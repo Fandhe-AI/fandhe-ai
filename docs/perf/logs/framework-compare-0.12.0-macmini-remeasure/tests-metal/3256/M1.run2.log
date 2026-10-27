@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/resident_train_step.rs (<HOME>/work/target-fandhe-ai/release/deps/resident_train_step-59d4685d697c33c8)
+
+running 1 test
+test metal_public_api_chain_matches_tape_path_bit_exact_two_layers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.06s
+
+rc=0

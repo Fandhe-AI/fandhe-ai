@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running unittests src/lib.rs (<W>/target-ws/release/deps/fandhe_ai-1f0cc972c1a9eed7)
+
+running 1 test
+test compat::sequential::train_step_chain_tests_3251::cuda::cuda_wait_device_param_store_and_read_after_internal_tape_dropped ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 550 filtered out; finished in 0.58s
+
+rc=0

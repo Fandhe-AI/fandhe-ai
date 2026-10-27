@@ -1,0 +1,99 @@
+start 2026-10-27T07:08:31Z new=bdaca14c old=0ae56703
+run_all rc=0
+stage1-done 2026-10-27T07:10:01Z rows=112 skipped=0
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":256,"median_s":0.000388166,"q1_s":0.000367007,"q3_s":0.000419182,"gflops":86.444,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.001519370,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":512,"median_s":0.002378127,"q1_s":0.002207148,"q3_s":0.002560326,"gflops":112.877,"checksum":937.743233,"warmup":20,"iters":20,"mode":"reuse","init_s":0.003088579,"parity_total":262144,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":1024,"median_s":0.006570526,"q1_s":0.006189392,"q3_s":0.006771741,"gflops":326.836,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.011459715,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":2048,"median_s":0.030865255,"q1_s":0.024275797,"q3_s":0.031313229,"gflops":556.609,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.047756612,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":4096,"median_s":0.153117074,"q1_s":0.151786708,"q3_s":0.155075537,"gflops":897.607,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.199745489,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":4096,"median_s":0.124901667,"q1_s":0.123357268,"q3_s":0.128994599,"gflops":1100.377,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"cpu","size":4096,"median_s":0.220240824,"q1_s":0.217476850,"q3_s":0.223000580,"gflops":624.039,"checksum":-25768.736638,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":8.964539e-5,"parity_max_rel_err":1.691077e0,"parity_scaled_abs_bound":3.051757e-5,"parity_scaled_abs_rescued":672}
+{"framework":"burn","version":"0.21.0","task":"gemm","device":"cpu","size":4096,"median_s":1.191730403,"q1_s":1.191496886,"q3_s":1.192707616,"gflops":115.327,"checksum":-25768.726554,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":8.964539e-5,"parity_max_rel_err":1.950224e0,"parity_scaled_abs_bound":3.051757e-5,"parity_scaled_abs_rescued":582}
+stage2-done 2026-10-27T07:11:29Z rows=8
+== old gemm cpu 256 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":256,"median_s":0.000196983,"q1_s":0.000168211,"q3_s":0.000238395,"gflops":170.342,"checksum":237.546660,"warmup":20,"iters":20,"mode":"fresh","parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 512 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":512,"median_s":0.001922553,"q1_s":0.001637634,"q3_s":0.002289699,"gflops":139.624,"checksum":937.743233,"warmup":20,"iters":20,"mode":"fresh","parity_total":262144,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 1024 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":1024,"median_s":0.004771374,"q1_s":0.004571243,"q3_s":0.005073545,"gflops":450.077,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 2048 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":2048,"median_s":0.016956544,"q1_s":0.016488634,"q3_s":0.017913641,"gflops":1013.170,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 4096 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":4096,"median_s":0.123640796,"q1_s":0.121183758,"q3_s":0.125917176,"gflops":1111.599,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 256 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":256,"median_s":0.000087160,"q1_s":0.000087088,"q3_s":0.000087588,"gflops":384.977,"checksum":237.546660,"warmup":20,"iters":20,"mode":"fresh","parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 512 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":512,"median_s":0.000257759,"q1_s":0.000257363,"q3_s":0.000258420,"gflops":1041.420,"checksum":937.743233,"warmup":20,"iters":20,"mode":"fresh","parity_total":262144,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 1024 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":1024,"median_s":0.000970708,"q1_s":0.000968848,"q3_s":0.000972404,"gflops":2212.286,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"fresh","parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 2048 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":2048,"median_s":0.004187912,"q1_s":0.004183284,"q3_s":0.004193189,"gflops":4102.251,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 4096 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":4096,"median_s":0.021875527,"q1_s":0.021840036,"q3_s":0.022431501,"gflops":6282.772,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old train cpu 64 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"train","device":"cpu","size":64,"median_s":0.001050124,"q1_s":0.000782277,"q3_s":0.001264656,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== old infer cpu 64 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"infer","device":"cpu","size":64,"median_s":0.000183016,"q1_s":0.000175767,"q3_s":0.000192491,"throughput_per_s":5464.003,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== old train cuda 64 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"train","device":"cuda","size":64,"median_s":0.000511950,"q1_s":0.000507490,"q3_s":0.000514706,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== old infer cuda 64 fresh ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"infer","device":"cuda","size":64,"median_s":0.000152567,"q1_s":0.000151172,"q3_s":0.000158900,"throughput_per_s":6554.497,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== old gemm cpu 256 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":256,"median_s":0.000172167,"q1_s":0.000164476,"q3_s":0.000180068,"gflops":194.894,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.000929485,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 512 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":512,"median_s":0.001731210,"q1_s":0.001618926,"q3_s":0.002016357,"gflops":155.057,"checksum":937.743233,"warmup":20,"iters":20,"mode":"reuse","init_s":0.002318599,"parity_total":262144,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 1024 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":1024,"median_s":0.004677519,"q1_s":0.004332092,"q3_s":0.004937458,"gflops":459.107,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.006417289,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 2048 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":2048,"median_s":0.015803902,"q1_s":0.015553470,"q3_s":0.015995425,"gflops":1087.065,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.026047536,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cpu 4096 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":4096,"median_s":0.122608716,"q1_s":0.121851600,"q3_s":0.125449711,"gflops":1120.956,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.123550761,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 256 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":256,"median_s":0.000084400,"q1_s":0.000084116,"q3_s":0.000084628,"gflops":397.567,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.508544597,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 512 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":512,"median_s":0.000255031,"q1_s":0.000253931,"q3_s":0.000256567,"gflops":1052.560,"checksum":937.743233,"warmup":20,"iters":20,"mode":"reuse","init_s":0.460628037,"parity_total":262144,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 1024 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":1024,"median_s":0.000952213,"q1_s":0.000950761,"q3_s":0.000954317,"gflops":2255.256,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.458394990,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 2048 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":2048,"median_s":0.004159336,"q1_s":0.004156577,"q3_s":0.004193336,"gflops":4130.435,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.460638406,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old gemm cuda 4096 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cuda","size":4096,"median_s":0.021985792,"q1_s":0.021928664,"q3_s":0.022090327,"gflops":6251.262,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.539942039,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== old train cpu 64 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"train","device":"cpu","size":64,"median_s":0.000831853,"q1_s":0.000659322,"q3_s":0.001204052,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000938957}
+== old infer cpu 64 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"infer","device":"cpu","size":64,"median_s":0.000184071,"q1_s":0.000168760,"q3_s":0.000192716,"throughput_per_s":5432.686,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.001158972}
+== old train cuda 64 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"train","device":"cuda","size":64,"median_s":0.000279575,"q1_s":0.000278143,"q3_s":0.000281595,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.269195032}
+== old infer cuda 64 reuse ==
+{"framework":"fandhe-ai","version":"0.12.0","task":"infer","device":"cuda","size":64,"median_s":0.000089855,"q1_s":0.000089784,"q3_s":0.000089984,"throughput_per_s":11128.979,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.262409137}
+stage4-done 2026-10-27T07:12:11Z rows=28
+== --framework pytorch --task gemm --device cpu --size 256 ==
+== --framework pytorch --task gemm --device cpu --size 512 ==
+== --framework pytorch --task gemm --device cpu --size 1024 ==
+== --framework pytorch --task gemm --device cpu --size 2048 ==
+== --framework pytorch --task gemm --device cpu --size 4096 ==
+== --framework pytorch --task train --device cpu --size 64 ==
+== --framework pytorch --task infer --device cpu --size 64 ==
+== --framework tensorflow --task gemm --device cpu --size 256 ==
+== --framework tensorflow --task gemm --device cpu --size 512 ==
+== --framework tensorflow --task gemm --device cpu --size 1024 ==
+== --framework tensorflow --task gemm --device cpu --size 2048 ==
+== --framework tensorflow --task gemm --device cpu --size 4096 ==
+== --framework tensorflow --task train --device cpu --size 64 ==
+== --framework tensorflow --task infer --device cpu --size 64 ==
+== --framework scipy --task gemm --device cpu --size 256 ==
+== --framework scipy --task gemm --device cpu --size 512 ==
+== --framework scipy --task gemm --device cpu --size 1024 ==
+== --framework scipy --task gemm --device cpu --size 2048 ==
+== --framework scipy --task gemm --device cpu --size 4096 ==
+== --framework scipy --task train --device cpu --size 64 ==
+== --framework scipy --task infer --device cpu --size 64 ==
+== --framework pytorch --task gemm --device cuda --size 256 ==
+== --framework pytorch --task gemm --device cuda --size 512 ==
+== --framework pytorch --task gemm --device cuda --size 1024 ==
+== --framework pytorch --task gemm --device cuda --size 2048 ==
+== --framework pytorch --task gemm --device cuda --size 4096 ==
+== --framework pytorch --task train --device cuda --size 64 ==
+== --framework pytorch --task infer --device cuda --size 64 ==
+stage3-done 2026-10-27T07:15:52Z pyrows=28
+done. 2026-10-27T07:15:52Z
