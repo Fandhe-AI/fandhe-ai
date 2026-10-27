@@ -71,8 +71,21 @@ prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先�
   `scripts/check-forbidden-deps.sh lock-all` の専用契約検査が fail-closed で固定する
   （版の追加・変更で検査が落ちる）。この例外は本体のルート `deny.toml`・
   `scripts/bench/oss-gemm-compare/deny.toml` には適用しない。advisories の他のキー
-  （`unmaintained`・`yanked` 等）・licenses・bans・sources の緩和、勧告 ID のワイルドカード化
-  や範囲指定、crate 単位の ignore は従来どおり P0
+  （`unmaintained`・`yanked` 等）・licenses（下の licenses の例外を除く）・bans・sources の緩和、勧告 ID のワイルドカード化
+  や範囲指定、crate 単位の ignore は従来どおり P0。
+  例外（licenses）: `scripts/bench/framework-compare/deny.toml` の `[licenses] allow` へ
+  ライセンス識別子（完全一致の SPDX 識別子）を追加する変更のうち、次の (a)〜(d) をすべて
+  満たすものはこの P0 に当たらない（1 つでも欠ければ従来どおり P0）。(a) 追加する識別子が
+  本体のルート `deny.toml` の `[licenses] allow` に既にある（本体側で承認・実測済みの
+  識別子をハーネスへ写すだけで、ハーネス限定の新しい識別子ではない）。(b) その識別子を
+  要する crate が、承認済みピン（`fandhe-ai` の crates.io 公開版）の推移的依存として入り、
+  承認済みピンを変えずには除けない。(c) `docs/framework-compare-harness-decision.md` に
+  識別子ごとのユーザー承認記録（日付と、PR の外で確認できる承認の出典 URL〈Issue・PR
+  コメント〉）がある。(d) `deny.toml` の allow の該当箇所のコメントに、識別子を要する
+  crate 名・経由する依存経路・承認の出典を書く。ルートの allow に無い識別子の追加、
+  `[licenses]` の `exceptions`・`confidence-threshold` 等の他のキーの変更、識別子の
+  ワイルドカード化は従来どおり P0。この例外も本体のルート `deny.toml`・
+  `scripts/bench/oss-gemm-compare/deny.toml` には適用しない
 - **外部フォーマットのパース検証（P0）**: safetensors / ONNX（prost）・TOML 設定・
   guardrail CLI 入力のパース時は長さ・形状の事前検証を行う。検証の欠落・後退、
   シェル呼び出しへの外部入力の非クォート展開等のインジェクション経路は P0（A03）
