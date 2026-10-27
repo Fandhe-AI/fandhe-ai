@@ -9,7 +9,7 @@ doc: docs/backend-cuda-graph-step-capture-design.md §8.12.5（§8.12.5.8 が実
 - excl0（before）= 本件の実装の直前の main（待ち型の入口なし）:
 - before = e2660eba09245ca00b9f6f8802fb0b7cd6ef464f
 - excl1（after）= 本規則を含むコミット。RULE 自身のコミット SHA は本ファイルに書けないため、crates/ が下記の基準コミットと同一であることで固定する（ランナーが git diff --quiet で検査し、env_info の crates_identical_to へ記録する）。
-- after_crates_identical_to = 9975129d261588190ead2e2a578cddc703cda1c3
+- after_crates_identical_to = 7ea459d9d879f40c0b795f392c57d80637a1f40c
 - facade = 各ツリーの crates/facade への [patch.crates-io.fandhe-ai] path patch（--config 引数のみ。Cargo.toml／Cargo.lock へはコミットしない）。
 - 計測専用パッチ docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch（#3261 と同じ）を両ツリーにだけ適用する（`--mode chain` を足す）。
   patch_sha256: 92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819
