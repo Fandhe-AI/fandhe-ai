@@ -4,7 +4,7 @@
 > 各 run のログは `run1.log`〜`run5.log`、環境情報は `env.txt`、測定対象コミットは `rev-stamp.txt`。
 > 下の「実装済み（Stage A）」「承認依頼」は #2674 時点の記録（履歴）。
 
-> **#3138**: 実機 parity の事前登録規則・手順を `../cuda-linalg-parity-3138/` に用意した（未実測。GB10 での実施待ち）。
+> **#3138**: 4 コマンド一式の GB10 実機 parity を 2026-10-27 に実測し全件 pass（記入欄の #3138 行・`../cuda-linalg-parity-3138/README.md` 参照）。
 
 `docs/backend-gpu-linalg-decision.md` §3〜§6・§10 参照。本実装エージェント実行環境は CUDA 実機（DGX Spark GB10）に
 到達できず、また **カーネル起動に必要な新規 `unsafe` のユーザー承認がイシュー #2674 に確認できなかった**ため、
@@ -50,3 +50,4 @@ cargo test -p fandhe-ai --release --test linalg_gpu_optin_cuda_parity -- --ignor
 | 未実測 | DGX Spark GB10 | 上記 | 未実測 | NVRTC コンパイル確認のみ。parity は Stage B（unsafe 承認）後 |
 | 未実測 | DGX Spark GB10 | `../cuda-linalg-parity-3138/README.md` のコマンド | 未実測（#3138 スキャフォールド PR） | 規則は `../cuda-linalg-parity-3138/RULE.txt` |
 | 2026-10-27 | DGX Spark GB10（`<cuda-node>`） | 上記 2 コマンド × 5 run（コミット `18479ad49a715bb00bcce9f2bcba6450c837bccd`（dirty=0。`rev-stamp.txt`）） | 5 run すべて pass。backend: `running 6 tests`・`6 passed; 0 failed`（5/5）。facade（ゲート ON・inv／solve／det）: `running 3 tests`・`3 passed; 0 failed`（5/5）。全 run で `rc=0`。NaN／inf: 全 run で想定外の NaN／inf なし（1e±20 倍・`1e20 × I₂` を含むテストが pass。厳密ゼロ fail の `assert_parity` 判定。det の 1e20 × I₂ は期待値 1e40 が f32 範囲外のため、CPU の非有限期待値との bit 一致で判定する例外（`assert_det_parity`。`RULE.txt` 参照）） | 上 2 行（未実測）の LU 系分を本行が引き継ぐ。rustc 1.97.0・ドライバ 580.173.02・CUDA 13.0（nvcc 13.0.88）。hw-lock 保持 2026-10-27T10:03:06Z〜10:04:07Z（UTC）。常駐サービス（vLLM・ComfyUI）のプロセスが計測前後とも存在し、`utilization.gpu` は前 0%・後 4%（`env.txt`。常駐サービスは停止していない）。tolerance・カーネル・入力集合は不変。分解系（cholesky・qr・eigh）と #3138 の他コマンドは未実施 |
+| 2026-10-27 | DGX Spark GB10（`<cuda-node>`） | #3138 の 4 コマンド × 5 run（コミット `358b77554a4c8e483561bbe92d451458786bf74d`・dirty=0。`../cuda-linalg-parity-3138/rev-stamp.txt`） | 5 run すべて pass（LU 系: `running 6 tests`・`6 passed; 0 failed`・5/5。facade ゲート ON は 6 件中の inv／solve／det を含む） | 詳細・環境・ログは `../cuda-linalg-parity-3138/README.md` |

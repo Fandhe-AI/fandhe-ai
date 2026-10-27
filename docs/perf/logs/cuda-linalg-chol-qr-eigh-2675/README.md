@@ -6,7 +6,7 @@
 
 > **更新（#3136）**: Stage B（起動の実装）は実装済み。D-C 承認（親 #3133）と `docs/gpu-linalg-kernel-launch-unsafe-audit.md`（CU-3〜CU-5）に基づく。実機（GB10）での parity 実測は **#3138 へ申し送り・未実施**（本実行環境は GPU なし）。以下は Stage A 時点の記録で、「承認待ち」の記述は履歴として残す。
 
-> **#3138**: 実機 parity の事前登録規則・手順を `../cuda-linalg-parity-3138/` に用意した（未実測。GB10 での実施待ち）。
+> **#3138**: 4 コマンド一式の GB10 実機 parity を 2026-10-27 に実測し全件 pass（記入欄の #3138 行・`../cuda-linalg-parity-3138/README.md` 参照）。
 
 `docs/backend-gpu-linalg-decision.md` §3〜§6・§10 参照。本実装エージェント実行環境は CUDA 実機（DGX Spark GB10）に
 到達できず、また **カーネル起動に必要な新規 `unsafe` のユーザー承認がイシュー #2675 に確認できなかった**ため、
@@ -52,3 +52,4 @@ CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai cargo test -p fandhe-ai --release -
 | 2026-10-27 | DGX Spark GB10（`<cuda-node>`・sm_121） | 上記 2 コマンド × 独立 5 run | **5 run すべて pass**。backend 層 6 件（NVRTC ロード・cholesky／QR／eigh の CPU 一致・非 SPD と eigh 非収束の `InvalidArgument` 写像）と facade 層 3 件（cholesky／qr／eigh のゲート ON）が毎 run 全 pass（`6 passed; 0 failed`／`3 passed; 0 failed`）。出力に NaN／inf は無し（ログ全文を検索。0 件） | 対象 `f175ea28f56180c6034f85804658ed5d120a32fe`（`dirty=0`）。ドライバ 580.173.02・CUDA 13.0（nvcc 13.0.88）・rustc 1.97.0。hw-lock 保持 2026-10-27T11:16:08Z〜11:16:34Z（UTC）。計測前後とも他プロセスの常駐（LLM サービス・画像生成の GPU メモリ使用）はあったが GPU 使用率は 0%。tolerance・カーネル・入力集合は不変。`rc=` 行は上記注記のとおり判定に使わない。下の既存 2 行の「未実測」のうち分解系の分は本行が引き継ぐ（LU 系と #3138 のほかのコマンドは対象外） |
 | 未実測 | DGX Spark GB10 | 上記 | 未実測 | NVRTC コンパイル確認のみ。parity は Stage B（unsafe 承認）後 |
 | 未実測 | DGX Spark GB10 | `../cuda-linalg-parity-3138/README.md` のコマンド | 未実測（#3138 スキャフォールド PR） | 規則は `../cuda-linalg-parity-3138/RULE.txt` |
+| 2026-10-27 | DGX Spark GB10（`<cuda-node>`） | #3138 の 4 コマンド × 5 run（コミット `358b77554a4c8e483561bbe92d451458786bf74d`・dirty=0。`../cuda-linalg-parity-3138/rev-stamp.txt`） | 5 run すべて pass（分解系 backend: `running 6 tests`・`6 passed; 0 failed`・5/5。facade ゲート ON は 6 件中の cholesky／qr／eigh を含む） | 詳細・環境・ログは `../cuda-linalg-parity-3138/README.md` |
