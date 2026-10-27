@@ -143,3 +143,18 @@ cargo test -p fandhe-ai --release --test low_precision_ops_backend_parity -- --i
 - baseline 行の追加・更新（実測後、人間承認を経て別 issue）
 - f16 の fail≠0 形状の baseline 化（上記「所有者判断待ち」。別 issue 要）
 - Metal の大形状 parity、`F16MatrixUnitImpl` の facade 経由の実観測（公開面の拡張を伴う）
+
+## #3617 HEAD 再計測（baseline 候補値の確認）
+
+状態: **未実測**（本 issue の自動運転実装では GB10 へ到達していない。Linux CI や M4 Max の値で代えない）。
+baseline 化は所有者承認待ちで、`BASELINES` は変更していない（決定記録 §7）。
+
+事前登録規則（計測前に固定）:
+
+1. 測るのは既存診断 `cuda_low_precision_matmul_large_shape_report` のみ（コード・tolerance 不変）
+2. 同一ビルドで 2 回実行し、3 形状の total・fail・mean_abs・max_abs・max_rel が完全一致なら「安定」、不一致なら「不安定」とし baseline 化は所有者判断
+3. 安定かつ上記 `b640875f` の値と完全一致なら「候補値を HEAD で再確認」。不一致は両値を記録し所有者が選ぶ。規則は緩めない
+4. 厳密ゼロ fail 5 形状で fail≠0 が出たら後退として記録し報告する（直さない）
+5. `Unsupported`・`Err`・非有限値は fail として記録。実機未到達は undetermined
+
+実測記入欄: 日付 / 機体 / `.rev-stamp` / exit — 未記入。

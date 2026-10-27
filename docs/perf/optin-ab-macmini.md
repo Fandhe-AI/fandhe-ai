@@ -70,7 +70,7 @@ REQ-8 の確認（G6）は初回と同じ（固定 4 arm は手動境界チェ�
 - #3227: 反転できるゲートはない（ADOPT は両機体の成立が要り、GB10 側が undetermined）。G1 と G4 は Mac mini の正式系列で REJECT が確定したため、既定 OFF の維持が妥当。G3 は train reuse が 5/5 改善（0.9000）だが train fresh が 1.0077 で未成立。
 - #3265: G5 は専有 Mac mini の正式系列で全 6 セル ≤ 1.00（0.9592〜0.9773）。#1520 の REJECT を覆す材料として渡す（採否は #3265 の判断）。
 - 初回系列（record_only）は無効にせず残してある。旧 `steel/` を修正後の集計器で再集計すると判定語彙が出るが、旧系列は遡って有効にしない（RULE-reopen.txt 1.(ii)）。
-- スコープ外: `tape_new` が計時分解能を下回る問題（2114 の集計器と計測粒度の見直し）は継承側の別対応が必要。ruleset の required check の追加・変更は不要だった（workflow は触っていない）。
+- スコープ外: `tape_new` が計時分解能を下回る問題（2114 の集計器と計測粒度の見直し）は #3618 で計測側を修正済み（まとめ計時。実機再測定は未実施。「G7 の分解能を上げた再計測（#3618）」節）。ruleset の required check の追加・変更は不要だった（workflow は触っていない）。
 
 ---
 
@@ -178,3 +178,11 @@ REQ-8 の確認: 固定 4 arm は `metal-gemm-steel-candidates.md` §2 の構成
 - #3265: G5 は参考値（上記）。正式な再測定には、負荷で round 開始値が上がらない計測か、補遺 RULE 3 の条件の見直し（所有者判断）が必要。
 - 正式系列を成立させるには、継承スクリプトを編集せずに round 開始の load1 を < 3.0 にする方法がない（計測自身が 10 コアを使う）。補遺 RULE 3 の事後検査を「計測に入る前の外側ゲート値」へ変えるか、継承スクリプトへ機体別閾値を入れる改修が必要で、いずれもスコープ外として切り出した。
 - 継承 `metal-gemm-candidate-ab-2111/aggregate.py` の `check_run_log` と `--nocapture` 出力形式の不整合（G6）、`metal-tape-build-infer-phase-2114` の `tape_new` の `median_s` = 0.0（G7）は、継承側の別対応が必要。
+
+## G7 の分解能を上げた再計測（#3618）
+
+- 状態: **未実測**（Mac mini での再測定は本変更の時点で未実施。H1〜H3 は引き続き未確定。推定で埋めない）。
+- 原因: `Instant` は macOS で `clock_gettime(CLOCK_UPTIME_RAW)`（rust-src `library/std/src/sys/time/unix.rs` 55〜67 行目）。再開分の実ログの離散値（4.1e-8・4.2e-8・8.3e-8）から 1 tick は約 41.7 ns と推定している（実測は `timer_resolution_probe` を Mac mini で実行して確定させる）。集計器は 1 セルでも `median_s` が 0 なら全体を止める。
+- 対応（計測方法のみ。判定式・閾値・集計器は不変）: 4 セル（`tape_build_micro.tape_new`・`reuse_decomposed_off.tape_new`・`reuse_decomposed_on.tape_new`・`reuse_decomposed_on.provider_select`）を K = 1000 回まとめ計時した平均にし、従来値は `single_shot_*` に残す。バッチはカウンタ窓・`iter_total`・`tape_build` 窓の外で実行する。規則は `docs/perf/logs/optin-ab-macmini-3184/RULE-g7-r3.txt`、手順は `session-scripts/g7_r3_session.sh`。
+- 開発機（M4 Max）での動作確認のみ実施: 4 セルとも `median_s` > 0（tape_new 約 11〜14 ns・キャッシュ ON の provider_select 約 2 ns）、集計器の `--self-test` は変更なしで OK。この値は結果に使わない。
+- 次の手順: 事前登録コミットを Mac mini へ転送し `g7_r3_session.sh` を 1 回実行する（label `3184-macmini-r3-g7`）。H4 の再実行と #2114 の M4 Max 実測は対象外。

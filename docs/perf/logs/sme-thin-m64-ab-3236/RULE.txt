@@ -81,3 +81,32 @@ RULE-amend-1 (2026-10-24、計測前の訂正。結果を見る前に追記す�
   - P-BIT が実行する --ignored sme_thin_m64 には非正規化数・NaN の実機テスト (…_denormal・…_denormal_result_from_normal_operands・…_nan_input_does_not_panic) が含まれる。
     これを #3233 独立監査 P2 #3「非正規化数・NaN の実機 bit 判定」の根拠に充てる。範囲: 非正規化数は assert_eq の値一致 (±0 の符号は区別しない)、NaN はクラス一致のみ (payload 非比較)、FPCR は既定。
     to_bits の NaN payload・±0 符号の厳密判定は本 issue の範囲外 (反転 PR の範囲)。
+
+RULE-reopen-1 (2026-10-27、#3615。#3236 の l2_dx の再計測規則。計測前に追記する。緩和ではない)
+  - 理由: #3236 の l2_dx（GEMM 単体 64x256x10 Nt）は 5 round 中央値比 0.987・3/5（round 別 0.915〜1.092）で undetermined だった。
+    1 回約 30 us と短く、cpu_jobgrid_bench の MeasurementConfig::default()（warmup 20／iters 20）では 1 サンプルの計時が合計 1 ms に満たず、
+    round 間の揺らぎが大きいと考えられる。判定式・閾値・負荷ゲート・前提ゲートは変えず、反復数・round 数・対象セルだけを増減する（RULE §5 の末尾追記規定）。
+  - 登録基準: origin/main（3e5d41016）+ 本追記を含むコミット。計測はこのコミットのツリーで行う（rev-stamp の 1 行目と一致させる）。
+    経路同一性の確認: crates/backend-cpu/src/gemm_blis/mod.rs の blob は #3236 の計測コミット 3f122311f と本登録基準で同一（5a766882e）。
+    SME_THIN_M64_ENABLED = false・SME_PRODUCTION_ENABLED = false で、on-arm.patch は git apply --check が通る。
+  - 腕: #3236 と同じ。on-arm.patch は変えず、sha256 も RULE 冒頭の値で照合する。
+  - 系列とラベル: 3236-reopen-r1。収録先は macmini-reopen/（既存の macmini/・aggregate.md・aggregate.py は差し替えない）。
+  - 計測: 新設の cpu_sme_thin_m64_reopen（既存の計測 binary は変えない）を使い、WARMUP = 200、ITERS = 2000、ROUNDS = 11。
+    round ごとに起動順を交互に反転する。orchestrate_macmini_reopen.sh が実行し、aggregate_reopen.py が warmup／iters が上記と違う行を fail-closed で不成立にする。
+  - 対象セル: GEMM 単体の l2_dx（判定対象・必須）・l1_fwd・l1_dx（到達セルの併記。判定対象）、K 格子 7 点（記録用・ADOPT-k の K 決定用。役割は §4 と同じ）。
+    非到達の GEMM セルと framework-compare は測らない（run_ab_sme_thin_m64_macmini_cpu.sh は AB_ROUNDS != 5 を拒否するため。#3236 の 4 セルは 5/5 で成立済み）。
+  - 判定式の読み替え（閾値は不変）: §4 の「5/5」は「全 round（N/N）」、「5 round 中央値」は「11 round 中央値」と読む。
+    l2_dx・l1_fwd・l1_dx のセル判定: 「中央値 <= 1.00 かつ 11/11 で <= 1.00」なら ADOPT、「11/11 で > 1.00」なら後退、それ以外は undetermined。
+    評価順は §4 と同じ（FAIL > 前提不成立 → undetermined > REJECT / ADOPT-k > ADOPT > undetermined）。
+    REJECT: l1_fwd・l1_dx のどちらかが後退、または l2_dx が後退して ADOPT-k に当たらない。
+    ADOPT-k: 後退が l2_dx に限られ、K 格子で「k >= K の全点が 11/11 で ON <= OFF」となる最小の K が一意に決まり、かつ K > 10。
+    ADOPT: 到達 3 セルがすべて ADOPT。
+  - 総合の読み: 本系列は GEMM 単体のみ。ADOPT／ADOPT-k でも、framework-compare は再計測しないため #3236 の framework-compare 4 セル（5/5 で ON が速い）と組み合わせた
+    「ADOPT 候補」としか記さない（参考判定）。framework-compare は 3f122311f のツリーで測った値であり、反転 PR を作るなら framework-compare の再計測、
+    §5 の独立監査（docs/cpu-gemm-sme-unsafe-audit.md §13）、所有者の確認が必要。本 issue では既定を反転しない。
+  - 前提ゲート: P-TREE（SME_PRODUCTION_ENABLED は両腕とも false）・P-R0・P-BIT（main ツリーのみ。on-arm では --lib を実行しない）・
+    P-LOCK（owner は `#3615 <UTC>`）・P-GATE（各 round の前に load1 < 3.0・30 秒間隔・最大 30 分。11/11 通過した系列だけを正式とする）・
+    P-CELLS（全セル x 両腕 x ちょうど 11 行）・P-RUNAB／P-COLLECT（p_bit・gemm・collect の終了コードが 0。framework-compare は無いので run_ab は求めない）。
+    checksum は to_bits の 16 桁が全 round・両腕で一致しなければ FAIL（性能判定へ進まない）。RAYON_NUM_THREADS が設定されていれば実行を拒否する。
+  - スレッド方針の記録 run（RAYON_NUM_THREADS=1）は本系列では行わない（記録専用で判定に使わないため）。
+  - 結果ごとの処置とマスク規則は §5・§9 のまま（ADOPT でも反転 PR は別。undetermined／REJECT なら既定 OFF のまま記録する）。

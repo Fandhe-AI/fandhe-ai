@@ -1,0 +1,58 @@
+イシュー #3612 事前登録規則: Mac mini の Metal 常駐チェーン（train・infer）の時間の内訳
+固定日時: 2026-10-27（計測前に固定。以後、閾値・区間定義・振り分け規則を事後に変えない。変更は別名の規則を計測前に登録する）
+
+[目的]
+  #3257 の参考系列で届かなかった Mac mini の 2 セル（train +14.3 us・infer +6.9 us、いずれも vs torch）の「未説明残差」
+  （docs/compat-resident-train-step-decision.md §17.3）を、HEAD の常駐チェーン経路の区間別時間で
+  docs/perf/loss-attribution-matrix.md §10 の枠組み（ハードの上限／共通の計測窓／自分たちの制約）へ振り分ける。
+  振り分けられなければ理由を記録する。コードは直さない（是正の採否は所有者判断）。tolerance・baseline・閾値は変えない。
+
+[対象]
+  - 計測ツリー: 本 RULE を含むコミットの HEAD（crates/ の .rs・.metal は a8e91f0c9 と同一であること）。
+  - 機体: Mac mini のみ（sysctl machdep.cpu.brand_string が "Apple M4" に完全一致）。M4 Max 開発機・Linux の値は記録に使わない。
+  - 形状: 784-256(ReLU)-10、batch 64、SGD lr 0.01・momentum 0（bench-fandhe と同じ）。train は 100 step（warmup 20）、
+    infer は 100 反復（warmup 20）。初期値・入力は決定的パターン（診断テスト内の pattern()）。bench-fandhe の値とは非対称で、
+    checksum は A0 と一致しない（本診断の hard 条件は自己整合のみ）。
+
+[腕]
+  B0: 本番の同期位置。train = prep(tape 作成+snapshot_resident_params+validate) / encode(train_step_device_chain) / read(新 tape で read_train_step_loss)。
+      infer = predict_device_chain_resident の wall。
+  B1: train は encode 直後・read の前に synchronize_with_gpu_timestamps を明示。区間 prep/encode/commit_wait/gpu_busy(バッチ End-Start の和)/
+      host_fixed(=commit_wait-gpu_busy)/readout/total。infer は predict_device_chain_once と同じ部品列を再現し同様に分ける。
+  A0: #3257 と同じ窓の bench-fandhe（bench-resident-chain.patch。--device metal --mode chain）の step 中央値。全体時間の正。
+      別ランで取り、集計へ --a0-train-us／--a0-infer-us（5 値）で渡す。取れなければ gap2・N は「未取得」で結論は判定不能とする。
+  未実施（本 RULE の範囲外。取れた値とは混ぜない）: B2（forward/backward/SGD の群別 GPU 時間）・A1（facade 境界の 2 分割）・T（torch 同席）。
+      1 コマンドバッファのため HEAD の経路では forward/backward/SGD の GPU 分割はできない。
+
+[ラウンド・ゲート]
+  5 round 固定。各 round の前に ab_round_cooldown.sh で load1 < 3.0 を待つ（30 秒間隔・最大 30 分）。前後に pmset -g therm を記録。
+  5 round すべて通過したものだけを正式とする。奇数 round は B0 先、偶数 round は B1 先。計測中は同じ機体でビルドを並走させない。
+
+[hard 条件（外れたら判定不能として記録し所有者へ報告）]
+  1. 機体同定・.rev-stamp（1 行目=HEAD・2 行目 dirty=0）・追跡ファイルの差分なし。
+  2. 全 run で wait_until_completed の差分が 1 step（1 反復）あたりちょうど 1（Tape 経路へのフォールバックなら約 7）。
+  3. command_buffers は記録する（1 を期待。2 以上は auto-flush として注記）。
+  4. infer B1 の出力は B0 の出力と bit 一致。
+  5. GPU タイムスタンプが全バッチで取れる（欠落は診断テストが panic）。
+  6. 5 round すべてで負荷ゲート通過。
+
+[突き合わせ（無理にそろえない）]
+  代表値 = 5 run それぞれの中央値の中央値。run 別と min-max を併記。
+  gap1 = B1 total - Σ(B1 の区間)。gap2 = B0 total - A0 窓（ハーネスの差）。B1 - B0 = 観測の負荷。
+  N = max_r |A0_r - median(A0)|。Δ = #3257 の参考値（train +14.3 us・infer +6.9 us。出典 §17.3）。
+
+[振り分け（事前固定）]
+  タグ: host_fixed・readout = 共通の計測窓 / gpu_busy = GPU 計算（ピーク値の出典が無ければハード上限との比は出さない）/
+        prep・encode = 自分たちの制約。REQ-8 の境界検査の負荷は分離できず「未測定」。
+  |Δ| <= N: 揺れの範囲として記録（未説明残差は誤差範囲）。
+  |Δ| >  N: 各タグの自分側の量を「Δ を説明しうる上限」として並べ、「振り分け不能（相手の内訳が未測定）」とする。
+  N 未取得: 判定不能。いずれの場合も制約の緩和は提案しない。
+
+[事前に表明する仮説（推定。実測前）]
+  commit_wait のうち gpu_busy を除く host_fixed（コミット+完了待ちの固定費）が 1 step の大きな割合を占め、encode+prep は小さい。
+  いずれも torch も同期 1 回を負うため Δ の主因は特定できない可能性が高い。外れても規則は変えない。
+
+[限界]
+  B1 は同期の位置を read の外へ出すため B0 と時間が異なりうる。A0 との差は gap として併記する。診断は Mac mini 1 台・1 セッション。
+  bench-fandhe の fandhe-ai ピン（=0.11.0）の制約で HEAD(0.12.0) は A0 に使えない場合がある（その場合 A0 は a8e91f0c9 のツリーで取る）。
+  負荷ゲートの定数にはドリフトガードテストを作らない（ランナーが実行時に 3.0 固定を検査する）。

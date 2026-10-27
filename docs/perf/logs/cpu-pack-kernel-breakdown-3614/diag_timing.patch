@@ -1,0 +1,218 @@
+diff --git a/crates/backend-cpu/examples/cpu_pack_kernel_breakdown.rs b/crates/backend-cpu/examples/cpu_pack_kernel_breakdown.rs
+index be1964664..22a908faa 100644
+--- a/crates/backend-cpu/examples/cpu_pack_kernel_breakdown.rs
++++ b/crates/backend-cpu/examples/cpu_pack_kernel_breakdown.rs
+@@ -103,6 +103,7 @@ fn main() {
+             run_once(trans, &a, &b, &mut c, m, n, k);
+         }
+         // DIAG_RESET_HOOK（診断パッチが warmup 後の積算リセットを差し込む）
++        let _ = fandhe_ai_backend_cpu::gemm_blis::diag_pack_timer::take_and_reset();
+         let mut samples = Vec::with_capacity(N_MEASURE);
+         for _ in 0..N_MEASURE {
+             let t = Instant::now();
+@@ -110,7 +111,19 @@ fn main() {
+             samples.push(t.elapsed().as_nanos());
+         }
+         // 診断パッチがこの行を内訳文字列の生成へ置き換える。base 腕では空。
+-        let diag_suffix = String::new(); // DIAG_READ_HOOK
++        let diag = fandhe_ai_backend_cpu::gemm_blis::diag_pack_timer::take_and_reset();
++        let diag_suffix = format!(
++            " a_pack_ns={} b_pack_ns={} kernel_ns={} job_ns={} jobs={} a_intervals={} \
++b_intervals={} k_intervals={}",
++            diag.a_pack_ns,
++            diag.b_pack_ns,
++            diag.kernel_ns,
++            diag.job_ns,
++            diag.jobs,
++            diag.a_intervals,
++            diag.b_intervals,
++            diag.k_intervals
++        );
+         samples.sort_unstable();
+         let median = samples[N_MEASURE / 2];
+         let mean = samples.iter().sum::<u128>() as f64 / N_MEASURE as f64;
+diff --git a/crates/backend-cpu/src/gemm_blis/diag_pack_timer.rs b/crates/backend-cpu/src/gemm_blis/diag_pack_timer.rs
+new file mode 100644
+index 000000000..fbaf19205
+--- /dev/null
++++ b/crates/backend-cpu/src/gemm_blis/diag_pack_timer.rs
+@@ -0,0 +1,108 @@
++//! イシュー #3614 診断専用: 2D 動的分配の job 内で A pack・B pack・kernel の時間を積算する。
++//!
++//! 本ファイルは `docs/perf/logs/cpu-pack-kernel-breakdown-3614/diag_timing.patch` が計測用の
++//! 複製ツリーにだけ追加するもので、main にはコミットしない（`determinism_inventory` が
++//! atomic RMW・rayon 使用箇所を allowlist で固定しているため、本番ツリーに計時フックを置かない）。
++//!
++//! 呼び出し元: `run_two_d_job`（job 全体・B pack）と `gemm_blis_ic_loop`（A pack・kernel）。
++//! 積算は thread_local の `Cell` で行い、job の終わりに 1 回だけ `static Mutex` へ合算する
++//! （`fetch_add` も rayon も使わない）。区間はループ全体を 1 回の `Instant` 対で包み、
++//! 区間の終わりの時刻を次の区間の始まりへ流用して `Instant::now()` の呼び出し回数を減らす。
++
++use std::cell::Cell;
++use std::sync::Mutex;
++use std::time::Instant;
++
++/// 全 worker の合計（ns と区間数）。`jobs` は合算された job の数。
++#[derive(Clone, Copy, Default, Debug)]
++pub struct Totals {
++    pub job_ns: u64,
++    pub a_pack_ns: u64,
++    pub b_pack_ns: u64,
++    pub kernel_ns: u64,
++    pub jobs: u64,
++    pub a_intervals: u64,
++    pub b_intervals: u64,
++    pub k_intervals: u64,
++}
++
++static TOTALS: Mutex<Totals> = Mutex::new(Totals {
++    job_ns: 0,
++    a_pack_ns: 0,
++    b_pack_ns: 0,
++    kernel_ns: 0,
++    jobs: 0,
++    a_intervals: 0,
++    b_intervals: 0,
++    k_intervals: 0,
++});
++
++thread_local! {
++    static LOCAL: Cell<Totals> = const { Cell::new(Totals {
++        job_ns: 0, a_pack_ns: 0, b_pack_ns: 0, kernel_ns: 0,
++        jobs: 0, a_intervals: 0, b_intervals: 0, k_intervals: 0,
++    }) };
++}
++
++fn ns_between(from: Instant, to: Instant) -> u64 {
++    u64::try_from(to.duration_since(from).as_nanos()).unwrap_or(u64::MAX)
++}
++
++fn with_local(f: impl FnOnce(&mut Totals)) {
++    LOCAL.with(|c| {
++        let mut t = c.get();
++        f(&mut t);
++        c.set(t);
++    });
++}
++
++/// A pack 区間 `[from, to]` を加算する。
++pub fn add_a(from: Instant, to: Instant) {
++    with_local(|t| {
++        t.a_pack_ns += ns_between(from, to);
++        t.a_intervals += 1;
++    });
++}
++
++/// B pack 区間 `[from, to]` を加算する。
++pub fn add_b(from: Instant, to: Instant) {
++    with_local(|t| {
++        t.b_pack_ns += ns_between(from, to);
++        t.b_intervals += 1;
++    });
++}
++
++/// kernel 区間 `[from, to]` を加算する。
++pub fn add_k(from: Instant, to: Instant) {
++    with_local(|t| {
++        t.kernel_ns += ns_between(from, to);
++        t.k_intervals += 1;
++    });
++}
++
++/// job の終了時に 1 回呼ぶ。job 全体の時間を足し、スレッドローカルを共有へ合算してクリアする。
++pub fn end_job(from: Instant) {
++    let to = Instant::now();
++    let mut local = LOCAL.with(Cell::take);
++    local.job_ns += ns_between(from, to);
++    local.jobs += 1;
++    if let Ok(mut g) = TOTALS.lock() {
++        g.job_ns += local.job_ns;
++        g.a_pack_ns += local.a_pack_ns;
++        g.b_pack_ns += local.b_pack_ns;
++        g.kernel_ns += local.kernel_ns;
++        g.jobs += local.jobs;
++        g.a_intervals += local.a_intervals;
++        g.b_intervals += local.b_intervals;
++        g.k_intervals += local.k_intervals;
++    }
++}
++
++/// 合算値を取り出して 0 に戻す（example が warmup 後のリセットと計測後の読み出しに使う）。
++#[doc(hidden)]
++pub fn take_and_reset() -> Totals {
++    TOTALS
++        .lock()
++        .map(|mut g| std::mem::take(&mut *g))
++        .unwrap_or_default()
++}
+diff --git a/crates/backend-cpu/src/gemm_blis/mod.rs b/crates/backend-cpu/src/gemm_blis/mod.rs
+index 5a766882e..8af6ca100 100644
+--- a/crates/backend-cpu/src/gemm_blis/mod.rs
++++ b/crates/backend-cpu/src/gemm_blis/mod.rs
+@@ -68,6 +68,9 @@ mod pack;
+ // `cfg(test)` 限定プローブ（本番ビルドには含まれない）。
+ #[cfg(test)]
+ mod jobgrid_probe;
++// イシュー #3614 診断専用（診断パッチでのみ追加される区間計時）。
++#[doc(hidden)]
++pub mod diag_pack_timer;
+ // イシュー #1313 で本番結線（`gemm_blis_parallel_with_transpose`／
+ // `gemm_blis_bias_act_parallel` からの [`dispatch_two_d_dynamic`] 呼び出し）
+ // を追加したため、`partition::job_grid` が本番経路から到達可能になり
+@@ -1380,6 +1383,7 @@ fn gemm_blis_ic_loop<K: Microkernel>(
+         // `pack.rs` モジュールドキュメント参照）。
+         let mr_blocks = mc_len.div_ceil(mr);
+         let a_panel = &mut a_panel[..mr_blocks * kc_len * mr];
++        let diag_t_a0 = std::time::Instant::now();
+         for ir_block in 0..mr_blocks {
+             let ir = ir_block * mr;
+             let mr_eff = mr.min(mc_len - ir);
+@@ -1415,6 +1419,8 @@ fn gemm_blis_ic_loop<K: Microkernel>(
+                 ),
+             }
+         }
++        let diag_t_a1 = std::time::Instant::now();
++        diag_pack_timer::add_a(diag_t_a0, diag_t_a1);
+ 
+         for jr_block in 0..nr_blocks {
+             let jr = jr_block * nr;
+@@ -1492,6 +1498,7 @@ fn gemm_blis_ic_loop<K: Microkernel>(
+                 }
+             }
+         }
++        diag_pack_timer::add_k(diag_t_a1, std::time::Instant::now());
+ 
+         ic += blocks.mc;
+     }
+@@ -2786,6 +2793,7 @@ fn run_two_d_job<K: Microkernel>(
+     #[cfg(test)]
+     let _probe_scope = jobgrid_probe::on_job(b.as_ptr() as usize, mc_len, nc_len_job);
+ 
++    let diag_t_job = std::time::Instant::now();
+     let c_local_len = mc_len
+         .checked_mul(nc_len_job)
+         .ok_or(GemmError::DimProductOverflow)?;
+@@ -2819,6 +2827,7 @@ fn run_two_d_job<K: Microkernel>(
+                 pb.slice(nr, pc, kc_len, (job.cols.start + jc) / nr, nr_blocks)
+             } else {
+                 let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
++                let diag_t_b0 = std::time::Instant::now();
+                 for jr_block in 0..nr_blocks {
+                     let jr = jr_block * nr;
+                     let nr_eff = nr.min(nc_len - jr);
+@@ -2858,6 +2867,7 @@ fn run_two_d_job<K: Microkernel>(
+                         ),
+                     }
+                 }
++                diag_pack_timer::add_b(diag_t_b0, std::time::Instant::now());
+                 b_panel
+             };
+ 
+@@ -2893,6 +2903,7 @@ fn run_two_d_job<K: Microkernel>(
+         row.copy_from_slice(&c_local[i * nc_len_job..(i + 1) * nc_len_job]);
+     }
+ 
++    diag_pack_timer::end_job(diag_t_job);
+     Ok(())
+ }
+ 
