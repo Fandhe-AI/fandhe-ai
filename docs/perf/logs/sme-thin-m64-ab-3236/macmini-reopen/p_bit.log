@@ -1,0 +1,78 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling zerocopy v0.8.56
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling objc2 v0.6.4
+   Compiling crossbeam-utils v0.8.22
+   Compiling objc2-encode v4.1.0
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling bitflags v2.13.1
+   Compiling serde_core v1.0.229
+   Compiling rayon-core v1.13.0
+   Compiling syn v2.0.119
+   Compiling cudarc v0.19.8
+   Compiling zmij v1.0.23
+   Compiling rand_core v0.9.5
+   Compiling syn v3.0.3
+   Compiling libloading v0.9.0
+   Compiling serde v1.0.229
+   Compiling either v1.17.0
+   Compiling objc2-core-foundation v0.3.2
+   Compiling block2 v0.6.2
+   Compiling dispatch2 v0.3.1
+   Compiling fandhe-ai-backend-cpu v0.12.0 (<main>/crates/backend-cpu)
+   Compiling serde_json v1.0.151
+   Compiling rayon v1.12.0
+   Compiling objc2-foundation v0.3.2
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.12.0 (<main>/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.12.0 (<main>/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.12.0 (<main>/crates/autodiff)
+   Compiling objc2-metal v0.3.2
+   Compiling fandhe-ai-backend-metal v0.12.0 (<main>/crates/backend-metal)
+   Compiling bench-harness v0.12.0 (<main>/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 26.64s
+     Running unittests src/lib.rs (<work>/target-main/release/deps/fandhe_ai_backend_cpu-612c17454409c0d3)
+
+running 12 tests
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_matches_scalar_reference ... ignored, SME 実機（M4 系）専用。#3235
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_matches_scalar_reference_denormal ... ignored, SME 実機（M4 系）専用。#3235
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_matches_scalar_reference_denormal_result_from_normal_operands ... ignored, SME 実機（M4 系）専用。#3235
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_nan_input_does_not_panic ... ignored, SME 実機（M4 系）専用。#3235
+test gemm_blis::microkernel::sme_thin_m64::tests::kernel_unchecked_returns_err_instead_of_panicking_on_bad_bounds ... ok
+test gemm_blis::microkernel::sme_thin_m64::tests::scalar_fallback_k0_is_noop ... ok
+test gemm_blis::microkernel::sme_thin_m64::tests::scalar_fallback_rejects_bad_bounds_and_matches_reference ... ok
+test gemm_blis::tests::sme_thin_m64_ineligible_shape_falls_through ... ok
+test gemm_blis::tests::sme_thin_m64_disabled_by_default ... ok
+test gemm_blis::tests::sme_thin_m64_path_falls_through_without_sme ... ok
+test gemm_blis::tests::sme_thin_m64_bias_relu_matches_production ... ok
+test gemm_blis::tests::sme_thin_m64_matches_naive_and_neon_bit_exact ... ok
+
+test result: ok. 8 passed; 0 failed; 4 ignored; 0 measured; 770 filtered out; finished in 0.04s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<work>/target-main/release/deps/fandhe_ai_backend_cpu-612c17454409c0d3)
+
+running 4 tests
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_matches_scalar_reference ... ok
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_matches_scalar_reference_denormal ... ok
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_matches_scalar_reference_denormal_result_from_normal_operands ... ok
+test gemm_blis::microkernel::sme_thin_m64::tests::sme_thin_m64_kernel_nan_input_does_not_panic ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 778 filtered out; finished in 0.00s
+
