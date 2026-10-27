@@ -48,6 +48,7 @@ cargo test -p fandhe-ai-backend-metal --release --test linalg_parity -- --ignore
 | 未実測 | Apple M4 Max | parity（`--ignored` 全件） | 未実測 | #3139 で Mac mini に置き換え |
 | 未実測（2026-10-16 時点） | Mac mini（Apple M4） | parity（`--ignored` 全件） | 未実測 | 実機に到達できず未実行。事前登録 `metal-linalg-parity-3139/RULE.txt`。Mac 側での実行を申し送り |
 | 2026-10-27 | Mac mini `<metal-node>`（Apple M4） | `RULE.txt` のコマンド × 5 run | **fail（5/5 run で同一）** | 各 run `running 6 tests`・5 passed／1 failed・終了コード 101。fail は `qr_matches_cpu_on_device` のみ。sha・環境は下記 |
+| 2026-10-27 | Mac mini `<metal-node>`（Apple M4） | #3139 `RULE.txt` 改訂のコマンド × 5 run（`running 7 tests`） | **fail（5/5 run で同一）** | `qr_matches_cpu_on_device` のみ fail（#2676 と同一）。コミット `95a18c2d3`。GPU は f32 ホストモデルとビット一致・未到達ケースの診断値は `../metal-linalg-parity-3139/README.md` |
 
 ## 2026-10-27 Mac mini 実測（イシュー #2676）
 
