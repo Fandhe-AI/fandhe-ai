@@ -1,0 +1,27 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/linalg_factor_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_factor_parity-fc67e9fe5e44965f)
+
+running 6 tests
+test cholesky_matches_cpu_on_device ... ok
+test cholesky_non_spd_is_invalid_argument_on_device ... ok
+test eigh_matches_cpu_on_device ... ok
+test eigh_non_convergence_is_invalid_argument_on_device ... ok
+test nvrtc_compiles_and_loads_factor_kernels_on_device ... ok
+test qr_matches_cpu_on_device ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.31s
+
+
+rc=0
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/linalg_gpu_optin_cuda_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_gpu_optin_cuda_parity-e5f0fd2b8801e5ec)
+
+running 3 tests
+test facade_cholesky_gate_on_matches_cpu ... ok
+test facade_eigh_gate_on_matches_cpu ... ok
+test facade_qr_gate_on_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.56s
+
+
+rc=0
