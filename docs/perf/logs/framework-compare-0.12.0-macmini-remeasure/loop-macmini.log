@@ -1,0 +1,17 @@
+series-A-start 2026-10-27T07:17:47Z
+run1: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:19:27Z
+run2: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:21:06Z
+run3: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:22:45Z
+run4: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:24:24Z
+run5: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:26:03Z
+ALL-DONE completed=5/5
+series-A rc=0 2026-10-27T07:26:03Z
+series-B-start 2026-10-27T07:26:03Z
+run1: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:28:42Z
+run2: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:30:20Z
+run3: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:31:59Z
+run4: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:34:38Z
+run5: done. rows=48 pyrows=32 oldrows=26 skipped=4 2026-10-27T07:37:16Z
+ALL-DONE completed=5/5
+series-B rc=0 2026-10-27T07:37:16Z
+SERIES-END

@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running tests/resident_train_step.rs (<W>/target-ws/release/deps/resident_train_step-a819bb456a94a1be)
+
+running 1 test
+test cuda_public_api_chain_matches_tape_path_bit_exact_two_layers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.62s
+
+rc=0

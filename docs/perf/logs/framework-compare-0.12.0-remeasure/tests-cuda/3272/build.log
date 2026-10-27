@@ -1,0 +1,3 @@
+   Compiling bench-fandhe v0.1.0 (<W>/new/scripts/bench/framework-compare/bench-fandhe)
+    Finished `release` profile [optimized] target(s) in 1.73s
+  Executable unittests src/main.rs (target/release/deps/bench_fandhe-0b48ebd63fcfd89b)

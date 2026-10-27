@@ -1,11 +1,19 @@
-事前登録規則（DGX Spark GB10）0.12.0 6 フレームワーク同席計測 — 【未固定（草案）】
-イシュー #3273。固定時刻: 未記入（計測直前に UTC で記入し、以後編集しない）。本ファイルは実測値を含まない。
+事前登録規則（DGX Spark GB10）0.12.0 6 フレームワーク同席計測 — 【固定】
+イシュー #3273。固定時刻: 2026-10-27T07:17:00Z（5 ラウンドの開始前。以後編集しない。固定後の変更は RULE.v2.txt を新設する）。本ファイルは時間の実測値を含まない（行数スモークの行数のみ）。
 
 腕・判別式・bench_py.py sha256・判定・N=5・既定設定・実機ロックは Mac mini 側
 （../framework-compare-0.12.0-macmini-remeasure/RULE.txt）と同じ。
+新条件腕 NEW = bdaca14ccff7a01a4582eb84c6655f025a23208f・旧条件腕 OLD = 0ae5670359c0f9d7a82f8bbd71791fb516713627。
+機体: <cuda-node>（GB10 / sm_121・driver 580.173.02）。0.11.0 の GB10 計測ノードの記録はない。指示どおり GB10 のうち compute プロセスが無いノードを選び、途中で変えない。
+Python 3 FW の版（2026-10-27 所有者判断で ~/work/.venv-bench を新規作成。0.11.0 README・JSONL の version と同じ）:
+  Python 3.12.3（システム）・torch 2.14.0+cu130・tensorflow 2.21.0（CPU のみ）・scipy 1.18.1・numpy 2.5.4（0.11.0 の GB10 の numpy は未記録）・keras 3.15.1。
 期待行数: stage1 112（skipped 0）/ stage2 8 / stage3 28 / stage4（旧腕）28。
+  行数スモーク（RULE 固定前・2026-10-27T07:06:07Z〜07:15:52Z・ビルド込み 1 round・値は判定に使わない）: stage1 112・skipped 0・stage2 8・stage4 28・stage3 28。tree・tree-old とも fandhe-ai v0.12.0。
 旧腕の位置: stage2 の後・stage3 の前。新腕と段の位置が違うことは偏りの可能性として明記する。
 ゲート: 各 round 前に load1 < 1.0 かつ GPU 使用率 0% が 3 サンプル連続（30 秒間隔・最大 30 分）。
   値が数値で取れなければ GATE-INVALID、30 分超過は GATE-TIMEOUT として系列を打ち切る。5/5 完走のみ採用。
 常駐サービス（vLLM・ComfyUI）の有無は nvidia-smi --query-compute-apps で env_info.txt に記録する。
-#3256 の C1〜C9 は時間系列の後に同ロックで実行（判定は resident-chain-parity-3256/RULE.txt に従う）。
+#3256 の C1〜C9 は時間系列の後に同ロックで実行（判定は resident-chain-parity-3256/RULE.txt に従う。新腕の全体ツリーで run_rows.sh <out> cuda）。
+#3272 の X1 = bench-fandhe tests::resident_paths_match_tape_paths_cuda も同ロックで実行（新腕 framework-compare ツリー・--ignored --exact
+  --test-threads=1・5 run・独立プロセス）。各 run のログに running 1 test・1 passed・rc=0 が無ければ fail（0 件実行は pass にしない）。
+ビルドは各ターゲットとも cargo test --no-run で測定前に 1 回だけ。fail が出ても tolerance・assert・baseline は変えない。

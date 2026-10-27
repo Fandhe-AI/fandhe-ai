@@ -1,0 +1,13 @@
+   Compiling fandhe-ai-backend-cpu v0.12.0 (<W>/new/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.12.0 (<W>/new/crates/tensor-core)
+   Compiling fandhe-ai-autodiff v0.12.0 (<W>/new/crates/autodiff)
+   Compiling fandhe-ai-backend-metal v0.12.0 (<W>/new/crates/backend-metal)
+   Compiling fandhe-ai-backend-cuda v0.12.0 (<W>/new/crates/backend-cuda)
+   Compiling bench-harness v0.12.0 (<W>/new/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.12.0 (<W>/new/crates/onnx-interop)
+   Compiling fandhe-ai v0.12.0 (<W>/new/crates/facade)
+    Finished `release` profile [optimized] target(s) in 17.61s
+  Executable tests/resident_train_step.rs (<HOME>/work/target-fandhe-ai/release/deps/resident_train_step-59d4685d697c33c8)
+   Compiling fandhe-ai v0.12.0 (<W>/new/crates/facade)
+    Finished `release` profile [optimized] target(s) in 8.16s
+  Executable unittests src/lib.rs (<HOME>/work/target-fandhe-ai/release/deps/fandhe_ai-ab5780141e377cce)

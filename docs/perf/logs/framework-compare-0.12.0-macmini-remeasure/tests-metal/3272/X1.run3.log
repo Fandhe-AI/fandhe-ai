@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running unittests src/main.rs (target/release/deps/bench_fandhe-5e5da9ec9fff9277)
+
+running 1 test
+test tests::resident_paths_match_tape_paths_metal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.29s
+
+rc=0
