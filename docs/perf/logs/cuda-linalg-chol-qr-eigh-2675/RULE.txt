@@ -1,0 +1,18 @@
+# 事前宣言（実測前に固定。2026-10-27 UTC。イシュー #2675。結果が出た後に緩めない）
+- 公式の実機: DGX Spark GB10（sm_121）のみ。他の GPU の結果は判定に使わない。
+- 判定・入力集合・fail の扱いは ../cuda-linalg-parity-3138/RULE.txt を参照で採用する（本ファイルは分解系に絞った差分のみ）。
+- 対象（分解系 cholesky・qr・eigh のみ。LU 系〈#2674 で実測済み〉と #3138 の他コマンドは範囲外）:
+  1. backend 層: crates/backend-cuda/tests/linalg_factor_parity.rs の #[ignore] 全 6 件（ファイル単位で --ignored 実行。期待 `running 6 tests`）
+     nvrtc_compiles_and_loads_factor_kernels_on_device・cholesky_matches_cpu_on_device・qr_matches_cpu_on_device・eigh_matches_cpu_on_device・cholesky_non_spd_is_invalid_argument_on_device・eigh_non_convergence_is_invalid_argument_on_device
+  2. facade 層（ゲート ON）: crates/facade/tests/linalg_gpu_optin_cuda_parity.rs の facade_cholesky_gate_on_matches_cpu・facade_qr_gate_on_matches_cpu・facade_eigh_gate_on_matches_cpu の 3 件（--exact 指定。期待 `running 3 tests`）
+  - linalg_ops_backend_parity.rs の cuda_eigh／cuda_pinv はゲート OFF のホスト経路でカーネルを通らないため範囲外（#3138 に残す）。
+- 判定: assert_parity（相対 1e-3 未満 または 絶対 1e-5 未満）を厳密ゼロ fail で適用。エラー写像テストは期待どおりの BackendError::InvalidArgument（非 SPD の cholesky・eigh の非収束）。1e±20 倍と 1e20 × I₂ で、出力に想定外の NaN／inf が出ないこと。baseline 方式は使わない。
+- 実行: 独立プロセス（別の ssh 呼び出し）で 5 回、各 run で下記 2 コマンドを順に実行。5 回すべて pass で pass。実行件数が期待と違えば（0 件を含む）その run は無効で pass の根拠にしない。再実行による選別・ケース除外・性能計測はしない。
+- 対象コミット: .rev-stamp の 1 行目がフル sha、2 行目が dirty=0 でない実測は無効。本 RULE.txt をコミットした HEAD 以降のコミットであること。
+- 計測中のビルド・他 GPU 負荷の並走禁止。hw-lock（~/work/.fandhe-hw-lock を mkdir）保持中にのみ計測し、失敗時も解放する。
+- fail 時: tolerance・カーネル・入力集合・判定方式を変えず、テスト名・fail_count・max_abs_diff・max_rel_err を事実として記録し、所有者へ報告する。承認なしに Issue 起票・baseline 化はしない。PR に Closes #2675 は書かない。
+- 収録ファイルはホスト名・ユーザー名・絶対パスを <cuda-node>・<home> 等へマスクする。
+```sh
+CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai cargo test -p fandhe-ai-backend-cuda --release --test linalg_factor_parity -- --ignored --nocapture --test-threads=1
+CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai cargo test -p fandhe-ai --release --test linalg_gpu_optin_cuda_parity -- --ignored --exact --nocapture --test-threads=1 facade_cholesky_gate_on_matches_cpu facade_qr_gate_on_matches_cpu facade_eigh_gate_on_matches_cpu
+```
