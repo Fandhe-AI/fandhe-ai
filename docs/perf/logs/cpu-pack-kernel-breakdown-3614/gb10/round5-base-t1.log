@@ -1,0 +1,8 @@
+arm=base mode=t1 timer_tick_ns=16 timer_pair_ns=54.59
+arm=base mode=t1 shape=l1_fwd trans=nn m=64 n=256 k=784 rayon_threads=1 calls=500 wall_median_ns=246817 wall_mean_ns=247577.1 bits_hash=0x98a8f9023485d94c
+arm=base mode=t1 shape=l1_dw trans=tn m=784 n=256 k=64 rayon_threads=1 calls=500 wall_median_ns=259537 wall_mean_ns=260248.6 bits_hash=0x706fd78a3e3a9d3b
+arm=base mode=t1 shape=l1_dx trans=nt m=64 n=784 k=256 rayon_threads=1 calls=500 wall_median_ns=278033 wall_mean_ns=278733.8 bits_hash=0xd04b35aed56ce0e9
+arm=base mode=t1 shape=l2_fwd trans=nn m=64 n=10 k=256 rayon_threads=1 calls=500 wall_median_ns=7168 wall_mean_ns=7188.7 bits_hash=0xe8b880c3a1a6e241
+arm=base mode=t1 shape=l2_dw trans=tn m=256 n=10 k=64 rayon_threads=1 calls=500 wall_median_ns=7856 wall_mean_ns=7861.1 bits_hash=0xac87f57cf5ba4207
+arm=base mode=t1 shape=l2_dx trans=nt m=64 n=256 k=10 rayon_threads=1 calls=500 wall_median_ns=7152 wall_mean_ns=7166.7 bits_hash=0xaa3e412ace0beee5
+arm=base mode=t1 shape=ref_square_512 trans=nn m=512 n=512 k=512 rayon_threads=1 calls=500 wall_median_ns=2254599 wall_mean_ns=2257868.2 bits_hash=0xc3d521c64199a3bf

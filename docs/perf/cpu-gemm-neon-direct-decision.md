@@ -97,10 +97,24 @@
 
 ### 7.1 内訳計測（#3614）
 
-- **状態: 未実測**。計測部品と事前登録規則だけを用意した段階で、実機（GB10・Mac mini）の計測値・判定は未記録
+- **状態: 実測済み（2026-10-27。GB10・Mac mini の 2 機体とも。両機体で 5 round 完走・負荷ゲート各 20/20 pass・集計 fail-closed なし）**。判定は下の「判定の結果」
 - 事前登録規則: `docs/perf/logs/cpu-pack-kernel-breakdown-3614/RULE.txt`（計測前に固定。6 形状・5 round・負荷ゲート・判定式〈Nn／Nt の A pack の時間加重割合 S_A が 0.50 以上で 5 round 中 4 以上なら PACK_MAIN〉・fail-closed 条件）
 - 計測部品: example `cpu_pack_kernel_breakdown`（base 腕）・区間計時の診断パッチ `diag_timing.patch`（複製ツリーにだけ当てる。main には入れない）・`run_breakdown.sh`・`aggregate.py`。手順は同ディレクトリの `README.md`
-- 判定の結果: 未記録
+- 判定の結果（native 腕。`docs/perf/logs/cpu-pack-kernel-breakdown-3614/aggregate.md` の転記。手で直していない）:
+
+  | 機体 | S_A の round 別（1〜5） | S_A 中央値 | S_A >= 0.50 の round | 判定 |
+  |---|---|---|---|---|
+  | GB10（rayon 20） | 0.1491・0.1482・0.1493・0.1492・0.1497 | 0.1492 | 0/5 | **NOT_PACK_MAIN** |
+  | Mac mini（rayon 10） | 0.1742・0.1737・0.1752・0.1730・0.1725 | 0.1737 | 0/5 | **NOT_PACK_MAIN** |
+
+  - RULE §10 の式では、A pack が主因という条件を 2 機体とも満たさない（閾値 0.50 に対し約 0.15〜0.17）。RULE の閾値・tolerance・baseline は変えていない
+  - 補助（判定に使わない）: T 全体の s_pack（A＋B pack）中央値は GB10 0.3752・Mac mini 0.3184。(A) が取り除くのは Nn／Nt の A pack だけ（§4.1）なので判定式は sA を使う
+  - 形状別 sA／s_pack（native。GB10 / Mac mini）: L1 fwd 0.188/0.215・0.409/0.385、L1 dW 0.067/0.057・0.119/0.134、L1 dX 0.116/0.135・0.357/0.244、L2 fwd 0.186/0.152・0.410/0.472、L2 dW 0.145/0.156・0.304/0.366、L2 dX 0.073/0.097・0.180/0.193。kernel 比率 sK は L1 で 0.42〜0.60、L2 は 0.14〜0.30
+  - 注記: L2 dW／L2 dX は区間が 10×tick 未満の項があり個別判定は判定不能（分解能。GB10 tick 16 ns・Mac mini tick 41 ns）。L2 dW／dX の timed/base wall 比は 1.5〜2.1 倍で計時の摂動が大きい（L2 は絶対時間が小さく、sO＝その他が 0.3〜0.7 を占める）。参照 512 角の timed/base は 0.97 前後。L2 の値は参考扱いで、判定は L1 の大きい形状が支配する
+  - t1 腕（rayon 1。判定に使わない参考）: S_A 中央値は GB10 0.0330・Mac mini 0.0296。単スレッドでは kernel が支配的
+  - 限界は RULE §13（plain GEMM 入口であり `bias_act` 融合経路ではない・L1 dX が本番で実行されるかは未確認・kernel 区間は端タイルのコピーを含む）。RULE §14 のとおり閾値は実装側が登録した値で、所有者が承認した定数ではない
+  - 計測条件: `.rev-stamp` は両機体とも SHA `3e17739b0f0795677ce085ba4bdb8ea54db8e774`・ツリー指紋 `74d7c88267db8c531689212248094329b1a14b8fe4334f1ed1bfed0410b20af7`。診断パッチ sha256 `0b748dc0…7549` 一致。実機ロックの保持は GB10 07:47:12Z〜約 07:48:30Z・Mac mini 07:56:50Z〜約 08:01:40Z（ノード時計の UTC）。ログは `docs/perf/logs/cpu-pack-kernel-breakdown-3614/{gb10,macmini}/`（`bin_sha256.txt`・`load_gate.log`・`hwlock.log` を含む）
+  - 事実整理（結論ではない）: 事前登録した式では pack 主因とは言えない。一方 L1 fwd・dX の s_pack（A＋B）は 0.24〜0.41 で、sA だけを見る判定式が (A) の効果の上限を表す点は RULE §10 の定義による
 - (A) を再検討するかの所有者判断: **未記録（所有者確認待ち）**。本節の追記は所有者の承認を意味しない
 
 ## 8. 変更していないもの
