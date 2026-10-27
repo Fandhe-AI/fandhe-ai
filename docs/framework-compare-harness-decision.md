@@ -9,8 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.11.0`。2026-10-09 に crates.io 公開済み
-  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.11.0 リリースサイクルで `=0.10.0` から更新）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.12.0`。2026-10-27 に crates.io 公開済み
+  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.12.0 リリースサイクルで `=0.11.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -30,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.11.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.12.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -38,7 +38,7 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.11.0）の存在
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.12.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
      `source = "registry+https://github.com/rust-lang/crates.io-index"` を
      伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
@@ -72,6 +72,12 @@
 | MPL-2.0 | `colored`（burn 経由）・`option-ext`（dirs 経由） | ファイル単位の弱いコピーレフト。ベンチ実行のみ（改変・再配布なし・非配布ツール）のため受容 |
 | CC0-1.0 | `hexf-parse`・`tiny-keccak`（wgpu / cubecl 経由） | パブリックドメイン相当 |
 | BSL-1.0 | `xxhash-rust`（burn 経由） | Boost Software License（permissive） |
+
+上記 3 件に加え、`fandhe-ai =0.12.0` への更新（2026-10-27・#3271）で
+`CDLA-Permissive-2.0`（`webpki-root-certs`。facade の `ureq`／`native-tls` 経由）を
+allow へ追加した。これは本 workspace 限定の追加ではなく、ルート `deny.toml` の
+同一識別子を写したもの（第 11 区分〈#3124〉で監査済み。判断は `docs/license-matrix.md`
+6 節と追加実測〈#3124〉を参照）で、上表の 3 行は変わらない。
 
 RUSTSEC ignore（`RUSTSEC-2025-0141` bincode unmaintained・`RUSTSEC-2024-0436`
 paste unmaintained）はいずれも情報提供型（脆弱性ではない）で、比較対象の固定
@@ -220,6 +226,35 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   crates.io registry 取得元を fail-closed で固定する（追加・削除・変更のいずれも失敗。
   Codex 指摘への対応として 2026-10-17 に所有者承認のうえ追加。self-test に正負ケースあり）。
   別の版が入った場合は ignore を足さず承認を取り直す。
+- 2026-10-27: 所有者の承認（#3271 の issuecomment-6111781998＝2026-10-12 の (A)＋(b)
+  確定〈https://github.com/Fandhe-AI/fandhe-ai/issues/3271#issuecomment-6111781998〉、および issuecomment-6426224103＝2026-10-27 のピン更新・推移的依存・
+  `CDLA-Permissive-2.0` の承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/3271#issuecomment-6426224103〉。licenses の限定例外 (a)〜(d) は
+  PR #3633 で規約へ追加〈https://github.com/Fandhe-AI/fandhe-ai/issues/3271#issuecomment-6431265992〉）に基づき、v0.12.0 の crates.io 公開（`release-all.yml`
+  publish run 40392236921・tag `v0.12.0` = `e23417cb4`。7 クレート公開）を受けて
+  `fandhe-ai` 承認ピンを `=0.11.0` から `=0.12.0` へ更新した。
+  - 承認された範囲: ピン更新、推移的依存 `ureq 3.4.2`・`native-tls`・vendored
+    OpenSSL・`webpki-root-certs` の lock への流入、ハーネス専用 `deny.toml` の licenses
+    allow への `CDLA-Permissive-2.0` 追加。これら以外の allow 識別子や新しい推移的依存が
+    必要になった場合は作業を止めて所有者へ戻す。
+  - `Cargo.lock` の差分: 自社 7 クレートが 0.11.0 → 0.12.0、外部 crate は 20 件追加・
+    削除 0・既存外部 crate の版更新 0（637 → 657 パッケージ）。追加 20 件は base64 0.23.1・
+    core-foundation 0.10.1・der 0.8.2・foreign-types 0.3.2・foreign-types-shared 0.1.1・
+    native-tls 0.2.18・openssl 0.10.81・openssl-macros 0.1.1・openssl-probe 0.2.1・
+    openssl-src 300.6.1+3.6.3・openssl-sys 0.9.117・pem-rfc7468 1.0.0・schannel 0.1.29・
+    security-framework 3.7.0・security-framework-sys 2.17.0・ureq 3.4.2・ureq-proto 0.6.4・
+    utf8-zero 0.8.1・vcpkg 0.2.15・webpki-root-certs 1.0.10。全件が facade 0.12.0 の
+    `cfg(unix)` 依存 `ureq`（`native-tls`＋`vendored`）の依存閉包に属し、本体ルート
+    `Cargo.lock`（v0.12.0）に同じ版・同じ checksum で存在することを機械検査で確認した。
+  - 版の揃え方: `cargo update -p fandhe-ai --precise 0.12.0` だけでは 5 crate（der・
+    openssl-probe・schannel・ureq-proto・webpki-root-certs）がルート lock より新しい版に
+    解決されるため、`--precise` でルート lock の版に揃えた（webpki-root-certs は承認済みの
+    1.0.10。1.0.11 は承認外）。
+  - 再実行結果: `check-forbidden-deps.sh lock-all`・`self-test` は rc 0（旧ピンの検査は
+    新 lock で rc 1 となり fail-closed が働くことも確認）。専用 `deny.toml` の
+    `advisories bans licenses sources` は ok（`chacha20 0.10.1` の yanked warning は
+    変更前から存在する既存のもの）。`burn =0.21.0`・`candle-core =0.11.0` のピンと
+    契約検査のロジックは変えていない。`git diff v0.12.0..HEAD -- crates/` は空。
+  - ライセンス・監査は `docs/license-matrix.md` 8b（2026-10-27 再実測）。
 
 ## 5. tch-rs を計測対象に含めない判断
 

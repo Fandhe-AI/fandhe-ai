@@ -166,7 +166,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 定義は `.claude/rules/deps-policy.md`「許容依存 10 区分」表を正とし本節では二重管理
 しない。allow リストの実体は `scripts/bench/framework-compare/deny.toml` 冒頭
 コメントを参照する（比較対象の推移的依存に含まれる MPL-2.0・CC0-1.0・BSL-1.0 を
-**本 workspace 限定**で許容。ルート `deny.toml`・本表 2 節の適合基準は変更しない）。
+**本 workspace 限定**で許容。`CDLA-Permissive-2.0` はルート `deny.toml` と同一識別子を写したもの。ルート `deny.toml`・本表 2 節の適合基準は変更しない）。
 
 実測（2026-08-28。`fandhe-ai` を `=0.4.0` へ更新後の 2026-08-29 再実測をイシュー #982 で追記。
 `=0.5.0` へ更新後の 2026-08-31 再実測をイシュー #1011 で追記。
@@ -175,27 +175,55 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 `=0.8.0` へ更新後の 2026-09-10 再実測をイシュー #1487 で追記。
 `=0.9.0` へ更新後の 2026-09-17 再実測を v0.9.0 リリースサイクルで追記。
 `=0.10.0` へ更新後の 2026-10-03 再実測を v0.10.0 リリースサイクルで追記。
-`=0.11.0` へ更新後の 2026-10-10 再実測を v0.11.0 リリースサイクルで追記）:
+`=0.11.0` へ更新後の 2026-10-10 再実測を v0.11.0 リリースサイクルで追記。
+`=0.12.0` へ更新後の 2026-10-27 再実測を v0.12.0 リリースサイクル〈#3271〉で追記）:
 
 - 対象 `Cargo.lock`: `scripts/bench/framework-compare/Cargo.lock`
-- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-10-10 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
-- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-10-10 再実測。`fandhe-ai` 以外の 2 crate は 2026-10-03 から変更なし）:
+- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-10-27 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
+- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-10-27 再実測。`fandhe-ai` 以外の 2 crate は 2026-10-03 から変更なし）:
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
 | `burn` | 0.21.0 | `MIT OR Apache-2.0` |
 | `candle-core` | 0.11.0 | `MIT OR Apache-2.0` |
-| `fandhe-ai` | 0.11.0 | `MIT OR Apache-2.0`（2026-10-10 に `=0.10.0` から更新。v0.11.0 リリースサイクル。直接依存 3 crate のライセンス式に変更なし） |
+| `fandhe-ai` | 0.12.0 | `MIT OR Apache-2.0`（2026-10-27 に `=0.11.0` から更新。v0.12.0 リリースサイクル。直接依存 3 crate のライセンス式に変更なし） |
 
 v0.10.0 では自社クレート `fandhe-ai-onnx-interop`（初回公開）が facade の通常依存として加わったため、`Cargo.lock` へ新規の推移的依存を実測した（`cargo metadata --locked` の `license` フィールド。2026-10-03）。追加は自社 1 crate と、第 3 区分（相互運用）の承認済み依存 `prost` のみで、他の外部依存の追加はない（`libc`・`safetensors` は既存エントリ。`safetensors 0.7.0` は既存の別版と並存）:
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
-| `fandhe-ai-onnx-interop` | 0.11.0 | `MIT OR Apache-2.0` |
+| `fandhe-ai-onnx-interop` | 0.12.0 | `MIT OR Apache-2.0` |
 | `prost` | 0.14.4 | `Apache-2.0` |
 | `prost-derive` | 0.14.4 | `Apache-2.0` |
 
 v0.11.0 へのピン更新（2026-10-10）では `Cargo.lock` の差分は自社 7 クレートの版・checksum のみで、外部依存の追加・更新・削除はない。上表の `fandhe-ai-onnx-interop` は 0.11.0 へ更新（ライセンス式 `MIT OR Apache-2.0` に変更なし）、`prost`・`prost-derive` は 0.14.4 のまま。
+
+v0.12.0 へのピン更新（2026-10-27・#3271。承認記録は `docs/framework-compare-harness-decision.md` 4 節）では、`Cargo.lock` の差分は自社 7 クレートが 0.11.0 → 0.12.0、外部 crate が 20 件の追加（削除 0・既存外部 crate の版更新 0）となった。20 件は facade 0.12.0 の `cfg(unix)` 依存 `ureq`（`native-tls`＋`vendored`。第 11 区分）とその依存閉包に属し、全件が本体ルート `Cargo.lock`（v0.12.0）と同じ版・同じ checksum である（機械検査で確認）。ライセンス式は `cargo metadata --locked` の実測（2026-10-27）。新しいライセンス識別子は `CDLA-Permissive-2.0`（`webpki-root-certs`）のみで、ルート `deny.toml` の同一識別子を写して allow へ追加した（本 workspace 限定の追加ではない。判断は 6 節と追加実測〈#3124〉を参照し再説明しない）。`cargo deny ... advisories bans licenses sources` は `advisories ok, bans ok, licenses ok, sources ok`（`chacha20 0.10.1` の yanked warning は変更前から存在する既存のもの）:
+
+| crate | version | license（`cargo metadata` 実測） |
+|-------|---------|-----------------------------------|
+| `base64` | 0.23.1 | `MIT OR Apache-2.0`（既存の別版と並存） |
+| `core-foundation` | 0.10.1 | `MIT OR Apache-2.0` |
+| `der` | 0.8.2 | `Apache-2.0 OR MIT` |
+| `foreign-types` | 0.3.2 | `MIT/Apache-2.0` |
+| `foreign-types-shared` | 0.1.1 | `MIT/Apache-2.0` |
+| `native-tls` | 0.2.18 | `MIT OR Apache-2.0` |
+| `openssl` | 0.10.81 | `Apache-2.0` |
+| `openssl-macros` | 0.1.1 | `MIT/Apache-2.0` |
+| `openssl-probe` | 0.2.1 | `MIT OR Apache-2.0` |
+| `openssl-src` | 300.6.1+3.6.3 | `MIT/Apache-2.0`（同梱の OpenSSL は Apache-2.0。Linux target の build-dependency のみ） |
+| `openssl-sys` | 0.9.117 | `MIT` |
+| `pem-rfc7468` | 1.0.0 | `Apache-2.0 OR MIT` |
+| `schannel` | 0.1.29 | `MIT` |
+| `security-framework` | 3.7.0 | `MIT OR Apache-2.0` |
+| `security-framework-sys` | 2.17.0 | `MIT OR Apache-2.0` |
+| `ureq` | 3.4.2 | `MIT OR Apache-2.0` |
+| `ureq-proto` | 0.6.4 | `MIT OR Apache-2.0` |
+| `utf8-zero` | 0.8.1 | `MIT OR Apache-2.0` |
+| `vcpkg` | 0.2.15 | `MIT/Apache-2.0` |
+| `webpki-root-certs` | 1.0.10 | `CDLA-Permissive-2.0` |
+
+上表の `fandhe-ai-onnx-interop` は 0.12.0 へ更新（ライセンス式に変更なし）。
 
 dependabot PR #2959（2026-10-11 所有者承認。承認記録は `docs/framework-compare-harness-decision.md` 4 節）では推移的依存 `rustls` を 0.23.43 から 0.23.45 へ更新した。同じ依存解決で `tempfile` の `getrandom` 参照が 0.4.3 から既存エントリの 0.3.4 へ切り替わる（crate の追加・削除はない）。ライセンス式は `cargo metadata --locked` で実測し、更新前から変更はない（2026-10-11）。`cargo deny ... advisories bans licenses sources` の再実測結果は `advisories ok, bans ok, licenses ok, sources ok`:
 

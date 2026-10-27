@@ -21,7 +21,7 @@
 #                (1) Cargo.lock の存在（不在はエラー）、(2) 同ディレクトリの Cargo.toml が
 #                独自の [workspace] を宣言していること（本体 workspace への構造的
 #                非混入）、(3) 承認済み比較対象のピン（burn 0.21.0・candle-core 0.11.0・
-#                fandhe-ai 0.11.0。deps-policy.md 第 9 区分の承認バージョン）が
+#                fandhe-ai 0.12.0。deps-policy.md 第 9 区分の承認バージョン）が
 #                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出。
 #                加えて各エントリが `source = "registry+https://github.com/rust-lang/
 #                crates.io-index"` を伴うこと＝path/git 依存への差し替えで source/
@@ -85,7 +85,7 @@ ORIGIN_KEY_ALT='path|git|registry|rev|branch|tag|package'
 # 承認済みピン。`<crate>=<version>` 形式のスペース区切り。ここを緩める・削る変更は
 # ユーザー承認必須（検査対象の追加は fail-closed の強化であり承認不要）。
 FRAMEWORK_COMPARE_DIR="scripts/bench/framework-compare"
-FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.11.0"
+FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.12.0"
 
 # `zip` の承認済み版集合（スペース区切り）。`scripts/bench/framework-compare/deny.toml` の
 # `[advisories] ignore` にある RUSTSEC-2026-0367／0368／0369 は勧告 ID 単位で効くため、
@@ -103,7 +103,7 @@ FRAMEWORK_COMPARE_ZIP_VERSIONS="0.6.6 7.2.0 8.6.0"
 # allowlist の拡張はユーザー承認必須（deps-policy.md 第 9 区分）。
 FRAMEWORK_COMPARE_MANIFEST_ALLOWLIST="\
 bench-common/Cargo.toml:
-bench-fandhe/Cargo.toml:bench-common,fandhe-ai@=0.11.0
+bench-fandhe/Cargo.toml:bench-common,fandhe-ai@=0.12.0
 bench-candle/Cargo.toml:bench-common,candle-core@=0.11.0
 bench-burn/Cargo.toml:bench-common,burn@=0.21.0"
 
@@ -290,7 +290,7 @@ check_lock_name_versions_text() {
 # から固定文字列で直接検証できるよう、ファイル I/O と分離する）。allowlist 外の
 # 直接依存（禁止リストの `tch` を含む任意のクレート）・完全固定でないバージョン
 # 指定を fail-closed に検出する。`@=` 付きエントリ（＝承認済み比較対象。registry
-# 取得・完全固定必須の意味）は、`fandhe-ai = { version = "=0.11.0", path = "…" }` の
+# 取得・完全固定必須の意味）は、`fandhe-ai = { version = "=0.12.0", path = "…" }` の
 # ように完全固定文字列を保ったまま取得元だけを path/git 等へ差し替える迂回も
 # 検出する（イシュー #982。ORIGIN_KEY_ALT 参照）。
 check_manifest_deps_text() {
@@ -885,26 +885,26 @@ tch = { version = "=0.22.0" }'
   # られる、現行検査（バージョン文字列一致のみ）がすり抜けていた形そのもの。
   local manifest_inline_path_dep_text='[dependencies]
 bench-common = { path = "../bench-common" }
-fandhe-ai = { version = "=0.11.0", path = "../../../crates/facade" }'
+fandhe-ai = { version = "=0.12.0", path = "../../../crates/facade" }'
   local manifest_inline_git_dep_text='[dependencies]
 bench-common = { path = "../bench-common" }
-fandhe-ai = { version = "=0.11.0", git = "https://github.com/Fandhe-AI/fandhe-ai", rev = "deadbeef" }'
+fandhe-ai = { version = "=0.12.0", git = "https://github.com/Fandhe-AI/fandhe-ai", rev = "deadbeef" }'
   local manifest_dotted_origin_text='[dependencies]
 bench-common = { path = "../bench-common" }
 fandhe-ai.path = "../../../crates/facade"'
-  if check_manifest_deps_text "self-test manifest inline path-dep fixture" "${manifest_inline_path_dep_text}" "bench-common,fandhe-ai@=0.11.0" >/dev/null 2>&1; then
+  if check_manifest_deps_text "self-test manifest inline path-dep fixture" "${manifest_inline_path_dep_text}" "bench-common,fandhe-ai@=0.12.0" >/dev/null 2>&1; then
     echo "self-test NG: manifest inline path-dep fixture が誤って pass した（非 registry 取得元〈インライン table〉の検出が退行している）" >&2
     failed=1
   else
     echo "self-test OK: manifest inline path-dep fixture は fail する"
   fi
-  if check_manifest_deps_text "self-test manifest inline git-dep fixture" "${manifest_inline_git_dep_text}" "bench-common,fandhe-ai@=0.11.0" >/dev/null 2>&1; then
+  if check_manifest_deps_text "self-test manifest inline git-dep fixture" "${manifest_inline_git_dep_text}" "bench-common,fandhe-ai@=0.12.0" >/dev/null 2>&1; then
     echo "self-test NG: manifest inline git-dep fixture が誤って pass した（非 registry 取得元〈インライン table・git〉の検出が退行している）" >&2
     failed=1
   else
     echo "self-test OK: manifest inline git-dep fixture は fail する"
   fi
-  if check_manifest_deps_text "self-test manifest dotted origin-key fixture" "${manifest_dotted_origin_text}" "bench-common,fandhe-ai@=0.11.0" >/dev/null 2>&1; then
+  if check_manifest_deps_text "self-test manifest dotted origin-key fixture" "${manifest_dotted_origin_text}" "bench-common,fandhe-ai@=0.12.0" >/dev/null 2>&1; then
     echo "self-test NG: manifest dotted origin-key fixture が誤って pass した（非 registry 取得元〈ドット付きキー〉の検出が退行している）" >&2
     failed=1
   else
