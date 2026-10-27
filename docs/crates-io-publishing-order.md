@@ -925,6 +925,11 @@ lock-all` も green。
   対応表の fandhe-ai 列をタグ `v0.12.0` 基準で確定した（`crates/` の差は版数文字列のみ。
   `docs/perf/framework-compare-feature-matrix-0.12.0.md` §8）。0.12.0 の計測が未了のため、
   スコアボードの生成と公開は未実施。
+- 2026-10-27（0.12.0 対応表の所有者判断の反映。イシュー #3274）:
+  所有者コメント `#issuecomment-6435074095` に基づき、対応表の件数と行判定を確定した
+  （相互運用は「部分的」・A3-e・A3-f・C4・C8 は対象外へ・9 行すべてが「部分的」。
+  `docs/perf/framework-compare-feature-matrix-0.12.0.md` §8.5）。公開先は 0.12.0 用の新規 Artifact
+  （0.11.0 版は上書きせず GitHub Pages にも載せない）。HTML は #3273 の実測待ちで未生成。
 - 2026-10-27（v0.12.0 公開完了）: `release-all.yml`（`mode: publish` run 40392236921。
   main `e23417cb4`）で公開 7 クレートの v0.12.0 公開を完了した（crates.io で 7 クレート
   反映確認済み）。注釈付きタグ `v0.12.0` は `e23417cb4`。§10 に追補を記録した。
