@@ -90,7 +90,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">最適化・学習ループ</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">optimizer（Adadelta／Adafactor／Adamax／ASGD／Lion／Rprop／NAdam／RAdam）、scheduler（PolynomialLr・CyclicLr）、param groups、OptimizerStateDict、EMA、SWA の fit 結線（Callback::Swa）、fit_with_weights／fit_with_train_step、学習ステップ入口、PrefetchDataLoader ほかが公開（7 件）。未公開 1 件（SWA の FitConfig 形）、保留 7 件（棚卸し #3268 で未掲載だった EMA と AMP の併用拒否・EMA の warmup・param groups の LrSchedule 併用・AMP 併用 API・保存形式・常駐・Optimizer 4 種の経路）、対象外 3 件（FitConfig への EMA、param groups と Lbfgs の併用、スロット添字の公開ヘルパー）。マルチワーカー DataLoader と同じ挙動かは判定していない。<br>棚卸し分の区分は所有者の回答で確定した（2026-10-27。EMA の warmup は未公開・保留のまま数える）</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">optimizer（Adadelta／Adafactor／Adamax／ASGD／Lion／Rprop／NAdam／RAdam）、scheduler（PolynomialLr・CyclicLr）、param groups、OptimizerStateDict、EMA、SWA の fit 結線（Callback::Swa）、fit_with_weights／fit_with_train_step、学習ステップ入口、PrefetchDataLoader ほかが公開（7 件）。未公開 1 件（SWA の FitConfig 形）、保留 7 件（棚卸し #3268 で未掲載だった EMA と AMP の併用拒否・EMA の warmup・param groups の LrSchedule 併用・AMP 併用 API・保存形式・常駐・Optimizer 4 種の経路）、対象外 3 件（FitConfig への EMA、param groups と Lbfgs の併用、スロット添字の公開ヘルパー）。マルチワーカー DataLoader と同じ挙動かは判定していない。<br>棚卸し分の区分は所有者の回答で確定した（2026-10-27。EMA の warmup は保留のまま数える）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.optim 網羅・DataLoader・AMP</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras optimizer 網羅・fit()・tf.data</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">scipy.optimize（L-BFGS 等。NN 学習用ではない）</span></td>
