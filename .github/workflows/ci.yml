@@ -984,6 +984,12 @@ jobs:
       - name: フレームワーク横並びベンチ compare_graph_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/compare_graph_ab_test.py
 
+      # イシュー #3614: aggregate.py（NEON 直接カーネル再検討のための A pack・B pack・
+      # kernel 内訳の fail-closed 集計・PACK_MAIN 判定）の回帰テスト。合成 fixture のみ
+      # （stdlib の unittest のみ・cargo の有無に関わらず常時実行。上記と同一方針）。
+      - name: pack と kernel の内訳集計 aggregate.py の単体テスト
+        run: python3 -m unittest docs/perf/logs/cpu-pack-kernel-breakdown-3614/aggregate_test.py
+
       # イシュー #1477: compare_readout_ab.py（Metal 借用ビュー readout の
       # legacy/borrowed override〈`--readout`〉を同一バイナリで run 単位に
       # interleave 計測した A/B 比較ヘルパー。件数・checksum 完全一致・

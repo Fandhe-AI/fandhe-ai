@@ -1,0 +1,64 @@
+イシュー #3614 事前登録規則（計測前に固定。計測後に緩めない）
+================================================================
+目的: MLP 784→256→10・batch 64 の 6 形状で、A pack・B pack・kernel・その他の時間内訳を測り、
+「pack が主因か」を下の判定式で決める。NEON 直接カーネル (A) の再検討の前提データ
+（docs/perf/cpu-gemm-neon-direct-decision.md §6 の 3 項目め・§7）。診断のみ。
+本番の既定値（TWO_D_DYNAMIC_PRODUCTION_ENABLED・TWO_D_JOBS_PER_WORKER・SME 系／
+SMALL_M_JOB_MERGE／G2 の各ゲート・MC/KC/NC）とコードパスは変えない。(A) は実装しない。
+
+1. 機体: GB10 と Mac mini の両方。到達できない機体は unavailable と記録し、推定値で埋めない。
+   M4 Max 開発機の値は使わない。記録項目はチップ・OS・rustc・perflevel・rayon_threads・
+   .rev-stamp・ツリー指紋。内部ホスト名は書かない。
+2. 形状（m,n,k / 転置）: L1 fwd 64x256x784 Nn / L1 dW 784x256x64 Tn / L1 dX 64x784x256 Nt /
+   L2 fwd 64x10x256 Nn / L2 dW 256x10x64 Tn / L2 dX 64x256x10 Nt。
+   参照（判定に使わない）: 正方 512。
+3. 腕:
+   縦軸: base（main そのまま。wall と bits_hash）／timed（diag_timing.patch 適用。wall・bits_hash・内訳）。
+   横軸: native（機体の既定プール。判定に使う腕）／t1（RAYON_NUM_THREADS=1。参照で判定には使わない）。
+   バイナリは example cpu_pack_kernel_breakdown。出力の rayon_threads= を正とする。
+4. round: 5。1 round は 4 プロセス（base／timed × native／t1）で、起動順は round ごとに
+   ローテーションする。run の差し替え・追加起動はせず、ログは上書きしない。
+5. プロセス内の回数: N_WARMUP=50・N_MEASURE=500（固定）。内訳は warmup 後にリセットし、
+   N_MEASURE 回の合計を出す。
+6. 負荷ゲート: 各プロセスの開始前に load1 が閾値未満になるまで 30 秒おきに最大 30 分待つ。
+   閾値は Mac mini 5.0・GB10 10.0（#3177 と同じ）。通過できなかったプロセスは unavailable。
+   全プロセスが通過した系列だけを正式系列と呼び、それ以外は参考系列とする。
+7. 運用: 両機体とも実機ロック（~/work/.fandhe-hw-lock）を取り、保持している間に転送・ビルド・
+   計測・回収を行う。ビルドは全腕ぶんを先に逐次で済ませ、計測と並走させない。Mac mini は zsh -lc。
+8. fail-closed（集計を止め、理由を記録する）:
+   - base と timed で bits_hash が食い違う（形状・機体・round のどれか 1 つでも）
+   - 同じ腕（base／timed × native／t1）の round 間で bits_hash が食い違う
+   - rayon_threads= が腕の指定と食い違う（t1 腕で 1 でない・native 腕で 1）
+   - 予定した (round × プロセス) が欠けている・unavailable が混じる（この場合は参考系列として別記）
+   - 行の解析に失敗する（欠損キー・重複キー・非数値）
+   - timed 腕で jobs=0
+9. 指標: 全 worker の合計作業時間（wall ではない）。形状 s・round r ごとに、1 回あたり
+   tA・tB・tK・tJob（各 ns の合計 ÷ calls）、tO = tJob − tA − tB − tK。
+   割合 sA = tA/tJob、sB、sK、sO、s_pack = (tA+tB)/tJob。5 round の中央値を採る。
+   参考: 同 round の wall_median の比 timed/base（計時による摂動）。ゲートではなく注記に使う。
+10. 判定（native 腕・機体ごと）。(A) が取り除くのは Nn／Nt の A pack だけ（決定記録 §4.1）なので、
+   主判定は A pack の割合で行う。
+   集計対象 T = {L1 fwd, L1 dX, L2 fwd, L2 dX}。
+   時間加重の割合 S_A(r) = Σ_{s∈T} tA / Σ_{s∈T} tJob を round ごとに計算する。
+   PACK_MAIN: median_r S_A >= 0.50 かつ 5 round 中 4 round 以上で S_A >= 0.50。
+   NOT_PACK_MAIN: median_r S_A < 0.50 かつ S_A >= 0.50 の round が 1 以下。
+   それ以外は INDETERMINATE。
+   補助（判定に使わない）: 形状ごとの sA・s_pack の中央値と、T 全体・6 形状全体の s_pack。
+11. 分解能: 区間 1 回あたりの平均時間（合計 ÷ 区間数）が 10 × timer_tick_ns 未満の
+   （形状, 区間）には「分解能不足」の注記を付け、その形状の個別判定は「判定不能（分解能）」とする。
+   集計値はそのまま出す（Mac の Instant は 24 MHz 刻みで約 41.7 ns）。主判定 S_A は注記の対象でも
+   式のまま計算する。
+12. 2 水準への分裂: 5 round の tJob（形状ごと）の最大／最小が 1.5 倍以上で、昇順に並べた隣接値の
+   最大の比が 1.5 以上となる 2 群に割れた場合は、両群の中央値を併記する（#3177 で GB10 単スレッドが
+   36／105 GFLOPS に割れた前例）。1 つの代表値に潰さない。判定式は上記のまま適用する。
+13. 限界（事前に明記）:
+   - 計測は plain GEMM 入口で、学習 forward が通りうる bias_act 融合経路ではない
+   - L1 dX が本番で実行されるかは未確認（#3177 §2）
+   - kernel の区間は端タイルの C コピーを含む。その他 tO は c_local の確保・コピーイン／アウト・
+     PanelBuffers の確保・ループ制御・計時コストを含む
+   - 計時区間はループ全体を包む（run_with_ldc 1 回ごとには包まない）。区間数は ic ごと・(jc,pc) ごと
+   - timed 腕の wall は計時で摂動する。内訳は timed 腕の値、wall 比較は base 腕の値を使う
+   - timed 腕のツリーでは determinism_inventory（lock／atomic の allowlist 検査）は通らない
+     （診断用の Mutex を足すため。診断パッチを main に入れない理由）
+14. 本規則の閾値（0.50・4/5・10×tick・1.5 倍）は実装側が登録した値で、所有者が承認した定数ではない。
+   計測後に変えない。結果を受けて (A) を再検討するかは所有者が判断する（本規則は判定のみ）。

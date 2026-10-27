@@ -95,6 +95,14 @@
 - 6 形状について pack と kernel の時間内訳を事前登録規則で測り、pack が主因と分かった場合に (A) を再検討する。起票は `.claude/rules/out-of-scope-tracking.md` に従い、ユーザー承認を経てから
 - #3227 の既定反転判断には影響しない
 
+### 7.1 内訳計測（#3614）
+
+- **状態: 未実測**。計測部品と事前登録規則だけを用意した段階で、実機（GB10・Mac mini）の計測値・判定は未記録
+- 事前登録規則: `docs/perf/logs/cpu-pack-kernel-breakdown-3614/RULE.txt`（計測前に固定。6 形状・5 round・負荷ゲート・判定式〈Nn／Nt の A pack の時間加重割合 S_A が 0.50 以上で 5 round 中 4 以上なら PACK_MAIN〉・fail-closed 条件）
+- 計測部品: example `cpu_pack_kernel_breakdown`（base 腕）・区間計時の診断パッチ `diag_timing.patch`（複製ツリーにだけ当てる。main には入れない）・`run_breakdown.sh`・`aggregate.py`。手順は同ディレクトリの `README.md`
+- 判定の結果: 未記録
+- (A) を再検討するかの所有者判断: **未記録（所有者確認待ち）**。本節の追記は所有者の承認を意味しない
+
 ## 8. 変更していないもの
 
 - `.rs`・`docs/spec`・tolerance・baseline・FMA 契約（p 昇順）・ruleset・リポジトリ設定
