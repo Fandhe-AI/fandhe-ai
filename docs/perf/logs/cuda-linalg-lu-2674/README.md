@@ -1,8 +1,8 @@
-# CUDA LU 系線形代数（#2674・#3135）実機未実測の申し送り
+# CUDA LU 系線形代数（#2674・#3135）の実機 parity 実測記録
 
-> **状態（#3135）: Stage B 実装済み・実機未実測。** カーネル起動（`CudaLinalg::launch_lu`＝CU-1・`run_lu_solve_f32`＝CU-2）と
-> 実機 `#[ignore]` テストを追加済み。GB10 での NVRTC・parity・特異写像の実測は #3138 で行う（下の実測記入欄は未記入のまま）。
-> 以下の「実装済み（Stage A）」「承認依頼」は #2674 時点の記録（履歴）。
+> **状態（#2674 reopen・2026-10-27）: GB10 実機で実測済み。5 run すべて pass。** 事前登録規則は `RULE.txt`（計測前に固定・コミット済み）、
+> 各 run のログは `run1.log`〜`run5.log`、環境情報は `env.txt`、測定対象コミットは `rev-stamp.txt`。
+> 下の「実装済み（Stage A）」「承認依頼」は #2674 時点の記録（履歴）。
 
 > **#3138**: 実機 parity の事前登録規則・手順を `../cuda-linalg-parity-3138/` に用意した（未実測。GB10 での実施待ち）。
 
@@ -36,11 +36,11 @@ cudarc の `launch_builder(..).launch(cfg)` は `unsafe fn`。次の 2 ブロッ
 `crates/backend-cuda/tests/linalg_lu_parity.rs` への実機 `#[ignore]` parity テスト追加（`CpuBackendOps` と
 `assert_parity`、設計記録 §5 の入力集合）。
 
-## 測定コマンド案（実機）
+## 測定コマンド（実機。`RULE.txt` と同一。1 run = 2 コマンド、独立プロセスで 5 run）
 
 ```sh
-# NVRTC コンパイル・ロード確認（Stage A でも検証可能）
-cargo test -p fandhe-ai-backend-cuda --release --test linalg_lu_parity -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release --test linalg_lu_parity -- --ignored --nocapture --test-threads=1
+cargo test -p fandhe-ai --release --test linalg_gpu_optin_cuda_parity -- --ignored --exact --nocapture --test-threads=1 facade_inv_gate_on_matches_cpu facade_solve_gate_on_matches_cpu facade_det_gate_on_matches_cpu
 ```
 
 ## 実測記入欄
@@ -49,3 +49,4 @@ cargo test -p fandhe-ai-backend-cuda --release --test linalg_lu_parity -- --igno
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 | 未実測 | NVRTC コンパイル確認のみ。parity は Stage B（unsafe 承認）後 |
 | 未実測 | DGX Spark GB10 | `../cuda-linalg-parity-3138/README.md` のコマンド | 未実測（#3138 スキャフォールド PR） | 規則は `../cuda-linalg-parity-3138/RULE.txt` |
+| 2026-10-27 | DGX Spark GB10（`<cuda-node>`） | 上記 2 コマンド × 5 run（コミット `18479ad49a715bb00bcce9f2bcba6450c837bccd`（dirty=0。`rev-stamp.txt`）） | 5 run すべて pass。backend: `running 6 tests`・`6 passed; 0 failed`（5/5）。facade（ゲート ON・inv／solve／det）: `running 3 tests`・`3 passed; 0 failed`（5/5）。全 run で `rc=0`。NaN／inf: 全 run で NaN／inf なし（1e±20 倍・`1e20 × I₂` を含むテストが pass。厳密ゼロ fail の `assert_parity` 判定） | 上 2 行（未実測）の LU 系分を本行が引き継ぐ。rustc 1.97.0・ドライバ 580.173.02・CUDA 13.0（nvcc 13.0.88）。hw-lock 保持 2026-10-27T10:03:06Z〜10:04:07Z（UTC）。常駐サービス（vLLM・ComfyUI）のプロセスが計測前後とも存在し、`utilization.gpu` は前 0%・後 4%（`env.txt`。常駐サービスは停止していない）。tolerance・カーネル・入力集合は不変。分解系（cholesky・qr・eigh）と #3138 の他コマンドは未実施 |
