@@ -10,7 +10,7 @@
 | `aggregate_sweep_single.py` | Stage 0 の単機集計（継承 `aggregate_sweep.py` を import。`--self-test` あり） |
 | `machine_gate_check.py` | 継承ゲートログから round 別 load1 < 3.0 を判定（uptime 定期サンプルのみのログは round 非対応のため判定不能。`--self-test` あり）。結果は `macmini/machine_gate_ok.txt` |
 | `split_by_task.py` | 混在 JSONL を task だけで分割する前処理（G4。2112 README §3 のコマンドを実行可能にする） |
-| `RULE-g7-r3.txt`・`session-scripts/g7_r3_session.sh` | #3618: G7 の H1〜H3 を計時の分解能を上げて測り直す事前登録（補遺 3。4 セルを K = 1000 でまとめ計時）とセッションスクリプト。出力先は `verify-cache-r3/`（**未実測**。実測後に追加する） |
+| `RULE-g7-r3.txt`・`session-scripts/g7_r3_session.sh` | #3618: G7 の H1〜H3 を計時の分解能を上げて測り直す事前登録（補遺 3。4 セルを K = 1000 でまとめ計時）とセッションスクリプト。出力先は `verify-cache-r3/`（実測済み 2026-10-27。`aggregate.md`・`steps.log`・`timer-res.log`・`env_info.txt`・`run{1..5}.jsonl`）。hw-lock の時刻は `hwlock-r3.log`、実行前の検査は `precheck-r3.txt` |
 | `RULE-reopen.txt` | 再開分の事前登録（補遺 2。継承 RULE と元の補遺は不変。修正前の sha256 を記録） |
 | `session-scripts/*_r2.sh`・`gb10_g3_session.sh`・`lib_r2.sh` | 再開分のセッションスクリプト（旧スクリプトは残す）。`AB_ROUND_COOLDOWN_MAX_LOAD1=3.0` で継承スクリプトの round 前クールダウン hook を有効化 |
 | `host-arena-r2/`（G1）・`reduction/stage1-r2/`（G2。Stage 0 は再計測せず初回を継承）・`encode-only-r2/`（G3。`prereq/` に前提ゲート）・`encode-only-gb10/`（G3 の GB10 対照）・`readback-r2/`（G4）・`readout-r2/`（G5）・`steel-r2/`（G6）・`verify-cache-r2/`（G7）・`macmini-r2/`・`gb10/` | 再開分の生ログ（マスク済み。ベンチバイナリは収録せず、sha は `sha-*.txt`） |
@@ -40,3 +40,4 @@
 4. Metal 系: `metal_session.sh g4g5` → `g3g6g7`（G3 前提ゲート）→ `g3ab` → `g6g7`。
 5. 回収後にマスク（ホスト名 → `masked`、`$HOME` → `<home>`、ユーザー名を除去）し、`machine_gate_check.py` で round 別の load1 を判定する。
 6. G4 は `split_by_task.py` で分割後、2112 README §3 のコマンドで比較。G5 は `compare_readout_ab.py --device metal --sizes gate --threshold 1.00`。
+7. G7 の r3（#3618）: 固定コミットだけを `git bundle` で転送して clone（`.git` 付き。rsync 方式では `.git` が無く rev-stamp が取れない）→ 外側ラッパー（repo の外に置く）で hw-lock を取得し、`g7_r3_session.sh` を無改変で 1 回実行 → 回収・マスク。ラッパーの取得・解放時刻は `hwlock-r3.log`。

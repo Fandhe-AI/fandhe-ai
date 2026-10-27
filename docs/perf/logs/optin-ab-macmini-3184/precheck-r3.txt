@@ -1,0 +1,13 @@
+HEAD=450e0c9d7f1ba6eff5481906a526fe1668bb0850
+porcelain_lines= 0
+1b9819079a9025a0fd75ae2d766dffa1b6cba6b64581ea5e146a0256ecfc2d7b  docs/perf/logs/metal-tape-build-infer-phase-2114/RULE.txt
+003d59f36dd76a3a612ebe97433a82cd03a2a4aac0e5ede0f5975da34583daa4  docs/perf/logs/metal-tape-build-infer-phase-2114/aggregate.py
+b034a27444203ce1b44b8cbe78de0c0e3c92e7f47c90f29e060981d648533bfb  docs/perf/logs/metal-tape-build-infer-phase-2114/orchestrate.sh
+858101ed281b6bad1e94ea88d570a4a283341bb49d5c35740318b242a7ea0559  docs/perf/logs/optin-ab-macmini-3184/RULE.txt
+b593d375b910589020e7d54a3e3ab6c0bfb02ac926587730e2f884eb2a6a1101  docs/perf/logs/optin-ab-macmini-3184/RULE-reopen.txt
+75f84c571374834d75f48c340a2a30d825ffa7508f6607d6ef4aa1579acfee89  crates/facade/tests/metal_infer_tape_build_fixedcost_diag.rs
+self-test OK
+/dev/disk3s5   228Gi   148Gi    56Gi    73%    1.9M  585M    0%   /System/Volumes/Data
+{ 2.77 1.64 1.53 }
+rustc 1.99.0 (b940084d7 2026-09-28)
+procs=0

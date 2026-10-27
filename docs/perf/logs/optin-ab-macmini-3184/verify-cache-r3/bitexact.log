@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/metal_infer_tape_build_fixedcost_diag.rs (<home>/work/g7-3618/target-r3/release/deps/metal_infer_tape_build_fixedcost_diag-034ca4b7f7794624)
+
+running 1 test
+test metal_infer_decomposition_matches_public_api_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.06s
+
