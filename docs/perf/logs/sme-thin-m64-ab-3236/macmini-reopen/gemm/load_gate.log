@@ -1,0 +1,11 @@
+round1 gate=pass gate_ok=1 threshold=3.0 load1=2.69 waited_s=210 at=2026-10-27T08:38:32Z
+round2 gate=pass gate_ok=1 threshold=3.0 load1=2.69 waited_s=0 at=2026-10-27T08:38:35Z
+round3 gate=pass gate_ok=1 threshold=3.0 load1=2.48 waited_s=30 at=2026-10-27T08:39:08Z
+round4 gate=pass gate_ok=1 threshold=3.0 load1=2.48 waited_s=0 at=2026-10-27T08:39:11Z
+round5 gate=pass gate_ok=1 threshold=3.0 load1=2.69 waited_s=30 at=2026-10-27T08:39:44Z
+round6 gate=pass gate_ok=1 threshold=3.0 load1=2.50 waited_s=30 at=2026-10-27T08:40:17Z
+round7 gate=pass gate_ok=1 threshold=3.0 load1=2.44 waited_s=30 at=2026-10-27T08:40:50Z
+round8 gate=pass gate_ok=1 threshold=3.0 load1=2.35 waited_s=30 at=2026-10-27T08:41:23Z
+round9 gate=pass gate_ok=1 threshold=3.0 load1=2.96 waited_s=0 at=2026-10-27T08:41:26Z
+round10 gate=pass gate_ok=1 threshold=3.0 load1=2.76 waited_s=30 at=2026-10-27T08:41:58Z
+round11 gate=pass gate_ok=1 threshold=3.0 load1=2.57 waited_s=30 at=2026-10-27T08:42:31Z

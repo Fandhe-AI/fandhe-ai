@@ -62,6 +62,12 @@ Mac mini（Apple M4）で OFF（main）と ON（定数 1 行を反転した計�
 | `orchestrate_macmini_reopen.sh` | `orchestrate_macmini.sh` の派生（ラベル `3236-reopen-r1`・11 round・framework-compare と記録 run は無し。`--dry-run` あり） |
 | `aggregate_reopen.py` | 厳密集計（`python3 -I aggregate_reopen.py --self-test`／`python3 -I aggregate_reopen.py macmini-reopen`） |
 | `../../../../crates/backend-cpu/examples/cpu_sme_thin_m64_reopen.rs` | 計時 binary（`<before\|after> <gemm\|kgrid>`。出力に `warmup=`／`iters=` を含む） |
-| `macmini-reopen/`・`aggregate-reopen.md` | 実測後に追加する収録ログと機械出力 |
+| `macmini-reopen/`・`aggregate-reopen.md` | 収録ログと機械出力（`python3 -I aggregate_reopen.py macmini-reopen`） |
 
-状態: **未実測**（計測部品と規則のみ。Mac mini での実測はこのコミット時点で未実施）。既定 `SME_THIN_M64_ENABLED` はこの issue では反転しない。
+状態: **実測済み・判定 undetermined**（l2_dx 中央値比 1.104・<= 1.00 は 1/11 round。l1_fwd・l1_dx は ADOPT。解釈は決定記録 `cpu-gemm-sme-thin-m64-decision.md` §11.2）。既定 `SME_THIN_M64_ENABLED` はこの issue では反転しない。
+
+### 実績（2026-10-27）
+
+- 転送段のロック: 08:33:43Z 取得・解放（bundle を clone し `rev-parse HEAD`＝`a078935b1` とクリーン状態を確認）。計測段のロック: スクリプトが 08:33:58Z に取得・08:42:34Z に解放し、終了後に不在を確認（回収した `hwlock.log` は `released-pending` までで、最終の `released` 行は含まれない）。
+- 転送は bundle → clone 方式。収録ログのマスク漏れ（ホスト名・ユーザー名・絶対パス）は grep で 0 件を確認した。`p_bit.log` に残った `<home>/work/reopen-3615/...` 形のパスだけ、スクリプトの置換順の都合で `<main>`／`<work>` へ追加マスクした。
+- 計測後、Mac mini 側の作業ツリー・target・bundle は削除済み。

@@ -1,0 +1,2 @@
+before: sme_report=SmeReport { os_flag: true, svl_bytes: Some(64), kernel_enabled: true }
+after: sme_report=SmeReport { os_flag: true, svl_bytes: Some(64), kernel_enabled: true }
