@@ -1,0 +1,2 @@
+precheck=assert ok
+precheck FAILED: B1／B2 の主要シンボルのアドレス差を確認できない（layout_symbol_diff=0）

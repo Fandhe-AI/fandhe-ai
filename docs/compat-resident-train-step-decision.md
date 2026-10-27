@@ -708,14 +708,24 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - Mac mini の train／infer の内訳は §17.6（#3612。計測部品は登録済み・実機は未実測）、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
 - 本計測は参考系列で、正式な 6 フレームワーク同席計測とピン更新（0.12.0）は #3273。
 
-### 17.5 #3611 CPU train の REGRESS の切り分け（手順の登録。状態: 未実測）
+### 17.5 #3611 CPU train の REGRESS の切り分け（状態: 両機体とも precheck 失敗で未実測。分類なし）
 
 §17.1 の CPU train の REGRESS（Mac mini ratio_ab 1.004・GB10 1.059）が、ノイズ幅・配置・チェーン化の実際の後退のどれかを、計測より前に固定した手順で分類する。
 
 - 手順の正本: `docs/perf/logs/resident-chain-cpu-train-diag-3611/DIAG.txt`（計測前に固定。#3257 の RULE と判定は変えない。分類であり判定ではない）。ランナーは `scripts/bench/framework-compare/run_diag_resident_chain_cpu.sh`、集計は `summarize_diag_resident_chain_cpu.py`。
 - 腕は 7 つ（A/A 2・B1 の chain・配置をずらした B2 の reuse／chain・#3257 時点のコード B0 の reuse／chain）。#3257 の before／after は同一バイナリだったため、配置の対照は「配置をずらした再ビルドでも差が同じ向きで残るか」で見る。
 - ツリーは HEAD の main ではなく #3622 の `a8e91f0c9`（版 0.11.0 のまま `crates/` が最新の最後のコミット）を使う。#3623 の 0.12.0 版上げ以降は bench-fandhe の `fandhe-ai =0.11.0` ピンが path patch に解決されず、#3273 のピン更新まで HEAD は計測できないため。`.rs` は main と同一。
-- 結果（分類・数値・ログのパス）と所有者判断事項は計測後にここへ追記する。両機体とも現時点では未実測。
+- **実施結果（2026-10-27）**: Mac mini（Apple M4）・GB10 の両機体で DIAG のランナーを起動したが、計測前の precheck「B1／B2 の主要シンボルのアドレス差を確認できない（`layout_symbol_diff=0`）」で fail-closed に停止した。7 腕・5 round の計測は 1 本も走っておらず、**分類 (i)〜(v) はどちらの機体も付けられない**（未実測）。#3257 の REGRESS 判定・§17.1〜§17.4 は書き換えない。
+- 停止の原因（観測した事実）: ランナーの `sym_dump` は `nm` のシンボル名末尾の `17h<16 桁 hex>E`（legacy mangling のハッシュ）を落として B1 と B2 の名前を突き合わせるが、両機体のビルドは v0 mangling（`_RNv…`）で、名前の途中にあるクレート識別子（例: Mac mini の B1 `Cs4vp0J2ErAuc`・B2 `Cshpzk1jJ7XbY`、GB10 の B1 `Cs3bmvltcWNSn`・B2 `Cs6vaE4x1fxIR`）がビルドパス依存で B1 と B2 で異なる。このため突き合わせで共通名が 1 つも残らず、差の数が 0 になった。シンボルのアドレス自体は B1 と B2 で異なっており（Mac mini `train_step_resident` は `0x1000204c0` と `0x1000262a4`、GB10 は `0x59640` と `0x5f070`）、配置のずれは起きていたとみられるが、DIAG が定める検査としては確認できていない。これは計測手順側（ランナーの正規化）の問題で、チェーン化の性能の結果ではない。
+- ランナー・パッチ・DIAG は事前登録後に変えない方針のため、本 issue の範囲では直さず再実行もしていない。B0・B1・B2 の release ビルドは両機体で成功し、3 本のバイナリの sha256 は互いに異なっていた（`sha-diag-*`）。
+- ログ: `docs/perf/logs/resident-chain-cpu-train-diag-3611/macmini/`・`gb10/`（`run-*.log`・`build-*.err`・`nm-*`・`sha-*`・`tree-*`・`skipped-*`。ホームの絶対パスは `<home>` にマスク済み）。`results-*.jsonl`・`digest-*`・`summary-*` は計測が走っていないため存在しない。
+- 限界: DIAG の「限界」節のとおり（B1 は #3257 と同じコードではない・検出力が低い・checksum は bit 同一の証明ではない）。本実施では数値が得られていないため、これらは再実施にも適用される。
+
+**所有者判断事項（未決）**
+
+- precheck の突き合わせをどう扱うか。例: ランナーの `sym_dump` で v0 mangling のクレート識別子も正規化する（別名の DIAG／ランナー改訂を計測前に登録し直す）、または precheck の条件自体を所有者が見直す。いずれも計測部品の変更であり、本 issue ではコードを直していない。
+- 上記の後に 2 機体の計測を再実施するか（再実施時は同じ label を使わず、別名 DIAG を計測前に固定する）。
+- CPU train の REGRESS の是正の要否は、分類が得られるまで判断材料がない。
 
 ### 17.6 #3612 Mac mini Metal 常駐チェーンの内訳（手順の登録。状態: 未実測）
 
