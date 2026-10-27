@@ -708,7 +708,7 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - Mac mini の train／infer の内訳は §17.6（#3612。2026-10-27 に実測済み。torch 側の内訳と B2 は未実測）、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
 - 本計測は参考系列で、正式な 6 フレームワーク同席計測とピン更新（0.12.0）は #3273。
 
-### 17.5 #3611 CPU train の REGRESS の切り分け（状態: 両機体とも precheck 失敗で未実測。分類なし）
+### 17.5 #3611 CPU train の REGRESS の切り分け（状態: r1 は precheck 失敗で未実測。r2 は両機体で実測済み・分類 (i)。是正要否は所有者判断待ち）
 
 §17.1 の CPU train の REGRESS（Mac mini ratio_ab 1.004・GB10 1.059）が、ノイズ幅・配置・チェーン化の実際の後退のどれかを、計測より前に固定した手順で分類する。
 
@@ -726,6 +726,28 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - precheck の突き合わせをどう扱うか。例: ランナーの `sym_dump` で v0 mangling のクレート識別子も正規化する（別名の DIAG／ランナー改訂を計測前に登録し直す）、または precheck の条件自体を所有者が見直す。いずれも計測部品の変更であり、本 issue ではコードを直していない。
 - 上記の後に 2 機体の計測を再実施するか（再実施時は同じ label を使わず、別名 DIAG を計測前に固定する）。
 - CPU train の REGRESS の是正の要否は、分類が得られるまで判断材料がない。
+
+#### 実施 2（r2）: 正規化を直した DIAG-r2 での実測（2026-10-28）
+
+- 事前登録: `docs/perf/logs/resident-chain-cpu-train-diag-3611/DIAG-r2.txt`（r1 の `DIAG.txt` は凍結記録で変えない。設計・腕・巡回・ゲート・hard 条件・分類規則・パッチは r1 と同一で、変えたのは主要シンボルの突き合わせの正規化と、runner／helper の sha256 の固定だけ）。突き合わせは新設の `scripts/bench/framework-compare/diag_layout_symbols.py`（legacy／v0 mangling を正規化。重複・必須シンボル欠落・共通キー 0 件は fail-closed）。r1 のコミット済みダンプを再生すると両機体とも `layout_symbol_diff=2` になることを単体テストで固定した（`summarize_diag_resident_chain_cpu_test.py`）。計測前に DIAG-r2 とランナー・helper をコミットし、その同一コミット（runner 側 sha256 は env_info の `runner_sha256`／`layout_helper_sha256` と DIAG-r2 が一致）を bundle で両ノードへ送って計測した。
+- 実施: 両機体で precheck を通過（`layout_symbol_diff=2`・`layout_symbol_keys=2`、B0・B1・B2 のバイナリ sha256 は互いに異なる）、7 腕 x 5 round を完走。5 round とも負荷ゲート通過。hard 条件（checksum・PARAM_DIGEST の全 run 一致）は集計が検査して通過（終了コード 0）。機体ロックは `#3611` で取得し、収録後に解放した。GB10 の初回起動は PATH 未設定（cargo が見つからない）でビルド前に止まり、計測は 0 本だったため、その出力ファイルだけを削除して同じラベルで再起動した（`run-3611r2-gb10.log` は 2 回目、失敗した起動のログはノード上で削除）。
+- 注意: b1 は r1 から据え置き（`a8e91f0c9`）。#3273 でピンが `=0.12.0` へ更新済みで、main の `crates/` は b1 から約 2000 行進んでいるため、r1 の記述（「HEAD は #3273 まで計測不能」「b1 と main は `.rs` 同一」）は r2 時点では古い。B1 の結果は HEAD の結果ではない。
+
+| 機体 | 分類 | N | D1 | c1 | D2 | c2 | P | B0 の o1/o0 - 1 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Mac mini（Apple M4） | (i) ノイズ幅内 | 0.1104 | -0.0003 | 3/5 | +0.0050 | 3/5 | 0.0007 | +0.0005 |
+| GB10 | (i) ノイズ幅内 | 0.0938 | -0.0093 | 3/5 | +0.0121 | 4/5 | 0.0174 | -0.0161 |
+
+- rho（aa0 比、5 run の median_s の中央値の比）。Mac mini: aa1 1.0053・ch1 0.9997・rb0 1.0007・rb1 1.0056・o0 0.9982・o1 0.9988。GB10: aa1 1.0190・ch1 0.9907・rb0 0.9826・rb1 0.9944・o0 1.0003・o1 0.9842。run 別の rho_r と代表値は各 `summary-3611r2-*.txt`。
+- 読み方（事実のみ）: 規則上、N（A/A の run 内ばらつき）が D1・D2 より大きいので (i) になった。これは「ノイズ幅より大きい差が観測されなかった」であり、「差が無い」ことの証明ではない。Mac mini の N は round 1 の A/A 腕（rho_r 0.8896）に支配されている。Mac mini の負荷ゲートは load1 2.75〜2.77（閾値 3.0 の手前）で通過した。#3257 の参考系列の ratio_ab（Mac mini 1.004・GB10 1.059）に相当する差は、本実測では再現していない（D1 は両機体とも絶対値 1% 未満）。
+- 規則は事後に変えていない（round の追加・腕の差し替え・再実行なし）。#3257 の RULE・判定、§17.1〜§17.4、r1 の記録は書き換えない。
+- ログ: `docs/perf/logs/resident-chain-cpu-train-diag-3611/macmini-r2/`・`gb10-r2/`（`env_info-*`・`results-*.jsonl`・`digest-*`・`load_gate-*`・`nm-raw-*`（nm 生出力）・`nm-diag-*`（正規化済み）・`sha-*`・`build-*.err`・`tree-*`・`skipped-*`・`summary-3611r2-*.txt`〔末尾に集計の終了コード〕）。ホームの絶対パスは `<home>` にマスク済み。bench バイナリ・target・B2 の worktree は収録していない。
+
+**所有者判断事項（r2 後。未決）**
+
+- 是正の要否: 分類が (i) のため、本 issue ではコードを直していない。是正不要とするか（根拠の候補: 両機体で A/A ノイズ幅内、D1 は絶対値 1% 未満）、検出力を上げて再計測するか（例: round 数の増加は規則変更になるため別名 DIAG が必要）は所有者判断待ち。
+- b1 を HEAD（0.12.0）へ切り替えた再登録・再計測の要否は所有者判断待ち。
+- 本 PR は `Refs #3611`。所有者判断（是正要否）が得られるまで issue は閉じない。
 
 ### 17.6 #3612 Mac mini Metal 常駐チェーンの内訳（状態: 実測済み。hard 条件はすべて通過）
 
