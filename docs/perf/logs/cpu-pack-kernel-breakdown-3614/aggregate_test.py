@@ -8,6 +8,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import tempfile
 import unittest
 
@@ -201,6 +202,38 @@ class AggregateTest(unittest.TestCase):
         with self.assertRaises(agg.AggregateError) as cm:
             agg.load_machine(self.root)
         self.assertIn("l1_dx", str(cm.exception))
+
+    def _edit_timed_line(self, key, value):
+        path = os.path.join(self.root, "round5-timed-native.log")
+        out = []
+        with open(path, encoding="utf-8") as fh:
+            for ln in fh:
+                if "shape=l1_dx " in ln:
+                    ln = re.sub(rf"\b{key}=-?\d+", f"{key}={value}", ln)
+                out.append(ln)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(out))
+
+    def test_negative_value_rejected(self):
+        write_machine(self.root, [0.6] * 5)
+        self._edit_timed_line("kernel_ns", -5)
+        with self.assertRaises(agg.AggregateError) as cm:
+            agg.load_machine(self.root)
+        self.assertIn("kernel_ns", str(cm.exception))
+
+    def test_breakdown_exceeds_job_rejected(self):
+        write_machine(self.root, [0.6] * 5)
+        self._edit_timed_line("kernel_ns", 10**12)
+        with self.assertRaises(agg.AggregateError) as cm:
+            agg.load_machine(self.root)
+        self.assertIn("超過", str(cm.exception))
+
+    def test_job_ns_zero_rejected(self):
+        write_machine(self.root, [0.6] * 5)
+        self._edit_timed_line("job_ns", 0)
+        with self.assertRaises(agg.AggregateError) as cm:
+            agg.load_machine(self.root)
+        self.assertIn("job_ns", str(cm.exception))
 
     def test_jobs_zero(self):
         def mut(r, arm, mode, s, kw):

@@ -178,10 +178,17 @@ for r in ${ROUNDS}; do
             continue
         fi
         if [ "${arm}" = "base" ]; then bin="${BIN_BASE}"; else bin="${BIN_TIMED}"; fi
+        # pipefail でバイナリの異常終了を検出する。失敗時は .tmp を破棄しログを確定せず、DONE も作らず停止する。
         if [ "${mode}" = "t1" ]; then
-            RAYON_NUM_THREADS=1 "${bin}" "${arm}" 2>&1 | mask > "${log}.tmp"
+            ( set -o pipefail; RAYON_NUM_THREADS=1 "${bin}" "${arm}" 2>&1 | mask > "${log}.tmp" )
         else
-            "${bin}" "${arm}" 2>&1 | mask > "${log}.tmp"
+            ( set -o pipefail; "${bin}" "${arm}" 2>&1 | mask > "${log}.tmp" )
+        fi
+        rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            rm -f "${log}.tmp"
+            echo "error: 計測失敗 round=${r} arm=${arm} mode=${mode} rc=${rc}（ログ未確定・DONE なし）" >&2
+            exit 1
         fi
         mv "${log}.tmp" "${log}"
     done

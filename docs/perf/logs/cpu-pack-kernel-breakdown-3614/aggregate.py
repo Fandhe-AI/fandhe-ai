@@ -132,6 +132,21 @@ def parse_log(path, arm, mode):
                 raise AggregateError(f"{where}: shape {kv['shape']} が重複")
             if kv["calls"] <= 0:
                 raise AggregateError(f"{where}: calls が 0 以下")
+            if arm == "timed":
+                # 値域・整合性（時間・区間数は非負、job_ns は正、内訳合計は job_ns 以下）。
+                # jobs=0 は load_machine が「経路が想定と違う」として専用メッセージで拒否する。
+                for key in TIMED_KEYS:
+                    if kv[key] < 0:
+                        raise AggregateError(f"{where}: {key} が負値: {kv[key]}")
+                if kv["job_ns"] <= 0:
+                    raise AggregateError(f"{where}: job_ns が 0 以下: {kv['job_ns']}")
+                parts = kv["a_pack_ns"] + kv["b_pack_ns"] + kv["kernel_ns"]
+                if parts > kv["job_ns"]:
+                    raise AggregateError(
+                        f"{where}: a_pack_ns+b_pack_ns+kernel_ns={parts} が job_ns={kv['job_ns']} を超過")
+            for key in ("rayon_threads", "wall_median_ns"):
+                if kv[key] <= 0:
+                    raise AggregateError(f"{where}: {key} が 0 以下: {kv[key]}")
             rows[kv["shape"]] = kv
     if calib is None:
         raise AggregateError(f"{path}: 校正行がない")
