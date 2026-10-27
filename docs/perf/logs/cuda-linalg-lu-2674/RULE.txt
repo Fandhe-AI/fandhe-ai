@@ -1,0 +1,16 @@
+# 事前宣言（実測前に固定。2026-10-27 UTC。イシュー #2674。結果が出た後に緩めない）
+- 公式の実機: DGX Spark GB10（sm_121）のみ。他の GPU の結果は判定に使わない。
+- 判定・入力集合・fail の扱いは ../cuda-linalg-parity-3138/RULE.txt を参照で採用する（本ファイルは LU 系に絞った差分のみ）。
+- 対象（LU 系のみ。分解系 cholesky・qr・eigh と #3138 の他コマンドは範囲外）:
+  1. backend 層: crates/backend-cuda/tests/linalg_lu_parity.rs の #[ignore] 全 6 件（ファイル単位で --ignored 実行。期待 `running 6 tests`）
+  2. facade 層（ゲート ON）: crates/facade/tests/linalg_gpu_optin_cuda_parity.rs の facade_inv_gate_on_matches_cpu・facade_solve_gate_on_matches_cpu・facade_det_gate_on_matches_cpu の 3 件（--exact 指定。期待 `running 3 tests`）
+- 判定: assert_parity（相対 1e-3 未満 または 絶対 1e-5 未満）を厳密ゼロ fail で適用。特異写像テストは期待どおりの BackendError。1e±20 倍と 1e20 × I₂ で、出力に想定外の NaN／inf が出ないこと。ただし det は 1e20 × I₂ の期待値が 1e40 で f32 範囲外となるため、この範囲外の期待値は例外とし、CPU の非有限期待値と bit 一致することを確認する契約（assert_det_parity。参照元 ../cuda-linalg-parity-3138/RULE.txt に同例外あり）で判定する。「非有限値禁止」の対象は期待値が有限なケースに限る（判定の明確化であり緩和ではない）。
+- 実行: 独立プロセスで 5 回、各 run で下記 2 コマンドを順に実行。5 回すべて pass で pass。再実行による選別・ケース除外はしない。実行件数が期待と違えば（0 件を含む）無効。
+- 対象コミット: .rev-stamp の 2 行目が dirty=0 でない実測は無効。
+- 計測中のビルド・他 GPU 負荷の並走禁止。hw-lock 保持中にのみ計測する。
+- fail 時: tolerance・カーネル・入力集合を変えず事実を記録し、所有者へ報告する。
+- 収録ファイルはホスト名・ユーザー名・絶対パスを <cuda-node>・<home> 等へマスクする。
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --test linalg_lu_parity -- --ignored --nocapture --test-threads=1
+cargo test -p fandhe-ai --release --test linalg_gpu_optin_cuda_parity -- --ignored --exact --nocapture --test-threads=1 facade_inv_gate_on_matches_cpu facade_solve_gate_on_matches_cpu facade_det_gate_on_matches_cpu
+```

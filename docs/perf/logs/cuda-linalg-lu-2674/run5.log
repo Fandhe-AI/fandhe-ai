@@ -1,0 +1,25 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/linalg_lu_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_lu_parity-c7725717d4b9a9d2)
+
+running 6 tests
+test lu_det_matches_cpu_on_device ... ok
+test lu_det_matches_cpu_on_device_set ... ok
+test lu_inv_matches_cpu_on_device ... ok
+test lu_singular_maps_like_cpu_on_device ... ok
+test lu_solve_matches_cpu_on_device ... ok
+test nvrtc_compiles_and_loads_lu_kernels_on_device ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.27s
+
+rc=0
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/linalg_gpu_optin_cuda_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_gpu_optin_cuda_parity-e5f0fd2b8801e5ec)
+
+running 3 tests
+test facade_det_gate_on_matches_cpu ... ok
+test facade_inv_gate_on_matches_cpu ... ok
+test facade_solve_gate_on_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.26s
+
+rc=0
