@@ -1,0 +1,3 @@
+arm=after series=threads shape=l1_fwd trans=nn m=64 n=256 k=784 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000109667 gflops=234.256 checksum=0x410d9f88573bc000
+arm=after series=threads shape=l1_dx trans=nt m=64 n=784 k=256 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000067708 gflops=379.425 checksum=0xc1342e6dec4fb600
+arm=after series=threads shape=l2_dx trans=nt m=64 n=256 k=10 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000028625 gflops=11.447 checksum=0x410fab52a68fa700

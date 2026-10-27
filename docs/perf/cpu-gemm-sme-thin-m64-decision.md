@@ -187,5 +187,26 @@ train CPU に効くのは forward と dX の GEMM 経由だけである。
 - **checksum**: framework-compare は train／infer の全セルで「完全一致」。GEMM 単体・K 格子の判定も `aggregate.md` の前提ゲートで全一致。ただし checksum の一致は bit 同一の証明ではない（RULE §7）。
 - **P-BIT（Mac mini 実機・main ツリー）**: `--lib sme_thin_m64` 8 passed／`--ignored sme_thin_m64 --test-threads=1` 4 passed（`p_bit exit=0`）。#3233 独立監査の P2 #3（非正規化数・NaN の実機判定）の根拠として、次の 3 件が ok: `…_matches_scalar_reference_denormal`・`…_denormal_result_from_normal_operands`・`…_nan_input_does_not_panic`。**判定範囲**: 非正規化数は `assert_eq` の値一致（非ゼロの非正規化数では bit 一致と等価。±0 の符号は区別しない）、NaN はクラス一致（`is_nan`）で payload は比較しない（既存の「NaN のみクラス一致」契約と同じ）、FPCR は既定（FZ=0・DN=0）。`to_bits` による NaN payload・±0 符号の厳密判定は未実施で、反転 PR 側の範囲とする（本 PR は Rust のテストを足さない）。
 - **PyTorch との比（同 round の実測。PyTorch median / fandhe median の 5 round 中央値。値が大きいほど fandhe が近い。判定には使わない）**: train 64 fresh 0.197（OFF）→ 0.248（ON）、train reuse 0.273 → 0.306、infer fresh 0.157 → 0.216、infer reuse 0.155 → 0.221（torch 2.14.0・bench_py.py sha256 は `macmini/ab/env_info-3236-sme-3236-r1.txt`）。GEMM 単体は同 round の相手実測なし。issue に書かれた到達目安（infer 40〜55 us 等）は**推定**で、合格ラインに使っていない。
-- **未実測**: GB10（SME 非搭載で経路が変わらないため対象外）、`SME_PRODUCTION_ENABLED = true` 下での A/B（#3232 の GB10 REJECT により既定 false）、l2_dx の round 数を増やした再計測。M4 Max の値は Mac mini の値として使っていない。
+- **未実測**: GB10（SME 非搭載で経路が変わらないため対象外）、`SME_PRODUCTION_ENABLED = true` 下での A/B（#3232 の GB10 REJECT により既定 false）、`RAYON_NUM_THREADS=1` の記録 run。l2_dx の round 数を増やした再計測は §11.2 で実測。M4 Max の値は Mac mini の値として使っていない。
 - **処置**: 既定 OFF のまま。再計測が必要なら RULE §5 のとおり末尾に RULE-reopen を追記してから新しいラベルで測る（既存系列は差し替えない）。反転 PR は作らない。仮に将来 ADOPT／ADOPT-k になった場合の前提は (i) 所有者の確認、(ii) 独立監査の P2 条件（`docs/cpu-gemm-sme-unsafe-audit.md` §13.6。P2 #1 のゲート結合 `SME_PRODUCTION_ENABLED && SME_THIN_M64_ENABLED` は production SME が false の現状では薄型経路を死に経路にするため、扱いは所有者と反転 PR の判断事項）。
+
+### 11.2 #3615 の l2_dx 再計測（RULE-reopen-1。2026-10-27。判定 undetermined）
+
+判定の閾値は変えず、warmup 200／iters 2000・11 round の別系列 `3236-reopen-r1` で測り直した（規則: `docs/perf/logs/sme-thin-m64-ab-3236/RULE.txt` 末尾の RULE-reopen-1。計測前にコミット済み）。
+
+- 計測機: Mac mini（`<metal-node>`・Apple M4）。M4 Max の値は使っていない。計測ツリー: `a078935b1`（`rev-stamp.txt` 1 行目と一致。after は `+on-arm.patch`）。
+- 前提ゲート: すべて成立（P-TREE・P-R0・P-BIT。`p_bit.log` は 8 passed／4 passed、`gate_constant.txt` は before=false・after=true）。負荷ゲート: 11/11 round 通過（`gemm/load_gate.log`）。実機ロック: 08:33:58Z 取得・08:42:34Z 解放（`hwlock.log`）。
+- checksum は bit 同一の証明ではない（RULE §7）。
+- 機械出力: `docs/perf/logs/sme-thin-m64-ab-3236/aggregate-reopen.md`。収録ログ: `docs/perf/logs/sme-thin-m64-ab-3236/macmini-reopen/`。
+
+| セル | 11 round 中央値比（ON/OFF） | <= 1.00 の round | round 別比の範囲 | セル判定 |
+|---|---|---|---|---|
+| l1_fwd | 0.642 | 11/11 | 0.568〜0.680 | ADOPT |
+| l1_dx | 0.414 | 11/11 | 0.403〜0.473 | ADOPT |
+| l2_dx | 1.104 | 1/11 | 0.995〜1.153 | undetermined |
+
+- l2_dx は OFF 中央値 2.5875e-05 秒・ON 中央値 2.8708e-05 秒。#3236（5 round・中央値比 0.987）と異なり ON が遅い側に寄ったが、全 round 一貫の後退（全 round で > 1.00）ではなく r1 が 0.995 のため REJECT 条件には当たらない。
+- K 格子（記録用）: k=10 0.995・k=16 1.159・k=32 1.131・k=64 0.945・k=128 0.670・k=256 0.522・k=784 0.646。K 下限（格子上）は 128。全 round 一貫の後退セルは無し。
+- 総合判定: **undetermined**。規則は緩めない。
+
+処置: 既定 `SME_THIN_M64_ENABLED` は OFF のまま、Rust は変えない。揺らぎ・遅延傾向の原因切り分けは所有者判断（本 PR の対象外）。未実測: framework-compare の再計測、`RAYON_NUM_THREADS=1` の記録 run。

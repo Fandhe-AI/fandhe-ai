@@ -1,0 +1,7 @@
+arm=before shape=kgrid_k10 m=64 n=256 k=10 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000026167 gflops=12.523 checksum=0x40d4934a8564c000
+arm=before shape=kgrid_k16 m=64 n=256 k=16 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000022709 gflops=23.087 checksum=0xc10ec8d7c7104000
+arm=before shape=kgrid_k32 m=64 n=256 k=32 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000024333 gflops=43.093 checksum=0x4124bf608aa95400
+arm=before shape=kgrid_k64 m=64 n=256 k=64 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000028709 gflops=73.049 checksum=0x41070a6bde469c40
+arm=before shape=kgrid_k128 m=64 n=256 k=128 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000044458 gflops=94.343 checksum=0xc115934fed797300
+arm=before shape=kgrid_k256 m=64 n=256 k=256 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000069834 gflops=120.122 checksum=0xc136bc2aa90bfe00
+arm=before shape=kgrid_k784 m=64 n=256 k=784 rayon_threads=10 warmup=200 iters=2000 median_secs=0.000169750 gflops=151.341 checksum=0x410d9f88573bc000

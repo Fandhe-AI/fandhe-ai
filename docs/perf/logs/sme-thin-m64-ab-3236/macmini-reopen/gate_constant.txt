@@ -1,0 +1,2 @@
+3603:const SME_THIN_M64_ENABLED: bool = false;
+3603:const SME_THIN_M64_ENABLED: bool = true;

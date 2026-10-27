@@ -1,13 +1,15 @@
-事前登録規則（Mac mini・Apple M4）0.12.0 6 フレームワーク同席計測 — 【未固定（草案）】
-イシュー #3273。固定時刻: 未記入（実機計測の直前に UTC で記入し、以後編集しない。固定後の変更は RULE.v2.txt を新設する）。
-本ファイルは実測値を含まない。
+事前登録規則（Mac mini・Apple M4）0.12.0 6 フレームワーク同席計測 — 【固定】
+イシュー #3273。固定時刻: 2026-10-27T07:17:00Z（系列 A・B の開始前。以後編集しない。固定後の変更は RULE.v2.txt を新設する）。
+本ファイルは時間の実測値を含まない（行数スモークの行数のみ）。
 
 腕:
   旧条件腕 OLD = 0ae5670359c0f9d7a82f8bbd71791fb516713627（#3272 直前の bench-fandhe・fandhe-ai =0.12.0）
-  新条件腕 NEW = 計測直前の origin/main のうち ff0ac8e4e 以降の 1 コミット（フル SHA を固定時に記入）
+  新条件腕 NEW = bdaca14ccff7a01a4582eb84c6655f025a23208f（計測直前の origin/main。ff0ac8e4e 以降）
   判別式: ^[[:space:]]+let c0 = tape\.matmul_resident\(  （新ツリーで 1 件ヒット・旧ツリーで 0 件。草案作成時に確認済み）
   bench_py.py sha256: 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
-  Python 3 FW の版: 0.11.0 計測と同じ版を使う（違っていれば記録のみ・上げない）
+  Python 3 FW の版: 0.11.0 計測と同じ版を使う（違っていれば記録のみ・上げない）。2026-10-27 所有者判断で再構築した版:
+    Python 3.12.15（uv）。venv-torch = torch 2.14.0・scipy 1.18.1・numpy 2.5.4、
+    venv-tf = tensorflow 2.16.2・tensorflow-metal 1.2.0・numpy 1.26.4・keras 3.15.1（0.11.0 README の記録と同じ。pip freeze は env/ に収録）
 
 判定（0.11.0 から不変）: 比 = 同一 run 内の「有効な相手のうち最速 / fandhe-ai reuse」の 5 run 中央値。
   比 > 1 で 1 位、>= 0.90 で僅差。parity_fail_count > 0 の行は判定不能。tolerance・baseline は変えない。
@@ -16,7 +18,13 @@
 実機ロック: ~/work/.fandhe-hw-lock（owner "#3273 <UTC>"）。ロックなしの値は採らない。計測中のビルド・並走負荷は禁止。
 旧腕の位置: Rust 段の直後・Python 段の前。fresh/reuse の先後は run 番号の奇偶で入れ替え。
 期待行数: Rust 48 / Python 32 / 旧腕 26。skipped は bench-burn gemm metal 512/1024/2048/4096 fresh の 4 件のみ許容。
-  （行数スモークを RULE 固定前に 1 回実施し、結果をここへ記入する: 未実施）
+  行数スモーク（RULE 固定前・2026-10-27T07:08:21Z〜07:14:16Z・ビルド込み 1 round・値は判定に使わない）:
+    rows=48 pyrows=32 oldrows=26 skipped=4（burn Metal GEMM 512/1024/2048/4096 fresh の MEASURE_ERROR のみ）。tree・tree-old とも fandhe-ai v0.12.0。
 系列: A=ゲートなし（対照）、B=各 run 前に load1 < 3.0 を最大 30 分待つ。B が 5/5 完走なら B 正式、それ以外は A 正式・B 参考。
   A/B で区分が反転した行はノイズ帯として明示する。
 失敗時: 打ち切られた run はそのまま記録。取り直しは RULE.v2.txt。
+実機テスト（時間系列の後に同じロック内で実行。測定中はビルドを並走させない）:
+  #3256 の M1〜M6: 新腕の全体ツリーで resident-chain-parity-3256/run_rows.sh <out> metal（各行 5 run・判定は同 RULE.txt）。
+  #3272 の X1 = bench-fandhe tests::resident_paths_match_tape_paths_metal（新腕 framework-compare ツリー・--ignored --exact
+    --test-threads=1・5 run・独立プロセス）。各 run のログに running 1 test・1 passed・rc=0 が無ければ fail（0 件実行は pass にしない）。
+  ビルドは各ターゲットとも cargo test --no-run で測定前に 1 回だけ。fail が出ても tolerance・assert・baseline は変えない。

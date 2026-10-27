@@ -43,3 +43,5 @@ tbody th{font-weight:500}
 table.pos td.pc{white-space:normal;vertical-align:top;min-width:180px;max-width:280px;font-size:12.5px;line-height:1.45}
 table.pos td.pc.me{background:var(--me2)}table.pos .pt{display:block;margin-top:5px;color:var(--mu)}table.pos td.pc.me .pt{color:var(--tx)}
 pre{background:var(--sf);border:1px solid var(--ln);border-radius:6px;padding:12px 14px;font:12.5px/1.5 "IBM Plex Mono",monospace;overflow-x:auto;margin:10px 0 0}
+table.ur td.why{white-space:normal;min-width:260px;max-width:560px;font-size:12.5px;line-height:1.45}
+table.ct{max-width:820px}
