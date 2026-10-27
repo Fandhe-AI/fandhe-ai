@@ -28,9 +28,10 @@ export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 # run_all_cuda.sh 内の cargo build は最新成果物なら即終了する。patch 変数は registry 計測のため明示的に外す。
 [ -z "${GEMM_GATE_PATCH_FACADE_PATH:-}" ] || { echo "GEMM_GATE_PATCH_FACADE_PATH が非空（registry 計測では拒否）"; exit 2; }
 NFC="${ROOT}/scripts/bench/framework-compare"
-(cd "${NFC}" && cargo build --release -p bench-fandhe > "${B}/build-new.log" 2>&1 \
-  && cargo build --release -p bench-candle --no-default-features --features cuda >> "${B}/build-new.log" 2>&1 \
-  && cargo build --release -p bench-burn --no-default-features --features cuda >> "${B}/build-new.log" 2>&1) || { echo "BUILD FAILED (new)"; exit 1; }
+# --locked なので Cargo.lock は書き換わらず（lock 復元 trap は不要）、新腕ツリーは dirty にならない。lock と Cargo.toml が不整合なら build が失敗する（fail-closed）。
+(cd "${NFC}" && cargo build --release --locked -p bench-fandhe > "${B}/build-new.log" 2>&1 \
+  && cargo build --release --locked -p bench-candle --no-default-features --features cuda >> "${B}/build-new.log" 2>&1 \
+  && cargo build --release --locked -p bench-burn --no-default-features --features cuda >> "${B}/build-new.log" 2>&1) || { echo "BUILD FAILED (new)"; exit 1; }
 for bin in bench-fandhe bench-candle bench-burn; do [ -x "${NFC}/target/release/${bin}" ] || { echo "BUILD FAILED (new: ${bin} missing)"; exit 1; }; done
 done_n=0
 for i in 1 2 3 4 5; do
