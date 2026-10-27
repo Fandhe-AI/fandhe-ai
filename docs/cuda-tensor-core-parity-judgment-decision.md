@@ -244,7 +244,7 @@ fail-closed に検査する点で回帰検出契約としては維持される�
   クレートである（publish の verify はテストをビルドしないため止まらない）。代案の backend-cuda
   側配置は dev 依存の追加と入口の相違で provenance が崩れるため推奨しない
 - 値の出典（所有者が選ぶ）: (a) README の値 (b) HEAD での GB10 再計測値（推奨。事前登録規則つきで
-  2 回実行し一致を確認）。ceiling は §4 の表記丸め規約で算出する
+  2 回実行し一致を確認）。ceiling は `docs/perf/cuda-parity-baseline.md` §6「ベースライン更新規約」の表記丸め規約で算出する
 - 承認後の実装（段 B）: バリアントと 3 行の追加、`parity_nonregression.rs` の列挙・除外の更新、
   facade への `#[ignore]` ゲートテスト追加、GB10 での pass 記録
 
