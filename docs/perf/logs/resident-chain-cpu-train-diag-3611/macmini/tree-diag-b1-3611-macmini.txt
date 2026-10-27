@@ -1,0 +1,3 @@
+bench-fandhe v0.1.0 (<home>/work/diag-3611/b1/scripts/bench/framework-compare/bench-fandhe)
+├── bench-common v0.1.0 (<home>/work/diag-3611/b1/scripts/bench/framework-compare/bench-common)
+└── fandhe-ai v0.11.0 (<home>/work/diag-3611/b1/crates/facade)

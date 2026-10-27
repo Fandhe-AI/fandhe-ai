@@ -2,9 +2,17 @@
 
 ## 状態
 
-- **手順の登録のみ。実機計測（Mac mini・GB10）は未実測**。結果は決定記録 `docs/compat-resident-train-step-decision.md` §17.5 へ追記する。
-- 背景: #3257 の参考系列で CPU の train セルが両機体とも REGRESS（Mac mini ratio_ab 1.004・GB10 1.059。`../resident-chain-ab-3257/judge-3257.md`）。原因は未調査。
+- **2026-10-27 に Mac mini・GB10 で実行したが、両機体とも計測前の precheck で停止し、計測は 1 本も走っていない（未実測。分類なし）**。停止理由は `layout_symbol_diff=0`（B1／B2 のシンボルのアドレス差を確認できない。v0 mangling のクレート識別子がビルドパス依存で B1／B2 の名前が一致しないため）。詳細と所有者判断事項は決定記録 `docs/compat-resident-train-step-decision.md` §17.5。
+- 背景: #3257 の参考系列で CPU の train セルが両機体とも REGRESS（Mac mini ratio_ab 1.004・GB10 1.059。`../resident-chain-ab-3257/judge-3257.md`）。
 - 本診断は分類（ノイズ幅内／配置の影響／チェーン化の後退／chain が速い／判定不能）であり、#3257 の RULE・判定は変えない。是正の要否は所有者が判断する。
+
+## 実施メモ（2026-10-27）
+
+- runner: `08902dbf3`（main の HEAD。DIAG・パッチ・ランナーは #3626 から変更なし。DIAG の sha256 は `b233e73b…` で両ノードのクローンと一致）。B0＝`786d18b50`・B1＝`a8e91f0c9`。bundle を各ノードの専用ディレクトリへ転送して clone し、`.rev-stamp`（`dirty=0`）を作ってパッチを適用した（GitHub 認証はノードに置いていない）。
+- 機体ロック: 両ノードで `#3611 2026-10-27T05:46:48Z` を取得し、収録後の 2026-10-27T05:52:26Z に解放した（他のロックは無かった）。起動前の環境変数 `BENCH_LAYOUT_PAD_3611`・`RAYON_NUM_THREADS` は未設定。機体の同定（Mac mini＝`Apple M4`、GB10＝aarch64・GPU 名 `NVIDIA GB10`）は通過した。
+- 結果: 両機体とも B0・B1・B2 のビルドと tree／sha の確認は通り、`precheck FAILED: ... layout_symbol_diff=0` で停止した。`env_info`・`results-*.jsonl`・`digest-*`・`load_gate-*` は出力されていない。集計（`summarize_...py`）は入力が無いため実行していない。
+- マスク: ホームの絶対パスを `<home>` に置換した。sha・nm のシンボル名とアドレスは置換していない。
+- 収録しないもの: bench バイナリ（`bench-fandhe-diag-*`）、`target-diag-*`、B2 の worktree、`.local.md`・`.env*`。ノード上の作業ディレクトリ（target を含む）は削除済み。
 
 ## 収録物
 
