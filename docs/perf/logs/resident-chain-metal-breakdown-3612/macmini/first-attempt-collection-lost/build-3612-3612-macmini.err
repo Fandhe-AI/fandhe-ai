@@ -1,0 +1,7 @@
+   Compiling fandhe-ai-backend-cpu v0.12.0 (<home>/work/bd-3612/runner/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.12.0 (<home>/work/bd-3612/runner/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.12.0 (<home>/work/bd-3612/runner/crates/backend-cuda)
+   Compiling fandhe-ai-backend-metal v0.12.0 (<home>/work/bd-3612/runner/crates/backend-metal)
+   Compiling fandhe-ai-autodiff v0.12.0 (<home>/work/bd-3612/runner/crates/autodiff)
+   Compiling bench-harness v0.12.0 (<home>/work/bd-3612/runner/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 18.93s

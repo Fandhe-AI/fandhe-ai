@@ -2,13 +2,15 @@
 
 ## 状態
 
-- **計測部品と事前登録規則の登録のみ。Mac mini 実機の計測は未実測**。結果は `docs/compat-resident-train-step-decision.md` §17.6 へ追記する。
+- **Mac mini 実機で 2026-10-27 に実測済み**（B0／B1 は 5 round、A0 は 5 値。hard 条件はすべて通過、集計の終了コード 0）。結果は `docs/compat-resident-train-step-decision.md` §17.6、振り分けは `docs/perf/loss-attribution-matrix.md` §10.11、集計は `summary-3612-3612-macmini2.md`・`.exit`、生ログは `macmini/`。
+- 実施メモ: 機体ロック `#3612`（`macmini/hwlock-*.log`）。bundle → clone で転送し、`.rev-stamp` を作った（B0／B1 は `3e5d41016`、A0 は `a8e91f0c9`）。B0／B1 の最初のランは回収時のファイル名パターンの誤りで JSONL を回収できないままノードの作業ディレクトリを削除したため、ラベル `3612-macmini2` でやり直した（最初のランの付随ログは `macmini/first-attempt-collection-lost/`。集計に使わない）。`build-*.err`・`a0-tree-*.txt` のホームの絶対パスを `<home>` に置換した（JSONL・sha256・digest は置換していない）。収録しないもの: バイナリ・target・bundle・`.local.md`・`.env*`。回収後にノード上の作業ディレクトリを削除しロックを解放した。
 - 背景: #3257 の参考系列で Mac mini の Metal 常駐チェーンが torch に届かなかった（train +14.3 us・infer +6.9 us）。§17.3 の 2 行は「Mac mini の内訳は未実測」のまま。
 
 ## 収録物
 
 | ファイル | 内容 |
 |---|---|
+| `macmini/`・`summary-3612-3612-macmini2.md`・`.exit` | 実測の生ログ（マスク済み）と集計の出力・終了コード |
 | `RULE.txt` | 事前登録規則（区間定義・5 round・負荷ゲート・hard 条件・突き合わせ・振り分け・仮説・限界） |
 | `crates/backend-metal/src/resident_chain_breakdown_diag_tests_3612.rs` | B0／B1 の `#[ignore]` 診断テスト（`cfg(test)`。lib には入らない） |
 | `scripts/bench/framework-compare/run_breakdown_resident_chain_metal.sh` | Mac mini 用ランナー（5 round。テストバイナリを計測前にビルド） |
