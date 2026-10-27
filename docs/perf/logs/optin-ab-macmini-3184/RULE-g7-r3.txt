@@ -1,0 +1,49 @@
+イシュー #3618 事前登録規則 補遺 3 (G7 の再測定: 計時の分解能を上げて H1〜H3 を測り直す)
+fixed-at: 2026-10-27 (この補遺は実機計測より前に、テスト変更・セッションスクリプトと同じコミットで固定する。
+  以後、緩和・事後調整はしない。コミットの作者日時が最初の実機ログ (steps.log の先頭・env_info.txt の date_utc) より
+  前であることを結論 doc に記録する)
+
+0. 位置づけ
+  - 継承 RULE (2114 の RULE.txt、#3184 の RULE.txt・RULE-reopen.txt) は 1 字も変えない。判定語彙・判定式・閾値
+    (H1 50%・H2 1 us・H3 の回数)・集計器 aggregate.py の正値検査 (median_s > 0) は 2114 RULE のまま。
+    変えるのは計測方法 (4 セルのまとめ計時) だけ。H4 は再開分で支持済みのため再実行しない。
+  - 背景: 再開分 (verify-cache-r2) では tape_new などの median_s が 0.0 で集計器が fail-closed 停止し H1〜H3 が未確定。
+  - 固定時点の sha256 (origin/main の内容と一致すること):
+      1b9819079a9025a0fd75ae2d766dffa1b6cba6b64581ea5e146a0256ecfc2d7b  docs/perf/logs/metal-tape-build-infer-phase-2114/RULE.txt
+      003d59f36dd76a3a612ebe97433a82cd03a2a4aac0e5ede0f5975da34583daa4  docs/perf/logs/metal-tape-build-infer-phase-2114/aggregate.py
+      b034a27444203ce1b44b8cbe78de0c0e3c92e7f47c90f29e060981d648533bfb  docs/perf/logs/metal-tape-build-infer-phase-2114/orchestrate.sh
+      858101ed281b6bad1e94ea88d570a4a283341bb49d5c35740318b242a7ea0559  docs/perf/logs/optin-ab-macmini-3184/RULE.txt
+      b593d375b910589020e7d54a3e3ab6c0bfb02ac926587730e2f884eb2a6a1101  docs/perf/logs/optin-ab-macmini-3184/RULE-reopen.txt
+    変更前のテストファイル (変更後は固定コミットのツリーで確かめる):
+      a525b2d80f09a9ae75ec72718ff00e8723e8f71ed00082d08bbd9b8f3cd6c2a2  crates/facade/tests/metal_infer_tape_build_fixedcost_diag.rs
+
+1. 分解能
+  - Rust std の Instant は macOS で clock_gettime(CLOCK_UPTIME_RAW) (使用 toolchain の rust-src
+    library/std/src/sys/time/unix.rs の 55〜67 行目)。実機の 1 tick は mach_timebase に由来する約 41.7 ns (推定)。
+  - 実測は #[ignore] テスト timer_resolution_probe (TIMER_RES 1 行) を timer-res.log に記録する。数値は実測後に
+    結論 doc へ記入し、RULE には推定値を判定材料として書かない。FFI (mach_timebase_info) は呼ばない。
+
+2. 計測方法
+  - TIMING_BATCH_K = 1000。次の 4 セルに限り 1 サンプル = 「K 回を 1 つの Instant 窓でまとめて計り K で割った値」
+    とする: tape_build_micro.tape_new / reuse_decomposed_off.tape_new / reuse_decomposed_on.tape_new /
+    reuse_decomposed_on.provider_select (キャッシュ ON のヒット経路)。他のセルは従来どおり 1 回ずつ計る
+    (H1 の両辺を比較可能に保つため)。
+  - まとめ計時のバッチは add_counters の後 (カウンタ窓・iter_total 窓・tape_build 窓の外) で実行する。
+    run_micro は従来の 1 回計時の後に実行する。warmup でも同じバッチを実行する。n = 80 (EXPECTED_N 不変)。
+  - JSON 拡張フィールド: timing_method (batched_mean|single_shot)・batch_k・single_shot_median_s・single_shot_q1_s。
+    median_s・q1_s・q3_s・min_s・max_s は対象 4 セルではまとめ計時の 80 サンプルの統計。単発値は参考。
+  - 既定でこの方式 (env による opt-in にしない)。
+
+3. 0 が残った場合
+  - まとめ計時でも median_s が 0.0 のセルが残る、または集計器が別理由 (checksum 不一致・欠落・n != 80 等) で止まった
+    場合: 集計器は変えず、H1〜H3 は「未確定 (集計器停止・原因: aggregate.err の要旨)」と書き推定で埋めない。
+    生ログを残し所有者に報告する。同じ RULE のまま K を上げて取り直さない (再計測は新しい補遺と新しい label が必要)。
+
+4. 系列・運用
+  - label 3184-macmini-r3-g7、出力 verify-cache-r3/。1 回だけ実行し差し替えない。失敗時は別 label で取り直し旧系列も残す。
+    r2 系列は record_only のまま残す。G7 のゲートは record_only (2114 のまま)。
+  - RULE-reopen.txt の 2・8 に従う: 外側ゲート (load1 < 3.0 かつ並走プロセス 0 件・30 秒間隔・最大 30 分)、
+    nohup で切り離し、RAYON_NUM_THREADS は unset、ビルドと計測を並走させない (先に --no-run でビルド)、
+    rev-stamp (HEAD に固定コミットを含み status --porcelain が空)。
+  - マスク: ホスト名は masked、$HOME は <home>。
+  - 実機は Mac mini に限る。M4 Max 開発機・Linux の値は結果に使わない。

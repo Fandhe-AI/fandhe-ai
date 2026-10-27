@@ -29,4 +29,5 @@ cargo test --release -p fandhe-ai-backend-metal infer_fixed_cost_diag \
 
 - 既存の `run{N}.jsonl` があると `orchestrate.sh` は中止する（差し替え禁止）
 - 収録前にホスト名は `masked`、`$HOME` は `<home>` へ置換される（`env_info.txt`・`run*.err`）。手順 3 の転記時も同じ置換を行う
+- #3618: 計時の分解能（約 41.7 ns）未満の 4 セル（`tape_build_micro.tape_new`・`reuse_decomposed_{off,on}.tape_new`・`reuse_decomposed_on.provider_select`）は、テスト側で 1000 回まとめ計時した平均を `median_s` 等にし、従来の 1 回計時は `single_shot_*` へ残す（`timing_method`・`batch_k` を追加）。`RULE.txt`・`aggregate.py`・`orchestrate.sh` は不変。分解能の実測用に `timer_resolution_probe` を追加。規則は `docs/perf/logs/optin-ab-macmini-3184/RULE-g7-r3.txt`
 - 結果は `docs/perf/metal-tape-build-infer-fixedcost.md` §6 に RULE.txt の規則で記入する

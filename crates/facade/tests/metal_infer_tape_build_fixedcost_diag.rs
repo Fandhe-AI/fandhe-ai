@@ -24,6 +24,14 @@
 //! - `MetalContext` singleton のカウンタを共有するため、`METAL_SINGLETON_LOCK` でファイル内の
 //!   テストを直列化する（`infer_device_chain_metal.rs` と同型）
 //!
+//! イシュー #3618（G7 再測定）: Apple Silicon の `Instant` は 1 tick が約 41.7 ns（24 MHz）で、
+//! 1 µs 未満の 4 セル（[`BATCHED_CELLS`]）は中央値が 0 になり `aggregate.py` の正値検査が
+//! 全体を止めた。この 4 セルに限り、1 サンプルを「[`TIMING_BATCH_K`] 回を 1 つの `Instant`
+//! 窓でまとめて計り K で割った値」にする（量子化 41.7/K ns）。従来の 1 回計時の値は
+//! `single_shot_*` として同じ JSON 行に残す。まとめ計時は `add_counters` の**後**（カウンタ窓・
+//! `iter_total`・`tape_build` 窓の外）で実行し、カウンタを K 倍にしない。`EXPECTED_N = 80`・
+//! 集計器・判定閾値は不変。`timer_resolution_probe` は `Instant` の分解能の実測用（record-only）。
+//!
 //! 本番コード・tolerance・baseline は変更しない。
 #![cfg(target_os = "macos")]
 
@@ -56,6 +64,19 @@ const ROUNDS: usize = 4;
 const ITERS_PER_ROUND: usize = 20;
 /// 標準出力の 1 行 1 フェーズ JSON の接頭辞（`orchestrate.sh` が抽出）。
 const PREFIX: &str = "DIAG_JSON ";
+/// #3618: まとめ計時の 1 バッチあたりの呼び出し回数（事前登録。`RULE-g7-r3.txt`）。
+const TIMING_BATCH_K: usize = 1000;
+/// #3618: `Instant` の分解能（約 41.7 ns）未満でまとめ計時する 4 セル `(arm, phase)`。
+const BATCHED_CELLS: [(&str, &str); 4] = [
+    ("tape_build_micro", "tape_new"),
+    ("reuse_decomposed_off", "tape_new"),
+    ("reuse_decomposed_on", "tape_new"),
+    ("reuse_decomposed_on", "provider_select"),
+];
+
+fn is_batched(arm: &str, phase: &str) -> bool {
+    BATCHED_CELLS.contains(&(arm, phase))
+}
 
 fn make_input() -> Tensor<f32> {
     let data = Xorshift64Star::new(0x9000).fill_vec(BATCH * IN_FEATURES);
@@ -184,7 +205,10 @@ fn metal_infer_decomposition_matches_public_api_bit_exact() {
 
 #[derive(Default)]
 struct Cell {
+    /// 統計の元サンプル。まとめ計時セルでは K 回平均（80 件）。
     secs: Vec<f64>,
+    /// まとめ計時セルのみ: 従来の 1 回計時のサンプル（参考値）。
+    single: Vec<f64>,
     checksum: Option<u64>,
 }
 
@@ -219,7 +243,29 @@ impl Rec {
 
     fn push(&mut self, arm: &'static str, phase: &'static str, dt: f64) {
         if self.on {
-            self.cell(arm, phase).secs.push(dt);
+            let c = self.cell(arm, phase);
+            if is_batched(arm, phase) {
+                c.single.push(dt);
+            } else {
+                c.secs.push(dt);
+            }
+        }
+    }
+
+    /// #3618: `f` を [`TIMING_BATCH_K`] 回、1 つの `Instant` 窓でまとめて計り 1 呼び出し平均を
+    /// `secs` へ積む。戻り値は窓の外で drop し（従来も drop は計測窓の外）、`black_box` で除去を防ぐ。
+    /// ウォームアップ（`on == false`）でも同じ負荷を掛けるため実行だけは行う。
+    fn batched<T>(&mut self, arm: &'static str, phase: &'static str, mut f: impl FnMut() -> T) {
+        debug_assert!(is_batched(arm, phase));
+        let mut keep: Vec<T> = Vec::with_capacity(TIMING_BATCH_K);
+        let t = Instant::now();
+        for _ in 0..TIMING_BATCH_K {
+            keep.push(std::hint::black_box(f()));
+        }
+        let mean = t.elapsed().as_secs_f64() / TIMING_BATCH_K as f64;
+        drop(keep);
+        if self.on {
+            self.cell(arm, phase).secs.push(mean);
         }
     }
 
@@ -386,6 +432,14 @@ fn run_reuse_decomposed(c: &Ctx, rec: &mut Rec, arm: &'static str) {
         &f0,
         &__diagnostic_fixed_cost_counters_snapshot(),
     );
+    // #3618: カウンタ窓・iter_total・tape_build 窓の外でまとめ計時する（キャッシュ状態は run_arm の
+    // スコープ内。ON ならヒット経路）。
+    if is_batched(arm, "provider_select") {
+        rec.batched(arm, "provider_select", provider_select_cached);
+    }
+    rec.batched(arm, "tape_new", || {
+        Tape::new_with_ops(Box::new(MetalBackendOps::new()))
+    });
 }
 
 /// `tape_build` の内訳を個別に計測する（常にキャッシュ OFF。IOKit 単独・存在確認全体・
@@ -405,6 +459,10 @@ fn run_micro(rec: &mut Rec, arm: &'static str) {
     });
     rec.timed(arm, "tape_for", || {
         std::hint::black_box(fandhe_ai::tape_for(Device::Metal).expect("tape_for"))
+    });
+    // #3618: tape_new は 1 µs 未満で分解能を下回るためまとめ計時（従来の 1 回計時は single_shot）。
+    rec.batched(arm, "tape_new", || {
+        Tape::new_with_ops(Box::new(MetalBackendOps::new()))
     });
 }
 
@@ -458,10 +516,20 @@ fn metal_infer_tape_build_fixedcost_phases() {
         let q = median_q1_q3(&cell.secs).expect("サンプルは非空・非 NaN");
         let mut sorted = cell.secs.clone();
         sorted.sort_by(f64::total_cmp);
+        let batched = is_batched(arm, phase);
+        let single = if batched {
+            Some(median_q1_q3(&cell.single).expect("1 回計時サンプルは非空・非 NaN"))
+        } else {
+            None
+        };
         let line = serde_json::json!({
             "issue": 2114,
             "arm": arm,
             "phase": phase,
+            "timing_method": if batched { "batched_mean" } else { "single_shot" },
+            "batch_k": if batched { TIMING_BATCH_K } else { 1 },
+            "single_shot_median_s": single.as_ref().map(|x| x.median),
+            "single_shot_q1_s": single.as_ref().map(|x| x.q1),
             "median_s": q.median,
             "q1_s": q.q1,
             "q3_s": q.q3,
@@ -494,4 +562,30 @@ fn metal_infer_tape_build_fixedcost_phases() {
         });
         println!("{PREFIX}{line}");
     }
+}
+
+/// #3618: `Instant` の分解能の実測（record-only）。連続取得の差分の種類と 0 の割合を 1 行で出す。
+/// 本番コード・計測方法は変えず、RULE 外の補助記録として `timer-res.log` に残す。
+#[test]
+#[ignore = "Instant 分解能の実測用 record-only 診断（#3618）"]
+fn timer_resolution_probe() {
+    const N: usize = 1_000_000;
+    let mut deltas: Vec<u128> = Vec::with_capacity(N);
+    let mut prev = Instant::now();
+    for _ in 0..N {
+        let now = Instant::now();
+        deltas.push(now.duration_since(prev).as_nanos());
+        prev = now;
+    }
+    let zero = deltas.iter().filter(|d| **d == 0).count();
+    let mut nz: Vec<u128> = deltas.into_iter().filter(|d| *d != 0).collect();
+    nz.sort_unstable();
+    nz.dedup();
+    nz.truncate(8);
+    println!(
+        "TIMER_RES min_nonzero_ns={:?} distinct_deltas_ns={:?} zero_fraction={}",
+        nz.first(),
+        nz,
+        zero as f64 / N as f64
+    );
 }
