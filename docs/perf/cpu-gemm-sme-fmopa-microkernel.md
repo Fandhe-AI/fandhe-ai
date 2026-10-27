@@ -937,7 +937,7 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
 - 分類（RULE §4）: 非再現（ノイズ帯・判定不能）／方法感度（判定不能）／SME 経路の選択ロジックに帰属／再現したが未分離（ノイズ帯）／FAIL／undetermined（前提不成立）。**非再現・判定不能も正式な結果**として記録する（§5.7 は未分離だった）。
 - **計測ツリー**: 規則冒頭の「3e5d41016 直系」のツリーでは bench-fandhe の固定版 `=0.11.0` と workspace `0.12.0` が食い違い、A/B 本体の path patch が使われず `cargo tree` 検査で必ず失敗する（推論。`1276ff3863` での実ビルド確認は省略）。
   PR #3634 の squash 後 `e2660eba0` では固定版が `=0.12.0` で解決する。`crates/` の backend-cpu・facade・tensor-core・autodiff は `3e5d41016` との差分なしを確認した。計測前に `RULE.txt` §8 へ追記し、閾値・分類表は変えていない（所有者の事後確認対象）。
-  固定の証跡: 追記コミット `02baacf0d`（未 push）。`gb10/prereg_append.txt`（追記後 RULE.txt の sha256 と準備時刻 2026-10-27T07:12:30Z）が `gb10/hwlock.log` の acquired（07:13:03Z）より前。
+  固定の証跡: 本 PR 内の §8 追記コミット（squash merge で SHA は消えるため、正は `gb10/prereg_append.txt` の sha256 と時刻）。`gb10/prereg_append.txt`（追記後 RULE.txt の sha256 と準備時刻 2026-10-27T07:12:30Z）が `gb10/hwlock.log` の acquired（07:13:03Z）より前。
 - **結果（機械出力。`docs/perf/logs/sme-gb10-attribution-3613/aggregate-gb10.md` を正とする。ログ: `.../gb10/`）**:
   - 前提ゲート: P-TREE・P-R0・P-BIT・P-RT・P-LOCK・P-GATE・P-RUNAB・P-COLLECT すべて成立。腕: before=`e2660eba0`／prime・after=それぞれ `+on-arm-prime.patch`／`+on-arm.patch`（`gb10/rev-stamp.txt`）。
   - 判定 2 セルの分類: **gemm 256 fresh = 非再現（ノイズ帯・判定不能）／gemm 2048 reuse = 非再現（ノイズ帯・判定不能）**。
