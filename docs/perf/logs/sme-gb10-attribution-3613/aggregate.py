@@ -131,7 +131,11 @@ def cell_analysis(per_arm):
         for r in per_arm[arm]:
             c = r.get("checksum")
             if isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c):
+                # 配列・オブジェクト・欠損・非有限・bool は構造不正。集合へ入れず（unhashable で
+                # TypeError になるため）、不一致の FAIL とも区別して判定不能（前提不成立）へ倒す。
+                res["ok"], res["reason"] = False, "checksum が有限の数値ではない (%s)" % arm
                 res["checksum_ok"] = False
+                return res
             cks.append(c)
     if len(set(cks)) != 1:
         res["checksum_ok"] = False
@@ -163,9 +167,16 @@ def gate_checks(root):
         shas = re.findall(r"_sha256=([0-9a-f]{64})", bs)
         nl = re.findall(r"_lines=(\d+)", bs)
         ok = len(set(shas)) == 1 and len(shas) == 3 and all(x == "6726847" for x in nl) and cmp_.strip() == ""
-    g["P-BIT"] = (ok, "3 腕の bitdump が 6,726,847 行で sha 一致・cmp 差分 0 となる記録が無い")
+    lo = read("load_gate.log")
+    # 実行の終了コード。欠損・複数行・非ゼロはいずれも不成立（fail-closed）。
+    # 出力行が揃っていても、その後の実行失敗（コンパイルエラー・非ゼロ終了）を成立と見なさない。
+    bd = re.findall(r"^bitdump exit=(\d+) cmp_exit=(\d+)\s*$", lo or "", re.M)
+    bit_rc_ok = len(bd) == 1 and bd[0] == ("0", "0")
+    g["P-BIT"] = (ok and bit_rc_ok, "3 腕の bitdump が 6,726,847 行で sha 一致・cmp 差分 0 かつ load_gate.log の bitdump exit=0 cmp_exit=0 となる記録が無い")
     rt = read("rt_before.log")
-    g["P-RT"] = (bool(rt) and "FAILED" not in rt and "test result: ok" in rt, "before の cargo test が全件 pass の記録が無い")
+    rt_rc = re.findall(r"^rt_before exit=(\d+)\s*$", lo or "", re.M)
+    g["P-RT"] = (bool(rt) and "FAILED" not in rt and "test result: ok" in rt and rt_rc == ["0"],
+                 "before の cargo test が全件 pass かつ load_gate.log の rt_before exit=0 となる記録が無い")
     lk = read("hwlock.log")
     g["P-LOCK"] = (bool(lk) and "acquired" in lk and "released" in lk, "hwlock.log に取得・解放の記録が無い")
     lg = None
@@ -175,7 +186,6 @@ def gate_checks(root):
     n_ok = len(re.findall(r"gate_ok=1\b", lg or ""))
     outer = read("load_gate_outer.log")
     g["P-GATE"] = (n_ok == ROUNDS and bool(outer) and " pass" in outer, "内側 8.0 の 5/5 round 通過と外側ゲート pass の記録が無い（gate_ok=1 は %d 件）" % n_ok)
-    lo = read("load_gate.log")
     g["P-RUNAB"] = (bool(lo) and "run_ab exit=0" in lo, "run_ab exit=0 の記録が無い")
     g["P-COLLECT"] = (bool(lo) and "collect exit=0" in lo, "collect exit=0 の記録が無い")
     return g
@@ -254,6 +264,44 @@ def self_test():
     assert ga["ok"] and ga["checksum_ok"] and ga["ratios"]["pair0"] == R(1.0)
     diff = {a: [{"median_s": 1.0, "checksum": 1.0 if a != "prime" else 2.0}] * ROUNDS for a in ARMS}
     assert cell_analysis(diff)["checksum_ok"] is False
+    # 構造不正な checksum（配列・オブジェクト・欠損・文字列）は TypeError にせず ok=False（判定不能）へ倒す
+    for badck in ([1.0, 2.0], {"a": 1}, None, "1.0", True, float("nan")):
+        inv = {a: [{"median_s": 1.0, "checksum": badck}] * ROUNDS for a in ARMS}
+        ia = cell_analysis(inv)
+        assert ia["ok"] is False and ia["checksum_ok"] is False, badck
+        assert classify(ia["ratios"], ia["checksum_ok"], True and ia["ok"]) == C_PRECOND, badck
+    nock = {a: [{"median_s": 1.0}] * ROUNDS for a in ARMS}
+    assert cell_analysis(nock)["ok"] is False
+    # 前提ゲートの終了コード検証（P-RT・P-BIT）。出力が揃っていても exit 欠損・非ゼロは不成立
+    import tempfile
+
+    def gate_fixture(load_gate):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "bitdump"))
+        files = {
+            "rt_before.log": "test result: ok. 10 passed\n",
+            "bitdump/summary.txt": "expected=6726847\n" + "".join(
+                "%s_lines=6726847\n%s_sha256=%s\n" % (t, t, "a" * 64) for t in ("before", "prime", "after")),
+            "bitdump/cmp.txt": "",
+        }
+        if load_gate is not None:
+            files["load_gate.log"] = load_gate
+        for rel, body in files.items():
+            with open(os.path.join(d, rel), "w", encoding="utf-8") as f:
+                f.write(body)
+        return d
+
+    good_lg = "rt_before exit=0\nrun_ab exit=0\nbitdump exit=0 cmp_exit=0\ncollect exit=0\n"
+    g = gate_checks(gate_fixture(good_lg))
+    assert g["P-RT"][0] and g["P-BIT"][0], g
+    for lg in (None, "", "rt_before exit=101\nbitdump exit=0 cmp_exit=0\n", "bitdump exit=1 cmp_exit=0\nrt_before exit=0\n",
+               "bitdump exit=0 cmp_exit=1\nrt_before exit=0\n", "rt_before exit=0\n", "bitdump exit=0 cmp_exit=0\n",
+               "rt_before exit=0\nrt_before exit=1\nbitdump exit=0 cmp_exit=0\n"):
+        g = gate_checks(gate_fixture(lg))
+        want_rt = lg is not None and re.findall(r"^rt_before exit=(\d+)$", lg, re.M) == ["0"]
+        want_bit = lg is not None and re.findall(r"^bitdump exit=(\d+) cmp_exit=(\d+)$", lg, re.M) == [("0", "0")]
+        assert g["P-RT"][0] == want_rt and g["P-BIT"][0] == want_bit, (lg, g)
+        assert not (g["P-RT"][0] and g["P-BIT"][0]), lg
     print("self-test ok")
 
 
