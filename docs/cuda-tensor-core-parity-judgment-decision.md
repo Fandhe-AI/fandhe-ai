@@ -207,6 +207,7 @@ fail-closed に検査する点で回帰検出契約としては維持される�
 ## 6. 関連
 
 - イシュー #1106（本決定の起点）・#1102（親トラッキング）
+- イシュー #3617（§7 facade f16 fail≠0 3 形状の baseline 化提案）
 - Fandhe-AI/fandhe-ai-spec PR #63（REQ-2 2026-09-02 追記。受け入れ判定
   方式の正本）・実装リポ PR #1128（`docs/spec` submodule 前進）
 - `docs/perf/cuda-parity-baseline.md`（§3 ベースライン表・§6 ベースライン
@@ -219,3 +220,32 @@ fail-closed に検査する点で回帰検出契約としては維持される�
   fixture・`assert_no_parity_regression` 検査ユーティリティ本体）
 - `docs/cuda-tf32-optin-api-decision.md`（同型の決定記録ドキュメントの
   先例。承認ステータス節の書式を踏襲）
+
+## 7. facade `matmul_low_precision`（f16 Mma）の fail≠0 3 形状の扱い（イシュー #3617・提案・所有者承認待ち）
+
+状態: **提案のみ。所有者の承認は未取得**（#3617 に形と値を承認したコメントはない）。
+承認前は `BASELINES`・テストコードを変更しない。
+
+- 対象: `F16@512x512x512`（seed 14・fail 5）・`F16@1024x1024x1024`（seed 15・fail 192）・
+  `F16@256x256x1024`（seed 16・fail 16）。出典は `docs/perf/logs/low-precision-ops-2628/README.md`
+  （#3170・`b640875f`・GB10）。診断 `cuda_low_precision_matmul_large_shape_report` は記録専用で
+  fail 数を assert しないため、後退を機械検出するゲートがない
+- 形状二分方式（§2 項目 2）に従い、この 3 形状を非後退方式（`ParityBaseline`／
+  `assert_no_parity_regression`）の対象にする。厳密ゼロ fail 成立の 5 形状・tolerance 定数・
+  既存 baseline 行は変えない
+- **既存 `ParityPath::MmaF16` には足せない**: `parity_nonregression.rs::check_mma_f16_baseline` は
+  `fill_vec_f16` 由来の入力と `matmul_reference_fma` 参照で `CudaMmaGemm::run_f16` を直接呼ぶ。
+  facade 診断は lhs=seed／rhs=seed+1 の f32 `fill_vec` と CPU tape 参照で入口も違うため、足すと
+  GB10 で誤入力により誤 fail する。新バリアント（案: `FacadeLowPrecisionMatmulF16`、Display は
+  `facade_low_precision_matmul_f16`）とする
+- 実行側の案: facade テストから `#[path = "../../backend-cuda/tests/common/parity_baseline.rs"]`
+  で共有 module を取り込み、`assert_no_parity_regression` をそのまま使う（判定の複製をしない。
+  security.md A08）。注意: クレート外を指す `#[path]` は前例がなく、facade は crates.io 公開
+  クレートである（publish の verify はテストをビルドしないため止まらない）。代案の backend-cuda
+  側配置は dev 依存の追加と入口の相違で provenance が崩れるため推奨しない
+- 値の出典（所有者が選ぶ）: (a) README の値 (b) HEAD での GB10 再計測値（推奨。事前登録規則つきで
+  2 回実行し一致を確認）。ceiling は §4 の表記丸め規約で算出する
+- 承認後の実装（段 B）: バリアントと 3 行の追加、`parity_nonregression.rs` の列挙・除外の更新、
+  facade への `#[ignore]` ゲートテスト追加、GB10 での pass 記録
+
+実機計測（HEAD 再計測）は本提案の時点で未実測。
