@@ -1,0 +1,10 @@
+# 0.12.0 スコアボード生成の引数（実測後に記入する欄）。状態: 未実測（#3273 の計測成果物なし。推測の値は入れない）。
+# 0.11.0 Mac mini 版の gen_args_macmini.txt と同じキー構成。値は #3273 の各ラウンドのログ・gate.log から転記する。
+--m4-series=（未実測）
+--m4-load=（未実測）
+--m4-date=（未実測）
+--m4-skipped-note=（未実測）
+--gb-load=（未実測）
+--gb-date=（未実測）
+--gb-skipped-note=（未実測）
+--updated=（未実測）
