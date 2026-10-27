@@ -65,6 +65,15 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 - 将来ブロック化・並列リダクションで順序を変える場合や実機で fail が出た場合も tolerance は緩めない。カーネルを是正するか、別の決定記録とユーザー承認を経て baseline 方式（または spec への提案）を検討する
 - 実機 parity は `#[ignore]` で分離し、未実測は `docs/perf/logs/<slug>-<issue>/README.md` へ申し送る（子 issue の責務）
 
+### QR 入力 (3,8) の是正（2026-10-28 所有者判断 (a)）
+
+- 経緯: Mac mini 実測（2026-10-27・PR #3654・#3658。`docs/perf/logs/metal-linalg-lu-chol-qr-2676/run1.log`〜`run5.log`）で `qr_matches_cpu_on_device` が 5/5 run fail した（`qr R 3x8 scale=1e20`、fail_count=1/24）。
+- 原因: 旧 `qr_input(3,8)` は第 0 列と第 2 列が偶然直交し `R[0,2]` の真値が厳密 0。1e20 倍では f32（GPU とホストモデル。ビット一致）と f64（CPU 参照）の丸め残差の差が、絶対救済（1e-5）の効かない相対誤差 1.0 として露出する。カーネルのずれではなく精度クラス差。
+- 採用: (3,8) の主対角へ `+2.0`（`QR_WIDE_DIAG_SHIFT`。17×17 の既存シフトと同形）。tolerance・判定式・baseline 方式・カーネル・他の入力は不変。元入力での fail は上記ログと本節に残す。
+- 退けた候補: add 定数方式（新たな構造的 0 か厳密 0 が残る見込み）、主対角シフト +0.5・+1.0・+6.0（可だが R 最小要素比が +2.0 より小さい）。
+- 再発防止: `linalg_parity_inputs_guard.rs::qr_inputs_have_no_structural_zero_in_r` が全 QR 形状の `|R_ij|/‖a_j‖` を `1e-10` 以上に固定する（実測の最小値は (8,3) 3.75e-1・(3,8) 6.41e-2・(17,17) 4.50e-4。旧入力は検出される）。常時テスト `qr_parity_inputs_model_matches_cpu` が f32 モデル対 CPU を実機と同じ判定列で固定する。
+- 再実測: 2026-10-28 に Mac mini で 5/5 run 全件 pass（`docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md`）。
+
 ## 6. 既定経路と opt-in ゲート
 
 - 推奨: CUDA・Metal とも**内部 opt-in ゲート既定 OFF**。案: `backend-cuda::linalg::set_gpu_linalg_enabled`／`backend-metal::linalg::set_gpu_linalg_enabled`（`crates/backend-metal/src/split_k_runtime.rs:93` の `set_split_k_enabled` と同形）。OFF 時はデバイスに触れず `Unsupported` を返し、現行（ホスト f64）と bit 単位で同一に保つ
@@ -133,7 +142,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 - Mac mini 実機の結果（2026-10-27・Apple M4・コミット `95a18c2d3`・5 run）: LU 系・cholesky・パイプライン構築は pass、**`qr_matches_cpu_on_device` は 5/5 run で fail**
   （`qr R 3x8 scale=1e20` の `R[0,2]` ただ 1 要素。GPU は f32 ホストモデルとビット一致で、モデル対 CPU も同じ要素で同値の不一致を出すため、
   構造的に 0 になる要素と 1e20 倍の相対判定が f32 対 f64 の精度クラス差を露出したものと判別した）。判定は fail のまま、tolerance・入力集合・カーネルは未変更。
-  選択肢（入力是正・判定契約見直し・据え置き）は所有者判断待ちで、詳細と事前登録・生ログは `docs/perf/logs/metal-linalg-parity-3139/`。
+  選択肢（入力是正・判定契約見直し・据え置き）は所有者判断待ちだった（詳細と事前登録・生ログは `docs/perf/logs/metal-linalg-parity-3139/`）。**2026-10-28 に所有者判断 (a)「入力の是正」を受け §5「QR 入力 (3,8) の是正」を実施し、Mac mini 再実測で 5/5 run 全件 pass した**（#2676 の記録）。
 
 ### #3135（CUDA LU 系 Stage B）の実施内容
 
@@ -173,7 +182,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 | ゲート | 状況 | 根拠 |
 |---|---|---|
 | G1: 公開形の所有者承認 | **取得済み（2026-10-17）** | §11.2 の推奨形 9 項目を所有者が承認した（#3140 コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3140#issuecomment-6227907703）。既定 ON（Stage E）・tolerance／baseline・新しい `unsafe`・依存は承認範囲外。着手時点（a20d036f）では未取得で、D-C の承認対象は GPU 線形代数の `unsafe` のみだった |
-| G2: #3138・#3139 の実機 parity | **未実測** | `docs/perf/logs/cuda-linalg-parity-3138/README.md` は未実測。Metal 側 `docs/perf/logs/metal-linalg-parity-3139/README.md` は 2026-10-27 に実測済みだが QR が fail（要対応・所有者判断待ち）で pass していない |
+| G2: #3138・#3139 の実機 parity | **未実測** | `docs/perf/logs/cuda-linalg-parity-3138/README.md` は未実測。Metal 側は 2026-10-27 に QR が fail したが、2026-10-28 の所有者判断 (a)（入力是正。§5）後の Mac mini 再実測で 5/5 run 全件 pass（`docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md`）。CUDA 側が未実測のため G2 全体は未充足 |
 
 「D-C の延長」と解釈して G1 を迂回しない（着手時点の判断。G1 はその後に個別承認で取得した）。
 
