@@ -597,7 +597,7 @@ class RealFileSmokeTest(unittest.TestCase):
     （framework-compare 単独チェックアウト等）では明示的に skip する。
     """
 
-    def test_real_file_parses_and_totals_45_rows(self):
+    def test_real_file_parses_and_totals_48_rows(self):
         default_path = os.path.normpath(
             os.path.join(HERE, "..", "..", "..", "crates", "backend-cuda", "tests", "common", "parity_baseline.rs")
         )
@@ -606,11 +606,13 @@ class RealFileSmokeTest(unittest.TestCase):
                 f"実ファイルが見つからないため skip（環境制約。期待パス: {default_path}）"
             )
         rows = pbi.parse_baselines(default_path)
-        # 実測される行数は 45（`ParityPath` 別内訳の合計。本スクリプト
-        # docstring・`docs/perf/candle-parity-tolerance-baseline-impact.md`
-        # §6 参照。単純な `grep -c "ParityBaseline {"` は struct 定義自体を
-        # 含んで 46 と数えるため使わない）。
-        self.assertEqual(len(rows), 45)
+        # 実測される行数は 48（`ParityPath` 別内訳の合計。うち
+        # FacadeLowPrecisionMatmulF16 の 3 行〈#3617〉は解析対象外のため、
+        # 机上分類の対象は 45 行）。本スクリプト docstring・
+        # `docs/perf/candle-parity-tolerance-baseline-impact.md` §6 参照。
+        # 単純な `grep -c "ParityBaseline {"` は struct 定義自体を含んで
+        # 49 と数えるため使わない。
+        self.assertEqual(len(rows), 48)
         from collections import Counter
 
         counts = Counter(r.path for r in rows)
@@ -623,6 +625,7 @@ class RealFileSmokeTest(unittest.TestCase):
                     "WmmaTf32Opt": 9,
                     "WmmaTf32Staged": 8,
                     "SpecializedMmaF16": 3,
+                    "FacadeLowPrecisionMatmulF16": 3,
                     "WmmaF16": 2,
                     "MmaTf32VsWmmaStaged": 2,
                     "MmaF16": 1,
@@ -632,6 +635,63 @@ class RealFileSmokeTest(unittest.TestCase):
         none_ceiling_rows = [r for r in rows if r.max_abs_diff_ceiling is None]
         self.assertEqual(len(none_ceiling_rows), 1)
         self.assertEqual(none_ceiling_rows[0].path, "WmmaTf32Opt")
+
+        # 新種別は解析対象外（入力を再現できないため）。それ以外は解析対象。
+        analyzed, excluded = pbi.split_rows(rows)
+        self.assertEqual(len(analyzed), 45)
+        self.assertEqual(len(excluded), 3)
+        self.assertEqual({r.path for r in excluded}, {"FacadeLowPrecisionMatmulF16"})
+        # `is_f16` は `fill_vec_f16` 由来か否か。新種別は f32 の `fill_vec`
+        # 入力のため False（`F16_PATHS` に入れない）。
+        self.assertTrue(all(not r.is_f16 for r in excluded))
+
+
+class ExcludedPathsTest(unittest.TestCase):
+    """`NOT_REPRODUCED_PATHS`（解析対象外種別）の扱いを合成 fixture で確認する。"""
+
+    def _rows(self, path_name: str) -> list:
+        import tempfile
+
+        body = (
+            _synthetic_entry(path="MmaTf32", context="kept")
+            + "\n"
+            + _synthetic_entry(path=path_name, context="dropped", seed="14")
+        )
+        text = _SYNTHETIC_BASELINES_HEADER + body + _SYNTHETIC_BASELINES_FOOTER
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "fixture.rs")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text)
+            return pbi.parse_baselines(p)
+
+    def test_facade_path_is_excluded_and_not_f16(self):
+        self.assertIn("FacadeLowPrecisionMatmulF16", pbi.NOT_REPRODUCED_PATHS)
+        self.assertNotIn("FacadeLowPrecisionMatmulF16", pbi.F16_PATHS)
+        rows = self._rows("FacadeLowPrecisionMatmulF16")
+        analyzed, excluded = pbi.split_rows(rows)
+        self.assertEqual([r.context for r in analyzed], ["kept"])
+        self.assertEqual([r.context for r in excluded], ["dropped"])
+
+    def test_other_path_is_analyzed(self):
+        analyzed, excluded = pbi.split_rows(self._rows("WmmaF16"))
+        self.assertEqual(len(analyzed), 2)
+        self.assertEqual(excluded, [])
+
+    def test_render_marks_excluded_rows_and_skips_scale(self):
+        rows = self._rows("FacadeLowPrecisionMatmulF16")
+        out = pbi.render_markdown(rows, "upper-bound")
+        self.assertIn("全 2 行のうち解析対象 1 行・解析対象外 1 行", out)
+        self.assertIn("## 解析対象外の行", out)
+        # 対象外行は行別スケール表・候補表に出ず、対象外節にのみ現れる。
+        scale_section = out.split("## 行別 入力規模")[1].split("## 候補 A")[0]
+        self.assertNotIn("FacadeLowPrecisionMatmulF16", scale_section)
+        self.assertIn("| FacadeLowPrecisionMatmulF16 | dropped |", out.split("## 解析対象外の行")[1])
+        self.assertNotIn("row1", out)  # 解析対象 1 行分（row0）のみ
+
+    def test_render_without_excluded_rows_says_none(self):
+        out = pbi.render_markdown(self._rows("WmmaF16"), "upper-bound")
+        self.assertIn("解析対象外 0 行", out)
+        self.assertIn("なし。", out.split("## 解析対象外の行")[1])
 
 
 class MainCliTest(unittest.TestCase):

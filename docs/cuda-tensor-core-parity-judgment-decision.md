@@ -221,31 +221,38 @@ fail-closed に検査する点で回帰検出契約としては維持される�
 - `docs/cuda-tf32-optin-api-decision.md`（同型の決定記録ドキュメントの
   先例。承認ステータス節の書式を踏襲）
 
-## 7. facade `matmul_low_precision`（f16 Mma）の fail≠0 3 形状の扱い（イシュー #3617・提案・所有者承認待ち）
+## 7. facade `matmul_low_precision`（f16 Mma）の fail≠0 3 形状の扱い（イシュー #3617）
 
-状態: **提案のみ。所有者の承認は未取得**（#3617 に形と値を承認したコメントはない）。
-承認前は `BASELINES`・テストコードを変更しない。
+状態: **形・値の出典・ceiling の型・ゲートの置き場所は所有者承認済み**（#3617 コメント 6432022446、
+2026-10-27）。**baseline の値は PR #3661 で提示し所有者承認済み**（#3617 コメント 6445938807（2026-10-28））
+（コメント 6432022446 の「再計測値を PR で所有者に提示してから確定する」に従い、PR #3661 で提示した）。
+値の承認により PR #3661 で #3617 を閉じる。
 
 - 対象: `F16@512x512x512`（seed 14・fail 5）・`F16@1024x1024x1024`（seed 15・fail 192）・
-  `F16@256x256x1024`（seed 16・fail 16）。出典は `docs/perf/logs/low-precision-ops-2628/README.md`
-  （#3170・`b640875f`・GB10）。診断 `cuda_low_precision_matmul_large_shape_report` は記録専用で
-  fail 数を assert しないため、後退を機械検出するゲートがない
+  `F16@256x256x1024`（seed 16・fail 16）。診断 `cuda_low_precision_matmul_large_shape_report` は
+  記録専用で fail 数を assert しないため、後退を機械検出するゲートがなかった
 - 形状二分方式（§2 項目 2）に従い、この 3 形状を非後退方式（`ParityBaseline`／
-  `assert_no_parity_regression`）の対象にする。厳密ゼロ fail 成立の 5 形状・tolerance 定数・
-  既存 baseline 行は変えない
-- **既存 `ParityPath::MmaF16` には足せない**: `parity_nonregression.rs::check_mma_f16_baseline` は
-  `fill_vec_f16` 由来の入力と `matmul_reference_fma` 参照で `CudaMmaGemm::run_f16` を直接呼ぶ。
-  facade 診断は lhs=seed／rhs=seed+1 の f32 `fill_vec` と CPU tape 参照で入口も違うため、足すと
-  GB10 で誤入力により誤 fail する。新バリアント（案: `FacadeLowPrecisionMatmulF16`、Display は
-  `facade_low_precision_matmul_f16`）とする
-- 実行側の案: facade テストから `#[path = "../../backend-cuda/tests/common/parity_baseline.rs"]`
-  で共有 module を取り込み、`assert_no_parity_regression` をそのまま使う（判定の複製をしない。
-  security.md A08）。注意: クレート外を指す `#[path]` は前例がなく、facade は crates.io 公開
-  クレートである（publish の verify はテストをビルドしないため止まらない）。代案の backend-cuda
-  側配置は dev 依存の追加と入口の相違で provenance が崩れるため推奨しない
-- 値の出典（所有者が選ぶ）: (a) README の値 (b) HEAD での GB10 再計測値（推奨。事前登録規則つきで
-  2 回実行し一致を確認）。ceiling は `docs/perf/cuda-parity-baseline.md` §6「ベースライン更新規約」の表記丸め規約で算出する
-- 承認後の実装（段 B）: バリアントと 3 行の追加、`parity_nonregression.rs` の列挙・除外の更新、
-  facade への `#[ignore]` ゲートテスト追加、GB10 での pass 記録
-
-実機計測（HEAD 再計測）は本提案の時点で未実測。
+  `assert_no_parity_regression`）の対象にした。厳密ゼロ fail 成立の 5 形状・bf16・tolerance 定数・
+  既存 baseline 行は変えていない
+- **既存 `ParityPath::MmaF16` には足していない**: `check_mma_f16_baseline` は `fill_vec_f16` 入力＋
+  `matmul_reference_fma` 参照で `CudaMmaGemm::run_f16` を直接呼ぶ。facade 診断は lhs=seed／
+  rhs=seed+1 の f32 `fill_vec` と CPU tape 参照で入口が違うため、混ぜると誤 fail する。新バリアント
+  `ParityPath::FacadeLowPrecisionMatmulF16`（Display は `facade_low_precision_matmul_f16`）とした。
+  `parity_nonregression.rs` は列挙に加え、`CudaGemm`／`CudaMmaGemm` から到達できないため
+  実行ループでは除外している
+- 実行側: facade の `tests/low_precision_ops_backend_parity.rs` が
+  `#[path = "../../backend-cuda/tests/common/parity_baseline.rs"]` で共有 module を取り込み、
+  `assert_no_parity_regression` をそのまま使う（判定は複製しない。security.md A08）。
+  `#[ignore]` ゲート `cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress` と、CI で走る
+  構造テスト `facade_f16_low_precision_baselines_cover_exactly_the_approved_shapes` を置いた
+- 値の出典: HEAD（`a053ea7ed`）を GB10 で再計測した値。事前登録規則つきで 2 回実行し完全一致、
+  `b640875f` の値とも完全一致（`docs/perf/logs/low-precision-ops-2628/README.md`
+  「#3617 HEAD 再計測」）。ceiling は `docs/perf/cuda-parity-baseline.md` §6 の表記丸め規約
+  （表示桁最終桁 +1）。max_abs は `1.5626e-2` 型
+- ゲートの GB10 実行: `.rev-stamp` = `045a18a231ac8dfa255b275e9f30a33b0879e897`、1 passed（exit 0、
+  `cuda/gate_3617.log`）。同一ビルドの診断ログは保存しておらず、診断値の一致は記録上未確認
+- **残存リスク**: クレート外を指す `#[path]` は前例がなく、facade は crates.io 公開クレートである。
+  パッケージに入る `tests/low_precision_ops_backend_parity.rs` は共有ファイルを同梱しないため、
+  下流が tarball から `cargo test` するとこのテストファイルはコンパイルできない。
+  `cargo publish` の verify は lib のみをビルドするためリリースは止まらない。所有者承認の形であり、
+  `exclude` 等の対処は行っていない

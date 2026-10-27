@@ -146,8 +146,9 @@ cargo test -p fandhe-ai --release --test low_precision_ops_backend_parity -- --i
 
 ## #3617 HEAD 再計測（baseline 候補値の確認）
 
-状態: **未実測**（本 issue の自動運転実装では GB10 へ到達していない。Linux CI や M4 Max の値で代えない）。
-baseline 化は所有者承認待ちで、`BASELINES` は変更していない（決定記録 §7）。
+状態: HEAD 再計測は 2026-10-27 に GB10 で実施済み（下記「実測記入欄」）。baseline 行は
+`ParityPath::FacadeLowPrecisionMatmulF16` として追加したが、**値は所有者承認済み**（#3617 コメント 6445938807（2026-10-28））
+（形・値の出典・ceiling の型は #3617 コメント 6432022446 で承認済み。決定記録 §7）。
 
 事前登録規則（計測前に固定）:
 
@@ -157,4 +158,41 @@ baseline 化は所有者承認待ちで、`BASELINES` は変更していない�
 4. 厳密ゼロ fail 5 形状で fail≠0 が出たら後退として記録し報告する（直さない）
 5. `Unsupported`・`Err`・非有限値は fail として記録。実機未到達は undetermined
 
-実測記入欄: 日付 / 機体 / `.rev-stamp` / exit — 未記入。
+事前登録規則（ゲート実行用。ゲートを実行する前に固定）:
+
+6. ゲート実行で測るのは `cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress` 1 本のみ。tolerance・baseline は変えない
+7. exit=0（`1 passed`）なら pass。fail・panic・mma 利用不可は fail として記録し、baseline も規則も緩めない
+8. 同一ビルドで診断を 1 回流し、規則 2・3 の測定値と完全一致することを確かめる。不一致なら記録して所有者判断
+
+実測記入欄（規則 1〜5）:
+
+| 項目 | 値 |
+|------|-----|
+| 日付 | 2026-10-27 |
+| 機体 | GB10（DGX Spark・sm_121・CUDA 13.0）。計測前後 GPU util 0%（他用途の常駐プロセスあり） |
+| `.rev-stamp` | `a053ea7ed0f49d3b5ff01051d5ee8ff36d8661e9`（`cuda/rev-stamp-3617-measure.txt`） |
+| exit | run1=0・run2=0（`cuda/large_shape_report_3617_run1.log`・`_run2.log`） |
+| 規則 2（安定性） | REPORT・ROUTE 行が 2 回で完全一致 = 安定 |
+| 規則 3（`b640875f` との一致） | 3 形状の total・fail・mean_abs・max_abs・max_rel が完全一致 = 候補値を HEAD で再確認 |
+| 規則 4（厳密ゼロ fail 5 形状） | 全て fail=0（後退なし） |
+| 規則 5 | `Unsupported`・`Err`・非有限値なし。`mma_available=true` |
+
+baseline の ceiling 換算（表示桁最終桁 +1）:
+
+| 形状 | 項目 | 実測 | ceiling |
+|------|------|------|---------|
+| 512³ | mean_abs | 4.145593038629158e-6 | 4.145593038629159e-6 |
+| 512³ | max_abs | 1.5625e-2 | 1.5626e-2 |
+| 512³ | max_rel | 3.8848920863309355e-1 | 3.8848920863309356e-1 |
+| 1024³ | mean_abs | 1.0508246703011537e-5 | 1.0508246703011538e-5 |
+| 1024³ | max_abs | 3.125e-2 | 3.126e-2 |
+| 1024³ | max_rel | 4.803921568627451e-1 | 4.803921568627452e-1 |
+| 256×256×1024 | mean_abs | 8.295384759549052e-6 | 8.295384759549053e-6 |
+| 256×256×1024 | max_abs | 1.5625e-2 | 1.5626e-2 |
+| 256×256×1024 | max_rel | 2.5336500395882817e-2 | 2.5336500395882818e-2 |
+
+ゲート実行（規則 6〜8）の結果: 2026-10-27・GB10・`.rev-stamp` `045a18a231ac8dfa255b275e9f30a33b0879e897`
+（`cuda/rev-stamp-3617-gate.txt`）。ゲート `cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress`
+は 1 passed・exit 0（`cuda/gate_3617.log`）= pass（規則 7）。規則 8（同一ビルドの診断値の一致）は、
+ゲート時のビルド（`045a18a2`）の診断ログを保存していないため記録上は未確認（保存済みの診断ログは
+`a053ea7ed` の run1・run2 のみ。`045a18a2` との `crates/` の差分は `tests/` 配下のテストファイルのみで、計測対象のライブラリコードは同一）。baseline の値は所有者承認済み（#3617 コメント 6445938807（2026-10-28））。

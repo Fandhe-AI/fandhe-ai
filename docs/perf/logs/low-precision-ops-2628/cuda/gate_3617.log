@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/low_precision_ops_backend_parity.rs (~/work/target/release/deps/low_precision_ops_backend_parity-b83989608687259c)
+
+running 1 test
+test cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.84s
+

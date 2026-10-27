@@ -24,6 +24,25 @@
 //! CPU と突き合わせ、形状ごとの 4 指標と ulp 分布を記録する。**記録専用**で
 //! 統一複合判定の fail 数は assert しない（tolerance 緩和ではない。扱いの提案は
 //! README に書く）。
+//!
+//! `#[ignore]` の非後退ゲート（#3617。`cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress`）:
+//! 上記の診断は記録専用のため、f16 が `f16:Mma` 経路に乗り統一複合判定で fail≠0 となる
+//! 3 形状（512³・1024³・256×256×1024）は後退しても検出できない。この 3 形状だけを
+//! `crates/backend-cuda/tests/common/parity_baseline.rs` の
+//! `ParityPath::FacadeLowPrecisionMatmulF16` 行（baseline 非後退方式。判定は
+//! `assert_no_parity_regression` をそのまま使い複製しない）で検査する。
+//! 厳密ゼロ fail が成立する 5 形状・bf16・tolerance 定数は不変。
+//! 構造テスト `facade_f16_low_precision_baselines_cover_exactly_the_approved_shapes`
+//! は GPU 不要で CI でも走り、fixture の形状集合が承認範囲と一致することを固定する。
+
+// 共有 fixture をクレート外から取り込む（`crates/backend-cuda/src/gemm.rs` の
+// 同型の `#[path]` 取り込みが前例。判定ロジックを facade 側へ複製しないため）。
+// 注意: パッケージ化される facade の tarball には共有ファイルが入らないため、
+// 下流が tarball から `cargo test` するとこのテストファイルはコンパイルできない
+// （`cargo publish` の verify は lib のみのため影響なし。
+// docs/cuda-tensor-core-parity-judgment-decision.md §7 に残存リスクとして記録）。
+#[path = "../../backend-cuda/tests/common/parity_baseline.rs"]
+mod parity_baseline;
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
@@ -300,6 +319,16 @@ fn predicted_route(
     }
 }
 
+/// 大形状診断・ゲート共通の入力生成（lhs は `seed`、rhs は `seed + 1`）。
+/// 診断とゲートが同じ関数を使い、baseline の provenance（入力）を揃える。
+fn large_shape_inputs(m: usize, n: usize, k: usize, seed: u64) -> (Tensor<f32>, Tensor<f32>) {
+    let mut a = bench_harness::rng::Xorshift64Star::new(seed);
+    let mut b = bench_harness::rng::Xorshift64Star::new(seed + 1);
+    let lhs = Tensor::new(a.fill_vec(m * k), &[m, k]).unwrap();
+    let rhs = Tensor::new(b.fill_vec(k * n), &[k, n]).unwrap();
+    (lhs, rhs)
+}
+
 /// 大形状 matmul の CPU 対 CUDA 診断。assert は shape 一致・`compare` が `Ok`・
 /// 全要素有限のみ。統一複合判定の fail 数は記録だけで panic しない
 /// （Tensor Core 経路は結合順序が単一 K ループと異なり、決定記録
@@ -320,10 +349,7 @@ fn cuda_low_precision_matmul_large_shape_report() {
     let (mut zero, mut nonzero) = (Vec::new(), Vec::new());
     for d in DTYPES {
         for &(m, n, k, seed) in LARGE_SHAPES {
-            let mut a = bench_harness::rng::Xorshift64Star::new(seed);
-            let mut b = bench_harness::rng::Xorshift64Star::new(seed + 1);
-            let lhs = Tensor::new(a.fill_vec(m * k), &[m, k]).unwrap();
-            let rhs = Tensor::new(b.fill_vec(k * n), &[k, n]).unwrap();
+            let (lhs, rhs) = large_shape_inputs(m, n, k, seed);
             let cpu_tape = fandhe_ai::tape();
             let y_cpu = matmul_low_precision(&cpu_tape.var(&lhs), &cpu_tape.var(&rhs), d)
                 .unwrap()
@@ -372,4 +398,126 @@ fn cuda_low_precision_matmul_large_shape_report() {
         }
     }
     println!("SUMMARY strict_zero_fail={zero:?} nonzero_fail={nonzero:?}");
+}
+
+// ---------------------------------------------------------------------
+// f16 Tensor Core 経路 fail≠0 3 形状の非後退ゲート（#3617）
+// ---------------------------------------------------------------------
+
+/// 所有者承認済み（#3617 コメント 6432022446）の対象形状 `(m, n, k, seed)`。
+const F16_NONZERO_FAIL_SHAPES: [(usize, usize, usize, u64); 3] = [
+    (512, 512, 512, 14),
+    (1024, 1024, 1024, 15),
+    (256, 256, 1024, 16),
+];
+
+/// 厳密ゼロ fail が成り立つ f16 形状（baseline 化の対象外。混入を禁じる）。
+const F16_STRICT_ZERO_SHAPES: [(usize, usize, usize, u64); 5] = [
+    (64, 64, 64, 11),
+    (128, 128, 128, 12),
+    (256, 256, 256, 13),
+    (128, 128, 100, 17),
+    (65, 63, 33, 18),
+];
+
+fn facade_f16_rows() -> Vec<&'static parity_baseline::ParityBaseline> {
+    parity_baseline::BASELINES
+        .iter()
+        .filter(|b| b.path == parity_baseline::ParityPath::FacadeLowPrecisionMatmulF16)
+        .collect()
+}
+
+/// GPU 不要の構造テスト。fixture の形状集合が承認範囲とちょうど一致し、
+/// ceiling が全て確定済みで、tolerance 定数が固定されていることを確かめる。
+#[test]
+fn facade_f16_low_precision_baselines_cover_exactly_the_approved_shapes() {
+    let rows = facade_f16_rows();
+    assert_eq!(rows.len(), F16_NONZERO_FAIL_SHAPES.len(), "対象行は 3 件");
+    let mut got: Vec<_> = rows
+        .iter()
+        .map(|b| (b.m as usize, b.n as usize, b.k as usize, b.seed))
+        .collect();
+    let mut want = F16_NONZERO_FAIL_SHAPES.to_vec();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want, "baseline 行の形状集合が承認範囲と不一致");
+    for shape in &got {
+        assert!(LARGE_SHAPES.contains(shape), "{shape:?} は LARGE_SHAPES 外");
+        assert!(
+            !F16_STRICT_ZERO_SHAPES.contains(shape),
+            "{shape:?} は厳密ゼロ fail 形状（baseline 化対象外）"
+        );
+    }
+    for b in rows {
+        assert!(!b.baseline_provenance_unconfirmed, "{}", b.context);
+        assert!(b.baseline_max_abs_diff_ceiling.is_some(), "{}", b.context);
+        assert!(b.baseline_max_rel_err_ceiling.is_some(), "{}", b.context);
+        assert_eq!(b.total, (b.m as usize) * (b.n as usize), "{}", b.context);
+    }
+    parity_baseline::assert_tolerance_constants_pinned();
+}
+
+/// f16 が `f16:Mma` に乗り fail≠0 となる 3 形状の非後退ゲート。facade の
+/// `matmul_low_precision(F16)` を CUDA tape と CPU tape で実行し、
+/// `assert_no_parity_regression` で baseline 行と突き合わせる
+/// （判定式は複製しない。診断と同じ引数順 device, cpu）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。#3617 非後退ゲート"]
+fn cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress() {
+    let rows = facade_f16_rows();
+    assert!(!rows.is_empty(), "対象 baseline 行が 0 件（fail-closed）");
+    let dev = fandhe_ai_backend_cuda::CudaDevice::new(0).expect("CUDA 実機が必要");
+    let auto = fandhe_ai_backend_cuda::CudaGemmAuto::new(&dev).expect("CudaGemmAuto 構築");
+    assert!(
+        auto.mma_available(),
+        "mma.sync が使えない環境では f16:Mma の baseline を判定できない: {:?}",
+        auto.mma_unavailable_reason()
+    );
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0)).expect("CUDA tape");
+    let mut failures = Vec::new();
+    for b in rows {
+        let (m, n, k) = (b.m as usize, b.n as usize, b.k as usize);
+        assert_eq!(
+            predicted_route(ScalarDType::F16, true, (m, n, k)),
+            "f16:Mma",
+            "{}: Mma 経路に乗らない形状は本ゲートの対象外",
+            b.context
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (lhs, rhs) = large_shape_inputs(m, n, k, b.seed);
+            let cpu_tape = fandhe_ai::tape();
+            let y_cpu =
+                matmul_low_precision(&cpu_tape.var(&lhs), &cpu_tape.var(&rhs), ScalarDType::F16)
+                    .unwrap()
+                    .to_tensor();
+            let y_dev =
+                matmul_low_precision(&cuda_tape.var(&lhs), &cuda_tape.var(&rhs), ScalarDType::F16)
+                    .unwrap()
+                    .to_tensor();
+            assert_eq!(y_cpu.shape(), y_dev.shape(), "{}: shape", b.context);
+            let (dv, cv) = (y_dev.host_slice(), y_cpu.host_slice());
+            assert!(
+                dv.iter().all(|v| v.is_finite()),
+                "{}: 非有限出力",
+                b.context
+            );
+            let report = fandhe_ai_backend_cpu::parity::compare(dv.as_ref(), cv.as_ref())
+                .unwrap_or_else(|e| panic!("{}: compare Err {e:?}", b.context));
+            parity_baseline::assert_no_parity_regression(b.context, &report, b);
+        }));
+        if let Err(err) = result {
+            let msg = err
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "panic (詳細不明)".to_string());
+            failures.push(format!("{}: {msg}", b.context));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "f16 非後退ゲート FAIL（{} 件）:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
