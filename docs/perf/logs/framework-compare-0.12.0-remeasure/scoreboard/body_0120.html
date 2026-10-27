@@ -1,0 +1,178 @@
+<title>fandhe-ai 0.12.0 対戦成績</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Sans+Condensed:wght@600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+<style>
+{css}
+</style>
+<main>
+<p class="eyebrow">fandhe-ai · framework-compare · candle · burn · PyTorch · TensorFlow · SciPy · f32 · warmup 20 + 計測 20（GEMM）／100 step（学習）· Mac mini（M4） {m4_date} · GB10 {gb_date}（UTC）· {updated_h} 更新</p>
+<h1>他フレームワークとの勝敗スコアボード</h1>
+<p class="lede">crates.io 公開版 <code>fandhe-ai =0.12.0</code>（2026-10-27 公開）を、同一ハーネス・同一 xorshift64* シード入力で <code>candle-core =0.11.0</code>・<code>burn =0.21.0</code>・PyTorch 2.14.0・TensorFlow（Mac mini {m4_tf_ver}＋Metal プラグイン／GB10 2.21.0 CPU）・SciPy 1.18.1 と比較。Hugging Face transformers と LangChain は計算層ではないため性能比較の対象外とし、下の役割対応表で扱う。<b>Python 3 フレームワーク（PyTorch／TensorFlow／SciPy）も両機体で、fandhe-ai・candle・burn と同じラウンドの中で同席計測した</b>（0.11.0 版と同じ方式）。Apple 側は、M4 Max 開発機が他アプリの並走で負荷が安定しないため、計測専用の Mac mini（Apple M4・10 コア・16 GB）で計測し直した（2026-10-11 所有者指示）。{m4_prev_note}<b>Mac mini（Apple M4・Metal／CPU）は {m4_date} に 5 ラウンド計測</b>（{m4_cond}）、<b>DGX Spark GB10（CUDA／CPU）は {gb_date}（UTC）に 5 ラウンド計測</b>（{gb_load}）し、いずれもセルごとの 5 ラウンド中央値を採った。「勝敗」の区分（1 位／僅差／負け）と「最速他 FW ÷ fandhe-ai」の比は、事前登録規則どおり同一ラウンド内の比（そのラウンドの有効な他フレームワーク最速 ÷ fandhe-ai）の 5 ラウンド中央値で決める（&gt;1 で 1 位、0.90 以上で僅差）。負けの「N 位」と「vs」の相手名は 5 ラウンド中央値で数える。値は中央値 ms（GEMM は GFLOP/s 併記）、推論はバッチ/秒。「0.11.0 比」は同一セル・同一モードの fandhe-ai 中央値の比（&lt;1 が高速化。推論は &gt;1 が改善）。0.11.0 に同モードの記録がないセルは fresh 同士の比とし「（fresh 同士）」と表示する。</p>
+<div class="tally"><div class="w"><b>{n_win}</b><span>1 位（勝ち）</span></div><div class="n"><b>{n_near}</b><span>僅差（最速の 90% 以内）</span></div><div class="l"><b>{n_loss}</b><span>負け</span></div><div><b>{n_invalid}</b><span>判定不能セル（要素検証超過・順位に含めない）／判定対象 {n_total} 行</span></div></div>
+
+<h2>Mac mini（Apple M4・Metal／CPU）— {m4_date}・6 フレームワーク同席計測（5 ラウンド中央値{m4_series_h}）</h2>
+<div class="wrap"><table>{m4_head}<tbody>
+{m4_rows}
+</tbody></table></div>
+<p class="note"><b>読み違い注意 2（Python 側の checksum）</b>: Python 3 フレームワークの計測窓には全要素の checksum が含まれる。Mac mini で実測した checksum 時間の Python÷Rust 比は 3.66〜4.17（<code>MM-179</code>・実測。<code>docs/perf/loss-attribution-matrix.md</code> §10.6）。<b>Python が相手のセルの比は、その分だけ甘く出る</b>。<b>以下の数値は 0.11.0 の計測を対象にした参考分析であり、0.12.0 の新条件腕の実測値ではない（0.12.0 の表の値とは一致しない）</b>。0.11.0 の CPU GEMM N=256／512 の 1.04× を「ライブラリ同士の比」に直すと 0.09〜0.69 の範囲で確定できない（推定。2 つの時間基準 (i)／(ii) のどちらが有効か決める材料がなく、所有者判断待ち＝同 §10.10）。GB10 の TensorFlow 側の checksum は未測定。上の「最速他 FW ÷ fandhe-ai」は窓の比であり、ライブラリ同士の比ではない。</p>
+<p class="note">判定列は全行 fandhe-ai <code>reuse</code>（デバイス／tape を 1 回構築して計測区間を candle・burn と一致させる。candle 比ゲートの正式記録と同じ組み合わせ）、参考列は <code>fresh</code>（毎回 tape 新規生成）。registry ピン <code>fandhe-ai =0.12.0</code> で、各ラウンドに fandhe-ai／candle／burn と PyTorch／TensorFlow／SciPy を続けて実行し、セルごとに 5 ラウンドの中央値を採った（<code>{m4_load}</code>）。{m4_noise_sentence}0.12.0 の新条件腕（常駐入力。<code>bench-fandhe</code>・<code>docs/framework-compare-harness-decision.md</code> §7.9）は入力転送を計測窓外へ移しており、GEMM <code>reuse</code> は <code>matmul_resident</code>、学習 <code>reuse</code> は <code>train_step_resident</code>（<code>DeviceParamStore</code> によるデバイス常駐 SGD 更新）、推論 <code>reuse</code> は <code>predict_resident_input</code>。点線下線は他フレームワーク最速。<b>burn Metal N≥512 は結果テンソルが全ゼロ（upstream 既知バグ・<code>docs/perf/burn-wgpu-metal-gemm-zero-result.md</code>）のため記録拒否</b>、△ の数字はスケール付き絶対誤差で救済した要素数（#1241 承認契約・有効セル扱い）。学習の最終 loss は 0.11.0 では fandhe-ai 0.080541・他 5 フレームワーク 0.1175（fandhe-ai のみ重み初期化が異なるため一致しない。時間には影響しない。0.8.0／0.9.0／0.10.0／0.11.0 と同一の値で版間の再現性を確認（0.12.0 は未実測のため、実測後に確認して書き換える））。<b>Python 3 フレームワークの計測条件</b>: bench-common／bench-candle のプロトコル（xorshift64* 固定シード・計測窓＝matmul ディスパッチ＋ホスト実体化＋全要素 checksum・parity は CPU f32 FMA 参照との複合判定＋スケール付き絶対誤差救済）を Python へ移植した <code>bench_py.py</code> で、GEMM checksum（0.11.0 の N=256: 237.5466599）・学習 loss・推論 checksum が candle と一致することを確認したうえで実行。すべて eager 実行（<code>torch.compile</code>／<code>tf.function</code> なし）、PyTorch MPS と TensorFlow Metal（tensorflow-metal 1.2.0）の同期点は <code>.cpu()</code>／<code>.numpy()</code> のホスト転送、SciPy は <code>scipy.linalg.blas.sgemm</code>＋NumPy 手書き backprop で CPU のみ。隔離 venv（torch 2.14.0／scipy 1.18.1、TF は 2.16.2＋tensorflow-metal 1.2.0 の別 venv）を使用。</p>
+
+<h2>DGX Spark GB10（CUDA／ARM CPU）— {gb_date}（UTC）・6 フレームワーク同席計測（5 ラウンド中央値）</h2>
+<div class="wrap"><table>{gb_head}<tbody>
+{gb_rows}
+</tbody></table></div>
+<p class="note"><b>読み違い注意 1（burn の CUDA は TF32）</b>: burn（cubecl）の CUDA matmul は f32 入力を常に TF32 へ降格し、無効化する公開スイッチがない（<code>docs/analysis/burn-cubecl-cuda-matmul.md</code>）。fandhe-ai の既定は FP32 strict（<code>docs/cuda-gemm-default-precision-decision.md</code>・#3262 で維持）。<b>burn が最速相手の CUDA セルは、精度クラスが違う比較である</b>（burn は u=2^-11 の TF32、fandhe-ai は u=2^-24 の FP32）。参考に、fandhe-ai を TF32 opt-in にした実測は G-CUDA-G4096 で対 burn 1.17×（0.11.0・推定。<code>docs/perf/loss-attribution-matrix.md</code> §10.7）。この opt-in は既定 OFF で、上の表の判定には含めない。</p>
+<p class="note"><b>出典</b>: registry ピン <code>fandhe-ai =0.12.0</code> で、各ラウンドに <code>run_all_cuda.sh</code>（fandhe-ai／candle／burn）→ 追加計測（CPU GEMM の <code>reuse</code> N=256〜4096 と N=4096 の fresh 3 種）→ <code>bench_py.py</code>（PyTorch cu130 CPU／CUDA・TensorFlow CPU・SciPy）を続けて実行し、5 ラウンドの中央値を採った（<code>{gb_load}</code>）。5 ラウンドの run 別の対戦相手比は <code>gen_0120.out</code>（本ディレクトリ）に出している。<b>run_all_cuda.sh の TF32 opt-in スイープ（#1983。fandhe-ai／candle の <code>--tf32</code> 行）は f32 同士の判定から除外</b>し、下の「エンジン単体の対照」節に参考値として載せる（burn は TF32 が既定でその行しかないため f32 表にも従来どおり載る）。<b>burn CUDA GEMM（TF32 既定降格）は承認済みの精度クラス（burn cuda の <code>tf32: true</code> 行のみ u=2^-11 で第 3 救済項を評価。#1989 承認・#2046 実装・fandhe-ai 行と candle 行は u=2^-24 のまま不変）により 5 形状とも有効セル</b>で、△ の数字は精度クラス TF32 の第 3 救済項で救済した要素数（0.9.0 版の初出時は判定不能扱いで、#1988 版から有効セル）。fandhe-ai は f32、burn は TF32 という精度差を含む比較である点に注意。{gb_inv_note}判定不能セルは打ち消し線で示し順位に含めない。TensorFlow 2.21.0 は GB10 では CPU のみ計測（CUDA 列は未計測で「—」）。CUDA GEMM の N≤2048 で fandhe-ai の <code>reuse</code> が <code>fresh</code> より遅いのは既知の傾向（reuse は matmul ごとにホスト実体化と checksum を含む計測窓のため。<code>docs/perf/cuda-gemm-reuse-phase-breakdown.md</code>）で、判定列は規則どおり <code>reuse</code> のまま。</p>
+
+<h2>0.11.0（2026-10-09）→ 0.12.0 の変化 — 同一セル・同一モード（計測条件の変更を含む）</h2>
+<div class="kv">
+{m4_cards}
+{gb_cards}
+<div><h3>何が変わったか（0.11.0→0.12.0）</h3><span class="v">fandhe-ai 自身の変更内容の整理は本ページの範囲外</span><p>v0.12.0 は v0.11.0 タグ以降の 352 コミット（<code>git rev-list --count v0.11.0..v0.12.0</code>・2026-10-27 実測）。上の「{prev_ver} 比」は同一セル・同一モードの fandhe-ai 中央値の比で、計測日・負荷の違いによる揺れに加え、<b>ライブラリ変更と計測条件変更（入力転送を計測窓外へ移した新経路 <code>matmul_resident</code>／<code>train_step_resident</code>／<code>predict_resident_input</code>。同 §7.9）の両方を含む</b>ため、ライブラリ変更だけの効果ではない。切り分けは旧条件腕との比較で行う。Apple 機（Mac mini）は {prev_ver} も同じ機体の正式系列 B で計測したため、同じ機体で比べている。絶対 ms は負荷の交絡を含みうる参考値で、判定は同一ラウンド内で同席計測した対戦相手との比が主である。変更内容ごとの性能影響の切り分けは行っていない。</p></div>
+</div>
+
+<h2>役割・機能の対応表 — fandhe-ai は何であり、何でないか</h2>
+<p class="note"><b>注記</b>: fandhe-ai 列の基準は crates.io <code>fandhe-ai =0.12.0</code>（2026-10-27 公開・タグ <code>v0.12.0</code>＝<code>e23417cb4</code>）の facade 公開面。事前監査（基準 sha <code>1009825c9</code>・#3269）との <code>crates/</code> 差分は内部依存の版数文字列 12 行だけで、<code>.rs</code> の差は 0 件（#3274 で確認。<code>docs/perf/framework-compare-feature-matrix-0.12.0.md</code> §8）。facade の <code>pub use</code>／<code>pub mod</code> から到達できるものだけを公開扱いとし、未公開・保留が 1 項目でも残る行は「部分的」とする（機械的判定）。承認済みの非目標（対象外）は行の判定を下げない。<b>監査に未掲載だった項目（#3268 の棚卸し・<code>docs/compat-unlisted-holds-inventory.md</code>）を当て直した結果、事前監査で「ある」だった相互運用を「部分的」へ戻した</b>（未公開 2 件・保留 1 件。所有者確認待ち）。監査対象外の 4 行（層・役割／言語・配布／固有の仕組み／本ページの性能実測）は 0.11.0 版の記述を引き継ぎ、層・役割の公開モジュール列挙のみ更新した。実機 parity は「測定コミットの内容が pass した」ことだけを意味し、基準 sha（またはタグ）での pass を意味しない（同書 §5。120 件のうち実測済み 70・実機未実測 10・判定対象外 3・性能計測 37）。</p>
+<p class="note">他列は各プロジェクトの公開ドキュメント上の一般的事実。Hugging Face と LangChain は fandhe-ai と同じ層の製品ではなく、性能比較の相手ではない。</p>
+<div class="wrap"><table class="pos"><thead><tr><th>項目</th>
+<th>fandhe-ai 0.12.0</th>
+<th>PyTorch</th>
+<th>TensorFlow (Keras 3)</th>
+<th>SciPy / NumPy</th>
+<th>Hugging Face transformers</th>
+<th>LangChain</th>
+</tr></thead><tbody>
+<tr><th scope="row"><span class="ph">層・役割</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust 製の完全自作コア（テンソル・動的テープ autodiff・カーネル・バックエンド抽象）。facade が唯一の公開面で、compat（array・Sequential・fit）に nn・optim・data・interop・model・inference・text・distributed を載せる。REQ-1 で既存 ML フレームワークへの依存を排除</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">汎用 DL フレームワーク（テンソル・autograd・nn・分散）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">汎用 DL フレームワーク（Keras 3 高水準 API・XLA）</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">科学計算（BLAS/LAPACK・最適化・統計・信号処理）。NN・autodiff の層ではない</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">事前学習済みモデルとハブ。計算は PyTorch/TF/JAX に委譲</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">LLM アプリのオーケストレーション（チェーン・エージェント・RAG）。数値計算をしない</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">言語・配布</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust のみ（Python バインディングなし）。crates.io 7 クレート（0.10.0 で onnx-interop 初公開。0.12.0 まで同じ 7 クレート）・MIT OR Apache-2.0。Windows はビルド可・CUDA は CUDA_INCLUDE_PATH 明示で実機動作確認（CUDA_PATH からの自動探索は 0.10.0 で追加・実機未確認）。Windows の save_model／load_model は非対応</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python（C++ コア libtorch）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python（C++ コア）・JS/Lite</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python（C/Fortran）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python・JS</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">dtype</span><span class="ds">autograd は f32＋f64（8 演算）</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">f64 の自動微分（TapeF64／VarF64・8 演算）、低精度 forward の opt-in（Var::matmul_low_precision ほか 6 本）、CastDType／TypedOps、AMP（compile_with_amp）、CUDA GEMM の精度 opt-in（set_cuda_gemm_precision。既定は FP32 のまま・#3262）が公開（5 件）。未公開 1 件（Var の低精度委譲以外の配置）、保留 1 件（TapeF64／VarF64 の jvp 系。所有者の確認コメントなし）。対象外 3 件（f16／bf16 を値型とする Tape／Var・sparse／complex・int8 量子化）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">f16/bf16/f32/f64/int/bool/量子化型</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">同左＋mixed precision policy</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">f32/f64/complex/int（NN 用の低精度型はない）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">バックエンドに準拠（bf16/int8/4bit 量子化ロード）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">自動微分</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">高階微分（backward_create_graph。対象 Op を拡張）・CustomFunction／Tape::custom・backward hook・jacobian／hessian・gradcheck／anomaly 検出・関数型 AD（vjp／hvp／vmap／jvp／jacfwd。複数入力・微分可能 jvp・vmap(grad) を追加）・決定論モードが公開（12 件）。未公開 0 件。保留 4 件（create_graph の残る Op・拒否範囲・意味論ほか。所有者へ戻す論点として記録され未確定）。対象外 4 件（D-0 の除外名・ネイティブ forward-mode・jvp の f16 ほか）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">動的 autograd・高階・カスタム Function・functorch</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">GradientTape・高階・tf.function</span></td>
+<td class="pc"><span class="pill loss">ない</span><span class="pt">なし（有限差分・手書き勾配）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">バックエンドに委譲</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">演算の範囲</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">Phase 4 の演算（FFT・順序統計・kron 等・pad モード・3D プーリング／ConvTranspose3d／MaxUnpool・Fold／Unfold・LRN・weight_norm／spectral_norm・オプション型を取る損失ほか）が Var から使える（7 件）。未公開 1 件（GPU 線形代数の opt-in 関数。前提の実機 parity が未実測で #3405 が OPEN）。保留 0 件。対象外 4 件（D-0 の再エクスポート・sparse／complex・Metal の eigh／SVD と CUDA の SVD・int／bool 演算と数千 op 級の網羅）。線形代数は CPU のみ（CUDA／Metal は Unsupported）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">網羅（数千 op）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">網羅</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">線形代数・FFT・疎行列・最適化（NN 向けではない）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">NN 層・モデル構築</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">Sequential::add_* は 65 → 71（3D プーリング・ConvTranspose3d・Fold／Unfold・LRN を追加）、MaxUnpool の層経路（FunctionalBuilder）、weight_norm／spectral_norm の結線、save_model の kind 追加、参照モデルが公開（6 件）。未公開 2 件（add_upsample の scale_factor・独自 Module から組み込み層を呼ぶ経路）、保留 0 件、対象外 1 件（層型名の公開。機能は別名で到達できる）。<br>棚卸し（#3268）で未掲載だった torch.nn との差分（Hardshrink／Softshrink・Bilinear・BatchNorm3d・CosineSimilarity／PairwiseDistance・ChannelShuffle・LPPool ほか 4 種）は、規則上は未公開に当たる（所有者確認待ち）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.nn 網羅</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Keras レイヤー網羅</span></td>
+<td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Transformer 系アーキテクチャ多数</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">最適化・学習ループ</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">optimizer（Adadelta／Adafactor／Adamax／ASGD／Lion／Rprop／NAdam／RAdam）、scheduler（PolynomialLr・CyclicLr）、param groups、OptimizerStateDict、EMA、SWA の fit 結線（Callback::Swa）、fit_with_weights／fit_with_train_step、学習ステップ入口、PrefetchDataLoader ほかが公開（7 件）。未公開 1 件（SWA の FitConfig 形）、対象外 1 件（FitConfig への EMA）。マルチワーカー DataLoader と同じ挙動かは判定していない。<br>棚卸し（#3268）で未掲載だった保留（EMA と AMP の併用拒否・EMA の warmup・param groups の併用・保存形式・常駐・Optimizer 4 種）は保留に当たる（所有者確認待ち）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.optim 網羅・DataLoader・AMP</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Keras optimizer 網羅・fit()・tf.data</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">scipy.optimize（L-BFGS 等。NN 学習用ではない）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Trainer・PEFT</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">バックエンド・ハード</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">CPU（BLIS 風自作 GEMM・rayon）／CUDA（NVRTC 自作カーネル）／Metal（simdgroup 自作カーネル）を cfg 切替・tape_for／available_devices()／Tape::transfer で扱い、set_cuda_gemm_precision で CUDA GEMM 精度を選ぶ。分散学習の初期形 fandhe_ai::distributed（ホスト側 ring all-reduce・検証は単一ノード複数プロセス）が公開（3 件）。未公開 0 件。保留 1 件（ROCm の facade 公開。所有者判断待ち）。対象外 3 件（FSDP／ZeRO 系ほか・nccl feature・int8）。Metal の実機計測先は Mac mini</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">CPU/CUDA/ROCm/MPS/XPU・DDP/FSDP</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">CPU/CUDA/TPU・Metal はプラグイン（本計測は 2.16.2＋tensorflow-metal／GB10 は 2.21.0 CPU）・分散戦略</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">CPU（Accelerate/OpenBLAS）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">バックエンドに委譲</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">相互運用（重み・モデル形式）</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">facade から ONNX import（36 op・推論専用）・export（Sequential の 6 層と import 済みモデルの往復）・safetensors 保存／読込（F32）・save_model／load_model・Functional モデル保存・npy／npz 自由関数が使える（4 件）。Python バインディングと TF 系形式、Tensor への npy inherent は対象外（2 件）。<br><b>事前監査（#3269）は「ある」だったが、棚卸し（#3268）との照合で「部分的」へ戻した</b>: 未公開 2 件（ONNX autograd が facade 未接続・safetensors の F32 以外）、保留 1 件（Sigmoid の export。数値契約が承認保留）。export の対応層 6 種・op 26 種（import は 36 種）は機能範囲の制約で、行は下げない（UnsupportedLayer で fail-closed）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.export・ONNX export・safetensors</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">SavedModel・TFLite・ONNX（tf2onnx）</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">npy/npz・scipy.io（MATLAB・netCDF）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Hub・safetensors・GGUF 変換</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">事前学習済みモデル</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">ModelRegistry（load・ローカル配置への save・HTTPS 取得 download／download_with。sha256 pin 検証つき）と、アーキテクチャのみの参照モデルが公開（4 件）。未公開 1 件（HF Hub 連携。facade 外の補助クレートで crates.io 公開と整合は所有者確認待ち）、保留 0 件、対象外 1 件（重みの同梱）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torchvision・torch.hub</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Keras Applications・TF Hub</span></td>
+<td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">数十万モデル（Hub）</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">モデルは API・ローカルランタイム経由で利用</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">推論・サービング</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">predict／predict_batches／predict_resident、generate／AutoregressiveModel（caches 形モデル対応・サンプリング版 speculative）、KvCache・PagedKvCache・paged_attention_forward、BatchScheduler とテンソル単位バッチ、Unicode・StringLookup が公開（8 件）。未公開 1 件（caches で表せない内部状態を持つモデル）、保留 0 件、対象外 5 件（汎用グラフコンパイル区分 A・HTTP サーバ／量子化 KV・サブワードトークナイザ・beam search 等・int8）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.compile・TorchScript・量子化・TorchServe</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">TFLite・TF Serving・XLA</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">pipeline・generate・TGI</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">チェーン実行・LangServe</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">固有の仕組み</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">バックエンド間数値一致契約（rel&lt;1e-3 or abs&lt;1e-5・FMA 契約統一）・依存 =x.y.z 完全固定と禁止リストの CI 検査。guardrail（3 分岐判定）・self-repair・bench-harness はリポジトリ内の非公開クレート</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.compile／Inductor</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">XLA・tf.function グラフ</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">LAPACK ラッパの網羅性</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Hub とモデルカード</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Agents・RAG・LCEL</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">本ページの性能実測</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">判定側（reuse）・両機体</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Mac mini CPU／MPS・GB10 CPU／CUDA で同一プロトコル計測</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Mac mini CPU／Metal・GB10 CPU で同一プロトコル計測</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Mac mini CPU・GB10 CPU（sgemm＋NumPy 手書き backprop）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">対象外（計算層ではない）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">対象外（計算層ではない）</span></td>
+</tr>
+</tbody></table></div>
+<h2>エンジン単体の対照（framework-compare 外のハーネス・参考）</h2>
+<div class="kv">
+<div><h3>CPU GEMM vs gemm crate／matrixmultiply（M4 Max・2026-09-03）</h3><span class="v">対 gemm crate 0.84〜0.97×</span><p>N=512/1024/2048/4096 で 433／786／874／1,041 GFLOP/s 対 519／837／978／1,070（5 回中央値・<code>oss-gemm-compare</code>・本番既定 RowPanel。<code>docs/perf/oss-gemm-comparison-baseline.md</code>）。matrixmultiply は 110 GFLOP/s 前後で K≥1024 は出力不一致のため参照除外。DGX 側の Tier 2 併記（#1312）では N=4096 で gemm crate の 1.43 倍（0.77 → 1.09 TFLOP/s）。2026-09-11 に結線した <code>TwoDDynamic</code>（#1313）の対 OSS 単体実測は未実施。</p></div>
+<div><h3>Metal GEMM vs MLX f32／PyTorch MPS f32（M4 Max・2026-08-23）</h3><span class="v">転送込み 0.41〜0.60×（MLX）・0.27〜0.77×（MPS）</span><p>N=4096: 自作 4.16 TFLOPS 対 MLX 9.64・MPS 13.05（H2D＋GEMM＋D2H 込み）。デバイス内比較（自作 prepared 7.23 対 MLX 12.78）は MLX が呼び出しごとに出力配列を確保する非対称があり参考値。この OSS ハーネスでの Metal 再計測は 2026-08-23 以降なし（以後は candle 比へ移行）。</p></div>
+<div><h3>REQ-8 段階的下限（対 PyTorch・2026-08-18 確定・凍結）</h3><span class="v">GEMM 5 行すべて達成</span><p>CPU 24.7%（目標 20%）・CUDA f32 51.96%（50%）・CUDA f16 37.47%（35%）・Metal f32 13.01%（10%）・Metal f16 18.78%（15%）。<code>docs/performance-targets.md</code> の確定値で、その後の candle 比再計測は反映されない。</p></div>
+<div><h3>candle 比ゲート（正式系列 0.8.0・5 回中央値）</h3><span class="v">達成 4 セル／12 セル</span><p>CUDA N=4096（1.478×）・Metal N=2048（1.002×）・CPU GB10 N=2048（1.400×）・CPU M4 Max N=512（1.015×）が正式系列として達成。他 8 セルは未達（<code>docs/perf/cuda,metal,cpu-gemm-candle-gate-remeasurement.md</code> §16／§16／§24）。本ページの両機体の行は 6 フレームワーク同席計測の 5 ラウンド中央値（各ラウンド 1 run）で、ゲート判定の正式系列ではない。</p></div>
+{tf32_card}
+</div>
+
+<h2>1.0 以下のセル — 届かなかった理由（ハードの上限／計測窓の定義／自分たちの制約）</h2>
+<p class="note">各セルの理由を 3 分類（ハードの上限／計測窓の定義／自分たちの制約）で、数字つきで示す。<b>制約（FP32 strict・REQ-8・REQ-1・<code>f64</code> アキュムレータ）の緩和は提案しない。所有者判断の材料として示す</b>。<b>推定値を合格ラインに使わない</b>（理由文の数字は「実測」か「推定」を明記する）。</p>
+{unreached_table}
+
+<h2>まとめ（判定対象 {n_total} 行 = 勝ち {n_win}＋僅差 {n_near}＋負け {n_loss}・相手は candle／burn／PyTorch／TensorFlow／SciPy の有効セル最速）</h2>
+<div class="kv">
+<div><h3>勝っている領域（{n_win}）</h3><p>{win_list}</p></div><div><h3>僅差（{n_near}）</h3><p>{near_list}</p></div><div><h3>負けている領域（{n_loss}）</h3><p>{loss_list}</p></div>
+<div><h3>ノイズ帯（{n_noise}）</h3><p>{noise_list}</p></div>
+<div><h3>読み方</h3><p>内訳は上記「勝っている領域」「僅差」「負けている領域」のとおり（詳細は各表の行を参照）。勝敗区分は同一ラウンド内の対戦相手比の 5 ラウンド中央値で判定している（相手は全フレームワークの有効セル最速で、candle 単独と比べる candle 比ゲートとは対象が異なる）。{mm_note}HEAD 側の opt-in 性能改善候補（既定 OFF）は registry 既定経路の比較である本表には反映されない。</p></div>
+</div>
+
+<h2>計測条件・再現手順</h2>
+<p class="note"><b>Mac mini（Apple M4）</b>: Apple M4（10 コア）・16 GB · macOS · registry ピン <code>fandhe-ai =0.12.0</code>・5 ラウンド計測（<code>{m4_load}</code>）。計測失敗（各ラウンドの <code>skipped-macmini-0.12.0.log</code>）: {m4_skipped}<br><b>DGX Spark GB10</b>: NVIDIA GB10 · driver・CUDA ランタイムの版は 0.12.0 の計測後に記入（未実測）（PyTorch は cu130 wheel）· registry ピン <code>fandhe-ai =0.12.0</code>・5 ラウンド（<code>{gb_load}</code>）。計測失敗: {gb_skipped}（各ラウンドの <code>skipped-dgx-0.12.0.log</code>）。</p>
+<pre>cd scripts/bench/framework-compare
+# Mac mini（Apple M4）: 出力先を results-macmini-0.12.0.jsonl に向けた run_all.sh の複製で実行（Cargo.lock は復元 trap で不変）。各ラウンドで bench_py.py も続けて実行し、5 ラウンドの中央値を採用
+./run_all.sh                                   # macOS: cpu + metal（既定出力 results/raw/results.jsonl）
+python3 summarize.py results/raw/results-macmini-0.12.0.jsonl
+# Python 3 フレームワーク: 隔離 venv（torch 2.14.0 / scipy 1.18.1、TF は 2.16.2 + tensorflow-metal 1.2.0 の別 venv）で bench_py.py を同一プロトコルで実行
+# DGX（docs/perf/logs/framework-compare-0.12.0-remeasure/scripts/）: dgx-run-0120.sh（run_all_cuda.sh 全セル → CPU reuse・N=4096 → bench_py.py）× 5 ラウンド
+python3 aggregate/median_rounds.py out-median5.jsonl run{{1..5}}/results-*.jsonl  # セルごとの 5 ラウンド中央値（0.10.0 版から tf32 をキーに含む）</pre>
+</main>
