@@ -3,7 +3,7 @@
 ## 状態
 
 - GB10 実測済み（2026-10-27 UTC）。計測ツリーは `e2660eba0`（理由は `RULE.txt` §8）。判定 2 セルはともに非再現（ノイズ帯・判定不能）。数値は `aggregate-gb10.md`、ログは `gb10/`、解釈は perf doc §5.15。
-- 既定 ON へ戻すかの判断は所有者判断待ち（承認未取得）。
+- 所有者判断済み（2026-10-28。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3613#issuecomment-6445941159）: 2 セルの後退は非再現として記録し、SME 既定 ON を維持する。是正・再 A/B は行わない。`RULE.txt` §8 追記は事後承認済み。併記セル train 64 fresh の 5/5 後退は記録のみ（別 issue なし）。`RULE.txt` は事前登録規則のため判断の追記は行わない。
 - 規則は計測前に push して固定する。以後の訂正は `RULE.txt` 末尾への追記だけ。ただし §8 追記のみ push 前に `gb10/prereg_append.txt` のタイムスタンプ（hwlock 取得より前）で固定した。
 
 ## 目的
@@ -30,5 +30,5 @@
 
 ## スコープ外
 
-- `SME_PRODUCTION_ENABLED` の切替・既定 ON の再 A/B・是正（所有者判断）。
+- `SME_PRODUCTION_ENABLED` の切替・既定 ON の再 A/B・是正（所有者判断で再 A/B・是正は行わないと確定済み。上記「状態」）。
 - GB10 の PyTorch 相手比（venv なし。「未計測」と記録）。
