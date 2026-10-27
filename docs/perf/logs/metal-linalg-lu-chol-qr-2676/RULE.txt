@@ -1,0 +1,50 @@
+事前登録規則（イシュー #2676: Metal の LU 系・cholesky・QR の Mac mini 実機 parity）
+宣言日時（UTC）: 2026-10-27T10:20Z（実機実行より前。実機結果を見た後に入力・判定・件数の期待を変えない）
+
+位置づけ:
+  判定方式・入力集合・fail 時の扱いは ../metal-linalg-parity-3139/RULE.txt をそのまま採用する。
+  差し替えるのは「対象コミット」の条件だけである。#3139 の RULE は対象を d7d8d503 に固定し
+  「crates/ 配下が同一」を条件にしたが、その後 crates/ は他の変更で広く更新され、この条件は満たせない。
+  一方 d7d8d503 から本 RULE のコミットまでの差分を linalg 関連ファイル
+  （linalg.metal・linalg.rs・linalg_kernel.rs・linalg_model.rs・encoder_args.rs・context_cache.rs・
+  tests/linalg_parity.rs・tests/linalg_parity_inputs.rs・backend-cpu/src/linalg.rs）に絞ると差分は 0 件で、
+  唯一の差分は tests/linalg_parity_inputs_guard.rs（#3403 での κ₂ 上界の平方根を 2 回取る誤りの是正と
+  既知条件数の退行テスト追加。デバイスに触れず、判定は厳しくなる方向）である（2026-10-27 に git diff --stat で確認）。
+  #3139 の README と RULE は登録が異なるため更新しない。
+
+機体: Mac mini（Apple M4）のみ。ホスト名は記録しない（<metal-node>）。
+  M4 Max 開発機・Linux の値は判定にも根拠にも使わない。
+
+対象範囲: backend 層（fandhe-ai-backend-metal）のみ。facade には Metal ゲート ON のテストがない
+  （Metal のゲートは facade に公開していない。#2678・#2679）ため、CUDA 側の facade 実測とは意図的に異なる。
+
+コマンド（独立したプロセスで 5 回。各 run は別の ssh 呼び出し）:
+  CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai-backend-metal --release --test linalg_parity -- --ignored --nocapture
+  （計測中は他のビルドを並走させない。性能は測らず pass／fail のみ見る。--test-threads は指定しない）
+
+実行件数: 各 run で `running 6 tests` が出ること。0 件を含め期待と異なる run は無効で、pass の根拠にしない。
+
+判定:
+  各 run で次の 4 件がすべて pass し、`test result: ok. 6 passed; 0 failed`、終了コード 0 であること。
+    pipeline_compiles_on_device
+    cholesky_matches_cpu_on_device
+    lu_family_matches_cpu_on_device
+    qr_matches_cpu_on_device
+  assert_parity の fail は 0 件（RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD は不変。baseline 方式へは移らない）。
+  QR は「R と Q が有限」「R の対角が CPU 参照・実測とも 0 でない」「倍率で正規化した R の parity」も成立すること。
+  残り 2 件（status_mapping_end_to_end_on_device・gate_on_non_empty_does_not_return_unsupported）は
+  実行・記録するが parity 判定には含めない。
+  5 回すべてが上記を満たしたときだけ pass とする。再実行で結果を選ばない。ケースを除かない。
+
+対象コミット: 本 RULE.txt をコミットした HEAD。ノード上の .rev-stamp は 1 行目にフル SHA、2 行目に dirty=0 が必須で、
+  満たさない実測は無効。.rev-stamp は転送後にノード上へ直接書く（作業ツリーに作らない）。
+
+実機ロック: ~/work/.fandhe-hw-lock を mkdir で取得している間だけ実測する。失敗時も必ず解放する。
+
+fail 時の扱い:
+  tolerance・カーネル・入力集合・判定方式は変えない。該当テスト名・fail_count・max_abs_diff・max_rel_err を
+  README に fail として記録し、原因の仮説とカーネル側の是正方針を「要対応（所有者判断待ち）」として書く。
+  Issue の起票・コメント、baseline 化は承認なしでは行わない。PR に Closes #2676 は書かない。
+
+収録: ホスト名・ユーザー名・絶対パスは <metal-node>・<home> にマスクして収録する。
