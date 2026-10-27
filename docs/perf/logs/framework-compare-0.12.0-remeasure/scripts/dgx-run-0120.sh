@@ -33,6 +33,11 @@ echo "9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b  ${BP}" |
 cp "${ROOT}/.rev-stamp" "${LOGD}/rev-stamp.txt"; cp "${OLD_ROOT}/.rev-stamp" "${LOGD}/rev-stamp-old.txt"
 { nvidia-smi --query-gpu=name,driver_version --format=csv,noheader; echo "compute-apps:"; nvidia-smi --query-compute-apps=pid,name --format=csv,noheader; } > "${LOGD}/env_info.txt" 2>&1
 cd "${FC}"
+# pin 検査は計測前に行う（誤った pin で計測を終えてから fail しない）。fail() は FAILED を立てるので、ここでは即 exit する
+cargo tree --locked -p bench-fandhe --depth 1 | grep -E 'fandhe-ai v' > "${LOGD}/tree.txt"
+(cd "${OFC}" && cargo tree --locked -p bench-fandhe --depth 1 | grep -E 'fandhe-ai v') > "${LOGD}/tree-old.txt"
+for t in tree tree-old; do grep -q 'fandhe-ai v0\.12\.0$' "${LOGD}/${t}.txt" || fail "registry pin 0.12.0 not resolved (${t})"; done
+[ "${FAILED}" -eq 0 ] || { echo "pin 検査に失敗（計測前）"; exit 1; }
 echo "start $(date -u +%FT%TZ) new=$(cut -c1-8 "${ROOT}/.rev-stamp") old=$(cut -c1-8 "${OLD_ROOT}/.rev-stamp")"; uptime > "${LOGD}/uptime_before_all.txt"
 nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader > "${LOGD}/gpu_util_before.txt"
 rm -f results/raw/results-cuda.jsonl results/raw/skipped-cuda.log
@@ -45,9 +50,6 @@ uptime > "${LOGD}/uptime_after_all.txt"
 echo "stage1-done $(date -u +%FT%TZ) rows=$(wc -l < results/raw/results-cuda.jsonl) skipped=$(wc -l < results/raw/skipped-cuda.log)"
 expect_rows results/raw/results-cuda.jsonl 112 stage1
 expect_rows results/raw/skipped-cuda.log 0 "stage1 skipped"
-cargo tree --locked -p bench-fandhe --depth 1 | grep -E 'fandhe-ai v' > "${LOGD}/tree.txt"
-(cd "${OFC}" && cargo tree --locked -p bench-fandhe --depth 1 | grep -E 'fandhe-ai v') > "${LOGD}/tree-old.txt"
-for t in tree tree-old; do grep -q 'fandhe-ai v0\.12\.0$' "${LOGD}/${t}.txt" || fail "registry pin 0.12.0 not resolved (${t})"; done
 EX="${LOGD}/results-dgx-0.12.0-extra.jsonl"; : > "${EX}"
 for n in 256 512 1024 2048 4096; do ./target/release/bench-fandhe --task gemm --device cpu --size "${n}" --mode reuse --out "${EX}" 2>>"${LOGD}/extra.err" || fail "reuse ${n}"; done
 ./target/release/bench-fandhe --task gemm --device cpu --size 4096 --mode fresh --out "${EX}" 2>>"${LOGD}/extra.err" || fail "fresh 4096"
@@ -56,9 +58,8 @@ echo "stage2-done $(date -u +%FT%TZ) rows=$(wc -l < "${EX}")"
 expect_rows "${EX}" 8 stage2
 # stage4: 旧条件腕（判定 14 セル × fresh・reuse = 28 行）。段の位置は stage3 の前（新腕と位置が違う偏りは RULE に明記）。
 # 先後は run 番号の奇偶で fresh/reuse を入れ替える
-if [ ! -x "${OLD_TARGET}/release/bench-fandhe" ]; then
-  (cd "${OFC}" && cargo build --release --locked --target-dir "${OLD_TARGET}" > "${LOGD}/build-old.log" 2>&1) || fail "旧腕ビルド"
-fi
+# 旧腕バイナリは系列開始前に dgx-0120-loop.sh がビルドする。測定窓内ではビルドせず、無ければ fail（ビルド負荷・熱の混入防止）
+[ -x "${OLD_TARGET}/release/bench-fandhe" ] || { fail "旧腕バイナリなし（dgx-0120-loop.sh の事前ビルドが必要）"; echo "round FAILED."; exit 1; }
 OLDOUT="${LOGD}/results-dgx-old-0.12.0.jsonl"; : > "${OLDOUT}"
 RUN_NO="$(basename "${LOGD}" | tr -dc '0-9')"; RUN_NO="${RUN_NO:-1}"
 if [ $((RUN_NO % 2)) -eq 1 ]; then MODES="fresh reuse"; else MODES="reuse fresh"; fi

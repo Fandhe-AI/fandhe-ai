@@ -13,6 +13,8 @@ gate() { local t=0 raw l; while :; do
   echo "gate $(date -u +%FT%TZ) load1=${l}" >> "${B}/gate.log"
   if ! printf '%s' "${l}" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then echo "gate $(date -u +%FT%TZ) GATE-INVALID load1-not-numeric" >> "${B}/gate.log"; return 2; fi
   awk -v l="${l}" 'BEGIN{exit !(l<3.0)}' && return 0; t=$((t+60)); [ ${t} -ge 1800 ] && return 1; sleep 60; done; }
+# 事前検査: SKIP_BUILD=1 で回すため旧腕バイナリが無ければ開始前に fail する
+[ -x "${OLD_ROOT:?}/../target-old/release/bench-fandhe" ] || { echo "旧腕バイナリなし。系列 A の run1（ビルド込み）を先に実行すること"; exit 1; }
 done_n=0
 for i in 1 2 3 4 5; do
   grc=0; gate || grc=$?

@@ -15,7 +15,7 @@
 | `scripts/dgx-0120-loop.sh` | 5 round を同じループで実行。各 round 前に load1 < 1.0 かつ GPU 0% が 3 連続のゲート。`ALL-DONE completed=5/5` |
 | `aggregate/median_rounds.py` | 0.11.0 版のコピー（変更なし） |
 | `aggregate/swap_fandhe_arm.py` | 旧腕判定用: 新腕 JSONL の fandhe-ai 行を同 run の旧腕行で置換（`--self-test` あり） |
-| `aggregate/check_identity.py` | A1 の照合（tree・rev-stamp・行数。欠損は非零。`--self-test` あり） |
+| `aggregate/check_identity.py` | A1 の照合（tree・rev-stamp・行数。欠損は非零。`--self-test` あり。skipped ログの内容〈Mac mini は burn Metal の 4 件のみ許容〉は照合対象外で run スクリプト側が検査する） |
 
 Mac mini 側は `../framework-compare-0.12.0-macmini-remeasure/`。Mac mini と GB10 の値は同じ表に混ぜない。
 

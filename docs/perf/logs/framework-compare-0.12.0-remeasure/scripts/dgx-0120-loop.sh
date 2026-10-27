@@ -16,6 +16,13 @@ gate() { local t=0 ok=0 l g
     [ "${ok}" -ge 3 ] && return 0
     t=$((t+30)); [ "${t}" -ge 1800 ] && return 1; sleep 30
   done; }
+# 旧条件腕のビルドは系列開始前に 1 回だけ行う（round 内の測定窓へビルド負荷・熱を入れない）。
+# trap による Cargo.lock 復元の対象外だが、--locked なので Cargo.lock は書き換わらない（意図的）。
+ROOT="${ROOT:?new root}"; OLD_ROOT="${OLD_ROOT:?old root}"; OLD_TARGET="${OLD_ROOT}/../target-old"
+export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
+if [ ! -x "${OLD_TARGET}/release/bench-fandhe" ]; then
+  (cd "${OLD_ROOT}/scripts/bench/framework-compare" && cargo build --release --locked --target-dir "${OLD_TARGET}" > "${B}/build-old.log" 2>&1) || { echo "BUILD FAILED (old)"; exit 1; }
+fi
 done_n=0
 for i in 1 2 3 4 5; do
   grc=0; gate || grc=$?

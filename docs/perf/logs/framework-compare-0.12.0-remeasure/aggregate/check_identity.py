@@ -20,19 +20,24 @@ def check(new_sha, old_sha, spec, runs, expect_runs=5):
             p = os.path.join(d, name)
             if not os.path.isfile(p):
                 errs.append(f'{p} なし'); continue
-            if open(p).read().strip() != sha:
+            with open(p) as f:
+                got_sha = f.read().strip()
+            if got_sha != sha:
                 errs.append(f'{p} が RULE と不一致')
         for name in ('tree.txt', 'tree-old.txt'):
             p = os.path.join(d, name)
             if not os.path.isfile(p):
                 errs.append(f'{p} なし'); continue
-            if not re.search(r'fandhe-ai v0\.12\.0$', open(p).read(), re.M):
+            with open(p) as f:
+                tree_text = f.read()
+            if not re.search(r'fandhe-ai v0\.12\.0$', tree_text, re.M):
                 errs.append(f'{p} が fandhe-ai v0.12.0 でない')
         for fn, n in spec.items():
             p = os.path.join(d, fn)
             if not os.path.isfile(p):
                 errs.append(f'{p} なし'); continue
-            got = sum(1 for l in open(p) if l.strip())
+            with open(p) as f:
+                got = sum(1 for l in f if l.strip())
             if got != n:
                 errs.append(f'{p} 行数 {got}（期待 {n}）')
     return errs
