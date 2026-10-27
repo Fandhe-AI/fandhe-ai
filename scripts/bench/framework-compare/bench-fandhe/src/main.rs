@@ -110,7 +110,7 @@
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::{Device, SgdConfig, Tape, Tensor};
+use fandhe_ai::{Device, ResidentTensor, SgdConfig, Tape, Tensor};
 use std::time::{Duration, Instant};
 
 const FRAMEWORK: &str = "fandhe-ai";
@@ -192,6 +192,18 @@ const PHASE_GEMM_ITER_TOTAL: &str = "iter_total";
 // 参照。
 const PHASE_INFER_PREDICT: &str = "predict";
 const PHASE_INFER_PREDICT_RESIDENT: &str = "predict_resident";
+
+/// 区間記録が有効なときだけ `Instant::now()` を取る（無効時は時計を読まない）。
+fn lap_start(phases: &Option<PhaseSamples>) -> Option<Instant> {
+    phases.as_ref().map(|_| Instant::now())
+}
+
+/// [`lap_start`] が `Some` のときだけ経過を `phase` へ記録する。
+fn lap_end(phases: &mut Option<PhaseSamples>, phase: &'static str, t0: Option<Instant>) {
+    if let (Some(p), Some(t0)) = (phases.as_mut(), t0) {
+        p.push(phase, t0.elapsed());
+    }
+}
 
 /// `train --phases` の 1 step 分の区間計測を保持する順序付きサンプル集合
 /// （イシュー #1009）。phase の初出順が `phase_index`（README「train
@@ -312,6 +324,27 @@ impl std::ops::Deref for HostReadout {
     }
 }
 
+/// 常駐経路（#3272）の出力 [`readout_tensor`] の戻り型。`Deref` は実装せず、
+/// 要素スライスの取得を [`TensorReadout::slice`]（`Result`）に限る。
+/// 本番経路の panic を避け、非 contiguous の前提崩れを型付きエラーで返す。
+enum TensorReadout {
+    /// contiguous テンソルを memcpy なしで借用する（構築側が `as_slice()` が
+    /// `Some` のものだけを入れる）。
+    Shared(Tensor<f32>),
+    Owned(Vec<f32>),
+}
+
+impl TensorReadout {
+    fn slice(&self) -> Result<&[f32], Box<dyn std::error::Error>> {
+        match self {
+            TensorReadout::Shared(t) => t
+                .as_slice()
+                .ok_or_else(|| "TensorReadout::Shared は contiguous テンソル専用".into()),
+            TensorReadout::Owned(vec) => Ok(vec.as_slice()),
+        }
+    }
+}
+
 /// Host-materialize a Var result and return a checksum (forces sync).
 ///
 /// CPU/CUDA は借用ビュー（`Var::host_view()`）に対して `f64` 逐次和を
@@ -390,6 +423,61 @@ fn checksum_tensor(
             .to_vec();
         Ok(slice.iter().map(|&x| x as f64).sum())
     }
+}
+
+/// 常駐経路（#3272）が返す `Tensor<f32>` を [`TensorReadout`] へ変える。
+/// 分岐は [`readout_var`] と同じ [`readout_uses_borrowed_view`] を共有する:
+/// 既定は contiguous なら memcpy なしで借用し、非 contiguous か
+/// `--readout legacy` のときだけ `to_vec` で実体化する。`gemm reuse` が
+/// `matmul_resident` の戻り値に要素単位の parity 検証（`verify_strict`）を
+/// 掛けるために使う（`checksum_tensor` は和しか返さないため別に必要）。
+fn readout_tensor(
+    t: Tensor<f32>,
+    readout_override: Option<&str>,
+) -> Result<TensorReadout, Box<dyn std::error::Error>> {
+    if readout_uses_borrowed_view(readout_override) {
+        let c = t.contiguous();
+        if c.as_slice().is_some() {
+            return Ok(TensorReadout::Shared(c));
+        }
+        return Ok(TensorReadout::Owned(c.host_slice().into_owned()));
+    }
+    let owned = t
+        .contiguous()
+        .as_slice()
+        .ok_or("as_slice() returned None after contiguous()")?
+        .to_vec();
+    Ok(TensorReadout::Owned(owned))
+}
+
+/// `gemm --mode reuse` が常駐入力経路（`Tape::upload_resident`／
+/// `matmul_resident`。fandhe-ai 0.12.0・#3250）を使うかを計測前に決める。
+/// 0.12.0 の CUDA `gemm_device` は `Fp32Strict` のみ対応で TF32 系は
+/// `Unsupported` になるため、`--tf32` はホスト入力・Tape 経路のまま残す
+/// （計測中に `Unsupported` で初めて気づかないよう純関数で固定する。#3272）。
+/// `--device-checksum` は常駐版の `matmul_checksum` が無く、tape にノードを
+/// 積まない従来経路（`run_gemm_reuse_device_checksum`）のまま残す。
+fn gemm_reuse_uses_resident_input(cli: &Cli) -> bool {
+    !cli.tf32 && !cli.device_checksum
+}
+
+/// `train --mode reuse` が学習ステップ入口（`Sequential::train_step_resident`。
+/// #3250 P4）を使うかを計測前に決める。`--graph` が capture するのは
+/// `DeviceParamStore::step` の update 区間（#1350）でチェーンは `step` を
+/// 通らないため、`--graph` 指定時はホスト入力・Tape 経路のまま残す（#3272）。
+fn train_reuse_uses_resident_chain(cli: &Cli) -> bool {
+    cli.graph.is_none()
+}
+
+/// `gemm --mode reuse` の常駐経路で `upload_resident` が要求する
+/// `DeviceParamStore` を作る。gemm にはモデルが無いので最小の 1 層
+/// `Sequential` を束縛用に使う（`matmul_resident` は store の世代を見ない。
+/// 費用は `init_s` に入る。#3272）。
+fn gemm_binding_store(
+    tape: &Tape,
+) -> Result<fandhe_ai::DeviceParamStore, Box<dyn std::error::Error>> {
+    let model = Sequential::new().add_linear(1, 1, SEED_L1)?;
+    Ok(model.init_device_param_store(tape)?)
 }
 
 fn gemm_inputs(n: usize) -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> {
@@ -548,6 +636,56 @@ fn release_gemm_reuse_iteration(tape: &mut Tape) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+/// `gemm --mode reuse` の入口（#3272）。常駐入力経路が使える条件
+/// （[`gemm_reuse_uses_resident_input`]）なら [`run_gemm_reuse_resident`]、
+/// `--tf32`／`--device-checksum` はホスト入力・Tape 経路
+/// （[`run_gemm_reuse_host_input`]）へ振り分ける。経路は計測前に決まる。
+fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if gemm_reuse_uses_resident_input(cli) {
+        run_gemm_reuse_resident(cli)
+    } else {
+        run_gemm_reuse_host_input(cli)
+    }
+}
+
+/// `gemm --mode reuse` の常駐入力経路（#3272）。計測は
+/// [`measure_gemm_reuse_resident`]、ここは Record の出力だけを担う。
+fn run_gemm_reuse_resident(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let run = measure_gemm_reuse_resident(cli, false)?;
+    let n = cli.size;
+    let measured = &run.durations[run.durations.len() - MEASURE_ITERS..];
+    let st = stats(measured)?;
+    Record {
+        framework: FRAMEWORK,
+        framework_version: VERSION,
+        task: "gemm",
+        device: &cli.device,
+        size: n,
+        stats: st,
+        gflops: Some(gemm_gflops(n, st.median_s)),
+        throughput_per_s: None,
+        checksum: run.checksum,
+        warmup: WARMUP_ITERS,
+        iters: MEASURE_ITERS,
+        mode: "reuse",
+        init_s: Some(run.init_s),
+        parity: Some(run.parity),
+        tf32: false,
+        managed: cli.managed,
+        device_checksum: false,
+        graph: None,
+        graph_stats: None,
+        readout: cli.readout.as_deref(),
+        metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
+    }
+    .emit(&cli.out)?;
+    Ok(())
+}
+
+/// ホスト入力・Tape 経路の gemm reuse（#3272 以降は `--tf32`／`--device-checksum`
+/// 専用。旧条件の再現はこの関数が担う）。
+///
 /// `--mode reuse` の gemm 計測（イシュー #925）。tape/デバイスを 1 回だけ
 /// 構築し、その構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの経過を
 /// init_s として分離記録したうえで、同一 tape 上で warmup 残り + 計測を回す。
@@ -555,7 +693,7 @@ fn release_gemm_reuse_iteration(tape: &mut Tape) -> Result<(), Box<dyn std::erro
 /// たびに tape へ蓄積される（N=2048 で約 16 MiB/回 × 40 回 ≒ 640 MiB。
 /// N=4096 でも約 2.6 GiB で対象 GPU メモリ内に収まる。README 計測プロトコル
 /// 節に明記）。
-fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run_gemm_reuse_host_input(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
     let (a_data, b_data) = gemm_inputs(n)?;
     // イシュー #970: 参照 GEMM は init_s 計測（tape/デバイス初期化コスト）
@@ -838,17 +976,43 @@ fn run_gemm_reuse_device_checksum(
     Ok(())
 }
 
-/// `gemm --mode reuse --phases`（イシュー #1182）の計測本体。`run_gemm_reuse`
-/// と**同一の処理順・同一 API 呼び出し**（参照 GEMM を init 前に計算・
-/// init_s の定義・`validate_gemm_checksum` を全反復で実施・
-/// `GemmReference::verify` は計測窓外で worst 集約）を保ちながら、
-/// `readout_var`（`to_tensor` + `contiguous().as_slice().to_vec()` を
-/// まとめて呼ぶ）をここでは展開し、`to_tensor`／`host_copy`（ホスト
-/// コピー）／`checksum`（全要素和）を個別区間として `Instant` で計時する。
-/// `run_gemm_reuse` 本体は本関数の追加によって変更しない（AC-2）。
-fn measure_gemm_reuse_phases(
+/// 常駐経路の gemm reuse 計測結果（[`measure_gemm_reuse_resident`] の戻り値）。
+/// JSONL の checksum は `{:.6}` 出力で bit 比較できないため、bit 一致テスト用に
+/// 生の値（最終出力の bits）をここへ残す。
+struct GemmResidentRun {
+    /// 反復ごとの区間（`iter_total` は窓全体）。warmup 残り + 計測の全反復分。
+    /// `record_phases` が偽なら `None`（通常計測では区間を記録しない）。
+    phases: Option<PhaseSamples>,
+    /// 反復ごとの窓全体（`phases` の `iter_total` と同値）。
+    durations: Vec<Duration>,
+    checksum: f64,
+    init_s: f64,
+    parity: ParityStats,
+    /// 最終反復の出力要素の bits（bit 一致テスト専用。本体の出力には使わない）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    last_out_bits: Vec<u32>,
+}
+
+/// `gemm --mode reuse` の常駐入力経路（#3272。fandhe-ai 0.12.0・#3250）の
+/// 計測本体。`run_gemm_reuse`（主行）と `run_gemm_reuse_phases`（区間分解）の
+/// 両方がこの 1 関数を通るので、2 つの条件が食い違わない。
+///
+/// 比較相手（candle・PyTorch）は A・B を計測窓の外で 1 回だけデバイスへ置く。
+/// ここでも `upload_resident` を init で 1 回だけ呼び、窓の中は
+/// `matmul_resident`（カーネル・D2H・同期を含む。tape にノードを積まない）→
+/// readout → checksum だけにする（#3264 §7.1 (4)）。結果ノードの蓄積
+/// （#3265 の解放処理が必要だった非対称）は構造的に生じない。
+///
+/// init_s: tape 構築 + 束縛用 store 作成 + A・B の upload + 初回
+/// `matmul_resident` + readout（最初の D2H が upload の完了を保証する）。
+/// 参照 GEMM は init_s を汚さないよう `init_start` より前に計算する。
+/// 窓の外で `validate_gemm_checksum` と `verify_strict` を全反復で行い、
+/// worst 集約する。常駐 API の `Unsupported` 等はホスト経路へ戻さず
+/// `MEASURE_ERROR` として返す（別条件の行が `reuse` として残るのを防ぐ）。
+fn measure_gemm_reuse_resident(
     cli: &Cli,
-) -> Result<(PhaseSamples, f64, f64, ParityStats), Box<dyn std::error::Error>> {
+    record_phases: bool,
+) -> Result<GemmResidentRun, Box<dyn std::error::Error>> {
     let n = cli.size;
     let (a_data, b_data) = gemm_inputs(n)?;
     let a_host = a_data
@@ -862,102 +1026,103 @@ fn measure_gemm_reuse_phases(
         .ok_or("b_data as_slice() returned None")?
         .to_vec();
     let reference = GemmReference::compute(n, &a_host, &b_host)?;
+    let ro = cli.readout.as_deref();
 
-    // init_s: `run_gemm_reuse` と同一定義（tape 構築 + 葉 Var 登録 +
-    // 初回 matmul + ホスト実体化までの経過）。区間分解の対象は warmup
-    // 残り + 計測本体のみとし、init 自体は phase を push しない
-    // （`measure_train_reuse_phases` の init と同型）。
     let init_start = Instant::now();
-    let mut tape = make_tape(&cli.device)?;
-    let (mut checksum, init_s, mut parity) = {
-        let a = tape.var(&a_data);
-        let b = tape.var(&b_data);
-        let c0 = a.matmul(&b)?;
-        let out0 = readout_var(&c0, cli.readout.as_deref())?;
-        let checksum: f64 = out0.iter().map(|&x| x as f64).sum();
-        let init_s = init_start.elapsed().as_secs_f64();
-        validate_gemm_checksum(checksum)?;
-        (checksum, init_s, reference.verify_strict(&out0)?)
-    };
-    // #3265: `run_gemm_reuse` と同じく結果ノードを窓の外で解放する。
-    release_gemm_reuse_iteration(&mut tape)?;
+    let tape = make_tape(&cli.device)?;
+    let store = gemm_binding_store(&tape)?;
+    let ra: ResidentTensor = tape.upload_resident(&store, &a_data)?;
+    let rb: ResidentTensor = tape.upload_resident(&store, &b_data)?;
+    let c0 = tape.matmul_resident(&ra, &rb)?;
+    let out0 = readout_tensor(c0, ro)?;
+    let out0_slice = out0.slice()?;
+    let mut checksum: f64 = out0_slice.iter().map(|&x| x as f64).sum();
+    let init_s = init_start.elapsed().as_secs_f64();
+    validate_gemm_checksum(checksum)?;
+    let mut parity = reference.verify_strict(out0_slice)?;
+    drop(out0);
 
-    let mut phases = PhaseSamples::new();
-    // 1 回は init 計測内で消費済み（`run_gemm_reuse` と同じ warmup 消費
-    // 規約）。
+    // 区間記録は診断（`--phases`）のときだけ有効にする。通常計測では
+    // 区間用の `Instant::now`／`PhaseSamples::push` を一切実行せず、
+    // 主行の median_s・GFLOP/s へ診断費用を混入させない（codex P2）。
+    let mut phases: Option<PhaseSamples> = record_phases.then(PhaseSamples::new);
+    let mut durations = Vec::new();
+    let mut last_out_bits = Vec::new();
+    // 1 回は init 計測内で消費済み（run_gemm_reuse の warmup 消費規約）。
     let total_iters = WARMUP_ITERS.saturating_sub(1) + MEASURE_ITERS;
-    for _ in 0..total_iters {
-        // 葉の再取得は計測窓（`iter_start`）の外（#3265）。
-        let (a, b) = gemm_reuse_leaves(&tape)?;
+    for i in 0..total_iters {
         let iter_start = Instant::now();
 
-        let t0 = Instant::now();
-        let c = a.matmul(&b)?;
-        phases.push(PHASE_GEMM_MATMUL, t0.elapsed());
+        let t0 = lap_start(&phases);
+        let c = tape.matmul_resident(&ra, &rb)?;
+        lap_end(&mut phases, PHASE_GEMM_MATMUL, t0);
 
-        // イシュー #1337・#1438: `to_tensor`／`host_copy` の 2 区間は
-        // `readout_var` の実装（`readout_uses_borrowed_view` 分岐）を
-        // ここで展開したもの（module doc・README「`gemm --mode reuse
-        // --phases`」節参照）。区間名・順序・件数（5 区間）はいずれの
-        // 分岐でも不変。`readout_var` と同じく
-        // [`readout_uses_borrowed_view`]（codex-review 指摘・PR #1452
-        // P2）の判定を共有し、`--phases` 診断と gemm 本体計測の間で
-        // 分岐が矛盾しない。
-        let out = if readout_uses_borrowed_view(cli.readout.as_deref()) {
-            // `to_tensor` 区間: `Var::host_view()` の構築
-            // （`materialize_non_fallible(..).contiguous()`。contiguous
-            // な場合は `Tensor` 内部 `Arc` の複製のみで memcpy を伴わない
-            // ——旧 `to_tensor` 区間が担っていた「`Tape` 借用からの
-            // 実体化」に対応する区間として維持する）。
-            let t0 = Instant::now();
-            let view = c.host_view();
-            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
-
-            // `host_copy` 区間: 借用スライスの取得（`Deref::deref`。
-            // 追加コピーなし・旧区間の memcpy が消える想定値 ≈0。
-            // #1182 §6/§9 が確定した「host_copy が主因」を打ち消す本
-            // 変更の中心区間）。
-            let t0 = Instant::now();
-            let out: &[f32] = &view;
-            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
-            let _ = out;
-            HostReadout::Borrowed(view)
+        // `to_tensor`: readout の構築（借用ビューでは contiguous の `Arc` 複製
+        // だけで ≈0）。`host_copy`: スライス取得（借用では ≈0）、`--readout
+        // legacy` では `to_vec` の memcpy 本体。区間名・順序・件数は不変。
+        let out = if readout_uses_borrowed_view(ro) {
+            let t0 = lap_start(&phases);
+            let out = readout_tensor(c, ro)?;
+            lap_end(&mut phases, PHASE_GEMM_TO_TENSOR, t0);
+            let t0 = lap_start(&phases);
+            out.slice()?;
+            lap_end(&mut phases, PHASE_GEMM_HOST_COPY, t0);
+            out
         } else {
-            // `to_tensor` 区間: `Var::to_tensor()`（`Tape` の `RefCell`
-            // 借用から `Tensor<f32>` へ複製）。
-            let t0 = Instant::now();
-            let t = c.to_tensor();
-            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
-
-            // `host_copy` 区間: `contiguous().as_slice().to_vec()`
-            // （旧 legacy 経路の memcpy 本体）。
-            let t0 = Instant::now();
-            let owned = t
-                .contiguous()
+            let t0 = lap_start(&phases);
+            let cont = c.contiguous();
+            lap_end(&mut phases, PHASE_GEMM_TO_TENSOR, t0);
+            let t0 = lap_start(&phases);
+            let owned = cont
                 .as_slice()
                 .ok_or("as_slice() returned None after contiguous()")?
                 .to_vec();
-            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
-            HostReadout::Owned(owned)
+            lap_end(&mut phases, PHASE_GEMM_HOST_COPY, t0);
+            TensorReadout::Owned(owned)
         };
+        let out_slice = out.slice()?;
 
-        let t0 = Instant::now();
-        checksum = out.iter().map(|&x| x as f64).sum();
-        phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
+        let t0 = lap_start(&phases);
+        checksum = out_slice.iter().map(|&x| x as f64).sum();
+        lap_end(&mut phases, PHASE_GEMM_CHECKSUM, t0);
 
-        // `run_gemm_reuse` と同じく、elapsed の計測窓はここで閉じる
-        // （checksum 計算までを計時対象とし、以降の検証コストは含めない）。
-        phases.push(PHASE_GEMM_ITER_TOTAL, iter_start.elapsed());
+        let elapsed = iter_start.elapsed();
+        if let Some(p) = phases.as_mut() {
+            p.push(PHASE_GEMM_ITER_TOTAL, elapsed);
+        }
+        durations.push(elapsed);
 
         validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify_strict(&out)?);
-        // `Borrowed` の `Arc` と `Var` 借用を手放してから reset する（#3265。
-        // phase は 5 区間のまま増やさない）。
-        drop(out);
-        release_gemm_reuse_iteration(&mut tape)?;
+        parity = parity.worst(reference.verify_strict(out_slice)?);
+        if i + 1 == total_iters {
+            last_out_bits = out_slice.iter().map(|x| x.to_bits()).collect();
+        }
     }
 
-    Ok((phases, checksum, init_s, parity))
+    Ok(GemmResidentRun {
+        phases,
+        durations,
+        checksum,
+        init_s,
+        parity,
+        last_out_bits,
+    })
+}
+
+/// `gemm --mode reuse --phases`（イシュー #1182）の計測本体。#3272 以降は
+/// 主行（`run_gemm_reuse`）と同じ常駐入力経路（[`measure_gemm_reuse_resident`]）
+/// を区間分解する。区間名 5 つと順序は `summarize.py` の固定契約のまま、
+/// 意味だけが変わる: `matmul` = `matmul_resident`（カーネル・D2H・同期を含む）、
+/// `to_tensor` = readout の構築、`host_copy` = スライス取得（legacy は
+/// `to_vec`）、`checksum` = 全要素和。
+fn measure_gemm_reuse_phases(
+    cli: &Cli,
+) -> Result<(PhaseSamples, f64, f64, ParityStats), Box<dyn std::error::Error>> {
+    let run = measure_gemm_reuse_resident(cli, true)?;
+    let phases = run
+        .phases
+        .ok_or("measure_gemm_reuse_resident: 区間記録が有効なのに phases が None")?;
+    Ok((phases, run.checksum, run.init_s, run.parity))
 }
 
 /// [`measure_gemm_reuse_phases`] の結果を phase ごとに 1 行の JSONL
@@ -1163,6 +1328,148 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `train --mode reuse` の入口（#3272）。`--graph` 指定なら
+/// ホスト入力・Tape 経路（[`run_train_reuse_host_input`]）、それ以外は
+/// 学習ステップ入口の常駐経路（[`run_train_reuse_chain`]）。経路は
+/// [`train_reuse_uses_resident_chain`] で計測前に決まる。
+fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if train_reuse_uses_resident_chain(cli) {
+        run_train_reuse_chain(cli)
+    } else {
+        run_train_reuse_host_input(cli)
+    }
+}
+
+/// 常駐経路の train reuse 計測結果（[`measure_train_reuse_chain`] の戻り値）。
+struct TrainChainRun {
+    durations: Vec<Duration>,
+    last_loss: f32,
+    init_s: f64,
+    /// 終端同期した更新後パラメータの bits（bit 一致テスト専用）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    synced_bits: Vec<Vec<u32>>,
+}
+
+/// `train --mode reuse` の常駐経路の計測本体（#3272。fandhe-ai 0.12.0・
+/// #3250 P2/P4/P6/P7）。比較相手は X・Y を計測窓の外で 1 回だけデバイスへ
+/// 置くので、ここでも `upload_resident` を init で 1 回だけ呼ぶ。窓の中は
+/// `train_step_resident`（forward・backward・SGD 更新を 1 入口で）と
+/// `ResidentLoss::read`（毎 step の唯一の D2H・同期点）だけで、step ごとの
+/// `make_tape`・`var`・backward・step は窓から消える（#3264 §7.1 (5)）。
+/// `read` が前 step までの積み残しを待つので、窓は 1 step 分に揃う。
+///
+/// init_s: tape 作成 + `init_device_param_store` + X・Y の upload +
+/// `wait_device_param_store`（P7。D2H なしの完了待ち。旧実装は公開面に無く
+/// `sync_device_param_store_to_host` で代替していた）。終端の
+/// `sync_device_param_store_to_host`（件数・非有限の A08 検査）は窓の外で残す。
+/// 常駐 API の失敗はホスト経路へ戻さず `MEASURE_ERROR` で返す。
+fn measure_train_reuse_chain(cli: &Cli) -> Result<TrainChainRun, Box<dyn std::error::Error>> {
+    let model = build_model()?;
+    let (x_data, y_data) = mlp_data()?;
+
+    let init_start = Instant::now();
+    let init_tape = make_tape(&cli.device)?;
+    let mut store = model.init_device_param_store(&init_tape)?;
+    let rx = init_tape.upload_resident(&store, &x_data)?;
+    let ry = init_tape.upload_resident(&store, &y_data)?;
+    init_tape.wait_device_param_store(&store)?;
+    drop(init_tape);
+    let init_s = init_start.elapsed().as_secs_f64();
+
+    let config = SgdConfig::new(LR);
+    let mut durations = Vec::with_capacity(TRAIN_STEPS);
+    let mut last_loss = 0.0f32;
+    for _ in 0..TRAIN_STEPS {
+        let start = Instant::now();
+        let loss = model.train_step_resident(&mut store, &rx, &ry, &config)?;
+        last_loss = loss.read(&mut store)?;
+        durations.push(start.elapsed());
+    }
+
+    if !last_loss.is_finite() {
+        return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
+    }
+
+    let synced_bits = verify_synced_params(&model, &cli.device, &store)?;
+    Ok(TrainChainRun {
+        durations,
+        last_loss,
+        init_s,
+        synced_bits,
+    })
+}
+
+/// 終端同期（窓の外）: 新規 tape から `DeviceParamStore` をホストへ実体化し、
+/// 件数が `trainable_parameters()` と一致し全要素が有限であることを検査する
+/// （A08: 破損した学習結果を性能値として残さない）。更新後パラメータの bits
+/// を返す。
+fn verify_synced_params(
+    model: &Sequential,
+    device: &str,
+    store: &fandhe_ai::DeviceParamStore,
+) -> Result<Vec<Vec<u32>>, Box<dyn std::error::Error>> {
+    let final_tape = make_tape(device)?;
+    let synced = final_tape.sync_device_param_store_to_host(store)?;
+    let expected_len = model.trainable_parameters().len();
+    if synced.len() != expected_len {
+        return Err(format!(
+            "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
+            synced.len()
+        )
+        .into());
+    }
+    let mut bits = Vec::with_capacity(synced.len());
+    for t in &synced {
+        let slice = t
+            .contiguous()
+            .as_slice()
+            .ok_or("synced param as_slice() returned None")?
+            .to_vec();
+        if slice.iter().any(|v| !v.is_finite()) {
+            return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
+        }
+        bits.push(slice.iter().map(|v| v.to_bits()).collect());
+    }
+    Ok(bits)
+}
+
+/// 常駐経路の train reuse の Record 出力（計測は [`measure_train_reuse_chain`]）。
+/// `graph` は常に `None`（`--graph` はこの経路に来ない）。
+fn run_train_reuse_chain(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let run = measure_train_reuse_chain(cli)?;
+    let measured = &run.durations[TRAIN_WARMUP..];
+    let st = stats(measured)?;
+    Record {
+        framework: FRAMEWORK,
+        framework_version: VERSION,
+        task: "train",
+        device: &cli.device,
+        size: BATCH,
+        stats: st,
+        gflops: None,
+        throughput_per_s: None,
+        checksum: run.last_loss as f64,
+        warmup: TRAIN_WARMUP,
+        iters: measured.len(),
+        mode: "reuse",
+        init_s: Some(run.init_s),
+        parity: None,
+        tf32: false,
+        managed: cli.managed,
+        device_checksum: false,
+        graph: None,
+        graph_stats: None,
+        readout: None,
+        metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
+    }
+    .emit(&cli.out)?;
+    Ok(())
+}
+
+/// ホスト入力・Tape 経路の train reuse（#3272 以降は `--graph` 専用。
+/// 旧条件の再現はこの関数が担う）。
+///
 /// `--mode reuse` の train 計測（イシュー #958）。`DeviceParamStore` を
 /// 1 回だけ構築し（`init_s` として初期化コストを分離記録）、以後の各 step
 /// は新規 tape 上で `forward_resident` → `backward_device_param_store` →
@@ -1175,7 +1482,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// 型付きエラーで拒否する。`store` の DeviceParamStore を渡す
 /// `Tape::backward_device_param_store` が必須（`docs/device-resident-
 /// update-design.md` §3.3e・`docs/compat-api-scope.md`「backward」節）。
-fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run_train_reuse_host_input(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let model = build_model()?;
     let (x_data, y_data) = mlp_data()?;
 
@@ -1192,6 +1499,9 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // 最初の `forward_resident` 内の download 同期（暗黙のストリーム
     // 同期点）へ計上されてしまう（codex-review PR #998 P2 指摘 1）。
     //
+    // （#3272 注記: 0.12.0 は D2H なしの完了待ち `wait_device_param_store`
+    // を公開済みで、常駐経路 `measure_train_reuse_chain` はそれを使う。この
+    // Tape 経路は旧条件の再現用に以下の定義を保つ。）
     // 完了を保証する同期点として `sync_device_param_store_to_host` を
     // 使うのは、`bench-fandhe` が依存できる公開 API 面（`fandhe-ai
     // =0.4.0`。第 9 区分の適用範囲拡張・`.claude/rules/deps-policy.md`）
@@ -1687,17 +1997,21 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let batch = infer_batch()?;
     let x_data = infer_input(batch)?;
 
+    // #3272: x は init で 1 回だけ upload し（比較相手が X を窓の外で置くのと
+    // 揃える。#3264 §7.1 (4)）、完了は D2H なしの `wait_device_param_store`
+    // （P7）で保証する。窓の中は `predict_resident_input` + checksum だけ。
     let init_start = Instant::now();
     let init_tape = make_tape(&cli.device)?;
     let store = model.init_device_param_store(&init_tape)?;
-    let _ = init_tape.sync_device_param_store_to_host(&store)?;
+    let rx = init_tape.upload_resident(&store, &x_data)?;
+    init_tape.wait_device_param_store(&store)?;
     drop(init_tape);
     let init_s = init_start.elapsed().as_secs_f64();
 
     let mut checksum = 0.0;
     let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
-        let out = model.predict_resident(&store, &x_data)?;
+        let out = model.predict_resident_input(&store, &rx)?;
         *sync_checksum = checksum_tensor(&out, cli.readout.as_deref())?;
         Ok(start.elapsed())
     };
@@ -1714,31 +2028,10 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("MEASURE_ERROR: final checksum not finite: {checksum}").into());
     }
 
-    // 終端同期: `run_train_reuse`/`measure_train_reuse_phases` と同一の
-    // 検証（A08: 破損した推論結果を性能値として残さない）。
-    // `predict_resident` は `store` を `&DeviceParamStore` で読むのみで
-    // 更新しないため、init 直後との差分は生じないはずだが、reuse する
+    // 終端同期（A08: 破損した推論結果を性能値として残さない）。
+    // `predict_resident_input` は `store` を読むのみで更新しないが、reuse する
     // store がここまでの呼び出しで壊れていないことを終端でも確認する。
-    let final_tape = make_tape(&cli.device)?;
-    let synced = final_tape.sync_device_param_store_to_host(&store)?;
-    let expected_len = model.trainable_parameters().len();
-    if synced.len() != expected_len {
-        return Err(format!(
-            "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
-            synced.len()
-        )
-        .into());
-    }
-    for t in &synced {
-        let slice = t
-            .contiguous()
-            .as_slice()
-            .ok_or("synced param as_slice() returned None")?
-            .to_vec();
-        if slice.iter().any(|v| !v.is_finite()) {
-            return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
-        }
-    }
+    verify_synced_params(&model, &cli.device, &store)?;
 
     let st = stats(&durations)?;
     Record {
@@ -1800,10 +2093,14 @@ fn measure_infer_phases(
     let iters = WARMUP_ITERS + MEASURE_ITERS;
 
     let init_s = if mode == "reuse" {
+        // #3272: `run_infer_reuse` と同じく x は init で upload 済み。区間名
+        // `predict_resident` は固定契約のため維持し、意味は
+        // `predict_resident_input` の呼び出しを測る区間になる。
         let init_start = Instant::now();
         let init_tape = make_tape(&cli.device)?;
         let store = model.init_device_param_store(&init_tape)?;
-        let _ = init_tape.sync_device_param_store_to_host(&store)?;
+        let rx = init_tape.upload_resident(&store, &x_data)?;
+        init_tape.wait_device_param_store(&store)?;
         drop(init_tape);
         let init_s = init_start.elapsed().as_secs_f64();
 
@@ -1811,7 +2108,7 @@ fn measure_infer_phases(
             let iter_start = Instant::now();
 
             let t0 = Instant::now();
-            let out = model.predict_resident(&store, &x_data)?;
+            let out = model.predict_resident_input(&store, &rx)?;
             phases.push(PHASE_INFER_PREDICT_RESIDENT, t0.elapsed());
 
             // イシュー #1438 codex-review 指摘（PR #1452 P2）:
@@ -1843,26 +2140,7 @@ fn measure_infer_phases(
         }
 
         // 終端同期（`run_infer_reuse` と同一の検証。A08）。
-        let final_tape = make_tape(&cli.device)?;
-        let synced = final_tape.sync_device_param_store_to_host(&store)?;
-        let expected_len = model.trainable_parameters().len();
-        if synced.len() != expected_len {
-            return Err(format!(
-                "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
-                synced.len()
-            )
-            .into());
-        }
-        for t in &synced {
-            let s = t
-                .contiguous()
-                .as_slice()
-                .ok_or("synced param as_slice() returned None")?
-                .to_vec();
-            if s.iter().any(|v| !v.is_finite()) {
-                return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
-            }
-        }
+        verify_synced_params(&model, &cli.device, &store)?;
         Some(init_s)
     } else if cli.device == "cpu" {
         for _ in 0..iters {
@@ -4484,5 +4762,179 @@ mod tests {
         let yb: Vec<u32> = ys.as_slice().unwrap().iter().map(|v| v.to_bits()).collect();
         assert_eq!(xb, yb);
         assert_eq!(infer_input(1024).unwrap().shape(), &[1024, D_IN]);
+    }
+
+    // ---- #3272: 常駐入力・学習ステップ入口の経路が従来経路と bit 一致すること ----
+
+    /// ホスト入力・Tape 経路の gemm 1 回分（readout の bits と checksum）。
+    fn gemm_tape_reference(device: &str, n: usize) -> (Vec<u32>, f64) {
+        let (a, b) = gemm_inputs(n).expect("inputs");
+        let tape = make_tape(device).expect("tape");
+        let c = tape.var(&a).matmul(&tape.var(&b)).expect("matmul");
+        let out = readout_var(&c, None).expect("readout");
+        let sum: f64 = out.iter().map(|&x| x as f64).sum();
+        (out.iter().map(|x| x.to_bits()).collect(), sum)
+    }
+
+    fn check_gemm_resident_bit_exact(device: &str, n: usize) {
+        let out = temp_out_path("gemm-resident-bit");
+        let mut cli = make_cli("gemm", "reuse", out.path());
+        cli.device = device.to_string();
+        cli.size = n;
+        let run = measure_gemm_reuse_resident(&cli, true).expect("resident run");
+        let (bits, sum) = gemm_tape_reference(device, n);
+        assert_eq!(run.last_out_bits, bits, "{device} N={n}: 出力 bits 不一致");
+        assert_eq!(
+            run.checksum.to_bits(),
+            sum.to_bits(),
+            "{device} N={n}: checksum bits 不一致"
+        );
+        assert_eq!(run.parity.fail_count, 0, "{device} N={n}: parity fail");
+        // 5 区間・件数一致（summarize.py の固定契約）。
+        assert_eq!(run.phases.as_ref().expect("phases").order.len(), 5);
+        let total = WARMUP_ITERS.saturating_sub(1) + MEASURE_ITERS;
+        assert_eq!(run.durations.len(), total);
+    }
+
+    #[test]
+    fn gemm_reuse_resident_matches_host_input_bit_exact() {
+        check_gemm_resident_bit_exact("cpu", 64);
+        check_gemm_resident_bit_exact("cpu", 512);
+    }
+
+    fn train_tape_reference(device: &str) -> (u32, Vec<Vec<u32>>) {
+        let (x_data, y_data) = mlp_data().expect("mlp_data");
+        let model = build_model().expect("model");
+        let init_tape = make_tape(device).expect("tape");
+        let mut store = model.init_device_param_store(&init_tape).expect("store");
+        drop(init_tape);
+        let config = SgdConfig::new(LR);
+        let mut last = 0.0f32;
+        for _ in 0..TRAIN_STEPS {
+            let tape = make_tape(device).expect("tape");
+            let x = tape.var_no_grad(&x_data);
+            let y = tape.var(&y_data);
+            let pred = model.forward_resident(&tape, &x, &mut store).expect("fwd");
+            let loss = pred.mse_loss(&y).expect("mse");
+            last = loss.to_tensor().get(&[]).expect("scalar");
+            let grads = tape
+                .backward_device_param_store(&loss, &store)
+                .expect("backward");
+            tape.step_device_param_store(&mut store, &grads, &config)
+                .expect("step");
+        }
+        let bits = verify_synced_params(&model, device, &store).expect("sync");
+        (last.to_bits(), bits)
+    }
+
+    fn check_train_chain_bit_exact(device: &str) {
+        let out = temp_out_path("train-chain-bit");
+        let mut cli = make_cli("train", "reuse", out.path());
+        cli.device = device.to_string();
+        let run = measure_train_reuse_chain(&cli).expect("chain run");
+        let (loss_bits, params) = train_tape_reference(device);
+        assert_eq!(
+            run.last_loss.to_bits(),
+            loss_bits,
+            "{device}: loss bits 不一致"
+        );
+        assert_eq!(
+            run.synced_bits, params,
+            "{device}: 更新後パラメータ bits 不一致"
+        );
+        assert_eq!(run.durations.len(), TRAIN_STEPS);
+    }
+
+    #[test]
+    fn train_reuse_chain_matches_tape_path_bit_exact() {
+        check_train_chain_bit_exact("cpu");
+    }
+
+    fn check_infer_resident_bit_exact(device: &str) {
+        let model = build_model().expect("model");
+        let x = infer_input(BATCH).expect("x");
+        let tape = make_tape(device).expect("tape");
+        let store = model.init_device_param_store(&tape).expect("store");
+        let rx = tape.upload_resident(&store, &x).expect("upload");
+        tape.wait_device_param_store(&store).expect("wait");
+        let host = model.predict_resident(&store, &x).expect("host input");
+        let res = model.predict_resident_input(&store, &rx).expect("resident");
+        let hb: Vec<u32> = host
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let rb: Vec<u32> = res
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(
+            hb, rb,
+            "{device}: predict_resident_input の出力 bits 不一致"
+        );
+    }
+
+    #[test]
+    fn infer_reuse_resident_input_matches_host_input_bit_exact() {
+        check_infer_resident_bit_exact("cpu");
+    }
+
+    /// 経路の振り分けは計測前に純関数で決まる（#3272 §3.5）。
+    #[test]
+    fn reuse_path_selection_is_decided_before_measurement() {
+        let out = std::path::Path::new("unused");
+        let mut cli = make_cli("gemm", "reuse", out);
+        assert!(gemm_reuse_uses_resident_input(&cli));
+        cli.tf32 = true;
+        assert!(!gemm_reuse_uses_resident_input(&cli));
+        cli.tf32 = false;
+        cli.device_checksum = true;
+        assert!(!gemm_reuse_uses_resident_input(&cli));
+
+        let mut cli = make_cli("train", "reuse", out);
+        assert!(train_reuse_uses_resident_chain(&cli));
+        cli.graph = Some("on".to_string());
+        assert!(!train_reuse_uses_resident_chain(&cli));
+    }
+
+    /// 常駐経路の gemm reuse 行は mode:"reuse"・init_s 非 null・parity を持つ。
+    #[test]
+    fn gemm_reuse_resident_record_keeps_reuse_fields() {
+        let out = temp_out_path("gemm-resident-record");
+        run_gemm_reuse(&make_cli("gemm", "reuse", out.path())).expect("run");
+        let content = std::fs::read_to_string(out.path()).expect("read");
+        let last = content.lines().next_back().expect("line");
+        assert!(last.contains("\"mode\":\"reuse\""), "{last}");
+        assert!(
+            last.contains("\"init_s\":") && !last.contains("\"init_s\":null"),
+            "{last}"
+        );
+        assert!(last.contains("parity_total"), "{last}");
+        assert!(!last.contains("tf32"), "{last}");
+    }
+
+    /// 実機（CUDA）: 常駐経路が従来経路と bit 一致する（GB10 用。`tf32_flag_test_lock` 保持）。
+    #[test]
+    #[ignore]
+    fn resident_paths_match_tape_paths_cuda() {
+        let _flag_lock = tf32_flag_test_lock();
+        check_gemm_resident_bit_exact("cuda", 512);
+        check_train_chain_bit_exact("cuda");
+        check_infer_resident_bit_exact("cuda");
+    }
+
+    /// 実機（Metal）: 同上（macOS のみ）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn resident_paths_match_tape_paths_metal() {
+        check_gemm_resident_bit_exact("metal", 512);
+        check_train_chain_bit_exact("metal");
+        check_infer_resident_bit_exact("metal");
     }
 }

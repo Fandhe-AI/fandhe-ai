@@ -398,3 +398,19 @@ GEMM の結果検証は 2 層防御で構成する。
 - Metal のノイズ帯: 系列 A と系列 B で区分が反転したセルは、新条件腕が gemm metal N=512・infer metal、旧条件腕が gemm metal N=512。Mac mini の区分の読みはこの帯を割り引いて行う。
 - 事実の記録: #3265 の (3) は `readout_uses_borrowed_view` から Metal 分岐を除いたため、Metal の fresh（gemm・infer）の readout も変わっている。「fresh は変更しない」は CPU・CUDA にだけ当てはまり、併記では Metal の fresh を「参考・変化あり」として読む。
 - 対象外: 入力のデバイス常駐と学習ステップ入口（#3272）、0.12.0 へのピン更新（#3271）、`--phases`・TF32 行の併記。
+
+### 7.9 実装記録（#3272）
+
+§7.1 の (4)（入力のデバイス常駐）と (5)（学習ステップ入口）を `bench-fandhe` の `--mode reuse` に実装した。変えたのは `bench-fandhe/src/main.rs`・framework-compare の README・本 doc 群だけで、相手側コード・`bench-common`・checksum と parity の判定・tolerance・依存ピン（`Cargo.toml`・`Cargo.lock`）・`fresh` モードは変えていない。JSONL の `mode` は `"reuse"` のまま（`bench-common` の allowlist を変えないため）。
+
+- **GEMM**: A・B を init で 1 回だけ `Tape::upload_resident` し、窓の中は `matmul_resident` → readout → checksum。`upload_resident` が store を要るため、1 層の `Sequential` から作った束縛用 store を使う（`matmul_resident` は store を見ない。費用は `init_s` に入る）。`matmul_resident` は tape にノードを積まないので、#3265 で解放していた結果ノード蓄積（§7.1 (1)）は常駐経路では構造的に生じない。
+- **train**: x・y を init で upload し、窓の中は `train_step_resident` と `ResidentLoss::read`（毎 step の唯一の D2H・同期点）だけ。`init_s` は `wait_device_param_store`（P7）で完了を保証する。`compat-resident-train-step-decision.md` §14 の申し送りを実施した。
+- **infer**: x を init で upload し、窓の中は `predict_resident_input` + checksum。
+- **`--phases`**: gemm・infer は常駐経路へ揃え、区間名は固定契約のまま意味を差し替えた（`matmul` = `matmul_resident`、`predict_resident` = `predict_resident_input` の呼び出し）。train の reuse 分解は Tape 経路のまま（チェーンは 1 入口で、`summarize.py` の 8 区間の固定契約へ分解できないため）。(b'') の分解は主行と別条件になる。
+- **ホスト入力・Tape 経路に残す例外**（計測前に純関数で決める。JSONL の既存フィールドで区別できる）: `gemm reuse --tf32`（0.12.0 の CUDA `gemm_device` は TF32 系で `Unsupported`）、`gemm reuse --device-checksum`（常駐版の checksum 経路が無い）、`train reuse --graph`（`--graph` が capture する `DeviceParamStore::step` をチェーンは通らない）、`train reuse --phases`。`run_ab_graph_cuda.sh` の `off` 腕は HEAD ではチェーンになるため、#1350 の A/B の再現には旧条件腕のコミットを使う。
+- **fail-closed**: 常駐 API の `Unsupported` 等はホスト経路へ戻さず `MEASURE_ERROR` で返す（別条件の行が `reuse` として残るのを防ぐ）。Metal の `gemm_device` は m・n・k が 8 の倍数のときだけ動くが、sweep・tests の N はすべて 8 の倍数。
+- **`--managed`／`--pinned-h2d`**: reuse 行では窓の中に H2D が無くなるため、効果は init の upload にしか出ない（fresh 行には従来どおり効く）。
+- **旧条件腕**（#3273 が参照する。ホスト入力・Tape 経路・`fandhe-ai =0.12.0`）: コミット `0ae5670359c0f9d7a82f8bbd71791fb516713627`（#3625）。`bench-fandhe` の tree hash は `bb39a15c821a52d5ec2341998a842e0c6dd3409e`。`Cargo.lock` は registry 版の `fandhe-ai 0.12.0`。
+- **計測専用パッチへの影響**: `resident-chain-ab-3257/bench-resident-chain.patch` は本変更後のツリーには当たらない。参照する runner の precheck は fail-closed で止まり、runner ツリーは RULE.txt で固定されているので運用は変わらない。既存ログとパッチは変えていない。
+- **検証**: CPU は bit 一致テスト（gemm N=64・512、train 100 step の loss と更新後パラメータ全要素、infer）で固定し CI で回る。Metal は開発機（M4 Max）で `#[ignore]` の bit 一致テストが通ったが、参考確認であり計測値は記録に使わない。**未検証**: GB10（CUDA）の `#[ignore]` テスト（`resident_paths_match_tape_paths_cuda`）と新旧バイナリの実機 JSONL 突き合わせ。机上の根拠は §10 の `gemm_device` と `gemm` の同一核と #3256 の GB10 実測。実機の正式計測は #3273。
+- **承認**: D-C（§7）の範囲内。新しい承認は得ていない。
