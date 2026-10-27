@@ -49,4 +49,4 @@ Mac mini 側は `../framework-compare-0.12.0-macmini-remeasure/`。Mac mini と 
 1. 展開ツリー 3 つ（新腕の `scripts/bench/framework-compare`・旧腕の同パス・新腕の全体）を `git archive` で作り `.rev-stamp`（フル SHA）を置く。
 2. 行数スモークを 1 回行い、RULE.txt を固定（時刻・SHA・sha256 を記入）。
 3. 実機ロックを取り、`ROOT`・`OLD_ROOT`・`EXPECT_NEW_SHA`・`EXPECT_OLD_SHA` を渡して `dgx-0120-loop.sh` を `setsid nohup` で起動。
-4. 集計: `median_rounds.py`、旧腕は `swap_fandhe_arm.py` → `median_rounds.py`、`check_identity.py`。スコアボード生成器（`gen_0120.py`）とセル表生成器は未作成（残作業）。
+4. 集計: `median_rounds.py`、旧腕は `swap_fandhe_arm.py`（GB10 は主 JSONL と extra JSONL の両方を NEW に渡す）→ `median_rounds.py`、`check_identity.py`。スコアボード生成器（`gen_0120.py`）とセル表生成器は未作成（残作業）。

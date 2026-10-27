@@ -4,7 +4,8 @@
 呼び出し元: median_rounds.py の前段（run ごとに 1 回）。判定コード（gen 系）は 1 か所のまま、入力だけを差し替える（イシュー #3273）。
 `median_rounds.py` の index は key で重複を除く（重複は例外）ため、追加ではなく置き換えにする。
 旧腕に無いセルの新腕行は残す（旧腕が測らない行を欠かさない）。旧腕のキーが新腕に無ければ例外（取り違えの検知）。
-使い方: swap_fandhe_arm.py NEW.jsonl OLD.jsonl OUT.jsonl  /  swap_fandhe_arm.py --self-test
+GB10 は gemm cpu の 6 セル（reuse 256〜4096・fresh 4096）が extra JSONL にだけあるため、NEW は複数ファイル（主＋extra）を受け取り連結して照合する。
+使い方: swap_fandhe_arm.py NEW.jsonl [NEW_EXTRA.jsonl ...] OLD.jsonl OUT.jsonl  /  swap_fandhe_arm.py --self-test
 """
 import json, sys, os, tempfile
 
@@ -55,9 +56,10 @@ def self_test():
 if __name__ == '__main__':
     if sys.argv[1:] == ['--self-test']:
         self_test(); sys.exit(0)
-    if len(sys.argv) != 4:
+    if len(sys.argv) < 4:
         sys.exit(__doc__)
-    out = swap(load(sys.argv[1]), load(sys.argv[2]))
-    with open(sys.argv[3], 'w') as w:
+    new_rows = [r for p in sys.argv[1:-2] for r in load(p)]
+    out = swap(new_rows, load(sys.argv[-2]))
+    with open(sys.argv[-1], 'w') as w:
         for r in out:
             w.write(json.dumps(r) + '\n')
