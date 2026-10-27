@@ -146,6 +146,7 @@ fn baseline_fixture_is_self_consistent() {
         ParityPath::SpecializedMmaF16,
         ParityPath::MmaTf32,
         ParityPath::MmaTf32VsWmmaStaged,
+        ParityPath::FacadeLowPrecisionMatmulF16,
     ] {
         assert!(
             BASELINES.iter().any(|b| b.path == path),
@@ -208,6 +209,7 @@ fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
         ParityPath::SpecializedMmaF16,
         ParityPath::MmaTf32,
         ParityPath::MmaTf32VsWmmaStaged,
+        ParityPath::FacadeLowPrecisionMatmulF16,
     ] {
         let total = BASELINES.iter().filter(|b| b.path == path).count();
         let enforced = BASELINES
@@ -456,6 +458,11 @@ fn parity_baselines_do_not_regress() {
         // `tests/mma_tf32_vs_wmma_tf32_staged.rs::
         // mma_tf32_matches_wmma_tf32_staged_across_shapes`／
         // `..._k4096_stress` が同一 baseline 行を直接検査済み。
+        // `ParityPath::FacadeLowPrecisionMatmulF16`（イシュー #3617）は facade の
+        // tape 経路（`matmul_low_precision`）であり、本ファイルの `CudaGemm`／
+        // `CudaMmaGemm` からは到達できない。検査は facade 側
+        // `tests/low_precision_ops_backend_parity.rs::
+        // cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress` が担う。
         // `ParityPath::SpecializedMmaF16`（イシュー #1161 で追加）も同じ
         // 理由でここでは検査しない: `run_specialized_mma_f16` は
         // `internal-diagnostics` feature ゲート下にあり、`required-features`
@@ -469,6 +476,7 @@ fn parity_baselines_do_not_regress() {
             || baseline.path == ParityPath::SpecializedMmaF16
             || baseline.path == ParityPath::MmaTf32
             || baseline.path == ParityPath::MmaTf32VsWmmaStaged
+            || baseline.path == ParityPath::FacadeLowPrecisionMatmulF16
         {
             continue;
         }
@@ -485,7 +493,8 @@ fn parity_baselines_do_not_regress() {
                 | ParityPath::WmmaF16
                 | ParityPath::SpecializedMmaF16
                 | ParityPath::MmaTf32
-                | ParityPath::MmaTf32VsWmmaStaged => {
+                | ParityPath::MmaTf32VsWmmaStaged
+                | ParityPath::FacadeLowPrecisionMatmulF16 => {
                     unreachable!("continue で除外済み")
                 }
             }));

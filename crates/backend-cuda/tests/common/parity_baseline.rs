@@ -227,6 +227,26 @@ pub enum ParityPath {
     /// で検査し、残り 7 形状は引き続き `fandhe_ai_backend_cpu::assert_parity`
     /// （厳密ゼロ fail 判定）で検査する（ユーザー承認 2026-09-03）。
     MmaTf32VsWmmaStaged,
+    /// facade `matmul_low_precision(.., F16)`（`fandhe_ai_autodiff::
+    /// low_precision_ops`）を `tape_for(Device::Cuda(0))` で実行した結果と、
+    /// 同じ Op を CPU tape で実行した結果との非後退ゲート（イシュー #3617）。
+    ///
+    /// **`MmaF16` と分ける理由**: 入力は f32 の `fill_vec`（lhs=seed・
+    /// rhs=seed+1）で、参照は CPU tape の `matmul_low_precision(F16)` である。
+    /// `check_mma_f16_baseline` は `fill_vec_f16` 入力＋`matmul_reference_fma`
+    /// 参照の別経路であり、同じ行に混ぜると入力・参照の違いで誤 fail する。
+    /// GB10 で `f16:Mma`（`mma.sync`）経路に乗る 512³・1024³・256×256×1024 が
+    /// 統一複合判定で fail≠0（厳密ゼロ fail が成立しない）のため baseline 方式
+    /// とする。厳密ゼロ fail が成立する 5 形状（64³・128³・256³・128×128×100・
+    /// 65×63×33）は本経路に含めない。
+    ///
+    /// 検査を担うのは `crates/facade/tests/low_precision_ops_backend_parity.rs::
+    /// cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress`
+    /// （本モジュールを `#[path]` で取り込む。`parity_nonregression.rs` の
+    /// `CudaGemm`／`CudaMmaGemm` からは到達できないため同ファイルでは除外）。
+    /// 形・値の出典・ceiling の型は所有者承認済み（イシュー #3617 コメント
+    /// 6432022446）。baseline の値は PR で所有者の確認待ち。
+    FacadeLowPrecisionMatmulF16,
 }
 
 impl std::fmt::Display for ParityPath {
@@ -240,6 +260,7 @@ impl std::fmt::Display for ParityPath {
             ParityPath::SpecializedMmaF16 => "specialized_mma_f16",
             ParityPath::MmaTf32 => "mma_tf32",
             ParityPath::MmaTf32VsWmmaStaged => "mma_tf32_vs_wmma_tf32_staged",
+            ParityPath::FacadeLowPrecisionMatmulF16 => "facade_low_precision_matmul_f16",
         };
         f.write_str(s)
     }
@@ -319,7 +340,7 @@ pub struct ParityBaseline {
     pub baseline_max_rel_err_ceiling: Option<f64>,
 }
 
-/// 記録済みベースライン一覧（`docs/perf/cuda-parity-baseline.md` の表・7 行）。
+/// 記録済みベースライン一覧（`docs/perf/cuda-parity-baseline.md` の表）。経路別の行は各 `ParityPath` を参照。
 ///
 /// 出典: `docs/backend-cuda-real-device-testing.md` §5.3（DGX Spark GB10・
 /// sm_121・2026 年 8 月時点実測）。§5.3 の記録は `assert_parity` が最初の
@@ -1160,6 +1181,55 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_provenance_unconfirmed: false,
         baseline_max_abs_diff_ceiling: Some(1.562501e-2),
         baseline_max_rel_err_ceiling: Some(3.341150e-2),
+    },
+    // --- FacadeLowPrecisionMatmulF16（イシュー #3617）---
+    // 出典: 2026-10-27 GB10（DGX Spark・sm_121）で HEAD（a053ea7ed）を再計測した
+    // 診断 `cuda_low_precision_matmul_large_shape_report` の REPORT 行
+    // （同一ビルド 2 回実行で全値完全一致・b640875f の値とも完全一致）。ログは
+    // `docs/perf/logs/low-precision-ops-2628/cuda/large_shape_report_3617_run{1,2}.log`。
+    // ceiling は実測値（`{:e}` の round-trip 表記）の最終桁 +1（表記丸め対応のみ。
+    // tolerance 定数は不変）。入力 seed は lhs=seed・rhs=seed+1。
+    ParityBaseline {
+        path: ParityPath::FacadeLowPrecisionMatmulF16,
+        context: "facade_low_precision_matmul_f16 512x512x512 seed=14 (lhs=seed, rhs=seed+1; #3617 GB10 HEAD remeasure)",
+        m: 512,
+        n: 512,
+        k: 512,
+        seed: 14,
+        total: 512 * 512,
+        baseline_fail_count: 5,
+        baseline_mean_abs_diff_ceiling: 4.145593038629159e-6,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.5626e-2),
+        baseline_max_rel_err_ceiling: Some(3.8848920863309356e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::FacadeLowPrecisionMatmulF16,
+        context: "facade_low_precision_matmul_f16 1024x1024x1024 seed=15 (lhs=seed, rhs=seed+1; #3617 GB10 HEAD remeasure)",
+        m: 1024,
+        n: 1024,
+        k: 1024,
+        seed: 15,
+        total: 1024 * 1024,
+        baseline_fail_count: 192,
+        baseline_mean_abs_diff_ceiling: 1.0508246703011538e-5,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(3.126e-2),
+        baseline_max_rel_err_ceiling: Some(4.803921568627452e-1),
+    },
+    ParityBaseline {
+        path: ParityPath::FacadeLowPrecisionMatmulF16,
+        context: "facade_low_precision_matmul_f16 256x256x1024 seed=16 (lhs=seed, rhs=seed+1; #3617 GB10 HEAD remeasure)",
+        m: 256,
+        n: 256,
+        k: 1024,
+        seed: 16,
+        total: 256 * 256,
+        baseline_fail_count: 16,
+        baseline_mean_abs_diff_ceiling: 8.295384759549053e-6,
+        baseline_provenance_unconfirmed: false,
+        baseline_max_abs_diff_ceiling: Some(1.5626e-2),
+        baseline_max_rel_err_ceiling: Some(2.5336500395882818e-2),
     },
 ];
 
