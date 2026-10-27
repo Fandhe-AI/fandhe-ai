@@ -4,8 +4,8 @@
 
 ## 対象範囲
 
-- 測るのは `RocmGemmF32::run`（f32 GEMM・`GfxTarget::Gfx942`）と `is_available()`（`probe_real_device.rs`）のみ。
-- reduce・softmax・norm など `docs/backend-rocm-ops-coverage-plan.md` の R0〜R13（linalg〈R13〉の kernel 実行器は #3444 で実装済み。下の「linalg」節。`BackendOps` 結線は R0 待ち）は未実装（`BackendOps` 未実装・起票は所有者承認待ち）のため対象外。各 R イシューが同じ `#[ignore]` 方式でテストを足す。
+- `--ignored` 全件実行が被覆する範囲（`tests/*_real_device.rs` の `#[ignore]` 16 本）: `RocmGemmF32::run`（f32 GEMM・`GfxTarget::Gfx942`）と `is_available()`（probe）、および `RocmBackendOps` 経由の linalg〈R13〉・softmax 系〈R4〉・reduce〈R3〉・loss〈R5〉・norm〈R6〉・paged KV〈R12〉。各 Op の記入欄は下の節に分けてある。
+- `docs/backend-rocm-ops-coverage-plan.md` §3 で実機が不要とされた R0〜R2・R7〜R11（elementwise・optim・rnn_cell・gather/scatter・gemm_derived 等）は実機テストを置かないため対象外。
 - 判定は REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）のみ。tolerance・baseline・FMA 契約は変えない。規則は `RULE.txt`（事前登録）。
 
 ## 前提
@@ -19,6 +19,7 @@
 2. `docs/real-hardware-verification-env.md` §3 と同じ形の rsync で転送する。`--filter=':- .gitignore'` を付け、`.env*`・`*.local.md`・`.claude/settings.local.json` を明示除外する。接続先は Git 管理外のローカルファイルとシェル変数（例 `"$ROCM_NODE"`。クォート必須）で渡す。
 3. ノード上で `bash docs/perf/logs/rocm-parity-3159/run_rocm_parity.sh <tree-abs-path> <out-abs-path>` を実行する（ビルド後に run1・run2 を順に実行。ホスト名・ホームパス・ユーザー名はマスクし、残れば fail-closed で停止）。
 4. 出力（`.rev-stamp`・`env_info.txt`・`run*/ignored.log`・`run*/exit_code`）をこのディレクトリへ戻し、下の記入欄を埋める。ログの `ROCM_PARITY` 行・`ROCM_DETERMINISM` 行を転記する。
+5. 実行本数の照合（スクリプトは終了コードしか見ないため手動で行う）: 実行前に `cargo test -p fandhe-ai-backend-rocm --release -- --ignored --list` で ignored テスト数（現状 16 本）を取り、記入欄へ転記する。実行後、各 `run*/ignored.log` の `test result:` の passed 合計がこの本数と一致し、`0 passed` のまま終わった実機テストバイナリが無いことを確かめる。一致しない結果・0 本実行の結果は pass の根拠にしない。
 
 ## 形状（`RULE.txt` と同一）
 
@@ -136,6 +137,48 @@ unsafe 監査 §6（`docs/backend-rocm-unsafe-audit.md`）のうちテストの�
 | HIPRTC コンパイル（paged KV） | |
 
 ケースごと（`ROCM_PARITY_PAGED_KV` 行の転記）:
+
+| 名前 | total | fail | max_abs | max_rel | bit_mismatch |
+|---|---|---|---|---|---|
+| | | | | | |
+
+## loss（#3436）
+
+**状態: 未実測**。`mse`・`huber`（Huber／SmoothL1）・`bce`（Probabilities／Logits）・`nll`・`kl_div` の forward／backward の実機 parity。`tests/loss_real_device.rs`（`#[ignore]`）が `run_rocm_parity.sh` の `--ignored` 全件実行に自動で含まれる（スクリプトは変更しない）。**本テストの失敗は run の終了コードに影響する。** 外れたケースがあっても全ケースを走らせて fail 要素数と最大誤差を記録し、最後に落とす。
+
+- 判定は REQ-2 統一複合判定のみ（`RULE.txt` の GEMM 用規則とは別の追加規則は設けない）。同一入力 2 回実行の bit 一致（決定性）も assert する。tolerance・baseline・FMA 契約は変えない。
+- 入力集合: テスト内の `SIZES`（1・7・255・256・257・4097・256×1024+3）× reduction（Mean／Sum）、nll は shape 5 種（最後は grid-stride が 2 周以上する形状）。
+- ログ行は `ROCM_PARITY_LOSS\t<名前>\ttotal=…\tfail=…\tmax_abs=…\tmax_rel=…\tmean_abs=…\tp99_abs=…\tbit_mismatch=…`。
+- 補助確認（記録のみ）: 実 HIPRTC で `logf`・`log1pf`・`expf` が解決できること、`__builtin_fmaf`・`#pragma clang fp contract(off)`・`__launch_bounds__` が受理されること、`WARPS_PER_BLOCK = 4` の wave64 での縮約順序。
+
+| 項目 | 値 |
+|---|---|
+| 実施日 | |
+| 判定（pass／fail） | |
+| HIPRTC コンパイル（loss） | |
+
+ケースごと（`ROCM_PARITY_LOSS` 行の転記）:
+
+| 名前 | total | fail | max_abs | max_rel | bit_mismatch |
+|---|---|---|---|---|---|
+| | | | | | |
+
+## 正規化（#3437）
+
+**状態: 未実測**。`rmsnorm`・`layer_norm`・`batch_norm_train`・`batch_norm_infer` の forward（CPU 参照比較）と `rmsnorm_backward`・`layer_norm_backward`（テスト内 f64 参照比較）の実機 parity。`tests/norm_real_device.rs`（`#[ignore]`）が `run_rocm_parity.sh` の `--ignored` 全件実行に自動で含まれる（スクリプトは変更しない）。**本テストの失敗は run の終了コードに影響する。** 外れたケースがあっても全ケースを走らせて記録し、最後に落とす。
+
+- 判定は REQ-2 統一複合判定のみ（GEMM 用規則とは別の追加規則は設けない）。`bit_mismatch` は観測値。tolerance・baseline・FMA 契約は変えない。
+- 入力集合: テスト内の形状（forward は (1,1)・(3,31)・(5,64)・(4,65)・(2,3,257)、backward は rows×hidden 5 種、batch_norm は (4,3)・(2,3,17)・(2,5,4,33)）× weight／bias の有無。
+- ログ行は `ROCM_PARITY_NORM\t<名前>#<連番>\ttotal=…\tfail=…\tmax_abs=…\tmax_rel=…\tmean_abs=…\tp99_abs=…\tbit_mismatch=…`。
+- 補助確認（記録のみ）: 実 HIPRTC で `__shfl_xor` の double 版・`__builtin_fma` の f64 命令化がコンパイルできること、wave64 の縮約順序。
+
+| 項目 | 値 |
+|---|---|
+| 実施日 | |
+| 判定（pass／fail） | |
+| HIPRTC コンパイル（norm） | |
+
+ケースごと（`ROCM_PARITY_NORM` 行の転記）:
 
 | 名前 | total | fail | max_abs | max_rel | bit_mismatch |
 |---|---|---|---|---|---|
