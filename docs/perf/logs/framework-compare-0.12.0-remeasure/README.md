@@ -15,6 +15,9 @@
 | `scripts/dgx-0120-loop.sh` | 5 round を同じループで実行。各 round 前に load1 < 1.0 かつ GPU 0% が 3 連続のゲート。`ALL-DONE completed=5/5` |
 | `aggregate/median_rounds.py` | 0.11.0 版のコピー（変更なし） |
 | `aggregate/swap_fandhe_arm.py` | 旧腕判定用: 新腕 JSONL の fandhe-ai 行を同 run の旧腕行で置換（`--self-test` あり） |
+| `scoreboard/gen_0120.py` | スコアボード生成器（#3274）。0.11.0 Mac mini 版 `gen_0110_macmini.py` の派生。判定関数群は不変で、前版比の入力・`--run-ver`・旧条件の注記（`--m4-old`／`--gb-old`）・届かなかったセルの表（`--unreached-tsv`）を足した |
+| `scoreboard/body_0120.html`・`style.css` | テンプレートと色定義（style.css は 0.11.0 版の逐語コピー）。注記 2 点（burn の TF32・Python 側 checksum）・届かなかったセルの節・対応表の 0.12.0 版（タグ基準）を含む |
+| `scoreboard/gen_args.txt` | 負荷・日付・skipped の注記引数の記入欄（未実測。推測の値は入れない） |
 | `aggregate/check_identity.py` | A1 の照合（tree・rev-stamp・行数。欠損は非零。`--self-test` あり。skipped ログの内容〈Mac mini は burn Metal の 4 件のみ許容〉は照合対象外で run スクリプト側が検査する） |
 
 Mac mini 側は `../framework-compare-0.12.0-macmini-remeasure/`。Mac mini と GB10 の値は同じ表に混ぜない。
@@ -49,4 +52,12 @@ Mac mini 側は `../framework-compare-0.12.0-macmini-remeasure/`。Mac mini と 
 1. 展開ツリー 3 つ（新腕の `scripts/bench/framework-compare`・旧腕の同パス・新腕の全体）を `git archive` で作り `.rev-stamp`（フル SHA）を置く。
 2. 行数スモークを 1 回行い、RULE.txt を固定（時刻・SHA・sha256 を記入）。
 3. 実機ロックを取り、`ROOT`・`OLD_ROOT`・`EXPECT_NEW_SHA`・`EXPECT_OLD_SHA` を渡して `dgx-0120-loop.sh` を `setsid nohup` で起動。
-4. 集計: `median_rounds.py`、旧腕は `swap_fandhe_arm.py`（GB10 は主 JSONL と extra JSONL の両方を NEW に渡す）→ `median_rounds.py`、`check_identity.py`。スコアボード生成器（`gen_0120.py`）とセル表生成器は未作成（残作業）。
+4. 集計: `median_rounds.py`、旧腕は `swap_fandhe_arm.py`（GB10 は主 JSONL と extra JSONL の両方を NEW に渡す）→ `median_rounds.py`、`check_identity.py`。スコアボード生成: `scoreboard/gen_0120.py`（0.11.0 の読み方は `framework-compare-0.11.0-macmini-remeasure/README.md` の「スコアボード」の引数に準じ、`--m4-prev`・`--gb-prev` の既定は 0.11.0 の中央値。旧条件の判定は `swap_fandhe_arm.py` で置換した入力に同じ生成器をもう 1 回かけて `gen_0120_oldarm.out` に出す）。セル表生成器は未作成（残作業）。
+
+## スコアボード（#3274）
+
+- **状態: 生成器とテンプレートのみ（0.12.0 実測待ち）**。`gen_0120.out`（判定一覧）・HTML・Artifact は未生成で、0.12.0 の勝敗・届かなかったセルの値はまだ無い。
+- 生成器は 0.11.0 の正式データで回帰確認済み（`--run-ver 0.11.0 --prev-ver 0.10.0 --m4-prev ''` で標準出力が `gen_0110_macmini.out` と完全一致。tally 6 1 20 invalid 1 noise 1 total 27）。旧条件の注記は表示のみで、有無で判定一覧が変わらない。`--unreached-tsv` は分類が 3 種以外・比が数値でない行で非零終了する。
+- 対応表の fandhe-ai 列はタグ `v0.12.0` 基準（`docs/perf/framework-compare-feature-matrix-0.12.0.md` §8）。相互運用行は #3268 の棚卸しとの照合で「部分的」へ戻した（所有者確認待ち）。
+- **公開先（既存 Artifact の更新か新規か）と公開範囲: 所有者未確認（記入欄）**。確認前は公開しない。0.11.0 版のページは上書きしない。
+- 注意: 「約 5 倍」「0.33〜0.40」は出典がなく採らない。Python 側 checksum の補正は `docs/perf/loss-attribution-matrix.md` §10.6 の実測（Python÷Rust 3.66〜4.17）に合わせた。

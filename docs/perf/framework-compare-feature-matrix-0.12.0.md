@@ -14,6 +14,7 @@
 - **基準 sha**: `1009825c9e9e954bf58748c5c1b42234bb12121d`（`git rev-parse origin/main`。2026-10-27 に固定。以後 main が進んでも動かさない）。docs/spec の pin は `7534c9c`。
 - 直近の公開版との差: `git diff --shortstat v0.11.0 1009825c9e9e954bf58748c5c1b42234bb12121d -- crates` は「487 files changed, 149852 insertions(+), 8800 deletions(-)」である（`v0.11.0` = `6b14fdb4`）。0.11.0 版 §1 の「差分なし」から大きく変わった。
 - タグ `v0.12.0` は**未作成**で、版数の公開（publish）は別の明示指示を待つ。タグとの差分確認と再判定は #3274 が行う。
+  - 追記（2026-10-27・#3274）: タグ `v0.12.0`（`e23417cb4`）は作成済み。タグとの差分と #3268 との照合は §8 に記録した（`crates/` の差は版数文字列 12 行のみ。相互運用行は §8.2 で「部分的」へ戻した）。
 - 実機 parity の測定コミットは基準 sha と別である。各 README が記録する測定コミットと、基準 sha までの `crates/` 差分は §5 末尾の表に示す。
   測定コミットの多くは作業ブランチ上のコミットで main の履歴に残らない。したがって「測定済み」は「その測定コミットの内容が pass した」ことだけを意味し、基準 sha での pass を意味しない。
 - 本書の調査は main 上のソース・決定記録・GitHub のコメントの読み取りだけで行い、コード・テスト・実機は動かしていない。
@@ -308,3 +309,56 @@ README が無い 2 件（`infer-chain-graphcapture-rejudge-3205`・`train-step-g
 `crates/` 全体・`docs/spec/`・tolerance／baseline・依存関係（`Cargo.toml`・`Cargo.lock`）・CI 設定・`docs/compat-api-scope.md`／`docs/compat-feature-gap.md`・
 各 `docs/perf/logs/*/README.md`・0.9.0 版と 0.11.0 版の記録（本文・§8 の追記とも）・スコアボード関連ファイルは変更していない。
 変更したのは本書の新設と、`docs/README.md` への索引 1 行の追加だけである。
+
+## 8. 追補（#3274）: タグ v0.12.0 との差分確認と #3268 棚卸しとの照合
+
+イシュー #3274（親 #3018）。§6 の申し送り 2 点（タグとの差分確認・#3268 の注記の再確認）を実施した記録。§3・§4.1 の本文は基準 sha（1009825c9）時点の監査記録として書き換えない。
+
+### 8.1 タグ v0.12.0 との差分（2026-10-27 実測）
+
+`v0.12.0` = `e23417cb4f982f19e6d0682f053a42c1d98983c7`（#3623）。`1009825c9` は `v0.12.0` の祖先である（`git merge-base --is-ancestor` が成功）。
+
+```
+$ git diff --stat 1009825c9e9e954bf58748c5c1b42234bb12121d v0.12.0 -- crates
+ crates/autodiff/Cargo.toml      |  2 +-
+ crates/backend-cpu/Cargo.toml   |  2 +-
+ crates/backend-cuda/Cargo.toml  |  2 +-
+ crates/backend-metal/Cargo.toml |  2 +-
+ crates/facade/Cargo.toml        | 12 ++++++------
+ crates/onnx-interop/Cargo.toml  |  4 ++--
+ 6 files changed, 12 insertions(+), 12 deletions(-)
+$ git diff --name-only 1009825c9e9e954bf58748c5c1b42234bb12121d v0.12.0 -- crates | grep -v Cargo.toml | wc -l
+0
+```
+
+差分 12 行はすべて内部依存の `version = "=0.11.0"` → `"=0.12.0"` である（`git diff … | grep -E '^[+-][^+-]'` で全行確認）。`.rs` の差は 0 件で、facade の公開面は基準 sha と同一である。
+したがって §3 の行判定は、**タグ `v0.12.0` の facade 公開面にそのまま当てはまる**。間のコミットは 5 件（#3620・#3621・#3616・#3622・#3623）で、`crates/` を変えるのは #3623 の版数文字列だけである。
+なお `git diff --shortstat v0.12.0 origin/main -- crates` は 5 files changed で、タグ後の main は進んでいる。対応表の基準はタグである。
+
+### 8.2 #3268 棚卸し（`docs/compat-unlisted-holds-inventory.md`）との照合
+
+#3268 の成果物（#3616）は基準 sha の後に入ったため、§2 の規則（到達性・5 区分・D-0 の対象外の扱い）で §4.1〜4.4 を当て直した。
+棚卸し表の区分（公開／未公開／保留／対象外）をそのまま本書の区分に写し、O-2（所有者が確定していない「スコープ外」）は未公開または保留として数えた（§2 の 6。迷う項目は対象外へ移さない）。
+
+| 行 | #3269 の判定 | #3274 の判定 | 増える項目（棚卸しの番号） | 根拠 |
+|---|---|---|---|---|
+| 最適化・学習ループ | 部分的 | 部分的（変わらず） | 保留が増える: A1（EMA と AMP の併用拒否）・A2（EMA の warmup）・A3-a〜A3-d・A3-g（param groups の併用・保存形式・常駐・`Optimizer` の 4 種）。対象外へ移す案: A3-e・A3-f（所有者確認待ち） | 棚卸し §4.1 |
+| NN 層・モデル構築 | 部分的 | 部分的（変わらず） | 未公開が増える: C1（Hardshrink／Softshrink）・C2（Bilinear）・C3（BatchNorm3d）・C5／C6（CosineSimilarity／PairwiseDistance）・C7（ChannelShuffle）・C9（LPPool 等 4 件）。C4・C8 は D-0 の対象外（機能は到達可能） | 棚卸し §4.3 |
+| 相互運用 | **ある** | **部分的（「ある」から戻す）** | 未公開が 2 件: B1（ONNX autograd が facade 未接続。`crates/facade/src/interop/onnx.rs:8`・`docs/onnx-autograd-decision.md` §6）・B5（safetensors の F32 以外。`crates/onnx-interop/src/st_save.rs:19-20`）。保留が 1 件: B3（Sigmoid の export。数値契約が承認保留。`docs/facade-onnx-export-exposure-decision.md:239`） | 棚卸し §4.2 |
+| その他 6 行 | 部分的 | 部分的（変わらず） | 棚卸しに該当する新項目なし（棚卸しの群 D の D1 は #3021 項目 7 で対象外確定済み） | 棚卸し §4.4 |
+
+- **相互運用を「部分的」へ戻す理由**: §4.1 の規則は「ある」を未公開 0 件かつ保留 0 件の行に限る。#3269 の「ある」は棚卸しの B1・B5（未公開）・B3（保留）が監査の欄に載っていなかったことに依存していた。棚卸しの区分が正しければ未公開 2 件・保留 1 件で、規則上「ある」を名乗れない。
+  「ある」を名乗るには、件数 0 を `path:line` で示す必要があり、示せない。安全側（部分的）に倒す。
+- **B2・B4 の扱い**: ONNX export の対応層が 6 種・export op が 26 種（import は 36 種）という制約は、§6 の注記（機能範囲の制約で行を下げない。`UnsupportedLayer` で fail-closed）のとおり、区分に当たらないとして数えない。B3 は「公開が承認待ちの項目」であり機能範囲の制約とは別なので保留に数える。
+- **件数（相互運用）**: 公開 4・未公開 2（B1・B5）・対象外 2・保留 1（B3）。
+
+### 8.3 所有者確認事項（#3269 と食い違う点）
+
+1. 相互運用行を「ある」から「部分的」へ戻した判断（§8.2）。棚卸しの B1・B5 を「未公開」、B3 を「保留」と数えることへの同意。B5 を所有者が対象外に分類するなら、B1・B3 が残るため行は「部分的」のままである。
+2. 棚卸しの O-2 項目（A2・C3・C9）を未公開・保留に数えた扱い（所有者が Won't と確定した記録が無いため）。
+3. 棚卸しの A3-e・A3-f・C4・C8 を対象外へ移す提案への回答（回答後に件数を更新する）。
+4. §6 の所有者確認 9 件（ROCm の facade 公開ほか）は変わらず未回答。
+
+### 8.4 変更していないもの
+
+`crates/`・`docs/spec/`・tolerance／baseline・依存関係・CI・§3〜§7 の本文。
