@@ -215,24 +215,13 @@ fn naive_reference(a: &[f32], b: &[f32], n: usize) -> Vec<f32> {
 
 impl Resident {
     fn new(kind: Kind, a: &Tensor<f32>, b: &Tensor<f32>, n: usize) -> Self {
-        let tape = tape_for(Device::Cpu).expect("CPU tape");
-        // bench `gemm_binding_store` と同じ束縛用 store（`matmul_resident` は世代を見ない）。
-        let store = Sequential::new()
-            .add_linear(1, 1, 1)
-            .expect("linear")
-            .init_device_param_store(&tape)
-            .expect("store");
-        let ra = tape.upload_resident(&store, a).expect("upload a");
-        let rb = tape.upload_resident(&store, b).expect("upload b");
+        // bench `measure_gemm_reuse_resident` は `GemmReference::compute`（入力写し・参照 c の確保）を
+        // Tape・store 生成と resident upload より前に実行する。H-A2 腕は確保・解放履歴の再現が目的なので
+        // 同じ順序（前処理 → Tape・store → upload）にそろえる。
         let a_s = a.as_slice().expect("contiguous");
         let b_s = b.as_slice().expect("contiguous");
         let mut held = Vec::new();
-        let mut reference = Vec::new();
         match kind {
-            Kind::VerifyTouch => {
-                let out = tape.matmul_resident(&ra, &rb).expect("matmul_resident");
-                reference = out.contiguous().as_slice().expect("contiguous").to_vec();
-            }
             Kind::HoldFootprint => {
                 // 既存の入力 a・b（N² 2 本）に 3 本足して bench の 5 本
                 // （a_data・b_data・a_host・b_host・参照 c）と同数にする。触れずに保持するだけ。
@@ -249,6 +238,22 @@ impl Resident {
             }
             _ => {}
         }
+        let tape = tape_for(Device::Cpu).expect("CPU tape");
+        // bench `gemm_binding_store` と同じ束縛用 store（`matmul_resident` は世代を見ない）。
+        let store = Sequential::new()
+            .add_linear(1, 1, 1)
+            .expect("linear")
+            .init_device_param_store(&tape)
+            .expect("store");
+        let ra = tape.upload_resident(&store, a).expect("upload a");
+        let rb = tape.upload_resident(&store, b).expect("upload b");
+        // VerifyTouch の参照出力は resident 経路自体の出力なので upload 後に 1 回だけ計算する。
+        let reference = if kind == Kind::VerifyTouch {
+            let out = tape.matmul_resident(&ra, &rb).expect("matmul_resident");
+            out.contiguous().as_slice().expect("contiguous").to_vec()
+        } else {
+            Vec::new()
+        };
         let gap_a: Vec<f32> = (0..GAP_BUF_LEN).map(|i| i as f32).collect();
         let gap_b = gap_a.clone();
         Self {

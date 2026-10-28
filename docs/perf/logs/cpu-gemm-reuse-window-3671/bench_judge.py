@@ -80,6 +80,19 @@ def _check_parity(row, path, n):
     _num(row.get("median_s"), f"{path} median_s")
 
 
+def _checksum(v, path):
+    """checksum は存在・数値（文字列可）・有限であること。不備はデータ不備として拒否する。"""
+    if v is None or isinstance(v, bool):
+        raise JudgeError(f"{path}: checksum が欠落または null")
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise JudgeError(f"{path}: checksum が数値でない: {v!r}")
+    if not math.isfinite(x):
+        raise JudgeError(f"{path}: checksum が有限でない: {v!r}")
+    return str(v)
+
+
 def load_bench_arm(root, arm):
     """arm -> {n: {"fresh": [..5], "reuse": [..5], "phases": {phase: [..5]}}} と checksum 集合（N 別）。"""
     d = os.path.join(root, arm)
@@ -101,7 +114,7 @@ def load_bench_arm(root, arm):
                 rows = _read_rows(path)
                 for row in rows:
                     _check_parity(row, path, n)
-                    sums.setdefault(n, set()).add(str(row.get("checksum")))
+                    sums.setdefault(n, set()).add(_checksum(row.get("checksum"), path))
                 if m in ("fresh", "reuse"):
                     if len(rows) != 1 or rows[0].get("task") != "gemm" or rows[0].get("mode") != m:
                         raise JudgeError(f"{path}: gemm {m} の 1 行ではない")
