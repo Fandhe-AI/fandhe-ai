@@ -6,12 +6,14 @@ bench-fandhe の `gemm --mode reuse` を常駐入力経路（#3272。`Tape::uplo
 本ディレクトリはその原因を GB10 実測で切り分けるための事前登録規則・診断基盤・集計器を置く。
 結論・帰属・修正方針の提案は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9 に書く。
 
-## 状態（2026-10-28 GB10 実測済み）
+## 状態（2026-10-28 GB10 実測済み。参考記録・帰属保留）
+
+**RULE.txt の専有条件（GB10 の compute プロセス 0）を満たせなかったため、本ディレクトリの実測はすべて参考記録とする。正式系列としての判定・帰属の確定は行わず保留する。確定には、専有した GB10 での独立系列、または実測前に条件変更を登録した独立系列の再計測が必要（未実施）。以下の「正式系列」「帰属」「分類」の語はこの留保つきで読むこと。**
 
 | 項目 | 状態 |
 |---|---|
 | 診断テスト・RULE.txt・RULE.v2.txt・orchestrate.sh・aggregate.py | 整備済み。`RULE.v2.txt`（ブリッジ節のみの置換。理由は同ファイル冒頭）を実測前に別コミットで固定 |
-| GB10 正式系列（5 run） | **実測済み**。全 run が負荷ゲート通過（`gb10/load_gate_status.txt`）・checksum bit 一致・`aggregate.py` exit 0（`gb10/aggregate.md`） |
+| GB10 系列（5 run。参考記録） | **実測済み**。全 run が負荷ゲート通過（`gb10/load_gate_status.txt`）・checksum bit 一致・`aggregate.py` exit 0（`gb10/aggregate.md`） |
 | 補助系列（minflt 1 run・tunables 5 run・taskset 5 run） | **実測済み**（判定外。`gb10-minflt/`・`gb10-tunables/`・`gb10-taskset/` の `aggregate.md`） |
 | ブリッジ（bench-fandhe 5 run × 5 N × 3 モード） | **実測済み**。N=4096 のみ pass、N=256〜2048 は fail（`gb10-bridge/bridge_judge.md`） |
 | G-CPU-INF の分類（要件 2） | **実測済み**（`gb10-gcpuinf/`）。分類は doc §9.4 を参照 |
@@ -20,16 +22,16 @@ bench-fandhe の `gemm --mode reuse` を常駐入力経路（#3272。`Tape::uplo
 ## 結果の要約（詳細・解釈・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9）
 
 - bench 側の逆転は GB10 で**再現**した（bench-fandhe の reuse iter_total / fresh = N=256〜4096 で 1.71・1.64・1.47・1.57・1.25）
-- 診断の `resident_public` / `fresh` は N=256 が非再現（0.970）、N=512〜2048 が 1.04〜1.06、N=4096 が 1.214。**帰属を出せたのは N=4096 だけ**
+- 診断の `resident_public` / `fresh` は N=256 が非再現（0.970）、N=512〜2048 が 1.04〜1.06、N=4096 が 1.214。**参考値として帰属候補が出たのは N=4096 だけ（保留）**
   （rho_DL 0.78 → H1: `download` の追加確保＋コピー。rho_DROP 0.36・rho_K 0.00・rho_IN 0.02 は未達）
 - N=256〜2048 は診断が bench の逆転幅の 1/12〜1/15 しか写せておらずブリッジ fail。**この範囲の原因は未特定**
 - 補助系列（判定外）: tunables は N=256・512 で ratio <= 1.05、N=1024 以上で > 1.05。taskset は ratio をほぼ動かさない（N=4096 で 1.201）
 
 ## 実行環境と逸脱（RULE.txt との差）
 
-- ノードは `<cuda-node>`（GB10）。**RULE.txt の「GB10 専有（compute プロセス 0）の別途確認」は満たせなかった**。常駐 GPU プロセス 3 件
+- ノードは `<cuda-node>`（GB10）。**RULE.txt の「GB10 専有（compute プロセス 0）の別途確認」は満たせなかった（このため参考記録へ降格）**。常駐 GPU プロセス 3 件
   （LLM 推論 2・画像生成 1。停止していない）が計測前後とも同一で、ps の %CPU は最大 3.9・`utilization.gpu` は 0 %、計測中に新規プロセスは現れていない
-  （`session-scripts/gpu_procs.txt` の 9 時点）。RULE が実際に強制する判定ゲートは load1 < 1.0（全 run 通過）
+  （`session-scripts/gpu_procs.txt` の 9 時点）。aggregate.py が機械的に強制するのは load1 < 1.0（全 run 通過）だが、RULE.txt は専有確認も要求しており、これを欠くため正式判定には用いない
 - 転送は固定コミットの tracked ファイルだけを tar で展開する方式（rsync の `--delete-excluded` は使っていない）。ビルドは実機ロック取得前に完了。実機ロックは外部の `mkdir` 方式
 - `RULE.v2.txt` でブリッジ節だけを差し替えた（bench-fandhe が `gemm --mode fresh --phases` を MEASURE_ERROR で拒否するため RULE.txt のブリッジは実行不能）。
   `aggregate.py`・閾値・帰属規則は不変
