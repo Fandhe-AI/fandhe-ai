@@ -137,6 +137,19 @@ def load_series(root, host, rule_sha):
             raise JudgeError("excl_status に main が無い: %s" % root)
         excl = d["main"]
     runs = {(arm, r): load_run(os.path.join(root, arm, "run%d.jsonl" % r)) for arm in ARMS for r in RUNS}
+    # RULE.txt が記録を要求する区間行（T1／T2）の存在を検証する。欠落は入力不備。
+    # 実在する median_s=0.0 は計時分解能による欠測として許容し、ratio 側で None（有効 run 数に数えない）にする。
+    for c in CELLS:
+        if c[1] != host:
+            continue
+        for ph in c[4]:
+            for (arm_name, r), rows in runs.items():
+                v = rows.get((c[2], ph, c[3]))
+                if v is None:
+                    raise JudgeError("区間行が欠落: %s %s/run%d %r" % (root, arm_name, r, (c[2], ph, c[3])))
+                m = v[0]
+                if isinstance(m, bool) or not isinstance(m, (int, float)) or not math.isfinite(m) or m < 0:
+                    raise JudgeError("区間行の median_s が 0 以上の有限数でない: %s %r" % (root, (c[2], ph, c[3])))
     # 反復数（n_samples）は全 run・両腕で同一でなければ比較不能
     for key in runs[("before", 1)]:
         vals = {runs[(arm, r)][key][1] for arm in ARMS for r in RUNS if key in runs[(arm, r)]}
@@ -229,6 +242,10 @@ def judge_all(host_dirs, rule_path):
     for host, dirs in host_dirs.items():
         if len(dirs) > MAX_SERIES:
             raise JudgeError("系列が %d を超える: %s" % (MAX_SERIES, host))
+        # 同一ディレクトリの重複指定は別セッション 3 系列を満たさないため入力不備（realpath で正規化して検査）
+        real = [os.path.realpath(d) for d in dirs]
+        if len(set(real)) != len(real):
+            raise JudgeError("系列ディレクトリが重複している: %s" % host)
         loaded = [load_series(d, host, rule_sha) for d in dirs]
         selected = [s for s in loaded if not s["reasons"]][:NEED_SERIES]
         out["hosts"][host] = {"loaded": loaded, "selected": selected,
@@ -277,7 +294,7 @@ def render(res):
             L += ["", "## %s の区間行（再現したセルのみ。15 個の ratio の中央値。記録のみ）" % c["name"], "",
                   "| 区間 | 中央値 ratio | 有効 run 数 |", "|---|---|---|"]
             for ph, m, nv in c["phase_table"]:
-                L.append("| %s | %s | %d |" % (ph, "n/a（0.0 の run のみ）" if m is None else "%.4f" % m, nv))
+                L.append("| %s | %s | %d |" % (ph, "n/a（計時分解能による欠測。有効 run 0）" if m is None else "%.4f" % m, nv))
     L.append("")
     return "\n".join(L)
 
@@ -291,7 +308,7 @@ def _w(path, text):
 
 
 def make_series(root, host, rule_sha, fn, first="before", kind="main", gate="pass", excl="pass",
-                cksum=None, drop_run=False, dup=False, bad_sha=False, zero_phase=False):
+                cksum=None, drop_run=False, dup=False, bad_sha=False, zero_phase=False, no_phase=False):
     """fn(arm, diag_arm, n, run) -> after／before の median_s。"""
     _w(os.path.join(root, "env_info.txt"), "rule_sha256: %s\nhost_kind: %s\n" % ("0" * 64 if bad_sha else rule_sha, host))
     _w(os.path.join(root, "series_kind.txt"), kind + "\n")
@@ -309,10 +326,13 @@ def make_series(root, host, rule_sha, fn, first="before", kind="main", gate="pas
                     ck = cksum(arm, a, n, r) if cksum else "c-%s-%d" % (a, n)
                     rows.append({"arm": a, "phase": "iter_total", "n": n, "median_s": fn(arm, a, n, r),
                                  "n_samples": 10, "checksum_bits": ck})
-            rows.append({"arm": "resident_split", "phase": "download", "n": 512, "median_s": 0.0 if zero_phase else 1e-4,
-                         "n_samples": 10, "checksum_bits": None})
-            rows.append({"arm": "resident_split", "phase": "gemm_device", "n": 512, "median_s": 1e-4 * (1.2 if arm == "after" else 1.0),
-                         "n_samples": 10, "checksum_bits": None})
+            for c in CELLS:
+                for ph in c[4]:
+                    if no_phase and ph == c[4][0]:
+                        continue
+                    m = 0.0 if zero_phase else 1e-4 * (1.2 if arm == "after" else 1.0)
+                    rows.append({"arm": c[2], "phase": ph, "n": c[3], "median_s": m,
+                                 "n_samples": 10, "checksum_bits": None})
             if dup:
                 rows.append(rows[0])
             _w(os.path.join(root, arm, "run%d.jsonl" % r), "".join(json.dumps(x) + "\n" for x in rows))
@@ -415,6 +435,9 @@ def self_test():
         expect("行重複は fail-closed", raises(build("dup", [slow] * 3, opts={1: {"dup": True}})))
         expect("RULE sha 不一致は fail-closed", raises(build("sha", [slow] * 3, opts={1: {"bad_sha": True}})))
         expect("系列ディレクトリ無しは fail-closed", raises([os.path.join(tmp, "nonexistent")]))
+        expect("区間行の欠落は fail-closed", raises(build("nophase", [slow] * 3, opts={2: {"no_phase": True}})))
+        same = build("samedir", [slow], host="macmini")[0]
+        expect("同一系列ディレクトリの重複は fail-closed", raises([same, same, same + "/../s1"]))
         expect("系列 6 本は fail-closed", raises(build("six", [slow] * 6)))
     print("self-test: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
