@@ -1,0 +1,66 @@
+イシュー #3679 事前登録規則（実測前に固定。事後に緩めない）
+
+固定時刻: このファイルを追加したコミットのコミット時刻を正とする（手書きの時刻は入れない。
+          実際の値は rev-stamp-verification-3679.md に git log -1 --format=%cI で記録する）。
+
+対象と動機:
+- #3672（PR #3677・#3678）の A/B は REJECT だった（judge-3672.md）。処置 2 セルは改善したが、
+  非処置の次の 3 セルが 5/5 run で後退した。本規則は、その結果を見たあとに 3 セルを指定して行う
+  「再現するか」の確認であり、#3672 の RULE.txt・RULE.v2.txt と REJECT 判定は変えない。
+- T1: GB10 の診断 resident_split iter_total N=512
+- T2: Mac mini の診断 resident_public iter_total N=256
+- T3: Mac mini の診断 gemm_device_download iter_total N=4096
+- T1・T3 の腕は res.ops.download を直接呼び、download_owned を通らない（コード読解。実測ではない）。
+  T2 は公開経路 matmul_resident を通る。
+
+腕:
+- before = a7aac2f0227add243845418e0897ac0675c5b622
+- after  = f7ce20fc91730216e8f3f60514b181f32ebfee48
+- 両腕とも git archive の tar を転送し、.rev-stamp（1 行目 sha・2 行目 dirty=0）を置き、
+  ツリー指紋をローカルの git archive と突き合わせる。registry の fandhe-ai =0.12.0 は使わない。
+- ハード条件: 診断テストと framework-compare が両腕で同一であること（build_ab_arms.sh が強制する）。
+  バイナリは hw-lock を取る前に build_ab_arms.sh で作り、各系列の前に arms.txt の sha256 と照合する。
+- bench は測らない（3 セルはすべて診断セル）。
+
+系列と run:
+- 機体ごとに 3 系列。各系列は別セッションとして起動し、hw-lock を取り直し、別ラベル（s1 から）を付ける。
+- 1 系列は 5 run。各 run で before と after を別プロセスで起動し、run ごとに順を反転する（ABBA）。
+- 系列の先頭腕は交互にする（s1 は before 先・s2 は after 先・s3 は before 先・s4 は after 先・s5 は before 先）。
+- 診断の反復数は cpu_gemm_resident_reuse_diag.rs の iters_for 既定のまま。縮めない。
+- 系列間は 30 分以上あける（steps.log の開始時刻で確認する）。
+
+ゲートと打ち切り:
+- GB10: 系列の前・途中（30 秒間隔の poller）・後で compute プロセスが 0 件（excl_check.py --series main が pass）
+  かつ各 run の前に load1 < 1.0。Mac mini: 各 run の前に load1 < 3.0。
+- ゲートを通らない run を含む系列は record_only とし、判定に使わない。
+- 機体ごとに最大 5 系列まで起動し、起動順でゲートを pass した最初の 3 系列を判定に使う。
+  選ぶ基準はゲートだけで、値を見て選ばない。run の差し替え・追加・セルの除外はしない。
+- 計測の前に止まった場合だけ、新しいラベルで起動し直してよい。経緯は README.md に記録する。
+
+指標: ratio_r = after_r / before_r（同じ系列・同じ run 番号の対。phase=iter_total の median_s）。
+      セルごとに 3 系列 x 5 run = 15 個を使う。
+
+判定（セルごと。互いに排他で、すべての場合を覆う。上から順に適用する）:
+- k = 15 個のうち ratio_r > 1.00 の個数（1.00 ちょうどは数えない）。
+1. 判定不能（系列不足）: ゲートを pass した系列が 3 未満。
+2. 判定不能（checksum）: 当該 (腕, N) の checksum_bits が before・after の全 run で一致しない。
+3. 再現した: k >= 12（片側の符号検定で p ≈ 0.018）かつ、3 系列それぞれの中央値 ratio > 1.00。
+4. 再現しない: k <= 7（15 個の中央値が 1.00 以下であることと同じ）。
+5. 判定不能: 上のどれにも当たらない（8 <= k <= 11、または k >= 12 で中央値が 1.00 以下の系列がある）。
+- 記録のみ: 15 個の中央値 ratio、系列ごとの中央値と「5/5 run で > 1.00 か」、ノイズ参考として
+  系列ごとに T1〜T3 以外の診断セルが 5/5 > 1.00・5/5 < 1.00 になった件数。
+- 帰無仮説（差なし）で 1 セルが 5/5 後退する確率は 1/32 で、約 90 セルでは約 2.8 件が偶然当たる。
+
+判定後の解釈（事前固定）:
+- T1・T3 で「再現した」場合は、download_owned の経路の外の差（同じプロセス内の持ち越し・バイナリ配置等）
+  として記録し、区間の帰属は主張しない。
+- T2 で「再現した」場合は、matmul 区間と readout／checksum 区間のどちらに差があるかを記録する。
+- 再現したセルは、run ごとの区間の中央値の ratio を記録のみとして表にする（判定には使わない）。
+    T1: gemm_device / download / out_drop / readout / checksum
+    T2: matmul / readout / checksum
+    T3: 区間行がないので記録しない
+- これより細かい切り分けと修正は対象外。所有者確認のあと別 issue にする。
+
+不変: tolerance・parity baseline・ガードレール閾値・依存は変えない。
+実測できなかった機体・セルは「未実測」のまま残し、他機体や他の機体種の値で代替しない。
+「再現しない」「判定不能」も正当な結果として記録する。
