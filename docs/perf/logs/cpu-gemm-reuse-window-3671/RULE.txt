@@ -1,0 +1,99 @@
+RULE fixed-at-utc: 2026-10-28T00:00:00Z (実機計測より前に単独コミットで固定。事後に緩めない)
+issue: #3671 GB10 CPU gemm の N=256〜2048 で bench の reuse 窓が診断より遅い原因の切り分け
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §10
+前提: #3646 の専有正式系列（docs/perf/logs/cpu-gemm-resident-reuse-3646/gb10-excl/・doc §9.7）。
+      RULE.v2.txt のブリッジ基準（0.5 <= 比 <= 2.0）を新しい閾値を作らずそのまま使う。
+
+[対象と見るべき量]
+- 判定対象 N = 256・512・1024・2048。N=4096 は対照として記録し判定外とする。
+- §9.7 では fresh 自体も bench と診断で違う（N=256〜2048 で bench fresh / diag fresh = 0.96・1.48・1.12・1.04）。
+  プロセス全体に効く要因を常駐経路の原因として数えないよう、reuse 側だけにある超過分を見る:
+  E(N) = (bench reuse / diag resident_public) ÷ (bench fresh / diag fresh)。E は記録用で判定には使わない。
+
+[コード読解で確定した差分（実測ではない）]
+- 窓の中: bench は matmul_resident → readout_tensor（contiguous＋借用）→ slice → 全要素 checksum。
+  診断 resident_public は matmul_resident → contiguous → as_slice → checksum。実質同じ。
+- 窓の外（反復ごと）: bench は validate_gemm_checksum と reference.verify_strict(out)（参照 N² と出力 N² の
+  全要素比較。単一スレッド）と out の drop。診断は record_checksum（bit 比較のみ）と drop。全要素の検算はない。
+- Tape::reset: bench の measure_gemm_reuse_resident も診断の one_iter も呼ばない（release_gemm_reuse_iteration は
+  ホスト入力経路 run_gemm_reuse_host_input だけが使う）。比べる差分がないため腕を作らない。
+- プロセス構成: bench は 1 プロセス 1 腕 1 N（init 1 回＋warmup 19＋計測 20）で、init より前に単一スレッドの
+  O(N³) 参照 GEMM を計算し、N² の f32 を 5 本（a_data・b_data・a_host・b_host・参照 c）保持する。
+  診断は 1 プロセスで 8 腕×5 N×4 ラウンドを交互に回す。ビルドは bench が framework-compare workspace の
+  registry fandhe-ai =0.12.0、診断が本体 workspace の path（HEAD）。
+
+[腕（1 腕 = 1 要因）]
+診断側（crates/facade/tests/cpu_gemm_reuse_window_diag.rs。窓の中は resident_public と同一。足す要因だけ違う）:
+- fresh / resident_public: #3646 と同じ基準腕（同一セッションの値を使う）。
+- rp_verify_touch（H-V）: 窓の外で N² の参照 Vec と出力を全要素 bit 比較（verify_strict のアクセスパターンの写し。
+  parity 契約ではない）。区間 gap を計時する。
+- rp_verify_gap（H-V の分解）: 同じ比較回数 2·N² を L1 に収まる 4 KiB バッファ上で行う（メモリトラフィックなしの
+  空き時間）。区間 gap を計時し、両 verify 腕の空き時間が揃うことを記録する。
+- rp_hold_footprint（H-A1）: bench と同じ 5 本の N² Vec を保持するだけで触らない。
+- rp_ref_compute（H-A2）: ブロック開始前に単一スレッド O(N³) の参照 GEMM を 1 回計算し、同じ 5 本を保持する。
+- rp_solo（H-P）: 別系列。GEMM_WINDOW_ONLY_ARM=resident_public（allowlist 検証・許可外は拒否）で 1 プロセス
+  resident_public のみ・1 ラウンド・bench と同じ反復構造（init 1 回＋warmup 20 相当＋計測 20）。
+bench 側（bench-fandhe のソース・窓・emit・判定は変えない。環境変数とビルドの切り替えだけ）:
+- bench_base: 変更なし。--task gemm --device cpu の --mode fresh 通常行・--mode reuse --phases・--mode reuse 通常行。
+- bench_tunables（H-A3）: GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=1073741824
+  （#3646 の補助系列と同じリテラル）。
+- bench_headpatch（H-B）: --config 'patch.crates-io.fandhe-ai.path=<repo>/crates/facade' で HEAD の path ビルドへ差し替え
+  （既存の run_ab_* と同じ方式。Cargo.lock は計測後に元へ戻す）。
+
+[予測]
+- H-V が主因なら rp_verify_touch が bench に近づく。N=4096 は 1 反復の GEMM（約 113 ms）に比べて検算の費用と
+  キャッシュの影響が小さいためブリッジが崩れず、#3646 の観測（N=4096 で比 1.135）と矛盾しない。
+- H-V のうち空き時間が主因なら rp_verify_gap も近づく。キャッシュの追い出しが主因なら rp_verify_touch だけが近づく。
+- H-A／H-B／H-P が主因なら、それぞれの腕だけが近づく。
+
+[実行方法]
+- 診断の正式系列: 1 run = 1 プロセスで cpu_gemm_reuse_window_phases を --ignored --exact --nocapture --test-threads=1 で
+  起動、run1〜run5 の 5 run。各 (腕, N) ブロックは N=256〜2048 が warmup 20＋計測 20、N=4096 が warmup 5＋計測 10。
+  4 ラウンド、ラウンドごとに腕順を反転（n_samples は N=4096 が 40、それ以外が 80）。
+- rp_solo は別系列（cpu_gemm_reuse_window_solo）で 5 run（n_samples は N=4096 が 10、それ以外が 20）。
+- bench: bench_base・bench_tunables・bench_headpatch を、それぞれ N × 3 モード × 5 run。--out を必ず明示する。
+- 差し替え・追加起動・セル除外・既存 run ファイルの上書きはしない。RAYON_NUM_THREADS が設定されていれば拒否する。
+- 代表値: run ごとの median_s を採り、5 run の中央値と min-max を報告する。主指標は iter_total。matmul 区間は記録のみ。
+
+[checksum 規則（hard・fail-closed）]
+- 診断: N ごとに全腕・全 run の iter_total.checksum_bits が bit 一致すること。bench: 全 run で parity が pass すること。
+  どちらも外れたら系列は無効（aggregate.py／bench_judge.py は exit != 0）。
+
+[量の定義]
+- G_bench = bench_base の reuse --phases iter_total − bench_base の fresh（RULE.v2 と同じ）。
+- G_diag  = resident_public.iter_total − fresh.iter_total（同じ診断プロセス）。
+- G_X     = X.iter_total − fresh.iter_total（診断側の腕 X。同じプロセスの fresh を使う）。rp_solo は同系列内に
+  fresh が無いため G_solo は主診断系列の fresh を使う（記録に明記する）。
+- G_Y     = Y の reuse iter_total − Y の fresh（bench 側の腕 Y。同じ腕の fresh を使う）。
+
+[判定（RULE.v2 のブリッジ基準をそのまま使い新しい閾値は作らない）]
+- 基準の再確認: 同じセッションの bench_base と resident_public でブリッジ（bench の matmul 区間差が iter_total 差の
+  50% 以上、かつ matmul 区間比 0.5〜2.0）が fail すること（§9.7 の再現）。pass なら「現象が再現しない」と記録し帰属は行わない。
+- 診断側の腕 X: G_bench > 0 かつ G_X > 0 かつ 0.5 <= G_bench / G_X <= 2.0 のとき
+  「その要因を足すと bench の逆転幅を再現する」→ 支持。
+- bench 側の腕 Y: G_Y > 0 かつ G_diag > 0 かつ 0.5 <= G_Y / G_diag <= 2.0 のとき
+  「その要因を外すと診断の水準まで縮む」→ 支持。
+- 支持された腕が複数あれば併記する（交互作用は断定しない）。どれも支持されなければ「特定できず」とし各比を記録する。
+- rp_verify_touch が支持され rp_verify_gap が支持されない → 「キャッシュとページへの影響」。両方支持 →
+  「単一スレッドの空き時間（ワーカーの休止など）」。この区別は記録のみで因果の断定はしない。
+- 修正が要る場合も本 Issue では方針を所有者に示すところまでにとどめる（bench の窓に関わるなら所有者判断）。
+
+[ゲート・専有・同定]
+- 各 run の前に load1 < 1.0（30 秒間隔・最大 30 分。未通過は gate=unpassed で参考扱い）。
+- 専有は excl_check.py --series でラベルごとに判定（前・途中 30 秒間隔・後で compute-apps が 0 件）。
+  1 系列でも fail ならその系列は参考記録とする。
+- ドリフトガード: .rev-stamp（1 行目 HEAD・2 行目 dirty=<件数>）が RULE を含むコミットを指し、RULE の sha256 が
+  env_info.txt と一致すること。ツリー指紋は git archive と突き合わせる。
+- 同定の記録: git diff --stat v0.12.0 HEAD -- crates/tensor-core crates/autodiff crates/backend-cpu crates/facade/src を記録する。
+  差分があれば bench_headpatch の解釈に注記する。両 workspace の rustc -vV と cargo --version も記録する。
+
+[補助（判定外・別系列）]
+- minflt: 診断の 1 run を /usr/bin/time -v 配下で起動し、プロセス全体の minor page faults と
+  voluntary／involuntary context switches を記録する（/usr/bin/time が無ければ「未実測」）。
+  計時を乱す可能性があるので判定には使わず正式系列に混ぜない。
+
+[対象外]
+- tolerance・parity baseline・判定規則・bench の窓の変更。修正の実装（download の所有権移動は #3672。bench の窓の
+  見直しは所有者判断）。0.12.0 の正式値と #3274 の tally の変更。Tape::reset の腕（理由は読解の節）。
+  Linux x86・M4 Max の値による代替（M4 Max は疎通確認のみで record_only）。
+- 固定後は変えない。変える場合は RULE.v2.txt を別コミットで作り理由を書く。

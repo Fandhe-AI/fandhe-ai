@@ -428,3 +428,70 @@ bench プロセス固有のアロケータ状態、反復ごとの `Tape::reset`
 
 参考記録（§9.3b。非専有）との差: 向き・結論は同じ（N=4096 のみ H1 支持、N≤2048 ブリッジ fail）。rho_DL は 0.78→0.72、rho_DROP は 0.36→0.25。数値の細部の差は
 機体の状態差を含みうるため、どちらが「真」かはここでは断定しない。G-CPU-INF の分類も同じ（§9.4）。
+
+## 10. N=256〜2048 の窓の差の切り分け（#3671）
+
+### 10.1 状態（先に結論）
+
+**計測部品の段階で、GB10 の専有系列は未実測。原因は特定していない。** 事前登録規則（`logs/cpu-gemm-reuse-window-3671/RULE.txt`・`RULE.v2.txt`）、診断テスト
+`crates/facade/tests/cpu_gemm_reuse_window_diag.rs`、`orchestrate.sh`・`aggregate.py`・`bench_judge.py`・`session-scripts/session-3671-excl.sh`
+を置いた（実測前に規則を固定。固定の順序は同ディレクトリの `README.md`）。0.12.0 の正式値と #3274 の tally は変えていない。
+未実行の項目は「未実測」とし、Linux x86・M4 Max の値で代替しない。
+
+| 項目 | 状態 |
+|---|---|
+| 読解で確定した窓の差 | 窓の中は同じ。差は窓の外（bench の `verify_strict`）とプロセス構成（10.2） |
+| `Tape::reset` | bench も診断も呼ばないため比べる差分なし（腕は作らない） |
+| 診断側の腕・bench 側の腕の GB10 専有系列 | 未実測 |
+| 原因 | 未特定（実測後に 10.4 を埋める） |
+
+### 10.2 コード上の事実（読解。実測ではない）
+
+| 項目 | bench `measure_gemm_reuse_resident` | 診断 `resident_public`（#3646） |
+|---|---|---|
+| 窓の中 | `matmul_resident` → `readout_tensor` → `slice` → 全要素 checksum | `matmul_resident` → `contiguous` → `as_slice` → checksum（実質同じ） |
+| 窓の外（反復ごと） | `validate_gemm_checksum`・`reference.verify_strict(out)`（参照 N² と出力 N² の全要素比較・単一スレッド）・drop | `record_checksum`（bit 比較のみ）・drop |
+| `Tape::reset` | 呼ばない | 呼ばない |
+| 常駐データ | `a_data`・`b_data`・`a_host`・`b_host`・`GemmReference.c`（N² の f32 が 5 本）。init より前に並列（scoped worker）の O(N³) 参照 GEMM（`RULE.v3.txt` で「単一スレッド」の誤記を訂正） | `a`・`b` と常駐コピーのみ |
+| 反復構造 | 1 プロセス 1 腕 1 N（init 1 回＋warmup 19＋計測 20） | 1 プロセスで腕を交互に回す（各ブロック warmup 20＋計測 20） |
+| ビルド | framework-compare workspace・registry `fandhe-ai =0.12.0` | 本体 workspace・path の HEAD・test harness |
+
+§9.7 では fresh 自体も bench と診断で違う（bench fresh / diag fresh = 0.96・1.48・1.12・1.04）。プロセス全体に効く要因を常駐経路の原因として
+数えないよう、reuse 側だけにある超過分 E(N) = (bench reuse / diag resident_public) ÷ (bench fresh / diag fresh) を記録する（判定には使わない）。
+
+### 10.3 仮説・腕・予測（`RULE.txt`・`RULE.v2.txt` に事前登録）
+
+| 仮説 | 腕（1 要因） | 支持の条件（#3646 ブリッジ v2 と同じ 0.5〜2.0。新しい閾値は作らない） |
+|---|---|---|
+| H-V 検算が次反復のキャッシュ・ページに及ぼす影響 | `rp_verify_touch`（窓の外で N² を全要素比較） | G_bench / G_X が 0.5〜2.0 |
+| H-V の分解（空き時間のみ） | `rp_verify_gap`（同じ回数を L1 上で） | 同上 |
+| H-A1 常駐量 | `rp_hold_footprint` | 同上 |
+| H-A2 前処理の確保・解放履歴 | `rp_ref_compute` | 同上 |
+| H-P 腕の交互実行・反復構造 | `rp_solo`（別系列） | 同上 |
+| H-A3 bench プロセスのアロケータ | `bench_tunables` | G_Y / G_diag が 0.5〜2.0 |
+| H-B ビルド成果物の差 | `bench_headpatch` | 同上 |
+
+予測: H-V が主因なら `rp_verify_touch` が bench に近づく。N=4096 は 1 反復の GEMM（約 113 ms）に比べ検算の費用とキャッシュの影響が小さく、
+ブリッジが崩れない（§9.7 の観測 1.135 と矛盾しない）。空き時間が主因なら `rp_verify_gap` も近づき、追い出しが主因なら `rp_verify_touch` だけが近づく。
+
+### 10.4 正式系列の結果
+
+**未実測。** GB10 専有系列を取った後に、`aggregate.py`・`bench_judge.py` の出力（run 番号付きの表を含む）と `excl_status.txt` をここへ転記する。
+専有（`excl_check.py --series`）を満たさない系列は参考記録とする。
+
+### 10.5 性能規則の結論
+
+実測前のため結論なし（未実測）。規則の結論は「どの腕が支持されたか・特定できたか」だけで、実測後に 10.4 の結果から機械的に書く。
+
+### 10.6 保守性の判断（性能規則の結論とは別項）
+
+実測前のため判断なし。修正が要る場合も本 Issue では方針を所有者へ示すところまでにとどめる。原因が bench の計測窓の側にあれば、直し方は
+§9.5 (c)（窓の見直し）で所有者判断。特定できなかった場合に限り、bench-fandhe の診断用ノブ（例: 反復内の検算をループの後へ移す）を**提案として**示す
+（本 Issue では実装しない）。
+
+### 10.7 限界
+
+- 診断の `rp_verify_touch` は `verify_strict` の**メモリアクセスパターンの複製**であり、parity 契約ではない（bench-common へは path 依存できない）
+- `Tape::reset` はノード数を公開 API で数えられないため、読解（reset 非呼び出し）と葉数不変の CI テストのみが根拠
+- 腕は 1 要因ずつで、交互作用は断定しない。支持が複数ならすべて併記する
+- 実測前の PR のため、原因の特定・非特定のどちらも主張しない
