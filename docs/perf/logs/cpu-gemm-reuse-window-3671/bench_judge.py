@@ -242,6 +242,17 @@ def judge(diag, solo, bench, excl, gate_bad):
     return lines, notes, concl
 
 
+def check_solo_checksums(diag, solo):
+    """N ごとに solo と主診断の iter_total.checksum_bits が一致すること（不一致は JudgeError）。"""
+    if solo is None:
+        return
+    for n in agg.SIZES:
+        want = {c[("fresh", n, "iter_total")]["checksum_bits"] for c in diag["runs"]}
+        got = {c[("rp_solo", n, "iter_total")]["checksum_bits"] for c in solo["runs"]}
+        if len(want) != 1 or got != want:
+            raise JudgeError(f"solo と主診断の checksum_bits が N={n} で不一致: diag={sorted(want)} solo={sorted(got)}")
+
+
 def run(args):
     diag = agg.load_series(args["diag"])
     if diag["kind"] != "main":
@@ -251,12 +262,17 @@ def run(args):
         solo = agg.load_series(args["solo"])
         if solo["kind"] != "solo":
             raise JudgeError("--solo は series_kind=solo の系列")
-    bench, sums = {}, {}
+    bench, sums, missing = {}, {}, []
     for a in BENCH_ARMS:
         if os.path.isdir(os.path.join(args["bench_root"], a)):
             bench[a], sums[a] = load_bench_arm(args["bench_root"], a)
+        else:
+            missing.append(f"bench_{a}")
     if "base" not in bench:
         raise JudgeError("bench_base の系列が無い（基準の再確認ができない）")
+    if solo is None:
+        missing.append("rp_solo（--solo）")
+    check_solo_checksums(diag, solo)
     for n in agg.SIZES:
         allsum = set()
         for a in bench:
@@ -266,6 +282,9 @@ def run(args):
     gate_bad = load_gate_log(args["gate_log"], list(bench)) if args.get("gate_log") else ["(gate-log 未指定)"]
     excl = load_excl(args["excl"]) if args.get("excl") else None
     lines, notes, concl = judge(diag, solo, bench, excl, gate_bad)
+    if missing:
+        # RULE.txt は全腕（base・tunables・headpatch・rp_solo）を要求する。欠落は正式判定にしない。
+        notes.append("RULE 必須の腕が欠落: " + ", ".join(missing))
     print("OFFICIAL:", "yes" if not notes else "no（参考記録: " + "; ".join(notes) + "）")
     for ln in lines:
         print(ln)

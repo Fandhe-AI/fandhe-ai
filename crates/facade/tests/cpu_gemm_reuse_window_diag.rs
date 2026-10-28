@@ -180,20 +180,35 @@ struct Resident {
     gap_b: Vec<f32>,
 }
 
-/// bench `GemmReference::compute` の写し: 単一スレッド・ikj 順の素朴な O(N³) GEMM。
-/// 前処理で確保・解放と CPU 履歴を bench と揃えるためだけの計算で、数値契約には使わない。
+/// bench `GemmReference::compute` の写し: `available_parallelism()` 個（`n` で頭打ち）の scoped worker が
+/// 行を分担する ikj 順の素朴な O(N³) GEMM。前処理で bench と同じスレッドスタックの確保・解放と
+/// CPU 履歴を再現するためだけの計算で、数値契約には使わない（H-A2）。
 fn naive_reference(a: &[f32], b: &[f32], n: usize) -> Vec<f32> {
     let mut c = vec![0.0f32; n * n];
-    for i in 0..n {
-        for k in 0..n {
-            let aik = a[i * n + k];
-            let row = &b[k * n..(k + 1) * n];
-            let out = &mut c[i * n..(i + 1) * n];
-            for (o, &bv) in out.iter_mut().zip(row) {
-                *o = aik.mul_add(bv, *o);
-            }
+    let workers = std::thread::available_parallelism()
+        .map(|w| w.get())
+        .unwrap_or(1)
+        .min(n)
+        .max(1);
+    let rows_per_chunk = n.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (chunk_idx, c_chunk) in c.chunks_mut(rows_per_chunk * n).enumerate() {
+            let row_start = chunk_idx * rows_per_chunk;
+            scope.spawn(move || {
+                for local_i in 0..c_chunk.len() / n {
+                    let i = row_start + local_i;
+                    for k in 0..n {
+                        let aik = a[i * n + k];
+                        let row = &b[k * n..(k + 1) * n];
+                        let out = &mut c_chunk[local_i * n..(local_i + 1) * n];
+                        for (o, &bv) in out.iter_mut().zip(row) {
+                            *o = aik.mul_add(bv, *o);
+                        }
+                    }
+                }
+            });
         }
-    }
+    });
     c
 }
 
@@ -257,7 +272,7 @@ fn verify_touch(reference: &[f32], out: &[f32]) -> usize {
         .count()
 }
 
-/// 同じ比較回数 `2·N²` 相当を L1 常駐バッファ上で行う。メモリトラフィックなしの空き時間。
+/// `verify_touch` と同じ比較回数 `N²` を L1 常駐バッファ上で行う。メモリトラフィックなしの空き時間。
 fn verify_gap(a: &[f32], b: &[f32], total: usize) -> usize {
     let mut mism = 0usize;
     let mut left = total;
@@ -326,7 +341,7 @@ fn one_iter(
             );
         }
         Kind::VerifyGap => {
-            let m = rec.timed("gap", || verify_gap(&res.gap_a, &res.gap_b, 2 * n * n));
+            let m = rec.timed("gap", || verify_gap(&res.gap_a, &res.gap_b, n * n));
             assert_eq!(black_box(m), 0);
         }
         _ => {}

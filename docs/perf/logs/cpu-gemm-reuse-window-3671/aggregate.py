@@ -13,6 +13,7 @@
 正式系列の条件: series_kind が main または solo で、全 run が gate=pass。満たさない系列は「参考記録」と出力する
 （専有 excl=pass は bench_judge.py が excl_status.txt で別途確認する）。
 """
+import hashlib
 import json
 import math
 import os
@@ -168,7 +169,19 @@ def summarize(runs):
     return out
 
 
-def load_series(d):
+def rule_hashes():
+    """同ディレクトリの承認済み RULE.txt／RULE.v2.txt の実 sha256（orchestrate.sh の sha256_of と同じ全バイト）。"""
+    out = {}
+    for key, name in (("rule_sha256", "RULE.txt"), ("rule_v2_sha256", "RULE.v2.txt")):
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name), "rb") as f:
+                out[key] = hashlib.sha256(f.read()).hexdigest()
+        except OSError as e:
+            raise AggError(f"{name}: 読み込み不可 ({e})")
+    return out
+
+
+def load_series(d, rule_override=None):
     """検証済みの系列を返す: dict(kind, env, gate, runs, summary, official, why)。"""
     kind = load_kind(d)
     nruns = run_count(kind)
@@ -183,6 +196,10 @@ def load_series(d):
         why.append("補助系列（判定外）")
     if any(v != "pass" for v in gate.values()):
         why.append("負荷ゲート未通過または record_only の run を含む: " + ",".join(f"{k}={v}" for k, v in sorted(gate.items())))
+    actual = rule_override if rule_override is not None else rule_hashes()
+    for k, v in actual.items():
+        if env[k] != v:
+            why.append(f"{k} が承認済み RULE の実ハッシュと不一致（記録 {env[k]!r}・実 {v!r}）")
     if env["rev_stamp_dirty"] != "dirty=0":
         why.append(f"計測ツリーが dirty（{env['rev_stamp_dirty']}）")
     return {"kind": kind, "env": env, "gate": gate, "runs": runs, "summary": summarize(runs),
@@ -228,7 +245,7 @@ def report(s):
             print(f"| {n} | {fmt(summ[('rp_verify_touch', n, 'gap')][0])} | {fmt(summ[('rp_verify_gap', n, 'gap')][0])} |")
 
 
-def _gen_fixture(d, kind="main", runs=None, mutate=None, gate="pass"):
+def _gen_fixture(d, kind="main", runs=None, mutate=None, gate="pass", rule_hash=None):
     arms = KINDS[kind]
     nruns = run_count(kind) if runs is None else runs
     os.makedirs(d, exist_ok=True)
@@ -238,7 +255,9 @@ def _gen_fixture(d, kind="main", runs=None, mutate=None, gate="pass"):
         for n in range(1, run_count(kind) + 1):
             f.write(f"run{n} gate={gate}\n")
     with open(os.path.join(d, ENV_FILE), "w") as f:
-        f.write(f"rev_stamp_head: abc\nrev_stamp_dirty: dirty=0\nrule_sha256: x\nrule_v2_sha256: y\nseries_kind: {kind}\n")
+        rh = rule_hash or rule_hashes()
+        f.write(f"rev_stamp_head: abc\nrev_stamp_dirty: dirty=0\nrule_sha256: {rh['rule_sha256']}\n"
+                f"rule_v2_sha256: {rh['rule_v2_sha256']}\nseries_kind: {kind}\n")
     for r in range(1, nruns + 1):
         lines = []
         for arm, phases in arms.items():
@@ -285,6 +304,11 @@ def self_test():
         _gen_fixture(d, gate="unpassed")
         if load_series(d)["official"]:
             print("SELF-TEST FAIL unpassed-gate-official")
+            ok = False
+    with tempfile.TemporaryDirectory() as d:
+        _gen_fixture(d, rule_hash={"rule_sha256": "x", "rule_v2_sha256": "y"})
+        if load_series(d)["official"]:
+            print("SELF-TEST FAIL rule-hash-mismatch-official")
             ok = False
     expect_fail("missing-run", runs=4)
     expect_fail("missing-cell", mutate=lambda r, rec: None if (rec["arm"], rec["n"], rec["phase"]) == ("rp_verify_gap", 512, "gap") else rec)
