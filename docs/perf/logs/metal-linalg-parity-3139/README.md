@@ -6,7 +6,24 @@
 
 ## 結果
 
-**状態（2026-10-27）**: Mac mini（`<metal-node>`・Apple M4）で改訂 `RULE.txt` どおり実測し、**5 回中 5 回とも `qr_matches_cpu_on_device` が fail（判定は fail。要対応・所有者判断待ち）**。
+**状態（2026-10-28）**: 所有者判断 (a) による `qr_input(3,8)` の是正後、Mac mini（`<metal-node>`・Apple M4）で 5/5 run 全件 pass（各 run `running 7 tests`・`7 passed; 0 failed`・`rc=0`）。
+収録先は `../metal-linalg-lu-chol-qr-2676/rerun-2026-10-28/`。本 issue の受け入れ条件を満たし、PR は `Closes #3139`。新しい実測は本 PR では行っておらず、既存記録の対応づけのみ。
+
+### #3139 受け入れ条件と根拠（2026-10-28）
+
+| 受け入れ条件（要約） | 根拠 |
+|---|---|
+| 判定 4 テスト（`pipeline_compiles_on_device`・`cholesky_matches_cpu_on_device`・`lu_family_matches_cpu_on_device`・`qr_matches_cpu_on_device`）が Mac mini で全件 pass。事前登録規則と rev-stamp がログにある | `../metal-linalg-lu-chol-qr-2676/RULE.txt` の「改訂（2026-10-28）」、`rerun-2026-10-28/rev-stamp.txt`・`run1.log`〜`run5.log`（5 run とも `7 passed; 0 failed`・`rc=0`） |
+| 実測記入欄の更新と `docs/README.md` の索引行 | `../metal-linalg-lu-chol-qr-2676/README.md` の実測記入欄（2026-10-28 行）、`docs/README.md` の索引行 |
+| 1e±20 倍の QR が NaN／0 を返さず判定を満たす | `qr_matches_cpu_on_device` の assert（有限性・R 対角が 0 でない・倍率で正規化した R の parity）の pass。記録専用の診断行でも `finite=true diag_nonzero=true`（`rerun-2026-10-28/run1.log` 46・53・66・73 行。`1e20 × I₂` は 80 行・R の parity は 75〜77 行で fail 0/4） |
+| fail 時に tolerance を緩めず原因と是正方針を記録 | 下記の 2026-10-27 の fail の節（原因の判別）と `docs/backend-gpu-linalg-decision.md` §5。是正は (a)（入力是正）が採用された。tolerance・判定式・baseline は不変 |
+
+- 実測 SHA の同一性: 実測ツリーは `2e30c15b2c7016afde3e4b69686187dcd9bd259b`（squash 前のブランチ `origin/test/2676-qr-input-fix` 上）。main では `963a5c0be`（#3665）に squash された。`2e30c15b2` と main の差分（backend-metal・backend-cpu・tensor-core・Cargo.toml・Cargo.lock・rust-toolchain.toml）が空であることを確認済みで、判定対象のコードは実測時と同一
+- 事前登録の先後: `rev-stamp.txt` が RULE 改訂を含むコミット `2e30c15b2` 自体を指すため、構造上 RULE の固定は実測より前である（RULE 改訂の「宣言日時（UTC）」表記はコミット時刻より後の値で、時刻表記の誤記と思われる。事前登録は書き換えないためそのまま残す）
+
+### 履歴: 2026-10-27 の状態（元入力・fail）
+
+**状態（2026-10-27。元入力）**: Mac mini（`<metal-node>`・Apple M4）で改訂 `RULE.txt` どおり実測し、**5 回中 5 回とも `qr_matches_cpu_on_device` が fail（判定は fail。要対応・所有者判断待ち）**。
 LU 系・cholesky・`pipeline_compiles_on_device` は pass。本 issue の閉じる条件（実機 pass）は**未達**で、PR は `Refs #3139`（`Closes` は書かない）。
 
 - 事前登録: 実測前にコミット `95a18c2d324a0d5271e1b9e4c84829bc51d08de9`（診断テスト追加 + `RULE.txt` 改訂）で固定

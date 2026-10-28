@@ -182,7 +182,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 | ゲート | 状況 | 根拠 |
 |---|---|---|
 | G1: 公開形の所有者承認 | **取得済み（2026-10-17）** | §11.2 の推奨形 9 項目を所有者が承認した（#3140 コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3140#issuecomment-6227907703）。既定 ON（Stage E）・tolerance／baseline・新しい `unsafe`・依存は承認範囲外。着手時点（a20d036f）では未取得で、D-C の承認対象は GPU 線形代数の `unsafe` のみだった |
-| G2: #3138・#3139 の実機 parity | **未実測** | `docs/perf/logs/cuda-linalg-parity-3138/README.md` は未実測。Metal 側は 2026-10-27 に QR が fail したが、2026-10-28 の所有者判断 (a)（入力是正。§5）後の Mac mini 再実測で 5/5 run 全件 pass（`docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md`）。CUDA 側が未実測のため G2 全体は未充足 |
+| G2: #3138・#3139 の実機 parity | **充足（2026-10-28）** | CUDA: `docs/perf/logs/cuda-linalg-parity-3138/README.md`（2026-10-27・GB10・4 コマンド × 5 run 全件 pass・`358b77554`）。Metal: `docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md` の 2026-10-28 再実測（所有者判断 (a)〔§5 の入力是正〕後・Mac mini・5/5 run 全件 pass・`2e30c15b2`。#3139 の記録は `docs/perf/logs/metal-linalg-parity-3139/README.md`）。#3405 の着手条件のうち G2 は満たされた。ただし公開の実装は #3405 の範囲で、本記録は着手しない |
 
 「D-C の延長」と解釈して G1 を迂回しない（着手時点の判断。G1 はその後に個別承認で取得した）。
 
@@ -204,4 +204,4 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 
 G1 の承認コメント URL を特定し、G2 の実測 pass を確認したうえで、(a) `lib.rs` に上記関数を追加、(b) `api_surface.rs` の否定ガード 2 件を「シグネチャ・委譲本体の固定＋allowlist 方式の違反スキャナ＋正のプローブ自己テスト＋到達性テスト」へ置換、(c) 常時実行の受入テスト `gpu_linalg_optin.rs` と実機 parity テスト（CUDA は `GateOn` を facade 経由へ、Metal は新規）、(d) backend 側 doc の「facade へ再公開しない」更新、(e) 本節への実装記録と `compat-api-scope.md` の適用記録を行う。既定 ON（Stage E）は別承認で本件の範囲外。
 
-§9 の「facade 公開の実施」は #3405 で扱う（公開形は承認済み・実機 parity 実測待ち）。
+§9 の「facade 公開の実施」は #3405 で扱う（公開形は承認済み・実機 parity は G2 充足済み、2026-10-28）。
