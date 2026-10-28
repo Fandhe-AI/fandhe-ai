@@ -6,6 +6,8 @@
 # ビルドは事前に build_ab_arms.sh で完了済み（計測中のビルド並走は禁止）。各ステップの rc を steps.log へ追記し最後に終端行を書く。
 # 使い方: session-3672.sh <gb10|macmini> <label>   （label は ^[A-Za-z0-9._-]+$。出力は $HOME/work/r3672/out-<label>。既存なら中止）
 # 配置: $HOME/work/r3672/{runner,bin}（runner = 部品を入れたコミットの git archive 展開木・bin = build_ab_arms.sh の出力）
+# 終了コード: orchestrate／excl_check／ab_judge のいずれかが非 0 ならセッションも非 0（終端行 done. rc= と exit に最初の失敗 rc を反映）。
+#   注: 回収済みの実測ログ（macmini/session/steps.log）は本修正前の版で実行されたもので、ab_judge rc=2 の後も done. rc=0 と記録されている（記録は改変しない）。
 # 値は RULE の固定定数だけを使い、外部入力から組み立てない。ホスト名・ユーザー名のマスクは orchestrate.sh と回収側で行う。
 export PATH=$HOME/.cargo/bin:$PATH
 export LC_ALL=C
@@ -91,17 +93,23 @@ step "start runner=$(sed -n 1p "${T}/.rev-stamp") before=$(sed -n 1p "${R}/befor
 bash "${RES}/orchestrate.sh" "${host_kind}" --bindir "${BIN}" --out "${O}/${host_kind}" >"${O}/orch-${host_kind}.log" 2>&1
 orc_rc=$?
 step "orchestrate rc=${orc_rc}"
+final_rc=${orc_rc}
 if [ "${host_kind}" = "gb10" ]; then
   snap "main:post"
   kill "${POLLER_PID}" 2>/dev/null
   POLLER_PID=""
   python3 -I "${EXCL}" "${O}" --series main >"${O}/excl_check.log" 2>&1
-  step "excl_check rc=$?"
+  excl_rc=$?
+  step "excl_check rc=${excl_rc}"
+  [ "${final_rc}" != 0 ] || final_rc=${excl_rc}
   [ ! -f "${O}/excl_status.txt" ] || cp "${O}/excl_status.txt" "${O}/${host_kind}/excl_status.txt"
 fi
 if [ "${orc_rc}" = 0 ]; then
   python3 -I "${RES}/ab_judge.py" --host "${host_kind}=${O}/${host_kind}" --out "${O}/judge-${host_kind}.md" >"${O}/judge-${host_kind}.log" 2>&1
-  step "ab_judge rc=$?"
+  judge_rc=$?
+  step "ab_judge rc=${judge_rc}"
+  [ "${final_rc}" != 0 ] || final_rc=${judge_rc}
 fi
 step "session body done"
-echo "done. rc=${orc_rc}" >>"${LOG}"
+echo "done. rc=${final_rc}" >>"${LOG}"
+exit "${final_rc}"
