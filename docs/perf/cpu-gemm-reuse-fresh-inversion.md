@@ -719,3 +719,44 @@ before = `a7aac2f02`（マージベース）、after = `f7ce20fc9`（PR head。t
 - 実測が無いため、`vafter` が支持される可能性も、どの腕も支持されない可能性もある。vafter が支持された場合の bench の窓の見直し（§9.5 (c)）は所有者判断で、本 Issue では提案に留める
 - 1 台・1 セッションの実測になる。別機体での再現と `GLIBC_TUNABLES` の閾値スイープは対象外
 - §10.6 の 2 と §11.7 の申し送りへの対応は、実測後に 13.1 の状態と結果表を更新して行う
+
+## 14. #3681: 非処置セルを matmul_resident の経路に絞った再事前登録と再計測
+
+### 14.1 状態（先に結論）
+
+- **実機計測は未実測**（本節の記録時点。計測部品と事前登録規則だけをコミット済み。GB10・Mac mini とも値は無い。Linux や M4 Max の値で代替しない）
+- 結論（ADOPT／REJECT／判定不能）は、実測後に `logs/cpu-gemm-download-owned-path-3681/judge-3681.md`（`path_judge.py` の出力そのまま）から 14.5 へ転記する。それまで本節に結論は無い
+- 事前登録規則: `logs/cpu-gemm-download-owned-path-3681/RULE.txt`（実測前に単独コミットで固定。固定時刻はそのコミットのコミット時刻）。#3672 の RULE と REJECT（§11.6）は変えない・置き換えない・生データの再判定にも使わない
+
+### 14.2 事実（コードの読解。実測ではない）
+
+- 腕の木 before（`a7aac2f0`）の行番号。`download_owned` の呼び出し元は after（`f7ce20fc`）で `crates/autodiff/src/optim/resident_input.rs:122`（before は `:120` の `mem.download(&out)`）の 1 か所だけ
+- 経路上（窓の中で `matmul_resident` を呼ぶ）: bench `--mode reuse --phases` の `iter_total`（`measure_gemm_reuse_phases` → `measure_gemm_reuse_resident`、窓内 `main.rs:1057`）・診断 `resident_public`（`t_all` :284 の後に :288）・診断 `resident_reupload`（`res.reupload` :282 は `t_all` より前で窓の外。窓内は `resident_public` と同じ :288 なので経路上）
+- 経路外: 診断 `fresh`（`va.matmul` :270）・`resident_split`（`gemm_device`＋`ops.download` :302〜:304）・`gemm_device_hold`／`gemm_device_drop_in`／`gemm_device_download`（`gemm_device`〈＋ `ops.download` :322〉）・`backend_drop`（`ops.gemm` :339）
+- #3672 で 5/5 後退した 3 セルのうち Mac mini 診断 `resident_public` N=256 は経路上（範囲に含める）、GB10 診断 `resident_split` N=512 と Mac mini 診断 `gemm_device_download` N=4096 は経路外（§12.2 と一致）。外す理由は経路であり、結果ではない
+- セル数: 処置 2 + 経路上の非処置 28 = 30 が判定対象。経路外は 60 セル（記録のみ）
+
+### 14.3 事前登録（要約）
+
+- 腕・ゲート・run 数・指標・閾値は #3672 と同じ（before `a7aac2f0`・after `f7ce20fc`、GB10 専有と Mac mini、ABBA 5 run、処置 ratio ≤ 0.95 かつ 5/5 run < 1.00、rho_REM ≥ 0.5、checksum 全件一致）。新しいセッションで測る
+- 違いは 1 点: REJECT の「5/5 run 後退」と ADOPT の「非処置セル中央値 ratio ≤ 1.00」を経路上のセルだけに適用する。経路外セルは中央値 ratio・run 別 ratio・5/5 件数を、差が無い場合の期待件数（1 セルあたり 1/32）と並べて記録する。checksum は絞らない
+- tolerance・parity baseline・ガードレール閾値・依存は変えない
+
+### 14.4 結果
+
+未実測。実測後に `judge-3681.md` の表（処置・経路上の非処置・経路外の記録）を転記する。
+
+### 14.5 性能規則の結論
+
+未実測のため無し（`judge-3681.md` の結論を機械的に転記する欄）。ADOPT・REJECT・判定不能はいずれも正当な結果として記録する。
+
+### 14.6 保守性の判断（14.5 とは別項）
+
+所有者判断（2026-10-29、§11.7）により、変更（PR #3677 の `download_owned`）は main に残っている。これは保守性の判断であり、14.5 の性能規則の結論を覆すものではない。実測後に結論が REJECT・判定不能でも、この判断は書き換えず、結論と並べて記録する。
+
+### 14.7 限界
+
+- 本節の時点では実測が無い。実測後に 14.1 の状態と 14.4〜14.5 を更新する
+- 経路の分類はコード読解による。「経路外」の腕の後退は判定に使わないが、経路外の後退が download_owned と無関係だと示すものではない（原因の切り分けは対象外）
+- 範囲を #3672 の結果を見たあとに決め直した再登録である。経路という基準はコード上の事実から導いたが、事後の再登録であることは変わらない
+- `download_owned` の区間（`take_data`・prepack の破棄・解放のタイミング）のさらに細かい切り分け、`PooledMemory`・Metal の `download_owned` 上書き、出力バッファのプール（§9.5 (b)）、bench 窓の見直し（§9.5 (c)）、#3679（3 セルの再現）・#3680（N=256・512 の原因）は本 Issue の対象外
