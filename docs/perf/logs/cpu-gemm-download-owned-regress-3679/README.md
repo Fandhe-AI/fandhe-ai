@@ -31,3 +31,10 @@
 
 - `python3 -I repro_judge.py --self-test` が PASS（再現した／再現しない／判定不能／系列不足／checksum 不一致／k=12 でも系列中央値 ≤ 1.00／欠損・重複・RULE の sha 不一致の fail-closed）
 - `bash -n`・引数の拒否ケース（相対パス・許可外の文字・`--first` 不正値）
+
+## 実行の試み（2026-10-29・自動運転セッション）
+
+- **状態: 未実測のまま**。本セッションでは `session-3679.sh` を 1 本も起動していない。RULE.txt・判定器・腕は変更していない。
+- GB10（`<cuda-node>`）: 候補 3 ノードすべてで `nvidia-smi --query-compute-apps` が 1 件以上の常駐 compute プロセスを返した。常駐のあるノードでは `excl_check` が構造的に fail し record_only になるため使わず、他者の常駐サービスは止めない。専有できるノードが空くまで T1 は未実測。
+- Mac mini（`<metal-node>`）: 到達でき hw-lock も空いていたが、1 機体 3 系列で最短 3〜4 時間かかり、前景ポーリング制約のあるこのセッションでは完走できないため起動しなかった。T2・T3 も未実測。
+- 次の実行者は RULE.txt の sha256（`75c4f3c5…`）を確認し、`session-3679.sh <host> s1 before` から起動する。
