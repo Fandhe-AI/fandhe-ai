@@ -1238,7 +1238,12 @@ fn check_diag_verify_after_loop(cli: &Cli, args: &[String]) -> Result<(), String
     if !diag_verify_after_loop_from_args(args) {
         return Ok(());
     }
-    let out_explicit = args.iter().any(|a| a == "--out");
+    // 値なしの末尾 `--out`（parse_cli_from が既定の results/raw/results.jsonl へ落とす）や
+    // `--out --size ...` を明示指定と見なさない。直後に `--` 始まりでない値が続くことを要求する。
+    let out_explicit = args
+        .iter()
+        .enumerate()
+        .any(|(i, a)| a == "--out" && args.get(i + 1).is_some_and(|v| !v.starts_with("--")));
     if cli.task != "gemm"
         || cli.mode != "reuse"
         || cli.device != "cpu"
@@ -4918,6 +4923,15 @@ mod tests {
             (
                 make_cli("gemm", "reuse", out.path()),
                 args_of(&["bin", "--diag-verify-after-loop"]),
+            ),
+            (
+                // 値なしの末尾 --out は既定出力へ落ちるため明示指定と見なさない。
+                make_cli("gemm", "reuse", out.path()),
+                args_of(&["bin", "--diag-verify-after-loop", "--out"]),
+            ),
+            (
+                make_cli("gemm", "reuse", out.path()),
+                args_of(&["bin", "--diag-verify-after-loop", "--out", "--size", "256"]),
             ),
         ];
         for (c, args) in cases {

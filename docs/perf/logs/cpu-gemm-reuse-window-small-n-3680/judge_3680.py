@@ -142,6 +142,31 @@ def load_env_3680(path):
     return env
 
 
+MODES = ("fresh", "reuse", "phases")
+
+
+def load_gate_log_3680(path, arms):
+    """gate ログにモードごとの通過記録（bench_<arm>/n<N>/r<R>/<mode> gate=pass）を要求し、欠落ラベルを返す。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            seen = {}
+            for ln in f:
+                parts = ln.split()
+                if len(parts) == 2 and parts[1].startswith("gate="):
+                    seen[parts[0]] = parts[1][5:]
+    except OSError as e:
+        raise JudgeError(f"{path}: 読み込み不可 ({e})")
+    bad = []
+    for a in arms:
+        for n in agg.SIZES:
+            for r in range(1, bj.RUNS + 1):
+                for m in MODES:
+                    label = f"bench_{a}/n{n}/r{r}/{m}"
+                    if seen.get(label) != "pass":
+                        bad.append(label)
+    return bad
+
+
 def check_sums(sums):
     """N ごとに全腕・全 run の checksum が 1 種類（RULE.txt checksum 規則）。"""
     for n in agg.SIZES:
@@ -168,6 +193,11 @@ def official_notes(diag, excl, gate_bad, env):
         actual = sha256_file(os.path.join(HERE, "RULE.txt"))
         if env["rule_sha256"] != actual:
             notes.append(f"rule_sha256 が RULE.txt の実ハッシュと不一致（記録 {env['rule_sha256']!r}）")
+        diag_head = diag["env"].get("rev_stamp_head")
+        if not diag_head or env["rev_stamp_head"] != diag_head:
+            notes.append(
+                f"診断系列と bench 系列の計測コミットが不一致（diag {diag_head!r} / bench {env['rev_stamp_head']!r}）"
+            )
         if env["rev_stamp_dirty"] != "dirty=0":
             notes.append(f"計測ツリーが dirty（{env['rev_stamp_dirty']}）")
     return notes
@@ -183,7 +213,7 @@ def run(args):
             raise JudgeError(f"bench の腕 {a} が無い（RULE 必須。欠落は判定しない）")
         bench[a], sums[a] = bj.load_bench_arm(args["bench_root"], a)
     check_sums(sums)
-    gate_bad = bj.load_gate_log(args["gate_log"], ARMS) if args.get("gate_log") else ["(gate-log 未指定)"]
+    gate_bad = load_gate_log_3680(args["gate_log"], ARMS) if args.get("gate_log") else ["(gate-log 未指定)"]
     excl = bj.load_excl(args["excl"]) if args.get("excl") else None
     env = load_env_3680(args["env"]) if args.get("env") else None
     notes = official_notes(diag, excl, gate_bad, env)
@@ -295,10 +325,29 @@ def self_test():
             pass
         # 参考記録化
         check("notes-excl", len(official_notes(diag, None, ["x"], None)) >= 3)
-        env_ok = {"rule_sha256": sha256_file(os.path.join(HERE, "RULE.txt")), "rev_stamp_dirty": "dirty=0"}
+        env_ok = {
+            "rule_sha256": sha256_file(os.path.join(HERE, "RULE.txt")),
+            "rev_stamp_dirty": "dirty=0",
+            "rev_stamp_head": diag["env"]["rev_stamp_head"],
+        }
         check("notes-clean", official_notes(diag, {"diag": "pass", "bench": "pass"}, [], env_ok) == diag["why"])
         env_bad = dict(env_ok, rule_sha256="0" * 64, rev_stamp_dirty="dirty=1")
         check("notes-env", len(official_notes(diag, {"diag": "pass", "bench": "pass"}, [], env_bad)) - len(diag["why"]) == 2)
+        env_head = dict(env_ok, rev_stamp_head="different")
+        check("notes-head", len(official_notes(diag, {"diag": "pass", "bench": "pass"}, [], env_head)) - len(diag["why"]) == 1)
+        gl = os.path.join(tmp, "gate.log")
+        with open(gl, "w") as f:
+            for a in ARMS:
+                for n in agg.SIZES:
+                    for r in range(1, bj.RUNS + 1):
+                        for m in MODES:
+                            f.write(f"bench_{a}/n{n}/r{r}/{m} gate=pass\n")
+        check("gate-modes-ok", load_gate_log_3680(gl, ARMS) == [])
+        with open(gl) as f:
+            lines = f.readlines()
+        with open(gl, "w") as f:
+            f.writelines(lines[:-1])
+        check("gate-modes-missing", len(load_gate_log_3680(gl, ARMS)) == 1)
     print("self-test:", "ok" if ok else "FAILED")
     return 0 if ok else 1
 

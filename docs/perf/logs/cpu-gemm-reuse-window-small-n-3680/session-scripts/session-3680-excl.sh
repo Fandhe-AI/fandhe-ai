@@ -126,6 +126,8 @@ run_cell() {
   esac
   if [ $((r % 2)) = 1 ]; then modes="fresh reuse phases"; else modes="phases reuse fresh"; fi
   for m in $modes; do
+    # 負荷ゲートは 3 モード（fresh・reuse・phases）それぞれの起動前に通す（モードごとの通過記録を残す）。
+    gate "bench_$arm/n${n}/r${r}/${m}" || abort_gate "bench_$arm/n${n}/r${r}/${m}"
     local f="$O/bench/$arm/gemm_${m}_n${n}_r${r}"
     local args flag=""
     case "$m" in
@@ -164,7 +166,6 @@ for r in 1 2 3 4 5; do
   if [ $((r % 2)) = 1 ]; then arms="$ARMS_ODD"; else arms="$ARMS_EVEN"; fi
   for a in $arms; do
     for n in $SIZES; do
-      gate "bench_$a/n${n}/r${r}" || abort_gate "bench_$a/n${n}/r${r}"
       run_cell "$a" "$n" "$r"
     done
   done
