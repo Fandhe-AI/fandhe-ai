@@ -1,0 +1,46 @@
+RULE.v2 fixed-at-utc: 2026-10-28T13:30:00Z (実機計測より前に RULE.txt とは別コミットで固定。事後に緩めない)
+issue: #3672 CPU の matmul_resident で download のコピーを除き N=4096 の reuse 逆転を縮める
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §11
+supersedes: なし。RULE.txt の曖昧な箇所の解釈を固定するだけで、閾値・条件・腕・ゲートは変えない・緩めない。
+  RULE.txt 本文は編集しない（orchestrate.sh が sha256 を env_info.txt に記録しドリフトガードに使うため）。
+
+[セルの定義（RULE.txt「非処置セル: 上記以外の全セル」の解釈を、厳しい側に固定）]
+- 機体ごとに次の 2 群をセルとする。いずれも phase=iter_total の median_s、N = 256・512・1024・2048・4096 の各点。
+  (1) bench セル: bench-fandhe --task gemm --device cpu --mode reuse --phases の gemm_phases 行のうち phase=iter_total
+  (2) 診断セル: cpu_gemm_resident_reuse_phases の全腕（fresh・resident_public・resident_reupload・resident_split・
+      backend_drop・gemm_device_hold・gemm_device_drop_in・gemm_device_download）の phase=iter_total
+- 処置セルは RULE.txt のとおり GB10 の bench セル N=4096 と GB10 の診断 resident_public の N=4096 の 2 つ。
+  それ以外は全て非処置セル（Mac mini の全セル、GB10 の N=4096 以外・他の腕を含む）。
+- iter_total 以外の区間（resident_split の download・out_drop・gemm_device、matmul・readout 等）は記録のみで判定に使わない。
+  DL_before・X(arm) の計算にだけ使う。
+- 非処置セルは「中央値 ratio <= 1.00」を全セル要求する（ノイズによる > 1.00 も判定不能側に倒れる。緩めない）。
+  > 1.00 になったセルは一覧にして記録する。
+
+[ratio と中央値]
+- run r ごとに ratio_r = after_r / before_r（同じ run 番号どうしの対。起動順は ABBA で奇数 run は before→after、
+  偶数 run は after→before）。セルの ratio は 5 個の ratio_r の中央値。
+- 「5/5 run で ratio < 1.00」「全 run で ratio > 1.00」は、5 個の ratio_r に対する判定。
+
+[X・DL・rho の定義]
+- X(arm) = run ごとの (resident_public.iter_total - gemm_device_hold.iter_total) を 5 run で中央値化（N=4096・機体 GB10）。
+- DL_before = before 木の resident_split の phase=download の 5 run 中央値（N=4096・GB10）。
+- rho_REM = (X_before - X_after) / DL_before。rho_BENCH = (bench_iter_before - bench_iter_after) / DL_before
+  （bench_iter は bench セル N=4096 の 5 run 中央値）。rho_OFFSET = 1 - rho_BENCH。いずれも GB10 の N=4096 のみ。
+- rho_REM は ADOPT の判定条件（>= 0.5）。rho_BENCH・rho_OFFSET は記録のみ。
+
+[checksum]
+- 診断: iter_total 行の checksum_bits が、(機体, 腕, N) ごとに before・after の全 run で完全一致すること。
+- bench: gemm_phases 行の checksum が、(機体, N) ごとに before・after の全 run で完全一致すること。
+- 1 件でも不一致なら REJECT（RULE.txt のとおり）。欠落・解析不能は判定せず判定器が失敗終了する（fail-closed）。
+
+[両機体の揃い]
+- ADOPT は GB10 と Mac mini の両機体の系列が揃い、ゲートを通ったときに限り出す。
+  片方が未実測・record_only なら ADOPT は出さず「判定不能（未実測あり）」とし、REJECT 条件に当たる場合のみ REJECT を出す。
+
+[ゲート（RULE.txt の具体化）]
+- GB10: compute プロセス 0 件（系列の前・途中 30 秒間隔・後）かつ各 run の前に load1 < 1.0。専有の合否は excl_check.py の出力で判定する。
+- Mac mini: 各 run の前に load1 < 3.0 を pass / unpassed として記録する。unpassed を含む系列は record_only。
+- 起動したが計測前に止まった場合は新しいラベルで 1 回だけ起動し直し、経緯を README に記録する。run の差し替え・追加はしない。
+
+[固定後]
+- RULE.txt・RULE.v2.txt の sha256 を env_info.txt・README・rev-stamp-verification-3672.md に記録する。
