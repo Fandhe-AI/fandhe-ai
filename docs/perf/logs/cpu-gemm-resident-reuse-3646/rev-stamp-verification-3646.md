@@ -62,7 +62,7 @@ GB10 ノード（`<cuda-node>`）の専用ディレクトリ（既存ディレ�
 | ファイル | sha256 |
 |---|---|
 | `session-scripts/session-3646-excl.sh` | `66bba41cfe8af626cce8281231ada30370bfcdcb53470cd4feebb15e01324bbe` |
-| `excl_check.py` | `d249573084a2104333be5ef312286ad86e96535b3e1a0aa51190c355f2b87be2` |
+| `excl_check.py` | `699eb1bdbdd88eaf3b4f1f9fb3afda1183b8b883c047b1a1028008824289ad72（レビュー指摘で観測間隔 60 秒以下の検査を追加。判定閾値・実測の判定結果は不変）` |
 | `gb10-bridge/bridge_judge.py` | `254a7a7557d53c96ef154deed8ae608ee27cf0f67f98c77d4882b4786bcaca7f`（不変） |
 | `gb10-gcpuinf/gcpuinf_judge.py` | `88b6f84ef76792c988473805a926448409fa33eb5cd1a8e6ba933cb5de4738a3`（不変） |
 | `aggregate.py` | `6ed4bb45b8393cfb61c7cde8c165084382927c18a91b9d4a91522b65dcffec96`（不変） |
