@@ -1,0 +1,130 @@
+イシュー #3681 事前登録規則（実測前に固定。事後に緩めない）
+
+固定時刻: このファイルを追加したコミットのコミット時刻を正とする（手書きの時刻は入れない。
+          実際の値は rev-stamp-verification-3681.md に git log -1 --format=%cI -- RULE.txt で記録する）。
+
+位置づけ（#3672 の結果を見たあとの再登録）:
+- #3672（PR #3677・#3678）の A/B は、RULE.v2.txt が「非処置セル = bench と診断の全 8 腕 × 全 N の iter_total」と
+  固定していたため REJECT だった（judge-3672.md）。処置 2 セルは改善したが、診断の次の 3 セルが 5/5 run で後退した。
+  所有者判断（2026-10-29）: 変更は main に残す。#3672 の REJECT は記録として残す。
+- 本規則は、その結果を見たあとに、非処置セルの範囲を「コード上の経路」で決め直して行う再登録である。
+  #3672 の RULE.txt・RULE.v2.txt・judge-3672.md は変えない・置き換えない。#3672 の生データの再判定には使わない。
+  本規則の判定は、新しいセッションで測った別の生データにだけ適用する。
+
+経路の定義（範囲の決め方。#3672 のどのセルが後退したかは基準に使わない）:
+- 「経路上」= 計測窓（bench の reuse 窓、診断の iter_total の t_all 以降）の中で Tape::matmul_resident を呼ぶ腕。
+  after の木では matmul_resident が download_owned を 1 か所で呼ぶ
+  （crates/autodiff/src/optim/resident_input.rs:122。before は同 :120 の mem.download(&out)）。
+  download_owned の呼び出し元は after の木でここだけ（grep で確認済み）。
+- 「経路外」= 窓の中で matmul_resident を呼ばない腕。コード読解（実測ではない）で決める。
+- 行番号は before = a7aac2f0227add243845418e0897ac0675c5b622 の木。after との差は resident_input.rs と
+  backend-cpu・tensor-core の download_owned 関係だけ（診断テストと framework-compare は両腕で同一）。
+
+  経路上:
+  - bench reuse --phases の iter_total: measure_gemm_reuse_phases
+    （scripts/bench/framework-compare/bench-fandhe/src/main.rs:1118）→ measure_gemm_reuse_resident（同 :1012）、
+    窓内の tape.matmul_resident（同 :1057）
+  - 診断 resident_public の iter_total: crates/facade/tests/cpu_gemm_resident_reuse_diag.rs の t_all（:284）の後に
+    res.tape.matmul_resident（:288）
+  - 診断 resident_reupload の iter_total: res.reupload（:282。upload_resident）は t_all（:284）より前で窓の外。
+    窓内は resident_public と同じ matmul_resident（:288）。よって経路上（非自明な包含としてここに明記する）
+  経路外:
+  - 診断 fresh: va.matmul(&vb)（:270。Tape 経路）
+  - 診断 resident_split: res.ops.gemm_device ＋ res.ops.download（:302〜:304）
+  - 診断 gemm_device_hold・gemm_device_drop_in・gemm_device_download: res.ops.gemm_device（＋ res.ops.download :322）
+  - 診断 backend_drop: res.ops.gemm（:339）
+- #3672 で 5/5 後退した 3 セルのうち、Mac mini の診断 resident_public N=256 は経路上なので範囲に含める（名指し）。
+  GB10 の診断 resident_split N=512 と Mac mini の診断 gemm_device_download N=4096 は経路外。
+  外す理由は経路であって、結果ではない。
+- 判定に使う指標は #3672 と同じく iter_total の median_s。経路上の診断腕の区間（matmul・readout・checksum）は
+  「どの区間か」の記録のみで判定に使わない。
+
+セル列挙（機械可読。判定器 path_judge.py が本ブロックと定数の集合等価を検査する。不一致は入力不備で終了コード 2）:
+  各行は「<種別> <機体> <bench|diag> <ラベル> <N>」。
+  treat-cell: gb10 bench reuse_iter_total 4096
+  treat-cell: gb10 diag resident_public 4096
+  path-cell: gb10 bench reuse_iter_total 256
+  path-cell: gb10 bench reuse_iter_total 512
+  path-cell: gb10 bench reuse_iter_total 1024
+  path-cell: gb10 bench reuse_iter_total 2048
+  path-cell: gb10 diag resident_public 256
+  path-cell: gb10 diag resident_public 512
+  path-cell: gb10 diag resident_public 1024
+  path-cell: gb10 diag resident_public 2048
+  path-cell: gb10 diag resident_reupload 256
+  path-cell: gb10 diag resident_reupload 512
+  path-cell: gb10 diag resident_reupload 1024
+  path-cell: gb10 diag resident_reupload 2048
+  path-cell: gb10 diag resident_reupload 4096
+  path-cell: macmini bench reuse_iter_total 256
+  path-cell: macmini bench reuse_iter_total 512
+  path-cell: macmini bench reuse_iter_total 1024
+  path-cell: macmini bench reuse_iter_total 2048
+  path-cell: macmini bench reuse_iter_total 4096
+  path-cell: macmini diag resident_public 256
+  path-cell: macmini diag resident_public 512
+  path-cell: macmini diag resident_public 1024
+  path-cell: macmini diag resident_public 2048
+  path-cell: macmini diag resident_public 4096
+  path-cell: macmini diag resident_reupload 256
+  path-cell: macmini diag resident_reupload 512
+  path-cell: macmini diag resident_reupload 1024
+  path-cell: macmini diag resident_reupload 2048
+  path-cell: macmini diag resident_reupload 4096
+  経路外セル（記録のみ）: 上記以外の診断 iter_total（fresh・resident_split・backend_drop・gemm_device_hold・
+  gemm_device_drop_in・gemm_device_download の 6 腕 × 5 N × 2 機体 = 60 セル）。
+  処置 2 + 経路上の非処置 28 = 30 セルが判定対象。
+
+腕（#3672 と同一）:
+- before = a7aac2f0227add243845418e0897ac0675c5b622
+- after  = f7ce20fc91730216e8f3f60514b181f32ebfee48
+- 両腕とも tar アーカイブ（git archive）を転送し、.rev-stamp（1 行目 sha・2 行目 dirty=0）を置き、
+  ツリー指紋をローカルの同アーカイブと突き合わせる。registry の fandhe-ai =0.12.0 は使わない。
+- ハード条件: 診断テストと framework-compare が両腕で同一であること（build_ab_arms.sh が強制する）。
+  バイナリは hw-lock を取る前に build_ab_arms.sh で作り、系列の前に arms.txt の sha256 と照合する。
+
+系列と run（#3672 と同一）:
+- 機体は GB10 と Mac mini。N = 256・512・1024・2048・4096。5 run。
+- 各 run で before・after を独立プロセスで起動し、run ごとに起動順を反転する（ABBA。奇数 run は before 先）。
+- 診断の反復数は cpu_gemm_resident_reuse_diag.rs の iters_for 既定のまま。縮めない。
+- run の差し替え・追加・セル除外はしない。
+- 新しいセッションで測る。#3672 のラベル・出力・生データは使わない。
+
+指標（#3672 の RULE.txt・RULE.v2.txt の定義をそのまま使う）:
+- ratio_r = after_r / before_r（同じ run 番号の対）。セルの ratio は 5 個の中央値。
+- 処置セル: GB10 の bench reuse iter_total N=4096、GB10 の診断 resident_public iter_total N=4096（#3672 と同一）
+- X(arm) = resident_public.iter_total - gemm_device_hold.iter_total（N=4096・GB10・run ごと→5 run 中央値）
+- DL_before = before 木の resident_split の phase=download の 5 run 中央値（N=4096・GB10）
+- rho_REM = (X_before - X_after) / DL_before、rho_BENCH = (bench_iter_before - bench_iter_after) / DL_before、
+  rho_OFFSET = 1 - rho_BENCH。rho_REM のみ ADOPT 条件、他は記録のみ。
+  rho の計算に経路外の腕（gemm_device_hold・resident_split）の区間を使うことは、セルの判定ではないので妨げない。
+
+判定（閾値は #3672 と同値。緩めない）:
+- ADOPT: 処置 2 セルとも中央値 ratio <= 0.95 かつ 5/5 run で ratio < 1.00、rho_REM >= 0.5、
+  経路上の非処置セルがすべて中央値 ratio <= 1.00、checksum 全件一致、両機体の系列が揃いゲート pass
+- REJECT: 経路上のセルに 5/5 run で後退（全 run で ratio > 1.00）がある／処置セルの中央値 ratio > 1.00／
+  checksum 不一致が 1 件でもある
+- checksum の範囲は絞らない（診断の全 8 腕 × 5 N の iter_total と bench の 5 N）。正しさの検査で経路と無関係のため。
+- 判定不能: 上記のいずれにも当たらない。片機体が未実測・record_only なら ADOPT は出さず
+  「判定不能（未実測あり）」とし、REJECT 条件に当たる場合のみ REJECT を出す。
+- ADOPT・REJECT・判定不能はいずれも正当な結果として記録する。
+- 経路外セルは判定に使わず、次を記録する: 中央値 ratio・run ごとの ratio・5/5 run で ratio > 1.00 の件数・
+  5/5 run で ratio < 1.00 の件数。差が無い場合の期待件数（1 セルあたり 1/32）× セル数を並べて載せる。
+
+ゲート（#3672 と同一）:
+- GB10: compute プロセス 0 件（系列の前・途中 30 秒間隔・後。excl_check.py --series main）かつ各 run の前に load1 < 1.0。
+  Mac mini: 各 run の前に load1 < 3.0。
+- 通らない run を含む系列は record_only とし判定に使わない。
+- 計測の前に止まった場合だけ新しいラベルで 1 回起動し直してよい。経緯は README.md に記録する。
+- 実測できなかった機体・セルは「未実測」のまま残し、他機体・M4 Max・Linux の値で代替しない。
+
+記録:
+- RULE のコミット時刻（git log -1 --format=%cI -- RULE.txt）と、各機体の計測開始（env_info.txt の date_utc と
+  steps.log 先頭）を rev-stamp-verification-3681.md に並べ、RULE が先であることを示す。
+- RULE.txt の sha256 を env_info.txt（rule_sha256）・README・rev-stamp-verification-3681.md に記録する。
+
+不変事項: tolerance・parity baseline・ガードレール閾値・依存は変えない。
+性能規則の結論（判定器の出力）と保守性の判断（変更を main に残すか）は別項で書き、前者を後者で覆さない。
+
+対象外: #3679（3 セルの再現確認）と #3680（N=256・512 の原因）の実測と判定・出力バッファのプール（§9.5 (b)）・
+bench 窓の見直し（§9.5 (c)）・download_owned の区間のさらに細かい切り分け。
