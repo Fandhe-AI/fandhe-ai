@@ -651,7 +651,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// `gemm --mode reuse` の常駐入力経路（#3272）。計測は
 /// [`measure_gemm_reuse_resident`]、ここは Record の出力だけを担う。
 fn run_gemm_reuse_resident(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let run = measure_gemm_reuse_resident(cli, false)?;
+    let run = measure_gemm_reuse_resident(cli, false, diag_verify_after_loop())?;
     let n = cli.size;
     let measured = &run.durations[run.durations.len() - MEASURE_ITERS..];
     let st = stats(measured)?;
@@ -679,7 +679,11 @@ fn run_gemm_reuse_resident(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         metal_split_k: cli.metal_split_k.as_deref(),
         pinned_h2d: cli.pinned_h2d,
     }
-    .emit(&cli.out)?;
+    // 診断腕は行へ `diag` を記録し、通常ゲートの集計から除外させる（#3680）。
+    .emit_with_diag(
+        &cli.out,
+        diag_verify_after_loop().then_some("verify_after_loop"),
+    )?;
     Ok(())
 }
 
@@ -1009,9 +1013,16 @@ struct GemmResidentRun {
 /// 窓の外で `validate_gemm_checksum` と `verify_strict` を全反復で行い、
 /// worst 集約する。常駐 API の `Unsupported` 等はホスト経路へ戻さず
 /// `MEASURE_ERROR` として返す（別条件の行が `reuse` として残るのを防ぐ）。
+///
+/// `verify_after_loop`（イシュー #3680。診断専用・既定 `false`）が `true` のとき、
+/// 反復内の `verify_strict`（参照 N² と出力 N² の全要素比較）をループの後へ移す。
+/// 窓の中（`iter_start`〜`elapsed`）は変えない。parity の検査対象は 39 反復から
+/// init と最終反復の 2 回に減り、途中の反復は checksum の bit 一致で代える
+/// （[`check_checksum_bits_stable`]）。通常 bench の parity 契約ではない。
 fn measure_gemm_reuse_resident(
     cli: &Cli,
     record_phases: bool,
+    verify_after_loop: bool,
 ) -> Result<GemmResidentRun, Box<dyn std::error::Error>> {
     let n = cli.size;
     let (a_data, b_data) = gemm_inputs(n)?;
@@ -1040,6 +1051,7 @@ fn measure_gemm_reuse_resident(
     let init_s = init_start.elapsed().as_secs_f64();
     validate_gemm_checksum(checksum)?;
     let mut parity = reference.verify_strict(out0_slice)?;
+    let init_checksum_bits = checksum.to_bits();
     drop(out0);
 
     // 区間記録は診断（`--phases`）のときだけ有効にする。通常計測では
@@ -1050,6 +1062,9 @@ fn measure_gemm_reuse_resident(
     let mut last_out_bits = Vec::new();
     // 1 回は init 計測内で消費済み（run_gemm_reuse の warmup 消費規約）。
     let total_iters = WARMUP_ITERS.saturating_sub(1) + MEASURE_ITERS;
+    // 診断腕用。ループ内で確保しないよう先に容量を取る（OFF では空のまま）。
+    let mut iter_checksum_bits: Vec<u64> =
+        Vec::with_capacity(if verify_after_loop { total_iters } else { 0 });
     for i in 0..total_iters {
         let iter_start = Instant::now();
 
@@ -1093,10 +1108,20 @@ fn measure_gemm_reuse_resident(
         durations.push(elapsed);
 
         validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify_strict(out_slice)?);
+        if verify_after_loop {
+            iter_checksum_bits.push(checksum.to_bits());
+        } else {
+            parity = parity.worst(reference.verify_strict(out_slice)?);
+        }
         if i + 1 == total_iters {
             last_out_bits = out_slice.iter().map(|x| x.to_bits()).collect();
         }
+    }
+
+    if verify_after_loop {
+        check_checksum_bits_stable(init_checksum_bits, &iter_checksum_bits)?;
+        let last: Vec<f32> = last_out_bits.iter().map(|&b| f32::from_bits(b)).collect();
+        parity = parity.worst(reference.verify_strict(&last)?);
     }
 
     Ok(GemmResidentRun {
@@ -1118,7 +1143,7 @@ fn measure_gemm_reuse_resident(
 fn measure_gemm_reuse_phases(
     cli: &Cli,
 ) -> Result<(PhaseSamples, f64, f64, ParityStats), Box<dyn std::error::Error>> {
-    let run = measure_gemm_reuse_resident(cli, true)?;
+    let run = measure_gemm_reuse_resident(cli, true, diag_verify_after_loop())?;
     let phases = run
         .phases
         .ok_or("measure_gemm_reuse_resident: 区間記録が有効なのに phases が None")?;
@@ -1172,7 +1197,11 @@ fn emit_gemm_phase_records(
             phase,
             phase_index,
         }
-        .emit(&cli.out)?;
+        // 診断腕（--phases 併用）の区間行にも `diag` を付け、通常の区間集計から除外させる（#3680）。
+        .emit_with_diag(
+            &cli.out,
+            diag_verify_after_loop().then_some("verify_after_loop"),
+        )?;
     }
     Ok(())
 }
@@ -1190,6 +1219,66 @@ fn mlp_data() -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> 
         Tensor::new(x, &[BATCH, D_IN])?,
         Tensor::new(y, &[BATCH, D_OUT])?,
     ))
+}
+
+/// `--diag-verify-after-loop`（値なしフラグ。イシュー #3680）。診断専用で、
+/// `gemm --mode reuse` の常駐入力経路の反復内 `verify_strict` をループの後へ移す
+/// （[`measure_gemm_reuse_resident`] の `verify_after_loop`）。GB10 の N=256・512 で
+/// bench の reuse 窓が診断より遅い原因が「窓の外の検算の位置」かを切り分ける腕。
+/// `bench-common::Cli` は bench-candle／bench-burn と共有のため触らず、
+/// `--infer-batch` と同じく `std::env::args()` から読む。
+fn diag_verify_after_loop_from_args(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--diag-verify-after-loop")
+}
+
+/// 実プロセスの引数から [`diag_verify_after_loop_from_args`] を読む
+/// （`run_gemm_reuse_resident`／`measure_gemm_reuse_phases` が使う）。
+fn diag_verify_after_loop() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    diag_verify_after_loop_from_args(&args)
+}
+
+/// `--diag-verify-after-loop` の受理条件（`run()` から呼ぶ fail-closed 検査）。
+/// フラグが無ければ何もしない。付いているときは `--task gemm --mode reuse
+/// --device cpu` の常駐入力経路かつ `--out` 明示のときだけ通す（既定の
+/// `results/raw/results.jsonl` へ診断行が混ざるのを防ぐ）。エラー文に引数の値は含めない。
+fn check_diag_verify_after_loop(cli: &Cli, args: &[String]) -> Result<(), String> {
+    if !diag_verify_after_loop_from_args(args) {
+        return Ok(());
+    }
+    // 値なしの末尾 `--out`（parse_cli_from が既定の results/raw/results.jsonl へ落とす）や
+    // `--out --size ...` を明示指定と見なさない。直後に `--` 始まりでない値が続くことを要求する。
+    let out_explicit = args
+        .iter()
+        .enumerate()
+        .any(|(i, a)| a == "--out" && args.get(i + 1).is_some_and(|v| !v.starts_with("--")));
+    // 明示 `--out` が既定の結果ファイルを指す場合も診断行の混入を許さない。
+    let out_is_default = cli.out == "results/raw/results.jsonl";
+    if cli.task != "gemm"
+        || cli.mode != "reuse"
+        || cli.device != "cpu"
+        || !gemm_reuse_uses_resident_input(cli)
+        || !out_explicit
+        || out_is_default
+    {
+        return Err(
+            "MEASURE_ERROR: --diag-verify-after-loop requires --task gemm --mode reuse \
+             --device cpu (resident path) with an explicit non-default --out (issue #3680, diagnostic only)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// 診断腕で各反復の checksum bits が init（`out0`）の checksum bits と一致することの確認。
+/// 反復内の `verify_strict` を外した代わりの、途中反復の整合検査（不一致は MEASURE_ERROR）。
+fn check_checksum_bits_stable(init_bits: u64, iter_bits: &[u64]) -> Result<(), String> {
+    if let Some(i) = iter_bits.iter().position(|&b| b != init_bits) {
+        return Err(format!(
+            "MEASURE_ERROR: --diag-verify-after-loop: iteration {i} checksum bits differ from init (issue #3680)"
+        ));
+    }
+    Ok(())
 }
 
 /// `--infer-batch` の許容値（イシュー #2115。`--task infer` 限定。
@@ -2309,6 +2398,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         infer_batch_from_args(&args)?;
+    }
+    // イシュー #3680: 診断専用フラグは受理条件を外れたら fail-closed 拒否する。
+    check_diag_verify_after_loop(&cli, &args)?;
+    if diag_verify_after_loop_from_args(&args) {
+        eprintln!(
+            "DIAG: --diag-verify-after-loop ON (verify_strict moved after the loop; issue #3680)"
+        );
     }
     dispatch(&cli)
 }
@@ -4781,7 +4877,7 @@ mod tests {
         let mut cli = make_cli("gemm", "reuse", out.path());
         cli.device = device.to_string();
         cli.size = n;
-        let run = measure_gemm_reuse_resident(&cli, true).expect("resident run");
+        let run = measure_gemm_reuse_resident(&cli, true, false).expect("resident run");
         let (bits, sum) = gemm_tape_reference(device, n);
         assert_eq!(run.last_out_bits, bits, "{device} N={n}: 出力 bits 不一致");
         assert_eq!(
@@ -4800,6 +4896,93 @@ mod tests {
     fn gemm_reuse_resident_matches_host_input_bit_exact() {
         check_gemm_resident_bit_exact("cpu", 64);
         check_gemm_resident_bit_exact("cpu", 512);
+    }
+
+    // ---- #3680: --diag-verify-after-loop（診断専用・既定 OFF） ----
+
+    fn args_of(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn diag_verify_after_loop_flag_parse() {
+        assert!(!diag_verify_after_loop_from_args(&args_of(&[
+            "bin", "--task", "gemm"
+        ])));
+        assert!(diag_verify_after_loop_from_args(&args_of(&[
+            "bin",
+            "--diag-verify-after-loop"
+        ])));
+    }
+
+    #[test]
+    fn diag_verify_after_loop_acceptance_is_fail_closed() {
+        let out = temp_out_path("diag-accept");
+        let ok_args = args_of(&["bin", "--diag-verify-after-loop", "--out", "x"]);
+        let cli = make_cli("gemm", "reuse", out.path());
+        assert!(check_diag_verify_after_loop(&cli, &ok_args).is_ok());
+        // フラグなしは常に素通り（通常 bench を変えない）。
+        let fresh = make_cli("gemm", "fresh", out.path());
+        assert!(check_diag_verify_after_loop(&fresh, &args_of(&["bin"])).is_ok());
+        // 受理条件を外れたら拒否し、エラー文に引数値を含めない。
+        let mut cuda = make_cli("gemm", "reuse", out.path());
+        cuda.device = "cuda".to_string();
+        let cases: Vec<(Cli, Vec<String>)> = vec![
+            (fresh, ok_args.clone()),
+            (make_cli("train", "reuse", out.path()), ok_args.clone()),
+            (cuda, ok_args.clone()),
+            (
+                make_cli("gemm", "reuse", out.path()),
+                args_of(&["bin", "--diag-verify-after-loop"]),
+            ),
+            (
+                // 明示 --out が既定の結果ファイルを指す場合も拒否する。
+                make_cli("gemm", "reuse", "results/raw/results.jsonl".as_ref()),
+                args_of(&[
+                    "bin",
+                    "--diag-verify-after-loop",
+                    "--out",
+                    "results/raw/results.jsonl",
+                ]),
+            ),
+            (
+                // 値なしの末尾 --out は既定出力へ落ちるため明示指定と見なさない。
+                make_cli("gemm", "reuse", out.path()),
+                args_of(&["bin", "--diag-verify-after-loop", "--out"]),
+            ),
+            (
+                make_cli("gemm", "reuse", out.path()),
+                args_of(&["bin", "--diag-verify-after-loop", "--out", "--size", "256"]),
+            ),
+        ];
+        for (c, args) in cases {
+            let err = check_diag_verify_after_loop(&c, &args).unwrap_err();
+            assert!(err.starts_with("MEASURE_ERROR"), "{err}");
+            assert!(!err.contains("--out x"), "{err}");
+        }
+    }
+
+    #[test]
+    fn checksum_bits_stable_detects_drift() {
+        assert!(check_checksum_bits_stable(7, &[7, 7, 7]).is_ok());
+        let err = check_checksum_bits_stable(7, &[7, 8, 7]).unwrap_err();
+        assert!(err.contains("iteration 1"), "{err}");
+    }
+
+    #[test]
+    fn diag_verify_after_loop_matches_default_run() {
+        for n in [64usize, 128] {
+            let out = temp_out_path("diag-vafter");
+            let mut cli = make_cli("gemm", "reuse", out.path());
+            cli.size = n;
+            let off = measure_gemm_reuse_resident(&cli, true, false).expect("off");
+            let on = measure_gemm_reuse_resident(&cli, true, true).expect("on");
+            assert_eq!(off.last_out_bits, on.last_out_bits, "N={n}");
+            assert_eq!(off.checksum.to_bits(), on.checksum.to_bits(), "N={n}");
+            assert_eq!(on.parity.fail_count, 0, "N={n}");
+            assert_eq!(off.durations.len(), on.durations.len(), "N={n}");
+            assert_eq!(on.phases.as_ref().expect("phases").order.len(), 5);
+        }
     }
 
     fn train_tape_reference(device: &str) -> (u32, Vec<Vec<u32>>) {

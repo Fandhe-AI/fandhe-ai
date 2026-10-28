@@ -397,6 +397,14 @@ def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None, task=DEFAU
                     "— skipped"
                 )
                 continue
+            # イシュー #3680: `diag` キー（bench-fandhe の診断腕。全反復の
+            # parity 検証を行わない）の行は通常 A/B から除外する。
+            if "diag" in obj:
+                warnings.append(
+                    f"{path}:{lineno}: 'diag' キーを持つ行は本 A/B の対象外 "
+                    "— skipped"
+                )
+                continue
             if not _valid_cell_identity(obj, device, size_set=size_set, task=task):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"

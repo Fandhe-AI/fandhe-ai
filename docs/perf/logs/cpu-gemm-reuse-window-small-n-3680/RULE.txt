@@ -1,0 +1,70 @@
+RULE fixed-at-utc: コミット時刻を正とする（実機計測より前に単独コミットで固定。事後に緩めない）
+issue: #3680 GB10 CPU gemm の N=256・512 で bench の reuse 窓が診断より遅い原因を bench-fandhe の診断腕で切り分ける
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md（#3680 の節）
+前提: #3671 の RULE.txt／RULE.v2.txt／RULE.v3.txt と §10.5（N=256・512 は「特定できず」）、#3672 の download_owned（§11.5）、
+      #3646 の専有判定 excl_check.py。ブリッジ v2 の 0.5〜2.0 を新しい閾値を作らずそのまま使う。
+      #3671 の RULE と判定は変更しない（本 RULE は追加の事前登録である）。
+
+[対象]
+- 判定対象 N = 256・512。N=1024・2048・4096 は記録のみ（判定外）。
+- 量の定義（#3671 と同じ）: G_bench = base 腕の reuse --phases の iter_total − base 腕の fresh、
+  G_diag = resident_public.iter_total − fresh.iter_total（同じ診断プロセス）、
+  G_Y = 腕 Y の reuse --phases の iter_total − 同じ腕の fresh（vafter の fresh はフラグなしで同じ系列の中で測る）。
+  代表値は run ごとの median_s を採り、5 run の中央値と min–max を報告する。
+
+[ビルドの条件]
+- 現 main（#3672 の download_owned を含む）を測る。fandhe-ai =0.12.0（registry）には download_owned が無いため、
+  bench-fandhe は計測木の crates/facade への path patch でビルドする（1 本のバイナリを全腕で共有。
+  framework-compare/Cargo.lock はビルド後に元へ戻す。ピン・allowlist・deny.toml は変えない）。
+- 診断側は同じ計測木の cpu_gemm_reuse_window_diag（orchestrate.sh gb10。#3671 のものを変えずに使う）。
+
+[bench 側の腕（すべて同一バイナリ。差は CLI フラグか環境変数の 1 要因だけ）]
+- base: 変更なし。--task gemm --device cpu の --mode fresh・--mode reuse・--mode reuse --phases。
+- vafter（H-V2）: --diag-verify-after-loop を reuse／phases にだけ付ける。反復内の reference.verify_strict を
+  ループの後へ移す（窓の中は変えない。parity の検査回数が 39 から init と最終の 2 回に減るため診断専用）。
+- tunboth（H-A3）: GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=1073741824
+  （#3671 と同じリテラル。再現の確認）。
+- tunmmap（H-A3a）: GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432 のみ。
+- tuntrim（H-A3b）: GLIBC_TUNABLES=glibc.malloc.trim_threshold=1073741824 のみ。
+- 「GLIBC_TUNABLES を N 別に当てる」は、bench が 1 プロセス 1 N なので N ごとの独立プロセスに当て、N ごとに判定する
+  ことと定める。リテラルは上記 3 つに固定し、閾値のスイープはしない。
+- 順序: bench は 1 系列（series ラベル bench）。run ごとに腕の巡回順を反転（奇数 run は base vafter tunboth tunmmap tuntrim、
+  偶数 run は逆順）。各 (腕, N) の中は run の奇偶で fresh reuse phases と phases reuse fresh を入れ替える。
+  系列は診断（diag）と bench の 2 本。
+
+[段階 1: 現 main で差が残っているか（N ごと）]
+- (a) G_bench <= 0 → 「逆転が消えた」。その N は帰属に進まない。
+- (b) G_bench > 0 かつ bridge_v2 pass（G_diag > 0 かつ 0.5 <= G_bench/G_diag <= 2.0）→ 「差が残っていない」。帰属に進まない。
+- (c) G_bench > 0 かつ bridge_v2 fail → 「差が残っている」。その N だけ段階 2 を判定する。
+- N=256・512 がどちらも (a) か (b) なら、本イシューは段階 1 の記録で完了とする。
+- (a) を明記する理由: bridge_v2 は G_bench <= 0 でも fail になり、そのまま帰属へ進むと「消えた逆転」の原因を探すことになるため。
+  新しい閾値ではなく条件分岐の明示である。
+
+[段階 2: 支持条件（(c) の N だけ）]
+- 主判定: G_floor = max(G_diag, 0) とし、G_Y − G_floor <= 0.5 × (G_bench − G_floor) なら腕 Y を支持
+  （bench の超過分の半分以上がその腕で消える）。#3671 で N=256 が G_diag < 0 のため判定不能だった点への対処として
+  本イシューで新たに事前登録する。0.5 はブリッジ v2 の下限をそのまま使い、新しい数値は作らない。
+- 記録のみ: #3671 と同じ式（G_Y > 0 かつ G_diag > 0 かつ 0.5 <= G_Y/G_diag <= 2.0）の結果も併記する。
+  主判定と食い違っても主判定を結論とし、両方を併記する。
+- 支持が複数なら併記する（交互作用は断定しない）。tunmmap／tuntrim の片方だけが支持なら「そのノブ」と記録する
+  （因果は断定しない）。どれも支持されなければ「特定できず」。
+- vafter が支持された場合、原因は bench の窓の外の検算の位置になる。bench の窓の見直し（§9.5 (c)）は所有者判断なので
+  本イシューでは提案に留める。
+
+[checksum 規則（hard・fail-closed）]
+- 診断: N ごとに全 run の iter_total.checksum_bits が bit 一致。
+- bench: 全 run で parity_fail_count == 0、かつ N ごとに全腕・全 run の checksum が一致。
+  外れたら系列は無効（judge は exit != 0）。
+
+[ゲート・専有・同定]
+- 各起動前に load1 < 1.0（30 秒間隔・最大 30 分。未通過は abort。系列は参考記録）。
+- excl_check.py --series diag,bench が両系列とも pass でなければ参考記録とし判定しない。
+- .rev-stamp（1 行目 HEAD・2 行目 dirty=0）が本 RULE を含むコミットを指すこと。RULE の sha256 を env_info に記録し、
+  judge が実ハッシュと突き合わせる。bench バイナリの sha256、path patch が計測木の crates/facade に解決されたこと、
+  rustc -vV／cargo --version を記録する。
+- 差し替え・追加起動・セル除外・既存 run の上書きはしない。RAYON_NUM_THREADS が設定されていれば拒否する。
+
+[対象外]
+- tolerance・parity baseline・ガードレール閾値・#3671／#3646 の RULE と判定の変更、bench の窓の見直し、原因が特定された
+  場合の修正の実装、依存とピンの変更、Linux／M4 Max の値による代替（M4 Max は疎通確認のみで record_only）。
+- 固定後は変えない。変える場合は RULE.v2.txt を別コミットで作り理由を書く。

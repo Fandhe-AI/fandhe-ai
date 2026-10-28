@@ -658,6 +658,10 @@ def load_rows(path):
     # 済みの JSONL との互換維持。モジュール docstring 参照）。
     with open(path) as f:
         rows = [json.loads(line) for line in f if line.strip()]
+    # イシュー #3680: `diag` キー（bench-fandhe の診断腕。全反復の parity 検証を
+    # 行わない）を持つ行は、公式表・target_gate・区間集計を含む本ファイル内の
+    # 全集計から除外する（compare_gemm_gate.py・compare_gemm_ab.py と同方針）。
+    rows = [r for r in rows if "diag" not in r]
     for r in rows:
         r.setdefault("mode", "fresh")
         # イシュー #1042 codex-review P0 指摘（PR #1091）: `tf32` は外部

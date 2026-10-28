@@ -599,6 +599,21 @@ class LoadRowsTf32ValidationTests(unittest.TestCase):
             os.unlink(path)
         self.assertNotIn("tf32", rows[0])
 
+    def test_diag_rows_are_excluded_from_load(self):
+        # イシュー #3680: `diag` キー付き行（診断腕・区間行を含む）は集計から除外。
+        rows_in = [
+            _base_row(),
+            dict(_base_row(), diag="verify_after_loop"),
+            dict(_base_row(), diag="verify_after_loop", phase="forward"),
+        ]
+        path = _write_jsonl(rows_in)
+        try:
+            rows = summarize.load_rows(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("diag", rows[0])
+
     def test_strict_bool_true_and_false_load_unchanged(self):
         rows_in = [
             dict(_base_row(framework="fandhe-ai"), tf32=True),
