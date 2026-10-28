@@ -571,11 +571,20 @@ class LoadRowsMetalSplitKTest(unittest.TestCase):
     def test_diag_row_is_excluded_from_gate_matching(self):
         # イシュー #3680: `diag` キーを持つ行（bench-fandhe 診断腕）は
         # 通常のゲート判定から除外される。
-        rows = [
-            dict(_row("fandhe-ai", 1024, "reuse", 0.010), diag="verify_after_loop"),
-        ]
+        normal = _row("fandhe-ai", 1024, "reuse", 0.010)
+        rows = [dict(normal, diag="verify_after_loop")]
+        # フィルタが効いていること（device 不一致ではなく diag で除外）を示すため、
+        # 同一行から diag を除いた対照が同じ照合で一致することを先に確認する。
+        self.assertEqual(
+            len(
+                compare_gemm_gate._matching_rows(
+                    [normal], "fandhe-ai", "reuse", 1024, device=normal["device"]
+                )
+            ),
+            1,
+        )
         matches = compare_gemm_gate._matching_rows(
-            rows, "fandhe-ai", "reuse", 1024, device="metal"
+            rows, "fandhe-ai", "reuse", 1024, device=normal["device"]
         )
         self.assertEqual(matches, [])
 

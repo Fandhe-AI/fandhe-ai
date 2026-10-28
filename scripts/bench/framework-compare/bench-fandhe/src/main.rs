@@ -1197,7 +1197,11 @@ fn emit_gemm_phase_records(
             phase,
             phase_index,
         }
-        .emit(&cli.out)?;
+        // 診断腕（--phases 併用）の区間行にも `diag` を付け、通常の区間集計から除外させる（#3680）。
+        .emit_with_diag(
+            &cli.out,
+            diag_verify_after_loop().then_some("verify_after_loop"),
+        )?;
     }
     Ok(())
 }
@@ -1248,15 +1252,18 @@ fn check_diag_verify_after_loop(cli: &Cli, args: &[String]) -> Result<(), String
         .iter()
         .enumerate()
         .any(|(i, a)| a == "--out" && args.get(i + 1).is_some_and(|v| !v.starts_with("--")));
+    // 明示 `--out` が既定の結果ファイルを指す場合も診断行の混入を許さない。
+    let out_is_default = cli.out == "results/raw/results.jsonl";
     if cli.task != "gemm"
         || cli.mode != "reuse"
         || cli.device != "cpu"
         || !gemm_reuse_uses_resident_input(cli)
         || !out_explicit
+        || out_is_default
     {
         return Err(
             "MEASURE_ERROR: --diag-verify-after-loop requires --task gemm --mode reuse \
-             --device cpu (resident path) with an explicit --out (issue #3680, diagnostic only)"
+             --device cpu (resident path) with an explicit non-default --out (issue #3680, diagnostic only)"
                 .to_string(),
         );
     }
@@ -4927,6 +4934,16 @@ mod tests {
             (
                 make_cli("gemm", "reuse", out.path()),
                 args_of(&["bin", "--diag-verify-after-loop"]),
+            ),
+            (
+                // 明示 --out が既定の結果ファイルを指す場合も拒否する。
+                make_cli("gemm", "reuse", "results/raw/results.jsonl".as_ref()),
+                args_of(&[
+                    "bin",
+                    "--diag-verify-after-loop",
+                    "--out",
+                    "results/raw/results.jsonl",
+                ]),
             ),
             (
                 // 値なしの末尾 --out は既定出力へ落ちるため明示指定と見なさない。

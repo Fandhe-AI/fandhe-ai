@@ -551,6 +551,21 @@ impl PhaseRecord<'_> {
         let line = self.to_json_line()?;
         emit_line(path, &line)
     }
+
+    /// [`PhaseRecord::emit`] の診断キー付き版（イシュー #3680）。`diag` が
+    /// `Some` のとき行末へ `"diag":"<値>"` を足し、通常の区間行と区別させる。
+    pub fn emit_with_diag(&self, path: &str, diag: Option<&str>) -> Result<(), BenchError> {
+        let mut line = self.to_json_line()?;
+        if let Some(d) = diag {
+            debug_assert!(
+                d.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            );
+            line.pop(); // 末尾の '}'
+            line.push_str(&format!(",\"diag\":\"{d}\"}}"));
+        }
+        emit_line(path, &line)
+    }
 }
 
 /// Parsed CLI: --task gemm|train|infer --device cpu|metal --size N
