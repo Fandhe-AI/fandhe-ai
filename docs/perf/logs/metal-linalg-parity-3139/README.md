@@ -91,3 +91,9 @@ Issue の起票・コメント、baseline 化は承認なしでは行ってい�
 CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
 cargo test -p fandhe-ai-backend-metal --release --test linalg_parity -- --ignored --nocapture
 ```
+
+## 2026-10-28 追記: 入力是正と再実測（所有者判断 (a)）
+
+`qr_input(3,8)` の是正と Mac mini 再実測は #2676 の PR で実施した（同じ作業。判定の正は `../metal-linalg-lu-chol-qr-2676/RULE.txt` の「改訂（2026-10-28）」）。
+結果は 5/5 run で全件 pass（`running 7 tests`・`7 passed; 0 failed`）。記録は `../metal-linalg-lu-chol-qr-2676/README.md` の「2026-10-28 入力是正と再実測」節と `rerun-2026-10-28/`。
+本ディレクトリの 2026-10-27 の fail ログは元入力のものとして残す。tolerance・判定式は不変。G2（`docs/backend-gpu-linalg-decision.md` §11.1）のうち Metal 側は充足、CUDA #3138 は別記録。

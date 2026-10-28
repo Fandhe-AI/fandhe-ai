@@ -48,3 +48,29 @@ fail 時の扱い:
   Issue の起票・コメント、baseline 化は承認なしでは行わない。PR に Closes #2676 は書かない。
 
 収録: ホスト名・ユーザー名・絶対パスは <metal-node>・<home> にマスクして収録する。
+
+
+改訂（2026-10-28。実機実行より前に宣言。既存本文は残す）
+宣言日時（UTC）: 2026-10-28T06:00Z
+
+経緯: 2026-10-27 の Mac mini 実測（PR #3654・#3658。既存 run1〜5.log）で qr_matches_cpu_on_device が 5/5 run fail した。
+  原因は qr_input(3,8) の等倍で第 0 列と第 2 列が偶然直交し R[0,2] の真値が厳密 0 になることで、1e20 倍では
+  f32（GPU・ホストモデル。ビット一致）と f64（CPU 参照）の丸め残差の差が相対誤差 1.0 として露出するため
+  （カーネルのずれではない）。(3,8)×1e-20・(17,17)・1e20×I2・正規化 R の parity は未到達（判定未実施）。
+  所有者判断 (a)「入力の是正」（#2676 コメント 6445945182・#3139 コメント 6445947161。2026-10-28）に従う。
+
+変更点: tests/linalg_parity_inputs.rs の qr_input(3,8) だけ、主対角へ +2.0（QR_WIDE_DIAG_SHIFT）を加える。
+  (8,3)・(17,17)・1e20×I2・LU・cholesky の入力、tolerance 定数、判定式、カーネル、CPU 参照は不変。
+  baseline 方式へは移らない。元入力での fail は既存 run*.log と決定記録 §5 に残す（上書きしない）。
+  ガード: tests/linalg_parity_inputs_guard.rs に構造的 0 検出を追加。常時実行の model 対 CPU テスト
+  （linalg_model_parity.rs::qr_parity_inputs_model_matches_cpu）も追加した（実機 pass の根拠にはしない）。
+
+実行件数: 各 run で `running 7 tests`（判定 4 件 + 記録 3 件）。期待と異なる run は無効。
+  （既存本文の「running 6 tests」は qr_diagnose_all_cases_on_device 追加前の値。判定 4 件は不変）
+判定: 既存本文と同じ 4 件が 5 run すべてで pass し、test result の fail 数が記録専用の失敗を除き 0 であること。
+  記録 3 件（status_mapping_end_to_end_on_device・gate_on_non_empty_does_not_return_unsupported・
+  qr_diagnose_all_cases_on_device）は実行・記録するが判定に含めない（ただし起動失敗で fail した場合はその旨を記録）。
+  再実行で結果を選ばない。ケースを除かない。
+対象コミット: 本改訂を含む HEAD。ノード上の .rev-stamp は 1 行目フル SHA・2 行目 dirty=0 必須（転送後にノード上へ直接書く）。
+実機ロック・計測中のビルド非並走・fail 時の扱い・収録時のマスクは既存本文どおり。
+収録先: rerun-2026-10-28/（env.txt・rev-stamp.txt・run1〜5.log）。

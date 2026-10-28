@@ -8,6 +8,8 @@
 #[path = "linalg_parity_inputs.rs"]
 mod inputs;
 
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_tensor_core::BackendOps;
 use fandhe_ai_tensor_core::Tensor;
 use inputs::*;
 
@@ -131,4 +133,58 @@ fn scale_set_is_not_silently_shrunk() {
     assert_eq!(SIZES, [1, 2, 8, 17, 64]);
     assert_eq!(QR_SHAPES, [(8, 3), (3, 8), (17, 17)]);
     assert_eq!(DET_MAX_N, 17);
+}
+
+/// 厳密 0 構造の検出閾値（列ノルム比）。f64 の丸め残差（約 1e-17）と真の非零値（17×17 の最小でも約 5e-4）を
+/// 分ける値で、f32 で解像できるかの境界ではない。これより大きくすると既に pass している 17×17 が落ちる。
+const STRUCTURAL_ZERO_RATIO: f64 = 1e-10;
+
+/// CPU 参照（f64）の R の上三角で `|R_ij| / ‖a_j‖₂` の最小値と位置を返す（i < min(m,n)、j ≥ i）。
+fn min_upper_r_ratio(a: &Tensor<f32>) -> (f64, usize, usize) {
+    let sh = a.shape().to_vec();
+    let (m, n) = (sh[0], sh[1]);
+    let av = s(a);
+    let r = s(&CpuBackendOps::new().linalg_qr(a).expect("cpu qr").r);
+    let mut best = (f64::INFINITY, 0, 0);
+    for i in 0..m.min(n) {
+        for j in i..n {
+            let cn = (0..m)
+                .map(|row| (av[row * n + j] as f64).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let ratio = (r[i * n + j] as f64).abs() / cn;
+            if ratio < best.0 {
+                best = (ratio, i, j);
+            }
+        }
+    }
+    best
+}
+
+/// #2676: 偶発的な直交（R の厳密 0 要素）が 1e20 倍で f32 対 f64 の精度クラス差を相対誤差 1.0 として
+/// 露出させた（旧 `qr_input(3,8)` の R[0,2]）。QR 入力に構造的 0 を再導入させない。
+#[test]
+fn qr_inputs_have_no_structural_zero_in_r() {
+    for (m, n) in QR_SHAPES {
+        let (ratio, i, j) = min_upper_r_ratio(&qr_input(m, n));
+        println!("qr_input({m},{n}) min |R_ij|/|a_j| = {ratio:e} @[{i},{j}]");
+        assert!(
+            ratio >= STRUCTURAL_ZERO_RATIO,
+            "qr_input({m},{n}): R[{i},{j}] が構造的 0（比 {ratio:e}）"
+        );
+    }
+}
+
+/// 旧 (3,8) 式（シフトなし）で構造的 0 を検出できること（ガード自身の退行検出）。
+#[test]
+fn structural_zero_guard_detects_legacy_wide_input() {
+    let d: Vec<f32> = (0..24)
+        .map(|i| (((i * 37 + 11) % 23) as f32 - 11.0) / 7.0)
+        .collect();
+    let (ratio, i, j) = min_upper_r_ratio(&t(d, &[3, 8]));
+    assert!(
+        ratio < STRUCTURAL_ZERO_RATIO,
+        "旧入力で検出できない: {ratio:e}"
+    );
+    assert_eq!((i, j), (0, 2));
 }
