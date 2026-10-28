@@ -453,6 +453,30 @@ impl Record<'_> {
     pub fn emit(&self, path: &str) -> Result<(), BenchError> {
         emit_line(path, &self.to_json_line())
     }
+
+    /// 診断腕（イシュー #3680）用の `to_json_line`。`diag` が `Some` のとき
+    /// 行末に `"diag":"<値>"` を足す。`diag` キーを持つ行は
+    /// compare_gemm_gate.py・compare_gemm_ab.py の通常判定が除外する
+    /// （`readout` 等と同型の「キー有り = 診断条件」規約）。`Record` の
+    /// 全構築箇所へフィールドを増やさないため、行生成側で付与する。
+    /// `diag` は固定の英数字トークン（`-`/`_` 可）に限る。
+    pub fn to_json_line_with_diag(&self, diag: Option<&str>) -> String {
+        let mut s = self.to_json_line();
+        if let Some(d) = diag {
+            debug_assert!(
+                d.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            );
+            s.pop(); // 末尾の '}'
+            s.push_str(&format!(",\"diag\":\"{d}\"}}"));
+        }
+        s
+    }
+
+    /// [`Record::emit`] の診断キー付き版（[`Record::to_json_line_with_diag`]）。
+    pub fn emit_with_diag(&self, path: &str, diag: Option<&str>) -> Result<(), BenchError> {
+        emit_line(path, &self.to_json_line_with_diag(diag))
+    }
 }
 
 /// `Record::emit` / `PhaseRecord::emit`（イシュー #1009）が共用する追記処理。
@@ -1462,5 +1486,14 @@ mod tests {
         let mut r = sample_record("fresh", None);
         r.pinned_h2d = true;
         assert!(r.to_json_line().contains("\"pinned_h2d\":true"));
+    }
+
+    #[test]
+    fn json_line_with_diag_appends_diag_key_only_when_some() {
+        let r = sample_record("reuse", None);
+        assert_eq!(r.to_json_line_with_diag(None), r.to_json_line());
+        let line = r.to_json_line_with_diag(Some("verify_after_loop"));
+        assert!(line.ends_with(",\"diag\":\"verify_after_loop\"}"), "{line}");
+        assert!(!r.to_json_line().contains("\"diag\""));
     }
 }

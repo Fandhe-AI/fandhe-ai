@@ -315,6 +315,11 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
         # が `compare_gemm_ab.py` で専用の A/B 比較を別途担う）。
         if "metal_split_k" in r:
             continue
+        # イシュー #3680: `diag` キーを持つ行（bench-fandhe の診断腕
+        # `--diag-verify-after-loop`。全反復の parity 検証を行わない）は
+        # 通常の性能判定へ混入させないため除外する。
+        if "diag" in r:
+            continue
         # イシュー #1585: `pinned_h2d:true`（CUDA H2D 側 pinned staging
         # opt-in 経路）行は既定プロトコル計測とのゲート混同を防ぐため
         # 除外する（`compare_pinned_h2d_ab.py` が専用の A/B 比較を

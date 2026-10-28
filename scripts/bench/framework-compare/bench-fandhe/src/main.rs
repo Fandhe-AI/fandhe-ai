@@ -679,7 +679,11 @@ fn run_gemm_reuse_resident(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         metal_split_k: cli.metal_split_k.as_deref(),
         pinned_h2d: cli.pinned_h2d,
     }
-    .emit(&cli.out)?;
+    // 診断腕は行へ `diag` を記録し、通常ゲートの集計から除外させる（#3680）。
+    .emit_with_diag(
+        &cli.out,
+        diag_verify_after_loop().then_some("verify_after_loop"),
+    )?;
     Ok(())
 }
 

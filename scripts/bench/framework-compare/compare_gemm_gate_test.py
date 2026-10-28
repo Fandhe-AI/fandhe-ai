@@ -568,6 +568,17 @@ class LoadRowsMetalSplitKTest(unittest.TestCase):
         )
         self.assertEqual(matches, [])
 
+    def test_diag_row_is_excluded_from_gate_matching(self):
+        # イシュー #3680: `diag` キーを持つ行（bench-fandhe 診断腕）は
+        # 通常のゲート判定から除外される。
+        rows = [
+            dict(_row("fandhe-ai", 1024, "reuse", 0.010), diag="verify_after_loop"),
+        ]
+        matches = compare_gemm_gate._matching_rows(
+            rows, "fandhe-ai", "reuse", 1024, device="metal"
+        )
+        self.assertEqual(matches, [])
+
 
 class MainCliTest(unittest.TestCase):
     def test_main_exit_code_reflects_achievement(self):
