@@ -2,7 +2,7 @@
 
 ## 状態
 
-- **実施 2（r2。2026-10-28）**: 正規化を直した `DIAG-r2.txt` を計測前にコミットし、両機体で 7 腕 x 5 round を完走。分類は Mac mini・GB10 とも (i) ノイズ幅内（N 0.1104／0.0938、D1 -0.0003／-0.0093）。数値・解釈・所有者判断事項は決定記録 §17.5「実施 2（r2）」、ログは `macmini-r2/`・`gb10-r2/`（`summary-3611r2-*.txt`）。以下の「2026-10-27」の記述は r1 の記録で、そのまま残す。
+- **実施 2（r2。2026-10-28）**: 正規化を直した `DIAG-r2.txt` を計測前にコミットし、両機体で 7 腕 x 5 round を完走。分類は Mac mini・GB10 とも (i) ノイズ幅内（N 0.1104／0.0938、D1 -0.0003／-0.0093）。数値・解釈は決定記録 §17.5「実施 2（r2）」。所有者判断（2026-10-28）は是正不要・再計測なし（§17.5）、ログは `macmini-r2/`・`gb10-r2/`（`summary-3611r2-*.txt`）。以下の「2026-10-27」の記述は r1 の記録で、そのまま残す。
 - **2026-10-27 に Mac mini・GB10 で実行したが、両機体とも計測前の precheck で停止し、計測は 1 本も走っていない（未実測。分類なし）**。停止理由は `layout_symbol_diff=0`（B1／B2 のシンボルのアドレス差を確認できない。v0 mangling のクレート識別子がビルドパス依存で B1／B2 の名前が一致しないため）。詳細と所有者判断事項は決定記録 `docs/compat-resident-train-step-decision.md` §17.5。
 - 背景: #3257 の参考系列で CPU の train セルが両機体とも REGRESS（Mac mini ratio_ab 1.004・GB10 1.059。`../resident-chain-ab-3257/judge-3257.md`）。
 - 本診断は分類（ノイズ幅内／配置の影響／チェーン化の後退／chain が速い／判定不能）であり、#3257 の RULE・判定は変えない。是正の要否は所有者が判断する。
@@ -22,10 +22,21 @@
 | `DIAG.txt` | 事前登録手順（計測前に固定。対象 SHA・パッチ sha256・7 腕・巡回・ゲート・hard 条件・分類規則・仮説・限界） |
 | `DIAG-r2.txt` | 2 回目の事前登録（r1 の停止原因だった主要シンボルの正規化のみを直した。runner／helper の sha256 を固定） |
 | `scripts/bench/framework-compare/diag_layout_symbols.py` | r2 の主要シンボル突き合わせ helper（legacy／v0 mangling を正規化。stdlib のみ） |
-| `macmini-r2/`・`gb10-r2/` | r2 の生ログ（マスク済み）と集計出力（`summary-3611r2-*.txt`。末尾に終了コード） |
+| `macmini-r2/`・`gb10-r2/` | r2 の生ログ（マスク済み）と集計出力（`summary-3611r2-*.txt`。末尾に終了コード）。nm 生出力は `.txt.gz`（下記「nm 生出力の圧縮」） |
 | `layout-shift.patch` | 配置の対照腕 B2 にだけ当てる計測専用パッチ（bench-fandhe の `main.rs` のみ。コミットは本パッチファイルだけで `crates/` には触れない） |
 | `scripts/bench/framework-compare/run_diag_resident_chain_cpu.sh` | 両機体共用ランナー（B0・B1・B2 の 3 ツリー・7 腕・5 round） |
 | `scripts/bench/framework-compare/summarize_diag_resident_chain_cpu.py` | DIAG の分類規則を fail-closed に適用する集計（`..._test.py` は CI で実行） |
+
+## nm 生出力の圧縮（2026-10-28）
+
+r2 の nm 生出力（`nm-raw-diag-b{1,2}-3611r2-{macmini,gb10}.txt`。計 61,843 行）は、PR の差分が大きすぎて Cursor Bugbot がレビューできないため、`gzip -n -9` で圧縮して `.txt.gz` として収録した（所有者判断 2026-10-28・#3611 コメント 6457938199）。内容は変えていない（展開すると元の `.txt` とバイト一致することを確認済み）。正規化済みの `nm-diag-*`・集計出力はテキストのまま。展開は `gunzip -k <file>.txt.gz`。
+
+| ファイル（圧縮後） | 元の `.txt` の sha256 | 行数 | `.txt.gz` の sha256 |
+|---|---|---:|---|
+| `macmini-r2/nm-raw-diag-b1-3611r2-macmini.txt.gz` | `fd8305d43b4172488a1efe25a5a5b0bcb3b01d8ba7553e7447a9040cecb812c8` | 16657 | `baf9991ef9c7b342fd90c64b80103dfa4cdfc0cce5b5e78a81ae5e1d0444d086` |
+| `macmini-r2/nm-raw-diag-b2-3611r2-macmini.txt.gz` | `5fb78db257f3d4c46eb36083631421d81b701e50fd71b27f0cd518e340b43dca` | 16671 | `54ba11f3477b59b4034df9479fc23a79cf986e437ca4c4915939e4fcdbb1e132` |
+| `gb10-r2/nm-raw-diag-b1-3611r2-gb10.txt.gz` | `67ee33a4b3da46118dcd2627bd7015a0b9e34e7095ce27bc82f0446a1fe86d9e` | 14257 | `ec4633920f080c04adc278b18507c47c4ec8dd51ae58417347f81c3cc45f2a73` |
+| `gb10-r2/nm-raw-diag-b2-3611r2-gb10.txt.gz` | `0fff4c1099eb3837f53de7b9d646221e4a4571037c2c7ab4adc5c9f9d9d8f4b1` | 14258 | `961d009fa33931114432151472811eae3da211f6737ec2aa4e1b515e82675c41` |
 
 ## 実行手順（実測時）
 

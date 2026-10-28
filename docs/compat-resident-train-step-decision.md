@@ -708,7 +708,7 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - Mac mini の train／infer の内訳は §17.6（#3612。2026-10-27 に実測済み。torch 側の内訳と B2 は未実測）、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
 - 本計測は参考系列で、正式な 6 フレームワーク同席計測とピン更新（0.12.0）は #3273。
 
-### 17.5 #3611 CPU train の REGRESS の切り分け（状態: r1 は precheck 失敗で未実測。r2 は両機体で実測済み・分類 (i)。是正要否は所有者判断待ち）
+### 17.5 #3611 CPU train の REGRESS の切り分け（状態: r1 は precheck 失敗で未実測。r2 は両機体で実測済み・分類 (i)。所有者判断済み〈2026-10-28〉: 是正不要・再計測なし）
 
 §17.1 の CPU train の REGRESS（Mac mini ratio_ab 1.004・GB10 1.059）が、ノイズ幅・配置・チェーン化の実際の後退のどれかを、計測より前に固定した手順で分類する。
 
@@ -741,13 +741,13 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - rho（aa0 比、5 run の median_s の中央値の比）。Mac mini: aa1 1.0053・ch1 0.9997・rb0 1.0007・rb1 1.0056・o0 0.9982・o1 0.9988。GB10: aa1 1.0190・ch1 0.9907・rb0 0.9826・rb1 0.9944・o0 1.0003・o1 0.9842。run 別の rho_r と代表値は各 `summary-3611r2-*.txt`。
 - 読み方（事実のみ）: 規則上、N（A/A の run 内ばらつき）が D1・D2 より大きいので (i) になった。これは「ノイズ幅より大きい差が観測されなかった」であり、「差が無い」ことの証明ではない。Mac mini の N は round 1 の A/A 腕（rho_r 0.8896）に支配されている。Mac mini の負荷ゲートは load1 2.75〜2.77（閾値 3.0 の手前）で通過した。#3257 の参考系列の ratio_ab（Mac mini 1.004・GB10 1.059）に相当する差は、本実測では再現していない（D1 は両機体とも絶対値 1% 未満）。
 - 規則は事後に変えていない（round の追加・腕の差し替え・再実行なし）。#3257 の RULE・判定、§17.1〜§17.4、r1 の記録は書き換えない。
-- ログ: `docs/perf/logs/resident-chain-cpu-train-diag-3611/macmini-r2/`・`gb10-r2/`（`env_info-*`・`results-*.jsonl`・`digest-*`・`load_gate-*`・`nm-raw-*`（nm 生出力）・`nm-diag-*`（正規化済み）・`sha-*`・`build-*.err`・`tree-*`・`skipped-*`・`summary-3611r2-*.txt`〔末尾に集計の終了コード〕）。ホームの絶対パスは `<home>` にマスク済み。bench バイナリ・target・B2 の worktree は収録していない。
+- ログ: `docs/perf/logs/resident-chain-cpu-train-diag-3611/macmini-r2/`・`gb10-r2/`（`env_info-*`・`results-*.jsonl`・`digest-*`・`load_gate-*`・`nm-raw-*.txt.gz`（nm 生出力を `gzip -n -9` で圧縮。元の `.txt` の sha256 は README「nm 生出力の圧縮」）・`nm-diag-*`（正規化済み）・`sha-*`・`build-*.err`・`tree-*`・`skipped-*`・`summary-3611r2-*.txt`〔末尾に集計の終了コード〕）。ホームの絶対パスは `<home>` にマスク済み。bench バイナリ・target・B2 の worktree は収録していない。
 
-**所有者判断事項（r2 後。未決）**
+**所有者判断（r2 後。2026-10-28。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3611#issuecomment-6457938199）**
 
-- 是正の要否: 分類が (i) のため、本 issue ではコードを直していない。是正不要とするか（根拠の候補: 両機体で A/A ノイズ幅内、D1 は絶対値 1% 未満）、検出力を上げて再計測するか（例: round 数の増加は規則変更になるため別名 DIAG が必要）は所有者判断待ち。
-- b1 を HEAD（0.12.0）へ切り替えた再登録・再計測の要否は所有者判断待ち。
-- 本 PR は `Refs #3611`。所有者判断（是正要否）が得られるまで issue は閉じない。
+- 是正の要否: 是正不要とする。両機体とも分類 (i)（D1 は絶対値 1% 未満で A/A のばらつき N より小さく、#3257 の差は再現しなかった）。コードは直さない。
+- 再計測: b1 を HEAD（0.12.0）へ切り替えた再登録・再計測、round 数を増やした別名 DIAG の再計測は、いずれも行わない。
+- 分類 (i) は「ノイズ幅より大きい差が観測されなかった」であり「差が無い」ことの証明ではない、という上の読み方は変えない。#3257 の RULE・判定も書き換えない。
 
 ### 17.6 #3612 Mac mini Metal 常駐チェーンの内訳（状態: 実測済み。hard 条件はすべて通過）
 
