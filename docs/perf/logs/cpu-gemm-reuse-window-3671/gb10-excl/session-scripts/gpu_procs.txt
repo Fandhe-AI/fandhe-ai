@@ -1,0 +1,60 @@
+== diag:pre 2026-10-28T11:14:36Z
+rc=0
+
+0 %
+ 20:14:36 up 62 days,  7:41,  1 user,  load average: 10.63, 6.37, 2.70
+== diag:post 2026-10-28T11:36:08Z
+rc=0
+
+0 %
+ 20:36:08 up 62 days,  8:03,  2 users,  load average: 9.37, 4.86, 3.84
+== solo:pre 2026-10-28T11:36:08Z
+rc=0
+
+0 %
+ 20:36:08 up 62 days,  8:03,  2 users,  load average: 9.37, 4.86, 3.84
+== solo:post 2026-10-28T11:38:57Z
+rc=0
+
+0 %
+ 20:38:57 up 62 days,  8:05,  2 users,  load average: 2.33, 3.12, 3.31
+== base:pre 2026-10-28T11:38:57Z
+rc=0
+
+0 %
+ 20:38:57 up 62 days,  8:05,  2 users,  load average: 2.33, 3.12, 3.31
+== base:post 2026-10-28T11:52:28Z
+rc=0
+
+0 %
+ 20:52:28 up 62 days,  8:19,  2 users,  load average: 3.29, 2.30, 2.57
+== tunables:pre 2026-10-28T11:52:28Z
+rc=0
+
+0 %
+ 20:52:29 up 62 days,  8:19,  2 users,  load average: 3.29, 2.30, 2.57
+== tunables:post 2026-10-28T12:05:23Z
+rc=0
+
+0 %
+ 21:05:23 up 62 days,  8:32,  2 users,  load average: 5.97, 2.96, 2.57
+== headpatch:pre 2026-10-28T12:05:23Z
+rc=0
+
+0 %
+ 21:05:23 up 62 days,  8:32,  2 users,  load average: 5.97, 2.96, 2.57
+== headpatch:post 2026-10-28T12:18:54Z
+rc=0
+
+0 %
+ 21:18:54 up 62 days,  8:45,  2 users,  load average: 3.40, 2.27, 2.21
+== minflt:pre 2026-10-28T12:18:54Z
+rc=0
+
+0 %
+ 21:18:54 up 62 days,  8:45,  2 users,  load average: 3.40, 2.27, 2.21
+== minflt:post 2026-10-28T12:22:01Z
+rc=0
+
+0 %
+ 21:22:01 up 62 days,  8:49,  2 users,  load average: 10.40, 4.72, 3.06
