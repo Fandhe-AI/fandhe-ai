@@ -3,15 +3,17 @@
 # 判定規則は同ディレクトリの RULE.txt ＋ RULE.v2.txt ＋ RULE.v3.txt（実測前に固定）が正。構成は
 # docs/perf/logs/cpu-gemm-resident-reuse-3646/orchestrate.sh と同型（ビルド 1 回・独立 5 プロセス・
 # .rev-stamp 必須・既存 run の上書き禁止・load ゲート・ホスト名／$HOME／ユーザー名のマスク）。
-# 使い方: orchestrate.sh <m4max|gb10> [--only-arm resident_public] [--aux minflt] [--out <dir>]
+# 使い方: orchestrate.sh <m4max|gb10> [--only-arm resident_public] [--aux minflt] [--abort-on-gate-unpassed] [--out <dir>]
 #   既定: 診断の正式系列（series_kind=main。cpu_gemm_reuse_window_phases を 5 run）
 #   --only-arm: rp_solo 系列（series_kind=solo。cpu_gemm_reuse_window_solo を 5 run）。値は allowlist のみ
 #   --aux minflt: 判定外の補助 1 run（/usr/bin/time -v 配下。series_kind=minflt）
+#   --abort-on-gate-unpassed: gb10 の負荷ゲートが未通過（30 分）の run で診断バイナリを起動せず rc=4 で終了する
+#     （#3680 RULE.txt「各起動前に判定・未通過は abort」用の opt-in。既定は従来どおり参考扱いで続行し、#3671 の挙動は不変）
 # bench 側の腕（bench_base／bench_tunables／bench_headpatch）は session-scripts/session-3671-excl.sh が回す。
 # 集計は `python3 -I aggregate.py <dir>`。計測ツリーのルートに .rev-stamp（1 行目 HEAD・2 行目 dirty=<件数>）が必須。
 set -euo pipefail
 
-usage() { echo "usage: $0 <m4max|gb10> [--only-arm resident_public] [--aux minflt] [--out <dir>]" >&2; exit 2; }
+usage() { echo "usage: $0 <m4max|gb10> [--only-arm resident_public] [--aux minflt] [--abort-on-gate-unpassed] [--out <dir>]" >&2; exit 2; }
 
 host_kind="${1:-}"
 [ -n "$host_kind" ] || usage
@@ -23,6 +25,7 @@ repo_root="$(cd "$script_dir/../../../.." && pwd)"
 kind="main"
 only_arm=""
 out_dir=""
+abort_on_unpassed=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only-arm)
@@ -36,6 +39,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || usage
       case "$2" in minflt) kind="minflt" ;; *) usage ;; esac
       shift 2
+      ;;
+    --abort-on-gate-unpassed)
+      abort_on_unpassed=1
+      shift
       ;;
     --out)
       [ $# -ge 2 ] || usage
@@ -164,6 +171,10 @@ for n in $(seq 1 "$run_count"); do
     echo "run$n load1=$(load1) (record_only)" >>"$out_dir/load_gate.log"
   fi
   echo "run$n gate=$gate_status" >>"$out_dir/load_gate_status.txt"
+  if [ "$abort_on_unpassed" = 1 ] && [ "$gate_status" = unpassed ]; then
+    echo "run$n: 負荷ゲート未通過のため起動せず中止する（--abort-on-gate-unpassed）" >&2
+    exit 4
+  fi
   case "$kind" in
     main) runner=("$bin") ;;
     solo) runner=() ;; # solo は上で N ごとに別プロセス起動する

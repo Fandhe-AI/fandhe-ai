@@ -172,9 +172,12 @@ snap "diag:pre"
 echo diag >"$CUR"
 # 診断系列も起動前に負荷ゲートを通す。未通過なら起動せず中止する。
 gate "diag:pre" || abort_gate "diag:pre"
-bash "$RES3671/orchestrate.sh" gb10 --out "$O/gb10" >"$O/orch-gb10.log" 2>&1
-step "orchestrate-diag rc=$?"
-# orchestrate.sh は run ごとの未通過を「参考扱い」で続行するため、#3680 ではここで検出して後続（bench 系列）を中止する。
+# --abort-on-gate-unpassed: run ごとのゲート（30 分）未通過ならそのラン以降を起動せず rc=4 で止める（RULE.txt「各起動前・未通過は abort」）。
+bash "$RES3671/orchestrate.sh" gb10 --abort-on-gate-unpassed --out "$O/gb10" >"$O/orch-gb10.log" 2>&1
+orc=$?
+step "orchestrate-diag rc=$orc"
+if [ "$orc" = 4 ]; then abort_gate "diag orchestrate 内の run で未通過"; fi
+# 念のための二重確認（未通過記録が残っていれば bench 系列も中止する）。
 if grep -q 'gate=unpassed' "$O/gb10/load_gate_status.txt" 2>/dev/null; then
   abort_gate "diag orchestrate 内の run で未通過"
 fi
