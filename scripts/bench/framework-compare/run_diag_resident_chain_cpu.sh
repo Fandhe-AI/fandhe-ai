@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # イシュー #3611: 常駐チェーン CPU train セルの REGRESS（#3257: Mac mini +0.4%・GB10 +5.9%）の原因を切り分ける診断ランナー。
 # 両機体共用（AB_PROFILE=macmini|gb10。機体間の並走は可、同一機体では計測とビルドを並走させない）。
-# 手順の正本: docs/perf/logs/resident-chain-cpu-train-diag-3611/DIAG.txt（計測前に固定。本スクリプトは sha256 を env_info へ記録し、
+# 手順の正本: docs/perf/logs/resident-chain-cpu-train-diag-3611/DIAG-r2.txt（r2。r1 の DIAG.txt は precheck の mangling 正規化不備で計測 0 本。
+# 計測前に固定。DIAG に runner／helper の sha256 を持たせ、一致しなければ停止する。本スクリプトは sha256 を env_info へ記録し、
 # summarize_diag_resident_chain_cpu.py が DIAG と突合する）。判定ではなく分類を出す診断であり、judge ツールの入力ではない。
 # run_ab_resident_chain.sh は 1 ツリー・4 腕固定で B0／B1／B2 の 3 ツリーと A/A 腕を扱えないため流用せず、同じ検証
 # （facade パス検証・.rev-stamp・一時 index による完全一致）を 7 腕向けに持つ。既存ランナーは変更しない。
@@ -74,7 +75,7 @@ fi
 RUNNER_ROOT="$(cd ../../.. && pwd)"
 LOGDIR="$RUNNER_ROOT/docs/perf/logs/resident-chain-cpu-train-diag-3611"
 # DIAG ファイル名は固定の正規表現のみ受け、固定ディレクトリ配下でのみ解決する（パス走査防止。A03）。
-DIAG_NAME="${DIAG_NAME-DIAG.txt}"
+DIAG_NAME="${DIAG_NAME-DIAG-r2.txt}"
 if [[ ! "$DIAG_NAME" =~ ^DIAG(-[a-z0-9]+)?\.txt$ ]]; then
   echo "error: DIAG_NAME は DIAG(-<英小文字数字>).txt のファイル名のみ（got: ${DIAG_NAME}）" >&2; exit 1
 fi
@@ -114,6 +115,20 @@ if [[ -z "$DIAG_LAYOUT_SHA" || "$DIAG_LAYOUT_SHA" != "$LAYOUT_SHA" ]]; then
 fi
 if [[ -z "$EXPECT_B1" || -z "$EXPECT_B0" ]]; then
   echo "error: DIAG から b1／oldcode の SHA を読めない" >&2; exit 1
+fi
+# r2（#3611）: runner 本体と正規化 helper の sha256 を DIAG に固定し、計測前登録後の差し替えを fail-closed で検出する。
+# sha フィールドを持たない DIAG.txt（r1）はここで拒否される。
+HELPER_FILE="$(pwd)/diag_layout_symbols.py"
+[[ -f "$HELPER_FILE" ]] || { echo "error: diag_layout_symbols.py が無い" >&2; exit 1; }
+RUNNER_SHA="$(sha256_of "$(pwd)/$(basename "$0")")"
+HELPER_SHA="$(sha256_of "$HELPER_FILE")"
+DIAG_RUNNER_SHA="$(sed -n 's/^  runner_sha256: \([0-9a-f]\{64\}\)$/\1/p' "$DIAG_FILE" | head -n1)"
+DIAG_HELPER_SHA="$(sed -n 's/^  layout_helper_sha256: \([0-9a-f]\{64\}\)$/\1/p' "$DIAG_FILE" | head -n1)"
+if [[ -z "$DIAG_RUNNER_SHA" || "$DIAG_RUNNER_SHA" != "$RUNNER_SHA" ]]; then
+  echo "error: DIAG の runner_sha256 と実ランナーの sha256 が一致しない（DIAG にフィールドが無い場合を含む）" >&2; exit 1
+fi
+if [[ -z "$DIAG_HELPER_SHA" || "$DIAG_HELPER_SHA" != "$HELPER_SHA" ]]; then
+  echo "error: DIAG の layout_helper_sha256 と実 helper の sha256 が一致しない" >&2; exit 1
 fi
 
 OUT="results/raw"
@@ -254,15 +269,16 @@ if [[ "$S_B0" == "$S_B1" || "$S_B1" == "$S_B2" || "$S_B0" == "$S_B2" ]]; then
   precheck_fail "B0・B1・B2 のバイナリ sha256 が互いに異なっていない"
 fi
 # B1／B2 の主要シンボル（ハッシュ接尾辞を除いた名前）のアドレスを記録し、少なくとも 1 つが異なることを確かめる。
-sym_dump() { # <bin> <out>
-  nm "$1" 2>/dev/null | grep -E 'train_step_resident|forward_resident' \
-    | awk 'NF>=3{n=$3; sub(/17h[0-9a-f]{16}E$/,"",n); print n, $1}' | sort >"$2"
-}
-sym_dump "$(bin_for aa0)" "$OUT/nm-diag-b1-${LABEL}.txt"
-sym_dump "$(bin_for rb0)" "$OUT/nm-diag-b2-${LABEL}.txt"
-LAYOUT_SYM_DIFF="$(awk 'NR==FNR{a[$1]=$2; next} ($1 in a) && a[$1]!=$2 {c++} END{print c+0}' "$OUT/nm-diag-b1-${LABEL}.txt" "$OUT/nm-diag-b2-${LABEL}.txt")"
-if [[ ! -s "$OUT/nm-diag-b1-${LABEL}.txt" || ! -s "$OUT/nm-diag-b2-${LABEL}.txt" || "$LAYOUT_SYM_DIFF" -lt 1 ]]; then
-  precheck_fail "B1／B2 の主要シンボルのアドレス差を確認できない（layout_symbol_diff=${LAYOUT_SYM_DIFF}）"
+# r2: 突き合わせは diag_layout_symbols.py（legacy／v0 mangling の正規化）が行う。nm 生出力は証拠として残す。
+nm "$(bin_for aa0)" >"$OUT/nm-raw-diag-b1-${LABEL}.txt" 2>/dev/null
+nm "$(bin_for rb0)" >"$OUT/nm-raw-diag-b2-${LABEL}.txt" 2>/dev/null
+SYM_OUT="$(python3 -I "$HELPER_FILE" --b1 "$OUT/nm-raw-diag-b1-${LABEL}.txt" --b2 "$OUT/nm-raw-diag-b2-${LABEL}.txt" \
+  --out-b1 "$OUT/nm-diag-b1-${LABEL}.txt" --out-b2 "$OUT/nm-diag-b2-${LABEL}.txt" 2>>"$SKIP")" \
+  || precheck_fail "diag_layout_symbols.py が失敗した（主要シンボルを突き合わせられない）"
+LAYOUT_SYM_DIFF="$(echo "$SYM_OUT" | sed -n 's/^layout_symbol_diff=\([0-9]\{1,\}\)$/\1/p' | head -n1)"
+LAYOUT_SYM_KEYS="$(echo "$SYM_OUT" | sed -n 's/^layout_symbol_keys=\([0-9]\{1,\}\)$/\1/p' | head -n1)"
+if [[ -z "$LAYOUT_SYM_DIFF" || -z "$LAYOUT_SYM_KEYS" || "$LAYOUT_SYM_DIFF" -lt 1 ]]; then
+  precheck_fail "B1／B2 の主要シンボルのアドレス差を確認できない（layout_symbol_diff=${LAYOUT_SYM_DIFF:-unset}）"
 fi
 
 {
@@ -277,6 +293,9 @@ fi
   echo "rev_stamp_head_b0=${STAMP_B0}"
   echo "rev_stamp_head_b1=${STAMP_B1}"
   for a in "${ARMS[@]}"; do echo "bin_sha256_${a}=$(sha256_of "$(bin_for "$a")")"; done
+  echo "runner_sha256=${RUNNER_SHA}"
+  echo "layout_helper_sha256=${HELPER_SHA}"
+  echo "layout_symbol_keys=${LAYOUT_SYM_KEYS}"
   echo "layout_symbol_diff=${LAYOUT_SYM_DIFF}"
   echo "precheck=assert"
   echo "rounds=${ROUNDS}"

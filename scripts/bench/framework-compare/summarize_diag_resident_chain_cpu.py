@@ -90,6 +90,12 @@ def check_env(profile, kv, diag_sha, diag_text):
             raise Undet(f"同じバイナリ群 {g} の腕で bin_sha256 が食い違う（{a}）")
     if len(set(grp.values())) != 3:
         raise Undet("B0・B1・B2 のバイナリが互いに異なっていない（配置の対照が成立しない）")
+    # r2 以降の DIAG は runner／helper の sha256 を固定する。行がある DIAG のときだけ env_info との一致を必須にする（DIAG.txt 後方互換）。
+    for k, pat in (("runner_sha256", r"^  runner_sha256: ([0-9a-f]{64})$"),
+                   ("layout_helper_sha256", r"^  layout_helper_sha256: ([0-9a-f]{64})$")):
+        m = re.search(pat, diag_text, re.M)
+        if m and kv.get(k) != m.group(1):
+            raise Undet(f"env_info の {k} が DIAG の固定値と一致しない")
     n = kv.get("layout_symbol_diff", "")
     if not re.match(r"^[0-9]+$", n) or int(n) < 1:
         raise Undet(f"B1／B2 の主要シンボルのアドレス差が確認できていない（layout_symbol_diff={n!r}）")
