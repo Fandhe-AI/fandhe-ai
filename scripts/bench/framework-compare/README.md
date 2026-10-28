@@ -565,6 +565,22 @@ interleave 計測**できるようにする（`bench-candle`／`bench-burn` は�
   #3184 G5 の ADOPT を受け、#3265 で `readout_uses_borrowed_view` の Metal
   分岐を撤去し、本節「借用ビュー readout」冒頭の見出しも更新した（§20）。
 
+### `--diag-verify-after-loop`（イシュー #3680。診断専用・既定 OFF）
+
+`gemm --mode reuse`（`--phases` の有無は問わない）の常駐入力経路で、反復内の
+`reference.verify_strict`（参照 N² と出力 N² の全要素比較）を**ループの後**へ移す診断腕。
+GB10 の N=256・512 で bench の reuse 窓が診断テストより遅い原因が「窓の外の検算の位置」かを
+切り分けるためだけに使う（判定規則は `docs/perf/logs/cpu-gemm-reuse-window-small-n-3680/RULE.txt`）。
+
+- 窓の中（`iter_start`〜`elapsed`）・出力スキーマ（`Record`・区間名 5 つ）は変えない。
+- parity の検査対象は 39 反復から「init と最終反復の 2 回」に減り、途中の反復は checksum の bit 一致
+  （init の checksum と同一）で代える。**通常 bench の parity 契約ではない**ため、
+  `run_all*.sh`・`run_gemm_gate*.sh` では使わない。
+- 受理条件は `--task gemm --mode reuse --device cpu`（常駐入力経路）かつ `--out` の明示。
+  外れたら `MEASURE_ERROR`（既定の `results/raw/results.jsonl` へ診断行が混ざるのを防ぐ）。
+- `bench-common::Cli` は bench-candle／bench-burn と共有のため触らず、`--infer-batch` と同じく
+  bench-fandhe が `std::env::args()` から読む。ON のとき stderr に `DIAG:` の 1 行を出す。
+
 ### `infer --mode reuse` / `infer --phases`（イシュー #1217）
 
 `docs/perf/train-step-phase-breakdown.md` §13・§15.5 の背景: `--task infer` は

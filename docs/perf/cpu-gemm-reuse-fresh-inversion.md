@@ -688,3 +688,34 @@ before = `a7aac2f02`（マージベース）、after = `f7ce20fc9`（PR head。t
 
 - 本節の時点では実測が無い。実測後に 12.1 の状態と結果表を更新する
 - 下流の #3681（非処置セルを経路で絞った再事前登録）への申し送り: T1・T3 は `matmul_resident` の経路にない（12.2。読解）。本 Issue の判定は実測後に追記する
+
+## 13. #3680: N=256・512 で bench の reuse 窓が診断より遅い原因を bench-fandhe の診断腕で切り分ける
+
+### 13.1 状態（先に結論）
+
+- **実機計測は未実測**（本節の記録時点。計測部品と事前登録規則だけをコミット済み。GB10 の値は無い。Linux や M4 Max の値で代替しない）
+- 結論（逆転が消えた／差が残っていない／特定できず／支持された腕）は、実測後に `logs/cpu-gemm-reuse-window-small-n-3680/` の `judge_3680.py` の出力から転記する。それまで本節に結論は無い
+- 事前登録規則: `logs/cpu-gemm-reuse-window-small-n-3680/RULE.txt`（実測と部品の実装より前に単独コミットで固定。固定時刻はそのコミットのコミット時刻）
+
+### 13.2 事実（コードの読解。実測ではない）
+
+- §10.5 は N=256・512 を「特定できず」とした。診断テスト側の腕では bench との差を写せず、§10.6 の 2 が bench-fandhe 側の診断腕を次の切り分けとして残した
+- その後 #3672（`download_owned`。§11）が main に入った。§11.5 の GB10 の値から、現 main では N=256・512 の逆転そのものが残っていない可能性がある。そのため本 Issue は先に「差が残っているか」を測る（段階 1）
+- `measure_gemm_reuse_resident` の窓の外（毎反復）に `validate_gemm_checksum` と `reference.verify_strict`（参照 N² と出力 N² の全要素比較・単一スレッド）がある。診断 `resident_public` には全要素の検算が無い（§10.2）
+- registry の `fandhe-ai =0.12.0` には `download_owned` が無い。現 main を測るには、bench-fandhe を計測木の `crates/facade` への path patch でビルドする必要がある（`build_bench_head.sh`。`framework-compare/Cargo.lock` は終了時に復元する）。#3671 の `build_bench_arms.sh` の base 腕は registry 版なので流用しない
+
+### 13.3 事前登録（要約）
+
+- 判定対象は N=256・512。診断の正式系列 `diag` と bench 系列 `bench`（5 腕を run ごとに巡回）の 2 系列を、同じ専有セッションで取る
+- bench の腕: `base`（変更なし）・`vafter`（`--diag-verify-after-loop`。反復内の `verify_strict` をループの後へ移す）・`tunboth`（#3671 と同じ `GLIBC_TUNABLES`）・`tunmmap`（mmap 閾値のみ）・`tuntrim`（trim 閾値のみ）。「N 別に当てる」は N ごとの独立プロセスに当て N ごとに判定することと定めた
+- 段階 1（N ごと）: G_bench ≤ 0 は (a) 逆転が消えた、bridge_v2 pass は (b) 差が残っていない、bridge_v2 fail は (c) 差が残っている。両 N が (a)(b) なら段階 1 の記録で完了
+- 段階 2（(c) の N だけ）: G_floor = max(G_diag, 0) として G_Y − G_floor ≤ 0.5 × (G_bench − G_floor) なら支持（主判定）。#3671 の式は記録として併記し、食い違えば主判定を結論とする。0.5 はブリッジ v2 の下限で、新しい数値は作らない
+- #3671・#3646 の RULE と判定、tolerance・parity baseline・ガードレール閾値、依存とピンは変えない
+
+### 13.4 診断腕の仕様と限界
+
+- `--diag-verify-after-loop` は診断専用・既定 OFF。受理条件は `--task gemm --mode reuse --device cpu`（常駐入力経路）と `--out` の明示。窓の中と出力スキーマは変えない（README の `--diag-verify-after-loop` 節）
+- ON のとき parity の検査対象は 39 反復から init と最終反復の 2 回に減り、途中の反復は checksum の bit 一致で代える。**通常 bench の parity 契約ではない**
+- 実測が無いため、`vafter` が支持される可能性も、どの腕も支持されない可能性もある。vafter が支持された場合の bench の窓の見直し（§9.5 (c)）は所有者判断で、本 Issue では提案に留める
+- 1 台・1 セッションの実測になる。別機体での再現と `GLIBC_TUNABLES` の閾値スイープは対象外
+- §10.6 の 2 と §11.7 の申し送りへの対応は、実測後に 13.1 の状態と結果表を更新して行う
