@@ -396,6 +396,24 @@ pub trait MemoryOps {
     /// `numel() == 0` の場合は FFI を呼ばず空 `Tensor` を返す。
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError>;
 
+    /// `buffer` を所有権ごと受け取ってホストへダウンロードする（イシュー #3672）。
+    ///
+    /// 呼び出し元が以後バッファを使わないとき、コピーを省けるバックエンド（CPU は
+    /// ホストの `Vec` をそのまま `Tensor` へ移せる）が上書きする入口。同期契約は
+    /// [`Self::download`] と同じで、復帰時点でホストデータが確定している。
+    /// 呼び出し元は autodiff の `matmul_resident`（#3646 §9.7 で `download` の
+    /// コピーが N=4096 の reuse 逆転の主因と帰属。所有者判断は §9.5）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// `self.download(&buffer)` へ委譲し、その後 `buffer` を drop する。
+    /// 「download → バッファの drop」という従来の順序と同じため、CUDA・Metal 等の
+    /// 挙動は変わらない（`upload_into`・`with_host_view` と同じ既定実装つきの
+    /// 非破壊拡張。object-safe）。
+    fn download_owned(&self, buffer: DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+        self.download(&buffer)
+    }
+
     /// ホスト常駐の `tensor` を、既存の `dst`（呼び出し元が既に確保済みの
     /// デバイスバッファ）の `dst_offset` 要素目から H2D 転送する（イシュー
     /// #1212・`docs/device-resident-update-design.md` 追補）。
@@ -660,5 +678,48 @@ mod tests {
             assert_eq!(counter.get(), i + 1, "サイクル {i} 回目で解放回数がずれた");
         }
         assert_eq!(counter.get(), 50);
+    }
+
+    /// `download_owned` の既定実装が `download` へ委譲し、その後バッファを drop する（#3672）。
+    #[test]
+    fn download_owned_default_delegates_to_download_then_drops() {
+        struct Mem {
+            calls: Cell<usize>,
+        }
+        impl MemoryOps for Mem {
+            fn alloc_zeroed(&self, _: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
+                Err(BackendError::Unsupported("test".into()))
+            }
+            fn upload(&self, _: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
+                Err(BackendError::Unsupported("test".into()))
+            }
+            fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+                self.calls.set(self.calls.get() + 1);
+                let h = buffer
+                    .downcast_handle::<MockHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                Tensor::new(h.payload.clone(), buffer.shape()).map_err(BackendError::ShapeMismatch)
+            }
+        }
+        let counter = Rc::new(Cell::new(0));
+        let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
+            drop_count: Rc::clone(&counter),
+            payload: vec![1.0, -0.0, 3.5, f32::NAN],
+        });
+        let buf = DeviceBuffer::<f32>::new(Device::Cpu, vec![2, 2], handle);
+        let mem = Mem {
+            calls: Cell::new(0),
+        };
+        let t = mem.download_owned(buf).unwrap();
+        assert_eq!(mem.calls.get(), 1);
+        assert_eq!(counter.get(), 1, "復帰時にバッファが drop されているはず");
+        let bits: Vec<u32> = t.as_slice().unwrap().iter().map(|v| v.to_bits()).collect();
+        assert_eq!(
+            bits,
+            [1.0f32, -0.0, 3.5, f32::NAN]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 }
