@@ -1,0 +1,12 @@
+2026-10-28T02:12:45Z hwlock acquired
+2026-10-28T02:12:45Z start tree=449ae15814514d7e64a62c6e0bd573c7f422391f
+2026-10-28T02:33:04Z orchestrate-main rc=0
+2026-10-28T02:37:50Z orchestrate-minflt rc=0
+2026-10-28T03:01:39Z orchestrate-tunables rc=0
+2026-10-28T03:24:28Z orchestrate-taskset rc=0
+2026-10-28T03:41:28Z bridge done
+2026-10-28T03:43:10Z orchestrate-2105 rc=0
+2026-10-28T03:43:12Z blas-path rc=0
+2026-10-28T03:43:12Z session body done
+done.
+2026-10-28T03:43:12Z hwlock released

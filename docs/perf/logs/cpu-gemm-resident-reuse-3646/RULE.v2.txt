@@ -1,0 +1,32 @@
+RULE.v2 fixed-at-utc: 2026-10-28T02:11:00Z (実機計測より前に RULE.txt とは別コミットで固定。事後に緩めない)
+issue: #3646 GB10 の CPU gemm で常駐入力の reuse が fresh より遅い原因の切り分け
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §9
+supersedes: RULE.txt の [ブリッジ（bench との窓の一致確認）] 節のみ。RULE.txt 本文は編集しない
+  （orchestrate.sh が RULE.txt の sha256 を env_info.txt に記録しドリフトガードに使うため）。
+
+[変更理由（実測前に判明した実行不能）]
+- RULE.txt のブリッジは `bench-fandhe --task gemm --device cpu --mode fresh --phases` を前提に
+  「--phases の matmul 区間差」を求める。しかし scripts/bench/framework-compare/bench-fandhe/src/main.rs の
+  dispatch()（doc コメント「`gemm --mode fresh` との組合せのみ MEASURE_ERROR とする」）は
+  gemm fresh --phases を拒否し、テスト tests::phases_with_gemm_fresh_is_measure_error が固定している。
+  fresh 側の matmul 区間は取得できず、判定式が計算できないため全 N が bridge=fail となり、
+  実測しても最初から帰属が保留になる。
+- そのため、bench が実際に出す値だけで決まる窓の一致確認へ差し替える。判定の閾値・帰属規則・
+  checksum 規則・腕・代表値・補助系列・ゲート・G-CPU-INF 規則・対象外は RULE.txt のまま有効。
+  aggregate.py は bridge_status.txt の pass/fail を読むだけで、閾値・判定ロジックは変更しない。
+
+[ブリッジ v2（bench との窓の一致確認。RULE.txt の同名節を置換）]
+- 測る（bench-fandhe。registry fandhe-ai =0.12.0。patch は使わない。N = 256・512・1024・2048・4096 各 5 run）:
+  - fresh: `--task gemm --device cpu --mode fresh` の通常 gemm 行の median_s
+  - reuse: `--task gemm --device cpu --mode reuse --phases` の gemm_phases 行 phase=iter_total の median_s
+    （通常 reuse 行 `--mode reuse` も別途 5 run 取り記録する）
+  - 各 N で 5 run 間の中央値を採る。
+- G_bench = reuse.iter_total - fresh.iter_total（bench 側の逆転幅）
+- G_diag  = resident_public.iter_total - fresh.iter_total（診断 gb10 系列の 5 run 中央値同士。aggregate.py の G と同じ）
+- bridge=pass の条件: G_bench > 0 かつ G_diag > 0 かつ 0.5 <= G_bench / G_diag <= 2.0。それ以外は bridge=fail。
+  fail の N は帰属を保留する（aggregate.py の既存挙動）。
+- 記録のみ（判定外）: reuse の matmul 区間が G_bench に占める割合、to_tensor・host_copy・checksum の値、通常 reuse 行の median_s。
+- 集計結果は gb10-bridge/bridge_judge.md、判定は gb10/bridge_status.txt に `<N> bridge=pass|fail` を 1 行ずつ（重複なし）。
+
+[固定後]
+- 規則・期待行数・閾値を変えない。RULE.v2.txt の sha256 は rev-stamp-verification-3646.md と README に記録する。
