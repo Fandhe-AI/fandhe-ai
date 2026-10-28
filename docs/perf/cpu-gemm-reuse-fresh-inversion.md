@@ -660,3 +660,31 @@ before = `a7aac2f02`（マージベース）、after = `f7ce20fc9`（PR head。t
 - `orchestrate.sh` の最終行の案内文は絶対パスを含む（回収時にマスクした）
 - GB10 は専有 pass だが、診断・bench とも 1 機体 1 系列（5 run）。小 N の差は run 間のばらつきが大きく、本 Issue の対象（N=4096 の逆転）の判定には影響しないが、小 N の後退の有無は別途の確認が要る
 - autodiff 内の他の `download(` 呼び出し、`PooledMemory`・Metal の `download_owned` 上書き、出力バッファのプール（§9.5 (b)）、bench 窓の見直し（§9.5 (c)）、N=256〜2048 の逆転（#3671）は本 Issue の対象外
+
+## 12. #3679: download_owned 後に 5/5 run で後退した 3 セルが再現する差かの確認
+
+### 12.1 状態（先に結論）
+
+- **実機計測は未実測**（本節の記録時点。計測部品と事前登録規則だけをコミット済み。GB10・Mac mini とも値は無い。Linux や M4 Max の値で代替しない）
+- 結論（再現した／再現しない／判定不能）は、実測後に `logs/cpu-gemm-download-owned-regress-3679/judge-3679.md`（`repro_judge.py` の出力そのまま）から転記する。それまで本節に結論は無い
+- 事前登録規則: `logs/cpu-gemm-download-owned-regress-3679/RULE.txt`（実測前に単独コミットで固定。固定時刻はそのコミットのコミット時刻）
+
+### 12.2 事実（コードの読解。実測ではない）
+
+- before（`a7aac2f0`）と after（`f7ce20fc`）の差は、`matmul_resident` の `download` → `download_owned`、`CpuMemory`／`CpuBackendOps` の `download_owned` と `take_data`、`tensor-core` の `MemoryOps::download_owned` 既定実装と `BufferHandle::is_pool_owned` の追加。**`download` 本体は変えていない**
+- 診断 `cpu_gemm_resident_reuse_diag.rs` の腕の経路: `resident_public` は公開経路なので download_owned を通る（T2）。`resident_split` と `gemm_device_download` は `res.ops.download` を直接呼ぶので **download_owned を通らない**（T1・T3）
+- このため T1・T3 で差が再現しても、download_owned の区間には帰属できない。候補は (a) 同一プロセス内の持ち越し（ARMS は `fresh, resident_public, resident_split, …` の順でラウンドごとに反転し、`resident_split` は `resident_public` と隣り合う）、(b) バイナリ配置・コード生成の差（trait へのメソッド追加）、(c) ノイズ
+- #3672 の非処置セルは 2 機体で約 90 あり、差が無く ratio が対称にばらつくなら 1 セルが 5/5 run で > 1.00 になる確率は 1/32、約 2.8 件が偶然当たると期待される。当たった 3 件はこの期待値と同程度
+- 固定した腕の木では、`take_data`・prepack の破棄・解放のタイミングを区間に分けられない。T1 は gemm_device／download／out_drop／readout／checksum、T2 は matmul／readout／checksum の区間行があり、T3 は iter_total のみ。より細かい切り分けは新しい sha に新しい診断を足す必要があり、本 Issue の対象外（所有者確認のあと別 issue）
+
+### 12.3 事前登録（要約）
+
+- 判定対象は T1（GB10 `resident_split` N=512）・T2（Mac mini `resident_public` N=256）・T3（Mac mini `gemm_device_download` N=4096）の 3 セル。機体ごとに 3 系列（別セッション・先頭腕を交互）× 5 run（ABBA）。ratio_r = after / before の 15 個を使う
+- k = 15 個のうち ratio_r > 1.00 の個数。k ≥ 12 かつ 3 系列の中央値がすべて > 1.00 なら「再現した」、k ≤ 7 なら「再現しない」、それ以外は「判定不能」。ゲートを pass した系列が 3 未満、または checksum 不一致も「判定不能」
+- ゲートは GB10 が compute プロセス 0 件（`excl_check.py`）かつ load1 < 1.0、Mac mini が load1 < 3.0。ゲートを pass した最初の 3 系列だけを使い、値で選ばない。詳細は RULE.txt を正とする
+- #3672 の RULE.txt・RULE.v2.txt と REJECT 判定は変えない。tolerance・parity baseline・ガードレール閾値・依存も変えない
+
+### 12.4 限界
+
+- 本節の時点では実測が無い。実測後に 12.1 の状態と結果表を更新する
+- 下流の #3681（非処置セルを経路で絞った再事前登録）への申し送り: T1・T3 は `matmul_resident` の経路にない（12.2。読解）。本 Issue の判定は実測後に追記する
