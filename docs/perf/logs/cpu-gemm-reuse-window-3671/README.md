@@ -2,16 +2,19 @@
 
 ## 状態
 
-**計測部品のみ（実測前）。** 事前登録規則（`RULE.txt`・`RULE.v2.txt`）・診断テスト・オーケストレータ・集計器・判定器・
-セッションスクリプトを置いた。**GB10 の専有系列は未実測**で、原因は未特定（「特定できた」とも「特定できず」とも書かない）。
-このため PR は `Refs #3671`。`Closes` は専有を満たした正式系列で完了条件を満たしたときに限る。
+**GB10 の専有の正式系列を実測済み（2026-10-28・`<cuda-node>`・`gb10-excl/`）。** 診断 5 run・`rp_solo` 5 run・bench 3 腕（各 75 起動）・`minflt`（判定外 1 run）を
+1 本の切り離しセッション（`session-scripts/session-3671-excl.sh`）で取得し、6 系列とも `excl=pass`・`aggregate.py`／`bench_judge.py` は `OFFICIAL: yes`・
+`steps.log` は `done.`（rc なし）で完走した。同定は `rev-stamp-verification-3671.md`。
 
-0.12.0 の正式値と #3274 の tally は変えていない。tolerance・parity baseline・bench の窓・本番コードも変えていない。
+判定（機械的。`gb10-excl/bench_judge.md`）: N=256・512 は**特定できず**／N=1024 は **`bench_tunables` が支持**／N=2048 は bridge_v2 が pass して**現象が再現しない**／
+N=4096 は対照（pass）。結果と読み取りは `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §10.4〜10.7。
+
+0.12.0 の正式値と #3274 の tally は変えていない。tolerance・parity baseline・bench の窓・本番コード・規則・判定器の閾値も変えていない。
 
 ## 固定の順序
 
 1. `RULE.txt`（単独コミット）→ 2. `RULE.v2.txt`（基準の再確認の式だけ置換。別コミット）→ 3. 部品一式（診断テスト・スクリプト・本ファイル）
-RULE の sha256 と `RULE.v2.txt`・`RULE.v3.txt`（H-A2 の「単一スレッド」誤記の訂正。記述のみ）の sha256 は計測時に `env_info.txt` と `rev-stamp-verification-3671.md` へ記録する（未作成。計測時に作る）。
+`RULE.txt`・`RULE.v2.txt`・`RULE.v3.txt`（H-A2 の「単一スレッド」誤記の訂正。記述のみ）の sha256 は `3f90896a…`・`7349ec07…`・`2bcc3366…`（完全値は `rev-stamp-verification-3671.md`。計測時の `env_info.txt` と一致）。
 
 ## 腕
 
@@ -54,8 +57,12 @@ M4 Max は疎通確認のみ（`orchestrate.sh m4max`。`record_only`）。Linux
 | 項目 | 状態 |
 |---|---|
 | 診断テストの bit 一致（N=64・128・全腕）・葉数不変 | CI で実行可能。ローカル（M4 Max）で pass |
-| `aggregate.py --self-test`・`bench_judge.py --self-test`・`excl_check.py --self-test` | pass |
-| `excl_check.py` の既定 series の挙動 | 不変。`gb10-excl/session-scripts/` に再実行して `excl_status.txt` がバイト単位で同じ |
+| `aggregate.py --self-test`・`bench_judge.py --self-test`・`excl_check.py --self-test` | pass（計測後にも再実行して pass） |
+| `excl_check.py` の既定 series の挙動 | 不変 |
 | `shellcheck -x`（3 本の sh） | 警告なし |
-| `orchestrate.sh`・`session-3671-excl.sh`・`build_bench_arms.sh` の実走 | **未検証**（GB10 実機が必要。実装環境は macOS） |
-| GB10 の実測（全系列） | **未実測** |
+| `orchestrate.sh`・`session-3671-excl.sh`・`build_bench_arms.sh` の GB10 実走 | **実走済み**（2026-10-28。スクリプトの修正なし） |
+| GB10 の専有の正式系列（診断・solo・bench 3 腕・minflt） | **実測済み**。6 系列とも `excl=pass`・負荷ゲート全 pass・`OFFICIAL: yes` |
+| ホスト名・`/home`・ユーザー名のマスク | 収録全ファイルで grep 0 件（`fandhe-ai` のクレート名のみ残る） |
+| 別機体・別セッションでの再現 | **未実測**（`<cuda-node>` 1 台・1 回の取得） |
+| N=256・512 の原因 | **特定できず**（bench-fandhe への診断用ノブの追加は提案どまり。§10.6） |
+| `env_info.txt` の `diff_stat_v0.12.0_head` | 未実測（ノードに `.git` が無い。Mac で取った差分は `rev-stamp-verification-3671.md`） |
