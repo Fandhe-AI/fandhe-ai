@@ -100,7 +100,7 @@ def load_env(d):
         if ": " in ln and not ln.startswith(" "):
             k, v = ln.split(": ", 1)
             env[k.strip()] = v.strip()
-    for k in ("rev_stamp_head", "rev_stamp_dirty", "rule_sha256", "rule_v2_sha256", "series_kind"):
+    for k in ("rev_stamp_head", "rev_stamp_dirty", "rule_sha256", "rule_v2_sha256", "rule_v3_sha256", "series_kind"):
         if not env.get(k):
             raise AggError(f"{path}: {k} の記録が無い（ドリフトガード不能）")
     return env
@@ -170,9 +170,9 @@ def summarize(runs):
 
 
 def rule_hashes():
-    """同ディレクトリの承認済み RULE.txt／RULE.v2.txt の実 sha256（orchestrate.sh の sha256_of と同じ全バイト）。"""
+    """同ディレクトリの承認済み RULE.txt／RULE.v2.txt／RULE.v3.txt の実 sha256（orchestrate.sh の sha256_of と同じ全バイト）。"""
     out = {}
-    for key, name in (("rule_sha256", "RULE.txt"), ("rule_v2_sha256", "RULE.v2.txt")):
+    for key, name in (("rule_sha256", "RULE.txt"), ("rule_v2_sha256", "RULE.v2.txt"), ("rule_v3_sha256", "RULE.v3.txt")):
         try:
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name), "rb") as f:
                 out[key] = hashlib.sha256(f.read()).hexdigest()
@@ -214,7 +214,7 @@ def report(s):
     kind, summ, runs = s["kind"], s["summary"], s["runs"]
     arms = KINDS[kind]
     print(f"series_kind: {kind}  runs: {len(runs)}  rev_stamp: {s['env']['rev_stamp_head']} {s['env']['rev_stamp_dirty']}")
-    print(f"rule_sha256: {s['env']['rule_sha256']}  rule_v2_sha256: {s['env']['rule_v2_sha256']}")
+    print(f"rule_sha256: {s['env']['rule_sha256']}  rule_v2_sha256: {s['env']['rule_v2_sha256']}  rule_v3_sha256: {s['env']['rule_v3_sha256']}")
     print("OFFICIAL:", "yes" if s["official"] else "no（参考記録: " + "; ".join(s["why"]) + "）")
     print("\n## iter_total（秒。5 run 中央値 [min-max]）")
     print("| N | " + " | ".join(arms) + " |")
@@ -257,7 +257,7 @@ def _gen_fixture(d, kind="main", runs=None, mutate=None, gate="pass", rule_hash=
     with open(os.path.join(d, ENV_FILE), "w") as f:
         rh = rule_hash or rule_hashes()
         f.write(f"rev_stamp_head: abc\nrev_stamp_dirty: dirty=0\nrule_sha256: {rh['rule_sha256']}\n"
-                f"rule_v2_sha256: {rh['rule_v2_sha256']}\nseries_kind: {kind}\n")
+                f"rule_v2_sha256: {rh['rule_v2_sha256']}\nrule_v3_sha256: {rh['rule_v3_sha256']}\nseries_kind: {kind}\n")
     for r in range(1, nruns + 1):
         lines = []
         for arm, phases in arms.items():
@@ -306,7 +306,7 @@ def self_test():
             print("SELF-TEST FAIL unpassed-gate-official")
             ok = False
     with tempfile.TemporaryDirectory() as d:
-        _gen_fixture(d, rule_hash={"rule_sha256": "x", "rule_v2_sha256": "y"})
+        _gen_fixture(d, rule_hash={"rule_sha256": "x", "rule_v2_sha256": "y", "rule_v3_sha256": "z"})
         if load_series(d)["official"]:
             print("SELF-TEST FAIL rule-hash-mismatch-official")
             ok = False

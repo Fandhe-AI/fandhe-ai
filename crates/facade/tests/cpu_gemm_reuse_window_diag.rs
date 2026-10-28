@@ -12,7 +12,7 @@
 //!   parity 契約ではない）
 //! - `rp_verify_gap`: 同じ比較回数を L1 に収まる 4 KiB バッファ上で行う（メモリトラフィックなしの空き時間）
 //! - `rp_hold_footprint`: 既存入力 a・b に 3 本の N² Vec を足し、bench と同じ計 5 本を保持するだけ（触らない）
-//! - `rp_ref_compute`: ブロック開始前に単一スレッド O(N³) の参照 GEMM を 1 回計算して保持する
+//! - `rp_ref_compute`: ブロック開始前に並列（scoped worker。bench の `GemmReference::compute` と同構成）の O(N³) 参照 GEMM を 1 回計算して保持する
 //! - `rp_solo`（別テスト）: `GEMM_WINDOW_ONLY_ARM=resident_public`・`GEMM_WINDOW_ONLY_N=<N>` で
 //!   1 プロセス 1 腕 1 N・1 ラウンドを回す（N ごとに別プロセスで起動し集計時にまとめる）
 //!

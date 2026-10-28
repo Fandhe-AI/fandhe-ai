@@ -452,7 +452,7 @@ bench プロセス固有のアロケータ状態、反復ごとの `Tape::reset`
 | 窓の中 | `matmul_resident` → `readout_tensor` → `slice` → 全要素 checksum | `matmul_resident` → `contiguous` → `as_slice` → checksum（実質同じ） |
 | 窓の外（反復ごと） | `validate_gemm_checksum`・`reference.verify_strict(out)`（参照 N² と出力 N² の全要素比較・単一スレッド）・drop | `record_checksum`（bit 比較のみ）・drop |
 | `Tape::reset` | 呼ばない | 呼ばない |
-| 常駐データ | `a_data`・`b_data`・`a_host`・`b_host`・`GemmReference.c`（N² の f32 が 5 本）。init より前に単一スレッドの O(N³) 参照 GEMM | `a`・`b` と常駐コピーのみ |
+| 常駐データ | `a_data`・`b_data`・`a_host`・`b_host`・`GemmReference.c`（N² の f32 が 5 本）。init より前に並列（scoped worker）の O(N³) 参照 GEMM（`RULE.v3.txt` で「単一スレッド」の誤記を訂正） | `a`・`b` と常駐コピーのみ |
 | 反復構造 | 1 プロセス 1 腕 1 N（init 1 回＋warmup 19＋計測 20） | 1 プロセスで腕を交互に回す（各ブロック warmup 20＋計測 20） |
 | ビルド | framework-compare workspace・registry `fandhe-ai =0.12.0` | 本体 workspace・path の HEAD・test harness |
 

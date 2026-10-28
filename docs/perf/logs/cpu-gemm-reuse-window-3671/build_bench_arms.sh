@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # イシュー #3671: bench 側の腕 bench_base／bench_headpatch のバイナリを hw-lock の前に作る（計測中のビルド並走は禁止）。
-# 判定規則は RULE.txt ＋ RULE.v2.txt が正。bench-fandhe のソース・窓・emit は変えない。
+# 判定規則は RULE.txt ＋ RULE.v2.txt ＋ RULE.v3.txt が正。bench-fandhe のソース・窓・emit は変えない。
 #   base:      registry fandhe-ai =0.12.0（framework-compare の承認ピンそのまま）→ <bindir>/bench-fandhe-base
 #   headpatch: --config 'patch.crates-io.fandhe-ai.path=<repo>/crates/facade' で HEAD の path ビルド → <bindir>/bench-fandhe-head
 # path patch は framework-compare/Cargo.lock を書き換えるため bench_fandhe_lock_restore.sh の退避・復元 trap を使い、

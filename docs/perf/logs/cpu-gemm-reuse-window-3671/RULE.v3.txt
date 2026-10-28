@@ -1,0 +1,25 @@
+RULE.v3 fixed-at-utc: 2026-10-28T00:00:00Z (実機計測より前に RULE.txt・RULE.v2.txt とは別コミットで固定。事後に緩めない)
+issue: #3671 GB10 CPU gemm の N=256〜2048 で bench の reuse 窓が診断より遅い原因の切り分け
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §10
+supersedes: RULE.txt の記述 2 箇所（H-A2 の定義と [コード読解] 節の「プロセス構成」の前処理の説明）だけ。
+  RULE.txt 本文は編集しない（orchestrate.sh が sha256 を env_info.txt に記録しドリフトガードに使うため）。
+
+[訂正理由（実測前にレビューで判明した記述の誤り。実測は未実施）]
+- RULE.txt は参照 GEMM を「単一スレッド O(N³)」と書いたが、診断の naive_reference（crates/facade/tests/
+  cpu_gemm_reuse_window_diag.rs）と bench の GemmReference::compute はどちらも available_parallelism()
+  （N 以下・1 以上に丸める）に応じた scoped worker で行方向に分割して並列実行する。
+- 実装（腕の構成・実行順・計測）は元から両者とも並列で同じであり、変わるのは記述だけである。
+  ただしこの実験は前処理が残す CPU 状態（ワーカーの起動履歴・スレッドスタックの確保履歴・キャッシュ）を調べるため、
+  前処理が並列であることを前提に結果を解釈する。
+
+[訂正後の記述（RULE.txt の該当箇所を置換）]
+- rp_ref_compute（H-A2）: ブロック開始前に、bench の GemmReference::compute と同じ構成の並列 O(N³) 参照 GEMM
+  （available_parallelism() に応じた scoped worker・行方向分割）を 1 回計算し、同じ 5 本を保持する。
+- プロセス構成: bench は init より前に並列の O(N³) 参照 GEMM を計算する（他は RULE.txt のまま）。
+- 参照 GEMM の「単一スレッド」は誤記。なお verify_strict による検算（窓の外の全要素比較）は単一スレッドのままで
+  RULE.txt の記述は正しい。
+- 「単一スレッドの空き時間（ワーカーの休止など）」（判定節の rp_verify_gap の解釈）は検算の比較区間の話で、
+  参照 GEMM とは無関係。変更しない。
+
+[固定後]
+- 規則・腕・期待行数・閾値を変えない。RULE.v3.txt の sha256 は env_info.txt（rule_v3_sha256）と README に記録する。

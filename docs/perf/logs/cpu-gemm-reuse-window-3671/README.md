@@ -11,7 +11,7 @@
 ## 固定の順序
 
 1. `RULE.txt`（単独コミット）→ 2. `RULE.v2.txt`（基準の再確認の式だけ置換。別コミット）→ 3. 部品一式（診断テスト・スクリプト・本ファイル）
-RULE の sha256 と `RULE.v2.txt` の sha256 は計測時に `env_info.txt` と `rev-stamp-verification-3671.md` へ記録する（未作成。計測時に作る）。
+RULE の sha256 と `RULE.v2.txt`・`RULE.v3.txt`（H-A2 の「単一スレッド」誤記の訂正。記述のみ）の sha256 は計測時に `env_info.txt` と `rev-stamp-verification-3671.md` へ記録する（未作成。計測時に作る）。
 
 ## 腕
 
@@ -21,7 +21,7 @@ RULE の sha256 と `RULE.v2.txt` の sha256 は計測時に `env_info.txt` と 
 | | `rp_verify_touch` | 窓の外で N² の参照と出力を全要素比較 | H-V（キャッシュ・ページ） |
 | | `rp_verify_gap` | 同じ比較回数を L1 常駐の 4 KiB で行う | H-V の分解（空き時間のみ） |
 | | `rp_hold_footprint` | N² Vec を 5 本保持するだけ | H-A1 |
-| | `rp_ref_compute` | 単一スレッド O(N³) の参照 GEMM を前処理で 1 回 | H-A2 |
+| | `rp_ref_compute` | 並列（scoped worker）の O(N³) 参照 GEMM を前処理で 1 回 | H-A2 |
 | 診断（`solo`） | `rp_solo` | 1 プロセス 1 腕 1 N・1 ラウンド（N ごとに別プロセス） | H-P |
 | bench | `bench_base` | 基準（registry `fandhe-ai =0.12.0`） | — |
 | | `bench_tunables` | `GLIBC_TUNABLES`（#3646 と同じリテラル） | H-A3 |

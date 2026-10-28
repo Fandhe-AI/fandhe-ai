@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # イシュー #3671: N=256〜2048 の bench reuse 窓と診断の差の切り分け（診断側の腕）オーケストレータ。
-# 判定規則は同ディレクトリの RULE.txt ＋ RULE.v2.txt（実測前に固定）が正。構成は
+# 判定規則は同ディレクトリの RULE.txt ＋ RULE.v2.txt ＋ RULE.v3.txt（実測前に固定）が正。構成は
 # docs/perf/logs/cpu-gemm-resident-reuse-3646/orchestrate.sh と同型（ビルド 1 回・独立 5 プロセス・
 # .rev-stamp 必須・既存 run の上書き禁止・load ゲート・ホスト名／$HOME／ユーザー名のマスク）。
 # 使い方: orchestrate.sh <m4max|gb10> [--only-arm resident_public] [--aux minflt] [--out <dir>]
@@ -122,6 +122,7 @@ print(exe)
   echo "rev_stamp_dirty: $(sed -n 2p "$repo_root/.rev-stamp")"
   echo "rule_sha256: $(sha256_of "$script_dir/RULE.txt")"
   echo "rule_v2_sha256: $(sha256_of "$script_dir/RULE.v2.txt")"
+  echo "rule_v3_sha256: $(sha256_of "$script_dir/RULE.v3.txt")"
   echo "RAYON_NUM_THREADS: unset"
   echo "host_kind: $host_kind"
   echo "series_kind: $kind"
