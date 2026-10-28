@@ -574,3 +574,45 @@ bench 側の腕 Y（H-A3・H-B）。支持の条件は G_Y / G_diag が 0.5〜2.
 - bench の `bench_tunables` 腕は 1 つのリテラル（`glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=1073741824`）だけで、閾値別の感度は測っていない
 - ノードに `.git` が無く、`env_info.txt` の `diff_stat_v0.12.0_head` は「未実測」（v0.12.0 との差は Mac で取り `rev-stamp-verification-3671.md` に記録）
 - `rp_solo` の G_X は主診断系列の fresh を使う（RULE の定義どおり）
+
+## 11. #3672: CPU の matmul_resident で download のコピーを除く
+
+### 11.1 状態（先に結論）
+
+- **実装は完了。実機 A/B は未実測**（GB10 専有・Mac mini とも本セッションからは到達できず測っていない。Linux x86・M4 Max の値で代替しない）。よって性能規則の結論は「未実測」で、ADOPT／REJECT／判定不能のいずれも出していない。本 PR は `Refs #3672`（`Closes` は両機体の判定後）
+- 事前登録規則は `logs/cpu-gemm-download-owned-3672/RULE.txt`（sha256 `03d4c5f4f3dd08d9f076bfa879ccb8ca9c983005bf5ea5e06663cb1f2ed793be`。実測前に単独コミットで固定）
+
+### 11.2 設計（所有者判断 §9.5 (a) の実装）
+
+- `tensor-core::MemoryOps` に既定実装つき `download_owned(&self, DeviceBuffer<f32>)` を追加（既定は `download(&buffer)` へ委譲して drop。CUDA・Metal の挙動は不変。公開 API の非破壊拡張）
+- `backend-cpu` の `CpuMemory` と `CpuBackendOps` の 2 か所で上書き。`CpuBufferHandle::take_data` が prepack キャッシュを先に破棄（#3200 の不変条件）して `Vec` を取り出し、`Tensor::new` へ移す。device・ダウンキャスト・長さの検査は `download` と同じで、異種ハンドルは `DeviceMismatch`
+- `autodiff::matmul_resident` は `mem.download_owned(out)` に変えただけ。facade 公開面・CPU 専用分岐なし・`unsafe` なし
+- `PooledMemory` は上書きせず既定実装（プール契約を保つ）
+
+### 11.3 bit 一致の確認
+
+- `memory::tests::download_owned_is_bit_exact_and_moves_vec`: NaN・±0.0・subnormal・±inf を含む入力で `download` と bit 一致、`Vec` のポインタ一致、解放計上が 0 へ戻る
+- `ops::...cpu_backend_ops_download_owned_moves_vec_and_matches_download`: ホットパスの `CpuBackendOps` 経由でも同じ
+- 空バッファ・異種ハンドル・非 CPU device の拒否、`take_data` の抜け殻、既定実装の委譲（tensor-core）
+- 既存の `cpu_gemm_resident_reuse_diag.rs::cpu_gemm_resident_arms_match_public_path_bit_exact`（コピー経路の腕と公開経路の bit 一致を hard assert）が、変更後は旧経路と新経路の bit 一致検査として働く
+
+### 11.4 事前登録（要約）
+
+before = マージベース・after = PR head の 2 木を ABBA・5 run・N=256〜2048・4096。処置セルは GB10 の bench reuse と診断 `resident_public` の N=4096。ADOPT は処置 2 セルが中央値 ratio ≤ 0.95 かつ 5/5 run < 1.00・rho_REM ≥ 0.5・非処置セルが ≤ 1.00・checksum 全一致。詳細は RULE.txt を正とする。
+
+### 11.5 結果
+
+全セル **未実測**。
+
+### 11.6 性能規則の結論
+
+**未実測**（A/B 未実施のため判定なし。規則は緩めていない）。
+
+### 11.7 保守性の判断（11.6 とは別項）
+
+内部 trait への追加は 1 メソッド・CPU の上書きは 2 か所で、既定実装により他バックエンドは無改修。将来 Metal（unified memory）が同じ上書きの候補になりうるが提案のみ。
+
+### 11.8 限界
+
+- A/B のスクリプト（`build_ab_arms.sh`・`orchestrate.sh`・`ab_judge.py`・セッションスクリプト）は未作成。実測は後続で RULE に従って行う
+- autodiff 内の他の `download(` 呼び出しは本 Issue の対象外

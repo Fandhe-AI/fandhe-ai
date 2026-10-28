@@ -5,7 +5,8 @@
 //! 推論（`Sequential::predict_resident`）と行列積（`Var::matmul`）はホストの `Tensor` しか
 //! 受けず、呼ぶたびに入力の H2D が計測窓に入る。本モジュールは入力を **窓の外で 1 回だけ**
 //! デバイスへ置く不透明ハンドルを提供し、窓の中を「演算＋出力の D2H 1 回」に絞る。
-//! 消えるのは H2D だけで、D2H と同期の 1 回は残る。
+//! 消えるのは H2D だけで、D2H と同期の 1 回は残る（CPU は出力 `Vec` を `Tensor` へ移すため
+//! D2H 相当のコピーも消える。#3672）。
 //!
 //! # 呼び出し元・境界
 //! - 作成: `DeviceParamStore::upload_resident_input`（`device_store.rs`）。facade の
@@ -117,7 +118,8 @@ pub fn matmul_resident(
         BackendError::Unsupported("matmul_resident: backend does not implement MemoryOps".into())
     })?;
     let out = tape.ops().gemm_device(&a.buf, &b.buf)?;
-    mem.download(&out)
+    // 出力は以後使わないため所有権ごと渡す（CPU は Vec を Tensor へ移しコピーしない。#3672）
+    mem.download_owned(out)
 }
 
 /// 学習ステップのチェーン（`DeviceParamStore::train_step_device_chain`）が積んだ loss への

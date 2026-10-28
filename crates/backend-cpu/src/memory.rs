@@ -79,6 +79,14 @@ mod handle {
             &mut self.data
         }
 
+        /// ホストデータを所有権ごと取り出す（`download_owned`。#3672）。
+        /// `data_mut` と同じく pack 済み panel キャッシュを先に破棄して #3200 の不変条件を保つ。
+        /// 抜け殻のハンドルは空の `Vec` だけを持つ（`TrackedAllocation` は drop で解放計上される）。
+        pub(crate) fn take_data(&mut self) -> Vec<f32> {
+            self.prepack.clear_mut();
+            std::mem::take(&mut self.data)
+        }
+
         /// テスト用: 要素数を 1 つ減らす（長さ不一致の拒否経路の検証用。キャッシュも破棄する）。
         #[cfg(test)]
         pub(crate) fn pop_for_test(&mut self) {
@@ -287,6 +295,38 @@ impl MemoryOps for CpuMemory {
             return Tensor::new(Vec::new(), buffer.shape()).map_err(BackendError::ShapeMismatch);
         }
         Tensor::new(handle.data().to_vec(), buffer.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`MemoryOps::download_owned`] の CPU 実装（イシュー #3672）。
+    /// `handle.data` の `Vec` を `Tensor` へ移すだけで、N² の新規確保と memcpy を行わない
+    /// （`unsafe` なし）。device・ダウンキャスト・長さの検査は `download` と同じで、
+    /// 異種ハンドルは `DeviceMismatch` で拒否する（コピー版へ黙って落とさない）。
+    fn download_owned(&self, buffer: DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+        if buffer.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        // プール付きバッファは drop で内部ハンドルがプールへ戻るため、Vec を奪うと
+        // 抜け殻が再利用される（codex P1）。コピー版へ退いて実体を保つ。
+        if buffer.is_pool_owned() {
+            return self.download(&buffer);
+        }
+        let shape = buffer.shape().to_vec();
+        let numel = buffer.numel();
+        // 不変ダウンキャストで型を先に確認する。`as_any` のみ実装した外部ハンドルに
+        // 可変ダウンキャスト（`as_any_mut` 既定実装は panic）を行うと、
+        // `DeviceMismatch` の前に panic するため（codex P1）。
+        if buffer.downcast_handle::<CpuBufferHandle>().is_none() {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let mut buffer = buffer;
+        let handle = buffer
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        if numel == 0 {
+            return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
+        }
+        let data = handle.take_data();
+        Tensor::new(data, &shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`MemoryOps::upload_into`] の CPU 実装（イシュー #1212）。
@@ -592,5 +632,130 @@ mod tests {
         assert_eq!(mem.allocated_bytes(), 256, "clone 元からも計上が見える");
         assert_eq!(mem.peak_allocated_bytes(), 256);
         drop(buf);
+    }
+
+    /// `download_owned`（#3672）は `download` と bit 一致し、Vec を移す（ポインタ一致）。
+    #[test]
+    fn download_owned_is_bit_exact_and_moves_vec() {
+        for shape in [vec![3usize, 5], vec![1, 1], vec![64, 128]] {
+            let n: usize = shape.iter().product();
+            let mut data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin()).collect();
+            let specials = [
+                f32::NAN,
+                -0.0,
+                0.0,
+                f32::MIN_POSITIVE / 4.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+            ];
+            for (i, v) in specials.iter().enumerate() {
+                if i < n {
+                    data[i] = *v;
+                }
+            }
+            let mem = CpuMemory::new();
+            let buf = mem
+                .upload(&Tensor::<f32>::new(data, &shape).unwrap())
+                .unwrap();
+            let base = mem.allocated_bytes();
+            assert!(base > 0);
+            let copied = mem.download(&buf).unwrap();
+            let mut ptr = std::ptr::null();
+            mem.with_host_view(&buf, &mut |s| ptr = s.as_ptr()).unwrap();
+            let owned = mem.download_owned(buf).unwrap();
+            assert_eq!(owned.as_slice().unwrap().as_ptr(), ptr, "Vec が移るはず");
+            assert_eq!(owned.shape(), copied.shape());
+            let a: Vec<u32> = owned
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let b: Vec<u32> = copied
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            assert_eq!(a, b);
+            assert_eq!(mem.allocated_bytes(), 0, "バッファ解放が計上されるはず");
+        }
+    }
+
+    #[test]
+    fn download_owned_empty_and_mismatch() {
+        #[derive(Debug)]
+        struct OtherHandle;
+        impl BufferHandle for OtherHandle {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn as_any_mut(&mut self) -> &mut dyn Any {
+                self
+            }
+        }
+        let mem = CpuMemory::new();
+        let empty = mem.alloc_zeroed(&[0, 4]).unwrap();
+        let t = mem.download_owned(empty).unwrap();
+        assert_eq!(t.shape(), &[0, 4]);
+        assert!(t.as_slice().unwrap().is_empty());
+
+        let other: DeviceBuffer<f32> =
+            DeviceBuffer::new(Device::Cpu, vec![1], Box::new(OtherHandle));
+        assert!(matches!(
+            mem.download_owned(other).unwrap_err(),
+            BackendError::DeviceMismatch
+        ));
+        let other: DeviceBuffer<f32> =
+            DeviceBuffer::new(Device::Cuda(0), vec![1], Box::new(OtherHandle));
+        assert!(matches!(
+            mem.download_owned(other).unwrap_err(),
+            BackendError::DeviceMismatch
+        ));
+    }
+
+    /// `as_any` のみ実装した外部ハンドルでも panic せず `DeviceMismatch` を返す（codex P1）。
+    #[test]
+    fn download_owned_foreign_handle_without_as_any_mut_is_mismatch() {
+        #[derive(Debug)]
+        struct ForeignHandle;
+        impl BufferHandle for ForeignHandle {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        let foreign: DeviceBuffer<f32> =
+            DeviceBuffer::new(Device::Cpu, vec![1], Box::new(ForeignHandle));
+        assert!(matches!(
+            CpuMemory::new().download_owned(foreign).unwrap_err(),
+            BackendError::DeviceMismatch
+        ));
+    }
+
+    /// プール付きバッファは `download_owned` で Vec を奪わず、同サイズ再確保が健全（codex P1）。
+    #[test]
+    fn download_owned_pooled_buffer_keeps_shell_intact() {
+        use fandhe_ai_tensor_core::pool::{PoolConfig, PooledMemory};
+        let mem = PooledMemory::new(CpuMemory::new(), Device::Cpu, PoolConfig::default());
+        let mut buf = mem.alloc_zeroed(&[4, 4]).unwrap();
+        buf.downcast_handle_mut::<CpuBufferHandle>()
+            .unwrap()
+            .data_mut()
+            .fill(3.0);
+        let t = CpuMemory::new().download_owned(buf).unwrap();
+        assert_eq!(t.as_slice().unwrap(), &[3.0f32; 16][..]);
+        let again = mem.alloc_zeroed(&[4, 4]).unwrap();
+        let t2 = mem.download(&again).unwrap();
+        assert_eq!(t2.as_slice().unwrap(), &[0.0f32; 16][..]);
+    }
+
+    /// `take_data` は prepack キャッシュ破棄経路（`data_mut` と同じ）を通る。
+    #[test]
+    fn take_data_leaves_empty_shell() {
+        let mem = CpuMemory::new();
+        let mut buf = mem.alloc_zeroed(&[2, 2]).unwrap();
+        let h = buf.downcast_handle_mut::<CpuBufferHandle>().unwrap();
+        assert_eq!(h.take_data().len(), 4);
+        assert!(h.data().is_empty());
     }
 }

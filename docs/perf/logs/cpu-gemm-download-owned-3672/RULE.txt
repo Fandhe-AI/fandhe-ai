@@ -1,0 +1,42 @@
+RULE fixed-at-utc: 2026-10-28T12:57:00Z
+イシュー #3672 事前登録規則（実測前に固定。事後に緩めない）
+
+対象: CPU の matmul_resident が MemoryOps::download_owned（Vec 移動）へ切り替わったことによる
+      N=4096 の reuse 逆転の縮小（#3646 §9.7 の H1: download 区間）。
+
+腕:
+- before = PR のマージベース（origin/main の sha）
+- after  = 計測時点の PR head（dirty=0）
+- 両腕とも git archive の tar を転送し、.rev-stamp（1 行目 sha・2 行目 dirty=0）を置き、
+  ツリー指紋を Mac 側の git archive と突き合わせる。registry の fandhe-ai =0.12.0 は before に使わない。
+- ハード条件: git diff before after -- crates/facade/tests/cpu_gemm_resident_reuse_diag.rs
+  scripts/bench/framework-compare/ が空であること。違えば中止。
+
+系列: N = 256・512・1024・2048・4096。5 run。各 run で before・after を独立プロセスで起動し
+run ごとに起動順を反転（ABBA）。run の差し替え・追加・セル除外はしない。
+診断の反復数は cpu_gemm_resident_reuse_diag.rs の既定（iters_for）のまま。
+bench の reuse 行は #3646 RULE.v2.txt と同じ gemm_phases の phase=iter_total の median_s。
+
+指標:
+- ratio = after / before（5 run の中央値。セルごと・機体ごと）
+- 処置セル: GB10 の bench reuse iter_total N=4096、GB10 の診断 resident_public iter_total N=4096
+- 非処置セル: 上記以外の全セル（Mac mini の全セルを含む）
+- X(arm) = resident_public.iter_total - gemm_device_hold.iter_total
+- DL_before = before 木の resident_split の download 区間の中央値
+- rho_REM = (X_before - X_after) / DL_before（0.5 以上で download 区間が除かれたと判定）
+- rho_BENCH = (bench_iter_before - bench_iter_after) / DL_before、rho_OFFSET = 1 - rho_BENCH
+  （rho_BENCH < 0.5 は解放タイミングの移動等による相殺として記録）
+
+予測（事前）: 修正後は out の解放が窓の外へ出るため rho_BENCH は rho_REM をやや下回りうる。判定は数値で行う。
+
+判定:
+- ADOPT: 処置 2 セルとも中央値 ratio <= 0.95 かつ 5/5 run で ratio < 1.00、rho_REM >= 0.5、
+  両機体の非処置セルがすべて中央値 ratio <= 1.00、checksum 全件一致
+- REJECT: 5/5 run で後退（全 run で ratio > 1.00）したセルがある／処置セルの中央値 ratio > 1.00／checksum 不一致が 1 件でもある
+- 判定不能: 上記のいずれにも当たらない。REJECT・判定不能も正当な結果として記録する
+
+ゲート: GB10 は compute プロセス 0 件（計測の前・途中 30 秒間隔・後に記録）かつ load1 < 1.0。
+Mac mini は load1 < 3.0。通らない run を含む系列は record_only とし判定に使わない。
+実測できなかった機体・セルは「未実測」のまま残し、他機体の値で代替しない。
+
+対象外: N=256〜2048 の逆転（#3671）・出力バッファのプール（§9.5 (b)）・bench 窓の見直し（§9.5 (c)）。
