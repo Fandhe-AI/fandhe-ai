@@ -8,7 +8,8 @@
 判定閾値・aggregate.py・各 judge は変更しない。自プロセス由来かどうかでの除外はしない
 （pid と comm は記録のみ。除外可否は所有者判断）。
 
-使い方: excl_check.py <session-scripts ディレクトリ> / excl_check.py --self-test
+使い方: excl_check.py <session-scripts ディレクトリ> [--series a,b,c] / excl_check.py --self-test
+--series は #3671 で追加（系列ラベルを小文字英字のカンマ区切りで指定。省略時は #3646 の既定 SERIES で挙動不変）。
 pass 条件（系列ごと）: pre・post が各 1 件、途中の poll が 1 件以上、全記録が rc=0 かつ apps=0、
 かつ pre → 各 poll → post の隣接間隔がすべて MAX_GAP_S（60 秒）以下（poller 停止・ログの部分欠落の検出）。
 fail 条件: 観測間隔の超過（時刻は poll 行と境界ヘッダのタイムスタンプ）・ nvidia-smi の rc 非 0・出力が解析できない（0 件とは扱わない）・記録の欠落・ラベル重複・解析不能な行。
@@ -116,13 +117,14 @@ def gap_failures(s, snaps, pl):
     return why
 
 
-def judge(poll_text, snap_text):
-    """({label: bool}, [理由]) を返す。"""
+def judge(poll_text, snap_text, series=None):
+    """({label: bool}, [理由]) を返す。series 省略時は既定 SERIES。"""
+    series = SERIES if series is None else series
     errors = []
     poll = parse_poll(poll_text, errors)
     snaps = parse_snaps(snap_text, errors)
     status, reasons = {}, []
-    for s in SERIES:
+    for s in series:
         why = []
         for edge in ("pre", "post"):
             lst = snaps.get((s, edge), [])
@@ -155,7 +157,8 @@ def judge(poll_text, snap_text):
     return status, sorted(set(reasons))
 
 
-def run(dirpath):
+def run(dirpath, series=None):
+    series = SERIES if series is None else series
     try:
         with open(os.path.join(dirpath, "gpu_poll.log"), encoding="utf-8") as f:
             poll_text = f.read()
@@ -164,24 +167,25 @@ def run(dirpath):
     except OSError as e:
         print("入力を読めない: %s" % e, file=sys.stderr)
         return 2
-    status, reasons = judge(poll_text, snap_text)
+    status, reasons = judge(poll_text, snap_text, series)
     with open(os.path.join(dirpath, "excl_status.txt"), "w", encoding="utf-8") as f:
-        for s in SERIES:
+        for s in series:
             f.write("%s excl=%s\n" % (s, "pass" if status[s] else "fail"))
     for r in reasons:
         print(r)
-    for s in SERIES:
+    for s in series:
         print("%s excl=%s" % (s, "pass" if status[s] else "fail"))
     return 0 if all(status.values()) else 1
 
 
-def _fixture(series_over=None, drop_poll=None, dup_pre=False, poll_times=None):
+def _fixture(series_over=None, drop_poll=None, dup_pre=False, poll_times=None, series=None):
+    series = SERIES if series is None else series
     series_over = series_over or {}
     poll, snap = [], []
-    for s in SERIES:
+    for s in series:
         pre = "== %s:pre 2026-10-28T00:00:00Z\nrc=0\n0 %%\n" % s
         snap.append(pre)
-        if dup_pre and s == "main":
+        if dup_pre and s == series[0]:
             snap.append(pre)
         if s != drop_poll:
             rc, apps, det = series_over.get(s, (0, "0", ""))
@@ -250,6 +254,16 @@ def self_test():
         if rc != 0 or n != 6:
             print("SELF-TEST FAIL run")
             ok = False
+    # --series: 任意ラベルの系列でも同じ判定が働く（#3671）。
+    custom = ["diag", "solo"]
+    st, _ = judge(*_fixture(series=custom), custom)
+    if list(st) != custom or not all(st.values()):
+        print("SELF-TEST FAIL custom-series-pass")
+        ok = False
+    st, _ = judge(*_fixture(series=custom, series_over={"solo": (0, "1", "9, x;")}), custom)
+    if st["diag"] is not True or st["solo"]:
+        print("SELF-TEST FAIL custom-series-fail")
+        ok = False
     print("self-test:", "ok" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -257,7 +271,15 @@ def self_test():
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
         sys.exit(self_test())
-    if len(sys.argv) != 2:
+    argv = sys.argv[1:]
+    series_arg = None
+    if len(argv) == 3 and argv[1] == "--series":
+        series_arg = argv[2].split(",")
+        if not all(re.fullmatch(r"[a-z]+", x) for x in series_arg) or len(set(series_arg)) != len(series_arg):
+            print("--series は重複しない小文字英字のカンマ区切り", file=sys.stderr)
+            sys.exit(2)
+        argv = argv[:1]
+    if len(argv) != 1:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
-    sys.exit(run(sys.argv[1]))
+    sys.exit(run(argv[0], series_arg))
