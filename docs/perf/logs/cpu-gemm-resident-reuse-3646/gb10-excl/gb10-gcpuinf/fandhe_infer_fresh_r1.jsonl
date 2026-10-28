@@ -1,0 +1,1 @@
+{"framework":"fandhe-ai","version":"0.12.0","task":"infer","device":"cpu","size":64,"median_s":0.000180066,"q1_s":0.000165338,"q3_s":0.000205478,"throughput_per_s":5553.519,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}

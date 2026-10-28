@@ -1,0 +1,20 @@
+date_utc: 2026-10-28T07:00:08Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+Architecture:                            aarch64
+CPU(s):                                  20
+Model name:                              Cortex-X925
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+Model name:                              Cortex-A725
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo: cargo 1.97.1 (c980f4866 2026-06-30)
+fatal: not a git repository (or any of the parent directories): .git
+git_head: 
+RAYON_NUM_THREADS: unset
+host_kind: gb10

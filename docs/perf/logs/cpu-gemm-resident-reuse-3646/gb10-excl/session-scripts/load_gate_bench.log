@@ -1,0 +1,107 @@
+bridge/gemm/n256/r1 load1=5.42 waited=0s
+bridge/gemm/n256/r1 load1=3.28 waited=30s
+bridge/gemm/n256/r1 load1=1.99 waited=60s
+bridge/gemm/n256/r1 load1=1.28 waited=90s
+bridge/gemm/n256/r1 load1=0.77 waited=120s
+bridge/gemm/n256/r1 gate=pass
+bridge/gemm/n512/r1 load1=0.77 waited=0s
+bridge/gemm/n512/r1 gate=pass
+bridge/gemm/n1024/r1 load1=0.77 waited=0s
+bridge/gemm/n1024/r1 gate=pass
+bridge/gemm/n2048/r1 load1=0.79 waited=0s
+bridge/gemm/n2048/r1 gate=pass
+bridge/gemm/n4096/r1 load1=0.81 waited=0s
+bridge/gemm/n4096/r1 gate=pass
+bridge/gemm/n256/r2 load1=2.25 waited=0s
+bridge/gemm/n256/r2 load1=1.43 waited=30s
+bridge/gemm/n256/r2 load1=0.87 waited=60s
+bridge/gemm/n256/r2 gate=pass
+bridge/gemm/n512/r2 load1=0.87 waited=0s
+bridge/gemm/n512/r2 gate=pass
+bridge/gemm/n1024/r2 load1=0.87 waited=0s
+bridge/gemm/n1024/r2 gate=pass
+bridge/gemm/n2048/r2 load1=0.87 waited=0s
+bridge/gemm/n2048/r2 gate=pass
+bridge/gemm/n4096/r2 load1=2.48 waited=0s
+bridge/gemm/n4096/r2 load1=1.50 waited=30s
+bridge/gemm/n4096/r2 load1=0.91 waited=60s
+bridge/gemm/n4096/r2 gate=pass
+bridge/gemm/n256/r3 load1=5.74 waited=0s
+bridge/gemm/n256/r3 load1=3.56 waited=30s
+bridge/gemm/n256/r3 load1=2.15 waited=60s
+bridge/gemm/n256/r3 load1=1.31 waited=90s
+bridge/gemm/n256/r3 load1=0.79 waited=120s
+bridge/gemm/n256/r3 gate=pass
+bridge/gemm/n512/r3 load1=0.79 waited=0s
+bridge/gemm/n512/r3 gate=pass
+bridge/gemm/n1024/r3 load1=0.79 waited=0s
+bridge/gemm/n1024/r3 gate=pass
+bridge/gemm/n2048/r3 load1=0.79 waited=0s
+bridge/gemm/n2048/r3 gate=pass
+bridge/gemm/n4096/r3 load1=0.81 waited=0s
+bridge/gemm/n4096/r3 gate=pass
+bridge/gemm/n256/r4 load1=4.43 waited=0s
+bridge/gemm/n256/r4 load1=2.69 waited=30s
+bridge/gemm/n256/r4 load1=1.63 waited=60s
+bridge/gemm/n256/r4 load1=0.98 waited=90s
+bridge/gemm/n256/r4 gate=pass
+bridge/gemm/n512/r4 load1=0.98 waited=0s
+bridge/gemm/n512/r4 gate=pass
+bridge/gemm/n1024/r4 load1=0.98 waited=0s
+bridge/gemm/n1024/r4 gate=pass
+bridge/gemm/n2048/r4 load1=0.98 waited=0s
+bridge/gemm/n2048/r4 gate=pass
+bridge/gemm/n4096/r4 load1=0.99 waited=0s
+bridge/gemm/n4096/r4 gate=pass
+bridge/gemm/n256/r5 load1=5.47 waited=0s
+bridge/gemm/n256/r5 load1=3.31 waited=30s
+bridge/gemm/n256/r5 load1=2.01 waited=60s
+bridge/gemm/n256/r5 load1=1.22 waited=90s
+bridge/gemm/n256/r5 load1=0.73 waited=120s
+bridge/gemm/n256/r5 gate=pass
+bridge/gemm/n512/r5 load1=0.73 waited=0s
+bridge/gemm/n512/r5 gate=pass
+bridge/gemm/n1024/r5 load1=0.73 waited=0s
+bridge/gemm/n1024/r5 gate=pass
+bridge/gemm/n2048/r5 load1=0.76 waited=0s
+bridge/gemm/n2048/r5 gate=pass
+bridge/gemm/n4096/r5 load1=1.74 waited=0s
+bridge/gemm/n4096/r5 load1=1.05 waited=30s
+bridge/gemm/n4096/r5 load1=0.64 waited=60s
+bridge/gemm/n4096/r5 gate=pass
+gcpuinf/torch-kernel/r1 load1=5.32 waited=0s
+gcpuinf/torch-kernel/r1 load1=3.22 waited=30s
+gcpuinf/torch-kernel/r1 load1=1.95 waited=60s
+gcpuinf/torch-kernel/r1 load1=1.26 waited=90s
+gcpuinf/torch-kernel/r1 load1=0.76 waited=120s
+gcpuinf/torch-kernel/r1 gate=pass
+gcpuinf/torch-infer-window/r1 load1=0.76 waited=0s
+gcpuinf/torch-infer-window/r1 gate=pass
+gcpuinf/torch-kernel/r2 load1=0.76 waited=0s
+gcpuinf/torch-kernel/r2 gate=pass
+gcpuinf/torch-infer-window/r2 load1=0.76 waited=0s
+gcpuinf/torch-infer-window/r2 gate=pass
+gcpuinf/torch-kernel/r3 load1=0.76 waited=0s
+gcpuinf/torch-kernel/r3 gate=pass
+gcpuinf/torch-infer-window/r3 load1=0.78 waited=0s
+gcpuinf/torch-infer-window/r3 gate=pass
+gcpuinf/torch-kernel/r4 load1=0.78 waited=0s
+gcpuinf/torch-kernel/r4 gate=pass
+gcpuinf/torch-infer-window/r4 load1=0.78 waited=0s
+gcpuinf/torch-infer-window/r4 gate=pass
+gcpuinf/torch-kernel/r5 load1=0.78 waited=0s
+gcpuinf/torch-kernel/r5 gate=pass
+gcpuinf/torch-infer-window/r5 load1=0.78 waited=0s
+gcpuinf/torch-infer-window/r5 gate=pass
+gcpuinf/fandhe-infer/r1 load1=1.60 waited=0s
+gcpuinf/fandhe-infer/r1 load1=1.03 waited=30s
+gcpuinf/fandhe-infer/r1 load1=0.62 waited=60s
+gcpuinf/fandhe-infer/r1 gate=pass
+gcpuinf/fandhe-infer/r2 load1=0.62 waited=0s
+gcpuinf/fandhe-infer/r2 gate=pass
+gcpuinf/fandhe-infer/r3 load1=0.62 waited=0s
+gcpuinf/fandhe-infer/r3 gate=pass
+gcpuinf/fandhe-infer/r4 load1=0.62 waited=0s
+gcpuinf/fandhe-infer/r4 gate=pass
+gcpuinf/fandhe-infer/r5 load1=0.62 waited=0s
+gcpuinf/fandhe-infer/r5 gate=pass

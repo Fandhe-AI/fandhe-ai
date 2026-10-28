@@ -1,0 +1,25 @@
+date_utc: 2026-10-28T05:34:05Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+Architecture:                            aarch64
+CPU(s):                                  20
+Model name:                              Cortex-X925
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+Model name:                              Cortex-A725
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo: cargo 1.97.1 (c980f4866 2026-06-30)
+pagesize: 4096
+thp: always [madvise] never
+glibc: ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+rev_stamp_head: 555a445a6d6a139e9d554cc951abc64d7c24c591
+rev_stamp_dirty: dirty=0
+rule_sha256: cb2a2c109c7539d6b3298ee4291767ece7d12ffc20d4cb2275df0b0cf0ecc2a2
+RAYON_NUM_THREADS: unset
+host_kind: gb10
+series_kind: main

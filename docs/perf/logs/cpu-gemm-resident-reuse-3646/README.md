@@ -6,7 +6,24 @@ bench-fandhe の `gemm --mode reuse` を常駐入力経路（#3272。`Tape::uplo
 本ディレクトリはその原因を GB10 実測で切り分けるための事前登録規則・診断基盤・集計器を置く。
 結論・帰属・修正方針の提案は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9 に書く。
 
-## 状態（2026-10-28 GB10 実測済み。参考記録・帰属保留）
+## 状態（2026-10-28 GB10 専有の正式系列で判定済み）
+
+3 回目の reopen（所有者判断 2026-10-28）に従い、compute プロセス 0 件の GB10 で専有の独立系列を取り直した（`gb10-excl/`。`gb10-excl/README.md`）。
+RULE.txt（ブリッジ節のみ RULE.v2.txt）・閾値・帰属規則・`aggregate.py`・各 judge は不変。**この系列が正式系列**で、下の PR #3669 の記録（`gb10/` ほか）は参考記録に据え置く。
+
+| 項目 | 結果（専有の正式系列） |
+|---|---|
+| 専有（`excl_check.py`・`gb10-excl/session-scripts/excl_status.txt`） | 6 系列すべて `excl=pass`（poller 173 件・境界 12 件が compute-apps 0 件。計測の前・途中・後） |
+| 診断主系列（5 run） | 全 run `gate=pass`・checksum bit 一致・`aggregate.py` exit 0。N=256〜4096 で再現（1.064・1.064・1.021・1.038・1.203）。帰属は **N=4096 のみ H1（`download`）支持**（rho_DL 0.72）。N=256〜2048 は保留（ブリッジ fail） |
+| ブリッジ v2 | N=4096 のみ pass（比 1.135）。N=256〜2048 は fail（8.1〜20.1 倍）。**N≤2048 の原因は特定できず**（試した仮説は doc §9.7） |
+| 補助系列 | minflt 1 run・tunables 5 run・taskset 5 run（判定外） |
+| G-CPU-INF（要件 2） | 自分たちの制約（REQ-1。条件つき。相手経路は追加確認の shim による）。純カーネル差 / D = 1.34〜1.92（doc §9.4） |
+| 修正（要件 3） | 実装しない（方針提示のみ。doc §9.5） |
+| 未実行 | perf（`perf_event_paranoid=4`。sudo 不使用）。RULE 固定手順の LD_DEBUG は sgemm 系の解決先を拾えなかった |
+
+## 先行の参考記録の状態（PR #3669。非専有。以下は書き換えていない）
+
+### 状態（2026-10-28 GB10 実測済み。参考記録・帰属保留）
 
 **RULE.txt の専有条件（GB10 の compute プロセス 0）を満たせなかったため、本ディレクトリの実測はすべて参考記録とする。正式系列としての判定・帰属の確定は行わず保留する。確定には、専有した GB10 での独立系列、または実測前に条件変更を登録した独立系列の再計測が必要（未実施）。以下の「正式系列」「帰属」「分類」の語はこの留保つきで読むこと。**
 
@@ -45,7 +62,8 @@ bench-fandhe の `gemm --mode reuse` を常駐入力経路（#3272。`Tape::uplo
 
 | ディレクトリ・ファイル | 内容 |
 |---|---|
-| `gb10/` | 正式系列。`run{1..5}.jsonl`・`env_info.txt`・`load_gate*`・`bridge_status.txt`・`aggregate.md`（`python3 aggregate.py gb10` の出力） |
+| `gb10-excl/` | **専有の正式系列**（本ディレクトリと同じ構成。`gb10/`・`gb10-minflt/`・`gb10-tunables/`・`gb10-taskset/`・`gb10-bridge/`・`gb10-gcpuinf/`・`session-scripts/`〈`excl_status.txt`・`gpu_poll.log` を含む〉・`README.md`）。`excl_check.py` と `session-scripts/session-3646-excl.sh` で取得 |
+| `gb10/` | 参考記録（非専有。専有の正式系列は `gb10-excl/`）。`run{1..5}.jsonl`・`env_info.txt`・`load_gate*`・`bridge_status.txt`・`aggregate.md`（`python3 aggregate.py gb10` の出力） |
 | `gb10-minflt/`・`gb10-tunables/`・`gb10-taskset/` | 補助系列（判定外）と各 `aggregate.md` |
 | `gb10-bridge/` | bench-fandhe の生 JSONL（fresh／reuse／reuse --phases × N × 5 run）・`rc.log`・`bridge_judge.py`・`bridge_judge.md` |
 | `gb10-gcpuinf/` | G-CPU-INF: PyTorch 純カーネル・PyTorch 窓・fandhe 窓・#2105 層別区間（`fixedcost-2105/`）・BLAS 経路（`blas_path.log`・`blas_bindings.txt`・`blas_probe/`）・`gcpuinf_judge.py`／`gcpuinf_judge.md` |

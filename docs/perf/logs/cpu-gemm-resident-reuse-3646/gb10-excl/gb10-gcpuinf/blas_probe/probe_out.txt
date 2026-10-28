@@ -1,0 +1,13 @@
+# gcc: gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+# --- mm 2 回（l1_fwd 形・l2_fwd 形）。shim 無しの checksum と shim 有りの checksum を比較する
+plain 12845056.0 163840.0
+PROBE sgemm_ entered
+probed 12845056.0 163840.0
+PROBE sgemm_ calls=2 next_lib=<home>/work/.venv-bench/lib/python3.12/site-packages/torch/lib/libnvpl_blas_lp64_gomp.so.0
+PROBE cblas_sgemm calls=0 next_lib=unresolved
+PROBE sgemm_ first[0] m=256 n=64 k=784
+PROBE sgemm_ first[1] m=10 n=64 k=256
+# --- import torch のみ（mm なし）。mm 以外の sgemm_ 呼び出しの有無（基準）
+import-only
+PROBE sgemm_ calls=0 next_lib=unresolved
+PROBE cblas_sgemm calls=0 next_lib=unresolved

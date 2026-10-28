@@ -773,3 +773,4 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 
 - 0.12.0 の新腕（常駐入力経路）で GB10 CPU gemm の reuse が fresh より 1.23〜1.79 倍遅くなった件の切り分けは、診断基盤と事前登録規則を整備した段階で、**GB10 実測は未実測・原因は未特定**（`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9・`docs/perf/logs/cpu-gemm-resident-reuse-3646/`）。
 - G-CPU-INF の 3 区分（ハードの上限／計測窓の定義／自分たちの制約）への数字つき割り当ては **保留（未実測）**。割り当て規則は同 RULE.txt 末尾に事前登録済みで、足りない数値は GB10 同一セッションの PyTorch CPU 純カーネル・fandhe 層別区間・PyTorch CPU BLAS 経路の実行時確認。Linux・M4 Max の値は代替に使わない。
+- **2026-10-28 追記（#3646 の 3 回目の reopen）**: 上 2 項は整備段階の記述。GB10 専有（compute プロセス 0 件）の正式系列で実測し、G-CPU-INF は「自分たちの制約（REQ-1。条件つき。純カーネル差 / D = 1.34〜1.92。相手経路は追加確認の shim による）」と分類した。GB10 CPU gemm の逆転は N=4096 のみ原因（`download`）を特定し、N=256〜2048 は未特定（`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9.4・§9.7）。上表の値・判定・0.12.0 の tally は変えない。
