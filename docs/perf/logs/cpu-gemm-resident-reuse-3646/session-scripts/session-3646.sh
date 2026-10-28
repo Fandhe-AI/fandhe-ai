@@ -64,6 +64,10 @@ gate() { # $1=ラベル。load1 < 1.0 を 30 秒間隔・最大 30 分待つ（R
   done
 }
 
+# 負荷ゲート未通過は RULE.txt [ゲート] により系列を参考扱いにし判定しない。以降の計測を中止して終端行へ記録する
+# （未通過の系列から通常の判定結果を作らない。判定器も load_gate_bench.log の gate=unpassed を拒否する）。
+abort_gate() { step "gate unpassed: $1 -> abort"; echo "done. rc=gate-unpassed" >>"$LOG"; exit 4; }
+
 cd "$T" || exit 1
 step "start tree=$(sed -n 1p "$T/.rev-stamp")"
 { "$PY" --version; "$PY" -c 'import torch,numpy; print(torch.__version__, numpy.__version__); print(torch.get_num_threads())'; } >"$O/versions.txt" 2>&1
@@ -88,7 +92,7 @@ mkdir -p "$O/gb10-bridge"
 snap "before-bridge"
 for r in 1 2 3 4 5; do
   for n in $SIZES; do
-    gate "bridge/gemm/n${n}/r${r}"
+    gate "bridge/gemm/n${n}/r${r}" || abort_gate "bridge/gemm/n${n}/r${r}"
     # run の偶奇で fresh と reuse の先後を入れ替える（順序効果の相殺）。
     if [ $((r % 2)) = 1 ]; then modes="fresh reuse phases"; else modes="phases reuse fresh"; fi
     for m in $modes; do
@@ -113,19 +117,19 @@ sha256sum "$O/pybench/bench_py.py" >"$O/gb10-gcpuinf/bench_py.sha256"
 snap "before-gcpuinf"
 # (i) PyTorch 純カーネル（MLP 2 形状を含む 6 形状・base 腕）と PyTorch の infer 窓（bench_py と同一プロトコル）
 for r in 1 2 3 4 5; do
-  gate "gcpuinf/torch-kernel/r${r}"
+  gate "gcpuinf/torch-kernel/r${r}" || abort_gate "gcpuinf/torch-kernel/r${r}"
   "$PY" "$T/scripts/bench/framework-compare/opp_kernel_torch_diag.py" measure --bench-py "$O/pybench/bench_py.py" \
     --device cpu --shapes mlp --arm base --run "$r" --out "$O/gb10-gcpuinf/torch_kernel_r${r}.jsonl" \
     >"$O/gb10-gcpuinf/torch_kernel_r${r}.log" 2>&1
   echo "torch-kernel r=$r rc=$?" >>"$O/gb10-gcpuinf/rc.log"
-  gate "gcpuinf/torch-infer-window/r${r}"
+  gate "gcpuinf/torch-infer-window/r${r}" || abort_gate "gcpuinf/torch-infer-window/r${r}"
   "$PY" "$O/pybench/bench_py.py" --framework pytorch --task infer --device cpu \
     --out "$O/gb10-gcpuinf/torch_infer_r${r}.jsonl" >"$O/gb10-gcpuinf/torch_infer_r${r}.log" 2>&1
   echo "torch-infer-window r=$r rc=$?" >>"$O/gb10-gcpuinf/rc.log"
 done
 # (ii) fandhe の infer 窓（fresh 通常行・reuse 通常行・reuse --phases）
 for r in 1 2 3 4 5; do
-  gate "gcpuinf/fandhe-infer/r${r}"
+  gate "gcpuinf/fandhe-infer/r${r}" || abort_gate "gcpuinf/fandhe-infer/r${r}"
   if [ $((r % 2)) = 1 ]; then modes="fresh reuse phases"; else modes="phases reuse fresh"; fi
   for m in $modes; do
     case "$m" in

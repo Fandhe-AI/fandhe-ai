@@ -109,6 +109,21 @@ def diag_medians(gb10_dir):
     return out
 
 
+def check_load_gate(top_dir, prefix, want_pass):
+    """負荷ゲートログ（RULE.txt [ゲート]）を検査する。未通過・通過行数の不一致は例外（参考扱い＝判定しない）。"""
+    path = os.path.join(top_dir, "session-scripts", "load_gate_bench.log")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip().startswith(prefix)]
+    except OSError as e:
+        raise JudgeError(f"{path}: 読み込み不可 ({e})")
+    if any(ln.endswith("gate=unpassed") for ln in lines):
+        raise JudgeError(f"{path}: 負荷ゲート未通過の系列は参考扱いで判定しない")
+    got = sum(1 for ln in lines if ln.endswith("gate=pass"))
+    if got != want_pass:
+        raise JudgeError(f"{path}: {prefix} の gate=pass 行数 {got} != {want_pass}")
+
+
 def check_rc(bridge_dir):
     path = os.path.join(bridge_dir, "rc.log")
     try:
@@ -131,6 +146,7 @@ def main(argv):
     base = argv[1]
     bridge_dir = os.path.join(base, "gb10-bridge")
     gb10_dir = os.path.join(base, "gb10")
+    check_load_gate(base, "bridge/", len(SIZES) * len(RUNS))
     check_rc(bridge_dir)
     diag = diag_medians(gb10_dir)
     status = {}

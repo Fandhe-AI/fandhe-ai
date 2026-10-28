@@ -54,6 +54,32 @@ def single(d, name, **want):
     return pos(rs[0]["median_s"], name)
 
 
+def check_load_gate(d):
+    """負荷ゲートログ（RULE.txt [ゲート]）を検査する。未通過・通過行数の不一致は例外（参考扱い＝判定しない）。"""
+    path = os.path.join(d, "..", "session-scripts", "load_gate_bench.log")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip().startswith("gcpuinf/")]
+    except OSError as e:
+        raise JErr(f"{path}: {e}")
+    if any(ln.endswith("gate=unpassed") for ln in lines):
+        raise JErr(f"{path}: 負荷ゲート未通過の系列は参考扱いで判定しない")
+    got = sum(1 for ln in lines if ln.endswith("gate=pass"))
+    want = 3 * len(RUNS)
+    if got != want:
+        raise JErr(f"{path}: gcpuinf の gate=pass 行数 {got} != {want}")
+
+
+def unique_by(rs, key, name):
+    out = {}
+    for x in rs:
+        k = x[key]
+        if k in out:
+            raise JErr(f"{name}: 重複 {key}={k!r}")
+        out[k] = x
+    return out
+
+
 def med(vals):
     return statistics.median(vals)
 
@@ -63,12 +89,13 @@ def main(argv):
         print("usage: gcpuinf_judge.py <gb10-gcpuinf dir>", file=sys.stderr)
         return 2
     d = argv[1]
+    check_load_gate(d)
     torch_win = [single(d, f"torch_infer_r{r}.jsonl", task="infer", framework="pytorch") for r in RUNS]
     f_fresh = [single(d, f"fandhe_infer_fresh_r{r}.jsonl", task="infer", mode="fresh") for r in RUNS]
     f_reuse = [single(d, f"fandhe_infer_reuse_r{r}.jsonl", task="infer", mode="reuse") for r in RUNS]
     f_phase = []
     for r in RUNS:
-        got = {x["phase"]: x for x in rows(os.path.join(d, f"fandhe_infer_phases_r{r}.jsonl"))}
+        got = unique_by(rows(os.path.join(d, f"fandhe_infer_phases_r{r}.jsonl")), "phase", f"fandhe_infer_phases_r{r}")
         if "iter_total" not in got:
             raise JErr(f"fandhe_infer_phases_r{r}: iter_total が無い")
         f_phase.append(pos(got["iter_total"]["median_s"], f"phases r{r}"))
@@ -86,10 +113,13 @@ def main(argv):
     fc = {}
     for r in RUNS:
         for x in rows(os.path.join(d, "fixedcost-2105", f"run{r}.jsonl")):
-            if x.get("phase") in ("l1_linear_forward_device", "l2_linear_forward_device") and x.get("arm") == "reuse_decomposed":
-                fc.setdefault((x["arm"], x["phase"]), {})[r] = pos(x["median_s"], f"2105 run{r}")
-            if x.get("phase") in ("l1_linear_relu_fused", "l2_linear_gemm_add") and x.get("arm") == "fresh_layers":
-                fc.setdefault((x["arm"], x["phase"]), {})[r] = pos(x["median_s"], f"2105 run{r}")
+            ph, arm = x.get("phase"), x.get("arm")
+            if (arm, ph) in (("reuse_decomposed", "l1_linear_forward_device"), ("reuse_decomposed", "l2_linear_forward_device"),
+                             ("fresh_layers", "l1_linear_relu_fused"), ("fresh_layers", "l2_linear_gemm_add")):
+                cell = fc.setdefault((arm, ph), {})
+                if r in cell:
+                    raise JErr(f"2105 run{r}: 重複 {(arm, ph)}")
+                cell[r] = pos(x["median_s"], f"2105 run{r}")
     keys = [("reuse_decomposed", "l1_linear_forward_device"), ("reuse_decomposed", "l2_linear_forward_device"),
             ("fresh_layers", "l1_linear_relu_fused"), ("fresh_layers", "l2_linear_gemm_add")]
     for k in keys:
