@@ -204,4 +204,4 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 
 G1 の承認コメント URL を特定し、G2 の実測 pass を確認したうえで、(a) `lib.rs` に上記関数を追加、(b) `api_surface.rs` の否定ガード 2 件を「シグネチャ・委譲本体の固定＋allowlist 方式の違反スキャナ＋正のプローブ自己テスト＋到達性テスト」へ置換、(c) 常時実行の受入テスト `gpu_linalg_optin.rs` と実機 parity テスト（CUDA は `GateOn` を facade 経由へ、Metal は新規）、(d) backend 側 doc の「facade へ再公開しない」更新、(e) 本節への実装記録と `compat-api-scope.md` の適用記録を行う。既定 ON（Stage E）は別承認で本件の範囲外。
 
-§9 の「facade 公開の実施」は #3405 で扱う（公開形は承認済み・実機 parity 実測待ち）。
+§9 の「facade 公開の実施」は #3405 で扱う（公開形は承認済み・実機 parity は G2 充足済み、2026-10-28）。
