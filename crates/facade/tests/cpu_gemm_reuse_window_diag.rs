@@ -11,9 +11,10 @@
 //!   アクセスパターンの写し。bench-common へは path 依存できないため**アクセスパターンだけの複製**で、
 //!   parity 契約ではない）
 //! - `rp_verify_gap`: 同じ比較回数を L1 に収まる 4 KiB バッファ上で行う（メモリトラフィックなしの空き時間）
-//! - `rp_hold_footprint`: bench と同じ 5 本の N² Vec を保持するだけ（触らない）
+//! - `rp_hold_footprint`: 既存入力 a・b に 3 本の N² Vec を足し、bench と同じ計 5 本を保持するだけ（触らない）
 //! - `rp_ref_compute`: ブロック開始前に単一スレッド O(N³) の参照 GEMM を 1 回計算して保持する
-//! - `rp_solo`（別テスト）: `GEMM_WINDOW_ONLY_ARM=resident_public` で 1 プロセス 1 腕 1 ラウンドを回す
+//! - `rp_solo`（別テスト）: `GEMM_WINDOW_ONLY_ARM=resident_public`・`GEMM_WINDOW_ONLY_N=<N>` で
+//!   1 プロセス 1 腕 1 N・1 ラウンドを回す（N ごとに別プロセスで起動し集計時にまとめる）
 //!
 //! 窓の外の `Tape::reset` はコード読解で bench・診断とも呼ばないため腕を作らない
 //! （bench `measure_gemm_reuse_resident` は `release_gemm_reuse_iteration` を呼ばず、
@@ -233,15 +234,15 @@ impl Resident {
                 reference = out.contiguous().as_slice().expect("contiguous").to_vec();
             }
             Kind::HoldFootprint => {
-                // a_data・b_data・a_host・b_host・参照 c の 5 本（bench と同数）。内容は入力の写しで
-                // 触れずに保持するだけ（確保時の書き込みのみ）。
-                for _ in 0..5 {
+                // 既存の入力 a・b（N² 2 本）に 3 本足して bench の 5 本
+                // （a_data・b_data・a_host・b_host・参照 c）と同数にする。触れずに保持するだけ。
+                for _ in 0..3 {
                     held.push(vec![1.0f32; n * n]);
                 }
             }
             Kind::RefCompute => {
-                held.push(a_s.to_vec());
-                held.push(b_s.to_vec());
+                // 既存の入力 a・b（2 本）＋ 入力の写し 2 本 ＋ 参照 c 1 本 = bench の 5 本。
+                // 追加分は 3 本（写し 2 本・参照 1 本）。
                 held.push(a_s.to_vec());
                 held.push(b_s.to_vec());
                 held.push(naive_reference(a_s, b_s, n));
@@ -485,9 +486,10 @@ fn cpu_gemm_reuse_window_phases() {
     emit(&rec, "diag");
 }
 
-/// `rp_solo` 系列: 1 プロセスで `resident_public` だけを bench と同じ反復構造
-/// （init 1 回＋warmup＋計測。腕の交互実行なし・1 ラウンド）で回す。
-/// `GEMM_WINDOW_ONLY_ARM` は allowlist で検証し、許可外・未設定は panic で拒否する。
+/// `rp_solo` 系列: 1 プロセスで `resident_public` を 1 つの N だけ、bench と同じ反復構造
+/// （init 1 回＋warmup＋計測。腕の交互実行なし・1 ラウンド）で回す（bench の 1 プロセス 1 腕 1 N の再現）。
+/// `GEMM_WINDOW_ONLY_ARM`・`GEMM_WINDOW_ONLY_N` は allowlist で検証し、許可外・未設定は panic で拒否する。
+/// `orchestrate.sh --only-arm` が N ごとに別プロセスで起動し、出力 JSON 行を run ファイルへ連結する。
 #[test]
 #[ignore = "実機計測用の record-only 診断（RULE.txt・orchestrate.sh --only-arm 参照）"]
 fn cpu_gemm_reuse_window_solo() {
@@ -496,16 +498,22 @@ fn cpu_gemm_reuse_window_solo() {
         SOLO_ALLOWED.contains(&want.as_str()),
         "GEMM_WINDOW_ONLY_ARM={want:?} は allowlist 外"
     );
+    let n_raw = std::env::var("GEMM_WINDOW_ONLY_N").expect("GEMM_WINDOW_ONLY_N が未設定");
+    let n: usize = n_raw
+        .parse()
+        .unwrap_or_else(|_| panic!("GEMM_WINDOW_ONLY_N={n_raw:?} は整数でない"));
+    assert!(
+        SIZES.contains(&n),
+        "GEMM_WINDOW_ONLY_N={n_raw:?} は SIZES の allowlist 外"
+    );
     let arm = ARMS
         .iter()
         .copied()
         .find(|a| a.name == want)
         .expect("allowlist の腕は ARMS に存在する");
     let mut rec = Rec::default();
-    for n in SIZES {
-        let (a, b) = inputs(n);
-        drive(&mut rec, arm, n, (&a, &b), iters_for(n), None);
-    }
+    let (a, b) = inputs(n);
+    drive(&mut rec, arm, n, (&a, &b), iters_for(n), None);
     // arm 名は "rp_solo" として出す（同一プロセス内の resident_public と区別する）。
     let mut solo = Rec::default();
     for ((_, n, phase), secs) in rec.cells {

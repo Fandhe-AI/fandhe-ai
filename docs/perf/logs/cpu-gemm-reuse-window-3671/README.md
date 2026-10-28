@@ -22,7 +22,7 @@ RULE の sha256 と `RULE.v2.txt` の sha256 は計測時に `env_info.txt` と 
 | | `rp_verify_gap` | 同じ比較回数を L1 常駐の 4 KiB で行う | H-V の分解（空き時間のみ） |
 | | `rp_hold_footprint` | N² Vec を 5 本保持するだけ | H-A1 |
 | | `rp_ref_compute` | 単一スレッド O(N³) の参照 GEMM を前処理で 1 回 | H-A2 |
-| 診断（`solo`） | `rp_solo` | 1 プロセス 1 腕・1 ラウンド | H-P |
+| 診断（`solo`） | `rp_solo` | 1 プロセス 1 腕 1 N・1 ラウンド（N ごとに別プロセス） | H-P |
 | bench | `bench_base` | 基準（registry `fandhe-ai =0.12.0`） | — |
 | | `bench_tunables` | `GLIBC_TUNABLES`（#3646 と同じリテラル） | H-A3 |
 | | `bench_headpatch` | `crates/facade` の path patch | H-B |

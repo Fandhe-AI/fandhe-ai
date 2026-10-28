@@ -165,11 +165,21 @@ for n in $(seq 1 "$run_count"); do
   echo "run$n gate=$gate_status" >>"$out_dir/load_gate_status.txt"
   case "$kind" in
     main) runner=("$bin") ;;
-    solo) runner=(env "GEMM_WINDOW_ONLY_ARM=$only_arm" "$bin") ;;
+    solo) runner=() ;; # solo は上で N ごとに別プロセス起動する
     minflt) runner=(/usr/bin/time -v -o "$out_dir/run$n.time.raw" "$bin") ;;
   esac
-  "${runner[@]}" --ignored --exact "$test_name" \
-    --nocapture --test-threads=1 >"$out_dir/run$n.raw" 2>"$out_dir/run$n.err.raw"
+  if [ "$kind" = "solo" ]; then
+    # bench の 1 プロセス 1 腕 1 N を再現するため N ごとに別プロセスで起動し、出力を連結する。
+    : >"$out_dir/run$n.raw"
+    : >"$out_dir/run$n.err.raw"
+    for sz in 256 512 1024 2048 4096; do
+      env "GEMM_WINDOW_ONLY_ARM=$only_arm" "GEMM_WINDOW_ONLY_N=$sz" "$bin" --ignored --exact "$test_name" \
+        --nocapture --test-threads=1 >>"$out_dir/run$n.raw" 2>>"$out_dir/run$n.err.raw"
+    done
+  else
+    "${runner[@]}" --ignored --exact "$test_name" \
+      --nocapture --test-threads=1 >"$out_dir/run$n.raw" 2>"$out_dir/run$n.err.raw"
+  fi
   grep -o 'DIAG_JSON .*' "$out_dir/run$n.raw" | sed -e 's/^DIAG_JSON //' >"$out_dir/run$n.jsonl"
   mask <"$out_dir/run$n.err.raw" >"$out_dir/run$n.err"
   if [ "$kind" = "minflt" ]; then

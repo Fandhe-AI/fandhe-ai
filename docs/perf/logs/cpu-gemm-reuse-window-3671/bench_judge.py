@@ -7,6 +7,7 @@ bench_base／bench_tunables／bench_headpatch の run を読み、N=256〜2048 �
   - 診断側の腕 X（verify_touch／verify_gap／hold_footprint／ref_compute／solo）: G_bench>0 かつ G_X>0 かつ
     0.5<=G_bench/G_X<=2.0 なら支持
   - bench 側の腕 Y（tunables／headpatch）: G_Y>0 かつ G_diag>0 かつ 0.5<=G_Y/G_diag<=2.0 なら支持
+  - 記録のみ（AUX 行・各 N・各 bench 腕）: 通常 reuse の median_s・通常 reuse と iter_total の差・to_tensor／host_copy／checksum 区間
   - 記録のみ: matmul 区間/G_bench・X.iter_total/bench reuse・E(N)・N=4096（対照・判定外）
 閾値は RULE.v2（#3646 ブリッジ v2 と同じ 0.5〜2.0）が正で、本スクリプトは新しい閾値を作らない。
 
@@ -201,6 +202,22 @@ def judge(diag, solo, bench, excl, gate_bad):
                      f"fresh_diag={fresh_d:.9f} resident_public={rp:.9f} G_diag={g_diag:+.9f} "
                      f"G_bench/G_diag={r_bd} bridge_v2={'pass' if bridge else 'fail'} E={e_n:.3f} "
                      f"matmul/G_bench={med(base['phases']['matmul']) / g_bench if g_bench > 0 else float('nan'):.3f}")
+        # RULE.v2 の記録のみ（判定外）補助指標: 各 bench 腕について通常 reuse の median_s・
+        # 通常 reuse と --phases iter_total の差・to_tensor／host_copy／checksum 区間（無い区間は n/a）。
+        for a in BENCH_ARMS:
+            if a not in bench:
+                continue
+            c = bench[a][n]
+            reuse_norm = med(c["reuse"])
+            it = med(c["phases"]["iter_total"])
+
+            def _ph(name, c=c):
+                v = c["phases"].get(name)
+                return f"{med(v):.9f}" if v else "n/a"
+
+            lines.append(f"  AUX bench_{a}: reuse_median_s={reuse_norm:.9f} "
+                         f"reuse_minus_phases_iter_total={reuse_norm - it:+.9f} "
+                         f"to_tensor={_ph('to_tensor')} host_copy={_ph('host_copy')} checksum={_ph('checksum')}")
         xs = {x: ds[(x, n, "iter_total")][0] for x in DIAG_X}
         if solo is not None:
             xs["rp_solo"] = solo["summary"][("rp_solo", n, "iter_total")][0]
@@ -345,6 +362,9 @@ def self_test():
             if "rp_verify_touch" not in row or "bench_headpatch" not in row or "rp_verify_gap" in row or "bench_tunables" in row:
                 print("SELF-TEST FAIL judge-support:", row)
                 ok = False
+        if text.count("AUX bench_") != 3 * len(agg.SIZES) or "to_tensor=n/a" not in text:
+            print("SELF-TEST FAIL aux-lines")
+            ok = False
         if "キャッシュとページ" not in text or notes:
             print("SELF-TEST FAIL notes/cache:", notes)
             ok = False
