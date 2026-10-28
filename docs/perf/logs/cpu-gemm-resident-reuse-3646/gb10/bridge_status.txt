@@ -1,0 +1,5 @@
+256 bridge=fail
+512 bridge=fail
+1024 bridge=fail
+2048 bridge=fail
+4096 bridge=pass

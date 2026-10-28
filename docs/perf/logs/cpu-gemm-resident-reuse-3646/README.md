@@ -6,14 +6,49 @@ bench-fandhe の `gemm --mode reuse` を常駐入力経路（#3272。`Tape::uplo
 本ディレクトリはその原因を GB10 実測で切り分けるための事前登録規則・診断基盤・集計器を置く。
 結論・帰属・修正方針の提案は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9 に書く。
 
-## 状態
+## 状態（2026-10-28 GB10 実測済み）
 
 | 項目 | 状態 |
 |---|---|
-| 診断テスト（`crates/facade/tests/cpu_gemm_resident_reuse_diag.rs`）・RULE.txt・orchestrate.sh・aggregate.py | 整備済み（CI の bit 一致テスト・`aggregate.py --self-test`・shellcheck は通過） |
-| GB10 正式系列（5 run）・補助系列（minflt／tunables／taskset）・ブリッジ（bench `--phases`） | **未実測**（本作業の実行環境に GB10 への接続がなく、Linux・M4 Max の代替値は使わない） |
-| G-CPU-INF の 3 区分分類（要件 2） | **未実測のため「保留」**。規則は RULE.txt 末尾に事前登録済み。足りない数値は GB10 同一セッションの PyTorch CPU 純カーネル・fandhe 層別区間・PyTorch CPU BLAS 経路の実行時確認 |
-| 修正（要件 3） | 実装しない（所有者への方針提示が先。提案は §9 に記載） |
+| 診断テスト・RULE.txt・RULE.v2.txt・orchestrate.sh・aggregate.py | 整備済み。`RULE.v2.txt`（ブリッジ節のみの置換。理由は同ファイル冒頭）を実測前に別コミットで固定 |
+| GB10 正式系列（5 run） | **実測済み**。全 run が負荷ゲート通過（`gb10/load_gate_status.txt`）・checksum bit 一致・`aggregate.py` exit 0（`gb10/aggregate.md`） |
+| 補助系列（minflt 1 run・tunables 5 run・taskset 5 run） | **実測済み**（判定外。`gb10-minflt/`・`gb10-tunables/`・`gb10-taskset/` の `aggregate.md`） |
+| ブリッジ（bench-fandhe 5 run × 5 N × 3 モード） | **実測済み**。N=4096 のみ pass、N=256〜2048 は fail（`gb10-bridge/bridge_judge.md`） |
+| G-CPU-INF の分類（要件 2） | **実測済み**（`gb10-gcpuinf/`）。分類は doc §9.4 を参照 |
+| 修正（要件 3） | 実装しない（所有者への方針提示のみ。doc §9.5） |
+
+## 結果の要約（詳細・解釈・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9）
+
+- bench 側の逆転は GB10 で**再現**した（bench-fandhe の reuse iter_total / fresh = N=256〜4096 で 1.71・1.64・1.47・1.57・1.25）
+- 診断の `resident_public` / `fresh` は N=256 が非再現（0.970）、N=512〜2048 が 1.04〜1.06、N=4096 が 1.214。**帰属を出せたのは N=4096 だけ**
+  （rho_DL 0.78 → H1: `download` の追加確保＋コピー。rho_DROP 0.36・rho_K 0.00・rho_IN 0.02 は未達）
+- N=256〜2048 は診断が bench の逆転幅の 1/12〜1/15 しか写せておらずブリッジ fail。**この範囲の原因は未特定**
+- 補助系列（判定外）: tunables は N=256・512 で ratio <= 1.05、N=1024 以上で > 1.05。taskset は ratio をほぼ動かさない（N=4096 で 1.201）
+
+## 実行環境と逸脱（RULE.txt との差）
+
+- ノードは `<cuda-node>`（GB10）。**RULE.txt の「GB10 専有（compute プロセス 0）の別途確認」は満たせなかった**。常駐 GPU プロセス 3 件
+  （LLM 推論 2・画像生成 1。停止していない）が計測前後とも同一で、ps の %CPU は最大 3.9・`utilization.gpu` は 0 %、計測中に新規プロセスは現れていない
+  （`session-scripts/gpu_procs.txt` の 9 時点）。RULE が実際に強制する判定ゲートは load1 < 1.0（全 run 通過）
+- 転送は固定コミットの tracked ファイルだけを tar で展開する方式（rsync の `--delete-excluded` は使っていない）。ビルドは実機ロック取得前に完了。実機ロックは外部の `mkdir` 方式
+- `RULE.v2.txt` でブリッジ節だけを差し替えた（bench-fandhe が `gemm --mode fresh --phases` を MEASURE_ERROR で拒否するため RULE.txt のブリッジは実行不能）。
+  `aggregate.py`・閾値・帰属規則は不変
+- perf は `perf_event_paranoid=4` で拒否（`gb10-gcpuinf/perf_record.log`）。sudo では再試行していない。代わりに `LD_PRELOAD` の観測専用 shim で
+  PyTorch の mm 実行時の呼び出し先を確認した（`gb10-gcpuinf/blas_probe/`。計測外・時間は測らない）。これは RULE 固定の手順（LD_DEBUG・perf）に
+  対する追加確認で、(iii) の判定根拠として用いるのはこの追加確認である
+- `session-scripts/session-3646.sh` の `blas-path rc=` は直前の echo の終了コードで意味を持たない（shellcheck SC2320）。実行物と同一のため修正していない
+- 回収物のホスト名・`/home` パスは `<home>` に置換済み（数値は書き換えていない）
+
+## 回収物の見方
+
+| ディレクトリ・ファイル | 内容 |
+|---|---|
+| `gb10/` | 正式系列。`run{1..5}.jsonl`・`env_info.txt`・`load_gate*`・`bridge_status.txt`・`aggregate.md`（`python3 aggregate.py gb10` の出力） |
+| `gb10-minflt/`・`gb10-tunables/`・`gb10-taskset/` | 補助系列（判定外）と各 `aggregate.md` |
+| `gb10-bridge/` | bench-fandhe の生 JSONL（fresh／reuse／reuse --phases × N × 5 run）・`rc.log`・`bridge_judge.py`・`bridge_judge.md` |
+| `gb10-gcpuinf/` | G-CPU-INF: PyTorch 純カーネル・PyTorch 窓・fandhe 窓・#2105 層別区間（`fixedcost-2105/`）・BLAS 経路（`blas_path.log`・`blas_bindings.txt`・`blas_probe/`）・`gcpuinf_judge.py`／`gcpuinf_judge.md` |
+| `session-scripts/` | 実行したセッションスクリプト・`steps.log`・`gpu_procs.txt`・`load_gate_bench.log`・`orch-*.log`・`versions.txt` |
+| `rev-stamp-verification-3646.md` | `.rev-stamp`・ツリー指紋・RULE の sha256 |
 
 ## 構成
 
@@ -49,6 +84,6 @@ bench-fandhe の `gemm --mode reuse` を常駐入力経路（#3272。`Tape::uplo
    ツリー指紋を `git archive` の展開物と突合して `rev-stamp-verification-3646.md` に残す
 2. `setsid nohup` で切り離し hw-lock を取得、PATH を明示、計測中はビルド並走禁止
 3. `bash orchestrate.sh gb10`
-4. ブリッジ（集計の前に行う）: bench-fandhe `--task gemm --device cpu --mode reuse|fresh --phases` を N=256〜4096 各 5 run。matmul 区間差が iter_total 差の 50% 以上かを N ごとに判定し、`gb10/bridge_status.txt` へ `<N> bridge=pass|fail` を 1 行ずつ記録する（未記録・fail の N は aggregate.py が帰属を保留する）
+4. ブリッジ（集計の前に行う。**RULE.v2.txt が正**）: bench-fandhe の fresh 通常行・reuse 通常行・`--mode reuse --phases` を N=256〜4096 各 5 run（`--out` を必ず明示）。`python3 gb10-bridge/bridge_judge.py .` が `G_bench`／`G_diag` の比で判定し `gb10/bridge_status.txt` へ `<N> bridge=pass|fail` を 1 行ずつ書く（未記録・fail の N は aggregate.py が帰属を保留する）
 5. `python3 aggregate.py gb10`。補助: `--aux minflt`・`--aux tunables`・`--aux taskset`（別ディレクトリへ出力。判定外）
 6. G-CPU-INF: RULE.txt 末尾の測定 (i)〜(iii)（既存の承認済み venv のみ。新規パッケージ導入はしない）

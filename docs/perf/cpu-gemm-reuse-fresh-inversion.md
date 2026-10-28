@@ -212,11 +212,16 @@ checksum 全一致。`.rev-stamp`・ツリー指紋・`rule_sha256` は `logs/cp
 
 ### 9.1 状態（先に結論）
 
-- **原因は未特定**。GB10 実測（正式 5 run・補助系列・ブリッジ）は **未実測**（実行環境に GB10 への接続がなかった）。
-  Linux・M4 Max の値は代替に使わない。推測で帰属を埋めない
-- 整備済み: 診断テスト `crates/facade/tests/cpu_gemm_resident_reuse_diag.rs`、事前登録規則
-  `logs/cpu-gemm-resident-reuse-3646/RULE.txt`、`orchestrate.sh`、`aggregate.py`（`--self-test`・fail-closed）
-- tolerance・parity baseline・判定規則・本番コードは変更していない
+2026-10-28 に GB10 で RULE.txt（ブリッジ節のみ RULE.v2.txt）どおり実測した（`logs/cpu-gemm-resident-reuse-3646/`。全 run が負荷ゲート通過・checksum bit 一致）。
+
+- **bench の逆転は GB10 で再現した**（bench-fandhe の reuse iter_total / fresh = 1.25〜1.71。§9.3b）
+- **原因を特定できたのは N=4096 だけ**: `matmul_resident` の `download`（出力 N² の新規確保＋コピー）が逆転幅の 78%（rho_DL 0.78）。minflt 補助系列では
+  `download` が 16385 回/反復のページフォールト（64 MiB ÷ 4 KiB）を起こしている
+- **N=256〜2048 の原因は未特定**: 診断の `resident_public` は fresh より 0〜6% 遅いだけで、bench の逆転幅（37〜57%）の 1/12〜1/15 しか写せず、ブリッジが fail。
+  診断が写していない費用が bench の窓にある（候補は §9.3b・§9.6。いずれも未検証）。試して否定した仮説は §9.3b に記録
+- G-CPU-INF は「自分たちの制約（REQ-1）」と分類した（条件つき。§9.4）
+- 修正は実装していない（方針提示のみ。§9.5）。tolerance・parity baseline・判定規則・本番コード・`aggregate.py` の閾値は変更していない
+- 規則の変更は `RULE.v2.txt` の 1 件のみ（ブリッジ節の置換。bench-fandhe が `gemm --mode fresh --phases` を拒否するため RULE.txt のブリッジは実行不能だった。実測前に別コミットで固定）
 
 ### 9.2 コード上の事実（読解。実測ではない）
 
@@ -241,25 +246,91 @@ checksum 全一致。`.rev-stamp`・ツリー指紋・`rule_sha256` は `logs/cp
 先行記録（#3187 §6・#3226 §8.4）は、出力の確保・解放パターンが GB10 の glibc・ページフォールト機構に当たることを示しており、
 H1・H1b が最有力だが、これは先行記録からの見込みで本件の実測結果ではない。
 
+### 9.3b 実測結果（GB10・2026-10-28。5 run 中央値。生値・run 別は `logs/cpu-gemm-resident-reuse-3646/` の各 `aggregate.md`・`bridge_judge.md`）
+
+診断の正式系列（`gb10/aggregate.md`。単位 us）。
+
+| N | fresh | resident_public | ratio | 再現 | G | rho_DL | rho_DROP | rho_K | rho_IN | 帰属 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 256 | 167.9 | 162.9 | 0.970 | 非再現 | — | — | — | — | — | なし |
+| 512 | 787.8 | 831.0 | 1.055 | 再現 | 43.2 | — | — | — | — | 保留（ブリッジ fail） |
+| 1024 | 3054.7 | 3208.3 | 1.050 | 再現 | 153.7 | — | — | — | — | 保留（ブリッジ fail） |
+| 2048 | 15951.8 | 16583.5 | 1.040 | 再現 | 631.7 | — | — | — | — | 保留（ブリッジ fail） |
+| 4096 | 124751.6 | 151388.7 | 1.214 | 再現 | 26637.1 | **0.78** | 0.36 | 0.00 | 0.02 | **H1（download）支持** |
+
+ブリッジ v2（`gb10-bridge/bridge_judge.md`。RULE.v2.txt。bench-fandhe `fandhe-ai =0.12.0`・単位 us）。
+
+| N | bench fresh | bench reuse（iter_total） | bench ratio | G_bench | G_diag | G_bench / G_diag | 判定 |
+|---|---|---|---|---|---|---|---|
+| 256 | 196.2 | 334.8 | 1.71 | 138.7 | -5.0 | — | fail |
+| 512 | 1033.8 | 1698.6 | 1.64 | 664.8 | 43.2 | 15.4 | fail |
+| 1024 | 4140.2 | 6077.6 | 1.47 | 1937.4 | 153.7 | 12.6 | fail |
+| 2048 | 16441.9 | 25865.6 | 1.57 | 9423.8 | 631.7 | 14.9 | fail |
+| 4096 | 121372.3 | 151343.1 | 1.25 | 29970.8 | 26637.1 | 1.13 | **pass** |
+
+読み取り（事実）:
+
+- N=4096 は bench と診断の窓が一致し、逆転の 78% が `download`。`gemm_device`（カーネル＋確保）は fresh の matmul と同じ（113.0 ms 対 113.0 ms）で、
+  窓内 drop を足しても +9.6 ms（rho_DROP 0.36）、入力の再アップロードは差を動かさない（rho_IN 0.02）。minflt 補助（1 run・判定外）では `download` が
+  16385 回/反復、`gemm_device` と fresh の matmul が各約 38k 回/反復で、`download` の 20.9 ms は約 1.28 us/回のページフォールトに相当する
+- N=256〜2048 は診断が写せていない。bench の reuse では `--phases` の matmul 区間だけで、診断の fresh の iter_total 全体より長い
+  （N=256: 300.5 us 対 167.9 us）。つまり bench の reuse 窓の `matmul_resident` 呼び出し自体が、診断の `resident_public` の同区間より
+  N=256〜2048 で 1.75〜2.33 倍遅い（300.5／128.8・1541.8／669.1・5531.3／2482.8・23690.3／13570.0 us）。N=4096 は同じ（142.7 ms 対 142.6 ms）。
+  reuse の to_tensor・host_copy は 1 us 未満（`gb10-bridge/bridge_judge.md` の matmul 区間表）
+- 補助系列（判定外）: tunables（`mmap_threshold`・`trim_threshold` を引き上げ）は ratio が N=256 で 0.945・N=512 で 1.045（<= 1.05）、
+  N=1024・2048・4096 で 1.142・1.254・1.221（> 1.05。RULE の規則どおり「それだけでは説明できない」）。N=2048 の fresh が 20597 us（正式系列 15952 us）と
+  大きく振れており、この系列は参考値。taskset（大コア集合 5-9,15-19）は ratio を 0.950・1.037・1.040・1.034・1.201 とほぼ動かさず、H4（スレッド親和性）は支持されない
+- 否定・未達の仮説（N=4096）: H1b（窓内 drop。rho 0.36）・H2/H3（入力の寿命・配置。rho 0.02）・gemm_device 内の確保かカーネル（rho 0.00）
+
 ### 9.4 G-CPU-INF の分類（要件 2）
 
-**保留（未実測）**。0.12.0 の PyTorch 窓との差 D を「窓の定義／純カーネル差（閉源経路を実行時確認できた場合のみ自分たちの制約）／ハード上限」に
-割り当てる規則を RULE.txt 末尾へ事前登録した。割り当てに足りない数値は、GB10 同一セッションの PyTorch CPU 純カーネル・fandhe 層別区間・
-PyTorch CPU BLAS 経路の実行時確認（#3185 では未確認）。0.12.0 の正式値・tally は変えない（#3274 の範囲）。
+**分類: 自分たちの制約（REQ-1。条件つき）**。規則（RULE.txt 末尾）どおり、GB10 同一セッションの 5 run 中央値で D と成分を求めた（`gb10-gcpuinf/gcpuinf_judge.md`。単位 us）。
+
+| fandhe の窓 | 窓 | D（対 PyTorch 窓 122.9） | 純カーネル差 | 窓の構成差 | 純カーネル差 / D | 構成差 / D |
+|---|---|---|---|---|---|---|
+| fresh 通常行 | 173.6 | +50.7 | +68.9 | -18.2 | 1.36 | -0.36 |
+| reuse 通常行 | 159.3 | +36.4 | +73.2 | -36.8 | 2.01 | -1.01 |
+| reuse --phases iter_total | 164.5 | +41.7 | +73.2 | -31.5 | 1.76 | -0.76 |
+
+- 純カーネル差 = fandhe 層カーネル合計（#2105 診断の層別区間。fresh 177.8・reuse 182.1）- PyTorch mm 合計（l1_fwd 98.0 + l2_fwd 10.9 = 108.9）
+- 純カーネル差が D の 50% 以上（136〜201%）。窓の構成差は負で 50% に届かない。したがって「計測窓の定義」ではない
+- 相手経路の実行時確認: `libtorch_cpu.so` は NVPL（NVIDIA の閉源 BLAS。`BLAS_INFO=nvpl`）に動的リンクされ、LD_PRELOAD の観測専用 shim で PyTorch の `torch.mm`
+  （64×784 @ 784×256 と 64×256 @ 256×10）がどちらも `sgemm_`（m=256,n=64,k=784／m=10,n=64,k=256）を 1 回ずつ呼び、転送先が
+  `libnvpl_blas_lp64_gomp.so.0` であることを確認した（`gb10-gcpuinf/blas_probe/probe_out.txt`。mm なしの import のみでは呼び出し 0 回）。
+  perf は `perf_event_paranoid=4` で使えなかった（未確認）。よって「相手経路が閉源ライブラリと実行時に確認できた」条件は満たす
+- 条件・限界: (1) fandhe 層カーネルは bias／活性化を融合した層の区間で、PyTorch 側は mm のみのため、純カーネル差は mm 以外の分だけ過大になりうる。
+  (2) 層別区間は別プロセス（#2105 診断）の値で、窓の値と同一プロセスではない。(3) PyTorch の窓は bench_py と同一プロトコルの infer（run 別 120.4〜138.9）で、
+  5 run 間の幅が D の 2 割を超える。(4) 「ハードの上限」を示す数値（GB10 の理論 FLOPS 比など）は本件で取っておらず、この分類はそれを否定も肯定もしない。
+  分類の根拠は G-CUDA-INF（cuBLAS）の先例と `loss-attribution-matrix.md` §10.5 の定義に揃えた規則適用であり、D の縮小は NVPL 相当の自作カーネル改善（REQ-1 の範囲外の依存を使わない制約下）でしか得られない
+- 0.12.0 の正式値・tally は変えない（#3274 の範囲）
 
 ### 9.5 修正方針の提案（要件 3。実装はしていない・所有者判断待ち）
 
-実測で帰属が決まってから確定する。候補のみ記す。
+実測で帰属が決まったのは N=4096（H1: `download`）だけ。提案はその範囲に限る。修正 issue の起票・実装は所有者の承認後で、本 PR では行わない。
 
-- (a) CPU の `matmul_resident` で `gemm_device` の出力 Vec を `Tensor` へ所有権ごと移す（download のコピーを除く。bit 同一）
+**候補**
+
+- (a) CPU の `matmul_resident` で `gemm_device` の出力 Vec を `Tensor` へ所有権ごと移す（`download` のコピーと新規確保を除く。bit 同一）。N=4096 で最大 20.9 ms（診断の `download` 区間）を削れる見込み。ただし `Tensor` が出力バッファを抱え続けるため、解放のタイミング（窓内 drop。rho_DROP 0.36）が `download` の分だけ移る可能性がある。見込みは実測前の読みで未検証
 - (b) 出力バッファの再利用（store 側のプール）
 - (c) bench 側の窓の見直し（判定規則・D-C の範囲に関わるため所有者判断）
+- (d) N=256〜2048 は別途、診断が写していない費用の切り分けが先（下記）。(a) では説明できない
 
-**性能規則の結論**（ADOPT／REJECT）は将来の A/B を別 RULE で事前登録して決める。**保守性の判断**（`MemoryOps` への所有権移動版 download の追加か CPU 特化分岐か、
-公開 API への影響、`unsafe` の有無）はそれとは別に所有者へ示す。現時点で結論は出していない。
+**性能規則の結論**（ADOPT／REJECT）: 今回は出さない。(a)(b) は将来の A/B を別 RULE で事前登録し、N=4096 の `download` 区間と bench の iter_total を分けて判定する。
+N=256〜2048 の逆転は (a) の対象外で、先に原因の切り分け診断（bench の reuse 窓の `matmul_resident` 呼び出しが診断の同区間より 1.75〜2.33 倍遅い理由）が要る。
+未検証の候補は、bench が反復ごとに窓の外で行う全要素の検算（`verify_strict`・checksum）が次反復の出力ページ・キャッシュに及ぼす影響、
+bench プロセス固有のアロケータ状態、反復ごとの `Tape::reset` の有無の差。いずれも本件では測っていない。
+
+**保守性の判断**（性能規則の結論とは別）: (a) は `MemoryOps` へ所有権移動版 `download` を足すか、CPU バックエンドだけの分岐にするかを選ぶ必要がある。
+前者は内部 trait の変更（公開 API の `facade` には出ない見込み・`unsafe` は不要の見込み）、後者は分岐が増えるが影響は CPU 内に閉じる。
+どちらも `bit` 同一であることの確認（既存の parity テスト）を伴う。現時点で採否の結論は出していない。
 
 ### 9.6 限界
 
-- GB10 の実測が無いため、§9.2〜9.3 は読解と先行記録に基づく仮説であり検証されていない
-- 診断の `resident_*` 腕は内部 API（`MemoryOps::download` 等）を使うため、bench（公開 API）との窓の一致は RULE.txt のブリッジ手順で確認する必要がある
+- 帰属を出せたのは N=4096 だけ。N=512〜2048 の診断 ratio は 1.04〜1.06 で、bench の 1.47〜1.64 を説明できず、N=256 は診断が非再現。ブリッジ v2 は fail
+- 診断の `resident_*` 腕は内部 API（`MemoryOps::download` 等）を使い、bench の公開 API の窓と同一ではない。ブリッジ v2 で一致を確認できたのは N=4096 のみ。
+  N≤2048 の不一致の原因は未特定（§9.5 の候補は未検証）
+- 実機に GPU 常駐プロセス 3 件があり専有ではない（RULE の専有確認は満たせず、`utilization.gpu` 0 %・%CPU 3.9 以下・新規プロセスなしを記録）。判定ゲートは load1 < 1.0（全 run 通過）
+- 補助系列 tunables の N=2048 は fresh が大きく振れており参考値。minflt は 1 run
+- G-CPU-INF は fandhe の層別区間が別プロセスの値・PyTorch が mm のみ・PyTorch 窓の run 間幅が大きい、という限界つきの規則適用（§9.4）。perf は使えなかった
 - 旧腕（Tape 経路 reuse＋reset）は本診断に含めていない
+- RULE.v2.txt によるブリッジ節の置換は実測前に固定したが、判定式（`G_bench`／`G_diag` の比 0.5〜2.0）は bench が出す値に合わせて新設したもので、RULE.txt の「matmul 区間差」式を実測していない

@@ -1,0 +1,90 @@
+== before-main 2026-10-28T02:12:47Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-08:57:08 VLLM::StageEngi
+2084616  3.9 16-08:54:55 VLLM::StageEngi
+2626105  0.0 15-22:10:24 python
+ 11:12:47 up 61 days, 22:39, 10 users,  load average: 3.63, 1.67, 0.67
+== after-main 2026-10-28T02:33:04Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-09:17:25 VLLM::StageEngi
+2084616  3.9 16-09:15:12 VLLM::StageEngi
+2626105  0.0 15-22:30:40 python
+ 11:33:04 up 61 days, 23:00, 11 users,  load average: 8.00, 5.54, 3.92
+== after-minflt 2026-10-28T02:37:50Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-09:22:11 VLLM::StageEngi
+2084616  3.9 16-09:19:58 VLLM::StageEngi
+2626105  0.0 15-22:35:26 python
+ 11:37:50 up 61 days, 23:04, 11 users,  load average: 14.90, 7.45, 4.81
+== after-tunables 2026-10-28T03:01:39Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-09:46:00 VLLM::StageEngi
+2084616  3.9 16-09:43:47 VLLM::StageEngi
+2626105  0.0 15-22:59:16 python
+ 12:01:39 up 61 days, 23:28, 11 users,  load average: 9.35, 5.95, 5.07
+== after-taskset 2026-10-28T03:24:28Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-10:08:49 VLLM::StageEngi
+2084616  3.9 16-10:06:36 VLLM::StageEngi
+2626105  0.0 15-23:22:05 python
+ 12:24:28 up 61 days, 23:51, 11 users,  load average: 6.49, 4.33, 4.11
+== before-bridge 2026-10-28T03:24:28Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-10:08:49 VLLM::StageEngi
+2084616  3.9 16-10:06:36 VLLM::StageEngi
+2626105  0.0 15-23:22:05 python
+ 12:24:28 up 61 days, 23:51, 11 users,  load average: 6.49, 4.33, 4.11
+== after-bridge 2026-10-28T03:41:28Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-10:25:49 VLLM::StageEngi
+2084616  3.9 16-10:23:36 VLLM::StageEngi
+2626105  0.0 15-23:39:05 python
+ 12:41:28 up 62 days, 8 min, 11 users,  load average: 3.10, 2.26, 2.73
+== before-gcpuinf 2026-10-28T03:41:28Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-10:25:49 VLLM::StageEngi
+2084616  3.9 16-10:23:36 VLLM::StageEngi
+2626105  0.0 15-23:39:05 python
+ 12:41:28 up 62 days, 8 min, 11 users,  load average: 3.10, 2.26, 2.73
+== after-gcpuinf 2026-10-28T03:43:12Z
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+0 %
+    PID %CPU     ELAPSED COMMAND
+2083578  3.9 16-10:27:33 VLLM::StageEngi
+2084616  3.9 16-10:25:20 VLLM::StageEngi
+2626105  0.0 15-23:40:49 python
+ 12:43:12 up 62 days, 10 min, 11 users,  load average: 0.79, 1.66, 2.47
