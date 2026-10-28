@@ -44,3 +44,32 @@ GB10 ノード（`<cuda-node>`）の専用ディレクトリ（既存ディレ�
 
 `session-scripts/steps.log`: 実機ロック（`mkdir` 方式）取得 02:12:45Z → 診断主系列 → minflt → tunables → taskset → ブリッジ → G-CPU-INF → 解放 03:43:12Z（UTC）。
 ビルドはロック取得前に完了済み（計測中のビルド並走なし）。実行前にノードで bench-fandhe の N=256 スモーク（gemm fresh・reuse `--phases`・infer reuse `--phases` 各 1 回。出力は削除済み・系列に数えない）を行った。
+
+## 専有系列（`gb10-excl/`。3 回目の reopen）
+
+手順は上と同じ（固定コミットの tracked ファイルだけを `git archive` で新しい作業ディレクトリへ展開。`.git`・`docs/spec` 実体・`*.local.md` は転送せず、ノード上に `*.local.md` が無いことを `find` で確認。rsync は使っていない）。
+既存の回収物と作業ディレクトリには触れていない。実測前に手順（`session-scripts/session-3646-excl.sh`・`excl_check.py`）を別コミットで固定した。
+
+| 項目 | 値 |
+|---|---|
+| `.rev-stamp` 1 行目 | `555a445a6d6a139e9d554cc951abc64d7c24c591`（手順固定コミット。`gb10-excl/gb10/env_info.txt` の `rev_stamp_head` と一致） |
+| `.rev-stamp` 2 行目 | `dirty=0` |
+| `RULE.txt` の sha256 | `cb2a2c109c7539d6b3298ee4291767ece7d12ffc20d4cb2275df0b0cf0ecc2a2`（`env_info.txt` の `rule_sha256` と一致。不変） |
+| `RULE.v2.txt` の sha256 | `eb71245f841c8586b08253a63a953c73f8833065945a78bcd788e103fcfebb65`（不変） |
+| ツリー指紋（ノード・Mac の `git archive` 展開物） | どちらも `5e8b85d2ffbfa4f7a022a28b1acddf6427cc88e53fbd3df341904969e5c37680`（2512 件。上と同じ指紋。一致） |
+| 等価性 | `git diff --stat v0.12.0 555a445a…`（上と同じパス群）と `git diff --stat 449ae158… 555a445a…`（`crates`・`scripts/bench/framework-compare`・RULE 2 本・`orchestrate.sh`・`aggregate.py`・`cpu-predict-resident-fixedcost-2105`・`bench_py.py`）は、どちらも空。bench-fandhe は registry の `fandhe-ai =0.12.0`（patch なし・`--locked`） |
+
+| ファイル | sha256 |
+|---|---|
+| `session-scripts/session-3646-excl.sh` | `66bba41cfe8af626cce8281231ada30370bfcdcb53470cd4feebb15e01324bbe` |
+| `excl_check.py` | `d249573084a2104333be5ef312286ad86e96535b3e1a0aa51190c355f2b87be2` |
+| `gb10-bridge/bridge_judge.py` | `254a7a7557d53c96ef154deed8ae608ee27cf0f67f98c77d4882b4786bcaca7f`（不変） |
+| `gb10-gcpuinf/gcpuinf_judge.py` | `88b6f84ef76792c988473805a926448409fa33eb5cd1a8e6ba933cb5de4738a3`（不変） |
+| `aggregate.py` | `6ed4bb45b8393cfb61c7cde8c165084382927c18a91b9d4a91522b65dcffec96`（不変） |
+| `orchestrate.sh` | `f508373827081dc74c015b239f1c4b3115053e6ae6ef9e528766ee000be961b5`（不変） |
+
+実行: 実機ロック取得 05:34:04Z → 診断主系列 → minflt → tunables → taskset → ブリッジ → G-CPU-INF → 解放 07:00:11Z（UTC。`gb10-excl/session-scripts/steps.log`）。
+ビルドはロック取得前に完了。ロック取得前に、計数しないスモーク（診断テスト 60 秒・bench-fandhe gemm fresh／reuse／reuse --phases の N=256・infer reuse --phases・PyTorch 純カーネル・PyTorch infer 窓。
+1 秒間隔 64 回の compute-apps はすべて 0 件。出力は削除済み）を行い、自プロセス由来の compute-apps が出ないことを確かめた。
+G-CPU-INF (iii) の追加確認（shim）はセッション後に別途実行した（ロックを取得・compute-apps 前後 0 件。計測外）。
+
