@@ -82,22 +82,26 @@ if [ "${host_kind}" = "gb10" ]; then
       uptime
     } >>"${GPU}" 2>&1
   }
-  poller &
-  POLLER_PID=$!
 fi
 
 cd "${T}" || exit 1
 step "start runner=$(sed -n 1p "${T}/.rev-stamp") before=$(sed -n 1p "${R}/before/.rev-stamp") after=$(sed -n 1p "${R}/after/.rev-stamp")"
 
 [ "${host_kind}" != "gb10" ] || snap "main:pre"
+# ポーラーは main:pre の後に起動し、main:post の前に停止する（窓外ポールを excl_check.py が負区間失敗とみなすため）。
+if [ "${host_kind}" = "gb10" ]; then
+  poller &
+  POLLER_PID=$!
+fi
 bash "${RES}/orchestrate.sh" "${host_kind}" --bindir "${BIN}" --out "${O}/${host_kind}" >"${O}/orch-${host_kind}.log" 2>&1
 orc_rc=$?
 step "orchestrate rc=${orc_rc}"
 final_rc=${orc_rc}
 if [ "${host_kind}" = "gb10" ]; then
-  snap "main:post"
   kill "${POLLER_PID}" 2>/dev/null
+  wait "${POLLER_PID}" 2>/dev/null
   POLLER_PID=""
+  snap "main:post"
   python3 -I "${EXCL}" "${O}" --series main >"${O}/excl_check.log" 2>&1
   excl_rc=$?
   step "excl_check rc=${excl_rc}"
