@@ -319,6 +319,13 @@ impl MemoryOps for CpuBackendOps {
         shared_cpu_memory().download(buffer)
     }
 
+    /// [`MemoryOps::download_owned`] の CPU 実装（イシュー #3672）。委譲しないと既定の
+    /// コピー版がホットパス（autodiff・facade が通る `CpuBackendOps`）で使われ効果が失われる
+    /// （`with_host_view` の #1335 codex-review P2 と同じ罠）ため明示的に転送する。
+    fn download_owned(&self, buffer: DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+        shared_cpu_memory().download_owned(buffer)
+    }
+
     /// [`MemoryOps::upload_into`] の CPU 実装（イシュー #1212）。CPU の
     /// 「デバイス」はホストメモリそのものであるため、実データは
     /// `contiguous()` した `tensor` を `dst` の `CpuBufferHandle::data`
@@ -4535,6 +4542,33 @@ mod with_host_view_forwarding_tests {
                 .collect::<Vec<_>>(),
             "CpuBackendOps::with_host_view は download() と bit 同一のはず"
         );
+    }
+
+    /// `CpuBackendOps::download_owned`（#3672）が `CpuMemory` の Vec 移動版へ転送される
+    /// （既定のコピー版へ落ちない）ことをポインタ一致で確かめる。
+    #[test]
+    fn cpu_backend_ops_download_owned_moves_vec_and_matches_download() {
+        let ops = CpuBackendOps::new();
+        let data = vec![
+            1.0f32,
+            -0.0,
+            f32::NAN,
+            f32::MIN_POSITIVE / 2.0,
+            f32::MAX,
+            -7.5,
+        ];
+        let buf = ops
+            .upload(&Tensor::<f32>::new(data, &[2, 3]).unwrap())
+            .unwrap();
+        let copied = ops.download(&buf).unwrap();
+        let mut ptr = std::ptr::null();
+        ops.with_host_view(&buf, &mut |s| ptr = s.as_ptr()).unwrap();
+        let owned = ops.download_owned(buf).unwrap();
+        assert_eq!(owned.as_slice().unwrap().as_ptr(), ptr);
+        let bits = |t: &Tensor<f32>| -> Vec<u32> {
+            t.as_slice().unwrap().iter().map(|v| v.to_bits()).collect()
+        };
+        assert_eq!(bits(&owned), bits(&copied));
     }
 }
 
