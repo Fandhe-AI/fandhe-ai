@@ -1,0 +1,6 @@
+run1 load1=7.90 waited=0s
+run1 load1=4.79 waited=30s
+run1 load1=2.96 waited=60s
+run1 load1=1.79 waited=90s
+run1 load1=1.08 waited=120s
+run1 load1=0.66 waited=150s

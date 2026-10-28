@@ -1,0 +1,101 @@
+== torch.__config__.show()
+PyTorch built with:
+  - GCC 13.3
+  - C++ Version: 202002
+  - Intel(R) MKL-DNN v3.12.0 (Git Hash 80afa71049cd69a3df32adcccb623b12cd7baa22)
+  - OpenMP 201511 (a.k.a. OpenMP 4.5)
+  - LAPACK is enabled (usually provided by MKL)
+  - NNPACK is enabled
+  - CPU capability usage: SVE128
+  - CUDA Runtime 13.0
+  - NVCC architecture flags: -gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_100,code=sm_100;-gencode;arch=compute_110,code=sm_110;-gencode;arch=compute_120,code=sm_120
+  - CuDNN 92.4  (built against CUDA 13.3)
+  - Build settings: BLAS_INFO=nvpl, BUILD_TYPE=Release, COMMIT_SHA=08187d9e0fba026dc8217405802ab5381dc88d90, CUDA_FLAGS= -DLIBCUDACXX_ENABLE_SIMPLIFIED_COMPLEX_OPERATIONS -Xfatbin -compress-all -DONNX_NAMESPACE=onnx_torch -gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_110,code=sm_110 -gencode arch=compute_120,code=sm_120 -Xcudafe --diag_suppress=cc_clobber_ignored,--diag_suppress=field_without_dll_interface,--diag_suppress=base_class_has_different_dll_interface,--diag_suppress=dll_interface_conflict_none_assumed,--diag_suppress=dll_interface_conflict_dllexport_assumed,--diag_suppress=bad_friend_decl --expt-relaxed-constexpr --expt-extended-lambda -Xfatbin -compress-all --threads 2 -compress-mode=size -Wno-deprecated-gpu-targets --expt-extended-lambda -DCUB_WRAPPED_NAMESPACE=at_cuda_detail -DDISABLE_CUSPARSE_DEPRECATED -DCUDA_HAS_FP16=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -DC10_NODEPRECATED, CUDA_VERSION=13.0, CUDNN_VERSION=9.24.0, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -ffunction-sections -fdata-sections -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DHAS_CUPTI -DUSE_FBGEMM -DUSE_MSLK -DUSE_PYTORCH_QNNPACK -DAT_BUILD_ARM_VEC256_WITH_SLEEF -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-omit-frame-pointer -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=nvpl, TORCH_VERSION=2.14.0, USE_CUDA=1, USE_CUDNN=ON, USE_CUSPARSELT=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_HIPSPARSELT=OFF, USE_MKLDNN=1, USE_MPI=OFF, USE_NCCL=ON, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, 
+
+== LD_DEBUG=bindings: mm 実行時に解決された BLAS 系シンボルの解決先
+   2642335:	binding file /usr/lib/python3.12/lib-dynload/_ctypes.cpython-312-aarch64-linux-gnu.so [0] to <home>/work/.venv-bench/bin/python [0]: normal symbol `PyType_FromMetaclass'
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `vsnprintf' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to <home>/work/.venv-bench/bin/python [0]: normal symbol `stderr' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `bind' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to <home>/work/.venv-bench/bin/python [0]: normal symbol `stdin' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `__cxa_finalize' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `listen' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `socketpair' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `sendmsg' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `socket' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `__pthread_key_create' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `connect' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `recvmsg' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to <home>/work/.venv-bench/bin/python [0]: normal symbol `stdout' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `gettimeofday' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `memmove' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `dgettext' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `lseek' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `opendir' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libgcc_s.so.1 [0]: normal symbol `_Unwind_GetRegionStart' [GCC_3.0]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `uname' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `geteuid' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `wmemmove' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `clock_gettime' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `memset' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `__newlocale' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_cond_destroy' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `fopen64' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `fseeko64' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `open' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `memcpy' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libgcc_s.so.1 [0]: normal symbol `_Unwind_GetTextRelBase' [GCC_3.0]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `read' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `malloc' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `shmget' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `dlmopen' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `fflush' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libgcc_s.so.1 [0]: normal symbol `__unordtf2' [GCC_4.5.0]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `__nl_langinfo_l' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_rwlock_wrlock' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `wcsnrtombs' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `sem_trywait' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `nftw' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `ftruncate' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `sem_post' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `ungetc' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `ftello64' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `mbsnrtowcs' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_key_create' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_detach' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_mutex_init' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `wmemset' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `wmemcpy' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_mutexattr_settype' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_mutexattr_init' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `realloc' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `gettext' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libgcc_s.so.1 [0]: normal symbol `_Unwind_RaiseException' [GCC_3.0]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `fprintf' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `vsnprintf' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `setenv' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `putwc' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `wcscmp' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `getauxval' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `fputs' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libgcc_s.so.1 [0]: normal symbol `__gttf2' [GCC_3.0]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `getcwd' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pipe' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `__duplocale' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `ferror' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_spin_destroy' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `munmap' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `snprintf' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `dlerror' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `time' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `__wcsftime_l' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `pthread_create' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `isspace' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `strdup' [GLIBC_2.17]
+   2642335:	binding file <home>/work/.venv-bench/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13 [0] to /lib/aarch64-linux-gnu/libc.so.6 [0]: normal symbol `__fxstat64' [GLIBC_2.17]
+== ldd libtorch_cpu.so
+	libnvpl_blas_lp64_gomp.so.0 => <home>/work/.venv-bench/lib/python3.12/site-packages/torch/lib/libnvpl_blas_lp64_gomp.so.0 (0x0000fa05cd220000)
+	libarm_compute.so => <home>/work/.venv-bench/lib/python3.12/site-packages/torch/lib/libarm_compute.so (0x0000fa05cc2f0000)
+	libarm_compute_graph.so => <home>/work/.venv-bench/lib/python3.12/site-packages/torch/lib/libarm_compute_graph.so (0x0000fa05cc1c0000)
+	libnvpl_blas_core.so.0 => <home>/work/.venv-bench/lib/python3.12/site-packages/torch/lib/libnvpl_blas_core.so.0 (0x0000fa05cb8b0000)
+== perf_event_paranoid: 4

@@ -1,0 +1,6 @@
+main excl=pass
+minflt excl=pass
+tunables excl=pass
+taskset excl=pass
+bridge excl=pass
+gcpuinf excl=pass

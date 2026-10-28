@@ -1,0 +1,26 @@
+torch-kernel r=1 rc=0
+torch-infer-window r=1 rc=0
+torch-kernel r=2 rc=0
+torch-infer-window r=2 rc=0
+torch-kernel r=3 rc=0
+torch-infer-window r=3 rc=0
+torch-kernel r=4 rc=0
+torch-infer-window r=4 rc=0
+torch-kernel r=5 rc=0
+torch-infer-window r=5 rc=0
+fandhe-infer fresh r=1 rc=0
+fandhe-infer reuse r=1 rc=0
+fandhe-infer phases r=1 rc=0
+fandhe-infer phases r=2 rc=0
+fandhe-infer reuse r=2 rc=0
+fandhe-infer fresh r=2 rc=0
+fandhe-infer fresh r=3 rc=0
+fandhe-infer reuse r=3 rc=0
+fandhe-infer phases r=3 rc=0
+fandhe-infer phases r=4 rc=0
+fandhe-infer reuse r=4 rc=0
+fandhe-infer fresh r=4 rc=0
+fandhe-infer fresh r=5 rc=0
+fandhe-infer reuse r=5 rc=0
+fandhe-infer phases r=5 rc=0
+perf-record rc=255
