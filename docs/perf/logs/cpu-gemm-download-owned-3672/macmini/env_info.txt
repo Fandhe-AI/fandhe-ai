@@ -1,0 +1,23 @@
+date_utc: 2026-10-28T14:16:03Z
+uname: Darwin 27.0.0 arm64
+Apple M4
+10
+4
+6
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+pagesize: 16384
+rule_sha256: 03d4c5f4f3dd08d9f076bfa879ccb8ca9c983005bf5ea5e06663cb1f2ed793be
+rule_v2_sha256: f07439fd88ee335028dee3d6a2bb1b495281099c4ab7a1d82fa804538a9d1ddc
+RAYON_NUM_THREADS: unset
+host_kind: macmini
+series_kind: main
+load_max: 3.0
+before_rev_stamp: a7aac2f0227add243845418e0897ac0675c5b622 dirty=0
+after_rev_stamp: f7ce20fc91730216e8f3f60514b181f32ebfee48 dirty=0
+bench-before_sha256: 5eb3b38f456a449f2d1450f631424b41b43f2964082c0766e038be2b0c6322c2
+bench-after_sha256: 2b47c47719cc586f00d464bd34eca375c2c55b855e7eb48317ac7340a22209b2
+diag-before_sha256: da0c8b82c95cfe360ec6270a8ebaff8cfc0cf86e95730e526975fe0f8e2e880c
+diag-after_sha256: 6152f48de487065d00da69fc91549a0287393f57c3f3ffd24187df0c892afcd7
+rustc -vV: rustc 1.99.0 (b940084d7 2026-09-28);binary: rustc;commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4;commit-date: 2026-09-28;host: aarch64-apple-darwin;release: 1.99.0;LLVM version: 23.1.1;
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)

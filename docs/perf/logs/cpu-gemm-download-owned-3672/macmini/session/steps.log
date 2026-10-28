@@ -1,0 +1,7 @@
+2026-10-28T14:16:03Z hwlock acquired host=macmini
+2026-10-28T14:16:03Z start runner=a36f2efecbac9894114d0e6f4d61c986fe2f6c37 before=a7aac2f0227add243845418e0897ac0675c5b622 after=f7ce20fc91730216e8f3f60514b181f32ebfee48
+2026-10-28T14:57:10Z orchestrate rc=0
+2026-10-28T14:57:10Z ab_judge rc=2
+2026-10-28T14:57:10Z session body done
+done. rc=0
+2026-10-28T14:57:10Z hwlock released
