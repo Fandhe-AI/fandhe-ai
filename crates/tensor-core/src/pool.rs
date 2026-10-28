@@ -312,6 +312,11 @@ impl BufferHandle for PooledBufferHandle {
         // それでも `BufferHandle` の完全性のため転送を実装しておく。
         self.inner.as_any_mut()
     }
+
+    /// drop で内部ハンドルをプールへ返すため `true`（`download_owned` の所有権奪取を防ぐ）。
+    fn is_pool_owned(&self) -> bool {
+        true
+    }
 }
 
 impl Drop for PooledBufferHandle {

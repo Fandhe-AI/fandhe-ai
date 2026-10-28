@@ -305,6 +305,11 @@ impl MemoryOps for CpuMemory {
         if buffer.device() != Device::Cpu {
             return Err(BackendError::DeviceMismatch);
         }
+        // プール付きバッファは drop で内部ハンドルがプールへ戻るため、Vec を奪うと
+        // 抜け殻が再利用される（codex P1）。コピー版へ退いて実体を保つ。
+        if buffer.is_pool_owned() {
+            return self.download(&buffer);
+        }
         let shape = buffer.shape().to_vec();
         let numel = buffer.numel();
         let mut buffer = buffer;
@@ -701,6 +706,23 @@ mod tests {
             mem.download_owned(other).unwrap_err(),
             BackendError::DeviceMismatch
         ));
+    }
+
+    /// プール付きバッファは `download_owned` で Vec を奪わず、同サイズ再確保が健全（codex P1）。
+    #[test]
+    fn download_owned_pooled_buffer_keeps_shell_intact() {
+        use fandhe_ai_tensor_core::pool::{PoolConfig, PooledMemory};
+        let mem = PooledMemory::new(CpuMemory::new(), Device::Cpu, PoolConfig::default());
+        let mut buf = mem.alloc_zeroed(&[4, 4]).unwrap();
+        buf.downcast_handle_mut::<CpuBufferHandle>()
+            .unwrap()
+            .data_mut()
+            .fill(3.0);
+        let t = CpuMemory::new().download_owned(buf).unwrap();
+        assert_eq!(t.as_slice().unwrap(), &[3.0f32; 16][..]);
+        let again = mem.alloc_zeroed(&[4, 4]).unwrap();
+        let t2 = mem.download(&again).unwrap();
+        assert_eq!(t2.as_slice().unwrap(), &[0.0f32; 16][..]);
     }
 
     /// `take_data` は prepack キャッシュ破棄経路（`data_mut` と同じ）を通る。

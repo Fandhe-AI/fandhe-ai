@@ -122,6 +122,15 @@ pub trait BufferHandle: fmt::Debug + 'static {
              （tensor-core 0.2.0 → 0.3.0 の破壊的変更。crates/tensor-core/src/buffer.rs 参照）。"
         )
     }
+
+    /// プール（`pool::PooledMemory`）が drop 時に内部ハンドルを回収するハンドルなら `true`
+    /// （イシュー #3672・codex P1）。`PooledBufferHandle` は `as_any_mut` を内部ハンドルへ
+    /// 転送するため、`download_owned` が Vec を移すと抜け殻がプールへ戻り、次の同サイズ
+    /// `alloc_zeroed` が空の実体を返してしまう。所有権を奪う最適化はこれが `false` の
+    /// ハンドルに限る。既定は `false`（既存実装への非破壊拡張）。
+    fn is_pool_owned(&self) -> bool {
+        false
+    }
 }
 
 /// デバイス上に確保されたバッファへのハンドル。
@@ -242,6 +251,12 @@ impl<T: Element> DeviceBuffer<T> {
     /// を誤って渡した等。`downcast_handle` と同じ契約）。
     pub fn downcast_handle_mut<H: BufferHandle>(&mut self) -> Option<&mut H> {
         self.handle.as_any_mut().downcast_mut::<H>()
+    }
+
+    /// 内部ハンドルがプール回収対象か（[`BufferHandle::is_pool_owned`]）。
+    /// 所有権を奪う `download_owned` 実装が、プール付きバッファではコピーへ退くための判定。
+    pub fn is_pool_owned(&self) -> bool {
+        self.handle.is_pool_owned()
     }
 
     /// 内部ハンドルの所有権を取り出す（`downcast_handle` は参照しか返さない）。
