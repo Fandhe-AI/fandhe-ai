@@ -27,6 +27,7 @@ compute プロセス 0 件の GB10（`<cuda-node>`）で、`RULE.txt`（ブリ�
 - `session-scripts/session-3646-excl.sh`（開始前に固定コミット `555a445a`）。poller（30 秒間隔）と系列ラベル `current_series` で、系列ごとの途中の出現を判定する
 - G-CPU-INF (iii) の補足 shim（`gb10-gcpuinf/blas_probe/probe_out.txt`）はセッション後に同じ `blas_probe/run_probe.sh` を実行した追加確認（計測外・時間は測らない）。
   出力は `../gb10-gcpuinf/blas_probe/probe_out.txt`（PR #3669 の参考記録）と sha256 まで同一
+- `session-scripts/session-3646-excl.sh` は親ディレクトリの `../session-scripts/session-3646-excl.sh` とバイト一致（sha256 `66bba41c…`）の**意図的な二重配置**。親側は `rev-stamp-verification-3646.md` が指す固定手順の原本、本ディレクトリ側は専有系列の回収物を単体で完結させるための同梱コピーで、どちらも実測後は書き換えない（差分が出た場合は同梱コピーではなく rev-stamp 記載の sha256 を正とする）
 - 回収物は `$HOME` を `<home>` に置換済み（数値は書き換えていない）
 
 ## 構成
