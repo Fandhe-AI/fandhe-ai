@@ -10,7 +10,9 @@
 # ホスト名・ユーザー名のマスクは回収側で行う。
 export PATH=$HOME/.cargo/bin:$PATH
 export LC_ALL=C
-unset RAYON_NUM_THREADS CARGO_TARGET_DIR GEMM_REUSE_MINFLT GLIBC_TUNABLES GEMM_WINDOW_ONLY_ARM
+# RAYON_NUM_THREADS は無条件に unset せず、設定済みなら（計測条件の混入として）先に拒否して終了する。
+if [ -n "${RAYON_NUM_THREADS+x}" ]; then echo "RAYON_NUM_THREADS が設定済みのため中止する" >&2; exit 7; fi
+unset CARGO_TARGET_DIR GEMM_REUSE_MINFLT GLIBC_TUNABLES GEMM_WINDOW_ONLY_ARM
 R=$HOME/work/r3680-excl
 T=$R/runner
 O=$R/out
@@ -36,6 +38,21 @@ ARMS_EVEN="tuntrim tunmmap tunboth vafter base"
 # 既存の出力があれば中止（専有系列は新しい作業ディレクトリでだけ取る。上書き・追記をしない）。
 if [ -e "$O" ]; then echo "output dir exists: $O" >&2; exit 5; fi
 [ -x "$BIN" ] || { echo "bench バイナリが無い: $BIN（build_bench_head.sh を先に実行）" >&2; exit 6; }
+# bench バイナリのビルド元と計測木の一致を保証する。arms.txt を必須とし、
+# ビルド時 rev-stamp・バイナリ sha256 を現在の計測木（.rev-stamp）・実行ファイルと照合する（不一致は中止）。
+ARMS=$BINDIR/arms.txt
+[ -f "$ARMS" ] || { echo "arms.txt が無い: $ARMS（build_bench_head.sh の出力が必須）" >&2; exit 6; }
+[ -f "$T/.rev-stamp" ] || { echo ".rev-stamp が無い: $T" >&2; exit 6; }
+sha256_pre() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+want_rev="rev_stamp: $(sed -n 1p "$T/.rev-stamp") $(sed -n 2p "$T/.rev-stamp")"
+[ "$(sed -n 's/^rev_stamp: .*/&/p' "$ARMS" | head -n 1)" = "$want_rev" ] \
+  || { echo "arms.txt の rev_stamp が計測木と不一致（bench バイナリのビルド元が異なる）" >&2; exit 8; }
+[ "$(sed -n 2p "$T/.rev-stamp")" = "dirty=0" ] || { echo "計測木が dirty" >&2; exit 8; }
+want_sha="$(sed -n 's/^bench-fandhe-head_sha256: //p' "$ARMS" | head -n 1)"
+[ -n "$want_sha" ] && [ "$want_sha" = "$(sha256_pre "$BIN")" ] \
+  || { echo "bench バイナリの sha256 が arms.txt と不一致" >&2; exit 8; }
 mkdir -p "$O" || exit 1
 echo idle >"$CUR"
 step() { echo "$(date -u +%FT%TZ) $*" >>"$LOG"; }
@@ -153,8 +170,14 @@ step "start tree=$(sed -n 1p "$T/.rev-stamp")"
 # ---- (1) 診断の正式系列 ----
 snap "diag:pre"
 echo diag >"$CUR"
+# 診断系列も起動前に負荷ゲートを通す。未通過なら起動せず中止する。
+gate "diag:pre" || abort_gate "diag:pre"
 bash "$RES3671/orchestrate.sh" gb10 --out "$O/gb10" >"$O/orch-gb10.log" 2>&1
 step "orchestrate-diag rc=$?"
+# orchestrate.sh は run ごとの未通過を「参考扱い」で続行するため、#3680 ではここで検出して後続（bench 系列）を中止する。
+if grep -q 'gate=unpassed' "$O/gb10/load_gate_status.txt" 2>/dev/null; then
+  abort_gate "diag orchestrate 内の run で未通過"
+fi
 echo idle >"$CUR"
 snap "diag:post"
 
