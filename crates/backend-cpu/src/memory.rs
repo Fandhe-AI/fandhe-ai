@@ -312,6 +312,12 @@ impl MemoryOps for CpuMemory {
         }
         let shape = buffer.shape().to_vec();
         let numel = buffer.numel();
+        // 不変ダウンキャストで型を先に確認する。`as_any` のみ実装した外部ハンドルに
+        // 可変ダウンキャスト（`as_any_mut` 既定実装は panic）を行うと、
+        // `DeviceMismatch` の前に panic するため（codex P1）。
+        if buffer.downcast_handle::<CpuBufferHandle>().is_none() {
+            return Err(BackendError::DeviceMismatch);
+        }
         let mut buffer = buffer;
         let handle = buffer
             .downcast_handle_mut::<CpuBufferHandle>()
@@ -704,6 +710,24 @@ mod tests {
             DeviceBuffer::new(Device::Cuda(0), vec![1], Box::new(OtherHandle));
         assert!(matches!(
             mem.download_owned(other).unwrap_err(),
+            BackendError::DeviceMismatch
+        ));
+    }
+
+    /// `as_any` のみ実装した外部ハンドルでも panic せず `DeviceMismatch` を返す（codex P1）。
+    #[test]
+    fn download_owned_foreign_handle_without_as_any_mut_is_mismatch() {
+        #[derive(Debug)]
+        struct ForeignHandle;
+        impl BufferHandle for ForeignHandle {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        let foreign: DeviceBuffer<f32> =
+            DeviceBuffer::new(Device::Cpu, vec![1], Box::new(ForeignHandle));
+        assert!(matches!(
+            CpuMemory::new().download_owned(foreign).unwrap_err(),
             BackendError::DeviceMismatch
         ));
     }
