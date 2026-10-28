@@ -1,0 +1,26 @@
+RULE.v2 fixed-at-utc: 2026-10-28T00:00:00Z (実機計測より前に RULE.txt とは別コミットで固定。事後に緩めない)
+issue: #3671 GB10 CPU gemm の N=256〜2048 で bench の reuse 窓が診断より遅い原因の切り分け
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §10
+supersedes: RULE.txt の [判定] 節の「基準の再確認」1 項だけ。RULE.txt 本文は編集しない
+  （orchestrate.sh が RULE.txt の sha256 を env_info.txt に記録しドリフトガードに使うため）。
+
+[変更理由（実測前に判明した不整合。実測は未実施）]
+- RULE.txt の「基準の再確認」は「bench の matmul 区間差が iter_total 差の 50% 以上かつ matmul 区間比 0.5〜2.0」と
+  書いたが、これは #3646 の RULE.txt 原本のブリッジ（RULE.v2.txt で置換済み。gemm fresh --phases は
+  bench が MEASURE_ERROR で拒否するため計算できない）の判定式である。#3646 の正式判定は RULE.v2 のブリッジ v2
+  （G_bench / G_diag が 0.5〜2.0）で、本 Issue が説明したい現象（N=256〜2048 で比が 8.1〜20.1）もこの式の fail である。
+  RULE.txt のまま実行すると基準の再確認が計算不能になるため、#3646 RULE.v2 のブリッジ v2 の式へ置換する。
+- 判定の閾値・腕・帰属規則・checksum 規則・ゲート・専有・同定・対象外は RULE.txt のまま有効。新しい閾値は作らない。
+
+[基準の再確認（RULE.txt の同項を置換）]
+- 同じセッションの bench_base と診断 resident_public で bridge_v2 = (G_bench > 0 かつ G_diag > 0 かつ
+  0.5 <= G_bench / G_diag <= 2.0) を N ごとに判定する。判定対象 N=256〜2048 で fail の N を「現象が再現した N」とする。
+  pass の N は「再現しない」と記録し、その N の帰属は行わない。bench 側の腕 Y・診断側の腕 X の支持判定は
+  再現した N だけで行う。
+- 記録のみ（判定外）: bench の --phases の matmul 区間 / G_bench、to_tensor・host_copy・checksum 区間、通常 reuse 行の
+  median_s、各腕 X の iter_total ÷ bench_base の reuse iter_total（絶対値での近さ。比が 1 に近いほど窓の差が埋まったことを示す）、
+  E(N)。
+- 通常 reuse 行（--mode reuse）と --phases の iter_total の差は記録のみ。
+
+[固定後]
+- 規則・期待行数・閾値を変えない。RULE.v2.txt の sha256 は rev-stamp-verification-3671.md と README に記録する。
