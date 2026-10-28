@@ -43,4 +43,12 @@ RULE.txt の「非処置セル: 上記以外の全セル」は、機体ごとに
 
 ## 状態
 
-（実測後に更新する）
+2026-10-28 に GB10 専有（`<cuda-node>`）と Mac mini（`<metal-node>`）で各 1 回（ラベル `s1`）実測済み。
+**判定は REJECT**（`judge-3672.md`）。処置 2 セルは ratio 0.80（bench N=4096）・0.82（診断 resident_public N=4096）で 5/5 run < 1.00、
+rho_REM 1.28、checksum 全件一致だが、RULE の「5/5 run で後退したセルがある」に非処置 3 セルが当たった
+（GB10 診断 resident_split N=512、Mac mini 診断 resident_public N=256 と gemm_device_download N=4096）。
+詳細・保守性の判断・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §11。
+
+実行の経緯: 起動のやり直しなし。計測後に `ab_judge.py` を 1 点修正した（判定に使わない区間行の `median_s` が 0.0 でも入力不備にしない。
+判定式・閾値は不変。`rev-stamp-verification-3672.md`）。`RULE.v2.txt` の `fixed-at-utc`（13:30Z）は記入時の誤りで、実際のコミットは 14:00Z 頃（同 md で訂正）。
+`orchestrate.sh` の最終行の案内文は絶対パスを含むため、回収時にマスクした。

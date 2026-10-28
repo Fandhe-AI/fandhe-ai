@@ -94,7 +94,7 @@ def load_diag_run(path):
     for d in read_jsonl(path):
         try:
             key = (d["arm"], d["phase"], d["n"])
-            val = (pos_float(d["median_s"], "median_s"), d["n_samples"], d.get("checksum_bits"))
+            val = (d["median_s"], d["n_samples"], d.get("checksum_bits"))
         except KeyError as e:
             raise JudgeError("診断行にキーが無い: %s (%s)" % (path, e))
         if key in out:
@@ -104,6 +104,8 @@ def load_diag_run(path):
     for k in needed:
         if k not in out:
             raise JudgeError("診断行が欠落: %s %r" % (path, k))
+        # 判定に使う行だけ値を検査する（使わない区間行は Mac のタイマー分解能で 0.0 になりうるため検査しない）。
+        pos_float(out[k][0], "median_s %r" % (k,))
     for a in DIAG_ARMS:
         for n in SIZES:
             if not isinstance(out[(a, "iter_total", n)][2], str) or not out[(a, "iter_total", n)][2]:
@@ -378,6 +380,8 @@ def make_host(root, host, factor, kind="main", gate="pass", excl="pass", cksum_a
                     rows.append({"arm": a, "phase": "iter_total", "n": n, "median_s": v, "n_samples": 20, "checksum_bits": ck})
             dl = 0.01
             rows.append({"arm": "resident_split", "phase": "download", "n": TREAT_N, "median_s": dl, "n_samples": 20, "checksum_bits": None})
+            # 使わない区間行の 0.0（タイマー分解能）は判定を止めない（Mac mini 実測で発生。判定器の修正点）
+            rows.append({"arm": "fresh", "phase": "tape_build", "n": 256, "median_s": 0.0, "n_samples": 20, "checksum_bits": None})
             if drop == r and arm == "after":
                 rows.pop(0)
             _w(os.path.join(root, arm, "run%d.jsonl" % r), "".join(json.dumps(x) + "\n" for x in rows))

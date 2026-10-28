@@ -1,0 +1,32 @@
+run1 load1=0.11 waited=0s
+run1 order=before,after
+run2 load1=8.50 waited=0s
+run2 load1=5.15 waited=30s
+run2 load1=3.12 waited=60s
+run2 load1=1.95 waited=90s
+run2 load1=1.24 waited=120s
+run2 load1=0.75 waited=150s
+run2 order=after,before
+run3 load1=11.48 waited=0s
+run3 load1=6.96 waited=30s
+run3 load1=4.22 waited=60s
+run3 load1=2.55 waited=90s
+run3 load1=1.55 waited=120s
+run3 load1=0.94 waited=150s
+run3 order=before,after
+run4 load1=12.63 waited=0s
+run4 load1=7.65 waited=30s
+run4 load1=4.78 waited=60s
+run4 load1=3.22 waited=90s
+run4 load1=2.19 waited=120s
+run4 load1=1.33 waited=150s
+run4 load1=0.80 waited=180s
+run4 order=after,before
+run5 load1=13.19 waited=0s
+run5 load1=7.99 waited=30s
+run5 load1=4.84 waited=60s
+run5 load1=2.93 waited=90s
+run5 load1=1.78 waited=120s
+run5 load1=1.08 waited=150s
+run5 load1=0.65 waited=180s
+run5 order=before,after

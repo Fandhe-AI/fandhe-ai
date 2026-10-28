@@ -579,8 +579,10 @@ bench 側の腕 Y（H-A3・H-B）。支持の条件は G_Y / G_diag が 0.5〜2.
 
 ### 11.1 状態（先に結論）
 
-- **実装は完了。実機 A/B は未実測**（GB10 専有・Mac mini とも本セッションからは到達できず測っていない。Linux x86・M4 Max の値で代替しない）。よって性能規則の結論は「未実測」で、ADOPT／REJECT／判定不能のいずれも出していない。本 PR は `Refs #3672`（`Closes` は両機体の判定後）
-- 事前登録規則は `logs/cpu-gemm-download-owned-3672/RULE.txt`（sha256 `03d4c5f4f3dd08d9f076bfa879ccb8ca9c983005bf5ea5e06663cb1f2ed793be`。実測前に単独コミットで固定）
+- **実装は完了（PR #3677）。実機 A/B は 2026-10-28 に GB10 専有（`<cuda-node>`）と Mac mini（`<metal-node>`）の両機体で RULE どおりに実測し、性能規則の結論は REJECT**（`logs/cpu-gemm-download-owned-3672/judge-3672.md`。`ab_judge.py` の出力そのまま）
+- REJECT の理由は、RULE の「5/5 run で後退（全 run で ratio > 1.00）したセルがある」に当たる非処置セルが 3 つあること。GB10 の診断 `resident_split` N=512（中央値 ratio 1.0743）、Mac mini の診断 `resident_public` N=256（同 1.0872）と診断 `gemm_device_download` N=4096（同 1.0021）。**処置 2 セルは大きく改善し（GB10 bench reuse N=4096 は ratio 0.7997、診断 `resident_public` N=4096 は 0.8220。ともに 5/5 run で < 0.95）、rho_REM は 1.28、checksum は全件一致**。ADOPT に必要な非処置セルの条件（全セル中央値 ratio ≤ 1.00）を満たしたセルは多いが、ノイズ級の > 1.00 が両機体に残った（`judge-3672.md` の「ADOPT を妨げた項目」に 18 件〈GB10 4・Mac mini 14〉を列挙）
+- 事前登録規則は `logs/cpu-gemm-download-owned-3672/RULE.txt`（sha256 `03d4c5f4f3dd08d9f076bfa879ccb8ca9c983005bf5ea5e06663cb1f2ed793be`。実測前に単独コミットで固定）と `RULE.v2.txt`（sha256 `f07439fd88ee335028dee3d6a2bb1b495281099c4ab7a1d82fa804538a9d1ddc`。セル集合の解釈の固定。閾値は不変。計測部品のコミットより前に単独コミットで固定）
+- 専有・ゲート: GB10 は 5 run 全てで load1 < 1.0、compute プロセス 0 件（poller 61 件・前後のスナップショット。`excl_check.py --series main` は `main excl=pass`）。Mac mini は 5 run 全てで load1 < 3.0。腕の同定（`.rev-stamp`・ツリー指紋・バイナリ sha256）は `logs/cpu-gemm-download-owned-3672/rev-stamp-verification-3672.md`
 
 ### 11.2 設計（所有者判断 §9.5 (a) の実装）
 
@@ -600,19 +602,57 @@ bench 側の腕 Y（H-A3・H-B）。支持の条件は G_Y / G_diag が 0.5〜2.
 
 before = マージベース・after = PR head の 2 木を ABBA・5 run・N=256〜2048・4096。処置セルは GB10 の bench reuse と診断 `resident_public` の N=4096。ADOPT は処置 2 セルが中央値 ratio ≤ 0.95 かつ 5/5 run < 1.00・rho_REM ≥ 0.5・非処置セルが ≤ 1.00・checksum 全一致。詳細は RULE.txt を正とする。
 
-### 11.5 結果
+### 11.5 結果（2026-10-28。5 run 中央値。生値・全セルは `logs/cpu-gemm-download-owned-3672/judge-3672.md`、機体別の生ログは `gb10/`・`macmini/`）
 
-全セル **未実測**。
+before = `a7aac2f02`（マージベース）、after = `f7ce20fc9`（PR head。tree は `e03f81957` と同一）。ratio = after / before の中央値（run ごとの ratio の中央値）。ABBA・5 run・独立プロセス。
 
-### 11.6 性能規則の結論
+**GB10（`<cuda-node>`・専有 pass）**
 
-**未実測**（A/B 未実施のため判定なし。規則は緩めていない）。
+| セル | N | before (s) | after (s) | 中央値 ratio | run ごとの ratio |
+|---|---|---|---|---|---|
+| bench reuse iter_total（**処置**） | 4096 | 0.153438 | 0.122702 | **0.7997** | 0.8221 0.7997 0.7861 0.8109 0.7923 |
+| 診断 resident_public iter_total（**処置**） | 4096 | 0.15118 | 0.124936 | **0.8220** | 0.8322 0.8187 0.8220 0.8181 0.8298 |
+| bench reuse iter_total（非処置） | 256 | 0.000357577 | 0.000182137 | 0.5115 | 0.5115 0.4646 0.5335 0.5364 0.4287 |
+| 同 | 512 | 0.00239146 | 0.00185485 | 0.7731 | 0.8438 0.7628 0.7381 0.7731 0.8793 |
+| 同 | 1024 | 0.00637541 | 0.00442637 | 0.6675 | 0.8051 0.6675 0.7674 0.6261 0.6537 |
+| 同 | 2048 | 0.0301476 | 0.0166738 | 0.5407 | 0.5235 0.5785 0.5407 0.5297 0.5652 |
+| 診断 resident_public（非処置） | 256 | 0.000183712 | 0.00018104 | 1.0030 | 1.0023 1.0098 1.0972 1.0030 0.8847 |
+| 同 | 512 | 0.00109195 | 0.0011259 | 1.0143 | 1.0143 1.0223 0.9976 0.9490 1.0606 |
+| 同 | 1024 | 0.00419371 | 0.00388986 | 0.9341 | 0.9912 0.9341 1.0569 0.8240 0.7939 |
+| 同 | 2048 | 0.017263 | 0.0164745 | 0.9543 | 0.9606 0.9541 0.9546 0.9348 0.9543 |
+| 診断 resident_split（非処置・REJECT 条件） | 512 | 0.00112684 | 0.00125103 | 1.0743 | 1.1748 1.0062 1.0444 1.1613 1.0743 |
 
-### 11.7 保守性の判断（11.6 とは別項）
+**Mac mini（`<metal-node>`・5 run とも load1 < 3.0）**
 
-内部 trait への追加は 1 メソッド・CPU の上書きは 2 か所で、既定実装により他バックエンドは無改修。将来 Metal（unified memory）が同じ上書きの候補になりうるが提案のみ。
+| セル | N | before (s) | after (s) | 中央値 ratio | run ごとの ratio |
+|---|---|---|---|---|---|
+| bench reuse iter_total（非処置） | 256 / 512 / 1024 / 2048 / 4096 | 各セルは `judge-3672.md` | | 0.9712 / 0.9828 / 0.9825 / 0.9794 / 0.9919 | |
+| 診断 resident_public（非処置・REJECT 条件） | 256 | 0.000230708 | 0.00024875 | 1.0872 | 1.0732 1.0872 1.1031 1.1208 1.0679 |
+| 診断 resident_public（非処置） | 4096 | 0.265233 | 0.263727 | 0.9952 | 0.9949 0.9923 0.9980 0.9952 0.9959 |
+| 診断 gemm_device_download（非処置・REJECT 条件） | 4096 | `judge-3672.md` | | 1.0021 | 全 5 run で > 1.00 |
+
+**rho（GB10 N=4096。`ab_judge.py` の出力）**: X_before 0.0370215 s・X_after 0.0116697 s・DL_before 0.0197884 s、**rho_REM = 1.2811（≥ 0.5）**。bench の iter_total 差から rho_BENCH = 1.5532、rho_OFFSET = −0.5532（相殺は起きず、窓の短縮は download 区間より大きい）。
+
+**checksum**: 診断の iter_total（全 8 腕 × 5 N）と bench の iter_total（5 N）の checksum は、両機体で before・after の全 run が完全一致（不一致 0 件）。
+
+### 11.6 性能規則の結論（`judge-3672.md` の結論を機械的に転記）
+
+**REJECT**。RULE.txt の「5/5 run で後退（全 run で ratio > 1.00）したセルがある」に 3 セル（上記）が当たった。処置セルの条件（中央値 ratio ≤ 0.95 かつ 5/5 run < 1.00）と rho_REM ≥ 0.5 は満たし、checksum も全件一致したが、RULE の REJECT 条件が ADOPT の成否より先に適用される。規則は緩めていない。
+
+事実の記録（因果の断定ではない）:
+- 処置 2 セルは約 18〜20% 短縮（ratio 0.80〜0.82）。N=4096 の download 区間（DL_before 19.8 ms）を除くと X が 37.0 ms から 11.7 ms へ減った（rho_REM 1.28）
+- GB10 の bench reuse は N=256〜2048 でも 0.51〜0.77 へ短縮した（処置セル外。RULE では非処置セル）
+- REJECT 条件に当たった 3 セルのうち 2 つ（GB10 診断 `resident_split` N=512・Mac mini 診断 `resident_public` N=256）は小 N で 7〜9% の後退、Mac mini の診断 `gemm_device_download` N=4096 は ratio 1.0021（run 間のばらつきが小さく 5/5 が > 1.00 になった）。3 件とも本 Issue では原因を切り分けていない（計測ノイズの可能性を含む。RULE のとおり判定に使い、除外していない）
+
+### 11.7 保守性の判断（11.6 とは別項。提案・ユーザー判断待ち）
+
+内部 trait への追加は 1 メソッド・CPU の上書きは 2 か所で、既定実装により他バックエンドは無改修。処置セルの改善（約 18〜20%）と全 checksum 一致を踏まえると、**変更を残すこと自体は保守性・性能の両面で妥当と考えるが、性能規則の結論は REJECT のままで、採否はユーザー判断**。判断のために論点を 2 つ挙げる。(1) RULE.v2 で「非処置セル = bench と診断の全腕の iter_total」と厳しい側に固定したため、Mac mini の小 N などノイズ級の差（中央値 ratio が 1.00 を 0.1〜9% 上回る）も ADOPT を妨げる（18 件）。規則の趣旨が「`matmul_resident` 経路の後退検出」なら、対象セルの絞り方は別 Issue で事前登録し直して再計測すべきで、事後に緩めない。(2) GB10 診断 `resident_split` N=512 と Mac mini 診断 `resident_public` N=256 の小 N 後退は再現性のある差の可能性があり（5/5 run で後退）、小 N の経路（#3671 の対象）として別途確認する価値がある。将来 Metal（unified memory）が同じ上書きの候補になりうるが提案のみ。
 
 ### 11.8 限界
 
-- A/B のスクリプト（`build_ab_arms.sh`・`orchestrate.sh`・`ab_judge.py`・セッションスクリプト）は未作成。実測は後続で RULE に従って行う
-- autodiff 内の他の `download(` 呼び出しは本 Issue の対象外
+- 腕の木は git archive の展開木で、ビルドは各ノードで 1 回ずつ（`build_ab_arms.sh`）。計測中のビルド並走はない。診断の反復数は `iters_for` の既定のまま
+- 計測部品（`build_ab_arms.sh`・`orchestrate.sh`・`ab_judge.py`・セッションスクリプト）は計測より前にコミットした。例外として、計測後に `ab_judge.py` を 1 点修正した（判定に使わない区間行の `median_s` が 0.0 のとき入力不備にしていた過剰な検査を外した。閾値・判定式は不変。詳細は `rev-stamp-verification-3672.md`）
+- RULE.v2.txt の `fixed-at-utc` は記入時の誤り（13:30Z と記載、実際は 14:00Z 頃のコミット）。計測開始（14:15Z）より前に固定した事実は不変（`rev-stamp-verification-3672.md`）
+- `orchestrate.sh` の最終行の案内文は絶対パスを含む（回収時にマスクした）
+- GB10 は専有 pass だが、診断・bench とも 1 機体 1 系列（5 run）。小 N の差は run 間のばらつきが大きく、本 Issue の対象（N=4096 の逆転）の判定には影響しないが、小 N の後退の有無は別途の確認が要る
+- autodiff 内の他の `download(` 呼び出し、`PooledMemory`・Metal の `download_owned` 上書き、出力バッファのプール（§9.5 (b)）、bench 窓の見直し（§9.5 (c)）、N=256〜2048 の逆転（#3671）は本 Issue の対象外
