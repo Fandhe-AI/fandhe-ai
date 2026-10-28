@@ -1,0 +1,11 @@
+2026-10-28T11:14:36Z hwlock acquired
+2026-10-28T11:14:36Z start tree=302f6ae9dce4fe6b9f5e387c669b3338f80ab637
+2026-10-28T11:36:08Z orchestrate-diag rc=0
+2026-10-28T11:38:57Z orchestrate-solo rc=0
+2026-10-28T11:52:28Z bench base done
+2026-10-28T12:05:23Z bench tunables done
+2026-10-28T12:18:54Z bench headpatch done
+2026-10-28T12:22:01Z orchestrate-minflt rc=0
+2026-10-28T12:22:01Z session body done
+done.
+2026-10-28T12:22:01Z hwlock released

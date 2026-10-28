@@ -1,0 +1,6 @@
+diag excl=pass
+solo excl=pass
+base excl=pass
+tunables excl=pass
+headpatch excl=pass
+minflt excl=pass
