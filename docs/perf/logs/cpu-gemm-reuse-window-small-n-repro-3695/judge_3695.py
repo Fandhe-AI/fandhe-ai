@@ -203,21 +203,35 @@ def eval_series(root, label, prev, first):
     if not os.path.isdir(gb10):
         why.append("gb10 ディレクトリが無い（計測前の停止）")
         return res
+    diag = None
     try:
         diag = guard(agg.load_series, gb10)
+    except ChecksumFail as e:
+        # checksum 違反は全体判定の規則（選択された系列にだけ効く）。ゲート・同定条件は違反と独立に検証するため、
+        # check_checksums だけを無効化して再読み込みし、負荷ゲート・RULE ハッシュ・dirty・コミット照合を完了させる。
+        res["cks_fail"] = str(e)
+        orig = agg.check_checksums
+        agg.check_checksums = lambda runs, kind: None
+        try:
+            diag = agg.load_series(gb10)
+        except agg.AggError as e2:
+            if not halted:
+                raise
+            why.append(f"診断系列の読み込み不可（計測が途中で停止した系列）: {e2}")
+        finally:
+            agg.check_checksums = orig
+    except agg.AggError as e:
+        # 計測を完走した系列の診断データの欠落・不正 JSON は構造的不備（exit 1）。ゲート不通過とは区別する。
+        if not halted:
+            raise
+        why.append(f"診断系列の読み込み不可（計測が途中で停止した系列）: {e}")
+    if diag is not None:
         res["diag"] = diag
         if diag["kind"] != "main":
             why.append("gb10 は series_kind=main の系列でない")
         why.extend(diag["why"])
         if res["env"] is not None and diag["env"].get("rev_stamp_head") != res["env"]["rev_stamp_head"]:
             why.append("診断と bench の計測コミットが不一致")
-    except ChecksumFail as e:
-        res["cks_fail"] = str(e)
-    except agg.AggError as e:
-        # 計測を完走した系列の診断データの欠落・不正 JSON は構造的不備（exit 1）。ゲート不通過とは区別する。
-        if not halted:
-            raise
-        why.append(f"診断系列の読み込み不可（計測が途中で停止した系列）: {e}")
     return res
 
 
@@ -385,7 +399,7 @@ def self_test():
         return datetime.fromtimestamp(t0.timestamp() + sec, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def make(root, label, idx, g, rp=0.0011, gap=3600, excl="pass", sha=None, binsha="bin1", cks=None,
-             skip_rc=False, done="done. rc=0"):
+             skip_rc=False, done="done. rc=0", dcks=False, dgate=None):
         """合成系列。idx 番目は acquired=idx*(7200+gap)、released=+7200。g は腕ごとの G。"""
         d = os.path.join(root, label)
         ss = os.path.join(d, "session-scripts")
@@ -407,6 +421,15 @@ def self_test():
                 good = f.read()
             with open(p, "w") as f:
                 f.write(good.replace('"checksum": "1.0"', '"checksum": "2.0"'))
+        if dcks:  # 診断側の checksum bit 不一致（run2 の 1 行だけ書き換える）
+            p = os.path.join(d, "gb10", "run2.jsonl")
+            with open(p) as f:
+                good = f.read()
+            with open(p, "w") as f:
+                f.write(good.replace("00000000deadbeef", "00000000deadbeee", 1))
+        if dgate:  # 診断側の負荷ゲート不通過
+            with open(os.path.join(d, "gb10", "load_gate_status.txt"), "w") as f:
+                f.write("".join(f"run{i} gate={dgate}\n" for i in range(1, 6)))
         if skip_rc:
             os.remove(os.path.join(d, "bench", "base", "rc.log"))
         acq = idx * (7200 + gap)
@@ -491,6 +514,12 @@ def self_test():
     # 12. checksum 不一致 → 判定不能（checksum）
     v, _ = verdict(three([only_v] * 3, [{}, {"cks": True}, {}]))
     check("checksum", v == V_CHECKSUM)
+    # 12b. 診断側 checksum 不一致でも診断ゲートは独立に検証する: ゲート不通過の s1 は record_only（s4 を使う）
+    v, out = verdict([("s1", only_v, {"dcks": True, "dgate": "record_only"}), ("s2", only_v, {}), ("s3", only_v, {}), ("s4", only_v, {})])
+    check("diag-cks-gated", v != V_CHECKSUM and "## 系列 s1: record_only" in out and "負荷ゲート" in out)
+    # 12c. ゲートを通った診断 checksum 不一致の系列は従来どおり判定不能（checksum）
+    v, _ = verdict(three([only_v] * 3, [{}, {"dcks": True}, {}]))
+    check("diag-cks-selected", v == V_CHECKSUM)
     # 13. データ欠損（rc.log なし）→ JudgeError（exit 1）
     try:
         verdict(three([only_v] * 3, [{}, {"skip_rc": True}, {}]))
