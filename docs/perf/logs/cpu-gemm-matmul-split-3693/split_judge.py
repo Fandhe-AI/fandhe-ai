@@ -15,7 +15,7 @@ RULE.txt の値をそのまま定数にしたもので、ここで新しい基�
     env_info.txt（rule_sha256・host_kind）/ series_kind.txt / first_arm.txt / load_gate_status.txt /
     excl_status.txt（gb10 のみ）/ before/run{1..5}.jsonl  after/run{1..5}.jsonl
 
-fail-closed: run 数が 5 でない・行の欠落／重複・n_samples の不一致・JSON 解析不能・ゲート記録の欠落・
+fail-closed: run 数が 5 でない・行の欠落／重複・n_samples が事前登録値 80 と不一致・JSON 解析不能・ゲート記録の欠落・
 RULE の sha256 不一致・系列が 5 を超える場合は例外にして終了コード 2。
 区間行の median_s は 0.0 を許容する（Mac のタイマー分解能）。iter_total は正の有限数を要求する。
 終了コード: 0=判定を出した（どの結論でも 0）、2=入力不備、1=self-test 失敗。
@@ -47,6 +47,9 @@ NEED_SERIES = 3
 MAX_SERIES = 5
 K_REPRODUCED = 12
 MAIN_CAUSE_COEFF = 0.5
+# 事前登録の反復数: 計測 20 回（iters_for の N<4096 側）× ROUNDS=4。全必須行で一致を要求する
+# （crates/facade/tests/cpu_gemm_resident_matmul_split_diag.rs。RULE.txt「反復数は縮めない」）
+EXPECTED_N_SAMPLES = 80
 # 判定対象: macmini の N=256 のみ。ほかは記録のみ。
 DECISIVE = ("macmini", 256)
 # 帰属の区間群: (名前, owned 側の区間, copy 側の区間)
@@ -154,7 +157,13 @@ def load_series(root, host, rule_sha):
             raise JudgeError("excl_status に main が無い: %s" % root)
         excl = d["main"]
     runs = {(t, r): load_run(os.path.join(root, t, "run%d.jsonl" % r)) for t in TREES for r in RUNS}
-    # 反復数（n_samples）は全 run・両木で同一でなければ比較不能
+    # 反復数（n_samples）は事前登録値 EXPECTED_N_SAMPLES と全必須行で一致しなければ入力不備
+    for (t, r), rows in runs.items():
+        for key, row in rows.items():
+            if row[1] != EXPECTED_N_SAMPLES:
+                raise JudgeError("n_samples が事前登録値 %d と不一致: %s %s run%d %r = %r"
+                                 % (EXPECTED_N_SAMPLES, root, t, r, key, row[1]))
+    # 加えて全 run・両木で同一でなければ比較不能
     for key in runs[("before", 1)]:
         vals = {runs[(t, r)][key][1] for t in TREES for r in RUNS if key in runs[(t, r)]}
         if len(vals) != 1:
@@ -375,7 +384,7 @@ def _w(path, text):
 
 
 def make_series(root, host, rule_sha, fn, first="before", kind="main", gate="pass", excl="pass",
-                ck=None, drop_run=False, dup=False, bad_sha=False):
+                ck=None, drop_run=False, dup=False, bad_sha=False, n_samples=None):
     """fn(tree, arm, phase, n, run) -> median_s。"""
     _w(os.path.join(root, "env_info.txt"), "rule_sha256: %s\nhost_kind: %s\n" % ("0" * 64 if bad_sha else rule_sha, host))
     _w(os.path.join(root, "series_kind.txt"), kind + "\n")
@@ -392,10 +401,14 @@ def make_series(root, host, rule_sha, fn, first="before", kind="main", gate="pas
                 for n in SIZES:
                     c = ck(t, arm, n, r) if ck else "c-%d" % n
                     rows.append({"arm": arm, "phase": "iter_total", "n": n, "median_s": fn(t, arm, "iter_total", n, r),
-                                 "n_samples": 10, "checksum_bits": c})
+                                 "n_samples": EXPECTED_N_SAMPLES, "checksum_bits": c})
                     for ph in phases:
                         rows.append({"arm": arm, "phase": ph, "n": n, "median_s": fn(t, arm, ph, n, r),
-                                     "n_samples": 10, "checksum_bits": None})
+                                     "n_samples": EXPECTED_N_SAMPLES, "checksum_bits": None})
+            if n_samples is not None:
+                for i, x in enumerate(rows):
+                    if n_samples(t, r, i) is not None:
+                        x["n_samples"] = n_samples(t, r, i)
             if dup:
                 rows.append(rows[0])
             _w(os.path.join(root, t, "run%d.jsonl" % r), "".join(json.dumps(x) + "\n" for x in rows))
@@ -517,6 +530,9 @@ def self_test():
         f0 = model({})
         expect("run 欠落は fail-closed", raises(build("miss", f0, opts={1: {"drop_run": True}})))
         expect("行重複は fail-closed", raises(build("dup", f0, opts={1: {"dup": True}})))
+        expect("n_samples 全行 1 は fail-closed", raises(build("ns1", f0, opts={1: {"n_samples": lambda t, r, i: 1}})))
+        expect("n_samples が 1 行だけ短縮は fail-closed",
+               raises(build("ns2", f0, opts={1: {"n_samples": lambda t, r, i: 79 if (t, r, i) == ("after", 3, 5) else None}})))
         expect("RULE sha 不一致は fail-closed", raises(build("sha", f0, opts={1: {"bad_sha": True}})))
         expect("系列ディレクトリ無しは fail-closed", raises([os.path.join(tmp, "nonexistent")]))
         same = build("samedir", f0, n_series=1)[0]
