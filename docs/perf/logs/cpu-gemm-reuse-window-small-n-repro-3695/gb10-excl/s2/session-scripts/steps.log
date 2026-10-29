@@ -1,0 +1,8 @@
+2026-10-29T14:16:15Z hwlock acquired
+2026-10-29T14:16:15Z start series=s2 tree=38eb8672cc59b0c17495ee73b2007e4114ede886
+2026-10-29T14:34:02Z orchestrate-diag rc=0
+2026-10-29T16:01:44Z bench done
+2026-10-29T16:01:44Z excl_check rc=0
+2026-10-29T16:01:44Z session body done
+done. rc=0
+2026-10-29T16:01:44Z hwlock released
