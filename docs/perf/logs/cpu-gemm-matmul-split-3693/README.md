@@ -1,6 +1,6 @@
 # #3693: matmul_resident の後退（T2）を matmul 区間の内側で切り分ける診断
 
-**状態: 未実測（部品の実装まで。実機計測は未実施）**。GB10・Mac mini とも実測値は無く、他機体（開発機の M4 Max・Linux）の値で代替していない。結論の欄は「未実測」のまま。
+**状態: 実測済み（2026-10-29。GB10 専有 3 系列・Mac mini 3 系列・全系列ゲート通過）**。結論は `judge-3693.md`（判定器の出力そのまま）: Mac mini N=256（判定対象）は **主因の区間を特定した: S1**（`gemm_device`＝出力の確保・ゼロ埋め・計算・包み。after の木で owned − copy の差が D_iter の 1.29 倍）。GB10 の N=256・N=512 と Mac mini の N=512 は記録のみで、いずれも健全性 A（T2 が出ない）により判定不能。木・指紋・バイナリ・系列の時刻は `rev-stamp-verification-3693.md`。
 背景・事実・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §15。
 
 ## 構成
@@ -32,3 +32,13 @@
 - `python3 -I split_judge.py --self-test` が PASS（主因 1 つ・複数・特定できない・健全性 A／B 不成立・D_iter 非正・系列不足・checksum 不一致・欠損／重複・RULE sha 不一致・GB10 記録のみ）
 - `before-arm.patch` を after 相当の木へ適用し、差が `resident_input.rs` の 1 行だけになること
 - 診断テストの CI 部分（N=64・128 の bit 一致）と `--ignored` 実行の JSON 行の区間名が RULE と一致すること（手元の M4 Max での確認のみ。値は記録にも判定にも使っていない）
+
+## 実測の経緯（2026-10-29）
+
+- after = runner = `91c57a281`（#3697 の squash）。before は同じ木に `before-arm.patch` を当てた木。ツリー指紋は両ノードとローカルで一致
+- GB10 の日本語ロケールで `build_split_arms.sh` のハード条件検査が文言違い（`diff -rq` の出力）で 1 回中止した。スクリプトは編集せず `LC_ALL=C` を付けて再実行した（計測前）
+- 系列は `session-3693.sh` をそのまま使い、s1 before・s2 after・s3 before を 31 分間隔の直列ラッパー（リポジトリ外）で起動した。全系列がゲートを通ったため s4・s5 は起動していない。例外（`done. rc=lock`・途中失敗）は無かった
+- `session-3693.sh`・`orchestrate.sh` のコメント中の `build_ab_arms.sh` は旧名のまま（実体は `build_split_arms.sh`。挙動は同一。runner の sha を保つため直していない）
+- 回収は tar over ssh。セッションファイル（`session/`）は回収側でホスト名・HOME・ユーザー名をマスクした（grep 0 件）。大きなファイルは無く、gzip は不要だった
+- 配置: `gb10/sN`・`macmini/sN`（各系列の run 出力）、`gb10/sN/session`・`macmini/sN/session`（steps.log・orch ログ・単一系列の参考判定・GB10 の poll／excl）、`arms/`（各機体の腕バイナリの sha256）
+- 本番経路・tolerance・parity baseline・閾値・依存は変更していない。T2 の修正は後続 issue（所有者判断）

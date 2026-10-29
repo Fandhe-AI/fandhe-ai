@@ -889,7 +889,7 @@ GB10 N=4096 の rho は rho_REM 1.3381・rho_BENCH 1.5684・rho_OFFSET -0.5684�
 
 ### 15.1 状態
 
-**未実測**（部品の実装まで）。両機体の実測は未実施で、結論は出していない。他機体（M4 Max・Linux）の値で代替しない。部品と手順は `docs/perf/logs/cpu-gemm-matmul-split-3693/`（`README.md`）。
+**実測済み**（2026-10-29。GB10 専有 3 系列・Mac mini 3 系列。全系列がゲートを通り、RULE どおり s1 before・s2 after・s3 before を 31 分間隔で取った）。結論（`judge-3693.md`・判定対象の Mac mini N=256）: **主因の区間を特定した: S1**。RULE の事前固定の解釈に従えば「出力の確保（calloc のブロック再利用・ページの状態）側」。ただし因果は断定しない（§15.6）。GB10 と N=512 は記録のみで、すべて健全性 A（T2 が出ない）により判定不能。木・指紋・バイナリ・系列の時刻は `docs/perf/logs/cpu-gemm-matmul-split-3693/rev-stamp-verification-3693.md`、部品と手順は同ディレクトリの `README.md`。他機体（M4 Max・Linux）の値で代替していない。
 
 ### 15.2 背景
 
@@ -909,9 +909,34 @@ GB10 N=4096 の rho は rho_REM 1.3381・rho_BENCH 1.5684・rho_OFFSET -0.5684�
 
 ### 15.5 結果・判定
 
-未実測（`judge-3693.md` は未生成）。
+`judge-3693.md`（`split_judge.py` の出力。手で書き換えていない）から転記する。
+
+| 機体 | N | 位置づけ | 結論 |
+|---|---|---|---|
+| Mac mini | 256 | 判定対象 | **主因の区間を特定した: S1** |
+| Mac mini | 512 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=1） |
+| GB10 | 256 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=7・中央値 0.9966） |
+| GB10 | 512 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=6・中央値 0.9887） |
+
+Mac mini N=256（判定対象）:
+
+- 健全性 A（`resident_public` iter_total の木の間 ratio）: k=15・中央値 1.0623・成立。健全性 B（after の木の写し owned／copy ratio）: k=14・中央値 1.0710・成立
+- after の木の owned − copy の中央値（D_iter 比）: D_iter 1.629e-05 s（1.00）／**S1 2.100e-05 s（1.29）**／S2 −4.043e-06 s（−0.25）／S3 0（0.00）／S4 0（0.00）／残差 1e-09 s／窓外の result_drop 2.51e-07 s（0.02）。D_s >= 0.5 x D_iter を満たすのは S1 だけ
+- 記録のみ: before の木でも S1 が 1.35 倍（D_iter 1.213e-05 s）・S2 は −0.33 倍で同じ形。`resident_public` の木の間 ratio は iter_total 1.0623・matmul 1.0751・readout 1.0000・checksum 1.0000・result_drop 3.3280。写し 2 腕の木の間 ratio は mirror_owned 1.0150・mirror_copy 0.9910（木の差が経路の外にも出ている=False）。alloc_probe の owned − copy は iter_total −3.083e-06 s・alloc 1.333e-06 s・touch 1e-09 s
+- 区間の読み: owned 側は `download_owned` 側（S2）では速く（負の差）、`gemm_device` 区間（S1）で遅い。S2 の節約より S1 の増分が大きく、差し引きで iter_total が約 1.06 倍遅い
+
+記録のみのセル（全文は `judge-3693.md`）:
+
+- Mac mini N=512: 木の間 iter_total ratio 0.9853（k=1）・matmul 0.9792。GB10 N=256: iter_total 0.9966・matmul 0.9952。GB10 N=512: iter_total 0.9887・matmul 0.9657。いずれも after の方が遅くならず、T2 は Mac mini N=256 に固有
 
 ### 15.6 限界
+
+- 実測で見えたこと（追記）:
+  - 判定は S1 を「`gemm_device` 対 `gemm_device`」の差として示す。つまり同じ `gemm_device` 呼び出しが、直前の反復の出力の始末が owned（出力そのものを解放）か copy（コピー先を解放）かで遅くなる。これは RULE が S1 に「次の反復での確保の影響を含む」と定義した範囲に収まり、`gemm_device` 内のコード自体が遅くなったことを示さない。出力の確保・ゼロ埋め・計算・包みのどれかは S1 の内側では分かれない（alloc_probe の `alloc` 差は 1.3e-06 s で S1 の約 6%。alloc_probe は確保のみの写しで、同じ状況の再現とは限らない）
+  - 因果は断定しない。「calloc のブロック再利用・ページの状態」という RULE の解釈は、S1 が主因という帰属から導く事前固定の読みであり、allocator の挙動を直接観測したものではない
+  - 直し方の案（記録のみ・今回は実装しない）: 出力バッファのプール（§9.5 (b)）、host arena の既定化、`download_owned` の扱いの見直し。いずれも所有者判断のあと別 issue にする
+  - GB10 では T2 自体が出ない（N=256 の iter_total 中央値 0.9966）ため、GB10 の帰属表は判定にも解釈にも使えない。GB10 の S1／S2 は D_iter 比が 6.78／−6.59 と大きいが、D_iter がほぼ 0（1.008e-06 s）の分母由来で、意味のある比ではない
+  - s1 の所要時間は両機体で約 160 秒、s2・s3 は 9〜37 秒だった（原因未調査。標本数と出力量は同等で判定器は受理）
 
 - テスト側から `CpuBufferHandle` は見えないため、`take_data`・prepack の破棄・抜け殻の drop は S2 に合算され分けられない。出力の確保と計算も S1 に合算される。分けるには本番側に計時点が要り、本 Issue の制約（本番経路を変えない）と合わない
 - 写しは公開経路の dyn ディスパッチ・入力検証を通らない。健全性 B で再現を確かめ、再現しなければ判定不能として記録する
