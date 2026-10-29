@@ -871,3 +871,35 @@ GB10 N=4096 の rho は rho_REM 1.3381・rho_BENCH 1.5684・rho_OFFSET -0.5684�
 - 範囲を #3672 の結果を見たあとに決め直した再登録である。経路という基準はコード上の事実から導いたが、事後の再登録であることは変わらない。結論が REJECT であることは、この事後性の影響を受けていない（範囲を絞っても Mac mini N=256 は経路上に残る）
 - REJECT の根拠は 1 セル（Mac mini N=256。絶対値では before 0.000232 s → after 0.000251 s の約 19 μs 差）であり、N が小さい領域に限られる。規則はこの大きさを理由に条件を緩めない
 - `download_owned` の区間（`take_data`・prepack の破棄・解放のタイミング）のさらに細かい切り分け、`PooledMemory`・Metal の `download_owned` 上書き、出力バッファのプール（§9.5 (b)）、bench 窓の見直し（§9.5 (c)）、#3679（3 セルの再現）・#3680（N=256・512 の原因）は本 Issue の対象外
+
+## 15. #3693: T2 の matmul 区間の細分化
+
+### 15.1 状態
+
+**未実測**（部品の実装まで）。両機体の実測は未実施で、結論は出していない。他機体（M4 Max・Linux）の値で代替しない。部品と手順は `docs/perf/logs/cpu-gemm-matmul-split-3693/`（`README.md`）。
+
+### 15.2 背景
+
+#3672（PR #3677）で `matmul_resident` の末尾を `download` から `download_owned` に変えたあと、Mac mini の診断 `resident_public` iter_total N=256（T2）が #3672・#3679・#3681 の 3 回とも約 1.09〜1.10 倍遅くなった（§12・§14）。#3679 の区間行では後退は `matmul` 区間（1.1009）に出ていた。既存の診断は `matmul` 区間をこれ以上分けられない。
+
+### 15.3 コード読解（実測ではない）
+
+- `matmul_resident`（`crates/autodiff/src/optim/resident_input.rs`）は `gemm_device` のあと `download_owned(out)` で終わる。`gemm_device`（`crates/backend-cpu/src/ops.rs`）は出力を確保（既定では host arena OFF のため `vec![0.0f32; len]`）・計算・包みを行う
+- `CpuMemory::download` は N² の新規確保と memcpy を行う。`download_owned` はプールに属さないハンドルなら `take_data()`（prepack の破棄＋`mem::take`）で Vec を移し、抜け殻を drop する
+- 窓の中と外の差: before は窓の外でコピー先を解放し、after は窓の外で出力そのものを解放する。次の反復の確保がどのブロックを再利用するかが 2 本で違いうる。これは仮説であり、本 Issue で測る
+
+### 15.4 事前登録の要約（正は `RULE.txt`）
+
+- 木は 2 本: after と、after の `resident_input.rs` の 1 行だけを `download` に戻した before（`before-arm.patch`）。診断腕は `resident_public`（木に従う）・`mirror_owned`／`mirror_copy`（内部 API による処理列の写し。木に依らない）・`alloc_probe_*`（記録のみ）
+- 判定対象は Mac mini の N=256。健全性 A（T2 が出る）・健全性 B（写しが T2 を再現する）を満たした場合だけ、after の木で owned と copy の区間差を S1（`gemm_device`）・S2（`download_owned` 対 `download`＋`out_drop`）・S3・S4 に分け、D_s >= 0.5 x D_iter の区間群を主因とする
+- GB10 と N=512 は記録のみ。「特定できない」「判定不能」も正当な結果として記録する
+
+### 15.5 結果・判定
+
+未実測（`judge-3693.md` は未生成）。
+
+### 15.6 限界
+
+- テスト側から `CpuBufferHandle` は見えないため、`take_data`・prepack の破棄・抜け殻の drop は S2 に合算され分けられない。出力の確保と計算も S1 に合算される。分けるには本番側に計時点が要り、本 Issue の制約（本番経路を変えない）と合わない
+- 写しは公開経路の dyn ディスパッチ・入力検証を通らない。健全性 B で再現を確かめ、再現しなければ判定不能として記録する
+- T2 の修正（出力のプール §9.5 (b)・host arena の既定・`download_owned` の扱い）は本 Issue の対象外。所有者判断のあと別 issue にする
