@@ -263,11 +263,23 @@ def judge_cell(host, n, selected, n_launched):
         mirror_tree[arm] = {"k": k, "median": m, "outside_path": ok}
     rec["mirror_tree_ratio"] = mirror_tree
     rec["before_attribution"] = attribution(use, "before", n)
-    probe = {}
-    probe["iter_total"] = statistics.median(
-        med(s["runs"][("after", r)][("alloc_probe_owned", "iter_total", n)])
-        - med(s["runs"][("after", r)][("alloc_probe_copy", "iter_total", n)])
-        for s in use for r in RUNS)
+    # alloc_probe 2 診断腕の区間差（RULE.txt「記録のみ」: after の木・owned - copy の 15 個の中央値）。
+    # 共通区間 alloc／touch／result_drop は同名区間どうし、wrap は copy + src_drop と対応させる。
+    def probe_diff(owned_phases, copy_phases):
+        return statistics.median(
+            phase_sum(s["runs"][("after", r)], "alloc_probe_owned", owned_phases, n)
+            - phase_sum(s["runs"][("after", r)], "alloc_probe_copy", copy_phases, n)
+            for s in use for r in RUNS)
+    probe = {
+        "iter_total": statistics.median(
+            med(s["runs"][("after", r)][("alloc_probe_owned", "iter_total", n)])
+            - med(s["runs"][("after", r)][("alloc_probe_copy", "iter_total", n)])
+            for s in use for r in RUNS),
+        "alloc": probe_diff(["alloc"], ["alloc"]),
+        "touch": probe_diff(["touch"], ["touch"]),
+        "result_drop": probe_diff(["result_drop"], ["result_drop"]),
+        "wrap_vs_copy_src_drop": probe_diff(["wrap"], ["copy", "src_drop"]),
+    }
     rec["alloc_probe_diff_after"] = probe
 
     # 3. 健全性 A
@@ -370,7 +382,12 @@ def render(res):
         L += ["", "### 写し 2 診断腕の木の間 ratio（記録のみ）", ""]
         for arm, v in r["mirror_tree_ratio"].items():
             L.append("- %s: k=%s 中央値=%s 木の差が経路の外にも出ている=%s" % (arm, v["k"], fmt(v["median"]), v["outside_path"]))
-        L.append("- alloc_probe（after の木・owned - copy の iter_total 中央値）: %.3e s" % r["alloc_probe_diff_after"]["iter_total"])
+        pd = r["alloc_probe_diff_after"]
+        L += ["", "### alloc_probe 2 診断腕の区間差（after の木・owned - copy の 15 個の中央値。記録のみ）", "",
+              "| 区間 | 差 (s) |", "|---|---|"]
+        for k, label in (("iter_total", "iter_total"), ("alloc", "alloc"), ("touch", "touch"),
+                         ("result_drop", "result_drop"), ("wrap_vs_copy_src_drop", "wrap（owned） - copy + src_drop（copy）")):
+            L.append("| %s | %.3e |" % (label, pd[k]))
     L.append("")
     return "\n".join(L)
 
@@ -478,6 +495,11 @@ def self_test():
         c = cell(res)
         expect("主因 S1 を特定（%s）" % c["verdict"], c["verdict"].startswith("主因の区間を特定した: S1"))
         expect("render が文字列を返す", "S1" in render(res))
+        pd = c["records"]["alloc_probe_diff_after"]
+        expect("alloc_probe の区間差を記録（wrap - copy - src_drop = -1.0e-5）",
+               set(pd) == {"iter_total", "alloc", "touch", "result_drop", "wrap_vs_copy_src_drop"}
+               and abs(pd["wrap_vs_copy_src_drop"] + 1.0e-5) < 1e-12 and abs(pd["alloc"]) < 1e-12)
+        expect("render が alloc_probe 区間差の表を出す", "wrap（owned） - copy + src_drop（copy）" in render(res))
         expect("N=512 は記録のみ", cell(res, n=512)["decisive"] is False)
 
         # 主因 S2（gemm_device は同一）
