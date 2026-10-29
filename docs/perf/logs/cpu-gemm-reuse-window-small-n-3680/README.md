@@ -1,6 +1,6 @@
 # #3680: N=256・512 の bench reuse 窓の差を診断腕で切り分ける
 
-状態: **未実測**（計測部品と事前登録規則のみ。GB10 の値は無い。Linux・M4 Max の値で代替しない）。
+状態: **実測済み**（2026-10-28〜29・`<cuda-node>`〈専有の GB10〉・1 セッション・OFFICIAL: yes）。結論は `judge-3680.md`（N=256: (a) 逆転が消えた／N=512: (c) 差が残っている・支持された腕は vafter と tunmmap）。別機体での再現は未実測。
 判定規則は `RULE.txt` が正（実測と部品より前に単独コミットで固定。固定後は変えない）。
 経緯と読解は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §13。
 
@@ -42,6 +42,13 @@
 | bench-fandhe の fmt／clippy／unit test（OFF と ON の bit 一致・受理条件・checksum 不一致の拒否） | 検証済み（M4 Max。値は記録しない） |
 | `judge_3680.py --self-test`（(a)(b)(c)・G_diag 負・複数支持・支持なし・データ不備・参考記録化） | 検証済み |
 | `shellcheck`／`bash -n`（2 本） | 検証済み |
-| `build_bench_head.sh` の実ビルド・path patch の解決確認 | 未検証（`.rev-stamp` 付きの木で実行が要る） |
-| `session-3680-excl.sh` の実機実行 | 未検証 |
-| GB10 の実測・判定 | 未実測 |
+| `build_bench_head.sh` の実ビルド・path patch の解決確認 | 検証済み（`<cuda-node>`。`framework-compare/Cargo.lock` の sha256 が FIX と一致〈`rev-stamp-verification-3680.md`〉） |
+| `session-3680-excl.sh` の実機実行 | 検証済み（`gb10-excl/session-scripts/steps.log`。`done.` で正常終了） |
+| GB10 の実測・判定 | 実測済み（`judge-3680.md`。1 台・1 セッション） |
+| 別機体での再現・`GLIBC_TUNABLES` の閾値スイープ | 未実測（対象外） |
+
+## 成果物
+
+- `gb10-excl/`: マスク済みの回収データ（`gb10/`〈診断 5 run〉・`bench/<腕>/`・`session-scripts/`〈ログ・`excl_status.txt`・`env_info_3680.txt`〉・`.rev-stamp`）。マスクは `/home/<user>` → `<home>` のみ（ホスト名は出力に現れない）
+- `judge-3680.md`: `judge_3680.py` の標準出力。マスク前の判定出力と全行一致を確認済み
+- `rev-stamp-verification-3680.md`: 計測木・バイナリ・実行物の同定記録
