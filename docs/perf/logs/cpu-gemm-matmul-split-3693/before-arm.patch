@@ -1,0 +1,13 @@
+diff --git a/crates/autodiff/src/optim/resident_input.rs b/crates/autodiff/src/optim/resident_input.rs
+index 1354f162d..5deb31676 100644
+--- a/crates/autodiff/src/optim/resident_input.rs
++++ b/crates/autodiff/src/optim/resident_input.rs
+@@ -119,7 +119,7 @@ pub fn matmul_resident(
+     })?;
+     let out = tape.ops().gemm_device(&a.buf, &b.buf)?;
+     // 出力は以後使わないため所有権ごと渡す（CPU は Vec を Tensor へ移しコピーしない。#3672）
+-    mem.download_owned(out)
++    mem.download(&out)
+ }
+ 
+ /// 学習ステップのチェーン（`DeviceParamStore::train_step_device_chain`）が積んだ loss への

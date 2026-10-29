@@ -1,0 +1,75 @@
+イシュー #3693 事前登録規則（実測と部品の実装より前に単独コミットで固定。事後に緩めない）
+
+固定時刻: このファイルを追加したコミットのコミット時刻を正とする（手書きの時刻は入れない。
+          実際の値は rev-stamp-verification-3693.md に git log -1 --format=%cI で記録する）。
+
+対象と動機:
+- #3672（PR #3677）で matmul_resident の末尾を download から download_owned に変えたあと、
+  Mac mini の診断 resident_public iter_total N=256（T2）が #3672・#3679・#3681 の 3 回とも
+  約 1.09〜1.10 倍遅くなった。#3679 の区間行では後退は matmul 区間（1.1009）に出ていた。
+- 本規則は matmul 区間の内側（出力の確保・計算／受け渡し・解放）のどこに差があるかを切り分ける。
+  #3672・#3679・#3681 の RULE と判定は変えない。直すことは目的に含めない。
+
+腕（木）:
+- after  = 本 PR の部品のコミット（診断テストと計測部品を足した現在の main 系）
+- before = after と同じ木で crates/autodiff/src/optim/resident_input.rs の呼び出し 1 行だけを
+           mem.download_owned(out) から mem.download(&out) に戻したもの（before-arm.patch。main には入れない）
+- 両木とも git archive の tar を転送し、.rev-stamp（1 行目 sha・2 行目 dirty=0）を置き、
+  ツリー指紋をローカルと突き合わせる。registry の fandhe-ai =0.12.0 は使わない。
+- ハード条件: 2 本の木の diff -r（.rev-stamp・target* を除く）が resident_input.rs の 1 ファイルだけ、
+  かつ診断テストファイルが同一。build_split_arms.sh が強制する。バイナリは hw-lock の前にビルドする。
+- bench は測らない。
+
+診断腕（cpu_gemm_resident_matmul_split_diag.rs の腕。木の腕と区別して「診断腕」と呼ぶ）:
+- resident_public: 公開経路。区間 matmul / readout / checksum / iter_total、窓の外で result_drop。木に従って経路が変わる唯一の診断腕
+- mirror_owned: after の処理列の内部 API 写し（木に依らない）。
+    区間 gemm_device / download_owned / readout / checksum / iter_total、窓の外で result_drop
+- mirror_copy: before の処理列の内部 API 写し（木に依らない）。
+    区間 gemm_device / download / out_drop / readout / checksum / iter_total、窓の外で result_drop
+- alloc_probe_owned / alloc_probe_copy: 計算なしの確保・書き込み・受け渡しの補助診断腕（記録のみ）
+- SIZES = [256, 512]。N=256 が判定対象、N=512 は記録のみ。反復数は iters_for 既定（縮めない）。
+
+系列と run:
+- 機体ごとに 3 系列。各系列は別セッションとして起動し、hw-lock を取り直し、別ラベル（s1 から）を付ける。
+- 1 系列は 5 run。各 run で before と after を別プロセスで起動し、run ごとに順を反転する（ABBA）。
+- 系列の先頭腕は s1 before・s2 after・s3 before・s4 after・s5 before。系列間は 30 分以上あける。
+- 最大 5 系列まで起動し、起動順でゲートを pass した最初の 3 系列を使う。値を見て選ばない。
+  run の差し替え・追加・セルの除外はしない。計測の前に止まった場合だけ新ラベルで起動し直してよい。
+- ゲート: GB10 は compute プロセス 0 件（excl_check.py --series main が pass）かつ各 run の前に load1 < 1.0。
+  Mac mini は各 run の前に load1 < 3.0。通らない run を含む系列は record_only。
+
+判定対象: Mac mini（<metal-node>）の N=256。GB10 の同じセルと N=512 は記録のみ（同じ手順で取り判定器は「記録のみ」と出す）。
+
+判定（上から順に適用。互いに排他）:
+1. 判定不能（系列不足）: ゲートを pass した系列が 3 未満。
+2. 判定不能（checksum）: N=256 で resident_public・mirror_owned・mirror_copy の iter_total の
+   checksum_bits が、2 本の木・全 run・3 診断腕のあいだで一致しない。
+3. 判定不能（健全性 A: T2 が出ない）: resident_public iter_total の ratio_r = after/before（3 系列 x 5 run = 15 個、
+   同じ系列・同じ run 番号の対）が、k >= 12（ratio_r > 1.00 の個数。1.00 ちょうどは数えない）かつ
+   3 系列それぞれの中央値 > 1.00 を満たさない。
+4. 判定不能（健全性 B: 写しが T2 を再現しない）: after の木の 15 プロセスで m_r = mirror_owned.iter_total /
+   mirror_copy.iter_total（同じプロセス）が同じ条件（k >= 12 かつ 3 系列の中央値 > 1.00）を満たさない。
+   または D_iter <= 0。
+5. 帰属: after の木の 15 プロセスで、run ごとの差 d = owned - copy の中央値（15 個）を区間群ごとに求める。
+     D_iter = iter_total の差
+     S1 = gemm_device 対 gemm_device（出力の確保・ゼロ埋め・計算・包み。次の反復での確保の影響を含む）
+     S2 = download_owned 対 download + out_drop（受け渡しと出力の解放。take_data・prepack 破棄・抜け殻の drop を含み分けられない）
+     S3 = readout、S4 = checksum
+   D_s >= 0.5 x D_iter を満たす区間群を主因とする（0.5 は #3680 段階 2 の主判定の係数の流用）。
+   1 つだけなら「主因の区間を特定した: S?」。複数なら併記する（交互作用は断定しない）。無ければ「特定できない」。
+
+記録のみ（判定に使わない）:
+- 区間外の残差（iter_total - 区間の和）、窓の外の result_drop の差
+- before の木での同じ帰属表
+- resident_public の木の間の区間 ratio（matmul・readout・checksum・result_drop）
+- 写し 2 診断腕の木の間の ratio（k >= 12 かつ 3 系列の中央値 > 1.00 なら「木の差が経路の外にも出ている」と記録）
+- alloc_probe 2 診断腕の区間の差
+- GB10 の全項目、N=512 の全項目
+
+判定後の解釈（事前固定）:
+- S1 が主因なら「出力の確保（calloc のブロック再利用・ページの状態）側」、S2 が主因なら「受け渡し・解放側」と記録する。
+- 因果は断定しない。直し方の案（出力のプール・host arena の既定等）は記録に書くだけにする。
+
+不変: tolerance・parity baseline・ガードレール閾値・依存。#3672・#3679・#3681 の RULE と判定。
+実測できなかった機体・セルは「未実測」のまま残し、他機体や他の機体種の値で代替しない。
+「特定できない」「判定不能」も正当な結果として記録する。
