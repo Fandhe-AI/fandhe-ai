@@ -243,7 +243,8 @@ def select_series(root, labels):
     for lab in labels:
         r = eval_series(root, lab, prev, first)
         # 最初に起動した系列の HEAD・バイナリ sha256 が残っていなければ、後続系列の同一性を確認済みと扱わない（fail-closed）。
-        if first is None and ident_lost is not None:
+        # first が後から確立しても ident_lost は保持する（代用の系列を同定の基準にしない）。
+        if ident_lost is not None:
             r["reasons"].append(f"先行系列 {ident_lost} の同定情報（env_info）が欠落し、計測木・バイナリの同一性を確認できない")
         evaluated.append(r)
         if first is None and r["env"] is not None:
@@ -406,7 +407,7 @@ def self_test():
         return datetime.fromtimestamp(t0.timestamp() + sec, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def make(root, label, idx, g, rp=0.0011, gap=3600, excl="pass", sha=None, binsha="bin1", cks=None,
-             skip_rc=False, done="done. rc=0", dcks=False, dgate=None):
+             skip_rc=False, done="done. rc=0", dcks=False, dgate=None, noenv=False):
         """合成系列。idx 番目は acquired=idx*(7200+gap)、released=+7200。g は腕ごとの G。"""
         d = os.path.join(root, label)
         ss = os.path.join(d, "session-scripts")
@@ -451,6 +452,8 @@ def self_test():
                     for r in range(1, bj.RUNS + 1):
                         for m in j80.MODES:
                             f.write(f"bench_{a}/n{n}/r{r}/{m} gate=pass\n")
+        if noenv:  # ロック取得済みだが同定情報（env_info）が欠落した系列
+            return
         with open(os.path.join(ss, "env_info_3695.txt"), "w") as f:
             f.write(f"series_label: {label}\nrev_stamp_head: abc\nrev_stamp_dirty: dirty=0\n"
                     f"rule_sha256: {sha or rule_sha}\nbench_binary_sha256: {binsha}\n")
@@ -482,6 +485,10 @@ def self_test():
     # 1. vafter だけ再現・組み合わせも再現 → 分離できた
     v, _ = verdict(three([G(vafter=0.0001, vt=0.0001)] * 3))
     check("separated", v.startswith(V_SEPARATED) and "vafter" in v)
+    # 1b. 先行系列 s1 が env_info 欠落（ロック取得済み）→ 後続の s3 以降も正式判定に使わない（fail-closed）
+    gg = G(vafter=0.0001, vt=0.0001)
+    v, _ = verdict([("s1", gg, {"noenv": True})] + [(f"s{i}", gg, {}) for i in range(2, 6)])
+    check("ident-lost-persists", v.startswith(V_INSUFFICIENT))
     # 2. tunmmap だけ再現・組み合わせは再現せず → 分離できない
     v, _ = verdict(three([only_t] * 3))
     check("not-separated-vt-false", v.startswith(V_NOT_SEPARATED) and "もう一方" in v)
