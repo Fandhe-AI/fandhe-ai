@@ -123,6 +123,23 @@ def load_env_3695(path):
     return env
 
 
+def never_locked(root, label):
+    """ロック未取得かつ未計測と確認できた系列か（hw-lock 待ちのタイムアウト等で計測前に停止した系列）。
+
+    RULE.txt はセッションをロック取得から解放までと定義し、計測前停止後の新ラベルでの再起動を認める。
+    steps.log が読めて hwlock acquired 行が無く、gb10・bench ディレクトリも無い場合のみ真。
+    確認できない（steps.log 欠落・取得行あり・計測ディレクトリあり）場合は偽（間隔判定の基準に残す）。
+    """
+    d = os.path.join(root, label)
+    if os.path.isdir(os.path.join(d, "gb10")) or os.path.isdir(os.path.join(d, "bench")):
+        return False
+    try:
+        with open(os.path.join(d, "session-scripts", "steps.log"), encoding="utf-8") as f:
+            return not any(ln.strip().split(" ", 1)[-1] == "hwlock acquired" for ln in f)
+    except OSError:
+        return False
+
+
 def eval_series(root, label, prev, first):
     """系列のゲートを評価する。返り値: dict(label, reasons[], diag, cks_fail, acq, rel, env)。
 
@@ -213,7 +230,8 @@ def select_series(root, labels):
         evaluated.append(r)
         if first is None and r["env"] is not None:
             first = r
-        prev = r
+        if not never_locked(root, lab):
+            prev = r  # ロック未取得・未計測の系列は間隔判定の基準にしない（直前の実セッションと比べる）
         if not r["reasons"]:
             selected.append(r)
         if len(selected) == USE_SERIES:
