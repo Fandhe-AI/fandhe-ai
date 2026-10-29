@@ -1,0 +1,82 @@
+RULE fixed-at-utc: コミット時刻を正とする（実機計測より前に単独コミットで固定。事後に緩めない）
+issue: #3695 #3680 の N=512 で支持された vafter と tunmmap を、別セッションで再現確認し分離する（bench の窓は変えない）
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md（§13.7）
+前提: #3680 の RULE.txt と judge-3680.md の判定（N=512 は (c)、vafter と tunmmap が同時に支持）、#3671 の RULE 群、#3646 の専有判定 excl_check.py、
+      #3679 の複数系列の先例（系列ラベル・最大 5 系列起動・ゲートを通った最初の 3 系列を使う）。
+      ブリッジ v2 の 0.5〜2.0 と主判定の 0.5 をそのまま使い、新しい数値は作らない。#3680・#3671・#3646 の RULE と判定は変更しない
+      （本 RULE は追加の事前登録である）。tolerance・parity baseline・ガードレール閾値・依存・ピン・allowlist・deny.toml・bench の窓は変えない。
+
+[対象・量の定義（#3680 と同じ）]
+- 判定対象は N=512 のみ。N=256 は記録のみ。N=1024・2048・4096 も記録のみ（流用するローダーが 5 N を要求するため測る。結論には使わない）。
+- G_bench = base 腕の reuse --phases の iter_total − base 腕の fresh。
+  G_diag = 同じ系列の診断の resident_public.iter_total − fresh.iter_total。
+  G_Y = 腕 Y の reuse --phases の iter_total − 同じ腕の fresh。代表値は run ごとの median_s の 5 run 中央値（min–max も報告する）。
+- 各系列が自分の診断（diag）系列を持つ。段階 1 と G_floor は同じ系列の G_diag を使い、#3680 の G_diag を流用しない。
+
+[ビルドの条件]
+- 計測木は現在の main（RULE と部品のコミットを含む HEAD）。bench-fandhe は #3680 と同じ build_bench_head.sh で
+  計測木の crates/facade への path patch でビルドする（1 本のバイナリを全腕・全系列で共有。バイナリは最初の系列の前に
+  hw-lock を取らずに 1 回だけビルドする。framework-compare/Cargo.lock は終了時に元へ戻す）。
+- 診断側は同じ計測木の cpu_gemm_reuse_window_diag（#3671 の orchestrate.sh gb10。変更しない）。
+
+[腕（すべて同一バイナリ。差は CLI フラグと環境変数だけ）]
+- base: 変更なし。--task gemm --device cpu の --mode fresh・--mode reuse・--mode reuse --phases。
+- vafter: --diag-verify-after-loop を reuse／phases にだけ付ける（fresh はフラグなし）。
+- tunmmap: 3 モードすべてに GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432（#3680 と同じリテラル）。
+- vafter+tunmmap（ディレクトリ名 vafter_tunmmap）: 3 モードすべてに上の GLIBC_TUNABLES、加えて reuse／phases にだけ --diag-verify-after-loop。
+  交互作用を見るための両方を当てた腕。
+- 閾値のスイープはしない。tunboth・tuntrim は測らない。N ごとに独立プロセスで起動する。
+- 順序: run ごとに腕の巡回順を反転（奇数 run は base vafter tunmmap vafter_tunmmap、偶数 run は逆順）。
+  各 (腕, N) の中は run の奇偶で fresh reuse phases と phases reuse fresh を入れ替える。
+
+[系列と起動]
+- 「セッション」は hw-lock の取得から解放までと定める。1 系列 = 1 セッション = 1 回の切り離し起動。各系列で hw-lock を取り直す。
+- 系列ラベルは起動順に s1〜s5。最大 5 系列まで起動し、起動順でゲート条件（下記）を満たした最初の 3 系列を判定に使う。
+  選ぶ基準はゲートだけで、値を見て選ばない。run の差し替え・追加・セルの除外・既存出力の上書きはしない。
+- 計測の前に止まった場合（hw-lock 待ちのタイムアウト等。計測ファイルが 1 つもない）だけ、新しいラベルで起動し直してよい。経緯は README に書く。
+- 系列の間隔: 前の系列の hwlock released から次の系列の hwlock acquired まで 1800 秒以上（各系列の steps.log の時刻で judge が確かめる）。
+- 計測木と bench バイナリは全系列で同じ（同じ .rev-stamp HEAD・同じ bench_binary_sha256）。
+
+[段階 1（系列ごと・N ごと。#3680 と同じ式）]
+- (a) G_bench <= 0 → 逆転が消えた。
+- (b) G_bench > 0 かつ bridge_v2 pass（G_diag > 0 かつ 0.5 <= G_bench/G_diag <= 2.0）→ 差が残っていない。
+- (c) G_bench > 0 かつ bridge_v2 fail → 差が残っている。
+
+[段階 2（系列ごと。(c) の系列・N だけ）]
+- 主判定: G_floor = max(G_diag, 0)、G_Y − G_floor <= 0.5 × (G_bench − G_floor) なら腕 Y を支持。
+- 記録のみ: #3671 式（G_Y > 0 かつ G_diag > 0 かつ 0.5 <= G_Y/G_diag <= 2.0）を併記する。主判定と食い違っても主判定を採る。
+- 段階 1 が (a)/(b) の系列では、その N の全腕を「不支持」として数える。
+
+[全体判定（N=512。上から順に適用。互いに排他で全ての場合を覆う）]
+1. 判定不能（系列不足）: ゲートを通った系列が 3 未満。
+2. 判定不能（checksum）: checksum 規則の hard 規則に外れる。
+3. c = 判定に使う 3 系列のうち段階 1 が (c) の系列数。c <= 1 → 再現しない（N=512 の差が再現しない）。
+4. 腕 Y（vafter・tunmmap・vafter+tunmmap）ごとに rep(Y) = 「(c) かつ主判定で支持」の系列数 >= 2（3 系列の過半）。
+5. rep(vafter) も rep(tunmmap) も偽 → 再現しない（支持が再現しない）。vafter+tunmmap の結果は記録する。
+6. 単独の腕のちょうど 1 本 X が rep 真:
+   - rep(vafter+tunmmap) が真 → 再現した・分離できた（効いている腕は X）。
+   - rep(vafter+tunmmap) が偽 → 再現した・分離できない（もう一方のノブを足すと支持が消える。交互作用は断定しない）。
+7. 単独の腕が 2 本とも rep 真 → 再現した・分離できない（どちらも単独で超過分の半分以上を消す）。
+   記録として rep(vafter+tunmmap) と、系列ごとの「G_{vafter+tunmmap} <= min(G_vafter, G_tunmmap)」の真偽（大小比較だけ。閾値なし）を併記する。
+- 4 つの結果（再現した・分離できた／再現した・分離できない／再現しない／判定不能）はいずれも正当な結果として記録する。
+- 記録のみ: 3 系列の N=256 の段階 1 と腕ごとの支持、#3671 式の結果、N=1024・2048・4096 の行、record_only 系列の理由。
+- 解釈（事前固定）: 因果は断定しない。vafter が再現した場合の bench の窓の見直し（§9.5 (c)）は所有者判断で、本イシューでは提案に留める。
+
+[checksum 規則（hard・fail-closed）]
+- 診断: N ごとに全 run の iter_total.checksum_bits が bit 一致。
+- bench: 全 run で parity_fail_count == 0、かつ N ごとに全腕・全 run の checksum が一致。
+- 判定に使う 3 系列のどれかで外れたら全体を「判定不能（checksum）」とする。系列をまたいだ checksum の一致は記録のみ。
+
+[ゲート・専有・同定（系列ごと。1 つでも欠ければその系列は record_only で判定に使わない）]
+- excl_check.py <系列の session-scripts> --series diag,bench が diag・bench とも pass（compute プロセス 0 件）。
+- 診断の各 run の前と bench の各起動前（腕 × N × run × モード）で load1 < 1.0（30 秒間隔・最大 30 分。未通過なら系列を中止）。
+- .rev-stamp の 1 行目が本 RULE を含むコミットを指し、2 行目が dirty=0。env_info の RULE の sha256 が実ハッシュと一致。
+  診断と bench の計測コミットが一致。
+- 計測木の HEAD と bench バイナリの sha256 が最初に起動した系列と一致。系列の間隔を満たす。
+- RAYON_NUM_THREADS が設定されていれば起動を拒否する（unset しない）。
+- 機体は専有用の GB10（#3680 と同じ）。常駐プロセスのあるノードは使わず、常駐を止めない。埋まっていれば待つ。
+
+[対象外]
+- bench の窓・判定契約・parity 契約の変更、窓の見直しの実施（提案に留める）、別機体での再現、GLIBC_TUNABLES の閾値スイープ、
+  原因が分かった場合の修正の実装、依存とピンの変更、Linux／M4 Max の値による代替。
+- 固定後は変えない。変える場合は RULE.v2.txt を別コミットで作り理由を書く。
