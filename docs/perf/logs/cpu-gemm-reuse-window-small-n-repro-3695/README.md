@@ -1,6 +1,6 @@
 # #3695: N=512 の vafter と tunmmap を別セッションで再現確認し分離する
 
-状態: **部品のみ。実測は未実測**（専有の GB10 での 3 系列は未取得。値は入れていない）。
+状態: **実測済み**（2026-10-29・`<cuda-node>` の専有 GB10・3 系列 s1〜s3・ゲート不通過なし。全体判定は「再現しない（N=512 の差が再現しない）」）。
 判定規則は `RULE.txt` が正（実測と部品より前に単独コミットで固定。固定後は変えない）。
 経緯と読解は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §13.7。#3680（`../cpu-gemm-reuse-window-small-n-3680/`）の続き。
 
@@ -42,10 +42,14 @@
 |---|---|
 | `judge_3695.py --self-test`（全体判定の各行・ゲート不通過の系列の飛ばし・系列間隔・RULE sha・バイナリ sha・checksum・データ欠損） | 検証済み |
 | `shellcheck`／`bash -n`（セッションスクリプト）、ラベル不正・`RAYON_NUM_THREADS` 設定時の拒否 | 検証済み |
-| `session-3695-excl.sh` の実機実行・`build_bench_head.sh` の実ビルド | 未実測 |
-| GB10 の 3 系列の実測・判定 | 未実測 |
+| `session-3695-excl.sh` の実機実行・`build_bench_head.sh` の実ビルド | 検証済み（s1〜s3 とも `done. rc=0`。起動し直した系列・ゲート不通過の系列はなし） |
+| GB10 の 3 系列の実測・判定 | 検証済み（`judge-3695.md`。マスク前後で全行一致） |
 | 別機体での再現・`GLIBC_TUNABLES` の閾値スイープ | 未実測（対象外） |
 
-## 成果物（実測後に追加）
+## 成果物
 
-`gb10-excl/<label>/`（マスク済みの回収データ）・`judge-3695.md`（判定器の標準出力）・`rev-stamp-verification-3695.md`（木・バイナリ・実行物の同定）。
+- `gb10-excl/s1`〜`s3/`: マスク済みの回収データ（`gb10/`〈診断 5 run〉・`bench/<腕>/`・`session-scripts/`・`.rev-stamp`）
+- `judge-3695.md`: `judge_3695.py --series-root gb10-excl --series s1,s2,s3` の標準出力そのまま
+- `rev-stamp-verification-3695.md`: 木・バイナリ・実行物・専有ゲート・時刻表の同定記録
+
+結果の転記と読み方は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §13.7。

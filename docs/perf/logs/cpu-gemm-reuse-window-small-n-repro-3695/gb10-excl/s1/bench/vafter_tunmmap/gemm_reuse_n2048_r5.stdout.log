@@ -1,0 +1,2 @@
+DIAG: --diag-verify-after-loop ON (verify_strict moved after the loop; issue #3680)
+{"framework":"fandhe-ai","version":"0.12.0","task":"gemm","device":"cpu","size":2048,"median_s":0.017903204,"q1_s":0.017623564,"q3_s":0.018343867,"gflops":959.597,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.039230253,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0,"diag":"verify_after_loop"}
