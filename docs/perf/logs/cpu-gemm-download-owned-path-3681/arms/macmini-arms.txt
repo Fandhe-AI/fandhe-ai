@@ -1,0 +1,8 @@
+before_rev_stamp: a7aac2f0227add243845418e0897ac0675c5b622 dirty=0
+after_rev_stamp: f7ce20fc91730216e8f3f60514b181f32ebfee48 dirty=0
+bench-before_sha256: 43ced4c3cf581f2609478b272a71f3fb2499a3c17bf96a36f15e08a21ad3dbec
+bench-after_sha256: 8e31f6afb7fa4ce1c8da3bcf59419f3f3682c6163a48434912ef3da56ee4965b
+diag-before_sha256: da0c8b82c95cfe360ec6270a8ebaff8cfc0cf86e95730e526975fe0f8e2e880c
+diag-after_sha256: 6152f48de487065d00da69fc91549a0287393f57c3f3ffd24187df0c892afcd7
+rustc -vV: rustc 1.99.0 (b940084d7 2026-09-28);binary: rustc;commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4;commit-date: 2026-09-28;host: aarch64-apple-darwin;release: 1.99.0;LLVM version: 23.1.1;
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)

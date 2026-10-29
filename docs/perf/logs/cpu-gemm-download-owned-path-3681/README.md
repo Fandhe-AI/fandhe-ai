@@ -1,6 +1,6 @@
 # #3681: download_owned の A/B を、非処置セルを matmul_resident の経路に絞った規則で再事前登録して再計測する
 
-**状態: 未実測**（計測部品と事前登録規則のみ。実測値は無く、他機体・他機体種の値で代替しない）。
+**状態: 実測済み（2026-10-29。GB10 専有 1 系列・Mac mini 1 系列。ゲートは両系列 pass）**。結論は **REJECT**（Mac mini 診断 `resident_public` N=256 が経路上の非処置セルで 5/5 run 後退。`judge-3681.md`）。処置 2 セルは ratio ≤ 0.95・5/5 run < 1.00・rho_REM 1.3381 で満たした。他機体・他機体種の値で代替していない。
 背景・事実・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §14。
 
 #3672 の REJECT（`../cpu-gemm-download-owned-3672/judge-3672.md`）を見たあとの再登録である。#3672 の
@@ -40,6 +40,21 @@ REJECT の「5/5 run 後退」と ADOPT の「非処置セル中央値 ratio ≤
 5. マスクして回収（実ホスト名・HOME・ユーザー名の grep が 0 件）、`gb10/`・`macmini/` に置く。大きな生出力はコミットしない
 6. `python3 -I path_judge.py --host gb10=<dir> --host macmini=<dir> --out judge-3681.md`（手で書き換えない）
 7. `rev-stamp-verification-3681.md` に腕の同定、RULE のコミット時刻（`git log -1 --format=%cI -- RULE.txt`）と各機体の計測開始時刻（`env_info.txt` の `date_utc`・`steps.log` 先頭）、専有の合否を並べる
+
+## 成果物
+
+| パス | 内容 |
+|---|---|
+| `judge-3681.md` | 両機体を揃えた最終判定（`path_judge.py` の出力そのまま。手で書き換えない） |
+| `rev-stamp-verification-3681.md` | 木・指紋・バイナリ・スクリプト・RULE 固定時刻と計測開始の比較・ゲートの同定記録 |
+| `gb10/s1`・`macmini/s1` | 系列の生ログ（`before/`・`after/` の `run{1..5}.{jsonl,err}`・`bench/`・`env_info.txt`・`load_gate*`・`series_kind.txt`。GB10 は `excl_status.txt` も。`session/` にセッション側のログ〈`steps.log`・`orch-*.log`・`judge-<機体>.md`・GB10 は `gpu_poll.log`・`gpu_procs.txt`・`excl_check.log`〉） |
+| `arms/gb10-arms.txt`・`arms/macmini-arms.txt` | `build_ab_arms.sh` の `arms.txt`（バイナリ本体はコミットしない） |
+
+## 実測の経緯
+
+- 2026-10-29 に 2 機体へ展開木を転送し、事前ビルド後に `session-3681.sh <機体> s1` を並行して切り離し起動した（開始 `04:20:06Z`。GB10 は `04:55:11Z`・Mac mini は `05:04:43Z` に完了）
+- 再起動・差し替え・除外はない。系列は 1 本だけで、ゲートは両機体で全 run pass（GB10 は専有〈`excl=pass`・compute プロセス 0 件〉も pass）のため追加系列は起動していない
+- マスク（`/home/<user>`・`/Users/<user>` を `<home>` へ）後も `judge-3681.md` はマスク前の判定出力とバイト一致した。`path_judge.py`・`RULE.txt` は変更していない
 
 ## 検証済み（実機なし）
 
