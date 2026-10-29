@@ -1,0 +1,7 @@
+2026-10-29T09:59:13Z hwlock acquired host=macmini
+2026-10-29T09:59:13Z start runner=91c57a281e7a57a3f9ad383f7746222a83575fd1 before=91c57a281e7a57a3f9ad383f7746222a83575fd1+before-arm.patch(c4dbdedb4906) after=91c57a281e7a57a3f9ad383f7746222a83575fd1 first=before
+2026-10-29T10:01:50Z orchestrate rc=0
+2026-10-29T10:01:51Z split_judge rc=0
+2026-10-29T10:01:51Z session body done
+done. rc=0
+2026-10-29T10:01:51Z hwlock released
