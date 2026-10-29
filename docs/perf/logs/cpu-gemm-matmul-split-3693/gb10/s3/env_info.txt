@@ -1,0 +1,29 @@
+date_utc: 2026-10-29T11:03:02Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+Architecture:                            aarch64
+CPU(s):                                  20
+Model name:                              Cortex-X925
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+Model name:                              Cortex-A725
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo: cargo 1.97.1 (c980f4866 2026-06-30)
+pagesize: 4096
+rule_sha256: 2fe453eb45382a29bab55eac4b4195712fb0b289f9a8920e4e8c749b63ba56d8
+RAYON_NUM_THREADS: unset
+host_kind: gb10
+series_kind: main
+first_arm: before
+load_max: 1.0
+before_rev_stamp: 91c57a281e7a57a3f9ad383f7746222a83575fd1+before-arm.patch(c4dbdedb4906) dirty=0
+after_rev_stamp: 91c57a281e7a57a3f9ad383f7746222a83575fd1 dirty=0
+diag-before_sha256: 3e92ae0f61114e0fe55b1bbacf8e00bb1c83c4958439b7fec81555f49a8e339f
+diag-after_sha256: cc958418a376da57b21d0af67772e9c6b8ce9a012eead8ea31228343c930b2c9
+rustc -vV: rustc 1.97.1 (8bab26f4f 2026-07-14);binary: rustc;commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452;commit-date: 2026-07-14;host: aarch64-unknown-linux-gnu;release: 1.97.1;LLVM version: 22.1.6;
+cargo: cargo 1.97.1 (c980f4866 2026-06-30)

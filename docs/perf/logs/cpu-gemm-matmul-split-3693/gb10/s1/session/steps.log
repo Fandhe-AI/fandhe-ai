@@ -1,0 +1,8 @@
+2026-10-29T09:58:12Z hwlock acquired host=gb10
+2026-10-29T09:58:12Z start runner=91c57a281e7a57a3f9ad383f7746222a83575fd1 before=91c57a281e7a57a3f9ad383f7746222a83575fd1+before-arm.patch(c4dbdedb4906) after=91c57a281e7a57a3f9ad383f7746222a83575fd1 first=before
+2026-10-29T10:00:52Z orchestrate rc=0
+2026-10-29T10:00:52Z excl_check rc=0
+2026-10-29T10:00:52Z split_judge rc=0
+2026-10-29T10:00:52Z session body done
+done. rc=0
+2026-10-29T10:00:52Z hwlock released
