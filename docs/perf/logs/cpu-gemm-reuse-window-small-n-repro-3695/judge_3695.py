@@ -7,6 +7,8 @@
 新しい閾値は作らない（ブリッジ v2 の 0.5〜2.0 と主判定の 0.5 のみ。多数決は 3 系列中 2 以上）。
 
 データの構造的な不備（ファイル欠落・不正 JSON・rc 非 0・行の重複）は exit 1（判定を出さない）。
+計測を完走した系列の診断データの不備も exit 1。計測前／途中で停止した系列（gb10 無し・終端行が done. rc=0 でない等）だけ理由付きで record_only。
+--series は s1 からの連続昇順に限る（先行系列の省略による選択を禁止）。
 RULE の sha 不一致・専有／負荷ゲート不通過・系列間隔不足などは「その系列を record_only」にして次の系列へ進む。
 checksum 規則（診断の bit 不一致・parity_fail_count != 0・bench の腕をまたぐ不一致）は全体を「判定不能（checksum）」とする。
 
@@ -131,6 +133,7 @@ def eval_series(root, label, prev, first):
     ss = os.path.join(d, "session-scripts")
     res = {"label": label, "reasons": [], "diag": None, "cks_fail": None, "acq": None, "rel": None, "env": None}
     why = res["reasons"]
+    halted = False  # 計測の途中停止（診断データが未完でも構造不備にしない）
     if not os.path.isdir(d):
         why.append("系列ディレクトリが無い")
         return res
@@ -154,6 +157,7 @@ def eval_series(root, label, prev, first):
         acq, rel, done = load_steps(os.path.join(ss, "steps.log"))
         res["acq"], res["rel"] = acq, rel
         if done != "done. rc=0":
+            halted = True
             why.append(f"steps.log の終端行が {done!r}（done. rc=0 でない）")
         if prev is not None:
             if prev["rel"] is None or acq is None:
@@ -163,6 +167,7 @@ def eval_series(root, label, prev, first):
                 if gap < MIN_GAP_S:
                     why.append(f"系列間隔 {gap:.0f}s が {MIN_GAP_S}s 未満")
     except JudgeError as e:
+        halted = True
         why.append(f"steps.log 不備: {e}")
     try:
         excl = bj.load_excl(os.path.join(ss, "excl_status.txt"))
@@ -177,8 +182,12 @@ def eval_series(root, label, prev, first):
             why.append(f"bench の負荷ゲート未通過または未記録 {len(bad)} 件（例 {bad[0]}）")
     except JudgeError as e:
         why.append(f"負荷ゲートログ不備: {e}")
+    gb10 = os.path.join(d, "gb10")
+    if not os.path.isdir(gb10):
+        why.append("gb10 ディレクトリが無い（計測前の停止）")
+        return res
     try:
-        diag = guard(agg.load_series, os.path.join(d, "gb10"))
+        diag = guard(agg.load_series, gb10)
         res["diag"] = diag
         if diag["kind"] != "main":
             why.append("gb10 は series_kind=main の系列でない")
@@ -188,7 +197,10 @@ def eval_series(root, label, prev, first):
     except ChecksumFail as e:
         res["cks_fail"] = str(e)
     except agg.AggError as e:
-        why.append(f"診断系列の読み込み不可: {e}")
+        # 計測を完走した系列の診断データの欠落・不正 JSON は構造的不備（exit 1）。ゲート不通過とは区別する。
+        if not halted:
+            raise
+        why.append(f"診断系列の読み込み不可（計測が途中で停止した系列）: {e}")
     return res
 
 
@@ -303,6 +315,8 @@ def run(root, labels):
             raise JudgeError(f"系列ラベル {lab!r} は s1〜s5 のみ")
     if len(set(labels)) != len(labels):
         raise JudgeError("系列ラベルが重複している")
+    if labels != LABELS[:len(labels)]:
+        raise JudgeError("--series は s1 からの連続した昇順（s1,s2,...）に限る。先行系列を省略して選択してはならない（RULE.txt）")
     evaluated, selected = select_series(root, labels)
     results, cks = [], None
     for r in selected:
@@ -474,6 +488,30 @@ def self_test():
         check("bad-label", False)
     except JudgeError:
         pass
+    # 15b. 先行系列を除外した指定は拒否
+    for bad in (["s3", "s4", "s5"], ["s1", "s3"], ["s2", "s1"]):
+        try:
+            run("/nonexistent", bad)
+            check(f"non-prefix-{bad}", False)
+        except JudgeError:
+            pass
+    # 15c. 完走した s2 の診断データ破損は伝播（exit 1）。停止系列の破損は record_only
+    def corrupt(root):
+        with open(os.path.join(root, "s2", "gb10", "run1.jsonl"), "w") as f:
+            f.write("{broken\n")
+    for halted_s2 in (False, True):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, lab in enumerate(["s1", "s2", "s3", "s4"]):
+                make(tmp, lab, i, only_v, **({"done": "done. rc=gate-unpassed"} if lab == "s2" and halted_s2 else {}))
+            corrupt(tmp)
+            import contextlib
+            import io
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run(tmp, ["s1", "s2", "s3", "s4"])
+                check(f"corrupt-diag-{halted_s2}", halted_s2)
+            except (JudgeError, agg.AggError):
+                check(f"corrupt-diag-{halted_s2}", not halted_s2)
     # 16. 純関数 overall の網羅（rep の境界）
     def fake(branch, sup):
         arms = {y: {"counted": sup.get(y, False) and branch == "c", "g": 0.0} for y in Y_ARMS}
