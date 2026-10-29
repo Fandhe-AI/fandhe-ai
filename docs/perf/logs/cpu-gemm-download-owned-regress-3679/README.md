@@ -1,6 +1,6 @@
 # #3679: download_owned 後に 5/5 run で後退した 3 セルの再現確認
 
-**状態: 未実測**（計測部品と事前登録規則のみ。実測値は無く、他機体・他機体種の値で代替しない）。
+**状態: 実測済み（2026-10-29。GB10 専有 3 系列・Mac mini 3 系列。ゲートは全系列 pass）**。結論は T1 再現しない・T2 再現した・T3 再現しない（`judge-3679.md`）。他機体・他機体種の値で代替していない。
 背景・事実・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §12。
 
 ## 構成
@@ -31,3 +31,17 @@
 
 - `python3 -I repro_judge.py --self-test` が PASS（再現した／再現しない／判定不能／系列不足／checksum 不一致／k=12 でも系列中央値 ≤ 1.00／欠損・重複・RULE の sha 不一致の fail-closed）
 - `bash -n`・引数の拒否ケース（相対パス・許可外の文字・`--first` 不正値）
+
+## 成果物
+
+| パス | 内容 |
+|---|---|
+| `judge-3679.md` | 全系列を揃えた最終判定（`repro_judge.py` の出力そのまま。手で書き換えない） |
+| `rev-stamp-verification-3679.md` | 木・指紋・バイナリ・スクリプト・系列時刻の同定記録 |
+| `gb10/s1`〜`s3`・`macmini/s1`〜`s3` | 系列ごとの生ログ（`before/`・`after/` の `run{1..5}.{jsonl,err}`・`env_info.txt`・`load_gate*`・`first_arm.txt` ほか。`session/` にセッション側のログ） |
+| `arms/gb10-arms.txt`・`arms/macmini-arms.txt` | `build_ab_arms.sh` の `arms.txt`（バイナリ本体はコミットしない） |
+
+## 実測の経緯
+
+- 2026-10-29 に 2 機体へ展開木を転送し、事前ビルド後に s1（before 先）・s2（after 先）・s3（before 先）を 30 分以上あけて起動した。全系列がゲートを通ったため s4・s5 は起動していない
+- 再起動・差し替え・除外はない。マスク（`/home/<user>`・`/Users/<user>` を `<home>` へ）後も判定の数値は全行一致
