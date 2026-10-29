@@ -171,6 +171,16 @@ run_cell() {
   done
 }
 
+# ---- env_info（judge のドリフトガード用）。計測開始前に保存する ----
+# 先行系列が負荷ゲート未通過で abort しても HEAD・バイナリ sha256 が残り、judge が後続系列の同一性を照合できる。
+{
+  echo "series_label: ${LABEL}"
+  echo "rev_stamp_head: $(sed -n 1p "$T/.rev-stamp")"
+  echo "rev_stamp_dirty: $(sed -n 2p "$T/.rev-stamp")"
+  echo "rule_sha256: $(sha256_of "$RES/RULE.txt")"
+  echo "bench_binary_sha256: $(sha256_of "$BIN")"
+  [ ! -f "$BINDIR/arms.txt" ] || sed 's/^/  /' "$BINDIR/arms.txt"
+} >"$SS/env_info_3695.txt"
 cd "$T" || exit 1
 step "start series=${LABEL} tree=$(sed -n 1p "$T/.rev-stamp")"
 
@@ -207,15 +217,7 @@ step "bench done"
 echo idle >"$CUR"
 snap "bench:post"
 
-# ---- (3) env_info（judge のドリフトガード用）と専有判定 ----
-{
-  echo "series_label: ${LABEL}"
-  echo "rev_stamp_head: $(sed -n 1p "$T/.rev-stamp")"
-  echo "rev_stamp_dirty: $(sed -n 2p "$T/.rev-stamp")"
-  echo "rule_sha256: $(sha256_of "$RES/RULE.txt")"
-  echo "bench_binary_sha256: $(sha256_of "$BIN")"
-  [ ! -f "$BINDIR/arms.txt" ] || sed 's/^/  /' "$BINDIR/arms.txt"
-} >"$SS/env_info_3695.txt"
+# ---- (3) 専有判定（env_info は計測開始前に保存済み）----
 cp "$T/.rev-stamp" "$O/.rev-stamp"
 # excl_check.py が $SS/excl_status.txt を自分で書く（標準出力は別ファイルへ）。
 # 失敗しても rc を記録して先へ進み、終端行に反映する（#3679 の作法）。

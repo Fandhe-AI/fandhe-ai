@@ -239,11 +239,18 @@ def select_series(root, labels):
     """起動順に評価し、ゲートを通った最初の USE_SERIES 系列で打ち切る。返り値: (評価済み全系列, 選択系列)。"""
     evaluated, selected = [], []
     first = prev = None
+    ident_lost = None  # ロック取得済みの先行系列で同定情報（env_info）が欠けた場合、その系列ラベル
     for lab in labels:
         r = eval_series(root, lab, prev, first)
+        # 最初に起動した系列の HEAD・バイナリ sha256 が残っていなければ、後続系列の同一性を確認済みと扱わない（fail-closed）。
+        if first is None and ident_lost is not None:
+            r["reasons"].append(f"先行系列 {ident_lost} の同定情報（env_info）が欠落し、計測木・バイナリの同一性を確認できない")
         evaluated.append(r)
         if first is None and r["env"] is not None:
             first = r
+        elif (first is None and ident_lost is None and os.path.isdir(os.path.join(root, lab))
+              and not never_locked(root, lab)):
+            ident_lost = lab
         if not never_locked(root, lab):
             prev = r  # ロック未取得・未計測の系列は間隔判定の基準にしない（直前の実セッションと比べる）
         if not r["reasons"]:
