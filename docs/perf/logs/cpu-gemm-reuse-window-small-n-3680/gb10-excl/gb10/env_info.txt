@@ -1,0 +1,28 @@
+date_utc: 2026-10-28T21:46:13Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+Architecture:                            aarch64
+CPU(s):                                  20
+Model name:                              Cortex-X925
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+Model name:                              Cortex-A725
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+CPU(s) scaling MHz:                      100%
+rustc -vV: rustc 1.97.1 (8bab26f4f 2026-07-14);binary: rustc;commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452;commit-date: 2026-07-14;host: aarch64-unknown-linux-gnu;release: 1.97.1;LLVM version: 22.1.6;
+cargo: cargo 1.97.1 (c980f4866 2026-06-30)
+pagesize: 4096
+thp: always [madvise] never
+glibc: ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+rev_stamp_head: 8931dcf43a8fb0fdfb68264a61227b310833a1bd
+rev_stamp_dirty: dirty=0
+rule_sha256: 3f90896aab94a2052a8757edad0e11e5e12027fec3648a5dd6e890a42d706059
+rule_v2_sha256: 7349ec07ee4cd99ee1bff2250a9d6fbb6cbc1eb5bc1fe564f0ce528ab1ea7553
+rule_v3_sha256: 2bcc33665e367cc0d9ed3eabe441c4cda08e6993ac5535b22d3e0b71276ac765
+RAYON_NUM_THREADS: unset
+host_kind: gb10
+series_kind: main
+diff_stat_v0.12.0_head: 未実測（v0.12.0 タグが計測ツリーに無い）

@@ -1,0 +1,9 @@
+rev_stamp_head: 8931dcf43a8fb0fdfb68264a61227b310833a1bd
+rev_stamp_dirty: dirty=0
+rule_sha256: e643bc9919eade71cf8ae1125ff58412ea4e06c03b0c706ccec6d45b89f7b9d1
+bench_binary_sha256: 4274b6f5abecd9ed350627c94df7763bd9515c1bb7612a23f2e73c958dbf2894
+  rev_stamp: 8931dcf43a8fb0fdfb68264a61227b310833a1bd dirty=0
+  path_patch: <home>/work/r3680-excl/runner/crates/facade
+  bench-fandhe-head_sha256: 4274b6f5abecd9ed350627c94df7763bd9515c1bb7612a23f2e73c958dbf2894
+  rustc -vV: rustc 1.97.1 (8bab26f4f 2026-07-14);binary: rustc;commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452;commit-date: 2026-07-14;host: aarch64-unknown-linux-gnu;release: 1.97.1;LLVM version: 22.1.6;
+  cargo: cargo 1.97.1 (c980f4866 2026-06-30)

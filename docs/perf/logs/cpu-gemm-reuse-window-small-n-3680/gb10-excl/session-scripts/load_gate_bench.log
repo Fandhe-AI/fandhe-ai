@@ -1,0 +1,965 @@
+diag:pre load1=5.35 waited=0s
+diag:pre load1=3.48 waited=30s
+diag:pre load1=2.24 waited=60s
+diag:pre load1=1.55 waited=90s
+diag:pre load1=1.18 waited=120s
+diag:pre load1=1.04 waited=150s
+diag:pre load1=0.82 waited=180s
+diag:pre gate=pass
+bench_base/n256/r1/fresh load1=9.05 waited=0s
+bench_base/n256/r1/fresh load1=5.59 waited=30s
+bench_base/n256/r1/fresh load1=3.39 waited=60s
+bench_base/n256/r1/fresh load1=2.27 waited=90s
+bench_base/n256/r1/fresh load1=1.51 waited=120s
+bench_base/n256/r1/fresh load1=1.02 waited=150s
+bench_base/n256/r1/fresh load1=0.62 waited=180s
+bench_base/n256/r1/fresh gate=pass
+bench_base/n256/r1/reuse load1=0.62 waited=0s
+bench_base/n256/r1/reuse gate=pass
+bench_base/n256/r1/phases load1=0.62 waited=0s
+bench_base/n256/r1/phases gate=pass
+bench_base/n512/r1/fresh load1=0.62 waited=0s
+bench_base/n512/r1/fresh gate=pass
+bench_base/n512/r1/reuse load1=0.62 waited=0s
+bench_base/n512/r1/reuse gate=pass
+bench_base/n512/r1/phases load1=0.57 waited=0s
+bench_base/n512/r1/phases gate=pass
+bench_base/n1024/r1/fresh load1=0.57 waited=0s
+bench_base/n1024/r1/fresh gate=pass
+bench_base/n1024/r1/reuse load1=0.57 waited=0s
+bench_base/n1024/r1/reuse gate=pass
+bench_base/n1024/r1/phases load1=0.57 waited=0s
+bench_base/n1024/r1/phases gate=pass
+bench_base/n2048/r1/fresh load1=0.57 waited=0s
+bench_base/n2048/r1/fresh gate=pass
+bench_base/n2048/r1/reuse load1=0.57 waited=0s
+bench_base/n2048/r1/reuse gate=pass
+bench_base/n2048/r1/phases load1=0.57 waited=0s
+bench_base/n2048/r1/phases gate=pass
+bench_base/n4096/r1/fresh load1=2.13 waited=0s
+bench_base/n4096/r1/fresh load1=1.29 waited=30s
+bench_base/n4096/r1/fresh load1=1.00 waited=60s
+bench_base/n4096/r1/fresh load1=0.61 waited=90s
+bench_base/n4096/r1/fresh gate=pass
+bench_base/n4096/r1/reuse load1=2.16 waited=0s
+bench_base/n4096/r1/reuse load1=1.31 waited=30s
+bench_base/n4096/r1/reuse load1=0.79 waited=60s
+bench_base/n4096/r1/reuse gate=pass
+bench_base/n4096/r1/phases load1=2.22 waited=0s
+bench_base/n4096/r1/phases load1=1.52 waited=30s
+bench_base/n4096/r1/phases load1=0.92 waited=60s
+bench_base/n4096/r1/phases gate=pass
+bench_vafter/n256/r1/fresh load1=3.20 waited=0s
+bench_vafter/n256/r1/fresh load1=2.00 waited=30s
+bench_vafter/n256/r1/fresh load1=1.37 waited=60s
+bench_vafter/n256/r1/fresh load1=0.88 waited=90s
+bench_vafter/n256/r1/fresh gate=pass
+bench_vafter/n256/r1/reuse load1=0.88 waited=0s
+bench_vafter/n256/r1/reuse gate=pass
+bench_vafter/n256/r1/phases load1=0.88 waited=0s
+bench_vafter/n256/r1/phases gate=pass
+bench_vafter/n512/r1/fresh load1=0.88 waited=0s
+bench_vafter/n512/r1/fresh gate=pass
+bench_vafter/n512/r1/reuse load1=0.88 waited=0s
+bench_vafter/n512/r1/reuse gate=pass
+bench_vafter/n512/r1/phases load1=0.88 waited=0s
+bench_vafter/n512/r1/phases gate=pass
+bench_vafter/n1024/r1/fresh load1=0.88 waited=0s
+bench_vafter/n1024/r1/fresh gate=pass
+bench_vafter/n1024/r1/reuse load1=0.88 waited=0s
+bench_vafter/n1024/r1/reuse gate=pass
+bench_vafter/n1024/r1/phases load1=0.88 waited=0s
+bench_vafter/n1024/r1/phases gate=pass
+bench_vafter/n2048/r1/fresh load1=0.88 waited=0s
+bench_vafter/n2048/r1/fresh gate=pass
+bench_vafter/n2048/r1/reuse load1=2.41 waited=0s
+bench_vafter/n2048/r1/reuse load1=1.46 waited=30s
+bench_vafter/n2048/r1/reuse load1=0.88 waited=60s
+bench_vafter/n2048/r1/reuse gate=pass
+bench_vafter/n2048/r1/phases load1=0.88 waited=0s
+bench_vafter/n2048/r1/phases gate=pass
+bench_vafter/n4096/r1/fresh load1=0.88 waited=0s
+bench_vafter/n4096/r1/fresh gate=pass
+bench_vafter/n4096/r1/reuse load1=0.90 waited=0s
+bench_vafter/n4096/r1/reuse gate=pass
+bench_vafter/n4096/r1/phases load1=2.43 waited=0s
+bench_vafter/n4096/r1/phases load1=1.65 waited=30s
+bench_vafter/n4096/r1/phases load1=1.06 waited=60s
+bench_vafter/n4096/r1/phases load1=0.79 waited=90s
+bench_vafter/n4096/r1/phases gate=pass
+bench_tunboth/n256/r1/fresh load1=3.08 waited=0s
+bench_tunboth/n256/r1/fresh load1=2.02 waited=30s
+bench_tunboth/n256/r1/fresh load1=1.33 waited=60s
+bench_tunboth/n256/r1/fresh load1=0.88 waited=90s
+bench_tunboth/n256/r1/fresh gate=pass
+bench_tunboth/n256/r1/reuse load1=0.88 waited=0s
+bench_tunboth/n256/r1/reuse gate=pass
+bench_tunboth/n256/r1/phases load1=0.88 waited=0s
+bench_tunboth/n256/r1/phases gate=pass
+bench_tunboth/n512/r1/fresh load1=0.88 waited=0s
+bench_tunboth/n512/r1/fresh gate=pass
+bench_tunboth/n512/r1/reuse load1=0.88 waited=0s
+bench_tunboth/n512/r1/reuse gate=pass
+bench_tunboth/n512/r1/phases load1=0.88 waited=0s
+bench_tunboth/n512/r1/phases gate=pass
+bench_tunboth/n1024/r1/fresh load1=0.88 waited=0s
+bench_tunboth/n1024/r1/fresh gate=pass
+bench_tunboth/n1024/r1/reuse load1=0.88 waited=0s
+bench_tunboth/n1024/r1/reuse gate=pass
+bench_tunboth/n1024/r1/phases load1=0.88 waited=0s
+bench_tunboth/n1024/r1/phases gate=pass
+bench_tunboth/n2048/r1/fresh load1=0.88 waited=0s
+bench_tunboth/n2048/r1/fresh gate=pass
+bench_tunboth/n2048/r1/reuse load1=0.88 waited=0s
+bench_tunboth/n2048/r1/reuse gate=pass
+bench_tunboth/n2048/r1/phases load1=2.41 waited=0s
+bench_tunboth/n2048/r1/phases load1=1.46 waited=30s
+bench_tunboth/n2048/r1/phases load1=1.04 waited=60s
+bench_tunboth/n2048/r1/phases load1=0.68 waited=90s
+bench_tunboth/n2048/r1/phases gate=pass
+bench_tunboth/n4096/r1/fresh load1=0.68 waited=0s
+bench_tunboth/n4096/r1/fresh gate=pass
+bench_tunboth/n4096/r1/reuse load1=3.65 waited=0s
+bench_tunboth/n4096/r1/reuse load1=2.21 waited=30s
+bench_tunboth/n4096/r1/reuse load1=1.34 waited=60s
+bench_tunboth/n4096/r1/reuse load1=1.07 waited=90s
+bench_tunboth/n4096/r1/reuse load1=0.71 waited=120s
+bench_tunboth/n4096/r1/reuse gate=pass
+bench_tunboth/n4096/r1/phases load1=2.26 waited=0s
+bench_tunboth/n4096/r1/phases load1=1.37 waited=30s
+bench_tunboth/n4096/r1/phases load1=0.83 waited=60s
+bench_tunboth/n4096/r1/phases gate=pass
+bench_tunmmap/n256/r1/fresh load1=3.53 waited=0s
+bench_tunmmap/n256/r1/fresh load1=2.19 waited=30s
+bench_tunmmap/n256/r1/fresh load1=1.40 waited=60s
+bench_tunmmap/n256/r1/fresh load1=0.85 waited=90s
+bench_tunmmap/n256/r1/fresh gate=pass
+bench_tunmmap/n256/r1/reuse load1=0.85 waited=0s
+bench_tunmmap/n256/r1/reuse gate=pass
+bench_tunmmap/n256/r1/phases load1=0.85 waited=0s
+bench_tunmmap/n256/r1/phases gate=pass
+bench_tunmmap/n512/r1/fresh load1=0.85 waited=0s
+bench_tunmmap/n512/r1/fresh gate=pass
+bench_tunmmap/n512/r1/reuse load1=0.85 waited=0s
+bench_tunmmap/n512/r1/reuse gate=pass
+bench_tunmmap/n512/r1/phases load1=0.85 waited=0s
+bench_tunmmap/n512/r1/phases gate=pass
+bench_tunmmap/n1024/r1/fresh load1=0.85 waited=0s
+bench_tunmmap/n1024/r1/fresh gate=pass
+bench_tunmmap/n1024/r1/reuse load1=0.85 waited=0s
+bench_tunmmap/n1024/r1/reuse gate=pass
+bench_tunmmap/n1024/r1/phases load1=0.85 waited=0s
+bench_tunmmap/n1024/r1/phases gate=pass
+bench_tunmmap/n2048/r1/fresh load1=0.85 waited=0s
+bench_tunmmap/n2048/r1/fresh gate=pass
+bench_tunmmap/n2048/r1/reuse load1=2.14 waited=0s
+bench_tunmmap/n2048/r1/reuse load1=1.45 waited=30s
+bench_tunmmap/n2048/r1/reuse load1=0.93 waited=60s
+bench_tunmmap/n2048/r1/reuse gate=pass
+bench_tunmmap/n2048/r1/phases load1=0.93 waited=0s
+bench_tunmmap/n2048/r1/phases gate=pass
+bench_tunmmap/n4096/r1/fresh load1=0.93 waited=0s
+bench_tunmmap/n4096/r1/fresh gate=pass
+bench_tunmmap/n4096/r1/reuse load1=0.94 waited=0s
+bench_tunmmap/n4096/r1/reuse gate=pass
+bench_tunmmap/n4096/r1/phases load1=2.05 waited=0s
+bench_tunmmap/n4096/r1/phases load1=1.57 waited=30s
+bench_tunmmap/n4096/r1/phases load1=1.00 waited=60s
+bench_tunmmap/n4096/r1/phases load1=0.86 waited=90s
+bench_tunmmap/n4096/r1/phases gate=pass
+bench_tuntrim/n256/r1/fresh load1=3.56 waited=0s
+bench_tuntrim/n256/r1/fresh load1=2.16 waited=30s
+bench_tuntrim/n256/r1/fresh load1=1.31 waited=60s
+bench_tuntrim/n256/r1/fresh load1=0.94 waited=90s
+bench_tuntrim/n256/r1/fresh gate=pass
+bench_tuntrim/n256/r1/reuse load1=0.94 waited=0s
+bench_tuntrim/n256/r1/reuse gate=pass
+bench_tuntrim/n256/r1/phases load1=0.94 waited=0s
+bench_tuntrim/n256/r1/phases gate=pass
+bench_tuntrim/n512/r1/fresh load1=0.94 waited=0s
+bench_tuntrim/n512/r1/fresh gate=pass
+bench_tuntrim/n512/r1/reuse load1=0.94 waited=0s
+bench_tuntrim/n512/r1/reuse gate=pass
+bench_tuntrim/n512/r1/phases load1=0.94 waited=0s
+bench_tuntrim/n512/r1/phases gate=pass
+bench_tuntrim/n1024/r1/fresh load1=0.94 waited=0s
+bench_tuntrim/n1024/r1/fresh gate=pass
+bench_tuntrim/n1024/r1/reuse load1=0.94 waited=0s
+bench_tuntrim/n1024/r1/reuse gate=pass
+bench_tuntrim/n1024/r1/phases load1=0.94 waited=0s
+bench_tuntrim/n1024/r1/phases gate=pass
+bench_tuntrim/n2048/r1/fresh load1=0.94 waited=0s
+bench_tuntrim/n2048/r1/fresh gate=pass
+bench_tuntrim/n2048/r1/reuse load1=1.03 waited=0s
+bench_tuntrim/n2048/r1/reuse load1=0.62 waited=30s
+bench_tuntrim/n2048/r1/reuse gate=pass
+bench_tuntrim/n2048/r1/phases load1=0.62 waited=0s
+bench_tuntrim/n2048/r1/phases gate=pass
+bench_tuntrim/n4096/r1/fresh load1=0.65 waited=0s
+bench_tuntrim/n4096/r1/fresh gate=pass
+bench_tuntrim/n4096/r1/reuse load1=2.20 waited=0s
+bench_tuntrim/n4096/r1/reuse load1=1.33 waited=30s
+bench_tuntrim/n4096/r1/reuse load1=0.86 waited=60s
+bench_tuntrim/n4096/r1/reuse gate=pass
+bench_tuntrim/n4096/r1/phases load1=2.14 waited=0s
+bench_tuntrim/n4096/r1/phases load1=1.41 waited=30s
+bench_tuntrim/n4096/r1/phases load1=0.85 waited=60s
+bench_tuntrim/n4096/r1/phases gate=pass
+bench_tuntrim/n256/r2/phases load1=1.91 waited=0s
+bench_tuntrim/n256/r2/phases load1=1.23 waited=30s
+bench_tuntrim/n256/r2/phases load1=0.96 waited=60s
+bench_tuntrim/n256/r2/phases gate=pass
+bench_tuntrim/n256/r2/reuse load1=0.96 waited=0s
+bench_tuntrim/n256/r2/reuse gate=pass
+bench_tuntrim/n256/r2/fresh load1=0.96 waited=0s
+bench_tuntrim/n256/r2/fresh gate=pass
+bench_tuntrim/n512/r2/phases load1=0.96 waited=0s
+bench_tuntrim/n512/r2/phases gate=pass
+bench_tuntrim/n512/r2/reuse load1=0.96 waited=0s
+bench_tuntrim/n512/r2/reuse gate=pass
+bench_tuntrim/n512/r2/fresh load1=0.96 waited=0s
+bench_tuntrim/n512/r2/fresh gate=pass
+bench_tuntrim/n1024/r2/phases load1=0.96 waited=0s
+bench_tuntrim/n1024/r2/phases gate=pass
+bench_tuntrim/n1024/r2/reuse load1=0.96 waited=0s
+bench_tuntrim/n1024/r2/reuse gate=pass
+bench_tuntrim/n1024/r2/fresh load1=0.96 waited=0s
+bench_tuntrim/n1024/r2/fresh gate=pass
+bench_tuntrim/n2048/r2/phases load1=0.96 waited=0s
+bench_tuntrim/n2048/r2/phases gate=pass
+bench_tuntrim/n2048/r2/reuse load1=1.13 waited=0s
+bench_tuntrim/n2048/r2/reuse load1=0.83 waited=30s
+bench_tuntrim/n2048/r2/reuse gate=pass
+bench_tuntrim/n2048/r2/fresh load1=0.83 waited=0s
+bench_tuntrim/n2048/r2/fresh gate=pass
+bench_tuntrim/n4096/r2/phases load1=0.83 waited=0s
+bench_tuntrim/n4096/r2/phases gate=pass
+bench_tuntrim/n4096/r2/reuse load1=2.38 waited=0s
+bench_tuntrim/n4096/r2/reuse load1=1.44 waited=30s
+bench_tuntrim/n4096/r2/reuse load1=1.16 waited=60s
+bench_tuntrim/n4096/r2/reuse load1=1.35 waited=90s
+bench_tuntrim/n4096/r2/reuse load1=1.21 waited=120s
+bench_tuntrim/n4096/r2/reuse load1=0.96 waited=150s
+bench_tuntrim/n4096/r2/reuse gate=pass
+bench_tuntrim/n4096/r2/fresh load1=2.45 waited=0s
+bench_tuntrim/n4096/r2/fresh load1=1.64 waited=30s
+bench_tuntrim/n4096/r2/fresh load1=1.04 waited=60s
+bench_tuntrim/n4096/r2/fresh load1=0.63 waited=90s
+bench_tuntrim/n4096/r2/fresh gate=pass
+bench_tunmmap/n256/r2/phases load1=2.90 waited=0s
+bench_tunmmap/n256/r2/phases load1=1.75 waited=30s
+bench_tunmmap/n256/r2/phases load1=1.27 waited=60s
+bench_tunmmap/n256/r2/phases load1=0.77 waited=90s
+bench_tunmmap/n256/r2/phases gate=pass
+bench_tunmmap/n256/r2/reuse load1=0.77 waited=0s
+bench_tunmmap/n256/r2/reuse gate=pass
+bench_tunmmap/n256/r2/fresh load1=0.77 waited=0s
+bench_tunmmap/n256/r2/fresh gate=pass
+bench_tunmmap/n512/r2/phases load1=0.77 waited=0s
+bench_tunmmap/n512/r2/phases gate=pass
+bench_tunmmap/n512/r2/reuse load1=0.77 waited=0s
+bench_tunmmap/n512/r2/reuse gate=pass
+bench_tunmmap/n512/r2/fresh load1=0.77 waited=0s
+bench_tunmmap/n512/r2/fresh gate=pass
+bench_tunmmap/n1024/r2/phases load1=0.77 waited=0s
+bench_tunmmap/n1024/r2/phases gate=pass
+bench_tunmmap/n1024/r2/reuse load1=0.77 waited=0s
+bench_tunmmap/n1024/r2/reuse gate=pass
+bench_tunmmap/n1024/r2/fresh load1=0.77 waited=0s
+bench_tunmmap/n1024/r2/fresh gate=pass
+bench_tunmmap/n2048/r2/phases load1=0.77 waited=0s
+bench_tunmmap/n2048/r2/phases gate=pass
+bench_tunmmap/n2048/r2/reuse load1=0.77 waited=0s
+bench_tunmmap/n2048/r2/reuse gate=pass
+bench_tunmmap/n2048/r2/fresh load1=2.39 waited=0s
+bench_tunmmap/n2048/r2/fresh load1=1.58 waited=30s
+bench_tunmmap/n2048/r2/fresh load1=1.02 waited=60s
+bench_tunmmap/n2048/r2/fresh load1=0.81 waited=90s
+bench_tunmmap/n2048/r2/fresh gate=pass
+bench_tunmmap/n4096/r2/phases load1=0.81 waited=0s
+bench_tunmmap/n4096/r2/phases gate=pass
+bench_tunmmap/n4096/r2/reuse load1=2.65 waited=0s
+bench_tunmmap/n4096/r2/reuse load1=1.61 waited=30s
+bench_tunmmap/n4096/r2/reuse load1=0.97 waited=60s
+bench_tunmmap/n4096/r2/reuse gate=pass
+bench_tunmmap/n4096/r2/fresh load1=2.78 waited=0s
+bench_tunmmap/n4096/r2/fresh load1=1.96 waited=30s
+bench_tunmmap/n4096/r2/fresh load1=1.19 waited=60s
+bench_tunmmap/n4096/r2/fresh load1=0.72 waited=90s
+bench_tunmmap/n4096/r2/fresh gate=pass
+bench_tunboth/n256/r2/phases load1=2.26 waited=0s
+bench_tunboth/n256/r2/phases load1=1.37 waited=30s
+bench_tunboth/n256/r2/phases load1=1.11 waited=60s
+bench_tunboth/n256/r2/phases load1=0.67 waited=90s
+bench_tunboth/n256/r2/phases gate=pass
+bench_tunboth/n256/r2/reuse load1=1.18 waited=0s
+bench_tunboth/n256/r2/reuse load1=0.87 waited=30s
+bench_tunboth/n256/r2/reuse gate=pass
+bench_tunboth/n256/r2/fresh load1=0.87 waited=0s
+bench_tunboth/n256/r2/fresh gate=pass
+bench_tunboth/n512/r2/phases load1=0.87 waited=0s
+bench_tunboth/n512/r2/phases gate=pass
+bench_tunboth/n512/r2/reuse load1=0.87 waited=0s
+bench_tunboth/n512/r2/reuse gate=pass
+bench_tunboth/n512/r2/fresh load1=0.87 waited=0s
+bench_tunboth/n512/r2/fresh gate=pass
+bench_tunboth/n1024/r2/phases load1=0.87 waited=0s
+bench_tunboth/n1024/r2/phases gate=pass
+bench_tunboth/n1024/r2/reuse load1=0.87 waited=0s
+bench_tunboth/n1024/r2/reuse gate=pass
+bench_tunboth/n1024/r2/fresh load1=0.87 waited=0s
+bench_tunboth/n1024/r2/fresh gate=pass
+bench_tunboth/n2048/r2/phases load1=0.87 waited=0s
+bench_tunboth/n2048/r2/phases gate=pass
+bench_tunboth/n2048/r2/reuse load1=0.87 waited=0s
+bench_tunboth/n2048/r2/reuse gate=pass
+bench_tunboth/n2048/r2/fresh load1=0.87 waited=0s
+bench_tunboth/n2048/r2/fresh gate=pass
+bench_tunboth/n4096/r2/phases load1=0.96 waited=0s
+bench_tunboth/n4096/r2/phases gate=pass
+bench_tunboth/n4096/r2/reuse load1=2.48 waited=0s
+bench_tunboth/n4096/r2/reuse load1=1.58 waited=30s
+bench_tunboth/n4096/r2/reuse load1=1.13 waited=60s
+bench_tunboth/n4096/r2/reuse load1=0.68 waited=90s
+bench_tunboth/n4096/r2/reuse gate=pass
+bench_tunboth/n4096/r2/fresh load1=3.65 waited=0s
+bench_tunboth/n4096/r2/fresh load1=2.21 waited=30s
+bench_tunboth/n4096/r2/fresh load1=1.56 waited=60s
+bench_tunboth/n4096/r2/fresh load1=0.95 waited=90s
+bench_tunboth/n4096/r2/fresh gate=pass
+bench_vafter/n256/r2/phases load1=1.40 waited=0s
+bench_vafter/n256/r2/phases load1=0.84 waited=30s
+bench_vafter/n256/r2/phases gate=pass
+bench_vafter/n256/r2/reuse load1=0.84 waited=0s
+bench_vafter/n256/r2/reuse gate=pass
+bench_vafter/n256/r2/fresh load1=0.84 waited=0s
+bench_vafter/n256/r2/fresh gate=pass
+bench_vafter/n512/r2/phases load1=0.84 waited=0s
+bench_vafter/n512/r2/phases gate=pass
+bench_vafter/n512/r2/reuse load1=0.84 waited=0s
+bench_vafter/n512/r2/reuse gate=pass
+bench_vafter/n512/r2/fresh load1=0.84 waited=0s
+bench_vafter/n512/r2/fresh gate=pass
+bench_vafter/n1024/r2/phases load1=0.84 waited=0s
+bench_vafter/n1024/r2/phases gate=pass
+bench_vafter/n1024/r2/reuse load1=0.84 waited=0s
+bench_vafter/n1024/r2/reuse gate=pass
+bench_vafter/n1024/r2/fresh load1=0.84 waited=0s
+bench_vafter/n1024/r2/fresh gate=pass
+bench_vafter/n2048/r2/phases load1=0.84 waited=0s
+bench_vafter/n2048/r2/phases gate=pass
+bench_vafter/n2048/r2/reuse load1=0.84 waited=0s
+bench_vafter/n2048/r2/reuse gate=pass
+bench_vafter/n2048/r2/fresh load1=0.84 waited=0s
+bench_vafter/n2048/r2/fresh gate=pass
+bench_vafter/n4096/r2/phases load1=0.86 waited=0s
+bench_vafter/n4096/r2/phases gate=pass
+bench_vafter/n4096/r2/reuse load1=2.39 waited=0s
+bench_vafter/n4096/r2/reuse load1=1.53 waited=30s
+bench_vafter/n4096/r2/reuse load1=1.10 waited=60s
+bench_vafter/n4096/r2/reuse load1=0.66 waited=90s
+bench_vafter/n4096/r2/reuse gate=pass
+bench_vafter/n4096/r2/fresh load1=2.44 waited=0s
+bench_vafter/n4096/r2/fresh load1=1.47 waited=30s
+bench_vafter/n4096/r2/fresh load1=1.05 waited=60s
+bench_vafter/n4096/r2/fresh load1=0.76 waited=90s
+bench_vafter/n4096/r2/fresh gate=pass
+bench_base/n256/r2/phases load1=3.72 waited=0s
+bench_base/n256/r2/phases load1=2.25 waited=30s
+bench_base/n256/r2/phases load1=1.36 waited=60s
+bench_base/n256/r2/phases load1=1.03 waited=90s
+bench_base/n256/r2/phases load1=0.62 waited=120s
+bench_base/n256/r2/phases gate=pass
+bench_base/n256/r2/reuse load1=0.62 waited=0s
+bench_base/n256/r2/reuse gate=pass
+bench_base/n256/r2/fresh load1=0.62 waited=0s
+bench_base/n256/r2/fresh gate=pass
+bench_base/n512/r2/phases load1=0.62 waited=0s
+bench_base/n512/r2/phases gate=pass
+bench_base/n512/r2/reuse load1=0.62 waited=0s
+bench_base/n512/r2/reuse gate=pass
+bench_base/n512/r2/fresh load1=0.62 waited=0s
+bench_base/n512/r2/fresh gate=pass
+bench_base/n1024/r2/phases load1=0.62 waited=0s
+bench_base/n1024/r2/phases gate=pass
+bench_base/n1024/r2/reuse load1=0.62 waited=0s
+bench_base/n1024/r2/reuse gate=pass
+bench_base/n1024/r2/fresh load1=0.62 waited=0s
+bench_base/n1024/r2/fresh gate=pass
+bench_base/n2048/r2/phases load1=0.62 waited=0s
+bench_base/n2048/r2/phases gate=pass
+bench_base/n2048/r2/reuse load1=0.62 waited=0s
+bench_base/n2048/r2/reuse gate=pass
+bench_base/n2048/r2/fresh load1=0.65 waited=0s
+bench_base/n2048/r2/fresh gate=pass
+bench_base/n4096/r2/phases load1=0.65 waited=0s
+bench_base/n4096/r2/phases gate=pass
+bench_base/n4096/r2/reuse load1=2.11 waited=0s
+bench_base/n4096/r2/reuse load1=1.46 waited=30s
+bench_base/n4096/r2/reuse load1=1.03 waited=60s
+bench_base/n4096/r2/reuse load1=0.73 waited=90s
+bench_base/n4096/r2/reuse gate=pass
+bench_base/n4096/r2/fresh load1=0.75 waited=0s
+bench_base/n4096/r2/fresh gate=pass
+bench_base/n256/r3/fresh load1=1.11 waited=0s
+bench_base/n256/r3/fresh load1=0.67 waited=30s
+bench_base/n256/r3/fresh gate=pass
+bench_base/n256/r3/reuse load1=0.67 waited=0s
+bench_base/n256/r3/reuse gate=pass
+bench_base/n256/r3/phases load1=0.67 waited=0s
+bench_base/n256/r3/phases gate=pass
+bench_base/n512/r3/fresh load1=0.67 waited=0s
+bench_base/n512/r3/fresh gate=pass
+bench_base/n512/r3/reuse load1=0.67 waited=0s
+bench_base/n512/r3/reuse gate=pass
+bench_base/n512/r3/phases load1=0.67 waited=0s
+bench_base/n512/r3/phases gate=pass
+bench_base/n1024/r3/fresh load1=0.67 waited=0s
+bench_base/n1024/r3/fresh gate=pass
+bench_base/n1024/r3/reuse load1=0.67 waited=0s
+bench_base/n1024/r3/reuse gate=pass
+bench_base/n1024/r3/phases load1=0.67 waited=0s
+bench_base/n1024/r3/phases gate=pass
+bench_base/n2048/r3/fresh load1=0.67 waited=0s
+bench_base/n2048/r3/fresh gate=pass
+bench_base/n2048/r3/reuse load1=0.70 waited=0s
+bench_base/n2048/r3/reuse gate=pass
+bench_base/n2048/r3/phases load1=0.70 waited=0s
+bench_base/n2048/r3/phases gate=pass
+bench_base/n4096/r3/fresh load1=0.70 waited=0s
+bench_base/n4096/r3/fresh gate=pass
+bench_base/n4096/r3/reuse load1=3.67 waited=0s
+bench_base/n4096/r3/reuse load1=2.30 waited=30s
+bench_base/n4096/r3/reuse load1=1.50 waited=60s
+bench_base/n4096/r3/reuse load1=0.91 waited=90s
+bench_base/n4096/r3/reuse gate=pass
+bench_base/n4096/r3/phases load1=1.22 waited=0s
+bench_base/n4096/r3/phases load1=0.74 waited=30s
+bench_base/n4096/r3/phases gate=pass
+bench_vafter/n256/r3/fresh load1=2.59 waited=0s
+bench_vafter/n256/r3/fresh load1=1.76 waited=30s
+bench_vafter/n256/r3/fresh load1=1.06 waited=60s
+bench_vafter/n256/r3/fresh load1=0.64 waited=90s
+bench_vafter/n256/r3/fresh gate=pass
+bench_vafter/n256/r3/reuse load1=0.64 waited=0s
+bench_vafter/n256/r3/reuse gate=pass
+bench_vafter/n256/r3/phases load1=0.64 waited=0s
+bench_vafter/n256/r3/phases gate=pass
+bench_vafter/n512/r3/fresh load1=0.64 waited=0s
+bench_vafter/n512/r3/fresh gate=pass
+bench_vafter/n512/r3/reuse load1=0.64 waited=0s
+bench_vafter/n512/r3/reuse gate=pass
+bench_vafter/n512/r3/phases load1=0.64 waited=0s
+bench_vafter/n512/r3/phases gate=pass
+bench_vafter/n1024/r3/fresh load1=0.64 waited=0s
+bench_vafter/n1024/r3/fresh gate=pass
+bench_vafter/n1024/r3/reuse load1=0.64 waited=0s
+bench_vafter/n1024/r3/reuse gate=pass
+bench_vafter/n1024/r3/phases load1=0.64 waited=0s
+bench_vafter/n1024/r3/phases gate=pass
+bench_vafter/n2048/r3/fresh load1=0.64 waited=0s
+bench_vafter/n2048/r3/fresh gate=pass
+bench_vafter/n2048/r3/reuse load1=0.64 waited=0s
+bench_vafter/n2048/r3/reuse gate=pass
+bench_vafter/n2048/r3/phases load1=0.64 waited=0s
+bench_vafter/n2048/r3/phases gate=pass
+bench_vafter/n4096/r3/fresh load1=0.67 waited=0s
+bench_vafter/n4096/r3/fresh gate=pass
+bench_vafter/n4096/r3/reuse load1=0.70 waited=0s
+bench_vafter/n4096/r3/reuse gate=pass
+bench_vafter/n4096/r3/phases load1=3.30 waited=0s
+bench_vafter/n4096/r3/phases load1=2.22 waited=30s
+bench_vafter/n4096/r3/phases load1=1.34 waited=60s
+bench_vafter/n4096/r3/phases load1=0.81 waited=90s
+bench_vafter/n4096/r3/phases gate=pass
+bench_tunboth/n256/r3/fresh load1=1.15 waited=0s
+bench_tunboth/n256/r3/fresh load1=0.70 waited=30s
+bench_tunboth/n256/r3/fresh gate=pass
+bench_tunboth/n256/r3/reuse load1=0.70 waited=0s
+bench_tunboth/n256/r3/reuse gate=pass
+bench_tunboth/n256/r3/phases load1=0.70 waited=0s
+bench_tunboth/n256/r3/phases gate=pass
+bench_tunboth/n512/r3/fresh load1=0.70 waited=0s
+bench_tunboth/n512/r3/fresh gate=pass
+bench_tunboth/n512/r3/reuse load1=0.70 waited=0s
+bench_tunboth/n512/r3/reuse gate=pass
+bench_tunboth/n512/r3/phases load1=0.70 waited=0s
+bench_tunboth/n512/r3/phases gate=pass
+bench_tunboth/n1024/r3/fresh load1=0.70 waited=0s
+bench_tunboth/n1024/r3/fresh gate=pass
+bench_tunboth/n1024/r3/reuse load1=0.70 waited=0s
+bench_tunboth/n1024/r3/reuse gate=pass
+bench_tunboth/n1024/r3/phases load1=0.70 waited=0s
+bench_tunboth/n1024/r3/phases gate=pass
+bench_tunboth/n2048/r3/fresh load1=2.24 waited=0s
+bench_tunboth/n2048/r3/fresh load1=1.54 waited=30s
+bench_tunboth/n2048/r3/fresh load1=0.93 waited=60s
+bench_tunboth/n2048/r3/fresh gate=pass
+bench_tunboth/n2048/r3/reuse load1=0.93 waited=0s
+bench_tunboth/n2048/r3/reuse gate=pass
+bench_tunboth/n2048/r3/phases load1=0.93 waited=0s
+bench_tunboth/n2048/r3/phases gate=pass
+bench_tunboth/n4096/r3/fresh load1=0.93 waited=0s
+bench_tunboth/n4096/r3/fresh gate=pass
+bench_tunboth/n4096/r3/reuse load1=2.50 waited=0s
+bench_tunboth/n4096/r3/reuse load1=1.70 waited=30s
+bench_tunboth/n4096/r3/reuse load1=1.11 waited=60s
+bench_tunboth/n4096/r3/reuse load1=0.86 waited=90s
+bench_tunboth/n4096/r3/reuse gate=pass
+bench_tunboth/n4096/r3/phases load1=2.78 waited=0s
+bench_tunboth/n4096/r3/phases load1=1.68 waited=30s
+bench_tunboth/n4096/r3/phases load1=1.02 waited=60s
+bench_tunboth/n4096/r3/phases load1=0.84 waited=90s
+bench_tunboth/n4096/r3/phases gate=pass
+bench_tunmmap/n256/r3/fresh load1=0.86 waited=0s
+bench_tunmmap/n256/r3/fresh gate=pass
+bench_tunmmap/n256/r3/reuse load1=0.86 waited=0s
+bench_tunmmap/n256/r3/reuse gate=pass
+bench_tunmmap/n256/r3/phases load1=0.86 waited=0s
+bench_tunmmap/n256/r3/phases gate=pass
+bench_tunmmap/n512/r3/fresh load1=0.86 waited=0s
+bench_tunmmap/n512/r3/fresh gate=pass
+bench_tunmmap/n512/r3/reuse load1=0.86 waited=0s
+bench_tunmmap/n512/r3/reuse gate=pass
+bench_tunmmap/n512/r3/phases load1=0.86 waited=0s
+bench_tunmmap/n512/r3/phases gate=pass
+bench_tunmmap/n1024/r3/fresh load1=0.86 waited=0s
+bench_tunmmap/n1024/r3/fresh gate=pass
+bench_tunmmap/n1024/r3/reuse load1=0.86 waited=0s
+bench_tunmmap/n1024/r3/reuse gate=pass
+bench_tunmmap/n1024/r3/phases load1=0.86 waited=0s
+bench_tunmmap/n1024/r3/phases gate=pass
+bench_tunmmap/n2048/r3/fresh load1=0.86 waited=0s
+bench_tunmmap/n2048/r3/fresh gate=pass
+bench_tunmmap/n2048/r3/reuse load1=0.86 waited=0s
+bench_tunmmap/n2048/r3/reuse gate=pass
+bench_tunmmap/n2048/r3/phases load1=0.87 waited=0s
+bench_tunmmap/n2048/r3/phases gate=pass
+bench_tunmmap/n4096/r3/fresh load1=0.87 waited=0s
+bench_tunmmap/n4096/r3/fresh gate=pass
+bench_tunmmap/n4096/r3/reuse load1=1.04 waited=0s
+bench_tunmmap/n4096/r3/reuse load1=0.63 waited=30s
+bench_tunmmap/n4096/r3/reuse gate=pass
+bench_tunmmap/n4096/r3/phases load1=2.09 waited=0s
+bench_tunmmap/n4096/r3/phases load1=1.26 waited=30s
+bench_tunmmap/n4096/r3/phases load1=0.97 waited=60s
+bench_tunmmap/n4096/r3/phases gate=pass
+bench_tuntrim/n256/r3/fresh load1=1.93 waited=0s
+bench_tuntrim/n256/r3/fresh load1=1.17 waited=30s
+bench_tuntrim/n256/r3/fresh load1=0.79 waited=60s
+bench_tuntrim/n256/r3/fresh gate=pass
+bench_tuntrim/n256/r3/reuse load1=2.41 waited=0s
+bench_tuntrim/n256/r3/reuse load1=1.46 waited=30s
+bench_tuntrim/n256/r3/reuse load1=1.05 waited=60s
+bench_tuntrim/n256/r3/reuse load1=0.64 waited=90s
+bench_tuntrim/n256/r3/reuse gate=pass
+bench_tuntrim/n256/r3/phases load1=0.64 waited=0s
+bench_tuntrim/n256/r3/phases gate=pass
+bench_tuntrim/n512/r3/fresh load1=0.64 waited=0s
+bench_tuntrim/n512/r3/fresh gate=pass
+bench_tuntrim/n512/r3/reuse load1=0.64 waited=0s
+bench_tuntrim/n512/r3/reuse gate=pass
+bench_tuntrim/n512/r3/phases load1=0.64 waited=0s
+bench_tuntrim/n512/r3/phases gate=pass
+bench_tuntrim/n1024/r3/fresh load1=0.64 waited=0s
+bench_tuntrim/n1024/r3/fresh gate=pass
+bench_tuntrim/n1024/r3/reuse load1=0.64 waited=0s
+bench_tuntrim/n1024/r3/reuse gate=pass
+bench_tuntrim/n1024/r3/phases load1=0.64 waited=0s
+bench_tuntrim/n1024/r3/phases gate=pass
+bench_tuntrim/n2048/r3/fresh load1=0.64 waited=0s
+bench_tuntrim/n2048/r3/fresh gate=pass
+bench_tuntrim/n2048/r3/reuse load1=0.64 waited=0s
+bench_tuntrim/n2048/r3/reuse gate=pass
+bench_tuntrim/n2048/r3/phases load1=0.99 waited=0s
+bench_tuntrim/n2048/r3/phases gate=pass
+bench_tuntrim/n4096/r3/fresh load1=0.99 waited=0s
+bench_tuntrim/n4096/r3/fresh gate=pass
+bench_tuntrim/n4096/r3/reuse load1=3.17 waited=0s
+bench_tuntrim/n4096/r3/reuse load1=1.92 waited=30s
+bench_tuntrim/n4096/r3/reuse load1=1.39 waited=60s
+bench_tuntrim/n4096/r3/reuse load1=0.89 waited=90s
+bench_tuntrim/n4096/r3/reuse gate=pass
+bench_tuntrim/n4096/r3/phases load1=3.08 waited=0s
+bench_tuntrim/n4096/r3/phases load1=2.09 waited=30s
+bench_tuntrim/n4096/r3/phases load1=1.26 waited=60s
+bench_tuntrim/n4096/r3/phases load1=1.03 waited=90s
+bench_tuntrim/n4096/r3/phases load1=0.62 waited=120s
+bench_tuntrim/n4096/r3/phases gate=pass
+bench_tuntrim/n256/r4/phases load1=0.68 waited=0s
+bench_tuntrim/n256/r4/phases gate=pass
+bench_tuntrim/n256/r4/reuse load1=0.68 waited=0s
+bench_tuntrim/n256/r4/reuse gate=pass
+bench_tuntrim/n256/r4/fresh load1=0.68 waited=0s
+bench_tuntrim/n256/r4/fresh gate=pass
+bench_tuntrim/n512/r4/phases load1=0.68 waited=0s
+bench_tuntrim/n512/r4/phases gate=pass
+bench_tuntrim/n512/r4/reuse load1=0.68 waited=0s
+bench_tuntrim/n512/r4/reuse gate=pass
+bench_tuntrim/n512/r4/fresh load1=0.68 waited=0s
+bench_tuntrim/n512/r4/fresh gate=pass
+bench_tuntrim/n1024/r4/phases load1=0.68 waited=0s
+bench_tuntrim/n1024/r4/phases gate=pass
+bench_tuntrim/n1024/r4/reuse load1=0.68 waited=0s
+bench_tuntrim/n1024/r4/reuse gate=pass
+bench_tuntrim/n1024/r4/fresh load1=0.68 waited=0s
+bench_tuntrim/n1024/r4/fresh gate=pass
+bench_tuntrim/n2048/r4/phases load1=0.68 waited=0s
+bench_tuntrim/n2048/r4/phases gate=pass
+bench_tuntrim/n2048/r4/reuse load1=0.68 waited=0s
+bench_tuntrim/n2048/r4/reuse gate=pass
+bench_tuntrim/n2048/r4/fresh load1=1.11 waited=0s
+bench_tuntrim/n2048/r4/fresh load1=0.67 waited=30s
+bench_tuntrim/n2048/r4/fresh gate=pass
+bench_tuntrim/n4096/r4/phases load1=0.67 waited=0s
+bench_tuntrim/n4096/r4/phases gate=pass
+bench_tuntrim/n4096/r4/reuse load1=1.75 waited=0s
+bench_tuntrim/n4096/r4/reuse load1=1.34 waited=30s
+bench_tuntrim/n4096/r4/reuse load1=0.87 waited=60s
+bench_tuntrim/n4096/r4/reuse gate=pass
+bench_tuntrim/n4096/r4/fresh load1=3.89 waited=0s
+bench_tuntrim/n4096/r4/fresh load1=2.36 waited=30s
+bench_tuntrim/n4096/r4/fresh load1=1.43 waited=60s
+bench_tuntrim/n4096/r4/fresh load1=1.05 waited=90s
+bench_tuntrim/n4096/r4/fresh load1=0.64 waited=120s
+bench_tuntrim/n4096/r4/fresh gate=pass
+bench_tunmmap/n256/r4/phases load1=0.69 waited=0s
+bench_tunmmap/n256/r4/phases gate=pass
+bench_tunmmap/n256/r4/reuse load1=0.69 waited=0s
+bench_tunmmap/n256/r4/reuse gate=pass
+bench_tunmmap/n256/r4/fresh load1=0.69 waited=0s
+bench_tunmmap/n256/r4/fresh gate=pass
+bench_tunmmap/n512/r4/phases load1=0.69 waited=0s
+bench_tunmmap/n512/r4/phases gate=pass
+bench_tunmmap/n512/r4/reuse load1=0.69 waited=0s
+bench_tunmmap/n512/r4/reuse gate=pass
+bench_tunmmap/n512/r4/fresh load1=0.69 waited=0s
+bench_tunmmap/n512/r4/fresh gate=pass
+bench_tunmmap/n1024/r4/phases load1=0.69 waited=0s
+bench_tunmmap/n1024/r4/phases gate=pass
+bench_tunmmap/n1024/r4/reuse load1=0.69 waited=0s
+bench_tunmmap/n1024/r4/reuse gate=pass
+bench_tunmmap/n1024/r4/fresh load1=0.69 waited=0s
+bench_tunmmap/n1024/r4/fresh gate=pass
+bench_tunmmap/n2048/r4/phases load1=0.69 waited=0s
+bench_tunmmap/n2048/r4/phases gate=pass
+bench_tunmmap/n2048/r4/reuse load1=0.69 waited=0s
+bench_tunmmap/n2048/r4/reuse gate=pass
+bench_tunmmap/n2048/r4/fresh load1=0.72 waited=0s
+bench_tunmmap/n2048/r4/fresh gate=pass
+bench_tunmmap/n4096/r4/phases load1=0.72 waited=0s
+bench_tunmmap/n4096/r4/phases gate=pass
+bench_tunmmap/n4096/r4/reuse load1=3.68 waited=0s
+bench_tunmmap/n4096/r4/reuse load1=2.23 waited=30s
+bench_tunmmap/n4096/r4/reuse load1=1.55 waited=60s
+bench_tunmmap/n4096/r4/reuse load1=0.94 waited=90s
+bench_tunmmap/n4096/r4/reuse gate=pass
+bench_tunmmap/n4096/r4/fresh load1=2.47 waited=0s
+bench_tunmmap/n4096/r4/fresh load1=1.50 waited=30s
+bench_tunmmap/n4096/r4/fresh load1=0.91 waited=60s
+bench_tunmmap/n4096/r4/fresh gate=pass
+bench_tunboth/n256/r4/phases load1=1.15 waited=0s
+bench_tunboth/n256/r4/phases load1=0.75 waited=30s
+bench_tunboth/n256/r4/phases gate=pass
+bench_tunboth/n256/r4/reuse load1=0.75 waited=0s
+bench_tunboth/n256/r4/reuse gate=pass
+bench_tunboth/n256/r4/fresh load1=0.75 waited=0s
+bench_tunboth/n256/r4/fresh gate=pass
+bench_tunboth/n512/r4/phases load1=0.75 waited=0s
+bench_tunboth/n512/r4/phases gate=pass
+bench_tunboth/n512/r4/reuse load1=0.75 waited=0s
+bench_tunboth/n512/r4/reuse gate=pass
+bench_tunboth/n512/r4/fresh load1=0.75 waited=0s
+bench_tunboth/n512/r4/fresh gate=pass
+bench_tunboth/n1024/r4/phases load1=0.75 waited=0s
+bench_tunboth/n1024/r4/phases gate=pass
+bench_tunboth/n1024/r4/reuse load1=0.75 waited=0s
+bench_tunboth/n1024/r4/reuse gate=pass
+bench_tunboth/n1024/r4/fresh load1=0.77 waited=0s
+bench_tunboth/n1024/r4/fresh gate=pass
+bench_tunboth/n2048/r4/phases load1=0.77 waited=0s
+bench_tunboth/n2048/r4/phases gate=pass
+bench_tunboth/n2048/r4/reuse load1=0.77 waited=0s
+bench_tunboth/n2048/r4/reuse gate=pass
+bench_tunboth/n2048/r4/fresh load1=0.77 waited=0s
+bench_tunboth/n2048/r4/fresh gate=pass
+bench_tunboth/n4096/r4/phases load1=0.79 waited=0s
+bench_tunboth/n4096/r4/phases gate=pass
+bench_tunboth/n4096/r4/reuse load1=1.13 waited=0s
+bench_tunboth/n4096/r4/reuse load1=0.90 waited=30s
+bench_tunboth/n4096/r4/reuse gate=pass
+bench_tunboth/n4096/r4/fresh load1=2.48 waited=0s
+bench_tunboth/n4096/r4/fresh load1=1.50 waited=30s
+bench_tunboth/n4096/r4/fresh load1=1.08 waited=60s
+bench_tunboth/n4096/r4/fresh load1=0.65 waited=90s
+bench_tunboth/n4096/r4/fresh gate=pass
+bench_vafter/n256/r4/phases load1=2.52 waited=0s
+bench_vafter/n256/r4/phases load1=1.59 waited=30s
+bench_vafter/n256/r4/phases load1=1.12 waited=60s
+bench_vafter/n256/r4/phases load1=0.79 waited=90s
+bench_vafter/n256/r4/phases gate=pass
+bench_vafter/n256/r4/reuse load1=0.79 waited=0s
+bench_vafter/n256/r4/reuse gate=pass
+bench_vafter/n256/r4/fresh load1=0.79 waited=0s
+bench_vafter/n256/r4/fresh gate=pass
+bench_vafter/n512/r4/phases load1=0.79 waited=0s
+bench_vafter/n512/r4/phases gate=pass
+bench_vafter/n512/r4/reuse load1=0.79 waited=0s
+bench_vafter/n512/r4/reuse gate=pass
+bench_vafter/n512/r4/fresh load1=0.79 waited=0s
+bench_vafter/n512/r4/fresh gate=pass
+bench_vafter/n1024/r4/phases load1=0.79 waited=0s
+bench_vafter/n1024/r4/phases gate=pass
+bench_vafter/n1024/r4/reuse load1=0.79 waited=0s
+bench_vafter/n1024/r4/reuse gate=pass
+bench_vafter/n1024/r4/fresh load1=0.79 waited=0s
+bench_vafter/n1024/r4/fresh gate=pass
+bench_vafter/n2048/r4/phases load1=0.79 waited=0s
+bench_vafter/n2048/r4/phases gate=pass
+bench_vafter/n2048/r4/reuse load1=0.79 waited=0s
+bench_vafter/n2048/r4/reuse gate=pass
+bench_vafter/n2048/r4/fresh load1=0.79 waited=0s
+bench_vafter/n2048/r4/fresh gate=pass
+bench_vafter/n4096/r4/phases load1=0.80 waited=0s
+bench_vafter/n4096/r4/phases gate=pass
+bench_vafter/n4096/r4/reuse load1=1.14 waited=0s
+bench_vafter/n4096/r4/reuse load1=0.69 waited=30s
+bench_vafter/n4096/r4/reuse gate=pass
+bench_vafter/n4096/r4/fresh load1=3.66 waited=0s
+bench_vafter/n4096/r4/fresh load1=2.22 waited=30s
+bench_vafter/n4096/r4/fresh load1=1.51 waited=60s
+bench_vafter/n4096/r4/fresh load1=0.92 waited=90s
+bench_vafter/n4096/r4/fresh gate=pass
+bench_base/n256/r4/phases load1=0.93 waited=0s
+bench_base/n256/r4/phases gate=pass
+bench_base/n256/r4/reuse load1=0.93 waited=0s
+bench_base/n256/r4/reuse gate=pass
+bench_base/n256/r4/fresh load1=0.93 waited=0s
+bench_base/n256/r4/fresh gate=pass
+bench_base/n512/r4/phases load1=0.93 waited=0s
+bench_base/n512/r4/phases gate=pass
+bench_base/n512/r4/reuse load1=0.93 waited=0s
+bench_base/n512/r4/reuse gate=pass
+bench_base/n512/r4/fresh load1=0.93 waited=0s
+bench_base/n512/r4/fresh gate=pass
+bench_base/n1024/r4/phases load1=0.93 waited=0s
+bench_base/n1024/r4/phases gate=pass
+bench_base/n1024/r4/reuse load1=0.93 waited=0s
+bench_base/n1024/r4/reuse gate=pass
+bench_base/n1024/r4/fresh load1=0.93 waited=0s
+bench_base/n1024/r4/fresh gate=pass
+bench_base/n2048/r4/phases load1=0.93 waited=0s
+bench_base/n2048/r4/phases gate=pass
+bench_base/n2048/r4/reuse load1=0.93 waited=0s
+bench_base/n2048/r4/reuse gate=pass
+bench_base/n2048/r4/fresh load1=0.93 waited=0s
+bench_base/n2048/r4/fresh gate=pass
+bench_base/n4096/r4/phases load1=0.93 waited=0s
+bench_base/n4096/r4/phases gate=pass
+bench_base/n4096/r4/reuse load1=2.34 waited=0s
+bench_base/n4096/r4/reuse load1=1.42 waited=30s
+bench_base/n4096/r4/reuse load1=1.11 waited=60s
+bench_base/n4096/r4/reuse load1=0.67 waited=90s
+bench_base/n4096/r4/reuse gate=pass
+bench_base/n4096/r4/fresh load1=1.02 waited=0s
+bench_base/n4096/r4/fresh load1=0.68 waited=30s
+bench_base/n4096/r4/fresh gate=pass
+bench_base/n256/r5/fresh load1=3.81 waited=0s
+bench_base/n256/r5/fresh load1=2.85 waited=30s
+bench_base/n256/r5/fresh load1=2.31 waited=60s
+bench_base/n256/r5/fresh load1=1.48 waited=90s
+bench_base/n256/r5/fresh load1=1.01 waited=120s
+bench_base/n256/r5/fresh load1=0.76 waited=150s
+bench_base/n256/r5/fresh gate=pass
+bench_base/n256/r5/reuse load1=0.76 waited=0s
+bench_base/n256/r5/reuse gate=pass
+bench_base/n256/r5/phases load1=0.76 waited=0s
+bench_base/n256/r5/phases gate=pass
+bench_base/n512/r5/fresh load1=0.76 waited=0s
+bench_base/n512/r5/fresh gate=pass
+bench_base/n512/r5/reuse load1=0.76 waited=0s
+bench_base/n512/r5/reuse gate=pass
+bench_base/n512/r5/phases load1=0.76 waited=0s
+bench_base/n512/r5/phases gate=pass
+bench_base/n1024/r5/fresh load1=0.76 waited=0s
+bench_base/n1024/r5/fresh gate=pass
+bench_base/n1024/r5/reuse load1=0.76 waited=0s
+bench_base/n1024/r5/reuse gate=pass
+bench_base/n1024/r5/phases load1=0.76 waited=0s
+bench_base/n1024/r5/phases gate=pass
+bench_base/n2048/r5/fresh load1=0.76 waited=0s
+bench_base/n2048/r5/fresh gate=pass
+bench_base/n2048/r5/reuse load1=0.78 waited=0s
+bench_base/n2048/r5/reuse gate=pass
+bench_base/n2048/r5/phases load1=0.78 waited=0s
+bench_base/n2048/r5/phases gate=pass
+bench_base/n4096/r5/fresh load1=0.78 waited=0s
+bench_base/n4096/r5/fresh gate=pass
+bench_base/n4096/r5/reuse load1=3.66 waited=0s
+bench_base/n4096/r5/reuse load1=2.22 waited=30s
+bench_base/n4096/r5/reuse load1=1.34 waited=60s
+bench_base/n4096/r5/reuse load1=0.81 waited=90s
+bench_base/n4096/r5/reuse gate=pass
+bench_base/n4096/r5/phases load1=0.92 waited=0s
+bench_base/n4096/r5/phases gate=pass
+bench_vafter/n256/r5/fresh load1=4.01 waited=0s
+bench_vafter/n256/r5/fresh load1=2.43 waited=30s
+bench_vafter/n256/r5/fresh load1=1.47 waited=60s
+bench_vafter/n256/r5/fresh load1=0.89 waited=90s
+bench_vafter/n256/r5/fresh gate=pass
+bench_vafter/n256/r5/reuse load1=0.89 waited=0s
+bench_vafter/n256/r5/reuse gate=pass
+bench_vafter/n256/r5/phases load1=0.89 waited=0s
+bench_vafter/n256/r5/phases gate=pass
+bench_vafter/n512/r5/fresh load1=0.89 waited=0s
+bench_vafter/n512/r5/fresh gate=pass
+bench_vafter/n512/r5/reuse load1=0.89 waited=0s
+bench_vafter/n512/r5/reuse gate=pass
+bench_vafter/n512/r5/phases load1=0.89 waited=0s
+bench_vafter/n512/r5/phases gate=pass
+bench_vafter/n1024/r5/fresh load1=0.89 waited=0s
+bench_vafter/n1024/r5/fresh gate=pass
+bench_vafter/n1024/r5/reuse load1=0.89 waited=0s
+bench_vafter/n1024/r5/reuse gate=pass
+bench_vafter/n1024/r5/phases load1=0.89 waited=0s
+bench_vafter/n1024/r5/phases gate=pass
+bench_vafter/n2048/r5/fresh load1=0.89 waited=0s
+bench_vafter/n2048/r5/fresh gate=pass
+bench_vafter/n2048/r5/reuse load1=0.89 waited=0s
+bench_vafter/n2048/r5/reuse gate=pass
+bench_vafter/n2048/r5/phases load1=0.89 waited=0s
+bench_vafter/n2048/r5/phases gate=pass
+bench_vafter/n4096/r5/fresh load1=2.42 waited=0s
+bench_vafter/n4096/r5/fresh load1=1.73 waited=30s
+bench_vafter/n4096/r5/fresh load1=1.05 waited=60s
+bench_vafter/n4096/r5/fresh load1=0.63 waited=90s
+bench_vafter/n4096/r5/fresh gate=pass
+bench_vafter/n4096/r5/reuse load1=1.78 waited=0s
+bench_vafter/n4096/r5/reuse load1=1.08 waited=30s
+bench_vafter/n4096/r5/reuse load1=0.84 waited=60s
+bench_vafter/n4096/r5/reuse gate=pass
+bench_vafter/n4096/r5/phases load1=3.71 waited=0s
+bench_vafter/n4096/r5/phases load1=2.25 waited=30s
+bench_vafter/n4096/r5/phases load1=1.43 waited=60s
+bench_vafter/n4096/r5/phases load1=0.95 waited=90s
+bench_vafter/n4096/r5/phases gate=pass
+bench_tunboth/n256/r5/fresh load1=2.63 waited=0s
+bench_tunboth/n256/r5/fresh load1=1.65 waited=30s
+bench_tunboth/n256/r5/fresh load1=1.08 waited=60s
+bench_tunboth/n256/r5/fresh load1=0.76 waited=90s
+bench_tunboth/n256/r5/fresh gate=pass
+bench_tunboth/n256/r5/reuse load1=0.76 waited=0s
+bench_tunboth/n256/r5/reuse gate=pass
+bench_tunboth/n256/r5/phases load1=0.76 waited=0s
+bench_tunboth/n256/r5/phases gate=pass
+bench_tunboth/n512/r5/fresh load1=0.76 waited=0s
+bench_tunboth/n512/r5/fresh gate=pass
+bench_tunboth/n512/r5/reuse load1=0.76 waited=0s
+bench_tunboth/n512/r5/reuse gate=pass
+bench_tunboth/n512/r5/phases load1=0.76 waited=0s
+bench_tunboth/n512/r5/phases gate=pass
+bench_tunboth/n1024/r5/fresh load1=0.76 waited=0s
+bench_tunboth/n1024/r5/fresh gate=pass
+bench_tunboth/n1024/r5/reuse load1=0.76 waited=0s
+bench_tunboth/n1024/r5/reuse gate=pass
+bench_tunboth/n1024/r5/phases load1=3.10 waited=0s
+bench_tunboth/n1024/r5/phases load1=2.10 waited=30s
+bench_tunboth/n1024/r5/phases load1=1.32 waited=60s
+bench_tunboth/n1024/r5/phases load1=0.80 waited=90s
+bench_tunboth/n1024/r5/phases gate=pass
+bench_tunboth/n2048/r5/fresh load1=0.80 waited=0s
+bench_tunboth/n2048/r5/fresh gate=pass
+bench_tunboth/n2048/r5/reuse load1=0.80 waited=0s
+bench_tunboth/n2048/r5/reuse gate=pass
+bench_tunboth/n2048/r5/phases load1=0.80 waited=0s
+bench_tunboth/n2048/r5/phases gate=pass
+bench_tunboth/n4096/r5/fresh load1=0.80 waited=0s
+bench_tunboth/n4096/r5/fresh gate=pass
+bench_tunboth/n4096/r5/reuse load1=1.30 waited=0s
+bench_tunboth/n4096/r5/reuse load1=0.84 waited=30s
+bench_tunboth/n4096/r5/reuse gate=pass
+bench_tunboth/n4096/r5/phases load1=3.64 waited=0s
+bench_tunboth/n4096/r5/phases load1=2.38 waited=30s
+bench_tunboth/n4096/r5/phases load1=1.44 waited=60s
+bench_tunboth/n4096/r5/phases load1=0.93 waited=90s
+bench_tunboth/n4096/r5/phases gate=pass
+bench_tunmmap/n256/r5/fresh load1=2.34 waited=0s
+bench_tunmmap/n256/r5/fresh load1=1.57 waited=30s
+bench_tunmmap/n256/r5/fresh load1=1.13 waited=60s
+bench_tunmmap/n256/r5/fresh load1=0.75 waited=90s
+bench_tunmmap/n256/r5/fresh gate=pass
+bench_tunmmap/n256/r5/reuse load1=0.75 waited=0s
+bench_tunmmap/n256/r5/reuse gate=pass
+bench_tunmmap/n256/r5/phases load1=0.75 waited=0s
+bench_tunmmap/n256/r5/phases gate=pass
+bench_tunmmap/n512/r5/fresh load1=0.75 waited=0s
+bench_tunmmap/n512/r5/fresh gate=pass
+bench_tunmmap/n512/r5/reuse load1=0.75 waited=0s
+bench_tunmmap/n512/r5/reuse gate=pass
+bench_tunmmap/n512/r5/phases load1=0.75 waited=0s
+bench_tunmmap/n512/r5/phases gate=pass
+bench_tunmmap/n1024/r5/fresh load1=0.75 waited=0s
+bench_tunmmap/n1024/r5/fresh gate=pass
+bench_tunmmap/n1024/r5/reuse load1=0.75 waited=0s
+bench_tunmmap/n1024/r5/reuse gate=pass
+bench_tunmmap/n1024/r5/phases load1=0.75 waited=0s
+bench_tunmmap/n1024/r5/phases gate=pass
+bench_tunmmap/n2048/r5/fresh load1=0.75 waited=0s
+bench_tunmmap/n2048/r5/fresh gate=pass
+bench_tunmmap/n2048/r5/reuse load1=0.75 waited=0s
+bench_tunmmap/n2048/r5/reuse gate=pass
+bench_tunmmap/n2048/r5/phases load1=2.22 waited=0s
+bench_tunmmap/n2048/r5/phases load1=1.41 waited=30s
+bench_tunmmap/n2048/r5/phases load1=1.07 waited=60s
+bench_tunmmap/n2048/r5/phases load1=0.65 waited=90s
+bench_tunmmap/n2048/r5/phases gate=pass
+bench_tunmmap/n4096/r5/fresh load1=0.65 waited=0s
+bench_tunmmap/n4096/r5/fresh gate=pass
+bench_tunmmap/n4096/r5/reuse load1=2.52 waited=0s
+bench_tunmmap/n4096/r5/reuse load1=1.53 waited=30s
+bench_tunmmap/n4096/r5/reuse load1=0.92 waited=60s
+bench_tunmmap/n4096/r5/reuse gate=pass
+bench_tunmmap/n4096/r5/phases load1=1.02 waited=0s
+bench_tunmmap/n4096/r5/phases load1=0.72 waited=30s
+bench_tunmmap/n4096/r5/phases gate=pass
+bench_tuntrim/n256/r5/fresh load1=0.83 waited=0s
+bench_tuntrim/n256/r5/fresh gate=pass
+bench_tuntrim/n256/r5/reuse load1=0.83 waited=0s
+bench_tuntrim/n256/r5/reuse gate=pass
+bench_tuntrim/n256/r5/phases load1=0.83 waited=0s
+bench_tuntrim/n256/r5/phases gate=pass
+bench_tuntrim/n512/r5/fresh load1=0.83 waited=0s
+bench_tuntrim/n512/r5/fresh gate=pass
+bench_tuntrim/n512/r5/reuse load1=0.83 waited=0s
+bench_tuntrim/n512/r5/reuse gate=pass
+bench_tuntrim/n512/r5/phases load1=2.36 waited=0s
+bench_tuntrim/n512/r5/phases load1=1.65 waited=30s
+bench_tuntrim/n512/r5/phases load1=1.00 waited=60s
+bench_tuntrim/n512/r5/phases load1=0.83 waited=90s
+bench_tuntrim/n512/r5/phases gate=pass
+bench_tuntrim/n1024/r5/fresh load1=0.83 waited=0s
+bench_tuntrim/n1024/r5/fresh gate=pass
+bench_tuntrim/n1024/r5/reuse load1=0.83 waited=0s
+bench_tuntrim/n1024/r5/reuse gate=pass
+bench_tuntrim/n1024/r5/phases load1=0.83 waited=0s
+bench_tuntrim/n1024/r5/phases gate=pass
+bench_tuntrim/n2048/r5/fresh load1=0.83 waited=0s
+bench_tuntrim/n2048/r5/fresh gate=pass
+bench_tuntrim/n2048/r5/reuse load1=0.83 waited=0s
+bench_tuntrim/n2048/r5/reuse gate=pass
+bench_tuntrim/n2048/r5/phases load1=2.36 waited=0s
+bench_tuntrim/n2048/r5/phases load1=1.43 waited=30s
+bench_tuntrim/n2048/r5/phases load1=0.87 waited=60s
+bench_tuntrim/n2048/r5/phases gate=pass
+bench_tuntrim/n4096/r5/fresh load1=0.87 waited=0s
+bench_tuntrim/n4096/r5/fresh gate=pass
+bench_tuntrim/n4096/r5/reuse load1=3.89 waited=0s
+bench_tuntrim/n4096/r5/reuse load1=2.36 waited=30s
+bench_tuntrim/n4096/r5/reuse load1=1.60 waited=60s
+bench_tuntrim/n4096/r5/reuse load1=0.97 waited=90s
+bench_tuntrim/n4096/r5/reuse gate=pass
+bench_tuntrim/n4096/r5/phases load1=3.41 waited=0s
+bench_tuntrim/n4096/r5/phases load1=2.07 waited=30s
+bench_tuntrim/n4096/r5/phases load1=1.41 waited=60s
+bench_tuntrim/n4096/r5/phases load1=0.98 waited=90s
+bench_tuntrim/n4096/r5/phases gate=pass
