@@ -93,6 +93,7 @@ mean_abs_diff=8.384e12, mean_rel_err=4.167e-2, p50_abs_diff=4.398e12, p99_abs_di
 - 変更: `crates/backend-metal/tests/linalg_parity_inputs.rs` の `qr_input(3,8)` だけ主対角へ `+2.0`（`QR_WIDE_DIAG_SHIFT`）。(8,3)・(17,17)・`1e20 × I₂`・LU・cholesky の入力、tolerance 定数、判定式、カーネル、CPU 参照は不変。baseline 方式へは移っていない。経緯と退けた候補は `docs/backend-gpu-linalg-decision.md` §5「QR 入力 (3,8) の是正」。
 - 原因（2026-10-27 の fail。既存 `run1.log`〜`run5.log` に残す）: 旧 (3,8) は第 0 列と第 2 列が偶然直交し `R[0,2]` の真値が厳密 0。1e20 倍で f32（GPU・ホストモデル。ビット一致）と f64（CPU 参照）の丸め残差の差が相対誤差 1.0 として露出した。カーネルのずれではない。
 - 事前登録: `RULE.txt` の「改訂（2026-10-28）」を実測前にコミット `2e30c15b2c7016afde3e4b69686187dcd9bd259b` で固定。実測ツリーはそのコミットのアーカイブ展開で、`rerun-2026-10-28/rev-stamp.txt` はフル SHA と `dirty=0`。
+- 正誤（2026-10-29 追記。`RULE.txt` 本体は事前登録の記録なので書き換えない）: `RULE.txt` の改訂の「宣言日時（UTC）: 2026-10-28T06:00Z」は記入時の誤り。改訂を固定したコミット `2e30c15b2` の実際の時刻は **2026-10-27T18:56:25Z**（PR #3665 のブランチ上のコミット。main の squash コミット `963a5c0be` の時刻ではない）。実測より前に固定した事実は変わらない。根拠は、実測ツリーが `2e30c15b2` のアーカイブ展開であること（`rerun-2026-10-28/rev-stamp.txt`）。生ログには時刻が残っていない。
 - 環境: `rerun-2026-10-28/env.txt`（Apple M4・macOS 27.0.1・rustc 1.99.0・cargo 1.99.0）。ホスト名・ユーザー名・パスは `<metal-node>`・`<home>`・`<user>` にマスク。実機ロック `~/work/.fandhe-hw-lock` は実測前に取得し実測後に解放した。
 - 生ログ: `rerun-2026-10-28/run1.log`〜`run5.log`（末尾 `rc=`）。
 
