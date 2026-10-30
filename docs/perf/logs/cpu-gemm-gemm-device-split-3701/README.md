@@ -1,6 +1,6 @@
 # #3701: T2 の主因 S1（gemm_device）の内側を分けて測る（計測専用パッチ）
 
-**状態: 部品まで実装済み・実機は未実測**（部品のコミットまで。Mac mini・GB10 とも `judge-3701.md` はまだ無い。他機体や M4 Max の値では代替しない）。
+**状態: 実測済み**（2026-10-30。GB10 専有 3 系列・Mac mini 3 系列。全系列がゲートを通った）。結論（`judge-3701.md`・判定対象の Mac mini N=256）: **主因の区間を特定した: S1a**（`gemm_device` の内側の `gd_alloc_zeroed`。RULE の事前固定の解釈では「calloc 側。確保とゼロ埋め」）。GB10 と Mac mini の N=512 は記録のみで、すべて健全性 A（T2 が出ない）により判定不能。他機体や M4 Max の値では代替していない。
 背景・コード読解・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §16。規則は `RULE.txt`（部品より前に単独コミットで固定。以後編集しない）。
 イシュー本文の所有者承認（2026-10-30）の記載は、本ディレクトリでは検証済みの承認としては扱わない。
 
@@ -55,6 +55,23 @@ main では `probe_take()` が常に `None` を返すスタブで、実機診断
 - パッチ無しの木で `--ignored` を実行すると panic すること
 - `make_after_tree.sh` → `make_before_tree.sh` → `build_split_arms.sh` をローカルで通し、split_probe.rs の無い木を before に渡すとハード条件違反で中止すること
 
+## 実測の経緯（2026-10-30）
+
+- runner は `976f691910d64807c98658f4c88d30e532ab9a7b`（#3702 の squash）。after・before の木と指紋・腕のバイナリ・系列の時刻・間隔・ゲートは `rev-stamp-verification-3701.md`
+- 系列は両機体とも s1 before・s2 after・s3 before を 31 分間隔で起動し、全系列がゲートを通ったため s4・s5 は起動していない。判定は `python3 -I split_inner_judge.py --host macmini=macmini/s1,macmini/s2,macmini/s3 --host gb10=gb10/s1,gb10/s2,gb10/s3 --out judge-3701.md`（手で書き換えていない）
+- 生ログは `macmini/sN/`・`gb10/sN/`（`session/` に steps.log・orch ログ・単一系列の参考判定・GB10 の poll／excl_check）。実ホスト名・`/home/<user>`・`/Users/<user>` は `<home>` 等へマスクした（数値は変えていない。マスク前後で judge の出力は一致）。腕のバイナリの sha256 は `arms/`
+- 判定器・RULE・スクリプトは変更していない
+- 結果の要約と読み・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §16.5・§16.6
+
+## 結果の要約（`judge-3701.md` から転記）
+
+| 機体 | N | 位置づけ | 結論 |
+|---|---|---|---|
+| Mac mini | 256 | 判定対象 | **主因の区間を特定した: S1a** |
+| Mac mini | 512 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=1） |
+| GB10 | 256 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=7） |
+| GB10 | 512 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=6） |
+
 ## 未実測
 
-- Mac mini（判定対象）・GB10（記録のみ）とも、実機での 3 系列は未実行。`judge-3701.md`・`rev-stamp-verification-3701.md`・`macmini/`・`gb10/`・`arms/` は実測後に追加する
+- なし（判定対象の Mac mini と記録のみの GB10 とも 3 系列を実測した）。計時点なしの対照腕は RULE のとおり置いていないため、計時点そのものが T2 を変えたかどうかは本実測では分からない（ただし健全性 A は成立した）

@@ -1,0 +1,18 @@
+run1 load1=17.90 waited=0s
+run1 load1=17.38 waited=30s
+run1 load1=13.75 waited=60s
+run1 load1=14.07 waited=90s
+run1 load1=9.45 waited=120s
+run1 load1=6.17 waited=150s
+run1 load1=4.49 waited=180s
+run1 load1=3.06 waited=210s
+run1 load1=2.48 waited=240s
+run1 order=before,after
+run2 load1=2.52 waited=0s
+run2 order=after,before
+run3 load1=2.52 waited=0s
+run3 order=before,after
+run4 load1=2.52 waited=0s
+run4 order=after,before
+run5 load1=2.52 waited=0s
+run5 order=before,after
