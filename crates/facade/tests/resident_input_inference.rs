@@ -70,7 +70,8 @@ fn matmul_matches_host(device: Device) {
     // 倍数でない形状は CPU だけで確かめる（Metal は `Unsupported`）。
     let mut shapes = vec![(8, 8, 8), (16, 24, 32), (64, 784, 256), (256, 256, 256)];
     if device == Device::Cpu {
-        shapes.extend([(1, 1, 1), (1, 5, 3), (7, 13, 5)]);
+        // (256, 8, 257) は出力 65792 要素で #3694 の閾値（65536 要素）を超える（owned 経路）
+        shapes.extend([(1, 1, 1), (1, 5, 3), (7, 13, 5), (256, 8, 257)]);
     }
     for &(m, k, n) in &shapes {
         let a = tensor(1, &[m, k]);
