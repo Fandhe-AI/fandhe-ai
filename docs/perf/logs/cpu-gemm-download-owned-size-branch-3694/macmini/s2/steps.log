@@ -1,0 +1,7 @@
+2026-10-30T07:02:47Z hwlock acquired host=macmini
+2026-10-30T07:02:47Z start runner=207eceb5274e79539f75d4218681389c9e89c03f before=a7aac2f0227add243845418e0897ac0675c5b622+harness-overlay(19426afd4ef2) after=207eceb5274e79539f75d4218681389c9e89c03f
+2026-10-30T07:45:52Z orchestrate rc=0
+2026-10-30T07:45:52Z path_judge rc=0
+2026-10-30T07:45:52Z session body done
+done. rc=0
+2026-10-30T07:45:52Z hwlock released
