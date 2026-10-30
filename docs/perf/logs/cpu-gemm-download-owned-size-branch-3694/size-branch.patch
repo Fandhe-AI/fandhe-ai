@@ -1,0 +1,76 @@
+diff --git a/crates/autodiff/src/optim/resident_input.rs b/crates/autodiff/src/optim/resident_input.rs
+index 1354f162d..8ef278bae 100644
+--- a/crates/autodiff/src/optim/resident_input.rs
++++ b/crates/autodiff/src/optim/resident_input.rs
+@@ -5,8 +5,8 @@
+ //! 推論（`Sequential::predict_resident`）と行列積（`Var::matmul`）はホストの `Tensor` しか
+ //! 受けず、呼ぶたびに入力の H2D が計測窓に入る。本モジュールは入力を **窓の外で 1 回だけ**
+ //! デバイスへ置く不透明ハンドルを提供し、窓の中を「演算＋出力の D2H 1 回」に絞る。
+-//! 消えるのは H2D だけで、D2H と同期の 1 回は残る（CPU は出力 `Vec` を `Tensor` へ移すため
+-//! D2H 相当のコピーも消える。#3672）。
++//! 消えるのは H2D だけで、D2H と同期の 1 回は残る（CPU は出力が 256 KiB を超えるときだけ
++//! 出力 `Vec` を `Tensor` へ移し D2H 相当のコピーも消える。#3672・#3694）。
+ //!
+ //! # 呼び出し元・境界
+ //! - 作成: `DeviceParamStore::upload_resident_input`（`device_store.rs`）。facade の
+@@ -118,8 +118,44 @@ pub fn matmul_resident(
+         BackendError::Unsupported("matmul_resident: backend does not implement MemoryOps".into())
+     })?;
+     let out = tape.ops().gemm_device(&a.buf, &b.buf)?;
+-    // 出力は以後使わないため所有権ごと渡す（CPU は Vec を Tensor へ移しコピーしない。#3672）
+-    mem.download_owned(out)
++    // 出力が閾値以下なら従来どおりコピーしてからバッファを drop する（#3694）。
++    // 閾値を超えるときだけ所有権ごと渡す（CPU は Vec を Tensor へ移しコピーしない。#3672）
++    let numel: usize = out.shape().iter().product();
++    if use_owned_download(numel) {
++        mem.download_owned(out)
++    } else {
++        let t = mem.download(&out);
++        drop(out);
++        t
++    }
++}
++
++/// 出力がこのバイト数以下なら D2H を `download`（コピー）で行う閾値（イシュー #3694。
++/// 所有者判断 issuecomment-6515206177）。
++///
++/// 根拠: `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §15・§16。Mac mini の診断
++/// `resident_public` は N=256（出力 256 KiB）で `download_owned` 化後に後退し、N=512（1 MiB）では
++/// 出ない。主因は出力の確保とゼロ埋め（`gd_alloc_zeroed`）だった。実行時に変える口は作らない。
++const RESIDENT_COPY_DOWNLOAD_MAX_BYTES: usize = 256 * 1024;
++
++/// 出力要素数 `numel`（f32）が閾値を超えるとき true（`download_owned` を使う）。
++/// 乗算を避け、オーバーフローしない比較にする。
++fn use_owned_download(numel: usize) -> bool {
++    numel > RESIDENT_COPY_DOWNLOAD_MAX_BYTES / std::mem::size_of::<f32>()
++}
++
++#[cfg(test)]
++mod size_branch_tests {
++    use super::use_owned_download;
++
++    #[test]
++    fn threshold_boundary_is_inclusive_copy() {
++        assert!(!use_owned_download(0));
++        assert!(!use_owned_download(256 * 256)); // N=256 正方 = 262144 B は copy
++        assert!(use_owned_download(256 * 256 + 1));
++        assert!(use_owned_download(512 * 512)); // N=512 は owned
++        assert!(use_owned_download(usize::MAX));
++    }
+ }
+ 
+ /// 学習ステップのチェーン（`DeviceParamStore::train_step_device_chain`）が積んだ loss への
+diff --git a/crates/facade/tests/resident_input_inference.rs b/crates/facade/tests/resident_input_inference.rs
+index d915e0660..529bb64b3 100644
+--- a/crates/facade/tests/resident_input_inference.rs
++++ b/crates/facade/tests/resident_input_inference.rs
+@@ -70,7 +70,8 @@ fn matmul_matches_host(device: Device) {
+     // 倍数でない形状は CPU だけで確かめる（Metal は `Unsupported`）。
+     let mut shapes = vec![(8, 8, 8), (16, 24, 32), (64, 784, 256), (256, 256, 256)];
+     if device == Device::Cpu {
+-        shapes.extend([(1, 1, 1), (1, 5, 3), (7, 13, 5)]);
++        // (256, 8, 257) は出力 65792 要素で #3694 の閾値（65536 要素）を超える（owned 経路）
++        shapes.extend([(1, 1, 1), (1, 5, 3), (7, 13, 5), (256, 8, 257)]);
+     }
+     for &(m, k, n) in &shapes {
+         let a = tensor(1, &[m, k]);

@@ -35,6 +35,8 @@ const SEED_A: u64 = 0xA11CE;
 const SEED_B: u64 = 0xB0B;
 const ROUNDS: usize = 4;
 const SIZES: [usize; 5] = [256, 512, 1024, 2048, 4096];
+/// #3694 の記録のみセル（N<=128。判定には使わない。RULE.txt）。反復数は `iters_for` を流用する。
+const SMALL_SIZES: [usize; 2] = [64, 128];
 /// 標準出力の 1 行 1 区間 JSON の接頭辞（`orchestrate.sh` が抽出）。
 const PREFIX: &str = "DIAG_JSON ";
 
@@ -438,6 +440,66 @@ fn cpu_gemm_resident_arms_match_public_path_bit_exact() {
 fn cpu_gemm_resident_reuse_phases() {
     let mut rec = Rec::default();
     for n in SIZES {
+        let (a, b) = inputs(n);
+        for round in 0..ROUNDS {
+            // 順序効果を打ち消すためラウンドごとに arm 順を反転する。
+            let order: Vec<Arm> = if round % 2 == 0 {
+                ARMS.to_vec()
+            } else {
+                ARMS.iter().rev().copied().collect()
+            };
+            for arm in order {
+                drive(&mut rec, arm, n, (&a, &b), iters_for(n), None);
+            }
+        }
+    }
+
+    let threads = std::env::var("RAYON_NUM_THREADS").ok();
+    for ((arm, n, phase), cell) in &rec.cells {
+        let q = median_q1_q3(&cell.secs).expect("サンプルは非空・非 NaN");
+        let mut sorted = cell.secs.clone();
+        sorted.sort_by(f64::total_cmp);
+        let minflt_mean = if !cell.flt_missing && !cell.flts.is_empty() {
+            Some(cell.flts.iter().sum::<u64>() as f64 / cell.flts.len() as f64)
+        } else {
+            None
+        };
+        let checksum_bits = (*phase == "iter_total")
+            .then(|| {
+                rec.checksums
+                    .iter()
+                    .find(|(k, _)| *k == (*arm, *n))
+                    .map(|(_, b)| format!("{b:016x}"))
+            })
+            .flatten();
+        let line = serde_json::json!({
+            "issue": 3646,
+            "arm": arm,
+            "n": n,
+            "phase": phase,
+            "median_s": q.median,
+            "q1_s": q.q1,
+            "q3_s": q.q3,
+            "min_s": sorted.first(),
+            "max_s": sorted.last(),
+            "n_samples": cell.secs.len(),
+            "checksum_bits": checksum_bits,
+            "minflt_delta_per_iter": minflt_mean,
+            "minflt_enabled": minflt_enabled(),
+            "rayon_num_threads_env": threads,
+            "target_arch": std::env::consts::ARCH,
+            "target_os": std::env::consts::OS,
+        });
+        println!("{PREFIX}{line}");
+    }
+}
+
+/// #3694 の小 N（記録のみ）版。出力形式は本体と同じ（`orchestrate.sh` が独立プロセスで 5 回起動）。
+#[test]
+#[ignore = "実機計測用の record-only 診断（RULE.txt・orchestrate.sh 参照）"]
+fn cpu_gemm_resident_reuse_phases_small_n() {
+    let mut rec = Rec::default();
+    for n in SMALL_SIZES {
         let (a, b) = inputs(n);
         for round in 0..ROUNDS {
             // 順序効果を打ち消すためラウンドごとに arm 順を反転する。
