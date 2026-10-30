@@ -986,3 +986,37 @@ Mac mini N=256（判定対象）:
 - テスト側から `CpuBufferHandle` は見えないため、`take_data`・prepack の破棄・抜け殻の drop は S2 に合算され分けられない。出力の確保と計算も S1 に合算される。分けるには本番側に計時点が要り、本 Issue の制約（本番経路を変えない）と合わない
 - 写しは公開経路の dyn ディスパッチ・入力検証を通らない。健全性 B で再現を確かめ、再現しなければ判定不能として記録する
 - T2 の修正（出力のプール §9.5 (b)・host arena の既定・`download_owned` の扱い）は本 Issue の対象外。所有者判断のあと別 issue にする
+
+## 16. #3701: T2 の主因 S1（gemm_device）の内側の細分化
+
+### 16.1 状態
+
+**部品まで実装済み・実機は未実測**。事前登録規則（`docs/perf/logs/cpu-gemm-gemm-device-split-3701/RULE.txt`）を部品より前に単独コミットで固定し、続けて診断テスト・計測専用パッチ・スクリプト・判定器を追加した。Mac mini（判定対象）・GB10（記録のみ）とも実機の 3 系列は未実行で、`judge-3701.md` は無い。他機体（M4 Max・Linux）の値では代替しない。結果が出たら §16.5 を `judge-3701.md` から機械的に転記する。イシュー本文の所有者承認（2026-10-30）の記載は、本書では検証済みの承認としては扱わない。
+
+### 16.2 背景
+
+§15（#3693）は T2 の主因を S1（`gemm_device` 区間。出力の確保・ゼロ埋め・計算・包みに加え、次の反復での確保の影響を含む）と判定した（after の木で owned − copy の差が D_iter の 1.29 倍）。ところが S1 の内側は分かれておらず、alloc_probe の確保の差（約 1.3 us）では S1 の差（約 21 us）を説明できない。この状態で直し方の候補（H: host arena の既定化／P: 出力プール／D: `download_owned` の見直し）を選ぶと当て推量になる。本節は S1 と S2 の内側に計時点を入れて分ける。
+
+### 16.3 コード読解（実測ではない）
+
+- `CpuBackendOps::gemm_device`（`crates/backend-cpu/src/ops.rs`）の処理順は、device 検査・形状検査・downcast・長さ検査 → `zeroed_output` → `gemm_blis_parallel` → `wrap_vec`。`zeroed_output` は本番のしきい値（`GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS = usize::MAX`）で必ず `take_zeroed_f32` を通り、host arena は既定 OFF なので実体は `vec![0.0f32; len]`（calloc 1 回）になる
+- そのため確保とゼロ埋めは計時点で分けられない。calloc が新しいページを返すと、ゼロ化（ページフォールト）は最初の書き込みとして計算区間に入りうる
+- `CpuMemory::download_owned`（`crates/backend-cpu/src/memory.rs`）は検査 → `take_data()`（prepack 破棄＋`mem::take`）→ `Tensor::new`、関数を抜けるときに抜け殻の buffer が drop される。計時点では抜け殻の drop を明示して順序を保つ
+
+### 16.4 事前登録の要約（正は `RULE.txt`）
+
+- 木は 3 本: runner（main の部品。計時点なし）・after（runner + `probe-3701.patch`）・before（after + #3693 と同じ `before-arm.patch`）。計時点は計測専用パッチの中だけにあり、main の本番コードにはない（`make_after_tree.sh` が入力に `split_probe.rs` が無いことを検査する）
+- 内側の区間: `gd_checks`・`gd_alloc_zeroed`・`gd_compute`・`gd_wrap`（`gemm_device`）、`do_checks`・`do_prepack_clear`・`do_take`・`do_tensor_new`・`do_shell_drop`（`download_owned`）、`dc_checks`・`dc_to_vec`・`dc_tensor_new`（`download`）
+- 判定: 1〜4 は #3693 と同じ（系列不足・checksum・健全性 A・健全性 B）。5 は段 1（連続性: #3693 と同じ S1〜S4）と段 2（内側の区間 S1k/S1a/S1b/S1c・S2k/S2m/S2w/S2d・S3・S4 に D_x >= 0.5 x D_iter。主判定）。新しい係数・閾値は作らない
+- 計時点そのものが T2 を消した場合は健全性 A の判定不能として正当に記録する。GB10 と N=512 は記録のみ
+
+### 16.5 結果・判定
+
+未実測。実測後に `judge-3701.md`（`split_inner_judge.py` の出力。手で書き換えない）から転記する。
+
+### 16.6 限界
+
+- 確保とゼロ埋めは calloc 1 回のため分けられない（`gd_alloc_zeroed` に合算）。ページのゼロ化は `gd_compute` に入りうるので、`gd_compute` が主因でも「カーネル自体が遅くなった」とは読まない
+- 計時点（`Instant::now()` 数回と thread_local の書き込み）が T2 を変える可能性がある。その場合は健全性 A の判定不能になる（計時点なしの対照腕は置かない）
+- 直し方の案（H・P・D）は記録のみで、本 Issue では実装しない。#3694 で所有者判断のあとに扱う
+- 本番経路・tolerance・parity baseline・閾値・依存は変更していない
