@@ -206,6 +206,13 @@ def single_view(pj, series):
             "passed": passed, "skipped": skipped, "short": []}
 
 
+def series_name(path):
+    """系列の表示名。orchestrate の出力ディレクトリ名（機体名）だけでは区別できないため、1 つ上の階層（s1 など）を添える。"""
+    p = path.rstrip("/")
+    base = os.path.basename(p)
+    return "%s/%s" % (os.path.basename(os.path.dirname(p)), base) if os.path.dirname(p) else base
+
+
 def fnum(v):
     return "%.6g" % v
 
@@ -222,17 +229,17 @@ def render(out):
     for h in HOSTS:
         used = out["passed"][h]
         L.append("- %s: ゲートを通った系列 %d 本（使用: %s）。先頭腕: %s。開始: %s" % (
-            h, len(used), ", ".join(os.path.basename(x["dir"].rstrip("/")) for x in used) or "なし",
+            h, len(used), ", ".join(series_name(x["dir"]) for x in used) or "なし",
             ",".join(x["first_arm"] for x in used) or "-", ",".join(x["date_utc"] for x in used) or "-"))
         for x in out["skipped"][h]:
-            L.append("  - 使わない系列 %s: %s" % (os.path.basename(x["dir"].rstrip("/")), " / ".join(x["record_only_reasons"])))
+            L.append("  - 使わない系列 %s: %s" % (series_name(x["dir"]), " / ".join(x["record_only_reasons"])))
     if out["short"]:
         L.append("- 系列不足の機体: %s（必要 %d 本）" % (", ".join(out["short"]), NEEDED_SERIES))
     L.append("")
     L += ["## 対ごとの判定", "", "| 対 k | GB10 系列 | Mac mini 系列 | 判定 |", "|---|---|---|---|"]
     for p in out["pairs"]:
-        L.append("| %d | %s | %s | %s |" % (p["k"], os.path.basename(p["gb10"]["dir"].rstrip("/")),
-                                           os.path.basename(p["macmini"]["dir"].rstrip("/")), p["res"]["verdict"]))
+        L.append("| %d | %s | %s | %s |" % (p["k"], series_name(p["gb10"]["dir"]),
+                                           series_name(p["macmini"]["dir"]), p["res"]["verdict"]))
     L.append("")
     L += ["## T2（macmini・診断 resident_public・N=256。経路上セル）", "",
           "| 対 k | before 中央値(s) | after 中央値(s) | 中央値 ratio | 5 run の ratio（run1..run5） |", "|---|---|---|---|---|"]
@@ -280,7 +287,7 @@ def render(out):
     for h in HOSTS:
         for x in out["passed"][h]:
             cells, missing = small_cells(x["dir"])
-            L.append("### %s %s" % (h, os.path.basename(x["dir"].rstrip("/"))))
+            L.append("### %s %s" % (h, series_name(x["dir"])))
             L.append("")
             if cells:
                 L += ["| 群 | セル | N | before 中央値(s) | after 中央値(s) | 中央値の比 |", "|---|---|---|---|---|---|"]

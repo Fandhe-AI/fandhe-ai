@@ -1,0 +1,57 @@
+run1 load1=10.02 waited=0s
+run1 load1=6.13 waited=30s
+run1 load1=3.87 waited=60s
+run1 load1=2.58 waited=90s
+run1 load1=1.56 waited=120s
+run1 load1=0.95 waited=150s
+run1 order=before,after
+run2 load1=11.06 waited=0s
+run2 load1=6.70 waited=30s
+run2 load1=4.45 waited=60s
+run2 load1=2.94 waited=90s
+run2 load1=1.78 waited=120s
+run2 load1=1.14 waited=150s
+run2 load1=1.01 waited=180s
+run2 load1=0.61 waited=210s
+run2 order=after,before
+run3 load1=11.40 waited=0s
+run3 load1=6.91 waited=30s
+run3 load1=4.27 waited=60s
+run3 load1=2.90 waited=90s
+run3 load1=1.76 waited=120s
+run3 load1=1.06 waited=150s
+run3 load1=0.72 waited=180s
+run3 order=before,after
+run4 load1=12.97 waited=0s
+run4 load1=8.25 waited=30s
+run4 load1=5.07 waited=60s
+run4 load1=3.14 waited=90s
+run4 load1=1.90 waited=120s
+run4 load1=1.54 waited=150s
+run4 load1=0.93 waited=180s
+run4 order=after,before
+run5 load1=12.58 waited=0s
+run5 load1=7.62 waited=30s
+run5 load1=4.62 waited=60s
+run5 load1=3.08 waited=90s
+run5 load1=1.92 waited=120s
+run5 load1=1.16 waited=150s
+run5 load1=0.70 waited=180s
+run5 order=before,after
+small run1 load1=8.16 waited=0s
+small run1 load1=5.17 waited=30s
+small run1 load1=3.24 waited=60s
+small run1 load1=2.02 waited=90s
+small run1 load1=1.29 waited=120s
+small run1 load1=1.00 waited=150s
+small run1 load1=1.00 waited=180s
+small run1 load1=0.77 waited=210s
+small run1 order=before,after
+small run2 load1=0.79 waited=0s
+small run2 order=after,before
+small run3 load1=0.79 waited=0s
+small run3 order=before,after
+small run4 load1=0.79 waited=0s
+small run4 order=after,before
+small run5 load1=0.79 waited=0s
+small run5 order=before,after

@@ -1,0 +1,8 @@
+2026-10-30T06:22:58Z hwlock acquired host=gb10
+2026-10-30T06:22:58Z start runner=207eceb5274e79539f75d4218681389c9e89c03f before=a7aac2f0227add243845418e0897ac0675c5b622+harness-overlay(19426afd4ef2) after=207eceb5274e79539f75d4218681389c9e89c03f
+2026-10-30T07:01:19Z orchestrate rc=0
+2026-10-30T07:01:19Z excl_check rc=0
+2026-10-30T07:01:19Z path_judge rc=0
+2026-10-30T07:01:19Z session body done
+done. rc=0
+2026-10-30T07:01:19Z hwlock released
