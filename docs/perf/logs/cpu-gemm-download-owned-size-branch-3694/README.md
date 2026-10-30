@@ -24,7 +24,7 @@ GB10（専有機体）と Mac mini の各 3 系列（系列間 31 分以上・hw
 | `judge-3694.md` | 判定器の出力（手で書き換えない） |
 | `rev-stamp-verification-3694.md` | 腕の同定記録（木・指紋・バイナリ・規則 sha・系列の時刻と順・使わなかった系列） |
 | `arms/{gb10,macmini}-arms.txt` | `build_ab_arms.sh` の出力（腕の rev-stamp・バイナリの sha256） |
-| `gb10/s{1..3}`・`macmini/s{1..3}` | マスク済みの生ログ（各系列の `<機体>/`〈診断・bench・`small/`〉と `steps.log`・GB10 は poller・`excl_status.txt`） |
+| `gb10/s{1..3}`・`macmini/s{1..3}` | マスク済みの生ログ（各系列の `<機体>.tar.gz`〈`<機体>/` 配下の診断・bench・`small/` をまとめたもの〉と `steps.log`・GB10 は poller・`excl_status.txt`）。`<機体>/` は 1 系列 180 ファイル前後あり、PR が Cursor Bugbot の上限を超えたため系列ごとに tar.gz にした（中身は変えていない） |
 
 小 N（64・128）の記録セル用に `crates/facade/tests/cpu_gemm_resident_reuse_diag.rs` へ `cpu_gemm_resident_reuse_phases_small_n`（`#[ignore]`）を足してある。既存の関数・反復数は変えていない。
 
@@ -35,9 +35,11 @@ GB10（専有機体）と Mac mini の各 3 系列（系列間 31 分以上・hw
 3. 各機体の `$HOME/work/r3694/{runner,before,after}` へ ssh の tar で展開し、ツリー指紋が一致することを確かめる（rsync は使わない）
 4. hw-lock の前に `build_ab_arms.sh <before> <after> <bin>` を 1 回実行する（計測中にビルドしない）
 5. `session-scripts/session-3694.sh <gb10|macmini> <label> <before|after>` を s1（before 先頭）・s2（after 先頭）・s3（before 先頭）で 31 分以上あけて切り離し起動する
-6. 回収・マスク後に `python3 -I judge_3694.py --host gb10=gb10/s1/gb10,gb10/s2/gb10,gb10/s3/gb10 --host macmini=macmini/s1/macmini,... --out judge-3694.md`
+6. 回収・マスク後に、各系列ディレクトリで `tar -xzf <機体>.tar.gz` を実行して `<機体>/` を展開し、`python3 -I judge_3694.py --host gb10=gb10/s1/gb10,gb10/s2/gb10,gb10/s3/gb10 --host macmini=macmini/s1/macmini,... --out judge-3694.md`
 
 ## 検証した事項
+
+- 生ログを tar.gz にまとめた後、展開したファイル一覧がまとめる前と一致し、展開した木から `judge_3694.py` を再実行した出力が `judge-3694.md` と完全に一致した（`diff` が空）
 
 - `bash -n`・`shellcheck`（3 スクリプト）・引数の拒否ケース（相対パス・不正な機体名・不正な label・不正な `--first`）・`judge_3694.py --self-test`（3 対 ADOPT／1 対 REJECT／混在／系列不足／REJECT 優先／ゲート不通過を飛ばして次を使う／各 sha 不一致・`rule_3681_sha256` 欠落・rev-stamp 不正で入力不備／小 N 欠落でも判定不変）
 - サイズ分岐を当てた状態で `cargo test -p fandhe-ai-autodiff --lib size_branch`・`cargo test -p fandhe-ai --test resident_input_inference`（閾値を超える形状 (256, 8, 257) を含む CPU の bit 一致）・`cargo clippy -p fandhe-ai-autodiff -p fandhe-ai --all-targets -- -D warnings` が通った
