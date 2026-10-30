@@ -35,12 +35,26 @@ const SIZES: [usize; 2] = [256, 512];
 /// 標準出力の 1 行 1 区間 JSON の接頭辞（`orchestrate.sh` が抽出）。
 const PREFIX: &str = "DIAG_JSON ";
 
-/// 計測専用パッチが取り出す内側の区間。`gd` は `gemm_device` の内側、`dl` は `download_owned`／`download` の内側。
+/// 計時点の区間名（`probe-3701.patch` の `split_probe` と同じ並び。RULE.txt が正）。
+const GD_PHASES: [&str; 4] = ["gd_checks", "gd_alloc_zeroed", "gd_compute", "gd_wrap"];
+const DO_PHASES: [&str; 5] = [
+    "do_checks",
+    "do_prepack_clear",
+    "do_take",
+    "do_tensor_new",
+    "do_shell_drop",
+];
+const DC_PHASES: [&str; 3] = ["dc_checks", "dc_to_vec", "dc_tensor_new"];
+
+/// 計測専用パッチが取り出す内側の区間。固定長配列だけで持ち、取り出しと保持で確保しない
+/// （計測窓 `iter_total` 内に Vec の確保・解放を入れず、経路ごとに窓の中身を変えないため）。
+/// `gd` は `gemm_device` の内側、`dl` は `download_owned`／`download` の内側（コピー版は先頭 3 要素だけ有効）。
+#[derive(Clone, Copy)]
 struct ProbeSplit {
-    gd: Vec<(&'static str, f64)>,
+    gd: [f64; 4],
     /// `owned`／`copy`／`owned_pool_fallback`。
     dl_kind: &'static str,
-    dl: Vec<(&'static str, f64)>,
+    dl: [f64; 5],
 }
 
 /// 計時点の取り出し口（main ではスタブで常に `None`）。
@@ -125,6 +139,8 @@ struct Rec {
     n: usize,
     /// true なら `probe_take()` が `None` の反復で panic する（実機診断。パッチ無しバイナリを止める）。
     require_probe: bool,
+    /// 窓内で取り出した内側の区間。`iter_total` の記録後に `flush_probe` が cells へ移す（窓内で Vec を伸ばさない）。
+    pending_probe: Option<ProbeSplit>,
     /// (arm, n) → 全計測反復で共通だった checksum の bit。
     checksums: Vec<((&'static str, usize), u64)>,
 }
@@ -172,8 +188,26 @@ impl Rec {
                 self.arm
             );
         }
-        for (ph, dt) in p.gd.into_iter().chain(p.dl) {
+        // 確保を伴う記録は窓の外（`flush_probe`）で行う。ここは固定長のコピーだけ。
+        self.pending_probe = Some(p);
+    }
+
+    /// `iter_total` の記録後に呼び、保留した内側の区間を cells へ記録する。
+    fn flush_probe(&mut self) {
+        let Some(p) = self.pending_probe.take() else {
+            return;
+        };
+        for (ph, dt) in GD_PHASES.iter().copied().zip(p.gd) {
             self.push(ph, dt);
+        }
+        if p.dl_kind == "owned" {
+            for (ph, dt) in DO_PHASES.iter().copied().zip(p.dl) {
+                self.push(ph, dt);
+            }
+        } else {
+            for (ph, dt) in DC_PHASES.iter().copied().zip(p.dl) {
+                self.push(ph, dt);
+            }
         }
     }
 
@@ -254,6 +288,7 @@ fn one_iter(rec: &mut Rec, arm: Arm, res: &mut Resident, n: usize, capture: Opti
             let s = rec.timed("checksum", || checksum(sl));
             take(sl);
             rec.push("iter_total", t_all.elapsed().as_secs_f64());
+            rec.flush_probe();
             rec.record_checksum(s);
             rec.timed("result_drop", move || drop((c, out)));
         }
@@ -271,6 +306,7 @@ fn one_iter(rec: &mut Rec, arm: Arm, res: &mut Resident, n: usize, capture: Opti
             let s = rec.timed("checksum", || checksum(sl));
             take(sl);
             rec.push("iter_total", t_all.elapsed().as_secs_f64());
+            rec.flush_probe();
             rec.record_checksum(s);
             rec.timed("result_drop", move || drop((host, c)));
         }
@@ -287,6 +323,7 @@ fn one_iter(rec: &mut Rec, arm: Arm, res: &mut Resident, n: usize, capture: Opti
             let s = rec.timed("checksum", || checksum(sl));
             take(sl);
             rec.push("iter_total", t_all.elapsed().as_secs_f64());
+            rec.flush_probe();
             rec.record_checksum(s);
             rec.timed("result_drop", move || drop((host, c)));
         }

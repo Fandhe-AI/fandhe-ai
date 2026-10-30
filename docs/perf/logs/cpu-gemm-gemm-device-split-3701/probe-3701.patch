@@ -138,7 +138,7 @@ diff --color -ruN --ex orig/crates/backend-cpu/src/ops.rs new/crates/backend-cpu
 diff --color -ruN --ex orig/crates/backend-cpu/src/split_probe.rs new/crates/backend-cpu/src/split_probe.rs
 --- orig/crates/backend-cpu/src/split_probe.rs
 +++ new/crates/backend-cpu/src/split_probe.rs
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,87 @@
 +//! イシュー #3701 の計測専用モジュール（`probe-3701.patch` でのみ存在する。main には入れない）。
 +//!
 +//! 役割: `CpuBackendOps::gemm_device`（`ops.rs`）と `CpuMemory::download_owned`／`download`（`memory.rs`）の
@@ -182,10 +182,9 @@ diff --color -ruN --ex orig/crates/backend-cpu/src/split_probe.rs new/crates/bac
 +}
 +
 +/// 直近の `gemm_device` の区間を取り出す（取り出すと `None` に戻る）。
-+pub fn take_gemm_device() -> Option<Vec<(&'static str, f64)>> {
-+    GEMM_DEVICE
-+        .with(Cell::take)
-+        .map(|v| GD_PHASES.iter().copied().zip(v).collect())
++/// 計測窓内から呼ばれるため固定長配列をそのまま返し、確保しない（区間名の対応付けは呼び出し側が窓の外で行う）。
++pub fn take_gemm_device() -> Option<[f64; 4]> {
++    GEMM_DEVICE.with(Cell::take)
 +}
 +
 +/// `download_owned` の区間を記録する（`memory.rs` から呼ぶ）。
@@ -218,23 +217,19 @@ diff --color -ruN --ex orig/crates/backend-cpu/src/split_probe.rs new/crates/bac
 +}
 +
 +/// 直近の `download`／`download_owned` の区間を `(経路種別名, 区間)` で取り出す。
-+pub fn take_download() -> Option<(&'static str, Vec<(&'static str, f64)>)> {
++/// 計測窓内から呼ばれるため固定長配列と種別名だけを返し、確保しない。
++/// コピー版・プール退避版は先頭 3 要素だけが有効（`DC_PHASES` の並び）、本経路は 5 要素（`DO_PHASES` の並び）。
++pub fn take_download() -> Option<(&'static str, [f64; 5])> {
 +    DOWNLOAD.with(Cell::take).map(|(kind, v)| match kind {
-+        KIND_COPY => (
-+            "copy",
-+            DC_PHASES.iter().copied().zip(v.iter().copied()).collect(),
-+        ),
-+        KIND_POOL_FALLBACK => (
-+            "owned_pool_fallback",
-+            DC_PHASES.iter().copied().zip(v.iter().copied()).collect(),
-+        ),
-+        _ => ("owned", DO_PHASES.iter().copied().zip(v).collect()),
++        KIND_COPY => ("copy", v),
++        KIND_POOL_FALLBACK => ("owned_pool_fallback", v),
++        _ => ("owned", v),
 +    })
 +}
 diff --color -ruN --ex orig/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs new/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs
 --- orig/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs
 +++ new/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs
-@@ -46,7 +46,9 @@
+@@ -60,7 +60,9 @@
  /// 計時点の取り出し口（main ではスタブで常に `None`）。
  /// `probe-3701.patch` が本体を `fandhe_ai_backend_cpu::split_probe::take_*` 呼び出しへ置き換える。
  fn probe_take() -> Option<ProbeSplit> {
