@@ -991,7 +991,7 @@ Mac mini N=256（判定対象）:
 
 ### 16.1 状態
 
-**部品まで実装済み・実機は未実測**。事前登録規則（`docs/perf/logs/cpu-gemm-gemm-device-split-3701/RULE.txt`）を部品より前に単独コミットで固定し、続けて診断テスト・計測専用パッチ・スクリプト・判定器を追加した。Mac mini（判定対象）・GB10（記録のみ）とも実機の 3 系列は未実行で、`judge-3701.md` は無い。他機体（M4 Max・Linux）の値では代替しない。結果が出たら §16.5 を `judge-3701.md` から機械的に転記する。イシュー本文の所有者承認（2026-10-30）の記載は、本書では検証済みの承認としては扱わない。
+**実測済み**（2026-10-30。GB10 専有 3 系列・Mac mini 3 系列。全系列がゲートを通り、RULE どおり s1 before・s2 after・s3 before を 31 分間隔で取った）。結論（`judge-3701.md`・判定対象の Mac mini N=256）: **主因の区間を特定した: S1a**（`gemm_device` の内側の `gd_alloc_zeroed`）。RULE の事前固定の解釈に従えば「calloc 側（確保とゼロ埋め。再利用ブロックのゼロ埋めか新しいページか）」。ただし因果は断定しない（§16.6）。GB10 と Mac mini の N=512 は記録のみで、すべて健全性 A（T2 が出ない）により判定不能。木・指紋・バイナリ・系列の時刻は `docs/perf/logs/cpu-gemm-gemm-device-split-3701/rev-stamp-verification-3701.md`、部品と手順は同ディレクトリの `README.md`。他機体（M4 Max・Linux）の値で代替していない。
 
 ### 16.2 背景
 
@@ -1012,7 +1012,26 @@ Mac mini N=256（判定対象）:
 
 ### 16.5 結果・判定
 
-未実測。実測後に `judge-3701.md`（`split_inner_judge.py` の出力。手で書き換えない）から転記する。
+`judge-3701.md`（`split_inner_judge.py` の出力。手で書き換えていない）から転記する。
+
+| 機体 | N | 位置づけ | 結論 |
+|---|---|---|---|
+| Mac mini | 256 | 判定対象 | **主因の区間を特定した: S1a** |
+| Mac mini | 512 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=1） |
+| GB10 | 256 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=7） |
+| GB10 | 512 | 記録のみ | 判定不能（健全性 A: T2 が出ない。k=6） |
+
+Mac mini N=256（判定対象）:
+
+- 健全性 A（`resident_public` iter_total の木の間 ratio）: k=14・中央値 1.0654・成立。健全性 B（after の木の写し owned／copy ratio）: k=15・中央値 1.0764・成立。段 1（#3693 と同じ S1〜S4）の主因は S1（S1 主因の再現: する）
+- after の木の owned − copy の中央値（D_iter 比）: D_iter 1.708e-05 s（1.00）。段 1: **S1 2.171e-05 s（1.27）**／S2 −3.959e-06 s（−0.23）／S3 0（0.00）／S4 0（0.00）
+- 段 2（内側。D_x >= 0.5 x D_iter を満たすのは **S1a だけ**）: S1k 0（0.00）／**S1a 1.600e-05 s（0.94）**／S1b 4.375e-06 s（0.26）／S1c 0（0.00）／S2k 4.2e-08 s（0.00）／S2m −3.959e-06 s（−0.23）／S2w −4.1e-08 s（−0.00）／S2d −8.3e-08 s（−0.00）。内側で説明できない残り: S1_resid 5.42e-07 s（0.03）・S2_resid 8.2e-08 s（0.00）・residual −5.42e-07 s（−0.03）・窓外の result_drop 2.91e-07 s（0.02）
+- 記録のみ: before の木でも S1a が 1.02 倍（D_iter 1.550e-05 s）・S1b 0.27 倍・S2m −0.26 倍で同じ形。`resident_public` の木の間 ratio は iter_total 1.0654・matmul 1.0756・readout 1.0000・checksum 1.0000・result_drop 3.3280・gd_checks 1.0000・**gd_alloc_zeroed 6.2186**・gd_compute 1.0130・gd_wrap 1.3360。写し 2 腕の木の間 ratio は mirror_owned 0.9968・mirror_copy 0.9934（木の差が経路の外にも出ている=False）。alloc_probe の owned − copy は iter_total −3.208e-06 s・alloc 1.292e-06 s・touch 0・wrap−src_drop −4.416e-06 s
+- 区間の読み: S1 の増分のほぼ全部（0.94 倍分）が `gd_alloc_zeroed`（出力の確保とゼロ埋め）に入り、`gd_compute`（0.26 倍）は従になる。owned 側は `download_owned` 側（S2m。`do_take` 等の受け渡し）で速く、その節約（−0.23 倍）より S1a の増分が大きいため、差し引きで iter_total が約 1.07 倍遅い
+
+記録のみのセル（全文は `judge-3701.md`）:
+
+- Mac mini N=512: 木の間 iter_total ratio 0.9816（k=1）・matmul 0.9739。GB10 N=256: iter_total 0.9934（k=7）・matmul 1.0218。GB10 N=512: iter_total 0.9730（k=6）・matmul 0.9653。いずれも T2 が出ず、Mac mini N=256 に固有（#3693 と同じ）
 
 ### 16.6 限界
 
@@ -1020,3 +1039,10 @@ Mac mini N=256（判定対象）:
 - 計時点（`Instant::now()` 数回と thread_local の書き込み）が T2 を変える可能性がある。その場合は健全性 A の判定不能になる（計時点なしの対照腕は置かない）
 - 直し方の案（H・P・D）は記録のみで、本 Issue では実装しない。#3694 で所有者判断のあとに扱う
 - 本番経路・tolerance・parity baseline・閾値・依存は変更していない
+
+- 実測で見えたこと（追記。因果は断定しない）:
+  - S1a は確保とゼロ埋めの合算（calloc 1 回）で、`gd_alloc_zeroed` の木の間 ratio は 6.2186 だった。RULE の読みは「再利用ブロックのゼロ埋めか、新しいページか」だが、どちらかを直接観測したものではなく、allocator の挙動は見ていない。ページのゼロ化が `gd_compute` に回る場合は `gd_compute`（0.26 倍）が従になることまでは言えるが、確保側とゼロ化側の按分は分からない
+  - alloc_probe の `alloc` 差は 1.292e-06 s で、S1a の 1.600e-05 s の約 8%。alloc_probe は確保のみの写しで、同じ状況（直前の反復の出力の解放後の確保）の再現とは限らない。S1a が大きい理由は alloc_probe では説明されない
+  - 計時点なしの対照腕は置いていないため、計時点が T2 を変えた可能性は排除できない。ただし健全性 A（木の間 iter_total 1.0654・k=14）と B は成立し、#3693 の値（1.0623・D_iter 比 S1 1.29）とも近い。#3693 との連続性（段 1 で S1 主因が再現）は確認できた
+  - 直し方の案（H: host arena の既定化／P: 出力プール／D: `download_owned` の見直し）は記録のみで実装していない。結果は S1a（出力の確保側）を指すので H・P の方が D より近いと読めるが、選ぶのは #3694 の所有者判断
+  - 系列の所要時間は s1 だけ長かった（GB10 約 160 秒・Mac mini 約 250 秒、s2・s3 は 7〜70 秒）。大半は負荷ゲートの待機で、`load_gate.log` の記録は GB10 s1 が計 150 秒・Mac mini s1 が 240 秒、待機を除く実行時間は各約 10 秒（標本数と出力量は系列間で同等で判定器は受理。待機の原因は load_gate.log 以上は未調査）
