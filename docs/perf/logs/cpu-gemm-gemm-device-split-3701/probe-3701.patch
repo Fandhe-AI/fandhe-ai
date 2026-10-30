@@ -1,0 +1,247 @@
+diff --color -ruN --ex orig/crates/backend-cpu/src/lib.rs new/crates/backend-cpu/src/lib.rs
+--- orig/crates/backend-cpu/src/lib.rs
++++ new/crates/backend-cpu/src/lib.rs
+@@ -213,6 +213,8 @@
+ // （`thread_limit::ThreadLimitReport` と同型の位置づけ）。
+ mod sme_detect;
+ pub mod softmax;
++/// イシュー #3701 の計測専用モジュール（`probe-3701.patch` でのみ存在。S1・S2 の内側の計時点の受け渡し）。
++pub mod split_probe;
+ mod thread_limit;
+ // イシュー #2385: `gb10_affinity`・`thread_limit` の単体テストが使う一時ディレクトリ
+ // RAII ガード（一意名＋排他作成）。テスト専用。
+diff --color -ruN --ex orig/crates/backend-cpu/src/memory.rs new/crates/backend-cpu/src/memory.rs
+--- orig/crates/backend-cpu/src/memory.rs
++++ new/crates/backend-cpu/src/memory.rs
+@@ -83,8 +83,16 @@
+         /// `data_mut` と同じく pack 済み panel キャッシュを先に破棄して #3200 の不変条件を保つ。
+         /// 抜け殻のハンドルは空の `Vec` だけを持つ（`TrackedAllocation` は drop で解放計上される）。
+         pub(crate) fn take_data(&mut self) -> Vec<f32> {
++            let probe_t0 = std::time::Instant::now();
+             self.prepack.clear_mut();
+-            std::mem::take(&mut self.data)
++            let probe_t1 = std::time::Instant::now();
++            let taken = std::mem::take(&mut self.data);
++            let probe_t2 = std::time::Instant::now();
++            crate::split_probe::set_take_data([
++                (probe_t1 - probe_t0).as_secs_f64(),
++                (probe_t2 - probe_t1).as_secs_f64(),
++            ]);
++            taken
+         }
+ 
+         /// テスト用: 要素数を 1 つ減らす（長さ不一致の拒否経路の検証用。キャッシュも破棄する）。
+@@ -285,6 +293,7 @@
+     }
+ 
+     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
++        let probe_t0 = std::time::Instant::now();
+         if buffer.device() != Device::Cpu {
+             return Err(BackendError::DeviceMismatch);
+         }
+@@ -294,7 +303,17 @@
+         if buffer.numel() == 0 {
+             return Tensor::new(Vec::new(), buffer.shape()).map_err(BackendError::ShapeMismatch);
+         }
+-        Tensor::new(handle.data().to_vec(), buffer.shape()).map_err(BackendError::ShapeMismatch)
++        let probe_t1 = std::time::Instant::now();
++        let copied = handle.data().to_vec();
++        let probe_t2 = std::time::Instant::now();
++        let result = Tensor::new(copied, buffer.shape()).map_err(BackendError::ShapeMismatch);
++        let probe_t3 = std::time::Instant::now();
++        crate::split_probe::set_download_copy([
++            (probe_t1 - probe_t0).as_secs_f64(),
++            (probe_t2 - probe_t1).as_secs_f64(),
++            (probe_t3 - probe_t2).as_secs_f64(),
++        ]);
++        result
+     }
+ 
+     /// [`MemoryOps::download_owned`] の CPU 実装（イシュー #3672）。
+@@ -302,13 +321,16 @@
+     /// （`unsafe` なし）。device・ダウンキャスト・長さの検査は `download` と同じで、
+     /// 異種ハンドルは `DeviceMismatch` で拒否する（コピー版へ黙って落とさない）。
+     fn download_owned(&self, buffer: DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
++        let probe_t0 = std::time::Instant::now();
+         if buffer.device() != Device::Cpu {
+             return Err(BackendError::DeviceMismatch);
+         }
+         // プール付きバッファは drop で内部ハンドルがプールへ戻るため、Vec を奪うと
+         // 抜け殻が再利用される（codex P1）。コピー版へ退いて実体を保つ。
+         if buffer.is_pool_owned() {
+-            return self.download(&buffer);
++            let fallback = self.download(&buffer);
++            crate::split_probe::mark_pool_fallback();
++            return fallback;
+         }
+         let shape = buffer.shape().to_vec();
+         let numel = buffer.numel();
+@@ -325,8 +347,23 @@
+         if numel == 0 {
+             return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
+         }
++        let probe_t1 = std::time::Instant::now();
+         let data = handle.take_data();
+-        Tensor::new(data, &shape).map_err(BackendError::ShapeMismatch)
++        let probe_t2 = std::time::Instant::now();
++        let result = Tensor::new(data, &shape).map_err(BackendError::ShapeMismatch);
++        let probe_t3 = std::time::Instant::now();
++        // 元の drop 順序（戻り値の評価 → ローカルの drop）を保ったまま抜け殻の drop を明示して計時する。
++        drop(buffer);
++        let probe_t4 = std::time::Instant::now();
++        let take = crate::split_probe::take_take_data().unwrap_or([0.0, 0.0]);
++        crate::split_probe::set_download_owned([
++            (probe_t1 - probe_t0).as_secs_f64(),
++            take[0],
++            take[1],
++            (probe_t3 - probe_t2).as_secs_f64(),
++            (probe_t4 - probe_t3).as_secs_f64(),
++        ]);
++        result
+     }
+ 
+     /// [`MemoryOps::upload_into`] の CPU 実装（イシュー #1212）。
+diff --color -ruN --ex orig/crates/backend-cpu/src/ops.rs new/crates/backend-cpu/src/ops.rs
+--- orig/crates/backend-cpu/src/ops.rs
++++ new/crates/backend-cpu/src/ops.rs
+@@ -1863,6 +1863,7 @@
+         a: &DeviceBuffer<f32>,
+         b: &DeviceBuffer<f32>,
+     ) -> Result<DeviceBuffer<f32>, BackendError> {
++        let probe_t0 = std::time::Instant::now();
+         if a.device() != Device::Cpu || b.device() != Device::Cpu {
+             return Err(BackendError::DeviceMismatch);
+         }
+@@ -1888,10 +1889,21 @@
+         // 確保前に出力バイトサイズを検証する（`gemm` と同じ。capacity overflow 回避）。
+         let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(1, m, n)
+             .map_err(BackendError::ShapeMismatch)?;
++        let probe_t1 = std::time::Instant::now();
+         let mut out = zeroed_output(total);
++        let probe_t2 = std::time::Instant::now();
+         gemm_blis_parallel(a_handle.data(), b_handle.data(), &mut out, m, n, k)
+             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+-        shared_cpu_memory().wrap_vec(out, out_shape)
++        let probe_t3 = std::time::Instant::now();
++        let wrapped = shared_cpu_memory().wrap_vec(out, out_shape);
++        let probe_t4 = std::time::Instant::now();
++        crate::split_probe::set_gemm_device([
++            (probe_t1 - probe_t0).as_secs_f64(),
++            (probe_t2 - probe_t1).as_secs_f64(),
++            (probe_t3 - probe_t2).as_secs_f64(),
++            (probe_t4 - probe_t3).as_secs_f64(),
++        ]);
++        wrapped
+     }
+ 
+     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
+diff --color -ruN --ex orig/crates/backend-cpu/src/split_probe.rs new/crates/backend-cpu/src/split_probe.rs
+--- orig/crates/backend-cpu/src/split_probe.rs
++++ new/crates/backend-cpu/src/split_probe.rs
+@@ -0,0 +1,92 @@
++//! イシュー #3701 の計測専用モジュール（`probe-3701.patch` でのみ存在する。main には入れない）。
++//!
++//! 役割: `CpuBackendOps::gemm_device`（`ops.rs`）と `CpuMemory::download_owned`／`download`（`memory.rs`）の
++//! 内側に置いた計時点の結果を、呼び出し元スレッドの thread_local に**上書き**で保存する。
++//! 診断テスト（`crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs`）が外側の区間の計時の直後に
++//! `take_*` で取り出す。累積はしない（1 反復 1 回の上書き）。
++//! 計算・出力の bit・確保の呼び出し・drop の順序は変えない。足すのは `Instant::now()` と書き込みだけで、`unsafe`・依存は無い。
++//! 区間名・計時点は `docs/perf/logs/cpu-gemm-gemm-device-split-3701/RULE.txt` を正とする。
++
++use std::cell::Cell;
++
++/// `gemm_device` の内側の区間名（`GemmDeviceSplit` の並びと同じ）。
++pub const GD_PHASES: [&str; 4] = ["gd_checks", "gd_alloc_zeroed", "gd_compute", "gd_wrap"];
++/// `download_owned` の内側の区間名。
++pub const DO_PHASES: [&str; 5] = [
++    "do_checks",
++    "do_prepack_clear",
++    "do_take",
++    "do_tensor_new",
++    "do_shell_drop",
++];
++/// `download` の内側の区間名。
++pub const DC_PHASES: [&str; 3] = ["dc_checks", "dc_to_vec", "dc_tensor_new"];
++
++/// 経路種別: `download_owned` の本経路。
++pub const KIND_OWNED: u8 = 0;
++/// 経路種別: `download`（コピー版）。
++pub const KIND_COPY: u8 = 1;
++/// 経路種別: `download_owned` がプール付きバッファのためコピー版へ退いた経路。
++pub const KIND_POOL_FALLBACK: u8 = 2;
++
++thread_local! {
++    static GEMM_DEVICE: Cell<Option<[f64; 4]>> = const { Cell::new(None) };
++    static DOWNLOAD: Cell<Option<(u8, [f64; 5])>> = const { Cell::new(None) };
++    static TAKE_DATA: Cell<Option<[f64; 2]>> = const { Cell::new(None) };
++}
++
++/// `gemm_device` の区間（秒）を記録する（`ops.rs` から呼ぶ）。
++pub fn set_gemm_device(v: [f64; 4]) {
++    GEMM_DEVICE.with(|c| c.set(Some(v)));
++}
++
++/// 直近の `gemm_device` の区間を取り出す（取り出すと `None` に戻る）。
++pub fn take_gemm_device() -> Option<Vec<(&'static str, f64)>> {
++    GEMM_DEVICE
++        .with(Cell::take)
++        .map(|v| GD_PHASES.iter().copied().zip(v).collect())
++}
++
++/// `download_owned` の区間を記録する（`memory.rs` から呼ぶ）。
++pub fn set_download_owned(v: [f64; 5]) {
++    DOWNLOAD.with(|c| c.set(Some((KIND_OWNED, v))));
++}
++
++/// `download` の区間を記録する（`memory.rs` から呼ぶ。残り 2 要素は未使用）。
++pub fn set_download_copy(v: [f64; 3]) {
++    DOWNLOAD.with(|c| c.set(Some((KIND_COPY, [v[0], v[1], v[2], 0.0, 0.0]))));
++}
++
++/// 直近の `download` 系の記録の種別をプール退避に書き換える（`download_owned` がコピー版へ退いたとき）。
++pub fn mark_pool_fallback() {
++    DOWNLOAD.with(|c| {
++        if let Some((_, v)) = c.get() {
++            c.set(Some((KIND_POOL_FALLBACK, v)));
++        }
++    });
++}
++
++/// `take_data` の内訳（prepack 破棄・`mem::take`）を記録する（`memory.rs` の handle から呼ぶ）。
++pub fn set_take_data(v: [f64; 2]) {
++    TAKE_DATA.with(|c| c.set(Some(v)));
++}
++
++/// 直近の `take_data` の内訳を取り出す（`download_owned` が合成に使う）。
++pub fn take_take_data() -> Option<[f64; 2]> {
++    TAKE_DATA.with(Cell::take)
++}
++
++/// 直近の `download`／`download_owned` の区間を `(経路種別名, 区間)` で取り出す。
++pub fn take_download() -> Option<(&'static str, Vec<(&'static str, f64)>)> {
++    DOWNLOAD.with(Cell::take).map(|(kind, v)| match kind {
++        KIND_COPY => (
++            "copy",
++            DC_PHASES.iter().copied().zip(v.iter().copied()).collect(),
++        ),
++        KIND_POOL_FALLBACK => (
++            "owned_pool_fallback",
++            DC_PHASES.iter().copied().zip(v.iter().copied()).collect(),
++        ),
++        _ => ("owned", DO_PHASES.iter().copied().zip(v).collect()),
++    })
++}
+diff --color -ruN --ex orig/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs new/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs
+--- orig/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs
++++ new/crates/facade/tests/cpu_gemm_s1_inner_split_diag.rs
+@@ -46,7 +46,9 @@
+ /// 計時点の取り出し口（main ではスタブで常に `None`）。
+ /// `probe-3701.patch` が本体を `fandhe_ai_backend_cpu::split_probe::take_*` 呼び出しへ置き換える。
+ fn probe_take() -> Option<ProbeSplit> {
+-    None
++    let gd = fandhe_ai_backend_cpu::split_probe::take_gemm_device()?;
++    let (dl_kind, dl) = fandhe_ai_backend_cpu::split_probe::take_download()?;
++    Some(ProbeSplit { gd, dl_kind, dl })
+ }
+ 
+ /// N ごとの (warmup, 計測) 反復数。縮めない（RULE.txt）。
