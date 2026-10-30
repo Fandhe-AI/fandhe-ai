@@ -174,13 +174,27 @@ def compose(pj, series):
         lst = series.get(host, [])
         passed[host] = [h for h in lst if not h["record_only_reasons"]][:NEEDED_SERIES]
         skipped[host] = [h for h in lst if h["record_only_reasons"]]
+    seen = {}
+    for host in HOSTS:
+        for h in series.get(host, []):
+            real = os.path.realpath(h["dir"])
+            if real in seen:
+                raise InputError("同じ系列ディレクトリの重複指定: %s（%s と %s）" % (real, seen[real], host))
+            seen[real] = host
     npairs = min(len(passed["gb10"]), len(passed["macmini"]))
     pairs = []
     for k in range(npairs):
         res = pj.judge({"gb10": passed["gb10"][k], "macmini": passed["macmini"][k]})
         pairs.append({"k": k + 1, "gb10": passed["gb10"][k], "macmini": passed["macmini"][k], "res": res})
+    # 対を作れない系列（相手機体の系列が足りない位置）も単独で path_judge に通し、
+    # REJECT 条件に当たれば合成に反映する（RULE「REJECT に当たらない限り系列不足」。codex P2）
+    unpaired = []
+    for host in HOSTS:
+        for h in passed[host][npairs:]:
+            res = pj.judge({host: h, **{x: None for x in HOSTS if x != host}})
+            unpaired.append({"host": host, "series": h, "res": res})
     short = [h for h in HOSTS if len(passed[h]) < NEEDED_SERIES]
-    if any(p["res"]["verdict"] == "REJECT" for p in pairs):
+    if any(p["res"]["verdict"] == "REJECT" for p in pairs) or any(u["res"]["verdict"] == "REJECT" for u in unpaired):
         verdict = "REJECT"
     elif short:
         verdict = "判定不能（系列不足）"
@@ -188,7 +202,8 @@ def compose(pj, series):
         verdict = "ADOPT"
     else:
         verdict = "判定不能"
-    return {"verdict": verdict, "pairs": pairs, "passed": passed, "skipped": skipped, "short": short}
+    return {"verdict": verdict, "pairs": pairs, "passed": passed, "skipped": skipped, "short": short,
+            "unpaired": unpaired}
 
 
 def single_view(pj, series):
@@ -235,6 +250,8 @@ def render(out):
             L.append("  - 使わない系列 %s: %s" % (series_name(x["dir"]), " / ".join(x["record_only_reasons"])))
     if out["short"]:
         L.append("- 系列不足の機体: %s（必要 %d 本）" % (", ".join(out["short"]), NEEDED_SERIES))
+    for u in out.get("unpaired", []):
+        L.append("- 対を作れない系列 %s（単独で path_judge）: %s" % (series_name(u["series"]["dir"]), u["res"]["verdict"]))
     L.append("")
     L += ["## 対ごとの判定", "", "| 対 k | GB10 系列 | Mac mini 系列 | 判定 |", "|---|---|---|---|"]
     for p in out["pairs"]:
@@ -405,6 +422,15 @@ def self_test():
 
         r = run(td, {"gb10": [ok, rej], "macmini": [ok, ok, ok]})
         expect("系列不足でも REJECT が優先", r["verdict"] == "REJECT")
+
+        r = run(td, {"gb10": [ok], "macmini": [ok, ok, rej]})
+        expect("対を作れない系列の REJECT も反映", r["verdict"] == "REJECT" and len(r["pairs"]) == 1
+               and [u["res"]["verdict"] for u in r["unpaired"]] == ["判定不能（未実測あり）", "REJECT"])
+
+        d_dup = mk(td, "gb10", f_base)
+        expect_err("同じ系列ディレクトリの重複指定", lambda: compose(PJ, {
+            "gb10": [load_series(PJ, d_dup, "gb10")] * 3,
+            "macmini": [load_series(PJ, mk(td, "macmini", f_base), "macmini") for _ in range(3)]}))
 
         r = run(td, {"gb10": [ok, ok, ok], "macmini": []})
         expect("片機体ゼロ系列は判定不能（系列不足）", r["verdict"] == "判定不能（系列不足）" and r["pairs"] == [])
