@@ -2061,6 +2061,192 @@ CI の行は新設 `crates/autodiff/tests/create_graph_rnn_cell.rs` に置く。
 - スコープ外: 実機の parity（#3856・#3858）、測り方（#3739）、f64 テープ（#3722）、他の C 区分の族、非 fused モードの公開、双方向／projection など新しい variant。
 - Issue の紐付け: 本 PR は `Closes #3728`、`Refs #3767 #3795 #3796 #3719`。
 - 変えていないもの: コード・依存・`unsafe`・tolerance・baseline・FMA 契約・`docs/spec`・既存節の本文・公開 API・`compat-api-scope.md`。
+
+## 38. 設計記録（イシュー #3729・親 #3719。create_graph の B 区分・Conv3d・ConvTranspose3d）
+
+### 38.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
+- **基準**: `origin/main` の `fefb069df`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: §21.4 (b) の `Conv3d`・`ConvTranspose3d`。§21.2 は B 区分の #3080 族へ Conv 系 6 Op を割り当てたが、#3080 は §21.4 (a) の 2D 4 variant だけを実装し（§23）、3D の 2 Op は `supports_create_graph() == false` のまま fail-closed で残っている（§23.5 の 1 の申し送り）。このため 3D の畳み込みを含むモデルでは `hvp`・`jvp`・`jacfwd`・`jvp_create_graph` が `Err(AutodiffError::Backward)` で拒否される（追跡表の項目 4）
+- **根拠**: §21.1（V1〜V3・閉包性）、§21.3 の #3080 方針、§21.6（fail-closed 契約）、§23（2D の実装記録）。ルート #3711 の「実装を既定に設計する」趣旨は設計方針の根拠であり、承認ではない
+- **後続**: 実装は #3797。承認は #3767、実機 parity は #3857（`<cuda-node>`）・#3859（`<metal-node>`）、雛形は #3776・#3777、測り方は #3739
+- **最初に押さえる事実**: conv は x と w について双線形なので、二階の値は構造側の `MatMul` オペランドだけで決まる（§23.3 と同じ）
+- **推奨**: **実装する（2 Op とも）**。理由は次の 3 つ
+  1. 2D と同じ式が、3D 版の内部 Op を足すだけで書ける
+  2. 1 階 VJP がすでに strict GEMM と f64 縮約のホスト関数を持っており、V3 の値にそのまま使える
+  3. 3D CNN・動画モデルで HVP・jacfwd が拒否される実害がある
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | 2 Op を実装する | 3D CNN で高階変換が使える。追跡表の項目 4 の残りが埋まる | 内部 Op 3 つの追加と保守の費用。子テープのメモリ増（38.12） |
+| B | 対象外にして fail-closed を恒久契約にする | 費用ゼロ | 上記のモデルで高階変換が使えないまま残る |
+
+### 38.1 公開形
+
+該当なし。公開名は増えない。`Tape::backward_create_graph`・`hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` は公開済みで、受理する Op の範囲が広がるだけである。`crates/facade/tests/api_surface.rs` には 3D 畳み込みの create_graph に関わる否定ガードも保留 doctest ガードも無い（`VarConv3dHoldDoctestGuard`・`ConvTranspose3dMaxUnpoolHoldDoctestGuard` は層の公開の保留で、create_graph とは無関係なので触らない）。
+
+新しい内部 Op はすべて `pub(crate)` とする。
+
+- `Op::Unfold3d { input, params: Conv3dParams }`: groups=1 の im2col3d。出力は `[N, C·kD·kH·kW, P]`
+- `Op::Fold3d { input, params: Conv3dParams }`: groups=1 の col2im3d。出力の空間 shape はノード自身の shape から取る（2D の `Fold` と同じ）
+- `Op::ConvWeightGradHost3d { structure, g, x, params: Conv3dParams, transposed }`: d_weight の値ノード。2D の `ConvWeightGradHost`（`params` は `Conv2dParams` 固定。`tape.rs:685`）の 3D 版
+
+3 つとも `push_eager` で実体化し、`is_checkpoint_eligible == false`・`supports_create_graph == true` とする。2D の `Unfold`／`Fold`（`tape.rs:1371`・`:1377`）の payload は `Conv2dParams` で、3D の unfold／fold に当たる Op・`Var` メソッドは存在しない。
+
+**命名の制約**: `api_surface.rs` の関数名インベントリのガード 3 本（`workspace_declares_conv3d_fn_names_only_in_allowed_locations` が `conv3d`・`add_conv3d`・`im2col3d`・`col2im3d`、`workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locations` が `conv_transpose3d`・`max_unpool*`、`workspace_declares_fold_unfold_fn_names_only_in_allowed_locations` が `fold`・`unfold`）が数える名前と完全に同じ `fn` 名は新しく宣言しない。例として `unfold3d_var`・`fold3d_var`・`replay_conv3d`・`conv3d_vjp`・`conv3d_dw_from_col`・`conv_transpose3d_dw_from_col` を使う。
+
+実装 PR（#3797）で変える箇所:
+
+- `supports_create_graph`（`crates/autodiff/src/tape.rs:2526`）の網羅 match で、`Conv3d`・`ConvTranspose3d` と新しい 3 Op を true 側へ置く（外側にワイルドカードは足さない）
+- `Op` の doc コメントの「高階微分非対応」（`tape.rs:1353`・`:1522`）、`crates/autodiff/src/create_graph.rs` のモジュール doc
+- facade の rustdoc（`crates/facade/src/lib.rs:911`・`:1036`・`:1140`・`:1201`・`:1300`・`:1382`）にある「対象 Op の正本は §21.2・§22〜§31」の範囲に §38 を加える
+
+### 38.2 rustdoc と doctest
+
+- 新しい公開 API が無いので必須の doctest は無い。任意で facade の `backward_create_graph` に CPU だけで通る小さな `conv3d` の HVP 例を足してよい。GPU の例は置かない（置くなら `no_run`／`#[ignore]`）
+- 失敗系は `compile_fail` に頼らず、ランタイムの `Err(AutodiffError::Backward(_))` 一致と `child.is_empty()` で確かめる
+
+### 38.3 エラー型
+
+- 新しい variant は足さない。拒否はすべて `AutodiffError::Backward(String)`: 入力 rank が 5 でない（内部契約違反）、shape・要素数・確保長の `checked_mul` 桁あふれ、ConvTranspose3d の `output_padding` 導出が負・桁あふれ・`>= stride`、値 shape と構造 shape の不一致
+- 検証順: 判定は子テープへ書く前に行う。拒否したら `child` は空のままにし、再試行できるようにする（§21.6）。本番経路で `unwrap`／`expect` を使わない
+
+### 38.4 テスト計画
+
+候補名は案であり、実装 PR で確定する。CI の行は新規 `crates/autodiff/tests/create_graph_conv3d.rs` に置く。
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|--------------|--------|------|---------------|----------------|----------------|
+| 1 階が素の `backward` と bit 同一、`cg.grad` が REQ-2 で一致（CPU では d_weight・d_bias の bit 一致も見る） | `conv3d_family_first_order_bit_identical_and_cgrad_req2` | CI | 未実測 | 未実測 | 未実測 |
+| ヘッシアンが有限差分と一致。Conv3d・ConvTranspose3d × bias あり・なし × groups 1・2。軸ごとに異なるハイパーパラメータ（例: stride `[1,2,2]`・padding `[0,1,1]`・dilation `[2,1,1]`・kernel `[2,3,2]`、ConvTranspose3d の output_padding `[0,1,0]`）で D／H／W 軸の取り違えを検出する。x・w・b は 1 本の葉から切り出して純ブロックと混合ブロックを同時に見る。loss は `sum(y⊙y⊙c)`。h を大きく取り Richardson 外挿で補う（§23.4 の前例）。CI 時間のため葉の総数は小さくする | `conv3d_family_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| 長軸縮約の overflow 回帰: N=3・1×1×1 カーネル・`x=[1,1,-1]`・`g=[3e38;3]` で 1 階と `cg.grad` が bit 一致する。有限性を要求するのは d_weight のみ（f64 縮約で相殺されるため）。d_bias = sum(g) = 9e38 は f32 へ変換すると `inf` になるので、d_bias は 1 階と `cg.grad` がともに `inf` で一致することを期待する（有限性の検査は別途、打ち消す入力 `g=[3e38;-3e38;0]` 等で行う） | `conv3d_family_weight_bias_grad_overflow_regression` | CI | 未実測 | 未実測 | 未実測 |
+| 孫テープで `h=(gw·1e-38)²` を作って更に微分した x 勾配が素の `backward` と bit 一致 | `conv3d_family_grandchild_replay_stays_finite` | CI | 未実測 | 未実測 | 未実測 |
+| `jvp_create_graph` が中央差分と一致 | `conv3d_family_jvp_create_graph_matches_central_difference` | CI | 未実測 | 未実測 | 未実測 |
+| 空入力: N=0 は d_bias もゼロ、N>0・Cin=0・Cout>0 は d_bias = sum(g) が非零になり得る（§23.3 と同じ。2 ケースに分けて検査） | `conv3d_family_empty_inputs_zero_grads` | CI | 未実測 | 未実測 | 未実測 |
+| output_padding の符号付き導出（padding が大きく、output_padding を除いた base が負になる場合） | `conv_transpose3d_output_padding_derivation_signed` | CI | 未実測 | 未実測 | 未実測 |
+| 隣接 Op（`Op::Custom`）が fail-closed のまま | `conv3d_family_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
+| `create_graph/conv3d.rs` 内の単体: groups=G の im2col3d を平坦化したものと groups=1 の結果が bit 一致（K 軸の並び `(c,kd,kh,kw)` の前提を固定） | `unfold3d_groups1_matches_grouped_im2col3d_flatten` | CI | — | — | — |
+| 同: `<unfold(x),y> = <x,fold(y)>`（相互随伴） | `unfold3d_fold3d_are_adjoint` | CI | — | — | — |
+| facade 経由 | `crates/facade/tests/create_graph_facade.rs` に `conv3d_create_graph_via_facade`・`conv_transpose3d_create_graph_via_facade` を追加 | CI | 未実測 | 未実測 | 未実測 |
+| CUDA／Metal の parity | `create_graph_conv3d_family_cuda_parity`／`create_graph_conv3d_family_metal_parity`（後者は `cfg(target_os = "macos")`）。置き場・名前は #3776・#3777 の雛形が確定するまで仮。測り方は #3739 に従う | `#[ignore]` | 未実測 | 未実測 | 未実測 |
+
+実機の実行は #3857・#3859 が担う。Linux や開発機の代替値で pass にしない。
+
+**既存テストで反転・差し替えが要るもの（#3797 の必須作業）**:
+
+- `crates/autodiff/src/tape.rs:5522` の `conv3d_op_does_not_support_create_graph`: `conv3d_family_supports_create_graph` へ反転
+- 同 `conv_transpose3d_max_unpool_op_tests::conv_transpose3d_op_meta_properties`: `supports_create_graph` だけ true へ。新 3 Op のメタテストを足す
+- `crates/autodiff/tests/create_graph.rs:2579` の `create_graph_still_rejects_conv3d`: 成功して 1 階と bit 一致する確認へ変える
+- `crates/autodiff/tests/conv_transpose3d_parity.rs:687` の `records_exactly_one_node_and_rejects_create_graph`: 1 ノード記録の確認は残し、create_graph は成功させる
+
+隣接 Op には恒久対象外の `Op::Custom`（§21.2 A 区分。§32 の前例）を使う。兄弟 issue が並行して true にしうる Op（`MaxUnpool`・`LocalResponseNorm` 等）は拒否見本にしない。
+
+### 38.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えず、新しい baseline も作らない
+- 1 階は構造上 bit 同一（§21.1(1)）
+- `cg.grad` の d_weight・d_bias は CPU で 1 階と bit 一致する（V3 の値が同じホスト関数だから）
+- d_input は V1。1 階は batched GEMM、子テープは group ごとの rank 2 strict matmul で GEMM の分割が違いうるので REQ-2 で判定する（§23 と同じ）。GPU では bit 一致を主張しない
+- f64 長軸縮約の契約（`coding-rust.md`）は V3 の値側（`reduce_batch_axes_f64`・`reduce_bias_grad_rows`）で守る。FMA 契約には影響しない
+- S1（スケール付き合成）は採らない（§23.3 と同じ理由）
+- 必須ベクトルは 38.4 の overflow・孫テープ・空入力。三階以上の微分と、真値が f32 を超える場合（1 階と同じく `inf`）は保証外
+
+### 38.6 互換への影響
+
+**追加のみ**。`api-compat-0.14.0-decision.md` §8 の手順で判定する。触れる型は `pub(crate)` の `Op` だけで、`AutodiffError` の variant も公開シグネチャも変わらない。以前 `Err` だった入力が `Ok` になる受理範囲の拡大であり、§1.1 の破壊的条件には当たらない。
+
+### 38.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `docs/compat-api-scope.md` への適用記録は #3767 の承認後の実装 PR で書く。文案: `**適用記録（イシュー #3797・親 #3729。承認: <#3767 の回答 URL>）**: Conv3d・ConvTranspose3d を create_graph の対象にした。公開名の追加なし。`
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（承認後の PR で行う。承認が無いうちは書かない）
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した（項目 4 の設計記録の欄に §38 を追記）
+
+### 38.8 ベンチと性能への影響
+
+既定経路（`Tape::backward`・forward）は変えない。#3797 では 1 階の Conv3d・ConvTranspose3d の腕から dw のホスト関数（`conv3d_dw_from_col`／`conv_transpose3d_dw_from_col`）を切り出す。式・評価順・呼び出し回数は変えない（§23.1 の 2D の前例）。bit 同一は既存の conv3d テストで担保する。切り出し以外で既定経路に触れた場合だけ、5 回計測の中央値で前後を比べ、判定規則を計測前に固定する。実機の値は未実測。
+
+### 38.9 依存の追加の有無
+
+追加なし。許容 12 区分・禁止リストとの照合で変化なし。新しい `unsafe` なし。
+
+### 38.10 方式と式
+
+記号: K_g = Cin_g·kD·kH·kW、P = Dout·Hout·Wout、P_x = Din·Hin·Win。
+
+- **R（replay）**
+  - Conv3d: `Var::conv3d(x_m, w_m, b_m, stride, padding, dilation, groups)`（`var.rs:3371`）
+  - ConvTranspose3d: `Var::conv_transpose3d`（`var.rs:5489`）。`output_padding` は軸ごとに `out + 2p − ((in−1)·s + d·(k−1) + 1)` を `i128` で導出し、負・桁あふれ・`>= stride` なら拒否する（§23.3）
+- **Conv3d の cgrad**
+  - d_input（V1）: 各 group で `w_gᵀ [K_g, Cout_g] · channel_rows(g) [Cout_g, N·P]` を計算し、`[N, K_g, P]` に戻して cat で `[N, G·K_g, P]` にしたあと `fold3d` で `[N, Cin, D, H, W]` にする
+  - d_weight（V3）: 構造は `col = unfold3d(x)` から `g_g · col_np_by_k(col)` で `[Cout_g, K_g]` を作り、cat して reshape する。値は `conv3d_dw_from_col`（strict GEMM と `reduce_batch_axes_f64`）で、`Op::ConvWeightGradHost3d { transposed: false }` として `push_eager` する
+  - d_bias（V3）: `permute([0,2,3,4,1])` で `[N·P, Cout]` の行にして `reduce_bias_grad_var`
+- **ConvTranspose3d の cgrad**
+  - `col = unfold3d(g)` で `[N, Cout·kvol, P_x]` を作る
+  - d_input: `w_g [Cin_g, K_g] · channel_rows(col)` を計算し、cat して reshape する
+  - d_weight: 構造は `x_g · col_np_by_k(col)`、値は `conv_transpose3d_dw_from_col`（`transposed: true`）
+  - d_bias: 1 階と同じ行縮約
+- `Unfold3d` の VJP は `Fold3d`、`Fold3d` の VJP は `Unfold3d` で、互いに随伴になる。`ConvWeightGradHost3d` の VJP は恒等で `structure` だけへ渡し、孫テープでの再生でも同じホスト関数で値を再計算する（§23.3 の是正と同じ）
+- 実装の置き場は新規 `create_graph/conv3d.rs` とし、2D のファイル（`create_graph/conv.rs`）は触らない。rank 一般のヘルパー（`channel_rows`・`col_np_by_k`・`np_cols_to_n_rows_p`・`cat_or_single`・`zeros_var`）は可視性を `pub(super)` に上げて共用し、rank 4 前提の `bias_grad`・`weight_grad_value`・`zero_grads` は 3D 版を別に書く（2D の数値は不変）
+- `ConvNeeds` で不要な寄与は構造ノードもホスト計算も作らない。shape に 0 を含むときは寄与ごとにゼロ定数で短絡するが、d_bias は g が空でない限り `bias_grad`（sum(g)）を呼ぶ（`create_graph/conv.rs::zero_grads` と同じ分岐。N=0 のみ d_bias もゼロ、N>0・Cin=0・Cout>0 では非零になり得る）
+- **方式を合成にしない理由**: 1 階 VJP の forward 相当（`conv3d_with_fallback`）は `ops.conv3d` の override フックと非 strict の `gemm_batched` を通り、TF32 opt-in の影響を受ける。構造側を `Var::conv3d` の合成で書くと FP32 strict 契約を破るため、groups=1 の `Unfold3d`／`Fold3d` と rank 2 strict matmul で組む
+
+### 38.11 閉包性と族間の依存
+
+- 子テープへ積む Op: `Narrow`・`Contiguous`・`Reshape`・`Permute`・`Transpose`・`Concat`・rank 2 `MatMul`・`Sum`・`Unfold3d`・`Fold3d`・`ConvWeightGradHost3d` と、写しの `Conv3d`・`ConvTranspose3d`。実装 PR の前に `supports_create_graph`（`tape.rs:2526`）で前の 6 つ以外が true であることを引き直す
+- 他族への依存は無い（#3080(a) の前例だけを使う）
+- 内部 Op は §21.2 の A/B/C の 123 件の数えには入れない（`ConvWeightGradHost`・`BatchNormGradHost` と同じ扱いの補助 Op）。層ではないので model_io の kind にも現れない
+
+### 38.12 fail-closed・メモリ量・GPU の forward
+
+- §21.6 の判定順・網羅 match・未知 variant を false にする規約は弱めない
+- **メモリ量**（見積であり、実測ではない）
+  - C_x = 4·N·Cin·kvol·P バイト（Conv3d の col。ConvTranspose3d は 4·N·Cout·kvol·P_x）
+  - 1 階 VJP の一時的なピークは約 2·C_x（col と d_col）
+  - 子テープは生きている間、unfold3d の出力・group 並べ替えのコピー・d_col の部分・`np_cols_to_n_rows_p` のコピー・cat を保持するので約 4〜5·C_x になる。V3 のホスト再計算で一時的に約 1·C_x が加わる。孫テープへ再生すると、その分がさらに加算される
+  - 例: N=2・Cin=32・k=3³・16³ では C_x ≈ 28.3MB で子テープは約 113〜142MB、32³ では C_x ≈ 226MB で約 0.9〜1.1GB
+  - 推奨: 2D と同じく新しい上限は設けない。すべてのサイズ計算を確保前に `checked_mul` し、桁あふれは型付きで拒否する。見積の式は `create_graph/conv3d.rs` の rustdoc に書く（38.14 の論点 4）
+- **GPU の forward**: CUDA・Metal・ROCm は `im2col3d`／`col2im3d`／`conv3d` を override しておらず（override は CPU だけ。`backend-cpu/src/ops.rs:2259`・`:2276`）、`Unsupported` を受けてホスト参照の `eval::im2col3d`／`col2im3d` へフォールバックする。GEMM はバックエンドで動く（forward は `gemm_batched`、構造は `gemm_batched_fp32_strict`）。本設計は forward も GPU カーネルも変えない。GPU 版 im2col3d カーネルはスコープ外。CUDA の TF32 opt-in 下では写しの forward が非 strict になる既知差がある（2D と同じ）が、構造は strict のまま。GPU での一致は未実測で、#3857・#3859 が `#[ignore]` テストで確かめる
+
+### 38.13 Phase 5 の段分け・セキュリティ観点・スコープ外・Closes／Refs
+
+**Phase 5 の段分け（#3797。2h 単位。起票・分割は承認後で、本 PR では行わない）**:
+
+1. P5-1: 内部 Op `Unfold3d`／`Fold3d` を足す（`pub(crate)` の入口・`push_eager`・1 階 VJP〈相互随伴〉・`replay_op`／`build_cgrads` の腕・メタテスト・単体テスト 2 本）
+2. P5-2: `grad.rs` から `conv3d_dw_from_col`・`conv_transpose3d_dw_from_col` を切り出す（1 階は不変）。あわせて `Op::ConvWeightGradHost3d`（値ノード・replay）を足す
+3. P5-3: Conv3d の replay と cgrad を実装し、true 側へ移す。既存テストを反転する
+4. P5-4: ConvTranspose3d の replay（output_padding 導出）と cgrad を実装し、反転する
+5. P5-5: 有限差分・overflow・孫テープ・jvp・facade のテスト、Op／モジュール／facade の rustdoc、実装記録・適用記録・追跡表、`#[ignore]` の実機テストの枠
+
+Phase 10 の実測（#3857・#3859）は別に行う。PR は Phase 10 まで `Refs #3797` を使う。
+
+**セキュリティ観点**:
+
+- A03: shape・params は forward 側の検証を通ったものだけが届く。そのうえで子テープへ書く前に桁あふれ・output_padding を検査する
+- A04: 拒否時に子テープを空に保ち、網羅 match を維持する
+- A06: 依存を追加しない。A08: 判定・閾値・tolerance の迂回経路を作らない。秘密情報・ホスト名・個人のパスは書かない
+
+**スコープ外**: GPU の im2col3d カーネル、低精度 conv3d、メモリ上限の新設（承認があれば別 issue）、GPU 実機 parity（#3857・#3859）、測り方（#3739）。新しい issue は承認なしに起票しない。
+
+`Closes #3729`。`Refs #3797 #3767 #3719`
+
+### 38.14 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 族の採否 | 2 Op を実装する／対象外にする | 実装する | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 2. 3D の構造 | 内部 Op `Unfold3d`／`Fold3d`（groups=1・相互随伴）を新設する／`Var::conv3d`・`conv_transpose3d` の合成で書く（非 strict GEMM と `ops.conv3d` フックを通り FP32 strict 契約を破る）／2D unfold を D 方向のスライスに分解する（ノード数 O(Dout·kD)） | 内部 Op の新設 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 3. d_weight の値ノード | 新 variant `ConvWeightGradHost3d`（2D の腕を触らない）／既存 `ConvWeightGradHost` の `params` を 2D／3D の内部 enum に一般化する | 新 variant | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 4. メモリ | 上限なし（桁あふれ検査と見積の明記。2D と同じ）／子テープへ書く前にバイト上限で型付き拒否（新しい定数は所有者承認） | 上限なし | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 5. GPU の im2col3d | ホストフォールバックのまま（forward と同じ）／GPU カーネルを追加する（別 issue） | ホストフォールバック | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 6. GPU parity の判定方式 | #3739 の推奨に従う（tolerance は変えない）／別方式 | #3739 に従う | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+
+### 38.15 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
 ## 39. 設計記録（イシュー #3730・親 #3719。create_graph の B 区分・損失の回帰・二値・マージン系 9 variant）
 
 ### 39.0 位置づけ・承認根拠・境界・推奨
