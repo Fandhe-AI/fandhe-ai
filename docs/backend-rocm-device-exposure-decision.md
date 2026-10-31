@@ -71,3 +71,32 @@
 
 - HIP のデバイス ID と gfx target の取得方法（実機での確認は #3159）。
 - 下流で `Device` を網羅的に `match` している利用の実態。
+
+## 9. 訂正（#3720・2026-10-31）
+
+§1〜§8 は決定記録として書き換えず、本節で訂正を追記する（先例: `docs/perf/framework-compare-feature-matrix-0.12.0.md` §8.5）。どれも誤記ではなく、記録後に起きた状態の変化である。本節も所有者の承認を得たものとは記載しない。
+
+- 確認時点: base `7e04294e5`・2026-10-31T13:18Z（UTC）
+
+### 9.1 訂正表
+
+| 元の記述 | 訂正後の事実 | 根拠 |
+|---|---|---|
+| `:9`「`RocmBackendOps`（R0）は未実装・未起票」 | R0 は #3431 として起票され、2026-10-18 に実装・close 済み。R0〜R13（#3431〜#3444）も全件が CLOSED | `crates/backend-rocm/src/ops.rs:158`（`pub struct RocmBackendOps`）・`:727`（`impl BackendOps for RocmBackendOps`）、各 issue の closedAt |
+| `:9`「`tape_for(Device::Rocm(_))` は型付きエラーしか返せない」 | 変わっていない。`Device::Rocm` は未追加で、facade は backend-rocm に結線されていない。`DeviceProvider` も backend-rocm には未実装 | `crates/backend-rocm/`・`crates/tensor-core/src/device.rs`・`crates/facade/Cargo.toml` に該当なし |
+| `:23`「backend-rocm は tensor-core に依存せず、`BackendOps`・`DeviceProvider` を実装しない」 | いまは tensor-core に依存し（`crates/backend-rocm/Cargo.toml:28`）、`BackendOps` を実装している。`DeviceProvider` は未実装のまま | 同上 |
+| `:52`「R0 未結線のとき」 | R0 は backend-rocm 内に実装済み。残るのは facade への結線（`resolve_ops`・`available_devices`）と `RocmDeviceProvider`。§5 の方針は「facade 未結線のとき」と読み替えれば変わらない | 同上 |
+
+### 9.2 Q1〜Q3 の状態
+
+- Q3（R0 との境界）: #3150 の所有者コメント（`#issuecomment-6248286174`・2026-10-18）が「§8 の境界は提案どおり」と判断し、R0 も実装済みのため実質解決した。§6 の本文は書き換えない。
+- Q1（公開 API の契約）・Q2（クレートの公開）: まだ回答がない（`docs/compat-matrix-ari-tracker.md` 項目 24 の承認列は未承認・#3771 待ち。後続の設計は #3758）。
+- §7 手順 1 の前提のうち「R0 がマージ済み」は満たされた。「`backend-rocm` の公開が承認済み」は満たされていない。
+
+### 9.3 実機（#3159）
+
+#3159 は 2026-10-31T13:18Z（UTC）の `gh issue view` で OPEN。実測は未了で、`docs/perf/logs/rocm-parity-3159/README.md:3` の「状態: 未実測」と矛盾しない。
+
+### 9.4 本節で変えていないもの
+
+§1〜§8 の本文・`crates/`・`api_surface.rs` の保留ガード（`device_variant_set_is_fixed_while_3157_on_hold`）。
