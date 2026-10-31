@@ -2441,3 +2441,157 @@ Phase 10 の実測（#3857・#3859）は別に行う。PR は Phase 10 まで `R
 ### 39.17 変えていないもの
 
 コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
+## 42. 設計記録（イシュー #3733・親 #3719。create_graph の B 区分・Stft・Istft）
+
+### 42.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
+- **基準**: `origin/main` の `839a88f6d`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: `Stft`・`Istft` の 2 Op。§21.2 は B 区分の #3086 族に置いたが、§31.1 は「窓と overlap-add を再生可能な `Var` 演算で組むと O(T) 個のノードが要る」ことを理由に fail-closed へ固定した。このため STFT を含む損失（音声モデル・スペクトル損失など）では `hvp`・`jvp`・`jacfwd`・`jvp_create_graph` が `Err(AutodiffError::Backward)` で拒否される（追跡表の項目 4）
+- **根拠**: §21.1、§21.6、§31.1・§31.5 の 3、`docs/autodiff-fft-ops-decision.md` §13
+- **後続**: 実装は #3804。承認は #3767、実機 parity は #3857（`<cuda-node>`）・#3859（`<metal-node>`）、雛形は #3776・#3777、測り方は #3739
+- **§31.5 の 3 の前提の訂正**: O(T) 個のノードが要るのは、フレームごとに `Narrow`／`Concat` を組む場合だけである。下の案 A・案 B はどちらも T に対して O(1) 個のノードで済む
+- **推奨: 実装する（2 Op とも）**。理由は次の 3 つ
+  1. 2 Op は入力に対して実線形で、1 階 VJP のホスト関数（`stft_vjp_host`／`istft_vjp_host`。`crates/tensor-core/src/fft/stft.rs:385`・`:734`）がすでにあり、随伴性もテスト済み（同 `:987`・`:1107`）
+  2. 随伴 Op 対で閉じるので、1 ノードで済み、1 階と bit 一致する
+  3. STFT を含む損失で高階変換が拒否される実害がある
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | 随伴 Op 対: `pub(crate)` の `Op::StftAdjoint`・`Op::IstftAdjoint` を新設する。値は `stft_vjp_host`／`istft_vjp_host`、VJP は forward の `stft_host`／`istft_host` | 閉包は 4 Op。cgrad は 1 ノード。CPU では 1 階と bit 一致。新しい数値判定は要らない | `Op` に 2 variant 増え、網羅 match の保守が要る。形式上は §21.1(3) の V4 に当たる（下記に正当化） |
+| B | V3 合成: 値は同じホスト関数。構造は `Gather`／`scatter_add`（反射パディングの随伴と共役ミラー）、`Unfold`／`Fold`（kernel `[1,n_fft]`・stride `[1,hop]`）、`Var::irfft`／`rfft`、窓や `window/env` の定数 `Mul`、`Pad`・`Permute`・`Narrow` | `Op` を増やさない。積む Op はすべて既存の true 側 | 1 Op あたり約 10〜15 ノード。構造値は f32 なので REQ-2 だけ。f32 の中間値が overflow しうるため総括判定（§27.3・§31.3 の形）が要る。中央寄せの窓・ミラー・`length` の詰めの写し間違いが起きやすい |
+| C | フレームごとの `Narrow`／`Concat`／`Add` で組む V1 | 新しい Op が要らない | ノードが O(T)（§21.2 が退けた形） |
+| D | 対象外として fail-closed を恒久契約にする | 費用ゼロ | 上記のモデルで高階変換が使えないまま残る |
+
+- **V4 形の正当化**: Op が線形なので、手で書く VJP は既存の forward カーネルそのもの（随伴の随伴）になる。Op ごとに二階の式を作って保守する負担（§4・§5 が退けた理由）は生じない。先例は相互随伴の Op 対 `Unfold`↔`Fold`（§23）・`Unfold3d`↔`Fold3d`（§38）と、B 区分の設計で `pub(crate)` の補助 Op を足した `ConvWeightGradHost3d`（§38）
+
+### 42.1 公開形
+
+- 該当なし。公開名は増えない。`Var::stft`／`istft`（#2678 で公開済み）が create_graph を通るようになるだけ
+- `crates/facade/tests/api_surface.rs` に create_graph の Stft に関する否定ガードも保留 doctest ガードも無い。`FftOpsHoldDoctestGuard` 系は #2678 の公開形を固定するもので触らない
+- **命名の制約**: `workspace_declares_fft_ops_fn_names_only_in_allowed_locations`（`api_surface.rs:25671`）は `rfft`・`irfft`・`fft`・`ifft`・`stft`・`istft` と同じ名前の `fn` を数える。新しい関数には別の名前を使う。候補は `stft_from_resolved`・`istft_from_resolved`（`fft_ops.rs`）、`stft_adjoint_var`・`istft_adjoint_var`・`stft_cgrad`・`istft_cgrad`（新規 `create_graph/stft.rs`）
+- **新しい内部 Op**（すべて `pub(crate)`。`push_eager` で実体化し、`is_checkpoint_eligible == false`・`supports_create_graph == true`）
+  - `Op::StftAdjoint { input: g, window: Tensor<f32>, params: StftParams }`: 出力は信号の shape。layout は自ノードの shape から `stft_layout(own_shape, params)` で作る（2D の `Fold` と同じ導出）
+  - `Op::IstftAdjoint { input: g, window, params: IstftParams }`: 出力はスペクトルの shape。layout は `istft_layout(own_shape, params)`。`params.onesided` は解決済み（`Some`）の値を保持する
+- **実装 PR（#3804）で変える箇所**: `supports_create_graph`（`tape.rs:2526`）の網羅 match の true 側へ 4 Op を移す（ワイルドカードは足さない）、`Op::Stft`／`Istft` の doc（`tape.rs:955`〜`:975`）、`tape.rs:2594`・`:2652` のコメント（「`PadMode` 再生不可。§29」は #3084 の後では事実でない）、`create_graph.rs:74` のモジュール doc、`fft_ops.rs:46`〜`:48`、facade の rustdoc 6 か所（`crates/facade/src/lib.rs:911`・`:1036`・`:1140`・`:1201`・`:1300`・`:1382`）の「§21.2・§22〜§31」へ §42 を加える
+- 内部 Op は §21.2 の 123 件の数えに入れない（§38 の補助 Op と同じ扱い）
+
+### 42.2 rustdoc と doctest
+
+- 新しい公開 API が無いので、必須の doctest は無い
+- 任意で、facade の `backward_create_graph` に CPU だけで通る `stft` の HVP 例を足してよい。GPU の例は置かない（置くなら `no_run` か `#[ignore]`）
+- 失敗系は `compile_fail` に頼らない。実行時の `Err(AutodiffError::Backward(_))` との一致と `child.is_empty()` で確かめる
+
+### 42.3 エラー型
+
+- 新しい variant は足さない。拒否はすべて `AutodiffError::Backward(String)`（layout の再構築失敗、NOLA 違反、上流 shape の不一致〈`check_fft_upstream_shape`〉。いずれも forward の検査を通っていれば起きない内部契約違反）。`FftError` は既存の `From` 変換に従う
+- **検証順**: `validate_ancestors`（`create_graph.rs:444`）で、追跡中の各 `Stft`／`Istft` 祖先について、子テープへ書く前に `stft_layout`／`istft_layout` の再計算、`istft_check_nola`、窓の長さが `n_fft` であることの確認を行う。これで `build_cgrads` が途中で失敗しない。二重の防御として呼び出し側のロールバックで `child` は空に戻る（§27.3・§28.3 の形）
+- `StftPadMode`（`#[non_exhaustive]`）の未知 variant に対する検査は足さない。cgrad は pad mode で分岐せず、1 階と同じホスト関数に委ねるので、1 階が対応した variant は二階でも対応になる。`normalized` は `bool` なので `check_fft_norm` に当たる検査も要らない
+- 本番経路で `unwrap`／`expect` を使わない
+
+### 42.4 テスト計画
+
+名前は案で、実装 PR で確定する。CI の行は新規 `crates/autodiff/tests/create_graph_stft.rs` に置く。
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| Var の段で `<stft(x), y> = <x, StftAdjoint(y)>`、`<istft(X), y> = <X, IstftAdjoint(y)>`。center × Reflect／Constant × normalized × onesided × rank 1／2 × `win_length < n_fft` の hann 窓 × hop が割り切れない場合 × istft の `length` 短・長 × `onesided=Some(false)` | `stft_family_adjoint_ops_are_mutually_adjoint` | CI | — | — | — |
+| 1 階が素の `backward` と bit 同一。`cg.grad` は REQ-2 で一致 | `stft_family_first_order_bit_identical_and_cgrad_req2` | CI | 未実測 | 未実測 | 対象外（全面フォールバック） |
+| 線形な上流では `cg.grad` が 1 階と bit 一致（CPU） | `stft_family_cgrad_bit_identical_for_linear_upstream` | CI | — | — | — |
+| ヘッシアンが有限差分と一致。二次の損失は大きな h で厳密に一致（§31.4 の前例）、`tanh` 合成は 5 点中央差分。x が stft と別の非線形項の両方へ流れる構成も含める | `stft_family_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 対象外 |
+| `istft(stft(x))` の往復の二階が直接の合成と一致 | `stft_istft_roundtrip_second_order_matches_direct` | CI | — | — | — |
+| 孫テープへの再生値が一致（閉包性） | `stft_family_grandchild_replay_matches` | CI | 未実測 | 未実測 | 対象外 |
+| `jvp_create_graph` が中央差分と一致 | `stft_family_jvp_create_graph_matches_central_difference` | CI | 未実測 | 未実測 | 対象外 |
+| 非有限の入力・上流が 1 階と同じクラスで伝わる | `stft_family_nonfinite_propagates_like_first_order` | CI | — | — | — |
+| 上流 `g≈±3e38` で `cg.grad` と 1 階がともに有限か、ともに `inf` で一致 | `stft_family_large_upstream_matches_first_order` | CI | — | — | — |
+| istft の `length` 超過部分（0 詰め）と `onesided=Some(false)` の上位 bin の二階勾配が 0 | `istft_zero_padded_tail_and_upper_bins_have_zero_second_order` | CI | — | — | — |
+| 隣接 Op（`Op::Custom`）は fail-closed のまま。`Err(Backward)` で `child` が空 | `stft_family_neighbouring_unsupported_op_stays_fail_closed` | CI | — | — | — |
+| `tape.rs` のメタ: 4 Op が true、新しい 2 Op が checkpoint 非対象 | `stft_family_supports_create_graph` | CI | — | — | — |
+| facade 経由 | `crates/facade/tests/create_graph_facade.rs` に `stft_create_graph_via_facade`・`istft_create_graph_via_facade` | CI | 未実測 | 未実測 | 対象外 |
+| CUDA／Metal の parity | `create_graph_stft_family_cuda_parity`／`create_graph_stft_family_metal_parity`（後者は `cfg(target_os = "macos")`）。置き場と名前は #3776・#3777 の確定まで仮。測り方は #3739 | `#[ignore]` | 未実測 | 未実測 | 対象外 |
+
+- backend override の経路は CI でも確かめられる: `stft_parity.rs:783` のフェイクバックエンド（`fft_stft` を override）で、子テープの replay が override を通ることを見る
+- **既存テストの反転・差し替え（#3804 の必須作業）**: `crates/autodiff/tests/create_graph_linalg_fft.rs` の `fail_closed_cases()`（`:639`〜`:665`）から `stft`・`istft` を外し、件数を 15 から 13 へ（`:759` のテストとモジュール doc `:13` も直す）。`tape.rs:5370` のテストの supported 側に 4 Op を足す
+- 実機の実行は #3857・#3859 が担う。Linux や開発機の代替値で pass にしない
+
+### 42.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えず、新しい baseline も作らない
+- 1 階は構造上 bit 同一（§21.1(1)）。`cg.grad` の寄与は 1 階と同じホスト関数を子テープ上の上流に当てた値で、上流が bit 一致なら CPU では bit 一致する。一般の場合は REQ-2 で判定する。孫テープの値も同じホスト関数で再計算される
+- **新しい数値判定は足さない**（S1 も総括判定も置かない）。積むのは forward と 1 階の既存カーネルだけで、f32 の中間合成が無いため。契約は既存カーネルのものを引き継ぐ（窓掛けは f32 の積、DFT は f64、overlap-add と包絡除算は f64 アキュムレータで index 昇順、最後に 1 回だけ downcast。`mul_add` は使わず FMA 契約には触れない）。非有限の値は拒否せずに伝える（§31.2 の FFT と同じ）
+- **保証外**: 窓への勾配と窓を通る混合項（窓は非追跡のペイロード）、三階以上の微分、真の値が f32 を超える場合（1 階と同じく `inf`）、二階の逆伝播で使う forward カーネルの f32 窓積が overflow する場合（forward と同じ意味論）
+
+### 42.6 互換への影響
+
+- **追加のみ**。`api-compat-0.14.0-decision.md` §8 の手順で判定する
+- 触れる型は `pub(crate)` の `Op` だけ。`AutodiffError`・`StftOptions`・`IstftOptions`・`StftPadMode`・公開シグネチャは変わらない
+- これまで `Err` だった入力が `Ok` になる受理範囲の拡大で、§1.1 の破壊的条件には当たらない
+
+### 42.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `docs/compat-api-scope.md` の適用記録は承認後の実装 PR で書く。文案: `**適用記録（イシュー #3804・親 #3733。承認: <#3767 の回答 URL>）**: Stft・Istft を create_graph の対象にした。公開名の追加なし。` 0.14.0 の移行ノート（#3780）の該当欄も実装 PR で更新する
+- [ ] compat-api-scope（承認後の PR で行う）
+- [x] `docs/README.md` の索引
+- [x] 追跡表（項目 4 に §42 を追記）
+
+### 42.8 ベンチと性能への影響
+
+- 既定経路（`Tape::backward`・forward）の演算は変えない
+- #3804 で `fft_ops::stft`／`istft`（`fft_ops.rs:430`・`:480`）の後半を `pub(crate)` の `*_from_resolved` に切り出す。ただの整理で、式・評価順・呼び出し回数は変えない。bit 同一は既存の `stft_parity.rs` で担保する。1 階 VJP のホスト関数はすでに `pub` なので切り出しは要らない
+- 二階の費用は、cgrad で随伴を 1 回評価し、二階の逆伝播で forward を 1 回評価するだけ。直接 DFT なのでフレームあたり O(n_fft²) で、1 階と同じ次数
+- 切り出し以外で既定経路に触れた場合だけ、5 回計測の中央値で前後を比べ、判定規則を計測前に固定する。実機の値は未実測
+
+### 42.9 依存の追加の有無
+
+追加なし。許容 12 区分と禁止リストに照らして変化なし。新しい `unsafe` も無い。
+
+### 42.10 方式と式
+
+- **R（replay）**: `Stft` は `stft_from_resolved(x_m, &window, &params)`、`Istft` は `istft_from_resolved(..)`（NOLA の検査を含む）。公開 `Var::stft` にオプションを組み立て直して渡す方式は採らない（`resolve_window` は `window.len() == win_length` を要求するので、`win_length < n_fft` の解決済み窓を渡すと失敗する）。`StftAdjoint`／`IstftAdjoint` は `stft_adjoint_var`／`istft_adjoint_var` に写しの入力を渡して再び `push_eager` する
+- **cgrad**（g は子テープ上の上流）
+  - `Stft`: `dx = StftAdjoint(g)`（値は `stft_vjp_host(g, window, stft_layout(x_shape, params))`）
+  - `Istft`: `dX = IstftAdjoint(g)`（値は `istft_vjp_host(..)`）
+  - `StftAdjoint`: `dg = Stft(u)`（u はこの Op の上流。値は `stft_host`）
+  - `IstftAdjoint`: `dg = Istft(u)`（値は `istft_host`）
+- 1 階の VJP 腕（`grad.rs:2384`・`:2399` の隣）を 2 つ足す（`StftAdjoint` → `stft_host`、`IstftAdjoint` → `istft_host`。どちらも `check_fft_upstream_shape` を通す）
+- 置き場は新規 `create_graph/stft.rs` とし、`linalg_fft.rs` は触らない
+
+### 42.11 閉包性と族間の依存
+
+- 子テープへ積む Op は `Stft`・`Istft`・`StftAdjoint`・`IstftAdjoint` の 4 つだけで、すべて true（§21.1(4)）。他の族への依存は無い
+- 案 B を採る場合の積む Op（`Gather`・`Scatter`・`Unfold`・`Fold`・`Rfft`・`Irfft`・`Mul`・`Pad`・`Permute`・`Narrow`・`Reshape`）も、すべて既存の true 側にある。案 B が成り立つ根拠として記録する
+- 網羅 match で 2 variant を足す箇所: `tape.rs:1999` 付近（checkpoint／再計算の分類）、`:2226` 付近（入力の列挙）、`:2526`（`supports_create_graph`）、`grad.rs` の VJP、`create_graph.rs` の `replay_op`（`:676`）と `build_cgrads`（`:1197`）。`crates/autodiff/src` で `Op::Stft` に match しているのはこれらだけ
+
+### 42.12 fail-closed・メモリ量・GPU の forward
+
+- §21.6 の判定順、網羅 match、未知 variant を false にする規約は弱めない
+- **メモリ量（見積で実測ではない）**: `StftAdjoint` の値は信号と同じ大きさ、`IstftAdjoint` の値はスペクトルと同じ大きさで、どちらも窓のコピー（n_fft 要素）を持つ。一時的なピークは 1 階 VJP と同じ（フレームの作業領域 `B·T·n_fft`）。新しい上限は設けず、確保サイズは既存の `check_alloc` と `checked_mul` が検査する
+- **GPU の forward**: 新しい Op の値計算は 1 階 VJP と同じくホストで行う。CUDA・Metal・ROCm の forward は従来どおりホストへフォールバックする（backend override は CPU だけ。`backend-cpu/src/ops.rs:3864`・`:3882`）。GPU 版 STFT カーネルはスコープ外。一致は未実測で、#3857・#3859 が `#[ignore]` のテストで確かめる。`<rocm-node>` は全面フォールバックのため対象外
+
+### 42.13 Phase 5 の段分け・セキュリティ観点・スコープ外
+
+- **Phase 5（#3804。2h 単位。起票と分割は承認後で、本 PR では行わない）**
+  - P5-1: `fft_ops.rs` に `stft_from_resolved`／`istft_from_resolved` を切り出す（forward は bit 同一。既存の `stft_parity.rs` が通ること）
+  - P5-2: `Op::StftAdjoint`／`IstftAdjoint` を足す（網羅 match、`grad.rs` の VJP 腕、`create_graph/stft.rs` の入口、メタテスト、Var の段の随伴テスト）
+  - P5-3: `replay_op`・`build_cgrads` の腕と `validate_ancestors` の事前検査を足し、4 Op を true 側へ移す。既存テストを反転する（15 件から 13 件へ）。古いコメントを直す
+  - P5-4: `create_graph_stft.rs` の残りのテスト、facade のテスト 2 本、`#[ignore]` の実機テストの枠、facade の rustdoc 6 か所、実装記録・適用記録・追跡表・移行ノート
+  - PR は Phase 10 まで `Refs #3804` を使う
+- **セキュリティ観点**: A03: shape と params は forward の検査を通ったものだけが届くが、子テープへ書く前に layout・NOLA・窓の長さを検査し直す。A04: 拒否したら `child` を空に保ち、網羅 match を保つ。A06: 依存を追加しない。A08: 判定・閾値・tolerance を迂回する経路を作らない
+- **スコープ外**: 窓への勾配（PyTorch との差。`autodiff-fft-ops-decision.md` §13）、GPU の STFT カーネル、O(n log n) 化、GPU 実機の parity（#3857・#3859）、測り方（#3739）。新しい issue は承認なしに起票しない
+
+### 42.14 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 族の採否 | 2 Op を実装する／対象外にする | 実装する | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 2. 構造の方式 | 案 A 随伴 Op 対（V4 形。正当化つき）／案 B V3 合成（総括判定が要る）／案 C フレームごとの V1 | 案 A | 同上 |
+| 3. 数値判定 | 新しい判定を置かず既存カーネルの契約を引き継ぐ／案 B と同じ総括判定を足す | 置かない | 同上 |
+| 4. `StftPadMode` の未知 variant | 検査しない（1 階と同じホスト関数に委ねる）／`validate_ancestors` で既知以外を拒否する | 検査しない | 同上 |
+| 5. GPU の forward | ホストへのフォールバックのまま／GPU カーネルを追加する（別 issue） | フォールバックのまま | 同上 |
+| 6. GPU parity の判定方式 | #3739 の推奨に従う（tolerance は変えない）／別の方式 | #3739 に従う | 同上 |
+
+### 42.15 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
