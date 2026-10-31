@@ -136,6 +136,147 @@ NN 行の 9 件は N7〜N15（add_upsample・Module 経路・C1・C2・C3・C5�
 
 `crates/`・`docs/spec/`・tolerance・baseline・依存・CI は変更していない。cargo-semver-checks は導入していない。
 
-## 2. 以降の節
+## 2. 位置づけ・承認根拠・境界
 
-互換方針の決定は #3714 が記述する。
+§2 以降は #3714 が追記する（§1 は #3713 が書いた事実と判定規則で、本 PR では書き換えない）。
+
+- **承認: 未承認（#3718 待ち）**。所有者の承認は取得していない。承認の URL は Phase 4 以降の最初の PR が転記する
+- 本記録が決めるのは方針だけで、コード・公開面・依存・tolerance・baseline・spec・ガードレール閾値は変えない
+- 保留ガード G1（`device_variant_set_is_fixed_while_3157_on_hold`）・G2 は、#3718 の回答と spec 改訂提案（#3715）の受理が揃うまで維持する（`docs/decision-record-template.md` の fail-closed 既定）
+
+### 2.1 §1.5 の未確認事項の解決（実コード確認）
+
+| 型 | 確認結果 | 判定 |
+|---|---|---|
+| `ParamGroupStep` | 素の `pub trait`（`crates/autodiff/src/nn/optim/param_group.rs:209`）。sealed でも supertrait 制約でもない | 既定実装なしのメソッド追加は破壊的（`trait_method_added`）。既定実装つきは追加のみ |
+| `EmaCallback`・`SwaCallback` | フィールドはすべて非公開（`crates/facade/src/compat/callbacks.rs:1250`・`:1403`） | フィールド追加は追加のみ |
+| `RequestId` | タプルのフィールドが非公開（`crates/autodiff/src/generate/scheduler.rs:72`） | 追加のみ |
+| `SchedulerLimits` | `#[non_exhaustive]`（`scheduler.rs:76`） | フィールド追加は追加のみ |
+| `BatchScheduler` | フィールド非公開（`scheduler.rs:329`）。`#[non_exhaustive]` は不要 | 追加のみ |
+| `HfHub` | `pub struct`・フィールド `registry` は非公開（`crates/hf-hub/src/lib.rs:337`） | 追加のみ |
+| `Module` | open trait（`crates/facade/src/nn/module.rs:45`） | `ParamGroupStep` と同じ扱い |
+
+cargo-semver-checks の分類名は、開発機の 0.51.0 で `cargo semver-checks --explain <名前>` を実行して存在を確認した（ツールの導入ではなく参照のみ）。§1.1 の「要確認」は次で確定する。
+
+- `trait_method_added` の説明は「without a default implementation」。既定実装つきのメソッド追加は追加のみ
+- 使う分類名: `enum_variant_added`・`constructible_struct_adds_field`・`derive_trait_impl_removed`・`inherent_method_missing`・`function_parameter_count_changed`・`trait_added_supertrait`・`enum_marked_non_exhaustive`・`struct_marked_non_exhaustive`・`trait_method_added`
+
+## 3. 論点・選択肢・推奨
+
+### 3.1 破壊的変更の扱い
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| (a) **推奨** | 承認済みの破壊的変更だけを 0.14.0 の 1 回に集約し、移行ノート（§5）を付ける | 下流の修正が 1 回で済む。0.x の先例（`Cargo.toml` の `[workspace.package]` コメント。0.1.0→0.2.0・0.2.0→0.3.0）と一致 |
+| (b) | 破壊的変更を出さない。ROCm の facade 公開は見送り、バックエンド行は「部分的」のまま（または #3758 が比べる別案） | 項目 24 が承認されない場合の帰結 |
+| (c) | `#[deprecated]` を併存させる段階移行 | `Device` は variant 追加を非破壊にできる形が無い（`docs/backend-rocm-device-exposure-decision.md` §3 の案 C 不成立）ため不成立 |
+
+推奨 (a) の中身:
+
+- 0.14.0 で破壊的になるのは `Device::Rocm` の追加と `Device` への `#[non_exhaustive]` 付与だけ
+- §1.3 のほかの型はすべて「追加のみ」に設計を寄せる
+- 「追加のみ」に寄せられない設計は実装せず所有者へ戻す
+- 項目 24（ROCm の facade 公開）が Phase 3 の #3771 で承認されなければ、0.14.0 に破壊的変更は無い（(b)）
+
+### 3.2 `#[non_exhaustive]`
+
+- **推奨**: `Device` に限って付ける。付与自体が破壊的（`enum_marked_non_exhaustive`）なので、**同一リリースで当該型の破壊的変更が確定している型にだけ**付ける（二重に壊さない）。下流は 1 回の修正（`_` 腕の追加）で、以後の variant 追加から守られる。`Device` は `Metal` が `cfg(target_os = "macos")` で既に環境により variant 集合が変わる（`crates/tensor-core/src/device.rs:46-47` は現状 `#[non_exhaustive]` なし）
+- ROCm が承認されない場合、0.14.0 では後付けしない（単独の後付けは破壊だけが残る）
+- `OnnxValue`: variant 追加は既定で行わず、必要なら別型・別メソッドで足す。設計上 variant 追加が必要になれば #3759 が所有者へ戻す
+- ほかの既存 enum・struct への遡及付与はしない（`docs/compat-api-scope.md` §0 の `FusedOpKind` の記述と同じ理由）
+- 影響:
+  - `tensor-core::select_from` と `facade::resolve_ops`（別クレートで `Device` を網羅 `match`。`docs/backend-rocm-device-exposure-decision.md` §2）は `_` 腕が必須になる。内部の網羅性チェックを失うため、`_` 腕は型付き `DeviceUnavailable` を返す
+  - `api_surface.rs` は integration test（別クレート視点）なので、ワイルドカード腕なしの G1 はコンパイルできなくなる。反転の方針は「ワイルドカード腕つきの分類」と「ソース走査による variant 名の在庫テスト（`pb_has_non_exhaustive_before`〈`api_surface.rs:24949`〉と同型）」で集合を固定し、variant 追加がテストの失敗として表れるようにする。具体的なテスト名は #3758 の設計記録が確定する
+
+### 3.3 版数
+
+- **推奨 0.14.0**（`workspace.version` の lockstep。`docs/crates-io-publishing-order.md` §4。破壊の有無によらず 0.x の minor）
+- 1.0.0 は不採用。29 項目の公開が途中で、安定宣言の条件（互換契約の保守体制）をまだ決めていないため
+- 破壊的変更が無い場合も 0.14.0（追加が多数のため patch にしない）
+- `=0.13.0` で固定している利用者（framework-compare の第 9 区分ピン等）は、明示的にピンを上げるまで影響を受けない
+- 運用ゲートの先例: `docs/autodiff-var-dtype-multiplexing-design.md` 契約 4（`BREAKING CHANGE` 運用と版数運用は不可分）
+- **spec との食い違い**: 0.x の minor での破壊は版上は合法だが、spec の「追加のみ」の文言（`docs/spec/04-requirements.md` の `:236`・`:238`・`:383`・`:405`。計画時点の行番号で、本 worktree では submodule 未展開のため再確認していない）と食い違う。**spec は編集しない**。(a) は #3715 の改訂提案が必要、(b) は不要。改訂提案を spec リポへ出すかは #3718 の論点 3
+
+### 3.4 所有者へ戻す論点
+
+| 論点 | 内容 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1 | 破壊的変更を 0.14.0 に集約するか（§3.1） | (a) | 確認があるまで実装へ進めない（保留ガード維持） |
+| 2 | `Device` への `#[non_exhaustive]` 付与（§3.2） | `Device` のみ | 同上 |
+| 3 | 版数と spec 文言の食い違い・改訂提案の要否（§3.3） | 0.14.0・#3715 で提案 | 同上 |
+
+## 4. 型ごとの扱い
+
+#3713 §1.3 の全行に対応づける。項目 24 以外で「破壊的」判定が出た場合は、§3.4 の表へ足して所有者へ戻す。
+
+| 区分 | 型（N 番号） | 扱い |
+|---|---|---|
+| 破壊的・承認要 | `Device`（24） | `Rocm(usize)` 追加（`enum_variant_added`）と `#[non_exhaustive]` 後付け（`enum_marked_non_exhaustive`）。承認は #3718・#3771。未承認の間は追加しない |
+| 追加のみを維持する設計が条件 | `Module`（8）・`ParamGroupStep`（19） | 既定実装つきのメソッドに限る。必須メソッドが要るなら新 trait を切る |
+| 同上 | `FitConfig`（16・18） | `Copy`／`Eq` を維持する。`f32` は bits で保持（先例 `validation_split_bits`）。別の設定型へ逃がすのでも可 |
+| 同上 | `OnnxValue`（25） | variant 追加は既定で禁止。別型・別メソッドで足す |
+| 同上 | safetensors の入口（27） | ジェネリック化は不可。別名の入口を足す |
+| 追加のみ | 上記以外の §1.3 の全行（`Optimizer`〈既に `#[non_exhaustive]`。§1.4〉・`FitConfig` のフィールド追加・`OnnxModel`・`OnnxError`・`OnnxExportOptions`・`SaveError`／`LoadError`・`GenerateConfig`・`SpeculativeConfig`・`BatchScheduler` 系・`ModelError`・`DownloadOptions`・`DeviceParamStore`・`HfHub` ほか） | フィールド・variant・メソッドの追加は §1.1 の規則で非破壊 |
+
+## 5. 移行ノートの形
+
+- 置き場所: `docs/migration/0.14.0.md`（次の版以降も同じ置き場所を使う）
+- 雛形の作成は #3780（Phase 4）。Phase 5〜9 の実装 PR が該当欄を埋め、Phase 11 のバンプで確定する。公開用の写し（`site/` や注釈付き tag メッセージ）は Phase 11 の判断とし、本 issue では決めない
+- 書式は CHANGELOG 相当の固定の節: 追加した API／破壊的変更と下流の直し方／挙動のみの変更／`#[deprecated]` の追加／既定値の変更なしの確認欄／対応表の行の変化
+- 破壊的変更 1 件あたりの項目: 型・パス、変更の種類（semver-checks の分類名）、コンパイルエラーの出方、before／after のコード、承認 URL、関連 PR
+- 作例（`Device::Rocm`）:
+  - before: `Cpu`・`Cuda(i)`・`#[cfg(target_os = "macos")] Metal` の網羅 `match`
+  - after: `_` 腕を足す。推奨は `_ => Err(...)` か既定バックエンドへのフォールバック
+  - 承認で見送りになった場合は、空欄の理由を書く欄にする
+- 先例: `docs/compat-api-scope.md` §4.2・§4.3 の `#[deprecated]` シム
+
+## 6. 破壊的変更の検出方法
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| (a) **推奨** | 既存機構で担保（導入 0 件）: `api_surface.rs` の正ガード・否定ガード、variant 在庫のソース走査テスト、doctest の網羅 `match`（失敗系は `compile_fail` に頼らず正のプローブで組む） | 依存・CI の変更なし |
+| (b) 任意の補助 | Phase 11 の事前監査で cargo-semver-checks を手動の参考実行として使う。基準は crates.io の `0.13.0`（要ネットワーク）。開発機に導入済みで workspace の依存でも CI でもない。結果は「未実測」のまま、実行した PR が書く | 導入なし |
+| (c) | CI ジョブ化 | **本 issue では推奨しない**。ツール導入と固定が依存・CI の変更になる。`main-protection` の required contexts 更新が要る（実装 Agent は ruleset を変更しない。`.claude/rules/ci.md`）。公開 7 クレートの基準版が複数要る。所有者承認事項 |
+
+## 7. ガードレールとの関係
+
+- 事実: `crates/guardrail/src/checks/api_stability.rs` の `public_api_broken` は、変更された `.rs` の `pub fn`／`pub struct`／`pub enum` の**行が baseline から消えたか**だけを見る行単位比較である。`Rocm(usize)` の variant 追加・`#[non_exhaustive]` の後付け・derive の喪失・trait への必須メソッド追加は検出できない
+- CI が PR の diff に `guardrail check` を適用しているかは `ci.yml`・`scripts/run-guardrail-regression.sh` を grep して確認した範囲では、guardrail 自身の回帰検証（layer1／layer2）のみで、PR の公開 API diff への適用は見当たらない（未確認事項として残す）
+- 方針:
+  1. 承認済みの破壊的変更は人間が起こすレビュー済み PR で入れる。自己修復ループの自動適用対象にしない
+  2. ガードレール閾値・5 条件・ポリシー除外リスト・`guardrail.toml` は変えない。承認を除外ルールに登録する経路を作らない（`.claude/rules/security.md` A08）
+  3. 補償の統制は、破壊を試みるループの変更が `api_surface.rs` の保留ガード／在庫テストをビルド・テストゲートで落とす点に置く
+- 検出強化（variant 追加・derive 喪失の検知）は本 issue の範囲外。所有者承認後の別 issue 提案として §11 に記す
+
+## 8. 判定手順（設計記録の「互換への影響」が参照する正）
+
+1. 変更が触れる公開型を §4（#3713 §1.3 の表）で引く。表に無ければ先に表へ足して判定する
+2. §1.1 の規則で判定する。次のいずれかは破壊的: `#[non_exhaustive]` なし enum への variant 追加、構築可能な struct へのフィールド追加、derive の喪失（`Eq` 等）、既定実装なしの trait メソッド追加、既存シグネチャの変更、`#[non_exhaustive]` の後付け
+3. 破壊的なら、§4 の承認済みの行（現時点は `Device` のみ）にある場合だけ進める。それ以外は設計を「追加のみ」へ直す（既定実装・bits 保持・別名の入口）。直せないなら §3.4 の表に足して所有者へ戻し、承認までは実装せず保留ガードを維持する
+4. 結論は設計記録の「互換への影響」に「追加のみ／破壊的で承認要／該当なし」と理由で書く。破壊的なら移行ノート（§5）・追跡表・実装 PR の `type(scope)!:` と `BREAKING CHANGE:` フッタ（`.claude/rules/conventional-commits.md`）を揃える
+
+## 9. 保守・運用チェックリスト
+
+| 節 | 結果 |
+|---|---|
+| 公開形 | 該当なし（公開面を変えない） |
+| rustdoc／doctest | 該当なし（コード変更なし） |
+| エラー型 | 該当なし |
+| テスト計画 | 該当なし。G1／G2 の反転方式は §3.2 に記録 |
+| 数値契約 | tolerance・baseline・FMA は不変 |
+| 互換への影響 | 本記録そのもの |
+| 適用記録・索引・追跡表 | `docs/README.md` の索引を更新。`compat-api-scope.md` の適用記録は該当なし。追跡表は更新しない（承認列は #3718 待ち） |
+| ベンチ・性能 | 該当なし |
+| 依存 | 追加なし。cargo-semver-checks は導入しない。新規 `unsafe` なし |
+
+## 10. セキュリティ観点
+
+docs のみの変更で、OWASP A03 の実装面は非該当。A08 の観点では「承認済み変更を自己修復の判定迂回に使わない」を §7 に反映した。秘密情報・実ホスト名は書いていない。
+
+## 11. スコープ外（所有者承認後に起票。無断で起票しない）
+
+- ガードレールの検出強化（§7）
+- cargo-semver-checks の CI 化（§6）
+- spec 改訂提案（#3715）
+- 移行ノート雛形（#3780）
+- 追跡表の自動集計（#3781）
