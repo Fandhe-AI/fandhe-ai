@@ -2646,6 +2646,208 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
 
 - コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
 
+## 41. 設計記録（イシュー #3732・親 #3719。create_graph の B 区分・IndexedScatterReduce・Cumprod・Logcumsumexp）
+
+### 41.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えず、`supports_create_graph` もまだ `true` にしない
+- **基準**: `origin/main` の `3f974d9b1`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: 3 variant。`IndexedScatterReduce`（`crates/autodiff/src/tape.rs:1163`）・`Cumprod`（`tape.rs:1222`）・`Logcumsumexp`（`tape.rs:1282`）。3 つとも `supports_create_graph` の網羅 match の false 側（`tape.rs:2653`・`:2662`・`:2663`）にあり、§25.1 の表で「fail-closed のまま」と記録された。理由は、prod／amax／amin のタイ規則を持つ入力依存のホストカーネル、`WideFloat` を使う Horner 型の再帰、prefix の `exp` で起きる中間 overflow の 3 つ
+- **根拠**: §21.1（V1〜V3・S1・閉包性）、§21.3 の #3083、§21.6（fail-closed 契約）、§25（索引・累積族の第 1 弾）、§27.3・§31 Det（総括判定）。ルート #3711 の「実装を既定に設計する」趣旨は設計方針の根拠であり、承認ではない
+- **後続**: 実装は #3802（IndexedScatterReduce）と #3803（Cumprod・Logcumsumexp）、承認は #3767、実機 parity は #3857（`<cuda-node>`）・#3859（`<metal-node>`）、雛形は #3776・#3777、測り方は #3739
+- **推奨**: **3 variant とも実装する**。`IndexedScatterReduce` の `Prod` は、§41.10 の区分つき scan を条件とする。理由は次の 3 つ
+  1. 3 つとも 1 階の値は既存のホスト関数（f64／`WideFloat`／(仮数, 指数)）で決まる。V3 でそのまま値に使えるので、`cg.grad` は CPU で 1 階と bit 同一になる
+  2. 構造は replayable な Op（`Narrow`・`Concat`・`Mul`・`Add`・`Exp`・`Where`・`Gather`・`Scatter`・`Div`）の合成で書ける
+  3. 累積積・累積 logsumexp・scatter_reduce は系列モデル・生存解析・グラフ集約で使われ、HVP や勾配ペナルティが拒否されると実害がある
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | 3 variant とも実装する | 該当 Op を含むグラフで `hvp`・`jvp`・`jacfwd`・`jvp_create_graph` が使える | 実装と保守の費用。scan 補助と総括判定の追加 |
+| B | `Prod` だけ mode 単位で fail-closed にする | `Prod` 専用の区分つき scan が要らなくなる | `scatter_reduce(Prod)` で高階変換が使えない |
+| C | 3 つとも対象外にし、fail-closed を恒久契約にする | 費用ゼロ | 上記の用途で高階変換が使えないまま残る |
+
+### 41.1 公開形
+
+該当なし。公開名は増えない。`Tape::backward_create_graph`・`hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` は公開済みで、受理する Op の範囲が広がるだけである。forward の公開面も既にあり形は変えない: `Var::cumprod`（`crates/autodiff/src/var.rs:2160`）・`Var::logcumsumexp`（`var.rs:5198`）・`Var::scatter_reduce`（`var.rs:5339`）・`ScatterReduceMode` の再エクスポート（`crates/facade/src/lib.rs:320`）。
+
+`crates/facade/tests/api_surface.rs` には、この 3 Op の create_graph を対象にした否定ガードも保留 doctest ガードも無く、反転するものは無い。forward の公開形を固定するガード群（`cumulative_ops_hold_doctest_*`・`facade_does_not_reexport_or_declare_cumulative_ops`・`indexed_update_ops_hold_doctest_*` 等）は create_graph と無関係なので残す。`indexed_update_ops.rs` のモジュール doc に残る「facade 非公開（保留）」の記述は古いので、更新を実装 PR の作業に含める。実装 PR（#3802・#3803）で変える箇所:
+
+- `supports_create_graph` の網羅 match で 3 variant を true 側へ移す。ワイルドカードは足さない
+- `create_graph.rs:69-70` のモジュール doc の「対象外」列挙、`tape.rs:2502`・`:2568` の doc とコメント、`tape.rs` の 3 variant の「高階微分非対応」の doc（`OrderSelect` 等が「`Op::Logcumsumexp` と同じ分類」と参照する `tape.rs:1301`・`:1313` は意味が変わらないよう直す）
+- `cumulative_ops.rs:34`・`indexed_update_ops.rs:40` のモジュール doc
+- facade の rustdoc にある「§21.2・§22〜§31」（`crates/facade/src/lib.rs` の 6 か所）に §41 を加える
+- §25.1 の表の更新（本 PR では既存節の本文を書き換えない。実装 PR の作業）
+
+### 41.2 rustdoc と doctest
+
+- 新しい公開 API が無いので必須の doctest は無い。任意で facade の `hvp` か `backward_create_graph` に、CPU だけで通る `cumprod` の HVP 例を 1 つ足せる。GPU の例は置かない（置くなら `no_run`／`#[ignore]`）
+- 失敗系は `compile_fail` に頼らず、ランタイムの `Err(AutodiffError::Backward(_))` 一致と `child.is_empty()` で確かめる
+
+### 41.3 エラー型
+
+新しい variant は足さず `AutodiffError::Backward(String)` に統一する。拒否するもの:
+
+- 総括判定（§41.12）で外れた入力
+- 非有限の upstream と ±inf の入力（§33.14 の論点 3 と同じ規則。NaN は伝播させる）
+- 未知の `ScatterReduceMode`。`#[non_exhaustive]`（`crates/tensor-core/src/indexed_update.rs:56`）なので、§25.2 の未知 `ScatterReduce` と同じく `validate_ancestors` が子テープへ書く前に拒否する
+- `Prod` を対象外とする回答が #3767 で出た場合の、mode 単位の拒否
+
+検証順: 判定は子テープへ書く前（`validate_ancestors` か cgrad 構築の冒頭）に行う。拒否したら `Tape::backward_create_graph` のロールバックで `child` を空に戻し、再試行できるようにする（§27.3 と同じ）。shape・`dim`・`index` の範囲は forward 側の検査（`cumulative_layout`・`scatter_reduce_layout`）を通ったものだけが届く。本番経路で `unwrap`／`expect` は使わない。
+
+### 41.4 テスト計画
+
+新規の `crates/autodiff/tests/create_graph_index_cum_b.rs`（仮名）に置く。実測欄はすべて「未実測」。
+
+| 受け入れ基準 | テスト名（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 1 階が素の `backward` と bit 同一で、`cg.grad` が CPU で 1 階と bit 同一（V3） | `index_cum_b_first_order_bit_identical_and_cgrad_bit_identical` | CI | - | - | - |
+| ヘッシアンが有限差分と一致する。Cumprod は零が 0／1／2 個・`dim` が 0・最終軸・rank 3 の中間軸、Logcumsumexp は広い値域、scatter_reduce は 5 mode × `include_self` × 重複索引。Amax／Amin はタイを含まない入力に限る。loss は §25.4 と同じ `y³⊙c` | `index_cum_b_hessian_matches_finite_difference` | CI | - | - | - |
+| 零を含む Cumprod の混合二階項 `H[j,z]`（`j>z`、`z` は最初の零）が有限差分と一致する（除算形を退けた根拠の回帰。§41.10） | `cumprod_mixed_hessian_after_first_zero_matches_finite_difference` | CI | - | - | - |
+| `jvp_create_graph` で孫テープに再生した結果が、独立に求めた方向微分と一致する | `index_cum_b_grandchild_replay_matches_directional_derivative` | CI | - | - | - |
+| 必須ベクトル（§41.5）が 3 段（1 階・`cg.grad`・孫テープ）のすべてで有限か、拒否されて `child` が空である | `index_cum_b_mandatory_vectors_finite_or_rejected_in_three_stages` | CI | - | - | - |
+| Amax／Amin のタイで、1 階の均等分配（`ties` で割る）に bit で一致する。NaN の結果では勾配 0 で、`g` への二階の微分も NaN にならず有限（`ties_safe`）。触れられていない位置の `d_input` は 1 階と同じく `g` の素通しで、ヘッシアンが有限差分と一致する | `scatter_reduce_extremum_ties_follow_first_order_rule` | CI | - | - | - |
+| 安全でない入力の拒否・`child` が空・再試行できる（未知 mode を含む） | `index_cum_b_unsafe_inputs_rejected_child_empty_and_retry` | CI | - | - | - |
+| 空テンソルで全ゼロ | `index_cum_b_empty_tensor_returns_zeros` | CI | - | - | - |
+| 隣接 Op（`Op::Custom`）が fail-closed のまま | `index_cum_b_neighbouring_unsupported_op_stays_fail_closed` | CI | - | - | - |
+| scan 補助（§41.10）の構造値がホストの逐次計算と REQ-2 で一致し、段数が `⌈log2 n⌉` である | 内部単体テスト `scan_structure_matches_sequential_host` | CI | - | - | - |
+| facade 経由（`cumprod`・`logcumsumexp`・`scatter_reduce`） | `crates/facade/tests/create_graph_facade.rs` に `*_create_graph_via_facade` を追加 | CI | - | - | - |
+| CUDA／Metal の parity。Cumprod は GPU カーネルを通る経路、残る 2 つはホスト実体化を含む経路（§41.12） | `create_graph_index_cum_b_cuda_parity`／`create_graph_index_cum_b_metal_parity`（後者は `cfg(target_os = "macos")`）。置き場と名前は #3776・#3777 の確定まで仮。測り方は #3739 に従う | `#[ignore]` | 未実測 | 未実測 | 対象外（全面フォールバック） |
+
+**差し替える既存テスト**（#3802・#3803 の作業。3 variant が true になると壊れる。先に入る PR が自分に関係するものを差し替える）:
+
+1. `crates/autodiff/tests/create_graph.rs:3982` の `create_graph_rejects_unsupported_op_cumprod`: 拒否の見本を恒等の `Op::Custom`（cumsum の下流）へ替え、名前も直す。基準テスト `:749` の `create_graph_rejects_unsupported_op_custom` と重複するなら削除
+2. `create_graph.rs:3993` の `create_graph_rejects_gather_mixed_with_unsupported_op_and_keeps_child_empty`: 隣接見本の `cumprod` を `Op::Custom` へ
+3. `create_graph.rs:5139` の `create_graph_rejects_pad_mask_mixed_with_unsupported_op_and_keeps_child_empty`: 同じく `Op::Custom` へ
+4. `crates/autodiff/src/tape.rs` の `index_cumulative_family_supports_create_graph`（`:5457` 付近）: `rejected` 側の 3 件を `supported` 側へ移し、`rejected` は `Op::Custom` 系にする
+5. `crates/autodiff/tests/cumulative_parity.rs:660` の `create_graph_is_a_typed_error_not_a_panic`（logcumsumexp）: 正の受理テスト、または ±inf 入力の型付き拒否テストに替える
+6. `crates/autodiff/tests/indexed_update_parity.rs:814` の同名テスト（scatter_reduce `Sum`）: 同様に替える
+
+あわせて `create_graph.rs:2039`・`:3512` の「fail-closed のまま: IndexedScatterReduce・Cumprod・Logcumsumexp」のコメントを直す。隣接見本に `Op::Custom` を使うのは、§21.6・§32 が基準テストに使う恒久的な対象外だからである。実機での実行は #3857・#3859 が担い、Linux や開発機の代替値で pass にしない。
+
+### 41.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えない。新しい baseline は作らない（作るなら実機の実測値に限り、所有者承認が要る）
+- 1 階は構造上 bit 同一（§21.1(1)）。`cg.grad` は V3 で値を入れるので CPU では 1 階と bit 同一。Logcumsumexp の値は libm の `exp`／`ln_1p` に依存するため、bit 同一は同じホストの中に限り、backend 間は REQ-2 で比べる（`crates/tensor-core/src/cumulative.rs` の冒頭 doc と同じ扱い）
+- f64／`WideFloat` の契約は V3 の値の側で守る。構造側の f32 合成は値を決めない。FMA 契約には触れず `mul_add` は使わない
+- **必須ベクトル**（3 段すべてで有限かつ一致するか、総括判定で拒否されて `child` が空になることを固定する）:
+  - Cumprod（受理されて有限）: `[1e-30, 1e-30, 1e30]`（`backward.rs:2218` の underflow 回帰。scan の中間値が有限であることを §41.10 の計算例で示す）、零が 0／1／2 個の場合（`backward.rs:2295`〜`:2334`）
+  - Cumprod（拒否されて `child` が空）: `backward.rs:2382`（1e30 の連続と零）、`:2418`（複数の零と overflow）、`:2469`（`[0]+[2^-100]×11+[2^100]×11`。suffix 積が f32 で発散）、`:2529`（大きい値から小さい値へ）。1 階はこれらでも有限のまま変わらない
+  - Logcumsumexp: 広い値域 `x=[-1000, 1000]`（素朴な合成 `exp(x)⊙revcumsum(g⊙exp(-out))` では overflow する反例）、`x=[-100, -100, 80]`、一定の lane、大きな共通オフセット（`x=[1e8, 1e8]`・`g=[0,1]`、`x=[1e8, 1e8+1, 1e8]`。f32 丸めで `c` が 1 に潰れ、参照約 0.5 と食い違うので拒否されて `child` が空になることを固定する。オフセットが無い同形の入力 `x=[0, 0]` は受理され対角ヘッシアンが有限差分と一致することも対で固定する）、`g=3e38`、`g=[3e38,-3e38]`
+  - scatter_reduce: `Prod` は零を含む位置・寄与の積が f32 で overflow する組（例 `[1e30, 1e30]`）・`include_self` の自己寄与、`Amax`／`Amin` はタイと NaN、`Mean` は寄与数が大きい位置、全般で `g=3e38`
+- 保証範囲は §27.3 と同じ。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上は対象外
+- **既知の差**:
+  1. Amax／Amin はタイの点で微分不能。二階は 1 階と同じ均等分配の劣勾配に従い、有限差分では検証しない
+  2. Logcumsumexp の係数 `exp(out[j]-out[j+1])` が f32 で 0 に underflow するレーンの寄与は、`|T|` を上限とする絶対誤差に収まる。これは「ゼロ化の食い違い」として拒否には数えない
+
+### 41.6 互換への影響
+
+追加のみ。`api-compat-0.14.0-decision.md` §8 の手順で判定する。触れる型は `Op`（`pub(crate)`）だけで payload は足さない（再生に要る値は `tape.rs:1163`・`:1222`・`:1282` の payload に揃っている）。`AutodiffError` の variant・公開シグネチャ・`ScatterReduceMode` は変えない。以前は `Err` だった入力が `Ok` になるのは受理範囲の拡大であり、破壊的条件には当たらない。
+
+### 41.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `docs/compat-api-scope.md` への適用記録は、#3767 の承認後に実装 PR で書く。文案: `**適用記録（イシュー #3802／#3803・親 #3732。承認: <#3767 の回答 URL>）**: IndexedScatterReduce・Cumprod・Logcumsumexp を create_graph の対象にした。公開名の追加なし。`
+- チェックリスト: `[ ]` compat-api-scope（承認後の PR で行う）、`[x]` `docs/README.md` の索引、`[x]` 追跡表（`docs/compat-matrix-ari-tracker.md`）の項目 4
+
+### 41.8 ベンチと性能への影響
+
+既定経路（forward・`Tape::backward`・GPU の cumprod カーネル）は変わらない。`supports_create_graph` は create_graph の入口でしか呼ばれない。create_graph 経路で増えるのは、scan の `⌈log2 n⌉` 段 × 段ごとの数ノード（各ノードは numel の大きさ）・総括判定のホスト走査 O(numel log n)・`Prod` の並べ替え O(N log N)。既定経路に触れないので前後比較は不要と判断する。実装で触れた場合は 5 回計測の中央値で前後を比べ、判定規則を計測前に固定する。実機の値は未実測。
+
+### 41.9 依存の追加の有無
+
+追加なし。許容 12 区分・禁止リストとの照合でも変化はない。新しい `unsafe` もない。`docs/license-matrix.md` の更新も不要。
+
+### 41.10 方式と式（variant ごと）
+
+記号: `x_m`・`s_m`・`in_m` は子テープ上の写し、`g` は子テープの `Var`。V3 の値は 1 階のホスト関数を `pub(crate)` にして `push_v3`（`create_graph.rs:986`）で入れる（本体と数値は変えない）。区分定数は V2 で扱う。親の記録値からホストでマスクを作り `where_cond` で選ぶ。`g.mul(0/1 定数)` は使わない。
+
+**共通の部品: replayable な scan 補助**（`create_graph/` 配下の新しいサブモジュール。実装時に決める）
+
+- 線形再帰 `S[a] = b[a] + A[a]·S[a+1]`（末尾は `S[n-1]=b[n-1]`）を Hillis–Steele 型で `⌈log2 n⌉` 段に展開する。段 `l` の更新は `S[a] += A[a]·S[a+2^l]`、`A[a] *= A[a+2^l]`。端は `Concat` で 0 を詰める
+- 使う Op は `Narrow`・`Concat`・`Mul`・`Add` だけで、すべて true（`tape.rs:2526` 付近）。`dim` 以外の軸を lane としてまとめてベクトル化する
+- 区分つきの変種は、ホストで作る区切りマスクを `where_cond` で入れ、区間をまたぐ係数を 0 にする
+- 逐次ループの展開（ノード数 O(n)）と O(n²) の行列形は、ノード数とメモリの点で退ける
+
+**Cumprod（V3 + scan）**
+
+- R: `Var::cumprod(dim)`。CPU・CUDA（`crates/backend-cuda/src/ops.rs:6152`）・Metal（`crates/backend-metal/src/ops.rs:4991`）の forward カーネルを通る
+- 1 階: `d_x[a] = L[a]·S[a]`。`L` は排他的 prefix 積、`S[a] = g[a] + x[a+1]·S[a+1]`（`crates/autodiff/src/grad.rs:7458` の `cumprod_vjp_along`、`WideFloat`）
+- 構造: `S` は scan 補助に `b=g`、`A[a]=x_m[a+1]`（`A[n-1]=0`）を渡して求める。`L` は `Concat([1], Narrow(y_m, 0, n-1))`（`y_m` は replay の出力）か、同じ scan の乗算版とする。どちらにするかは実装で決め、総括判定の対象段に含める
+- 除算を使わない多項式の合成なので、零が何個あっても一階・二階とも厳密
+- **除算形と最初の零のマスク（PyTorch 型）を退ける理由**: `x=[2,0,3]`・`g=[0,0,1]`（`f=x0·x1·x2`）では真の `∂d_x2/∂x1 = x0 = 2` だが、`j>z` の勾配を定数 0 にする構造ではこれが 0 になり、ヘッシアンが非対称になって有限差分と一致しない
+- 値: `cumprod_vjp_along` を `pub(crate)` にして `push_v3` で入れる
+- 計算例 `[1e-30,1e-30,1e30]`・`g=1`: 段 0 で `S=[1,1e30,1]`・`A=[1,0,0]`、段 1 で `S[0]=2`。中間値はすべて有限
+
+**Logcumsumexp（V3 + 係数が [0,1] の再帰 scan）**
+
+- R: `Var::logcumsumexp(dim)`（`var.rs:5198`）。forward は CPU カーネルのみで、GPU はホストへフォールバック
+- 1 階は `crates/tensor-core/src/cumulative.rs:252` の `logcumsumexp_vjp_host`: `T[j] = g[j] + exp(out[j]-out[j+1])·T[j+1]`、`d_x[j] = exp(x[j]-out[j])·T[j]`
+- 構造: `c = Exp(Narrow(out_m,0,n-1) - Narrow(out_m,1,n-1))`、`w = Exp(x_m - out_m)`。`T` は scan 補助（`b=g`、`A=c`）で求め、`d_x = w⊙T`
+- `out` は lane ごとに単調非減少で `x[j] ≤ out[j]` が成り立つ。丸めは単調なので f32 の replay 値でもこの関係は保たれる。したがって `exp` の引数は常に 0 以下で、係数は [0,1] に収まり overflow しない。`|T| ≤ Σ|g|`
+- 素朴な合成 `exp(x)⊙revcumsum(g⊙exp(-out))` と lane 一律のシフト（S1）は、広い値域で overflow や 0 への丸めが起きるので退ける（`x=[-1000,1000]`）
+- **丸め済み `out_m` から係数を作る限界（案 2: 拒否条件で閉じる）**: 構造の `c` は f32 に丸めた replay 出力 `out_m` の差から作るので、大きな共通オフセットがあると差が失われる。`x=[1e8,1e8]`・`g=[0,1]` では replay の `out_m` が両段とも `1e8` になり `c=1`・`w=1` となる。一方 1 階の `logcumsumexp_vjp_host` は f64 の prefix を再計算するので対応する重みは約 0.5 で、V3 で勾配値を直しても構造の微分は直らず、対角ヘッシアンが約 0.25 のところ約 0.5 になる。全段が有限かつ `2^125` 未満なので既存の「非有限・`2^125` 以上」の拒否では防げない。安定化した差分から係数を作る案（lane の最大値を引く等）は、`out` 自体の f32 丸めが残り、広い値域の反例で S1 と同じ問題に戻るため採らない。代わりに §41.12 の総括判定へ「係数の食い違い」（REQ-2 の複合判定を係数と Hessian の両方に適用）を加えて拒否する
+- 値は `logcumsumexp_vjp_host` を `push_v3` で入れる
+
+**IndexedScatterReduce（mode ごと）**
+
+- R: `Var::scatter_reduce(dim, index, src, mode, include_self)`（`var.rs:5339`）。forward は CPU のみで、GPU はホストへフォールバック
+- 値は `crates/tensor-core/src/indexed_update.rs:326` の `scatter_reduce_vjp_host` を `push_v3` で入れる（2 出力）
+- **未タッチ位置の素通し（全 mode 共通）**: 1 階の `scatter_reduce_vjp_host`（`indexed_update.rs:326` 以降）は、src が一度も書かない位置 `q`（`cnt[q]==0`）の `d_input[q]` を mode によらず上流 `g[q]` で初期化する。V2 の `d_input` もこの恒等経路を構造として持つ。ホストで「触れられた位置」のマスク `touched` を作り、`d_input = where(touched, d_touched, g)` と組む（`d_touched` は下の mode ごとの式）。素通しの枝は `g` そのものなので、二階では `g` を経由する分だけ曲率が流れ、欠くと Hessian が 0 に潰れて有限差分と合わない。`Sum` の `where(触れられた位置, 0, g)` はこの形の特殊例で、`Mean`・`Amax`／`Amin`・`Prod` も同じ形に揃える
+- `Sum`（V1 + V2）: `d_src = Gather(g, dim, index)`。`d_input` は `include_self` なら `g`、そうでなければ `where(触れられた位置, 0, g)`
+- `Mean`（V1 + V2）: `d_src = Gather(g)/m`。`m` は位置ごとの寄与数（`include_self` の自己寄与を含む）をホストの定数として src の位置へ写したもの。`d_input` は触れられた位置で `g/(cnt+1)`（`include_self` のとき）か 0、触れられていない位置は `g` の素通し
+- `Amax`／`Amin`（V2）: forward の値の選択は「先勝ち」だが、1 階の VJP は結果と等しい寄与の数 `ties` で**均等に分ける**（`indexed_update.rs:449` 以降）。V2 のマスクは forward の先勝ちではなくこの VJP の規則を写す（§21.1(3) の「先勝ちタイ」との違い）。マスク `sel` は親の記録値を使い、1 階と同じ f32 の比較でホストで作る。`d_src = where(sel, Gather(g)/ties_safe, 0)`、`d_input` の触れられた位置も同様（`include_self` のときのみ。そうでなければ 0）で、触れられていない位置は上の素通し。**分母はホストで `ties_safe = max(ties, 1)` に置き換えてから `Div` に渡す**。`ties=0`（NaN の結果）の位置は `sel` が false なので `where` が 0 を選ぶが、`Div` ノード自体は選ばれない枝でも実行される。分母が 0 のままだと `g/0` が非有限になり、`Where` から 0 が渡る逆伝播で `Div` が 0/0 や 0×inf を作って `g` への微分が NaN になる（`jvp_create_graph` など他経路にも波及する）。`max(ties,1)` なら選ばれない枝も有限で、勾配は 0・`g` への微分も 0 になり、1 階が `ties>0` のときだけ除算する（`indexed_update.rs` の `ties[q] > 0` 判定）のと同じ安全性を合成表現でも保つ。NaN の結果では勾配 0。値について二階は 0 で、曲率は `g` を経由する分しか流れない
+- `Prod`（V3 + 区分つき scan）: ホストで、寄与を出力位置ごとに走査順に並べる。自己寄与は末尾に置き 1 階と同じ並びにする。その置換を `Gather` で写し、区分つき scan で排他的 prefix 積と suffix 積を作る。`excl = prefix⊙suffix`、`d = Gather(g)⊙excl` とし、逆置換で src と input へ戻す。零と inf を含んでも除算を使わないので二階まで厳密。除算形を退ける理由は Cumprod と同じ。中間積の overflow は総括判定で拒否し、1 階の (仮数, 指数) の値は影響を受けない。scan 補助（#3803 の ①）に依存するので、#3802 の `Prod` は #3803 の ① の後に置く
+
+### 41.11 閉包性と族間の依存
+
+- 子テープへ積む Op は `Narrow`・`Concat`・`Mul`・`Add`・`Sub`・`Div`・`Exp`・`Where`・`Gather`・`Scatter{Add}`・`BroadcastTo`・`Contiguous`（`push_v3`）。基準時点で true であることを確かめた。`ScalarUnary`／`ScalarBinary` は `scalar_unary_replayable`（`create_graph.rs:145`）・`scalar_binary_replayable`（`:180`）で判定する
+- 孫テープの再生では写しの forward が再生されるので、3 variant 自身が true であることが要る。scan 補助は他の族に依存しない（`Gather`／`Scatter` は §25 で対象済み）
+- 族内の順序: #3803 の ①（scan 補助・Logcumsumexp）→ ②（Cumprod）。#3802 の ①（Sum・Mean・Amax・Amin）は独立に進められ、#3802 の ②（Prod）は #3803 の ① の後
+
+### 41.12 fail-closed・総括判定・GPU の forward
+
+- **総括判定**: `check_structure_stages`（`crates/autodiff/src/create_graph_norm.rs:338`）と同型の判定を置く。ホストは構造の各段（replay の出力・scan の各段の `S` と `A`・最終値）を同じ f32 の演算で再計算し、f64／`WideFloat`／(仮数, 指数) の参照と比べる。二階の逆伝播の「cotangent × 微分係数」の上界も f64 で求める。非有限の食い違いがあるか `2^125` 以上の段があれば拒否する。閾値と seed の前提は §27.3 と同じ。**Logcumsumexp の係数の食い違い**: 各段 `j` で、replay の f32 の `c[j]` と、f64 の prefix から求めた参照係数 `exp(out64[j]-out64[j+1])` を、REQ-2 の統一複合判定（相対誤差 `1e-3` 未満 または 絶対誤差 `1e-5` 未満。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD` を再利用し、新しい許容誤差や絶対カットオフは作らない）で比べ、外れたら拒否する。係数 `c` は二階で cotangent に掛かる微分係数なので、係数の誤差は Hessian へそのまま入る（対角が約 0.25 のような小さい値では、絶対 `1e-3` の係数誤差でも REQ-2 を外す）。このため係数の判定に加え、**Hessian 側の判定**として「cotangent × 係数」の各項（f64 の参照との比較）にも同じ複合判定を適用し、どちらかが外れたら拒否する。反例の確認（共有オフセットの中間帯）: `x=[5e4,5e4]` では `5e4` が `[2^15, 2^16)` にあり f32 の ulp は `2^-8`（約 `3.9e-3`）。replay の `out_m[1]=fl(5e4+ln2)` は `ln2*256≈177.45` から 177 に丸まり、`out_m[0]-out_m[1]=-177/256≈-0.69141`（真値 `-0.69315`）、`c[0]=exp(-0.69141)≈0.50087`（参照 0.5）となる。絶対誤差は約 `8.7e-4` で旧案の絶対 `1e-3` カットオフでは通ってしまうが、相対誤差は約 `1.7e-3`（`1e-3` 以上）かつ絶対誤差も `1e-5` 以上なので複合判定で拒否される。`4e4`〜`6e4` の共有オフセットは同じ ulp（`2^-8`）帯で、係数の丸めが `1e-3` 相対を超える段は同様に拒否され、通る段も Hessian 側の複合判定を満たすことが拒否条件の定義から保証される（「係数が通って Hessian が落ちる」組合せは作らない）。`c` が f32 で 0 に underflow する段は参照も 0 に近く、絶対誤差 `1e-5` 未満の既存の救済で通る（絶対比較ではなく REQ-2 の絶対誤差による救済が理由）ので §41.5 の既知の差に収まる。`x=[1e8,1e8]`・`g=[0,1]` は `c=1` と参照約 0.5 で食い違い、拒否されて `child` が空になる。Logcumsumexp の係数の underflow は §41.5 の理由で拒否条件に数えない
+- **入口での拒否**: 非有限の upstream と ±inf の入力は拒否し、NaN は伝播させる（§33.14 の論点 3）。§21.6 の判定順・網羅 match・未知 variant を false にする規約は弱めない
+- **GPU の forward**: Cumprod には CUDA と Metal（soft-f64 モデル `crates/backend-metal/src/scan_model.rs`）のカーネルがあり、子テープでの replay もそのカーネルを通る。#3857・#3859 はカーネルを含む経路を測る。Logcumsumexp と IndexedScatterReduce はどの GPU backend でもホストへフォールバックする（`crates/tensor-core/src/backend_ops.rs:2615`・`:3482` の既定は `Unsupported`）ので、測るのはデバイスからホストへの実体化を含む経路で、カーネル間の parity ではない。ROCm は全面フォールバック。GPU カーネルは新設しない。値は未実測
+
+### 41.13 実装の段分け（Phase 5・2h 単位）
+
+- #3803: ① scan 補助と Logcumsumexp（V3・再帰 scan・総括判定・`cumulative_parity.rs:660` の差し替え）、② Cumprod（V3・scan・零が 0／1／2 個・`H[j,z]` の回帰・既存テスト 1〜4 の差し替え）
+- #3802: ① Sum・Mean・Amax・Amin（V1／V2・タイ・未知 mode の拒否・`indexed_update_parity.rs:814` の差し替え）、② Prod（区分つき scan。#3803 の ① の後）
+- 各段で §41.4 の該当行と facade のテストを足す。実機の実行は #3857・#3859 に任せる
+
+### 41.14 セキュリティ観点
+
+- A03: forward の検証を通った shape・`dim`・`index` だけが届く。新しく確保するのはマスク・置換・O(numel log n) の f32／f64 の一時領域に限り、`Prod` の並べ替えでは確保の前に `checked_mul` で要素数を検査する
+- A04: 拒否時は子テープを空に保ち、fail-closed を維持する
+- A06: 依存を追加しない
+- A08: 総括判定と網羅 match を迂回する経路を作らない
+- 秘密情報・ホスト名・個人のパスは書かない
+
+### 41.15 スコープ外・Closes／Refs
+
+- スコープ外: 他の B 区分（#3729・#3730・#3731・#3733〜#3735）、Embedding の `padding_idx`（#3738）、f64 テープの create_graph、GPU カーネルの新設、実機 parity（#3857・#3859）と測り方（#3739）。新しい issue は承認なしに起票しない
+- PR 本文には `Closes #3732` と `Refs #3802 #3803 #3767 #3719` を書く
+
+### 41.16 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 3 variant を採るか | 実装する／対象外にする | 実装する | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 2. 値の方式 | V3（1 階と bit 同一）／V1（f32 合成で REQ-2） | V3 | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 3. Cumprod の構造 | 除算を使わない scan／除算形と最初の零のマスク（PyTorch 型。二階が不正確） | scan | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 4. Logcumsumexp の構造 | 係数が [0,1] の再帰 scan／対数領域の自己 replay で符号を分ける案／チャンク分割の案 | 再帰 scan | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 5. `Prod` | 区分つき scan で実装する／mode 単位で fail-closed にする | 実装する（#3803 の ① の後） | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 6. Amax／Amin のタイの二階 | 1 階の均等分配に従う（PyTorch と同じ）／先勝ちに寄せる | 均等分配 | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 7. 総括判定で外れた入力（Cumprod の suffix 積の発散など） | 型付きで拒否する／S2（ホスト値の定数ノード） | 拒否 | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 8. 非有限の入力 | §33.14 の論点 3 と同じ規則／すべて拒否 | §33 と同じ規則 | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 9. GPU parity の判定方式 | #3739 に従う／別の方式 | #3739 に従う | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 10. 隣接見本 | `Op::Custom`／他の fail-closed の Op | `Op::Custom` | 確認があるまで実装へ進めない（fail-closed を維持） |
+
+### 41.17 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
 ## 42. 設計記録（イシュー #3733・親 #3719。create_graph の B 区分・Stft・Istft）
 
 ### 42.0 位置づけ・承認根拠・境界・推奨
