@@ -3568,3 +3568,196 @@ CI の行は新規 `crates/autodiff/tests/create_graph_decomp.rs`（仮名）に
 ### 45.20 変えていないもの
 
 コード・公開 API・rustdoc・1 階の値・tolerance・baseline・閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
+## 48. 設計記録（イシュー #3739・親 #3719。create_graph の GPU parity の測り方。C 区分・B 区分・拒否範囲の申し送りの集約）
+
+### 48.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の論点 5 の回答待ちで、本節は何も承認しない。回答があるまで、テストコード・雛形・baseline には手を付けない
+- **基準**: `origin/main` の `a5baca51b`。以下の `file:line` はこの時点で確かめた値で、雛形 PR の前に引き直す
+- **節番号**: §46（PR #3899）と §47（PR #3900）は並行 PR が使うため、本節は §48 にした
+- **対象**: 追跡表（`docs/compat-matrix-ari-tracker.md`）の項目 3（C 区分 24 Op。§33〜§37）、項目 4（B 区分の未実装 Op。§38〜§44）、項目 5（拒否範囲と意味論。§45〜§47）の GPU parity の測り方。§23.5 の 2（Conv2d と create_graph の実機未測）と §31.5 の 5（線形代数の `cg.grad` の parity 未確認）の申し送りもここに集める
+- **後続**: 雛形は #3776（CUDA）・#3777（Metal）、実測は #3856・#3858（C 区分）と #3857・#3859（B 区分・拒否範囲）、承認は #3767
+- **推奨: 案 A（実装する）**。本節の測り方で雛形と実測を行う。判定は統一複合判定をそのまま使い、新しい baseline は作らない
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | 統一複合判定をそのまま使う。Metal は split-K が発火しない形状だけを選ぶ（形状規則 S3）。CUDA の strict 経路は単一 K ループなのでそのまま適用する | tolerance・baseline に触れない。#3168／#3169 の手順を再利用できる | split-K 形状の二階は測らない（論点 8） |
+| B | 結合順序が異なる経路を含む族だけ baseline 非後退方式にする | split-K 形状も測れる | GEMM 単体の baseline は合成した二階出力へ流用できない。族ごとに実機の実測値と所有者承認が要り、Phase 10 が承認待ちで止まる |
+| C | GPU parity を測らない（CPU だけで閉じる） | 費用が無い | 追跡表の実機 parity 欄が埋まらず、監査で「部分的」が残る |
+
+- **境界（扱わない）**: TF32 opt-in ON、GPU linalg ゲート ON の parity（決定性の確認を除く）、ROCm、f64 テープの create_graph（#3722）、新しい GPU カーネル、GPU 上での PyTorch との突き合わせ
+
+### 48.1 公開形
+
+- 該当なし。テストと docs だけで、公開名は増えない
+- `crates/facade/tests/api_surface.rs` に、GPU parity に関わる否定ガードも保留 doctest ガードも置かない。反転対象は無い（対象 Op の正ガードは #3812 が扱う）。実装 PR 側で `create_graph` を含む行を引き直して確かめる
+- facade のテストが内部クレートの既存の pub 項目（`fandhe_ai_backend_metal::should_split_k`。`crates/backend-metal/src/tile.rs:2888`）を読むが、公開面は変わらない
+
+### 48.2 rustdoc と doctest
+
+- 必須の doctest は無い。GPU の例は置かない（置く場合は `no_run`）
+- 失敗系は `compile_fail` に頼らず、`Err(AutodiffError::Backward(_))` との一致と子テープが空であること（`child.is_empty()`）で確かめる（stable rustdoc は `compile_fail` のコードを照合しないため）
+
+### 48.3 エラー型
+
+- 新しい variant は足さない
+- 拒否の判定はホストの f64 で行う総括判定と入口検査で、デバイスに依存しない設計になっている。そのため「GPU でも CPU と同じ入力で `Err(Backward)` を返し、子テープが空のまま」を Q5 に含める
+- `DeviceMismatch` は既存テスト（`create_graph_rejects_device_mismatch`）の範囲で、変えない
+
+### 48.4 テスト計画
+
+**事実（調べた結果）**
+
+1. `crates/autodiff` の依存は `tensor-core` だけで、GPU バックエンドに届かない。`crates/autodiff/tests/` は CPU 専用（有限差分・bit 同一・拒否の CI テスト）になる
+2. `crates/facade` は backend-cpu・backend-cuda（macOS では backend-metal も）を合成する。既存の GPU 版 create_graph テストは `crates/facade/tests/create_graph_facade.rs` にある（`gpu_hessian_matches_cpu`〈`:308`〉、`gpu_extended_ops_match_cpu`〈`:826`。LayerNorm・Conv2d・MaxPool2d について `H v` と `hvp` だけを比べる〉、`create_graph_{hessian,extended_ops}_{cuda,metal}_matches_cpu`、`create_graph_rejects_device_mismatch`）。#3168（`docs/perf/logs/cuda-autodiff-parity-3168/`）と #3169（`docs/perf/logs/metal-autodiff-parity-3169/`）で pass と記録済み。ただし #3169 は、カーネル経路とホストフォールバックをログから区別できなかったと書いている
+3. CUDA の FP32 strict GEMM（`gemm_fp32_strict_impl`。`crates/backend-cuda/src/ops.rs:744`）は単一 K ループのタイル方式を呼ぶ。SplitK 変種は診断専用 feature の後ろで、本番の選択では到達しない。Tensor Core は TF32 opt-in（既定 OFF）のときだけ使われる。この読みは雛形 PR（#3776）が再確認する（未確認の前提として扱う）
+4. Metal の `gemm_fp32_strict` は trait の既定実装で `gemm` に委譲し（`crates/tensor-core/src/backend_ops.rs:1780`）、Metal の `gemm` は split-K を通りうる。発火条件は `should_split_k`（`crates/backend-metal/src/tile.rs:2888`。`k >= max(m, n)` など）。split-K の判定は全形状一律の baseline 方式に決まっている（`docs/backend-metal-splitk-parity-judgment-decision.md`。対象は GEMM 単体の形状）
+5. split-K・ホスト再パックのカウンタは `pub(crate)` で、facade から読めない
+6. 比較関数は `fandhe_ai_backend_cpu::parity::compare`（`crates/backend-cpu/src/parity.rs:138`）。定数の正本は `crates/tensor-core/src/tolerance.rs`
+7. 各族の GPU forward の経路は §33.12・§34・§35.12・§36.12・§37.13・§38.12・§39.12・§40.12・§41.12・§42.12・§43.12・§44.12 が分類済み（デバイスカーネル／ホストへのフォールバック／opt-in ゲートの後ろ）
+8. facade に `Device::Rocm` が無い（追跡表の項目 24）
+
+**測る量**（比較相手は、同じテストコードを `fandhe_ai::tape()`〈CPU〉で走らせた値）
+
+| 記号 | 量 | GPU での判定 |
+|---|---|---|
+| Q1 | `first_order()` | 同じデバイスの素の `backward` と bit 一致（§21.1(1) の構造的な性質）。GPU と CPU の間は REQ-2 |
+| Q2 | 子テープ上の `cg.grad` | GPU と CPU の間を REQ-2 で比べる。CPU で bit 一致する族でも、GPU では REQ-2 だけを主張する |
+| Q3 | 二階 `H v` | 固定方向 `probe_dir` の子テープ backward。GPU と CPU の間を REQ-2 で比べ、`H v` がゼロでないことも assert する（線形な Op で二階の検査が自明に通るのを防ぐ） |
+| Q4 | 孫テープへの再生 | `jvp_create_graph`、または子の create_graph から孫の backward。GPU と CPU の間を REQ-2 で比べる |
+| Q5 | 拒否の一致 | 各設計記録の拒否テストから代表を 1 件以上取り、GPU でも `Err(Backward)` を返し子テープが空であること |
+
+- PyTorch との突き合わせと有限差分は CI（CPU）の責務とし、GPU テストでは使わない
+- 比較は既存の `compare` を使う。fail 時は fail_count・max_abs_diff・max_rel_err を panic メッセージに出し、RULE.txt から引用できるようにする。新しい定数は作らない
+
+**経路区分**（登録表の各ケースに付ける列）
+
+- `K`: デバイスカーネル経路
+- `H`: デバイスからホストへの実体化を含むフォールバック経路
+- `G`: opt-in ゲートの後ろの経路（既定 OFF なので `H` として測る）
+- 区分は雛形 PR が `file:line` で静的に書く。facade からは経路を assert しない（事実 5）。`H` の pass は「経路の parity」であり、カーネル同士の parity ではないと併記する
+
+**形状規則**
+
+- S1: CI テスト（`crates/autodiff/tests/`）の小さな形状と同じ入力を、最低 1 つ使う
+- S2: タイル境界をまたぐ中くらいの形状を 1 つ使う。各次元を 2 のべき乗でない値（例 17・33）にし、要素数は数千以下を目安にする
+- S3: Metal では、子テープの構造に含まれる MatMul の `(m, n, k)` が `should_split_k(m, n, k) == None` となる形状に限る。GEMM の形状を列挙できる族はテスト内で assert する。列挙できない族は `k < max(m, n)` になるよう形状を選ぶ規則を書く。避けられない族（長軸の K が大きくなる conv3d の d_weight など）は Phase 10 の主表から外し、論点 8 に残す
+- S4: 決定的な入力にする（固定式、または dev-dep の `bench_harness` の `Xorshift64Star` を seed 固定で使う）
+- S5: しきい値から離れた入力にする。2^125 の guard・縮退判定・タイ（max／min・`OrderSelect`）の近くを避ける。GPU の forward 値のわずかなずれで受理と拒否が入れ替わるのを防ぐためで、Q5 の拒否入力は拒否域の十分内側から取る
+
+**置き場**
+
+- 推奨: 新規 `crates/facade/tests/create_graph_gpu_parity.rs`（#3776 が作り、#3777 が `#[cfg(target_os = "macos")]` の Metal 版を同じファイルに足す）。理由は、(1) autodiff は GPU に届かない（事実 1）、(2) facade は全バックエンドを合成する公開経路で、#3168／#3169 と同じ実行経路、(3) backend-cuda の tests に置くと Metal と二重になり公開経路を通らない
+- backend 側に置くのは、facade から到達できない内部の切替が要る行（GPU linalg ゲート ON の決定性。opt-in 関数の facade 公開は #3405 で未完了）だけにする
+- baseline の置き場（#3776 の作業 2）は、`crates/backend-cuda/tests/common/parity_baseline.rs` の形に倣って値の無い置き場だけを作る。fail-closed にし、baseline 方式に指定されたケースで行が無ければ undetermined とする。値は実機の実測値で、所有者の承認 URL がある場合だけ入れる
+
+**粒度と命名**
+
+- 1 実装 issue につき、デバイスごとに `#[ignore]` テストを 1 本置く（RULE.txt は `--exact` で 1 本ずつ実行し、Phase 10 は実装 issue 単位で `Closes` するため）
+- 名前は `create_graph_<族>[_<小分類>]_{cuda,metal}_matches_cpu`。各族の設計記録にある仮名（`create_graph_<x>_{cuda,metal}_parity` や「`gpu_extended_ops_match_cpu` へ足す」）は次の表に置き換える。既存の節の本文は書き換えない
+- 既存の `create_graph_hessian_*`・`create_graph_extended_ops_*`・`create_graph_rejects_device_mismatch` は変えない（実測済みのログを無効にしない）
+
+| 設計記録 | 実装 issue | 族の部分 |
+|---|---|---|
+| §34 | #3789・#3790 | `select_reduce_minmax`・`select_reduce_order` |
+| §33 | #3791・#3792 | `stat_reduce_norm`・`stat_reduce_nan_lse` |
+| §35 | #3793 | `structural` |
+| §36 | #3794 | `norm_reparam` |
+| §37 | #3795・#3796 | `rnn_gru_cell`・`lstm_cell` |
+| §38 | #3797 | `conv3d_family` |
+| §39 | #3798・#3799 | `loss_regression`・`loss_binary_margin` |
+| §40 | #3800・#3801 | `loss_class_axis`・`ctc_loss` |
+| §41 | #3802・#3803 | `indexed_scatter_reduce`・`cumprod_logcumsumexp` |
+| §42 | #3804 | `stft_family` |
+| §43 | #3805・#3806 | `linalg_cholesky_pinv_lstsq`・`linalg_norm_sign_rank` |
+| §44 | #3807・#3808 | `decomp_qr`・`decomp_svd_eigh`（ゲート ON の決定性は `decomp_gpu_linalg_gate_on_replay_deterministic`） |
+| §45 | #3809 | `norm_prescale` |
+| §46（PR #3899） | #3810 | `det_family_rowscale` |
+| §47（PR #3900） | #3811 | `embedding_padding` |
+| 実装済みの族（§22〜§31） | なし | `landed_families`（§23.5 の 2 と §31.5 の 5 の申し送り分。Q2・Q4 を含めて測り直す） |
+
+**テスト計画の表**
+
+| 行 | 内容 | CUDA | Metal | ROCm |
+|---|---|---|---|---|
+| Q1〜Q4 | 族ごとの `#[ignore]` テスト（上表） | 未実測 | 未実測 | 未実測（雛形なし。facade に `Device::Rocm` が無い・項目 24） |
+| Q5 | 拒否の一致 | 未実測 | 未実測 | 同上 |
+| S3 assert | Metal の MatMul 形状が split-K 非発火 | 該当なし | 未実測 | 同上 |
+| `landed_families` | §23.5 の 2・§31.5 の 5 の測り直し | 未実測 | 未実測 | 同上 |
+| ゲート ON の決定性 | 同じ入力で 2 回評価し bit 一致（GPU の atomic 縮約を誤って fail にしないため、この行だけで確かめる） | 未実測 | 未実測 | 同上 |
+| CI ビルド | `cargo test -p fandhe-ai --test create_graph_gpu_parity --no-run` が通り、Linux では Metal の行が cfg で外れる | 雛形 PR で確認 | 雛形 PR で確認 | 該当なし |
+
+**RULE.txt の項目**（Phase 10 が計測前に固定する。#3168 の形を踏襲）
+
+1. 宣言日時（UTC。実機の実行より前）
+2. 機体の区分（`<cuda-node>`／`<metal-node>`）
+3. 対象コミットと、`crates/`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` に差が無いことを確かめる条件
+4. `.rev-stamp` の形式と、dirty でないことの担保
+5. 展開先と `CARGO_TARGET_DIR`（ログではマスクする）
+6. 事前ビルドの `--no-run`（判定外）
+7. 実行コマンド（`-- --ignored --exact --nocapture --test-threads=1 <テスト名>`。`--release` なし。timeout つき）。テスト名は固定の文字列だけで、外部入力をシェル展開しない
+8. 各コマンドの前に `--list` で、選ばれるテストがちょうど 1 件か確かめる
+9. テストごとの判定（REQ-2／bit 一致／型付きエラー）、経路区分（K／H／G）、既定の切替状態（TF32 opt-in OFF・GPU linalg ゲート OFF・Metal split-K の実行時トグルは既定のまま触らない）
+10. pass／fail／undetermined の定義（undetermined は timeout・`--list` の件数違い・ビルド不能・到達不能）
+11. run 数は各コマンド 1 回。時間計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。再実行するなら RULE.txt を登録し直す
+12. 計測中は他のビルドを並走させない
+13. fail 時は tolerance・入力・判定を変えず、数値を引用して「要対応」と書く。起票と baseline 化は承認を得てから
+14. 記録規則（ホスト名・`$HOME`・ユーザー名のマスク。漏れがあれば記録を捨てる）。`SHA256SUMS` と、スクリプトの sha256 を `env_info.txt` に記録する
+
+### 48.5 数値契約
+
+- REQ-2 の統一複合判定をそのまま使う。次は変えない: `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`、baseline、ガードレール閾値、`STAGE_BOUND_GUARD`、FMA 契約、f64 の長軸縮約と soft-f64 の bit 一致契約。新しい baseline は作らない
+- 結合順序の扱い（`.claude/rules/coding-rust.md` の baseline 非後退方式に当たるか）を経路ごとに書く
+  - **CUDA**: strict 経路は単一 K ループ（事実 3）なので、統一複合判定を直接当てる。非 strict の forward 再生も既定（TF32 OFF）では同じ系統。雛形 PR が再確認する
+  - **Metal**: split-K は結合順序の異なるカーネルで、全形状一律の baseline 方式が決まっている（事実 4）。GEMM 単体の baseline は合成した二階出力へ流用できない。そのため S3 で split-K を避けて統一複合判定を当てる。避けられない形状は、baseline（実機の実測値と所有者承認）を作るまで Phase 10 の主表に入れない
+  - **GPU のツリー縮約**（`sum` など）: baseline 方式に指定した決定記録は無い。既存の parity テストと同じく統一複合判定を当てる
+  - **Metal の fast-math** による pointwise の ulp 単位の差は REQ-2 で受ける。bit 一致は主張しない
+- 保証範囲は §27.3・§31.3 に揃える（総括判定を通った入力で、seed の各要素の絶対値が 1 以下のとき）
+
+### 48.6 互換への影響
+
+- 該当なし。テストと docs だけで、公開面・`Op`・エラー型を変えない（`docs/api-compat-0.14.0-decision.md` §8 に照らしても追加は無い）
+
+### 48.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `docs/compat-api-scope.md` の適用記録: 該当なし（公開名の追加も対象外化も無い）
+- `[x]` `docs/README.md` の索引
+- `[x]` 追跡表の項目 3・4・5 の設計記録列。実機 parity 列は未実測のまま変えない
+
+### 48.8 ベンチと性能への影響
+
+- 既定経路は変わらない。`#[ignore]` のテストバイナリが 1 本増えるため、CI のテストビルド時間がわずかに増える（雛形 PR で `rust-ci / cargo test` の所要時間を確認する）。前後比較は不要
+
+### 48.9 依存の追加の有無
+
+- 追加なし。許容 12 区分と禁止リストに照らして変化なし。新しい `unsafe` も無い。`docs/license-matrix.md` の更新は不要
+
+### 48.10 セキュリティ観点・スコープ外・Closes／Refs
+
+- **A03**: 外部入力は無い。RULE.txt の実行コマンドは固定のテスト名だけを渡す
+- **A04**: undetermined と未実測を pass に数えない。経路が不明なときは pass に経路区分を併記する
+- **A05・秘密情報**: RULE.txt とログでホスト名・個人のパス・ユーザー名をマスクし、漏れがあれば記録を捨てる。認証情報は書かない
+- **A08**: 計測前の事前登録、`SHA256SUMS`・`.rev-stamp` による改竄検知。判定と tolerance の迂回経路を作らない
+- **スコープ外**: TF32 opt-in ON での二階、GPU linalg ゲート ON の parity（決定性を除く）、ROCm（項目 24 の後）、split-K 形状の二階、f64 テープ（#3722）、新しい GPU カーネル、GPU での PyTorch との突き合わせ。いずれも承認なしに起票しない
+- 本 PR は `Closes #3739`、`Refs #3719 #3767 #3776 #3777 #3856 #3857 #3858 #3859`
+
+### 48.11 #3767 で問う論点
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 判定方式（#3767 の論点 5） | 統一複合判定＋split-K 非発火の形状規則／結合順序の異なる経路は baseline 方式 | 統一複合判定（tolerance は変えない） | 確認があるまで雛形を作らない |
+| 2. 置き場 | facade/tests の新ファイル／backend 側／既存の `create_graph_facade.rs` | facade/tests の新ファイル | 同上 |
+| 3. 既存記録（§34・§37・§40・§43・§44・§46）の「`gpu_extended_ops_match_cpu` へ足す」 | 新しい登録表へ置き換える／既存関数へ足す | 置き換える（既存のログを無効にしない） | 同上 |
+| 4. 粒度 | 実装 issue ごとに 1 本／族ごとに 1 本／全体で 1 本 | 実装 issue ごとに 1 本 | 同上 |
+| 5. `H` 経路の pass の数え方 | 経路区分を併記して pass／カーネル経路だけを pass に数える | 併記して pass | 同上 |
+| 6. 経路の観測 | backend 側に観測用の probe を足す（別承認）／静的な区分で足りる | 静的な区分（probe は別 issue の候補） | 静的な区分のまま |
+| 7. ゲート ON と TF32 ON | Phase 10 に含める／決定性の行だけ／対象外 | 決定性の行だけ | 対象外のまま |
+| 8. split-K 形状の二階 | baseline を作って測る／スコープ外 | スコープ外 | スコープ外のまま |
+| 9. `landed_families` | #3857・#3859 で測る／別 issue にする | #3857・#3859 で測る | 未実測のまま |
+| 10. ROCm | 項目 24 の承認後に別 issue／対象外 | 項目 24 の承認後に別 issue | 未実測のまま |
+
+### 48.12 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・ガードレール閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・既存の実機テストとログ。
