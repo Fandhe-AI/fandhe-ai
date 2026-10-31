@@ -27,7 +27,7 @@
 | # | 項目 | 対応表の行 | 0.12.0 の区分 | 設計記録 | 承認 | 実装 issue | 正ガード | 実機 parity | 0.14.0 の区分 |
 |---|---|---|---|---|---|---|---|---|---|
 | 1 | 低精度演算の `Var` 以外の配置 | dtype | 未公開 | #3721（`docs/autodiff-low-precision-op-extension-decision.md` §8） | 未承認（#3766 待ち） | #3784（承認された場合のみ） | 現状は否定ガード `VarLowPrecisionOpsHoldDoctestGuard`（`crates/facade/src/lib.rs:5963`）。反転先は設計記録で確定 | 該当 issue なし（要否は #3721 で判断） | 未確定 |
-| 2 | `TapeF64` の `jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` | dtype＋自動微分 | 保留 | #3722（`docs/autodiff-functional-transforms-design.md` §35）、#3723 | 未承認（#3766 待ち） | #3785、#3786、#3787、#3788 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
+| 2 | `TapeF64` の `jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` | dtype＋自動微分 | 保留 | #3722（`docs/autodiff-functional-transforms-design.md` §35）、#3723（同 §36） | 未承認（#3766 待ち） | #3785、#3786、#3787、#3788 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
 | 3 | `create_graph` の C 区分 24 Op | 自動微分 | 保留 | #3724〜#3728、#3739 | 未承認（#3767 待ち） | #3789〜#3796 | 未特定（設計記録で確定） | 未実測（#3856 は GB10、#3858 は Mac mini。雛形は #3776、#3777） | 未確定 |
 | 4 | `create_graph` の B 区分の未実装 Op | 自動微分 | 保留 | #3729〜#3735、#3739 | 未承認（#3767 待ち） | #3797〜#3808、#3812 | 未特定（設計記録で確定） | 未実測（#3857 は GB10、#3859 は Mac mini） | 未確定 |
 | 5 | 二階微分の拒否範囲と意味論（LayerNorm・RmsNorm・BatchNorm、Det・Inv・Solve・SlogdetLogAbsDet、Embedding の `padding_idx`） | 自動微分 | 保留 | #3736〜#3738、#3739 | 未承認（#3767 待ち） | #3809〜#3811、#3812 | 未特定（設計記録で確定） | 未実測（#3857 は GB10、#3859 は Mac mini） | 未確定 |
