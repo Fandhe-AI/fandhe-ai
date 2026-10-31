@@ -1433,6 +1433,152 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
 
+## 34. 設計記録（イシュー #3724・親 #3719 系。create_graph の C 区分・選択縮約 7 Op）
+
+### 34.0 位置づけ・承認根拠・境界・推奨
+
+- 状態: **設計記録のみ**。承認は #3767 の回答待ちで、本節は承認を代行しない。コード・公開面・tolerance・baseline は変えない。基準 sha は `69881d9da`。
+- 対象 7 Op: `Max`・`Min`・`Amax`・`Amin`・`OrderSelect`・`MedianAll`・`Quantile`。いずれも `crates/autodiff/src/tape.rs` の `supports_create_graph`（:2526）で `false` の腕にあり、`backward_create_graph` は型付きエラーで拒否する（fail-closed）。
+- 根拠: §20（D-A・2026-10-11）、§21.2 の C 区分表、ルート #3711 の起票経緯（実装を既定とする方針）。これらは設計方針の根拠であって承認ではない。
+- 推奨: **実装する**。理由は次の 3 点。
+  - 7 Op とも 1 階 VJP が「選択（マスク・索引）× 定数重み」の形で、V1／V2／V3 の既存前例（§21.1(3)・§25・§30）で閉じる。
+  - 子テープへ積む Op は既に対象の Op とこの族自身だけで、他の C 区分の族（#3725〜#3728）に依存しない。
+  - 既定経路（1 階 `backward`）は変わらない。
+- 境界: 統計縮約（`Nansum`・`Nanmean` 等。#3725）は扱わない。公開面の追加はしない。実装は #3789（`Max`・`Min`・`Amax`・`Amin`）と #3790（`OrderSelect`・`MedianAll`・`Quantile`）に分ける。
+- 訂正の注記: §21.2 の表は選択縮約を「V2」と一括りにしている。本節では Op ごとに V1／V2／V3 を割り当てる。§21.2 の本文は書き換えない。
+
+### 34.1 公開形
+
+- 該当なし。新しい公開名は無い。facade は `Var` をそのまま再エクスポートし（`crates/facade/src/lib.rs:281`）、`max`／`min`／`amax`／`amin`／`median`／`kthvalue`／`quantile` と `backward_create_graph`（:935）は公開済みで、変わるのは受理する Op の範囲だけである。
+- `api_surface.rs` に本族を拒否する否定ガードは無い（fail-closed は挙動で固定されている）。正ガードに当たるものは 34.4 の facade 挙動テスト `*_create_graph_via_facade` とし、追跡表のセルは実装 PR で更新する。
+
+### 34.2 rustdoc と doctest
+
+- facade `backward_create_graph` の rustdoc（`lib.rs:910` 付近）の「対象 Op の正本」へ選択縮約を追記する。実装 PR で行う。
+- doctest は CPU で通る `x.max(None)` を含む二階の例を 1 つ置く。失敗系は `compile_fail` に頼らず挙動テストで検証する。
+
+### 34.3 エラー型
+
+- 新しい variant は足さず、既存の `AutodiffError::Backward` を使う。拒否するのは次の場合。
+  - 未知の `QuantileInterpolation`（`#[non_exhaustive]`。`stat_reduce.rs:53`。`validate_ancestors` に `check_fft_norm`〈`create_graph/linalg_fft.rs:68`〉と同形の検査を足す）
+  - `OrderSelect` の `index` の範囲外と i32 の桁あふれ（§30.1 の前例）
+  - V3 の shape 不一致（`push_v3`）
+- 検査はすべて確保より前、かつ子テープへ書く前に行い、拒否時は `child` が空のまま残る。本番経路で `unwrap`／`expect` は使わない。
+
+### 34.4 テスト計画
+
+| 区分 | 内容 |
+|---|---|
+| CI（ubuntu-latest） | 新設 `crates/autodiff/tests/create_graph_select_reduce.rs`。7 Op の Hessian を 5 点中央差分と REQ-2 判定で突き合わせる。選択だけでは二階が 0 なので合成形を使う（`max(x⊙x)`・`max(x)²`・`amax(x)²`・`kthvalue(x³)`・`median(x)²`・`quantile(x², q)`。`dim` は None／中央軸、補間は 5 種すべて） |
+| CI | 1 階 `first_order()` の bit 一致、`cg.grad` の bit 一致、`jvp_create_graph`（孫テープ）と独立参照の一致 |
+| CI | タイと NaN の回帰（34.12 の回帰ベクトル） |
+| CI | 隣接する fail-closed の拒否テスト: `Op::Custom` との組み合わせで拒否され `child` が空のままであること |
+| CI | `tape.rs` 単体テスト `selection_reduce_family_supports_create_graph`: 7 Op が `true`、隣接の `Nansum`・`Nanmean` が `false`（兄弟の族が反転した PR がこの一覧を直す） |
+| CI | `create_graph/` 配下の単体テスト: マスク・重みが 1 階ホスト関数と bit 一致、範囲外 `index` が型付きエラー |
+| CI | facade `crates/facade/tests/create_graph_facade.rs` に `max_`／`amax_`／`kthvalue_`／`median_`／`quantile_create_graph_via_facade` を `check_create_graph_family` で追加 |
+| CI | 34.13 の既存テスト差し替え |
+| `#[ignore]`（実機） | `gpu_extended_ops_match_cpu` のケース表へ `max`・`amax`・`quantile` を追加（`create_graph_extended_ops_{cuda,metal}_matches_cpu` で走る）。#3776／#3777 の雛形ができたら登録表へ移す |
+
+実機の結果はすべて **未実測**。実測は #3856（`<cuda-node>`）・#3858（`<metal-node>`）に申し送る。
+
+### 34.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を使う。tolerance 定数・baseline・ガードレール閾値・FMA 契約は変えない。f64 長軸縮約の契約はホスト関数側でそのまま保たれる。baseline の追加は無い。詳細は 34.12。
+
+### 34.6 互換への影響
+
+- 該当なし。facade の公開型とシグネチャは変わらない。`api-compat-0.14.0-decision.md` §1.2 の項目 3（挙動のみ。`Err` が `Ok` になる受理拡大）にあたり、§8 の手順に当てはめても破壊的変更は生じない。
+- tensor-core に `pub fn`（34.10(e)）を足す場合も内部クレートへの追加のみで、facade は `stat_reduce` を再エクスポートしない。
+
+### 34.7 適用記録・索引・追跡表
+
+- `compat-api-scope.md` の適用記録は承認後の実装 PR で書く。本 PR では行わない。
+- 本 PR で行うのは `docs/README.md` の索引と、`docs/compat-matrix-ari-tracker.md` 行 3 の「設計記録」セルの更新だけ。
+
+### 34.8 ベンチ
+
+- 既定経路（1 階 `backward`）に影響は無い。変わるのは create_graph 経路と `supports_create_graph` の腕だけで、共有ヘルパーの切り出しも値を変えない。前後比較は不要。
+
+### 34.9 依存
+
+- 追加しない。許容 12 区分と禁止リストに照らして新規なし。新しい `unsafe` も無い。
+
+### 34.10 方式と式
+
+| Op | 方式 | 再生 | cgrad の構造 | 子テープへ積む Op |
+|---|---|---|---|---|
+| `Max`／`Min` | V2 | `Var::max`／`min` | 1 階 `extremum_first_match_vjp`（`grad.rs:7912`）と同じ走査で bool マスクをホスト生成し `where_cond(M, g を keepdim→broadcast, 0)` | `Reshape`・`BroadcastTo`・`Where`・定数 `Leaf` |
+| `Amax`／`Amin` | V3（推奨） | `Var::amax`／`amin` | 一致全要素のマスクと一致数 `k`。`k_safe = max(k,1)` の f32 定数で割り `where_cond`。値は `extremum_even_split_vjp`（:8009）を `push_v3` で載せる | `Reshape`・`BroadcastTo`・`ScalarBinary{Div}`・`Where`・`Contiguous` |
+| `OrderSelect` | V1 | `gather(dim, index_keep).reshape` | `gather_like_vjp` ＝ `zeros.scatter_add`。1 階と同じ `scatter_with_fallback(Add)` を通る | `Gather`・`Reshape`・`Scatter{Add}`・定数 `Leaf` |
+| `MedianAll` | V3 | `Var::median(None)` | 1 階と同じ規則で中央値 `m` を求め、等価マスク（`m` が NaN なら NaN 同士）と `count` から `where_cond`。値は `median_all_vjp_host` を `push_v3` で載せる | `Reshape`・`BroadcastTo`・`ScalarBinary{Div}`・`Where` |
+| `Quantile` | V3 | `Var::quantile(q, dim, interp)` | 1 階と同じ安定ソートと rank 規則で lane ごとの下側・上側の添字と重みを得て、互いに素なマスクと f32 重み定数の `Mul`・`Add` で組む。値は `quantile_vjp_host`（`stat_reduce.rs:507`）を `push_v3` で載せる | `Where`・`Mul`・`Add`・`Gather`・`Scatter{Add}` |
+
+(a) `Max`／`Min`
+- 走査は外側 × 軸 × 内側の順で、記録値 `out_value` と `==` で一致した lane 内の最初の要素だけが選ばれる。`out_value` が NaN なら全要素が不一致で勾配は全ゼロになる。規則を 1 階と共用するため、走査を `pub(crate)` ヘルパーに切り出す（1 階の値は変えず、既存テストが無変更で通ることをガードにする）。
+- マスクは区分定数なので x による二階微分は 0 で、`g` を通る混合項だけが流れる。
+
+(b) `Amax`／`Amin`
+- 1 階は一致全要素へ f32 の `g / (k as f32)` を 1 回だけ配る。`k == 0` の lane は 0 のまま。
+- `k_safe` を使う理由は、`k == 0` の lane で `div` の VJP（`-g·y/k²`）が `inf·0` を生まないようにするため（前例: `create_graph.rs:1930` 付近の `safe_a_for_pow`）。
+- V3 とする理由は、デバイスの `Div`（Metal の fast-math 等）が正しい丸めである保証が無く、V3 ならどのバックエンドでも `cg.grad` が 1 階と bit 一致するため。`k > 2^24` の丸めは 1 階に既にある限界と同じで、新しい拒否は足さない。
+
+(c) `OrderSelect`
+- payload に `k` が無く `kthvalue` を再実行できないため、子テープのタグは `Gather`＋`Reshape` になる（§25 の `Sort` と同じ前例）。
+
+(d) `MedianAll`
+- 1 階は f64 で `g/count` を計算し f32 へ丸める。構造側の f32 除算との bit 一致をデバイス演算に委ねないため、値はホスト関数で固定する。要素数 0 の入力では 1 階が空ベクトルを返すことと整合させる。
+
+(e) `Quantile`
+- lane に NaN があれば安定順で最後の NaN へ `g` を流す。`lo == hi` なら `g` を直接代入し、それ以外は `g·(1-w)`・`g·w` を配る。f32 に丸めると 0 になる重みの項は、乗算ではなくマスクで外す（`inf*0` を避ける）。
+- 規則を 1 か所で持つため、tensor-core の `stat_reduce` に lane ごとの選択位置を返す `pub fn`（仮名 `quantile_select_host`）を足す案とする。1 階側の `sort_order`・`quantile_positions` は private。足すかどうかは #3790 で確定し、代案は 34.15 の論点 3。
+- 重みは x について区分定数で、x による二階微分は 0。
+
+### 34.11 閉包性
+
+- 子テープへ積む Op は、`Reshape`・`BroadcastTo`・`Where`・`Contiguous`・`ScalarBinary{Div, Mul}`・`Add`・`Gather`・`Scatter{Add}`・定数 `Leaf` と、写しの forward として積む `Max`・`Min`・`Amax`・`Amin`・`MedianAll`・`Quantile`。前者は既に対象で、後者はこの族を `true` にしたときに初めて孫テープでも閉じる。このため #3789 と #3790 は、担当する Op を同じ PR の中で `true` にする。
+- 依存先は §25（#3083 の索引系）と §16（#2062 の `Where`／`ScalarBinary`）だけで、いずれもマージ済み。他の C 区分の族には依存しない。§21.4 の依存順には「#3789・#3790 は §16・§25 の後、他の C 区分と独立」の 1 行を足す扱いとする。
+
+### 34.12 タイ・NaN・1 階との bit 一致
+
+- 1 階 `first_order()` は親テープを加工しないので構造上 bit 同一（§21.1(1)）。
+- `cg.grad` が bit 一致する理由は Op で異なる。`Max`・`Min`・`OrderSelect` は選択だけだから。`Amax`・`Amin`・`MedianAll`・`Quantile` は V3 で 1 階のホスト値を使うから。
+- 契約として約束するのは REQ-2（§9 (i)）で、テストでは bit 一致で固定する（§32 の運用と同じ）。孫テープ（`jvp_create_graph`）で再生した値は REQ-2 で一致すればよい。
+- 回帰ベクトル: タイ（先勝ち・均等分配）、`[0.0, -0.0]`、NaN を含む lane（`Max` は勾配ゼロ、`Quantile` は最後の NaN）、`Amax` で `k == 0` の lane の二階が NaN を生まないこと、上流 `3e38` で 1 階・`cg.grad`・二階が有限であること。
+
+### 34.13 既存テストの差し替え（#3789 で必須）
+
+次の 7 か所は `x.max(None)` を「拒否される Op」の代表に使っており、#3789 で `Max` を `true` にした時点で壊れる。
+
+- `crates/autodiff/tests/double_vjp_feasibility.rs:434`（`c4_unsupported_ops_are_rejected_fail_closed`）
+- `crates/autodiff/tests/functional_ops_parity.rs:541`（`h3_rejections_leave_both_tapes_unchanged`）
+- `crates/autodiff/src/functional_ops_jvp_tests.rs:419`（`j5_`）・:793（`m5_`。親テープの増分 `len + 2` を検査）・:1177（`c7_zero_paths_and_node_counts`）
+- `crates/autodiff/tests/functional_ops_composition.rs:469`（`c7_fail_closed_on_composition`）
+- `crates/autodiff/tests/jacobian_hessian_parity.rs:406`（`j4_hessian_propagates_create_graph_rejections_without_touching_child`）
+
+代わりの拒否 Op は恒久的に対象外の `Op::Custom`（A 区分）に統一する（§32 と同じ判断）。`Var`・`LogSumExp`・`Nansum` 等は #3725 で `true` になりうるため使わない。`custom` のケースを既に持つテストでは `max` のケースを「受理される」確認へ反転するか削除し、ノード数を検査するテストは期待値を直す。`stat_reduce_parity.rs` の `create_graph_is_a_typed_error_not_a_panic` は `nansum` を使うので触らない（#3725 の扱い）。
+
+### 34.14 GPU の forward 経路と Phase 10
+
+- `Max`・`Min`・`Amax`・`Amin` の forward はデバイスカーネルで走る（CUDA: `crates/backend-cuda/src/ops.rs:6371`・:6380。Metal: `crates/backend-metal/src/ops.rs:4122`・:4220。Metal の `min` は ±0 の符号が実装依存で bit 一致は主張しない）。マスクは親の記録値から `==` で作るので、各バックエンドの NaN／±0 規則と 1 階の結果が構造上一致する。
+- `OrderSelect`・`MedianAll`・`Quantile` の `BackendOps::stat_*` を実装するのは `backend-cpu`（`ops.rs:3665`）だけで、CUDA／Metal では `Unsupported` になりホストのカーネルへフォールバックする（`stat_reduce_ops.rs` 冒頭の経路 ③）。
+- 子テープの構造 Op（`where_cond`・`div`・`mul`・`scatter_add`・`gather`）はデバイスで実行され、V3 の値はホストで計算する。実機の結果は全部**未実測**で、Phase 10 の #3856・#3858 へ申し送る。
+
+### 34.15 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. `Amax`／`Amin` の値の方式 | V3 ／ V2 のみ（GPU では REQ-2 で一致） | V3 | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 2. `cg.grad` の bit 一致を 7 Op のテストで固定するか | 固定する ／ V3 の Op だけ REQ-2 にする | 固定する（契約は REQ-2 のまま） | 同上 |
+| 3. `Quantile` の位置情報の取得元 | tensor-core に `pub fn` を足す ／ autodiff 側で同じ規則を写す | `pub fn` を足す（規則を 1 か所で持つ） | 同上 |
+| 4. 7 Op を実装するか | 全部実装する ／ 一部を対象外にする | 全部実装する | 同上 |
+
+### 34.16 その他
+
+- セキュリティ観点: 外部入力は扱わない。`index`・形状・`q`・enum variant・確保サイズは確保前に検証する。秘密情報は書かない。
+- スコープ外: 統計縮約（#3725）など他の C 区分の族、公開面の追加、f64 テープ（#3722）。
+- Issue の紐付け: 本 PR は `Closes #3724`、`Refs #3767 #3789 #3790`。
+- 変えていないもの: コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文・公開 API。
+
 ## 35. 設計記録（イシュー #3726・親 #3719。create_graph の C 区分・構造変換 3 Op）
 
 ### 35.0 位置づけ・承認根拠・境界・推奨
