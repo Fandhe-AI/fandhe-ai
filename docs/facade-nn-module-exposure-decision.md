@@ -577,3 +577,130 @@ facade `nn::Module` へ #2137 の凍結 API を鏡写しした（#2338 承認事
 ### 22.7 #2338 の close の扱い
 
 #2338 は過去に意図せず reopen された経緯があるため（§13.2）、本記録を入れる #2403 の PR ではクローズキーワードを使わない。PR のマージを確認したうえで明示的に close する。
+
+## 23. 保守・運用チェックリスト（イシュー #3741）: 独自 `Module` から組み込み層を呼ぶ経路の公開形
+
+雛形 `docs/decision-record-template.md`（#3716）の「保守・運用チェックリスト」9 節に沿った設計記録である。`docs/compat-matrix-ari-tracker.md` の行 #8（Issue 上は項目 9 と呼ばれる同一項目）に対応する。docs のみの PR で、`crates/**`・`docs/spec`・`Cargo.toml`／`Cargo.lock` は変えない。
+
+- 承認の状態: **未承認**。#3768 の論点 2 の回答待ちで、承認を得たとは書かない
+- 実装は #3815、受入テストは #3816。実機 parity は該当 issue なし
+- 根拠: §22.6（起票候補）、`docs/facade-nn-layer-type-exposure-decision.md` §6（残課題）、`docs/reference-models-decision.md` §10.8 (d)
+
+### 23.0 課題と案の比較
+
+現状、利用者は facade の `nn::Module`（`forward(&self, TapeRef<'t>, &Var<'t>)`。`crates/facade/src/nn/module.rs`）で独自層を書けるが、その `forward` の中から組み込み層を呼べない。理由は 3 つある。
+
+- 層の型名を公開していない（#3022 の (i)+(iv) 方針）
+- `compat::Sequential` は facade の `nn::Module` を実装していない（trait impl は `Default` のみ。`crates/facade/src/compat/sequential.rs:578`）
+- inherent の `compat::Sequential::forward` は `&Tape` を取り（同 :2540）、`TapeRef<'t>(pub(crate) &Tape)`（`crates/facade/src/lib.rs:2001`）から安全には作れない
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| **A（推奨）** | `compat::Sequential` に facade `nn::Module` を実装する。impl は `inner` が private のため `compat/sequential.rs` に置く。`forward` は `self.inner.forward(tape.0, input)` | 公開名の追加は 0 件で trait impl が 1 件増えるだけ。組み込み層は既存の `add_*` で組み、1 層だけの `Sequential` がハンドル役になる。`unsafe` なし。数値は inherent `forward` と同じ関数を通る | inherent `forward` が trait メソッドを隠すため、メソッド構文では呼べず UFCS か `nn::Sequential` で包む形になる（§23.1） |
+| B | 組み込み層を個別の facade `Module` 型として出す | 型名で直接組める | #3022 (iv) の (a) 名指ししないと使えない操作がない（A で足りる）、(b) autodiff の層は autodiff の `Module` しか実装せず型ごとに newtype が要る、(c) 多数の正ガードが要る。公開面の恒久的増分が大きく劣後 |
+| C | ハンドル型（`Box<dyn autodiff::Module>` を包む不透明型）を新設する | `compiled`／`specs` を持たない単純な意味論 | 型と構築子の追加が要り、A と同じ目的を公開名を増やして実現するだけで劣後 |
+| D | 対象外にする | 公開面は不変 | 独自層は組み込み層を呼べないまま。§22.6 の `ReferenceModule` 移行の前提も満たされない |
+
+**推奨: 実装する（案 A）**。追加のみ・公開名 0 件・(i)+(iv) と矛盾しない・安全な 1 行委譲で数値同一性が構造的に保証される、の 4 点が理由である。§6 で除外した `repr(transparent)` と unsafe キャストは再び候補にしない。
+
+### 23.1 公開形
+
+```rust
+impl crate::nn::Module for Sequential {
+    fn forward<'t>(&self, tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    // 他に override するのは named_parameters / set_parameter / state_dict /
+    // load_state_dict / set_training / training のみ（inherent へ委譲）
+}
+```
+
+- 配置: `crates/facade/src/compat/sequential.rs` の `impl Default for Sequential`（:578）の直後
+- 委譲先: `forward` は `self.inner.forward(tape.0, input)`（Linear→ReLU 融合を含む）。`set_parameter` は autodiff `nn::Sequential` の `"{index}.{name}"` 分割＋範囲・shape 検査へ委譲する（未 override だと入れ子の `load_state_dict` が既定の拒否で失敗する）。`training` の委譲漏れは既定 `true` を返すためテスト項目にする
+- パラメータの所有: 値所有。テンソルは inner の層が持つ。キーは `add_module` の入れ子で `"{外 index}.{内 index}.{name}"`。利用者の複合層は接頭辞（例 `block.`）を `named_parameters`／`set_parameter`／`children` の名前とそろえる契約
+- 保存形式: `state_dict` → `interop::safetensors::save_safetensors_f32`／`load_safetensors_f32` → `load_state_dict` の往復は成り立つ。`save_model`（manifest）は `LayerSpec::Unsupported` で `UnsupportedModel` の fail-closed のまま（#3750 の横断方針に委ねる）。ONNX export も既存の fail-closed のまま（#3815 で確認）
+- train／eval の伝播: 外側コンテナの `set_training` → trait impl → inherent → inner の全層（Dropout・BatchNorm）。利用者の複合層は既定 `set_training` が no-op のため自分で override して子へ伝える
+- 凍結: **override しない**（既定の fail-closed。パラメータを持てば `InvalidArgument`）。現在 `compat::Sequential` を凍結する公開経路はなく、委譲すると `fit`／`bind`／常駐経路との未検証の組合せが公開経路で作れるため（論点 2）
+- `children`／`children_mut`: **空（葉として扱う）**。inner の子は autodiff の `Box<dyn Module>` で、facade の `&dyn Module` を返すには所有アダプタが要るため（論点 3）。`summary` は 1 ノード、`parameter_count` は `named_parameters` から正しく出る
+- 学習: 広げない。パラメータを持つ入れ子の外側 `fit`／`bind` は `InvalidArgument`、常駐経路は `Unsupported` のまま（既存の fail-closed）。勾配を集める経路は §22.6 第 2 項で別承認。内側単体の `fit` は従来どおり
+- 派生効果: `compat::Sequential` を `add_module` で入れ子にできる／`nn::Sequential::add(seq)` が成り立つ／`ForwardHooked<compat::Sequential>` が成り立つ／§22.6 の `ReferenceModule` 移行の前提を満たす（移行は別 issue）
+- 呼び出し構文: メソッド解決は inherent を優先するため、独自層内の `self.block.forward(tape_ref, x)` は `&Tape` 版が選ばれ型不一致になる。UFCS の `fandhe_ai::nn::Module::forward(&self.block, tape, x)` か、facade の `nn::Sequential` で包む形を案内する。inherent の別名メソッドは足さず、inherent `forward` のシグネチャ変更（`impl Into<TapeRef>`）は破壊的のため除外する（api-compat §8 手順 2）。挙動は #3815 で小実験により確認する（未検証）
+
+ガード計画: 現状 `compat::Sequential` への facade `nn::Module` impl を禁じる否定ガード・保留 doctest ガードは**ない**（`scan_type_impl_surface(content, "Sequential")` は inherent fn の集合のみ）。したがって「反転」は正ガードの新設を指す。#3815 で新設する（名前は案）。
+
+- `compat_sequential_nn_module_impl_matches_approved_shape`: impl がちょうど 1 件／override 集合が {`forward`,`named_parameters`,`set_parameter`,`state_dict`,`load_state_dict`,`set_training`,`training`} と完全一致／`forward` 本体が `self.inner.forward(tape.0, input)` への委譲／`unsafe` なし
+- `compat_sequential_trait_impls_match_expected_set`: trait impl 集合が {`Default`,`Module`}（`Deref` や autodiff `Module` impl を検出）
+- 上記 2 件の `..._detects_each_category`（override 過不足・`Deref` 追加・autodiff `Module` impl・`unsafe` 混入・`forward` 本体のすり替えを合成入力で検出）
+
+維持する既存ガード: `facade_nn_module_trait_methods_match_approved_set`（`api_surface.rs:7710`。trait 本体は変えない）、`facade_nn_module_trait_signatures_hide_internal_types`、`facade_declares_no_nn_module_items`、`facade_does_not_reexport_nn_module_or_containers`、`compat_sequential_add_module_is_sole_approved_entry`（:8091）、`tape_ref_public_surface_is_exactly_var_family`（:28052）、`facade_does_not_reexport_tape_or_backend_ops`、`compat_public_functions_do_not_accept_raw_autodiff_tape_argument`。#3815 では `scan_parametrize_downcast_sites` の走査対象に `compat/sequential.rs` が入るかも確認する。
+
+### 23.2 rustdoc と doctest
+
+- impl ブロックに役割要約（独自層から組み込み層を呼ぶ入口。inherent `forward` と同じ関数を通る）を付ける
+- doctest は CPU だけ・facade だけで通る形にする。(i) 独自 `Residual { block: compat::Sequential }` が UFCS で組み込み層を呼び、`Var::add` で残差を足す。`named_parameters`／`set_parameter` の接頭辞を `children` の名前とそろえ、`set_training` の伝播も示す。(ii) `nn::Sequential::new().add(seq)` で包む例
+- 失敗系は `compile_fail` に頼らず（stable rustdoc はコード未照合）、統合テストで `Err` の variant まで照合する
+
+### 23.3 エラー型
+
+新しい variant は足さない。`forward` のエラーはそのまま伝える。`set_parameter` の未知キー・範囲外・shape 不一致は `InvalidArgument`、`load_state_dict` は two-pass とロールバックで inherent と同一。凍結は既定の fail-closed。本番経路で `unwrap`／`expect` を使わず、キーの分割と parse は確保より前に行う。
+
+### 23.4 テスト計画
+
+置き場は #3815（公開形・正ガード・意味論）と #3816（利用者の書き方による受入テスト）で分担する。実機列はすべて「該当なし」（新しいカーネル・Op・VJP がなく inherent `forward` と同じ関数を通るため。Phase 10 の実機テストもなし）。
+
+| 受け入れ基準 | テスト（`crates/facade/tests/nn_compat_sequential_module.rs`） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| Module 経路 `forward` が inherent と bit 一致（融合含む） | `module_forward_matches_inherent_forward_bit_exact` | CI | 該当なし | 該当なし | 該当なし |
+| 独自層から UFCS で組み込み層を呼べる | `custom_module_calls_builtin_block_via_ufcs` | CI | 該当なし | 該当なし | 該当なし |
+| train／eval の伝播（Dropout eval が決定的・`training()` が委譲値） | `training_mode_propagates_into_nested_compat_sequential` | CI | 該当なし | 該当なし | 該当なし |
+| `named_parameters` の順序・キー・`parameter_count` | `nested_named_parameters_keys_and_order` | CI | 該当なし | 該当なし | 該当なし |
+| `state_dict`→safetensors→`load_state_dict` の往復 bit 一致、不正キー・shape はロールバック | `nested_state_dict_safetensors_roundtrip`・`nested_load_state_dict_rejects_and_rolls_back` | CI | 該当なし | 該当なし | 該当なし |
+| 凍結が fail-closed | `freeze_on_compat_sequential_module_is_fail_closed` | CI | 該当なし | 該当なし | 該当なし |
+| `children` が空で `summary` が 1 ノード | `compat_sequential_module_is_leaf_in_introspection` | CI | 該当なし | 該当なし | 該当なし |
+| 外側の `fit` は `InvalidArgument`、常駐は `Unsupported`。内側単体の `fit` は従来どおり | `outer_fit_rejects_parametric_nested_compat_sequential` | CI | 該当なし | 該当なし | 該当なし |
+| 入れ子の `save_model` は `UnsupportedModel`、ONNX export は既存の fail-closed | `nested_save_model_and_onnx_export_fail_closed` | CI | 該当なし | 該当なし | 該当なし |
+| 既定経路が不変 | 既存 `cargo test -p fandhe-ai` 一式 | CI | 該当なし | 該当なし | 該当なし |
+| 公開形の正ガードと自己テスト | `crates/facade/tests/api_surface.rs`（§23.1） | CI | 該当なし | 該当なし | 該当なし |
+
+### 23.5 数値契約
+
+REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は既存 `forward` の契約を引き継ぐだけで変えない。Module 経路と inherent 経路は bit 一致を契約にする。FMA 契約・f64 長軸縮約への影響はなく、baseline の追加・更新、tolerance・ガードレール閾値の変更もない。
+
+### 23.6 互換への影響
+
+**追加のみ**（`docs/api-compat-0.14.0-decision.md` §8 手順 1〜4）。
+
+- 触れる公開型は `compat::Sequential`（構築は `new`／`Default` のみ・フィールドは private）で、変更は trait impl の追加 1 件。§1.2 の `Sequential` 行は「追加のみ」
+- `nn::Module` trait のメソッドは増やさないため、§1.3 の `Module` 行（既定実装なしの追加は破壊的）には当たらない
+- 利用者の独自 trait が同名メソッドを持つと呼び出しが曖昧になりうるが、RFC 1105 では minor の範囲
+- 案 B／C を選んでも追加のみだが、公開名が大きく増える
+
+### 23.7 適用記録・索引・追跡表
+
+- 適用記録の案（`docs/compat-api-scope.md` §5 へは実装 PR #3815 で追記し、本 PR では書かない）: `**適用記録（イシュー #3815・親 #3741。承認: <#3768 の回答 URL>）**: compat::Sequential に facade nn::Module を実装（公開名の追加なし・trait impl 1 件）。凍結は fail-closed、children は空、学習は fail-closed のまま。公開状態: 公開済み`
+- 本 PR の更新: `docs/README.md` の注釈と追跡表の行 #8「設計記録」。公開状態は未公開のまま
+
+### 23.8 ベンチと性能への影響
+
+既定経路（inherent の `forward`／`predict`／`fit`）は変えない。入れ子にした場合は `FacadeModuleAdapter` が `supports_forward_host()==false` のため `predict` は tape 経路になるが、これは新経路だけの性質で既定経路を遅くしない。ベンチは足さず前後比較も不要（未実測）。
+
+### 23.9 依存の追加の有無
+
+追加なし。許容 12 区分・禁止リストとの照合結果も変わらない。新しい `unsafe` もない（`TapeRef.0` は crate 内フィールドへの安全なアクセス）。
+
+### 23.10 所有者へ戻す論点（#3768 の論点 2 へ渡す）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 公開形 | A `compat::Sequential` へ `nn::Module` を実装／B 個別型／C ハンドル型／D 対象外 | A | 実装へ進めない（公開面は現状のまま） |
+| 2. 凍結 API | (a) override せず既定の fail-closed／(b) inner の `set_requires_grad` へ委譲（`fit`／`bind`／常駐経路との相互作用の検証が条件） | (a) | (a) 相当を維持 |
+| 3. `children` | (a) 空（葉）／(b) 積んだ facade 層を子として返す（所有アダプタの設計が要る） | (a) | (a) 相当を維持 |
+| 4. 呼び出し構文 | UFCS と `nn::Sequential` で包む形を案内／inherent の別名メソッドを足す／inherent `forward` のシグネチャ変更（破壊的） | UFCS の案内 | 別名メソッドは足さない |
+| 5. 保存 | 入れ子の `save_model` を `UnsupportedModel` のまま／manifest を入れ子に広げる | 維持（#3750 に委ねる） | 維持 |
+| 6. 学習 | 入れ子のパラメータ付き層を含む外側の学習は fail-closed のまま／勾配を集める経路の公開（§22.6 第 2 項） | 範囲外のまま（別承認） | fail-closed を維持 |
+
+### 23.11 セキュリティ観点・スコープ外
+
+- A03: 外部入力は `load_state_dict` のキー（safetensors 由来）のみ。既存の `split_once('.')`→`usize` parse→範囲検査→shape 検査を確保より前に行い panic しない。新しい parse は足さない
+- A04／A08: 学習と凍結の fail-closed を保ち「したつもりで何も起きない」黙った成功を作らない。trait impl は inherent への委譲 1 本で、判定の迂回経路を作らない
+- REQ-12: 生の `Tape`・`BackendOps`・内部層型を公開シグネチャに出さない（既存ガードを維持）。新しい `unsafe`・秘密情報なし
+- スコープ外: `ReferenceModule`／`Trainable` の移行（§22.6 第 1 項）、独自層の学習対応（同第 2 項）、`compat::Sequential::parameter_count()`／`summary()` の inherent 化（同第 3 項）、manifest 保存・ONNX export の入れ子対応（#3750）、組み込み層の型名の公開（#3022 で対象外）
+- 参照: Closes #3741。Refs #3768・#3815・#3816
