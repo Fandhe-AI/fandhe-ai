@@ -1,0 +1,30 @@
+事前登録規則（DGX Spark GB10）0.13.0 6 フレームワーク同席計測 — 【固定済み】
+イシューなし（2026-10-31 所有者のチャットでの明示指示「0.13.0 で公開してください。framework-compare のピン =0.13.0 も承認します。」による。追跡は本 PR）。固定時刻: 2026-10-31T04:56:14Z（以後編集しない。固定後の変更は RULE.v2.txt を新設する）。本ファイルは時間の実測値を含まない（行数スモークの行数のみ）。
+0.12.0 の RULE.txt（../framework-compare-0.12.0-remeasure/RULE.txt）を雛形にした。0.12.0 との違いは単腕（旧条件腕・stage4 を置かない）と前版比の参照先（0.12.0 は 0.11.0 比 → 0.13.0 は 0.12.0 比）だけで、
+ゲート・判定規則・期待行数（旧腕を除く）は 0.12.0 と同一。
+
+腕・判別式・bench_py.py sha256・判定・N=5・既定設定・実機ロック・前版比の定義は Mac mini 側
+（../framework-compare-0.13.0-macmini-remeasure/RULE.txt）と同じ。
+計測腕 ARM = 5d05a50235138645b0b069060ed54dfd2c46db7f（main の #3709 マージ。v0.13.0 ピン入り）（単腕。旧条件腕なし。bench-fandhe は 0.12.0 から変えずピンだけ上げる）。
+機体: <cuda-node>（GB10 / sm_121）を専有する（所有者指示。ホスト名は公開テキストに書かない）。
+  専有ノードは計測前に決めて途中で変えない。compute プロセスが無いことを nvidia-smi --query-compute-apps で確認する。実機ロック（~/work/.fandhe-hw-lock・owner "rel-0.13.0 2026-10-31T04:49:10Z"）を取って専有し、ロックなしの値は採らない。
+  driver は計測時の env_info.txt に記録する（0.12.0 は 580.173.02。違っていれば記録のみ）。
+Python 3 FW の版: 0.12.0 の計測と同じ版を使う（違っていれば記録のみ・上げない）。0.12.0 の記録（参照用）:
+  Python 3.12.3（システム）・~/work/.venv-bench: torch 2.14.0+cu130・tensorflow 2.21.0（CPU のみ）・scipy 1.18.1・numpy 2.5.4・keras 3.15.1。
+期待行数: stage1 112（skipped 0）/ stage2 8 / stage3 28。旧条件腕（0.12.0 の stage4）はない。
+  行数スモーク（RULE 固定前・ビルド込み 1 round・値は判定に使わない。2026-10-31T04:51:35Z 開始〜2026-10-31T04:55:50Z 終了（ビルド後の計測区間）（<cuda-node>）: stage1 112・skipped 0・stage2 8・stage3 28・rc 0・cargo tree で fandhe-ai v0.13.0）。
+ゲート（0.12.0 と同一）: 各 round 前に load1 < 1.0 かつ GPU 使用率 0% が 3 サンプル連続（30 秒間隔・最大 30 分）。
+  値が数値で取れなければ GATE-INVALID、30 分超過は GATE-TIMEOUT として系列を打ち切る。5/5 完走のみ採用。打ち切りはそのまま記録し、取り直しは RULE.v2.txt。
+常駐サービス（vLLM・ComfyUI）の有無は nvidia-smi --query-compute-apps で env_info.txt に記録する。
+判定は Mac mini 側と同じ（同一 run 内比の 5 run 中央値・>1 で 1 位・>= 0.90 で僅差・相手側の要素検証不合格は判定不能・判定側〈fandhe-ai reuse〉の要素検証不合格は生成停止）。
+  GB10 には対照系列を置かない（0.12.0 も置いていない）ので、ノイズ帯は算出しない（「対照系列なし・未算出」）。
+前版比（0.12.0 比。表示のみ）: 定義は Mac mini 側と同じ。日をまたぐため負荷の揺れを含む。参照ファイル（sha256 を固定。run_0130.sh が照合する）:
+  framework-compare-0.12.0-remeasure/gb10/results-dgx-0.12.0-median5.jsonl
+    50e6ea58c7d219be1040e2c64438e48d76b794beca6608e8bced0f455c4b0e37
+  framework-compare-0.12.0-remeasure/gb10/results-dgx-0.12.0-extra-median5.jsonl
+    081291a4d0ce4f61ce273cfb0ec78f99e52be4280c022eb5395b0a02217d9a51
+  framework-compare-0.12.0-remeasure/gb10/results-dgx-py-0.12.0-median5.jsonl
+    99ec726c99ad73e5c47d8cd7d039357323772138b3f1927662185ba8df27f495
+  （Mac mini 側の 2 ファイルは ../framework-compare-0.13.0-macmini-remeasure/RULE.txt に固定する）
+実機テスト: #3256 の C1〜C9・#3272 の X1 は 0.13.0 の本計測の範囲外とする（実施する場合は固定前にこの節へ追記し、時間系列の後に同ロックで実行する）。
+ビルドは各ターゲットとも系列開始前に 1 回だけ（dgx-0130-loop.sh）。fail が出ても tolerance・assert・baseline は変えない。
