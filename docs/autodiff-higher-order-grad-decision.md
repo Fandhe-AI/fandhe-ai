@@ -1284,9 +1284,158 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - GPU 実機（LayerNorm・Conv2d・MaxPool2d）は `#[ignore]` で追加。実測は #3168・#3169 へ申し送る（`docs/perf/logs/create-graph-extended-ops-3087/README.md`）。
 - 変えていないもの: 公開 API・1 階 `backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・`crates/autodiff/src`。
 
-## 33. 設計記録（イシュー #3724・親 #3719 系。create_graph の C 区分・選択縮約 7 Op）
+## 33. 決定記録（イシュー #3725・親 #3719。create_graph の C 区分・統計縮約 7 Op）
 
 ### 33.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
+- **基準**: `origin/main` の `69881d9da`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: §21.2 の C 区分（族を割り当てず fail-closed に固定した 24 Op）のうち、統計縮約の 7 Op（`Var`・`Std`・`VectorNorm`・`PNorm`・`LogSumExp`・`Nansum`・`Nanmean`）。§21.2 の C 表は方式欄を「V3」とだけ書くが、Op ごとに中身が違う（33.10）
+- **根拠**: §21.1（共通方式 V1〜V4・S1〜S3・閉包性）、§21.6（fail-closed 契約）、前例は §24（Softmax／LogSoftmax の V3）、§27（LayerNorm／RmsNorm の S1 と `check_structure_stages`）、§28、§31（総括的な判定）。ルート #3711 の「実装を既定に設計する」趣旨は設計方針の根拠であり、承認ではない
+- **後続**: 実装は #3791（Var・Std・VectorNorm・PNorm）と #3792（LogSumExp・Nansum・Nanmean）。承認は #3767、実機 parity は #3856（`<cuda-node>`）・#3858（`<metal-node>`）、雛形は #3776・#3777、測り方は #3739
+- **推奨**: **実装する（7 Op すべて）**。理由は次の 4 つ
+  1. 1 階 VJP がすべてホストの f64 関数で、V3 の値にそのまま流用できる（`crates/autodiff/src/grad.rs` の `var_vjp`:8110・`std_vjp`:8181・`vector_norm_vjp`:8268・`logsumexp_vjp`:8362・`pnorm_vjp`:8472、`crates/tensor-core/src/stat_reduce.rs` の `nan_reduce_vjp_host`:583）
+  2. 構造に要る Op がすべて既に `supports_create_graph == true`（33.11）
+  3. S1 と総括判定の前例（§27.3）がある
+  4. 分散・ノルム・logsumexp を含む損失が `jvp`／`jacfwd`／`hvp` で拒否される実害がある
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | 7 Op を実装する | 正則化項・logsumexp 損失の HVP が使える。追跡表の項目 3 が「ある」に近づく | 実装と保守の費用。総括判定の追加 |
+| B | 対象外にして fail-closed を恒久契約にする | 費用ゼロ | 上記の損失で高階変換が使えないまま残る |
+
+### 33.1 公開形
+
+該当なし。新しい公開名は増えない。`Tape::backward_create_graph`・`hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` は公開済みで、受理する Op の範囲が広がるだけである。`crates/facade/tests/api_surface.rs` には、この 7 Op に関わる否定ガードも保留 doctest ガードも無く、正ガードへ反転するものも無い。実装 PR で変える箇所:
+
+- facade の rustdoc（`crates/facade/src/lib.rs`）にある「対象 Op の正本は §21.2・§22〜§31」の範囲に §33 を加える
+- `Op` の doc コメント（`crates/autodiff/src/tape.rs`）
+- `supports_create_graph`（`tape.rs:2526`）の網羅 match で 7 Op を false 側から true 側へ移す。ワイルドカードは足さない。`VectorNorm` は payload で判定し（`ord` が `L1`／`L2` なら true）、`#[non_exhaustive]` の未知 `ord` は false にする（`ScalarUnary` の前例）
+
+### 33.2 rustdoc と doctest
+
+- 新しい公開 API が無いので必須の doctest は無い。任意で facade の `backward_create_graph` に `std` か `logsumexp` を含む CPU だけで通る HVP 例を 1 つ足す。GPU の例は置かない（置くなら `no_run`／`#[ignore]`）
+- 失敗系は `compile_fail` に頼らず、ランタイムの `Err(AutodiffError::Backward(_))` 一致と `child.is_empty()` で確かめる
+
+### 33.3 エラー型
+
+- 新しい variant は足さない。総括判定で外れた入力、非対応の `ord`、非有限レーンの拒否（33.12）は `AutodiffError::Backward(String)` にする
+- 検証順: 判定は子テープへ書く前に行う（`validate_ancestors` か cgrad 構築の冒頭）。拒否したら `Tape::backward_create_graph` のロールバックで `child` を空に戻し、再試行できるようにする（§27.3 と同じ）。shape・`dim`・`correction` は forward 側の確保前検証を通ったものだけが届く。本番経路で `unwrap`／`expect` を使わない
+
+### 33.4 テスト計画
+
+候補名は案であり、実装 PR で確定する。CI の行は新規 `crates/autodiff/tests/create_graph_stat_reduce.rs` に置く。
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|--------------|--------|------|---------------|----------------|----------------|
+| 1 階が素の `backward` と bit 同一、`cg.grad` が REQ-2 で一致（V3 は CPU で bit 一致も見る） | `stat_reduce_first_order_bit_identical_and_cgrad_req2` | CI | 未実測 | 未実測 | 未実測 |
+| ヘッシアンが有限差分と一致（7 Op × `dim` None／Some × rank 1〜3 × `correction` 0／1 × `p` ∈ {0.5, 1, 1.5, 2, 3}。5 点中央差分 h=1e-2 は §27.4 の前例どおり。判定式は変えない） | `stat_reduce_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| 必須ベクトルが 3 段（1 階・`cg.grad`・`jvp_create_graph` 経由の孫テープ再生）で有限 | `stat_reduce_mandatory_vectors_finite_in_three_stages` | CI | 未実測 | 未実測 | 未実測 |
+| 分母ゼロのレーン（std=0・‖x‖=0・p<1 で x_i=0・全 −inf・nanmean の count=0） | `stat_reduce_zero_denominator_lanes` | CI | 未実測 | 未実測 | 未実測 |
+| 安全でない入力の拒否・`child` が空・再試行できる | `stat_reduce_unsafe_inputs_rejected_child_empty_and_retry` | CI | 未実測 | 未実測 | 未実測 |
+| 構造の全経路が有限か拒否（§27.4 と同型の掛け合わせ。受理と拒否の両方が出ることも確かめる） | `stat_reduce_sweep_every_structure_path_is_finite_or_rejected` | CI | 未実測 | 未実測 | 未実測 |
+| 隣接 Op（`MatrixNorm`）が fail-closed のまま | `stat_reduce_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
+| facade 経由（代表は `std`・`logsumexp`） | `crates/facade/tests/create_graph_facade.rs` に `*_create_graph_via_facade` を追加 | CI | 未実測 | 未実測 | 未実測 |
+| CUDA／Metal の parity（forward がホストへフォールバックするかを含む。33.12） | `create_graph_stat_reduce_cuda_parity`／`create_graph_stat_reduce_metal_parity`（後者は `cfg(target_os = "macos")`）。置き場・名前は #3776・#3777 の雛形が確定するまで仮。測り方は #3739 に従う | `#[ignore]` | 未実測 | 未実測 | 未実測 |
+
+実機の実行は #3856・#3858 が担う。Linux や開発機の代替値で pass にしない。
+
+### 33.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えない。新しい baseline は作らない（作るなら実機の実測値に限り所有者承認）
+- 1 階は構造上 bit 同一（§21.1(1)）。V3 の Op は `cg.grad` の値も CPU で 1 階と bit 同一。V1／V2 は REQ-2
+- f64 長軸縮約の契約（`coding-rust.md`。二乗和は先に f64 へ上げてから二乗する）は V3 の値側で守る。構造側の f32 合成は値を決めない。FMA 契約には影響しない
+- 必須ベクトル（3 段すべてで有限かつ一致。外れる場合は総括判定で拒否され `child` が空になることを固定する）:
+  - 大スケール `x=1e20`・`[-1e20, 1e20]`
+  - 中心化の丸め `[16777216, 16777218]`（Var・Std）
+  - 小スケール `[1e-30, 1e-30]` と非正規化数の入力
+  - 大きな upstream `g=3e38`・`g=[3e38, -3e38]`
+  - 定数レーン（std=0）・全ゼロレーン
+  - LogSumExp の `[-inf, -inf]`・`[+inf, 1]`・`[+inf, +inf]`
+  - PNorm の `p=0.5` でゼロ要素を含むレーン、極小 `p`（例 0.01）× 長いレーン
+  - NaN を含むレーン（Nansum／Nanmean）
+- 保証範囲は §27.3 と同じ書き方にする。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上の微分と、真値が f32 を超える場合（1 階と同じく `inf`）は対象外
+
+### 33.6 互換への影響
+
+**追加のみ**。`api-compat-0.14.0-decision.md` §8 の手順で判定する。触れる公開型が無く（`Op` は `pub(crate)`）、`AutodiffError` の variant も公開シグネチャも変わらない。以前 `Err` だった入力が `Ok` になる受理範囲の拡大であり、§1.1 の破壊的条件には当たらない。`Op` の payload（`dim`・`correction`・`ord`・`p`）は再生に必要な値を持っており、追加は要らない。
+
+### 33.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `docs/compat-api-scope.md` への適用記録は #3767 の承認後の実装 PR で書く。文案: `**適用記録（イシュー #3791・#3792・親 #3725。承認: <#3767 の回答 URL>）**: 統計縮約 7 Op を create_graph の対象にした。公開名の追加なし。`
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（承認後の PR で行う。承認が無いうちは書かない）
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した（項目 3 の設計記録の欄に §33 を追記）
+
+### 33.8 ベンチと性能への影響
+
+既定経路（`Tape::backward`・forward）は変わらない。`supports_create_graph` は create_graph の入口でしか呼ばれない。増えるのは create_graph 経路の構造ノード（1 Op あたり数〜十数ノード）と総括判定のホスト走査 O(numel) だけである。既定経路に触れないので前後比較は不要と判断する。実装で既定経路に触れた場合は、5 回計測の中央値で前後を比べ、判定規則を計測前に固定する。実機の値は未実測。
+
+### 33.9 依存の追加の有無
+
+追加なし。許容 12 区分・禁止リストとの照合で変化なし。新しい `unsafe` なし。`erf` 等の外部クレートも使わない。
+
+### 33.10 族の方式と式（Op ごと）
+
+記号: `x_m` は子テープ上の入力の写し、`g` は子テープ上の upstream、`g_b` は `g` を縮約軸へ broadcast したもの。縮約軸は `dim` を permute／reshape で `[lanes, axis_len]` に寄せて扱い、終わったら戻す（`Permute`・`Reshape`・`Contiguous`。`dim=None` はレーン 1 本）。再生（R）は公開メソッドへ委譲する（`Var::var`:7026・`std`:7087・`norm_l1`:7109・`norm_l2`:7116・`logsumexp`:5999・`norm_p`:6017・`nansum`:5245・`nanmean`:5239。いずれも `crates/autodiff/src/var.rs`）。V3 の値に使う 1 階のホスト関数は `pub(crate)` にする（本体・数値は変えない）。
+
+**#3791 側**
+
+- **Var（V3。中心化を安定化する）**: cgrad = `g_b · 2·dev / (n−c)`。dev は §21.3／§27.1 の安定な中心化（`x_ref=Narrow`・`d=x−x_ref`・`dev=d−Mean(d)`・補正 `dev2=dev−Mean(dev)`）で作る。`create_graph_norm::stable_centering`（`create_graph_norm.rs:640`）を軸一般化して共用する。dev について線形なので S1 のスケールは要らない。値は `var_vjp`。`Mean` の f32 部分和の overflow（§27.2(c) と同じ型）は総括判定で拒否する
+- **Std（V3 + 2 段スケール）**: cgrad = `g_b ⊙ dev / ((n−c)·std)`。dev／std はスケール不変なので、まず `x/s0`（s0 は `max|x|` 以上の 2 のべき乗。指数は [-126, 127] にクランプし、全ゼロは 1）で前スケールし、安定な中心化のあと、さらに `dev/s1`（s1 は子テープ上の実値 `max|dev2|` 以上の 2 のべき乗）で正規化する。そのうえで `std_s = sqrt(Σ dev_s² / (n−c))` を Sum・Mul・Div・Sqrt で合成する。`|dev_s / std_s| ≤ √(n−c)` に収まる。値は `std_vjp`。`(std as f32)==0` のレーンは 1 階が 0 勾配にマスクしているので V2 にする。出力側の `where_cond` だけでは足りない。捨てた側の `Div` の VJP が分母 0 で NaN を作るため、分母を `where_cond(mask, 1, std_s)` で先に守る。さらに分母だけの保護でも足りない。出力を 0 に置き換えると逆伝播で `Sqrt` にゼロの cotangent が届き、`Sqrt` の微分係数 `0.5/y`（`crates/autodiff/src/eval/scalar.rs:90`）が `y=0` で `0×inf=NaN` になる。そこで定数レーンでは `Sqrt` に入る二乗和 `Σ dev_s²/(n−c)` を先に `where_cond(mask, 1, 二乗和)` で正の定数へ置換し、そのあとで出力を `where_cond(mask, 0, …)` でゼロにする（`Sqrt` の入力側を守る）。前スケールは §27.2 が将来案に残した「S0」を、この族で採る形になる（§27.2 の本文は書き換えない）。代替は `x_m.std` の自己再生（`Op::Std` 自身を積む）で、33.14 に載せる
+- **VectorNorm L1（V3 の値 + V2 の構造）**: 1 階は `g·sign(x)` を f32 の乗算で計算している（`grad.rs:8268` 以降。`g=inf` かつ `x=0` で NaN）。構造は `where_cond(x>0, g_b, where_cond(x<0, −g_b, 0))` とし、0/1 定数を掛ける方式は使わない（§21.1(3) の `inf*0` 規則）。値は `vector_norm_vjp` を V3 で入れて 1 階と bit 一致させる。x による二階は 0
+- **VectorNorm L2（V3 + S1）**: cgrad = `g_b ⊙ x_s / ‖x_s‖₂`。`x_s = x/s` で、x/‖x‖ はスケール不変なので戻しは要らない。‖x_s‖ は Sum・Mul・Sqrt で合成し、値は 1 以上 √n 以下になる。‖x‖=0 のレーンは分母を `where_cond` で 1 にし、出力を 0 にする。ただし `Sqrt` の出力だけを置換しても、逆伝播で `Sqrt` にゼロの cotangent が届き、微分係数 `0.5/y`（`crates/autodiff/src/eval/scalar.rs:90`）が `y=0` で `0×inf=NaN` になる。そのため全ゼロレーンでは `Sqrt` に入る二乗和 `Σ x_s²` を先に `where_cond(mask, 1, 二乗和)` で正の定数へ置換し、そのあとで出力をゼロにする（`Sqrt` の入力側を守る）。NaN は IEEE のまま伝播させる（1 階の NaN 分岐と同じ）。値は `vector_norm_vjp`
+- **PNorm（V3 + S1 + V2）**: cgrad = `g_b ⊙ sign(x) ⊙ (|x_s| / ‖x_s‖_p)^(p−1)`。sign は `where_cond` の 3 分岐にする。`x_i=0` の要素は `|x_s|` を `where_cond(x==0, 1, |x_s|)` で守ってから `PowScalar` に入れ、出力を 0 にする（p<1 で `0^負` が inf になるのを防ぐ。1 階の劣勾配の選び方と同じ）。`‖x_s‖_p = (Σ |x_s|^p)^(1/p)` は Abs・PowScalar・Sum で合成する。全ゼロレーンでは `Sum` の結果（`PowScalar(1/p)` の入力）も同様に `where_cond` で正の定数へ先に置換する（`0^(1/p)` の微分係数が `p>1` で `0×inf=NaN` になるのを防ぐ）。極小の p では f32 で overflow するので総括判定で拒否する。`±inf` を含むレーン（1 階は均等分配の特別分岐）は 33.12 と 33.14 で扱う。値は `pnorm_vjp`
+
+**#3792 側**
+
+- **LogSumExp（V3）**: 有限なレーンの cgrad = `g_b ⊙ softmax(x_m, dim)`（`dim=None` は reshape して軸 0）。Softmax は #3077（§24）で対象になっており依存は満たされている。値の範囲は [0, 1] で `|cgrad| ≤ |g|`。代替の `g·exp(x_m − lse_m)` は LogSumExp 自身を積むので採らない。値は `logsumexp_vjp`。非有限レーンの 3 分岐（全 −inf は 0、+inf は均等分配、NaN は伝播）はこの構造では表せない。推奨は V2: 入力を `where_cond(非有限レーン, 0, x_m)` で守り、全 −inf レーンは 0、+inf レーンはホスト定数 `1/inf_count` を +inf の位置に置いて `g_b` と選び合わせ、NaN レーンは伝播に任せる。代替は非有限な x を入口で拒否する案（§27.2(a) 型）で、33.14 に載せる
+- **Nansum（V3 の値 + V2 の構造）**: 構造は `where_cond(isnan_mask, 0, g_b)` で `x_m` に依存しない（x による二階は 0）。値は `nan_reduce_vjp_host`（NaN の位置は `0×t` なので、`g` が非有限なら NaN）。構造との違いは `g` が非有限な場合の構造側だけに限られる
+- **Nanmean（V3 の値 + V2 の構造）**: 構造は `where_cond(isnan_mask, 0, g_b / count)`（count はホストの整数定数）。値は `nan_reduce_vjp_host`（f64 で割ってから 1 回 downcast）。count=0（全 NaN）のレーンは分母を 1 に守って構造を有限にし、値はホスト関数の NaN をそのまま使う（1 階と同じ）
+
+### 33.11 閉包性と族間の依存
+
+- 子テープへ積む Op: `Reshape`・`Permute`・`Contiguous`・`Narrow`・`BroadcastTo`・`Sum`・`Mean`・`Mul`・`Add`・`Where`・`ScalarBinary`（Sub・Div）・`ScalarUnary`（Sqrt・Abs・PowScalar・Neg）・`Softmax`（LogSumExp だけ）。基準時点で `supports_create_graph`（`tape.rs:2526`）と `scalar_unary_replayable`（`create_graph.rs:145`）で true になっていることを確かめた。`ScalarBinary` は実装前に origin/main で再確認する
+- 他族への依存は #3077（Softmax）だけで、マージ済み。7 Op はどれも自分自身を構造に積まない（Std の自己再生は代替案）
+- 孫テープの再生では、子テープ上にある 7 Op の forward の写しが再生されるので、7 Op 自身が true であることが要る（族の中で閉じる）
+- 依存順: #3791 と #3792 は互いに独立。`stable_centering` の共用化は #3791 が持つ
+
+### 33.12 fail-closed・総括的な適用判定・拒否テスト
+
+- **総括判定**: `check_structure_stages`（`create_graph_norm.rs:338`）と同型の判定を族全体に置く。構造の forward の各段、二階の逆伝播の「cotangent × 微分係数」、境界の cotangent の上界をホストが f64 で求め、`2^125` 以上か非有限になる段があれば拒否する（閾値と seed の絶対値 1 以下という前提は §27.3 と同じ）。個別の条件を足していく方式は、§27.3 でレビューが収束しなかった経緯から採らない。特に危ない段は PNorm の `(Σ)^(1/p)`、Std／L2 の低分散レーンで `1/std²` 型の係数が cotangent を増幅する段、Var の `Mean` の部分和
+- **入口での拒否の候補**: 非有限要素を含む x（Std／L2／PNorm／Var。推奨は「NaN は伝播、±inf は拒否」）、非有限の g（§27.3 と同じ）。33.14 で問う
+- **既存テストの差し替え（#3792 の作業）**: `crates/autodiff/tests/create_graph.rs` の `create_graph_rejects_unsupported_op_logsumexp`（:697）と `create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty`（:2955）は LogSumExp を拒否の見本にしており、LogSumExp が true になると壊れる。隣接 Op は `MatrixNorm`（§21.2 の #3086 で fail-closed。ノルムに近く、兄弟の C 区分 issue の対象でもない）に替える。実装時点で `MatrixNorm` が true になっていたら恒久対象外の `Op::Custom` に替える。`Max`／`Amax` は兄弟 issue と同時に true になりうるので使わない
+- **CUDA／Metal の forward**: forward は 1 階の既存経路のままで、本設計では変えない。create_graph の構造ノードはホストの再生経路（既存のホスト実装）で評価し、GPU カーネルを新設しない。GPU で cgrad の値が一致するかは未実測で、#3856・#3858 が `#[ignore]` テストで確かめる（33.4）
+- §21.6 の判定順・網羅 match・未知 variant を false にする規約は弱めない
+
+### 33.13 セキュリティ観点・スコープ外・Closes／Refs
+
+- A03: shape・`dim`・`correction` は forward 側の確保前検証を通ったものだけが届く。総括判定はホスト走査で、新しい確保は O(numel) の f64 一時領域に限る
+- A04: 拒否時に子テープを空に保ち、fail-closed を維持する
+- A06: 依存を追加しない。A08: 該当なし。秘密情報・ホスト名・個人のパスは書かない
+- **スコープ外**: GPU 実機の parity（#3856・#3858）、測り方（#3739）、f64 テープの create_graph（#3722）、S2 の実装（拒否範囲を狭めるかは 33.14）、`VectorNormOrd` の新 variant。新しい issue は承認なしに起票しない
+- `Closes #3725`。`Refs #3791 #3792 #3767 #3719`
+
+### 33.14 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 族の採否 | 7 Op を実装する／対象外にする | 実装する | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 2. LogSumExp・PNorm の ±inf レーン | V2 で 1 階の極限の意味を写す／入口で拒否 | V2 で写す | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 3. Std／L2／PNorm／Var の非有限な x | NaN は伝播し ±inf は拒否／全部拒否／全部受理 | NaN は伝播し ±inf は拒否 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 4. 総括判定で外れる入力 | 型付きエラーで拒否（§27.2 と同じ）／S2 を作って受理 | 型付きエラーで拒否 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 5. Std の構造 | 2 段スケールの合成／`Op::Std` の自己再生 | 2 段スケールの合成 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 6. 前スケール S0 をこの族で採ること（§27.2 の将来案を先に使う） | 採る／採らない | 採る | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 7. GPU parity の判定方式 | #3739 の推奨に従う（tolerance は変えない）／別方式 | #3739 に従う | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+
+### 33.15 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
+## 34. 設計記録（イシュー #3724・親 #3719 系。create_graph の C 区分・選択縮約 7 Op）
+
+### 34.0 位置づけ・承認根拠・境界・推奨
 
 - 状態: **設計記録のみ**。承認は #3767 の回答待ちで、本節は承認を代行しない。コード・公開面・tolerance・baseline は変えない。基準 sha は `69881d9da`。
 - 対象 7 Op: `Max`・`Min`・`Amax`・`Amin`・`OrderSelect`・`MedianAll`・`Quantile`。いずれも `crates/autodiff/src/tape.rs` の `supports_create_graph`（:2526）で `false` の腕にあり、`backward_create_graph` は型付きエラーで拒否する（fail-closed）。
@@ -1298,17 +1447,17 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - 境界: 統計縮約（`Nansum`・`Nanmean` 等。#3725）は扱わない。公開面の追加はしない。実装は #3789（`Max`・`Min`・`Amax`・`Amin`）と #3790（`OrderSelect`・`MedianAll`・`Quantile`）に分ける。
 - 訂正の注記: §21.2 の表は選択縮約を「V2」と一括りにしている。本節では Op ごとに V1／V2／V3 を割り当てる。§21.2 の本文は書き換えない。
 
-### 33.1 公開形
+### 34.1 公開形
 
 - 該当なし。新しい公開名は無い。facade は `Var` をそのまま再エクスポートし（`crates/facade/src/lib.rs:281`）、`max`／`min`／`amax`／`amin`／`median`／`kthvalue`／`quantile` と `backward_create_graph`（:935）は公開済みで、変わるのは受理する Op の範囲だけである。
-- `api_surface.rs` に本族を拒否する否定ガードは無い（fail-closed は挙動で固定されている）。正ガードに当たるものは 33.4 の facade 挙動テスト `*_create_graph_via_facade` とし、追跡表のセルは実装 PR で更新する。
+- `api_surface.rs` に本族を拒否する否定ガードは無い（fail-closed は挙動で固定されている）。正ガードに当たるものは 34.4 の facade 挙動テスト `*_create_graph_via_facade` とし、追跡表のセルは実装 PR で更新する。
 
-### 33.2 rustdoc と doctest
+### 34.2 rustdoc と doctest
 
 - facade `backward_create_graph` の rustdoc（`lib.rs:910` 付近）の「対象 Op の正本」へ選択縮約を追記する。実装 PR で行う。
 - doctest は CPU で通る `x.max(None)` を含む二階の例を 1 つ置く。失敗系は `compile_fail` に頼らず挙動テストで検証する。
 
-### 33.3 エラー型
+### 34.3 エラー型
 
 - 新しい variant は足さず、既存の `AutodiffError::Backward` を使う。拒否するのは次の場合。
   - 未知の `QuantileInterpolation`（`#[non_exhaustive]`。`stat_reduce.rs:53`。`validate_ancestors` に `check_fft_norm`〈`create_graph/linalg_fft.rs:68`〉と同形の検査を足す）
@@ -1316,45 +1465,45 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
   - V3 の shape 不一致（`push_v3`）
 - 検査はすべて確保より前、かつ子テープへ書く前に行い、拒否時は `child` が空のまま残る。本番経路で `unwrap`／`expect` は使わない。
 
-### 33.4 テスト計画
+### 34.4 テスト計画
 
 | 区分 | 内容 |
 |---|---|
 | CI（ubuntu-latest） | 新設 `crates/autodiff/tests/create_graph_select_reduce.rs`。7 Op の Hessian を 5 点中央差分と REQ-2 判定で突き合わせる。選択だけでは二階が 0 なので合成形を使う（`max(x⊙x)`・`max(x)²`・`amax(x)²`・`kthvalue(x³)`・`median(x)²`・`quantile(x², q)`。`dim` は None／中央軸、補間は 5 種すべて） |
 | CI | 1 階 `first_order()` の bit 一致、`cg.grad` の bit 一致、`jvp_create_graph`（孫テープ）と独立参照の一致 |
-| CI | タイと NaN の回帰（33.12 の回帰ベクトル） |
+| CI | タイと NaN の回帰（34.12 の回帰ベクトル） |
 | CI | 隣接する fail-closed の拒否テスト: `Op::Custom` との組み合わせで拒否され `child` が空のままであること |
 | CI | `tape.rs` 単体テスト `selection_reduce_family_supports_create_graph`: 7 Op が `true`、隣接の `Nansum`・`Nanmean` が `false`（兄弟の族が反転した PR がこの一覧を直す） |
 | CI | `create_graph/` 配下の単体テスト: マスク・重みが 1 階ホスト関数と bit 一致、範囲外 `index` が型付きエラー |
 | CI | facade `crates/facade/tests/create_graph_facade.rs` に `max_`／`amax_`／`kthvalue_`／`median_`／`quantile_create_graph_via_facade` を `check_create_graph_family` で追加 |
-| CI | 33.13 の既存テスト差し替え |
+| CI | 34.13 の既存テスト差し替え |
 | `#[ignore]`（実機） | `gpu_extended_ops_match_cpu` のケース表へ `max`・`amax`・`quantile` を追加（`create_graph_extended_ops_{cuda,metal}_matches_cpu` で走る）。#3776／#3777 の雛形ができたら登録表へ移す |
 
 実機の結果はすべて **未実測**。実測は #3856（`<cuda-node>`）・#3858（`<metal-node>`）に申し送る。
 
-### 33.5 数値契約
+### 34.5 数値契約
 
-- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を使う。tolerance 定数・baseline・ガードレール閾値・FMA 契約は変えない。f64 長軸縮約の契約はホスト関数側でそのまま保たれる。baseline の追加は無い。詳細は 33.12。
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を使う。tolerance 定数・baseline・ガードレール閾値・FMA 契約は変えない。f64 長軸縮約の契約はホスト関数側でそのまま保たれる。baseline の追加は無い。詳細は 34.12。
 
-### 33.6 互換への影響
+### 34.6 互換への影響
 
 - 該当なし。facade の公開型とシグネチャは変わらない。`api-compat-0.14.0-decision.md` §1.2 の項目 3（挙動のみ。`Err` が `Ok` になる受理拡大）にあたり、§8 の手順に当てはめても破壊的変更は生じない。
-- tensor-core に `pub fn`（33.10(e)）を足す場合も内部クレートへの追加のみで、facade は `stat_reduce` を再エクスポートしない。
+- tensor-core に `pub fn`（34.10(e)）を足す場合も内部クレートへの追加のみで、facade は `stat_reduce` を再エクスポートしない。
 
-### 33.7 適用記録・索引・追跡表
+### 34.7 適用記録・索引・追跡表
 
 - `compat-api-scope.md` の適用記録は承認後の実装 PR で書く。本 PR では行わない。
 - 本 PR で行うのは `docs/README.md` の索引と、`docs/compat-matrix-ari-tracker.md` 行 3 の「設計記録」セルの更新だけ。
 
-### 33.8 ベンチ
+### 34.8 ベンチ
 
 - 既定経路（1 階 `backward`）に影響は無い。変わるのは create_graph 経路と `supports_create_graph` の腕だけで、共有ヘルパーの切り出しも値を変えない。前後比較は不要。
 
-### 33.9 依存
+### 34.9 依存
 
 - 追加しない。許容 12 区分と禁止リストに照らして新規なし。新しい `unsafe` も無い。
 
-### 33.10 方式と式
+### 34.10 方式と式
 
 | Op | 方式 | 再生 | cgrad の構造 | 子テープへ積む Op |
 |---|---|---|---|---|
@@ -1381,22 +1530,22 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 (e) `Quantile`
 - lane に NaN があれば安定順で最後の NaN へ `g` を流す。`lo == hi` なら `g` を直接代入し、それ以外は `g·(1-w)`・`g·w` を配る。f32 に丸めると 0 になる重みの項は、乗算ではなくマスクで外す（`inf*0` を避ける）。
-- 規則を 1 か所で持つため、tensor-core の `stat_reduce` に lane ごとの選択位置を返す `pub fn`（仮名 `quantile_select_host`）を足す案とする。1 階側の `sort_order`・`quantile_positions` は private。足すかどうかは #3790 で確定し、代案は 33.15 の論点 3。
+- 規則を 1 か所で持つため、tensor-core の `stat_reduce` に lane ごとの選択位置を返す `pub fn`（仮名 `quantile_select_host`）を足す案とする。1 階側の `sort_order`・`quantile_positions` は private。足すかどうかは #3790 で確定し、代案は 34.15 の論点 3。
 - 重みは x について区分定数で、x による二階微分は 0。
 
-### 33.11 閉包性
+### 34.11 閉包性
 
 - 子テープへ積む Op は、`Reshape`・`BroadcastTo`・`Where`・`Contiguous`・`ScalarBinary{Div, Mul}`・`Add`・`Gather`・`Scatter{Add}`・定数 `Leaf` と、写しの forward として積む `Max`・`Min`・`Amax`・`Amin`・`MedianAll`・`Quantile`。前者は既に対象で、後者はこの族を `true` にしたときに初めて孫テープでも閉じる。このため #3789 と #3790 は、担当する Op を同じ PR の中で `true` にする。
 - 依存先は §25（#3083 の索引系）と §16（#2062 の `Where`／`ScalarBinary`）だけで、いずれもマージ済み。他の C 区分の族には依存しない。§21.4 の依存順には「#3789・#3790 は §16・§25 の後、他の C 区分と独立」の 1 行を足す扱いとする。
 
-### 33.12 タイ・NaN・1 階との bit 一致
+### 34.12 タイ・NaN・1 階との bit 一致
 
 - 1 階 `first_order()` は親テープを加工しないので構造上 bit 同一（§21.1(1)）。
 - `cg.grad` が bit 一致する理由は Op で異なる。`Max`・`Min`・`OrderSelect` は選択だけだから。`Amax`・`Amin`・`MedianAll`・`Quantile` は V3 で 1 階のホスト値を使うから。
 - 契約として約束するのは REQ-2（§9 (i)）で、テストでは bit 一致で固定する（§32 の運用と同じ）。孫テープ（`jvp_create_graph`）で再生した値は REQ-2 で一致すればよい。
 - 回帰ベクトル: タイ（先勝ち・均等分配）、`[0.0, -0.0]`、NaN を含む lane（`Max` は勾配ゼロ、`Quantile` は最後の NaN）、`Amax` で `k == 0` の lane の二階が NaN を生まないこと、上流 `3e38` で 1 階・`cg.grad`・二階が有限であること。
 
-### 33.13 既存テストの差し替え（#3789 で必須）
+### 34.13 既存テストの差し替え（#3789 で必須）
 
 次の 7 か所は `x.max(None)` を「拒否される Op」の代表に使っており、#3789 で `Max` を `true` にした時点で壊れる。
 
@@ -1408,13 +1557,13 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 代わりの拒否 Op は恒久的に対象外の `Op::Custom`（A 区分）に統一する（§32 と同じ判断）。`Var`・`LogSumExp`・`Nansum` 等は #3725 で `true` になりうるため使わない。`custom` のケースを既に持つテストでは `max` のケースを「受理される」確認へ反転するか削除し、ノード数を検査するテストは期待値を直す。`stat_reduce_parity.rs` の `create_graph_is_a_typed_error_not_a_panic` は `nansum` を使うので触らない（#3725 の扱い）。
 
-### 33.14 GPU の forward 経路と Phase 10
+### 34.14 GPU の forward 経路と Phase 10
 
 - `Max`・`Min`・`Amax`・`Amin` の forward はデバイスカーネルで走る（CUDA: `crates/backend-cuda/src/ops.rs:6371`・:6380。Metal: `crates/backend-metal/src/ops.rs:4122`・:4220。Metal の `min` は ±0 の符号が実装依存で bit 一致は主張しない）。マスクは親の記録値から `==` で作るので、各バックエンドの NaN／±0 規則と 1 階の結果が構造上一致する。
 - `OrderSelect`・`MedianAll`・`Quantile` の `BackendOps::stat_*` を実装するのは `backend-cpu`（`ops.rs:3665`）だけで、CUDA／Metal では `Unsupported` になりホストのカーネルへフォールバックする（`stat_reduce_ops.rs` 冒頭の経路 ③）。
 - 子テープの構造 Op（`where_cond`・`div`・`mul`・`scatter_add`・`gather`）はデバイスで実行され、V3 の値はホストで計算する。実機の結果は全部**未実測**で、Phase 10 の #3856・#3858 へ申し送る。
 
-### 33.15 所有者へ戻す論点（#3767 で問う）
+### 34.15 所有者へ戻す論点（#3767 で問う）
 
 | 点 | 選択肢 | 推奨 | 確認がないときの扱い |
 |----|--------|------|----------------------|
@@ -1423,7 +1572,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 | 3. `Quantile` の位置情報の取得元 | tensor-core に `pub fn` を足す ／ autodiff 側で同じ規則を写す | `pub fn` を足す（規則を 1 か所で持つ） | 同上 |
 | 4. 7 Op を実装するか | 全部実装する ／ 一部を対象外にする | 全部実装する | 同上 |
 
-### 33.16 その他
+### 34.16 その他
 
 - セキュリティ観点: 外部入力は扱わない。`index`・形状・`q`・enum variant・確保サイズは確保前に検証する。秘密情報は書かない。
 - スコープ外: 統計縮約（#3725）など他の C 区分の族、公開面の追加、f64 テープ（#3722）。
