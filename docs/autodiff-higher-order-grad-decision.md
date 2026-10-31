@@ -1900,6 +1900,167 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`・`docs/autodiff-lrn-weight-reparam-decision.md`。
 
+## 37. 設計記録（イシュー #3728・親 #3719。create_graph の C 区分・RNN セル 4 Op）
+
+### 37.0 位置づけ・承認根拠・境界・推奨
+
+- 状態: **設計記録のみ**。承認は #3767 の回答待ちで、本節は承認を代行しない。コード・公開面・tolerance・baseline は変えない。基準 sha は `b0a48b25d`。
+- 対象 4 Op: `RnnCell`・`LstmCell`・`LstmHidden`・`GruCell`。いずれも `crates/autodiff/src/tape.rs` の `supports_create_graph`（:2526。RNN の行は :2634〜2637）で `false` の腕にあり、`backward_create_graph` は型付きエラーで拒否する（fail-closed）。
+- 根拠: §20（D-A）、§21.1、§21.2 の C 区分表、§21.6、ルート #3711 の方針。これらは設計方針の根拠であって承認ではない。
+- 推奨: **A. 実装する（4 Op すべて）**。
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| A（推奨） | 4 Op を `Var::rnn_cell`／`lstm_cell`／`gru_cell` への自己再生で子テープに写し、cgrad を primitive の合成で書く | payload の追加が不要。既定経路は不変 |
+| B | 対象外にし、fail-closed を恒久契約にする | RNN を含むモデルの `hvp`・`jvp`・`jacfwd` が拒否され続ける |
+| C | モジュールに非 fused モードを足し、利用者に primitive 経路を渡す | 公開面の追加になるため別承認。推奨しない |
+
+- §21.2 は RNN セルを「恒久寄り。利用者が replayable な primitive で手組みすれば create_graph は通る」とする。fused Op は性能のためにあり、その言い分には理がある。ただし次の事実が反対側にある。
+  - facade は `GateParams` を再エクスポートしていない（`fandhe_ai_autodiff` の `lib.rs:430` にだけある）ので、facade 利用者は `Var::rnn_cell` 等を直接組めない。
+  - facade の RNN 系公開 API（`Tape::rnn_forward_seq`／`lstm_forward_seq`／`gru_forward_seq`、stacked 系、packed 系。`crates/facade/src/lib.rs:1779〜1864`）はどれも fused Op を積む。
+  - よって facade 利用者には手組みの経路が事実上無く、RNN を含むモデルの二階微分が拒否される実害が残る。
+- A を推す理由:
+  - 1 階 VJP が「pointwise 因子 × アフィン（GEMM）」で、どちらも対象の Op で書ける。
+  - payload の追加が要らない。
+  - 他の C 区分の族に依存しない。
+  - 既定経路（1 階 `backward`）は変わらない。
+- 境界: 統計縮約（#3725）・選択縮約（#3724）・構造変換（#3726）・正規化（#3727）は扱わない。実装は #3795（`RnnCell`・`GruCell`）と #3796（`LstmCell`・`LstmHidden`）に分ける。
+- 前提となるコードの事実（基準 sha の値。実装 PR の前に引き直す）:
+  - payload は、`RnnCell` が NodeId だけ、`LstmCell` が `gates_ifg [B,3H]`、`LstmHidden { cell, gate_o [B,H] }`、`GruCell` が `gates_rzn [B,3H]` と `q [B,H]`。いずれも追跡しない Tensor（`tape.rs:771〜830`）。
+  - push 順序の契約: `Var::lstm_cell` は `LstmCell` → `LstmHidden` をこの順で続けて push し `(h_t, c_t)` を返す（`var.rs:6528`・:6625・:6638）。1 階 VJP の `LstmHidden` 腕は `nodes[cell].op` が `LstmCell` でなければ型付きエラーにする（`grad.rs:2085〜2118`）。
+  - `for_each_input` では `LstmHidden` の入力は `cell` だけ（`tape.rs:2452`）。VJP は o ゲート経由で x・h_prev・w_ih・w_hh・b にも寄与する。
+  - `is_checkpoint_eligible` にも 4 Op が並ぶ（`tape.rs:1854`・:1954〜1957）。本件では変えない。
+
+### 37.1 公開形
+
+- 該当なし。新しい公開名は無い。変わるのは受理する Op の範囲だけ。
+- `api_surface.rs` に RNN の create_graph を拒否する否定ガードや保留 doctest ガードは無い（nn::rnn の公開面ガードは層の公開範囲を見るもので無関係）。正ガードの代わりは 37.4 の facade 挙動テスト `*_create_graph_via_facade` とする。
+- 実装 PR で変える箇所: `supports_create_graph` で 4 Op を `true` 側へ移す（ワイルドカードは足さない）、`Op` の doc コメント、facade の rustdoc（`lib.rs:910` 付近ほか）が指す「§21.2・§22〜§31」の範囲に本節を加える。
+
+### 37.2 rustdoc と doctest
+
+- 必須の doctest は無い。任意で、facade の `backward_create_graph` に `Tape::rnn_forward_seq` を含む CPU だけで通る HVP 例を 1 つ足す。GPU の例は `no_run`／`#[ignore]`。
+- 失敗系は `compile_fail` に頼らず、`Err(AutodiffError::Backward(_))` と `child.is_empty()` で確かめる。
+
+### 37.3 エラー型
+
+- 新しい variant は足さず `AutodiffError::Backward(String)` を使う。拒否するのは次の場合。
+  - `validate_ancestors` で、親の `LstmHidden.cell` が `LstmCell` を指していない（子テープに書く前に判定する）。
+  - 再生直後に、子テープ側の対応ノード（37.10）が `LstmHidden { cell: 写しの c の id }` になっていない（push 順序契約の違反。`rollback_to` で `child` を空に戻す。`create_graph.rs:366〜373`）。
+  - shape 不整合。
+- 本番経路で `unwrap`／`expect` は使わない。
+
+### 37.4 テスト計画
+
+CI の行は新設 `crates/autodiff/tests/create_graph_rnn_cell.rs` に置く。テスト名は案で、実装 PR で確定する。
+
+| 受け入れ基準 | テスト（案） | 区分 |
+|---|---|---|
+| 1 階 `first_order()` が素の `backward` と bit 同一。`cg.grad` が REQ-2 で一致（4 Op × bias None／Some × B=1・H=1 と B=3・D=4・H=5） | `rnn_cells_first_order_bit_identical_and_cgrad_req2` | CI |
+| ヘッシアンと有限差分の一致。x・h_prev・c_prev・w_ih・w_hh・b のそれぞれと混合二階（weight × input）。損失は `sum(h²)`・`sum(h⊙c)` など非線形を合成。5 点中央差分 h=1e-2（§27.4 の前例）。判定式は変えない | `rnn_cells_hessian_matches_finite_difference` | CI |
+| BPTT T=3 で重みを共有し fan-in がある場合（`nn::Rnn/Lstm/Gru` の forward_seq 経由）。LSTM は h だけ使う／c だけ使う（`LstmHidden` が祖先に無い）／両方使う、の 3 通り | `rnn_cells_bptt_fan_in_and_lstm_output_subsets` | CI |
+| 3 段（1 階・`cg.grad`・`jvp_create_graph` 経由の孫テープ再生）で、有限か 1 階と同じ非有限か。飽和ゲート（pre=±1e4・±1e30）、`g=3e38`、大きな `c_prev`・`q` | `rnn_cells_mandatory_vectors_three_stages` | CI |
+| 掃引: 1 階が有限なら cgrad・二階も有限 | `rnn_cells_sweep_first_order_finite_implies_cgrad_finite` | CI |
+| push 順序契約の違反が型付きエラーになり `child` が空のまま残る | `create_graph.rs` 内の単体テスト（`Op` が `pub(crate)` のため） | CI |
+| 4 Op が `true`、隣接の `CtcLoss` が `false` | `rnn_cell_family_supports_create_graph`（`tape.rs` 単体） | CI |
+| 隣接する fail-closed: `Op::Custom` と組み合わせると拒否され `child` が空（§32・§34 の方針） | `rnn_cells_neighbouring_unsupported_op_stays_fail_closed` | CI |
+| facade 経由 | `create_graph_facade.rs` に `rnn_`／`lstm_`／`gru_create_graph_via_facade` を `check_create_graph_family`（:552）で追加（`Tape::*_forward_seq` 経由） | CI |
+| 実機 parity | `gpu_extended_ops_match_cpu`（:826）のケース表へ rnn／lstm／gru を追加（`create_graph_extended_ops_{cuda,metal}_matches_cpu`）。#3776・#3777 の雛形ができたら登録表へ移す。ROCm は雛形が無く `<rocm-node>` は未実測 | `#[ignore]` |
+
+- 既存テストの差し替え: **無し**。RNN セルを「拒否される Op」の見本にしている既存テストは無い（`create_graph*.rs`・`double_vjp_feasibility.rs`・`functional_ops*.rs`・`jacobian_hessian_parity.rs`・`functional_ops_jvp_tests.rs`・`nn_rnn.rs`・facade の `create_graph_facade.rs` を grep して 0 件）。§34.13 のような差し替えは要らない。
+- 実機の結果はすべて **未実測**。実行は #3856（`<cuda-node>`）と #3858（`<metal-node>`）が担う。開発機の代替値で pass にしない。
+
+### 37.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値・FMA 契約は変えない。新しい baseline は作らない。
+- 1 階は構造上 bit 同一（§21.1(1)）。写しの値も、forward と同じ公開 `Var` メソッド・同じカーネルを通るので 1 階と bit 同一になる。
+- `cg.grad` は REQ-2 で一致させる。pointwise 因子を子テープの primitive 合成で作り直すので、fused カーネル・FMA（GRU の forward は `mul_add`。`eval.rs:5405〜5590`）・Metal fast-math とは演算順が違う。
+- bias の項は V3（`reduce_bias_grad_var`。`create_graph.rs:2475`）。保証は「同じ入力に対する bias 縮約は 1 階と同じ f64 契約を保つ」ことに限る。bias 勾配全体の値は上流の `g` を含め他の `cg.grad` と同じく REQ-2 統一複合判定の範囲の一致を主張し、1 階との bit 一致は主張しない。
+- 保証範囲: seed の絶対値が 1 以下で、1 階が有限な入力に限る。真値が f32 を超える場合（1 階と同じく `inf`）と三階以上は対象外。
+
+### 37.6 互換への影響
+
+- **追加のみ**。`api-compat-0.14.0-decision.md` §1.2 項目 3（`Err` が `Ok` になる受理範囲の拡大）にあたり、§8 の手順に当てはめても破壊的変更は生じない。`Op` は `pub(crate)` で、payload は追加しない。
+
+### 37.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）。
+- [ ] `compat-api-scope.md` の適用記録（承認後の実装 PR で行う）
+- [x] `docs/README.md` の索引
+- [x] `docs/compat-matrix-ari-tracker.md` 行 3 の「設計記録」セル
+
+### 37.8 ベンチと性能への影響
+
+- 既定経路（forward・`Tape::backward`）は変わらない。増えるのは create_graph 経路だけ。
+  - LSTM／GRU は cgrad の中でゲートを作り直すため、セル 1 つあたり GEMM が 2 本と pointwise 数ノード増える。
+  - `RnnCell` は写しの出力 `h_m` で済むので GEMM は増えない。
+- 既定経路に触れないので前後比較は不要。触れた場合は 5 回計測の中央値で比べ、判定規則を計測前に固定する。
+
+### 37.9 依存
+
+- 追加しない。許容 12 区分と禁止リストに照らして新規なし。新しい `unsafe` も無い。
+
+### 37.10 方式と式
+
+共通事項:
+
+- 再生 R は公開メソッド `Var::rnn_cell`／`lstm_cell`／`gru_cell` への自己再生にする（§21.1(2)）。cgrad は V1（primitive の合成）で書き、bias だけ V3 にする。
+- 記号: `x_m`・`h_m`・`c_prev_m`・`W_m` は写し、`g` は upstream。
+- 子テープの GEMM は親ノードの `fp32_strict` を引き継ぎ、`transpose` ＋ `matmul_fp32_strict` を使う（§14a、`matmul_vjp` と同じオペランド順）。
+- `dW` の部分幅ブロックは `Pad`（§29）かゼロ定数との `Concat` で列位置へ戻す（1 階の `embed_columns_*` の写し）。`db` は `reduce_bias_grad_var`（V3）を通したあと同じ方法で戻す。
+- **payload のゲートは cgrad で定数として使えない**。`gates_ifg`・`gate_o`・`gates_rzn`・`q` は x・h_prev・W の関数で、定数扱いにすると二階が落ちる。そこで子テープ上で `pre = x_m·W_ih_m (+b_ih) + h_m·W_hh_m (+b_hh)` → `narrow` → `sigmoid`／`tanh` と作り直す。
+- **GRU は共通手順の例外（reset-after）**。`pre_i = x·W_ih (+b_ih)` と `pre_h = h_prev·W_hh (+b_hh)` を分離したまま作り、`r = sigmoid(pre_i_r + pre_h_r)`、`z = sigmoid(pre_i_z + pre_h_z)`、`q = pre_h_n`、`n = tanh(r⊙q + pre_i_n)` と再構築する（`eval.rs::gru_pointwise` と同じ。`n = tanh(pre_i_n + pre_h_n)` ではなく `r` の乗算が入る）。
+
+| Op | 方式 | cgrad の式 |
+|---|---|---|
+| `RnnCell` | V1＋bias V3 | `d_pre = g ⊙ (1 − h_m²)`（`h_m` は写しの出力。`Op::Tanh` の腕と同じ形）。`dx = d_pre·W_ihᵀ`、`dW_ih = x_mᵀ·d_pre`。h 側も同形 |
+| `LstmCell` | V1＋bias V3 | `g` は fan-in 合算後の `dc`（同じ step の `LstmHidden` 腕の寄与と、次 step の `dc_prev`）。`eval.rs:5429` 付近と同じ式: `d_pre_i = dc⊙g⊙i⊙(1−i)`、`d_pre_f = dc⊙c_prev_m⊙f⊙(1−f)`、`d_pre_g = dc⊙i⊙(1−g²)`、`dc_prev = dc⊙f`。`i,f,g` は作り直したゲート。積は 1 階と同じく左から順に掛け、非有限になるかを 1 階と揃える。列ブロック i,f,g を `Concat` して `[B,3H]` を作り、`W[:, :3H]` を `narrow` |
+| `LstmHidden` | V1＋bias V3 | `d_pre_o = dh⊙tanh(c_m)⊙o⊙(1−o)`、`dc = dh⊙o⊙(1−tanh(c_m)²)`。`o` は作り直したゲート、`c_m` は写しの c。x・h_prev・W・b への寄与は親の `nodes[cell].op` から NodeId を読み列ブロック `[3H, 4H)` に置く。`(cell, dc)` も `accumulate` する |
+| `GruCell` | V1＋bias V3 | 式は `eval.rs:5525` 付近と同じ。`q` は `h_m·W_hh_m (+b_hh)` の n ブロックから作り直す。`d_pre_i` と `d_pre_h`（n ブロックだけ `⊙r`）を別々の affine に流す。`h_prev` への 2 系統（直接の `dh⊙z` と affine 経由）は `accumulate` で合算する |
+
+**`LstmCell`／`LstmHidden` の 2 ノード再生（#3796 の核）**
+
+- §21.2 が QR／SVD を多出力 payload で fail-closed にしたのとは事情が違う。`h_t` は `cell` を NodeId の入力として持ち、`c_t` は祖先として先に写される。
+- 案 (a)（推奨）: `LstmCell` の再生で `Var::lstm_cell` を呼び `mirror[cell] = c_m` とする。`LstmHidden { cell }` の再生では push 順序契約を使い、子テープの `c_m.id + 1` のノードを `Var::from_raw` で取り、`Op::LstmHidden { cell: c_m.id }` であることを検査して違えば fail-closed にする。`build_mirror`（`create_graph.rs:588`）のシグネチャを変えず、状態も持たない。
+- 案 (b): `build_mirror` に側表（親の cell id → `h_m`）を持たせる。
+- h を使わない場合、子テープに孤立した `LstmHidden` が残るがどこからも到達しないので無害。
+
+### 37.11 閉包性と族間の依存
+
+- 子テープへ積む Op は、構造側が `MatMul`（rank 2・strict）・`Transpose`・`Add`・`Mul`・`ScalarBinary`（Sub）・`Sigmoid`・`Tanh`・`Narrow`・`Concat`・`Pad`・`Reshape`・`BroadcastTo`・`Sum`（V3 のタグ）・定数 `Leaf`、写しの forward として積む 4 Op 自身。構造側はいずれも `supports_create_graph == true` であることを確かめた（`Pad`・`ScalarBinary` は実装前に origin/main でもう一度確かめる）。
+- 他の C 区分の族には依存しない。孫テープでは 4 Op 自身が再生されるので、#3795 は `RnnCell` と `GruCell` を、#3796 は `LstmCell` と `LstmHidden` を同じ PR の中で `true` にする。LSTM の 2 Op は必ず一緒に反転する。
+- §21.4 の依存順には「#3795・#3796 は互いに独立、他の C 区分とも独立」の 1 行を足す扱いとする（§21.4 の本文は書き換えない）。
+
+### 37.12 fail-closed・総括的な判定
+
+- 構造は 1 階と同じ f32 の積を同じ順で並べるだけで、スケール変換も f64 縮約も入らない。このため既定では §27.3 型の総括判定を置かない。
+- 掃引テストで「1 階が有限なら cgrad・二階も有限」を固定する。違反する入力が見つかったら、実装 PR で型付きの拒否を足し、本節に逸脱として追記する（37.14 の論点 5）。
+- `is_checkpoint_eligible` は触らない。§21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。
+
+### 37.13 GPU の forward 経路と Phase 10
+
+- forward と 1 階の pointwise は CPU・CUDA・Metal・ROCm のすべてでデバイスカーネルが走り、ホストへのフォールバックは無い（`backend-cpu/src/ops.rs:3032〜3148`、`backend-cuda/src/ops.rs:7614〜7799`、`backend-metal/src/ops.rs:5927〜6082`、`backend-rocm/src/ops.rs:833〜872`）。`gemm_bias_act` は常に FP32 厳密。
+- 子テープの構造 Op（GEMM・pointwise）もデバイスで走る。V3 の bias は f64 のホスト縮約。
+- Metal の fast-math では、pointwise の作り直しとカーネルの値が ulp 単位でずれる。これは REQ-2 で受け、bit 一致は主張しない。
+- 実機の結果はすべて **未実測**。#3856（`<cuda-node>`）・#3858（`<metal-node>`）へ申し送る。ROCm は雛形が無く `<rocm-node>` は未実測のまま記録する。
+
+### 37.14 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 族の採否 | 4 Op を実装する／対象外にする（B）／非 fused モードの公開（C。別承認） | 実装する | 実装へ進めず fail-closed を維持 |
+| 2. 写し R の方式 | `Var::*_cell` の自己再生／primitive 合成＋値を V3 で親の記録値に置き換え（子テープに 4 Op が載らないが §21.1(2) から外れ、置き換えなければずれが T step で累積する） | 自己再生 | 同上 |
+| 3. `LstmHidden` の対応づけ | push 順序契約（`c_m.id+1` を検査）／側表 | push 順序契約 | 同上 |
+| 4. pointwise 因子の値 | V1（REQ-2）／V3（`push_v3` で 1 階カーネル値に bit 一致） | V1（GEMM の経路でも bit 一致は保証されないため） | 同上 |
+| 5. 総括判定 | 置かない（掃引で固定し違反時に拒否を足す）／§27.3 型を置く | 置かない | 同上 |
+| 6. GPU parity の判定方式 | #3739 に従う（tolerance は変えない）／別方式 | #3739 | 同上 |
+
+### 37.15 その他
+
+- セキュリティ観点: 外部入力は forward 側の確保前検証（rank・`D,H>0`・`checked_gate_width`）を通ったものに限る。新しい検査は子テープへ書く前に行い、拒否時は rollback で `child` を空に保つ。秘密情報・実機のホスト名・個人のパスは書かない。
+- スコープ外: 実機の parity（#3856・#3858）、測り方（#3739）、f64 テープ（#3722）、他の C 区分の族、非 fused モードの公開、双方向／projection など新しい variant。
+- Issue の紐付け: 本 PR は `Closes #3728`、`Refs #3767 #3795 #3796 #3719`。
+- 変えていないもの: コード・依存・`unsafe`・tolerance・baseline・FMA 契約・`docs/spec`・既存節の本文・公開 API・`compat-api-scope.md`。
 
 ## 38. 設計記録（イシュー #3729・親 #3719。create_graph の B 区分・Conv3d・ConvTranspose3d）
 
