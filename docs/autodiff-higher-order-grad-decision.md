@@ -1959,10 +1959,10 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 |--------------|--------|------|---------------|----------------|----------------|
 | 1 階が素の `backward` と bit 同一、`cg.grad` が REQ-2 で一致（CPU では d_weight・d_bias の bit 一致も見る） | `conv3d_family_first_order_bit_identical_and_cgrad_req2` | CI | 未実測 | 未実測 | 未実測 |
 | ヘッシアンが有限差分と一致。Conv3d・ConvTranspose3d × bias あり・なし × groups 1・2。軸ごとに異なるハイパーパラメータ（例: stride `[1,2,2]`・padding `[0,1,1]`・dilation `[2,1,1]`・kernel `[2,3,2]`、ConvTranspose3d の output_padding `[0,1,0]`）で D／H／W 軸の取り違えを検出する。x・w・b は 1 本の葉から切り出して純ブロックと混合ブロックを同時に見る。loss は `sum(y⊙y⊙c)`。h を大きく取り Richardson 外挿で補う（§23.4 の前例）。CI 時間のため葉の総数は小さくする | `conv3d_family_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
-| 長軸縮約の overflow 回帰: N=3・1×1×1 カーネル・`x=[1,1,-1]`・`g=[3e38;3]` で 1 階と `cg.grad` が有限かつ bit 一致 | `conv3d_family_weight_bias_grad_overflow_regression` | CI | 未実測 | 未実測 | 未実測 |
+| 長軸縮約の overflow 回帰: N=3・1×1×1 カーネル・`x=[1,1,-1]`・`g=[3e38;3]` で 1 階と `cg.grad` が bit 一致する。有限性を要求するのは d_weight のみ（f64 縮約で相殺されるため）。d_bias = sum(g) = 9e38 は f32 へ変換すると `inf` になるので、d_bias は 1 階と `cg.grad` がともに `inf` で一致することを期待する（有限性の検査は別途、打ち消す入力 `g=[3e38;-3e38;0]` 等で行う） | `conv3d_family_weight_bias_grad_overflow_regression` | CI | 未実測 | 未実測 | 未実測 |
 | 孫テープで `h=(gw·1e-38)²` を作って更に微分した x 勾配が素の `backward` と bit 一致 | `conv3d_family_grandchild_replay_stays_finite` | CI | 未実測 | 未実測 | 未実測 |
 | `jvp_create_graph` が中央差分と一致 | `conv3d_family_jvp_create_graph_matches_central_difference` | CI | 未実測 | 未実測 | 未実測 |
-| 空入力: N=0、Cin=0 でも bias 勾配は非零（§23.3 と同じ） | `conv3d_family_empty_inputs_zero_grads` | CI | 未実測 | 未実測 | 未実測 |
+| 空入力: N=0 は d_bias もゼロ、N>0・Cin=0・Cout>0 は d_bias = sum(g) が非零になり得る（§23.3 と同じ。2 ケースに分けて検査） | `conv3d_family_empty_inputs_zero_grads` | CI | 未実測 | 未実測 | 未実測 |
 | output_padding の符号付き導出（padding が大きく、output_padding を除いた base が負になる場合） | `conv_transpose3d_output_padding_derivation_signed` | CI | 未実測 | 未実測 | 未実測 |
 | 隣接 Op（`Op::Custom`）が fail-closed のまま | `conv3d_family_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
 | `create_graph/conv3d.rs` 内の単体: groups=G の im2col3d を平坦化したものと groups=1 の結果が bit 一致（K 軸の並び `(c,kd,kh,kw)` の前提を固定） | `unfold3d_groups1_matches_grouped_im2col3d_flatten` | CI | — | — | — |
@@ -2029,7 +2029,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
   - d_bias: 1 階と同じ行縮約
 - `Unfold3d` の VJP は `Fold3d`、`Fold3d` の VJP は `Unfold3d` で、互いに随伴になる。`ConvWeightGradHost3d` の VJP は恒等で `structure` だけへ渡し、孫テープでの再生でも同じホスト関数で値を再計算する（§23.3 の是正と同じ）
 - 実装の置き場は新規 `create_graph/conv3d.rs` とし、2D のファイル（`create_graph/conv.rs`）は触らない。rank 一般のヘルパー（`channel_rows`・`col_np_by_k`・`np_cols_to_n_rows_p`・`cat_or_single`・`zeros_var`）は可視性を `pub(super)` に上げて共用し、rank 4 前提の `bias_grad`・`weight_grad_value`・`zero_grads` は 3D 版を別に書く（2D の数値は不変）
-- `ConvNeeds` で不要な寄与は構造ノードもホスト計算も作らない。shape に 0 を含むときはゼロ定数で短絡する
+- `ConvNeeds` で不要な寄与は構造ノードもホスト計算も作らない。shape に 0 を含むときは寄与ごとにゼロ定数で短絡するが、d_bias は g が空でない限り `bias_grad`（sum(g)）を呼ぶ（`create_graph/conv.rs::zero_grads` と同じ分岐。N=0 のみ d_bias もゼロ、N>0・Cin=0・Cout>0 では非零になり得る）
 - **方式を合成にしない理由**: 1 階 VJP の forward 相当（`conv3d_with_fallback`）は `ops.conv3d` の override フックと非 strict の `gemm_batched` を通り、TF32 opt-in の影響を受ける。構造側を `Var::conv3d` の合成で書くと FP32 strict 契約を破るため、groups=1 の `Unfold3d`／`Fold3d` と rank 2 strict matmul で組む
 
 ### 38.11 閉包性と族間の依存
