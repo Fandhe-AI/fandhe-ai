@@ -185,7 +185,7 @@ cargo-semver-checks の分類名は、開発機の 0.51.0 で `cargo semver-chec
 - `OnnxValue`: variant 追加は既定で行わず、必要なら別型・別メソッドで足す。設計上 variant 追加が必要になれば #3759 が所有者へ戻す
 - ほかの既存 enum・struct への遡及付与はしない（`docs/compat-api-scope.md` §0 の `FusedOpKind` の記述と同じ理由）
 - 影響:
-  - `tensor-core::select_from` と `facade::resolve_ops`（別クレートで `Device` を網羅 `match`。`docs/backend-rocm-device-exposure-decision.md` §2）は `_` 腕が必須になる。内部の網羅性チェックを失うため、`_` 腕は型付き `DeviceUnavailable` を返す
+  - `_` 腕が必須になるのは別クレートの `facade::resolve_ops`（`crates/facade/src/lib.rs:2539`。`Device` を網羅 `match`。`docs/backend-rocm-device-exposure-decision.md` §2）だけで、`_` 腕は型付き `DeviceUnavailable` を返す。`tensor-core::select_from`（`crates/tensor-core/src/device.rs:171`）は `Device` と同一クレートなので `#[non_exhaustive]` の影響を受けず、`_` 腕を足さず網羅 `match` を維持する（variant 追加時にコンパイラが対応漏れを検出できる状態を保つ）
   - `api_surface.rs` は integration test（別クレート視点）なので、ワイルドカード腕なしの G1 はコンパイルできなくなる。反転の方針は「ワイルドカード腕つきの分類」と「ソース走査による variant 名の在庫テスト（`pb_has_non_exhaustive_before`〈`api_surface.rs:24949`〉と同型）」で集合を固定し、variant 追加がテストの失敗として表れるようにする。具体的なテスト名は #3758 の設計記録が確定する
 
 ### 3.3 版数
