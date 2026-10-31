@@ -589,6 +589,19 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > 内訳と承認範囲は `docs/framework-compare-harness-decision.md` 4 節。上の「未更新」は
 > 2026-10-09 時点の記述。
 
+> **追補（2026-10-31・v0.13.0 公開完了）**: `.github/workflows/release-all.yml`
+> （`mode: publish` run 41168270894。事前 dry-run〈verify〉run 41168022860。main
+> `db2b385fb`＝#3708 のマージ）により公開 7 クレートの **v0.13.0 の公開を完了した**
+> （7 クレート sparse index 反映確認済み）。リリースタグ `v0.13.0` は注釈付きタグで
+> コミット `db2b385fb` を指す。
+
+> **追補（2026-10-31・v0.13.0 ピン更新）**: 所有者の承認（2026-10-31 の所有者発言
+> 「0.13.0 で公開してください。framework-compare のピン =0.13.0 も承認します。」。
+> チャットでの明示指示で issue コメントの URL はない）により、framework-compare の承認ピンを
+> `fandhe-ai =0.12.0` から `=0.13.0` へ更新した。`Cargo.lock` の差分は自社 7 クレートの
+> 版・checksum のみで外部依存の増減なし。`deny.toml` の allow は変更していない。内訳と
+> 承認範囲は `docs/framework-compare-harness-decision.md` 4 節。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -920,6 +933,15 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-31（v0.13.0 公開完了）: `release-all.yml`（`mode: publish` run 41168270894。
+  事前 dry-run〈verify〉run 41168022860。main `db2b385fb`）で公開 7 クレートの v0.13.0
+  公開を完了した（7 クレート sparse index 反映確認済み）。注釈付きタグ `v0.13.0` は
+  `db2b385fb`。§10 に追補を記録した。
+- 2026-10-31（v0.13.0 ピン更新）: 所有者の承認（2026-10-31 の所有者発言〈チャットでの
+  明示指示。issue コメントの URL はない〉）により framework-compare の承認ピンを
+  `fandhe-ai =0.12.0` → `=0.13.0` へ更新した（`Cargo.lock` は自社 7 クレートの版・
+  checksum のみ変更。外部依存の増減なし。`deny.toml` の allow は変更なし）。§10 に追補を
+  記録した。
 - 2026-10-31（v0.13.0 リリースサイクル・バンプ）: 公開 7 クレートを lockstep で
   0.12.0 → 0.13.0 へ上げた（`workspace.version`・内部依存 12 箇所・ルート
   `Cargo.lock`・`scripts/bench/oss-gemm-compare/Cargo.lock`）。所有者の明示指示

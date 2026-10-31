@@ -176,23 +176,24 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 `=0.9.0` へ更新後の 2026-09-17 再実測を v0.9.0 リリースサイクルで追記。
 `=0.10.0` へ更新後の 2026-10-03 再実測を v0.10.0 リリースサイクルで追記。
 `=0.11.0` へ更新後の 2026-10-10 再実測を v0.11.0 リリースサイクルで追記。
-`=0.12.0` へ更新後の 2026-10-27 再実測を v0.12.0 リリースサイクル〈#3271〉で追記）:
+`=0.12.0` へ更新後の 2026-10-27 再実測を v0.12.0 リリースサイクル〈#3271〉で追記。
+`=0.13.0` へ更新後の 2026-10-31 再実測を v0.13.0 リリースサイクルで追記）:
 
 - 対象 `Cargo.lock`: `scripts/bench/framework-compare/Cargo.lock`
-- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-10-27 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
-- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-10-27 再実測。`fandhe-ai` 以外の 2 crate は 2026-10-03 から変更なし）:
+- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-10-31 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
+- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-10-31 再実測。`fandhe-ai` 以外の 2 crate は 2026-10-03 から変更なし）:
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
 | `burn` | 0.21.0 | `MIT OR Apache-2.0` |
 | `candle-core` | 0.11.0 | `MIT OR Apache-2.0` |
-| `fandhe-ai` | 0.12.0 | `MIT OR Apache-2.0`（2026-10-27 に `=0.11.0` から更新。v0.12.0 リリースサイクル。直接依存 3 crate のライセンス式に変更なし） |
+| `fandhe-ai` | 0.13.0 | `MIT OR Apache-2.0`（2026-10-31 に `=0.12.0` から更新。v0.13.0 リリースサイクル。直接依存 3 crate のライセンス式に変更なし） |
 
 v0.10.0 では自社クレート `fandhe-ai-onnx-interop`（初回公開）が facade の通常依存として加わったため、`Cargo.lock` へ新規の推移的依存を実測した（`cargo metadata --locked` の `license` フィールド。2026-10-03）。追加は自社 1 crate と、第 3 区分（相互運用）の承認済み依存 `prost` のみで、他の外部依存の追加はない（`libc`・`safetensors` は既存エントリ。`safetensors 0.7.0` は既存の別版と並存）:
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
-| `fandhe-ai-onnx-interop` | 0.12.0 | `MIT OR Apache-2.0` |
+| `fandhe-ai-onnx-interop` | 0.13.0 | `MIT OR Apache-2.0` |
 | `prost` | 0.14.4 | `Apache-2.0` |
 | `prost-derive` | 0.14.4 | `Apache-2.0` |
 
@@ -224,6 +225,8 @@ v0.12.0 へのピン更新（2026-10-27・#3271。承認記録は `docs/framewor
 | `webpki-root-certs` | 1.0.10 | `CDLA-Permissive-2.0` |
 
 上表の `fandhe-ai-onnx-interop` は 0.12.0 へ更新（ライセンス式に変更なし）。
+
+v0.13.0 へのピン更新（2026-10-31。承認記録は `docs/framework-compare-harness-decision.md` 4 節）では、`Cargo.lock` の差分は自社 7 クレートが 0.12.0 → 0.13.0（版・checksum のみ）で、外部 crate の追加・削除・版更新はない（パッケージ数 658 のまま。`cargo update -p fandhe-ai --precise 0.13.0` は一部の Windows 向け `windows-sys` 参照〈`colored`・`errno`・`quinn-udp`・`rustix`・`tempfile`・`winapi-util` の 0.52.0 → 0.61.2 の辺のみ。どちらの版も既存エントリ〉も付け替えたが、`--locked` で不要と確認できたため採用せず、元の辺を維持した）。ライセンス式は `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` の実測（2026-10-31）で、自社 7 クレート（`fandhe-ai`・`-autodiff`・`-backend-cpu`・`-backend-cuda`・`-backend-metal`・`-onnx-interop`・`-tensor-core`）はいずれも `MIT OR Apache-2.0`（0.12.0 から変更なし）。新しいライセンス識別子はなく、ハーネス専用 `deny.toml` の allow は変更していない。`cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml` は `advisories ok, bans ok, licenses ok, sources ok`（`chacha20 0.10.1` の yanked warning は変更前から存在する既存のもの）。
 
 dependabot PR #2959（2026-10-11 所有者承認。承認記録は `docs/framework-compare-harness-decision.md` 4 節）では推移的依存 `rustls` を 0.23.43 から 0.23.45 へ更新した。同じ依存解決で `tempfile` の `getrandom` 参照が 0.4.3 から既存エントリの 0.3.4 へ切り替わる（crate の追加・削除はない）。ライセンス式は `cargo metadata --locked` で実測し、更新前から変更はない（2026-10-11）。`cargo deny ... advisories bans licenses sources` の再実測結果は `advisories ok, bans ok, licenses ok, sources ok`:
 

@@ -11,7 +11,7 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 | フレームワーク | クレート | バージョン | デバイス |
 | --- | --- | --- | --- |
-| fandhe-ai | `fandhe-ai`（facade。crates.io 版） | =0.12.0 | CPU / Metal / CUDA（`tape_for(Device::…)`） |
+| fandhe-ai | `fandhe-ai`（facade。crates.io 版） | =0.13.0 | CPU / Metal / CUDA（`tape_for(Device::…)`） |
 | candle | `candle-core` | =0.11.0 | CPU / Metal（`metal` feature）/ CUDA（`cuda` feature） |
 | Burn | `burn` | =0.21.0 | CPU（ndarray）/ Metal（wgpu）/ CUDA（cubecl） |
 | tch-rs | — | 未計測 | libtorch 依存のため省略 |
@@ -447,6 +447,11 @@ effective_num_threads(...)`（イシュー #1363）へ差し替えているが�
 （facade 差分なし）であることを確認済みのため、上記の突合前提は
 `fandhe-ai =0.12.0` に対しても成立する。
 
+**ピン更新後の追記（v0.13.0・2026-10-31）**: 承認ピンを `fandhe-ai =0.12.0`
+から `=0.13.0` へ更新した後も、`git diff v0.13.0..HEAD -- crates/` が空
+（facade 差分なし）であることを確認済みのため、上記の突合前提は
+`fandhe-ai =0.13.0` に対しても成立する。
+
 実測（両実機・5 回独立プロセス中央値）は
 `docs/perf/cpu-gemm-candle-gate-remeasurement.md` へ記録する
 （イシュー #1292）。`gemm --mode reuse --phases`（CPU 含む）は診断専用
@@ -511,7 +516,7 @@ M4 Max。`docs/perf/metal-gemm-candle-gate-remeasurement.md` §17）は書き換
   各 remeasurement doc に明記）。
 - **`run_gemm_gate.sh`** は借用ビュー readout が既定経路のため feature 指定
   不要（旧 `GEMM_GATE_BENCH_FANDHE_FEATURES` は撤去済み）。承認ピン
-  `fandhe-ai =0.12.0`（v0.12.0 ピン更新。#1487 の `=0.8.0` 時点から既に
+  `fandhe-ai =0.13.0`（v0.13.0 ピン更新。#1487 の `=0.8.0` 時点から既に
   収録済み）が借用ビュー readout API を収録済みのため、
   正式系列の計測は registry 解決のまま実行できる。`GEMM_GATE_PATCH_
   FACADE_PATH`（HEAD ツリーへの path patch）は参考系列用の任意指定と
@@ -889,7 +894,8 @@ opt-in で WMMA TF32 Tensor Core 経路（`run_wmma_tf32`）へ切り替えら�
   #1487 でユーザー承認済み）・`fandhe-ai =0.10.0`（v0.10.0 リリースサイクルで
   ユーザー承認済み）・`fandhe-ai =0.11.0`（v0.11.0 リリースサイクル・2026-10-10 所有者指示で
   承認済み）・`fandhe-ai =0.12.0`（v0.12.0 リリースサイクル・2026-10-27 所有者承認 #3271 で
-  承認済み）へ進み、`fandhe_ai::set_cuda_tf32_gemm_enabled`／`cuda_tf32_gemm_enabled`
+  承認済み）・`fandhe-ai =0.13.0`（v0.13.0 リリースサイクル・2026-10-31 所有者承認〈チャットでの
+  明示指示〉で承認済み）へ進み、`fandhe_ai::set_cuda_tf32_gemm_enabled`／`cuda_tf32_gemm_enabled`
   は crates.io 公開版の無条件公開面として収録済みのため、`--managed`／`--pinned-h2d`／
   `--graph` と異なり追加の cargo feature は不要である。受理時は
   `set_cuda_tf32_gemm_enabled(true)` を呼び読み戻し確認したうえで計測する。
@@ -936,7 +942,7 @@ reuse とも `a.matmul(&b)`（`CudaBackendOps::gemm` の `clone_htod`／`alloc_z
 - **`bench-fandhe`**: `--device cuda` 以外は常に `MEASURE_ERROR`（プロセスワイドフラグが cpu
   計測で無音 no-op になるのを防ぐ）。`--device cuda` でも、`managed-placement` cargo feature
   （既定無効）を有効化したビルドでなければ `MEASURE_ERROR` になる。`set_cuda_managed_memory_
-  enabled` API は crates.io 公開版 `fandhe-ai =0.12.0`（#1352 は #1487 の
+  enabled` API は crates.io 公開版 `fandhe-ai =0.13.0`（#1352 は #1487 の
   `=0.8.0` 時点から既に収録済み。v0.9.0 でも引き続き収録済み）
   に収録済みだが、feature 分岐自体は既定 OFF のまま維持しているため、有効化するには
   **`managed-placement` feature ＋ `[patch.crates-io.fandhe-ai]` による HEAD `crates/facade`
@@ -975,7 +981,7 @@ CUDA H2D（ホスト → デバイス）側 pinned staging（`fandhe_ai::set_cud
 - **`bench-fandhe`**: `--device cuda` 以外は常に `MEASURE_ERROR`（プロセスワイドフラグが cpu
   計測で無音 no-op になるのを防ぐ）。`--device cuda` でも、`pinned-h2d-toggle` cargo feature
   （既定無効）を有効化したビルドでなければ `MEASURE_ERROR` になる。`set_cuda_pinned_h2d_enabled`
-  API は crates.io 公開版 `fandhe-ai =0.8.0` には未収録だったが `=0.12.0`（v0.12.0 ピン更新）で
+  API は crates.io 公開版 `fandhe-ai =0.8.0` には未収録だったが `=0.13.0`（v0.13.0 ピン更新）で
   収録済み。feature 分岐は既定 OFF のまま維持しているため、`cargo build` 自体には
   **`pinned-h2d-toggle` feature の有効化が必須**であり、`[patch.crates-io.fandhe-ai]` による
   HEAD `crates/facade` への path patch は HEAD ソース計測用の任意指定（収録済み API 自体は
@@ -1019,7 +1025,7 @@ CUDA H2D（ホスト → デバイス）側 pinned staging（`fandhe_ai::set_cud
   `--phases` との併用は常に `MEASURE_ERROR`
 - **`bench-fandhe`**: `device-checksum` cargo feature（既定無効）を有効化したビルドでなければ
   `MEASURE_ERROR` になる。`Var::matmul_checksum`／`ChecksumReadout`／`GemmChecksum` API は
-  crates.io 公開版 `fandhe-ai =0.12.0`（v0.12.0 ピン更新。#1487 の `=0.8.0` 時点から既に収録済み）
+  crates.io 公開版 `fandhe-ai =0.13.0`（v0.13.0 ピン更新。#1487 の `=0.8.0` 時点から既に収録済み）
   に収録済みだが、feature 分岐自体は
   既定 OFF のまま維持しているため、`--managed` と同じく **`device-checksum` feature ＋
   `[patch.crates-io.fandhe-ai]` による HEAD `crates/facade` への path patch**の両方が必要
@@ -1082,7 +1088,7 @@ CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step
 - **`bench-fandhe`**: `--device cuda --task train` 以外は常に `MEASURE_ERROR`。`--device cuda
   --task train` でも、`graph-step` cargo feature（既定無効）を有効化したビルドでなければ
   `MEASURE_ERROR` になる。`cuda_graph_step_mode`/`cuda_graph_step_stats` API は crates.io
-  公開版 `fandhe-ai =0.12.0`（v0.12.0 ピン更新。#1487 の `=0.8.0` 時点から既に収録済み）に
+  公開版 `fandhe-ai =0.13.0`（v0.13.0 ピン更新。#1487 の `=0.8.0` 時点から既に収録済み）に
   収録済みだが、feature 分岐自体は既定 OFF の
   まま維持しているため、`--managed` と同じく **`graph-step` feature ＋
   `[patch.crates-io.fandhe-ai]` による HEAD `crates/facade` への path patch**の両方が必要
@@ -1232,8 +1238,8 @@ ENABLED` を撤去し per-instance フィールドへ一本化〉）を、facade
   `--managed` の `--device cuda` 限定と同型）。`--device metal` でも、
   `metal-split-k-toggle` cargo feature（既定無効）を有効化したビルド
   でなければ `MEASURE_ERROR` になる。`set_metal_split_k_gemm_enabled` API
-  は crates.io 公開版 `fandhe-ai =0.8.0` には未収録だったが `=0.12.0`
-  （v0.12.0 ピン更新）で収録済み。feature 分岐は既定 OFF のまま維持して
+  は crates.io 公開版 `fandhe-ai =0.8.0` には未収録だったが `=0.13.0`
+  （v0.13.0 ピン更新）で収録済み。feature 分岐は既定 OFF のまま維持して
   いるため、`cargo build` 自体には **`metal-split-k-toggle` feature の
   有効化が必須**であり、`[patch.crates-io.fandhe-ai]` による HEAD
   `crates/facade` への path patch は HEAD ソース計測用の任意指定
@@ -1330,7 +1336,7 @@ ENABLED` を撤去し per-instance フィールドへ一本化〉）を、facade
 cd scripts/bench/framework-compare
 ./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal gemm reuse・train reuse・train phases スイープ）→ results/raw/results.jsonl
 ./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda gemm reuse・train reuse・train phases スイープ + gemm cuda TF32 スイープ〈bench-fandhe・bench-candle。イシュー #1983〉）→ results/raw/results-cuda.jsonl
-# 承認ピン fandhe-ai =0.12.0（v0.12.0 ピン更新。#1487 の =0.8.0 時点から
+# 承認ピン fandhe-ai =0.13.0（v0.13.0 ピン更新。#1487 の =0.8.0 時点から
 # 既に収録済み）が借用ビュー readout API
 # （Var::host_view/Tensor::host_slice。#1438 で既定経路化）を収録済みの
 # ため、上記 2 本・run_ab_train_cuda.sh は registry 解決のまま通常実行
@@ -1431,7 +1437,7 @@ fresh` も交互起動する（環境 10/11 単発 fresh 計測との連続性�
 **2 系列の使い分け**:
 
 - **正式系列**（#1031/#1037 のゲート判定の正）: `bench-fandhe/Cargo.toml` の承認済み
-  ピン（現行 `=0.12.0`。v0.12.0 ピン更新）でビルドしたまま計測する。コミット済み manifest・
+  ピン（現行 `=0.13.0`。v0.13.0 ピン更新）でビルドしたまま計測する。コミット済み manifest・
   `Cargo.lock` は変更しない
 - **参考系列**（次回 crates.io 公開前の見込み値）: `GEMM_GATE_PATCH_FACADE_PATH=
   <facade 絶対パス>` を指定して `run_gemm_gate_cuda.sh`／`run_gemm_gate_metal.sh`
@@ -1455,9 +1461,9 @@ fresh` も交互起動する（環境 10/11 単発 fresh 計測との連続性�
 ```bash
 cd scripts/bench/framework-compare
 # CUDA 正式系列（現行ピン）:
-bash run_gemm_gate_cuda.sh 0.12.0
+bash run_gemm_gate_cuda.sh 0.13.0
 # Metal 正式系列（現行ピン。イシュー #1147）:
-bash run_gemm_gate_metal.sh 0.12.0
+bash run_gemm_gate_metal.sh 0.13.0
 # CPU 正式系列（現行ピン。DGX Spark〈Grace CPU〉／M4 Max のいずれでも実行可。
 # bench-candle のビルド flag はホスト OS で自動選択される。イシュー #1148）。
 # GEMM_GATE_CPU_NODE_TAG（dgx-cpu／m4max-cpu の明示指定。必須）が実行ホストの
@@ -1474,8 +1480,8 @@ bash run_gemm_gate_metal.sh 0.12.0
 # いずれかの不一致はいずれも計測前に fail-closed で終了する。codex-review
 # P1 PRRT_kwDOTuUCJc6fK_lT・PRRT_kwDOTuUCJc6fLNFe 対応）:
 cp gemm-gate-trusted-hosts.local.example gemm-gate-trusted-hosts.local  # 初回のみ。hostname・機体識別子を登録する
-GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.12.0     # DGX Spark 側
-GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.12.0  # M4 Max 側
+GEMM_GATE_CPU_NODE_TAG=dgx-cpu bash run_gemm_gate_cpu.sh 0.13.0     # DGX Spark 側
+GEMM_GATE_CPU_NODE_TAG=m4max-cpu bash run_gemm_gate_cpu.sh 0.13.0  # M4 Max 側
 
 # CUDA 参考系列（#1164 結線後 HEAD。ビルド＋計測を 1 invocation で実行）:
 GEMM_GATE_PATCH_FACADE_PATH="$HOME/work/rust-ai-library-run/crates/facade" \
@@ -1489,18 +1495,18 @@ GEMM_GATE_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
   bash run_gemm_gate_metal.sh head-<short sha>
 
 # 借用ビュー readout は #1438 で既定経路化済み（feature 分岐は撤去済み）。
-# 承認ピン `fandhe-ai =0.12.0`（v0.12.0 ピン更新。#1487 の =0.8.0 時点から
+# 承認ピン `fandhe-ai =0.13.0`（v0.13.0 ピン更新。#1487 の =0.8.0 時点から
 # 既に収録済み）が当該 API を収録済みのため、正式系列
 # は registry 解決のまま計測できる（GEMM_GATE_PATCH_FACADE_PATH は参考系列
 # 用の任意指定。上記「gemm --mode reuse --phases」節「借用ビュー readout」
 # 小節参照）:
-bash run_gemm_gate_cuda.sh 0.12.0-readout-default
+bash run_gemm_gate_cuda.sh 0.13.0-readout-default
 
 # 集計（N ごとに fandhe-ai reuse vs candle fresh の 5 回計測中央値・判定）:
-python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.12.0.jsonl
-python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.12.0.jsonl
-python3 compare_gemm_gate.py --device cpu results/raw/results-dgx-cpu-gemm-gate-0.12.0.jsonl
-python3 compare_gemm_gate.py --device cpu results/raw/results-m4max-cpu-gemm-gate-0.12.0.jsonl
+python3 compare_gemm_gate.py results/raw/results-dgx-gemm-gate-0.13.0.jsonl
+python3 compare_gemm_gate.py --device metal results/raw/results-m4max-gemm-gate-0.13.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-dgx-cpu-gemm-gate-0.13.0.jsonl
+python3 compare_gemm_gate.py --device cpu results/raw/results-m4max-cpu-gemm-gate-0.13.0.jsonl
 echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2: 入力を読めない
 ```
 
@@ -1533,7 +1539,7 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
 - **借用ビュー readout の既定経路化（イシュー #1337・#1438）**: 旧
   `GEMM_GATE_BENCH_FANDHE_FEATURES`（cargo feature 切替）は撤去済み。
   bench-fandhe は借用ビュー readout を常時使うが、承認ピン
-  `fandhe-ai =0.12.0`（v0.12.0 ピン更新。#1487 の =0.8.0 時点から既に
+  `fandhe-ai =0.13.0`（v0.13.0 ピン更新。#1487 の =0.8.0 時点から既に
   収録済み）が該当 API を収録済みのため、正式系列は
   registry 解決のまま計測できる（`GEMM_GATE_PATCH_FACADE_PATH` は参考
   系列用の任意指定。旧 `bench_fandhe_pin_guard.sh` の早期停止ガードは
@@ -1615,7 +1621,7 @@ echo $?   # 0: 全 N 達成 / 3: 未達または判定不能が 1 件以上 / 2:
 
 `run_gemm_gate_metal.sh` が対 candle の性能ゲート判定なのに対し、本ツールは
 **fandhe-ai 自身の 2 ビルド**（before=正式系列。承認ピン〈現行
-`fandhe-ai =0.12.0`。v0.12.0 ピン更新〉の crates.io registry 解決・after=参考系列
+`fandhe-ai =0.13.0`。v0.13.0 ピン更新〉の crates.io registry 解決・after=参考系列
 HEAD〈`crates/facade` への path patch〉）を比較する。依存 #1304 が
 `tile::CANDIDATES`／`tile::select`／`select_for_device` を一切変更して
 いない（本番既定は不変。`docs/perf/metal-gemm-n4096-kernel-gap.md`
@@ -1917,8 +1923,8 @@ tag `v0.5.0` = `a5e465d`）へ更新した（#1011 ツリー）。**ピンはそ
 リリースサイクルで `=0.6.0`、v0.7.0 リリースサイクル（イシュー #1185 に対する
 ユーザー指示）で `=0.7.0`、イシュー #1487 で `=0.8.0`、v0.9.0 リリース
 サイクルで `=0.9.0`、v0.10.0 リリースサイクルで `=0.10.0`、v0.11.0 リリースサイクルで
-`=0.11.0`、v0.12.0 リリースサイクルで `=0.12.0` へさらに更新済みであり、現在のツリー（main）のピンは「都度同期なし」側の延長線上（after
-系列。現行 `=0.12.0`）を指すが `after-0.5.0` の値そのものではない**。
+`=0.11.0`、v0.12.0 リリースサイクルで `=0.12.0`、v0.13.0 リリースサイクルで `=0.13.0` へさらに更新済みであり、現在のツリー（main）のピンは「都度同期なし」側の延長線上（after
+系列。現行 `=0.13.0`）を指すが `after-0.5.0` の値そのものではない**。
 「都度同期あり」側（before = 0.4.0）・
 「都度同期なし」側（after = 0.5.0）を当時のまま再現するには、それぞれ
 対応するピンのコミット（`=0.4.0`・`=0.5.0`）を別 worktree で checkout して
@@ -1930,7 +1936,7 @@ tag `v0.5.0` = `a5e465d`）へ更新した（#1011 ツリー）。**ピンはそ
 （`fandhe-ai =0.4.0` ピン）・`after-0.5.0`（`fandhe-ai =0.5.0` ピン）が
 実際に別バージョンの registry 依存を解決していた前提に立つ。**現行ツリー
 （main）でこのまま実行しても再現しない**: 上記「前提」段落のとおり現行
-ピンは `=0.12.0` であり、`before`/`after` いずれの worktree も同じ現行ソース
+ピンは `=0.13.0` であり、`before`/`after` いずれの worktree も同じ現行ソース
 から同じピンを解決するため、ラベルが示す「都度同期あり／なし」の対比が
 崩れる。当時どおり再現するには、`before-0.4.0`/`after-0.5.0` のそれぞれに
 対応するピンのコミット（`=0.4.0`・`=0.5.0`）を別 worktree で checkout し、
@@ -1953,7 +1959,7 @@ echo $?   # 0: 判定完了（性能比較が成立） / 2: 判定不能（レ�
 
 ### 現行 HEAD での計測例（ピン未更新中の制約は v0.8.0 で解消）
 
-現行ツリー（`fandhe-ai =0.12.0` ピン）で `run_ab_train_cuda.sh` を実行する
+現行ツリー（`fandhe-ai =0.13.0` ピン）で `run_ab_train_cuda.sh` を実行する
 場合は、上記の 2 worktree 再現とは別物として扱う。承認ピンが借用ビュー
 readout API を収録済み（#1487）のため、`GEMM_GATE_PATCH_FACADE_PATH` を
 指定しなくても registry 解決のまま通常実行できる（当初はこの API が
@@ -1968,9 +1974,9 @@ readout API を収録済み（#1487）のため、`GEMM_GATE_PATCH_FACADE_PATH` 
 
 **注意（codex-review 指摘・PR #1452 P2）**: `framework_version`（JSONL の
 `version` キー）は `bench-fandhe/src/main.rs` の `VERSION` 定数
-（`"0.12.0"` 固定リテラル）から出力され、`GEMM_GATE_PATCH_FACADE_PATH` の
+（`"0.13.0"` 固定リテラル）から出力され、`GEMM_GATE_PATCH_FACADE_PATH` の
 有無・patch 先の差はこの値に反映されない。そのため before/after 双方の
-`version` は常に同一（`"0.12.0"`）になり、`compare_ab.py:365` の
+`version` は常に同一（`"0.13.0"`）になり、`compare_ab.py:365` の
 「before/after の `framework_version` が同一——A/B 比較になっていない」
 判定（fail-closed。security.md A08）により、以下の 2 回計測は
 **必ず「判定不能」（`exit 2`）になる**——`compare_ab.py` による自動比較
