@@ -137,7 +137,16 @@ members = [
 # 契約変更は含まない。非公開クレート `hf-hub`・`backend-rocm` も追加された
 # （`publish = false`。公開対象外で公開クレートは 7 のまま）。変更点の網羅は
 # `docs/perf/framework-compare-feature-matrix-0.12.0.md` の監査記録を正とする。
-version = "0.12.0"
+#
+# v0.13.0（2026-10）: 0.12.0 公開（2026-10-27）以降の 70 コミットを含めて crates.io へ
+# 公開し、framework-compare の対戦成績を `fandhe-ai =0.13.0` で再判定するため
+# 0.12.0 → 0.13.0 とする。本番経路の変更は `matmul_resident` の D2H 経路
+# （#3677 `download_owned` の追加・#3706 出力 256 KiB 以下は copy／超は owned）と、
+# CUDA Graph capture 中のチェーン外操作の待機・再試行（#3637）。残りは計測部品と
+# 実機 parity の記録（#3658・#3660・#3661・#3665）。facade の公開面（`pub` 宣言）は
+# 変わらない。内部クレートの `MemoryBackend` 系に `download_owned` が加わった
+# （既定実装つきの追加）。
+version = "0.13.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

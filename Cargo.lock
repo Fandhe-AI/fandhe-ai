@@ -64,7 +64,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bench-harness"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "criterion",
  "cudarc",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "docs-site"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "either"
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bench-harness",
  "fandhe-ai-autodiff",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-autodiff"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bench-harness",
  "fandhe-ai-tensor-core",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-cpu"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bench-harness",
  "fandhe-ai-autodiff",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-cuda"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bench-harness",
  "cudarc",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-metal"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bench-harness",
  "fandhe-ai-autodiff",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-rocm"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "fandhe-ai-backend-cpu",
  "fandhe-ai-tensor-core",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-hf-hub"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "fandhe-ai",
  "serde",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-onnx-interop"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "fandhe-ai-autodiff",
  "fandhe-ai-backend-cpu",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-tensor-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "half",
 ]
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "guardrail"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bench-harness",
  "serde",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "self-repair"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "guardrail",
  "serde",
