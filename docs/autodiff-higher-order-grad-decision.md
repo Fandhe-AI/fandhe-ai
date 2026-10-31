@@ -1432,3 +1432,164 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 33.15 変えていないもの
 
 コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
+## 36. 決定記録（イシュー #3727・親 #3719。create_graph の C 区分・正規化・再パラメータ 3 Op）
+
+### 36.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えず、`supports_create_graph` もまだ `true` にしない
+- **基準**: `origin/main` の `6402d6087`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: §21.2 の C 区分（族を割り当てず fail-closed に固定した 24 Op）のうち、正規化・再パラメータの 3 Op（`Op::LocalResponseNorm`・`Op::WeightNorm`・`Op::SpectralNorm`）。§21.2 の C 表ではこの 3 Op の方式欄が空で、本節が埋める。3 Op は `supports_create_graph`（`crates/autodiff/src/tape.rs:2526`）の網羅 match の false 側（`tape.rs:2667`〜`:2669`）にある
+- **根拠**: §21.1（共通方式 V1〜V4・S1〜S3・閉包性）、§21.6（fail-closed 契約）、前例は §27（S1 と `check_structure_stages`）、§33（Sqrt 入力側の保護・2 のべき乗スケール）、§21.2 の `Det`（大きな指数を 1 個の f32 定数にしないチャンク分割）。ルート #3711 の「実装を既定に設計する」趣旨は設計方針の根拠であり、承認ではない
+- **後続**: 実装は #3794、承認は #3767、実機 parity は #3856（`<cuda-node>`）・#3858（`<metal-node>`）、雛形は #3776・#3777、測り方は #3739
+- **推奨**: **実装する（3 Op すべて）**。理由は次の 4 つ
+  1. 1 階 VJP がすべてホストの f64 関数で、V3 の値にそのまま使える（`crates/autodiff/src/grad.rs:3536`〈LRN → `local_response_norm_vjp_host`。`crates/tensor-core/src/lrn.rs:200`〉・`:3560`〈WeightNorm → `weight_norm_vjp_host`。`weight_reparam.rs:219`〉・`:3590`〈SpectralNorm → `spectral_norm_vjp_host`。`weight_reparam.rs:422`〉）
+  2. 構造に要る Op がすべて既に replayable（36.11）
+  3. S1 と総括判定の前例がある（§27.3・§33.12）
+  4. `weight_norm`・`spectral_norm` は GAN の判別器や勾配ペナルティ（二階微分が要る典型例）で使われ、LRN は CNN で使われる。拒否されたままだと `hvp`／`jvp`／`jacfwd` が使えない実害がある
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | 3 Op を実装する | 勾配ペナルティ・正規化層を含む損失の HVP が使える。追跡表の項目 3 が「ある」に近づく | 実装と保守の費用。総括判定の追加 |
+| B | 対象外にして fail-closed を恒久契約にする | 費用ゼロ | 上記の損失で高階変換が使えないまま残る |
+
+### 36.1 公開形
+
+該当なし。新しい公開名は増えない。`Tape::backward_create_graph`・`hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` は公開済みで、受理する Op の範囲が広がるだけである。`Var::{local_response_norm, weight_norm, spectral_norm}` と `SpectralNormState` は #2851 で公開済みで、形は変えない。
+
+`crates/facade/tests/api_surface.rs` には、この 3 Op の create_graph を対象にした否定ガードも保留 doctest ガードも無く、反転するものは無い。`LrnWeightReparamHoldDoctestGuard`（`crates/facade/src/lib.rs:7044`）が固定しているのは `norm_except_dim` や層 struct などの保留名で、create_graph とは無関係なので反転せず残す。実装 PR（#3794）で変える箇所:
+
+- facade の rustdoc にある「対象 Op の正本は §21.2・§22〜§31」（`crates/facade/src/lib.rs` の 6 か所）の範囲に §36 を加える
+- `Op` の doc コメント（`tape.rs:1378` 以降の「高階微分非対応」の記述）と、`lrn_ops.rs`・`weight_reparam_ops.rs` 冒頭の「高階微分（create_graph）は対象外」
+- `supports_create_graph` の網羅 match で 3 Op を false 側から true 側へ移す。ワイルドカードは足さない
+- `docs/autodiff-lrn-weight-reparam-decision.md` の「create_graph 対象外」の記述への追記（実装 PR の作業。本 PR では書き換えない）
+
+### 36.2 rustdoc と doctest
+
+- 新しい公開 API が無いので必須の doctest は無い。任意で facade の `backward_create_graph` に CPU だけで通る `weight_norm` の HVP 例を 1 つ足す。GPU の例は置かない（置くなら `no_run`／`#[ignore]`）
+- 失敗系は `compile_fail` に頼らず、ランタイムの `Err(AutodiffError::Backward(_))` 一致と `child.is_empty()` で確かめる
+
+### 36.3 エラー型
+
+- 新しい variant は足さない。総括判定で外れた入力、`d_s <= 0` のレーン、ゼロノルムのグループ、`σ` が 0 または非有限、非有限の upstream の拒否は `AutodiffError::Backward(String)` にする
+- 検証順: 判定は子テープへ書く前に行う（`validate_ancestors` か cgrad 構築の冒頭）。拒否したら `Tape::backward_create_graph` のロールバックで `child` を空に戻し、再試行できるようにする（§27.3 と同じ）。shape・`dim`・`LrnParams` は forward 側の確保前検証を通ったものだけが届く。本番経路で `unwrap`／`expect` を使わない
+
+### 36.4 テスト計画
+
+候補名は案であり、実装 PR で確定する。CI の行は新規 `crates/autodiff/tests/create_graph_norm_reparam.rs`（仮名）に置く。
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|--------------|--------|------|---------------|----------------|----------------|
+| 1 階が素の `backward` と bit 同一、`cg.grad` が REQ-2 で一致（V3 は CPU で bit 一致も見る） | `norm_reparam_first_order_bit_identical_and_cgrad_req2` | CI | 未実測 | 未実測 | 未実測 |
+| ヘッシアンが有限差分と一致（LRN: `size` 奇数・偶数 × β ∈ {0.5, 0.75, 1, 2} × k ∈ {1, 2}。WeightNorm: `dim` None／0／末尾 × v と g の混合二階項。SpectralNorm: `dim` 0／1 × rank 2〜4。5 点中央差分 h=1e-2 は §27.4 の前例どおり。判定式は変えない） | `norm_reparam_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| 必須ベクトルが 3 段（1 階・`cg.grad`・`jvp_create_graph` 経由の孫テープ再生）で有限か、拒否されて `child` が空 | `norm_reparam_mandatory_vectors_finite_in_three_stages` | CI | 未実測 | 未実測 | 未実測 |
+| SpectralNorm の replay と `hvp` が power iteration を回さず、`SpectralNormState` の `u`・`v` を変えない（training／eval の両方） | `spectral_norm_create_graph_does_not_advance_power_iteration_state` | CI | 未実測 | 未実測 | 未実測 |
+| 安全でない入力の拒否・`child` が空・再試行できる | `norm_reparam_unsafe_inputs_rejected_child_empty_and_retry` | CI | 未実測 | 未実測 | 未実測 |
+| 構造の全経路が有限か拒否（§27.4 と同型の掛け合わせ。受理と拒否の両方が出ることも確かめる） | `norm_reparam_sweep_every_structure_path_is_finite_or_rejected` | CI | 未実測 | 未実測 | 未実測 |
+| 隣接 Op（`Op::Custom`）が fail-closed のまま | `norm_reparam_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
+| facade 経由（代表は `weight_norm`・`spectral_norm`） | `crates/facade/tests/create_graph_facade.rs` に `*_create_graph_via_facade` を追加 | CI | 未実測 | 未実測 | 未実測 |
+| CUDA／Metal の parity（forward がホストへフォールバックすることを含む。36.12） | `create_graph_norm_reparam_cuda_parity`／`create_graph_norm_reparam_metal_parity`（後者は `cfg(target_os = "macos")`）。置き場・名前は #3776・#3777 の雛形が確定するまで仮。測り方は #3739 に従う | `#[ignore]` | 未実測 | 未実測 | 未実測 |
+
+**差し替える既存テスト（#3794 の作業）**: 3 Op が true になると次の 3 件が壊れる。
+
+1. `crates/autodiff/src/tape.rs:5817` の `lrn_weight_norm_spectral_norm_op_meta_properties`: `!supports_create_graph()` の検査を `supports_create_graph()` に直す（checkpoint 対象外と `for_each_input` の検査は残す）
+2. `crates/autodiff/tests/create_graph.rs:4674` の `batch_norm_neighbor_local_response_norm_stays_rejected`: 上流の拒否見本を LRN から恒等の `Op::Custom` へ替え、shape `[1,4,2,2]` を保つ。テスト名も直す
+3. `crates/autodiff/tests/create_graph_norm.rs:582` の `neighbouring_unsupported_norm_op_stays_fail_closed`: 同じく `Op::Custom` に替える
+
+隣接 Op に `MatrixNorm` を使わない理由: §33 が既に使っており、#3734（B 区分の線形代数）が設計中で true に変わりうる。`Op::Custom` は §21.6 が基準テストに使う恒久的な対象外である。実機の実行は #3856・#3858 が担い、Linux や開発機の代替値で pass にしない。
+
+### 36.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えない。新しい baseline は作らない（作るなら実機の実測値に限り所有者承認）
+- 1 階は構造上 bit 同一（§21.1(1)）。3 Op とも V3 なので `cg.grad` の値も CPU で 1 階と bit 同一。CUDA／Metal も 1 階 VJP がホストで同じ関数を通るが、主張は REQ-2 の範囲までにする（実機は未実測）
+- f64 長軸縮約の契約（`coding-rust.md`）は V3 の値側で守る。LRN の二乗和は先に f64 へ上げてから二乗し、WeightNorm・SpectralNorm の内積は要素積を f32 で確定してから f64 へ上げる。構造側の f32 合成は値を決めない。FMA 契約には触れない
+- 必須ベクトル（3 段すべてで有限かつ一致。外れる場合は総括判定で拒否され `child` が空になることを固定する）:
+  - LRN: `x=1e20`（f32 の二乗が overflow する）、`k=0` かつ窓内が全ゼロ（`d=0`）、`α<0` で `d<0`（β が非整数なら 1 階は NaN）、小さな `x=[1e-30, …]`、`g=3e38`・`g=[3e38, -3e38]`、偶数 `size` の非対称窓
+  - WeightNorm: ゼロノルムのグループ（1 階は `0·inf=NaN`）、`dim=None`、`v=1e20`、小スケールの `v`、大きな `g`・upstream
+  - SpectralNorm: `σ=0`（1 階は NaN／inf を伝播）、極小の `σ`、`W=1e20`、`eps` で clamp された `u`・`v`、training と eval の両方
+- 保証範囲は §27.3 と同じ書き方にする。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上の微分と、真値が f32 を超える場合（1 階と同じく `inf`）は対象外
+
+### 36.6 互換への影響
+
+**追加のみ**。`api-compat-0.14.0-decision.md` §8 の手順で判定する。触れる公開型が無く（`Op` は `pub(crate)`）、`AutodiffError` の variant も公開シグネチャも変わらない。以前 `Err` だった入力が `Ok` になる受理範囲の拡大であり、§1.1 の破壊的条件には当たらない。payload（`params`・`dim`・`u`/`v` スナップショット）は再生に必要な値を既に持っており、追加は要らない。`SpectralNormState` の公開形も変えない。
+
+### 36.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `docs/compat-api-scope.md` への適用記録は #3767 の承認後の実装 PR で書く。文案: `**適用記録（イシュー #3794・親 #3727。承認: <#3767 の回答 URL>）**: 正規化・再パラメータ 3 Op を create_graph の対象にした。公開名の追加なし。`
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（承認後の PR で行う。承認が無いうちは書かない）
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した（項目 3 の設計記録の欄に §36 を追記）
+
+### 36.8 ベンチと性能への影響
+
+既定経路（`Tape::backward`・forward）は変わらない。`supports_create_graph` は create_graph の入口でしか呼ばれない。増えるのは create_graph 経路の構造ノード（LRN は窓幅に比例して O(size) 個の Pad／Narrow／Add、ほかは十数ノード）と総括判定のホスト走査 O(numel) だけである。既定経路に触れないので前後比較は不要と判断する。実装で既定経路に触れた場合は、5 回計測の中央値で前後を比べ、判定規則を計測前に固定する。実機の値は未実測。
+
+### 36.9 依存の追加の有無
+
+追加なし。許容 12 区分・禁止リストとの照合で変化なし。新しい `unsafe` なし。
+
+### 36.10 族の方式と式（Op ごと）
+
+記号は §33.10 に揃える。`x_m` は子テープ上の入力の写し、`g` は子テープ上の upstream、`g_b` は `g` を縮約軸へ broadcast したもの。V3 の値は 1 階のホスト関数を `pub(crate)` にして使う（本体・数値は変えない）。結合は `push_v3`（`crates/autodiff/src/create_graph.rs:986`）。
+
+- **LocalResponseNorm（V3 + S1 + 総括判定）**
+  - 1 階の式（`lrn.rs:14-31`）: `dx_m = g_m·d_m^{−β} − (2αβ/size)·x_m·Σ_{c∈W'(m)} g_c·x_c·d_c^{−β−1}`、`d_c = k + (α/size)·Σ_{W(c)} x²`。窓は前方 `W(c) = [c−⌊size/2⌋, c+⌊(size−1)/2⌋]`、第 2 項は反転窓 `W'(m) = [m−⌊(size−1)/2⌋, m+⌊size/2⌋]` で、偶数 `size` では非対称になるため別々に作る
+  - **R**: `Var::local_response_norm(x_m, size, alpha, beta, k)`。`LrnParams` のアクセサから値を取る。forward は子テープ上でもホストの共有カーネルへ落ちるので値は同じ
+  - **構造**: `[N, C, *S]` を `[N, C, inner]` へ Reshape し、レーンを `(n, inner)` 列（チャネル方向）とする。レーンごとの 2 のべき乗スケール `s` をホスト定数で決め、`x_s = x_m/s`、`d_s = k/s² + (α/size)·Σ x_s²`（`d = s²·d_s`）とする。窓和は、チャネル軸を `Pad`（値 0）してから `Narrow` で `size` 回ずらして `Add` で作る。このとき `dx = s^{−2β} · [ g⊙d_s^{−β} − (2αβ/size)·x_s ⊙ Σ_{W'} g·x_s·d_s^{−β−1} ]` となり、スケール `s^{−2β}` は最後に 1 回掛ければよい。冪は `PowScalar(−β)`・`PowScalar(−β−1)`。0/1 定数の行列を掛ける方式は §21.1(3) の `inf*0` 規則に触れるので採らず、累積和の差分も非負の和の桁落ちになるので採らない（`lrn.rs` が直接加算を選んだ理由と同じ）
+  - **`s` の規則**: §21.1(5) の eps 規則を写し、`s = pow2ceil(max(max|x|, √(|k|·size/|α|)))`。指数は [−126, 127] にクランプし、全ゼロのレーンは `s=1`。`α=0` は `y = x·k^{−β}` に縮退し構造は `x` の線形（V1）で足りるので別分岐にする
+  - **定数の指数**: `s^{−2β}` は β が非整数だと 1 個の f32 定数では範囲を外れうる。§21.2 の `Det` と同じく 1 個の f32 定数にせず、±2^100 以下の 2 のべき乗チャンクに分けて順に `Mul` する。2 のべき乗にならない端数は 1 個の定数にする
+  - **拒否**: `d_s <= 0` のレーン（`k<=0` で窓が全ゼロ、または `α<0`）は拒否する。`LrnParams::new` は `size==0` と非有限の α/β/k だけを拒否し（`lrn.rs:55-75`）、`k<=0` と負の α は受理して結果へ伝播する。1 階は NaN／inf を伝播するが、構造の `PowScalar` の微分係数が `0×inf` を生むため。代替（V2 でマスクして 1 階の値を写す）は 36.14
+  - 値は `local_response_norm_vjp_host`
+- **WeightNorm（V3 + S1。2 入力）**
+  - 1 階の式（`weight_reparam.rs:15-34`）: `dot = Σ up·v`、`dg = dot/n`、`dv = (g/n)·up − (g·dot/n³)·v`（`n` はグループのノルム）
+  - **R**: `Var::weight_norm(v_m, g_m, dim)`
+  - **構造**: `dim` を先頭へ `Permute` し `[groups, rest]` へ `Reshape` する（`dim=None` は `[1, numel]`）。グループごとの 2 のべき乗スケール `s` で `v_s = v_m/s`、`n_s = Sqrt(Sum(v_s²))`、単位ベクトル `v̂ = v_s/n_s` を作る。`dg = Σ(up⊙v̂)`、`dv = (g_b/(s·n_s))⊙(up − dg_b⊙v̂)`。`v̂` はスケール不変で各要素の絶対値は 1 以下、`1/s` は 2 のべき乗なので厳密に表せる
+  - `build_cgrads` は `v` と `g` の**両方**へ寄与を返す（§21.3 #3082 の「入力を定数化しない」と同じ）。`g` から `v` への混合二階項を保つため、`g_m` は子テープ上の Var のまま使う
+  - **ゼロノルム**: §33.10 の VectorNorm L2 と同じく、`Sqrt` に入る二乗和を先に `where_cond(mask, 1, …)` で正の定数へ置き換え（`Sqrt` の微分係数 `0.5/y` が `y=0` で `0×inf=NaN` になるのを防ぐ）、そのあとで出力側を処理する。推奨はゼロノルムのグループを拒否すること（1 階の forward 自体が NaN）。代替（V2 で 1 階の NaN／inf を写す）は 36.14
+  - 値は `weight_norm_vjp_host` の `(dv, dg)` を、それぞれ `push_v3` で入れる
+- **SpectralNorm（V3 + S1。power iteration は定数）**
+  - 1 階の式: `σ = uᵀ W_mat v`、`dW = up/σ − (s/σ²)·u vᵀ`、`s = Σ up·W`。`u`・`v` は forward 時点の**非追跡スナップショット**（`tape.rs:1378` 以降の payload `{weight, u, v, dim}`、`grad.rs:3590`）で、1 階 VJP は両者を定数として扱う
+  - **冪乗法の扱い（イシューの論点）**: **定数として扱う**。1 階 VJP が既に `u`・`v` を detach したスナップショットとして扱っており、PyTorch も `_power_method` を no_grad で回し buffer を clone する。反復を微分すると 1 階と別の関数を微分することになり、「1 階 bit 同一」の契約と PyTorch の二階微分の意味論の両方を壊す。真の最大特異値の微分（SVD の微分）にする案も同じ理由で採らない
+  - **R**: 公開の `spectral_norm(&mut state, training)`（`crates/autodiff/src/weight_reparam_ops.rs:296`）は使わない。training のときは power iteration を回して状態を書き戻すため、孫テープの再生で状態が進んでしまう。`pub(crate)` の再生用入口（例 `spectral_norm_from_snapshot(weight, u: &Tensor, v: &Tensor, dim)`）を新設する。この入口は layout の検査、`spectral_norm_forward`（またはホストの forward）、同じスナップショットで `Op::SpectralNorm` を積むことだけを行う。**replay は power iteration を回さず、どの `SpectralNormState` にも触れない**ことを必須要件とする。代替は `W_m/σ_m` を `Mul`（ホスト定数 `uvᵀ`）・`Sum`・`Div` で合成する案（Op 自身を積まない）で、36.14 に載せる
+  - **構造**: `uvᵀ` を W の shape へ並べたホスト定数 `P` を用意する（`dim` を先頭にした `W_mat` の並びを逆 permute する）。2 のべき乗スケール `s ≥ max|W|` で `W_s = W_m/s`、`σ_s = Sum(W_s⊙P)`、`Ŵ = W_s/σ_s` とする。cgrad は `(1/(s·σ_s))⊙(up − Sum(up⊙Ŵ)·P)`。`u`・`v` が正規化済みなら `P` の各要素の絶対値は 1 以下
+  - **拒否**: `σ_s` が 0 または非有限（1 階は伝播する）
+  - 値は `spectral_norm_vjp_host`
+
+### 36.11 閉包性と族間の依存
+
+- 子テープへ積む Op: `Reshape`・`Permute`・`Contiguous`・`Pad`・`Narrow`・`BroadcastTo`・`Sum`・`Mul`・`Add`・`Where`・`ScalarBinary`（Sub・Div）・`ScalarUnary`（Sqrt・PowScalar・Neg・Abs）。基準時点で `supports_create_graph`（`tape.rs:2526`）と `scalar_unary_replayable`（`create_graph.rs:145`）で true になっていることを確かめた。`ScalarBinary` は実装前に origin/main で再確認する
+- 他族への依存は #3084 の `Pad`（§29。マージ済み）だけ。3 Op はどれも構造に自分自身を積まない（SpectralNorm の R 用入口は Op 自身を積むが、族の中で閉じる）
+- 孫テープの再生では子テープ上にある 3 Op の forward の写しが再生されるので、3 Op 自身が true であることが要る。3 Op は互いに依存しないので、#3794 の中でどの順に実装してもよい
+
+### 36.12 fail-closed・総括的な適用判定・拒否テスト
+
+- **総括判定**: `check_structure_stages`（`crates/autodiff/src/create_graph_norm.rs:338`）と同型の判定を族全体に置く。構造の forward の各段、二階の逆伝播の「cotangent × 微分係数」（`PowScalar` の `−β·d_s^{−β−1}`、`Div` の `−(a/b)/b`、`Sqrt` の `0.5/y`）、境界の cotangent の上界をホストが f64 で求め、`2^125` 以上か非有限になる段があれば拒否する。閾値と seed の絶対値 1 以下という前提は §27.3 と同じ。個別の条件を足していく方式は、§27.3 でレビューが収束しなかった経緯から採らない
+- **入口での拒否**: 非有限の upstream は §27.3 と同じく拒否する。非有限の `x`／`v`／`g`／`W` は §33.14 の論点 3 と同じ規則（NaN は伝播し ±inf は拒否）に合わせる。LRN の `d_s<=0`、ゼロノルム、`σ=0` は 36.10 のとおり拒否する。いずれも 36.14 で問う
+- **CUDA／Metal の forward**: 3 Op とも `BackendOps::{lrn_forward, weight_norm_forward, spectral_norm_forward}`（`crates/tensor-core/src/backend_ops.rs:2669`〜`:2708`）の既定は `Unsupported` で、override しているのは `backend-cpu` だけである。CUDA／Metal／ROCm にデバイスカーネルは無く、forward も 1 階 VJP もホストの共有カーネルで計算する。create_graph の構造ノードも既存のホスト再生経路で評価し、GPU カーネルを新設しない。#3856・#3858 が測るのはデバイスからホストへの実体化を含む経路の parity であり、カーネル間の parity ではない。値は未実測
+- §21.6 の判定順・網羅 match・未知 variant を false にする規約は弱めない
+
+### 36.13 セキュリティ観点・スコープ外・Closes／Refs
+
+- A03: shape・`dim`・`LrnParams` は forward 側の確保前検証を通ったものだけが届く。総括判定はホスト走査で、新しい確保は O(numel) の f64 一時領域と、`P`（W と同じ shape）に限る。LRN のずらし回数は `min(size, C)` で上限をかける
+- A04: 拒否時に子テープを空に保ち、fail-closed を維持する
+- A06: 依存を追加しない。A08: SpectralNorm の状態が create_graph で変わらないことをテストで固定する（36.4）。秘密情報・ホスト名・個人のパスは書かない
+- **スコープ外**: GPU 実機の parity（#3856・#3858）、測り方（#3739）、f64 テープの create_graph、S2 の実装（拒否範囲を狭めるかは 36.14）、`Sequential::add_weight_norm`／`add_spectral_norm`・`norm_except_dim` の公開。新しい issue は承認なしに起票しない
+- `Closes #3727`。`Refs #3794 #3767 #3719`
+
+### 36.14 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 族の採否 | 3 Op を実装する／対象外にする | 実装する | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 2. SpectralNorm の power iteration | 定数として扱う（1 階・PyTorch と同じ）／反復を微分する／SVD の微分 | 定数 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 3. SpectralNorm の R | `pub(crate)` のスナップショット再生入口／`Mul`・`Sum`・`Div` の合成で Op を積まない | スナップショット再生入口 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 4. LRN の `d_s<=0`・WeightNorm のゼロノルム・`σ=0` | 型付きエラーで拒否／V2 で 1 階の NaN／inf を写す | 拒否 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 5. 非有限な入力 | §33.14 の論点 3 と同じ規則（NaN は伝播し ±inf は拒否）／全部拒否 | §33 と同じ規則 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 6. 総括判定で外れる入力 | 型付きエラーで拒否（§27.2 と同じ）／S2 を作って受理 | 型付きエラーで拒否 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 7. LRN の窓和の構造 | `Pad` + ずらした `Narrow` + `Add`／0/1 の帯行列との MatMul／Cumsum の差分 | `Pad` + `Narrow` | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 8. GPU parity の判定方式 | #3739 の推奨に従う（tolerance は変えない）／別方式 | #3739 に従う | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+
+### 36.15 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`・`docs/autodiff-lrn-weight-reparam-decision.md`。
