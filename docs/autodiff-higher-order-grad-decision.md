@@ -3166,6 +3166,184 @@ CI の行は既存の `crates/autodiff/tests/create_graph_linalg_fft.rs` に追�
 
 - コード・公開 API・rustdoc・tolerance・baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
 
+## 45. 設計記録（イシュー #3736・親 #3719。create_graph の拒否範囲・LayerNorm／RmsNorm／BatchNorm）
+
+### 45.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md`・閾値は変えない
+- **基準**: `origin/main` の `ad4213dd1`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: `Op::LayerNorm`・`Op::RmsNorm`・`Op::BatchNorm` の `create_graph`（`hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` が使う子テープ方式）が、入口検査と構造段の上界判定で拒否している入力。§27.2（`docs/autodiff-higher-order-grad-decision.md`）は「S2 か、代替の S0 前スケーリングか」を所有者へ戻していた。本節はその設計を書く。追跡表（`docs/compat-matrix-ari-tracker.md`）の項目 5
+- **根拠**: §21.1、§21.3、§27.2・§27.3、§28.3・§28.5
+- **後続**: 実装は #3809。承認は #3767、GPU parity の測り方は #3739、実機は #3857（`<cuda-node>`）・#3859（`<metal-node>`）、雛形は #3776・#3777
+- **推奨: 実装する（案 A = S0 前スケーリング。入口検査の (b)(c) だけを受理へ移す）**。理由は次の 3 つ
+  1. 恒等式 `LN(x; eps) = LN(x/p; eps/p²)` を使うと、二階の項を手で書く必要が無い。二階は子テープ上の自動微分が `Div` を通して得るので、Hessian が「有限のまま誤値」になる構造的な危険が無い（45.11）
+  2. 残る危険は overflow／underflow だけで、既存の構造段の判定（`check_structure_stages`）が fail-closed で拾う
+  3. `[3e38, -3e38]` のような有限入力で `hvp` が使えないままになる実害がある（現状は型付きエラー）
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | S0 前スケーリング。(b)(c) に当たる行だけ `x` を 2 のべき乗 `p` で割ってから既存の S1 構造に入れ、dx の出力を `p` で割って戻す | 二階の項を手で書かない。Hessian の構造的な誤値が起きない。1 階の値は bit 同一のまま | 構造に除算の段が 1 つ増える。underflow の扱いを書く必要がある（45.12） |
+| B | S2。ホストで統計量（`mean`・`rstd`）を f64 で求め、定数として `push_eager` し、二階の項を解析式で手書き合成する | 中間値が f32 を超えない | 手書きの項が 1 つ欠けると Hessian が有限のまま誤値になり、有限性のプローブでは検出できない。塞ぐには項ごとの f64 参照テストが要り、§27.2 が「1 イシューの粒度を超える」とした理由そのもの |
+| C | 対象外。現状の fail-closed を恒久契約にする | 費用ゼロ | 上記の実害が残る |
+
+### 45.1 公開形
+
+- 該当なし。新しい公開名は増えない。`Tape::backward_create_graph` と、それを使う `hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` が受理する入力の範囲が広がるだけ
+- `crates/facade/tests/api_surface.rs` には Norm の create_graph の拒否範囲を固定する否定ガードも保留 doctest ガードも無い。反転対象は無い
+- **実装 PR（#3809）が直す記述**: `crates/autodiff/src/create_graph_norm.rs` のモジュール doc「拒否条件」節（`:36` 付近）、`reject()`（`:108`）のメッセージ（§27・§28 に §45 を足す）、`tape.rs:2526` の `supports_create_graph` の周辺 doc、facade `crates/facade/src/lib.rs:1168`・`:1239` の「設計記録 §27・§28」の参照
+
+### 45.2 rustdoc と doctest
+
+- 新しい公開 API が無いので、必須の doctest は無い
+- 任意で、facade の `backward_create_graph` に CPU だけで通る広い偏差の行（例 `[3e38, -3e38]`、`g = 1`）の受理例を足してよい。GPU の例は置かない
+- 失敗系は `compile_fail` に頼らない。実行時の `Err(AutodiffError::Backward(_))` との一致と `child.is_empty()` で確かめる（`compile_fail` はコードを照合しないため。stable rustdoc の実測）
+
+### 45.3 エラー型
+
+- 新しい variant は足さない。拒否は従来どおり `AutodiffError::Backward(String)`
+- スケール指数 `k` の計算と、(b)(c) に当たるかの判定は、子テープへ書く前（入口検査 `validate_norm_s1`〈`create_graph_norm.rs:123`〉・`validate_batch_norm`〈`:970`〉）に行う。構造段の判定 `check_structure_stages`（`:338`）は、スケール後の領域で従来どおり構造を組む前に走らせる。拒否は `backward_create_graph` のロールバックで `child` を空に戻し、同じ `child` で再試行できる
+- `n·spatial` と `hidden` の積は既存どおり `checked_mul`。本番経路で `unwrap`／`expect` を使わない
+
+### 45.4 テスト計画
+
+名前は案で、実装 PR で確定する。CI の行は既存の `crates/autodiff/tests/create_graph_norm.rs`・`create_graph_batch_norm.rs` へ足す。
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 受理へ移す入力で、1 階が素の `backward` と bit 同一、`cg.grad` が REQ-2 で一致し、1 階・`cg.grad`・孫テープ再生の 3 段が有限 | `layer_norm_prescaled_rows_three_stages_finite`、`rms_norm_prescaled_*` | CI | 未実測 | 未実測 | 対象外（全面フォールバック） |
+| 二階の値（混合項 `∂dw/∂x`・`∂dx/∂w`、`w`・`b` の二階）がホスト f64 の参照と一致 | `layer_norm_prescaled_hessian_matches_f64_reference` | CI | 未実測 | 未実測 | 対象外 |
+| BatchNorm train のチャネル行で同上 | `batch_norm_prescaled_*` | CI | 未実測 | 未実測 | 対象外 |
+| 同じ行を S0 あり（強制 `k`）と S0 なし（S1 のみ）で組んだとき、受理域の中程度の `x` で `cg.grad`・二階が REQ-2 で一致（S0 の構造が値を変えないことの直接確認） | `layer_norm_prescale_forced_k_matches_s1` | CI | — | — | — |
+| 拒否を残す入力（45.13 の表）が拒否され、`child` が空で再試行できる | 既存 `layer_norm_rejects_unsafe_inputs_and_keeps_child_empty`・`rms_norm_rejects_unsafe_inputs_and_keeps_child_empty` の縮小 | CI | — | — | — |
+| 掃引に広い偏差の行を足しても「受理なら有限・一致、拒否なら `child` 空」が成り立ち、受理と拒否の両方が出る | 既存 `sweep_every_structure_path_is_finite_or_rejected` の拡張 | CI | — | — | — |
+| 判定（`stage`）を一時的に常に通すと掃引が落ちる（置き換えの確認。§28.6 と同じ確かめ方を S0 経路にも適用） | 手動確認 | 手動 | — | — | — |
+| facade 経由の受理例 | `crates/facade/tests/create_graph_facade.rs` に `*_prescaled_create_graph_via_facade` | CI | 未実測 | 未実測 | 対象外 |
+| CUDA／Metal の parity | `create_graph_norm_prescale_cuda_parity`／`create_graph_norm_prescale_metal_parity`（後者は `cfg(target_os = "macos")`）。置き場と名前は #3776・#3777 の確定まで仮。測り方は #3739 | `#[ignore]` | 未実測 | 未実測 | 対象外 |
+
+- 二階の値の参照は、テスト内のホスト f64 実装による 5 点中央差分とする。`h` は `x` のスケールに比例させる。判定式・tolerance は変えない
+- **値テストの検出力に関する注意**: `|x| ~ 3e38` の行では、真の `∂²L/∂x²` が約 `1/σ²`（`σ ~ 3e38` で約 1e-77。f32 では 0 に丸まる）、混合項 `∂dx/∂w` が約 `g·rstd`（約 3e-39）で、いずれも REQ-2 の絶対誤差 1e-5 より小さい。このため極端な行の値テストは「有限で 0 近傍」を確かめるだけで、式の誤りを検出する力が弱い。値の正しさは上の「強制 `k`」テストと、S0 が発動するぎりぎりの広さの行（`x_i − x_0` が f32 最大に近い行）で確かめる。判定の下限は実装 PR で f64 スクリプトにより実測してから書く
+- 実機の実行は #3857・#3859 が担う。Linux や開発機の代替値で pass にしない
+
+### 45.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・`STAGE_BOUND_GUARD`／`MEAN_OVERFLOW_GUARD`／`TINY_DEVIATION_GUARD` は変えず、新しい baseline も作らない
+- 1 階の値（`layer_norm_vjp_rows`・`rmsnorm_vjp_rows`・`batch_norm_vjp_channels`）は元の `x` で計算するので bit 同一のまま。S0 は構造（二階の経路）にだけ入る
+- FMA 契約と f64 長軸縮約の契約（`.claude/rules/coding-rust.md`）には触れない
+- `p` は 2 のべき乗なので、`x/p` と `dx'/p` は（underflow しない範囲で）丸めなしの厳密な除算になる。`eps' = eps/(p·s')²` は f64 で計算して f32 へ丸める。`p = 2^127` のとき `eps'` は f32 の最小正規数より小さく 0 に丸まる（`eps = 1e-5` なら約 2e-77。f64 スクリプトで確認）。S0 が発動する行は偏差が大きく、スケール後の分散は `1/n` 規模以上なので、`eps' = 0` でも `rstd` は有限で、真の `eps` の寄与（相対約 1e-77）は f32 の丸めの下に埋もれる。tolerance を使って隠す扱いではない
+- 保証範囲は §27.3 と同じ書き方にする: 判定を通った入力に限る。seed の各要素は絶対値 1 以下。三階以上は対象外
+- 実測した前提（f64 と f32 の模擬）: `[3e38, -3e38]` の f32 の `x_1 − x_0` は `-inf`。`[-2e38, 1e38, 1e38]` は差が有限（約 3e38）でも `Mean` の部分和が `inf`。どちらも `k` は 127 を超えるので 127 にクランプし、スケール後の最大絶対値は約 1.76（`3e38 / 2^127`）になる
+
+### 45.6 互換への影響
+
+- **該当なし**。`api-compat-0.14.0-decision.md` §8 の手順で引くべき公開型に触れない（公開名・シグネチャ・`AutodiffError` の variant は不変）
+- 一部の入力が `Err` から `Ok` に変わる挙動の変化だけを注記する。拒否の範囲を狭める変更で、既存の成功入力の結果は変わらない（1 階は bit 同一、S0 は (b)(c) の行だけで発動し、いま受理している入力の子テープの構造は変わらない）
+
+### 45.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（公開型の変化なし）
+- `docs/compat-api-scope.md` の適用記録は承認後の実装 PR（#3809）で書く。文案: `**適用記録（イシュー #3809・親 #3736。承認: <#3767 の回答 URL>）**: LayerNorm・RmsNorm・BatchNorm の create_graph で、f32 の差・部分和が overflow する入力を S0 前スケーリングで受理へ広げた。公開名の追加なし。` 0.14.0 の移行ノート（#3780）の該当欄も実装 PR で更新する
+- [ ] compat-api-scope（承認後の PR で行う）
+- [x] `docs/README.md` の索引
+- [x] 追跡表（項目 5 に §45 を追記）
+
+### 45.8 ベンチと性能への影響
+
+- 既定経路（`Tape::backward`・forward）の演算は変えない
+- S0 は (b)(c) に当たる行だけで有効にする。それ以外の行では `p = 1` とし、ノードを足さない。S0 が発動する行の費用は `Div` 2 段（`x/p`、`dx'/p`）と `p` の定数列で、行数に比例する
+- 掃引テストの CI 時間の参考値は §28.6 の「約 16 秒（デバッグ）」。それ以外の値は未実測。既定経路に触れた場合だけ、5 回計測の中央値で前後を比べ、判定規則を計測前に固定する
+
+### 45.9 依存の追加の有無
+
+追加なし。許容 12 区分と禁止リストに照らして変化なし。新しい `unsafe` も無い。
+
+### 45.10 現状の拒否の棚卸し（2 つの軸を分ける）
+
+- **入口検査**（親テープの `x` だけで決まる。`validate_norm_s1`・`validate_batch_norm`）
+  - LayerNorm／BatchNorm train: (a) 非有限要素、(b) f32 の `x_i − x_0` が非有限、(c) `hidden · max|x_i − x_0| ≥ 2^125`、(d) `eps == 0` かつ `max|x_i − x_0| < 2^-100`
+  - RmsNorm: (a)、(d') `eps == 0` かつ全ゼロ行
+  - BatchNorm eval: `x`・`mean`・`var` の非有限要素
+- **構造段の上界判定**（`check_structure_stages`。`g`・`w`・`rstd` との組み合わせで構造の各段と二階の逆伝播の cotangent が `2^125` 以上になる入力を拒否する）。§28.5 の Codex 3・6・7、§27.3 のレビュー例、eval の `x − mean` overflow がこれに当たる
+- **S0 が動かすのは入口検査の (b)(c) だけ**で、構造段の判定には触れない。(b)(c) を通った行も、構造段の判定を通らなければ拒否される
+
+### 45.11 方式比較（S0 と S2）
+
+- **S2**: ホストで f64 の統計量を求めて定数ノードにし、二階の項を解析式で手書き合成する。定数ノードは子テープ上で `x` に依存しないので、手書きの項が 1 つでも欠けたり誤ったりすると、Hessian は**有限のまま誤値**になる。有限性のプローブ（受理なら全段が有限で一致）では検出できず、孫テープ再生（`jvp_create_graph`）でも定数の微分は 0 として扱われる。塞ぐ手段は 2 つあり、どちらも費用が大きい: (1) 値が 0 で微分が恒等の項 `x − const(x)` で接線を運ぶ、(2) S1 経路と重なる受理域での突合と f64 参照 Hessian のテスト
+- **S0**: `p` を行ごとの 2 のべき乗にする。RmsNorm と BatchNorm train も同じスケール不変性（分子・分母が同次）を持つ。子テープ上で `x' = Div(x, p)` を作り、既存の S1 構造（`x'`・`eps'`）の dx 出力を `Div(dx', p)` で戻す。二階は自動微分が `Div` を通して自動で得る。**手書きの二階の項が無い**ので、Hessian の構造的な誤値は起きない
+- 結論: 推奨は S0（案 A）。所有者が S2 を望む場合の費用は上の (1)(2) で、別 issue で設計する（45.19 の論点 1）
+
+### 45.12 S0 の構造と式
+
+- `p = 2^k`。`k` は行の `max|x_i|` から `max|x_i| / 2^k ≤ 1` となる最小の `k ≥ 0`、ただし上限 127 にクランプする（`max|x_i| > 2^127` のとき `|x'_i| < 2`）。`p` は縮小方向だけに使い（`k ≥ 0`）、小さなスケールは S1 の行スケール `s` が引き続き扱う
+- **適用条件**: その行が (b) か (c) に当たるときだけ `p > 1` にする。それ以外は `p = 1` で、ノードを足さない
+- **構造段の判定**はスケール後の領域（`x'`・`eps'`）で既存の `check_structure_stages` をそのまま走らせる。`/p` の段は値を縮めるだけ（`p ≥ 1`）で、二階の逆伝播でも seed を縮めるだけなので上界は保たれる。fail-closed の透明性のため、`/p` の段も判定の段として明示する
+- **指数の範囲**: `s'·p` を 1 個の f32 定数にしない。`Div(·, s')` と `Div(·, p)` を別ノードにする。各定数は `[2^-126, 2^127]` に収まる
+- `p` は `[rows, 1]` の定数列として broadcast する。BatchNorm train ではチャネル行ごとに同じことをする。**eval は固定統計に対してスケール不変ではない**ので S0 を適用しない
+- **underflow**: 行の最大値の f32 の ulp より下の情報は、元の f32 の `x_i − x_0` でもすでに失われている。S0 で出る underflow（`dx'/p` が非正規数や 0 になる）は、真の `dx ~ g·rstd` が約 1e-39 規模の行で起きるもので、REQ-2 の絶対誤差 1e-5 のうえでは一致とみなせる。実質的な損失にならないことを実装 PR のテストで確かめる（45.4 の値テストの注意と同じ）
+
+### 45.13 拒否を残す入力／受理へ移す入力
+
+| 入力 | 現状 | 提案 | 理由 |
+|---|---|---|---|
+| (a) 非有限要素 | 拒否 | 拒否のまま | 1 階も非有限で、契約の外 |
+| (b) f32 の `x_i − x_0` が非有限（例 `[3e38, -3e38]`） | 拒否 | 受理へ（S0）。ただし構造段の判定を通った場合に限る | スケール後は差が 4 未満 |
+| (c) `Mean` の部分和の overflow（例 `[-2e38, 1e38, 1e38]`） | 拒否 | 受理へ（S0）。同上 | スケール後は `hidden · 4` 未満 |
+| (d) `eps == 0` の定数行・極小偏差行 | 拒否 | 拒否のまま | 定数行は真の微分が未定義。極小偏差は `rstd ≥ 2^100` で、真の二階も f32 を超えうる |
+| (d') RmsNorm の `eps == 0` 全ゼロ行 | 拒否 | 拒否のまま | 真の微分が未定義 |
+| BatchNorm eval の非有限要素 | 拒否 | 拒否のまま | (a) と同じ |
+| BatchNorm eval の `x − mean` overflow | 拒否 | 拒否のまま | S0 は適用外（固定統計） |
+| 構造段の判定による拒否（大きな upstream など） | 拒否 | 拒否のまま（本節の範囲外） | 論点 3 として所有者へ戻す |
+
+- (d) の境界を「厳密な定数行だけ」に狭める案は、論点 2 として所有者へ戻す
+
+### 45.14 §28 で撤去した前置スケールとの違い
+
+§28.5 が撤去した方式は次の 3 点を持っていた: (1) upstream `s_g` のスケールとその打ち切り、(2) `±100` 段の 2 のべき乗の掛け戻し（拡大方向）、(3) 無条件の適用。S0 との違い:
+
+- `x` だけを縮小方向に割る。掛け戻しはせず、`dx'` を `p` で割って戻す
+- (b)(c) の行だけに適用する。Cursor Bugbot が指摘した「同符号の巨大入力で余計な倍率」の例（`[3e38, 2.9e38]`）は (b)(c) に当たらないので S0 は発動しない
+- 後段に構造段の総括判定（`2^125`）を置く。撤去時には、この総括判定が後ろに無かった
+
+### 45.15 正のプローブの更新計画（#3809 で差し替える既存テスト）
+
+- `create_graph_norm.rs`: `layer_norm_rejects_unsafe_inputs_and_keeps_child_empty`（`:555`）から (b)(c) の行を外し、受理テストへ移す。(a)(d) の行は残す。`rms_norm_rejects_unsafe_inputs_and_keeps_child_empty`（`:563`）は変更なし。`sweep_rows`（`:849`）と `sweep_every_structure_path_is_finite_or_rejected`（`:885`）に広い偏差の行を足す。`review_examples`（`:776`）・`review_examples_are_rejected_with_empty_child`（`:831`）のうち入口の (b)(c) に依存する例があるかは実装時に確かめる
+- `create_graph_batch_norm.rs`: `review_examples`（`:267`）の Codex 5・8（`[3e38, -3e38]`・`g = 1e38` 系）は**期待値を反転しない**。入口は通るが構造段の判定で拒否される見込みで、拒否の理由が入口の (b) から構造段へ変わる。結果は #3809 で実行して確かめ、受理された場合は全段が有限で一致することを確かめる。同じ `x` で `g = 1` の変形を足して期待値を受理にし、`rejected_review_examples_at_moderate_scale_are_accepted`（`:350`）も見直す。掃引（`:458`・`:507`）にも広い偏差のチャネル値を足す
+- `create_graph.rs`: `batch_norm_create_graph_overflow_regression_vectors_are_finite_or_rejected`（`:4523`）の `[3e38, -3e38]` の扱いを同じ規則で分ける
+- プローブの契約は従来どおり: 受理なら 1 階・`cg.grad`・孫テープ再生が有限で一致、拒否なら `child` が空
+
+### 45.16 実装の段分け（#3809。2h 単位の目安。起票と分割は承認後で、本 PR では行わない）
+
+1. 入口検査の分岐を (b)(c) 用の S0 へ切り替え、`k` を計算する
+2. 構造に `Div(x, p)`・`Div(dx', p)` を入れ、判定の段を足す（LayerNorm・RmsNorm の共通関数）
+3. BatchNorm train のチャネル行へ展開する
+4. テストの差し替えと追加（強制 `k` の比較、f64 参照の Hessian テストを含む）
+5. rustdoc・決定記録・適用記録・追跡表・facade のテスト
+
+### 45.17 セキュリティ観点（OWASP Top 10）
+
+- A03: テンソル値は外部入力として扱う。`k` の計算と判定は子テープへ書く前、確保の前に行い、拒否は型付きエラーにする
+- A04／A08: 黙った誤値（Hessian）を構造で防ぐのが S0 を推す理由。tolerance・判定の閾値を緩めない。判定の迂回経路を作らない
+- A06: 依存を追加しない
+
+### 45.18 スコープ外・Closes／Refs
+
+- 構造段の判定による拒否を狭めること（S2 の再検討）は範囲外。所有者の承認なしに起票しない（`.claude/rules/out-of-scope-tracking.md`）
+- Det 系は #3737、`padding_idx` は #3738、GPU の測り方は #3739 の範囲
+- 本 PR は受け入れ条件がすべて docs なので `Closes #3736` でよい
+
+### 45.19 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 方式 | A S0／B S2／C 対象外 | A | 確認があるまで実装へ進めない（fail-closed を維持） |
+| 2. (d) の境界 | 現状維持／厳密な定数行だけに狭める | 現状維持 | 同上 |
+| 3. 構造段の判定による拒否 | 範囲外のまま／別 issue で S2 を設計 | 範囲外のまま。起票は承認後 | 同上 |
+| 4. BatchNorm eval の `x − mean` overflow | 拒否のまま／別方式 | 拒否のまま | 同上 |
+| 5. 実機 parity | #3857・#3859 の範囲に S0 経路を含める／含めない | 含める | 同上 |
+
+### 45.20 変えていないもの
+
+コード・公開 API・rustdoc・1 階の値・tolerance・baseline・閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
 ## 46. 設計記録（イシュー #3737・親 #3719。create_graph の拒否範囲・Det／Inv／Solve／SlogdetLogAbsDet）
 
 ### 46.0 位置づけ・承認根拠・境界・推奨
@@ -3216,7 +3394,7 @@ CI の行は既存の `crates/autodiff/tests/create_graph_linalg_fft.rs` に追�
 
 | 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
 |---|---|---|---|---|---|
-| 受理へ移す入力（`diag(1e20,1e20)`・`g=1`、`diag(1e20)×3`・`g=1e-30`、`diag(1e30,1e-30)`・`g=1`）で 1 階が素の `backward` と bit 同一、`cg.grad` が 1 階と bit 一致（V3）、1 階・`cg.grad`・孫テープ再生（`jvp_create_graph`）が有限、Hessian が f64 参照（またはスケールに比例した刻みの 5 点中央差分）と REQ-2 で一致 | `crates/autodiff/tests/create_graph_linalg_fft.rs` に追加 | CI | 未実測 | 未実測 | 未実測 |
+| 受理へ移す入力（`diag(1e20,1e20)`・`g=1`、`diag(1e20)×3`・`g=1e-30`）で 1 階が素の `backward` と bit 同一、`cg.grad` が 1 階と bit 一致（V3）、1 階・`cg.grad`・孫テープ再生（`jvp_create_graph`）が有限、Hessian が f64 参照（またはスケールに比例した刻みの 5 点中央差分）と REQ-2 で一致 | `crates/autodiff/tests/create_graph_linalg_fft.rs` に追加 | CI | 未実測 | 未実測 | 未実測 |
 | 拒否が残る入力（`A=I`・`g=3e38`、`1.001·I`〈160 次〉、256 次上三角・`g=2^-100`）が `Err(Backward)` で `child` が空、同じ `child` で再試行できる | 同上 | CI | 未実測 | 未実測 | 未実測 |
 | 強制スケール比較: ほどほどの入力を行別スケールを強制した構造とスケールなしの構造で組み、`cg.grad`・二階が REQ-2 で一致（§45 の「強制 k」と同じ確かめ方） | 同上 | CI | 未実測 | 未実測 | 未実測 |
 | 今受理している入力（dense など）では構造が変わらない | 同上 | CI | 未実測 | 未実測 | 未実測 |
@@ -3289,7 +3467,7 @@ CI の行は既存の `crates/autodiff/tests/create_graph_linalg_fft.rs` に追�
 | `Solve` の `A=[[1e-10]]`・`B=[[1e30]]`（`solve_overflowing_state_is_rejected`） | (i) | 拒否のまま | `x≈1e40`、`dA≈-1e50` |
 | `Det` の `diag(1e20,1e20)`・`g=1`（`det_large_input_is_rejected`） | (ii) | **受理へ移す** | `det=1e40` は f32 超だが 1 階は `1e20`、二階は ±1 で有限 |
 | `Det` の `diag(1e20)×3`・`g=1e-30` | (ii) | 受理へ移す（見込み） | スケール後の段が収まる |
-| `Det` の `diag(1e30,1e-30)`・`g=1` | (iii) | 受理へ移す（見込み） | 上界の式を復元係数つきで書き直すことが前提 |
+| `Det` の `diag(1e30,1e-30)`・`g=1` | (iii) | 拒否のまま | 区分 (iii) の救済（V4）は本 issue のスコープ外で、スケール経路の発動条件（区分 (ii) だけで拒否する入力）にも含めない。受け入れ基準の受理対象にも入れない。V4 は別 issue で扱う |
 | `Det` の `A=I`・`g=3e38` | (ii) | 拒否が残る（見込み） | 最終値 `3e38` が `2^125` 以上 |
 | `Det` の `1.001·I`（160 次） | (iii) | 拒否が残る（見込み） | `det(B)` のアンダーフロー |
 | `Det` の 256 次上三角・`g=2^-100` | (ii) | 拒否が残る（見込み） | スケール後も段が収まらない |
