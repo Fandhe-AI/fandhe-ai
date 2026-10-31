@@ -3166,6 +3166,231 @@ CI の行は既存の `crates/autodiff/tests/create_graph_linalg_fft.rs` に追�
 
 - コード・公開 API・rustdoc・tolerance・baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
 
+## 44. 設計記録（イシュー #3735・親 #3719。create_graph の B 区分・分解系 7 Op）
+
+### 44.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
+- **基準**: `origin/main` の `ccd2d7835`。以下の `file:line` はこの時点の値で、実装 PR の前に引き直す
+- **節番号**: base では §41・§43 が未使用だが、並行 PR（#3894 が §41、#3896 が §43）が使うため、衝突しない §44 にした
+- **対象**: `QrQ`・`QrR`・`SvdU`・`SvdS`・`SvdVh`・`EighValues`・`EighVectors` の 7 Op。§21.2 は B 区分の #3086 族に置き、§31.1 は「多出力ノードが兄弟の値を追跡されない payload として持ち、縮退で不安定」を理由に fail-closed へ固定した。§31.5 の 4 は「縮退の扱いを決めたうえで起票する」としている。このため分解を含む損失（直交化・スペクトル正則化・固有値損失）では `hvp`・`jvp`・`jacfwd`・`jvp_create_graph` が `Err(AutodiffError::Backward)` で拒否される（追跡表の項目 4）
+- **根拠**: §21.1（V1〜V4・閉包性・数値契約）、§21.2、§21.6、§27.3、§31.1・§31.3・§31.5 の 4、§37.10（LSTM の複数ノード再生の前例）。設計方針の根拠であって承認ではない
+- **後続**: 実装は #3807（QR）・#3808（SVD・Eigh）。承認は #3767、実機 parity は #3857（`<cuda-node>`）・#3859（`<metal-node>`）、測り方は #3739
+- **推奨: 案 A（7 Op すべて実装する）**。理由は 3 つ
+  1. 1 階 VJP の式はすべて replayable な Op で書ける
+  2. 1 回の再生から兄弟をそろえて取るので、因子どうしの整合が構造的に保たれる
+  3. §37 の `LstmHidden` に同じ前例がある
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| A（推奨） | 7 Op を `Var::qr`／`svd`／`eigh` の自己再生で写す。兄弟は push 順序契約で取る。値は V3（1 階のホスト関数）、構造は f32 の合成、縮退などは事前に拒否する | payload も公開面も増えない。既定経路は変わらない |
+| B | 対象外として fail-closed を恒久契約にする | 費用は無いが、分解を含む損失の高階変換が拒否され続ける |
+| C | 兄弟の NodeId を `Op` の payload に足す | `pub(crate)` なので公開面は変わらないが、網羅 match の保守が増える。A で足りる |
+| D | 兄弟ごとに重複して再生する | 状態を持たずに済むが、因子分解が最大 3 回になる。GPU の opt-in ゲート ON のとき決定性に依存し、Q と R が別呼び出しから来ると値の整合が崩れうる |
+
+- **境界**: 他の B 区分（#3729〜#3734）と C 区分は扱わない。`MatrixNorm` の `Nuc`／`Spectral`（§43 の領域）も扱わない。`Svd*` が使えるようになっても σ1 = σ2・σ = 0 の微分できない点は残るので、再検討の要否だけを論点 11 として所有者に戻す
+
+### 44.1 公開形
+
+- 該当なし。公開名は増えず、`Var::qr`／`svd`／`eigh` と `QrVars`／`SvdVars`／`EighVars`（`crates/facade/src/lib.rs:296`〜`:300` で公開済み）のシグネチャも変えない。変わるのは受理する範囲だけ
+- 反転する否定ガード・保留 doctest ガードは無い（`crates/facade/tests/api_surface.rs` に分解系の create_graph を拒否するガードは無い）。正ガードの代わりは 44.4 の facade 挙動テストとする
+- **命名の制約**: `LINALG_OPS_FN_NAMES`（`api_surface.rs:12444`）が `eigh` などの関数名を数えるので、同名の `fn` は宣言しない。ヘルパーは `qr_cgrad`・`svd_cgrad`・`eigh_cgrad`・`guard_qr`・`guard_svd`・`guard_eigh`・`decomp_siblings` のような形にし、新規 `create_graph/decomp.rs` に置く案とする
+- **実装 PR で変える箇所**: `supports_create_graph`（`crates/autodiff/src/tape.rs:2526`。7 Op は `:2639`〜`:2647` の false 側）の網羅 match で 7 Op を true 側へ移す（ワイルドカードは足さない）、`create_graph.rs` のモジュール doc（`:74`〜`:75` の fail-closed 列挙）、`tape.rs` の `Op` の doc（`:842`〜`:894`）と `:2594` 付近のコメント、`tests/create_graph_linalg_fft.rs` 冒頭の列挙、facade の rustdoc 6 か所（`lib.rs:911`・`:1036`・`:1140`・`:1201`・`:1300`・`:1382`）の「§21.2・§22〜§31」へ §44 を加える
+- `is_checkpoint_eligible`（`tape.rs:1962`〜`:1975`）は触らない
+
+### 44.2 rustdoc と doctest
+
+- 必須の doctest は無い。任意で、facade の `hvp` に CPU だけで通る `eigh` の固有値損失の HVP 例を 1 つ足してよい。GPU の例は `no_run`／`#[ignore]` にする
+- 失敗系は `compile_fail` に頼らず、`Err(AutodiffError::Backward(_))` との一致と `child.is_empty()` で確かめる
+
+### 44.3 エラー型
+
+- 新しい variant は足さず、`AutodiffError::Backward(String)` に統一する
+- **検証順**
+  1. 子テープへ書く前（`validate_ancestors`。`create_graph.rs:444`）に、親の情報だけで決まる条件を拒否する
+     - (a) 兄弟の push 順序契約の違反（親の `id±k` のノードが同じ `input` を持つ兄弟 Op でない）
+     - (b) QR で `m < n`
+     - (c) QR で R の対角に 0 がある（rank 落ち）か、R が特異
+     - (d) SVD で特異値の縮退（`svd_vjp` と同じ述語 `|σj²−σi²| < 1e-9`。`eval/linalg.rs:1371`）か `σ == 0`
+     - (e) Eigh で固有値の縮退（`EIGH_DEGENERATE_RTOL` の相対判定。`eval/linalg.rs:1719`。値は変えず、可視性だけ `pub(crate)` にする）
+     - (f) `k == 0` の空分解（論点 10）
+  2. 上流 `g` に依存する総括判定（44.12）は、cgrad の腕の冒頭でノードを push する前に行う。二重の防御として、呼び出し側のロールバック（`create_graph.rs:366`〜`:373` の `rollback_to`）で `child` を空に戻す
+  3. 再生の直後に、子テープ側の兄弟ノードの Op と `input` が契約どおりかを検査する（§37.3 と同形）。違えば `rollback_to`
+- ガードは `qr_vjp`（`eval/linalg.rs:1309`）・`svd_vjp`・`eigh_vjp`（`:1849`）以上に厳しくする。これで V3 の値計算が `InvalidArgument` を返す経路が無くなり、拒否は常に `Backward` になる
+- 本番経路で `unwrap`／`expect` は使わない。外部入力（rank 2・正方・有限）は forward 側の検証を通ったものだけが届く。新しい tolerance・閾値定数は作らない
+
+### 44.4 テスト計画
+
+CI の行は新規 `crates/autodiff/tests/create_graph_decomp.rs`（仮名）に置く。テスト名は案で、実装 PR で確定する。
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 1 階が素の `backward` と bit 同一。`cg.grad` も V3 なので CPU で bit 一致 | `decomp_first_order_bit_identical_and_cgrad` | CI | 未実測 | 未実測 | 未実測 |
+| QR（縦長・正方）のヘッシアンが 5 点中央差分と REQ-2 で一致。Q だけ・R だけ・両方を使う損失 | `qr_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| SVD（縦長・横長・正方。スペクトルはよく分離、例 σ≈3,2,1）のヘッシアン。U・S・Vh それぞれと混合の損失を、gauge 不変な損失と、符号依存だが max-abs のタイから離れた入力の損失の両方で | `svd_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| Eigh のヘッシアン。パラメータは下三角の成分だけ（forward は下三角しか読まない）にし、上三角方向の勾配と二階が 0 であることも確かめる。固有値だけ・固有ベクトルだけ・両方の損失 | `eigh_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| `jvp_create_graph`（孫テープへの再生）が方向微分と一致する | `decomp_grandchild_replay_matches_directional_derivative` | CI | 未実測 | 未実測 | 未実測 |
+| 兄弟が祖先に無い場合（Q だけ・S だけ・固有値だけを使う）でも、push 順序契約で兄弟の写しが取れ、二階が正しい | `decomp_sibling_not_in_ancestors_second_order` | CI | 未実測 | 未実測 | 未実測 |
+| 縮退の拒否: `eigh(I_2)`・`eigh(diag(2,2,1))`・`svd(diag(2,2))`、しきい値の内側の近接スペクトル、`svd([[1,0],[0,0]])`（σ=0）、rank 落ちの QR、横長の QR、空行列で `Err(Backward)`。`child` が空で同じ `child` で再試行できる。固有値だけの損失でも拒否する（1 階は受理するのと対比） | `decomp_degenerate_inputs_rejected_child_empty_and_retry` | CI | 未実測 | 未実測 | 未実測 |
+| 総括判定の拒否域（`g=±3e38`、しきい値の外だが 1/E² の上界が 2^125 を超える近接スペクトル、悪条件の R）で `Err(Backward)`、`child` が空 | `decomp_unsafe_inputs_rejected_child_empty` | CI | 未実測 | 未実測 | 未実測 |
+| ほどほどのスケール（1e-3〜1e3）の入力は受理され、3 段とも有限 | `decomp_moderate_inputs_accepted_and_finite` | CI | 未実測 | 未実測 | 未実測 |
+| 縦長 `[100000,1]` の QR／SVD で、構造が m×m の中間行列を作らない | `decomp_cgrad_does_not_materialize_m_by_m` | CI | 未実測 | 未実測 | 未実測 |
+| push 順序契約の違反が型付きエラーになり `child` が空のまま残る | `create_graph.rs` 内の単体テスト（`Op` が `pub(crate)` のため） | CI | 未実測 | 未実測 | 未実測 |
+| 7 Op が true、隣接の fail-closed（その時点で false のもの）が false | `tape.rs` の単体テスト `decomp_family_supports_create_graph` | CI | 未実測 | 未実測 | 未実測 |
+| 隣接する fail-closed: `Op::Custom` と組み合わせると拒否され、`child` が空 | `decomp_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
+| facade 経由 | `qr_`／`svd_`／`eigh_create_graph_via_facade`（`check_create_graph_family`。`crates/facade/tests/create_graph_facade.rs:552`） | CI | 未実測 | 未実測 | 未実測 |
+| 実機 parity: `gpu_extended_ops_match_cpu`（`:826`）のケース表へ qr・svd・eigh を足す。ゲート OFF の既定経路で測る。ゲート ON の決定性は別の行にする | 同左。ゲート ON 用は `decomp_gpu_linalg_gate_on_replay_deterministic`（仮名・`#[ignore]`） | `#[ignore]` | 未実測（#3857） | 未実測（#3859） | 未実測（雛形なし） |
+
+**既存テストの差し替え**（実装 PR の作業。その時点の main で数え直す）
+
+- `fail_closed_cases()`（`crates/autodiff/tests/create_graph_linalg_fft.rs:639`）から分解系 7 行（`:700`〜`:735`）を外す。件数の固定値（`:761` の `assert_eq!(cases.len(), 15)`）は §42・§43 の実装でも変わるので、固定値は本節に書かず実装時に数える。拒否の見本は 44.4 の拒否テストへ移す
+- `tape.rs` の `linalg_fft_family_supports_create_graph`（`:5370`）の unsupported 配列から分解系を外す
+- **§43.4 との関係**（並行 PR #3896 の記述。本節からは §43 を変えない）: §43.4 が差し替え先に挙げる `QrQ`・svd 系は、#3807・#3808 の後は fail-closed でなくなる。隣接の見本は `Op::Custom` だけにする
+- 実機の実行は #3857・#3859 が担う。Linux や開発機の代替値で pass にしない
+
+### 44.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。次は変えない: `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`、baseline、ガードレール閾値、`STAGE_BOUND_GUARD`（2^125）、FMA 契約、f64 長軸縮約の契約、`EIGH_DEGENERATE_RTOL` と `svd_vjp` の 1e-9（どちらもアルゴリズムの引数で REQ-2 の tolerance ではない）。新しい baseline は作らない
+- 1 階は構造上 bit 同一（§21.1(1)）。`cg.grad` は V3 なので CPU では 1 階と bit 一致する
+  - 根拠: 再生した兄弟の値は、親の payload と同じ決定的なホスト f64 関数から来る
+  - 部分寄与は 1 階と同じくノードごとに計算し `accumulate` で合算する。まとめて 1 回で計算すると丸めが変わるので、そうしない
+  - GPU で opt-in ゲートを ON にしたときは REQ-2 だけを主張する
+- 二階と孫テープでは構造側の f32 合成が効く
+- 必須ベクトル（3 段すべて）: 近接スペクトル（しきい値のすぐ外）、`g=±3e38`、スケール `1e20`／`1e-20`。`1e-20` の SVD は σ² の絶対値判定で縮退として拒否され、1 階と同じ挙動になることを確かめる
+- 保証範囲は §27.3・§31.3 に揃える。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上と、真の値が f32 を超える場合は対象外
+
+### 44.6 互換への影響
+
+- **追加のみ**。`docs/api-compat-0.14.0-decision.md` §1.2 項目 3（`Err` が `Ok` になる受理範囲の拡大）にあたり、同 §8 の手順に当てはめても破壊的条件には当たらない
+- `Op`（`pub(crate)`）の payload、`QrVars`・`SvdVars`・`EighVars`、`AutodiffError` の variant、公開シグネチャはいずれも変えない。縮退の拒否は create_graph の経路だけで、1 階の受理範囲は変えない
+
+### 44.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `compat-api-scope.md` の適用記録の文案（承認後の実装 PR で書く）
+  - #3807 用: 「適用記録（イシュー #3807・親 #3735。承認: <#3767 の回答 URL>）: `QrQ`・`QrR` を create_graph の対象にした（`m ≥ n`・フルランクに限る）。公開名の追加なし。」
+  - #3808 用: 「適用記録（イシュー #3808・親 #3735。承認: <URL>）: `SvdU`・`SvdS`・`SvdVh`・`EighValues`・`EighVectors` を create_graph の対象にした（縮退・σ=0 は拒否）。公開名の追加なし。」
+- チェック欄
+  - [ ] `compat-api-scope.md`（承認後の実装 PR で行う）
+  - [x] `docs/README.md` の索引
+  - [x] 追跡表（`docs/compat-matrix-ari-tracker.md`）の行 4
+
+### 44.8 ベンチと性能への影響
+
+- 既定経路（forward・`Tape::backward`）は変わらない。増えるのは create_graph の経路だけ
+  - 再生は分解 1 つにつき 1 回（push 順序契約を使うので兄弟の数だけ繰り返さない）
+  - cgrad 1 ノードあたりの `MatMul` は、QR が 3〜4 本と `Solve` 1 本、SVD が 6〜8 本、Eigh が 3〜4 本
+  - 総括判定のホスト走査は 1 階 VJP と同規模（O(mnk) 程度）
+- 既定経路に触れないので前後比較は不要。触れた場合は 5 回計測の中央値で比べ、判定規則を計測前に固定する。実機の値は未実測
+
+### 44.9 依存の追加の有無
+
+- 追加なし。許容 12 区分と禁止リストに照らして変化なし。新しい `unsafe` も無いので `docs/license-matrix.md` の更新は不要
+
+### 44.10 方式と式
+
+**共通（多出力 payload の扱い。本節の核）**
+
+- 兄弟の payload（`tape.rs:842`〜`:894`。`QrQ { input, r }` など）は cgrad で定数として使わない。二階には dR/dA・dV/dA・dσ/dA が要るので、子テープ上で追跡される兄弟の写しを使う（§37.10 の「ゲートを定数にしない」と同じ理由）。`for_each_input`（`tape.rs:2194`〜`:2200`）は `input` しか辿らず、兄弟の NodeId は持たない
+- 再生は公開メソッドへの自己再生にする（`a_m.qr()`・`a_m.svd()`・`a_m.eigh()`。§21.1(2)）。push 順序は `Var::qr` が `QrQ`→`QrR`（`var.rs:6866`）、`Var::svd` が `SvdU`→`SvdS`→`SvdVh`（`:6915`）、`linalg_ops::eigh` が `EighValues`→`EighVectors`（`linalg_ops.rs:150`）
+- 兄弟は **push 順序契約** で取る
+  - 親側の検査（`validate_ancestors`）: `QrQ` が `id` なら `QrR` は `id+1`。`SvdU`・`SvdS`・`SvdVh` は `id`・`id+1`・`id+2`。`EighValues`・`EighVectors` は `id`・`id+1`。いずれも同じ `input` を持つこと
+  - 子側の検査: 再生した写しの id から兄弟を `Var::from_raw(child, id±k)` で取り、Op と `input` を確かめる
+  - 兄弟の写しがすでにある場合（両方とも祖先にある場合）は、それから offset で導いて再生を 1 回で済ませる
+  - mirror の表には祖先だけを登録し、祖先でない兄弟は cgrad の中でだけ取る。`build_mirror`（`create_graph.rs:588`）のシグネチャは変えず、状態も持たない
+- 値は V3: `push_v3`（`create_graph.rs:986`）に、既存の 1 階ホスト関数を子の兄弟の値で呼んだ結果を入れる。本体の関数と数値は変えない
+- 構造は V1 の f32 合成、マスクは V2 にする
+  - 対角・三角はホスト定数の bool マスクを `where_cond` に渡して作る。`g.mul(0/1 定数)` は使わない（`inf·0=NaN` になるため。§21.1(3)）
+  - 0 除算になりうる位置は「安全な分母」で囲む: `D_safe = where(eye, 1, D)` としてから `where(eye, 0, 1/D_safe)` を取る
+- MatMul は `matmul_fp32_strict` を使う（§14a）
+
+**QrQ・QrR（V3 ＋ f32 構造。`m ≥ n` かつフルランクに限る）**
+
+- QrQ の部分寄与（dR = 0）: `M = −gᵀQ_m`。QrR の部分寄与（dQ = 0）: `M = R_m gᵀ`
+- 以降は共通: `C = copyltu(M) = where(下三角〈対角を含む〉マスク, M, Mᵀ)`、`inner = (QrQ なら g、QrR なら 0) + Q_m C`、`dA = solve(R_m, innerᵀ)ᵀ`
+- 積む Op: `Transpose`・`Contiguous`・`MatMul`・`Where`・`Add`・`Neg`・`Solve`
+- 「縮退」に当たるのは rank 落ち（R_ii = 0）で、事前に拒否する。R の対角を非負にする符号正規化は、フルランクの近傍では局所的に一定
+
+**SvdU・SvdS・SvdVh（V3 ＋ f32 構造。縮退と σ=0 を拒否）**
+
+- 子テープ上で σ_m から次を作る: `s2 = σ_m⊙σ_m`、`D_ij = σj² − σi²`（reshape した s2 の broadcast 差）、`F = where(eye, 0, 1/where(eye, 1, D))`、`inv_s = 1/σ_m`（σ = 0 は事前に拒否済み）
+- SvdU の部分寄与: `J = (U_mᵀg − gᵀU_m)⊙F`、`term1 = U_m (J⊙σ の列 broadcast) Vh_m`、`term2 = (g⊙inv_s) Vh_m − U_m((U_mᵀ(g⊙inv_s)) Vh_m)`
+- SvdS の部分寄与: `(U_m⊙bcast(g)) Vh_m`
+- SvdVh の部分寄与: `dV = gᵀ`、`K = (V_mᵀdV − dVᵀV_m)⊙F`、`term1 = U_m (σ の行 broadcast⊙K) Vh_m`、`term3 = U_m(inv_s⊙g) − U_m(((inv_s⊙g) V_m) Vh_m)`
+- いずれも k×k を経由する結合順にし、m×m・n×n を作らない（1 階 `svd_vjp` と同じ）
+- σ = 0 を拒否する理由: 1 階は `1/σ` を「`σ == 0` なら 0」と区分的に扱っているが、二階は定義されない（σ(A) は σ = 0 で |x| と同型に微分できない）
+
+**EighValues・EighVectors（V3 ＋ f32 構造。縮退を拒否）**
+
+- EighValues の部分寄与: `ga = (V_m⊙bcast(g)) V_mᵀ`
+- EighVectors の部分寄与: `X = V_mᵀ g`、`skew = 0.5(X − Xᵀ)`、`E_ij = λ_j − λ_i`、`middle = where(eye, 0, skew / where(eye, 1, E))`、`ga = V_m middle V_mᵀ`
+- 両者に共通する下三角への集約: `where(狭義下三角マスク, ga + gaᵀ, where(eye, ga, 0))`。forward は下三角しか読まないので勾配も下三角へ集約する（非対角は 2 倍、上三角は 0）。2 倍は 2 のべき乗で丸めに影響しない
+- **1 階との意図的な違い**: 1 階は固有値だけの損失なら縮退でも受理する（`gV ≡ 0` のとき検査を省く）。create_graph は、Eigh・Svd のノードが追跡中の祖先にあれば、どの兄弟を使う損失でも縮退を拒否する。理由は 2 つ
+  1. 固有値だけの損失でも二階 `d²λ_k` は `Σ_j 2(v_jᵀ dA v_k)²/(λ_k−λ_j)` を含み、縮退で発散する
+  2. 構造 `V_m diag(g) V_mᵀ` は子テープの `EighVectors` を通るので、二階の逆伝播で `eigh_vjp` に非ゼロの `gV` が届き `InvalidArgument` になる
+- 例外として、クラスタ内で `g` が一定の損失（`trace` など）は数学的には滑らかで、射影子の形の構造なら受理できる。ただし構造が別物になるので推奨せず、論点 3 として戻す
+
+### 44.11 閉包性と族間の依存
+
+- 子テープへ積む Op
+  - 構造側: `Transpose`・`Contiguous`・`MatMul`・`Where`・`Add`・`Mul`・`Reshape`・`BroadcastTo`・`Solve`・`ScalarUnary`（Neg）・`ScalarBinary`（Sub・Div・Mul）・定数 `Leaf`
+  - V3 のタグ: `Contiguous`
+  - 自己再生: 7 Op 自身
+- 基準時点で、構造側はすべて true 側にあることを確かめた。実装前に origin/main で再確認する
+- 依存: #3086（`Solve`。実装済み）→ QR。孫テープでは分解の Op 自身が再生されるので、QR の 2 Op は #3807 で、SVD の 3 Op と Eigh の 2 Op は #3808 で、それぞれ同じ PR の中でまとめて true にする。push 順序契約の共通ヘルパー `decomp_siblings` は #3807 で入れ、#3808 が使う。したがって #3807 → #3808 の順にする
+- §21.4 の依存順に 1 行足す扱いとする（§21.4 の本文は書き換えない）
+
+### 44.12 fail-closed・総括判定・GPU の forward
+
+- 総括判定は §31.3 の `guard_inv`・`guard_solve`（`linalg_fft`）と同型にする。f64 の参照で構造の各段を求め、次のどれかなら拒否する: 非有限、`STAGE_BOUND_GUARD`（2^125）以上、非零なのに f32 の正規化最小値未満、二階の上界が 2^125 以上
+- 各 Op の段と二階の上界の形: QR の段は `M`・`C`・`inner`・`dA`（上界は R⁻¹ の冪を含む）、SVD の段は `F`・`J`・`K`・`term1〜3`（上界は `1/min gap²` と `1/σ_min²` を含む）、Eigh の段は `skew/E` と `ga`（上界は `1/min|E|²` を含む）。具体的な冪は実装 PR で確定し、本節には形だけを書く。閾値は不変
+- §21.6 の判定順・網羅 match・未知 variant を false に倒す規約は弱めない
+- **GPU の forward**
+  - SVD は CUDA・Metal とも `Unsupported` で、ホストの f64 へフォールバックする。QR は CUDA（`crates/backend-cuda/src/ops.rs:6494`）と Metal（`crates/backend-metal/src/ops.rs:4512`）に、Eigh は CUDA だけ（`ops.rs:6527`）にデバイスカーネルがある。いずれも opt-in ゲート `linalg_gate_prepare` の後ろで、既定は OFF（ホストへフォールバック）。ROCm は未実装。facade の opt-in 関数は未公開（追跡表の行 6）
+  - 既定では 7 Op の forward はすべてホストの `eval::linalg` で走り、構造の Op（`MatMul` など）はデバイスで走る。#3857・#3859 が測るのは「デバイスとホストの往復を含む経路」で、新しいカーネルは作らない
+  - ゲート ON は facade の opt-in が未公開（#3405）なので Phase 10 の主対象にしない。決定性の確認行だけを `#[ignore]` で置く。値はすべて未実測
+
+### 44.13 Phase 5 の段分け（2h 単位）・セキュリティ観点・スコープ外
+
+- **#3807（QR）**
+  1. 兄弟の push 順序契約: 親側の検査、子側の検査、ヘルパー `decomp_siblings`、`replay_op` の腕と単体テスト
+  2. QR の事前拒否（`m<n`・rank 落ち）と総括判定 `guard_qr`、V3 ＋構造の cgrad
+  3. FD テスト・孫テープ・拒否テスト・m×m を作らないテスト
+  4. 既存の fail-closed テストの差し替え（QR 分）と facade テスト
+- **#3808（SVD・Eigh）**。E 行列が 1 つで済む Eigh を先にする
+  1. Eigh: 縮退の事前拒否、下三角への集約を含む cgrad、下三角パラメータでの FD テスト
+  2. SVD: F 行列の安全な構築、σ=0 の拒否、U・S・Vh の cgrad
+  3. 総括判定と、縮退・近接スペクトルの拒否テスト
+  4. 既存テストの差し替え（残り）、facade テスト、`gpu_extended_ops_match_cpu` のケース追加
+- 実機は #3857・#3859 に任せる。実装 PR は `Refs` にし、Phase 10 の実測 PR が閉じる
+- **セキュリティ観点（OWASP）**
+  - A03: forward の検証（rank 2・正方・有限）を通った値だけが届く。push 順序契約と `m≥n` などは子テープへ書く前に検査する
+  - A04: m×m の中間行列を作らない（縦長 `[100000,1]` で 10^10 要素の確保を避ける）。総括判定のホスト走査は 1 階 VJP の規模に収め、拒否時は子テープを空に保つ
+  - A06: 依存を追加しない。A08: 総括判定と網羅 match を迂回する経路を作らない
+- **スコープ外**: `MatrixNorm` の `Nuc`／`Spectral`、縮退クラスタで `g` が一定の損失を受理する射影子の構造、横長 QR の二階（1 階も未対応）、GPU の opt-in ゲート ON の公開（#3405）、他の B 区分（#3729〜#3734）、C 区分、f64 テープ（#3722）、GPU 実機 parity（#3857・#3859）と測り方（#3739）
+- 本設計の PR は `Closes #3735`、`Refs #3807 #3808 #3767 #3719 #3739 #3857 #3859`
+
+### 44.14 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 族の採否 | 7 Op を実装する／QR だけ実装する／対象外 | 7 Op を実装する | 実装へ進めず fail-closed を維持 |
+| 2. 兄弟の取得方式 | push 順序契約（1 回再生）／重複して再生／側表／`Op` に NodeId を追加 | push 順序契約 | 同上 |
+| 3. 縮退の扱い | 追跡中の祖先にあればどの兄弟の損失でも拒否／1 階と同じく `gV≡0` なら受理／クラスタ内で `g` が一定なら射影子の構造で受理 | どの兄弟でも拒否 | 同上 |
+| 4. SVD の縮退判定 | 既存の絶対値判定 1e-9 のまま／create_graph だけ相対判定（定数の新設は要承認） | 既存のまま | 同上 |
+| 5. σ = 0（rank 落ちの SVD） | 拒否／1 階と同じ区分的な扱いで受理 | 拒否 | 同上 |
+| 6. 値の方式 | V3（CPU で bit 一致）／V1（REQ-2 のみ） | V3 | 同上 |
+| 7. QR の範囲 | `m ≥ n` かつフルランクだけ／横長も（1 階の拡張が要る） | `m ≥ n` だけ | 同上 |
+| 8. 非有限の上流 `g` | 総括判定で拒否／伝播 | 拒否（§31.3 と同じ） | 同上 |
+| 9. GPU parity の判定方式 | #3739 に従う（tolerance は変えない）／別方式 | #3739 | 同上 |
+| 10. 空分解 `k==0` | 拒否／自明に受理 | 拒否 | 同上 |
+| 11. `MatrixNorm` の `Nuc`／`Spectral` の再検討 | #3808 の後に別イシューで再評価／現状の結論を維持 | 起票の要否だけを問う（起票には承認が要る） | 起票しない |
+| 12. 隣接見本 | `Op::Custom` だけ／分解系を残す | `Op::Custom` だけ | 同上 |
+
+### 44.15 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・`STAGE_BOUND_GUARD`・`EIGH_DEGENERATE_RTOL` の値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
 ## 45. 設計記録（イシュー #3736・親 #3719。create_graph の拒否範囲・LayerNorm／RmsNorm／BatchNorm）
 
 ### 45.0 位置づけ・承認根拠・境界・推奨
