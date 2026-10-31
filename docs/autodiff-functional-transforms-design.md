@@ -971,6 +971,7 @@ CUDA は `create_graph_extended_ops_cuda_matches_cpu`、Metal は `create_graph_
 ### 34.6 変えていないもの
 
 公開 API・1 階 `backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・`crates/autodiff/src`。C 区分・`Conv3d` 系・損失の残り variant を対象に加えていない。rustdoc は対象 Op の正本（`supports_create_graph` の網羅 match と決定記録 §21.2・§22〜§31）を示す一文だけを足した。
+
 ## 35. 決定記録（イシュー #3722・親 #3719。f64 テープの create_graph 機構）
 
 ### 35.0 位置づけ・承認根拠・境界・推奨
