@@ -87,7 +87,7 @@ tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 - 破壊的で承認要
 - 該当なし
 
-判定手順の正は Phase 1 の `api-compat-0.14.0-decision.md`（#3714 で新設予定。本書作成時点では未作成）の短い手順とする。記録の作成後に #3714 側で参照を張る。
+判定手順の正は Phase 1 の `api-compat-0.14.0-decision.md` の §8（判定手順）とする。
 
 ### 7. 適用記録・索引・追跡表
 
@@ -102,7 +102,7 @@ tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 
 - [ ] `docs/compat-api-scope.md` に適用記録を追記した
 - [ ] `docs/README.md` の索引を更新した
-- [ ] 追跡表 `docs/compat-matrix-ari-tracker.md`（#3717 で新設予定。本書作成時点では未作成）を更新した。未作成なら記録の作成後に追加する
+- [ ] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した
 
 ### 8. ベンチと性能への影響
 
