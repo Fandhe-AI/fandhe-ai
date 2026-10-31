@@ -3569,6 +3569,151 @@ CI の行は新規 `crates/autodiff/tests/create_graph_decomp.rs`（仮名）に
 
 コード・公開 API・rustdoc・1 階の値・tolerance・baseline・閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
 
+## 47. 設計記録（イシュー #3738・親 #3719。create_graph の意味論・Embedding の padding_idx の二階）
+
+### 47.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md`・閾値は変えない
+- **節番号**: `origin/main` の最終節は §45。並行する設計 PR（#3897 の §44、#3899 の §46）が使うため §47 とした
+- **基準**: `origin/main` の `0dc5fa6ff`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: `Op::Embedding`（`padding_idx: Some(p)`）を含むグラフの `create_graph`（`hessian`・`hvp`・`jvp_create_graph` など）が返す二階の意味論。追跡表（`docs/compat-matrix-ari-tracker.md`）の項目 5
+- **根拠**: §21.1(2)(4)、§25.1〜§25.4（特に §25.3 が「有限差分準拠か PyTorch 準拠か」を所有者へ戻していた）
+- **後続**: 実装は #3811。承認は #3767、GPU parity の測り方は #3739、実機は #3857（`<cuda-node>`）・#3859（`<metal-node>`）、雛形は #3776・#3777
+- **推奨: 実装する（案 B1 = 子テープ上の写しを `Op::Embedding` として再生し、二階でも行 `p` の寄与を 0 にする。PyTorch 準拠）**。理由は次の 4 つ
+  1. ライブラリ内の一貫性: 1 階と `jvp`／`jacfwd` は既に `W[p]` を定数として扱う（47.11）。二階だけが forward 経由で `W[p]` の寄与を拾う現状は規約の混在
+  2. 二階の行列が対称になり、`hvp` の rustdoc（C² の範囲で `H·v`）と整合する。現状は非対称で `Hᵀv` になる（47.10）
+  3. 手書きの二階の項が要らない。`embedding_vjp`（`crates/autodiff/src/create_graph/index_cum.rs:80`）が子テープ上でも行 `p` を `where_cond` で 0 にするので、孫テープまで同じ規約が自動で続く。1 階と `cg.grad` の値は bit 同一のまま
+  4. PyTorch の `nn.Embedding(padding_idx=..)`（行 `p` を学習しない）との互換（REQ-9）
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A | 現状維持。有限差分準拠（1 階勾配関数 `G(W)` の有限差分）を契約化する | 費用最小。既存テストのまま | 二階が非対称で、`hvp`／`hessian` の rustdoc に注記が要る。jvp との規約混在が残る |
+| B1（推奨） | 写し（現状 `Gather`、`create_graph.rs:842`）を `Op::Embedding` で再生する | ノード数が増えない。二階の項を手書きしない。値は `gather` と bit 同一 | 展開済み `[N, D]` の `index` の扱いを決める（47.3） |
+| B2 | `gather` の前に `where_cond(keep_rows, W の写し, W の値の定数葉)` を置き、行 `p` の勾配を止める | 値は bit 同一。Op の再利用が不要 | `padding_idx` ありのときノードが 2 つ増える。子テープ上の Op タグが `Gather` のまま |
+
+全案共通: 1 階の `Tape::backward` と `cg.grad` の値は変わらない。
+
+### 47.1 公開形
+
+- 該当なし。新しい公開名・シグネチャは無い。`hessian`・`hvp`・`jvp_create_graph` が返す値の、列 `p` 方向の成分だけが変わる（案 B のとき）
+- `crates/facade/tests/api_surface.rs` に Embedding／`padding_idx` の二階を固定する否定ガードも保留 doctest ガードも無い（grep で確かめた）。反転対象は無い
+- **実装 PR（#3811）が直す記述**: `index_cum.rs` のモジュール doc と `embedding_vjp` の doc、`create_graph.rs:842` の `replay_op` の腕、`Var::embedding`（`crates/autodiff/src/var.rs` の doc）に二階の意味論を 1 文、facade の `hessian`／`hvp` の doc、`crates/autodiff/tests/create_graph.rs` のテスト内コメント（§25 参照）
+
+### 47.2 rustdoc と doctest
+
+- 新しい公開 API が無いので、必須の doctest は無い
+- 任意で、facade の `hvp` に CPU だけで通る `padding_idx` 付きの例（行 `p` の結果が 0）を足してよい。GPU の例は置かない（置くなら `no_run`／`#[ignore]`）
+- 失敗系は `compile_fail` に頼らない（stable rustdoc はコードを照合しない）
+
+### 47.3 エラー型
+
+- 新しい variant は足さない。範囲外の `padding_idx` は既存どおり `validate_ancestors`（`create_graph.rs:537`）が子テープへ書く前に `AutodiffError::Backward` で拒否し、`child` は空のまま
+- B1 の写しは公開 `Var::embedding` の検査（rank・`padding_idx`・添字範囲）を迂回しない。写しの `index` は展開済みの `[N, D]` なので、次の 2 案があり、選択は #3811 に委ねる: (1) 列 0 から rank 1 の ids を作り直して `Var::embedding` へ委譲する、(2) 展開済み index を受ける `pub(crate)` ヘルパーを足し、そこで同じ検査を行う。どちらも本番経路で `unwrap`／`expect` を使わない
+
+### 47.4 テスト計画
+
+名前は案で、実装 PR で確定する。CI 行は `crates/autodiff/tests/create_graph.rs` の索引・累積族の節へ足す。
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| `padding_idx` 付き Hessian が「マスク付き有限差分」（既存 `finite_diff_hessian` の結果のうち行・列 `p` を 0 にしたもの）と REQ-2 で一致 | `hessian_embedding_padding_idx_matches_masked_finite_difference`（既存 `hessian_embedding_padding_idx_matches_finite_difference_of_first_order` を置き換える。tolerance は緩めない） | CI | 未実測 | 未実測 | 対象外（全面フォールバック） |
+| Hessian が対称 | `hessian_embedding_padding_idx_is_symmetric` | CI | 未実測 | 未実測 | 対象外 |
+| `hvp` の行 `p` が 0 | `hvp_embedding_padding_row_is_zero` | CI | 未実測 | 未実測 | 対象外 |
+| 1 階と `cg.grad` が bit 同一のまま | 既存 `embedding_padding_row_first_order_grad_is_zero_in_child`（変更なし） | CI | 未実測 | 未実測 | 対象外 |
+| `padding_idx` なしは従来どおり | 既存 `hessian_embedding_matches_finite_difference`（変更なし） | CI | 未実測 | 未実測 | 対象外 |
+| `jvp` が行 `p` の接線を落とす現行規約を固定（47.11 の確認） | `jvp_embedding_padding_ignores_tangent_on_padding_row` | CI | 未実測 | 未実測 | 対象外 |
+| 孫テープ再生（`jvp_create_graph`）でも行・列 `p` が 0 | `jvp_create_graph_embedding_padding_matches_masked_reference` | CI | 未実測 | 未実測 | 対象外 |
+| （B1 のとき）子テープの写しの Op タグが `Embedding` | 内部単体テスト | CI | 未実測 | 未実測 | 対象外 |
+| facade 経由の CPU 例 | `crates/facade/tests/create_graph_facade.rs` に `embedding_padding_hvp_via_facade` | CI | 未実測 | 未実測 | 対象外 |
+| CUDA／Metal の parity | `create_graph_embedding_padding_cuda_parity`／`..._metal_parity`（置き場と名前は #3776・#3777 の確定まで仮。測り方は #3739） | `#[ignore]` | 未実測 | 未実測 | 対象外 |
+
+- **有限差分突合から PyTorch 参照値突合への切替の要否**: 案 B を採るなら参照の切替は要る。ただし参照は CI で計算できるマスク付き有限差分で足りる（47.10 の式で PyTorch のソース上の式と一致する）。PyTorch の実測値の fixture は、torch が無く値を作れないので置かない（47.12）。実測値との突合を足すかは所有者判断（47.16）
+
+### 47.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えず、新しい baseline も作らない
+- FMA 契約と f64 長軸縮約の契約に影響しない。B1・B2 とも写しの値は `gather` と同じ経路で bit 同一のはずで、実装 PR で bit 一致を確かめる。重複 id は従来どおり `ScatterReduce::Add` の f64 決定的集約
+
+### 47.6 互換への影響
+
+- 公開型: 該当なし（`docs/api-compat-0.14.0-decision.md` §8 の手順で引く公開型に触れない。同 §1.2 で項目 5 は「挙動のみ」）
+- **挙動の変化**: §45 の「Err→Ok」と違い、**既に `Ok` を返している入力の値が変わる**。対象は `padding_idx: Some(p)` を含むグラフの `hessian`・`hvp`・`jvp_create_graph` の列 `p` 方向の成分。1 階・`cg.grad`・`jvp`・`jacfwd` の値は変わらない
+- 移行ノート（`docs/migration/0.14.0.md`、雛形 #3780）の「挙動のみの変更」欄に載せる計画を持つ。所有者へ戻す論点にも独立の行を置く（47.16）
+- 案 A を採る場合は値の変化が無く、rustdoc の注記だけになる
+
+### 47.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（公開型の変化なし）
+- `docs/compat-api-scope.md` の適用記録は承認後の実装 PR（#3811）で書く。文案: 「適用記録（イシュー #3811・親 #3738。承認: 承認の回答 URL）: Embedding の padding_idx を含むグラフの create_graph で、二階の行・列 padding_idx を 0 にし PyTorch と同じ意味論にした。公開名の追加なし」
+- [ ] `docs/compat-api-scope.md`（承認後の PR）
+- [x] `docs/README.md` の索引
+- [x] 追跡表（項目 5 の設計記録セルへ §47 を追記）
+
+### 47.8 ベンチと性能への影響
+
+- 既定経路（`Tape::backward`・forward）は変えない。B1 は子テープのノード数が変わらない（`Gather`→`Embedding` の差し替え。ids を作り直す場合は O(N) のホスト処理が 1 回増える）。B2 は `padding_idx` ありのときだけノードが 2 つ増える
+- 計測値は未実測。既定経路に触れた場合だけ 5 回計測の中央値で前後比較し、判定規則は計測前に固定する
+
+### 47.9 依存の追加の有無
+
+- 追加なし。許容 12 区分・禁止リストに照らして変化なし。新しい `unsafe` なし。PyTorch は Rust の依存に入れない（参照はソースの確認のみ）
+
+### 47.10 方式と式
+
+記号: `S` は `index` による scatter_add、`Sᵀ` は gather（その転置）、`M` は行 `p` を 0 にする対角マスク、`L''` は損失の `y = Sᵀ·W` に関する二階。
+
+| 方式 | 1 階 `G(W)` | 二階（`∂G_j/∂W_i`） | 性質 |
+|---|---|---|---|
+| 現状（案 A） | `M·S·g(y)` | `M·S·L''·Sᵀ` | 行 `p` は 0、列 `p` は非零。非対称 |
+| 案 B／PyTorch（ソース上の式、47.12） | 同上 | `M·S·L''·Sᵀ·M` | 行・列 `p` が 0。対称 |
+
+- 現状では写しが `Gather` なので、二階の逆伝播は `y→W` をマスク無しの `S` で通る。`(Σy)²` のような損失では `L''` が全要素を結ぶため、列 `p` が非零になる（既存の `embedding_loss` が該当）
+- 案 B は「`W[p]` を固定した関数の有限差分」と一致する。したがって `hvp` の返す `Hᵀv` は、案 B なら `H·v` と同じになる。現状 `hvp` の rustdoc が書く「C² の範囲で `H·v`」は、非対称な `H` では成り立たない（コード読解による導出。実装 PR のテストで確かめる）
+
+### 47.11 ライブラリ内の整合
+
+- `jvp`／`jacfwd`／`jvp_multi` は double-VJP 法で、`double_vjp_front`（`crates/autodiff/src/functional_ops.rs:411`）が `g = Jᵀu = embedding_vjp(u)`（マスクあり）を作り、`g·t` を `u` で微分する。結果は `Sᵀ·M·t` で、**行 `p` の接線を既に落としている**（`W[p]` を定数扱い）
+- つまり現状は「1 階・JVP・Jacobian は `W[p]` を定数として扱う」「二階だけが forward 経由で `W[p]` の寄与を拾う」の混在になる。案 B はライブラリ自身の 1 階の規約を二階へ一貫して適用する
+- これはコード読解による結論で、実装 PR で「`jvp` が行 `p` の接線を落とす」ことをテストで固定して確かめる（47.4）
+
+### 47.12 PyTorch との差
+
+- **PyTorch 2.14.0 の実測: 未実測**。本環境の `python3` に `torch` が無い（`ModuleNotFoundError` を確認した）。実測値は推測で埋めない
+- ソース上の式: `embedding` の backward は行 `padding_idx` を 0 にし、その double backward も `padding_idx` の位置を 0 にした gather を返す、と理解している。これを使えば二階は `M·S·L''·Sᵀ·M` になる。**ソースは本記録の執筆時に未確認**で、v2.14.0 のタグでの確認（`tools/autograd/derivatives.yaml`・`torch/csrc/autograd/FunctionsManual.cpp`）を #3811 の着手前に行う
+- forward-mode（`torch.func.jvp`）が `embedding` の行 `p` の接線をどう扱うかは**要確認**。未確認のまま論点に残す
+
+### 47.13 実装の段分け（#3811。2h 単位の目安。起票と分割は承認後で、本 PR では行わない）
+
+1. `replay_op` の `Op::Embedding` の腕を差し替える（B1。47.3 の index の扱いを決める）
+2. 既存テストの置き換えと、47.4 のテストの追加
+3. rustdoc・決定記録・適用記録・移行ノート・追跡表・facade のテスト
+
+### 47.14 セキュリティ観点（OWASP Top 10）
+
+- A03: `padding_idx` と ids は外部入力として扱い、子テープへ書く前、確保の前に検査する。forward の検証を迂回しない
+- A04／A08: tolerance・判定を緩めて差を隠さない。判定の迂回経路を作らない。承認を代行しない（#3767 の回答待ち）
+- A06: 依存を追加しない
+
+### 47.15 スコープ外・Closes／Refs
+
+- `EmbeddingBag` の `padding_idx` の二階（create_graph 非対象のまま）、forward-mode AD の新設、PyTorch 実測ハーネスの追加は範囲外。所有者の承認なしに起票しない（`.claude/rules/out-of-scope-tracking.md`）
+- Norm 系は #3736、Det 系は #3737、GPU の測り方は #3739 の範囲
+- 本 PR は受け入れ条件がすべて docs で、PyTorch 実測は「未実測と書く」ことが許されているので `Closes #3738` でよい
+
+### 47.16 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 意味論 | A 現状維持（有限差分準拠）／B PyTorch 準拠 | B | 確認があるまで実装へ進めない（現状の意味論を維持） |
+| 2. B の実装形 | B1 写しを `Op::Embedding` で再生／B2 `where_cond` で勾配を止める | B1（index の扱いは #3811 で決める） | 同上 |
+| 3. 既存 `Ok` 入力の値の変化（挙動のみの変更として移行ノートに載せる） | 受け入れる／受け入れない | 受け入れる | 同上 |
+| 4. 受入テストの参照 | マスク付き有限差分のみ／PyTorch 実測 fixture も足す | マスク付き有限差分のみ（実測は未実測のまま残す） | 同上 |
+| 5. 実機 parity | #3857・#3859 の範囲に含める／含めない | 含める | 同上 |
+
+### 47.17 変えていないもの
+
+コード・公開 API・rustdoc・1 階の値・tolerance・baseline・閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文（§25.3 を含む）・`docs/compat-api-scope.md`。
+
 ## 48. 設計記録（イシュー #3739・親 #3719。create_graph の GPU parity の測り方。C 区分・B 区分・拒否範囲の申し送りの集約）
 
 ### 48.0 位置づけ・承認根拠・境界・推奨
