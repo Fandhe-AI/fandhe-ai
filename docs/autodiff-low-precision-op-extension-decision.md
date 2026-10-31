@@ -179,3 +179,122 @@ fixture は `crates/autodiff/tests/fixtures/low-precision-ops-pytorch-reference/
 - 既定 CPU テープで非対応の組合せは型付きエラー（`Unsupported` を f32 へ静かにフォールバックしない）。`compile_with_amp` の対象層は変えていない。
 - テスト: `crates/facade/tests/phase4_ops_facade.rs`（low_precision_methods_return_value_or_typed_error。`fandhe_ai::` だけを import し、fn ポインタ型でシグネチャを固定して厳密に決まる値を確認）と、`crates/facade/tests/api_surface.rs` の正ガード（`var_phase4_ops_methods_are_thin_delegations`・`facade_reexports_phase4_ops_types_only_in_approved_shape`・`facade_tape_phase4_methods_are_thin_delegations`・各 `workspace_declares_*`）。
 - 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。CUDA／Metal 実機 parity は未実測で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` へ申し送る（新しい数値経路はなく、1 行委譲のため既存の各 `*_backend_parity.rs` の結果がそのまま適用される）。
+
+## 8. 保守・運用チェックリスト（イシュー #3721。低精度演算の `Var` 以外の配置）
+
+### 8.0 位置づけ・承認根拠・境界・推奨
+
+- 位置づけ: 本節は**推奨の記録であり承認記録ではない**。基準 sha は `125120678`（2026-10-31）。本件の承認は**未取得**で、承認 issue #3766 で所有者に問う。既公開の `Var` 6 本の承認根拠（ルート #2499 の `issuecomment-6033824965`）を引くだけで、新しい承認は主張しない
+- 境界: 対象は「`Var` 6 本と同じ 6 演算の別入口」だけ。`Sum`／`Max` 等の低精度化・backward の低精度化・`TypedOps` 拡張・dtype を値型とする `Tape`／`Var`（#3021 項目 2 で対象外確定済み）は扱わない
+- 現状の事実（基準 sha で確認）:
+  - 内部クレートに自由関数 6 本がある（`crates/autodiff/src/low_precision_ops.rs`、`lib.rs` で `pub mod`）。内部 `autodiff::Tape` に `*_low_precision` メソッドは無く、facade `Tape` は newtype（`crates/facade/src/lib.rs:452`）なので `Tape` 案は 6 シグネチャの新規重複になる
+  - `Var` 6 本は公開済み（§7）。3 経路（モジュール再エクスポート・クレートルートの裸の自由関数・`Tape` 上の同名メソッド）は `VarLowPrecisionOpsHoldDoctestGuard`（`crates/facade/src/lib.rs:5963`）が締め出し、0.12.0 監査で dtype 行の「未公開 1 件」に数えられている（`docs/perf/framework-compare-feature-matrix-0.12.0.md`。D-0 の除外名に含まれないため、対象外へ移すには所有者確認が要る）
+  - 低精度の非 autodiff 計算は `Tape::typed_ops_f16`／`typed_ops_bf16` と `CastDType`／`TypedOps` で、方針レベルの混合精度は `compile_with_amp`（`crates/facade/src/compat/training.rs:2060`）で、既に到達できる
+  - §3.6 の案 B（`pub use fandhe_ai_autodiff::low_precision_ops;`）は `facade_pub_use_leaves_are_not_modules`（`crates/facade/tests/api_surface.rs:8780`）が拒否する
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| X（推奨: 対象外にする） | 別入口を足さない。`Var` 6 本を唯一の入口とし、ガードを禁止経路専用として恒久化する | 同名 API が 1 系統のまま。ガードと委譲テストの保守が増えない。PyTorch／TF にも演算単位の低精度自由関数が無く、利用者に届く機能差がない | 対応表で「対象外」に数えるには所有者承認が要る（D-0 に未掲載）。dtype 行を「ある」にするには保留 #2（`TapeF64` の `jvp` 系。#3722・#3723）の決着にも依存する |
+| B | 内部モジュールを facade から再エクスポートする | 実装量が最小 | 既存ガード `facade_pub_use_leaves_are_not_modules` と衝突し、内部モジュール名が公開名になる。facade の安定性保証が内部クレートに引きずられる |
+| C | facade 自前モジュールに自由関数 6 本（1 行委譲） | `torch.nn.functional` 風の関数呼び出しを好む利用者に届く | 同名 API が 2 系統（`Var` メソッドと関数）になり、委譲テスト・宣言インベントリ・doctest ガードの保守が倍になる。glob import 時の名前空間汚染リスク |
+| D | `Tape` 上の同名メソッド | `Tape` 起点で書ける | facade の演算は `Var` に置く慣例から外れる。`Var` 引数を取る 6 メソッドの純粋な重複で、内部 `Tape` に実体が無く newtype 側で新規委譲が要る |
+
+PyTorch／TF との対応:
+
+| 観点 | PyTorch | TF | fandhe-ai の対応物 |
+|------|---------|----|--------------------|
+| 方針レベル | `torch.autocast` | `tf.keras.mixed_precision` のポリシー | `compile_with_amp`（公開済み） |
+| 演算単位の opt-in | 明示 `x.half()`／`.to(dtype)` の後に通常演算 | `tf.cast` の後に通常演算 | `Var::*_low_precision`（公開済み）、`CastDType`／`TypedOps` |
+| 演算ごとの低精度自由関数 | なし | なし | なし（案 C はこれを新設する） |
+
+どちらのフレームワークにも演算ごとの低精度自由関数は無く、別入口を足しても到達できる機能は増えない。
+
+- 推奨: **対象外にする（案 X）**。理由は上表の X 行と、類似先例 D-0（`docs/compat-api-scope.md` §5.1 の D-0。`functional_ops` の自由関数・`elementwise_loss_ops` 等の再エクスポートを対象外とした）である。ただし本項目は D-0 の列挙に含まれないため先例として引くに留め、対象外への移行は #3766 の所有者承認が要る
+- 「実装する」場合に絞る 1 案: **案 C**（facade 自前の `pub mod low_precision_ops` に自由関数 6 本。本体は内部 `fandhe_ai_autodiff::low_precision_ops::*` への 1 行委譲）。B は既存ガードと衝突し、D は慣例外のため採らない
+
+### 8.1 公開形
+
+- 推奨（対象外）の場合: 新しいシグネチャは無い。`VarLowPrecisionOpsHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の保留ガード 5 本（`var_low_precision_ops_hold_doctest_globs_all_pub_modules`・`var_low_precision_ops_hold_doctest_probe_body_matches_fixed_contract`・`facade_does_not_reexport_or_declare_low_precision_ops`・同 `_detects_each_category`・`workspace_declares_low_precision_ops_fn_names_only_in_allowed_locations`）を、**禁止経路専用の恒久ガード**として維持する
+  - 残す理由: 対象外の確定後に別入口が無断で生えるのを機械的に検出するため。意味が「保留」から「対象外の固定」に変わるだけで、プローブ本体は変えない
+  - ガード名と doc コメントの文言（「未承認」→「対象外」）の更新は承認反映後の PR で行い、本 PR ではコードを触らない
+- 実装（案 C）の場合のシグネチャ案: `fandhe_ai::low_precision_ops::{matmul_low_precision, add_low_precision, mul_low_precision, relu_low_precision, exp_low_precision, tanh_low_precision}`。二項は `(lhs: &Var<'t>, rhs: &Var<'t>, dtype: ScalarDType)`、単項は `(x: &Var<'t>, dtype: ScalarDType)`、戻り値は `Result<Var<'t>, AutodiffError>`。facade 自前の `pub mod` であり `pub use` の再エクスポートではない
+- 実装の場合のガード反転計画: doctest プローブから `low_precision_ops` モジュールの宣言と呼び出し行だけを外し、クレートルートの裸の自由関数と `Tape` 受け手のプローブは残す（#2678 の部分反転と同型）。`facade_does_not_reexport_or_declare_low_precision_ops` は「facade 自前 `pub mod low_precision_ops` の 6 本の 1 行委譲だけを許し、`pub use fandhe_ai_autodiff::low_precision_ops` は引き続き拒否する」正ガードへ反転する。宣言場所インベントリに facade 側 6 宣言を足し、正ガード `facade_low_precision_ops_free_fns_are_thin_delegations`（と `_detects_each_category`）を新設する。`var_phase4_ops_methods_are_thin_delegations` と `phase4_matmul_low_precision_free_fn_delegates_to_method` は変えない
+
+### 8.2 rustdoc と doctest の例
+
+- 対象外: 該当なし（新しい公開 API が無い）。既存 `Var::*_low_precision` の rustdoc は変えない
+- 実装（案 C）の場合: モジュール `//!` に役割要約（`Var` メソッドと同じ演算の関数形。数値契約は §3.3、fail-closed）、各関数に `///` と CPU 既定テープで通る doctest（F16 の厳密値、非対応 dtype が型付きエラーになる例）を置く。GPU を要する例は書かない。失敗系は `compile_fail` に頼らず、正のプローブとインベントリで組む
+
+### 8.3 エラー型
+
+- 両分岐とも新しい variant は無い。既存の `AutodiffError::Backend(BackendError::Unsupported)`（accessor 不在）・`Backend(InvalidArgument)`（F16／Bf16 以外）・shape 不一致を、委譲先の検査順（shape → dtype → accessor → 降格 → 演算 → 戻り shape 検証）のまま使う
+- 本番経路で `unwrap`／`expect` を使わない。f32 への無言フォールバックは作らない（fail-closed）。外部入力のパースは無いため A03 の追加検証は要らない
+
+### 8.4 テスト計画
+
+- 対象外: 新規テストは無い。既存の保留ガード 5 本と doctest ガードが CI（ubuntu-latest）で走り続けることが「別入口が無い」ことの検証になる。実機テストは該当なし（新しい数値経路・カーネルが無い）
+- 実装（案 C）の場合:
+
+| 受け入れ基準 | テスト | 区分（CI／`#[ignore]`） | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|--------------|--------|--------------------------|---------------|----------------|----------------|
+| 自由関数と `Var` メソッドの出力が bit 一致 | `crates/facade/tests/` に新設（案） | CI | 該当なし | 該当なし | 該当なし |
+| 非対応 dtype・accessor 不在で型付きエラー | 同上 | CI | 該当なし | 該当なし | 該当なし |
+| 別入口の形を固定 | §8.1 の正ガード | CI | 該当なし | 該当なし | 該当なし |
+
+  1 行委譲で数値経路が既存と同一のため、実機 `#[ignore]` テストは新設しない。既存 P6 の実測結果（#2629・2026-10-11・両実機 pass。§6.4）がそのまま適用される
+
+### 8.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を適用する。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は変えない
+- FMA 契約・f64 長軸縮約の契約への影響: なし（どちらの分岐でも新しい数値経路が無い）
+- baseline の追加・更新: なし
+
+### 8.6 互換への影響
+
+`docs/api-compat-0.14.0-decision.md` §8 の手順で判定する。
+
+1. §1.2 の 29 項目表の #1 行（`Var`・`Tape`・`Tensor` の演算追加。関数の追加なら追加のみ）を引く
+2. §1.1 の規則で判定する
+3. 破壊的な変更は無い
+4. 結論: 対象外の場合は **該当なし**（公開型を変えない）。実装（案 C）の場合は **追加のみ**（新モジュール・新関数の追加で、既存の型・シグネチャ・`#[non_exhaustive]` の状態は変えない）
+
+### 8.7 適用記録・索引・追跡表
+
+適用記録は**案**であり、承認前なので `docs/compat-api-scope.md` へは書かない（存在しない承認を主張しないため）。承認反映後の PR が追記する。
+
+```text
+（対象外の場合）**適用記録（イシュー #3721・親 #3766。承認: 未取得・#3766 待ち）**: 低精度演算の `Var` 以外の配置（モジュール再エクスポート・自由関数・`Tape` メソッド）を対象外とする。`Var::*_low_precision` 6 本を唯一の入口とし、`VarLowPrecisionOpsHoldDoctestGuard` を禁止経路専用で維持する。公開状態: 未公開（対象外）
+（実装の場合）**適用記録（イシュー #3721・親 #3766。承認: 未取得・#3766 待ち）**: facade 自前の `low_precision_ops` に自由関数 6 本（1 行委譲）を追加する（案 C）。公開状態: 未公開（#3784 で公開）
+```
+
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（未チェック。承認反映後の PR が追記する）
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した（#1 行の設計記録列のみ。承認・正ガード・0.14.0 の区分は承認反映後・実装後の PR が更新する）
+
+承認後の扱い: 対象外が承認されたら承認 URL を追跡表の承認列へ、0.14.0 の区分を「対象外」へ更新し、#3784 には着手しない。実装が承認されたら #3784 が §8.1 の形で実装し、正ガード列と区分を更新する。
+
+### 8.8 ベンチと性能への影響
+
+- 既定経路への影響: なし（対象外はコード変更が無い。実装案も 1 行委譲で既定の f32 経路を通らない）
+- 前後比較の計画・事前登録規則: 該当なし（既定経路を変えないため）
+
+### 8.9 依存の追加の有無
+
+- 依存追加: なし
+- 許容区分・禁止リストとの照合: 変化なし（許容 12 区分・禁止リストに触れない）
+- 新規 `unsafe`: なし
+
+### 8.10 セキュリティ観点・スコープ外・Closes／Refs
+
+- セキュリティ（OWASP）: A04 — 別入口が f32 へ無言フォールバックする形を作らず、fail-closed を維持する。A08 — ガードを禁止経路専用で残し、承認外の公開経路を機械検出する。秘密情報・実機ホスト名は書かない
+- スコープ外: `Sum`／`Max` 等の低精度化、backward の低精度化、ガード名の改称（承認反映後の PR）。所有者の承認なしに起票しない
+- `Closes`／`Refs`: 本 PR は docs のみで受け入れ基準を実測なしに満たすため `Closes #3721`。承認は主張しない
+
+### 8.11 所有者へ戻す論点（#3766 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| Q1 別入口を足すか | 対象外にする／実装する（案 C）／実装する（案 B・D） | 対象外にする | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| Q2 対応表で「対象外」に数えてよいか（D-0 未掲載のため個別承認） | 対象外として数える／未公開のまま残す | 対象外として数える | 未公開のまま数え、0.14.0 の区分は「未確定」 |
+| Q3 対象外のとき保留ガードを恒久維持し、名前と doc 文言を承認後 PR で更新してよいか | 維持＋文言更新／維持のみ／撤去 | 維持＋文言更新 | 現行ガードをそのまま維持 |
+| Q4 実装を選ぶ場合の配置名 | `fandhe_ai::low_precision_ops`／別名 | `low_precision_ops` | 実装へ進めない |
