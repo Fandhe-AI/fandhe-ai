@@ -1147,24 +1147,27 @@ impl<'t> TapeF64<'t> {
 
 | Op | 方式 | 必要な内部 variant | 段 |
 |---|---|---|---|
-| `add`／`mul`／`div`（同 shape） | V1 | なし | 第 1 段 |
-| `matmul`（rank 2） | V1 | `Transpose` | 第 1 段 |
-| `sum(None)`／`mean(None)` | V1 | `Unreduce` | 第 1 段 |
-| ブロードキャストを伴う二項 | V1 | `BroadcastTo`／`ReduceTo` | 第 2 段 |
-| `sum(Some)`／`mean(Some)`（`1/n` 係数） | V1 | `Unreduce`／`BroadcastTo` | 第 2 段 |
-| `pow` | V1＋V2 | `Log`／`Where` | 第 2 段 |
+| `add`／`mul`／`div`（同 shape とブロードキャスト） | V1 | `BroadcastTo`／`ReduceTo` | 第 1 段 |
+| `pow` | V1＋V2 | `Log`／`Where` | 第 1 段 |
+| `matmul`（rank 2） | V1 | `Transpose` | 第 2 段 |
+| `sum`／`mean`（`None` と `Some(axis)`。`1/n` 係数） | V1 | `Unreduce` | 第 2 段 |
 | `max` | fail-closed | なし | 対象外 |
 
-- `max` は f32 の `Max` が C 区分で、#3724 で設計中のため揃えて fail-closed にする。#3724 の結論に従う後続は 35.13 の論点とする。
+- 段分けは起票済みの実装 issue の題名（#3785「基盤と add・mul・div・pow」、#3786「matmul・sum・mean・max と閉包性」）に揃えた。両 issue の受け入れ条件は本記録どおりの実装なので、題名と中身がずれたときの正は本節とする。
+- 第 1 段の variant 集合（`BroadcastTo`／`ReduceTo`／`Log`／`Where`）で閉じる。`Log` の VJP は `Div`、`Where` の VJP は `Where`、`BroadcastTo` と `ReduceTo` は互いの VJP になる。
+- 第 1 段のテストは `sum` を使わない。非スカラー loss は全要素 1 のシードで逆伝播するため（`f64_autograd.rs` の `Tensor::full(&loss_shape, 1.0f64)`）、`sum` なしで組める。
+- `max` は f32 の `Max` が C 区分で、#3724 で設計中のため揃えて fail-closed にする。#3786 の題名にある `max` は「拒否の固定」と読む。実装するかは #3724 の結論と 35.13 の論点 5 に従う。
 - rank 3 以上の `matmul` は forward が拒否する。
-- 第 1 段（#3785）: autodiff 内部の基盤。
-  - 入口検査・祖先の収集と検査・写し・勾配グラフ・`rollback_to`・結果型、`Transpose`・`Unreduce` と第 1 段の Op。
-  - 第 2 段の Op は fail-closed。
+- 第 1 段（#3785）: autodiff 内部の基盤と要素演算族。
+  - 入口検査・祖先の収集と検査・写し・勾配グラフ・`rollback_to`・結果型。
+  - `add`／`mul`／`div`／`pow` と `BroadcastTo`／`ReduceTo`／`Log`／`Where`。
+  - 第 2 段の Op（`matmul`・`sum`・`mean`）と `max` は fail-closed。
   - CPU の CI テスト。
   - facade の公開面は変えない。既存の f64 正ガード群が無変更で通ること、1 階 `backward` が bit 同一であること。
 - 第 2 段（#3786）:
-  - `BroadcastTo`／`ReduceTo`／`Log`／`Where` と残りの Op。
+  - `Transpose`／`Unreduce` と `matmul`・`sum`・`mean`。
   - `Max` の拒否テスト。
+  - 全 variant の閉包性テスト（孫テープでの再生）。
   - facade newtype と 35.1 のガード反転。
   - `#[ignore]` の GPU テストとログ README。
   - 承認を前提に、`compat-api-scope.md` の適用記録。
