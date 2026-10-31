@@ -2528,7 +2528,7 @@ Phase 10 の実測（#3857・#3859）は別に行う。PR は Phase 10 まで `R
 - **必須ベクトル**（3 段すべてで有限かつ一致するか、総括判定で拒否されて `child` が空になることを固定する）:
   - Cumprod（受理されて有限）: `[1e-30, 1e-30, 1e30]`（`backward.rs:2218` の underflow 回帰。scan の中間値が有限であることを §41.10 の計算例で示す）、零が 0／1／2 個の場合（`backward.rs:2295`〜`:2334`）
   - Cumprod（拒否されて `child` が空）: `backward.rs:2382`（1e30 の連続と零）、`:2418`（複数の零と overflow）、`:2469`（`[0]+[2^-100]×11+[2^100]×11`。suffix 積が f32 で発散）、`:2529`（大きい値から小さい値へ）。1 階はこれらでも有限のまま変わらない
-  - Logcumsumexp: 広い値域 `x=[-1000, 1000]`（素朴な合成 `exp(x)⊙revcumsum(g⊙exp(-out))` では overflow する反例）、`x=[-100, -100, 80]`、一定の lane、`g=3e38`、`g=[3e38,-3e38]`
+  - Logcumsumexp: 広い値域 `x=[-1000, 1000]`（素朴な合成 `exp(x)⊙revcumsum(g⊙exp(-out))` では overflow する反例）、`x=[-100, -100, 80]`、一定の lane、大きな共通オフセット（`x=[1e8, 1e8]`・`g=[0,1]`、`x=[1e8, 1e8+1, 1e8]`。f32 丸めで `c` が 1 に潰れ、参照約 0.5 と食い違うので拒否されて `child` が空になることを固定する。オフセットが無い同形の入力 `x=[0, 0]` は受理され対角ヘッシアンが有限差分と一致することも対で固定する）、`g=3e38`、`g=[3e38,-3e38]`
   - scatter_reduce: `Prod` は零を含む位置・寄与の積が f32 で overflow する組（例 `[1e30, 1e30]`）・`include_self` の自己寄与、`Amax`／`Amin` はタイと NaN、`Mean` は寄与数が大きい位置、全般で `g=3e38`
 - 保証範囲は §27.3 と同じ。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上は対象外
 - **既知の差**:
@@ -2581,6 +2581,7 @@ Phase 10 の実測（#3857・#3859）は別に行う。PR は Phase 10 まで `R
 - 構造: `c = Exp(Narrow(out_m,0,n-1) - Narrow(out_m,1,n-1))`、`w = Exp(x_m - out_m)`。`T` は scan 補助（`b=g`、`A=c`）で求め、`d_x = w⊙T`
 - `out` は lane ごとに単調非減少で `x[j] ≤ out[j]` が成り立つ。丸めは単調なので f32 の replay 値でもこの関係は保たれる。したがって `exp` の引数は常に 0 以下で、係数は [0,1] に収まり overflow しない。`|T| ≤ Σ|g|`
 - 素朴な合成 `exp(x)⊙revcumsum(g⊙exp(-out))` と lane 一律のシフト（S1）は、広い値域で overflow や 0 への丸めが起きるので退ける（`x=[-1000,1000]`）
+- **丸め済み `out_m` から係数を作る限界（案 2: 拒否条件で閉じる）**: 構造の `c` は f32 に丸めた replay 出力 `out_m` の差から作るので、大きな共通オフセットがあると差が失われる。`x=[1e8,1e8]`・`g=[0,1]` では replay の `out_m` が両段とも `1e8` になり `c=1`・`w=1` となる。一方 1 階の `logcumsumexp_vjp_host` は f64 の prefix を再計算するので対応する重みは約 0.5 で、V3 で勾配値を直しても構造の微分は直らず、対角ヘッシアンが約 0.25 のところ約 0.5 になる。全段が有限かつ `2^125` 未満なので既存の「非有限・`2^125` 以上」の拒否では防げない。安定化した差分から係数を作る案（lane の最大値を引く等）は、`out` 自体の f32 丸めが残り、広い値域の反例で S1 と同じ問題に戻るため採らない。代わりに §41.12 の総括判定へ「係数の食い違い」を加えて拒否する
 - 値は `logcumsumexp_vjp_host` を `push_v3` で入れる
 
 **IndexedScatterReduce（mode ごと）**
@@ -2601,7 +2602,7 @@ Phase 10 の実測（#3857・#3859）は別に行う。PR は Phase 10 まで `R
 
 ### 41.12 fail-closed・総括判定・GPU の forward
 
-- **総括判定**: `check_structure_stages`（`crates/autodiff/src/create_graph_norm.rs:338`）と同型の判定を置く。ホストは構造の各段（replay の出力・scan の各段の `S` と `A`・最終値）を同じ f32 の演算で再計算し、f64／`WideFloat`／(仮数, 指数) の参照と比べる。二階の逆伝播の「cotangent × 微分係数」の上界も f64 で求める。非有限の食い違いがあるか `2^125` 以上の段があれば拒否する。閾値と seed の前提は §27.3 と同じ。Logcumsumexp の係数の underflow は §41.5 の理由で拒否条件に数えない
+- **総括判定**: `check_structure_stages`（`crates/autodiff/src/create_graph_norm.rs:338`）と同型の判定を置く。ホストは構造の各段（replay の出力・scan の各段の `S` と `A`・最終値）を同じ f32 の演算で再計算し、f64／`WideFloat`／(仮数, 指数) の参照と比べる。二階の逆伝播の「cotangent × 微分係数」の上界も f64 で求める。非有限の食い違いがあるか `2^125` 以上の段があれば拒否する。閾値と seed の前提は §27.3 と同じ。**Logcumsumexp の係数の食い違い**: 各段 `j` で、replay の f32 の `c[j]` と、f64 の prefix から求めた参照係数 `exp(out64[j]-out64[j+1])` の絶対差を比べ、閾値を超えたら拒否する（閾値は REQ-2 の相対許容 `1e-3` と同じ値を使い、新しい許容誤差は作らない）。絶対差で比べるので、`c` が f32 で 0 に underflow する段（参照も 0 に近い）は拒否に数えず §41.5 の既知の差に収まる。`x=[1e8,1e8]`・`g=[0,1]` は `c=1` と参照約 0.5 で食い違い、拒否されて `child` が空になる。Logcumsumexp の係数の underflow は §41.5 の理由で拒否条件に数えない
 - **入口での拒否**: 非有限の upstream と ±inf の入力は拒否し、NaN は伝播させる（§33.14 の論点 3）。§21.6 の判定順・網羅 match・未知 variant を false にする規約は弱めない
 - **GPU の forward**: Cumprod には CUDA と Metal（soft-f64 モデル `crates/backend-metal/src/scan_model.rs`）のカーネルがあり、子テープでの replay もそのカーネルを通る。#3857・#3859 はカーネルを含む経路を測る。Logcumsumexp と IndexedScatterReduce はどの GPU backend でもホストへフォールバックする（`crates/tensor-core/src/backend_ops.rs:2615`・`:3482` の既定は `Unsupported`）ので、測るのはデバイスからホストへの実体化を含む経路で、カーネル間の parity ではない。ROCm は全面フォールバック。GPU カーネルは新設しない。値は未実測
 
