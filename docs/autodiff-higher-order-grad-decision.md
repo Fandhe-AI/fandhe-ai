@@ -2331,7 +2331,9 @@ CI の行は新設 `crates/autodiff/tests/create_graph_loss_class.rs`（仮名�
   - Multi*: `x=±1e30`・p=2 で `z²` 相当が大きい組、`g=3e38`。
   - MultiMargin p=2: 1 行 2 クラス・`x=[-1e38, 1e38]`・target=0・`w_y=1e-38`・margin=0・`g=1`（f64 VJP は有限だが f32 構造の `H` が overflow するため、総括判定で拒否されること）。
   - Cosine: `x1=x2=1e20` の行（f32 の二乗が inf）、零ベクトル行（`m=ε`）、`x=1e-30` の行（`ε/s²` の保護）、`y=-1` で `cos==margin`。
-  - Triplet: 差分 `1e20`、`p=1024` 相当、差分がちょうど `-eps` になるレーン、swap の同値、`d_an=inf` の側。
+  - MultiLabelSoft: C=N=1・x=0・target=0.5・weight=1e30・`g=1e10`（二階が約 2.5e39。総括判定で拒否）。
+  - MultiMargin p=1（重み付き）: x=0・target=0・weight=1e20・Sum・`g=1e20`（勾配が約 5e39。総括判定で拒否）。
+  - Triplet: 差分 `1e20`、`p=1024` 相当、差分がちょうど `-eps` になるレーン、swap の同値、`d_an=inf` の側、p=2 で一部レーンだけ `u_i==0`（`norm'>0`）の行（二階の曲率が 0 に落ちないこと。混合二階の確認項目 `loss_class_mixed_second_derivatives` に含める）。
   - 全般: `g=[3e38]`・`g=-3e38`。
 - 保証範囲は §27.3 の書き方に揃える。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上は対象外。
 
@@ -2389,7 +2391,7 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
   - `x²` は `1e20` で f32 の inf になるので §21.1(5) の S1 を使う。行ごとに `s_i = max(max|x_i|, √ε)` を 2 のべき乗へ切り上げ、`x/s` を作り、`ε` を `ε/s²` に変換する（ε=1e-12）。
   - 式: `dx1 = s_b·coeff/s1·(b'/denom' − cos·a'/m1')`。`dx2` も同形。1/s の掛け順は総括判定で確かめる。rank 1 は `[1, d]` へ reshape する。
 - **TripletMarginLoss（V3 + V2 + S1 構造。3 入力）**
-  - `v = a_m − p_m + eps`（an・pn も同形）。p ノルムは 1 階の `p_norm_f64` と同じスケール形 `mx·(Σ(|v|/mx)^p)^(1/p)` で組む。`mx` は行ごとの 2 のべき乗のホスト定数で、`Abs`・`PowScalar`・`Sum`・`Mul` を使う。勾配は `sign(u)·(|u|/norm')^(p−1)`。
+  - `v = a_m − p_m + eps`（an・pn も同形）。p ノルムは 1 階の `p_norm_f64` と同じスケール形 `mx·(Σ(|v|/mx)^p)^(1/p)` で組む。`mx` は行ごとの 2 のべき乗のホスト定数で、`Abs`・`PowScalar`・`Sum`・`Mul` を使う。勾配は `sign(u)·(|u|/norm')^(p−1)`。**p=2 は `u/norm'` で組む**（`sign(u)·(|u|/norm')` だと `Abs` の VJP が `u==0` で 0 になり、`norm'>0` の行で `u_i==0` のレーンの曲率 `1/norm'` が二階から消えるため。`Mul`・`Div` だけの式なので零点で曲率が保たれる）。p=1 の符号は V2 の定数、p≠2 の `u==0` は論点 5 のとおり。
   - V2 にするもの: `hinge_active`（`>=0`）、`an_coeff`（1／0／0.5。乗算でなく `where` で選び、0.5 の同値だけ非零定数を掛ける）、`norm==0`（PyTorch と同じく 0）、p=1 の符号。
   - 寄与は `da = g_ap − c_an·g_an`、`dp = −g_ap − c_pn·g_pn`、`dn = c_an·g_an + c_pn·g_pn`（1 階 VJP と同じ）。
   - `1<p<2` で `u==0` のレーンは二階が発散する（真値も特異）。推奨は総括判定で拒否（論点 5）。
@@ -2413,7 +2415,7 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
 
 ### 40.12 fail-closed・総括判定・GPU の forward
 
-- 総括判定: §27.3 の `check_structure_stages`（`create_graph_norm.rs`）と同型の判定を、Cosine・Triplet（スケール・ノルム・`PowScalar`）と CEWO（大きな class_weight を含む定数）に置く。構造の各段・二階の cotangent × 微分係数の上界をホストが f64 で求め、`2^125` 以上か非有限なら拒否する。閾値と seed の前提は §27.3 と同じ。MultiLabelMargin・MultiLabelSoftMargin と MultiMarginLoss の p=1 は x について線形・有界なので upstream の検査だけを適用する。**MultiMarginLoss の p=2 は対象に含める**（線形ではない）。`H = 2·Z`、`Sum(H, 1)`、`c_w ⊙ …`、`s_b ⊙ …` の各段の上界をホストが f64 で求め、同じ `2^125` 閾値で拒否する。重み `w_y` を後から掛ける構造のため、f64 では有限（例: 1 行 2 クラス・`x=[-1e38, 1e38]`・target=0・`w_y=1e-38`・margin=0・`g=1` は VJP が約 `[-2, 2]`）でも f32 の `H` が約 4e38 で overflow する入力を、この段別の上界検査で拒否する（重みを先に掛ける演算順への組み替えは採らない。`Z` 自体が f32 を超えるため解決しない）。必須ベクトルにこの反例を加える。
+- 総括判定: §27.3 の `check_structure_stages`（`create_graph_norm.rs`）と同型の判定を、Cosine・Triplet（スケール・ノルム・`PowScalar`）と CEWO（大きな class_weight を含む定数）に置く。構造の各段・二階の cotangent × 微分係数の上界をホストが f64 で求め、`2^125` 以上か非有限なら拒否する。閾値と seed の前提は §27.3 と同じ。MultiLabelMargin は x について区分定数なので upstream の検査だけを適用する。**MultiLabelSoftMarginLoss（weight 有無とも）・MultiMarginLoss の p=1（重み付き）・p=2 は対象に含める**。MultiLabelSoft は x について線形でなく、曲率が `s_b·(w_c/C)·σ(1−σ)` になる。weight・upstream `g`・微分係数 `σ(1−σ)`・行数分母 `s_b` の積と、`Sigmoid(x)−t`・`const(w_c/C) ⊙ …`・`s_b ⊙ …` の各段の上界をホストが f64 で求め、同じ `2^125` 閾値で拒否する（反例: C=N=1・x=0・target=0.5・weight=1e30・`g=1e10` は二階が約 2.5e39 で f32 overflow）。MultiMargin の p=1 は `K`・`w_y/C`・`s_b`・`g` の積（反例: x=0・target=0・weight=1e20・Sum・`g=1e20` は勾配が約 5e39 で f32 overflow）を同様に段別で検査する。`H = 2·Z`、`Sum(H, 1)`、`c_w ⊙ …`、`s_b ⊙ …` の各段の上界をホストが f64 で求め、同じ `2^125` 閾値で拒否する。重み `w_y` を後から掛ける構造のため、f64 では有限（例: 1 行 2 クラス・`x=[-1e38, 1e38]`・target=0・`w_y=1e-38`・margin=0・`g=1` は VJP が約 `[-2, 2]`）でも f32 の `H` が約 4e38 で overflow する入力を、この段別の上界検査で拒否する（重みを先に掛ける演算順への組み替えは採らない。`Z` 自体が f32 を超えるため解決しない）。必須ベクトルにこの反例を加える。
 - §21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。CtcLoss は `false` のまま。
 - GPU の forward: 7 Op はどれも全 backend でホストの `push_eager` で計算し、融合カーネルは無い。子テープの構造 Op（Softmax・pointwise・Sum）はデバイスで走る。よって #3857・#3859 が測るのは「デバイス→ホストの実体化を含む経路」で、カーネル間の parity ではない。GPU カーネルは新設しない。値は未実測。
 
