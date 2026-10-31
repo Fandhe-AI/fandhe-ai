@@ -285,8 +285,10 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 新 variant は追加しない。
 
 - 構築時: `AutodiffError::InvalidArgument`（空・非有限・0 以下）。
-- forward 時: rank 不足は `AutodiffError::Shape(ShapeError::RankMismatch)`、長さ不一致・オーバーフロー・出力 0 は
-  `ScaleFactorError` を包んだ `AutodiffError::InvalidArgument`（`upsample.rs::resolve_size`）。`mode` と空間軸数の不整合は既存どおり forward 時の遅延検査。
+- forward 時: rank 不足（入力 rank < `scale.len()`）は `AutodiffError::Shape(ShapeError::RankMismatch)`、オーバーフロー・出力 0 は
+  `ScaleFactorError` を包んだ `AutodiffError::InvalidArgument`（`upsample.rs::resolve_size`）。`resolve_size` は入力の末尾 `scale.len()` 軸を切り出して
+  ヘルパーへ渡すため、ヘルパー側の「2 スライスの長さ不一致」は到達不能で、契約にしない。倍率の個数と `mode` が要求する空間軸数の不一致は、
+  導出 `size` を渡した後続の補間形状検証（`Var::interpolate`）が返す `AutodiffError::Shape` 系の Err で検出する（forward 時の遅延検査）。
 - 本番経路で `unwrap`／`expect` を使わない。検証は確保（`Vec`・tape への push・`specs.push`）より前に行う。
 - model_io 読込はキー集合の完全一致 → 型 → 正準表記 → 範囲の順に検査し `ModelIoError::Manifest` で fail-closed にする。
 
@@ -295,7 +297,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 | 受け入れ基準 | テスト（置き場・名前案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
 |---|---|---|---|---|---|
 | 構築時の拒否（空・0・負・NaN・±inf） | `crates/facade/tests/compat_sequential_spatial_layers.rs::add_upsample_scale_factor_rejects_invalid_scale` | CI | 該当なし | 該当なし | 該当なし |
-| floor 丸め（1.5 倍で 3→4、0.5 倍で 4→2）と、出力 0・長さ不一致・rank 不足の forward 時 `Err` | 同 `add_upsample_scale_factor_floors_output_size`・`..._rejects_zero_output_and_rank_mismatch` | CI | 該当なし | 該当なし | 該当なし |
+| floor 丸め（1.5 倍で 3→4、0.5 倍で 4→2）と、出力 0・rank 不足（`Shape(RankMismatch)`）・倍率個数と `mode` の空間軸数の不一致（補間形状検証の `Shape` 系 `Err`）の forward 時 `Err` | 同 `add_upsample_scale_factor_floors_output_size`・`..._rejects_zero_output_and_rank_mismatch` | CI | 該当なし | 該当なし | 該当なし |
 | 倍率経路と導出サイズの size 経路が CPU で bit 一致（Nearest・Bilinear） | 同 `add_upsample_scale_factor_matches_size_path_bit_exact` | CI | 該当なし | 該当なし | 該当なし |
 | 学習経路（`fit`）と常駐経路の素通し | 同 `add_upsample_scale_factor_passes_train_and_resident_paths` | CI | 該当なし | 該当なし | 該当なし |
 | 保存（§9.5 の論点 2 の結果に従う）。(ii) なら `save_model` が `dir` に触れる前に `UnsupportedModel`。(i) なら往復 bit 一致と、非正準・範囲外 manifest の拒否 | `crates/facade/tests/compat_sequential_model_io_layers.rs` に追加。非信頼入力は `model_io.rs` の既存表駆動テストに追加 | CI | 該当なし | 該当なし | 該当なし |
@@ -306,7 +308,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 ### §9.5 数値契約
 
 - **丸め**: `out[axis] = floor(in[axis] as f64 * scale[axis])`（`tensor-core::interpolate_size_from_scale_factor` の式。PyTorch と同じ）。
-  非有限・0 以下・長さ不一致・`usize` 超過（`as usize` の前に検査）・導出後 0 は fail-closed で拒否。縮小（`s < 1`）は受理。
+  非有限・0 以下・`usize` 超過（`as usize` の前に検査）・導出後 0 は fail-closed で拒否（個数不一致は rank 不足または後続の補間形状検証で拒否。§9.3）。縮小（`s < 1`）は受理。
   f64 の表現誤差（例 `0.29*100 = 28.999…` は 28）は `floor` 前に補正しない（PyTorch と同じ）。
 - **座標系**: PyTorch の `recompute_scale_factor=True` 相当。導出 `size` を既存 `Var::interpolate` へ渡すため補間座標は `in/out`。
   PyTorch 既定（`None`、座標に `1/scale`）とは `in*s` が整数でないときだけ差が出うる（整数倍は一致）。これを契約として doc に明記し、切り替えは公開しない。
