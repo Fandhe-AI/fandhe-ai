@@ -1579,6 +1579,165 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - Issue の紐付け: 本 PR は `Closes #3724`、`Refs #3767 #3789 #3790`。
 - 変えていないもの: コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文・公開 API。
 
+## 35. 設計記録（イシュー #3726・親 #3719。create_graph の C 区分・構造変換 3 Op）
+
+### 35.0 位置づけ・承認根拠・境界・推奨
+
+- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
+- **基準**: `origin/main` の `ad92b6aa7`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
+- **対象**: §21.2 の C 区分（族を割り当てず fail-closed に固定した 24 Op）のうち、構造変換の 3 Op（`Dropout`・`Interpolate`・`MaxUnpool`）
+- **根拠**: §21.1（共通方式 V1〜V3・閉包性）、§21.6（fail-closed 契約）。前例は §25（索引系・`scatter_vjp`）、§29（`MaskedFill` の `where_cond`）、§30（`MaxPool` の記録済み index を固定する V1、Avg 系の V3 と `check_structure_contract`）、§32（拒否見本を `Op::Custom` に替える方針）。ルート #3711 の「実装を既定に設計する」趣旨は設計方針の根拠であり、承認ではない
+- **後続**: 実装は #3793。承認は #3767、実機 parity は #3856（`<cuda-node>`）・#3858（`<metal-node>`）、雛形は #3776・#3777、測り方は #3739
+- **最初に押さえる事実**: 3 Op はどれも入力 x について**線形**（y = A·x。A は Dropout が記録済みマスク、Interpolate が座標式から決まる固定の重み行列、MaxUnpool が記録済み index による散布）。このため cgrad は `Aᵀ g` で g だけに依存し、x による二階の項は恒等的に 0 になる。二階微分は g を通る経路（下流の非線形）からだけ流れる
+- **推奨**: **実装する（3 Op すべて）**。理由は次の 3 つ
+  1. 1 階 VJP が supported な `Gather`・`Scatter`・`Mul`・`Where`・`BroadcastTo` と、§30 で前例のある V3 だけで子テープに書ける
+  2. `Op` の payload の追加が要らない（Dropout は `mask`、Interpolate は `size`・`mode`、MaxUnpool は `index` とノード shape で足りる）
+  3. 学習時の Dropout や U-Net 系の Interpolate・MaxUnpool を含むモデルが `hvp`・`jvp`・`jacfwd` で拒否される実害がある
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | 3 Op を実装する | Dropout 入りの学習モデルや decoder 系の HVP が使える。追跡表の項目 3 が「ある」に近づく | 実装と保守の費用。Area の構造判定の一般化 |
+| B | 対象外にして fail-closed を恒久契約にする | 費用ゼロ | 上記のモデルで高階変換が使えないまま残る |
+
+### 35.1 公開形
+
+該当なし。新しい公開名は増えない。`Tape::backward_create_graph`・`hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` は公開済みで、受理する Op の範囲が広がるだけである。`crates/facade/tests/api_surface.rs` には、この 3 Op の create_graph に関わる否定ガードも保留 doctest ガードも無い（`DropoutEmbeddingBagHoldDoctestGuard`・`ConvTranspose3dMaxUnpoolHoldDoctestGuard` は層の公開の保留で、create_graph とは無関係なので触らない）。実装 PR（#3793）で変える箇所:
+
+- `supports_create_graph`（`crates/autodiff/src/tape.rs:2526`）の網羅 match で `Dropout`・`MaxUnpool` を true 側へ移す。`Interpolate` は payload で判定する（`InterpolateMode` は `#[non_exhaustive]` なので内側の match に `_ => false` を置く。`ScalarUnary` の前例。§21.6 の「未知 variant は false」を守る）。外側の match にワイルドカードは足さない
+- `Op` の doc コメント（`tape.rs:1109` Dropout・`:1365` MaxUnpool の「高階微分非対応」・`:1431` Interpolate・`:2506` の「隣接する `MaxUnpool` は `false` のまま」）、`crates/autodiff/src/max_unpool_ops.rs` のモジュール doc、`crates/autodiff/src/create_graph.rs` の「`MaxUnpool` は対象外」の記述
+- facade の rustdoc（`crates/facade/src/lib.rs`）にある「対象 Op の正本は §21.2・§22〜§31」の範囲に §35 を加える
+- `is_checkpoint_eligible`（`tape.rs:2014`・`:2073`・`:2098`）は変えない
+
+### 35.2 rustdoc と doctest
+
+- 新しい公開 API が無いので必須の doctest は無い。任意で facade の `backward_create_graph` に `interpolate`（Nearest）を含む CPU だけで通る HVP 例を 1 つ足す。GPU の例は置かない（置くなら `no_run`／`#[ignore]`）
+- 失敗系は `compile_fail` に頼らず、ランタイムの `Err(AutodiffError::Backward(_))` 一致と `child.is_empty()` で確かめる
+
+### 35.3 エラー型
+
+- 新しい variant は足さない。拒否はすべて `AutodiffError::Backward(String)`: Interpolate の未知 `mode`、`sp_in_numel > i32::MAX`、索引テンソル長の桁あふれ、Area の構造判定外れ、MaxUnpool の index 範囲外・shape 不整合
+- 検証順: 判定は子テープへ書く前に行う（`validate_ancestors` か cgrad 構築の冒頭）。拒否したら `child` を空に戻し、再試行できるようにする（§27.3・§30 と同じ）。本番経路で `unwrap`／`expect` を使わない
+
+### 35.4 テスト計画
+
+候補名は案であり、実装 PR で確定する。CI の行は新規 `crates/autodiff/tests/create_graph_structural.rs` に置く。線形 Op は `hessian(sum(op(x)))` が恒等的に 0 で有限差分が何も確かめないので、**非線形を合成した損失**で突き合わせる。
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|--------------|--------|------|---------------|----------------|----------------|
+| 1 階が素の `backward` と bit 同一、`cg.grad` が REQ-2 で一致（CPU では bit 一致も見る。Dropout の非有限 g の drop 位置は 35.10 の既知差として別に固定） | `structural_first_order_bit_identical_and_cgrad_req2` | CI | 未実測 | 未実測 | 未実測 |
+| ヘッシアンが有限差分と一致: `sum(interpolate(x)²)`（全 7 mode × `align_corners` × アップ・ダウン・恒等 size × rank 3〜5）、`sum(max_unpool(max_pool(x))²)`（重なりなし・重複 index あり）、`sum(dropout_with_mask(x)²)`。5 点中央差分 h=1e-2 は §27.4 の前例どおり。判定式は変えない | `structural_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| 素の和のヘッシアンが厳密に 0（線形性） | `structural_plain_sum_hessian_is_exact_zero` | CI | 未実測 | 未実測 | 未実測 |
+| 孫テープ（`jvp_create_graph`）の再生が独立な参照と一致し、3 段（1 階・`cg.grad`・孫）すべてで有限 | `structural_grandchild_replay_matches_reference` | CI | 未実測 | 未実測 | 未実測 |
+| Dropout の replay がグローバル RNG を消費しない（`manual_seed` で固定し、`backward_create_graph`／`jvp_create_graph` の前後で次の `rand` が同じ）。`Dropout2d`・`AlphaDropout`（同じ `Op::Dropout` 経路）と `p=1.0` も含む | `dropout_create_graph_does_not_consume_global_rng` | CI | 未実測 | 未実測 | 未実測 |
+| 必須ベクトル（35.5）の有限性・bit 一致 | `structural_mandatory_vectors` | CI | 未実測 | 未実測 | 未実測 |
+| 拒否（未知 mode は単体テスト、`sp_in` の i32 超過、Area の構造判定外れ、MaxUnpool の範囲外 index）で `child` が空・再試行できる | `structural_unsafe_inputs_rejected_child_empty_and_retry` | CI | 未実測 | 未実測 | 未実測 |
+| 隣接 Op（`Op::Custom`）が fail-closed のまま | `structural_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
+| `tape.rs` のメタテスト: Interpolate の既知 7 mode が true、未知は false | `structural_family_supports_create_graph`（単体） | CI | — | — | — |
+| facade 経由（代表は `dropout`・`interpolate`・`max_unpool2d`） | `crates/facade/tests/create_graph_facade.rs` に `*_create_graph_via_facade` を追加 | CI | 未実測 | 未実測 | 未実測 |
+| CUDA／Metal の parity。GPU ネイティブの mode（Nearest・Bilinear）とホストフォールバックの mode（Bicubic・Area など）を最低 1 つずつ。Dropout と MaxUnpool も含める | `create_graph_structural_cuda_parity`／`create_graph_structural_metal_parity`（後者は `cfg(target_os = "macos")`）。置き場・名前は #3776・#3777 の雛形が確定するまで仮。測り方は #3739 に従う | `#[ignore]` | 未実測 | 未実測 | 未実測 |
+
+実機の実行は #3856・#3858 が担う。Linux や開発機の代替値で pass にしない。
+
+**既存テストで反転・差し替えが要るもの（#3793 の必須作業）**:
+
+- `crates/autodiff/src/tape.rs` の `pooling_family_supports_create_graph`: `!MaxUnpool` を assert しているので true へ反転
+- 同 `conv_transpose3d_max_unpool_op_tests::max_unpool_op_meta_properties`: `supports_create_graph()` だけ true へ（`is_checkpoint_eligible` は false のまま）
+- `crates/autodiff/tests/create_graph_pool.rs` の `create_graph_still_rejects_max_unpool_after_pooling`: 成功して 1 階と bit 一致する確認へ反転（隣接 Op の拒否は上の新テストへ移す）
+- `crates/autodiff/tests/max_unpool_parity.rs` の `records_exactly_one_node_and_rejects_create_graph`: 1 ノード記録の確認は残し、create_graph は成功と 1 階 bit 一致へ
+
+隣接 Op には恒久対象外の `Op::Custom`（§21.2 A 区分。§32 の前例）を使う。`ConvTranspose3d`（#3797）・`LocalResponseNorm`（#3794）など兄弟 issue が並行して true にしうる Op は使わない。
+
+### 35.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えない。新しい baseline は作らない（作るなら実機の実測値に限り所有者承認）
+- 1 階は構造上 bit 同一（§21.1(1)。1 階の VJP には触れない）
+- `cg.grad` の CPU での bit 一致の見込み: Nearest・NearestExact・MaxUnpool はコピーと f64 決定的集約なので bit 一致。固定 tap の mode は 1 階と同じ f32 積 `u·w` と同じ `scatter_with_fallback(Add)`（f64 集約）を通るので bit 一致。Area は V3 なので値が bit 一致。Dropout は keep 位置で bit 一致し、drop 位置で g が非有限のときだけ 35.10 の既知差がある
+- GPU（CUDA・Metal）では `Mul`・scatter を backend カーネルで評価するので、契約は REQ-2 とし、bit 一致は主張しない
+- f64 長軸縮約の契約（`coding-rust.md`）: Area の値は 1 階の `interpolate_area_vjp`（f64 アキュムレータ・最後に 1 回 downcast）を V3 でそのまま使う。固定 tap の mode は f64 集約の `ScatterReduce::Add` に乗る。FMA 契約には影響しない
+- 必須ベクトル（3 段すべてで有限かつ一致。外れる場合は型付き拒否で `child` が空になることを固定する）:
+  - 大きな upstream `g=3e38`・`g=[3e38, -3e38]`（Bicubic の負の重みを含む）
+  - 非有限の g（drop 位置・keep 位置の両方）
+  - MaxUnpool の重複 index（last-writer）と NaN・inf の入力
+  - Interpolate の `outer==0`（空 batch）
+  - Area の不均一な窓（例 5→3）と打ち消し合う upstream
+  - Dropout の `p=1.0`（mask がすべて 0）
+- 保証範囲は §27.3・§30.3 と同じ書き方にする。Area は構造判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上の微分と、真値が f32 を超える場合（1 階と同じく `inf`）は対象外
+
+### 35.6 互換への影響
+
+**追加のみ**。`api-compat-0.14.0-decision.md` §8 の手順で判定する。触れる公開型が無く（`Op` は `pub(crate)`）、`AutodiffError` の variant も公開シグネチャも変わらない。以前 `Err` だった入力が `Ok` になる受理範囲の拡大であり、§1.1 の破壊的条件には当たらない。`Op` の payload の追加は要らない。
+
+### 35.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）
+- `docs/compat-api-scope.md` への適用記録は #3767 の承認後の実装 PR で書く。文案: `**適用記録（イシュー #3793・親 #3726。承認: <#3767 の回答 URL>）**: 構造変換 3 Op を create_graph の対象にした。公開名の追加なし。`
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（承認後の PR で行う。承認が無いうちは書かない）
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した（項目 3 の設計記録の欄に §35 を追記）
+
+### 35.8 ベンチと性能への影響
+
+既定経路（`Tape::backward`・forward）は変わらない。`supports_create_graph` は create_graph の入口でしか呼ばれない。増えるのは create_graph 経路の構造ノードと、索引・重み定数（`[outer, sp_out·K]`）のホスト確保だけなので、前後比較は不要と判断する。実装で既定経路に触れた場合は、5 回計測の中央値で前後を比べ、判定規則を計測前に固定する。実機の値は未実測。
+
+### 35.9 依存の追加の有無
+
+追加なし。許容 12 区分・禁止リストとの照合で変化なし。新しい `unsafe` なし。
+
+### 35.10 族の方式と式（Op ごと）
+
+記号: `x_m` は子テープ上の入力の写し、`g` は子テープ上の upstream。
+
+- **Dropout（V1 + V2）**
+  - R: `x_m.dropout_with_mask(mask.clone())`（`crates/autodiff/src/var.rs:4499`。`pub(crate)`）。forward と同じ `dropout_with_fallback`（`grad.rs:3935`。`ops.mul` と drop 位置のゼロ上書き）を通るので写しの値は bit 一致。**`Var::dropout`（`var.rs:4473`）は呼ばない**: マスクを引き直してグローバル RNG を消費してしまうため（`docs/rng-global-contract-design.md` §3.2）。replay は RNG に触れない
+  - cgrad（推奨）: `where_cond(mask != 0, g.mul(mask_const), 0)`。keep 位置は 1 階の `vjp_elementwise_mul`（`grad.rs:84`）と同じ IEEE 乗算 1 回なので bit 一致。drop 位置は常に 0 で、g が非有限のとき 1 階（`inf·0 = NaN`）と違う。§21.2 の「記録済みマスクの `where_cond`」・§21.1(3) の `inf*0` 規則・forward のゼロ出力契約に揃う。代替は素の `g.mul(mask_const)`（1 階と完全に bit 一致し NaN も 1 階と同じ）で、35.14 の論点 2 に載せる
+  - 1 階の非有限 upstream の扱いは変えない
+  - `Dropout2d`・`AlphaDropout` も同じ `Op::Dropout` を記録するので追加作業なしで対象になる（AlphaDropout の定数バイアス加算は `Add`）
+- **Interpolate**
+  - R: `x_m.interpolate(&size, mode)`（`var.rs:4610`）。payload で足りる
+  - Nearest・NearestExact（V1）: `g → contiguous → reshape [outer, sp_out] → zeros[outer, sp_in].scatter_add(1, index, ·) → reshape input_shape`。index は 1 階と同じ `nearest_src_index_map`（`grad.rs:5502`）・`nearest_exact_src_index_map`（`grad.rs:5620`）から作る
+  - Linear・Bilinear・Trilinear・Bicubic（V1。K = 2／4／8／16）: `g → reshape [outer, sp_out, 1] → broadcast_to [outer, sp_out, K] → contiguous → reshape [outer, sp_out·K] → mul(weight_const) → zeros.scatter_add(1, index, ·) → reshape`。index と weight は 1 階と同じ `*_src_index_and_weight_map`（forward と共有する座標式）から作り、必要なものは `pub(crate)` にする（本体と数値は変えない）。**重み定数との `Mul` を使ってよい理由**: 1 階 VJP（`interpolate_fixed_tap_scatter_vjp`、`grad.rs:5812`）自身が同じ f32 積 `u·w` を作ってから同じ f64 集約の scatter_add を通るので、§21.1(3) が禁じる「選択の 0/1 マスクを掛ける」形には当たらない（Bicubic の負の重みや 0 の重みでも 1 階と同じ積になる）
+  - Area（V3）: 値は 1 階の `interpolate_area_vjp`（`grad.rs:5876`。`pub(crate)` にする）を `push_v3` で登録する。構造は §30 の Adaptive と同じ窓の分類ごとの `gather → 1/s → scatter_add → s/d` で、`pool.rs` の `plan_adaptive2d`（:273）・`window_scatter_structure`（:385）・`check_structure_contract`（:443）を空間 N 次元へ一般化して共用する。§30.3(d) と同じく、divisor の違う分類が混ざる入力で REQ-2 を外れるものや、集約前の中間和が f32 を超えるものは型付きエラーで拒否する。代替（Area だけ fail-closed のまま残す）は 35.14 の論点 3
+  - 共通の拒否: `outer == 0` は 1 階と同じくゼロの定数を返す（大きな確保をしない）。`sp_in_numel > i32::MAX` と `outer·sp_out·K` の桁あふれは確保の前に拒否する（1 階 `grad.rs:2887` 付近と同じ順序）
+- **MaxUnpool（V1 + V2）**
+  - R: `max_unpool_ops` に `pub(crate)` の入口を新設する。引数は `(x_m, index, out_shape)` で、`replay_op` が受け取るノード shape を使う（`pool::replay_max_pool(&mirror, &index, shape)`〈`create_graph/pool.rs:58`〉と同じ形）。index の範囲検査と `scatter_with_fallback(Overwrite)`（`grad.rs:4732`）を通して `Op::MaxUnpool` を積む。payload の変更は要らない。公開入口（`max_unpool1d/2d/3d`）は kernel・stride・padding を要求するので replay には使わない
+  - cgrad: `where_cond(last_writer_mask, g_flat.gather(1, index_flat), 0)` を `[N·C, in_plane]` から入力 shape へ戻す。これは `index_cum::scatter_vjp`（`create_graph/index_cum.rs:119`）の Overwrite の `d_src` の枝そのものなので、`ScatterSpec { input_shape: flat_out, src_shape: flat_in, dim: 1, index, reduce: Overwrite }`・`need_input=false` で再利用する。gather はコピーで、選択は 1 階の `elementwise_mul_mask`（`grad.rs:6773`。選択であって乗算ではない）と同じ規則なので bit 一致
+  - 重複 index の意味論は 1 階どおり last-writer（PyTorch とは違うが `docs/autodiff-conv-transpose3d-max-unpool-decision.md` で決定済み）。新しい論点にはしない
+  - 空（`nc==0`・`in_plane==0`・`out_plane==0`）はゼロの定数
+
+### 35.11 閉包性と族間の依存
+
+- 子テープへ積む Op: `Reshape`・`Contiguous`・`BroadcastTo`・`Mul`・`Where`・`Gather`・`Scatter`（Add）と、forward の写しの `Dropout`・`Interpolate`・`MaxUnpool`。基準時点の `supports_create_graph`（`tape.rs:2526`）で前の 7 つが true であることを確かめた
+- 他族への依存は #3083（索引系 `Gather`／`Scatter`。§25）と #3085（`pool.rs` の窓構造。§30）で、どちらもマージ済み
+- 孫テープの再生では、子テープ上の写し（`Dropout`・`Interpolate`・`MaxUnpool`）が再生されるので、3 Op 自身が true であることが要る（族の中で閉じる）
+
+### 35.12 fail-closed・拒否テスト・GPU の forward
+
+- §21.6 の判定順・網羅 match・未知 variant を false にする規約は弱めない
+- 隣接 Op は `Op::Custom`（35.4）
+- CUDA／Metal の forward: `Interpolate` は Nearest と Bilinear だけ GPU カーネルを持ち（`crates/backend-cuda/src/ops.rs`・`crates/backend-metal/src/ops.rs`）、ほかの mode は `Unsupported` を受けてホストの参照実装へフォールバックする。`Dropout` は `ops.mul`（GPU）のあとホストでゼロ上書きする。`MaxUnpool` は `scatter_with_fallback(Overwrite)` を通る。本設計は forward も GPU カーネルも変えない。子テープの構造ノードは子テープの backend で評価される。GPU での一致は未実測で、#3856・#3858 が `#[ignore]` テストで確かめる（35.4）
+
+### 35.13 セキュリティ観点・スコープ外・Closes／Refs
+
+- A03: shape・`size`・`mode`・index は forward 側の確保前検証を通ったものだけが届く。そのうえで子テープへ書く前に i32 範囲・確保長の桁あふれ・index 範囲を検査する。新しい確保は `[outer, sp_out·K]` の索引・重み定数と Area の構造判定の f64 一時領域に限る
+- A04: 拒否時に子テープを空に保つ fail-closed、網羅 match、未知 `InterpolateMode` を false にする規約を維持する。Dropout の replay がグローバル RNG を消費しないことを契約とテストで固定する（学習の再現性の破れを防ぐ）
+- A06: 依存を追加しない。A08: 判定・閾値・tolerance の迂回経路を作らない。秘密情報・ホスト名・個人のパスは書かない
+- **スコープ外**: GPU 実機の parity（#3856・#3858）、測り方（#3739）、1 階の Dropout の非有限 upstream の意味論、MaxUnpool の重複 index を PyTorch に寄せること、`InterpolateMode` の新 variant、f64 テープの create_graph（#3722）。新しい issue は承認なしに起票しない
+- `Closes #3726`。`Refs #3793 #3767 #3719`
+
+### 35.14 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 族の採否 | 3 Op を実装する／対象外にする | 実装する | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 2. Dropout の drop 位置で g が非有限のときの cgrad | `where_cond` で 0（§21.2 の記載どおり）／素の `mul` で 1 階と bit 一致（NaN） | `where_cond` | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 3. Interpolate の Area | V3（§30 の窓構造を N 次元へ一般化し、判定外れは拒否）／Area だけ fail-closed のまま残す | V3 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 4. MaxUnpool の replay | `max_unpool_ops` に out_shape を受ける `pub(crate)` 入口を新設して `Op::MaxUnpool` を積む／`Scatter(Overwrite)` の合成で再生する | 新設の入口 | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| 5. GPU parity の判定方式 | #3739 の推奨に従う（tolerance は変えない）／別方式 | #3739 に従う | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+
+### 35.15 変えていないもの
+
+コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
 ## 36. 決定記録（イシュー #3727・親 #3719。create_graph の C 区分・正規化・再パラメータ 3 Op）
 
 ### 36.0 位置づけ・承認根拠・境界・推奨
@@ -1740,4 +1899,3 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 36.15 変えていないもの
 
 コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`・`docs/autodiff-lrn-weight-reparam-decision.md`。
-||||||| 6402d6087
