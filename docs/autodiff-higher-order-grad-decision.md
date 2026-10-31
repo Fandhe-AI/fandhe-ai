@@ -2442,6 +2442,210 @@ Phase 10 の実測（#3857・#3859）は別に行う。PR は Phase 10 まで `R
 
 コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
 
+## 40. 設計記録（イシュー #3731・親 #3719。create_graph の B 区分・損失のクラス軸系 6 variant と CtcLoss）
+
+### 40.0 位置づけ・承認根拠・境界・推奨
+
+- 状態: **設計記録のみ**。承認は #3767 の回答待ちで、本節は承認を代行しない。コード・公開面・tolerance・baseline は変えない。基準 sha は `49d627a5b`。
+- 対象: §26.2 表の (c) クラス軸系のうち未実装の 6 variant（`CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss`）と、§21.2 で恒久 fail-closed とした `CtcLoss`。いずれも `crates/autodiff/src/tape.rs` の `supports_create_graph`（:2606〜2630 付近）の網羅 match で `false` 側にあり、`backward_create_graph` は型付きエラーで拒否する（fail-closed）。
+- 根拠: §20（D-A）、§21.1（V1〜V4・S1・閉包性・数値契約）、§21.2、§21.3 の #3082、§21.6、§26、§27.3（総括判定）。これらは設計方針の根拠であって承認ではない。
+- 推奨: **6 variant は A「実装する」**、**CtcLoss は B「対象外にする（恒久 fail-closed を維持）」**。ただし採否は #3767 で個別に問う。
+
+| 案（6 variant） | 内容 | 評価 |
+|---|---|---|
+| A（推奨） | 各 variant を自己再生＋cgrad の primitive 合成で書く。hvp・jvp・jacfwd・jvp_create_graph が通る | 1 階 VJP が閉じた式で、`Softmax`・`Sigmoid`・`Sqrt`・`Abs`・`PowScalar`・`Sum`・`Gather`・`Where` 等の replayable な Op で書ける |
+| B | 対象外にし fail-closed を恒久契約にする | label smoothing 付き CE や metric learning 損失を含むモデルの二階微分が拒否され続ける |
+
+| 案（CtcLoss） | 内容 | 評価 |
+|---|---|---|
+| A | α／β を `Var` の合成で子テープに再生する | 40.10 の理由 1〜5 で不採用 |
+| B（推奨） | 対象外（恒久 fail-closed を維持） | 現状のまま。上限なしのノード生成を避けられる |
+| C | V4（専用の二階 VJP） | §4／§5 が一般方針として退けているため不採用 |
+
+- 6 variant を推す理由: (1) 1 階 VJP がすべて閉じた式、(2) 6 つとも 1 階が f64 のホスト関数なので V3 の値に流用できる、(3) §26 の部品（`loss_scale_bcast`・`onehot_*`・`pairwise_mask`・`push_v3`）を使い回せる、(4) CE の label smoothing・class weight と metric learning（Cosine・Triplet）は実用頻度が高い。
+- 境界: #3730（§39 の 9 variant）、他の B 区分、C 区分（`VectorNorm`・`PNorm`・`LogSumExp`・`Max` は #3725・#3724 で設計中の fail-closed Op）は扱わない。**構造に C 区分の Op を積まない**。
+
+### 40.1 公開形
+
+- 該当なし。公開名は増えない。対象の `Var` メソッド（`cross_entropy_loss_with`・`cosine_embedding_loss`・`multilabel_margin_loss`・`multi_margin_loss`・`multilabel_soft_margin_loss`・`triplet_margin_loss`・`ctc_loss`）は公開済みで形は変えない。変わるのは受理する Op の範囲だけ。
+- `crates/facade/tests/api_surface.rs` に、これらの create_graph を拒否する否定ガードや保留 doctest ガードは無い（`__Fandhe*HoldMarker` 系はメソッド公開のガードで無関係）。**反転するガードは無い**。正ガードの代わりは 40.4 の facade 挙動テストとする。
+- 実装 PR（#3800）で変える箇所: `supports_create_graph` で 6 variant を `true` 側へ移す（ワイルドカードは足さない）、`create_graph.rs` のモジュール doc の「対象外」列挙、facade `lib.rs` の rustdoc が指す「§21.2・§22〜§31」の範囲に本節を加える、§26.2 表の更新（本 PR では行わない）。
+
+### 40.2 rustdoc と doctest
+
+- 必須の doctest は無い。任意で、facade の `hvp` か `backward_create_graph` に CPU だけで通る `cross_entropy_loss_with`（label_smoothing 付き）の HVP 例を 1 つ足す。GPU の例は `no_run`／`#[ignore]`。
+- 失敗系は `compile_fail` に頼らず、`Err(AutodiffError::Backward(_))` と `child.is_empty()` で確かめる。
+
+### 40.3 エラー型
+
+- 新しい variant は足さず `AutodiffError::Backward(String)` に統一する。拒否するのは、総括判定（40.12）を外れた入力、非有限の upstream、±inf の入力（§33.14 論点 3 と同じ規則。NaN は伝播し ±inf は拒否）、未知の enum 値、内部の shape 不整合。
+- 判定は子テープへ書く前に行い（`validate_ancestors` か cgrad 構築の冒頭）、拒否時は `Tape::backward_create_graph` のロールバックで `child` を空に戻す。
+- 外部入力（targets 範囲・`y` が ±1・`p>=1`・`eps>=0`・`margin` 有限・class_weight 非負）は forward の検証を通ったものだけが届く。本番経路で `unwrap`／`expect` は使わない。
+- CtcLoss が対象外のままなら、拒否経路は現行の `supports_create_graph == false` のまま変えない。
+
+### 40.4 テスト計画
+
+CI の行は新設 `crates/autodiff/tests/create_graph_loss_class.rs`（仮名）に置く。名前は案で、実装 PR で確定する。
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 1 階が素の `backward` と bit 同一。`cg.grad` は REQ-2 で一致（V3 の値は CPU で bit 一致も見る） | `loss_class_first_order_bit_identical_and_cgrad_req2` | CI | 未実測 | 未実測 | 未実測 |
+| ヘッシアンが有限差分と一致（6 variant × Mean／Sum）。CEWO は label_smoothing・ignore_index・class_weight の各組と class_dim 0／最終軸／rank3 中間軸、MultiMargin は p=1／2・weight 有無、Triplet は p ∈ {1, 2, 3}・swap 有無・同値タイ。刻みは §26.4・§27.4 の前例どおり | `loss_class_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| 多入力の混合二階（Cosine の `d²L/dx1·dx2`、Triplet の a·p・a·n・p·n） | `loss_class_mixed_second_derivatives` | CI | 未実測 | 未実測 | 未実測 |
+| `jvp_create_graph` で孫テープへ再生し方向微分と一致 | `loss_class_grandchild_replay_matches_directional_derivative` | CI | 未実測 | 未実測 | 未実測 |
+| 必須ベクトル（40.5）が 3 段（1 階・`cg.grad`・孫テープ）で有限か、拒否されて `child` が空 | `loss_class_mandatory_vectors_three_stages` | CI | 未実測 | 未実測 | 未実測 |
+| 区分の境界が 1 階の規則と一致（Multi* は `z>0` 厳密、Cosine・Triplet は `>=0`、Triplet swap の同値タイは 0.5 等分、CEWO の早期 return 2 種） | `loss_class_piecewise_boundaries_follow_first_order_rule` | CI | 未実測 | 未実測 | 未実測 |
+| ignore 行・全クラス重み 0・`Mean && W==0` で logits に NaN があっても 0 を返す | `cewo_zero_weight_paths_return_zero_not_nan` | CI | 未実測 | 未実測 | 未実測 |
+| 安全でない入力の拒否・`child` が空・再試行できる | `loss_class_unsafe_inputs_rejected_child_empty_and_retry` | CI | 未実測 | 未実測 | 未実測 |
+| 空テンソルで全ゼロ | `loss_class_empty_tensor_returns_zeros` | CI | 未実測 | 未実測 | 未実測 |
+| 6 variant が `true` | `tape.rs` 単体テスト `class_axis_losses_support_create_graph` | CI | 未実測 | 未実測 | 未実測 |
+| 隣接する fail-closed: `Op::Custom` との組み合わせは拒否され `child` が空 | `loss_class_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
+| facade 経由（6 損失。`check_create_graph_family` で） | `*_create_graph_via_facade` | CI | 未実測 | 未実測 | 未実測 |
+| 実機 parity: `gpu_extended_ops_match_cpu`（`create_graph_facade.rs`）のケース表へ 6 損失を足す。#3776・#3777 の雛形ができたら登録表へ移す。測り方は #3739 | 同左（置き場と名前は仮） | `#[ignore]` | 未実測（#3857） | 未実測（#3859） | 未実測（雛形なし） |
+
+- 既存テストの差し替えは無い。6 variant と CtcLoss を拒否の見本にしている既存テストは無い。`tape.rs` の `first_wave_losses_are_supported_and_neighbors_stay_closed` と `tests/create_graph.rs` の `create_graph_still_rejects_remaining_loss_ops` は `KlDivLoss` を見本にしており、#3730 系の PR が `Op::Custom` へ替える予定（§39.4）。#3800 の実装 PR では、その時点の main で引き直し、6 variant が見本にされていないことを再確認する。
+- 隣接見本は `Op::Custom` とする。CtcLoss は #3767 の回答で変わりうるので見本にしない。
+- 実機の実行は #3857・#3859 が担う。Linux や開発機の代替値で pass にしない。
+
+### 40.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値・FMA 契約は変えない。新しい baseline は作らない（作る場合は実機の実測値に限り所有者承認が要る）。
+- 1 階は構造上 bit 同一（§21.1(1)）。6 つとも V3 なので `cg.grad` の値も CPU で 1 階と bit 同一になる。構造側の f32 合成は二階と孫テープにだけ効く。
+- f64 の契約（`coding-rust.md`。二乗和は先に昇格）は V3 の値側で守る。構造側の overflow は S1 と総括判定で防ぐ。
+- 必須ベクトル（3 段すべて）:
+  - CEWO: logits `±1e30`、class_weight に大きな値（Σw が f32 を超える組は拒否）、`g=3e38`。
+  - Multi*: `x=±1e30`・p=2 で `z²` 相当が大きい組、`g=3e38`。
+  - MultiMargin p=2: 1 行 2 クラス・`x=[-1e38, 1e38]`・target=0・`w_y=1e-38`・margin=0・`g=1`（f64 VJP は有限だが f32 構造の `H` が overflow するため、総括判定で拒否されること）。
+  - Cosine: `x1=x2=1e20` の行（f32 の二乗が inf）、零ベクトル行（`m=ε`）、`x=1e-30` の行（`ε/s²` の保護）、`y=-1` で `cos==margin`。
+  - MultiLabelSoft: C=N=1・x=0・target=0.5・weight=1e30・`g=1e10`（二階が約 2.5e39。総括判定で拒否）。
+  - MultiMargin p=1（重み付き）: x=0・target=0・weight=1e20・Sum・`g=1e20`（勾配が約 5e39。総括判定で拒否）。
+  - Triplet: 差分 `1e20`、`p=1024` 相当、差分がちょうど `-eps` になるレーン、swap の同値、`d_an=inf` の側、p=2 で一部レーンだけ `u_i==0`（`norm'>0`）の行（二階の曲率が 0 に落ちないこと。混合二階の確認項目 `loss_class_mixed_second_derivatives` に含める）。
+  - 全般: `g=[3e38]`・`g=-3e38`。
+- 保証範囲は §27.3 の書き方に揃える。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上は対象外。
+
+### 40.6 互換への影響
+
+- **追加のみ**。`docs/api-compat-0.14.0-decision.md` §1.2 項目 3（`Err` が `Ok` になる受理範囲の拡大）にあたり、§8 の手順に当てはめても破壊的条件には当たらない。
+- 型ごと: `Op`（`pub(crate)`）は payload を追加しない（再生に要る値は `tape.rs` の既存 payload に揃っている）。`AutodiffError` の variant は不変。オプション型（`CrossEntropyOptions`・`TripletMarginOptions`・`MultiMarginOptions`・`MultiLabelSoftMarginOptions`・`CtcLossOptions`）と `Reduction` は不変。公開シグネチャは不変。
+- CtcLoss を対象外にした場合は現状のまま（`Err`）なので影響は無い。
+
+### 40.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）。
+- `compat-api-scope.md` 適用記録の文案（承認後の実装 PR で書く）: 「**適用記録（イシュー #3800・親 #3731。承認: <#3767 の回答 URL>）**: 損失のクラス軸系 6 variant を create_graph の対象にした。公開名の追加なし。」CtcLoss は「対象外に確定（承認 URL）」と「実装した場合」の 2 通りを書く。
+- チェック欄:
+  - [ ] `compat-api-scope.md`（承認後の実装 PR で行う）
+  - [x] `docs/README.md` の索引
+  - [x] 追跡表（`docs/compat-matrix-ari-tracker.md`）行 4 の設計記録の欄に本節を記入
+
+### 40.8 ベンチと性能への影響
+
+- 既定経路（forward・`Tape::backward`）は変わらない。`supports_create_graph` を呼ぶのは create_graph の入口だけ。
+- 増えるのは create_graph 経路だけ。variant ごとに数〜二十数ノード、CEWO は子テープに `Softmax` が 1 つ増え、Cosine・Triplet は行ごとのスケール・ノルム合成が増える。マスクと総括判定のホスト走査は O(numel)。
+- 既定経路に触れないので前後比較は不要と判断する。触れた場合は 5 回計測の中央値で比べ、判定規則を計測前に固定する。実機の値は未実測。
+
+### 40.9 依存の追加の有無
+
+- 追加なし。許容 12 区分・禁止リストとの照合で変化なし。新しい `unsafe` も無い（`docs/license-matrix.md` の更新は不要）。
+
+### 40.10 方式と式（variant ごと）
+
+記号: `x_m` 等は子テープ上の写し、`g` は子テープ上の upstream `Var`。R は公開メソッドへの自己再生（§21.1(2)。forward の検証を迂回しない）。V3 の値は 1 階のホスト関数（`grad.rs` の各 VJP、`eval/margin_focal_loss.rs`）を `pub(crate)` にして `push_v3`（`create_graph.rs`）で入れる。本体と数値は変えない。区分定数は V2 で作り（親の記録値からホストで 1 階と同じ f64 判定でマスクを作り `where_cond`）、`g.mul(0/1 定数)` は使わない（`inf·0=NaN` を避けるため）。
+
+Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.rs`）は `n: usize` しか取らない。
+
+| variant | Mean の分母 |
+|---|---|
+| CEWO | 非 ignore サンプルの重み和 `W`（f64）。`loss_scale_bcast` は使えないので `g / const(W as f32)` の別ヘルパーを足す |
+| Multi* 3 種 | 行数 N（`rows_cols`。rank 1 は 1） |
+| Cosine・Triplet | 行数 n（`shape[0]`。rank 1 は 1） |
+
+- **CrossEntropyLossWithOptions（V3 + V1 構造。`Softmax` に依存）**
+  - R: `cross_entropy_loss_with(&targets, class_dim, reduction, &options)`。非既定オプションなので再生でも同じ variant が積まれる。
+  - 構造: `dx = where(valid, s_b ⊙ (A_b ⊙ softmax(x_m, class_dim) − B), 0)`。`A = (1−ε)·w_t + (ε/C)·Σw`（サンプルごと）、`B_c = (1−ε)·w_t·δ_{c,t} + (ε/C)·w_c` はホスト定数（f64 で作り f32 へ）。`valid` は ignore でない行のマスク。
+  - 早期 return（`Σw==0`、`Mean && W==0`）は定数ゼロの cgrad にする。1 階と同じく NaN を出さない。
+  - `class_weight` を定数化しても二階は失われない（非追跡データのため）。V1 単独で REQ-2 比較にする案もある（論点 3）。
+- **MultiMarginLoss（V3 + V2）**
+  - `z_j = margin − x_y + x_j`。`x_y` は `gather(x_m, y)` を broadcast して作る。活性マスク `M = (j≠y ∧ z_j>0)` はホストで作る。
+  - p=1: `dx = where(K≠0, s_b ⊙ const(K), 0)`（`K` は `w_y/C` の符号付き個数）。
+  - p=2: `H = where(M, 2·Z, 0)`、`dx = s_b ⊙ c_w ⊙ where(onehot_y, −Sum(H, 1)_b, H)`（`c_w = w_y/C` は行定数）。二階は p=2 でだけ曲率を持ち、p=1 は `g` を経由する分だけ。
+- **MultiLabelMarginLoss（V3 + V2）**: x について区分定数なので `dx = where(K≠0, s_b ⊙ const(K/C), 0)`。`K` は活性な (t, d) 組の符号付き個数で、重複 target は重複分だけ数える（1 階と同じ）。
+- **MultiLabelSoftMarginLoss（V3 + V1）**: `dx = s_b ⊙ (const(w_c/C) ⊙ (Sigmoid(x_m) − t))`。掛ける順はこの括弧のとおりで、中間値が最終値を超えないようにする。
+- **CosineEmbeddingLoss（V3 + V2 + S1 構造。2 入力）**
+  - `coeff ∈ {−1, +1, 0}`（`y>0` → −1、`y<0 ∧ cos−margin>=0` → +1、それ以外 0）は V2。ホストで 1 階と同じ f64 の `cos` から判定する。
+  - 行ごとのノルムを `Mul`・`Sum(dim)`・`Sqrt`・`Div` で組む。**`Op::VectorNorm` は使わない**（C 区分の fail-closed Op）。
+  - `x²` は `1e20` で f32 の inf になるので §21.1(5) の S1 を使う。行ごとに `s_i = max(max|x_i|, √ε)` を 2 のべき乗へ切り上げ、`x/s` を作り、`ε` を `ε/s²` に変換する（ε=1e-12）。
+  - 式: `dx1 = s_b·coeff/s1·(b'/denom' − cos·a'/m1')`。`dx2` も同形。1/s の掛け順は総括判定で確かめる。rank 1 は `[1, d]` へ reshape する。
+- **TripletMarginLoss（V3 + V2 + S1 構造。3 入力）**
+  - `v = a_m − p_m + eps`（an・pn も同形）。p ノルムは 1 階の `p_norm_f64` と同じスケール形 `mx·(Σ(|v|/mx)^p)^(1/p)` で組む。`mx` は行ごとの 2 のべき乗のホスト定数で、`Abs`・`PowScalar`・`Sum`・`Mul` を使う。勾配は `sign(u)·(|u|/norm')^(p−1)`。**p=2 は `u/norm'` で組む**（`sign(u)·(|u|/norm')` だと `Abs` の VJP が `u==0` で 0 になり、`norm'>0` の行で `u_i==0` のレーンの曲率 `1/norm'` が二階から消えるため。`Mul`・`Div` だけの式なので零点で曲率が保たれる）。p=1 の符号は V2 の定数、p≠2 の `u==0` は論点 5 のとおり。
+  - V2 にするもの: `hinge_active`（`>=0`）、`an_coeff`（1／0／0.5。乗算でなく `where` で選び、0.5 の同値だけ非零定数を掛ける）、`norm==0`（PyTorch と同じく 0）、p=1 の符号。
+  - 寄与は `da = g_ap − c_an·g_an`、`dp = −g_ap − c_pn·g_pn`、`dn = c_an·g_an + c_pn·g_pn`（1 階 VJP と同じ）。
+  - `1<p<2` で `u==0` のレーンは二階が発散する（真値も特異）。推奨は総括判定で拒否（論点 5）。
+- **CtcLoss（推奨: 対象外）**
+  - 実装案 A: α／β を `Var` の合成で子テープに再生する。1 セルは 3 項以下の logaddexp と emission で、`Gather`・`Exp`・`Log`・`Add`・`ScalarBinary::Maximum`・`Where` は replayable。logaddexp は `m + Log(Exp(a−m)+Exp(b−m))`（m はホスト定数）で書ける。値は `ctc_loss_vjp` の V3、`γ = Exp(α+β+nll)` を構造にする。
+  - 不採用の理由:
+    1. `ctc_add_emission` の「−inf は加算相手を問わず支配する」規約と β の規約（`docs/autodiff-ctc-design.md` §2.4）が、合成では `−inf−(−inf)=NaN` を生む。到達不能セルごとに V2 マスクが要る。
+    2. サンプルごとの `nll==+inf`・`zero_infinity`・NaN の分岐はホストの制御フローで、構造に写すと分岐ごとの定数化が要る。
+    3. ノード数がセル単位で O(N·T·L') × 約 8（例: N=32・T=100・L'=50 で約 128 万ノード）。時刻ごとにベクトル化しても O(N·T) × 十数ノードで β 側で倍になる。上限なしの消費は A04／DoS の観点からも拒否理由になる。
+    4. 1 階は f64 の α／β だが構造は f32 の対数空間になる。長い T で誤差が積み上がり、二階が REQ-2 に収まる保証が弱い。
+    5. V4（専用の二階 VJP）は §4／§5 が退けている。
+  - 補足: PyTorch が CTC の double backward を提供するかは**未確認**。実装判断の前に一次資料（derivatives.yaml）で確かめる。推測で事実化しない。
+  - 対象外に決まった場合、#3801 は #3767 の回答 URL を設計記録・追跡表に書く docs のみの PR で閉じる。実装に決まった場合の段分けは 40.13。
+
+### 40.11 閉包性と族間の依存
+
+- 子テープへ積む Op: `Add`・`Mul`・`Sum`・`BroadcastTo`・`Reshape`・`Narrow`・`Concat`・`Contiguous`（`push_v3`）・`Where`・`Gather`・`Softmax`（#3077・V3）・`ScalarBinary`（Sub・Div・Maximum）・`ScalarUnary`（Neg・Abs・Sqrt・Sigmoid・PowScalar・Exp・Log）。基準時点で `true` であることを `supports_create_graph` で確かめた。実装前に origin/main で再確認する。
+- C 区分の `VectorNorm`・`PNorm`・`LogSumExp`・`Max` は積まない。
+- 依存は #3077（Softmax）→ CEWO の 1 本だけ（§21.4 の「#3077 → #3082(c)」と一致）。#3083(a) の `Gather` は実装済み。
+- 孫テープでは 6 variant 自身が再生されるので、各 variant の `true` への反転は、その variant の cgrad と同じ PR で行う。
+
+### 40.12 fail-closed・総括判定・GPU の forward
+
+- 総括判定: §27.3 の `check_structure_stages`（`create_graph_norm.rs`）と同型の判定を、Cosine・Triplet（スケール・ノルム・`PowScalar`）と CEWO（大きな class_weight を含む定数）に置く。構造の各段・二階の cotangent × 微分係数の上界をホストが f64 で求め、`2^125` 以上か非有限なら拒否する。閾値と seed の前提は §27.3 と同じ。MultiLabelMargin は x について区分定数なので upstream の検査だけを適用する。**MultiLabelSoftMarginLoss（weight 有無とも）・MultiMarginLoss の p=1（重み付き）・p=2 は対象に含める**。MultiLabelSoft は x について線形でなく、曲率が `s_b·(w_c/C)·σ(1−σ)` になる。weight・upstream `g`・微分係数 `σ(1−σ)`・行数分母 `s_b` の積と、`Sigmoid(x)−t`・`const(w_c/C) ⊙ …`・`s_b ⊙ …` の各段の上界をホストが f64 で求め、同じ `2^125` 閾値で拒否する（反例: C=N=1・x=0・target=0.5・weight=1e30・`g=1e10` は二階が約 2.5e39 で f32 overflow）。MultiMargin の p=1 は `K`・`w_y/C`・`s_b`・`g` の積（反例: x=0・target=0・weight=1e20・Sum・`g=1e20` は勾配が約 5e39 で f32 overflow）を同様に段別で検査する。`H = 2·Z`、`Sum(H, 1)`、`c_w ⊙ …`、`s_b ⊙ …` の各段の上界をホストが f64 で求め、同じ `2^125` 閾値で拒否する。重み `w_y` を後から掛ける構造のため、f64 では有限（例: 1 行 2 クラス・`x=[-1e38, 1e38]`・target=0・`w_y=1e-38`・margin=0・`g=1` は VJP が約 `[-2, 2]`）でも f32 の `H` が約 4e38 で overflow する入力を、この段別の上界検査で拒否する（重みを先に掛ける演算順への組み替えは採らない。`Z` 自体が f32 を超えるため解決しない）。必須ベクトルにこの反例を加える。
+- §21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。CtcLoss は `false` のまま。
+- GPU の forward: 7 Op はどれも全 backend でホストの `push_eager` で計算し、融合カーネルは無い。子テープの構造 Op（Softmax・pointwise・Sum）はデバイスで走る。よって #3857・#3859 が測るのは「デバイス→ホストの実体化を含む経路」で、カーネル間の parity ではない。GPU カーネルは新設しない。値は未実測。
+
+### 40.13 実装の段分け（Phase 5・2h 単位）
+
+- #3800:
+  1. CEWO（W 分母のスケールヘルパー・早期 return・Softmax 依存）
+  2. MultiMargin + MultiLabelMargin + MultiLabelSoftMargin（行数の分母・V2 マスク）
+  3. CosineEmbedding（S1 の行スケール・ε 保護・総括判定・混合二階）
+  4. TripletMargin（スケール形 p ノルム・swap・`1<p<2` の扱い・3 入力の混合二階）
+  - 各段で 40.4 の該当行と facade テストを足す。
+- #3801（実装に決まった場合だけ）: ① α の合成 → ② β と γ の合成 → ③ 分岐の V2 化・ノード数上限の拒否・テスト。
+- 実機は #3857・#3859 に任せる。
+
+### 40.14 セキュリティ観点
+
+- A03: forward の検証を通った値だけが届く。新しい確保はマスクと O(numel) の f64 一時領域に限る。
+- A04: 拒否時は子テープを空に保つ。CtcLoss を対象外にする理由の 1 つは上限なしのノード生成（DoS）を避けること。
+- A06: 依存を追加しない。A08: 総括判定と網羅 match を迂回する経路を作らない。
+- 秘密情報・実機のホスト名・個人のパスは書かない。
+
+### 40.15 スコープ外・Closes／Refs
+
+- スコープ外: §39 の 9 variant（#3730）、他の B 区分（#3729・#3732〜#3735）、C 区分の `VectorNorm` 等（#3725）、`Reduction::None` の追加（公開 API の変更。§26.3）、f64 テープ（#3722）、GPU 実機 parity（#3857・#3859）、測り方（#3739）。
+- 本 PR は `Closes #3731`、`Refs #3800 #3801 #3767 #3719`。
+
+### 40.16 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 6 variant の採否 | 実装する／対象外 | 実装する | 実装へ進めず fail-closed を維持 |
+| 2. CtcLoss の採否 | 対象外（恒久 fail-closed）／α・β の `Var` 合成で実装／V4 | 対象外 | 同上 |
+| 3. CEWO の方式 | V3（1 階 bit 一致）／V1 単独（REQ-2 比較） | V3 | 同上 |
+| 4. Cosine・Triplet のノルム構造 | S1（行ごとの 2 のべき乗スケール＋総括判定）／S2（統計量をホスト定数化し解析式） | S1 | 同上 |
+| 5. Triplet の `1<p<2`・`u==0` | 総括判定で拒否／V2 で 1 階の値を写す | 拒否 | 同上 |
+| 6. hinge 境界 | 1 階の規則を継承（Multi* は `z>0` 厳密、Cosine・Triplet は `>=0`。不揃いは既存規則の引き継ぎで本設計が作るものではない）／揃える（1 階の変更になるため別承認） | 継承 | 同上 |
+| 7. 非有限の入力 | §33.14 論点 3 と同じ（NaN は伝播し ±inf は拒否）／全部拒否 | §33 と同じ | 同上 |
+| 8. GPU parity の判定方式 | #3739 に従う（tolerance は変えない）／別方式 | #3739 | 同上 |
+| 9. 隣接見本 | `Op::Custom`／`CtcLoss` | `Op::Custom` | 同上 |
+
+### 40.17 変えていないもの
+
+- コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
 ## 41. 設計記録（イシュー #3732・親 #3719。create_graph の B 区分・IndexedScatterReduce・Cumprod・Logcumsumexp）
 
 ### 41.0 位置づけ・承認根拠・境界・推奨
