@@ -75,19 +75,7 @@
 - `add_*` は構築時に同じ関数で検査し `Err` を返す。本番経路で `unwrap`／`expect` を使わない。範囲外は fail-closed。
 - PyTorch との差（論点 Q1）: Softshrink は PyTorch でも負の `lambd` を拒否する。Hardshrink は PyTorch では拒否されず負の `lambd` は恒等写像になる（ソースの定義に基づく記述で**実測はしていない**）。本推奨は Hardshrink も負を拒否するため、既知の差分として記録する。
 
-### §1.4 VJP・create_graph・合成方式
-
-- 新規 `Op` は作らない。既存 Op の合成で書く。独自 VJP は書かず、合成元から自動で決まる。
-  - `hardshrink(x, λ) = masked_fill(x, mask(-λ <= v <= λ), 0.0)`。mask は `crate::activation_ops::build_value_mask`（`activation_ops.rs:83`）で作る。NaN は比較が偽になり素通し（勾配 1）。
-  - `softshrink(x, λ) = x.sub(&x.clamp(-λ, λ))`（`Var::clamp` は `var.rs:934`）。範囲内は勾配 0、境界 `|x| == λ` も 0（clamp は境界を含めて係数 1 なので 1 − 1）、範囲外は 1。NaN 入力は forward が NaN、勾配は 1 − 0 = 1。
-  - 最終形は実装時に決めてよい（`where_cond` 形も可）。ただし「新規 `Op` ゼロ」「§1.6 の数値契約」「下の既知の差分」の 3 点は変えない。
-- **create_graph は対象にする（追加作業なし）**。`MaskedFill` は #3084（`docs/autodiff-higher-order-grad-decision.md` §29）、`ScalarUnary`（`Clamp` を含む）と減算系は同 §16 で対象のため、合成すれば二階微分がそのまま通る。#3817 のテストに CPU の二階有限差分突合を各 1 本入れる。clamp／mask の境界は不連続なので、境界から離れた入力で検証する。
-- 既知の差分（いずれも**実測していない**。実装時に参照版のソースで確認する）:
-  - Softshrink の NaN 入力: PyTorch のカーネルには版によって 0 を返すものがある。本合成は NaN を伝播する。
-  - Softshrink の範囲内の出力: 本合成は `x - x = +0`。PyTorch は負の `x` で `-0` になりうるので符号付きゼロが異なりうる。
-  - Hardshrink の負の `lambd`: §1.3 のとおり拒否する。
-
-### §1.5 テスト計画
+### §1.4 テスト計画
 
 | 受入基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
 |---|---|---|---|---|---|
@@ -106,13 +94,13 @@
 - 実機の手順と記録先は `docs/perf/logs/shrink-ops-3817/README.md`（#3817 で新設）。cfg で 0 本しか実行されなかった結果は pass の根拠にしない。
 - ROCm は facade 非公開（追跡表 # 24 保留）のため「該当なし」。
 
-### §1.6 数値契約
+### §1.5 数値契約
 
 - 判定は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。演算は選択と IEEE 減算 1 回だけなので、テストはそれより強い **bit 完全一致**で書く（`threshold` と同じ扱い）。
 - `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は変えない。新しい baseline は作らない。
 - FMA 契約・f64 長軸縮約の契約への影響: なし（縮約も積和も無い）。
 
-### §1.7 互換への影響
+### §1.6 互換への影響
 
 - 判定（`docs/api-compat-0.14.0-decision.md` §8 の手順）: **追加のみ**。
   - `Var`（autodiff。facade が再エクスポート）: inherent メソッド 2 件の追加。
@@ -120,20 +108,32 @@
   - `AutodiffError`: variant を足さない。`LayerSpec`: `pub(super)` で公開型ではない。
 - 利用者が `Var` に同名のトレイトメソッドを生やしている場合は inherent メソッドが優先して解決される。Rust の通常の追加と同じ扱いで、破壊的には数えない。
 
-### §1.8 適用記録・索引・追跡表
+### §1.7 適用記録・索引・追跡表
 
 - `docs/compat-api-scope.md` への適用記録は承認前なので本 PR では追記しない。承認後の #3817 が次の文案で追記する（公開状態は未公開から変更）:
   `**適用記録（イシュー #3817・親 <Phase 親>。承認: <#3768 の回答 URL>）**: `Var::hardshrink`／`Var::softshrink` と `compat::Sequential::add_hardshrink`／`add_softshrink` の 4 件を追加のみで公開。新規 `Op`・依存なし。`
 - 本 PR の更新は `docs/README.md` の索引 1 行と、追跡表 # 9 行の「設計記録」セルのみ。「承認」「0.14.0 の区分」「正ガード」列は変えない（正ガードは #3817 で `path:line` を書く）。
 
-### §1.9 ベンチと性能
+### §1.8 ベンチと性能
 
 - 既定経路への影響: なし（新 API の追加のみ。既存の演算・カーネルに触れない）。
 - 補足: mask 構築で `host_view` を通るため GPU tape では同期が 1 回入る（`threshold` と同じ）。新経路なので前後比較は不要。専用カーネルによる最適化はスコープ外。
 
-### §1.10 依存
+### §1.9 依存
 
 - 依存の追加: なし。許容 12 区分・禁止リストとの照合は該当なし。新規 `unsafe`: なし。
+
+### §1.10 VJP・create_graph・合成方式
+
+- 新規 `Op` は作らない。既存 Op の合成で書く。独自 VJP は書かず、合成元から自動で決まる。
+  - `hardshrink(x, λ) = masked_fill(x, mask(-λ <= v <= λ), 0.0)`。mask は `crate::activation_ops::build_value_mask`（`activation_ops.rs:83`）で作る。NaN は比較が偽になり素通し（勾配 1）。
+  - `softshrink(x, λ) = x.sub(&x.clamp(-λ, λ))`（`Var::clamp` は `var.rs:934`）。範囲内は勾配 0、境界 `|x| == λ` も 0（clamp は境界を含めて係数 1 なので 1 − 1）、範囲外は 1。NaN 入力は forward が NaN、勾配は 1 − 0 = 1。
+  - 最終形は実装時に決めてよい（`where_cond` 形も可）。ただし「新規 `Op` ゼロ」「§1.5 の数値契約」「下の既知の差分」の 3 点は変えない。
+- **create_graph は対象にする（追加作業なし）**。`MaskedFill` は #3084（`docs/autodiff-higher-order-grad-decision.md` §29）、`ScalarUnary`（`Clamp` を含む）と減算系は同 §16 で対象のため、合成すれば二階微分がそのまま通る。#3817 のテストに CPU の二階有限差分突合を各 1 本入れる。clamp／mask の境界は不連続なので、境界から離れた入力で検証する。
+- 既知の差分（いずれも**実測していない**。実装時に参照版のソースで確認する）:
+  - Softshrink の NaN 入力: PyTorch のカーネルには版によって 0 を返すものがある。本合成は NaN を伝播する。
+  - Softshrink の範囲内の出力: 本合成は `x - x = +0`。PyTorch は負の `x` で `-0` になりうるので符号付きゼロが異なりうる。
+  - Hardshrink の負の `lambd`: §1.3 のとおり拒否する。
 
 ### §1.11 所有者へ戻す論点（#3768 へ渡す）
 
