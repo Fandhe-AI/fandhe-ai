@@ -342,7 +342,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 
 | 点 | 選択肢 | 推奨 | 確認がないときの扱い |
 |---|---|---|---|
-| 1. 公開形 | A 別名メソッド／B `UpsampleSize` に変えて `add_upsample` を変更（破壊的）／C 型の再エクスポートと新メソッド | A | 実装へ進めない（保留ガードを維持） |
+| 1. 公開形 | A 別名メソッド／B `UpsampleSize` に変えて `add_upsample` を変更（破壊的）／C 型の再エクスポートと新メソッド | A | 現状（公開面なし）を維持し、実装へ進めない |
 | 2. 保存（model_io） | (i) 新 kind と f64 正準表記で保存／(ii) 当面 `UnsupportedModel` で fail-closed、#3750 に合わせ後で対応 | #3750 が先ならその規則、無ければ (ii) | (ii) 相当の fail-closed を維持 |
 | 3. ONNX export | `UnsupportedLayer` のまま／`Resize`（scales）対応 | `UnsupportedLayer` のまま（#3750 に委ねる） | 同上 |
 | 4. メソッド名 | `add_upsample_scale_factor`／`add_upsample_scale`／`add_upsample_with_scale_factor` | `add_upsample_scale_factor`（内部構築子と PyTorch 引数名に揃う） | 同上 |
