@@ -920,6 +920,12 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-31（v0.13.0 リリースサイクル・バンプ）: 公開 7 クレートを lockstep で
+  0.12.0 → 0.13.0 へ上げた（`workspace.version`・内部依存 12 箇所・ルート
+  `Cargo.lock`・`scripts/bench/oss-gemm-compare/Cargo.lock`）。所有者の明示指示
+  （2026-10-31「0.13.0 で公開してください。framework-compare のピン =0.13.0 も承認します。」）
+  による。公開クレート集合は 7 のまま。framework-compare の承認ピンは本バンプでは変えず、
+  公開後に別 PR で `=0.13.0` へ上げる。公開日・タグ `v0.13.0` は公開完了後に記録する。
 - 2026-10-27（0.12.0 の対戦成績・対応表の生成器とテンプレート。イシュー #3274）:
   `docs/perf/logs/framework-compare-0.12.0-remeasure/scoreboard/` に生成器とテンプレートを追加し、
   対応表の fandhe-ai 列をタグ `v0.12.0` 基準で確定した（`crates/` の差は版数文字列のみ。
