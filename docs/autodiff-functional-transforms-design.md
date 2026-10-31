@@ -1205,3 +1205,177 @@ impl<'t> TapeF64<'t> {
 ### 35.14 変えていないもの
 
 `crates/**`・公開 API・tolerance・baseline・依存・`unsafe`・ガードレール閾値・`docs/spec`・`docs/compat-api-scope.md`。
+
+## 36. 決定記録（イシュー #3723・親 #3719。`TapeF64` の `jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` の公開形）
+
+### 36.0 位置づけ・承認根拠・境界・推奨
+
+- 状態: **設計記録のみ。推奨は「実装する」**。承認は #3766 論点 2・3 の回答待ちで、本書は承認を代行しない。回答までコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
+- 基準 sha: `origin/main` `919f44aef`
+- 根拠: §33（#3074）、§35（#3722）、ルート #3711 の起票経緯コメント（実装を既定とする設計方針。承認ではない。§35.0 と同じ引き方）
+- 境界: §35 の機構（`TapeF64::backward_create_graph`・`CreateGraphResultF64`・内部 variant・段分け）は再決定しない。§36 は §35.13 の論点 1・2・3・4・8 の回答に依存する（論点 1 が「対象外」なら §36 も成立しない）
+- 推奨と理由: §35 で機構を実装する前提が立った。その上の 4 関数は f32 `functional_ops` の合成を写すだけで、新しい `OpF64` variant は要らない（36.10）。対応表の項目 2 を「ある」にするには 4 関数の公開が要る
+
+§33.7 の論点への回答:
+
+| §33.7 の論点 | 回答 |
+|---|---|
+| 1. 扱い | (a) 実装する。(b) f32 限定の契約固定は選択肢として残す |
+| 2. 契約の範囲 | double-VJP 系の 4 関数をすべて実装する。`TapeF64` の `vjp`／`hvp`／`vmap`／`vmap_grad` は 29 項目の外なので「対象外のまま（契約化しない）」とし、否定ガードを維持する |
+| 3. 再開条件 | (a) を採るなら該当なし。(b) が採られた場合に限り §33.7 の推奨（f64 の `J·v` の利用実績で不足が確認されたら再開）を使う |
+| 4. 代替手順の掲載先 | (a) を採るなら §33.8 の代替手順は rustdoc 化しない（§35.2 と同じ）。(b) の場合は `TapeF64` の rustdoc に doctest として載せる |
+
+### 36.1 公開形
+
+シグネチャ案（f32 版と同形。名前と形は #3766 の回答まで案）:
+
+```rust
+impl<'t> TapeF64<'t> {
+    pub fn jvp(&self, output: &VarF64<'_, 't>, input: &VarF64<'_, 't>,
+               tangent: &Tensor<f64>, child: &TapeF64<'t>) -> Result<Tensor<f64>, AutodiffError>;
+    pub fn jacfwd(&self, output: &VarF64<'_, 't>, input: &VarF64<'_, 't>,
+                  child: &TapeF64<'t>) -> Result<Tensor<f64>, AutodiffError>;
+    pub fn jvp_multi(&self, output: &VarF64<'_, 't>, inputs: &[&VarF64<'_, 't>],
+                     tangents: &[&Tensor<f64>], child: &TapeF64<'t>) -> Result<Tensor<f64>, AutodiffError>;
+    pub fn jvp_create_graph<'g>(&self, output: &VarF64<'_, 't>, input: &VarF64<'_, 't>,
+                                tangent: &Tensor<f64>, child: &TapeF64<'t>, grandchild: &'g TapeF64<'t>)
+        -> Result<JvpCreateGraphResultF64<'g, 't>, AutodiffError>;
+}
+// JvpCreateGraphResultF64<'g, 't>:
+//   output(&self) -> VarF64<'g, 't>
+//   child_var(&self, &VarF64<'_, 't>) -> Result<Option<VarF64<'g, 't>>, AutodiffError>
+```
+
+- f32 との対応: 引数の順序・戻り値の構造・`child`／`grandchild` を明示引数にする点は f32 の `Tape::jvp` 等（`crates/facade/src/lib.rs`）と同じ。`'t` の共有は §35.13 論点 8 と連動し、独立の `'tc` を採る場合はシグネチャが変わる
+- 内部の置き場: `crates/autodiff/src/f64_autograd/functional_ops.rs` を新設し、内部 `TapeF64` の inherent メソッドとして実装する。結果型は `f64_autograd` から `pub use` する。自由関数にしない理由は、facade の本体を `self.0.jvp(..)` の 1 式にでき、`f64_autograd` トークンを完全修飾以外で facade に書かずに済むため
+- facade の配置: 4 メソッドは `crates/facade/src/lib.rs` の既存の唯一の `impl<'t> TapeF64<'t>` ブロックへ足す（ガードが固有 impl をちょうど 1 件と固定している）。結果型は D-2 形の newtype `pub struct JvpCreateGraphResultF64<'g, 't>(pub(crate) ...)` とし `pub use` にしない（`f64_autograd_not_reexported_from_facade` が再エクスポートを禁じているため。§35.1 の `CreateGraphResultF64` と同じ）。`jvp_multi` の本体はスライスの写し（`inputs.iter().map(|v| &v.0).collect::<Vec<_>>()`）を含む 1 式にして本体表へ登録する
+- 実装の分担（題名とずれたときは本節を正とする）: #3787 は autodiff 内部の `jvp`／`jacfwd`・CI テスト・f32 との突き合わせ（facade は変えない）。#3788 は内部の `jvp_multi`／`jvp_create_graph`・facade の 4 メソッドと newtype・下のガード更新・`#[ignore]` の GPU テスト・ログ README・`compat-api-scope.md` の適用記録
+
+**ガードの反転・更新計画**（すべて `crates/facade/tests/api_surface.rs`。#3788 で行い、#3787 は k の autodiff 分だけ）:
+
+| # | ガード（テスト名・定数） | 現状で壊れる理由 | 更新内容 |
+|---|---|---|---|
+| a | `F64_AUTOGRAD_SURFACE`・`f64_autograd_public_surface_is_exactly_approved_delegations` | 公開メソッドの完全一致と 1 式本体の固定 | `TapeF64` に 4 メソッド、`JvpCreateGraphResultF64` の項（`output`・`child_var`）を追加 |
+| b | `f64_autograd_reexport_violations`・`f64_autograd_not_reexported_from_facade` | `ok_suffix` が `TapeF64｜VarF64｜GradientsF64` のみ受理 | 受理集合と監視名に `JvpCreateGraphResultF64` を足す（§35 の `CreateGraphResultF64` と合わせる） |
+| c | `f64_autograd_declared_once_in_lib_with_crate_private_field`・`f64_autograd_expected_decl` | 新しい struct が対象外 | `pub(crate)` フィールド・derive なしの宣言を足す |
+| d | `f64_autograd_struct_declarations_workspace_inventory` | 期待パスが `autodiff/src/f64_autograd.rs::<型>` に固定 | 型ごとの期待パスにする（新しい型は `f64_autograd/functional_ops.rs`） |
+| e | `f64_autograd_signature_probe` | 新メソッドが無い | 4 メソッドと結果型 2 メソッドの関数ポインタを使う正のプローブを足す |
+| f | `f64_autograd_guards_detect_each_violation_class` | 自己テスト | 新しい型・メソッドのすり替え（本体変更・2 件目の impl・trait impl）の検出例を足す |
+| g | `scan_functional_transforms_reexports_and_declarations`（`facade_does_not_reexport_or_declare_functional_transforms`） | `impl Tape` 直下だけを例外にしており、同名 `fn jvp` が 2 件で違反になる（§35.1 の申し送り） | 承認表を（受け手, 名前）で引く形にし、`impl TapeF64` 直下で承認シグネチャと一致する 4 名を受け手ごとに最大 1 件まで差し引く |
+| h | `FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES`／`_BODIES`・`check_facade_tape_functional_transforms_shape`（`facade_tape_functional_transforms_are_approved_thin_delegations`） | `fn_signatures_by_name(..).len() == 1` を要求し、同名 2 件では本体抽出が `None` になる | 抽出を `impl Tape` の範囲に限る。f64 側は a・e で固定する |
+| i | `..._detects_each_category`（g・h の自己テスト） | 既存の負例を維持する必要がある | `impl Var`／`impl Tensor`／裸の関数への同名追加は違反のまま検出。`impl TapeF64` の別シグネチャ・2 件目も違反として足す |
+| j | `facade_tape_backward_create_graph_is_thin_delegation`・`workspace_declares_backward_create_graph_only_in_approved_locations` | §35 の担当 | §36 では変えない（§35.1 の計画に従う） |
+| k | `workspace_declares_functional_transforms_fn_names_only_in_allowed_locations` | 期待マップが固定 | `facade/src/lib.rs::{4 名}` を 1 から 2 へ。`autodiff/src/f64_autograd/functional_ops.rs::{4 名}` を各 1 で足す（#3787 で `jvp`／`jacfwd`、#3788 で残り）。`vjp`／`hvp`／`vmap`／`vmap_grad` は不変 |
+| l | `FunctionalTransformsHoldDoctestGuard`・`functional_transforms_hold_doctest_probe_body_matches_fixed_contract`・`FUNCTIONAL_TRANSFORMS_HOLD_PROBE_BODY` | `TapeF64`／`VarF64` のプローブはもともと無い | **反転対象なし**（§31・§32 と同じ書き方）。未承認経路の否定プローブ（`VarF64` 受け手の 8 名、`TapeF64` 受け手の `vjp`／`hvp`／`vmap`／`vmap_grad`）を足し、固定本文定数を更新する |
+| m | `facade_reexports_jvp_create_graph_result_in_approved_shape` | 識別子の完全一致で判定するため `JvpCreateGraphResultF64` と衝突しない | 変えない（「F64 名は検出しない」負例の追加は任意） |
+
+否定のまま残すもの: モジュール `functional_ops`・`f64_autograd` の再エクスポート、裸の自由関数、`VarF64`／`GradientsF64`／`Tensor<f64>` 上の同名メソッド、`TapeF64` の `vjp`／`hvp`／`vmap`／`vmap_grad`。
+
+### 36.2 rustdoc と doctest
+
+- 4 メソッドと結果型に、役割の要約・入口検査の順序・副作用（親へ 2 ノード）・ゼロ経路・数値（REQ-2。bit 同一は契約にしない）・計算量・メモリ（写しによる増加）を書く。構成は f32 版 rustdoc と同じ
+- facade 単独で通る CPU の例: `y = x ⊙ x`・`v = [1, 0.5, 2]` で `jvp` が `[2, 2, 12]`、`jacfwd` が `diag(2x)`、`jvp_multi` で `x1 ⊙ x2`、`jvp_create_graph` で `grandchild.backward(&res.output().sum(None)?)` が `2v`。比較は絶対誤差 1e-5 以内（REQ-2 の救済項に揃え、f64 専用の厳しい値を暗に契約しない）。`expect` の代わりに `ok_or(..)?` を使う
+- GPU の例は置かない（置くなら `no_run`）。失敗系は `compile_fail` に頼らず、正のプローブ・インベントリ・拒否テストで組む
+- f32 側 rustdoc の「f32 の `Tape` のみ（`VarF64`・f16 は対象外）」は #3788 で「f64 版は `TapeF64::jvp` 等」への案内に直す（f32 のシグネチャは変えない）
+
+### 36.3 エラー型
+
+- 新しい variant は足さない（`AutodiffError` は `#[non_exhaustive]`）。`TapeMismatch`・`GradientTrackingDisabled`・`Shape`（`ShapeMismatch`／`ElementCountOverflow`）・`InvalidArgument`・`Backward`・`DeviceMismatch` を再利用する。本番経路で `unwrap`／`expect` を使わない
+- 入口検査の順序は f32 版の rustdoc を写して固定する
+  - `jvp`: (1) 別テープ → `TapeMismatch` (2) 追跡なしの入力 → `GradientTrackingDisabled` (3) `tangent` の shape 不一致 → `ShapeMismatch` (4) 要素数の検査付き乗算 → `ElementCountOverflow` (5) 要素数 0 または追跡なしの `output` はテープに触れず全ゼロ (6) 以降は §35.3 の `backward_create_graph` の検査（同一の子 → `Backward`、デバイス不一致 → `DeviceMismatch`、空でない子 → `Backward`、範囲外 Op〈`Max` 等〉 → `Backward`）を伝播
+  - `jacfwd`: `tangent` の検査を除き同じ。`m×n` は検査付き乗算
+  - `jvp_multi`: 長さ不一致・空 → `InvalidArgument`、別テープ、追跡なし、重複 → `InvalidArgument`、shape、要素数の順
+  - `jvp_create_graph`: (1)〜(4) のあとテープの事前検査（同一 → `Backward`、デバイス → `DeviceMismatch`、空でない → `Backward`）。ここまでの失敗では 3 枚のテープとも無変更
+- 副作用: 入口検査を通った後は、失敗しても親へちょうど 2 ノード（全要素 1 の追跡ありの葉 `u` と `mul`）が残る。f32 と同じ
+- 確保の前に検査する（A03）。結果のバイト数・`m×n` は `checked_*` で求める
+
+### 36.4 テスト計画
+
+| 受け入れ基準 | テスト | 区分 | 担当 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|---|
+| f32 と f64 の突き合わせ | `crates/autodiff/tests/f64_functional_transforms.rs`（新設）。同じグラフを `Tape` と `TapeF64` に組み、入力は f32 で厳密に表せる値にする。f32 の結果を f64 へ広げ `compare_f64`／`assert_parity_f64`（REQ-2）で比較。対象は §35.11 の範囲（同 shape・ブロードキャストの `add`／`mul`／`div`／`pow`〈a>0〉、`matmul` rank 2、`sum`／`mean`） | CI | #3787（jvp・jacfwd）／#3788（残り） | 該当なし | 該当なし | 該当なし |
+| 独立参照との一致 | 同上。§33.8 の「backward の繰り返し」で作る f64 ヤコビアンとの `J·v` の一致、閉形式との一致 | CI | 同上 | — | — | — |
+| 関数間の整合 | `jacfwd` と one-hot 接ベクトルの `jvp` の列の一致、入力 1 つの `jvp_multi` と `jvp` の一致（bit 同一は主張しない）、`jvp_create_graph().output()` と `jvp` の一致、孫での二階と閉形式の一致 | CI | 同上 | — | — | — |
+| 拒否と順序 | 入口検査の各種と順序。`Max` の拒否で f32・f64 とも `Backward`。失敗時に親へ 2 ノード残り、子・孫は無変更（`is_empty`） | CI | 同上 | — | — | — |
+| 既定経路が bit 同一 | 既存の f64・f32 テストが無変更で通る | CI | 両方 | — | — | — |
+| 到達性・シグネチャ | `crates/facade/tests/f64_functional_transforms_facade.rs`（新設） | CI | #3788 | — | — | — |
+| GPU | 同ファイル `f64_jvp_family_cuda_matches_cpu`（`TypedOps<f64>` のネイティブ経路） | `#[ignore]` | #3788 | 未実測 | — | — |
+| GPU | 同ファイル `f64_jvp_family_metal_matches_cpu`（Metal はホスト経路のみ） | `#[ignore]` | #3788 | — | 未実測 | — |
+| ROCm | 該当なし（ROCm は facade 未公開。項目 24） | — | — | — | — | 該当なし |
+
+- 実機の記入欄は `docs/perf/logs/f64-jvp-facade-3788/README.md`（#3788 で新設）。実測は Phase 10。追跡表の行 2 の実機 parity は「該当 issue なし」なので、起票は承認後の論点にする（§35.13 論点 9 と統合）
+- 線形の Op だけでは二階が 0 になりテストの意味がなくなるので、非線形な包みを入れる（§34.3）
+
+### 36.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。比較関数は `fandhe_ai_backend_cpu::{compare_f64, assert_parity_f64}`。tolerance 定数は `tensor-core` のものを使い、新しい定数は作らない
+- f32 と f64 の突き合わせも REQ-2 で判定する（f32 側の丸めを含む比較なので f64 専用の厳しい判定は採らない。#3766 論点 3 の推奨）
+- FMA 契約・f64 長軸縮約の契約への影響はない（f64 ホスト・`host_gemm_f64` のまま）
+- baseline は追加しない（単一の連続ループの経路で split-K 等の対象外）。ガードレール閾値も変えない
+
+### 36.6 互換への影響（`docs/api-compat-0.14.0-decision.md` §8 の手順と §1.2 の行 2 で判定）
+
+| 対象 | 種類 |
+|---|---|
+| `TapeF64` | inherent メソッド 4 つの追加（追加のみ） |
+| `JvpCreateGraphResultF64` | 新しい型（追加のみ。フィールドは `pub(crate)` で構築不可） |
+| `VarF64`・`GradientsF64` | 変更なし |
+| f32 の `Tape`・`JvpCreateGraphResult` | 変更なし（rustdoc の案内文だけ） |
+| `AutodiffError` | variant を足さないので該当なし |
+
+結論は「追加のみ」。移行ノート（#3780）には「移行作業なし」と書く。
+
+### 36.7 適用記録・索引・追跡表
+
+- `compat-api-scope.md` の適用記録の案（**承認後の #3788 で追記する。本 PR では書かない**）: §5.1 の F ブロックに `F9`〜`F12`（`TapeF64::jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph`）と結果型の行を足す。公開状態は「未公開」、根拠は §36 と #3766 の回答 URL。F4〜F7 の「保留継続: `VarF64`」は本文を書き換えず、追記で「→ #3788 で公開」と前方参照する
+- 本 PR で行うこと: `docs/README.md` の索引の追記と、`docs/compat-matrix-ari-tracker.md` の行 2 の設計記録セルの更新のみ
+
+### 36.8 ベンチと性能への影響
+
+- 既定経路（f32 `Tape` 全体と `TapeF64::backward`）は変えない。4 関数は新しい入口で既存の呼び出しに影響しないため、前後比較は計画しない
+- 計算量: `jvp`／`jvp_multi` は親 backward 1 回＋子 backward 1 回。`jacfwd` は子 backward を n 回。`jvp_create_graph` はそれに孫への記録 1 回を足す
+- メモリ: full mirror（§35.10）で祖先の値が複製される。rustdoc に明記する
+
+### 36.9 依存の追加の有無
+
+なし。許容 12 区分・禁止リストとの照合で変化はない。新しい `unsafe` もない（newtype の `repr(transparent)` キャストは採らない）。
+
+### 36.10 算法の写し方（f64 固有の決定）
+
+- `jvp`: 親に `u`（全要素 1）と `s = output ⊙ u` を足し、`backward_create_graph(s, child)` から `g = cg.grad(input)` と `cu = cg.child_var(u)` を得る。`child.backward(g ⊙ v_const)` の `cu` 勾配を返す。既存の `VarF64` 演算だけで閉じる
+- `jacfwd` の列の取り出し: f32 の `FlatElements`（`contiguous`／`reshape`／`narrow`）は `VarF64` に無く、§35.10 の variant 集合にも無い
+  - **推奨 J1**: 列 k ごとに `child.var_no_grad(e_k)`（入力 shape の one-hot 定数）を作り `g ⊙ e_k` から `child.backward` する。非スカラー loss のシードは全要素 1 なので `sum` は不要（§33.8 と同じ）。各列の後、§35.3 で #3785 が導入する内部 `rollback_to` で `g` 構築時点の印まで子テープを戻し、メモリを O(n) に抑える
+  - J2: 戻さない。子テープに 2n ノードと n² 要素の定数が積もる
+  - J3: 内部に `Narrow`／`Reshape` の variant を足す。#3722 の variant 集合の変更になるため所有者へ戻す
+- `jvp_multi`: 入力ごとの shape が異なると `add` できないため、各 `g_i ⊙ v_i` を `sum(None)` でスカラーにしてから `add` で畳み、子 backward を 1 回で済ませる。子側は 1 階の `TapeF64::backward` だけなので create_graph の対象 Op は増えない
+- `jvp_create_graph`: 2 段目は `child.backward_create_graph(g ⊙ v, grandchild)`（§35.10 の閉包性に依存）。写しの合成（`cg1.mirror()` を `cg2.child_var` で引き継ぐ）は f32 の `functional_ops::jvp_create_graph` と同じ。第 2 段（#3786）が前提
+- 依存順は #3785 → #3786 → #3787 → #3788（issue の依存と一致）
+
+### 36.11 セキュリティ観点・スコープ外・Closes／Refs
+
+- OWASP
+  - A03: shape・要素数・`m×n`・バイト数を確保の前に検査する
+  - A04／A08: 子・孫テープへ書く前に fail-closed で検査し、迂回経路を作らない
+  - DoS: 写しと `jacfwd` のメモリを rustdoc に明記する
+  - 秘密情報・ホスト名は書かない（`<cuda-node>` 等で表す）。`unsafe` はない
+- スコープ外（起票は所有者承認後。無断で起票しない）: `TapeF64` の `vjp`／`hvp`／`vmap`／`vmap_grad`、f64 の `Max` の create_graph（#3724 の結論待ち）、項目 2 の Phase 10 実機 parity issue
+- 本 PR は `Closes #3723`（docs のみの設計 issue で実測を要しないため。#3884 が #3722 を閉じた先例と同じ）。`Refs #3766 #3722 #3787 #3788` を併記する
+
+### 36.12 所有者へ戻す論点（#3766 論点 2 で問う）
+
+| # | 論点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|---|
+| 1 | 4 関数を実装・公開するか | (a) 実装・公開／(b) f32 限定の契約で固定（§33.7） | (a) | 実装へ進めない（保留ガードを維持） |
+| 2 | 公開の範囲 | 4 関数と `TapeF64::backward_create_graph` を公開／4 関数だけを公開（機構は内部。後者でも `jvp_create_graph` の結果型は公開が要る） | §35.13 論点 2 に従う | 実装へ進めない |
+| 3 | 名前 | 同名（ガード g・h・k を受け手の範囲で引く）／接尾辞（`jvp_f64` 等） | 同名 | 実装へ進めない |
+| 4 | 子・孫テープの型とライフタイム | `&TapeF64<'t>` で `'t` を共有／独立の `'tc` | 共有（§35.13 論点 8 と連動） | 実装へ進めない |
+| 5 | `jvp_create_graph` の結果型 | facade newtype `JvpCreateGraphResultF64<'g,'t>`／`jvp_create_graph` を見送る | newtype | 実装へ進めない |
+| 6 | `jacfwd` の列の取り出し | J1／J2／J3（新 variant。#3722 の範囲変更） | J1 | 実装へ進めない |
+| 7 | 追跡なしの `output`・失敗時に親へ残る 2 ノード | f32 と同じ（全ゼロ・2 ノード）／変える | f32 と同じ | 設計は f32 と同じで保つが、実装へは進めない |
+| 8 | `TapeF64` の `vjp`／`hvp`／`vmap`／`vmap_grad` | 対象外のまま（否定プローブを追加）／同時に設計 | 対象外のまま | 対象外のまま |
+| 9 | f32 と f64 の突き合わせの判定 | REQ-2／f64 専用の判定（別承認） | REQ-2（#3766 論点 3） | REQ-2 |
+| 10 | Phase 10 の実機 parity issue | 起票（承認後）／起票しない | 起票（§35.13 論点 9 と統合） | 起票しない |
+
+### 36.13 変えていないもの
+
+`crates/**`・公開 API・tolerance・baseline・依存・`unsafe`・ガードレール閾値・`docs/spec`・`docs/compat-api-scope.md`。
