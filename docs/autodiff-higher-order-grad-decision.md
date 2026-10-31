@@ -2645,3 +2645,167 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
 ### 40.17 変えていないもの
 
 - コード・公開 API・rustdoc・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
+
+## 43. 設計記録（イシュー #3734・親 #3719。create_graph の B 区分・線形代数 6 Op）
+
+### 43.0 位置づけ・承認根拠・境界・推奨
+
+- 状態: **設計記録のみ**。承認は #3767 の回答待ちで、本節は承認を代行しない。コード・公開面・tolerance・baseline は変えない。基準 sha は `6f51dbcac`。節番号は、並行する設計 PR（索引累積 4 Op・Stft／Istft）が §41・§42 を使うため §43 とした。
+- 対象: `Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`SlogdetSign`・`MatrixRank` の 6 Op。いずれも `crates/autodiff/src/tape.rs` の `supports_create_graph`（:2595〜2651 付近）の網羅 match で `false` 側にあり、`backward_create_graph` は型付きエラーで拒否する（fail-closed）。§21.2 は `Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm` を「二階の式が複雑」、`SlogdetSign`・`MatrixRank` を「1 階 VJP が恒等ゼロ」として残した。§31.5 の 2 は、`SlogdetSign` を使うと create_graph 全体が拒否される使い勝手の問題を挙げている。
+- 根拠: §21.1（V1〜V4・S1・閉包性・数値契約）、§21.2、§21.6、§27.3（総括判定）、§31.1・§31.3・§31.5。これらは設計方針の根拠であって承認ではない。
+- 推奨（Op ごと。採否は #3767 で個別に問う）:
+
+| Op | 推奨 | 方式 | 理由 |
+|---|---|---|---|
+| `SlogdetSign` | 実装する | V2（ゼロの cgrad） | 1 階が恒等ゼロ。§31.5 の 2 を解消する |
+| `MatrixRank` | 実装する | V2（ゼロの cgrad） | 同上 |
+| `Cholesky` | 実装する | V3 + f32 構造 + 総括判定 | 閉じた式。`Solve`（#3086）に依存 |
+| `Pinv` | 実装する。**受理は打ち切りなし（rank == min(m,n)）の入力だけ** | V3 + f32 構造 + 総括判定 | 打ち切りありは rank の局所一定性が崩れ、式が別物になる |
+| `Lstsq` | 同上 | V3 + f32 構造（`Pinv` に依存） | 同上 |
+| `MatrixNorm` | **ord で分ける**。`Fro`・`One`・`Inf` は実装、`Nuc`・`Spectral` は fail-closed を維持 | `Fro` は V3 + S1、`One`・`Inf` は V2 | `Nuc`・`Spectral` は SVD の多出力に依存し、`Svd*` は §8 (c) で fail-closed。`Spectral` は σ1 = σ2、`Nuc` は σ = 0 で微分できない |
+
+- 境界: 他の B 区分（#3729〜#3733・#3735）、分解系（`Qr*`・`Svd*`・`Eigh*`）、C 区分は扱わない。**構造に C 区分の Op（`VectorNorm` 等）や fail-closed の Op（`Svd*` 等）を積まない**。
+
+### 43.1 公開形
+
+- 公開名は増えない。対象の `Var` メソッド（`cholesky`・`pinv`・`lstsq`・`matrix_norm`・`slogdet`・`matrix_rank`。`crates/autodiff/src/var.rs:5857`〜`:6975`、入口は `linalg_ops.rs`）は公開済みで、シグネチャは変えない。変わるのは受理する範囲だけ。
+- `crates/facade/tests/api_surface.rs` に、これらの create_graph を拒否する否定ガードや保留 doctest ガードは無い。あるのは `LINALG_OPS_FN_NAMES`（:12444）の正のインベントリだけ。**反転するガードは無い**。正ガードの代わりは 43.4 の facade 挙動テストとする。
+- 実装 PR への注意: `fn eigh`・`fn slogdet`・`fn pinv`・`fn matrix_rank`・`fn lstsq` と同名の関数を新しく宣言すると上のインベントリが fail-closed で落ちる。ヘルパー名は `pinv_cgrad`・`guard_pinv` のようにする。
+- 実装 PR で変える箇所: `supports_create_graph`（`MatrixNorm` は payload 判定。43.10）、`create_graph.rs` のモジュール doc の fail-closed 列挙（:74-75）、`create_graph/linalg_fft.rs` のモジュール doc、`tests/create_graph_linalg_fft.rs` 冒頭 doc の 15 件の列挙。
+
+### 43.2 rustdoc と doctest
+
+- 必須の doctest は無い。任意で、facade の `hvp` か `backward_create_graph` に CPU だけで通る `cholesky` の HVP 例を 1 つ足してよい。GPU の例は `no_run`／`#[ignore]`。
+- 失敗系は `compile_fail` に頼らず、`Err(AutodiffError::Backward(_))` と `child.is_empty()` で確かめる。
+
+### 43.3 エラー型
+
+- 新しい variant は足さず `AutodiffError::Backward(String)` に統一する。拒否は子テープへ書く前（`validate_ancestors` か cgrad 構築の冒頭の guard）に行い、`Tape::backward_create_graph` のロールバックで `child` を空に戻す。
+- 拒否する入力: 総括判定（43.12）を外れたもの、非有限の upstream（`SlogdetSign`・`MatrixRank` は除く。1 階が `g` によらずゼロを返すので受理し、bit 一致する）、`Pinv`・`Lstsq` で打ち切りが起きるもの、rcond の閾値付近（43.10）、`MatrixNorm` の `Nuc`・`Spectral`・未知の ord、`MatrixNorm` の入力に ±inf を含むもの、内部の shape 不整合。
+- 外部入力（rank 2・正方・有限・rcond）は forward 側（`linalg_ops.rs`・`var.rs`）の検証を通ったものだけが届く。本番経路で `unwrap`／`expect` は使わない。
+
+### 43.4 テスト計画
+
+CI の行は既存の `crates/autodiff/tests/create_graph_linalg_fft.rs` に追記するか、新設の `crates/autodiff/tests/create_graph_linalg_b.rs`（仮名）に置く。名前は案で、実装 PR で確定する。
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 1 階が素の `backward` と bit 同一。`cg.grad` は V3／V2 で bit 一致（V1 を選んだ場合は REQ-2） | `linalg_b_first_order_bit_identical_and_cgrad` | CI | 未実測 | 未実測 | 未実測 |
+| ヘッシアンが 1 階勾配の 5 点中央差分と REQ-2 で一致。**Cholesky は `A = (X+Xᵀ)/2 + cI` で X をパラメータにする**（VJP が dA を対称化する一方、forward は下三角しか読まないため、生の A を成分ごとに差分すると合わない）。上三角だけの方向で二階が 0 になることも確かめる | `linalg_b_hessian_matches_finite_difference` | CI | 未実測 | 未実測 | 未実測 |
+| Lstsq の A・B の混合二階 | `lstsq_mixed_second_derivatives` | CI | 未実測 | 未実測 | 未実測 |
+| `jvp_create_graph`（孫テープへの再生）が方向微分と一致 | `linalg_b_grandchild_replay_matches_directional_derivative` | CI | 未実測 | 未実測 | 未実測 |
+| Pinv・Lstsq の縦長・横長・正方（打ち切りなし）が受理され、打ち切りあり（例 `A=diag(2,1)`・`rcond=0.75`）・rank 落ち・閾値付近が拒否され、`child` が空で再試行できる | `pinv_lstsq_truncation_rejected_child_empty_and_retry` | CI | 未実測 | 未実測 | 未実測 |
+| Pinv の構造が m×m の中間行列を作らない（縦長 `[100000,1]`。1 階の `pinv_vjp_tall_matrix_does_not_allocate_full_m_by_m_intermediate` の構造版） | `pinv_cgrad_does_not_materialize_m_by_m` | CI | 未実測 | 未実測 | 未実測 |
+| SlogdetSign・MatrixRank の cg.grad がゼロ（`Some(zeros)`。1 階と同じ）。logabsdet と混ぜた損失（例 `sign·exp(logabsdet)`）の二階が有限差分と一致。非有限の `g` でもゼロ | `slogdet_sign_and_matrix_rank_zero_cgrad` | CI | 未実測 | 未実測 | 未実測 |
+| MatrixNorm One・Inf の先勝ちのタイが 1 階と同じ列・行を選ぶ。sign(0)=0 | `matrix_norm_one_inf_tie_follows_first_order` | CI | 未実測 | 未実測 | 未実測 |
+| MatrixNorm Fro の大スケール（`1e30`）・小スケール（`1e-38`）・零行列・NaN が 3 段（1 階・`cg.grad`・孫テープ）で有限か、1 階と同じクラス | `matrix_norm_fro_mandatory_vectors_three_stages` | CI | 未実測 | 未実測 | 未実測 |
+| 総括判定の拒否域（悪条件の Cholesky・巨大な `g`）で `Err(Backward)`、`child` が空 | `linalg_b_unsafe_inputs_rejected_child_empty_and_retry` | CI | 未実測 | 未実測 | 未実測 |
+| 6 Op（MatrixNorm は Fro・One・Inf）が `true`、Nuc・Spectral が `false` | `tape.rs` 単体テスト `linalg_b_family_supports_create_graph` | CI | 未実測 | 未実測 | 未実測 |
+| 隣接する fail-closed: `Op::Custom` との組み合わせは拒否され `child` が空 | `linalg_b_neighbouring_unsupported_op_stays_fail_closed` | CI | 未実測 | 未実測 | 未実測 |
+| facade 経由 | `*_create_graph_via_facade`（`create_graph_facade.rs`） | CI | 未実測 | 未実測 | 未実測 |
+| 実機 parity: `gpu_extended_ops_match_cpu`（`create_graph_facade.rs:826`）のケース表へ 6 Op を足す。測り方は #3739 | 同左（置き場と名前は仮） | `#[ignore]` | 未実測（#3857） | 未実測（#3859） | 未実測（雛形なし） |
+
+**既存テストの差し替え**（実装 PR の作業。#3805・#3806 の時点の main で数え直す）:
+
+- `tests/create_graph_linalg_fft.rs` の `fail_closed_cases()`（:639）と `fail_closed_ops_are_rejected_with_typed_error_and_leave_child_empty`（:759。`assert_eq!(cases.len(), 15)` が :761）: cholesky・pinv・lstsq・slogdet.sign・matrix_rank を外し、matrix_norm のケースは `Fro` から `Nuc`（と `Spectral`）へ替える。件数は並行する PR（Stft・Istft）も変えるので、固定値は書かず実装時に数える。
+- `fail_closed_op_in_untracked_subtree_is_treated_as_constant`（:777）: `cholesky` を見本にしているので `Op::Custom` か `svd` 系へ替える。
+- `tape.rs` の `linalg_fft_family_supports_create_graph`（:5370）: unsupported 配列の `Cholesky`・`SlogdetSign`・`MatrixRank`・`Pinv`・`MatrixNorm{Fro}` を `MatrixNorm{Nuc}`・`MatrixNorm{Spectral}`・`QrQ` などへ替える。
+- §33 と §34.13 は `MatrixNorm` を隣接見本にする予定がある。#3806 で `Fro`・`One`・`Inf` が `true` になれば、§34.13 の規定どおり `Op::Custom` へ替える必要がある（§33・§34 の本文は本 PR で変えない）。
+- 隣接見本は `Op::Custom` だけにする。実機の実行は #3857・#3859 が担い、Linux や開発機の代替値で pass にしない。
+
+### 43.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値・`STAGE_BOUND_GUARD`・FMA 契約は変えない。新しい baseline は作らない（作る場合は実機の実測値に限り所有者承認が要る）。
+- 1 階は構造上 bit 同一（§21.1(1)）。V3 の Op（Cholesky・Pinv・Lstsq・MatrixNorm Fro）と V2 の Op（One・Inf・SlogdetSign・MatrixRank）は `cg.grad` も CPU で 1 階と bit 一致する。構造側の f32 合成が効くのは二階と孫テープだけ。
+- 必須ベクトル（3 段すべて）: Fro の `1e30`・`1e-38`・零行列・NaN、Cholesky の悪条件（対角 `1e-20` 付近）と `g=3e38`、Pinv の縦長で cond の大きい入力、One・Inf のタイと sign(0)、全般の `g=±3e38`。
+- 保証範囲は §27.3・§31.3 の書き方に揃える。総括判定を通った入力で、seed の各要素の絶対値が 1 以下のときに限る。三階以上は対象外。
+
+### 43.6 互換への影響
+
+- **追加のみ**。`docs/api-compat-0.14.0-decision.md` §1.2 項目 3（`Err` が `Ok` になる受理範囲の拡大）にあたり、同 §8 の手順（公開型を引く → §1.1 の規則で判定）に当てはめても破壊的条件には当たらない。
+- 型ごと: `Op`（`pub(crate)`）は payload を変えない（`MatrixNorm{ord}`・`Pinv{rcond}` 等は既存のまま）。`AutodiffError` の variant、`MatrixNormOrd`（`#[non_exhaustive]`）、`SlogdetVars`、公開シグネチャはいずれも不変。
+
+### 43.7 適用記録・索引・追跡表
+
+- 公開状態: 未公開（設計のみ）。
+- `compat-api-scope.md` 適用記録の文案（承認後の実装 PR で書く）:
+  - #3805: 「**適用記録（イシュー #3805・親 #3734。承認: <#3767 の回答 URL>）**: `Cholesky`・`Pinv`・`Lstsq` を create_graph の対象にした（`Pinv`・`Lstsq` は打ち切りなしの入力に限る）。公開名の追加なし。」
+  - #3806: 「**適用記録（イシュー #3806・親 #3734。承認: <#3767 の回答 URL>）**: `SlogdetSign`・`MatrixRank`・`MatrixNorm`（`Fro`・`One`・`Inf`）を create_graph の対象にした。`Nuc`・`Spectral` は対象外に確定（承認 URL）。公開名の追加なし。」
+- チェック欄:
+  - [ ] `compat-api-scope.md`（承認後の実装 PR で行う）
+  - [x] `docs/README.md` の索引
+  - [x] 追跡表（`docs/compat-matrix-ari-tracker.md`）行 4 の設計記録の欄に本節を記入
+
+### 43.8 ベンチと性能への影響
+
+- 既定経路（forward・`Tape::backward`）は変わらない。`supports_create_graph` を呼ぶのは create_graph の入口だけ。
+- 増えるのは create_graph 経路だけ。Cholesky は `MatMul` 1・`Solve` 2・転置と対称化、Pinv は `MatMul` が 4〜6 と `Pinv` の再生 1、Lstsq はそれに `Pinv` ノードの追加。総括判定のホスト走査は O(n³)（f64 の SVD・LU。1 階の VJP と同じ規模）。
+- 既定経路に触れないので前後比較は不要と判断する。触れた場合は 5 回計測の中央値で比べ、判定規則を計測前に固定する。実機の値は未実測。
+
+### 43.9 依存の追加の有無
+
+- 追加なし。許容 12 区分・禁止リストとの照合で変化なし。新しい `unsafe` も無い（`docs/license-matrix.md` の更新は不要）。
+
+### 43.10 方式と式（Op ごと）
+
+記号: `*_m` は子テープ上の写し、`g` は子テープ上の upstream。R は公開メソッドへの自己再生（§21.1(2)。forward の検証を迂回しない）。V3 の値は `eval::linalg` の既存の 1 階ホスト関数（`pub(crate)`）を `push_v3`（`create_graph.rs:986`）で入れる。本体と数値は変えない。
+
+- **SlogdetSign（V2・ゼロ）**: R は `slogdet()?.sign`。cgrad は `child.var_no_grad(&Tensor::zeros(input_shape))`（既存の定数ゼロのパターン）。`g.mul(0)` は使わない（`inf·0=NaN`）。accumulate は省かない（省くと sign 経路しかないときに 1 階の `Some(zeros)` と食い違う）。`SlogdetLogAbsDet` と同じ親呼び出しから両方を再生すると子テープで `slogdet` が 2 回呼ばれる（決定的なホスト f64 なので値は一致する）。片方の未使用ノードは根から到達しない。推奨は「重複して再生」で、mirror を共有する案は論点 8。
+- **MatrixRank（V2・ゼロ）**: R は `matrix_rank(Some(rcond))`。cgrad はゼロの定数。
+- **rcond の payload の丸め**: `Op::Pinv`・`Lstsq`・`MatrixRank` の `rcond` は `resolve_rcond(..) as f32` で丸めた値（`linalg_ops.rs:266`・`:296`）。1 階 VJP も `Some(payload)` を使うので 1 階の bit 同一性には影響しない。ただし `max(m,n)` が大きいなどで payload が forward の解決値と異なると、再生で rank が反転しうる。guard で「どれかの特異値が `rcond·σmax` から f32 の丸め幅の範囲内にある入力」を拒否する（具体式は実装 PR で決める。新しい tolerance・閾値定数は作らない）。MatrixRank は、再生したスカラーが親の記録値と一致することを確かめる案も併記する（論点 6）。
+- **Cholesky（V3 + f32 構造）**: R は `a_m.cholesky()`。値は `cholesky_vjp`（`eval/linalg.rs:1267`。入力ではなく forward の L を使う）。構造は L の写し（Cholesky ノードの mirror）から `Φ = tril(Lᵀ g)`（下三角マスクは `where_cond`、対角は 0.5 倍の定数 `Mul`）、`Y = solve(Lᵀ, Φ)`、`S = solve(Lᵀ, Yᵀ)ᵀ`、`dA = 0.5(S + Sᵀ)`。Op は `Transpose`・`Contiguous`・`MatMul`（`matmul_fp32_strict`）・`Where`・`Mul`・`Solve`・`Add`。代替は §31 と同じ「V1 + 総括判定」（論点 2）。
+- **Pinv（V3 + f32 構造。打ち切りなしの入力に限る）**: R は `a_m.pinv(Some(rcond))`。値は `pinv_vjp`（`eval/linalg.rs:2361`）。受理するのは、ホストの SVD で `rank == min(m,n)` かつ打ち切られた非零の特異値が無い入力だけ（`pinv_vjp_direct_f64`〈:2121〉の前提。rank の局所一定性）。構造は P = Pinv ノードの mirror を使い、`gA = −Pᵀ G Pᵀ + (I−AP) Gᵀ P Pᵀ + Pᵀ P Gᵀ (I−PA)` にする。フルランクでは、縦長（m ≥ n）で `PA ≡ I_n`、横長で `AP ≡ I_m` が近傍で恒等的に成り立つので、該当する項とその微分は 0 になり構造から落とせる。正方は `−Pᵀ G Pᵀ`（Inv と同形）。**m×m を作らない結合順**を規定する: 縦長の第 2 項は `M − A(P M)`（`M = Gᵀ P Pᵀ`）、横長の第 3 項は `M − (M P)A`（`M = Pᵀ P Gᵀ`。m×m は短辺側）。
+- **Lstsq（V3 + f32 構造。Pinv に依存）**: R は `a_m.lstsq(&b_m, Some(rcond))`（`pinv(A)·B` で合成すると丸めが変わるので自己再生にする）。値は `lstsq_vjp`（`eval/linalg.rs:2503`）。構造は、子テープで新しく `P = a_m.pinv(Some(rcond))` を積み、`gB = Pᵀ gX`、`gA = Pinv の構造（G = gX·Bᵀ）` とする。受理条件は Pinv と同じ。**#3805 の中では Pinv を Lstsq より先に `true` にする**。
+- **MatrixNorm（ord で分ける）**:
+  - `supports_create_graph` は payload 判定にする: `Op::MatrixNorm { ord: Fro | One | Inf, .. } => true`。内側の match は `MatrixNormOrd` が `#[non_exhaustive]`（別クレート）なので `_ => false` が必須で、§21.6 の「未知 variant を `false` へ倒す」規約に当たる。外側の `Op` の網羅 match にワイルドカードは足さない。`validate_ancestors` に `check_fft_norm`（`create_graph/linalg_fft.rs:68`）と同形の ord 検査を足す。
+  - `Fro`（V3 + S1 + V2）: 値は `matrix_norm_vjp`（`eval/linalg.rs:1526`）。構造は、行列全体の 2 のべき乗スケール `s`（最大絶対値以上。全ゼロなら 1。指数は f32 の範囲にクランプ）で `B = A_m/s` を作り、`g_b ⊙ B / sqrt(Σ B²)`。ホストの f64 ノルムが 0 なら cgrad はゼロの定数にする（`Sqrt` の 0 で `0×inf` になるのを避ける。§33 の Std の教訓）。NaN は 1 階と同じく伝播させ、±inf は拒否する（§33.14 論点 3 と同じ規則）。
+  - `One`・`Inf`（V2）: ホストで 1 階と同じ f64 の先勝ち選択（`best_col`〈:1585〉・`best_row`〈:1629〉）と sign の ±1・0 マスクを作り、`where_cond(pos, g_b, where_cond(neg, −g_b, 0))` とする。乗算が厳密なので bit 一致する。A に関する二階は 0（`g` を経由する分だけ残る）。選択ロジックを共有するために抽出する場合は、数値を変えない `pub(crate)` ヘルパーにする。NaN は `Fro` と同じ規則。
+  - `Nuc`・`Spectral`: fail-closed のまま（理由は 43.0）。
+
+### 43.11 閉包性と族間の依存
+
+- 子テープへ積む Op: `Transpose`・`Contiguous`・`MatMul`・`Solve`・`Where`・`Mul`・`Add`・`Sum`・`Div`・`BroadcastTo`・`ScalarUnary`（Sqrt・Neg）、それに自己再生の `Cholesky`・`Pinv`・`Lstsq`・`SlogdetSign`・`MatrixRank`・`MatrixNorm`。実装前に origin/main の `supports_create_graph` で、基準時点で `true`（または同じ PR で `true` になる）ことを再確認する。
+- 依存: #3086（`Solve`・`Inv`。実装済み）→ Cholesky、および Pinv → Lstsq（同じ #3805 の中）。`Svd*` は積まない。
+
+### 43.12 fail-closed・総括判定・GPU の forward
+
+- 総括判定は §31.3 の `guard_inv`（`create_graph/linalg_fft.rs:328`）・`guard_solve`（:359）と同型にする: f64 の参照で構造の各段を求め、次のどれかなら拒否する — 非有限、`STAGE_BOUND_GUARD`（2^125）以上、非零なのに f32 の正規化最小値未満、二階の上界が 2^125 以上、丸め幅の許容を超える。Cholesky の段は `Lᵀg`・`Φ`・`Y`・`S`・`dA`、Pinv の段は各 `MatMul` の出力。上界の具体的な冪は実装 PR で確定し、本節には形（Inv と同型の保守的な上界。閾値は不変）だけを書く。
+- §21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。
+- GPU の forward: `linalg_*` を実装しているのは `backend-cpu` だけで（`crates/backend-cpu/src/ops.rs`）、CUDA・Metal は `Unsupported` を返してホストの `eval::linalg` へフォールバックする。構造の Op（`MatMul` 等）はデバイスで走る。したがって #3857・#3859 が測るのは「デバイスとホストの往復を含む経路」で、新しいカーネルは作らない。値は未実測。
+
+### 43.13 実装の段分け（Phase 5・2h 単位）
+
+- #3805: ① Cholesky（構造・guard・対称パラメータでの FD テスト）→ ② Pinv（打ち切り判定・向き別の結合順・m×m を作らないテスト）→ ③ Lstsq（Pinv ノードの積み増し・混合二階）→ ④ 既存の fail-closed テストの差し替え・facade テスト。
+- #3806: ① SlogdetSign・MatrixRank（ゼロの cgrad・rcond の再生確認）→ ② MatrixNorm `Fro`（S1・V3）→ ③ `One`・`Inf`（V2・タイ）と ord の payload 判定・既存テストの差し替え。
+- 実機は #3857・#3859 に任せる。PR は `Refs` にする（Phase 10 の実測 PR が閉じる）。
+
+### 43.14 セキュリティ観点
+
+- A03: forward の検証（rank 2・有限・rcond）を通った値だけが届く。payload の ord・rcond は入口で検査する。
+- A04: m×m の中間行列を作らない（縦長 `[100000,1]` で 10^10 要素になる確保を避ける）。総括判定のホスト走査は 1 階 VJP と同じ規模に収める。拒否時は子テープを空に保つ。
+- A06: 依存を追加しない。A08: 総括判定と網羅 match を迂回する経路を作らない。
+- 秘密情報・実機のホスト名・個人のパスは書かない。
+
+### 43.15 スコープ外・Closes／Refs
+
+- スコープ外: 分解系（`Qr*`・`Svd*`・`Eigh*`）、MatrixNorm の `Nuc`・`Spectral`、打ち切りありの Pinv・Lstsq の二階（§8 のスコープ外課題）、他の B 区分（#3729〜#3733・#3735）、C 区分、f64 テープ（#3722）、GPU 実機 parity（#3857・#3859）、測り方（#3739）。
+- 本 PR は `Closes #3734`、`Refs #3805 #3806 #3767 #3719`。
+
+### 43.16 所有者へ戻す論点（#3767 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. SlogdetSign・MatrixRank の採否 | 実装（ゼロの cgrad）／対象外 | 実装 | 実装へ進めず fail-closed を維持 |
+| 2. Cholesky の採否と方式 | V3 + 構造／V1 + 総括判定（§31 型）／対象外 | V3 + 構造 | 同上 |
+| 3. Pinv・Lstsq の受理範囲 | 打ち切りなしだけ受理／打ち切りありも rank 制限式で構造化（§8 のスコープ外課題に踏み込む）／対象外 | 打ち切りなしだけ | 同上 |
+| 4. Pinv・Lstsq の値の方式 | V3／V1 | V3 | 同上 |
+| 5. MatrixNorm の ord | `Fro`・`One`・`Inf` だけ／全 ord（SVD の再生が要る）／対象外 | `Fro`・`One`・`Inf` | 同上 |
+| 6. rcond の閾値付近 | 拒否／payload に任せる／再生値を親の記録値と照合 | 拒否 | 同上 |
+| 7. 非有限の入力 | §33.14 論点 3 と同じ（NaN は伝播し ±inf は拒否）／全部拒否 | §33 と同じ | 同上 |
+| 8. slogdet の二重再生 | 重複して再生（決定的）／mirror を共有 | 重複して再生 | 同上 |
+| 9. GPU parity の判定方式 | #3739 に従う（tolerance は変えない）／別方式 | #3739 | 同上 |
+| 10. 隣接見本 | `Op::Custom`／`MatrixNorm{Nuc}` | `Op::Custom` | 同上 |
+
+### 43.17 変えていないもの
+
+- コード・公開 API・rustdoc・tolerance・baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・`docs/compat-api-scope.md`。
