@@ -2135,6 +2135,7 @@ CI の行は新設 `crates/autodiff/tests/create_graph_loss_class.rs`（仮名�
 - 必須ベクトル（3 段すべて）:
   - CEWO: logits `±1e30`、class_weight に大きな値（Σw が f32 を超える組は拒否）、`g=3e38`。
   - Multi*: `x=±1e30`・p=2 で `z²` 相当が大きい組、`g=3e38`。
+  - MultiMargin p=2: 1 行 2 クラス・`x=[-1e38, 1e38]`・target=0・`w_y=1e-38`・margin=0・`g=1`（f64 VJP は有限だが f32 構造の `H` が overflow するため、総括判定で拒否されること）。
   - Cosine: `x1=x2=1e20` の行（f32 の二乗が inf）、零ベクトル行（`m=ε`）、`x=1e-30` の行（`ε/s²` の保護）、`y=-1` で `cos==margin`。
   - Triplet: 差分 `1e20`、`p=1024` 相当、差分がちょうど `-eps` になるレーン、swap の同値、`d_an=inf` の側。
   - 全般: `g=[3e38]`・`g=-3e38`。
@@ -2218,7 +2219,7 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
 
 ### 40.12 fail-closed・総括判定・GPU の forward
 
-- 総括判定: §27.3 の `check_structure_stages`（`create_graph_norm.rs`）と同型の判定を、Cosine・Triplet（スケール・ノルム・`PowScalar`）と CEWO（大きな class_weight を含む定数）に置く。構造の各段・二階の cotangent × 微分係数の上界をホストが f64 で求め、`2^125` 以上か非有限なら拒否する。閾値と seed の前提は §27.3 と同じ。Multi* は線形・有界なので upstream の検査だけを適用する。
+- 総括判定: §27.3 の `check_structure_stages`（`create_graph_norm.rs`）と同型の判定を、Cosine・Triplet（スケール・ノルム・`PowScalar`）と CEWO（大きな class_weight を含む定数）に置く。構造の各段・二階の cotangent × 微分係数の上界をホストが f64 で求め、`2^125` 以上か非有限なら拒否する。閾値と seed の前提は §27.3 と同じ。MultiLabelMargin・MultiLabelSoftMargin と MultiMarginLoss の p=1 は x について線形・有界なので upstream の検査だけを適用する。**MultiMarginLoss の p=2 は対象に含める**（線形ではない）。`H = 2·Z`、`Sum(H, 1)`、`c_w ⊙ …`、`s_b ⊙ …` の各段の上界をホストが f64 で求め、同じ `2^125` 閾値で拒否する。重み `w_y` を後から掛ける構造のため、f64 では有限（例: 1 行 2 クラス・`x=[-1e38, 1e38]`・target=0・`w_y=1e-38`・margin=0・`g=1` は VJP が約 `[-2, 2]`）でも f32 の `H` が約 4e38 で overflow する入力を、この段別の上界検査で拒否する（重みを先に掛ける演算順への組み替えは採らない。`Z` 自体が f32 を超えるため解決しない）。必須ベクトルにこの反例を加える。
 - §21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。CtcLoss は `false` のまま。
 - GPU の forward: 7 Op はどれも全 backend でホストの `push_eager` で計算し、融合カーネルは無い。子テープの構造 Op（Softmax・pointwise・Sum）はデバイスで走る。よって #3857・#3859 が測るのは「デバイス→ホストの実体化を含む経路」で、カーネル間の parity ではない。GPU カーネルは新設しない。値は未実測。
 
