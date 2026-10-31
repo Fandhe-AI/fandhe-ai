@@ -235,3 +235,121 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
   `ZeroPad2d::uniform`／負パディングの facade 公開・ONNX export 対応（`UnsupportedLayer` で fail-closed のまま）。
 - **実機 parity**: `crates/facade/tests/compat_sequential_spatial_layers_backend_parity.rs`（`#[ignore]`）。
   未実測のまま `docs/perf/logs/compat-sequential-spatial-2522/README.md` で GB10／M4 Max へ申し送る。
+
+## §9 保守・運用チェックリスト（イシュー #3740）
+
+追跡表 `docs/compat-matrix-ari-tracker.md` の行 #7（`add_upsample` の `scale_factor` 指定。Issue 上は「項目 8」と呼ばれる同一項目）の
+公開形を設計する。**設計のみ**で、コード・公開面・`docs/spec` は変えない。
+
+- **承認根拠**: なし。**未承認（#3768 待ち）**。実装は承認後の #3814、実機 parity は #3860（`<cuda-node>`）・#3861（`<metal-node>`）、
+  保存・export の横断方針は #3750（OPEN）。
+- **現状**: facade の `compat::Sequential::add_upsample(size: Vec<usize>, mode)`（`crates/facade/src/compat/sequential.rs:2435`、
+  基準 `30bd1d046`）は出力サイズ直指定のみ。内部クレートには倍率経路が実装済み
+  （`autodiff::nn::Upsample::with_scale_factor`・`UpsampleSize::ScaleFactor(Vec<f64>)`〈`#[non_exhaustive]`、
+  `crates/autodiff/src/nn/upsample.rs:21-31`〉・`tensor-core::interpolate_size_from_scale_factor`〈`interpolate.rs:426`〉）。
+  §8 の残課題「`UpsampleSize` 再エクスポートまたは別名メソッド」を本節で比較する。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | 別名メソッド `compat::Sequential::add_upsample_scale_factor(self, scale_factor: Vec<f64>, mode: InterpolateMode) -> Result<Self, AutodiffError>` を新設（`Upsample::with_scale_factor` への 1:1 委譲。既存 `add_upsample` は不変） | 公開名は `pub fn` 1 件の追加のみ。新しい型を出さず `docs/facade-nn-layer-type-exposure-decision.md` の (i)+(iv) 方針に合う。`docs/api-compat-0.14.0-decision.md` §1.2 行 7 の「別名メソッドなら追加のみ」に当たる | メソッドが 2 つに分かれる。指定方式が増えるとメソッドも増える |
+| B | `UpsampleSize` を再エクスポートし `add_upsample` の引数を `UpsampleSize` に変える | PyTorch の `size`／`scale_factor` 二択を型で表せる | 既存シグネチャ変更で**破壊的**（api-compat §8 手順 2）。§4 に承認済みの行がなく手順 3 により進められない。`#[non_exhaustive]` 型の variant 追加が公開面へ伝わる |
+| C | `UpsampleSize` を再エクスポートし、それを受ける新メソッド（例 `add_upsample_with`）を足す | 追加のみ | 型名を名指ししないと使えない操作がなく (iv) 条件 (a) を満たさない。公開名が 2 件増える。`Size` が倍率も含み紛らわしい |
+
+**推奨: 実装する（案 A）**。理由は、互換が追加のみで済むこと、型名公開方針 (i)+(iv) と矛盾しないこと、内部経路が実装済みで委譲 1 行で足りることの 3 点。
+
+### §9.1 公開形とガード反転計画
+
+- 配置: `crates/facade/src/compat/sequential.rs` の `add_upsample` 直後。`Upsample::with_scale_factor` で検査し、成功時のみ
+  `inner.push` と `specs.push` を行う（検査前に状態を変えない）。
+- `LayerSpec`（`pub(super)`、公開面の外）には新 variant `UpsampleScaleFactor { scale_factor: Vec<f64>, mode: InterpolateMode }` を足し、
+  既存 `Upsample { size, mode }` は広げない。size 経路の forward・manifest のバイト列・既存テストは bit 単位で不変（#3814 の「既定経路が bit 同一」に合う）。
+- ガード: 現在 `scale_factor` 用の否定ガードは存在しない（`api_surface.rs` に該当なし）。したがって「反転」は正ガードの新設を指す。
+  - `SPATIAL_LAYER_APPROVED_ADD_METHODS`（`crates/facade/tests/api_surface.rs:14473`）を 4 名に拡張し、
+    `compat_sequential_exposes_spatial_layer_add_methods_issue_2522`（`:14489`）と自己テスト `..._counts_declarations`（`:14508`）に 4 名目を足す。
+  - `ADD_UPSAMPLE_SCALE_FACTOR_PARAMS` 定数を追加し、`compat_sequential_spatial_add_methods_have_approved_signatures`（`:14427`）で
+    `sequential_spatial_add_signature_ok`（`:14401`）によりシグネチャを固定。すり替え検出の自己テスト（`:14451`）に `f32` 化・引数入れ替え・`Self` 返しを足す。
+  - 否定プローブとして維持: `SpatialLayersHoldDoctestGuard`（`crates/facade/src/lib.rs:3793`）の 5 型名プローブと
+    `add_conv_transpose1d`／`add_unflatten` の自由関数プローブ。案 A は `UpsampleSize` を出さないため、その型名プローブの追加を推奨する
+    （追加時は `SPATIAL_LAYERS_HOLD_PROBE_BODY`〈`:14231`〉と 1 行も違わず同期し、`spatial_layers_hold_doctest_probe_body_matches_fixed_contract`〈`:14209`〉・
+    `spatial_layers_hold_doctest_globs_all_pub_modules`〈`:14179`〉を通す）。
+
+### §9.2 rustdoc と doctest
+
+- 役割要約: 「Upsample 層を倍率指定で追加する（`nn::Upsample::with_scale_factor`。§9）」。丸め契約と座標系（§9.5）を doc に書く。
+- doctest は facade だけで通り CPU で動く: `[1,1,3,3]` に `vec![2.0, 2.0]`・`Nearest` → `[1,1,6,6]`（`add_upsample(vec![6,6], Nearest)` の出力と `host_slice` 一致）、
+  `vec![1.5, 1.5]` → `floor(3*1.5)=4` で `[1,1,4,4]`。GPU が要る例は置かない（置くなら `no_run`）。
+- 失敗系は `compile_fail` に頼らず、CI の統合テストで `Err` の variant まで照合する。
+
+### §9.3 エラー型
+
+新 variant は追加しない。
+
+- 構築時: `AutodiffError::InvalidArgument`（空・非有限・0 以下）。
+- forward 時: rank 不足（入力 rank < `scale.len()`）は `AutodiffError::Shape(ShapeError::RankMismatch)`、オーバーフロー・出力 0 は
+  `ScaleFactorError` を包んだ `AutodiffError::InvalidArgument`（`upsample.rs::resolve_size`）。`resolve_size` は入力の末尾 `scale.len()` 軸を切り出して
+  ヘルパーへ渡すため、ヘルパー側の「2 スライスの長さ不一致」は到達不能で、契約にしない。倍率の個数と `mode` が要求する空間軸数の不一致は、
+  導出 `size` を渡した後続の補間形状検証（`Var::interpolate`）が返す `AutodiffError::Shape` 系の Err で検出する（forward 時の遅延検査）。
+- 本番経路で `unwrap`／`expect` を使わない。検証は確保（`Vec`・tape への push・`specs.push`）より前に行う。
+- model_io 読込はキー集合の完全一致 → 型 → 正準表記 → 範囲の順に検査し `ModelIoError::Manifest` で fail-closed にする。
+
+### §9.4 テスト計画
+
+| 受け入れ基準 | テスト（置き場・名前案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 構築時の拒否（空・0・負・NaN・±inf） | `crates/facade/tests/compat_sequential_spatial_layers.rs::add_upsample_scale_factor_rejects_invalid_scale` | CI | 該当なし | 該当なし | 該当なし |
+| floor 丸め（1.5 倍で 3→4、0.5 倍で 4→2）と、出力 0・rank 不足（`Shape(RankMismatch)`）・倍率個数と `mode` の空間軸数の不一致（補間形状検証の `Shape` 系 `Err`）の forward 時 `Err` | 同 `add_upsample_scale_factor_floors_output_size`・`..._rejects_zero_output_and_rank_mismatch` | CI | 該当なし | 該当なし | 該当なし |
+| 倍率経路と導出サイズの size 経路が CPU で bit 一致（Nearest・Bilinear） | 同 `add_upsample_scale_factor_matches_size_path_bit_exact` | CI | 該当なし | 該当なし | 該当なし |
+| 学習経路（`fit`）と常駐経路の素通し | 同 `add_upsample_scale_factor_passes_train_and_resident_paths` | CI | 該当なし | 該当なし | 該当なし |
+| 保存（§9.5 の論点 2 の結果に従う）。(ii) なら `save_model` が `dir` に触れる前に `UnsupportedModel`。(i) なら往復 bit 一致と、非正準・範囲外 manifest の拒否 | `crates/facade/tests/compat_sequential_model_io_layers.rs` に追加。非信頼入力は `model_io.rs` の既存表駆動テストに追加 | CI | 該当なし | 該当なし | 該当なし |
+| ONNX export が `UnsupportedLayer` を返す | facade の ONNX export テストに 1 件追加 | CI | 該当なし | 該当なし | 該当なし |
+| 公開形の正ガードと自己テスト | `api_surface.rs`（§9.1） | CI | 該当なし | 該当なし | 該当なし |
+| 実機 parity（Nearest は bit 一致、Bilinear は REQ-2） | `crates/facade/tests/compat_sequential_spatial_layers_backend_parity.rs` に `cuda_upsample_scale_factor_nearest_bit_exact`・`cuda_upsample_scale_factor_bilinear_matches_cpu`・`metal_upsample_scale_factor_nearest_bit_exact`・`metal_upsample_scale_factor_bilinear_matches_cpu`（Metal は `cfg(target_os = "macos")`） | `#[ignore]` | 未実測（#3860） | 未実測（#3861） | 該当なし（ROCm は facade 未公開） |
+
+### §9.5 数値契約
+
+- **丸め**: `out[axis] = floor(in[axis] as f64 * scale[axis])`（`tensor-core::interpolate_size_from_scale_factor` の式。PyTorch と同じ）。
+  非有限・0 以下・`usize` 超過（`as usize` の前に検査）・導出後 0 は fail-closed で拒否（個数不一致は rank 不足または後続の補間形状検証で拒否。§9.3）。縮小（`s < 1`）は受理。
+  f64 の表現誤差（例 `0.29*100 = 28.999…` は 28）は `floor` 前に補正しない（PyTorch と同じ）。
+- **座標系**: PyTorch の `recompute_scale_factor=True` 相当。導出 `size` を既存 `Var::interpolate` へ渡すため補間座標は `in/out`。
+  PyTorch 既定（`None`、座標に `1/scale`）とは `in*s` が整数でないときだけ差が出うる（整数倍は一致）。これを契約として doc に明記し、切り替えは公開しない。
+- **REQ-2**: 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま適用。新カーネル・Op・VJP はなく既存 `Var::interpolate` の契約を継承する。
+  `Nearest`／`NearestExact` は 3 バックエンドで bit 一致、`Bilinear` ほかは REQ-2。FMA 契約・f64 長軸縮約契約への影響なし。tolerance・baseline・ガードレール閾値は不変で baseline は追加しない。
+- **model_io**: 倍率は f64 のまま bit 一致で往復する必要がある（`floor(in*s)` が値に依存）。現状の `model_io.rs` は `as_f32`・`put_real(f32)` のみ。
+  - (i) 新 kind `upsample_scale_factor`: キー `mode`・`align_corners`・`scale_len`（1..=3）・`scale_0..2`（f64 最短往復表記 `{:?}` と正準表記検査、`as_f64` を新設。`MAX_NUMBER_LEXEME_LEN = 64`・キー上限 16 に収まる）。`format_version` 不変（#2522 の先例）。古い読み手は未知 kind を `UnsupportedModel` で拒否。
+  - (ii) 当面 fail-closed: `dir` に触れる前に `UnsupportedModel`（§6 の `conv_transpose1d` の先例）。
+  - 横断方針は #3750 が決めるため、(i) は設計案として記録し、#3814 は「#3750 が先に入っていればその規則、無ければ (ii)」を推奨する。
+- **ONNX export**: `graph_from_layers` は 6 種のみ対応で size 指定 Upsample もすでに非対応。倍率指定も `OnnxError::UnsupportedLayer` で fail-closed。`Resize`（scales）対応は #3750 とスコープ外へ回す。
+
+### §9.6 互換への影響
+
+**追加のみ**（`docs/api-compat-0.14.0-decision.md` §8 手順 1〜4）。触れる公開型は `Sequential` の inherent `pub fn` 1 件の追加のみで、
+`add_upsample` は不変、`UpsampleSize` は再エクスポートせず、`LayerSpec` は公開面の外、`ModelIoError`・`OnnxError` に variant 追加なし。
+案 B を選ぶ場合は破壊的で承認要（移行ノート・`type(scope)!:`・`BREAKING CHANGE:` が必要で、§4 に承認済みの行もない）。
+
+### §9.7 適用記録・索引・追跡表
+
+- 適用記録の案（実装 PR #3814 で `docs/compat-api-scope.md` へ追記する。本 PR では追記しない）:
+  `適用記録（イシュー #3814。承認: <#3768 の回答 URL>）: compat::Sequential::add_upsample_scale_factor(scale_factor: Vec<f64>, mode) を公開。UpsampleSize・Upsample 型は未公開のまま。保存は <(i)/(ii)>、ONNX export は UnsupportedLayer。公開状態: 公開済み`
+- 本 PR の更新: `docs/README.md` の本書注釈に 1 文、追跡表 行 #7 の「設計記録」セル。`compat-api-scope.md` は #3814 で行う。公開状態は未公開。
+
+### §9.8 ベンチと性能への影響
+
+既定経路（size 指定）は不変。倍率経路で増えるのは forward ごとの O(空間軸数) の f64 乗算と `floor` のみで、補間カーネルは既存と同じ。ベンチは追加せず、前後比較も不要（未実測）。
+
+### §9.9 依存
+
+依存の追加なし（許容 12 区分・禁止リストの照合に変化なし）。新しい `unsafe` なし。
+
+### 所有者へ戻す論点（#3768 の論点 1・4 へ渡す）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 公開形 | A 別名メソッド／B `UpsampleSize` に変えて `add_upsample` を変更（破壊的）／C 型の再エクスポートと新メソッド | A | 現状（公開面なし）を維持し、実装へ進めない |
+| 2. 保存（model_io） | (i) 新 kind と f64 正準表記で保存／(ii) 当面 `UnsupportedModel` で fail-closed、#3750 に合わせ後で対応 | #3750 が先ならその規則、無ければ (ii) | (ii) 相当の fail-closed を維持 |
+| 3. ONNX export | `UnsupportedLayer` のまま／`Resize`（scales）対応 | `UnsupportedLayer` のまま（#3750 に委ねる） | 同上 |
+| 4. メソッド名 | `add_upsample_scale_factor`／`add_upsample_scale`／`add_upsample_with_scale_factor` | `add_upsample_scale_factor`（内部構築子と PyTorch 引数名に揃う） | 同上 |
+
+### セキュリティ観点・スコープ外
+
+- A03（manifest の非信頼入力）: f64 の正準表記・有限性検査、`scale_len` 上限、キー集合の完全一致を確保より前に行う。A04・A08: 構築と forward の判定を `resolve_size` 1 か所に寄せ迂回経路を作らない。`as usize` の飽和は前検査で防ぐ（既存実装）。
+- スコープ外: `recompute_scale_factor=None` 相当の座標系の公開、ONNX `Resize` の export、`UpsampleSize`／`Upsample` 型の再エクスポート、`Var` への倍率メソッド追加。
