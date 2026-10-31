@@ -35,7 +35,7 @@
 | 7 | `add_upsample` の `scale_factor` 指定 | NN 層・モデル構築 | 未公開 | #3740（`docs/autodiff-spatial-layers-decision.md` §9） | 未承認（#3768 待ち） | #3814 | 未特定（設計記録で確定） | 未実測（#3860 は GB10、#3861 は Mac mini） | 未確定 |
 | 8 | 独自 `Module` から組み込み層を呼ぶ経路 | NN 層・モデル構築 | 未公開 | #3741（docs/facade-nn-module-exposure-decision.md §23） | 未承認（#3768 待ち） | #3815、#3816 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
 | 9 | C1: Hardshrink・Softshrink | NN 層・モデル構築 | 未公開 | #3742（`docs/nn-shrink-bilinear-channel-shuffle-decision.md` §1） | 未承認（#3768 待ち） | #3817 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
-| 10 | C2: Bilinear | NN 層・モデル構築 | 未公開 | #3743 | 未承認（#3768 待ち） | #3818 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
+| 10 | C2: Bilinear | NN 層・モデル構築 | 未公開 | #3743（`docs/nn-shrink-bilinear-channel-shuffle-decision.md` §2） | 未承認（#3768 待ち） | #3818 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 11 | C3: BatchNorm3d（`Var::batch_norm` の rank 5） | NN 層・モデル構築 | 未公開 | #3744 | 未承認（#3768 待ち） | #3819、#3820 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 12 | C5: CosineSimilarity | NN 層・モデル構築 | 未公開 | #3745 | 未承認（#3768 待ち） | #3821 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 13 | C6: PairwiseDistance | NN 層・モデル構築 | 未公開 | #3745 | 未承認（#3768 待ち） | #3821 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |

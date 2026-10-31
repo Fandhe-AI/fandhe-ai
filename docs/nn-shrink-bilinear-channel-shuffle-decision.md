@@ -4,7 +4,7 @@
 
 - 本書は追跡表 `docs/compat-matrix-ari-tracker.md` の C1・C2・C7 の設計記録をまとめる 1 本である。節の分担は次のとおり。
   - **§1 C1 Hardshrink・Softshrink**: イシュー #3742（本 PR が記述）
-  - §2 C2 Bilinear: イシュー #3743 が追記する
+  - **§2 C2 Bilinear**: イシュー #3743（本 PR が記述）
   - §3 C7 ChannelShuffle: イシュー #3746 が追記する
 - 書式は `docs/decision-record-template.md`（#3716）の「保守・運用チェックリスト（必須 9 節）」に従う。先例は `docs/autodiff-spatial-layers-decision.md` §9（#3740）。
 - **設計のみ**で、コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変えない。
@@ -155,6 +155,146 @@
 - スコープ外: ONNX export（ONNX の `Shrink` op。#3750）、専用 GPU カーネル、層型名の facade 公開（#3022）、`Tensor<f32>`／`Tape` 上のメソッド。新しいイシューは起票しない（所有者の承認事項）。
 - #3817 は実機 parity が済むまで `Refs` 運用とする。
 
-## §2 C2 Bilinear（イシュー #3743 が追記）
+## §2 C2 Bilinear（イシュー #3743）
+
+行番号は origin/main の `b52c981c4` を基準にする。
+
+### §2.0 位置づけ・推奨
+
+- 追跡表の **行 # 10**（C2）。イシュー本文は「項目 11」と書くが、§1.0 と同じく 1 ずれている。更新対象は # 10 行である。
+- 流れ: 設計 #3743 → 承認 #3768（論点 3）→ 実装 #3818 → 実機 parity #3860（`<cuda-node>`）・#3861（`<metal-node>`）。保存・export の横断方針は #3750（設計中）。
+- **承認根拠: なし。未承認（#3768 待ち）。**
+- 現状: `crates/` に `nn.Bilinear` 相当は 0 件（`bilinear` を含むのは補間の `InterpolateMode::Bilinear` と `eval.rs` の `bilinear_*` だけ）。棚卸し `docs/compat-unlisted-holds-inventory.md:72` が「未公開・起票する」と分類した。facade に Bilinear 層の否定ガード・保留 doctest ガードは無い。したがって「反転」は正ガードを新しく作ることを指す。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| **A（推奨）** | `Var::bilinear` を足す（自由関数を新モジュールに置き 1 行で委譲）。autodiff 内部に層 `nn::Bilinear`／`BilinearVars` を置くが facade からは再エクスポートしない。`Sequential::add_*` は設けない | 新規 `Op`・カーネル・`unsafe`・依存が 0 件。公開名の追加は inherent メソッド 1 件。PyTorch の `F.bilinear` と同じ形 | パラメータ管理と学習ループは利用者が書く |
+| B | A に加え `FunctionalBuilder` にパラメータ付きの 2 入力ノードを足す | `FunctionalModel` の `fit`・`state_dict` で学習できる | 結合ノードは層を持たない前提（`functional.rs` 冒頭 doc）を崩す。キー体系・bind・保存（#3750）の設計が要り、公開面も大きい |
+| C | 専用 GPU カーネル | 中間テンソルを作らず速くなりうる | `BackendOps` 追加・`unsafe`・境界検査（REQ-8）・新しい parity 契約が要る。性能要求が無い |
+| D | 対象外にする | 公開面は変わらない | 対応表の行が「ある」にならない |
+
+**推奨: 実装する（案 A）。** 理由は 4 点。
+
+1. 既存 Op の合成だけで作れ、新規 `Op`・`BackendOps`・カーネル・`unsafe`・依存が要らない。
+2. `kron`／`tensordot`／`cdist`（`crates/autodiff/src/tensor_product_ops.rs`・#2640・#2678）と同じ型の追加で、ガードとテストの先例を使える。
+3. 互換区分は「追加のみ」。
+4. PyTorch でも `nn.Bilinear` は `forward(input1, input2)` を取り `nn.Sequential` に載らない。入力が 2 つの層を `Sequential` に載せないのは同じ扱いである。
+
+2 入力の経路について、#3741 の独自 Module 経路（`nn::Module::forward(&self, TapeRef<'t>, &Var<'t>)`・`crates/facade/src/nn/module.rs:45`）も入力は 1 つなので、それだけでは解決しない。利用者は自分の構造体に 2 入力の inherent メソッドを書き、中で `Var::bilinear` を呼ぶ（重みは `TapeRef::var`〈`crates/facade/src/lib.rs:2011`〉で葉にする）。案 B は論点 Q3 で所有者に問う。
+
+### §2.1 公開形とガード反転計画
+
+**シグネチャ案**
+
+| 対象 | シグネチャ |
+|---|---|
+| `Var::bilinear` | `fn bilinear(&self, x2: &Var<'t>, weight: &Var<'t>, bias: Option<&Var<'t>>) -> Result<Var<'t>, AutodiffError>`（`self` が `x1`。PyTorch `F.bilinear(input1, input2, weight, bias)` と同じ並び） |
+
+- 形状: `x1 = [*, in1]`、`x2 = [*, in2]`（先頭の次元は完全一致）、`weight = [out, in1, in2]`（PyTorch と同じ並び。Q1）、`bias = [out]`、出力 `[*, out]`。先頭の次元は `[N, in]` に平らにして計算し、最後に `[*, out]` へ戻す。受け入れる rank は Q2（推奨: rank 2 以上。rank 1 は拒否し、PyTorch との差として記録する。PyTorch の rank 1 の挙動は**未確認**で、実装時に参照版で確かめる）。
+- 実体の置き場所: 自由関数は新モジュール `crates/autodiff/src/bilinear_ops.rs`。`var.rs` には `crate::bilinear_ops::bilinear(self, x2, weight, bias)` への 1 行委譲だけを置く（`Var::cdist`〈`var.rs:5413`〉と同じ）。`tensor_product_ops.rs` に足さない理由は、その固定契約プローブ（`tensor_product_ops_hold_doctest_probe_body_matches_fixed_contract`・`workspace_declares_tensor_product_ops_fn_names_only_in_allowed_locations`）の固定集合を動かさずに済むため（§1.1 で別モジュールにしたのと同じ理由）。
+- 層: autodiff 内部に `crates/autodiff/src/nn/bilinear.rs` を新設し、`Bilinear`（`new(in1, in2, out, bias, seed)`／`from_parameters`／`bind`）と `BilinearVars<'t> { pub weight, pub bias }`（`forward(&self, x1, x2)`）を置く。`Linear`／`LinearVars`（`crates/autodiff/src/nn/linear.rs:53,565`）と同じ構成。初期化は `U(-1/√in1, 1/√in1)`（PyTorch のソースの定義に基づく記述で**未実測**）。`in1 == 0` は bound が inf になるので引数として弾く（`Linear::new` の `in_features == 0` と同じ。`linear.rs:81-91`）。
+- facade: `fandhe_ai::Var` は autodiff の再エクスポートなので `Var::bilinear` は追加の配置なしで届く。`bilinear_ops`・`Bilinear`・`BilinearVars` は再エクスポートしない。#3022 の (iv) 条件 (a)「その型を名指ししないと使えない操作がある」を満たさないため。`LinearVars`（`lib.rs:281`）の先例に合わせるかは Q4。
+- `Sequential::add_bilinear` は**作らない**（`Sequential::forward` は入力 1 つ。`sequential.rs:2540`）。`LayerSpec` も増やさない。
+- 反転する既存ガード: **該当なし**。`TensorProductOpsHoldDoctestGuard`（`lib.rs:6377`）とその固定文言検査は変えない。
+
+**#3818 が新しく作る正ガード（既存の命名にならった案）**
+
+- `var_bilinear_ops_method_is_thin_delegation`: 本体が `crate :: bilinear_ops :: bilinear ( self , x2 , weight , bias )` と一致すること（`var_activation_ops_methods_are_thin_delegations`〈`api_surface.rs:12228`〉と同じ形）。
+- `var_bilinear_is_reachable_via_facade_only`: `fandhe_ai::{Var, Tensor, AutodiffError}` だけで fn ポインタのシグネチャが一致し、手計算できる期待値が出ること（スタブでは通らない）。
+- `workspace_declares_bilinear_ops_fn_names_only_in_allowed_locations`: `bilinear_ops.rs` の自由関数と `var.rs` の委譲がそれぞれ 1 件だけであることのインベントリ。
+- `facade_does_not_reexport_or_declare_bilinear_ops`: facade の src が `bilinear_ops`・`Bilinear`・`BilinearVars` を再エクスポートも宣言もしていないこと。違反の種類ごとに検出できるかを合成入力で確かめる自己テスト `..._detects_each_category` を付ける。
+- `compat_sequential_has_no_bilinear_add_method`: `scan_type_impl_surface(content, "Sequential")` に `add_bilinear` が無いこと（2 入力の層を載せない決定を固定する）。
+
+否定プローブとして残す範囲はモジュールの再エクスポート、`Tape`／`Tensor<f32>` 上のメソッド、層型の再エクスポート。保留 doctest ガード（`BilinearOpsHoldDoctestGuard`）を作るかは Q5（推奨: 作らない）。
+
+### §2.2 rustdoc と doctest
+
+- `Var::bilinear` に役割要約（PyTorch 相当名・式・形状・`weight` の並び・bias の扱い）と、CPU の `fandhe_ai::tape()` だけで動く doctest を置く。重みを `var` で葉にし、手計算した値と比べる。GPU は要らない。
+- 2 入力の書き方の例（独自構造体の inherent メソッドから `Var::bilinear` を呼ぶ。重みは `nn::init::uniform`〈`crates/autodiff/src/nn/init.rs:687`〉で作る）を rustdoc に 1 本置く。
+- 失敗系（形状不一致・rank 不足・別 tape）は `compile_fail` を使わず、`Result::is_err` と variant を確かめる通常の doctest／統合テストで検証する（`docs/facade-speculative-decoding-batching-design.md` §18.3 の方針）。
+
+### §2.3 エラー型
+
+- 新しい variant は足さない（`AutodiffError` は `#[non_exhaustive]`。`crates/autodiff/src/error.rs:19-21`）。
+- 別 tape → `TapeMismatch`（`check_same_tape`）。rank・形状の不一致（`x1` の最後の次元 ≠ `weight[1]`、`x2` の最後の次元 ≠ `weight[2]`、先頭の次元の不一致、bias ≠ `[out]`、`weight` の rank ≠ 3）→ `Shape(ShapeError)`（使えない意味論のエラーは `InvalidArgument`）。層の構築時の `in1 == 0` → `InvalidArgument`。
+- 検査の順: tape の一致 → rank → 各次元 → tape への積み込み（reshape・matmul）。エラーのときに孤児ノードを残さない。本番経路で `unwrap`／`expect` を使わない。範囲外は fail-closed。
+- 大きさ 0 の軸: `N == 0` と `out == 0` は空テンソルとして通す。`in1 == 0`／`in2 == 0` は縮約が空なので bias だけが出る形になる（`matmul_zero_size_axis` の先例。挙動は #3818 のテストで固定する）。
+
+### §2.4 テスト計画
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 手計算の forward・backward（4 勾配）、bias なし、先頭の次元が多い場合、大きさ 0 の軸 | `crates/autodiff/src/bilinear_ops.rs` の単体テスト | CI | - | - | - |
+| 中央差分による勾配の突合 | 同上 `*_matches_central_difference` | CI | - | - | - |
+| 形状・rank・tape の拒否と孤児ノードが無いこと | 同上 | CI | - | - | - |
+| create_graph の二階有限差分 | `crates/autodiff/tests/create_graph.rs` に節を足す | CI | - | - | - |
+| 層 `nn::Bilinear` の初期化範囲・`from_parameters` の検査・`bind`→`forward` | `crates/autodiff/src/nn/bilinear.rs` の単体テスト | CI | - | - | - |
+| facade 経由で届くことと doctest | `crates/facade/tests/bilinear_ops_facade.rs`・rustdoc | CI | - | - | - |
+| CPU と f64 ホスト参照の突合（REQ-2 の複合判定）、CPU と NaiveOps の合成の一致 | `crates/facade/tests/bilinear_ops_backend_parity.rs::cpu_*` | CI | - | - | - |
+| CUDA と CPU の parity（forward・backward） | 同ファイル `cuda_bilinear_{forward,backward}_matches_cpu_reference` | `#[ignore]` | 未実測（#3860） | - | 該当なし |
+| Metal と CPU の parity | 同ファイル `metal_bilinear_*`（`cfg(target_os = "macos")`） | `#[ignore]` | - | 未実測（#3861） | 該当なし |
+| 正ガード 5 件と自己テスト（§2.1） | `crates/facade/tests/api_surface.rs` | CI | - | - | - |
+
+- 実機の手順と記録先は `docs/perf/logs/bilinear-ops-3818/README.md`（#3818 で新設）。cfg で 0 本しか動かなかった結果は pass の根拠にしない。Linux や M4 Max 開発機の代替値で pass にしない。
+- ROCm は facade 非公開（追跡表 # 24 は保留）なので「該当なし」。
+
+### §2.5 数値契約
+
+- 判定は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+- §1 と違い、**バックエンド間の bit 一致は主張しない**。経路が `matmul`（FMA 契約。CUDA の TF32 opt-in も効く）と `sum`（CPU は f64 チャンクの 2 段）を通るため。CPU と NaiveOps の比較は同じ合成どうしで行う。
+- 縮約は 2 段（in1 は matmul の連続した K ループ、in2 は `sum`）で、どちらも既存 Op の既存の契約のまま。新しい結合順序のカーネルは作らないので、baseline 方式（coding-rust.md の Tensor Core／split-K 節）の対象ではない。実機で複合判定を外れたら tolerance を緩めず所有者へ戻す。
+- `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は変えない。新しい baseline は作らない。FMA 契約・f64 長軸縮約の契約への影響はない。
+
+### §2.6 互換への影響
+
+判定（`docs/api-compat-0.14.0-decision.md` §8 の手順）: **追加のみ**。
+
+- `Var`: inherent メソッド 1 件を足す。`AutodiffError`: variant を足さない。`compat::Sequential`: 変えない。
+- `Bilinear`／`BilinearVars`: autodiff 内部だけ（Q4 で再エクスポートが選ばれても新しい型の追加で「追加のみ」）。
+- 利用者が `Var` に同名のトレイトメソッドを持つ場合は inherent が先に解決される。通常の追加と同じ扱いで破壊的には数えない。
+- 記録のずれ: `api-compat-0.14.0-decision.md:51`（§1.2 の # 10 行）は「層型・`Var` 演算・`add_*`」と見込むが、本設計は `add_*` を作らない。この doc は本 PR では直さず、Q7 として #3768 で確かめ #3818 で直す。
+
+### §2.7 適用記録・索引・追跡表
+
+- `docs/compat-api-scope.md` の適用記録は承認前なので本 PR では書かない。承認後に #3818 が追記する文案: `**適用記録（イシュー #3818・親 <Phase 親>。承認: <#3768 の回答 URL>）**: Var::bilinear を追加のみで公開。新規 Op・依存なし。Sequential::add_* は設けない（2 入力）。公開状態: 公開済み`。
+- 本 PR の更新は `docs/README.md` の索引 1 行と、追跡表 # 10 行の「設計記録」セルだけ。「承認」「0.14.0 の区分」「正ガード」列は変えない（正ガードの `path:line` は #3818 が書く）。
+
+### §2.8 ベンチと性能
+
+- 既定経路への影響はない（新しい API を足すだけで既存の演算・カーネルに触れない）。
+- 中間テンソル `[N, out, in2]` と forward ごとの weight の permute／reshape の分だけメモリと時間がかかる。新しい経路なので前後比較は要らない（未実測）。専用カーネル（案 C）はスコープ外。
+
+### §2.9 依存
+
+- 依存の追加: なし。許容 12 区分・禁止リストとの照合: 該当なし。新規 `unsafe`: なし。
+
+### §2.10 VJP・create_graph・合成方式
+
+新規 `Op` は作らない。独自の VJP は書かず、合成元の Op から自動で決まる。
+
+- 合成: `W = [out, in1, in2]` を `permute([1, 0, 2])`（`var.rs:2631`）→ `reshape([in1, out·in2])`（`:2531`）→ `x1f.matmul(W′)`（rank 2。`:394`）→ `reshape([N, out, in2])` → `mul(x2f.unsqueeze(1))`（`:689`・`:2976`。broadcast）→ `sum(Some(2))`（`:1166`）→ bias があれば `add(bias)`（`:666`）→ `reshape([*, out])`。permute した view への reshape に `contiguous` が要るかは実装時に確かめる。
+- 選ばない形: `einsum` は 1〜2 オペランドに限られる（`var.rs:2732` の doc）ので 3 オペランドの一括縮約には使えない。2 段目を rank 3 の `matmul`（`gemm_batched`）にすると create_graph が `Backward` で拒否される（同 doc・`docs/autodiff-higher-order-grad-decision.md` §14）。`x1 ⊗ x2` を作る 1 回の GEMM は中間テンソルが `[N, in1·in2]` と大きい。
+- **create_graph は対象にする（追加の作業なし）**。使うのは rank 2 の `MatMul`・`Permute`・`Reshape`・`Mul`・`BroadcastTo`・単一軸の `Sum`・`Add` で、いずれも `docs/autodiff-higher-order-grad-decision.md:119`（§8 の対象）と §14 に入っている。#3818 のテストに CPU の二階有限差分の突合を入れる。
+- PyTorch との差（rank 1 の入力の扱い、weight の並び）は PyTorch のソースの定義に基づく記述で**未実測**。実装時に参照版で確かめる。
+
+### §2.11 所有者へ戻す論点（#3768 の論点 3 へ渡す）
+
+確認がないときの扱いはどれも、確認があるまで実装へ進めない（公開面が無い今の状態を保つ fail-closed）。
+
+| 点 | 選択肢 | 推奨 |
+|---|---|---|
+| Q1 weight の並び | (a) PyTorch と同じ `[out, in1, in2]` (b) 内部で扱いやすい `[in1, out, in2]` | (a)（state_dict の相互運用） |
+| Q2 受け入れる rank | (a) rank 2 以上・先頭の次元は任意で完全一致 (b) rank 2 だけ（`LinearVars::forward` と同じ） | (a) |
+| Q3 2 入力の学習経路 | (a) `Var::bilinear` だけ (b) `FunctionalBuilder` にパラメータ付き 2 入力ノードも足す | (a)（(b) は別の承認） |
+| Q4 `BilinearVars` の再エクスポート | (a) 出さない (b) `LinearVars` の先例に合わせ root に出す | (a) |
+| Q5 未承認経路の固め方 | (a) 正ガードと否定ガードだけ (b) `BilinearOpsHoldDoctestGuard` も作る | (a) |
+| Q6 保存・export | #3750 の横断方針に従う（`Sequential` に載せないので現状の model_io・ONNX export に影響しない） | #3750 に委ねる |
+| Q7 記録のずれ | `api-compat-0.14.0-decision.md:51` の「`add_*`」を #3818 で「`Var` 演算（`add_*` なし）」に直す | 直す（#3818） |
+
+### §2.12 セキュリティ観点・スコープ外
+
+- A03: 形状は tape 操作や確保より前に検査して fail-closed にする（外部由来の重みを `from_parameters` で受ける場合も含む）。A04／A08: 判定の迂回経路を作らない（1 行委譲を正ガードで固定）。REQ-12: 生の `Tape`・内部の層型を公開シグネチャに出さない。秘密情報・ホスト名は書かない。
+- スコープ外: `FunctionalBuilder` のノード（Q3 (b)）、専用 GPU カーネル（案 C）、層型名の facade 公開（#3022）、ONNX export・model_io（#3750）、`Tensor<f32>`／`Tape` 上のメソッド。新しいイシューは起票しない（所有者の承認事項）。
+- #3818 は実機 parity が済むまで `Refs` 運用とする。
 
 ## §3 C7 ChannelShuffle（イシュー #3746 が追記）
