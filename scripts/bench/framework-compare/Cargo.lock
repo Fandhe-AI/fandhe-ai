@@ -2276,9 +2276,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51b2e0c0073abe6eb2ef4fa6d91cf410ee6631131f62e0b5a458bf2d0fe4c14b"
+checksum = "8056f8ff15e720e48ae4cb70359ab1f9da87e89244bb25f0d46a37a304448f3f"
 dependencies = [
  "fandhe-ai-autodiff",
  "fandhe-ai-backend-cpu",
@@ -2292,18 +2292,18 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-autodiff"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d670e8082d316bc7ee9425a2132a8ac3b49f730861212854df701442ff4b3fe5"
+checksum = "ed280e1a4ddc88f27e79fb6763fd73e203c722de7bd66f202d40525e665e08bc"
 dependencies = [
  "fandhe-ai-tensor-core",
 ]
 
 [[package]]
 name = "fandhe-ai-backend-cpu"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebdee06efad56d709a046b21f1e5f8dfb9d569de62fd531c70c590d6cdc72522"
+checksum = "dbaabaf472e26d68763380b295259078413c8310942d9b48b9ce2082dbaf1ffb"
 dependencies = [
  "fandhe-ai-tensor-core",
  "half",
@@ -2312,9 +2312,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-cuda"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20164e548d9ef99637a9443d39c4ebaf87cef3a2d72c3ccd4abf62b05e8272d6"
+checksum = "1756b061740379ae17fff721bffea57f5e616091ede4b081a4f332d3e1e2dcdf"
 dependencies = [
  "cudarc 0.19.8",
  "fandhe-ai-tensor-core",
@@ -2323,9 +2323,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-backend-metal"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9eb953ddd329be53896fc142d0dc84488038f3537e7432bee611608fbbc05e5"
+checksum = "71ec6b1a9c63a243f93ffc3caf01bf19bacd6eabb46a63603ff9db9d685445b3"
 dependencies = [
  "fandhe-ai-tensor-core",
  "half",
@@ -2336,9 +2336,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-onnx-interop"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a731b6c781c52475ba6d7e3ab3bd3eca33582214cc59846434eed3979e4a8f6"
+checksum = "0e21be4024b3fb584a911ddfda648d5ae44900b1d81f49b89160bb19ceb91472"
 dependencies = [
  "fandhe-ai-autodiff",
  "fandhe-ai-tensor-core",
@@ -2350,9 +2350,9 @@ dependencies = [
 
 [[package]]
 name = "fandhe-ai-tensor-core"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb45f6fd928c9ed3ec81548b77c7d70d2182547b607f326f9c71bd5ebff674f"
+checksum = "2c130991f9ae9fca662080b86376324a164f038ea4e20317d98837a539f2cd65"
 dependencies = [
  "half",
 ]

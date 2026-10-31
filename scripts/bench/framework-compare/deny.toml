@@ -84,7 +84,7 @@ ignore = [
 version = 2
 include-dev = true
 # 先頭 9 件はルート `deny.toml` の [licenses] allow と同一リスト。うち
-# `CDLA-Permissive-2.0` は `webpki-root-certs`（fandhe-ai 0.12.0 の facade →
+# `CDLA-Permissive-2.0` は `webpki-root-certs`（fandhe-ai 0.12.0 以降の facade →
 # ureq/native-tls 経由の推移的依存。ルートと同じ第 11 区分の監査済み版）用に
 # ルートを写したもので、本 workspace 限定の追加ではない（2026-10-27 所有者承認:
 # #3271 issuecomment-6426224103）。
