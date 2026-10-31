@@ -971,3 +971,233 @@ CUDA は `create_graph_extended_ops_cuda_matches_cpu`、Metal は `create_graph_
 ### 34.6 変えていないもの
 
 公開 API・1 階 `backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・`crates/autodiff/src`。C 区分・`Conv3d` 系・損失の残り variant を対象に加えていない。rustdoc は対象 Op の正本（`supports_create_graph` の網羅 match と決定記録 §21.2・§22〜§31）を示す一文だけを足した。
+## 35. 決定記録（イシュー #3722・親 #3719。f64 テープの create_graph 機構）
+
+### 35.0 位置づけ・承認根拠・境界・推奨
+
+- 状態: **設計記録のみ。推奨は「実装する（案 A）」で、承認は #3766（論点 2「`TapeF64` の `jvp` 系」・論点 3「f64 の数値契約」）の回答待ち**。本節は承認を代行しない。回答が出るまで、コード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない。
+- 基準: `origin/main` `69881d9da`。以下の行番号・規模はこの sha 上で再現できる。
+- 根拠: §33（#3074 の規模見積もり）と、ルート #3711 の起票経緯コメント（<https://github.com/Fandhe-AI/fandhe-ai/issues/3711#issuecomment-6542000986>・2026-10-31。27 項目は「実装」を既定として設計する）。後者は設計方針の根拠であり、承認ではない。
+- 推奨: **実装する（案 A）**。§33.7 の (b)「f32 `Tape` 限定で契約固定」は本節で改める。§33 の規模の議論（縮約系に構造演算が要る）は否定しない。そのうえで次を理由にする。
+  - 写しを f64 専用に複製し、対象 Op を 8 つに限るので、規模に上限がある（35.10・35.11）。
+  - 2 段に分けて実装できる（35.11）。
+  - 所有者方針が実装既定である。
+- 訂正の注記: §33.2 の表の `sum(Some(axis))`／`mean(Some(axis))` 行は列が 1 つずれている。訂正は本節で行い、§33 の本文は書き換えない。
+- 境界: 本節が扱うのは create_graph 機構だけ。4 関数（`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph`）の公開形・シグネチャ・`FunctionalTransformsHoldDoctestGuard` の扱いは #3723 が扱う。
+
+### 35.1 公開形
+
+内部シグネチャ案（autodiff。名前・形は #3766 の回答まで案）:
+
+```rust
+impl<'t> TapeF64<'t> {
+    pub fn backward_create_graph<'c>(
+        &self,
+        loss: &VarF64<'_, 't>,
+        child: &'c TapeF64<'t>,
+    ) -> Result<CreateGraphResultF64<'c, 't>, AutodiffError>;
+}
+```
+
+- 結果型 `CreateGraphResultF64<'c, 't>` は、`grad(&VarF64) -> Result<Option<VarF64<'c, 't>>, _>` と `child_var(..)` を持つ（f32 の `CreateGraphResult` と同じ意味論）。jvp の合成のため、内部向けの `mirror()` アクセサも持つ。
+- 子テープの `'t` は親と共有する。`TapeF64<'t>` は `'t` について共変なので、同じ f32 `Tape` を借用した 2 本の `TapeF64` を親子にできる。別の `'tc` にする案は 35.13 の論点に載せる。
+- 置き場: `crates/autodiff/src/f64_autograd/create_graph.rs` を、`f64_autograd.rs` の子モジュールとして新設する。`f64_autograd.rs` のパスは変えない。子モジュールは祖先の private 項目（`NodeF64`・`OpF64`・`binary_partials_f64` 等）に触れられる。結果型は `f64_autograd` から `pub use` し、`fandhe_ai_autodiff::f64_autograd::CreateGraphResultF64` の完全修飾パスを保つ。
+- facade 配置案: D-2 形の newtype（`fandhe_ai::CreateGraphResultF64<'c, 't>`。フィールドは `pub(crate)`）とし、`TapeF64::backward_create_graph` へ 1 式で委譲する。`f64_autograd_not_reexported_from_facade` が `f64_autograd` 経由の `pub use` を禁じているため、f32 の `CreateGraphResult` のような再エクスポートにはできない。
+- `first_order` の制約: newtype 越しに `&fandhe_ai::GradientsF64` を返すことは `unsafe` なしではできない。案は 3 つ。
+  - (a) facade の結果型が facade の `GradientsF64` を所有する（内部に分解用メソッドを置く）。
+  - (b) `first_order_get(&VarF64)` で値を素通しする。
+  - (c) 省いて `TapeF64::backward` の再呼び出しで代替する。
+  - 推奨は (a)。`repr(transparent)` キャストは使わない。
+- 内部の新 `OpF64` variant はすべて `pub(crate)`。`VarF64` の公開メソッド（`F64_AUTOGRAD_SURFACE` の 15 件）は増やさない。
+- 正ガードの反転・更新の対象（すべて `crates/facade/tests/api_surface.rs`。実装 PR で行う）:
+
+| ガード | 更新内容 |
+|---|---|
+| `F64_AUTOGRAD_SURFACE` | `TapeF64::backward_create_graph` と新しい型を追加する |
+| `f64_autograd_declared_once_in_lib_with_crate_private_field`・`f64_autograd_expected_decl` | 4 型目を追加する |
+| `f64_autograd_public_surface_is_exactly_approved_delegations` | 承認済み委譲に追加する |
+| `f64_autograd_not_reexported_from_facade`・`f64_autograd_reexport_violations` | 監視対象に新しい型名を足す |
+| `f64_autograd_struct_declarations_workspace_inventory` | 新ファイルの宣言を足す |
+| `f64_autograd_signature_probe` | 正のプローブを足す |
+| `f64_autograd_guards_detect_each_violation_class`（自己テスト） | すり替えの検出例を足す |
+| `workspace_declares_backward_create_graph_only_in_approved_locations` | 期待マップを 2 件から 4 件にする（または別名にする） |
+| `facade_tape_backward_create_graph_is_thin_delegation` | `determinism_fn_body` は lib.rs に同名の `pub fn` が 2 件あると `None` を返す。同名を採るなら抽出を `impl Tape` スコープに限る |
+
+- 否定のまま残すもの: `VarF64` 上の jvp 系の名前（#3723 の範囲）、`f64_autograd` モジュールの再エクスポート、`TapeF64` の `hvp`／`vjp`／`vmap`。
+- #3723 への申し送り: `scan_functional_transforms_reexports_and_declarations` は `impl Tape` 直下だけを例外にしているので、`impl TapeF64` への拡張が要る。
+
+### 35.2 rustdoc と doctest の例
+
+- `TapeF64::backward_create_graph` と結果型に、役割の要約と CPU だけで通る doctest を置く。例: `f(x) = sum(x*x*x)` の二階 `6x` を `child.backward` で読む。
+- GPU が要る例は置かない。置く場合は `no_run`／`#[ignore]` にする。
+- 失敗系は `compile_fail` に頼らない。正のプローブ・インベントリ・拒否テストで組む。
+- §33.8 の代替手順（f32 `Tape` へ載せ替える案内）は、案 A が採られれば不要になる。その場合は rustdoc 化しない。
+
+### 35.3 エラー型
+
+- 新しい variant は足さない。`TapeMismatch`・`DeviceMismatch`・`Backward`・`GradientTrackingDisabled`・`Shape`・`InvalidArgument` を再利用する。本番経路で `unwrap`／`expect` は使わない。
+- 入口検査は次の順序で固定し、子テープへ書く前・確保の前に行う。
+  1. `loss` が `self` に属さない: `TapeMismatch`
+  2. 子テープが親と同じ: `Backward`（`RefCell` の二重借用による panic も防ぐ）
+  3. f32 側 `Tape` の device が親子で違う: `DeviceMismatch`
+  4. 子テープが空でない: `Backward`（内部に `is_empty` を足す）
+  5. 祖先の収集と検査。範囲外 Op は `Backward`
+  6. 無変更の `self.backward(loss)` で 1 階勾配を得る
+  7. 写しと勾配グラフを構築する。途中で失敗したら内部の `rollback_to(0)` で子テープを空に戻す
+- checkpoint 検査は該当なし（`TapeF64` に checkpoint がない）。
+- 検査対象は「`requires_grad` かつ葉でない祖先」だけにする（§21.6 と同じ）。
+
+### 35.4 テスト計画
+
+実機の列はすべて「未実測」。
+
+| 区分 | 置き場 | 内容 |
+|---|---|---|
+| CI | `crates/autodiff/tests/f64_create_graph.rs`（新設） | `first_order()` が `TapeF64::backward` と bit 同一 |
+| CI | 同上 | `cg.grad` と 1 階勾配の一致（bit 一致を実測できた Op は bit で固定し、ほかは REQ-2。§34.4 の先例） |
+| CI | 同上 | 閉形式の二階（`x*x*x`・`x@x`〈matmul の両オペランドを追跡〉・`div`・`pow`） |
+| CI | 同上 | 1 階勾配の中心差分との REQ-2 突合 |
+| CI | 同上 | 閉包性: 子テープからさらに孫テープへ create_graph する |
+| CI | 同上 | 入口検査 4 種と範囲外 Op（`Max`）の拒否。拒否後に `child.is_empty()` であること |
+| CI | 既存 f64 テスト | 無変更で通ること |
+| CI | `crates/facade/tests/f64_create_graph_facade.rs`（新設） | 到達性とシグネチャ |
+| `#[ignore]` | 同ファイル | `f64_create_graph_cuda_matches_cpu`（CUDA は `TypedOps<f64>` のネイティブ経路）。未実測 |
+| `#[ignore]` | 同ファイル | `f64_create_graph_metal_matches_cpu`（Metal は `typed_ops_f64()` が `None` でホスト経路のみ）。未実測 |
+
+- 実機の記入欄は `docs/perf/logs/f64-create-graph-3786/README.md`（実装 PR で新設）。実測は Phase 10 で行う。
+- 線形の Op だけでは Hessian が 0 になりテストが意味を失うので、非線形な包みを入れる（§34.3 の方針）。
+
+### 35.5 数値契約（#3766 論点 3 への回答案）
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。比較は既存の `fandhe_ai_backend_cpu::assert_parity_f64`／`compare_f64`（`crates/backend-cpu/src/parity.rs`）で行う。autodiff 側のテストは `tensor-core` の tolerance 定数を使い、新しい定数は作らない。
+- 層:
+  - (N1) `first_order` は構造上 bit 同一。
+  - (N2) `cg.grad` 対 1 階勾配は REQ-2 が契約。CPU では逆数形（`g*(1/b)`）・同じホスト関数（`reduce_to_shape_f64`・`unreduce_broadcast_f64`）・同じ gemm dispatch を使うので bit 一致が見込めるが、これは推測であり契約にしない。
+  - (N3) 二階の値対独立参照（閉形式・f64 中心差分）は REQ-2。
+  - (N4) バックエンド間は REQ-2。`#[ignore]` で行う。
+- FMA 契約・f64 長軸縮約契約への影響はない（f64 のままで、`host_gemm_f64` の `mul_add` を流用するため）。
+- baseline は追加しない。単一の連続ループの経路で、split-K 等の対象外。tolerance・ガードレール閾値も変えない。
+- f64 専用のより厳しい判定は採らない。新しい判定契約になり別承認が要るため、35.13 の論点に載せる。
+
+### 35.6 互換への影響
+
+`docs/api-compat-0.14.0-decision.md` §8 の手順と §1.2 の行 2 に照らして判定する。
+
+| 対象 | 変更の種類 |
+|---|---|
+| `TapeF64` | メソッド追加（追加のみ） |
+| `CreateGraphResultF64` | 新しい型（追加のみ） |
+| `VarF64`・`GradientsF64` | 変更なし |
+| `AutodiffError` | variant を足さないので該当なし |
+| 内部の `OpF64`（`pub(crate)`） | 該当なし |
+
+結論は「追加のみ」。移行ノート（#3780）は「移行作業なし」と書く。
+
+### 35.7 適用記録・索引・追跡表
+
+- `docs/compat-api-scope.md` へ書く適用記録の案（**承認後の PR で追記する。本 PR では書かない**）:
+  - 見出し: f64 テープの create_graph 機構（`TapeF64::backward_create_graph`・`CreateGraphResultF64`）
+  - 公開状態: 未公開
+  - 根拠: 本節（§35）・#3766 の回答
+  - チェックボックス: 未チェック（承認後の PR で追記）
+- 本 PR で行うこと: `docs/README.md` の索引と、`docs/compat-matrix-ari-tracker.md` の # 2 行の「設計記録」セルの更新。承認・正ガード・0.14.0 の区分のセルは変えない（追跡表 §4 規則 1・6）。
+
+### 35.8 ベンチと性能への影響
+
+- 既定経路（f32 `Tape` 全体、既存 8 Op の `TapeF64::backward`）は変えない。`TapeF64::backward` に足すのは、内部の新 variant 向けの match 腕だけで、利用者が組むグラフには現れない。
+- 前後比較は計画しない。実装で既存腕に手を入れる場合に限り、5 回計測の中央値で前後比較し、規則は計測前に固定する。
+
+### 35.9 依存の追加の有無
+
+依存の追加はない。許容 12 区分・禁止リストとの照合で変化はない。新しい `unsafe` はない（35.1 で `repr(transparent)` キャストを採らないのはこのため）。
+
+### 35.10 機構の写し方（決定事項 1）
+
+- 方式の写し:
+  - V1（追跡される写しを係数にした `VarF64` 演算の合成）を基本にする。
+  - V2（親の記録値から作るホストマスク）は `Pow` の `a==0`／`b==0` の安全置換に使う。f32 の `create_graph.rs` の `where_cond`＋`log` と同じ方式。
+  - V3 は不要。f32 で V3 が要ったのは、1 階が f64 ホストで子が f32 という精度差のためで、f64 ではこの差がない。縮約は、1 階と同じホスト関数を forward にする内部 variant で揃える。
+- 写しは full mirror にする。係数を `var_no_grad` の定数にする §33.2 の方式は `jvp`／`jacfwd`／`jvp_multi` には足りるが、`jvp_create_graph` が子テープを孫テープへ create_graph するとき、入力の写しについて微分できなくなる。#3723 の 4 関数すべてを満たすため full mirror を採る。
+- 内部の新 variant（すべて `pub(crate)`）:
+
+| variant | forward | VJP |
+|---|---|---|
+| `Transpose`（rank 2） | 転置 | `Transpose` |
+| `Unreduce{dim}` | `unreduce_broadcast_f64` | 既存の `Sum{dim}` |
+| `BroadcastTo` | ブロードキャスト | `ReduceTo` |
+| `ReduceTo` | `reduce_to_shape_f64` | `BroadcastTo` |
+| `Log` | 対数 | `Div` |
+| `Where` | 定数の bool マスク | `Where` とゼロ定数 |
+
+- 閉包性: 子テープへ積む Op はすべて f64 create_graph の対象であり、各 variant の VJP は集合の中で書ける（§21.1 (4) の f64 版）。
+- fail-closed: `supports_create_graph_f64` をワイルドカードなしの網羅 match にし、新 variant を追加したら分類を強制する。
+- 共通化か複製か:
+
+| 観点 | 複製（推奨） | ジェネリック化 |
+|---|---|---|
+| 変更範囲 | f64 専用の小さな写し。f32 の機構は無変更 | f32 の `Op`（123 variant）・`push_eager`・`Var` に結びついた機構を `Tape`／`TapeF64` で統一する |
+| f32 への影響 | なし（bit 同一契約を損なわない） | bit 同一契約を損なうリスクがある |
+| 位置づけ | `autodiff-var-dtype-multiplexing-design.md` §5 の方針と矛盾しない | 同 §5 で着手しないとされた案 A そのもの |
+| 保守コスト | f64 の Op 集合は 8 で固定。f32 の C 区分・B 区分の拡張は f64 に波及しない。二重化するのは骨格だけ | 統一の継続コストが f32 側の拡張ごとに発生する |
+
+- 共有するのは形（入口検査の順序・結果型の API・テスト fixture の作り方）だけ。行数や時間の見積もりは、根拠がないため書かない（§33.4 の方針を継ぐ）。
+
+### 35.11 対象 Op と段分け（決定事項 2・4）
+
+| Op | 方式 | 必要な内部 variant | 段 |
+|---|---|---|---|
+| `add`／`mul`／`div`（同 shape） | V1 | なし | 第 1 段 |
+| `matmul`（rank 2） | V1 | `Transpose` | 第 1 段 |
+| `sum(None)`／`mean(None)` | V1 | `Unreduce` | 第 1 段 |
+| ブロードキャストを伴う二項 | V1 | `BroadcastTo`／`ReduceTo` | 第 2 段 |
+| `sum(Some)`／`mean(Some)`（`1/n` 係数） | V1 | `Unreduce`／`BroadcastTo` | 第 2 段 |
+| `pow` | V1＋V2 | `Log`／`Where` | 第 2 段 |
+| `max` | fail-closed | なし | 対象外 |
+
+- `max` は f32 の `Max` が C 区分で、#3724 で設計中のため揃えて fail-closed にする。#3724 の結論に従う後続は 35.13 の論点とする。
+- rank 3 以上の `matmul` は forward が拒否する。
+- 第 1 段（#3785）: autodiff 内部の基盤。
+  - 入口検査・祖先の収集と検査・写し・勾配グラフ・`rollback_to`・結果型、`Transpose`・`Unreduce` と第 1 段の Op。
+  - 第 2 段の Op は fail-closed。
+  - CPU の CI テスト。
+  - facade の公開面は変えない。既存の f64 正ガード群が無変更で通ること、1 階 `backward` が bit 同一であること。
+- 第 2 段（#3786）:
+  - `BroadcastTo`／`ReduceTo`／`Log`／`Where` と残りの Op。
+  - `Max` の拒否テスト。
+  - facade newtype と 35.1 のガード反転。
+  - `#[ignore]` の GPU テストとログ README。
+  - 承認を前提に、`compat-api-scope.md` の適用記録。
+- #3787・#3788 はこの機構の上で 4 関数を作る（#3723 の範囲）。
+
+### 35.12 セキュリティ観点・スコープ外・Closes／Refs
+
+- OWASP:
+  - A03: shape と要素数は、確保の前に `checked_bytes_for_f64`／`checked_product` 相当で検査する。
+  - A04／A08: 子テープへ書く前に fail-closed で検査し、迂回経路を作らない。
+  - DoS: 写しは祖先の値を複製するのでメモリが増える。rustdoc に明記する。
+  - 秘密情報・ホスト名は書かない。`unsafe` はない。
+- スコープ外（起票は所有者承認後。無断で起票しない）:
+  - 項目 2 の実機 parity を測る Phase 10 issue（追跡表は「該当 issue なし」のまま）
+  - f64 の `Max` の create_graph（#3724 の結論待ち）
+  - `TapeF64` の `hvp`／`vjp`／`vmap`
+- 本 PR は `Closes #3722`。docs のみの設計 issue で実測を要しないため。`Refs #3766 #3723 #3785 #3786` を併記する。
+
+### 35.13 所有者へ戻す論点（#3766 で問う）
+
+| # | 論点 | 推奨 | 代替 | 確認がないときの扱い |
+|---|---|---|---|---|
+| 1 | 項目 2 の機構 | 実装する（full mirror） | 対象外（§33 (b)） | 実装へ進めない |
+| 2 | facade に `TapeF64::backward_create_graph` と `CreateGraphResultF64` を公開するか | 公開する（f32 と対称） | 内部限定にし、jvp 4 関数だけを公開する | 実装へ進めない |
+| 3 | 名前 | 同名（ガード 2 件を impl スコープ化する） | 別名 | 実装へ進めない |
+| 4 | `first_order` の形 | (a) 所有 | (b) 素通し／(c) 省略 | 実装へ進めない |
+| 5 | `Max` | f32（#3724）に揃えて fail-closed | f64 だけ先に V2 で実装 | fail-closed |
+| 6 | `Pow` の `a==0`／`b==0` | `Where`＋`Log` の安全置換 | `a>0` に限り、ほかは `Err` | 実装へ進めない |
+| 7 | 数値契約 | REQ-2 のまま | f64 専用の判定（別承認） | REQ-2 のまま |
+| 8 | 子テープのライフタイム | `'t` を共有 | 独立の `'tc` | 実装へ進めない |
+| 9 | Phase 10 の実機 parity issue | 起票する（起票は承認後） | 起票しない | 起票しない |
+
+確認がないときの扱いは、実装へ進めず、保留のまま正ガード（否定ガード）を維持する。
+
+### 35.14 変えていないもの
+
+`crates/**`・公開 API・tolerance・baseline・依存・`unsafe`・ガードレール閾値・`docs/spec`・`docs/compat-api-scope.md`。
