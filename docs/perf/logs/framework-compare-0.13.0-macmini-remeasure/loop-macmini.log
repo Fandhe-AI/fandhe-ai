@@ -1,0 +1,6 @@
+run1: done. rows=48 pyrows=32 skipped=4 2026-10-31T05:00:14Z
+run2: done. rows=48 pyrows=32 skipped=4 2026-10-31T05:02:33Z
+run3: done. rows=48 pyrows=32 skipped=4 2026-10-31T05:03:52Z
+run4: done. rows=48 pyrows=32 skipped=4 2026-10-31T05:06:11Z
+run5: done. rows=48 pyrows=32 skipped=4 2026-10-31T05:08:30Z
+ALL-DONE completed=5/5

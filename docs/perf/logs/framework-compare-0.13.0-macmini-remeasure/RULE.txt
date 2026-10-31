@@ -1,0 +1,44 @@
+事前登録規則（Mac mini・Apple M4）0.13.0 6 フレームワーク同席計測 — 【固定済み】
+イシューなし（2026-10-31 所有者のチャットでの明示指示「0.13.0 で公開してください。framework-compare のピン =0.13.0 も承認します。」による。追跡は本 PR）。固定時刻: 2026-10-31T04:56:14Z（以後編集しない。固定後の変更は RULE.v2.txt を新設する）。
+本ファイルは時間の実測値を含まない（行数スモークの行数のみ）。0.12.0 の RULE.txt（../framework-compare-0.12.0-macmini-remeasure/RULE.txt）を雛形にした。
+0.12.0 との違いは 3 点だけ: (1) 単腕（旧条件腕を置かない）、(2) 系列 B のみ（系列 A〈対照〉を行わない）、(3) 前版比の参照先を 0.12.0 にする（0.12.0 は 0.11.0 比）。判定規則は 0.12.0 と同一。
+
+腕（単腕）:
+  計測腕 ARM = 5d05a50235138645b0b069060ed54dfd2c46db7f（main の #3709 マージ。v0.13.0 ピン入り）
+  方針: bench-fandhe は 0.12.0 から変えず、registry ピン（fandhe-ai）だけを =0.13.0 に上げる（0.10.0・0.11.0 と同じ単腕。旧条件腕・swap_fandhe_arm.py は使わない）。
+  計測前の事前確認（結果は README の「事前確認」に記録する。未確認のまま固定しない）:
+    scripts/bench/framework-compare について、0.12.0 の新条件腕 bdaca14ccff7a01a4582eb84c6655f025a23208f との差分が
+    ・*.rs の差 0 件、・Cargo.toml の差は fandhe-ai の版の行のみ、・Cargo.lock の差は fandhe-ai 系クレートとその推移的依存のエントリのみ、であること。
+  常駐入力の判別式（計測ツリーで 1 件ヒットしなければ fail。0.12.0 の新腕と同じ式。run ごとに検査）:
+    ^[[:space:]]+let c0 = tape\.matmul_resident\(
+  bench_py.py sha256: 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b（0.12.0 と同値。run ごとに照合）
+  Python 3 FW の版: 0.12.0 の計測と同じ版を使う（違っていれば記録のみ・上げない）。0.12.0 の記録（参照用。2026-10-27 所有者判断で再構築した版）:
+    Python 3.12.15（uv）。venv-torch = torch 2.14.0・scipy 1.18.1・numpy 2.5.4、
+    venv-tf = tensorflow 2.16.2・tensorflow-metal 1.2.0・numpy 1.26.4・keras 3.15.1。0.13.0 計測時の pip freeze は env/ に収録する。
+
+判定（0.12.0 から不変）: 比 = 同一 run 内の「有効な相手のうち最速 / fandhe-ai reuse」の 5 run 中央値（推論はスループット比。同じ式）。
+  比 > 1 で 1 位、>= 0.90 で僅差、それ未満は負け。相手側の parity_fail_count > 0 の行は判定不能（その相手を順位・最速に含めない）。
+  判定側（fandhe-ai reuse）の要素検証（parity_fail_count）が 1 件でも不合格なら、判定不能にせず生成を停止する（fail-closed）。
+  欠損 run・有効な相手の不在も生成停止。負けの「N 位」と相手名は 5 run 中央値で数える。tolerance・baseline は変えない。
+  N = 5。設定は既定（SME OFF・Graph capture OFF）。
+前版比（0.12.0 比。表示のみ・勝敗には使わない）: 同一セル・同一モードの fandhe-ai 中央値同士の比（0.13.0 の 5 run 中央値 ÷ 0.12.0 の 5 run 中央値。
+  推論はスループット比。<1 が高速化・推論は >1 が改善。0.12.0 に同モードの記録がないセルは fresh 同士）。0.12.0 は 2026-10-27 の計測で、日をまたぐため
+  計測日の負荷・機体の状態の揺れを含む（ライブラリの変更だけの効果ではない）。参照ファイル（sha256 を固定。run_0130.sh が照合する）:
+    framework-compare-0.12.0-macmini-remeasure/macmini-series-b/results-macmini-0.12.0-median5.jsonl
+      a74e4f5ff0fed000d9a1b20790593a02c16ecdc5edde3f4ddc7eff10e50923e8
+    framework-compare-0.12.0-macmini-remeasure/macmini-series-b/results-macmini-py-0.12.0-median5.jsonl
+      d42335c701c7a3fc0dc337d080557253ddda95fd9649624fb453a1c35951ab55
+  （GB10 側の参照ファイルは ../framework-compare-0.13.0-remeasure/RULE.txt に固定する）
+  勝敗の前版 tally は ../framework-compare-0.12.0-remeasure/scoreboard/gen_0120.out（1 位 10・僅差 4・負け 13・判定不能 1・ノイズ帯 0）を参照する。
+
+機体: machdep.cpu.brand_string == "Apple M4"（run ごとに検査）。M4 Max の値を Mac mini の値として使わない。公開テキストでは機体のホスト名を <metal-node> と書く。
+実機ロック: ~/work/.fandhe-hw-lock（owner "rel-0.13.0 2026-10-31T04:49:10Z"）。ロックなしの値は採らない。計測中のビルド・並走負荷は禁止。
+期待行数: Rust 48 / Python 32。旧条件腕はない。skipped は bench-burn gemm metal 512/1024/2048/4096 fresh の 4 件のみ許容
+  （MEASURE_ERROR: gemm checksum is degenerate。0.12.0 と同じ。それ以外の skipped は run を fail にする）。
+  行数スモーク（RULE 固定前・ビルド込み 1 round・値は判定に使わない。2026-10-31T04:49:42Z 開始〜2026-10-31T04:53:51Z 終了（事前ビルド込み）（<metal-node>）: rows 48・pyrows 32・skipped 4（burn Metal GEMM 512〜4096 fresh のみ）・rc 0）。
+系列: 系列 B のみ（各 run 前に load1 < 3.0 を最大 30 分待つゲート。5 run）。系列 A（ゲートなしの対照）は行わない。
+  したがって「ノイズ帯」（A/B で区分が反転した行）は算出できない。ページ・README・判定一覧では「対照系列なし・未算出」と書き、0 件とは書かない
+  （判定一覧の tally 行は `noise na`）。B が 5/5 完走しなければ B は打ち切りとして記録し、取り直しは RULE.v2.txt（A の代替には使わない）。
+  ビルドは系列開始前に 1 回だけ（macmini-0130b-loop.sh が macmini-run-0130.sh を BUILD_ONLY=1 で呼ぶ）。ゲートの数値検証（GATE-INVALID）・30 分のタイムアウト（GATE-TIMEOUT）は 0.12.0 と同じ。
+失敗時: 打ち切られた run はそのまま記録。取り直しは RULE.v2.txt。
+実機テスト: #3256 の M1〜M6・#3272 の X1 は 0.13.0 の本計測の範囲外とする（実施する場合は固定前にこの節へ追記し、時間系列の後に同じロック内で実行する）。

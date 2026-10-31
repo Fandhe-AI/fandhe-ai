@@ -1,0 +1,42 @@
+start 2026-10-31T05:07:09Z rev=5d05a502
+run_all rc=0
+stage1-done 2026-10-31T05:08:37Z rows=112 skipped=0
+{"framework":"fandhe-ai","version":"0.13.0","task":"gemm","device":"cpu","size":256,"median_s":0.000369941,"q1_s":0.000353882,"q3_s":0.000409733,"gflops":90.702,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.001869217,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.13.0","task":"gemm","device":"cpu","size":512,"median_s":0.001745066,"q1_s":0.001664239,"q3_s":0.001934837,"gflops":153.825,"checksum":937.743233,"warmup":20,"iters":20,"mode":"reuse","init_s":0.002499901,"parity_total":262144,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.13.0","task":"gemm","device":"cpu","size":1024,"median_s":0.004497437,"q1_s":0.004153615,"q3_s":0.004883370,"gflops":477.491,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.009002794,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.13.0","task":"gemm","device":"cpu","size":2048,"median_s":0.016167057,"q1_s":0.015795929,"q3_s":0.016579038,"gflops":1062.647,"checksum":-6016.774008,"warmup":20,"iters":20,"mode":"reuse","init_s":0.033921478,"parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.13.0","task":"gemm","device":"cpu","size":4096,"median_s":0.121701844,"q1_s":0.120370627,"q3_s":0.125254796,"gflops":1129.309,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.169033336,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"fandhe-ai","version":"0.13.0","task":"gemm","device":"cpu","size":4096,"median_s":0.121177524,"q1_s":0.120534382,"q3_s":0.126309454,"gflops":1134.195,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"cpu","size":4096,"median_s":0.220253986,"q1_s":0.218704734,"q3_s":0.221489986,"gflops":624.002,"checksum":-25768.736638,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":8.964539e-5,"parity_max_rel_err":1.691077e0,"parity_scaled_abs_bound":3.051757e-5,"parity_scaled_abs_rescued":672}
+{"framework":"burn","version":"0.21.0","task":"gemm","device":"cpu","size":4096,"median_s":1.192998431,"q1_s":1.192590141,"q3_s":1.193283440,"gflops":115.205,"checksum":-25768.726554,"warmup":20,"iters":20,"mode":"fresh","parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":8.964539e-5,"parity_max_rel_err":1.950224e0,"parity_scaled_abs_bound":3.051757e-5,"parity_scaled_abs_rescued":582}
+stage2-done 2026-10-31T05:10:03Z rows=8
+== --framework pytorch --task gemm --device cpu --size 256 ==
+== --framework pytorch --task gemm --device cpu --size 512 ==
+== --framework pytorch --task gemm --device cpu --size 1024 ==
+== --framework pytorch --task gemm --device cpu --size 2048 ==
+== --framework pytorch --task gemm --device cpu --size 4096 ==
+== --framework pytorch --task train --device cpu --size 64 ==
+== --framework pytorch --task infer --device cpu --size 64 ==
+== --framework tensorflow --task gemm --device cpu --size 256 ==
+== --framework tensorflow --task gemm --device cpu --size 512 ==
+== --framework tensorflow --task gemm --device cpu --size 1024 ==
+== --framework tensorflow --task gemm --device cpu --size 2048 ==
+== --framework tensorflow --task gemm --device cpu --size 4096 ==
+== --framework tensorflow --task train --device cpu --size 64 ==
+== --framework tensorflow --task infer --device cpu --size 64 ==
+== --framework scipy --task gemm --device cpu --size 256 ==
+== --framework scipy --task gemm --device cpu --size 512 ==
+== --framework scipy --task gemm --device cpu --size 1024 ==
+== --framework scipy --task gemm --device cpu --size 2048 ==
+== --framework scipy --task gemm --device cpu --size 4096 ==
+== --framework scipy --task train --device cpu --size 64 ==
+== --framework scipy --task infer --device cpu --size 64 ==
+== --framework pytorch --task gemm --device cuda --size 256 ==
+== --framework pytorch --task gemm --device cuda --size 512 ==
+== --framework pytorch --task gemm --device cuda --size 1024 ==
+== --framework pytorch --task gemm --device cuda --size 2048 ==
+== --framework pytorch --task gemm --device cuda --size 4096 ==
+== --framework pytorch --task train --device cuda --size 64 ==
+== --framework pytorch --task infer --device cuda --size 64 ==
+stage3-done 2026-10-31T05:11:13Z pyrows=28
+done. 2026-10-31T05:11:13Z

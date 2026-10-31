@@ -1,0 +1,15 @@
+# 0.13.0 スコアボード生成の引数（2026-10-31 の実測ログ〔gate.log・run.log・uptime_*.txt・gpu_util_before.txt・env_info.txt・loop.log・skipped-*.log〕と git から転記）。run_0130.sh が「--key=value」行をそのまま gen_0130.py へ渡す。
+# `<要記入` を含む行が 1 つでも残っていると gen_0130.py は HTML を生成しない（推測値で埋めない）。
+# 値は生のテキストで書く（`<` や `&` は生成器が HTML エスケープする。0.12.0 版のように `&lt;` を手で書かない）。
+# 0.12.0 版の gen_args.txt との違い: --m4-alt 系の対照系列の説明はない（系列 A を行わない）。GB10 の driver は env_info.txt から生成器が読む。
+--m4-series=系列 B のみ（各 run 開始前に load1 < 3.0 を最大 30 分待つゲート付き）・対照系列（ゲートなしの系列 A）は置かない
+--m4-load=系列 B の各 run 開始時 load1 = 1.39／2.57／2.35／2.00／1.77（ゲート通過時の値。gate.log 8 行・各 run の uptime_before.txt と一致）。run2・run4・run5 の前は直前 run の終了直後の load1 が 4.21・3.15・3.10 で、1 分ずつ待機してから通過（run1・run3 は待機なし）・5/5 run がゲートを通過・GATE-INVALID／GATE-TIMEOUT なし
+--m4-date=2026-10-31
+--m4-skipped-note=bench-burn gemm metal size=512/1024/2048/4096 mode=fresh: MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor is all-zero or non-finite; refusing to record timing（0.12.0 と同一・全 5 run 共通。それ以外の失敗なし）
+--gb-load=2026-10-31 04:59:06〜05:33:28 UTC に 5 ラウンド（ラウンド開始＝ゲート通過は 04:59:06／05:07:09／05:14:44／05:22:19／05:29:24）。各ラウンド前に load1 < 1.0 かつ GPU 0% の 3 連続ゲートを通過（gate.log 38 行）。ラウンド開始時 load1 = 0.82／0.56／0.33／0.36／0.63・GPU 使用率 0／0／0／0／0%・compute プロセスなし（全 5 run の env_info.txt）。全ラウンドでゲートの待機があった（待機 2.5〜4 分。待機の最初のサンプルは load1 = 3.33／7.71／5.94／5.04／5.59 で、run2〜5 は直前ラウンドの終了直後。run2 の最初のサンプルだけ GPU 1%・通過した 3 サンプルは全て GPU 0%）。GATE-INVALID・GATE-TIMEOUT なし
+--gb-date=2026-10-31
+--gb-skipped-note=なし（全 5 ラウンドの skipped-dgx-0.13.0.log が 0 バイト）
+--updated=2026-10-31
+--release-date=2026-10-31
+--commit-count=71
+--gb-cpu-note=0.13.0 で reuse が fresh より遅いのは N=256（1.91）と N=1024（1.14）で、N=512・2048・4096 は 0.99〜1.00（reuse と fresh が並ぶ）。0.12.0 は 5 サイズとも reuse が fresh より 1.23〜1.79 倍遅かった。0.12.0 から 0.13.0 で入った本番変更は matmul_resident の D2H 経路（#3677 の download_owned の追加、#3706 の出力 256 KiB 以下は copy・超は owned）で、本計測では区間の切り分けをしていない（この変更と reuse／fresh の変化の対応＝効果の帰属は、本計測では示さない）。変更時の A/B 記録は docs/perf/logs/cpu-gemm-download-owned-size-branch-3694/judge-3694.md と docs/perf/cpu-gemm-reuse-fresh-inversion.md（#3706 の A/B 判定は REJECT で、所有者判断により採用した）。N=256 の reuse が fresh より遅い後退は 0.13.0 でも残る

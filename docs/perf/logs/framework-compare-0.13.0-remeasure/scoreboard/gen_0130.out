@@ -1,0 +1,28 @@
+Mac mini（M4） gemm Metal N=256       1 位  vs candle     1.15x  run別 [1.12 1.09 1.15 1.15 1.16]  0.12.0 比 1.00×
+Mac mini（M4） gemm Metal N=512       1 位  vs candle     1.08x  run別 [1.45 1.16 1.08 1.08 1.08]  0.12.0 比 1.00×
+Mac mini（M4） gemm Metal N=1024      僅差   vs candle     0.99x  run別 [1.00 0.99 1.02 0.98 0.99]  0.12.0 比 0.98×
+Mac mini（M4） gemm Metal N=2048      僅差   vs candle     0.94x  run別 [0.94 0.94 0.94 0.94 0.94]  0.12.0 比 1.00×
+Mac mini（M4） gemm Metal N=4096      2 位  vs candle     0.88x  run別 [0.94 0.86 0.88 0.89 0.85]  0.12.0 比 0.96×
+Mac mini（M4） gemm CPU N=256         3 位  vs pytorch    0.71x  run別 [0.68 0.70 0.71 0.72 0.71]  0.12.0 比 0.99×
+Mac mini（M4） gemm CPU N=512         2 位  vs pytorch    0.76x  run別 [0.74 0.76 0.77 0.76 0.75]  0.12.0 比 0.99×
+Mac mini（M4） gemm CPU N=1024        2 位  vs pytorch    0.70x  run別 [0.68 0.80 0.70 0.80 0.66]  0.12.0 比 0.98×
+Mac mini（M4） gemm CPU N=2048        2 位  vs pytorch    0.52x  run別 [0.52 0.52 0.54 0.54 0.52]  0.12.0 比 0.97×
+Mac mini（M4） train Metal            僅差   vs pytorch    0.95x  run別 [0.95 0.95 0.96 0.95 0.96]  0.12.0 比 1.00×
+Mac mini（M4） infer Metal            1 位  vs candle     1.02x  run別 [1.03 1.02 0.91 1.03 0.98]  0.12.0 比 1.01×
+Mac mini（M4） train CPU              3 位  vs pytorch    0.28x  run別 [0.27 0.28 0.27 0.28 0.28]  0.12.0 比 0.98×
+Mac mini（M4） infer CPU              4 位  vs pytorch    0.15x  run別 [0.16 0.16 0.15 0.15 0.15]  0.12.0 比 1.02×
+GB10    gemm CUDA N=256        1 位  vs candle     1.16x  run別 [1.14 1.19 1.16 1.18 1.16]  0.12.0 比 1.00×
+GB10    gemm CUDA N=512        1 位  vs candle     1.14x  run別 [1.15 1.14 1.15 1.13 0.99]  0.12.0 比 0.99×
+GB10    gemm CUDA N=1024       1 位  vs candle     1.15x  run別 [1.14 1.15 1.19 1.15 1.14]  0.12.0 比 1.00×
+GB10    gemm CUDA N=2048       1 位  vs burn       1.13x  run別 [1.13 1.14 1.13 1.13 1.13]  0.12.0 比 1.00×
+GB10    gemm CUDA N=4096       1 位  vs burn       1.97x  run別 [1.97 1.94 1.97 1.92 1.98]  0.12.0 比 0.99×
+GB10    gemm CPU N=256         3 位  vs pytorch    0.72x  run別 [0.72 0.69 0.89 0.93 0.62]  0.12.0 比 1.04×
+GB10    gemm CPU N=512         1 位  vs candle     1.14x  run別 [1.15 1.14 0.99 0.93 1.43]  0.12.0 比 0.76×
+GB10    gemm CPU N=1024        1 位  vs candle     1.25x  run別 [1.21 1.25 1.21 1.40 1.57]  0.12.0 比 0.70×
+GB10    gemm CPU N=2048        1 位  vs tensorflow 1.74x  run別 [1.68 1.77 1.74 1.71 1.84]  0.12.0 比 0.54×
+GB10    gemm CPU N=4096        1 位  vs tensorflow 1.20x  run別 [1.22 1.21 1.20 1.17 1.19]  0.12.0 比 0.79×
+GB10    train CUDA             1 位  vs candle     1.99x  run別 [1.99 1.99 2.00 1.99 1.44]  0.12.0 比 1.01×
+GB10    infer CUDA             3 位  vs pytorch    0.51x  run別 [0.51 0.51 0.53 0.51 0.52]  0.12.0 比 0.99×
+GB10    train CPU              2 位  vs pytorch    0.52x  run別 [0.52 0.55 0.56 0.48 0.42]  0.12.0 比 0.98×
+GB10    infer CPU              2 位  vs pytorch    0.76x  run別 [0.81 0.78 0.76 0.74 0.72]  0.12.0 比 1.03×
+tally 13 3 11 invalid 1 noise na total 27
