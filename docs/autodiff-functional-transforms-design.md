@@ -977,7 +977,7 @@ CUDA は `create_graph_extended_ops_cuda_matches_cpu`、Metal は `create_graph_
 ### 35.0 位置づけ・承認根拠・境界・推奨
 
 - 状態: **設計記録のみ。推奨は「実装する（案 A）」で、承認は #3766（論点 2「`TapeF64` の `jvp` 系」・論点 3「f64 の数値契約」）の回答待ち**。本節は承認を代行しない。
-  - → #3785 追記: 承認は https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674（2026-11-01）で得られた。第 1 段の実装記録は §37。回答が出るまで、コード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない。
+  - → #3785 追記: 承認は https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674（2026-11-01）で得られた。第 1 段の実装記録は §37。上の「本節は承認を代行しない」と、承認前の方針（回答が出るまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` を変えない）は、この承認で役目を終えた。
 - 基準: `origin/main` `69881d9da`。以下の行番号・規模はこの sha 上で再現できる。
 - 根拠: §33（#3074 の規模見積もり）と、ルート #3711 の起票経緯コメント（<https://github.com/Fandhe-AI/fandhe-ai/issues/3711#issuecomment-6542000986>・2026-10-31。27 項目は「実装」を既定として設計する）。後者は設計方針の根拠であり、承認ではない。
 - 推奨: **実装する（案 A）**。§33.7 の (b)「f32 `Tape` 限定で契約固定」は本節で改める。§33 の規模の議論（縮約系に構造演算が要る）は否定しない。そのうえで次を理由にする。
