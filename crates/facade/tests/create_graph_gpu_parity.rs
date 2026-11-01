@@ -247,6 +247,36 @@ const CASES: &[Case] = &[
         run: run_select_reduce_quantile,
         reject: None,
     },
+    // 統計縮約 3 Op（イシュー #3792・決定記録 §33/§51）。`logsumexp`／`stat_nansum`／`stat_nanmean`
+    // は backend-cpu にだけ実装があり、CUDA／Metal ではホストへフォールバックする（経路 H）。
+    // 実機は未実測（#3856・#3858）。構造に MatMul は無い。
+    Case {
+        name: "stat_reduce_lse_nan_logsumexp",
+        family: "stat_reduce_lse_nan",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_reduce_logsumexp,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "stat_reduce_lse_nan_nansum",
+        family: "stat_reduce_lse_nan",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_reduce_nansum,
+        reject: None,
+    },
+    Case {
+        name: "stat_reduce_lse_nan_nanmean",
+        family: "stat_reduce_lse_nan",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_reduce_nanmean,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -448,6 +478,19 @@ fn run_select_reduce_quantile(tp: &Tapes) -> Outputs {
     })
 }
 
+/// 統計縮約（#3792）。入力は有限値（`run_select_reduce` の固定入力）、損失は `sum(y ⊙ y)`。
+fn run_stat_reduce_logsumexp(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().logsumexp(Some(1)).unwrap())
+}
+
+fn run_stat_reduce_nansum(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().nansum(Some(1)).unwrap())
+}
+
+fn run_stat_reduce_nanmean(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().nanmean(Some(1)).unwrap())
+}
+
 /// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
 /// 子テープは空のまま。
 fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
@@ -618,6 +661,10 @@ cuda_family_test!(
     create_graph_select_reduce_order_cuda_matches_cpu,
     "select_reduce_order"
 );
+cuda_family_test!(
+    create_graph_stat_reduce_lse_nan_cuda_matches_cpu,
+    "stat_reduce_lse_nan"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -640,6 +687,10 @@ metal_family_test!(
 metal_family_test!(
     create_graph_select_reduce_order_metal_matches_cpu,
     "select_reduce_order"
+);
+metal_family_test!(
+    create_graph_stat_reduce_lse_nan_metal_matches_cpu,
+    "stat_reduce_lse_nan"
 );
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
@@ -669,6 +720,11 @@ fn select_reduce_minmax_cases_pass_cpu_against_cpu() {
 #[test]
 fn select_reduce_order_cases_pass_cpu_against_cpu() {
     run_family("select_reduce_order", None);
+}
+
+#[test]
+fn stat_reduce_lse_nan_cases_pass_cpu_against_cpu() {
+    run_family("stat_reduce_lse_nan", None);
 }
 
 #[test]

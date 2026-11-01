@@ -563,8 +563,7 @@ fn adjacent_fail_closed_ops_stay_rejected() {
         &x0,
         &[2, 3],
     );
-    // 現 base で `false` のままの隣接 Op（#3791 の担当）。`median` は #3790 で対象化された
-    // ため差し替えた。先に対象化された場合は、その時点で `false` のままの Op へ差し替える。
-    assert_rejected("nanmean", |_, x| x.nanmean(None), &x0, &[2, 3]);
-    assert_rejected("nansum", |_, x| x.nansum(None), &x0, &[2, 3]);
+    // `median` は #3790、`nansum`／`nanmean` は #3792 で対象化されたため差し替えた。
+    // 恒久的に未対応の Op（`selu`）で拒否契約を保つ。
+    assert_rejected("selu", |_, x| x.selu()?.sum(None), &x0, &[2, 3]);
 }

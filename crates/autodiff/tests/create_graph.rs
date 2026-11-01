@@ -694,13 +694,13 @@ fn create_graph_rejects_custom_downstream_of_gelu() {
 }
 
 #[test]
-fn create_graph_rejects_unsupported_op_logsumexp() {
-    // イシュー #3077 で Softmax は対象になったため、fail-closed のまま
-    // 残る隣接 Op（`LogSumExp`）で拒否契約を維持する。
+fn create_graph_rejects_unsupported_op_selu() {
+    // イシュー #3077 で Softmax、#3792 で LogSumExp が対象になったため、
+    // fail-closed のまま残る隣接 Op（`Selu`）で拒否契約を維持する。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
-    let loss = x.logsumexp(Some(1)).unwrap().sum(None).unwrap();
+    let loss = x.selu().unwrap().sum(None).unwrap();
 
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
@@ -2956,13 +2956,7 @@ fn create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty(
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
-    let loss = x
-        .softmax(1)
-        .unwrap()
-        .logsumexp(Some(1))
-        .unwrap()
-        .sum(None)
-        .unwrap();
+    let loss = x.softmax(1).unwrap().selu().unwrap().sum(None).unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
