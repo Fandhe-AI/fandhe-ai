@@ -1136,6 +1136,47 @@ fn triplet_inverse_scale_second_order_overflow_is_rejected() {
     );
 }
 
+/// MultiMargin p=2 の Z が f32 再構成で桁落ちする入力は拒否する（非 root の二階が H=0 で誤るのを防ぐ）。
+#[test]
+fn multi_margin_p2_cancellation_in_f32_reconstruction_is_rejected() {
+    fn build<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        z.reshape(&[1, 2])?.multi_margin_loss(
+            &i32t(vec![0], &[1]),
+            &MultiMarginOptions::default().p(2).margin(1.0),
+            Reduction::Sum,
+        )
+    }
+    assert_rejected_then_retry_ok(
+        "multi_margin p=2 cancellation",
+        build,
+        &[1e8, 1e8],
+        build,
+        &[0.3, 0.5],
+    );
+}
+
+/// Triplet 1<p<2 で微小な非ゼロ成分が曲率の負べきを f32 範囲外にする入力は拒否する。
+#[test]
+fn triplet_p_between_1_and_2_tiny_component_is_rejected() {
+    fn build<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        tri_loss(
+            z,
+            &TripletMarginOptions::default()
+                .p(1.1)
+                .eps(0.0)
+                .margin(2.0)
+                .swap(false),
+        )
+    }
+    assert_rejected_then_retry_ok(
+        "triplet p=1.1 tiny component",
+        build,
+        &[f32::from_bits(1), 1.0, 0.0, 0.0, 1.0, 2.0],
+        build,
+        &[0.5, 0.25, 1.0, 1.5, 2.0, 0.75],
+    );
+}
+
 /// ignore 行の logits に NaN があっても二階が NaN にならない。
 #[test]
 fn cewo_ignore_row_nan_logits_keep_second_order_finite() {

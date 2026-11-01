@@ -402,6 +402,14 @@ pub(super) fn multi_margin_cgrad<'c>(
                 m_data[i * c + j] = true;
                 count += 1.0;
                 if p == 2 {
+                    // 子テープは Z を f32 の `(margin - x_y) + x_j` で再構成する。桁落ちでホストの f64 値と
+                    // ずれると H=where(M, 2Z, 0) の二階が誤る（push_v3 は dx の値しか補正しない）ため拒否する。
+                    let z32 = (margin - row[y]) + xj;
+                    if (z - f64::from(z32)).abs() > z.abs() * 2f64.powi(-10) {
+                        return Err(invalid(
+                            "MultiMargin: マージン項の f32 再構成が桁落ちでホストの f64 値とずれるため拒否",
+                        ));
+                    }
                     let h = 2.0 * z;
                     stage(z)?;
                     stage(h)?;
@@ -836,6 +844,14 @@ fn pair_info(
         }
         stage(mx)?;
         let inv = (1.0 / mx) as f32;
+        if p > 1.0 && p < 2.0 {
+            // 曲率の成分ごとの負べき (p-1)·(|v_k|/mx)^(p-2) と cotangent・逆スケールの積（§40.12）。
+            for &x in v.iter() {
+                let u = x.abs() / mx;
+                stage(u.powf(p - 2.0))?;
+                stage(sb * (p - 1.0) * u.powf(p - 2.0) * f64::from(inv))?;
+            }
+        }
         if p != 1.0 {
             stage(sb * f64::from(inv) * (p + 1.0) * d as f64)?;
         }
