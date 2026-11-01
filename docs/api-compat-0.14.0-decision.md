@@ -280,3 +280,134 @@ docs のみの変更で、OWASP A03 の実装面は非該当。A08 の観点で�
 - spec 改訂提案（#3715）
 - 移行ノート雛形（#3780）
 - 追跡表の自動集計（#3781）
+
+## 12. Phase 2 設計記録の横断突き合わせ（イシュー #3764）
+
+イシュー #3764（親 #3712 系。Phase 2 の最後の集約）。Phase 2 で追跡表 `docs/compat-matrix-ari-tracker.md` の 29 項目の設計記録がそろったので、Phase 3 の承認（#3766〜#3771）へ進む前に、次の 4 点を 1 か所に集める。
+
+1. 各設計記録の「互換への影響」を §3.1・§4・§8 に照らした集約表（12.1）
+2. 記録のずれ・訂正事項（12.2）
+3. 移行ノート `docs/migration/0.14.0.md`（雛形は #3780）に載せる変更（12.3）
+4. Phase 3 で問う論点の領域別一覧（12.4）と、依存・`unsafe` の件数（12.5）
+
+### 12.0 位置づけ・境界
+
+- 基準面: `origin/main` の `52ca9bf3a`（2026-11-01 確認）。コード・依存・tolerance・baseline・spec・CI は変更しない
+- 本節は集約と突き合わせだけを行う。§1〜§11 の本文は書き換えない（食い違いは 12.2 に訂正事項として書く。§1.4 と同じやり方）。各設計記録の本文も書き換えない
+- 本節は承認をしない。#3718 には所有者の回答の記録コメント（<https://github.com/Fandhe-AI/fandhe-ai/issues/3718#issuecomment-6543681116>、2026-10-31）があり、中身は「`Device` だけ 0.14.0 で・版数 0.14.0・spec 改訂提案は 1 件だけ出す・追跡表と雛形を承認」である。これは事実として引くだけで、§2 の承認欄・追跡表の承認列への転記は行わない（同コメントのとおり Phase 4 以降の最初の PR が行う）
+- `Device::Rocm` の追加そのものの承認は #3771 の回答待ちである。spec 改訂提案 Fandhe-AI/fandhe-ai-spec#87 は 2026-11-01 時点で OPEN で、受理は未確認
+- 推奨（実装／対象外）は各設計記録が書いたもので、いずれも所有者の承認前である。「承認済み」と言えるのは `backend-gpu-linalg-decision.md` §11 の公開形（#3140 のコメント 6227907703）だけである
+
+### 12.1 集約表（追跡表の 29 項目）
+
+1 行 1 項目で、キーは追跡表の通し番号 # である。設計記録の節は各 doc の見出しで解決することを確認した（見出しの書式は `## N.` と `## §N` の 2 種がある）。
+
+区分欄の読み方（12.2 (c) の統一規則）:
+
+- **追加のみ**: 公開名（型・関数・メソッド・variant・クレート）を足す。既存のシグネチャ・derive・variant は不変
+- **該当なし**: 公開名も型も変わらず、変わるのは挙動だけ（`Err` が `Ok` になる受理範囲の拡大など）。挙動は 12.3 の「挙動のみの変更」欄に載せる
+- **破壊的で承認要**: §8 手順 2 の破壊的条件に当たる。承認は #3718・#3771 の条件を満たすまで実装しない
+
+Phase 3 の issue 本文の「項目 N」は、#3766・#3767 では追跡表の # と同じ（項目 1〜5）だが、#3768 以降は追跡表の # + 1 になる（例: #3768 の項目 8〜16 は追跡表 # 7〜15、#3769 の項目 17〜24 は # 16〜23、#3770 の項目 26〜28・30 は # 25〜27・29、#3771 の項目 25・29 は # 24・28）。同じ注記が #3750 §0 にもある。追跡表 # 6 に当たる Phase 3 の issue は無い。
+
+| # | 項目 | Phase 3 | 設計記録（issue と節） | 推奨 | 触れる公開型 | 区分 | 備考・§1.2 の見立てとの差 |
+|---|---|---|---|---|---|---|---|
+| 1 | 低精度演算の `Var` 以外の配置 | #3766 | #3721（`autodiff-low-precision-op-extension-decision.md` §8） | 対象外（Q1 の推奨）。実装するなら案 C | なし（実装なら新モジュール・新関数） | 該当なし（実装なら追加のみ） | 対象外として数えるには Q2 の個別承認が要る（D-0 未掲載のため） |
+| 2 | `TapeF64` の `jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` | #3766 | #3722（`autodiff-functional-transforms-design.md` §35）、#3723（同 §36） | 実装 | `TapeF64`（メソッド追加）、新型 `CreateGraphResultF64`・`JvpCreateGraphResultF64` | 追加のみ | `VarF64`・`GradientsF64`・f32 の `Tape` は不変 |
+| 3 | `create_graph` の C 区分 24 Op | #3767 | #3724（`autodiff-higher-order-grad-decision.md` §34）、#3725（同 §33）、#3726（同 §35）、#3727（同 §36）、#3728（同 §37）、#3739（同 §48） | 実装（全族。RNN セルの採否は #3728 に従い個別確認） | なし（`Op` は `pub(crate)`） | 該当なし | `Err` が `Ok` になる挙動。記録の表記は §34・§48 が「該当なし」、§33・§35〜§37 が「追加のみ」と割れている（12.2 (c)） |
+| 4 | `create_graph` の B 区分の未実装 Op | #3767 | #3729（同 §38）、#3730（同 §39）、#3731（同 §40）、#3732（同 §41）、#3733（同 §42）、#3734（同 §43）、#3735（同 §44）、#3739（同 §48） | 実装。一部対象外: `CtcLoss` は対象外（§40）。`Pinv`・`Lstsq` は打ち切りなしの入力だけ受理（§43） | なし（`Op` は `pub(crate)`、オプション型・`Reduction` は不変） | 該当なし | 記録の表記は「追加のみ」。`Err` が `Ok` になる挙動 |
+| 5 | 二階微分の拒否範囲と意味論 | #3767 | #3736（同 §45）、#3737（同 §46）、#3738（同 §47）、#3739（同 §48） | 実装。一部対象外: §45 は S0（案 A）で `LayerNorm`・`RmsNorm`・`BatchNorm` の拒否を狭める。§46 は `Det` だけ受理へ広げ、`Inv`・`Solve`・`SlogdetLogAbsDet` は対象外。§47 は B1（PyTorch 準拠） | なし | 該当なし | §45 の S0 は issue 題の S2 とは違う。§47 は**既に `Ok` を返している入力の値が変わる**（`padding_idx: Some(p)` の `hessian`・`hvp`・`jvp_create_graph` の列 `p`） |
+| 6 | GPU 線形代数の opt-in 関数 | なし | 既存 `backend-gpu-linalg-decision.md` §11（Phase 2 の設計 issue なし） | 実装（公開形は #3140 のコメント 6227907703 で承認済み。実装は #3405） | facade の関数 2 件の追加 | 追加のみ（§11.2 の 9） | Phase 3 で問う論点なし。facade 経由の実機 parity の測定は #3866 |
+| 7 | `add_upsample` の `scale_factor` 指定 | #3768 | #3740（`autodiff-spatial-layers-decision.md` §9）、#3750（`compat-new-layers-io-export-decision.md` §10〜§12） | 実装（案 A。別名メソッド `add_upsample_scale_factor`） | `Sequential`（inherent メソッド 1 件） | 追加のみ（案 B なら破壊的で承認要） | `add_upsample`・`UpsampleSize` は不変 |
+| 8 | 独自 `Module` から組み込み層を呼ぶ経路 | #3768 | #3741（`facade-nn-module-exposure-decision.md` §23） | 実装（案 A。`compat::Sequential` に `nn::Module` の impl を足す） | `compat::Sequential`（trait impl の追加 1 件） | 追加のみ | §1.2 は「trait にメソッドを足す」と見込んだが、実際は trait impl の追加で `Module` のメソッドは増えない |
+| 9 | C1: Hardshrink・Softshrink | #3768 | #3742（`nn-shrink-bilinear-channel-shuffle-decision.md` §1）、#3750（`compat-new-layers-io-export-decision.md` §10〜§12） | 実装（既存 Op の合成） | `Var`・`compat::Sequential`（inherent メソッド各 2 件） | 追加のみ | 差なし |
+| 10 | C2: Bilinear | #3768 | #3743（同 `nn-shrink-...` §2） | 実装（案 A。既存 Op の合成） | `Var`（inherent メソッド 1 件） | 追加のみ | `Sequential::add_*` は作らない。§1.2 の # 10 行（`add_*` を見込む）とずれており、同記録の Q7 で #3768 が確かめ #3818 が直す |
+| 11 | C3: BatchNorm3d | #3768 | #3744（`autodiff-batch-norm-3d-decision.md` §0〜§12）、#3750 | 実装（案 A） | `Var::batch_norm` 系（シグネチャ不変）、`Sequential::add_batch_norm3d` | 追加のみ | rank 5 が拒否から受理に変わる。rank 6 以上の `RankMismatch.expected` の値が 4 から 5 に変わる（挙動のみ） |
+| 12 | C5: CosineSimilarity | #3768 | #3745（`autodiff-similarity-distance-decision.md` §0〜§12） | 実装（案 A） | `Var`（inherent メソッド） | 追加のみ | 差なし。# 13 と同じ記録 |
+| 13 | C6: PairwiseDistance | #3768 | #3745（同上） | 実装（案 A） | `Var`（inherent メソッド） | 追加のみ | 差なし。# 12 と同じ記録 |
+| 14 | C7: ChannelShuffle | #3768 | #3746（同 `nn-shrink-...` §3）、#3750 | 実装（案 A） | `Var`・`compat::Sequential`（inherent メソッド各 1 件） | 追加のみ | 差なし（§3.6 が # 14 行との一致を確認済み） |
+| 15 | C9: 3 次元適応プーリング・LPPool・FractionalMaxPool | #3768 | #3747（`autodiff-pool3d-ops-decision.md` §18）、#3748（同 §19）、#3749（同 §20）、#3750 | 実装 | `Var`・`compat::Sequential`（inherent メソッド）。`BackendOps` は内部クレートで既定実装つきメソッド追加 | 追加のみ | FractionalMaxPool の乱数契約は #3768 で個別に確認する |
+| 16 | SWA の `FitConfig` 形 | #3769 | #3751（`autodiff-swa-decision.md` §20） | 対象外（案 A。`Callback::Swa` だけを正とする） | なし（案 B なら `FitConfig` に bits で保持するフィールド） | 該当なし（案 B なら追加のみ） | `f32` を直接持つ形は `Eq` を失い破壊的になるため採らない |
+| 17 | A1: EMA と `compile_with_amp` の併用 | #3769 | #3752（`autodiff-ema-decision.md` §17） | 実装（案 A。skip に追従） | なし（シグネチャ・variant・derive は不変） | 該当なし | `Err` が `Ok` になる挙動。記録の表記は「追加のみ」（12.2 (c)） |
+| 18 | A2: EMA の減衰率ウォームアップ | #3769 | #3753（同 §18） | 実装（案 A。既定 OFF） | `EmaCallback`・`ExponentialMovingAverage`（非公開フィールドと inherent メソッド 2 件） | 追加のみ | 既存 API の意味論は既定 OFF で不変 |
+| 19 | A3-a: param groups と AMP の併用 | #3769 | #3752（`autodiff-param-groups-decision.md` §14。skip 規則は `autodiff-ema-decision.md` §17） | 実装（(a) 新しい inherent メソッド `compile_with_amp_and_param_groups`） | `Sequential`（inherent メソッド） | 追加のみ | §1.2 の「`ParamGroupStep` へのメソッド追加」には触れない（`AmpConfig`・`ParamGroup`・`ParamGroupStep` は不変） |
+| 20 | A3-b: param groups と `LrSchedule` の併用 | #3769 | #3754（同 §15） | 実装（案 A） | なし（groups があるときの `Err` を `Ok` にするだけ） | 該当なし | 記録の表記は「追加のみ」。groups 空の既定経路は bit 不変 |
+| 21 | A3-c: param groups の `state_dict` 保存 | #3769 | #3755（同 §18） | 実装（案 A） | なし（`save_model`／`load_model`・`ModelIoError` は不変） | 該当なし（保存形式の追加） | 記録の表記は「追加のみ」。新リーダーは旧ファイルを読めるが、旧リーダーは新ファイルを fail-closed で拒否する（前方互換なし） |
+| 22 | A3-d: param groups と `DeviceParamStore` 常駐更新 | #3769 | #3756（同 §19） | 実装（案 A） | `Sequential`（inherent メソッド）、`DeviceParamStore`（非公開フィールド）。内部の `BackendOps` に既定実装つきメソッド | 追加のみ | 新しい FFI `unsafe` が要る見込み（12.5）。実機 parity は #3862・#3863 |
+| 23 | A3-g: `Optimizer` に Adadelta・Adamax・NAdam・RAdam | #3769 | #3757（`compat-optimizer-variants-0.14.0-decision.md` §0〜§13） | 実装 | `Optimizer`（既に `#[non_exhaustive]` のため variant 追加は非破壊。§1.4） | 追加のみ | model_io の kind を足す（`format_version` 2 は据え置き）。旧リーダーは未知の kind を fail-closed で拒否する |
+| 24 | ROCm の facade 公開（`Device::Rocm`） | #3771 | #3758（`backend-rocm-device-exposure-decision.md` §10） | 実装（案 A。cfg なしで `Device::Rocm(usize)`） | `Device`（`Rocm(usize)` の追加と `#[non_exhaustive]` の後付け） | **破壊的で承認要**（`enum_variant_added`・`enum_marked_non_exhaustive`） | `_` 腕が要る箇所が §3.2 の「`resolve_ops` だけ」より広い（12.2 (b)）。`BackendError` は追加のみ。`available_devices`・`tape_for` などの戻り値に値が増える |
+| 25 | B1: ONNX モデルの学習の facade 公開 | #3770 | #3759（`onnx-autograd-decision.md` §8） | 実装（案 A。`OnnxModel` への薄い委譲） | `OnnxModel`（メソッド追加）、`OnnxError`（`#[non_exhaustive]` への variant 追加）、新 3 型 | 追加のみ | `OnnxValue` は不変（§1.5 の懸念は解消）。6 op のエラーが内部で `UnsupportedOp` から `UnsupportedInAutograd` に変わる（facade 外の挙動差） |
+| 26 | B3: ONNX export の `Sigmoid` | #3770 | #3760（`facade-onnx-export-exposure-decision.md` §19） | 実装（(α)。既存の統一複合判定で検証） | facade の公開項目は変わらない。autodiff の `Module::as_sigmoid`（既定実装つき） | 追加のみ（autodiff のフック）。facade の型は該当なし | これまで `Err` だった `Sigmoid` を含むモデルが `Ok` になる。単体の publish dry-run は registry 上の autodiff を参照して失敗しうる（一括 dry-run は成立） |
+| 27 | B5: safetensors の f32 以外の型 | #3770 | #3761（`facade-safetensors-exposure-decision.md` §13） | 実装（案 C。別名の入口） | `LoadError`（`#[non_exhaustive]` への variant 追加）、新 2 型、別名の関数 | 追加のみ | 既存 7 アイテムのシグネチャは不変。§1.2 の見立てはジェネリック化の余地を残していた |
+| 28 | HF Hub 連携の 2 段目（`hf-hub` の crates.io 公開と数え方） | #3771 | #3762（`hf-hub-integration-design.md` §10） | 実装（A。0.14.0 で公開） | 新クレートの全公開型（初回公開で基準版なし）。facade の型は該当なし | 追加のみ（新クレート） | 公開後は `EXPECTED_LIB_PUBLIC` が semver 面になる。`download` の公開とリダイレクト先ホストの allowlist は別承認 |
+| 29 | `caches` で表せない内部状態を持つモデルの speculative decoding・連続バッチング | #3770 | #3763（`facade-speculative-decoding-batching-design.md` §29） | 実装（B2。別 trait＋専用の入口） | 新 trait `StatefulAutoregressiveModel`、新しい自由関数、`step_stateful`（inherent メソッド） | 追加のみ | 条件: `BatchScheduler` の `Send`／`Sync` を保つ（型消去の箱に `Send + Sync` を付け、正のプローブで固定） |
+
+**結論**: 破壊的なのは # 24 `Device` の 1 件だけで、§3.1 (a)・§3.2 と #3718 の回答の記録（`Device` だけ 0.14.0）に一致する。ほかの 28 項目は「追加のみ」か「該当なし」で、設計を「追加のみ」に寄せる条件（既定実装・bits 保持・別名の入口・`OnnxValue` に variant を足さない）を各記録が満たしている。`ParamGroupStep` と `Module` には必須メソッドを足さない設計になっている（§4）。
+
+### 12.2 訂正事項・記録のずれ（§1〜§4 は書き換えず、ここへ記録する）
+
+- **(a) §1.2 の見立てと実際の設計の差**: # 7（別名メソッド）、# 8（メソッドでなく trait impl）、# 10（`add_*` を作らない）、# 19（`ParamGroupStep` でなく新しい inherent メソッド）、# 25（`OnnxValue` は不変）、# 27（ジェネリック化でなく別名の入口）。いずれも設計が見立てより「追加のみ」の側に寄っており、判定は変わらない。# 10 は記録側の Q7 で #3768 が確かめ、#3818 が §1.2 を直す
+- **(b) §3.2 の `_` 腕の在庫**: §3.2 は「`_` 腕が必須になるのは `resolve_ops` だけ」と書くが、`backend-rocm-device-exposure-decision.md` §10.6 は doctest・保留ガード G1・テスト 4 本にも `_` 腕が要るとする。判定（破壊的で承認要）は変わらない。`Device` の承認が出た後に #3853 が在庫を数え直す
+- **(c) 「Err→Ok で公開型は不変」のラベルの割れ**: 同じ種類の変更に、記録によって「追加のみ」（higher-order の §33・§35〜§44、EMA §17、param groups §15・§18 など）と「該当なし」（higher-order の §34・§45〜§48）が付いている。§8 手順 4 の読み方を本節で統一した（12.1 の区分欄の定義）。**型の区分は公開名を足すかで決め、挙動の変化は区分と別に 12.3 へ載せる**。記録の本文は書き換えず、どちらのラベルでも §8 の結論（破壊的でない）は同じである
+- **(d) 追跡表 # 6 の承認欄**: 「前提の実機 parity は未実測のため公開の条件は未充足」は、`backend-gpu-linalg-decision.md` §11.1 の G2 充足の記述（2026-10-28。CUDA は `docs/perf/logs/cuda-linalg-parity-3138/README.md`、Metal は `docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md`）と食い違っていた。G2 は充足済みで、未実測なのは facade 経由の実測（#3866）である。§11.1 を読み直して確かめたうえで、追跡表の該当セルの後半だけを事実に直した。承認の値（公開形は承認済み）は変えない
+- **(e) `docs/README.md` の索引**: 本書の注釈にあった「承認は #3718 待ち」は、#3718 に回答の記録コメントがあることと合わない。本 PR で「#3718 に回答の記録あり（転記は Phase 4）」へ直した。本書 §2 の承認欄自体は転記まで「未承認」のまま残る
+
+### 12.3 移行ノートに載せる変更（雛形 #3780 の欄に合わせる）
+
+| 欄 | 載せる変更 |
+|---|---|
+| 破壊的変更 | `Device::Rocm` の追加と `#[non_exhaustive]` の付与だけ（# 24）。#3771 Q1 の承認と spec#87 の受理が条件。見送りになった場合は §5 の「空欄の理由」欄を使う |
+| 追加した API | # 2・# 6〜# 15・# 18・# 19・# 22・# 23・# 25〜# 29 の公開名。新クレート `fandhe-ai-hf-hub`（# 28）。承認された場合は `fandhe-ai-backend-rocm`（# 24） |
+| 挙動のみの変更（`Err` が `Ok` になる） | # 3・# 4・# 5（§45・§46）、# 11（rank 5 の受理）、# 17、# 20、# 21（groups の保存）、# 26（`Sigmoid`） |
+| 挙動のみの変更（**既に `Ok` の値が変わる**。独立した行にする） | # 5 の §47（`padding_idx: Some(p)` の二階。案 A なら値は変わらず注記だけ） |
+| 挙動のみの変更（その他） | # 11 の rank 6 以上の `RankMismatch.expected`（4 から 5）。# 24 の `available_devices`・`tape_for`・`release_cached_memory`・`memory_pool_stats` の戻り値に値が増えること。# 25 の内部エラー種別の変化（facade 外） |
+| 保存形式の前方互換なし（旧リーダーが fail-closed で拒否する） | #3750 の新しい kind（# 9〜# 15）、# 21 の groups を含む新ファイル、# 23 の `Optimizer` の kind |
+| 対象外になれば載せないもの | # 1・# 16（推奨は対象外）、`CtcLoss`、`Inv`・`Solve`・`SlogdetLogAbsDet` |
+
+### 12.4 Phase 3 で問う論点の領域別一覧
+
+各記録の「所有者へ戻す論点」の節から、論点を領域別に引く。**(新)** 列は、承認 issue の本文が問っておらず記録だけが挙げている論点で、承認 issue の回答時に取りこぼしやすい。
+
+| 領域 | 承認 issue | 引く節 | 論点（承認 issue 本文が問うもの） | (新) 記録だけが挙げる論点 |
+|---|---|---|---|---|
+| dtype・関数変換 | #3766 | `autodiff-low-precision-op-extension-decision.md` §8.11、`autodiff-functional-transforms-design.md` §35.13・§36.12 | 低精度の別配置を実装するか（推奨は対象外）、`TapeF64` の `jvp` 系を実装するか、f64 の数値契約 | 低精度の Q2（対象外として数えるための個別承認）と Q3（対象外時の保留ガードの維持と文言更新） |
+| 二階微分 | #3767 | `autodiff-higher-order-grad-decision.md` §33.14〜§48.11 | C 区分 24 Op の採否、B 区分の採否、拒否範囲、`padding_idx` の意味論、GPU parity の判定方式 | §40 の `CtcLoss`、§43・§46 の Op ごとの採否、§47.16 の「既に `Ok` の値が変わる」点、§48.11 の 10（ROCm の parity は # 24 の承認後） |
+| NN | #3768 | `autodiff-spatial-layers-decision.md` の「所有者へ戻す論点」、`compat-new-layers-io-export-decision.md` §13、`facade-nn-module-exposure-decision.md` §23.10、`nn-shrink-...` §1.11・§2.11・§3.11、`autodiff-batch-norm-3d-decision.md` §11、`autodiff-similarity-distance-decision.md` §11、`autodiff-pool3d-ops-decision.md` §18.12・§19.12・§20.12 | `add_upsample` の公開形、独自 Module 経路、各層の公開形の一括承認、保存形式と ONNX export | Bilinear の Q7（§1.2 の記録のずれの是正）、#3750 の移行ノートへの記載、FractionalMaxPool の乱数契約の個別確認 |
+| 最適化 | #3769 | `autodiff-swa-decision.md` §20.10、`autodiff-ema-decision.md` §17.10・§18.10、`autodiff-param-groups-decision.md` §14.10・§15.10・§18.10・§19.10、`compat-optimizer-variants-0.14.0-decision.md` §12 | SWA の公開形、AMP の skip 追従、保存形式、残りの一括承認 | SWA の論点 4（§16.5 の理由の置き換え）、# 22 の新しい FFI `unsafe` の監査条件、# 23 の旧リーダーが kind を拒否すること |
+| 相互運用・推論 | #3770 | `onnx-autograd-decision.md` §8.10、`facade-onnx-export-exposure-decision.md` §19.10、`facade-safetensors-exposure-decision.md` §13.10、`facade-speculative-decoding-batching-design.md` §29.10 | ONNX 学習の公開形、`Sigmoid` の数値契約、safetensors の入口、内部状態モデルの採否 | speculative の `Send`／`Sync` の条件 |
+| バックエンド・公開クレート | #3771 | `backend-rocm-device-exposure-decision.md` §10.10、`hf-hub-integration-design.md` §10.10、本節 | `Device::Rocm`、`fandhe-ai-backend-rocm` の公開、`hf-hub` の公開、規則 3 の読み方、`download` の公開 | ROCm の gfx target の照会と新規 `unsafe`（12.5）、`download` 公開時のリダイレクト先ホストの allowlist |
+
+追跡表 # 6 は「Phase 3 で問う論点なし（#3140 で承認済み・実装は #3405）」である。
+
+### 12.5 依存の追加と新規 `unsafe`
+
+- **依存の追加が要る設計は 0 件**。# 1〜# 29 の記録の依存節はすべて「追加なし」で、`docs/license-matrix.md` の更新も要らない見込みである（# 28 の `ureq` と # 24 の `libloading` は承認済みの区分の再利用で、新しい allow 識別子が要るかは #3773・#3774 が `cargo deny` で実測する）
+- 0 件のそばにある事項（どれも新しいクレートの追加ではない）:
+  - # 22（A3-d）: CUDA・Metal の grouped カーネル起動で既存と同じ形の FFI `unsafe` が要る見込み。SAFETY コメントと security-auditor の監査を #3837 の条件にしている
+  - # 24（ROCm）: 新規 `unsafe` が要るかは論点 3 の選択で変わる（gfx target の照会を HIP のシンボル追加で行う場合は `docs/backend-rocm-unsafe-audit.md` への追記と監査が要る）
+  - # 24・# 28: 承認済みの `libloading =0.9.0`（第 12 区分）と `ureq =3.4.2`（第 11 区分）が、公開クレートの直接依存として crates.io に出る（版・feature は不変。公開準備は #3774・#3773）
+  - # 26: `fandhe-ai-onnx-interop` から autodiff の新しいフック `Module::as_sigmoid` への依存で、publish の順序に注意が要る（`docs/crates-io-publishing-order.md` §8.1）
+
+### 12.6 保守・運用チェックリスト
+
+| 節 | 結果 |
+|---|---|
+| 公開形 | 該当なし（docs のみ。公開面を変えない） |
+| rustdoc／doctest | 該当なし（コード変更なし） |
+| エラー型 | 該当なし |
+| テスト計画 | 該当なし（docs のみ）。検証は参照の解決・表の形・網羅の機械確認で行った |
+| 数値契約 | tolerance・baseline・FMA は不変 |
+| 互換への影響 | 本節そのもの（12.1）。型の区分は 12.1 の定義に統一した |
+| 適用記録・索引・追跡表 | `docs/README.md` の索引を更新。追跡表は注記 1 行と、事実として誤っているセルの訂正だけ（列・ヘッダ・承認の値・0.14.0 の区分は不変） |
+| ベンチ・性能 | 該当なし |
+| 依存 | 追加なし（12.5）。新規 `unsafe` なし |
+
+### 12.7 セキュリティ観点
+
+docs のみの変更で、OWASP A03 の実装面は非該当。A08 の観点は 2 点: 承認を代わりに記述しない（#3718 は URL つきの事実として引くだけで、承認欄へは転記しない）、本節の集約を自己修復の判定を迂回する根拠に使わない。秘密情報・実機のホスト名は書いていない。
+
+### 12.8 スコープ外
+
+- 移行ノートの雛形（#3780）、承認の転記（Phase 4 以降の最初の PR）、spec#87 の受理、追跡表の自動集計（#3781）
+- 12.2 で見つけた記録のずれの是正（各実装 PR。例: # 10 の #3818）
+- 新しい issue は起票しない
