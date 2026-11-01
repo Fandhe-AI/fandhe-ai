@@ -21,8 +21,8 @@
 //! Pad／MaskedFill・プーリング・線形代数／FFT）が facade の公開経路でも二階まで通ることを固定する。
 //! x について線形な Op は `sum(op(x))` だと Hessian が恒等的にゼロで二階の再生が壊れても通るため、
 //! 必ず非線形な包み（tanh／要素積）を入れ、固定方向の `H v` がゼロでないことも assert する。
-//! 拒否の基準 Op は恒久対象外の `Tape::custom`（§21.2 A 区分）。`LogSumExp`・`Max` は C 区分で、
-//! 将来の拡張で対象になりうるため基準にしない。GPU 実機（LayerNorm・Conv2d・MaxPool2d）は
+//! 拒否の基準 Op は恒久対象外の `Tape::custom`（§21.2 A 区分）。`LogSumExp`（#3792）・`Max`（#3789）は
+//! 対象化済みのため基準にしない。GPU 実機（LayerNorm・Conv2d・MaxPool2d）は
 //! `#[ignore]` で、実測は #3168・#3169 へ申し送る
 //! （`docs/perf/logs/create-graph-extended-ops-3087/README.md`）。
 
@@ -202,8 +202,8 @@ fn rejects_unsupported_op_and_keeps_child_empty() {
     let child = fandhe_ai::tape();
     let tape = fandhe_ai::tape();
     let x = tape.var(&t(vec![0.1, 0.2, 0.3], &[1, 3]));
-    // `Op::Custom` は §21.2 A 区分（恒久対象外）。LogSumExp は C 区分で将来の拡張で
-    // 対象になりうる（Max は #3789 で対象化済み）ため、拒否の基準にしない（イシュー #3087）。
+    // `Op::Custom` は §21.2 A 区分（恒久対象外）。LogSumExp（#3792）・Max（#3789）は
+    // 対象化済みのため、拒否の基準にしない（イシュー #3087）。
     let loss = tape
         .custom(Arc::new(IdentityFn), &[x])
         .unwrap()
@@ -826,6 +826,45 @@ fn amin_create_graph_via_facade() {
     check_create_graph_family("amin", &NX, &[2, 3], amin_reduce_loss, true, 1e-2);
 }
 
+/// 統計縮約（イシュー #3792）: Hessian がゼロにならないよう縮約結果を二乗する。入力は NaN を含まない
+/// （有限差分は NaN の座標で使えないため）。
+fn logsumexp_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = weights(tape, &[2, 3]);
+    let z = x
+        .mul(x)
+        .unwrap()
+        .mul(&w)
+        .unwrap()
+        .logsumexp(Some(1))
+        .unwrap();
+    z.mul(&z).unwrap().sum(None).unwrap()
+}
+
+fn nansum_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let m = x.mul(x).unwrap().nansum(None).unwrap();
+    m.mul(&m).unwrap()
+}
+
+fn nanmean_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let m = x.mul(x).unwrap().nanmean(Some(1)).unwrap();
+    m.mul(&m).unwrap().sum(None).unwrap()
+}
+
+#[test]
+fn logsumexp_create_graph_via_facade() {
+    check_create_graph_family("logsumexp", &NX, &[2, 3], logsumexp_loss, true, 1e-2);
+}
+
+#[test]
+fn nansum_create_graph_via_facade() {
+    check_create_graph_family("nansum", &NX, &[2, 3], nansum_loss, true, 1e-2);
+}
+
+#[test]
+fn nanmean_create_graph_via_facade() {
+    check_create_graph_family("nanmean", &NX, &[2, 3], nanmean_loss, true, 1e-2);
+}
+
 #[test]
 fn max_pool2d_create_graph_via_facade() {
     check_create_graph_family(
@@ -914,7 +953,7 @@ fn quantile_create_graph_via_facade() {
     check_create_graph_family("quantile", &SEL_X, &[3, 4], quantile_loss, true, 1e-2);
 }
 
-// 統計縮約 4 Op（イシュー #3791・決定記録 §33・§51）。`tanh` で包んで上流 g と x の混合項を
+// 統計縮約 4 Op（イシュー #3791・決定記録 §33・§52）。`tanh` で包んで上流 g と x の混合項を
 // 非自明にする（L1 は x についての二階が 0 なので、tanh の曲率で `Hv ≠ 0` を作る）。
 // 孫テープ・総括判定の網羅は `crates/autodiff/tests/create_graph_stat_varnorm.rs`。
 fn var_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {

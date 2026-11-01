@@ -1,5 +1,5 @@
 //! 統計縮約（`Var`・`Std`・`VectorNorm`〈L1／L2〉・`PNorm`）の `create_graph` 対応（イシュー #3791・
-//! 親 #3725・決定記録 `docs/autodiff-higher-order-grad-decision.md` §33・§51）の受け入れ条件を
+//! 親 #3725・決定記録 `docs/autodiff-higher-order-grad-decision.md` §33・§52）の受け入れ条件を
 //! 確かめる統合テスト。
 //!
 //! - 1 階が素の `Tape::backward` と bit 同一、`cg.grad` も CPU では bit 一致（V3）。

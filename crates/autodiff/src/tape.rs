@@ -222,7 +222,7 @@ pub(crate) enum Op {
     /// logsumexp_along` へフォールバック）。`sum`／`exp`／`log` の合成
     /// では全要素が `-inf`（または `+inf` を含む）lane で `NaN` が出る
     /// ため専用ノードとして分離する（`docs/autodiff-reduce-ops-
-    /// decision.md` §2.4）。
+    /// decision.md` §2.4）。高階微分（`create_graph`）はイシュー #3792（決定記録 §33/§51）で対応。
     LogSumExp { input: NodeId, dim: Option<usize> },
     /// p-ノルム（`crate::reduce_ops::norm_p`。`torch.linalg.vector_norm
     /// (ord=p)` 相当。イシュー #2147）。`p` は呼び出し元
@@ -1319,10 +1319,10 @@ pub(crate) enum Op {
         interpolation: fandhe_ai_tensor_core::QuantileInterpolation,
     },
     /// `nansum`（イシュー #2637）。VJP は `stat_reduce::nan_reduce_vjp_host`。
-    /// 高階微分非対応（統計縮約 #3725 の対象）。
+    /// 高階微分はイシュー #3792（決定記録 §33/§51）で対応。
     Nansum { input: NodeId, dim: Option<usize> },
     /// `nanmean`（イシュー #2637）。VJP は `stat_reduce::nan_reduce_vjp_host`
-    /// （`mean = true`）。高階微分非対応（統計縮約 #3725 の対象）。
+    /// （`mean = true`）。高階微分はイシュー #3792（決定記録 §33/§51）で対応。
     Nanmean { input: NodeId, dim: Option<usize> },
     /// 3D max pooling（`torch.nn.functional.max_pool3d` 相当。NCDHW 固定。イシュー #2643・
     /// `docs/autodiff-pool3d-ops-decision.md`）。`crate::pool3d_ops::max_pool3d` からのみ積まれる
@@ -2511,7 +2511,8 @@ impl Op {
     ///
     /// 選択縮約 4 variant（`Max`・`Min`・`Amax`・`Amin`）はイシュー #3789（決定記録 §34）で `true` になった。
     /// 選択縮約の `OrderSelect`・`MedianAll`・`Quantile` はイシュー #3790（決定記録 §34）で
-    /// `true` になった。`Nansum`・`Nanmean` は `false` のまま。
+    /// `true` になった。統計縮約の `LogSumExp`・`Nansum`・`Nanmean` はイシュー #3792
+    /// （決定記録 §33/§51）で `true` になった（`Var`・`Std`・`VectorNorm`・`PNorm` は別イシュー #3791）。
     ///
     /// `Pad`・`PadMode`・`MaskedFill` はイシュー #3084（決定記録 §29）で `true`
     /// になった（設計 doc §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
@@ -2611,12 +2612,17 @@ impl Op {
             | Op::Min { .. }
             | Op::Amax { .. }
             | Op::Amin { .. }
+            // 統計縮約 3 Op（イシュー #3792・決定記録 §33/§51）。方式は
+            // `create_graph/stat_reduce_lse_nan.rs`。
+            | Op::LogSumExp { .. }
+            | Op::Nansum { .. }
+            | Op::Nanmean { .. }
             // 選択縮約 3 Op（イシュー #3790・決定記録 §34）。方式は
             // `create_graph/stat_select.rs`。入口検査は `validate_ancestors`。
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
             | Op::Quantile { .. }
-            // 統計縮約 4 Op（イシュー #3791・決定記録 §33・§51）。方式は
+            // 統計縮約 4 Op（イシュー #3791・決定記録 §33・§52）。方式は
             // `create_graph/stat_varnorm.rs`。入口検査は `validate_ancestors`。
             | Op::Var { .. }
             | Op::Std { .. }
@@ -2629,8 +2635,7 @@ impl Op {
             ),
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
-            Op::LogSumExp { .. }
-            | Op::BceLoss { .. }
+            Op::BceLoss { .. }
             | Op::CrossEntropyLossWithOptions { .. }
             | Op::CosineEmbeddingLoss { .. }
             | Op::MarginRankingLoss { .. }
@@ -2669,8 +2674,6 @@ impl Op {
             | Op::MatrixRank { .. }
             // `Stft`／`Istft`（イシュー #2633）は非対応のまま（`PadMode` 再生不可。§29）。
             | Op::Logcumsumexp { .. }
-            | Op::Nansum { .. }
-            | Op::Nanmean { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
             | Op::Dropout { .. }
@@ -5313,7 +5316,7 @@ mod conv3d_op_tests {
     }
 
     /// イシュー #3789: 選択縮約 4 variant は対象。`OrderSelect`・`MedianAll`・`Quantile`（#3790）も対象。
-    /// 統計縮約（`Nansum`・`Nanmean`）は fail-closed のまま。兄弟 PR が族を反転したらこの一覧を直す。
+    /// 統計縮約の `LogSumExp`・`Nansum`・`Nanmean` はイシュー #3792 で対象。隣接する `MatrixNorm` は fail-closed のまま。
     #[test]
     fn selection_reduce_family_supports_create_graph() {
         let i = NodeId(0);
@@ -5347,16 +5350,30 @@ mod conv3d_op_tests {
         );
         assert!(Op::MedianAll { input: i }.supports_create_graph());
         assert!(
-            !Op::Nansum {
+            Op::Nansum {
                 input: i,
                 dim: None
             }
             .supports_create_graph()
         );
         assert!(
-            !Op::Nanmean {
+            Op::Nanmean {
                 input: i,
                 dim: None
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::LogSumExp {
+                input: i,
+                dim: Some(0)
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            !Op::MatrixNorm {
+                input: i,
+                ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro
             }
             .supports_create_graph()
         );
@@ -5969,7 +5986,7 @@ mod loss_create_graph_support_tests {
         assert!(!closed.supports_create_graph());
     }
     /// 選択縮約 3 Op（イシュー #3790・決定記録 §34）が `supports_create_graph() == true`、
-    /// 隣接する `Nansum`／`Nanmean` が `false` のままであること。
+    /// 統計縮約 3 Op（イシュー #3792）も `true`、隣接する `MatrixNorm` が `false` のままであること。
     #[test]
     fn order_select_family_supports_create_graph() {
         let supported = [
@@ -5989,21 +6006,14 @@ mod loss_create_graph_support_tests {
         for op in &supported {
             assert!(op.supports_create_graph(), "{op:?}");
         }
-        for closed in [
-            Op::Nansum {
-                input: NodeId(0),
-                dim: None,
-            },
-            Op::Nanmean {
-                input: NodeId(0),
-                dim: None,
-            },
-        ] {
-            assert!(!closed.supports_create_graph(), "{closed:?}");
-        }
+        let closed = Op::MatrixNorm {
+            input: NodeId(0),
+            ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro,
+        };
+        assert!(!closed.supports_create_graph(), "{closed:?}");
     }
 
-    /// 統計縮約 4 Op（イシュー #3791・決定記録 §33・§51）が `supports_create_graph() == true`
+    /// 統計縮約 4 Op（イシュー #3791・決定記録 §33・§52）が `supports_create_graph() == true`
     /// であること（`VectorNorm` は `L1`／`L2` の payload で判定）。隣接 Op の `false` は
     /// 兄弟イシューで変わりうるため、ここでは確かめない（未知 `ord` の false は網羅 match で担保）。
     #[test]

@@ -450,6 +450,8 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
   variant と 3 箇所の網羅 match（`is_checkpoint_eligible`・
   `for_each_input`・`supports_create_graph`。いずれも `Op::Var`／
   `Op::VectorNorm` と同じ扱い）
+  - 追記（2026-11-01・#3792）: 上の `supports_create_graph` の扱いは記録時点のもの。現在は `LogSumExp` だけ
+    `true`（`docs/autodiff-higher-order-grad-decision.md` §51）。`Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm` も #3791 で `true`（同 §52）。
 - `crates/autodiff/src/eval.rs`: `nan_propagating_max_f64`（`pub
   (crate)`）・`logsumexp_along`・`vector_norm_p_along`
 - `crates/autodiff/src/grad.rs`: `vjp` への 2 arm 追加・

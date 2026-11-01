@@ -33,7 +33,7 @@
 //! **数値契約・順序規則**: 規則の正は `fandhe_ai_tensor_core::stat_reduce`
 //! （安定昇順・NaN 最大・下側中央値・`f64` アキュムレータ・`quantile` の `f64` rank）。
 //! 非有限入力は拒否せず伝播する。高階微分（`create_graph`）は `kthvalue`・`median`・`quantile` が
-//! #3790 で対応済み（`nansum`／`nanmean` は対象外のまま）。activation
+//! #3790 で、`nansum`／`nanmean` も #3792 で対応済み。activation
 //! checkpoint・f64 自動微分経路・`nanmedian`／`nanquantile`・1 次元 `q` は対象外。
 //!
 //! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{median,median_with_indices,kthvalue,quantile,nanmean,nansum}` と `QuantileInterpolation`（クレートルート）。本モジュール自体は facade から再エクスポートしない。

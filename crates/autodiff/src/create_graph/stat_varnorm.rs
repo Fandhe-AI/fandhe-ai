@@ -1,5 +1,5 @@
 //! 統計縮約 4 Op（`Var`・`Std`・`VectorNorm`〈`L1`／`L2`〉・`PNorm`）の `create_graph` 対応
-//! （イシュー #3791・親 #3725・設計 `docs/autodiff-higher-order-grad-decision.md` §33、実装記録 §51）。
+//! （イシュー #3791・親 #3725・設計 `docs/autodiff-higher-order-grad-decision.md` §33、実装記録 §52）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `validate_ancestors`（入口検査
 //! [`validate_stat_varnorm`]）・`replay_op`（forward 再生。公開 `Var::var`／`std`／`norm_l1`／
@@ -74,7 +74,7 @@ use crate::var::Var;
 fn invalid(msg: String) -> AutodiffError {
     AutodiffError::Backward(format!(
         "create_graph: {msg}（統計縮約 Var／Std／VectorNorm／PNorm の構造が安全に扱えない入力。\
-         docs/autodiff-higher-order-grad-decision.md §33・§51 参照）"
+         docs/autodiff-higher-order-grad-decision.md §33・§52 参照）"
     ))
 }
 

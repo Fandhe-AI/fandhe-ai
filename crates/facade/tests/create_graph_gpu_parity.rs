@@ -247,7 +247,7 @@ const CASES: &[Case] = &[
         run: run_select_reduce_quantile,
         reject: None,
     },
-    // 統計縮約 4 Op（イシュー #3791・決定記録 §33・§51）。`BackendOps::var`／`vector_norm`／
+    // 統計縮約 4 Op（イシュー #3791・決定記録 §33・§52）。`BackendOps::var`／`vector_norm`／
     // `vector_norm_p` を実装しているのは `backend-cpu` だけで、CUDA／Metal ではホストへ
     // フォールバックする。`Std` は対応する `BackendOps` メソッドが無く常にホスト実装。cgrad の
     // V3 値は 1 階と同じホスト関数で、構造は f32 の `Var` 演算（MatMul は無い）。経路 H の pass は
@@ -296,6 +296,36 @@ const CASES: &[Case] = &[
         split_k: SplitKShapes::NoMatMul,
         run: run_stat_varnorm_pnorm,
         reject: Some(reject_stat_varnorm_with_custom),
+    },
+    // 統計縮約 3 Op（イシュー #3792・決定記録 §33/§51）。`logsumexp`／`stat_nansum`／`stat_nanmean`
+    // は backend-cpu にだけ実装があり、CUDA／Metal ではホストへフォールバックする（経路 H）。
+    // 実機は未実測（#3856・#3858）。構造に MatMul は無い。
+    Case {
+        name: "stat_reduce_lse_nan_logsumexp",
+        family: "stat_reduce_lse_nan",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_reduce_logsumexp,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "stat_reduce_lse_nan_nansum",
+        family: "stat_reduce_lse_nan",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_reduce_nansum,
+        reject: None,
+    },
+    Case {
+        name: "stat_reduce_lse_nan_nanmean",
+        family: "stat_reduce_lse_nan",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_reduce_nanmean,
+        reject: None,
     },
 ];
 
@@ -496,6 +526,19 @@ fn run_select_reduce_quantile(tp: &Tapes) -> Outputs {
             .quantile(0.4, Some(1), fandhe_ai::QuantileInterpolation::Linear)
             .unwrap()
     })
+}
+
+/// 統計縮約（#3792）。入力は有限値（`run_select_reduce` の固定入力）、損失は `sum(y ⊙ y)`。
+fn run_stat_reduce_logsumexp(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().logsumexp(Some(1)).unwrap())
+}
+
+fn run_stat_reduce_nansum(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().nansum(Some(1)).unwrap())
+}
+
+fn run_stat_reduce_nanmean(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().nanmean(Some(1)).unwrap())
 }
 
 /// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
@@ -700,6 +743,10 @@ cuda_family_test!(
     "select_reduce_order"
 );
 cuda_family_test!(create_graph_stat_varnorm_cuda_matches_cpu, "stat_varnorm");
+cuda_family_test!(
+    create_graph_stat_reduce_lse_nan_cuda_matches_cpu,
+    "stat_reduce_lse_nan"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -724,6 +771,10 @@ metal_family_test!(
     "select_reduce_order"
 );
 metal_family_test!(create_graph_stat_varnorm_metal_matches_cpu, "stat_varnorm");
+metal_family_test!(
+    create_graph_stat_reduce_lse_nan_metal_matches_cpu,
+    "stat_reduce_lse_nan"
+);
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -758,6 +809,11 @@ fn select_reduce_order_cases_pass_cpu_against_cpu() {
 #[test]
 fn stat_varnorm_cases_pass_cpu_against_cpu() {
     run_family("stat_varnorm", None);
+}
+
+#[test]
+fn stat_reduce_lse_nan_cases_pass_cpu_against_cpu() {
+    run_family("stat_reduce_lse_nan", None);
 }
 
 #[test]

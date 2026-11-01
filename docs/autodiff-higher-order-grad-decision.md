@@ -4212,15 +4212,61 @@ CI（CPU）相当の結果: `cargo test --workspace`・`cargo clippy --workspace
 - 本 PR は `Refs #3790 #3724 #3767`。
 
 
-## 51. 実装記録（イシュー #3791・親 #3719 系。create_graph の C 区分・統計縮約 `Var`・`Std`・`VectorNorm`・`PNorm`）
+## 51. 実装記録（イシュー #3792・親 #3719 系。create_graph の C 区分・統計縮約 `LogSumExp`・`Nansum`・`Nanmean`）
 
 ### 51.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3792`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §33（#3725）で、本節はその実装記録。`Var`・`Std`・`VectorNorm`・`PNorm` は #3791 の担当で本節では扱わない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「設計記録の推奨どおり、すべての論点を承認」とある。§33.14 の論点 1（実装する）・論点 2（LogSumExp の `±inf` レーンは V2 で 1 階の極限を写す）・論点 4（総括判定から外れる入力は型付きエラーで拒否）・論点 7（GPU parity は §48 の方式）が本節に関わる。論点 3（非有限 x は NaN を伝播し `±inf` を拒否）は `Std`・`L2`・`PNorm`・`Var` が対象で、本 3 Op には当たらない。個別の承認を上乗せして主張しない。
+
+### 51.1 実装したもの
+
+| Op | 公開メソッド | 方式 | forward の写し | cgrad |
+|---|---|---|---|---|
+| `LogSumExp` | `logsumexp` | V3（非有限レーンは V2） | `Var::logsumexp(dim)` | 値は `grad::logsumexp_vjp`（1 階と同じ関数）、構造は `g_b ⊙ softmax(x_safe)` と `where_cond` 2 段（`+inf` 位置は `g_b / inf_count`、0 位置は 0） |
+| `Nansum` | `nansum` | V3（構造は V2） | `Var::nansum(dim)` | 値は `stat_reduce::nan_reduce_vjp_host(mean = false)`、構造は `where_cond(isnan(x), 0, g_b)` |
+| `Nanmean` | `nanmean` | V3（構造は V2） | `Var::nanmean(dim)` | 値は同関数（`mean = true`）、構造は `where_cond(isnan(x), 0, g_b / count)` |
+
+- 実装は `crates/autodiff/src/create_graph/stat_reduce_lse_nan.rs`。`replay_op` と `build_cgrads` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`。
+- `±inf` レーンの分類は `grad::logsumexp_lane_masks`（新設。`logsumexp_vjp` と同じ走査・同じ `nan_propagating_max_f64`）。`logsumexp_vjp` は可視性を `pub(crate)` にしただけで本体は変えていない。NaN レーンはどのマスクにも入れず伝播させる。
+- `Nanmean` の `count == 0`（全 NaN）レーンの個数は 1 に守る。構造は全 0 で有限、値はホスト関数の NaN で 1 階と同じ。個数は f32 で持つため 2^24 を超えると丸まるが、影響は構造側だけで値は決まらない。
+- `±inf` レーンは `x` を 0 に差し替えてから softmax する（守らないと `where_cond` で選ばれない側でも Softmax の VJP が NaN を出す）。
+- 要素数 0 の入力は 1 階に揃え、ゼロ定数を返す。
+
+### 51.2 設計（§33）からの差・明確化
+
+- ファイル名は §33.4 の仮名 `create_graph_stat_reduce` ではなく `stat_reduce_lse_nan.rs`、GPU parity の族名は `stat_reduce_lse_nan`（#3791 の実装物との衝突を避けるため）。
+- 総括判定（§33.12）は `check_structure_stages` の写しを作らず、構造の各段が `|g|`（softmax は [0, 1]・マスクは 0/1・`1/count` と `1/inf_count` は 1 以下）で押さえられることから、子テープへ書く前の 1 判定に集約した: `g` に非有限要素がある、または `max|g|·max(1, 軸長)` が `STAGE_BOUND_GUARD`（2^125）以上なら型付き `Err(Backward)` で拒否する。拒否後は既存のロールバックで `child` が空に戻り、同じ `child` で再試行できる。
+- 非有限 `g` の拒否は、§33.12 では候補として書かれただけで §33.14 に行が無い。§27.3 と同じ扱いにした明確化で、承認済みとは書かない。x 側は拒否しない（`LogSumExp` は V2 の分岐と伝播、`Nansum`・`Nanmean` はマスクで扱う）。
+- 拒否契約の見本として 3 Op を使っていた既存テストを恒久的に未対応の `selu` へ差し替えた: `tests/create_graph.rs` の `create_graph_rejects_unsupported_op_selu`（旧 `..._logsumexp`）・`create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty`、`tests/create_graph_select_reduce.rs` の `adjacent_fail_closed_ops_stay_rejected`、`tests/stat_reduce_parity.rs` の `create_graph_nansum_is_supported_and_unsupported_op_is_a_typed_error`。`tape.rs` の単体テスト 2 件は 3 Op を `true` 側へ移し、`false` のままの隣接 Op は `MatrixNorm` にした。
+
+### 51.3 テスト
+
+- `crates/autodiff/tests/create_graph_stat_reduce_lse_nan.rs`: Hessian と有限差分の REQ-2 突合（3 Op × `dim` None／各軸）、`LogSumExp` の閉形式 `diag(s) − s sᵀ`、`first_order()`／`cg.grad` と 1 階 `Tape::backward` の bit 一致（NaN は値のクラス一致）、`±inf`・NaN・全 NaN レーンの入力、必須ベクトル（`1e20`・`[-1e20, 1e20]`・`1e-30`・非正規化数）の 3 段有限、全 `-inf`／count=0 レーン、`3e38`・`inf`・NaN の上流の拒否と再試行、`1e30` の受理、`jvp_create_graph` の孫テープ、隣接する `selu` の fail-closed。
+- `grad.rs` の単体テスト（レーン分類が `logsumexp_vjp` の出力パターンと一致）。
+- facade: `{logsumexp,nansum,nanmean}_create_graph_via_facade`（`grad_exact = true`）、`backward_create_graph` の rustdoc に `logsumexp` の HVP の doctest。本族を拒否する `api_surface.rs` の否定ガードは元から無く（§33.1）、反転するものは無い。代わりの正ガードは doctest 実在検査 `backward_create_graph_stat_reduce_lse_nan_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `stat_reduce_lse_nan`（経路 `H`・`Judge::Strict`・`NoMatMul`）の 3 ケースを登録し、`create_graph_stat_reduce_lse_nan_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 51.4 GPU（未実測）
+
+`logsumexp`・`stat_nansum`・`stat_nanmean` を実装するのは `backend-cpu` だけで、CUDA／Metal ではホストへフォールバックする（経路 `H`）。実機の結果はすべて**未実測**で、Phase 10 の #3856（`<cuda-node>`）・#3858（`<metal-node>`）へ申し送る。baseline の置き場は空のまま。
+
+### 51.5 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。shape と `dim` は forward 側の確保前検証を通ったものだけが届き、新しい確保は O(numel) のマスク・定数テンソルと O(レーン数) の個数に限る。本番経路で `unwrap`／`expect` は使わず、内部契約違反は型付きエラーにする。`unsafe` は追加しない。
+- スコープ外: `Var`・`Std`・`VectorNorm`・`PNorm`（#3791）、f64 テープの create_graph、`MatrixNorm` の反転、GPU 実機 parity の実測（#3856・#3858）、公開面の追加。
+- 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。
+- 本 PR は `Refs #3792 #3725 #3767 #3856 #3858`。
+
+## 52. 実装記録（イシュー #3791・親 #3719 系。create_graph の C 区分・統計縮約 `Var`・`Std`・`VectorNorm`・`PNorm`）
+
+### 52.0 位置づけ・承認根拠
 
 - 状態: **実装済み**（本 PR は `Refs #3791 #3725 #3767`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §33 で、本節はその実装記録。`LogSumExp`・`Nansum`・`Nanmean` は #3792 の担当で本節では扱わない（記録時点で `false` のまま）。
 - 承認根拠: #3767 の所有者の回答コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>（2026-11-01）。回答は「設計記録の推奨どおり、すべての論点を承認」「C 区分は全 5 族を実装」「非有限は NaN を伝播し ±inf は拒否」「外れる入力は型付きで拒否」「前提スケールは S0」。承認の範囲はこれを超えて書かない。§33.14 の論点表の番号と回答本文の番号がずれる点は、全論点の一括承認に含まれると読んだ。
 - 基準 sha: `335c95432`。
 
-### 51.1 実装したもの
+### 52.1 実装したもの
 
 縮約軸を最後へ寄せた `[lanes, n]` に正準化して軸 1 で扱い（`dim=None` は `[1, numel]`。`Reshape`・`Permute`・`Contiguous`）、終わったら元の並びへ戻す。値はすべて V3（1 階と同じホスト関数を `push_v3` で載せる）で、`cg.grad` は CPU で 1 階と bit 一致する。
 
@@ -4238,7 +4284,7 @@ CI（CPU）相当の結果: `cargo test --workspace`・`cargo clippy --workspace
 - 入口検査 `validate_stat_varnorm`（子テープへ書く前）: `Var`／`Std`／`L2`／`PNorm` の入力に ±inf がある、自由度不足（`n <= correction`）、`Var` の `x_i − x_0` が f32 で非有限または `n·max|x_i − x_0| >= 2^125`、未知の `VectorNormOrd`。NaN は通す。
 - 総括判定（`g` が手に入った時点で構造を積む前。`Std` だけは `dev2` の実値が要るので中心化まで積んでから）: 構造の forward の各段と、二階の逆伝播（seed の各要素の絶対値 ≤ 1）の「cotangent × 微分係数」と縮約の部分和を f64 で積み上げ、1 段でも `STAGE_BOUND_GUARD`（2^125）以上か非有限なら `AutodiffError::Backward` で拒否する。非有限の上流 `g` も拒否する。NaN を含むレーンは判定から外す。拒否は `backward_create_graph` のロールバックで `child` が空へ戻り、再試行できる。保証範囲は §27.3 と同じ書き方（判定を通った入力に限り、seed の各要素 ≤ 1、三階以上と真値が f32 を超える場合は対象外）。
 
-### 51.2 設計（§33）からの逸脱・判断
+### 52.2 設計（§33）からの逸脱・判断
 
 - **D1. PNorm の ±inf（§33.14 の点 2 と点 3 の衝突）**: 点 2 は「PNorm の ±inf レーンは V2 で 1 階の極限を写す」、点 3 は「Std／L2／PNorm／Var の非有限な x は NaN を伝播し ±inf は拒否」。所有者の回答本文が「±inf は拒否」と明記しているため、PNorm の ±inf は**入口で拒否**した（fail-closed）。点 2 の PNorm の部分は実装していない。必要なら所有者の判断で別対応にする（`pnorm_vjp` の `input_has_inf` 分岐は create_graph からは到達しない）。点 2 の LogSumExp の部分は #3792 の担当。
 - **D2. L1 の非有限な x**: ±inf も NaN も受理する。点 3 の対象は Std／L2／PNorm／Var で L1 は入っていない。構造（3 分岐の `where_cond`）は x=±inf でも有限で、NaN は 1 階と同じく符号 0 になる。テストで固定した。
@@ -4248,9 +4294,9 @@ CI（CPU）相当の結果: `cargo test --workspace`・`cargo clippy --workspace
 - **D6. 兄弟 #3792 との名前の分離**: §33.4 の単一ファイル名 `create_graph_stat_reduce.rs` ではなく、統合テストは `crates/autodiff/tests/create_graph_stat_varnorm.rs`、サブモジュールは `stat_varnorm.rs`、GPU parity の族名は `stat_varnorm` にした（#3789・#3790 の前例）。§33.4 の 7 Op 一括を 4 Op に分けた形になる。
 - **D8. 安定な中心化の軸一般化はしなかった**: 計画の `stable_centering_along` は作らず、`[lanes, n]` への正準化（縮約軸を最後へ寄せる）で既存の `stable_centering`（軸 1）をそのまま使った。LayerNorm／BatchNorm の演算列は bit 同一のまま。
 - 前スケール S0 は §27.2 が将来案に残したものを本族で採った（§33.14 の点 6。承認済み）。相対的に極小な要素が f32 で 0 に落ちる場合の二階の精度は保証しない（構造は二階だけを担い値は V3。§45 の S0 と同じ扱い）。
-- 実装記録の節番号は、記録時点で §50 まで使われていたため §51 とした（並行する #3792 の実装記録は後から取り込む側が採番を見直す）。
+- 実装記録の節番号は、並行する #3792 の実装記録が §51 を使うため、base 取り込み時に #3791 側を §52 へ振り直した。
 
-### 51.3 テスト
+### 52.3 テスト
 
 | 区分 | テスト |
 |------|--------|
@@ -4262,11 +4308,11 @@ CI（CPU）相当の結果: `cargo test --workspace`・`cargo clippy --workspace
 
 CI（CPU）相当の結果は PR の検証欄に記録する。
 
-### 51.4 GPU 実機 parity
+### 52.4 GPU 実機 parity
 
 **未実測**。`BackendOps::var`／`vector_norm`／`vector_norm_p` を実装するのは `backend-cpu` だけで、CUDA／Metal ではホストへフォールバックする。`Std` は対応する `BackendOps` メソッドが無く常にホスト実装（経路 `H`。pass は「経路の parity」でカーネル同士ではない）。実機テストは `create_graph_stat_varnorm_cuda_matches_cpu`（GB10、#3856）と `create_graph_stat_varnorm_metal_matches_cpu`（macOS 限定、#3858）で、どちらも `#[ignore]`。判定は `Judge::Strict`、構造に MatMul は無いので S3 は `NoMatMul`。Linux 側の値で pass とは書かない。baseline の置き場は空のまま。
 
-### 51.5 セキュリティ観点・スコープ外・変えていないもの
+### 52.5 セキュリティ観点・スコープ外・変えていないもの
 
 - 外部入力は扱わない。shape・`dim`・`correction`・`p` は forward 側の確保前検証を通ったものだけが届き、`dim` の範囲は入口でも再確認する。総括判定はホスト走査で、新しい確保は O(numel) の f64／f32 一時領域だけ。`get_unchecked` は使わない（REQ-8）。拒否は子テープへ書く前か、ロールバックで `child` が空に戻る経路のどちらかで、本番経路に `unwrap`／`expect`／panic は無い。依存・`unsafe` の追加なし。秘密情報・ホスト名は書かない。
 - スコープ外: `LogSumExp`・`Nansum`・`Nanmean`（#3792）、PNorm の ±inf レーンを V2 で受理すること（D1。所有者が求めれば別対応）、GPU 実機 parity の実測（#3856・#3858）、f64 テープの create_graph（#3722）、S2 の実装、`VectorNormOrd` の新 variant。

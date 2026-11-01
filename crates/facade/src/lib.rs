@@ -911,7 +911,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `var`・`std`・`norm_l1`・
-    /// `norm_l2`・`norm_p` は §33・§51（#3791）で対象になった。
+    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -976,6 +976,30 @@ impl Tape {
     /// let xc = cg.child_var(&x)?.unwrap();
     /// let second = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
     /// assert!((second[0] - 1.0).abs() < 1e-4 && (second[1] + 1.0).abs() < 1e-4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// 統計縮約（`logsumexp`・`nansum`・`nanmean`。#3792）も二階へ進める。次は `logsumexp(x)` の例で、
+    /// 1 階勾配は `softmax(x)`、その第 0 成分の勾配（Hessian の第 0 行）は `s0·(1 − s0)`, `−s0·s1`, `−s0·s2`。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3])?);
+    /// let loss = x.logsumexp(None)?;
+    /// let cg = t.backward_create_graph(&loss, &child)?;
+    /// let g = cg.grad(&x)?.unwrap();
+    /// let grads2 = child.backward(&g.narrow(0, 0, 1)?.sum(None)?)?;
+    /// let xc = cg.child_var(&x)?.unwrap();
+    /// let row = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
+    /// let z: f32 = [1.0_f32, 2.0, 3.0].iter().map(|v| v.exp()).sum();
+    /// let s: Vec<f32> = [1.0_f32, 2.0, 3.0].iter().map(|v| v.exp() / z).collect();
+    /// assert!((row[0] - s[0] * (1.0 - s[0])).abs() < 1e-4);
+    /// assert!((row[1] + s[0] * s[1]).abs() < 1e-4 && (row[2] + s[0] * s[2]).abs() < 1e-4);
     /// # Ok(())
     /// # }
     /// ```
@@ -1082,7 +1106,8 @@ impl Tape {
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
-    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
+    /// §33・§51（#3792）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1188,7 +1213,8 @@ impl Tape {
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
-    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
+    /// §33・§51（#3792）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1251,7 +1277,8 @@ impl Tape {
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
-    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
+    /// §33・§51（#3792）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1352,7 +1379,8 @@ impl Tape {
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
-    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
+    /// §33・§51（#3792）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1436,7 +1464,8 @@ impl Tape {
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
-    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
+    /// §33・§51（#3792）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
