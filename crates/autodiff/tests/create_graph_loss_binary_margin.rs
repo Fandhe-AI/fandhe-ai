@@ -777,3 +777,86 @@ fn neighbouring_custom_stays_fail_closed() {
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());
 }
+
+// ---------------------------------------------------------------------------------
+// レビュー指摘（PR #3944・codex P1 3 件）の回帰: 上界検査の演算順序と飽和域の曲率保持
+// ---------------------------------------------------------------------------------
+
+/// 損失へ `scale` を掛けて create_graph し、入力 `z0[0]` の二階微分（スカラー）を返す。
+fn scaled_second_derivative<F>(build: F, z0: &[f32], scale: f32) -> Result<f64, AutodiffError>
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> BuildResult<'t>,
+{
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let z = tape.var(&t(z0.to_vec(), &[z0.len()]));
+    let l = build(&tape, &z)?;
+    let loss = l.mul(&tape.var_no_grad(&t(vec![scale], &[1])))?.sum(None)?;
+    let cg = tape.backward_create_graph(&loss, &child)?;
+    let gz = cg.grad(&z)?.expect("1 階勾配");
+    let cz = cg.child_var(&z)?.expect("写し");
+    let h = child.backward(&gz.narrow(0, 0, 1)?.sum(None)?)?;
+    Ok(f64::from(dense(h.get(&cz)?.expect("2 階"))[0]))
+}
+
+/// gamma * ce 自体が f32 で溢れる入力（gamma = 1e30）は、q^(gamma-1) = 0 で積が小さくても拒否する。
+#[test]
+fn focal_gamma_times_ce_overflow_is_rejected() {
+    assert!(!try_case("focal gamma=1e30", focal_fn(1e30, 0.5), &[1e10]));
+}
+
+/// pos_weight 付き BCE（x = -20・t = 0・pw = 1・損失 x 1e10）の二階が σ'(x) x 1e10（約 20.6）を保つ。
+#[test]
+fn bce_pos_weight_keeps_curvature_in_saturated_region() {
+    let x = -20.0f64;
+    let s = 1.0 / (1.0 + (-x).exp());
+    let expect = s * (1.0 - s) * 1e10;
+    let got = scaled_second_derivative(
+        |_, z| {
+            let q = one(z, 2);
+            q[0].bce_with_logits_loss_with(
+                &q[1],
+                Reduction::Sum,
+                &BceWithLogitsOptions::default().pos_weight(t(vec![1.0], &[1])),
+            )
+        },
+        &[-20.0, 0.0],
+        1e10,
+    )
+    .expect("受理");
+    assert!(
+        (got - expect).abs() / expect < 1e-3,
+        "got={got} expect={expect}"
+    );
+}
+
+/// focal（gamma = 0.5・t = 0・x = -15・損失 x 1e10）の二階が f64 参照を保つ（ce の桁落ちなし）。
+#[test]
+fn focal_keeps_curvature_without_ce_cancellation() {
+    let g = 0.5f64;
+    let sig = |x: f64| 1.0 / (1.0 + (-x).exp());
+    let sp = |x: f64| x.max(0.0) + (-x.abs()).exp().ln_1p();
+    // t = 0: L = softplus(x)·σ(x)^γ。L' を解析式で書き、中央差分で L'' を得る。
+    let d1 = |x: f64| {
+        let p = sig(x);
+        p.powf(g + 1.0) + g * sp(x) * p.powf(g) * (1.0 - p)
+    };
+    let h = 1e-4;
+    let expect = (d1(-15.0 + h) - d1(-15.0 - h)) / (2.0 * h) * 1e10;
+    let got = scaled_second_derivative(
+        |_, z| {
+            one(z, 1)[0].sigmoid_focal_loss(
+                &t(vec![0.0], &[1]),
+                &SigmoidFocalLossOptions::default().alpha(None).gamma(0.5),
+                Reduction::Sum,
+            )
+        },
+        &[-15.0],
+        1e10,
+    )
+    .expect("受理");
+    assert!(
+        (got - expect).abs() / expect.abs() < 1e-3,
+        "got={got} expect={expect}"
+    );
+}

@@ -26,6 +26,11 @@
 //!   `dx = s_b⊙α_t⊙[(p−t)⊙q^γ + γ⊙ce⊙q^(γ−1)⊙(1−2t)⊙p⊙(1−p)]` を構造に積む。`γ == 0` は第 2 項を、
 //!   `γ == 1` は `PowScalar` を積まない（payload の定数で分岐）。
 //!
+//! **飽和域の曲率保持**（PR #3944 レビュー対応）: `BceWithLogitsPosWeightLoss` の `dx` と focal の
+//! `ce`・`σ(±x)` は `x` の符号別に桁落ちしない形へ分解する（Sigmoid の VJP は出力値から
+//! `y(1−y)` を作るため、大きい側の `σ` を経由すると f32 で二階が 0 に丸まる）。focal は
+//! `γ⊙ce` 自体も段検査に含める。
+//!
 //! 子テープへ積む Op は `Add`・`Sub`・`Mul`・`Div`・`Neg`・`Exp`・`Log`・`Sigmoid`・`Softplus`・
 //! `PowScalar`・`Where`・`BroadcastTo`・`Contiguous`・定数 `Leaf` で、すべて
 //! `supports_create_graph() == true`（閉包性。§39.11）。
@@ -339,7 +344,14 @@ pub(super) fn bce_pos_weight_cgrad<'c>(
     let one = scalar(child, 1.0);
     let nx = x_m.neg()?;
     let lw = one.add(&pm1_c.mul(t_m)?)?;
-    let dx = s_b.mul(&one.sub(t_m)?.sub(&lw.mul(&nx.sigmoid())?)?)?;
+    // dx = s_b⊙[(1−t) − lw⊙σ(−x)] を符号別の安定形へ分解する（二階の曲率を飽和域で保つ）。
+    // x ≥ 0: そのまま（σ(−x) ≤ 0.5 で桁落ちなし）。
+    // x < 0: (1−t) − lw = −pw⊙t なので lw⊙σ(x) − pw⊙t（σ(x) の VJP が y(1−y) で精度を保つ）。
+    let pw_c = const_vec(child, ps.clone(), &shape)?;
+    let nonneg = Tensor::new(xs.iter().map(|&x| x >= 0.0).collect::<Vec<bool>>(), &shape)?;
+    let form_pos = one.sub(t_m)?.sub(&lw.mul(&nx.sigmoid())?)?;
+    let form_neg = lw.mul(&x_m.sigmoid())?.sub(&pw_c.mul(t_m)?)?;
+    let dx = s_b.mul(&Var::where_cond(&nonneg, &form_pos, &form_neg)?)?;
     let dt = s_b.mul(&nx.add(&pm1_c.mul(&nx.softplus(1.0, 20.0)?)?)?)?;
     Ok((push_v3(child, &dx, hx)?, push_v3(child, &dt, ht)?))
 }
@@ -562,6 +574,7 @@ pub(super) fn focal_cgrad<'c>(
         stage(sba)?;
         stage(sba * pt)?;
         stage(sba * pt * c1)?;
+        stage(g64 * ce)?;
         stage(g64 * ce * qg1)?;
         stage(sba * g64 * ce * qg1)?;
         stage(sba * g64 * ce * curv)?;
@@ -583,24 +596,36 @@ pub(super) fn focal_cgrad<'c>(
     let t_c = const_vec(child, ts.clone(), &shape)?;
     let a_c = const_vec(child, alpha_t, &shape)?;
     let one = scalar(child, 1.0);
-    let p = x_m.sigmoid();
     let nx = x_m.neg()?;
-    let q = t_c.mul(&nx.sigmoid())?.add(&one.sub(&t_c)?.mul(&p)?)?;
+    // σ(x)・σ(−x) は「小さい側」を直接 Sigmoid で作り、大きい側を `1 − 小` で作る。大きい側を
+    // Sigmoid の出力から作ると VJP の y(1−y) が f32 の丸めで曲率を失う（x ≪ 0 の σ(−x) 等）。
+    let nonneg = Tensor::new(xs.iter().map(|&x| x >= 0.0).collect::<Vec<bool>>(), &shape)?;
+    let small = Var::where_cond(&nonneg, &nx.sigmoid(), &x_m.sigmoid())?;
+    let big = one.sub(&small)?;
+    let p = Var::where_cond(&nonneg, &big, &small)?;
+    let sn = Var::where_cond(&nonneg, &small, &big)?;
+    let q = t_c.mul(&sn)?.add(&one.sub(&t_c)?.mul(&p)?)?;
+    // p − t = (1−t)⊙p − t⊙σ(−x)（t が 0／1 近傍の飽和域で桁落ちしない形）。
+    let p_minus_t = one.sub(&t_c)?.mul(&p)?.sub(&t_c.mul(&sn)?)?;
     let first = if g64 == 0.0 {
-        p.sub(&t_c)?
+        p_minus_t
     } else {
-        p.sub(&t_c)?.mul(&q.pow_scalar(gamma)?)?
+        p_minus_t.mul(&q.pow_scalar(gamma)?)?
     };
     let bracket = if g64 == 0.0 {
         first
     } else {
-        let ce = one.sub(&t_c)?.mul(x_m)?.add(&nx.softplus(1.0, 20.0)?)?;
+        // ce = (1−t)x + softplus(−x) を符号別に分解（x ≥ 0: そのまま、x < 0: softplus(x) − t⊙x）。
+        // 単一式だと t = 0・x ≪ 0 で x + softplus(−x) が f32 で 0 に丸まり ce と微分を失う。
+        let ce_pos = one.sub(&t_c)?.mul(x_m)?.add(&nx.softplus(1.0, 20.0)?)?;
+        let ce_neg = x_m.softplus(1.0, 20.0)?.sub(&t_c.mul(x_m)?)?;
+        let ce = Var::where_cond(&nonneg, &ce_pos, &ce_neg)?;
         let one_m_2t = one.sub(&t_c.mul(&scalar(child, 2.0))?)?;
         let mut second = scalar(child, gamma).mul(&ce)?;
         if g64 != 1.0 {
             second = second.mul(&q.pow_scalar(gamma - 1.0)?)?;
         }
-        let second = second.mul(&one_m_2t)?.mul(&p)?.mul(&one.sub(&p)?)?;
+        let second = second.mul(&one_m_2t)?.mul(&p)?.mul(&sn)?;
         first.add(&second)?
     };
     let dx = s_b.mul(&a_c)?.mul(&bracket)?;
