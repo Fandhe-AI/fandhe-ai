@@ -24,6 +24,8 @@ cp docs/real-hardware-verification-env.local.md.example docs/real-hardware-verif
 | CUDA ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | `<ここにユーザー名・ディレクトリ>` | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 3〜4 節 |
 | Metal 実機ノード（Mac mini）の SSH ホスト名 | `METAL_NODE=<ここに実ホスト名>` | シェル変数 `METAL_NODE`（`export METAL_NODE="<実ホスト名>"`。クォート必須の理由は CUDA_NODE と同じ） | docs/real-hardware-verification-env.md 1・7 節 |
 | Metal ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | `<ここにユーザー名・ディレクトリ>` | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 7 節 |
+| ROCm 実機ノード（MI300X）の SSH ホスト名 | `ROCM_NODE=<ここに実ホスト名>` | シェル変数 `ROCM_NODE`（`export ROCM_NODE="<実ホスト名>"`。クォート必須の理由は CUDA_NODE と同じ） | docs/real-hardware-verification-env.md 9 節 |
+| ROCm ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | `<ここにユーザー名・ディレクトリ>` | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 9 節 |
 
 ## 注意
 
