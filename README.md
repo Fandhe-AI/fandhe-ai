@@ -96,7 +96,8 @@ cargo run -p fandhe-ai --example getting_started
 | `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`tape()`／`tape_for(Device)`）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`（`Sgd`／`AdamW` 等）・デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）の 4 つを確定入口として提供します（[`docs/compat-api-scope.md`](docs/compat-api-scope.md) §0） |
 | `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
 
-上記 6 クレートと、下記の `fandhe-ai-onnx-interop` の計 7 クレートが crates.io 公開対象です（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
+上記 6 クレートと、下記の `fandhe-ai-onnx-interop` の計 7 クレートを crates.io に公開しています（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
+`fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` も公開準備済みで、0.14.0 で公開する予定です（未公開）。
 ディレクトリ名（`crates/tensor-core` 等）はリネーム前のまま維持しており、
 `[package] name`（crates.io 公開名）のみ `fandhe-ai` prefix 付きへ変更しています。
 相互運用（ONNX／safetensors）を担う `fandhe-ai-onnx-interop`（`crates/onnx-interop`）は
@@ -109,7 +110,7 @@ save／load は引き続き `fandhe-ai` からの再エクスポートが未提�
 利用できません。
 
 このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
-ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。1 段目は非公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする。公開準備済みで crates.io 未公開）を担う内部クレートがあります。
+ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。公開準備済みで crates.io 未公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする。公開準備済みで crates.io 未公開）を担う内部クレートがあります。
 compat API のサポート境界の詳細は [`docs/compat-api-scope.md`](docs/compat-api-scope.md) を参照してください。
 
 ## バックエンド
