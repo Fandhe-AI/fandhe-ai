@@ -531,3 +531,141 @@ impl<'t> Var<'t> {
 
 - セキュリティ（OWASP）: A03 `norm_type`・`kernel_size`・`stride`・shape（保存ファイル経由で復元されるものを含む）は外部入力として扱い、確保と tape 操作より前に検証する（`K` の `checked_mul` を含む）。A08 判定を迂回する経路を作らない。正ガードで 1 行委譲を固定する。
 - スコープ外（無断で起票しない。所有者の承認を得てから追跡する）: ONNX export・model_io の kind（#3750）／GPU 専用カーネル／層型名の facade 公開（#3022）／`ceil_mode=true` の対応／バッチなし入力／`Sign` の `create_graph` 対応／`docs/pooling-ops-design.md` への参照追記
+
+## 20. FractionalMaxPool2d・FractionalMaxPool3d の乱数と parity の契約（保守・運用チェックリスト。イシュー #3749）
+
+基準 sha は `969095335`。**設計のみ**で、コード・公開面・tolerance・baseline・依存・`docs/spec` は変えない。**承認根拠: なし（未承認。#3768 の論点 3 待ち）**。追跡表 `docs/compat-matrix-ari-tracker.md` の # 15 行（C9。イシュー本文の「項目 16」は同表では # 15）。流れは #3749（本書）→ #3768（承認）→ #3826（`Var` 演算）・#3827（`Sequential` 層）→ #3860・#3861（実機 parity）。保存・ONNX export の横断方針は #3750 に委ねる。行番号の参照は基準 sha の値で、実装 PR が直す。兄弟の LPPool は §19（#3748）で並行して追記されるため、§19 が未マージの間は欠番になる。
+
+### 20.0 位置づけ・推奨
+
+- 棚卸し `docs/compat-unlisted-holds-inventory.md:79` の C9 は FractionalMaxPool を「未公開」とし、本書 §8（`docs/autodiff-pool3d-ops-decision.md:170`）は #2643 のスコープ外として残した。C9 の他 3 種と違い**窓を乱数で決める**ため、(1) 乱数をどこで引くか、(2) バックエンド間 parity をどう取るかを先に決める。
+- 現状: `crates/` に `fractional_max_pool`／`FractionalMaxPool` は 0 件（`git grep -i fractional` の該当は無関係なテスト名のみ）。部品はそろっている: `Op::MaxPool2d`／`Op::MaxPool3d { input, index }`、`adaptive_max_pool_ops.rs` の再利用の先例、`rng::rand`／`with_global_rng`、`Var::dropout` → `dropout_with_mask` の分け方。
+- **推奨: 実装する（案 A）。** 理由: (1) 窓さえ決まれば純粋な選択演算で、VJP は既存 `Op::MaxPool*` の索引 scatter をそのまま使え、`create_graph/pool.rs::replay_max_pool` も変更なしで通る。(2) 乱数はホストだけで引く既存契約（`docs/rng-global-contract-design.md`）に乗る。(3) 依存・`unsafe`・GPU カーネルが要らない。(4) `docs/api-compat-0.14.0-decision.md` の # 15 行（追加のみ）と一致する。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | 標本をホストで引き、窓表もホストで整数化する。backend には整数の窓表だけを渡し、GPU はホストへフォールバックする | 窓がバックエンド間で構造上一致し、値と索引が bit 一致する | GPU tape では同期とコピーが入る |
+| B | GPU 側で乱数か窓計算を行う | 常駐したまま実行できる | GPU の乱数と浮動小数の窓計算がずれ、parity を窓の一致から検証し直す。REQ-8 の作業が増える |
+| C | 対象外にする | 作業なし | C9 が残る |
+
+### 20.1 公開形とガード反転計画
+
+- シグネチャ案:
+  - `Var::fractional_max_pool2d(&self, kernel_size: [usize; 2], output_size: [usize; 2]) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>`（グローバル RNG から標本を引く）
+  - `Var::fractional_max_pool3d(&self, kernel_size: [usize; 3], output_size: [usize; 3]) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>`
+  - 標本を明示する入口 `fractional_max_pool{2,3}d_with_samples(&self, kernel_size, output_size, samples: &Tensor<f32>)`。既定は `pub(crate)`（PyTorch の `_random_samples` 相当。公開は Q2）。
+  - `compat::Sequential::add_fractional_max_pool2d(mut self, kernel_size: [usize; 2], output_size: [usize; 2]) -> Result<Self, AutodiffError>` と 3d 版。
+- 配置: `Var` の各メソッドは `crates/autodiff/src/var.rs` から新モジュール `crates/autodiff/src/fractional_max_pool_ops.rs`（非 `pub mod`・`pub(crate) fn`）へ 1 行委譲する。共有ホストカーネルと窓表の計算は新モジュール `crates/tensor-core/src/fractional_max_pool.rs` に置く（`pool3d.rs` に足さない理由は §18.10 と同じ）。層の内部型 `nn::FractionalMaxPool2d`／`3d` は `crates/autodiff/src/nn/pooling.rs`。facade からは再エクスポートしない（#3022）。`LayerSpec` に variant を 2 件足す。
+- 索引の意味: `(n, c)` 平面内の flat 添字（2d は `h·W + w`、3d は `d·H·W + h·W + w`、`Tensor<i32>`）。`max_unpool2d`／`3d` と整合する。
+- ガード: **反転すべき既存の否定ガードは該当なし**。`AdaptiveMaxGlobalPoolHoldDoctestGuard`・`Pool3dOpsHoldDoctestGuard` と固定文言の検査は変えない。
+- #3826／#3827 が新設する正ガードの名前案:
+  - `var_fractional_max_pool_methods_are_thin_delegations`
+  - `workspace_declares_fractional_max_pool_fn_names_only_in_allowed_locations`
+  - `facade_does_not_reexport_or_declare_fractional_max_pool_ops`（＋ `_detects_each_category`）
+  - `add_fractional_max_pool_signatures_match_approved_contract`（＋ `_detects_offense`）
+  - `compat_sequential_exposes_fractional_max_pool_add_methods_issue_3827_counts_declarations`
+- 否定検査として残す経路: `Tape`／`Tensor<f32>` 上の同名メソッド、モジュール・層型の再エクスポート、`_with_samples`（Q2 で非公開とした場合）。新識別子が既存のトークン走査（`POOL3D_WORKSPACE_FN_NAMES` 等）に誤って当たらないことは、実装時に推測で済ませず確かめる。
+
+### 20.2 rustdoc と doctest
+
+- 公開 4 件（Q2 次第で 6 件）に役割要約を置く。要約に書くこと: PyTorch 相当名、窓の式、**`manual_seed` 下でだけ決定的**であること、`eval()` でも標本を引くこと、索引の意味、NaN の扱い。
+- doctest は CPU の `fandhe_ai::manual_seed`＋`tape()`／`Sequential::predict` だけで動く形にし、同じシードで 2 回呼んで一致することを示す。GPU 例は置かない（置くなら `no_run`）。失敗系は `compile_fail` に頼らず、`is_err` を確かめる通常の doctest かテストで検証する。
+
+### 20.3 エラー型（A03 の検査順）
+
+新しい variant は足さない。検査は確保・RNG 消費・tape 操作より前に終える。
+
+1. rank（2d は 4、3d は 5。`ShapeError::RankMismatch`）
+2. 空間軸が 0 なら拒否（`N`／`C` が 0 は空の出力を返し、RNG は消費しない）
+3. `kernel_size`／`output_size` に 0 があれば `InvalidArgument`
+4. 軸ごとの実行可能性の検査（2d／3d で PyTorch と同じ式にするかは Q6）
+5. 出力要素数のオーバーフロー（`checked_numel_for`）
+6. 平面の要素数が `i32::MAX` 以下か（`IndexRangeOverflow`。`N` が 0 でも検査）
+7. 明示的な標本は shape が `[N, C, D]` と完全一致し、全要素が有限かつ `[0, 1)` にあること（違反は `InvalidArgument`。範囲外の標本は窓を入力の外へ出すため、本設計固有の A03 項目）
+8. 標本を引く、または受け取る
+9. ホストで窓表を作る（各 start について `start + k <= in` を `checked_add` で再検査する。fail-closed）
+10. 実体化 → カーネル呼び出し → 戻り値 shape の再検証（`BackendError::ShapeMismatch`）→ `push_eager`
+
+層の `new` は `kernel_size`／`output_size` を前倒しで検査する。本番経路で `unwrap`／`expect` を使わず、孤児ノードを残さない。
+
+### 20.4 テスト計画
+
+| 区分 | テスト（置き場） | 内容 |
+|---|---|---|
+| CI | 共有ホストカーネルの単体テスト（`tensor-core/src/fractional_max_pool.rs`） | 窓表の式（`out=1`・`out=in-k+1`・最後の窓の固定）・タイ先勝ち・NaN・`-inf`・拒否系・決定性 |
+| CI | `crates/autodiff/tests/fractional_max_pool_ops.rs` | 中心差分の勾配・重なり窓での勾配加算・実行可能性の検査による拒否・拒否した入力で RNG を消費しないこと・`manual_seed_makes_fractional_max_pool_deterministic`（#3826 の受入条件）・消費数がちょうど `N·C·D` であること（後続の `fandhe_ai::rand` で確認）・孤児ノード無し・`create_graph` の二階有限差分 |
+| CI | PyTorch 2.14.0 fixture 突合（案: `crates/autodiff/tests/fixtures/fractional-max-pool-pytorch-reference/`） | xorshift64* と PyTorch の生成器は一致しないため `_random_samples` を明示して作り、samples・input・output・indices を一緒に収める。実行するまでは「未実測」 |
+| CI | `crates/facade/tests/fractional_max_pool_ops_backend_parity.rs::cpu_matches_naive_reference` | CPU と Naive の bit 一致 |
+| CI | `crates/facade/tests/compat_sequential_fractional_max_pool.rs` | 層経路と `Var` 直呼びの bit 一致・`eval()` でも標本を引くこと |
+| CI | §20.1 の正ガード | 1 行委譲・宣言位置・未承認経路の否定 |
+| `#[ignore]`（Phase 10） | `fractional_max_pool_ops_backend_parity.rs::cuda_fractional_max_pool_ops_match_cpu_reference` | #3860（`<cuda-node>`）。同じ標本で bit 一致 |
+| `#[ignore]`（Phase 10） | `fractional_max_pool_ops_backend_parity.rs::metal_fractional_max_pool_ops_match_cpu_reference`（`cfg(target_os = "macos")`） | #3861（`<metal-node>`） |
+| `#[ignore]`（Phase 10） | `compat_sequential_fractional_max_pool_backend_parity.rs::{cuda_*, metal_*}` | 層経路 |
+
+- グローバル RNG に触るテストは `static LOCK: Mutex<()>` で直列化するか専用のテストバイナリに分ける（`api_surface.rs` の先例）。
+- 実機の手順置き場の案: `docs/perf/logs/fractional-max-pool-ops-3826/README.md`（#3826 で新設）。
+- 実機列: cuda／metal は**未実測**、rocm は該当なし（facade 非公開）。cfg の都合で 0 本しか実行されなかった結果は pass の根拠にしない。
+
+### 20.5 数値契約（乱数と parity）
+
+- **乱数の契約**:
+  - 標本は `[N, C, D]`（D は 2d で 2、3d で 3）の `[0, 1)` の値で、`(n, c, 軸)` ごとに 1 つ。軸の並びは PyTorch と同じ（2d は [0]=W・[1]=H、3d は [0]=T・[1]=H・[2]=W）。
+  - 引くのは**ホストだけ**で、`rng::rand(&[N, C, D])`（`with_global_rng` のロック 1 回で一括。24bit 整数から作るためプラットフォームをまたいで bit 同一）を通す。`BackendOps` もデバイス側の RNG も使わない。
+  - 標本を引くのはすべての検査を通った後に限り、消費数はちょうど `N·C·D`。スレッドをまたぐ呼び出しの順序は保証しない（`docs/rng-global-contract-design.md` §5）。
+  - xorshift64* は暗号用途ではない（`rng.rs` 冒頭の A02 注記と同じ）。
+- **窓表の契約**: PyTorch の `generate_intervals` と同じ式にする。`alpha = (in - k) / (out - 1)`（`out > 1` のときだけ求める）、`seq[i] = (int)((i + sample) · alpha) - (int)(sample · alpha)`（`i < out - 1`）、`seq[out - 1] = in - k`。`int` への変換は 0 方向への切り捨て。演算の型は f32（ATen の `scalar_t` と同じ。同じ標本なら同じ窓になる）を推奨し、f64 にするかは Q1 で問う。
+- **parity の仕組み**: 窓表はホストで 1 回だけ作り、**整数の start 配列として backend へ渡す。GPU 側で式を計算し直さない**。標本の生成そのものは parity の軸にならず、同じ窓に対する選択演算だけを比べる。
+- **選択の契約**: 走査は row-major。タイは先勝ち。NaN は窓内で最初の NaN の索引を残す（`max_pool*`／`adaptive_max_pool*` と同方針。PyTorch とは異なる）。同じ標本ならバックエンド間で値と索引が **bit 完全一致**する。
+- PyTorch との比較は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。選択演算なので実際には bit 一致を見込む。
+- FMA 契約にも `f64` 長軸縮約の契約にも影響しない（加算なし・`mul_add` なし）。tolerance 定数・baseline・ガードレール閾値は変えず、新しい baseline も作らない。
+
+### 20.6 互換への影響
+
+`docs/api-compat-0.14.0-decision.md` §8 の手順で判定すると**追加のみ**。`Var` は inherent メソッドの追加、`compat::Sequential` も inherent メソッドの追加（フィールド非公開）、`AutodiffError` は変更なし、`Op` は `pub(crate)` で新 variant なし、`LayerSpec` は `pub(super)`、`BackendOps` は内部クレートの trait に既定実装付きメソッドを足すのみ。乱数の消費順は型でなく契約の問題として rustdoc に書く。
+
+### 20.7 適用記録・索引・追跡表
+
+- `docs/compat-api-scope.md` の適用記録は承認後に #3826／#3827 が書く。文案: `**適用記録（イシュー #3826／#3827・承認: <#3768 回答 URL>）**: Var::fractional_max_pool2d／fractional_max_pool3d と Sequential::add_fractional_max_pool2d／add_fractional_max_pool3d を追加のみで公開。新規依存なし`。
+- 本 PR で更新するのは `docs/README.md` の索引と、追跡表 # 15 行の「設計記録」セルのみ。公開状態は「未公開」のまま。
+
+### 20.8 ベンチと性能
+
+既定経路への影響はない（新 API を足すだけで `max_pool*`／`adaptive_*` には手を入れない）。GPU tape ではホストへのフォールバックで同期とコピーが入るが、新規経路のため前後比較は要らない。
+
+### 20.9 依存
+
+依存の追加なし（乱数は既存の `rng` モジュール）。許容 12 区分・禁止リストとの照合は該当なし。新規 `unsafe` なし。
+
+### 20.10 方式
+
+- `BackendOps::fractional_max_pool2d`／`3d` を既定 `Unsupported` で足し、CPU のみ共有ホストカーネルを呼ぶ override を持つ。引数は計算済みの窓表で、標本は渡さない。
+- Op は `Op::MaxPool2d`／`Op::MaxPool3d` を再利用する（`adaptive_max_pool_ops.rs` の先例。VJP は窓パラメータに依存しない scatter-add で、重なり窓の重複索引も足し込まれる）。`create_graph` はそのまま通る。
+- 層: `is_pooling() = true`、`supports_forward_host() = false`。`Module::forward` は値のみ返し、索引は層固有の forward から得る。resident 経路は fail-closed で拒否する。PyTorch と同じく `training` に関係なく forward ごとに標本を引く。`eval()` だけでは決定的にならず、`manual_seed` で決まることを rustdoc に書く。
+- GPU と REQ-8: 専用カーネルは作らない。将来作る場合もシェーダ側の手動境界検査を省かないことを条件とする。
+
+### 20.11 PyTorch との差分（すべて未実測。ATen の main ブランチのソースからの記述）
+
+- 索引の型: PyTorch は int64、本設計は `i32`。
+- NaN を含む窓の索引: PyTorch は最後の NaN、本設計は最初の NaN。
+- `output_ratio`: 本設計は v1 で受け付けない（Q3）。バッチなし入力（2d の rank 3、3d の rank 4）も受け付けない。
+- 乱数生成器: PyTorch と異なり、シードを合わせても同じ値は出ない。
+- 実行可能性の検査: PyTorch は 2d が `out + k - 1 <= in`、3d が `out + k - 1 < in`（加えて `k <= in`）で式が違う（Q6）。
+- 範囲外の明示標本: PyTorch は検査しないと見込む（未確認）。本設計は拒否する。
+- 実測は #3826 で fixture を作るときに行う。それまでは未実測。
+
+### 20.12 所有者へ戻す論点（#3768 の論点 3 へ）・セキュリティ・スコープ外
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| Q1 窓計算の型 | (a) f32（ATen と同じ） (b) f64 | (a) | 確認があるまで実装へ進めない |
+| Q2 標本を明示する入口 | (a) `pub(crate)` のみ (b) `_with_samples` を公開 (c) `Generator` 版を追加（`Generator::rand` が無く範囲拡大になる） | (a)。parity と fixture は内部の入口と `manual_seed` で足りる | 同上 |
+| Q3 `output_ratio` | (a) v1 では受け付けない (b) 列挙型で受け付ける（新しい公開型が増える） | (a) | 同上 |
+| Q4 eval 時の標本 | (a) PyTorch と同じく常に引く (b) eval では固定の標本 | (a) | 同上 |
+| Q5 範囲 | (a) 2d と 3d (b) 2d のみ | (a)。`Op::MaxPool3d` が既にある | 同上 |
+| Q6 実行可能性の式 | (a) PyTorch と同じ（2d と 3d で違う） (b) 2d の式にそろえる | (a) | 同上 |
+| Q7 未承認経路の固定方法 | (a) ソース走査の正ガードと否定検査のみ (b) `FractionalMaxPoolHoldDoctestGuard` も新設 | (a)（§18 Q6 と揃える） | 同上 |
+| Q8 保存と export | #3750 の横断方針に委ねる | #3750 に委ねる | 同上 |
+
+- Q8 補足: #3750 が決めるまでは `LayerSpec` に variant を置き、保存は `Unsupported` で fail-closed にする。
+- セキュリティ: A03 shape・`kernel_size`・`output_size`・明示標本（保存ファイル経由で復元されるものを含む）は外部入力として、確保と RNG 消費より前に検証し、窓の start は二重に検査する。A02 標本の生成器は暗号用途ではない。A08 判定を迂回する経路を作らず、正ガードで 1 行委譲を固定する。実機ホスト名・秘密情報は書かない。
+- スコープ外: GPU 専用カーネル、`output_ratio`、バッチなし入力、`Generator` 版、層型名の facade 公開（#3022）、ONNX export（#3750）、`docs/pooling-ops-design.md:394` への参照追記。新規 issue は所有者承認なしに起票しない。
