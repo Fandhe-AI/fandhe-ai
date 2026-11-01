@@ -2,14 +2,13 @@
 //! forward の自由関数（イシュー #2628・親 #2626「`compute_dtype` の Op 拡張」。
 //! ルート #2499 Phase 4）。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::{matmul,add,mul,relu,exp,tanh}
-//! _low_precision(.., dtype)` の委譲メソッド）は未承認で、承認依頼は #2677
-//! （公開自体は承認後の #2678）。本モジュールは内部クレート限定の入口で、
-//! `Var` に `pub` の inherent メソッドを足さない（`fft_ops` と同型）。保留は
-//! `crates/facade/src/lib.rs` の `VarLowPrecisionOpsHoldDoctestGuard` と
+//! **facade 非公開（対象外）**: 公開形の `Var::{matmul,add,mul,relu,exp,tanh}
+//! _low_precision(.., dtype)` の委譲メソッド 6 本は #2678 で公開済み。本モジュール
+//! 自体は内部クレート限定の入口で、facade の別入口（モジュール再エクスポート・
+//! 裸の自由関数・`Tape` メソッド）は #3766（<https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674>）で対象外に確定した。
+//! 禁止経路は `crates/facade/src/lib.rs` の `VarLowPrecisionOpsHoldDoctestGuard` と
 //! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する
-//! （`docs/autodiff-low-precision-op-extension-decision.md`。同記録は推奨案の
-//! 記録であり承認記録ではない）。
+//! （`docs/autodiff-low-precision-op-extension-decision.md` §8・§9）。
 //!
 //! **数値契約**: 入力（f32 master）を `dtype`（`F16`／`Bf16` のみ）へ丸め、
 //! `TypedOps<T>` の演算を行い、結果を 1 回だけ f32 へ昇格して `Tape` へ積む

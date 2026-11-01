@@ -184,6 +184,8 @@ fixture は `crates/autodiff/tests/fixtures/low-precision-ops-pytorch-reference/
 
 ### 8.0 位置づけ・承認根拠・境界・推奨
 
+> 承認状況は §9 を参照（#3766 で案 X を承認。本節の「未取得」は #3721 時点の記述）。
+
 - 位置づけ: 本節は**推奨の記録であり承認記録ではない**。基準 sha は `125120678`（2026-10-31）。本件の承認は**未取得**で、承認 issue #3766 で所有者に問う。既公開の `Var` 6 本の承認根拠（ルート #2499 の `issuecomment-6033824965`）を引くだけで、新しい承認は主張しない
 - 境界: 対象は「`Var` 6 本と同じ 6 演算の別入口」だけ。`Sum`／`Max` 等の低精度化・backward の低精度化・`TypedOps` 拡張・dtype を値型とする `Tape`／`Var`（#3021 項目 2 で対象外確定済み）は扱わない
 - 現状の事実（基準 sha で確認）:
@@ -267,7 +269,7 @@ PyTorch／TF との対応:
 （実装の場合）**適用記録（イシュー #3721・親 #3766。承認: 未取得・#3766 待ち）**: facade 自前の `low_precision_ops` に自由関数 6 本（1 行委譲）を追加する（案 C）。公開状態: 未公開（#3784 で公開）
 ```
 
-- [ ] `docs/compat-api-scope.md` に適用記録を追記した（未チェック。承認反映後の PR が追記する）
+- [x] `docs/compat-api-scope.md` に適用記録を追記した（#3784 で追記）
 - [x] `docs/README.md` の索引を更新した
 - [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した（#1 行の設計記録列のみ。承認・正ガード・0.14.0 の区分は承認反映後・実装後の PR が更新する）
 
@@ -298,3 +300,17 @@ PyTorch／TF との対応:
 | Q2 対応表で「対象外」に数えてよいか（D-0 未掲載のため個別承認） | 対象外として数える／未公開のまま残す | 対象外として数える | 未公開のまま数え、0.14.0 の区分は「未確定」 |
 | Q3 対象外のとき保留ガードを恒久維持し、名前と doc 文言を承認後 PR で更新してよいか | 維持＋文言更新／維持のみ／撤去 | 維持＋文言更新 | 現行ガードをそのまま維持 |
 | Q4 実装を選ぶ場合の配置名 | `fandhe_ai::low_precision_ops`／別名 | `low_precision_ops` | 実装へ進めない |
+
+## 9. 実装記録（イシュー #3784。対象外の確定）
+
+基準 sha: `4e19fdff2`（2026-11-01）。
+
+- 承認: https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674（2026-11-01）。Q1 案 X「対象外」、Q2 対象外に数える、Q3 保留ガードを維持し名前と文言を更新してよい
+- 結論: 別入口 3 経路（モジュール再エクスポート・裸の自由関数・`Tape` メソッド）は対象外。`Var::*_low_precision` 6 本が唯一の入口。公開面・シグネチャ・数値経路は不変
+- ガード: `VarLowPrecisionOpsHoldDoctestGuard`（`crates/facade/src/lib.rs:5966`）と `crates/facade/tests/api_surface.rs` の 5 テスト（`:27509`・`:27533`・`:27700`・`:27719`・`:27759`）を禁止経路専用として維持する。正ガードへは反転しない
+- Q3 の解釈（逸脱・解釈の報告）: 構造体名とテスト名は改名せず、doc 文言とコメントだけを更新した。先例 `LossOpsHoldDoctestGuard` が「`*HoldDoctestGuard` の統一と固定文言ドリフト検査の対象名を保つため名前を変えない」としており、改名は `api_surface.rs` の抽出ヘルパー呼び出し等へ波及して docs のみの PR でなくなるため。改名を求める場合は所有者が別 issue で判断する
+- §8.7 の「#3784 には着手しない」の訂正: イシュー本文の対象外分岐に従い、docs のみ（コメント更新を含む）の PR で閉じた
+- 変更したファイル: 本 doc・`docs/compat-api-scope.md`・`docs/compat-matrix-ari-tracker.md`、およびコメントのみの `crates/facade/src/lib.rs`・`crates/facade/tests/api_surface.rs`・`crates/autodiff/src/low_precision_ops.rs`。コード経路・テスト本体・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変更なし
+- 移行ノート: 該当欄なし（`docs/migration/0.14.0.md` の記入規則 11 が # 1 を除外している）
+- 残課題: `api_surface.rs` のアサーションメッセージ（約 27711 行）に古い「承認依頼は #2677」の文言が残る。テストコードの変更になるため本 PR では触れない
+- 実機 parity: 該当なし（新しい数値経路が無い）
