@@ -2631,7 +2631,15 @@ impl Op {
             // `create_graph/stat_varnorm.rs`。入口検査は `validate_ancestors`。
             | Op::Var { .. }
             | Op::Std { .. }
-            | Op::PNorm { .. } => true,
+            | Op::PNorm { .. }
+            // 損失の二値・マージン系 6 variant（イシュー #3799・決定記録 §39/§54）。方式は
+            // `create_graph/loss_binary_margin.rs`。Bce は V1+V2、残る 5 つは V3（+V2）。
+            | Op::BceLoss { .. }
+            | Op::BceWithLogitsPosWeightLoss { .. }
+            | Op::SoftMarginLoss { .. }
+            | Op::HingeEmbeddingLoss { .. }
+            | Op::MarginRankingLoss { .. }
+            | Op::SigmoidFocalLoss { .. } => true,
             // `VectorNorm` は payload で判定する（`ScalarUnary` の前例）。`L1`／`L2` だけ true、
             // `#[non_exhaustive]` の未知 `ord` は false。
             Op::VectorNorm { ord, .. } => matches!(
@@ -2640,18 +2648,12 @@ impl Op {
             ),
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
-            Op::BceLoss { .. }
-            | Op::CrossEntropyLossWithOptions { .. }
+            Op::CrossEntropyLossWithOptions { .. }
             | Op::CosineEmbeddingLoss { .. }
-            | Op::MarginRankingLoss { .. }
             | Op::TripletMarginLoss { .. }
-            | Op::BceWithLogitsPosWeightLoss { .. }
-            | Op::HingeEmbeddingLoss { .. }
-            | Op::SoftMarginLoss { .. }
             | Op::MultiMarginLoss { .. }
             | Op::MultiLabelMarginLoss { .. }
             | Op::MultiLabelSoftMarginLoss { .. }
-            | Op::SigmoidFocalLoss { .. }
             | Op::CtcLoss { .. }
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
@@ -6055,6 +6057,80 @@ mod loss_create_graph_support_tests {
         let closed = Op::MatrixNorm {
             input: NodeId(0),
             ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro,
+        };
+        assert!(!closed.supports_create_graph(), "{closed:?}");
+    }
+
+    /// 損失の二値・マージン系 6 variant（イシュー #3799・決定記録 §39/§54）が
+    /// `supports_create_graph() == true` であること（payload の違いで判定が変わらない）。
+    /// 隣接する `CtcLoss`・`MultiMarginLoss` が `false` のままであることも固定する。
+    #[test]
+    fn binary_margin_losses_support_create_graph() {
+        use fandhe_ai_tensor_core::BceKind;
+        let r = Reduction::Mean;
+        let t1 = || Tensor::new(vec![1f32], &[1]).unwrap();
+        let supported = [
+            Op::BceLoss {
+                input: NodeId(0),
+                target: NodeId(1),
+                kind: BceKind::Probabilities,
+                reduction: r,
+            },
+            Op::BceLoss {
+                input: NodeId(0),
+                target: NodeId(1),
+                kind: BceKind::Logits,
+                reduction: r,
+            },
+            Op::BceWithLogitsPosWeightLoss {
+                input: NodeId(0),
+                target: NodeId(1),
+                pos_weight: t1(),
+                reduction: r,
+            },
+            Op::SoftMarginLoss {
+                input: NodeId(0),
+                y: t1(),
+                reduction: r,
+            },
+            Op::HingeEmbeddingLoss {
+                input: NodeId(0),
+                y: t1(),
+                margin: 1.0,
+                reduction: r,
+            },
+            Op::MarginRankingLoss {
+                x1: NodeId(0),
+                x2: NodeId(1),
+                y: t1(),
+                margin: 0.0,
+                reduction: r,
+            },
+            Op::SigmoidFocalLoss {
+                input: NodeId(0),
+                target: t1(),
+                alpha: Some(0.25),
+                gamma: 2.0,
+                reduction: r,
+            },
+            Op::SigmoidFocalLoss {
+                input: NodeId(0),
+                target: t1(),
+                alpha: None,
+                gamma: 0.0,
+                reduction: r,
+            },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?}");
+        }
+        let closed = Op::MultiMarginLoss {
+            input: NodeId(0),
+            targets: vec![0],
+            weight: None,
+            p: 1,
+            margin: 1.0,
+            reduction: r,
         };
         assert!(!closed.supports_create_graph(), "{closed:?}");
     }

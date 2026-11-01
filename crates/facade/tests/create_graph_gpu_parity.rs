@@ -326,6 +326,62 @@ const CASES: &[Case] = &[
         split_k: SplitKShapes::NoMatMul,
         run: run_stat_reduce_nanmean,
         reject: None,
+    }, // 損失の二値・マージン系 6 variant（イシュー #3799・決定記録 §39/§54）。Bce は 1 階が融合カーネル
+    // `bce_loss_backward` 経路（K）、残る 5 つは 1 階がホスト関数（H）。構造に MatMul は無い。
+    // 実機は未実測（#3857・#3859）。
+    Case {
+        name: "loss_binary_margin_bce",
+        family: "loss_binary_margin",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_binary_margin_bce,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "loss_binary_margin_bce_pos_weight",
+        family: "loss_binary_margin",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_binary_margin_bce_pos_weight,
+        reject: None,
+    },
+    Case {
+        name: "loss_binary_margin_soft_margin",
+        family: "loss_binary_margin",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_binary_margin_soft_margin,
+        reject: None,
+    },
+    Case {
+        name: "loss_binary_margin_hinge_embedding",
+        family: "loss_binary_margin",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_binary_margin_hinge_embedding,
+        reject: None,
+    },
+    Case {
+        name: "loss_binary_margin_margin_ranking",
+        family: "loss_binary_margin",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_binary_margin_margin_ranking,
+        reject: None,
+    },
+    Case {
+        name: "loss_binary_margin_sigmoid_focal",
+        family: "loss_binary_margin",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_binary_margin_sigmoid_focal,
+        reject: None,
     },
     // 損失の回帰系 3 variant（イシュー #3798・決定記録 §39/§53）。KlDiv は 1 階が融合カーネル
     // `kl_div_loss_backward` 経路（K）、Poisson・Gaussian は 1 階がホスト関数（H）。構造に MatMul は無い。
@@ -569,6 +625,111 @@ fn run_stat_reduce_nansum(tp: &Tapes) -> Outputs {
 
 fn run_stat_reduce_nanmean(tp: &Tapes) -> Outputs {
     run_select_reduce(tp, |x| x.mul(x).unwrap().nanmean(Some(1)).unwrap())
+}
+
+/// 損失の二値・マージン系（#3799）。葉 `z`（長さ 12）から損失を作り、`loss²` で `H v ≠ 0` にする。
+/// 区分定数の損失（Hinge・MarginRanking）も `loss²` の `g` 経由で二階が非零になる。
+fn run_loss_binary_margin(tp: &Tapes, f: for<'t> fn(&Var<'t>) -> Var<'t>) -> Outputs {
+    let z0: Vec<f32> = vec![
+        0.4, 0.55, 0.7, 0.85, 0.9, 0.1, 0.6, 0.3, 0.2, 0.5, 0.8, 0.45,
+    ];
+    // 符号付き勾配との内積が偶然 0 にならない非対称な方向。
+    let dir: Vec<f32> = (0..12)
+        .map(|i| 1.0 - 0.0625 * i as f32 + 0.03 * (i * i) as f32)
+        .collect();
+    let z = tp.parent.var(&t(z0, &[12]));
+    let l = f(&z);
+    let loss = l.mul(&l).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&z).unwrap().expect("grad"));
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&z).unwrap().expect("first_order"));
+    let g = cg.grad(&z).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir, &[12]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let zc = cg.child_var(&z).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&zc).unwrap().expect("second order"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: None,
+    }
+}
+
+fn run_loss_binary_margin_bce(tp: &Tapes) -> Outputs {
+    run_loss_binary_margin(tp, |z| {
+        let (x, tg) = (z.narrow(0, 0, 4).unwrap(), z.narrow(0, 4, 4).unwrap());
+        x.bce_loss(&tg, fandhe_ai::nn::loss::Reduction::Mean)
+            .unwrap()
+    })
+}
+
+fn run_loss_binary_margin_bce_pos_weight(tp: &Tapes) -> Outputs {
+    run_loss_binary_margin(tp, |z| {
+        let (x, tg) = (z.narrow(0, 0, 4).unwrap(), z.narrow(0, 4, 4).unwrap());
+        let opts = fandhe_ai::nn::loss::BceWithLogitsOptions::default()
+            .pos_weight(Tensor::<f32>::new(vec![2.0, 0.5, 3.0, 1.0], &[4]).unwrap());
+        x.bce_with_logits_loss_with(&tg, fandhe_ai::nn::loss::Reduction::Mean, &opts)
+            .unwrap()
+    })
+}
+
+fn run_loss_binary_margin_soft_margin(tp: &Tapes) -> Outputs {
+    run_loss_binary_margin(tp, |z| {
+        let x = z.narrow(0, 0, 4).unwrap();
+        x.soft_margin_loss(
+            &Tensor::<f32>::new(vec![1.0, -1.0, -1.0, 1.0], &[4]).unwrap(),
+            fandhe_ai::nn::loss::Reduction::Mean,
+        )
+        .unwrap()
+    })
+}
+
+fn run_loss_binary_margin_hinge_embedding(tp: &Tapes) -> Outputs {
+    run_loss_binary_margin(tp, |z| {
+        let x = z.narrow(0, 0, 4).unwrap();
+        x.hinge_embedding_loss(
+            &Tensor::<f32>::new(vec![1.0, -1.0, -1.0, 1.0], &[4]).unwrap(),
+            1.0,
+            fandhe_ai::nn::loss::Reduction::Mean,
+        )
+        .unwrap()
+    })
+}
+
+fn run_loss_binary_margin_margin_ranking(tp: &Tapes) -> Outputs {
+    run_loss_binary_margin(tp, |z| {
+        let (x1, x2) = (z.narrow(0, 0, 4).unwrap(), z.narrow(0, 4, 4).unwrap());
+        x1.margin_ranking_loss(
+            &x2,
+            &Tensor::<f32>::new(vec![1.0, -1.0, 1.0, -1.0], &[4]).unwrap(),
+            0.5,
+            fandhe_ai::nn::loss::Reduction::Mean,
+        )
+        .unwrap()
+    })
+}
+
+fn run_loss_binary_margin_sigmoid_focal(tp: &Tapes) -> Outputs {
+    run_loss_binary_margin(tp, |z| {
+        let x = z.narrow(0, 0, 4).unwrap();
+        let opts = fandhe_ai::nn::loss::SigmoidFocalLossOptions::default()
+            .alpha(Some(0.25))
+            .gamma(2.0);
+        x.sigmoid_focal_loss(
+            &Tensor::<f32>::new(vec![1.0, 0.0, 0.7, 0.2], &[4]).unwrap(),
+            &opts,
+            fandhe_ai::nn::loss::Reduction::Mean,
+        )
+        .unwrap()
+    })
 }
 
 /// 損失の回帰系（#3798）。葉 `z`（長さ 12 = `[x; target; var]`）から損失を作り、`loss²` で `H v ≠ 0` にする。
@@ -847,6 +1008,10 @@ cuda_family_test!(
     "stat_reduce_lse_nan"
 );
 cuda_family_test!(
+    create_graph_loss_binary_margin_cuda_matches_cpu,
+    "loss_binary_margin"
+);
+cuda_family_test!(
     create_graph_loss_regression_cuda_matches_cpu,
     "loss_regression"
 );
@@ -877,6 +1042,10 @@ metal_family_test!(create_graph_stat_varnorm_metal_matches_cpu, "stat_varnorm");
 metal_family_test!(
     create_graph_stat_reduce_lse_nan_metal_matches_cpu,
     "stat_reduce_lse_nan"
+);
+metal_family_test!(
+    create_graph_loss_binary_margin_metal_matches_cpu,
+    "loss_binary_margin"
 );
 metal_family_test!(
     create_graph_loss_regression_metal_matches_cpu,
@@ -921,6 +1090,11 @@ fn stat_varnorm_cases_pass_cpu_against_cpu() {
 #[test]
 fn stat_reduce_lse_nan_cases_pass_cpu_against_cpu() {
     run_family("stat_reduce_lse_nan", None);
+}
+
+#[test]
+fn loss_binary_margin_cases_pass_cpu_against_cpu() {
+    run_family("loss_binary_margin", None);
 }
 
 #[test]

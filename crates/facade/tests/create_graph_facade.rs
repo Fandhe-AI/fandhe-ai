@@ -28,7 +28,9 @@
 
 use std::sync::Arc;
 
-use fandhe_ai::nn::loss::{GaussianNllOptions, PoissonNllOptions, Reduction};
+use fandhe_ai::nn::loss::{
+    BceWithLogitsOptions, GaussianNllOptions, PoissonNllOptions, Reduction, SigmoidFocalLossOptions,
+};
 use fandhe_ai::{
     AutodiffError, CreateGraphResult, CustomFunction, Device, FftNorm, Tape, Tensor, Var,
 };
@@ -863,6 +865,86 @@ fn nansum_create_graph_via_facade() {
 #[test]
 fn nanmean_create_graph_via_facade() {
     check_create_graph_family("nanmean", &NX, &[2, 3], nanmean_loss, true, 1e-2);
+}
+
+/// 損失の二値・マージン系（イシュー #3799）。1 本の葉 `z` を `[x; target]` へ `narrow` で切り出し、
+/// 損失を二乗して `H v ≠ 0` にする（`y`・focal の `target`・`pos_weight` は定数）。
+fn bce_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let (x, tg) = (z.narrow(0, 0, 3).unwrap(), z.narrow(0, 3, 3).unwrap());
+    let l = x.bce_loss(&tg, Reduction::Mean).unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn bce_with_logits_pos_weight_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let (x, tg) = (z.narrow(0, 0, 3).unwrap(), z.narrow(0, 3, 3).unwrap());
+    let opts = BceWithLogitsOptions::default().pos_weight(t(vec![2.0, 0.5, 3.0], &[3]));
+    let l = x
+        .bce_with_logits_loss_with(&tg, Reduction::Mean, &opts)
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn sigmoid_focal_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let opts = SigmoidFocalLossOptions::default()
+        .alpha(Some(0.25))
+        .gamma(2.0);
+    let l = z
+        .sigmoid_focal_loss(&t(vec![1.0, 0.0, 0.7], &[3]), &opts, Reduction::Mean)
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn margin_ranking_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let (x1, x2) = (z.narrow(0, 0, 3).unwrap(), z.narrow(0, 3, 3).unwrap());
+    let l = x1
+        .margin_ranking_loss(&x2, &t(vec![1.0, -1.0, 1.0], &[3]), 0.5, Reduction::Mean)
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+#[test]
+fn bce_loss_create_graph_via_facade() {
+    let z = [0.4, 0.5, 0.6, 0.9, 0.1, 0.95];
+    check_create_graph_family("bce_loss", &z, &[6], bce_loss_loss, false, 5e-3);
+}
+
+#[test]
+fn bce_with_logits_pos_weight_loss_create_graph_via_facade() {
+    let z = [0.3, -0.8, 0.5, 0.9, 0.2, 0.5];
+    check_create_graph_family(
+        "bce_with_logits_pos_weight_loss",
+        &z,
+        &[6],
+        bce_with_logits_pos_weight_loss_loss,
+        true,
+        3e-3,
+    );
+}
+
+#[test]
+fn sigmoid_focal_loss_create_graph_via_facade() {
+    check_create_graph_family(
+        "sigmoid_focal_loss",
+        &[0.3, -0.8, 0.5],
+        &[3],
+        sigmoid_focal_loss_loss,
+        true,
+        3e-3,
+    );
+}
+
+#[test]
+fn margin_ranking_loss_create_graph_via_facade() {
+    // raw = −y·(x1 − x2) + margin が全要素で 0 から離れる（区分境界の中央差分をまたがない）値。
+    let z = [0.9, 0.2, -0.3, 0.1, 0.6, 0.4];
+    check_create_graph_family(
+        "margin_ranking_loss",
+        &z,
+        &[6],
+        margin_ranking_loss_loss,
+        true,
+        1e-2,
+    );
 }
 
 /// 損失の回帰系（イシュー #3798）。1 本の葉 `z` を `[x; target (; var)]` へ `narrow` で切り出し、
