@@ -37,8 +37,8 @@
 | 9 | C1: Hardshrink・Softshrink | NN 層・モデル構築 | 未公開 | #3742（`docs/nn-shrink-bilinear-channel-shuffle-decision.md` §1） | 未承認（#3768 待ち） | #3817 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 10 | C2: Bilinear | NN 層・モデル構築 | 未公開 | #3743（`docs/nn-shrink-bilinear-channel-shuffle-decision.md` §2） | 未承認（#3768 待ち） | #3818 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 11 | C3: BatchNorm3d（`Var::batch_norm` の rank 5） | NN 層・モデル構築 | 未公開 | #3744（`docs/autodiff-batch-norm-3d-decision.md` §0〜§12） | 未承認（#3768 待ち） | #3819、#3820 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
-| 12 | C5: CosineSimilarity | NN 層・モデル構築 | 未公開 | #3745 | 未承認（#3768 待ち） | #3821 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
-| 13 | C6: PairwiseDistance | NN 層・モデル構築 | 未公開 | #3745 | 未承認（#3768 待ち） | #3821 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
+| 12 | C5: CosineSimilarity | NN 層・モデル構築 | 未公開 | #3745（`docs/autodiff-similarity-distance-decision.md` §0〜§12） | 未承認（#3768 待ち） | #3821 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
+| 13 | C6: PairwiseDistance | NN 層・モデル構築 | 未公開 | #3745（`docs/autodiff-similarity-distance-decision.md` §0〜§12） | 未承認（#3768 待ち） | #3821 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 14 | C7: ChannelShuffle | NN 層・モデル構築 | 未公開 | #3746（`docs/nn-shrink-bilinear-channel-shuffle-decision.md` §3） | 未承認（#3768 待ち） | #3822 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 15 | C9: AdaptiveAvgPool3d・AdaptiveMaxPool3d・LPPool・FractionalMaxPool（4 種で 1 項目） | NN 層・モデル構築 | 未公開 | #3747〜#3749 | 未承認（#3768 待ち） | #3823〜#3827 | 未特定（設計記録で確定） | 未実測（#3860、#3861） | 未確定 |
 | 16 | SWA の `FitConfig` 形（`use_swa`・`swa_start`・`swa_lr`） | 最適化・学習ループ | 未公開 | #3751 | 未承認（#3769 待ち） | #3830（承認された場合のみ） | 現状は否定ガード `SwaHoldDoctestGuard`（`crates/facade/src/lib.rs:4608`）。反転先は設計記録で確定 | 該当 issue なし | 未確定 |
