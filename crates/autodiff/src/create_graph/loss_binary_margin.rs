@@ -257,7 +257,13 @@ pub(super) fn bce_cgrad<'c>(
 
     let s_b = super::loss_scale_bcast(child, g, reduction, false, n, &shape)?;
     if !probabilities {
-        let dinput = s_b.mul(&x_m.sigmoid().sub(t_m)?)?;
+        // σ(x) − t を符号別に分解する（x ≥ 0: (1−t) − σ(−x)、x < 0: σ(x) − t）。大きい側の σ を
+        // Sigmoid の出力から作ると VJP の y(1−y) が f32 の丸めで飽和域の曲率を 0 にするため。
+        let nonneg = Tensor::new(xs.iter().map(|&x| x >= 0.0).collect::<Vec<bool>>(), &shape)?;
+        let one = scalar(child, 1.0);
+        let form_pos = one.sub(t_m)?.sub(&x_m.neg()?.sigmoid())?;
+        let form_neg = x_m.sigmoid().sub(t_m)?;
+        let dinput = s_b.mul(&Var::where_cond(&nonneg, &form_pos, &form_neg)?)?;
         let dtarget = s_b.mul(x_m)?.neg()?;
         return Ok((dinput, dtarget));
     }
@@ -343,16 +349,21 @@ pub(super) fn bce_pos_weight_cgrad<'c>(
     let pm1_c = const_vec(child, ps.iter().map(|p| p - 1.0).collect(), &shape)?;
     let one = scalar(child, 1.0);
     let nx = x_m.neg()?;
-    let lw = one.add(&pm1_c.mul(t_m)?)?;
+    // lw = (1−t) + pw⊙t（非負項の和。pw ≪ 1 の t = 1 で 1 + (pw−1)t が f32 で 0 に丸まるのを避ける）。
+    let pw_c = const_vec(child, ps.clone(), &shape)?;
+    let lw = one.sub(t_m)?.add(&pw_c.mul(t_m)?)?;
     // dx = s_b⊙[(1−t) − lw⊙σ(−x)] を符号別の安定形へ分解する（二階の曲率を飽和域で保つ）。
     // x ≥ 0: そのまま（σ(−x) ≤ 0.5 で桁落ちなし）。
     // x < 0: (1−t) − lw = −pw⊙t なので lw⊙σ(x) − pw⊙t（σ(x) の VJP が y(1−y) で精度を保つ）。
-    let pw_c = const_vec(child, ps.clone(), &shape)?;
     let nonneg = Tensor::new(xs.iter().map(|&x| x >= 0.0).collect::<Vec<bool>>(), &shape)?;
     let form_pos = one.sub(t_m)?.sub(&lw.mul(&nx.sigmoid())?)?;
     let form_neg = lw.mul(&x_m.sigmoid())?.sub(&pw_c.mul(t_m)?)?;
     let dx = s_b.mul(&Var::where_cond(&nonneg, &form_pos, &form_neg)?)?;
-    let dt = s_b.mul(&nx.add(&pm1_c.mul(&nx.softplus(1.0, 20.0)?)?)?)?;
+    // dt = −x + (pw−1)⊙softplus(−x)。x < 0 は softplus(−x) が線形分岐になり構造が退化するため
+    // −pw⊙x + (pw−1)⊙softplus(x) へ分解する（小さい側の Softplus を使う）。
+    let dt_pos = nx.add(&pm1_c.mul(&nx.softplus(1.0, 20.0)?)?)?;
+    let dt_neg = pw_c.mul(&nx)?.add(&pm1_c.mul(&x_m.softplus(1.0, 20.0)?)?)?;
+    let dt = s_b.mul(&Var::where_cond(&nonneg, &dt_pos, &dt_neg)?)?;
     Ok((push_v3(child, &dx, hx)?, push_v3(child, &dt, ht)?))
 }
 
@@ -397,7 +408,21 @@ pub(super) fn soft_margin_cgrad<'c>(
     );
     let s_b = super::loss_scale_bcast(child, g, reduction, false, n, &shape)?;
     let ny = const_vec(child, ys.iter().map(|v| -v).collect(), &shape)?;
-    let dx = s_b.mul(&ny)?.mul(&ny.mul(x_m)?.sigmoid())?;
+    // σ(z)（z = −y⊙x）を符号別に分解する（z ≥ 0: 1 − σ(−z)）。大きい側の σ の VJP は f32 で曲率を失う。
+    let y_c = const_vec(child, ys.clone(), &shape)?;
+    let zpos = Tensor::new(
+        xs.iter()
+            .zip(&ys)
+            .map(|(&x, &yv)| -(f64::from(yv) * f64::from(x)) >= 0.0)
+            .collect::<Vec<bool>>(),
+        &shape,
+    )?;
+    let one = scalar(child, 1.0);
+    let sig_pos = one.sub(&y_c.mul(x_m)?.sigmoid())?;
+    let sig_neg = ny.mul(x_m)?.sigmoid();
+    let dx = s_b
+        .mul(&ny)?
+        .mul(&Var::where_cond(&zpos, &sig_pos, &sig_neg)?)?;
     push_v3(child, &dx, hx)
 }
 

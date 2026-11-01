@@ -787,6 +787,20 @@ fn scaled_second_derivative<F>(build: F, z0: &[f32], scale: f32) -> Result<f64, 
 where
     F: for<'t> Fn(&'t Tape, &Var<'t>) -> BuildResult<'t>,
 {
+    scaled_mixed_derivative(build, z0, scale, 0, 0)
+}
+
+/// 損失へ `scale` を掛けて create_graph し、`∂(grad[row]) / ∂z[col]` を返す。
+fn scaled_mixed_derivative<F>(
+    build: F,
+    z0: &[f32],
+    scale: f32,
+    row: usize,
+    col: usize,
+) -> Result<f64, AutodiffError>
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> BuildResult<'t>,
+{
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let z = tape.var(&t(z0.to_vec(), &[z0.len()]));
@@ -795,8 +809,8 @@ where
     let cg = tape.backward_create_graph(&loss, &child)?;
     let gz = cg.grad(&z)?.expect("1 階勾配");
     let cz = cg.child_var(&z)?.expect("写し");
-    let h = child.backward(&gz.narrow(0, 0, 1)?.sum(None)?)?;
-    Ok(f64::from(dense(h.get(&cz)?.expect("2 階"))[0]))
+    let h = child.backward(&gz.narrow(0, row, 1)?.sum(None)?)?;
+    Ok(f64::from(dense(h.get(&cz)?.expect("2 階"))[col]))
 }
 
 /// gamma * ce 自体が f32 で溢れる入力（gamma = 1e30）は、q^(gamma-1) = 0 で積が小さくても拒否する。
@@ -853,6 +867,94 @@ fn focal_keeps_curvature_without_ce_cancellation() {
         },
         &[-15.0],
         1e10,
+    )
+    .expect("受理");
+    assert!(
+        (got - expect).abs() / expect.abs() < 1e-3,
+        "got={got} expect={expect}"
+    );
+}
+
+fn sigma_prime(x: f64) -> f64 {
+    let s = 1.0 / (1.0 + (-x).exp());
+    s * (1.0 - s)
+}
+
+/// BCE logits（x = 20・t = 0・損失 x 1e10）の二階が σ'(x) x 1e10（約 20.6）を保つ。
+#[test]
+fn bce_logits_keeps_curvature_in_positive_saturation() {
+    let expect = sigma_prime(20.0) * 1e10;
+    let got = scaled_second_derivative(
+        |_, z| {
+            let q = one(z, 2);
+            q[0].bce_with_logits_loss(&q[1], Reduction::Sum)
+        },
+        &[20.0, 0.0],
+        1e10,
+    )
+    .expect("受理");
+    assert!(
+        (got - expect).abs() / expect < 1e-3,
+        "got={got} expect={expect}"
+    );
+}
+
+/// SoftMargin（x = -20・y = 1・損失 x 1e10）の二階が σ'(20) x 1e10 を保つ。
+#[test]
+fn soft_margin_keeps_curvature_in_saturation() {
+    let expect = sigma_prime(20.0) * 1e10;
+    let got = scaled_second_derivative(
+        |_, z| one(z, 1)[0].soft_margin_loss(&t(vec![1.0], &[1]), Reduction::Sum),
+        &[-20.0],
+        1e10,
+    )
+    .expect("受理");
+    assert!(
+        (got - expect).abs() / expect < 1e-3,
+        "got={got} expect={expect}"
+    );
+}
+
+/// pos_weight = 1e-8・t = 1・x = 0（損失 x 1e20）で lw が 0 に丸まらず二階が 2.5e11 を保つ。
+#[test]
+fn bce_pos_weight_tiny_keeps_curvature() {
+    let expect = 1e-8 * 0.25 * 1e20;
+    let got = scaled_second_derivative(
+        |_, z| {
+            let q = one(z, 2);
+            q[0].bce_with_logits_loss_with(
+                &q[1],
+                Reduction::Sum,
+                &BceWithLogitsOptions::default().pos_weight(t(vec![1e-8], &[1])),
+            )
+        },
+        &[0.0, 1.0],
+        1e20,
+    )
+    .expect("受理");
+    assert!(
+        (got - expect).abs() / expect < 1e-3,
+        "got={got} expect={expect}"
+    );
+}
+
+/// pos_weight = 0・x = -21（target 追跡・損失 x 1e10）で ∂dt/∂x が -σ(x) x 1e10（約 -7.58）を保つ。
+#[test]
+fn bce_pos_weight_zero_keeps_mixed_derivative() {
+    let expect = -(1.0 / (1.0 + 21f64.exp())) * 1e10;
+    let got = scaled_mixed_derivative(
+        |_, z| {
+            let q = one(z, 2);
+            q[0].bce_with_logits_loss_with(
+                &q[1],
+                Reduction::Sum,
+                &BceWithLogitsOptions::default().pos_weight(t(vec![0.0], &[1])),
+            )
+        },
+        &[-21.0, 0.5],
+        1e10,
+        1,
+        0,
     )
     .expect("受理");
     assert!(
