@@ -2626,14 +2626,21 @@ impl Op {
             // `create_graph/stat_select.rs`。入口検査は `validate_ancestors`。
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
-            | Op::Quantile { .. } => true,
+            | Op::Quantile { .. }
+            // 統計縮約 4 Op（イシュー #3791・決定記録 §33・§52）。方式は
+            // `create_graph/stat_varnorm.rs`。入口検査は `validate_ancestors`。
+            | Op::Var { .. }
+            | Op::Std { .. }
+            | Op::PNorm { .. } => true,
+            // `VectorNorm` は payload で判定する（`ScalarUnary` の前例）。`L1`／`L2` だけ true、
+            // `#[non_exhaustive]` の未知 `ord` は false。
+            Op::VectorNorm { ord, .. } => matches!(
+                ord,
+                fandhe_ai_tensor_core::VectorNormOrd::L1 | fandhe_ai_tensor_core::VectorNormOrd::L2
+            ),
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
-            Op::Var { .. }
-            | Op::VectorNorm { .. }
-            | Op::Std { .. }
-            | Op::PNorm { .. }
-            | Op::BceLoss { .. }
+            Op::BceLoss { .. }
             | Op::CrossEntropyLossWithOptions { .. }
             | Op::CosineEmbeddingLoss { .. }
             | Op::MarginRankingLoss { .. }
@@ -6050,5 +6057,43 @@ mod loss_create_graph_support_tests {
             ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro,
         };
         assert!(!closed.supports_create_graph(), "{closed:?}");
+    }
+
+    /// 統計縮約 4 Op（イシュー #3791・決定記録 §33・§52）が `supports_create_graph() == true`
+    /// であること（`VectorNorm` は `L1`／`L2` の payload で判定）。隣接 Op の `false` は
+    /// 兄弟イシューで変わりうるため、ここでは確かめない（未知 `ord` の false は網羅 match で担保）。
+    #[test]
+    fn stat_varnorm_family_supports_create_graph() {
+        use fandhe_ai_tensor_core::VectorNormOrd;
+        let supported = [
+            Op::Var {
+                input: NodeId(0),
+                dim: None,
+                correction: 1,
+            },
+            Op::Std {
+                input: NodeId(0),
+                dim: Some(0),
+                correction: 0,
+            },
+            Op::VectorNorm {
+                input: NodeId(0),
+                ord: VectorNormOrd::L1,
+                dim: None,
+            },
+            Op::VectorNorm {
+                input: NodeId(0),
+                ord: VectorNormOrd::L2,
+                dim: Some(0),
+            },
+            Op::PNorm {
+                input: NodeId(0),
+                p: 3.0,
+                dim: None,
+            },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?}");
+        }
     }
 }

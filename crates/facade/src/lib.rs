@@ -910,8 +910,8 @@ impl Tape {
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
-    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `var`・`std`・`norm_l1`・
+    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -954,6 +954,28 @@ impl Tape {
     /// let xc = cg.child_var(&x)?.unwrap();
     /// let second = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
     /// assert!((second[1] - 2.0).abs() < 1e-4 && second[0] == 0.0 && second[2] == 0.0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// 統計縮約（`var`・`std`・`norm_l1`・`norm_l2`・`norm_p`。#3791）も二階へ進める。次は
+    /// `x.var(None, 1) = (a - b)^2 / 2` の例で、1 階勾配 `[a - b, b - a]` の第 0 成分を
+    /// 微分すると `[1, -1]` になる。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![1.0_f32, 3.0], &[2])?);
+    /// let loss = x.var(None, 1)?; // (a - b)^2 / 2
+    /// let cg = t.backward_create_graph(&loss, &child)?;
+    /// let g = cg.grad(&x)?.unwrap();
+    /// let grads2 = child.backward(&g.narrow(0, 0, 1)?.sum(None)?)?;
+    /// let xc = cg.child_var(&x)?.unwrap();
+    /// let second = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
+    /// assert!((second[0] - 1.0).abs() < 1e-4 && (second[1] + 1.0).abs() < 1e-4);
     /// # Ok(())
     /// # }
     /// ```
