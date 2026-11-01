@@ -327,9 +327,14 @@ pub(super) fn cewo_cgrad<'c>(
     };
     let a_c = const_vec(child, a_data, &shape)?;
     let b_c = const_vec(child, b_data, &shape)?;
-    let sm = x_m.softmax(class_dim)?;
+    // ignore / 範囲外の行は Softmax の前で有限定数へ置換し、その行への微分も遮断する
+    // （NaN logits が 0 の cotangent と乗算されて二階へ漏れるのを防ぐ）。
+    let valid_m = mask(valid, &shape)?;
+    let zeros = zeros_like(child, &shape)?;
+    let x_safe = Var::where_cond(&valid_m, x_m, &zeros)?;
+    let sm = x_safe.softmax(class_dim)?;
     let scaled = s_b.mul(&a_c.mul(&sm)?.sub(&b_c)?)?;
-    let dx = Var::where_cond(&mask(valid, &shape)?, &scaled, &zeros_like(child, &shape)?)?;
+    let dx = Var::where_cond(&valid_m, &scaled, &zeros)?;
     push_v3(child, &dx, host)
 }
 
@@ -783,7 +788,16 @@ struct PairInfo {
     zero: Vec<bool>,
 }
 
-fn pair_info(rows: &[Vec<f64>], d: usize, p: f64) -> Result<PairInfo, AutodiffError> {
+/// `rows`（ホスト f64 の差分）と `rec`（子テープが f32 の `Sub`→`Add` で再構成する差分）が構造として
+/// 一致すること、および逆スケール `sb·inv_mx·(p+1)·d`（`pair_grad` の二階逆伝播で `v` へ流れる
+/// cotangent の上界。設計 §40.12 の段別 cotangent×微分係数検査）が f32 範囲に収まることを検査する。
+fn pair_info(
+    rows: &[Vec<f64>],
+    rec: &[Vec<f32>],
+    d: usize,
+    p: f64,
+    sb: f64,
+) -> Result<PairInfo, AutodiffError> {
     let mut inv_mx = vec![1f32; rows.len() * d];
     let mut sign = vec![0f32; rows.len() * d];
     let mut zero = vec![false; rows.len() * d];
@@ -802,6 +816,15 @@ fn pair_info(rows: &[Vec<f64>], d: usize, p: f64) -> Result<PairInfo, AutodiffEr
                 "Triplet: 1<p<2 で差分が 0 のレーンは二階が発散するため拒否",
             ));
         }
+        // 子テープの f32 再構成が桁落ちでホストの f64 差分とずれる入力（0/0 や 1e-8 → 0）は拒否する。
+        let r = &rec[i];
+        if v.iter().zip(r.iter()).any(|(&h, &c)| {
+            (h == 0.0) != (c == 0.0) || (h - f64::from(c)).abs() > mx * 2f64.powi(-10)
+        }) {
+            return Err(invalid(
+                "Triplet: 差分の f32 再構成が桁落ちでホストの f64 差分とずれるため拒否",
+            ));
+        }
         if mx == 0.0 {
             for k in 0..d {
                 zero[base + k] = true;
@@ -813,6 +836,9 @@ fn pair_info(rows: &[Vec<f64>], d: usize, p: f64) -> Result<PairInfo, AutodiffEr
         }
         stage(mx)?;
         let inv = (1.0 / mx) as f32;
+        if p != 1.0 {
+            stage(sb * f64::from(inv) * (p + 1.0) * d as f64)?;
+        }
         for k in 0..d {
             inv_mx[base + k] = inv;
         }
@@ -895,6 +921,8 @@ pub(super) fn triplet_cgrad<'c>(
     let mut rows_ap = Vec::with_capacity(n);
     let mut rows_an = Vec::with_capacity(n);
     let mut rows_pn = Vec::with_capacity(n);
+    let (mut rec_ap, mut rec_an, mut rec_pn) = (Vec::new(), Vec::new(), Vec::new());
+    let eps32 = options.eps_value();
     let mut act = vec![false; numel];
     let (mut m_one, mut m_zero, mut m_half) =
         (vec![false; numel], vec![false; numel], vec![false; numel]);
@@ -913,14 +941,22 @@ pub(super) fn triplet_cgrad<'c>(
                 m_half[base + k] = true;
             }
         }
+        let row32 = |x: &[f32], y: &[f32]| -> Vec<f32> {
+            (0..d)
+                .map(|k| (x[base + k] - y[base + k]) + eps32)
+                .collect()
+        };
+        rec_ap.push(row32(&a_s, &p_s));
+        rec_an.push(row32(&a_s, &n_s));
+        rec_pn.push(row32(&p_s, &n_s));
         rows_ap.push(diff_ap);
         rows_an.push(diff_an);
         rows_pn.push(diff_pn);
     }
-    let info_ap = pair_info(&rows_ap, d, p64)?;
-    let info_an = pair_info(&rows_an, d, p64)?;
+    let info_ap = pair_info(&rows_ap, &rec_ap, d, p64, sb)?;
+    let info_an = pair_info(&rows_an, &rec_an, d, p64, sb)?;
     let info_pn = if swap {
-        Some(pair_info(&rows_pn, d, p64)?)
+        Some(pair_info(&rows_pn, &rec_pn, d, p64, sb)?)
     } else {
         None
     };

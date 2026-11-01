@@ -1093,3 +1093,71 @@ fn loss_class_neighbouring_unsupported_op_stays_fail_closed() {
         assert!(child.is_empty(), "{}", c.name);
     }
 }
+
+/// Triplet の差分が f32 の Sub→Add 再構成で桁落ちしてゼロになる入力は拒否する（0/0 の二階 NaN を防ぐ）。
+#[test]
+fn triplet_cancellation_in_f32_reconstruction_is_rejected() {
+    fn build<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        tri_loss(
+            z,
+            &TripletMarginOptions::default()
+                .p(2.0)
+                .eps(1.0)
+                .margin(2.0)
+                .swap(false),
+        )
+    }
+    assert_rejected_then_retry_ok(
+        "triplet cancellation",
+        build,
+        &[1e-8, 0.0, 1.0, 1.0, 2.0, 0.0],
+        build,
+        &[0.5, 0.25, 1.0, 1.5, 2.0, 0.75],
+    );
+}
+
+/// Triplet の逆スケール（sb·inv_mx）が f32 範囲を超える二階は拒否する。
+#[test]
+fn triplet_inverse_scale_second_order_overflow_is_rejected() {
+    fn build<'t>(tape: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        tri_loss(
+            z,
+            &TripletMarginOptions::default().p(2.0).eps(0.0).margin(1.0),
+        )?
+        .mul(&tape.var_no_grad(&Tensor::scalar(1e10)))?
+        .sum(None)
+    }
+    assert_rejected_then_retry_ok(
+        "triplet inverse scale",
+        build,
+        &[0.0, 0.0, 1e-29, 0.0, 0.0, 2e-29],
+        build,
+        &[0.0, 0.0, 0.5, 0.0, 0.0, 0.25],
+    );
+}
+
+/// ignore 行の logits に NaN があっても二階が NaN にならない。
+#[test]
+fn cewo_ignore_row_nan_logits_keep_second_order_finite() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let z = tape.var(&t(vec![f32::NAN, 0.0, 0.0, 1.0], &[4]));
+    let loss = z
+        .reshape(&[2, 2])
+        .unwrap()
+        .cross_entropy_loss_with(
+            &i32t(vec![-1, 0], &[2]),
+            1,
+            Reduction::Sum,
+            &CrossEntropyOptions::default().ignore_index(-1),
+        )
+        .unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gz = cg.grad(&z).unwrap().unwrap();
+    let s = gz.sum(None).unwrap();
+    let cz = cg.child_var(&z).unwrap().unwrap();
+    let h = child.backward(&s).unwrap();
+    let row = dense(h.get(&cz).unwrap().unwrap());
+    assert!(row[2..].iter().all(|v| v.is_finite()), "{row:?}");
+    assert_eq!(&row[..2], &[0.0, 0.0], "{row:?}");
+}
