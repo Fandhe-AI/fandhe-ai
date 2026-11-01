@@ -1364,7 +1364,7 @@ impl Tape {
     /// # 数値・適用範囲
     ///
     /// 経路上の Op は `Op::supports_create_graph()` が真のものに限り、非対象は型付きの `Err` になる。
-    /// f32 の `Tape` のみ（`VarF64`・f16 は対象外）、入力は単一（複数入力は [`Tape::jvp_multi`]）、結果は非微分のホスト値。数値は REQ-2 の
+    /// f32 の `Tape` 用（f64 は [`TapeF64::jvp`]、f16 は対象外）、入力は単一（複数入力は [`Tape::jvp_multi`]）、結果は非微分のホスト値。数値は REQ-2 の
     /// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で一致し、`jacobian` や 1 階 VJP との
     /// bit 同一は契約にしない。計算量は親 backward 1 回＋子 backward 1 回。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
@@ -2241,6 +2241,8 @@ impl<'t> From<&'t Tape> for TapeRef<'t> {
 /// （`docs/perf/logs/f64-autograd-facade-2599/README.md` に申し送り）。
 /// `backward` の非スカラー loss は全要素 1 のシードで逆伝播する。
 /// 高階微分は [`Self::backward_create_graph`]（`max` は対象外で `Backward` を返す）。
+/// 前進モード風の `J·v` は [`Self::jvp`]・[`Self::jacfwd`]・[`Self::jvp_multi`]・
+/// [`Self::jvp_create_graph`]（イシュー #3788。`vjp`／`hvp`／`vmap`／`vmap_grad` の f64 版は未公開）。
 ///
 /// ```
 /// use fandhe_ai::{TapeF64, Tensor};
@@ -2325,6 +2327,173 @@ impl<'t> TapeF64<'t> {
             let (first, vars) = cg.into_parts();
             CreateGraphResultF64(GradientsF64(first), vars)
         })
+    }
+
+    /// ヤコビアン・ベクトル積 `J·v`（`J = ∂output/∂input`）を double-VJP 法で求める
+    /// （f32 の [`Tape::jvp`] の f64 版。イシュー #3788。内部実装への 1 式委譲）。
+    /// 戻り値は shape が `output.shape()` の非微分値。`child` は空の子テープ
+    /// （[`Self::backward_create_graph`] と同じ契約）で、呼び出し後は再利用しない。
+    ///
+    /// **入口検査（順序固定。失敗時は親・子とも無変更）**: 別テープ → [`AutodiffError::TapeMismatch`]、
+    /// 追跡なしの入力 → [`AutodiffError::GradientTrackingDisabled`]、接ベクトル shape 不一致・
+    /// 要素数・バイト数の溢れ → [`AutodiffError::Shape`]。要素数 0・追跡なし出力はテープに触れず全ゼロ
+    /// （`child` も検査しない）。以降は `backward_create_graph` の拒否（`max` 含有・
+    /// 同一/非空/別デバイスの子）が [`AutodiffError::Backward`] 等で伝播する。
+    ///
+    /// **副作用**: 前段以降の失敗でも親へちょうど 2 ノードが残る。成功時の子には写しが残る。
+    /// 数値は REQ-2 の統一複合判定の範囲で `J·v` と一致する（bit 同一は主張しない）。
+    /// 計算量は親 backward 1 回＋子 backward 1 回、メモリは full mirror 分。
+    ///
+    /// ```
+    /// use fandhe_ai::{TapeF64, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let (parent, child) = (TapeF64::new(&tape), TapeF64::new(&tape));
+    /// let x = parent.var(&Tensor::<f64>::new(vec![1.0, 2.0, 3.0], &[3])?);
+    /// let y = x.mul(&x)?;
+    /// let v = Tensor::<f64>::new(vec![1.0, 0.5, 2.0], &[3])?;
+    /// let out = parent.jvp(&y, &x, &v, &child)?;
+    /// for (g, w) in out.as_slice().ok_or("連続")?.iter().zip([2.0f64, 2.0, 12.0]) {
+    ///     assert!((g - w).abs() < 1e-5);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn jvp(
+        &self,
+        output: &VarF64<'_, 't>,
+        input: &VarF64<'_, 't>,
+        tangent: &Tensor<f64>,
+        child: &TapeF64<'t>,
+    ) -> Result<Tensor<f64>, AutodiffError> {
+        self.0.jvp(&output.0, &input.0, tangent, &child.0)
+    }
+
+    /// ヤコビアン全体 `J = ∂output/∂input` を double-VJP 法で列ごとに求める
+    /// （f32 の [`Tape::jacfwd`] の f64 版。イシュー #3788）。戻り値は shape が
+    /// `output.shape ++ input.shape` の非微分値。`child` の契約・入口検査・副作用・数値契約は
+    /// [`Self::jvp`] と同じ（接ベクトル検査を除く）。計算量は親 backward 1 回＋子 backward `n` 回
+    /// （`n` は入力の要素数）で、結果は `m × n` 要素（確保前に要素数・バイト数を検査し
+    /// [`AutodiffError::Shape`] で拒否する）。
+    ///
+    /// ```
+    /// use fandhe_ai::{TapeF64, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let (parent, child) = (TapeF64::new(&tape), TapeF64::new(&tape));
+    /// let x = parent.var(&Tensor::<f64>::new(vec![1.0, 2.0], &[2])?);
+    /// let y = x.mul(&x)?;
+    /// let j = parent.jacfwd(&y, &x, &child)?;
+    /// for (g, w) in j.as_slice().ok_or("連続")?.iter().zip([2.0f64, 0.0, 0.0, 4.0]) {
+    ///     assert!((g - w).abs() < 1e-5);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn jacfwd(
+        &self,
+        output: &VarF64<'_, 't>,
+        input: &VarF64<'_, 't>,
+        child: &TapeF64<'t>,
+    ) -> Result<Tensor<f64>, AutodiffError> {
+        self.0.jacfwd(&output.0, &input.0, &child.0)
+    }
+
+    /// 複数入力のヤコビアン・ベクトル積 `J·v = Σ_i J_i·v_i`（f32 の [`Tape::jvp_multi`] の f64 版。
+    /// イシュー #3788）。戻り値は shape が `output.shape()` の非微分値。`child` の契約は
+    /// [`Self::jvp`] と同じ。
+    ///
+    /// **入口検査（順序固定。失敗時は親・子とも無変更）**: `inputs` と `tangents` の長さ不一致・
+    /// 空 → [`AutodiffError::InvalidArgument`]、別テープ（`output` が先、続いて `inputs` の添字順）→
+    /// `TapeMismatch`、追跡なしの入力 → `GradientTrackingDisabled`、同一ノードの重複指定 →
+    /// `InvalidArgument`、shape 不一致・要素数・バイト数の溢れ → `Shape`。出力・全入力の要素数 0 や
+    /// 追跡なし出力はテープに触れず全ゼロ。以降の拒否は [`Self::jvp`] と同じ。
+    ///
+    /// 計算量は入力数に依らず親 backward 1 回＋子 backward 1 回。副作用（親へ 2 ノード）と
+    /// 数値契約（REQ-2）、メモリ（full mirror）は [`Self::jvp`] と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai::{TapeF64, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let (parent, child) = (TapeF64::new(&tape), TapeF64::new(&tape));
+    /// let a = parent.var(&Tensor::<f64>::new(vec![1.0, 2.0], &[2])?);
+    /// let b = parent.var(&Tensor::<f64>::new(vec![3.0, 4.0], &[2])?);
+    /// let y = a.mul(&b)?;
+    /// let va = Tensor::<f64>::new(vec![1.0, 1.0], &[2])?;
+    /// let vb = Tensor::<f64>::new(vec![0.5, 2.0], &[2])?;
+    /// let out = parent.jvp_multi(&y, &[&a, &b], &[&va, &vb], &child)?;
+    /// for (g, w) in out.as_slice().ok_or("連続")?.iter().zip([3.5f64, 8.0]) {
+    ///     assert!((g - w).abs() < 1e-5);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn jvp_multi(
+        &self,
+        output: &VarF64<'_, 't>,
+        inputs: &[&VarF64<'_, 't>],
+        tangents: &[&Tensor<f64>],
+        child: &TapeF64<'t>,
+    ) -> Result<Tensor<f64>, AutodiffError> {
+        self.0.jvp_multi(
+            &output.0,
+            &inputs.iter().map(|v| &v.0).collect::<Vec<_>>(),
+            tangents,
+            &child.0,
+        )
+    }
+
+    /// 追跡された `J·v` を孫テープ上の値として返す微分可能な `jvp`（f32 の
+    /// [`Tape::jvp_create_graph`] の f64 版。イシュー #3788）。前段は [`Self::jvp`] と同じで、
+    /// 2 段目の VJP だけ `child.backward_create_graph` で `grandchild` に記録する。元の入力への微分は
+    /// [`JvpCreateGraphResultF64::child_var`] の写し（親→子→孫の 2 段合成）を通して `grandchild.backward`
+    /// で取る。
+    ///
+    /// **入口検査（順序固定。ここまでの失敗では 3 枚のテープとも無変更）**: 別テープ → `TapeMismatch`、
+    /// 追跡なしの入力 → `GradientTrackingDisabled`、接ベクトル shape 不一致・要素数・バイト数 → `Shape`、
+    /// テープ関係（子が親と同一・孫が親か子と同一 → `Backward`、デバイス不一致 →
+    /// [`AutodiffError::DeviceMismatch`]、子か孫が空でない → `Backward`）。追跡なし出力・要素数 0 は
+    /// 孫へ全ゼロの葉を 1 個置いて返す（写しは空）。以降は `max` 含有等の拒否が `Backward` で伝播する。
+    ///
+    /// **副作用**: 前段以降の失敗でも親へちょうど 2 ノードが残る。`J ≡ 0` も全ゼロの葉を返す。
+    /// 数値は REQ-2 の範囲で [`Self::jvp`] と一致する。メモリは親→子の full mirror に加え、
+    /// 孫へ 2 段目の逆伝播グラフが残る分。
+    ///
+    /// ```
+    /// use fandhe_ai::{TapeF64, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let (p, c, g) = (TapeF64::new(&tape), TapeF64::new(&tape), TapeF64::new(&tape));
+    /// let x = p.var(&Tensor::<f64>::new(vec![1.0, 2.0], &[2])?);
+    /// let y = x.mul(&x)?;
+    /// let v = Tensor::<f64>::new(vec![1.0, 0.5], &[2])?;
+    /// let res = p.jvp_create_graph(&y, &x, &v, &c, &g)?;
+    /// let cx = res.child_var(&x)?.ok_or("x の写しがある")?;
+    /// let grads = g.backward(&res.output().sum(None)?)?;
+    /// let d = grads.get(&cx)?.ok_or("勾配が届く")?;
+    /// // J·v = 2 x v なので d/dx Σ(J·v) = 2 v
+    /// for (a, w) in d.as_slice().ok_or("連続")?.iter().zip([2.0f64, 1.0]) {
+    ///     assert!((a - w).abs() < 1e-5);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn jvp_create_graph<'g>(
+        &self,
+        output: &VarF64<'_, 't>,
+        input: &VarF64<'_, 't>,
+        tangent: &Tensor<f64>,
+        child: &TapeF64<'t>,
+        grandchild: &'g TapeF64<'t>,
+    ) -> Result<JvpCreateGraphResultF64<'g, 't>, AutodiffError> {
+        self.0
+            .jvp_create_graph(&output.0, &input.0, tangent, &child.0, &grandchild.0)
+            .map(JvpCreateGraphResultF64)
     }
 }
 
@@ -2445,6 +2614,45 @@ impl<'c, 't> CreateGraphResultF64<'c, 't> {
     /// `var` に対応する子テープ上の写しを返す。
     pub fn child_var(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'c, 't>>, AutodiffError> {
         self.1.child_var(&var.0).map(|v| v.map(VarF64))
+    }
+}
+
+/// [`TapeF64::jvp_create_graph`] の結果（f32 の [`JvpCreateGraphResult`] の f64 版。イシュー #3788）。
+///
+/// 役割: 孫テープ上の追跡された `J·v`（[`Self::output`]）と、親の `VarF64` に対応する孫テープ上の写し
+/// （[`Self::child_var`]。親→子→孫の 2 段合成）を引く。別テープの変数は
+/// [`AutodiffError::TapeMismatch`]、`var_no_grad` の葉は [`AutodiffError::GradientTrackingDisabled`]、
+/// `J·v` がその入力に依存しなければ `Ok(None)`。`TapeF64` は世代を持たないため世代検査はない。
+///
+/// ```
+/// use fandhe_ai::{TapeF64, Tensor};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let tape = fandhe_ai::tape();
+/// let (p, c, g) = (TapeF64::new(&tape), TapeF64::new(&tape), TapeF64::new(&tape));
+/// let x = p.var(&Tensor::<f64>::new(vec![1.0, 2.0, 3.0], &[3])?);
+/// let y = x.mul(&x)?.mul(&x)?;
+/// let v = Tensor::<f64>::new(vec![1.0, 1.0, 1.0], &[3])?;
+/// let res = p.jvp_create_graph(&y, &x, &v, &c, &g)?;
+/// // J·v = 3 x^2。Σ の x 微分は 6 x。
+/// assert_eq!(res.output().shape(), vec![3]);
+/// assert!(res.child_var(&x)?.is_some());
+/// # Ok(())
+/// # }
+/// ```
+pub struct JvpCreateGraphResultF64<'g, 't>(
+    pub(crate) fandhe_ai_autodiff::f64_autograd::JvpCreateGraphResultF64<'g, 't>,
+);
+
+impl<'g, 't> JvpCreateGraphResultF64<'g, 't> {
+    /// `J·v`（shape は元の `output` と同じ）を孫テープ上の追跡対象値として返す。
+    pub fn output(&self) -> VarF64<'g, 't> {
+        VarF64(self.0.output())
+    }
+
+    /// 親の `var` に対応する孫テープ上の写しを返す。
+    pub fn child_var(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'g, 't>>, AutodiffError> {
+        self.0.child_var(&var.0).map(|v| v.map(VarF64))
     }
 }
 
@@ -8668,6 +8876,13 @@ struct GradcheckAnomalyHoldDoctestGuard;
 /// 一方、裸の自由関数・`Var<'t>`・`Tensor<f32>` 上の `vmap_grad` は未承認の受け手として本 doctest の
 /// プローブに新規に加えた。
 ///
+/// **追加の承認公開（イシュー #3788）**: `TapeF64` の `jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph`
+/// （結果型 `JvpCreateGraphResultF64`）を公開した（承認: #3766 の所有者回答
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674>。設計記録 §36・§40）。
+/// 保留ガードに反転対象はなく、`TapeF64` 受け手のプローブには `jvp` 等 4 名を入れない（承認形と衝突するため）。
+/// 一方 `TapeF64` 上の `vjp`・`hvp`・`vmap`・`vmap_grad` と、`VarF64<'g, 't>` 上の 8 名すべては未承認の
+/// 受け手として本 doctest のプローブに新規に加えた（`TapeF64` 用は別トレイト）。
+///
 /// 引き続き拒否する未承認経路: モジュール `functional_ops` の公開、クレートルート直下の裸の自由関数
 /// `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph`・`vmap_grad`、および `Var<'t>`・`Tensor<f32>` 上の同名メソッド。下の doctest は全 `pub mod` を glob import
 /// したスコープへ、これらに対応するローカル定義とプローブ用トレイトを置き、修飾なしの関数呼び出しと
@@ -8787,6 +9002,55 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     }
 /// }
 ///
+/// impl<'g, 't> __FandheFunctionalTransformsHoldProbe for fandhe_ai::VarF64<'g, 't> {
+///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+/// }
+///
+/// trait __FandheFunctionalTransformsHoldTapeF64Probe {
+///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheFunctionalTransformsHoldTapeF64Probe for fandhe_ai::TapeF64<'t> {
+///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+/// }
+///
 /// fn __probe_free_fns() {
 ///     // モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
@@ -8806,6 +9070,8 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     v: &fandhe_ai::Var<'_>,
 ///     _tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
+///     t64: &fandhe_ai::TapeF64<'_>,
+///     v64: &fandhe_ai::VarF64<'_, '_>,
 /// ) {
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vjp(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::hvp(v);
@@ -8823,6 +9089,18 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_multi(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_create_graph(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap_grad(tf);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::vjp(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::hvp(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::vmap(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jvp(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jacfwd(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jvp_multi(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jvp_create_graph(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::vmap_grad(v64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::vjp(t64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::hvp(t64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::vmap(t64);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::vmap_grad(t64);
 /// }
 /// ```
 #[cfg(doctest)]

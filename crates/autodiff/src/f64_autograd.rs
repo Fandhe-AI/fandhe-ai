@@ -134,6 +134,7 @@ use crate::error::AutodiffError;
 use crate::tape::Tape;
 
 pub use create_graph::{CreateGraphResultF64, CreateGraphVarsF64};
+pub use functional_ops::JvpCreateGraphResultF64;
 
 /// プロセス全体で共有する [`TapeF64`] 識別子発行カウンタ。`crate::tape::
 /// TapeId`（`tape.rs` の `NEXT_TAPE_ID`）と同じ理由（ポインタ比較は

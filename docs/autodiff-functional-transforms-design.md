@@ -1491,3 +1491,39 @@ facade の `src/`、依存（`Cargo.toml`／`Cargo.lock`）、tolerance、baseli
 
 - `jvp_multi`／`jvp_create_graph`（内部）、facade の 4 メソッドと newtype `JvpCreateGraphResultF64`、ガード a〜i・l の反転、`mirror()` の要否、GPU の `#[ignore]` テストとログ README、`compat-api-scope.md` §5.1 の F9〜F12 行。
 - f64 の `max` の create_graph、`vjp`／`hvp`／`vmap`／`vmap_grad` の f64 版は対象外のまま（承認が別に要る）。
+
+## 40. 実装記録（イシュー #3788・親 #3719。`jvp_multi`・`jvp_create_graph` の内部実装と 4 関数の facade 公開）
+
+### 40.0 位置づけ
+
+- 承認: §37.0 と同じ #3766 の所有者の回答コメント（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674）の論点 2 (a)（4 関数と `backward_create_graph` を公開。`vjp`／`hvp`／`vmap`／`vmap_grad` の f64 版は対象外のまま）と論点 3（REQ-2 の判定式をそのまま使う）。§36.12 の各論点は推奨どおり（同名、`'t` を共有、newtype `JvpCreateGraphResultF64`、J1、ゼロ経路と 2 ノードの副作用は f32 と同じ）。
+- 基準: `origin/main` `d4d3b7523`。本節は §36.1 の「実装の分担」のうち #3788（残りの内部実装と facade 公開）の記録である。
+
+### 40.1 追加したもの
+
+- `crates/autodiff/src/f64_autograd/functional_ops.rs`: 前段を `double_vjp_front`（`backward_create_graph` の結果と余接葉の子テープ写しを返す）と `double_vjp_stage` に分け、`pub fn jvp_multi`・`pub fn jvp_create_graph`・内部型 `JvpCreateGraphResultF64`（`output`／`child_var`。f64 のテープは世代を持たないため epoch は持たない）を追加。`jvp`／`jacfwd` の挙動と親テープへの操作の並びは変えていない。
+- `crates/autodiff/src/f64_autograd/create_graph.rs`: `CreateGraphResultF64::mirror()`（`pub(crate)`）。`jvp_create_graph` が親→子→孫の写しを合成するために使う（§37.2-2・§38.5 で後回しにした分）。
+- `crates/facade/src/lib.rs`: `impl<'t> TapeF64<'t>` に `jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph`（いずれも 1 式委譲）、newtype `JvpCreateGraphResultF64`（フィールド `pub(crate)`・derive なし・固有 impl 1 件）。rustdoc と doctest、クレート／`TapeF64` の doc、f32 `Tape::jvp` の案内文を更新。
+- ガード（`crates/facade/tests/api_surface.rs`）: a `F64_AUTOGRAD_SURFACE`、b 再エクスポート検査、d 宣言インベントリ（結果型の実体は `f64_autograd/functional_ops.rs`）、e シグネチャプローブ、f 自己テスト（変異 8 種ほか）、g `scan_functional_transforms_reexports_and_declarations`（f64 承認表 `FUNCTIONAL_TRANSFORMS_F64_APPROVED_SIGNATURES`）、h `check_facade_tape_functional_transforms_shape`（`impl Tape` 直下に範囲を限定）と新設の `check_facade_tape_f64_functional_transforms_shape`、i 自己テスト、k 期待マップ（facade の 4 名が 2 件、autodiff の f64 側 2 名を追加）、l 保留 doctest（`VarF64` 受け手 8 名と `TapeF64` 受け手 4 名の未承認プローブ）、usage doctest の実在ガード `f64_jvp_family_usage_doctest_is_present_and_compiled`。
+- テスト: `crates/autodiff/tests/f64_functional_transforms.rs`（f32 との REQ-2 突き合わせ、入力ごとの `jvp` の和との一致、入口検査の順序、ゼロ経路、`max` の拒否、二階の閉形式、`child_var` の検査）、モジュール内単体 3 件、`crates/facade/tests/f64_functional_transforms_facade.rs`（到達性・シグネチャ固定・CPU の突き合わせ・`#[ignore]` の CUDA／Metal parity）。
+- 実機の手順書: `docs/perf/logs/f64-jvp-facade-3788/README.md`（記入欄はすべて未実測）。
+
+### 40.2 §36 から外れた点
+
+- ガード g・h の範囲限定: facade の `lib.rs` に `fn jvp` などが `impl Tape` と `impl<'t> TapeF64<'t>` で 2 件になるため、トークン列全体を数える既存の方式は通らない。固有 impl の `{ }` 内を切り出す共通ヘルパー `inherent_impl_body_ranges`（型名の完全一致。自己テストつき）を新設し、h は `impl Tape` 直下だけを検査して総数が「Tape 1 件 + TapeF64 0〜1 件」であることを要求する形にした。
+- 保留 doctest の `TapeF64` 受け手プローブは、`jvp` 等 4 名を入れると新しい inherent メソッドと衝突するため、`vjp`／`hvp`／`vmap`／`vmap_grad` の 4 名だけを別トレイトに置いた。
+- `jvp_multi`・`jvp_create_graph` にも出力のバイト数検査（`checked_bytes_for_f64`）を足した（A03。`jvp` の `check_entry` に揃えた）。
+
+### 40.3 測った一致の範囲
+
+- NaiveOps と CPU のみ。f32 の `functional_ops::{jvp_multi, jvp_create_graph}` と REQ-2 の統一複合判定の範囲で一致する。bit 同一は主張しない。tolerance・baseline は変えていない。
+- CUDA／Metal／ROCm 実機は未実測（`#[ignore]` の `f64_jvp_family_cuda_matches_cpu`・`f64_jvp_family_metal_matches_cpu` を用意した）。
+
+### 40.4 変えていないもの
+
+依存（`Cargo.toml`／`Cargo.lock`）、tolerance、baseline、ガードレール閾値、`unsafe`、`docs/spec`、f32 の挙動（`functional_ops.rs` は rustdoc の案内文のみ）、`VarF64`・`GradientsF64`・`AutodiffError`、§36 以前の本文。
+
+### 40.5 申し送り
+
+- Phase 10 の実機 parity issue は #3766 で起票が承認されているが、まだ起票していない（実機結果は追跡表の「実機 parity」列に書く）。
+- f64 の `max` の create_graph、`vjp`／`hvp`／`vmap`／`vmap_grad` の f64 版は対象外のまま（承認が別に要る）。f32 側の `ScalarBinaryOp::Pow`（`mask_b0`）の混合二階微分の問題（§37.4）も未対応。

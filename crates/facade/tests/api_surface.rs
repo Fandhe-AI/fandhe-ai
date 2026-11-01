@@ -38246,6 +38246,55 @@ impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
+impl<'g, 't> __FandheFunctionalTransformsHoldProbe for fandhe_ai::VarF64<'g, 't> {\n\
+\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandheFunctionalTransformsHoldTapeF64Probe {\n\
+\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheFunctionalTransformsHoldTapeF64Probe for fandhe_ai::TapeF64<'t> {\n\
+\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
 fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
@@ -38265,6 +38314,8 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20_tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
+\x20\x20\x20\x20t64: &fandhe_ai::TapeF64<'_>,\n\
+\x20\x20\x20\x20v64: &fandhe_ai::VarF64<'_, '_>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vjp(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::hvp(v);\n\
@@ -38282,6 +38333,18 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_multi(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_create_graph(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap_grad(tf);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::vjp(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::hvp(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::vmap(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jvp(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jacfwd(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jvp_multi(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::jvp_create_graph(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::VarF64::vmap_grad(v64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::vjp(t64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::hvp(t64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::vmap(t64);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::TapeF64::vmap_grad(t64);\n\
 }";
 
 /// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`Tape` 上の承認形 8 名
@@ -38360,9 +38423,22 @@ fn scan_functional_transforms_reexports_and_declarations(
     }
 
     let tape_impl_fns = pb_pub_fn_names_in_inherent_impls(&tokens, "Tape");
+    let tape_f64_tokens = inherent_impl_body_tokens(&tokens, "TapeF64");
     for fn_name in FUNCTIONAL_TRANSFORMS_FN_NAMES {
         let mut count = count_fn_declarations_by_name(&tokens, fn_name);
         if allow_approved_tape_methods {
+            // #3788: `impl TapeF64` 直下の f64 承認形シグネチャ（名前ごとに最大 1 件）を差し引く。
+            if let Some((_, sig)) = FUNCTIONAL_TRANSFORMS_F64_APPROVED_SIGNATURES
+                .iter()
+                .find(|(n, _)| *n == fn_name)
+            {
+                let want = normalized_tokens(sig);
+                let f64_matches = fn_signatures_by_name(&tape_f64_tokens, fn_name)
+                    .iter()
+                    .filter(|s| **s == want)
+                    .count();
+                count -= f64_matches.min(1).min(count);
+            }
             let approved_sig = FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES
                 .iter()
                 .find(|(n, _)| *n == fn_name)
@@ -38503,6 +38579,135 @@ const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 8] = [
     ),
 ];
 
+/// #3788: `TapeF64` の `impl<'t> TapeF64<'t>` 直下で承認された jvp 系 4 名のシグネチャ（`pub fn` から本体の
+/// `{` の直前まで。承認: #3766 の所有者回答 issuecomment-6554563674。設計記録 §36・§40）。`vjp`／`hvp`／
+/// `vmap`／`vmap_grad` の f64 版は未承認で、足されると [`FUNCTIONAL_TRANSFORMS_FN_NAMES`] の計数に現れて違反になる。
+const FUNCTIONAL_TRANSFORMS_F64_APPROVED_SIGNATURES: [(&str, &str); 4] = [
+    (
+        "jvp",
+        "pub fn jvp(
+    &self,
+    output: &VarF64<'_, 't>,
+    input: &VarF64<'_, 't>,
+    tangent: &Tensor<f64>,
+    child: &TapeF64<'t>,
+) -> Result<Tensor<f64>, AutodiffError>",
+    ),
+    (
+        "jacfwd",
+        "pub fn jacfwd(
+    &self,
+    output: &VarF64<'_, 't>,
+    input: &VarF64<'_, 't>,
+    child: &TapeF64<'t>,
+) -> Result<Tensor<f64>, AutodiffError>",
+    ),
+    (
+        "jvp_multi",
+        "pub fn jvp_multi(
+    &self,
+    output: &VarF64<'_, 't>,
+    inputs: &[&VarF64<'_, 't>],
+    tangents: &[&Tensor<f64>],
+    child: &TapeF64<'t>,
+) -> Result<Tensor<f64>, AutodiffError>",
+    ),
+    (
+        "jvp_create_graph",
+        "pub fn jvp_create_graph<'g>(
+    &self,
+    output: &VarF64<'_, 't>,
+    input: &VarF64<'_, 't>,
+    tangent: &Tensor<f64>,
+    child: &TapeF64<'t>,
+    grandchild: &'g TapeF64<'t>,
+) -> Result<JvpCreateGraphResultF64<'g, 't>, AutodiffError>",
+    ),
+];
+
+/// #3788: [`FUNCTIONAL_TRANSFORMS_F64_APPROVED_SIGNATURES`] に対応する委譲本体（`{ }` の内側。内部の f64 実体への
+/// 1 式委譲。`F64_AUTOGRAD_SURFACE` の本体文字列と同一）。
+const FUNCTIONAL_TRANSFORMS_F64_APPROVED_BODIES: [(&str, &str); 4] = [
+    ("jvp", "self.0.jvp(&output.0, &input.0, tangent, &child.0)"),
+    ("jacfwd", "self.0.jacfwd(&output.0, &input.0, &child.0)"),
+    (
+        "jvp_multi",
+        "self.0.jvp_multi(&output.0, &inputs.iter().map(|v| &v.0).collect::<Vec<_>>(), tangents, &child.0,)",
+    ),
+    (
+        "jvp_create_graph",
+        "self.0.jvp_create_graph(&output.0, &input.0, tangent, &child.0, &grandchild.0).map(JvpCreateGraphResultF64)",
+    ),
+];
+
+/// 固有 impl（`impl [<..>] <type_name> [<..>] {`。`for`／`where` を伴う trait impl は除く）の `{ }` の
+/// 内側のトークン範囲 `(開きの次, 閉じ)` を返す。型名は 1 トークンの完全一致で、`Tape` は `TapeF64` に
+/// 一致しない（#3788: `impl Tape` と `impl<'t> TapeF64<'t>` を取り違えないための共通ヘルパー）。
+fn inherent_impl_body_ranges(tokens: &[String], type_name: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "impl" {
+            continue;
+        }
+        let mut j = i + 1;
+        if tokens.get(j).map(String::as_str) == Some("<") {
+            match matching_close(tokens, j, "<", ">") {
+                Some(c) => j = c + 1,
+                None => continue,
+            }
+        }
+        if tokens.get(j).map(String::as_str) != Some(type_name) {
+            continue;
+        }
+        j += 1;
+        if tokens.get(j).map(String::as_str) == Some("<") {
+            match matching_close(tokens, j, "<", ">") {
+                Some(c) => j = c + 1,
+                None => continue,
+            }
+        }
+        if tokens.get(j).map(String::as_str) != Some("{") {
+            continue;
+        }
+        if let Some(close) = matching_close(tokens, j, "{", "}") {
+            out.push((j + 1, close));
+        }
+    }
+    out
+}
+
+/// [`inherent_impl_body_ranges`] の範囲内トークンを連結して返す（各範囲は `{ }` が釣り合っている）。
+fn inherent_impl_body_tokens(tokens: &[String], type_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (a, b) in inherent_impl_body_ranges(tokens, type_name) {
+        out.extend_from_slice(&tokens[a..b]);
+    }
+    out
+}
+
+/// [`inherent_impl_body_ranges`] の自己テスト: `impl Tape` と `impl<'t> TapeF64<'t>` を区別し、
+/// trait impl・他型を除く。
+#[test]
+fn inherent_impl_body_ranges_distinguishes_tape_and_tape_f64() {
+    let tok = |src: &str| {
+        let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+        tokenize_including_punctuation(&cleaned)
+    };
+    let src = "impl Tape { pub fn a() {} } impl<'t> TapeF64<'t> { pub fn b() {} } \
+               impl Clone for Tape { fn c() {} } impl Foo for TapeF64<'_> { fn d() {} } \
+               impl Var { fn e() {} }";
+    let t = tok(src);
+    let tape = inherent_impl_body_tokens(&t, "Tape");
+    let f64t = inherent_impl_body_tokens(&t, "TapeF64");
+    assert_eq!(count_fn_declarations_by_name(&tape, "a"), 1);
+    assert_eq!(count_fn_declarations_by_name(&tape, "b"), 0);
+    assert_eq!(count_fn_declarations_by_name(&tape, "c"), 0);
+    assert_eq!(count_fn_declarations_by_name(&f64t, "b"), 1);
+    assert_eq!(count_fn_declarations_by_name(&f64t, "a"), 0);
+    assert_eq!(count_fn_declarations_by_name(&f64t, "d"), 0);
+    assert!(inherent_impl_body_ranges(&t, "Nothing").is_empty());
+}
+
 /// facade src 全体（`crates/facade/src/**`）に関数型 AD ラッパーの保留対象の再エクスポート・同名
 /// `fn`・`pub mod` 宣言が存在しないことを固定する（`FunctionalTransformsHoldDoctestGuard` の正の
 /// プローブと多層防御を成す最内層のソース走査ガード）。
@@ -38634,6 +38839,49 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
     assert!(offense_lib(
         "impl Var { pub fn vmap_grad<F>(input: &Tensor<f32>, in_dim: usize, child: &mut Tape, mut f: F) -> Result<Tensor<f32>, AutodiffError> where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>, { fandhe_ai_autodiff::functional_ops::vmap_grad(input, in_dim, &mut child.0, |t, s| { f(TapeRef::from_autodiff(t), s) }) } }"
     ));
+    // #3788: `impl<'t> TapeF64<'t>` 直下の f64 承認形 4 件は lib.rs 扱いで無違反、lib.rs 以外扱いでは違反。
+    let mut f64_impl = String::from("impl<'t> TapeF64<'t> {\n");
+    for (_, sig) in FUNCTIONAL_TRANSFORMS_F64_APPROVED_SIGNATURES {
+        f64_impl.push_str(&format!("{sig}\n{{ x }}\n"));
+    }
+    f64_impl.push_str("}\n");
+    let both = format!("{all}\n{f64_impl}");
+    assert!(
+        !offense_lib(&both),
+        "f32 承認形 8 件 + f64 承認形 4 件は lib.rs 扱いで無違反"
+    );
+    assert!(offense(&both), "lib.rs 以外扱いでは f64 承認形でも違反");
+    // f64 側の別シグネチャ（f32 の tangent）・`pub` の欠落・2 件目は違反のまま。
+    assert!(offense_lib(
+        &both.replace("tangent: &Tensor<f64>", "tangent: &Tensor<f32>")
+    ));
+    assert!(offense_lib(&both.replace(
+        "pub fn jacfwd(\n    &self,\n    output: &VarF64",
+        "fn jacfwd(\n    &self,\n    output: &VarF64"
+    )));
+    assert!(offense_lib(&format!("{both}\n{f64_impl}")));
+    // f64 の承認形シグネチャは `impl VarF64`／`impl Tape` 内では差し引かれず違反のまま。
+    assert!(offense_lib(&format!(
+        "{all}\n{}",
+        f64_impl.replace("impl<'t> TapeF64<'t>", "impl<'t> VarF64<'t>")
+    )));
+    assert!(offense_lib(&format!(
+        "{all}\n{}",
+        f64_impl.replace("impl<'t> TapeF64<'t>", "impl Tape")
+    )));
+    // 未承認の f64 名（`vjp`／`hvp`／`vmap`／`vmap_grad`）は `impl TapeF64` でも違反。
+    for name in ["vjp", "hvp", "vmap", "vmap_grad"] {
+        assert!(offense_lib(&format!(
+            "{both}\nimpl<'t> TapeF64<'t> {{ pub fn {name}(&self) {{}} }}"
+        )));
+    }
+    // f64 の jvp 系の裸の自由関数・再エクスポートも lib.rs 扱いで違反のまま。
+    assert!(offense_lib(&format!(
+        "{both}\npub fn jvp_create_graph() {{}}"
+    )));
+    assert!(offense_lib(&format!(
+        "{both}\npub use fandhe_ai_autodiff::f64_autograd::functional_ops::jvp_multi;"
+    )));
     // 重複（2 件目）は違反。
     assert!(offense_lib(&format!("{all}\n{all}")));
     // `impl Var`／`impl Tensor` 内の承認シグネチャは違反。
@@ -38685,9 +38933,11 @@ fn functional_transforms_fn_inventory_counts_f64_substitutions() {
 /// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`・`::jvp_multi`・`::jvp_create_graph`（#3063・#3068）・`::vmap_grad`（#3072・#3071 の子テープ版内部実装）: #2940 の double-VJP 内部実装（#2956 で `pub fn` 化。
 ///   facade 以外へは再エクスポートしない）。
 ///
-/// - `autodiff/src/f64_autograd/functional_ops.rs::jvp`・`::jacfwd`（#3787）: f64 の double-VJP 内部実装
-///   （`impl TapeF64` 直下。各 1 件。facade 公開は #3788。f64 側の `vjp`／`hvp`／`vmap`／`vmap_grad`／
-///   `jvp_multi`／`jvp_create_graph` は未承認のため足されたら違反として検出される）。
+/// - `autodiff/src/f64_autograd/functional_ops.rs::jvp`・`::jacfwd`（#3787）・`::jvp_multi`・`::jvp_create_graph`
+///   （#3788）: f64 の double-VJP 内部実装（`impl TapeF64` 直下。各 1 件）。f64 側の `vjp`／`hvp`／`vmap`／
+///   `vmap_grad` は未承認のため足されたら違反として検出される。
+/// - `facade/src/lib.rs::{jvp, jacfwd, jvp_multi, jvp_create_graph}`: #2956・#3063・#3068 の `Tape`（f32）1 件と
+///   #3788 の `TapeF64`（f64）1 件で計 2 件ずつ（f64 側の承認形は `check_facade_tape_f64_functional_transforms_shape`）。
 ///
 /// 以後の実装を足すときは期待集合へ 1 行ずつ追記する。
 #[test]
@@ -38755,13 +39005,22 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
             1usize,
         ),
         ("autodiff/src/grad.rs::vjp".to_string(), 1usize),
+        (
+            "autodiff/src/f64_autograd/functional_ops.rs::jvp_multi".to_string(),
+            1usize,
+        ),
+        (
+            "autodiff/src/f64_autograd/functional_ops.rs::jvp_create_graph".to_string(),
+            1usize,
+        ),
         ("facade/src/lib.rs::vjp".to_string(), 1usize),
         ("facade/src/lib.rs::hvp".to_string(), 1usize),
         ("facade/src/lib.rs::vmap".to_string(), 1usize),
-        ("facade/src/lib.rs::jvp".to_string(), 1usize),
-        ("facade/src/lib.rs::jacfwd".to_string(), 1usize),
-        ("facade/src/lib.rs::jvp_multi".to_string(), 1usize),
-        ("facade/src/lib.rs::jvp_create_graph".to_string(), 1usize),
+        // #3788: `impl Tape`（f32）と `impl TapeF64`（f64）の各 1 件ずつで計 2 件。
+        ("facade/src/lib.rs::jvp".to_string(), 2usize),
+        ("facade/src/lib.rs::jacfwd".to_string(), 2usize),
+        ("facade/src/lib.rs::jvp_multi".to_string(), 2usize),
+        ("facade/src/lib.rs::jvp_create_graph".to_string(), 2usize),
         (
             "autodiff/src/functional_ops.rs::vmap_grad".to_string(),
             1usize,
@@ -38773,7 +39032,7 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd／jvp_multi／jvp_create_graph／vmap_grad の `fn` 宣言が許可された置き場所\
-         （autodiff/src/functional_ops.rs・autodiff/src/f64_autograd/functional_ops.rs〈jvp・jacfwd のみ〉・autodiff/src/grad.rs・facade/src/lib.rs の各 1 件）と一致しない。\
+         （autodiff/src/functional_ops.rs・autodiff/src/f64_autograd/functional_ops.rs〈jvp・jacfwd・jvp_multi・jvp_create_graph のみ〉・autodiff/src/grad.rs・facade/src/lib.rs の各 1 件）と一致しない。\
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
@@ -38785,8 +39044,18 @@ fn check_facade_tape_functional_transforms_shape(lib_src: &str) -> Result<(), St
     let cleaned: String = strip_comments_and_literals(lib_src).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let tape_impl_fns = pb_pub_fn_names_in_inherent_impls(&tokens, "Tape");
+    // #3788: `impl Tape` 直下だけを検査対象にする（`impl TapeF64` の同名 fn は f64 側の検査が担う）。
+    // 他の文脈の同名 fn は総数の一致（Tape 側 1 件 + `impl TapeF64` 側 0〜1 件）で拒否する。
+    let tape_tokens = inherent_impl_body_tokens(&tokens, "Tape");
+    let f64_tokens = inherent_impl_body_tokens(&tokens, "TapeF64");
     for (name, sig) in FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES {
-        let sigs = fn_signatures_by_name(&tokens, name);
+        let f64_n = count_fn_declarations_by_name(&f64_tokens, name);
+        if f64_n > 1 || count_fn_declarations_by_name(&tokens, name) != 1 + f64_n {
+            return Err(format!(
+                "`fn {name}` の総数が `impl Tape` 1 件 + `impl TapeF64` 0〜1 件と一致しない"
+            ));
+        }
+        let sigs = fn_signatures_by_name(&tape_tokens, name);
         if sigs.len() != 1 {
             return Err(format!(
                 "`fn {name}` が {} 件（1 件であるべき）",
@@ -38803,7 +39072,7 @@ fn check_facade_tape_functional_transforms_shape(lib_src: &str) -> Result<(), St
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, b)| normalized_tokens(b));
-        match (determinism_fn_body(&tokens, name), want_body) {
+        match (determinism_fn_body(&tape_tokens, name), want_body) {
             (Some(body), Some(want)) if body == want => {}
             (other, _) => return Err(format!("`{name}` の本体が承認形と不一致: {other:?}")),
         }
@@ -38816,11 +39085,51 @@ fn check_facade_tape_functional_transforms_shape(lib_src: &str) -> Result<(), St
     Ok(())
 }
 
+/// `src/lib.rs` の `impl<'t> TapeF64<'t>` 直下の `jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` が承認形
+/// （シグネチャ・1 式委譲本体・各ちょうど 1 件）であることを検査する（#3788 の正ガード本体）。
+/// `vjp`／`hvp`／`vmap`／`vmap_grad` は `TapeF64` 直下に 1 件も無いことも要求する（未承認のまま）。
+fn check_facade_tape_f64_functional_transforms_shape(lib_src: &str) -> Result<(), String> {
+    let cleaned: String = strip_comments_and_literals(lib_src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let f64_tokens = inherent_impl_body_tokens(&tokens, "TapeF64");
+    for (name, sig) in FUNCTIONAL_TRANSFORMS_F64_APPROVED_SIGNATURES {
+        let sigs = fn_signatures_by_name(&f64_tokens, name);
+        if sigs.len() != 1 || sigs[0] != normalized_tokens(sig) {
+            return Err(format!(
+                "`TapeF64::{name}` のシグネチャが承認形と不一致、または 1 件でない: {sigs:?}"
+            ));
+        }
+        let want = FUNCTIONAL_TRANSFORMS_F64_APPROVED_BODIES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, b)| normalized_tokens(b));
+        match (determinism_fn_body(&f64_tokens, name), want) {
+            (Some(body), Some(want)) if body == want => {}
+            (other, _) => {
+                return Err(format!(
+                    "`TapeF64::{name}` の本体が承認形と不一致: {other:?}"
+                ));
+            }
+        }
+    }
+    for name in ["vjp", "hvp", "vmap", "vmap_grad"] {
+        if count_fn_declarations_by_name(&f64_tokens, name) != 0 {
+            return Err(format!("`TapeF64::{name}` は未承認（足してはならない）"));
+        }
+    }
+    Ok(())
+}
+
 /// facade の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd` が `src/lib.rs` にちょうど 1 件ずつ・承認形で存在し、
 /// facade src の他ファイルには同名 `fn` が無いことを固定する正ガード（#2931・#2956）。
 #[test]
 fn facade_tape_functional_transforms_are_approved_thin_delegations() {
     let content = read_to_string_or_panic(&lib_rs_path());
+    if let Err(e) = check_facade_tape_f64_functional_transforms_shape(&content) {
+        panic!(
+            "facade の `TapeF64::jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` が承認形（#3788・#3766 の所有者回答・設計記録 §36・§40）と一致しない: {e}"
+        );
+    }
     if let Err(e) = check_facade_tape_functional_transforms_shape(&content) {
         panic!(
             "facade の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph`／`vmap_grad` が承認形（#2931・#2956・#3068・#3072・決定記録 §23.1〜§23.2・§27.1〜§27.2・§31.1・§32.1）と一致しない: {e}"
@@ -38937,6 +39246,55 @@ fn facade_tape_functional_transforms_are_approved_thin_delegations_detects_each_
     // `impl Tape` 直下でない（`impl Var` 内）。
     let wrong_recv = ok.replace("impl Tape", "impl Var");
     assert!(check_facade_tape_functional_transforms_shape(&wrong_recv).is_err());
+
+    // #3788: `impl<'t> TapeF64<'t>` に同名 fn が加わっても f32 側の検査は誤検出しない。
+    let mut f64_impl = String::from("impl<'t> TapeF64<'t> {\n");
+    for ((_, sig), (_, body)) in FUNCTIONAL_TRANSFORMS_F64_APPROVED_SIGNATURES
+        .iter()
+        .zip(FUNCTIONAL_TRANSFORMS_F64_APPROVED_BODIES.iter())
+    {
+        f64_impl.push_str(&format!("{sig}\n{{\n{body}\n}}\n"));
+    }
+    f64_impl.push_str("}\n");
+    let both = format!("{ok}\n{f64_impl}");
+    assert!(check_facade_tape_functional_transforms_shape(&both).is_ok());
+    assert!(check_facade_tape_f64_functional_transforms_shape(&both).is_ok());
+    // f32 本体のすり替えは f64 impl が併存していても検出する。
+    let f32_swap = both.replace(
+        "functional_ops::jvp(&self.0, output, input, tangent, &child.0)",
+        "functional_ops::jvp(&self.0, output, tangent, input, &child.0)",
+    );
+    assert_ne!(f32_swap, both);
+    assert!(check_facade_tape_functional_transforms_shape(&f32_swap).is_err());
+    // impl Var 内の同名 fn（総数が 1 + f64 側の件数と一致しない）は検出する。
+    let extra_var = format!("{both}\nimpl Var {{ pub fn jvp(&self) {{}} }}");
+    assert!(check_facade_tape_functional_transforms_shape(&extra_var).is_err());
+    // f64 側: 承認形は無違反。空振り・本体すり替え・シグネチャ改変・2 件目・未承認名の追加を検出する。
+    assert!(check_facade_tape_f64_functional_transforms_shape("impl<'t> TapeF64<'t> {}").is_err());
+    for (from, to) in [
+        (
+            "self.0.jacfwd(&output.0, &input.0, &child.0)",
+            "self.0.jacfwd(&input.0, &output.0, &child.0)",
+        ),
+        ("tangents, &child.0,)", "&child.0, tangents,)"),
+        ("&child.0, &grandchild.0)", "&grandchild.0, &child.0)"),
+        ("tangent: &Tensor<f64>", "tangent: &Tensor<f32>"),
+        ("grandchild: &'g TapeF64<'t>", "grandchild: &TapeF64<'t>"),
+    ] {
+        let m = both.replace(from, to);
+        assert_ne!(m, both, "変異対象が存在する: {from}");
+        assert!(
+            check_facade_tape_f64_functional_transforms_shape(&m).is_err(),
+            "f64 の承認形からの逸脱を検出できない: {from}"
+        );
+    }
+    let f64_dup = format!("{both}\n{f64_impl}");
+    assert!(check_facade_tape_f64_functional_transforms_shape(&f64_dup).is_err());
+    assert!(check_facade_tape_functional_transforms_shape(&f64_dup).is_err());
+    let f64_unapproved = format!("{both}\nimpl<'t> TapeF64<'t> {{ pub fn vmap_grad(&self) {{}} }}");
+    assert!(check_facade_tape_f64_functional_transforms_shape(&f64_unapproved).is_err());
+    let f64_wrong_recv = both.replace("impl<'t> TapeF64<'t>", "impl<'t> VarF64<'t>");
+    assert!(check_facade_tape_f64_functional_transforms_shape(&f64_wrong_recv).is_err());
 }
 
 /// facade 公開面から `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd` が型レベルで到達可能であることを固定し、
@@ -39766,6 +40124,17 @@ const F64_AUTOGRAD_SURFACE: &[(&str, &[(&str, &str)])] = &[
                 "backward_create_graph",
                 "self.0.backward_create_graph(&loss.0, &child.0).map(|cg| { let (first, vars) = cg.into_parts(); CreateGraphResultF64(GradientsF64(first), vars) })",
             ),
+            // #3788: jvp 系 4 関数（承認: #3766 の所有者回答。設計記録 §36・§40）。
+            ("jvp", "self.0.jvp(&output.0, &input.0, tangent, &child.0)"),
+            ("jacfwd", "self.0.jacfwd(&output.0, &input.0, &child.0)"),
+            (
+                "jvp_multi",
+                "self.0.jvp_multi(&output.0, &inputs.iter().map(|v| &v.0).collect::<Vec<_>>(), tangents, &child.0,)",
+            ),
+            (
+                "jvp_create_graph",
+                "self.0.jvp_create_graph(&output.0, &input.0, tangent, &child.0, &grandchild.0).map(JvpCreateGraphResultF64)",
+            ),
         ],
     ),
     (
@@ -39795,6 +40164,17 @@ const F64_AUTOGRAD_SURFACE: &[(&str, &[(&str, &str)])] = &[
             (
                 "child_var",
                 "self.1.child_var(&var.0).map(|v| v.map(VarF64))",
+            ),
+        ],
+    ),
+    // #3788: `TapeF64::jvp_create_graph` の結果型（内部の `JvpCreateGraphResultF64` を 1 つだけ所有）。
+    (
+        "JvpCreateGraphResultF64",
+        &[
+            ("output", "VarF64(self.0.output())"),
+            (
+                "child_var",
+                "self.0.child_var(&var.0).map(|v| v.map(VarF64))",
             ),
         ],
     ),
@@ -39971,6 +40351,7 @@ fn f64_autograd_reexport_violations(content: &str) -> Vec<String> {
         "GradientsF64",
         "CreateGraphResultF64",
         "CreateGraphVarsF64",
+        "JvpCreateGraphResultF64",
         "f64_autograd",
     ];
     let mut v = Vec::new();
@@ -39999,6 +40380,7 @@ fn f64_autograd_reexport_violations(content: &str) -> Vec<String> {
                             | "GradientsF64"
                             | "CreateGraphResultF64"
                             | "CreateGraphVarsF64"
+                            | "JvpCreateGraphResultF64"
                     )
                 );
             if !(ok_prefix && ok_suffix) {
@@ -40119,6 +40501,9 @@ fn f64_autograd_struct_declarations_workspace_inventory() {
         // 結果型の実体は `f64_autograd/create_graph.rs`（#3785）。
         let internal = if *ty == "CreateGraphResultF64" {
             "autodiff/src/f64_autograd/create_graph.rs"
+        } else if *ty == "JvpCreateGraphResultF64" {
+            // #3788: 結果型の実体は `f64_autograd/functional_ops.rs`。
+            "autodiff/src/f64_autograd/functional_ops.rs"
         } else {
             "autodiff/src/f64_autograd.rs"
         };
@@ -40154,7 +40539,8 @@ fn f64_autograd_struct_declarations_workspace_inventory() {
 #[test]
 fn f64_autograd_signature_probe() {
     use fandhe_ai::{
-        AutodiffError, CreateGraphResultF64, GradientsF64, Tape, TapeF64, Tensor, VarF64,
+        AutodiffError, CreateGraphResultF64, GradientsF64, JvpCreateGraphResultF64, Tape, TapeF64,
+        Tensor, VarF64,
     };
 
     fn assert_copy<T: Copy>() {}
@@ -40207,6 +40593,45 @@ fn f64_autograd_signature_probe() {
         type GradLookup<'a> = Result<Option<&'a Tensor<f64>>, AutodiffError>;
         let _: for<'a, 'b, 'c, 'd> fn(&'a GradientsF64, &'b VarF64<'c, 'd>) -> GradLookup<'a> =
             GradientsF64::get;
+        // #3788: jvp 系 4 関数と結果型（孫テープの寿命 'e を結果型 'e で引き継ぐ）。
+        type TensorResult = Result<Tensor<f64>, AutodiffError>;
+        type JvpMultiFn<'a, 'b, 'c, 'd, 'e, 't> = fn(
+            &'a TapeF64<'t>,
+            &'b VarF64<'c, 't>,
+            &'b [&'d VarF64<'d, 't>],
+            &'e [&'e Tensor<f64>],
+            &'e TapeF64<'t>,
+        ) -> TensorResult;
+        type JvpCreateGraphFn<'a, 'b, 'c, 'd, 'e, 'f, 't> =
+            fn(
+                &'a TapeF64<'t>,
+                &'b VarF64<'c, 't>,
+                &'b VarF64<'d, 't>,
+                &'e Tensor<f64>,
+                &'e TapeF64<'t>,
+                &'f TapeF64<'t>,
+            ) -> Result<JvpCreateGraphResultF64<'f, 't>, AutodiffError>;
+        let _: for<'a, 'b, 'c, 'd, 'e> fn(
+            &'a TapeF64<'t>,
+            &'b VarF64<'c, 't>,
+            &'b VarF64<'d, 't>,
+            &'e Tensor<f64>,
+            &'e TapeF64<'t>,
+        ) -> TensorResult = TapeF64::jvp;
+        let _: for<'a, 'b, 'c, 'd, 'e> fn(
+            &'a TapeF64<'t>,
+            &'b VarF64<'c, 't>,
+            &'b VarF64<'d, 't>,
+            &'e TapeF64<'t>,
+        ) -> TensorResult = TapeF64::jacfwd;
+        let _: JvpMultiFn<'_, '_, '_, '_, '_, 't> = TapeF64::jvp_multi;
+        let _: JvpCreateGraphFn<'_, '_, '_, '_, '_, '_, 't> = TapeF64::jvp_create_graph;
+        let _: for<'a> fn(&'a JvpCreateGraphResultF64<'g, 't>) -> VarF64<'g, 't> =
+            JvpCreateGraphResultF64::output;
+        let _: for<'a, 'b> fn(
+            &'a JvpCreateGraphResultF64<'g, 't>,
+            &'b VarF64<'g, 't>,
+        ) -> CgLookup<'g, 't> = JvpCreateGraphResultF64::child_var;
     }
 
     probe();
@@ -40341,8 +40766,84 @@ fn f64_autograd_guards_detect_each_violation_class() {
         f64_autograd_expected_decl("CreateGraphResultF64"),
         "結果型の derive 追加を検出できない"
     );
+    // #3788: jvp 系 4 関数と結果型の承認形からの逸脱を検出する。
+    for (from, to, what) in [
+        (
+            "self.0.jvp(&output.0, &input.0, tangent, &child.0)",
+            "self.0.jvp(&output.0, &input.0, tangent, &child.0).map(|t| t)",
+            "jvp の本体すり替え",
+        ),
+        (
+            "self.0.jacfwd(&output.0, &input.0, &child.0)",
+            "self.0.jacfwd(&input.0, &output.0, &child.0)",
+            "jacfwd の output／input 入れ替え",
+        ),
+        (
+            "tangents,\n            &child.0,\n        )",
+            "tangents,\n            &output.0,\n        )",
+            "jvp_multi の child すり替え",
+        ),
+        (
+            ".jvp_create_graph(&output.0, &input.0, tangent, &child.0, &grandchild.0)\n            .map(JvpCreateGraphResultF64)",
+            ".jvp_create_graph(&output.0, &input.0, tangent, &grandchild.0, &child.0)\n            .map(JvpCreateGraphResultF64)",
+            "jvp_create_graph の child／grandchild 入れ替え",
+        ),
+        (
+            ".jvp_create_graph(&output.0, &input.0, tangent, &child.0, &grandchild.0)\n            .map(JvpCreateGraphResultF64)",
+            ".jvp_create_graph(&output.0, &input.0, tangent, &child.0, &grandchild.0)\n            .map(|r| JvpCreateGraphResultF64(r))",
+            "jvp_create_graph の .map 脱落（形の変更）",
+        ),
+        (
+            "VarF64(self.0.output())",
+            "{ let _ = self; todo!() }",
+            "JvpCreateGraphResultF64::output の本体すり替え",
+        ),
+    ] {
+        let m = mutate(from, to);
+        assert!(
+            !f64_autograd_surface_violations(&m).is_empty(),
+            "{what}を検出できない"
+        );
+    }
+    let mut second_jvp_impl = base.clone();
+    second_jvp_impl.push_str(
+        "\nimpl<'g, 't> JvpCreateGraphResultF64<'g, 't> {\n    pub fn extra(&self) {}\n}\n",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&second_jvp_impl).is_empty(),
+        "JvpCreateGraphResultF64 の 2 件目の固有 impl を検出できない"
+    );
+    let mut deref_jvp = base.clone();
+    deref_jvp.push_str(
+        "\nimpl<'g, 't> std::ops::Deref for JvpCreateGraphResultF64<'g, 't> {\n    type Target = \
+         fandhe_ai_autodiff::f64_autograd::JvpCreateGraphResultF64<'g, 't>;\n    fn deref(&self) -> \
+         &Self::Target {\n        &self.0\n    }\n}\n",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&deref_jvp).is_empty(),
+        "JvpCreateGraphResultF64 の Deref impl を検出できない"
+    );
+    let pub_jvp_field = mutate(
+        "pub struct JvpCreateGraphResultF64<'g, 't>(\n    pub(crate) ",
+        "pub struct JvpCreateGraphResultF64<'g, 't>(\n    pub ",
+    );
+    assert_ne!(
+        f64_autograd_struct_decl_records(&pub_jvp_field, "JvpCreateGraphResultF64")[0],
+        f64_autograd_expected_decl("JvpCreateGraphResultF64"),
+        "JvpCreateGraphResultF64 の pub フィールドを検出できない"
+    );
+    let derived_jvp = mutate(
+        "pub struct JvpCreateGraphResultF64<'g, 't>(",
+        "#[derive(Clone)]\npub struct JvpCreateGraphResultF64<'g, 't>(",
+    );
+    assert_ne!(
+        f64_autograd_struct_decl_records(&derived_jvp, "JvpCreateGraphResultF64")[0],
+        f64_autograd_expected_decl("JvpCreateGraphResultF64"),
+        "JvpCreateGraphResultF64 の derive 追加を検出できない"
+    );
     // 再エクスポート（直接・別名・短縮 use）。
     for src in [
+        "pub use fandhe_ai_autodiff::f64_autograd::JvpCreateGraphResultF64;",
         "pub use fandhe_ai_autodiff::f64_autograd::CreateGraphResultF64;",
         "pub use fandhe_ai_autodiff::f64_autograd::CreateGraphVarsF64 as V;",
         "pub use fandhe_ai_autodiff::f64_autograd::TapeF64;",
@@ -43752,6 +44253,29 @@ fn f64_backward_create_graph_usage_doctest_is_present_and_compiled() {
         "backward_create_graph",
         "x.matmul",
         "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["x.median(None)"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
+/// f64 テープの jvp 系 4 関数と `JvpCreateGraphResultF64`（イシュー #3788）の利用例 doctest の実在を固定する
+/// 正ガード。f64 の jvp 系を拒否していたのは `FunctionalTransformsHoldDoctestGuard` の `TapeF64` 受け手
+/// プローブ（未承認名のみ残す）と workspace の fn 名インベントリで、反転後は「受理されること」を示す doctest
+/// （実際にコンパイル・実行される）の実在をここで固定する。アンカーは一意な `pub struct JvpCreateGraphResultF64`。
+/// 存在しない needle を課すと違反が出ること（空振り防止）も確かめる。
+#[test]
+fn f64_jvp_family_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "f64 jvp_create_graph",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub struct JvpCreateGraphResultF64"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "TapeF64",
+        "jvp_create_graph",
+        "res.child_var",
     ])]);
     assert!(ok.is_empty(), "{ok:?}");
     let missing = surface_guard::usage_doctest_violations(&[entry(&["x.median(None)"])]);

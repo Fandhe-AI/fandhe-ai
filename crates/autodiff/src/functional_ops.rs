@@ -466,7 +466,7 @@ fn write_column(
 /// **副作用**: 前段以降の失敗でも親テープへちょうど 2 ノード（全要素 1 の追跡あり葉 `u` と `mul`）が残る
 /// （既存ノードの値は不変）。成功時の子テープには写し・1 階勾配・第 2 段の補助ノードが残る。
 /// 子テープ上の数値は 1 階 VJP や `jacobian` と bit 同一を主張しない。非有限値は検査せず伝播する。
-/// 計算量は親 backward 1 回＋子 backward 1 回。f32 の [`Tape`] のみ（`VarF64`・f16 は対象外）。
+/// 計算量は親 backward 1 回＋子 backward 1 回。f32 の [`Tape`] 用（f64 は `f64_autograd::TapeF64::jvp`、f16 は対象外）。
 pub fn jvp(
     tape: &Tape,
     output: &Var<'_>,
@@ -581,7 +581,7 @@ pub fn jacfwd(
 /// **副作用**: 入口検査後の失敗でも親テープへちょうど 2 ノード（`u` と `mul`）が残る（入力数に依らない）。
 /// 成功時の子テープには写し・1 階勾配・第 2 段の補助ノードが残る。結果は REQ-2 統一複合判定で
 /// `jacobian` 由来の `Σ J_i·v_i` と一致し、入力 1 つでも [`jvp`] と bit 同一は主張しない。
-/// 非有限値は検査せず伝播する。f32 の [`Tape`] のみ。
+/// 非有限値は検査せず伝播する。f32 の [`Tape`] 用（f64 は `f64_autograd::TapeF64::jvp_multi`）。
 pub fn jvp_multi(
     tape: &Tape,
     output: &Var<'_>,
@@ -738,7 +738,7 @@ fn zero_jvp_result<'g>(
 /// 以降は [`jvp`] と同じ拒否（非対象 Op・rank 3 以上の `matmul`・checkpoint 等）が 1 段目に、
 /// `backward_create_graph` の既存検査が 2 段目に `Err(Backward)` で伝播する。親テープへは前段で
 /// ちょうど 2 ノードが残る。`J ≡ 0` は全ゼロの追跡なし葉を返す。非有限値は検査せず伝播する。
-/// f32 の [`Tape`] のみ（`VarF64`・f16・複数入力は対象外）。
+/// f32 の [`Tape`] 用の単一入力版（f64 は `f64_autograd::TapeF64::jvp_create_graph`、f16 は対象外）。
 pub fn jvp_create_graph<'g>(
     tape: &Tape,
     output: &Var<'_>,
