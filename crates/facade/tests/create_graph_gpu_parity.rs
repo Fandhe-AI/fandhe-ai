@@ -1,7 +1,9 @@
 //! 二階微分（`create_graph`・孫テープ再生）の CUDA 実機 parity テストの雛形
 //! （イシュー #3776・親 #3719。測り方は `docs/autodiff-higher-order-grad-decision.md`
 //! §48〈#3739〉）。Phase 5 の各族の実装 issue は [`CASES`] に 1 行足し、
-//! Phase 10 が GB10（`<cuda-node>`）で測る。Metal 版は #3777 が同じファイルへ足す。
+//! Phase 10 が GB10（`<cuda-node>`）で測る。Metal 版（イシュー #3777）は同じ
+//! ファイルの `create_graph_<族>_metal_matches_cpu`（`cfg(target_os = "macos")`
+//! ・`#[ignore]`）で、Phase 10 が `<metal-node>` で測る。
 //!
 //! 置き場が facade の理由: `crates/autodiff` は GPU バックエンドへ届かず、facade は
 //! 全バックエンドを合成する公開経路で、既存の `create_graph_facade.rs`
@@ -17,9 +19,16 @@
 //! 値は変えない。`Baseline` 方式は `tests/common/create_graph_gpu_parity_baseline.rs`
 //! の空の置き場を引き、行が無ければ undetermined で止まる。
 //!
+//! S3（§48.4）: Metal の `gemm_fp32_strict` は `gemm` に委譲され split-K を通りうる。
+//! 各族は [`SplitKShapes`] で子テープ構造内の MatMul 形状を宣言し、macOS では
+//! `should_split_k` が `None` であることを厳密に検査する。発火する形状は主表から
+//! 外す（論点 8＝スコープ外）。結合順序の異なる経路が避けられない族だけが
+//! `Judge::Baseline` の Metal 行（`BaselineDevice::Metal`）に回る。Linux では
+//! Metal の行が cfg で外れ、宣言の形式検査だけが CI で走る。
+//!
 //! 実行: `#[ignore]` の GPU テストは CI で走らず、`cargo test -p fandhe-ai --test
 //! create_graph_gpu_parity --no-run` でビルドだけ通る。実機手順は
-//! `docs/real-hardware-verification-env.md` 4.9 節。RULE.txt の雛形は
+//! `docs/real-hardware-verification-env.md` 4.9 節（Metal は 7.3 節）。RULE.txt の雛形は
 //! `docs/perf/logs/create-graph-gpu-parity-template/RULE.txt`。
 //! 登録表自体の健全性は CPU 同士の非 `#[ignore]` 自己検査で CI が守る。
 
@@ -72,6 +81,65 @@ struct Outputs {
     replay: Option<Vec<f32>>,
 }
 
+/// S3（§48.4）の宣言。各族が明示する（宣言なしで Metal の主表に入れない）。
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // `Listed`／`Rule` は MatMul を含む族の実装 issue が使う。自己検査が構築する。
+enum SplitKShapes {
+    /// 子テープの構造に MatMul を含まない。
+    NoMatMul,
+    /// 構造に含まれる MatMul の `(m, n, k)` を列挙できる族。
+    Listed(&'static [(usize, usize, usize)]),
+    /// 列挙できない族。`k < max(m, n)` となるよう形状を選んだ規則の文（RULE.txt に引用）。
+    Rule(&'static str),
+}
+
+/// 宣言の形式検査（全プラットフォーム）。曖昧な宣言は fail-closed で弾く。
+fn validate_split_k_decl(d: &SplitKShapes) -> Result<(), String> {
+    match d {
+        SplitKShapes::NoMatMul => Ok(()),
+        SplitKShapes::Listed([]) => {
+            Err("Listed が空: MatMul が無いなら NoMatMul と書く".to_string())
+        }
+        SplitKShapes::Listed(shapes) => {
+            if shapes.iter().any(|&(m, n, k)| m == 0 || n == 0 || k == 0) {
+                Err("Listed に 0 を含む次元がある".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        SplitKShapes::Rule(s) if s.trim().is_empty() => Err("Rule の文が空".to_string()),
+        SplitKShapes::Rule(_) => Ok(()),
+    }
+}
+
+/// macOS 限定の厳密検査。`Listed` の各形状で split-K が発火しないことを確かめる。
+/// `should_split_k` は `backend-metal` が `pub use` 済みの既存項目（公開面は不変）。
+#[cfg(target_os = "macos")]
+fn check_split_k_not_fired(case: &Case) -> Result<(), String> {
+    validate_split_k_decl(&case.split_k).map_err(|e| format!("{}:S3: {e}", case.name))?;
+    if let SplitKShapes::Listed(shapes) = case.split_k {
+        for &(m, n, k) in shapes {
+            if fandhe_ai_backend_metal::should_split_k(m, n, k).is_some() {
+                return Err(format!(
+                    "{}:S3 違反: ({m},{n},{k}) で split-K が発火する。主表から外す（論点 8）",
+                    case.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `device` を baseline の軸へ写す。CPU・未指定は baseline 対象外（undetermined）。
+fn baseline_device(device: Option<Device>) -> Option<baseline::BaselineDevice> {
+    match device {
+        Some(Device::Cuda(_)) => Some(baseline::BaselineDevice::Cuda),
+        #[cfg(target_os = "macos")]
+        Some(Device::Metal) => Some(baseline::BaselineDevice::Metal),
+        _ => None,
+    }
+}
+
 /// 登録表の 1 行。**Op を足すときはここに 1 行足す**（テスト関数は族単位で別に置く）。
 struct Case {
     /// ケース名。baseline の `case` と逐語一致させる。
@@ -80,6 +148,8 @@ struct Case {
     family: &'static str,
     route: Route,
     judge: Judge,
+    /// S3: 子テープ構造に含まれる MatMul の split-K 宣言（Metal 用。§48.4）。
+    split_k: SplitKShapes,
     /// 決定的な入力でテープを走らせ測定量を返す。形状・入力はこの関数内で固定する
     /// （S1: CI の小形状 + S2: 2 のべき乗でない中形状、S4: 決定的、S5: しきい値回避）。
     run: fn(&Tapes) -> Outputs,
@@ -93,6 +163,7 @@ const CASES: &[Case] = &[Case {
     family: "scaffold",
     route: Route::K,
     judge: Judge::Strict,
+    split_k: SplitKShapes::NoMatMul,
     run: run_scaffold_cubic,
     reject: None,
 }];
@@ -150,7 +221,13 @@ fn tapes_for(device: Option<Device>) -> Tapes {
 
 /// REQ-2 統一複合判定（`Baseline` 方式は空の置き場を引く）。fail 時は RULE.txt から
 /// 引用できるよう fail_count・max_abs_diff・max_rel_err を出す。
-fn judge(case: &Case, quantity: &str, gpu: &[f32], cpu: &[f32]) -> Result<(), String> {
+fn judge(
+    case: &Case,
+    device: Option<Device>,
+    quantity: &str,
+    gpu: &[f32],
+    cpu: &[f32],
+) -> Result<(), String> {
     let report = compare(gpu, cpu).map_err(|e| format!("{}:{quantity}: {e:?}", case.name))?;
     match case.judge {
         Judge::Strict if report.passes() => Ok(()),
@@ -164,12 +241,25 @@ fn judge(case: &Case, quantity: &str, gpu: &[f32], cpu: &[f32]) -> Result<(), St
             report.max_abs_diff,
             report.max_rel_err
         )),
-        Judge::Baseline => baseline::check_no_regression(baseline::lookup(case.name)?, &report),
+        Judge::Baseline => {
+            let dev = baseline_device(device).ok_or_else(|| {
+                format!(
+                    "undetermined: {} は baseline 対象外のデバイス {device:?}",
+                    case.name
+                )
+            })?;
+            baseline::check_no_regression(baseline::lookup(case.name, dev)?, &report)
+        }
     }
 }
 
 /// 1 ケースを `device`（None は CPU）と CPU 参照で突き合わせる。
 fn check_case(case: &Case, device: Option<Device>) -> Result<(), String> {
+    // S3: Metal では split-K が発火しない形状だけを主表に置く（§48.4）。
+    #[cfg(target_os = "macos")]
+    if matches!(device, Some(Device::Metal)) {
+        check_split_k_not_fired(case)?;
+    }
     let gpu = (case.run)(&tapes_for(device));
     let cpu = (case.run)(&tapes_for(None));
     // Q1: 同デバイスの素の backward と bit 一致（構造的な性質）。
@@ -182,15 +272,21 @@ fn check_case(case: &Case, device: Option<Device>) -> Result<(), String> {
     }
     // Q1: GPU・CPU 間も REQ-2 複合判定で突き合わせる（§48.4。tolerance は不変）。
     // 同デバイス bit 一致だけでは backward と first_order が同じ誤値を返しても通るため。
-    judge(case, "Q1 first_order", &gpu.first_order, &cpu.first_order)?;
-    judge(case, "Q2 grad", &gpu.grad, &cpu.grad)?;
+    judge(
+        case,
+        device,
+        "Q1 first_order",
+        &gpu.first_order,
+        &cpu.first_order,
+    )?;
+    judge(case, device, "Q2 grad", &gpu.grad, &cpu.grad)?;
     // 線形な Op で二階の検査が自明に通るのを防ぐ。
     if gpu.hv.iter().all(|&v| v == 0.0) {
         return Err(format!("{}:Q3: H v が全ゼロ", case.name));
     }
-    judge(case, "Q3 hv", &gpu.hv, &cpu.hv)?;
+    judge(case, device, "Q3 hv", &gpu.hv, &cpu.hv)?;
     match (&gpu.replay, &cpu.replay) {
-        (Some(g), Some(c)) => judge(case, "Q4 replay", g, c)?,
+        (Some(g), Some(c)) => judge(case, device, "Q4 replay", g, c)?,
         (None, None) => {}
         _ => return Err(format!("{}:Q4: 片側だけ replay を返した", case.name)),
     }
@@ -236,6 +332,21 @@ macro_rules! cuda_family_test {
 
 cuda_family_test!(create_graph_scaffold_cuda_matches_cpu, "scaffold");
 
+/// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
+/// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
+macro_rules! metal_family_test {
+    ($name:ident, $family:literal) => {
+        #[cfg(target_os = "macos")]
+        #[test]
+        #[ignore = "Metal 実機が必要"]
+        fn $name() {
+            run_family($family, Some(Device::Metal));
+        }
+    };
+}
+
+metal_family_test!(create_graph_scaffold_metal_matches_cpu, "scaffold");
+
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
 #[test]
@@ -260,5 +371,32 @@ fn baseline_is_an_empty_placeholder_and_fails_closed() {
         baseline::BASELINES.is_empty(),
         "値は実機実測と所有者承認まで入れない"
     );
-    assert!(baseline::lookup("scaffold_cubic").is_err());
+    assert!(baseline::lookup("scaffold_cubic", baseline::BaselineDevice::Cuda).is_err());
+    assert!(baseline::lookup("scaffold_cubic", baseline::BaselineDevice::Metal).is_err());
+}
+
+#[test]
+fn registry_split_k_declarations_are_well_formed() {
+    for c in CASES {
+        validate_split_k_decl(&c.split_k).unwrap_or_else(|e| panic!("{}: {e}", c.name));
+    }
+}
+
+#[test]
+fn split_k_declaration_validator_rejects_malformed() {
+    assert!(validate_split_k_decl(&SplitKShapes::Listed(&[])).is_err());
+    assert!(validate_split_k_decl(&SplitKShapes::Listed(&[(0, 1, 1)])).is_err());
+    assert!(validate_split_k_decl(&SplitKShapes::Rule("")).is_err());
+    assert!(validate_split_k_decl(&SplitKShapes::Listed(&[(33, 17, 8)])).is_ok());
+    assert!(validate_split_k_decl(&SplitKShapes::Rule("k < max(m, n) の形状だけを使う")).is_ok());
+    assert!(validate_split_k_decl(&SplitKShapes::NoMatMul).is_ok());
+}
+
+/// GPU 不要の純関数検査。形状規則の検査であり測定値ではない（macOS 開発機で走る）。
+#[cfg(target_os = "macos")]
+#[test]
+fn registry_shapes_do_not_fire_split_k() {
+    for c in CASES {
+        check_split_k_not_fired(c).unwrap_or_else(|e| panic!("{e}"));
+    }
 }
