@@ -5839,7 +5839,7 @@ struct BinningOpsHoldDoctestGuard;
 /// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・
 /// ルート #2499 Phase 4）のうち `Var` 以外の別入口を facade 公開面から締め出す**禁止経路専用の恒久ガード**
 /// （`FftOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。#2628 で導入し、
-/// 別入口は #3766 の所有者回答（案 X「対象外」。https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674・2026-11-01）で対象外に確定したため、禁止経路専用として維持する
+/// 別入口は #3766 の所有者回答（案 X「対象外」。<https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674>・2026-11-01）で対象外に確定したため、禁止経路専用として維持する
 /// （`LossOpsHoldDoctestGuard` と同じ扱い。構造体名は `*HoldDoctestGuard` の統一と固定文言ドリフト検査の対象名を保つため変えない。
 /// 判断の出典は `docs/autodiff-low-precision-op-extension-decision.md` §8・§9）。
 ///

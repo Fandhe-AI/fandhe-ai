@@ -5,7 +5,7 @@
 //! **facade 非公開（対象外）**: 公開形の `Var::{matmul,add,mul,relu,exp,tanh}
 //! _low_precision(.., dtype)` の委譲メソッド 6 本は #2678 で公開済み。本モジュール
 //! 自体は内部クレート限定の入口で、facade の別入口（モジュール再エクスポート・
-//! 裸の自由関数・`Tape` メソッド）は #3766（https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674）で対象外に確定した。
+//! 裸の自由関数・`Tape` メソッド）は #3766（<https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674>）で対象外に確定した。
 //! 禁止経路は `crates/facade/src/lib.rs` の `VarLowPrecisionOpsHoldDoctestGuard` と
 //! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する
 //! （`docs/autodiff-low-precision-op-extension-decision.md` §8・§9）。
