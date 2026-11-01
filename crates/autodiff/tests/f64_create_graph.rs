@@ -4,9 +4,10 @@
 //! `mod common;`（`NaiveOps`。`typed_ops_f64` は `None` でホスト経路）の上で動かす。
 //! `autodiff` は具体バックエンドクレートへ依存しない不変条件があるため、REQ-2 の判定は
 //! `common::req2_close`（`backend-cpu::parity::compare` の独立再実装）を使う。tolerance は
-//! 新設しない。loss は第 1 段で `sum` が使えないため常に非スカラー（シードは全要素 1）で、
-//! 線形 Op だけで二階が 0 になる検証（§34.3）は作らない。実機（CUDA／Metal）の
-//! `#[ignore]` テストは #3786 で追加する（第 1 段に実機依存のテストはない）。
+//! 新設しない。第 1 段の loss は非スカラー（シードは全要素 1）、第 2 段（#3786）は
+//! `matmul`／`sum`／`mean` を含む。線形 Op だけで二階が 0 になる検証（§34.3）は作らず、
+//! 非線形な包みを入れる。実機（CUDA／Metal）の `#[ignore]` テストは facade 側の
+//! `crates/facade/tests/f64_create_graph_facade.rs`。
 
 mod common;
 
@@ -437,19 +438,14 @@ fn entry_checks_reject_in_order() -> R<()> {
 
 #[test]
 fn unsupported_ops_are_rejected_and_child_stays_reusable() -> R<()> {
+    // 第 2 段（#3786）で matmul・sum・mean は対象になった。fail-closed で
+    // 残るのは max だけ（§35.13 論点 5）。
     let base = new_tape();
     let p = TapeF64::new(&base);
     let c = TapeF64::new(&base);
     let m = p.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
     let x = p.var(&t(vec![1.0, 2.0], &[2]));
-    let bad: Vec<VarF64<'_, '_>> = vec![
-        m.matmul(&m)?,
-        m.sum(None)?,
-        m.sum(Some(0))?,
-        m.mean(None)?,
-        m.max(None)?,
-        m.max(Some(1))?,
-    ];
+    let bad: Vec<VarF64<'_, '_>> = vec![m.max(None)?, m.max(Some(1))?];
     for l in &bad {
         assert!(matches!(
             p.backward_create_graph(l, &c),
@@ -563,5 +559,283 @@ fn pow_tiny_base_and_zero_exponent_at_different_positions_is_accepted() -> R<()>
     for v in second(&cg, &c, &a, &a)? {
         assert!(v.is_finite(), "二階に非有限値: {v}");
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// 第 2 段（イシュー #3786）: matmul・sum・mean と閉包性
+// ---------------------------------------------------------------------
+
+/// 追跡対象 1 個を受けて loss を組む関数（`fd_check` の入力）。
+fn grad_sum_of<F>(xs: &[f64], shape: &[usize], build: &F) -> R<f64>
+where
+    F: for<'g, 't> Fn(&VarF64<'g, 't>) -> R<VarF64<'g, 't>>,
+{
+    let base = new_tape();
+    let p = TapeF64::new(&base);
+    let x = p.var(&t(xs.to_vec(), shape));
+    let l = build(&x)?;
+    let g = p.backward(&l)?;
+    Ok(vals(g.get(&x)?.expect("届く")).iter().sum())
+}
+
+/// 二階（Σ grad_x の x_k での偏導関数）を中心差分と突き合わせる。
+fn fd_check<F>(xv: &[f64], shape: &[usize], build: F) -> R<()>
+where
+    F: for<'g, 't> Fn(&VarF64<'g, 't>) -> R<VarF64<'g, 't>>,
+{
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let x = p.var(&t(xv.to_vec(), shape));
+    let l = build(&x)?;
+    let cg = p.backward_create_graph(&l, &c)?;
+    let got = second(&cg, &c, &x, &x)?;
+    let h = 1e-5;
+    for k in 0..xv.len() {
+        let (mut up, mut dn) = (xv.to_vec(), xv.to_vec());
+        up[k] += h;
+        dn[k] -= h;
+        let fd = (grad_sum_of(&up, shape, &build)? - grad_sum_of(&dn, shape, &build)?) / (2.0 * h);
+        assert!(
+            common::req2_close(got[k], fd),
+            "k={k}: got {} fd {fd}",
+            got[k]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn matmul_second_order_self_product() -> R<()> {
+    // x を左右両方に使う（fan-out）。loss = Σ (x@x)^2。
+    fd_check(&[0.5, 1.5, 2.0, 1.0], &[2, 2], |x| {
+        let y = x.matmul(x)?;
+        y.mul(&y)?.sum(None)
+    })
+}
+
+#[test]
+fn matmul_second_order_both_operands_tracked() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let (av, bv) = (
+        vec![0.5, 1.5, 2.0, 1.0, 0.7, 3.0],
+        vec![1.1, 0.4, 0.9, 1.3, 0.6, 2.0],
+    );
+    let a = p.var(&t(av.clone(), &[2, 3]));
+    let b = p.var(&t(bv.clone(), &[3, 2]));
+    let y = a.matmul(&b)?;
+    let l = y.mul(&y)?.sum(None)?;
+    let cg = p.backward_create_graph(&l, &c)?;
+    // 1 階: dL/da = 2 y bᵀ。REQ-2 で first_order と一致。
+    for v in [&a, &b] {
+        let g = cg.grad(v)?.expect("届く").value();
+        assert_close(
+            &vals(&g),
+            &vals(cg.first_order().get(v)?.expect("届く")),
+            "matmul grad vs first_order",
+        );
+    }
+    // 二階を a・b 双方の中心差分と比べる。
+    let eval = |av: &[f64], bv: &[f64]| -> R<(Vec<f64>, Vec<f64>)> {
+        let base = new_tape();
+        let p = TapeF64::new(&base);
+        let a = p.var(&t(av.to_vec(), &[2, 3]));
+        let b = p.var(&t(bv.to_vec(), &[3, 2]));
+        let y = a.matmul(&b)?;
+        let l = y.mul(&y)?.sum(None)?;
+        let g = p.backward(&l)?;
+        Ok((
+            vals(g.get(&a)?.expect("届く")),
+            vals(g.get(&b)?.expect("届く")),
+        ))
+    };
+    let sum = |(x, y): (Vec<f64>, Vec<f64>)| x.iter().chain(&y).sum::<f64>();
+    let h = 1e-5;
+    let total = cg
+        .grad(&a)?
+        .expect("届く")
+        .sum(None)?
+        .add(&cg.grad(&b)?.expect("届く").sum(None)?)?;
+    let grads = c.backward(&total)?;
+    let got_a = vals(grads.get(&cg.child_var(&a)?.expect("写し"))?.expect("届く"));
+    let got_b = vals(grads.get(&cg.child_var(&b)?.expect("写し"))?.expect("届く"));
+    for k in 0..6 {
+        let (mut up, mut dn) = (av.clone(), av.clone());
+        up[k] += h;
+        dn[k] -= h;
+        let fd = (sum(eval(&up, &bv)?) - sum(eval(&dn, &bv)?)) / (2.0 * h);
+        assert!(
+            common::req2_close(got_a[k], fd),
+            "a[{k}]: got {} fd {fd}",
+            got_a[k]
+        );
+        let (mut up, mut dn) = (bv.clone(), bv.clone());
+        up[k] += h;
+        dn[k] -= h;
+        let fd = (sum(eval(&av, &up)?) - sum(eval(&av, &dn)?)) / (2.0 * h);
+        assert!(
+            common::req2_close(got_b[k], fd),
+            "b[{k}]: got {} fd {fd}",
+            got_b[k]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sum_and_mean_axis_second_order() -> R<()> {
+    let xv = [0.5, 1.5, 2.0, 1.0, 0.7, 3.0];
+    // 立方を作ってから縮約し、さらに非線形（自乗）で包む。
+    fd_check(&xv, &[2, 3], |x| {
+        let c = x.mul(x)?.mul(x)?;
+        let s = c.sum(None)?;
+        s.mul(&s)
+    })?;
+    for axis in [0usize, 1] {
+        fd_check(&xv, &[2, 3], move |x| {
+            let c = x.mul(x)?.mul(x)?;
+            let s = c.sum(Some(axis))?;
+            s.mul(&s)?.sum(None)
+        })?;
+        fd_check(&xv, &[2, 3], move |x| {
+            let c = x.mul(x)?.mul(x)?;
+            let m = c.mean(Some(axis))?;
+            m.mul(&m)?.mean(None)
+        })?;
+    }
+    fd_check(&xv, &[2, 3], |x| {
+        let m = x.mul(x)?.mean(None)?;
+        m.mul(&m)
+    })
+}
+
+/// matmul・mean(軸あり)・sum(軸あり)・mean(None) を通す loss。
+fn stage2_loss<'g, 't>(a: &VarF64<'g, 't>, b: &VarF64<'g, 't>) -> R<VarF64<'g, 't>> {
+    let y = a.matmul(b)?;
+    y.mean(Some(0))?.mul(&y.sum(Some(1))?.mean(None)?)
+}
+
+#[test]
+fn first_order_is_bit_identical_with_matmul_sum_mean() -> R<()> {
+    let av = vec![0.5, 1.5, 2.0, 1.0, 0.7, 3.0];
+    let bv = vec![1.1, 0.4, 0.9, 1.3, 0.6, 2.0];
+    let base = new_tape();
+    let (p1, c1) = (TapeF64::new(&base), TapeF64::new(&base));
+    let a1 = p1.var(&t(av.clone(), &[2, 3]));
+    let b1 = p1.var(&t(bv.clone(), &[3, 2]));
+    let cg = p1.backward_create_graph(&stage2_loss(&a1, &b1)?, &c1)?;
+    let p2 = TapeF64::new(&base);
+    let a2 = p2.var(&t(av, &[2, 3]));
+    let b2 = p2.var(&t(bv, &[3, 2]));
+    let plain = p2.backward(&stage2_loss(&a2, &b2)?)?;
+    for (x, y) in [(&a1, &a2), (&b1, &b2)] {
+        let got = vals(cg.first_order().get(x)?.expect("届く"));
+        let want = vals(plain.get(y)?.expect("届く"));
+        assert!(
+            got.iter()
+                .zip(&want)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn child_grad_matches_first_order_for_stage2_ops() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let a = p.var(&t(vec![0.5, 1.5, 2.0, 1.0, 0.7, 3.0], &[2, 3]));
+    let b = p.var(&t(vec![1.1, 0.4, 0.9, 1.3, 0.6, 2.0], &[3, 2]));
+    let cg = p.backward_create_graph(&stage2_loss(&a, &b)?, &c)?;
+    for v in [&a, &b] {
+        let g = cg.grad(v)?.expect("届く").value();
+        assert_close(
+            &vals(&g),
+            &vals(cg.first_order().get(v)?.expect("届く")),
+            "grad vs first_order",
+        );
+    }
+    Ok(())
+}
+
+/// 三階: 孫テープの `backward_create_graph` が Transpose／Unreduce を含む
+/// 勾配グラフを再生でき、値が中心差分と一致する（閉包性）。
+#[test]
+fn third_order_closure_through_transpose_and_unreduce() -> R<()> {
+    let xv = [0.5, 1.5, 2.0, 1.0];
+    // second_sum(xs) = Σ_k d/dx_k Σ_i g_i（create_graph で得る）。
+    let second_sum = |xs: &[f64]| -> R<f64> {
+        let base = new_tape();
+        let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+        let x = p.var(&t(xs.to_vec(), &[2, 2]));
+        let y = x.matmul(&x)?;
+        let l = y.mul(&y)?.mul(&y)?.mean(None)?;
+        let cg = p.backward_create_graph(&l, &c)?;
+        Ok(second(&cg, &c, &x, &x)?.iter().sum())
+    };
+    let base = new_tape();
+    let (p, c, gc) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let x = p.var(&t(xv.to_vec(), &[2, 2]));
+    let y = x.matmul(&x)?;
+    let l = y.mul(&y)?.mul(&y)?.mean(None)?;
+    let cg1 = p.backward_create_graph(&l, &c)?;
+    let g1 = cg1.grad(&x)?.expect("届く");
+    let cx = cg1.child_var(&x)?.expect("写し");
+    let cg2 = c.backward_create_graph(&g1, &gc)?;
+    let g2 = cg2.grad(&cx)?.expect("届く");
+    let gx = cg2.child_var(&cx)?.expect("写し");
+    let third = gc.backward(&g2)?;
+    let got = vals(third.get(&gx)?.expect("届く"));
+    let h = 1e-5;
+    for k in 0..4 {
+        let (mut up, mut dn) = (xv.to_vec(), xv.to_vec());
+        up[k] += h;
+        dn[k] -= h;
+        let fd = (second_sum(&up)? - second_sum(&dn)?) / (2.0 * h);
+        assert!(
+            common::req2_close(got[k], fd),
+            "k={k}: got {} fd {fd}",
+            got[k]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn max_is_rejected_and_child_stays_empty() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let x = p.var(&t(vec![1.0, 3.0, 2.0, 4.0], &[2, 2]));
+    // max を matmul・sum と混ぜても、追跡対象の祖先なら拒否する。
+    for l in [
+        x.max(None)?,
+        x.max(Some(0))?.mul(&x.max(Some(1))?)?,
+        x.matmul(&x)?.max(None)?.mul(&x.sum(None)?)?,
+    ] {
+        assert!(matches!(
+            p.backward_create_graph(&l, &c),
+            Err(AutodiffError::Backward(_))
+        ));
+    }
+    // 拒否のあとも同じ子テープを再利用できる（何も書かれていない）。
+    let good = x.matmul(&x)?.sum(None)?;
+    assert!(p.backward_create_graph(&good, &c)?.grad(&x)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn empty_sum_create_graph() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let x = p.var(&t(vec![], &[0]));
+    let l = x.sum(None)?;
+    let cg = p.backward_create_graph(&l, &c)?;
+    let g = cg.grad(&x)?.expect("届く");
+    assert_eq!(g.value().shape(), &[0]);
     Ok(())
 }

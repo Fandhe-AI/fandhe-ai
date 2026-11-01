@@ -1627,6 +1627,19 @@ f64 の独立自動微分グラフに `create_graph` 機構の第 1 段を、内
 facade の newtype とそのガード反転は #3786。依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
 実装記録は `docs/autodiff-functional-transforms-design.md` §37。
 
+**適用記録（イシュー #3786・親 #3719。f64 create_graph 第 2 段と facade 公開）**:
+f64 テープの `create_graph` 機構の第 2 段（`matmul`〈rank 2〉・`sum`・`mean` と閉包性。内部 variant `Transpose`／`Unreduce`。
+`max` は fail-closed のまま）を実装し、`fandhe_ai::TapeF64::backward_create_graph` と
+`fandhe_ai::CreateGraphResultF64`（`first_order`／`grad`／`child_var`）を facade の newtype として公開した
+（承認は #3766 の所有者の回答コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674〈2026-11-01〉の論点 2 (a)。
+内部型は完全修飾パスでのみ参照し、`pub use`・trait impl は設けない）。`fandhe-ai =0.13.0` の公開 API に対して追加のみ。
+承認形だけを許す正ガードは `crates/facade/tests/api_surface.rs` の `f64_autograd_*` 群・
+`workspace_declares_backward_create_graph_only_in_approved_locations`（4 件）・`facade_tape_backward_create_graph_is_thin_delegation`・
+`f64_backward_create_graph_usage_doctest_is_present_and_compiled`（自己テストつき）。着手時点で f64 専用の保留 doctest ガードは無かった。
+依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。実装記録は `docs/autodiff-functional-transforms-design.md` §38。
+CUDA／Metal 実機 parity は未実測で `docs/perf/logs/f64-create-graph-3786/README.md` に手順と記入欄を置いた。
+スコープ外: `jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` の公開（#3787・#3788）、f64 の `max` の create_graph。
+
 > **更新（#2556）**: 下記の保留のうち `OptimizerStateDict` の再エクスポートは #2556 で公開済み
 > （`docs/autodiff-optimizer-state-dict-decision.md` §11）。保留ガードは正ガードへ反転した。
 > 適用記録は下記「適用記録（経路 2。イシュー #2556・#2557）」。以下の保留記録は履歴として残し、

@@ -5809,6 +5809,20 @@ fn facade_reexports_create_graph_result_guards_detect_each_category() {
     );
 }
 
+/// `impl Tape`（f32。型名の完全一致）の固有 impl にある `backward_create_graph` の本体
+/// トークン列（空白区切り）。0 件・2 件以上・非 `pub` は `None`。
+fn tape_backward_create_graph_body(content: &str) -> Option<String> {
+    let mut found: Vec<&FnInfo> = Vec::new();
+    let impls = collect_type_impls(content, "Tape");
+    for imp in impls.iter().filter(|i| i.trait_tokens.is_none()) {
+        found.extend(imp.fns.iter().filter(|f| f.name == "backward_create_graph"));
+    }
+    match found.as_slice() {
+        [f] if f.vis == FnVis::Public => Some(f.body.join(" ")),
+        _ => None,
+    }
+}
+
 /// facade `Tape::backward_create_graph` が `pub fn` として宣言され、本体が
 /// `self.0.backward_create_graph(loss, &child.0)` だけの薄い委譲である
 /// ことを固定する（#2545・決定記録 §17.2。独自実装へのすり替えを拒否）。
@@ -5820,19 +5834,32 @@ fn facade_tape_backward_create_graph_is_thin_delegation() {
         contains_pub_fn_declaration(&content, "backward_create_graph"),
         "facade の Tape に `pub fn backward_create_graph` 宣言が見つからない"
     );
-    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
-    let tokens = tokenize_including_punctuation(&cleaned);
+    // f64 の `TapeF64::backward_create_graph`（#3786）と同名のため、`impl Tape` の
+    // 固有 impl（型名の完全一致。`TapeF64` は別型）に限って本体を取る。
     assert_eq!(
-        determinism_fn_body(&tokens, "backward_create_graph").as_deref(),
+        tape_backward_create_graph_body(&content).as_deref(),
         Some("self . 0 . backward_create_graph ( loss , & child . 0 )"),
         "Tape::backward_create_graph の本体が承認形（1 行委譲）と一致しない"
     );
+    // 自己テスト: f32 本体のすり替えは検出し、`TapeF64` 側の同名 fn は誤検出しない。
+    let swapped = content.replacen(
+        "self.0.backward_create_graph(loss, &child.0)",
+        "{ let _ = child; Err(AutodiffError::Backward(String::new())) }",
+        1,
+    );
+    assert_ne!(
+        tape_backward_create_graph_body(&swapped).as_deref(),
+        Some("self . 0 . backward_create_graph ( loss , & child . 0 )"),
+        "f32 本体のすり替えを検出できない"
+    );
+    let only_f64 = "impl<'t> TapeF64<'t> { pub fn backward_create_graph(&self) { x } }";
+    assert_eq!(tape_backward_create_graph_body(only_f64), None);
 }
 
 /// `backward_create_graph` の `fn` 宣言が workspace 内で承認された 3 箇所の各 1 件のみで
 /// あること（f32 本体・facade の委譲・f64 本体。`TapeRef` 版等の承認範囲外の追加を
 /// fail-closed で拒否。決定記録 §17.3。f64 本体は #3785・設計記録 §35.1／§37 で承認済み。
-/// facade の f64 newtype 側の宣言は #3786 で期待へ足す）。
+/// facade の f64 newtype 側の宣言は #3786・設計記録 §38 で期待へ足した。合計 4 件）。
 #[test]
 fn workspace_declares_backward_create_graph_only_in_approved_locations() {
     let found = scan_workspace_fn_declarations(&["backward_create_graph"]);
@@ -5845,7 +5872,8 @@ fn workspace_declares_backward_create_graph_only_in_approved_locations() {
             "autodiff/src/f64_autograd/create_graph.rs::backward_create_graph".to_string(),
             1,
         ),
-        ("facade/src/lib.rs::backward_create_graph".to_string(), 1),
+        // f32 の `Tape` と f64 の `TapeF64`（#3786）の各 1 件。
+        ("facade/src/lib.rs::backward_create_graph".to_string(), 2),
     ]
     .into_iter()
     .collect();
@@ -5860,9 +5888,11 @@ fn workspace_backward_create_graph_inventory_detects_each_category() {
     use surface_guard::{
         assert_detects_each_category, declaration_count_violations, fn_declaration_sites,
     };
-    const APPROVED: [&str; 3] = [
+    // facade は f32 `Tape` と f64 `TapeF64`（#3786）の 2 件。
+    const APPROVED: [&str; 4] = [
         "autodiff/src/create_graph.rs",
         "autodiff/src/f64_autograd/create_graph.rs",
+        "facade/src/lib.rs",
         "facade/src/lib.rs",
     ];
     let checker = |files: &[(String, String)]| {
@@ -39698,6 +39728,10 @@ const F64_AUTOGRAD_SURFACE: &[(&str, &[(&str, &str)])] = &[
             ("var", "VarF64(self.0.var(value))"),
             ("var_no_grad", "VarF64(self.0.var_no_grad(value))"),
             ("backward", "self.0.backward(&loss.0).map(GradientsF64)"),
+            (
+                "backward_create_graph",
+                "self.0.backward_create_graph(&loss.0, &child.0).map(|cg| { let (first, vars) = cg.into_parts(); CreateGraphResultF64(GradientsF64(first), vars) })",
+            ),
         ],
     ),
     (
@@ -39716,6 +39750,20 @@ const F64_AUTOGRAD_SURFACE: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("GradientsF64", &[("get", "self.0.get(&var.0)")]),
+    // #3786: `TapeF64::backward_create_graph` の結果型。フィールド 0 が facade の
+    // `GradientsF64`（`first_order` を `unsafe` なしで参照で返すため所有する）、
+    // フィールド 1 が内部の `CreateGraphVarsF64`（子テープ側の参照部分）。
+    (
+        "CreateGraphResultF64",
+        &[
+            ("first_order", "&self.0"),
+            ("grad", "self.1.grad(&var.0).map(|v| v.map(VarF64))"),
+            (
+                "child_var",
+                "self.1.child_var(&var.0).map(|v| v.map(VarF64))",
+            ),
+        ],
+    ),
 ];
 
 /// 承認形の型ごとの `(タプルフィールド可視性, derive)`。
@@ -39883,7 +39931,14 @@ fn f64_autograd_surface_violations(content: &str) -> Vec<String> {
 /// （`use ... as` 別名・`use fandhe_ai_autodiff::f64_autograd;` による短縮を拒否する）。
 fn f64_autograd_reexport_violations(content: &str) -> Vec<String> {
     let tokens = tokens_of(content);
-    let watched = ["TapeF64", "VarF64", "GradientsF64", "f64_autograd"];
+    let watched = [
+        "TapeF64",
+        "VarF64",
+        "GradientsF64",
+        "CreateGraphResultF64",
+        "CreateGraphVarsF64",
+        "f64_autograd",
+    ];
     let mut v = Vec::new();
     for (i, t) in tokens.iter().enumerate() {
         if t == "use" && i > 0 && (tokens[i - 1] == "pub" || tokens[i - 1] == ")") {
@@ -39904,7 +39959,13 @@ fn f64_autograd_reexport_violations(content: &str) -> Vec<String> {
                 && tokens.get(i + 2).map(String::as_str) == Some(":")
                 && matches!(
                     tokens.get(i + 3).map(String::as_str),
-                    Some("TapeF64" | "VarF64" | "GradientsF64")
+                    Some(
+                        "TapeF64"
+                            | "VarF64"
+                            | "GradientsF64"
+                            | "CreateGraphResultF64"
+                            | "CreateGraphVarsF64"
+                    )
                 );
             if !(ok_prefix && ok_suffix) {
                 v.push(format!(
@@ -40021,12 +40082,36 @@ fn f64_autograd_struct_declarations_workspace_inventory() {
     }
     let mut expected = std::collections::BTreeMap::new();
     for (ty, _) in F64_AUTOGRAD_SURFACE {
-        expected.insert(format!("autodiff/src/f64_autograd.rs::{ty}"), 1usize);
+        // 結果型の実体は `f64_autograd/create_graph.rs`（#3785）。
+        let internal = if *ty == "CreateGraphResultF64" {
+            "autodiff/src/f64_autograd/create_graph.rs"
+        } else {
+            "autodiff/src/f64_autograd.rs"
+        };
+        expected.insert(format!("{internal}::{ty}"), 1usize);
         expected.insert(format!("facade/src/lib.rs::{ty}"), 1usize);
     }
+    // facade の結果型が内部で保持する参照部分（#3786。公開面ではなく内部型の宣言は 1 件）。
+    let vars_decls: usize = {
+        let mut n = 0usize;
+        visit_rs_files(
+            &crates_dir.join("autodiff/src/f64_autograd"),
+            &mut |_, content| {
+                n += tokens_of(content)
+                    .windows(2)
+                    .filter(|w| w[0] == "struct" && w[1] == "CreateGraphVarsF64")
+                    .count();
+            },
+        );
+        n
+    };
+    assert_eq!(
+        vars_decls, 1,
+        "CreateGraphVarsF64 の宣言は autodiff/src/f64_autograd/ 配下にちょうど 1 件"
+    );
     assert_eq!(
         found, expected,
-        "3 型の struct 宣言が承認済みの置き場所（autodiff 実体 + facade newtype）と不一致"
+        "4 型の struct 宣言が承認済みの置き場所（autodiff 実体 + facade newtype）と不一致"
     );
 }
 
@@ -40034,7 +40119,9 @@ fn f64_autograd_struct_declarations_workspace_inventory() {
 /// を型注釈と関数ポインタ代入で固定する（シグネチャ変更はコンパイルエラーで検出）。
 #[test]
 fn f64_autograd_signature_probe() {
-    use fandhe_ai::{AutodiffError, GradientsF64, Tape, TapeF64, Tensor, VarF64};
+    use fandhe_ai::{
+        AutodiffError, CreateGraphResultF64, GradientsF64, Tape, TapeF64, Tensor, VarF64,
+    };
 
     fn assert_copy<T: Copy>() {}
 
@@ -40065,6 +40152,24 @@ fn f64_autograd_signature_probe() {
             VarF64::mean;
         let _: fn(&VarF64<'g, 't>, Option<usize>) -> Result<VarF64<'g, 't>, AutodiffError> =
             VarF64::max;
+        // #3786: 高階微分の入口と結果型（子テープの寿命 'd を結果型 'd で引き継ぐ）。
+        let _: for<'a, 'b, 'c, 'd> fn(
+            &'a TapeF64<'t>,
+            &'b VarF64<'c, 't>,
+            &'d TapeF64<'t>,
+        )
+            -> Result<CreateGraphResultF64<'d, 't>, AutodiffError> = TapeF64::backward_create_graph;
+        let _: for<'a> fn(&'a CreateGraphResultF64<'g, 't>) -> &'a GradientsF64 =
+            CreateGraphResultF64::first_order;
+        type CgLookup<'g, 't> = Result<Option<VarF64<'g, 't>>, AutodiffError>;
+        let _: for<'a, 'b> fn(
+            &'a CreateGraphResultF64<'g, 't>,
+            &'b VarF64<'g, 't>,
+        ) -> CgLookup<'g, 't> = CreateGraphResultF64::grad;
+        let _: for<'a, 'b> fn(
+            &'a CreateGraphResultF64<'g, 't>,
+            &'b VarF64<'g, 't>,
+        ) -> CgLookup<'g, 't> = CreateGraphResultF64::child_var;
         type GradLookup<'a> = Result<Option<&'a Tensor<f64>>, AutodiffError>;
         let _: for<'a, 'b, 'c, 'd> fn(&'a GradientsF64, &'b VarF64<'c, 'd>) -> GradLookup<'a> =
             GradientsF64::get;
@@ -40151,8 +40256,61 @@ fn f64_autograd_guards_detect_each_violation_class() {
         f64_autograd_expected_decl("VarF64"),
         "derive 追加を検出できない"
     );
+    // #3786: 結果型・高階微分の入口の承認形からの逸脱を検出する。
+    let swapped_grad = mutate(
+        "self.1.grad(&var.0).map(|v| v.map(VarF64))",
+        "{ let _ = var; Ok(None) }",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&swapped_grad).is_empty(),
+        "CreateGraphResultF64::grad の本体すり替えを検出できない"
+    );
+    let swapped_entry = mutate(
+        "let (first, vars) = cg.into_parts();",
+        "let (first, vars) = cg.into_parts(); let _ = 0;",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&swapped_entry).is_empty(),
+        "TapeF64::backward_create_graph の本体すり替えを検出できない"
+    );
+    let mut second_impl = base.clone();
+    second_impl
+        .push_str("\nimpl<'c, 't> CreateGraphResultF64<'c, 't> {\n    pub fn extra(&self) {}\n}\n");
+    assert!(
+        !f64_autograd_surface_violations(&second_impl).is_empty(),
+        "結果型の 2 件目の固有 impl を検出できない"
+    );
+    let mut deref_result = base.clone();
+    deref_result.push_str(
+        "\nimpl<'c, 't> std::ops::Deref for CreateGraphResultF64<'c, 't> {\n    type Target = \
+         GradientsF64;\n    fn deref(&self) -> &Self::Target {\n        &self.0\n    }\n}\n",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&deref_result).is_empty(),
+        "結果型の Deref impl を検出できない"
+    );
+    let pub_result_field = mutate(
+        "pub struct CreateGraphResultF64<'c, 't>(\n    pub(crate) GradientsF64,",
+        "pub struct CreateGraphResultF64<'c, 't>(\n    pub GradientsF64,",
+    );
+    assert_ne!(
+        f64_autograd_struct_decl_records(&pub_result_field, "CreateGraphResultF64")[0],
+        f64_autograd_expected_decl("CreateGraphResultF64"),
+        "結果型の pub フィールドを検出できない"
+    );
+    let derived_result = mutate(
+        "pub struct CreateGraphResultF64<'c, 't>(",
+        "#[derive(Clone)]\npub struct CreateGraphResultF64<'c, 't>(",
+    );
+    assert_ne!(
+        f64_autograd_struct_decl_records(&derived_result, "CreateGraphResultF64")[0],
+        f64_autograd_expected_decl("CreateGraphResultF64"),
+        "結果型の derive 追加を検出できない"
+    );
     // 再エクスポート（直接・別名・短縮 use）。
     for src in [
+        "pub use fandhe_ai_autodiff::f64_autograd::CreateGraphResultF64;",
+        "pub use fandhe_ai_autodiff::f64_autograd::CreateGraphVarsF64 as V;",
         "pub use fandhe_ai_autodiff::f64_autograd::TapeF64;",
         "pub use fandhe_ai_autodiff::f64_autograd::VarF64 as V;",
         "pub use fandhe_ai_autodiff::f64_autograd;",
@@ -43539,6 +43697,29 @@ fn backward_create_graph_select_reduce_usage_doctest_is_present_and_compiled() {
     ])]);
     assert!(ok.is_empty(), "{ok:?}");
     // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["x.median(None)"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
+/// f64 テープの `backward_create_graph` / `CreateGraphResultF64`（イシュー #3786）の利用例 doctest
+/// の実在を固定する正ガード。f64 専用の保留 doctest ガードは存在しなかったため反転ではなく新設。
+/// アンカーは一意な `pub struct CreateGraphResultF64`（`pub fn backward_create_graph` は先頭一致で
+/// f32 側を指すため使わない）。存在しない needle を課すと違反が出ること（空振り防止）も確かめる。
+#[test]
+fn f64_backward_create_graph_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "f64 backward_create_graph",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub struct CreateGraphResultF64"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "TapeF64",
+        "backward_create_graph",
+        "x.matmul",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
     let missing = surface_guard::usage_doctest_violations(&[entry(&["x.median(None)"])]);
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }

@@ -112,6 +112,9 @@
 //! [`TapeF64`]／[`VarF64`]／[`GradientsF64`]（#2599）は f64 専用の独立自動微分グラフで、
 //! 3 型とも本クレート所有の newtype（`docs/autodiff-var-dtype-multiplexing-design.md`
 //! §4.1・§10.1 の推奨案 D-2）。構築は [`TapeF64::new`]（facade [`Tape`] の借用）のみ。
+//! 高階微分の入口 [`TapeF64::backward_create_graph`] と結果型 [`CreateGraphResultF64`]
+//! （#3786。f32 の [`Tape::backward_create_graph`]／[`CreateGraphResult`] の f64 版）も
+//! 同じ newtype 方式で公開する（`docs/autodiff-functional-transforms-design.md` §35・§38）。
 //!
 //! **`Var`／`Gradients`／`AutodiffError`／`LinearVars`（`autodiff` 由来）・
 //! `Tensor`（`tensor_core` 由来）の扱い**: これらは `BackendOps` 注入の
@@ -2174,6 +2177,7 @@ impl<'t> From<&'t Tape> for TapeRef<'t> {
 /// 常にホスト計算、`div`／`pow` は常にホスト計算。CUDA／Metal 実機 parity は未実測
 /// （`docs/perf/logs/f64-autograd-facade-2599/README.md` に申し送り）。
 /// `backward` の非スカラー loss は全要素 1 のシードで逆伝播する。
+/// 高階微分は [`Self::backward_create_graph`]（`max` は対象外で `Backward` を返す）。
 ///
 /// ```
 /// use fandhe_ai::{TapeF64, Tensor};
@@ -2208,6 +2212,56 @@ impl<'t> TapeF64<'t> {
     /// 勾配追跡対象を持たない loss は [`AutodiffError::Backward`]。
     pub fn backward(&self, loss: &VarF64<'_, 't>) -> Result<GradientsF64, AutodiffError> {
         self.0.backward(&loss.0).map(GradientsF64)
+    }
+
+    /// `loss` の逆伝播グラフを空の子テープ `child` 上へ `VarF64` 演算として記録し、
+    /// 二階以上の微分の土台を返す（f32 の [`Tape::backward_create_graph`] の f64 版。
+    /// 内部実装への 1 式委譲）。対象 Op は `add`／`mul`／`div`／`pow`／`matmul`（rank 2）／
+    /// `sum`／`mean`。**`max` は対象外**で、追跡対象の祖先にあれば子テープへ何も書かず
+    /// [`AutodiffError::Backward`] を返す。
+    ///
+    /// 入口検査の順序: `loss` が別テープ → [`AutodiffError::TapeMismatch`]、`child` が
+    /// 自身 → `Backward`、デバイス不一致 → [`AutodiffError::DeviceMismatch`]、`child` が
+    /// 空でない → `Backward`、対象外 Op → `Backward`。構築の途中で失敗しても `child` は
+    /// 空へ戻る。
+    ///
+    /// 数値: [`CreateGraphResultF64::first_order`] は素の [`Self::backward`] と bit 同一。
+    /// [`CreateGraphResultF64::grad`] は 1 階勾配と REQ-2 の統一複合判定の範囲で一致する
+    /// （bit 一致は契約にしない）。
+    ///
+    /// メモリ: loss の祖先を子テープへ複製する（full mirror）ため、子テープのノード数と
+    /// 値のメモリは祖先数に比例して増える。`sum` の勾配は入力 shape まで広がる。
+    ///
+    /// ```
+    /// use fandhe_ai::{TapeF64, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let parent = TapeF64::new(&tape);
+    /// let child = TapeF64::new(&tape);
+    /// let x = parent.var(&Tensor::<f64>::new(vec![1.0, 2.0, 3.0], &[3])?);
+    /// // loss = sum(x^3)。一階 3x^2、二階 6x。
+    /// let loss = x.mul(&x)?.mul(&x)?.sum(None)?;
+    /// let cg = parent.backward_create_graph(&loss, &child)?;
+    /// let g = cg.grad(&x)?.ok_or("x へ勾配が届く")?;
+    /// let cx = cg.child_var(&x)?.ok_or("x の写しがある")?;
+    /// let h = child.backward(&g)?;
+    /// let h = h.get(&cx)?.ok_or("二階勾配が届く")?;
+    /// for (v, x) in h.as_slice().ok_or("連続")?.iter().zip([1.0f64, 2.0, 3.0]) {
+    ///     assert!((v - 6.0 * x).abs() < 1e-5);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn backward_create_graph<'c>(
+        &self,
+        loss: &VarF64<'_, 't>,
+        child: &'c TapeF64<'t>,
+    ) -> Result<CreateGraphResultF64<'c, 't>, AutodiffError> {
+        self.0.backward_create_graph(&loss.0, &child.0).map(|cg| {
+            let (first, vars) = cg.into_parts();
+            CreateGraphResultF64(GradientsF64(first), vars)
+        })
     }
 }
 
@@ -2279,6 +2333,55 @@ impl GradientsF64 {
     /// [`AutodiffError::GradientTrackingDisabled`]。
     pub fn get(&self, var: &VarF64<'_, '_>) -> Result<Option<&Tensor<f64>>, AutodiffError> {
         self.0.get(&var.0)
+    }
+}
+
+/// [`TapeF64::backward_create_graph`] の結果（f32 の [`CreateGraphResult`] の f64 版）。
+///
+/// 役割: 親テープ上の素の 1 階勾配（[`Self::first_order`]）と、子テープ上の追跡対象の
+/// 勾配（[`Self::grad`]）・親変数に対応する子テープ上の写し（[`Self::child_var`]）を引く。
+/// `grad` は子テープの `backward` でさらに微分できる。別テープの変数は
+/// [`AutodiffError::TapeMismatch`]、`var_no_grad` の葉は
+/// [`AutodiffError::GradientTrackingDisabled`]、loss から届かないノードは `Ok(None)`。
+///
+/// ```
+/// use fandhe_ai::{TapeF64, Tensor};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let tape = fandhe_ai::tape();
+/// let parent = TapeF64::new(&tape);
+/// let child = TapeF64::new(&tape);
+/// let x = parent.var(&Tensor::<f64>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?);
+/// // loss = mean((x @ x)^2)。matmul・mean を通した二階微分が取れる。
+/// let y = x.matmul(&x)?;
+/// let loss = y.mul(&y)?.mean(None)?;
+/// let cg = parent.backward_create_graph(&loss, &child)?;
+/// let g = cg.grad(&x)?.ok_or("x へ勾配が届く")?;
+/// let cx = cg.child_var(&x)?.ok_or("x の写しがある")?;
+/// let h = child.backward(&g)?;
+/// assert!(h.get(&cx)?.is_some());
+/// # Ok(())
+/// # }
+/// ```
+pub struct CreateGraphResultF64<'c, 't>(
+    pub(crate) GradientsF64,
+    pub(crate) fandhe_ai_autodiff::f64_autograd::CreateGraphVarsF64<'c, 't>,
+);
+
+impl<'c, 't> CreateGraphResultF64<'c, 't> {
+    /// 親テープ上の素の 1 階勾配（[`TapeF64::backward`] の結果と bit 同一）。
+    pub fn first_order(&self) -> &GradientsF64 {
+        &self.0
+    }
+
+    /// `var` の勾配を子テープ上の追跡対象値として返す。
+    pub fn grad(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'c, 't>>, AutodiffError> {
+        self.1.grad(&var.0).map(|v| v.map(VarF64))
+    }
+
+    /// `var` に対応する子テープ上の写しを返す。
+    pub fn child_var(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'c, 't>>, AutodiffError> {
+        self.1.child_var(&var.0).map(|v| v.map(VarF64))
     }
 }
 

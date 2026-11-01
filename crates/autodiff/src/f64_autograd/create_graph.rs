@@ -1,6 +1,6 @@
-//! f64 テープの `create_graph`（二階微分の土台）第 1 段（イシュー #3785・
-//! 親 #3719。設計は `docs/autodiff-functional-transforms-design.md` §35、
-//! 実装記録は同 §37）。
+//! f64 テープの `create_graph`（二階微分の土台）第 1 段・第 2 段（イシュー
+//! #3785・#3786・親 #3719。設計は `docs/autodiff-functional-transforms-design.md`
+//! §35、実装記録は同 §37・§38）。
 //!
 //! # 役割と呼び出し文脈
 //!
@@ -12,17 +12,21 @@
 //! 値であり、子テープの `backward` でさらに微分できる（double-VJP 法。
 //! 追跡表の項目 2〔`TapeF64`／`VarF64` の `jvp` 系〕の前提）。
 //!
-//! - 呼び出し元: 第 1 段では autodiff 内部のテストのみ。facade への公開
-//!   （newtype `CreateGraphResultF64`）は #3786、`jvp` 系は #3787・#3788。
+//! - 呼び出し元: facade の newtype `CreateGraphResultF64`（#3786。
+//!   [`CreateGraphResultF64::into_parts`] で分解して所有する）、`jvp` 系は
+//!   #3787・#3788。
 //! - 呼び出し先: 親側は無変更の [`super::TapeF64::backward`]（`first_order`）、
-//!   子側は `VarF64` の `add`／`mul`／`div`／`pow` と crate 内部の
-//!   `cg_*` forward。
+//!   子側は `VarF64` の `add`／`mul`／`div`／`pow`／`matmul`／`sum`／`mean` と
+//!   crate 内部の `cg_*` forward。
 //!
-//! # 第 1 段の範囲（§35.11）
+//! # 第 1 段・第 2 段の範囲（§35.11・§38）
 //!
-//! 対応 Op は `add`／`mul`／`div`／`pow` と、勾配グラフの閉包性のための内部
-//! variant（`BroadcastTo`／`ReduceTo`／`Log`／`Where`）。`matmul`／`sum`／
-//! `mean` は第 2 段（#3786）、`max` は fail-closed（`Backward` を返す）。
+//! 対応 Op は `add`／`mul`／`div`／`pow`／`matmul`（rank 2）／`sum`／`mean` と、
+//! 勾配グラフの閉包性のための内部 variant（`BroadcastTo`／`ReduceTo`／`Log`／
+//! `Where`／`Transpose`／`Unreduce`）。子テープに積む Op はこの集合だけで、
+//! 各 VJP もこの集合の中で書けるため、勾配グラフを孫テープへ再び
+//! 再生できる（閉包性）。`max` は fail-closed（`Backward` を返す。
+//! §35.13 論点 5）。
 //! 追跡対象（`requires_grad`）の祖先に対象外 Op があれば、子テープへ何も
 //! 書く前に拒否する。`requires_grad == false` の部分木は下へたどらない
 //! ため、定数側に対象外 Op があっても通す（f32 と同じ規則）。
@@ -70,6 +74,14 @@ type VarSlots<'c, 't> = Vec<Option<VarF64<'c, 't>>>;
 /// f32 版のような世代検査は要らない。
 pub struct CreateGraphResultF64<'c, 't> {
     first_order: GradientsF64,
+    vars: CreateGraphVarsF64<'c, 't>,
+}
+
+/// [`CreateGraphResultF64`] のうち子テープ上の写し・勾配を引く部分
+/// （`first_order` を除く）。facade の newtype が `first_order` を自前の
+/// `GradientsF64` として所有しつつ、残りを本型として保持するための分解先
+/// （[`CreateGraphResultF64::into_parts`]。設計記録 §38）。
+pub struct CreateGraphVarsF64<'c, 't> {
     parent_id: TapeIdF64,
     mirror: VarSlots<'c, 't>,
     cgrads: VarSlots<'c, 't>,
@@ -83,11 +95,31 @@ impl<'c, 't> CreateGraphResultF64<'c, 't> {
 
     /// `var` の勾配を子テープ上の追跡対象値として返す。
     pub fn grad(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'c, 't>>, AutodiffError> {
+        self.vars.grad(var)
+    }
+
+    /// `var` に対応する子テープ上の写しを返す。
+    pub fn child_var(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'c, 't>>, AutodiffError> {
+        self.vars.child_var(var)
+    }
+
+    /// `first_order` と子テープ側の参照部分に分解する（facade の newtype が
+    /// `unsafe` なしで `GradientsF64` を所有するため）。
+    pub fn into_parts(self) -> (GradientsF64, CreateGraphVarsF64<'c, 't>) {
+        (self.first_order, self.vars)
+    }
+}
+
+impl<'c, 't> CreateGraphVarsF64<'c, 't> {
+    /// `var` の勾配を子テープ上の追跡対象値として返す（意味論は
+    /// [`CreateGraphResultF64::grad`] と同じ）。
+    pub fn grad(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'c, 't>>, AutodiffError> {
         self.check(var)?;
         Ok(self.cgrads.get(var.id.0).copied().flatten())
     }
 
-    /// `var` に対応する子テープ上の写しを返す。
+    /// `var` に対応する子テープ上の写しを返す（意味論は
+    /// [`CreateGraphResultF64::child_var`] と同じ）。
     pub fn child_var(&self, var: &VarF64<'_, 't>) -> Result<Option<VarF64<'c, 't>>, AutodiffError> {
         self.check(var)?;
         Ok(self.mirror.get(var.id.0).copied().flatten())
@@ -115,7 +147,7 @@ impl<'t> TapeF64<'t> {
     /// 2. `child` が `self` と同一 → `Backward`（`RefCell` の二重借用も防ぐ）
     /// 3. `child` のデバイスが異なる → `DeviceMismatch`
     /// 4. `child` が空でない → `Backward`
-    /// 5. 追跡対象の祖先に第 1 段の対象外 Op がある → `Backward`
+    /// 5. 追跡対象の祖先に対象外 Op（`max`）がある → `Backward`
     ///    （子テープへ書く前に拒否する）
     /// 6. 素の `backward` で `first_order` を得る（追跡なしの loss はここで
     ///    既存どおり拒否される）
@@ -180,9 +212,11 @@ impl<'t> TapeF64<'t> {
         let (mirror, cgrads) = self.build_with_rollback(loss.id, &ancestors, child)?;
         Ok(CreateGraphResultF64 {
             first_order,
-            parent_id: self.id,
-            mirror,
-            cgrads,
+            vars: CreateGraphVarsF64 {
+                parent_id: self.id,
+                mirror,
+                cgrads,
+            },
         })
     }
 
@@ -205,15 +239,15 @@ impl<'t> TapeF64<'t> {
         seen
     }
 
-    /// 追跡対象の祖先に第 1 段の対象外 Op があれば `Backward`
+    /// 追跡対象の祖先に対象外 Op（`max`）があれば `Backward`
     /// （fail-closed。定数側の部分木は検査しない）。
     fn validate_ancestors_f64(&self, ancestors: &[bool]) -> Result<(), AutodiffError> {
         let nodes = self.nodes.borrow();
         for (id, node) in nodes.iter().enumerate() {
             if ancestors[id] && node.requires_grad && !supports_create_graph_f64(&node.op) {
                 return Err(AutodiffError::Backward(format!(
-                    "f64 create_graph: NodeId {id} の演算は第 1 段の対象外（matmul・sum・\
-                     mean は第 2 段、max は fail-closed。設計記録 §35.11）"
+                    "f64 create_graph: NodeId {id} の演算は対象外（max は fail-closed。\
+                     設計記録 §35.11・§35.13 論点 5）"
                 )));
             }
         }
@@ -315,7 +349,9 @@ fn op_inputs_f64(op: &OpF64) -> Vec<NodeIdF64> {
         | OpF64::Mean { input, .. }
         | OpF64::Max { input, .. }
         | OpF64::BroadcastTo { input }
-        | OpF64::ReduceTo { input } => vec![*input],
+        | OpF64::ReduceTo { input }
+        | OpF64::Transpose { input }
+        | OpF64::Unreduce { input, .. } => vec![*input],
         OpF64::Log(input) => vec![*input],
         OpF64::Where {
             cond,
@@ -325,7 +361,7 @@ fn op_inputs_f64(op: &OpF64) -> Vec<NodeIdF64> {
     }
 }
 
-/// 第 1 段で `create_graph` が扱える Op か。ワイルドカードを使わず、
+/// `create_graph` が扱える Op か（`Max` のみ対象外）。ワイルドカードを使わず、
 /// Op の追加時に必ず判断を強制する（迂回経路を作らない。
 /// `.claude/rules/security.md` A08）。
 fn supports_create_graph_f64(op: &OpF64) -> bool {
@@ -338,8 +374,13 @@ fn supports_create_graph_f64(op: &OpF64) -> bool {
         | OpF64::BroadcastTo { .. }
         | OpF64::ReduceTo { .. }
         | OpF64::Log(..)
-        | OpF64::Where { .. } => true,
-        OpF64::MatMul(..) | OpF64::Sum { .. } | OpF64::Mean { .. } | OpF64::Max { .. } => false,
+        | OpF64::Where { .. }
+        | OpF64::MatMul(..)
+        | OpF64::Sum { .. }
+        | OpF64::Mean { .. }
+        | OpF64::Transpose { .. }
+        | OpF64::Unreduce { .. } => true,
+        OpF64::Max { .. } => false,
     }
 }
 
@@ -378,11 +419,14 @@ fn replay_op_f64<'c, 't>(
             on_false,
         } => mirrored(mirror, cond)?
             .cg_where(&mirrored(mirror, on_true)?, &mirrored(mirror, on_false)?),
-        OpF64::MatMul(..) | OpF64::Sum { .. } | OpF64::Mean { .. } | OpF64::Max { .. } => {
-            Err(AutodiffError::Backward(
-                "f64 create_graph: 第 1 段の対象外の演算（検査をすり抜けた契約違反）".into(),
-            ))
-        }
+        OpF64::MatMul(a, b) => mirrored(mirror, a)?.matmul(&mirrored(mirror, b)?),
+        OpF64::Sum { input, dim } => mirrored(mirror, input)?.sum(dim),
+        OpF64::Mean { input, dim } => mirrored(mirror, input)?.mean(dim),
+        OpF64::Transpose { input } => mirrored(mirror, input)?.cg_transpose(),
+        OpF64::Unreduce { input, dim } => mirrored(mirror, input)?.cg_unreduce(&node.shape, dim),
+        OpF64::Max { .. } => Err(AutodiffError::Backward(
+            "f64 create_graph: max は対象外の演算（検査をすり抜けた契約違反）".into(),
+        )),
     }
 }
 
@@ -492,11 +536,47 @@ fn vjp_contributions_f64<'c, 't>(
             }
             Ok(out)
         }
-        OpF64::MatMul(..) | OpF64::Sum { .. } | OpF64::Mean { .. } | OpF64::Max { .. } => {
-            Err(AutodiffError::Backward(
-                "f64 create_graph: 第 1 段の対象外の演算（検査をすり抜けた契約違反）".into(),
-            ))
+        OpF64::MatMul(a, b) => {
+            let (need_a, need_b) = (nodes[a.0].requires_grad, nodes[b.0].requires_grad);
+            let mut out = Vec::with_capacity(2);
+            // 1 階の `matmul_vjp_f64` と同じ `g @ bᵀ`・`aᵀ @ g`。転置は
+            // `Transpose` ノードとして積み、さらに微分できるようにする。
+            if need_a {
+                let b_t = mirrored(mirror, b)?.cg_transpose()?;
+                out.push((a, g.matmul(&b_t)?));
+            }
+            if need_b {
+                let a_t = mirrored(mirror, a)?.cg_transpose()?;
+                out.push((b, a_t.matmul(&g)?));
+            }
+            Ok(out)
         }
+        OpF64::Sum { input, dim } => {
+            let da = g.cg_unreduce(&nodes[input.0].shape, dim)?;
+            Ok(vec![(input, da)])
+        }
+        OpF64::Mean { input, dim } => {
+            let input_shape = &nodes[input.0].shape;
+            let n: usize = match dim {
+                None => input_shape.iter().product(),
+                Some(axis) => input_shape.get(axis).copied().unwrap_or(0),
+            };
+            if n == 0 {
+                return Err(AutodiffError::Backward(
+                    "f64 create_graph: mean の縮約対象の要素数が 0（forward が事前拒否 \
+                     しているはずの契約違反）"
+                        .into(),
+                ));
+            }
+            // 1 階の `mean_vjp_f64`（`g / n` を展開）と同じ演算順。
+            let scaled = g.div(&scalar_const(child, n as f64)?)?;
+            Ok(vec![(input, scaled.cg_unreduce(input_shape, dim)?)])
+        }
+        OpF64::Transpose { input } => Ok(vec![(input, g.cg_transpose()?)]),
+        OpF64::Unreduce { input, dim } => Ok(vec![(input, g.sum(dim)?)]),
+        OpF64::Max { .. } => Err(AutodiffError::Backward(
+            "f64 create_graph: max は対象外の演算（検査をすり抜けた契約違反）".into(),
+        )),
     }
 }
 
@@ -705,5 +785,125 @@ mod tests {
         for (got, want) in gy.host_slice().iter().zip(want_y) {
             assert!((got - want).abs() < 1e-12, "{got} vs {want}");
         }
+    }
+
+    /// 第 2 段の内部 variant（Transpose・Unreduce）の 1 階 VJP が閉形式と
+    /// 一致する。
+    #[test]
+    fn stage2_internal_variants_first_order_vjp_match_closed_forms() {
+        let base = Tape::new_with_ops(naive_ops());
+        let tape = TapeF64::new(&base);
+        let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+        // loss = Σ (xᵀ ⊙ w) と、Unreduce(sum 軸 0) の組み合わせ。
+        let w = tape.var_no_grad(&t(vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0], &[3, 2]));
+        let xt = x.cg_transpose().expect("transpose");
+        let l1 = xt.mul(&w).expect("mul").sum(None).expect("sum");
+        let col = x.sum(Some(0)).expect("sum0");
+        let up = col.cg_unreduce(&[2, 3], Some(0)).expect("unreduce");
+        let l2 = up.mul(&x).expect("mul").sum(None).expect("sum");
+        let grads = tape.backward(&l1.add(&l2).expect("add")).expect("backward");
+        let gx = grads.get(&x).expect("get").expect("some");
+        // d l1/dx = wᵀ、d l2/dx = (列和の複製) + (x の列和を複製したもの)。
+        let wt = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
+        let colsum = [5.0, 7.0, 9.0];
+        let want: Vec<f64> = (0..6).map(|k| wt[k] + 2.0 * colsum[k % 3]).collect();
+        for (got, w) in gx.host_slice().iter().zip(want) {
+            assert!((got - w).abs() < 1e-12, "{got} vs {w}");
+        }
+    }
+
+    /// `cg_unreduce` は巨大 shape を確保の前に型付きエラーで拒否し（A03）、
+    /// `cg_transpose` は rank≠2 を拒否する。
+    #[test]
+    fn cg_unreduce_and_transpose_reject_invalid_inputs() {
+        let base = Tape::new_with_ops(naive_ops());
+        let tape = TapeF64::new(&base);
+        let s = tape.var(&t(vec![1.0], &[]));
+        assert!(matches!(
+            s.cg_unreduce(&[usize::MAX, usize::MAX], None),
+            Err(AutodiffError::Shape(_))
+        ));
+        // 縮約後 shape が合わない展開も拒否する。
+        let v = tape.var(&t(vec![1.0, 2.0], &[2]));
+        assert!(matches!(
+            v.cg_unreduce(&[2, 3], Some(0)),
+            Err(AutodiffError::Shape(_))
+        ));
+        assert!(matches!(v.cg_transpose(), Err(AutodiffError::Shape(_))));
+    }
+
+    fn op_name(op: &OpF64) -> &'static str {
+        match op {
+            OpF64::Leaf => "Leaf",
+            OpF64::Add(..) => "Add",
+            OpF64::Mul(..) => "Mul",
+            OpF64::Div(..) => "Div",
+            OpF64::Pow(..) => "Pow",
+            OpF64::MatMul(..) => "MatMul",
+            OpF64::Sum { .. } => "Sum",
+            OpF64::Mean { .. } => "Mean",
+            OpF64::Max { .. } => "Max",
+            OpF64::BroadcastTo { .. } => "BroadcastTo",
+            OpF64::ReduceTo { .. } => "ReduceTo",
+            OpF64::Log(..) => "Log",
+            OpF64::Where { .. } => "Where",
+            OpF64::Transpose { .. } => "Transpose",
+            OpF64::Unreduce { .. } => "Unreduce",
+        }
+    }
+
+    /// 閉包性: 合成 loss の子テープ上の勾配グラフが、全ノードとも
+    /// `supports_create_graph_f64` を満たす（孫テープで再生できる）こと、
+    /// および対象 Op（Max を除く全 variant）が各 1 回以上現れることを確かめる。
+    /// 新 variant を足して閉包性が切れる退化をここで検出する。
+    #[test]
+    fn child_grad_graph_uses_only_supported_variants() {
+        let base = Tape::new_with_ops(naive_ops());
+        let parent = TapeF64::new(&base);
+        let child = TapeF64::new(&base);
+        let x = parent.var(&t(vec![0.5, 1.5, 2.0, 1.0, 0.7, 3.0], &[2, 3]));
+        let w = parent.var(&t(vec![1.1, 0.4, 0.9, 1.3, 0.6, 2.0], &[3, 2]));
+        let s = parent.var(&t(vec![1.2, 0.8, 1.7], &[3]));
+        // Pow（指数追跡・ブロードキャストで Log／Where／BroadcastTo）、
+        // Add（ブロードキャストで ReduceTo）、Div、MatMul、Sum、Mean。
+        let p = x.pow(&s).expect("pow");
+        let q = x.add(&s).expect("add").div(&p).expect("div");
+        let y = q.matmul(&w).expect("matmul");
+        let loss = y
+            .mean(Some(0))
+            .expect("mean0")
+            .mul(&y.sum(Some(1)).expect("sum1").mean(None).expect("mean"))
+            .expect("mul");
+        parent
+            .backward_create_graph(&loss, &child)
+            .expect("create_graph");
+        let nodes = child.nodes.borrow();
+        let mut seen = std::collections::BTreeSet::new();
+        for node in nodes.iter() {
+            assert!(
+                supports_create_graph_f64(&node.op),
+                "子テープに対象外 Op: {}",
+                op_name(&node.op)
+            );
+            seen.insert(op_name(&node.op));
+        }
+        for want in [
+            "Add",
+            "Mul",
+            "Div",
+            "Pow",
+            "MatMul",
+            "Sum",
+            "Mean",
+            "BroadcastTo",
+            "ReduceTo",
+            "Log",
+            "Where",
+            "Transpose",
+            "Unreduce",
+        ] {
+            assert!(seen.contains(want), "{want} が子テープに現れない: {seen:?}");
+        }
+        assert!(!seen.contains("Max"));
     }
 }
