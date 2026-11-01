@@ -24,7 +24,7 @@
 //! **数値契約**: 算術を含まないコピーなので値は入力要素と bit 一致（NaN／inf も保存）。重複索引の
 //! forward は `ScatterReduce::Overwrite` の決定的契約（row-major 走査で最後の書き手が残る。PyTorch の
 //! 重複索引時の勝者は未規定〈実測では書き手により異なる〉）。高階微分（`create_graph`）は
-//! イシュー #3793（決定記録 §35/§56）で対象になった（[`replay_max_unpool`]）。activation
+//! イシュー #3793（決定記録 §35/§56）で対象になった（`replay_max_unpool`）。activation
 //! checkpoint・f64 経路は対象外。`N = 0`／`C = 0` は受理して空出力を返す（PyTorch は `C = 0` を拒否）。
 
 use fandhe_ai_tensor_core::max_unpool::{MaxUnpoolLayout, max_unpool_layout};
@@ -74,7 +74,7 @@ fn max_unpool_impl<'t>(
 
 /// 共通本体の後半（③〜⑤: scatter→`Op::MaxUnpool` を 1 ノード記録）。索引の範囲検査は呼び出し側が
 /// 済ませている前提。公開入口（[`max_unpool_impl`]）と `create_graph` の写し
-/// （[`replay_max_unpool`]）が共有する。
+/// （`replay_max_unpool`）が共有する。
 fn scatter_and_push<'t>(
     input: &Var<'t>,
     idx_c: Tensor<i32>,
