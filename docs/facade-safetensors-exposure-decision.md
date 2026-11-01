@@ -188,3 +188,122 @@ export（#2018）も引き続き対象外。
 伴う。本モジュール（`crates/facade/src/interop/safetensors.rs`）自体・
 `api_surface.rs` の allowlist 契約・公開 7 アイテムはいずれも変更して
 いない。
+
+## 13. 保守・運用チェックリスト（イシュー #3761）: safetensors の f32 以外の dtype（B5）
+
+雛形は `docs/decision-record-template.md`。§1〜§12 は書き換えない。基準 sha は `5834b0958`（本節の `path:line` はこの sha のもの）。実機ホスト名は `<cuda-node>`・`<metal-node>`・`<rocm-node>`。本節は **コード変更を伴わない設計記録**であり、承認は **未承認**（#3770 論点 3 待ち。本節は承認の根拠にならない）。
+
+### 13.0 位置づけ・課題・推奨
+
+- 位置づけ: 横断ルート #3711・Phase 2。実装は #3845（読込側）・#3846（書出側と facade の再エクスポート）。
+- 番号のずれ: イシュー本文と #3845・#3846 は「項目 28」と書くが、追跡表 `docs/compat-matrix-ari-tracker.md` では B5 は行 #27（#28 は HF Hub。`docs/api-compat-0.14.0-decision.md:68` も 27）。行 #27 だけを更新し、ほかの issue の記述は直さない。
+- 課題: safetensors の save／load は `Tensor<f32>` 専用で、F32 以外は `LoadError::UnsupportedDtype` で拒否する（`crates/onnx-interop/src/st_save.rs:19-20`、`st_load.rs:143-149`）。`st_save.rs` が参照する追跡先 #274 は CLOSED で、現在は追跡先がない（`docs/compat-unlisted-holds-inventory.md:63`）。HF Hub 由来のチェックポイントは bf16／f16 が主流で、f32 の重みと i64 の buffer を混ぜたファイルもある。モデル取得側の検証は既に F32 以外を受け入れており（`st_load.rs:105-119`）、ロード API だけが F32 に縛られている。
+- 確認した事実:
+  - 既存 7 アイテムは `Tensor<f32>` 固定。ジェネリック化は破壊的で、別名の入口なら追加のみ（`docs/api-compat-0.14.0-decision.md:68`）。よって既存 7 アイテムのシグネチャと「F32 以外を `UnsupportedDtype` で拒否する」挙動は凍結する。既存テスト `dtype_mismatch_is_rejected_with_unsupported_dtype`（`crates/facade/tests/interop_safetensors_roundtrip.rs:275`）が無修正で通ることを不変条件にする。
+  - facade の `src/interop/safetensors.rs` は `pub use` だけのモジュールに固定されている（`api_surface.rs:2683` `interop_safetensors_module_is_pure_reexport`）。新しい型・関数は onnx-interop の `st_load`／`st_save` に置き、接頭辞 allowlist（`api_surface.rs:2768-2771`）の 2 本のまま再エクスポートする。
+  - `Element` は f32・f64・f16・bf16・i32・i64・bool に実装済み（`crates/tensor-core/src/element.rs`）。`CastElement` は f32・f64・i32・i64・bool に封印され f16／bf16 を持たない（`crates/tensor-core/src/cast.rs:88-96`）。
+  - safetensors は `=0.7.0` 固定。onnx-interop は既に `half` に依存している。facade は `half` を再エクスポートしない（`TypedOps` の先例。`crates/facade/src/lib.rs`）。`Tensor<f16>`／`Tensor<bf16>` がシグネチャに現れるのは許容し、要素を名指ししたい利用者は `half` に直接依存する。
+  - `Tensor` は `Clone` と手書き `Debug` を持ち、`PartialEq` を持たない（`crates/tensor-core/src/tensor.rs`）。
+- 案比較:
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A | dtype ごとの名前付き関数（`load_safetensors_f16` 等。約 24 本） | 既存の命名と同形 | 名前が爆発する。1 マップ 1 dtype のため混在ファイルを読めない |
+| B | 封印 trait `SafetensorsElement` のジェネリック関数 | 名前が少ない | 混在ファイルを読めない。trait が公開面に乗る |
+| C（推奨） | `#[non_exhaustive]` 列挙型 `SafetensorsTensor` と dtype タグ `SafetensorsDtype` を新設し `*_typed` の入口を足す。f32 変換は列挙型のメソッドで明示 opt-in | 混在ファイルを 1 回で読める。新しい型は 2 つ。追加のみ | 呼び出し側が `match` で取り出す |
+| D | 変換つき読込（全 dtype を f32 へ昇格）だけ | `state_dict` へすぐ渡せる | 書出しを扱えない。非可逆変換が暗黙になる |
+| E | 対象外にする | 変更なし | B5 が未公開のまま残り、相互運用行が「部分的」のまま |
+
+- 推奨: **実装する（案 C）**。(1) 新しい型 2 つで f16・bf16・f64・整数・bool を追加のみで足せる。(2) 混在 dtype を 1 回で読める。(3) 既存 f32 経路を変えないので既定経路は bit 同一のまま。(4) 変換を暗黙にせず、案 D の利点（`state_dict` への接続）を明示 opt-in で取り込める。
+
+### 13.1 公開形
+
+- 配置: onnx-interop の `st_load`（型と読込）・`st_save`（書出）。facade は `fandhe_ai::interop::safetensors::*` へ `pub use` で再エクスポートするだけ。新モジュールは作らない（接頭辞 allowlist の変更が要るため）。
+- シグネチャ案:
+  - `#[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] pub enum SafetensorsDtype { F32, F16, BF16, F64, I32, I64, Bool }`（`header_name(&self) -> &'static str` が `"F32"`・`"F16"`・`"BF16"`・`"F64"`・`"I32"`・`"I64"`・`"BOOL"` を返す。safetensors の `Dtype` は公開面に出さない）
+  - `#[non_exhaustive] #[derive(Debug, Clone)] pub enum SafetensorsTensor { F32(Tensor<f32>), F16(Tensor<f16>), BF16(Tensor<bf16>), F64(Tensor<f64>), I32(Tensor<i32>), I64(Tensor<i64>), Bool(Tensor<bool>) }`（`PartialEq` は derive しない）
+  - メソッド: `dtype()`・`shape()`・`to_f32(&self) -> Result<Tensor<f32>, ShapeError>`（明示変換）・`from_f32(t: &Tensor<f32>, dtype: SafetensorsDtype) -> Result<Self, ShapeError>`（明示の縮小変換）
+  - 読込: `load_safetensors_typed_from_bytes(&[u8])`・`load_safetensors_typed(&Path)`（ともに `Result<HashMap<String, SafetensorsTensor>, LoadError>`）・`require_keys_typed(&HashMap<String, SafetensorsTensor>, &[&str]) -> Result<(), LoadError>`
+  - 書出: `save_safetensors_typed_to_bytes(&HashMap<String, SafetensorsTensor>, Option<HashMap<String, String>>) -> Result<Vec<u8>, SaveError>`・`save_safetensors_typed(&Path, &HashMap<String, SafetensorsTensor>) -> Result<(), SaveError>`。キー昇順の決定的出力と、一時ファイル＋`rename` の契約は既存 f32 版と同じ。f32 版の出力バイト列を変えないことをテストで固定する。
+  - 対応外の dtype（U8・I8・I16・U16・U32・U64・F8_*・F4・F6_*・C64）は読込で `UnsupportedDtype` として fail-closed（無言 skip しない）。
+- 正ガードへの反転計画（`crates/facade/tests/api_surface.rs`。B5 専用の `*HoldDoctestGuard` はなく、識別子の完全一致 allowlist が否定ガードの役を担う）:
+  1. `interop_safetensors_reexports_exactly_expected_surface`（`:2764`。期待集合は現在 7 件）: #3845 で読込側 5 件を足して 12 件、#3846 で書出側 2 件を足して 14 件。どちらで再エクスポートしたかは実装記録に書く。
+  2. `interop_safetensors_types_are_reachable_via_facade`（`:2854`）: 新しい `LoadError` variant の腕と、`SafetensorsTensor`・`SafetensorsDtype` をワイルドカード腕つきで `match` する到達性プローブを足す。
+  3. 新設（すり替え検出の自己テスト）: onnx-interop 内で `SafetensorsDtype` の全 variant と `header_name` の対応を網羅 `match` で固定するインベントリテスト（例 `safetensors_dtype_inventory_is_exact`）。facade 側では `scan_safetensors_reexport_lines` に別名付け（`SafetensorsTensor as Tensor`）を渡して拒否される合成入力テストを足す（拒否されない実装なら走査器の修正を #3845 に含める）。
+- 残す否定側: `interop_safetensors_module_is_pure_reexport`（`:2683`）、`interop_safetensors_reexport_scanner_rejects_root_path_and_glob`、接頭辞 allowlist 2 本、`interop/mod.rs` の pub 項目の検査。
+
+### 13.2 rustdoc と doctest の例
+
+- 新しい公開項目それぞれに 1〜2 行の役割要約を付ける。`SafetensorsTensor` の doc に、対応 dtype 表・変換の可逆性（§13.5）・「既存 `*_f32` は F32 以外を拒否したまま」・「`half` は facade から再エクスポートしない」を書く。
+- doctest（CPU だけ・facade だけで通る形。facade は `half` を dev 依存にも持たないため f16／bf16 を名指ししない）: (a) `F64`・`I64`・`Bool` を混ぜたマップの `save_safetensors_typed_to_bytes` → `load_safetensors_typed_from_bytes` 往復、(b) `from_f32(.., SafetensorsDtype::BF16)` で bf16 チェックポイントを作る → 読込 → `to_f32()` → `compat::Sequential::load_state_dict`。
+- GPU 経路はないので `no_run`／`#[ignore]` の例は該当なし。失敗系は `compile_fail` に頼らず、実行時テストと正のプローブで確かめる。
+
+### 13.3 エラー型
+
+- `LoadError`（`#[non_exhaustive]`）に 1 件追加: `InvalidBoolValue { key: String, index: usize, value: u8 }`（BOOL は 1 バイトで 0／1 以外は fail-closed で拒否する）。
+- 既存 variant の再利用: 対応外 dtype は `UnsupportedDtype`（doc の「F32 以外」を「対応外の dtype」に直す。シグネチャは不変）、データ長不整合は `DataLengthMismatch`（`Dtype::size()` で割って数える）、shape は `Shape`。
+- `SaveError` は追加なしを推奨: 入力が列挙型で dtype が閉じているため未対応 dtype は起きない。非 contiguous は既存どおり詰め直し、`DataUnavailable` を防御用に再利用する。`to_f32`／`from_f32` は `ShapeError` を返す。
+- 検証順（A03。既存 `st_load.rs` と同じ 4 段）: (1) ヘッダ・レイアウト検査 → (2) dtype 検査 → (3) データ長と shape の要素数積 × 要素幅の一致 → (4) `Tensor::new` の shape 検査。バイト変換と確保は検証の後。BOOL の値検査は変換と同じループで行い、最初の不正バイトで止める。本番経路で `unwrap`／`expect` を使わない。
+
+### 13.4 テスト計画（すべて案）
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 各 dtype の bytes 往復が bit 一致 | `crates/onnx-interop/tests/st_typed.rs::typed_roundtrip_is_bit_identical_per_dtype` | CI | 該当なし | 該当なし | 該当なし |
+| 特殊値（NaN・±inf・-0.0・非正規化数、整数の最小・最大）が bit 一致 | 同 `typed_roundtrip_preserves_special_values` | CI | 該当なし | 該当なし | 該当なし |
+| 混在 dtype ファイルを 1 回で読める・ヘッダの dtype 文字列が PyTorch と一致 | 同 `mixed_dtype_file_loads_in_one_pass` | CI | 該当なし | 該当なし | 該当なし |
+| 対応外 dtype（U8・I8・F8_E4M3・C64 の代表）は `UnsupportedDtype` | 同 `unsupported_dtypes_are_rejected_fail_closed` | CI | 該当なし | 該当なし | 該当なし |
+| BOOL の 0／1 以外は `InvalidBoolValue` | 同 `invalid_bool_byte_is_rejected` | CI | 該当なし | 該当なし | 該当なし |
+| 決定的出力・非 contiguous の書出し | 同 `typed_save_is_deterministic`・`typed_save_handles_non_contiguous` | CI | 該当なし | 該当なし | 該当なし |
+| F32 だけのマップを `*_typed` で書いたバイト列が既存と同一 | 同 `typed_f32_only_matches_legacy_f32_bytes` | CI | 該当なし | 該当なし | 該当なし |
+| 明示変換の方向別規則 | 同 `explicit_conversion_follows_cast_contract` | CI | 該当なし | 該当なし | 該当なし |
+| 既存 f32 経路が不変（F32 以外を拒否し続ける） | 既存 `st_load.rs`・`st_save.rs`・`st_roundtrip.rs`・facade `interop_safetensors_roundtrip.rs` が無修正で通る | CI | 該当なし | 該当なし | 該当なし |
+| facade から往復・bf16 → `to_f32` → `load_state_dict` まで届く | `crates/facade/tests/interop_safetensors_typed_roundtrip.rs` | CI | 該当なし | 該当なし | 該当なし |
+| 公開面の正ガード・自己テスト | §13.1 の 1〜3 | CI | 該当なし | 該当なし | 該当なし |
+
+- 実機列が「該当なし」の理由: ホスト上のバイト列の読み替えだけで、バックエンドのカーネルや device 経路を通らない。Phase 10 で測る実機テストは該当なし（置き場もなし）。追跡表の「実機 parity」も「該当 issue なし」のまま。
+- PyTorch 側の手動確認（`safetensors.torch.load_file` で dtype と shape を表示）は `st_save.rs` 冒頭と同様に `text` ブロックで doc に書き、CI では走らせない。
+
+### 13.5 数値契約
+
+- 読込・書出は算術を含まないため bit 完全一致（NaN もビット列ごと保つ）。REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）が効くバックエンド間比較はない。
+- 明示変換の方向別規則: f16／bf16 → f32 は完全表現。f32 → f16／bf16 は最近接偶数丸め・範囲超過は ±inf（`half`）。f64・i32・i64 → f32 は最近接偶数丸めで非可逆。bool・整数は `CastElement` の規則にそろえ、`cast_to_f32`／`cast_from_f32` を単一情報源にする。
+- `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は変えない。baseline の追加はなし。FMA 契約・f64 長軸縮約の契約への影響もない。
+
+### 13.6 互換への影響
+
+- 判定: **追加のみ**（`docs/api-compat-0.14.0-decision.md` §8 の手順 1〜4）。(1) 触れる型は同 §4 の行 27。(2) `LoadError` は `#[non_exhaustive]` への variant 追加、`SaveError` と既存 7 アイテムのシグネチャは不変、新しい 2 型は `#[non_exhaustive]` で新設、関数は別名で新設。(3) 破壊的変更なし。(4) 移行ノート（#3780）の「追加」欄に載せる。`!`・`BREAKING CHANGE:` は付けない。
+- `UnsupportedDtype` の doc 文言変更は挙動差なし。公開クレート `fandhe-ai-onnx-interop` 側も追加のみ。
+
+### 13.7 適用記録・索引・追跡表
+
+- 適用記録の案（実装 PR #3846 が承認後に `docs/compat-api-scope.md` §5 へ書く）: `**適用記録（イシュー #3846・親 #3711。承認: <#3770 の回答コメント URL>）**: SafetensorsTensor・SafetensorsDtype と load_safetensors_typed(_from_bytes)・save_safetensors_typed(_to_bytes)・require_keys_typed を fandhe_ai::interop::safetensors に公開。対応 dtype は F32・F16・BF16・F64・I32・I64・BOOL、それ以外は fail-closed。既存 *_f32 は不変。公開状態: 公開済み。`
+- 現在の公開状態: 未公開。
+- チェック: `docs/README.md` の索引［x］（本 PR）／追跡表 行 #27［x］（本 PR）／`docs/compat-api-scope.md` の適用記録［ ］（実装 PR）。
+
+### 13.8 ベンチと性能への影響
+
+既定経路（既存 `*_f32`）のコードは変えないので前後比較は不要。`*_typed` は opt-in の入口で、計測しないため数値は書かない。書出しの内部ヘルパーを共有する場合も、f32 版のバイト列同一テスト（§13.4）で挙動を固定する。速度が問題になれば別 issue（起票は承認後）。
+
+### 13.9 依存の追加の有無
+
+依存追加なし（onnx-interop は既に `safetensors =0.7.0`・`half` に依存、facade は `fandhe-ai-onnx-interop` に依存済み）。`Cargo.toml`・`Cargo.lock`・`deny.toml`・`docs/license-matrix.md` は無変更。許容 12 区分・禁止リストとの照合結果は不変。新しい `unsafe` なし（`from_le_bytes`／`to_le_bytes` で変換する既存方針を踏襲）。
+
+### 13.10 所有者へ戻す論点（#3770 論点 3）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 入口の形 | A dtype ごとの関数／B 封印 trait／C 列挙型 `SafetensorsTensor`／D 変換つき読込だけ／E 対象外 | C | 実装へ進めない（期待集合 7 件の allowlist を維持） |
+| 2. 対応 dtype の範囲 | `Element` 実装済みの 7 種／さらに U8 等を足す／浮動小数点だけ | 7 種。ほかは fail-closed | 同上 |
+| 3. f32 への昇格 | 既存 `*_f32` で暗黙に昇格／`to_f32` で明示 opt-in／提供しない | 明示 opt-in。既存 `*_f32` は拒否したまま | 同上 |
+| 4. f32 からの縮小（`from_f32`） | 提供する／提供しない | 提供する | 同上 |
+| 5. BOOL の 0／1 以外 | `InvalidBoolValue` で拒否／非 0 を true とみなす | 拒否 | 同上 |
+| 6. `require_keys` の扱い | 別名 `require_keys_typed` を足す／足さない | 足す | 同上 |
+| 7. 名前 | `SafetensorsTensor`・`SafetensorsDtype`・`*_typed`／別名 | 左の案 | 同上 |
+| 8. `half` の再エクスポート | しない／する | しない | 同上 |
+
+### 13.11 セキュリティ・スコープ外・Closes／Refs
+
+- OWASP: A03 は §13.3 の検証順（確保と変換の前に検証。BOOL の値も検査）。A04 は対応外 dtype を無言で飛ばさず fail-closed、非可逆変換を暗黙にしない。A06 は依存変更なし。A08 は決定的出力と一時ファイル＋`rename` を typed 側にも適用し、公開面を allowlist で固定する。秘密情報・実ホスト名は書かない。
+- スコープ外（起票は所有者承認後）: U8／I8 等 `Element` 未実装の dtype、`__metadata__` の読出し API、入力サイズ上限（§11.3 から継続）、`Var`／`Tape` の f16 値型、`docs/huggingface-safetensors-interop-guide.md` への bf16 手順の追記。
+- 本 PR は docs のみ。`Closes #3761`、`Refs #3770 #3845 #3846`。
