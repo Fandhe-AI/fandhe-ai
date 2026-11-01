@@ -458,6 +458,15 @@ fn mandatory_vectors_finite_or_rejected_in_three_stages() {
         },
         &[0.3, 90.0],
     ));
+    // KlDiv(log-target): e = exp(t) が 0 に潰れても t - x の f32 減算が overflow する入力は拒否。
+    assert!(!try_case(
+        "kl log t-x overflow",
+        |_, z| {
+            let p = parts(z, 2, 1);
+            p[0].kl_div_loss_with_log_target(&p[1], Reduction::Sum)
+        },
+        &[2e38, -2e38],
+    ));
 }
 
 /// スケール適用前の微分係数（`-(1/c)/c`・`t/u/u`・`1/t` 等）が f32 で overflow する入力は、

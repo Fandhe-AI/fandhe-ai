@@ -163,8 +163,8 @@ pub(super) fn kl_div_cgrad<'c>(
     let sb = upstream_scale(&g_value, reduction, n)?;
     reject_inf(&[&xs, &ts])?;
     let mut gsum = 0f64;
-    for (&x, &t) in xs.iter().zip(&ts) {
-        let (x, t) = (f64::from(x), f64::from(t));
+    for (&x32, &t32) in xs.iter().zip(&ts) {
+        let (x, t) = (f64::from(x32), f64::from(t32));
         if x.is_nan() || t.is_nan() {
             continue;
         }
@@ -183,7 +183,13 @@ pub(super) fn kl_div_cgrad<'c>(
             gsum += t.abs() + if t == 0.0 { 0.0 } else { a };
         } else {
             let e = t.exp();
+            // 子テープは `t - x` を f32 で先に作る。e が 0 に潰れる入力（t = -2e38 等）でも
+            // 積の上界だけでは見逃すため、f32 減算の結果を単独で検査する。
+            let d = f64::from(t32 - x32);
+            stage(d)?;
+            stage(d + 1.0)?;
             let a = (t - x).abs() + 1.0;
+            stage(a)?;
             stage(e)?;
             stage(e * a)?;
             stage(sb * e)?;
