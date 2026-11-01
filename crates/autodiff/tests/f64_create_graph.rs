@@ -343,6 +343,23 @@ fn pow_positive_base_zero_exponent_keeps_mixed_partials() -> R<()> {
     Ok(())
 }
 
+/// 微小な正の底（1e-310）と非追跡のゼロ指数でも `a^(-1)` の overflow から
+/// `0 * inf = NaN` を作らず、1 階と backward_create_graph の勾配が一致する。
+#[test]
+fn pow_subnormal_base_const_zero_exponent_is_finite() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let a = p.var(&t(vec![1e-310], &[1]));
+    let b = p.var_no_grad(&t(vec![0.0], &[1]));
+    let l = a.pow(&b)?;
+    let cg = p.backward_create_graph(&l, &c)?;
+    assert_eq!(vals(cg.first_order().get(&a)?.expect("届く")), vec![0.0]);
+    for v in second(&cg, &c, &a, &a)? {
+        assert!(v.is_finite(), "二階に非有限値: {v}");
+    }
+    Ok(())
+}
+
 /// device だけ差し替える `BackendOps`（`DeviceMismatch` の再現用）。
 struct OtherDevice(Box<dyn BackendOps + Send>);
 impl BackendOps for OtherDevice {
