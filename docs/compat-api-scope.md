@@ -1619,6 +1619,14 @@ workspace インベントリ・シグネチャプローブ・自己テスト）�
 `docs/perf/logs/f64-autograd-facade-2599/README.md` に手順と記入欄を置いた。スコープ外: バッチ matmul・`keepdim`・
 多軸縮約・`min`・GPU ネイティブ f64 カーネル・`TypedOps<f64>` 拡張・§10 の項目 1・2・4・5。
 
+**適用記録（イシュー #3785・親 #3719。内部クレート限定）**:
+f64 の独立自動微分グラフに `create_graph` 機構の第 1 段を、内部クレート `fandhe_ai_autodiff::f64_autograd` へ実装した
+（`TapeF64::backward_create_graph`・`CreateGraphResultF64`。対象は `add`／`mul`／`div`／`pow` と内部 variant。
+承認は #3766 の所有者の回答コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674〈2026-11-01〉の論点 2 (a)・論点 3）。facade の公開面は変えておらず、
+`fandhe-ai =0.13.0` の公開 API に変化はない。`api_surface.rs` の宣言インベントリを承認形 3 件へ更新した。
+facade の newtype とそのガード反転は #3786。依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
+実装記録は `docs/autodiff-functional-transforms-design.md` §37。
+
 > **更新（#2556）**: 下記の保留のうち `OptimizerStateDict` の再エクスポートは #2556 で公開済み
 > （`docs/autodiff-optimizer-state-dict-decision.md` §11）。保留ガードは正ガードへ反転した。
 > 適用記録は下記「適用記録（経路 2。イシュー #2556・#2557）」。以下の保留記録は履歴として残し、
