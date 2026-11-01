@@ -193,6 +193,10 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 
 実測は 2026-10-01 に本手順で実施済み（正式実行 1 系列・219 プロセスすべて exit 0・`aggregate.py` exit 0。結果は `docs/cuda-sm121-isa-probe.md` §5、生ログと集計は `docs/perf/logs/sm121-isa-probe-2122/`）。legacy は `setmaxnreg_probe_*` 4 件に加え、`tma_probe_real_device` の 3 テストを `tma_probe_real_device@<テスト関数>` として 1 テストずつ別プロセスで再実行する。結果の転記手順は §8「結果の記録先」と `docs/cuda-sm121-isa-probe.md` §7 に従う。
 
+### 4.9 二階微分（`create_graph`）の CUDA parity 雛形（#3776）
+
+雛形は `crates/facade/tests/create_graph_gpu_parity.rs`（登録表 `CASES` に 1 行足して族を増やす。測り方は `docs/autodiff-higher-order-grad-decision.md` §48）。GPU テストは `#[ignore]` で、実装 issue ごとに `create_graph_<族>_cuda_matches_cpu` を 1 本ずつ、§4.1 の形式で `cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>` として別プロセスで実行する（`--release` なし。事前に `--no-run` でビルドを済ませ、各コマンドの前に `--list` で選ばれるテストがちょうど 1 件か確かめる）。事前登録の雛形は `docs/perf/logs/create-graph-gpu-parity-template/RULE.txt`。baseline の置き場 `crates/facade/tests/common/create_graph_gpu_parity_baseline.rs` は空で、行の追加は実機の実測値と所有者の承認 URL が揃った場合に限る。この雛形の時点では実機で実行していない（未実測）。
+
 ## 5. PyTorch 参照値の再計測（同一実機）
 
 ### 5.1 venv の利用
