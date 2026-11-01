@@ -574,14 +574,17 @@ fn binary_contributions_f64<'c, 't>(
                 // 混合二階微分 `1/a` が f64 で表せず、`inf * 0 = NaN` が `d2/da2`（本来 0）
                 // を汚染するため、構築時に型付きエラーで拒否する。
                 if need_b {
-                    // 形状が異なる場合は broadcast 後の対応が必要なため、全要素の組合せで保守的に判定する。
-                    let any_zero_b = b_m.value().host_slice().contains(&0.0);
-                    let any_tiny_a = a_m
-                        .value()
+                    // broadcast 後の同一要素ペアで判定する（別位置に存在する場合は拒否しない）。
+                    let a_val = broadcast_value_f64(&a_m.value(), out_shape)?;
+                    let b_val = broadcast_value_f64(&b_m.value(), out_shape)?;
+                    let any_zero_b = a_val
                         .host_slice()
                         .iter()
-                        .any(|&x| x.is_finite() && x > 0.0 && !(1.0 / x).is_finite());
-                    if any_zero_b && any_tiny_a {
+                        .zip(b_val.host_slice().iter())
+                        .any(|(&x, &y)| {
+                            y == 0.0 && x.is_finite() && x > 0.0 && !(1.0 / x).is_finite()
+                        });
+                    if any_zero_b {
                         return Err(AutodiffError::Backward(
                             "Pow: 指数 0 かつ底の逆数が overflow する非正規化数域では create_graph の混合二階微分を表せない".to_string(),
                         ));

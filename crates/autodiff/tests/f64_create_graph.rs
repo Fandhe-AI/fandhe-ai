@@ -549,3 +549,19 @@ fn pow_subnormal_base_tracked_zero_exponent_is_rejected_not_nan() -> R<()> {
     assert_eq!(second(&cg, &c2, &a2, &a2)?, vec![0.0]);
     Ok(())
 }
+
+/// 拒否条件は broadcast 後の同一要素ペアで判定する。微小な底と指数 0 が別位置に
+/// ある（拒否すべきペアが存在しない）入力は成功する。
+#[test]
+fn pow_tiny_base_and_zero_exponent_at_different_positions_is_accepted() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let a = p.var(&t(vec![1e-310, 2.0], &[2]));
+    let b = p.var(&t(vec![2.0, 0.0], &[2]));
+    let l = a.pow(&b)?;
+    let cg = p.backward_create_graph(&l, &c)?;
+    for v in second(&cg, &c, &a, &a)? {
+        assert!(v.is_finite(), "二階に非有限値: {v}");
+    }
+    Ok(())
+}
