@@ -544,3 +544,172 @@ bit 不変で他が更新されることを固定する（§9.2 項目 4: スロ
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`。再エクスポートへ別名を一時的に
 足す変異で `facade_param_groups_public_surface_matches_approved_contract` が失敗することを手元で確認した。
 `Cargo.toml`／`Cargo.lock`・tolerance・baseline・`docs/spec` は変更していない。
+
+## §18 保守・運用チェックリスト（イシュー #3755）: param groups の保存形式（A3-c）
+
+本節は**設計記録であって承認ではない**。承認は #3769 の論点 3 の回答を待つ（実装は書き出し側が #3835、読み込み側と互換検査が #3836）。
+実際に得ていない承認は書かない。コードの引用は `origin/main` の `78d6b805d` のもの。公開形・推奨・戻す論点の書式は
+`docs/decision-record-template.md` に従う。なお追跡表 `docs/compat-matrix-ari-tracker.md` の行番号は 21（A3-c）で、
+issue 本文が使う「項目 22」とは 1 ずれる。
+
+### 18.0 位置づけ・課題・推奨
+
+- 現状: `compile_with_param_groups` で groups を設定した compile 状態は、`save_model` が `InvalidArgument`
+  （`ModelIoError::Autodiff`）で拒否する（`crates/facade/src/compat/training.rs:1495-1497` の `snapshot_of_compiled`。
+  §12.4 が要判断事項として残した外挿）。復元側の `compiled_from_snapshot` は groups を常に空で作る
+  （`training.rs:1579`）。groups を黙って落とすと復元後に学習率が変わるため、今は拒否している。
+- 保存先: autodiff の optimizer は groups を持たない（`ParamGroupStep::step_with_groups` が呼び出しごとに受け取る）。
+  `OptimizerStateDict` 側に保存対象はなく、groups の保持先は facade の非公開 `Compiled::param_groups`
+  （`training.rs:1411`）である。よって保存先は `save_model`／`load_model` の manifest の `compiled` 節になる。
+- manifest の制約（`crates/facade/src/compat/model_io.rs`・`model_io/compiled.rs`）: `compiled` は
+  `{"loss","optimizer":{"kind","config"[,"history_len"]},"optimizer_state_keys","amp"}` で、`parse_compiled` は
+  `exact_fields` でキー集合の完全一致を要求する（未知キーは `ModelIoError::Manifest`）。`MAX_JSON_DEPTH = 4`
+  （root → compiled → optimizer → config で使い切る）、`MAX_ARRAY_LEN = 2 * MAX_LAYERS`、`MAX_OBJECT_KEYS = 16`。
+  いずれも承認済みの値で、変えるなら再承認が要る。`optimizer_state_keys` を平坦な配列にした理由も同じ深さ制約
+  （`docs/compat-model-io-decision.md` §4）。
+- 版数の先例: lbfgs の `history_len` 追加（#2373）、`compiled.loss` の allowlist 拡張（#2509）、以降の kind 追加は
+  すべて `format_version` を 2 のまま据え置いた（Functional 形式は 1）。旧リーダーは未知キー・未知値を fail-closed で拒否する。
+- Functional モデルには groups の入口がなく、`param_groups` は常に空。`functional_io.rs` は `render_compiled`／
+  `parse_compiled` を共有する。
+- 検証規則の正本 `resolve_slot_hparams`（`crates/autodiff/src/nn/optim/param_group.rs:136`）は `pub(crate)` で、
+  facade からは呼べない。`ParamGroup::new(params, lr, weight_decay)` は検証しない。
+
+**推奨は「実装する」**。理由: 拒否のままだと groups を使う学習を `save_model` で中断・再開できない（PyTorch の
+`optimizer.state_dict()` は `param_groups` を含む）。公開名は増えず、既存の `save_model`／`load_model` が「拒否」から
+「保存・復元」に変わるだけで、groups なしの出力は今とバイト単位で同じにできる。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | `compiled` に任意キー `param_groups` を 1 つ足す。値は CSR 形の object `{"lr":[f32…],"weight_decay":[f32…],"offsets":[0,…,N],"slots":[usize…]}`（group `g` のスロットは `slots[offsets[g]..offsets[g+1]]`）。**groups が空ならキー自体を書かない** | 深さは root(1) → compiled(2) → param_groups(3) → 配列(4) で上限内。group の順序と group 内 `params` の順序を保つので `ParamGroup` の `PartialEq` で往復を比べられる。groups なしの出力は今と同じバイト列 | 配列長の整合検査（`lr`・`weight_decay` は G 件、`offsets` は G+1 件）が要る |
+| A' | `compiled` 直下に `param_groups: [{"lr","weight_decay"}]`・`param_group_slots`・`param_group_offsets` を並べる | A と同じ情報量 | キーが 3 つ増え、有無の整合検査（全部あるか全部ないか）が増える |
+| B | スロット → group の写像 `param_group_of_slot: [idx\|null]` | 重複検査が要らない | group 内 `params` の順序が失われ、復元後の `ParamGroup` が昇順に並び替わる（`PartialEq` が往復で成り立たない） |
+| C | safetensors の `optimizer.` 名前空間にテンソルで保存 | JSON を触らない | facade の safetensors 経路は f32 のみで、添字が 2^24 を超えると正確に表せない。optimizer の `load_state_dict` は余剰キーを拒否し、名前空間の衝突回避も別に要る |
+| D（対象外） | 保存の拒否を恒久契約にする | 変更なし | groups を使う学習を `save_model` で再開できないまま残る |
+
+- 数値の表現は既存の `config` と同じで、f32 は `{:?}` の正準形（`-0.0` も往復でビットが一致する）。スロット添字は JSON の非負整数。
+- `compiled` のキー数は 4 → 5 で `MAX_OBJECT_KEYS` 内。`slots` の長さは重複禁止によりスロット数以下で、スロット数は
+  `parameter_keys` が `MAX_ARRAY_LEN` で既に抑えている。上限定数は変えない。
+
+版数は次の 3 案から選ぶ。
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| (i)（推奨） | Sequential は `format_version` 2、Functional は 1 のまま据え置く | lbfgs（#2373）・loss 拡張（#2509）と同じ先例。groups なしのファイルは旧リーダーでも今どおり読める。groups を含む新ファイルは旧リーダーが `exact_fields` の未知キーとして `Manifest` で fail-closed に拒否する |
+| (ii) | groups を含むときだけ `format_version` 3 を書く | 旧リーダーのエラーが「版が未対応」で分かりやすい。ただし書き手が版を 2 種類出し、`verify_round_trip` と版ごとの受理表が複雑になる |
+| (iii) | 常に 3 へ上げる | groups を使わないファイルまで旧リーダーで読めなくなる（後退）。推奨しない |
+
+### 18.1 公開形
+
+- 公開名の追加はない。`save_model`／`load_model`／`ModelIoError` のシグネチャは不変。変わるのは挙動（拒否 → 保存・復元）と保存形式。
+- #3835／#3836 のコード変更点:
+  - `CompiledSnapshot`・`CompiledMeta`（非公開）に `param_groups: Vec<ParamGroup>` を足す
+  - `snapshot_of_compiled`: 拒否をやめて groups を写す
+  - `render_compiled`: groups が空でないときだけ `,"param_groups":{…}` を出す
+  - `parse_compiled`: 有無で分けてからキー集合を照合する（lbfgs の `history_len` と同じ書き方）
+  - `compiled_from_snapshot`: groups を復元する（「常に空」のコメントを更新）
+  - `load_from_dir_with_limits`・`prepare_save`: スロット範囲の照合を足す
+  - doc 更新: `compile_with_param_groups` の「# 制約」にある「groups が空でない compile 状態は `save_model` で保存できない」と、`optim.rs` のモジュール doc の同趣旨の記述
+- ガード: `crates/facade/tests/api_surface.rs` に、この拒否を固定する否定ガード・保留 doctest ガードは**ない**。
+  param groups の正ガード群（`facade_param_groups_public_surface_matches_approved_contract`・`param_groups_types_match_approved_shape`・
+  `param_groups_types_are_reachable_via_facade_only` 等）は変更不要と見込むが、#3835 で全件を再実行して確認する。
+  反転するのは挙動テスト `crates/facade/tests/compat_sequential_param_groups.rs::save_model_rejects_groups_and_keeps_empty_groups_working`
+  （`:641`）で、往復の正テスト（改名案: `save_model_round_trips_param_groups_and_keeps_empty_groups_bit_identical`）へ置き換える。
+  `param_groups_usage_doctests_are_present_and_compiled` は doc を更新したら再実行する。
+
+### 18.2 rustdoc と doctest の例
+
+- `compile_with_param_groups` の「# 制約」を「groups も `save_model` で保存・復元される（形式は決定記録 §18）」に直す。
+  `save_model`／`load_model` の doc に groups の往復を 1 行足す。
+- doctest は facade 単独・CPU で、一時ディレクトリへ保存 → 読み込み → `fit` 1 step の結果がビット一致（GPU 不要で `ignore`／`no_run` なし）。
+- 失敗系は `compile_fail` に頼らず、正のテストで確かめる（`docs/facade-speculative-decoding-batching-design.md` §18.3 の方針）。
+
+### 18.3 エラー型
+
+- 新しい variant は作らない（`ModelIoError` は `#[non_exhaustive]`）。
+  - スキーマ違反（未知キー・長さ不整合・空の group・重複・非有限・負値、`format_version` 1 や Functional manifest に groups がある）: `Manifest`
+  - スロット範囲とモデルの不一致: `Mismatch`
+  - 作れない組み合わせ（`Lbfgs` と groups、AMP と groups〈#3832 が実装されるまで〉）: `UnsupportedModel`
+  - 配列長の超過: 既存の `TooLarge`
+- 検証順（すべてアロケーションとモデル状態の変更より前。本番経路で `unwrap`／`expect` は使わない）:
+  1. `param_groups` が無ければ groups は空（旧ファイル・`compile()` 由来）
+  2. あれば `exact_fields` で 4 キーの完全一致、各値が配列であること
+  3. 長さの整合: `lr.len() == weight_decay.len() == G`、`offsets.len() == G + 1`、`G >= 1`、`offsets[0] == 0`、`offsets` は狭義増加（空 group を拒否）、`offsets[G] == slots.len()`
+  4. `slots` の重複を group 内・group 間ともに拒否。`lr`／`weight_decay` は有限かつ非負（`resolve_slot_hparams` と同じ規則）
+  5. 組み合わせ（`Lbfgs`・AMP）と版（`format_version` 1・Functional）の検査
+  6. モデル構築後に、どのスロット添字も `trainable_parameters().len()` 未満であること（`check_slot_shapes` の隣）
+  7. 復元は construct-before-assign（`ParamGroup::new` で組み立て、全部成功してから代入）
+- 保存側（`prepare_save`）も同じ検証を書き出し前に通し、「書いたものは必ず読める」契約を保つ。どこまで保存時に強制するかは 18.10 の点 4。
+- 検証器は facade 側（`model_io/compiled.rs`）に置く。`resolve_slot_hparams` は `pub(crate)` なので、規則の食い違いを防ぐため、
+  同じ不正入力を facade 公開の `step_with_groups` も拒否することを確かめる突合テストを足す。
+
+### 18.4 テスト計画
+
+すべて CI（ubuntu-latest）で回る。GPU カーネル・`Op`・`BackendOps` に触れないので実機列は「該当なし」。置き場は
+`crates/facade/tests/compat_sequential_param_groups.rs`（往復・挙動）と `crates/facade/src/compat/model_io.rs`／`model_io/compiled.rs` の単体テスト（パーサ）。
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| groups ありの往復で、パラメータ・optimizer 状態・groups（`PartialEq`）が一致し、再開後の `fit` が保存しない場合とビット一致 | 新規（上記の置き換え） | CI | 該当なし | 該当なし | 該当なし |
+| groups なしの manifest が変更前とバイト単位で同じ | 既存のゴールデン文字列テストが無変更で通る | CI | 該当なし | 該当なし | 該当なし |
+| `param_groups` キーのない旧ファイルが空の groups で読める | 新規（キーを除いた fixture） | CI | 該当なし | 該当なし | 該当なし |
+| 長さ不整合・`offsets` の非単調・空 group・重複スロット・非有限や負の `lr`／`weight_decay` を `Manifest` で拒否 | 新規（パーサ単体） | CI | 該当なし | 該当なし | 該当なし |
+| スロット範囲外を `Mismatch` で拒否し、部分状態を返さない | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| `Lbfgs`／AMP と groups、`format_version` 1 に groups、Functional manifest に groups を拒否 | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| facade の検証器と `step_with_groups` の拒否集合が一致する | 新規（突合テスト） | CI | 該当なし | 該当なし | 該当なし |
+| Functional の保存・読み込みが不変 | 既存 `functional_io/tests.rs` が無変更で通る | CI | 該当なし | 該当なし | 該当なし |
+
+実機で測るテストはない（実機依存の経路に触れないため）。
+
+### 18.5 数値契約
+
+新しい算術はなく、判定はビット一致のみ。REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）・tolerance 定数
+（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・ガードレール閾値は変えない。FMA 契約・f64 長軸縮約の契約への影響はない。
+baseline の追加・更新はない。
+
+### 18.6 互換への影響
+
+**追加のみ**。`docs/api-compat-0.14.0-decision.md` §1.2 の A3-c 行（型より保存形式の互換が論点。`ModelIoError` は `#[non_exhaustive]`）と §8 の判定手順に従う。
+`ModelIoError`・`ParamGroup`・`ParamGroupStep`・`save_model`／`load_model` のシグネチャは不変。保存形式は新リーダーが旧ファイルを読める（後方互換）。
+旧リーダーは groups を含む新ファイルを fail-closed に拒否する（前方互換はない。lbfgs と同じ扱い）。挙動のみの変更（拒否 → 成功）は
+移行ノート（`docs/migration/0.14.0.md`、雛形は #3780）の「挙動のみの変更」欄へ #3835 が書く。
+
+### 18.7 適用記録・索引・追跡表
+
+適用記録の案（#3835／#3836 が `docs/compat-api-scope.md` へ書く。承認 URL は #3769 の回答を待って入れる）:
+
+```text
+**適用記録（イシュー #3835・#3836。承認: <#3769 の回答コメント URL>）**: compile_with_param_groups の groups を save_model／load_model の manifest（compiled.param_groups・format_version 据え置き）で保存・復元。公開名の追加なし。公開状態: 未公開
+```
+
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（実装 PR が行う）
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md`（行 21）を更新した
+
+### 18.8 ベンチと性能への影響
+
+既定経路（groups なしの保存・読み込み・学習）は分岐 1 つと空チェックだけで、算術も確保も増えない。計測しないので数値は書かず、前後比較は不要。
+
+### 18.9 依存の追加の有無
+
+- 依存追加: なし。手書きの JSON パーサを使い、`serde_json` は入れない。
+- 許容 12 区分・禁止リストとの照合: 変化なし。
+- 新規 `unsafe`: なし。
+
+### 18.10 所有者へ戻す論点（#3769 論点 3）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 保存するか | 保存する／拒否を恒久契約にする | 保存する | 保存の拒否を維持（実装へ進めない） |
+| 2. 版数 | (i) 据え置き／(ii) groups ありのときだけ 3／(iii) 常に 3 | (i) | 同上 |
+| 3. 符号化 | A（CSR 形の 1 キー）／A'／B（スロット写像）／C（safetensors） | A | 同上 |
+| 4. 保存・読み込みで強制する検証の範囲 | 両側でスロット範囲まで厳密に照合／スキーマだけ見てスロット範囲は fit 入口に委ねる | 両側で厳密に照合 | 同上 |
+| 5. A3-a（AMP 併用）・A3-b（`LrSchedule` 併用）との関係 | AMP と groups は #3832 が実装されるまで `UnsupportedModel`、groups の `lr` は絶対値として保存／A3-b の形で意味が変わるならそのとき任意キーを足す | 左記 | 同上 |
+
+### 18.11 セキュリティ・スコープ外
+
+- A03: manifest は非信頼データ。長さ・添字・有限性の検証を確保とモデル変更より前に行い、既存の上限（`MAX_ARRAY_LEN`・`MAX_OBJECT_KEYS`・`MAX_JSON_DEPTH`・`MAX_MANIFEST_BYTES`）の中に収める。
+  非信頼な `offsets`／`slots` の値で確保量を決めない。
+- A04／A08: 保存側の自己検証で「読めないファイル」を作らない。閾値・tolerance・baseline・上限定数は変えない。
+- 秘密情報は書かず、実機ホスト名は `<cuda-node>` 等で表す。
+- スコープ外: A3-a（#3752／#3832）、A3-b（#3754）、A3-d（#3756）、`Lbfgs` 併用、`Optimizer` にない 4 種（#3757）、
+  `OptimizerStateDict` への groups の追加（optimizer が groups を持たないため）、`LrSchedule` の状態保存。新しい issue は起票しない。
