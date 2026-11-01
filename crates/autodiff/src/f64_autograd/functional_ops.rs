@@ -47,6 +47,9 @@ impl<'t> TapeF64<'t> {
         let out_shape = output.shape();
         let n = checked_numel(&input.shape())?;
         let m = checked_numel(&out_shape)?;
+        // 結果（jvp は出力 shape、jacfwd は更に拡張した shape）の確保前に f64 のバイト数を検査し、
+        // Vec の上限超過による capacity overflow の panic を防ぐ（§36.3）。
+        checked_bytes_for_f64(&out_shape).map_err(AutodiffError::Shape)?;
         Ok((Entry { out_shape, n, m }, out_tracked))
     }
 
@@ -329,6 +332,26 @@ mod tests {
         let j = p.jacfwd(&y, &x, &c).expect("jacfwd");
         assert_eq!(j.shape(), &[3, 3]);
         assert_eq!(c.rollback_point(), expected);
+    }
+
+    #[test]
+    fn jvp_rejects_output_whose_byte_size_overflows_before_allocation() {
+        let base = Tape::new_with_ops(naive_ops());
+        let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+        let x = p.var(&t(vec![1.0, 2.0], &[2]));
+        let view = t(vec![1.0], &[1])
+            .broadcast_to(&[1usize << 61])
+            .expect("view");
+        let y = p.var(&view);
+        let v = t(vec![1.0, 1.0], &[2]);
+        assert!(matches!(
+            p.jvp(&y, &x, &v, &c),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+        assert!(matches!(
+            p.jacfwd(&y, &x, &c),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
     }
 
     #[test]
