@@ -13,7 +13,7 @@
 # 公開は 0.14.0 で行う予定（所有者承認: #3771 コメント 6554565469。
 # https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469）。実際の publish と
 # 版の 0.14.0 へのバンプは Phase 11 で所有者が指示したときだけ行う
-# （docs/crates-io-publishing-order.md §14）。
+# （docs/crates-io-publishing-order.md §15）。
 #
 # `libloading` は無条件依存（cfg なし。cudarc の dynamic-loading と同じ構成）。ビルド時に
 # `libamdhip64` へリンクしないため ROCm 非搭載でもビルドが成立する。承認根拠は
@@ -40,7 +40,7 @@ libloading.workspace = true
 # `impl BackendOps for RocmBackendOps`（src/ops.rs）の trait・Tensor・エラー型。workspace 内の path 依存で
 # 許容依存区分（外部クレート）の追加には当たらない。`publish = true` のため `version = "=0.13.0"`
 # （workspace 公開バージョンと完全一致）を併記する（併記しないと cargo-deny の wildcards で deny される）。
-# 0.14.0 へのバンプ時は他の公開クレートと同時に更新する（docs/crates-io-publishing-order.md §14）。
+# 0.14.0 へのバンプ時は他の公開クレートと同時に更新する（docs/crates-io-publishing-order.md §15）。
 fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.13.0" }
 # sum/max のホスト経路（R3 でカーネル化するまで）の委譲先と、テストの CPU 参照。
 fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.13.0" }

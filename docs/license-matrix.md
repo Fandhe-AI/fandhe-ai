@@ -386,6 +386,12 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - ライセンス: `cargo metadata --locked` で 1.0.10 も `CDLA-Permissive-2.0`。`deny.toml` の allow は変更していない。
 - `cargo deny --locked check advisories bans licenses sources`: ok。`scripts/check-forbidden-deps.sh lock-all`: ok。
 
+## 追加実測（イシュー #3773）: `fandhe-ai-hf-hub` を公開対象に加える
+
+- 新しい allow 識別子は不要。`cargo deny --locked check advisories bans licenses sources` は ok。
+- 外部パッケージ集合と `Cargo.lock` は不変（`crates/hf-hub` の `publish`・メタデータ・facade への path 依存の `version` 併記のみの変更）。
+- 変わるのは、公開クレートの直接依存として `ureq`（第 11 区分。`cfg(unix)` 限定）が crates.io 上の `fandhe-ai-hf-hub` から参照される点だけ。版・feature・ライセンスは facade 経由の既存実測（#3124）と同一。
+
 ## 追加確認（イシュー #3774）
 
 `fandhe-ai-backend-rocm` を crates.io の公開クレート（8 クレート目）にする準備に伴い、第 12 区分 `libloading =0.9.0`（ISC）が公開物の通常依存に入ることを確認した（承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>）。実測日: 2026-11-01。

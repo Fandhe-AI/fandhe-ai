@@ -744,16 +744,16 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 本節は §1〜§9 を書き換えず追記する。書式は `docs/decision-record-template.md` の 9 節に従い、構成は `docs/backend-rocm-device-exposure-decision.md` §10 に倣う。
 
-- **承認: 未承認（#3771 待ち）**。引用できる既存の承認は、#3128 コメント 6220036919（hf-hub での `ureq` 利用と `resolve_revision`／`list_files` の公開化。2 段目・allowlist は別承認と明記）に限る。これは 1 段目の実装を認めたもので、crates.io 公開の承認ではない。本節は設計と推奨だけを置き、承認を得たものとして書かない。
+- **承認: 承認済み（所有者の回答コメント 2026-11-01。§10.12）**。以下の本文は承認前に書いた設計と推奨で、書き換えていない。承認前に引用できた既存の承認は既存の承認は、#3128 コメント 6220036919（hf-hub での `ureq` 利用と `resolve_revision`／`list_files` の公開化。2 段目・allowlist は別承認と明記）に限る。これは 1 段目の実装を認めたもので、crates.io 公開の承認ではない。本節は設計と推奨だけを置き、承認を得たものとして書かない。
 - **項目番号**: イシュー本文と #3771 は hf-hub を「項目 29」と書くが、追跡表（`docs/compat-matrix-ari-tracker.md`）と `docs/api-compat-0.14.0-decision.md` §1.2 では**行 28**である。本節は追跡表の番号 28 を使う。
 - **§9.3 の 2 段目に入る 4 条件の現状**（確認時点 base `16d22e832`）:
 
 | # | 条件 | 現状 |
 |---|---|---|
-| 1 | 所有者の公開承認 | 未承認（#3771） |
+| 1 | 所有者の公開承認 | 承認済み（§10.12） |
 | 2 | `download_with` を含む `fandhe-ai` の公開版 | **充足**。`git show v0.13.0:crates/facade/src/model.rs` に `pub fn download_with` が 1 件ある |
-| 3 | crates.io 名の空きの実測 | 未実測。#3773 が読み取りのみの GET で `fandhe-ai-hf-hub` と正規化衝突を確認する |
-| 4 | `docs/compat-api-scope.md` §0 との整合の再承認 | 未承認（#3771） |
+| 3 | crates.io 名の空きの実測 | 実測済み（§10.12）。#3773 が読み取りのみの GET で `fandhe-ai-hf-hub` と正規化衝突を確認する |
+| 4 | `docs/compat-api-scope.md` §0 との整合の再承認 | 承認済み（§10.12。文言変更は #3847） |
 
 ### 10.0 推奨: 実装する（2 段目へ進み、0.14.0 で crates.io 公開）
 
@@ -869,3 +869,11 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 - OWASP: A06 名前の空きを公開前に実測し、README で第三者 `hf-hub` との混同を避ける。公開は environment 承認ゲート経由で `=x.y.z` 固定は不変。A08 `download` 非公開、sha256 pin が真正性の根拠。A10 allowlist 未実装の残留リスクを公開物の doc に書く。A01 private／gated は fail-closed で非対応のまま。A09 エラーは静的メッセージ。A02・A05 TLS 固定設定・タイムアウト・上限は不変。
 - スコープ外（起票しない。`out-of-scope-tracking.md`）: allowlist の実装、ミラー対応、Windows クロス検査、cargo-semver-checks の CI 化、実通信の実測、実公開（Phase 11）。
 - 確認時点: base `16d22e832`・2026-11-01（UTC）。#3771・#3773・#3847 の状態は実装 PR 着手時に再確認する。
+
+### 10.12 承認の反映と公開準備の記録（#3773）
+
+- **承認**: #3771 の所有者回答（2026-11-01。<https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>）の論点 3〜5 で、案 A（0.14.0 で crates.io 公開）・規則 3「公開に数える」・`docs/compat-api-scope.md` §0 への限定例外・`HfHub::download` は `pub(crate)` のまま、が承認された。
+- **§9.3 の 4 条件の現状**: 条件 1・4 は承認済み（§0 の文言変更そのものは #3847）。条件 2 は充足済み。条件 3 は #3773 で実測し、`fandhe-ai-hf-hub` は未登録（404）だった（`docs/crates-io-naming-decision.md`）。
+- **§10.10 の各点の決着**: 点 1 は案 A、点 2 は公開に数える、点 3 は限定例外、点 4 は含めない、点 5 は数える。
+- **#3773 で行った変更**: `crates/hf-hub/Cargo.toml` の公開メタデータと `publish = true`、facade 依存への `version = "=0.13.0"` 併記、LICENSE の追加、`release-all.yml`／`release.yml` への追加。検証の詳細は `docs/crates-io-publishing-order.md` §14。
+- **未実施**: 実公開（Phase 11）。公開前に #3847（README・クレート doc・§0・facade 側ガード）のマージと 0.14.0 の lockstep バンプが必要。
