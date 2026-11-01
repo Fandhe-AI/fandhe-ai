@@ -197,6 +197,19 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 
 雛形は `crates/facade/tests/create_graph_gpu_parity.rs`（登録表 `CASES` に 1 行足して族を増やす。測り方は `docs/autodiff-higher-order-grad-decision.md` §48）。GPU テストは `#[ignore]` で、実装 issue ごとに `create_graph_<族>_cuda_matches_cpu` を 1 本ずつ、§4.1 の形式で `cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>` として別プロセスで実行する（`--release` なし。事前に `--no-run` でビルドを済ませ、各コマンドの前に `--list` で選ばれるテストがちょうど 1 件か確かめる）。事前登録の雛形は `docs/perf/logs/create-graph-gpu-parity-template/RULE.txt`。baseline の置き場 `crates/facade/tests/common/create_graph_gpu_parity_baseline.rs` は空で、行の追加は実機の実測値と所有者の承認 URL が揃った場合に限る。この雛形の時点では実機で実行していない（未実測）。
 
+### 4.10 NN 層・最適化・ONNX の学習の parity 雛形（#3778）
+
+雛形は `crates/facade/tests/train_gpu_parity.rs`（共通部品は `tests/common/train_gpu_parity.rs`）。実機テストは族ごとに 1 本で、名前は `train_parity_<scaffold|nn|optim|onnx>_<cuda|metal>_matches_cpu`（`metal` は macOS のみ）。`--exact` で 1 本ずつ別プロセスで実行し、`--release` は付けない。事前登録の雛形は `docs/perf/logs/train-gpu-parity-template/RULE.txt`。本節は手順の雛形であり、**未実測**である。
+
+```bash
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 train_parity_nn_cuda_matches_cpu'
+```
+
+Metal は §7.1 と同じく `zsh -lc` で包み、テスト名を `train_parity_<族>_metal_matches_cpu` にする。出力の `TRAIN_PARITY` 行を集計する。
+
 ## 5. PyTorch 参照値の再計測（同一実機）
 
 ### 5.1 venv の利用

@@ -1,0 +1,64 @@
+# RULE.txt 雛形 — NN 層・最適化・ONNX の学習の実機 parity（事前登録。イシュー #3778）
+#
+# これは雛形であり、未実測である。Phase 10 の測定 issue（NN 層 #3860・#3861、param groups の常駐更新
+# #3862・#3863、ONNX の学習 #3864・#3865）が docs/perf/logs/<名前>-<issue 番号>/RULE.txt へ写し、
+# <...> を埋めて、実機での実行より前にコミットする。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<cuda-node>／<metal-node>／<user>／<home> で表す。
+
+declared_at_utc: <実機での実行より前の UTC 日時>
+issue: <測定 issue 番号>
+machine: <cuda-node（DGX Spark GB10）または metal-node（Mac mini・Apple Silicon）のいずれか 1 つ>
+target_commit: <40 桁の commit sha>
+  条件: 展開元で `git diff --quiet` が成功していること（未コミット差分なし）
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること
+deploy: <展開先は <home>/work/rust-ai-library-run。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai。docs/real-hardware-verification-env.md §3・§4.10>
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::compare）の定数は
+  fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない
+switches_left_default: TF32 opt-in は OFF のまま、GPU linalg ゲートは OFF のまま（触らない）
+
+# ---- 腕（族ごとに書く）----
+# 腕 A（被検腕）は fandhe_ai::tape_for(<device>) 経由。腕 B（参照腕）の既定は CPU。
+arms:
+  scaffold: A=tape_for(<device>)  B=CPU（雛形の自己検査用。測定対象ではない）
+  nn:       A=tape_for(<device>)  B=CPU
+  optim:    A=デバイス常駐（init_device_param_store ほか）  B=ホスト参照（Sgd::step 等）  ※ Case.reference で指定
+  onnx:     A=<GPU tape 上の ONNX の学習>  B=CPU tape  ※ #3842 の公開形でつなぐ
+
+# ---- 形状（ケースごとに Case.shape を写す）----
+shapes:
+  <case 名>: <Case.shape の文字列。S1 / S2、種、step 数を含む>
+
+# ---- 判定（ケースごとに事前宣言する）----
+judgment:
+  <case 名>: judge=<Req2|Bit> route=<K|H|G>
+  説明: Req2 は compare の CompareReport::passes()。Bit は設計が bit 一致を約束するケースのみ（NaN はクラス一致）
+  説明: route H の pass は経路の parity であり、カーネル同士の parity ではない
+pass: コマンドが exit 0 で、出力に「1 passed; 0 failed」があること
+undetermined: ノードに届かない、ビルドできない、timeout、--list の不一致、自己検査の失敗、
+  登録 0 件の族、run 関数の Err、全ゼロの量（require_nonzero）。pass として扱わない
+
+# ---- run 数 ----
+runs: 各コマンド 1 回。時間の計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  1) 先に cargo test -p fandhe-ai --test train_gpu_parity --no-run でビルドを終える。計測中は他の cargo・ビルドを走らせない
+  2) cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --list の出力で、これから走らせるテスト名が
+     ちょうど 1 件に絞れることを確かめる（--exact 付きで確認する）
+  3) 1 本ずつ別プロセスで実行する:
+     cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>
+     テスト名: train_parity_<scaffold|nn|optim|onnx>_<cuda|metal>_matches_cpu
+     --release は付けない（docs/real-hardware-verification-env.md §4.10）
+external_timeout: <外部 timeout 秒数。例: timeout 900>。ハングを pass にしない。timeout は undetermined
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を保存する。TRAIN_PARITY 行を grep して集計する。
+  1 行に case・family・quantity・arm・route・judge・total・fail_count・max_abs_diff・mean_abs_diff・max_rel_err・verdict が入る
+masking: ホスト名・ユーザー名・ホームのパス・インスタンス識別子を収録しない。収録する場合は <cuda-node>／<metal-node>／<user>／<home> へ置換。
+  漏れたら記録を捨てて取り直す
+integrity: 保存したファイル群の SHA256SUMS を作り、README に載せる
+
+# ---- fail の扱い ----
+fail_handling: fail が出ても tolerance・判定方式・入力・テストコードを変えない。
+  TRAIN_PARITY 行と panic メッセージの fail_count・max_abs_diff・max_rel_err をそのまま引用して事実を記録し、
+  README と PR に「要対応」と書く。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
