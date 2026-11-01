@@ -27494,9 +27494,11 @@ fn workspace_declares_binning_ops_fn_names_only_in_allowed_locations() {
 // VarLowPrecisionOpsHoldDoctestGuard（イシュー #2628・親 #2626・ルート #2499
 // Phase 4）: `FftOpsHoldDoctestGuard`（#2631）系のテストを鏡写しにする。
 // 実装は内部クレート（`fandhe_ai_autodiff::low_precision_ops`・
-// `fandhe_ai_tensor_core::*_low_precision`）に閉じ、facade 公開形
-// （`Var::{matmul,add,mul,relu,exp,tanh}_low_precision(.., dtype)` の委譲
-// メソッド）は未承認（承認依頼は #2677。公開は承認後の #2678）。
+// `fandhe_ai_tensor_core::*_low_precision`）に閉じる。`Var::{matmul,add,mul,
+// relu,exp,tanh}_low_precision(.., dtype)` の 6 メソッドは #2678 で公開済み。
+// 残る別入口 3 経路（モジュール・裸の自由関数・`Tape` メソッド）は #3766
+// （https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674）で対象外に確定し、本ガード群は禁止経路専用として恒久的に維持する
+// （`docs/autodiff-low-precision-op-extension-decision.md` §9）。
 // =====================================================================
 
 /// `VarLowPrecisionOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが

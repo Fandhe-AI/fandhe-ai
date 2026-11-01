@@ -317,6 +317,11 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
     対象外項目で、再開は 5 節手続きを要する）
   - `torch.fx`／TorchScript／`torch.jit`・分散 RPC・モバイル／エッジ
     向け変換
+  - 低精度演算の `Var` 以外の配置（`low_precision_ops` モジュールの再エクスポート、クレートルートの裸の自由関数、`Tape` 上の同名メソッド）。
+    理由は、同名 API が 2 系統になること、PyTorch／TF にも演算ごとの低精度自由関数が無く利用者に届く機能差が無いこと。
+    `Var::*_low_precision` 6 本が唯一の入口。承認は https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674（2026-11-01）、
+    決定記録は `docs/autodiff-low-precision-op-extension-decision.md` §8・§9。
+    `VarLowPrecisionOpsHoldDoctestGuard` が禁止経路を固定する。再開は 5 節手続きを要する
   - 汎用グラフ JIT（`torch.compile`／`tf.function` 相当）: 範囲整理は
     `docs/autodiff-graph-optimization-scope-decision.md`（#1632）で確定
     済み（実装済み／延長候補／非目標の 3 区分）。汎用 JIT 自体は引き続き
@@ -2800,3 +2805,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **公開形の記録（イシュー #3140・親 #3133。公開形は承認済み・未公開）**: GPU 線形代数（CUDA／Metal）の facade opt-in 関数 `set_cuda_gpu_linalg_enabled`／`cuda_gpu_linalg_enabled` と、macOS 限定の `set_metal_gpu_linalg_enabled`／`metal_gpu_linalg_enabled` の公開形を `docs/backend-gpu-linalg-decision.md` §11 に承認依頼として記録した。公開形の正は同 §11。**公開状態は未公開**で、`api_surface.rs` の否定ガードは維持している。公開形は 2026-10-17 に所有者が承認した（#3140 コメント 6227907703。D-C の対象は `unsafe` のみのため個別承認とした）。実機 parity（#3138・#3139）が未実測のため、公開の実装は #3018 ツリー外の #3405 で実測 pass 後に行う。`crates/**`・依存・tolerance／baseline・`docs/spec` は不変で、新規 `unsafe` はない。
 
 **適用記録（イシュー #3789・親（Phase 5 親）。承認根拠は #3767 の所有者の回答コメント 6554564013〈2026-11-01〉）**: `Max`・`Min`・`Amax`・`Amin` を `create_graph` の受理範囲に加えた（公開名の追加なし、`Err` が `Ok` になる受理拡大、既存シグネチャ不変。`docs/api-compat-0.14.0-decision.md` §1.2 の項目 3）。正ガードは facade の挙動テスト `{max,min,amax,amin}_create_graph_via_facade` と、`api_surface.rs` の `backward_create_graph_select_reduce_usage_doctest_is_present_and_compiled`（本族を拒否する否定ガードは元から無かった）。GPU 実機 parity は未実測（`create_graph_select_reduce_minmax_{cuda,metal}_matches_cpu`。#3856・#3858）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`unsafe`・`docs/spec` は不変。実装記録は `docs/autodiff-higher-order-grad-decision.md` §49。
+
+**適用記録（イシュー #3784・設計 #3721。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674〈2026-11-01〉）**: 低精度演算の `Var` 以外の配置（モジュール再エクスポート・裸の自由関数・`Tape` メソッド）を対象外とする。`Var::*_low_precision` 6 本を唯一の入口とし、`VarLowPrecisionOpsHoldDoctestGuard` を禁止経路専用で維持する（正ガードへの反転なし）。公開状態: 未公開（対象外）。公開 API・依存・tolerance・baseline・`docs/spec` は変えない。

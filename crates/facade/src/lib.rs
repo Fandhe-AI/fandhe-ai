@@ -5865,10 +5865,13 @@ struct BinningOpsHoldDoctestGuard;
 /// `Var`／`Tape` の低精度 forward 入口（`matmul_low_precision`・
 /// `add_low_precision`・`mul_low_precision`・`relu_low_precision`・
 /// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・
-/// ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（
-/// `FftOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// ルート #2499 Phase 4）のうち `Var` 以外の別入口を facade 公開面から締め出す**禁止経路専用の恒久ガード**
+/// （`FftOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。#2628 で導入し、
+/// 別入口は #3766 の所有者回答（案 X「対象外」。<https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674>・2026-11-01）で対象外に確定したため、禁止経路専用として維持する
+/// （`LossOpsHoldDoctestGuard` と同じ扱い。構造体名は `*HoldDoctestGuard` の統一と固定文言ドリフト検査の対象名を保つため変えない。
+/// 判断の出典は `docs/autodiff-low-precision-op-extension-decision.md` §8・§9）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `low_precision_ops`、クレートルート直下の裸の自由関数 `matmul_low_precision`・`add_low_precision`・`mul_low_precision`・`relu_low_precision`・`exp_low_precision`・`tanh_low_precision`）と、
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、対象外経路に対応するローカル定義（モジュール `low_precision_ops`、クレートルート直下の裸の自由関数 `matmul_low_precision`・`add_low_precision`・`mul_low_precision`・`relu_low_precision`・`exp_low_precision`・`tanh_low_precision`）と、
 /// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
 /// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
 /// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
@@ -5876,7 +5879,7 @@ struct BinningOpsHoldDoctestGuard;
 /// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
 /// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{matmul,add,mul,relu,exp,tanh}_low_precision`（`matmul_low_precision` は既存メソッドの `pub` 化）は承認形どおり公開済みのため、
 /// 該当する UFCS 行と、受け手 `Var` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
-/// 引き続き拒否する未承認経路: モジュール `low_precision_ops`、クレートルート直下の裸の自由関数 `matmul_low_precision`・`add_low_precision`・`mul_low_precision`・`relu_low_precision`・`exp_low_precision`・`tanh_low_precision`・残した受け手（`Tape`）上の、公開していない名前の同名メソッド。
+/// 拒否する対象外経路（#3766）: モジュール `low_precision_ops`、クレートルート直下の裸の自由関数 `matmul_low_precision`・`add_low_precision`・`mul_low_precision`・`relu_low_precision`・`exp_low_precision`・`tanh_low_precision`・残した受け手（`Tape`）上の、公開していない名前の同名メソッド。
 /// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
 /// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
