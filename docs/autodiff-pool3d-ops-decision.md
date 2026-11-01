@@ -279,3 +279,121 @@ impl<'t> Var<'t> {
 `Sequential::add_max_pool3d`／`add_avg_pool3d` を公開した（#3025 §3 の形・`LayerSpec::Unsupported` で保存は fail-closed。保存 kind は後続 `-c`）。`Pool3dOpsHoldDoctestGuard` は `Sequential` 受け手の分のみ反転し、`Tape`／`Tensor<f32>`・モジュール・型名の否定は維持。`nn::MaxPool3d`／`AvgPool3d` の `as_*` フックは未使用のまま維持。
 
 #3029 で `LayerSpec` を実 variant 化し、`save_model` を `max_pool3d`／`avg_pool3d` kind で対応した（上記の「保存は fail-closed」は #3029 以降は解消済み）。
+
+## 18. AdaptiveAvgPool3d・AdaptiveMaxPool3d の設計（保守・運用チェックリスト。イシュー #3747）
+
+基準 sha は `6537d0925`。**設計のみ**で、コード・公開面・tolerance・baseline・依存・`docs/spec` は変えない。**承認根拠: なし（未承認。#3768 の論点 3 待ち）**。追跡表 `docs/compat-matrix-ari-tracker.md` の # 15 行（C9。イシュー本文の「項目 16」は同表では # 15）。流れは #3747（本書）→ #3768（承認）→ #3823（`Var` 演算）・#3824（`Sequential` 層）→ #3860・#3861（実機 parity）。保存・ONNX export の横断方針は #3750 に委ねる。行番号の参照は基準 sha の値で、実装 PR が直す。
+
+### 18.0 位置づけ・推奨
+
+- 棚卸し `docs/compat-unlisted-holds-inventory.md` の C9 は 3D 適応プーリング 2 種を「未公開」とし、本書 §8 は #2643 のスコープ外として残した。
+- 現状: `crates/` に `adaptive_avg_pool3d`／`adaptive_max_pool3d`／`AdaptiveAvgPool3d`／`AdaptiveMaxPool3d` は 0 件。2D／1D の適応プーリング（`Var::adaptive_avg_pool2d`・`adaptive_max_pool2d`、`Sequential::add_adaptive_*`）と 3D 固定窓（`max_pool3d`／`avg_pool3d`）は実装済み。
+- **推奨: 実装する。** 理由: (1) 2D 適応の窓式 `adaptive_window`、`Op::MaxPool3d` の VJP、`create_graph/pool.rs` の `window_scatter_structure` をそのまま流用できる。(2) 依存・`unsafe`・GPU カーネルが要らない。(3) 互換区分は「追加のみ」で `docs/api-compat-0.14.0-decision.md` の # 15 行と一致する。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | `Var` 演算 2 件と `Sequential` 層 2 件。GPU はホストへフォールバック | 既存部品の再利用・追加のみ | GPU tape では同期とコピーが入る |
+| B | CUDA／Metal の専用カーネルまで含める | GPU 常駐のまま実行 | カーネル・REQ-8 境界検査・実機検証が増え、2D の adaptive max にも GPU カーネルが無い現状と不整合 |
+| C | 対象外にする | 作業なし | C9 の最優先項目が残り、2D との非対称が続く |
+
+### 18.1 公開形とガード反転計画
+
+- シグネチャ案（2D 版の 3 軸版）:
+  - `Var::adaptive_avg_pool3d(&self, output_size: [usize; 3]) -> Result<Var<'t>, AutodiffError>`
+  - `Var::adaptive_max_pool3d(&self, output_size: [usize; 3]) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>`
+  - `compat::Sequential::add_adaptive_avg_pool3d(mut self, output_size: [usize; 3]) -> Result<Self, AutodiffError>`
+  - `compat::Sequential::add_adaptive_max_pool3d(mut self, output_size: [usize; 3]) -> Result<Self, AutodiffError>`
+- 配置: `Var` の 2 件は `crates/autodiff/src/var.rs` から新モジュール `crates/autodiff/src/adaptive_pool3d_ops.rs` の自由関数へ 1 行委譲する。facade の `Var` は再エクスポートなので追加の配置は要らない。層の内部型 `nn::AdaptiveAvgPool3d`／`nn::AdaptiveMaxPool3d` は `crates/autodiff/src/nn/pooling.rs`。facade からは再エクスポートしない（層型名の公開は #3022 の個別承認に従う別判断）。`LayerSpec`（`pub(super)`）に variant を 2 件足す。
+- 索引の意味: `(n, c)` 平面内の flat 添字 `d·H·W + h·W + w`（`Tensor<i32>`）。`Op::MaxPool3d` と同じで、後続の `max_unpool3d` とも整合する。
+- ガード: **反転すべき既存の否定ガードは該当なし**。`AdaptiveMaxGlobalPoolHoldDoctestGuard`（`crates/facade/src/lib.rs`）がプローブするのは 2d／1d のみ、`Pool3dOpsHoldDoctestGuard` は `max_pool3d`／`avg_pool3d` のみで、両ガードと固定文言の検査（`adaptive_max_global_pool_hold_doctest_probe_body_matches_fixed_contract`・`pool3d_ops_hold_doctest_probe_body_matches_fixed_contract`）は変えない。
+- #3823／#3824 が新設する正ガードの名前案:
+  - `var_adaptive_pool3d_methods_are_thin_delegations`
+  - `workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations`
+  - `facade_does_not_reexport_or_declare_adaptive_pool3d_ops`（＋ `_detects_each_category`）
+  - `add_adaptive_pool3d_signatures_match_approved_contract`（＋ `_detects_offense`）
+  - `compat_sequential_exposes_adaptive_pool3d_add_methods_issue_3824_counts_declarations`
+- 未承認の経路（`Tape`／`Tensor<f32>` 上の同名メソッド、モジュール・層型の再エクスポート）は否定検査として残す。実装時の確認事項: 新識別子が既存のトークン走査（`POOL3D_WORKSPACE_FN_NAMES`、adaptive_max_global のインベントリ、`facade_declares_pool3d_add_names_only_in_approved_form`）に誤って当たらないこと。トークン単位照合のため当たらない見込みだが、推測で済ませず実装時に確かめる。
+
+### 18.2 rustdoc と doctest
+
+- 公開 4 件それぞれに役割要約（PyTorch 相当名・窓の式・索引の意味・NaN の扱い）と doctest を置く。doctest は CPU の `fandhe_ai::tape()`／`Sequential::predict` だけで動く形にし、facade 単独で通す。GPU 例は置かない（置くなら `no_run`）。
+- 失敗系（`output_size` に 0、rank 違反）は `compile_fail` に頼らず、`is_err` で確かめる通常の doctest かテストで検証する（stable rustdoc は `compile_fail` のコードを照合しないため）。
+
+### 18.3 エラー型
+
+- 新しい variant は足さない。検査順: rank 5（`ShapeError::RankMismatch`）→ `D`／`H`／`W` が 0 なら拒否（`ShapeMismatch`。`N`／`C` が 0 は空の出力を返す）→ `output_size` に 0 があれば拒否 → 出力要素数のオーバーフロー（`checked_numel_for`）→ Max のみ `D·H·W <= i32::MAX`（`IndexRangeOverflow`。`N` が 0 でも検査）→ 実体化 → バックエンド呼び出し → 戻り値 shape の再検証（`BackendError::ShapeMismatch`）→ `push_eager`。
+- 層の `new` は `output_size` の 0 を `AutodiffError::InvalidArgument` で拒否する（2D の `AdaptiveAvgPool2d::new` と同じ）。
+- ホストカーネルは入力スライス長を再検査し（`ElementCountMismatch`）、窓座標を `checked_*` で計算する。VJP の契約違反は `AutodiffError::Backward`。本番経路で `unwrap`／`expect` を使わず、エラー時に孤児ノードを残さない。
+
+### 18.4 テスト計画
+
+| 区分 | テスト（置き場） | 内容 |
+|---|---|---|
+| CI | 共有ホストカーネルの単体テスト（`tensor-core/src/adaptive_pool3d.rs`） | 窓境界・割り切れない場合の重なり窓・出力が入力より大きい場合・タイ先勝ち・最初の NaN・`-inf`・拒否系・決定性 |
+| CI | `crates/autodiff/tests/adaptive_pool3d_parity.rs` | 中心差分の勾配・重なり窓での勾配加算・Unsupported 時のフォールバックと他エラーの伝播・孤児ノード無し・`create_graph` の二階有限差分 |
+| CI | PyTorch 2.14.0 fixture 突合（案: `crates/autodiff/tests/fixtures/adaptive-pool3d-pytorch-reference/`） | 実行するまでは「未実測」 |
+| CI | `crates/facade/tests/adaptive_pool3d_ops_backend_parity.rs::cpu_matches_naive_reference` | CPU と Naive の bit 一致 |
+| CI | `crates/facade/tests/compat_sequential_adaptive_pool3d.rs` | 層経路 |
+| CI | §18.1 の正ガード | 1 行委譲・宣言位置・未承認経路の否定 |
+| `#[ignore]`（Phase 10） | `adaptive_pool3d_ops_backend_parity.rs::cuda_adaptive_pool3d_ops_match_cpu_reference` | #3860（`<cuda-node>`） |
+| `#[ignore]`（Phase 10） | `adaptive_pool3d_ops_backend_parity.rs::metal_adaptive_pool3d_ops_match_cpu_reference`（`cfg(target_os = "macos")`） | #3861（`<metal-node>`） |
+| `#[ignore]`（Phase 10） | `compat_sequential_adaptive_pool3d_backend_parity.rs::{cuda_*, metal_*}` | 層経路 |
+
+- 実機の手順置き場の案: `docs/perf/logs/adaptive-pool3d-ops-3823/README.md`（#3823 で新設）。
+- 実機列: cuda／metal は**未実測**、rocm は該当なし（facade 非公開・追跡表 # 24 保留）。cfg の都合で 0 本しか実行されなかった結果は pass の根拠にしない。
+
+### 18.5 数値契約
+
+- Max は純粋な選択演算なので、値と索引はバックエンド間で bit 完全一致とする。走査は `kd` → `kh` → `kw` の row-major。更新条件は `v > best || (v.is_nan() && !best.is_nan())`（タイは先勝ち、窓内で最初の NaN の索引が残る。`max_pool3d`／`adaptive_max_pool2d` と同じ）。
+- Avg は窓内を `f64` へ上げて逐次に足し、`f64` で割り、最後に 1 回だけ `f32` へ戻す（`coding-rust.md` の長軸縮約契約）。divisor は実際の窓要素数。VJP は出力 major で `f64` 配列へ足し込み、最後に 1 回だけ `f32` へ戻す（`grad.rs` の 2D 版の 3 軸化）。
+- PyTorch との比較は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。CPU と Naive、GPU のフォールバックは bit 一致で書く。
+- FMA 契約には影響しない（`mul_add` を使わない）。tolerance 定数・baseline・ガードレール閾値は変えず、新しい baseline も作らない。
+
+### 18.6 互換への影響
+
+`docs/api-compat-0.14.0-decision.md` §8 の手順で判定すると**追加のみ**。`Var` は inherent メソッドの追加、`compat::Sequential` も inherent メソッドの追加（フィールド非公開）、`AutodiffError` は変更なし、`Op` は `pub(crate)`、`LayerSpec` は `pub(super)`、`BackendOps` は内部クレートの trait に既定実装付きメソッドを足すのみ。利用者が同名のトレイトメソッドを持っていても inherent が優先されるだけで、破壊的変更には数えない。
+
+### 18.7 適用記録・索引・追跡表
+
+- `docs/compat-api-scope.md` の適用記録は承認後に #3823／#3824 が書く。文案: `**適用記録（イシュー #3823／#3824・承認: <#3768 回答 URL>）**: Var::adaptive_avg_pool3d／adaptive_max_pool3d と Sequential::add_adaptive_avg_pool3d／add_adaptive_max_pool3d の 4 件を追加のみで公開。新規依存なし`。
+- 本 PR で更新するのは `docs/README.md` の索引と、追跡表 # 15 行の「設計記録」セルのみ。
+
+### 18.8 ベンチと性能
+
+既定経路への影響はない。`adaptive_window`・2D 版・`pool3d` には手を入れず新 API を足すだけ。GPU tape ではホストへのフォールバックで同期とコピーが入るが、新規経路のため前後比較は要らない。専用カーネルによる最適化はスコープ外。
+
+### 18.9 依存
+
+依存の追加なし。許容 12 区分・禁止リストとの照合は該当なし。新規 `unsafe` なし。
+
+### 18.10 方式（窓境界の共通化・Op・create_graph・GPU と REQ-8）
+
+- 共通化: 窓は軸ごとに既存の `fandhe_ai_tensor_core::adaptive_window`（`ops_shape.rs`）を呼び、forward・VJP・`create_graph` の唯一の情報源にする（関数自体は変えない）。出力 shape 検査関数 `adaptive_pool3d_out_shape` を新設する。共有ホストカーネル（`AdaptivePool3dLayout`・`adaptive_pool3d_layout`・`adaptive_avg_pool3d_host`・`adaptive_max_pool3d_host`・`adaptive_avg_pool3d_vjp_host`）は新モジュール `crates/tensor-core/src/adaptive_pool3d.rs` に置く。`pool3d.rs` に足さない理由は、兄弟の #3748／#3749 が触りうる同ファイルとの競合と、固定窓の `Pool3dLayout` との混同を避けるため（Q5）。
+- `BackendOps`: `adaptive_pool3d_avg`／`adaptive_pool3d_max` を既定 `Unsupported` で足し、CPU のみ共有カーネルを呼ぶ override を持つ。名前は `pool3d_max`／`pool3d_avg` の先例にならい、素の `fn adaptive_*_pool3d` の宣言位置をインベントリで固定しやすくする。
+- Op: Max は既存 `Op::MaxPool3d { input, index }` を再利用する（VJP は index による scatter-add で窓パラメータに依存しない。2D の adaptive max が `Op::MaxPool2d` を再利用する先例と同じ。重なり窓の重複索引は `Add` で集約され、`create_graph` もそのまま通る）。Avg は `Op::AvgPool3d` が固定窓の params と layout に依存するため使えず、`Op::AdaptiveAvgPool3d { input }` を新設する（融合しない・checkpoint 対象外・`supports_create_graph() == true`）。`create_graph` は `create_graph/pool.rs` の `window_scatter_structure`（窓が可変でも扱える）に 3D 適応版の窓表を足して対応する。
+- GPU: 本ツリーでは専用カーネルを作らない。CUDA／Metal は既定 `Unsupported` から共有ホストカーネルへフォールバックする（`pool3d` と同じ）。#3860／#3861 はこのフォールバック経路の parity を確かめる。REQ-8 はホストカーネルの手動境界検査で満たす。将来 GPU カーネルを足す場合もシェーダ側の手動境界検査を省かないことを条件とする。#3823 本文は GPU カーネルがある前提で書かれているため Q1 で問う。
+- 層（#3824 向け）: `Module` impl を持たせ `is_pooling() = true`（「Pooling 11 型」の記述は 13 型になる）、`supports_forward_host() = false`（`nn::MaxPool3d` と同じ）。`Module::forward` は Max の値のみ返し、索引は層固有の `forward` から得る。resident 経路は Pooling 層として fail-closed で拒否する。
+
+### 18.11 PyTorch との差分（すべて未実測。ソースからの記述）
+
+- 索引の型: PyTorch は int64、本設計は `i32`。
+- PyTorch はバッチなし rank 4 入力と `output_size` の `None`（その軸は入力サイズのまま）を受け付けるが、本設計は受け付けない（Q4）。
+- NaN を含む窓の索引: PyTorch は窓内で最後の NaN、本設計は最初の NaN（§5 と同方針）。
+- Avg の累積精度: PyTorch は f32、本設計は f64。
+- 実測は #3823 で fixture を作るときに行う。それまでは未実測。
+
+### 18.12 所有者へ戻す論点（#3768 の論点 3 へ）・セキュリティ・スコープ外
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| Q1 GPU カーネル | (a) ホストへのフォールバックのみ (b) CUDA／Metal 専用カーネル（REQ-8 手動境界検査つき） | (a) | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| Q2 Max のタイと NaN | (a) 先勝ち・最初の NaN (b) PyTorch に合わせる | (a) | 同上 |
+| Q3 `create_graph` | (a) 対応（Max は自動、Avg は V3） (b) Avg は型付きエラーで拒否 | (a) | 同上 |
+| Q4 入力範囲 | (a) rank 5 のみ・`output_size` は `[usize; 3]` (b) `None` 軸と rank 4 にも対応 | (a) | 同上 |
+| Q5 実体の置き場所と Op | (a) 新モジュール・Avg は新 Op・Max は `Op::MaxPool3d` 再利用 (b) `pool3d.rs` へ追記・2 つとも新 Op | (a) | 同上 |
+| Q6 未承認経路の固定方法 | (a) ソース走査の正ガードと否定検査のみ (b) `AdaptivePool3dHoldDoctestGuard` も新設 | (a) | 同上 |
+| Q7 保存と export | #3750 の横断方針に委ねる | #3750 に委ねる | 同上 |
+
+- Q7 補足: `crates/facade/src/compat/model_io.rs` が kind の allowlist を 70 種に固定している。#3750 が決めるまでは `LayerSpec` に variant を置き、保存は `Unsupported` で fail-closed にする。
+- セキュリティ: A03 `output_size` と shape（保存ファイル経由を含む）は外部入力として、確保と tape 操作より前に検証する。A08 判定を迂回する経路を作らず、正ガードで 1 行委譲を固定する。実機ホスト名・秘密情報は書かない。
+- スコープ外: ONNX export（#3750）、GPU 専用カーネル、層型名の facade 公開（#3022）、`GlobalPool` の rank 5 対応、`ceil_mode` 等の追加引数、`docs/pooling-ops-design.md` への参照追記。新規 issue は所有者承認なしに起票しない。
