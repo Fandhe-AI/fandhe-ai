@@ -1646,6 +1646,19 @@ CUDA／Metal 実機 parity は未実測で `docs/perf/logs/f64-create-graph-3786
 実装記録は `docs/autodiff-functional-transforms-design.md` §39。
 スコープ外: `jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` の公開（#3787・#3788）、f64 の `max` の create_graph。
 
+**適用記録（イシュー #3788・親 #3719。f64 の jvp 系 4 関数の facade 公開）**:
+`TapeF64::jvp_multi`／`jvp_create_graph`（内部型 `JvpCreateGraphResultF64`）を `fandhe-ai-autodiff` に実装し、`fandhe_ai::TapeF64` の
+`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` と結果型 `fandhe_ai::JvpCreateGraphResultF64`（`output`／`child_var`）を facade の
+newtype／委譲メソッドとして公開した（承認は #3766 の所有者の回答コメント
+https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674〈2026-11-01〉の論点 2 (a)・論点 3。`TapeF64` の
+`vjp`／`hvp`／`vmap`／`vmap_grad` と `VarF64` 上の 8 名は対象外のまま）。`fandhe-ai =0.13.0` の公開 API に対して追加のみ。
+正ガードは `api_surface.rs` の `F64_AUTOGRAD_SURFACE`／`f64_autograd_*` 群・`check_facade_tape_f64_functional_transforms_shape`・
+`inherent_impl_body_ranges`（`impl Tape` と `impl TapeF64` を区別する共通ヘルパー。自己テストつき）・
+`workspace_declares_functional_transforms_fn_names_only_in_allowed_locations`・`f64_jvp_family_usage_doctest_is_present_and_compiled`。
+保留 doctest（`FunctionalTransformsHoldDoctestGuard`）には `VarF64` 受け手 8 名と `TapeF64` 受け手 4 名（別トレイト）の未承認プローブを追加した。
+依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。実装記録は `docs/autodiff-functional-transforms-design.md` §40。
+CUDA／Metal 実機 parity は未実測で `docs/perf/logs/f64-jvp-facade-3788/README.md` に手順と記入欄を置いた。
+
 > **更新（#2556）**: 下記の保留のうち `OptimizerStateDict` の再エクスポートは #2556 で公開済み
 > （`docs/autodiff-optimizer-state-dict-decision.md` §11）。保留ガードは正ガードへ反転した。
 > 適用記録は下記「適用記録（経路 2。イシュー #2556・#2557）」。以下の保留記録は履歴として残し、
@@ -2716,6 +2729,10 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 | F6 | `jvp_multi`（#3063） | `Tape::jvp_multi(&self, output: &Var<'_>, inputs: &[&Var<'_>], tangents: &[&Tensor<f32>], child: &Tape) -> Result<Tensor<f32>, AutodiffError>`（結果 shape = `output.shape()`。`J·v = Σ J_i·v_i`） | 追加のみ（既存 `jvp` は不変） | `FunctionalTransformsHoldDoctestGuard`（裸の自由関数・`Var`／`Tensor<f32>` 上のプローブを新規追加）＋ `api_surface.rs` の正ガード（承認形 6 名・インベントリ 13 件） | 公開済み（#3063。根拠 D-A） | 設計記録 §30 |
 | F7 | `jvp_create_graph`（#3068） | `Tape::jvp_create_graph<'g>(&self, output: &Var<'_>, input: &Var<'_>, tangent: &Tensor<f32>, child: &Tape, grandchild: &'g Tape) -> Result<JvpCreateGraphResult<'g>, AutodiffError>` と `JvpCreateGraphResult<'g>`（`output()`・`child_var()`。クレートルートで再エクスポート、フィールド非公開）。結果は孫テープ上の追跡 `Var`（微分可能な `J·v`） | 追加のみ（既存 `jvp`／`jvp_multi`／`backward_create_graph` は不変） | `FunctionalTransformsHoldDoctestGuard`（裸の自由関数・`Var`／`Tensor<f32>` 上のプローブを追加。反転対象なし）＋ `api_surface.rs` の正ガード（承認形 7 名・インベントリ 15 件）＋ `JvpCreateGraphResult` の再エクスポート正ガード（`CreateGraphResult` の検査は識別子完全一致へ変更） | 公開済み（#3068。根拠 D-A） | 設計記録 §31 |
 | F8 | `vmap_grad`（#3072） | `Tape::vmap_grad<F>(input: &Tensor<f32>, in_dim: usize, child: &mut Tape, f: F) -> Result<Tensor<f32>, AutodiffError> where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>`（関連関数・`&self` なし。結果は shape `[B] ++ slice_shape` の非微分 `Tensor<f32>`。子テープは空を渡し、戻り時も空） | 追加のみ（既存 `vmap` は不変。`fandhe-ai =0.11.0` に同名はない） | `FunctionalTransformsHoldDoctestGuard`（裸の自由関数・`Var`／`Tensor<f32>` 上のプローブを追加。反転対象なし）＋ `api_surface.rs` の正ガード（承認形 8 名・インベントリは名前で固定） | 公開済み（#3072。根拠 D-A） | 設計記録 §32 |
+| F9 | `TapeF64::jvp`（#3788） | facade の f64 テープの委譲メソッド `TapeF64::jvp(&self, output: &VarF64<'_, 't>, input: &VarF64<'_, 't>, tangent: &Tensor<f64>, child: &TapeF64<'t>) -> Result<Tensor<f64>, AutodiffError>`（`impl<'t> TapeF64<'t>` 直下・内部実体への 1 式委譲） | 追加のみ（`fandhe-ai =0.13.0` の既存シグネチャ・意味論は不変） | `api_surface.rs` の `F64_AUTOGRAD_SURFACE`・`f64_autograd_*` 群・`facade_tape_functional_transforms_are_approved_thin_delegations`（`check_facade_tape_f64_functional_transforms_shape`）・`workspace_declares_functional_transforms_fn_names_only_in_allowed_locations`（facade の 4 名が 2 件）。保留 doctest の `TapeF64`／`VarF64` 受け手プローブは未承認名のみ | 公開済み（#3788。承認は #3766 の所有者回答 issuecomment-6554563674） | 設計記録 §36・§40 |
+| F10 | `TapeF64::jacfwd`（#3788） | `TapeF64::jacfwd(&self, output: &VarF64<'_, 't>, input: &VarF64<'_, 't>, child: &TapeF64<'t>) -> Result<Tensor<f64>, AutodiffError>`（結果 shape = `output.shape ++ input.shape`） | 同上 | 同上 | 公開済み（#3788。承認は同上） | 同上 |
+| F11 | `TapeF64::jvp_multi`（#3788） | `TapeF64::jvp_multi(&self, output: &VarF64<'_, 't>, inputs: &[&VarF64<'_, 't>], tangents: &[&Tensor<f64>], child: &TapeF64<'t>) -> Result<Tensor<f64>, AutodiffError>` | 同上 | 同上 | 公開済み（#3788。承認は同上） | 同上 |
+| F12 | `TapeF64::jvp_create_graph`（#3788）と `JvpCreateGraphResultF64<'g, 't>` | `TapeF64::jvp_create_graph<'g>(&self, output, input, tangent: &Tensor<f64>, child: &TapeF64<'t>, grandchild: &'g TapeF64<'t>) -> Result<JvpCreateGraphResultF64<'g, 't>, AutodiffError>` と、タプル構造体 `JvpCreateGraphResultF64`（フィールド `pub(crate)`・derive なし・固有 impl 1 件で `output()`／`child_var()`。再エクスポート・trait impl なし） | 追加のみ（`TapeF64`・`VarF64`・f32 の `Tape` は不変） | 上記に加え `f64_autograd_*` 群（`JvpCreateGraphResultF64` を追加）・`f64_jvp_family_usage_doctest_is_present_and_compiled`（自己テストつき） | 公開済み（#3788。承認は同上） | 同上 |
 
 - 判定方式（設計記録 §27.3。未承認）: REQ-2 の統一複合判定。`jacobian` や 1 階 VJP との bit 同一は主張しない。新しい tolerance・baseline は作らない。
 - 拡張要否: 依存・`unsafe`・新規 `Op`／`BackendOps`／VJP はなし。内部可視性の `pub` 化と `expect(dead_code)` の撤去のみが公開時に必要（§27.2）。

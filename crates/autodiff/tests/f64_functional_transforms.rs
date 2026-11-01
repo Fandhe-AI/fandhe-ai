@@ -327,3 +327,311 @@ fn child_tape_errors_propagate() -> R<()> {
     ));
     Ok(())
 }
+
+// ---- jvp_multi・jvp_create_graph（イシュー #3788。設計記録 §40）----
+
+const T1: [f32; 3] = [0.5, -1.0, 2.0];
+
+/// 追跡ありの 2 入力（shape が違う）を add／mul／div／pow と matmul／sum／mean で通す f64 グラフ。
+fn g3_f64<'g, 't>(g: &'g TapeF64<'t>) -> R<(VarF64<'g, 't>, VarF64<'g, 't>, VarF64<'g, 't>)> {
+    let x = g.var(&t64(&X, &[2, 3])?);
+    let s = g.var(&t64(&S, &[3])?);
+    let two = g.var_no_grad(&t64(&[2.0], &[])?);
+    let num = x.mul(&s)?.add(&x)?;
+    let a = num.div(&s.add(&two)?)?.add(&x.pow(&s)?)?;
+    let w = g.var_no_grad(&t64(
+        &[0.5, -1.0, 1.5, 0.25, 2.0, 1.0, 1.0, 0.5, -0.5],
+        &[3, 3],
+    )?);
+    let h = a.matmul(&w)?;
+    let hh = h.mul(&h)?;
+    let y = hh.sum(Some(1))?.add(&hh.mean(Some(1))?)?;
+    Ok((x, s, y))
+}
+
+fn g3_f32<'t>(g: &'t Tape) -> R<(Var<'t>, Var<'t>, Var<'t>)> {
+    let x = g.var(&t32(&X, &[2, 3])?);
+    let s = g.var(&t32(&S, &[3])?);
+    let two = g.var_no_grad(&t32(&[2.0], &[])?);
+    let num = x.mul(&s)?.add(&x)?;
+    let a = num.div(&s.add(&two)?)?.add(&x.pow(&s)?)?;
+    let w = g.var_no_grad(&t32(
+        &[0.5, -1.0, 1.5, 0.25, 2.0, 1.0, 1.0, 0.5, -0.5],
+        &[3, 3],
+    )?);
+    let h = a.matmul(&w)?;
+    let hh = h.mul(&h)?;
+    let y = hh.sum(Some(1))?.add(&hh.mean(Some(1))?)?;
+    Ok((x, s, y))
+}
+
+#[test]
+fn jvp_multi_matches_f32_and_sum_of_single_jvps() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let (x, s, y) = g3_f64(&p)?;
+    let (vx, vs) = (t64(&V, &[2, 3])?, t64(&T1, &[3])?);
+    let got = p.jvp_multi(&y, &[&x, &s], &[&vx, &vs], &c)?;
+
+    let (pt, ct) = (new_tape(), new_tape());
+    let (x32, s32, y32) = g3_f32(&pt)?;
+    let (vx32, vs32) = (t32(&V, &[2, 3])?, t32(&T1, &[3])?);
+    let want = functional_ops::jvp_multi(&pt, &y32, &[&x32, &s32], &[&vx32, &vs32], &ct)?;
+    assert_f32_f64_close(&want, &got, "jvp_multi g3");
+
+    // 入力ごとの jvp の和とも一致する（別テープで組み直す）。
+    let mut acc = vec![0.0f64; vals64(&got).len()];
+    for which in 0..2 {
+        let b = new_tape();
+        let (p2, c2) = (TapeF64::new(&b), TapeF64::new(&b));
+        let (x2, s2, y2) = g3_f64(&p2)?;
+        let one = if which == 0 {
+            p2.jvp(&y2, &x2, &vx, &c2)?
+        } else {
+            p2.jvp(&y2, &s2, &vs, &c2)?
+        };
+        for (a, v) in acc.iter_mut().zip(vals64(&one)) {
+            *a += v;
+        }
+    }
+    for (i, (a, g)) in acc.iter().zip(vals64(&got)).enumerate() {
+        assert!(common::req2_close(*a, g), "sum[{i}]: {a} vs {g}");
+    }
+    Ok(())
+}
+
+#[test]
+fn jvp_multi_single_input_matches_jvp() -> R<()> {
+    let base = new_tape();
+    let (p, c, c2) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let (x, y) = g1_f64(&p)?;
+    let v = t64(&V, &[2, 3])?;
+    let multi = p.jvp_multi(&y, &[&x], &[&v], &c)?;
+    let single = p.jvp(&y, &x, &v, &c2)?;
+    for (a, b) in vals64(&multi).iter().zip(vals64(&single)) {
+        assert!(common::req2_close(*a, b), "{a} vs {b}");
+    }
+    Ok(())
+}
+
+#[test]
+fn jvp_multi_entry_checks_reject_in_order() -> R<()> {
+    let base = new_tape();
+    let (p, c, other) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let x = p.var(&t64(&[1.0, 2.0], &[2])?);
+    let y = x.mul(&x)?;
+    let o = other.var(&t64(&[1.0, 2.0], &[2])?);
+    let oy = o.mul(&o)?;
+    let nog = p.var_no_grad(&t64(&[1.0, 2.0], &[2])?);
+    let v = t64(&[1.0, 1.0], &[2])?;
+    let short = t64(&[1.0], &[1])?;
+    // 長さ不一致・空が最優先（別テープの出力でも InvalidArgument）
+    assert!(matches!(
+        p.jvp_multi(&oy, &[&x], &[], &c),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        p.jvp_multi(&oy, &[], &[], &c),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    // 別テープ（output が先）> 追跡なし > 重複 > shape
+    assert!(matches!(
+        p.jvp_multi(&oy, &[&nog], &[&v], &c),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    assert!(matches!(
+        p.jvp_multi(&y, &[&nog, &x], &[&v, &v], &c),
+        Err(AutodiffError::GradientTrackingDisabled)
+    ));
+    assert!(matches!(
+        p.jvp_multi(&y, &[&x, &x], &[&short, &v], &c),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        p.jvp_multi(&y, &[&x], &[&short], &c),
+        Err(AutodiffError::Shape(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn jvp_multi_zero_paths() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let x = p.var(&t64(&[1.0, 2.0], &[2])?);
+    let konst = p.var_no_grad(&t64(&[3.0, 4.0], &[2])?);
+    let v = t64(&[1.0, 1.0], &[2])?;
+    // 追跡なし出力: テープに触れない
+    let out = p.jvp_multi(&konst, &[&x], &[&v], &c)?;
+    assert_eq!(vals64(&out), vec![0.0, 0.0]);
+    // J ≡ 0（出力が入力に依存しない追跡ありの葉）
+    let other = p.var(&t64(&[5.0, 6.0], &[2])?);
+    let out = p.jvp_multi(&other, &[&x], &[&v], &c)?;
+    assert_eq!(vals64(&out), vec![0.0, 0.0]);
+    Ok(())
+}
+
+#[test]
+fn jvp_multi_rejects_max_with_two_parent_nodes() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let x = p.var(&t64(&[1.0, 2.0], &[2])?);
+    let bad = x.max(None)?;
+    let v = t64(&[1.0, 1.0], &[2])?;
+    assert!(matches!(
+        p.jvp_multi(&bad, &[&x], &[&v], &c),
+        Err(AutodiffError::Backward(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn jvp_create_graph_output_matches_jvp_and_f32() -> R<()> {
+    let base = new_tape();
+    let (p, c, g, c2) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let (x, y) = g1_f64(&p)?;
+    let v = t64(&V, &[2, 3])?;
+    let res = p.jvp_create_graph(&y, &x, &v, &c, &g)?;
+    let want = p.jvp(&y, &x, &v, &c2)?;
+    let got = res.output().value();
+    for (a, b) in vals64(&got).iter().zip(vals64(&want)) {
+        assert!(common::req2_close(*a, b), "{a} vs {b}");
+    }
+    let (pt, ct, gt) = (new_tape(), new_tape(), new_tape());
+    let (x32, y32) = g1_f32(&pt)?;
+    let r32 = functional_ops::jvp_create_graph(&pt, &y32, &x32, &t32(&V, &[2, 3])?, &ct, &gt)?;
+    let want32 = r32.output().to_tensor();
+    assert_f32_f64_close(&want32, &got, "jvp_create_graph g1");
+    Ok(())
+}
+
+#[test]
+fn jvp_create_graph_second_order_matches_closed_form() -> R<()> {
+    // y = x^3 のとき J·v = 3 x^2 v。Σ(J·v) の x 微分は 6 x v。
+    let base = new_tape();
+    let (p, c, g) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let xs = [1.0f32, 2.0, 3.0];
+    let vs = [1.0f32, 0.5, 2.0];
+    let x = p.var(&t64(&xs, &[3])?);
+    let y = x.mul(&x)?.mul(&x)?;
+    let res = p.jvp_create_graph(&y, &x, &t64(&vs, &[3])?, &c, &g)?;
+    let cx = res
+        .child_var(&x)?
+        .ok_or(AutodiffError::Backward("no mirror".into()))?;
+    let grads = g.backward(&res.output().sum(None)?)?;
+    let d = grads
+        .get(&cx)?
+        .ok_or(AutodiffError::Backward("no grad".into()))?;
+    for (i, got) in vals64(d).iter().enumerate() {
+        let want = 6.0 * f64::from(xs[i]) * f64::from(vs[i]);
+        assert!((got - want).abs() < 1e-9, "d[{i}]: {got} vs {want}");
+    }
+    Ok(())
+}
+
+#[test]
+fn jvp_create_graph_child_var_checks_and_none() -> R<()> {
+    let base = new_tape();
+    let (p, c, g, other) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let x = p.var(&t64(&[1.0, 2.0], &[2])?);
+    let unrelated = p.var(&t64(&[1.0, 2.0], &[2])?);
+    let nog = p.var_no_grad(&t64(&[1.0, 2.0], &[2])?);
+    let y = x.mul(&x)?;
+    let res = p.jvp_create_graph(&y, &x, &t64(&[1.0, 1.0], &[2])?, &c, &g)?;
+    let o = other.var(&t64(&[1.0, 2.0], &[2])?);
+    assert!(matches!(
+        res.child_var(&o),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    assert!(matches!(
+        res.child_var(&nog),
+        Err(AutodiffError::GradientTrackingDisabled)
+    ));
+    assert!(res.child_var(&unrelated)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn jvp_create_graph_entry_checks_and_zero_paths() -> R<()> {
+    let base = new_tape();
+    let (p, c, g, other) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let x = p.var(&t64(&[1.0, 2.0], &[2])?);
+    let y = x.mul(&x)?;
+    let o = other.var(&t64(&[1.0, 2.0], &[2])?);
+    let nog = p.var_no_grad(&t64(&[1.0, 2.0], &[2])?);
+    let v = t64(&[1.0, 1.0], &[2])?;
+    assert!(matches!(
+        p.jvp_create_graph(&y, &o, &v, &c, &g),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    assert!(matches!(
+        p.jvp_create_graph(&y, &nog, &v, &c, &g),
+        Err(AutodiffError::GradientTrackingDisabled)
+    ));
+    assert!(matches!(
+        p.jvp_create_graph(&y, &x, &t64(&[1.0], &[1])?, &c, &g),
+        Err(AutodiffError::Shape(_))
+    ));
+    assert!(matches!(
+        p.jvp_create_graph(&y, &x, &v, &p, &g),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(matches!(
+        p.jvp_create_graph(&y, &x, &v, &c, &c),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(matches!(
+        p.jvp_create_graph(&y, &x, &v, &c, &p),
+        Err(AutodiffError::Backward(_))
+    ));
+    // 追跡なし output はゼロ経路: 親・子は無変更、孫に葉が 1 個
+    let konst = p.var_no_grad(&t64(&[3.0, 4.0], &[2])?);
+    let res = p.jvp_create_graph(&konst, &x, &v, &c, &g)?;
+    assert_eq!(vals64(&res.output().value()), vec![0.0, 0.0]);
+    Ok(())
+}
+
+#[test]
+fn jvp_create_graph_rejects_max_and_keeps_child_grandchild_empty() -> R<()> {
+    let base = new_tape();
+    let (p, c, g) = (
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+        TapeF64::new(&base),
+    );
+    let x = p.var(&t64(&[1.0, 2.0], &[2])?);
+    let bad = x.max(None)?;
+    let v = t64(&[1.0, 1.0], &[2])?;
+    assert!(matches!(
+        p.jvp_create_graph(&bad, &x, &v, &c, &g),
+        Err(AutodiffError::Backward(_))
+    ));
+    Ok(())
+}
