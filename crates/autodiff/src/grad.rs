@@ -9117,7 +9117,7 @@ pub(crate) fn elementwise_loss_scale(
 /// margin_ranking_loss` doc の数式を微分する。hinge が有効
 /// （`raw = −y_i·(x1_i−x2_i)+margin >= 0`。`clamp_min` の VJP 契約）な
 /// 要素のみ `dx1_i = −s·y_i`・`dx2_i = +s·y_i` を流す。
-fn margin_ranking_loss_vjp(
+pub(crate) fn margin_ranking_loss_vjp(
     x1: &Tensor<f32>,
     x2: &Tensor<f32>,
     y: &Tensor<f32>,

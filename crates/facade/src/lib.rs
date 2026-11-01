@@ -914,7 +914,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `var`・`std`・`norm_l1`・
-    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
+    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1003,6 +1003,34 @@ impl Tape {
     /// let s: Vec<f32> = [1.0_f32, 2.0, 3.0].iter().map(|v| v.exp() / z).collect();
     /// assert!((row[0] - s[0] * (1.0 - s[0])).abs() < 1e-4);
     /// assert!((row[1] + s[0] * s[1]).abs() < 1e-4 && (row[2] + s[0] * s[2]).abs() < 1e-4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// 損失の二値・マージン系（`bce_loss`・`bce_with_logits_loss`・`sigmoid_focal_loss` ほか 6 損失。#3799）も
+    /// 二階へ進める。次は `bce_with_logits_loss`（`Reduction::Sum`）の例で、損失 `Σ [(1 − t)·x + softplus(−x)]` の
+    /// Hessian は `diag(σ(x)(1 − σ(x)))` なので、固定方向 `v` との積 `H v` は `σ(x)(1 − σ(x)) ⊙ v`。
+    ///
+    /// ```
+    /// use fandhe_ai::nn::loss::Reduction;
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![0.5_f32, -0.25, 1.0], &[3])?);
+    /// let target = t.var_no_grad(&Tensor::new(vec![1.0_f32, 0.0, 0.5], &[3])?);
+    /// let loss = x.bce_with_logits_loss(&target, Reduction::Sum)?;
+    /// let cg = t.backward_create_graph(&loss, &child)?;
+    /// let g = cg.grad(&x)?.unwrap();
+    /// let v = child.var_no_grad(&Tensor::new(vec![1.0_f32, 2.0, -1.0], &[3])?);
+    /// let grads2 = child.backward(&g.mul(&v)?.sum(None)?)?;
+    /// let xc = cg.child_var(&x)?.unwrap();
+    /// let hv = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
+    /// for (i, (xi, vi)) in [0.5_f32, -0.25, 1.0].iter().zip([1.0_f32, 2.0, -1.0]).enumerate() {
+    ///     let s = 1.0 / (1.0 + (-xi).exp());
+    ///     assert!((hv[i] - s * (1.0 - s) * vi).abs() < 1e-4);
+    /// }
     /// # Ok(())
     /// # }
     /// ```
@@ -1137,7 +1165,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1244,7 +1272,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1308,7 +1336,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1410,7 +1438,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1495,7 +1523,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```

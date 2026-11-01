@@ -968,7 +968,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 | 族（§21.4） | variant | 理由・後続 |
 |---|---|---|
 | (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | #3798 で対象化済み（§53） |
-| (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | 未着手 |
+| (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | #3799 で対象化済み（§54） |
 | (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
 | 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
 
@@ -4317,6 +4317,54 @@ CI（CPU）相当の結果は PR の検証欄に記録する。
 - 外部入力は扱わない。shape・`dim`・`correction`・`p` は forward 側の確保前検証を通ったものだけが届き、`dim` の範囲は入口でも再確認する。総括判定はホスト走査で、新しい確保は O(numel) の f64／f32 一時領域だけ。`get_unchecked` は使わない（REQ-8）。拒否は子テープへ書く前か、ロールバックで `child` が空に戻る経路のどちらかで、本番経路に `unwrap`／`expect`／panic は無い。依存・`unsafe` の追加なし。秘密情報・ホスト名は書かない。
 - スコープ外: `LogSumExp`・`Nansum`・`Nanmean`（#3792）、PNorm の ±inf レーンを V2 で受理すること（D1。所有者が求めれば別対応）、GPU 実機 parity の実測（#3856・#3858）、f64 テープの create_graph（#3722）、S2 の実装、`VectorNormOrd` の新 variant。
 - 変えていないもの: `docs/spec`・`Cargo.toml`／`Cargo.lock`・`unsafe`・REQ-2 の tolerance 定数・parity baseline（空のまま）・ガードレール閾値・FMA 契約・`AutodiffError` の variant・facade の公開名とシグネチャ（rustdoc と doctest を足しただけ）・1 階 VJP の本体と出力値・既存節の本文。
+
+## 54. 実装記録（イシュー #3799・親 #3719 系。create_graph の B 区分・損失の二値・マージン系 `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`HingeEmbeddingLoss`・`MarginRankingLoss`・`SigmoidFocalLoss`）
+
+### 54.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3799`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §39（#3730）で、本節はその実装記録。回帰系の 3 variant は #3798（§53）の担当で本節では扱わない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「B 区分は §38〜§44 の推奨どおり実装する」とある。§39.16 の論点（実装する・f64 を持つ variant は V3・Bce は V1 + V2・focal の飽和域は型付きで拒否・総括判定から外れる入力は型付きエラーで拒否・NaN は伝播し `±inf` は拒否・Softplus は threshold=20・GPU parity は §48 の方式・隣接見本は `Op::Custom`）が本節に関わる。個別の承認を上乗せして主張しない。
+
+### 54.1 実装したもの
+
+| Op | 公開メソッド | 方式 | forward の写し | cgrad |
+|---|---|---|---|---|
+| `BceLoss` | `bce_loss`・`bce_with_logits_loss` | V1 + V2（f32） | `kind` で公開メソッドを選ぶ。未知の `BceKind` は `Err(Backward)` | Logits は `dinput = s ⊙ (σ(x) − t)`・`dtarget = −s ⊙ x`。Probabilities は `dinput = s ⊙ (x − t)/D`（`D` は `x(1−x) < 1e-12` のレーンで定数 `1e-12`、それ以外は `x(1−x)`）・`dtarget = −s ⊙ (L(x) − L(1−x))`（`L(u)` は `ln u < −100` のレーンで定数 `−100`、それ以外は `Log(u_safe)`） |
+| `BceWithLogitsPosWeightLoss` | `bce_with_logits_loss_with`（`pos_weight`） | V3 | `BceWithLogitsOptions::pos_weight(payload)`。payload は input の shape へ展開済みなので `broadcast_to` は恒等で、写した Op の payload は親と同じ | 値は `bce_with_logits_pos_weight_loss_vjp`。構造は `lw = 1 + (P−1) ⊙ t`・`dx = s ⊙ ((1−t) − lw ⊙ σ(−x))`・`dt = s ⊙ (−x + (P−1) ⊙ Softplus(−x; 1, 20))` |
+| `SoftMarginLoss` | `soft_margin_loss` | V3 | `Var::soft_margin_loss` | 値は `soft_margin_loss_vjp`。構造は `dx = s ⊙ (−y) ⊙ σ(−y ⊙ x)` |
+| `HingeEmbeddingLoss` | `hinge_embedding_loss` | V3 + V2 | `Var::hinge_embedding_loss` | 値は `hinge_embedding_loss_vjp`。構造は `where(y==1, s, where(margin−x > 0, −s, 0))`。マスクは 1 階と同じ f64 比較で、境界 `x == margin` は 0 |
+| `MarginRankingLoss` | `margin_ranking_loss` | V3 + V2 | `Var::margin_ranking_loss` | 値は `margin_ranking_loss_vjp`。構造は `active = (−y(x1−x2) + margin ≥ 0)`（f64。境界は通す）で `dx1 = where(active, −s ⊙ y, 0)`・`dx2 = where(active, s ⊙ y, 0)` |
+| `SigmoidFocalLoss` | `sigmoid_focal_loss` | V3 + V2 | `SigmoidFocalLossOptions::alpha(..).gamma(..)` | 値は `sigmoid_focal_loss_vjp`。構造は `dx = s ⊙ α_t ⊙ [(p − t) ⊙ q^γ + γ ⊙ ce ⊙ q^(γ−1) ⊙ (1−2t) ⊙ p ⊙ (1−p)]`（`α_t`・`t` は定数、`ce = (1−t) x + Softplus(−x; 1, 20)`） |
+
+- 実装は `crates/autodiff/src/create_graph/loss_binary_margin.rs`。`replay_op` と `build_cgrads` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`。`grad.rs` は `margin_ranking_loss_vjp` と `elementwise_loss_scale` の可視性を、`eval.rs` は `BCE_LOG_CLAMP_MIN` の可視性を `pub(crate)` にしただけで本体・値は変えていない（Bce の dtarget のマスクは 1 階と同じ定数を使い二重管理しない）。
+- `s` は `loss_scale_bcast` で子テープ上の `g` を通すので、損失が根でなくても二階が `g` へ流れる。
+- 要素数 0 の入力は 1 階に揃え、ゼロ定数を返す。区分定数の損失（Hinge・MarginRanking）の Hessian は損失が根のとき全ゼロで、`g` を通る分だけ二階が流れる。
+
+### 54.2 設計（§39）からの差・明確化
+
+- ファイル名は `loss_binary_margin.rs`、GPU parity の族名は `loss_binary_margin`（#3798 の `loss_regression` との衝突を避けるため）。総括判定のヘルパー（`stage`・`upstream_scale` など）は #3798 と共有せず、この新モジュールの private 関数として同等のものを置いた（両 PR が独立にマージできるようにするため）。マージ後の共通化は別途の整理候補。
+- 総括判定（§39.12）は variant ごとに構造の各段と二階逆伝播の「cotangent × 微分係数」（係数は f32 で先に作られるので単独でも）を f64 の三角不等式で上から押さえ、非有限または `STAGE_BOUND_GUARD`（2^125）以上の段があれば子テープへ書く前に型付き `Err(Backward)` で拒否する具体形にした。拒否後は既存のロールバックで `child` が空に戻り、同じ `child` で再試行できる。
+- Bce Probabilities の `L(u)` は `ln u ≥ −100` のレーンで `Log` の VJP `1/u` を f32 で作る。`u` が約 `2.4e-38` 未満の非 clamp レーン（`ln u` が `−100` の少し上の非正規数付近）は `1/u` が overflow するため拒否する。clamp 側（`ln u < −100`）は定数なので受理する。
+- focal の飽和域: `0 < γ < 1` または `1 < γ < 2` のとき、`q = t σ(−x) + (1−t) σ(x)`（f64 で評価）が `f32::MIN_POSITIVE` 未満のレーンを拒否する（`q^(γ−1)`・`q^(γ−2)` が発散するため）。1 階は `0 < γ < 1` かつ `q == 0` の第 2 項を極限値 0 とするため、ここで 1 階と 2 階の受理範囲が分かれる（§39.5 の既知の差。V2 で極限値を写す代替案は採っていない）。`γ == 0`・`γ == 1`・`γ ≥ 2` の飽和レーンは受理する（`γ == 1` は `PowScalar` を構造に積まない）。`q_safe` による置き換えは、飽和域を拒否するため不要になり積んでいない。
+- 非有限の `g` と、入力（x・target・x1・x2）の `±inf` は拒否する。NaN のレーンは段検査から外して伝播させる。追跡されていない入力も保守的に同じ検査へ含める。これらは §39.12 の具体化・明確化であり、個別の承認を上乗せして主張しない。
+- 既存の拒否見本テスト（`tests/create_graph.rs` の `create_graph_still_rejects_remaining_loss_ops` と `tape.rs` の `first_wave_losses_are_supported_and_neighbors_stay_closed`）は、見本が `KlDivLoss` で本節の 6 variant では壊れないため本 PR では触らない。`Op::Custom` 基準への差し替えは #3798 が担う（§39.4 の「どちらが先に入っても壊れない」を満たす）。`tape.rs` には 6 variant を確かめる単体テスト `binary_margin_losses_support_create_graph` を追加した。
+
+### 54.3 テスト
+
+- `crates/autodiff/tests/create_graph_loss_binary_margin.rs`: `first_order()` と 1 階の bit 一致（`cg.grad` は V3 の 5 variant が bit 一致、Bce が REQ-2）、損失が根でないときの子テープ上の損失値の写し（forward と bit 一致。`pos_weight` payload の冪等性を含む）、Hessian と有限差分の REQ-2 突合（損失が根の場合と根でない場合。h と h/2 の Richardson 外挿。Bce Probabilities だけ刻みを 0.01 にした）、追跡する target との混合二階項の独立な解析式との突合、`jvp_create_graph` の孫テープ、必須ベクトルの有限または拒否（focal の飽和域は `γ=0.5`・`1.5` を拒否し `γ=0`・`1`・`2` を受理）、`g = ±3e38` の拒否と再試行、区分境界（Hinge の `x == margin`・MarginRanking の `raw == 0`・Bce の ln 境界と `D` の境界）、`±inf` の拒否と NaN の伝播、空テンソル、隣接する `Op::Custom` の fail-closed。
+- facade: `{bce_loss,bce_with_logits_pos_weight_loss,sigmoid_focal_loss,margin_ranking_loss}_create_graph_via_facade`、`backward_create_graph` の rustdoc に `bce_with_logits_loss` の HVP の doctest。本族を拒否する `api_surface.rs` の否定ガードは元から無く、反転するものは無い。代わりの正ガードは doctest 実在検査 `backward_create_graph_loss_binary_margin_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `loss_binary_margin` の 6 ケース（Bce は経路 `K`、残る 5 つは経路 `H`。いずれも `Judge::Strict`・`NoMatMul`）を登録し、`create_graph_loss_binary_margin_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 54.4 GPU（未実測）
+
+Bce の 1 階は融合カーネル `bce_loss_backward` を通り、残る 5 つの 1 階はホスト関数（CUDA／Metal ではホストへ実体化）である。実機の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline の置き場は空のまま。
+
+### 54.5 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。shape・`pos_weight`（有限かつ非負）・`y`（±1）・`target`（[0, 1]）・`alpha`・`gamma`・`margin` は forward 側の検証を通ったものだけが届き、写しは公開 `Var` メソッド経由なので検証は迂回されない。新しい確保は O(numel) のマスク・f64 一時領域・定数テンソルに限る。本番経路で `unwrap`／`expect` は使わず、内部契約違反は型付きエラーにする。`unsafe` は追加しない。
+- スコープ外: 回帰系 3 variant（#3798）、クラス軸系（#3731・#3800）、`CtcLoss`、`Reduction::None` の追加、f64 テープの create_graph、GPU 実機 parity の実測（#3857・#3859）、公開面の追加、#3798 との総括判定ヘルパーの共通化。
+- 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§26.2 の表の 1 行を除く）・公開 API。
+- 本 PR は `Refs #3799 #3730 #3767 #3857 #3859`。
 
 ## 53. 実装記録（イシュー #3798・親 #3719 系。create_graph の B 区分・損失の回帰系 `KlDivLoss`・`PoissonNllLoss`・`GaussianNllLoss`）
 
