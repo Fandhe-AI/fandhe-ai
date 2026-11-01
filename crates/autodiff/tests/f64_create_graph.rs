@@ -323,6 +323,26 @@ fn pow_zero_base_and_exponent_stay_finite() -> R<()> {
     Ok(())
 }
 
+/// 底が正で指数が 0 の位置でも混合二階微分を定数マスクで消さない
+/// （d²(a^b)/da db = a^(b-1)(1 + b ln a) を b=0 で評価すると 1/a）。
+#[test]
+fn pow_positive_base_zero_exponent_keeps_mixed_partials() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let av = [2.0, 0.5, 3.0];
+    let a = p.var(&t(av.to_vec(), &[3]));
+    let b = p.var(&t(vec![0.0, 0.0, 0.0], &[3]));
+    let l = a.pow(&b)?;
+    let cg = p.backward_create_graph(&l, &c)?;
+    let inv: Vec<f64> = av.iter().map(|v| 1.0 / v).collect();
+    let ln2: Vec<f64> = av.iter().map(|v| v.ln() * v.ln()).collect();
+    assert_close(&second(&cg, &c, &a, &b)?, &inv, "d2/da db");
+    assert_close(&second(&cg, &c, &b, &a)?, &inv, "d2/db da");
+    assert_close(&second(&cg, &c, &a, &a)?, &[0.0, 0.0, 0.0], "d2/da2");
+    assert_close(&second(&cg, &c, &b, &b)?, &ln2, "d2/db2");
+    Ok(())
+}
+
 /// device だけ差し替える `BackendOps`（`DeviceMismatch` の再現用）。
 struct OtherDevice(Box<dyn BackendOps + Send>);
 impl BackendOps for OtherDevice {

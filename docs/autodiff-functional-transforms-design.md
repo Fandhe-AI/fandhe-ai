@@ -1394,7 +1394,7 @@ impl<'t> TapeF64<'t> {
 - `crates/autodiff/src/f64_autograd/create_graph.rs`（新設）: `TapeF64::backward_create_graph`（入口検査は §35.3 の順序）、`CreateGraphResultF64`（`first_order`／`grad`／`child_var`）、祖先の収集と検査、写し（full mirror）、勾配グラフ、失敗時の `rollback_to`。
 - `crates/autodiff/src/f64_autograd.rs`: 内部 variant `BroadcastTo`／`ReduceTo`／`Log`／`Where`（`pub(crate)`）、それらの 1 階 VJP 腕、crate 内部の `is_empty`／`rollback_point`／`rollback_to`、内部 forward（`cg_broadcast_to`／`cg_reduce_to`／`cg_log`／`cg_where`。公開メソッドは増やさない）。既存の腕は変えていない。
 - 範囲外の Op（`matmul`／`sum`／`mean`／`max`）は追跡対象の祖先にあれば `Backward` で拒否する（子テープへ書く前）。`max` は fail-closed のまま。定数側の部分木は検査しない。
-- テスト: `crates/autodiff/tests/f64_create_graph.rs`（14 件。二階の閉形式・中心差分・三階の閉包性・`Pow` の `a==0`／`b==0`・入口検査・範囲外 Op・再試行）、`create_graph.rs` の単体 3 件。facade `api_surface.rs` は宣言インベントリを承認形 3 件へ更新し、検出力の自己テストを足した。
+- テスト: `crates/autodiff/tests/f64_create_graph.rs`（15 件。二階の閉形式・中心差分・三階の閉包性・`Pow` の `a==0`／`b==0`・正の底でゼロ指数の混合二階微分（`pow_positive_base_zero_exponent_keeps_mixed_partials`）・入口検査・範囲外 Op・再試行）、`create_graph.rs` の単体 3 件。facade `api_surface.rs` は宣言インベントリを承認形 3 件へ更新し、検出力の自己テストを足した。
 
 ### 37.2 §35 から外れた点（所有者への報告事項）
 
@@ -1402,6 +1402,7 @@ impl<'t> TapeF64<'t> {
 2. **`mirror()` は見送り**: 第 1 段では使う箇所がなく、dead_code で clippy を落とすため作っていない（`#[allow]` で黙らせない）。#3786／#3788 が必要になった時点で足す。
 3. **`rollback_point`／`rollback_to` は一般形**: 子テープの先頭に限らない切り戻しにした（#3787 の `jacfwd` J1 案が再利用できる）。前提は、`point` より後のノードを指す `VarF64` を呼び出し側が持たないこと。
 4. **判定ヘルパー**: §35.5 の `compare_f64` ではなく、autodiff の `tests/common::req2_close` を使った（autodiff は backend-cpu に依存しない不変条件。判定式は同じ）。`compare_f64` は #3786 の facade テストで使う。
+5. **`Pow` の安全置換の範囲**: §35.10・§35.13 論点 6 の「`Where`＋`Log` の安全置換」という方式は変えず、da 側でマスクする位置を「`b == 0` かつ底が有限の正の値でない」に絞った。`b == 0` 全体を定数マスクで消すと、底が正の位置で混合二階微分が 0 になり、正しい値 `1/a` を失うため（PR #3940 の Codex レビュー指摘）。1 階の `binary_partials_f64` は変えていない。
 
 ### 37.3 測った bit 一致の範囲
 
@@ -1411,7 +1412,7 @@ impl<'t> TapeF64<'t> {
 
 ### 37.4 変えていないもの
 
-`crates/facade/src/**`、依存（`Cargo.toml`／`Cargo.lock`）、tolerance 定数、parity baseline、ガードレール閾値、`unsafe`、`docs/spec`、f32 の `create_graph.rs`、§36 の本文。
+`crates/facade/src/**`、依存（`Cargo.toml`／`Cargo.lock`）、tolerance 定数、parity baseline、ガードレール閾値、`unsafe`、`docs/spec`、f32 の `create_graph.rs`、§36 の本文。なお f32 側の `ScalarBinaryOp::Pow`（`mask_b0`）にも同じ構造があり、混合二階微分が 0 になりうる。このイシューでは変えていない（対象外の候補として申し送る）。
 
 ### 37.5 #3786・#3787・#3788 への申し送り
 

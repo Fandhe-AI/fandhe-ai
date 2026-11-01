@@ -34,9 +34,12 @@
 //!   立てが `binary_partials_f64` と異なる（例: `Div` は `1/b` を先に作る）
 //!   ため bit 一致は契約にしない。判定は REQ-2 の統一複合判定
 //!   （相対 1e-3 未満 または 絶対 1e-5 未満）をそのまま使う。
-//! - `Pow` は選ばれない枝の `0 * inf = NaN` を避けるため、`b == 0`／
-//!   `a == 0` の位置を `Where` で安全な値へ置き換える（1 階の
-//!   `binary_partials_f64` のマスク規約と揃う）。
+//! - `Pow` は選ばれない枝の `0 * inf = NaN` を避けるため `Where` で安全な
+//!   値へ置き換える。da 側は「`b == 0` かつ底が有限の正の値でない」位置
+//!   だけ、db 側は `a == 0` の位置だけを置き換える。底が正の位置は式の
+//!   依存関係を残し、混合二階微分（`1/a`）を定数マスクで消さない。値は
+//!   1 階の `binary_partials_f64` と REQ-2 の範囲で一致する（違いうるのは
+//!   零の符号だけ）。
 //!
 //! # メモリ
 //!
@@ -418,6 +421,28 @@ fn mask_const<'c, 't>(
     Ok(child.var_no_grad(&t))
 }
 
+/// `a`・`b` を `shape` へブロードキャストし、`pred(a, b)` を満たす位置を
+/// 1.0、それ以外を 0.0 とした定数マスク（`Pow` の da 側の安全置換用）。
+fn pair_mask_const<'c, 't>(
+    child: &'c TapeF64<'t>,
+    a: &Tensor<f64>,
+    b: &Tensor<f64>,
+    shape: &[usize],
+    pred: impl Fn(f64, f64) -> bool,
+) -> Result<VarF64<'c, 't>, AutodiffError> {
+    super::checked_bytes_for_f64(shape).map_err(AutodiffError::Shape)?;
+    let a_bc = broadcast_value_f64(a, shape)?;
+    let b_bc = broadcast_value_f64(b, shape)?;
+    let data: Vec<f64> = a_bc
+        .host_slice()
+        .iter()
+        .zip(b_bc.host_slice().iter())
+        .map(|(&x, &y)| if pred(x, y) { 1.0 } else { 0.0 })
+        .collect();
+    let t = Tensor::new(data, shape).map_err(AutodiffError::Shape)?;
+    Ok(child.var_no_grad(&t))
+}
+
 /// ノード `id` の VJP を子テープ上の `VarF64` 演算で組み、
 /// `(寄与先, 寄与勾配)` を返す。寄与勾配は寄与先の shape を持つ。
 fn vjp_contributions_f64<'c, 't>(
@@ -537,7 +562,11 @@ fn binary_contributions_f64<'c, 't>(
             if need_a {
                 let b_bc = b_m.cg_broadcast_to(out_shape)?;
                 let neg_one = scalar_const(child, -1.0)?;
-                let mask_b0 = mask_const(child, &b_m.value(), out_shape, |v| v == 0.0)?;
+                // 指数 0 かつ底が有限の正でない位置だけ置き換える（正の底は式を残す）。
+                let mask_b0 =
+                    pair_mask_const(child, &a_m.value(), &b_m.value(), out_shape, |a, b| {
+                        b == 0.0 && !(a.is_finite() && a > 0.0)
+                    })?;
                 let safe_a = mask_b0.cg_where(&ones, &a_bc)?;
                 let a_pow = safe_a.pow(&b_bc.add(&neg_one)?)?;
                 let factor = mask_b0.cg_where(&zeros, &b_bc.mul(&a_pow)?)?;
