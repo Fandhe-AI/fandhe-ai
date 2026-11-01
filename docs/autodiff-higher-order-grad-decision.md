@@ -969,7 +969,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 |---|---|---|
 | (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | #3798 で対象化済み（§53） |
 | (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | #3799 で対象化済み（§54） |
-| (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
+| (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | #3800 で対象化済み（§55） |
 | 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
 
 ### 26.3 `reduction` と既知の差
@@ -4410,3 +4410,80 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: 二値・マージン系 6 variant（#3799）、クラス軸系（#3731・#3800）、`CtcLoss`、f64 テープの create_graph、GPU 実機 parity の実測（#3857・#3859）、公開面の追加。
 - 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§26.2 の表の 1 行を除く）・公開 API。
 - 本 PR は `Refs #3798 #3730 #3767 #3857 #3859`。
+
+## 55. 実装記録（イシュー #3800・親 #3719 系。create_graph の B 区分・損失のクラス軸系 `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss`）
+
+### 55.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3800`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §40（#3731）で、本節はその実装記録。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「B 区分は §38〜§44 の推奨どおり実装する」「CtcLoss は対象外とし恒久的に fail-closed にする」「§40 点 6（hinge 境界は継承）は推奨どおり」とあり、§40.16 のほかの論点（6 variant を実装・CEWO は V3・Cosine と Triplet は S1・Triplet の `1<p<2` かつ `u==0` は拒否・NaN は伝播し `±inf` は拒否・GPU parity は §48 の方式・隣接見本は `Op::Custom`）も推奨どおり。個別の承認を上乗せして主張しない。
+- `CtcLoss` は承認により恒久的に対象外で、`supports_create_graph` は `false` のまま。拒否経路も変えていない。#3801 の docs のみのクローズは本 PR の作業ではない。
+
+### 55.1 実装したもの
+
+| Op | 公開メソッド | 方式 | cgrad |
+|---|---|---|---|
+| `CrossEntropyLossWithOptions` | `cross_entropy_loss_with` | V3 + V1 | 値は `cross_entropy_loss_with_options_vjp`。構造は `dx = where(valid, s ⊙ (A ⊙ softmax(x) − B), 0)`。`A = (1−ε) w_t + (ε/C) Σw`・`B_c = (1−ε) w_t δ_{c,t} + (ε/C) w_c`・`valid` はホストが f64 で作る定数。Mean の分母は非 ignore サンプルの重み和 `W`（`g / const(W)`）。`Σw == 0` と `Mean && W == 0` は定数ゼロ |
+| `MultiMarginLoss` | `multi_margin_loss` | V3 + V2 | p=1 は `where(K≠0, s ⊙ const(K), 0)`（`K` は `w_y/C` の符号付き個数）、p=2 は `H = where(M, 2Z, 0)`・`dx = s ⊙ c_w ⊙ where(onehot_y, −Sum(H), H)`。`Z = margin − x_y + x`（`x_y` は `Gather`）、`M` は 1 階と同じ f64 の厳密 `z > 0` |
+| `MultiLabelMarginLoss` | `multilabel_margin_loss` | V3 + V2 | x について区分定数。`dx = where(K≠0, s ⊙ const(K/C), 0)`（重複 target は重複分だけ数える） |
+| `MultiLabelSoftMarginLoss` | `multilabel_soft_margin_loss` | V3 + V1 | `dx = s ⊙ (const(w_c/C) ⊙ (σ(x) − t))`。`σ(x) − t` は符号別の安定形（x ≥ 0: `(1−t) − σ(−x)`、x < 0: `σ(x) − t`）。大きい側の σ を Sigmoid の出力から作ると VJP の `y(1−y)` が f32 で曲率を失うため（§54 と同じ扱い） |
+| `CosineEmbeddingLoss` | `cosine_embedding_loss` | V3 + V2 + S1 | 行ごとに 2 のべき乗の `s_i = max(max|x_i|, √ε)` で `x/s` を作り、`ε` を `ε/s²` へ変換する。`Mul`・`Sum`・`Sqrt`・`Div` でノルムを組み、`dx1 = s_b ⊙ coeff ⊙ (1/s1) ⊙ (b'/den − cos ⊙ a'/m1')`（`dx2` も同形）。`coeff ∈ {−1, +1, 0}` は 1 階と同じ f64 の `cos` で決める V2 定数 |
+| `TripletMarginLoss` | `triplet_margin_loss` | V3 + V2 + S1 | 差分 `v = x − y + eps` から p ノルムの勾配を組む。p=2 は `u/norm'`、p=1 は符号の V2 定数、一般の p は `sign(u) ⊙ (|u|/norm')^(p−1)`。`hinge_active`（`>=`）・`an_coeff`（1／0／0.5）・`norm == 0` は V2。寄与は 1 階 VJP と同じ `da = g_ap − c_an g_an`・`dp = −g_ap − c_pn g_pn`・`dn = c_an g_an + c_pn g_pn` |
+
+- 実装は `crates/autodiff/src/create_graph/loss_class.rs`。`replay_op` と `build_cgrads` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`（ワイルドカードは足していない）。`grad.rs` は `cross_entropy_loss_with_options_vjp`・`cosine_embedding_loss_vjp`・`triplet_margin_loss_vjp` の可視性を `pub(crate)` にしただけで、本体・値は変えていない。`create_graph.rs` の `reduce_dim_bcast` を `pub(super)` にした。
+- 再生（`replay_op`）は公開 `Var` メソッドへ委譲するので forward の検証を迂回しない。`MultiMarginLoss` の `targets`／`weight`、`MultiLabelMarginLoss` の `targets` は `Op` payload の `Vec` から `Tensor` を組み直して渡す。
+- `s` は `loss_scale_bcast` で子テープ上の `g` を通すので、損失が根でなくても二階が `g` へ流れる。CEWO だけ分母が `W` なので `g / const(W as f32)` の別経路にした。
+- `g.mul(0/1 定数)` は使わず、区分は `where_cond` で選ぶ（`inf·0 = NaN` を避ける）。
+- 要素数 0 の入力は 1 階に揃え、ゼロ定数を返す。
+
+### 55.2 設計（§40）からの差・明確化
+
+- **`Op::VectorNorm`／`Op::PNorm` を使わない理由**: §40 の基準 sha 以降、`VectorNorm`（L1・L2）と `PNorm` は #3942（§52）で `supports_create_graph` が `true` になった。それでも Cosine・Triplet のノルムは §40.10 のとおり `Mul`・`Sum`・`Sqrt`・`Div`（Triplet は `Abs`・`PowScalar`）で手に組み、S1 の行スケールと `ε → ε/s²` の変換を入れた。承認は S1 の構造（スケール・`ε/s²` の扱い・総括判定）に対して出ており、`norm_l2`／`norm_p` への簡略化はその前提を変えるため。
+- Triplet のスケール `mx` は、設計の「2 のべき乗」ではなく**行ごとの差分の最大絶対値**（ホスト定数）にした。2 のべき乗に切り上げると最大要素が `(0.5, 1]` に入り、`p` が大きいとき（`p = 1024` 等）`Σ(|v|/mx)^p` が f32 で 0 に潰れて `norm'` が 0 になるため。最大絶対値で割れば最大要素が約 1 になり、`norm' ≥ 約 1` が保たれる。`1/mx` が f32 で表せない小さな差分（`max|v| < 2^-100`、全要素 0 の行を除く）は拒否する。Cosine は `norm'` が `ε'` 側でも `m' ≥ 約 0.25` となるので、設計どおり 2 のべき乗を使う。
+- Triplet の `1<p<2` で差分が 0 のレーンは、**活性でない行も含めて**拒否する。非活性行の構造にも `PowScalar(p−1)` が積まれ、`0·inf = NaN` が二階へ混ざるのを避けるため（設計は「二階が発散するので拒否」。承認は論点 5 の拒否）。`p = 1`・`p = 2`・`p > 2` では差分 0 のレーンを受理する（p=2 は `u/norm'` で曲率を保つ）。
+- 総括判定（§40.12）の第 1 の軸（overflow）は、variant ごとに構造の各段と二階逆伝播の「cotangent × 微分係数」を f64 で上から押さえ、非有限または `STAGE_BOUND_GUARD`（2^125）以上の段があれば子テープへ書く前に型付き `Err(Backward)` で拒否する具体形にした。拒否後は既存のロールバックで `child` が空に戻り、同じ `child` で再試行できる。§40.5 の必須ベクトル 3 件（MultiMargin p=2 の `H` overflow・MultiLabelSoft の `weight=1e30`・MultiMargin p=1 の `weight=1e20`）は拒否される。
+- **総括判定の第 2 の軸（相殺・桁落ち）**: 第 1 の軸は「大きな値」しか見ないため、ε の吸収や差し引きの桁落ちで構造の二階が有限のまま f64 の参照から外れる入力を通していた（PR #3947 のレビューで同じ類型の指摘が続いた。例: x1=[1]・x2=[1]・y=[1]・Sum の Cosine に 1e10 を掛けると、f32 の `m' = a'² + ε'` から `ε'` が丸めで消えて二階が 0 になる。真値は `3·1e10·ε/(1+ε)^3` で約 0.03）。`push_v3` は 1 階の値しか補正しないので、構造内の差し引きの丸めはそのまま二階へ入る。経路ごとに条件を足すのをやめ、次の 1 つの判定（`loss_class.rs::cancel_check`）に寄せた。構造を積む前に、seed が 1 要素（Hessian の 1 列）のときの二階の各要素を構造の演算順どおりに f64 で展開し、参照値 `V` と、同じ式を各項の絶対値の和で評価した `M`（相殺が無ければ `|V|` と等しい）を求める。誤差の見積り `coeff·M·scale`（`scale` は上流 `|g|`・`1/n`・`1/W`・行スケール `1/s` 等の積）が絶対 1e-5 未満でも、`coeff·M ≤ (1e-3/2)·|V|` でもない要素が 1 つでもあれば型付き `Err(Backward)` で拒否する。形は `linalg_fft.rs::rounding_ok` と同じで、tolerance 定数は `tensor-core::tolerance` から読み、値は変えない（相対は許容の半分を使う）。`coeff = (2·L + 4)·2^-23` で、`L` は最長の縮約長（Cosine・Triplet は行の幅 `d`、CEWO・MultiMargin は軸長 `C`、MultiLabelSoft は 1。f32 の逐次和でも成り立つ最悪値として長さに比例させる）。Triplet は p ノルムの累乗で相対誤差が増幅されるため `2·(|p−1| + 1)·(κ + 1)·2^-23` を足す（`κ = (|x − y| + |eps|)/|v|` は差分の再構成の条件数）。ε の吸収は「`M` に比べて小さい `V`」として同じ式で検出される。
+- **f32 の中間値の underflow（同じ判定の第 2 項）**: 構造が f32 で計算する中間値が、ホストの f64 では非ゼロ（または正規数）なのに f32 では 0 や非正規数になると、その成分の曲率が消える（PR #3947 のレビューで 2 回指摘された類型。例: rank 1 の anchor=[0,0,0]・positive=[−1e10,−1e10,−1e-40]・negative=[−2e10,−1e10,−2e-40]・p=2.1・eps=0・margin=3e10・Sum・1e14 倍では、差分の第 3 成分が `v·(1/mx)` で 0 になり、positive の第 3 成分の Hessian 対角は参照約 0.0765 に対し構造は 0）。個別の条件にせず、判定の誤差の見積りを `(|V_str − V| + coeff·M)·scale` に広げた。`V_str` は、構造が f32 で計算する中間値を f32 で再現し、それを同じ展開式に入れて組んだ値である。比べる値は、CEWO の Softmax（`exp(x − max)` の逐次和と除算）・定数 `A`・`B`、MultiMargin の `Z`・定数 `c_w`・`K`、MultiLabelMargin の定数 `K/C`、MultiLabelSoft の `Sigmoid(−|x|)`・安定形の差し引き・定数 `w_c/C`、Cosine の `a·(1/s)`・`Σa'² + ε'`・`sqrt`・内積・`cos`、Triplet の差分の再構成・`v·(1/mx)`・`|u|^p` の逐次和・`ssum^(1/p)`・`|u|/N`・`PowScalar` とその微分係数、全 variant の `s_b`（子テープの f32 の `g / n`・`g / W`）。f32 の再現値がどれも `coeff` 以内で f64 の値と一致する行は、従来どおり `V_str = V` として O(d) の速い経路を使う。ずれる行（underflow・非正規数・再構成の桁落ち）は、速い経路を使わず要素ごとに比べる。
+- **相殺の判定の検出範囲（契約）**:
+  - Cosine: x 経路の 4 ブロック（dx1／dx2 × x1／x2）の全要素と、g 経路（`b'/den − cos·a'/m'`）。平行に近い行と ε の吸収はここで拒否される。
+  - CEWO: x 経路は Softmax の VJP の対角 `y_j(1 − y_j)`（確信度の高い行で相殺。参照の `1 − y_j` は他クラスの和で作る）。非対角は単項で相殺しないため、`coeff` が相対の半分を超える長い軸（C が約 2000 超）のときだけ上位 2 クラスの積で絶対判定を確かめる。g 経路は `A·y − B`（target の `A·y_t ≈ B_t`）。
+  - MultiMargin p=2: g 経路の `Z = (margin − x_y) + x_j` と target レーンの `−ΣH`。x 経路は `±2·c_w` の同符号の和で相殺しない。既存の再構成の検査（2^-10）は残す。
+  - MultiLabelSoft: g 経路の `σ(x) − t`（安定形の差し引き）。x 経路の `σ(1−σ)` は安定形で単項になり相殺しない。
+  - Triplet（p ≠ 1）: 9 ブロック（da／dp／dn × a／p／n）の全要素と g 経路。1 成分が支配的な差分（p=2 では `(1 − û²)/‖v‖`）と、`H_ap − c_an·H_an`・`H_ap − c_pn·H_pn` の 2 ペアの差を含む。p=1 は符号の定数で二階は厳密に 0 なので対象外。既存の再構成・norm の丸めの検査は残す。
+  - MultiLabelMargin と MultiMargin p=1: x について区分定数で、構造の係数は f32 の定数の和なので相殺が起きず対象外。
+  - 定数と `s_b`: MultiMargin（p=1 の `K`・p=2 の `c_w`）・MultiLabelMargin の `K/C`・MultiLabelSoft の `w_c/C`・CEWO の `A`・`B`・全 variant の `s_b` は、f32 の値と f64 の値の差を同じ判定で比べる（f32 で 0 や非正規数になる定数で曲率・g 経路が消える入力を拒否する）。
+  - f32 の中間値の underflow: 上の各 variant で、構造が f32 で計算する中間値を f32 で再現する。再現の範囲は前項の列挙のとおり。CPU の逐次の演算順で再現し、和の順序の違い（GPU 等）は `coeff` の長さ比例項に含める。
+  - 離散量（符号・マスク・活性判定など）: `V_str` は、構造の子テープが実際に使う離散量から組む。ホストの f64 由来の値を `V` と共有するのは、構造自身もその値を V2 定数として使う箇所に限る。洗い出した結果（PR #3947 の Bugbot の指摘を受けた全数の確認）は次のとおり。
+    - 構造が f32 の値から決める離散量は Triplet の符号だけである。p=2 の `u/norm'` は勾配の符号を f32 の `u` から取る。一般の p では、`Abs` の VJP が逆伝播の符号を f32 の `u` から取る（`sign(0) = 0`）。`V_str` ではこの 2 つを f32 の `u` の符号に置き換えた（`PairRow` の `sg`・`sa`・`dsg`）。一般の p の勾配の符号 `sign_c` は V2 定数（ホスト）のままである。f32 の符号がホストと異なる行は、速い経路を使わず要素ごとに比べる。
+    - f32 の再構成で符号が反転する入力は作れない。丸めは単調で、`eps` は f32 で表せるからである。`(x − y) + eps > 0` なら `fl(x − y) ≥ −eps` となり、よって `fl(fl(x − y) + eps) ≥ 0` が成り立つ（負も同様）。正の `fl(1/mx)` を掛けても、符号は反転せず 0 へ潰れるだけである。0 への潰れは、`pair_info` の「0 と非 0 の不一致」と underflow の判定で拒否される。テスト `triplet_f32_reconstruction_never_flips_sign_and_collapse_is_rejected` は、桁落ちの近傍の格子で反転が無いことを全数で確かめる。反転に最も近い入力（f32 で 0、f64 で −1.96e-8）が拒否されることも確かめる。
+    - ほかの離散量は、どれも構造が V2 定数として使うホストの値で、`V_str` が共有して正しい。該当するのは次のとおり。
+      - Triplet: `hinge_active`・`an_coeff` のマスク・全 0 行のマスク・一般の p の `sign_c`
+      - Cosine: `coeff ∈ {−1, 0, +1}`・活性マスク・行スケール
+      - CEWO: `valid`（ignore と範囲外）・`A`・`B`
+      - MultiMargin: マスク `M`（f64 の `z > 0`）・onehot・p=1 の `K`
+      - MultiLabelMargin: `K`
+      - MultiLabelSoft: 符号別の安定形の分岐（f32 の入力 `x` から決まり、ホストの `f64::from(x)` と同じ符号）
+    - MultiMargin p=2 で、ホストでは `z > 0` なのに f32 の `Z` が 0 以下になる場合は、構造が `where(M, 2Z, 0)` で f32 の `Z` を使うので、`V_str` も f32 の `Z` を使う。Softmax の最大値の引き算は値を変えない（離散量が結果に効かない）。
+  - 計算量: 行ごとに O(d) の速い経路を先に試す。速い経路は、f32 の再現値がどれも `coeff` 以内で一致し、かつブロックの `M` の上界で絶対判定を満たすかを見る。満たさないブロックだけ O(d²) で走査する（CEWO の非対角は、再現値がずれる行だけ O(C²)）。
+- **保証範囲（本節の数値契約。§27.3 の書き方に揃える）**: 保証は総括判定（第 1・第 2 の軸）を通った入力に限る。通った入力では、1 階・`cg.grad`（1 階と bit 同一）・二階が有限である。二階の各要素（seed が 1 要素のときの Hessian の成分と、g への二階）は、上の見積りの範囲で f64 の参照と REQ-2 判定で一致する。見積りは、f32 で再現した中間値と参照の差に、各項の相対誤差を `coeff` と置いた一次の評価を足したもので、厳密な証明ではない。f32 の再現は CPU の演算を写したもので、各 Op の内部の実装（`powf`・`exp` 等の丸め）とは数 ulp ずれうる。この差は `coeff` が覆う（`coeff` を安全側に取り、相対は許容の半分を使う）。拒否は保守的で、許容内の入力も拒否する（例: 平行な行・1 成分だけの差分・確信度の高い行で上流係数が大きい場合、行の幅や C が大きく上流係数も大きい場合、大きな p）。対象外: 1 要素でない seed の縮約での相殺（`Σ_i w_i·H_ij` の打ち消し。1 階の各 Op と同じ扱い）、g への二階が `g` を作る上流の Op で増幅される分（§27.3 と同じ）、三階以上、真の値そのものが f32 を超える場合。拒否範囲を狭める（S2 化）かは所有者判断。
+- **構造で曲率を保つ修正を採らない理由**: `ε'/m' < 2^-24` の行では f32 の `m'` に ε の情報が残らない。平行に近い行・確信度の高い行・支配的な成分の相殺は、f32 の中間値では表せない大きさの差を求めることになり、構造の組み替えでは解決しない。判定で拒否するのが実装のしていない保証を書かない形だと判断した。
+- 非有限の `g` と、入力の `±inf` は拒否する。NaN のレーンは段検査から外して伝播させる（§33.14 論点 3 と同じ）。これらは §40.12 の具体化・明確化であり、個別の承認を上乗せして主張しない。
+- ヘルパー（`stage`・`upstream_scale`・`check_g_cotangent` 等）は #3798／#3799 と共有せず、この新モジュールの private 関数として同等のものを置いた（独立にマージできるようにするため）。マージ後の共通化は整理候補。
+- 既存テスト `tape.rs` の `binary_margin_losses_support_create_graph` は拒否の見本に `Op::MultiMarginLoss` を使っていたため、`Op::Custom` 基準へ差し替えた（本 PR の変更で見本が受理側に入るため）。ほかに 6 variant を拒否の見本にしている既存テストは無かった（`tests/create_graph*.rs`・`crates/facade/tests/create_graph*.rs` を確認）。追加の単体テスト `class_axis_losses_support_create_graph` は `CtcLoss` が `false` のままであることも固定する。
+
+### 55.3 テスト
+
+- `crates/autodiff/tests/create_graph_loss_class.rs`: `first_order()` と `cg.grad` の 1 階 bit 一致（6 つとも V3）、損失が根でないときの子テープ上の損失値の写し、Hessian と有限差分の REQ-2 突合（6 variant × Mean／Sum。CEWO は label_smoothing・ignore_index・class_weight の各組と class_dim 0／最終軸／rank 3 中間軸、MultiMargin は p=1／2・weight 有無、Triplet は p ∈ {1, 2, 3}・swap 有無。損失が根の場合と根でない場合。h と h/2 の Richardson 外挿）、混合二階（Cosine の x1·x2、Triplet の a·p・a·n・p·n）と p=2 で一部レーンの差分が 0 の行の曲率保持、`jvp_create_graph` の孫テープ、必須ベクトル（拒否と `child` が空・再試行）、区分境界（MultiMargin／MultiLabelMargin の `z == 0` は非活性、Cosine の `cos == margin`・Triplet の hinge 境界は活性、swap の同値タイ）、CEWO の早期 return 2 種が NaN logits でも 0、`±inf` の拒否と NaN の伝播、空テンソル、隣接する `Op::Custom` の fail-closed。相殺の判定の正のプローブ（`cosine_epsilon_absorption_second_order_is_rejected_or_exact`〈Codex P1 の入力そのもの〉・`cewo_confident_row_softmax_curvature_is_rejected_or_exact`・`triplet_dominant_component_curvature_is_rejected_or_exact`・`multilabel_soft_sigma_near_target_g_path_is_rejected_or_exact`）: 上流係数 1〜1e10 を振り、受理なら構造の Hessian が f64 の閉形式の参照と REQ-2 で一致し、拒否なら `child` が空で、受理と拒否の両方が現れること（判定を外すと 1e4 倍で REQ-2 を外れることを確認済み）。f32 の中間値の underflow の正のプローブ `triplet_scaled_component_underflow_is_rejected_or_exact`（Codex の入力そのもの）: 1e12 倍以上は拒否され、受理される係数では positive の第 3 成分の Hessian 対角が閉形式 `(p−1)/N·q^(p−2)·(1 − q^p)` と REQ-2 で一致する（`V_str` の項を外すと 1e12 倍で受理されてしまうことを確認済み）。
+- facade: `{cross_entropy_loss_with,multi_margin_loss,multilabel_margin_loss,multilabel_soft_margin_loss,cosine_embedding_loss,triplet_margin_loss}_create_graph_via_facade`、`backward_create_graph` の rustdoc に label smoothing 付き `cross_entropy_loss_with` の HVP の doctest。本族を拒否する `api_surface.rs` の否定ガードは元から無く、反転するものは無い。代わりの正ガードは doctest 実在検査 `backward_create_graph_loss_class_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `loss_class` の 6 ケース（いずれも経路 `H`・`Judge::Strict`・`NoMatMul`。1 階は 6 つともホスト関数）を登録し、`create_graph_loss_class_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 55.4 GPU（未実測）
+
+6 つの 1 階はすべてホスト関数（CUDA／Metal ではホストへ実体化）で、子テープの構造 Op（Softmax・pointwise・Sum）がデバイスで走る。実機の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。`<rocm-node>` は雛形なし。baseline は作らず、置き場は空のまま。
+
+### 55.5 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。targets の範囲・`y`（±1）・`p`・`eps`・`margin`・class_weight（有限かつ非負）・shape は forward 側の検証を通ったものだけが届き、写しは公開 `Var` メソッド経由なので検証は迂回されない。新しい確保は O(numel) のマスク・f64 一時領域・定数テンソルに限る。本番経路で `unwrap`／`expect` は使わず、内部契約違反は型付きエラーにする。`unsafe` は追加しない。
+- スコープ外: `CtcLoss`（恒久 fail-closed）、他の B 区分、`Reduction::None` の追加、f64 テープの create_graph、GPU 実機 parity の実測（#3857・#3859）、測り方の変更（#3739）、公開面の追加、#3798／#3799 との総括判定ヘルパーの共通化。
+- 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§26.2 の表の 1 行を除く）・公開 API。
+- 本 PR は `Refs #3800 #3731 #3767 #3857 #3859`。

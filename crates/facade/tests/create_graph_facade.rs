@@ -29,7 +29,9 @@
 use std::sync::Arc;
 
 use fandhe_ai::nn::loss::{
-    BceWithLogitsOptions, GaussianNllOptions, PoissonNllOptions, Reduction, SigmoidFocalLossOptions,
+    BceWithLogitsOptions, CrossEntropyOptions, GaussianNllOptions, MultiLabelSoftMarginOptions,
+    MultiMarginOptions, PoissonNllOptions, Reduction, SigmoidFocalLossOptions,
+    TripletMarginOptions,
 };
 use fandhe_ai::{
     AutodiffError, CreateGraphResult, CustomFunction, Device, FftNorm, Tape, Tensor, Var,
@@ -944,6 +946,174 @@ fn margin_ranking_loss_create_graph_via_facade() {
         margin_ranking_loss_loss,
         true,
         1e-2,
+    );
+}
+
+/// 損失のクラス軸系（イシュー #3800）。1 本の葉 `z` を切り出して損失を作り、二乗して `H v ≠ 0` にする。
+fn cross_entropy_loss_with_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let opts = CrossEntropyOptions::default()
+        .label_smoothing(0.1)
+        .class_weight(t(vec![1.0, 2.0, 0.5], &[3]));
+    let l = z
+        .reshape(&[2, 3])
+        .unwrap()
+        .cross_entropy_loss_with(
+            &Tensor::<i32>::new(vec![0, 2], &[2]).unwrap(),
+            1,
+            Reduction::Mean,
+            &opts,
+        )
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn multi_margin_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let opts = MultiMarginOptions::default().p(2);
+    let l = z
+        .reshape(&[2, 3])
+        .unwrap()
+        .multi_margin_loss(
+            &Tensor::<i32>::new(vec![1, 0], &[2]).unwrap(),
+            &opts,
+            Reduction::Mean,
+        )
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn multilabel_margin_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let l = z
+        .reshape(&[2, 3])
+        .unwrap()
+        .multilabel_margin_loss(
+            &Tensor::<i32>::new(vec![2, -1, 0, 0, 1, -1], &[2, 3]).unwrap(),
+            Reduction::Mean,
+        )
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn multilabel_soft_margin_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let l = z
+        .reshape(&[2, 3])
+        .unwrap()
+        .multilabel_soft_margin_loss(
+            &t(vec![1.0, 0.0, 0.5, 0.0, 1.0, 0.3], &[2, 3]),
+            &MultiLabelSoftMarginOptions::default(),
+            Reduction::Mean,
+        )
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn cosine_embedding_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let (x1, x2) = (z.narrow(0, 0, 6).unwrap(), z.narrow(0, 6, 6).unwrap());
+    let l = x1
+        .reshape(&[2, 3])
+        .unwrap()
+        .cosine_embedding_loss(
+            &x2.reshape(&[2, 3]).unwrap(),
+            &t(vec![1.0, -1.0], &[2]),
+            0.2,
+            Reduction::Mean,
+        )
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn triplet_margin_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let p = |i: usize| z.narrow(0, 6 * i, 6).unwrap().reshape(&[2, 3]).unwrap();
+    let l = p(0)
+        .triplet_margin_loss(
+            &p(1),
+            &p(2),
+            &TripletMarginOptions::default().margin(2.0),
+            Reduction::Mean,
+        )
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+#[test]
+fn cross_entropy_loss_with_create_graph_via_facade() {
+    let z = [0.2, -0.4, 0.9, 0.5, 0.1, -0.7];
+    check_create_graph_family(
+        "cross_entropy_loss_with",
+        &z,
+        &[6],
+        cross_entropy_loss_with_loss,
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn multi_margin_loss_create_graph_via_facade() {
+    let z = [0.3, 0.9, -0.2, 0.8, 0.1, 0.5];
+    check_create_graph_family(
+        "multi_margin_loss",
+        &z,
+        &[6],
+        multi_margin_loss_loss,
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn multilabel_margin_loss_create_graph_via_facade() {
+    let z = [0.3, 0.9, -0.2, 0.8, 0.1, -0.5];
+    check_create_graph_family(
+        "multilabel_margin_loss",
+        &z,
+        &[6],
+        multilabel_margin_loss_loss,
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn multilabel_soft_margin_loss_create_graph_via_facade() {
+    let z = [0.3, 0.9, -0.2, 0.8, 0.1, -0.5];
+    check_create_graph_family(
+        "multilabel_soft_margin_loss",
+        &z,
+        &[6],
+        multilabel_soft_margin_loss_loss,
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn cosine_embedding_loss_create_graph_via_facade() {
+    let z = [
+        0.5, -0.3, 0.8, 0.6, 0.2, -0.5, 0.1, 0.7, -0.4, 0.5, 0.3, -0.4,
+    ];
+    check_create_graph_family(
+        "cosine_embedding_loss",
+        &z,
+        &[12],
+        cosine_embedding_loss_loss,
+        true,
+        5e-3,
+    );
+}
+
+#[test]
+fn triplet_margin_loss_create_graph_via_facade() {
+    let z = [
+        0.5, -0.3, 0.8, 0.6, 0.2, -0.5, 0.3, -0.1, 0.5, 0.1, 0.5, -0.2, 0.9, 0.5, 0.1, 0.7, -0.4,
+        0.3,
+    ];
+    check_create_graph_family(
+        "triplet_margin_loss",
+        &z,
+        &[18],
+        triplet_margin_loss_loss,
+        true,
+        5e-3,
     );
 }
 

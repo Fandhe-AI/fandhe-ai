@@ -9037,7 +9037,7 @@ fn l1_grad_sign(d: f32) -> f32 {
 /// は hinge が有効（`cos − margin >= 0`。`clamp_min` の VJP 契約——
 /// 境界ちょうど 0 でも勾配を通す）なときのみ `dx1 = s·d(cos)/d(x1)` を
 /// 流す。`scale` は `Mean`／`Sum` 縮約済みの上流勾配係数（`f64`）。
-fn cosine_embedding_loss_vjp(
+pub(crate) fn cosine_embedding_loss_vjp(
     x1: &Tensor<f32>,
     x2: &Tensor<f32>,
     y: &Tensor<f32>,
@@ -9146,7 +9146,7 @@ pub(crate) fn margin_ranking_loss_vjp(
 /// （`eval::triplet_distance_stats`・`eval::p_norm_grad_f64` を再利用し
 /// forward と同じ距離統計を再計算する）をそのまま実装する。hinge が
 /// 無効な要素は寄与 0。
-fn triplet_margin_loss_vjp(
+pub(crate) fn triplet_margin_loss_vjp(
     anchor: &Tensor<f32>,
     positive: &Tensor<f32>,
     negative: &Tensor<f32>,
@@ -9451,7 +9451,7 @@ fn ctc_loss_vjp(
 /// CrossEntropyLossWithOptions` doc 参照）。`targets`／
 /// `options.class_weight` は非追跡のため戻り値は `logits` 側の勾配のみ
 /// （呼び出し元 `vjp()` の `CrossEntropyLossWithOptions` 分岐参照）。
-fn cross_entropy_loss_with_options_vjp(
+pub(crate) fn cross_entropy_loss_with_options_vjp(
     logits: &Tensor<f32>,
     targets: &Tensor<i32>,
     class_dim: usize,
