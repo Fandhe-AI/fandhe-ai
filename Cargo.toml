@@ -16,7 +16,7 @@
 # facade の公開 API だけに依存し、facade の安定性保証の外にある。外部依存の新規追加はなく
 # [workspace.dependencies] へは影響しない（docs/hf-hub-integration-design.md §9）。
 #
-# backend-rocm（13 個目・イシュー #3154）は ROCm（AMD GPU）バックエンドの雛形（`publish = false`）。
+# backend-rocm（13 個目・イシュー #3154）は ROCm（AMD GPU）バックエンドの雛形（`publish = true`・公開準備済みで crates.io 未公開。0.14.0 で公開予定・#3771 承認・#3774）。
 # HIP は `libloading`（第 12 区分）で実行時に動的ロードし、ビルド時にはリンクしない
 # （ROCm 非搭載環境でもビルドが通る。docs/backend-rocm-hip-ffi-decision.md）。
 # `BackendOps` の骨格（#3431）として tensor-core・backend-cpu へ path 依存する。facade からは参照しない。

@@ -5,26 +5,42 @@
 # 線形代数 f64 カーネル（#3444）を起動できる。
 #
 # 依存方向: `tensor-core`（`BackendOps` 等）と `backend-cpu`（ホスト経路の委譲先・parity 参照）へ
-# 依存する（R0・イシュー #3431）。facade からは参照しない（Device への ROCm 追加は #3157）。
+# 依存する（R0・イシュー #3431）。facade からは #3853 まで参照しない（Device への ROCm 追加は #3157）。
 #
-# 公開区分: `publish = false`（workspace 既定を継承）。
+# 公開区分: `publish = true`（crates.io 公開準備済み・未公開。イシュー #3774）。facade に
+# `Device::Rocm` を出すには facade が本クレートを通常依存に持つ必要があり、そのためには
+# 本クレートが公開クレートでなければならない（docs/backend-rocm-device-exposure-decision.md §10.9）。
+# 公開は 0.14.0 で行う予定（所有者承認: #3771 コメント 6554565469。
+# https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469）。実際の publish と
+# 版の 0.14.0 へのバンプは Phase 11 で所有者が指示したときだけ行う
+# （docs/crates-io-publishing-order.md §15）。
 #
 # `libloading` は無条件依存（cfg なし。cudarc の dynamic-loading と同じ構成）。ビルド時に
 # `libamdhip64` へリンクしないため ROCm 非搭載でもビルドが成立する。承認根拠は
 # deps-policy.md 第 12 区分・docs/backend-rocm-hip-ffi-decision.md §5。
 [package]
 name = "fandhe-ai-backend-rocm"
-description = "ROCm（AMD GPU）バックエンドの雛形（HIP を実行時に動的ロードする。非公開）"
+# crates.io 公開向け説明文（英語。条件付き・実験的である旨を明示する。#3774）。
+description = "Experimental ROCm (AMD GPU) backend (HIP loaded at runtime via libloading) for a from-scratch Rust AI/ML library"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+# crates.io の本クレートページに表示される readme。「fandhe-ai 経由での利用が唯一のサポート面・
+# 本クレートへの直接依存はサポート対象外」を明示する per-crate 方式（backend-cuda と同じ）。
+readme = "README.md"
+# ルート `[workspace.package]` の `publish = false`（非公開クレート向け既定）を明示的に上書きする。
+publish = true
+# keywords（5 個以内・各 20 文字以内）と categories（backend-cuda と同じ検証済み slug）。
+keywords = ["rocm", "hip", "amd", "gpu", "machine-learning"]
+categories = ["science", "mathematics", "hardware-support"]
 
 [dependencies]
 libloading.workspace = true
 # `impl BackendOps for RocmBackendOps`（src/ops.rs）の trait・Tensor・エラー型。workspace 内の path 依存で
-# 許容依存区分（外部クレート）の追加には当たらない。`publish = false` のため `version` は付けない
-# （crates.io 公開する場合は version の併記が必要。公開可否は所有者判断・被覆計画 §8 の Q2）。
-fandhe-ai-tensor-core = { path = "../tensor-core" }
+# 許容依存区分（外部クレート）の追加には当たらない。`publish = true` のため `version = "=0.13.0"`
+# （workspace 公開バージョンと完全一致）を併記する（併記しないと cargo-deny の wildcards で deny される）。
+# 0.14.0 へのバンプ時は他の公開クレートと同時に更新する（docs/crates-io-publishing-order.md §15）。
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.13.0" }
 # sum/max のホスト経路（R3 でカーネル化するまで）の委譲先と、テストの CPU 参照。
-fandhe-ai-backend-cpu = { path = "../backend-cpu" }
+fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.13.0" }
