@@ -17,12 +17,29 @@
 //!   行える。推定値・Linux／M4 Max 開発機の代替値は入れない
 //! - `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD` はここで持たない
 //!   （正本は `crates/tensor-core/src/tolerance.rs`）
+//!
+//! デバイス軸（イシュー #3777）: 行は `(case, device)` の組で引く。CUDA の行を
+//! Metal へ流用する穴を塞ぐため。Metal の行は「S3（split-K 非発火）を守れない
+//! 族」に限り、`crates/backend-metal/tests/common/splitk_parity_baseline.rs::
+//! SplitKParityBaseline` と同じ非後退検査（`fail_count`・総要素数の一致・3 つの
+//! ceiling）で判定する。GEMM 単体の split-K baseline を合成した二階の出力へ流用
+//! しない（§48.5）。
+
+/// baseline 行が対象とする実機デバイス。ラベルだけなので cfg は付けない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 行を足す Phase 10 が使う語彙。雛形は `lookup` の引数でのみ使う。
+pub enum BaselineDevice {
+    Cuda,
+    Metal,
+}
 
 /// 1 ケース分の記録済み baseline。全フィールドは実機実測値の転記に限る。
 #[derive(Debug, Clone, Copy)]
 pub struct GpuParityBaseline {
     /// 登録表のケース名（`CASES[i].name`）と逐語一致させる。
     pub case: &'static str,
+    /// 実測したデバイス。`lookup` は `(case, device)` の両方が一致する行だけを返す。
+    pub device: BaselineDevice,
     /// 比較した全要素数。形状がずれたら不一致として止める。
     pub total: usize,
     pub fail_count: usize,
@@ -36,12 +53,14 @@ pub struct GpuParityBaseline {
 /// 記録済み baseline。**空**（所有者承認と実機実測が揃うまで入れない）。
 pub const BASELINES: &[GpuParityBaseline] = &[];
 
-/// `case` の baseline を引く。無い・承認 URL が空のときは undetermined。
-pub fn lookup(case: &str) -> Result<&'static GpuParityBaseline, String> {
+/// `(case, device)` の baseline を引く。無い・承認 URL が空のときは undetermined。
+pub fn lookup(case: &str, device: BaselineDevice) -> Result<&'static GpuParityBaseline, String> {
     let row = BASELINES
         .iter()
-        .find(|b| b.case == case)
-        .ok_or_else(|| format!("undetermined: baseline に `{case}` の行がありません"))?;
+        .find(|b| b.case == case && b.device == device)
+        .ok_or_else(|| {
+            format!("undetermined: baseline に `{case}` ({device:?}) の行がありません")
+        })?;
     if row.approval_url.is_empty() {
         return Err(format!(
             "undetermined: baseline `{case}` に所有者の承認 URL がありません"

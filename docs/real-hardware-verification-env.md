@@ -281,6 +281,10 @@ torch は system には未導入。venv 作成手順（`python3 -m venv .venv-mp
 
 イシュー #383 実測時点の実測事実: `python3 -m venv .venv-mps-bench && ./.venv-mps-bench/bin/pip install torch` で torch 2.13.0（Python 3.12.12・`cp312-cp312-macosx_14_0_arm64` ホイール）が導入され、`torch.backends.mps.is_available() == True` を確認済み（Apple M4 Max・macOS 26.6）。venv はワークツリー直下に作成し、計測後もコミットしていない。
 
+### 7.3 二階微分（`create_graph`）の Metal parity 雛形（#3777）
+
+雛形は §4.9 と同じ `crates/facade/tests/create_graph_gpu_parity.rs` で、Metal 版は `create_graph_<族>_metal_matches_cpu`（`cfg(target_os = "macos")`・`#[ignore]`）。§7.1 の形（`zsh -lc` で包む・`CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai`）で `cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>` を別プロセスで実行する（`--release` なし。事前に `--no-run`、各コマンドの前に `--list` でちょうど 1 件か確かめる）。事前登録の雛形は `docs/perf/logs/create-graph-gpu-parity-template/RULE.txt`。Metal の `gemm_fp32_strict` は split-K を通りうるため、各族は子テープ構造内の MatMul 形状を `SplitKShapes` で宣言し、`should_split_k` が `None` であること（S3）を macOS で検査する。避けられない族は baseline の Metal 行（実測値と所有者の承認 URL が揃った場合に限る。置き場は空）に回す。この雛形の時点では実機で実行していない（未実測。実測は #3858・#3859）。
+
 ## 8. 結果の記録先
 
 実測結果は各 issue 本文が指定する `docs/perf/` 配下の該当ファイルへ記録する。例：

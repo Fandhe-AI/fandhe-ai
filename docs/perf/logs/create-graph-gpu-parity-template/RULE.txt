@@ -1,9 +1,9 @@
-事前登録規則の雛形（二階微分 create_graph の CUDA 実機 parity。イシュー #3776。測り方は docs/autodiff-higher-order-grad-decision.md §48）
+事前登録規則の雛形（二階微分 create_graph の CUDA・Metal 実機 parity。イシュー #3776・#3777。測り方は docs/autodiff-higher-order-grad-decision.md §48）
 このファイルは雛形であり、未実測。Phase 10 の実測 issue が `docs/perf/logs/<名前>-<issue 番号>/RULE.txt` へ写し、
 <...> を埋めて実機の実行より前にコミットする。書式は docs/perf/logs/metal-phase2-4-parity-3172/RULE.txt を踏襲する。
 宣言日時（UTC）: <YYYY-MM-DDThh:mmZ>（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
 
-機体: <cuda-node>（ホスト名は記録しない。Linux／M4 Max 開発機では測らない・記録しない。docs/real-hardware-verification-env.md §1）。
+機体: <cuda-node> または <metal-node>（どちらかを宣言する。ホスト名は記録しない。Linux／M4 Max 開発機では測らない・記録しない。docs/real-hardware-verification-env.md §1）。
 
 対象コミット（テスト入力・判定を含むコミット）:
   <40 桁小文字 16 進数>
@@ -19,20 +19,27 @@
   cargo test -p fandhe-ai --test create_graph_gpu_parity --no-run
 
 コマンド（テスト名は固定の文字列だけ。外部入力をシェル展開しない。1 テスト 1 プロセス 1 回。--release なし。外部 timeout つき）:
-  cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 create_graph_<族>_cuda_matches_cpu
+  cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 create_graph_<族>_{cuda,metal}_matches_cpu
+  （--release は付けない。docs/real-hardware-verification-env.md §7.1 のベンチ例の --release は parity には使わない。）
+  Metal は §7.1 と同じく zsh -lc で包み、CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai（ログではマスク）、長時間なら nohup で切り離す。
 選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行で対象のフルパスと逐語一致すること。
 
 経路区分と既定の切替状態（ケースごとに宣言する）:
   <ケース名>: 経路区分 K／H／G（H の pass は経路の parity でありカーネル同士の parity ではない）
-  既定のまま触らない: TF32 opt-in OFF・GPU linalg ゲート OFF
+  既定のまま触らない: TF32 opt-in OFF・GPU linalg ゲート OFF・Metal split-K の実行時トグル（既定のまま）
+Metal の S3 宣言（ケースごと。§48.4）:
+  <ケース名>: NoMatMul／Listed（子テープ構造内の MatMul の (m, n, k) を列挙。should_split_k が None であること）／
+    Rule（k < max(m, n) となるよう形状を選んだ規則の文を逐語引用）。
+  split-K が避けられない族は Judge::Baseline の Metal 行（BaselineDevice::Metal）が必要。行が無ければ undetermined。
 
 判定（判定契約は各テストのコードが定める。ここでは変えない）:
   Q1 first_order が同デバイスの素の backward と bit 一致／Q2 cg.grad・Q3 二階 H v（ゼロでない）・Q4 孫テープ再生は
   GPU と CPU の REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。tolerance 定数・baseline は不変）／
   Q5 拒否は Err(Backward) かつ子テープが空。
+  Metal の fast-math による pointwise の ulp 差は REQ-2 で受け、bit 一致は主張しない（§48.5）。ただし Q1 は同一デバイス内の bit 一致なので対象外。
   pass: exit 0 かつ "running 1 test"・"1 passed; 0 failed"。
   fail: 1 件以上の失敗。
-  undetermined: ノード到達不能、ビルド不能、timeout、--list の選択が期待と異なる、自己検査失敗、baseline に行が無いケース。
+  undetermined: ノード到達不能、ビルド不能、timeout、--list の選択が期待と異なる、自己検査失敗、baseline に行が無いケース、Metal の S3 違反（宣言した形状で split-K が発火する）、Metal の baseline 行が無いケース。
 
 実行回数: 各コマンド 1 回。時間計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。
   再実行するなら RULE.txt を登録し直す。計測中は他のビルドを並走させない。
