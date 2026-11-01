@@ -4119,7 +4119,7 @@ PR は `Refs` にする。
 
 - 状態: **実装済み**（設計は §34）。承認は #3767 の所有者の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>（2026-11-01。「設計記録の推奨どおり、すべての論点を承認」）。§34.15 の論点表の番号と回答本文の番号がずれる点は、全論点の一括承認に含まれると読んだ（§34.0 末尾に転記）。
 - 基準 sha: `4e19fdff2`。
-- 対象は 4 Op。`OrderSelect`・`MedianAll`・`Quantile` は #3790 の担当で、本 PR では `false` のまま。
+- 対象は 4 Op。`OrderSelect`・`MedianAll`・`Quantile` は #3790 の担当で、本 PR の時点では `false` だった（記録時点の状態。現在は #3790 の取り込みで 7 Op とも `true`。§50）。
 
 ### 49.1 実装したもの
 
@@ -4137,7 +4137,7 @@ PR は `Refs` にする。
 
 ### 49.2 設計からの逸脱
 
-- §34.4 の「7 Op が `true`」は本 PR では 4 Op（`tape.rs` の単体テスト `selection_reduce_family_supports_create_graph` は 4 Op が `true`、`MedianAll`・`Nansum`・`Nanmean` が `false`）。兄弟 PR が族を反転したらこの一覧を直す。
+- §34.4 の「7 Op が `true`」は、本 PR の時点では 4 Op だった。兄弟 PR（#3790）の取り込み後は 7 Op とも `true` で、`tape.rs` の単体テスト `selection_reduce_family_supports_create_graph` は `MedianAll` を含めて `true` を要求し、隣接する `Nansum`・`Nanmean` は `false` のままであることを確認する（§50）。
 - §34.4 の「`gpu_extended_ops_match_cpu` へ足す」は、§48.4 の命名表（族ごとに `create_graph_<族>_cuda_matches_cpu`）に従い、`create_graph_gpu_parity.rs` の登録表 `CASES` へ族 `select_reduce_minmax` の 4 行を足す形に置き換えた。既存の `gpu_extended_ops_match_cpu` は変えていない。実機の形状は `[17, 33]`（S2）の 1 種で、軸 1 縮約。小形状（S1）は CPU の統合テストが担う。
 - §34.1 のとおり本族を拒否する否定ガードは `api_surface.rs` に存在しなかったため、「否定ガードの反転」は行っていない。受け入れ条件は次の対応で満たした: 正ガード = facade 挙動テスト `{max,min,amax,amin}_create_graph_via_facade` と、doctest の実在検査 `backward_create_graph_select_reduce_usage_doctest_is_present_and_compiled`（`api_surface.rs`）。すり替え検出 = `H v ≠ 0` の assert、検出器が空振りしないことの自己テスト、fail-closed 拒否テスト。
 
