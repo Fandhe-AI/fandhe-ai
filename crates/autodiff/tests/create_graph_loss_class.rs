@@ -1177,6 +1177,29 @@ fn triplet_p_between_1_and_2_tiny_component_is_rejected() {
     );
 }
 
+/// Triplet の f32 丸め後に最大成分が 1 を僅かに下回り、巨大な p で `|u|^p` が 0 に潰れる入力は拒否する
+/// （norm=0 の Div で二階が NaN になるのを防ぐ。Codex P1）。
+#[test]
+fn triplet_large_p_f32_rounding_underflow_is_rejected() {
+    fn build<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        tri_loss(
+            z,
+            &TripletMarginOptions::default()
+                .p(1e10)
+                .eps(0.0)
+                .margin(3.0)
+                .swap(false),
+        )
+    }
+    assert_rejected_then_retry_ok(
+        "triplet large p underflow",
+        build,
+        &[0.0, 0.0, -1.27, 0.0, -2.0, 0.0],
+        build,
+        &[0.5, 0.25, 1.0, 1.5, 2.0, 0.75],
+    );
+}
+
 /// ignore 行の logits に NaN があっても二階が NaN にならない。
 #[test]
 fn cewo_ignore_row_nan_logits_keep_second_order_finite() {

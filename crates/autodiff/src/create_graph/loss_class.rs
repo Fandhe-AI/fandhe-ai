@@ -844,16 +844,30 @@ fn pair_info(
         }
         stage(mx)?;
         let inv = (1.0 / mx) as f32;
-        if p > 1.0 && p < 2.0 {
-            // 曲率の成分ごとの負べき (p-1)·(|v_k|/mx)^(p-2) と cotangent・逆スケールの積（§40.12）。
-            for &x in v.iter() {
-                let u = x.abs() / mx;
-                stage(u.powf(p - 2.0))?;
-                stage(sb * (p - 1.0) * u.powf(p - 2.0) * f64::from(inv))?;
-            }
-        }
         if p != 1.0 {
-            stage(sb * f64::from(inv) * (p + 1.0) * d as f64)?;
+            // 子テープの f32 構造（`u = v·inv`、`|u|^p` の和、`norm = ssum^(1/p)`）を、f32 に丸めた
+            // `u` から f64 で再現して検査する（設計 §40.12）。`u` の最大成分は丸めで 1 を僅かに下回りうるため、
+            // 巨大な p では `|u|^p` が全成分で 0 に潰れ、norm が 0 になって Div に非有限値が入る。
+            let us: Vec<f64> = r.iter().map(|&c| f64::from((c * inv).abs())).collect();
+            let ssum: f64 = us.iter().map(|u| u.powf(p)).sum();
+            if !ssum.is_finite() || ssum < 2f64.powi(-100) {
+                return Err(invalid(
+                    "Triplet: f32 丸め後の |u|^p の和が下限を割る（norm が 0 へ潰れる）ため拒否",
+                ));
+            }
+            let norm = ssum.powf(1.0 / p);
+            stage(1.0 / ssum)?;
+            stage(1.0 / norm)?;
+            if p > 1.0 && p < 2.0 {
+                // `pair_grad` は `(|u|/norm)^(p-1)` を組むため、二階の係数は (p-1)·(|u|/norm)^(p-2)/norm
+                // （norm ≥ 1 のとき `|u|^(p-2)` より大きい）。実際の評価式どおりに cotangent と積で検査する。
+                for &u in &us {
+                    let c = (p - 1.0) * (u / norm).powf(p - 2.0) / norm;
+                    stage(c)?;
+                    stage(sb * c * f64::from(inv))?;
+                }
+            }
+            stage(sb * f64::from(inv) * (p + 1.0) * d as f64 / ssum.min(1.0))?;
         }
         for k in 0..d {
             inv_mx[base + k] = inv;
