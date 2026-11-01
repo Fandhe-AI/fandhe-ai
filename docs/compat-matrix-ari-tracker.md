@@ -45,7 +45,7 @@
 | 17 | A1: EMA と `compile_with_amp` の併用（AMP の skip step） | 最適化・学習ループ | 保留 | #3752（`docs/autodiff-ema-decision.md` §17） | 未承認（#3769 待ち） | #3831 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
 | 18 | A2: EMA の減衰率ウォームアップ | 最適化・学習ループ | 保留 | #3753（`docs/autodiff-ema-decision.md` §18） | 未承認（#3769 待ち） | #3833 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
 | 19 | A3-a: param groups と AMP の併用 | 最適化・学習ループ | 保留 | #3752（`docs/autodiff-param-groups-decision.md` §14。skip 規則は `docs/autodiff-ema-decision.md` §17） | 未承認（#3769 待ち） | #3832 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
-| 20 | A3-b: param groups と `LrSchedule` の併用 | 最適化・学習ループ | 保留 | #3754 | 未承認（#3769 待ち） | #3834 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
+| 20 | A3-b: param groups と `LrSchedule` の併用 | 最適化・学習ループ | 保留 | #3754（`docs/autodiff-param-groups-decision.md` §15） | 未承認（#3769 待ち） | #3834 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
 | 21 | A3-c: param groups の `state_dict` 保存 | 最適化・学習ループ | 保留 | #3755 | 未承認（#3769 待ち） | #3835、#3836 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
 | 22 | A3-d: param groups と `DeviceParamStore` 常駐更新 | 最適化・学習ループ | 保留 | #3756 | 未承認（#3769 待ち） | #3837、#3838 | 未特定（設計記録で確定） | 未実測（#3862 は GB10、#3863 は Mac mini） | 未確定 |
 | 23 | A3-g: `Optimizer` に Adadelta・Adamax・NAdam・RAdam | 最適化・学習ループ | 保留 | #3757 | 未承認（#3769 待ち） | #3839、#3840 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
