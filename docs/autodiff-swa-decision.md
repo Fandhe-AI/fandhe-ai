@@ -291,3 +291,112 @@ SWA 系列（親 #3057）の最後の 1 件。承認根拠は §15 の D-A の�
 - **0.11.0 の対応表**: `docs/perf/framework-compare-feature-matrix-0.11.0.md` はタグ `v0.11.0` 時点の監査スナップショットのため書き換えない。次回監査（0.12.0）への申し送り: 「SWA の fit 結線は `Callback::Swa` として公開済み。`FitConfig`／`Sequential` 経路は禁止経路（対象外の非目標）として扱う」。
 - **不変**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`・`FitConfig` の derive（`Copy + Eq`）・既存の公開シグネチャ・`SWA_HOLD_PROBE_BODY`・`MIN_KNOWN_PROBE_BLOCKS`。
 - **スコープ外**: `update_bn`（§16.6）、param group ごとの `swa_lr`、resident 経路、`SwaCallback` の doctest への `history.lr` 検査の追加。
+
+## 20. 保守・運用チェックリスト（イシュー #3751）: SWA の `FitConfig` 形
+
+雛形 `docs/decision-record-template.md`（#3716）の 9 節に沿って、SWA を `FitConfig` の設定として出すかを判断する。基準 sha は `origin/main` = `cafcc24af`（行番号はこの sha で実測）。
+
+- 追跡表 `docs/compat-matrix-ari-tracker.md` の行 #16 が本件である。#3769 の論点 1 では「項目 17」と呼んでいるが、追跡表の通し番号では行 #16 にあたる（行 #17 は EMA×AMP〈#3752〉で別件）。
+- 承認の状態: **未承認**。#3769 の論点 1 の回答待ちで、承認を得たとは書かない。
+- 実装または対象外の記録は #3830（承認された場合のみ）。実機 parity は該当なし。
+
+### 20.0 課題と案の比較
+
+SWA は `Callback::Swa(SwaCallback)` から fit に組み込める（§16〜§19）。`FitConfig` にも設定の入口を足すかどうかが課題である。§16.5 は足さない理由を「`swa_lr: f32` を持つと `Eq` が外れて破壊的になる」とした。しかし `validation_split_bits: Option<u32>`（`crates/facade/src/compat/training.rs:316`）は f32 を bits で持って `Copy + Eq` を保っており、この理由は決め手にならない。**§16.5 の理由は、本節の理由 1〜3 で置き換える**（§16.5 本文は書き換えず、§19 が §9 を上書きしたのと同じ形で更新する）。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| **A（推奨）** | 対象外にする。`Callback::Swa` に一本化し、`FitConfig`／`Sequential` 経路は禁止経路のまま | 公開名 0 件。状態の持ち主が callback 1 つ。EMA（`Callback::Ema` 一本化）と入口が揃う | 単純な `fit()` からは使えない。`fit_with_callbacks(x, y, cfg, None, &mut [Callback::Swa(..)])` の 1 行で代替できる |
+| B | `FitConfig::swa(..)` を追加して実装する | 設定だけで SWA を有効にできる | 下の理由 1〜3 がそのまま当てはまる |
+
+**推奨: 対象外にする（案 A）**。理由は重い順に次の 4 つ。
+
+1. **状態を持てない（決め手）**。SWA は fit 呼び出しをまたいで状態を持ち続ける。中身は平均化重み（`AveragedModel`）・`n_averaged`・通算 epoch 数・アニールの基準 lr・退避した生の重みである（§16.2・§16.3・§17・§18）。継続 fit の書き戻しと `Err` 時のスナップショット巻き戻しもこの状態に依存する。`FitConfig` は `Copy` の値型で状態を持てないため、持ち主は次のどちらかになる。
+   - (i) `Sequential` の内部に置く。退避した重みや平均を取り出す新しい inherent accessor を `Sequential` に足すことになり、`SwaHoldDoctestGuard` と `swa_surface_violations` が禁じる経路そのものになる。持ち主も callback と並んで 2 つになる。
+   - (ii) fit 呼び出しごとに使い捨ての callback を作る。§19 の T2 で固定した「分割 fit と一括 fit の bit 一致」が成り立たず、`raw_state_dict()` を取り出す経路もなくなり、元の重みに戻せない。
+2. **入口が 2 系統になる**。`Callback::Swa` との併用規則（重複すると平均が二重になる）、§16.4 の拒否 7 条件、§16.3 の終了時の上書きと復元を、2 か所で同じ意味に保ち続ける保守コストがかかる。
+3. **EMA と揃える**。EMA は `FitConfig::use_ema` 案（`docs/autodiff-ema-decision.md` §5 案 A）を採らず `Callback::Ema` に一本化している（同 §10.1・§10.2 (d)）。`EmaHoldDoctestGuard`（`crates/facade/src/lib.rs:4501`）が `FitConfig`／`Sequential` 経路を禁止経路として固定している。SWA だけが `FitConfig` 形を持つと、学習の拡張の入口が非対称になる。
+4. **得るものが小さい**。上表のとおり `fit_with_callbacks` の 1 行で同じことができる。
+
+### 20.1 公開形
+
+**案 A（推奨）**: 公開名を追加しない。コードは変えない。次のガードは禁止経路専用として維持する。
+
+- `SwaHoldDoctestGuard`（`crates/facade/src/lib.rs:4608`）
+- `swa_hold_doctest_globs_all_pub_modules`（`crates/facade/tests/api_surface.rs:19666`）・`swa_hold_doctest_probe_body_matches_fixed_contract`（同 :19690）
+- `swa_surface_violations`（同 :19789）・`facade_exposes_swa_only_in_approved_shape`（同 :19934）
+- `fit_config_declares_no_swa_fields`（同 :20389）と自己テスト（同 :20397）
+- `fit_config_keeps_copy_eq_for_0_9_0_compat`（同 :21921）
+
+正ガードへの反転は行わない。正の経路は `Callback::Swa` 側の正ガード（`callback_swa_variant_*`・`compat_callback_swa_variant_has_exact_approved_shape`）が引き続き固定する。
+
+**案 B（比較用。採る場合のみ #3830 が実装）**:
+
+```rust
+// fandhe_ai::compat::FitConfig（フィールドはすべて pub(super)）
+pub fn swa(self, swa_start: usize, swa_lr: f32, anneal_epochs: usize,
+           anneal: fandhe_ai::optim::SwaAnneal) -> Self;
+// 内部: swa_start: Option<usize> / swa_lr_bits: u32 / swa_anneal_epochs: usize / swa_anneal: SwaAnneal
+```
+
+- bits で持つ必要があるのは `swa_lr` だけ。`SwaAnneal` は `Copy + Eq` を derive 済み（`crates/autodiff/src/nn/optim/lr_scheduler.rs:1089`）。
+- 検証は `validation_split` と同じく fit 呼び出し時に行う。状態の持ち主は `Sequential` 内部の `Option<SwaCallback>` 相当で、取り出し用 accessor（名前は所有者の論点）が要る。
+- `Callback::Swa` との併用は優先規則を作らず、fit 開始前に `InvalidArgument` で拒否する。§16.4 の 7 条件は同じ判定関数を共有する。
+- 反転するガード: `fit_config_declares_no_swa_fields` を承認したフィールド集合への完全一致を求める正ガードへ反転し自己テストも更新する。`swa_surface_violations` の許可箇所に `training.rs` の `fn swa` と accessor を足す。`SwaHoldDoctestGuard` はプローブ名（`use_swa`／`swa_start`／`swa_lr`）を採らない限り維持し、採るなら `FitConfig` の impl だけを外して固定文言のガードも更新する。`fit_config_keeps_copy_eq_for_0_9_0_compat` は変えずに通す。
+
+### 20.2 rustdoc と doctest の例
+
+- 案 A: 新しい doctest は足さない。`SwaHoldDoctestGuard` の説明文を「§20 で `FitConfig` 形は対象外と判断した。禁止経路専用」へ更新するのは、承認後の #3830 で行う。
+- 案 B: `FitConfig::new(10, 32).swa(2, 0.05, 0, SwaAnneal::Cos)` の `Copy`／`Eq` を示す例。facade 単独・CPU だけで通る。失敗系は `compile_fail` に頼らず（stable rustdoc はコード未照合）、統合テストで `Err` の variant まで照合する。
+
+### 20.3 エラー型
+
+既存の `AutodiffError::InvalidArgument` だけを使い、新しい variant は作らない。案 B の検証順は、fit 開始前に (1) `swa_lr` の有限・正の検査、(2) `Callback::Swa` との併用拒否、(3) §16.4 の 7 条件とし、いずれも `begin_fit` と確保より前に行う。本番経路で `unwrap`／`expect` を使わない。
+
+### 20.4 テスト計画
+
+| 案 | CI（ubuntu-latest） | `#[ignore]`（実機） |
+|---|---|---|
+| A | 既存の禁止経路ガード（20.1 の一覧）を維持するだけ。新規テストなし | なし |
+| B | `crates/facade/tests/compat_sequential_fit_swa_config.rs`（仮称）: `Callback::Swa` と bit 一致・併用拒否・`swa_lr` のビット比較による `Eq`・分割 fit | なし |
+
+SWA はホストの `Tensor<f32>` 計算だけなので、CUDA／Metal／ROCm の実機の列は「該当なし（ホスト計算のみ）」である（未実測ではない）。
+
+### 20.5 数値契約
+
+REQ-2 の統一複合判定は不変。FMA 契約・f64 の長軸縮約への影響はなく、baseline の追加もない。案 B でも `Callback::Swa` 経由との bit 完全一致で検査する。
+
+### 20.6 互換への影響
+
+`docs/api-compat-0.14.0-decision.md` §8 の手順 1〜4 で判定する。案 A は「該当なし」。案 B は「追加のみ」（`FitConfig` のフィールドは `pub(super)` で外から構築できず、bits で持てば derive も保たれる。同 §1.3 の `FitConfig` 行）。`f32` を直接持つ形は破壊的で承認が要るため採らない。
+
+### 20.7 適用記録・索引・追跡表
+
+- 本 PR で `docs/README.md` の索引と、追跡表の行 #16 の「設計記録」セルを更新した。「承認」は未承認、「0.14.0 の区分」は未確定のまま。公開状態は「未公開」。
+- 適用記録の案（`docs/compat-api-scope.md` への追記は承認後に #3830 が行う）:
+  - 対象外になった場合: 対象外の節に「SWA の `FitConfig` 形（`use_swa`・`swa_start`・`swa_lr`）。理由は `docs/autodiff-swa-decision.md` §20.0。承認 `<#3769 の回答 URL>`」を追記する。
+  - 実装になった場合: §5 に公開名・配置・承認 `<#3769 の回答 URL>` を追記する。
+
+### 20.8 ベンチと性能への影響
+
+案 A は既定経路を変えない。案 B は SWA 未指定の既定経路で分岐が 1 つ増えるだけで、`Callback::Swa` を含まない fit と bit 一致する。ベンチは足さない（未実測）。
+
+### 20.9 依存の追加の有無
+
+なし。許容 12 区分と禁止リストの照合に該当はなく、新しい `unsafe` もない。
+
+### 20.10 所有者へ戻す論点（#3769 の論点 1 へ渡す）
+
+| # | 論点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|---|
+| 1 | 公開形 | A 対象外 / B `FitConfig::swa` で実装 | A | 実装へ進めない。禁止経路ガードを維持 |
+| 2 | B のときの状態の持ち主と accessor 名 | `Sequential` 内部に置く案ほか | （B を採る場合に別途提示） | 実装へ進めない |
+| 3 | B のときの `Callback::Swa` との併用 | 拒否 / 優先規則 | 拒否 | 実装へ進めない |
+| 4 | §16.5 の理由の置き換え（本節の理由 1〜3）を承認するか | 承認 / 据え置き | 承認 | §16.5 を据え置き、禁止経路ガードを維持 |
+
+### 20.11 セキュリティ観点・スコープ外
+
+- A03: 外部入力の経路は増えない。案 B の `swa_lr` は確保と `begin_fit` より前に非有限・非正を拒否する。A04／A08: 既定はいずれも fail-closed で、黙って優先順位を決める経路を作らない。A05／A06: tolerance・baseline・閾値・依存に触れない。
+- スコープ外: `update_bn`（§16.6）、param group ごとの `swa_lr`、resident 経路、カスタム `avg_fn`、EMA 側の `FitConfig` 形（#3753）・EMA×AMP（#3752）、承認後の記録 PR（#3830）と `docs/compat-api-scope.md` への追記、`SwaHoldDoctestGuard` の説明文更新。
+- Closes #3751。Refs #3769・#3830。
+- **不変**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`・既存節の本文・コード。
