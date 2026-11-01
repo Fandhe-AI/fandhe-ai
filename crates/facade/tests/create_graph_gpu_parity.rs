@@ -66,7 +66,8 @@ enum Judge {
 struct Tapes {
     parent: Tape,
     child: Tape,
-    #[allow(dead_code)] // Q4 を測る族の実装 issue が使う。
+    /// Q4 用の別の空の子テープ（`jvp_create_graph` が受け取る）。
+    jvp_child: Tape,
     grand: Tape,
 }
 
@@ -293,12 +294,28 @@ fn run_select_reduce(
     let grads2 = tp.child.backward(&hv_loss).expect("child backward");
     let xc = cg.child_var(&x).unwrap().expect("mirror");
     let hv = vals(grads2.get(&xc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。同じ損失の微分可能 jvp（方向 `dir`）の出力を孫テープで
+    // `x` について逆伝播し、その勾配を GPU と CPU で比べる（子は上と別の空テープ）。
+    let tangent = t(
+        (0..n).map(|i| 0.5 + 0.01 * (i % 7) as f32).collect(),
+        &[rows, cols],
+    );
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &x, &tangent, &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rx = res.child_var(&x).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rx).unwrap().expect("replay grad"));
     Outputs {
         first_order,
         plain,
         grad,
         hv,
-        replay: None,
+        replay: Some(replay),
     }
 }
 
@@ -360,6 +377,7 @@ fn tapes_for(device: Option<Device>) -> Tapes {
     Tapes {
         parent: mk(),
         child: mk(),
+        jvp_child: mk(),
         grand: mk(),
     }
 }
