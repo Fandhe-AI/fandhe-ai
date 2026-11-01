@@ -80,6 +80,12 @@ where
     hess
 }
 
+/// 区分定数な出力（Hinge・MarginRanking 等）の二階 backward が返す「追跡対象の祖先なし」エラーか。
+/// 二階が構造的にゼロである場合だけを許容し、他の Err は検証失敗として扱うための判定。
+fn is_untracked_ancestor_err(e: &AutodiffError) -> bool {
+    matches!(e, AutodiffError::Backward(m) if m.contains("勾配追跡対象の祖先を持たない"))
+}
+
 fn analytic_hessian<F>(build: F, z0: &[f32]) -> Vec<Vec<f64>>
 where
     F: for<'t> Fn(&'t Tape, &Var<'t>) -> BuildResult<'t>,
@@ -98,8 +104,10 @@ where
     for j in 0..n {
         let gj = gz.narrow(0, j, 1).unwrap().sum(None).unwrap();
         // 区分定数な成分（Hinge・MarginRanking の root）は追跡対象の祖先を持たず逆伝播できない（= 全ゼロ）。
-        let Ok(grads) = child.backward(&gj) else {
-            continue;
+        let grads = match child.backward(&gj) {
+            Ok(g) => g,
+            Err(e) if is_untracked_ancestor_err(&e) => continue,
+            Err(e) => panic!("analytic_hessian: 予期しない backward エラー {e:?}"),
         };
         // 区分定数な損失（Hinge・MarginRanking）の root では 2 階が z へ到達しない（全ゼロ）。
         if let Some(row) = grads.get(&cz).unwrap() {
@@ -618,10 +626,15 @@ where
             );
             let s = gz.sum(None).unwrap();
             let cz = cg.child_var(&z).unwrap().unwrap();
-            if let Ok(h) = child.backward(&s)
-                && let Some(row) = h.get(&cz).unwrap()
-            {
-                assert!(dense(row).iter().all(|v| v.is_finite()), "{ctx}: 2 階");
+            match child.backward(&s) {
+                Ok(h) => {
+                    if let Some(row) = h.get(&cz).unwrap() {
+                        assert!(dense(row).iter().all(|v| v.is_finite()), "{ctx}: 2 階");
+                    }
+                }
+                // 区分定数な損失は二階が追跡対象に届かない。この構造的ケースだけ許容する。
+                Err(e) if is_untracked_ancestor_err(&e) => {}
+                Err(e) => panic!("{ctx}: 2 階 backward が予期しないエラー {e:?}"),
             }
             true
         }
@@ -778,6 +791,24 @@ fn loss_class_mandatory_vectors_three_stages() {
             &CrossEntropyOptions::default().class_weight(t(vec![1e38, 1e38, 1e38], &[3])),
         ),
         &[0.1, 0.2, 0.3]
+    ));
+    // CEWO Mean: 重み和 W = 2e-40（非正規化数）は非ゼロ有限だが `1/W` が f32 で overflow する。
+    // 損失 `1e-10 * L^2` では `g/W` が約 1e30 で段検査を通るため、係数 `1/W` の検査がないと
+    // 二階勾配が非有限になる（codex P1）。受理は不可、拒否後の child は空。
+    assert!(!try_case(
+        "cewo Mean 重み和の逆数 overflow",
+        |tape, z| {
+            let l = z.reshape(&[1, 2])?.cross_entropy_loss_with(
+                &i32t(vec![0], &[1]),
+                1,
+                Reduction::Mean,
+                &CrossEntropyOptions::default().class_weight(t(vec![1e-40, 1e-40], &[2])),
+            )?;
+            l.mul(&l)?
+                .mul(&tape.var_no_grad(&Tensor::scalar(1e-10f32)))?
+                .sum(None)
+        },
+        &[0.0, 1.0]
     ));
     // Multi*: x = ±1e30。
     try_case(

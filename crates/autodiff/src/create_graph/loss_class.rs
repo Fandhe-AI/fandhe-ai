@@ -268,6 +268,19 @@ pub(super) fn cewo_cgrad<'c>(
     if reduction == Reduction::Mean && (!w32.is_finite() || w32 == 0.0) {
         return Err(invalid("CrossEntropy: 重み和 W が f32 で表せないため拒否"));
     }
+    // 子テープの `g.div(W)` は逆伝播で Div の微分係数 `1/W`（f32）を先に作る。W が非ゼロ有限でも
+    // 極小（例 1e-40 の非正規化数）だと `1/W` が f32 で overflow し、`g/W` が段検査を通っても
+    // 二階勾配が非有限になる。係数そのものを f32 と段検査の両方で拒否する（設計 §40.12 の総括判定）。
+    if reduction == Reduction::Mean {
+        let inv_w32 = 1.0f32 / w32;
+        if !inv_w32.is_finite() {
+            return Err(invalid(
+                "CrossEntropy: 重み和 W の逆数が f32 範囲を超えるため拒否",
+            ));
+        }
+        stage(1.0 / denom_w)?;
+        stage(f64::from(inv_w32))?;
+    }
     let sb = match reduction {
         Reduction::Mean => gv / denom_w,
         Reduction::Sum => gv,
