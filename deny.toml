@@ -83,7 +83,7 @@ multiple-versions = "warn"
 # （deps-policy.md）に反するため fail-closed で弾く）。
 wildcards = "deny"
 # ワークスペース内クレートのうち非公開（`publish = false`。workspace 継承）の
-# private クレート（`guardrail`・`self-repair`・`bench-harness`・`docs-site`・`backend-rocm`）は
+# private クレート（`guardrail`・`self-repair`・`bench-harness`・`docs-site`）は
 # 相互参照がバージョン無しの path 依存（cargo 上は `*` 扱い）のため、private
 # クレートの path 依存に限り wildcards の対象外とする（cargo-deny の仕様上
 # publish 対象クレートの path 依存には適用されず、その場合は従来どおり deny

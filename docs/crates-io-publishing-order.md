@@ -991,10 +991,99 @@ lock-all` も green。
 - environment `crates-io-release` の承認。
 - CLAUDE.md・README・`site/` の「7 クレート」「非公開の hf-hub」表記の更新は #3775。
 
+## 15. 8 クレート目 `fandhe-ai-backend-rocm` の公開準備と検証記録（#3774）
+
+所有者の承認（#3771 の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>、
+2026-11-01）の Q2「`fandhe-ai-backend-rocm` を 0.14.0 で crates.io に公開する」を受け、
+公開できる状態に整えた。**本節の時点では公開準備のみで、実 `cargo publish`・版の 0.14.0 への
+バンプ・framework-compare のピン更新は未実施**である（Phase 11 で所有者が明示的に指示・承認したときだけ行う）。
+`libloading`（第 12 区分・`=0.9.0`）の版・用途条件は変えない。
+
+### 15.1 依存グラフ上の位置づけ
+
+`backend-rocm` の `[dependencies]` は `fandhe-ai-tensor-core`・`fandhe-ai-backend-cpu`（どちらも公開済み）
+と `libloading`。`[dev-dependencies]` はない。facade は現時点で `backend-rocm` に依存しない
+（通常依存にするのは #3853）。3 節のトポロジカル順は次のとおり更新される。
+
+```
+① fandhe-ai-tensor-core
+       │
+       ├──▶ ② fandhe-ai-autodiff / fandhe-ai-backend-cpu /
+       │       fandhe-ai-backend-cuda / fandhe-ai-backend-metal /
+       │       fandhe-ai-onnx-interop（順不同）
+       │            │
+       │            └──▶ ②″ fandhe-ai-backend-rocm（backend-cpu の公開後）
+       │
+       └──▶ ③ fandhe-ai
+```
+
+`RELEASE_CRATES`（`release-all.yml`）と `release.yml` の `crate` の選択肢には `fandhe-ai-backend-cpu` の
+直後・`fandhe-ai-backend-cuda` の前に追加した（列挙順は cargo の動作に影響しない。承認の
+「backend-cpu の後・facade の前」に合わせた並び）。`hf-hub`（#3773）が公開されれば facade に依存する
+ため 9 番目になる。
+
+### 15.2 公開メタデータの内容
+
+`crates/backend-rocm/Cargo.toml` を 7 節までの公開クレートと同型へ整備した: `publish = true`、
+英語 `description`（「Experimental」を明示）、`repository.workspace`、`readme = "README.md"`、
+`keywords`／`categories`（backend-cuda と同じ検証済み slug）、`LICENSE-APACHE`・`LICENSE-MIT` の同梱、
+`fandhe-ai-tensor-core`・`fandhe-ai-backend-cpu` への `version = "=0.13.0"` 併記（2 箇所増）。
+版は 0.13.0 のまま（lockstep のバンプは Phase 11）。バンプ時にこの 2 箇所を更新し忘れると、
+`cargo publish` が依存先の版を解決できず fail-closed で検出される。非公開クレートの一覧は
+`guardrail`・`self-repair`・`bench-harness`・`docs-site`・`hf-hub` になる。
+
+### 15.3 名前の空きの実測（読み取りのみ・GET）
+
+`docs/crates-io-naming-decision.md`「8 件目」に記録した（2026-11-01 06:58 UTC。いずれも HTTP 404）。
+
+### 15.4 検証記録（実測。2026-11-01・ROCm 非搭載の Linux）
+
+- `bash scripts/check-rocm-absent.sh assert`: `OK: ROCm の構成物は検出されませんでした（非搭載を確認）`
+  （ビルドの前に実行）。
+- `cargo build -p fandhe-ai-backend-rocm --locked`・`cargo test -p fandhe-ai-backend-rocm --locked`・
+  `cargo clippy -p fandhe-ai-backend-rocm --all-targets --locked -- -D warnings`・
+  `RUSTDOCFLAGS="-D warnings" cargo doc -p fandhe-ai-backend-rocm --no-deps --locked`・`cargo fmt --all --check`: すべて green
+  （`*_real_device.rs` は `#[ignore]` のまま）。
+- `cargo package --list --allow-dirty -p fandhe-ai-backend-rocm --locked`: `README.md`・`LICENSE-APACHE`・
+  `LICENSE-MIT`・`Cargo.toml`・`Cargo.lock`・`src/**`・`tests/**`（計 105 ファイル）。`build.rs` なし。意図しないファイルの混入なし。
+- 8 パッケージ一括 dry-run（`cargo publish --dry-run --allow-dirty --locked -p fandhe-ai-tensor-core -p fandhe-ai-autodiff
+  -p fandhe-ai-backend-cpu -p fandhe-ai-backend-rocm -p fandhe-ai-backend-cuda -p fandhe-ai-backend-metal
+  -p fandhe-ai-onnx-interop -p fandhe-ai`。`--allow-dirty` は未コミット状態で実測したため）: exit 0。8 件すべてが
+  Packaging → Verifying → `aborting upload due to dry run` まで進んだ。既公開の 7 クレートの 0.13.0 は
+  `already exists on crates.io index` の警告（想定内。§13.3 と同じ）。
+- 正規化後の `Cargo.toml`: 内部依存 2 件が `=0.13.0`、`libloading` が `=0.9.0`、`build = false`、`links` なし。
+- `cargo tree -p fandhe-ai-backend-rocm -e normal --locked --target all` は lock 既存の crate のみ。
+  `cargo tree -p fandhe-ai -e normal --locked` に `backend-rocm` は出ない。`Cargo.lock` の差分なし（依存の追加・版更新なし）。
+- `cargo deny --locked check advisories bans licenses sources`: `advisories ok, bans ok, licenses ok, sources ok`
+  （`publish = true` 後も wildcards に当たらない）。`scripts/check-forbidden-deps.sh lock-all`・
+  `scripts/check-workflow-runner-policy.sh check`: ok。`cargo test -p fandhe-ai --test api_surface --locked`
+  （facade が `backend-rocm` に通常依存しない保留ガードを含む）: green。
+- 単一クレートの dry-run（`-p fandhe-ai-backend-rocm` のみ）: 成功（依存先 2 件は crates.io の 0.13.0 を取得して Verifying〈ビルド〉まで通り、`aborting upload due to dry run`）。
+
+### 15.5 ROCm 非搭載でのビルド成立（公開物でも保たれること）
+
+dry-run の Verifying 段は、展開した `.crate` を ROCm 非搭載の環境（上記 assert で確認済み）でビルドしており、
+8 件目の `fandhe-ai-backend-rocm` も成功した。`build.rs` も `#[link]` も持たず、`libloading` で
+実行時にロードするだけなので、公開物でも ROCm 非搭載でビルドできる。CI の `build-no-cuda-toolkit` ジョブは変更していない。
+
+### 15.6 libloading の扱い
+
+第 12 区分（`=0.9.0`・利用クレートは `backend-rocm` のみ）は不変。公開物の通常依存に入る。
+追加の依存・新しい allow 識別子はない（`docs/license-matrix.md` 追加確認〈#3774〉）。
+
+### 15.7 実公開の前に確認すること（Phase 11）
+
+`RELEASE_CRATES` に含めたまま次の `release-all` を `mode: publish` で dispatch すると 0.14.0 として公開される。
+承認の条件（`docs/backend-rocm-device-exposure-decision.md` §10）により、dispatch の前に
+**#3159・#3867 の実機 parity が pass していること**を確かめる。両方とも**未実測**（本節の時点）である。
+未実測のままなら公開せず所有者へ戻し、`RELEASE_CRATES` から一時的に外すかを判断してもらう。
+
 ## 変更履歴
 
 - 2026-11-01（#3773）: `fandhe-ai-hf-hub` の公開準備（`publish = true`・メタデータ・
   `RELEASE_CRATES`／release.yml への追加）と検証を §14 に記録した。実公開は未実施。
+
+- 2026-11-01（8 クレート目 backend-rocm の公開準備。#3774）: §15 を追加した。公開準備のみで、publish・版の 0.14.0 へのバンプは未実施。
 
 - 2026-10-31（v0.13.0 公開完了）: `release-all.yml`（`mode: publish` run 41168270894。
   事前 dry-run〈verify〉run 41168022860。main `db2b385fb`）で公開 7 クレートの v0.13.0

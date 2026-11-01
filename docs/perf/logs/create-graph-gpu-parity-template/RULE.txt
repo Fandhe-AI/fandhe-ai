@@ -1,0 +1,45 @@
+事前登録規則の雛形（二階微分 create_graph の CUDA 実機 parity。イシュー #3776。測り方は docs/autodiff-higher-order-grad-decision.md §48）
+このファイルは雛形であり、未実測。Phase 10 の実測 issue が `docs/perf/logs/<名前>-<issue 番号>/RULE.txt` へ写し、
+<...> を埋めて実機の実行より前にコミットする。書式は docs/perf/logs/metal-phase2-4-parity-3172/RULE.txt を踏襲する。
+宣言日時（UTC）: <YYYY-MM-DDThh:mmZ>（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+機体: <cuda-node>（ホスト名は記録しない。Linux／M4 Max 開発機では測らない・記録しない。docs/real-hardware-verification-env.md §1）。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  <40 桁小文字 16 進数>
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること。
+    git diff --quiet <対象コミット> <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 2 行形式（1 行目: HEAD の 40 桁小文字 16 進数、2 行目: dirty=<status --porcelain の件数>）。
+  展開ツリー直下に書く。dirty=0 以外は無効（実行しない）。
+
+展開先: <~/work/rust-ai-library-run-<issue 番号>>（ログではマスクする）。CARGO_TARGET_DIR: <$HOME/work/target-fandhe-ai>（同）。
+
+事前ビルド（判定外。計測中にコンパイルを並走させない）:
+  cargo test -p fandhe-ai --test create_graph_gpu_parity --no-run
+
+コマンド（テスト名は固定の文字列だけ。外部入力をシェル展開しない。1 テスト 1 プロセス 1 回。--release なし。外部 timeout つき）:
+  cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 create_graph_<族>_cuda_matches_cpu
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行で対象のフルパスと逐語一致すること。
+
+経路区分と既定の切替状態（ケースごとに宣言する）:
+  <ケース名>: 経路区分 K／H／G（H の pass は経路の parity でありカーネル同士の parity ではない）
+  既定のまま触らない: TF32 opt-in OFF・GPU linalg ゲート OFF
+
+判定（判定契約は各テストのコードが定める。ここでは変えない）:
+  Q1 first_order が同デバイスの素の backward と bit 一致／Q2 cg.grad・Q3 二階 H v（ゼロでない）・Q4 孫テープ再生は
+  GPU と CPU の REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。tolerance 定数・baseline は不変）／
+  Q5 拒否は Err(Backward) かつ子テープが空。
+  pass: exit 0 かつ "running 1 test"・"1 passed; 0 failed"。
+  fail: 1 件以上の失敗。
+  undetermined: ノード到達不能、ビルド不能、timeout、--list の選択が期待と異なる、自己検査失敗、baseline に行が無いケース。
+
+実行回数: 各コマンド 1 回。時間計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。
+  再実行するなら RULE.txt を登録し直す。計測中は他のビルドを並走させない。
+
+fail 時の扱い: tolerance・baseline・判定方式・入力・テストコードは変えない。panic メッセージの fail_count・max_abs_diff・
+  max_rel_err を引用して事実を記録し、README と PR に「要対応」と書く。起票と baseline 化は所有者の承認を得てから。
+
+記録規則: ホスト名・ユーザー名・個人のパス（$HOME・/home/）は前後が識別子文字でない場合のみマスクする。
+  漏れがあれば記録を捨てる（fail-closed）。回収ログは手で編集しない。各ログ末尾に rc=<終了コード>。
+  実行と提出物の対応は env_info.txt の script_sha256・rev_stamp と SHA256SUMS で検証する。

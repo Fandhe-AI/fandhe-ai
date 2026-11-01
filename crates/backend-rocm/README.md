@@ -1,6 +1,10 @@
 # fandhe-ai-backend-rocm
 
-ROCm（AMD GPU）バックエンド（イシュー #3154・#3155）。非公開（`publish = false`）。
+ROCm（AMD GPU）バックエンド（イシュー #3154・#3155）。**条件付き・実験的**。
+
+> 本クレートへの直接依存はサポート対象外です。サポートされる公開 API 面は [`fandhe-ai`](https://crates.io/crates/fandhe-ai)（facade）のみで、本クレートは facade の依存解決のために crates.io で公開しています。
+>
+> 実機（AMD GPU）での実行確認は未実施です（#3159）。facade からの `Device::Rocm(0)` は 0.14.0 で追加予定（#3851〜#3853）で、現時点では facade から参照されません。
 
 - HIP・HIPRTC は `libloading` で実行時にロードする。ビルド時にはリンクしないため、
   ROCm 非搭載の環境（CI の ubuntu-latest・macOS・Windows）でもビルドとテストが通る。
@@ -8,3 +12,7 @@ ROCm（AMD GPU）バックエンド（イシュー #3154・#3155）。非公開�
 - 実機での実行確認は未実施（#3159）。`tests/gemm_real_device.rs`・`tests/linalg_real_device.rs`・`tests/reduce_real_device.rs`・`tests/loss_real_device.rs`・`tests/softmax_real_device.rs` は `#[ignore]`。
   ホスト側では CPU 上の添字モデル（`src/gemm_model.rs`・`src/linalg_model.rs`・`src/loss_model.rs`・`src/rnn_cell_model.rs`・`src/paged_kv_model.rs`）と参照 GEMM の照合までを検証する。
 - 設計の正本: `docs/backend-rocm-hip-ffi-decision.md`・`docs/backend-rocm-hiprtc-gemm-decision.md`
+
+## ライセンス
+
+MIT または Apache-2.0 のデュアルライセンス（`LICENSE-MIT`・`LICENSE-APACHE`）。

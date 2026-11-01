@@ -5,7 +5,8 @@
 #     再実行や、依存順どおり 1 つずつ確認しながら進めたい場合はこちらを使う。
 #   - 本ファイル（release-all.yml）: 公開クレート全件（`env.RELEASE_CRATES`。
 #     `fandhe-ai-tensor-core`・
-#     `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
+#     `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-rocm`〈#3774 で追加。
+#     所有者承認は #3771 コメント 6554565469〉・`fandhe-ai-backend-cuda`・
 #     `fandhe-ai-backend-metal`・`fandhe-ai-onnx-interop`〈#1963 で追加〉・
 #     `fandhe-ai`・`fandhe-ai-hf-hub`〈#3773 で追加。facade の後〉。命名確定は docs/crates-io-naming-decision.md、公開順序・
 #     版数運用は docs/crates-io-publishing-order.md）を単一の
@@ -84,6 +85,11 @@ on:
 permissions:
   contents: read
 
+# 実公開の前提（#3774。docs/crates-io-publishing-order.md §15.7）: `fandhe-ai-backend-rocm` を
+# 含めたまま次回 `mode: publish` を dispatch すると 0.14.0 として公開される。dispatch の前に
+# #3159・#3867 の実機 parity が pass していることを確かめる。未実測なら所有者へ戻し、本一覧から
+# 一時的に外すかどうかの判断を仰ぐ（未実測を pass とみなして公開しない）。
+#
 # 対象クレート一覧の単一ソース（依存順ではなく列挙順。公開順序自体は cargo の
 # 複数 -p publish が内部で解決するため列挙順に意味はない。
 # docs/crates-io-publishing-order.md §3）。verify・publish 両ジョブで参照するため
@@ -91,7 +97,7 @@ permissions:
 env:
   RELEASE_CRATES: >-
     fandhe-ai-tensor-core fandhe-ai-autodiff fandhe-ai-backend-cpu
-    fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai-onnx-interop
+    fandhe-ai-backend-rocm fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai-onnx-interop
     fandhe-ai fandhe-ai-hf-hub
 
 # release.yml と同一グループ（`crates-io-release`）で相互排他する: 一括リリースと

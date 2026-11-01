@@ -147,3 +147,20 @@ User-Agent にリポジトリ識別子のみ）で、書き込み・予約はし
 名前の制約（ASCII 英数字・`-`・`_`、64 文字以内）も満たす（`fandhe-ai-hf-hub` は 16 文字）。
 `categories` に使う `science`・`api-bindings` は `https://crates.io/api/v1/categories` で実在を確認した。
 実 publish は Phase 11 で所有者が指示したときだけ行う（`docs/crates-io-publishing-order.md` §14）。
+
+## 8 件目: `backend-rocm` → `fandhe-ai-backend-rocm`（イシュー #3774）
+
+`backend-rocm`（ROCm〈AMD GPU〉バックエンド）を 8 クレート目として公開対象へ追加する。所有者の承認は
+#3771 の回答（<https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>・2026-11-01）。
+命名規則（`fandhe-ai` prefix 付与・ディレクトリ名 `crates/backend-rocm` は不変）をそのまま適用する。
+名前制約（ASCII 英数字・`-`・64 文字以内）も満たす。
+
+空き確認の実測（読み取りのみ・GET。2026-11-01 06:58 UTC）:
+
+| 対象 | HTTP |
+|---|---|
+| `https://index.crates.io/fa/nd/fandhe-ai-backend-rocm`（sparse index） | 404 |
+| `https://index.crates.io/fa/nd/fandhe_ai_backend_rocm`（アンダースコア形） | 404 |
+| `https://crates.io/api/v1/crates/fandhe-ai-backend-rocm`（User-Agent 付き） | 404 |
+
+実際の `cargo publish` は Phase 11 で所有者が指示したときに行う（`docs/crates-io-publishing-order.md` §14）。
