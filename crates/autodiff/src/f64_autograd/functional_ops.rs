@@ -36,6 +36,7 @@ impl<'t> TapeF64<'t> {
         &self,
         output: &VarF64<'_, 't>,
         input: &VarF64<'_, 't>,
+        jacobian: bool,
     ) -> Result<(Entry, bool), AutodiffError> {
         if output.graph.id != self.id || input.graph.id != self.id {
             return Err(AutodiffError::TapeMismatch);
@@ -46,6 +47,11 @@ impl<'t> TapeF64<'t> {
         let out_tracked = output.value_and_requires_grad().1;
         let out_shape = output.shape();
         let n = checked_numel(&input.shape())?;
+        // jacfwd は入力が空だと結果が 0 要素になり、出力側の検査（要素数・バイト数）に先んじて
+        // 零返却経路へ入る（出力が巨大でも拒否しない。結果 shape の検査は jacfwd 側が行う）。
+        if jacobian && n == 0 {
+            return Ok((Entry { out_shape, n, m: 0 }, out_tracked));
+        }
         let m = checked_numel(&out_shape)?;
         // 結果（jvp は出力 shape、jacfwd は更に拡張した shape）の確保前に f64 のバイト数を検査し、
         // Vec の上限超過による capacity overflow の panic を防ぐ（§36.3）。
@@ -125,7 +131,7 @@ impl<'t> TapeF64<'t> {
                 rhs: tangent.shape().to_vec(),
             }));
         }
-        let (e, out_tracked) = self.check_entry(output, input)?;
+        let (e, out_tracked) = self.check_entry(output, input, false)?;
         if e.n == 0 || e.m == 0 || !out_tracked {
             return Tensor::zeros(&e.out_shape).map_err(AutodiffError::Shape);
         }
@@ -171,17 +177,18 @@ impl<'t> TapeF64<'t> {
         input: &VarF64<'_, 't>,
         child: &TapeF64<'t>,
     ) -> Result<Tensor<f64>, AutodiffError> {
-        let (e, out_tracked) = self.check_entry(output, input)?;
+        let (e, out_tracked) = self.check_entry(output, input, true)?;
         let total =
             e.m.checked_mul(e.n)
                 .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
         let in_shape = input.shape();
         let mut result_shape = e.out_shape.clone();
         result_shape.extend_from_slice(&in_shape);
-        checked_bytes_for_f64(&result_shape).map_err(AutodiffError::Shape)?;
         if total == 0 || !out_tracked {
+            // 零返却経路。確保の検査は `Tensor::zeros` 自身が行う。
             return Tensor::zeros(&result_shape).map_err(AutodiffError::Shape);
         }
+        checked_bytes_for_f64(&result_shape).map_err(AutodiffError::Shape)?;
         let mut data = vec![0.0f64; total];
         if let Some((g, cu)) = self.double_vjp_stage(output, input, &e.out_shape, child)? {
             // 列ごとに ek・p の 2 ノードだけが増える。ループ内で消えるため rollback_to の前提を満たす。

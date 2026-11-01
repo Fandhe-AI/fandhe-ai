@@ -234,6 +234,22 @@ fn zero_paths_return_zeros_without_touching_tapes() -> R<()> {
     Ok(())
 }
 
+/// 空入力の jacfwd は出力側の検査より先に零返却経路へ入り、結果 shape は `out ++ in`（0 要素）になる
+/// （Bugbot 指摘の回帰）。要素数 0 の巨大 shape `[0, usize::MAX, 2]` を出力に使う。
+/// 注: 要素数が非 0 で巨大な出力（バイト数溢れ）はデータなしでは構築できないため、
+/// その分岐は `check_entry` の `jacobian && n == 0` 早期 return の構造で担保する。
+#[test]
+fn jacfwd_empty_input_with_huge_shape_output_returns_zeros() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let empty = p.var(&t64(&[], &[0])?);
+    let huge = p.var(&t64(&[], &[0, usize::MAX, 2])?);
+    let j = p.jacfwd(&huge, &empty, &c)?;
+    assert_eq!(j.shape(), &[0, usize::MAX, 2, 0]);
+    assert!(j.host_slice().is_empty());
+    Ok(())
+}
+
 #[test]
 fn entry_checks_reject_in_order() -> R<()> {
     let base = new_tape();
