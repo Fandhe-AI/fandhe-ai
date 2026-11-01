@@ -76,15 +76,17 @@
 //! `Stft`・`Istft`・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・
 //! `SlogdetSign`・`MatrixRank` の 15 件は fail-closed に固定した。
 //! 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・`NllLoss` の 5 variant を
-//! イシュー #3082（決定記録 §26。V1／V2 方式）で対象にした。残る損失は
+//! イシュー #3082（決定記録 §26。V1／V2 方式）で対象にした。損失の二値・マージン系
+//! `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`HingeEmbeddingLoss`・
+//! `MarginRankingLoss`・`SigmoidFocalLoss` の 6 variant はイシュー #3799
+//! （決定記録 §39/§54・実装は `loss_binary_margin`）で対象にした。残る損失は
 //! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
-//! `CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`・
+//! `CosineEmbeddingLoss`・`TripletMarginLoss`・
 //! `PoissonNllLoss`（イシュー #2167。同型の理由で対象外）・
 //! `CtcLoss`（イシュー #2168。同型の理由で対象外）・
-//! `BceWithLogitsPosWeightLoss`・`HingeEmbeddingLoss`・`SoftMarginLoss`・
 //! `GaussianNllLoss`（イシュー #2652。同型の理由で対象外）・
-//! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・
-//! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
+//! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`
+//! （イシュー #2653。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
 //! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。プーリング族
 //! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）、
@@ -130,6 +132,7 @@ use crate::var::Var;
 mod conv;
 mod index_cum;
 mod linalg_fft;
+mod loss_binary_margin;
 mod pad_mask;
 mod pool;
 mod select_reduce;
@@ -969,6 +972,70 @@ fn replay_op<'c>(
             class_dim,
             reduction,
         } => get_mirror(mirror, input)?.nll_loss(&targets, class_dim, reduction),
+        // 損失の二値・マージン系 6 variant（イシュー #3799）。公開 `Var` メソッドへ委譲し forward の
+        // 検証を迂回しない。`BceWithLogitsPosWeightLoss` の `pos_weight` は input の shape へ展開済み
+        // なので `broadcast_to` は恒等で、再生した Op の payload は親と同じになる。
+        Op::BceLoss {
+            input,
+            target,
+            kind,
+            reduction,
+        } => {
+            let (x, t) = (get_mirror(mirror, input)?, get_mirror(mirror, target)?);
+            match kind {
+                fandhe_ai_tensor_core::BceKind::Probabilities => x.bce_loss(&t, reduction),
+                fandhe_ai_tensor_core::BceKind::Logits => x.bce_with_logits_loss(&t, reduction),
+                _ => Err(AutodiffError::Backward(
+                    "create_graph: BceLoss: 未知の BceKind は fail-closed".into(),
+                )),
+            }
+        }
+        Op::BceWithLogitsPosWeightLoss {
+            input,
+            target,
+            pos_weight,
+            reduction,
+        } => get_mirror(mirror, input)?.bce_with_logits_loss_with(
+            &get_mirror(mirror, target)?,
+            reduction,
+            &crate::elementwise_loss_ops::BceWithLogitsOptions::default().pos_weight(pos_weight),
+        ),
+        Op::SoftMarginLoss {
+            input,
+            y,
+            reduction,
+        } => get_mirror(mirror, input)?.soft_margin_loss(&y, reduction),
+        Op::HingeEmbeddingLoss {
+            input,
+            y,
+            margin,
+            reduction,
+        } => get_mirror(mirror, input)?.hinge_embedding_loss(&y, margin, reduction),
+        Op::MarginRankingLoss {
+            x1,
+            x2,
+            y,
+            margin,
+            reduction,
+        } => get_mirror(mirror, x1)?.margin_ranking_loss(
+            &get_mirror(mirror, x2)?,
+            &y,
+            margin,
+            reduction,
+        ),
+        Op::SigmoidFocalLoss {
+            input,
+            target,
+            alpha,
+            gamma,
+            reduction,
+        } => get_mirror(mirror, input)?.sigmoid_focal_loss(
+            &target,
+            &crate::margin_focal_loss_ops::SigmoidFocalLossOptions::default()
+                .alpha(alpha)
+                .gamma(gamma),
+            reduction,
+        ),
         // FFT 4 件・線形代数 4 件（イシュー #3086。方式は `linalg_fft` モジュール doc 参照）。
         // forward と同じ dispatch を公開 `Var` メソッド経由で通す。`SlogdetLogAbsDet` の写しは
         // `slogdet` が積む未使用の `SlogdetSign` ノードを伴うが、どの根からも到達しないため
@@ -1613,6 +1680,115 @@ fn build_cgrads<'c>(
                 let dtarget = dpred.neg()?;
                 accumulate(&parent_nodes, &mut cgrads, pred, dpred)?;
                 accumulate(&parent_nodes, &mut cgrads, target, dtarget)?;
+            }
+            // 損失の二値・マージン系 6 variant（イシュー #3799。方式は `loss_binary_margin` モジュール doc 参照）。
+            Op::BceLoss {
+                input,
+                target,
+                kind,
+                reduction,
+            } => {
+                let (x_m, t_m) = (get_mirror(mirror, input)?, get_mirror(mirror, target)?);
+                let (di, dt) = loss_binary_margin::bce_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, target, reduction),
+                    kind,
+                    (&x_m, &t_m),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dt)?;
+            }
+            Op::BceWithLogitsPosWeightLoss {
+                input,
+                target,
+                pos_weight,
+                reduction,
+            } => {
+                let (x_m, t_m) = (get_mirror(mirror, input)?, get_mirror(mirror, target)?);
+                let (di, dt) = loss_binary_margin::bce_pos_weight_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, target, reduction),
+                    &pos_weight,
+                    (&x_m, &t_m),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dt)?;
+            }
+            Op::SoftMarginLoss {
+                input,
+                y,
+                reduction,
+            } => {
+                let x_m = get_mirror(mirror, input)?;
+                let di = loss_binary_margin::soft_margin_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, reduction),
+                    &y,
+                    &x_m,
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+            }
+            Op::HingeEmbeddingLoss {
+                input,
+                y,
+                margin,
+                reduction,
+            } => {
+                let di = loss_binary_margin::hinge_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, reduction),
+                    (&y, margin),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+            }
+            Op::MarginRankingLoss {
+                x1,
+                x2,
+                y,
+                margin,
+                reduction,
+            } => {
+                let (d1, d2) = loss_binary_margin::margin_ranking_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (x1, x2, reduction),
+                    (&y, margin),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, x1, d1)?;
+                accumulate(&parent_nodes, &mut cgrads, x2, d2)?;
+            }
+            Op::SigmoidFocalLoss {
+                input,
+                target,
+                alpha,
+                gamma,
+                reduction,
+            } => {
+                let x_m = get_mirror(mirror, input)?;
+                let di = loss_binary_margin::focal_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, reduction),
+                    (&target, alpha, gamma),
+                    &x_m,
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
             }
             Op::CrossEntropyLoss {
                 logits,

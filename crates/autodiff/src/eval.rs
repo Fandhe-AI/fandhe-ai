@@ -1004,7 +1004,7 @@ pub(crate) fn huber_elem_loss(d: f32, kind: HuberKind, delta: f32) -> f32 {
 
 /// ログクランプ下限（PyTorch `BCELoss` の実装と同じ `-100`。`p` が
 /// `0`／`1` に極めて近い場合の `ln` の `-inf` 発散を避ける）。
-const BCE_LOG_CLAMP_MIN: f32 = -100.0;
+pub(crate) const BCE_LOG_CLAMP_MIN: f32 = -100.0;
 
 /// [`BceKind::Probabilities`]／[`BceKind::Logits`] 共通の要素損失
 /// （`bce_loss`／`bce_loss_vjp`〈`grad.rs`〉の双方から呼ばれる意味論の

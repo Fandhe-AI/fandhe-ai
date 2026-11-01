@@ -9101,7 +9101,11 @@ fn cosine_embedding_loss_vjp(
 
 /// 要素ごと損失 4 種（イシュー #2652）の VJP 共通 `scale`（`Mean` は `g/n`、`Sum` は
 /// `g`。`f64`）。`n > 0` は呼び出し側で保証する。
-fn elementwise_loss_scale(upstream: &Tensor<f32>, reduction: Reduction, n: usize) -> f64 {
+pub(crate) fn elementwise_loss_scale(
+    upstream: &Tensor<f32>,
+    reduction: Reduction,
+    n: usize,
+) -> f64 {
     let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
     match reduction {
         Reduction::Mean => f64::from(g_value) / n as f64,
@@ -9113,7 +9117,7 @@ fn elementwise_loss_scale(upstream: &Tensor<f32>, reduction: Reduction, n: usize
 /// margin_ranking_loss` doc の数式を微分する。hinge が有効
 /// （`raw = −y_i·(x1_i−x2_i)+margin >= 0`。`clamp_min` の VJP 契約）な
 /// 要素のみ `dx1_i = −s·y_i`・`dx2_i = +s·y_i` を流す。
-fn margin_ranking_loss_vjp(
+pub(crate) fn margin_ranking_loss_vjp(
     x1: &Tensor<f32>,
     x2: &Tensor<f32>,
     y: &Tensor<f32>,
