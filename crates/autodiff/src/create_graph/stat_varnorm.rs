@@ -464,6 +464,34 @@ fn check_pnorm(c: &PNormCheck<'_>) -> Result<(), AutodiffError> {
                 "PNorm の Σ|x_s|^p が 0（スケール後に表現できない）".into(),
             ));
         }
+        // 実際の f32 グラフと同じ丸めで Σ・ノルム・a/ノルムを再現する。f64 では正でも
+        // f32 のべき乗和がアンダーフローで 0 になると nrm=0・a/nrm=inf となり、
+        // 二階微分が非有限になるため（個々の要素の 0 化は寄与が無視できるので許容）。
+        let s32: f32 = a
+            .iter()
+            .map(|&v| {
+                if v > 0.0 {
+                    (v as f32).powf(p as f32)
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        if !s32.is_finite() || s32 < f32::MIN_POSITIVE {
+            return Err(invalid(
+                "PNorm の f32 べき乗和 Σ|x_s|^p が 0／非正規／非有限（f32 でアンダーフロー）"
+                    .into(),
+            ));
+        }
+        let nrm32 = s32.powf(1.0 / p as f32);
+        if !nrm32.is_finite() || nrm32 < f32::MIN_POSITIVE {
+            return Err(invalid(
+                "PNorm の f32 ノルムが 0／非正規／非有限（f32 でアンダーフロー）".into(),
+            ));
+        }
+        if a.iter().any(|&v| !(v as f32 / nrm32).is_finite()) {
+            return Err(invalid("PNorm の f32 の a/ノルムが非有限".into()));
+        }
         let nrm = s.powf(1.0 / p);
         st(nrm, "PNorm のノルム (Σ)^(1/p)")?;
         if nrm.is_nan() || nrm <= 0.0 {
@@ -773,6 +801,23 @@ mod tests {
         };
         assert!(check_pnorm(&c(3.0)).is_ok());
         assert!(check_pnorm(&c(0.01)).is_err());
+    }
+
+    /// 回帰: x=[0.75,0.75], p=400, loss=norm_p(x)*1e-30 は f64 では正だが f32 のべき乗和が
+    /// 0 になる。型付きエラーで拒否されること（PR #3942 Codex P1）。
+    #[test]
+    fn check_pnorm_rejects_f32_power_sum_underflow() {
+        let xs = [0.75f32, 0.75];
+        let zelem = [false, false];
+        let c = PNormCheck {
+            n: 2,
+            p: 400.0,
+            xs: &xs,
+            zelem: &zelem,
+            exps: &[0],
+            g: &[1e-30],
+        };
+        assert!(check_pnorm(&c).is_err());
     }
 
     #[test]
