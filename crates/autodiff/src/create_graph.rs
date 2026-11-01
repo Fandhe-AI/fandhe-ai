@@ -67,7 +67,8 @@
 //! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。イシュー #3083 で索引・累積族
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
-//! `Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
+//! `Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
+//! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
@@ -128,6 +129,7 @@ mod index_cum;
 mod linalg_fft;
 mod pad_mask;
 mod pool;
+mod stat_select;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -491,6 +493,20 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         {
             linalg_fft::check_fft_norm(*norm)?;
         }
+        // 選択縮約（イシュー #3790）: payload（dim・index・q・補間方式）を子テープへ
+        // 書く前に検証する（未知の `QuantileInterpolation` variant は拒否）。
+        match &node.op {
+            Op::OrderSelect { input, dim, index } => stat_select::check_order_select(
+                &parent_nodes[input.0].shape,
+                &node.shape,
+                *dim,
+                index,
+            )?,
+            Op::Quantile {
+                q, interpolation, ..
+            } => stat_select::check_quantile(*q, *interpolation)?,
+            _ => {}
+        }
         // BatchNorm（イシュー #3079）: 空テンソル（`n`／`c`／`spatial` のいずれかが 0。
         // eval は `M<=1` も通る）は二階 VJP の統計構造（行 `narrow`・`mean`）が
         // 成立しないため、子テープへ書く前に fail-closed で拒否する。
@@ -840,6 +856,19 @@ fn replay_op<'c>(
         | Op::Cummax { input, dim, index }
         | Op::Cummin { input, dim, index } => get_mirror(mirror, input)?.gather(dim, &index),
         Op::Embedding { weight, index, .. } => get_mirror(mirror, weight)?.gather(0, &index),
+        // 選択縮約（イシュー #3790。方式は `stat_select` モジュール doc 参照）。
+        Op::OrderSelect { input, dim, index } => {
+            stat_select::replay_order_select(&get_mirror(mirror, input)?, dim, &index, shape)
+        }
+        Op::MedianAll { input } => {
+            crate::stat_reduce_ops::median(&get_mirror(mirror, input)?, None)
+        }
+        Op::Quantile {
+            input,
+            q,
+            dim,
+            interpolation,
+        } => crate::stat_reduce_ops::quantile(&get_mirror(mirror, input)?, q, dim, interpolation),
         Op::Scatter {
             input,
             dim,
@@ -2176,6 +2205,43 @@ fn build_cgrads<'c>(
                 if parent_nodes[input.0].requires_grad {
                     let input_shape = parent_nodes[input.0].shape.clone();
                     let d = pad_mask::pad_mode_cgrad(child, &g, &input_shape, &pads, mode)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 選択縮約（イシュー #3790。方式は `stat_select` モジュール doc 参照）。
+            Op::OrderSelect { input, dim, index } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = stat_select::order_select_cgrad(child, &g, &input_shape, dim, &index)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::MedianAll { input } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
+                    let d = stat_select::median_all_cgrad(child, &g, &x_val, &input_shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Quantile {
+                input,
+                q,
+                dim,
+                interpolation,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
+                    let d = stat_select::quantile_cgrad(
+                        child,
+                        &g,
+                        &x_val,
+                        &input_shape,
+                        q,
+                        dim,
+                        interpolation,
+                    )?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }

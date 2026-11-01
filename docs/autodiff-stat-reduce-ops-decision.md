@@ -46,6 +46,7 @@
   trait メソッドは `stat_*`、共有カーネルは `*_host`。
 - `Var`／`Tape`／`Tensor` に inherent メソッドは足していない（足すと facade 公開面が広がる）。
 - 非融合（`push_eager`）・非 checkpoint・高階微分（`create_graph`）非対応。f64 自動微分経路は対象外。
+  - 追記（2026-11-01・#3790）: `kthvalue`・`median`・`quantile` の `create_graph` は #3790 で対応済み（`docs/autodiff-higher-order-grad-decision.md` §50）。`nansum`／`nanmean` は対象外のまま。
 - 上流 shape の検査は `check_fft_upstream_shape`（FFT 用の名称）を流用している（#2636 と同じ。兄弟 issue が編集する
   FFT の腕に触れないため）。
 
@@ -179,6 +180,7 @@ tolerance・baseline は変更していない。
 - CUDA／Metal の GPU 専用カーネルと実機計測（§10）。
 - `nanmedian`・`nanquantile`・1 次元 `q`・`keepdim`・負の `dim`・複数軸・索引の `int64` 化・0 次元入力への軸指定。
 - `create_graph`（高階微分）・activation checkpoint 対象化・f64／f16／bf16 自動微分経路。
+  - 追記（2026-11-01・#3790）: `kthvalue`・`median`・`quantile` の `create_graph` は #3790 で対応済み（同 §50）。`nansum`／`nanmean` は対象外のまま。
 - 選択アルゴリズムの高速化（quickselect・並列化。現状は lane ごと O(n log n) の安定ソート）。
 - 非有限入力時の補間値・勾配の PyTorch 完全一致。
 - 既存 `fn median`（`backend-cpu` のテスト内・`guardrail`）のリネーム、`check_fft_upstream_shape` の改名、

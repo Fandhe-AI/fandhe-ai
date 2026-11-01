@@ -36,7 +36,7 @@
 #[path = "common/create_graph_gpu_parity_baseline.rs"]
 mod baseline;
 
-use fandhe_ai::{AutodiffError, Device, Tape, Tensor};
+use fandhe_ai::{AutodiffError, Device, Tape, Tensor, Var};
 use fandhe_ai_backend_cpu::parity::compare;
 
 /// 経路区分（§48.4）。`H` の pass は「経路の parity」でカーネル同士ではない。
@@ -164,15 +164,46 @@ struct Case {
 }
 
 /// 登録表。雛形の自己検査用に、実装済みの `Mul`・`Sum` だけの 1 行を置く。
-const CASES: &[Case] = &[Case {
-    name: "scaffold_cubic",
-    family: "scaffold",
-    route: Route::K,
-    judge: Judge::Strict,
-    split_k: SplitKShapes::NoMatMul,
-    run: run_scaffold_cubic,
-    reject: None,
-}];
+const CASES: &[Case] = &[
+    Case {
+        name: "scaffold_cubic",
+        family: "scaffold",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_scaffold_cubic,
+        reject: None,
+    },
+    // 選択縮約（イシュー #3790・決定記録 §34）。`BackendOps::stat_*` は CPU のみ実装で、
+    // CUDA／Metal ではホストへフォールバックする（経路 H）。実機は未実測（#3856・#3858）。
+    Case {
+        name: "select_reduce_order_kthvalue",
+        family: "select_reduce_order",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_select_reduce_kthvalue,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "select_reduce_order_median_all",
+        family: "select_reduce_order",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_select_reduce_median_all,
+        reject: None,
+    },
+    Case {
+        name: "select_reduce_order_quantile_linear",
+        family: "select_reduce_order",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_select_reduce_quantile,
+        reject: None,
+    },
+];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::<f32>::new(data, shape).expect("test fixture: tensor")
@@ -211,6 +242,94 @@ fn run_scaffold_cubic(tp: &Tapes) -> Outputs {
         hv,
         replay: None,
     }
+}
+
+/// 選択縮約の共通走査。`f(x)` が選択 Op を含む出力を返し、損失は `sum(y ⊙ y)`。
+/// 入力は順位が切り替わらない（タイなし・最小間隔 0.07 以上）値に限る（S5）。
+fn run_select_reduce(tp: &Tapes, f: for<'t> fn(&Var<'t>) -> Var<'t>) -> Outputs {
+    let x0: Vec<f32> = (0..15)
+        .map(|i| 0.3 + 0.07 * ((i * 7) % 15) as f32)
+        .collect();
+    let dir: Vec<f32> = (0..15).map(|i| 1.0 - 0.0625 * i as f32).collect();
+    let x = tp.parent.var(&t(x0, &[3, 5]));
+    let y = f(&x);
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&x).unwrap().expect("grad"));
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&x).unwrap().expect("first_order"));
+    let g = cg.grad(&x).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir, &[3, 5]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let xc = cg.child_var(&x).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&xc).unwrap().expect("second order"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: None,
+    }
+}
+
+fn run_select_reduce_kthvalue(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().kthvalue(2, 1).unwrap().0)
+}
+
+fn run_select_reduce_median_all(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| x.mul(x).unwrap().median(None).unwrap())
+}
+
+fn run_select_reduce_quantile(tp: &Tapes) -> Outputs {
+    run_select_reduce(tp, |x| {
+        x.mul(x)
+            .unwrap()
+            .quantile(0.4, Some(1), fandhe_ai::QuantileInterpolation::Linear)
+            .unwrap()
+    })
+}
+
+/// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
+/// 子テープは空のまま。
+fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
+    struct Identity;
+    impl fandhe_ai::CustomFunction for Identity {
+        fn name(&self) -> &str {
+            "identity"
+        }
+        fn output_shape(&self, s: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+            Ok(s[0].to_vec())
+        }
+        fn forward(&self, i: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+            Ok(i[0].contiguous())
+        }
+        fn backward(
+            &self,
+            _i: &[&Tensor<f32>],
+            _o: &Tensor<f32>,
+            up: &Tensor<f32>,
+            _r: &[bool],
+        ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+            Ok(vec![Some(up.contiguous())])
+        }
+    }
+    let x = tp.parent.var(&t(vec![0.3, 0.9, 0.5, 0.7], &[4]));
+    let q = x
+        .quantile(0.4, None, fandhe_ai::QuantileInterpolation::Linear)
+        .unwrap()
+        .reshape(&[1])
+        .unwrap();
+    let c = tp
+        .parent
+        .custom(std::sync::Arc::new(Identity), &[q])
+        .unwrap();
+    let loss = c.sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
 }
 
 fn tapes_for(device: Option<Device>) -> Tapes {
@@ -337,6 +456,10 @@ macro_rules! cuda_family_test {
 }
 
 cuda_family_test!(create_graph_scaffold_cuda_matches_cpu, "scaffold");
+cuda_family_test!(
+    create_graph_select_reduce_order_cuda_matches_cpu,
+    "select_reduce_order"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -352,6 +475,10 @@ macro_rules! metal_family_test {
 }
 
 metal_family_test!(create_graph_scaffold_metal_matches_cpu, "scaffold");
+metal_family_test!(
+    create_graph_select_reduce_order_metal_matches_cpu,
+    "select_reduce_order"
+);
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -369,6 +496,11 @@ fn registry_names_are_unique() {
 #[test]
 fn scaffold_case_passes_cpu_against_cpu() {
     run_family("scaffold", None);
+}
+
+#[test]
+fn select_reduce_order_cases_pass_cpu_against_cpu() {
+    run_family("select_reduce_order", None);
 }
 
 #[test]

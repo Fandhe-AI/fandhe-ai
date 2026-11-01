@@ -4109,3 +4109,54 @@ PR は `Refs` にする。
 ### 48.12 変えていないもの
 
 コード・公開 API・rustdoc・tolerance・baseline・ガードレール閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・既存の実機テストとログ。
+
+
+## 50. 実装記録（イシュー #3790・親 #3719 系。create_graph の C 区分・選択縮約 `OrderSelect`・`MedianAll`・`Quantile`）
+
+### 50.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3790`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §34 で、本節はその実装記録。`Max`・`Min`・`Amax`・`Amin` は #3789（§49）の担当で本節では扱わない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「設計記録の推奨どおり、すべての論点を承認」「C 区分 全 5 族を実装」とある。回答本文が挙げる節番号は §33.14〜§37.14 だが、選択縮約の論点表は §34.15 にある。節番号のずれは事実としてここに残し、§34.15 の論点 1〜4 は包括承認の範囲として扱った（個別の承認を上乗せして主張しない）。
+- §34.15 の推奨との対応: 論点 2（`cg.grad` の bit 一致をテストで固定。契約は REQ-2 のまま）、論点 3（`Quantile` の位置情報は tensor-core に `pub fn` を足す）、論点 4（全 Op を実装）。論点 1（`Amax`／`Amin`）は #3789。
+
+### 50.1 対象と方式
+
+| Op | 公開メソッド | 方式 | forward の写し | cgrad |
+|---|---|---|---|---|
+| `OrderSelect` | `kthvalue`・`median(Some(d))`・`median_with_indices` | V1 | `gather(dim, index_keep)` → `reshape` | `g.reshape(keep)` → `zeros.scatter_add`（§25 の `gather_like_vjp` を再利用） |
+| `MedianAll` | `median(None)` | V3 | `stat_reduce_ops::median(x, None)` | 値は `median_all_vjp_host`、構造は `where_cond(M, g_b ⊙ W, 0)`（`M` は中央値と等しい要素、`W = 1/count`） |
+| `Quantile` | `quantile` | V3 | `stat_reduce_ops::quantile(..)` | 値は `quantile_vjp_host`、構造は `Single` lane を `where_cond(M1, g_b, 0)`（乗算なし）、`Pair` lane を `where_cond(M2, g_b ⊙ W, 0)` の和 |
+
+- 実装は `crates/autodiff/src/create_graph/stat_select.rs`。マスクと重みは x について区分定数の定数テンソルなので、二階は `g` を通る混合項だけが流れる。
+- `Single` lane（`lo == hi`・NaN lane の最後の NaN）は `g` を乗算を通さずに選ぶ（`inf * 0 = NaN` を避ける）。f32 で 0 に丸まる重みの位置はマスクから外す。
+- 要素数 0 の入力は 1 階（空ベクトル）に揃え、`push_v3` を通さずゼロ定数を返す。
+- 位置情報は tensor-core の `stat_reduce::quantile_select_host`（新設）と `QuantileLaneSelect`。規則（`sort_order`・`quantile_positions`・`quantile_precheck`）は `quantile_vjp_host` と同じ private 関数を使い、1 階の `quantile_vjp_host` は書き換えていない（bit 同一が構造上保たれる）。単体テストで `g = 1` の `quantile_vjp_host` の非ゼロ位置・重みとの一致を 5 補間・NaN lane・`dim` の None／中央軸で固定した。
+
+### 50.2 設計（§34.10）からの差
+
+- `Quantile` の構造は §34.10 の表の `Gather`／`Scatter` ではなく、`Reshape`・`BroadcastTo`・`Where`・`Mul`・`Add` の合成にした（位置が lane ごとに 1〜2 個の定数マスクで表せるため）。子テープへ積む Op はすべて `supports_create_graph() == true` で、閉包性は変わらない。
+- 入口検査 `validate_ancestors` に payload 検査を足した: `OrderSelect` の `dim` 範囲・`index` shape・各索引値の範囲・軸長の `i32` 収容、`Quantile` の `q`（有限かつ `[0, 1]`）と補間方式（`#[non_exhaustive]` のため既知 5 variant の allowlist で、未知は拒否）。子テープへ書く前に型付き `Err(Backward)` で拒否する。新しい `AutodiffError` variant は足していない。
+- 統合テストのファイル名は `create_graph_select_reduce_order.rs`（§34.4 は 7 Op 1 ファイルだが、#3789 と並行したため族ごとに分けた）。GPU parity の族名は `select_reduce_order`（#3789 は `select_reduce_minmax`）。
+- 実装記録の節番号は、並行する #3789（§49）と衝突しないよう §50 とした。
+
+### 50.3 テスト
+
+- `crates/autodiff/tests/create_graph_select_reduce_order.rs`: Hessian と有限差分の REQ-2 突合（`kthvalue`・`median` の `dim` 指定・`median_with_indices`・`median(None)`・`quantile` 5 補間 × `dim` None／各軸）、`first_order()` と `cg.grad` の bit 一致（桁落ちする上流付き）、`jvp_create_graph` の孫テープ、回帰ベクトル（タイの均等分配と安定順・`±0`・NaN lane・`3e38` 上流の 3 段有限・要素数 0）、隣接する fail-closed（`quantile` と `Op::Custom` の合成が `Err(Backward)` で `child` が空、親テープ長も不変）。
+- `stat_select.rs` の単体テスト（payload 検査）、`tape.rs` の `order_select_family_supports_create_graph`（3 Op が `true`、`Nansum`・`Nanmean` が `false`）、tensor-core の `quantile_select_host` の単体テスト。
+- facade: `{kthvalue,median_dim,median_all,quantile}_create_graph_via_facade`（`grad_exact = true`）。このファミリーを拒否する `api_surface.rs` の否定ガードは元から無く（§34.1）、反転するものは無い。代わりの正ガードは上の facade 挙動テストで、`supports_create_graph` を `false` へ戻す変更は `backward_create_graph` の `Err` で panic して検出される。
+- GPU parity: `crates/facade/tests/create_graph_gpu_parity.rs` の登録表に族 `select_reduce_order`（経路 `H`・`Judge::Strict`・`NoMatMul`）の 3 ケースを登録し、`create_graph_select_reduce_order_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 50.4 GPU（未実測）
+
+`BackendOps::stat_*` を実装するのは `backend-cpu` だけで、CUDA／Metal ではホストへフォールバックする（経路 `H`）。子テープの構造 Op はデバイスで走り、V3 の値はホストで計算する。実機の結果はすべて**未実測**で、Phase 10 の #3856（GB10）・#3858（Mac mini）へ申し送る。baseline の置き場は空のまま。
+
+### 50.5 §21.4 の依存順
+
+「#3789・#3790 は §16・§25 の後、他の C 区分と独立」の 1 行（§34.11）は #3789 と重複するため、ここに再掲するだけで §21 本文は書き換えない。
+
+### 50.6 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。`index`・`dim`・`q`・補間方式・shape は確保前に検証し、`index` は `i32::try_from` で変換する（無検査の `as` 変換や `get_unchecked` は使わない）。秘密情報は書かない。
+- スコープ外: `Nansum`・`Nanmean`（#3725）、f64 テープ（#3722）、GPU 実機 parity の実測（#3856・#3858）、公開面の追加。
+- 変えていないもの: 1 階の経路（`grad.rs`）・tolerance・baseline・ガードレール閾値・依存・`unsafe`・`docs/spec`・既存節の本文・公開 API。
+- 本 PR は `Refs #3790 #3724 #3767`。

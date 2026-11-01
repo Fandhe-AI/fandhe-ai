@@ -10,6 +10,8 @@
 //!   `CpuBackendOps::stat_*` がいずれも本モジュールの関数を直接呼ぶ。順序規則・
 //!   NaN 規則・アキュムレータ契約をクレート間で複製せず、乖離を構造的に排除する
 //!   （`cumulative.rs`・`fft.rs` と同じ「共有可能な層に一本化する」方式）。
+//! - `autodiff::create_graph`（二階微分。イシュー #3790）は [`quantile_select_host`] で
+//!   `quantile` の選択位置・重みを取り、子テープの定数マスクへ写す。
 //! - CUDA／Metal の専用カーネルは本イシューの対象外で、`BackendOps` 既定の
 //!   `Unsupported` から autodiff 側がこのホスト実装へフォールバックする。
 //!
@@ -539,6 +541,70 @@ pub fn quantile_vjp_host(
     Ok(d_x)
 }
 
+/// [`quantile_select_host`] が返す 1 lane の選択結果（入力の平坦位置で表す）。
+///
+/// `autodiff::create_graph`（二階微分。イシュー #3790・決定記録 §34）が、
+/// `quantile` の VJP と同じ選択規則を子テープ上の定数マスク・重みへ写すために使う。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QuantileLaneSelect {
+    /// 単一要素選択（`lo == hi`、または NaN lane の最後の NaN）。`g` を直接流す。
+    Single {
+        /// 入力の平坦位置。
+        pos: usize,
+    },
+    /// 2 要素選択（`lo != hi`）。下側へ `1 - w`・上側へ `w` を乗じて流す。
+    Pair {
+        /// 下側の入力平坦位置。
+        lo: usize,
+        /// 上側の入力平坦位置。
+        hi: usize,
+        /// 上側の重み（下側は `1 - w`）。
+        w: f64,
+    },
+}
+
+/// [`quantile_vjp_host`] と同じ選択規則（`sort_order`・`quantile_positions`）で、
+/// lane（`o * inner + i` の出力順）ごとの選択位置を返す。値の計算はしない。
+/// 1 階の `quantile_vjp_host` は本関数を使わず従来のまま（bit 同一を構造的に保つ）。
+pub fn quantile_select_host(
+    x: &[f32],
+    layout: &StatLayout,
+    q: f32,
+    interp: QuantileInterpolation,
+) -> Result<Vec<QuantileLaneSelect>, StatReduceError> {
+    quantile_precheck(x, layout, q)?;
+    let mut out = Vec::with_capacity(layout.out_numel());
+    let mut lane = Vec::with_capacity(layout.axis_len);
+    let mut order = Vec::with_capacity(layout.axis_len);
+    for o in 0..layout.outer {
+        for i in 0..layout.inner {
+            layout.gather(x, o, i, &mut lane);
+            sort_order(&lane, &mut order);
+            let n = lane.len();
+            if lane.iter().any(|v| v.is_nan()) {
+                out.push(QuantileLaneSelect::Single {
+                    pos: layout.pos(o, order[n - 1], i),
+                });
+                continue;
+            }
+            let (lo, hi, w) = quantile_positions(q, n, interp);
+            if lo == hi {
+                out.push(QuantileLaneSelect::Single {
+                    pos: layout.pos(o, order[lo], i),
+                });
+            } else {
+                out.push(QuantileLaneSelect::Pair {
+                    lo: layout.pos(o, order[lo], i),
+                    hi: layout.pos(o, order[hi], i),
+                    w,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// `nansum`／`nanmean` の共通走査。`f64` アキュムレータへ非 NaN 要素を添字昇順に
 /// 逐次加算し、`finish(和, 個数)` を 1 回だけ `f32` へ downcast する。
 fn nan_reduce(
@@ -612,6 +678,72 @@ pub fn nan_reduce_vjp_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `quantile_select_host` が `quantile_vjp_host(g = 1)` の非ゼロ位置・重みと一致する。
+    #[test]
+    fn quantile_select_matches_vjp_positions_and_weights() {
+        let interps = [
+            QuantileInterpolation::Linear,
+            QuantileInterpolation::Lower,
+            QuantileInterpolation::Higher,
+            QuantileInterpolation::Midpoint,
+            QuantileInterpolation::Nearest,
+        ];
+        let x = [
+            3.0_f32, 1.0, 2.0, 2.0, 9.0, -1.0, 0.5, 4.0, 4.0, 7.0, 0.0, -0.0,
+        ];
+        let nan_x = [1.0_f32, f32::NAN, 3.0, 2.0, 5.0, 4.0];
+        let cases: [(&[f32], &[usize], Option<usize>); 5] = [
+            (&x, &[12], None),
+            (&x, &[3, 4], None),
+            (&x, &[3, 4], Some(1)),
+            (&x, &[2, 3, 2], Some(1)),
+            (&nan_x, &[2, 3], Some(1)),
+        ];
+        for (data, shape, dim) in cases {
+            let l = lay(shape, dim);
+            for interp in interps {
+                for q in [0.0_f32, 0.3, 0.5, 1.0] {
+                    let sel = quantile_select_host(data, &l, q, interp).unwrap();
+                    assert_eq!(sel.len(), l.out_numel());
+                    let ones = vec![1.0_f32; l.out_numel()];
+                    let vjp = quantile_vjp_host(data, &ones, &l, q, interp).unwrap();
+                    let mut rebuilt = vec![0.0_f32; data.len()];
+                    for s in &sel {
+                        match *s {
+                            QuantileLaneSelect::Single { pos } => rebuilt[pos] = 1.0,
+                            QuantileLaneSelect::Pair { lo, hi, w } => {
+                                rebuilt[lo] = (1.0 - w) as f32;
+                                rebuilt[hi] = w as f32;
+                            }
+                        }
+                    }
+                    let a: Vec<u32> = vjp.iter().map(|v| v.to_bits()).collect();
+                    let b: Vec<u32> = rebuilt.iter().map(|v| v.to_bits()).collect();
+                    assert_eq!(a, b, "shape={shape:?} dim={dim:?} q={q} {interp:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quantile_select_rejects_invalid_q_and_empty_lane() {
+        let l = lay(&[3], None);
+        assert!(
+            quantile_select_host(&[1.0, 2.0, 3.0], &l, 1.5, QuantileInterpolation::Linear).is_err()
+        );
+        assert!(
+            quantile_select_host(
+                &[1.0, 2.0, 3.0],
+                &l,
+                f32::NAN,
+                QuantileInterpolation::Linear
+            )
+            .is_err()
+        );
+        let e = lay(&[0], None);
+        assert!(quantile_select_host(&[], &e, 0.5, QuantileInterpolation::Linear).is_err());
+    }
 
     fn lay(shape: &[usize], dim: Option<usize>) -> StatLayout {
         stat_layout(shape, dim).expect("test layout")
