@@ -55,7 +55,7 @@
 #   多層のバックストップとして機能する。
 #
 # 途中失敗時の再開方針（本ワークフローは非再開設計）:
-#   7 パッケージ一括 `cargo publish` が一部クレートの公開後に失敗した場合、
+#   公開クレート一括 `cargo publish` が一部クレートの公開後に失敗した場合、
 #   本ワークフローを再実行すると「crates.io 既公開バージョンの検証」ガードが
 #   公開済みクレート分で fail する（意図した挙動）。**部分公開状態からの
 #   再開・再実行は本ワークフローでは行わず、release.yml で未公開の残り
@@ -116,7 +116,7 @@ concurrency:
 jobs:
   # --------------------------------------------------
   # verify: トークン不要・承認不要。ref 検証 + 入力検証 + 公開クレート全件の
-  # 既公開チェック + 7 パッケージ一括 dry-run。mode に関わらず常に実行する
+  # 既公開チェック + 公開クレート一括 dry-run。mode に関わらず常に実行する
   # （publish ジョブの前段ゲートを兼ねる）。
   # --------------------------------------------------
   verify:
@@ -202,7 +202,7 @@ jobs:
           set -euo pipefail
           # 非冪等な `cargo publish` の再実行で同一バージョンを二重公開しない
           # ための fail-closed ガード（.claude/rules/security.md A08）。
-          # release.yml の同名ガードと同一ロジックを 公開クレート分ループする。
+          # release.yml の同名ガードと同一ロジックを公開クレートごとに繰り返す。
           # 1 件でも既公開なら失敗させるが、どのクレートが既公開済みかを
           # 1 回の実行でまとめて把握できるよう、最初の失敗で即 exit せず
           # 全件走査してから判定する。
@@ -268,12 +268,12 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: "verify: cargo publish --dry-run（7 パッケージ一括）"
+      - name: "verify: cargo publish --dry-run（公開クレート一括）"
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
         run: |
           set -euo pipefail
-          # 7 パッケージ同時指定はワークスペース内の path 依存をローカルで解決
+          # 公開クレート同時指定はワークスペース内の path 依存をローカルで解決
           # するため、依存先クレートが実 crates.io 未公開でも成功する
           # （docs/crates-io-publishing-order.md §8.1）。release.yml の単一
           # クレート dry-run（§8.2。実 index のみ参照するため依存先未公開の
@@ -286,7 +286,7 @@ jobs:
 
   # --------------------------------------------------
   # publish: mode=publish のときのみ実行。environment 承認ゲートを通過後、
-  # CARGO_REGISTRY_TOKEN をステップ限定で注入して 7 パッケージ一括で実公開する。
+  # CARGO_REGISTRY_TOKEN をステップ限定で注入して 公開クレート一括で実公開する。
   # --------------------------------------------------
   publish:
     name: publish (all crates ${{ inputs.version }})
@@ -355,7 +355,7 @@ jobs:
           fi
           echo "CARGO_REGISTRY_TOKEN が設定されていることを確認しました"
 
-      - name: "publish: cargo publish（7 パッケージ一括）"
+      - name: "publish: cargo publish（公開クレート一括）"
         env:
           # トークンはこのステップの env にのみ注入する（ジョブ env・他ステップへ
           # 広げない。.claude/rules/security.md A02/A07）。
