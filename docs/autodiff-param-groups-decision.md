@@ -544,3 +544,95 @@ bit 不変で他が更新されることを固定する（§9.2 項目 4: スロ
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`。再エクスポートへ別名を一時的に
 足す変異で `facade_param_groups_public_surface_matches_approved_contract` が失敗することを手元で確認した。
 `Cargo.toml`／`Cargo.lock`・tolerance・baseline・`docs/spec` は変更していない。
+
+## §14 保守・運用チェックリスト（イシュー #3752）: param groups と AMP の併用（A3-a）
+
+イシュー #3752（棚卸し A3-a。追跡表の行 19）。§9.3・§12.6・§13.5 が対象外とした「param groups と AMP の併用」の設計を記録する。本節は**設計記録であり承認ではない**。承認は #3769 の論点 2 の回答を待つ。実装は #3832（A1 の #3831 に依存）。skip した step の規則は `docs/autodiff-ema-decision.md` §17 を正とする。
+
+### 14.0 位置づけ・課題・推奨
+
+- コード上の事実（`origin/main` で確認）: AMP の step は既に `compiled.optimizer.step_dispatch(&param_refs, &unscaled_refs, &compiled.param_groups)` を通る。`compile_with_amp` が `param_groups: Vec::new()` を固定しているだけで、**欠けているのは groups と AMP を同時に設定する入口だけ**。
+- `unscale_grads`（`crates/autodiff/src/nn/optim/amp.rs`）は全勾配を 1 つの scale で割り、`found_non_finite` も全スロットで 1 つに集約する。unscale と skip の判定は groups 単位ではなく step 全体で 1 回になる。groups の lr／weight_decay はその後の `step_grouped` で効く。
+- したがってどの group（`lr = 0` の group や group に入っていないスロットを含む）で非有限が出ても、全 group の更新を飛ばし、`scaler.update(true)` を呼び、optimizer の step_count も進めない。group ごとに一部だけ更新すると、1 つのスケーラが 1 回だけ backoff するという scale の意味が崩れる。PyTorch の GradScaler が optimizer 単位で skip を決める点はソースでの確認を行っていないので**未確認**とする。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| (a)（推奨） | 新しい inherent メソッド `compile_with_amp_and_param_groups` を足す | 追加のみ。既存 3 入口は不変 | 公開名が 1 つ増える |
+| (b) | `AmpConfig` のビルダーに groups を持たせる | 入口が増えない | `Vec` を持たせると `Copy` が外れて破壊的（`api-compat-0.14.0-decision.md` §8）。借用だと lifetime が増える |
+| (c) | `compile_with_param_groups` のシグネチャを変える | — | 破壊的 |
+| (d) | 再 compile で groups を引き継ぐ | — | 再 compile で置き換えるという現行の契約が変わる |
+| (e) | 対象外にする | 変更なし | AMP と groups を同時に使えないまま残る |
+
+推奨は **(a)（実装する）**。メソッド名は承認の論点にする。
+
+### 14.1 公開形
+
+- シグネチャ案: `pub fn compile_with_amp_and_param_groups(&mut self, optimizer: Optimizer, loss: Loss, amp: AmpConfig, param_groups: &[ParamGroup]) -> Result<(), AutodiffError>`。全部を構築してから代入する（construct-before-assign）。Lbfgs の拒否は既存 2 入口と同じ形。groups が空なら `compile_with_amp` と bit 一致する。
+- facade 内の配置: `compat/training.rs` の `impl Sequential`、`compile_with_amp` の隣。`compile()`・`compile_with_amp`・`compile_with_param_groups` は変えない。
+- 正ガード／否定プローブ（#3832 が行う）: 現時点で A3-a の組み合わせを止める保留ガードは無い（新しい名前は既存の走査に引っかからない）ので、反転ではなく正ガードの在庫へ追加する形になる。対象は `scan_param_groups_reexports_and_declarations` と `PARAM_GROUPS_APPROVED_KEYS`（3 → 4 件）、`param_groups_inventory_violations`、`facade_param_groups_public_surface_matches_approved_contract`、`facade_param_groups_public_surface_guards_detect_each_category`（別名・別ファイル・二重宣言・`impl Sequential` の外の配置を足す）、`param_groups_types_are_reachable_via_facade_only`（シグネチャを fn ポインタに束縛）、`param_groups_usage_doctests_are_present_and_compiled`、`workspace_declares_param_group_fn_names_only_in_allowed_locations`、必要なら `amp_fit_types_are_reachable_via_facade`。
+- 確認事項（断定しない）: `scan_type_impl_surface(.., "Sequential")` を使う箇所に `compat::Sequential` の pub メソッド全集合を固定するものがあるかを、#3832 で再確認する。
+
+### 14.2 rustdoc と doctest の例
+
+- 新しいメソッドに、役割の要約、skip 判定が全 group 共通であること、スロット添字の契約（`compile_with_param_groups` の doc と同じ）、制約の一覧、doctest（`lr = 0` の group を凍結し、AMP で fit したあと bit 単位で変わらないこと。facade 単独・CPU）を置く計画。
+- 失敗系は `compile_fail` を使わず、正のテストで確かめる。
+
+### 14.3 エラー型
+
+- `InvalidArgument` だけ。Lbfgs と空でない groups の組み合わせ、`GradScalerConfig` の不正、optimizer の検証違反を拒否し、失敗したときは `self.compiled` を変えない。
+- 注意点: groups の中身の検証は既存どおり（fit 入口でスロット範囲、step 時に `resolve_slot_hparams`）。skip した step では `step_dispatch` が呼ばれないので、groups の中身の不正は最初の skip しない step で `Err` になる（その前の `scaler.update(true)` は残る）。これを論点にする（推奨は現行どおりにして doc とテストで固定する。代案は fit 入口での事前検証）。
+
+### 14.4 テスト計画
+
+置き場は `compat_sequential_param_groups.rs` か新しい `compat_sequential_fit_amp_param_groups.rs`（#3832 が決める）。
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 空の groups で `compile_with_amp` と bit 一致 | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| 空でない groups で手書きループ（`GradScaler::unscale` → `step_with_groups`）と bit 一致（F16／Bf16） | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| 1 つの group の勾配が非有限になると全 group が skip し、step_count が進まない（`2^127` の fixture） | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| `lr = 0` の group は skip の有無にかかわらず bit 単位で不変 | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| 拒否の組み合わせ（Lbfgs・`LrSchedule`・`save_model`・`accumulate_steps > 1`・カスタム step・SWA）で `compiled` が変わらない | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| スロット範囲の外を fit 入口が拒否 | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| #3831 の後に EMA＋AMP＋groups の 3 つを組み合わせる | 新規 | CI | 該当なし | 該当なし | 該当なし |
+
+実機列は「該当なし」（GPU カーネル・`Op`・`BackendOps` は変えない）。
+
+### 14.5 数値契約
+
+§17.5（`docs/autodiff-ema-decision.md`）と同じ。新しい算術は無く、判定は bit 一致だけ。tolerance 定数・baseline・ガードレール閾値は変えない。
+
+### 14.6 互換への影響
+
+- 「追加のみ」（inherent `pub fn` の追加。`api-compat-0.14.0-decision.md` §4 の行 19）。`AmpConfig` の `Copy`、`ParamGroup`／`ParamGroupStep` は変えない。
+- 下流が自前の trait で同じ名前を `Sequential` に実装している場合は inherent メソッドが優先される（§9.4 と同じ注記）。
+
+### 14.7 適用記録・索引・追跡表
+
+- 適用記録の案（#3832 が `docs/compat-api-scope.md` へ書く。承認の URL は #3769 の回答コメントを待って埋める）: `**適用記録（イシュー #3832。承認: <#3769 の回答コメント URL>）**: param groups と AMP を同時に設定する compile_with_amp_and_param_groups を追加。skip 判定は全 group 共通。`
+- 公開状態: 未公開。
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表を更新した
+- [ ] `docs/compat-api-scope.md` の適用記録（実装 PR が行う）
+
+### 14.8 ベンチと性能への影響
+
+既定経路は変えない。前後比較は不要（計測はしないので数値は書かない）。
+
+### 14.9 依存の追加の有無
+
+依存追加: なし。新しい `unsafe`: なし。許容 12 区分・禁止リストの照合結果は変化なし。
+
+### 14.10 所有者へ戻す論点（#3769 論点 2）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. 入口の形とメソッド名 | (a) 新メソッド／(b)〜(e) | (a) `compile_with_amp_and_param_groups` | 実装へ進めない |
+| 2. skip の単位 | 全 group 一括／group ごと | 一括 | 実装へ進めない |
+| 3. groups の中身の検証時点 | 現行どおり（step 時）／fit 入口で事前検証 | 現行どおり | 実装へ進めない |
+| 4. 解除の範囲 | `LrSchedule`・保存・Lbfgs・`DeviceParamStore` は拒否のまま／解除 | 拒否を維持 | 実装へ進めない |
+
+### 14.11 セキュリティ・スコープ外
+
+- A03: 外部入力の新しいパースは無く、検証順は状態を変える前に拒否する既存の形を保つ。A08: 閾値・tolerance・baseline は変えない。
+- スコープ外: A3-b（#3754）、A3-c（#3755）、A3-d（#3756）、A3-e（Lbfgs）、`Optimizer` に無い 4 種（#3757）。新しい issue は起票しない。#3832 は実装と完了条件の確認が済むまで `Refs` を使う。
