@@ -969,7 +969,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 |---|---|---|
 | (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | #3798 で対象化済み（§53） |
 | (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | #3799 で対象化済み（§54） |
-| (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
+| (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | #3800 で対象化済み（§55） |
 | 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
 
 ### 26.3 `reduction` と既知の差
@@ -4410,3 +4410,55 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: 二値・マージン系 6 variant（#3799）、クラス軸系（#3731・#3800）、`CtcLoss`、f64 テープの create_graph、GPU 実機 parity の実測（#3857・#3859）、公開面の追加。
 - 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§26.2 の表の 1 行を除く）・公開 API。
 - 本 PR は `Refs #3798 #3730 #3767 #3857 #3859`。
+
+## 55. 実装記録（イシュー #3800・親 #3719 系。create_graph の B 区分・損失のクラス軸系 `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss`）
+
+### 55.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3800`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §40（#3731）で、本節はその実装記録。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「B 区分は §38〜§44 の推奨どおり実装する」「CtcLoss は対象外とし恒久的に fail-closed にする」「§40 点 6（hinge 境界は継承）は推奨どおり」とあり、§40.16 のほかの論点（6 variant を実装・CEWO は V3・Cosine と Triplet は S1・Triplet の `1<p<2` かつ `u==0` は拒否・NaN は伝播し `±inf` は拒否・GPU parity は §48 の方式・隣接見本は `Op::Custom`）も推奨どおり。個別の承認を上乗せして主張しない。
+- `CtcLoss` は承認により恒久的に対象外で、`supports_create_graph` は `false` のまま。拒否経路も変えていない。#3801 の docs のみのクローズは本 PR の作業ではない。
+
+### 55.1 実装したもの
+
+| Op | 公開メソッド | 方式 | cgrad |
+|---|---|---|---|
+| `CrossEntropyLossWithOptions` | `cross_entropy_loss_with` | V3 + V1 | 値は `cross_entropy_loss_with_options_vjp`。構造は `dx = where(valid, s ⊙ (A ⊙ softmax(x) − B), 0)`。`A = (1−ε) w_t + (ε/C) Σw`・`B_c = (1−ε) w_t δ_{c,t} + (ε/C) w_c`・`valid` はホストが f64 で作る定数。Mean の分母は非 ignore サンプルの重み和 `W`（`g / const(W)`）。`Σw == 0` と `Mean && W == 0` は定数ゼロ |
+| `MultiMarginLoss` | `multi_margin_loss` | V3 + V2 | p=1 は `where(K≠0, s ⊙ const(K), 0)`（`K` は `w_y/C` の符号付き個数）、p=2 は `H = where(M, 2Z, 0)`・`dx = s ⊙ c_w ⊙ where(onehot_y, −Sum(H), H)`。`Z = margin − x_y + x`（`x_y` は `Gather`）、`M` は 1 階と同じ f64 の厳密 `z > 0` |
+| `MultiLabelMarginLoss` | `multilabel_margin_loss` | V3 + V2 | x について区分定数。`dx = where(K≠0, s ⊙ const(K/C), 0)`（重複 target は重複分だけ数える） |
+| `MultiLabelSoftMarginLoss` | `multilabel_soft_margin_loss` | V3 + V1 | `dx = s ⊙ (const(w_c/C) ⊙ (σ(x) − t))`。`σ(x) − t` は符号別の安定形（x ≥ 0: `(1−t) − σ(−x)`、x < 0: `σ(x) − t`）。大きい側の σ を Sigmoid の出力から作ると VJP の `y(1−y)` が f32 で曲率を失うため（§54 と同じ扱い） |
+| `CosineEmbeddingLoss` | `cosine_embedding_loss` | V3 + V2 + S1 | 行ごとに 2 のべき乗の `s_i = max(max|x_i|, √ε)` で `x/s` を作り、`ε` を `ε/s²` へ変換する。`Mul`・`Sum`・`Sqrt`・`Div` でノルムを組み、`dx1 = s_b ⊙ coeff ⊙ (1/s1) ⊙ (b'/den − cos ⊙ a'/m1')`（`dx2` も同形）。`coeff ∈ {−1, +1, 0}` は 1 階と同じ f64 の `cos` で決める V2 定数 |
+| `TripletMarginLoss` | `triplet_margin_loss` | V3 + V2 + S1 | 差分 `v = x − y + eps` から p ノルムの勾配を組む。p=2 は `u/norm'`、p=1 は符号の V2 定数、一般の p は `sign(u) ⊙ (|u|/norm')^(p−1)`。`hinge_active`（`>=`）・`an_coeff`（1／0／0.5）・`norm == 0` は V2。寄与は 1 階 VJP と同じ `da = g_ap − c_an g_an`・`dp = −g_ap − c_pn g_pn`・`dn = c_an g_an + c_pn g_pn` |
+
+- 実装は `crates/autodiff/src/create_graph/loss_class.rs`。`replay_op` と `build_cgrads` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`（ワイルドカードは足していない）。`grad.rs` は `cross_entropy_loss_with_options_vjp`・`cosine_embedding_loss_vjp`・`triplet_margin_loss_vjp` の可視性を `pub(crate)` にしただけで、本体・値は変えていない。`create_graph.rs` の `reduce_dim_bcast` を `pub(super)` にした。
+- 再生（`replay_op`）は公開 `Var` メソッドへ委譲するので forward の検証を迂回しない。`MultiMarginLoss` の `targets`／`weight`、`MultiLabelMarginLoss` の `targets` は `Op` payload の `Vec` から `Tensor` を組み直して渡す。
+- `s` は `loss_scale_bcast` で子テープ上の `g` を通すので、損失が根でなくても二階が `g` へ流れる。CEWO だけ分母が `W` なので `g / const(W as f32)` の別経路にした。
+- `g.mul(0/1 定数)` は使わず、区分は `where_cond` で選ぶ（`inf·0 = NaN` を避ける）。
+- 要素数 0 の入力は 1 階に揃え、ゼロ定数を返す。
+
+### 55.2 設計（§40）からの差・明確化
+
+- **`Op::VectorNorm`／`Op::PNorm` を使わない理由**: §40 の基準 sha 以降、`VectorNorm`（L1・L2）と `PNorm` は #3942（§52）で `supports_create_graph` が `true` になった。それでも Cosine・Triplet のノルムは §40.10 のとおり `Mul`・`Sum`・`Sqrt`・`Div`（Triplet は `Abs`・`PowScalar`）で手に組み、S1 の行スケールと `ε → ε/s²` の変換を入れた。承認は S1 の構造（スケール・`ε/s²` の扱い・総括判定）に対して出ており、`norm_l2`／`norm_p` への簡略化はその前提を変えるため。
+- Triplet のスケール `mx` は、設計の「2 のべき乗」ではなく**行ごとの差分の最大絶対値**（ホスト定数）にした。2 のべき乗に切り上げると最大要素が `(0.5, 1]` に入り、`p` が大きいとき（`p = 1024` 等）`Σ(|v|/mx)^p` が f32 で 0 に潰れて `norm'` が 0 になるため。最大絶対値で割れば最大要素が約 1 になり、`norm' ≥ 約 1` が保たれる。`1/mx` が f32 で表せない小さな差分（`max|v| < 2^-100`、全要素 0 の行を除く）は拒否する。Cosine は `norm'` が `ε'` 側でも `m' ≥ 約 0.25` となるので、設計どおり 2 のべき乗を使う。
+- Triplet の `1<p<2` で差分が 0 のレーンは、**活性でない行も含めて**拒否する。非活性行の構造にも `PowScalar(p−1)` が積まれ、`0·inf = NaN` が二階へ混ざるのを避けるため（設計は「二階が発散するので拒否」。承認は論点 5 の拒否）。`p = 1`・`p = 2`・`p > 2` では差分 0 のレーンを受理する（p=2 は `u/norm'` で曲率を保つ）。
+- 総括判定（§40.12）は variant ごとに構造の各段と二階逆伝播の「cotangent × 微分係数」を f64 で上から押さえ、非有限または `STAGE_BOUND_GUARD`（2^125）以上の段があれば子テープへ書く前に型付き `Err(Backward)` で拒否する具体形にした。拒否後は既存のロールバックで `child` が空に戻り、同じ `child` で再試行できる。§40.5 の必須ベクトル 3 件（MultiMargin p=2 の `H` overflow・MultiLabelSoft の `weight=1e30`・MultiMargin p=1 の `weight=1e20`）は拒否される。
+- 非有限の `g` と、入力の `±inf` は拒否する。NaN のレーンは段検査から外して伝播させる（§33.14 論点 3 と同じ）。これらは §40.12 の具体化・明確化であり、個別の承認を上乗せして主張しない。
+- ヘルパー（`stage`・`upstream_scale`・`check_g_cotangent` 等）は #3798／#3799 と共有せず、この新モジュールの private 関数として同等のものを置いた（独立にマージできるようにするため）。マージ後の共通化は整理候補。
+- 既存テスト `tape.rs` の `binary_margin_losses_support_create_graph` は拒否の見本に `Op::MultiMarginLoss` を使っていたため、`Op::Custom` 基準へ差し替えた（本 PR の変更で見本が受理側に入るため）。ほかに 6 variant を拒否の見本にしている既存テストは無かった（`tests/create_graph*.rs`・`crates/facade/tests/create_graph*.rs` を確認）。追加の単体テスト `class_axis_losses_support_create_graph` は `CtcLoss` が `false` のままであることも固定する。
+
+### 55.3 テスト
+
+- `crates/autodiff/tests/create_graph_loss_class.rs`: `first_order()` と `cg.grad` の 1 階 bit 一致（6 つとも V3）、損失が根でないときの子テープ上の損失値の写し、Hessian と有限差分の REQ-2 突合（6 variant × Mean／Sum。CEWO は label_smoothing・ignore_index・class_weight の各組と class_dim 0／最終軸／rank 3 中間軸、MultiMargin は p=1／2・weight 有無、Triplet は p ∈ {1, 2, 3}・swap 有無。損失が根の場合と根でない場合。h と h/2 の Richardson 外挿）、混合二階（Cosine の x1·x2、Triplet の a·p・a·n・p·n）と p=2 で一部レーンの差分が 0 の行の曲率保持、`jvp_create_graph` の孫テープ、必須ベクトル（拒否と `child` が空・再試行）、区分境界（MultiMargin／MultiLabelMargin の `z == 0` は非活性、Cosine の `cos == margin`・Triplet の hinge 境界は活性、swap の同値タイ）、CEWO の早期 return 2 種が NaN logits でも 0、`±inf` の拒否と NaN の伝播、空テンソル、隣接する `Op::Custom` の fail-closed。
+- facade: `{cross_entropy_loss_with,multi_margin_loss,multilabel_margin_loss,multilabel_soft_margin_loss,cosine_embedding_loss,triplet_margin_loss}_create_graph_via_facade`、`backward_create_graph` の rustdoc に label smoothing 付き `cross_entropy_loss_with` の HVP の doctest。本族を拒否する `api_surface.rs` の否定ガードは元から無く、反転するものは無い。代わりの正ガードは doctest 実在検査 `backward_create_graph_loss_class_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `loss_class` の 6 ケース（いずれも経路 `H`・`Judge::Strict`・`NoMatMul`。1 階は 6 つともホスト関数）を登録し、`create_graph_loss_class_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 55.4 GPU（未実測）
+
+6 つの 1 階はすべてホスト関数（CUDA／Metal ではホストへ実体化）で、子テープの構造 Op（Softmax・pointwise・Sum）がデバイスで走る。実機の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。`<rocm-node>` は雛形なし。baseline は作らず、置き場は空のまま。
+
+### 55.5 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。targets の範囲・`y`（±1）・`p`・`eps`・`margin`・class_weight（有限かつ非負）・shape は forward 側の検証を通ったものだけが届き、写しは公開 `Var` メソッド経由なので検証は迂回されない。新しい確保は O(numel) のマスク・f64 一時領域・定数テンソルに限る。本番経路で `unwrap`／`expect` は使わず、内部契約違反は型付きエラーにする。`unsafe` は追加しない。
+- スコープ外: `CtcLoss`（恒久 fail-closed）、他の B 区分、`Reduction::None` の追加、f64 テープの create_graph、GPU 実機 parity の実測（#3857・#3859）、測り方の変更（#3739）、公開面の追加、#3798／#3799 との総括判定ヘルパーの共通化。
+- 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§26.2 の表の 1 行を除く）・公開 API。
+- 本 PR は `Refs #3800 #3731 #3767 #3857 #3859`。

@@ -2639,7 +2639,15 @@ impl Op {
             | Op::SoftMarginLoss { .. }
             | Op::HingeEmbeddingLoss { .. }
             | Op::MarginRankingLoss { .. }
-            | Op::SigmoidFocalLoss { .. } => true,
+            | Op::SigmoidFocalLoss { .. }
+            // 損失のクラス軸系 6 variant（イシュー #3800・決定記録 §40/§55）。方式は
+            // `create_graph/loss_class.rs`。6 つとも V3（+V1／V2）。`CtcLoss` は承認により恒久 false。
+            | Op::CrossEntropyLossWithOptions { .. }
+            | Op::MultiMarginLoss { .. }
+            | Op::MultiLabelMarginLoss { .. }
+            | Op::MultiLabelSoftMarginLoss { .. }
+            | Op::CosineEmbeddingLoss { .. }
+            | Op::TripletMarginLoss { .. } => true,
             // `VectorNorm` は payload で判定する（`ScalarUnary` の前例）。`L1`／`L2` だけ true、
             // `#[non_exhaustive]` の未知 `ord` は false。
             Op::VectorNorm { ord, .. } => matches!(
@@ -2648,13 +2656,7 @@ impl Op {
             ),
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
-            Op::CrossEntropyLossWithOptions { .. }
-            | Op::CosineEmbeddingLoss { .. }
-            | Op::TripletMarginLoss { .. }
-            | Op::MultiMarginLoss { .. }
-            | Op::MultiLabelMarginLoss { .. }
-            | Op::MultiLabelSoftMarginLoss { .. }
-            | Op::CtcLoss { .. }
+            Op::CtcLoss { .. }
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
@@ -6063,7 +6065,7 @@ mod loss_create_graph_support_tests {
 
     /// 損失の二値・マージン系 6 variant（イシュー #3799・決定記録 §39/§54）が
     /// `supports_create_graph() == true` であること（payload の違いで判定が変わらない）。
-    /// 隣接する `CtcLoss`・`MultiMarginLoss` が `false` のままであることも固定する。
+    /// 隣接見本は `Op::Custom`（`CtcLoss` は恒久 false だが、見本には使わない。§40.4）。
     #[test]
     fn binary_margin_losses_support_create_graph() {
         use fandhe_ai_tensor_core::BceKind;
@@ -6124,15 +6126,87 @@ mod loss_create_graph_support_tests {
         for op in &supported {
             assert!(op.supports_create_graph(), "{op:?}");
         }
-        let closed = Op::MultiMarginLoss {
-            input: NodeId(0),
-            targets: vec![0],
-            weight: None,
-            p: 1,
-            margin: 1.0,
-            reduction: r,
+        let closed = Op::Custom {
+            inputs: vec![],
+            func: crate::custom::CustomFn(Arc::new(NoopFn)),
         };
         assert!(!closed.supports_create_graph(), "{closed:?}");
+    }
+
+    /// 損失のクラス軸系 6 variant（イシュー #3800・決定記録 §40/§55）が
+    /// `supports_create_graph() == true` であること（payload の違いで判定が変わらない）。
+    /// `CtcLoss` は承認により恒久的に `false` のまま（fail-closed）。
+    #[test]
+    fn class_axis_losses_support_create_graph() {
+        let r = Reduction::Sum;
+        let t1 = || Tensor::new(vec![1f32], &[1]).unwrap();
+        let supported = [
+            Op::CrossEntropyLossWithOptions {
+                logits: NodeId(0),
+                targets: Tensor::<i32>::new(vec![0], &[1]).unwrap(),
+                class_dim: 0,
+                reduction: r,
+                options: crate::loss_ops::CrossEntropyOptions::default().label_smoothing(0.1),
+            },
+            Op::MultiMarginLoss {
+                input: NodeId(0),
+                targets: vec![0],
+                weight: None,
+                p: 1,
+                margin: 1.0,
+                reduction: r,
+            },
+            Op::MultiMarginLoss {
+                input: NodeId(0),
+                targets: vec![0],
+                weight: Some(vec![1.0]),
+                p: 2,
+                margin: 0.5,
+                reduction: r,
+            },
+            Op::MultiLabelMarginLoss {
+                input: NodeId(0),
+                targets: vec![0],
+                reduction: r,
+            },
+            Op::MultiLabelSoftMarginLoss {
+                input: NodeId(0),
+                target: t1(),
+                weight: None,
+                reduction: r,
+            },
+            Op::CosineEmbeddingLoss {
+                x1: NodeId(0),
+                x2: NodeId(1),
+                y: t1(),
+                margin: 0.0,
+                reduction: r,
+            },
+            Op::TripletMarginLoss {
+                anchor: NodeId(0),
+                positive: NodeId(1),
+                negative: NodeId(2),
+                options: crate::loss_ops::TripletMarginOptions::default(),
+                reduction: r,
+            },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?}");
+        }
+        let ctc = Op::CtcLoss {
+            log_probs: NodeId(0),
+            targets: Tensor::<i32>::new(vec![1], &[1, 1]).unwrap(),
+            input_lengths: vec![1],
+            target_lengths: vec![1],
+            options: crate::loss_ops::CtcLossOptions::default(),
+            reduction: r,
+        };
+        assert!(!ctc.supports_create_graph(), "{ctc:?}");
+        let closed = Op::Custom {
+            inputs: vec![],
+            func: crate::custom::CustomFn(Arc::new(NoopFn)),
+        };
+        assert!(!closed.supports_create_graph());
     }
 
     /// 統計縮約 4 Op（イシュー #3791・決定記録 §33・§52）が `supports_create_graph() == true`

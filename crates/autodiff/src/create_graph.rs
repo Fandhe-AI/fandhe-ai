@@ -81,13 +81,12 @@
 //! イシュー #3082（決定記録 §26。V1／V2 方式）で対象にした。損失の二値・マージン系
 //! `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`HingeEmbeddingLoss`・
 //! `MarginRankingLoss`・`SigmoidFocalLoss` の 6 variant はイシュー #3799
-//! （決定記録 §39/§54・実装は `loss_binary_margin`）で対象にした。残る損失は
-//! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
-//! `CosineEmbeddingLoss`・`TripletMarginLoss`・
-//! `CtcLoss`（イシュー #2168。同型の理由で対象外）・
-//! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`
-//! （イシュー #2653。同型の理由で対象外）
-//! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
+//! （決定記録 §39/§54・実装は `loss_binary_margin`）で対象にした。損失のクラス軸系
+//! `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・
+//! `MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` の 6 variant は
+//! イシュー #3800（決定記録 §40/§55・実装は `loss_class`）で対象にした。残る損失は
+//! `CtcLoss`（イシュー #2168。所有者承認により恒久的に対象外・fail-closed のまま。§40・#3767）
+//! のみである。`BatchNorm`（train／eval。
 //! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。プーリング族
 //! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）、
 //! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）・
@@ -133,6 +132,7 @@ mod conv;
 mod index_cum;
 mod linalg_fft;
 mod loss_binary_margin;
+mod loss_class;
 mod loss_regression;
 mod pad_mask;
 mod pool;
@@ -1037,6 +1037,79 @@ fn replay_op<'c>(
                 .gamma(gamma),
             reduction,
         ),
+        // 損失のクラス軸系 6 variant（イシュー #3800）。公開 `Var` メソッドへ委譲し forward の検証を
+        // 迂回しない（`CrossEntropyLossWithOptions` は非既定オプションのときだけ構築される Op なので、
+        // 再生でも同じ variant が積まれる）。
+        Op::CrossEntropyLossWithOptions {
+            logits,
+            targets,
+            class_dim,
+            reduction,
+            options,
+        } => get_mirror(mirror, logits)?
+            .cross_entropy_loss_with(&targets, class_dim, reduction, &options),
+        Op::MultiMarginLoss {
+            input,
+            targets,
+            weight,
+            p,
+            margin,
+            reduction,
+        } => {
+            let mut options = crate::margin_focal_loss_ops::MultiMarginOptions::default()
+                .p(p)
+                .margin(margin);
+            if let Some(w) = weight {
+                options = options.weight(Tensor::new(w.clone(), &[w.len()])?);
+            }
+            let target = Tensor::<i32>::new(targets.clone(), &[targets.len()])?;
+            get_mirror(mirror, input)?.multi_margin_loss(&target, &options, reduction)
+        }
+        Op::MultiLabelMarginLoss {
+            input,
+            targets,
+            reduction,
+        } => {
+            let x = get_mirror(mirror, input)?;
+            let target = Tensor::<i32>::new(targets.clone(), x.shape().as_slice())?;
+            x.multilabel_margin_loss(&target, reduction)
+        }
+        Op::MultiLabelSoftMarginLoss {
+            input,
+            target,
+            weight,
+            reduction,
+        } => {
+            let mut options = crate::margin_focal_loss_ops::MultiLabelSoftMarginOptions::default();
+            if let Some(w) = weight {
+                options = options.weight(Tensor::new(w.clone(), &[w.len()])?);
+            }
+            get_mirror(mirror, input)?.multilabel_soft_margin_loss(&target, &options, reduction)
+        }
+        Op::CosineEmbeddingLoss {
+            x1,
+            x2,
+            y,
+            margin,
+            reduction,
+        } => get_mirror(mirror, x1)?.cosine_embedding_loss(
+            &get_mirror(mirror, x2)?,
+            &y,
+            margin,
+            reduction,
+        ),
+        Op::TripletMarginLoss {
+            anchor,
+            positive,
+            negative,
+            options,
+            reduction,
+        } => get_mirror(mirror, anchor)?.triplet_margin_loss(
+            &get_mirror(mirror, positive)?,
+            &get_mirror(mirror, negative)?,
+            &options,
+            reduction,
+        ),
         // 損失の回帰系 3 variant（イシュー #3798）。公開 `Var` メソッドへ委譲し forward の検証を迂回しない。
         Op::KlDivLoss {
             input,
@@ -1178,7 +1251,7 @@ fn push_v3<'c>(
 }
 
 /// `dim` 軸を縮約して長さ 1 で復元し `shape` へ broadcast する。
-fn reduce_dim_bcast<'c>(
+pub(super) fn reduce_dim_bcast<'c>(
     v: &Var<'c>,
     dim: usize,
     shape: &[usize],
@@ -1830,6 +1903,124 @@ fn build_cgrads<'c>(
                     &g,
                 )?;
                 accumulate(&parent_nodes, &mut cgrads, input, di)?;
+            }
+            // 損失のクラス軸系 6 variant（イシュー #3800。方式は `loss_class` モジュール doc 参照）。
+            Op::CrossEntropyLossWithOptions {
+                logits,
+                targets,
+                class_dim,
+                reduction,
+                options,
+            } => {
+                let x_m = get_mirror(mirror, logits)?;
+                let di = loss_class::cewo_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (logits, class_dim, reduction),
+                    (&targets, &options),
+                    &x_m,
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, logits, di)?;
+            }
+            Op::MultiMarginLoss {
+                input,
+                targets,
+                weight,
+                p,
+                margin,
+                reduction,
+            } => {
+                let x_m = get_mirror(mirror, input)?;
+                let di = loss_class::multi_margin_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, reduction),
+                    (&targets, weight.as_deref(), p, margin),
+                    &x_m,
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+            }
+            Op::MultiLabelMarginLoss {
+                input,
+                targets,
+                reduction,
+            } => {
+                let di = loss_class::multilabel_margin_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, reduction),
+                    &targets,
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+            }
+            Op::MultiLabelSoftMarginLoss {
+                input,
+                target,
+                weight,
+                reduction,
+            } => {
+                let x_m = get_mirror(mirror, input)?;
+                let di = loss_class::multilabel_soft_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, reduction),
+                    (&target, weight.as_deref()),
+                    &x_m,
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+            }
+            Op::CosineEmbeddingLoss {
+                x1,
+                x2,
+                y,
+                margin,
+                reduction,
+            } => {
+                let (a_m, b_m) = (get_mirror(mirror, x1)?, get_mirror(mirror, x2)?);
+                let (d1, d2) = loss_class::cosine_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (x1, x2, reduction),
+                    (&y, margin),
+                    (&a_m, &b_m),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, x1, d1)?;
+                accumulate(&parent_nodes, &mut cgrads, x2, d2)?;
+            }
+            Op::TripletMarginLoss {
+                anchor,
+                positive,
+                negative,
+                options,
+                reduction,
+            } => {
+                let (a_m, p_m, n_m) = (
+                    get_mirror(mirror, anchor)?,
+                    get_mirror(mirror, positive)?,
+                    get_mirror(mirror, negative)?,
+                );
+                let (da, dp, dn) = loss_class::triplet_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (anchor, positive, negative, reduction),
+                    &options,
+                    (&a_m, &p_m, &n_m),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, anchor, da)?;
+                accumulate(&parent_nodes, &mut cgrads, positive, dp)?;
+                accumulate(&parent_nodes, &mut cgrads, negative, dn)?;
             }
             // 損失の回帰系 3 variant（イシュー #3798。方式は `loss_regression` モジュール doc 参照）。
             Op::KlDivLoss {
