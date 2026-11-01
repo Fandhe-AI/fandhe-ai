@@ -75,14 +75,14 @@
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
 //! `Stft`・`Istft`・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・
 //! `SlogdetSign`・`MatrixRank` の 15 件は fail-closed に固定した。
+//! 損失の回帰系 `KlDivLoss`・`PoissonNllLoss`・`GaussianNllLoss` はイシュー #3798
+//! （決定記録 §39/§53・実装は `loss_regression`）で対象にした。
 //! 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・`NllLoss` の 5 variant を
 //! イシュー #3082（決定記録 §26。V1／V2 方式）で対象にした。残る損失は
 //! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
 //! `CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`・
-//! `PoissonNllLoss`（イシュー #2167。同型の理由で対象外）・
 //! `CtcLoss`（イシュー #2168。同型の理由で対象外）・
 //! `BceWithLogitsPosWeightLoss`・`HingeEmbeddingLoss`・`SoftMarginLoss`・
-//! `GaussianNllLoss`（イシュー #2652。同型の理由で対象外）・
 //! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・
 //! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
@@ -130,6 +130,7 @@ use crate::var::Var;
 mod conv;
 mod index_cum;
 mod linalg_fft;
+mod loss_regression;
 mod pad_mask;
 mod pool;
 mod select_reduce;
@@ -969,6 +970,46 @@ fn replay_op<'c>(
             class_dim,
             reduction,
         } => get_mirror(mirror, input)?.nll_loss(&targets, class_dim, reduction),
+        // 損失の回帰系 3 variant（イシュー #3798）。公開 `Var` メソッドへ委譲し forward の検証を迂回しない。
+        Op::KlDivLoss {
+            input,
+            target,
+            kind,
+            reduction,
+        } => {
+            let (x, t) = (get_mirror(mirror, input)?, get_mirror(mirror, target)?);
+            match kind {
+                fandhe_ai_tensor_core::KlDivTarget::Probabilities => x.kl_div_loss(&t, reduction),
+                fandhe_ai_tensor_core::KlDivTarget::LogProbabilities => {
+                    x.kl_div_loss_with_log_target(&t, reduction)
+                }
+                _ => Err(AutodiffError::Backward(
+                    "create_graph: KlDivLoss: 未知の KlDivTarget は fail-closed".into(),
+                )),
+            }
+        }
+        Op::PoissonNllLoss {
+            input,
+            target,
+            options,
+            reduction,
+        } => get_mirror(mirror, input)?.poisson_nll_loss(
+            &get_mirror(mirror, target)?,
+            &options,
+            reduction,
+        ),
+        Op::GaussianNllLoss {
+            input,
+            target,
+            var,
+            options,
+            reduction,
+        } => get_mirror(mirror, input)?.gaussian_nll_loss(
+            &get_mirror(mirror, target)?,
+            &get_mirror(mirror, var)?,
+            &options,
+            reduction,
+        ),
         // FFT 4 件・線形代数 4 件（イシュー #3086。方式は `linalg_fft` モジュール doc 参照）。
         // forward と同じ dispatch を公開 `Var` メソッド経由で通す。`SlogdetLogAbsDet` の写しは
         // `slogdet` が積む未使用の `SlogdetSign` ノードを伴うが、どの根からも到達しないため
@@ -1613,6 +1654,68 @@ fn build_cgrads<'c>(
                 let dtarget = dpred.neg()?;
                 accumulate(&parent_nodes, &mut cgrads, pred, dpred)?;
                 accumulate(&parent_nodes, &mut cgrads, target, dtarget)?;
+            }
+            // 損失の回帰系 3 variant（イシュー #3798。方式は `loss_regression` モジュール doc 参照）。
+            Op::KlDivLoss {
+                input,
+                target,
+                kind,
+                reduction,
+            } => {
+                let (x_m, t_m) = (get_mirror(mirror, input)?, get_mirror(mirror, target)?);
+                let (di, dt) = loss_regression::kl_div_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, target, reduction),
+                    kind,
+                    (&x_m, &t_m),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dt)?;
+            }
+            Op::PoissonNllLoss {
+                input,
+                target,
+                options,
+                reduction,
+            } => {
+                let (x_m, t_m) = (get_mirror(mirror, input)?, get_mirror(mirror, target)?);
+                let (di, dt) = loss_regression::poisson_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, target, reduction),
+                    &options,
+                    (&x_m, &t_m),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dt)?;
+            }
+            Op::GaussianNllLoss {
+                input,
+                target,
+                var,
+                options,
+                reduction,
+            } => {
+                let x_m = get_mirror(mirror, input)?;
+                let t_m = get_mirror(mirror, target)?;
+                let v_m = get_mirror(mirror, var)?;
+                let (di, dt, dv) = loss_regression::gaussian_cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    (input, target, var, reduction),
+                    options.eps_value(),
+                    (&x_m, &t_m, &v_m),
+                    &g,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, di)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dt)?;
+                accumulate(&parent_nodes, &mut cgrads, var, dv)?;
             }
             Op::CrossEntropyLoss {
                 logits,
