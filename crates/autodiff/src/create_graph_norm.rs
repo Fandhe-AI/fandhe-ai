@@ -213,7 +213,7 @@ fn get<'c>(mirror: &[Option<Var<'c>>], id: NodeId) -> Result<Var<'c>, AutodiffEr
 
 /// 2 のべき乗 `2^e`（`e` は `[-126, 127]` で f32 の正規数として厳密に表現できる）の指数を
 /// `t` 以上になる最小の整数として求め、表現可能域へクランプする。`t` が 0・非有限なら 0（`s=1`）。
-fn pow2_ceil_exponent(t: f64) -> i32 {
+pub(crate) fn pow2_ceil_exponent(t: f64) -> i32 {
     if t.is_nan() || t.is_infinite() || t <= 0.0 {
         return 0;
     }
@@ -637,7 +637,7 @@ fn keep_dim<'c>(v: &Var<'c>) -> Result<Var<'c>, AutodiffError> {
 /// 行の先頭要素 `x_ref` を先に引いた `d = x − x_ref` から `dev = d − Mean(d)` を作り、補正パス
 /// `dev2 = dev − Mean(dev)` を 1 回加える。`x2` は `[rows, hidden]`。`d` の f32 有限性と `Mean` の
 /// 部分和が overflow しないことは入口の [`validate_norm_s1`] が保証する。
-fn stable_centering<'c>(x2: &Var<'c>) -> Result<Var<'c>, AutodiffError> {
+pub(crate) fn stable_centering<'c>(x2: &Var<'c>) -> Result<Var<'c>, AutodiffError> {
     let x_ref = x2.narrow(1, 0, 1)?;
     let d = x2.sub(&x_ref)?;
     let m = keep_dim(&d.mean(Some(1))?)?;
