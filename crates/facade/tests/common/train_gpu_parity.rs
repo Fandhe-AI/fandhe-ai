@@ -132,6 +132,15 @@ pub fn compare_quantities(
     a: &[Quantity],
     b: &[Quantity],
 ) -> Result<Vec<Record>, String> {
+    if a.is_empty() || b.is_empty() {
+        return Err("測定量が 0 件（空の測定を pass 扱いしない）".to_string());
+    }
+    if let Some(q) = a.iter().chain(b).find(|q| q.values.is_empty()) {
+        return Err(format!(
+            "量 {} の values が空（total=0 の自明な一致を許さない）",
+            q.name
+        ));
+    }
     let names_a: Vec<_> = a.iter().map(|q| q.name).collect();
     let names_b: Vec<_> = b.iter().map(|q| q.name).collect();
     if names_a != names_b {

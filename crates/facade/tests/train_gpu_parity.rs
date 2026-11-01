@@ -364,6 +364,18 @@ fn harness_fails_closed_on_mismatch() {
         .is_err()
     );
 
+    // 空の測定量列・空 values（total=0）
+    assert!(harness::compare_quantities(&req2, "t", &[], &[]).is_err());
+    assert!(
+        harness::compare_quantities(
+            &req2,
+            "t",
+            &[q("a", vec![], false)],
+            &[q("a", vec![], false)]
+        )
+        .is_err()
+    );
+
     // 大きくずらした値は Req2 で fail
     let recs = harness::compare_quantities(
         &req2,
