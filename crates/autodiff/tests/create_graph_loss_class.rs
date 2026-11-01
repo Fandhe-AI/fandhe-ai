@@ -1016,7 +1016,7 @@ fn loss_class_unsafe_inputs_rejected_child_empty_and_retry() {
             tri_big_margin,
             &[bad, 0.0, 0.1, 0.2, 0.3, 0.4],
             tri_big_margin,
-            &[0.1, 0.0, 0.1, 0.2, 0.3, 0.4],
+            &[0.1, 0.0, 0.4, 0.3, -0.3, 0.5],
         );
     }
     // Triplet の 1<p<2 で差分が 0 のレーンは拒否。
@@ -1190,12 +1190,14 @@ fn triplet_inverse_scale_second_order_overflow_is_rejected() {
         .mul(&tape.var_no_grad(&Tensor::scalar(1e10)))?
         .sum(None)
     }
+    // 再試行は上流 1e10 倍を外し、支配的な成分の無い差分にする（1 成分だけの差分は 1e10 倍で
+    // 相殺の総括判定に保守的に拒否されるため）。
     assert_rejected_then_retry_ok(
         "triplet inverse scale",
         build,
         &[0.0, 0.0, 1e-29, 0.0, 0.0, 2e-29],
-        build,
-        &[0.0, 0.0, 0.5, 0.0, 0.0, 0.25],
+        tri_big_margin,
+        &[0.1, 0.0, 0.4, 0.3, -0.3, 0.5],
     );
 }
 
@@ -1258,8 +1260,8 @@ fn triplet_large_p_f32_rounding_underflow_is_rejected() {
         "triplet large p underflow",
         build,
         &[0.0, 0.0, -1.27, 0.0, -2.0, 0.0],
-        build,
-        &[0.5, 0.25, 1.0, 1.5, 2.0, 0.75],
+        tri_big_margin,
+        &[0.1, 0.0, 0.4, 0.3, -0.3, 0.5],
     );
 }
 
@@ -1285,8 +1287,8 @@ fn triplet_large_p_f32_pow_overflow_is_rejected() {
         "triplet large p pow overflow",
         build,
         &[0.028_971_935, -0.456_534_95, 0.028_971_935],
-        build,
-        &[0.5, 0.25, 1.0],
+        tri_big_margin,
+        &[0.1, 0.0, 0.4, 0.3, -0.3, 0.5],
     );
 }
 
@@ -1314,4 +1316,226 @@ fn cewo_ignore_row_nan_logits_keep_second_order_finite() {
     let row = dense(h.get(&cz).unwrap().unwrap());
     assert!(row[2..].iter().all(|v| v.is_finite()), "{row:?}");
     assert_eq!(&row[..2], &[0.0, 0.0], "{row:?}");
+}
+
+// ---------------------------------------------------------------------------------
+// 相殺の総括判定（§55.2）の正のプローブ: 受理なら構造の二階が f64 の閉形式の参照と REQ-2 で一致し、
+// 拒否なら型付きエラーで `child` が空になる。上流係数を振り、受理と拒否の両方が現れることも確かめる。
+// ---------------------------------------------------------------------------------
+
+/// create_graph を試み、受理なら構造の Hessian（`analytic_hessian` と同じ取り出し）を返す。拒否なら
+/// 型付きエラーと `child` が空であることを確かめて `None` を返す。
+fn try_hessian<F>(ctx: &str, build: F, z0: &[f32]) -> Option<Vec<Vec<f64>>>
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> BuildResult<'t>,
+{
+    let n = z0.len();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let z = tape.var(&t(z0.to_vec(), &[n]));
+    let loss = build(&tape, &z).expect("forward");
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert!(matches!(e, AutodiffError::Backward(_)), "{ctx}: {e:?}");
+            assert!(child.is_empty(), "{ctx}: 拒否後に child が空でない");
+            return None;
+        }
+    };
+    let gz = cg.grad(&z).unwrap().expect("1 階勾配");
+    let cz = cg.child_var(&z).unwrap().expect("写し");
+    let mut hess = vec![vec![0.0f64; n]; n];
+    for j in 0..n {
+        let gj = gz.narrow(0, j, 1).unwrap().sum(None).unwrap();
+        let grads = match child.backward(&gj) {
+            Ok(g) => g,
+            Err(e) if is_untracked_ancestor_err(&e) => continue,
+            Err(e) => panic!("{ctx}: 予期しない backward エラー {e:?}"),
+        };
+        if let Some(row) = grads.get(&cz).unwrap() {
+            for (i, v) in dense(row).iter().enumerate() {
+                hess[j][i] = f64::from(*v);
+            }
+        }
+    }
+    Some(hess)
+}
+
+/// 上流係数 `scale` を振り、受理なら全要素が `scale × reference` と REQ-2 で一致し、拒否なら `child` が
+/// 空であること、受理と拒否の両方が現れることを確かめる。`reject_from` 以上の係数は拒否されること。
+fn sweep_guard_sound<F>(ctx: &str, build: F, z0: &[f32], reference: &[Vec<f64>], reject_from: f32)
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>, f32) -> BuildResult<'t>,
+{
+    let (mut accepted, mut rejected) = (0, 0);
+    for scale in [1f32, 1e2, 1e4, 1e6, 1e10] {
+        let c = format!("{ctx} scale={scale}");
+        match try_hessian(&c, |tape, z| build(tape, z, scale), z0) {
+            Some(h) => {
+                assert!(scale < reject_from, "{c}: 拒否されるべき入力が受理された");
+                accepted += 1;
+                for (j, (row, rref)) in h.iter().zip(reference).enumerate() {
+                    for (i, (&a, &r)) in row.iter().zip(rref).enumerate() {
+                        let want = f64::from(scale) * r;
+                        assert!(
+                            common::req2_close(a, want),
+                            "{c}: hessian[{j}][{i}] 構造={a} 参照={want}"
+                        );
+                    }
+                }
+            }
+            None => rejected += 1,
+        }
+    }
+    assert!(
+        accepted > 0 && rejected > 0,
+        "{ctx}: 受理 {accepted}・拒否 {rejected}"
+    );
+}
+
+fn scaled<'t>(tape: &'t Tape, l: Var<'t>, scale: f32) -> BuildResult<'t> {
+    l.mul(&tape.var_no_grad(&Tensor::scalar(scale)))?.sum(None)
+}
+
+/// PR #3947 の Codex P1: x1=[1]、x2=[1]、y=[1]、Sum の Cosine に 1e10 を掛けると、f32 構造は
+/// `m' = a'² + ε'` の ε' を丸めで失い二階が 0 になる（真値は `3·1e10·ε/(1+ε)^3 ≈ 0.03`）。相殺の
+/// 総括判定で拒否され、係数 1 では受理されて閉形式の参照（ε = 1e-12）と一致する。
+#[test]
+fn cosine_epsilon_absorption_second_order_is_rejected_or_exact() {
+    fn build<'t>(tape: &'t Tape, z: &Var<'t>, scale: f32) -> BuildResult<'t> {
+        let p = parts(z, 2, 1);
+        let l = p[0].reshape(&[1, 1])?.cosine_embedding_loss(
+            &p[1].reshape(&[1, 1])?,
+            &t(vec![1.0], &[1]),
+            0.0,
+            Reduction::Sum,
+        )?;
+        scaled(tape, l, scale)
+    }
+    let eps = 1e-12f64;
+    let c3 = (1.0 + eps).powi(3);
+    let reference = vec![
+        vec![3.0 * eps / c3, -eps * eps / c3],
+        vec![-eps * eps / c3, 3.0 * eps / c3],
+    ];
+    assert!(
+        try_hessian(
+            "cosine codex p1",
+            |tape, z| build(tape, z, 1e10),
+            &[1.0, 1.0]
+        )
+        .is_none(),
+        "Codex P1 の入力（1e10 倍）は拒否される"
+    );
+    sweep_guard_sound("cosine parallel 1d", build, &[1.0, 1.0], &reference, 1e4);
+}
+
+/// 同類型（CEWO）: 確信度の高い行 logits=[0, 20]・target=1（class_weight=[1, 1]）では f32 の softmax が 1 に丸まり、
+/// Softmax の VJP の対角 `y(1−y)` が 0 になる（真値は約 2e-9）。上流係数が大きいと REQ-2 を外れる。
+#[test]
+fn cewo_confident_row_softmax_curvature_is_rejected_or_exact() {
+    fn build<'t>(tape: &'t Tape, z: &Var<'t>, scale: f32) -> BuildResult<'t> {
+        let l = z.reshape(&[1, 2])?.cross_entropy_loss_with(
+            &i32t(vec![1], &[1]),
+            1,
+            Reduction::Sum,
+            // 既定オプションは既存の `CrossEntropyLoss` 経路へ委譲されるため、重み 1 を明示して
+            // `CrossEntropyLossWithOptions` を通す（A = B_t = 1 で参照は既定と同じ）。
+            &CrossEntropyOptions::default().class_weight(t(vec![1.0, 1.0], &[2])),
+        )?;
+        scaled(tape, l, scale)
+    }
+    let y0 = 1.0 / (1.0 + 20f64.exp());
+    let y1 = 1.0 - y0;
+    let k = y0 * y1;
+    let reference = vec![vec![k, -k], vec![-k, k]];
+    sweep_guard_sound("cewo confident row", build, &[0.0, 20.0], &reference, 1e4);
+}
+
+/// 同類型（Triplet p=2）: 1 成分が支配的な差分 `a − p = [1, 1e-3]` では `(1 − û²)/‖v‖` が相殺する
+/// （真値は約 1e-6）。閉形式 `∂²‖v‖ = (I − v̂v̂ᵀ)/‖v‖` から 6×6 の参照を組む。
+#[test]
+fn triplet_dominant_component_curvature_is_rejected_or_exact() {
+    fn build<'t>(tape: &'t Tape, z: &Var<'t>, scale: f32) -> BuildResult<'t> {
+        let l = tri_loss(
+            z,
+            &TripletMarginOptions::default().p(2.0).eps(0.0).margin(5.0),
+        )?;
+        scaled(tape, l, scale)
+    }
+    let z0 = [1.0f32, 1e-3, 0.0, 0.0, -3.0, 0.5];
+    let zf: Vec<f64> = z0.iter().map(|&v| f64::from(v)).collect();
+    let hess_norm = |v: [f64; 2]| -> [[f64; 2]; 2] {
+        let r = (v[0] * v[0] + v[1] * v[1]).sqrt();
+        let mut h = [[0f64; 2]; 2];
+        for i in 0..2 {
+            for j in 0..2 {
+                let delta = if i == j { 1.0 } else { 0.0 };
+                h[i][j] = (delta - v[i] * v[j] / (r * r)) / r;
+            }
+        }
+        h
+    };
+    let h_ap = hess_norm([zf[0] - zf[2], zf[1] - zf[3]]);
+    let h_an = hess_norm([zf[0] - zf[4], zf[1] - zf[5]]);
+    // L = ‖a − p‖ − ‖a − n‖ + margin（活性）。ブロック (a,a)=H_ap−H_an、(a,p)=−H_ap、(a,n)=H_an、
+    // (p,p)=H_ap、(p,n)=0、(n,n)=−H_an。
+    let mut reference = vec![vec![0f64; 6]; 6];
+    for i in 0..2 {
+        for j in 0..2 {
+            reference[i][j] = h_ap[i][j] - h_an[i][j];
+            reference[i][2 + j] = -h_ap[i][j];
+            reference[2 + i][j] = -h_ap[i][j];
+            reference[i][4 + j] = h_an[i][j];
+            reference[4 + i][j] = h_an[i][j];
+            reference[2 + i][2 + j] = h_ap[i][j];
+            reference[4 + i][4 + j] = -h_an[i][j];
+        }
+    }
+    sweep_guard_sound("triplet dominant", build, &z0, &reference, 1e4);
+}
+
+/// 同類型（MultiLabelSoft の g 経路）: σ(x) ≈ t のレーン（x=1e-7・t=0.5）は安定形の差し引き
+/// `(1−t) − σ(−x)` が f32 で桁落ちする。大きな weight では g への二階が REQ-2 を外れうるため拒否され、
+/// weight 1 では受理されて非 root の Hessian `2∇L∇Lᵀ + 2L·H_L`（閉形式）と一致する。
+#[test]
+fn multilabel_soft_sigma_near_target_g_path_is_rejected_or_exact() {
+    fn build_w(w: f32) -> impl for<'t> Fn(&'t Tape, &Var<'t>) -> BuildResult<'t> {
+        move |_, z| {
+            let l = z.reshape(&[1, 2])?.multilabel_soft_margin_loss(
+                &t(vec![0.5, 0.0], &[1, 2]),
+                &MultiLabelSoftMarginOptions::default().weight(t(vec![w, w], &[2])),
+                Reduction::Sum,
+            )?;
+            l.mul(&l)
+        }
+    }
+    let z0 = [1e-7f32, 2.0];
+    assert!(
+        try_hessian("multilabel_soft w=1e3", build_w(1e3), &z0).is_none(),
+        "σ ≈ t のレーンで大きな weight は拒否される"
+    );
+    let h = try_hessian("multilabel_soft w=1", build_w(1.0), &z0).expect("weight 1 は受理");
+    let sig = |x: f64| 1.0 / (1.0 + (-x).exp());
+    let xs = [f64::from(z0[0]), f64::from(z0[1])];
+    let ts = [0.5f64, 0.0];
+    let c = 2.0;
+    let ell = |x: f64, t: f64| -(t * sig(x).ln() + (1.0 - t) * (1.0 - sig(x)).ln());
+    let l: f64 = (0..2).map(|k| ell(xs[k], ts[k])).sum::<f64>() / c;
+    let grad: Vec<f64> = (0..2).map(|k| (sig(xs[k]) - ts[k]) / c).collect();
+    for j in 0..2 {
+        for i in 0..2 {
+            let hl = if i == j {
+                sig(xs[i]) * (1.0 - sig(xs[i])) / c
+            } else {
+                0.0
+            };
+            let want = 2.0 * grad[i] * grad[j] + 2.0 * l * hl;
+            assert!(
+                common::req2_close(h[j][i], want),
+                "multilabel_soft w=1: hessian[{j}][{i}] 構造={} 参照={want}",
+                h[j][i]
+            );
+        }
+    }
 }

@@ -35,6 +35,13 @@
 //! NaN のレーンは段検査から外して伝播させる。Triplet の `1<p<2` で差分が 0 のレーンは二階が発散する
 //! （真値も特異）ため拒否する。
 //!
+//! **相殺の総括判定（第 2 の軸。§55.2）**: 段検査は大きな値しか見ないため、ε の吸収や差し引きの
+//! 桁落ちで構造の二階が有限のまま f64 の参照から外れる入力（例: Cosine の平行な行で `ε'` が f32 の
+//! `m'` から消える）を別に検査する。seed が 1 要素のときの二階の各要素を構造の演算順どおりに f64 で
+//! 展開し、参照値と各項の絶対値の和から丸め誤差を見積もって REQ-2 の判定を外れうる入力を拒否する
+//! （[`cancel_check`]。対象は Cosine・Triplet の x／g 経路、CEWO の Softmax 対角と g 経路、
+//! MultiMargin p=2・MultiLabelSoft の g 経路）。保証はこの判定を通った入力に限る。
+//!
 //! GPU: 6 つとも 1 階はホスト関数（経路区分 H）。実機 parity は未実測（Phase 10 の #3857・#3859）。
 
 use fandhe_ai_tensor_core::Tensor;
@@ -62,6 +69,49 @@ fn stage(v: f64) -> Result<(), AutodiffError> {
         return Err(invalid("構造の中間値が f32 範囲を超えうる入力のため拒否"));
     }
     Ok(())
+}
+
+/// 相殺（桁落ち）検査の丸め誤差係数 `(2·terms + 4)·2^-23`（`linalg_fft.rs::rounding_ok` と同じ形）。
+/// `terms` は構造の最長の縮約長（Cosine・Triplet は行の幅 `d`、CEWO は Softmax の軸長 `C` 等）。
+/// 縮約が f32 の逐次和でも成り立つ最悪値として長さに比例させる。
+fn rounding_coeff(terms: usize) -> f64 {
+    (2.0 * terms as f64 + 4.0) * (-23f64).exp2()
+}
+
+/// f32 構造の 1 要素の丸め誤差が REQ-2 の統一複合判定に収まるかの保守的検査（設計 §55.2 の
+/// 「相殺の総括判定」）。`v` は同じ要素の f64 の参照値、`m` は同じ式を各項の絶対値の和で評価した
+/// 大きさ（相殺が無ければ `|v|` と等しい）、`scale` は要素に掛かる上流係数（`|g|`・`1/n`・`1/W`・
+/// 行スケール `1/s` 等の積）。誤差上界 `coeff·m·scale` が絶対 1e-5 未満か、相対の半分
+/// （`linalg_fft.rs` と同じ保守的な閾値。許容自体は不変）以内でなければ拒否する。
+/// ε の吸収（`Σa² + ε` で ε が f32 に残らない）も「`m` に比べて小さい `v`」として同じ式で見える。
+/// NaN のレーンは伝播の契約に従い素通しにする。
+fn cancel_check(v: f64, m: f64, scale: f64, coeff: f64, what: &str) -> Result<(), AutodiffError> {
+    use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
+    if v.is_nan() || m.is_nan() || scale.is_nan() {
+        return Ok(());
+    }
+    let bound = coeff * m * scale;
+    if bound.is_finite()
+        && (bound < ABSOLUTE_RESCUE_THRESHOLD || coeff * m <= (RELATIVE_TOLERANCE / 2.0) * v.abs())
+    {
+        return Ok(());
+    }
+    Err(invalid(&format!(
+        "{what}: f32 構造の丸め誤差が相殺で増幅され二階が REQ-2 の判定を外れうるため拒否"
+    )))
+}
+
+/// 速い経路: ブロック全体の誤差見積りの上界 `bound` が絶対判定を満たす（要素ごとの走査を省ける）か。
+fn fast_ok(bound: f64) -> bool {
+    bound.is_finite() && bound < fandhe_ai_tensor_core::tolerance::ABSOLUTE_RESCUE_THRESHOLD
+}
+
+/// `g` へ流れる二階（`∂dx/∂g`）の係数（Mean は `1/n`、Sum は `1`）。`g` の大きさは含まない。
+fn g_scale(reduction: Reduction, n: usize) -> f64 {
+    match reduction {
+        Reduction::Mean => 1.0 / n as f64,
+        Reduction::Sum => 1.0,
+    }
 }
 
 /// 上流 `g`（スカラー）の絶対値を返す（有限・単一要素を要求し、段検査も通す）。
@@ -286,6 +336,11 @@ pub(super) fn cewo_cgrad<'c>(
         Reduction::Sum => gv,
     };
     stage(sb)?;
+    // `g` へ流れる二階の係数（Mean は子テープの `g / W`、Sum は `g`）。
+    let gscale_ce = match reduction {
+        Reduction::Mean => 1.0 / denom_w,
+        Reduction::Sum => 1.0,
+    };
 
     let numel: usize = shape.iter().product();
     let mut a_data = vec![0f32; numel];
@@ -316,6 +371,12 @@ pub(super) fn cewo_cgrad<'c>(
             stage(a_s + bmax)?;
             stage(sb * a_s)?;
             stage(sb * (a_s + bmax))?;
+            cewo_cancel_check(
+                &xs,
+                (o, i, inner, axis_len),
+                (a_s, &weights, t as usize, eps),
+                (sb, gscale_ce),
+            )?;
         }
     }
     let denom_for_g = if reduction == Reduction::Mean {
@@ -349,6 +410,84 @@ pub(super) fn cewo_cgrad<'c>(
     let scaled = s_b.mul(&a_c.mul(&sm)?.sub(&b_c)?)?;
     let dx = Var::where_cond(&valid_m, &scaled, &zeros)?;
     push_v3(child, &dx, host)
+}
+
+/// CEWO の 1 サンプル（`(o, i)` の class 軸）の相殺検査（設計 §55.2 の相殺の総括判定）。
+///
+/// 構造 `s_b⊙(A⊙softmax(x) − B)` の二階は、x 経路が Softmax の VJP `s_b·A·y_i(δ_ij − y_j)`。対角の
+/// `1 − y_j` は確信度の高い行（`y_j → 1`）で相殺し、f32 の `y_j` が 1 に丸まると曲率が 0 になる
+/// （真値は他クラスの確率の和）。非対角は単項の積で相殺しない。g 経路（`∂dx/∂g`）は `A·y_c − B_c`
+/// で、target の `A·y_t ≈ B_t` が同じく相殺する。参照値は f64 の softmax で、`1 − y_j` は他クラスの
+/// 和から桁落ちなく作る。NaN の行は伝播させるため検査しない。
+fn cewo_cancel_check(
+    xs: &[f32],
+    pos: (usize, usize, usize, usize),
+    coef: (f64, &[f64], usize, f64),
+    scales: (f64, f64),
+) -> Result<(), AutodiffError> {
+    let (o, i, inner, c) = pos;
+    let (a_s, weights, t, eps) = coef;
+    let (sb, gscale) = scales;
+    let row: Vec<f64> = (0..c)
+        .map(|a| f64::from(xs[(o * c + a) * inner + i]))
+        .collect();
+    if row.iter().any(|v| v.is_nan()) {
+        return Ok(());
+    }
+    let mx = row.iter().fold(f64::NEG_INFINITY, |m, &v| m.max(v));
+    let e: Vec<f64> = row.iter().map(|&v| (v - mx).exp()).collect();
+    let total: f64 = e.iter().sum();
+    let total_w: f64 = weights.iter().sum();
+    let smooth = eps / c as f64;
+    let coeff = rounding_coeff(c);
+    let sba = sb * a_s;
+    let (mut top1, mut top2) = (0f64, 0f64);
+    for j in 0..c {
+        let y = e[j] / total;
+        // `1 − y_j` は他クラスの和で求める（`y_j` が 1 に近い行で f64 の差も桁落ちさせない）。
+        let rest = if 2.0 * e[j] > total {
+            e.iter()
+                .enumerate()
+                .filter(|&(k, _)| k != j)
+                .map(|(_, v)| *v)
+                .sum::<f64>()
+        } else {
+            total - e[j]
+        } / total;
+        cancel_check(
+            sba * y * rest,
+            sba * y * (1.0 + y),
+            1.0,
+            coeff,
+            "CrossEntropy: Softmax の対角の曲率",
+        )?;
+        // `A·y_j − B_j = (1−ε)·w_t·(y_j − δ_jt) + (ε/C)·(Σw·y_j − w_j)`（`y_t − 1 = −rest_t`）。
+        let hard = if j == t { -rest } else { y };
+        let v = (1.0 - eps) * weights[t] * hard + smooth * (total_w * y - weights[j]);
+        let b = (1.0 - eps) * weights[t] * if j == t { 1.0 } else { 0.0 } + smooth * weights[j];
+        cancel_check(
+            v,
+            a_s * y + b.abs(),
+            gscale,
+            coeff,
+            "CrossEntropy: g への二階（A·softmax − B）",
+        )?;
+        if y > top1 {
+            top2 = top1;
+            top1 = y;
+        } else if y > top2 {
+            top2 = y;
+        }
+    }
+    // 非対角 `−s_b·A·y_i·y_j` は単項で `m == |v|`。`coeff` が相対の半分を超える長い軸のときだけ
+    // 絶対判定に落ちるので、最大の積（上位 2 クラス）で確かめる。
+    cancel_check(
+        sba * top1 * top2,
+        sba * top1 * top2,
+        1.0,
+        coeff,
+        "CrossEntropy: Softmax の非対角の曲率",
+    )
 }
 
 // ---------------------------------------------------------------------------------
@@ -387,6 +526,8 @@ pub(super) fn multi_margin_cgrad<'c>(
     let margin64 = f64::from(margin);
     let numel = n * c;
     let dim = shape.len() - 1;
+    let gs = g_scale(reduction, n);
+    let coeff = rounding_coeff(c);
 
     let mut gsum = 0f64;
     // p=1 の K（符号付き個数 × w_y/C）／p=2 の行定数 c_w とマスク M。
@@ -405,6 +546,7 @@ pub(super) fn multi_margin_cgrad<'c>(
         let xy = f64::from(row[y]);
         let mut count = 0f64;
         let mut sum_h = 0f64;
+        let mut sum_zm = 0f64;
         for (j, &xj) in row.iter().enumerate() {
             cw_data[i * c + j] = cw as f32;
             if j == y {
@@ -426,6 +568,16 @@ pub(super) fn multi_margin_cgrad<'c>(
                     let h = 2.0 * z;
                     stage(z)?;
                     stage(h)?;
+                    // g 経路（`∂dx_j/∂g = c_w·H_j`）の相殺: `Z = (margin − x_y) + x_j` の差し引き。
+                    let zm = margin64.abs() + xy.abs() + f64::from(xj).abs();
+                    cancel_check(
+                        cw * h,
+                        2.0 * cw * zm,
+                        gs,
+                        coeff,
+                        "MultiMargin: マージン項 Z の差し引き",
+                    )?;
+                    sum_zm += zm;
                     sum_h += h;
                     stage(sum_h)?;
                     stage(cw * h)?;
@@ -437,6 +589,14 @@ pub(super) fn multi_margin_cgrad<'c>(
             }
         }
         if p == 2 {
+            // target レーンの `−c_w·ΣH` も同じ相殺を持つ（各 `Z > 0` の和なので和自体は相殺しない）。
+            cancel_check(
+                cw * sum_h,
+                2.0 * cw * sum_zm,
+                gs,
+                coeff,
+                "MultiMargin: マージン項 Z の差し引き（target）",
+            )?;
             stage(cw * sum_h)?;
             stage(sb * cw * sum_h)?;
             stage(sb * cw * 2.0)?;
@@ -602,6 +762,7 @@ pub(super) fn multilabel_soft_cgrad<'c>(
     reject_inf(&[&xs, &ts])?;
     let g_value = child_value(child, g)?;
     let sb = upstream_scale(&g_value, reduction, n)?;
+    let gs = g_scale(reduction, n);
 
     let mut coef = vec![0f32; n * c];
     let mut gsum = 0f64;
@@ -618,6 +779,21 @@ pub(super) fn multilabel_soft_cgrad<'c>(
             stage(wc * diff)?;
             stage(sb * wc)?;
             stage(sb * wc * diff)?;
+            // g 経路（`∂dx/∂g = (w_c/C)·(σ(x) − t)`）の相殺。構造は符号別の安定形
+            // （x ≥ 0: `(1−t) − σ(−x)`、x < 0: `σ(x) − t`）で、σ ≈ t のとき差し引きが桁落ちする。
+            // x 経路の曲率 `σ(1−σ)` は安定形で単項になり相殺しない。
+            let mag = if x >= 0.0 {
+                (1.0 - t).abs() + sigmoid64(-x)
+            } else {
+                sigmoid64(x) + t.abs()
+            };
+            cancel_check(
+                wc * diff,
+                wc.abs() * mag,
+                gs,
+                rounding_coeff(1),
+                "MultiLabelSoftMargin: σ(x) − t の差し引き",
+            )?;
             gsum += wc * diff;
         }
     }
@@ -679,6 +855,7 @@ pub(super) fn cosine_cgrad<'c>(
     reject_inf(&[&a_s, &b_s])?;
     let g_value = child_value(child, g)?;
     let sb = upstream_scale(&g_value, reduction, n)?;
+    let gs = g_scale(reduction, n);
     let dim = shape.len() - 1;
     let numel = n * d;
 
@@ -765,6 +942,7 @@ pub(super) fn cosine_cgrad<'c>(
             stage(sb * r * r * kmax)?;
         }
         stage(sb * inv1 * inv2 * kmax)?;
+        cosine_cancel_check(&ar, &br, (inv1, inv2), (eps1, eps2), (sb, gs))?;
         gsum += inv1 * b1 + inv2 * b2;
     }
     check_g_cotangent(gsum, reduction, n)?;
@@ -796,6 +974,116 @@ pub(super) fn cosine_cgrad<'c>(
     let dx1 = Var::where_cond(&act_m, &sc.mul(&r1_c)?.mul(&inner1)?, &zeros)?;
     let dx2 = Var::where_cond(&act_m, &sc.mul(&r2_c)?.mul(&inner2)?, &zeros)?;
     Ok((push_v3(child, &dx1, h1)?, push_v3(child, &dx2, h2)?))
+}
+
+/// Cosine の 1 行の相殺検査（設計 §55.2 の相殺の総括判定。PR #3947 の Codex P1 への対応）。
+///
+/// 構造 `inner1 = b'/den − cos·a'/m1'`（`dx2` は a と b を入れ替えた形）を、seed が 1 要素
+/// （Hessian の 1 列）のときの二階の逆伝播の演算順どおりに f64 で展開し、各要素の参照値 `V` と
+/// 各項の絶対値の和 `M` を求めて [`cancel_check`] に掛ける。展開（own は自分側のベクトル、other は
+/// 相手側、`j` は seed の要素）:
+/// - `cot_cos = −own_j/m_own`、`cot_D = cot_cos/den`、`cot_den = −other_j/den² + own_j·cos/(m_own·den)`
+/// - `cot_m_own = cos·own_j/m_own² + cot_den·s_other/(2 s_own)`、`cot_m_other = cot_den·s_own/(2 s_other)`
+/// - own への二階 `δ_ij·(−cos/m_own) + other_i·cot_D + 2 own_i·cot_m_own`
+/// - other への二階 `δ_ij/den + own_i·cot_D + 2 other_i·cot_m_other`
+/// - g への二階は `inner_j` そのもの（`other_j/den − cos·own_j/m_own`）
+///
+/// `M` では `cos` を `Σ|a'b'|/den`（内積の相殺も含める）に置き換える。平行に近い行（例 x1=[1]、x2=[1]）
+/// では各項が O(1) で打ち消し合い、真の曲率は `ε'` の大きさ（`3ε/(1+ε)^3`）しか残らない。f32 では
+/// `m' = Σa'² + ε'` の `ε'` が丸めで消えるため構造は 0 を返し、上流係数が大きいと REQ-2 を外れる。
+/// この ε の吸収は `M` に比べて小さい `V` として同じ式で検出される（構造で ε を保つ方法は無い:
+/// `ε'/m' < 2^-24` の行では f32 の `m'` に ε の情報が残らない）。
+/// 係数は行の幅 `d` から [`rounding_coeff`]。上界 `coeff·M·scale` が O(d) の速い経路で絶対判定を
+/// 満たす行は要素ごとの O(d²) の走査を省く。
+fn cosine_cancel_check(
+    ar: &[f64],
+    br: &[f64],
+    inv: (f64, f64),
+    eps: (f64, f64),
+    scales: (f64, f64),
+) -> Result<(), AutodiffError> {
+    let d = ar.len();
+    let coeff = rounding_coeff(d);
+    let (sb, gs) = scales;
+    let ap: Vec<f64> = ar.iter().map(|v| v * inv.0).collect();
+    let bp: Vec<f64> = br.iter().map(|v| v * inv.1).collect();
+    let m1: f64 = ap.iter().map(|v| v * v).sum::<f64>() + eps.0;
+    let m2: f64 = bp.iter().map(|v| v * v).sum::<f64>() + eps.1;
+    let (s1, s2) = (m1.sqrt(), m2.sqrt());
+    let den = s1 * s2;
+    let dot: f64 = ap.iter().zip(&bp).map(|(a, b)| a * b).sum();
+    let cos = dot / den;
+    let cos_m: f64 = ap.iter().zip(&bp).map(|(a, b)| (a * b).abs()).sum::<f64>() / den;
+    let amax = |v: &[f64]| v.iter().fold(0f64, |m, x| m.max(x.abs()));
+    // (own, other, m_own, s_own, s_other, r_own, r_other)
+    let sides = [
+        (&ap, &bp, m1, s1, s2, inv.0, inv.1),
+        (&bp, &ap, m2, s2, s1, inv.1, inv.0),
+    ];
+    for (own, other, m_own, s_own, s_other, r_own, r_other) in sides {
+        let (omax, tmax) = (amax(own), amax(other));
+        // seed 要素 j ごとの cotangent（値と大きさ）。
+        let per_j: Vec<[f64; 6]> = (0..d)
+            .map(|j| {
+                let (oj, tj) = (own[j], other[j]);
+                let cot_d = -oj / (m_own * den);
+                let cot_den = -tj / (den * den) + oj * cos / (m_own * den);
+                let cot_mo = cos * oj / (m_own * m_own) + cot_den * s_other * 0.5 / s_own;
+                let cot_mt = cot_den * s_own * 0.5 / s_other;
+                let cot_d_m = oj.abs() / (m_own * den);
+                let cot_den_m = tj.abs() / (den * den) + oj.abs() * cos_m / (m_own * den);
+                let cot_mo_m =
+                    cos_m * oj.abs() / (m_own * m_own) + cot_den_m * s_other * 0.5 / s_own;
+                let cot_mt_m = cot_den_m * s_own * 0.5 / s_other;
+                [cot_d, cot_mo, cot_mt, cot_d_m, cot_mo_m, cot_mt_m]
+            })
+            .collect();
+        let max_of = |k: usize| per_j.iter().fold(0f64, |m, c| m.max(c[k]));
+        let s_own_blk = sb * r_own * r_own;
+        let s_cross_blk = sb * r_own * r_other;
+        let fast_own = cos_m / m_own + tmax * max_of(3) + 2.0 * omax * max_of(4);
+        let fast_cross = 1.0 / den + omax * max_of(3) + 2.0 * tmax * max_of(5);
+        let need_own = !fast_ok(coeff * fast_own * s_own_blk);
+        let need_cross = !fast_ok(coeff * fast_cross * s_cross_blk);
+        for (j, c) in per_j.iter().enumerate() {
+            let [cot_d, cot_mo, cot_mt, cot_d_m, cot_mo_m, cot_mt_m] = *c;
+            // g への二階（`inner_j`）。
+            cancel_check(
+                other[j] / den - cos * own[j] / m_own,
+                other[j].abs() / den + cos_m * own[j].abs() / m_own,
+                gs * r_own,
+                coeff,
+                "Cosine: g への二階（b'/den − cos·a'/m' の差し引き）",
+            )?;
+            if !(need_own || need_cross) {
+                continue;
+            }
+            for i in 0..d {
+                let delta = if i == j { 1.0 } else { 0.0 };
+                if need_own {
+                    cancel_check(
+                        delta * (-cos / m_own) + other[i] * cot_d + 2.0 * own[i] * cot_mo,
+                        delta * cos_m / m_own
+                            + other[i].abs() * cot_d_m
+                            + 2.0 * own[i].abs() * cot_mo_m,
+                        s_own_blk,
+                        coeff,
+                        "Cosine: 同じ側の二階（ε の吸収・平行に近い行の相殺）",
+                    )?;
+                }
+                if need_cross {
+                    cancel_check(
+                        delta / den + own[i] * cot_d + 2.0 * other[i] * cot_mt,
+                        delta / den + own[i].abs() * cot_d_m + 2.0 * other[i].abs() * cot_mt_m,
+                        s_cross_blk,
+                        coeff,
+                        "Cosine: 相手側の二階（ε の吸収・平行に近い行の相殺）",
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------
@@ -906,6 +1194,129 @@ fn pair_info(
     Ok(PairInfo { inv_mx, sign, zero })
 }
 
+/// Triplet の 1 ペア・1 行について、二階の展開に使う f64 の量（`pair_grad` の構造に対応）。
+/// `u = v·inv`、`N = ‖u‖_p`、`q = |u|/N`、`e = q^(p−1)`、対角係数 `dg = (p−1)·q^(p−2)`、
+/// `fac = inv/N`、`sg = sign(u)`。全要素 0 の行（構造は定数 0）・NaN の行は `None`。
+struct PairRow {
+    fac: f64,
+    pm1: f64,
+    dg: Vec<f64>,
+    e: Vec<f64>,
+    sg: Vec<f64>,
+}
+
+fn triplet_pair_row(h: &[f64], info: &PairInfo, base: usize, p: f64) -> Option<PairRow> {
+    if info.zero[base] || h.iter().any(|v| v.is_nan()) {
+        return None;
+    }
+    let inv = f64::from(info.inv_mx[base]);
+    let u: Vec<f64> = h.iter().map(|v| v * inv).collect();
+    let norm = if p == 2.0 {
+        u.iter().map(|x| x * x).sum::<f64>().sqrt()
+    } else {
+        u.iter().map(|x| x.abs().powf(p)).sum::<f64>().powf(1.0 / p)
+    };
+    if norm.is_nan() || norm <= 0.0 {
+        return None;
+    }
+    let q: Vec<f64> = u.iter().map(|x| x.abs() / norm).collect();
+    Some(PairRow {
+        fac: inv / norm,
+        pm1: p - 1.0,
+        dg: q.iter().map(|&x| (p - 1.0) * x.powf(p - 2.0)).collect(),
+        e: q.iter().map(|&x| x.powf(p - 1.0)).collect(),
+        sg: u.iter().map(|&x| sign0(x)).collect(),
+    })
+}
+
+/// Triplet の 1 行の相殺検査（設計 §55.2 の相殺の総括判定）。
+///
+/// 1 ペアの p ノルム勾配 `core_j = sign(u_j)·(|u_j|/N)^(p−1)` の二階は、v のレーン i へ
+/// `fac·(δ_ij·dg_j − (p−1)·sg_i·sg_j·e_i·e_j)` で、対角は 1 成分が支配的な行（`q_j → 1`）で相殺する
+/// （p=2 では `(1 − û_j²)/N`）。さらに `da` の a への二階は `H_ap − c_an·H_an`、`dp` の p への二階は
+/// `H_ap − c_pn·H_pn` と 2 ペアの差になり、非対角でも相殺しうる。9 ブロック（出力 da／dp／dn ×
+/// 入力 a／p／n）の各要素と、g への二階（`Σ w·core`）を [`cancel_check`] に掛ける。`coeff` は幅 `d` と
+/// `p`、差分の再構成の条件数 `κ`（`(|x − y| + |eps|)/|v|`。`v ≈ 0` の桁落ちで `u` の相対誤差が増える）
+/// から呼び出し元が作る。O(d) の速い経路で絶対判定を満たすブロックは O(d²) の走査を省く。
+fn triplet_cancel_check(
+    pr: &[Option<PairRow>; 3],
+    coefs: (f64, f64),
+    d: usize,
+    scales: (f64, f64),
+    coeff: f64,
+) -> Result<(), AutodiffError> {
+    let (c_an, c_pn) = coefs;
+    let (sb, gs) = scales;
+    // ペア添字 0 = ap、1 = an、2 = pn。重み w = (出力の係数)·(∂v/∂入力)。
+    let outputs: [[(usize, f64); 2]; 3] = [
+        [(0, 1.0), (1, -c_an)],
+        [(0, -1.0), (2, -c_pn)],
+        [(1, c_an), (2, c_pn)],
+    ];
+    let blocks: [[(usize, f64); 2]; 9] = [
+        [(0, 1.0), (1, -c_an)],
+        [(0, -1.0), (0, 0.0)],
+        [(1, c_an), (1, 0.0)],
+        [(0, -1.0), (0, 0.0)],
+        [(0, 1.0), (2, -c_pn)],
+        [(2, c_pn), (2, 0.0)],
+        [(1, c_an), (1, 0.0)],
+        [(2, c_pn), (2, 0.0)],
+        [(1, -c_an), (2, -c_pn)],
+    ];
+    let live = |terms: &[(usize, f64); 2]| -> Vec<(&PairRow, f64)> {
+        terms
+            .iter()
+            .filter(|&&(_, w)| w != 0.0)
+            .filter_map(|&(k, w)| pr[k].as_ref().map(|r| (r, w)))
+            .collect()
+    };
+    for terms in &outputs {
+        let ts = live(terms);
+        for j in 0..d {
+            let v: f64 = ts.iter().map(|(r, w)| w * r.sg[j] * r.e[j]).sum();
+            let m: f64 = ts.iter().map(|(r, w)| w.abs() * r.e[j]).sum();
+            cancel_check(v, m, gs, coeff, "Triplet: g への二階（ペア勾配の差し引き）")?;
+        }
+    }
+    for terms in &blocks {
+        let ts = live(terms);
+        if ts.is_empty() {
+            continue;
+        }
+        let fast: f64 = ts
+            .iter()
+            .map(|(r, w)| {
+                let dmax = r.dg.iter().fold(0f64, |m, x| m.max(x.abs()));
+                let emax = r.e.iter().fold(0f64, |m, &x| m.max(x));
+                w.abs() * r.fac * (dmax + r.pm1.abs() * emax * emax)
+            })
+            .sum();
+        if fast_ok(coeff * fast * sb) {
+            continue;
+        }
+        for j in 0..d {
+            for i in 0..d {
+                let delta = if i == j { 1.0 } else { 0.0 };
+                let (mut v, mut m) = (0f64, 0f64);
+                for (r, w) in &ts {
+                    let off = r.pm1 * r.sg[i] * r.sg[j] * r.e[i] * r.e[j];
+                    v += w * r.fac * (delta * r.dg[j] - off);
+                    m += w.abs() * r.fac * (delta * r.dg[j].abs() + off.abs());
+                }
+                cancel_check(
+                    v,
+                    m,
+                    sb,
+                    coeff,
+                    "Triplet: 二階（支配的な成分・2 ペアの差の相殺）",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 差分 `v`（子テープ上の `Var`）から p ノルムの勾配 `∂‖v‖_p/∂v` の構造を組む。
 fn pair_grad<'c>(
     child: &'c Tape,
@@ -986,11 +1397,37 @@ pub(super) fn triplet_cgrad<'c>(
     let mut act = vec![false; numel];
     let (mut m_one, mut m_zero, mut m_half) =
         (vec![false; numel], vec![false; numel], vec![false; numel]);
+    let (mut act_rows, mut c_an_rows, mut kap_rows) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
     for i in 0..n {
         let base = i * d;
         let (stats, diff_ap, diff_an, diff_pn) =
             crate::eval::triplet_distance_stats(&a64, &p64v, &n64, base, d, &params);
         let active = stats.d_ap - stats.neg_distance() + margin >= 0.0;
+        act_rows.push(active);
+        c_an_rows.push(if swap { stats.an_coeff } else { 1.0 });
+        let kappa = |x: &[f32], y: &[f32], h: &[f64]| -> f64 {
+            (0..d).fold(1f64, |m, k| {
+                let num = (f64::from(x[base + k]) - f64::from(y[base + k])).abs() + eps.abs();
+                if h[k] == 0.0 {
+                    m
+                } else {
+                    m.max(num / h[k].abs())
+                }
+            })
+        };
+        kap_rows.push(
+            kappa(&a_s, &p_s, &diff_ap)
+                .max(kappa(&a_s, &n_s, &diff_an))
+                .max(if swap {
+                    kappa(&p_s, &n_s, &diff_pn)
+                } else {
+                    1.0
+                }),
+        );
         for k in 0..d {
             act[base + k] = active;
             if stats.an_coeff >= 1.0 {
@@ -1020,6 +1457,33 @@ pub(super) fn triplet_cgrad<'c>(
     } else {
         None
     };
+    if p64 != 1.0 {
+        let gs = g_scale(reduction, n);
+        for i in 0..n {
+            if !act_rows[i] {
+                continue;
+            }
+            let row =
+                |rows: &[Vec<f64>], info: &PairInfo| triplet_pair_row(&rows[i], info, i * d, p64);
+            let pr = [
+                row(&rows_ap, &info_ap),
+                row(&rows_an, &info_an),
+                info_pn.as_ref().and_then(|info| row(&rows_pn, info)),
+            ];
+            let nan = [&rows_ap[i], &rows_an[i]]
+                .into_iter()
+                .chain(swap.then_some(&rows_pn[i]))
+                .any(|r| r.iter().any(|v| v.is_nan()));
+            if nan {
+                continue;
+            }
+            let c_an = c_an_rows[i];
+            let c_pn = if swap { 1.0 - c_an } else { 0.0 };
+            let coeff = rounding_coeff(d)
+                + 2.0 * ((p64 - 1.0).abs() + 1.0) * (kap_rows[i] + 1.0) * (-23f64).exp2();
+            triplet_cancel_check(&pr, (c_an, c_pn), d, (sb, gs), coeff)?;
+        }
+    }
     // 各勾配ベクトルの成分は |u|/norm' ≤ 1。3 本の寄与を足した上界で `g` への cotangent を押さえる。
     check_g_cotangent(3.0 * numel as f64, reduction, n)?;
 
