@@ -174,6 +174,9 @@ pub(super) fn kl_div_cgrad<'c>(
             } else {
                 ((t.abs().ln()).abs() + 1.0 + x.abs(), 1.0 / t.abs())
             };
+            // スケール前の微分係数（子テープ逆伝播は係数を f32 で先に作ってから cotangent を掛ける）。
+            stage(inv)?;
+            stage(a)?;
             stage(sb * t.abs())?;
             stage(sb * a)?;
             stage(sb * inv)?;
@@ -182,6 +185,7 @@ pub(super) fn kl_div_cgrad<'c>(
             let e = t.exp();
             let a = (t - x).abs() + 1.0;
             stage(e)?;
+            stage(e * a)?;
             stage(sb * e)?;
             stage(sb * e * a)?;
             gsum += e * (1.0 + a);
@@ -254,7 +258,11 @@ pub(super) fn poisson_cgrad<'c>(
                     "PoissonNll(log_input=false): x + eps <= 0 のため拒否",
                 ));
             }
+            // スケール前の係数（`t/u`・`t/u/u`）も f32 で先に作られるため単独で検査する。
             stage(1.0 / u)?;
+            stage(1.0 / u / u)?;
+            stage(t.abs() / u)?;
+            stage(t.abs() / u / u)?;
             stage(sb * t.abs() / u)?;
             stage(sb * t.abs() / u / u)?;
             stage(sb * u.ln().abs())?;
@@ -344,7 +352,10 @@ pub(super) fn gaussian_cgrad<'c>(
         stage(d.abs())?;
         stage(q.abs())?;
         stage(q * q)?;
+        // スケール前の係数: `inv_c = 1/c` の逆伝播 `-(1/c)/c`・`q` の逆伝播 `1/c`・`q/c`。
         stage(1.0 / c)?;
+        stage(1.0 / c / c)?;
+        stage(q.abs() / c)?;
         stage(sb * q.abs())?;
         stage(sb / c)?;
         stage(sb * q * q)?;

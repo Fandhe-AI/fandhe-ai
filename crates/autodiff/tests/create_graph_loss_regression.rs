@@ -460,6 +460,42 @@ fn mandatory_vectors_finite_or_rejected_in_three_stages() {
     ));
 }
 
+/// スケール適用前の微分係数（`-(1/c)/c`・`t/u/u`・`1/t` 等）が f32 で overflow する入力は、
+/// 上流が小さく（1e-10）て積が有限に収まっても受理せず型付きで拒否する（§39.12。codex P1 の回帰）。
+#[test]
+fn unscaled_coefficient_overflow_is_rejected() {
+    fn scaled<'t>(tape: &'t Tape, l: Var<'t>) -> BuildResult<'t> {
+        let c = tape.var_no_grad(&t(vec![1e-10], &[1]));
+        l.mul(&c)?.sum(None)
+    }
+    // Gaussian: x = target = 0, var = eps = 1e-20, Sum。
+    fn gauss<'t>(tp: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        scaled(tp, gauss_fn(1e-20)(tp, z)?)
+    }
+    assert!(!try_case(
+        "gaussian var=eps=1e-20",
+        gauss,
+        &[0.0, 0.0, 1e-20]
+    ));
+    // Poisson 非 log: x = 1e-20, target = 1, eps = 0。
+    fn poisson<'t>(tp: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        let p = parts(z, 2, 1);
+        let l = p[0].poisson_nll_loss(
+            &p[1],
+            &PoissonNllOptions::default().log_input(false).eps(0.0),
+            Reduction::Sum,
+        )?;
+        scaled(tp, l)
+    }
+    assert!(!try_case("poisson x=1e-20", poisson, &[1e-20, 1.0]));
+    // KlDiv Probabilities: target = 1e-40。
+    fn kl<'t>(tp: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        let p = parts(z, 2, 1);
+        scaled(tp, p[0].kl_div_loss(&p[1], Reduction::Sum)?)
+    }
+    assert!(!try_case("kl target=1e-40", kl, &[0.3, 1e-40]));
+}
+
 #[test]
 fn huge_upstream_scale_is_rejected_or_finite() {
     for scale in [3e38f32, -3e38] {
