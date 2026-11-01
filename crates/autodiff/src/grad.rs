@@ -9224,7 +9224,7 @@ fn triplet_margin_loss_vjp(
 /// `PoissonNllLoss` の VJP（イシュー #2167）。`crate::loss_ops::
 /// poisson_nll_loss` doc の数式を微分する。`full = true` かつ
 /// `t > 1` の要素のみ `dt` に Stirling 項の微分を加える。
-fn poisson_nll_loss_vjp(
+pub(crate) fn poisson_nll_loss_vjp(
     input: &Tensor<f32>,
     target: &Tensor<f32>,
     options: &crate::loss_ops::PoissonNllOptions,

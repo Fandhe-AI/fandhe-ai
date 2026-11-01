@@ -2586,6 +2586,11 @@ impl Op {
             | Op::HuberLoss { .. }
             | Op::CrossEntropyLoss { .. }
             | Op::NllLoss { .. }
+            // 損失の回帰系 3 variant（イシュー #3798・決定記録 §39/§53）。方式は
+            // `create_graph/loss_regression.rs`。
+            | Op::KlDivLoss { .. }
+            | Op::PoissonNllLoss { .. }
+            | Op::GaussianNllLoss { .. }
             // 行方向正規化（イシュー #3078・決定記録 §27）。V3 値＋S1 構造。
             | Op::RmsNorm { .. }
             | Op::LayerNorm { .. }
@@ -2646,13 +2651,10 @@ impl Op {
             Op::CrossEntropyLossWithOptions { .. }
             | Op::CosineEmbeddingLoss { .. }
             | Op::TripletMarginLoss { .. }
-            | Op::PoissonNllLoss { .. }
-            | Op::GaussianNllLoss { .. }
             | Op::MultiMarginLoss { .. }
             | Op::MultiLabelMarginLoss { .. }
             | Op::MultiLabelSoftMarginLoss { .. }
             | Op::CtcLoss { .. }
-            | Op::KlDivLoss { .. }
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
@@ -5937,13 +5939,39 @@ mod lrn_weight_reparam_op_tests {
 #[cfg(test)]
 mod loss_create_graph_support_tests {
     use super::*;
+    use crate::custom::CustomFunction;
     use crate::var::Reduction;
+    use std::sync::Arc;
+
+    /// 隣接する fail-closed の見本に使う何もしない `CustomFunction`（登録前の検査経路のみ）。
+    struct NoopFn;
+
+    impl CustomFunction for NoopFn {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+            Ok(input_shapes[0].to_vec())
+        }
+        fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+            Ok((*inputs[0]).clone())
+        }
+        fn backward(
+            &self,
+            _inputs: &[&Tensor<f32>],
+            _out_value: &Tensor<f32>,
+            upstream: &Tensor<f32>,
+            _requires_grad: &[bool],
+        ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+            Ok(vec![Some(upstream.clone())])
+        }
+    }
 
     /// 損失 Op 第 1 弾（イシュー #3082・決定記録 §26）の対象 5 variant が
     /// `supports_create_graph() == true`、隣接する未対応の損失が `false` の
     /// ままであること（fail-closed の境界を固定する）。
     #[test]
-    fn first_wave_losses_are_supported_and_neighbors_stay_closed() {
+    fn create_graph_supported_losses_and_custom_stays_closed() {
         let r = Reduction::Mean;
         let supported = [
             Op::MseLoss {
@@ -5975,15 +6003,33 @@ mod loss_create_graph_support_tests {
                 class_dim: 1,
                 reduction: r,
             },
+            // 回帰系 3 variant（イシュー #3798・決定記録 §39/§53）。
+            Op::KlDivLoss {
+                input: NodeId(0),
+                target: NodeId(1),
+                kind: fandhe_ai_tensor_core::KlDivTarget::Probabilities,
+                reduction: r,
+            },
+            Op::PoissonNllLoss {
+                input: NodeId(0),
+                target: NodeId(1),
+                options: crate::loss_ops::PoissonNllOptions::default(),
+                reduction: r,
+            },
+            Op::GaussianNllLoss {
+                input: NodeId(0),
+                target: NodeId(1),
+                var: NodeId(2),
+                options: crate::elementwise_loss_ops::GaussianNllOptions::default(),
+                reduction: r,
+            },
         ];
         for op in &supported {
             assert!(op.supports_create_graph(), "{op:?}");
         }
-        let closed = Op::KlDivLoss {
-            input: NodeId(0),
-            target: NodeId(1),
-            kind: fandhe_ai_tensor_core::KlDivTarget::Probabilities,
-            reduction: r,
+        let closed = Op::Custom {
+            inputs: vec![],
+            func: crate::custom::CustomFn(Arc::new(NoopFn)),
         };
         assert!(!closed.supports_create_graph());
     }

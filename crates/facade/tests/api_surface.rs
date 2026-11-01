@@ -43623,3 +43623,31 @@ fn backward_create_graph_loss_binary_margin_usage_doctest_is_present_and_compile
     ])]);
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
+
+/// `create_graph` の損失の回帰系（`kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss`）の受理範囲を固定する
+/// 正ガード（イシュー #3798・決定記録 `docs/autodiff-higher-order-grad-decision.md` §39・§53）。
+///
+/// 本族を拒否する否定ガードは `api_surface.rs` に存在しなかったため、反転ではなく
+/// 「受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。
+/// 挙動の本体は `tests/create_graph_facade.rs` の `{kl_div,poisson_nll,gaussian_nll}_loss_create_graph_via_facade`。
+/// 自己テストとして、存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_loss_regression_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph loss regression",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "x.poisson_nll_loss(",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&[
+        "x.gaussian_nll_loss(&t, &t, &opts, Reduction::Mean)",
+    ])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}

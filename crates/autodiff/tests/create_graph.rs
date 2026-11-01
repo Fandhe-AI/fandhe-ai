@@ -3489,13 +3489,15 @@ fn empty_loss_inputs_return_empty_grads() {
 }
 
 #[test]
-fn create_graph_still_rejects_remaining_loss_ops() {
-    // 第 1 弾の対象外（決定記録 §25 の表）。fail-closed のまま子テープは空。
+fn create_graph_still_rejects_custom_downstream_of_loss() {
+    // 損失（受理）の下流に `Op::Custom`（恒久 fail-closed）を置く構成。拒否時は子テープが空。
+    // 回帰系 3 variant（#3798）が受理側になったため、拒否の見本を Custom に替えた。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![0.2, 0.3, 0.5], &[1, 3]));
     let q = tape.var_no_grad(&t(vec![0.3, 0.3, 0.4], &[1, 3]));
-    let loss = x.kl_div_loss(&q, Reduction::Mean).unwrap();
+    let l = x.mse_loss_with(&q, Reduction::Mean).unwrap();
+    let loss = tape.custom(Arc::new(IdentityCustomFn), &[l]).unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());
