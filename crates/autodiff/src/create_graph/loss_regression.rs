@@ -232,10 +232,10 @@ pub(super) fn poisson_cgrad<'c>(
     let sb = upstream_scale(&g_value, reduction, n)?;
     reject_inf(&[&xs, &ts])?;
     let (log_input, full) = (options.log_input_value(), options.full_value());
-    let eps = f64::from(options.eps_value());
     let mut gsum = 0f64;
-    for (&x, &t) in xs.iter().zip(&ts) {
-        let (x, t) = (f64::from(x), f64::from(t));
+    let eps32 = options.eps_value();
+    for (&x32, &t) in xs.iter().zip(&ts) {
+        let (x, t) = (f64::from(x32), f64::from(t));
         if x.is_nan() || t.is_nan() {
             continue;
         }
@@ -252,7 +252,10 @@ pub(super) fn poisson_cgrad<'c>(
             stage(sb * t.abs())?;
             gsum += e + t.abs() + x.abs() + dt_extra;
         } else {
-            let u = x + eps;
+            // 構造側は f32 の `Add` で `u` を作るため、f64 の `x + eps` ではなく同じ f32 加算の結果を
+            // 使い、オーバーフローして inf になる入力も `stage(u)` で子テープ構築前に拒否する。
+            let u = f64::from(x32 + eps32);
+            stage(u)?;
             if u <= 0.0 {
                 return Err(invalid(
                     "PoissonNll(log_input=false): x + eps <= 0 のため拒否",

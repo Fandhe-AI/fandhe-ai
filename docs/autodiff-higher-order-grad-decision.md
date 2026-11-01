@@ -4342,6 +4342,7 @@ CI（CPU）相当の結果は PR の検証欄に記録する。
 
 - ファイル名は `loss_regression.rs`、GPU parity の族名は `loss_regression`（#3799 の実装物との衝突を避けるため）。
 - 総括判定（§39.12）は variant ごとに構造の各段と二階逆伝播の係数を f64 の三角不等式で上から押さえ、非有限または `STAGE_BOUND_GUARD`（2^125）以上の段があれば子テープへ書く前に型付き `Err(Backward)` で拒否する具体形にした。拒否後は既存のロールバックで `child` が空に戻り、同じ `child` で再試行できる。固有の拒否: Poisson 非 log の `x + eps <= 0`、Gaussian の `max(var, eps) == 0`、KlDiv LogProbabilities の `exp(t)` の overflow。
+- Poisson 非 log の `u = x + eps` は構造側が f32 の `Add` で作るため、検査も同じ f32 加算の結果で行い（`stage(u)`）、f64 では有限でも f32 で inf になる入力（例: `eps = x = 2e38`）を子テープ構築前に拒否する。
 - 非有限の `g` と、入力の `±inf` は拒否する。NaN のレーンは段検査から外して伝播させる。追跡されていない入力も保守的に同じ検査へ含める。これらは §39.12 の具体化・明確化であり、個別の承認を上乗せして主張しない。
 - 拒否契約の見本として `KlDivLoss` を使っていた既存テストを恒久的に未対応の `Op::Custom` へ差し替えた: `tests/create_graph.rs` の `create_graph_still_rejects_custom_downstream_of_loss`（旧 `..._remaining_loss_ops`）、`tape.rs` の単体テスト `create_graph_supported_losses_and_custom_stays_closed`（旧 `first_wave_losses_are_supported_and_neighbors_stay_closed`）。
 

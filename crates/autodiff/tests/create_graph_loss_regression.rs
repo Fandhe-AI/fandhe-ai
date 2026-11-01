@@ -687,3 +687,21 @@ fn neighbouring_custom_stays_fail_closed() {
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());
 }
+
+/// 構造側は f32 の `Add` で `u = x + eps` を作るため、f64 の `x + eps` だけを検査すると
+/// 有限入力でも `u = inf` になりうる（codex P1 の回帰）。f32 加算の結果を検査して拒否する。
+#[test]
+fn poisson_f32_add_overflow_is_rejected() {
+    fn poisson<'t>(tp: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        let p = parts(z, 2, 1);
+        let l = p[0].poisson_nll_loss(
+            &p[1],
+            &PoissonNllOptions::default().log_input(false).eps(2e38),
+            Reduction::Sum,
+        )?;
+        let a = tp.var(&t(vec![1.0], &[1]));
+        l.mul(&a)?.sum(None)
+    }
+    // x = eps = 2e38 は f32 では有限だが x + eps = 4e38 は f32 で inf になる。
+    assert!(!try_case("poisson x+eps overflow", poisson, &[2e38, 1.0]));
+}
