@@ -739,3 +739,133 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 - 2 段目の公開（crates.io・`release-all.yml`）は別承認。
 - `scripts/check-cross.sh windows-interop` への hf-hub 追加は CI 検査範囲の変更のため本変更では行わない（監査 A-4。要否は**所有者判断**。手元では `x86_64-pc-windows-msvc` の clippy を実行して非 unix 分岐のコンパイルと警告なしを確認した）。
 - §9.12.1 の未確認の外部仕様（revision API の形・401／403 の実挙動）の実測は実通信環境が必要で、CI では確認しない。
+
+## 10. 2 段目（crates.io 公開）と対応表での数え方の設計（イシュー #3762）
+
+本節は §1〜§9 を書き換えず追記する。書式は `docs/decision-record-template.md` の 9 節に従い、構成は `docs/backend-rocm-device-exposure-decision.md` §10 に倣う。
+
+- **承認: 未承認（#3771 待ち）**。引用できる既存の承認は、#3128 コメント 6220036919（hf-hub での `ureq` 利用と `resolve_revision`／`list_files` の公開化。2 段目・allowlist は別承認と明記）に限る。これは 1 段目の実装を認めたもので、crates.io 公開の承認ではない。本節は設計と推奨だけを置き、承認を得たものとして書かない。
+- **項目番号**: イシュー本文と #3771 は hf-hub を「項目 29」と書くが、追跡表（`docs/compat-matrix-ari-tracker.md`）と `docs/api-compat-0.14.0-decision.md` §1.2 では**行 28**である。本節は追跡表の番号 28 を使う。
+- **§9.3 の 2 段目に入る 4 条件の現状**（確認時点 base `16d22e832`）:
+
+| # | 条件 | 現状 |
+|---|---|---|
+| 1 | 所有者の公開承認 | 未承認（#3771） |
+| 2 | `download_with` を含む `fandhe-ai` の公開版 | **充足**。`git show v0.13.0:crates/facade/src/model.rs` に `pub fn download_with` が 1 件ある |
+| 3 | crates.io 名の空きの実測 | 未実測。#3773 が読み取りのみの GET で `fandhe-ai-hf-hub` と正規化衝突を確認する |
+| 4 | `docs/compat-api-scope.md` §0 との整合の再承認 | 未承認（#3771） |
+
+### 10.0 推奨: 実装する（2 段目へ進み、0.14.0 で crates.io 公開）
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | `fandhe-ai-hf-hub` を 0.14.0（lockstep）で公開。規則 3 は「crates.io 公開済みで §0 に限定例外として載せた補助クレートは公開に数える」と読み、§0 は限定例外を追加する | §9.12〜§9.15 で実装・監査済みの機能が利用者に届く。`docs/functorch-serving-hub-non-target-spec-proposal.md` の「HF Hub 連携は非目標ではなくコア外の設計対象」と整合する | 公開クレートが増え、release・naming・publishing-order の保守が増える。§0 の文言変更に所有者承認が要る |
+| B | 公開せず、規則 3 に従い `hf-hub` を「対象外」へ移す（承認 URL 必須） | 最小コストで行を閉じられる。REQ-9 の「特定モデルハブ連携のコア組み込みは対象外」と矛盾しない | 実装済みの機能が配布されない。上記提案 doc の趣旨と緊張する |
+| C | 公開せず、対象外にもしない | 変更なし | 行は「部分的」のまま残り、0.14.0 の目標に届かない |
+
+- **論点は束ねて問う**: 公開の可否・規則 3 の読み方・§0 の整合は独立ではない。A なら「公開に数える」と §0 の限定例外を組にする。B なら「facade から到達できるものだけ数える」と §0 の据え置き＋対象外を組にする。「公開はするが安定性保証の外に置き、それでも公開に数える」は一貫しないので推奨しない。
+- 理由: (1) 実装・テスト・監査は完了済みで、残りは公開の手続きだけ。(2) 条件 (2) は充足済み。(3) 外部依存は増えない（§10.9）。
+
+### 10.1 公開形
+
+- 公開面は現行の `EXPECTED_LIB_PUBLIC`（`crates/hf-hub/tests/api_surface.rs:471` 付近）と `EXPECTED_API_PUBLIC`（`RepoFile`・`path`）をそのまま crates.io の公開面にする。主な型は `HfRepoId::parse`、`Revision::{main, parse}`、`CommitSha::parse`、`HfHub::{new, registry, resolve_revision, list_files}`、`CachedModel`、`#[non_exhaustive] HfError`。
+- 配置は別クレート `fandhe_ai_hf_hub::...`。facade は hf-hub に依存せず再エクスポートもしない（依存は hf-hub → facade の一方向）。
+- `HfHub::download` は `pub(crate)` のまま（§10.10 の点 4）。公開と決まった場合だけ `pub fn download(&self, repo: &HfRepoId, rev: &CommitSha, filename: &str, pin: Sha256Pin, options: DownloadOptions<'_>) -> Result<CachedModel, HfError>` とする。
+
+| ガード | 推奨形（download 非公開） | download 公開時 |
+|---|---|---|
+| `lib_public_surface_is_exactly_the_expected_items` | 維持 | `EXPECTED_LIB_PUBLIC` に download の署名を追加 |
+| `api_public_surface_is_exactly_the_expected_items` | 維持 | 維持 |
+| `new_public_methods_are_present_and_download_stays_internal` | 維持 | `download_is_public_with_pinned_signature`（仮称）へ反転。`cfg_attr(not(test), allow(dead_code))` を外す |
+| `cargo_toml_declares_ureq_only_via_unix_workspace_inheritance` | `publish = true`・`version` 併記後も誤検知しないことを #3773 で確認 | 同左 |
+
+- **facade 側のガード（事実の訂正）**: `git grep -n -i 'hf.hub' origin/main -- crates/facade` は `crates/facade/src/model.rs:162` のコメント 1 件だけを返し、facade の `tests/api_surface.rs` に hf-hub を名指しするガードは**ない**。`docs/crates-io-publishing-order.md` §6 追記や `crates/hf-hub/Cargo.toml` コメントの「api_surface.rs で担保」は、実際には cargo の循環依存禁止（通常依存の場合）に支えられているだけである。#3847 で `facade_does_not_depend_on_hf_hub`（backend-rocm の G2 と同型。`[dev-dependencies]` も禁止し、合成入力の正負プローブを付ける）の追加を提案する。既存 doc の記述は書き換えず、ここで訂正として記録する。
+
+### 10.2 rustdoc と doctest
+
+- 既存の doctest（`resolve_revision` はオフライン実行、`list_files` は `no_run`）を維持し、facade（`fandhe_ai::model::ModelRegistry`）だけで通ることを保つ。GPU は該当しない。
+- 公開前に #3847 で、クレート doc の「1 段目は `publish = false`」「雛形」の記述を利用者向けに直し、`crates/hf-hub/README.md` に次を書く: `download` 非公開、sha256 pin が真正性の根拠、private／gated 非対応、接続先は `huggingface.co` 固定、非 unix は `Unsupported`、第三者の `hf-hub` クレートとは無関係。
+- 失敗系は `compile_fail` に頼らず、正のプローブと inventory で組む。
+
+### 10.3 エラー型
+
+- `HfError`（`#[non_exhaustive]`）の variant は変えない。公開に伴う追加はない。
+- 検証順は §9.4／§9.12.2 のまま（`HfRepoId::parse` → `Revision::parse` → URL 生成 → host 再照合 → 転送）。範囲外は接続前に fail-closed。メッセージは静的で、入力値・URL・トークンを含まない。本番経路に `unwrap`／`expect` はない（§9.15.4 監査 B）。
+
+### 10.4 テスト計画
+
+| 種別 | 内容 |
+|---|---|
+| CI（ubuntu-latest・外部通信なし） | 既存の `tests/api_surface.rs` 全件・ループバック結合マトリクス・オフラインテスト・doctest。#3773 で追加: 全公開クレートの `cargo publish --dry-run --locked` と `cargo package --list -p fandhe-ai-hf-hub`（同梱物の監査）。#3847 で追加: `facade_does_not_depend_on_hf_hub` |
+| `#[ignore]`（実通信。CI 対象外） | `crates/hf-hub/src/live_tests.rs` の `live_resolve_main_and_list_files`・`live_resolve_and_list_nonexistent_repo_fail_closed`。**未実測** |
+| 実機（Phase 10） | 該当なし（数値演算を持たない）。実機 parity は「該当 issue なし」のまま |
+
+### 10.5 数値契約
+
+該当なし。REQ-2 の対象演算を持たず、`ModelRegistry::load` の F32 契約は facade 側で不変。tolerance（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・baseline・ガードレール閾値・FMA／f64 縮約の契約は変えない。
+
+### 10.6 互換への影響（`docs/api-compat-0.14.0-decision.md` §8 の判定）
+
+| 型 | 判定 |
+|---|---|
+| `HfHub`・`HfRepoId`・`Revision`・`CommitSha`・`CachedModel`・`RepoFile`・`HfError` | 追加のみ（新クレートの初回公開。基準版がない） |
+| facade の型 | 該当なし（facade の公開面は不変） |
+| `download` を公開する場合 | 追加のみ（`pub(crate)` → `pub`）。facade の `DownloadOptions` に allowlist を足すなら §8 の手順で別途判定 |
+
+- 公開後は `EXPECTED_LIB_PUBLIC` が semver 面になる。暫定の検証規則（repo_id の文字集合・長さ）を緩めるのは非破壊、厳しくするのは破壊的。版は 0.14.0 lockstep。
+- 移行ノート（`docs/migration/0.14.0.md`・#3780）の「追加した API」欄に新クレートを載せる。
+
+### 10.7 適用記録・索引・追跡表
+
+- `docs/compat-api-scope.md` への適用記録（転記は承認後に #3847 が行う）。推奨 A の案: 「**適用記録（イシュー #3847・親 #3711。承認: <#3771 の回答 URL>）**: §0 に限定例外を追加し、`fandhe-ai-hf-hub` を facade の公開 API だけに依存する HF Hub 連携の補助クレートとして crates.io 公開。公開面は `resolve_revision`／`list_files` ほか（`download` は非公開）。公開状態: 未公開」。見送り B の案: 「HF Hub 連携の crates.io 公開を対象外へ移す（承認: <URL>）」。
+- §0 に足す限定例外の文言案: 「`fandhe-ai-hf-hub` は facade の公開 API だけに依存する HF Hub 連携の補助クレートで、公開面（`crates/hf-hub/tests/api_surface.rs` の `EXPECTED_LIB_PUBLIC`）に限りサポート対象とする。内部クレートへの直接依存は持たない」。
+
+| 時点 | 更新対象 |
+|---|---|
+| 本 PR（#3762） | 本節、`docs/README.md` の索引、追跡表の行 28 の設計記録セル |
+| 承認後の最初の PR | 追跡表の承認セル、本節の承認欄 |
+| #3847 | 正ガードのセル、`compat-api-scope.md` の適用記録と §0、README／クレート doc、facade 側ガード |
+| #3773 | `docs/crates-io-publishing-order.md`・`docs/crates-io-naming-decision.md` の実測記録 |
+| Phase 11 | 実公開と 0.14.0 区分 |
+| #3780 | 移行ノート |
+
+同時に直す箇所: CLAUDE.md の公開済みクレート数、README・`site/index.md`（§9.7 の 2 段目列）、ルート `Cargo.toml` と `deny.toml` の非公開一覧コメント。
+
+### 10.8 ベンチと性能への影響
+
+既定経路に影響なし。facade は hf-hub に依存しないため、facade 利用者のビルド・実行経路は変わらない。前後比較は不要（計測しない）。
+
+### 10.9 依存の追加の有無と 2 段目の公開手順
+
+- 外部依存の追加は**なし**。`ureq`（第 11 区分・`cfg(unix)`）は #3393 で承認・宣言済み、`serde`／`serde_json` は既存区分。新たに生じるのは「公開クレートの直接依存として `ureq`（vendored OpenSSL を含む）が crates.io に出る」点だけで、版・feature・固定設定は不変。新規 `unsafe` なし。禁止リストは該当なし。
+- `docs/license-matrix.md` は新しい allow 識別子が要らない見込みで更新不要（#3773 が `cargo deny` で実測。要るなら所有者承認）。
+- 手順（#3773 → Phase 11）:
+  1. `docs/crates-io-naming-decision.md`「確認方法」で `fandhe-ai-hf-hub`・`fandhe_ai_hf_hub` の空きを読み取りのみの GET で実測し、日時を記録する。
+  2. `crates/hf-hub/Cargo.toml` に `publish = true`・英語の `description`・`repository.workspace`・`readme`・`keywords`・`categories` を入れ、`LICENSE-APACHE`／`LICENSE-MIT` を同梱する（`docs/crates-io-publishing-order.md` §13.2 の onnx-interop が先例）。
+  3. `fandhe-ai = { path = "../facade", version = "=0.14.0" }` のように `version` を併記する（`deny.toml` の `wildcards = "deny"` 対策）。
+  4. 公開順は facade の後（最後）。backend-rocm も承認されれば backend-rocm の次、片方だけならそれが 8 件目（ROCm §10.9 と揃える）。
+  5. `release-all.yml` の `RELEASE_CRATES`・冒頭コメント・ステップ名の「7 クレート」と、`release.yml` の `crate` 選択肢に追加する。
+  6. `docs/crates-io-publishing-order.md` に節を足し、§6 追記（#3130）の記述を更新する。
+  7. `deny.toml` の非公開一覧コメントから hf-hub を外す。
+  8. 多パッケージの dry-run と `cargo deny` を実行する。
+  9. Phase 11 で `environment: crates-io-release` の承認ゲートを通して公開する。
+- ruleset の required checks には影響しない（ジョブを足さない）。
+
+### 10.10 所有者へ戻す論点（#3771 で問う）
+
+| 点 | 選択肢 | 推奨 | 確認がないとき |
+|---|---|---|---|
+| 1（#3771 論点 3） | `fandhe-ai-hf-hub` の crates.io 公開: 公開する／公開せず対象外へ／公開せず対象外にもしない | 公開する（A） | `publish = false` のまま。#3773 に進まない |
+| 2（#3771 論点 4） | 規則 3 の 0.14.0 での読み方: crates.io 公開済みの補助クレートを公開に数える／facade から到達できるものだけ数える | 公開に数える（点 1 の A と組） | 「未確定」のまま。0.12.0 の規則 3 で数える |
+| 3（§0） | 限定例外を追加／補助クレート（安定性保証の外）として据え置く | 公開するなら限定例外、しないなら据え置き | 据え置き |
+| 4（#3771 論点 5） | `HfHub::download` の公開: 今回含める（allowlist も同時承認）／含めない | 含めない | `pub(crate)` のまま。ガードを維持 |
+| 5（点 2 と 4 の依存） | `download` を出さずに公開した場合に項目 28 を「公開」に数えてよいか: 数える（revision 解決・一覧と facade の `download_with` で取得経路が成り立つ）／数えない | 数える（所有者判断） | 「未確定」のまま |
+| 6（参考） | `scripts/check-cross.sh windows-interop` への hf-hub 追加、ミラー対応、大文字小文字の FS 衝突 | 本件では扱わず申し送り | 現状維持 |
+
+点 4 で「含めない」を推奨する理由: allowlist の置き場所を決める承認がない（facade の `DownloadOptions` に置けば facade 公開面の拡張、hf-hub 側で HEAD 解決すれば `ureq` の用途「JSON 取得に限る」の変更で、いずれも別承認）。CDN のドメインが一次資料で未確認（§9.12.1 項 5）。
+
+### 10.11 セキュリティ・スコープ外・確認時点
+
+- OWASP: A06 名前の空きを公開前に実測し、README で第三者 `hf-hub` との混同を避ける。公開は environment 承認ゲート経由で `=x.y.z` 固定は不変。A08 `download` 非公開、sha256 pin が真正性の根拠。A10 allowlist 未実装の残留リスクを公開物の doc に書く。A01 private／gated は fail-closed で非対応のまま。A09 エラーは静的メッセージ。A02・A05 TLS 固定設定・タイムアウト・上限は不変。
+- スコープ外（起票しない。`out-of-scope-tracking.md`）: allowlist の実装、ミラー対応、Windows クロス検査、cargo-semver-checks の CI 化、実通信の実測、実公開（Phase 11）。
+- 確認時点: base `16d22e832`・2026-11-01（UTC）。#3771・#3773・#3847 の状態は実装 PR 着手時に再確認する。

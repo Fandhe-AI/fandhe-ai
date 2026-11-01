@@ -53,7 +53,7 @@
 | 25 | B1: ONNX モデルの学習（autograd）の facade 公開 | 相互運用 | 未公開 | #3759 | 未承認（#3770 待ち） | #3842、#3843 | 未特定（設計記録で確定） | 未実測（#3864 は GB10、#3865 は Mac mini） | 未確定 |
 | 26 | B3: ONNX export の `Sigmoid` | 相互運用 | 保留 | #3760（`docs/facade-onnx-export-exposure-decision.md` §19） | 未承認（#3770 待ち） | #3844 | 否定テスト `sigmoid_is_rejected_as_unsupported`（`crates/onnx-interop/tests/onnx_export_layers_parity.rs:234`）と `sequential_with_sigmoid_is_rejected_with_unsupported_layer`（`crates/facade/tests/interop_onnx_export_sequential.rs:296`）。正への反転先は §19.1 で確定（基準 sha `5834b0958`） | 該当 issue なし | 未確定 |
 | 27 | B5: safetensors の f32 以外の型 | 相互運用 | 未公開 | #3761 | 未承認（#3770 待ち） | #3845、#3846 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
-| 28 | HF Hub 連携の 2 段目（`hf-hub` の crates.io 公開と数え方） | 事前学習済みモデル | 未公開 | #3762 | 未承認（#3771 待ち） | #3847。公開準備は #3773 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
+| 28 | HF Hub 連携の 2 段目（`hf-hub` の crates.io 公開と数え方） | 事前学習済みモデル | 未公開 | #3762（`docs/hf-hub-integration-design.md` §10〈推奨・9 節・論点〉） | 未承認（#3771 待ち） | #3847。公開準備は #3773 | facade 側の否定ガードなし。hf-hub 側の `lib_public_surface_is_exactly_the_expected_items`・`new_public_methods_are_present_and_download_stays_internal`（`crates/hf-hub/tests/api_surface.rs`。基準 sha `16d22e832`）を維持し、反転は論点 4 次第 | 該当 issue なし | 未確定 |
 | 29 | `caches` で表せない内部状態を持つモデルの speculative decoding・連続バッチング | 推論・サービング | 未公開 | #3763 | 未承認（#3770 待ち） | #3848、#3849 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
 
 注記:
