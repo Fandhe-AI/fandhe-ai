@@ -785,6 +785,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - #3080(a) → #3085(b)
 - #3077 → #3082(c)
 - #3081 は `Erf` を同時に replayable にする（族内で閉じる）
+- #3789・#3790 は §16・§25 の後、他の C 区分と独立（§34.11。#3789 の実装記録は §49）
 
 ### 21.5 個別論点の結論
 
@@ -1446,6 +1447,8 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
   - 既定経路（1 階 `backward`）は変わらない。
 - 境界: 統計縮約（`Nansum`・`Nanmean` 等。#3725）は扱わない。公開面の追加はしない。実装は #3789（`Max`・`Min`・`Amax`・`Amin`）と #3790（`OrderSelect`・`MedianAll`・`Quantile`）に分ける。
 - 訂正の注記: §21.2 の表は選択縮約を「V2」と一括りにしている。本節では Op ごとに V1／V2／V3 を割り当てる。§21.2 の本文は書き換えない。
+
+- 承認の転記（#3767「回答後の扱い」。実装 PR #3789 が行う）: 所有者の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>（2026-11-01）に「設計記録の推奨どおり、すべての論点を承認」とある。本節の論点表の番号は 34.15 で、回答本文が挙げる個別の点の番号とずれるが、全論点の一括承認に含まれると読む（点 1: `Amax`／`Amin` は V3、点 2: `cg.grad` の bit 一致をテストで固定、点 4: 7 Op を全部実装）。上の「承認は #3767 の回答待ち」は本節の初版時点の記述で、本行で承認済みに更新する（既存の文は書き換えない）。
 
 ### 34.1 公開形
 
@@ -4109,3 +4112,50 @@ PR は `Refs` にする。
 ### 48.12 変えていないもの
 
 コード・公開 API・rustdoc・tolerance・baseline・ガードレール閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・既存の実機テストとログ。
+
+## 49. 実装記録（イシュー #3789・親 #3719 系。create_graph の C 区分・選択縮約 `Max`・`Min`・`Amax`・`Amin`）
+
+### 49.0 位置づけ・承認
+
+- 状態: **実装済み**（設計は §34）。承認は #3767 の所有者の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>（2026-11-01。「設計記録の推奨どおり、すべての論点を承認」）。§34.15 の論点表の番号と回答本文の番号がずれる点は、全論点の一括承認に含まれると読んだ（§34.0 末尾に転記）。
+- 基準 sha: `4e19fdff2`。
+- 対象は 4 Op。`OrderSelect`・`MedianAll`・`Quantile` は #3790 の担当で、本 PR では `false` のまま。
+
+### 49.1 実装したもの
+
+| Op | 方式 | 子テープの構造 |
+|----|------|----------------|
+| `Max`・`Min` | V2 | 親の記録値から「各 lane で `==` 一致する最初の 1 位置」の bool マスクをホストで作り、`where_cond(M, g_b, 0)`。`mul` を使わないので `inf * 0` を作らない。1 階と bit 一致 |
+| `Amax`・`Amin` | V3 | 値は 1 階と同じ `extremum_even_split_vjp` を `push_v3` で載せる。構造は `where_cond(M_all, g_b / k, 0)`。`k == 0` の lane はマスク全 false・`k = 1` で `0/1` となり、Div の VJP が NaN を生まない |
+
+- 実装: `crates/autodiff/src/create_graph/select_reduce.rs`（新規）、`create_graph.rs` の `replay_op`／`build_cgrads`、`tape.rs` の `supports_create_graph`（4 variant を `true`。網羅 match のまま）。
+- 写しの Op タグは親と同じ（`Amax`／`Amin` は `Var::amax`／`amin` で再生。`Max` のタグで記録すると孫テープが先勝ち VJP を使ってしまう）。
+- 1 階の走査規則は `grad.rs` に `extremum_first_match_mask`／`extremum_all_match_mask` として足した（`pub(crate)`）。1 階 VJP 関数の本体は変えていない（`extremum_first_match_vjp`／`extremum_even_split_vjp` の可視性を `pub(crate)` にしただけ）。単体テスト `extremum_mask_tests` が、マスクと `k` が 1 階 VJP（`g = 1`）の非ゼロ位置・`1/k` と一致することを、タイ・NaN・`[0.0, -0.0]`・全軸で固定する。
+- 子テープへ積む Op は `Reshape`・`BroadcastTo`・`Contiguous`・`Where`・`ScalarBinary{Div}`・定数 `Leaf` と、写しの `Max`／`Min`／`Amax`／`Amin` だけ。すべて `supports_create_graph == true`（閉包性。§34.11）。
+- 入口で「入力・記録値・上流」の shape 整合を確かめ、崩れていれば子テープへ書く前に `AutodiffError::Backward` で拒否する（多層防御。§34.3 は 4 Op 向けの拒否条件を挙げていないので `validate_ancestors` は変えていない）。
+- `max_dims(&[..], keepdim)` は `Op::Max` の連鎖と reshape なので追加の実装なしで受理される（テストで固定）。
+
+### 49.2 設計からの逸脱
+
+- §34.4 の「7 Op が `true`」は本 PR では 4 Op（`tape.rs` の単体テスト `selection_reduce_family_supports_create_graph` は 4 Op が `true`、`MedianAll`・`Nansum`・`Nanmean` が `false`）。兄弟 PR が族を反転したらこの一覧を直す。
+- §34.4 の「`gpu_extended_ops_match_cpu` へ足す」は、§48.4 の命名表（族ごとに `create_graph_<族>_cuda_matches_cpu`）に従い、`create_graph_gpu_parity.rs` の登録表 `CASES` へ族 `select_reduce_minmax` の 4 行を足す形に置き換えた。既存の `gpu_extended_ops_match_cpu` は変えていない。実機の形状は `[17, 33]`（S2）の 1 種で、軸 1 縮約。小形状（S1）は CPU の統合テストが担う。
+- §34.1 のとおり本族を拒否する否定ガードは `api_surface.rs` に存在しなかったため、「否定ガードの反転」は行っていない。受け入れ条件は次の対応で満たした: 正ガード = facade 挙動テスト `{max,min,amax,amin}_create_graph_via_facade` と、doctest の実在検査 `backward_create_graph_select_reduce_usage_doctest_is_present_and_compiled`（`api_surface.rs`）。すり替え検出 = `H v ≠ 0` の assert、検出器が空振りしないことの自己テスト、fail-closed 拒否テスト。
+
+### 49.3 テスト
+
+| 区分 | テスト |
+|------|--------|
+| autodiff 統合 | `crates/autodiff/tests/create_graph_select_reduce.rs`: Hessian と有限差分の突合（`max_min_*`・`amax_amin_*`）、閉形式（`max_hessian_matches_closed_form`・`amax_tie_second_order_matches_closed_form`）、1 階との bit 一致（`first_order_and_cg_grad_are_bit_identical`・`tie_nan_signed_zero_regressions`）、`k == 0` の NaN 非伝播、孫テープ、隣接 Op の fail-closed |
+| autodiff 単体 | `grad.rs::extremum_mask_tests`、`tape.rs::selection_reduce_family_supports_create_graph` |
+| facade | `create_graph_facade.rs` の 4 本、`create_graph_gpu_parity.rs` の登録 4 行と CPU 自己検査 `select_reduce_minmax_cases_pass_cpu_against_cpu`、`api_surface.rs` の doctest 実在検査、rustdoc の doctest（`max(x)^2`） |
+| 差し替え（§34.13） | 拒否の代表に `max` を使っていた 7 か所を、`Op::Custom` または `selu`（いずれも対象外のまま）へ替えた。判定（`Err` の種類・子が空・テープ長）は変えていない。`double_vjp_feasibility.rs` の `max` は受理側の `c4_max_is_accepted_since_3789` へ移した |
+
+CI（CPU）相当の結果: `cargo test --workspace`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`・`cargo test -p fandhe-ai --doc` が通った。
+
+### 49.4 GPU 実機 parity
+
+**未実測**。実機テストは `create_graph_select_reduce_minmax_cuda_matches_cpu`（GB10、#3856）と `create_graph_select_reduce_minmax_metal_matches_cpu`（macOS 限定、#3858）で、どちらも `#[ignore]`。判定は `Judge::Strict`（`fail_count == 0`）、構造に MatMul は無いので S3 は `NoMatMul`。Linux 側の値で pass とは書かない。
+
+### 49.5 変えていないもの
+
+`docs/spec`・依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・REQ-2 の tolerance 定数・parity baseline（空のまま）・ガードレール閾値・FMA 契約・`AutodiffError` の variant・facade の公開名とシグネチャ（rustdoc と doctest を足しただけ）・1 階 VJP の出力値。
