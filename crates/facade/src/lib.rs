@@ -909,7 +909,8 @@ impl Tape {
     ///
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `max`／`min`／`amax`／`amin` は
+    /// §34（#3789）で対象になった。`Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -929,6 +930,28 @@ impl Tape {
     /// let xc = cg.child_var(&x)?.unwrap();
     /// let second = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
     /// assert!((second[0] - 12.0).abs() < 1e-4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// 選択縮約（`max`・`min`・`amax`・`amin`。#3789）も二階へ進める。次は `max(x)^2` の例で、
+    /// 最大要素（添字 1）の対角だけが `2` になる。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![1.0_f32, 3.0, 2.0], &[3])?);
+    /// let m = x.max(None)?;
+    /// let loss = m.mul(&m)?; // max(x)^2
+    /// let cg = t.backward_create_graph(&loss, &child)?;
+    /// let g = cg.grad(&x)?.unwrap();
+    /// let grads2 = child.backward(&g.sum(None)?)?;
+    /// let xc = cg.child_var(&x)?.unwrap();
+    /// let second = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
+    /// assert!((second[1] - 2.0).abs() < 1e-4 && second[0] == 0.0 && second[2] == 0.0);
     /// # Ok(())
     /// # }
     /// ```
@@ -1034,7 +1057,8 @@ impl Tape {
     ///
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1138,7 +1162,8 @@ impl Tape {
     /// （`VarF64`・低精度 forward は対象外）。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1199,7 +1224,8 @@ impl Tape {
     /// bit 同一は契約にしない。計算量は親 backward 1 回＋子 backward 1 回。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1298,7 +1324,8 @@ impl Tape {
     /// 計算量は入力数に依らず親 backward 1 回＋子 backward 1 回。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1380,7 +1407,8 @@ impl Tape {
     /// 計算量は親 backward 1 回＋子 backward 1 回＋孫テープへの記録 1 回。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
