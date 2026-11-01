@@ -87,7 +87,8 @@
 //! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
 //! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。プーリング族
 //! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）、
-//! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）も対象——
+//! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）・
+//! 統計縮約（`LogSumExp`・`Nansum`・`Nanmean`。イシュー #3792・決定記録 §33/§51・実装は `stat_reduce_lse_nan`）も対象——
 //! 方式は `pool` サブモジュール doc と決定記録 §30（`MaxUnpool` は対象外）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
@@ -131,6 +132,7 @@ mod linalg_fft;
 mod pad_mask;
 mod pool;
 mod select_reduce;
+mod stat_reduce_lse_nan;
 mod stat_select;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
@@ -997,6 +999,10 @@ fn replay_op<'c>(
         Op::Min { input, dim } => get_mirror(mirror, input)?.min(dim),
         Op::Amax { input, dim } => get_mirror(mirror, input)?.amax(dim),
         Op::Amin { input, dim } => get_mirror(mirror, input)?.amin(dim),
+        // 統計縮約（イシュー #3792。方式は `stat_reduce_lse_nan` モジュール doc 参照）。
+        Op::LogSumExp { input, dim } => get_mirror(mirror, input)?.logsumexp(dim),
+        Op::Nansum { input, dim } => get_mirror(mirror, input)?.nansum(dim),
+        Op::Nanmean { input, dim } => get_mirror(mirror, input)?.nanmean(dim),
         Op::Inv { input } => get_mirror(mirror, input)?.inv(),
         Op::Solve { a, b } => get_mirror(mirror, a)?.solve(&get_mirror(mirror, b)?),
         Op::Det { input } => get_mirror(mirror, input)?.det(),
@@ -2225,6 +2231,34 @@ fn build_cgrads<'c>(
                             dim,
                             split: select_reduce::Split::EvenSplit,
                         },
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 統計縮約（イシュー #3792。方式は `stat_reduce_lse_nan` モジュール doc 参照）。
+            Op::LogSumExp { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let x_m = get_mirror(mirror, input)?;
+                    let d = stat_reduce_lse_nan::logsumexp_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        (id, input, dim),
+                        &x_m,
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Nansum { input, dim } | Op::Nanmean { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = stat_reduce_lse_nan::nan_reduce_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        (id, input, dim),
+                        matches!(node.op, Op::Nanmean { .. }),
                         &g,
                     )?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
