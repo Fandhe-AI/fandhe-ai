@@ -24,3 +24,5 @@ GPU tape 版は `Tape::new_with_ops(Box::new(CudaBackendOps::new(..)))` 等へ�
   CPU バックエンドの forward 契約（FMA 契約。`.claude/rules/coding-rust.md`）に
   従う各バックエンドの `ops::*` 実装と REQ-2 統一複合判定で一致するはず。
 - backward: `Tape::custom` の backward はホスト実行のみのため device 差分なし。
+
+- 追記（#3778）: GPU tape 上の ONNX の学習の parity テストは onnx-interop の `onnx_autograd_device_parity.rs` 案ではなく、facade の `crates/facade/tests/train_gpu_parity.rs` の `onnx` 族に置く。測定は #3864（GB10）・#3865（Mac mini）。

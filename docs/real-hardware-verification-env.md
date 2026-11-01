@@ -193,6 +193,19 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 
 実測は 2026-10-01 に本手順で実施済み（正式実行 1 系列・219 プロセスすべて exit 0・`aggregate.py` exit 0。結果は `docs/cuda-sm121-isa-probe.md` §5、生ログと集計は `docs/perf/logs/sm121-isa-probe-2122/`）。legacy は `setmaxnreg_probe_*` 4 件に加え、`tma_probe_real_device` の 3 テストを `tma_probe_real_device@<テスト関数>` として 1 テストずつ別プロセスで再実行する。結果の転記手順は §8「結果の記録先」と `docs/cuda-sm121-isa-probe.md` §7 に従う。
 
+### 4.10 NN 層・最適化・ONNX の学習の parity 雛形（#3778）
+
+雛形は `crates/facade/tests/train_gpu_parity.rs`（共通部品は `tests/common/train_gpu_parity.rs`）。実機テストは族ごとに 1 本で、名前は `train_parity_<scaffold|nn|optim|onnx>_<cuda|metal>_matches_cpu`（`metal` は macOS のみ）。`--exact` で 1 本ずつ別プロセスで実行し、`--release` は付けない。事前登録の雛形は `docs/perf/logs/train-gpu-parity-template/RULE.txt`。本節は手順の雛形であり、**未実測**である。
+
+```bash
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 train_parity_nn_cuda_matches_cpu'
+```
+
+Metal は §7.1 と同じく `zsh -lc` で包み、テスト名を `train_parity_<族>_metal_matches_cpu` にする。出力の `TRAIN_PARITY` 行を集計する。
+
 ## 5. PyTorch 参照値の再計測（同一実機）
 
 ### 5.1 venv の利用
