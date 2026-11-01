@@ -855,6 +855,14 @@ fn pair_info(
                     "Triplet: f32 丸め後の |u|^p の和が下限を割る（norm が 0 へ潰れる）ため拒否",
                 ));
             }
+            // 上限側: f64 で有限でも、子テープの f32 `PowScalar`（`|u|^p` とその微分係数 `p·|u|^(p-1)`）と
+            // 和 `ssum` が f32 範囲を超えると inf になり、逆伝播で 0×inf の NaN になる（Codex P1）。
+            // 各項・和・微分係数を `stage` で検査する（設計 §40.12 の中間値・二階逆伝播の総括判定）。
+            stage(ssum)?;
+            for &u in &us {
+                stage(u.powf(p))?;
+                stage(p * u.powf(p - 1.0))?;
+            }
             let norm = ssum.powf(1.0 / p);
             stage(1.0 / ssum)?;
             stage(1.0 / norm)?;

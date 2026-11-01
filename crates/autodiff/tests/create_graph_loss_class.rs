@@ -1200,6 +1200,33 @@ fn triplet_large_p_f32_rounding_underflow_is_rejected() {
     );
 }
 
+/// Triplet の累乗和 `ssum` が f64 では有限でも f32 の `PowScalar` で overflow する入力
+/// （差分の f32 再構成と逆スケールの積が 1 を僅かに超え、p=1e9 で `|u|^p` が約 1e51）は、
+/// 逆伝播の 0×inf による NaN を避けるため型付きエラーで拒否する（Codex P1）。
+#[test]
+fn triplet_large_p_f32_pow_overflow_is_rejected() {
+    fn build<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        let q = parts(z, 3, 1);
+        q[0].reshape(&[1])?.triplet_margin_loss(
+            &q[1].reshape(&[1])?,
+            &q[0].reshape(&[1])?,
+            &TripletMarginOptions::default()
+                .p(1e9)
+                .eps(1e-6)
+                .margin(1.0)
+                .swap(false),
+            Reduction::Sum,
+        )
+    }
+    assert_rejected_then_retry_ok(
+        "triplet large p pow overflow",
+        build,
+        &[0.028_971_935, -0.456_534_95, 0.028_971_935],
+        build,
+        &[0.5, 0.25, 1.0],
+    );
+}
+
 /// ignore 行の logits に NaN があっても二階が NaN にならない。
 #[test]
 fn cewo_ignore_row_nan_logits_keep_second_order_finite() {
