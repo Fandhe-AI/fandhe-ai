@@ -38647,6 +38647,28 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
     assert!(offense_lib(&format!("{all}\npub mod functional_ops {{}}")));
 }
 
+/// f64 の `jvp`／`jacfwd` 置き場所（#3787）の計数が、承認形では各 1 件、`impl VarF64` への重複や
+/// 未承認名の追加では期待との不一致になり、コメント・文字列内の宣言は計上されないことを固定する。
+#[test]
+fn functional_transforms_fn_inventory_counts_f64_substitutions() {
+    let count = |src: &str, name: &str| {
+        let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+        count_fn_declarations_by_name(&tokenize_including_punctuation(&cleaned), name)
+    };
+    let approved = "impl<'t> TapeF64<'t> { pub fn jvp(&self) {} pub fn jacfwd(&self) {} }";
+    assert_eq!(count(approved, "jvp"), 1);
+    assert_eq!(count(approved, "jacfwd"), 1);
+    let dup = format!("{approved} impl VarF64 {{ fn jvp(&self) {{}} }}");
+    assert_eq!(count(&dup, "jvp"), 2);
+    let extra =
+        format!("{approved} impl TapeF64 {{ fn jvp_multi(&self) {{}} fn vjp(&self) {{}} }}");
+    assert_eq!(count(&extra, "jvp_multi"), 1);
+    assert_eq!(count(&extra, "vjp"), 1);
+    let hidden = "// fn jvp() {}\nconst S: &str = \"fn jacfwd() {}\";";
+    assert_eq!(count(hidden, "jvp"), 0);
+    assert_eq!(count(hidden, "jacfwd"), 0);
+}
+
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`FUNCTIONAL_TRANSFORMS_FN_NAMES`] の `fn` 宣言が
 /// 許可された置き場所だけに存在することを固定する。
 ///
@@ -38662,6 +38684,10 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
 ///
 /// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`・`::jvp_multi`・`::jvp_create_graph`（#3063・#3068）・`::vmap_grad`（#3072・#3071 の子テープ版内部実装）: #2940 の double-VJP 内部実装（#2956 で `pub fn` 化。
 ///   facade 以外へは再エクスポートしない）。
+///
+/// - `autodiff/src/f64_autograd/functional_ops.rs::jvp`・`::jacfwd`（#3787）: f64 の double-VJP 内部実装
+///   （`impl TapeF64` 直下。各 1 件。facade 公開は #3788。f64 側の `vjp`／`hvp`／`vmap`／`vmap_grad`／
+///   `jvp_multi`／`jvp_create_graph` は未承認のため足されたら違反として検出される）。
 ///
 /// 以後の実装を足すときは期待集合へ 1 行ずつ追記する。
 #[test]
@@ -38720,6 +38746,14 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
             "autodiff/src/functional_ops.rs::jvp_create_graph".to_string(),
             1usize,
         ),
+        (
+            "autodiff/src/f64_autograd/functional_ops.rs::jvp".to_string(),
+            1usize,
+        ),
+        (
+            "autodiff/src/f64_autograd/functional_ops.rs::jacfwd".to_string(),
+            1usize,
+        ),
         ("autodiff/src/grad.rs::vjp".to_string(), 1usize),
         ("facade/src/lib.rs::vjp".to_string(), 1usize),
         ("facade/src/lib.rs::hvp".to_string(), 1usize),
@@ -38739,7 +38773,7 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd／jvp_multi／jvp_create_graph／vmap_grad の `fn` 宣言が許可された置き場所\
-         （autodiff/src/functional_ops.rs・autodiff/src/grad.rs・facade/src/lib.rs の各 1 件）と一致しない。\
+         （autodiff/src/functional_ops.rs・autodiff/src/f64_autograd/functional_ops.rs〈jvp・jacfwd のみ〉・autodiff/src/grad.rs・facade/src/lib.rs の各 1 件）と一致しない。\
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
