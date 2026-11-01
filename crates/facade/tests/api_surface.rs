@@ -5829,9 +5829,10 @@ fn facade_tape_backward_create_graph_is_thin_delegation() {
     );
 }
 
-/// `backward_create_graph` の `fn` 宣言が workspace 内で autodiff の本体と
-/// facade の委譲の各 1 件のみであること（`TapeRef` 版等の承認範囲外の
-/// 追加を fail-closed で拒否。決定記録 §17.3）。
+/// `backward_create_graph` の `fn` 宣言が workspace 内で承認された 3 箇所の各 1 件のみで
+/// あること（f32 本体・facade の委譲・f64 本体。`TapeRef` 版等の承認範囲外の追加を
+/// fail-closed で拒否。決定記録 §17.3。f64 本体は #3785・設計記録 §35.1／§37 で承認済み。
+/// facade の f64 newtype 側の宣言は #3786 で期待へ足す）。
 #[test]
 fn workspace_declares_backward_create_graph_only_in_approved_locations() {
     let found = scan_workspace_fn_declarations(&["backward_create_graph"]);
@@ -5840,11 +5841,68 @@ fn workspace_declares_backward_create_graph_only_in_approved_locations() {
             "autodiff/src/create_graph.rs::backward_create_graph".to_string(),
             1,
         ),
+        (
+            "autodiff/src/f64_autograd/create_graph.rs::backward_create_graph".to_string(),
+            1,
+        ),
         ("facade/src/lib.rs::backward_create_graph".to_string(), 1),
     ]
     .into_iter()
     .collect();
     assert_eq!(found, expected);
+}
+
+/// 上の宣言インベントリが「承認形だけを許す」判定として機能することを、合成ファイルで
+/// 固定する自己テスト（#3785。検出器が常に通る状態へ退化しない）。違反は承認外ファイルへの
+/// 追加・facade 側への二重宣言・欠落、無害は別名（`_v2`）・コメント・文字列内の記述。
+#[test]
+fn workspace_backward_create_graph_inventory_detects_each_category() {
+    use surface_guard::{
+        assert_detects_each_category, declaration_count_violations, fn_declaration_sites,
+    };
+    const APPROVED: [&str; 3] = [
+        "autodiff/src/create_graph.rs",
+        "autodiff/src/f64_autograd/create_graph.rs",
+        "facade/src/lib.rs",
+    ];
+    let checker = |files: &[(String, String)]| {
+        declaration_count_violations(
+            "backward_create_graph",
+            &fn_declaration_sites(files, "backward_create_graph"),
+            &APPROVED,
+        )
+    };
+    let decl = "impl X { pub fn backward_create_graph(&self) {} }\n";
+    let base: Vec<(String, String)> = APPROVED
+        .iter()
+        .map(|rel| (rel.to_string(), decl.to_string()))
+        .collect();
+    // 違反: facade の impl への二重宣言・f64 本体と同居しない別ファイル・TapeRef 版。
+    let injected = [
+        ("facade/src/lib.rs", decl),
+        ("autodiff/src/f64_autograd.rs", decl),
+        (
+            "autodiff/src/tape.rs",
+            "impl TapeRef { fn backward_create_graph() {} }\n",
+        ),
+    ];
+    // 無害: 別名・コメント・文字列。
+    let benign = [
+        ("autodiff/src/x.rs", "fn backward_create_graph_v2() {}\n"),
+        ("autodiff/src/y.rs", "// fn backward_create_graph() {}\n"),
+        (
+            "autodiff/src/z.rs",
+            "let s = \"fn backward_create_graph()\";\n",
+        ),
+    ];
+    assert_detects_each_category(
+        "backward_create_graph インベントリ",
+        checker,
+        &base,
+        true,
+        &injected,
+        &benign,
+    );
 }
 
 /// facade 公開シグネチャの固定と、CPU での最小呼び出し成功の確認（#2545）。

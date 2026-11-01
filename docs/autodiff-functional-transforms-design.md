@@ -976,7 +976,8 @@ CUDA は `create_graph_extended_ops_cuda_matches_cpu`、Metal は `create_graph_
 
 ### 35.0 位置づけ・承認根拠・境界・推奨
 
-- 状態: **設計記録のみ。推奨は「実装する（案 A）」で、承認は #3766（論点 2「`TapeF64` の `jvp` 系」・論点 3「f64 の数値契約」）の回答待ち**。本節は承認を代行しない。回答が出るまで、コード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない。
+- 状態: **設計記録のみ。推奨は「実装する（案 A）」で、承認は #3766（論点 2「`TapeF64` の `jvp` 系」・論点 3「f64 の数値契約」）の回答待ち**。本節は承認を代行しない。
+  - → #3785 追記: 承認は https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674（2026-11-01）で得られた。第 1 段の実装記録は §37。上の「本節は承認を代行しない」と、承認前の方針（回答が出るまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` を変えない）は、この承認で役目を終えた。
 - 基準: `origin/main` `69881d9da`。以下の行番号・規模はこの sha 上で再現できる。
 - 根拠: §33（#3074 の規模見積もり）と、ルート #3711 の起票経緯コメント（<https://github.com/Fandhe-AI/fandhe-ai/issues/3711#issuecomment-6542000986>・2026-10-31。27 項目は「実装」を既定として設計する）。後者は設計方針の根拠であり、承認ではない。
 - 推奨: **実装する（案 A）**。§33.7 の (b)「f32 `Tape` 限定で契約固定」は本節で改める。§33 の規模の議論（縮約系に構造演算が要る）は否定しない。そのうえで次を理由にする。
@@ -1379,3 +1380,41 @@ impl<'t> TapeF64<'t> {
 ### 36.13 変えていないもの
 
 `crates/**`・公開 API・tolerance・baseline・依存・`unsafe`・ガードレール閾値・`docs/spec`・`docs/compat-api-scope.md`。
+
+
+## 37. 実装記録（イシュー #3785・親 #3719。f64 create_graph 第 1 段）
+
+### 37.0 位置づけ
+
+- 承認: §35.0 の承認待ちは、#3766 の所有者の回答コメント（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674）で論点 2 (a)（full mirror・対象 8 Op・2 段）と論点 3（REQ-2 の判定式をそのまま使う）が承認された。§35.13 の各論点は推奨どおり。本節は §35.11 の第 1 段の実装記録である。
+- 基準: `origin/main` `4e19fdff2`。第 2 段（`matmul`／`sum`／`mean`、`Transpose`／`Unreduce`）と facade の newtype、実機の `#[ignore]` テストは #3786。
+
+### 37.1 追加したもの
+
+- `crates/autodiff/src/f64_autograd/create_graph.rs`（新設）: `TapeF64::backward_create_graph`（入口検査は §35.3 の順序）、`CreateGraphResultF64`（`first_order`／`grad`／`child_var`）、祖先の収集と検査、写し（full mirror）、勾配グラフ、失敗時の `rollback_to`。
+- `crates/autodiff/src/f64_autograd.rs`: 内部 variant `BroadcastTo`／`ReduceTo`／`Log`／`Where`（`pub(crate)`）、それらの 1 階 VJP 腕、crate 内部の `is_empty`／`rollback_point`／`rollback_to`、内部 forward（`cg_broadcast_to`／`cg_reduce_to`／`cg_log`／`cg_where`。公開メソッドは増やさない）。既存の腕は変えていない。
+- 範囲外の Op（`matmul`／`sum`／`mean`／`max`）は追跡対象の祖先にあれば `Backward` で拒否する（子テープへ書く前）。`max` は fail-closed のまま。定数側の部分木は検査しない。
+- テスト: `crates/autodiff/tests/f64_create_graph.rs`（15 件。二階の閉形式・中心差分・三階の閉包性・`Pow` の `a==0`／`b==0`・正の底でゼロ指数の混合二階微分（`pow_positive_base_zero_exponent_keeps_mixed_partials`）・入口検査・範囲外 Op・再試行）、`create_graph.rs` の単体 3 件。facade `api_surface.rs` は宣言インベントリを承認形 3 件へ更新し、検出力の自己テストを足した。
+
+### 37.2 §35 から外れた点（所有者への報告事項）
+
+1. **マスクの格納**: §35.10 の「定数の bool マスク」は `Tensor<bool>` を `OpF64` に持たせず、0.0／1.0 の f64 定数葉（`requires_grad == false`）を指す `Where{cond, on_true, on_false}` にした。`Tensor<bool>` を持たせると `OpF64` の `Copy` 束縛が崩れ、既存の `backward` の腕を書き換えることになるため。写しの段では定数として写るので閉包性は保たれる。
+2. **`mirror()` は見送り**: 第 1 段では使う箇所がなく、dead_code で clippy を落とすため作っていない（`#[allow]` で黙らせない）。#3786／#3788 が必要になった時点で足す。
+3. **`rollback_point`／`rollback_to` は一般形**: 子テープの先頭に限らない切り戻しにした（#3787 の `jacfwd` J1 案が再利用できる）。前提は、`point` より後のノードを指す `VarF64` を呼び出し側が持たないこと。
+4. **判定ヘルパー**: §35.5 の `compare_f64` ではなく、autodiff の `tests/common::req2_close` を使った（autodiff は backend-cpu に依存しない不変条件。判定式は同じ）。`compare_f64` は #3786 の facade テストで使う。
+5. **`Pow` の安全置換の範囲**: §35.10・§35.13 論点 6 の「`Where`＋`Log` の安全置換」という方式は変えず、da 側でマスクする位置を「`b == 0` かつ底が有限の正の値でない」に絞った。`b == 0` 全体を定数マスクで消すと、底が正の位置で混合二階微分が 0 になり、正しい値 `1/a` を失うため（PR #3940 の Codex レビュー指摘）。1 階の `binary_partials_f64` は変えていない。
+
+### 37.3 測った bit 一致の範囲
+
+- `first_order()` は素の `backward` と全要素で `to_bits` 一致（テスト `first_order_is_bit_identical_to_plain_backward`）。構造上同一。
+- `grad()`（子テープ上の勾配）は 1 階勾配と REQ-2 の範囲で一致する。式の組み立てが異なる（例: `Div` は先に `1/b` を作る）ため bit 一致は契約にしていない。
+- NaiveOps（ホスト経路）のみで測った。CUDA／Metal の実測は未実施で、#3786 が `docs/perf/logs/f64-create-graph-3786/README.md` に手順と記入欄を置く。ここでは代替の値で埋めない。
+
+### 37.4 変えていないもの
+
+`crates/facade/src/**`、依存（`Cargo.toml`／`Cargo.lock`）、tolerance 定数、parity baseline、ガードレール閾値、`unsafe`、`docs/spec`、f32 の `create_graph.rs`、§36 の本文。なお f32 側の `ScalarBinaryOp::Pow`（`mask_b0`）にも同じ構造があり、混合二階微分が 0 になりうる。このイシューでは変えていない（対象外の候補として申し送る）。
+
+### 37.5 #3786・#3787・#3788 への申し送り
+
+- #3786: 第 2 段の Op、facade newtype（`first_order` は §35.13 論点どおり (a) の所有）、§35.1 の表の残りのガード反転（`F64_AUTOGRAD_SURFACE`・`f64_autograd_*` 群・期待マップへ facade の f64 宣言を足して 4 件にする・`facade_tape_backward_create_graph_is_thin_delegation` を impl の範囲で抽出する）、実機テスト、公開の適用記録。
+- #3787・#3788: `rollback_to` の再利用、`mirror()` の追加、移行ノートの公開名。

@@ -266,6 +266,8 @@ pub mod einsum_batch;
 mod error;
 mod eval;
 pub mod extremum_ops;
+// f64 テープの `create_graph` 第 1 段（`TapeF64::backward_create_graph`。イシュー #3785・
+// 設計記録 `docs/autodiff-functional-transforms-design.md` §37）。内部クレート限定で、facade へは未公開。
 pub mod f64_autograd;
 pub mod fft_ops;
 pub mod indexed_update_ops;

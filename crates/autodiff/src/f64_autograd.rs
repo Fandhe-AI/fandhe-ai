@@ -93,6 +93,17 @@
 //!   決定的方式）。`max` の値そのものは走査順に依らないため（NaN を
 //!   除き）常に bit 一致する。
 //!
+//! # create_graph（イシュー #3785・親 #3719。第 1 段）
+//!
+//! [`TapeF64::backward_create_graph`] は loss の逆伝播グラフを空の子 [`TapeF64`]
+//! 上へ `VarF64` 演算として記録する（f32 の `Tape::backward_create_graph` の
+//! f64 版。実装は子モジュール `create_graph.rs`、設計は
+//! `docs/autodiff-functional-transforms-design.md` §35／§37）。第 1 段の対象は
+//! `add`／`mul`／`div`／`pow` と、勾配グラフの閉包性のための crate 内部
+//! variant（`BroadcastTo`／`ReduceTo`／`Log`／`Where`）。`matmul`／`sum`／
+//! `mean`／`max` は追跡対象の祖先にあれば拒否する。公開面（`VarF64` の公開
+//! メソッド）は増やさない。facade への公開は #3786。
+//!
 //! # 次段への申し送り
 //!
 //! 本イシュー（#2196）のスコープ外（`docs/autodiff-var-dtype-multiplexing-
@@ -106,6 +117,8 @@
 //! - rank≥3 のバッチ matmul・`keepdim`・多軸縮約（`sum_dims` 相当）・
 //!   `min`
 
+mod create_graph;
+
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -116,6 +129,8 @@ use fandhe_ai_tensor_core::{
 
 use crate::error::AutodiffError;
 use crate::tape::Tape;
+
+pub use create_graph::CreateGraphResultF64;
 
 /// プロセス全体で共有する [`TapeF64`] 識別子発行カウンタ。`crate::tape::
 /// TapeId`（`tape.rs` の `NEXT_TAPE_ID`）と同じ理由（ポインタ比較は
@@ -169,6 +184,31 @@ pub(crate) enum OpF64 {
         input: NodeIdF64,
         dim: Option<usize>,
     },
+    /// ブロードキャスト（目標 shape はノードの `shape`。イシュー #3785）。
+    /// `backward_create_graph` が組む勾配グラフ（`ReduceTo` の VJP）専用の
+    /// crate 内部 variant で、公開 API（`VarF64` の公開メソッド）からは
+    /// 作れない。
+    BroadcastTo {
+        input: NodeIdF64,
+    },
+    /// ブロードキャストの逆演算（目標 shape はノードの `shape`。
+    /// `reduce_to_shape_f64` と同じホスト逐次和。イシュー #3785）。
+    ReduceTo {
+        input: NodeIdF64,
+    },
+    /// 要素ごとの自然対数（`Pow` の二階微分の `y * ln(a)` 項用。
+    /// イシュー #3785）。
+    Log(NodeIdF64),
+    /// 要素ごとの選択。`cond` は 0.0／1.0 の f64 定数葉
+    /// （`requires_grad == false`）を指す。`Tensor<bool>` をノードに
+    /// 持たせないのは、`OpF64` のフィールドを `Copy` のまま保ち既存の
+    /// `match` 腕（値束縛）を 1 文字も変えないため（イシュー #3785・
+    /// 設計記録 §37）。
+    Where {
+        cond: NodeIdF64,
+        on_true: NodeIdF64,
+        on_false: NodeIdF64,
+    },
 }
 
 /// 二項演算 4 種の種別のみを表す軽量タグ（[`OpF64`] から演算の種類だけ
@@ -200,6 +240,14 @@ enum OpKindF64 {
     Max {
         input: NodeIdF64,
         dim: Option<usize>,
+    },
+    BroadcastTo(NodeIdF64),
+    ReduceTo(NodeIdF64),
+    Log(NodeIdF64),
+    Where {
+        cond: NodeIdF64,
+        on_true: NodeIdF64,
+        on_false: NodeIdF64,
     },
 }
 
@@ -262,6 +310,26 @@ impl<'t> TapeF64<'t> {
         });
         drop(nodes);
         VarF64 { graph: self, id }
+    }
+
+    /// ノードが 1 つも無いか。`backward_create_graph` の子テープ入口検査用
+    /// （イシュー #3785。crate 内部）。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.nodes.borrow().is_empty()
+    }
+
+    /// ロールバック位置（現在のノード数）。`rollback_to` と対で使う。
+    pub(crate) fn rollback_point(&self) -> usize {
+        self.nodes.borrow().len()
+    }
+
+    /// `point` 以降に追記したノードを破棄して `rollback_point` 時点へ戻す。
+    /// `backward_create_graph` が構築途中で失敗したときに子テープを空へ
+    /// 戻すために使う（イシュー #3785）。`TapeF64` のノード列は追記専用の
+    /// ため truncate だけで足りる。前提: 呼び出し側が `point` より後の
+    /// ノードを指す `VarF64` を以後使わないこと。
+    pub(crate) fn rollback_to(&self, point: usize) {
+        self.nodes.borrow_mut().truncate(point);
     }
 
     /// `loss` を起点に逆伝播し、各ノードへ流入した勾配を
@@ -330,6 +398,18 @@ impl<'t> TapeF64<'t> {
                     OpF64::Sum { input, dim } => Some(OpKindF64::Sum { input, dim }),
                     OpF64::Mean { input, dim } => Some(OpKindF64::Mean { input, dim }),
                     OpF64::Max { input, dim } => Some(OpKindF64::Max { input, dim }),
+                    OpF64::BroadcastTo { input } => Some(OpKindF64::BroadcastTo(input)),
+                    OpF64::ReduceTo { input } => Some(OpKindF64::ReduceTo(input)),
+                    OpF64::Log(input) => Some(OpKindF64::Log(input)),
+                    OpF64::Where {
+                        cond,
+                        on_true,
+                        on_false,
+                    } => Some(OpKindF64::Where {
+                        cond,
+                        on_true,
+                        on_false,
+                    }),
                 }
             };
             let Some(kind) = kind else {
@@ -377,6 +457,36 @@ impl<'t> TapeF64<'t> {
                     };
                     let da = max_first_match_vjp_f64(&input_val, dim, &out_val, &grad_g)?;
                     vec![(input, da)]
+                }
+                // 以下 4 腕はイシュー #3785 で追加した内部 variant の 1 階 VJP
+                // （`backward_create_graph` が構築する勾配グラフを、その子
+                // テープ上でさらに逆伝播するときに通る）。既存の腕は不変。
+                OpKindF64::BroadcastTo(input) => {
+                    let input_shape = self.nodes.borrow()[input.0].shape.clone();
+                    let da = reduce_to_shape_f64(&grad_g, &input_shape)?;
+                    vec![(input, da)]
+                }
+                OpKindF64::ReduceTo(input) => {
+                    let input_shape = self.nodes.borrow()[input.0].shape.clone();
+                    let da = broadcast_value_f64(&grad_g, &input_shape)?;
+                    vec![(input, da)]
+                }
+                OpKindF64::Log(input) => {
+                    let a_val = self.nodes.borrow()[input.0].value.clone();
+                    let da = host_binary_elementwise(&grad_g, &a_val, |gv, av| gv / av)
+                        .map_err(AutodiffError::Shape)?;
+                    vec![(input, da)]
+                }
+                OpKindF64::Where {
+                    cond,
+                    on_true,
+                    on_false,
+                } => {
+                    let cond_val = self.nodes.borrow()[cond.0].value.clone();
+                    let (d_true, d_false) = where_vjp_f64(&cond_val, &grad_g)?;
+                    // `cond` は 0/1 の定数葉（`requires_grad == false`）なので
+                    // 寄与を返さない。
+                    vec![(on_true, d_true), (on_false, d_false)]
                 }
             };
 
@@ -597,6 +707,117 @@ impl<'g, 't> VarF64<'g, 't> {
             out_shape,
             requires_grad,
         )
+    }
+
+    // -----------------------------------------------------------------
+    // create_graph 用の内部 forward（イシュー #3785）
+    //
+    // 公開メソッドにしない（`VarF64` の公開面は 15 件のまま。facade の
+    // 正ガードとの衝突を避けるため名前も既存の公開名と重ならない `cg_`
+    // 接頭辞）。呼び出し元は `f64_autograd/create_graph.rs` だけ。
+    // -----------------------------------------------------------------
+
+    /// 目標 shape へのブロードキャスト（同 shape なら新ノードを積まず
+    /// `self` を返す）。確保の前に `checked_bytes_for_f64` で検査する。
+    fn cg_broadcast_to(&self, target: &[usize]) -> Result<Self, AutodiffError> {
+        if self.shape().as_slice() == target {
+            return Ok(*self);
+        }
+        checked_bytes_for_f64(target).map_err(AutodiffError::Shape)?;
+        let (a_val, requires_grad) = self.value_and_requires_grad();
+        let value = broadcast_value_f64(&a_val, target)?;
+        self.push_node(
+            OpF64::BroadcastTo { input: self.id },
+            value,
+            target.to_vec(),
+            requires_grad,
+        )
+    }
+
+    /// 目標 shape への縮約（`reduce_to_shape_f64` と同じホスト逐次和。
+    /// 同 shape なら新ノードを積まず `self` を返す）。目標がブロード
+    /// キャスト逆方向として不正（rank 超過・非互換）なら `ShapeMismatch`。
+    fn cg_reduce_to(&self, target: &[usize]) -> Result<Self, AutodiffError> {
+        let shape = self.shape();
+        if shape.as_slice() == target {
+            return Ok(*self);
+        }
+        // `reduce_to_shape_f64` は rank(target) <= rank(g) かつ target が g
+        // へブロードキャスト可能であることを前提にする（契約違反は
+        // rank 差の usize underflow になるため事前に型付きエラーで拒否）。
+        let compatible = target.len() <= shape.len()
+            && matches!(elementwise_out_shape(&shape, target), Ok(ref o) if *o == shape);
+        if !compatible {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: shape,
+                rhs: target.to_vec(),
+            }));
+        }
+        let (a_val, requires_grad) = self.value_and_requires_grad();
+        let value = reduce_to_shape_f64(&a_val, target)?;
+        self.push_node(
+            OpF64::ReduceTo { input: self.id },
+            value,
+            target.to_vec(),
+            requires_grad,
+        )
+    }
+
+    /// 要素ごとの自然対数（ホスト上の `f64::ln`）。
+    fn cg_log(&self) -> Result<Self, AutodiffError> {
+        let (a_val, requires_grad) = self.value_and_requires_grad();
+        let shape = a_val.shape().to_vec();
+        checked_bytes_for_f64(&shape).map_err(AutodiffError::Shape)?;
+        let c = a_val.contiguous();
+        let data: Vec<f64> = c.host_slice().iter().map(|&v| v.ln()).collect();
+        let value = Tensor::new(data, &shape).map_err(AutodiffError::Shape)?;
+        self.push_node(OpF64::Log(self.id), value, shape, requires_grad)
+    }
+
+    /// 要素ごとの選択。`self` が `cond`（0.0／1.0 の定数葉）。3 つの
+    /// shape が完全一致でなければ `ShapeMismatch`（ブロードキャストは
+    /// しない）。`cond != 0.0` の位置で `on_true` を選ぶ。
+    fn cg_where(&self, on_true: &Self, on_false: &Self) -> Result<Self, AutodiffError> {
+        if self.graph.id != on_true.graph.id || self.graph.id != on_false.graph.id {
+            return Err(AutodiffError::TapeMismatch);
+        }
+        let (c_val, _) = self.value_and_requires_grad();
+        let (t_val, t_rg) = on_true.value_and_requires_grad();
+        let (f_val, f_rg) = on_false.value_and_requires_grad();
+        let shape = c_val.shape().to_vec();
+        for other in [t_val.shape(), f_val.shape()] {
+            if other != shape.as_slice() {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: shape,
+                    rhs: other.to_vec(),
+                }));
+            }
+        }
+        checked_bytes_for_f64(&shape).map_err(AutodiffError::Shape)?;
+        let (c, t, f) = (c_val.contiguous(), t_val.contiguous(), f_val.contiguous());
+        let data: Vec<f64> = c
+            .host_slice()
+            .iter()
+            .zip(t.host_slice().iter().zip(f.host_slice().iter()))
+            .map(|(&cv, (&tv, &fv))| if cv != 0.0 { tv } else { fv })
+            .collect();
+        let value = Tensor::new(data, &shape).map_err(AutodiffError::Shape)?;
+        self.push_node(
+            OpF64::Where {
+                cond: self.id,
+                on_true: on_true.id,
+                on_false: on_false.id,
+            },
+            value,
+            shape,
+            t_rg || f_rg,
+        )
+    }
+
+    fn value_and_requires_grad(&self) -> (Tensor<f64>, bool) {
+        let nodes = self.graph.nodes.borrow();
+        let node = &nodes[self.id.0];
+        (node.value.clone(), node.requires_grad)
     }
 
     /// 演算実行結果をノードとして記録する共通末尾処理（`matmul`／
@@ -1256,6 +1477,47 @@ fn binary_vjp_f64(
     Ok((
         reduce_to_shape_f64(&da_full_t, a.shape())?,
         reduce_to_shape_f64(&db_full_t, b.shape())?,
+    ))
+}
+
+/// `value` を `target` へブロードキャストして実体化する（確保前に
+/// `checked_bytes_for_f64` で検査）。`BroadcastTo` の forward と
+/// `ReduceTo` の VJP が共有する（イシュー #3785）。
+fn broadcast_value_f64(
+    value: &Tensor<f64>,
+    target: &[usize],
+) -> Result<Tensor<f64>, AutodiffError> {
+    checked_bytes_for_f64(target).map_err(AutodiffError::Shape)?;
+    Ok(value
+        .broadcast_to(target)
+        .map_err(AutodiffError::Shape)?
+        .contiguous())
+}
+
+/// `Where` の VJP: `on_true` へ `where(cond, g, 0)`、`on_false` へ
+/// `where(cond, 0, g)`。`cond` と `g` の shape は完全一致が前提
+/// （forward が 3 つの shape の一致を検査済み）。
+fn where_vjp_f64(
+    cond: &Tensor<f64>,
+    g: &Tensor<f64>,
+) -> Result<(Tensor<f64>, Tensor<f64>), AutodiffError> {
+    if cond.shape() != g.shape() {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: cond.shape().to_vec(),
+            rhs: g.shape().to_vec(),
+        }));
+    }
+    let c = cond.contiguous();
+    let g_c = g.contiguous();
+    let (d_true, d_false): (Vec<f64>, Vec<f64>) = c
+        .host_slice()
+        .iter()
+        .zip(g_c.host_slice().iter())
+        .map(|(&cv, &gv)| if cv != 0.0 { (gv, 0.0) } else { (0.0, gv) })
+        .unzip();
+    Ok((
+        Tensor::new(d_true, g.shape()).map_err(AutodiffError::Shape)?,
+        Tensor::new(d_false, g.shape()).map_err(AutodiffError::Shape)?,
     ))
 }
 
