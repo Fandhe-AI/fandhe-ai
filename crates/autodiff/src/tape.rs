@@ -1298,7 +1298,7 @@ pub(crate) enum Op {
     /// `crate::stat_reduce_ops::{kthvalue, median_with_indices, median}` からのみ
     /// 積まれ、facade には公開しない。VJP は `scatter_with_fallback`（`Add`）で
     /// upstream を選ばれた 1 要素へ流す（lane ごとに出力 1 個のため索引は重複しない）。
-    /// 非融合・非 checkpoint・高階微分非対応（`Op::Logcumsumexp` と同じ分類）。
+    /// 非融合・非 checkpoint。高階微分（`create_graph`）は #3790 で対応（`create_graph/stat_select.rs`）。
     OrderSelect {
         input: NodeId,
         dim: usize,
@@ -1306,12 +1306,12 @@ pub(crate) enum Op {
     },
     /// 全要素 `median`（イシュー #2637）。VJP は入力から中央値を再計算し、中央値と
     /// 等しい要素へ均等分配する（`tensor_core::stat_reduce::median_all_vjp_host`）。
-    /// 分類は [`Op::OrderSelect`] と同じ。
+    /// 高階微分は #3790 で対応（`create_graph/stat_select.rs`）。
     MedianAll { input: NodeId },
     /// `quantile`（スカラー `q`。イシュー #2637）。VJP は入力から lane を再ソートして
     /// 下側・上側と重みを導出する（`stat_reduce::quantile_vjp_host`。
-    /// `Op::Logcumsumexp` と同じ「入力から再計算」方式）。分類は [`Op::OrderSelect`]
-    /// と同じ。
+    /// `Op::Logcumsumexp` と同じ「入力から再計算」方式）。高階微分は #3790 で対応
+    /// （`create_graph/stat_select.rs`）。
     Quantile {
         input: NodeId,
         q: f32,
@@ -1319,10 +1319,10 @@ pub(crate) enum Op {
         interpolation: fandhe_ai_tensor_core::QuantileInterpolation,
     },
     /// `nansum`（イシュー #2637）。VJP は `stat_reduce::nan_reduce_vjp_host`。
-    /// 分類は [`Op::OrderSelect`] と同じ。
+    /// 高階微分非対応（統計縮約 #3725 の対象）。
     Nansum { input: NodeId, dim: Option<usize> },
     /// `nanmean`（イシュー #2637）。VJP は `stat_reduce::nan_reduce_vjp_host`
-    /// （`mean = true`）。分類は [`Op::OrderSelect`] と同じ。
+    /// （`mean = true`）。高階微分非対応（統計縮約 #3725 の対象）。
     Nanmean { input: NodeId, dim: Option<usize> },
     /// 3D max pooling（`torch.nn.functional.max_pool3d` 相当。NCDHW 固定。イシュー #2643・
     /// `docs/autodiff-pool3d-ops-decision.md`）。`crate::pool3d_ops::max_pool3d` からのみ積まれる
@@ -2509,6 +2509,9 @@ impl Op {
     /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §26）で `true`
     /// になった（残る 16 variant は fail-closed のまま。§26 の表）。
     ///
+    /// 選択縮約の `OrderSelect`・`MedianAll`・`Quantile` はイシュー #3790（決定記録 §34）で
+    /// `true` になった。`Nansum`・`Nanmean` は `false` のまま。
+    ///
     /// `Pad`・`PadMode`・`MaskedFill` はイシュー #3084（決定記録 §29）で `true`
     /// になった（設計 doc §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
     ///
@@ -2600,7 +2603,12 @@ impl Op {
             | Op::Inv { .. }
             | Op::Solve { .. }
             | Op::Det { .. }
-            | Op::SlogdetLogAbsDet { .. } => true,
+            | Op::SlogdetLogAbsDet { .. }
+            // 選択縮約 3 Op（イシュー #3790・決定記録 §34）。方式は
+            // `create_graph/stat_select.rs`。入口検査は `validate_ancestors`。
+            | Op::OrderSelect { .. }
+            | Op::MedianAll { .. }
+            | Op::Quantile { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2651,9 +2659,6 @@ impl Op {
             | Op::MatrixRank { .. }
             // `Stft`／`Istft`（イシュー #2633）は非対応のまま（`PadMode` 再生不可。§29）。
             | Op::Logcumsumexp { .. }
-            | Op::OrderSelect { .. }
-            | Op::MedianAll { .. }
-            | Op::Quantile { .. }
             | Op::Nansum { .. }
             | Op::Nanmean { .. }
             | Op::Stft { .. }
@@ -5902,5 +5907,39 @@ mod loss_create_graph_support_tests {
             reduction: r,
         };
         assert!(!closed.supports_create_graph());
+    }
+    /// 選択縮約 3 Op（イシュー #3790・決定記録 §34）が `supports_create_graph() == true`、
+    /// 隣接する `Nansum`／`Nanmean` が `false` のままであること。
+    #[test]
+    fn order_select_family_supports_create_graph() {
+        let supported = [
+            Op::OrderSelect {
+                input: NodeId(0),
+                dim: 0,
+                index: Tensor::new(vec![0i32], &[1]).unwrap(),
+            },
+            Op::MedianAll { input: NodeId(0) },
+            Op::Quantile {
+                input: NodeId(0),
+                q: 0.5,
+                dim: None,
+                interpolation: fandhe_ai_tensor_core::QuantileInterpolation::Linear,
+            },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?}");
+        }
+        for closed in [
+            Op::Nansum {
+                input: NodeId(0),
+                dim: None,
+            },
+            Op::Nanmean {
+                input: NodeId(0),
+                dim: None,
+            },
+        ] {
+            assert!(!closed.supports_create_graph(), "{closed:?}");
+        }
     }
 }

@@ -821,6 +821,55 @@ fn rfft_create_graph_via_facade() {
     check_create_graph_family("rfft", &[0.5, -1.0, 0.25, 2.0], &[4], rfft_loss, true, 1e-2);
 }
 
+// 選択縮約 3 Op（イシュー #3790。決定記録 §34）。api_surface.rs にこの族を拒否する否定ガードは無く
+// （§34.1）、`grad_exact = true` の挙動テストが正ガードを担う: `supports_create_graph` を `false` へ
+// 戻すと `backward_create_graph` が Err になり、ここで panic する。
+const SEL_X: [f32; 12] = [0.9, 0.3, 1.4, 0.6, 1.1, 0.2, 0.8, 1.7, 0.5, 1.3, 0.4, 1.0];
+
+fn kthvalue_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.mul(x).unwrap().kthvalue(2, 1).unwrap().0;
+    y.tanh().sum(None).unwrap()
+}
+
+fn median_dim_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.mul(x).unwrap().median(Some(0)).unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn median_all_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.mul(x).unwrap().median(None).unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn quantile_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x
+        .mul(x)
+        .unwrap()
+        .quantile(0.4, Some(1), fandhe_ai::QuantileInterpolation::Linear)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+#[test]
+fn kthvalue_create_graph_via_facade() {
+    check_create_graph_family("kthvalue", &SEL_X, &[3, 4], kthvalue_loss, true, 1e-2);
+}
+
+#[test]
+fn median_dim_create_graph_via_facade() {
+    check_create_graph_family("median_dim", &SEL_X, &[3, 4], median_dim_loss, true, 1e-2);
+}
+
+#[test]
+fn median_all_create_graph_via_facade() {
+    check_create_graph_family("median_all", &SEL_X, &[3, 4], median_all_loss, true, 1e-2);
+}
+
+#[test]
+fn quantile_create_graph_via_facade() {
+    check_create_graph_family("quantile", &SEL_X, &[3, 4], quantile_loss, true, 1e-2);
+}
+
 /// GPU 実機: LayerNorm・Conv2d・MaxPool2d（線形代数は forward がホスト f64 フォールバックのため
 /// 代表にしない。§31.6 申し送り 5）について、CPU と device で `H v`・HVP を REQ-2 で比べる。
 fn gpu_extended_ops_match_cpu(device: Device) {
