@@ -13,10 +13,6 @@
 //! - `tests/common/` に置かない理由: `common` は多数のテストバイナリが取り込み、使わない
 //!   `pub` 項目が `dead_code` で clippy `-D warnings` を落とすため。
 
-// 本体は後続の反転イシューが使う部品。現時点では同ファイルの等価性テストだけが呼ぶため、
-// 非 test ビルドでは未使用になる。
-#![allow(dead_code)]
-
 use super::{
     approved_reexport_surface_violations, count_fn_declarations_by_name, doc_lines_above_fn,
     doctest_probe_violations, facade_crate_root, inner_doc_lines, read_to_string_or_panic,
