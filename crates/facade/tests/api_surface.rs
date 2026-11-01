@@ -66,10 +66,15 @@
 //! `hooks_declare_only_approved_items`・`nn_forward_hook_rs_public_items_match_expected_set`・
 //! `hooks_are_reachable_via_facade_only` で、定義元インベントリは
 //! `autodiff/src/tape.rs` と `facade/src/lib.rs` の委譲 2 件（同 doc §18）。
+//!
+//! 否定ガード・保留 doctest ガードを正ガードへ反転する手順と共通ヘルパー
+//! （宣言の固定・再エクスポートの固定・自己テスト試験台・doctest 実在検査）は
+//! `tests/surface_guard/README.md`・`tests/surface_guard/mod.rs`（イシュー #3782）。
 
 use std::path::Path;
 
 mod common;
+mod surface_guard;
 use common::temp_dir::TempDirGuard;
 
 fn facade_crate_root() -> std::path::PathBuf {
