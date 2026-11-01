@@ -109,7 +109,7 @@ save／load は引き続き `fandhe-ai` からの再エクスポートが未提�
 利用できません。
 
 このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
-ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。1 段目は非公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする）を担う非公開の内部クレートがあります。
+ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。1 段目は非公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする。公開準備済みで crates.io 未公開）を担う内部クレートがあります。
 compat API のサポート境界の詳細は [`docs/compat-api-scope.md`](docs/compat-api-scope.md) を参照してください。
 
 ## バックエンド

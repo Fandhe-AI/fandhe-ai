@@ -127,3 +127,20 @@ fandhe-ai-onnx-interop`）で再実測し、HTTP 404（未登録・空き）で�
 rename・公開メタデータ整備の実装は #1963 自身が行う（`crates/onnx-interop/
 Cargo.toml`・README・LICENSE-* の追加。実際の `cargo publish` は次回リリース
 サイクルで `release-all.yml` を通じてユーザーが実行する）。
+
+## 8 件目: `backend-rocm` → `fandhe-ai-backend-rocm`（イシュー #3774）
+
+`backend-rocm`（ROCm〈AMD GPU〉バックエンド）を 8 クレート目として公開対象へ追加する。所有者の承認は
+#3771 の回答（<https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>・2026-11-01）。
+命名規則（`fandhe-ai` prefix 付与・ディレクトリ名 `crates/backend-rocm` は不変）をそのまま適用する。
+名前制約（ASCII 英数字・`-`・64 文字以内）も満たす。
+
+空き確認の実測（読み取りのみ・GET。2026-11-01 06:58 UTC）:
+
+| 対象 | HTTP |
+|---|---|
+| `https://index.crates.io/fa/nd/fandhe-ai-backend-rocm`（sparse index） | 404 |
+| `https://index.crates.io/fa/nd/fandhe_ai_backend_rocm`（アンダースコア形） | 404 |
+| `https://crates.io/api/v1/crates/fandhe-ai-backend-rocm`（User-Agent 付き） | 404 |
+
+実際の `cargo publish` は Phase 11 で所有者が指示したときに行う（`docs/crates-io-publishing-order.md` §14）。

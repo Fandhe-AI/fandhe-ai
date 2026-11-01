@@ -385,3 +385,11 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - `Cargo.lock` の差分: `webpki-root-certs` の version と checksum だけ。ほかの crate の追加・版変更はない。
 - ライセンス: `cargo metadata --locked` で 1.0.10 も `CDLA-Permissive-2.0`。`deny.toml` の allow は変更していない。
 - `cargo deny --locked check advisories bans licenses sources`: ok。`scripts/check-forbidden-deps.sh lock-all`: ok。
+
+## 追加確認（イシュー #3774）
+
+`fandhe-ai-backend-rocm` を crates.io の公開クレート（8 クレート目）にする準備に伴い、第 12 区分 `libloading =0.9.0`（ISC）が公開物の通常依存に入ることを確認した（承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>）。実測日: 2026-11-01。
+
+- `cargo tree -p fandhe-ai-backend-rocm -e normal --locked --target all` は `Cargo.lock` に既にある crate のみで、`Cargo.lock` の差分はない。
+- `cargo deny --locked check advisories bans licenses sources`: `advisories ok, bans ok, licenses ok, sources ok`。`deny.toml` の allow は変更していない。
+- 外部依存の増減・版更新はなく、上の許容依存表は変更しない。
