@@ -98,6 +98,40 @@ fn checked_shapes(
     Ok(in_shape)
 }
 
+/// 一次 VJP（`logsumexp_vjp`）の係数 `exp(x_i - y)`（`y = ln(acc) + shift` を `f64` で丸めた値）と、
+/// 構造の係数 `softmax(x)_i = exp(x_i - shift) / acc` が一致する入力か確かめる（§51.2）。
+/// 両者の比は `exp(ln(acc) - ((ln(acc) + shift) - shift))` で全要素共通のため、`shift` が大きく
+/// `ln(acc)` が `f64` の丸めで落ちる lane（例 `[1e20, 1e20]`）だけが外れる。外れる入力は
+/// 構造と一次 VJP の乖離（二重 VJP が一次勾配と整合しない）を生むので、子テープへ書く前に拒否する。
+/// 閾値 `1e-6`（比の相対誤差）は REQ-2 の相対 1e-3 より厳しい拒否基準で、判定 tolerance ではない。
+/// 非有限 max（`±inf`・NaN）の lane は別経路（マスク・伝播）で扱うため対象外。
+fn check_softmax_matches_first_order(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+) -> Result<(), AutodiffError> {
+    let data = crate::eval::dense_vec(input);
+    let (outer, axis_len, inner) = lane_dims(input.shape(), dim, data.len());
+    for o in 0..outer {
+        for i in 0..inner {
+            let at = |a: usize| f64::from(data[(o * axis_len + a) * inner + i]);
+            let m = (0..axis_len).fold(f64::NEG_INFINITY, |acc, a| acc.max(at(a)));
+            if !m.is_finite() || (0..axis_len).any(|a| at(a).is_nan()) {
+                continue;
+            }
+            let acc: f64 = (0..axis_len).map(|a| (at(a) - m).exp()).sum();
+            let ln_acc = acc.ln();
+            let y = ln_acc + m;
+            if (ln_acc - (y - m)).abs() >= 1e-6 {
+                return Err(invalid(
+                    "LogSumExp の入力の絶対値が大きく一次 VJP の係数と softmax 構造が一致しないため拒否（§51.2 参照）"
+                        .into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `LogSumExp` の d_input を子テープへ記録する（`x_m` は入力の子テープ上の写し）。
 pub(super) fn logsumexp_cgrad<'c>(
     parent: &Tape,
@@ -118,6 +152,7 @@ pub(super) fn logsumexp_cgrad<'c>(
     let (_, axis_len, _) = lane_dims(&in_shape, dim, numel);
     let g_value = child_value(child, g)?;
     check_upstream_bound(&g_value, axis_len)?;
+    check_softmax_matches_first_order(input_val, dim)?;
 
     let masks = logsumexp_lane_masks(input_val, dim);
     let guard = Tensor::new(masks.guard, &in_shape)?;

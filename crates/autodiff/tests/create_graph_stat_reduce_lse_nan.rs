@@ -337,6 +337,10 @@ fn mandatory_vectors_stay_finite_in_three_stages() {
     ];
     for (name, x0) in &cases {
         for (rname, r) in reducers() {
+            // LogSumExp の [1e20, 1e20] は一次 VJP と softmax 構造が乖離するため拒否（別テスト）。
+            if rname == "logsumexp" && *name == "1e20" {
+                continue;
+            }
             // 1 階（Tape::backward）・cg.grad の bit 一致、孫テープ（jvp_create_graph）の有限性。
             assert_first_order_bit_identical(
                 &format!("{rname} {name}"),
@@ -372,6 +376,36 @@ fn mandatory_vectors_stay_finite_in_three_stages() {
             assert!(jv.is_finite(), "{rname} {name}: jvp={jv}");
         }
     }
+}
+
+/// 一次 VJP は f64 の `ln(2) + 1e20` で `ln(2)` が落ち `[1, 1]` を返すが、構造は `[0.5, 0.5]` となり
+/// 接ベクトル `[1, 0.5]` の二重 VJP が一次勾配と整合しない。型付きエラーで拒否し child は空のまま。
+#[test]
+fn logsumexp_large_shift_lane_is_rejected_not_silently_diverging() {
+    assert_rejected(
+        "logsumexp 1e20",
+        |_, x| x.logsumexp(None),
+        &[1e20, 1e20],
+        &[2],
+    );
+    // 係数が一致する入力（相殺で ln(acc)=0 になる [-1e20, 1e20]）は受理され、独立参照と一致する。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![-1e20, 1e20], &[2]));
+    let loss = x.logsumexp(None).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &x,
+        &t(vec![1.0, 0.5], &[2]),
+        &child,
+        &grand,
+    )
+    .unwrap();
+    // softmax = [0, 1]・ヘッシアン = 0 のため jvp は 0.5（一次 d = s·v）。
+    let jv = res.output().value().get(&[]).unwrap() as f64;
+    assert!(common::req2_close(jv, 0.5), "jvp={jv}");
 }
 
 #[test]
