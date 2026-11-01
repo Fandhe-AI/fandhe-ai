@@ -544,3 +544,178 @@ bit 不変で他が更新されることを固定する（§9.2 項目 4: スロ
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`。再エクスポートへ別名を一時的に
 足す変異で `facade_param_groups_public_surface_matches_approved_contract` が失敗することを手元で確認した。
 `Cargo.toml`／`Cargo.lock`・tolerance・baseline・`docs/spec` は変更していない。
+
+## §15 保守・運用チェックリスト（イシュー #3754）: param groups と `LrSchedule` の併用（A3-b）
+
+本節は**設計記録であって承認ではない**。承認は #3769 の論点 4 の回答を待つ（実装は #3834）。実際に得ていない承認は
+書かない。コードの引用は `origin/main` の `2b82c8740` のもの。公開形・推奨・戻す論点の書式は
+`docs/decision-record-template.md` に従う。なお追跡表 `docs/compat-matrix-ari-tracker.md` の行番号は 20
+（A3-b）で、issue 本文や #3834 が使う通し番号「項目 21」（ルート／#3769 側）とは 1 ずれる。
+
+### 15.0 位置づけ・課題・推奨
+
+- 現状: `compile_with_param_groups` で空でない groups を設定すると、`fit_with_callbacks` 系の入口が
+  `Callback::LrSchedule` を `InvalidArgument` で拒否する（`crates/facade/src/compat/training.rs:2966-2980` の
+  (2.06)。§9.2 項目 3 の案 B、§12.3 で実装）。層別学習率とスケジュールを同時には使えない。
+  棚卸しでは `docs/compat-unlisted-holds-inventory.md:48`（A3-b）が保留、§12.6・§13.5 は対象外（案 A）。
+- 拒否の理由: `LrSchedule::lr_for_epoch_begin`（`crates/facade/src/compat/callbacks.rs:693`）は**絶対値の lr**
+  を返し、epoch 開始時に `optimizer.set_lr` が config の lr を書き換える（`training.rs:3273-3297`）。
+  一方 `ParamGroup.lr` は所属スロットの config の lr を**置き換える**ので、拒否を外しただけでは group の
+  スロットはスケジュールに追従せず、黙って意味が変わる。
+- `LrScheduler` trait は `lr_at(step) -> f32` だけで（`crates/autodiff/src/nn/optim/lr_scheduler.rs:71-75`）、
+  基準 lr を取り出す accessor がない。
+- (2.05)（`training.rs:2947-2963`）は (2.06) より前に走り、`set_lr` を持たない RmsProp・Adagrad・Lamb
+  （`training.rs:1259-1276`）と `LrSchedule` の組み合わせは groups の有無に関係なく拒否される。
+- optimizer config は `lr >= 0` を受け付ける（例 `crates/autodiff/src/nn/optim/adam.rs:120`）ので、
+  compile 時の lr が 0 になることは起こりうる。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | 全 group 共通の倍率。epoch 開始時の有効 lr を `group.lr × (現在の optimizer lr ／ base_lr)` にする。`base_lr` は compile 時の optimizer config の lr の控え（PyTorch の `initial_lr` に近い） | 新しい公開名がない（拒否を受理に変える挙動変更のみ）。乗法型スケジュール（StepLr・MultiStepLr・ExponentialLr・LinearWarmupLr・LambdaLr 等）で group ごとの比が保たれる | 加法項を持つスケジュール（`eta_min > 0` の `CosineAnnealingLr`・`CyclicLr`・`OneCycleLr`・`ReduceLrOnPlateau` の下限）は PyTorch の group ごとの評価と値が一致しない（公式ドキュメントの式による推測。ソースとの照合は未確認）。`base_lr == 0` は扱いが要る |
+| B | group ごとのスケジュール（`Callback` の新 variant、`Vec<LrSchedule>` 等） | 加法型も PyTorch と同じ形で書ける | 新しい公開形が要り `Callback` の形も変わる。承認範囲が広い |
+| C | 拒否を恒久の契約にする（対象外） | 変更なし | 層別 lr とスケジュールを同時に使えないまま残る |
+| D | 拒否を外すだけ（group は固定 lr のまま） | 実装が最小 | group のスロットだけがスケジュールを無視し、黙って意味が変わるので不採用 |
+
+**推奨は A（実装する）**。理由: 公開面を増やさない。§9.2 項目 3 が後続 opt-in に回した案 A の具体化で、
+拒否を受理に変えるのは非破壊の方向（§9.2）。設計の詳細は次のとおり。
+
+- **基準 lr**: compile 時の optimizer config の lr を非公開の `Compiled` に控える。`optimizer.lr()` は
+  epoch ごとに上書きされるので基準にできない。`LrScheduler` への `base_lr()` 追加は退ける（既定実装のない
+  メソッド追加は破壊的〈`docs/api-compat-0.14.0-decision.md` §8 の 2〉。既定実装つきでも自前スケジューラでは
+  値が取れない）。初回 epoch のスケジュール値を基準にする案も退ける（warmup 系で倍率が崩れる）。
+- **式と精度**: `((group.lr as f64) * (cur as f64) / (base as f64)) as f32`。f64 で計算し f32 への downcast は
+  最後の 1 回だけ。`cur.to_bits() == base.to_bits()` のときは倍率計算を通さず groups をそのまま使い、
+  既定経路の bit 一致を確実にする。
+- **weight_decay** には倍率を掛けない（PyTorch のスケジューラも lr だけを書き換える）。`lr = 0` の group
+  （凍結）は 0 のままで凍結が保たれる。
+- **適用範囲**: epoch 開始時、LR 同期の後に有効 groups を 1 回組み立て、その epoch の全 step 経路
+  （`step_dispatch` の各呼び出し〈`training.rs:3350`・`3505`・`3605`・`3662` 付近〉、`accumulate_steps > 1`
+  の累積境界、`fit_with_train_step` のフック〈`training.rs:2509-2511` の doc の「compile 時の groups」を
+  「有効 groups」へ改める〉）に同じものを渡す。組み立て方（`Cow` 等）は #3834 が決める。
+- **複数の `LrSchedule`** は現行どおり後に並んだものが勝つ。倍率は同期後の `optimizer.lr()` から求めるので
+  矛盾しない。
+- **スケジュールつき fit の後の素の `fit()`**: group 外スロットの lr は持ち越される（現行どおり）。
+  group の lr も同じ倍率を持ち越す（PyTorch で group の lr が書き換わったまま残るのと同じ。論点 5）。
+- **`History::lr`** の意味は変えない（同期後の optimizer の lr）。doc には
+  `group の lr = group.lr × history.lr[e] ／ base_lr` と書く。group ごとの記録欄は足さない（論点 7）。
+- **`set_lr` を持たない 3 種**は (2.05) の拒否と順序を保つ。「全スロットが group に入っていれば受理」は
+  退ける（`History::lr` の意味が定まらず、`set_lr` の追加は公開面の拡張で別承認になる）。
+- **`Lbfgs`** は空でない groups を compile 時に拒否済み（`training.rs:2001-2004`）。**SWA** と groups は
+  別条件で拒否済み（`training.rs:2861-2863`）。どちらも変更しない。
+
+### 15.1 公開形
+
+- シグネチャ案: **新しい公開名はない**。`compile_with_param_groups`・`ParamGroup`・`ParamGroupStep`・
+  `LrSchedule`・`Callback`・`History` の形は変えない。変わるのは、groups が空でないときに
+  `Callback::LrSchedule` を受理する挙動だけ。
+- facade 内で触る箇所（#3834）: `compat/training.rs` の `Compiled` に非公開の基準 lr の控えを足す
+  （`training.rs:1408-1411` の隣）／(2.06) の拒否を 15.3 の条件へ置き換える／epoch 開始時に有効 groups を組み立てる。
+- 反転する対象: `api_surface.rs` に A3-b 専用の否定ガードや保留 doctest ガードは**ない**。拒否を固定している
+  のは挙動テスト `crates/facade/tests/compat_sequential_param_groups.rs::lr_schedule_is_rejected_only_when_groups_present`
+  （T4、`:441`）。#3834 で反転・更新するもの: T4（正のテストへ。名前も変える）、(2.06) のブロックとコメント、
+  `compile_with_param_groups` の doc の「制約」箇条書き（`training.rs:1934-1935`）、`fit_with_callbacks` の doc の
+  拒否一覧（`training.rs:2263` 付近）、`OptimizerState::set_lr` の doc、`docs/compat-api-scope.md` §5 の
+  「`LrSchedule` 併用…fail-closed 拒否」（`:1827`）と対象外一覧（`:1842`）。
+- 残す正ガード: `facade_param_groups_public_surface_matches_approved_contract`・`PARAM_GROUPS_APPROVED_KEYS`
+  （3 件のまま）・`param_groups_types_match_approved_shape`・`param_groups_types_are_reachable_via_facade_only`・
+  `workspace_declares_param_group_fn_names_only_in_allowed_locations` は変更せず、公開名が増えないことを固定し続ける。
+- 自己テスト: 手書きループ（`step_with_groups` に倍率をかけた groups を渡す）との bit 一致を正のテストとして置く。
+
+### 15.2 rustdoc と doctest の例
+
+- `compile_with_param_groups` の doc に「学習率スケジュールとの関係」節を足す: 倍率の式、基準 lr が compile 時の
+  config の lr であること、weight_decay に掛けないこと、加法型は PyTorch と一致しない可能性（未確認）、
+  `History::lr` の意味。
+- doctest 案: CPU で動く facade 単体の例。`StepLr` と 2 つの group を使い、1 epoch 後に group の lr の比が
+  保たれることを見る。`ignore`／`no_run` は不要。既存の正プローブ `param_groups_usage_doctests_are_present_and_compiled`
+  が、対象 doc の例がコンパイル・実行される形のままであることを確かめる。
+- 失敗系は `compile_fail` に頼らず正のテストで確かめる（stable rustdoc はエラーコードを照合しない）。
+
+### 15.3 エラー型
+
+既存の `AutodiffError::InvalidArgument` だけを使い、新 variant は足さない。本番経路で `unwrap`／`expect` は使わない。
+拒否は `fit_with_callbacks` 系の入口で、状態を変える前にこの順で評価する。
+
+1. (2.05) を維持: `set_lr` を持たない optimizer と `LrSchedule` は groups の有無を問わず拒否。
+2. 新 (2.06a): groups が空でなく `LrSchedule` があり、基準 lr の控えが 0 または非有限なら拒否。
+   compile 時の拒否にはしない（スケジュールなしで lr = 0 を compile するのは現行で合法で、拒否すると破壊的）。
+3. (2.06b): 既存のスロット範囲の検査はそのまま残す。
+
+epoch 開始時の有効 lr が非有限（overflow）になる場合は、optimizer 状態を変える前に `InvalidArgument` で止める
+（fail-closed）。step 時の `resolve_slot_hparams` の非有限検査は二重の防御として残す。拒否時は `self.compiled`
+を入口の前の状態に戻す（現行の (2.05)／(2.06) と同じ）。
+
+### 15.4 テスト計画
+
+置き場は `crates/facade/tests/compat_sequential_param_groups.rs`（#3834）。GPU カーネル・`Op`・`BackendOps` に
+触らないため実機の列はすべて該当なし。
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| groups 空 + スケジュールが現行と bit 一致 | 既存（T4 の後半）を維持 | CI | 該当なし | 該当なし | 該当なし |
+| groups あり + スケジュールなしが現行と bit 一致（倍率を通さない分岐） | 既存テストを無変更で通す | CI | 該当なし | 該当なし | 該当なし |
+| groups + `StepLr` が手書きループと bit 一致（Sgd・AdamW） | 新規（T4 を反転） | CI | 該当なし | 該当なし | 該当なし |
+| `ReduceLrOnPlateau`（`LrSchedule::plateau`）でも bit 一致 | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| `lr = 0` の group はスケジュールがあっても bit 不変 | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| 基準 lr が 0 で groups + スケジュールを拒否し、パラメータも compile 状態も不変 | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| RmsProp・Adagrad・Lamb + groups + スケジュールが (2.05) で拒否のまま | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| `accumulate_steps > 1`・`fit_with_train_step` のフックにも有効 groups が渡る | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| スケジュールつき fit の後の素の `fit()` で倍率が持ち越される | 新規 | CI | 該当なし | 該当なし | 該当なし |
+| 公開面が増えない | `cargo test -p fandhe-ai --test api_surface` を無変更で通す | CI | 該当なし | 該当なし | 該当なし |
+
+Phase 10 で測る実機テストはない（追跡表の実機 parity 列は「該当 issue なし」のまま）。
+
+### 15.5 数値契約
+
+新しい GPU 演算はない。判定はすべて bit 一致で、新しい tolerance は置かない。REQ-2 の統一複合判定・
+`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は変えない。FMA 契約・
+f64 長軸縮約の契約にも影響しない（倍率はホスト側スカラー計算で、f64 で計算し 1 回 downcast する）。
+
+### 15.6 互換への影響
+
+判定は**追加のみ**（手順の正は `docs/api-compat-0.14.0-decision.md` §8、表は同 §4 の行 20 と `:91`）。
+公開型・シグネチャ・derive・trait メソッドは変えず、変わるのは groups があるときの `Err` を `Ok` にする
+受理方向の挙動だけ（§9.2）。groups 空の既定経路と、groups ありスケジュールなしの経路は bit 不変。
+移行ノート（#3780）には「挙動の追加: groups ありで `LrSchedule` を受理する」とだけ書く想定（実装 PR が書く）。
+
+### 15.7 適用記録・索引・追跡表
+
+現時点の公開状態は未公開（拒否のまま）。適用記録の案（#3834 が `docs/compat-api-scope.md` §5 へ書く。承認 URL は
+#3769 の回答コメントを待って埋める）: 「param groups 設定時の `Callback::LrSchedule` を全 group 共通の倍率
+（group.lr × 現在 lr ／ compile 時の lr）で受理するよう変更。新しい公開名なし。公開状態: 公開済み（挙動のみ）」。
+
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表（行 20）を更新した
+- [ ] `docs/compat-api-scope.md` の適用記録（実装 PR が行う）
+
+### 15.8 ベンチと性能への影響
+
+既定経路（groups 空、または groups ありでスケジュールなし）は倍率を計算しない分岐を通り、コストは基準 lr の
+bit 比較だけ。スケジュールありでも組み立ては epoch あたり 1 回で、groups の複製は O(スロット数)。前後比較は
+不要と判断し、計測していないので数値は書かない。
+
+### 15.9 依存の追加の有無
+
+依存の追加はなく、新しい `unsafe` もない。許容 12 区分・禁止リストとの照合結果は変わらず、
+`docs/license-matrix.md` の更新も不要。
+
+### 15.10 所有者へ戻す論点（#3769 論点 4）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 適用の単位 | A 全 group 共通の倍率／B group ごとのスケジュール／C 拒否を恒久化（対象外） | A | 実装へ進めない（(2.06) の拒否と T4 を維持） |
+| 2. 基準 lr | compile 時の config の lr の控え／初回 epoch のスケジュール値／`LrScheduler` の trait 拡張 | compile 時の控え | 実装へ進めない |
+| 3. 基準 lr が 0 のとき | fit 入口で拒否（スケジュールがあるときだけ）／倍率 1 として groups を固定 | 拒否 | 実装へ進めない |
+| 4. `set_lr` を持たない 3 種 | 拒否を維持／全スロットが group に入っていれば受理 | 拒否を維持 | 実装へ進めない |
+| 5. スケジュール後の素の `fit()` | 倍率を持ち越す／groups を compile 時の lr に戻す | 持ち越す（group 外スロットと同じ） | 実装へ進めない |
+| 6. AMP の入口（A3-a。#3914 の §14.10 点 4）との関係 | A3-b の受理は `compile_with_param_groups` に限り AMP の入口は A3-a の決定に従う／AMP の入口にも同じ受理を及ぼす | 前者（A3-a 点 4 が決まるまで AMP の入口では拒否を維持。後に入る実装 PR が条件とテストを足す） | 実装へ進めない |
+| 7. `History` に group ごとの lr を記録するか | 足さない／`#[non_exhaustive]` の `History` にフィールドを追加 | 足さない（式で導ける） | 実装へ進めない |
+
+### 15.11 セキュリティ・スコープ外・Closes／Refs
+
+- A03: 外部入力の新しいパースはない。検査は状態変更の前に済ませ、非有限の lr は fail-closed で止める（15.3）。
+- A08: ガードレール閾値・tolerance・baseline は変えず、自己修復ループの判定経路にも触れない。秘密情報・ホスト名は書かない。
+- スコープ外: A3-a（#3752・#3832）、A3-c（#3755）、A3-d（#3756）、A3-e（Lbfgs）、`Optimizer` に入っていない
+  4 種（#3757）、SWA と groups の組み合わせ、`set_lr` を持たない 3 種への `set_lr` 追加、group ごとの
+  スケジュール（案 B）。新しい issue は起票しない（起票には承認が要る）。
+- 本 PR は設計記録のみで `Closes #3754`。`Refs #3769`（承認待ち）・`Refs #3834`（実装）。
