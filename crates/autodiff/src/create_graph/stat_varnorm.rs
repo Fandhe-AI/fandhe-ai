@@ -26,7 +26,9 @@
 //! - `VectorNorm::L2`: `x_s = x/s`（`s` はレーンの `max|x|` 以上の 2 のべき乗）→
 //!   `cg = g_b · x_s / ‖x_s‖₂`。全ゼロレーンは `Sqrt` の入力側を守って出力を 0 にする。
 //! - `PNorm`: `x_s = x/s`、`|x_s|` のゼロ要素は `where_cond` で 1 に置換してから `PowScalar` へ
-//!   入れる（`p<1` で `0^負` が inf になるのを防ぐ。1 階の劣勾配の選び方と同じ）。
+//!   入れる（`p<1` で `0^負` が inf になるのを防ぐ。1 階の劣勾配の選び方と同じ）。比率
+//!   `a/‖x_s‖` のゼロ要素も `PowScalar` の前に 1 へ置換する（死に枝の微分係数を有限にする）。
+//!   3 つの `PowScalar` の f32 微分係数は総括判定で再現して検査する。
 //!   `cg = g_b · sign(x) · (|x_s| / ‖x_s‖_p)^(p−1)`。
 //!
 //! 子テープへ積む Op は `Reshape`・`Permute`・`Contiguous`・`Narrow`・`BroadcastTo`・`Sum`・
@@ -492,6 +494,36 @@ fn check_pnorm(c: &PNormCheck<'_>) -> Result<(), AutodiffError> {
         if a.iter().any(|&v| !(v as f32 / nrm32).is_finite()) {
             return Err(invalid("PNorm の f32 の a/ノルムが非有限".into()));
         }
+        // 実際の backward（`eval::scalar::unary_grad_factor` の PowScalar）は微分係数
+        // `exponent * x^(exponent-1)` を f32 で先に計算する。f64 の cotangent 判定だけでは
+        // 小さい g を掛ける前に係数が inf になる入力（x=[1e-30,1], p=0.5 等）を見逃すため、
+        // 3 つの PowScalar（|x_s|^p・Σ^(1/p)・(a/ノルム)^(p-1)）の係数を f32 で再現して検査する。
+        // ゼロ要素は構造側で 1 に置換済み（死に枝も係数 p・p-1 で有限）なので対象外。
+        let p32 = p as f32;
+        let coef_ok = |c: f32| c.is_finite() && (c.abs() as f64) < STAGE_BOUND_GUARD;
+        let c_sum = (1.0 / p) as f32 * s32.powf((1.0 / p) as f32 - 1.0);
+        if !coef_ok(c_sum) {
+            return Err(invalid(
+                "PNorm の Σ^(1/p) の f32 微分係数が非有限／2^125 以上".into(),
+            ));
+        }
+        for (i, &ai) in a.iter().enumerate() {
+            if zl[i] {
+                continue;
+            }
+            let a32 = ai as f32;
+            let c_pow = p32 * a32.powf(p32 - 1.0);
+            let c_ratio = if p32 == 1.0 {
+                0.0
+            } else {
+                (p - 1.0) as f32 * (a32 / nrm32).powf((p - 2.0) as f32)
+            };
+            if !coef_ok(c_pow) || !coef_ok(c_ratio) {
+                return Err(invalid(
+                    "PNorm の PowScalar の f32 微分係数が非有限／2^125 以上".into(),
+                ));
+            }
+        }
         let nrm = s.powf(1.0 / p);
         st(nrm, "PNorm のノルム (Σ)^(1/p)")?;
         if nrm.is_nan() || nrm <= 0.0 {
@@ -729,7 +761,11 @@ pub(super) fn stat_varnorm_cgrad<'c>(
             let s_sum = pw.sum(Some(1))?.unsqueeze(1)?;
             let s_safe = Var::where_cond(&zlane_t, &ones_col, &s_sum)?;
             let nrm = s_safe.pow_scalar((1.0 / p as f64) as f32)?;
-            let rp = a.div(&nrm)?.pow_scalar((p as f64 - 1.0) as f32)?;
+            // ゼロ要素の比率は PowScalar の前に 1 へ置換する（死に枝の微分係数
+            // `(p-1)·r^(p-2)` が inf になり、上流 0 との積が NaN になって共有 nrm 経由で
+            // 非ゼロ要素の二階を汚染するのを防ぐ。PR #3942 Codex P1）。
+            let ratio = Var::where_cond(&zelem_t, &ones_ln, &a.div(&nrm)?)?;
+            let rp = ratio.pow_scalar((p as f64 - 1.0) as f32)?;
             let sign_c = child.var_no_grad(&Tensor::new(sign, &[lanes, n])?);
             let cg2 = Var::where_cond(&zelem_t, &zeros_ln, &sign_c.mul(&rp)?.mul(&g2)?)?;
             let host = pnorm_vjp(x_val, p, dim, &g_val);
@@ -816,6 +852,22 @@ mod tests {
             zelem: &zelem,
             exps: &[0],
             g: &[1e-30],
+        };
+        assert!(check_pnorm(&c).is_err());
+    }
+
+    /// 回帰: x=[1e-30,1], p=0.5 は Σ^(1/p) 等の f32 微分係数が inf（PR #3942 Codex P1）。
+    #[test]
+    fn check_pnorm_rejects_f32_coefficient_overflow() {
+        let xs = [1e-30f32, 1.0];
+        let zelem = [false, false];
+        let c = PNormCheck {
+            n: 2,
+            p: 0.5,
+            xs: &xs,
+            zelem: &zelem,
+            exps: &[0],
+            g: &[1e-20],
         };
         assert!(check_pnorm(&c).is_err());
     }
