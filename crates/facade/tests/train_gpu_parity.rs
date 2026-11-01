@@ -303,7 +303,8 @@ fn scaffold_family_passes_cpu_against_cpu() {
 #[test]
 #[should_panic(expected = "undetermined")]
 fn empty_family_is_undetermined() {
-    harness::run_family(CASES, "onnx", Device::Cpu);
+    // 本番 CASES から切り離した空の登録表で検証する（#3842 で onnx のケースを足しても影響しない）。
+    harness::run_family(&[], "onnx", Device::Cpu);
 }
 
 fn q(name: &'static str, values: Vec<f32>, require_nonzero: bool) -> Quantity {
