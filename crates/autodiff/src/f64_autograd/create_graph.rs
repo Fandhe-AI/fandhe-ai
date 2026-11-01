@@ -570,6 +570,23 @@ fn binary_contributions_f64<'c, 't>(
                 // - 指数が追跡され底が有限の正: 混合二階微分 `d/db [b a^(b-1)] = 1/a` を
                 //   残すため `factor = (b * a^b) / a` の形で組む。`a^b = 1`（b = 0）の位置
                 //   でのみ使うので overflow せず、`a` 側の微分も `0/a` で NaN にならない。
+                // 逆数 `1/a` が overflow する非正規化数域の底（指数 0・指数追跡）は、
+                // 混合二階微分 `1/a` が f64 で表せず、`inf * 0 = NaN` が `d2/da2`（本来 0）
+                // を汚染するため、構築時に型付きエラーで拒否する。
+                if need_b {
+                    // 形状が異なる場合は broadcast 後の対応が必要なため、全要素の組合せで保守的に判定する。
+                    let any_zero_b = b_m.value().host_slice().contains(&0.0);
+                    let any_tiny_a = a_m
+                        .value()
+                        .host_slice()
+                        .iter()
+                        .any(|&x| x.is_finite() && x > 0.0 && !(1.0 / x).is_finite());
+                    if any_zero_b && any_tiny_a {
+                        return Err(AutodiffError::Backward(
+                            "Pow: 指数 0 かつ底の逆数が overflow する非正規化数域では create_graph の混合二階微分を表せない".to_string(),
+                        ));
+                    }
+                }
                 let pairs = |a: f64, b: f64| -> (bool, bool) {
                     let b0 = b == 0.0;
                     let pos = a.is_finite() && a > 0.0;

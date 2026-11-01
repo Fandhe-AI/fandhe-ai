@@ -527,3 +527,25 @@ fn pow_tiny_base_tracked_zero_exponent_second_order_is_finite() -> R<()> {
     }
     Ok(())
 }
+
+/// 底 1e-310（非正規化数、逆数が overflow）・指数 0（ともに追跡）は NaN を
+/// 流さず型付きエラーで拒否される。指数が非追跡なら d2/da2 = 0 を返す。
+#[test]
+fn pow_subnormal_base_tracked_zero_exponent_is_rejected_not_nan() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let a = p.var(&t(vec![1e-310], &[1]));
+    let b = p.var(&t(vec![0.0], &[1]));
+    let l = a.pow(&b)?;
+    assert!(matches!(
+        p.backward_create_graph(&l, &c),
+        Err(AutodiffError::Backward(_))
+    ));
+    let (p2, c2) = (TapeF64::new(&base), TapeF64::new(&base));
+    let a2 = p2.var(&t(vec![1e-310], &[1]));
+    let k = p2.var_no_grad(&t(vec![0.0], &[1]));
+    let l2 = a2.pow(&k)?;
+    let cg = p2.backward_create_graph(&l2, &c2)?;
+    assert_eq!(second(&cg, &c2, &a2, &a2)?, vec![0.0]);
+    Ok(())
+}
