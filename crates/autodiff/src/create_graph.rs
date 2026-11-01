@@ -86,7 +86,8 @@
 //! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
 //! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。プーリング族
-//! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）も対象——
+//! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）、
+//! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）も対象——
 //! 方式は `pool` サブモジュール doc と決定記録 §30（`MaxUnpool` は対象外）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
@@ -129,6 +130,7 @@ mod index_cum;
 mod linalg_fft;
 mod pad_mask;
 mod pool;
+mod select_reduce;
 mod stat_select;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
@@ -989,6 +991,12 @@ fn replay_op<'c>(
             dim,
             norm,
         } => get_mirror(mirror, input)?.ifft(Some(n), Some(dim), norm),
+        // 選択縮約（イシュー #3789。方式は `select_reduce` モジュール doc 参照）。写しの
+        // Op タグを親と一致させる（`Amax`／`Amin` を `Max` で記録すると孫が先勝ち VJP になる）。
+        Op::Max { input, dim } => get_mirror(mirror, input)?.max(dim),
+        Op::Min { input, dim } => get_mirror(mirror, input)?.min(dim),
+        Op::Amax { input, dim } => get_mirror(mirror, input)?.amax(dim),
+        Op::Amin { input, dim } => get_mirror(mirror, input)?.amin(dim),
         Op::Inv { input } => get_mirror(mirror, input)?.inv(),
         Op::Solve { a, b } => get_mirror(mirror, a)?.solve(&get_mirror(mirror, b)?),
         Op::Det { input } => get_mirror(mirror, input)?.det(),
@@ -2184,6 +2192,41 @@ fn build_cgrads<'c>(
                 if parent_nodes[input.0].requires_grad {
                     let input_shape = parent_nodes[input.0].shape.clone();
                     let d = index_cum::gather_like_vjp(child, &g, &input_shape, dim, &index)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 選択縮約（イシュー #3789。方式は `select_reduce` モジュール doc 参照）。
+            Op::Max { input, dim } | Op::Min { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = select_reduce::select_reduce_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        select_reduce::SelectReduceSpec {
+                            id,
+                            input,
+                            dim,
+                            split: select_reduce::Split::FirstMatch,
+                        },
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Amax { input, dim } | Op::Amin { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = select_reduce::select_reduce_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        select_reduce::SelectReduceSpec {
+                            id,
+                            input,
+                            dim,
+                            split: select_reduce::Split::EvenSplit,
+                        },
+                        &g,
+                    )?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }

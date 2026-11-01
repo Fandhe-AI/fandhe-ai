@@ -537,8 +537,8 @@ fn h3_rejections_leave_both_tapes_unchanged() {
     assert!(child.is_empty());
     assert_eq!(tape.len(), before);
 
-    // 非対象 Op（max）
-    let m = x.max(None).unwrap();
+    // 非対象 Op（selu。max は #3789 で対象化）
+    let m = x.selu().unwrap().sum(None).unwrap();
     let before = tape.len();
     assert!(matches!(
         hvp(&tape, &m, &x, &v, &child),

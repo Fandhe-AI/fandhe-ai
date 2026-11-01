@@ -36,7 +36,9 @@
 #[path = "common/create_graph_gpu_parity_baseline.rs"]
 mod baseline;
 
-use fandhe_ai::{AutodiffError, Device, Tape, Tensor, Var};
+use std::sync::Arc;
+
+use fandhe_ai::{AutodiffError, CustomFunction, Device, Tape, Tensor, Var};
 use fandhe_ai_backend_cpu::parity::compare;
 
 /// 経路区分（§48.4）。`H` の pass は「経路の parity」でカーネル同士ではない。
@@ -64,7 +66,8 @@ enum Judge {
 struct Tapes {
     parent: Tape,
     child: Tape,
-    #[allow(dead_code)] // Q4 を測る族の実装 issue が使う。
+    /// Q4 用の別の空の子テープ（`jvp_create_graph` が受け取る）。
+    jvp_child: Tape,
     grand: Tape,
 }
 
@@ -174,6 +177,47 @@ const CASES: &[Case] = &[
         run: run_scaffold_cubic,
         reject: None,
     },
+    // 選択縮約 4 Op（イシュー #3789・決定記録 §34）。forward はデバイスのカーネル
+    // （CUDA `crates/backend-cuda/src/ops.rs` の max／min 縮約、Metal
+    // `crates/backend-metal/src/ops.rs` の同縮約）。`Amax`／`Amin` の V3 値（均等分配）は
+    // 1 階と同じホスト関数で、`Max`／`Min` の cgrad は親記録値から作る先勝ちマスクと
+    // `where_cond`（ホスト計算を含む）。構造に MatMul は無い。
+    Case {
+        name: "select_reduce_minmax_max",
+        family: "select_reduce_minmax",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_select_reduce_max,
+        reject: Some(reject_select_reduce_minmax_with_custom),
+    },
+    Case {
+        name: "select_reduce_minmax_min",
+        family: "select_reduce_minmax",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_select_reduce_min,
+        reject: Some(reject_select_reduce_minmax_with_custom),
+    },
+    Case {
+        name: "select_reduce_minmax_amax",
+        family: "select_reduce_minmax",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_select_reduce_amax,
+        reject: Some(reject_select_reduce_minmax_with_custom),
+    },
+    Case {
+        name: "select_reduce_minmax_amin",
+        family: "select_reduce_minmax",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_select_reduce_amin,
+        reject: Some(reject_select_reduce_minmax_with_custom),
+    },
     // 選択縮約（イシュー #3790・決定記録 §34）。`BackendOps::stat_*` は CPU のみ実装で、
     // CUDA／Metal ではホストへフォールバックする（経路 H）。実機は未実測（#3856・#3858）。
     Case {
@@ -242,6 +286,116 @@ fn run_scaffold_cubic(tp: &Tapes) -> Outputs {
         hv,
         replay: None,
     }
+}
+
+/// 選択縮約ケースの共通本体（S2: 2 のべき乗でない中形状 `[17, 33]`・軸 1 縮約）。
+/// 入力は決定的で各 lane の値が重複せず（最小間隔 0.01。S4・S5）、argmax／argmin が
+/// タイにならない。損失は `sum(reduce(x)² ⊙ c)`（行ごとの非一様な重み `c`）で、`H v` は
+/// 選択位置の対角 `2·c·v` となり全ゼロにならない。
+fn run_select_reduce_minmax_body(
+    tp: &Tapes,
+    reduce: for<'a> fn(&fandhe_ai::Var<'a>) -> fandhe_ai::Var<'a>,
+) -> Outputs {
+    let (rows, cols) = (17usize, 33usize);
+    let n = rows * cols;
+    let x0: Vec<f32> = (0..n)
+        .map(|i| ((i * 389 + 17) % 1009) as f32 * 0.01 + 1.0)
+        .collect();
+    let dir: Vec<f32> = (0..n).map(|i| 0.5 + 0.01 * (i % 7) as f32).collect();
+    let c: Vec<f32> = (0..rows).map(|i| 0.5 + 0.1 * i as f32).collect();
+
+    let x = tp.parent.var(&t(x0, &[rows, cols]));
+    let cv = tp.parent.var_no_grad(&t(c, &[rows]));
+    let y = reduce(&x);
+    let loss = y.mul(&y).unwrap().mul(&cv).unwrap().sum(None).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&x).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&x).unwrap().expect("first_order"));
+    let g = cg.grad(&x).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir, &[rows, cols]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let xc = cg.child_var(&x).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&xc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。同じ損失の微分可能 jvp（方向 `dir`）の出力を孫テープで
+    // `x` について逆伝播し、その勾配を GPU と CPU で比べる（子は上と別の空テープ）。
+    let tangent = t(
+        (0..n).map(|i| 0.5 + 0.01 * (i % 7) as f32).collect(),
+        &[rows, cols],
+    );
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &x, &tangent, &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rx = res.child_var(&x).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rx).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+fn run_select_reduce_max(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.max(Some(1)).unwrap())
+}
+
+fn run_select_reduce_min(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.min(Some(1)).unwrap())
+}
+
+fn run_select_reduce_amax(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.amax(Some(1)).unwrap())
+}
+
+fn run_select_reduce_amin(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.amin(Some(1)).unwrap())
+}
+
+/// 恒久対象外の `Op::Custom`（決定記録 §21.2 A 区分）用の恒等関数。
+struct IdentityFn;
+
+impl CustomFunction for IdentityFn {
+    fn name(&self) -> &str {
+        "identity"
+    }
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].clone())
+    }
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        _requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        Ok(vec![Some(upstream.clone())])
+    }
+}
+
+/// Q5: 選択縮約の祖先に `Op::Custom` があるグラフは GPU でも拒否され、子テープが空のまま。
+fn reject_select_reduce_minmax_with_custom(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![0.5, 1.5, 1.0, 2.0], &[2, 2]));
+    let Ok(id) = tp.parent.custom(Arc::new(IdentityFn), &[x]) else {
+        return false;
+    };
+    let loss = id.max(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
 }
 
 /// 選択縮約の共通走査。`f(x)` が選択 Op を含む出力を返し、損失は `sum(y ⊙ y)`。
@@ -340,6 +494,7 @@ fn tapes_for(device: Option<Device>) -> Tapes {
     Tapes {
         parent: mk(),
         child: mk(),
+        jvp_child: mk(),
         grand: mk(),
     }
 }
@@ -424,7 +579,6 @@ fn check_case(case: &Case, device: Option<Device>) -> Result<(), String> {
 }
 
 /// Q5 の共通判定。`r` が `Err(Backward)` かつ `child` が空なら `true`。
-#[allow(dead_code)] // 各族の `reject` が使う。
 fn is_clean_rejection<T>(r: Result<T, AutodiffError>, child: &Tape) -> bool {
     matches!(r, Err(AutodiffError::Backward(_))) && child.leaf_count() == 0
 }
@@ -457,6 +611,10 @@ macro_rules! cuda_family_test {
 
 cuda_family_test!(create_graph_scaffold_cuda_matches_cpu, "scaffold");
 cuda_family_test!(
+    create_graph_select_reduce_minmax_cuda_matches_cpu,
+    "select_reduce_minmax"
+);
+cuda_family_test!(
     create_graph_select_reduce_order_cuda_matches_cpu,
     "select_reduce_order"
 );
@@ -475,6 +633,10 @@ macro_rules! metal_family_test {
 }
 
 metal_family_test!(create_graph_scaffold_metal_matches_cpu, "scaffold");
+metal_family_test!(
+    create_graph_select_reduce_minmax_metal_matches_cpu,
+    "select_reduce_minmax"
+);
 metal_family_test!(
     create_graph_select_reduce_order_metal_matches_cpu,
     "select_reduce_order"
@@ -496,6 +658,12 @@ fn registry_names_are_unique() {
 #[test]
 fn scaffold_case_passes_cpu_against_cpu() {
     run_family("scaffold", None);
+}
+
+/// 選択縮約族の登録（`run`・`reject`・`H v ≠ 0` の assert）を CI で一度は実行する。
+#[test]
+fn select_reduce_minmax_cases_pass_cpu_against_cpu() {
+    run_family("select_reduce_minmax", None);
 }
 
 #[test]

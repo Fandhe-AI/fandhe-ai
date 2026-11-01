@@ -202,8 +202,8 @@ fn rejects_unsupported_op_and_keeps_child_empty() {
     let child = fandhe_ai::tape();
     let tape = fandhe_ai::tape();
     let x = tape.var(&t(vec![0.1, 0.2, 0.3], &[1, 3]));
-    // `Op::Custom` は §21.2 A 区分（恒久対象外）。LogSumExp・Max は C 区分で
-    // 将来の拡張で対象になりうるため、拒否の基準にしない（イシュー #3087）。
+    // `Op::Custom` は §21.2 A 区分（恒久対象外）。LogSumExp は C 区分で将来の拡張で
+    // 対象になりうる（Max は #3789 で対象化済み）ため、拒否の基準にしない（イシュー #3087）。
     let loss = tape
         .custom(Arc::new(IdentityFn), &[x])
         .unwrap()
@@ -678,6 +678,30 @@ fn masked_fill_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
     m.mul(&m).unwrap().sum(None).unwrap()
 }
 
+/// 選択縮約（イシュー #3789）: `reduce(x⊙x⊙w)`。選ばれる位置はタイにならず、`H v` は選択位置の
+/// 対角 `2·w·v` でゼロにならない。
+fn select_reduce_loss<'a>(tape: &'a Tape, x: &Var<'a>, reduce: fn(&Var<'a>) -> Var<'a>) -> Var<'a> {
+    let shape = x.value().shape().to_vec();
+    let w = weights(tape, &shape);
+    reduce(&x.mul(x).unwrap().mul(&w).unwrap())
+}
+
+fn max_reduce_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    select_reduce_loss(tape, x, |y| y.max(None).unwrap())
+}
+
+fn min_reduce_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    select_reduce_loss(tape, x, |y| y.min(None).unwrap())
+}
+
+fn amax_reduce_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    select_reduce_loss(tape, x, |y| y.amax(None).unwrap())
+}
+
+fn amin_reduce_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    select_reduce_loss(tape, x, |y| y.amin(None).unwrap())
+}
+
 fn max_pool2d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
     let (y, _idx) = x
         .max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1], false)
@@ -780,6 +804,26 @@ fn pad_create_graph_via_facade() {
 #[test]
 fn masked_fill_create_graph_via_facade() {
     check_create_graph_family("masked_fill", &NX, &[2, 3], masked_fill_loss, true, 1e-2);
+}
+
+#[test]
+fn max_create_graph_via_facade() {
+    check_create_graph_family("max", &NX, &[2, 3], max_reduce_loss, true, 1e-2);
+}
+
+#[test]
+fn min_create_graph_via_facade() {
+    check_create_graph_family("min", &NX, &[2, 3], min_reduce_loss, true, 1e-2);
+}
+
+#[test]
+fn amax_create_graph_via_facade() {
+    check_create_graph_family("amax", &NX, &[2, 3], amax_reduce_loss, true, 1e-2);
+}
+
+#[test]
+fn amin_create_graph_via_facade() {
+    check_create_graph_family("amin", &NX, &[2, 3], amin_reduce_loss, true, 1e-2);
 }
 
 #[test]

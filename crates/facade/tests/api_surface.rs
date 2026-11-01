@@ -43458,3 +43458,29 @@ fn facade_resident_train_step_surface_detects_each_category() {
     assert_ne!(m, lib_src);
     assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
 }
+
+/// `create_graph` の選択縮約（`max`・`min`・`amax`・`amin`）の受理範囲を固定する正ガード
+/// （イシュー #3789・決定記録 `docs/autodiff-higher-order-grad-decision.md` §34）。
+///
+/// 本族を拒否する否定ガードは `api_surface.rs` に存在しなかったため、反転ではなく
+/// 「受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。
+/// 挙動の本体は `tests/create_graph_facade.rs` の `{max,min,amax,amin}_create_graph_via_facade`。
+/// 自己テストとして、存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_select_reduce_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph select-reduce",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "x.max(None)",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["x.median(None)"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}

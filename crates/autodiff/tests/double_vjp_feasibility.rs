@@ -428,11 +428,8 @@ fn assert_rejected<'t>(tape: &'t Tape, y: &Var<'t>, ctx: &str) {
 
 #[test]
 fn c4_unsupported_ops_are_rejected_fail_closed() {
-    // Op::Max
-    let tape = new_tape();
-    let x = tape.var(&t(seq(6, 1.0), &[2, 3]));
-    let y = x.max(None).unwrap();
-    assert_rejected(&tape, &y, "max");
+    // 拒否の代表は A 区分（恒久対象外）の Op::Custom ほか。Op::Max は #3789 で対象化したため
+    // 受理側の `c4_max_is_accepted_since_3789` へ移した。
 
     // rank 3 の MatMul
     let tape = new_tape();
@@ -452,4 +449,16 @@ fn c4_unsupported_ops_are_rejected_fail_closed() {
     let x = tape.var(&t(seq(4, 1.0), &[4]));
     let y = x.selu().unwrap();
     assert_rejected(&tape, &y, "selu");
+}
+
+/// `Op::Max` はイシュー #3789（決定記録 §34）で受理側へ移った（旧: 拒否の代表）。
+#[test]
+fn c4_max_is_accepted_since_3789() {
+    let tape = new_tape();
+    let x = tape.var(&t(seq(6, 1.0), &[2, 3]));
+    let y = x.max(None).unwrap();
+    let child = new_tape();
+    let cg = tape.backward_create_graph(&y, &child).unwrap();
+    assert!(!child.is_empty());
+    assert!(cg.grad(&x).unwrap().is_some());
 }
