@@ -91,7 +91,8 @@
 //! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）、
 //! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）・
 //! 統計縮約（`LogSumExp`・`Nansum`・`Nanmean`。イシュー #3792・決定記録 §33/§51・実装は `stat_reduce_lse_nan`）も対象——
-//! 方式は `pool` サブモジュール doc と決定記録 §30（`MaxUnpool` は対象外）。それ以外の追跡対象 Op・rank≥3 の
+//! 方式は `pool` サブモジュール doc と決定記録 §30。構造変換の `Dropout`・`Interpolate`・`MaxUnpool` は
+//! イシュー #3793（決定記録 §35/§56・実装は `structural`）で対象にした。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -140,6 +141,7 @@ mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
 mod stat_varnorm;
+mod structural;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -1212,6 +1214,17 @@ fn replay_op<'c>(
         Op::Solve { a, b } => get_mirror(mirror, a)?.solve(&get_mirror(mirror, b)?),
         Op::Det { input } => get_mirror(mirror, input)?.det(),
         Op::SlogdetLogAbsDet { input } => Ok(get_mirror(mirror, input)?.slogdet()?.logabsdet),
+        // 構造変換 3 Op（イシュー #3793。方式は `structural` モジュール doc 参照）。`Dropout` は
+        // 記録済みマスクを固定して再生し、グローバル RNG を消費しない。
+        Op::Dropout { input, mask } => {
+            structural::replay_dropout(&get_mirror(mirror, input)?, &mask)
+        }
+        Op::Interpolate { input, size, mode } => {
+            get_mirror(mirror, input)?.interpolate(&size, mode)
+        }
+        Op::MaxUnpool { input, index } => {
+            crate::max_unpool_ops::replay_max_unpool(&get_mirror(mirror, input)?, &index, shape)
+        }
         _ => Err(AutodiffError::Backward(
             "create_graph: replay_op: supports_create_graph() が true の未対応 Op（内部契約違反）"
                 .into(),
@@ -3019,6 +3032,27 @@ fn build_cgrads<'c>(
                         g
                     };
                     let d = linalg_fft::det_like_cgrad(child, &scale, &a_m)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 構造変換 3 Op（イシュー #3793。方式は `structural` モジュール doc 参照）。
+            Op::Dropout { input, mask } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = structural::dropout_cgrad(child, &g, &mask)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Interpolate { input, size, mode } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = structural::interpolate_cgrad(child, &g, &input_shape, &size, mode)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::MaxUnpool { input, index } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = structural::max_unpool_cgrad(child, &g, &input_shape, &index)?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
