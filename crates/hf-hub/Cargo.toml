@@ -5,11 +5,16 @@
 # facade の公開 API（`fandhe_ai::model`）に任せる（docs/hf-hub-integration-design.md §2.1・§9.2）。
 #
 # 依存方向: hf-hub → facade の一方向のみ。内部クレート（tensor-core・autodiff・backend-*・
-# onnx-interop）へは直接依存しない。facade は本クレートに依存しない（api_surface.rs で担保）。
+# onnx-interop）へは直接依存しない。facade は本クレートに依存しない（循環依存は cargo が拒否する。専用ガードは #3847）。
 #
-# 公開区分: 2 段構成の 1 段目として `publish = false`（workspace 既定を継承）。2 段目の公開は
-# 別の承認で扱う。path 依存に `version` を書かないのは非公開クレートのため deny.toml の
-# `allow-wildcard-paths = true` の範囲に収まるからで、2 段目では `version = "=x.y.z"` の併記が必要。
+# 公開区分: 2 段構成の 2 段目へ入った（`publish = true`。承認: #3771 所有者回答コメント
+# 2026-11-01 https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469。
+# 公開準備は #3773）。実際の `cargo publish`（0.14.0）は Phase 11 で所有者が明示的に指示したときだけ
+# release-all.yml から行う。公開クレートなので facade への path 依存には `version = "=x.y.z"` を
+# 併記する（deny.toml の `wildcards = "deny"` と docs/crates-io-publishing-order.md §1 の方針）。
+# 併記の版は他の内部依存と同じく lockstep バンプ（同 §4）の対象で、現行の workspace version に合わせる。
+# 本クレートは facade の安定性保証の外にある補助クレートで、facade は本クレートに依存しない
+# （cargo の循環依存禁止による。専用ガードは #3847。docs/hf-hub-integration-design.md §10）。
 #
 # HTTP／TLS（第 11 区分 `ureq`）は `cfg(unix)` 限定で workspace 継承により宣言する（#3393。
 # 承認根拠: #3128 コメント 6220036919）。用途は HF Hub API の JSON 取得に限り、版・feature・固定設定は
@@ -18,14 +23,19 @@
 # serde／serde_json は #3131 の JSON 解析用に、既存の許容区分を workspace の固定版で先に宣言する。
 [package]
 name = "fandhe-ai-hf-hub"
-description = "Hugging Face Hub 連携の補助クレート（facade の公開 API だけを使う。1 段目は非公開）"
+description = "Hugging Face Hub helper for fandhe-ai: repo id validation, revision resolution and file listing built only on the facade public API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["huggingface", "hub", "machine-learning", "model-download", "ai"]
+categories = ["science", "api-bindings"]
+# ルート `[workspace.package]` の `publish = false` 既定を上書きして公開可能にする（#3773）。
+publish = true
 
 [dependencies]
-fandhe-ai = { path = "../facade" }
+fandhe-ai = { path = "../facade", version = "=0.13.0" }
 serde.workspace = true
 serde_json.workspace = true
 

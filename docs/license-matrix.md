@@ -385,3 +385,9 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - `Cargo.lock` の差分: `webpki-root-certs` の version と checksum だけ。ほかの crate の追加・版変更はない。
 - ライセンス: `cargo metadata --locked` で 1.0.10 も `CDLA-Permissive-2.0`。`deny.toml` の allow は変更していない。
 - `cargo deny --locked check advisories bans licenses sources`: ok。`scripts/check-forbidden-deps.sh lock-all`: ok。
+
+## 追加実測（イシュー #3773）: `fandhe-ai-hf-hub` を公開対象に加える
+
+- 新しい allow 識別子は不要。`cargo deny --locked check advisories bans licenses sources` は ok。
+- 外部パッケージ集合と `Cargo.lock` は不変（`crates/hf-hub` の `publish`・メタデータ・facade への path 依存の `version` 併記のみの変更）。
+- 変わるのは、公開クレートの直接依存として `ureq`（第 11 区分。`cfg(unix)` 限定）が crates.io 上の `fandhe-ai-hf-hub` から参照される点だけ。版・feature・ライセンスは facade 経由の既存実測（#3124）と同一。
