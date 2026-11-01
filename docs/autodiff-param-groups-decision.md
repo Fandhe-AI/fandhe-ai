@@ -980,3 +980,228 @@ baseline の追加・更新はない。
 - 秘密情報は書かず、実機ホスト名は `<cuda-node>` 等で表す。
 - スコープ外: A3-a（#3752／#3832）、A3-b（#3754）、A3-d（#3756）、`Lbfgs` 併用、`Optimizer` にない 4 種（#3757）、
   `OptimizerStateDict` への groups の追加（optimizer が groups を持たないため）、`LrSchedule` の状態保存。新しい issue は起票しない。
+
+## §19 保守・運用チェックリスト（イシュー #3756）: param groups と `DeviceParamStore` 常駐更新の併用（A3-d）
+
+本節は**設計記録であって承認ではない**。承認は #3769 の論点 4 の回答を待つ（実装は #3837〈内部〉・#3838〈facade〉、
+実機 parity は #3862〈`<cuda-node>`〉・#3863〈`<metal-node>`〉）。実際に得ていない承認は書かない。コードの引用は
+`origin/main` の `ac48e627f` のもの（行番号は変わりうるため、関数名で引く）。公開形・推奨・戻す論点の書式は
+`docs/decision-record-template.md` に従う。追跡表 `docs/compat-matrix-ari-tracker.md` の行番号は 22（A3-d）で、
+issue 本文や #3837・#3838 が使う通し番号「項目 23」（ルート／#3769 側）とは 1 ずれる。
+
+### 19.0 位置づけ・課題・推奨
+
+**現状**
+
+- `DeviceParamStore`（`crates/autodiff/src/optim/device_store.rs`）は全パラメータを 1 本の連結 `DeviceBuffer<f32>`
+  に置き（`ParamLayout`、#1023）、各 `step*` はスカラーの `*StepConfig`（`SgdStepConfig`・`AdamStepConfig`・
+  `RmsPropStepConfig`・`AdagradStepConfig`・`LambStepConfig`。`crates/tensor-core/src/backend_ops.rs`）でカーネルを
+  **1 回だけ**起動する。group の概念はない。
+- **fit 側に解除すべき拒否は無い**: `crates/facade/src/compat/training.rs` に `DeviceParamStore` への参照はなく、
+  `Compiled` の groups は常駐経路から読まれない。常駐経路（`Tape::step_device_param_store*` 6 種、
+  `Sequential::train_step_resident`、`distributed::step_sgd/adam/adamw`、`step_*_amp`）は、利用者が optimizer
+  config を直接渡す。#3838 の概要にある「fit の拒否条件を解除」はコードと前提が合わないため、#3838 の中身は
+  「facade の入口を足す」と読み替える（#3838 本文は編集しない）。
+- GPU カーネルの範囲: CUDA・Metal・ROCm が実装している常駐 step は `sgd_step_device`・`adam_step_device` だけ。
+  `rmsprop`／`adagrad`／`lamb` の常駐 step は CPU だけ（他は既定の `Unsupported`）。
+- 状態種別ガード: Adam 系・RmsProp・Adagrad・Lamb は「固定ハイパラは初回 step で確定し、以後は lr だけ変えられる」。
+  SGD は毎回 config を検証する。
+- Adam/AdamW/Lamb は lr から `step_size`・`decay_factor` を、Adagrad は `clr` を、ホストで先に計算してから渡す。
+- CUDA Graph capture（#1349、opt-in）は `fold_sgd_step_config_key` でスカラーの lr/wd を key に畳み込む。
+- `train_step_device_chain`（`device_store/train_chain.rs`）は `SgdStepConfig` を自分で組み立て、
+  `sgd_step_device_tracked` を直接呼ぶ。
+- 棚卸し `docs/compat-unlisted-holds-inventory.md`（A3-d）は「起票する。実機 parity が要る」、§12.6・§13.5 は対象外のまま。
+
+**選択肢（per-slot ハイパラをカーネルへどう渡すか）**
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | 区間テーブル方式。新しい `BackendOps` メソッド（例 `sgd_step_device_grouped`・`adam_step_device_grouped`。既定実装は `Err(Unsupported)`）に、区間ごとの導出済みスカラー列（`numel`・`lr`・`weight_decay`・Adam の `step_size`/`decay_factor` 等）を渡す。隣り合う同じハイパラのスロットはホストで 1 区間にまとめる。起動は 1 回のまま。先例は `lamb_step_device` の `segment_numels: &[usize]` | #1023 の「起動回数をパラメータ数に依らず 1 回」を保つ。既存カーネルの式をそのまま使え、スカラーの導出をホストの `step_with_slot_hparams` と同じにできる | 3 バックエンドに新カーネルが要り、GPU は実機 parity が要る |
+| B | group（区間）ごとに既存カーネルを起動する | カーネルの変更が小さい | 起動回数が区間数に比例する。#1023 の記録（`device_store.rs` 冒頭。Metal で大幅な後退）と同じ形に戻るので退ける |
+| C | 要素ごとの lr/wd バッファ（`total_numel` 長）を常駐させる | カーネル内の参照が単純 | メモリが 2 倍。Adam の `step_size` は毎 step 変わるので毎回要素長の upload が要る |
+| D | 対象外にする（常駐経路に group なしを恒久化） | 変更なし | 追跡表で予定済みの #3837・#3838・#3862・#3863 が消え、層別 lr を常駐学習で使えないまま残る |
+| E | ホストへ退避して `step_with_groups` を回す | 実装が最小 | 常駐の意味がなくなり、黙って遅くなる。不採用 |
+
+**推奨は「実装する」（案 A）**。理由: 公開名の追加が 1 つで済み、既定経路を変えず、起動 1 回の性能契約を保ち、
+ホストの式とスカラーの導出順を揃えられる。
+
+**設計の詳細（推奨案）**
+
+- **入口**: group は store の構築時に束ねる。`Sequential::init_device_param_store_with_param_groups(&self, tape: &Tape,
+  groups: &[ParamGroup]) -> Result<DeviceParamStore, BackendError>`（`compile_with_param_groups` と対になる形）。
+  スロット添字は `trainable_parameters()` の位置という既存契約をそのまま使う。store は検証済みのスロット別
+  ハイパラ表を非公開フィールドに持つ。group を変えるときは store を作り直す（「固定ハイパラは作り直しで変える」と同じ）。
+- autodiff 側の実装本体は facade が再エクスポートしない形にする（`DeviceParamStore` に inherent の `pub fn` を足すと
+  その時点で facade の公開面になるため。`docs/compat-resident-train-step-decision.md` の方針）。内部名は
+  `step_with_groups`／`step_with_slot_hparams`／`resolve_slot_hparams`／`compile_with_param_groups` と別の名前にする
+  （workspace インベントリの期待件数を動かさないため）。
+- **意味**: group 外のスロットは各 step の config の lr/wd を使う。group の lr/wd は絶対値で、config の lr を
+  変えても追従しない（ホストの §2.2 と同じ）。Adam 系・RmsProp・Adagrad・Lamb では、group の表を初回 step で確定する
+  固定状態として扱う。
+- **groups が空のとき**: 既存のスカラーカーネルの経路を一切変えずに通す（一様な表で新カーネルを通す案は退ける。
+  既定経路の bit 一致と性能を構造で守るため）。
+- **導出スカラー**: 区間ごとに、ホストの `step_with_slot_hparams` と同じ式・同じ順で計算する。
+  精度を一律には指定せず、各導出値について既存ホスト実装の中間精度と丸め位置をそのまま維持する
+  （例: AdamW の `step_size` は `(hp.lr as f64 / bias_correction1) as f32` の f64 計算＋1 回 downcast、
+  `decay_factor` は `1.0 - hp.lr * hp.weight_decay` の f32 の積と減算〈`crates/autodiff/src/nn/optim/adamw.rs`〉）。
+  常駐側で f64 へ統一すると §19.5 の CPU 常駐とホストの bit 一致契約を満たせないため、一律 f64 化はしない。#3837 は各 optimizer のホスト式と常駐側の式を突き合わせて記録する。
+- **適用範囲**: GPU（CUDA・Metal）は SGD・Adam・AdamW。RmsProp・Adagrad・Lamb は CPU だけ（今のカーネルの範囲と同じ）。
+  ROCm は grouped カーネルを持たないので、groups が空でない store を状態を変える前に `Unsupported` で拒否する。
+- **非対応にする経路**（#3837 では fail-closed で拒否し、拡張は別判断）: `step_*_amp`（AMP）・`distributed::step_*`
+  （groups が空でなければ `InvalidArgument`）。CUDA Graph capture は groups が空でないときは使わず直接実行にする
+  （opt-in なので既定経路は変わらない）。
+- **`train_step_resident`（チェーン）**: groups が空でない store では、チェーンが最初の書き込みの前に `Unsupported`
+  を返し、既存の契約どおり Tape 経路へ全体フォールバックする。フォールバック先は `step_device_param_store` なので
+  group が効き、チェーンと bit 一致する契約は保たれる。チェーンの grouped 化は後の拡張。
+- **既存の不変条件**: 新しいハンドル型は足さない。`DeviceParamStore` は `DeviceBuffer` を持つため `!Send` のまま。
+  `unsafe impl Send` は足さない。`ResidentTensor`／`ResidentLoss` の `!Send` を確かめる `compile_fail` doctest、
+  `store_id` の束縛、pending／poison の状態機械、状態種別ガードは変えない。group の検証エラーは store を poison
+  しない。カーネル実行時のエラーは従来どおり poison する。
+
+### 19.1 公開形
+
+- シグネチャ案: `Sequential::init_device_param_store_with_param_groups`（19.0）の 1 件だけ。`DeviceParamStore`・
+  `ParamGroup`・`ParamGroupStep`・各 `*Config`・`Tape::step_device_param_store*`・`train_step_resident`・
+  `distributed::step_*` の形は変えない。
+- facade 内の配置: `crates/facade/src/compat/sequential.rs` の `impl Sequential`（`init_device_param_store` の隣）。
+- **反転する否定ガードは無い**: A3-d 専用の `*HoldDoctestGuard`・否定プローブは `crates/facade/src/lib.rs`・
+  `api_surface.rs` に無い（A3-b の §15.1 と同じ状況）。そのため「反転」ではなく、公開面を縛っている正ガードの
+  更新計画を列挙する（`crates/facade/tests/api_surface.rs`）:
+  - `facade_param_groups_public_surface_matches_approved_contract`・`PARAM_GROUPS_APPROVED_KEYS`（3 件 → 4 件）。
+    走査は `fn compile_with_param_groups` を名前で数えるだけなので、新しい鍵
+    `fn:init_device_param_store_with_param_groups`（`compat/sequential.rs` の `impl Sequential` 内に 1 件）を
+    明示的に足さないと見落とす。
+  - `param_groups_inventory_violations`・`facade_param_groups_public_surface_guards_detect_each_category`
+    （新しい鍵の欠落・二重化・`impl Sequential` の外・別名を正例で踏む自己テストを足す）。
+  - `param_groups_types_are_reachable_via_facade_only`（新しい fn を fn ポインタへ束縛する）。
+  - `workspace_declares_param_group_fn_names_only_in_allowed_locations`（autodiff の内部名を既存 4 名と別にすれば
+    期待集合は不変。facade の新しい fn を NAMES に足すかは #3838 が決め、足すなら期待集合も更新する）。
+  - 変えないガード: `check_resident_train_step_surface`／`RESIDENT_SEQUENTIAL_APPROVED_SIGNATURES`
+    （`train_step_resident` の形を固定）・`RESIDENT_TAPE_APPROVED_SIGNATURES`・
+    `distributed_items_are_reachable_via_facade_distributed_path`・`!Send` の `compile_fail` プローブ。これらが
+    無変更で通ることが「既存の形を変えない」ことの確認になる。
+- 分担: #3837 は autodiff・tensor-core・各バックエンドの内部実装（公開面は増やさない）、#3838 は facade の入口・
+  ガード更新・適用記録。
+
+### 19.2 rustdoc と doctest の例
+
+- 新しい fn の doc: 役割の要約、スロット添字の契約、group 外スロットの扱い、group を変えるには作り直すこと、
+  対応するバックエンドと optimizer の範囲、AMP・distributed・graph capture の非対応、`train_step_resident` の
+  フォールバック。
+- doctest 案: CPU（`fandhe_ai::tape()`）で動く facade 単体の例。2 層モデルで中間層を `lr = 0` の group に入れ、
+  `step_device_param_store` を数 step 回して、その層だけ bit 不変を確かめる。`ignore`／`no_run` は不要
+  （GPU の例は書かない）。
+- 失敗系は `compile_fail` に頼らず、正のテスト・インベントリで確かめる（stable rustdoc はエラーコードを照合しない）。
+  正の doctest プローブを `param_groups_usage_doctests_are_present_and_compiled` の対象に足すかは #3838 が決める。
+
+### 19.3 エラー型
+
+- 新 variant は足さない。構築時は `BackendError::InvalidArgument`（検証違反）／`BackendError::Unsupported`
+  （grouped 非対応のバックエンド・`Unsupported` 層を含むモデル。既存と同じ）、step 時は既存の `BackendError` を使う。
+- 検証の順（状態変更・確保の前）: (1) 既存の `init_device_param_store` の層検査 → (2) `resolve_slot_hparams` と
+  同じ規則（params が空・添字が範囲外・重複・lr/wd が非有限か負）をスロット数 `trainable_parameters().len()` で検査
+  → (3) バックエンドが grouped カーネルを持つかの確認（ROCm 等は `Unsupported`）→ (4) `DeviceParamStore` の構築・upload。
+- step 時: groups が空でない store での `step_*_amp`・`distributed::step_*` は `InvalidArgument` で拒否し、pending を
+  消費せず状態も変えない。導出スカラーが非有限になる場合（例 `1 - lr*wd` の overflow）も、カーネルを起動する前に
+  `InvalidArgument` で止める（poison しない）。
+- 本番経路で `unwrap`／`expect` は使わない。
+
+### 19.4 テスト計画
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| groups が空の既定経路が変更前と bit 一致 | 既存 `crates/facade/tests/device_param_store_*_train.rs`・`crates/backend-cpu/tests/*_device_parity.rs` を無変更で通す | CI | 該当なし | 該当なし | 該当なし |
+| CPU 常駐 + groups がホストの `step_with_groups` と bit 一致（SGD〈momentum・nesterov・wd〉・Adam・AdamW・RmsProp・Adagrad・Lamb） | 新規 `crates/facade/tests/device_param_store_param_groups_train.rs`（`device_param_store_adam_train.rs` と同じく各 step の勾配を読み出してホストへ与える方式） | CI | 該当なし | 該当なし | 該当なし |
+| grouped カーネル単体が CPU で既存スカラーカーネルの区間ごとの結果と bit 一致 | 新規 `crates/backend-cpu/tests/grouped_optimizer_step_device_parity.rs` | CI | 該当なし | 該当なし | 該当なし |
+| `lr = 0`・`weight_decay = 0` の group のスロットが bit 不変 | 上の facade テストに含める | CI | 該当なし | 該当なし | 該当なし |
+| 検証違反（空・範囲外・重複・非有限・負）が構築前に拒否され、store を作らない | 同上 | CI | 該当なし | 該当なし | 該当なし |
+| `step_*_amp`・`distributed::step_*` が groups ありで拒否され、pending・パラメータが不変 | 同上 | CI | 該当なし | 該当なし | 該当なし |
+| `train_step_resident` が groups ありで Tape 経路へフォールバックし、手書きループと bit 一致 | 同上（CPU） | CI | 該当なし | 該当なし | 該当なし |
+| graph capture が opt-in でも groups ありでは使われず、結果が直接実行と同じ | 同上（CPU では capture が `None` であることを確かめる。CUDA は実機テストに含める） | CI | 該当なし | 該当なし | 該当なし |
+| 公開面が承認形だけ増える | `api_surface.rs` の 19.1 のガード更新と自己テスト | CI | 該当なし | 該当なし | 該当なし |
+| ROCm 等 grouped 非対応で groups ありの構築が `Unsupported` になる | grouped メソッドの既定実装による拒否を CPU 側の模擬バックエンドで確かめる | CI | 該当なし | 該当なし | 該当 issue なし |
+| CUDA の grouped SGD/Adam/AdamW が CPU 参照と統一複合判定で一致し、run-to-run で bit 同一 | 新規 `crates/backend-cuda/tests/grouped_optimizer_step_real_device.rs` | `#[ignore]` | 未実測（#3862） | 該当なし | 該当なし |
+| Metal の同上 | 新規 `crates/backend-metal/tests/grouped_optimizer_step_parity.rs` | `#[ignore]` | 該当なし | 未実測（#3863） | 該当なし |
+| facade で 100 step 学習した最終パラメータが CPU ホスト参照と統一複合判定で一致 | 新規 `crates/facade/tests/device_param_store_param_groups_backend_parity.rs`（`device_param_store_backend_parity.rs` と同じ構成） | `#[ignore]` | 未実測（#3862） | 未実測（#3863） | 該当なし |
+
+- 上のファイル名・テスト名は**案**（実装 PR が既存名との衝突を確認して確定する）。
+- Phase 10 で測るのは `#[ignore]` の 3 本（#3862: CUDA 側 2 本、#3863: Metal 側 2 本。facade の 1 本は両方で測る）。
+  実測するまで「未実測」のままにし、Linux や開発機の値で埋めない。
+
+### 19.5 数値契約
+
+- 3 段: (1) groups が空 → 変更前と bit 一致（既存経路を変えない）、(2) CPU 常駐 + groups → ホスト
+  `step_with_groups` と bit 一致（CPU の bit 一致契約の先例どおり）、(3) CUDA・Metal + groups → CPU 参照と
+  REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。GPU の bit 一致は観測値として記録するが
+  合否の基準にはしない（既存の常駐 optimizer カーネルの実機テストの事前登録規則と同じ）。
+- `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は変えない。新しい
+  baseline は置かない（必要になったら実機実測値に限り所有者承認）。
+- FMA 契約: 区間ごとのスカラーを既存カーネルの式・演算順のまま使う（`mul_add` の並びを変えない）。長軸縮約は
+  新しく生まれない（要素ごとの更新だけ。Lamb のノルムは CPU だけで、区間の境界は既存の `segment_numels` と同じ）ため、
+  f64 アキュムレータ・Metal soft-f64 の規約には触れない。
+
+### 19.6 互換への影響
+
+判定は**追加のみ**（手順の正は `docs/api-compat-0.14.0-decision.md` §8。同 §4 の行 22 は `DeviceParamStore` を
+フィールド非公開で「追加のみ」と分類済み）。型ごとの判定:
+
+- `Sequential`: inherent fn の追加なので追加のみ。
+- `DeviceParamStore`: 非公開フィールドの追加なので追加のみ（公開メソッドは増やさない）。
+- `ParamGroup`／`ParamGroupStep`: 不変。
+- `BackendOps`（tensor-core。facade の安定性保証の外〈`docs/compat-api-scope.md` §0〉）: 既定実装つきメソッドの追加
+  なので追加のみ。
+
+移行ノート（#3780）には「追加: `init_device_param_store_with_param_groups`」とだけ書く想定（実装 PR が書く）。
+
+### 19.7 適用記録・索引・追跡表
+
+現時点の公開状態は未公開。適用記録の案（#3838 が `docs/compat-api-scope.md` §5 へ書く。承認 URL は #3769 の回答
+コメントを待って埋める）: 「`compat::Sequential::init_device_param_store_with_param_groups` を追加し、param groups を
+常駐更新（CPU: 6 optimizer、CUDA・Metal: SGD・Adam・AdamW）へ適用。AMP・distributed・graph capture・ROCm は非対応で
+fail-closed。公開状態: 公開済み」。
+
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表（行 22）を更新した
+- [ ] `docs/compat-api-scope.md` の適用記録（実装 PR が行う）
+
+### 19.8 ベンチと性能への影響
+
+- 既定経路（groups が空）はスカラーカーネルの経路をそのまま通るので変わらない。追加のコストは「groups が空か」の
+  分岐だけ。
+- groups ありの経路は起動 1 回のまま。区間テーブルの upload（区間数 × 数 f32）が step ごとに増える。
+- 計測計画: #3837 で `crates/facade/tests/device_param_store_bench.rs` を使い、groups なしの前後比較を 5 回計測の
+  中央値で行う（事前登録規則は計測前に固定）。GPU の値は実機で測るまで「未実測」。本 PR では測らないので数値は書かない。
+
+### 19.9 依存の追加の有無
+
+- 依存の追加なし。許容 12 区分・禁止リストとの照合結果は変わらず、`docs/license-matrix.md` の更新も不要
+  （追加が生じるなら所有者承認と license-matrix 更新が要る）。
+- 新しい `unsafe`: CUDA（NVRTC）・Metal（objc2）の grouped カーネル起動で、既存と同じ形の FFI `unsafe` が要る見込み。
+  SAFETY コメントと security-auditor の監査を #3837 の条件にする。
+
+### 19.10 所有者へ戻す論点（#3769 論点 4）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 実装するか・方式 | A 区間テーブル／B 区間ごとの起動／C 要素ごとのバッファ／D 対象外 | A（実装する） | 実装へ進めない（常駐経路に group なしを維持） |
+| 2. 入口 | store 構築時に束ねる（`init_device_param_store_with_param_groups`）／step ごとに渡す（`Tape::step_*` に 6 種の別版）／`DeviceParamStore` の setter | 構築時に束ねる（公開名 1 件・既存シグネチャ不変） | 実装へ進めない |
+| 3. GPU の対象 | SGD・Adam・AdamW だけ（RmsProp・Adagrad・Lamb は CPU だけ）／6 種すべての GPU カーネルを作る | 前者（今のカーネルの範囲と同じ） | 実装へ進めない |
+| 4. ROCm | groups ありを `Unsupported` で拒否／grouped カーネルを作る | 拒否 | 実装へ進めない |
+| 5. AMP・distributed | groups ありを拒否（拡張は別判断）／#3837 で対応 | 拒否 | 実装へ進めない |
+| 6. `train_step_resident` | Tape 経路へフォールバック／`InvalidArgument` で拒否／チェーンを grouped 化 | フォールバック（既存の契約内） | 実装へ進めない |
+| 7. CUDA Graph capture | groups ありでは使わない／group の表を key に畳み込む | 使わない | 実装へ進めない |
+| 8. group の変更 | 作り直しだけ／途中で変える setter を足す | 作り直しだけ（固定ハイパラの既存規則と同じ） | 実装へ進めない |
+| 9. GPU の合否基準 | REQ-2 統一複合判定（bit は観測値）／bit 一致を基準にする | 前者（既存の常駐カーネルの実機テストと同じ） | 実装へ進めない |
+
+### 19.11 セキュリティ・スコープ外・Closes／Refs
+
+- A03: 外部入力の新しいパースはない。group の検証（範囲・重複・有限・非負）は upload と状態変更の前に済ませる（19.3）。
+- A04: 黙って別経路へ落とさない。非対応の経路は型付きエラーにする。フォールバックは既存の契約で明示された
+  `train_step_resident` だけ。
+- A08: tolerance・baseline・ガードレール閾値は変えず、自己修復ループの判定経路にも触れない。新しい FFI `unsafe` は
+  監査必須。秘密情報・実機ホスト名は書かない。
+- スコープ外: A3-a（#3752・#3832）、A3-b（#3754・#3834）、A3-c（#3755）、#3757（Optimizer 4 種）、Lbfgs、
+  AMP・distributed・ROCm・graph capture の grouped 化、`decoupled_weight_decay` の group 上書き、optimizer 状態の
+  group 追従。新しい issue は起票しない（起票には承認が要る）。
+- 本 PR は設計記録のみで `Closes #3756`。`Refs #3769`（承認待ち）・`Refs #3837`・`Refs #3838`（実装）・
+  `Refs #3862`・`Refs #3863`（実機）。
