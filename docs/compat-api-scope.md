@@ -1638,6 +1638,12 @@ f64 テープの `create_graph` 機構の第 2 段（`matmul`〈rank 2〉・`sum
 `f64_backward_create_graph_usage_doctest_is_present_and_compiled`（自己テストつき）。着手時点で f64 専用の保留 doctest ガードは無かった。
 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。実装記録は `docs/autodiff-functional-transforms-design.md` §38。
 CUDA／Metal 実機 parity は未実測で `docs/perf/logs/f64-create-graph-3786/README.md` に手順と記入欄を置いた。
+
+**適用記録（イシュー #3787・親 #3719。内部クレート限定）**:
+`fandhe-ai-autodiff` に `TapeF64::jvp`／`jacfwd`（double-VJP 法・J1 案）を内部実装した。facade の公開面は変えていない
+（公開は #3788）。ガード k の期待マップに f64 の 2 件を追加した（`crates/facade/tests/api_surface.rs`）。
+依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。F 行は変えていない。
+実装記録は `docs/autodiff-functional-transforms-design.md` §39。
 スコープ外: `jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` の公開（#3787・#3788）、f64 の `max` の create_graph。
 
 > **更新（#2556）**: 下記の保留のうち `OptimizerStateDict` の再エクスポートは #2556 で公開済み

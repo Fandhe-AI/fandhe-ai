@@ -1459,3 +1459,35 @@ impl<'t> TapeF64<'t> {
 - `jvp` 系の facade 公開と §36.1 のガード g〜l の反転は #3787・#3788 の範囲。本イシューでは変えていない。
 - f64 の `max` の create_graph は対象外のまま（f32 の `Max` は #3938 で対象になった）。f64 で実装するかは所有者の承認が要る。無断で起票していない。
 - f32 側の `ScalarBinaryOp::Pow`（`mask_b0`）の混合二階微分の問題（§37.4）は引き続き未対応。
+
+## 39. 実装記録（イシュー #3787・親 #3719。`TapeF64::jvp`／`jacfwd` の内部実装）
+
+### 39.0 位置づけ
+
+- 承認: §37.0 と同じ #3766 の所有者の回答コメント（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674）。`jacfwd` は J1、同名、`'t` 共有、f32 と同じゼロ経路と 2 ノードの副作用。
+- 基準: `origin/main` `db925b0df`。本節は §36.1 の「実装の分担」のうち #3787（autodiff 内部）の記録である。facade の公開は #3788。
+
+### 39.1 追加したもの
+
+- `crates/autodiff/src/f64_autograd/functional_ops.rs`: `impl<'t> TapeF64<'t>` に `pub fn jvp`・`pub fn jacfwd`。f32 の `double_vjp_front`／`double_vjp_stage` を写した private の前段、`copy_grad_row_f64`・`write_column_f64`・`jacfwd_column`。新しい `OpF64` variant・struct・公開メソッドは増やしていない（J1）。
+- `jacfwd` は前段の `g` を 1 回作り、列 `k` ごとに one-hot 定数 `e_k` との `mul` を子テープで `backward` する。各列の後に `rollback_to` で子テープを戻し、成長を O(1)／列に抑える。結果の shape（`out ++ in`）は確保の前に `checked_bytes_for_f64` と `checked_mul` で検査する（A03）。
+- テスト: `crates/autodiff/tests/f64_functional_transforms.rs`（f32 との REQ-2 突き合わせ、閉形式と `backward` 由来の `J·v`、列と one-hot `jvp` の一致、ゼロ経路、入口検査の順序、`max` の拒否と子の再利用、子テープ検査）、モジュール内単体 4 件、rustdoc の doctest 2 件。
+- ガード k（`crates/facade/tests/api_surface.rs::workspace_declares_functional_transforms_fn_names_only_in_allowed_locations`）の期待に f64 の `jvp`／`jacfwd` 各 1 件を追加。自己テスト `functional_transforms_fn_inventory_counts_f64_substitutions` を新設。
+
+### 39.2 §36 から外れた点
+
+なし。f64 用の保留 doctest プローブは存在しないため、反転の対象はない（§36.1 の l・§38.2 の 4 と同じ扱い）。
+
+### 39.3 測った一致の範囲
+
+- NaiveOps のみ。f32 の `functional_ops::{jvp, jacfwd}` と REQ-2 の統一複合判定の範囲で一致する。bit 同一は主張しない。
+- CUDA／Metal／ROCm 実機は該当なし（#3788 の担当）。
+
+### 39.4 変えていないもの
+
+facade の `src/`、依存（`Cargo.toml`／`Cargo.lock`）、tolerance、baseline、ガードレール閾値、`unsafe`、`docs/spec`、f32 全体、§36 以前の本文。
+
+### 39.5 #3788 への申し送り
+
+- `jvp_multi`／`jvp_create_graph`（内部）、facade の 4 メソッドと newtype `JvpCreateGraphResultF64`、ガード a〜i・l の反転、`mirror()` の要否、GPU の `#[ignore]` テストとログ README、`compat-api-scope.md` §5.1 の F9〜F12 行。
+- f64 の `max` の create_graph、`vjp`／`hvp`／`vmap`／`vmap_grad` の f64 版は対象外のまま（承認が別に要る）。

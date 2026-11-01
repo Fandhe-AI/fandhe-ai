@@ -266,8 +266,9 @@ pub mod einsum_batch;
 mod error;
 mod eval;
 pub mod extremum_ops;
-// f64 テープの `create_graph` 第 1 段（`TapeF64::backward_create_graph`。イシュー #3785・
-// 設計記録 `docs/autodiff-functional-transforms-design.md` §37）。内部クレート限定で、facade へは未公開。
+// f64 テープの `create_graph`（`TapeF64::backward_create_graph`。イシュー #3785・#3786。設計記録
+// `docs/autodiff-functional-transforms-design.md` §37・§38）は facade へ公開済み。`TapeF64::jvp`／`jacfwd`
+// （#3787・同 §39）は内部クレート限定で、facade 公開は #3788。
 pub mod f64_autograd;
 pub mod fft_ops;
 pub mod indexed_update_ops;
@@ -293,7 +294,7 @@ pub mod jacobian_ops;
 // `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §11・§12）。
 pub mod gradcheck;
 // 関数型 AD ラッパー（`vjp`・`hvp`・`vmap`。イシュー #2874・#2875・#2876。`jvp`／`jacfwd` は #2940 で
-// `pub(crate)` の内部実装のみ追加・facade 非公開）。既存 `Tape::backward`／
+// 内部実装として追加し #2956 で facade 公開済み）。既存 `Tape::backward`／
 // `backward_create_graph` と `mul`、`vmap` は `unbind`／`contiguous`／`stack` の合成のみで、
 // 新規 Op・VJP・`AutodiffError` variant はない。facade への公開は保留
 // （`docs/autodiff-functional-transforms-design.md` §5・§10）。

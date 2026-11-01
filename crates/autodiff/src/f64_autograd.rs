@@ -120,6 +120,7 @@
 //!   `min`
 
 mod create_graph;
+mod functional_ops;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
