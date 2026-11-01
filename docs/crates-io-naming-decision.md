@@ -127,3 +127,23 @@ fandhe-ai-onnx-interop`）で再実測し、HTTP 404（未登録・空き）で�
 rename・公開メタデータ整備の実装は #1963 自身が行う（`crates/onnx-interop/
 Cargo.toml`・README・LICENSE-* の追加。実際の `cargo publish` は次回リリース
 サイクルで `release-all.yml` を通じてユーザーが実行する）。
+
+## `hf-hub` → `fandhe-ai-hf-hub`（イシュー #3773）
+
+#3771 の所有者回答（2026-11-01）で 2 段目（0.14.0 での crates.io 公開）が承認され、
+名前の空きは #3773 で実測する条件だった。読み取りのみの GET（認証なし・リクエスト間隔 1.2 秒以上・
+User-Agent にリポジトリ識別子のみ）で、書き込み・予約はしていない。
+
+確認日時: 2026-11-01T06:59:11Z〜06:59:21Z（UTC）
+
+| 確認先 | URL | HTTP status | 判定 |
+|---|---|---|---|
+| sparse index | `https://index.crates.io/fa/nd/fandhe-ai-hf-hub` | 404 | 未登録（空き） |
+| sparse index（`_` 正規化） | `https://index.crates.io/fa/nd/fandhe_ai_hf_hub` | 404 | 未登録（衝突なし） |
+| crates.io API | `https://crates.io/api/v1/crates/fandhe-ai-hf-hub` | 404 | 未登録（空き） |
+| crates.io API（`_` 正規化） | `https://crates.io/api/v1/crates/fandhe_ai_hf_hub` | 404 | 衝突なし |
+| 参考: 第三者の `hf-hub` | `https://crates.io/api/v1/crates/hf-hub` | 200 | 本クレートとは無関係の別クレート。混同回避の記述は README（#3847）で行う |
+
+名前の制約（ASCII 英数字・`-`・`_`、64 文字以内）も満たす（`fandhe-ai-hf-hub` は 16 文字）。
+`categories` に使う `science`・`api-bindings` は `https://crates.io/api/v1/categories` で実在を確認した。
+実 publish は Phase 11 で所有者が指示したときだけ行う（`docs/crates-io-publishing-order.md` §14）。
