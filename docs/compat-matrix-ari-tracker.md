@@ -54,7 +54,7 @@
 | 26 | B3: ONNX export の `Sigmoid` | 相互運用 | 保留 | #3760（`docs/facade-onnx-export-exposure-decision.md` §19） | 未承認（#3770 待ち） | #3844 | 否定テスト `sigmoid_is_rejected_as_unsupported`（`crates/onnx-interop/tests/onnx_export_layers_parity.rs:234`）と `sequential_with_sigmoid_is_rejected_with_unsupported_layer`（`crates/facade/tests/interop_onnx_export_sequential.rs:296`）。正への反転先は §19.1 で確定（基準 sha `5834b0958`） | 該当 issue なし | 未確定 |
 | 27 | B5: safetensors の f32 以外の型 | 相互運用 | 未公開 | #3761（docs/facade-safetensors-exposure-decision.md §13） | 未承認（#3770 待ち） | #3845、#3846 | 現状は識別子の完全一致 allowlist interop_safetensors_reexports_exactly_expected_surface（crates/facade/tests/api_surface.rs:2764。基準 5834b0958）が否定側を担う。反転先は同テストの期待集合拡張と interop_safetensors_types_are_reachable_via_facade（:2854） | 該当 issue なし | 未確定 |
 | 28 | HF Hub 連携の 2 段目（`hf-hub` の crates.io 公開と数え方） | 事前学習済みモデル | 未公開 | #3762 | 未承認（#3771 待ち） | #3847。公開準備は #3773 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
-| 29 | `caches` で表せない内部状態を持つモデルの speculative decoding・連続バッチング | 推論・サービング | 未公開 | #3763 | 未承認（#3770 待ち） | #3848、#3849 | 未特定（設計記録で確定） | 該当 issue なし | 未確定 |
+| 29 | `caches` で表せない内部状態を持つモデルの speculative decoding・連続バッチング | 推論・サービング | 未公開 | #3763（docs/facade-speculative-decoding-batching-design.md §29） | 未承認（#3770 待ち） | #3848、#3849 | 否定ガードなし。反転・拡張先は設計記録 §29.1 で確定（inference_module_reexports_exactly_expected_surface〈crates/facade/tests/api_surface.rs:24369〉、speculative_scheduler_public_shape_is_pinned〈:40807〉ほか。基準 16d285c0a） | 該当 issue なし | 未確定 |
 
 注記:
 
