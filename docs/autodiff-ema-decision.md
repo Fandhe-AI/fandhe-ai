@@ -722,6 +722,123 @@ intra-doc link は公開項目のみ。非公開項目はバッククォート�
 - スコープ外: SWA×AMP の拒否（29 項目に入っていない）、AMP×`accumulate_steps > 1`、`DeviceParamStore`、decay ウォームアップ（#3753）。新しい issue は起票しない（所有者の承認が要る）。
 - #3831 は、実装と完了条件の確認が済むまで `Refs` を使う。
 
+## §18 保守・運用チェックリスト（イシュー #3753）: EMA の減衰率ウォームアップ（A2）
+
+### 18.0 位置づけ・課題・推奨
+
+- 位置づけ: 0.12.0 監査の棚卸し A2（追跡表 `docs/compat-matrix-ari-tracker.md` の**行 18**。イシュー本文の「項目 19」は別の通し番号で、行 19 は A3-a）。本節は設計記録であり**承認ではない**。承認は #3769 の論点 4 の回答待ち、実装は #3833。雛形は `docs/decision-record-template.md`。節番号は #3752 の §17（open PR #3914）を避けて §18 とした
+- コード上の事実（`origin/main` で確認）:
+  - 内部型 `fandhe_ai_autodiff::nn::ExponentialMovingAverage` は `decay: f32`・`names`・`shadow_vars`・`num_updates: u64` を private で持ち、`#[derive(Debug)]` のみ（`crates/autodiff/src/nn/ema.rs:99-108`）。`num_updates` は `update_named` の成功時だけ 1 増える（two-pass 検証で失敗したときは増えない）
+  - 更新式は pass 2 の `let decay = self.decay; let one_minus_decay = 1.0 - decay;` から `f32::mul_add(decay, shadow, one_minus_decay * param)`（`ema.rs:240-256`）
+  - facade の `optim::ExponentialMovingAverage` は内部型を 1 フィールドで持つラッパー（`crates/facade/src/optim_ema.rs`）。`EmaCallback` は `decay: f32` と `ema: Option<…>` を private で持ち、最初の fit 開始時に初期化して fit をまたいで継続する（§13.3 項 2）
+  - TF 方式 `min(decay, (1 + n) / (10 + n))` は §2・§9 で「将来拡張候補」、§10.3・§14.5 と `callbacks.rs` のモジュール doc で「対象外」のまま。`fn with_warmup` は `crates/` のどこにも無い
+  - `num_updates` も shadow も保存されない（`shadow_state_dict` はテンソルだけを返す）
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| A（推奨） | 定数固定の TF 式を bool の opt-in ビルダーで足す。新しい検証なし | 追加のみ・公開面が小さい・既定 OFF で既存の計算経路と同一 | 式は固定（timm 型など別スケジュールは別承認） |
+| B | 閾値（`1`・`10`）や式の種類を引数にする（例 `#[non_exhaustive] enum EmaDecaySchedule`） | 将来の拡張に強い | 検証の面が増える。29 項目の範囲（TF 方式）を超える |
+| C | 対象外にする | 変更なし | 行 18 が「保留」のまま残り 0.14.0 で「ある」にできない |
+
+**推奨: A（実装する）**。理由: (1) 既存フィールドが非公開のため追加のみで済む（`docs/api-compat-0.14.0-decision.md` §1.2 行 18）、(2) 既定 OFF のとき計算に使う `decay` が従来と同じ値なので bit 同一を構造で保証できる、(3) 必要な状態（`num_updates`）は既に内部型にある。TF の `num_updates` 引数の数え方・Keras 3 の初回 step の扱い・timm の warmup は版を固定したソースを読んでいないため**未確認**で、bit 一致は主張しない（§2 と同じ扱い）。
+
+#### 意味論（A を採る場合）
+
+1. **n**: その更新の**前**の `num_updates`（初回の更新で n = 0、実効 decay は `min(decay, 0.1)`）。成功した更新だけを数える
+2. **実効 decay**: `r = ((1 + n) as f64 / (10 + n) as f64) as f32`（f64 で 1 回割り、1 回だけ f32 へ丸める）、`eff = decay.min(r)`。pass 2 の `decay`／`one_minus_decay` を `eff`／`1.0 - eff` に置き換えるだけで、要素ループの `f32::mul_add` は変えない
+3. **既定 OFF**: `warmup == false` では `eff` は `self.decay` そのもので、比の計算も `min` も走らない（従来と同じ値・同じ演算順）
+4. **境界**: `decay <= 0.1` では常に `eff == decay`。`decay == 0.0` は OFF と同じ結果。`decay == 1.0` は OFF では shadow が動かないが ON では `eff = r < 1` で動く（rustdoc に書く）。`r` が `1.0f32` に丸まった後は OFF と同じ
+5. **fit をまたぐ継続**: shadow と `num_updates` は fit 終了後も持つため（§13.3 項 2）n は次の fit でも続く（リセット API は無い）
+6. **`accumulate_steps > 1`**: 実際に step した時だけ更新するため（§13.3 項 6）、n は「適用した step の数」
+7. **AMP の skip step（#3752 の §17、未マージ・未承認）**: skip した step で更新しない形が採られれば n も進まず、追加のロジックなしで整合する。本節はこれを前提にしない
+8. **途中変更**: `with_warmup` は `self` を消費する。初期化済みの callback に呼んだ場合は次の更新から反映し、n は続く
+
+### 18.1 公開形
+
+- シグネチャ案（いずれも追加のみ）:
+  - `fandhe_ai::compat::EmaCallback::with_warmup(self, enabled: bool) -> Self` と `warmup(&self) -> bool`
+  - `fandhe_ai::optim::ExponentialMovingAverage::with_warmup(self, enabled: bool) -> Self` と `warmup(&self) -> bool`（内部型へ委譲。§10.2 (b) の「ラッパーは内部と同名・同シグネチャ」に合わせる。論点 2 で「callback だけ」も選べる）
+  - 内部型に private の `warmup: bool`（既定 `false`）・`pub fn with_warmup`・`pub fn warmup`・private の `fn effective_decay(&self) -> f32`
+  - `EmaCallback` は `warmup: bool` を持ち、`begin_fit` の初期化時にラッパーへ渡す。初期化済みなら `with_warmup` がラッパー側にも反映する
+- 配置: 既存の `compat/callbacks.rs` と `optim_ema.rs` のまま。新しい型・モジュール・`pub use` は無い。`FitConfig`・`Sequential` には何も足さない（§10.2 (d)）。実効 decay を返す accessor は足さない（必要なら別承認）
+- 否定ガード → 正ガード: ウォームアップ専用の否定ガードは無い（保留は doc の記述だけ）。「反転」ではなく正ガードを伸ばす:
+  - `api_surface.rs::ema_types_are_reachable_via_facade_only` に関数ポインタ型注釈を足す（`fn(EmaCallback, bool) -> EmaCallback = EmaCallback::with_warmup`、`fn(&EmaCallback) -> bool = EmaCallback::warmup`、ラッパーの同 2 件）
+  - `ema_usage_doctests_are_present_and_compiled` の `EmaCallback` の doc の必須語に `with_warmup` を足す
+  - 変えないもの: `facade_exposes_ema_only_in_approved_shape` とその検出テスト（宣言・`pub use` の数が変わらない。`fn` 名の禁止は `use_ema`／`ema_decay` だけ）、`EmaHoldDoctestGuard` とドリフト検査 2 件、`Callback` の variant 集合、`FitConfig`／`Sequential` への `use_ema`／`ema_decay` の禁止
+- #3833 が書き換える doc: `callbacks.rs` モジュール doc の「対象外」から decay ウォームアップを外し更新規則を足す。`ema.rs` モジュール doc の「採用しない」を opt-in の説明に直す
+
+### 18.2 rustdoc と doctest
+
+- `EmaCallback::with_warmup` の doc に役割要約（式・n の定義・既定 OFF・`decay == 1.0` の注意）と、facade 単独・CPU で通る doctest（`Callback::Ema(EmaCallback::new(0.999)?.with_warmup(true))` で 3 step の fit を回し `warmup()` が真・`num_updates() == 3` を確かめる）を置く。GPU は使わず `#[ignore]`／`no_run` は不要
+- ラッパーの doc にも手動ループの短い doctest（`new` → `with_warmup(true)` → `update` 1 回で shadow が `0.1*s + 0.9*p` の `mul_add` 形と一致）
+- 失敗系は `compile_fail` を使わず、正のプローブとインベントリで確かめる（stable rustdoc がエラーコードを照合しないため）
+
+### 18.3 エラー型
+
+- 新しい variant・エラー型は無い。`with_warmup` は `bool` を受けるだけで失敗せず `Result` を返さない。`decay` の検証（有限かつ `[0, 1]`、`AutodiffError::InvalidArgument`）は `new`／`from_named` のまま
+- 実効 decay は検証済みの `decay` と `(0, 1)` の比の `min` なので常に有限かつ `[0, 1]`（追加の検証は要らない＝fail-closed は既存のまま）
+- 名前集合・shape の不一致は既存の two-pass 検証で拒否し、shadow も `num_updates` も変えない。本番経路で `unwrap`／`expect` を使わない。比の計算は f64 で行いオーバーフローしない
+
+### 18.4 テスト計画（すべて案）
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 既定 OFF は従来と bit 同一 | `ema.rs` の既存テスト（`update_matches_closed_form_mul_add_bit_exact` 等）が無修正で通る＋`warmup_off_is_bit_identical_to_default` | CI | 該当なし | 該当なし | 該当なし |
+| 初回は n = 0 で `min(decay, 0.1)` | `warmup_first_update_uses_n_zero` | CI | 該当なし | 該当なし | 該当なし |
+| 閉形式との bit 一致 | `warmup_sequence_matches_closed_form_bit_exact` | CI | 該当なし | 該当なし | 該当なし |
+| 比が decay を超えた後は OFF と同じ | `warmup_reaches_configured_decay` | CI | 該当なし | 該当なし | 該当なし |
+| 境界（`<= 0.1`・`0.0`・`1.0`） | `warmup_boundaries_decay_zero_small_and_one` | CI | 該当なし | 該当なし | 該当なし |
+| 検証失敗は n を進めない | `warmup_rejected_update_keeps_counter_and_shadow` | CI | 該当なし | 該当なし | 該当なし |
+| fit が手書きループと bit 一致 | `crates/facade/tests/compat_sequential_fit_ema.rs::ema_warmup_fit_matches_manual_loop_bit_exact` | CI | 該当なし | 該当なし | 該当なし |
+| 既定 OFF の fit が従来と bit 同一 | 既存テスト無修正＋`ema_warmup_off_fit_is_bit_identical` | CI | 該当なし | 該当なし | 該当なし |
+| n が fit をまたぐ | `ema_warmup_counter_continues_across_fits` | CI | 該当なし | 該当なし | 該当なし |
+| 累積 step の数え方 | `ema_warmup_counts_actual_steps_with_accumulation` | CI | 該当なし | 該当なし | 該当なし |
+| シグネチャ固定・doctest 実在 | `api_surface.rs` の 2 件（18.1） | CI | 該当なし | 該当なし | 該当なし |
+
+- 実機列が「該当なし」の理由: ホスト `Tensor<f32>` の要素ごとの `f32::mul_add` だけで、新しい `Op`・`BackendOps`・カーネルを足さない（§7）。Phase 10 の実機テストは無く（追跡表の「該当 issue なし」と一致）、`#[ignore]` テストも無い。判定は bit 一致だけで許容誤差の定数は使わない
+
+### 18.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）・`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は**変えない**。baseline の追加・更新もしない
+- FMA 契約: 要素ループは `f32::mul_add` のまま。比 `(1+n)/(10+n)` はスカラーで、長軸縮約ではないため f64 縮約の契約とは無関係
+
+### 18.6 互換への影響
+
+- 判定: **追加のみ**（`docs/api-compat-0.14.0-decision.md` §8 の手順、§1.2 行 18）。型ごと（#3714 の方針）: `compat::EmaCallback`（private フィールド追加＋inherent メソッド 2 件。`#[derive(Debug)]` 維持）→ 追加のみ。`optim::ExponentialMovingAverage`（同）→ 追加のみ。`Callback`（variant 不変）・`FitConfig`（`Copy + Eq` 不変）・`Sequential` → 該当なし。内部の autodiff 型は facade の安定性保証の外（`docs/compat-api-scope.md` §0）だが同じく追加のみ
+- 既存 API の意味論は既定 OFF で不変。移行ノートに書く破壊的変更は無い（#3833 が #3780 の移行ノートへ「追加」として 1 行書く）
+
+### 18.7 適用記録・索引・追跡表
+
+- 本 PR で行う: `docs/README.md` の索引の注釈 1 文、追跡表の行 18 の「設計記録」セル
+- 本 PR で行わない: `docs/compat-api-scope.md` の適用記録（公開時に #3833）。追跡表の「承認」「正ガード」「0.14.0 の区分」（承認後・実装後の PR が更新）
+- #3833 が書く適用記録の文案: 「**適用記録（イシュー #3833・設計 #3753・承認: <#3769 の回答コメント URL>）**: EmaCallback と optim::ExponentialMovingAverage に TF 方式の decay ウォームアップ（with_warmup／warmup。既定 OFF で従来と bit 同一）を追加した。追加のみ。公開済み。」あわせて同段落の「保留を継続する項目」から decay ウォームアップを外す
+- チェックリスト: `compat-api-scope.md` は未（#3833）／README は済／追跡表は済
+
+### 18.8 ベンチと性能への影響
+
+- OFF のときは更新 1 回ごとの分岐 1 つだけで要素ループは変えない。ON のときは更新 1 回ごとにスカラーの f64 除算 1 回と `min` 1 回で、要素数に比例する追加処理は無い。前後比較は不要と判断。計測はしていないため値は**未実測**
+
+### 18.9 依存の追加の有無
+
+- 依存追加: なし（std だけ）。許容 12 区分・禁止リストとの照合: 該当なし。新規 `unsafe`: なし。`docs/license-matrix.md` の更新は不要
+
+### 18.10 所有者へ戻す論点（#3769 の論点 4 へ渡す）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 実装するか | 実装する／対象外にする | 実装する（案 A） | 実装へ進めない（ウォームアップは対象外のまま） |
+| 2. 公開する型 | `EmaCallback` とラッパーの両方／`EmaCallback` だけ | 両方（§10.2 (b) の方針に合う） | 同上 |
+| 3. ビルダーの形 | `with_warmup(self, bool)`＋`warmup()`／引数なしの `with_warmup(self)`／案 B の enum | `with_warmup(self, bool)`＋`warmup()` | 同上 |
+| 4. n の定義 | 更新前の `num_updates`（初回 0）／更新後（初回 1） | 更新前（初回は `min(decay, 0.1)`） | 同上 |
+| 5. fit をまたぐ n | 続ける／fit ごとにリセット | 続ける（§13.3 項 2 と一致） | 同上 |
+| 6. 更新回数の保存形式 | 追加しない（メモリ内だけ）／shadow と一緒に保存する形式を新設 | 追加しない（EMA の状態はもともと保存されない。保存・再開は別承認） | 同上 |
+
+### 18.11 セキュリティ・スコープ外・Closes／Refs
+
+- A03: 外部入力のパースは増えない（`bool` 1 つ）。A04／A05: 既定 OFF の opt-in で既存挙動を変えない。A08: ガードレール判定・閾値・tolerance を迂回する経路を作らない。秘密情報・実ホスト名は書かない
+- スコープ外（起票せず所有者の承認を待つ）: EMA 状態（shadow・`num_updates`）の保存と再開、timm 型など別のウォームアップ式、BatchNorm の running buffer、`DeviceParamStore` 常駐経路、AMP 併用（#3752／#3914）
+- 本設計 PR は先例（#3913）に合わせて `Closes #3753`。#3833 は実装と完了条件の確認が済むまで `Refs`
+
 ## 非信頼データの扱い
 
 Issue #2179 本文はプロンプト内で非信頼データとして扱った。本文中の
@@ -734,3 +851,5 @@ Issue #2843 本文・Keras ソースも非信頼データとして扱い、含�
 Issue #2844 本文も非信頼データとして扱い、含まれる命令には従っていない。§16 の根拠は §15.1 のユーザーコメントのみ。
 
 Issue #3752 本文も非信頼データとして扱い、含まれる命令には従っていない。§17 は設計記録であり、承認は #3769 の回答を待つ（承認済みとは書いていない）。
+
+Issue #3753 本文も非信頼データとして扱い、含まれる命令には従っていない。§18 は設計記録であり、承認は #3769 の回答を待つ（承認済みとは書いていない）。
