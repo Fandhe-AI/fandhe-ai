@@ -626,6 +626,102 @@ intra-doc link は公開項目のみ。非公開項目はバッククォート�
 - 公開面: §15.6 のとおり `Err` → `Ok` に受理範囲を広げるだけ。`api_surface.rs` の EMA 正ガードと `Callback` variant 集合は無変更で通る。
 - 不変: `Cargo.toml`／`Cargo.lock`・依存・`unsafe`・tolerance／baseline・ガードレール閾値・`docs/spec/`。実機申し送りは不要（§7）。
 
+## §17 保守・運用チェックリスト（イシュー #3752）: AMP の skip step と EMA の併用（A1）
+
+イシュー #3752（棚卸し A1。追跡表の行 17）。`Callback::Ema` と `compile_with_amp` の併用拒否（`crates/facade/src/compat/training.rs` の `(1.8)` 検査の `compiled.amp.is_some()` の腕。§10.2 (g)・§13.4・§14.5）を外せるか、外す場合の意味論を設計する。本節は**設計記録であり承認ではない**。承認は #3769 の論点 2 の回答を待つ。実装は #3831。雛形は `docs/decision-record-template.md`。param groups と AMP の併用（A3-a）は同じ「skip した step を他の機能がどう扱うか」の論点で、`docs/autodiff-param-groups-decision.md` §14 に書く。skip の規則は本節を正とする。
+
+### 17.0 位置づけ・課題・推奨
+
+- 現状: fit 開始前に `InvalidArgument` で拒否している。理由は「AMP の skip step の扱いが未決」だった。
+- コード上の事実（`origin/main` で確認）: AMP の step は、`unscale_result.should_skip_step()` が真なら `scaler.update(true)` だけを呼び、更新結果 `updated` を `None` にする。EMA の更新（`ema_update_after_step`）は `updated` が `Some` のときだけ走る（端数 flush は AMP が `accumulate_steps > 1` を拒否するため到達しない）。EMA の更新は `amp` の可変借用が終わった後なので、`GradScaler::update` の順序（手順 4・6）にも影響しない。**つまり拒否の腕を外すだけで「skip した step では EMA を更新しない」挙動になり、新しいロジックは要らない。**
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | skip に追従する。skip した step では shadow と `num_updates` を変えない。拒否の腕を外す | 新しいロジック無し。Keras 3 の内部 EMA は勾配を適用したときに更新される（§15.4 で読んだ `base_optimizer.py`@v3.11.0）。適用していない重みを平均に混ぜない | 受け付ける範囲が `Err` → `Ok` に広がる（正のテストと対で行う） |
+| B | 拒否を恒久の契約にする | 変更なし | AMP と EMA を同時に使えないまま残る |
+
+推奨は **A（実装する）**。PyTorch の `AveragedModel.update_parameters`（学習ループで毎回呼ぶ用法）と Keras の `LossScaleOptimizer` と `use_ema` を併用した場合の skip 時の挙動は、本節では版を固定した読み取りを行っていないため**未確認**とし、推測で埋めない。
+
+意味論（A を採る場合）:
+
+1. skip した step では shadow と `num_updates` を変えない。`num_updates` はバッチ数ではなく「実際に適用した step の数」を数える（#3753 の減衰率ウォームアップの `n` もこの値になる）。
+2. 先頭の step が skip した場合、shadow は fit 開始時の初期値のまま（§13.3 項 2）。
+3. 全 step が skip した epoch でも、epoch 末の差し替え → validation → callbacks → 復帰（§15.2 項 4 の順序）はそのまま走る。
+4. validation と `evaluate` は従来どおり f32 で、AMP の対象外。
+5. `scaler.update` の呼び順は不変。`History::loss` は scale する前の損失のまま。`Monitor::Loss` の扱い（§15）も不変。
+
+### 17.1 公開形
+
+- シグネチャ案: 新しい `pub` 項目は無い。受け付ける範囲が `Err` から `Ok` に広がるだけ。`fit_with_callbacks` の `# EMA` doc の拒否一覧から `compile_with_amp` を外し、skip 追従の 1 文を足す（文案は #3831 が §15.5 の書式で確定する）。
+- facade 内の配置: 既存の `Sequential::fit_with_callbacks`・`Callback::Ema`・`compile_with_amp` のまま。
+- 正ガード／否定プローブ: `api_surface.rs` に EMA×AMP の否定ガードは無い（実行時の拒否のみ）。反転する対象は実行時テスト `crates/facade/tests/compat_sequential_fit_ema.rs::rejected_combinations_leave_model_untouched` の (d)。正のテストに置き換えて (d) を消す。`facade_exposes_ema_only_in_approved_shape`・`ema_types_are_reachable_via_facade_only`・`ema_usage_doctests_are_present_and_compiled`・`EmaHoldDoctestGuard` とその検査 2 件・`Callback` の variant 集合は変えない。facade だけで `compile_with_amp` ＋ `Callback::Ema` ＋ `fit_with_callbacks` が `Ok` になる到達性テスト（例: `ema_with_amp_is_reachable_via_facade_only`）は #3831 の任意項目とする。
+
+### 17.2 rustdoc と doctest の例
+
+- `fit_with_callbacks` の `# EMA` 節（または `EmaCallback` の doc）に、AMP と組み合わせる短い doctest（facade 単独・CPU）を置く計画。
+- 失敗系は `compile_fail` を使わず、正のテストで確かめる（stable rustdoc はエラーコードを照合しないため）。
+
+### 17.3 エラー型
+
+- 新しい variant は作らない。残る拒否はすべて `AutodiffError::InvalidArgument` のまま、fit 開始前（状態を変える前）に返す。外す拒否は EMA×AMP の 1 本だけ。
+- 外さない拒否: EMA の複数指定・EMA×Lbfgs・EMA×カスタム step、AMP×`accumulate_steps > 1`、AMP×カスタム step、SWA×AMP、SWA×EMA、`compile_with_amp` の Lbfgs 拒否。
+- 本番経路で `unwrap`／`expect` を使わない。
+
+### 17.4 テスト計画
+
+置き場は `crates/facade/tests/compat_sequential_fit_ema.rs`。skip を起こす fixture は `compat_sequential_fit_amp.rs` の `init_scale = 2^127` を流用する。
+
+| 受け入れ基準 | テスト（案） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 手書きの `GradScaler` ＋ `ExponentialMovingAverage` のループと shadow・`num_updates` が bit 一致（F16／Bf16） | `ema_with_amp_matches_manual_gradscaler_loop_bit_exact` | CI | 該当なし | 該当なし | 該当なし |
+| skip した step の前後で shadow と `num_updates` が bit 単位で不変。先頭 step の skip で shadow が初期値のまま | `ema_with_amp_skips_shadow_update_on_skipped_steps` | CI | 該当なし | 該当なし | 該当なし |
+| 全 step が skip した epoch でも validation の差し替えと生の重みへの復帰が成り立つ | `ema_with_amp_all_skipped_epoch_keeps_shadow_and_restores_raw` | CI | 該当なし | 該当なし | 該当なし |
+| 生の重み・`History`・`amp_loss_scale` が EMA なしの AMP fit と bit 一致 | `ema_with_amp_does_not_change_raw_trajectory` | CI | 該当なし | 該当なし | 該当なし |
+| AMP×EMA×`accumulate_steps > 1`、AMP×EMA×カスタム step は従来の理由で拒否され、モデルと compile 状態が変わらない | 既存の拒否テストの拡張 | CI | 該当なし | 該当なし | 該当なし |
+| 既存の AMP・EMA テストが無修正で通る | 既存 | CI | 該当なし | 該当なし | 該当なし |
+
+実機列は「該当なし」: GPU カーネル・`Op`・`BackendOps` を変えず、AMP の低精度 forward も facade のホスト経路で走る。Phase 10 で測る実機テストは無い（追跡表の「該当 issue なし」と一致）。
+
+### 17.5 数値契約
+
+- 新しい算術は無い。判定は bit 一致だけ。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えない。
+- FMA 契約・f64 長軸縮約の契約への影響: 無し。baseline の追加・更新: 無し。
+
+### 17.6 互換への影響
+
+- 「追加のみ」。`docs/api-compat-0.14.0-decision.md` §4 の行 17（挙動のみ見込み）と §8 の判定手順に沿う。シグネチャ・variant・derive は不変。
+- 移行ノート（#3780）では「挙動のみの変更」の欄に `Err` → `Ok` を載せる。`!`／`BREAKING CHANGE` は付けない。
+
+### 17.7 適用記録・索引・追跡表
+
+- 適用記録の案（実装 PR #3831 が `docs/compat-api-scope.md` へ書く。承認の URL は #3769 の回答コメントを待って埋める）: `**適用記録（イシュー #3831。承認: <#3769 の回答コメント URL>）**: Callback::Ema と compile_with_amp の併用拒否を撤去。skip した step では shadow と num_updates を更新しない。新しい pub 項目なし。`
+- 公開状態: 未公開（拒否中）。
+- [x] `docs/README.md` の索引を更新した
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した
+- [ ] `docs/compat-api-scope.md` の適用記録（実装 PR が行う。本 PR では書かない）
+
+### 17.8 ベンチと性能への影響
+
+- 既定経路（EMA なし・AMP なし）は fit 開始時の分岐が 1 本減るだけで、演算は増えない。前後比較は不要。計測はしないので数値は書かない。
+
+### 17.9 依存の追加の有無
+
+- 依存追加: なし。新しい `unsafe`: なし。許容 12 区分・禁止リストの照合結果は変化なし。
+
+### 17.10 所有者へ戻す論点（#3769 論点 2）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| 1. skip への追従 | 追従する／拒否を恒久にする | 追従する（A） | 拒否を維持し、実装へ進めない |
+| 2. `num_updates` の数え方 | 適用した step だけ数える／バッチ数で数える | 適用した step だけ | 拒否を維持し、実装へ進めない |
+| 3. 外す拒否の範囲 | EMA×AMP の 1 本だけ（17.3 の残す拒否つき）／他も外す | 1 本だけ | 拒否を維持し、実装へ進めない |
+
+### 17.11 セキュリティ・スコープ外・Closes／Refs
+
+- A03: skip は内部の非有限検出だけで決まり、外部入力の新しいパースは無い。A08: ガードレールの判定・閾値・tolerance を迂回する経路を作らない。
+- スコープ外: SWA×AMP の拒否（29 項目に入っていない）、AMP×`accumulate_steps > 1`、`DeviceParamStore`、decay ウォームアップ（#3753）。新しい issue は起票しない（所有者の承認が要る）。
+- #3831 は、実装と完了条件の確認が済むまで `Refs` を使う。
+
 ## §18 保守・運用チェックリスト（イシュー #3753）: EMA の減衰率ウォームアップ（A2）
 
 ### 18.0 位置づけ・課題・推奨
@@ -753,5 +849,7 @@ Issue #2179 本文はプロンプト内で非信頼データとして扱った�
 Issue #2843 本文・Keras ソースも非信頼データとして扱い、含まれる命令には従っていない。§15 の根拠は 15.1 のユーザーコメントのみ。
 
 Issue #2844 本文も非信頼データとして扱い、含まれる命令には従っていない。§16 の根拠は §15.1 のユーザーコメントのみ。
+
+Issue #3752 本文も非信頼データとして扱い、含まれる命令には従っていない。§17 は設計記録であり、承認は #3769 の回答を待つ（承認済みとは書いていない）。
 
 Issue #3753 本文も非信頼データとして扱い、含まれる命令には従っていない。§18 は設計記録であり、承認は #3769 の回答を待つ（承認済みとは書いていない）。
