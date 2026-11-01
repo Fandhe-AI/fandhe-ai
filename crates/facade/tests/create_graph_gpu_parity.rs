@@ -21,8 +21,9 @@
 //!
 //! S3（§48.4）: Metal の `gemm_fp32_strict` は `gemm` に委譲され split-K を通りうる。
 //! 各族は [`SplitKShapes`] で子テープ構造内の MatMul 形状を宣言し、macOS では
-//! `should_split_k` が `None` であることを厳密に検査する。発火する形状は主表から
-//! 外す（論点 8＝スコープ外）。結合順序の異なる経路が避けられない族だけが
+//! `Judge::Strict` のケースは `should_split_k` が `None` であることを厳密に検査する。
+//! `Judge::Baseline` のケースは非発火検査を課さず、宣言の形式検査だけを行う。Strict で
+//! 発火する形状は主表から外す（論点 8＝スコープ外）。結合順序の異なる経路が避けられない族だけが
 //! `Judge::Baseline` の Metal 行（`BaselineDevice::Metal`）に回る。Linux では
 //! Metal の行が cfg で外れ、宣言の形式検査だけが CI で走る。
 //!
@@ -112,11 +113,16 @@ fn validate_split_k_decl(d: &SplitKShapes) -> Result<(), String> {
     }
 }
 
-/// macOS 限定の厳密検査。`Listed` の各形状で split-K が発火しないことを確かめる。
+/// macOS 限定の検査。宣言の形式検査は全ケース、`Listed` の split-K 非発火は `Strict` のみ。
 /// `should_split_k` は `backend-metal` が `pub use` 済みの既存項目（公開面は不変）。
 #[cfg(target_os = "macos")]
 fn check_split_k_not_fired(case: &Case) -> Result<(), String> {
     validate_split_k_decl(&case.split_k).map_err(|e| format!("{}:S3: {e}", case.name))?;
+    // 非発火の必須検査は Strict 対象に限る。Baseline 対象は split-K が避けられない形状を
+    // Listed に登録でき、承認済み baseline の judge へ到達させる（宣言の形式検査は上で維持）。
+    if !matches!(case.judge, Judge::Strict) {
+        return Ok(());
+    }
     if let SplitKShapes::Listed(shapes) = case.split_k {
         for &(m, n, k) in shapes {
             if fandhe_ai_backend_metal::should_split_k(m, n, k).is_some() {
