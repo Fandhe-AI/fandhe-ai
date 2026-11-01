@@ -416,7 +416,6 @@ where
 
 #[test]
 fn j5_unsupported_ops_are_rejected_fail_closed() {
-    assert_rejected_both(&[2, 3], "max", |_, x| x.max(None));
     assert_rejected_both(&[2, 2, 2], "matmul rank3", |tp, x| {
         x.matmul(&c(tp, seq(8, 2.0), &[2, 2, 2]))
     });
@@ -790,7 +789,9 @@ fn m5_unsupported_ops_and_bad_child_are_rejected_with_two_parent_nodes() {
     let tape = new_tape();
     let x1 = tape.var(&t(seq(6, 1.0), &[2, 3]));
     let x2 = tape.var(&t(seq(6, 2.0), &[2, 3]));
-    let y = x1.add(&x2).unwrap().max(None).unwrap();
+    // 非対象 Op の代表は A 区分（恒久対象外）の `Op::Custom`（`max` は #3789 で対象化）。
+    let sum = x1.add(&x2).unwrap();
+    let y = tape.custom(Arc::new(IdentityCustomFn), &[sum]).unwrap();
     let v = t(seq(6, 5.0), &[2, 3]);
     let child = new_tape();
     let len = tape.len();
@@ -1174,7 +1175,6 @@ fn c7_zero_paths_and_node_counts() {
 
     // (e) 1 段目の拒否: Backward・親 +2・child と grand は空のまま。
     let rejected: Vec<RejectedCase> = vec![
-        ("max", vec![2, 3], Box::new(|_, x| x.max(None))),
         (
             "matmul rank3",
             vec![2, 2, 2],

@@ -7909,7 +7909,7 @@ fn max_vjp(
 /// [`max_vjp`] doc 参照。`out_value`（縮約後の最大値または最小値）と
 /// `==` 一致する `dim` 軸上の最初の要素へ `g` を伝播する、最大／最小
 /// 非依存の VJP 実体（イシュー #1720 で `max_vjp` から改称・共有化）。
-fn extremum_first_match_vjp(
+pub(crate) fn extremum_first_match_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
     out_value: &Tensor<f32>,
@@ -8006,7 +8006,7 @@ fn extremum_first_match_vjp(
 /// **総量保存**: 丸め誤差を除き各 lane 内で `sum(grad) == g`（`k` が
 /// `2^24` を超えると `k as f32` 変換で丸まる既知の限界があるが、実用
 /// 上想定しない極端なケース）。
-fn extremum_even_split_vjp(
+pub(crate) fn extremum_even_split_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
     out_value: &Tensor<f32>,
@@ -8083,6 +8083,123 @@ fn extremum_even_split_vjp(
         }
     }
     build_tensor(grad, &in_shape)
+}
+
+/// 各 lane（`dim` 軸に沿った 1 本の列。`dim = None` は全要素で 1 lane）の走査規則を
+/// 1 か所に集めた共通イテレータ（`create_graph` の選択縮約 cgrad 用。イシュー #3789・
+/// 決定記録 `docs/autodiff-higher-order-grad-decision.md` §34）。
+///
+/// 各 lane について `visit(target, positions)` を呼ぶ。`target` はその lane の
+/// forward 記録値、`positions` は lane の要素が入力 buffer 上で持つ線形位置の列
+/// （outer×axis×inner の順）。`out_value` の要素数が想定と不一致の lane は
+/// 1 階 VJP（[`extremum_first_match_vjp`]・[`extremum_even_split_vjp`]）と同様
+/// `debug_assert!` で検知しつつ安全側（visit しない = マスクなし）へ倒す。
+fn for_each_extremum_lane(
+    in_shape: &[usize],
+    in_len: usize,
+    dim: Option<usize>,
+    out_data: &[f32],
+    mut visit: impl FnMut(f32, &[usize]),
+) {
+    match dim {
+        None => {
+            if let Some(&target) = out_data.first() {
+                let positions: Vec<usize> = (0..in_len).collect();
+                visit(target, &positions);
+            }
+        }
+        Some(axis) => {
+            let (Some(head), Some(&axis_len), Some(tail)) = (
+                in_shape.get(..axis),
+                in_shape.get(axis),
+                in_shape.get(axis + 1..),
+            ) else {
+                debug_assert!(false, "extremum lane: dim が rank 範囲外（契約違反）");
+                return;
+            };
+            let outer: usize = head.iter().product();
+            let inner: usize = tail.iter().product();
+            let mut positions = Vec::with_capacity(axis_len);
+            for o in 0..outer {
+                for i in 0..inner {
+                    let Some(&target) = out_data.get(o * inner + i) else {
+                        debug_assert!(
+                            false,
+                            "extremum lane: out_value の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                        );
+                        continue;
+                    };
+                    positions.clear();
+                    positions.extend((0..axis_len).map(|a| (o * axis_len + a) * inner + i));
+                    visit(target, &positions);
+                }
+            }
+        }
+    }
+}
+
+/// [`extremum_first_match_vjp`] が上流勾配を置く位置のマスク（`Max`／`Min` の
+/// `create_graph` 用。イシュー #3789）。各 lane で `out_value` と IEEE 754 の `==` で
+/// 一致する最初の 1 位置だけが `true`。NaN は全不一致（lane 全体が `false`）。
+/// `[0.0, -0.0]` は `==` で一致するため最初の位置が選ばれる（1 階と同じ規則）。
+pub(crate) fn extremum_first_match_mask(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_value: &Tensor<f32>,
+) -> Vec<bool> {
+    let in_data = dense_vec(input);
+    let out_data = dense_vec(out_value);
+    let mut mask = vec![false; in_data.len()];
+    for_each_extremum_lane(
+        input.shape(),
+        in_data.len(),
+        dim,
+        &out_data,
+        |target, pos| {
+            if let Some(&p) = pos
+                .iter()
+                .find(|&&p| in_data.get(p).is_some_and(|&v| v == target))
+            {
+                mask[p] = true;
+            }
+        },
+    );
+    mask
+}
+
+/// [`extremum_even_split_vjp`] が `g / k` を置く位置のマスクと、各位置が属する lane の
+/// 一致数 `k`（`Amax`／`Amin` の `create_graph` 用。イシュー #3789）。
+/// 返す `k` は入力と同じ並びの `f32`。一致位置にはその lane の一致数、それ以外
+/// （`k == 0` の lane を含む）は除算を安全にするため `1.0`。`k` は整数カウントなので
+/// 1 階の `g_val / (k as f32)` と同じ値になる。
+pub(crate) fn extremum_all_match_mask(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_value: &Tensor<f32>,
+) -> (Vec<bool>, Vec<f32>) {
+    let in_data = dense_vec(input);
+    let out_data = dense_vec(out_value);
+    let mut mask = vec![false; in_data.len()];
+    let mut k_safe = vec![1.0f32; in_data.len()];
+    for_each_extremum_lane(
+        input.shape(),
+        in_data.len(),
+        dim,
+        &out_data,
+        |target, pos| {
+            let hits: Vec<usize> = pos
+                .iter()
+                .copied()
+                .filter(|&p| in_data.get(p).is_some_and(|&v| v == target))
+                .collect();
+            let k = hits.len();
+            for p in hits {
+                mask[p] = true;
+                k_safe[p] = k as f32;
+            }
+        },
+    );
+    (mask, k_safe)
 }
 
 /// `Op::Var`（`Var::var`）の VJP: `da_i = g · 2(x_i − mean) / (n −
@@ -15307,5 +15424,104 @@ release ビルドでも検知できるよう `assert!` を使う）"
             matches!(err, AutodiffError::Shape(ShapeError::ElementCountOverflow)),
             "sp_in_numel の checked_mul overflow は ElementCountOverflow を返すはず（実際: {err:?}）"
         );
+    }
+}
+
+#[cfg(test)]
+mod extremum_mask_tests {
+    //! `extremum_first_match_mask`／`extremum_all_match_mask` が 1 階 VJP
+    //! （`g = 1`）の非ゼロ位置・`1/k` と一致することの固定（イシュー #3789）。
+    use super::*;
+
+    fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
+        build_tensor(data, shape)
+    }
+
+    fn out_of(input: &Tensor<f32>, dim: Option<usize>, is_max: bool) -> Tensor<f32> {
+        let data = dense_vec(input);
+        let shape = input.shape().to_vec();
+        let pick = |it: &mut dyn Iterator<Item = f32>| -> f32 {
+            let mut best: Option<f32> = None;
+            for v in it {
+                if v.is_nan() {
+                    return f32::NAN;
+                }
+                best = Some(match best {
+                    None => v,
+                    Some(b) if (is_max && v > b) || (!is_max && v < b) => v,
+                    Some(b) => b,
+                });
+            }
+            best.unwrap_or(f32::NAN)
+        };
+        match dim {
+            None => build_tensor(vec![pick(&mut data.iter().copied())], &[]),
+            Some(axis) => {
+                let outer: usize = shape[..axis].iter().product();
+                let len = shape[axis];
+                let inner: usize = shape[axis + 1..].iter().product();
+                let mut out = Vec::new();
+                for o in 0..outer {
+                    for i in 0..inner {
+                        out.push(pick(&mut (0..len).map(|a| data[(o * len + a) * inner + i])));
+                    }
+                }
+                let mut os = shape.clone();
+                os.remove(axis);
+                build_tensor(out, &os)
+            }
+        }
+    }
+
+    fn cases() -> Vec<(Vec<f32>, Vec<usize>)> {
+        vec![
+            (vec![1.0, 3.0, 3.0, -2.0, 3.0, 0.5], vec![2, 3]),
+            (vec![0.0, -0.0, 0.0, -0.0], vec![2, 2]),
+            (vec![f32::NAN, 1.0, 2.0, 2.0], vec![2, 2]),
+            (vec![5.0, 1.0, 5.0, 2.0, 5.0, 5.0, 0.0, 5.0], vec![2, 2, 2]),
+        ]
+    }
+
+    #[test]
+    fn first_match_mask_equals_first_order_nonzero_positions() {
+        for (data, shape) in cases() {
+            let x = t(data, &shape);
+            for dim in std::iter::once(None).chain((0..shape.len()).map(Some)) {
+                for is_max in [true, false] {
+                    let out = out_of(&x, dim, is_max);
+                    let g = build_tensor(vec![1.0; out.numel()], out.shape());
+                    let want = dense_vec(&extremum_first_match_vjp(&x, dim, &out, &g));
+                    let got = extremum_first_match_mask(&x, dim, &out);
+                    let want_mask: Vec<bool> = want.iter().map(|&v| v != 0.0).collect();
+                    assert_eq!(
+                        got,
+                        want_mask,
+                        "dim={dim:?} max={is_max} data={:?}",
+                        dense_vec(&x)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_match_mask_and_k_equal_first_order_shares() {
+        for (data, shape) in cases() {
+            let x = t(data, &shape);
+            for dim in std::iter::once(None).chain((0..shape.len()).map(Some)) {
+                for is_max in [true, false] {
+                    let out = out_of(&x, dim, is_max);
+                    let g = build_tensor(vec![1.0; out.numel()], out.shape());
+                    let want = dense_vec(&extremum_even_split_vjp(&x, dim, &out, &g));
+                    let (mask, k) = extremum_all_match_mask(&x, dim, &out);
+                    for (i, &w) in want.iter().enumerate() {
+                        assert_eq!(mask[i], w != 0.0, "mask i={i} dim={dim:?}");
+                        let share = if mask[i] { 1.0f32 / k[i] } else { 0.0 };
+                        assert_eq!(share.to_bits(), w.to_bits(), "share i={i} dim={dim:?}");
+                        assert!(k[i] >= 1.0);
+                    }
+                }
+            }
+        }
     }
 }

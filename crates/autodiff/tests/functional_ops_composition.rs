@@ -465,8 +465,8 @@ fn c6_stays_differentiable_and_side_effects() {
 fn c7_fail_closed_on_composition() {
     let tape = new_tape();
     let x = tape.var(&t(seq(12, 1.0), &[4, 3]));
-    // create_graph 対象外の Op（max）を含むクロージャ: vmap と 1 階 vjp は成功し hvp は拒否。
-    let y = vmap(&tape, &x, 0, |s| s.max(None)).unwrap();
+    // create_graph 対象外の Op（selu。max は #3789 で対象化）を含むクロージャ: vmap と 1 階 vjp は成功し hvp は拒否。
+    let y = vmap(&tape, &x, 0, |s| s.selu()?.sum(None)).unwrap();
     let u = t(seq(4, 2.0), &[4]);
     vjp(&tape, &y, &x, &u).unwrap();
     let loss = y.sum(None).unwrap();

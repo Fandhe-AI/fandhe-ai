@@ -399,11 +399,11 @@ fn j4_hessian_propagates_create_graph_rejections_without_touching_child() {
     ));
     assert_eq!(child.len(), 1);
 
-    // 非対象 Op（`Max`）。
+    // 非対象 Op（`Selu`。`Max` は #3789 で対象化）。
     let tape2 = new_tape();
     let child2 = new_tape();
     let x2 = tape2.var(&t(vec![1.0, 2.0], &[2]));
-    let loss2 = x2.max(None).unwrap();
+    let loss2 = x2.selu().unwrap().sum(None).unwrap();
     assert!(matches!(
         hessian(&tape2, &loss2, &x2, &child2),
         Err(AutodiffError::Backward(_))

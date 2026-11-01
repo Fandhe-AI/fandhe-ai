@@ -2509,6 +2509,9 @@ impl Op {
     /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §26）で `true`
     /// になった（残る 16 variant は fail-closed のまま。§26 の表）。
     ///
+    /// 選択縮約 4 variant（`Max`・`Min`・`Amax`・`Amin`）はイシュー #3789（決定記録 §34）で
+    /// `true` になった。`OrderSelect`・`MedianAll`・`Quantile` は #3790 まで `false`。
+    ///
     /// `Pad`・`PadMode`・`MaskedFill` はイシュー #3084（決定記録 §29）で `true`
     /// になった（設計 doc §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
     ///
@@ -2600,18 +2603,20 @@ impl Op {
             | Op::Inv { .. }
             | Op::Solve { .. }
             | Op::Det { .. }
-            | Op::SlogdetLogAbsDet { .. } => true,
+            | Op::SlogdetLogAbsDet { .. }
+            // 選択縮約 4 variant（イシュー #3789・決定記録 §34）。Max／Min は V2（先勝ちマスク＋
+            // where_cond）、Amax／Amin は V3（均等分配）。
+            | Op::Max { .. }
+            | Op::Min { .. }
+            | Op::Amax { .. }
+            | Op::Amin { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
-            Op::Max { .. }
-            | Op::Var { .. }
+            Op::Var { .. }
             | Op::VectorNorm { .. }
             | Op::Std { .. }
             | Op::LogSumExp { .. }
             | Op::PNorm { .. }
-            | Op::Amax { .. }
-            | Op::Amin { .. }
-            | Op::Min { .. }
             | Op::BceLoss { .. }
             | Op::CrossEntropyLossWithOptions { .. }
             | Op::CosineEmbeddingLoss { .. }
@@ -5292,6 +5297,56 @@ mod conv3d_op_tests {
                 weight: NodeId(1),
                 bias: None,
                 params: p,
+            }
+            .supports_create_graph()
+        );
+    }
+
+    /// イシュー #3789: 選択縮約 4 variant は対象。`OrderSelect`・`MedianAll`・`Quantile`（#3790）と
+    /// 統計縮約（`Nansum`・`Nanmean`）は fail-closed のまま。兄弟 PR が族を反転したらこの一覧を直す。
+    #[test]
+    fn selection_reduce_family_supports_create_graph() {
+        let i = NodeId(0);
+        assert!(
+            Op::Max {
+                input: i,
+                dim: None
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::Min {
+                input: i,
+                dim: Some(0)
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::Amax {
+                input: i,
+                dim: None
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::Amin {
+                input: i,
+                dim: Some(1)
+            }
+            .supports_create_graph()
+        );
+        assert!(!Op::MedianAll { input: i }.supports_create_graph());
+        assert!(
+            !Op::Nansum {
+                input: i,
+                dim: None
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            !Op::Nanmean {
+                input: i,
+                dim: None
             }
             .supports_create_graph()
         );
