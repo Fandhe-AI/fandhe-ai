@@ -909,8 +909,9 @@ impl Tape {
     ///
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `max`／`min`／`amax`／`amin` は
-    /// §34（#3789）で対象になった。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
+    /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1057,7 +1058,8 @@ impl Tape {
     ///
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1162,7 +1164,8 @@ impl Tape {
     /// （`VarF64`・低精度 forward は対象外）。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1224,7 +1227,8 @@ impl Tape {
     /// bit 同一は契約にしない。計算量は親 backward 1 回＋子 backward 1 回。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1324,7 +1328,8 @@ impl Tape {
     /// 計算量は入力数に依らず親 backward 1 回＋子 backward 1 回。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1407,7 +1412,8 @@ impl Tape {
     /// 計算量は親 backward 1 回＋子 backward 1 回＋孫テープへの記録 1 回。
     /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
-    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大。選択縮約の `max`／`min`／`amax`／`amin` は §34〈#3789〉）。
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
+    /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
