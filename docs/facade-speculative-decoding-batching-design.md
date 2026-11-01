@@ -822,3 +822,164 @@ tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec`・`generat
 ### 28.3 変えないもの・申し送り
 
 tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec` は不変。実機（CUDA／Metal）のバッチ経路は未実測で、`docs/perf/logs/speculative-batching-facade-2934/README.md` の「#3107 追記」に測定コマンドと空の記入欄を置き、Phase 8（#3171・#3172）へ申し送る。対象外: B > 1 の speculative、padding 付き prefill、持続的なバッチキャッシュ、paged attention との結線、EOS 停止。
+
+## 29. `caches` で表せない内部状態を持つモデルの speculative decoding・連続バッチング（イシュー #3763・親 #3719）
+
+§19.10 で「保留・スコープ外。需要が出たら案 B から別 issue」とした内部状態保持型（RNN の隠れ状態・SSM の再帰状態など、`KvCache` で表せない状態を持つモデル）を、案 B（別 trait と専用の入口）で公開形まで具体化する設計記録である。雛形は `docs/decision-record-template.md`（#3716）。docs のみの変更で、`crates/*/src`・依存・`unsafe`・`docs/spec`・tolerance・baseline は変更しない。
+
+### 29.0 位置づけ・承認根拠・境界・調査事実
+
+- **承認根拠: 未承認（#3770 論点 4 の回答待ち）**。§19.10 は保留だったため D-A（#3018 コメント 6111643437）の範囲に入らない。本節は D-A を承認根拠として引かず、得ていない承認は書かない
+- 項目番号: issue・#3770・#3848・#3849 は「項目 30」と書くが、追跡表 `docs/compat-matrix-ari-tracker.md` ではこの項目は **# 29**（推論・サービング行）。更新するのは # 29 行だけ
+- 後続 issue: #3848（autodiff の trait・`stateful.rs`・`generate_speculative_stateful`・単体／結合テスト。facade 変更なし）、#3849（`step_stateful`・facade の `pub use`・`api_surface.rs` の反転と新設・doctest・適用記録・追跡表・#3780 移行ノート。#3848 に依存）
+- 境界（スコープ外）: B > 1 の stateful speculative、`step_batched` の stateful 版（行方向の状態の連結を一般には定義できない）、stateful 版の paged attention、KV 型と stateful 型を混在させる入口、`generate_stateful`（論点 3）
+
+調査事実（基準 `origin/main` = `16d285c0a`）:
+
+| 事実 | 出典 |
+|---|---|
+| `AutoregressiveModel` は `num_kv_layers`・`forward_step` の 2 メソッドだけ。`generate_public_shape_violations` がこの 2 つに固定し関連型・関連定数も禁止 | `crates/autodiff/src/generate/mod.rs:252` |
+| `generate_speculative` は検査順 8 で `num_kv_layers() == 0` を拒否する（§19 は「検査順 9」と書くが、現行コードでは 8 番目。差分は事実として注記）。巻き戻しは非公開の `kv_rewind`（案 (i)） | `crates/autodiff/src/generate/speculative.rs:325`・`:394` |
+| `BatchScheduler` は非ジェネリック。要求ごとの `Active` が `caches: Vec<KvCache>`・`rng`・token 列を持つ。`admit` は `num_kv_layers()` 個の `KvCache` を作る | `crates/autodiff/src/generate/scheduler.rs:145`・`:442` |
+| `BatchScheduler` の pub fn は 8 件（`new`・`queued_len`・`active_len`・`submit`・`step`・`step_batched`・`take_finished`・`take_failed`） | 同 `:354`〜`:587` |
+| `Active` は `VecDeque`／`Vec`／`Arc` 共有の `Tensor`／`Generator`／`AutodiffError` で構成。`error.rs` に `Box<dyn`・`Rc<` は無い。現状 `Send + Sync` と見込むが、正のプローブでの確認は #3849 の最初の作業とする（本節では未実測） | `crates/autodiff/src/error.rs` |
+| facade `inference/mod.rs` の `pub use` は 4 文。`inference_module_reexports_exactly_expected_surface` が固定 | `crates/facade/src/inference/mod.rs:356`〜`:377`・`crates/facade/tests/api_surface.rs:24369` |
+
+### 29.0.1 選択肢比較
+
+| 案 | 内容 | 判定 |
+|---|---|---|
+| B1 | 状態をモデル内部に持たせ（`RefCell` 等）、`&self` の `save`／`restore` で退避・復元する | 不採用。要求ごとに分けるにはスケジューラが毎 step・毎要求で restore → forward → save と入れ替える必要があり、忘れると要求間で状態が黙って混ざる（fail-open）。trait の「モデルは不変・状態は外から借りる」にも反する |
+| **B2（推奨）** | 状態を `caches` と同じく呼び出し側が持ち、`&mut Self::State` で渡す。退避・復元は trait の明示メソッド | 採用。要求ごとの分離は「要求ごとに `State` を 1 つ持つ」だけで済み、`&self` のモデルを共有できる |
+| 対象外 | 実装しない（需要の記録が無い） | 次点。論点 1 で所有者に問う |
+
+### 29.0.2 推奨形（B2）
+
+新モジュール `crates/autodiff/src/generate/stateful.rs`（`generate/mod.rs` に `pub mod stateful;` を 1 行足す）に置く。`speculative.rs` の「自由な pub fn は 1 件」というインベントリを壊さないため。
+
+```rust
+pub trait StatefulAutoregressiveModel {
+    type State;
+    fn init_state(&self) -> Result<Self::State, AutodiffError>;
+    fn forward_step_stateful(&self, new_ids: &Tensor<i32>, state: &mut Self::State)
+        -> Result<Tensor<f32>, AutodiffError>;
+    fn save_state(&self, state: &Self::State) -> Result<Self::State, AutodiffError>;
+    fn restore_state(&self, state: &mut Self::State, saved: Self::State)
+        -> Result<(), AutodiffError>;
+}
+
+pub fn generate_speculative_stateful<T, D>(
+    target: &T, draft: &D, input_ids: &Tensor<i32>,
+    config: &GenerateConfig, spec: &SpeculativeConfig,
+) -> Result<Tensor<i32>, AutodiffError>
+where T: StatefulAutoregressiveModel + ?Sized, D: StatefulAutoregressiveModel + ?Sized;
+
+impl BatchScheduler {
+    pub fn step_stateful<M>(&mut self, model: &M) -> Result<usize, AutodiffError>
+    where M: StatefulAutoregressiveModel + ?Sized, M::State: Send + Sync + 'static;
+}
+```
+
+判断の理由:
+
+- `AutoregressiveModel` とは独立の trait にする（supertrait にしない）。純 RNN に意味のある `forward_step` を実装させずに済み、`AutoregressiveModel` も 2 メソッドのまま保てる（案 A を採らない理由と同じ）
+- `init_state` は明示メソッドにする（`Default` 境界にしない）。スケジューラが要求ごとに新しい状態を作る必要があり、失敗を型付きエラーで返せる
+- `Clone` 境界ではなく `save_state`／`restore_state` にする。モデル側が安い snapshot（`Arc` 共有等）や整合検査を実装できる。`save`／`restore` だけの名前は `model_io` や利用者 trait と衝突しうるため `_state` を付ける
+- KV を持つモデルは `State = Vec<KvCache>` 等にして、状態の中のキャッシュを進めればよい。target と draft は両方とも新 trait を実装する（混在の入口は作らない）
+- facade は `inference/mod.rs` に 5 文目の `pub use fandhe_ai_autodiff::generate::stateful::{StatefulAutoregressiveModel, generate_speculative_stateful};` を足す。`step_stateful` は inherent メソッドなので自動的に公開される。既存 4 文は変えない
+
+不変条件・fail-closed:
+
+- `generate_speculative_stateful` の検査順は `generate_speculative` の 1〜7（config 矛盾 → `k == 0` → rank → `T == 0` → `B != 1` → `max_length < T` → オーバーフローと `isize::MAX` 超過）を引き継ぐ。8 の `num_kv_layers() == 0` 拒否は**置かない**（新 trait に `num_kv_layers` が無く、純 RNN は KV 層 0 が正当なため。既存入口と検査が違う唯一の点）。その後 `init_state`（target → draft の順）で、`Err` はそのまま伝播する
+- 巻き戻しは `kv_rewind` と同じ案 (i) の構造にする。draft の k 手と target の検証 forward の前に `save_state` で退避し、棄却時に `restore_state` で戻して受理分だけ再 forward する。`restore_state` や再 forward が失敗したら、`Err` を返す前に退避時点へ戻す努力をする。`kv_rewind` は非公開のまま、`KvCache` の公開メソッドは 9 件のまま
+- 状態の長さを外から検査できないため、フレームワークが自分で数える token 数で制御し、状態の整合は利用者の契約として rustdoc に書く
+- サンプリング版の別入口は作らない。`generate_speculative` と同じ strategy 分岐で受け、§20 の判定契約と §20.4・§25.2 の RNG 消費順を引き継ぐ
+- `step_stateful` は `admit` を共有する。状態は `Active` の非公開フィールド `Option<Box<dyn Any + Send + Sync>>` に型消去して持ち、`downcast_mut` で取り出す（`unsafe` なし）。次はすべて要求単位で `take_failed` に積み、ほかの要求は続ける（既存の「step 間で異なるモデル」と同じ扱い）:
+  (a) `step`／`step_batched` が stateful の要求に当たった（`step_batched` は束ねる行から外して失敗にする）、(b) `step_stateful` が KV 形の要求に当たった、(c) downcast が失敗した（step 間で状態型の違うモデルが渡された）、(d) `init_state` が `Err`。同じ型の別インスタンスは検出できず、利用者の保証事項として rustdoc に書く（§17.5 と同じ）
+- `AutodiffError` に新 variant は足さない（`InvalidArgument` を使う）。`Debug` は件数だけを出し、状態・token を出さない
+
+### 29.1 公開形
+
+- シグネチャ案・配置: 上記（§29.0.2）。`fandhe_ai::inference::{StatefulAutoregressiveModel, generate_speculative_stateful}` と `BatchScheduler::step_stateful`
+- `api_surface.rs` で反転・拡張・新設するガード（実装は #3849。行番号は基準 `16d285c0a`）:
+  - `inference_module_reexports_exactly_expected_surface`（`:24369`）: 承認形を 4 文から 5 文へ。新定数 `STATEFUL_APPROVED_REEXPORT` を足し、自己テストに欠落・別名・glob の変異を足す
+  - `facade_exposes_speculative_scheduler_items_only_in_approved_shape`（`:40387`）と `_detects_each_category`（`:40408`）: 走査トークンに `stateful`・`StatefulAutoregressiveModel`・`generate_speculative_stateful` を足し、期待を 2 件から 3 件へ
+  - `speculative_scheduler_public_shape_is_pinned`（`:40807`）と `speculative_scheduler_public_shape_violations`: `impl BatchScheduler` を 8 件から 9 件（`step_stateful`）へ。`stateful.rs` のインベントリ（trait メソッド 4 つ・関連型 `State` 1 つ・自由な pub fn は `generate_speculative_stateful` の 1 件）を足し、変異の自己テストも足す
+  - `speculative_scheduler_items_are_reachable_via_facade_inference_path`（`:40475`）: `generate_speculative_stateful::<Toy, Toy>` と `BatchScheduler::step_stateful::<Toy>` を関数ポインタ型注釈で固定するプローブと trait 実装のプローブを足す
+  - `speculative_scheduler_usage_doctests_are_present_and_compiled`（`:40570`）: stateful の成功例を必須トークンに足す（`fandhe_ai_autodiff` を使わない）
+  - 新設: `BatchScheduler: Send + Sync` の正のプローブ（`:42973` の `assert_send` パターン）。型消去の箱を足す前の main で通ることを先に確かめる
+  - 変えないもの: `generate_public_shape_violations`（案 A を採らなかったことの否定ガードとして残す）、`kv_cache_public_methods_stay_unchanged_for_speculative_scheduler`、`kv_rewind_stays_private_and_absent_from_facade`、`facade_exposes_generate_items_only_in_approved_shape`
+  - この項目専用の保留 doctest ガードは現状無い。§17.6 の先例どおり「反転」は正ガードの新設・拡張と、承認外経路を締める否定プローブで表す
+
+### 29.2 rustdoc と doctest の例
+
+- trait・`generate_speculative_stateful`・`step_stateful` に 1〜2 行の役割要約を付ける。facade だけで通る成功例 doctest を置く。例は整数の隠れ状態（直前 token の累積等）からホストの `Tensor<f32>` で logits を作る表引きモデルで、CPU だけで動く
+- 失敗系は `compile_fail` に頼らず、正のプローブとインベントリで組む（§18.3）
+
+### 29.3 エラー型
+
+- 新 variant なし（`InvalidArgument`）。検証順は §29.0.2。入力検証は確保の前に行い、本番経路で `unwrap`／`expect` を使わない。範囲外・型不一致は fail-closed（要求単位の失敗）
+
+### 29.4 テスト計画
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| greedy が単独 `generate` と一致（参照は同じ論理を `RefCell` 形の `AutoregressiveModel` でも実装したフィクスチャ） | #3848: `crates/autodiff/tests/nn_generate_speculative.rs` へ追加（または新ファイル） | CI | 該当なし | 該当なし | 該当なし |
+| 棄却経路で `save_state`／`restore_state` が呼ばれる（`Cell` で回数を数える） | 同上 | CI | 該当なし | 該当なし | 該当なし |
+| 検査順 1〜7 の拒否・`num_kv_layers` の無い純 RNN の受理・`init_state`／`save_state`／`restore_state` の `Err` 伝播 | 同上 | CI | 該当なし | 該当なし | 該当なし |
+| サンプリング版（C1〜C6 相当） | 同上 | CI | 該当なし | 該当なし | 該当なし |
+| 要求 A・B を交互に進めても単独の参照と一致、fail-closed (a)〜(d)、上限、`Debug` が状態を漏らさない | #3849: `crates/autodiff/tests/generate_scheduler.rs`・`crates/facade/tests/` | CI | 該当なし | 該当なし | 該当なし |
+| `BatchScheduler: Send + Sync` | #3849: `api_surface.rs` の正のプローブ | CI | 該当なし | 該当なし | 該当なし |
+| 既存テストが無変更で通る（既定経路が bit 同一） | 既存一式 | CI | 該当なし | 該当なし | 該当なし |
+
+実機 `#[ignore]` は新設しない。新しいカーネル・バックエンド経路が無く、状態の退避・復元はホスト側の制御フローだけで、数値はモデル実装の forward が決める。Phase 10 で測る項目は無く、追跡表の「該当 issue なし」と整合する。
+
+### 29.5 数値契約
+
+- REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を適用する。token 列の一致は margin が十分な greedy 入力に限る（§21.8 と同じ）
+- FMA 契約・f64 長軸縮約への影響: なし。baseline の追加・更新: なし。tolerance・閾値は変えない
+
+### 29.6 互換への影響
+
+**追加のみ**（`api-compat-0.14.0-decision.md` §8 の手順で判定）:
+
+- `StatefulAutoregressiveModel` は新設の trait（既存 trait へのメソッド追加ではない）
+- `generate_speculative_stateful` は新しい自由関数、`step_stateful` は inherent メソッド 1 件、`pub use` は 1 文。`Active` は非公開
+- 条件: `BatchScheduler` の auto trait（`Send`／`Sync`）を保つ。型消去の箱に `Send + Sync` を付けないと auto trait を失い破壊的変更になるため、正のプローブで固定する
+- 利用者 trait と同名メソッドの解決順への影響は、§19.7 と同じく minor の通常範囲として受け入れる
+
+### 29.7 適用記録・索引・追跡表
+
+- 適用記録の案（`docs/compat-api-scope.md` への実際の追記は #3849 が 1 回だけ行う。承認 URL は #3770 の回答後に埋める）:
+
+```text
+**適用記録（イシュー #3849・親 #3719。承認: <#3770 論点 4 の URL>）**: 内部状態保持型の speculative decoding・連続バッチングとして `StatefulAutoregressiveModel`・`generate_speculative_stateful`・`BatchScheduler::step_stateful` を facade の `inference` に追加した。追加のみ。公開状態: 公開済み（<版>）
+```
+
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（#3849 で実施）
+- [x] `docs/README.md` の索引を更新した（本 PR）
+- [x] 追跡表 # 29 行の設計記録・正ガード列を更新した（本 PR。承認・0.14.0 区分・実機 parity は変えない）
+- 0.14.0 移行ノート（#3780）には追加のみなので「破壊なし」として載せる見込み
+
+### 29.8 ベンチと性能への影響
+
+既定経路（`generate`・`generate_speculative`・`step`・`step_batched`）で増えるのは `Active` の `Option` フィールド 1 つと `is_some()` の分岐だけ。ホットループに新しい確保は無いため前後比較は不要と判断する（未計測）。#3848 が speculative の内部を共通化する場合は既存経路を単相化して命令順を変えず、既存テスト無変更で bit 同一を確かめる。
+
+### 29.9 依存の追加の有無
+
+- 依存追加: なし。許容 12 区分・禁止リストとの照合で変更なし
+- 新規 `unsafe`: なし（`Any::downcast_mut` を使う）
+
+### 29.10 推奨・所有者へ戻す論点・周辺項目
+
+**推奨: 実装する（案 B2）**。理由: #3770 の既定が「実装」であること、案 C（§19）で扱えない再帰状態を既存 2 関数と `step` のシグネチャを変えず追加のみで扱えること、要求ごとの分離が型で保証されること、fail-closed を保てること。
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1. 実装するか | 実装する（B2）／対象外にする | 実装する | #3848・#3849 に着手しない |
+| 2. `step_stateful` の `M::State` の境界 | `Send + Sync + 'static`（auto trait を保つ）／`'static` のみ（`BatchScheduler` が `Send`／`Sync` を失い破壊的）／状態付き専用の別スケジューラ型 | `Send + Sync + 'static` | 実装へ進めない |
+| 3. 単独の `generate_stateful` を足すか | 足さない／足す | 足さない（参照は `RefCell` 形と単独 `generate` で作れる。需要が出たら別 issue） | 足さない |
+
+- セキュリティ観点: A03（`KvCache` に任意 `Tensor` を入れる経路は作らず、型が合わなければ要求を切り離す）、A04（B1 は fail-open のため不採用。`SchedulerLimits` の 3 上限と検査順 1〜7 は不変。`State` のサイズは利用者の責任）、A06（依存・`unsafe` なし）、A08（承認を代行・記述しない）、A09（`Debug` は件数のみ）、A02（`Generator` は非暗号の xorshift64* で、生成 token をセキュリティ用途に使わない既存注記を引き継ぐ）
+- スコープ外: §29.0 の境界のとおり。起票は所有者承認後
+- PR は `Closes #3763`（設計記録の追記が完了条件）、#3848・#3849・#3770 は `Refs`
