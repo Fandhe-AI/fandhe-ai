@@ -68,7 +68,8 @@
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
 //! `Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
-//! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
+//! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3791 で統計縮約の
+//! `Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm`（実装は `stat_varnorm` サブモジュール、決定記録 §33・§52）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
@@ -134,6 +135,7 @@ mod pool;
 mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
+mod stat_varnorm;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -584,6 +586,8 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         // RmsNorm／LayerNorm／BatchNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
         // `child` へ書く前に拒否する（イシュー #3078・#3079。`create_graph_norm` モジュール doc）。
         crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
+        // 統計縮約 4 Op（イシュー #3791）: 非有限入力・自由度不足を子テープへ書く前に拒否する。
+        stat_varnorm::validate_stat_varnorm(&parent_nodes, parent.ops(), &node.op)?;
     }
     Ok(())
 }
@@ -999,6 +1003,26 @@ fn replay_op<'c>(
         Op::Min { input, dim } => get_mirror(mirror, input)?.min(dim),
         Op::Amax { input, dim } => get_mirror(mirror, input)?.amax(dim),
         Op::Amin { input, dim } => get_mirror(mirror, input)?.amin(dim),
+        // 統計縮約（イシュー #3791。方式は `stat_varnorm` モジュール doc 参照）。写しの Op タグを
+        // 親と一致させる（`norm_p` は p=1／2 で L1／L2 へ委譲するが、親が PNorm なら p は 1・2 以外）。
+        Op::Var {
+            input,
+            dim,
+            correction,
+        } => get_mirror(mirror, input)?.var(dim, correction),
+        Op::Std {
+            input,
+            dim,
+            correction,
+        } => get_mirror(mirror, input)?.std(dim, correction),
+        Op::VectorNorm { input, ord, dim } => match ord {
+            fandhe_ai_tensor_core::VectorNormOrd::L1 => get_mirror(mirror, input)?.norm_l1(dim),
+            fandhe_ai_tensor_core::VectorNormOrd::L2 => get_mirror(mirror, input)?.norm_l2(dim),
+            _ => Err(AutodiffError::Backward(
+                "create_graph: replay_op: 未知の VectorNormOrd（内部契約違反）".into(),
+            )),
+        },
+        Op::PNorm { input, p, dim } => get_mirror(mirror, input)?.norm_p(p, dim),
         // 統計縮約（イシュー #3792。方式は `stat_reduce_lse_nan` モジュール doc 参照）。
         Op::LogSumExp { input, dim } => get_mirror(mirror, input)?.logsumexp(dim),
         Op::Nansum { input, dim } => get_mirror(mirror, input)?.nansum(dim),
@@ -2230,6 +2254,89 @@ fn build_cgrads<'c>(
                             input,
                             dim,
                             split: select_reduce::Split::EvenSplit,
+                        },
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 統計縮約 4 Op（イシュー #3791。方式は `stat_varnorm` モジュール doc 参照）。
+            Op::Var {
+                input,
+                dim,
+                correction,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = stat_varnorm::stat_varnorm_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        &get_mirror(mirror, input)?,
+                        stat_varnorm::StatSpec {
+                            input,
+                            dim,
+                            kind: stat_varnorm::StatKind::Var { correction },
+                        },
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Std {
+                input,
+                dim,
+                correction,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = stat_varnorm::stat_varnorm_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        &get_mirror(mirror, input)?,
+                        stat_varnorm::StatSpec {
+                            input,
+                            dim,
+                            kind: stat_varnorm::StatKind::Std { correction },
+                        },
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::VectorNorm { input, ord, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let kind = match ord {
+                        fandhe_ai_tensor_core::VectorNormOrd::L1 => stat_varnorm::StatKind::L1,
+                        fandhe_ai_tensor_core::VectorNormOrd::L2 => stat_varnorm::StatKind::L2,
+                        _ => {
+                            return Err(AutodiffError::Backward(
+                                "create_graph: build_cgrads: 未知の VectorNormOrd（内部契約違反）"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    let d = stat_varnorm::stat_varnorm_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        &get_mirror(mirror, input)?,
+                        stat_varnorm::StatSpec { input, dim, kind },
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::PNorm { input, p, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = stat_varnorm::stat_varnorm_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        &get_mirror(mirror, input)?,
+                        stat_varnorm::StatSpec {
+                            input,
+                            dim,
+                            kind: stat_varnorm::StatKind::PNorm { p },
                         },
                         &g,
                     )?;
