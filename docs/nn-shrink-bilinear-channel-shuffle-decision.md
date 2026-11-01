@@ -5,7 +5,7 @@
 - 本書は追跡表 `docs/compat-matrix-ari-tracker.md` の C1・C2・C7 の設計記録をまとめる 1 本である。節の分担は次のとおり。
   - **§1 C1 Hardshrink・Softshrink**: イシュー #3742（本 PR が記述）
   - **§2 C2 Bilinear**: イシュー #3743（本 PR が記述）
-  - §3 C7 ChannelShuffle: イシュー #3746 が追記する
+  - **§3 C7 ChannelShuffle**: イシュー #3746（本 PR が記述）
 - 書式は `docs/decision-record-template.md`（#3716）の「保守・運用チェックリスト（必須 9 節）」に従う。先例は `docs/autodiff-spatial-layers-decision.md` §9（#3740）。
 - **設計のみ**で、コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変えない。
 - 行番号は origin/main の `9f92a2d22` を基準にする。実機は `<cuda-node>`・`<metal-node>`・`<rocm-node>` で表す。
@@ -297,4 +297,150 @@
 - スコープ外: `FunctionalBuilder` のノード（Q3 (b)）、専用 GPU カーネル（案 C）、層型名の facade 公開（#3022）、ONNX export・model_io（#3750）、`Tensor<f32>`／`Tape` 上のメソッド。新しいイシューは起票しない（所有者の承認事項）。
 - #3818 は実機 parity が済むまで `Refs` 運用とする。
 
-## §3 C7 ChannelShuffle（イシュー #3746 が追記）
+## §3 C7 ChannelShuffle（イシュー #3746）
+
+行番号は origin/main の `6537d0925` を基準にする。PyTorch についての記述はすべてソースの定義に基づく記述で、**未実測**である（実装時に参照版で確かめる）。
+
+### §3.0 位置づけ・推奨
+
+- 追跡表の **行 # 14**（C7）。イシュー本文は「項目 15」と書くが、§1.0・§2.0 と同じく 1 ずれている。更新対象は # 14 行である。
+- 流れ: 設計 #3746 → 承認 #3768（論点 3・4）→ 実装 #3822 → 実機 parity #3860（`<cuda-node>`）・#3861（`<metal-node>`）。保存・export の横断方針は #3750（設計中）。
+- **承認根拠: なし。未承認（#3768 待ち）。**
+- 現状: `crates/` に `channel_shuffle`／`ChannelShuffle` は 0 件。棚卸し `docs/compat-unlisted-holds-inventory.md:77` が「未公開・起票する（優先度は低い。`add_pixel_shuffle` と同型。`reshape`／`permute` で合成できる）」と分類した。先例は PixelShuffle（`crates/autodiff/src/nn/pixel_shuffle.rs`・`docs/autodiff-pixel-shuffle-decision.md`）。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| **A（推奨）** | `Var::channel_shuffle`＋`Sequential::add_channel_shuffle` を既存 Op（`contiguous`・`reshape`・`permute`）の合成で作る。層型 `nn::ChannelShuffle` は autodiff 内部に置き facade からは再エクスポートしない | 新規 `Op`・カーネル・`unsafe`・依存が 0 件。PixelShuffle と同型でガード・テスト・保存の先例を使える | GPU tape では `Contiguous` がホストで eager 実行される（§3.8） |
+| B | `add_channel_shuffle` だけを作る | 公開名が 1 件 | `Var` から直接呼べず、独自 Module（#3741）の利用者が困る |
+| C | 専用 `Op`／カーネル | 中間コピーを減らせる | `BackendOps` 追加・REQ-8 の境界検査・新しい parity 契約が要る。性能要求が無い |
+| D | 対象外にする | 公開面は変わらない | 対応表の行が「ある」にならない |
+
+**推奨: 実装する（案 A）。** 理由は 4 点。
+
+1. 新規 `Op`／`BackendOps`／カーネル／`unsafe`／依存が要らない。
+2. PixelShuffle と同型で、ガード・テスト・保存の先例をそのまま使える。
+3. 互換区分は「追加のみ」。
+4. PyTorch の `nn.ChannelShuffle(groups)` は 1 入力で `nn.Sequential` に載る。
+
+### §3.1 公開形とガード反転計画
+
+**シグネチャ案**
+
+| 対象 | シグネチャ |
+|---|---|
+| `Var::channel_shuffle` | `fn channel_shuffle(&self, groups: usize) -> Result<Var<'t>, AutodiffError>` |
+| `compat::Sequential::add_channel_shuffle` | `fn add_channel_shuffle(mut self, groups: usize) -> Result<Self, AutodiffError>`（構築時に検査するので `Result`。先例 `add_pixel_shuffle`〈`crates/facade/src/compat/sequential.rs:2475`〉） |
+
+- 軸の意味（Q1）: チャネル軸は **dim 1** に固定し、入力は `(N, C, *)` の rank 3 以上とする。並べ替えは `out[:, j*g+i] = in[:, i*(C/g)+j]`（`g = groups`）。PyTorch の native 実装は `reshape({b, g, c/g, -1}).permute({0,2,1,3})` に当たる定義で、これに合わせる。`pixel_shuffle` は `rank-3` 軸を使うが、rank 5 では C が dim 1 にならないためその方式は取らない。
+- 実体の置き場所（Q3）: 新モジュール `crates/autodiff/src/nn/channel_shuffle.rs` に次を置く。
+  - `channel_shuffle_out_shape`（`pub(crate)`。forward と forward_host が共有する判定）
+  - `channel_shuffle_forward`（`pub(crate)`。`Var` と層が共有する本体）
+  - `pub struct ChannelShuffle { groups }`（`new`／`groups`／`forward`／`forward_host`）
+- `nn/mod.rs` に `mod`／`pub use`／`pub(crate) use` を足し、`nn/module.rs` に `impl Module for ChannelShuffle`（`:1957` の PixelShuffle と同型。`named_parameters` は既定の空）を足す。`var.rs` には `crate::nn::channel_shuffle_forward(self, groups)` への 1 行委譲だけを置く（`Var::pixel_shuffle`〈`var.rs:3073`〉と同じ）。
+- `pixel_shuffle.rs` に足さない理由は、その固定契約（`PIXEL_SHUFFLE_FACADE_FN_NAMES`・`PixelShuffleHoldDoctestGuard`）の集合を動かさずに済むため（§1.1・§2.1 と同じ）。
+- `LayerSpec`（`pub(super)`）に `ChannelShuffle { groups: usize }` を足す（`sequential.rs:511` の隣）。
+- facade: `fandhe_ai::Var` は再エクスポートなので追加の配置は要らない。`ChannelShuffle` 型は #3022 の個別承認 3 条件を満たさないので再エクスポートしない。
+- 反転する既存の否定ガード・保留 doctest ガード: **該当なし**。「反転」は正ガードを新しく作ることを指す。`PixelShuffleHoldDoctestGuard` と `PIXEL_SHUFFLE_HOLD_PROBE_BODY` は変えない。`Sequential` の `add_*` 総数を固定するガードは `api_surface.rs` に無い。
+
+**#3822 が新しく作る正ガード（`api_surface.rs` の pixel_shuffle 群の命名にならった案）**
+
+- `workspace_declares_channel_shuffle_facade_fn_names_only_in_approved_locations`: `channel_shuffle` は `autodiff/src/var.rs` に、`add_channel_shuffle` は `facade/src/compat/sequential.rs` に、各 1 件だけ。
+- `var_channel_shuffle_method_is_thin_delegation`: 本体が `crate : : nn : : channel_shuffle_forward ( self , groups )` と一致する。
+- `var_channel_shuffle_method_is_reachable_via_facade_only`: fn ポインタの型が一致し、手計算できる値（`[1, 4, 1, 1]`・g=2 で並びが `[0, 2, 1, 3]`）が出る。`groups=0`・非整除で `Err`。
+- `compat_sequential_channel_shuffle_add_method_has_approved_signature` と `..._detects_offense`: 引数部が `mut self, groups: usize) -> Result<Self, AutodiffError>` と一致する。
+- `facade_does_not_reexport_or_declare_channel_shuffle_layer`: facade の src が `ChannelShuffle` 型・`channel_shuffle_forward` を再エクスポートも宣言もしない。自己テストを付ける。
+
+保留 doctest ガード（`ChannelShuffleHoldDoctestGuard`）を作るかは Q4（推奨: 作らない）。
+
+### §3.2 rustdoc と doctest
+
+- `Var::channel_shuffle` と `add_channel_shuffle` の両方に、役割要約（PyTorch 相当名・並べ替えの式・groups の条件）と、CPU の `fandhe_ai::tape()`／`Sequential::predict` だけで動く doctest を付ける（`add_pixel_shuffle` の doctest〈`sequential.rs:2463-2474`〉と同型。GPU は要らない）。
+- 失敗系は `compile_fail` を使わず、`Result::is_err` を確かめる通常のテストで検証する（`docs/facade-speculative-decoding-batching-design.md` §18.3 の方針）。
+
+### §3.3 エラー型
+
+- 新しい variant は足さない（`AutodiffError` は `#[non_exhaustive]`）。
+- `groups == 0` → `InvalidArgument`。`ChannelShuffle::new` と `channel_shuffle_forward` の入口の両方で検査する。
+- rank < 3 → `Shape(ShapeError::RankMismatch)`。`C % groups != 0` → `Shape(ShapeError::ShapeMismatch)`。空間軸の積は `checked_mul` で計算し、溢れたら `ElementCountOverflow`。
+- 検査の順は groups → rank → 整除 → tape への積み込み。`Err` のときに孤児ノードを残さない。
+- `add_*` は構築時に groups だけを検査し、shape は forward 時に遅延検査する（`PixelShuffle::new` と同じ契約）。
+- 本番経路で `unwrap`／`expect` を使わない。`groups == 1` と `groups == C` は有効（結果は恒等）。大きさ 0 の軸は空テンソルとして通す（PyTorch の挙動は未実測）。
+
+### §3.4 テスト計画
+
+| 受け入れ基準 | テスト | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 手計算の forward・backward、g=1／g=C の恒等、大きさ 0 の軸、rank 3／4／5 | `crates/autodiff/src/nn/channel_shuffle.rs` の単体テスト・`crates/autodiff/tests/nn_channel_shuffle.rs` | CI | - | - | - |
+| 拒否（g=0・非整除・rank<3）と孤児ノードが無いこと | 同上 | CI | - | - | - |
+| forward と forward_host の bit 一致、中央差分による勾配の突合 | 同上 | CI | - | - | - |
+| create_graph の二階有限差分 | `crates/autodiff/tests/create_graph.rs` に節を足す | CI | - | - | - |
+| facade 経由で届くことと doctest | `crates/facade/tests/channel_shuffle_facade.rs`・rustdoc | CI | - | - | - |
+| `add_*` の forward・`Err`・fit・常駐経路 | `crates/facade/tests/compat_sequential_channel_shuffle.rs` | CI | - | - | - |
+| CPU と NaiveOps の bit 一致 | `crates/facade/tests/channel_shuffle_backend_parity.rs::cpu_channel_shuffle_{forward,backward}_bit_exact_vs_naive` | CI | - | - | - |
+| CUDA と CPU の bit 一致 | 同ファイル `cuda_channel_shuffle_*` | `#[ignore]` | 未実測（#3860） | - | 該当なし |
+| Metal と CPU の bit 一致 | 同ファイル `metal_channel_shuffle_*`（`cfg(target_os = "macos")`） | `#[ignore]` | - | 未実測（#3861） | 該当なし |
+| 層経路の parity | `crates/facade/tests/compat_sequential_channel_shuffle_backend_parity.rs::{cpu_reference_runs_without_device, cuda_channel_shuffle_layers_bit_exact, metal_channel_shuffle_layers_bit_exact}` | CI と `#[ignore]` | 未実測（#3860） | 未実測（#3861） | 該当なし |
+| model_io の往復（Q5 が (a) の場合） | `compat_sequential_model_io_layers.rs`・`model_io.rs` の単体テスト | CI | - | - | - |
+| ONNX export の fail-closed | `OnnxModel::from_sequential` が `UnsupportedLayer` を返す | CI | - | - | - |
+| 正ガード 5 件と自己テスト（§3.1） | `crates/facade/tests/api_surface.rs` | CI | - | - | - |
+
+- 実機の手順と記録先は `docs/perf/logs/channel-shuffle-3822/README.md`（#3822 で新設）。cfg で 0 本しか実行されなかった結果、Linux や M4 Max 開発機の代替値は pass の根拠にしない。
+- ROCm は facade 非公開（追跡表 # 24 は保留）なので「該当なし」。
+
+### §3.5 数値契約
+
+- 判定は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。演算は純粋な並べ替えのコピーなので、テストはそれより強い **bit 完全一致**で書く（`pixel_shuffle_backend_parity.rs` と同じ扱い）。
+- `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・parity baseline・ガードレール閾値は変えない。新しい baseline は作らない。
+- FMA 契約・f64 長軸縮約の契約への影響: なし（積和も縮約も無い）。
+
+### §3.6 互換への影響
+
+判定（`docs/api-compat-0.14.0-decision.md` §8 の手順）は**追加のみ**。
+
+- `Var`・`compat::Sequential`: inherent メソッドを各 1 件足す。
+- `AutodiffError`: variant を足さない。`LayerSpec`: `pub(super)` で公開型ではない。`ChannelShuffle`: autodiff 内部だけ。
+- 利用者が `Var` に同名のトレイトメソッドを持つ場合は inherent メソッドが優先して解決される。通常の追加と同じ扱いで、破壊的には数えない。
+- `docs/api-compat-0.14.0-decision.md:55`（# 14 行）の記述と一致しており、記録のずれは無い。
+
+### §3.7 適用記録・索引・追跡表
+
+- `docs/compat-api-scope.md` の適用記録は承認前なので本 PR では書かない。#3822 が追記する文案: 「**適用記録（イシュー #3822。承認: <#3768 の回答 URL>）**: `Var::channel_shuffle` と `compat::Sequential::add_channel_shuffle` を追加のみで公開。新規 Op・依存なし。公開状態: 公開済み」。
+- 本 PR の更新は `docs/README.md` の索引 1 行と、追跡表 # 14 行の「設計記録」セルだけ。正ガードの `path:line` と 0.14.0 移行ノート（#3780）の該当欄は #3822 が書く。
+
+### §3.8 ベンチと性能
+
+- 既定経路への影響: なし（新しい API を足すだけで、既存の演算・カーネルに触れない）。
+- GPU tape では `Op::Contiguous` がホストで eager 実行されるため往復が入る（pixel_shuffle と同じ。`docs/autodiff-pixel-shuffle-decision.md` §2.1）。新しい経路なので前後比較は要らない（未実測）。専用カーネルはスコープ外。
+
+### §3.9 依存
+
+- 依存の追加: なし。許容 12 区分・禁止リストとの照合は該当なし。新規 `unsafe`: なし。
+
+### §3.10 VJP・create_graph・合成方式と保存・export
+
+- 合成（`pixel_shuffle_forward`〈`pixel_shuffle.rs:130`〉と同じ手順）: ① `contiguous` ② `reshape([N, g, C/g, S])`（S は空間軸の積）③ `permute([0, 2, 1, 3])` ④ `contiguous` ⑤ `reshape(in_shape)`。新規 `Op` も独自の VJP も作らない。
+- **create_graph は対象にする（追加の作業なし）。** `Reshape`・`Permute`・`Contiguous` は `docs/autodiff-higher-order-grad-decision.md:119` の初期スコープに入っている。CPU の二階有限差分の突合を 1 本入れる。
+- model_io（Q5）: pixel_shuffle と同型の kind `channel_shuffle`（`params`: `groups`）を推奨する。最終決定は #3750 の横断方針（タグの追加規則・後方互換・版数）に従う。#3822 が触る箇所は `crates/facade/src/compat/model_io.rs` の `spec_kind`（`:397`）・パラメータ無しの arm（`:801`）・`param_fields`（`:1514`）・`build_model`・`spec_from_kind`・`all_kind_specs`・kind 数のアサート・非信頼入力の表・不正値の表（`groups: 0`）・モジュール doc の種別数と、統合テスト（`compat_sequential_model_io.rs`・`compat_sequential_model_io_layers.rs`）。kind 数は兄弟の実装と合算した数に合わせる。load 時の `groups = 0` は `add_channel_shuffle` の `Err` を経由して型付きエラーで拒否する。
+- ONNX export（Q6）: ONNX に ChannelShuffle の単体 op は無く、`from_sequential` の対応層は 6 種で PixelShuffle も export していない。推奨は今回 export しないこと。`layer_kind_name`（`crates/onnx-interop/src/onnx/export_nn.rs:197`）が `"unknown"` を返し、`UnsupportedLayer` で fail-closed のままにする（`as_channel_shuffle` フックは足さない）。`Reshape → Transpose → Reshape` への分解 export は #3750 の論点とする（PyTorch exporter の分解方法は未実測）。
+- 既知の差分（未実測）: PyTorch の rank 条件・大きさ 0 の挙動・軸の定義。
+
+### §3.11 所有者へ戻す論点（#3768 の論点 3・4 へ渡す）
+
+確認がないときの扱いは、どの論点も「確認があるまで実装へ進めない（公開面が無い今の状態を保つ fail-closed）」とする。
+
+| 点 | 選択肢 | 推奨 |
+|---|---|---|
+| Q1 チャネル軸 | (a) dim 1 固定・rank 3 以上（PyTorch の native 実装）／(b) `rank-3` 軸（pixel_shuffle と同じ） | (a) |
+| Q2 groups の検証 | (a) 0 だけ構築時に拒否し、整除は forward 時に検査／(b) `add_*` に C も渡して構築時に整除まで検査 | (a)（PyTorch と同じ引数形） |
+| Q3 実体の置き場所 | (a) 新モジュール `nn/channel_shuffle.rs`／(b) `pixel_shuffle.rs` に追記 | (a) |
+| Q4 未承認経路の固定方法 | (a) 正ガードと否定ガードだけ／(b) `ChannelShuffleHoldDoctestGuard` も作る | (a) |
+| Q5 model_io | (a) kind `channel_shuffle`（`groups`）を #3750 の規則で足す／(b) #3750 が決まるまで保存を `UnsupportedModel` で拒否 | (a)（#3750 に従う） |
+| Q6 ONNX export | (a) 今回含めない（`UnsupportedLayer`）／(b) Reshape・Transpose・Reshape へ分解して export する | (a)（(b) は #3750 で別に判断） |
+
+### §3.12 セキュリティ観点・スコープ外
+
+- A03: `groups` は保存ファイル経由の値も含めて外部入力として扱い、tape 操作や確保より前に検査する。空間軸の積は `checked_mul` で計算する。
+- A08: forward と forward_host で同じ `channel_shuffle_out_shape` を使い、判定の迂回経路を作らない。1 行委譲は正ガードで固定する。
+- REQ-12: 内部の層型を公開シグネチャに出さない。秘密情報・ホスト名は書かない。
+- スコープ外: 専用 GPU カーネル、層型名の facade 公開（#3022）、ONNX export（#3750）、`Tensor<f32>`／`Tape` 上のメソッド。新しいイシューは起票しない（所有者の承認事項）。
+- #3822 は実機 parity が済むまで `Refs` 運用とする。
