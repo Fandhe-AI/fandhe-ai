@@ -8224,7 +8224,7 @@ pub(crate) fn extremum_all_match_mask(
 /// ため backward にも到達しない。`vector_norm_vjp` と同型の契約）。
 /// 確保するのは入力サイズ・出力サイズの `f32` バッファのみで、
 /// どちらも forward の検査に包含される。
-fn var_vjp(
+pub(crate) fn var_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
     correction: usize,
@@ -8295,7 +8295,7 @@ fn var_vjp(
 /// と同じ（forward 側 `Var::std` の `var_std_out_shape_checked` で
 /// 確保前検証済み。forward が拒否する shape は backward にも到達
 /// しない）。
-fn std_vjp(
+pub(crate) fn std_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
     correction: usize,
@@ -8382,7 +8382,7 @@ fn std_vjp(
 /// テンソルであるため、本関数を新たに検査する必要はない（forward が
 /// 拒否する shape は tape に push されないため backward にも到達しない。
 /// `logsumexp_vjp` と同型の契約。イシュー #2287）。
-fn vector_norm_vjp(
+pub(crate) fn vector_norm_vjp(
     input: &Tensor<f32>,
     ord: VectorNormOrd,
     dim: Option<usize>,
@@ -8586,7 +8586,12 @@ fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Te
 /// （`crate::reduce_ops::norm_p`）の `checked_bytes_for::<f32>` による
 /// 確保前検証を経て構築済みであるため、本関数を新たに検査する必要は
 /// ない（codex-review 指摘の確認・イシュー #2147・PR #2263）。
-fn pnorm_vjp(input: &Tensor<f32>, p: f32, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
+pub(crate) fn pnorm_vjp(
+    input: &Tensor<f32>,
+    p: f32,
+    dim: Option<usize>,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     let (outer, axis_len, inner) = match dim {
         None => (1usize, input.numel(), 1usize),

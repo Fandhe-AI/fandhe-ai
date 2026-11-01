@@ -914,6 +914,54 @@ fn quantile_create_graph_via_facade() {
     check_create_graph_family("quantile", &SEL_X, &[3, 4], quantile_loss, true, 1e-2);
 }
 
+// 統計縮約 4 Op（イシュー #3791・決定記録 §33・§51）。`tanh` で包んで上流 g と x の混合項を
+// 非自明にする（L1 は x についての二階が 0 なので、tanh の曲率で `Hv ≠ 0` を作る）。
+// 孫テープ・総括判定の網羅は `crates/autodiff/tests/create_graph_stat_varnorm.rs`。
+fn var_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.var(Some(1), 1).unwrap().tanh().sum(None).unwrap()
+}
+
+fn std_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.std(Some(1), 1).unwrap().tanh().sum(None).unwrap()
+}
+
+fn norm_l1_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.norm_l1(Some(1)).unwrap().tanh().sum(None).unwrap()
+}
+
+fn norm_l2_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.norm_l2(Some(1)).unwrap().tanh().sum(None).unwrap()
+}
+
+fn norm_p_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.norm_p(1.5, Some(1)).unwrap().tanh().sum(None).unwrap()
+}
+
+#[test]
+fn var_create_graph_via_facade() {
+    check_create_graph_family("var", &SEL_X, &[3, 4], var_loss, true, 1e-2);
+}
+
+#[test]
+fn std_create_graph_via_facade() {
+    check_create_graph_family("std", &SEL_X, &[3, 4], std_loss, true, 1e-2);
+}
+
+#[test]
+fn norm_l1_create_graph_via_facade() {
+    check_create_graph_family("norm_l1", &SEL_X, &[3, 4], norm_l1_loss, true, 1e-2);
+}
+
+#[test]
+fn norm_l2_create_graph_via_facade() {
+    check_create_graph_family("norm_l2", &SEL_X, &[3, 4], norm_l2_loss, true, 1e-2);
+}
+
+#[test]
+fn norm_p_create_graph_via_facade() {
+    check_create_graph_family("norm_p", &SEL_X, &[3, 4], norm_p_loss, true, 1e-2);
+}
+
 /// GPU 実機: LayerNorm・Conv2d・MaxPool2d（線形代数は forward がホスト f64 フォールバックのため
 /// 代表にしない。§31.6 申し送り 5）について、CPU と device で `H v`・HVP を REQ-2 で比べる。
 fn gpu_extended_ops_match_cpu(device: Device) {

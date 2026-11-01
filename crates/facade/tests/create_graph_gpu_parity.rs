@@ -247,6 +247,56 @@ const CASES: &[Case] = &[
         run: run_select_reduce_quantile,
         reject: None,
     },
+    // 統計縮約 4 Op（イシュー #3791・決定記録 §33・§51）。`BackendOps::var`／`vector_norm`／
+    // `vector_norm_p` を実装しているのは `backend-cpu` だけで、CUDA／Metal ではホストへ
+    // フォールバックする。`Std` は対応する `BackendOps` メソッドが無く常にホスト実装。cgrad の
+    // V3 値は 1 階と同じホスト関数で、構造は f32 の `Var` 演算（MatMul は無い）。経路 H の pass は
+    // 「経路の parity」でカーネル同士ではない。実機は未実測（Phase 10 の #3856・#3858）。
+    Case {
+        name: "stat_varnorm_var",
+        family: "stat_varnorm",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_varnorm_var,
+        reject: Some(reject_stat_varnorm_with_custom),
+    },
+    Case {
+        name: "stat_varnorm_std",
+        family: "stat_varnorm",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_varnorm_std,
+        reject: Some(reject_stat_varnorm_with_custom),
+    },
+    Case {
+        name: "stat_varnorm_norm_l1",
+        family: "stat_varnorm",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_varnorm_l1,
+        reject: Some(reject_stat_varnorm_with_custom),
+    },
+    Case {
+        name: "stat_varnorm_norm_l2",
+        family: "stat_varnorm",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_varnorm_l2,
+        reject: Some(reject_stat_varnorm_with_custom),
+    },
+    Case {
+        name: "stat_varnorm_norm_p",
+        family: "stat_varnorm",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stat_varnorm_pnorm,
+        reject: Some(reject_stat_varnorm_with_custom),
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -486,6 +536,37 @@ fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
     is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
 }
 
+fn run_stat_varnorm_var(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.var(Some(1), 1).unwrap())
+}
+
+fn run_stat_varnorm_std(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.std(Some(1), 1).unwrap())
+}
+
+fn run_stat_varnorm_l1(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.norm_l1(Some(1)).unwrap())
+}
+
+fn run_stat_varnorm_l2(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.norm_l2(Some(1)).unwrap())
+}
+
+fn run_stat_varnorm_pnorm(tp: &Tapes) -> Outputs {
+    run_select_reduce_minmax_body(tp, |x| x.norm_p(1.5, Some(1)).unwrap())
+}
+
+/// Q5: 統計縮約の祖先に `Op::Custom`（恒久的に対象外）があるグラフは GPU でも拒否され、
+/// 子テープは空のまま。
+fn reject_stat_varnorm_with_custom(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![0.5, 1.5, 1.0, 2.0], &[2, 2]));
+    let Ok(id) = tp.parent.custom(Arc::new(IdentityFn), &[x]) else {
+        return false;
+    };
+    let loss = id.std(None, 1).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
 fn tapes_for(device: Option<Device>) -> Tapes {
     let mk = || match device {
         None => fandhe_ai::tape(),
@@ -618,6 +699,7 @@ cuda_family_test!(
     create_graph_select_reduce_order_cuda_matches_cpu,
     "select_reduce_order"
 );
+cuda_family_test!(create_graph_stat_varnorm_cuda_matches_cpu, "stat_varnorm");
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -641,6 +723,7 @@ metal_family_test!(
     create_graph_select_reduce_order_metal_matches_cpu,
     "select_reduce_order"
 );
+metal_family_test!(create_graph_stat_varnorm_metal_matches_cpu, "stat_varnorm");
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -669,6 +752,12 @@ fn select_reduce_minmax_cases_pass_cpu_against_cpu() {
 #[test]
 fn select_reduce_order_cases_pass_cpu_against_cpu() {
     run_family("select_reduce_order", None);
+}
+
+/// 統計縮約族の登録（`run`・`reject`・`H v ≠ 0` の assert）を CI で一度は実行する。
+#[test]
+fn stat_varnorm_cases_pass_cpu_against_cpu() {
+    run_family("stat_varnorm", None);
 }
 
 #[test]
