@@ -8455,6 +8455,78 @@ fn vector_norm_vjp(
     build_tensor(out, &shape)
 }
 
+/// [`logsumexp_lane_masks`] の結果（すべて入力と同じ要素数・走査順は入力の物理順）。
+pub(crate) struct LogSumExpLaneMasks {
+    /// `±inf` レーンの全要素（`x` を 0 に差し替えて softmax の NaN を避ける対象）。
+    pub(crate) guard: Vec<bool>,
+    /// `+inf` レーンの `+inf` 位置（上流を `inf_count` で均等分配する位置）。
+    pub(crate) posinf_elem: Vec<bool>,
+    /// 勾配が 0 になる位置（全 `-inf` レーンの全要素と、`+inf` レーンの非 `+inf` 位置）。
+    pub(crate) zero_elem: Vec<bool>,
+    /// `+inf` 位置では当該レーンの `+inf` 個数、それ以外は 1（除算で 0 割りを作らない）。
+    pub(crate) inf_count: Vec<f32>,
+}
+
+/// `logsumexp_vjp` と同じ走査・同じ判定（`nan_propagating_max_f64`）で `±inf` レーンを
+/// 分類する（イシュー #3792・決定記録 §33/§51）。`create_graph` の構造側（V3）が
+/// 1 階の極限規則（`+inf` レーンは `+inf` 位置へ均等分配・全 `-inf` レーンは 0）を
+/// 子テープ上の `where_cond` で写すために使う。NaN レーンはどのマスクにも入れない
+/// （NaN は構造側でも伝播させる）。`logsumexp_vjp` の本体は書き換えない。
+pub(crate) fn logsumexp_lane_masks(input: &Tensor<f32>, dim: Option<usize>) -> LogSumExpLaneMasks {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let n = data.len();
+    let mut masks = LogSumExpLaneMasks {
+        guard: vec![false; n],
+        posinf_elem: vec![false; n],
+        zero_elem: vec![false; n],
+        inf_count: vec![1.0; n],
+    };
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f64::NEG_INFINITY;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                m = eval::nan_propagating_max_f64(m, data[src] as f64);
+            }
+            if m == f64::INFINITY {
+                let cnt = (0..axis_len)
+                    .filter(|&a| data[(o * axis_len + a) * inner + i] == f32::INFINITY)
+                    .count() as f32;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    masks.guard[src] = true;
+                    if data[src] == f32::INFINITY {
+                        masks.posinf_elem[src] = true;
+                        masks.inf_count[src] = cnt;
+                    } else {
+                        masks.zero_elem[src] = true;
+                    }
+                }
+            } else if m == f64::NEG_INFINITY {
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    masks.guard[src] = true;
+                    masks.zero_elem[src] = true;
+                }
+            }
+        }
+    }
+    masks
+}
+
+#[cfg(test)]
+#[path = "grad_lane_masks_tests.rs"]
+mod lane_masks_tests;
+
 /// `Op::LogSumExp`（`crate::reduce_ops::logsumexp`）の VJP（イシュー
 /// #2147）。[`var_vjp`] と同じ 3 段走査で `input` から `y`（forward の
 /// `eval::logsumexp_along` と同じ `f64` アルゴリズム）を改めて計算し、
@@ -8476,7 +8548,11 @@ fn vector_norm_vjp(
 /// 検査する必要はない（forward が拒否する shape は tape に push
 /// されないため backward にも到達しない。codex-review 指摘の確認・
 /// イシュー #2147・PR #2263）。
-fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
+pub(crate) fn logsumexp_vjp(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     let (outer, axis_len, inner) = match dim {
         None => (1usize, input.numel(), 1usize),

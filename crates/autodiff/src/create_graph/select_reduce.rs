@@ -55,7 +55,7 @@ pub(super) struct SelectReduceSpec {
 }
 
 /// 上流 `g`（縮約後 shape）を入力 shape へ復元・broadcast する。
-fn bcast_upstream<'c>(
+pub(super) fn bcast_upstream<'c>(
     g: &Var<'c>,
     in_shape: &[usize],
     dim: Option<usize>,

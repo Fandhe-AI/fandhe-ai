@@ -44,7 +44,7 @@ fn host(x: &Tensor<f32>) -> Vec<f32> {
 }
 
 /// 恒久対象外の `Tape::custom` 用の恒等関数（拒否の基準 Op。`Op::Custom` は §21.2 A 区分。
-/// `LogSumExp`・`Max` は C 区分で将来の拡張で対象になりうるため基準にしない。イシュー #3087）。
+/// `LogSumExp`（#3792）・`Max`（#3789）は対象化済みのため基準にしない。イシュー #3087）。
 struct IdentityFn;
 
 impl CustomFunction for IdentityFn {

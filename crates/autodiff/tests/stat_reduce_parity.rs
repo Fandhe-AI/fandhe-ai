@@ -959,11 +959,18 @@ fn each_op_records_exactly_one_node() {
 }
 
 #[test]
-fn create_graph_is_a_typed_error_not_a_panic() {
+fn create_graph_nansum_is_supported_and_unsupported_op_is_a_typed_error() {
+    // nansum は #3792 で create_graph 対象になった。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0], &[2]));
     let loss = nansum(&x, None).unwrap();
+    assert!(tape.backward_create_graph(&loss, &child).is_ok());
+    // 未対応 Op（selu）は panic せず型付きエラーで拒否する。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let loss = x.selu().unwrap().sum(None).unwrap();
     assert!(tape.backward_create_graph(&loss, &child).is_err());
 }
 

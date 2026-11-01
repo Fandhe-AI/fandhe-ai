@@ -4210,3 +4210,49 @@ CI（CPU）相当の結果: `cargo test --workspace`・`cargo clippy --workspace
 - スコープ外: `Nansum`・`Nanmean`（#3725）、f64 テープ（#3722）、GPU 実機 parity の実測（#3856・#3858）、公開面の追加。
 - 変えていないもの: 1 階の経路（`grad.rs`）・tolerance・baseline・ガードレール閾値・依存・`unsafe`・`docs/spec`・既存節の本文・公開 API。
 - 本 PR は `Refs #3790 #3724 #3767`。
+
+## 51. 実装記録（イシュー #3792・親 #3719 系。create_graph の C 区分・統計縮約 `LogSumExp`・`Nansum`・`Nanmean`）
+
+### 51.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3792`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §33（#3725）で、本節はその実装記録。`Var`・`Std`・`VectorNorm`・`PNorm` は #3791 の担当で本節では扱わない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「設計記録の推奨どおり、すべての論点を承認」とある。§33.14 の論点 1（実装する）・論点 2（LogSumExp の `±inf` レーンは V2 で 1 階の極限を写す）・論点 4（総括判定から外れる入力は型付きエラーで拒否）・論点 7（GPU parity は §48 の方式）が本節に関わる。論点 3（非有限 x は NaN を伝播し `±inf` を拒否）は `Std`・`L2`・`PNorm`・`Var` が対象で、本 3 Op には当たらない。個別の承認を上乗せして主張しない。
+
+### 51.1 実装したもの
+
+| Op | 公開メソッド | 方式 | forward の写し | cgrad |
+|---|---|---|---|---|
+| `LogSumExp` | `logsumexp` | V3（非有限レーンは V2） | `Var::logsumexp(dim)` | 値は `grad::logsumexp_vjp`（1 階と同じ関数）、構造は `g_b ⊙ softmax(x_safe)` と `where_cond` 2 段（`+inf` 位置は `g_b / inf_count`、0 位置は 0） |
+| `Nansum` | `nansum` | V3（構造は V2） | `Var::nansum(dim)` | 値は `stat_reduce::nan_reduce_vjp_host(mean = false)`、構造は `where_cond(isnan(x), 0, g_b)` |
+| `Nanmean` | `nanmean` | V3（構造は V2） | `Var::nanmean(dim)` | 値は同関数（`mean = true`）、構造は `where_cond(isnan(x), 0, g_b / count)` |
+
+- 実装は `crates/autodiff/src/create_graph/stat_reduce_lse_nan.rs`。`replay_op` と `build_cgrads` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`。
+- `±inf` レーンの分類は `grad::logsumexp_lane_masks`（新設。`logsumexp_vjp` と同じ走査・同じ `nan_propagating_max_f64`）。`logsumexp_vjp` は可視性を `pub(crate)` にしただけで本体は変えていない。NaN レーンはどのマスクにも入れず伝播させる。
+- `Nanmean` の `count == 0`（全 NaN）レーンの個数は 1 に守る。構造は全 0 で有限、値はホスト関数の NaN で 1 階と同じ。個数は f32 で持つため 2^24 を超えると丸まるが、影響は構造側だけで値は決まらない。
+- `±inf` レーンは `x` を 0 に差し替えてから softmax する（守らないと `where_cond` で選ばれない側でも Softmax の VJP が NaN を出す）。
+- 要素数 0 の入力は 1 階に揃え、ゼロ定数を返す。
+
+### 51.2 設計（§33）からの差・明確化
+
+- ファイル名は §33.4 の仮名 `create_graph_stat_reduce` ではなく `stat_reduce_lse_nan.rs`、GPU parity の族名は `stat_reduce_lse_nan`（#3791 の実装物との衝突を避けるため）。
+- 総括判定（§33.12）は `check_structure_stages` の写しを作らず、構造の各段が `|g|`（softmax は [0, 1]・マスクは 0/1・`1/count` と `1/inf_count` は 1 以下）で押さえられることから、子テープへ書く前の 1 判定に集約した: `g` に非有限要素がある、または `max|g|·max(1, 軸長)` が `STAGE_BOUND_GUARD`（2^125）以上なら型付き `Err(Backward)` で拒否する。拒否後は既存のロールバックで `child` が空に戻り、同じ `child` で再試行できる。
+- 非有限 `g` の拒否は、§33.12 では候補として書かれただけで §33.14 に行が無い。§27.3 と同じ扱いにした明確化で、承認済みとは書かない。x 側は拒否しない（`LogSumExp` は V2 の分岐と伝播、`Nansum`・`Nanmean` はマスクで扱う）。
+- 拒否契約の見本として 3 Op を使っていた既存テストを恒久的に未対応の `selu` へ差し替えた: `tests/create_graph.rs` の `create_graph_rejects_unsupported_op_selu`（旧 `..._logsumexp`）・`create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty`、`tests/create_graph_select_reduce.rs` の `adjacent_fail_closed_ops_stay_rejected`、`tests/stat_reduce_parity.rs` の `create_graph_nansum_is_supported_and_unsupported_op_is_a_typed_error`。`tape.rs` の単体テスト 2 件は 3 Op を `true` 側へ移し、`false` のままの隣接 Op は `MatrixNorm` にした。
+
+### 51.3 テスト
+
+- `crates/autodiff/tests/create_graph_stat_reduce_lse_nan.rs`: Hessian と有限差分の REQ-2 突合（3 Op × `dim` None／各軸）、`LogSumExp` の閉形式 `diag(s) − s sᵀ`、`first_order()`／`cg.grad` と 1 階 `Tape::backward` の bit 一致（NaN は値のクラス一致）、`±inf`・NaN・全 NaN レーンの入力、必須ベクトル（`1e20`・`[-1e20, 1e20]`・`1e-30`・非正規化数）の 3 段有限、全 `-inf`／count=0 レーン、`3e38`・`inf`・NaN の上流の拒否と再試行、`1e30` の受理、`jvp_create_graph` の孫テープ、隣接する `selu` の fail-closed。
+- `grad.rs` の単体テスト（レーン分類が `logsumexp_vjp` の出力パターンと一致）。
+- facade: `{logsumexp,nansum,nanmean}_create_graph_via_facade`（`grad_exact = true`）、`backward_create_graph` の rustdoc に `logsumexp` の HVP の doctest。本族を拒否する `api_surface.rs` の否定ガードは元から無く（§33.1）、反転するものは無い。代わりの正ガードは doctest 実在検査 `backward_create_graph_stat_reduce_lse_nan_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `stat_reduce_lse_nan`（経路 `H`・`Judge::Strict`・`NoMatMul`）の 3 ケースを登録し、`create_graph_stat_reduce_lse_nan_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 51.4 GPU（未実測）
+
+`logsumexp`・`stat_nansum`・`stat_nanmean` を実装するのは `backend-cpu` だけで、CUDA／Metal ではホストへフォールバックする（経路 `H`）。実機の結果はすべて**未実測**で、Phase 10 の #3856（`<cuda-node>`）・#3858（`<metal-node>`）へ申し送る。baseline の置き場は空のまま。
+
+### 51.5 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。shape と `dim` は forward 側の確保前検証を通ったものだけが届き、新しい確保は O(numel) のマスク・定数テンソルと O(レーン数) の個数に限る。本番経路で `unwrap`／`expect` は使わず、内部契約違反は型付きエラーにする。`unsafe` は追加しない。
+- スコープ外: `Var`・`Std`・`VectorNorm`・`PNorm`（#3791）、f64 テープの create_graph、`MatrixNorm` の反転、GPU 実機 parity の実測（#3856・#3858）、公開面の追加。
+- 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。
+- 本 PR は `Refs #3792 #3725 #3767 #3856 #3858`。
