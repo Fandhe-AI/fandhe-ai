@@ -393,23 +393,47 @@ fn weight_norm_huge_broadcast_view_is_rejected_before_allocation() {
     ));
 }
 
+/// `create_graph` は panic せず、退化入力（ゼロノルム・σ=0）を型付きエラー（`Backward`）で拒否して
+/// `child` を空に保ち、安全な入力では成功する（`weight_norm`／`spectral_norm` は #3794 で対象になった。
+/// 決定記録 §36・§56）。
 #[test]
 fn create_graph_is_a_typed_error_not_a_panic() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
-    let v = tape.var(&t(pseudo(6, 7, 23), &[2, 3]));
     let g = tape.var(&t(vec![1.0, 2.0], &[2, 1]));
+    // weight_norm: ゼロノルムのグループは拒否。
+    let v0 = tape.var(&t(vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0], &[2, 3]));
+    let loss = weight_norm(&v0, &g, Some(0)).unwrap().sum(None).unwrap();
+    assert!(matches!(
+        tape.backward_create_graph(&loss, &child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(child.is_empty());
+    // 同じ child で安全な入力は成功する。
+    let v = tape.var(&t(pseudo(6, 7, 23), &[2, 3]));
     let loss = weight_norm(&v, &g, Some(0)).unwrap().sum(None).unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
-    let w = tape.var(&t(pseudo(6, 7, 23), &[2, 3]));
+    assert!(tape.backward_create_graph(&loss, &child).is_ok());
+    // spectral_norm: σ=0（W が u・v と直交）は拒否、安全な入力は成功。
+    let child = Tape::new_with_ops(common::naive_ops());
     let mut st =
         SpectralNormState::from_vectors(&[2, 3], 0, &[1.0, 1.0], &[1.0, 1.0, 1.0], 1, 1e-12)
             .unwrap();
+    let w0 = tape.var(&t(vec![1.0, -1.0, 0.0, 0.0, 0.0, 0.0], &[2, 3]));
+    let loss = spectral_norm(&w0, &mut st, false)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    assert!(matches!(
+        tape.backward_create_graph(&loss, &child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(child.is_empty());
+    let w = tape.var(&t(pseudo(6, 7, 23), &[2, 3]));
     let loss = spectral_norm(&w, &mut st, false)
         .unwrap()
         .sum(None)
         .unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+    assert!(tape.backward_create_graph(&loss, &child).is_ok());
 }
 
 // --- spectral_norm: PyTorch fixture 突合 ---

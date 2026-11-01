@@ -1177,6 +1177,67 @@ fn gaussian_nll_loss_create_graph_via_facade() {
     );
 }
 
+fn local_response_norm_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let y = z
+        .reshape(&[1, 3, 2])
+        .unwrap()
+        .local_response_norm(3, 0.5, 0.75, 1.0)
+        .unwrap();
+    let l = y.mul(&y).unwrap().sum(None).unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn weight_norm_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    // z = [v(6); g(2)]。v と g の混合二階項を含む。
+    let v = z.narrow(0, 0, 6).unwrap().reshape(&[2, 3]).unwrap();
+    let g = z.narrow(0, 6, 2).unwrap().reshape(&[2, 1]).unwrap();
+    // `Σ w²` は `g` だけで決まり、上流が `w` に平行になって相殺するため `tanh` を挟む。
+    let w = v.weight_norm(&g, Some(0)).unwrap();
+    let l = w.tanh().sum(None).unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn spectral_norm_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let w = z.reshape(&[2, 3]).unwrap();
+    let mut st = fandhe_ai::SpectralNormState::from_vectors(
+        &[2, 3],
+        0,
+        &[0.6, 0.8],
+        &[0.5, 0.3, 0.8],
+        1,
+        1e-12,
+    )
+    .unwrap();
+    let y = w.spectral_norm(&mut st, false).unwrap();
+    let l = y.mul(&y).unwrap().sum(None).unwrap();
+    l.mul(&l).unwrap()
+}
+
+#[test]
+fn local_response_norm_create_graph_via_facade() {
+    let z = [0.3, -0.8, 0.5, 1.0, 0.7, 0.4];
+    check_create_graph_family(
+        "local_response_norm",
+        &z,
+        &[6],
+        local_response_norm_loss,
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn weight_norm_create_graph_via_facade() {
+    let z = [0.3, -0.8, 0.5, 1.0, 0.7, 0.4, 1.5, 0.9];
+    check_create_graph_family("weight_norm", &z, &[8], weight_norm_loss, true, 3e-3);
+}
+
+#[test]
+fn spectral_norm_create_graph_via_facade() {
+    let z = [0.9, 0.4, 0.5, 0.6, 0.7, 0.8];
+    check_create_graph_family("spectral_norm", &z, &[6], spectral_norm_loss, true, 3e-3);
+}
+
 #[test]
 fn max_pool2d_create_graph_via_facade() {
     check_create_graph_family(

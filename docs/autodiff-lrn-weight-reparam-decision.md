@@ -54,7 +54,7 @@
   「各 1 件・単一ファイル」に保つため。defaulted メソッドの追加のみで公開済み trait を破壊しない（#2643・#2637 と同じ
   拡張方式）。
 - forward は「フック → `Unsupported` のときだけ共有ホストカーネル」、VJP はホスト側のみ。非融合（`push_eager`）・
-  非 checkpoint・高階微分非対応・f64／低精度経路なし。`ops_shape.rs` には追記しない（兄弟イシューとの同一ファイル競合
+  非 checkpoint・高階微分非対応〈**注記（#3794）**: 3 Op は `create_graph` の対象になった。`docs/autodiff-higher-order-grad-decision.md` §36・§56 参照〉・f64／低精度経路なし。`ops_shape.rs` には追記しない（兄弟イシューとの同一ファイル競合
   回避。#2643〜#2645 と同じ判断）。
 - 命名規律: 素の `fn local_response_norm`・`fn weight_norm`・`fn norm_except_dim`・`fn spectral_norm` は
   `autodiff/src/lrn_ops.rs`／`autodiff/src/weight_reparam_ops.rs` の各 1 件のみ（workspace インベントリが固定。
@@ -148,7 +148,7 @@ forward ごとに反復が走るため、1 記録につき forward は 1 回。�
 - `crates/autodiff/tests/lrn_parity.rs`（17 件）・`weight_reparam_parity.rs`（21 件）: fixture 突合（forward・勾配・
   非有限・エラー表）・中心差分（`tests/conv_transpose3d_parity.rs` と同じ `H=1e-3`・相対 1e-2 または絶対 1e-3・`τ=1e-4`。
   緩和なし）・偶数 `size` の反転窓の手計算・非連続入力・引数エラーと孤児ノード無し・巨大 broadcast view の確保前拒否・
-  `create_graph` の型付きエラー・決定性・モック `BackendOps`（`Unsupported` フォールバック到達・他エラー伝播・誤 shape、
+  `create_graph` の型付きエラー〈注記（#3794）: 退化入力の拒否と安全な入力の受理へ変わった。§56 参照〉・決定性・モック `BackendOps`（`Unsupported` フォールバック到達・他エラー伝播・誤 shape、
   spectral は状態不変も確認）・spectral の eval 状態不変／training 更新・十分反復後の最大特異値 1。
 - `crates/facade/tests/lrn_weight_reparam_backend_parity.rs`: CPU tape と NaiveOps tape の突合（属性なし・bit 一致）。
   CUDA／Metal 実機は `#[ignore]`。
@@ -187,7 +187,7 @@ forward ごとに反復が走るため、1 記録につき forward は 1 回。�
 - CUDA／Metal の GPU 専用カーネルの新設と実機計測（§10）。
 - spectral_norm の rank 1 入力（`F.normalize` への縮退）・`u`／`v` の乱数初期化・`remove_parametrizations` 相当・旧 API
   （`torch.nn.utils.weight_norm` の hook 方式）・負の `dim`。
-- `create_graph`（高階微分）・activation checkpoint・f64 自動微分・f16／bf16・ONNX の import／export。
+- `create_graph`（高階微分。**注記（#3794）**: 3 Op は `docs/autodiff-higher-order-grad-decision.md` §36・§56 で対象になった）・activation checkpoint・f64 自動微分・f16／bf16・ONNX の import／export。
 - `docs/compat-api-scope.md` 1 節の対象範囲表の拡張・`docs/compat-feature-gap.md` の判定変更・spec（REQ-9）の改定・
   `MIN_KNOWN_PROBE_BLOCKS` の更新（下限検査と独立集計の一致検査のみで、新ガード追加は編集不要。兄弟も据え置き）。
 - ruleset・branch protection・リポジトリ設定の変更（`ci.yml` のジョブ追加・リネームは行っていないため required

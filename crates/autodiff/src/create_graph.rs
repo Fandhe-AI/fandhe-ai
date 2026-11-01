@@ -134,6 +134,7 @@ mod linalg_fft;
 mod loss_binary_margin;
 mod loss_class;
 mod loss_regression;
+mod norm_reparam;
 mod pad_mask;
 mod pool;
 mod select_reduce;
@@ -592,6 +593,9 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
         // 統計縮約 4 Op（イシュー #3791）: 非有限入力・自由度不足を子テープへ書く前に拒否する。
         stat_varnorm::validate_stat_varnorm(&parent_nodes, parent.ops(), &node.op)?;
+        // 正規化・再パラメータ 3 Op（イシュー #3794）: ±inf・退化統計（D≤0・ゼロノルム・σ=0）を
+        // 子テープへ書く前に拒否する。
+        norm_reparam::validate_norm_reparam(&parent_nodes, parent.ops(), &node.op)?;
     }
     Ok(())
 }
@@ -1208,6 +1212,25 @@ fn replay_op<'c>(
         Op::LogSumExp { input, dim } => get_mirror(mirror, input)?.logsumexp(dim),
         Op::Nansum { input, dim } => get_mirror(mirror, input)?.nansum(dim),
         Op::Nanmean { input, dim } => get_mirror(mirror, input)?.nanmean(dim),
+        // 正規化・再パラメータ（イシュー #3794。方式は `norm_reparam` モジュール doc 参照）。
+        // `SpectralNorm` は記録済みスナップショットから再生し、power iteration の状態を進めない。
+        Op::LocalResponseNorm { input, params } => get_mirror(mirror, input)?.local_response_norm(
+            params.size(),
+            params.alpha(),
+            params.beta(),
+            params.k(),
+        ),
+        Op::WeightNorm { v, g, dim } => {
+            get_mirror(mirror, v)?.weight_norm(&get_mirror(mirror, g)?, dim)
+        }
+        Op::SpectralNorm { weight, u, v, dim } => {
+            crate::weight_reparam_ops::spectral_norm_from_snapshot(
+                &get_mirror(mirror, weight)?,
+                &u,
+                &v,
+                dim,
+            )
+        }
         Op::Inv { input } => get_mirror(mirror, input)?.inv(),
         Op::Solve { a, b } => get_mirror(mirror, a)?.solve(&get_mirror(mirror, b)?),
         Op::Det { input } => get_mirror(mirror, input)?.det(),
@@ -2811,6 +2834,52 @@ fn build_cgrads<'c>(
                         &g,
                     )?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 正規化・再パラメータ（イシュー #3794。方式は `norm_reparam` モジュール doc 参照）。
+            Op::LocalResponseNorm { input, params } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = norm_reparam::lrn_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        &get_mirror(mirror, input)?,
+                        input,
+                        &params,
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::WeightNorm { v, g: g_id, dim } => {
+                if parent_nodes[v.0].requires_grad || parent_nodes[g_id.0].requires_grad {
+                    let (dv, dg) = norm_reparam::weight_norm_cgrads(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        &get_mirror(mirror, v)?,
+                        &get_mirror(mirror, g_id)?,
+                        (v, g_id),
+                        dim,
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, v, dv)?;
+                    accumulate(&parent_nodes, &mut cgrads, g_id, dg)?;
+                }
+            }
+            Op::SpectralNorm { weight, u, v, dim } => {
+                if parent_nodes[weight.0].requires_grad {
+                    let d = norm_reparam::spectral_norm_cgrad(
+                        parent,
+                        child,
+                        &parent_nodes,
+                        &get_mirror(mirror, weight)?,
+                        weight,
+                        (&u, &v),
+                        dim,
+                        &g,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
                 }
             }
             // 統計縮約（イシュー #3792。方式は `stat_reduce_lse_nan` モジュール doc 参照）。

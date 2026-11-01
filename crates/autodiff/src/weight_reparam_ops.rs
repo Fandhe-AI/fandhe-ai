@@ -11,6 +11,10 @@
 //! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定し、公開済み側は同ファイルの正ガードと
 //! ダウンキャスト消費箇所のインベントリ（`parametrize_downcast_sites_are_gated_or_exempt`）が固定する。
 //!
+//! **create_graph**: 3 Op（`LocalResponseNorm`・`WeightNorm`・`SpectralNorm`）はイシュー #3794 で対象になった
+//! （方式は `create_graph/norm_reparam.rs`、決定記録 §36・§56）。`SpectralNorm` の forward 再生には
+//! 状態を進めない [`spectral_norm_from_snapshot`] を使う。
+//!
 //! **PyTorch 相当**:
 //!
 //! | 入口 | PyTorch 相当 |
@@ -353,6 +357,57 @@ pub fn spectral_norm<'t>(
     Ok(Var::from_raw(weight.tape(), id))
 }
 
+/// 記録済みスナップショット `u`／`v` から `out = W / σ` を子テープへ積む（`create_graph` の forward
+/// 再生専用。イシュー #3794・決定記録 §36・§56）。
+///
+/// [`spectral_norm`] との違いは **power iteration を回さず [`SpectralNormState`] を受け取らない**こと
+/// だけで、forward の検査順・経路（`BackendOps::spectral_norm_forward` → `Unsupported` でホスト）・
+/// 戻り shape 再検証・`Op::SpectralNorm` の記録は同じ。`u`／`v` は親ノードが forward 時点で保持した
+/// 非追跡スナップショットなので、再生が状態を進めることも `Op` タグを取り違えることもない。
+/// `create_graph.rs::replay_op` からのみ呼ばれる。長さ・layout の不整合は型付きエラー（実体化・確保より前）。
+pub(crate) fn spectral_norm_from_snapshot<'t>(
+    weight: &Var<'t>,
+    u: &Tensor<f32>,
+    v: &Tensor<f32>,
+    dim: usize,
+) -> Result<Var<'t>, AutodiffError> {
+    let layout = wr::spectral_norm_layout(&weight.shape(), dim).map_err(AutodiffError::Shape)?;
+    for (got, want) in [(u.shape(), layout.rows()), (v.shape(), layout.cols())] {
+        if got != [want] {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: got.to_vec(),
+                rhs: vec![want],
+            }));
+        }
+    }
+    let w_val = materialize_one(weight)?;
+    let u_vec = u.contiguous().host_slice().into_owned();
+    let v_vec = v.contiguous().host_slice().into_owned();
+    let value = match weight.tape().ops().spectral_norm_forward(&w_val, u, v, dim) {
+        Ok(out) => {
+            verify_shape(out.shape(), layout.shape())?;
+            out
+        }
+        Err(BackendError::Unsupported(_)) => {
+            let data =
+                wr::spectral_norm_host(&w_val.contiguous().host_slice(), &layout, &u_vec, &v_vec)
+                    .map_err(AutodiffError::Shape)?;
+            Tensor::new(data, layout.shape()).map_err(AutodiffError::Shape)?
+        }
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    };
+    let id = weight.tape().push_eager(
+        Op::SpectralNorm {
+            weight: weight.node_id(),
+            u: u.clone(),
+            v: v.clone(),
+            dim,
+        },
+        value,
+    );
+    Ok(Var::from_raw(weight.tape(), id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +494,27 @@ mod tests {
         assert!(spectral_norm(&wrong, &mut st, true).is_err());
         assert_eq!(st, before);
         assert_eq!(tape.len(), n);
+    }
+
+    #[test]
+    fn snapshot_replay_matches_eval_and_leaves_no_orphans() {
+        let tape = Tape::new();
+        let w = tape.var(&t(vec![3.0, 0.5, -1.0, 1.0, 2.0, 0.25], &[2, 3]));
+        let mut st =
+            SpectralNormState::from_vectors(&[2, 3], 0, &[1.0, 1.0], &[1.0, 1.0, 1.0], 2, 1e-12)
+                .unwrap();
+        let eval = spectral_norm(&w, &mut st, false).unwrap();
+        let u = Tensor::new(st.u().to_vec(), &[2]).unwrap();
+        let v = Tensor::new(st.v().to_vec(), &[3]).unwrap();
+        let snap = spectral_norm_from_snapshot(&w, &u, &v, 0).unwrap();
+        assert_eq!(
+            eval.to_tensor().host_slice().into_owned(),
+            snap.to_tensor().host_slice().into_owned()
+        );
+        let n = tape.len();
+        let bad_u = Tensor::new(vec![1.0; 3], &[3]).unwrap();
+        assert!(spectral_norm_from_snapshot(&w, &bad_u, &v, 0).is_err());
+        assert_eq!(tape.len(), n, "エラー時に孤児ノードを残さない");
     }
 
     #[test]

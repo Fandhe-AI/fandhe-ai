@@ -527,16 +527,28 @@ fn each_call_records_exactly_one_node_and_no_grad_input_is_supported() {
     assert_eq!(y.to_tensor().shape(), &[1, 3, 2]);
 }
 
+/// `create_graph` は panic せず、退化入力（`k=0` で窓内が全ゼロ＝D=0）を型付きエラー（`Backward`）で拒否して
+/// `child` を空に保ち、安全な入力では成功する（LRN は #3794 で対象になった。決定記録 §36・§56）。
 #[test]
 fn create_graph_is_a_typed_error_not_a_panic() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
+    let zero = tape.var(&t(vec![0.0; 6], &[1, 3, 2]));
+    let loss = local_response_norm(&zero, 3, 0.5, 0.75, 0.0)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    assert!(matches!(
+        tape.backward_create_graph(&loss, &child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(child.is_empty());
     let x = small(&tape);
     let loss = local_response_norm(&x, 3, 0.5, 0.75, 1.0)
         .unwrap()
         .sum(None)
         .unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+    assert!(tape.backward_create_graph(&loss, &child).is_ok());
 }
 
 #[test]

@@ -4487,3 +4487,50 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: `CtcLoss`（恒久 fail-closed）、他の B 区分、`Reduction::None` の追加、f64 テープの create_graph、GPU 実機 parity の実測（#3857・#3859）、測り方の変更（#3739）、公開面の追加、#3798／#3799 との総括判定ヘルパーの共通化。
 - 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§26.2 の表の 1 行を除く）・公開 API。
 - 本 PR は `Refs #3800 #3731 #3767 #3857 #3859`。
+
+## 56. 実装記録（イシュー #3794・親 #3727。create_graph の C 区分・正規化・再パラメータ `LocalResponseNorm`・`WeightNorm`・`SpectralNorm`）
+
+### 56.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3794`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §36（#3727）で、本節はその実装記録。§36 本文は書き換えていない。§36.7 のチェック欄（`compat-api-scope.md` への適用記録）は本 PR で追記したので済みとして扱う。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「設計記録の推奨どおり、すべての論点を承認」「C 区分は全 5 族を実装」「SpectralNorm の power iteration は定数扱い」「非有限は NaN を伝播し `±inf` は拒否」「外れる入力は型付きで拒否」とある。§36.14 の論点 1〜8 はこの包括承認の範囲として扱い、個別の承認を上乗せして主張しない。
+
+### 56.1 実装したもの
+
+| Op | 公開メソッド | 方式 | cgrad |
+|---|---|---|---|
+| `LocalResponseNorm` | `local_response_norm` | V3 + S1 | 値は `local_response_norm_vjp_host`。構造は `[N, C, inner]` に畳み、`(n, inner)` 列ごとの 2 のべき乗 `s = pow2ceil(max(max\|x\|, √(\|k\|·size/\|α\|)))` で `x_s = x/s`、`d_s = k/s² + (α/size)·Σ_W x_s²`、`dx = s^{-2β}·[g·d_s^{-β} − (2αβ/size)·x_s·Σ_{W'} g·x_s·d_s^{-β-1}]`。窓和は `Pad`（値 0）＋ずらした `Narrow` の `Add`（前方窓 `W`＝`[c−⌊size/2⌋, c+⌊(size−1)/2⌋]` と反転窓 `W'`＝`[m−⌊(size−1)/2⌋, m+⌊size/2⌋]` を別々に作り、ずらしは `[−(C−1), C−1]` に打ち切る）。`s^{-2β}` は ±2^100 以下のチャンクに分けて順に `Mul`。`α = 0` は `dx = g·k^{-β}` の別分岐 |
+| `WeightNorm` | `weight_norm` | V3 + S1 | 値は `weight_norm_vjp_host` の `(dv, dg)`。`dim` 軸を先頭へ寄せた `[groups, rest]` で、グループごとの 2 のべき乗 `s` から `v_s = v/s`、`n_s = ‖v_s‖`、`v̂ = v_s/n_s`、`dg = Σ(g_up⊙v̂)`、`dv = (g/n_s/s)·(g_up − dg·v̂)`。`g` は子テープ上の写しのまま使い（v と g の混合二階項を保つ）、`dv`・`dg` を `v`・`g` の両方へ蓄積する |
+| `SpectralNorm` | `spectral_norm` | V3 + S1 | 値は `spectral_norm_vjp_host`。`u`・`v` は forward 時点のスナップショットで定数扱い。ホスト定数 `P[i,j] = u_i·v_j`（`W` と同じ並び）と `s = pow2ceil(max\|W\|)` から `W_s = W/s`、`σ_s = Σ(W_s⊙P)`、`Ŵ = W_s/σ_s`、`dW = (g_up − Σ(g_up⊙Ŵ)·P)/(σ_s·s)`。`σ` の符号は問わない（0 と非有限だけ拒否） |
+
+- 実装は `crates/autodiff/src/create_graph/norm_reparam.rs`。`replay_op`・`build_cgrads`・`validate_ancestors` の結線は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`（ワイルドカードは足していない）。`grad.rs` の可視性変更は不要だった（3 つのホスト関数は `tensor-core` で既に `pub`）。`tensor-core` は変更していない。
+- `SpectralNorm` の再生は新設の `weight_reparam_ops::spectral_norm_from_snapshot(weight, u, v, dim)`（`pub(crate)`）で行う。layout・`u`／`v` の長さを検査してから実体化し、`spectral_norm_forward`（`Unsupported` ならホスト）→戻り shape 検証→同じスナップショットで `Op::SpectralNorm` を `push_eager` するだけで、power iteration は回さず `SpectralNormState` も受け取らない。テスト `spectral_norm_create_graph_does_not_advance_power_iteration_state` が training／eval の両方で `backward_create_graph`・`hvp` の前後の `u`／`v` が bit 単位で不変なことを固定する。
+- `g.mul(0/1 定数)` は使わず、区分は `where_cond`／定数で選ぶ（`inf·0 = NaN` を作らない）。要素数 0 の入力は 1 階に揃え、ゼロ定数を返す。
+
+### 56.2 設計（§36）からの差・明確化
+
+- **総括判定の第 2 軸（相殺・f32 underflow）の具体形**: §36.12 の「f64 の参照 `V`・各項の絶対値和 `M`・f32 で再現した `V_str`」を、3 Op では**構造を積んだ直後に子テープ上の構造の実値（f32）と 1 階のホスト値（f64 起点）を要素ごとに比べる**形にした（`shadow_check`）。`loss_class.rs::struct_check` と同じ式 `err = |構造 − ホスト| + coeff·m` を使い、`err < 1e-5`（絶対）または `err ≤ (1e-3/2)·|ホスト|`（相対の半分）でなければ拒否する。`m` は各項の絶対値の和（LRN は `F·(|g|·a + 2|ρβ|·|x_s|·Σ|g·x_s|·b)`、WeightNorm は `coef·(|g_up| + |dg|·|v̂|)`、SpectralNorm は `(|g_up| + |Σ g_up·Ŵ|·|P|)/(|σ_s|·s)`）、`coeff = (2L+4)·2^-23`（`L` は最長の縮約長）。構造の forward の桁落ち・underflow は二階の曲率の誤差と同じ類型で、構造の実値との差として見える。**二階の各項を f64 で展開した検査ではなく、構造の forward 値による代理検査**である点が §36.12 の記述との差。tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）は `tensor-core::tolerance` から読み、値は変えない。
+- **第 1 軸（overflow）**: `check_l2` 等と同型に、構造の forward の各段と二階の逆伝播（seed の各要素の絶対値 ≤ 1）の「cotangent × 微分係数」の上界を f64 で押さえ、非有限か `STAGE_BOUND_GUARD`（2^125）以上の段があれば子テープへ書く前に型付き `Err(Backward)` で拒否する。上界は保守的で、`1/s`・`1/(n_s·s)`・`1/σ_s` の増幅と、LRN の `d_s^{-β-2}` を含む。非有限の上流 `g` も拒否する。
+- 入口検査（`validate_norm_reparam`）: 入力（WeightNorm は `v`・`g`、SpectralNorm は重み）に `±inf` があれば拒否し、NaN は伝播させる。LRN は窓内の `D = k + (α/size)·Σx²` が 0 以下か非有限、WeightNorm は全要素 0 のグループ、SpectralNorm は `σ = 0` か非有限を拒否する（NaN を含む列・グループ・重みは判定から外す）。LRN は構造段で `d_s` が 0 以下または f32 の非正規数になる入力（`k` が小さく `s` が大きい列）も拒否する。
+- 拒否は `AutodiffError::Backward`。新しいエラー variant は足していない。`backward_create_graph` のロールバックで `child` は空へ戻り、同じ `child` で安全な入力を再試行できる。
+- **相殺の拒否が起きる典型**: 上流 `g` が `v̂`（WeightNorm）や `P`（SpectralNorm）に平行になると `g_up − dg·v̂` が丸めの桁で相殺する。例えば `loss = Σ w²` は `g` のみで決まり、WeightNorm の上流は `w` に平行になるため拒否される（テストでは `tanh` を挟んだ損失を使う）。保守的な拒否で、許容内の入力も拒否しうる。
+- 既存テストの差し替え（§36.4 に載っていた分に加え、**§36.4 に未掲載の 2 本**）: `tape.rs` のメタ性質テスト `lrn_weight_norm_spectral_norm_op_meta_properties`（`supports_create_graph()` を true へ）、`tests/create_graph.rs` の `batch_norm_neighbor_local_response_norm_stays_rejected`→`batch_norm_neighbor_custom_op_stays_rejected`、`tests/create_graph_norm.rs` の `neighbouring_unsupported_norm_op_stays_fail_closed`（いずれも拒否の見本を `Op::Custom` へ）。未掲載の `tests/lrn_parity.rs`・`tests/weight_reparam_parity.rs` の `create_graph_is_a_typed_error_not_a_panic` は `.is_err()` を期待していたため、承認された拒否入力（`k=0` の全ゼロ窓・ゼロノルムのグループ・`σ=0`）で `Err(Backward)` と `child.is_empty()` を確かめ、安全な入力では `Ok` になる確認を足した。ほかに 3 Op を拒否の見本にしている既存テストは無い（`crates/*/tests`・`crates/*/src` を確認）。
+- ヘルパー（`stage`・`struct_check`・`rounding_coeff` 等）は他の族と共有せず、この新モジュールの private 関数として同等のものを置いた（独立にマージできるようにするため）。マージ後の共通化は整理候補。
+- **保証範囲（§27.3 の書き方に揃える）**: 保証は総括判定（第 1・第 2 の軸）を通った入力に限る。通った入力では、1 階・`cg.grad`（1 階と bit 同一）・二階（seed の各要素の絶対値 ≤ 1）・孫テープ再生が有限である。第 2 軸は構造の forward 値による代理検査であり、二階の各要素の REQ-2 一致の厳密な証明ではない。対象外: 絶対値 1 を超える seed、`g` を作る上流の Op の逆伝播、三階以上、真の値そのものが f32 を超える場合。拒否範囲を狭める（S2 化）かは所有者判断。
+
+### 56.3 テスト
+
+- `crates/autodiff/tests/create_graph_norm_reparam.rs`: Hessian と 5 点中央差分の REQ-2 突合（LRN は `size` 1〜5・`C` 3／4〈`size > C` を含む〉・β ∈ {0.5, 0.75, 1, 2}・k ∈ {1, 2}・`α = 0` の縮退分岐、WeightNorm は `dim` None／0／1／2 で v と g の混合項を含む、SpectralNorm は `dim` と rank 2〜4）、`first_order()` の bit 同一と `cg.grad` の bit 一致（V3）、power iteration の状態不変（training／eval・`backward_create_graph`・`hvp`）、拒否と `child` が空・再試行、隣接する `Op::Custom` の fail-closed、必須ベクトル（`x=1e20`・偶数 `size` の非対称窓・小スケール・`g=3e38`・`v=1e20` など）が 1 階・`cg.grad`・二階・孫テープ再生で有限かつ一致するか、拒否されて `child` が空になること、掃引（Op × パラメータ × 入力スケール 1e-30〜3e38 × 上流の大きさ）で「受理なら全段が有限かつ一致、拒否なら `Err(Backward)` で `child` が空」を確かめ、受理と拒否の両方が現れること。単体テスト（`norm_reparam.rs`・`weight_reparam_ops.rs`）はチャンク分割・`struct_check`・添字写像・スナップショット再生の孤児ノード無しを固定する。
+- facade: `{local_response_norm,weight_norm,spectral_norm}_create_graph_via_facade`、`backward_create_graph` の rustdoc に `weight_norm` の混合二階項の doctest。本族を拒否する `api_surface.rs` の否定ガードは元から無く、反転するものは無い（`LrnWeightReparamHoldDoctestGuard` は `add_weight_norm` 等の未公開名の保留で create_graph と無関係のため変更なし）。代わりの正ガードは doctest 実在検査 `backward_create_graph_norm_reparam_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `norm_reparam` の 3 ケース（いずれも経路 `H`・`Judge::Strict`・`NoMatMul`）を登録し、`create_graph_norm_reparam_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 56.4 GPU（未実測）
+
+`BackendOps::{lrn_forward, weight_norm_forward, spectral_norm_forward}` を実装するのは `backend-cpu` だけで、CUDA／Metal は forward も 1 階もホストへ落ちる（区分 H）。GPU カーネルは新設しない。子テープの構造 Op（Pad・Narrow・Mul・Div・Sum・Sqrt・PowScalar）がデバイスで走る。実機の結果はすべて**未実測**で、Phase 10 の #3856（`<cuda-node>`）・#3858（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。
+
+### 56.5 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。shape・`dim`・`LrnParams` は forward 側の検証を通ったものだけが届き、写しは公開 `Var` メソッド（と `spectral_norm_from_snapshot`）経由なので検証は迂回されない。`spectral_norm_from_snapshot` は `u`／`v` の長さと layout を照合してから実体化する。新しい確保は O(numel) の f64 一時領域・`P`（`W` と同じ shape）・定数テンソルに限り、LRN のずらし回数は最大 `2C−1`。本番経路で `unwrap`／`expect` は使わず、内部契約違反は型付きエラーにする。`unsafe` は追加しない。
+- スコープ外: GPU 実機 parity の実測（#3856・#3858）、測り方の変更（#3739）、f64 テープの create_graph、S2 の実装、三階以上の保証、`Sequential::add_weight_norm`／`add_spectral_norm`・`norm_except_dim` の公開、他の C 区分の族と B 区分、総括判定ヘルパーの兄弟モジュールとの共通化。
+- 変えていないもの: 1 階の経路（`grad.rs`）・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API（`SpectralNormState` の公開形を含む）。
+- 本 PR は `Refs #3794 #3727 #3767 #3856 #3858`。
