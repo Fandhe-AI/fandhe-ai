@@ -517,10 +517,13 @@ fn pow_tiny_base_tracked_zero_exponent_second_order_is_finite() -> R<()> {
     let l = a.pow(&b)?;
     let cg = p.backward_create_graph(&l, &c)?;
     assert_eq!(second(&cg, &c, &a, &a)?, vec![0.0]);
-    for (of, wrt) in [(&a, &b), (&b, &a), (&b, &b)] {
-        for v in second(&cg, &c, of, wrt)? {
-            assert!(v.is_finite(), "二階に非有限値: {v}");
-        }
+    // 混合二階微分は両方向とも閉形式 1/a = 1e200 に一致する（対称性）。
+    let ab = second(&cg, &c, &a, &b)?;
+    let ba = second(&cg, &c, &b, &a)?;
+    assert_eq!(ab, vec![1e200]);
+    assert_eq!(ba, vec![1e200]);
+    for v in second(&cg, &c, &b, &b)? {
+        assert!(v.is_finite(), "二階に非有限値: {v}");
     }
     Ok(())
 }

@@ -562,19 +562,37 @@ fn binary_contributions_f64<'c, 't>(
             if need_a {
                 let b_bc = b_m.cg_broadcast_to(out_shape)?;
                 let neg_one = scalar_const(child, -1.0)?;
-                // 指数 0 の位置を置き換える。ただし指数も追跡され（need_b）、底が
-                // 有限の正で `1/a^2` も有限な位置は式を残す（`a^(b-1)` の逆伝播係数
-                // `(b-1)a^(b-2)` が overflow して `0 * inf = NaN` になるのを避ける）（混合二階微分 `1/a` の
-                // ため）。指数が非追跡なら混合項は存在せず全 b == 0 位置を定数化し、
-                // 微小な正の底での `a^(-1)` overflow による `0 * inf = NaN` も避ける。
-                let mask_b0 =
+                // 指数 0 の位置の扱い（`factor = b * a^(b-1)` の逆伝播係数が
+                // `(b-1) b a^(b-2)` になり、微小な正の底では `a^(b-2)` が overflow して
+                // `0 * inf = NaN` になるのを避ける）。
+                // - 指数が非追跡、または底が有限の正でない: 混合項は存在しない（または
+                //   定義できない）ので係数を定数 0 にする。
+                // - 指数が追跡され底が有限の正: 混合二階微分 `d/db [b a^(b-1)] = 1/a` を
+                //   残すため `factor = (b * a^b) / a` の形で組む。`a^b = 1`（b = 0）の位置
+                //   でのみ使うので overflow せず、`a` 側の微分も `0/a` で NaN にならない。
+                let pairs = |a: f64, b: f64| -> (bool, bool) {
+                    let b0 = b == 0.0;
+                    let pos = a.is_finite() && a > 0.0;
+                    (b0 && !(need_b && pos), b0 && need_b && pos)
+                };
+                let mask_zero =
                     pair_mask_const(child, &a_m.value(), &b_m.value(), out_shape, |a, b| {
-                        b == 0.0
-                            && !(need_b && a.is_finite() && a > 0.0 && (1.0 / (a * a)).is_finite())
+                        pairs(a, b).0
                     })?;
-                let safe_a = mask_b0.cg_where(&ones, &a_bc)?;
-                let a_pow = safe_a.pow(&b_bc.add(&neg_one)?)?;
-                let factor = mask_b0.cg_where(&zeros, &b_bc.mul(&a_pow)?)?;
+                let mask_alt =
+                    pair_mask_const(child, &a_m.value(), &b_m.value(), out_shape, |a, b| {
+                        pairs(a, b).1
+                    })?;
+                let safe_a = mask_zero.cg_where(&ones, &a_bc)?;
+                // 通常式は alt 位置も 1 に差し替える（そこで `a^(b-2)` を作らない）。
+                let normal_a = mask_alt.cg_where(&ones, &safe_a)?;
+                let a_pow = normal_a.pow(&b_bc.add(&neg_one)?)?;
+                let normal = b_bc.mul(&a_pow)?;
+                // alt 式は alt 位置の底だけを使い、他位置は 1 に差し替える。
+                let alt_a = mask_alt.cg_where(&a_bc, &ones)?;
+                let alt = b_bc.mul(&alt_a.pow(&b_bc)?)?.div(&alt_a)?;
+                let factor = mask_alt.cg_where(&alt, &normal)?;
+                let factor = mask_zero.cg_where(&zeros, &factor)?;
                 out.push((a, g.mul(&factor)?.cg_reduce_to(a_shape)?));
             }
             if need_b {
