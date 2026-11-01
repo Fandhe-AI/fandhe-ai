@@ -100,9 +100,11 @@
 //! f64 版。実装は子モジュール `create_graph.rs`、設計は
 //! `docs/autodiff-functional-transforms-design.md` §35／§37）。第 1 段の対象は
 //! `add`／`mul`／`div`／`pow` と、勾配グラフの閉包性のための crate 内部
-//! variant（`BroadcastTo`／`ReduceTo`／`Log`／`Where`）。`matmul`／`sum`／
-//! `mean`／`max` は追跡対象の祖先にあれば拒否する。公開面（`VarF64` の公開
-//! メソッド）は増やさない。facade への公開は #3786。
+//! variant（`BroadcastTo`／`ReduceTo`／`Log`／`Where`）。第 2 段（#3786）で
+//! `matmul`（rank 2）／`sum`／`mean` と内部 variant `Transpose`／`Unreduce`
+//! を足し、`max` は fail-closed（追跡対象の祖先にあれば拒否）のまま固定した。
+//! 公開面（`VarF64` の公開メソッド）は増やさない。facade への公開は #3786
+//! （newtype `CreateGraphResultF64`）。
 //!
 //! # 次段への申し送り
 //!
@@ -130,7 +132,7 @@ use fandhe_ai_tensor_core::{
 use crate::error::AutodiffError;
 use crate::tape::Tape;
 
-pub use create_graph::CreateGraphResultF64;
+pub use create_graph::{CreateGraphResultF64, CreateGraphVarsF64};
 
 /// プロセス全体で共有する [`TapeF64`] 識別子発行カウンタ。`crate::tape::
 /// TapeId`（`tape.rs` の `NEXT_TAPE_ID`）と同じ理由（ポインタ比較は
@@ -209,6 +211,19 @@ pub(crate) enum OpF64 {
         on_true: NodeIdF64,
         on_false: NodeIdF64,
     },
+    /// 2 次元行列の転置（`matmul` の VJP を勾配グラフへ積むための
+    /// create_graph 専用 crate 内部 variant。rank≠2 は forward が拒否。
+    /// イシュー #3786）。
+    Transpose {
+        input: NodeIdF64,
+    },
+    /// `Sum` の VJP（勾配の複製・展開）を勾配グラフへ積むための
+    /// create_graph 専用 crate 内部 variant。目標 shape はノードの `shape`、
+    /// `dim` は対応する `Sum` の縮約軸（イシュー #3786）。
+    Unreduce {
+        input: NodeIdF64,
+        dim: Option<usize>,
+    },
 }
 
 /// 二項演算 4 種の種別のみを表す軽量タグ（[`OpF64`] から演算の種類だけ
@@ -248,6 +263,11 @@ enum OpKindF64 {
         cond: NodeIdF64,
         on_true: NodeIdF64,
         on_false: NodeIdF64,
+    },
+    Transpose(NodeIdF64),
+    Unreduce {
+        input: NodeIdF64,
+        dim: Option<usize>,
     },
 }
 
@@ -410,6 +430,8 @@ impl<'t> TapeF64<'t> {
                         on_true,
                         on_false,
                     }),
+                    OpF64::Transpose { input } => Some(OpKindF64::Transpose(input)),
+                    OpF64::Unreduce { input, dim } => Some(OpKindF64::Unreduce { input, dim }),
                 }
             };
             let Some(kind) = kind else {
@@ -487,6 +509,21 @@ impl<'t> TapeF64<'t> {
                     // `cond` は 0/1 の定数葉（`requires_grad == false`）なので
                     // 寄与を返さない。
                     vec![(on_true, d_true), (on_false, d_false)]
+                }
+                // 以下 2 腕はイシュー #3786 で追加した内部 variant の 1 階 VJP
+                // （`matmul`／`sum` の勾配グラフを子テープ上で再度逆伝播する
+                // ときに通る）。既存の腕は不変。
+                OpKindF64::Transpose(input) => {
+                    let da = grad_g
+                        .transpose(0, 1)
+                        .map_err(AutodiffError::Shape)?
+                        .contiguous();
+                    vec![(input, da)]
+                }
+                OpKindF64::Unreduce { input, dim } => {
+                    // `input` は縮約後 shape で、forward_sum の出力 shape と一致する。
+                    let (da, _) = forward_sum(self.tape, &grad_g, dim)?;
+                    vec![(input, da)]
                 }
             };
 
@@ -811,6 +848,56 @@ impl<'g, 't> VarF64<'g, 't> {
             value,
             shape,
             t_rg || f_rg,
+        )
+    }
+
+    /// 2 次元行列の転置（実体化済み）。rank≠2 は型付きエラーで拒否する。
+    fn cg_transpose(&self) -> Result<Self, AutodiffError> {
+        let (a_val, requires_grad) = self.value_and_requires_grad();
+        if a_val.shape().len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_val.shape().len(),
+            }));
+        }
+        let shape = vec![a_val.shape()[1], a_val.shape()[0]];
+        checked_bytes_for_f64(&shape).map_err(AutodiffError::Shape)?;
+        let value = a_val
+            .transpose(0, 1)
+            .map_err(AutodiffError::Shape)?
+            .contiguous();
+        self.push_node(
+            OpF64::Transpose { input: self.id },
+            value,
+            shape,
+            requires_grad,
+        )
+    }
+
+    /// `Sum{dim}` の VJP 用の展開。`self`（縮約後 shape）を `target`
+    /// （縮約前 shape）へ複製する。`self` の shape が
+    /// `reduce_out_shape(target, dim)` と一致しなければ `ShapeMismatch`。
+    /// 確保の前に `checked_bytes_for_f64` で検査する（A03）。
+    fn cg_unreduce(&self, target: &[usize], dim: Option<usize>) -> Result<Self, AutodiffError> {
+        let shape = self.shape();
+        let expected = reduce_out_shape(target, dim).map_err(AutodiffError::Shape)?;
+        if shape != expected {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: shape,
+                rhs: expected,
+            }));
+        }
+        checked_bytes_for_f64(target).map_err(AutodiffError::Shape)?;
+        let (g_val, requires_grad) = self.value_and_requires_grad();
+        let value = unreduce_broadcast_f64(&g_val, target, dim)?;
+        self.push_node(
+            OpF64::Unreduce {
+                input: self.id,
+                dim,
+            },
+            value,
+            target.to_vec(),
+            requires_grad,
         )
     }
 

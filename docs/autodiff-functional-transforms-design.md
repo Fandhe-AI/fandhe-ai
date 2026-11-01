@@ -1418,3 +1418,44 @@ impl<'t> TapeF64<'t> {
 
 - #3786: 第 2 段の Op、facade newtype（`first_order` は §35.13 論点どおり (a) の所有）、§35.1 の表の残りのガード反転（`F64_AUTOGRAD_SURFACE`・`f64_autograd_*` 群・期待マップへ facade の f64 宣言を足して 4 件にする・`facade_tape_backward_create_graph_is_thin_delegation` を impl の範囲で抽出する）、実機テスト、公開の適用記録。
 - #3787・#3788: `rollback_to` の再利用、`mirror()` の追加、移行ノートの公開名。
+
+## 38. 実装記録（イシュー #3786・親 #3719。f64 create_graph 第 2 段と facade 公開）
+
+### 38.0 位置づけ
+
+- 承認: §37.0 と同じ #3766 の所有者の回答コメント（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674）。論点 2 (a)（full mirror・対象 8 Op・2 段）と、`backward_create_graph` の公開が承認済み。§35.13 論点 5 の推奨「`max` は fail-closed」も承認済みなので、`max` は対象にせず拒否を固定した。
+- 基準: `origin/main` `f419e7884`。本節は §35.11 の第 2 段と §35.1 の facade 公開の実装記録である。
+
+### 38.1 追加したもの
+
+- `crates/autodiff/src/f64_autograd.rs`: 内部 variant `Transpose`／`Unreduce`（`pub(crate)`）、その 1 階 VJP 腕、内部 forward `cg_transpose`／`cg_unreduce`（公開メソッドは増やさない）。`cg_unreduce` は縮約後 shape の一致を検査し、確保の前に `checked_bytes_for_f64` を通す（A03）。既存の腕は変えていない。
+- `crates/autodiff/src/f64_autograd/create_graph.rs`: `matmul`（rank 2）・`sum`・`mean` の再生と VJP、`supports_create_graph_f64` の更新（`Max` だけ false）、分解用の型 `CreateGraphVarsF64` と `CreateGraphResultF64::into_parts`。
+  - 子テープに積む Op は `Add`／`Mul`／`Div`／`Pow`／`MatMul`／`Sum`／`Mean`／`BroadcastTo`／`ReduceTo`／`Log`／`Where`／`Transpose`／`Unreduce` だけで、各 VJP もこの集合の中で書ける（閉包性）。
+  - `matmul` の VJP は `g @ bᵀ`・`aᵀ @ g` を `Transpose` ノード越しに `VarF64::matmul` で積む。`sum` の VJP は `Unreduce`、`mean` は `g / n` を `Unreduce` する。`Transpose` の VJP は `Transpose`、`Unreduce` の VJP は `sum`。
+- facade `crates/facade/src/lib.rs`: `TapeF64::backward_create_graph` と newtype `CreateGraphResultF64`（`first_order`／`grad`／`child_var`）。メモリ（full mirror）と範囲外 Op を rustdoc に書いた。
+- テスト: autodiff `tests/f64_create_graph.rs`（二階の中心差分・三階の閉包性・`max` の拒否・空 `sum` ほか）と `create_graph.rs` の単体 3 件（内部 variant の 1 階 VJP・巨大 shape と rank の拒否・子テープの全ノードが対象 Op であることを確かめる閉包性）。facade `tests/f64_create_graph_facade.rs`（CPU 7 件、`#[ignore]` の CUDA／Metal 各 1 件）。
+- ガード（`crates/facade/tests/api_surface.rs`）: `F64_AUTOGRAD_SURFACE` に `TapeF64::backward_create_graph` と `CreateGraphResultF64` を足し、4 型の宣言・公開メソッド・再エクスポート・インベントリ・プローブ・自己テストを更新した。`workspace_declares_backward_create_graph_only_in_approved_locations` は facade 2 件の計 4 件にした。`facade_tape_backward_create_graph_is_thin_delegation` は `impl Tape` の固有 impl に限って本体を取り、f64 側の同名 fn を拾わない。f64 の利用例 doctest の実在ガードを新設した。
+
+### 38.2 §35 から外れた点（所有者への報告事項）
+
+1. **分解用の型 `CreateGraphVarsF64`**: facade の `first_order` が `&GradientsF64`（facade の newtype）を返すには、結果型が `GradientsF64` を所有する必要がある。`unsafe` の型変換は使わない（§35.1・§35.9）ため、内部の結果型を `first_order` と `CreateGraphVarsF64`（`grad`／`child_var` を持つ）に分け、`into_parts` で分解する形にした。内部の公開 API は追加のみ。facade の `CreateGraphResultF64` は `(GradientsF64, CreateGraphVarsF64)` の 2 フィールド（どちらも `pub(crate)`）。
+2. **`Mean` の係数**: §35.11 の「`1/n` 係数」ではなく、1 階の `mean_vjp_f64` と同じ `g / n`（除算）を子テープに積んだ。演算順が 1 階と揃い、丸めの違いを減らせるため。意味は同じ。
+3. **第 1 段の範囲を固定していたテストの更新**: `unsupported_ops_are_rejected_and_child_stays_reusable` は第 1 段で `matmul`／`sum`／`mean` の拒否を固定していたため、第 2 段で対象が広がる設計どおり `max` だけの形へ更新した。1 階の `backward` や f32 のテストではなく、既定経路の挙動は変えていない。
+4. **f64 専用の保留 doctest ガードは存在しなかった**: 反転ではなく、承認形の正ガードの更新と、利用例 doctest の実在ガードの新設で扱った。
+
+### 38.3 測った bit 一致の範囲
+
+- `first_order()` は素の `backward` と全要素で `to_bits` 一致（`first_order_is_bit_identical_with_matmul_sum_mean`、facade 側にも同型）。構造上同一。
+- `grad()` は 1 階勾配と REQ-2 の範囲で一致する。bit 一致は契約にしていない。
+- NaiveOps と CPU バックエンドだけで測った。CUDA／Metal は未実測で、`docs/perf/logs/f64-create-graph-3786/README.md` に手順と記入欄を置いた。
+
+### 38.4 変えていないもの
+
+依存（`Cargo.toml`／`Cargo.lock`）、tolerance 定数、parity baseline、ガードレール閾値、`unsafe`、`docs/spec`、f32 の `create_graph.rs`、§35・§36・§37 の本文。`TapeF64::backward` と f32 全体の挙動。
+
+### 38.5 #3787・#3788 への申し送り
+
+- `mirror()` アクセサは未追加（使う箇所がないため）。必要になった時点で `CreateGraphVarsF64` に足す。`CreateGraphVarsF64` は `jvp` の合成にも再利用できる。
+- `jvp` 系の facade 公開と §36.1 のガード g〜l の反転は #3787・#3788 の範囲。本イシューでは変えていない。
+- f64 の `max` の create_graph は対象外のまま（f32 の `Max` は #3938 で対象になった）。f64 で実装するかは所有者の承認が要る。無断で起票していない。
+- f32 側の `ScalarBinaryOp::Pow`（`mask_b0`）の混合二階微分の問題（§37.4）は引き続き未対応。
