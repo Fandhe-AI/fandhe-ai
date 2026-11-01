@@ -723,6 +723,39 @@ impl CustomFunction for IdentityCustomFn {
     }
 }
 
+/// 回帰（PR #3942 Codex P1）: PNorm の f32 微分係数 overflow（x=[1e-30,1]・p=0.5）は拒否して
+/// child を空に保ち、ゼロ要素を含む x=[0,0.75]・p=300 は死に枝が NaN を作らず二階が有限。
+#[test]
+fn pnorm_coefficient_overflow_rejected_and_dead_branch_finite() {
+    {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![1e-30, 1.0], &[2]));
+        let loss = x.norm_p(0.5, None).unwrap().sum(None).unwrap();
+        let err = tape
+            .backward_create_graph(&loss, &child)
+            .expect_err("f32 微分係数 overflow は拒否されるはず");
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        assert!(child.is_empty());
+    }
+    {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![0.0, 0.75], &[2]));
+        let loss = x.norm_p(300.0, None).unwrap().sum(None).unwrap();
+        match tape.backward_create_graph(&loss, &child) {
+            Ok(cg) => {
+                let g = cg.grad(&x).unwrap().unwrap().to_tensor();
+                assert!(dense(&g).iter().all(|v| v.is_finite()));
+            }
+            Err(e) => {
+                assert!(matches!(e, AutodiffError::Backward(_)), "{e:?}");
+                assert!(child.is_empty());
+            }
+        }
+    }
+}
+
 #[test]
 fn stat_varnorm_neighbouring_custom_op_stays_fail_closed() {
     for spec in [
