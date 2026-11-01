@@ -180,6 +180,9 @@ fn check_case(case: &Case, device: Option<Device>) -> Result<(), String> {
             case.name
         ));
     }
+    // Q1: GPU・CPU 間も REQ-2 複合判定で突き合わせる（§48.4。tolerance は不変）。
+    // 同デバイス bit 一致だけでは backward と first_order が同じ誤値を返しても通るため。
+    judge(case, "Q1 first_order", &gpu.first_order, &cpu.first_order)?;
     judge(case, "Q2 grad", &gpu.grad, &cpu.grad)?;
     // 線形な Op で二階の検査が自明に通るのを防ぐ。
     if gpu.hv.iter().all(|&v| v == 0.0) {
