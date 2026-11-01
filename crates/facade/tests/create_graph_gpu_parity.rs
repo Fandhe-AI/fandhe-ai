@@ -277,6 +277,36 @@ const CASES: &[Case] = &[
         run: run_stat_reduce_nanmean,
         reject: None,
     },
+    // 損失の回帰系 3 variant（イシュー #3798・決定記録 §39/§53）。KlDiv は 1 階が融合カーネル
+    // `kl_div_loss_backward` 経路（K）、Poisson・Gaussian は 1 階がホスト関数（H）。構造に MatMul は無い。
+    // 実機は未実測（#3857・#3859）。
+    Case {
+        name: "loss_regression_kl_div",
+        family: "loss_regression",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_regression_kl_div,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "loss_regression_poisson_nll",
+        family: "loss_regression",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_regression_poisson_nll,
+        reject: None,
+    },
+    Case {
+        name: "loss_regression_gaussian_nll",
+        family: "loss_regression",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_loss_regression_gaussian_nll,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -491,6 +521,75 @@ fn run_stat_reduce_nanmean(tp: &Tapes) -> Outputs {
     run_select_reduce(tp, |x| x.mul(x).unwrap().nanmean(Some(1)).unwrap())
 }
 
+/// 損失の回帰系（#3798）。葉 `z`（長さ 12 = `[x; target; var]`）から損失を作り、`loss²` で `H v ≠ 0` にする。
+fn run_loss_regression(tp: &Tapes, f: for<'t> fn(&Var<'t>) -> Var<'t>) -> Outputs {
+    let z0: Vec<f32> = vec![
+        0.3, -0.8, 0.5, 0.2, 0.55, 0.7, 0.85, 0.65, 0.4, 0.8, 1.2, 0.6,
+    ];
+    let dir: Vec<f32> = (0..12).map(|i| 1.0 - 0.0625 * i as f32).collect();
+    let z = tp.parent.var(&t(z0, &[12]));
+    let l = f(&z);
+    let loss = l.mul(&l).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&z).unwrap().expect("grad"));
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&z).unwrap().expect("first_order"));
+    let g = cg.grad(&z).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir, &[12]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let zc = cg.child_var(&z).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&zc).unwrap().expect("second order"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: None,
+    }
+}
+
+fn run_loss_regression_kl_div(tp: &Tapes) -> Outputs {
+    run_loss_regression(tp, |z| {
+        let (x, tg) = (z.narrow(0, 0, 4).unwrap(), z.narrow(0, 4, 4).unwrap());
+        x.kl_div_loss(&tg, fandhe_ai::nn::loss::Reduction::Sum)
+            .unwrap()
+    })
+}
+
+fn run_loss_regression_poisson_nll(tp: &Tapes) -> Outputs {
+    run_loss_regression(tp, |z| {
+        let (x, tg) = (z.narrow(0, 0, 4).unwrap(), z.narrow(0, 4, 4).unwrap());
+        x.poisson_nll_loss(
+            &tg,
+            &fandhe_ai::nn::loss::PoissonNllOptions::default(),
+            fandhe_ai::nn::loss::Reduction::Mean,
+        )
+        .unwrap()
+    })
+}
+
+fn run_loss_regression_gaussian_nll(tp: &Tapes) -> Outputs {
+    run_loss_regression(tp, |z| {
+        let (x, tg, v) = (
+            z.narrow(0, 0, 4).unwrap(),
+            z.narrow(0, 4, 4).unwrap(),
+            z.narrow(0, 8, 4).unwrap(),
+        );
+        x.gaussian_nll_loss(
+            &tg,
+            &v,
+            &fandhe_ai::nn::loss::GaussianNllOptions::default(),
+            fandhe_ai::nn::loss::Reduction::Mean,
+        )
+        .unwrap()
+    })
+}
+
 /// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
 /// 子テープは空のまま。
 fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
@@ -665,6 +764,10 @@ cuda_family_test!(
     create_graph_stat_reduce_lse_nan_cuda_matches_cpu,
     "stat_reduce_lse_nan"
 );
+cuda_family_test!(
+    create_graph_loss_regression_cuda_matches_cpu,
+    "loss_regression"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -691,6 +794,10 @@ metal_family_test!(
 metal_family_test!(
     create_graph_stat_reduce_lse_nan_metal_matches_cpu,
     "stat_reduce_lse_nan"
+);
+metal_family_test!(
+    create_graph_loss_regression_metal_matches_cpu,
+    "loss_regression"
 );
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
@@ -725,6 +832,11 @@ fn select_reduce_order_cases_pass_cpu_against_cpu() {
 #[test]
 fn stat_reduce_lse_nan_cases_pass_cpu_against_cpu() {
     run_family("stat_reduce_lse_nan", None);
+}
+
+#[test]
+fn loss_regression_cases_pass_cpu_against_cpu() {
+    run_family("loss_regression", None);
 }
 
 #[test]

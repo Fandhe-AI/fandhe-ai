@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use fandhe_ai::nn::loss::Reduction;
+use fandhe_ai::nn::loss::{GaussianNllOptions, PoissonNllOptions, Reduction};
 use fandhe_ai::{
     AutodiffError, CreateGraphResult, CustomFunction, Device, FftNorm, Tape, Tensor, Var,
 };
@@ -863,6 +863,66 @@ fn nansum_create_graph_via_facade() {
 #[test]
 fn nanmean_create_graph_via_facade() {
     check_create_graph_family("nanmean", &NX, &[2, 3], nanmean_loss, true, 1e-2);
+}
+
+/// 損失の回帰系（イシュー #3798）。1 本の葉 `z` を `[x; target (; var)]` へ `narrow` で切り出し、
+/// 損失を二乗して `H v ≠ 0` にする。
+fn kl_div_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let (x, tg) = (z.narrow(0, 0, 3).unwrap(), z.narrow(0, 3, 3).unwrap());
+    let l = x.kl_div_loss(&tg, Reduction::Sum).unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn poisson_nll_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let (x, tg) = (z.narrow(0, 0, 3).unwrap(), z.narrow(0, 3, 3).unwrap());
+    let l = x
+        .poisson_nll_loss(&tg, &PoissonNllOptions::default(), Reduction::Mean)
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+fn gaussian_nll_loss_loss<'a>(_tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let (x, tg, v) = (
+        z.narrow(0, 0, 3).unwrap(),
+        z.narrow(0, 3, 3).unwrap(),
+        z.narrow(0, 6, 3).unwrap(),
+    );
+    let l = x
+        .gaussian_nll_loss(&tg, &v, &GaussianNllOptions::default(), Reduction::Mean)
+        .unwrap();
+    l.mul(&l).unwrap()
+}
+
+#[test]
+fn kl_div_loss_create_graph_via_facade() {
+    let z = [0.3, -0.8, 0.5, 0.45, 0.6, 0.75];
+    check_create_graph_family("kl_div_loss", &z, &[6], kl_div_loss_loss, false, 3e-3);
+}
+
+#[test]
+fn poisson_nll_loss_create_graph_via_facade() {
+    let z = [0.3, -0.8, 0.5, 1.0, 2.0, 0.5];
+    check_create_graph_family(
+        "poisson_nll_loss",
+        &z,
+        &[6],
+        poisson_nll_loss_loss,
+        true,
+        3e-3,
+    );
+}
+
+#[test]
+fn gaussian_nll_loss_create_graph_via_facade() {
+    let z = [0.3, -0.8, 0.5, 0.1, 0.4, -0.2, 0.7, 1.1, 0.9];
+    check_create_graph_family(
+        "gaussian_nll_loss",
+        &z,
+        &[9],
+        gaussian_nll_loss_loss,
+        true,
+        1e-2,
+    );
 }
 
 #[test]

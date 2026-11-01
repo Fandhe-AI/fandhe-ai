@@ -967,7 +967,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 | 族（§21.4） | variant | 理由・後続 |
 |---|---|---|
-| (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | 未着手。次弾の候補 |
+| (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | #3798 で対象化済み（§53） |
 | (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | 未着手 |
 | (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
 | 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
@@ -4256,3 +4256,47 @@ CI（CPU）相当の結果: `cargo test --workspace`・`cargo clippy --workspace
 - スコープ外: `Var`・`Std`・`VectorNorm`・`PNorm`（#3791）、f64 テープの create_graph、`MatrixNorm` の反転、GPU 実機 parity の実測（#3856・#3858）、公開面の追加。
 - 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。
 - 本 PR は `Refs #3792 #3725 #3767 #3856 #3858`。
+
+## 53. 実装記録（イシュー #3798・親 #3719 系。create_graph の B 区分・損失の回帰系 `KlDivLoss`・`PoissonNllLoss`・`GaussianNllLoss`）
+
+### 53.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3798`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §39（#3730）で、本節はその実装記録。二値・マージン系の 6 variant は #3799 の担当で本節では扱わない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「B 区分は §38〜§44 の推奨どおり実装する」とある。§39.16 の論点（実装する・f64 を持つ variant は V3・KlDiv は V1 + V2・Gaussian の clamp は素通し・総括判定から外れる入力は型付きエラーで拒否・NaN は伝播し `±inf` は拒否・GPU parity は §48 の方式・隣接見本は `Op::Custom`）が本節に関わる。個別の承認を上乗せして主張しない。
+
+### 53.1 実装したもの
+
+| Op | 公開メソッド | 方式 | forward の写し | cgrad |
+|---|---|---|---|---|
+| `KlDivLoss` | `kl_div_loss`・`kl_div_loss_with_log_target` | V1 + V2（f32） | `kind` で公開メソッドを選ぶ。未知の `KlDivTarget` は `Err(Backward)` | Probabilities は `dinput = −(s ⊙ t)`・`dtarget = where(t≠0, s ⊙ ((ln t_safe + 1) − x), 0)`、LogProbabilities は `dinput = −(s ⊙ e^t)`・`dtarget = s ⊙ (e^t ⊙ ((t − x) + 1))` |
+| `PoissonNllLoss` | `poisson_nll_loss` | V3 + V2 | `Var::poisson_nll_loss` | 値は `grad::poisson_nll_loss_vjp`（1 階と同じ関数）、構造は `log_input` の分岐と、`full` の Stirling 項を `t > 1` マスクの `where_cond` で選ぶ |
+| `GaussianNllLoss` | `gaussian_nll_loss` | V3 | `Var::gaussian_nll_loss` | 値は `gaussian_nll_loss_vjp`、構造は `c = (var − const(var)) + const(max(var, eps))` の素通し形で `q = d/c`・`dx = s ⊙ q`・`dt = −dx`・`dvar = 0.5 s ⊙ (1/c − q²)` |
+
+- 実装は `crates/autodiff/src/create_graph/loss_regression.rs`。`replay_op` と `build_cgrads` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`。`grad.rs` は `poisson_nll_loss_vjp` と `elementwise_loss_scale` の可視性を `pub(crate)` にしただけで本体は変えていない。
+- `s` は `loss_scale_bcast` で子テープ上の `g` を通すので、損失が根でなくても二階が `g` へ流れる。
+- マスクで選ばれない分岐の入力（`t == 0` の `Log`、`t <= 1` の `Log`/`Div`）は、演算に入れる前に安全な値へ置き換える。
+- 要素数 0 の入力は 1 階に揃え、ゼロ定数を返す。
+
+### 53.2 設計（§39）からの差・明確化
+
+- ファイル名は `loss_regression.rs`、GPU parity の族名は `loss_regression`（#3799 の実装物との衝突を避けるため）。
+- 総括判定（§39.12）は variant ごとに構造の各段と二階逆伝播の係数を f64 の三角不等式で上から押さえ、非有限または `STAGE_BOUND_GUARD`（2^125）以上の段があれば子テープへ書く前に型付き `Err(Backward)` で拒否する具体形にした。拒否後は既存のロールバックで `child` が空に戻り、同じ `child` で再試行できる。固有の拒否: Poisson 非 log の `x + eps <= 0`、Gaussian の `max(var, eps) == 0`、KlDiv LogProbabilities の `exp(t)` の overflow。
+- 非有限の `g` と、入力の `±inf` は拒否する。NaN のレーンは段検査から外して伝播させる。追跡されていない入力も保守的に同じ検査へ含める。これらは §39.12 の具体化・明確化であり、個別の承認を上乗せして主張しない。
+- 拒否契約の見本として `KlDivLoss` を使っていた既存テストを恒久的に未対応の `Op::Custom` へ差し替えた: `tests/create_graph.rs` の `create_graph_still_rejects_custom_downstream_of_loss`（旧 `..._remaining_loss_ops`）、`tape.rs` の単体テスト `create_graph_supported_losses_and_custom_stays_closed`（旧 `first_wave_losses_are_supported_and_neighbors_stay_closed`）。
+
+### 53.3 テスト
+
+- `crates/autodiff/tests/create_graph_loss_regression.rs`: `first_order()` と 1 階の bit 一致（`cg.grad` は Poisson・Gaussian が bit 一致、KlDiv が REQ-2）、Hessian と有限差分の REQ-2 突合（損失が根の場合と根でない場合。x・target・var を 1 本の葉から切り出して混合二階項も含む。差分は h と h/2 の Richardson 外挿）、Gaussian の clamp 区間の独立な解析式との突合、`jvp_create_graph` の孫テープ、必須ベクトルの有限または拒否、`g = ±3e38` の拒否と再試行、区分境界（KlDiv の `t == 0`・Poisson の `t == 1`・Gaussian の `var == eps`）、`±inf` の拒否と NaN の伝播、空テンソル、隣接する `Op::Custom` の fail-closed。
+- facade: `{kl_div,poisson_nll,gaussian_nll}_loss_create_graph_via_facade`、`backward_create_graph` の rustdoc に `poisson_nll_loss` の HVP の doctest。本族を拒否する `api_surface.rs` の否定ガードは元から無く、反転するものは無い。代わりの正ガードは doctest 実在検査 `backward_create_graph_loss_regression_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `loss_regression` の 3 ケース（KlDiv は経路 `K`、Poisson・Gaussian は経路 `H`。いずれも `Judge::Strict`・`NoMatMul`）を登録し、`create_graph_loss_regression_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を足した。
+
+### 53.4 GPU（未実測）
+
+KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson・Gaussian の 1 階はホスト関数（CUDA／Metal ではホストへ実体化）である。実機の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline の置き場は空のまま。
+
+### 53.5 セキュリティ観点・スコープ外・変えていないもの
+
+- 外部入力は扱わない。shape・`eps`・`var >= 0` は forward 側の検証を通ったものだけが届く。新しい確保は O(numel) のマスク・f64 一時領域・定数テンソルに限る。本番経路で `unwrap`／`expect` は使わず、内部契約違反は型付きエラーにする。`unsafe` は追加しない。
+- スコープ外: 二値・マージン系 6 variant（#3799）、クラス軸系（#3731・#3800）、`CtcLoss`、f64 テープの create_graph、GPU 実機 parity の実測（#3857・#3859）、公開面の追加。
+- 変えていないもの: 1 階の経路（`grad.rs` の VJP 本体）・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§26.2 の表の 1 行を除く）・公開 API。
+- 本 PR は `Refs #3798 #3730 #3767 #3857 #3859`。

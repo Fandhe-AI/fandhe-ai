@@ -9096,7 +9096,11 @@ fn cosine_embedding_loss_vjp(
 
 /// 要素ごと損失 4 種（イシュー #2652）の VJP 共通 `scale`（`Mean` は `g/n`、`Sum` は
 /// `g`。`f64`）。`n > 0` は呼び出し側で保証する。
-fn elementwise_loss_scale(upstream: &Tensor<f32>, reduction: Reduction, n: usize) -> f64 {
+pub(crate) fn elementwise_loss_scale(
+    upstream: &Tensor<f32>,
+    reduction: Reduction,
+    n: usize,
+) -> f64 {
     let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
     match reduction {
         Reduction::Mean => f64::from(g_value) / n as f64,
@@ -9215,7 +9219,7 @@ fn triplet_margin_loss_vjp(
 /// `PoissonNllLoss` の VJP（イシュー #2167）。`crate::loss_ops::
 /// poisson_nll_loss` doc の数式を微分する。`full = true` かつ
 /// `t > 1` の要素のみ `dt` に Stirling 項の微分を加える。
-fn poisson_nll_loss_vjp(
+pub(crate) fn poisson_nll_loss_vjp(
     input: &Tensor<f32>,
     target: &Tensor<f32>,
     options: &crate::loss_ops::PoissonNllOptions,
