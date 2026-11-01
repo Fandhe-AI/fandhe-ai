@@ -1116,6 +1116,38 @@ fn triplet_cancellation_in_f32_reconstruction_is_rejected() {
     );
 }
 
+/// Triplet の大きな p で norm=2^(1/p) が f32 で 1 に潰れ、二階の曲率が解析値から外れる入力は拒否する（Codex P1）。
+#[test]
+fn triplet_huge_p_norm_collapse_is_rejected() {
+    fn build<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        tri_loss(
+            z,
+            &TripletMarginOptions::default()
+                .p(1e8)
+                .eps(0.0)
+                .margin(3.0)
+                .swap(false),
+        )
+    }
+    fn ok<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        tri_loss(
+            z,
+            &TripletMarginOptions::default()
+                .p(2.0)
+                .eps(0.0)
+                .margin(3.0)
+                .swap(false),
+        )
+    }
+    assert_rejected_then_retry_ok(
+        "triplet huge p",
+        build,
+        &[0.0, 0.0, -1.0, -1.0, -2.0, 0.0],
+        ok,
+        &[0.5, 0.25, 1.0, 1.5, 2.0, 0.75],
+    );
+}
+
 /// Triplet の逆スケール（sb·inv_mx）が f32 範囲を超える二階は拒否する。
 #[test]
 fn triplet_inverse_scale_second_order_overflow_is_rejected() {

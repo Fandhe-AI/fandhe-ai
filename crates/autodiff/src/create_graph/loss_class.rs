@@ -864,6 +864,15 @@ fn pair_info(
                 stage(p * u.powf(p - 1.0))?;
             }
             let norm = ssum.powf(1.0 / p);
+            // 子テープの `norm` は f32 で丸められる。`(|u|/norm)^(p-1)` は norm の相対誤差を (p-1) 倍に
+            // 増幅するため、大きな p で norm が 1 へ潰れる（例 p=1e8, d=2 で 2^(1/p)→1）入力は
+            // 二階の曲率が解析値から外れる。f32 再現値との相対差 × (p-1) を検査して拒否する（Codex P1）。
+            let norm32 = f64::from((ssum as f32).powf((1.0 / p) as f32));
+            if p > 1.0 && (p - 1.0) * (norm32 - norm).abs() / norm > 2f64.powi(-10) {
+                return Err(invalid(
+                    "Triplet: p が大きく norm の f32 丸めが二階の曲率を損なうため拒否",
+                ));
+            }
             stage(1.0 / ssum)?;
             stage(1.0 / norm)?;
             if p > 1.0 && p < 2.0 {
