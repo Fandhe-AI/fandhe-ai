@@ -989,7 +989,7 @@ lock-all` も green。
   `docs/compat-api-scope.md` §0 の限定例外、facade 側ガード）のマージ。
 - 0.14.0 への lockstep バンプ（§4。hf-hub の facade 依存の `version` 併記を含む）。
 - environment `crates-io-release` の承認。
-- CLAUDE.md・README・`site/` の「7 クレート」「非公開の hf-hub」表記の更新は #3775。
+- CLAUDE.md・README・`site/` の「7 クレート」「非公開の hf-hub」表記の更新は #3775（#3775 で更新済み）。
 
 ## 15. 8 クレート目 `fandhe-ai-backend-rocm` の公開準備と検証記録（#3774）
 
@@ -1080,6 +1080,9 @@ dry-run の Verifying 段は、展開した `.crate` を ROCm 非搭載の環境
 
 ## 変更履歴
 
+- 2026-11-01（#3775）: CLAUDE.md・README・`site/`・`Cargo.toml` コメント・`.claude/agents` の
+  公開クレート表記を、公開済み 7・公開対象 9 に合わせた。`.claude/rules/ci.md` の
+  「公開 7 クレート」は所有者確認待ちで未変更。
 - 2026-11-01（#3773）: `fandhe-ai-hf-hub` の公開準備（`publish = true`・メタデータ・
   `RELEASE_CRATES`／release.yml への追加）と検証を §14 に記録した。実公開は未実施。
 

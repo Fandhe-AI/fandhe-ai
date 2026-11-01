@@ -4,8 +4,8 @@
 
 Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/fandhe-ai-spec](https://github.com/Fandhe-AI/fandhe-ai-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。本リポジトリ自体は **public** で、CI は GitHub ホステッド `ubuntu-latest` が既定（self-hosted の再導入は `runner-policy` ジョブが fail-closed で検知する。詳細 → `.claude/rules/ci.md`）。仕様 submodule（`docs/spec`）と旧実装（v1）は private を維持する（README「位置づけ」節）。
 
-- 想定クレート 10 個（ほかに非公開の `docs-site`・`hf-hub`、公開準備済みで crates.io 未公開の `backend-rocm`）: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root。compat 公開面〈`compat::array`・`compat::Sequential`〉を持つ）に加え、GitHub Pages 公開ツリー向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`）・`hf-hub`（12 個目・`publish = false`。HF Hub 連携の補助クレートで、facade の公開 API だけを使い facade の安定性保証の外にある。`docs/hf-hub-integration-design.md` §9）・`backend-rocm`（13 個目・`publish = true`だが crates.io 未公開〈0.14.0 に公開予定〉。ROCm〈AMD GPU〉バックエンドの雛形。HIP を `libloading`〈第 12 区分〉で実行時に動的ロードし、ROCm 非搭載でもビルドが通る。`docs/backend-rocm-hip-ffi-decision.md`）。**`facade` が唯一のサポートされる公開 API 面**であり `tensor-core`・`autodiff`・`backend-*` は内部クレート（範囲の正は `docs/compat-api-scope.md` §0）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない
-- crates.io 公開済みは 7 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`）で、`[package] name` は `fandhe-ai` prefix 付きの公開名（`docs/crates-io-naming-decision.md`）。`onnx-interop` は 7 クレート目として v0.10.0（2026-10-03）で初回公開済み。`guardrail`・`self-repair`・`bench-harness`・`docs-site`・`hf-hub` は非公開（`backend-rocm` は公開準備済みで未公開）。facade からの ONNX import／export・safetensors save／load の公開範囲は `docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-safetensors-exposure-decision.md` を正とする
+- 想定クレート 10 個（ほかに非公開の `docs-site`、公開準備済みで crates.io 未公開の `hf-hub`・`backend-rocm`）: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root。compat 公開面〈`compat::array`・`compat::Sequential`〉を持つ）に加え、GitHub Pages 公開ツリー向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`）・`hf-hub`（12 個目・`publish = true`だが crates.io 未公開〈0.14.0 に公開予定〉。HF Hub 連携の補助クレートで、facade の公開 API だけを使い facade の安定性保証の外にある。`docs/hf-hub-integration-design.md` §9）・`backend-rocm`（13 個目・`publish = true`だが crates.io 未公開〈0.14.0 に公開予定〉。ROCm〈AMD GPU〉バックエンドの雛形。HIP を `libloading`〈第 12 区分〉で実行時に動的ロードし、ROCm 非搭載でもビルドが通る。`docs/backend-rocm-hip-ffi-decision.md`）。**`facade` が唯一のサポートされる公開 API 面**であり `tensor-core`・`autodiff`・`backend-*` は内部クレート（範囲の正は `docs/compat-api-scope.md` §0）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない
+- crates.io 公開済みは 7 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`）で、`[package] name` は `fandhe-ai` prefix 付きの公開名（`docs/crates-io-naming-decision.md`）。`onnx-interop` は 7 クレート目として v0.10.0（2026-10-03）で初回公開済み。`guardrail`・`self-repair`・`bench-harness`・`docs-site` は非公開。公開対象（`publish = true`・`release-all.yml` の `RELEASE_CRATES`）は 9 クレートで、うち `hf-hub`・`backend-rocm` は公開準備済み・crates.io 未公開（0.14.0 で公開予定。#3771 承認）。facade からの ONNX import／export・safetensors save／load の公開範囲は `docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-safetensors-exposure-decision.md` を正とする
 - crates.io への公開は一括リリース `.github/workflows/release-all.yml`（workflow_dispatch 1 回・environment `crates-io-release` 承認 1 回で公開クレートを依存順に publish）を基本とし、単一クレートの再実行・障害復旧には `.github/workflows/release.yml` を使う（いずれも `CARGO_REGISTRY_TOKEN`〈org secret〉・fail-closed ガード群）。手順・版数運用・公開履歴（v0.3.0〜v0.13.0）の正は `docs/crates-io-publishing-order.md` §9〜11・`.claude/rules/ci.md`
 - 依存は許容 12 区分のみ（本体 workspace の直接依存は第 1〜8・第 10〜12 区分の 11 区分、第 9 区分はベンチ比較対象の独立ハーネス限定）・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
@@ -24,7 +24,7 @@ fandhe-ai/
 ├── .editorconfig            # インデント・改行規約
 ├── Dockerfile / compose.yaml # 環境非依存の開発コンテナ（CPU バックエンドのみ）
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）
-├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉+ hf-hub〈非公開の補助クレート〉+ backend-rocm〈公開準備済み・crates.io 未公開・ROCm 雛形〉・本体 workspace の許容直接依存〈第 1〜8・第 10〜12 区分〉を =x.y.z 固定）
+├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉+ hf-hub〈公開準備済み・crates.io 未公開の補助クレート〉+ backend-rocm〈公開準備済み・crates.io 未公開・ROCm 雛形〉・本体 workspace の許容直接依存〈第 1〜8・第 10〜12 区分〉を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
 ├── rust-toolchain.toml       # toolchain 単一真実源（stable + rustfmt/clippy。rust-base-ci 前提）
 ├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans）
@@ -32,7 +32,7 @@ fandhe-ai/
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
 │                             # onnx-interop・guardrail・self-repair・bench-harness・facade（composition root・compat 公開面）・
 │                             # docs-site（GitHub Pages 公開ツリー向け SSG。開発者・CI 専用）・
-│                             # hf-hub（HF Hub 連携の補助クレート。非公開）・backend-rocm（ROCm 雛形。公開準備済み・crates.io 未公開で 0.14.0 に公開予定）
+│                             # hf-hub（HF Hub 連携の補助クレート。公開準備済み・crates.io 未公開で 0.14.0 に公開予定）・backend-rocm（ROCm 雛形。公開準備済み・crates.io 未公開で 0.14.0 に公開予定）
 ├── scripts/
 │   ├── lib.sh / help.sh / setup.sh / rustup.sh / hooks.sh / lint.sh / deny.sh / doc-warnings.sh # Makefile の入口が呼ぶ共通ヘルパーと環境構築・品質チェック
 │   ├── build-cross.sh / build-no-cuda.sh / check-cross.sh / test-ignored.sh / bench-harness.sh / ci-checks.sh # 同上（クロスビルド・実機テスト・計測・CI 共用検査の一括実行）
