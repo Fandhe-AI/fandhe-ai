@@ -397,3 +397,137 @@ impl<'t> Var<'t> {
 - Q7 補足: `crates/facade/src/compat/model_io.rs` が kind の allowlist を 70 種に固定している。#3750 が決めるまでは `LayerSpec` に variant を置き、保存は `Unsupported` で fail-closed にする。
 - セキュリティ: A03 `output_size` と shape（保存ファイル経由を含む）は外部入力として、確保と tape 操作より前に検証する。A08 判定を迂回する経路を作らず、正ガードで 1 行委譲を固定する。実機ホスト名・秘密情報は書かない。
 - スコープ外: ONNX export（#3750）、GPU 専用カーネル、層型名の facade 公開（#3022）、`GlobalPool` の rank 5 対応、`ceil_mode` 等の追加引数、`docs/pooling-ops-design.md` への参照追記。新規 issue は所有者承認なしに起票しない。
+
+## 19. LPPool の設計（保守・運用チェックリスト。イシュー #3748）
+
+基準 sha は `a2653b4f7`。**設計のみ**で、コード・公開面・tolerance・baseline・依存・`docs/spec` は変えない。**承認根拠: なし（未承認。#3768 の論点 3 待ち）**。追跡表 `docs/compat-matrix-ari-tracker.md` の # 15 行（C9。イシュー本文の「項目 16」は同表では # 15）。流れは #3748（本書）→ #3768（承認）→ #3825（`Var` 演算と `Sequential` 層の実装）→ #3860・#3861（実機 parity）。保存・ONNX export の横断方針は #3750 に委ねる。行番号の参照は基準 sha の値で、実装 PR が直す。節番号は §18（#3747）・§20（#3749）と並ぶ取り決めで、§18 が未マージの間は欠番になる。
+
+### 19.0 位置づけ・推奨
+
+- 棚卸し `docs/compat-unlisted-holds-inventory.md` の C9 は LPPool（PyTorch の `nn.LPPool1d`／`2d`／`3d`）を「未公開」とし、本書 §8 は #2643 のスコープ外として残した。所有者の Won't ではない。
+- 現状: `crates/` に `lp_pool`／`LpPool`／`LPPool` は 0 件（実装もガードもない）。部品はそろっている: `Var::avg_pool1d`／`avg_pool2d`／`avg_pool3d`・`Var::pow_scalar`・`Var::abs`・`Var::sign`・`Var::relu`・`Var::mul`（スカラー Var の broadcast）。層側も `Sequential::add_avg_pool1d`／`2d`／`3d` が公開済み。
+- **推奨: 実装する（案 A）。** 理由: (1) 新しい `Op`・`BackendOps`・VJP・カーネルが要らず、既存演算の合成だけで書ける。(2) 依存・`unsafe` の追加がない。(3) 互換区分は「追加のみ」で `docs/api-compat-0.14.0-decision.md` の # 15 行と一致する。
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|----|------|------|-----------|
+| A（推奨） | PyTorch の `F.lp_pool*d` と同じ順で既存演算を合成する（`x.pow(p)` → `avg_poolNd`〈padding 0〉→ `sign(out)·relu(abs(out))` → `×K` → `pow(1/p)`）。1d／2d／3d の 3 種 | 部品の再利用・PyTorch と演算順が一致・追加のみ | GPU tape では `pow_scalar`／`sign` がホストへフォールバックし、同期とコピーが入る。`create_graph` は `Sign` が replay できないため既定では非対応（Q3） |
+| B | 専用 `Op::LpPoolNd`（f64 で窓和を求め、f64 で `pow(1/p)`、最後に 1 回 `f32` へ戻す） | 精度が高い・GPU で 1 カーネルにできる | Op・VJP・`create_graph`・CUDA／Metal カーネル・REQ-8 境界検査・実機検証が増える。PyTorch と丸め順が異なる |
+| C | 対象外にする | 作業なし | C9 の未公開が残る。利用者は合成で到達できるが、`sign·relu·abs` の勾配マスクを自分で書く必要がある |
+
+### 19.1 公開形とガード反転計画
+
+- シグネチャ案（PyTorch の引数順に合わせる。LPPool には padding がない）:
+  - `Var::lp_pool1d(&self, norm_type: f32, kernel_size: usize, stride: Option<usize>, ceil_mode: bool) -> Result<Var<'t>, AutodiffError>`
+  - `Var::lp_pool2d(&self, norm_type: f32, kernel_size: [usize; 2], stride: Option<[usize; 2]>, ceil_mode: bool) -> Result<Var<'t>, AutodiffError>`
+  - `Var::lp_pool3d(&self, norm_type: f32, kernel_size: [usize; 3], stride: Option<[usize; 3]>, ceil_mode: bool) -> Result<Var<'t>, AutodiffError>`
+  - `compat::Sequential::add_lp_pool1d(mut self, norm_type: f32, kernel_size: usize, stride: Option<usize>) -> Result<Self, AutodiffError>`、`add_lp_pool2d`／`add_lp_pool3d` も同型（`[usize; 2]`／`[usize; 3]`）。
+- `ceil_mode`: `Var` 側は既存の `avg_pool*d` にならって引数に持ち、`true` は型付きエラーで拒否する（Q4）。`Sequential` 側は既存の `add_avg_pool*d` と同じく引数を持たず `false` 固定。
+- 配置:
+  - `Var` の 3 件は `crates/autodiff/src/var.rs` に置き、新モジュール `crates/autodiff/src/lp_pool_ops.rs` の自由関数 `lp_pool1d`／`lp_pool2d`／`lp_pool3d` へ 1 行で委譲する（合成の本体は自由関数側。`pool3d_ops` と同じ方式）。facade の `Var` は再エクスポートなので追加の配置は要らない。
+  - 層の内部型 `nn::LpPool1d`／`LpPool2d`／`LpPool3d` は `crates/autodiff/src/nn/pooling.rs` に置き、facade からは再エクスポートしない（層型名の公開は #3022 の個別承認に従う別判断）。
+  - `LayerSpec`（`pub(super)`）に variant を 3 件足す。保存は #3750 の方針が決まるまで fail-closed（Q7）。
+- ガード: **反転すべき既存の否定ガードはない**（`crates/` 全体で `lp_pool` は 0 件。`Pool3dOpsHoldDoctestGuard` がプローブするのは `max_pool3d`／`avg_pool3d` だけで、変えない）。
+- #3825 で新設する正ガードの名前案:
+  - `var_lp_pool_methods_are_thin_delegations`（1 行委譲をトークン列で固定）
+  - `workspace_declares_lp_pool_fn_names_only_in_allowed_locations`（`fn lp_pool*d` の宣言位置を `lp_pool_ops.rs` と `var.rs` の委譲各 1 件に固定）
+  - `facade_does_not_reexport_or_declare_lp_pool_ops`（＋ `_detects_each_category`）
+  - `compat_sequential_lp_pool_add_methods_have_approved_signatures`（＋ `_detects_offense`）
+- 未承認の経路（`Tape`／`Tensor<f32>` 上の同名メソッド、`lp_pool_ops` モジュール・層型の再エクスポート）は否定検査として残す。
+- 実装時の確認事項: 新しい識別子が既存のトークン走査（`POOL3D_WORKSPACE_FN_NAMES`・`facade_declares_pool3d_add_names_only_in_approved_form`・#3747 系のインベントリ）に誤って当たらないことを、推測で済ませず実際に確かめる。
+
+### 19.2 rustdoc と doctest
+
+- 公開 6 件それぞれに、役割要約と doctest を置く。要約に書くこと: PyTorch 相当名、式 `(Σ_window x^p)^(1/p)`、負の入力と非整数 `p` で NaN になる点、全零窓の勾配の扱い。
+- doctest は CPU の `fandhe_ai::tape()`／`Sequential::predict` だけで動く形にし、facade 単独で通す。GPU の例は置かない（置くなら `no_run`）。
+- 失敗系（`norm_type <= 0`・非有限、`kernel_size` 0、rank 違反、`ceil_mode=true`）は `compile_fail` に頼らない。`is_err` を確かめる通常の doctest かテストで検証する（stable rustdoc は `compile_fail` のエラーコードを照合しないため）。
+
+### 19.3 エラー型
+
+- 新しい variant は足さない。検査順（確保と tape 操作の前に検証を終える）:
+  1. `norm_type` が有限かつ `> 0` でなければ `AutodiffError::InvalidArgument`（0・負・NaN・±inf を拒否）
+  2. `ceil_mode == true` なら `InvalidArgument`（合成先の `avg_pool*d` も拒否するが、前倒しの二重化）
+  3. rank の検査（1d=3、2d=4、3d=5。`ShapeError::RankMismatch`）
+  4. `Pool2dParams::new`／`Pool3dParams::new` の検査（0 次元。padding は 0 固定）と出力 shape
+  5. 窓の要素数 `K = Π kernel_size` を `checked_mul` で求める（オーバーフローは `InvalidArgument`）
+  6. `K` を `f32` へ変換したとき厳密に表せること（`K <= 2^24`。超える場合は `InvalidArgument` で拒否するか、実装時に許容範囲を決めて記録する）
+  7. 合成の実行
+- 合成の各段は既存演算の `Result` を `?` で伝える。本番経路で `unwrap`／`expect` を使わない。途中でエラーになった場合に孤児ノードが残るかをテストで確かめ、残る場合は検査の前倒しで回避してその旨を記録する。
+- 層の `new` は `norm_type` と `kernel_size` を同じ規則で前倒しに検査する（`AvgPool2d::new` と同型）。
+
+### 19.4 テスト計画
+
+| 区分 | テスト（置き場の案） | 内容 |
+|------|------------------|------|
+| CI | `crates/autodiff/tests/lp_pool_ops.rs` | 閉形式（`p=1` は窓和、`p=2` は二乗和の平方根）・非整数 `p` で負の入力は NaN・全零窓の勾配が 0（NaN でない）・中心差分の勾配・拒否系（`norm_type`・`ceil_mode`・rank・`kernel_size` 0）・孤児ノード無し・決定性 |
+| CI | PyTorch 2.14.0 の fixture 突合（案: `crates/autodiff/tests/fixtures/lp-pool-pytorch-reference/`） | 1d／2d／3d、`p ∈ {1, 2, 3, 1.5}`、全零窓の勾配。fixture を作って実行するまでは「未実測」 |
+| CI | `crates/facade/tests/lp_pool_ops_backend_parity.rs::cpu_matches_naive_reference` | CPU と Naive の bit 一致 |
+| CI | `crates/facade/tests/compat_sequential_lp_pool.rs` | 層経路（`Var` 直呼びとの bit 一致・不正引数の拒否・常駐経路の fail-closed） |
+| CI | §19.1 の正ガード | 1 行委譲・宣言位置・未承認経路の否定・シグネチャ固定 |
+| `#[ignore]`（Phase 10） | `lp_pool_ops_backend_parity.rs::cuda_lp_pool_ops_match_cpu_reference` | #3860（`<cuda-node>`）未実測 |
+| `#[ignore]`（Phase 10） | `lp_pool_ops_backend_parity.rs::metal_lp_pool_ops_match_cpu_reference`（`cfg(target_os = "macos")`） | #3861（`<metal-node>`）未実測 |
+| `#[ignore]`（Phase 10） | `compat_sequential_lp_pool_backend_parity.rs::{cuda_*, metal_*}` | 層経路。未実測 |
+
+- 実機手順の置き場の案: `docs/perf/logs/lp-pool-ops-3825/README.md`（#3825 で新設）。
+- 実機列: `<cuda-node>`・`<metal-node>` は未実測。`<rocm-node>` は該当なし（facade 非公開）。cfg の都合で 0 本しか実行されなかった結果は pass の根拠にしない。
+
+### 19.5 数値契約
+
+- 演算順は PyTorch の `F.lp_pool*d` と同じにする（ソースからの記述で、未実測）。
+  1. `s = avg_poolNd(x.pow_scalar(p), k, stride, padding=0)`。窓和は既存の `avg_pool` 契約（`f64` で蓄積し、`K` で割って 1 回 `f32` へ戻す）。padding 0・`ceil_mode=false` なので divisor は常に `K` で、`count_include_pad` は結果に影響しない（実装では `true` を渡し、その旨をコメントで固定する）。
+  2. `z = sign(s) · relu(abs(s))`（forward は `s` と同値。`-0` の符号だけが異なりうる）
+  3. `y = (z × K).pow_scalar(1/p)`。`×K` は `f32` で行う。
+- `sign·relu·abs` の段を残す理由: 全零窓（`s = 0`）では `pow(1/p)` の勾配が `p > 1` で `inf` になる。この段を通すと勾配が 0 になり NaN を防げる。`Mul` の VJP は relu の枝へ `inf·0 = NaN` を送るが、`Op::Relu` の VJP は乗算をしない要素選択（`v > 0`）なので 0 になる。sign の枝は区分定数の VJP がゼロテンソルを直接生成するので 0 になる。
+- 上の挙動は #3825 で実測し、PyTorch の fixture とも突き合わせる（未実測）。とくに `Abs` と `Mul` の VJP が `inf·0` を下流へ漏らさないことを確かめる。
+- 既知の端: `0 < p < 1` で窓内に `x = 0` があると `pow_scalar(x, p)` の勾配が `0·inf = NaN` になりうる（PyTorch も同型と見込むが未実測）。fixture で確かめて記録する。
+- 判定: PyTorch との比較は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。CPU と Naive は bit 一致。GPU と CPU は合成先の各演算の既存契約に従う（`pow_scalar`／`sign` はホストフォールバックで bit 一致。`avg_pool` の GPU カーネルは `docs/pooling-ops-design.md` の既存契約で、実装時にその節を引用する）。
+- FMA 契約には影響しない（新しいカーネルなし・`mul_add` を使わない）。f64 長軸縮約の契約は `avg_pool` 側の既存実装に委ね、変えない。tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・baseline・ガードレール閾値は変えず、新しい baseline も作らない。
+
+### 19.6 互換への影響
+
+`docs/api-compat-0.14.0-decision.md` §8 の判定手順に照らすと**追加のみ**。`Var`: inherent メソッド 3 件の追加。`compat::Sequential`: inherent メソッド 3 件の追加（フィールドは非公開）。`AutodiffError`・`Op`・`BackendOps`: 変更なし。`LayerSpec` は `pub(super)` なので公開面に出ない。利用者が同名のトレイトメソッドを持っていても inherent が優先されるだけで、破壊的変更には数えない。
+
+### 19.7 適用記録・索引・追跡表
+
+- `docs/compat-api-scope.md` の適用記録は、承認後に #3825 が書く。文案: `**適用記録（イシュー #3825・承認: <#3768 回答 URL>）**: Var::lp_pool1d／lp_pool2d／lp_pool3d と Sequential::add_lp_pool1d／add_lp_pool2d／add_lp_pool3d の 6 件を追加のみで公開。新規依存なし`
+- 本 PR で更新するのは `docs/README.md` の索引と追跡表 # 15 行の「設計記録」セルだけ。公開状態は「未公開」のまま。
+
+### 19.8 ベンチと性能
+
+- 既定経路への影響はない。`avg_pool*d`・`pow_scalar` 等の既存実装には手を入れず、新しい API を足すだけ。
+- GPU tape では `pow_scalar`（CUDA／Metal カーネルが未実装）と `sign` がホストへフォールバックし、ホスト → GPU（`avg_pool`）→ ホストの同期とコピーが入る。新規経路なので前後比較は要らない。専用カーネルによる最適化（案 B）はスコープ外。
+
+### 19.9 依存
+
+依存の追加はない。許容 12 区分・禁止リストとの照合は該当なし。新規 `unsafe` もない。
+
+### 19.10 方式の詳細（範囲・層・`create_graph`・GPU と REQ-8）
+
+- 対象次元: 1d／2d／3d の 3 種。合成先の `avg_pool1d`／`2d`／`3d` がそろっていて、追加の費用は合成 1 本ずつで済むため。PyTorch 2.14.0 に `LPPool3d` があることは fixture 作成時に確かめる（それまでは未実測）。
+- `norm_type`: 有限かつ `> 0` に限る（fail-closed）。`p = inf`（max pooling 相当）は `max_pool*d` を使う前提で拒否する。負の入力と非整数 `p` の組は PyTorch と同じく NaN を返し、特別扱いしない。
+- スカラー `K` の乗算: `Var` に `mul_scalar` はない。`tape.var_no_grad(&Tensor::scalar(K))` との `mul`（broadcast）で行う（`create_graph.rs` の `PowScalar` の replay と同じ書き方）。実装時に既存のスカラー乗算の入口をもう一度 grep し、あればそれを使う。
+- `create_graph`: `ScalarUnaryOp::Sign` は `create_graph::scalar_unary_replayable` に含まれない。PyTorch と同じ合成のままでは二階微分が型付きエラーになる（Q3）。
+- 層（#3825 向け）: `Module` impl を持たせ `is_pooling() = true`、`supports_forward_host() = false`（`nn::MaxPool3d` と同じ）、resident 経路は Pooling 層として fail-closed で拒否する。「Pooling 層の型数」の記述は、マージ時点の実数を数えて直す。
+- GPU と REQ-8: 本件では専用カーネルを作らない。将来カーネルを足す場合も、シェーダ側の手動境界検査を省かないことを条件とする。
+
+### 19.11 PyTorch との差分（すべて未実測。ソースからの記述）
+
+- `ceil_mode=true`: PyTorch は受け付けるが、本設計は型付きエラーで拒否する（`avg_pool*d` の制約を引き継ぐ。Q4）。
+- `norm_type`: PyTorch は 0・負・非有限を検査しないが、本設計は拒否する（Q2）。
+- バッチなし入力（1d の rank 2、2d の rank 3、3d の rank 4）: PyTorch は受け付けるが、本設計は受け付けない。
+- 丸め: 窓和は本設計が `f64` で蓄積する（PyTorch は `f32`）。そのほかの段は同じ順。
+- 実測は #3825 で fixture を作るときに行う。
+
+### 19.12 所有者へ戻す論点（#3768 の論点 3 へ）・セキュリティ・スコープ外
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|----|--------|------|----------------------|
+| Q1 方式 | (a) 既存演算の合成（案 A）(b) 専用 Op（案 B） | (a) | 確認があるまで実装へ進めない（保留のまま保護ガードを維持） |
+| Q2 `norm_type` の範囲 | (a) 有限かつ `> 0`（他は拒否）(b) PyTorch と同じく無検査 (c) `>= 1` に限る | (a) | 同上 |
+| Q3 `create_graph` | (a) 非対応（`Sign` が replay できないため型付きエラー）(b) `Sign` を replay 可能にして対応（勾配は恒等的に 0。`create_graph.rs` に触れる範囲拡大）(c) `sign·relu·abs` の段を外す（全零窓で勾配が `inf`／NaN） | (a)。二階微分の需要が出たら (b) を別 issue で扱う | 同上 |
+| Q4 `ceil_mode` | (a) `Var` は引数に持って `true` を拒否、`Sequential` は持たない (b) `Var` も引数を持たない (c) `avg_pool` 側の `ceil_mode` 対応を先に行う | (a) | 同上 |
+| Q5 対象次元 | (a) 1d／2d／3d (b) 1d／2d のみ | (a) | 同上 |
+| Q6 未承認経路の固定方法 | (a) ソース走査の正ガードと否定検査のみ (b) `LpPoolHoldDoctestGuard` も新設 | (a)（#3747 の Q6 と揃える） | 同上 |
+| Q7 保存と export | #3750 の横断方針に委ねる（それまでは `LayerSpec` に variant を置き、保存は fail-closed。ONNX には `LpPool` op があるが、対応可否は #3750 が決める） | #3750 に委ねる | 同上 |
+
+- セキュリティ（OWASP）: A03 `norm_type`・`kernel_size`・`stride`・shape（保存ファイル経由で復元されるものを含む）は外部入力として扱い、確保と tape 操作より前に検証する（`K` の `checked_mul` を含む）。A08 判定を迂回する経路を作らない。正ガードで 1 行委譲を固定する。
+- スコープ外（無断で起票しない。所有者の承認を得てから追跡する）: ONNX export・model_io の kind（#3750）／GPU 専用カーネル／層型名の facade 公開（#3022）／`ceil_mode=true` の対応／バッチなし入力／`Sign` の `create_graph` 対応／`docs/pooling-ops-design.md` への参照追記
