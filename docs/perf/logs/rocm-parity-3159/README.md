@@ -15,6 +15,8 @@
 
 ## 手順（クラウド固有の接続情報は書かない）
 
+詳細手順（起動前の準備・費用順の実行と停止・回収・マスク漏れ検査・記入欄との対応表）は `docs/real-hardware-verification-env.md` §9。
+
 1. 転送元で `git rev-parse HEAD > .rev-stamp` を実行する（`RULE.txt` のコミットより後であること）。
 2. `docs/real-hardware-verification-env.md` §3 と同じ形の rsync で転送する。`--filter=':- .gitignore'` を付け、`.env*`・`*.local.md`・`.claude/settings.local.json` を明示除外する。接続先は Git 管理外のローカルファイルとシェル変数（例 `"$ROCM_NODE"`。クォート必須）で渡す。
 3. ノード上で `bash docs/perf/logs/rocm-parity-3159/run_rocm_parity.sh <tree-abs-path> <out-abs-path>` を実行する（ビルド後に run1・run2 を順に実行。ホスト名・ホームパス・ユーザー名はマスクし、残れば fail-closed で停止）。
@@ -36,6 +38,9 @@
 | wave 幅 | |
 | rustc | |
 | probe（`is_available()`） | |
+| ignored 本数（`--list`） | |
+| passed 合計（run1／run2） | |
+| exit_code（run1／run2） | |
 | 判定（pass／fail） | |
 
 形状ごと（run1／run2）:

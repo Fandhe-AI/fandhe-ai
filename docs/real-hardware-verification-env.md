@@ -6,6 +6,8 @@
 >
 > **実行前の準備（codex-review 指摘対応）**: 本ドキュメントのコード例は `<cuda-node>` の実ホスト名をシェル変数 `CUDA_NODE` として参照する（`ssh "$CUDA_NODE" '...'` の形。山括弧のプレースホルダをそのまま貼り付けて実行すると、POSIX shell がリダイレクト（`<`）と解釈しホストが存在せず入力元ファイルが見つからないエラーで失敗する）。実行前に `export CUDA_NODE="<実ホスト名>"`（山括弧を含む値は未クォートだと `export` 自体も同じくリダイレクトと誤解釈されるためクォート必須。実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）を設定してから各コード例を実行する。
 >
+> **ROCm ノード（`<rocm-node>`）**: MI300X のクラウドインスタンスの総称。実ホスト名はシェル変数 `ROCM_NODE`（クォート必須。`CUDA_NODE` と同じ扱い）で参照し、実値は `.local.md` にだけ書く（§9）。
+>
 > **プレースホルダの約束（2026-10-27 所有者決定）**: `<cuda-node>` は DGX Spark（GB10）の総称で、特定の機体を指さない。測定に使った機体は Git 管理外の `docs/real-hardware-verification-env.local.md` とノード上の `.rev-stamp` の記録で追う。同じ文の中で複数の GB10 を区別する必要がある箇所だけ `<cuda-node-2>` のように番号を付け、番号はその文書の中だけの区別とする（機体に固定しない）。
 
 ## 1. 対象と役割分担
@@ -15,6 +17,7 @@
 | Mac mini（`<metal-node>`。Apple M4 10 コア・16GB・macOS 27） | Metal バックエンド実機テスト・ベンチ・計測（2026-10-11 から） | SSH リモート実行（§7） |
 | 開発機 Mac（Apple M4 Max・64GB） | 実装・ビルド・CPU テスト・CUDA ノードへの転送元。**Metal の計測・実機 parity の記録には使わない** | ローカル直接実行 |
 | DGX Spark GB10（`<cuda-node>`） | CUDA バックエンド実機テスト・ベンチ（#388） | SSH リモート実行 |
+| MI300X クラウドインスタンス（`<rocm-node>`。所有者が起動・停止。実機 CI なし） | ROCm バックエンド parity 実測（#3159・#3867。手順は §9） | SSH リモート実行 |
 
 Mac 上では CUDA テストは実行不可（hardware 非対応）。
 
@@ -289,3 +292,88 @@ torch は system には未導入。venv 作成手順（`python3 -m venv .venv-mp
 ### 重要な制約
 
 **REQ-8 の下限値変更・数値一致許容誤差の緩和はユーザー承認必須**（`.claude/rules/coding-rust.md` 参照）。計測 issue では変更しない。
+
+## 9. ROCm 実機ノード（`<rocm-node>`・MI300X）
+
+MI300X のクラウドインスタンス（所有者が起動・停止する。実機 CI は置かない）で、(A) backend 単体の parity（#3159。いま実行できる）と (B) facade 経由の parity（#3867。条件付きで現時点では実行できない）を測る手順。課金時間を短くするため、GPU を使わない作業はすべて起動前に済ませる（#3779）。本節は手順だけを書き、実測値は書かない（実行できなかった項目は「未実測」のまま残す）。
+
+- 判定規則の正は `docs/perf/logs/rocm-parity-3159/RULE.txt`（事前登録・編集しない）。本節に規則を写さない。記入先は同ディレクトリの `README.md`
+- 手配・費用の正は `docs/rocm-cloud-amd-procurement-decision.md`（§2・§4・§7）。契約・起動・停止・課金は所有者が行い、エージェントは行わない
+- Linux 開発機や M4 Max の代替値で pass にしない。0 本しか実行されなかった結果も pass の根拠にしない。tolerance・baseline は変えない
+- ホスト名は `ROCM_NODE`（`docs/real-hardware-verification-env.local.md` に実値。冒頭注記と同じくクォート必須）で渡す
+
+### 9.1 起動前（GPU を使わない作業）
+
+1. 単価と可用性を再確認する（procurement §4 の判定規則）。約 1 万円を超えそうなら着手せず所有者へ戻す。
+2. `export ROCM_NODE="<実ホスト名>"` を設定する（クォート必須）。
+3. 転送するコミットを決める。push 済みで、`RULE.txt` を入れたコミット（2026-10-18）より後のものに限る。`git status --porcelain` が空であること。
+4. 開発機（ROCm なし）で次を実行する。
+   - `cargo test -p fandhe-ai-backend-rocm --release --no-run`（ROCm なしでビルドできること）
+   - `cargo test -p fandhe-ai-backend-rocm --release -- --ignored --list 2>/dev/null | grep -c ': test$'` が 16 になること。この値を README の「ignored 本数」の予定値として控える
+5. `git rev-parse HEAD > .rev-stamp`（40 桁の小文字 16 進数 1 行だけ。スクリプトはそれ以外を拒否する）。
+6. (B) を同じセッションで行えるかを判定する。条件は §9.5 の前提がすべてそろっていること。そろっていなければ (A) だけを行い、(B) のために起動を遅らせない。
+
+### 9.2 起動直後の確認（ノード上・数分）
+
+```bash
+uname -m; grep -E '^(NAME|VERSION_ID)=' /etc/os-release
+cat /opt/rocm/.info/version; hipconfig --version
+rocminfo | grep -E '^[[:space:]]*(Name:[[:space:]]+gfx|Wavefront Size:)'
+ls /opt/rocm/lib/libamdhip64.so /opt/rocm/lib/libhiprtc.so
+ldconfig -p | grep -E 'libamdhip64\.so |libhiprtc\.so '
+```
+
+- `rocminfo`・`amd-smi`・`rocm-smi` の出力全文は貼らない（UUID・BDF を含むため）。上の allowlist の grep に限る
+- ローダーは版なしの soname（`libamdhip64.so`・`libhiprtc.so`。`crates/backend-rocm/src/hip.rs`・`hiprtc.rs`）しか試さない。無い場合は probe が false になり 2 回の実行が無駄になる。dev パッケージの導入で解消するか、解消できなければ「未実測（理由: ライブラリ不在）」として止める。対処は記録に残す
+- gfx942 でない、または wave64 でない場合は `RULE.txt` の `machine` に当たらない。結果は参考扱いとし所有者へ戻す
+
+### 9.3 転送・ビルド・実行（(A) #3159）
+
+- 転送: §3 の rsync を流用する（転送先は `"$ROCM_NODE":~/work/rust-ai-library-run/`。`--filter=':- .gitignore'` と `.env*`・`*.local.md`・`.claude/settings.local.json` の明示除外を残す）。転送後に `.rev-stamp` を照合し、§3 の find で秘密ファイルが渡っていないことを確かめる
+- toolchain: rustup の stable（`rust-toolchain.toml` が stable と rustfmt・clippy を指定）。`CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai`（同期ツリーの外）。非対話 SSH の PATH は §2.2 と同じ形で通す
+- 実行: ノード上で `bash docs/perf/logs/rocm-parity-3159/run_rocm_parity.sh <tree-abs-path> <out-abs-path>`（ビルド後に run1・run2 を順に実行）。計測中は他の cargo を走らせない。SSH 切断で止まらないよう §4.4 と同じく `setsid nohup` で切り離してログを tail する
+- 外部 `timeout` で打ち切った場合は raw を回収せず「中断・未実測」と記録する。合格のための追加実行・差し替えはしない（`RULE.txt` の `runs`）
+
+### 9.4 回収・停止・記入（費用順）
+
+1. 回収するのはマスク済みの出力だけ（`.rev-stamp`・`env_info.txt`・`run1/`・`run2/` の `ignored.log` と `exit_code`）。rsync で `docs/perf/logs/rocm-parity-3159/` へ戻す。`*.raw` は回収しない。
+2. 補助診断（任意）: オフラインの `clang -x hip --offload-arch=gfx942 --offload-device-only -O3 -S` で `v_fma_*` を数える。時間に余裕があるときだけ行い、行わなければ記入欄に「未実施」と書く。
+3. **停止**: ノード上の作業ツリーと target を消し、所有者がインスタンスを停止・削除する（ストレージ課金も止める）。以降の記入は停止後にオフラインで行う。
+4. マスク漏れの手動検査（スクリプトが見るのは hostname・`$HOME`・`$USER` のみ）。回収ファイルに次を当て、該当 0 件を確かめる: IPv4 パターン、`[Uu]uid`、BDF（`[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]`）、事業者名・事業者ドメイン、`.local.md` に書いた実ホスト名（照合はローカルだけで行い実値を出力に残さない）。該当があればそのファイルをコミットしない。
+5. §9.6 の対応表に沿って README の記入欄を埋める。
+
+### 9.5 facade 経由（(B) #3867。条件付き・現時点では実行できない）
+
+- 前提（すべて必要）: #3771 で Q1・Q2 が承認済み、spec#87 が受理済み、#3851〜#3853 のマージで `Device::Rocm` が main にある、#3867 が `RULE.txt` とログ置き場 `docs/perf/logs/rocm-facade-3867/` を用意している（本節の作業ではこのディレクトリを作らない）。現時点でこれらは未成立（`docs/backend-rocm-device-exposure-decision.md` §10）
+- 予定のテスト（同 §10.4）: `crates/facade/tests/rocm_facade_real_device.rs` の `rocm_available_devices_lists_rocm0_and_tape_for_ok`・`rocm_facade_matmul_parity_vs_cpu`・`rocm_facade_mlp_train_step_parity_vs_cpu`・`rocm_tape_for_out_of_range_ordinal_is_err`
+- 最初に `cargo test -p fandhe-ai --test rocm_facade_real_device -- --ignored --list` で 4 本が出ることを確かめる。出なければ「未実測」と記録して止める
+- facade は `ureq` と vendored OpenSSL に依存する（deps-policy 第 11 区分）。ノードに `perl`・`make`（build-essential）が要る（backend-rocm 単体では不要）
+- (A) の後に同じセッションで行い、2 回目の起動を避ける。判定は REQ-2 統一複合判定のみ
+
+### 9.6 README 記入欄との対応表
+
+`docs/perf/logs/rocm-parity-3159/README.md` の記入欄と出典の対応。
+
+| README の記入欄 | 出典 |
+|---|---|
+| 実施日 | run 開始時刻の `date -u +%F`（開発機で控える） |
+| .rev-stamp | `<out>/.rev-stamp` |
+| ROCm 版 | `env_info.txt` の `rocm_version:`（と `hipconfig:`） |
+| gfx ターゲット | `env_info.txt` の `Name: gfx…` |
+| wave 幅 | `env_info.txt` の `Wavefront Size:` |
+| rustc | `env_info.txt` の `rustc:` |
+| probe（`is_available()`） | `run*/ignored.log` の `probe_true_on_rocm_host ... ok/FAILED` |
+| ignored 本数 | §9.1 手順 4 の `--list` の件数 |
+| passed 合計（run1／run2） | `run*/ignored.log` の `test result:` 行の passed 合計。`0 passed` で終わったバイナリが無いこと |
+| exit_code（run1／run2） | `run*/exit_code` |
+| 判定（pass／fail） | 両方の `exit_code` が 0、passed 合計が本数と一致、全形状で fail 0。どれかが欠ければ fail か未実測 |
+| 形状ごと | `grep -P '^ROCM_PARITY\t' run*/ignored.log` |
+| 決定性 | `grep -P '^ROCM_DETERMINISM\t' run*/ignored.log`（記録のみ） |
+| unsafe 監査 §6 | 完走で間接的に確かめられた項目だけを書き、ほかは「未確認」 |
+| linalg・softmax 系・reduce・loss・正規化・paged KV の各「実施日」「判定」と演算（ケース）ごとの表 | `ROCM_PARITY_LINALG`／`_SOFTMAX`／`_REDUCE`／`_LOSS`／`_NORM`／`_PAGED_KV` 行と該当テストの ok/FAILED |
+| 各「HIPRTC コンパイル」 | 該当テストがコンパイルエラーで落ちずに走ったか（`ignored.log` のエラー文） |
+| 「`v_fma_f64` の有無」・全軸 `sum` の `bit_mismatch` 合計 | §9.4 手順 2 の補助診断と `ROCM_PARITY_REDUCE` の集計。行わなければ「未実施」 |
+
+### 9.7 書かないもの
+
+インスタンス識別子・IP・認証情報・内部ホスト名・ユーザー名・ホームのパス・GPU の UUID／BDF・事業者のアカウント情報は、`<rocm-node>`・`<user>`・`<home>` に置き換えるか収録しない。実値は Git 管理外の `.local.md` にだけ書き、PR・Issue・コミットへ転記しない。
