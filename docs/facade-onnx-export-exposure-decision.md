@@ -817,3 +817,124 @@ sequential_with_sigmoid_is_rejected_with_unsupported_layer` で固定）。
   `Softmax`／`LayerNorm`／`GELU`／`Conv2d`）で確定。`Sigmoid` は
   §15.7 項 5 の承認が得られ次第、別 issue で `as_sigmoid` フックと
   `export_nn` の Sigmoid 腕を再結線する。
+
+## 19. 保守・運用チェックリスト（イシュー #3760）: ONNX export の `Sigmoid` 層の数値契約と対応層（B3）
+
+### 19.0 位置づけ・課題・推奨
+
+- 位置づけ: ルート #3711 の Phase 2 の設計記録である。追跡表 `docs/compat-matrix-ari-tracker.md` の行 26（B3）に対応する。承認の回答先は #3770（論点 2）、実装は #3844 である。**承認: 未取得（#3770 待ち）**。本節は承認を得たとは主張しない。コード・公開面・tolerance・baseline・ガードレール閾値は変えない（docs のみ）
+- 番号の注記: Issue・#3770・#3844 の本文は Sigmoid を「項目 27」と書くが、追跡表の通し番号では Sigmoid は行 26 で、行 27 は safetensors（B5）である。行は番号ではなく項目名で探す。表の番号は直さない
+- 現状のコード事実（基準 sha `5834b0958`。行番号は編集で動くため、実装 PR が現行の行に直す）:
+  - G1: `ExportOp::Sigmoid` と `SUPPORTED_OP_TYPES` の `"Sigmoid"` は既にある（`crates/onnx-interop/src/onnx/export_ops.rs:76,155,202`）。interp の `sigmoid` も既にある（`crates/onnx-interop/src/ops/activation.rs:46-48`）
+  - G2: `predict` 側は `eval::sigmoid_scalar`（`crates/autodiff/src/eval.rs:441-452`）を使い、`x >= 0` は `1/(1+exp(-x))`、`x < 0` は `exp(x)/(1+exp(x))` に分岐する。`impl Module for Sigmoid` の `forward_host` は `eval::sigmoid` を直接呼ぶ（`crates/autodiff/src/nn/module.rs:1751-1765`）。interp は全域で `1/(1+exp(-x))` を使う。このため負の入力で丸めが変わりうるので、bit 一致は保証できない（§15.1 F9）
+  - G3: `export_nn::export_parts_from_layers` は `as_linear`／`as_relu`／`as_softmax`／`as_layer_norm`／`as_gelu`／`as_conv2d` の閉じたフック集合で層を判別する（`crates/onnx-interop/src/onnx/export_nn.rs:346,357,426` ほか）。Sigmoid は判別できず `UnsupportedLayer` で拒否される（`export_nn.rs:606` 付近）
+  - G4: `Module` の bool フックの先例は `as_relu`・`as_gelu`（`module.rs:540,548`）。`as_sigmoid` は無い（§18.5 で取り除いた）
+  - G5: `compat::Sequential::add_sigmoid` は既にある（`crates/facade/src/compat/sequential.rs:885`）
+  - G6: 現在の拒否テストは 2 本。`crates/onnx-interop/tests/onnx_export_layers_parity.rs:234` の `sigmoid_is_rejected_as_unsupported` と、`crates/facade/tests/interop_onnx_export_sequential.rs:296` の `sequential_with_sigmoid_is_rejected_with_unsupported_layer`
+  - G7: `parity::compare`（`crates/backend-cpu/src/parity.rs`）は NaN と NaN の組を fail と判定する。NaN の一致は別に class 一致で検証する
+  - G8: Sigmoid を含む既存の検証は `crates/onnx-interop/tests/fixtures/model.onnx`（参照 fixture）と `crates/onnx-interop/tests/onnx_autograd.rs:150` の `sigmoid_forward_bit_identical` である
+- **推奨: 「実装する」。数値契約は (α)**。理由は 3 点。(γ) のままだと行 26 が「保留」に残り、相互運用の行が「部分的」から抜けない。(α) は tolerance と既定経路をどちらも変えない。(β) は import 済みのモデルすべてで interp の数値を変えてしまう
+
+### 19.1 公開形
+
+- シグネチャ案: **facade の新しい pub 名はない**。`OnnxModel::from_sequential(&Sequential) -> Result<OnnxModel, OnnxError>` は既にあり、`api_surface.rs` の `scan_unapproved_onnx_pub_items` の `ALLOWED_PUB_ITEMS`（12 件。`crates/facade/tests/api_surface.rs:1960`）も変えない。`api_surface.rs` に Sigmoid 専用の否定ガードはない
+- 変わる中身（#3844 の作業）:
+  - autodiff の `Module` に、既定 `false` の `fn as_sigmoid(&self) -> bool` を足す（`as_gelu` と同じ形）。`impl Module for Sigmoid` だけがオーバーライドする。`Hardsigmoid`・`LogSigmoid` はオーバーライドしない
+  - `export_nn` に `as_sigmoid()` → `ExportOp::Sigmoid` の腕を足す。ノードは 1 個・属性なし
+  - export の対応層は 6 種から 7 種になる（`Linear`／`ReLU`／`Softmax`／`LayerNorm`／`GELU`／`Conv2d`／`Sigmoid`）。中身は §18.5 で取り除いたものをほぼそのまま戻す形である
+- facade 内の配置: 既存の `fandhe_ai::interop::onnx::OnnxModel::from_sequential` のまま
+- 正ガードへ反転する対象（否定 → 正）:
+  - `sigmoid_is_rejected_as_unsupported` → `sigmoid_layer_parity`（onnx-interop）
+  - `sequential_with_sigmoid_is_rejected_with_unsupported_layer` → `sequential_with_sigmoid_is_accepted`（facade）
+  - facade の `interop_onnx_export_layers_parity.rs` に `sigmoid_model_parity` を戻す
+- 否定プローブを残す対象（すり替え検出）: `Tanh`・`GeluTanh`・`LogSoftmax` の拒否テストはそのまま残す。新たに `Hardsigmoid` と `LogSigmoid` が `UnsupportedLayer` で拒否されるテストを足し、`as_sigmoid` のオーバーライドが似た名前の層へ漏れていないことを確かめる。加えて export したグラフの op_type 列が厳密に `["Gemm", "Sigmoid"]` になることを確かめる
+
+### 19.2 rustdoc と doctest の例
+
+- 役割要約・doctest の計画: `crates/facade/src/interop/onnx.rs` の `from_sequential` の doc（「6 種」「Sigmoid は承認保留」の記述）を「7 種」に直す。doctest を 1 本足す: `Sequential::new().add_linear(..)?.add_sigmoid()` → `from_sequential` → `to_bytes` → `from_bytes` → `run`。CPU だけで facade 単独で通るので `no_run` や `#[ignore]` は不要。`?` で書き `unwrap` は使わない
+- 失敗系の検証方法: `compile_fail` に頼らない。§19.1 の正のテストと拒否テストの組（インベントリ）で検証する
+
+### 19.3 エラー型
+
+- variant 案: **新しい variant はない**。範囲外の層は従来どおり `OnnxError::UnsupportedLayer { index, layer_kind }` で拒否する（`OnnxError` は `#[non_exhaustive]`）
+- 検証順: Sigmoid は入力をそのまま受けるので新しい検証は要らない。グラフの構築は検証のあと、全部を作るか何も作らないか（部分 export をしない）のままにする。本番経路に `unwrap`／`expect` を入れない。範囲外は fail-closed
+
+### 19.4 テスト計画
+
+すべて案である。実装は #3844。
+
+| 受け入れ基準 | テスト（置き場::名前） | 区分 | `<cuda-node>` | `<metal-node>` | `<rocm-node>` |
+|---|---|---|---|---|---|
+| 単層 Sigmoid の export → interp と `forward_host` が複合判定で一致 | `crates/onnx-interop/tests/onnx_export_layers_parity.rs::sigmoid_layer_parity` | CI | 該当なし | 該当なし | 該当なし |
+| facade の往復（`from_sequential` → `to_bytes` → `from_bytes` → `run`）が `predict` と複合判定で一致 | `crates/facade/tests/interop_onnx_export_layers_parity.rs::sigmoid_model_parity` | CI | 該当なし | 該当なし | 該当なし |
+| 端点のスイープ（−1000・−88・−16・−1・−0.0・+0.0・1・16・88・1000・±inf）で複合判定に合格 | 同ファイル `sigmoid_edge_sweep_parity` | CI | 該当なし | 該当なし | 該当なし |
+| 決定的な疎スイープ（有限の負の f32 の bit パターンを決まった stride で数十万点）で複合判定に合格 | 同ファイル `sigmoid_negative_strided_sweep_parity` | CI | 該当なし | 該当なし | 該当なし |
+| 入力が非負（`Linear→ReLU→Sigmoid`。有限入力・中間で overflow しない）なら bit 一致 | 同ファイル `relu_then_sigmoid_is_bit_identical` | CI | 該当なし | 該当なし | 該当なし |
+| NaN 入力は両方とも NaN（class 一致で比べる。`compare` は使わない） | 同ファイル `sigmoid_nan_class_matches` | CI | 該当なし | 該当なし | 該当なし |
+| Sigmoid を含む `Sequential` を受け入れ、op_type 列が厳密に一致する | `crates/facade/tests/interop_onnx_export_sequential.rs::sequential_with_sigmoid_is_accepted` | CI | 該当なし | 該当なし | 該当なし |
+| `Hardsigmoid`／`LogSigmoid`／`Tanh` は拒否のまま | 同ファイル `sequential_with_hardsigmoid_is_rejected…`・`…log_sigmoid…`・既存の `…tanh…` | CI | 該当なし | 該当なし | 該当なし |
+| `as_sigmoid` の閉集合（`Sigmoid` だけが true） | `crates/autodiff/src/nn/module.rs` の単体テスト | CI | 該当なし | 該当なし | 該当なし |
+| import 済みモデルの既定経路が変わらない | 既存の `interop_onnx_*`・`onnx_autograd.rs::sigmoid_forward_bit_identical`・参照 fixture のテストが無修正で通る | CI | 該当なし | 該当なし | 該当なし |
+
+- 実機の欄を「該当なし」とする理由: export・interp・`Sigmoid::forward_host` はすべてホスト実行で、`BackendOps`／`Device` を通らない（§3.3・§18.3 と同じ整理。`Var::sigmoid` はホストで直接計算する）。実機テストは足さない。測っていないので pass とは書かない
+
+### 19.5 数値契約
+
+- 適用: REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`（`fandhe_ai_tensor_core::tolerance`）・baseline・ガードレール閾値は変えない
+- (α) が成り立つと見込む理由（断定せず、§19.4 の CI テストで示す）:
+  1. `x >= 0`（`+0.0`・`-0.0`・`+inf` を含む）では両者は同じ式 `1.0 / (1.0 + (-x).exp())` を同じ順で計算するので bit 一致する
+  2. `x < 0` の中くらいの範囲では、違いは ULP 程度にとどまる見込みで、相対誤差 1e-3 を大きく下回る
+  3. 大きな負の値（x ≲ −88 付近。出力が非正規化数になる、または interp 側で `exp(-x)` が inf になって 0 に落ちる範囲）では相対誤差が大きくなりうる。しかし両方の値が 1e-5 よりずっと小さいので、絶対誤差の救済項で合格する
+  4. `-inf` は両方とも厳密に 0、`+inf` は両方とも 1
+  5. NaN は両方とも NaN を伝播するが、payload や符号の一致は主張しない。`compare` は NaN 同士を fail と判定する（G7）ので、class 一致で別に検証する
+- 多層モデルでの注意: Sigmoid の出力は [0,1] に収まるが、後ろの層で大きな重みや桁落ちがあると差が広がりうる。契約の対象は「判定はモデルの最終出力に対して行い、parity テストの fixture は決定的シードの通常規模の重みとする」とする。病的な重み（§15.6 の overflow の反例と同類）では一致を主張しない
+- Linear／ReLU だけの構成の bit 一致契約（§15.6）は変えない。Sigmoid を含むモデルは複合判定の対象であり、bit 一致は §19.4 の非負入力のテストに限って主張する
+- FMA 契約・f64 長軸縮約の契約への影響: なし。baseline の追加・更新: なし（承認 URL も不要）
+
+| 案 | 内容 | 利点 | 欠点・影響 |
+|---|---|---|---|
+| (α)（推奨） | 統一複合判定で検証する。interp・eval はどちらも変えない | 定数・既定経路を変えない。#3844 の受入条件「既定経路が bit 単位で同一」を満たす | bit 一致は主張できない（非負入力だけ） |
+| (β) | interp の `sigmoid` を 2 分岐形に揃え、bit 一致させる | 往復が bit 一致になる | import 済みのモデルすべてで `OnnxModel::run` の数値が変わる（既定経路の変更）。参照 fixture（`model.onnx`）と `sigmoid_forward_bit_identical` の再検証が要る。別の承認が要る |
+| (γ) | 対象外のまま（現状・§18.2） | 変更なし | 行 26 が「保留」のまま。相互運用の行が「部分的」から抜けない |
+
+### 19.6 互換への影響
+
+`docs/api-compat-0.14.0-decision.md` §8 の手順で判定する。結論は **追加のみ**（`!` も `BREAKING CHANGE:` も付けない）。
+
+- facade: pub 項目の追加・変更はない（型としては該当なし）。挙動の面では、これまで Err だった Sigmoid を含むモデルが Ok を返すようになる（受け入れの拡大）。「追加のみ」として移行ノート（#3780）の欄に書く
+- autodiff の `Module::as_sigmoid`: 既定実装つきの trait メソッドの追加なので「追加のみ」（§8 規則 2）
+- `OnnxError`・`ExportError`・`ExportOp`: 変えない
+- 注意（§15.2 の 5 点目と同じ）: `as_sigmoid` は autodiff への新しいフックなので、次のリリースまでは単体の `cargo publish --dry-run -p fandhe-ai-onnx-interop` が registry 上の autodiff を参照して失敗しうる。7 パッケージ一括の dry-run は成立する（#2076 の `as_gelu` と同じ扱い。`docs/crates-io-publishing-order.md` §8.1）
+
+### 19.7 適用記録・索引・追跡表
+
+- 適用記録の案（`docs/compat-api-scope.md` への実際の記入は #3844 が行う。#3906 の先例）: 「**適用記録（イシュー #3844・親 #3760。承認: <#3770 の回答 URL>）**: `from_sequential` の対応層に `Sigmoid` を追加（6→7 種）。数値契約 (α)。新規 pub 名なし。公開状態: 公開済み（既存 `from_sequential` の受理範囲の拡大）」
+- #3844 が一緒に直すもの: `docs/onnx-export-op-mapping.md`、`site/guides/interop.md`、`crates/facade/src/interop/onnx.rs` のモジュール doc と `from_sequential` の doc、`crates/onnx-interop/src/onnx/export_nn.rs` の冒頭 doc、テスト冒頭のコメント（`onnx_export_layers_parity.rs`・`interop_onnx_export_layers_parity.rs`）
+- [ ] `docs/compat-api-scope.md` に適用記録を追記した（#3844 に回す。本 PR では案のみ）
+- [x] `docs/README.md` の索引を更新した（本 PR）
+- [x] 追跡表 `docs/compat-matrix-ari-tracker.md` の行 26 の設計記録を更新した（本 PR）
+
+### 19.8 ベンチと性能への影響
+
+- 既定経路への影響: なし。`as_sigmoid` を呼ぶのは export のときの層走査だけで、`Sequential::predict`・学習経路・融合判定（`as_relu` だけを見る）からは呼ばれない。interp の `sigmoid` も変えない（(α) の場合）
+- 前後比較の計画: 不要。(β) を選んだ場合に限り、interp の Sigmoid について 5 回計測の中央値で前後比較する計画を別承認として書く。計測していないので性能の数値は書かない
+
+### 19.9 依存の追加の有無
+
+- 依存追加: なし
+- 許容区分・禁止リストとの照合: 変化なし（許容 12 区分・禁止リストのいずれにも触れない）
+- 新規 `unsafe`: 0 件
+
+### 19.10 所有者へ戻す論点（#3770 論点 2）
+
+| 点 | 選択肢 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| Sigmoid の数値契約 | (α)／(β)／(γ) | (α) | 確認があるまで #3844 に進まない。現在の拒否テスト（G6）による fail-closed 拒否を続ける |
+| 実装するか対象外にするか | 実装する／対象外にする | 実装する | 同上 |
+
+承認: 未取得（#3770 待ち）。
+
+### 19.11 セキュリティ・スコープ外
+
+- OWASP の観点: A08 閉じた集合のフックで判別し、未知の層は fail-closed で拒否する（部分 export をしない）。A03 新しい外部入力はなく、import 側の検証順も変えない。A06 依存の追加なし。秘密情報・ホスト名は書かない（ノードは `<cuda-node>` 等で表す）
+- スコープ外（無断で起票しない）: (β) の interp 統一、`Tanh`／`Hardsigmoid`／`LogSigmoid` の export 対応、外部 ONNX ランタイムとの一致保証（§7 (a) を引き継ぐ）、`value_info` の出力
