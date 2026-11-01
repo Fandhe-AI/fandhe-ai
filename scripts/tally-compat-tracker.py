@@ -225,11 +225,23 @@ _CLEAN_FROZEN = {n: (0, 0) for n in ROW_NAMES}
 _CLEAN_FROZEN.update(
     {"dtype": (1, 1), "自動微分": (0, 1), "演算の範囲": (1, 0), "NN 層・モデル構築": (1, 0), "相互運用": (0, 1)}
 )
-_NEGATIVES = [
-    "missing-cell", "extra-cell", "bad-vocab-0120", "bad-vocab-0140", "unknown-row", "duplicate-number",
-    "gap-number", "header-mismatch", "out-of-scope-without-url", "count-drift", "remaining-drift",
-    "empty-cell", "missing-section",
-]
+# 負例 fixture と、その検査が出すべきエラーメッセージの断片。
+# 別の理由（ヘッダ不一致等）で落ちても通らないよう、検出理由まで突き合わせる。
+_NEGATIVES = {
+    "missing-cell": "セル数 9（10 必要）",
+    "extra-cell": "セル数 11（10 必要）",
+    "bad-vocab-0120": "0.12.0 の区分が語彙外",
+    "bad-vocab-0140": "0.14.0 の区分が語彙外",
+    "unknown-row": "対応表の行が語彙外",
+    "duplicate-number": "連番でない",
+    "gap-number": "連番でない",
+    "header-mismatch": "ヘッダが定義と一致しない",
+    "out-of-scope-without-url": "承認コメント URL がない",
+    "count-drift": "§1 の集計 が §8.5 固定値と不一致",
+    "remaining-drift": "§2 の手書き件数 が §8.5 固定値と不一致",
+    "empty-cell": "5 列目が空",
+    "missing-section": "見出し '## 2. 行別の残件数' が 0 回ある",
+}
 
 
 def self_test() -> int:
@@ -264,7 +276,7 @@ def self_test() -> int:
             report("compat-tracker-clean.md", good, "" if good else "集計値が期待と不一致")
         except TrackerError as e:
             report("compat-tracker-clean.md", False, str(e))
-    for neg in _NEGATIVES:
+    for neg, want in _NEGATIVES.items():
         name = f"compat-tracker-{neg}.md"
         t = load(name)
         if t is None:
@@ -272,8 +284,9 @@ def self_test() -> int:
         try:
             check(t, 5, _CLEAN_FROZEN)
             report(name, False, "違反を検出できなかった")
-        except TrackerError:
-            report(name, True)
+        except TrackerError as e:
+            hit = want in str(e)
+            report(name, hit, "" if hit else f"検出理由が期待と異なる（期待断片 '{want}'）: {e}")
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
