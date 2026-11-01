@@ -39,8 +39,12 @@
 //! 桁落ちで構造の二階が有限のまま f64 の参照から外れる入力（例: Cosine の平行な行で `ε'` が f32 の
 //! `m'` から消える）を別に検査する。seed が 1 要素のときの二階の各要素を構造の演算順どおりに f64 で
 //! 展開し、参照値と各項の絶対値の和から丸め誤差を見積もって REQ-2 の判定を外れうる入力を拒否する
-//! （[`cancel_check`]。対象は Cosine・Triplet の x／g 経路、CEWO の Softmax 対角と g 経路、
-//! MultiMargin p=2・MultiLabelSoft の g 経路）。保証はこの判定を通った入力に限る。
+//! （[`struct_check`]）。構造が f32 で計算する中間値（スケーリング・正規化・累乗・softmax・σ・定数・
+//! `s_b`）は f32 で再現し、そこから組んだ二階と参照の差も見積りに入れる。このため、f64 では非ゼロの
+//! 値が f32 で 0 や非正規数へ underflow して曲率が消える入力も同じ判定で拒否される（例: Triplet の
+//! 微小成分が `v·(1/mx)` で 0 になる）。対象は Cosine・Triplet の x／g 経路、CEWO の Softmax と
+//! g 経路、MultiMargin・MultiLabelMargin・MultiLabelSoft の定数と g 経路、MultiLabelSoft の σ の
+//! 曲率である。保証はこの判定を通った入力に限る。
 //!
 //! GPU: 6 つとも 1 階はホスト関数（経路区分 H）。実機 parity は未実測（Phase 10 の #3857・#3859）。
 
@@ -78,27 +82,67 @@ fn rounding_coeff(terms: usize) -> f64 {
     (2.0 * terms as f64 + 4.0) * (-23f64).exp2()
 }
 
-/// f32 構造の 1 要素の丸め誤差が REQ-2 の統一複合判定に収まるかの保守的検査（設計 §55.2 の
-/// 「相殺の総括判定」）。`v` は同じ要素の f64 の参照値、`m` は同じ式を各項の絶対値の和で評価した
-/// 大きさ（相殺が無ければ `|v|` と等しい）、`scale` は要素に掛かる上流係数（`|g|`・`1/n`・`1/W`・
-/// 行スケール `1/s` 等の積）。誤差上界 `coeff·m·scale` が絶対 1e-5 未満か、相対の半分
-/// （`linalg_fft.rs` と同じ保守的な閾値。許容自体は不変）以内でなければ拒否する。
-/// ε の吸収（`Σa² + ε` で ε が f32 に残らない）も「`m` に比べて小さい `v`」として同じ式で見える。
-/// NaN のレーンは伝播の契約に従い素通しにする。
-fn cancel_check(v: f64, m: f64, scale: f64, coeff: f64, what: &str) -> Result<(), AutodiffError> {
+/// f32 構造の 1 要素が REQ-2 の統一複合判定で f64 の参照に一致するかの保守的検査（設計 §55.2 の
+/// 「相殺の総括判定」）。`v` は同じ要素の f64 の参照値、`v_str` は構造が f32 で計算する中間値
+/// （スケーリング・正規化・累乗・softmax・σ・定数・`s_b` を f32 で再現した値）から同じ式で組んだ値、
+/// `m` は同じ式を各項の絶対値の和で評価した大きさ（相殺が無ければ `|v|` と等しい）、`scale` は要素に
+/// 掛かる上流係数（`|g|`・`1/n`・`1/W`・行スケール `1/s` 等の積）。誤差の見積り
+/// `(|v_str − v| + coeff·m)·scale` が絶対 1e-5 未満か、相対の半分（`linalg_fft.rs` と同じ保守的な閾値。
+/// 許容自体は不変）以内でなければ拒否する。
+/// - ε の吸収・差し引きの桁落ちは「`m` に比べて小さい `v`」として `coeff·m` の項で見える。
+/// - f32 の中間値の underflow（非ゼロが 0 や非正規数になる）は `|v_str − v|` の項で見える
+///   （例: Triplet の微小成分が `v·(1/mx)` で 0 になり、その成分の曲率が 0 になる）。
+///
+/// 参照値 `v` が NaN のレーンは伝播の契約に従い素通しにする（`v_str` だけが非有限なら拒否）。
+fn struct_check(
+    v: f64,
+    v_str: f64,
+    m: f64,
+    scale: f64,
+    coeff: f64,
+    what: &str,
+) -> Result<(), AutodiffError> {
     use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
     if v.is_nan() || m.is_nan() || scale.is_nan() {
         return Ok(());
     }
-    let bound = coeff * m * scale;
+    let err = (v_str - v).abs() + coeff * m;
+    let bound = err * scale;
     if bound.is_finite()
-        && (bound < ABSOLUTE_RESCUE_THRESHOLD || coeff * m <= (RELATIVE_TOLERANCE / 2.0) * v.abs())
+        && (bound < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * v.abs())
     {
         return Ok(());
     }
     Err(invalid(&format!(
-        "{what}: f32 構造の丸め誤差が相殺で増幅され二階が REQ-2 の判定を外れうるため拒否"
+        "{what}: f32 構造の丸め・相殺・underflow で二階が REQ-2 の判定を外れうるため拒否"
     )))
+}
+
+/// f32 で再現した値 `v_str` が構造と f64 で同じ（`v_str == v`）とみなせる要素の [`struct_check`]。
+fn cancel_check(v: f64, m: f64, scale: f64, coeff: f64, what: &str) -> Result<(), AutodiffError> {
+    struct_check(v, v, m, scale, coeff, what)
+}
+
+/// f32 で再現した中間値 `s` が f64 の値 `r` から、大きさ `mag` に対して丸め誤差の見積り `coeff` を
+/// 超えてずれるか（underflow・非正規数・再構成の桁落ち等）。ずれる行は速い経路を使わず、f32 の再現値で
+/// 組んだ構造の二階を要素ごとに参照と比べる。NaN は「ずれる」とする。
+fn deviates(r: f64, s: f64, mag: f64, coeff: f64) -> bool {
+    let d = (s - r).abs();
+    d.is_nan() || d > coeff * mag
+}
+
+/// f32 の逐次和（構造の `Sum` の再現。和の順序の違いは `coeff` の長さ比例項が覆う）。
+fn sum32(it: impl Iterator<Item = f32>) -> f32 {
+    it.fold(0f32, |a, x| a + x)
+}
+
+/// 構造の `s_b`（子テープの f32 の `g / n`・`g / W`・`g`）と f64 の `sb` の比。`sb == 0` は 1。
+fn sb_ratio(sb32: f32, sb: f64) -> f64 {
+    if sb == 0.0 {
+        1.0
+    } else {
+        f64::from(sb32).abs() / sb
+    }
 }
 
 /// 速い経路: ブロック全体の誤差見積りの上界 `bound` が絶対判定を満たす（要素ごとの走査を省ける）か。
@@ -139,6 +183,18 @@ fn upstream_scale(
         Reduction::Mean => gv / n as f64,
         Reduction::Sum => gv,
     })
+}
+
+/// 子テープの `loss_scale_bcast` が f32 で作る `s_b`（Mean は `g / (n as f32)`、Sum は `g`）の再現。
+fn upstream_scale32(g_value: &Tensor<f32>, reduction: Reduction, n: usize) -> f32 {
+    let g = crate::eval::dense_vec(g_value)
+        .first()
+        .copied()
+        .unwrap_or(0.0);
+    match reduction {
+        Reduction::Mean => g / n as f32,
+        Reduction::Sum => g,
+    }
 }
 
 /// `g` への cotangent 上界（要素寄与の絶対値和 × 要素あたりの係数 `1/n`／`1`）を検査する。
@@ -219,6 +275,16 @@ fn sigma_pair_stable<'c>(
     let form_pos = one.sub(t)?.sub(&x_m.neg()?.sigmoid())?;
     let form_neg = x_m.sigmoid().sub(t)?;
     Var::where_cond(&nonneg, &form_pos, &form_neg)
+}
+
+/// 構造の `Sigmoid`（`eval::sigmoid` の f32 の式）の再現。
+fn sigmoid32(x: f32) -> f32 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
 }
 
 fn sigmoid64(x: f64) -> f64 {
@@ -341,6 +407,16 @@ pub(super) fn cewo_cgrad<'c>(
         Reduction::Mean => 1.0 / denom_w,
         Reduction::Sum => 1.0,
     };
+    // 構造の `s_b`（Mean は f32 の `g / W`）の f64 の `sb` に対する比（`g / W` の underflow 等）。
+    let rho_ce = sb_ratio(
+        upstream_scale32(&g_value, Reduction::Sum, 1)
+            / if reduction == Reduction::Mean {
+                w32
+            } else {
+                1.0
+            },
+        sb,
+    );
 
     let numel: usize = shape.iter().product();
     let mut a_data = vec![0f32; numel];
@@ -375,7 +451,7 @@ pub(super) fn cewo_cgrad<'c>(
                 &xs,
                 (o, i, inner, axis_len),
                 (a_s, &weights, t as usize, eps),
-                (sb, gscale_ce),
+                (sb, gscale_ce, rho_ce),
             )?;
         }
     }
@@ -423,27 +499,38 @@ fn cewo_cancel_check(
     xs: &[f32],
     pos: (usize, usize, usize, usize),
     coef: (f64, &[f64], usize, f64),
-    scales: (f64, f64),
+    scales: (f64, f64, f64),
 ) -> Result<(), AutodiffError> {
     let (o, i, inner, c) = pos;
     let (a_s, weights, t, eps) = coef;
-    let (sb, gscale) = scales;
-    let row: Vec<f64> = (0..c)
-        .map(|a| f64::from(xs[(o * c + a) * inner + i]))
-        .collect();
-    if row.iter().any(|v| v.is_nan()) {
+    let (sb, gscale, rho) = scales;
+    let row32: Vec<f32> = (0..c).map(|a| xs[(o * c + a) * inner + i]).collect();
+    if row32.iter().any(|v| v.is_nan()) {
         return Ok(());
     }
+    let row: Vec<f64> = row32.iter().map(|&v| f64::from(v)).collect();
     let mx = row.iter().fold(f64::NEG_INFINITY, |m, &v| m.max(v));
     let e: Vec<f64> = row.iter().map(|&v| (v - mx).exp()).collect();
     let total: f64 = e.iter().sum();
+    // 構造の f32 の Softmax（`eval::softmax_along` と同じ `exp(x − max)` の逐次和と除算）の再現。
+    // 小さな確率は f32 で 0 や非正規数へ underflow し、その曲率が消える。
+    let mx32 = row32.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
+    let e32: Vec<f32> = row32.iter().map(|&v| (v - mx32).exp()).collect();
+    let total32 = sum32(e32.iter().copied());
+    let y32: Vec<f64> = e32.iter().map(|&v| f64::from(v / total32)).collect();
     let total_w: f64 = weights.iter().sum();
     let smooth = eps / c as f64;
     let coeff = rounding_coeff(c);
     let sba = sb * a_s;
+    let a32 = f64::from(a_s as f32);
+    let sba_str = rho * sb * a32;
+    let mut flag = deviates(1.0, rho, 1.0, coeff) || deviates(a_s, a32, a_s.abs(), coeff);
+    let ys: Vec<f64> = e.iter().map(|v| v / total).collect();
     let (mut top1, mut top2) = (0f64, 0f64);
     for j in 0..c {
-        let y = e[j] / total;
+        let y = ys[j];
+        let ys32 = y32[j];
+        flag |= deviates(y, ys32, y, coeff);
         // `1 − y_j` は他クラスの和で求める（`y_j` が 1 に近い行で f64 の差も桁落ちさせない）。
         let rest = if 2.0 * e[j] > total {
             e.iter()
@@ -454,8 +541,9 @@ fn cewo_cancel_check(
         } else {
             total - e[j]
         } / total;
-        cancel_check(
+        struct_check(
             sba * y * rest,
+            sba_str * ys32 * (1.0 - ys32),
             sba * y * (1.0 + y),
             1.0,
             coeff,
@@ -465,8 +553,10 @@ fn cewo_cancel_check(
         let hard = if j == t { -rest } else { y };
         let v = (1.0 - eps) * weights[t] * hard + smooth * (total_w * y - weights[j]);
         let b = (1.0 - eps) * weights[t] * if j == t { 1.0 } else { 0.0 } + smooth * weights[j];
-        cancel_check(
+        let (a_f, b_f, y_f) = (a_s as f32, b as f32, ys32 as f32);
+        struct_check(
             v,
+            f64::from(a_f * y_f - b_f),
             a_s * y + b.abs(),
             gscale,
             coeff,
@@ -478,6 +568,27 @@ fn cewo_cancel_check(
         } else if y > top2 {
             top2 = y;
         }
+    }
+    if flag {
+        // f32 の再現値が丸め誤差の見積りを超えてずれる行（確率の underflow 等）は、非対角
+        // `−s_b·A·y_i·y_j` も要素ごとに f32 の再現値で組んだ値と参照を比べる。
+        for jj in 0..c {
+            for ii in 0..c {
+                if ii == jj {
+                    continue;
+                }
+                let v = sba * ys[ii] * ys[jj];
+                struct_check(
+                    v,
+                    sba_str * y32[ii] * y32[jj],
+                    v.abs(),
+                    1.0,
+                    coeff,
+                    "CrossEntropy: Softmax の非対角の曲率（f32 の underflow）",
+                )?;
+            }
+        }
+        return Ok(());
     }
     // 非対角 `−s_b·A·y_i·y_j` は単項で `m == |v|`。`coeff` が相対の半分を超える長い軸のときだけ
     // 絶対判定に落ちるので、最大の積（上位 2 クラス）で確かめる。
@@ -528,6 +639,7 @@ pub(super) fn multi_margin_cgrad<'c>(
     let dim = shape.len() - 1;
     let gs = g_scale(reduction, n);
     let coeff = rounding_coeff(c);
+    let rho = sb_ratio(upstream_scale32(&g_value, reduction, n), sb);
 
     let mut gsum = 0f64;
     // p=1 の K（符号付き個数 × w_y/C）／p=2 の行定数 c_w とマスク M。
@@ -547,6 +659,8 @@ pub(super) fn multi_margin_cgrad<'c>(
         let mut count = 0f64;
         let mut sum_h = 0f64;
         let mut sum_zm = 0f64;
+        let mut sum_z32 = 0f64;
+        let cw32 = f64::from(cw as f32);
         for (j, &xj) in row.iter().enumerate() {
             cw_data[i * c + j] = cw as f32;
             if j == y {
@@ -569,15 +683,18 @@ pub(super) fn multi_margin_cgrad<'c>(
                     stage(z)?;
                     stage(h)?;
                     // g 経路（`∂dx_j/∂g = c_w·H_j`）の相殺: `Z = (margin − x_y) + x_j` の差し引き。
+                    // 構造の f32 の値（`z32`・定数 `c_w` の f32）で組んだ値と参照を比べる。
                     let zm = margin64.abs() + xy.abs() + f64::from(xj).abs();
-                    cancel_check(
+                    struct_check(
                         cw * h,
+                        2.0 * cw32 * f64::from(z32),
                         2.0 * cw * zm,
                         gs,
                         coeff,
                         "MultiMargin: マージン項 Z の差し引き",
                     )?;
                     sum_zm += zm;
+                    sum_z32 += f64::from(z32);
                     sum_h += h;
                     stage(sum_h)?;
                     stage(cw * h)?;
@@ -590,13 +707,27 @@ pub(super) fn multi_margin_cgrad<'c>(
         }
         if p == 2 {
             // target レーンの `−c_w·ΣH` も同じ相殺を持つ（各 `Z > 0` の和なので和自体は相殺しない）。
-            cancel_check(
+            struct_check(
                 cw * sum_h,
+                2.0 * cw32 * sum_z32,
                 2.0 * cw * sum_zm,
                 gs,
                 coeff,
                 "MultiMargin: マージン項 Z の差し引き（target）",
             )?;
+            // x 経路の二階は `±2·s_b·c_w`（target は個数倍）の定数。f32 の `s_b`・`c_w` の
+            // underflow（非正規数・0）で曲率が消える入力を拒否する。
+            if count > 0.0 {
+                let v = 2.0 * sb * cw * count;
+                struct_check(
+                    v,
+                    2.0 * rho * sb * cw32 * count,
+                    v.abs(),
+                    1.0,
+                    coeff,
+                    "MultiMargin: 定数 c_w・s_b の f32 underflow",
+                )?;
+            }
             stage(cw * sum_h)?;
             stage(sb * cw * sum_h)?;
             stage(sb * cw * 2.0)?;
@@ -604,6 +735,25 @@ pub(super) fn multi_margin_cgrad<'c>(
             gsum += 2.0 * cw * sum_h;
         } else {
             k_data[i * c + y] = (-cw * count) as f32;
+            // g 経路の二階は定数 `K`（f32）。f32 で 0 や非正規数になる `K` を拒否する。
+            if count > 0.0 {
+                struct_check(
+                    cw,
+                    cw32,
+                    cw.abs(),
+                    gs,
+                    coeff,
+                    "MultiMargin: 定数 K の f32 underflow",
+                )?;
+                struct_check(
+                    cw * count,
+                    f64::from((cw * count) as f32),
+                    (cw * count).abs(),
+                    gs,
+                    coeff,
+                    "MultiMargin: 定数 K の f32 underflow（target）",
+                )?;
+            }
             let kmax = cw * count;
             stage(kmax)?;
             stage(sb * kmax)?;
@@ -677,6 +827,7 @@ pub(super) fn multilabel_margin_cgrad<'c>(
     reject_inf(&[&xs])?;
     let g_value = child_value(child, g)?;
     let sb = upstream_scale(&g_value, reduction, n)?;
+    let gs = g_scale(reduction, n);
 
     let unit = 1.0 / c as f64;
     let mut k_data = vec![0f32; n * c];
@@ -713,6 +864,16 @@ pub(super) fn multilabel_margin_cgrad<'c>(
             stage(sb * v.abs())?;
             gsum += v.abs();
             k_data[i * c + j] = v as f32;
+            // g 経路の二階は定数 `K/C`（f32）。f32 で 0 や非正規数になる値を拒否する（区分定数なので
+            // x 経路の二階は 0）。
+            struct_check(
+                v,
+                f64::from(v as f32),
+                v.abs(),
+                gs,
+                rounding_coeff(1),
+                "MultiLabelMargin: 定数 K の f32 underflow",
+            )?;
         }
     }
     check_g_cotangent(gsum, reduction, n)?;
@@ -763,6 +924,8 @@ pub(super) fn multilabel_soft_cgrad<'c>(
     let g_value = child_value(child, g)?;
     let sb = upstream_scale(&g_value, reduction, n)?;
     let gs = g_scale(reduction, n);
+    let rho = sb_ratio(upstream_scale32(&g_value, reduction, n), sb);
+    let coeff = rounding_coeff(1);
 
     let mut coef = vec![0f32; n * c];
     let mut gsum = 0f64;
@@ -782,17 +945,38 @@ pub(super) fn multilabel_soft_cgrad<'c>(
             // g 経路（`∂dx/∂g = (w_c/C)·(σ(x) − t)`）の相殺。構造は符号別の安定形
             // （x ≥ 0: `(1−t) − σ(−x)`、x < 0: `σ(x) − t`）で、σ ≈ t のとき差し引きが桁落ちする。
             // x 経路の曲率 `σ(1−σ)` は安定形で単項になり相殺しない。
+            // 構造の f32 の値（`Sigmoid(−|x|)`・定数 `w_c/C`・`s_b` の f32）で組んだ値と参照を比べる。
+            // 飽和域の σ は f32 で非正規数や 0 へ underflow し、x 経路の曲率 `σ(1−σ)` が消える。
+            let (x32, t32) = (xs[i * c + j], ts[i * c + j]);
+            let s32 = sigmoid32(-x32.abs());
+            let s64 = sigmoid64(-x.abs());
+            let wc32 = wc as f32;
             let mag = if x >= 0.0 {
-                (1.0 - t).abs() + sigmoid64(-x)
+                (1.0 - t).abs() + s64
             } else {
-                sigmoid64(x) + t.abs()
+                s64 + t.abs()
             };
-            cancel_check(
-                wc * diff,
+            let form32 = if x >= 0.0 {
+                (1.0 - t32) - s32
+            } else {
+                s32 - t32
+            };
+            struct_check(
+                wc * (sigmoid64(x) - t),
+                f64::from(wc32 * form32),
                 wc.abs() * mag,
                 gs,
-                rounding_coeff(1),
+                coeff,
                 "MultiLabelSoftMargin: σ(x) − t の差し引き",
+            )?;
+            let curv = sb * wc * s64 * (1.0 - s64);
+            struct_check(
+                curv,
+                rho * sb * f64::from(wc32) * f64::from(s32 * (1.0 - s32)),
+                curv.abs(),
+                1.0,
+                coeff,
+                "MultiLabelSoftMargin: 飽和域の σ(1−σ) の f32 underflow",
             )?;
             gsum += wc * diff;
         }
@@ -856,6 +1040,7 @@ pub(super) fn cosine_cgrad<'c>(
     let g_value = child_value(child, g)?;
     let sb = upstream_scale(&g_value, reduction, n)?;
     let gs = g_scale(reduction, n);
+    let rho = sb_ratio(upstream_scale32(&g_value, reduction, n), sb);
     let dim = shape.len() - 1;
     let numel = n * d;
 
@@ -942,7 +1127,12 @@ pub(super) fn cosine_cgrad<'c>(
             stage(sb * r * r * kmax)?;
         }
         stage(sb * inv1 * inv2 * kmax)?;
-        cosine_cancel_check(&ar, &br, (inv1, inv2), (eps1, eps2), (sb, gs))?;
+        cosine_cancel_check(
+            (&a_s[base..base + d], &b_s[base..base + d]),
+            (inv1, inv2),
+            (eps1, eps2),
+            (sb, gs, rho),
+        )?;
         gsum += inv1 * b1 + inv2 * b2;
     }
     check_g_cotangent(gsum, reduction, n)?;
@@ -976,12 +1166,51 @@ pub(super) fn cosine_cgrad<'c>(
     Ok((push_v3(child, &dx1, h1)?, push_v3(child, &dx2, h2)?))
 }
 
-/// Cosine の 1 行の相殺検査（設計 §55.2 の相殺の総括判定。PR #3947 の Codex P1 への対応）。
+/// Cosine の 1 側（dx1 なら own = a'・other = b'）の二階の展開に使う値。f64 の参照と、構造が f32 で
+/// 計算する値（`a·(1/s)`・`Σa'² + ε'`・`sqrt`・内積・`cos`）の再現の 2 通りで作る。
+struct CosSide {
+    own: Vec<f64>,
+    other: Vec<f64>,
+    m_own: f64,
+    s_own: f64,
+    s_other: f64,
+    den: f64,
+    cos: f64,
+}
+
+impl CosSide {
+    /// seed 要素 `j` の cotangent `(cot_D, cot_m_own, cot_m_other)`。
+    fn cots(&self, j: usize) -> (f64, f64, f64) {
+        let (oj, tj) = (self.own[j], self.other[j]);
+        let cot_d = -oj / (self.m_own * self.den);
+        let cot_den = -tj / (self.den * self.den) + oj * self.cos / (self.m_own * self.den);
+        let cot_mo =
+            self.cos * oj / (self.m_own * self.m_own) + cot_den * self.s_other * 0.5 / self.s_own;
+        let cot_mt = cot_den * self.s_own * 0.5 / self.s_other;
+        (cot_d, cot_mo, cot_mt)
+    }
+
+    fn own_entry(&self, c: (f64, f64, f64), i: usize, j: usize) -> f64 {
+        let delta = if i == j { 1.0 } else { 0.0 };
+        delta * (-self.cos / self.m_own) + self.other[i] * c.0 + 2.0 * self.own[i] * c.1
+    }
+
+    fn cross_entry(&self, c: (f64, f64, f64), i: usize, j: usize) -> f64 {
+        let delta = if i == j { 1.0 } else { 0.0 };
+        delta / self.den + self.own[i] * c.0 + 2.0 * self.other[i] * c.2
+    }
+
+    fn g_entry(&self, j: usize) -> f64 {
+        self.other[j] / self.den - self.cos * self.own[j] / self.m_own
+    }
+}
+
+/// Cosine の 1 行の総括判定（設計 §55.2。相殺・ε の吸収・f32 の underflow）。
 ///
 /// 構造 `inner1 = b'/den − cos·a'/m1'`（`dx2` は a と b を入れ替えた形）を、seed が 1 要素
-/// （Hessian の 1 列）のときの二階の逆伝播の演算順どおりに f64 で展開し、各要素の参照値 `V` と
-/// 各項の絶対値の和 `M` を求めて [`cancel_check`] に掛ける。展開（own は自分側のベクトル、other は
-/// 相手側、`j` は seed の要素）:
+/// （Hessian の 1 列）のときの二階の逆伝播の演算順どおりに展開し（[`CosSide`]）、各要素の f64 の参照値
+/// `V`、各項の絶対値の和 `M`、構造の f32 の中間値から同じ式で組んだ `V_str` を [`struct_check`] に
+/// 掛ける。展開（own は自分側のベクトル、other は相手側、`j` は seed の要素）:
 /// - `cot_cos = −own_j/m_own`、`cot_D = cot_cos/den`、`cot_den = −other_j/den² + own_j·cos/(m_own·den)`
 /// - `cot_m_own = cos·own_j/m_own² + cot_den·s_other/(2 s_own)`、`cot_m_other = cot_den·s_own/(2 s_other)`
 /// - own への二階 `δ_ij·(−cos/m_own) + other_i·cot_D + 2 own_i·cot_m_own`
@@ -990,23 +1219,24 @@ pub(super) fn cosine_cgrad<'c>(
 ///
 /// `M` では `cos` を `Σ|a'b'|/den`（内積の相殺も含める）に置き換える。平行に近い行（例 x1=[1]、x2=[1]）
 /// では各項が O(1) で打ち消し合い、真の曲率は `ε'` の大きさ（`3ε/(1+ε)^3`）しか残らない。f32 では
-/// `m' = Σa'² + ε'` の `ε'` が丸めで消えるため構造は 0 を返し、上流係数が大きいと REQ-2 を外れる。
-/// この ε の吸収は `M` に比べて小さい `V` として同じ式で検出される（構造で ε を保つ方法は無い:
-/// `ε'/m' < 2^-24` の行では f32 の `m'` に ε の情報が残らない）。
-/// 係数は行の幅 `d` から [`rounding_coeff`]。上界 `coeff·M·scale` が O(d) の速い経路で絶対判定を
-/// 満たす行は要素ごとの O(d²) の走査を省く。
+/// `m' = Σa'² + ε'` の `ε'` が丸めで消えるため構造は 0 を返し、上流係数が大きいと REQ-2 を外れる
+/// （`coeff·M` の項で検出。構造で ε を保つ方法は無い: `ε'/m' < 2^-24` の行では f32 の `m'` に ε の
+/// 情報が残らない）。行スケール `a·(1/s)` で微小成分が 0 や非正規数になる行は `V_str` との差で検出する。
+/// 係数は行の幅 `d` から [`rounding_coeff`]。f32 の再現値がどれも `coeff` 以内で一致し、かつ上界
+/// `coeff·M·scale` が O(d) の速い経路で絶対判定を満たす行は、要素ごとの O(d²) の走査を省く。
 fn cosine_cancel_check(
-    ar: &[f64],
-    br: &[f64],
+    rows: (&[f32], &[f32]),
     inv: (f64, f64),
     eps: (f64, f64),
-    scales: (f64, f64),
+    scales: (f64, f64, f64),
 ) -> Result<(), AutodiffError> {
-    let d = ar.len();
+    let (a32, b32) = rows;
+    let d = a32.len();
     let coeff = rounding_coeff(d);
-    let (sb, gs) = scales;
-    let ap: Vec<f64> = ar.iter().map(|v| v * inv.0).collect();
-    let bp: Vec<f64> = br.iter().map(|v| v * inv.1).collect();
+    let (sb, gs, rho) = scales;
+    // f64 の参照値。
+    let ap: Vec<f64> = a32.iter().map(|&v| f64::from(v) * inv.0).collect();
+    let bp: Vec<f64> = b32.iter().map(|&v| f64::from(v) * inv.1).collect();
     let m1: f64 = ap.iter().map(|v| v * v).sum::<f64>() + eps.0;
     let m2: f64 = bp.iter().map(|v| v * v).sum::<f64>() + eps.1;
     let (s1, s2) = (m1.sqrt(), m2.sqrt());
@@ -1014,42 +1244,91 @@ fn cosine_cancel_check(
     let dot: f64 = ap.iter().zip(&bp).map(|(a, b)| a * b).sum();
     let cos = dot / den;
     let cos_m: f64 = ap.iter().zip(&bp).map(|(a, b)| (a * b).abs()).sum::<f64>() / den;
-    let amax = |v: &[f64]| v.iter().fold(0f64, |m, x| m.max(x.abs()));
-    // (own, other, m_own, s_own, s_other, r_own, r_other)
+    // 構造の f32 の中間値の再現（子テープの `x·const(1/s)`・`Sum(x'²) + const(ε/s²)`・`Sqrt`・`Mul`・`Div`）。
+    let (r1f, r2f, e1f, e2f) = (inv.0 as f32, inv.1 as f32, eps.0 as f32, eps.1 as f32);
+    let ap32: Vec<f32> = a32.iter().map(|&v| v * r1f).collect();
+    let bp32: Vec<f32> = b32.iter().map(|&v| v * r2f).collect();
+    let m1_32 = sum32(ap32.iter().map(|&v| v * v)) + e1f;
+    let m2_32 = sum32(bp32.iter().map(|&v| v * v)) + e2f;
+    let (s1_32, s2_32) = (m1_32.sqrt(), m2_32.sqrt());
+    let den32 = s1_32 * s2_32;
+    let cos32 = sum32(ap32.iter().zip(&bp32).map(|(&a, &b)| a * b)) / den32;
+    let to64 = |v: &[f32]| -> Vec<f64> { v.iter().map(|&x| f64::from(x)).collect() };
+    let (ap_s, bp_s) = (to64(&ap32), to64(&bp32));
+    let flag = deviates(1.0, rho, 1.0, coeff)
+        || ap
+            .iter()
+            .zip(&ap_s)
+            .any(|(&r, &x)| deviates(r, x, r.abs(), coeff))
+        || bp
+            .iter()
+            .zip(&bp_s)
+            .any(|(&r, &x)| deviates(r, x, r.abs(), coeff))
+        || deviates(m1, f64::from(m1_32), m1, coeff)
+        || deviates(m2, f64::from(m2_32), m2, coeff)
+        || deviates(den, f64::from(den32), den, coeff)
+        || deviates(cos, f64::from(cos32), cos_m, coeff);
+    let side = |own: &[f64], other: &[f64], m_own, s_own, s_other, den, cos| CosSide {
+        own: own.to_vec(),
+        other: other.to_vec(),
+        m_own,
+        s_own,
+        s_other,
+        den,
+        cos,
+    };
+    let (m1s, m2s, s1s, s2s) = (
+        f64::from(m1_32),
+        f64::from(m2_32),
+        f64::from(s1_32),
+        f64::from(s2_32),
+    );
+    let (dens, coss) = (f64::from(den32), f64::from(cos32));
+    // (参照, f32 再現, r_own, r_other)
     let sides = [
-        (&ap, &bp, m1, s1, s2, inv.0, inv.1),
-        (&bp, &ap, m2, s2, s1, inv.1, inv.0),
+        (
+            side(&ap, &bp, m1, s1, s2, den, cos),
+            side(&ap_s, &bp_s, m1s, s1s, s2s, dens, coss),
+            inv.0,
+            inv.1,
+        ),
+        (
+            side(&bp, &ap, m2, s2, s1, den, cos),
+            side(&bp_s, &ap_s, m2s, s2s, s1s, dens, coss),
+            inv.1,
+            inv.0,
+        ),
     ];
-    for (own, other, m_own, s_own, s_other, r_own, r_other) in sides {
+    let amax = |v: &[f64]| v.iter().fold(0f64, |m, x| m.max(x.abs()));
+    for (rf, st, r_own, r_other) in &sides {
+        let (own, other, m_own, s_own, s_other) =
+            (&rf.own, &rf.other, rf.m_own, rf.s_own, rf.s_other);
         let (omax, tmax) = (amax(own), amax(other));
-        // seed 要素 j ごとの cotangent（値と大きさ）。
-        let per_j: Vec<[f64; 6]> = (0..d)
+        // seed 要素 j ごとの cotangent の大きさ（`M` 用。`cos` を `cos_m` に置き換える）。
+        let mags: Vec<[f64; 3]> = (0..d)
             .map(|j| {
-                let (oj, tj) = (own[j], other[j]);
-                let cot_d = -oj / (m_own * den);
-                let cot_den = -tj / (den * den) + oj * cos / (m_own * den);
-                let cot_mo = cos * oj / (m_own * m_own) + cot_den * s_other * 0.5 / s_own;
-                let cot_mt = cot_den * s_own * 0.5 / s_other;
-                let cot_d_m = oj.abs() / (m_own * den);
-                let cot_den_m = tj.abs() / (den * den) + oj.abs() * cos_m / (m_own * den);
-                let cot_mo_m =
-                    cos_m * oj.abs() / (m_own * m_own) + cot_den_m * s_other * 0.5 / s_own;
+                let (oj, tj) = (own[j].abs(), other[j].abs());
+                let cot_d_m = oj / (m_own * den);
+                let cot_den_m = tj / (den * den) + oj * cos_m / (m_own * den);
+                let cot_mo_m = cos_m * oj / (m_own * m_own) + cot_den_m * s_other * 0.5 / s_own;
                 let cot_mt_m = cot_den_m * s_own * 0.5 / s_other;
-                [cot_d, cot_mo, cot_mt, cot_d_m, cot_mo_m, cot_mt_m]
+                [cot_d_m, cot_mo_m, cot_mt_m]
             })
             .collect();
-        let max_of = |k: usize| per_j.iter().fold(0f64, |m, c| m.max(c[k]));
+        let max_of = |k: usize| mags.iter().fold(0f64, |m, c| m.max(c[k]));
         let s_own_blk = sb * r_own * r_own;
         let s_cross_blk = sb * r_own * r_other;
-        let fast_own = cos_m / m_own + tmax * max_of(3) + 2.0 * omax * max_of(4);
-        let fast_cross = 1.0 / den + omax * max_of(3) + 2.0 * tmax * max_of(5);
-        let need_own = !fast_ok(coeff * fast_own * s_own_blk);
-        let need_cross = !fast_ok(coeff * fast_cross * s_cross_blk);
-        for (j, c) in per_j.iter().enumerate() {
-            let [cot_d, cot_mo, cot_mt, cot_d_m, cot_mo_m, cot_mt_m] = *c;
-            // g への二階（`inner_j`）。
-            cancel_check(
-                other[j] / den - cos * own[j] / m_own,
+        let fast_own = cos_m / m_own + tmax * max_of(0) + 2.0 * omax * max_of(1);
+        let fast_cross = 1.0 / den + omax * max_of(0) + 2.0 * tmax * max_of(2);
+        let need_own = flag || !fast_ok(coeff * fast_own * s_own_blk);
+        let need_cross = flag || !fast_ok(coeff * fast_cross * s_cross_blk);
+        for (j, mg) in mags.iter().enumerate() {
+            let [cot_d_m, cot_mo_m, cot_mt_m] = *mg;
+            // g への二階（`inner_j`）。g 経路は `s_b` を通らないので `rho` は掛けない。
+            let gv = rf.g_entry(j);
+            struct_check(
+                gv,
+                if flag { st.g_entry(j) } else { gv },
                 other[j].abs() / den + cos_m * own[j].abs() / m_own,
                 gs * r_own,
                 coeff,
@@ -1058,26 +1337,39 @@ fn cosine_cancel_check(
             if !(need_own || need_cross) {
                 continue;
             }
+            let (cr, cs) = (rf.cots(j), st.cots(j));
             for i in 0..d {
                 let delta = if i == j { 1.0 } else { 0.0 };
                 if need_own {
-                    cancel_check(
-                        delta * (-cos / m_own) + other[i] * cot_d + 2.0 * own[i] * cot_mo,
+                    let v = rf.own_entry(cr, i, j);
+                    struct_check(
+                        v,
+                        if flag {
+                            rho * st.own_entry(cs, i, j)
+                        } else {
+                            v
+                        },
                         delta * cos_m / m_own
                             + other[i].abs() * cot_d_m
                             + 2.0 * own[i].abs() * cot_mo_m,
                         s_own_blk,
                         coeff,
-                        "Cosine: 同じ側の二階（ε の吸収・平行に近い行の相殺）",
+                        "Cosine: 同じ側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）",
                     )?;
                 }
                 if need_cross {
-                    cancel_check(
-                        delta / den + own[i] * cot_d + 2.0 * other[i] * cot_mt,
+                    let v = rf.cross_entry(cr, i, j);
+                    struct_check(
+                        v,
+                        if flag {
+                            rho * st.cross_entry(cs, i, j)
+                        } else {
+                            v
+                        },
                         delta / den + own[i].abs() * cot_d_m + 2.0 * other[i].abs() * cot_mt_m,
                         s_cross_blk,
                         coeff,
-                        "Cosine: 相手側の二階（ε の吸収・平行に近い行の相殺）",
+                        "Cosine: 相手側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）",
                     )?;
                 }
             }
@@ -1194,9 +1486,9 @@ fn pair_info(
     Ok(PairInfo { inv_mx, sign, zero })
 }
 
-/// Triplet の 1 ペア・1 行について、二階の展開に使う f64 の量（`pair_grad` の構造に対応）。
+/// Triplet の 1 ペア・1 行について、二階の展開に使う量（`pair_grad` の構造に対応）。
 /// `u = v·inv`、`N = ‖u‖_p`、`q = |u|/N`、`e = q^(p−1)`、対角係数 `dg = (p−1)·q^(p−2)`、
-/// `fac = inv/N`、`sg = sign(u)`。全要素 0 の行（構造は定数 0）・NaN の行は `None`。
+/// `fac = inv/N`、`sg = sign(u)`（構造の V2 定数と同じホストの符号）。
 struct PairRow {
     fac: f64,
     pm1: f64,
@@ -1205,11 +1497,23 @@ struct PairRow {
     sg: Vec<f64>,
 }
 
-fn triplet_pair_row(h: &[f64], info: &PairInfo, base: usize, p: f64) -> Option<PairRow> {
+/// 1 ペア・1 行の f64 の参照値と、構造が f32 で計算する値（差分の再構成 `rec`・`v·(1/mx)`・`|u|^p` の
+/// 逐次和・`ssum^(1/p)`・`|u|/N`・`PowScalar` とその微分係数）の再現を作る。3 つ目は f32 の再現値が
+/// 丸め誤差の見積り `coeff` を超えてずれる（スケーリング後の微小成分の 0 化・非正規数化等）か。
+/// 全要素 0 の行（構造は定数 0）・NaN の行は `None`。
+fn triplet_pair_row(
+    h: &[f64],
+    rec: &[f32],
+    info: &PairInfo,
+    base: usize,
+    p: f64,
+    coeff: f64,
+) -> Option<(PairRow, PairRow, bool)> {
     if info.zero[base] || h.iter().any(|v| v.is_nan()) {
         return None;
     }
-    let inv = f64::from(info.inv_mx[base]);
+    let inv32 = info.inv_mx[base];
+    let inv = f64::from(inv32);
     let u: Vec<f64> = h.iter().map(|v| v * inv).collect();
     let norm = if p == 2.0 {
         u.iter().map(|x| x * x).sum::<f64>().sqrt()
@@ -1220,33 +1524,82 @@ fn triplet_pair_row(h: &[f64], info: &PairInfo, base: usize, p: f64) -> Option<P
         return None;
     }
     let q: Vec<f64> = u.iter().map(|x| x.abs() / norm).collect();
-    Some(PairRow {
+    let sg: Vec<f64> = (0..h.len())
+        .map(|k| f64::from(info.sign[base + k]))
+        .collect();
+    let reference = PairRow {
         fac: inv / norm,
         pm1: p - 1.0,
         dg: q.iter().map(|&x| (p - 1.0) * x.powf(p - 2.0)).collect(),
         e: q.iter().map(|&x| x.powf(p - 1.0)).collect(),
-        sg: u.iter().map(|&x| sign0(x)).collect(),
-    })
+        sg: sg.clone(),
+    };
+    // 構造の f32 の再現（`pair_grad`: `u = v·const(1/mx)`、p=2 は `u/sqrt(Σu²)`、一般の p は
+    // `(|u|/ssum^(1/p))^(p−1)`）。
+    let p32 = p as f32;
+    let u32v: Vec<f32> = rec.iter().map(|&c| c * inv32).collect();
+    let au: Vec<f32> = u32v.iter().map(|x| x.abs()).collect();
+    let norm32 = if p == 2.0 {
+        sum32(u32v.iter().map(|&x| x * x)).sqrt()
+    } else {
+        sum32(au.iter().map(|&x| x.powf(p32))).powf(1.0 / p32)
+    };
+    let q32: Vec<f32> = au.iter().map(|&x| x / norm32).collect();
+    let (e32, dg32): (Vec<f64>, Vec<f64>) = if p == 2.0 {
+        (
+            q32.iter().map(|&x| f64::from(x)).collect(),
+            vec![1.0; h.len()],
+        )
+    } else {
+        (
+            q32.iter().map(|&x| f64::from(x.powf(p32 - 1.0))).collect(),
+            q32.iter()
+                .map(|&x| f64::from((p32 - 1.0) * x.powf(p32 - 2.0)))
+                .collect(),
+        )
+    };
+    let structural = PairRow {
+        fac: inv / f64::from(norm32),
+        pm1: f64::from(p32) - 1.0,
+        dg: dg32,
+        e: e32,
+        sg,
+    };
+    let flag = deviates(norm, f64::from(norm32), norm, coeff)
+        || (0..h.len()).any(|k| {
+            deviates(u[k], f64::from(u32v[k]), u[k].abs(), coeff)
+                || deviates(reference.e[k], structural.e[k], reference.e[k], coeff)
+                || deviates(
+                    reference.dg[k],
+                    structural.dg[k],
+                    reference.dg[k].abs(),
+                    coeff,
+                )
+        });
+    Some((reference, structural, flag))
 }
 
-/// Triplet の 1 行の相殺検査（設計 §55.2 の相殺の総括判定）。
+/// Triplet の 1 行の総括判定（設計 §55.2。相殺・f32 の underflow）。
 ///
 /// 1 ペアの p ノルム勾配 `core_j = sign(u_j)·(|u_j|/N)^(p−1)` の二階は、v のレーン i へ
 /// `fac·(δ_ij·dg_j − (p−1)·sg_i·sg_j·e_i·e_j)` で、対角は 1 成分が支配的な行（`q_j → 1`）で相殺する
 /// （p=2 では `(1 − û_j²)/N`）。さらに `da` の a への二階は `H_ap − c_an·H_an`、`dp` の p への二階は
 /// `H_ap − c_pn·H_pn` と 2 ペアの差になり、非対角でも相殺しうる。9 ブロック（出力 da／dp／dn ×
-/// 入力 a／p／n）の各要素と、g への二階（`Σ w·core`）を [`cancel_check`] に掛ける。`coeff` は幅 `d` と
-/// `p`、差分の再構成の条件数 `κ`（`(|x − y| + |eps|)/|v|`。`v ≈ 0` の桁落ちで `u` の相対誤差が増える）
-/// から呼び出し元が作る。O(d) の速い経路で絶対判定を満たすブロックは O(d²) の走査を省く。
+/// 入力 a／p／n）の各要素と、g への二階（`Σ w·core`）を、f64 の参照と f32 の再現値（[`triplet_pair_row`]）
+/// で組んで [`struct_check`] に掛ける。スケーリング後に微小成分が 0 になる行（例: 差分
+/// `[1e10, 1e10, 1e-40]` の第 3 成分は `v·(1/mx)` で 0 になり、p > 2 でその成分の曲率 `dg` が 0 になる）は
+/// `V_str` との差で拒否される。`coeff` は幅 `d` と `p`、差分の再構成の条件数 `κ`
+/// （`(|x − y| + |eps|)/|v|`）から呼び出し元が作る。f32 の再現値がどれも `coeff` 以内で一致し、かつ
+/// O(d) の速い経路で絶対判定を満たすブロックは O(d²) の走査を省く。
 fn triplet_cancel_check(
-    pr: &[Option<PairRow>; 3],
+    pr: &[Option<(PairRow, PairRow, bool)>; 3],
     coefs: (f64, f64),
     d: usize,
-    scales: (f64, f64),
+    scales: (f64, f64, f64),
     coeff: f64,
 ) -> Result<(), AutodiffError> {
     let (c_an, c_pn) = coefs;
-    let (sb, gs) = scales;
+    let (sb, gs, rho) = scales;
     // ペア添字 0 = ap、1 = an、2 = pn。重み w = (出力の係数)·(∂v/∂入力)。
     let outputs: [[(usize, f64); 2]; 3] = [
         [(0, 1.0), (1, -c_an)],
@@ -1264,19 +1617,28 @@ fn triplet_cancel_check(
         [(2, c_pn), (2, 0.0)],
         [(1, -c_an), (2, -c_pn)],
     ];
-    let live = |terms: &[(usize, f64); 2]| -> Vec<(&PairRow, f64)> {
+    let live = |terms: &[(usize, f64); 2]| -> Vec<(&PairRow, &PairRow, f64)> {
         terms
             .iter()
             .filter(|&&(_, w)| w != 0.0)
-            .filter_map(|&(k, w)| pr[k].as_ref().map(|r| (r, w)))
+            .filter_map(|&(k, w)| pr[k].as_ref().map(|(r, st, _)| (r, st, w)))
             .collect()
     };
+    let flag = deviates(1.0, rho, 1.0, coeff) || pr.iter().flatten().any(|(_, _, f)| *f);
     for terms in &outputs {
         let ts = live(terms);
         for j in 0..d {
-            let v: f64 = ts.iter().map(|(r, w)| w * r.sg[j] * r.e[j]).sum();
-            let m: f64 = ts.iter().map(|(r, w)| w.abs() * r.e[j]).sum();
-            cancel_check(v, m, gs, coeff, "Triplet: g への二階（ペア勾配の差し引き）")?;
+            let v: f64 = ts.iter().map(|(r, _, w)| w * r.sg[j] * r.e[j]).sum();
+            let v_str: f64 = ts.iter().map(|(_, st, w)| w * st.sg[j] * st.e[j]).sum();
+            let m: f64 = ts.iter().map(|(r, _, w)| w.abs() * r.e[j]).sum();
+            struct_check(
+                v,
+                v_str,
+                m,
+                gs,
+                coeff,
+                "Triplet: g への二階（ペア勾配の差し引き・f32 の underflow）",
+            )?;
         }
     }
     for terms in &blocks {
@@ -1286,30 +1648,33 @@ fn triplet_cancel_check(
         }
         let fast: f64 = ts
             .iter()
-            .map(|(r, w)| {
+            .map(|(r, _, w)| {
                 let dmax = r.dg.iter().fold(0f64, |m, x| m.max(x.abs()));
                 let emax = r.e.iter().fold(0f64, |m, &x| m.max(x));
                 w.abs() * r.fac * (dmax + r.pm1.abs() * emax * emax)
             })
             .sum();
-        if fast_ok(coeff * fast * sb) {
+        if !flag && fast_ok(coeff * fast * sb) {
             continue;
         }
         for j in 0..d {
             for i in 0..d {
                 let delta = if i == j { 1.0 } else { 0.0 };
-                let (mut v, mut m) = (0f64, 0f64);
-                for (r, w) in &ts {
+                let (mut v, mut v_str, mut m) = (0f64, 0f64, 0f64);
+                for (r, st, w) in &ts {
                     let off = r.pm1 * r.sg[i] * r.sg[j] * r.e[i] * r.e[j];
                     v += w * r.fac * (delta * r.dg[j] - off);
                     m += w.abs() * r.fac * (delta * r.dg[j].abs() + off.abs());
+                    let off_s = st.pm1 * st.sg[i] * st.sg[j] * st.e[i] * st.e[j];
+                    v_str += w * st.fac * (delta * st.dg[j] - off_s);
                 }
-                cancel_check(
+                struct_check(
                     v,
+                    rho * v_str,
                     m,
                     sb,
                     coeff,
-                    "Triplet: 二階（支配的な成分・2 ペアの差の相殺）",
+                    "Triplet: 二階（支配的な成分・2 ペアの差の相殺・f32 の underflow）",
                 )?;
             }
         }
@@ -1459,16 +1824,24 @@ pub(super) fn triplet_cgrad<'c>(
     };
     if p64 != 1.0 {
         let gs = g_scale(reduction, n);
+        let rho = sb_ratio(upstream_scale32(&g_value, reduction, n), sb);
         for i in 0..n {
             if !act_rows[i] {
                 continue;
             }
-            let row =
-                |rows: &[Vec<f64>], info: &PairInfo| triplet_pair_row(&rows[i], info, i * d, p64);
+            let c_an = c_an_rows[i];
+            let c_pn = if swap { 1.0 - c_an } else { 0.0 };
+            let coeff = rounding_coeff(d)
+                + 2.0 * ((p64 - 1.0).abs() + 1.0) * (kap_rows[i] + 1.0) * (-23f64).exp2();
+            let row = |rows: &[Vec<f64>], rec: &[Vec<f32>], info: &PairInfo| {
+                triplet_pair_row(&rows[i], &rec[i], info, i * d, p64, coeff)
+            };
             let pr = [
-                row(&rows_ap, &info_ap),
-                row(&rows_an, &info_an),
-                info_pn.as_ref().and_then(|info| row(&rows_pn, info)),
+                row(&rows_ap, &rec_ap, &info_ap),
+                row(&rows_an, &rec_an, &info_an),
+                info_pn
+                    .as_ref()
+                    .and_then(|info| row(&rows_pn, &rec_pn, info)),
             ];
             let nan = [&rows_ap[i], &rows_an[i]]
                 .into_iter()
@@ -1477,11 +1850,7 @@ pub(super) fn triplet_cgrad<'c>(
             if nan {
                 continue;
             }
-            let c_an = c_an_rows[i];
-            let c_pn = if swap { 1.0 - c_an } else { 0.0 };
-            let coeff = rounding_coeff(d)
-                + 2.0 * ((p64 - 1.0).abs() + 1.0) * (kap_rows[i] + 1.0) * (-23f64).exp2();
-            triplet_cancel_check(&pr, (c_an, c_pn), d, (sb, gs), coeff)?;
+            triplet_cancel_check(&pr, (c_an, c_pn), d, (sb, gs, rho), coeff)?;
         }
     }
     // 各勾配ベクトルの成分は |u|/norm' ≤ 1。3 本の寄与を足した上界で `g` への cotangent を押さえる。

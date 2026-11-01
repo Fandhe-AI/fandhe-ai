@@ -1539,3 +1539,62 @@ fn multilabel_soft_sigma_near_target_g_path_is_rejected_or_exact() {
         }
     }
 }
+
+/// PR #3947 の Codex P1（2 回目の underflow の類型）: 一般の p で、差分 `a − p = [1e10, 1e10, 1e-40]` の
+/// 第 3 成分は f32 の `v·(1/mx)` で 0 へ underflow し、p = 2.1 ではその成分の曲率
+/// `(p−1)/N·q^(p−2)·(1 − q^p)` が構造上 0 になる（1e14 倍で参照は約 0.0765）。f32 で再現した中間値から
+/// 組んだ二階と参照の差で拒否され、受理される係数では閉形式の参照と REQ-2 で一致する。
+#[test]
+fn triplet_scaled_component_underflow_is_rejected_or_exact() {
+    fn build<'t>(tape: &'t Tape, z: &Var<'t>, scale: f32) -> BuildResult<'t> {
+        let q = parts(z, 3, 3);
+        let l = q[0].triplet_margin_loss(
+            &q[1],
+            &q[2],
+            &TripletMarginOptions::default()
+                .p(2.1)
+                .eps(0.0)
+                .margin(3e10)
+                .swap(false),
+            Reduction::Sum,
+        )?;
+        scaled(tape, l, scale)
+    }
+    let z0 = [0.0f32, 0.0, 0.0, -1e10, -1e10, -1e-40, -2e10, -1e10, -2e-40];
+    // ∂²L/∂p_3² = ∂²‖a − p‖_p/∂v_3²（v = a − p）。
+    let p = f64::from(2.1f32);
+    let v: Vec<f64> = (0..3)
+        .map(|k| f64::from(z0[k]) - f64::from(z0[3 + k]))
+        .collect();
+    let norm = v.iter().map(|x| x.abs().powf(p)).sum::<f64>().powf(1.0 / p);
+    let q3 = v[2].abs() / norm;
+    let want = (p - 1.0) / norm * q3.powf(p - 2.0) * (1.0 - q3.powf(p));
+    assert!(
+        (f64::from(1e14f32) * want - 0.0765).abs() < 1e-3,
+        "参照の確認: {}",
+        1e14 * want
+    );
+    let (mut accepted, mut rejected) = (0, 0);
+    // 1e10 倍では参照が約 7.65e-6 で絶対判定に収まるため受理されうる。1e12 倍以上は外れる。
+    for scale in [1f32, 1e6, 1e10, 1e12, 1e14] {
+        let ctx = format!("triplet underflow scale={scale}");
+        match try_hessian(&ctx, |tape, z| build(tape, z, scale), &z0) {
+            Some(h) => {
+                assert!(scale < 1e12, "{ctx}: 拒否されるべき入力が受理された");
+                accepted += 1;
+                let r = f64::from(scale) * want;
+                assert!(
+                    common::req2_close(h[5][5], r),
+                    "{ctx}: hessian[5][5] 構造={} 参照={r}",
+                    h[5][5]
+                );
+                assert!(h.iter().flatten().all(|x| x.is_finite()), "{ctx}: 非有限");
+            }
+            None => rejected += 1,
+        }
+    }
+    assert!(
+        accepted > 0 && rejected > 0,
+        "受理 {accepted}・拒否 {rejected}"
+    );
+}
