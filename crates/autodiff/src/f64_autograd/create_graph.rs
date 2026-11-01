@@ -563,12 +563,14 @@ fn binary_contributions_f64<'c, 't>(
                 let b_bc = b_m.cg_broadcast_to(out_shape)?;
                 let neg_one = scalar_const(child, -1.0)?;
                 // 指数 0 の位置を置き換える。ただし指数も追跡され（need_b）、底が
-                // 有限の正で `1/a` も有限な位置は式を残す（混合二階微分 `1/a` の
+                // 有限の正で `1/a^2` も有限な位置は式を残す（`a^(b-1)` の逆伝播係数
+                // `(b-1)a^(b-2)` が overflow して `0 * inf = NaN` になるのを避ける）（混合二階微分 `1/a` の
                 // ため）。指数が非追跡なら混合項は存在せず全 b == 0 位置を定数化し、
                 // 微小な正の底での `a^(-1)` overflow による `0 * inf = NaN` も避ける。
                 let mask_b0 =
                     pair_mask_const(child, &a_m.value(), &b_m.value(), out_shape, |a, b| {
-                        b == 0.0 && !(need_b && a.is_finite() && a > 0.0 && (1.0 / a).is_finite())
+                        b == 0.0
+                            && !(need_b && a.is_finite() && a > 0.0 && (1.0 / (a * a)).is_finite())
                     })?;
                 let safe_a = mask_b0.cg_where(&ones, &a_bc)?;
                 let a_pow = safe_a.pow(&b_bc.add(&neg_one)?)?;

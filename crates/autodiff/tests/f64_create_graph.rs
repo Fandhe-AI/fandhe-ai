@@ -505,3 +505,22 @@ fn result_accessors_check_ownership_and_tracking() -> R<()> {
     ));
     Ok(())
 }
+
+/// 底 1e-200・指数 0（ともに追跡）で、`a^(b-1)` の逆伝播係数 `-a^(-2)` が
+/// overflow しても二階微分が NaN にならず、正しい d2/da2 = 0 を返す。
+#[test]
+fn pow_tiny_base_tracked_zero_exponent_second_order_is_finite() -> R<()> {
+    let base = new_tape();
+    let (p, c) = (TapeF64::new(&base), TapeF64::new(&base));
+    let a = p.var(&t(vec![1e-200], &[1]));
+    let b = p.var(&t(vec![0.0], &[1]));
+    let l = a.pow(&b)?;
+    let cg = p.backward_create_graph(&l, &c)?;
+    assert_eq!(second(&cg, &c, &a, &a)?, vec![0.0]);
+    for (of, wrt) in [(&a, &b), (&b, &a), (&b, &b)] {
+        for v in second(&cg, &c, of, wrt)? {
+            assert!(v.is_finite(), "二階に非有限値: {v}");
+        }
+    }
+    Ok(())
+}
