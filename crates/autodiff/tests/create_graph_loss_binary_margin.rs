@@ -899,6 +899,34 @@ fn bce_logits_keeps_curvature_in_positive_saturation() {
     );
 }
 
+/// BCE logits の一階値は大きなスケール（x = 20・t = 1・Sum x 1e10）でも既存 backward と REQ-2 一致する
+/// （安定形の値 -2e-9 x 1e10 = -20.6 を返さない）。二階は別テストで保持を確認している。
+#[test]
+fn bce_logits_first_order_matches_existing_backward_at_large_scale() {
+    for (x, tg) in [(20.0f32, 1.0f32), (-20.0, 0.0), (20.0, 0.0), (-20.0, 1.0)] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let z = tape.var(&t(vec![x], &[1]));
+        let target = tape.var_no_grad(&t(vec![tg], &[1]));
+        let loss = z
+            .bce_with_logits_loss(&target, Reduction::Sum)
+            .unwrap()
+            .mul(&tape.var_no_grad(&t(vec![1e10], &[1])))
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let want = dense(tape.backward(&loss).unwrap().get(&z).unwrap().unwrap());
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let got = dense(cg.grad(&z).unwrap().unwrap().to_tensor());
+        for (a, b) in got.iter().zip(&want) {
+            assert!(
+                common::req2_close(f64::from(*a), f64::from(*b)),
+                "x={x} t={tg}: {a} vs {b}"
+            );
+        }
+    }
+}
+
 /// SoftMargin（x = -20・y = 1・損失 x 1e10）の二階が σ'(20) x 1e10 を保つ。
 #[test]
 fn soft_margin_keeps_curvature_in_saturation() {

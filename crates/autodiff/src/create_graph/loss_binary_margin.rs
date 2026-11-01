@@ -263,7 +263,23 @@ pub(super) fn bce_cgrad<'c>(
         let one = scalar(child, 1.0);
         let form_pos = one.sub(t_m)?.sub(&x_m.neg()?.sigmoid())?;
         let form_neg = x_m.sigmoid().sub(t_m)?;
-        let dinput = s_b.mul(&Var::where_cond(&nonneg, &form_pos, &form_neg)?)?;
+        let stable = Var::where_cond(&nonneg, &form_pos, &form_neg)?;
+        // 値は 1 階（`eval::bce_elem_grad_input`・CPU カーネル）の f32 経路へ揃える（REQ-2。
+        // 安定形の値のままだと大きなスケールで 1 階が 0 に丸まる入力と乖離する）。差分は定数
+        // （勾配を持たない）として足すので、曲率（二階）は安定形のまま保たれる。
+        let stable_value = crate::eval::dense_vec(&child_value(child, &stable)?);
+        let corr: Vec<f32> = xs
+            .iter()
+            .zip(&ts)
+            .zip(&stable_value)
+            .map(|((&x, &t), &sv)| {
+                let exact = crate::eval::bce_elem_grad_input(x, t, BceKind::Logits);
+                let c = exact - sv;
+                if c.is_finite() { c } else { 0.0 }
+            })
+            .collect();
+        let form = stable.add(&const_vec(child, corr, &shape)?)?;
+        let dinput = s_b.mul(&form)?;
         let dtarget = s_b.mul(x_m)?.neg()?;
         return Ok((dinput, dtarget));
     }
