@@ -1598,3 +1598,70 @@ fn triplet_scaled_component_underflow_is_rejected_or_exact() {
         "受理 {accepted}・拒否 {rejected}"
     );
 }
+
+/// Bugbot（PR #3947）の指摘: p=2 の Triplet の構造 `u/norm'` は、符号を f32 で再構成した差分
+/// `fl(fl(x − y) + eps)·fl(1/mx)` から取る。ホストの f64 の差分 `(x − y) + eps` と符号が反転する入力が
+/// あると、ホストの符号を共有した V_str では検出できない。ここでは次を確かめる。
+/// 1. 反転は起きない: 丸め `fl` は単調で、`eps` は f32 で表せるので、`(x − y) + eps > 0` なら
+///    `fl(x − y) ≥ −eps`、よって `fl(fl(x − y) + eps) ≥ 0`（負も同様）。正の `fl(1/mx)` を掛けても
+///    符号は反転せず、0 へ潰れるだけである。桁落ちの近傍を含む格子で全数を確かめる。
+/// 2. 反転に最も近い入力（f32 では 0 に潰れ、f64 では非ゼロ）は `pair_info` の「0 と非 0 の不一致」で
+///    拒否され、`child` は空になる（実装は V_str でも f32 の符号を使う。§55.2）。
+#[test]
+fn triplet_f32_reconstruction_never_flips_sign_and_collapse_is_rejected() {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut checked = 0usize;
+    for _ in 0..4000 {
+        let r = next();
+        let ey = (r % 60) as i32 - 30;
+        let ex = ey - 1 - ((r >> 8) % 40) as i32;
+        let y = (1.0 + ((r >> 16) % 1000) as f32 / 1000.0) * 2f32.powi(ey);
+        let x = (1.0 + ((r >> 28) % 1000) as f32 / 1000.0) * 2f32.powi(ex);
+        let x = if (r >> 40) & 1 == 0 { x } else { -x };
+        let inv = 1.0 / (1.0 + ((r >> 44) % 1000) as f32 / 10.0);
+        // eps を fl(y − x) の近傍の f32（±4 ulp）にとり、差分が −eps の近くで打ち消し合う状況を作る。
+        let base = y - x;
+        for k in -4i32..=4 {
+            let eps = f32::from_bits((base.to_bits() as i32 + k) as u32);
+            if !eps.is_finite() || eps < 0.0 {
+                continue;
+            }
+            let c = ((x - y) + eps) * inv;
+            let h = (f64::from(x) - f64::from(y)) + f64::from(eps);
+            assert!(
+                !(c > 0.0 && h < 0.0) && !(c < 0.0 && h > 0.0),
+                "符号反転: x={x:e} y={y:e} eps={eps:e} c={c:e} h={h:e}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 10_000, "検査数 {checked}");
+
+    // 反転に最も近い入力: lane 0 は f32 で `fl(4e-8 − 1) = −0.99999994` となり eps で厳密に 0、
+    // f64 では −1.96e-8。p=2 で拒否される。
+    fn build<'t>(_: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        let q = parts(z, 3, 2);
+        q[0].triplet_margin_loss(
+            &q[1],
+            &q[2],
+            &TripletMarginOptions::default()
+                .p(2.0)
+                .eps(0.999_999_94)
+                .margin(5.0),
+            Reduction::Sum,
+        )
+    }
+    let z0 = [4e-8f32, 0.5, 1.0, 0.0, -3.0, 2.0];
+    assert_eq!((z0[0] - z0[2]) + 0.999_999_94f32, 0.0);
+    assert!((f64::from(z0[0]) - f64::from(z0[2])) + f64::from(0.999_999_94f32) < 0.0);
+    assert!(
+        try_hessian("triplet p=2 collapse", build, &z0).is_none(),
+        "f32 で 0 に潰れるレーンは拒否される"
+    );
+}

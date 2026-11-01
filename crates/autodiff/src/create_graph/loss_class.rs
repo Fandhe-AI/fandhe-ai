@@ -1488,13 +1488,24 @@ fn pair_info(
 
 /// Triplet の 1 ペア・1 行について、二階の展開に使う量（`pair_grad` の構造に対応）。
 /// `u = v·inv`、`N = ‖u‖_p`、`q = |u|/N`、`e = q^(p−1)`、対角係数 `dg = (p−1)·q^(p−2)`、
-/// `fac = inv/N`、`sg = sign(u)`（構造の V2 定数と同じホストの符号）。
+/// `fac = inv/N`。符号は 3 つに分ける（構造の子テープが f32 で決める符号と、ホストの V2 定数の符号が
+/// 経路ごとに異なるため）:
+/// - `sg`: 勾配 `core_j` の符号。p=2 の構造 `u/norm'` は f32 の `u` の符号、一般の p は V2 定数
+///   `sign_c`（ホスト）。
+/// - `sa`: 入力レーン i へ逆伝播するときの符号。p=2 は f32 の `u` の符号（`u/norm'` の `u`）、一般の p は
+///   `Abs` の VJP が f32 の `u` から決める符号（`sign(0) = 0`）。
+/// - `dsg`: 対角の δ 項に掛かる符号（p=2 は `∂(u_j/N)/∂u_j = 1/N` で符号なしの 1、一般の p は
+///   `sg_j·sa_j`）。
+///
+/// 参照（f64）は 3 つともホストの差分の符号から作る（真の関数の微分）。
 struct PairRow {
     fac: f64,
     pm1: f64,
     dg: Vec<f64>,
     e: Vec<f64>,
     sg: Vec<f64>,
+    sa: Vec<f64>,
+    dsg: Vec<f64>,
 }
 
 /// 1 ペア・1 行の f64 の参照値と、構造が f32 で計算する値（差分の再構成 `rec`・`v·(1/mx)`・`|u|^p` の
@@ -1533,6 +1544,8 @@ fn triplet_pair_row(
         dg: q.iter().map(|&x| (p - 1.0) * x.powf(p - 2.0)).collect(),
         e: q.iter().map(|&x| x.powf(p - 1.0)).collect(),
         sg: sg.clone(),
+        sa: sg.clone(),
+        dsg: vec![1.0; h.len()],
     };
     // 構造の f32 の再現（`pair_grad`: `u = v·const(1/mx)`、p=2 は `u/sqrt(Σu²)`、一般の p は
     // `(|u|/ssum^(1/p))^(p−1)`）。
@@ -1558,12 +1571,22 @@ fn triplet_pair_row(
                 .collect(),
         )
     };
+    // 構造が f32 の `u` から決める符号（離散量もホストの値を共有せず、構造の実際の経路から取る）。
+    let s32: Vec<f64> = u32v.iter().map(|&x| sign0(f64::from(x))).collect();
+    let (sg_s, dsg_s) = if p == 2.0 {
+        (s32.clone(), vec![1.0; h.len()])
+    } else {
+        let d: Vec<f64> = sg.iter().zip(&s32).map(|(a, b)| a * b).collect();
+        (sg.clone(), d)
+    };
     let structural = PairRow {
         fac: inv / f64::from(norm32),
         pm1: f64::from(p32) - 1.0,
         dg: dg32,
         e: e32,
-        sg,
+        sg: sg_s,
+        sa: s32,
+        dsg: dsg_s,
     };
     let flag = deviates(norm, f64::from(norm32), norm, coeff)
         || (0..h.len()).any(|k| {
@@ -1575,6 +1598,7 @@ fn triplet_pair_row(
                     reference.dg[k].abs(),
                     coeff,
                 )
+                || structural.sa[k] != reference.sa[k]
         });
     Some((reference, structural, flag))
 }
@@ -1662,11 +1686,12 @@ fn triplet_cancel_check(
                 let delta = if i == j { 1.0 } else { 0.0 };
                 let (mut v, mut v_str, mut m) = (0f64, 0f64, 0f64);
                 for (r, st, w) in &ts {
-                    let off = r.pm1 * r.sg[i] * r.sg[j] * r.e[i] * r.e[j];
-                    v += w * r.fac * (delta * r.dg[j] - off);
+                    // seed は出力レーン j（`core_j`）、cotangent は入力レーン i へ流れる。
+                    let off = r.pm1 * r.sa[i] * r.sg[j] * r.e[i] * r.e[j];
+                    v += w * r.fac * (delta * r.dsg[j] * r.dg[j] - off);
                     m += w.abs() * r.fac * (delta * r.dg[j].abs() + off.abs());
-                    let off_s = st.pm1 * st.sg[i] * st.sg[j] * st.e[i] * st.e[j];
-                    v_str += w * st.fac * (delta * st.dg[j] - off_s);
+                    let off_s = st.pm1 * st.sa[i] * st.sg[j] * st.e[i] * st.e[j];
+                    v_str += w * st.fac * (delta * st.dsg[j] * st.dg[j] - off_s);
                 }
                 struct_check(
                     v,
