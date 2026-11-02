@@ -914,7 +914,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `var`・`std`・`norm_l1`・
-    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。
+    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。 線形代数の `cholesky`・`pinv`・`lstsq`（`pinv`・`lstsq` は打ち切りなし `rank == min(m,n)` の入力に限る）は §43・§65（#3805）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1343,6 +1343,33 @@ impl Tape {
     /// # Ok(())
     /// # }
     /// ```
+    /// 線形代数の `cholesky`・`pinv`・`lstsq`（#3805）も二階へ進める。`pinv`・`lstsq` は打ち切りなし
+    /// （`rank == min(m,n)`）で `rcond` の閾値付近でない入力に限り、打ち切りあり・rank 落ちは
+    /// `Err(AutodiffError::Backward(_))` で拒否される（`child` は空のまま）。次は 1×1 の `A = [[4]]` の例で、
+    /// `cholesky`（`L = √A`）は 1 階 `1/(2√A) = 0.25`・2 階 `-1/(4A^{3/2}) = -1/32`、
+    /// `pinv`（`P = 1/A`）は 1 階 `-1/A² = -1/16`・2 階 `2/A³ = 1/32`。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// for (use_cholesky, first, second) in [(true, 0.25_f32, -1.0_f32 / 32.0), (false, -1.0 / 16.0, 1.0 / 32.0)] {
+    ///     let t = tape();
+    ///     let child = tape();
+    ///     let x = t.var(&Tensor::new(vec![4.0_f32], &[1, 1])?);
+    ///     let y = if use_cholesky { x.cholesky()? } else { x.pinv(None)? };
+    ///     let loss = y.sum(None)?;
+    ///     let cg = t.backward_create_graph(&loss, &child)?;
+    ///     let g = cg.grad(&x)?.unwrap();
+    ///     assert!((g.to_tensor().as_slice().unwrap()[0] - first).abs() < 1e-6);
+    ///     let grads2 = child.backward(&g.sum(None)?)?;
+    ///     let xc = cg.child_var(&x)?.unwrap();
+    ///     let h = grads2.get(&xc)?.unwrap().as_slice().unwrap()[0];
+    ///     assert!((h - second).abs() < 1e-5);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn backward_create_graph<'c>(
         &self,
         loss: &Var<'_>,
@@ -1447,7 +1474,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。 線形代数の `cholesky`・`pinv`・`lstsq`（`pinv`・`lstsq` は打ち切りなし `rank == min(m,n)` の入力に限る）は §43・§65（#3805）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1554,7 +1581,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。 線形代数の `cholesky`・`pinv`・`lstsq`（`pinv`・`lstsq` は打ち切りなし `rank == min(m,n)` の入力に限る）は §43・§65（#3805）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1618,7 +1645,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。 線形代数の `cholesky`・`pinv`・`lstsq`（`pinv`・`lstsq` は打ち切りなし `rank == min(m,n)` の入力に限る）は §43・§65（#3805）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1720,7 +1747,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。 線形代数の `cholesky`・`pinv`・`lstsq`（`pinv`・`lstsq` は打ち切りなし `rank == min(m,n)` の入力に限る）は §43・§65（#3805）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1805,7 +1832,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）、正規化・再パラメータの `local_response_norm`・`weight_norm`・`spectral_norm` は §36・§57（#3794）で対象になった。 RNN セルの `rnn_forward_seq`・`gru_forward_seq`（`RnnCell`・`GruCell`）は §37・§58（#3795）で対象になった。 LSTM の `lstm_forward_seq`（`LstmCell`・`LstmHidden`）は §37・§61（#3796）で対象になった。 3D 畳み込みの `conv3d`・`conv_transpose3d` は §38・§59（#3797）で対象になった。 索引付き更新の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）は §41・§62（#3802）で対象になった。 短時間フーリエ変換の `stft`・`istft` は §42・§63（#3804）で対象になった。 線形代数の `cholesky`・`pinv`・`lstsq`（`pinv`・`lstsq` は打ち切りなし `rank == min(m,n)` の入力に限る）は §43・§65（#3805）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```

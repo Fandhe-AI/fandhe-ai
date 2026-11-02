@@ -1742,3 +1742,70 @@ fn istft_create_graph_via_facade() {
         .collect();
     check_create_graph_family("istft", &x0, &[5, 5, 2], istft_loss, false, 0.25);
 }
+
+// --- 線形代数 Cholesky・Pinv・Lstsq（イシュー #3805・決定記録 §43・§65） --------------------------
+//
+// `cholesky` は `A = (X+Xᵀ)/2 + cI` で `X` を微分する葉にする（VJP が `dA` を対称化し forward は下三角しか
+// 読まないため）。`pinv`・`lstsq` は打ち切りなし（条件の良い縦長）の入力だけ受理される。
+
+fn spd_from<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let half = tape.var_no_grad(&t(vec![0.5; 9], &[3, 3]));
+    let mut eye = vec![0.0f32; 9];
+    for i in 0..3 {
+        eye[i * 3 + i] = 4.0;
+    }
+    let eye = tape.var_no_grad(&t(eye, &[3, 3]));
+    x.add(&x.transpose(0, 1).unwrap())
+        .unwrap()
+        .mul(&half)
+        .unwrap()
+        .add(&eye)
+        .unwrap()
+}
+
+fn cholesky_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &spd_from(tape, x).cholesky().unwrap())
+}
+
+#[test]
+fn cholesky_create_graph_via_facade() {
+    let x0 = [0.3, -0.5, 0.2, 0.1, 0.4, -0.2, 0.6, 0.0, -0.3];
+    // 損失が `L` について非線形（二次形式）なので `cg.grad` は REQ-2 で突合する（`grad_exact = false`）。
+    check_create_graph_family("cholesky", &x0, &[3, 3], cholesky_loss, false, 0.05);
+}
+
+fn pinv_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.pinv(None).unwrap())
+}
+
+#[test]
+fn pinv_create_graph_via_facade() {
+    // 条件の良い 3x2（打ち切りなし）。
+    let x0 = [2.0, 0.3, -0.4, 1.5, 0.2, -0.6];
+    check_create_graph_family("pinv", &x0, &[3, 2], pinv_loss, false, 0.01);
+}
+
+fn lstsq_loss<'a>(tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let a = z.narrow(0, 0, 6).unwrap().reshape(&[3, 2]).unwrap();
+    let b = z.narrow(0, 6, 3).unwrap().reshape(&[3, 1]).unwrap();
+    quad_loss(tape, &a.lstsq(&b, None).unwrap())
+}
+
+#[test]
+fn lstsq_create_graph_via_facade() {
+    // 前半が A（3x2）、後半が B（3x1）。A と B の混合二階も通る。
+    let z = [2.0, 0.3, -0.4, 1.5, 0.2, -0.6, 0.7, -0.2, 0.5];
+    check_create_graph_family("lstsq", &z, &[9], lstsq_loss, false, 0.01);
+}
+
+/// 打ち切りありの `pinv`（`A = diag(2, 1)`・`rcond = 0.75`）は型付きエラーで拒否され、`child` は空のまま。
+#[test]
+fn pinv_truncated_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![2.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let loss = x.pinv(Some(0.75)).unwrap().sum(None).unwrap();
+    let r = tape.backward_create_graph(&loss, &child);
+    assert!(matches!(r, Err(AutodiffError::Backward(_))));
+    assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
+}

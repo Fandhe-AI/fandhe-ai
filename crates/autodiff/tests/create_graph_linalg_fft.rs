@@ -10,7 +10,7 @@
 //! - 閉包性: 子テープ上の勾配を孫テープへ再生（`child.backward_create_graph`）しても二階の値が一致する。
 //! - 総括的な適用判定（決定記録 §30）: 拒否域の入力は `Err(Backward)` かつ `child.is_empty()`、
 //!   拒否のあと同じ `child` で再試行できる。ほどほどの大きさの入力は受理され全段が有限で一致する。
-//! - fail-closed に固定した 13 件（`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・
+//! - fail-closed に固定した 10 件（`MatrixNorm`・
 //!   `QrQ`／`QrR`・`SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors`・`SlogdetSign`・`MatrixRank`）が
 //!   型付きエラーで拒否されること。`requires_grad == false` の部分木にある場合は拒否されない。
 
@@ -18,7 +18,7 @@
 
 mod common;
 
-use fandhe_ai_autodiff::{AutodiffError, Tape, Var};
+use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Tape, Var};
 use fandhe_ai_tensor_core::{FftNorm, MatrixNormOrd, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -624,7 +624,7 @@ fn moderate_scale_inputs_are_accepted_and_finite() {
     }
 }
 
-// --- 4. fail-closed に固定した 13 件 --------------------------------------------------------
+// --- 4. fail-closed に固定した 10 件 --------------------------------------------------------
 
 type Case = (
     &'static str,
@@ -639,33 +639,6 @@ fn spd3() -> Vec<f32> {
 fn fail_closed_cases() -> Vec<(Case, Vec<f32>)> {
     let sym3 = spd3();
     vec![
-        (
-            (
-                "cholesky",
-                vec![3, 3],
-                Box::new(|_t, x| x.cholesky()?.sum(None)),
-            ),
-            sym3.clone(),
-        ),
-        (
-            (
-                "pinv",
-                vec![3, 2],
-                Box::new(|_t, x| x.pinv(None)?.sum(None)),
-            ),
-            x_data(&[3, 2]),
-        ),
-        (
-            (
-                "lstsq",
-                vec![3, 2],
-                Box::new(|tape, x| {
-                    let b = tape.var_no_grad(&t(vec![1.0, 2.0, 3.0], &[3, 1]));
-                    x.lstsq(&b, None)?.sum(None)
-                }),
-            ),
-            x_data(&[3, 2]),
-        ),
         (
             (
                 "matrix_norm",
@@ -738,8 +711,8 @@ fn fail_closed_ops_are_rejected_with_typed_error_and_leave_child_empty() {
     let cases = fail_closed_cases();
     assert_eq!(
         cases.len(),
-        13,
-        "fail-closed 固定は 13 件（Stft／Istft は #3804 で対象化）"
+        10,
+        "fail-closed 固定は 10 件（Stft／Istft は #3804、Cholesky／Pinv／Lstsq は #3805 で対象化）"
     );
     for ((name, shape, build), x0) in cases {
         let tape = Tape::new_with_ops(common::naive_ops());
@@ -755,14 +728,48 @@ fn fail_closed_ops_are_rejected_with_typed_error_and_leave_child_empty() {
     }
 }
 
+/// 恒久的に create_graph 対象外の `Op::Custom` を使う恒等関数（untracked 部分木の見本）。
+struct IdentityCustomFn;
+
+impl CustomFunction for IdentityCustomFn {
+    fn name(&self) -> &str {
+        "identity_custom_fn"
+    }
+
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].contiguous())
+    }
+
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        if !requires_grad[0] {
+            return Ok(vec![None]);
+        }
+        Ok(vec![Some(upstream.contiguous())])
+    }
+}
+
 #[test]
 fn fail_closed_op_in_untracked_subtree_is_treated_as_constant() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
+    // 恒久的に fail-closed な `Op::Custom`（Cholesky・Pinv・Lstsq は #3805 で対象化済み。
+    // `Qr*`・`Svd*` は #3807・#3808 の対象のため見本にしない）。
     let l = tape
-        .var_no_grad(&t(spd3(), &[3, 3]))
-        .cholesky()
-        .expect("cholesky");
+        .custom(
+            std::sync::Arc::new(IdentityCustomFn),
+            &[tape.var_no_grad(&t(spd3(), &[3, 3]))],
+        )
+        .expect("Tape::custom 登録成功");
     let x = tape.var(&t(x_data(&[3, 3]), &[3, 3]));
     let loss = x.mul(&l).expect("mul").sum(None).expect("sum");
     let cg = tape

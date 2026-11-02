@@ -1994,7 +1994,7 @@ pub(crate) fn resolve_rcond(rcond: Option<f32>, m: usize, n: usize) -> Result<f6
 /// 降順ソート済み特異値列 `s` のうち `rcond · s[0]` を上回る個数
 /// （= 打ち切り後の有効ランク）。`s` が空、または `s[0] <= 0.0` の場合
 /// は `0`。
-fn truncated_svd_rank(s: &[f64], rcond: f64) -> usize {
+pub(crate) fn truncated_svd_rank(s: &[f64], rcond: f64) -> usize {
     let smax = s.first().copied().unwrap_or(0.0);
     if smax <= 0.0 {
         return 0;
@@ -2033,6 +2033,20 @@ fn pinv_mat_f64(a: &Tensor<f32>, rcond: f64) -> Result<Mat, AutodiffError> {
         }
     }
     Ok(out)
+}
+
+/// `create_graph` の総括的な適用判定（`create_graph/linalg_cholesky_pinv.rs`。イシュー #3805）専用の
+/// f64 参照: `A` の降順特異値と、`rcond` で打ち切った擬似逆行列 `P`（行優先 `[n,m]`）を、1 階 VJP
+/// （[`pinv_vjp`]・[`lstsq_vjp`]）と同じ [`svd`]／[`pinv_mat_f64`] から返す。`f32` へ downcast
+/// しない読み取り専用の補助で、既存関数の挙動と数値は変えない。
+pub(crate) fn singular_values_and_pinv_f64(
+    a: &Tensor<f32>,
+    rcond: f64,
+) -> Result<(Vec<f64>, Vec<f64>), AutodiffError> {
+    let (_, s, _) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let p = pinv_mat_f64(a, rcond)?;
+    Ok((s64, p.data))
 }
 
 /// Moore–Penrose 擬似逆行列（`A: [m,n]` → `[n,m]`）。イシュー #2150。
