@@ -133,6 +133,14 @@ mod tests {
         // rcond = 0・特異値 0 を持つ入力: rank は 1 で一定。
         let rank1 = mat(vec![1.0], &[]);
         validate_matrix_rank(&mat(vec![1.0, 0.0, 0.0, 0.0], &[2, 2]), &rank1, 0.0).unwrap();
+        // 境界値: -0.0 と f32::MAX は隣接値が範囲外にならず受理される（rank は安定）。
+        validate_matrix_rank(&mat(vec![1.0, 0.0, 0.0, 0.0], &[2, 2]), &rank1, -0.0).unwrap();
+        validate_matrix_rank(
+            &mat(vec![1.0, 0.0, 0.0, 0.0], &[2, 2]),
+            &mat(vec![0.0], &[]),
+            f32::MAX,
+        )
+        .unwrap();
     }
 
     #[test]
