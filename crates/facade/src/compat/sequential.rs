@@ -496,6 +496,12 @@ pub(super) enum LayerSpec {
         size: Vec<usize>,
         mode: InterpolateMode,
     },
+    /// イシュー #3814（`docs/autodiff-spatial-layers-decision.md` §9・§10）。
+    /// 倍率指定の Upsample。kind は `upsample_scale_factor`。f64 を持つため `Eq` は付かない。
+    UpsampleScaleFactor {
+        scale_factor: Vec<f64>,
+        mode: InterpolateMode,
+    },
     ZeroPad2d {
         padding: [usize; 4],
     },
@@ -2503,7 +2509,8 @@ impl Sequential {
 
     /// Upsample 層を追加する（`nn::Upsample::with_size`。イシュー #2522・
     /// `docs/autodiff-spatial-layers-decision.md` §6）。出力の空間サイズ `size`
-    /// を明示指定する形のみ公開する（`scale_factor` 指定は未公開。決定記録 §6 参照）。
+    /// を明示指定する形。倍率指定は [`Sequential::add_upsample_scale_factor`]
+    /// （イシュー #3814）を使う。
     /// `size` が空なら構築時に `AutodiffError::InvalidArgument`。`mode` と空間軸数の
     /// 整合は forward 時に検査する遅延検査（[`Sequential::add_flatten`] と同型）。
     /// 学習可能パラメータを持たない無状態層のため学習経路・常駐経路をそのまま通過し、
@@ -2532,6 +2539,51 @@ impl Sequential {
         let layer = Upsample::with_size(size.clone(), mode)?;
         self.inner.push(Box::new(layer));
         self.specs.push(LayerSpec::Upsample { size, mode });
+        Ok(self)
+    }
+
+    /// 倍率指定の Upsample 層を追加する（`nn::Upsample::with_scale_factor`。
+    /// イシュー #3814・`docs/autodiff-spatial-layers-decision.md` §9・§10）。
+    /// 既存の [`Sequential::add_upsample`]（出力サイズ指定）は変えず、別名メソッドで足す（案 A）。
+    ///
+    /// - 丸め契約: 出力サイズは各空間軸で `floor(入力サイズ as f64 * s)`（PyTorch と同じ）。
+    ///   f64 の表現誤差は補正しない。
+    /// - 座標系: 導出したサイズを渡す形（`recompute_scale_factor=True` 相当）で、座標の比は
+    ///   `in/out`。`in*s` が整数でないときだけ PyTorch 既定（`None`）と差が出うる。
+    /// - エラー: `scale_factor` が空・0 以下・`-0.0`・非有限なら構築時に
+    ///   `AutodiffError::InvalidArgument`（このとき `self` は消費される）。出力が 0 になる場合や
+    ///   rank・空間軸数の不整合は forward 時の `Err`（遅延検査）。
+    /// - 保存: `save_model`／`load_model` は kind `upsample_scale_factor` に対応する。
+    ///   ONNX export は `UnsupportedLayer`。`UpsampleSize` 型は公開しない。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::{InterpolateMode, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let x = Tensor::new(vec![1.0_f32; 9], &[1, 1, 3, 3])?;
+    /// let by_scale = Sequential::new()
+    ///     .add_upsample_scale_factor(vec![2.0, 2.0], InterpolateMode::Nearest)?;
+    /// let by_size = Sequential::new().add_upsample(vec![6, 6], InterpolateMode::Nearest)?;
+    /// let a = by_scale.predict(&x)?;
+    /// assert_eq!(a.shape(), &[1, 1, 6, 6]);
+    /// assert_eq!(a.host_slice().into_owned(), by_size.predict(&x)?.host_slice().into_owned());
+    /// let b = Sequential::new()
+    ///     .add_upsample_scale_factor(vec![1.5, 1.5], InterpolateMode::Nearest)?
+    ///     .predict(&x)?;
+    /// assert_eq!(b.shape(), &[1, 1, 4, 4]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_upsample_scale_factor(
+        mut self,
+        scale_factor: Vec<f64>,
+        mode: InterpolateMode,
+    ) -> Result<Self, AutodiffError> {
+        let layer = Upsample::with_scale_factor(scale_factor.clone(), mode)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::UpsampleScaleFactor { scale_factor, mode });
         Ok(self)
     }
 
