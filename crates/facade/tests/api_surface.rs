@@ -14326,6 +14326,7 @@ const SPATIAL_LAYERS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 mod __fandhe_spatial_hold_probe {\n\
 \x20\x20\x20\x20pub struct ConvTranspose1d;\n\
 \x20\x20\x20\x20pub struct Upsample;\n\
+\x20\x20\x20\x20pub struct UpsampleSize;\n\
 \x20\x20\x20\x20pub struct ZeroPad2d;\n\
 \x20\x20\x20\x20pub struct Identity;\n\
 \x20\x20\x20\x20pub struct Unflatten;\n\
@@ -14342,6 +14343,7 @@ use __fandhe_spatial_hold_probe::*;\n\
 fn __probe(\n\
 \x20\x20\x20\x20_: ConvTranspose1d,\n\
 \x20\x20\x20\x20_: Upsample,\n\
+\x20\x20\x20\x20_: UpsampleSize,\n\
 \x20\x20\x20\x20_: ZeroPad2d,\n\
 \x20\x20\x20\x20_: Identity,\n\
 \x20\x20\x20\x20_: Unflatten,\n\
@@ -14515,7 +14517,10 @@ const ADD_CONV_TRANSPOSE1D_PARAMS: &str = "mut self, in_channels: usize, out_cha
 const ADD_UNFLATTEN_PARAMS: &str =
     "mut self, dim: usize, unflattened_size: Vec<usize>, ) -> Result<Self, AutodiffError>";
 
-/// `compat::Sequential` の 2 add_* が承認シグネチャで 1 件ずつ存在する。
+const ADD_UPSAMPLE_SCALE_FACTOR_PARAMS: &str =
+    "mut self, scale_factor: Vec<f64>, mode: InterpolateMode, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential` の 3 add_*（`add_upsample_scale_factor` はイシュー #3814）が承認シグネチャで 1 件ずつ存在する。
 #[test]
 fn compat_sequential_spatial_add_methods_have_approved_signatures() {
     let path = facade_crate_root().join("src/compat/sequential.rs");
@@ -14527,6 +14532,15 @@ fn compat_sequential_spatial_add_methods_have_approved_signatures() {
         1
     );
     assert_eq!(count_fn_declarations_by_name(&tokens, "add_unflatten"), 1);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_upsample_scale_factor"),
+        1
+    );
+    assert!(sequential_spatial_add_signature_ok(
+        &cleaned,
+        "add_upsample_scale_factor",
+        ADD_UPSAMPLE_SCALE_FACTOR_PARAMS
+    ));
     assert!(sequential_spatial_add_signature_ok(
         &cleaned,
         "add_conv_transpose1d",
@@ -14559,12 +14573,42 @@ fn compat_sequential_spatial_add_methods_have_approved_signatures_detects_offens
             "{bad}"
         );
     }
+    // イシュー #3814: add_upsample_scale_factor の承認形とすり替え例。
+    let ok = "pub fn add_upsample_scale_factor(mut self, scale_factor: Vec<f64>, mode: InterpolateMode,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "add_upsample_scale_factor",
+        ADD_UPSAMPLE_SCALE_FACTOR_PARAMS
+    ));
+    for bad in [
+        "pub fn add_upsample_scale_factor(mut self, scale_factor: Vec<f32>, mode: InterpolateMode,) -> Result<Self, AutodiffError> {",
+        "pub fn add_upsample_scale_factor(mut self, scale_factor: &[f64], mode: InterpolateMode,) -> Result<Self, AutodiffError> {",
+        "pub fn add_upsample_scale_factor(mut self, mode: InterpolateMode, scale_factor: Vec<f64>,) -> Result<Self, AutodiffError> {",
+        "pub fn add_upsample_scale_factor(mut self, scale_factor: Vec<f64>, mode: InterpolateMode,) -> Self {",
+        "pub fn add_upsample_scale_factor(&mut self, scale_factor: Vec<f64>, mode: InterpolateMode,) -> Result<Self, AutodiffError> {",
+        // 名前の前方一致による取り違え（add_upsample 側の宣言は別名の判定に通らない）。
+        "pub fn add_upsample(mut self, size: Vec<usize>, mode: InterpolateMode,) -> Result<Self, AutodiffError> {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(
+                bad,
+                "add_upsample_scale_factor",
+                ADD_UPSAMPLE_SCALE_FACTOR_PARAMS
+            ),
+            "{bad}"
+        );
+    }
 }
 
-/// 承認済みの 3 メソッド名（イシュー #2522・ルート #2499 の 2026-10-04 一括承認。
-/// `docs/autodiff-spatial-layers-decision.md` §6）。
-const SPATIAL_LAYER_APPROVED_ADD_METHODS: [&str; 3] =
-    ["add_upsample", "add_zero_pad2d", "add_identity"];
+/// 承認済みの 4 メソッド名（イシュー #2522・ルート #2499 の 2026-10-04 一括承認の 3 件と、
+/// イシュー #3814 の `add_upsample_scale_factor`〈#3768 回答の案 A〉。
+/// `docs/autodiff-spatial-layers-decision.md` §6・§9）。
+const SPATIAL_LAYER_APPROVED_ADD_METHODS: [&str; 4] = [
+    "add_upsample",
+    "add_zero_pad2d",
+    "add_identity",
+    "add_upsample_scale_factor",
+];
 
 /// `content` 内の `pub fn {name}` 宣言の件数（先頭空白・`pub fn name(` 形の行のみ数える）。
 fn count_pub_fn_declarations(content: &str, name: &str) -> usize {
@@ -14581,7 +14625,7 @@ fn count_pub_fn_declarations(content: &str, name: &str) -> usize {
 #[test]
 fn compat_sequential_exposes_spatial_layer_add_methods_issue_2522() {
     let compat_dir = facade_crate_root().join("src/compat");
-    let mut counts = [0usize; 3];
+    let mut counts = [0usize; 4];
     visit_rs_files(&compat_dir, &mut |_path, content| {
         for (i, name) in SPATIAL_LAYER_APPROVED_ADD_METHODS.iter().enumerate() {
             counts[i] += count_pub_fn_declarations(content, name);
@@ -14589,9 +14633,9 @@ fn compat_sequential_exposes_spatial_layer_add_methods_issue_2522() {
     });
     assert_eq!(
         counts,
-        [1, 1, 1],
-        "src/compat 配下の add_upsample／add_zero_pad2d／add_identity の pub fn 宣言数が\
-         各 1 件でない（counts={counts:?}）"
+        [1, 1, 1, 1],
+        "src/compat 配下の add_upsample／add_zero_pad2d／add_identity／add_upsample_scale_factor の \
+         pub fn 宣言数が各 1 件でない（counts={counts:?}）"
     );
 }
 
@@ -14602,6 +14646,18 @@ fn compat_sequential_exposes_spatial_layer_add_methods_issue_2522_counts_declara
     let one = "    pub fn add_identity(mut self) -> Self {\n        self\n    }\n";
     assert_eq!(count_pub_fn_declarations(one, "add_identity"), 1);
     assert_eq!(count_pub_fn_declarations(one, "add_upsample"), 0);
+    // 名前の前方一致で取り違えない（needle に `(` を含むため）。
+    let sf = "    pub fn add_upsample_scale_factor(\n        mut self,\n";
+    assert_eq!(count_pub_fn_declarations(sf, "add_upsample"), 0);
+    assert_eq!(
+        count_pub_fn_declarations(sf, "add_upsample_scale_factor"),
+        1
+    );
+    let plain = "    pub fn add_upsample(\n        mut self,\n";
+    assert_eq!(
+        count_pub_fn_declarations(plain, "add_upsample_scale_factor"),
+        0
+    );
     let dup = format!("{one}{one}");
     assert_eq!(count_pub_fn_declarations(&dup, "add_identity"), 2);
     assert_eq!(

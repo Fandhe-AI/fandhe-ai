@@ -85,3 +85,21 @@ cargo test -p fandhe-ai --test compat_sequential_spatial_layers_backend_parity -
 - 成果物・全 10 本の集計: `../metal-compat-sequential-rerun-3164/README.md`、ログ `../metal-compat-sequential-rerun-3164/logs/`
 - 注記: GPU カーネル経路かホストフォールバック経路かは本ログから断定できず未確認。
 - tolerance 定数・baseline・判定式・テストコードは不変。
+
+## 倍率指定経路（イシュー #3814）の実機テスト（未実測）
+
+`compat::Sequential::add_upsample_scale_factor` の実機 parity テストを追加した（`#[ignore]`）。Nearest は CPU と bit 一致、Bilinear は REQ-2 統一複合判定（`assert_parity`）。tolerance・baseline は変更しない。
+
+```
+# CUDA（#3860。<cuda-node>）
+cargo test -p fandhe-ai --test compat_sequential_spatial_layers_backend_parity -- --ignored cuda_upsample_scale_factor
+# Metal（#3861。<metal-node>）
+cargo test -p fandhe-ai --test compat_sequential_spatial_layers_backend_parity -- --ignored metal_upsample_scale_factor
+```
+
+| 環境 | テスト | 結果 | 日付 |
+|---|---|---|---|
+| `<cuda-node>` | cuda_upsample_scale_factor_nearest_bit_exact | 未実測（#3860） | 未実測 |
+| `<cuda-node>` | cuda_upsample_scale_factor_bilinear_matches_cpu | 未実測（#3860） | 未実測 |
+| `<metal-node>` | metal_upsample_scale_factor_nearest_bit_exact | 未実測（#3861） | 未実測 |
+| `<metal-node>` | metal_upsample_scale_factor_bilinear_matches_cpu | 未実測（#3861） | 未実測 |
