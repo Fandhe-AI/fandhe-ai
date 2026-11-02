@@ -2678,8 +2678,8 @@ impl Op {
             | Op::Pad { .. }
             | Op::MaskedFill { .. }
             | Op::PadMode { .. }
-            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。分解系・
-            // `MatrixNorm` などは `false` のまま。`Stft`／`Istft` と内部 Op
+            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。分解系は
+            // `false` のまま。`Stft`／`Istft` と内部 Op
             // `StftAdjoint`／`IstftAdjoint` はイシュー #3804（決定記録 §42・§63。随伴 Op の対）。
             | Op::Stft { .. }
             | Op::Istft { .. }
@@ -2693,6 +2693,10 @@ impl Op {
             | Op::Solve { .. }
             | Op::Det { .. }
             | Op::SlogdetLogAbsDet { .. }
+            // SlogdetSign・MatrixRank（イシュー #3806・決定記録 §43・§66。1 階 VJP が恒等ゼロなので
+            // 二階は子テープへゼロ定数を置くだけ。MatrixRank は rank 一定性の判定を入口で行う）。
+            | Op::SlogdetSign { .. }
+            | Op::MatrixRank { .. }
             // Cholesky・Pinv・Lstsq（イシュー #3805・決定記録 §43・§65。V3 + f32 構造。
             // Pinv・Lstsq は打ち切りなしの入力だけを総括判定で受理する）。
             | Op::Cholesky { .. }
@@ -2773,6 +2777,15 @@ impl Op {
                 ord,
                 fandhe_ai_tensor_core::VectorNormOrd::L1 | fandhe_ai_tensor_core::VectorNormOrd::L2
             ),
+            // `MatrixNorm` も payload で判定する（イシュー #3806・決定記録 §43・§66）。`Fro`・`One`・
+            // `Inf` だけ true。`Nuc`・`Spectral` は SVD の多出力に依存するため false のまま、
+            // `#[non_exhaustive]` の未知 `ord` も false。
+            Op::MatrixNorm { ord, .. } => matches!(
+                ord,
+                fandhe_ai_tensor_core::MatrixNormOrd::Fro
+                    | fandhe_ai_tensor_core::MatrixNormOrd::One
+                    | fandhe_ai_tensor_core::MatrixNormOrd::Inf
+            ),
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::CtcLoss { .. }
@@ -2784,12 +2797,10 @@ impl Op {
             | Op::SvdU { .. }
             | Op::SvdS { .. }
             | Op::SvdVh { .. }
-            | Op::MatrixNorm { .. }
-            // イシュー #2150 の 5 演算のうち `SlogdetLogAbsDet` 以外は非対応のまま保持する。
+            // イシュー #2150 の 5 演算のうち `SlogdetLogAbsDet`・`SlogdetSign`・`MatrixRank` 以外は
+            // 非対応のまま保持する（`MatrixNorm` の `Nuc`・`Spectral` は上の payload 判定で false）。
             | Op::EighValues { .. }
             | Op::EighVectors { .. }
-            | Op::SlogdetSign { .. }
-            | Op::MatrixRank { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
             // プラグイン。`docs/autodiff-custom-function-decision.md`）は
@@ -5420,7 +5431,7 @@ mod conv3d_op_tests {
     }
 
     /// イシュー #3789: 選択縮約 4 variant は対象。`OrderSelect`・`MedianAll`・`Quantile`（#3790）も対象。
-    /// 統計縮約の `LogSumExp`・`Nansum`・`Nanmean` はイシュー #3792 で対象。隣接する `MatrixNorm` は fail-closed のまま。
+    /// 統計縮約の `LogSumExp`・`Nansum`・`Nanmean` はイシュー #3792 で対象。隣接見本は非微分の `Op::OneHot`（fail-closed）。
     #[test]
     fn selection_reduce_family_supports_create_graph() {
         let i = NodeId(0);
@@ -5474,13 +5485,7 @@ mod conv3d_op_tests {
             }
             .supports_create_graph()
         );
-        assert!(
-            !Op::MatrixNorm {
-                input: i,
-                ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro
-            }
-            .supports_create_graph()
-        );
+        assert!(!Op::OneHot { input: i }.supports_create_graph());
     }
 
     #[test]
@@ -5550,7 +5555,8 @@ mod conv3d_op_tests {
     }
 
     /// イシュー #3086: FFT 4 件・線形代数 4 件は create_graph 対応（`true`）。隣接する
-    /// `MatrixNorm`・`SlogdetSign`・`MatrixRank` などは `false`（fail-closed。型付きエラーでの拒否は
+    /// `MatrixNorm` の `Nuc`・`Spectral`・`QrQ` などは `false`（fail-closed。`MatrixNorm`（`Fro`・`One`・
+    /// `Inf`）・`SlogdetSign`・`MatrixRank` は #3806 で対応済みのため `linalg_norm_rank_supports_create_graph` が扱う。型付きエラーでの拒否は
     /// `tests/create_graph_linalg_fft.rs` が固定する。`Cholesky`・`Pinv`・`Lstsq` は #3805 で対応済みのため
     /// `linalg_cholesky_pinv_lstsq_supports_create_graph` が扱う。
     /// `Stft`／`Istft` は #3804 で対応済みのため `stft_family_supports_create_graph` が扱う）。
@@ -5593,6 +5599,31 @@ mod conv3d_op_tests {
             assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
         }
         let unsupported = [
+            Op::MatrixNorm {
+                input: a,
+                ord: fandhe_ai_tensor_core::MatrixNormOrd::Nuc,
+            },
+            Op::MatrixNorm {
+                input: a,
+                ord: fandhe_ai_tensor_core::MatrixNormOrd::Spectral,
+            },
+            Op::QrQ {
+                input: a,
+                r: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
+            },
+        ];
+        for op in &unsupported {
+            assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
+        }
+    }
+
+    /// イシュー #3806: `SlogdetSign`・`MatrixRank`・`MatrixNorm`（`Fro`・`One`・`Inf`）は
+    /// create_graph 対応（`true`）。`Nuc`・`Spectral` は SVD の多出力に依存するため `false`。
+    #[test]
+    fn linalg_norm_rank_supports_create_graph() {
+        use fandhe_ai_tensor_core::MatrixNormOrd;
+        let a = NodeId(0);
+        let supported = [
             Op::SlogdetSign { input: a },
             Op::MatrixRank {
                 input: a,
@@ -5600,10 +5631,22 @@ mod conv3d_op_tests {
             },
             Op::MatrixNorm {
                 input: a,
-                ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro,
+                ord: MatrixNormOrd::Fro,
+            },
+            Op::MatrixNorm {
+                input: a,
+                ord: MatrixNormOrd::One,
+            },
+            Op::MatrixNorm {
+                input: a,
+                ord: MatrixNormOrd::Inf,
             },
         ];
-        for op in &unsupported {
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
+        }
+        for ord in [MatrixNormOrd::Nuc, MatrixNormOrd::Spectral] {
+            let op = Op::MatrixNorm { input: a, ord };
             assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
         }
     }
@@ -6352,7 +6395,7 @@ mod loss_create_graph_support_tests {
         assert!(!closed.supports_create_graph());
     }
     /// 選択縮約 3 Op（イシュー #3790・決定記録 §34）が `supports_create_graph() == true`、
-    /// 統計縮約 3 Op（イシュー #3792）も `true`、隣接する `MatrixNorm` が `false` のままであること。
+    /// 統計縮約 3 Op（イシュー #3792）も `true`、隣接見本の `Op::Custom` が `false` のままであること。
     #[test]
     fn order_select_family_supports_create_graph() {
         let supported = [
@@ -6372,9 +6415,9 @@ mod loss_create_graph_support_tests {
         for op in &supported {
             assert!(op.supports_create_graph(), "{op:?}");
         }
-        let closed = Op::MatrixNorm {
-            input: NodeId(0),
-            ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro,
+        let closed = Op::Custom {
+            inputs: vec![],
+            func: crate::custom::CustomFn(Arc::new(NoopFn)),
         };
         assert!(!closed.supports_create_graph(), "{closed:?}");
     }

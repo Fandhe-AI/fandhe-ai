@@ -60,7 +60,7 @@
 //! GPU: `BackendOps::var`／`vector_norm`／`vector_norm_p` を実装するのは `backend-cpu` だけで、
 //! `Std` は常にホスト実装（経路区分 `H`）。実機 parity は未実測（Phase 10 の #3856・#3858）。
 
-use fandhe_ai_tensor_core::{BackendOps, Tensor, VectorNormOrd, reduce_out_shape};
+use fandhe_ai_tensor_core::{BackendOps, MatrixNormOrd, Tensor, VectorNormOrd, reduce_out_shape};
 
 use super::select_reduce::bcast_upstream;
 use super::{child_value, push_v3};
@@ -141,6 +141,13 @@ pub(super) fn validate_stat_varnorm(
             _ => return Err(invalid(format!("未知の VectorNormOrd {ord:?}"))),
         },
         Op::PNorm { input, dim, .. } => (*input, *dim, Kind::PNorm),
+        // MatrixNorm（イシュー #3806）: Fro・One・Inf だけ受理。±inf の拒否は L2 と同じ。
+        Op::MatrixNorm { input, ord } => match ord {
+            MatrixNormOrd::Fro | MatrixNormOrd::One | MatrixNormOrd::Inf => {
+                (*input, None, Kind::L2)
+            }
+            _ => return Err(invalid(format!("MatrixNorm の ord {ord:?} は対象外"))),
+        },
         _ => return Ok(()),
     };
     let x = materialize_fallible(parent_nodes, parent_ops, input)?;
@@ -572,11 +579,20 @@ fn check_pnorm(c: &PNormCheck<'_>) -> Result<(), AutodiffError> {
 /// 統計縮約ノードの方式（`build_cgrads` の腕が組み立てる）。
 #[derive(Clone, Copy)]
 pub(super) enum StatKind {
-    Var { correction: usize },
-    Std { correction: usize },
+    Var {
+        correction: usize,
+    },
+    Std {
+        correction: usize,
+    },
     L1,
     L2,
-    PNorm { p: f32 },
+    /// `MatrixNorm(Fro)`（イシュー #3806）。構造は `L2`（全要素 1 レーン）と同一で、値だけ
+    /// 1 階と同じ `eval::linalg::matrix_norm_vjp(Fro)` にする。
+    MatrixFro,
+    PNorm {
+        p: f32,
+    },
 }
 
 /// 統計縮約ノードの記述。
@@ -698,7 +714,7 @@ pub(super) fn stat_varnorm_cgrad<'c>(
             let host = std_vjp(x_val, dim, correction, &g_val);
             (lay.restore_lanes(&cg2)?, host)
         }
-        StatKind::L2 => {
+        StatKind::L2 | StatKind::MatrixFro => {
             let x2 = lay.to_lane_form(x_m)?;
             let exps = lane_exps(&xl, n);
             let scales: Vec<f32> = exps.iter().map(|&e| pow2(e)).collect();
@@ -718,7 +734,11 @@ pub(super) fn stat_varnorm_cgrad<'c>(
             let nrm = Var::where_cond(&zero_col, &ones_col, &ss)?.sqrt()?;
             let q = x_s.div(&nrm)?;
             let cg2 = Var::where_cond(&zero_col, &zeros_ln, &q.mul(&g2)?)?;
-            let host = vector_norm_vjp(x_val, VectorNormOrd::L2, dim, &g_val);
+            let host = if matches!(kind, StatKind::MatrixFro) {
+                crate::eval::linalg::matrix_norm_vjp(x_val, MatrixNormOrd::Fro, g_data[0])?
+            } else {
+                vector_norm_vjp(x_val, VectorNormOrd::L2, dim, &g_val)
+            };
             (lay.restore_lanes(&cg2)?, host)
         }
         StatKind::PNorm { p } => {
