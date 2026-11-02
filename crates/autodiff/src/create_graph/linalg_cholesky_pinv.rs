@@ -306,6 +306,18 @@ pub(super) fn guard_lstsq(
         ));
     }
     pinv_struct_check(&to_f64(a), &p, &g, m, n)?;
+    // G = gX Bᵀ・gB = Pᵀ gX の追加演算の逆伝播。tanh 飽和などで値が gX=G=gB=0 でも、二階の
+    // cotangent は seed から「Pinv 構造の逆伝播（P・A の dim 倍の 4 乗）→ G から gX へ（B の
+    // m 倍）」「gB から gX へ（P の m 倍）」と流れるため、値に依らない上界で検査する。
+    let dim = m.max(n) as f64;
+    let boundary = (m as f64 * max_abs(&bv))
+        .max(m as f64 * max_abs(&p))
+        .max(1.0);
+    if !second_order_ok(&[dim * max_abs(&p), dim * max_abs(&to_f64(a))], 4, boundary) {
+        return Err(reject(
+            "Lstsq: G・gB から B・gX への逆伝播の cotangent 上界が 2^125 以上",
+        ));
+    }
     let pt = transpose(&p, n, m);
     let gb = mm(&pt, &gx, m, n, k);
     if !all_stage_ok(&gb) {

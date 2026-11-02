@@ -582,6 +582,21 @@ fn lstsq_cancelling_gram_product_rejected_child_empty_and_retry() {
 }
 
 #[test]
+fn lstsq_saturated_tanh_cotangent_overflow_rejected_child_empty_and_retry() {
+    // A = [[1e-5]]・B = [[1e30]]: tanh 飽和で gX=G=gB=0 だが、二階の cotangent
+    // （G から gX へ約 1e40）が f32 で overflow し NaN になるため構造構築前に拒否する。
+    assert_rejected_and_child_reusable(
+        "lstsq saturated tanh",
+        |_t, x| {
+            let (a, b) = split_ab(x, 1, 1, 1)?;
+            a.lstsq(&b, None)?.tanh().sum(None)
+        },
+        &[1e-5, 1e30],
+        &[2],
+    );
+}
+
+#[test]
 fn linalg_cpl_unsafe_inputs_rejected_child_empty_and_retry() {
     // Cholesky の悪条件（対角 1e-20 付近）。
     assert_rejected_and_child_reusable(
