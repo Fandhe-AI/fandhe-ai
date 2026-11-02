@@ -246,6 +246,7 @@
 
 mod attention;
 mod batch_norm;
+mod bilinear;
 mod container;
 mod conv;
 mod dropout;
@@ -292,6 +293,7 @@ pub use attention::{
 pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
 };
+pub use bilinear::{Bilinear, BilinearVars};
 pub use container::{ModuleDict, ModuleList, Sequential, summary};
 pub(crate) use conv::conv_transpose1d_forward;
 pub use conv::{

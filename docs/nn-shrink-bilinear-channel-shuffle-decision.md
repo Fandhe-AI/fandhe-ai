@@ -176,8 +176,8 @@
 
 - 追跡表の **行 # 10**（C2）。イシュー本文は「項目 11」と書くが、§1.0 と同じく 1 ずれている。更新対象は # 10 行である。
 - 流れ: 設計 #3743 → 承認 #3768（論点 3）→ 実装 #3818 → 実機 parity #3860（`<cuda-node>`）・#3861（`<metal-node>`）。保存・export の横断方針は #3750（設計中）。
-- **承認根拠: なし。未承認（#3768 待ち）。**
-- 現状: `crates/` に `nn.Bilinear` 相当は 0 件（`bilinear` を含むのは補間の `InterpolateMode::Bilinear` と `eval.rs` の `bilinear_*` だけ）。棚卸し `docs/compat-unlisted-holds-inventory.md:72` が「未公開・起票する」と分類した。facade に Bilinear 層の否定ガード・保留 doctest ガードは無い。したがって「反転」は正ガードを新しく作ることを指す。
+- **承認根拠: #3768 の所有者の回答コメント 6554564412（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。「推奨どおり一括承認」で、Bilinear は「weight は `[out,in1,in2]`。`Var::bilinear` だけを出す」と明示された。**
+- 設計時点の現状（以下は #3743 時点の記録）: `crates/` に `nn.Bilinear` 相当は 0 件（`bilinear` を含むのは補間の `InterpolateMode::Bilinear` と `eval.rs` の `bilinear_*` だけ）。棚卸し `docs/compat-unlisted-holds-inventory.md:72` が「未公開・起票する」と分類した。facade に Bilinear 層の否定ガード・保留 doctest ガードは無い。したがって「反転」は正ガードを新しく作ることを指す。
 
 | 案 | 内容 | 利点 | 欠点・影響 |
 |---|---|---|---|
@@ -308,7 +308,22 @@
 
 - A03: 形状は tape 操作や確保より前に検査して fail-closed にする（外部由来の重みを `from_parameters` で受ける場合も含む）。A04／A08: 判定の迂回経路を作らない（1 行委譲を正ガードで固定）。REQ-12: 生の `Tape`・内部の層型を公開シグネチャに出さない。秘密情報・ホスト名は書かない。
 - スコープ外: `FunctionalBuilder` のノード（Q3 (b)）、専用 GPU カーネル（案 C）、層型名の facade 公開（#3022）、ONNX export・model_io（#3750）、`Tensor<f32>`／`Tape` 上のメソッド。新しいイシューは起票しない（所有者の承認事項）。
-- #3818 は実機 parity が済むまで `Refs` 運用とする。
+- #3818 は実機 parity が済むまで `Refs` 運用とする。ただし #3711 の所有者の承認コメント 6570118646（2026-11-02、<https://github.com/Fandhe-AI/fandhe-ai/issues/3711#issuecomment-6570118646>）で、実装 PR の `Closes` で閉じてよい（実機 parity は Phase 10 の実測 issue だけが受け持つ）と読み替えられた。
+
+### §2.13 実装記録（イシュー #3818・親 #3813）
+
+- 置き場所: 自由関数 `crates/autodiff/src/bilinear_ops.rs`（検査 → `x1f.matmul(permute(weight)→[in1, out·in2])` → `reshape([N,out,in2])` → `x2f.unsqueeze(1)` と `mul`〈broadcast〉→ `sum(Some(2))` → bias の `add` → `reshape`）。使った Op は `Contiguous`・`Permute`・`Reshape`・rank 2 の `MatMul`・`Mul`・単一軸 `Sum`・`Add` で、`Var::unsqueeze` は `Reshape` を積む。`Var::bilinear` は `crates/autodiff/src/var.rs` の 1 行委譲。層 `nn::{Bilinear, BilinearVars}`（`crates/autodiff/src/nn/bilinear.rs`。autodiff 内部のみで、`Module` は実装しない〈入力が 1 つの trait のため〉）。初期化 `U(-1/√in1, 1/√in1)` は PyTorch のソースの定義に基づく記述で、参照版での実測確認はしていない。
+- 不変条件: 新規 `Op`・`BackendOps`・カーネル・`unsafe`・依存はゼロ。tolerance・baseline・ガードレール閾値は変えていない。`Sequential::add_bilinear`・`FunctionalBuilder` ノード・model_io の kind・ONNX export は作っていない。
+- 検査（tape へノードを積む前に全部行う）: 同一 tape → weight rank 3 → x1・x2 rank 2 以上かつ同 rank → 先頭の次元の完全一致 → `in1`／`in2` の一致 → bias `[out]`。先頭の次元の積と中間 `[N,out,in2]` の確保量は `checked_bytes_for` で検査する。新しい variant は足していない。`N == 0`・`out == 0` は空テンソル、`in1 == 0`／`in2 == 0` は縮約が空で bias だけが出る形として受理し、単体テストで固定した。rank 1 入力は拒否する（PyTorch は受理しうる。差分）。
+- 正ガード（`crates/facade/tests/api_surface.rs` の末尾の #3818 節）: `var_bilinear_ops_method_is_thin_delegation`（自己テスト `_detects_offense` 付き）、`var_bilinear_is_reachable_via_facade_only`、`workspace_declares_bilinear_ops_fn_names_only_in_allowed_locations`（`add_bilinear` 0 件も同じインベントリで固定。無関係な既存宣言 `backend-rocm/src/interpolate_model.rs::bilinear`〈補間のホスト参照モデル〉は期待集合に明示）、`facade_does_not_reexport_or_declare_bilinear_ops`（`_detects_each_category` 付き。`InterpolateMode::Bilinear` を誤検出しないことも確認）、`compat_sequential_has_no_bilinear_add_method`（`_detects_offense` 付き）。反転対象の否定ガード・保留 doctest は元から無かった。保留 doctest ガードは新設していない（Q5 の (a)）。
+- テスト: autodiff 単体（`bilinear_ops::tests`・`nn::bilinear::tests`）、`crates/autodiff/tests/create_graph_bilinear.rs`（二階を有限差分と突合。x1・x2 の交差項が非 0）、facade の `bilinear_ops_facade.rs`・`bilinear_ops_backend_parity.rs`（CPU 対 f64 ホスト参照・NaiveOps は CI、`cuda_*`／`metal_*` は `#[ignore]`）。
+- 逸脱と注記:
+  - create_graph のテストは `create_graph.rs` に足さず別ファイル `create_graph_bilinear.rs` にした（並列 PR との競合回避。§1.13 と同じ）。
+  - backend parity は bit 一致を主張せず `assert_parity`（REQ-2 統一複合判定）で比較する（`matmul` と `sum` を通る合成のため）。
+  - `Var` の doctest は autodiff クレートで動くため `fandhe_ai_autodiff::Tape` を使う。facade だけで通る例は `bilinear_ops_facade.rs` が担う。
+  - `train_gpu_parity.rs` の `CASES` への登録は §1.13 と同じ理由で見送り、Phase 10（#3860・#3861）へ送る。
+  - PyTorch の rank 1 入力の挙動と初期化範囲は参照版のソースで確認できておらず、「未確認」のまま残す。
+- GPU 実機 parity は未実測（`docs/perf/logs/bilinear-ops-3818/README.md`）。
 
 ## §3 C7 ChannelShuffle（イシュー #3746）
 

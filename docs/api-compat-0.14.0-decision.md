@@ -48,7 +48,7 @@
 | 7 | NN | `add_upsample` の `scale_factor` 指定 | `Sequential::add_upsample`（`crates/facade/src/compat/sequential.rs:2435`）・`UpsampleSize` | 別名メソッドなら追加のみ。既存シグネチャ変更なら破壊的。`UpsampleSize` は `#[non_exhaustive]`（`crates/autodiff/src/nn/upsample.rs:21`） |
 | 8 | NN | 独自 `Module` から組み込み層を呼ぶ経路 | `nn::Module` trait（open trait。`crates/facade/src/nn/module.rs:11` のコメントが「sealed にしない」と明記） | 既定実装なしのメソッド追加は破壊的。#3714 で判断 |
 | 9 | NN | C1 Hardshrink／Softshrink | `Var` 演算・`Sequential::add_*` | 追加のみ |
-| 10 | NN | C2 Bilinear | 層型・`Var` 演算・`add_*`（層型名の公開は #3022 の個別承認に従う） | 追加のみ |
+| 10 | NN | C2 Bilinear | `Var` 演算（`add_*` なし。層型は autodiff 内部。層型名の公開は #3022 の個別承認に従う） | 追加のみ |
 | 11 | NN | C3 BatchNorm3d | `Var::batch_norm` の rank 5 対応・`add_batch_norm3d` | 挙動拡張＋追加のみ |
 | 12 | NN | C5 CosineSimilarity | `Var` 演算 | 追加のみ |
 | 13 | NN | C6 PairwiseDistance | `Var` 演算 | 追加のみ |
