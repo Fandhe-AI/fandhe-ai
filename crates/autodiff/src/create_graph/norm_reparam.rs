@@ -18,7 +18,9 @@
 //!   √(|k|·size/|α|)))`。`x_s = x/s`、`d_s = k/s² + (α/size)·Σ_W x_s²`、
 //!   `dx = s^{-2β}·[g·d_s^{-β} − (2αβ/size)·x_s·Σ_{W'} g·x_s·d_s^{-β-1}]`。窓和は `Pad`（値 0）＋
 //!   ずらした `Narrow` の `Add`。前方窓 `W` と反転窓 `W'` は別々に作る（偶数 `size` で非対称）。
-//!   `s^{-2β}` は ±2^100 以下の 2 のべき乗チャンクへ分けて順に `Mul` する（f32 の非正規数を作らない）。
+//!   `s^{-2β}` は ±2^100 以下の 2 のべき乗チャンクへ分けて順に `Mul` する（forward の値に f32 の非正規数を
+//!   作らないため）。二階の逆伝播の cotangent はチャンクの積 `s^{-2β}` そのもの（真の偏微分）になるので、
+//!   それが f32 で表せない列（例 `s = 2^-80`・`β = −1` で `2^-160`）は第 2 軸で拒否する。
 //!   `α = 0` は `dx = g·k^{-β}` に縮退するので別分岐にする。
 //! - `WeightNorm`: `dim` 軸を先頭へ寄せた `[groups, rest]` に正準化し、グループごとに
 //!   `v_s = v/s`、`n_s = ‖v_s‖`、`v̂ = v_s/n_s`、`dg = Σ(g_up⊙v̂)`、
@@ -42,18 +44,25 @@
 //! - **総括判定・第 1 軸（overflow。[`stage`] 系）**: `g` が手に入った時点で構造を積む前に、構造の forward の
 //!   各段と二階の逆伝播（seed の各要素の絶対値 ≤ 1）の「cotangent × 微分係数」の上界を f64 で積み上げ、
 //!   どれか 1 段でも `2^125` 以上か非有限なら拒否する。非有限の上流 `g` も拒否する。
-//! - **総括判定・第 2 軸（相殺・f32 underflow。[`shadow_check`]）**: 3 Op の構造はどれも引き算の形を
-//!   している。構造を積んだ直後に、子テープ上の構造の実値（f32）と 1 階のホスト値（f64 起点）を要素ごとに
-//!   比べ、`(|構造 − ホスト| + coeff·m)` が REQ-2 の許容の半分を超える入力を拒否する（`m` は各項の絶対値の和。
-//!   `loss_class.rs::struct_check` と同じ形。tolerance 定数・閾値は変えない）。中間値の underflow・
-//!   桁落ちはこの差として見える。
+//! - **総括判定・第 2 軸（相殺・f32 の underflow／overflow。本体は [`entry_check`]）**: 構造を積む前に、
+//!   seed が 1 要素（値 1）のときの二階の各要素（LRN は `x`・`up` へ、WeightNorm は `dv` と `dg` の各 seed から
+//!   `v`・`up`・`g` へ、SpectralNorm は `W`・`up` へ）を、構造の演算列を f64 の厳密な定数で評価した参照 `V` と
+//!   各項の絶対値の和 `M`（[`Rf`]）、構造が子テープで実際に行う f32 の演算列（forward の中間値・
+//!   `eval/scalar.rs` の VJP 係数・`cot·係数` の積・チャンクの `Mul` を逆順にたどる cotangent）を f32 で
+//!   再現した `V_str` で求め、`(|V_str − V| + coeff·M)` が絶対 1e-5 未満か相対の半分以内でない要素が 1 つでも
+//!   あれば拒否する（`loss_class.rs::struct_check` と同じ形。tolerance 定数は変えない）。f32 の forward 値・
+//!   VJP 係数が 1 つでも非有限なら（逆伝播は全要素に `cot·係数` を作るので `0·inf = NaN`）拒否する。
+//!   走査量が `2^27` 要素を超える入力は計算量の fail-closed として拒否する。構造を積んだ後の 1 階の値の照合
+//!   （[`shadow_check`]）も残す。
 //! - 拒否は `AutodiffError::Backward`。`backward_create_graph` のロールバックで `child` は空へ戻り、
 //!   安全な入力で再試行できる。
 //!
-//! 保証は判定を通った入力に限り、判定を通った入力では 1 階・`cg.grad`・二階（seed の各要素の絶対値 ≤ 1）・
-//! 孫テープ再生が有限で、`cg.grad` は 1 階と bit 一致する（V3）。`g` を作る上流の Op の逆伝播、絶対値 1 を
-//! 超える seed、三階以上の微分は対象外。
-//!
+//! 保証は判定を通った入力に限る。判定を通った入力では 1 階・`cg.grad`・二階（seed の各要素の絶対値 ≤ 1）・
+//! 孫テープ再生が有限で、`cg.grad` は 1 階と bit 一致する（V3）。二階の各要素（seed が 1 要素のとき）は
+//! 第 2 軸の見積りの範囲で f64 の参照と REQ-2 で一致する（見積りは一次の評価で、厳密な証明ではない）。
+//! 対象外: 1 要素でない seed の縮約での相殺、`g` を作る上流の Op の逆伝播、絶対値 1 を超える seed、
+//! 三階以上の微分、真の値そのものが f32 を超える場合、CPU 以外の演算順・非正規数の扱い（GPU は未実測）。
+
 //! GPU: `BackendOps::{lrn_forward, weight_norm_forward, spectral_norm_forward}` を実装するのは
 //! `backend-cpu` だけで、CUDA／Metal は forward も 1 階もホストへ落ちる経路区分 `H`。GPU カーネルは
 //! 新設しない。実機 parity は未実測（Phase 10 の #3856・#3858）。
@@ -137,7 +146,8 @@ fn struct_check(v: f64, v_str: f64, m: f64, coeff: f64, what: &str) -> Result<()
     )))
 }
 
-/// 子テープ上の構造 `composed` の実値を 1 階のホスト値 `host` と要素ごとに突き合わせる（第 2 軸）。
+/// 子テープ上の構造 `composed` の実値を 1 階のホスト値 `host` と要素ごとに突き合わせる（構造を積んだ後の
+/// 1 階の値の照合。二階の判定の本体は構造を積む前の [`entry_check`]）。
 fn shadow_check(
     child: &Tape,
     composed: &Var<'_>,
@@ -156,54 +166,250 @@ fn shadow_check(
     Ok(())
 }
 
-/// up への二階係数 1 要素の相殺検査（up の現在値に依らない。PR #3950 codex 指摘 P1）。
-/// `exact` は係数の厳密値、`err` は構造の f32 丸め誤差の上界（各項の絶対値の和 × 丸め係数）。
-/// 係数が 2 項の差し引き（`a − b` 型）の場合、up = 0 でも二階の混合項が相殺で消えうるため、
-/// 誤差が REQ-2 の許容の半分（絶対救済 or 相対）に収まらない入力を拒否する（tolerance 定数は不変）。
-fn coef_cancel_check(exact: f64, err: f64, what: &str) -> Result<(), AutodiffError> {
-    if exact.is_nan() || err.is_nan() {
-        return Ok(());
+// ---------------------------------------------------------------------
+// 総括判定・第 2 軸の本体: 二階の各要素の f32 再現（PR #3950 の codex 指摘の類型を 1 つに寄せる）
+// ---------------------------------------------------------------------
+//
+// 3 Op の構造は、二階（子テープの `backward`）で forward の中間値と VJP 係数・cotangent を f32 で
+// 計算する。f32 の中間値の overflow・underflow・相殺・定数の丸めは、どれも「二階の要素が f64 の参照から
+// 外れる」形で現れる（例: LRN の `s^{-2β}` を 2 のべき乗チャンクで戻すとき cotangent の積が 2^-160 で 0 に
+// なる、WeightNorm の `g/n_s` が 0 になる、`1 − v̂²` や `I − ŴP` が丸めで消える、Div／PowScalar の係数が
+// f32 で inf になり `0·inf = NaN` を作る）。経路ごとに条件を足さず、構造を積む前に、seed が 1 要素
+// （値 1）のときの二階の各要素を次の 2 通りで計算して [`entry_check`] に掛ける。
+//
+// - `V`・`M`（[`Rf`]）: 同じ演算列を f64 の厳密な定数で評価した参照値と、各項の絶対値の和（相殺の大きさ）。
+// - `V_str`（`f32`）: 構造が子テープで実際に行う f32 の演算列（forward の中間値・`eval/scalar.rs` の VJP
+//   係数〈Div は `1/b`・`-(a/b)/b`、Sqrt は `0.5/y`、PowScalar は `e·x^(e−1)`（`e == 0` は 0）〉・
+//   `grad.rs` の `cot·係数` の積・チャンクの `Mul` を逆順にたどる cotangent）を同じ順に f32 で再現した値。
+//
+// 構造は f32 の値から離散量（符号・マスク・分岐）を決めない（スケール指数・窓・グループ分けはホストの
+// V2 定数で、`V_str` もそれを共有して正しい）。要素数 0 でない cotangent に掛かる係数だけでなく、
+// 逆伝播は全要素に `cot·係数` を作るので、f32 の forward 値・VJP 係数が 1 つでも非有限なら `V_str` は
+// NaN になる（`0·inf`）。これは forward の再現で非有限を見つけた時点で拒否する。
+
+/// 総括判定で走査する二階の要素数の上限。超える入力は計算量の fail-closed として拒否する
+/// （保守的。上限内の入力だけに保証を限る）。
+const JUDGE_BUDGET: usize = 1 << 27;
+
+fn judge_budget(entries: usize, what: &str) -> Result<(), AutodiffError> {
+    if entries <= JUDGE_BUDGET {
+        Ok(())
+    } else {
+        Err(invalid(&format!(
+            "{what}: 二階の総括判定の走査量 {entries} が上限 2^27 を超えるため拒否（保守的な fail-closed）"
+        )))
     }
-    if err.is_finite()
-        && (err < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * exact.abs())
+}
+
+/// 構造の演算列を再現する数値型。`f32` は構造そのもの（`V_str`）、[`Rf`] は f64 の参照（`V`・`M`）。
+trait Num: Copy {
+    /// 定数（ホストが f64 で作り、構造は `as f32` で載せる値）。
+    fn k(x: f64) -> Self;
+    fn plus(self, o: Self) -> Self;
+    fn minus(self, o: Self) -> Self;
+    fn times(self, o: Self) -> Self;
+    fn over(self, o: Self) -> Self;
+    fn negate(self) -> Self;
+    fn root(self) -> Self;
+    /// `PowScalar` の forward `x^e`（構造は `e as f32` を使う）。
+    fn powe(self, e: f64) -> Self;
+    /// `PowScalar` の VJP 係数 `e·x^(e−1)`（`e == 0` は 0。`eval/scalar.rs::unary_grad_factor`）。
+    fn pow_grad(self, e: f64) -> Self;
+    /// `Sqrt` の VJP 係数 `0.5 / y`（`self` は forward の出力 `y`）。
+    fn root_grad(self) -> Self;
+    fn finite(self) -> bool;
+}
+
+impl Num for f32 {
+    fn k(x: f64) -> Self {
+        x as f32
+    }
+    fn plus(self, o: Self) -> Self {
+        self + o
+    }
+    fn minus(self, o: Self) -> Self {
+        self - o
+    }
+    fn times(self, o: Self) -> Self {
+        self * o
+    }
+    fn over(self, o: Self) -> Self {
+        self / o
+    }
+    fn negate(self) -> Self {
+        -self
+    }
+    fn root(self) -> Self {
+        f32::sqrt(self)
+    }
+    fn powe(self, e: f64) -> Self {
+        self.powf(e as f32)
+    }
+    fn pow_grad(self, e: f64) -> Self {
+        let e = e as f32;
+        if e == 0.0 {
+            0.0
+        } else {
+            e * self.powf(e - 1.0)
+        }
+    }
+    fn root_grad(self) -> Self {
+        0.5 / self
+    }
+    fn finite(self) -> bool {
+        self.is_finite()
+    }
+}
+
+/// f64 の参照値 `v` と、同じ式を各項の絶対値で評価した大きさ `m`（`m ≥ |v|`。相殺が無ければ `|v|`）。
+/// 和・差は `m` を足し、積は `m` を掛ける。商・平方根・累乗は分母・底に**値** `|v|` を使い、分母・底の
+/// 相殺は増幅率 `κ = m/|v|` として掛ける（`m` を分母に使うと相殺で判定が緩むため）。累乗 `x^e` が底の
+/// 丸め誤差を `|e|` 倍する分は、`loss_class.rs` の Triplet と同じく係数側（[`judge_coeff`] の `amp`）に足す。
+#[derive(Clone, Copy, Debug)]
+struct Rf {
+    v: f64,
+    m: f64,
+}
+
+impl Rf {
+    fn kappa(self) -> f64 {
+        if self.v == 0.0 {
+            1.0
+        } else {
+            (self.m / self.v.abs()).max(1.0)
+        }
+    }
+}
+
+impl Num for Rf {
+    fn k(x: f64) -> Self {
+        Rf { v: x, m: x.abs() }
+    }
+    fn plus(self, o: Self) -> Self {
+        Rf {
+            v: self.v + o.v,
+            m: self.m + o.m,
+        }
+    }
+    fn minus(self, o: Self) -> Self {
+        Rf {
+            v: self.v - o.v,
+            m: self.m + o.m,
+        }
+    }
+    fn times(self, o: Self) -> Self {
+        Rf {
+            v: self.v * o.v,
+            m: self.m * o.m,
+        }
+    }
+    fn over(self, o: Self) -> Self {
+        Rf {
+            v: self.v / o.v,
+            m: self.m / o.v.abs() * o.kappa(),
+        }
+    }
+    fn negate(self) -> Self {
+        Rf {
+            v: -self.v,
+            m: self.m,
+        }
+    }
+    fn root(self) -> Self {
+        let v = self.v.sqrt();
+        Rf {
+            v,
+            m: v.abs() * self.kappa(),
+        }
+    }
+    fn powe(self, e: f64) -> Self {
+        let v = self.v.powf(e);
+        Rf {
+            v,
+            m: v.abs() * self.kappa(),
+        }
+    }
+    fn pow_grad(self, e: f64) -> Self {
+        if e == 0.0 {
+            return Rf { v: 0.0, m: 0.0 };
+        }
+        let v = e * self.v.powf(e - 1.0);
+        Rf {
+            v,
+            m: v.abs() * self.kappa(),
+        }
+    }
+    fn root_grad(self) -> Self {
+        let v = 0.5 / self.v;
+        Rf {
+            v,
+            m: v.abs() * self.kappa(),
+        }
+    }
+    fn finite(self) -> bool {
+        self.v.is_finite() && self.m.is_finite()
+    }
+}
+
+/// 総括判定（第 2 軸の本体）の丸め誤差係数 `(len + depth + amp)·u`（`u = 2^-24`）。二階の 1 項が通る
+/// 丸めの回数を一次で数えたもの: `len` は縮約（forward の和・逆伝播の蓄積）の長さと、和から作った値
+/// （ノルム・σ_s 等）が同じ項に何度も現れる分の合計、`depth` はそれ以外の演算の段数（定数の丸めを含む）、
+/// `amp` は累乗が底の丸め誤差を `|e|` 倍する分（LRN だけ）。`loss_class.rs` の `(2L + 4)·2^-23` と同じ水準
+/// の見積りで、分母・底の相殺の増幅は [`Rf`] の `m` 側（`κ`）に入る。
+fn judge_coeff(len: usize, depth: usize, amp: f64) -> f64 {
+    (len as f64 + depth as f64 + amp) * (-24f64).exp2()
+}
+
+/// LRN の係数。窓和 `sw`・`sz` と逆伝播の窓の蓄積（各 `nt`）、段数は forward 約 12・逆伝播約 12 と
+/// チャンクの `Mul`（積と定数の丸め）。`a = d^{-β}`・`b = d^{-β-1}` とその係数は `d` までの丸め
+/// （窓和と 2 乗・ρ 倍・kk の加算・定数の丸めで `nt_f + 4`）を `|β| + 1`・`|β| + 2` 倍し、1 項に `b` と
+/// その係数が並ぶので `(2|β| + 4)·(nt_f + 4)`。
+fn lrn_coeff(nt_f: usize, nt_r: usize, nchunks: usize, beta: f64) -> f64 {
+    judge_coeff(
+        2 * (nt_f + nt_r),
+        24 + 2 * nchunks,
+        (2.0 * beta.abs() + 4.0) * (nt_f as f64 + 4.0),
+    )
+}
+
+/// WeightNorm の係数。`n_s = √Σv_s²`（丸め `rest/2 + 1`）が 1 項に最大 5 回（`g/n_s`・`v̂`・`-(v_s/n_s)/n_s`・
+/// `0.5/n_s`）現れ、`Σup⊙v̂` と逆伝播の `n_s` への蓄積（各 `rest`）が加わるので `len = 5·rest`。
+fn wn_coeff(rest: usize) -> f64 {
+    judge_coeff(5 * rest, 24, 0.0)
+}
+
+/// SpectralNorm の係数。`σ_s = ΣW_s⊙P`（丸め `N`）が 1 項に最大 4 回（`1/σ_s`・`Ŵ`・2 つの Div 係数）
+/// 現れ、`Σup⊙Ŵ` と逆伝播の `σ_s` への蓄積（各 `N`）が加わるので `len = 6·N`。σ_s の相殺は `κ` で入る。
+fn sn_coeff(n: usize) -> f64 {
+    judge_coeff(6 * n, 24, 0.0)
+}
+
+fn all_finite<T: Num>(vals: &[T]) -> bool {
+    vals.iter().all(|v| v.finite())
+}
+
+/// 二階の 1 要素の判定（`loss_class.rs::struct_check` と同じ形。scale は 1）。`r` は参照値 `V` と大きさ
+/// `M`、`s` は構造の f32 の再現値 `V_str`。`(|V_str − V| + coeff·M)` が絶対 1e-5 未満か相対の半分以内で
+/// なければ拒否する（tolerance 定数は変えない）。判定に掛けるのは NaN を含まないレーンだけなので、
+/// どれかが非有限なら拒否する。
+fn entry_check(r: Rf, s: f32, coeff: f64, what: &str) -> Result<(), AutodiffError> {
+    let err = (f64::from(s) - r.v).abs() + coeff * r.m;
+    if r.v.is_finite()
+        && r.m.is_finite()
+        && err.is_finite()
+        && (err < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * r.v.abs())
     {
         return Ok(());
     }
     Err(invalid(&format!(
-        "{what}: up への二階係数が f32 構造の相殺で REQ-2 の判定を外れうるため拒否"
+        "{what}: 二階の要素が f32 構造の丸め・相殺・underflow・overflow で REQ-2 の判定を外れうるため拒否"
     )))
 }
 
-/// 子テープ上の `Div(a, b)` の逆伝播が実際に使う偏微分係数（`eval/scalar.rs::binary_partials` の
-/// `da = 1/b`・`db = -(a/b)/b` を **f32 の評価順のまま**）を、f64 の厳密値と突き合わせる検査。
-/// `track_a`／`track_b` は当該オペランドが勾配追跡対象か（非追跡側の係数は使われないので検査しない）。
-/// 係数単体の overflow（cotangent が 0 でも `0·inf = NaN`）と、中間商 `a/b` の underflow による
-/// 係数の消失・精度劣化（二階項へ増幅される。PR #3950 codex 指摘 P1）を型付きエラーで拒否する。
-/// 判定は相対のみ（絶対救済は使わない: 係数が小さくても後段で桁違いに増幅されうるため）。
-fn div_partials_check(
-    a: f64,
-    b: f64,
-    track_a: bool,
-    track_b: bool,
-    what: &str,
-) -> Result<(), AutodiffError> {
-    let (a32, b32) = (a as f32, b as f32);
-    let da32 = 1.0f32 / b32;
-    let db32 = -(a32 / b32) / b32;
-    let da = 1.0 / b;
-    let db = -(a / b) / b;
-    let bad = |got: f32, exact: f64| -> bool {
-        if !got.is_finite() || !exact.is_finite() {
-            return true;
-        }
-        exact != 0.0 && (f64::from(got) - exact).abs() > (RELATIVE_TOLERANCE / 8.0) * exact.abs()
-    };
-    if (track_a && bad(da32, da)) || (track_b && bad(db32, db)) {
-        return Err(invalid(&format!(
-            "{what}: Div の偏微分係数が f32 で overflow／underflow し二階が REQ-2 の判定を外れうるため拒否"
-        )));
-    }
-    Ok(())
+fn nonfinite_struct(what: &str) -> AutodiffError {
+    invalid(&format!(
+        "{what}: 構造の f32 の forward 値または VJP 係数が非有限（二階で 0·inf = NaN を作る）"
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -374,8 +580,9 @@ fn window_terms(c: usize, back: usize, fwd: usize) -> usize {
     back.min(c - 1) + fwd.min(c - 1) + 1
 }
 
-/// `2^{L_lane}` を ±2^100 以下のチャンク列へ分ける（先頭から順に `Mul` する）。
-fn chunk_factors(l: &[f64]) -> Vec<Vec<f32>> {
+/// `2^{L_lane}` を ±2^100 以下のチャンク列へ分ける（先頭から順に `Mul` する）。値は f64 の
+/// `2^part`（構造は `as f32` で載せ、総括判定の参照 [`Rf`] は f64 のまま使う）。
+fn chunk_factors(l: &[f64]) -> Vec<Vec<f64>> {
     let mut rem = l.to_vec();
     let mut out = Vec::new();
     for _ in 0..8 {
@@ -383,12 +590,227 @@ fn chunk_factors(l: &[f64]) -> Vec<Vec<f32>> {
             break;
         }
         let part: Vec<f64> = rem.iter().map(|r| r.clamp(-100.0, 100.0)).collect();
-        out.push(part.iter().map(|p| 2f64.powf(*p) as f32).collect());
+        out.push(part.iter().map(|p| 2f64.powf(*p)).collect());
         for (r, p) in rem.iter_mut().zip(&part) {
             *r -= p;
         }
     }
     out
+}
+
+/// LRN の窓（`window_sum` と同じく `C − 1` に打ち切ったずらし幅）。`f` は前方窓 `W`、`r` は反転窓 `W'`。
+#[derive(Clone, Copy)]
+struct LrnWin {
+    bf: usize,
+    ff: usize,
+    br: usize,
+    fr: usize,
+}
+
+/// 構造の窓和 `Σ_{o=-back}^{fwd} v[i+o]`（範囲外は 0）を `window_sum` と同じ加算順で再現する。
+fn win_sum<T: Num>(v: &[T], i: usize, back: usize, fwd: usize) -> T {
+    let at = |o: usize| -> T {
+        let idx = i + o;
+        if idx >= back && idx - back < v.len() {
+            v[idx - back]
+        } else {
+            T::k(0.0)
+        }
+    };
+    let mut acc = at(0);
+    for o in 1..=(back + fwd) {
+        acc = acc.plus(at(o));
+    }
+    acc
+}
+
+/// LRN の 1 列（`(n, inner)`）の構造の forward（二階の逆伝播が使う中間値と VJP 係数）。
+struct LrnColFwd<T> {
+    xs: Vec<T>,
+    up: Vec<T>,
+    a: Vec<T>,
+    fa: Vec<T>,
+    fb: Vec<T>,
+    b: Vec<T>,
+    ux: Vec<T>,
+    sz: Vec<T>,
+    inv_s: T,
+    rho: T,
+    c2: T,
+    /// seed 1 をチャンクの `Mul` の逆順にたどった `term1 − term2` への cotangent（`s^{-2β}` の復元）。
+    ci: T,
+}
+
+/// LRN の列の定数（ホストの f64 値）。
+struct LrnColConst<'a> {
+    s: f64,
+    kk: f64,
+    rho: f64,
+    beta: f64,
+    chunks: &'a [f64],
+}
+
+/// `lrn_cgrad` が積む構造（`x_s = x/s` 〜 `dx = (term1 − term2)·chunk…`）の forward を再現する。
+/// f32 の forward 値・VJP 係数のどれかが非有限なら `None`。
+fn lrn_col_fwd<T: Num>(
+    x: &[f32],
+    up: &[f32],
+    k: &LrnColConst<'_>,
+    w: LrnWin,
+) -> Option<LrnColFwd<T>> {
+    let s = T::k(k.s);
+    let inv_s = T::k(1.0).over(s);
+    let xs: Vec<T> = x.iter().map(|&v| T::k(f64::from(v)).over(s)).collect();
+    let up: Vec<T> = up.iter().map(|&v| T::k(f64::from(v))).collect();
+    let sq: Vec<T> = xs.iter().map(|&v| v.times(v)).collect();
+    let rho = T::k(k.rho);
+    let kk = T::k(k.kk);
+    let c = x.len();
+    let d: Vec<T> = (0..c)
+        .map(|i| win_sum(&sq, i, w.bf, w.ff).times(rho).plus(kk))
+        .collect();
+    let a: Vec<T> = d.iter().map(|v| v.powe(-k.beta)).collect();
+    let b: Vec<T> = d.iter().map(|v| v.powe(-k.beta - 1.0)).collect();
+    let fa: Vec<T> = d.iter().map(|v| v.pow_grad(-k.beta)).collect();
+    let fb: Vec<T> = d.iter().map(|v| v.pow_grad(-k.beta - 1.0)).collect();
+    let ux: Vec<T> = up.iter().zip(&xs).map(|(&u, &v)| u.times(v)).collect();
+    let z: Vec<T> = ux.iter().zip(&b).map(|(&u, &v)| u.times(v)).collect();
+    let sz: Vec<T> = (0..c).map(|i| win_sum(&z, i, w.br, w.fr)).collect();
+    let c2 = T::k(2.0 * k.rho * k.beta);
+    let mut dx: Vec<T> = (0..c)
+        .map(|i| {
+            let t1 = up[i].times(a[i]);
+            let t2 = xs[i].times(sz[i]).times(c2);
+            t1.minus(t2)
+        })
+        .collect();
+    let mut fwd_ok = all_finite(&dx);
+    for &ch in k.chunks {
+        for v in &mut dx {
+            *v = v.times(T::k(ch));
+        }
+        fwd_ok &= all_finite(&dx);
+    }
+    let mut ci = T::k(1.0);
+    for &ch in k.chunks.iter().rev() {
+        ci = ci.times(T::k(ch));
+    }
+    let ok = fwd_ok
+        && inv_s.finite()
+        && ci.finite()
+        && [&xs, &sq, &d, &a, &b, &fa, &fb, &ux, &z, &sz]
+            .iter()
+            .all(|v| all_finite(v));
+    ok.then_some(LrnColFwd {
+        xs,
+        up,
+        a,
+        fa,
+        fb,
+        b,
+        ux,
+        sz,
+        inv_s,
+        rho,
+        c2,
+        ci,
+    })
+}
+
+/// LRN の逆伝播の作業領域（列長。seed ごとに触る範囲だけ 0 へ戻す）。
+struct LrnScratch<T> {
+    xs: Vec<T>,
+    d: Vec<T>,
+    sq: Vec<T>,
+    up: Vec<T>,
+}
+
+impl<T: Num> LrnScratch<T> {
+    fn new(c: usize) -> Self {
+        Self {
+            xs: vec![T::k(0.0); c],
+            d: vec![T::k(0.0); c],
+            sq: vec![T::k(0.0); c],
+            up: vec![T::k(0.0); c],
+        }
+    }
+}
+
+/// seed `e_j`（`dx_j` に 1）の二階の逆伝播を構造の演算順で再現する。`x` への要素は `[xlo, xhi]`、
+/// `up` への要素は `[ulo, uhi]` に入り（それ以外は 0）、`sc.xs`（`x` への値に変換済み）・`sc.up` に残る。
+fn lrn_col_rev<T: Num>(f: &LrnColFwd<T>, w: LrnWin, j: usize, sc: &mut LrnScratch<T>) {
+    let c = f.xs.len();
+    let (ulo, uhi) = (j.saturating_sub(w.br), (j + w.fr).min(c - 1));
+    let (xlo, xhi) = (ulo.saturating_sub(w.bf), (uhi + w.ff).min(c - 1));
+    for l in xlo..=xhi {
+        sc.xs[l] = T::k(0.0);
+        sc.d[l] = T::k(0.0);
+        sc.sq[l] = T::k(0.0);
+        sc.up[l] = T::k(0.0);
+    }
+    // dx = term1 − term2（Sub の係数 1・−1 は厳密）。term2 = (x_s·sz)·c2。
+    let cot_t1 = f.ci;
+    let cot_t2a = f.ci.negate().times(f.c2);
+    sc.xs[j] = sc.xs[j].plus(cot_t2a.times(f.sz[j]));
+    let cot_sz = cot_t2a.times(f.xs[j]);
+    // sz_j = Σ_{m ∈ W'(j)} z_m、z = (up·x_s)·b。
+    for m in ulo..=uhi {
+        let cot_ux = cot_sz.times(f.b[m]);
+        let cot_b = cot_sz.times(f.ux[m]);
+        sc.up[m] = sc.up[m].plus(cot_ux.times(f.xs[m]));
+        sc.xs[m] = sc.xs[m].plus(cot_ux.times(f.up[m]));
+        sc.d[m] = sc.d[m].plus(cot_b.times(f.fb[m]));
+    }
+    // term1 = up·a、a = d^{-β}。
+    sc.up[j] = sc.up[j].plus(cot_t1.times(f.a[j]));
+    let cot_a = cot_t1.times(f.up[j]);
+    sc.d[j] = sc.d[j].plus(cot_a.times(f.fa[j]));
+    // d = sw·ρ + kk、sw_m = Σ_{l ∈ W(m)} x_s,l²。
+    for m in ulo..=uhi {
+        let cot_sw = sc.d[m].times(f.rho);
+        let lo = m.saturating_sub(w.bf);
+        let hi = (m + w.ff).min(c - 1);
+        for l in lo..=hi {
+            sc.sq[l] = sc.sq[l].plus(cot_sw);
+        }
+    }
+    // sq = x_s·x_s（同じ入力へ 2 回）、x_s = x/s。
+    for l in xlo..=xhi {
+        let g = sc.sq[l].times(f.xs[l]);
+        sc.xs[l] = sc.xs[l].plus(g).plus(g).times(f.inv_s);
+    }
+}
+
+/// LRN の 1 列の総括判定。seed が 1 要素のときの二階（`x` と `up` への要素）を [`entry_check`] に掛ける。
+fn lrn_col_judge(
+    x: &[f32],
+    up: &[f32],
+    k: &LrnColConst<'_>,
+    w: LrnWin,
+    coeff: f64,
+) -> Result<(), AutodiffError> {
+    const WHAT: &str = "LocalResponseNorm の二階";
+    let (Some(fs), Some(fr)) = (
+        lrn_col_fwd::<f32>(x, up, k, w),
+        lrn_col_fwd::<Rf>(x, up, k, w),
+    ) else {
+        return Err(nonfinite_struct(WHAT));
+    };
+    let c = x.len();
+    let (mut ss, mut sr) = (LrnScratch::<f32>::new(c), LrnScratch::<Rf>::new(c));
+    for j in 0..c {
+        lrn_col_rev(&fs, w, j, &mut ss);
+        lrn_col_rev(&fr, w, j, &mut sr);
+        let (ulo, uhi) = (j.saturating_sub(w.br), (j + w.fr).min(c - 1));
+        let (xlo, xhi) = (ulo.saturating_sub(w.bf), (uhi + w.ff).min(c - 1));
+        for l in xlo..=xhi {
+            entry_check(sr.xs[l], ss.xs[l], coeff, WHAT)?;
+        }
+        for m in ulo..=uhi {
+            entry_check(sr.up[m], ss.up[m], coeff, WHAT)?;
+        }
+    }
+    Ok(())
 }
 
 /// `LocalResponseNorm` ノード（入力 `input`）の d_input を子テープへ記録する。
@@ -431,6 +853,13 @@ pub(super) fn lrn_cgrad<'c>(
         let f = k.powf(-beta);
         stage(f, "LRN(α=0) の k^{-β}")?;
         stage(f * u_max, "LRN(α=0) の g·k^{-β}")?;
+        // 総括判定（第 2 軸）: 二階は up への対角 `k^{-β}` だけで、構造は f32 定数として載せる。
+        entry_check(
+            Rf::k(f),
+            f as f32,
+            rounding_coeff(4),
+            "LocalResponseNorm(α=0) の二階",
+        )?;
         let composed = up.mul(&scalar_const(child, f as f32)?)?;
         return push_v3(child, &composed, host);
     }
@@ -470,6 +899,17 @@ pub(super) fn lrn_cgrad<'c>(
         .map(|&e| (k / 2f64.powi(2 * e)) as f32)
         .collect();
     let l_exp: Vec<f64> = exps.iter().map(|&e| -2.0 * beta * f64::from(e)).collect();
+    let chunks = chunk_factors(&l_exp);
+    // 総括判定（第 2 軸）の窓・係数（[`lrn_coeff`]）・走査量。
+    let win = LrnWin {
+        bf: back_f.min(c - 1),
+        ff: fwd_f.min(c - 1),
+        br: back_r.min(c - 1),
+        fr: fwd_r.min(c - 1),
+    };
+    let coeff_judge = lrn_coeff(nt_f, nt_r, chunks.len(), beta);
+    let per_elem = (win.br + win.fr + 1) + (win.br + win.fr + win.bf + win.ff + 1).min(c);
+    judge_budget(x_data.len().saturating_mul(per_elem), "LocalResponseNorm")?;
 
     // ホスト側の f64 参照（構造の各段を再現）と第 1 軸の判定、第 2 軸の m の計算。
     let xs: Vec<f32> = (0..x_data.len())
@@ -511,34 +951,6 @@ pub(super) fn lrn_cgrad<'c>(
                 a.iter().cloned().fold(0.0, f64::max),
                 b.iter().cloned().fold(0.0, f64::max),
             );
-            // PowScalar の微分係数 `e·d^(e-1)` 単体は、実装（eval/scalar.rs）が f32 の
-            // `powf` で先に評価する。cotangent との積（f64）を検査するだけでは、係数自身の
-            // f32 overflow（例 d=1e-30 の e=-0.5 で -1.6e45）を取り逃がすため、同じ f32 評価順で拒否する。
-            for &dc in &d {
-                for e in [(-beta) as f32, (-beta - 1.0) as f32] {
-                    let coef = if e == 0.0 {
-                        0.0
-                    } else {
-                        e * (dc as f32).powf(e - 1.0)
-                    };
-                    stage(
-                        f64::from(coef),
-                        "LRN の PowScalar 微分係数 e·d^(e-1)（f32 評価）",
-                    )?;
-                }
-            }
-            // up への二階係数の対角 `d(dx_i)/d(g_i) = s^{-2β}·(a_i − 2ρβ·x_s,i²·b_i)` は 2 項の差し引き。
-            // 非対角は同符号の単項なので相殺しない。up の値に依らず対角の丸め誤差を検査する。
-            let coeff_lrn = rounding_coeff(nt_f + nt_r + 4);
-            for ci in 0..c {
-                let x2 = f64::from(xs[col_idx[ci]]).powi(2);
-                let t2 = 2.0 * rho * beta * x2 * b[ci];
-                coef_cancel_check(
-                    big_f * (a[ci] - t2),
-                    big_f * coeff_lrn * (beta.abs() + 1.0) * (a[ci].abs() + t2.abs()),
-                    "LocalResponseNorm",
-                )?;
-            }
             let d_min = d.iter().cloned().fold(f64::INFINITY, f64::min);
             let col_u = col_idx
                 .iter()
@@ -566,6 +978,23 @@ pub(super) fn lrn_cgrad<'c>(
             let cot_xs = 2.0 * cot_sq + cot_inner * term2.max(rb * sz) + cot_z * col_u * b_max;
             stage(cot_xs, "LRN の x_s への cotangent")?;
             stage(cot_xs / f64::from(scales[col]), "LRN の x への cotangent")?;
+            // 第 2 軸の本体: seed が 1 要素のときの二階の各要素を f32 で再現して参照と比べる。
+            let col_x: Vec<f32> = col_idx.iter().map(|&i| x_data[i]).collect();
+            let col_up: Vec<f32> = col_idx.iter().map(|&i| up_data[i]).collect();
+            let col_chunks: Vec<f64> = chunks.iter().map(|ch| ch[col]).collect();
+            lrn_col_judge(
+                &col_x,
+                &col_up,
+                &LrnColConst {
+                    s: f64::from(scales[col]),
+                    kk: k / 2f64.powi(2 * exps[col]),
+                    rho,
+                    beta,
+                    chunks: &col_chunks,
+                },
+                win,
+                coeff_judge,
+            )?;
             // 第 2 軸の m（各項の絶対値の和）。
             for (ci, &i) in col_idx.iter().enumerate() {
                 let lo = ci.saturating_sub(back_r);
@@ -601,8 +1030,9 @@ pub(super) fn lrn_cgrad<'c>(
         .mul(&sz)?
         .mul(&scalar_const(child, (2.0 * rho * beta) as f32)?)?;
     let mut dx = term1.sub(&term2)?;
-    for chunk in chunk_factors(&l_exp) {
-        dx = dx.mul(&tensor_const(child, chunk, &col_shape)?)?;
+    for chunk in chunks {
+        let chunk32: Vec<f32> = chunk.iter().map(|&v| v as f32).collect();
+        dx = dx.mul(&tensor_const(child, chunk32, &col_shape)?)?;
     }
     let composed = dx.contiguous()?.reshape(&shape)?;
     shadow_check(
@@ -707,6 +1137,147 @@ impl GroupMap {
     }
 }
 
+/// WeightNorm の 1 グループの構造の forward（二階の逆伝播が使う中間値と VJP 係数）。
+struct WnFwd<T> {
+    vs: Vec<T>,
+    vh: Vec<T>,
+    /// `v̂ = v_s/n_s` の分母側の Div 係数 `-(v_s/n_s)/n_s`。
+    dvb: Vec<T>,
+    up: Vec<T>,
+    t: Vec<T>,
+    inv_s: T,
+    inv_n: T,
+    /// Sqrt の係数 `0.5/n_s`。
+    fsq: T,
+    dg: T,
+    /// `g/n_s` の分母側の Div 係数 `-(g/n_s)/n_s`。
+    dgb: T,
+    coef: T,
+}
+
+/// `weight_norm_cgrads` が積む構造（`v_s = v/s` 〜 `dv = (g/n_s/s)·(up − dg·v̂)`）の forward を再現する。
+/// f32 の forward 値・VJP 係数のどれかが非有限なら `None`。
+fn wn_fwd<T: Num>(v: &[f32], up: &[f32], g: f32, s: f64) -> Option<WnFwd<T>> {
+    let s = T::k(s);
+    let inv_s = T::k(1.0).over(s);
+    let vs: Vec<T> = v.iter().map(|&x| T::k(f64::from(x)).over(s)).collect();
+    let up: Vec<T> = up.iter().map(|&x| T::k(f64::from(x))).collect();
+    let mut ss = T::k(0.0);
+    for &x in &vs {
+        ss = ss.plus(x.times(x));
+    }
+    let n = ss.root();
+    let fsq = n.root_grad();
+    let inv_n = T::k(1.0).over(n);
+    let vh: Vec<T> = vs.iter().map(|&x| x.over(n)).collect();
+    let dvb: Vec<T> = vs.iter().map(|&x| x.over(n).over(n).negate()).collect();
+    let mut dg = T::k(0.0);
+    for (&u, &h) in up.iter().zip(&vh) {
+        dg = dg.plus(u.times(h));
+    }
+    let t: Vec<T> = up
+        .iter()
+        .zip(&vh)
+        .map(|(&u, &h)| u.minus(dg.times(h)))
+        .collect();
+    let gk = T::k(f64::from(g));
+    let c1 = gk.over(n);
+    let dgb = gk.over(n).over(n).negate();
+    let coef = c1.over(s);
+    let dv: Vec<T> = t.iter().map(|&x| coef.times(x)).collect();
+    let ok = [ss, n, fsq, inv_n, inv_s, dg, c1, dgb, coef]
+        .iter()
+        .all(|v| v.finite())
+        && [&vs, &vh, &dvb, &t, &dv].iter().all(|v| all_finite(v));
+    ok.then_some(WnFwd {
+        vs,
+        vh,
+        dvb,
+        up,
+        t,
+        inv_s,
+        inv_n,
+        fsq,
+        dg,
+        dgb,
+        coef,
+    })
+}
+
+/// WeightNorm の seed（`dv_j` に 1、または `dg` に 1）。
+#[derive(Clone, Copy)]
+enum WnSeed {
+    Dv(usize),
+    Dg,
+}
+
+/// seed の二階の逆伝播を構造の演算順で再現する。`v`・`up` への要素を `hv`・`hu` へ書き、`g` への
+/// 要素（`Dv` のときだけ）を返す。
+fn wn_rev<T: Num>(f: &WnFwd<T>, seed: WnSeed, hv: &mut [T], hu: &mut [T]) -> Option<T> {
+    let r = f.vs.len();
+    let mut cot_vh = vec![T::k(0.0); r];
+    for h in hu.iter_mut() {
+        *h = T::k(0.0);
+    }
+    let (mut cot_n, cot_dg, h_g) = match seed {
+        WnSeed::Dv(j) => {
+            // dv = coef·t（coef は [groups, 1] のブロードキャスト）、coef = (g/n_s)/s。
+            let cot_coef = f.t[j];
+            let cot_t = f.coef;
+            let cot_c1 = cot_coef.times(f.inv_s);
+            let h_g = cot_c1.times(f.inv_n);
+            let cot_n = cot_c1.times(f.dgb);
+            // t = up − dg·v̂。
+            hu[j] = cot_t;
+            let cot_q = cot_t.negate();
+            cot_vh[j] = cot_q.times(f.dg);
+            (cot_n, cot_q.times(f.vh[j]), Some(h_g))
+        }
+        WnSeed::Dg => (T::k(0.0), T::k(1.0), None),
+    };
+    // dg = Σ up⊙v̂。
+    for i in 0..r {
+        hu[i] = hu[i].plus(cot_dg.times(f.vh[i]));
+        cot_vh[i] = cot_vh[i].plus(cot_dg.times(f.up[i]));
+    }
+    // v̂ = v_s/n_s。
+    for i in 0..r {
+        hv[i] = cot_vh[i].times(f.inv_n);
+        cot_n = cot_n.plus(cot_vh[i].times(f.dvb[i]));
+    }
+    // n_s = √(Σ v_s²)、v_s = v/s。
+    let cot_ss = cot_n.times(f.fsq);
+    for (h, &x) in hv.iter_mut().zip(&f.vs) {
+        let g = cot_ss.times(x);
+        *h = h.plus(g).plus(g).times(f.inv_s);
+    }
+    h_g
+}
+
+/// WeightNorm の 1 グループの総括判定。seed が 1 要素（`dv` の各要素と `dg`）のときの二階
+/// （`v`・`up`・`g` への要素）を [`entry_check`] に掛ける。
+fn wn_group_judge(v: &[f32], up: &[f32], g: f32, s: f64, coeff: f64) -> Result<(), AutodiffError> {
+    const WHAT: &str = "WeightNorm の二階";
+    let (Some(fs), Some(fr)) = (wn_fwd::<f32>(v, up, g, s), wn_fwd::<Rf>(v, up, g, s)) else {
+        return Err(nonfinite_struct(WHAT));
+    };
+    let r = v.len();
+    let (mut hv_s, mut hu_s) = (vec![0f32; r], vec![0f32; r]);
+    let (mut hv_r, mut hu_r) = (vec![Rf::k(0.0); r], vec![Rf::k(0.0); r]);
+    for seed in (0..r).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+        let gs = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+        let gr = wn_rev(&fr, seed, &mut hv_r, &mut hu_r);
+        if let (Some(gs), Some(gr)) = (gs, gr) {
+            entry_check(gr, gs, coeff, WHAT)?;
+        }
+        for i in 0..r {
+            entry_check(hv_r[i], hv_s[i], coeff, WHAT)?;
+            entry_check(hu_r[i], hu_s[i], coeff, WHAT)?;
+        }
+    }
+    Ok(())
+}
+
 /// `WeightNorm` ノードの `(d_v, d_g)` を子テープへ記録する。`g_m` は子テープ上の `g` の写し。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn weight_norm_cgrads<'c>(
@@ -758,42 +1329,18 @@ pub(super) fn weight_norm_cgrads<'c>(
         .collect();
     let scales: Vec<f32> = exps.iter().map(|&e| pow2(e)).collect();
 
-    // 第 1 軸（overflow）と第 2 軸の m。
+    // 第 1 軸（overflow）と第 2 軸の m・総括判定（係数は [`wn_coeff`]）。
+    let coeff_judge = wn_coeff(rest);
+    judge_budget(
+        groups.saturating_mul(rest + 1).saturating_mul(2 * rest + 1),
+        "WeightNorm",
+    )?;
     let nf = rest as f64;
     let mut m_dv = vec![0.0f64; v_gm.len()];
     let mut m_dg = vec![0.0f64; groups];
     for k in 0..groups {
         let lo = k * rest;
         let vs: Vec<f32> = v_gm[lo..lo + rest].iter().map(|&x| x / scales[k]).collect();
-        // 上流 up に依存しない相殺検査（PR #3950 codex 指摘 P1）。up への二階係数は
-        // coef·(I − v̂v̂ᵀ) で、構造は対角 1 − v̂_j² を f32 の v̂_j·v̂_j から作るため、v̂_j² が 1 に
-        // 丸まる入力（他成分が極小）では up = 0 でも二階の混合項（g·v_k²/‖v‖³ 型）が 0 へ消える。
-        // 厳密値 (Σ_{k≠j} v_k²)/‖v‖² に対し丸め誤差 coeff·v̂_j² が REQ-2 の相対許容を超えるなら拒否する。
-        if !vs.iter().any(|x| x.is_nan()) && rest > 1 {
-            let ss0: f64 = vs.iter().map(|&x| f64::from(x).powi(2)).sum();
-            let coeff0 = rounding_coeff(rest + 4);
-            for (j, &x) in vs.iter().enumerate() {
-                let xj2 = f64::from(x).powi(2);
-                let mut others = ss0 - xj2;
-                if others < 1e-9 * ss0 {
-                    others = vs
-                        .iter()
-                        .enumerate()
-                        .filter(|&(i, _)| i != j)
-                        .map(|(_, &y)| f64::from(y).powi(2))
-                        .sum();
-                }
-                if others <= 0.0 {
-                    continue;
-                }
-                let exact = others / ss0;
-                if coeff0 * (xj2 / ss0) > (RELATIVE_TOLERANCE / 2.0) * exact {
-                    return Err(invalid(
-                        "WeightNorm の 1 − v̂²: f32 構造の相殺で up への二階係数が消えうるため拒否",
-                    ));
-                }
-            }
-        }
         if vs.iter().any(|x| x.is_nan()) || up_gm[lo..lo + rest].iter().any(|x| x.is_nan()) {
             continue;
         }
@@ -817,21 +1364,6 @@ pub(super) fn weight_norm_cgrads<'c>(
             .sum();
         let t_max = u_max + dgb;
         let coef = gk / n_s / s;
-        // 構造中の Div（v_s/n_s・g/n_s・(·)/s）の偏微分係数を f32 評価順で検査する。
-        for &x in &vs {
-            div_partials_check(f64::from(x), n_s, true, true, "WeightNorm の v_s/n_s")?;
-        }
-        if !g_data[k].is_nan() {
-            div_partials_check(f64::from(g_data[k]), n_s, true, true, "WeightNorm の g/n_s")?;
-            div_partials_check(
-                f64::from(g_data[k]) / n_s,
-                s,
-                true,
-                false,
-                "WeightNorm の (g/n_s)/s",
-            )?;
-        }
-        div_partials_check(f64::from(vs[0]) * s, s, true, false, "WeightNorm の v/s")?;
         stage(dgb, "WeightNorm の dg")?;
         stage(t_max, "WeightNorm の up − dg·v̂")?;
         stage(coef, "WeightNorm の g/(n_s·s)")?;
@@ -857,6 +1389,11 @@ pub(super) fn weight_norm_cgrads<'c>(
             m_dv[lo + j] = coef * (f64::from(x).abs() + dg_val.abs() * h.abs());
         }
         m_dg[k] = dgb;
+        // 第 2 軸の本体: seed が 1 要素のときの二階の各要素を f32 で再現して参照と比べる。
+        // g が NaN のグループは dv が NaN になる（1 階と同じ伝播）ので判定から外す。
+        if !g_data[k].is_nan() {
+            wn_group_judge(&v_gm[lo..lo + rest], upk, g_data[k], s, coeff_judge)?;
+        }
     }
 
     // 構造。
@@ -893,6 +1430,104 @@ pub(super) fn weight_norm_cgrads<'c>(
 // SpectralNorm
 // ---------------------------------------------------------------------
 
+/// SpectralNorm の構造の forward（二階の逆伝播が使う中間値と VJP 係数）。
+struct SnFwd<T> {
+    ws: Vec<T>,
+    p: Vec<T>,
+    wh: Vec<T>,
+    /// `Ŵ = W_s/σ_s` の分母側の Div 係数 `-(W_s/σ_s)/σ_s`。
+    dwb: Vec<T>,
+    up: Vec<T>,
+    /// `t/σ_s` の分母側の Div 係数 `-(t/σ_s)/σ_s`。
+    dob: Vec<T>,
+    inv_s: T,
+    inv_sig: T,
+}
+
+/// `spectral_norm_cgrad` が積む構造（`W_s = W/s` 〜 `dW = (up − Σ(up⊙Ŵ)·P)/σ_s/s`）の forward を再現する。
+/// `p` は `P[i] = u_i·v_j` の f64 の厳密値（構造は f32 へ丸めた値を載せる）。
+fn sn_fwd<T: Num>(w: &[f32], p: &[f64], up: &[f32], s: f64) -> Option<SnFwd<T>> {
+    let s = T::k(s);
+    let inv_s = T::k(1.0).over(s);
+    let ws: Vec<T> = w.iter().map(|&x| T::k(f64::from(x)).over(s)).collect();
+    let p: Vec<T> = p.iter().map(|&x| T::k(x)).collect();
+    let up: Vec<T> = up.iter().map(|&x| T::k(f64::from(x))).collect();
+    let mut sig = T::k(0.0);
+    for (&a, &b) in ws.iter().zip(&p) {
+        sig = sig.plus(a.times(b));
+    }
+    let inv_sig = T::k(1.0).over(sig);
+    let wh: Vec<T> = ws.iter().map(|&x| x.over(sig)).collect();
+    let dwb: Vec<T> = ws.iter().map(|&x| x.over(sig).over(sig).negate()).collect();
+    let mut sp = T::k(0.0);
+    for (&u, &h) in up.iter().zip(&wh) {
+        sp = sp.plus(u.times(h));
+    }
+    let t: Vec<T> = up
+        .iter()
+        .zip(&p)
+        .map(|(&u, &pi)| u.minus(sp.times(pi)))
+        .collect();
+    let dob: Vec<T> = t.iter().map(|&x| x.over(sig).over(sig).negate()).collect();
+    let dw: Vec<T> = t.iter().map(|&x| x.over(sig).over(s)).collect();
+    let ok = [sig, inv_sig, inv_s, sp].iter().all(|v| v.finite())
+        && [&ws, &p, &wh, &dwb, &t, &dob, &dw]
+            .iter()
+            .all(|v| all_finite(v));
+    ok.then_some(SnFwd {
+        ws,
+        p,
+        wh,
+        dwb,
+        up,
+        dob,
+        inv_s,
+        inv_sig,
+    })
+}
+
+/// seed `e_j`（`dW_j` に 1）の二階の逆伝播を構造の演算順で再現し、`W`・`up` への要素を `hw`・`hu` へ書く。
+fn sn_rev<T: Num>(f: &SnFwd<T>, j: usize, hw: &mut [T], hu: &mut [T]) {
+    let n = f.ws.len();
+    // dW = (t/σ_s)/s。
+    let cot_o = f.inv_s;
+    let cot_t = cot_o.times(f.inv_sig);
+    let mut cot_sig = cot_o.times(f.dob[j]);
+    // t = up − sp·P（sp は [1] のブロードキャスト）、sp = Σ up⊙Ŵ。
+    let cot_sp = cot_t.negate().times(f.p[j]);
+    for i in 0..n {
+        hu[i] = cot_sp.times(f.wh[i]);
+        let cot_wh = cot_sp.times(f.up[i]);
+        hw[i] = cot_wh.times(f.inv_sig);
+        cot_sig = cot_sig.plus(cot_wh.times(f.dwb[i]));
+    }
+    hu[j] = cot_t.plus(hu[j]);
+    // σ_s = Σ W_s⊙P、W_s = W/s。
+    for (h, &pi) in hw.iter_mut().zip(&f.p) {
+        *h = h.plus(cot_sig.times(pi)).times(f.inv_s);
+    }
+}
+
+/// SpectralNorm の総括判定。seed が 1 要素のときの二階（`W`・`up` への要素）を [`entry_check`] に掛ける。
+fn sn_judge(w: &[f32], p: &[f64], up: &[f32], s: f64, coeff: f64) -> Result<(), AutodiffError> {
+    const WHAT: &str = "SpectralNorm の二階";
+    let (Some(fs), Some(fr)) = (sn_fwd::<f32>(w, p, up, s), sn_fwd::<Rf>(w, p, up, s)) else {
+        return Err(nonfinite_struct(WHAT));
+    };
+    let n = w.len();
+    let (mut hw_s, mut hu_s) = (vec![0f32; n], vec![0f32; n]);
+    let (mut hw_r, mut hu_r) = (vec![Rf::k(0.0); n], vec![Rf::k(0.0); n]);
+    for j in 0..n {
+        sn_rev(&fs, j, &mut hw_s, &mut hu_s);
+        sn_rev(&fr, j, &mut hw_r, &mut hu_r);
+        for i in 0..n {
+            entry_check(hw_r[i], hw_s[i], coeff, WHAT)?;
+            entry_check(hu_r[i], hu_s[i], coeff, WHAT)?;
+        }
+    }
+    Ok(())
+}
+
 /// `SpectralNorm` ノード（入力 `weight`）の d_weight を子テープへ記録する。`u`・`v` は forward 時点の
 /// 非追跡スナップショット（定数扱い）。
 #[allow(clippy::too_many_arguments)]
@@ -924,9 +1559,12 @@ pub(super) fn spectral_norm_cgrad<'c>(
     let (h, cols) = (layout.rows(), layout.cols());
     let inner: usize = shape[dim + 1..].iter().product();
     let mut p = vec![0.0f32; w_data.len()];
+    let mut p_exact = vec![0.0f64; w_data.len()];
     for (i, &ui) in u_data.iter().enumerate().take(h) {
         for (j, &vj) in v_data.iter().enumerate().take(cols) {
-            p[(j / inner * h + i) * inner + j % inner] = ui * vj;
+            let at = (j / inner * h + i) * inner + j % inner;
+            p[at] = ui * vj;
+            p_exact[at] = f64::from(ui) * f64::from(vj);
         }
     }
     let p_max = p.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
@@ -955,35 +1593,6 @@ pub(super) fn spectral_norm_cgrad<'c>(
             return Err(invalid("SpectralNorm のスケール後 σ_s が 0 または非有限"));
         }
         let sa = sigma_s.abs();
-        // up への微分係数（W 側・up 側の両方）の独立検査。dW は up に線形で、係数行列は
-        // σ_s = Σ W_s·P の相殺で決まる。up の値（全ゼロでも）に依らず、σ_s の丸め誤差
-        // coeff·Σ|W_s·P| の相対値が dW の係数（1/σ_s と sp/σ_s の 2 重の 1/σ_s で最大 3 倍）を
-        // 通して REQ-2 の許容の半分に収まらない入力は拒否する（tolerance 定数は不変）。
-        let m_sigma: f64 = ws
-            .iter()
-            .zip(&p)
-            .map(|(&a, &b)| (f64::from(a) * f64::from(b)).abs())
-            .sum();
-        let rel_sigma = rounding_coeff(w_data.len() + 4) * m_sigma / sa;
-        if !rel_sigma.is_finite() || 3.0 * rel_sigma > RELATIVE_TOLERANCE / 2.0 {
-            return Err(invalid(
-                "SpectralNorm の σ_s の相殺で up への微分係数が REQ-2 の判定を外れうるため拒否",
-            ));
-        }
-        // up への二階係数の対角 `(1 − Ŵ_i·P_i)/(σ_s·s)` は差し引き（I − ŴP）。非対角は単項で相殺しない。
-        // σ_s 自身の精度検査では捕捉できない係数行列内部の相殺を up の値に依らず拒否する。
-        {
-            let coeff_sp = rounding_coeff(w_data.len() + 4);
-            let denom = sa * f64::from(s);
-            for (&w, &pi) in ws.iter().zip(&p) {
-                let wp = f64::from(w) / sigma_s * f64::from(pi);
-                coef_cancel_check(
-                    (1.0 - wp) / denom,
-                    coeff_sp * (1.0 + wp.abs()) / denom,
-                    "SpectralNorm",
-                )?;
-            }
-        }
         let sf = f64::from(s);
         let u_max = up_data
             .iter()
@@ -1016,19 +1625,6 @@ pub(super) fn spectral_norm_cgrad<'c>(
         let cot_ws = cot_what / sa + cot_sigma * p_max;
         stage(cot_ws, "SpectralNorm の W_s への cotangent")?;
         stage(cot_ws / sf, "SpectralNorm の W への cotangent")?;
-        // 構造中の Div（W/s・W_s/σ_s・t/σ_s・(·)/s）の偏微分係数を f32 評価順で検査する。
-        let sp_chk: f64 = up_data
-            .iter()
-            .zip(&ws)
-            .map(|(&x, &w)| f64::from(x) * f64::from(w) / sigma_s)
-            .sum();
-        div_partials_check(1.0, sf, true, false, "SpectralNorm の W/s")?;
-        for (i, &w) in ws.iter().enumerate() {
-            div_partials_check(f64::from(w), sigma_s, true, true, "SpectralNorm の W_s/σ_s")?;
-            let t_i = f64::from(up_data[i]) - sp_chk * f64::from(p[i]);
-            div_partials_check(t_i, sigma_s, true, true, "SpectralNorm の t/σ_s")?;
-            div_partials_check(t_i / sigma_s, sf, true, false, "SpectralNorm の (t/σ_s)/s")?;
-        }
         let sp_val: f64 = up_data
             .iter()
             .zip(&ws)
@@ -1037,6 +1633,13 @@ pub(super) fn spectral_norm_cgrad<'c>(
         for (i, mi) in m_abs.iter_mut().enumerate() {
             *mi = (f64::from(up_data[i]).abs() + sp_val.abs() * f64::from(p[i]).abs()) / (sa * sf);
         }
+        // 第 2 軸の本体: seed が 1 要素のときの二階の各要素を f32 で再現して参照と比べる。σ_s の相殺・
+        // 係数行列 `I − ŴP` の相殺・Div 係数の overflow・中間値の underflow はここで見える。
+        judge_budget(
+            w_data.len().saturating_mul(2 * w_data.len()),
+            "SpectralNorm",
+        )?;
+        sn_judge(&w_data, &p_exact, &up_data, sf, sn_coeff(w_data.len()))?;
     }
 
     // 構造。
@@ -1080,7 +1683,7 @@ mod tests {
         for ch in &many {
             assert!(ch.iter().all(|f| f.is_finite() && *f > 0.0));
         }
-        let prod: f64 = many.iter().map(|c| f64::from(c[0]).log2()).sum();
+        let prod: f64 = many.iter().map(|c| c[0].log2()).sum();
         assert!((prod + 250.0).abs() < 1e-3, "{prod}");
     }
 
@@ -1101,5 +1704,291 @@ mod tests {
         assert_eq!(gm.groups, 3);
         assert_eq!(gm.rest, 4);
         assert_eq!(gmj[..4], [0, 1, 6, 7]);
+    }
+
+    // --- 総括判定の f32 再現が子テープの実際の二階と一致すること（判定の前提の固定） ---------------
+
+    use crate::test_support::test_ops;
+    use crate::weight_reparam_ops::SpectralNormState;
+
+    fn tt(v: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
+        Tensor::new(v, shape).unwrap()
+    }
+
+    fn pattern(n: usize, phase: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i as f32 + phase) * 0.731).sin() * 0.9 + 0.2)
+            .collect()
+    }
+
+    /// `cg.grad(x)` の要素 `j` を seed にした子テープの二階（`wrt` への行）。
+    fn child_row(child: &Tape, gx: &Var<'_>, j: usize, wrt: &Var<'_>) -> Vec<f32> {
+        let n = gx.shape().iter().product();
+        let gj = gx
+            .contiguous()
+            .unwrap()
+            .reshape(&[n])
+            .unwrap()
+            .narrow(0, j, 1)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let g = child.backward(&gj).unwrap();
+        dense_vec(g.get(wrt).unwrap().unwrap())
+    }
+
+    /// 再現値 `s` が子テープの実値 `a` から判定の見積り `coeff·M` を超えてずれないこと。
+    fn assert_within(a: f32, s: f32, r: Rf, coeff: f64, ctx: &str) {
+        let d = (f64::from(a) - f64::from(s)).abs();
+        assert!(
+            d <= coeff * r.m + f64::from(f32::MIN_POSITIVE),
+            "{ctx}: 子テープ {a:e} と f32 再現 {s:e} の差 {d:e} が見積り {:e} を超える",
+            coeff * r.m
+        );
+    }
+
+    #[test]
+    fn lrn_emulation_reproduces_child_tape_second_order() {
+        // 奇数・偶数（非対称窓）・C を超える size と、β=−1（`-β-1 = 0` で PowScalar の係数が 0）。
+        for beta in [0.75f32, 2.0, -1.0] {
+            let compared = (1..=5usize)
+                .filter(|&size| lrn_emulation_case(size, 0.5, beta, 1.0))
+                .count();
+            assert!(
+                compared >= 4,
+                "beta={beta}: 比べられた size が {compared} 件しかない"
+            );
+        }
+    }
+
+    fn lrn_emulation_case(size: usize, alpha: f32, beta: f32, k: f32) -> bool {
+        let (n, c, inner) = (1usize, 4usize, 2usize);
+        let shape = [n, c, inner];
+        let x0 = pattern(8, 1.0);
+        let w = pattern(8, 4.0);
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let x = tape.var(&tt(x0.clone(), &shape));
+        let wc = tape.var_no_grad(&tt(w.clone(), &shape));
+        let y = x.local_response_norm(size, alpha, beta, k).unwrap();
+        let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+        // 判定が保守的に拒否した入力は構造が積まれないので比べられない（呼び出し側で件数を確かめる）。
+        let Ok(cg) = tape.backward_create_graph(&loss, &child) else {
+            return false;
+        };
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+        let rho = f64::from(alpha) / size as f64;
+        let floor = (f64::from(k).abs() * size as f64 / f64::from(alpha).abs()).sqrt();
+        let win = LrnWin {
+            bf: (size / 2).min(c - 1),
+            ff: ((size - 1) / 2).min(c - 1),
+            br: ((size - 1) / 2).min(c - 1),
+            fr: (size / 2).min(c - 1),
+        };
+        let (nt_f, nt_r) = (
+            window_terms(c, win.bf, win.ff),
+            window_terms(c, win.br, win.fr),
+        );
+        for si in 0..inner {
+            let idx: Vec<usize> = (0..c).map(|ci| ci * inner + si).collect();
+            let col_x: Vec<f32> = idx.iter().map(|&i| x0[i]).collect();
+            let col_up: Vec<f32> = idx.iter().map(|&i| w[i]).collect();
+            let mx = col_x.iter().fold(0.0f64, |m, &v| m.max(f64::from(v).abs()));
+            let e = pow2_ceil_exponent(mx.max(floor));
+            let chunks: Vec<f64> = chunk_factors(&[-2.0 * f64::from(beta) * f64::from(e)])
+                .iter()
+                .map(|ch| ch[0])
+                .collect();
+            let kc = LrnColConst {
+                s: f64::from(pow2(e)),
+                kk: f64::from(k) / 2f64.powi(2 * e),
+                rho,
+                beta: f64::from(beta),
+                chunks: &chunks,
+            };
+            let coeff = lrn_coeff(nt_f, nt_r, chunks.len(), f64::from(beta));
+            let fs = lrn_col_fwd::<f32>(&col_x, &col_up, &kc, win).unwrap();
+            let fr = lrn_col_fwd::<Rf>(&col_x, &col_up, &kc, win).unwrap();
+            let (mut ss, mut sr) = (LrnScratch::<f32>::new(c), LrnScratch::<Rf>::new(c));
+            for jc in 0..c {
+                lrn_col_rev(&fs, win, jc, &mut ss);
+                lrn_col_rev(&fr, win, jc, &mut sr);
+                let row = child_row(&child, &gx, idx[jc], &cx);
+                let (ulo, uhi) = (jc.saturating_sub(win.br), (jc + win.fr).min(c - 1));
+                let (xlo, xhi) = (ulo.saturating_sub(win.bf), (uhi + win.ff).min(c - 1));
+                for (l, &i) in idx.iter().enumerate() {
+                    let (s, r) = if (xlo..=xhi).contains(&l) {
+                        (ss.xs[l], sr.xs[l])
+                    } else {
+                        (0.0, Rf::k(0.0))
+                    };
+                    assert_within(
+                        row[i],
+                        s,
+                        r,
+                        coeff,
+                        &format!("lrn size{size} beta{beta} col{si} j{jc} l{l}"),
+                    );
+                }
+                // ほかの列への要素は 0。
+                for (i, &a) in row.iter().enumerate() {
+                    if i % inner != si {
+                        assert_eq!(a, 0.0, "lrn: 列をまたぐ二階は 0");
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn weight_norm_emulation_reproduces_child_tape_second_order() {
+        let (groups, rest) = (2usize, 3usize);
+        let v0 = pattern(6, 2.0);
+        let g0 = vec![0.7f32, -0.4];
+        let w = pattern(6, 5.0);
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let v = tape.var(&tt(v0.clone(), &[groups, rest]));
+        let g = tape.var(&tt(g0.clone(), &[groups, 1]));
+        let wc = tape.var_no_grad(&tt(w.clone(), &[groups, rest]));
+        let y = v.weight_norm(&g, Some(0)).unwrap();
+        let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let gv = cg.grad(&v).unwrap().unwrap();
+        let gg = cg.grad(&g).unwrap().unwrap();
+        let cv = cg.child_var(&v).unwrap().unwrap();
+        let cgv = cg.child_var(&g).unwrap().unwrap();
+        let coeff = wn_coeff(rest);
+        for kg in 0..groups {
+            let lo = kg * rest;
+            let vk = &v0[lo..lo + rest];
+            let mx = vk.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            let fs = wn_fwd::<f32>(vk, &w[lo..lo + rest], g0[kg], s).unwrap();
+            let fr = wn_fwd::<Rf>(vk, &w[lo..lo + rest], g0[kg], s).unwrap();
+            let (mut hv_s, mut hu_s) = (vec![0f32; rest], vec![0f32; rest]);
+            let (mut hv_r, mut hu_r) = (vec![Rf::k(0.0); rest], vec![Rf::k(0.0); rest]);
+            for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+                let h_g_s = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+                let h_g_r = wn_rev(&fr, seed, &mut hv_r, &mut hu_r);
+                let (row_v, row_g) = match seed {
+                    WnSeed::Dv(j) => (
+                        child_row(&child, &gv, lo + j, &cv),
+                        Some(child_row(&child, &gv, lo + j, &cgv)),
+                    ),
+                    WnSeed::Dg => (child_row(&child, &gg, kg, &cv), None),
+                };
+                for i in 0..rest {
+                    assert_within(row_v[lo + i], hv_s[i], hv_r[i], coeff, "wn v");
+                }
+                if let (Some(row_g), Some(hs), Some(hr)) = (row_g, h_g_s, h_g_r) {
+                    assert_within(row_g[kg], hs, hr, coeff, "wn g");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spectral_norm_emulation_reproduces_child_tape_second_order() {
+        let shape = [2usize, 3];
+        let (u0, v0) = ([0.6f32, 0.8], [0.5f32, 0.3, 0.8]);
+        let w0 = vec![0.9f32, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let up = pattern(6, 3.0);
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let mut st = SpectralNormState::from_vectors(&shape, 0, &u0, &v0, 1, 1e-12).unwrap();
+        let w = tape.var(&tt(w0.clone(), &shape));
+        let wc = tape.var_no_grad(&tt(up.clone(), &shape));
+        let y = w.spectral_norm(&mut st, false).unwrap();
+        let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let gw = cg.grad(&w).unwrap().unwrap();
+        let cw = cg.child_var(&w).unwrap().unwrap();
+        // forward のスナップショット（`from_vectors` は u・v を正規化する。eval なので進まない）。
+        let (us, vs) = (st.u().to_vec(), st.v().to_vec());
+        let mut p = Vec::with_capacity(6);
+        for &ui in &us {
+            for &vj in &vs {
+                p.push(f64::from(ui) * f64::from(vj));
+            }
+        }
+        let mx = w0.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+        let coeff = sn_coeff(6);
+        let fs = sn_fwd::<f32>(&w0, &p, &up, s).unwrap();
+        let fr = sn_fwd::<Rf>(&w0, &p, &up, s).unwrap();
+        let (mut hw_s, mut hu_s) = (vec![0f32; 6], vec![0f32; 6]);
+        let (mut hw_r, mut hu_r) = (vec![Rf::k(0.0); 6], vec![Rf::k(0.0); 6]);
+        for j in 0..6 {
+            sn_rev(&fs, j, &mut hw_s, &mut hu_s);
+            sn_rev(&fr, j, &mut hw_r, &mut hu_r);
+            let row = child_row(&child, &gw, j, &cw);
+            for i in 0..6 {
+                assert_within(row[i], hw_s[i], hw_r[i], coeff, "spectral W");
+            }
+        }
+    }
+
+    /// Codex 指摘（PR #3950・未解決スレッド）の入力で、f32 再現がスケール復元の cotangent の
+    /// underflow（2^-60·2^-100 = 2^-160 → 0）を再現し、判定が拒否することを直接確かめる。
+    #[test]
+    fn lrn_emulation_sees_scale_restoration_cotangent_underflow() {
+        let x = [(-80f32).exp2()];
+        let up = [1.0f32];
+        let (alpha, beta) = (1e36f64, -1.0f64);
+        let e = pow2_ceil_exponent(f64::from(x[0]));
+        assert_eq!(e, -80);
+        let chunks: Vec<f64> = chunk_factors(&[-2.0 * beta * f64::from(e)])
+            .iter()
+            .map(|ch| ch[0])
+            .collect();
+        assert_eq!(chunks.len(), 2, "2^-160 は 2 チャンクに分かれる");
+        let kc = LrnColConst {
+            s: f64::from(pow2(e)),
+            kk: 0.0,
+            rho: f64::from(alpha as f32),
+            beta,
+            chunks: &chunks,
+        };
+        let win = LrnWin {
+            bf: 0,
+            ff: 0,
+            br: 0,
+            fr: 0,
+        };
+        let fs = lrn_col_fwd::<f32>(&x, &up, &kc, win).unwrap();
+        let fr = lrn_col_fwd::<Rf>(&x, &up, &kc, win).unwrap();
+        assert_eq!(fs.ci, 0.0, "f32 の cotangent は 0 へ落ちる");
+        assert!(fr.ci.v > 0.0);
+        let (mut ss, mut sr) = (LrnScratch::<f32>::new(1), LrnScratch::<Rf>::new(1));
+        lrn_col_rev(&fs, win, 0, &mut ss);
+        lrn_col_rev(&fr, win, 0, &mut sr);
+        assert_eq!(ss.xs[0], 0.0);
+        let exact = 6.0 * f64::from(alpha as f32) * f64::from(x[0]);
+        assert!(
+            (sr.xs[0].v - exact).abs() <= 1e-6 * exact,
+            "{:e}",
+            sr.xs[0].v
+        );
+        assert!(entry_check(sr.xs[0], ss.xs[0], lrn_coeff(1, 1, 2, beta), "t").is_err());
+    }
+
+    #[test]
+    fn entry_check_and_rf_rules() {
+        let c = judge_coeff(4, 24, 0.0);
+        assert!(entry_check(Rf::k(1.0), 1.0, c, "t").is_ok());
+        // 値 0 だが大きさ 1e3（相殺）: 絶対許容を超える。
+        assert!(entry_check(Rf { v: 0.0, m: 1e3 }, 0.0, c, "t").is_err());
+        // f32 だけが非有限・参照が非有限はどちらも拒否。
+        assert!(entry_check(Rf::k(1.0), f32::NAN, c, "t").is_err());
+        assert!(entry_check(Rf::k(f64::NAN), 1.0, c, "t").is_err());
+        // 分母の相殺は κ として商の大きさへ入る（分母の m では割らない）。
+        let den = Rf::k(1.0).minus(Rf::k(0.999));
+        let q = Rf::k(1.0).over(den);
+        assert!(q.m >= q.v.abs() * 1999.0 * 0.999, "{q:?}");
+        assert!(judge_budget(JUDGE_BUDGET, "t").is_ok());
+        assert!(judge_budget(JUDGE_BUDGET + 1, "t").is_err());
     }
 }

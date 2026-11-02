@@ -808,3 +808,52 @@ fn spectral_norm_zero_upstream_with_cancelling_coefficient_matrix_is_rejected() 
         .expect("loss");
     expect_rejected(&tape, &loss, &child, "spectral/zero-up-matrix-cancel");
 }
+
+/// PR #3950 codex 指摘 P1（スケール復元の逆伝播の underflow）: x=2^-80・size=1・β=−1・k=0 では
+/// `s^{-2β} = 2^-160` を 2^-60・2^-100 のチャンクで戻すため、seed 1 の cotangent が f32 で 0 になり、
+/// 構造の二階は 0 になる（解析値は `6·α·x`。順方向の値は正しいので forward の照合では見えない）。
+/// α を振り、受理なら二階が解析値と REQ-2 で一致し、拒否なら `child` が空であること、Codex の入力
+/// （α=1e36。解析値 ≈ 4.96e12）は拒否され、受理側（解析値が絶対許容内に収まる小さい α）も現れることを確かめる。
+#[test]
+fn lrn_scale_restoration_cotangent_underflow_is_rejected_or_exact() {
+    let shape = [1usize, 1, 1];
+    let x0 = (-80f32).exp2();
+    let mut outcomes = Vec::new();
+    for &alpha in &[1.0f32, 1e20, 1e30, 1e36] {
+        let ctx = format!("lrn/scale-restoration-underflow/alpha={alpha:e}");
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![x0], &shape));
+        let y = x.local_response_norm(1, alpha, -1.0, 0.0).expect("forward");
+        let loss = y.sum(None).expect("loss");
+        match tape.backward_create_graph(&loss, &child) {
+            Err(AutodiffError::Backward(_)) => {
+                assert!(child.is_empty(), "{ctx}: 拒否後の child は空");
+                outcomes.push(Outcome::Rejected);
+            }
+            Err(e) => panic!("{ctx}: 想定外のエラー {e:?}"),
+            Ok(cg) => {
+                let gx = cg.grad(&x).expect("grad").expect("到達");
+                let s = gx.sum(None).expect("sum");
+                let second = child.backward(&s).expect("child.backward");
+                let cx = cg.child_var(&x).expect("child_var").expect("写し");
+                let h = dense(second.get(&cx).expect("get").expect("到達"))[0];
+                let exact = 6.0 * f64::from(alpha) * f64::from(x0);
+                assert!(
+                    common::req2_close(f64::from(h), exact),
+                    "{ctx}: 受理したなら二階 {h:e} は解析値 {exact:e} と REQ-2 で一致する"
+                );
+                outcomes.push(Outcome::Accepted);
+            }
+        }
+    }
+    assert_eq!(
+        outcomes.last(),
+        Some(&Outcome::Rejected),
+        "Codex の入力（α=1e36）は拒否される"
+    );
+    assert!(
+        outcomes.contains(&Outcome::Accepted),
+        "受理側が無い（判定が過剰）: {outcomes:?}"
+    );
+}

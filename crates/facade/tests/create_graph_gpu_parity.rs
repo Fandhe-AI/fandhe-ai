@@ -1115,6 +1115,10 @@ fn run_norm_reparam_weight_norm(tp: &Tapes) -> Outputs {
     run_loss_class(tp, |z| {
         let v = z.narrow(0, 0, 8).unwrap().reshape(&[2, 4]).unwrap();
         let g = z.narrow(0, 8, 2).unwrap().reshape(&[2, 1]).unwrap();
+        // `g` をそのまま使うと group 1（v=[0.9, 0.1, 0.6, 0.3]・g=0.5）の Hessian 対角（項の大きさ約 5.5、
+        // 値約 0.029）の f32 の最悪誤差が REQ-2 を外れうるため、総括判定が保守的に拒否する（決定記録 §57.2）。
+        // `g²` で大きさを下げ、判定を通る入力で測る。
+        let g = g.mul(&g).unwrap();
         // `Σ w²` は `g` だけで決まり上流が `w` に平行になって相殺するため `tanh` を挟む。
         let w = v.weight_norm(&g, Some(0)).unwrap();
         w.tanh().sum(None).unwrap()
