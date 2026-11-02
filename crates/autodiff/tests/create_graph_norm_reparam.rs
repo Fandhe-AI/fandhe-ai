@@ -949,8 +949,8 @@ fn lrn_nan_column_still_judges_independent_finite_window() {
     );
 }
 
-fn lrn_sum<'t>(x: &Var<'t>, size: usize) -> Built<'t> {
-    x.local_response_norm(size, 1.0, 0.75, 2.0)?.sum(None)
+fn lrn_sum<'t>(x: &Var<'t>, size: usize, beta: f32) -> Built<'t> {
+    x.local_response_norm(size, 1.0, beta, 2.0)?.sum(None)
 }
 
 /// 正のプローブ: NaN の届かない窓の二階は有限で、NaN を有限値へ置き換えた入力（列の最大値は同じなので
@@ -958,18 +958,21 @@ fn lrn_sum<'t>(x: &Var<'t>, size: usize) -> Built<'t> {
 /// （NaN から最も遠いチャネルの自分への二階）の 2 通り。
 #[test]
 fn lrn_nan_column_finite_window_matches_reference() {
-    let cases: [(Vec<f32>, usize, usize); 2] = [
-        (vec![f32::NAN, 1.0], 1, 1),
-        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 3, 4),
+    // β = −1 は `−β−1 = 0` で `pow_grad` が定数 0 を返す分岐（f32・参照とも NaN を伝えない）。
+    let cases: [(Vec<f32>, usize, usize, f32); 4] = [
+        (vec![f32::NAN, 1.0], 1, 1, 0.75),
+        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 3, 4, 0.75),
+        (vec![f32::NAN, 1.0, 1.0, 1.0, 1.0], 1, 4, -1.0),
+        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 3, 4, -1.0),
     ];
-    for (x0, size, far) in cases {
+    for (x0, size, far, beta) in cases {
         let shape = [1usize, x0.len(), 1];
         let (first, rows) =
-            second_rows(&x0, &shape, |x| lrn_sum(x, size)).expect("NaN の届かない窓は受理");
+            second_rows(&x0, &shape, |x| lrn_sum(x, size, beta)).expect("NaN の届かない窓は受理");
         let mut x_ref = x0.clone();
         x_ref[0] = 0.5;
         let (first_ref, rows_ref) =
-            second_rows(&x_ref, &shape, |x| lrn_sum(x, size)).expect("参照");
+            second_rows(&x_ref, &shape, |x| lrn_sum(x, size, beta)).expect("参照");
         assert!(first[0].is_nan(), "size{size}: NaN の窓の 1 階は NaN");
         assert!(
             common::req2_close(f64::from(first[far]), f64::from(first_ref[far])),
@@ -1068,4 +1071,83 @@ fn spectral_norm_single_nan_reaches_every_entry() {
     let (first, rows) = r;
     assert!(first.iter().all(|v| v.is_nan()), "1 階: {first:?}");
     assert!(rows.iter().flatten().all(|v| v.is_nan()), "二階: {rows:?}");
+}
+
+// --- ホストの 1 階の非有限・全窓 NaN の列の順序（Codex P1／P2・Bugbot・PR #3950）------------------
+
+/// `α = 0` の分岐でも、有限の入力からホストの 1 階に演算で生まれた NaN（`up·x` の f32 積が inf になり、
+/// `cross = 0` との積で NaN）を拒否する（Codex P1。以前は構造だけを見て受理し、`cg.grad` に NaN が載った）。
+#[test]
+fn lrn_alpha_zero_rejects_generated_nonfinite_host_grad() {
+    let shape = [1usize, 1, 1];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e20], &shape));
+    let a = tape.var(&t(vec![1e20], &shape));
+    let y = x.local_response_norm(1, 0.0, 1.0, 1e20).expect("forward");
+    let loss = y.mul(&a).and_then(|r| r.sum(None)).expect("loss");
+    assert!(
+        dense(&loss.to_tensor())[0].is_finite(),
+        "forward と損失は有限"
+    );
+    let err = tape
+        .backward_create_graph(&loss, &child)
+        .map(|_| ())
+        .unwrap_err();
+    match &err {
+        AutodiffError::Backward(msg) => assert!(msg.contains("演算で生まれた非有限"), "{msg}"),
+        e => panic!("想定外のエラー {e:?}"),
+    }
+    assert!(child.is_empty(), "拒否後の child は空");
+}
+
+/// 正のプローブ（`α = 0`）: 積が f32 に収まる入力は受理され、`cg.grad` は `up·k^{-β}` で有限。x に NaN が
+/// あっても（`size = 1`）NaN の位置だけが NaN で、ほかは同じ値。
+#[test]
+fn lrn_alpha_zero_accepts_finite_and_propagates_input_nan() {
+    let shape = [1usize, 3, 1];
+    let c = [0.5f32, -2.0, 1.5];
+    for x0 in [vec![0.3f32, 1.0, -0.7], vec![f32::NAN, 1.0, -0.7]] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(x0.clone(), &shape));
+        let a = tape.var(&t(c.to_vec(), &shape));
+        let y = x.local_response_norm(1, 0.0, 0.75, 2.0).expect("forward");
+        let loss = y.mul(&a).and_then(|r| r.sum(None)).expect("loss");
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .expect("α = 0 の有限な入力は受理");
+        let gx = dense(&cg.grad(&x).expect("grad").expect("到達").to_tensor());
+        for i in 0..3 {
+            if x0[i].is_nan() {
+                assert!(gx[i].is_nan(), "NaN の位置は NaN");
+            } else {
+                let exact = f64::from(c[i]) * 2f64.powf(-0.75);
+                assert!(
+                    common::req2_close(f64::from(gx[i]), exact),
+                    "{i}: {} と {exact}",
+                    gx[i]
+                );
+            }
+        }
+    }
+}
+
+/// 全窓が NaN の列は、スケール上界の段検査（`s^{-2β}`）より前に外す（Codex P2・Bugbot。`x = [NaN, 1e30]`・
+/// `size = 3`・`α = 0.5`・`β = -1`・`k = 1` で、以前は有限値の最大から `s = 2^100` を選び `2^200` の段で
+/// 拒否していた）。受理され、1 階は全要素 NaN、`child` には構造が積まれる。
+#[test]
+fn lrn_all_nan_window_column_is_skipped_before_stage_checks() {
+    let shape = [1usize, 2, 1];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![f32::NAN, 1e30], &shape));
+    let y = x.local_response_norm(3, 0.5, -1.0, 1.0).expect("forward");
+    let loss = y.sum(None).expect("loss");
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("守る有限の要素が無い列は段検査で拒否しない");
+    assert!(!child.is_empty(), "構造が積まれる");
+    let gx = dense(&cg.grad(&x).expect("grad").expect("到達").to_tensor());
+    assert!(gx.iter().all(|v| v.is_nan()), "1 階は全要素 NaN: {gx:?}");
 }
