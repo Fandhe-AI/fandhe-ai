@@ -1823,6 +1823,8 @@ mod tests {
         assert!(struct_check(0.0, 0.0, 1e3, rounding_coeff(4), "t").is_err());
         assert!(struct_check(f64::NAN, 1.0, 1.0, 0.0, "t").is_ok());
         assert!(struct_check(1.0, f64::NAN, 1.0, 0.0, "t").is_err());
+        // 参照値が有限なら `m` だけの NaN でも拒否する（有限の要素を検査なしで通さない）。
+        assert!(struct_check(1.0, 1.0, f64::NAN, 0.0, "t").is_err());
     }
 
     #[test]
@@ -2327,6 +2329,25 @@ mod tests {
         assert!(q.m >= q.v.abs() * 1999.0 * 0.999, "{q:?}");
         assert!(judge_budget(JUDGE_BUDGET, "t").is_ok());
         assert!(judge_budget(JUDGE_BUDGET + 1, "t").is_err());
+        // NaN の規則: 両側 NaN だけ外し、片側だけの NaN・±inf は拒否する。
+        let nan = Rf {
+            v: f64::NAN,
+            m: f64::NAN,
+        };
+        assert!(entry_check(nan, f32::NAN, c, "t").is_ok());
+        assert!(entry_check(Rf::k(1.0), f32::NAN, c, "t").is_err());
+        assert!(entry_check(nan, 1.0, c, "t").is_err());
+        assert!(entry_check(Rf::k(1.0), f32::INFINITY, c, "t").is_err());
+        // forward の NaN の位置: 一致なら通し、f32 だけ・参照だけの NaN と長さ違いは拒否する。
+        assert!(same_nan(&[1.0f32, f32::NAN], &[Rf::k(1.0), nan]));
+        assert!(!same_nan(&[f32::NAN, 1.0f32], &[Rf::k(1.0), Rf::k(1.0)]));
+        assert!(!same_nan(&[1.0f32, 1.0], &[Rf::k(1.0), nan]));
+        assert!(!same_nan(&[1.0f32], &[Rf::k(1.0), Rf::k(1.0)]));
+        assert!(no_inf(&[1.0f32, f32::NAN]) && !no_inf(&[f32::NEG_INFINITY]));
+        assert!(!no_inf(&[Rf {
+            v: 1.0,
+            m: f64::INFINITY
+        }]));
     }
 
     /// LRN の窓（`lrn_cgrad` と同じ組み立て）。
