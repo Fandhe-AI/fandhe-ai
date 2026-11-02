@@ -954,16 +954,21 @@ fn lrn_sum<'t>(x: &Var<'t>, size: usize, beta: f32) -> Built<'t> {
 }
 
 /// 正のプローブ: NaN の届かない窓の二階は有限で、NaN を有限値へ置き換えた入力（列の最大値は同じなので
-/// スケールも同じ）の二階と REQ-2 で一致する。NaN の窓の 1 階は NaN。`size = 1`（窓が独立）と `size = 3`
-/// （NaN から最も遠いチャネルの自分への二階）の 2 通り。
+/// スケールも同じ）の二階と REQ-2 で一致する。NaN の窓の 1 階は NaN。`size = 1`（窓が独立）と `size = 2`・
+/// `size = 3`（NaN から最も遠いチャネルの自分への二階）。
 #[test]
 fn lrn_nan_column_finite_window_matches_reference() {
     // β = −1 は `−β−1 = 0` で `pow_grad` が定数 0 を返す分岐（f32・参照とも NaN を伝えない）。
-    let cases: [(Vec<f32>, usize, usize, f32); 4] = [
+    // 偶数 `size = 2`（forward 窓と反転窓がずれる）と、冪の指数 0 で NaN が消える β ∈ {0, −1, −2} も含む。
+    let cases: [(Vec<f32>, usize, usize, f32); 8] = [
         (vec![f32::NAN, 1.0], 1, 1, 0.75),
         (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 3, 4, 0.75),
         (vec![f32::NAN, 1.0, 1.0, 1.0, 1.0], 1, 4, -1.0),
         (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 3, 4, -1.0),
+        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 2, 4, 0.75),
+        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 2, 4, -1.0),
+        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 2, 4, 0.0),
+        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 2, 4, -2.0),
     ];
     for (x0, size, far, beta) in cases {
         let shape = [1usize, x0.len(), 1];
@@ -1073,7 +1078,7 @@ fn spectral_norm_single_nan_reaches_every_entry() {
     assert!(rows.iter().flatten().all(|v| v.is_nan()), "二階: {rows:?}");
 }
 
-// --- ホストの 1 階の非有限・全窓 NaN の列の順序（Codex P1／P2・Bugbot・PR #3950）------------------
+// --- ホストの 1 階の非有限・NaN を含む列の除外と順序（Codex P1／P2・Bugbot・PR #3950）-------------
 
 /// `α = 0` の分岐でも、有限の入力からホストの 1 階に演算で生まれた NaN（`up·x` の f32 積が inf になり、
 /// `cross = 0` との積で NaN）を拒否する（Codex P1。以前は構造だけを見て受理し、`cg.grad` に NaN が載った）。
@@ -1133,9 +1138,10 @@ fn lrn_alpha_zero_accepts_finite_and_propagates_input_nan() {
     }
 }
 
-/// 全窓が NaN の列は、スケール上界の段検査（`s^{-2β}`）より前に外す（Codex P2・Bugbot。`x = [NaN, 1e30]`・
-/// `size = 3`・`α = 0.5`・`β = -1`・`k = 1` で、以前は有限値の最大から `s = 2^100` を選び `2^200` の段で
-/// 拒否していた）。受理され、1 階は全要素 NaN、`child` には構造が積まれる。
+/// 1 階・二階の全要素が入力の NaN で NaN になる列は、スケール上界の段検査（`s^{-2β}`）より前に外す
+/// （Codex P2・Bugbot。`x = [NaN, 1e30]`・`size = 3`・`α = 0.5`・`β = -1`・`k = 1` で、以前は有限値の最大から
+/// `s = 2^100` を選び `2^200` の段で拒否していた）。受理され、1 階は全要素 NaN、`child` には構造が積まれる。
+/// 同じ入力で `size = 2` にすると有限の二階の経路が残るので外さない（次のテスト）。
 #[test]
 fn lrn_all_nan_window_column_is_skipped_before_stage_checks() {
     let shape = [1usize, 2, 1];
@@ -1150,6 +1156,33 @@ fn lrn_all_nan_window_column_is_skipped_before_stage_checks() {
     assert!(!child.is_empty(), "構造が積まれる");
     let gx = dense(&cg.grad(&x).expect("grad").expect("到達").to_tensor());
     assert!(gx.iter().all(|v| v.is_nan()), "1 階は全要素 NaN: {gx:?}");
+}
+
+/// 全 forward 窓が NaN でも、二階が全要素 NaN とは限らない列は外さない（Codex P1・Bugbot。`x = [NaN, 1e30]`・
+/// `size = 2`・`α = 0.5`・`β = -1`・`k = 1`）。偶数 size では反転窓がずれ、`β = −1` では `b = d^0 = 1` なので、
+/// 子テープの二階に入力の NaN に依存しない経路が残る（その経路は `1e30` の 2 乗の overflow と 0 との積で
+/// 演算から NaN を生む）。以前は全窓 NaN の列として外して受理していた。有限の `d_s` が無いのに有限の経路が
+/// 残る形として fail-closed で拒否し、`child` は空に戻る。
+#[test]
+fn lrn_all_nan_window_column_with_finite_second_order_path_is_rejected() {
+    let shape = [1usize, 2, 1];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![f32::NAN, 1e30], &shape));
+    let y = x.local_response_norm(2, 0.5, -1.0, 1.0).expect("forward");
+    let loss = y.sum(None).expect("loss");
+    let err = tape
+        .backward_create_graph(&loss, &child)
+        .map(|_| ())
+        .unwrap_err();
+    match &err {
+        AutodiffError::Backward(msg) => assert!(
+            msg.contains("有限の二階の経路が残る"),
+            "fail-closed の文言: {msg}"
+        ),
+        other => panic!("Backward で拒否: {other:?}"),
+    }
+    assert!(child.is_empty(), "拒否後の child は空");
 }
 
 /// 部分 NaN の列で、NaN の窓にしか入らない巨大値（`x_0 = 1e30`）にスケールを決めさせない（`size = 3` の
