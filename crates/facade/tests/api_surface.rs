@@ -44395,6 +44395,35 @@ fn backward_create_graph_structural_usage_doctest_is_present_and_compiled() {
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
 
+/// `create_graph` の RNN セル（`rnn_forward_seq`・`gru_forward_seq`。`RnnCell`・`GruCell`）の受理範囲を固定する
+/// 正ガード（イシュー #3795・決定記録 `docs/autodiff-higher-order-grad-decision.md` §37・§58）。
+///
+/// 本族の create_graph を拒否する否定ガードは `api_surface.rs` に存在しなかったため、反転ではなく
+/// 「受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。
+/// 挙動の本体は `tests/create_graph_facade.rs` の `{rnn,gru}_create_graph_via_facade`。
+/// 自己テストとして、存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+/// `GateParams` は facade が再エクスポートしないので、facade の doctest には現れない。
+#[test]
+fn backward_create_graph_rnn_gru_cell_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph rnn_gru_cell",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "rnn_forward_seq(&rnn, &x, Some(&h0))",
+        "gru_forward_seq(&gru, &x, Some(&h0))",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing =
+        surface_guard::usage_doctest_violations(&[entry(&["x.rnn_cell(&h_prev, GateParams"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
 /// `create_graph` の 3D 畳み込み族（`conv3d`・`conv_transpose3d`）の受理範囲を固定する正ガード
 /// （イシュー #3797・決定記録 `docs/autodiff-higher-order-grad-decision.md` §38・§59）。
 ///

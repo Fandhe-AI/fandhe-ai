@@ -2690,7 +2690,11 @@ impl Op {
             // 構造変換 3 Op（イシュー #3793・決定記録 §35/§56）。方式は
             // `create_graph/structural.rs`。`Interpolate` は下の payload 判定。
             | Op::Dropout { .. }
-            | Op::MaxUnpool { .. } => true,
+            | Op::MaxUnpool { .. }
+            // RNN セル 2 Op（イシュー #3795・決定記録 §37/§58）。方式は
+            // `create_graph/rnn_gru_cell.rs`。`LstmCell`／`LstmHidden` は `false` のまま。
+            | Op::RnnCell { .. }
+            | Op::GruCell { .. } => true,
             // `Interpolate` は `mode` の既知 7 variant だけ true（`InterpolateMode` は
             // `#[non_exhaustive]` なので未知 variant は安全側の false。`VectorNorm` の前例）。
             Op::Interpolate { mode, .. } => matches!(
@@ -2715,10 +2719,8 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::RnnCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }
-            | Op::GruCell { .. }
             | Op::Cholesky { .. }
             | Op::QrQ { .. }
             | Op::QrR { .. }
@@ -5766,6 +5768,42 @@ mod conv_transpose3d_max_unpool_op_tests {
                 assert!(!op.is_checkpoint_eligible(), "{mode:?}");
             }
         }
+    }
+
+    /// RNN セル 2 Op（イシュー #3795）: bias あり・なしの `RnnCell` と `GruCell` は
+    /// create_graph 対象、checkpoint 対象外のまま。隣接する `Cholesky` は `false` のまま。
+    /// （`LstmCell`／`LstmHidden` は #3796 が並行して反転しうるため見本にしない。）
+    #[test]
+    fn rnn_gru_cell_family_supports_create_graph() {
+        let n = NodeId;
+        for with_bias in [false, true] {
+            let (b_ih, b_hh) = if with_bias {
+                (Some(n(4)), Some(n(5)))
+            } else {
+                (None, None)
+            };
+            let rnn = Op::RnnCell {
+                x: n(0),
+                h_prev: n(1),
+                w_ih: n(2),
+                w_hh: n(3),
+                b_ih,
+                b_hh,
+            };
+            assert!(rnn.supports_create_graph() && !rnn.is_checkpoint_eligible());
+            let gru = Op::GruCell {
+                x: n(0),
+                h_prev: n(1),
+                w_ih: n(2),
+                w_hh: n(3),
+                b_ih,
+                b_hh,
+                gates_rzn: Tensor::<f32>::zeros(&[1, 3]).unwrap(),
+                q: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
+            };
+            assert!(gru.supports_create_graph() && !gru.is_checkpoint_eligible());
+        }
+        assert!(!Op::Cholesky { input: n(0) }.supports_create_graph());
     }
 
     #[test]

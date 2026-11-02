@@ -443,6 +443,28 @@ const CASES: &[Case] = &[
         run: run_structural_dropout,
         reject: None,
     },
+    // RNN セル 2 Op（イシュー #3795・決定記録 §37/§58）。forward の `gemm_bias_act`・`gru_pointwise` と 1 階の
+    // pointwise は CPU・CUDA・Metal ともデバイスカーネルでホストへ落ちない（K）。子テープの構造は MatMul・
+    // pointwise・Narrow・Concat で、微分は `h0`（公開 API の `x` は定数）。形状は B=3・D=4・H=5（3H=15）に固定し、
+    // 構造とその二階の GEMM の k がすべて 15 以下になるので split-K は発火しない。実機は未実測（#3856・#3858）。
+    Case {
+        name: "rnn_gru_cell_rnn",
+        family: "rnn_gru_cell",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Rule("k ∈ {B=3, D=4, H=5, 3H=15} ≤ 15 < 16 のため split-K 非発火"),
+        run: run_rnn_gru_cell_rnn,
+        reject: Some(reject_rnn_gru_cell_with_custom),
+    },
+    Case {
+        name: "rnn_gru_cell_gru",
+        family: "rnn_gru_cell",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Rule("k ∈ {B=3, D=4, H=5, 3H=15} ≤ 15 < 16 のため split-K 非発火"),
+        run: run_rnn_gru_cell_gru,
+        reject: None,
+    },
     // 損失のクラス軸系 6 variant（イシュー #3800・決定記録 §40/§55）。6 つとも 1 階がホスト関数（H）で、
     // 構造の Softmax・pointwise・Sum がデバイスで走る。構造に MatMul は無い。実機は未実測（#3857・#3859）。
     Case {
@@ -1100,6 +1122,107 @@ fn run_structural_dropout(tp: &Tapes) -> Outputs {
     run_structural(tp, &[3, 4], |z| z.dropout(0.4, true).unwrap())
 }
 
+/// RNN セル（#3795）。公開 API の `x` は定数なので、葉は `h0`（`[3, 5]`）。`Σ h_n²·c` で `H v ≠ 0` にする。
+/// `gru` が真なら `gru_forward_seq`、偽なら `rnn_forward_seq`。決定的な重み（`Rnn::new`／`Gru::new` のシード）。
+fn run_rnn_gru_cell(tp: &Tapes, gru: bool) -> Outputs {
+    let (b, d, h, steps) = (3usize, 4usize, 5usize, 2usize);
+    let h0v: Vec<f32> = (0..b * h).map(|i| 0.3 * ((i as f32) * 0.9).sin()).collect();
+    let xv: Vec<f32> = (0..steps * b * d)
+        .map(|i| 0.5 * ((i as f32) * 0.37 + 0.2).cos())
+        .collect();
+    let x = t(xv, &[steps, b, d]);
+    let rnn = fandhe_ai::nn::rnn::Rnn::new(d, h, true, 7).expect("Rnn::new");
+    let grucell = fandhe_ai::nn::rnn::Gru::new(d, h, true, 7).expect("Gru::new");
+    let dir: Vec<f32> = (0..b * h)
+        .map(|i| 1.0 - 0.0625 * i as f32 + 0.03 * (i * i) as f32 / 4.0)
+        .collect();
+    let z = tp.parent.var(&t(h0v, &[b, h]));
+    let h_n = if gru {
+        tp.parent
+            .gru_forward_seq(&grucell, &x, Some(&z))
+            .expect("gru_forward_seq")
+            .h_n
+    } else {
+        tp.parent
+            .rnn_forward_seq(&rnn, &x, Some(&z))
+            .expect("rnn_forward_seq")
+            .h_n
+    };
+    let c: Vec<f32> = (0..b * h)
+        .map(|i| 0.4 + 0.37 * i as f32 - 0.05 * (i * i) as f32 / 4.0)
+        .collect();
+    let c = tp.parent.var_no_grad(&t(c, &[b, h]));
+    let loss = h_n.mul(&h_n).unwrap().mul(&c).unwrap().sum(None).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&z).unwrap().expect("grad"));
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&z).unwrap().expect("first_order"));
+    let g = cg.grad(&z).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir, &[b, h]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let zc = cg.child_var(&z).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&zc).unwrap().expect("second order"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: None,
+    }
+}
+
+fn run_rnn_gru_cell_rnn(tp: &Tapes) -> Outputs {
+    run_rnn_gru_cell(tp, false)
+}
+
+fn run_rnn_gru_cell_gru(tp: &Tapes) -> Outputs {
+    run_rnn_gru_cell(tp, true)
+}
+
+/// Q5（#3795）: RNN セルの下流に恒久対象外の `Op::Custom` があれば `Err(Backward)` で、子テープは空のまま。
+fn reject_rnn_gru_cell_with_custom(tp: &Tapes) -> bool {
+    struct Identity;
+    impl fandhe_ai::CustomFunction for Identity {
+        fn name(&self) -> &str {
+            "identity"
+        }
+        fn output_shape(&self, s: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+            Ok(s[0].to_vec())
+        }
+        fn forward(&self, i: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+            Ok(i[0].contiguous())
+        }
+        fn backward(
+            &self,
+            _i: &[&Tensor<f32>],
+            _o: &Tensor<f32>,
+            up: &Tensor<f32>,
+            _r: &[bool],
+        ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+            Ok(vec![Some(up.contiguous())])
+        }
+    }
+    let rnn = fandhe_ai::nn::rnn::Rnn::new(2, 3, true, 7).expect("Rnn::new");
+    let x = t(vec![0.1, 0.2, 0.3, 0.4], &[2, 1, 2]);
+    let h0 = tp.parent.var(&t(vec![0.2, -0.3, 0.5], &[1, 3]));
+    let h_n = tp
+        .parent
+        .rnn_forward_seq(&rnn, &x, Some(&h0))
+        .expect("rnn_forward_seq")
+        .h_n;
+    let custom = tp
+        .parent
+        .custom(Arc::new(Identity), &[h_n])
+        .expect("custom");
+    let loss = custom.sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
 /// 損失の回帰系（#3798）。葉 `z`（長さ 12 = `[x; target; var]`）から損失を作り、`loss²` で `H v ≠ 0` にする。
 fn run_loss_regression(tp: &Tapes, f: for<'t> fn(&Var<'t>) -> Var<'t>) -> Outputs {
     let z0: Vec<f32> = vec![
@@ -1478,6 +1601,7 @@ cuda_family_test!(
     "loss_binary_margin"
 );
 cuda_family_test!(create_graph_structural_cuda_matches_cpu, "structural");
+cuda_family_test!(create_graph_rnn_gru_cell_cuda_matches_cpu, "rnn_gru_cell");
 cuda_family_test!(create_graph_loss_class_cuda_matches_cpu, "loss_class");
 cuda_family_test!(
     create_graph_loss_regression_cuda_matches_cpu,
@@ -1517,6 +1641,7 @@ metal_family_test!(
     "loss_binary_margin"
 );
 metal_family_test!(create_graph_structural_metal_matches_cpu, "structural");
+metal_family_test!(create_graph_rnn_gru_cell_metal_matches_cpu, "rnn_gru_cell");
 metal_family_test!(create_graph_loss_class_metal_matches_cpu, "loss_class");
 metal_family_test!(
     create_graph_loss_regression_metal_matches_cpu,
@@ -1575,6 +1700,11 @@ fn loss_binary_margin_cases_pass_cpu_against_cpu() {
 #[test]
 fn structural_cases_pass_cpu_against_cpu() {
     run_family("structural", None);
+}
+
+#[test]
+fn rnn_gru_cell_cases_pass_cpu_against_cpu() {
+    run_family("rnn_gru_cell", None);
 }
 
 #[test]
