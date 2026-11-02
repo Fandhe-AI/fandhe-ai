@@ -950,3 +950,44 @@ fn rnn_gru_large_but_safe_scale_is_accepted() {
         assert!(r.iter().all(|v| v.is_finite()), "{kind:?}: {r:?}");
     }
 }
+
+#[test]
+fn gru_n_rounding_gap_is_not_amplified_into_gradient() {
+    // PR #3952 の codex P1: n が 1 と 0.99999976 に割れる入力（REQ-2 の許容内）でも、
+    // `1 − n²` と上流 1e4 の増幅で w_ih の勾配がずれないこと（n の値を forward の FMA 値へ補正する）。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&t(vec![1.0], &[1, 1]));
+    let hv = tape.var(&t(vec![1.0], &[1, 1]));
+    let wi = tape.var(&t(vec![1.0, 0.0, -73105848.0], &[1, 3]));
+    let wh = tape.var(&t(vec![0.0, 0.0, 100000000.0], &[1, 3]));
+    let y = xv
+        .gru_cell(
+            &hv,
+            GateParams {
+                w_ih: &wi,
+                w_hh: &wh,
+                b_ih: None,
+                b_hh: None,
+            },
+        )
+        .unwrap();
+    let cv = tape.var_no_grad(&t(vec![1e4], &[1, 1]));
+    let loss = y.mul(&cv).unwrap().sum(None).unwrap();
+    let want = dense(
+        tape.backward(&loss)
+            .unwrap()
+            .get(&wi)
+            .unwrap()
+            .expect("w_ih"),
+    );
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("拒否ではなく補正で受理される");
+    let got = dense(cg.grad(&wi).unwrap().expect("w_ih").to_tensor());
+    common::assert_all_req2_close(
+        &got,
+        &want.iter().map(|&a| f64::from(a)).collect::<Vec<_>>(),
+        "n 丸め差の増幅",
+    );
+}

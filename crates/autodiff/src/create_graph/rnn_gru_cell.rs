@@ -25,7 +25,8 @@
 //! （`MatMul`・`Transpose`・`Narrow`・`Concat`・`Add`・`Sub`〈`ScalarBinary`〉・`Mul`・
 //! `Sigmoid`・`Tanh`・`Sum`）に限る。
 //!
-//! **数値契約**: GRU の再構築は forward の `mul_add` と丸めがずれうるため、cgrad の値は
+//! **数値契約**: GRU の再構築は forward の `mul_add` と丸めがずれうるため、`n` の値には
+//! forward の FMA 値への定数補正を足し（`1 − n²` の増幅を防ぐ）、cgrad の値は
 //! 1 階と REQ-2 統一複合判定で一致する（bit 一致は主張しない。`first_order()` 側は素の
 //! `Tape::backward` と bit 同一）。tolerance・baseline は変えない。
 //!
@@ -246,17 +247,29 @@ pub(super) fn gru_cell_cgrad<'c>(
     let q = blk(&pre_h, 2)?;
     let n = r.mul(&q)?.add(&blk(&pre_i, 2)?)?.tanh();
 
-    // FMA 契約の判定: forward は `r.mul_add(q, pre_i_n)`、上の再構築は積を先に丸める。
-    // 相殺で `n` が REQ-2 複合判定外へずれる入力は拒否する（tolerance は緩めない）。
-    {
+    // FMA 契約の補正と判定: forward は `r.mul_add(q, pre_i_n)`、上の再構築は積を先に丸める。
+    // (1) `n` の値を forward の FMA 値へ合わせる定数補正 `c = n_fwd − n_rec` を足す
+    //     （勾配は `n_rec` の構造を通るので微分可能性は保たれ、値だけが forward と一致する）。
+    //     `1 − n²` は n が ±1 に近いと丸め差が増幅されるため、許容内のずれでも補正が要る。
+    // (2) 相殺で `n` が REQ-2 複合判定外へずれる入力は従来どおり拒否する（tolerance は緩めない）。
+    let n = {
         let rv = value_of(child, &r)?;
         let qv = value_of(child, &q)?;
         let pv = value_of(child, &blk(&pre_i, 2)?)?;
-        let (rs, qs, ps) = (rv.host_slice(), qv.host_slice(), pv.host_slice());
-        for ((&rr, &qq), &pp) in rs.iter().zip(qs.iter()).zip(ps.iter()) {
-            let fused = f64::from(rr.mul_add(qq, pp).tanh());
+        let nv = value_of(child, &n)?;
+        let (rs, qs, ps, ns) = (
+            rv.host_slice(),
+            qv.host_slice(),
+            pv.host_slice(),
+            nv.host_slice(),
+        );
+        let mut corr = Vec::with_capacity(ns.len());
+        for (((&rr, &qq), &pp), &nn) in rs.iter().zip(qs.iter()).zip(ps.iter()).zip(ns.iter()) {
+            let fused_f = rr.mul_add(qq, pp).tanh();
+            let fused = f64::from(fused_f);
             let split = f64::from((rr * qq + pp).tanh());
             if fused.is_nan() && split.is_nan() {
+                corr.push(0.0f32);
                 continue;
             }
             let diff = (fused - split).abs();
@@ -265,8 +278,12 @@ pub(super) fn gru_cell_cgrad<'c>(
                     "GruCell: r·q + pre_i_n の FMA と分離丸めで n が REQ-2 の許容を超えてずれる（桁落ち）",
                 ));
             }
+            let c = fused_f - nn;
+            corr.push(if c.is_finite() { c } else { 0.0 });
         }
-    }
+        let c = Tensor::new(corr, &out_shape)?;
+        n.add(&child.var_no_grad(&c))?
+    };
     let mut operands = vec![&m.x, &m.h_prev, &m.w_ih, &m.w_hh, &q];
     operands.extend(m.b_ih.iter().chain(m.b_hh.iter()));
     guard_overflow(child, g, &operands, "GruCell")?;

@@ -2038,7 +2038,7 @@ CI の行は新設 `crates/autodiff/tests/create_graph_rnn_cell.rs` に置く。
 
 - 構造は 1 階と同じ f32 の積を同じ順で並べるだけで、スケール変換も f64 縮約も入らない。このため既定では §27.3 型の総括判定を置かない。
 - 掃引テストで「1 階が有限なら cgrad・二階も有限」を固定する。違反する入力が見つかったら、実装 PR で型付きの拒否を足し、本節に逸脱として追記する（37.14 の論点 5）。
-- **逸脱（PR #3952 の codex 指摘で追加）**: RNN・GRU は掃引で違反入力が見つかったため、型付きの拒否を足した。(1) GRU の `r·q + pre_i_n` は forward が FMA、再構築が分離丸めで、相殺入力で `n` が REQ-2 の許容を超えてずれる場合に `Err`。(2) 上流 `g` × オペランド（x・h_prev・W・bias・GRU の `q`）の上界が `STAGE_BOUND_GUARD`（2^125）以上なら、真の二階が 0 でも `0 × inf = NaN` になりうるため `Err`（RNN・GRU 共通）。tolerance は変えない。
+- **逸脱（PR #3952 の codex 指摘で追加）**: RNN・GRU は掃引で違反入力が見つかったため、型付きの拒否を足した。(1) GRU の `r·q + pre_i_n` は forward が FMA、再構築が分離丸めで、相殺入力で `n` が REQ-2 の許容を超えてずれる場合に `Err`。(2) 上流 `g` × オペランド（x・h_prev・W・bias・GRU の `q`）の上界が `STAGE_BOUND_GUARD`（2^125）以上なら、真の二階が 0 でも `0 × inf = NaN` になりうるため `Err`（RNN・GRU 共通）。(3) GRU の `n` は FMA と分離丸めの差が許容内でも `1 − n²` と上流勾配で増幅され勾配が REQ-2 を外れうる（`n` が 1 と 0.99999976 になる例。w_ih の n 列の勾配が素の backward 0・cgrad 約 0.002384）。このため再構築した `n` に forward の FMA 値への定数補正（`c = n_fwd − n_rec`、勾配を持たない定数）を足し、勾配構造は保ったまま値だけを forward と一致させる（拒否ではなく構造側の修正）。tolerance は変えない。
 - `is_checkpoint_eligible` は触らない。§21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。
 
 ### 37.13 GPU の forward 経路と Phase 10
@@ -4570,7 +4570,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - **ファイル名**: 設計表の族名 `rnn_gru_cell`（§48）に合わせ、実装は `rnn_gru_cell.rs`、統合テストは `create_graph_rnn_gru_cell.rs`（#3796 が並行して別名のファイルを足しても衝突しない）。
 - **RNN の bit 一致の実測**: facade の経路（CPU バックエンド）で `rnn_forward_seq` の `cg.grad` は素の `backward` と bit 一致した。`gru_forward_seq` は子テープでゲートを作り直す（forward の `mul_add` と丸めがずれる）ので REQ-2 で突合する。
 - **Hessian の突合方式**: f32 の 1 階勾配の中央差分は、解析 Hessian の対称性（`|H[j][i] − H[i][j]| ≲ 1e-7`）から見て、差分側に絶対誤差 ~2e-5 の丸め雑音がある（BPTT 3 step では ~6e-5）。そこで (1) 融合 Op を使わず既存の primitive（`matmul`・`add`・`tanh`・`sigmoid`・`narrow`・`mul`・`sub`）で書いた参照の解析 Hessian と REQ-2 で雑音なしに突合し（`assert_hessian_matches_primitives`）、(2) 有限差分は Richardson 外挿（h = 2e-2 と 1e-2）に差分側の分解能として絶対誤差 5e-5（BPTT は 1.5e-4）の床を足して併用する。tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）は変えていない。
-- **掃引の範囲（§37.12・§37.14 論点 5）**: 「1 階が有限なら cgrad が有限」は全スケール（1e-3〜1e30 の入力・重み、上流 1〜3e38）で成り立った。一方、二階の行列ベクトル積 `Hv` と孫テープの出力が有限であることは、`g × scale³ ≤ 1e30` の範囲に限って問う。外側（例: 重み・入力 1e10 で上流 1e30）では、1 階が有限（飽和して 0）でも cotangent × W × x の中間積が f32 を超え、真値が 0 でも `0 × inf = NaN` になる。これは §27.3 と同じ「真の二階が f32 に収まらない領域」で、型付きの拒否は足していない（拒否は「受理して誤った値を返す」入力があるときに足す方針で、`cg.grad` は全範囲で 1 階に従い、`hvp`・`jvp_create_graph` は全範囲で拒否されず `Ok` を返す）。
+- **掃引の範囲（§37.12・§37.14 論点 5）**: 「1 階が有限なら cgrad が有限」は全スケール（1e-3〜1e30 の入力・重み、上流 1〜3e38）で成り立った。一方、二階の行列ベクトル積 `Hv` と孫テープの出力が有限であることは、`g × scale³ ≤ 1e30` の範囲に限って問う。外側（例: 重み・入力 1e10 で上流 1e30）では、1 階が有限（飽和して 0）でも cotangent × W × x の中間積が f32 を超え、真値が 0 でも `0 × inf = NaN` になる。これは §27.3 と同じ「真の二階が f32 に収まらない領域」で、§37.12 の逸脱どおり `guard_overflow`（上流 `g` の最大絶対値 × max(1, オペランドの最大絶対値) が `STAGE_BOUND_GUARD`〈2^125〉以上）が型付きの `Err` で拒否する。上の例（重み・入力 1e10、上流 1e30）は拒否対象で、受理されるのは上界が 2^125 未満の入力に限る。
 - 隣接する fail-closed Op の見本は恒久対象外の `Op::Custom`（§32 の前例）。#3796 で反転する `LstmCell`／`LstmHidden` は見本にしていない（単体テストの隣接見本は `Cholesky`）。
 - 既存テストの反転は無かった（RNN セルを「拒否される Op」の見本にしている既存テストは無い）。
 
