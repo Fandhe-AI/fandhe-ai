@@ -44634,8 +44634,7 @@ fn backward_create_graph_linalg_norm_rank_usage_doctest_is_present_and_compiled(
 /// facade に本族を拒否する否定ガードは無かったため、反転ではなく「受理されること」を示す facade の doctest
 /// （実際にコンパイル・実行される）の実在を固定する。挙動の本体は `tests/create_graph_facade.rs` の
 /// `qr_create_graph_via_facade`・`qr_wide_is_rejected_via_facade`。自己テストとして、存在しない needle を課すと
-/// 違反が出ること（検出器が空振りしないこと）も確かめる。`Svd*`・`Eigh*` は #3808 まで拒否のままで、ここでは
-/// 受理を固定しない。
+/// 違反が出ること（検出器が空振りしないこと）も確かめる。`svd`・`eigh` は #3808 の下のガードが扱う。
 #[test]
 fn backward_create_graph_linalg_qr_usage_doctest_is_present_and_compiled() {
     let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
@@ -44652,6 +44651,33 @@ fn backward_create_graph_linalg_qr_usage_doctest_is_present_and_compiled() {
     assert!(ok.is_empty(), "{ok:?}");
     // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
     let missing = surface_guard::usage_doctest_violations(&[entry(&["x.qr_missing_needle()"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
+/// `create_graph` の分解 `svd`・`eigh`（`SvdU`・`SvdS`・`SvdVh`・`EighValues`・`EighVectors`）の受理範囲を固定する
+/// 正ガード（イシュー #3808・決定記録 `docs/autodiff-higher-order-grad-decision.md` §44・§68）。
+///
+/// facade に本族を拒否する否定ガードは無かったため、反転ではなく「受理されること」を示す facade の doctest
+/// （実際にコンパイル・実行される）の実在を固定する。挙動の本体は `tests/create_graph_facade.rs` の
+/// `{svd,eigh}_create_graph_via_facade`・`eigh_degenerate_is_rejected_via_facade`。自己テストとして、存在しない
+/// needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_linalg_svd_eigh_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph linalg svd eigh",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "x.eigh()?",
+        "eye.eigh()?",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["x.eigh_missing_needle()"])]);
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
 

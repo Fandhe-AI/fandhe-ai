@@ -5106,3 +5106,68 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: `Svd*`・`Eigh*`（#3808）、横長 QR の二階（1 階も未対応）、GPU の opt-in ゲート ON の公開（#3405）、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（#3739）、`MatrixNorm` の `Nuc`・`Spectral` の再評価の起票、facade の公開名の追加。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`eval/linalg.rs`・`Var::qr`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
 - 追跡表の項目 4 は「保留」のまま（`Svd*`・`Eigh*`・`Nuc`／`Spectral` が残るため）。
+
+## 68. 実装記録（イシュー #3808・親 #3719 系。create_graph の B 区分・`SvdU`・`SvdS`・`SvdVh`・`EighValues`・`EighVectors`）
+
+### 68.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity だけが Phase 10 に残り、本記録の範囲では未実測）。設計は §44（#3735）で、本節はその実装記録。節番号は、main が §67 まで使うため §68 を取った（rebase 時に、兄弟のイシューと衝突していないか再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。書かれているのは次の 2 点で、これ以上の承認は主張しない。
+  - 「B 区分: §38〜§44 の推奨どおり実装する」（§44.14 の推奨: 7 Op を実装する／push 順序契約で兄弟を取る／縮退は兄弟を問わず拒否する／SVD の縮退判定は既存の絶対判定 1e-9 のまま／σ=0 は拒否する／値は V3／非有限の g は拒否する／空分解は拒否する）
+  - 「§44 点 4: 相対判定の定数は新設しない」
+
+### 68.1 実装したもの
+
+| 対象 | cgrad（`F_ij = 1/(σj² − σi²)`、`i = j` は 0） | 方式 |
+|---|---|---|
+| `SvdU`（`dU = g`） | `J = (Uᵀg − gᵀU) ⊙ F`、`dA = U (J ⊙ σ_j) Vh + g̃ Vh − U (Uᵀ g̃) Vh`（`g̃ = g ⊙ (1/σ_j)`） | V3 + f32 構造。値は 1 階と同じ `eval::linalg::svd_vjp` |
+| `SvdS`（`dS = g`） | `dA = (U ⊙ g_j) Vh` | 同上 |
+| `SvdVh`（`dV = gᵀ`） | `K = (Vh gᵀ − g Vhᵀ) ⊙ F`、`dA = U (σ_i ⊙ K) Vh + U g̃ − U (g̃ V) Vh`（`g̃ = (1/σ_i) ⊙ g`） | 同上 |
+| `EighValues`（`dλ = g`） | `ga = (V ⊙ g_j) Vᵀ` | 同上。値は `eval::linalg::eigh_vjp` |
+| `EighVectors`（`dV = g`） | `X = Vᵀg`、`middle_ij = 0.5 (X − Xᵀ)_ij / (λ_j − λ_i)`（`i ≠ j`）、`ga = V middle Vᵀ` | 同上 |
+
+- Eigh の `ga` は、1 階の `eigh_vjp` と同じく下三角へ集約する（`where(狭義下三角, ga + gaᵀ, where(対角, ga, 0))`）。forward は下三角だけを読むため、上三角方向の勾配は 0。
+- 再生は公開メソッド `Var::svd`／`Var::eigh`（`linalg_ops::eigh`）への自己再生で、`build_mirror` 段 2 から専用の `decomp::replay_svd`／`replay_eigh` へ振り分ける。分解ごとに `svd()`／`eigh()` は 1 回しか呼ばない（より前の兄弟の写しがあれば、その隣接ノードから `sibling_of` で導く）。
+- 兄弟は push 順序契約で取る（`Var::svd` は `SvdU`→`SvdS`→`SvdVh`、`eigh` は `EighValues`→`EighVectors` を連続 push）。`decomp::sibling_of`（§67 で導入）を共用する。
+- 部分寄与はノードごとに別々に計算し、`accumulate` が合算する（丸めが変わるため）。構造の MatMul は `matmul_fp32_strict`。対角・三角のマスクは bool を `where_cond` に渡して作る。`F` と `E` は `where(eye, 1, D)` で安全な分母にしてから逆数を取る。`m×m`・`n×n` は作らず、`k×k` を経由する結合順にする。
+- `supports_create_graph` は SVD 3 Op と Eigh 2 Op を、それぞれ同時に `true` 側へ移した（外側の網羅 match にワイルドカードは足していない）。実装は `crates/autodiff/src/create_graph/decomp.rs`。
+
+### 68.2 設計（§44）からの差・明確化
+
+- **入口検査 `check_svd_triple`／`check_eigh_pair`**（`validate_ancestors`。子テープへ書く前）: push 順序契約、因子の bit 整合、空分解、縮退、SVD の σ == 0 を拒否する。
+  - SVD の縮退判定は 1 階の `svd_vjp`（`eval/linalg.rs`）と同じ絶対判定 `|σj² − σi²| < 1e-9` の述語を `decomp.rs` に写した（`svd_vjp` 本体は触らず、定数も新設しない）。しきい値のすぐ内側・外側で `svd_vjp` の `InvalidArgument` と一致することを単体テスト `svd_degenerate_predicate_matches_first_order_svd_vjp` で固定した。
+  - Eigh の縮退判定は `EIGH_DEGENERATE_RTOL`（値は 1e-9 のまま。可視性だけを `pub(crate)` にした）と `eigh_vjp` と同じ式・同じ不等号。
+  - **1 階との意図的な違い**: 1 階の `eigh_vjp` は固有値だけの損失（`gV ≡ 0`）なら縮退でも受理する。create_graph では二階が `1/E²` で破綻するため、どの兄弟を使う損失でも縮退を拒否する（`eigh_degenerate_values_only_first_order_ok_but_create_graph_rejected` で対比）。
+  - **横長（`m < n`）は拒否しない**。SVD の forward は転置で横長に対応しており、§44.4 のテストも縦長・横長・正方を対象にしている。横長を拒否する QR（§67）とは非対称になる。
+  - σ == 0 の判定は厳密ゼロ比較（1 階は `1/σ` を 0 として扱うが、二階は定義されない）。
+- **総括判定 `guard_svd`／`guard_eigh`**（§44.12）: f64 参照で構造の各段を求め、`g` の非有限、`all_stage_ok` 外れ、`rounding_ok`（桁落ち）、`second_order_ok` 外れを拒否する。新しい定数は作らない。
+  - 二階の上界: SVD は因子 `max(m,n)·max(|U|,|Vh|)`・`max|F|·max(σ_max,1)²`・`max(1/σ)`・`σ_max`、Eigh は `n·max|V|`・`1/min|E|`。冪は 4、`extra = max(max|g|, 1)`（保守的な見積り）。
+  - 積和の段長 `terms`: 最長の縮約長に段数 4 を足した値（`SvdU` は `m + 4`、`SvdS` は `k + 1`、`SvdVh` は `n + 4`、Eigh は `EighVectors` が `3n + 2`・`EighValues` が `n + 1`）。`SvdS` に `m` を入れると `[100000,1]` が正当な入力でも拒否されるため分けた（§67.2 の `QrR` と同じ）。各段の長さの総和にすると小さな入力でも桁落ちとして拒否されすぎたため、この見積りにした。
+- **既知の保守的拒否（三階の機構）**: 孫テープ（子テープ上の勾配をさらに `backward_create_graph` する経路）では、子テープ側の cotangent が大きく、`svd` 損失の `s`・`[3,3]` のケースが桁落ちの見積りで拒否される。拒否は型付きエラーで孫テープは空のまま（`check_grandchild` が SVD に限り許容）。保証範囲は二階まで（§68.4）。
+- **差し替えた既存テスト**: `tests/create_graph_linalg_fft.rs` の fail-closed 固定を 7 件から 2 件へ（`svd.u`・`svd.s`・`svd.vh`・`eigh.values`・`eigh.vectors` を外した。残りは `MatrixNorm` の `Nuc`・`Spectral`）。`tape.rs` の `linalg_fft_family_supports_create_graph` の unsupported 見本から `SvdU` を外し、`qr_family_supports_create_graph` を分解族 7 Op の検査に広げた。`tests/create_graph_decomp.rs` の隣接 Op の見本は `Op::Custom` だけにした（§44.14 点 12）。
+- **関数名の制約**: `api_surface.rs` の `LINALG_OPS_FN_NAMES` と完全一致する `fn`（`svd`・`eigh` など）を宣言しない（`check_svd_triple`・`check_eigh_pair`・`replay_svd`・`replay_eigh`・`guard_svd`・`guard_eigh`・`svd_cgrad`・`eigh_cgrad` と命名）。
+
+### 68.3 テスト
+
+- `crates/autodiff/tests/create_graph_decomp.rs`（CI）
+  - Hessian と 5 点中央差分の突合（`svd_hessian_matches_finite_difference`: 縦長 `[4,3]`・横長 `[2,3]`・正方 `[3,3]`、損失は U・S・Vh それぞれと混合に加え、gauge 不変な再構成 `U diag(s) Vh` と `U²`・`Vh²`。`eigh_hessian_matches_finite_difference`: `n = 2, 3, 4`、固有値だけ・固有ベクトルだけ・両方。上三角方向の勾配が 0 であることも確認）
+  - 1 階の bit 同一と `cg.grad`（`svd_eigh_cg_grad_bit_identical_for_linear_upstream`）、`jvp_create_graph`（`svd_eigh_jvp_create_graph_matches_central_difference`）、兄弟が祖先に無い場合（`svd_eigh_sibling_not_in_ancestors_second_order`）
+  - 拒否: 縮退・σ == 0・空行列（`svd_eigh_degenerate_inputs_rejected_child_empty_and_retry`）、固有値だけの損失の縮退（`eigh_degenerate_values_only_first_order_ok_but_create_graph_rejected`）、巨大な上流 `±3e38`・上界超過の近接スペクトル（`svd_eigh_unsafe_inputs_rejected_child_empty`）
+  - 受理域（`1e-3`〜`1e3`）で 3 段とも有限（`svd_eigh_moderate_scales_accepted_and_finite`）。必須ベクトル（§44.5、スケール `1e20`・`1e-20`）は、受理なら勾配が有限、拒否なら `Err(Backward)` かつ `child` が空であることを固定した（`svd_eigh_extreme_scales_mandatory_vectors`）。SVD の `1e-20` は σ² の絶対判定で拒否され、1 階と同じ挙動になる。
+  - `[100000,1]`（`svd_cgrad_does_not_materialize_m_by_m`）、隣接 Op `Op::Custom` の fail-closed（`svd_eigh_neighbouring_unsupported_op_stays_fail_closed`）
+- 単体: `decomp.rs` の push 順序契約違反（隙間・別 input・孤立 `SvdS`／`SvdVh`・順序入れ替え・孤立 `EighVectors`）の入口拒否、`svd()`／`eigh()` が 1 回だけであること、SVD の縮退述語と `svd_vjp` の一致。`tape.rs` の `qr_family_supports_create_graph`（分解族 7 Op と、隣接の `MatrixNorm` `Nuc`・`Spectral` が `false`）。
+- facade: `{svd,eigh}_create_graph_via_facade`・`eigh_degenerate_is_rejected_via_facade`、`backward_create_graph` の rustdoc に `eigh` の閉形式（1 階 `(4, 0, 4, 6)`・2 階 `(2, 0, 4, 2)`）と `eigh(I₂)` の拒否を示す doctest、正ガード `backward_create_graph_linalg_svd_eigh_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き。facade に本族を拒否する否定ガードは元から無かった）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `linalg_svd`（`linalg_svd_tall`・`linalg_svd_wide`）と `linalg_eigh`（`linalg_eigh_sym3`。Q5 は縮退の拒否）を追加（`Route::H`・`Judge::Strict`・MatMul の形状を列挙）、`create_graph_linalg_{svd,eigh}_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査 `linalg_{svd,eigh}_cases_pass_cpu_against_cpu`。
+
+### 68.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`first_order()` は素の `backward` と bit 一致し、値は V3 なので `cg.grad` も CPU で 1 階と bit 一致する。tolerance・baseline・ガードレール閾値・`STAGE_BOUND_GUARD`・FMA 契約は変えない。新しい baseline・定数は作らない。
+- 保証範囲は、総括判定を通った入力で、seed の各要素の絶対値が 1 以下の二階まで（有限差分と REQ-2 判定で一致）。孫テープ（三階の機構）は有限差分との突合は通るが、保守的に拒否されうる（§68.2）。縮退・σ == 0・真値が f32 を超える場合は保証外。判定は保守的で、拒否されても実際に破綻するとは限らない。
+- gauge（符号・縮退部分空間の基底）に依存する損失は、forward の符号正規化（`normalize_max_abs_sign`）の下で、入力の摂動で符号が反転しない範囲に限って有限差分と一致する。
+
+### 68.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。SVD はデバイスカーネルが無く、Eigh は CUDA のゲートが既定 OFF のため、どちらも既定ではホストへフォールバックし、構造の `MatMul` 等だけがデバイスで走る（新しいカーネルは作らない）。§44.4 の「ゲート ON の決定性」の行は本 PR では未追加で、Phase 10 へ申し送る。
+- スコープ外: `MatrixNorm` の `Nuc`・`Spectral` の再評価と起票（#3767 の承認は得ているが、起票は別途ユーザー確認が要る）、縮退クラスタ内で `g` が一定の損失を射影子の構造で受理すること、GPU の opt-in ゲート ON の公開（#3405）、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（#3739）、`IndexedScatterReduce` の `Prod`、facade の公開名の追加。
+- 変えていないもの: 1 階の VJP 本体（`svd_vjp`・`eigh_vjp`）・forward・`Tape::backward`・`Var::svd`／`eigh` のシグネチャ・`Op` の payload・`SvdVars`／`EighVars`・`AutodiffError` の variant・tolerance・baseline・ガードレール閾値・`STAGE_BOUND_GUARD`・FMA 契約・`EIGH_DEGENERATE_RTOL` の値・SVD の 1e-9・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文。`unsafe` は追加していない。
+- 追跡表の項目 4 は「保留」のまま（`Nuc`／`Spectral` と `IndexedScatterReduce` の `Prod` が残るため。閉じるのは #3812 の役目）。
