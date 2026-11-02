@@ -654,3 +654,17 @@ fn norm_reparam_sweep_every_structure_path_is_finite_or_rejected() {
     );
     assert!(rejected > 0, "拒否側が 1 件も無い（判定が効いていない）");
 }
+
+/// PowScalar の微分係数 `e·d^(e-1)` 単体が f32 で overflow する入力（cotangent との f64 積の上界は
+/// 通る）を事前に拒否する回帰テスト（PR #3950 codex 指摘 P1）。実装は係数を f32 で先に評価するため、
+/// 受理すると二階微分が非有限になる。
+#[test]
+fn lrn_pow_scalar_coefficient_f32_overflow_is_rejected_child_empty() {
+    let shape = [1usize, 1, 1];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e20], &shape));
+    let y = x.local_response_norm(1, 1e-30, -0.5, 0.0).expect("forward");
+    let loss = y.sum(None).expect("loss");
+    expect_rejected(&tape, &loss, &child, "lrn/pow-coefficient-overflow");
+}

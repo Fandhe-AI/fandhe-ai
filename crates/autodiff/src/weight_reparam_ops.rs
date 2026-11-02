@@ -13,7 +13,7 @@
 //!
 //! **create_graph**: 3 Op（`LocalResponseNorm`・`WeightNorm`・`SpectralNorm`）はイシュー #3794 で対象になった
 //! （方式は `create_graph/norm_reparam.rs`、決定記録 §36・§56）。`SpectralNorm` の forward 再生には
-//! 状態を進めない [`spectral_norm_from_snapshot`] を使う。
+//! 状態を進めない `spectral_norm_from_snapshot`（`pub(crate)`）を使う。
 //!
 //! **PyTorch 相当**:
 //!

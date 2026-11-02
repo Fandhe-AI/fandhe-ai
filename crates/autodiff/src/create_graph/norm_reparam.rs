@@ -461,6 +461,22 @@ pub(super) fn lrn_cgrad<'c>(
                 a.iter().cloned().fold(0.0, f64::max),
                 b.iter().cloned().fold(0.0, f64::max),
             );
+            // PowScalar の微分係数 `e·d^(e-1)` 単体は、実装（eval/scalar.rs）が f32 の
+            // `powf` で先に評価する。cotangent との積（f64）を検査するだけでは、係数自身の
+            // f32 overflow（例 d=1e-30 の e=-0.5 で -1.6e45）を取り逃がすため、同じ f32 評価順で拒否する。
+            for &dc in &d {
+                for e in [(-beta) as f32, (-beta - 1.0) as f32] {
+                    let coef = if e == 0.0 {
+                        0.0
+                    } else {
+                        e * (dc as f32).powf(e - 1.0)
+                    };
+                    stage(
+                        f64::from(coef),
+                        "LRN の PowScalar 微分係数 e·d^(e-1)（f32 評価）",
+                    )?;
+                }
+            }
             let d_min = d.iter().cloned().fold(f64::INFINITY, f64::min);
             let col_u = col_idx
                 .iter()
