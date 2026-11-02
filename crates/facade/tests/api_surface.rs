@@ -44455,6 +44455,36 @@ fn backward_create_graph_conv3d_family_usage_doctest_is_present_and_compiled() {
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
 
+/// `create_graph` の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）の受理範囲を固定する正ガード
+/// （イシュー #3802・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41・§61）。
+///
+/// この Op の create_graph を拒否する否定ガードも保留 doctest ガードも `api_surface.rs` に存在しなかったため、
+/// 反転ではなく「受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。
+/// 挙動の本体は `tests/create_graph_facade.rs` の `scatter_reduce_*_create_graph_via_facade`。
+/// 公開面の保留ガード（`IndexedUpdateOpsHoldDoctestGuard`）は create_graph と無関係なので変更しない。
+/// `Prod` は #3803 の scan 補助待ちで対象外のため、ここでは受理を固定しない。
+/// 自己テストとして、存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_scatter_reduce_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph scatter_reduce",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "x.scatter_reduce(0, &idx, &s, ScatterReduceMode::Mean, true)",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&[
+        "x.scatter_reduce(0, &idx, &s, ScatterReduceMode::Prod, true)",
+    ])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
 /// `create_graph` の損失のクラス軸系（`cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・
 /// `multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss`）の受理範囲を固定する
 /// 正ガード（イシュー #3800・決定記録 `docs/autodiff-higher-order-grad-decision.md` §40・§55）。
