@@ -128,7 +128,7 @@ fn max_abs_of(t: &Tensor<f32>) -> f64 {
 
 /// 二階の随伴が `g × オペランド` で overflow しうる入力を拒否する（RNN・GRU 共通）。
 /// `operands` は `g` に掛かりうる値（入力・重み・bias・GRU の `q` 等）。
-fn guard_overflow<'c>(
+pub(super) fn guard_overflow<'c>(
     child: &'c Tape,
     g: &Var<'c>,
     operands: &[&Var<'c>],
@@ -157,7 +157,7 @@ fn guard_overflow<'c>(
     }
 }
 
-fn ones_like<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
+pub(super) fn ones_like<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
     Ok(child.var_no_grad(&Tensor::full(shape, 1.0f32)?))
 }
 

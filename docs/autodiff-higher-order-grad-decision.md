@@ -1003,7 +1003,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 | `Sort`・`Topk` | 対象 | V2 | `gather(dim, index)` | Gather と同じ |
 | `Cummax`・`Cummin` | 対象 | V2 | `gather(dim, index)` | Gather と同じ（索引は必ず重複する） |
 | `Cumsum` | 対象 | V3 | `cumsum(dim)` | 構造 `flip → cumsum → flip`、値 `cumsum_vjp_along` |
-| `IndexedScatterReduce` | Sum・Mean・Amax・Amin は #3802 で対象（§41・§61）。Prod は fail-closed のまま | V3 | `scatter_reduce(dim, index, src, mode, include_self)` | 値は `scatter_reduce_vjp_host`、構造は `Gather`＋定数係数＋`where_cond`（当初は「モードごとの入力依存ホストカーネルで構造グラフを組めない」としていたが、値は V3 で載せ、構造は線形な合成に限る方式で解いた） |
+| `IndexedScatterReduce` | Sum・Mean・Amax・Amin は #3802 で対象（§41・§62）。Prod は fail-closed のまま | V3 | `scatter_reduce(dim, index, src, mode, include_self)` | 値は `scatter_reduce_vjp_host`、構造は `Gather`＋定数係数＋`where_cond`（当初は「モードごとの入力依存ホストカーネルで構造グラフを組めない」としていたが、値は V3 で載せ、構造は線形な合成に限る方式で解いた） |
 | `Cumprod` | fail-closed のまま | — | — | 1 階は `WideFloat` の Horner 型再帰。合成グラフでは §21.1(5) の overflow 契約を保てない |
 | `Logcumsumexp` | fail-closed のまま | — | — | 1 階は lane ごとの f64 prefix 再計算。合成すると `exp` の中間 overflow が出るため S1 スケーリングの設計が要り、2h 枠を超える |
 
@@ -4730,15 +4730,62 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - コード、公開 API、rustdoc、tolerance、baseline、ガードレール閾値、FMA 契約、依存（`Cargo.toml`／`Cargo.lock`）、`unsafe`、`docs/spec`、移行ノート。
 - 本 PR は `Closes #3801`、`Refs #3731 #3767 #3857 #3859`。
 
-## 61. 実装記録（イシュー #3802・親 #3719 系。create_graph の B 区分・`IndexedScatterReduce` の Sum・Mean・Amax・Amin）
+## 61. 実装記録（イシュー #3796・親 #3719 系。create_graph の C 区分・LSTM `LstmCell`・`LstmHidden`）
 
 ### 61.0 位置づけ・承認根拠
 
-- 状態: **一部実装済み**。設計は §41（#3732）、本節はその実装記録。`Prod` mode は §41.11・§41.13 が「区分つき scan 補助（#3803 の ①）の後」と順序を固定しており、本 PR の時点で scan 補助が main に無いため**実装していない**（fail-closed のまま）。これは §41.16 の「3 variant を実装する」承認の範囲の一部を先送りするもので、隠さずここに明記する。受け皿（#3803 へ含めるか、新規 issue か）は所有者判断で、本 PR では起票しない。
-- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。「B 区分は §38〜§44 の推奨どおり」で、§41.16 の 10 点（3 variant を実装、値は V3、Amax／Amin のタイは均等分配、外れる入力は型付きで拒否、非有限は §33 と同じ規則、隣接見本は `Op::Custom`、GPU parity は §48 の S3 方式）も推奨どおり。個別の承認を上乗せして主張しない。
-- 節番号: 計画時点で #3801 の PR（#3956）が §60 を使うため、本節は §61。
+- 状態: **実装済み**（本 PR は `Refs #3796`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §37（#3728）で、本節はその実装記録。節番号は、open PR #3956 が §60 を予約していたため §61 を取った（rebase 時に再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。「C 区分 24 Op は全 5 族を実装する」「§33.14〜§37.14 の個別の点も推奨どおり」「GPU parity は §48.11 の方式」。個別の承認を上乗せして主張しない。
+- 範囲は `LstmCell`・`LstmHidden` の 2 Op。push 順序契約（§37.3）のため **同じ PR で一緒に** `supports_create_graph() == true` へ移した。**これで C 区分 24 Op の実装が揃った**（§33 が 7、§34 が 7、§35 が 3、§36 が 3、§37 が 4）。残るのは Phase 10 の GPU 実機 parity だけ。
 
 ### 61.1 実装したもの
+
+| Op | 公開メソッド（facade） | 方式 | cgrad |
+|---|---|---|---|
+| `LstmCell`（値 `c_t`） | `lstm_forward_seq`（内部は `Var::lstm_cell`） | V1 + bias のみ V3 | 子テープで `pre = x·W_ih + h·W_hh (+bias)` から `i,f,g` を作り直す（payload `gates_ifg` は定数に使わない）。`d_pre_i = g·gc·i·(1−i)`、`d_pre_f = g·c_prev·f·(1−f)`、`d_pre_g = g·i·(1−gc²)`、`dc_prev = g·f`（1 階 `eval::lstm_cell_backward` と同じ掛ける順）。`dx`・`dh_prev` は `d_pre_ifg`（`[B,3H]`）と W の `narrow(1,0,3H)` の転置との GEMM |
+| `LstmHidden`（値 `h_t`） | 同上 | V1 + bias のみ V3 | 写しの `c_m` から `tanh(c)`、`o` は作り直す。`d_pre_o = g·tanh(c)·o·(1−o)`、`dc = g·o·(1−tanh(c)²)`。x 等の NodeId は親の `nodes[cell].op`（`LstmCell`）から読み、W の `narrow(1,3H,H)` の転置との GEMM |
+
+- 実装は `crates/autodiff/src/create_graph/lstm_cell.rs`。`replay_op`／`build_cgrads`／`validate_ancestors` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`（ワイルドカードは足していない）。`overflow` の拒否など共通ヘルパー（`guard_overflow`・`ones_like`）は `rnn_gru_cell.rs` のものを可視性だけ `pub(super)` に上げて再利用した（数値・処理は不変）。
+- 再生: `LstmCell` は `Var::lstm_cell` で `(h, c)` を積み `c` を写しにする。`LstmHidden` は `c_m.id + 1` の位置が `Op::LstmHidden { cell: c_m }` で shape が一致することを検査して拾う（違えば型付き `Err(Backward)`）。入口（`validate_ancestors`）でも `LstmHidden.cell` が親テープの範囲内の `Op::LstmCell` を指すことを子テープへ書く前に検査する。
+- 子テープへ積む Op は `MatMul`・`Transpose`・`Narrow`・`Concat`・`Add`・`Sub`・`Mul`・`Sigmoid`・`Tanh`・`Sum`・定数 `Leaf` と、写しの `LstmCell`・`LstmHidden`。すべて `supports_create_graph() == true`（閉包性）で、孫テープでも再生できる。
+- `is_checkpoint_eligible` は触っていない（両 Op とも `false` のまま）。
+
+### 61.2 設計（§37）からの差・明確化
+
+- **部分幅は `narrow` と `cat` で処理し、`Pad` は使わない**: 1 階の `affine_vjp` は LSTM では W を部分幅（`LstmCell` は 3H 列、`LstmHidden` は H 列）で扱う。`d_pre` を `[B,4H]` へゼロ埋めして全幅の W と掛けると、W の `o` 列に非有限値があるとき `0 × inf = NaN` になり 1 階が触れない列で値が食い違う。そこで dx・dh_prev は W を `narrow` した部分幅と GEMM し、dW・db だけを `cat` でゼロ埋めして全幅へ戻した。`Pad` は §37.11 が再確認を求めているので使っていない。
+- **forward 揃えの補正は不要だった（GRU との違い）**: forward の FMA（`c = f.mul_add(c_prev, i·g)`）は `c` の写しが同じカーネルで再生されるので作り直さない。作り直したゲートが forward の payload（`gates_ifg`・`gate_o`）と bit 一致するかを掃引（bias あり／なし × 入力スケール 1e-2〜1e4、B,D,H = 3,4,5）で確かめた（単体 `rebuilt_gates_match_payload_bitwise`）。CPU の既定バックエンドでは全要素が bit 一致したので、GRU のような一次式の補正と FMA 相殺の拒否は入れていない（§37.12 の逸脱なし）。GPU カーネルでの一致は Phase 10 で測る。
+- **出力部分集合**: 損失が `c_n` だけに掛かる場合、`LstmHidden` は祖先に無く、子テープには孤立した `LstmHidden` が残るが、到達しないので害はない（統合テストで h のみ・c のみ・両方を確認）。
+- **overflow の拒否**: GRU（§58.2）と同じ `guard_overflow`。オペランドは `LstmCell` が x・h_prev・c_prev・W_ih・W_hh・bias、`LstmHidden` が x・h_prev・W・bias。
+- Hessian の突合方式と二階の有限性の範囲（`g × scale³ ≤ 1e30`）は §58.2 と同じ（tolerance 定数は変えていない）。
+
+### 61.3 テスト
+
+- `crates/autodiff/tests/create_graph_lstm_cell.rs`: `first_order()` の bit 一致と `cg.grad` の REQ-2 一致（bias なし／あり × (B,D,H) = (1,1,1)・(3,4,5) × 出力 h／c／両方、7 入力すべて）、Hessian の primitive 参照との REQ-2 突合と有限差分突合、`hvp`・`jacfwd` が拒否されないこと、BPTT（重み共有・fan-in の 3 step。出力 3 通り）、`nn::Lstm::forward_seq`（h0・c0 について）、必須ベクトル（飽和ゲート 1e4・1e30、上流 3e38、大きな `c_prev`）を 1 階・`cg.grad`・孫テープの 3 段で、スケール掃引、overflow guard の境界（内側受理・外側は型付き拒否）、`Op::Custom` の fail-closed と拒否後の `child` 空・再試行。
+- 単体: `tape.rs` の `lstm_cell_family_supports_create_graph`、`lstm_cell.rs` の push 順序違反の拒否（入口検査・再生の 2 件と正のプローブ）とゲートの bit 一致の掃引。
+- facade: `lstm_create_graph_via_facade`（葉 `z: [B,2H]` から `h0`・`c0` を切り出す）、`backward_create_graph` の rustdoc に `h0` の Hessian の doctest。本族の create_graph を拒否する `api_surface.rs` の否定ガードは元から無く、代わりの正ガードは `backward_create_graph_lstm_cell_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` に族 `lstm_cell` の 2 ケース（`lstm_cell_h`・`lstm_cell_c`。`Route::K`・`Judge::Strict`）、`create_graph_lstm_cell_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査 `lstm_cell_cases_pass_cpu_against_cpu`。形状は B=3・D=4・H=5 で GEMM の k は最大 20（4H）。`should_split_k` は `k/16 >= min_k_tiles16 (=8)` を要するので split-K は発火しない（S3 は `SplitKShapes::Rule` で宣言）。
+
+### 61.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP に触れていない）。`first_order()` は素の `backward` と bit 一致する。`cg.grad` は REQ-2 で一致する（bit 一致は主張しない）。tolerance・baseline・ガードレール閾値は変えない。新しい baseline は作らない。
+- GPU では GEMM・pointwise を backend のカーネルで評価するので、契約は REQ-2 とし、bit 一致は主張しない。三階以上、真値が f32 を超える場合は対象外。
+
+### 61.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3856（`<cuda-node>`）・#3858（`<metal-node>`）へ申し送る。ROCm は雛形で `<rocm-node>` も未実測。baseline は作らず、置き場は空のまま。
+- スコープ外: GPU 実機 parity の実測と測り方の変更（#3739・§48）、f64 テープの create_graph、非 fused モードの公開、双方向・projection などの新しい variant、facade の公開名の追加、他の B 区分の Op。stacked／packed 系の LSTM API は本 PR のテストで確かめていないため facade の rustdoc では対象として書いていない。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`is_checkpoint_eligible`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
+- 本 PR は `Refs #3796 #3728 #3767 #3719 #3856 #3858`。
+
+## 61. 実装記録（イシュー #3802・親 #3719 系。create_graph の B 区分・`IndexedScatterReduce` の Sum・Mean・Amax・Amin）
+
+### 62.0 位置づけ・承認根拠
+
+- 状態: **一部実装済み**。設計は §41（#3732）、本節はその実装記録。`Prod` mode は §41.11・§41.13 が「区分つき scan 補助（#3803 の ①）の後」と順序を固定しており、本 PR の時点で scan 補助が main に無いため**実装していない**（fail-closed のまま）。これは §41.16 の「3 variant を実装する」承認の範囲の一部を先送りするもので、隠さずここに明記する。受け皿（#3803 へ含めるか、新規 issue か）は所有者判断で、本 PR では起票しない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。「B 区分は §38〜§44 の推奨どおり」で、§41.16 の 10 点（3 variant を実装、値は V3、Amax／Amin のタイは均等分配、外れる入力は型付きで拒否、非有限は §33 と同じ規則、隣接見本は `Op::Custom`、GPU parity は §48 の S3 方式）も推奨どおり。個別の承認を上乗せして主張しない。
+- 節番号: 計画時点で #3801 の PR（#3956）が §60 を使うため、本節は §62（§61 は #3796 の LSTM）。
+
+### 62.1 実装したもの
 
 | mode | d_src（構造） | d_input（構造） | 値 |
 |---|---|---|---|
@@ -4755,13 +4802,13 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - `tensor-core` の `ScatterReduceLayout::positions` を `pub` にした（追加のみ。既存関数の挙動は不変）。autodiff 側が 1 階 VJP と同じ位置規則でマスク・寄与数を作るため。
 - 1 階の VJP（`grad.rs` の腕と `scatter_reduce_vjp_host` の本体）・forward・`Tape::backward` は変えていない。
 
-### 61.2 fail-closed・総括判定（§41.12）
+### 62.2 fail-closed・総括判定（§41.12）
 
 - 子テープへ書く前（`validate_ancestors`）: 未知 mode、`Prod`（`supports_create_graph` が先に拒否する）、input／src の値に `±inf` を含むものを `AutodiffError::Backward` で拒否する。NaN は伝播させる（§33.14）。
 - cgrad 構築時: 上流 `g` が非有限、または `max|g| ≥ STAGE_BOUND_GUARD` なら拒否する。構造の各段は `|g|` 以下（係数は 0/1 か `1/n`）なので、この判定だけで足りる。拒否時は `backward_create_graph` のロールバックで `child` が空に戻り、同じ `child` で再試行できる。
 - 判定順・網羅 match・「未知 variant は false」は弱めていない。本番経路で `unwrap`／`expect` を使っていない。
 
-### 61.3 テスト
+### 62.3 テスト
 
 - `crates/autodiff/tests/create_graph_scatter_reduce.rs`（CI）: 1 階・`cg.grad` が素の `backward` と bit 一致（4 mode × `include_self` × 重複索引 × 非末尾 dim × index の非 dim 軸が小さい形状 × input 側・src 側・結合）、Hessian の有限差分突合、未タッチ位置の曲率の素通し、`jvp_create_graph` の独立参照突合、`scatter_reduce_extremum_ties_follow_first_order_rule`（タイの均等分配）、NaN の結果の勾配 0 と二階の有限性、寄与数が大きい Mean、`±inf` 入力・`Prod` の拒否（`child` が空）、非有限・過大な上流の拒否と再試行、空の index。
 - 反転・差し替え: `tape.rs` の `index_cumulative_family_supports_create_graph`（4 mode は supported、`Prod` は rejected）、`tests/indexed_update_parity.rs` の `create_graph_is_a_typed_error_not_a_panic` を `create_graph_accepts_sum_mean_amax_amin_and_rejects_prod_typed` へ、`tests/create_graph.rs` のコメント。
@@ -4769,12 +4816,12 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - facade: `scatter_reduce_{sum,mean,amax}_create_graph_via_facade`、`backward_create_graph` の rustdoc に `Mean` の HVP の doctest、正ガード `backward_create_graph_scatter_reduce_usage_doctest_is_present_and_compiled`（この Op の create_graph を拒否する否定ガードも保留 doctest ガードも元から無かったため、反転ではなく新設。存在しない needle を課すと違反が返る自己テスト付き。`IndexedUpdateOpsHoldDoctestGuard` は公開面の保留で無関係のため不変）。
 - GPU parity: `create_graph_gpu_parity.rs` に族 `scatter_reduce` の 4 ケース（`Route::H`・`Judge::Strict`・`SplitKShapes::NoMatMul`）、`create_graph_scatter_reduce_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を登録した。
 
-### 61.4 数値契約と保証範囲
+### 62.4 数値契約と保証範囲
 
 - 1 階 `Tape::backward` は構造上 bit 同一。`cg.grad` は V3 なので CPU（naive）で 1 階と bit 一致。REQ-2 の統一複合判定・`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えない。新しい baseline は作らない。FMA 契約には触れない。
 - 保証範囲は §27.3 と同じ（総括判定を通った入力で、seed の各要素の絶対値が 1 以下のとき。三階以上は対象外）。Amax／Amin のタイの点は微分不能で、二階は均等分配の劣勾配に従う（有限差分では検証しない）。
 
-### 61.5 GPU（未実測）・スコープ外・変えていないもの
+### 62.5 GPU（未実測）・スコープ外・変えていないもの
 
 - 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。`indexed_scatter_reduce` は CUDA・Metal・ROCm で override されておらずホストへフォールバックする（経路区分 H）。
 - スコープ外: `Prod` mode（#3803 の scan 補助待ち）、`Cumprod`・`Logcumsumexp`（#3803）、GPU 実機 parity の実測、GPU カーネルの新設、f64 テープの create_graph、三階以上の保証。

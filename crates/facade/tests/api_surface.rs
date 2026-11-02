@@ -44424,6 +44424,35 @@ fn backward_create_graph_rnn_gru_cell_usage_doctest_is_present_and_compiled() {
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
 
+/// `create_graph` の LSTM（`lstm_forward_seq`。`LstmCell`・`LstmHidden`）の受理範囲を固定する正ガード
+/// （イシュー #3796・決定記録 `docs/autodiff-higher-order-grad-decision.md` §37・§61）。
+///
+/// 本族の create_graph を拒否する否定ガードは `api_surface.rs` に存在しなかった（LSTM に関する記述は
+/// 層の公開面ガードだけで、create_graph とは無関係）ため、反転ではなく「受理されること」を示す
+/// facade の doctest（実際にコンパイル・実行される）の実在を固定する。
+/// 挙動の本体は `tests/create_graph_facade.rs` の `lstm_create_graph_via_facade`。
+/// 自己テストとして、存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_lstm_cell_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph lstm_cell",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "lstm_forward_seq(&lstm, &x, Some(&h0), Some(&c0))",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&[
+        "x.lstm_cell(&h_prev, &c_prev, GateParams",
+    ])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
 /// `create_graph` の 3D 畳み込み族（`conv3d`・`conv_transpose3d`）の受理範囲を固定する正ガード
 /// （イシュー #3797・決定記録 `docs/autodiff-higher-order-grad-decision.md` §38・§59）。
 ///
@@ -44456,7 +44485,7 @@ fn backward_create_graph_conv3d_family_usage_doctest_is_present_and_compiled() {
 }
 
 /// `create_graph` の `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`）の受理範囲を固定する正ガード
-/// （イシュー #3802・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41・§61）。
+/// （イシュー #3802・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41・§62）。
 ///
 /// この Op の create_graph を拒否する否定ガードも保留 doctest ガードも `api_surface.rs` に存在しなかったため、
 /// 反転ではなく「受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。

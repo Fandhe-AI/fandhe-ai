@@ -68,7 +68,7 @@
 //! `conv3d` サブモジュール、決定記録 §38・§59）も拡張済み。イシュー #3083 で索引・累積族
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。イシュー #3802 で `IndexedScatterReduce`
-//! （Sum・Mean・Amax・Amin。実装は `scatter_reduce` サブモジュール、決定記録 §41・§61）も拡張済み。
+//! （Sum・Mean・Amax・Amin。実装は `scatter_reduce` サブモジュール、決定記録 §41・§62）も拡張済み。
 //! `IndexedScatterReduce` の `Prod`・`Cumprod`・`Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
 //! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3791 で統計縮約の
 //! `Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm`（実装は `stat_varnorm` サブモジュール、決定記録 §33・§52）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
@@ -95,8 +95,9 @@
 //! 統計縮約（`LogSumExp`・`Nansum`・`Nanmean`。イシュー #3792・決定記録 §33/§51・実装は `stat_reduce_lse_nan`）も対象——
 //! 方式は `pool` サブモジュール doc と決定記録 §30。構造変換の `Dropout`・`Interpolate`・`MaxUnpool` は
 //! イシュー #3793（決定記録 §35/§56・実装は `structural`）で対象にした。RNN セルの
-//! `RnnCell`・`GruCell` はイシュー #3795（決定記録 §37/§58・実装は `rnn_gru_cell`）で対象にした
-//! （`LstmCell`・`LstmHidden` は引き続き対象外）。それ以外の追跡対象 Op・rank≥3 の
+//! `RnnCell`・`GruCell` はイシュー #3795（決定記録 §37/§58・実装は `rnn_gru_cell`）で、
+//! `LstmCell`・`LstmHidden` はイシュー #3796（決定記録 §37/§61・実装は `lstm_cell`）で対象にした
+//! （C 区分 24 Op の実装はこれで揃う）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -140,6 +141,7 @@ mod linalg_fft;
 mod loss_binary_margin;
 mod loss_class;
 mod loss_regression;
+mod lstm_cell;
 mod norm_reparam;
 mod pad_mask;
 mod pool;
@@ -521,6 +523,11 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         {
             linalg_fft::check_fft_norm(*norm)?;
         }
+        // LSTM（イシュー #3796）: `LstmHidden.cell` が `LstmCell` を指す push 順序契約を
+        // 子テープへ書く前に確かめる（違反は型付き Err。`child.is_empty()` を保つ）。
+        if let Op::LstmHidden { cell, .. } = &node.op {
+            lstm_cell::check_lstm_hidden(&parent_nodes, *cell)?;
+        }
         // 選択縮約（イシュー #3790）: payload（dim・index・q・補間方式）を子テープへ
         // 書く前に検証する（未知の `QuantileInterpolation` variant は拒否）。
         match &node.op {
@@ -609,7 +616,7 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         // `child` へ書く前に拒否する（イシュー #3078・#3079。`create_graph_norm` モジュール doc）。
         crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
         // `IndexedScatterReduce` の未知 mode と ±inf 入力を子テープへ書く前に拒否する
-        // （イシュー #3802・決定記録 §41.12・§61）。
+        // （イシュー #3802・決定記録 §41.12・§62）。
         scatter_reduce::validate(&parent_nodes, parent.ops(), id, &node.op)?;
         // 統計縮約 4 Op（イシュー #3791）: 非有限入力・自由度不足を子テープへ書く前に拒否する。
         stat_varnorm::validate_stat_varnorm(&parent_nodes, parent.ops(), &node.op)?;
@@ -1370,6 +1377,30 @@ fn replay_op<'c>(
                 b_hh,
             },
         ),
+        // LSTM セル 2 Op（イシュー #3796。方式は `lstm_cell` モジュール doc 参照）。
+        // `LstmCell` は `(h, c)` を積んで c を返し、`LstmHidden` は直後の h ノードを検査して拾う。
+        Op::LstmCell {
+            x,
+            h_prev,
+            c_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+            ..
+        } => lstm_cell::replay_lstm_cell(
+            mirror,
+            &lstm_cell::LstmIds {
+                x,
+                h_prev,
+                c_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            },
+        ),
+        Op::LstmHidden { cell, .. } => lstm_cell::replay_lstm_hidden(mirror, cell, shape),
         Op::MaxUnpool { input, index } => {
             crate::max_unpool_ops::replay_max_unpool(&get_mirror(mirror, input)?, &index, shape)
         }
@@ -3403,6 +3434,35 @@ fn build_cgrads<'c>(
                     b_hh,
                 },
             )?,
+            // LSTM セル 2 Op（イシュー #3796。方式は `lstm_cell` モジュール doc 参照）。
+            Op::LstmCell {
+                x,
+                h_prev,
+                c_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+                ..
+            } => lstm_cell::lstm_cell_cgrad(
+                child,
+                &parent_nodes,
+                &mut cgrads,
+                mirror,
+                &g,
+                &lstm_cell::LstmIds {
+                    x,
+                    h_prev,
+                    c_prev,
+                    w_ih,
+                    w_hh,
+                    b_ih,
+                    b_hh,
+                },
+            )?,
+            Op::LstmHidden { cell, .. } => {
+                lstm_cell::lstm_hidden_cgrad(child, &parent_nodes, &mut cgrads, mirror, cell, &g)?
+            }
             _ => {
                 return Err(AutodiffError::Backward(
                     "create_graph: build_cgrads: supports_create_graph() が true の未対応 Op\

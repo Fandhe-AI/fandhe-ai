@@ -1,12 +1,12 @@
 //! `Op::IndexedScatterReduce`（`Var::scatter_reduce`）の `create_graph` 対応
 //! （イシュー #3802・親 #3719 系・追跡表 #3717 項目 4。設計
-//! `docs/autodiff-higher-order-grad-decision.md` §41.10、実装記録は §61）。
+//! `docs/autodiff-higher-order-grad-decision.md` §41.10、実装記録は §62）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `validate_ancestors`（入口検査）・
 //! `replay_op`（forward 再生）・`build_cgrads`（1 階 VJP の子テープ記録）から呼ばれる。
 //! 対象 mode は `Sum`・`Mean`・`Amax`・`Amin`。`Prod` は §41.11 が定める区分つき scan 補助
 //! （#3803 ①）の上に載る設計のため本イシューでは実装せず、fail-closed のままにする
-//! （`Op::supports_create_graph` が false。実装記録 §61 に理由を残す）。
+//! （`Op::supports_create_graph` が false。実装記録 §62 に理由を残す）。
 //!
 //! **方式**（値は 1 階 `grad.rs` の VJP と同じホスト関数 `scatter_reduce_vjp_host` の結果で、
 //! `push_v3` で載せる。構造は二階微分を流すためだけの線形な `Var` 合成）:
@@ -76,7 +76,7 @@ pub(super) fn validate(
     if !mode_supported(*mode) {
         return Err(invalid(format!(
             "IndexedScatterReduce の mode {mode:?}（NodeId({}))は非対応（Prod は #3803 の scan 補助待ち。\
-             docs/autodiff-higher-order-grad-decision.md §41・§61 参照）",
+             docs/autodiff-higher-order-grad-decision.md §41・§62 参照）",
             id.0
         )));
     }

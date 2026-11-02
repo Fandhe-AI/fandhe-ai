@@ -1,5 +1,5 @@
 //! `Op::IndexedScatterReduce`（`Var::scatter_reduce`。Sum・Mean・Amax・Amin）の `create_graph` 対応
-//! （イシュー #3802・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41、実装記録 §61）の
+//! （イシュー #3802・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41、実装記録 §62）の
 //! 受け入れ条件を確かめる統合テスト。
 //!
 //! - `first_order()` と `cg.grad` が 1 階 `Tape::backward` と bit 一致する（4 mode × `include_self` ×
