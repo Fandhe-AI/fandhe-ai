@@ -282,6 +282,7 @@ pub mod activation;
 pub mod loss;
 pub mod optim;
 pub mod packed_sequence;
+pub mod shrink;
 pub mod softmin_threshold;
 
 pub use attention::{

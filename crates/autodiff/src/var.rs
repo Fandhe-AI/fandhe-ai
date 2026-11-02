@@ -5703,6 +5703,43 @@ impl<'t> Var<'t> {
         crate::softmin_threshold_ops::rrelu(self, lower, upper, training)
     }
 
+    // ---- shrink_ops 委譲メソッド（Hardshrink・Softshrink。イシュー #3817・親 #3813）----
+    //
+    // 実体は `crate::shrink_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回を facade の正ガード
+    // （`var_shrink_ops_methods_are_thin_delegations`）で拒否する。
+
+    /// Hardshrink（`torch.nn.functional.hardshrink` 相当）。イシュー #3817。`crate::shrink_ops::hardshrink` へ 1 行委譲する。
+    /// `lambd` は有限かつ `>= 0`（違反は `InvalidArgument`）。PyTorch の既定値は 0.5。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let x = tape.var(&Tensor::new(vec![-1.0f32, 0.25, 2.0], &[3]).unwrap());
+    /// let y = x.hardshrink(0.5).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![-1.0, 0.0, 2.0]);
+    /// assert!(x.hardshrink(-1.0).is_err());
+    /// ```
+    pub fn hardshrink(&self, lambd: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::shrink_ops::hardshrink(self, lambd)
+    }
+
+    /// Softshrink（`torch.nn.functional.softshrink` 相当）。イシュー #3817。`crate::shrink_ops::softshrink` へ 1 行委譲する。
+    /// `lambd` は有限かつ `>= 0`（違反は `InvalidArgument`）。PyTorch の既定値は 0.5。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let x = tape.var(&Tensor::new(vec![-1.0f32, 0.25, 2.0], &[3]).unwrap());
+    /// let y = x.softshrink(0.5).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![-0.5, 0.0, 1.5]);
+    /// assert!(x.softshrink(f32::NAN).is_err());
+    /// ```
+    pub fn softshrink(&self, lambd: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::shrink_ops::softshrink(self, lambd)
+    }
+
     // ---- shape_view_ops 関連関数（meshgrid。イシュー #2678）----
 
     /// 1 次元テンソル列から座標格子を作る（`torch.meshgrid` 相当）。イシュー #2678。

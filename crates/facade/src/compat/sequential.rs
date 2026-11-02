@@ -116,6 +116,7 @@ use fandhe_ai_autodiff::nn::activation::{
     LogSoftmax, Mish, PRelu, PReluVars, Relu, Relu6, Selu, Sigmoid, Silu, Softmax, Softplus,
     Softsign, Tanh,
 };
+use fandhe_ai_autodiff::nn::shrink::{Hardshrink, Softshrink};
 use fandhe_ai_autodiff::nn::softmin_threshold::{RRelu, Softmin, Tanhshrink, Threshold};
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
@@ -362,6 +363,14 @@ pub(super) enum LayerSpec {
     /// イシュー #3054。`alpha` のみ（学習パラメータなし）。
     Celu {
         alpha: f32,
+    },
+    /// イシュー #3817。`lambd` のみ（有限かつ `>= 0`。学習パラメータなし）。
+    Hardshrink {
+        lambd: f32,
+    },
+    /// イシュー #3817。`lambd` のみ（有限かつ `>= 0`。学習パラメータなし）。
+    Softshrink {
+        lambd: f32,
     },
     /// イシュー #3054。`dim` のみ（範囲は forward 時の遅延検査）。
     Softmin {
@@ -1094,6 +1103,55 @@ impl Sequential {
         let layer = Celu::new(alpha)?;
         self.inner.push(Box::new(layer));
         self.specs.push(LayerSpec::Celu { alpha });
+        Ok(self)
+    }
+
+    /// Hardshrink 層を追加する（`nn::shrink::Hardshrink`。PyTorch `nn.Hardshrink(lambd)` 相当。イシュー #3817）。
+    /// `-lambd <= x <= lambd` の要素を 0 にし、それ以外は素通しする。`lambd` は有限かつ `>= 0`
+    /// （`-0.0` は受理。違反は構築時に `AutodiffError::InvalidArgument`）。PyTorch の既定値は 0.5 で、
+    /// 本 API は明示指定。NaN は素通し（勾配 1）。融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。
+    /// 保存は kind `hardshrink`（`params`: `lambd`）で往復できる。ONNX export は `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_hardshrink(0.5)?;
+    /// let x = Tensor::new(vec![-1.0f32, 0.25, 2.0], &[3])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.host_slice().to_vec(), vec![-1.0, 0.0, 2.0]);
+    /// assert!(Sequential::new().add_hardshrink(-1.0).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_hardshrink(mut self, lambd: f32) -> Result<Self, AutodiffError> {
+        let layer = Hardshrink::new(lambd)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Hardshrink { lambd });
+        Ok(self)
+    }
+
+    /// Softshrink 層を追加する（`nn::shrink::Softshrink`。PyTorch `nn.Softshrink(lambd)` 相当。イシュー #3817）。
+    /// `x - clamp(x, -lambd, lambd)`。`lambd` は有限かつ `>= 0`（違反は構築時に
+    /// `AutodiffError::InvalidArgument`）。それ以外は [`Sequential::add_hardshrink`] と同じ
+    /// （保存 kind は `softshrink`）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_softshrink(0.5)?;
+    /// let x = Tensor::new(vec![-1.0f32, 0.25, 2.0], &[3])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.host_slice().to_vec(), vec![-0.5, 0.0, 1.5]);
+    /// assert!(Sequential::new().add_softshrink(f32::NAN).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_softshrink(mut self, lambd: f32) -> Result<Self, AutodiffError> {
+        let layer = Softshrink::new(lambd)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Softshrink { lambd });
         Ok(self)
     }
 

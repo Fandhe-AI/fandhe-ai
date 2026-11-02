@@ -446,3 +446,32 @@ fn sequential_with_softmax_and_flatten_is_rejected_with_unsupported_layer() {
         other => panic!("UnsupportedLayer を期待したが {other:?}"),
     }
 }
+/// Hardshrink は ONNX export 非対応（イシュー #3817・#3750 §11）。`UnsupportedLayer` で fail-closed。
+#[test]
+fn sequential_with_hardshrink_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_linear(2, 2, 0x3817_0001)
+        .expect("test fixture: 層構築に失敗")
+        .add_hardshrink(0.5)
+        .expect("test fixture: 層構築に失敗");
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    assert!(
+        matches!(err, OnnxError::UnsupportedLayer { index: 1, .. }),
+        "UnsupportedLayer(index=1) を期待したが {err:?}"
+    );
+}
+
+/// Softshrink も同様に `UnsupportedLayer`（イシュー #3817）。
+#[test]
+fn sequential_with_softshrink_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_linear(2, 2, 0x3817_0002)
+        .expect("test fixture: 層構築に失敗")
+        .add_softshrink(0.5)
+        .expect("test fixture: 層構築に失敗");
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    assert!(
+        matches!(err, OnnxError::UnsupportedLayer { index: 1, .. }),
+        "UnsupportedLayer(index=1) を期待したが {err:?}"
+    );
+}
