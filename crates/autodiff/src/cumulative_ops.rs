@@ -31,7 +31,7 @@
 //! **数値契約**: `cummax`／`cummin` は比較・選択のみ（値は入力の要素と bit
 //! 一致・タイは後勝ち・NaN は伝播）。`logcumsumexp` は `f64` アキュムレータで
 //! 1 回だけ `f32` へ downcast（規則の正は `fandhe_ai_tensor_core::cumulative`）。
-//! 非有限入力は拒否せず伝播する。高階微分（`create_graph`）は `cummax`／`cummin` が #3083 で、`logcumsumexp` が #3803（決定記録 §62）で対応済み。activation
+//! 非有限入力は拒否せず伝播する。高階微分（`create_graph`）は `cummax`／`cummin` が #3083 で、`logcumsumexp` が #3803（決定記録 §63）で対応済み。activation
 //! checkpoint・f64 自動微分経路は対象外。
 //!
 //! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{cummax,cummin,logcumsumexp}`。本モジュール自体は facade から再エクスポートしない。

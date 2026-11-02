@@ -849,6 +849,61 @@ fn cumulative_b_create_graph_rejects_inf_input_via_facade() {
     }
 }
 
+/// 索引付き縮約（#3802）。`index` は `[2, 3]`（input `[3, 4]` より非 dim 軸が小さい）・重複あり・
+/// 触れられない行つき。`Mean`／`Amax` は非自明な係数（`1/m`・選択マスク）を通す。
+fn scatter_reduce_loss_with<'a>(
+    tape: &'a Tape,
+    x: &Var<'a>,
+    mode: fandhe_ai::ScatterReduceMode,
+) -> Var<'a> {
+    let s = tape.var_no_grad(&t(vec![0.35, -1.1, 0.7, 1.9, -0.45, 0.05], &[2, 3]));
+    let idx = Tensor::<i32>::new(vec![1, 1, 3, 0, 2, 2], &[2, 3]).unwrap();
+    let y = x.scatter_reduce(1, &idx, &s, mode, true).unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn scatter_reduce_x() -> Vec<f32> {
+    (0..12)
+        .map(|i| (((i * 5 + 1) % 13) as f32 - 6.0) * 0.17)
+        .collect()
+}
+
+#[test]
+fn scatter_reduce_sum_create_graph_via_facade() {
+    check_create_graph_family(
+        "scatter_reduce_sum",
+        &scatter_reduce_x(),
+        &[3, 4],
+        |tp, x| scatter_reduce_loss_with(tp, x, fandhe_ai::ScatterReduceMode::Sum),
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn scatter_reduce_mean_create_graph_via_facade() {
+    check_create_graph_family(
+        "scatter_reduce_mean",
+        &scatter_reduce_x(),
+        &[3, 4],
+        |tp, x| scatter_reduce_loss_with(tp, x, fandhe_ai::ScatterReduceMode::Mean),
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn scatter_reduce_amax_create_graph_via_facade() {
+    check_create_graph_family(
+        "scatter_reduce_amax",
+        &scatter_reduce_x(),
+        &[3, 4],
+        |tp, x| scatter_reduce_loss_with(tp, x, fandhe_ai::ScatterReduceMode::Amax),
+        true,
+        1e-2,
+    );
+}
+
 #[test]
 fn gelu_create_graph_via_facade() {
     check_create_graph_family("gelu", &NX, &[2, 3], gelu_loss, false, 2e-2);

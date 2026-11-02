@@ -130,7 +130,11 @@ impl ScatterReduceLayout {
     /// `index`／`src` の各要素 `p`（行優先）の書き込み先（入力の行優先線形添字）を
     /// 求める。`index` の値が `[0, shape[dim])` を外れる（負値を含む）場合は
     /// [`ShapeError::IndexOutOfRange`]。
-    fn positions(&self, index: &[i32]) -> Result<Vec<usize>, ShapeError> {
+    ///
+    /// `autodiff` の `create_graph`（`create_graph/scatter_reduce.rs`）が、1 階 VJP
+    /// （[`scatter_reduce_vjp_host`]）と同じ位置規則でマスク・寄与数を作るために公開する
+    /// （追加のみ。既存関数の挙動は変えない。イシュー #3802）。
+    pub fn positions(&self, index: &[i32]) -> Result<Vec<usize>, ShapeError> {
         let dim_size = self.in_shape[self.dim];
         let rank = self.idx_shape.len();
         let mut coords = vec![0usize; rank];

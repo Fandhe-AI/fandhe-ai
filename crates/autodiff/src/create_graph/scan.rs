@@ -1,6 +1,6 @@
 //! 線形再帰 `S[a] = b[a] + A[a]·S[a+1]` の replayable な scan 補助
 //! （イシュー #3803・親 #3732。決定記録 `docs/autodiff-higher-order-grad-decision.md`
-//! §41.10・実装記録 §62）。
+//! §41.10・実装記録 §63）。
 //!
 //! 親モジュール [`super`] 配下の `cumulative_b`（`Cumprod`・`Logcumsumexp` の cgrad）から
 //! 呼ばれる。将来 `IndexedScatterReduce` の `Prod`（イシュー #3802）が区切りマスク付きで

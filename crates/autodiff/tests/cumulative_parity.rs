@@ -657,7 +657,7 @@ fn each_op_records_exactly_one_node() {
 }
 
 /// `logcumsumexp` は #3803 で create_graph の対象になった。±inf 入力は型付きエラーで拒否され
-/// （panic しない）、拒否時に子テープへ書かない（決定記録 §62・§33.14 論点 3）。
+/// （panic しない）、拒否時に子テープへ書かない（決定記録 §63・§33.14 論点 3）。
 #[test]
 fn create_graph_rejects_inf_input_with_typed_error() {
     let tape = Tape::new_with_ops(common::naive_ops());

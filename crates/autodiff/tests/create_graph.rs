@@ -3515,8 +3515,9 @@ fn create_graph_still_rejects_custom_downstream_of_loss() {
 // --- 索引・累積族（イシュー #3083。決定記録 §25） -----------------------------
 //
 // 対象: Gather・Scatter（Add／Overwrite）・Embedding・Sort・Topk・Cummax・
-// Cummin・Cumsum。fail-closed のまま: IndexedScatterReduce（#3802 の担当）。
+// Cummin・Cumsum。fail-closed のまま: IndexedScatterReduce の Prod（#3803 では対象外）。
 // Cumprod・Logcumsumexp は #3803 で対象になった（`create_graph_cumprod_logcumsumexp.rs`）。
+// IndexedScatterReduce の Sum・Mean・Amax・Amin は #3802 で対象。
 //
 // - Hessian: loss は y³·c（勾配が 2 次多項式のため中央差分は厳密。h=0.1 で f32
 //   ノイズを抑える。tolerance は変えない）。Sort／Topk／Cummax／Cummin は
