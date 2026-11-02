@@ -45922,3 +45922,298 @@ fn create_graph_facade_coverage_map_detects_each_category() {
     }
     assert!(check_cg_coverage_map(&[("X", "real"), ("Y", "e")], &exp, fake).is_err());
 }
+// =====================================================================
+// イシュー #3817（親 #3813・Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `Var::{hardshrink, softshrink}` と `compat::Sequential::{add_hardshrink, add_softshrink}` の正ガード。
+// 反転対象の否定ガード・保留 doctest は元から無い（設計記録 §1.1）ため、承認形だけを許す正ガードを新設する。
+// `SOFTMIN_THRESHOLD_IDENTS` はトークン完全一致のため `tanhshrink` と `hardshrink` は干渉しない。
+// =====================================================================
+
+const SHRINK_VAR_EXPECTED_BODIES: [(&str, &str, &str); 2] = [
+    (
+        "shrink_ops",
+        "hardshrink",
+        "crate : : shrink_ops : : hardshrink ( self , lambd )",
+    ),
+    (
+        "shrink_ops",
+        "softshrink",
+        "crate : : shrink_ops : : softshrink ( self , lambd )",
+    ),
+];
+
+/// 与えたソース（コメント・リテラル除去済みトークン化）で、shrink の `Var` 委譲メソッドが承認形か。
+fn shrink_var_bodies_ok(source: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    SHRINK_VAR_EXPECTED_BODIES.iter().all(|(_, name, body)| {
+        count_fn_declarations_by_name(&tokens, name) == 1
+            && determinism_fn_body(&tokens, name).as_deref() == Some(*body)
+    })
+}
+
+/// `Var::hardshrink`／`Var::softshrink` が `var.rs` に 1 件ずつあり、本体が 1 行委譲である。
+#[test]
+fn var_shrink_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert!(
+        shrink_var_bodies_ok(&content),
+        "var.rs の Var::hardshrink／softshrink が承認形（shrink_ops への 1 行委譲）と一致しない"
+    );
+}
+
+/// [`var_shrink_ops_methods_are_thin_delegations`] の自己テスト（すり替えの検出）。
+#[test]
+fn var_shrink_ops_methods_are_thin_delegations_detects_offense() {
+    let ok = "impl Var { pub fn hardshrink(&self, lambd: f32) -> R { crate::shrink_ops::hardshrink(self, lambd) } \
+              pub fn softshrink(&self, lambd: f32) -> R { crate::shrink_ops::softshrink(self, lambd) } }";
+    assert!(shrink_var_bodies_ok(ok));
+    for bad in [
+        // 独自実装へのすり替え
+        "impl Var { pub fn hardshrink(&self, lambd: f32) -> R { self.clone() } \
+         pub fn softshrink(&self, lambd: f32) -> R { crate::shrink_ops::softshrink(self, lambd) } }",
+        // 引数名の変更
+        "impl Var { pub fn hardshrink(&self, lambd: f32) -> R { crate::shrink_ops::hardshrink(self, 0.5) } \
+         pub fn softshrink(&self, lambd: f32) -> R { crate::shrink_ops::softshrink(self, lambd) } }",
+        // 欠落
+        "impl Var { pub fn hardshrink(&self, lambd: f32) -> R { crate::shrink_ops::hardshrink(self, lambd) } }",
+        // 重複宣言
+        "impl Var { pub fn hardshrink(&self, lambd: f32) -> R { crate::shrink_ops::hardshrink(self, lambd) } \
+         pub fn hardshrink(&self, lambd: f32) -> R { crate::shrink_ops::hardshrink(self, lambd) } \
+         pub fn softshrink(&self, lambd: f32) -> R { crate::shrink_ops::softshrink(self, lambd) } }",
+    ] {
+        assert!(!shrink_var_bodies_ok(bad), "{bad}");
+    }
+}
+
+const ADD_HARDSHRINK_PARAMS: &str = "mut self, lambd: f32) -> Result<Self, AutodiffError>";
+const ADD_SOFTSHRINK_PARAMS: &str = "mut self, lambd: f32) -> Result<Self, AutodiffError>";
+
+const SHRINK_LAYER_ADD_METHODS: [(&str, &str); 2] = [
+    ("add_hardshrink", ADD_HARDSHRINK_PARAMS),
+    ("add_softshrink", ADD_SOFTSHRINK_PARAMS),
+];
+
+/// `compat::Sequential` の `add_hardshrink`／`add_softshrink` が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_shrink_layers_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in SHRINK_LAYER_ADD_METHODS {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_shrink_layers_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_shrink_layers_add_methods_have_approved_signatures_detects_offense() {
+    for (name, params) in SHRINK_LAYER_ADD_METHODS {
+        let ok = format!("pub fn {name}(mut self, lambd: f32) -> Result<Self, AutodiffError> {{");
+        assert!(
+            sequential_spatial_add_signature_ok(&ok, name, params),
+            "{ok}"
+        );
+        for bad in [
+            // 戻り値が Self（Result でない）
+            format!("pub fn {name}(mut self, lambd: f32) -> Self {{"),
+            // 型違い
+            format!("pub fn {name}(mut self, lambd: f64) -> Result<Self, AutodiffError> {{"),
+            // 引数の欠落
+            format!("pub fn {name}(mut self) -> Result<Self, AutodiffError> {{"),
+            // 引数の追加
+            format!(
+                "pub fn {name}(mut self, lambd: f32, extra: f32) -> Result<Self, AutodiffError> {{"
+            ),
+        ] {
+            assert!(
+                !sequential_spatial_add_signature_ok(&bad, name, params),
+                "{bad}"
+            );
+        }
+    }
+}
+
+/// `src/compat` 配下で 2 メソッドがそれぞれちょうど 1 件の `pub fn` として宣言されている。
+#[test]
+fn compat_sequential_exposes_shrink_add_methods_issue_3817() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut counts = [0usize; 2];
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        for (i, (name, _)) in SHRINK_LAYER_ADD_METHODS.iter().enumerate() {
+            counts[i] += count_pub_fn_declarations(content, name);
+        }
+    });
+    assert_eq!(
+        counts, [1; 2],
+        "shrink の add_* の pub fn 宣言数が各 1 件でない"
+    );
+}
+
+/// 宣言数の数え方の自己テスト（0 件・2 件を区別する）。
+#[test]
+fn compat_sequential_exposes_shrink_add_methods_issue_3817_counts_declarations() {
+    let one = "    pub fn add_hardshrink(mut self, lambd: f32) -> R {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_hardshrink"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_softshrink"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_hardshrink"), 2);
+    assert_eq!(
+        count_pub_fn_declarations("// pub fn add_hardshrink() {}", "add_hardshrink"),
+        0
+    );
+}
+
+const SHRINK_FN_NAMES: [&str; 4] = [
+    "hardshrink",
+    "softshrink",
+    "add_hardshrink",
+    "add_softshrink",
+];
+
+/// workspace 全体（`crates/*/src/`）の shrink 関連 `fn` 宣言が承認済みの置き場所だけにある。
+/// 自由関数 2 件（`autodiff/src/shrink_ops.rs`）・`Var` 委譲 2 件（`autodiff/src/var.rs`）・
+/// `Sequential::add_*` 2 件（`facade/src/compat/sequential.rs`）。層の `forward` は別名のため対象外。
+#[test]
+fn workspace_declares_shrink_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートが見つからない");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in SHRINK_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for n in ["hardshrink", "softshrink"] {
+        expected.insert(format!("autodiff/src/shrink_ops.rs::{n}"), 1);
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
+    }
+    for n in ["add_hardshrink", "add_softshrink"] {
+        expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1);
+    }
+    assert_eq!(
+        found, expected,
+        "shrink 関連の fn 宣言が承認済みの置き場所と一致しない（迂回経路の混入か未承認の実装追加）"
+    );
+}
+
+const SHRINK_IDENTS: [&str; 4] = ["shrink_ops", "shrink", "Hardshrink", "Softshrink"];
+
+/// facade src の `pub use` が shrink の内部実装（モジュール・層型）を含む、または層型の独自宣言・
+/// `pub mod` がある場合に違反の説明を返す。非 pub の `use`・コメント・文字列内の記述は違反としない。
+fn scan_shrink_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in SHRINK_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            if path_tokens.iter().any(|t| t == "fandhe_ai_autodiff")
+                && path_tokens.iter().any(|t| t == "*")
+            {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && matches!(name.as_str(), "Hardshrink" | "Softshrink")
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && let Some(name) = tokens.get(i + 2)
+            && matches!(name.as_str(), "shrink_ops" | "shrink")
+        {
+            offending.push(format!("pub mod {name} 宣言"));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が shrink の内部実装を再エクスポート・独自宣言していない
+/// （`Sequential::add_*` の `fn` は上の置き場所ガードが固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_shrink_ops() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_shrink_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が shrink の内部実装を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_shrink_ops`] の自己テスト。
+#[test]
+fn facade_does_not_reexport_or_declare_shrink_ops_detects_each_category() {
+    let offense = |src: &str| !scan_shrink_reexports_and_declarations(src).is_empty();
+    // 違反にならない例（正当な非 pub の use・コメント・文字列・無関係な pub use）
+    assert!(!offense(
+        "use fandhe_ai_autodiff::nn::shrink::{Hardshrink, Softshrink};"
+    ));
+    assert!(!offense(
+        "// pub use shrink_ops::hardshrink;\nconst S: &str = \"pub use Hardshrink;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    // 違反の例
+    assert!(offense("pub use fandhe_ai_autodiff::shrink_ops;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::shrink::Hardshrink as H;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::shrink::{Hardshrink, Softshrink};"
+    ));
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    assert!(offense("pub struct Softshrink;"));
+    assert!(offense("pub mod shrink_ops {}"));
+}

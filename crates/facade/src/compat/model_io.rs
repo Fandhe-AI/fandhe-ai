@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 70 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 72 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -323,7 +323,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 70 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 72 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -346,6 +346,8 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::LogSigmoid => Some("log_sigmoid"),
         LayerSpec::Tanhshrink => Some("tanhshrink"),
         LayerSpec::Celu { .. } => Some("celu"),
+        LayerSpec::Hardshrink { .. } => Some("hardshrink"),
+        LayerSpec::Softshrink { .. } => Some("softshrink"),
         LayerSpec::Softmin { .. } => Some("softmin"),
         LayerSpec::Threshold { .. } => Some("threshold"),
         LayerSpec::RRelu { .. } => Some("rrelu"),
@@ -486,6 +488,8 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
         // Threshold は構築時検査が無く ±inf／NaN を受理するため保存側で拒否する（#3054）。
         // Celu・RRelu は構築時に拒否済みだが多層防御として登録する。
         LayerSpec::Celu { alpha } => alpha.is_finite(),
+        // Hardshrink・Softshrink も構築時に拒否済みだが多層防御として登録する（#3817）。
+        LayerSpec::Hardshrink { lambd } | LayerSpec::Softshrink { lambd } => lambd.is_finite(),
         LayerSpec::Threshold { threshold, value } => threshold.is_finite() && value.is_finite(),
         LayerSpec::RRelu { lower, upper } => lower.is_finite() && upper.is_finite(),
         LayerSpec::Softplus { beta, threshold } => beta.is_finite() && threshold.is_finite(),
@@ -768,6 +772,8 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::LogSigmoid
         | LayerSpec::Tanhshrink
         | LayerSpec::Celu { .. }
+        | LayerSpec::Hardshrink { .. }
+        | LayerSpec::Softshrink { .. }
         | LayerSpec::Softmin { .. }
         | LayerSpec::Threshold { .. }
         | LayerSpec::RRelu { .. }
@@ -1136,6 +1142,9 @@ fn param_fields(spec: &LayerSpec) -> ParamFields {
         }
         LayerSpec::Elu { alpha } => put_real(&mut f, "alpha", *alpha),
         LayerSpec::Celu { alpha } => put_real(&mut f, "alpha", *alpha),
+        LayerSpec::Hardshrink { lambd } | LayerSpec::Softshrink { lambd } => {
+            put_real(&mut f, "lambd", *lambd)
+        }
         LayerSpec::Softmin { dim } => put_num(&mut f, "dim", *dim),
         LayerSpec::Threshold { threshold, value } => {
             put_real(&mut f, "threshold", *threshold);
@@ -2292,6 +2301,12 @@ fn build_model(
             LayerSpec::LogSigmoid => model.add_log_sigmoid(),
             LayerSpec::Tanhshrink => model.add_tanhshrink(),
             LayerSpec::Celu { alpha } => model.add_celu(*alpha).map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Hardshrink { lambd } => model
+                .add_hardshrink(*lambd)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Softshrink { lambd } => model
+                .add_softshrink(*lambd)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Softmin { dim } => model.add_softmin(*dim),
             LayerSpec::Threshold { threshold, value } => model.add_threshold(*threshold, *value),
             LayerSpec::RRelu { lower, upper } => model
@@ -3378,6 +3393,18 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
             let p = Params::new(params, &["alpha"])?;
             Ok(LayerSpec::Celu {
                 alpha: p.f32("alpha")?,
+            })
+        }
+        "hardshrink" => {
+            let p = Params::new(params, &["lambd"])?;
+            Ok(LayerSpec::Hardshrink {
+                lambd: p.f32("lambd")?,
+            })
+        }
+        "softshrink" => {
+            let p = Params::new(params, &["lambd"])?;
+            Ok(LayerSpec::Softshrink {
+                lambd: p.f32("lambd")?,
             })
         }
         "softmin" => {
@@ -4528,7 +4555,7 @@ mod tests {
         ));
     }
 
-    /// 70 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 72 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -4560,6 +4587,8 @@ mod tests {
             LayerSpec::LogSigmoid,
             LayerSpec::Tanhshrink,
             LayerSpec::Celu { alpha: -0.75 },
+            LayerSpec::Hardshrink { lambd: 0.5 },
+            LayerSpec::Softshrink { lambd: 0.0 },
             LayerSpec::Softmin { dim: 1 },
             LayerSpec::Threshold {
                 threshold: -0.5,
@@ -5020,7 +5049,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 70, "kind allowlist は 70 種: {kinds:?}");
+        assert_eq!(kinds.len(), 72, "kind allowlist は 72 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -5038,9 +5067,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 70 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 72 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("70 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("72 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -5048,7 +5077,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("70 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("72 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -5147,6 +5176,11 @@ mod tests {
             ("threshold", r#"{"threshold":0.50,"value":1.0}"#),
             ("celu", r#"{"alpha":1E0}"#),
             ("celu", r#"{"alpha":"NaN"}"#),
+            ("hardshrink", "{}"),
+            ("hardshrink", r#"{"lambd":0.5,"x":1}"#),
+            ("hardshrink", r#"{"lambd":1}"#),
+            ("softshrink", r#"{"lambd":1E0}"#),
+            ("softshrink", r#"{"lambd":"NaN"}"#),
             ("threshold", r#"{"threshold":null,"value":1.0}"#),
             ("softmin", r#"{"dim":1.5}"#),
             ("softmin", r#"{"dim":-1}"#),
@@ -5592,6 +5626,8 @@ mod tests {
                 min_val: f32::NAN,
                 max_val: 1.0,
             },
+            LayerSpec::Hardshrink { lambd: -0.5 },
+            LayerSpec::Softshrink { lambd: -0.5 },
             LayerSpec::Celu { alpha: 0.0 },
             LayerSpec::Celu { alpha: -0.0 },
             LayerSpec::RRelu {
@@ -5731,7 +5767,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("70 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("72 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

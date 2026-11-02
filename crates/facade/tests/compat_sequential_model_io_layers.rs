@@ -1553,3 +1553,66 @@ fn rrelu_train_mode_round_trip_restores_training_flag() {
         "eval 後の predict",
     );
 }
+// ---------------------------------------------------------------------
+// hardshrink・softshrink（イシュー #3817。kind 追加・format_version 2 据え置き）
+// ---------------------------------------------------------------------
+
+fn shrink_model() -> Sequential {
+    let mut m = Sequential::new()
+        .add_linear(3, 4, 7)
+        .expect("構築できるはず")
+        .add_hardshrink(0.125)
+        .expect("構築できるはず")
+        .add_linear(4, 4, 8)
+        .expect("構築できるはず")
+        .add_softshrink(0.0)
+        .expect("構築できるはず");
+    m.eval();
+    m
+}
+
+#[test]
+fn shrink_layers_round_trip_bit_identically() {
+    let kinds = round_trip("shrink-roundtrip", &shrink_model(), &tensor(&[2, 3], 0.3));
+    assert!(kinds.contains("hardshrink"), "{kinds:?}");
+    assert!(kinds.contains("softshrink"), "{kinds:?}");
+}
+
+#[test]
+fn shrink_layers_reject_tampered_params_on_load() {
+    let hard = "\"kind\":\"hardshrink\",\"params\":{\"lambd\":0.125}";
+    let soft = "\"kind\":\"softshrink\",\"params\":{\"lambd\":0.0}";
+    let cases = [
+        // 負の lambd は add_* の意味検査（Autodiff）で拒否される。
+        (
+            hard,
+            "\"kind\":\"hardshrink\",\"params\":{\"lambd\":-1.0}",
+            false,
+        ),
+        // 未知キー・キー欠落は Manifest で拒否される。
+        (
+            hard,
+            "\"kind\":\"hardshrink\",\"params\":{\"lambd\":0.125,\"x\":1}",
+            true,
+        ),
+        (soft, "\"kind\":\"softshrink\",\"params\":{}", true),
+    ];
+    for (i, (from, to, expect_manifest)) in cases.iter().enumerate() {
+        let guard = TempDirGuard::new(&format!("shrink-tamper-{i}"));
+        let dir = guard.path().join("m");
+        save_model(&shrink_model(), &dir).expect("保存できるはず");
+        let path = dir.join("manifest.json");
+        let text = std::fs::read_to_string(&path).expect("読めるはず");
+        assert!(
+            text.contains(from),
+            "置換対象 {from} が manifest にある: {text}"
+        );
+        std::fs::write(&path, text.replacen(from, to, 1)).expect("書けるはず");
+        let err = load_err(&dir);
+        if *expect_manifest {
+            assert!(matches!(err, ModelIoError::Manifest { .. }), "{i}: {err}");
+        } else {
+            assert!(matches!(err, ModelIoError::Autodiff(_)), "{i}: {err}");
+        }
+    }
+}

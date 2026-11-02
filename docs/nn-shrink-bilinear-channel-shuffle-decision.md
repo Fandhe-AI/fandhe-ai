@@ -16,8 +16,8 @@
 
 - 追跡表の **行 # 9**（C1）。イシュー本文は「項目 10」と書くが、追跡表の通し番号とは 1 ずれている（承認 #3768・実機 #3860 も同じずれ方）。更新対象は # 9 行である。
 - 流れ: 設計 #3742 → 承認 #3768 → 実装 #3817 → 実機 parity #3860（`<cuda-node>`）・#3861（`<metal-node>`）。保存・export の横断方針は #3750（設計中）。
-- **承認根拠: なし。未承認（#3768 待ち）。**
-- 現状: `crates/` に `hardshrink`／`softshrink` は 0 件。近い名前は `tanhshrink` のみ（`crates/autodiff/src/var.rs:5690`、`crates/facade/src/compat/sequential.rs:1132`）。棚卸し `docs/compat-unlisted-holds-inventory.md:71` が「未公開・起票する（`Var` 演算 2 件＋`add_*`）」と分類した。
+- **承認根拠: #3768 の所有者の回答コメント 6554564412（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。論点 3（C1〜C9 は推奨形で一括承認。Shrink は「`lambd` は有限かつ 0 以上」）と論点 4（model_io は全層に kind を追加し `format_version` 2 据え置き、ONNX export は 0.14.0 に含めず `UnsupportedLayer`）。**
+- 現状（設計時点）: `crates/` に `hardshrink`／`softshrink` は 0 件。近い名前は `tanhshrink` のみ（`crates/autodiff/src/var.rs:5690`、`crates/facade/src/compat/sequential.rs:1132`）。棚卸し `docs/compat-unlisted-holds-inventory.md:71` が「未公開・起票する（`Var` 演算 2 件＋`add_*`）」と分類した。
 
 **推奨: 実装する。** 理由は 3 点。
 
@@ -134,6 +134,19 @@
   - Softshrink の NaN 入力: PyTorch のカーネルには版によって 0 を返すものがある。本合成は NaN を伝播する。
   - Softshrink の範囲内の出力: 本合成は `x - x = +0`。PyTorch は負の `x` で `-0` になりうるので符号付きゼロが異なりうる。
   - Hardshrink の負の `lambd`: §1.3 のとおり拒否する。
+
+### §1.13 実装記録（イシュー #3817・親 #3813）
+
+- 置き場所: 自由関数 `crates/autodiff/src/shrink_ops.rs`（`hardshrink`＝`build_value_mask`＋`masked_fill`、`softshrink`＝`x.sub(&x.clamp(-λ, λ))`、検査 `validate_lambd`）。`Var::{hardshrink, softshrink}` は `crates/autodiff/src/var.rs` の 1 行委譲。層 `nn::shrink::{Hardshrink, Softshrink}`（`forward_host` なし）。`compat::Sequential::{add_hardshrink, add_softshrink}` と model_io の kind `hardshrink`／`softshrink`（`params`: `lambd`。kind 数 70 → 72 は #3750 R9 の加算規則による必須更新で、テストを弱める変更ではない）。
+- 不変条件: 新規 `Op`・`BackendOps`・カーネル・`unsafe`・依存はゼロ。tolerance・baseline・ガードレール閾値は変えていない。
+- 正ガード（`crates/facade/tests/api_surface.rs` の末尾の #3817 節）: `var_shrink_ops_methods_are_thin_delegations`（自己テスト `_detects_offense` 付き）、`compat_sequential_shrink_layers_add_methods_have_approved_signatures`（同）、`compat_sequential_exposes_shrink_add_methods_issue_3817`（`_counts_declarations` 付き）、`workspace_declares_shrink_ops_fn_names_only_in_allowed_locations`（検査関数 `validate_lambd` は `pub(crate)` で名前も異なるためインベントリに入れない）、`facade_does_not_reexport_or_declare_shrink_ops`（`_detects_each_category` 付き）。反転対象の否定ガード・保留 doctest は元から無かった（§1.1 の調査どおり）。保留 doctest ガードは新設していない（Q4 の (a)）。
+- テスト: autodiff 単体（`shrink_ops::tests`）、`crates/autodiff/tests/create_graph_shrink.rs`（二階を有限差分と突合）、facade の `shrink_ops_facade.rs`・`compat_sequential_shrink_layers.rs`・`shrink_ops_backend_parity.rs`（CPU 対 NaiveOps は CI、`cuda_*`／`metal_*` は `#[ignore]`）、`compat_sequential_model_io_layers.rs` の往復と改竄拒否、`interop_onnx_export_sequential.rs` の `UnsupportedLayer`。
+- 逸脱と注記:
+  - create_graph のテストは `create_graph.rs` に足さず別ファイル `create_graph_shrink.rs` にした（並列 PR との競合回避）。
+  - `Var` の doctest は autodiff クレートで動くため `fandhe_ai_autodiff::Tape` を使う（autodiff は facade に依存できない）。facade だけで通る例は `Sequential::add_*` の doctest と `shrink_ops_facade.rs` が担う。
+  - `train_gpu_parity.rs` の `CASES` への `family: "nn"` 行の登録と層経路の parity ファイルは本 PR では見送った（`nn` 族に登録済みの行が無く、実機で測れない状態でハーネスの契約だけを増やさないため）。Phase 10（#3860・#3861）で実機手順と併せて足す。
+  - PyTorch との NaN・符号付きゼロの差（§1.10）は参照版のソースで確認できておらず、「未確認」のまま残す。
+- GPU 実機 parity は未実測（`docs/perf/logs/shrink-ops-3817/README.md`）。
 
 ### §1.11 所有者へ戻す論点（#3768 へ渡す）
 
