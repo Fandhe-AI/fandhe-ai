@@ -1151,3 +1151,35 @@ fn lrn_all_nan_window_column_is_skipped_before_stage_checks() {
     let gx = dense(&cg.grad(&x).expect("grad").expect("到達").to_tensor());
     assert!(gx.iter().all(|v| v.is_nan()), "1 階は全要素 NaN: {gx:?}");
 }
+
+/// 部分 NaN の列で、NaN の窓にしか入らない巨大値（`x_0 = 1e30`）にスケールを決めさせない（`size = 3` の
+/// forward 窓は ch0〜2 が NaN を含み、ch3・ch4 は `{2,3,4}`・`{3,4}` で有限）。以前は列の全有限値の最大から
+/// `s = 2^100` を選び、有限のチャネルの `d_s` が f32 の非正規数になって拒否していた。受理され、NaN の届かない
+/// ch3・ch4 の 1 階と ch4 の自分への二階が、巨大値と NaN を小さい有限値へ置き換えた入力と REQ-2 で一致する。
+#[test]
+fn lrn_nan_column_scale_ignores_values_only_in_nan_windows() {
+    fn build<'t>(x: &Var<'t>) -> Built<'t> {
+        x.local_response_norm(3, 0.5, -1.0, 1.0)?.sum(None)
+    }
+    let shape = [1usize, 5, 1];
+    let (first, rows) = second_rows(&[1e30, f32::NAN, 1.0, 1.0, 1.0], &shape, build)
+        .expect("NaN の窓にしか入らない値で有限のチャネルを拒否しない");
+    let (first_ref, rows_ref) =
+        second_rows(&[1.0, 0.5, 1.0, 1.0, 1.0], &shape, build).expect("参照");
+    // β = −1 は `d^{-β-1} = d^0 = 1`（`powf(NaN, 0) = 1`）なので、ch3 の 1 階も NaN にならない。
+    assert!(first[..3].iter().all(|v| v.is_nan()), "{first:?}");
+    for i in 3..5 {
+        assert!(
+            common::req2_close(f64::from(first[i]), f64::from(first_ref[i])),
+            "{i}: {} と {}",
+            first[i],
+            first_ref[i]
+        );
+    }
+    let (h, h_ref) = (rows[4][4], rows_ref[4][4]);
+    assert!(h.is_finite(), "{h:e}");
+    assert!(
+        common::req2_close(f64::from(h), f64::from(h_ref)),
+        "{h:e} と {h_ref:e}"
+    );
+}

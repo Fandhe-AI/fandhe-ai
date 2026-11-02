@@ -486,19 +486,22 @@ fn host_nonfinite_check(host: &[f32], reach: &[bool], what: &str) -> Result<(), 
     Ok(())
 }
 
+/// [`lrn_nan_masks`] の戻り値（`reach`・`col_skip`・`scale_in`）。
+type LrnNanMasks = (Vec<bool>, Vec<bool>, Vec<bool>);
+
 /// LRN の NaN の到達範囲（列ごとに軸 1 の NaN の個数の累積和で求める）。`reach` はホストの 1 階 `dx_m` に
 /// 入力の NaN が届く要素（窓 2 段の和 `[m − (size−1), m + (size−1)]` に NaN がある。forward 窓の分け方に
 /// よらない上界）、`col_skip` は全チャネルの forward 窓に NaN がある列（`α ≠ 0` なら `d_s` が全チャネル NaN
-/// で、1 階・二階が全要素 NaN になり、守る有限の要素が無い）。
-fn lrn_nan_masks(
-    x: &[f32],
-    (n, c, inner): (usize, usize, usize),
-    size: usize,
-) -> (Vec<bool>, Vec<bool>) {
+/// で、1 階・二階が全要素 NaN になり、守る有限の要素が無い）、`scale_in` はスケール指数の最大値に入れる要素
+/// （`d_s` が有限のチャネル `ci` の forward 窓 `W(ci)` に入る要素。NaN の窓にしか入らない値は有限のチャネルに
+/// 届かないので、スケールを決めさせない）。NaN の無い列は `scale_in` が全要素。
+fn lrn_nan_masks(x: &[f32], (n, c, inner): (usize, usize, usize), size: usize) -> LrnNanMasks {
     let mut reach = vec![false; x.len()];
     let mut col_skip = vec![false; n * inner];
+    let mut scale_in = vec![true; x.len()];
     let (back_f, fwd_f) = (size / 2, (size - 1) / 2);
     let mut pre = vec![0usize; c + 1];
+    let mut fin = vec![0usize; c + 1];
     for ni in 0..n {
         for s in 0..inner {
             for ci in 0..c {
@@ -512,11 +515,21 @@ fn lrn_nan_masks(
                 reach[(ni * c + ci) * inner + s] =
                     has(ci.saturating_sub(size - 1), ci.saturating_add(size - 1));
             }
-            col_skip[ni * inner + s] =
-                (0..c).all(|ci| has(ci.saturating_sub(back_f), ci.saturating_add(fwd_f)));
+            // `d_s` が有限のチャネル（forward 窓に NaN が無い）の個数の累積和。`l ∈ W(ci)` は
+            // `ci ∈ [l − fwd_f, l + back_f]` と同じ。
+            for ci in 0..c {
+                let finite_d = !has(ci.saturating_sub(back_f), ci.saturating_add(fwd_f));
+                fin[ci + 1] = fin[ci] + usize::from(finite_d);
+            }
+            col_skip[ni * inner + s] = fin[c] == 0;
+            for l in 0..c {
+                let lo = l.saturating_sub(fwd_f);
+                let hi = l.saturating_add(back_f).min(c - 1);
+                scale_in[(ni * c + l) * inner + s] = fin[hi + 1] > fin[lo];
+            }
         }
     }
-    (reach, col_skip)
+    (reach, col_skip, scale_in)
 }
 
 fn nan_mismatch(what: &str) -> AutodiffError {
@@ -836,10 +849,14 @@ fn lrn_col_fwd<T: Num>(
     for &ch in k.chunks.iter().rev() {
         ci = ci.times(T::k(ch));
     }
+    // `sq = x_s²` は ±inf の検査に入れない。`sq` の値は逆伝播で係数として使われず（`Mul` の VJP は `x_s` を
+    // 使う）、`0·inf` を作らない。消費先の `d` は検査するので、有限の `d` へ届く `sq` の inf は `d` の inf と
+    // して拒否される。`d` が NaN の窓にしか入らない要素（`scale_in` の外。スケールで守られない）の `sq` の
+    // inf は NaN に吸収され、二階へ届かない。
     let ok = fwd_ok
         && inv_s.no_inf()
         && ci.no_inf()
-        && [&xs, &sq, &d, &a, &b, &fa, &fb, &ux, &z, &sz]
+        && [&xs, &d, &a, &b, &fa, &fb, &ux, &z, &sz]
             .iter()
             .all(|v| no_inf(v));
     ok.then_some(LrnColFwd {
@@ -1009,7 +1026,7 @@ pub(super) fn lrn_cgrad<'c>(
         .fold(0.0f64, |m, &v| m.max(f64::from(v).abs()));
     // ホストの 1 階の非有限は、入力の NaN が届く位置の NaN だけを通す（全分岐の前。`α = 0` でもホストは
     // 一般式で `up·x` の f32 積を作るので、有限の入力から inf・`0·inf = NaN` が生まれうる）。
-    let (reach, col_skip) = lrn_nan_masks(&x_data, (n, c, inner), size);
+    let (reach, col_skip, scale_in) = lrn_nan_masks(&x_data, (n, c, inner), size);
     host_nonfinite_check(&host_vec, &reach, "LocalResponseNorm")?;
 
     if alpha == 0.0 {
@@ -1048,9 +1065,10 @@ pub(super) fn lrn_cgrad<'c>(
     );
     let at = |ni: usize, ci: usize, s: usize| (ni * c + ci) * inner + s;
 
-    // 列 (n, inner) ごとのスケール指数。NaN の要素は最大値から外す（`f64::max` は NaN を無視する）ので、
-    // NaN を含む列でも有限のチャネルは NaN の無い列と同じスケールで守られる。全窓 NaN の列（`col_skip`）は
-    // 守る有限の要素が無いので指数 0 とし、チャンク数・係数・構造の定数へ影響させない。
+    // 列 (n, inner) ごとのスケール指数。最大値は `d_s` が有限のチャネルの窓に入る要素（`scale_in`）だけから
+    // 取る（NaN の要素と、NaN の窓にしか入らない値は有限のチャネルに届かないので外す）。NaN を含む列でも
+    // 有限のチャネルは、その窓の値だけで決まるスケールで守られる。全窓 NaN の列（`col_skip`）は守る有限の
+    // 要素が無いので指数 0 とし、チャンク数・係数・構造の定数へ影響させない。
     let ncols = n * inner;
     let mut exps = vec![0i32; ncols];
     for ni in 0..n {
@@ -1058,9 +1076,11 @@ pub(super) fn lrn_cgrad<'c>(
             if col_skip[ni * inner + s] {
                 continue;
             }
-            let mx = (0..c).fold(0.0f64, |m, ci| {
-                m.max(f64::from(x_data[at(ni, ci, s)]).abs())
-            });
+            let mx = (0..c)
+                .filter(|&ci| scale_in[at(ni, ci, s)])
+                .fold(0.0f64, |m, ci| {
+                    m.max(f64::from(x_data[at(ni, ci, s)]).abs())
+                });
             exps[ni * inner + s] = pow2_ceil_exponent(mx.max(floor));
         }
     }
@@ -2470,20 +2490,35 @@ mod tests {
     #[test]
     fn lrn_nan_masks_follow_windows() {
         let x = [f32::NAN, 1.0, 1.0, 1.0, 1.0];
-        let (reach, skip) = lrn_nan_masks(&x, (1, 5, 1), 2);
+        let (reach, skip, sc) = lrn_nan_masks(&x, (1, 5, 1), 2);
         assert_eq!(reach, vec![true, true, false, false, false]);
         assert_eq!(skip, vec![false]);
-        let (reach, skip) = lrn_nan_masks(&x, (1, 5, 1), 1);
+        // size 2 の forward 窓は {ci−1, ci}。有限の d は ch2〜4 で、窓 {1..4} の要素がスケールに入る。
+        assert_eq!(sc, vec![false, true, true, true, true]);
+        let (reach, skip, sc) = lrn_nan_masks(&x, (1, 5, 1), 1);
         assert_eq!(reach, vec![true, false, false, false, false]);
-        assert_eq!(skip, vec![false]);
-        let (reach, skip) = lrn_nan_masks(&[f32::NAN, 1e30], (1, 2, 1), 3);
-        assert_eq!((reach, skip), (vec![true, true], vec![true]));
-        // inner 軸の列は独立。
-        let (reach, skip) = lrn_nan_masks(&[f32::NAN, 1.0, 1.0, 1.0], (1, 2, 2), 3);
+        assert_eq!(
+            (skip, sc),
+            (vec![false], vec![false, true, true, true, true])
+        );
+        let (reach, skip, sc) = lrn_nan_masks(&[f32::NAN, 1e30], (1, 2, 1), 3);
+        assert_eq!(
+            (reach, skip, sc),
+            (vec![true, true], vec![true], vec![false, false])
+        );
+        // NaN の窓にしか入らない巨大値（ch0）はスケールに入らない（有限の d は ch3・ch4）。
+        let (_, skip, sc) = lrn_nan_masks(&[1e30, f32::NAN, 1.0, 1.0, 1.0], (1, 5, 1), 3);
+        assert_eq!(
+            (skip, sc),
+            (vec![false], vec![false, false, true, true, true])
+        );
+        // inner 軸の列は独立（NaN の無い列は全要素がスケールに入る）。
+        let (reach, skip, sc) = lrn_nan_masks(&[f32::NAN, 1.0, 1.0, 1.0], (1, 2, 2), 3);
         assert_eq!(
             (reach, skip),
             (vec![true, false, true, false], vec![true, false])
         );
+        assert_eq!(sc, vec![false, true, false, true]);
     }
 
     /// LRN の窓（`lrn_cgrad` と同じ組み立て）。
