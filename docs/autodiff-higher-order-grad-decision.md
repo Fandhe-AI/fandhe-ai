@@ -1289,7 +1289,6 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 ### 33.0 位置づけ・承認根拠・境界・推奨
 
-- **追記（#3809）**: 案 A（S0）は #3767 の回答（2026-11-01）で承認され、#3809 で実装済み（実装記録は §69）。以下の本文は設計時点の記述のまま残す。
 - **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
 - **基準**: `origin/main` の `69881d9da`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
 - **対象**: §21.2 の C 区分（族を割り当てず fail-closed に固定した 24 Op）のうち、統計縮約の 7 Op（`Var`・`Std`・`VectorNorm`・`PNorm`・`LogSumExp`・`Nansum`・`Nanmean`）。§21.2 の C 表は方式欄を「V3」とだけ書くが、Op ごとに中身が違う（33.10）
@@ -2944,7 +2943,7 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
 
 - 公開状態: 未公開（設計のみ）
 - `docs/compat-api-scope.md` の適用記録は承認後の実装 PR で書く。文案: `**適用記録（イシュー #3804・親 #3733。承認: <#3767 の回答 URL>）**: Stft・Istft を create_graph の対象にした。公開名の追加なし。` 0.14.0 の移行ノート（#3780）の該当欄も実装 PR で更新する
-- [x] compat-api-scope（#3809 で §69 とともに記入済み）
+- [ ] compat-api-scope（承認後の PR で行う）
 - [x] `docs/README.md` の索引
 - [x] 追跡表（項目 4 に §42 を追記）
 
@@ -3401,6 +3400,7 @@ CI の行は新規 `crates/autodiff/tests/create_graph_decomp.rs`（仮名）に
 
 ### 45.0 位置づけ・承認根拠・境界・推奨
 
+- **追記（#3809）**: 案 A（S0）は #3767 の回答（2026-11-01）で承認され、#3809 で実装済み（実装記録は §69）。以下の本文は設計時点の記述のまま残す。
 - **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md`・閾値は変えない
 - **基準**: `origin/main` の `ad4213dd1`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
 - **対象**: `Op::LayerNorm`・`Op::RmsNorm`・`Op::BatchNorm` の `create_graph`（`hvp`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph` が使う子テープ方式）が、入口検査と構造段の上界判定で拒否している入力。§27.2（`docs/autodiff-higher-order-grad-decision.md`）は「S2 か、代替の S0 前スケーリングか」を所有者へ戻していた。本節はその設計を書く。追跡表（`docs/compat-matrix-ari-tracker.md`）の項目 5
@@ -3473,7 +3473,7 @@ CI の行は新規 `crates/autodiff/tests/create_graph_decomp.rs`（仮名）に
 
 - 公開状態: 未公開（公開型の変化なし）
 - `docs/compat-api-scope.md` の適用記録は承認後の実装 PR（#3809）で書く。文案: `**適用記録（イシュー #3809・親 #3736。承認: <#3767 の回答 URL>）**: LayerNorm・RmsNorm・BatchNorm の create_graph で、f32 の差・部分和が overflow する入力を S0 前スケーリングで受理へ広げた。公開名の追加なし。` 0.14.0 の移行ノート（#3780）の該当欄も実装 PR で更新する
-- [ ] compat-api-scope（承認後の PR で行う）
+- [x] compat-api-scope（#3809 で §69 とともに記入済み）
 - [x] `docs/README.md` の索引
 - [x] 追跡表（項目 5 に §45 を追記）
 
