@@ -27,7 +27,7 @@
 #                crates.io-index"` を伴うこと＝path/git 依存への差し替えで source/
 #                checksum 行が消える・書き換わるケースを fail-closed に検出する。
 #                イシュー #982）、(3b) `zip` の版集合が承認済み集合（0.6.6・7.2.0・8.6.0。
-#                RUSTSEC-2026-0367〜0369 の ignore の前提）と完全一致し全エントリが
+#                RUSTSEC-2026-0367〜0369・0429 の ignore の前提）と完全一致し全エントリが
 #                registry 取得元であること、(4) 各メンバー crate の [dependencies] が承認済み
 #                allowlist（比較対象の =x.y.z 完全固定 + bench-common の path 依存）の
 #                範囲内であること（`tch` 等 allowlist 外の直接依存追加・ドット付きキー
@@ -88,7 +88,7 @@ FRAMEWORK_COMPARE_DIR="scripts/bench/framework-compare"
 FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.13.0"
 
 # `zip` の承認済み版集合（スペース区切り）。`scripts/bench/framework-compare/deny.toml` の
-# `[advisories] ignore` にある RUSTSEC-2026-0367／0368／0369 は勧告 ID 単位で効くため、
+# `[advisories] ignore` にある RUSTSEC-2026-0367／0368／0369／0429 は勧告 ID 単位で効くため、
 # ignore の前提はこの版集合（0.6.6／7.2.0／8.6.0）に固定される。Cargo.lock の `zip`
 # エントリがこの集合と完全一致すること（追加・削除・変更のいずれも fail）と、各エントリが
 # crates.io registry 取得元であることを check_lock_name_versions_text が fail-closed に
@@ -445,7 +445,7 @@ check_framework_compare() {
     check_lock_pin_text "${lock}" "$(cat "${lock}")" "${crate}" "${version}" || failed=1
   done
 
-  # (3b) zip の版集合が承認済み集合と完全一致すること（RUSTSEC-2026-0367〜0369 の
+  # (3b) zip の版集合が承認済み集合と完全一致すること（RUSTSEC-2026-0367〜0369・0429 の
   #      ignore の前提。FRAMEWORK_COMPARE_ZIP_VERSIONS 参照）。
   check_lock_name_versions_text "${lock}" "$(cat "${lock}")" "zip" "${FRAMEWORK_COMPARE_ZIP_VERSIONS}" || failed=1
 
