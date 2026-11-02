@@ -529,6 +529,37 @@ const CASES: &[Case] = &[
         run: run_loss_regression_gaussian_nll,
         reject: None,
     },
+    // 正規化・再パラメータ 3 Op（イシュー #3794・決定記録 §36/§57）。3 つとも forward・1 階がホスト関数
+    // （H。`BackendOps::{lrn_forward, weight_norm_forward, spectral_norm_forward}` は CPU のみ実装）で、
+    // 構造の Pad・Narrow・Mul・Div・Sum・Sqrt・PowScalar がデバイスで走る。構造に MatMul は無い。
+    // SpectralNorm は u・v を定数として扱い状態を進めない。実機は未実測（#3856・#3858）。
+    Case {
+        name: "norm_reparam_lrn",
+        family: "norm_reparam",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_norm_reparam_lrn,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "norm_reparam_weight_norm",
+        family: "norm_reparam",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_norm_reparam_weight_norm,
+        reject: None,
+    },
+    Case {
+        name: "norm_reparam_spectral_norm",
+        family: "norm_reparam",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_norm_reparam_spectral_norm,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -1067,6 +1098,47 @@ fn run_structural_dropout(tp: &Tapes) -> Outputs {
     run_structural(tp, &[3, 4], |z| z.dropout(0.4, true).unwrap())
 }
 
+/// 正規化・再パラメータ（#3794）。葉 `z`（長さ 12）から出力の二乗和を作り、`run_loss_class` の
+/// `loss²` 包みで `H v ≠ 0` にする。
+fn run_norm_reparam_lrn(tp: &Tapes) -> Outputs {
+    run_loss_class(tp, |z| {
+        let y = z
+            .reshape(&[1, 4, 3])
+            .unwrap()
+            .local_response_norm(3, 0.5, 0.75, 1.0)
+            .unwrap();
+        y.mul(&y).unwrap().sum(None).unwrap()
+    })
+}
+
+fn run_norm_reparam_weight_norm(tp: &Tapes) -> Outputs {
+    run_loss_class(tp, |z| {
+        let v = z.narrow(0, 0, 8).unwrap().reshape(&[2, 4]).unwrap();
+        let g = z.narrow(0, 8, 2).unwrap().reshape(&[2, 1]).unwrap();
+        // `Σ w²` は `g` だけで決まり上流が `w` に平行になって相殺するため `tanh` を挟む。
+        let w = v.weight_norm(&g, Some(0)).unwrap();
+        w.tanh().sum(None).unwrap()
+    })
+}
+
+fn run_norm_reparam_spectral_norm(tp: &Tapes) -> Outputs {
+    run_loss_class(tp, |z| {
+        let w = z.narrow(0, 0, 6).unwrap().reshape(&[2, 3]).unwrap();
+        let mut st = fandhe_ai::SpectralNormState::from_vectors(
+            &[2, 3],
+            0,
+            &[0.6, 0.8],
+            &[0.5, 0.3, 0.8],
+            1,
+            1e-12,
+        )
+        .unwrap();
+        // `Σ y²` は上流が `W` に平行で要素ごとの相殺が起きうるため `tanh` を挟む。
+        let y = w.spectral_norm(&mut st, false).unwrap();
+        y.tanh().sum(None).unwrap()
+    })
+}
+
 /// 損失の回帰系（#3798）。葉 `z`（長さ 12 = `[x; target; var]`）から損失を作り、`loss²` で `H v ≠ 0` にする。
 fn run_loss_regression(tp: &Tapes, f: for<'t> fn(&Var<'t>) -> Var<'t>) -> Outputs {
     let z0: Vec<f32> = vec![
@@ -1352,6 +1424,7 @@ cuda_family_test!(
     create_graph_loss_regression_cuda_matches_cpu,
     "loss_regression"
 );
+cuda_family_test!(create_graph_norm_reparam_cuda_matches_cpu, "norm_reparam");
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -1390,6 +1463,7 @@ metal_family_test!(
     create_graph_loss_regression_metal_matches_cpu,
     "loss_regression"
 );
+metal_family_test!(create_graph_norm_reparam_metal_matches_cpu, "norm_reparam");
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -1444,6 +1518,11 @@ fn structural_cases_pass_cpu_against_cpu() {
 #[test]
 fn loss_class_cases_pass_cpu_against_cpu() {
     run_family("loss_class", None);
+}
+
+#[test]
+fn norm_reparam_cases_pass_cpu_against_cpu() {
+    run_family("norm_reparam", None);
 }
 
 #[test]

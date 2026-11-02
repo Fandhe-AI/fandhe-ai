@@ -4664,14 +4664,14 @@ fn batch_norm_create_graph_result_is_closed_under_create_graph() {
     }
 }
 
-/// fail-closed の隣接 Op: 対象外のまま残る `local_response_norm` は入口で拒否され、
-/// 子テープは無変更のまま。
+/// fail-closed の隣接 Op: 対象外のまま残る `Op::Custom` は入口で拒否され、子テープは無変更のまま
+/// （`local_response_norm` は #3794 で対応済みになったため見本を `Op::Custom` へ替えた）。
 #[test]
-fn batch_norm_neighbor_local_response_norm_stays_rejected() {
+fn batch_norm_neighbor_custom_op_stays_rejected() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(bn_input(16), &[1, 4, 2, 2]));
-    let y = x.local_response_norm(3, 1e-4, 0.75, 1.0).unwrap();
+    let y = tape.custom(Arc::new(IdentityCustomFn), &[x]).unwrap();
     let bn_y = y.batch_norm(None, None, BN_EPS).unwrap();
     let loss = bn_y.sum(None).unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();

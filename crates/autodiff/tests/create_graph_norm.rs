@@ -22,8 +22,7 @@
 
 mod common;
 
-use fandhe_ai_autodiff::lrn_ops::local_response_norm;
-use fandhe_ai_autodiff::{AutodiffError, Tape, Var};
+use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Tape, Var};
 use fandhe_ai_tensor_core::Tensor;
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -46,6 +45,33 @@ fn dense(v: &Tensor<f32>) -> Vec<f32> {
 }
 
 type Built<'t> = Result<Var<'t>, AutodiffError>;
+
+/// 隣接する fail-closed Op（`Op::Custom`）の見本に使う恒等関数。
+struct IdentityCustomFn;
+
+impl CustomFunction for IdentityCustomFn {
+    fn name(&self) -> &str {
+        "identity_custom_fn"
+    }
+
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].contiguous())
+    }
+
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        _requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        Ok(vec![Some(upstream.contiguous())])
+    }
+}
 
 /// 有限差分の刻み。f32 の 1 階勾配の丸め雑音が小さな Hessian 成分の REQ-2 判定を乱さないよう、
 /// 2 点中央差分（h=1e-3）ではなく 4 次精度の 5 点中央差分（h=1e-2）で測定側の誤差を抑える。
@@ -580,11 +606,13 @@ fn eps_zero_nondegenerate_rows_are_accepted() {
 
 #[test]
 fn neighbouring_unsupported_norm_op_stays_fail_closed() {
-    // LocalResponseNorm は §21.2 の C 区分で fail-closed のまま（BatchNorm は #3079 が反転する）。
+    // `Op::Custom` は §21.2 の C 区分で fail-closed のまま（LocalResponseNorm は #3794 で反転した）。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(pattern(12, 2.0), &[1, 3, 2, 2]));
-    let y = local_response_norm(&x, 3, 1e-4, 0.75, 1.0).unwrap();
+    let y = tape
+        .custom(std::sync::Arc::new(IdentityCustomFn), &[x])
+        .unwrap();
     let loss = y.sum(None).unwrap();
     let err = tape
         .backward_create_graph(&loss, &child)
