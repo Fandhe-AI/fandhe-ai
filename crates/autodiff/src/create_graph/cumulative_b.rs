@@ -1,6 +1,6 @@
 //! 累積 2 Op（`Cumprod`・`Logcumsumexp`）の `create_graph` 対応
 //! （イシュー #3803・親 #3732・追跡表 #3717 項目 4。設計
-//! `docs/autodiff-higher-order-grad-decision.md` §41、実装記録は §63）。
+//! `docs/autodiff-higher-order-grad-decision.md` §41、実装記録は §64）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `build_cgrads`（1 階 VJP の子テープ記録）から
 //! 呼ばれる。forward の再生（`replay_op`）は公開 `Var::cumprod`／`logcumsumexp` への
@@ -90,19 +90,19 @@ fn check_entry(x: &[f32], g: &[f32], n: usize, what: &str) -> Result<(), Autodif
     for &v in g {
         if !v.is_finite() {
             return Err(invalid(format!(
-                "{what} の上流勾配が非有限のため拒否（§41・§63 参照）"
+                "{what} の上流勾配が非有限のため拒否（§41・§64 参照）"
             )));
         }
         max_g = max_g.max(f64::from(v).abs());
     }
     if x.iter().any(|v| v.is_infinite()) {
         return Err(invalid(format!(
-            "{what} の入力に ±inf がある（NaN は伝播するが ±inf は拒否する。§41・§63 参照）"
+            "{what} の入力に ±inf がある（NaN は伝播するが ±inf は拒否する。§41・§64 参照）"
         )));
     }
     if over_guard(max_g * (n.max(1) as f64)) {
         return Err(invalid(format!(
-            "{what} の上流勾配が大きすぎ中間値が f32 範囲を超えうるため拒否（§41・§63 参照）"
+            "{what} の上流勾配が大きすぎ中間値が f32 範囲を超えうるため拒否（§41・§64 参照）"
         )));
     }
     Ok(())
@@ -159,7 +159,7 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
             let (s, stage_max) = scan_lane_host(&gl, &a, None);
             if over_guard(stage_max) {
                 return Err(invalid(
-                    "Cumprod の scan 構造の段が 2^125 以上または非有限のため拒否（§41・§63 参照）"
+                    "Cumprod の scan 構造の段が 2^125 以上または非有限のため拒否（§41・§64 参照）"
                         .into(),
                 ));
             }
@@ -186,19 +186,19 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
             for j in 0..n {
                 if !composite_close_f32(s[j], s64[j] as f32) {
                     return Err(invalid(
-                        "Cumprod の scan 構造が桁落ちで f64 参照と REQ-2 の複合判定を外れるため拒否（§41・§63 参照）"
+                        "Cumprod の scan 構造が桁落ちで f64 参照と REQ-2 の複合判定を外れるため拒否（§41・§64 参照）"
                             .into(),
                     ));
                 }
                 if over_guard(mult * f64::from(s[j]).abs().max(s64[j].abs())) {
                     return Err(invalid(
-                        "Cumprod の二階の prefix 乗数と scan 値の積が 2^125 以上または非有限のため拒否（§41・§63 参照）"
+                        "Cumprod の二階の prefix 乗数と scan 値の積が 2^125 以上または非有限のため拒否（§41・§64 参照）"
                             .into(),
                     ));
                 }
                 if !composite_close_f32((mult * f64::from(s[j])) as f32, (mult * s64[j]) as f32) {
                     return Err(invalid(
-                        "Cumprod の scan の桁落ちが prefix 乗数で増幅され二階の精度を保証できないため拒否（§41・§63 参照）"
+                        "Cumprod の scan の桁落ちが prefix 乗数で増幅され二階の精度を保証できないため拒否（§41・§64 参照）"
                             .into(),
                     ));
                 }
@@ -212,7 +212,7 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
                 let prod = l[j] * s[j];
                 if over_guard(f64::from(l[j]).abs()) || over_guard(f64::from(prod).abs()) {
                     return Err(invalid(
-                        "Cumprod の排他的 prefix 積または出力段が 2^125 以上または非有限のため拒否（§41・§63 参照）"
+                        "Cumprod の排他的 prefix 積または出力段が 2^125 以上または非有限のため拒否（§41・§64 参照）"
                             .into(),
                     ));
                 }
@@ -227,7 +227,7 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
             let (_, cot_a, walk_max) = scan_cotangent_bound(&gl, &a, &cot_s);
             if over_guard(walk_max) {
                 return Err(invalid(
-                    "Cumprod の二階の逆伝播の中間値が 2^125 以上または非有限のため拒否（§41・§63 参照）"
+                    "Cumprod の二階の逆伝播の中間値が 2^125 以上または非有限のため拒否（§41・§64 参照）"
                         .into(),
                 ));
             }
@@ -240,7 +240,7 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
                 let from_a = if m >= 1 { cot_a[m - 1] } else { 0.0 };
                 if over_guard(f64::from(*v).abs() + from_a) {
                     return Err(invalid(
-                        "Cumprod の二階の入力 x への cotangent が 2^125 以上または非有限のため拒否（§41・§63 参照）"
+                        "Cumprod の二階の入力 x への cotangent が 2^125 以上または非有限のため拒否（§41・§64 参照）"
                             .into(),
                     ));
                 }
@@ -321,7 +321,7 @@ fn log_add_exp(a: f64, b: f64) -> f64 {
 
 fn reject_coeff(what: &str) -> AutodiffError {
     invalid(format!(
-        "Logcumsumexp の {what} が f64 参照と REQ-2 統一複合判定で一致せず（f32 の出力の丸めによる）拒否（§41・§63 参照）"
+        "Logcumsumexp の {what} が f64 参照と REQ-2 統一複合判定で一致せず（f32 の出力の丸めによる）拒否（§41・§64 参照）"
     ))
 }
 
@@ -343,7 +343,7 @@ fn check_logcumsumexp_stages(
             let ol = d.lane(out, o, i);
             if ol.iter().any(|v| !v.is_finite()) {
                 return Err(invalid(
-                    "Logcumsumexp の出力が f32 で非有限のため拒否（§41・§63 参照）".into(),
+                    "Logcumsumexp の出力が f32 で非有限のため拒否（§41・§64 参照）".into(),
                 ));
             }
             let mut out64 = vec![0f64; n];
@@ -378,7 +378,7 @@ fn check_logcumsumexp_stages(
             let (t32, stage_max) = scan_lane_host(&gl, &c32, None);
             if over_guard(stage_max) {
                 return Err(invalid(
-                    "Logcumsumexp の scan 構造の段が 2^125 以上または非有限のため拒否（§41・§63 参照）"
+                    "Logcumsumexp の scan 構造の段が 2^125 以上または非有限のため拒否（§41・§64 参照）"
                         .into(),
                 ));
             }

@@ -2407,6 +2407,51 @@ pub(crate) fn vjp(
             let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, da)]
         }
+        // `Op::Stft` の随伴（イシュー #3804・決定記録 §42.2）。`Sᵀ` の随伴は `S` なので、
+        // 上流（信号 shape）に `stft_host` を適用する。入力ノードはスペクトル shape で、
+        // 出力〈信号〉shape から layout を再構築して整合を確かめる。
+        Op::StftAdjoint {
+            input,
+            window,
+            params,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout =
+                fft::stft_layout(upstream.shape(), &params).map_err(AutodiffError::from)?;
+            if layout.out_shape() != input_shape.as_slice() {
+                return Err(AutodiffError::Backward(format!(
+                    "grad::vjp: Op::StftAdjoint の入力 shape {input_shape:?} が layout の {:?} と一致しない",
+                    layout.out_shape()
+                )));
+            }
+            let data = fft::stft_host(&upstream.host_slice(), &window.host_slice(), &layout)
+                .map_err(AutodiffError::from)?;
+            let dg = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, dg)]
+        }
+        // `Op::Istft` の随伴（イシュー #3804・決定記録 §42.2）。上流（スペクトル shape）に
+        // `istft_host` を適用する。NOLA は forward 側で検査済みだが、再生経路の多層防御として
+        // `istft_host` 自身の検査に委ねる。
+        Op::IstftAdjoint {
+            input,
+            window,
+            params,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout =
+                fft::istft_layout(upstream.shape(), &params).map_err(AutodiffError::from)?;
+            if layout.out_shape() != input_shape.as_slice() {
+                return Err(AutodiffError::Backward(format!(
+                    "grad::vjp: Op::IstftAdjoint の入力 shape {input_shape:?} が layout の {:?} と一致しない",
+                    layout.out_shape()
+                )));
+            }
+            fft::istft_check_nola(&window.host_slice(), &layout).map_err(AutodiffError::from)?;
+            let data = fft::istft_host(&upstream.host_slice(), &window.host_slice(), &layout)
+                .map_err(AutodiffError::from)?;
+            let dg = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, dg)]
+        }
         // `Var::permute` が記録する view ノード（イシュー #1597）。
         // 逆写像は逆置換（`inverse_permutation`）で `upstream` を
         // permute するだけで閉じる（zero-copy。`tape::Op::Permute`

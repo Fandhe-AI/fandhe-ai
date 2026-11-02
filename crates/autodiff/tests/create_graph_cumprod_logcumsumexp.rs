@@ -1,5 +1,5 @@
 //! 累積 B 区分（`Cumprod`・`Logcumsumexp`）の `create_graph` 対応の受け入れテスト
-//! （イシュー #3803・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41・§63）。
+//! （イシュー #3803・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41・§64）。
 //!
 //! - 1 階は素の `Tape::backward` と bit 同一（`first_order()`）、`cg.grad` も CPU で 1 階と bit 同一（V3）。
 //! - Hessian を独立な有限差分（`Tape::backward` の中央差分）と突合する。`Cumprod` は零が 0／1／2 個の

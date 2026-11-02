@@ -2857,6 +2857,7 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
 ### 42.0 位置づけ・承認根拠・境界・推奨
 
 - **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
+- 承認の転記（実装 PR #3804 が行う）: 所有者の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>（2026-11-01）に「B 区分: Op ごとの範囲の絞り込みを含め、§38〜§44 の推奨どおり実装する」とあり、§31.5 の 3 は「§42 で扱う」とされた。§42.14 の点 1〜6 を推奨どおり承認と読む。上の「承認は #3767 の回答待ち」「何も承認しない」は本節の初版時点の記述で、本行で承認済みに更新する（既存の文は書き換えない）。実装記録は §63
 - **基準**: `origin/main` の `839a88f6d`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
 - **対象**: `Stft`・`Istft` の 2 Op。§21.2 は B 区分の #3086 族に置いたが、§31.1 は「窓と overlap-add を再生可能な `Var` 演算で組むと O(T) 個のノードが要る」ことを理由に fail-closed へ固定した。このため STFT を含む損失（音声モデル・スペクトル損失など）では `hvp`・`jvp`・`jacfwd`・`jvp_create_graph` が `Err(AutodiffError::Backward)` で拒否される（追跡表の項目 4）
 - **根拠**: §21.1、§21.6、§31.1・§31.5 の 3、`docs/autodiff-fft-ops-decision.md` §13
@@ -4730,14 +4731,14 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - コード、公開 API、rustdoc、tolerance、baseline、ガードレール閾値、FMA 契約、依存（`Cargo.toml`／`Cargo.lock`）、`unsafe`、`docs/spec`、移行ノート。
 - 本 PR は `Closes #3801`、`Refs #3731 #3767 #3857 #3859`。
 
-## 63. 実装記録（イシュー #3803・親 #3719 系。create_graph の B 区分・累積 `Cumprod`・`Logcumsumexp`）
+## 64. 実装記録（イシュー #3803・親 #3719 系。create_graph の B 区分・累積 `Cumprod`・`Logcumsumexp`）
 
-### 63.0 位置づけ・承認根拠
+### 64.0 位置づけ・承認根拠
 
-- 状態: **実装済み**（本 PR は `Refs #3803`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §41（#3732）で、本節はその実装記録。節番号は、同時に進んでいる #3802（`IndexedScatterReduce`）が §62 を使うため §63 とした。
+- 状態: **実装済み**（本 PR は `Refs #3803`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §41（#3732）で、本節はその実装記録。節番号は、同時に進んでいる #3802（`IndexedScatterReduce`）が §62、#3804（`Stft`・`Istft`）が §63 を使うため §64 とした。
 - 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「B 区分は §38〜§44 の推奨どおり」で、§41.16 の 10 論点（V3 で値を入れる／`Cumprod` は除算を使わない scan／`Logcumsumexp` は係数が [0,1] の再帰 scan／総括判定で外れたら型付きで拒否／非有限は §33.14 の規則／GPU parity は §48／隣接見本は `Op::Custom`）も推奨どおり。個別の承認を上乗せして主張しない。
 
-### 63.1 実装したもの
+### 64.1 実装したもの
 
 | 対象 | 値（`push_v3`） | 構造（二階を流す `Var` 列） |
 |---|---|---|
@@ -4748,7 +4749,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - cgrad・総括判定は `create_graph/cumulative_b.rs`。`replay_op` は公開 `Var::cumprod`／`logcumsumexp` へ委譲（forward の検証・CPU／CUDA／Metal のカーネル経路を迂回しない）。`build_cgrads` の腕は `Op::Cumsum` の隣。
 - `Op::supports_create_graph` の false 側から 2 Op を true 側（索引・累積族）へ移した（ワイルドカードは足していない。`IndexedScatterReduce` だけ false のまま）。公開名の追加なし（受理範囲の拡大のみ）。
 
-### 63.2 設計（§41）からの差・明確化
+### 64.2 設計（§41）からの差・明確化
 
 - **`L` の構成**: §41.10 が実装に委ねた点を `Concat([1], Narrow(y_m, 0, n-1))` に確定した（追加の scan が不要で安い。`y_m` は replay の出力なので `Cumprod` 自身の VJP を通って二階が流れる）。
 - **`w = exp(x - out)` も係数判定に含めた**: §41.12 は `c` を明示し `w` は黙示だったため明確化した。`x = [1e8, 1e8]` では f32 の `out` が ln2 の差を失い `w[0] = 1`（参照 0.5）になる。
@@ -4760,7 +4761,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - **§25.1**: 本文（「fail-closed のまま」の `Cumprod`・`Logcumsumexp` の行）は兄弟 PR の慣行どおり書き換えず、本節で対象化したと前方参照する。
 - **正ガードの方式**: 本族を拒否する否定ガードも保留 doctest ガードも `api_surface.rs` に元から無かった。反転するものが無いので、facade の doctest の実在を固定する正ガード `backward_create_graph_cumulative_b_usage_doctest_is_present_and_compiled` を足した（存在しない needle を課すと違反が返る自己テスト付き）。累積の forward 公開形のガード（`cumulative_ops_hold_doctest_*` ほか）は create_graph と無関係で変えていない。
 
-### 63.3 テスト
+### 64.3 テスト
 
 - `crates/autodiff/tests/create_graph_cumprod_logcumsumexp.rs`（CI）: 1 階 bit 同一と `cg.grad` の bit 同一（V3）、Hessian の有限差分突合（`Cumprod` は零 0／1／2 個・先頭と末尾の零・dim が先頭／最終軸／rank 3 の中間軸。零点では打ち切り誤差を避けるため多重線形な loss で突合。`Logcumsumexp` は一定 lane を含む）、最初の零より後ろの混合二階 `H[j,z]`（`x=[2,0,3]`・`g=[0,0,1]`。除算形を退けた根拠の回帰）、孫テープ（`jvp_create_graph`）と独立の方向微分の一致、必須ベクトル（受理／拒否。拒否は `Err(Backward)`・`child` 空・素の `backward` は NaN にならない）、`±inf` 入力・非有限 upstream の拒否と再試行・NaN 入力の伝播、空テンソル、`Op::Custom` 隣接の fail-closed。
 - 単体: `scan.rs` の `scan_structure_matches_sequential_host`（構造値がホスト逐次計算と REQ-2 で一致し、同じ f32 演算順のホスト再計算と bit 一致。段数 `⌈log2 n⌉`）・区切りマスク、`cumulative_b.rs` の総括判定の境界（受理・拒否の両側）、`tape.rs` の `index_cumulative_family_supports_create_graph`。
@@ -4768,14 +4769,14 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `cumulative_b` の 2 ケース（`cumulative_b_cumprod` は `Route::K`、`cumulative_b_logcumsumexp` は `Route::H`。どちらも `Judge::Strict`・`SplitKShapes::NoMatMul`・±inf 入力の拒否一致〈Q5〉）を登録し、`create_graph_cumulative_b_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査 `cumulative_b_cases_pass_cpu_against_cpu` を足した。
 - 孫テープ: 必須ベクトルの 3 段目は `jvp_create_graph` の出力と、その孫テープでの逆伝播がともに有限であることを要求する（`[1e-30, 1e-30, 1e30]` を含む。jvp は子テープ上の累積 Op を再度 create_graph で微分するので、上流が `S` の大きさ〈1e30〉になるが、要素ごとの歩きで f32 に収まることを確かめている）。
 
-### 63.4 数値契約と保証範囲
+### 64.4 数値契約と保証範囲
 
 - 1 階 `Tape::backward` は構造上 bit 同一（`grad.rs` は可視性だけの変更）。`cg.grad` は V3 により CPU で 1 階と bit 一致。`Logcumsumexp` の値は libm の `exp`／`ln_1p` に依存するため bit 同一は同じホストの中に限る（backend 間は REQ-2）。tolerance・baseline・ガードレール閾値・FMA 契約は変えない。新しい baseline は作らない。
 - 保証範囲は §27.3 と同じ（総括判定を通った入力・seed の各要素の絶対値 1 以下）。三階以上は対象外。
 - 既知の差: `Logcumsumexp` は f32 の `out` が係数の相対誤差 1e-3 を満たさない大きなオフセットの入力を拒否する。`Cumprod` の拒否は f32 の構造段または二階の逆伝播の上界が `2^125` に達する入力に限る。
 - 二階の桁落ち増幅の拒否（レビュー指摘）: `Cumprod` は scan の `S` の誤差に prefix 乗数の上界 `Π max(1,|x|)` を掛けて REQ-2 複合判定を課す（`x=[1e20,1,1,1,1]` は拒否）。`Logcumsumexp` は微分係数の差の厳密上界（`max(1-c_j, w_{j+1})`・`1-w_j`）に対し f32 の `eps` が 1e-3 未満でない項で、誤差 `eps·|c·T|`・`eps·|w·T|` が絶対救済 1e-5 を超えるものを拒否する（`x=[0,-20]`・`g=[0,1e10]` は拒否）。新しい定数・tolerance は作らない。
 
-### 63.5 GPU（未実測）・スコープ外・変えていないもの
+### 64.5 GPU（未実測）・スコープ外・変えていないもの
 
 - 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。`cumprod` は CUDA・Metal のカーネル（経路区分 K）、`logcumsumexp` はホストフォールバック（経路区分 H）。
 - スコープ外: `IndexedScatterReduce`（#3802。scan 補助の区切りありの使用を含む）、GPU カーネルの新設、実機 parity の実測と測り方の変更（§48）、f64 テープの create_graph、他の B 区分・C 区分の Op、三階以上の保証、facade の公開名の追加。
@@ -4877,3 +4878,53 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。`indexed_scatter_reduce` は CUDA・Metal・ROCm で override されておらずホストへフォールバックする（経路区分 H）。
 - スコープ外: `Prod` mode（#3803 の scan 補助待ち）、`Cumprod`・`Logcumsumexp`（#3803）、GPU 実機 parity の実測、GPU カーネルの新設、f64 テープの create_graph、三階以上の保証。
 - 変えていないもの: 1 階の VJP の式・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開名。`unsafe` は追加していない。
+
+## 63. 実装記録（イシュー #3804・親 #3719 系。create_graph の B 区分・`Stft`・`Istft`）
+
+### 63.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity だけが Phase 10 に残り、本記録の範囲では未実測）。設計は §42（#3733）で、本節はその実装記録。節番号は、open PR #3957（#3802）が §61 を書いており rebase 後に §62 になる見込みのため、衝突を避けて §63 を取った（rebase 時に再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。「B 区分: Op ごとの範囲の絞り込みを含め、§38〜§44 の推奨どおり実装する」とあり、§31.5 の 3 は「§42 で扱う」。`Stft`・`Istft` を対象外にする回答は無い。§42.14 の 6 点（2 Op とも実装・案 A・新しい数値判定を置かない・`StftPadMode` の未知 variant は検査しない・GPU の forward はホストのまま・GPU parity は §48）も推奨どおりで、個別の承認を上乗せして主張しない。
+
+### 63.1 実装したもの
+
+| 対象 | cgrad | 方式 |
+|---|---|---|
+| `Stft` | `dx = StftAdjoint(g)` | 随伴 Op 1 ノード。値は `fft::stft_vjp_host`（1 階 VJP と同一関数） |
+| `Istft` | `dX = IstftAdjoint(g)` | 同上。値は `fft::istft_vjp_host` |
+| `StftAdjoint`（内部） | `dg = stft(up)` | `fft_ops::stft_from_resolved`（子テープの backend override を通る） |
+| `IstftAdjoint`（内部） | `dg = istft(up)` | `fft_ops::istft_from_resolved` |
+
+- 内部 Op `StftAdjoint`・`IstftAdjoint` は `pub(crate)` で、公開名の追加も §21.2 の 123 件の数えへの追加もない。`supports_create_graph() == true`、`is_checkpoint_eligible() == false`、`for_each_input` は `input` の 1 件。網羅 match 6 か所（`tape.rs` の 3 関数、`grad.rs` の VJP、`create_graph.rs` の `replay_op`・`build_cgrads`）にワイルドカードは足していない。
+- `fft_ops.rs` の `stft`・`istft` の後半を `stft_from_resolved`・`istft_from_resolved` に切り出した（式・評価順・呼び出し回数は不変。layout を再計算するが純関数で値は変わらない）。`istft_from_resolved` は NOLA 検査をバックエンド呼び出しより前に置き、再生経路でも迂回しない。再生で公開の `Var::stft` を使わないのは、`win_length` から窓を再解決するため、解決済みの窓（長さ `n_fft`）を渡すと失敗するから。
+- 実装は `crates/autodiff/src/create_graph/stft.rs`。`validate_ancestors` が 4 Op の layout・窓長・NOLA・入力 shape の整合を子テープへ書く前に検査し、違反は型付き `Err(Backward)` で `child` は空のまま。
+
+### 63.2 設計（§42）からの差・明確化
+
+- **行番号**: §42 の `file:line` は `839a88f6d` 時点の値で、実装前に引き直した。
+- **`stft_adjoint_var`・`istft_adjoint_var` に出力 shape の引数を足した**: 信号長はフレーム数から一意に決まらない（`T = 1 + (L_pad − n_fft)/hop`）ため、呼び出し側が親ノードの shape（`replay_op` ではノード自身の shape）を渡す。
+- **`IstftAdjoint` の `params`**: 対応する `Op::Istft` と同じ値（`onesided` が `None` のままでよい）。出力〈スペクトル〉shape から `istft_layout` を再構築すると同じ解決結果になるため、解決済みの値へ置き換えていない。
+- **正ガードの方式**: 本族の create_graph を拒否する否定ガードは `api_surface.rs` に元から無かった（§42.1）ので、#3797 の前例どおり facade の doctest の実在を固定する正ガード `backward_create_graph_stft_family_usage_doctest_is_present_and_compiled` を足した（存在しない needle を課すと違反が返る自己テスト付き）。`FftOpsHoldDoctestGuard` 系は公開名の保留で無関係のため変えていない。
+- **関数名の制約**: `api_surface.rs` の関数名インベントリが数える名前（`stft`・`istft`・`dot` 等）と完全一致する `fn` を宣言しない（`*_from_resolved`・`*_adjoint_var`・テストの `inner_prod` と命名）。
+- **GPU parity のテスト名**: §42.4 の仮名（`..._parity`）は、既存の命名規則に合わせて `create_graph_stft_family_{cuda,metal}_matches_cpu` とした。
+
+### 63.3 テスト
+
+- `crates/autodiff/tests/create_graph_stft.rs`（CI）: `stft_family_first_order_bit_identical_and_cgrad_req2`（center〈Reflect／Constant〉・normalized・onesided・rank 1／2・短い窓・hop が割り切れない場合 × 二次形式／`tanh`）、`istft_family_first_order_and_hessian_match`（`length` の短縮・延長・`onesided = Some(false)`・batch）、`stft_istft_roundtrip_second_order_matches_direct`、`stft_family_x_flows_to_stft_and_nonlinear_branch`、`stft_family_cgrad_bit_identical_for_linear_upstream`、`stft_family_jvp_create_graph_matches_central_difference`、`stft_family_nonfinite_propagates_like_first_order`、`stft_family_large_upstream_matches_first_order`、`istft_zero_padded_tail_and_upper_bins_have_zero_second_order`、`stft_family_neighbouring_unsupported_op_stays_fail_closed`（隣接 Op の見本は `Cholesky`）、`stft_family_child_replay_uses_backend_override`。Hessian は `Tape::backward` の 5 点中央差分（`create_graph` を経由しない独立経路）と REQ-2 で突合する。`onesided = Some(false)` と batch 付きの `istft` の `tanh` 損失は、f32 の中央差分雑音が小さな Hessian 成分で REQ-2 の相対側を超えるため二次形式（厳密）だけで突合した（判定式・tolerance は変えていない）。
+- 単体: `create_graph/stft.rs` の `stft_family_adjoint_ops_are_mutually_adjoint`・`istft_family_adjoint_ops_are_mutually_adjoint`（`⟨S x, y⟩ = ⟨x, Sᵀ y⟩`）、`tape.rs` の `stft_family_supports_create_graph`。
+- 反転した既存テスト: `tests/create_graph_linalg_fft.rs` の fail-closed の固定を 15 件から 13 件へ（`stft`・`istft` を外した）。それ以外の既存テストは無変更で通る。
+- facade: `{stft,istft}_create_graph_via_facade`（`grad_exact = false`。二次形式の損失）、`backward_create_graph` の rustdoc に矩形窓・`hop = n_fft` の `stft` の `H v = 8 v` の doctest。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `stft_family` の 2 ケース（`stft_family_stft`・`stft_family_istft`。`Route::H`・`Judge::Strict`・`NoMatMul`）、`create_graph_stft_family_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査 `stft_family_cases_pass_cpu_against_cpu`。
+
+### 63.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`first_order()` は素の `backward` と bit 一致する。`cg.grad` は REQ-2 で一致し、線形な上流では CPU で 1 階と bit 一致した。新しい数値判定（適用判定・S1）は置かない。tolerance・baseline・ガードレール閾値は変えない。新しい baseline は作らない。
+- 窓は非追跡で、窓への勾配は流れない（`docs/autodiff-fft-ops-decision.md` §13）。三階以上と、真値が f32 を超える場合は保証外。
+- 随伴 Op はホスト計算。`fft_stft`・`fft_istft` は CUDA・Metal・ROCm で override されておらずホストへフォールバックする。
+
+### 63.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。
+- スコープ外: 窓への勾配、GPU の STFT カーネル、O(n log n) 化、GPU 実機 parity の実測と測り方の変更（§48）、f64 テープの create_graph、他の B 区分・C 区分の Op、facade の公開名の追加。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
+- 追跡表の項目 4 は「保留」のまま（`Cholesky` 等の他 Op が残るため）。
