@@ -895,3 +895,177 @@ fn lrn_judge_budget_counts_window_double_scan() {
         "走査量の上限で短時間に拒否される: {elapsed:?}"
     );
 }
+
+// --- NaN の到達範囲（Codex P1・PR #3950）---------------------------------------------------------
+//
+// NaN は伝播させる契約だが、NaN の届かない有限の要素（LRN は窓、WeightNorm は g が NaN のグループの
+// g に依存しない要素）は通常どおり判定する。判定が外すのは f32 の再現と参照の両方が NaN の要素だけ。
+
+/// `backward_create_graph` の結果（受理なら 1 階と、seed `e_j` ごとの二階の行）。
+type SecondRows = Result<(Vec<f32>, Vec<Vec<f32>>), AutodiffError>;
+
+/// 損失 `build(x)` の 1 階 `∂L/∂x` と、その各要素を seed にした `x` への二階の行を返す。拒否なら `child` が空。
+fn second_rows<F>(x0: &[f32], shape: &[usize], mut build: F) -> SecondRows
+where
+    F: for<'t> FnMut(&Var<'t>) -> Built<'t>,
+{
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&x).expect("forward");
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert!(matches!(e, AutodiffError::Backward(_)), "{e:?}");
+            assert!(child.is_empty(), "拒否後の child は空");
+            return Err(e);
+        }
+    };
+    let gx = cg.grad(&x).expect("grad").expect("到達");
+    let cx = cg.child_var(&x).expect("child_var").expect("写し");
+    let first = dense(&gx.to_tensor());
+    let rows = (0..numel(shape))
+        .map(|j| {
+            let s = extract_scalar(&gx, shape, j).expect("seed");
+            let g = child.backward(&s).expect("child.backward");
+            dense(g.get(&cx).expect("get").expect("到達"))
+        })
+        .collect();
+    Ok((first, rows))
+}
+
+/// Codex の入力（`x = [NaN, 1]`・`size = 1`・`α = 1e-30`・`β = -0.5`・`k = 0`・損失は出力の和）。窓は互いに
+/// 独立で、有限側の `b = d_s^{-0.5}` の微分係数 `-0.5·d_s^{-1.5}` が f32 で overflow する。列に NaN が
+/// あっても有限の窓は判定されるので拒否される（以前は列ごと判定を外して受理し、有限側の二階が非有限だった）。
+#[test]
+fn lrn_nan_column_still_judges_independent_finite_window() {
+    let shape = [1usize, 2, 1];
+    let r = second_rows(&[f32::NAN, 1.0], &shape, |x| {
+        x.local_response_norm(1, 1e-30, -0.5, 0.0)?.sum(None)
+    });
+    assert!(
+        r.is_err(),
+        "有限の窓の f32 overflow は NaN の列でも拒否される"
+    );
+}
+
+fn lrn_sum<'t>(x: &Var<'t>, size: usize) -> Built<'t> {
+    x.local_response_norm(size, 1.0, 0.75, 2.0)?.sum(None)
+}
+
+/// 正のプローブ: NaN の届かない窓の二階は有限で、NaN を有限値へ置き換えた入力（列の最大値は同じなので
+/// スケールも同じ）の二階と REQ-2 で一致する。NaN の窓の 1 階は NaN。`size = 1`（窓が独立）と `size = 3`
+/// （NaN から最も遠いチャネルの自分への二階）の 2 通り。
+#[test]
+fn lrn_nan_column_finite_window_matches_reference() {
+    let cases: [(Vec<f32>, usize, usize); 2] = [
+        (vec![f32::NAN, 1.0], 1, 1),
+        (vec![f32::NAN, 0.6, -0.3, 0.8, 0.4], 3, 4),
+    ];
+    for (x0, size, far) in cases {
+        let shape = [1usize, x0.len(), 1];
+        let (first, rows) =
+            second_rows(&x0, &shape, |x| lrn_sum(x, size)).expect("NaN の届かない窓は受理");
+        let mut x_ref = x0.clone();
+        x_ref[0] = 0.5;
+        let (first_ref, rows_ref) =
+            second_rows(&x_ref, &shape, |x| lrn_sum(x, size)).expect("参照");
+        assert!(first[0].is_nan(), "size{size}: NaN の窓の 1 階は NaN");
+        assert!(
+            common::req2_close(f64::from(first[far]), f64::from(first_ref[far])),
+            "size{size}: 有限の窓の 1 階"
+        );
+        let (h, h_ref) = (rows[far][far], rows_ref[far][far]);
+        assert!(h.is_finite(), "size{size}: 有限の窓の二階は有限: {h:e}");
+        assert!(
+            common::req2_close(f64::from(h), f64::from(h_ref)),
+            "size{size}: 二階 {h:e} と参照 {h_ref:e}"
+        );
+    }
+}
+
+/// WeightNorm の g が NaN のグループも、g に依存しない二階（`dg` への seed の `v` への要素）は判定する。
+/// グループ 0（g = NaN）の `v = [1, 1e-4]`・上流 `[1e4, 0]` は、f32 で `v̂₀² = 1` に丸まり `dg` の `v₀` への
+/// 二階（解析値 `up₀·v̂₁²/n ≈ 1e-4`、項の大きさ約 1e4）が相殺で消えるので拒否される（以前は g が NaN の
+/// グループを判定から外して受理していた）。グループ 1 は有限で無害。
+#[test]
+fn weight_norm_nan_g_group_still_judges_g_independent_entries() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let v = tape.var(&t(vec![1.0, 1e-4, 0.6, 0.8], &[2, 2]));
+    let g = tape.var(&t(vec![f32::NAN, 0.5], &[2, 1]));
+    let a = tape.var(&t(vec![1e4, 0.0, 1.0, 1.0], &[2, 2]));
+    let w = v.weight_norm(&g, Some(0)).expect("forward");
+    let loss = w.mul(&a).and_then(|r| r.sum(None)).expect("loss");
+    expect_rejected(&tape, &loss, &child, "weight_norm/nan-g-cancel");
+}
+
+/// 正のプローブ: g が NaN のグループで、`dv` は NaN、`dg` と `dg` の `v` への二階は有限で、g を有限値へ
+/// 置き換えた入力と REQ-2 で一致する（`dg = Σup⊙v̂` は g に依存しない）。ほかのグループは有限。
+#[test]
+fn weight_norm_nan_g_group_finite_entries_match_reference() {
+    let run = |g0: f32| {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let v = tape.var(&t(vec![0.3, -0.7, 0.6, 0.8], &[2, 2]));
+        let g = tape.var(&t(vec![g0, 0.5], &[2, 1]));
+        let a = tape.var(&t(vec![0.9, -0.4, 1.0, 1.0], &[2, 2]));
+        let w = v.weight_norm(&g, Some(0)).expect("forward");
+        let loss = w.mul(&a).and_then(|r| r.sum(None)).expect("loss");
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .expect("g が NaN でも受理");
+        let gv = cg.grad(&v).expect("grad").expect("到達");
+        let gg = cg.grad(&g).expect("grad").expect("到達");
+        let cv = cg.child_var(&v).expect("child_var").expect("写し");
+        let dv = dense(&gv.to_tensor());
+        let dg = dense(&gg.to_tensor());
+        let s = extract_scalar(&gg, &[2, 1], 0).expect("seed");
+        let h = dense(
+            child
+                .backward(&s)
+                .expect("child.backward")
+                .get(&cv)
+                .expect("get")
+                .expect("到達"),
+        );
+        (dv, dg, h)
+    };
+    let (dv, dg, h) = run(f32::NAN);
+    let (dv_ref, dg_ref, h_ref) = run(1.3);
+    assert!(
+        dv[0].is_nan() && dv[1].is_nan(),
+        "g が NaN のグループの dv は NaN"
+    );
+    assert!(
+        dv[2].is_finite() && dv[3].is_finite(),
+        "ほかのグループは有限"
+    );
+    assert!(common::req2_close(f64::from(dg[0]), f64::from(dg_ref[0])));
+    for i in 0..2 {
+        assert!(h[i].is_finite(), "dg の v への二階は有限: {:e}", h[i]);
+        assert!(
+            common::req2_close(f64::from(h[i]), f64::from(h_ref[i])),
+            "dg の v への二階 {:e} と参照 {:e}",
+            h[i],
+            h_ref[i]
+        );
+        assert_eq!(h[2 + i], 0.0, "グループをまたぐ二階は 0");
+    }
+    let _ = dv_ref;
+}
+
+/// SpectralNorm の W に NaN が 1 つあると `σ_s = ΣW_s⊙P` を通ってテンソル全体へ届く（1 階・二階とも
+/// 全要素 NaN）。テンソル単位で判定を外すのは到達範囲と一致し、有限の要素を検査なしで通さない。
+#[test]
+fn spectral_norm_single_nan_reaches_every_entry() {
+    let mut st = SpectralNormState::from_vectors(&[2, 2], 0, &[0.6, 0.8], &[0.8, 0.6], 1, 1e-12)
+        .expect("state");
+    let r = second_rows(&[0.9, f32::NAN, 0.5, 0.6], &[2, 2], |w| {
+        w.spectral_norm(&mut st, false)?.sum(None)
+    })
+    .expect("NaN は伝播させる");
+    let (first, rows) = r;
+    assert!(first.iter().all(|v| v.is_nan()), "1 階: {first:?}");
+    assert!(rows.iter().flatten().all(|v| v.is_nan()), "二階: {rows:?}");
+}

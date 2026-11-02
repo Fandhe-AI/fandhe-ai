@@ -51,7 +51,13 @@
 //!   `eval/scalar.rs` の VJP 係数・`cot·係数` の積・チャンクの `Mul` を逆順にたどる cotangent）を f32 で
 //!   再現した `V_str` で求め、`(|V_str − V| + coeff·M)` が絶対 1e-5 未満か相対の半分以内でない要素が 1 つでも
 //!   あれば拒否する（`loss_class.rs::struct_check` と同じ形。tolerance 定数は変えない）。f32 の forward 値・
-//!   VJP 係数が 1 つでも非有限なら（逆伝播は全要素に `cot·係数` を作るので `0·inf = NaN`）拒否する。
+//!   VJP 係数に `±inf` が 1 つでもあれば（逆伝播は全要素に `cot·係数` を作るので `0·inf = NaN`）拒否する。
+//! - **NaN の到達範囲**: NaN は伝播させるが、NaN の届かない有限の要素は検査なしで通さない。到達範囲は
+//!   f32 の再現と参照の両方に NaN を伝播させて構造の演算そのもので決め、判定が外すのは両方が NaN の要素
+//!   だけ（片側だけ NaN は拒否。forward の NaN の位置の一致は [`same_nan`]）。LRN は NaN を含む列でも
+//!   NaN の届かない窓を、WeightNorm は g が NaN のグループでも g に依存しない要素を判定する。外す単位が
+//!   到達範囲と一致するのは、全チャネルの `d_s` が NaN の LRN の列・`v` に NaN がある WeightNorm の
+//!   グループ（`n_s` が NaN）・`W` に NaN がある SpectralNorm（`σ_s` が NaN）だけ（§57.2）。
 //!   走査量（f32 の再現 1 系統が回す内側ループの反復回数。LRN は seed ごとの反転窓 × 前方窓の二重走査を
 //!   含む。[`lrn_judge_cost`] 等）が `2^27` を超える入力は計算量の fail-closed として拒否する。構造を積んだ
 //!   後の 1 階の値の照合（[`shadow_check`]）も残す。
@@ -131,9 +137,10 @@ fn rounding_coeff(terms: usize) -> f64 {
 }
 
 /// 1 要素の構造値 `v_str`（f32）が参照値 `v` に REQ-2 の統一複合判定で一致するかの保守的検査。
-/// `m` は同じ式を各項の絶対値の和で評価した大きさ。NaN の参照は伝播の契約に従い素通しにする。
+/// `m` は同じ式を各項の絶対値の和で評価した大きさ。NaN の参照値（ホストの 1 階が NaN の要素）は伝播の
+/// 契約に従い素通しにする。参照値が有限なら `m` が NaN でも拒否する（有限の要素を検査なしで通さない）。
 fn struct_check(v: f64, v_str: f64, m: f64, coeff: f64, what: &str) -> Result<(), AutodiffError> {
-    if v.is_nan() || m.is_nan() {
+    if v.is_nan() {
         return Ok(());
     }
     let err = (v_str - v).abs() + coeff * m;
@@ -185,8 +192,10 @@ fn shadow_check(
 //
 // 構造は f32 の値から離散量（符号・マスク・分岐）を決めない（スケール指数・窓・グループ分けはホストの
 // V2 定数で、`V_str` もそれを共有して正しい）。要素数 0 でない cotangent に掛かる係数だけでなく、
-// 逆伝播は全要素に `cot·係数` を作るので、f32 の forward 値・VJP 係数が 1 つでも非有限なら `V_str` は
-// NaN になる（`0·inf`）。これは forward の再現で非有限を見つけた時点で拒否する。
+// 逆伝播は全要素に `cot·係数` を作るので、f32 の forward 値・VJP 係数が 1 つでも `±inf` なら `V_str` は
+// NaN になる（`0·inf`）。これは forward の再現で `±inf` を見つけた時点で拒否する。入力の NaN は f32 と
+// 参照の両方に同じ演算で伝播させ（forward で位置が一致することを [`same_nan`] で確かめる）、両方が NaN の
+// 要素だけを判定から外す（[`entry_check`]）。
 
 /// 総括判定の走査量の上限。走査量は f32 の再現（`V_str`）1 系統が回す内側ループの反復回数で数え
 /// （[`lrn_judge_cost`]・[`wn_judge_cost`]・[`sn_judge_cost`]。参照の [`Rf`] も同じ回数を回す）、
@@ -196,8 +205,8 @@ const JUDGE_BUDGET: usize = 1 << 27;
 /// LRN の総括判定の走査量（[`lrn_col_fwd`]・[`lrn_col_rev`]・[`lrn_col_judge`] の反復回数の上界）。
 /// 列（`ncols` 本・長さ `c`）ごとに、forward が窓和 `d`・`sz` の `c·(nf + nr)`（[`win_sum`] は範囲外も
 /// 0 として回るので `nf = bf + ff + 1`・`nr = br + fr + 1` は打ち切らない。最大 `2c − 1`）と長さ `c` の走査
-/// `25 + 2·nchunks` 回（中間値 10 本・`dx`・有限性の検査 11 本・チャンクの `Mul` と検査・作業領域の確保
-/// 4 本）、seed（`c` 個）ごとに作業領域の初期化・`x_s` から `x` への戻し・`x` への判定が各 `sx`、反転窓の
+/// `33 + 2·nchunks` 回（中間値 10 本・`dx`・±inf の検査 11 本・チャンクの `Mul` と検査・作業領域の確保
+/// 4 本・NaN の位置の照合〈[`same_nan`]〉8 本。定数個のスカラーは数えない）、seed（`c` 個）ごとに作業領域の初期化・`x_s` から `x` への戻し・`x` への判定が各 `sx`、反転窓の
 /// 走査と `up` への判定が各 `wr`、反転窓の各 `m` から前方窓への蓄積（二重走査）が `wr·wf`。seed 側の
 /// `wf`・`wr`・`sx` は前方窓・反転窓・`x` への要素の幅で、どれも `c` に打ち切る。f64 の参照（`d`・`m` の窓和）は
 /// forward の窓和と同じ大きさ。
@@ -208,7 +217,7 @@ fn lrn_judge_cost(ncols: usize, c: usize, w: LrnWin, nchunks: usize) -> usize {
     let (nf, nr) = (w.bf + w.ff + 1, w.br + w.fr + 1);
     let fwd = c
         .saturating_mul(nf + nr)
-        .saturating_add(c.saturating_mul(nchunks.saturating_mul(2).saturating_add(25)));
+        .saturating_add(c.saturating_mul(nchunks.saturating_mul(2).saturating_add(33)));
     let per_seed = sx
         .saturating_mul(3)
         .saturating_add(wr.saturating_mul(2))
@@ -217,22 +226,23 @@ fn lrn_judge_cost(ncols: usize, c: usize, w: LrnWin, nchunks: usize) -> usize {
 }
 
 /// WeightNorm の総括判定の走査量（[`wn_fwd`]・[`wn_rev`]・[`wn_group_judge`] の反復回数）。グループ
-/// （`groups` 個・長さ `rest`）ごとに、forward が長さ `rest` の走査 13 回（`v_s`・`up`・`Σv_s²`・`v̂`・
-/// Div 係数・`dg`・`t`・`dv` と有限性の検査 5 本）、seed（`rest + 1` 個）ごとに逆伝播が 5 回（作業領域の
+/// （`groups` 個・長さ `rest`）ごとに、forward が長さ `rest` の走査 18 回（`v_s`・`up`・`Σv_s²`・`v̂`・
+/// Div 係数・`dg`・`t`・`dv` と ±inf の検査 5 本・NaN の位置の照合 5 本）、seed（`rest + 1` 個）ごとに逆伝播が 5 回（作業領域の
 /// 確保・`up` への要素の初期化・`dg`・`v̂`・`v_s` の逆伝播）と判定が `2·rest + 1`。
 fn wn_judge_cost(groups: usize, rest: usize) -> usize {
     let per_seed = rest.saturating_mul(7).saturating_add(1);
     let per_group = rest
-        .saturating_mul(13)
+        .saturating_mul(18)
         .saturating_add((rest + 1).saturating_mul(per_seed));
     groups.saturating_mul(per_group)
 }
 
 /// SpectralNorm の総括判定の走査量（[`sn_fwd`]・[`sn_rev`]・[`sn_judge`] の反復回数）。forward が長さ
-/// `n` の走査 17 回（`W_s`・`P`・`up`・`σ_s`・`Ŵ`・Div 係数 2 本・`Σup⊙Ŵ`・`t`・`dW` と有限性の検査 7 本）、
+/// `n` の走査 23 回（`W_s`・`P`・`up`・`σ_s`・`Ŵ`・Div 係数 2 本・`Σup⊙Ŵ`・`t`・`dW` と ±inf の検査 7 本・
+/// NaN の位置の照合 6 本）、
 /// seed（`n` 個）ごとに逆伝播が 2 回（`Ŵ`・`up` と `σ_s` の逆伝播）と判定が `2·n`。
 fn sn_judge_cost(n: usize) -> usize {
-    n.saturating_mul(17)
+    n.saturating_mul(23)
         .saturating_add(n.saturating_mul(n.saturating_mul(4)))
 }
 
@@ -262,7 +272,10 @@ trait Num: Copy {
     fn pow_grad(self, e: f64) -> Self;
     /// `Sqrt` の VJP 係数 `0.5 / y`（`self` は forward の出力 `y`）。
     fn root_grad(self) -> Self;
-    fn finite(self) -> bool;
+    /// ±inf を含まない（NaN は入力の NaN の伝播として通す。[`no_inf`] 参照）。
+    fn no_inf(self) -> bool;
+    /// 値が NaN（[`Rf`] は参照値 `v`）。
+    fn nan(self) -> bool;
 }
 
 impl Num for f32 {
@@ -301,8 +314,11 @@ impl Num for f32 {
     fn root_grad(self) -> Self {
         0.5 / self
     }
-    fn finite(self) -> bool {
-        self.is_finite()
+    fn no_inf(self) -> bool {
+        !self.is_infinite()
+    }
+    fn nan(self) -> bool {
+        self.is_nan()
     }
 }
 
@@ -391,8 +407,11 @@ impl Num for Rf {
             m: v.abs() * self.kappa(),
         }
     }
-    fn finite(self) -> bool {
-        self.v.is_finite() && self.m.is_finite()
+    fn no_inf(self) -> bool {
+        !self.v.is_infinite() && !self.m.is_infinite()
+    }
+    fn nan(self) -> bool {
+        self.v.is_nan()
     }
 }
 
@@ -429,15 +448,34 @@ fn sn_coeff(n: usize) -> f64 {
     judge_coeff(6 * n, 24, 0.0)
 }
 
-fn all_finite<T: Num>(vals: &[T]) -> bool {
-    vals.iter().all(|v| v.finite())
+/// forward の再現の値・VJP 係数に ±inf が無いこと。±inf は `0·inf`・`inf − inf` で入力に無い NaN を作る
+/// ので拒否する。NaN は入力の NaN の伝播として通し、[`same_nan`] で f32 と参照の NaN の位置が一致する
+/// ことを確かめる（[`entry_check`] は両側が NaN の要素だけを外す）。
+fn no_inf<T: Num>(vals: &[T]) -> bool {
+    vals.iter().all(|v| v.no_inf())
+}
+
+/// f32 の再現と参照（[`Rf`]）の forward の値・VJP 係数で、NaN の位置が一致すること。参照の NaN は入力の
+/// NaN が演算で届いた位置だけに生じる。f32 だけの NaN（負の底の `powf`・`0/0` 等、入力に無い NaN）は、
+/// 逆伝播の `0·NaN` で依存しない二階の要素まで NaN にするので、forward の時点で拒否する。
+fn same_nan<A: Num, B: Num>(a: &[A], b: &[B]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.nan() == y.nan())
+}
+
+fn nan_mismatch(what: &str) -> AutodiffError {
+    invalid(&format!(
+        "{what}: 構造の f32 の forward 値または VJP 係数に、入力の NaN に依存しない NaN がある"
+    ))
 }
 
 /// 二階の 1 要素の判定（`loss_class.rs::struct_check` と同じ形。scale は 1）。`r` は参照値 `V` と大きさ
 /// `M`、`s` は構造の f32 の再現値 `V_str`。`(|V_str − V| + coeff·M)` が絶対 1e-5 未満か相対の半分以内で
-/// なければ拒否する（tolerance 定数は変えない）。判定に掛けるのは NaN を含まないレーンだけなので、
-/// どれかが非有限なら拒否する。
+/// なければ拒否する（tolerance 定数は変えない）。外すのは f32 の再現と参照の**両方が NaN** の要素だけ
+/// （入力の NaN が構造の演算で届いた要素。NaN は伝播させる契約）。片側だけ NaN・どちらかが ±inf は拒否する。
 fn entry_check(r: Rf, s: f32, coeff: f64, what: &str) -> Result<(), AutodiffError> {
+    if s.is_nan() && r.v.is_nan() {
+        return Ok(());
+    }
     let err = (f64::from(s) - r.v).abs() + coeff * r.m;
     if r.v.is_finite()
         && r.m.is_finite()
@@ -696,7 +734,7 @@ struct LrnColConst<'a> {
 }
 
 /// `lrn_cgrad` が積む構造（`x_s = x/s` 〜 `dx = (term1 − term2)·chunk…`）の forward を再現する。
-/// f32 の forward 値・VJP 係数のどれかが非有限なら `None`。
+/// f32 の forward 値・VJP 係数のどれかが ±inf なら `None`（NaN は伝播として通す。[`no_inf`]）。
 fn lrn_col_fwd<T: Num>(
     x: &[f32],
     up: &[f32],
@@ -729,23 +767,23 @@ fn lrn_col_fwd<T: Num>(
             t1.minus(t2)
         })
         .collect();
-    let mut fwd_ok = all_finite(&dx);
+    let mut fwd_ok = no_inf(&dx);
     for &ch in k.chunks {
         for v in &mut dx {
             *v = v.times(T::k(ch));
         }
-        fwd_ok &= all_finite(&dx);
+        fwd_ok &= no_inf(&dx);
     }
     let mut ci = T::k(1.0);
     for &ch in k.chunks.iter().rev() {
         ci = ci.times(T::k(ch));
     }
     let ok = fwd_ok
-        && inv_s.finite()
-        && ci.finite()
+        && inv_s.no_inf()
+        && ci.no_inf()
         && [&xs, &sq, &d, &a, &b, &fa, &fb, &ux, &z, &sz]
             .iter()
-            .all(|v| all_finite(v));
+            .all(|v| no_inf(v));
     ok.then_some(LrnColFwd {
         xs,
         up,
@@ -841,6 +879,25 @@ fn lrn_col_judge(
     ) else {
         return Err(nonfinite_struct(WHAT));
     };
+    let nan_ok = [
+        (&fs.xs, &fr.xs),
+        (&fs.up, &fr.up),
+        (&fs.a, &fr.a),
+        (&fs.fa, &fr.fa),
+        (&fs.fb, &fr.fb),
+        (&fs.b, &fr.b),
+        (&fs.ux, &fr.ux),
+        (&fs.sz, &fr.sz),
+    ]
+    .iter()
+    .all(|(a, b)| same_nan(a, b))
+        && same_nan(
+            &[fs.inv_s, fs.rho, fs.c2, fs.ci],
+            &[fr.inv_s, fr.rho, fr.c2, fr.ci],
+        );
+    if !nan_ok {
+        return Err(nan_mismatch(WHAT));
+    }
     let c = x.len();
     let (mut ss, mut sr) = (LrnScratch::<f32>::new(c), LrnScratch::<Rf>::new(c));
     for j in 0..c {
@@ -919,23 +976,16 @@ pub(super) fn lrn_cgrad<'c>(
     );
     let at = |ni: usize, ci: usize, s: usize| (ni * c + ci) * inner + s;
 
-    // 列 (n, inner) ごとのスケール指数。
+    // 列 (n, inner) ごとのスケール指数。NaN の要素は最大値から外す（`f64::max` は NaN を無視する）ので、
+    // NaN を含む列でも有限のチャネルは NaN の無い列と同じスケールで守られる。
     let ncols = n * inner;
     let mut exps = vec![0i32; ncols];
     for ni in 0..n {
         for s in 0..inner {
-            let mut mx = 0.0f64;
-            let mut has_nan = false;
-            for ci in 0..c {
-                let v = x_data[at(ni, ci, s)];
-                has_nan |= v.is_nan();
-                mx = mx.max(f64::from(v).abs());
-            }
-            exps[ni * inner + s] = if has_nan {
-                0
-            } else {
-                pow2_ceil_exponent(mx.max(floor))
-            };
+            let mx = (0..c).fold(0.0f64, |m, ci| {
+                m.max(f64::from(x_data[at(ni, ci, s)]).abs())
+            });
+            exps[ni * inner + s] = pow2_ceil_exponent(mx.max(floor));
         }
     }
     let scales: Vec<f32> = exps.iter().map(|&e| pow2(e)).collect();
@@ -970,14 +1020,12 @@ pub(super) fn lrn_cgrad<'c>(
         for s in 0..inner {
             let col = ni * inner + s;
             let col_idx: Vec<usize> = (0..c).map(|ci| at(ni, ci, s)).collect();
-            if col_idx
-                .iter()
-                .any(|&i| x_data[i].is_nan() || xs[i].is_nan())
-            {
-                continue;
-            }
             let big_f = l_exp[col].exp2();
             stage(big_f, "LRN の s^{-2β}")?;
+            // NaN の入力は窓和 `d` を通って、窓が NaN を含むチャネルにだけ届く。NaN の `d` は伝播として
+            // 通し、有限の `d` だけを検査する。段の上界（`fold` の max／min は NaN を無視する）は有限の
+            // チャネルの上界になる。全チャネルの `d` が NaN なら列の 1 階・二階は全要素 NaN（総括判定でも
+            // 全要素が両側 NaN）なので、守る有限の要素が無い。
             let mut d = vec![0.0f64; c];
             for (ci, dc) in d.iter_mut().enumerate() {
                 let lo = ci.saturating_sub(back_f);
@@ -985,8 +1033,11 @@ pub(super) fn lrn_cgrad<'c>(
                 let sum: f64 = (lo..=hi).map(|cj| f64::from(xs[col_idx[cj]]).powi(2)).sum();
                 *dc = f64::from(kk[col]) + rho * sum;
             }
+            if d.iter().all(|dc| dc.is_nan()) {
+                continue;
+            }
             if d.iter()
-                .any(|&dc| dc.is_nan() || dc <= 0.0 || (dc as f32) < f32::MIN_POSITIVE)
+                .any(|&dc| !dc.is_nan() && (dc <= 0.0 || (dc as f32) < f32::MIN_POSITIVE))
             {
                 return Err(invalid(
                     "LocalResponseNorm のスケール後統計 d_s が 0 以下または f32 の非正規数",
@@ -1203,7 +1254,7 @@ struct WnFwd<T> {
 }
 
 /// `weight_norm_cgrads` が積む構造（`v_s = v/s` 〜 `dv = (g/n_s/s)·(up − dg·v̂)`）の forward を再現する。
-/// f32 の forward 値・VJP 係数のどれかが非有限なら `None`。
+/// f32 の forward 値・VJP 係数のどれかが ±inf なら `None`（NaN は伝播として通す。[`no_inf`]）。
 fn wn_fwd<T: Num>(v: &[f32], up: &[f32], g: f32, s: f64) -> Option<WnFwd<T>> {
     let s = T::k(s);
     let inv_s = T::k(1.0).over(s);
@@ -1234,8 +1285,8 @@ fn wn_fwd<T: Num>(v: &[f32], up: &[f32], g: f32, s: f64) -> Option<WnFwd<T>> {
     let dv: Vec<T> = t.iter().map(|&x| coef.times(x)).collect();
     let ok = [ss, n, fsq, inv_n, inv_s, dg, c1, dgb, coef]
         .iter()
-        .all(|v| v.finite())
-        && [&vs, &vh, &dvb, &t, &dv].iter().all(|v| all_finite(v));
+        .all(|v| v.no_inf())
+        && [&vs, &vh, &dvb, &t, &dv].iter().all(|v| no_inf(v));
     ok.then_some(WnFwd {
         vs,
         vh,
@@ -1308,6 +1359,22 @@ fn wn_group_judge(v: &[f32], up: &[f32], g: f32, s: f64, coeff: f64) -> Result<(
     let (Some(fs), Some(fr)) = (wn_fwd::<f32>(v, up, g, s), wn_fwd::<Rf>(v, up, g, s)) else {
         return Err(nonfinite_struct(WHAT));
     };
+    let nan_ok = [
+        (&fs.vs, &fr.vs),
+        (&fs.vh, &fr.vh),
+        (&fs.dvb, &fr.dvb),
+        (&fs.up, &fr.up),
+        (&fs.t, &fr.t),
+    ]
+    .iter()
+    .all(|(a, b)| same_nan(a, b))
+        && same_nan(
+            &[fs.inv_s, fs.inv_n, fs.fsq, fs.dg, fs.dgb, fs.coef],
+            &[fr.inv_s, fr.inv_n, fr.fsq, fr.dg, fr.dgb, fr.coef],
+        );
+    if !nan_ok {
+        return Err(nan_mismatch(WHAT));
+    }
     let r = v.len();
     let (mut hv_s, mut hu_s) = (vec![0f32; r], vec![0f32; r]);
     let (mut hv_r, mut hu_r) = (vec![Rf::k(0.0); r], vec![Rf::k(0.0); r]);
@@ -1385,7 +1452,10 @@ pub(super) fn weight_norm_cgrads<'c>(
     for k in 0..groups {
         let lo = k * rest;
         let vs: Vec<f32> = v_gm[lo..lo + rest].iter().map(|&x| x / scales[k]).collect();
-        if vs.iter().any(|x| x.is_nan()) || up_gm[lo..lo + rest].iter().any(|x| x.is_nan()) {
+        // v に NaN があるグループは `n_s = √Σv_s²` が NaN になり、グループの 1 階・二階は全要素 NaN（総括
+        // 判定でも全要素が両側 NaN）なので、守る有限の要素が無い。グループは互いに独立（縮約は行ごと）。
+        // 上流 `up` は有限（上の `check_finite`）。
+        if vs.iter().any(|x| x.is_nan()) {
             continue;
         }
         let ss: f64 = vs.iter().map(|&x| f64::from(x).powi(2)).sum();
@@ -1434,10 +1504,10 @@ pub(super) fn weight_norm_cgrads<'c>(
         }
         m_dg[k] = dgb;
         // 第 2 軸の本体: seed が 1 要素のときの二階の各要素を f32 で再現して参照と比べる。
-        // g が NaN のグループは dv が NaN になる（1 階と同じ伝播）ので判定から外す。
-        if !g_data[k].is_nan() {
-            wn_group_judge(&v_gm[lo..lo + rest], upk, g_data[k], s, coeff_judge)?;
-        }
+        // g が NaN のグループも判定する。g の NaN は `coef = (g/n_s)/s` を通って `dv` と、`dv` への seed
+        // から `v`・`up` への二階へ届くが、`dg` への seed の二階（`v`・`up` への要素）と `dv` への seed の
+        // `g` への要素は g に依存せず有限なので、通常どおり判定する（両側 NaN の要素だけ外す）。
+        wn_group_judge(&v_gm[lo..lo + rest], upk, g_data[k], s, coeff_judge)?;
     }
 
     // 構造。
@@ -1514,10 +1584,10 @@ fn sn_fwd<T: Num>(w: &[f32], p: &[f64], up: &[f32], s: f64) -> Option<SnFwd<T>> 
         .collect();
     let dob: Vec<T> = t.iter().map(|&x| x.over(sig).over(sig).negate()).collect();
     let dw: Vec<T> = t.iter().map(|&x| x.over(sig).over(s)).collect();
-    let ok = [sig, inv_sig, inv_s, sp].iter().all(|v| v.finite())
+    let ok = [sig, inv_sig, inv_s, sp].iter().all(|v| v.no_inf())
         && [&ws, &p, &wh, &dwb, &t, &dob, &dw]
             .iter()
-            .all(|v| all_finite(v));
+            .all(|v| no_inf(v));
     ok.then_some(SnFwd {
         ws,
         p,
@@ -1558,6 +1628,20 @@ fn sn_judge(w: &[f32], p: &[f64], up: &[f32], s: f64, coeff: f64) -> Result<(), 
     let (Some(fs), Some(fr)) = (sn_fwd::<f32>(w, p, up, s), sn_fwd::<Rf>(w, p, up, s)) else {
         return Err(nonfinite_struct(WHAT));
     };
+    let nan_ok = [
+        (&fs.ws, &fr.ws),
+        (&fs.p, &fr.p),
+        (&fs.wh, &fr.wh),
+        (&fs.dwb, &fr.dwb),
+        (&fs.up, &fr.up),
+        (&fs.dob, &fr.dob),
+    ]
+    .iter()
+    .all(|(a, b)| same_nan(a, b))
+        && same_nan(&[fs.inv_s, fs.inv_sig], &[fr.inv_s, fr.inv_sig]);
+    if !nan_ok {
+        return Err(nan_mismatch(WHAT));
+    }
     let n = w.len();
     let (mut hw_s, mut hu_s) = (vec![0f32; n], vec![0f32; n]);
     let (mut hw_r, mut hu_r) = (vec![Rf::k(0.0); n], vec![Rf::k(0.0); n]);
@@ -1612,7 +1696,11 @@ pub(super) fn spectral_norm_cgrad<'c>(
         }
     }
     let p_max = p.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
-    let has_nan = w_data.iter().any(|x| x.is_nan()) || up_data.iter().any(|x| x.is_nan());
+    // W に NaN が 1 つでもあると `σ_s = ΣW_s⊙P` が NaN になり（`P` の成分が 0 でも `NaN·0 = NaN`）、`Ŵ`・
+    // `Σup⊙Ŵ`・`dW` と二階は全要素 NaN（総括判定でも全要素が両側 NaN）なので、守る有限の要素が無い。
+    // NaN の到達範囲がテンソル全体なので、テンソル単位で段検査と判定を外すのは到達範囲と一致する。
+    // 上流 `up` は有限（上の `check_finite`）。
+    let has_nan = w_data.iter().any(|x| x.is_nan());
 
     let e = if w_data.iter().any(|x| x.is_nan()) {
         0
@@ -2005,6 +2093,181 @@ mod tests {
         }
     }
 
+    /// NaN の要素の 1 対 1 の不変条件: 子テープの二階が有限な要素は f32 再現も有限で見積り内に一致し
+    /// （再現の範囲外なら子テープは 0）、再現が NaN の要素は子テープも NaN。判定が両側 NaN の要素だけを
+    /// 外すことの前提（NaN の到達範囲を構造の演算そのもので決める）。戻り値は（有限の要素数, NaN の要素数）。
+    fn nan_pair(a: f32, s: Option<(f32, Rf)>, coeff: f64, ctx: &str) -> (usize, usize) {
+        match s {
+            Some((s, r)) if s.is_nan() => {
+                assert!(r.v.is_nan(), "{ctx}: f32 再現だけが NaN");
+                assert!(a.is_nan(), "{ctx}: 再現が NaN なのに子テープが有限 {a:e}");
+                (0, 1)
+            }
+            Some((s, r)) => {
+                if a.is_finite() {
+                    assert_within(a, s, r, coeff, ctx);
+                    (1, 0)
+                } else {
+                    // 再現の和に入らない `0·NaN` が子テープで届いた要素（厳しい側。判定は再現を検査する）。
+                    assert!(a.is_nan(), "{ctx}: 子テープが ±inf");
+                    (0, 1)
+                }
+            }
+            None => {
+                assert!(
+                    a == 0.0 || a.is_nan(),
+                    "{ctx}: 再現の範囲外は 0 か NaN: {a:e}"
+                );
+                (usize::from(a == 0.0), usize::from(a.is_nan()))
+            }
+        }
+    }
+
+    /// LRN の列に NaN が 1 つあるとき（窓は size 1・3）、上の不変条件が成り立ち、有限の要素も NaN の要素も
+    /// 現れること（NaN の届かない窓の二階は判定され、子テープでも有限）。
+    #[test]
+    fn lrn_emulation_nan_reach_matches_child_tape() {
+        let c = 5usize;
+        let shape = [1usize, c, 1];
+        let x0 = vec![f32::NAN, 0.6, -0.3, 0.8, 0.4];
+        let w = vec![0.7f32, -0.5, 0.9, 0.3, -0.8];
+        let (alpha, beta, k) = (0.5f32, 0.75f32, 1.0f32);
+        for size in [1usize, 3] {
+            let tape = Tape::new_with_ops(test_ops());
+            let child = Tape::new_with_ops(test_ops());
+            let x = tape.var(&tt(x0.clone(), &shape));
+            let wc = tape.var(&tt(w.clone(), &shape));
+            let y = x.local_response_norm(size, alpha, beta, k).unwrap();
+            let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+            let cg = tape
+                .backward_create_graph(&loss, &child)
+                .unwrap_or_else(|e| panic!("size{size}: NaN の届かない窓は受理される: {e:?}"));
+            let gx = cg.grad(&x).unwrap().unwrap();
+            let cx = cg.child_var(&x).unwrap().unwrap();
+            let cwc = cg.child_var(&wc).unwrap().unwrap();
+            let rho = f64::from(alpha) / size as f64;
+            let floor = (f64::from(k) * size as f64 / f64::from(alpha)).sqrt();
+            let win = lrn_win(c, size);
+            let mx = x0.iter().fold(0.0f64, |m, &v| m.max(f64::from(v).abs()));
+            let e = pow2_ceil_exponent(mx.max(floor));
+            let chunks: Vec<f64> = chunk_factors(&[-2.0 * f64::from(beta) * f64::from(e)])
+                .iter()
+                .map(|ch| ch[0])
+                .collect();
+            let kc = LrnColConst {
+                s: f64::from(pow2(e)),
+                kk: f64::from(k) / 2f64.powi(2 * e),
+                rho,
+                beta: f64::from(beta),
+                chunks: &chunks,
+            };
+            let coeff = lrn_coeff(
+                window_terms(c, win.bf, win.ff),
+                window_terms(c, win.br, win.fr),
+                chunks.len(),
+                f64::from(beta),
+            );
+            let fs = lrn_col_fwd::<f32>(&x0, &w, &kc, win).unwrap();
+            let fr = lrn_col_fwd::<Rf>(&x0, &w, &kc, win).unwrap();
+            let (mut ss, mut sr) = (LrnScratch::<f32>::new(c), LrnScratch::<Rf>::new(c));
+            let (mut fin, mut nan) = (0usize, 0usize);
+            for j in 0..c {
+                lrn_col_rev(&fs, win, j, &mut ss);
+                lrn_col_rev(&fr, win, j, &mut sr);
+                let row = child_row(&child, &gx, j, &cx);
+                let row_up = child_row(&child, &gx, j, &cwc);
+                let (ulo, uhi) = (j.saturating_sub(win.br), (j + win.fr).min(c - 1));
+                let (xlo, xhi) = (ulo.saturating_sub(win.bf), (uhi + win.ff).min(c - 1));
+                for i in 0..c {
+                    let ctx = format!("lrn-nan size{size} j{j} i{i}");
+                    let sx = (xlo..=xhi).contains(&i).then(|| (ss.xs[i], sr.xs[i]));
+                    let su = (ulo..=uhi).contains(&i).then(|| (ss.up[i], sr.up[i]));
+                    for (a, b) in [
+                        nan_pair(row[i], sx, coeff, &ctx),
+                        nan_pair(row_up[i], su, coeff, &format!("{ctx} up")),
+                    ] {
+                        fin += a;
+                        nan += b;
+                    }
+                }
+            }
+            assert!(fin > 0 && nan > 0, "size{size}: 有限 {fin}・NaN {nan}");
+            // NaN から最も遠いチャネルの seed は、自分への二階が有限で判定に掛かる。
+            assert!(ss.xs[c - 1].is_finite() || size > c, "size{size}");
+        }
+    }
+
+    /// WeightNorm で g が NaN のグループ（と v が NaN のグループ）を含むとき、上の不変条件が成り立ち、
+    /// g が NaN のグループでも `dg` への seed の `v`・`up` への二階と `dv` への seed の `g` への二階が有限で
+    /// 再現と一致すること（判定から外さず検査する範囲）。
+    #[test]
+    fn weight_norm_emulation_nan_reach_matches_child_tape() {
+        let (groups, rest) = (3usize, 3usize);
+        let mut v0 = pattern(9, 2.0);
+        v0[7] = f32::NAN;
+        let g0 = vec![f32::NAN, -0.4, 0.5];
+        let w = pattern(9, 5.0);
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let v = tape.var(&tt(v0.clone(), &[groups, rest]));
+        let g = tape.var(&tt(g0.clone(), &[groups, 1]));
+        let wc = tape.var(&tt(w.clone(), &[groups, rest]));
+        let y = v.weight_norm(&g, Some(0)).unwrap();
+        let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let gv = cg.grad(&v).unwrap().unwrap();
+        let gg = cg.grad(&g).unwrap().unwrap();
+        let cv = cg.child_var(&v).unwrap().unwrap();
+        let cgv = cg.child_var(&g).unwrap().unwrap();
+        let cwc = cg.child_var(&wc).unwrap().unwrap();
+        let coeff = wn_coeff(rest);
+        let (mut fin_g_nan_group, mut nan) = (0usize, 0usize);
+        for kg in 0..groups {
+            let lo = kg * rest;
+            let vk = &v0[lo..lo + rest];
+            let mx = vk.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            let fs = wn_fwd::<f32>(vk, &w[lo..lo + rest], g0[kg], s).unwrap();
+            let fr = wn_fwd::<Rf>(vk, &w[lo..lo + rest], g0[kg], s).unwrap();
+            let (mut hv_s, mut hu_s) = (vec![0f32; rest], vec![0f32; rest]);
+            let (mut hv_r, mut hu_r) = (vec![Rf::k(0.0); rest], vec![Rf::k(0.0); rest]);
+            for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+                let h_g_s = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+                let h_g_r = wn_rev(&fr, seed, &mut hv_r, &mut hu_r);
+                let (row_v, row_u, row_g) = match seed {
+                    WnSeed::Dv(j) => (
+                        child_row(&child, &gv, lo + j, &cv),
+                        child_row(&child, &gv, lo + j, &cwc),
+                        Some(child_row(&child, &gv, lo + j, &cgv)),
+                    ),
+                    WnSeed::Dg => (
+                        child_row(&child, &gg, kg, &cv),
+                        child_row(&child, &gg, kg, &cwc),
+                        None,
+                    ),
+                };
+                let mut pairs = Vec::new();
+                for i in 0..rest {
+                    pairs.push((row_v[lo + i], (hv_s[i], hv_r[i])));
+                    pairs.push((row_u[lo + i], (hu_s[i], hu_r[i])));
+                }
+                if let (Some(row_g), Some(hs), Some(hr)) = (row_g, h_g_s, h_g_r) {
+                    pairs.push((row_g[kg], (hs, hr)));
+                }
+                for (a, sr) in pairs {
+                    let (f, n) = nan_pair(a, Some(sr), coeff, &format!("wn-nan group{kg}"));
+                    if kg == 0 {
+                        fin_g_nan_group += f;
+                    }
+                    nan += n;
+                }
+            }
+        }
+        // g が NaN のグループ: `dg` の seed の v・up への 2·rest と、`dv` の各 seed の g への rest。
+        assert_eq!(fin_g_nan_group, 3 * rest, "g が NaN のグループの有限の要素");
+        assert!(nan > 0);
+    }
+
     /// Codex 指摘（PR #3950・未解決スレッド）の入力で、f32 再現がスケール復元の cotangent の
     /// underflow（2^-60·2^-100 = 2^-160 → 0）を再現し、判定が拒否することを直接確かめる。
     #[test]
@@ -2103,8 +2366,8 @@ mod tests {
         // 典型的な小さい窓は上限内。
         assert!(judge_budget(lrn_judge_cost(64, 16, lrn_win(16, 5), 1), "t").is_ok());
         // WeightNorm・SpectralNorm は seed 数 × 長さ（二乗）で数える。
-        assert_eq!(wn_judge_cost(1, 2), 2 * 13 + 3 * 15);
-        assert_eq!(sn_judge_cost(3), 3 * 17 + 3 * 12);
+        assert_eq!(wn_judge_cost(1, 2), 2 * 18 + 3 * 15);
+        assert_eq!(sn_judge_cost(3), 3 * 23 + 3 * 12);
         assert!(judge_budget(wn_judge_cost(1, 4400), "t").is_err());
         assert!(judge_budget(sn_judge_cost(6000), "t").is_err());
     }
