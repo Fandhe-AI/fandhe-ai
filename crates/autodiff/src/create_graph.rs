@@ -75,7 +75,7 @@
 //! `Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm`（実装は `stat_varnorm` サブモジュール、決定記録 §33・§52）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
-//! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
+//! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。イシュー #3810（決定記録 §46・§70）で `Det` の拒否範囲を行別スケール＋2 のべき乗チャンク（値は V3）で受理へ広げた（`Inv`・`Solve`・`SlogdetLogAbsDet` は対象外として恒久化）。
 //! `MatrixNorm` の `Nuc`・`Spectral` は fail-closed に固定した（`Qr*` はイシュー #3807〈決定記録 §44・§67。実装は
 //! `decomp` サブモジュール。`m ≥ n` かつフルランクの入力だけ〉、`Svd*`・`Eigh*` はイシュー #3808〈決定記録 §44・§68。
 //! 同サブモジュール。縮退・σ == 0・空行列は拒否〉で対象にした）。
@@ -3642,18 +3642,49 @@ fn build_cgrads<'c>(
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
-            Op::Det { input } | Op::SlogdetLogAbsDet { input } => {
+            // Det（イシュー #3810・決定記録 §46・§70）: 値は全入力で V3（`det_vjp` を `push_v3`。
+            // `cg.grad` が 1 階と bit 一致）。構造は `det_row_scale_plan` が区分 (ii) だけで落ちる入力に
+            // 限り行別スケール＋2 のべき乗チャンク、それ以外は従来の V1 構造。空行列は従来経路。
+            Op::Det { input } => {
                 if parent_nodes[input.0].requires_grad {
-                    let with_det = matches!(node.op, Op::Det { .. });
                     let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
-                    linalg_fft::guard_det_like(a_val, &value_of(child, &g)?, with_det)?;
+                    let g_val = value_of(child, &g)?;
                     let a_m = get_mirror(mirror, input)?;
-                    let scale = if with_det {
-                        g.mul(&get_mirror(mirror, id)?)?
+                    // 行別スケール構造の det(B) ノードなら下流の縮小率（それ以外は 1.0）。
+                    let mult = parent
+                        .det_downstream_gain
+                        .borrow()
+                        .get(&id.0)
+                        .copied()
+                        .unwrap_or(1.0);
+                    let d = if a_val.shape()[0] == 0 {
+                        linalg_fft::guard_det_like(a_val, &g_val, true, 1.0)?;
+                        let scale = g.mul(&get_mirror(mirror, id)?)?;
+                        linalg_fft::det_like_cgrad(child, &scale, &a_m)?
                     } else {
-                        g
+                        let plan =
+                            linalg_fft::det_row_scale_plan(a_val, &g_val, g.requires_grad(), mult)?;
+                        let composed = match &plan {
+                            Some(p) => linalg_fft::det_row_scaled_cgrad(child, &g, &a_m, p)?,
+                            None => {
+                                let scale = g.mul(&get_mirror(mirror, id)?)?;
+                                linalg_fft::det_like_cgrad(child, &scale, &a_m)?
+                            }
+                        };
+                        let g_scalar = g_val.host_slice().first().copied().unwrap_or(0.0);
+                        let host = crate::eval::linalg::det_vjp(a_val, g_scalar)?;
+                        push_v3(child, &composed, host)?
                     };
-                    let d = linalg_fft::det_like_cgrad(child, &scale, &a_m)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // SlogdetLogAbsDet は対象外として恒久化（§46.14・§70）。従来の V1 と判定のまま。
+            Op::SlogdetLogAbsDet { input } => {
+                if parent_nodes[input.0].requires_grad {
+                    let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                    linalg_fft::guard_det_like(a_val, &value_of(child, &g)?, false, 1.0)?;
+                    let a_m = get_mirror(mirror, input)?;
+                    let d = linalg_fft::det_like_cgrad(child, &g, &a_m)?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }

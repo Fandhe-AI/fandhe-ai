@@ -891,6 +891,20 @@ const CASES: &[Case] = &[
         run: run_linalg_nr_rank,
         reject: None,
     },
+    // Det の行別スケール族（イシュー #3810・決定記録 §46/§70。名前は §48 の表）。`det` の 1 階 VJP は
+    // ホストの `eval::linalg::det_vjp`（V3 の値）で、デバイス経路は既定 OFF のためホストへフォールバックする
+    // （H）。構造は `Mul`／`Det`／`Inv` 等で MatMul を含まない。孫テープ再生（Q4）も比較する
+    // （CPU 側は `det_row_scaled_grandchild_replay_is_finite` でも検査済み。実機は未実測）
+    // （§70。#3857・#3859）。
+    Case {
+        name: "det_family_rowscale_diag_large",
+        family: "det_family_rowscale",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_det_family_rowscale,
+        reject: Some(reject_det_identity_huge_g),
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -2380,6 +2394,55 @@ fn run_norm_prescale_layer_norm(tp: &Tapes) -> Outputs {
     )
 }
 
+/// Det 行別スケール族（#3810）。`diag(1e20, 1e20)` の `det`（f32 を超える行列式）。Hv は
+/// `d²det/dA²` の方向微分で、非対角の成分がゼロにならない方向を使う。
+fn run_det_family_rowscale(tp: &Tapes) -> Outputs {
+    let shape = [2usize, 2];
+    let dir = vec![0.6f32, -0.23, 0.41, 0.3];
+    let p = tp.parent.var(&t(vec![1e20, 0.0, 0.0, 1e20], &shape));
+    let loss = p.det().expect("forward");
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
+    let g = cg.grad(&p).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), &shape));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let pc = cg.child_var(&p).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。行別スケール入力でも有限に受理される（§70.3 の逸脱 1）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, &shape), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+/// Q5: 真の 1 階値が f32 を超える `det`（`A = I`・`g = 3e38`）は拒否され、子テープは空のまま。
+fn reject_det_identity_huge_g(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let big = tp.parent.var_no_grad(&t(vec![3e38], &[]));
+    let loss = x.det().unwrap().mul(&big).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
 /// Q5: `eps = 0` の定数行は S0 でも fail-closed で拒否され、子テープは空のまま。
 fn reject_layer_norm_const_row_eps0(tp: &Tapes) -> bool {
     let x = tp.parent.var(&t(vec![2.0, 2.0, 2.0], &[1, 3]));
@@ -2745,6 +2808,10 @@ cuda_family_test!(create_graph_linalg_qr_cuda_matches_cpu, "linalg_qr");
 cuda_family_test!(create_graph_linalg_svd_cuda_matches_cpu, "linalg_svd");
 cuda_family_test!(create_graph_linalg_eigh_cuda_matches_cpu, "linalg_eigh");
 cuda_family_test!(create_graph_norm_prescale_cuda_matches_cpu, "norm_prescale");
+cuda_family_test!(
+    create_graph_det_family_rowscale_cuda_matches_cpu,
+    "det_family_rowscale"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -2810,6 +2877,10 @@ metal_family_test!(create_graph_linalg_eigh_metal_matches_cpu, "linalg_eigh");
 metal_family_test!(
     create_graph_norm_prescale_metal_matches_cpu,
     "norm_prescale"
+);
+metal_family_test!(
+    create_graph_det_family_rowscale_metal_matches_cpu,
+    "det_family_rowscale"
 );
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
@@ -2935,6 +3006,11 @@ fn linalg_eigh_cases_pass_cpu_against_cpu() {
 #[test]
 fn norm_prescale_cases_pass_cpu_against_cpu() {
     run_family("norm_prescale", None);
+}
+
+#[test]
+fn det_family_rowscale_cases_pass_cpu_against_cpu() {
+    run_family("det_family_rowscale", None);
 }
 
 #[test]

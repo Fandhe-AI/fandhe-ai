@@ -1413,7 +1413,46 @@ fn inv_create_graph_via_facade() {
 
 #[test]
 fn det_create_graph_via_facade() {
-    check_create_graph_family("det", &INV_X, &[2, 2], det_loss, false, 1e-2);
+    // V3（#3810・決定記録 §70）: `cg.grad` が 1 階と bit 一致（`grad_exact = true`。強めるだけで緩めない）。
+    check_create_graph_family("det", &INV_X, &[2, 2], det_loss, true, 1e-2);
+}
+
+/// 行別スケール（イシュー #3810・決定記録 §46・§70）: `det` が f32 を超える `diag(1e20, 1e20)` が受理され、
+/// 1 階が素の `backward` と bit 一致、`cg.grad` も bit 一致、二階が有限。真の 1 階値が f32 を超える
+/// `A = I`・`g = 3e38` は拒否のままで `child` は空に保たれる。
+#[test]
+fn det_row_scaled_create_graph_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1e20, 0.0, 0.0, 1e20], &[2, 2]));
+    let loss = x.det().unwrap();
+    let plain = vals(tape.backward(&loss).unwrap().get(&x).unwrap().unwrap());
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .unwrap_or_else(|e| panic!("diag(1e20,1e20): 受理されるはず {e:?}"));
+    let first = vals(cg.first_order().get(&x).unwrap().expect("first_order"));
+    let g = cg.grad(&x).unwrap().expect("grad");
+    let gv = vals(&g.value());
+    for ((a, b), c) in plain.iter().zip(&first).zip(&gv) {
+        assert_eq!(a.to_bits(), b.to_bits(), "first_order は bit 一致");
+        assert_eq!(a.to_bits(), c.to_bits(), "cg.grad は bit 一致（V3）");
+    }
+    assert!(gv.iter().all(|v| v.is_finite()), "cg.grad {gv:?}");
+    let grads2 = child.backward(&g.sum(None).unwrap()).unwrap();
+    let xc = cg.child_var(&x).unwrap().unwrap();
+    let h = vals(grads2.get(&xc).unwrap().unwrap());
+    assert!(h.iter().all(|v| v.is_finite()), "二階 {h:?}");
+
+    // 区分 (i): 真の 1 階値が f32 を超える入力は拒否のまま。
+    let rej_child = fandhe_ai::tape();
+    let eye = tape.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let big = tape.var_no_grad(&t(vec![3e38], &[]));
+    let rej_loss = eye.det().unwrap().mul(&big).unwrap();
+    assert!(matches!(
+        tape.backward_create_graph(&rej_loss, &rej_child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert_eq!(rej_child.leaf_count(), 0, "拒否後は child が空");
 }
 
 #[test]

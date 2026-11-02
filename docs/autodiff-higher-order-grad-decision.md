@@ -3580,6 +3580,7 @@ CI の行は新規 `crates/autodiff/tests/create_graph_decomp.rs`（仮名）に
 ### 46.0 位置づけ・承認根拠・境界・推奨
 
 - 状態: **設計記録のみ**。承認は #3767 の回答待ちで、本節は承認を代行しない。コード・公開面・rustdoc・tolerance・baseline・`STAGE_BOUND_GUARD`・`docs/spec` は変えない。基準 sha は `f8dd5e53f`。並行する設計 PR が §44・§45 を使うため §46 とした。
+- 実装状態: 承認済み（#3767 の回答コメント 2026-11-01）。`Det` は #3810 で実装済み（実装記録は §70）。`Inv`・`Solve`・`SlogdetLogAbsDet` は対象外として恒久化した。
 - 対象: `Det`・`Inv`・`Solve`・`SlogdetLogAbsDet` の 4 Op（追跡表 `docs/compat-matrix-ari-tracker.md` の項目 5）。#3086（§31）は総括的な適用判定で実装済みで、判定に当たる入力は `AutodiffError::Backward` で拒否している。§31.5 の論点 1 は「拒否せず §21.2 の行別スケール＋チャンクで受理へ広げるか」を所有者へ戻していた。本節はその設計である。
 - 根拠: §21.1・§21.2（`Det` の数値契約の段落）・§27.3・§31.1・§31.3・§31.5。これらは設計方針の根拠であって承認ではない。
 - 後続: 実装 #3810、承認 #3767、GPU の測り方 #3739、実機 #3857（`<cuda-node>`）・#3859（`<metal-node>`）。
@@ -3656,7 +3657,7 @@ CI の行は新規 `crates/autodiff/tests/create_graph_decomp.rs`（仮名）に
 **適用記録（イシュー #3810・親 #3737。承認: <#3767 の回答 URL>）**: Det の create_graph で、det が f32 を超えるが勾配と二階が有限な入力を、行別スケール＋2 のべき乗チャンクの構造（値は V3）で受理へ広げた。Inv・Solve・SlogdetLogAbsDet は現行の判定を恒久的な契約とした。公開名の追加なし。
 ```
 
-- [ ] `docs/compat-api-scope.md` に適用記録を追記した（承認後の実装 PR で行う）
+- [x] `docs/compat-api-scope.md` に適用記録を追記した（承認後の実装 PR で行う）（#3810・§70 で追記済み）
 - [x] `docs/README.md` の索引を更新した
 - [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した（項目 5 の設計記録セル）
 
@@ -5232,3 +5233,68 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。新しいカーネルは作らない。
 - スコープ外: 構造段の判定による拒否を狭めること（S2 の再検討。論点 3 で範囲外）、(d) の境界の変更（論点 2）、BatchNorm eval の `x - mean` overflow（論点 4）、実機 parity の実測と測り方（#3857・#3859・#3739）、Det 系（#3810）、`padding_idx`（#3811）、追跡表の項目 5 を閉じること（#3812）。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`Op` の payload・facade の公開名とシグネチャ・`AutodiffError` の variant・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§45.0 に追記 1 行、§45.7 のチェック欄を更新したのみ）。`unsafe` は追加していない。
+
+## 70. 実装記録（イシュー #3810・親 #3719 系。create_graph の拒否範囲・Det の行別スケール＋チャンク）
+
+### 70.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity だけが Phase 10 に残り、本記録の範囲では未実測）。設計は §46（#3737。§46.11〜§46.17 が実装の正）で、本節はその実装記録。節番号は、main が §69 まで使い open PR も無かったため §70 を取った（rebase 時に兄弟 #3811 の節と衝突しないか再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。書かれているのは「推奨どおり全論点承認」で、論点 3 は §46.20 の案 A（`Det` だけを受理し、`Inv`・`Solve`・`SlogdetLogAbsDet` は対象外として恒久化）。点 2（`Det` の V3 は全入力）、点 4（区分 (iii) の拒否は残す）、点 5（区分 (i) は拒否のまま）、点 6（拒否が残る必須ベクトルは拒否のまま記録）、点 7（区分 (iv) の冪は 3 のまま）、点 8（GPU parity は #3739〈§48〉に従う）も推奨どおり。これ以上の承認は主張しない。
+
+### 70.1 実装したもの
+
+`crates/autodiff/src/create_graph/linalg_fft.rs` と `create_graph.rs` の `Op::Det` 分岐。
+
+- **値は全入力で V3**: `det_vjp(a, g_scalar)` を `push_v3` で入れる（1 階と同じ関数・同じ `g` の取り出し方）。`cg.grad` は CPU で 1 階と bit 一致する。非スケール経路でも `Contiguous` ノードが 1 個増える（点 2 の承認による）。空行列は従来経路（V3 なし）。
+- **経路の選択**: `det_row_scale_plan(a, g, g_requires_grad)` が判定と構造の単一の源。従来の検査（段 (ii)・桁落ち (iii)・二階上界 (iv)）を従来と同じ順と式で行い、すべて通れば `Ok(None)`（構造は従来の V1 のまま）。段 (ii) だけで落ちた入力に限り、(i)（真の 1 階値 `g·det·X^T` が `stage_ok` でない）なら拒否、そうでなければスケール域で判定をやり直して `Some(DetRowScale)` を返す。
+- **構造**: `B = D⁻¹A`（`r_i = 2^{e_i}` は行の最大絶対値以上で最小の 2 のべき乗）、`g̃ = g/s_g`（`s_g` は `[2^-126, 2^127]` へクランプ）、`p = broadcast(g̃·det(B)) ⊙ inv(B)^T`、行 `i` に `2^{c_i}`（`c_i = Σ_{k≠i} e_k + log2 s_g`）。`1/r_i`・`1/s_g`・`2^{c_i}` はすべて ±2^100 以下のチャンクに分けた `Mul` 列で掛け、同符号なので実行中の値は最終値へ向かって単調に動く。係数を 1 個の f32 定数にまとめない。積む Op は `Mul`・`Det`・`Inv`・`Transpose`・`BroadcastTo` だけ。
+- **スケール域の判定**: `B`・`inv(B)`・`det(B)`・`g̃`・`g̃·det(B)`・チャンク前の積・各チャンク後の値がすべて `stage_ok`。(iii) は `det_second_order_rounding_ok` に復元係数 `mult = max_i 2^{c_i} · max_k 2^{-e_k}` を掛けた最終域で絶対 1e-5 と比べる（`g̃` だけで評価しない）。(iv) は冪 3 のまま、`(n·max|X_B|)³ · max(1,|g̃|) · max(1,|det_B|) · max(path_B, path_g)`（`path_B = max(1, 2^c の最大) · max(1, 1/r の最大)`、`path_g = g が勾配を要するとき max(1, 2^{E_max})`、それ以外 1）を `2^125` 未満に要求する。チャンク段数は 64 を上限にした（A04）。指数の和は checked 演算。
+- **`SlogdetLogAbsDet`・`Inv`・`Solve`** は従来の V1 と判定のまま（bit 同一）。対象外として恒久化した理由は §46.14（1 階が `X²g`、二階が `X³g` の規模で伸び、区分 (ii) に当たる入力はほぼ区分 (i) に含まれる）。
+- **強制フック**: `#[cfg(test)]` 限定の thread_local（`with_forced_scale`）。段 (ii) の判定を飛ばしてスケール経路を強制する（本番ビルドに残らない）。
+
+### 70.2 受理へ移った入力・拒否が残る入力（テストで確かめた結果）
+
+| 入力 | 結果 |
+|---|---|
+| `Det` の `diag(1e20, 1e20)`・`g = 1` | 受理（行別スケール。1 階 bit 同一・`cg.grad` bit 一致・二階が f64 閉形式と REQ-2 で一致） |
+| `Det` の `diag(1e20)×3`・`loss = 1e-30·det(A)`（`g` は定数） | 受理（同上） |
+| `Det` の `diag(3e38, 3e38)`・`g = 1e-8`（行の最大値が `2^127` 超で `1/r = 2^-128`） | 受理（`1/r` が `[-100, -28]` の 2 チャンクになる経路） |
+| `diag(1e20)×3` を `w`（勾配を要する葉、`1e-30`）と掛けた損失 | 拒否（`d²/dg dA = det·X^T ≈ 1e40` が f32 を超える。(iv) の `path_g`） |
+| `A = I`・`g = 3e38` | 拒否（区分 (i)） |
+| `1.001·I`（160 次）・`g = 1`、256 次上三角（対角 1.5・`A[0,1] = 2^-100`）・`g = 2^-100` | 拒否（`Err(Backward)`・`child` は空・再試行可。拒否した段までは個別に特定していない） |
+| `diag(1e30, 1e-30)`・`diag(1e3, 1e-3)`・`diag(30, 0.05)` | 拒否のまま（区分 (iii)。点 4） |
+| 桁落ち 3 件（`det_second_order_cancellation_*`・`inv_cancellation_input_is_rejected`） | 拒否のまま（無変更） |
+| `Inv` の `[[1e-39]]`・`Solve` の `A = 1e-10`・`B = 1e30` | 拒否のまま（区分 (i)。対象外として恒久化） |
+
+§46.12 の「見込み」との差: `diag(1e20)×3`・`g = 1e-30` は、§46.13 の `1/s_g` を `max 2^{c_i}` に単純に掛ける式だと `2^125` を超えて拒否になる。`g` が定数なら `g` へ戻る経路は無く、`g` が勾配を要する場合も `2^{c_i}/s_g = 2^{E_i}` で `s_g` は相殺する。そのため `path_B` と `path_g` を分けて評価した（「70.3」の逸脱 2）。
+
+### 70.3 設計（§46）からの逸脱
+
+1. **孫テープ再生は行別スケール入力でも有限に受理する（是正済み）**: 初版は、子テープ上の `det(B)` への cotangent が下流の `2^c` チャンクで `2^c` 倍になり（`diag(1e20, 1e20)` で約 `2^67`）、(iii) の桁落ち上界が上流勾配に比例するため孫テープ再生を拒否していた（§46.4 の受け入れ条件と矛盾）。レビュー指摘（PRRT_kwDOTuUCJc6y0YEW）を受け、実装で解消した: 行別スケール構造が積む `det(B)` ノードへ下流の縮小率 `max 2^-e_i`（`B = D^-1 A` の微分で A 側へ戻る最大係数）を `Tape::det_downstream_gain` に登録し、孫テープ再生の `Det` 分岐が (iii) の `mult` へ渡す。cotangent の `2^c` 倍は A 側へ戻る際に `2^-c` 倍に戻るため、最終域での誤差見積りは (iii) の式のまま変わらない（tolerance・判定式は緩めない。(iv) の上界は不変）。登録は `rollback_to`・`reset` で切り詰めたノード分を除く。テストは `det_row_scaled_grandchild_replay_is_finite`（`backward_create_graph`・`jvp_create_graph` が受理され有限）。所有者判断は不要になった（対象外化していない）。三階以上は引き続き保証範囲外（§46.5）。
+2. **(iv) の `g` 経路は `g` が勾配を要するときだけ含める**（`Var::requires_grad()`）。理由は 70.2 のとおり。
+3. **(iii) の復元係数**: 計画の `max_i 2^{c_i}` と `1/r_a` のうち、後者はシード側の最大 `1/r_k` にして保守側へ寄せた。
+4. **(i) の判定は `stage_ok`**: 真の 1 階値が非正規化数の入力も (i) 扱い（保守側）で拒否される。
+5. **既存テストの書き換え**（§46.15 の承認済みの契約変更）: `det_large_input_is_rejected` を `det_large_input_is_accepted_via_row_scale` へ反転、`inv_subnormal_input_is_rejected`・`solve_overflowing_state_is_rejected` はコメントのみ「区分 (i)・対象外として恒久化」に修正、facade の `det_create_graph_via_facade` は `grad_exact` を `false` から `true` へ強めた。`moderate_scale_inputs_are_accepted_and_finite` の `Det` 除外条件は、`diag(1e3, 1e-3)`・`diag(30, 0.05)` が今も拒否であることを `det_diagonal_scale_gap_stays_rejected_after_row_scale` で固定したため据え置いた。
+6. **否定ガードの反転は無い**: `api_surface.rs` に反転対象のガードは元から無い（§46.1）。#3809 と同じく受理を示す doctest の正ガード `backward_create_graph_det_rowscale_usage_doctest_is_present_and_compiled` を新設した。
+
+### 70.4 テスト
+
+- `crates/autodiff/src/create_graph/linalg_fft.rs`（単体）: 2 のべき乗補助関数、スケールなしで受理される入力は計画が `None`、`diag(1e20,1e20)` は `Some`・`A=I, g=3e38` は拒否、強制スケールとスケールなしの比較（`cg.grad` bit 一致・Hessian REQ-2 一致。dense 2×2・3×3、`g` = 1／0.25）、強制スケールでも `1e10·det(dense)` が `Err(Backward)` で `child` が空。
+- `crates/autodiff/tests/create_graph_linalg_fft.rs`: 受理テスト（f64 閉形式 Hessian `H[(ij),(kl)] = g·det·(X_ji X_lk − X_li X_jk)` と REQ-2 判定）、`2^127` 超の行、拒否が残る入力、256 次上三角、`g` 経路の cotangent 上界、(iii) 拒否の固定、孫テープ再生が有限であることの検査。
+- facade: `det_row_scaled_create_graph_via_facade`、`det_create_graph_via_facade` の強化、`backward_create_graph` の rustdoc の doctest（`diag(1e20, 1e20)` の二階が有限・`inv([[1e-39]])` が拒否で `leaf_count() == 0`）、正ガード（存在しない needle で違反が返る自己テスト付き）。
+- GPU parity: 登録表に族 `det_family_rowscale`（`det_family_rowscale_diag_large`。`Route::H`・`Judge::Strict`・`NoMatMul`。Q5 は `A = I`・`g = 3e38` の拒否）、`create_graph_det_family_rowscale_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査。孫テープ再生（Q4）は CPU 側で `det_row_scaled_grandchild_replay_is_finite` が検査済み、実機 parity は未実測のため `replay: None` のまま（#3857・#3859）。
+
+### 70.5 手動確認
+
+- 判定が効いていることの確認（スケール域の段の判定を一時的に常に通して拒否テストが落ちるか）は**未実施**。拒否テストは通常実行で期待どおり拒否になることまでを確かめた。
+
+### 70.6 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`cg.grad` は CPU で 1 階と bit 一致する（V3）。tolerance・baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`unsafe`・`docs/spec` は変えない。
+- 保証範囲は、判定を通った入力で seed の各要素の絶対値が 1 以下の二階まで（§27.3・§31.3 と同じ）。行別スケール入力の孫テープ再生は有限に受理される（70.3 の逸脱 1・是正済み）。三階以上は対象外。
+
+### 70.7 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らない。
+- スコープ外: `Inv`・`Solve`・`SlogdetLogAbsDet` の受理拡大（恒久化）、区分 (iii) の救済（V4）・S2 フォールバック、区分 (iv) の冪の見直し、実機 parity の実測（#3857・#3859・#3739）、`padding_idx`（#3811）、追跡表の項目 5 を閉じること（#3812）。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`Op` の payload・facade の公開名とシグネチャ・`AutodiffError` の variant・`supports_create_graph` の値・tolerance・baseline・`STAGE_BOUND_GUARD`・依存（`Cargo.toml`／`Cargo.lock`）・既存節の本文（§46.0 に状態 1 行、§46.7 のチェック欄を更新したのみ）。

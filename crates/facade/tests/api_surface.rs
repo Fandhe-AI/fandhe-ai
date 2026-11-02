@@ -44709,6 +44709,34 @@ fn backward_create_graph_norm_prescale_usage_doctest_is_present_and_compiled() {
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
 
+/// `create_graph` の線形代数 `det` の行別スケールによる受理範囲を固定する正ガード（イシュー #3810・
+/// 決定記録 `docs/autodiff-higher-order-grad-decision.md` §46・§70）。
+///
+/// facade に本件を拒否する否定ガード・保留 doctest ガードは元から無かったため（§46.1）、反転ではなく
+/// 「`diag(1e20, 1e20)` の `det` が受理されること」と「`inv` は対象外のまま拒否されること」を示す facade の
+/// doctest（実際にコンパイル・実行される）の実在を固定する。挙動の本体は `tests/create_graph_facade.rs` の
+/// `det_row_scaled_create_graph_via_facade`。自己テストとして、存在しない needle を課すと違反が出ること
+/// （検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_det_rowscale_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph det rowscale",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "1e20_f32, 0.0, 0.0, 1e20",
+        "x.det()?",
+        "inv_child.leaf_count()",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["x.det_missing_needle()"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
 /// `create_graph` の損失のクラス軸系（`cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・
 /// `multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss`）の受理範囲を固定する
 /// 正ガード（イシュー #3800・決定記録 `docs/autodiff-higher-order-grad-decision.md` §40・§55）。
