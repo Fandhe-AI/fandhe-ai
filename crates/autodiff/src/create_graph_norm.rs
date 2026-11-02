@@ -43,6 +43,14 @@
 //!   (d) `eps == 0` で `max|x_i − x_0|` が `2^-100` 未満（定数行・極小偏差行。`rstd=inf`）
 //! - `RmsNorm`: (a) 非有限要素 (d') `eps == 0` の全ゼロ行
 //!
+//! **(b)(c) は #3809 で S0 前スケーリング（§45・§69）により受理へ移った**。恒等式
+//! `LN(x; eps) = LN(x/p; eps/p²)`（`p = 2^k`）を使い、(b)(c) に当たる行だけ子テープ上で
+//! `x' = x/p`（[`prescale_exponents`]）を作ってから既存の S1 構造へ通し、dx だけを `/p` で戻す
+//! （dw・db は `xhat` がスケール不変なので戻さない）。二階は自動微分が `Div` を通して得るため、
+//! 手で書く二階の項は無い。入口検査は `x'` に対して (b)(c)(d) を判定し直す（fail-closed）。
+//! 残る拒否は (a)・(d)・(d')・BatchNorm eval の非有限・`x − mean` の overflow と、下記の構造段の
+//! 判定（`/p` の段を含む）によるもの。
+//!
 //! # 総括的な適用判定（構造段の上界。決定記録 §27.3）
 //!
 //! 上の入口検査は親の `x` だけで決まる。upstream `g`・`w`・`rstd` の組み合わせで構造の
@@ -85,7 +93,8 @@
 //! - 以前の版の前置スケール（`x/p`・`s_g` の打ち切り・`±100` 段の 2 のべき乗乗算）は、逆伝播の
 //!   倍率・中心化・平均の縮約で overflow が経路ごとに再発したため撤去し、上の判定に置き換えた
 //!   （PR #3348 の Codex P1 × 8・Cursor Bugbot 1 件）。その結果 `[3e38,-3e38]` のような入力は
-//!   受理から型付きエラーへ変わった（保証は判定を通った入力に限る）。
+//!   受理から型付きエラーへ変わった（保証は判定を通った入力に限る）。#3809 で入口は S0 により
+//!   通るようになり、構造段の判定を通れば受理する（上流勾配 `g` が巨大な例は構造段の判定で拒否のまま）。
 
 use fandhe_ai_tensor_core::{BackendOps, Tensor, batch_norm_layout, row_norm_layout};
 
@@ -108,7 +117,7 @@ const TINY_DEVIATION_GUARD: f64 = 7.888_609_052_210_118e-31;
 fn reject(what: &str) -> AutodiffError {
     AutodiffError::Backward(format!(
         "create_graph: {what}（LayerNorm／RmsNorm／BatchNorm の S1 構造が安全に扱えない入力。\
-         docs/autodiff-higher-order-grad-decision.md §27・§28 参照）"
+         docs/autodiff-higher-order-grad-decision.md §27・§28・§45・§69 参照）"
     ))
 }
 
@@ -148,30 +157,111 @@ pub(crate) fn validate_norm_s1(
     if data.iter().any(|v| !v.is_finite()) {
         return Err(reject("正規化の入力に非有限要素がある"));
     }
+    // LayerNorm は S0 前スケーリング（§45・§69）後の行で (b)(c)(d) を判定する。指数は構造
+    // （`layer_norm_cgrads`）と同じ [`prescale_exponents`] から取る（判定と構造は同じ値）。
+    let pre = if is_layer_norm {
+        prescale_exponents(&data, rows, hidden)
+    } else {
+        None
+    };
     for r in 0..rows {
         let row = &data[r * hidden..(r + 1) * hidden];
         if is_layer_norm {
-            let x0 = row[0];
-            let mut max_dev = 0.0f64;
-            for &v in row {
-                if !(v - x0).is_finite() {
-                    return Err(reject("LayerNorm の x_i − x_0 が f32 で非有限になる"));
-                }
-                max_dev = max_dev.max((v as f64 - x0 as f64).abs());
-            }
-            if hidden as f64 * max_dev >= MEAN_OVERFLOW_GUARD {
-                return Err(reject(
-                    "LayerNorm の偏差が大きく Mean の f32 部分和が overflow しうる",
-                ));
-            }
-            if eps == 0.0 && max_dev < TINY_DEVIATION_GUARD {
-                return Err(reject("eps=0 の LayerNorm で行が定数（または偏差が極小）"));
-            }
+            let k = pre.as_ref().map_or(0, |p| p[r]);
+            check_centered_row(row, k, eps, "LayerNorm", "行")?;
         } else if eps == 0.0 && row.iter().all(|&v| v == 0.0) {
             return Err(reject("eps=0 の RmsNorm で行が全ゼロ"));
         }
     }
     Ok(())
+}
+
+/// 行 `row` を `2^k` で割った `x' = x/2^k` に対する入口の (b)(c)(d) 判定（`LayerNorm`・`BatchNorm`
+/// train 共通。[`validate_norm_s1`]・[`validate_batch_norm`] から呼ばれる）。`k = 0` は S0 なしの
+/// 従来判定と同一。S0 の行（`k > 0`）は `|x'| ≤ 2` なので (b)(c) は再判定でも通るはずだが、
+/// fail-closed のために残す。(d) も S0 の行では偏差が大きく起きない（残すのは同じ理由）。
+fn check_centered_row(
+    row: &[f32],
+    k: i32,
+    eps: f32,
+    name: &str,
+    unit: &str,
+) -> Result<(), AutodiffError> {
+    let p = 2f64.powi(k);
+    let scaled: Vec<f32> = row.iter().map(|&v| (f64::from(v) / p) as f32).collect();
+    let x0 = scaled[0];
+    let mut max_dev = 0.0f64;
+    for &v in &scaled {
+        if !(v - x0).is_finite() {
+            return Err(reject(&format!(
+                "{name} の x_i − x_0 が f32 で非有限になる"
+            )));
+        }
+        max_dev = max_dev.max((f64::from(v) - f64::from(x0)).abs());
+    }
+    if scaled.len() as f64 * max_dev >= MEAN_OVERFLOW_GUARD {
+        return Err(reject(&format!(
+            "{name} の偏差が大きく Mean の f32 部分和が overflow しうる"
+        )));
+    }
+    if eps == 0.0 && max_dev < TINY_DEVIATION_GUARD {
+        return Err(reject(&format!(
+            "eps=0 の {name} で{unit}が定数（または偏差が極小）"
+        )));
+    }
+    Ok(())
+}
+
+/// S0 前スケーリング（決定記録 §45・§69。恒等式 `LN(x; eps) = LN(x/p; eps/p²)`、`p = 2^k`）の
+/// 行ごとの指数を決める。入口検査（[`validate_norm_s1`]・[`validate_batch_norm`]）と構造
+/// （`layer_norm_cgrads`・`batch_norm_cgrads`）の**両方**がこの関数の結果を使う（判定と構造は同じ値）。
+///
+/// 行ごとに、生の `x` で (b) f32 の `x_i − x_0` が非有限、または (c) `hidden·max|x_i − x_0| ≥ 2^125`
+/// に当たる行だけ `k = ceil(log2(max|x_i|))`（`|x'| ≤ 1`）とし、当たらない行は 0。全行 0 なら `None`
+/// （構造へノードを足さない合図。受理済み入力の子テープは変更前と同一になる）。`data` は有限と
+/// 呼び出し側が確かめたもの（`rows × hidden` の行優先。`BatchNorm` はチャネル行の並び）。
+pub(crate) fn prescale_exponents(data: &[f32], rows: usize, hidden: usize) -> Option<Vec<i32>> {
+    #[cfg(test)]
+    if let Some(k) = tests::forced_prescale() {
+        return Some(vec![k; rows]);
+    }
+    let exps: Vec<i32> = (0..rows)
+        .map(|r| {
+            let row = &data[r * hidden..(r + 1) * hidden];
+            let x0 = row[0];
+            let mut max_dev = 0.0f64;
+            let mut maxabs = 0.0f64;
+            let mut nonfinite = false;
+            for &v in row {
+                if !(v - x0).is_finite() {
+                    nonfinite = true;
+                }
+                max_dev = max_dev.max((f64::from(v) - f64::from(x0)).abs());
+                maxabs = maxabs.max(f64::from(v).abs());
+            }
+            if nonfinite || hidden as f64 * max_dev >= MEAN_OVERFLOW_GUARD {
+                pow2_ceil_exponent(maxabs).max(0)
+            } else {
+                0
+            }
+        })
+        .collect();
+    if exps.iter().all(|&k| k == 0) {
+        None
+    } else {
+        Some(exps)
+    }
+}
+
+/// 前スケール指数 `pre`（行ごと。空なら全行 0）の `r` 行目。
+fn pre_at(pre: &[i32], r: usize) -> i32 {
+    pre.get(r).copied().unwrap_or(0)
+}
+
+/// 子テープへ積む `x' = x/p` の `p`（行ごとの `2^k`。`[rows, 1]`）の定数葉。
+fn prescale_const<'c>(child: &'c Tape, pre: &[i32]) -> Result<Var<'c>, AutodiffError> {
+    let p: Vec<f32> = pre.iter().map(|&k| 2f64.powi(k) as f32).collect();
+    const_col(child, p)
 }
 
 /// `replay_op` から呼ばれる forward 再生（`Var::rms_norm`／`layer_norm` への薄い委譲）。
@@ -229,9 +319,10 @@ pub(crate) fn pow2_ceil_exponent(t: f64) -> i32 {
 
 /// 行ごとのスケール指数。`eps>0` は `max(maxabs, √eps)`、`eps=0` は `maxabs` を 2 のべき乗へ
 /// 切り上げる（§21.1 (5)）。
-fn scale_exponent(maxabs: f64, eps: f32) -> i32 {
+/// S0 の行（前スケール指数 `pre`）では `x' = x/2^pre` 側の `√eps' = √eps·2^-pre` を使う。
+fn scale_exponent(maxabs: f64, eps: f32, pre: i32) -> i32 {
     let t = if eps > 0.0 {
-        maxabs.max((eps as f64).sqrt())
+        maxabs.max((eps as f64).sqrt() / 2f64.powi(pre))
     } else {
         maxabs
     };
@@ -248,16 +339,25 @@ fn row_maxabs(data: &[f32], rows: usize, hidden: usize) -> Vec<f64> {
         .collect()
 }
 
+/// `eps/(p·s)²`（`p = 2^pre`・`s = 2^e`）を f64 で 1 回計算して f32 へ 1 回だけ丸める。
+/// 構造（[`scale_consts`]）と判定（[`check_structure_stages`]）が同じ値を使うための単一の定義で、
+/// 丸め済みの `eps/p²`（f32 では 0 になりうる）を経由しない（二重丸めで判定とずれるため）。
+fn eps_scaled(eps: f32, e: i32, pre: i32) -> f32 {
+    (f64::from(eps) / 2f64.powi(2 * (e + pre))) as f32
+}
+
 /// 行ごとの指数から `s`（`[rows, 1]`）と `eps/s²`（`[rows, 1]`。f64 計算→ f32 丸め）の定数葉を作る。
 fn scale_consts<'c>(
     child: &'c Tape,
     exps: &[i32],
+    pre: &[i32],
     eps: f32,
 ) -> Result<(Var<'c>, Var<'c>), AutodiffError> {
     let s: Vec<f32> = exps.iter().map(|&e| 2f64.powi(e) as f32).collect();
     let eps_s: Vec<f32> = exps
         .iter()
-        .map(|&e| (eps as f64 / 2f64.powi(2 * e)) as f32)
+        .enumerate()
+        .map(|(r, &e)| eps_scaled(eps, e, pre_at(pre, r)))
         .collect();
     let shape = [exps.len(), 1];
     let s_t = Tensor::new(s, &shape)?;
@@ -295,6 +395,9 @@ struct StageCheck<'a> {
     fixed: Option<FixedStats<'a>>,
     src: &'a [f32],
     exps: &'a [i32],
+    /// S0 前スケーリングの行ごとの指数（[`prescale_exponents`]。空なら全行 0）。`src`・`exps` は
+    /// `x/2^pre` 側の値で、`eps/(2^pre·s)²` の計算にだけ使う。
+    pre: &'a [i32],
     eps: f32,
     /// 子テープ上の upstream `g` の実値（`[rows, hidden]` の密。`BatchNorm` はチャネル行の並び）。
     dy: &'a [f32],
@@ -422,8 +525,9 @@ fn check_structure_stages(c: &StageCheck<'_>) -> Result<Vec<i32>, AutodiffError>
 
         let e = c.exps[r];
         let s = 2f64.powi(e);
-        // 構造と同じく f64 で計算して f32 へ丸めた `eps/s²`。
-        let eps_s = f64::from((f64::from(c.eps) / 2f64.powi(2 * e)) as f32);
+        // 構造と同じ [`eps_scaled`]（S0 の行は `eps/(p·s)²`）。
+        let kp = pre_at(c.pre, r);
+        let eps_s = f64::from(eps_scaled(c.eps, e, kp));
 
         // --- forward（統計量）: xs = src/s・ms・rstd_s・xhat・rstd = rstd_s/s ---
         let xs: Vec<f64> = src.iter().map(|&v| f64::from(v) / s).collect();
@@ -439,6 +543,8 @@ fn check_structure_stages(c: &StageCheck<'_>) -> Result<Vec<i32>, AutodiffError>
         stage(rs * rs, "rstd_s²（Div の分母側係数）")?;
         let k = rs / s;
         stage(k, "rstd = rstd_s/s")?;
+        // S0（x/p・dx の出力 /p・x への cotangent /p）は値を縮めるだけだが、段として明示する。
+        stage(k / 2f64.powi(kp), "rstd（S0 の /p 後）")?;
         let xhat: Vec<f64> = xs.iter().map(|v| v * rs).collect();
 
         // 二階の逆伝播で行内に集まる cotangent の上界（seed の各要素の絶対値 ≤ 1）。
@@ -658,9 +764,10 @@ fn scaled_stats<'c>(
     child: &'c Tape,
     src2: &Var<'c>,
     exps: &[i32],
+    pre: &[i32],
     eps: f32,
 ) -> Result<ScaledStats<'c>, AutodiffError> {
-    let (s_c, eps_s) = scale_consts(child, exps, eps)?;
+    let (s_c, eps_s) = scale_consts(child, exps, pre, eps)?;
     let one = child.var_no_grad(&Tensor::full(&[1], 1.0f32)?);
     let xs = src2.div(&s_c)?;
     let ms = keep_dim(&xs.mul(&xs)?.mean(Some(1))?)?;
@@ -761,7 +868,7 @@ pub(crate) fn rms_norm_cgrads<'c>(
     let w_m = targets.weight.map(|id| get(mirror, id)).transpose()?;
     let exps: Vec<i32> = row_maxabs(&x_slice, rows, hidden)
         .into_iter()
-        .map(|m| scale_exponent(m, eps))
+        .map(|m| scale_exponent(m, eps, 0))
         .collect();
     let gs_exps = check_structure_stages(&StageCheck {
         centered: false,
@@ -769,6 +876,7 @@ pub(crate) fn rms_norm_cgrads<'c>(
         fixed: None,
         src: &x_slice,
         exps: &exps,
+        pre: &[],
         eps,
         dy: &dy,
         w: w_slice.as_deref(),
@@ -785,7 +893,7 @@ pub(crate) fn rms_norm_cgrads<'c>(
     // 構造（S1）。
     let x2 = rows_hidden_2d(&x_m, rows, hidden)?;
     let g2 = rows_hidden_2d(&g, rows, hidden)?;
-    let st = scaled_stats(child, &x2, &exps, eps)?;
+    let st = scaled_stats(child, &x2, &exps, &[], eps)?;
 
     let mut out = Vec::new();
     if need_x {
@@ -853,13 +961,24 @@ pub(crate) fn layer_norm_cgrads<'c>(
     let w_m = targets.weight.map(|id| get(mirror, id)).transpose()?;
     let x2 = rows_hidden_2d(&x_m, rows, hidden)?;
     let g2 = rows_hidden_2d(&g, rows, hidden)?;
-    let dev2 = stable_centering(&x2)?;
+    // S0 前スケーリング（§45・§69）: 入口検査の (b)(c) に当たる行だけ `x' = x/p` を作ってから中心化する。
+    let pre = prescale_exponents(&x_slice, rows, hidden);
+    let pre_s: &[i32] = pre.as_deref().unwrap_or(&[]);
+    let p_c = match &pre {
+        Some(ks) => Some(prescale_const(child, ks)?),
+        None => None,
+    };
+    let dev2 = match &p_c {
+        Some(p) => stable_centering(&x2.div(p)?)?,
+        None => stable_centering(&x2)?,
+    };
 
     // `s` は中心化後偏差 `dev2` の子テープ上の実値から決める（中心化前の `x` からは取らない）。
     let dev2_host = dense_vec(&child_value(child, &dev2)?);
     let exps: Vec<i32> = row_maxabs(&dev2_host, rows, hidden)
         .into_iter()
-        .map(|mx| scale_exponent(mx, eps))
+        .enumerate()
+        .map(|(r, mx)| scale_exponent(mx, eps, pre_at(pre_s, r)))
         .collect();
     // 総括的な適用判定（中心化の 4 ノードの後・統計量と dx／dw／db の構造の前。ここで拒否しても
     // `backward_create_graph` のロールバックが `child` を空へ戻す）。
@@ -869,6 +988,7 @@ pub(crate) fn layer_norm_cgrads<'c>(
         fixed: None,
         src: &dev2_host,
         exps: &exps,
+        pre: pre_s,
         eps,
         dy: &dy,
         w: w_slice.as_deref(),
@@ -881,7 +1001,7 @@ pub(crate) fn layer_norm_cgrads<'c>(
         g_tracked: g.requires_grad(),
         w_tracked: w_m.as_ref().is_some_and(Var::requires_grad),
     })?;
-    let st = scaled_stats(child, &dev2, &exps, eps)?;
+    let st = scaled_stats(child, &dev2, &exps, pre_s, eps)?;
 
     let mut out = Vec::new();
     if need_x {
@@ -889,7 +1009,12 @@ pub(crate) fn layer_norm_cgrads<'c>(
             Some(w) => g2.mul(w)?,
             None => g2,
         };
-        let dx_s = dx_rows(child, &gw, &st, &gs_exps, hidden, true)?.reshape(&x_shape)?;
+        // dx = dx'/p（S0。dw・db は xhat がスケール不変なので戻さない）。
+        let mut dx_s = dx_rows(child, &gw, &st, &gs_exps, hidden, true)?;
+        if let Some(p) = &p_c {
+            dx_s = dx_s.div(p)?;
+        }
+        let dx_s = dx_s.reshape(&x_shape)?;
         let v = tag_with_host_value(child, &dx_s, build_tensor(dx_host, &x_shape))?;
         out.push((targets.input, v));
     }
@@ -993,26 +1118,14 @@ fn validate_batch_norm(
         }
         return Ok(());
     }
+    // S0（§45・§69）後のチャネル行で (b)(c)(d) を判定する（指数は構造と同じ [`prescale_exponents`]）。
+    let rows: Vec<f32> = (0..c)
+        .flat_map(|ch| channel_row(&data, c, spatial, m, ch))
+        .collect();
+    let pre = prescale_exponents(&rows, c, m);
     for ch in 0..c {
-        let row = channel_row(&data, c, spatial, m, ch);
-        let x0 = row[0];
-        let mut max_dev = 0.0f64;
-        for &v in &row {
-            if !(v - x0).is_finite() {
-                return Err(reject("BatchNorm の x_i − x_0 が f32 で非有限になる"));
-            }
-            max_dev = max_dev.max((f64::from(v) - f64::from(x0)).abs());
-        }
-        if m as f64 * max_dev >= MEAN_OVERFLOW_GUARD {
-            return Err(reject(
-                "BatchNorm の偏差が大きく Mean の f32 部分和が overflow しうる",
-            ));
-        }
-        if eps == 0.0 && max_dev < TINY_DEVIATION_GUARD {
-            return Err(reject(
-                "eps=0 の BatchNorm でチャネルが定数（または偏差が極小）",
-            ));
-        }
+        let k = pre.as_ref().map_or(0, |p| p[ch]);
+        check_centered_row(&rows[ch * m..(ch + 1) * m], k, eps, "BatchNorm", "チャネル")?;
     }
     Ok(())
 }
@@ -1166,13 +1279,26 @@ pub(crate) fn batch_norm_cgrads<'c>(
         )
     };
 
+    // S0 の前スケール指数と定数列（train で当たる行があるときだけ `Some`）。
+    let mut p_c: Option<Var<'c>> = None;
     let (xhat, dx_rows_s) = match inp.fixed_stats {
         None => {
-            let dev2 = stable_centering(&x_rows)?;
+            // S0 前スケーリング（§45・§69。LayerNorm と同じ。チャネル行を行として扱う）。
+            let x_rows_pre = dense_vec(&child_value(child, &x_rows)?);
+            let pre = prescale_exponents(&x_rows_pre, c, m);
+            let pre_s: Vec<i32> = pre.clone().unwrap_or_default();
+            if let Some(ks) = &pre {
+                p_c = Some(prescale_const(child, ks)?);
+            }
+            let dev2 = match &p_c {
+                Some(p) => stable_centering(&x_rows.div(p)?)?,
+                None => stable_centering(&x_rows)?,
+            };
             let dev2_host = dense_vec(&child_value(child, &dev2)?);
             let exps: Vec<i32> = row_maxabs(&dev2_host, c, m)
                 .into_iter()
-                .map(|mx| scale_exponent(mx, inp.eps))
+                .enumerate()
+                .map(|(r, mx)| scale_exponent(mx, inp.eps, pre_at(&pre_s, r)))
                 .collect();
             let gs_exps = check_structure_stages(&StageCheck {
                 centered: true,
@@ -1180,6 +1306,7 @@ pub(crate) fn batch_norm_cgrads<'c>(
                 fixed: None,
                 src: &dev2_host,
                 exps: &exps,
+                pre: &pre_s,
                 eps: inp.eps,
                 dy: &dy,
                 w: w_vals.as_deref(),
@@ -1192,9 +1319,14 @@ pub(crate) fn batch_norm_cgrads<'c>(
                 g_tracked: g.requires_grad(),
                 w_tracked: inp.w_mirror.as_ref().is_some_and(Var::requires_grad),
             })?;
-            let st = scaled_stats(child, &dev2, &exps, inp.eps)?;
+            let st = scaled_stats(child, &dev2, &exps, &pre_s, inp.eps)?;
             let dx = if inp.need_dx {
-                Some(dx_rows(child, &gw()?, &st, &gs_exps, m, true)?)
+                // dx = dx'/p（S0。dw・db は xhat がスケール不変なので戻さない）。
+                let mut d = dx_rows(child, &gw()?, &st, &gs_exps, m, true)?;
+                if let Some(p) = &p_c {
+                    d = d.div(p)?;
+                }
+                Some(d)
             } else {
                 None
             };
@@ -1217,6 +1349,7 @@ pub(crate) fn batch_norm_cgrads<'c>(
                 }),
                 src: &x_rows_host,
                 exps: &[],
+                pre: &[],
                 eps: inp.eps,
                 dy: &dy,
                 w: w_vals.as_deref(),
@@ -1265,6 +1398,17 @@ pub(crate) fn batch_norm_cgrads<'c>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// 強制 k のテスト用フック。`prescale_exponents` が全行この指数を返す（テストビルド限定。
+        /// 中程度の入力で S0 の構造が値を変えないことを S1 のみと直接比べるために使う）。
+        static FORCED_PRESCALE: Cell<Option<i32>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn forced_prescale() -> Option<i32> {
+        FORCED_PRESCALE.with(Cell::get)
+    }
 
     fn new_tape() -> Tape {
         Tape::new_with_ops(crate::default_ops::naive_ops())
@@ -1292,6 +1436,118 @@ mod tests {
             let back = from_channel_rows(&rows, n, c, spatial, &shape).unwrap();
             assert_eq!(back.to_tensor().as_slice().unwrap(), data.as_slice());
         }
+    }
+
+    /// 強制 k を設定して `f` を実行し、終了時に必ず解除する（他テストへ漏らさない）。
+    fn with_forced_prescale<R>(k: Option<i32>, f: impl FnOnce() -> R) -> R {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FORCED_PRESCALE.with(|c| c.set(None));
+            }
+        }
+        FORCED_PRESCALE.with(|c| c.set(k));
+        let _reset = Reset;
+        f()
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        let (a, b) = (f64::from(a), f64::from(b));
+        let diff = (a - b).abs();
+        let rel = diff / a.abs().max(b.abs()).max(1e-12);
+        rel < 1e-3 || diff < 1e-5
+    }
+
+    fn pat(n: usize, phase: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i as f32 + phase) * 0.9).sin() + 0.35 * (i as f32 + 1.0).cos() + 0.2)
+            .collect()
+    }
+
+    fn dv(t: &Tensor<f32>) -> Vec<f32> {
+        t.contiguous().as_slice().unwrap().to_vec()
+    }
+
+    /// 正規化 `kind`（`true` = LayerNorm、`false` = BatchNorm train）で、`cg.grad`（x・w）・
+    /// 子テープ上の二階（x・w）・孫テープ再生の x 勾配を平坦に並べて返す。
+    fn run_norm(layer: bool) -> Vec<Vec<f32>> {
+        let (shape, h) = if layer {
+            (vec![3usize, 5], 5usize)
+        } else {
+            (vec![5usize, 3], 3usize)
+        };
+        let nel = shape.iter().product::<usize>();
+        let tape = new_tape();
+        let child = new_tape();
+        let x = tape.var(&Tensor::new(pat(nel, 0.5), &shape).unwrap());
+        let w = tape.var(&Tensor::new(pat(h, 3.0), &[h]).unwrap());
+        let b = tape.var(&Tensor::new(pat(h, 5.0), &[h]).unwrap());
+        let y = if layer {
+            x.layer_norm(Some(&w), Some(&b), 1e-5).unwrap()
+        } else {
+            x.batch_norm(Some(&w), Some(&b), 1e-5).unwrap()
+        };
+        let c = tape.var_no_grad(&Tensor::new(pat(nel, 1.0), &shape).unwrap());
+        let loss = y.mul(&c).unwrap().sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let gw = cg.grad(&w).unwrap().unwrap();
+        let (cx, cw) = (
+            cg.child_var(&x).unwrap().unwrap(),
+            cg.child_var(&w).unwrap().unwrap(),
+        );
+        let vx = child.var_no_grad(&Tensor::new(pat(nel, 9.0), &shape).unwrap());
+        let vw = child.var_no_grad(&Tensor::new(pat(h, 7.0), &[h]).unwrap());
+        let prod = gx
+            .mul(&vx)
+            .unwrap()
+            .sum(None)
+            .unwrap()
+            .add(&gw.mul(&vw).unwrap().sum(None).unwrap())
+            .unwrap();
+        let hv = child.backward(&prod).unwrap();
+        let grand = new_tape();
+        let cg2 = child.backward_create_graph(&prod, &grand).unwrap();
+        vec![
+            dv(&gx.to_tensor()),
+            dv(&gw.to_tensor()),
+            dv(hv.get(&cx).unwrap().unwrap()),
+            dv(hv.get(&cw).unwrap().unwrap()),
+            dv(&cg2.grad(&cx).unwrap().unwrap().to_tensor()),
+        ]
+    }
+
+    /// S0 の構造（`x/p` と dx の `/p`）が値を変えないことの直接確認（#3809・§69）。中程度の入力で
+    /// 全行へ k を強制し、S1 のみ（強制なし）と `cg.grad`・二階・孫テープ再生が REQ-2 判定で一致する。
+    /// 極端な行の値テストは Hessian が f32 の下限へ潰れて検出力が弱いため、この比較が本命。
+    #[test]
+    fn prescale_forced_k_matches_s1_for_layer_norm_and_batch_norm() {
+        for layer in [true, false] {
+            let base = with_forced_prescale(None, || run_norm(layer));
+            for k in [1, 10, 20] {
+                let forced = with_forced_prescale(Some(k), || run_norm(layer));
+                for (si, (a, b)) in base.iter().zip(&forced).enumerate() {
+                    assert_eq!(a.len(), b.len());
+                    for (i, (&p, &q)) in a.iter().zip(b).enumerate() {
+                        assert!(
+                            p.is_finite() && q.is_finite() && close(p, q),
+                            "layer={layer} k={k} 段{si}[{i}]: S1={p} S0={q}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 前スケールが不要な入力では `prescale_exponents` が `None` を返し、構造へノードを足さない。
+    #[test]
+    fn prescale_absent_adds_no_nodes() {
+        let data = pat(15, 0.5);
+        assert!(with_forced_prescale(None, || prescale_exponents(&data, 3, 5)).is_none());
+        let wide = [3e38f32, -3e38, 1.0, 2.0];
+        let ks = with_forced_prescale(None, || prescale_exponents(&wide, 2, 2)).unwrap();
+        assert_eq!(ks[1], 0, "当たらない行は 0");
+        assert!(ks[0] > 0, "当たる行は正の指数");
     }
 
     #[test]

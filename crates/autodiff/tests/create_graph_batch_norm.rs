@@ -298,6 +298,16 @@ fn review_examples() -> Vec<(&'static str, Probe, Outcome)> {
             Rejected,
         ),
         (
+            "#3809 Codex 5 の g=1 変形: train x=[3e38,-3e38]・w=1・g=1（S0 で入口を通り受理）",
+            with_w(train_col(vec![3e38, -3e38], ones(2)), Wrt::X),
+            Accepted,
+        ),
+        (
+            "#3809 Codex 8 の g=1 変形: train [3,1]・x=[3e38,-3e38,-3e38]・w=1・g=1（S0 で受理）",
+            with_w(train_col(vec![3e38, -3e38, -3e38], ones(3)), Wrt::X),
+            Accepted,
+        ),
+        (
             "Codex 6: train x=[0,0]・w=1・g=1e38・cg.grad(w).sum の二階",
             with_w(train_col(vec![0.0; 2], vec![1e38; 2]), Wrt::W),
             Rejected,
@@ -337,6 +347,37 @@ fn review_examples() -> Vec<(&'static str, Probe, Outcome)> {
             Rejected,
         ),
     ]
+}
+
+/// #3809（§45・§69）: 幅広の行（(b)(c)）を持つ train を rank 2／3／4・affine あり／なしで通し、
+/// 受理かつ 3 段が有限・一致することを `probe` が確かめる。
+#[test]
+fn batch_norm_prescaled_layouts_are_accepted_and_finite() {
+    for shape in [vec![3usize, 2], vec![2, 2, 2], vec![2, 1, 2, 2]] {
+        let ch = shape[1];
+        let m = shape[0] * shape[2..].iter().product::<usize>();
+        let n_el = m * ch;
+        for vals in sweep_channel_values(m).into_iter().skip(5) {
+            let x0 = place_channels(&vals, &shape);
+            for (w, b, wrts) in sweep_affines(&pattern(ch, 3.0)) {
+                for &wrt in &wrts {
+                    let sn = if let Wrt::X = wrt { n_el } else { ch };
+                    let p = Probe {
+                        mode: Mode::Train,
+                        quadratic: false,
+                        x0: x0.clone(),
+                        shape: shape.clone(),
+                        c: ones(n_el),
+                        w: w.clone(),
+                        b: b.clone(),
+                        wrt,
+                        seed: ones(sn),
+                    };
+                    assert_eq!(probe(&p), Outcome::Accepted, "{p:?}");
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -465,6 +506,14 @@ fn sweep_channel_values(m: usize) -> Vec<Vec<f32>> {
         vec![1e-3; m],
         (0..m)
             .map(|i| [1e20, 2e20, -1e20].get(i).copied().unwrap_or(0.5))
+            .collect(),
+        // #3809（§45・§69）: 入口の (b)（x_i − x_0 が f32 で非有限）に当たる幅広の行。S0 で受理へ移る。
+        (0..m)
+            .map(|i| if i % 2 == 0 { 2e38 } else { -2e38 })
+            .collect(),
+        // 同じく (c)（部分和 overflow）に当たる行。
+        (0..m)
+            .map(|i| [-2e38, 1e38, 1e38].get(i).copied().unwrap_or(0.0))
             .collect(),
     ]
 }

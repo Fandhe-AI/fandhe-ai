@@ -4596,8 +4596,9 @@ fn batch_norm_create_graph_overflow_regression_vectors_are_finite_or_rejected() 
         ),
         BnOutcome::Accepted
     );
-    // 中心化 x_i − x_0 が f32 で -inf（入口検査）。
-    rejected("prescale", &[2, 1], vec![3e38, -3e38], vec![1.0, 2.0], None);
+    // 中心化 x_i − x_0 が f32 で -inf（入口の (b)）。#3809（決定記録 §45・§69）で S0 前スケーリング
+    // により受理へ移り、3 段が有限かつ一致する。
+    accepted("prescale", &[2, 1], vec![3e38, -3e38], vec![1.0, 2.0], None);
     rejected(
         "prescale-huge-g",
         &[2, 1],
