@@ -344,6 +344,9 @@ pub mod shape_view_ops;
 // `rrelu_with_noise`。イシュー #2650）。既存 Op の合成のみ。facade への公開は保留（承認依頼
 // #2677・公開 #2678・層化 #2679。`docs/autodiff-softmin-threshold-ops-decision.md`）。
 pub mod softmin_threshold_ops;
+// Hardshrink・Softshrink（`hardshrink`・`softshrink`。イシュー #3817・親 #3813）。既存 Op の合成のみ
+// （新規 Op・カーネル・依存ゼロ）。`Var` 委譲メソッドと `Sequential::add_*` のみ facade 公開。
+pub mod shrink_ops;
 // pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL（`bce_with_logits_loss_with`・
 // `hinge_embedding_loss`・`soft_margin_loss`・`gaussian_nll_loss`。イシュー #2652）。新規 Op 4 種 +
 // ホスト参照実装。`Var` の委譲メソッドとオプション型は #2677・#2854 で facade 公開済み（本モジュール自体は
