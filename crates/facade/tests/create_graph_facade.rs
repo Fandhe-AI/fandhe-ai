@@ -1656,3 +1656,29 @@ fn gru_create_graph_via_facade() {
     // GRU は子テープでゲートを作り直す（forward の `mul_add` と丸めがずれる）ので REQ-2 で突合する。
     check_create_graph_family("gru", &h0, &[2, 4], gru_loss, false, 0.02);
 }
+
+// --- LSTM（イシュー #3796・決定記録 §37/§61） ------------------------------------------------
+//
+// 葉は `z: [B, 2H]` 1 つで、`h0 = z[:, :H]`・`c0 = z[:, H:]` を切り出して両方の初期状態を微分する。
+// 損失は `h_n` と `c_n` の両方に掛かる（`LstmHidden` も `LstmCell` も祖先になる）。
+
+fn lstm_loss<'a>(tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let lstm = fandhe_ai::nn::rnn::Lstm::new(3, 4, true, 7).unwrap();
+    let h0 = z.narrow(1, 0, 4).unwrap();
+    let c0 = z.narrow(1, 4, 4).unwrap();
+    let out = tape
+        .lstm_forward_seq(&lstm, &rnn_x(), Some(&h0), Some(&c0))
+        .unwrap();
+    quad_loss(tape, &out.h_n)
+        .add(&quad_loss(tape, &out.c_n))
+        .unwrap()
+}
+
+#[test]
+fn lstm_create_graph_via_facade() {
+    let z = [
+        0.3, -0.7, 0.9, 0.2, 0.1, 0.4, -0.3, 0.6, -0.4, 0.8, 0.5, -0.1, 0.25, -0.5, 0.7, -0.2,
+    ];
+    // CPU で bit 一致が観測されても主張は REQ-2 に留める（`grad_exact = false`）。
+    check_create_graph_family("lstm", &z, &[2, 8], lstm_loss, false, 0.02);
+}

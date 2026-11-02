@@ -465,6 +465,35 @@ const CASES: &[Case] = &[
         run: run_rnn_gru_cell_gru,
         reject: None,
     },
+    // LSTM 2 Op（イシュー #3796・決定記録 §37/§61）。forward の `gemm_bias_act`・`lstm_pointwise` と 1 階の
+    // pointwise は CPU・CUDA・Metal ともデバイスカーネルでホストへ落ちない（K）。子テープの構造は MatMul・
+    // pointwise・Narrow・Concat で、微分は `h0`・`c0`（公開 API の `x` は定数なので葉 `z: [3, 10]` から切り出す）。
+    // 形状は B=3・D=4・H=5（3H=15・4H=20）に固定する。構造とその二階の GEMM の k は最大 20 で、
+    // `should_split_k` が要する `k/16 >= min_k_tiles16 (=8)`（k >= 128）に届かないので split-K は発火しない。
+    // `lstm_cell_h` は `LstmHidden`→`LstmCell` の連鎖を、`lstm_cell_c` は最後の step で `LstmHidden` の寄与が
+    // 無い経路を測る。実機は未実測（#3856・#3858）。
+    Case {
+        name: "lstm_cell_h",
+        family: "lstm_cell",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Rule(
+            "k ∈ {B=3, D=4, H=5, 3H=15, 4H=20} ≤ 20、k/16 = 1 < min_k_tiles16 = 8 のため split-K 非発火",
+        ),
+        run: run_lstm_cell_h,
+        reject: Some(reject_lstm_cell_with_custom),
+    },
+    Case {
+        name: "lstm_cell_c",
+        family: "lstm_cell",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Rule(
+            "k ∈ {B=3, D=4, H=5, 3H=15, 4H=20} ≤ 20、k/16 = 1 < min_k_tiles16 = 8 のため split-K 非発火",
+        ),
+        run: run_lstm_cell_c,
+        reject: None,
+    },
     // 損失のクラス軸系 6 variant（イシュー #3800・決定記録 §40/§55）。6 つとも 1 階がホスト関数（H）で、
     // 構造の Softmax・pointwise・Sum がデバイスで走る。構造に MatMul は無い。実機は未実測（#3857・#3859）。
     Case {
@@ -1320,6 +1349,105 @@ fn reject_rnn_gru_cell_with_custom(tp: &Tapes) -> bool {
     is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
 }
 
+/// LSTM（#3796）。公開 API の `x` は定数なので、葉は `z: [3, 10]`（`h0 = z[:, :5]`・`c0 = z[:, 5:]`）。
+/// `Σ y²·c` で `H v ≠ 0` にする。`use_c` が真なら `y = c_n`、偽なら `y = h_n`。決定的な重み（`Lstm::new` のシード）。
+fn run_lstm_cell(tp: &Tapes, use_c: bool) -> Outputs {
+    let (b, d, h, steps) = (3usize, 4usize, 5usize, 2usize);
+    let zv: Vec<f32> = (0..b * 2 * h)
+        .map(|i| 0.3 * ((i as f32) * 0.9).sin())
+        .collect();
+    let xv: Vec<f32> = (0..steps * b * d)
+        .map(|i| 0.5 * ((i as f32) * 0.37 + 0.2).cos())
+        .collect();
+    let x = t(xv, &[steps, b, d]);
+    let lstm = fandhe_ai::nn::rnn::Lstm::new(d, h, true, 7).expect("Lstm::new");
+    let dir: Vec<f32> = (0..b * 2 * h)
+        .map(|i| 1.0 - 0.0625 * i as f32 + 0.03 * (i * i) as f32 / 4.0)
+        .collect();
+    let z = tp.parent.var(&t(zv, &[b, 2 * h]));
+    let h0 = z.narrow(1, 0, h).expect("h0");
+    let c0 = z.narrow(1, h, h).expect("c0");
+    let out = tp
+        .parent
+        .lstm_forward_seq(&lstm, &x, Some(&h0), Some(&c0))
+        .expect("lstm_forward_seq");
+    let y = if use_c { out.c_n } else { out.h_n };
+    let c: Vec<f32> = (0..b * h)
+        .map(|i| 0.4 + 0.37 * i as f32 - 0.05 * (i * i) as f32 / 4.0)
+        .collect();
+    let c = tp.parent.var_no_grad(&t(c, &[b, h]));
+    let loss = y.mul(&y).unwrap().mul(&c).unwrap().sum(None).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&z).unwrap().expect("grad"));
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&z).unwrap().expect("first_order"));
+    let g = cg.grad(&z).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir, &[b, 2 * h]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let zc = cg.child_var(&z).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&zc).unwrap().expect("second order"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: None,
+    }
+}
+
+fn run_lstm_cell_h(tp: &Tapes) -> Outputs {
+    run_lstm_cell(tp, false)
+}
+
+fn run_lstm_cell_c(tp: &Tapes) -> Outputs {
+    run_lstm_cell(tp, true)
+}
+
+/// Q5（#3796）: LSTM の下流に恒久対象外の `Op::Custom` があれば `Err(Backward)` で、子テープは空のまま。
+fn reject_lstm_cell_with_custom(tp: &Tapes) -> bool {
+    struct Identity;
+    impl fandhe_ai::CustomFunction for Identity {
+        fn name(&self) -> &str {
+            "identity"
+        }
+        fn output_shape(&self, s: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+            Ok(s[0].to_vec())
+        }
+        fn forward(&self, i: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+            Ok(i[0].contiguous())
+        }
+        fn backward(
+            &self,
+            _i: &[&Tensor<f32>],
+            _o: &Tensor<f32>,
+            up: &Tensor<f32>,
+            _r: &[bool],
+        ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+            Ok(vec![Some(up.contiguous())])
+        }
+    }
+    let lstm = fandhe_ai::nn::rnn::Lstm::new(2, 3, true, 7).expect("Lstm::new");
+    let x = t(vec![0.1, 0.2, 0.3, 0.4], &[2, 1, 2]);
+    let h0 = tp.parent.var(&t(vec![0.2, -0.3, 0.5], &[1, 3]));
+    let c0 = tp.parent.var(&t(vec![0.1, 0.4, -0.2], &[1, 3]));
+    let h_n = tp
+        .parent
+        .lstm_forward_seq(&lstm, &x, Some(&h0), Some(&c0))
+        .expect("lstm_forward_seq")
+        .h_n;
+    let custom = tp
+        .parent
+        .custom(Arc::new(Identity), &[h_n])
+        .expect("custom");
+    let loss = custom.sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
 /// 損失の回帰系（#3798）。葉 `z`（長さ 12 = `[x; target; var]`）から損失を作り、`loss²` で `H v ≠ 0` にする。
 fn run_loss_regression(tp: &Tapes, f: for<'t> fn(&Var<'t>) -> Var<'t>) -> Outputs {
     let z0: Vec<f32> = vec![
@@ -1772,6 +1900,7 @@ cuda_family_test!(
 );
 cuda_family_test!(create_graph_structural_cuda_matches_cpu, "structural");
 cuda_family_test!(create_graph_rnn_gru_cell_cuda_matches_cpu, "rnn_gru_cell");
+cuda_family_test!(create_graph_lstm_cell_cuda_matches_cpu, "lstm_cell");
 cuda_family_test!(create_graph_loss_class_cuda_matches_cpu, "loss_class");
 cuda_family_test!(
     create_graph_loss_regression_cuda_matches_cpu,
@@ -1814,6 +1943,7 @@ metal_family_test!(
 );
 metal_family_test!(create_graph_structural_metal_matches_cpu, "structural");
 metal_family_test!(create_graph_rnn_gru_cell_metal_matches_cpu, "rnn_gru_cell");
+metal_family_test!(create_graph_lstm_cell_metal_matches_cpu, "lstm_cell");
 metal_family_test!(create_graph_loss_class_metal_matches_cpu, "loss_class");
 metal_family_test!(
     create_graph_loss_regression_metal_matches_cpu,
@@ -1879,6 +2009,11 @@ fn structural_cases_pass_cpu_against_cpu() {
 #[test]
 fn rnn_gru_cell_cases_pass_cpu_against_cpu() {
     run_family("rnn_gru_cell", None);
+}
+
+#[test]
+fn lstm_cell_cases_pass_cpu_against_cpu() {
+    run_family("lstm_cell", None);
 }
 
 #[test]
