@@ -67,8 +67,9 @@
 //! （`Conv3d`・`ConvTranspose3d` と内部 Op `Unfold3d`・`Fold3d`・`ConvWeightGradHost3d`。実装は
 //! `conv3d` サブモジュール、決定記録 §38・§59）も拡張済み。イシュー #3083 で索引・累積族
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
-//! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
-//! `Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
+//! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`Cumprod`・`Logcumsumexp` はイシュー #3803
+//! （決定記録 §41・§62。実装は `cumulative_b`／`scan`）で対象にした。`IndexedScatterReduce` は
+//! #3802 の担当で、このモジュールでは対象外（fail-closed）のまま。イシュー #3790 で選択縮約の
 //! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3791 で統計縮約の
 //! `Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm`（実装は `stat_varnorm` サブモジュール、決定記録 §33・§52）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
@@ -134,6 +135,7 @@ use crate::var::Var;
 
 mod conv;
 mod conv3d;
+mod cumulative_b;
 mod index_cum;
 mod linalg_fft;
 mod loss_binary_margin;
@@ -143,6 +145,7 @@ mod norm_reparam;
 mod pad_mask;
 mod pool;
 mod rnn_gru_cell;
+mod scan;
 mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
@@ -959,6 +962,10 @@ fn replay_op<'c>(
             reduce,
         ),
         Op::Cumsum { input, dim } => get_mirror(mirror, input)?.cumsum(dim),
+        // 累積 B 区分（イシュー #3803・決定記録 §41・§62）。公開 `Var` メソッドへ委譲する
+        // （forward の検証・CPU／CUDA／Metal のカーネル経路を迂回しない）。
+        Op::Cumprod { input, dim } => get_mirror(mirror, input)?.cumprod(dim),
+        Op::Logcumsumexp { input, dim } => get_mirror(mirror, input)?.logcumsumexp(dim),
         // Pad 族（イシュー #3084）。forward の検証（上限・確保・shape）を迂回しないよう
         // 公開 `Var` メソッド／`pad_with_mode` へ委譲する。`mask` は forward 時点で
         // 出力 shape へ broadcast 済みの f32（`c != 0.0`）。
@@ -3196,6 +3203,34 @@ fn build_cgrads<'c>(
             Op::Cumsum { input, dim } => {
                 if parent_nodes[input.0].requires_grad {
                     let d = index_cum::cumsum_cgrad(child, &g, dim)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 累積 B 区分（イシュー #3803。方式は `cumulative_b` モジュール doc 参照）。
+            Op::Cumprod { input, dim } | Op::Logcumsumexp { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let x_m = get_mirror(mirror, input)?;
+                    let y_m = get_mirror(mirror, id)?;
+                    let spec = (id, input, dim);
+                    let d = if matches!(node.op, Op::Cumprod { .. }) {
+                        cumulative_b::cumprod_cgrad(
+                            parent,
+                            child,
+                            &parent_nodes,
+                            spec,
+                            (&x_m, &y_m),
+                            &g,
+                        )?
+                    } else {
+                        cumulative_b::logcumsumexp_cgrad(
+                            parent,
+                            child,
+                            &parent_nodes,
+                            spec,
+                            (&x_m, &y_m),
+                            &g,
+                        )?
+                    };
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }

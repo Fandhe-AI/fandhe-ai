@@ -811,6 +811,44 @@ fn conv_transpose3d_create_graph_via_facade() {
     );
 }
 
+/// 累積積（#3803）。`dim = 1` の rank 2 で lane ごとに独立に累積する。
+fn cumprod_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.cumprod(1).unwrap().tanh().sum(None).unwrap()
+}
+
+/// 累積 logsumexp（#3803）。
+fn logcumsumexp_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.logcumsumexp(1).unwrap().tanh().sum(None).unwrap()
+}
+
+/// `cumprod` の `cg.grad` は V3（1 階と同じホスト関数の値ノード）なので CPU では bit 一致する。
+/// 零を含む lane も除算を使わない scan 構造のため二階が厳密（決定記録 §41.10・§62）。
+#[test]
+fn cumprod_create_graph_via_facade() {
+    let x: Vec<f32> = vec![0.9, 1.1, 0.8, 1.2, 1.05, 0.95, 1.0, 0.85];
+    check_create_graph_family("cumprod", &x, &[2, 4], cumprod_loss, true, 1e-2);
+    let with_zero: Vec<f32> = vec![0.9, 0.0, 0.8, 1.2, 1.05, 0.95, 1.0, 0.85];
+    check_create_graph_family("cumprod(零)", &with_zero, &[2, 4], cumprod_loss, true, 1e-2);
+}
+
+#[test]
+fn logcumsumexp_create_graph_via_facade() {
+    let x: Vec<f32> = vec![0.3, -0.5, 1.1, 0.2, -0.9, 0.7, 0.0, 0.4];
+    check_create_graph_family("logcumsumexp", &x, &[2, 4], logcumsumexp_loss, true, 1e-2);
+}
+
+/// ±inf 入力は型付きエラーで拒否される（panic しない。決定記録 §33.14 論点 3・§62）。
+#[test]
+fn cumulative_b_create_graph_rejects_inf_input_via_facade() {
+    for build in [cumprod_loss, logcumsumexp_loss] {
+        let tape = fandhe_ai::tape();
+        let child = fandhe_ai::tape();
+        let x = tape.var(&t(vec![1.0, f32::INFINITY, 0.5, 0.25], &[1, 4]));
+        let loss = build(&tape, &x);
+        assert!(tape.backward_create_graph(&loss, &child).is_err());
+    }
+}
+
 #[test]
 fn gelu_create_graph_via_facade() {
     check_create_graph_family("gelu", &NX, &[2, 3], gelu_loss, false, 2e-2);

@@ -7564,7 +7564,11 @@ pub(crate) fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f3
 /// 零オペランドを明示的に検査して常に厳密な `WideFloat::ZERO` を
 /// 返す設計により、特別扱いのガード無しで自動的に成り立つ
 /// （零 × 有限は `f64` 表現域内かどうかによらず厳密に零）。
-fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+pub(crate) fn cumprod_vjp_along(
+    input: &Tensor<f32>,
+    upstream: &Tensor<f32>,
+    axis: usize,
+) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     if shape.contains(&0) {
         return build_tensor(Vec::new(), &shape);

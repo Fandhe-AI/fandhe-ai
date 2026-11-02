@@ -4729,3 +4729,54 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 - コード、公開 API、rustdoc、tolerance、baseline、ガードレール閾値、FMA 契約、依存（`Cargo.toml`／`Cargo.lock`）、`unsafe`、`docs/spec`、移行ノート。
 - 本 PR は `Closes #3801`、`Refs #3731 #3767 #3857 #3859`。
+
+## 62. 実装記録（イシュー #3803・親 #3719 系。create_graph の B 区分・累積 `Cumprod`・`Logcumsumexp`）
+
+### 62.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3803`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §41（#3732）で、本節はその実装記録。節番号は、同時に進んでいる #3802（`IndexedScatterReduce`）が §61 を使うため §62 とした。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「B 区分は §38〜§44 の推奨どおり」で、§41.16 の 10 論点（V3 で値を入れる／`Cumprod` は除算を使わない scan／`Logcumsumexp` は係数が [0,1] の再帰 scan／総括判定で外れたら型付きで拒否／非有限は §33.14 の規則／GPU parity は §48／隣接見本は `Op::Custom`）も推奨どおり。個別の承認を上乗せして主張しない。
+
+### 62.1 実装したもの
+
+| 対象 | 値（`push_v3`） | 構造（二階を流す `Var` 列） |
+|---|---|---|
+| `Cumprod` | 1 階と同じ `grad::cumprod_vjp_along`（`WideFloat` アキュムレータ。`pub(crate)` にしただけで本体は不変） | `d_x = L ⊙ S`。`S[a] = g[a] + x[a+1]·S[a+1]` を scan 補助で `⌈log2 n⌉` 段に展開、`L = Concat([1], Narrow(y, 0, n-1))`（`y` は forward 出力の写し） |
+| `Logcumsumexp` | 1 階と同じ `tensor_core::cumulative::logcumsumexp_vjp_host` | `d_x = w ⊙ T`。`w = exp(x - out)`、`T[j] = g[j] + c[j]·T[j+1]`、`c[j] = exp(out[j] - out[j+1])`（係数は [0,1]） |
+
+- scan 補助 `crates/autodiff/src/create_graph/scan.rs`: Hillis–Steele 型。段 `k = 1, 2, 4, …`（`k < n`）で `S ← S + A ⊙ shift(S, k)`・`A ← A ⊙ shift(A, k)`、`shift` は `Narrow` と 0 の `Concat`。最終段では `A` を更新しない。子テープへ積む Op は `Narrow`・`Concat`・`Mul`・`Add`・`Where`・定数葉だけで、すべて `supports_create_graph() == true`（閉包性）。区切りマスク（`cut`）で境界をまたぐ係数を断つフックを持つ（使い手は #3802 の `Prod`。本イシューでは区切りなしだけを使い、区切りありは単体テストで値だけ確かめた）。同じ f32 演算順のホスト再計算 `scan_lane_host` を総括判定と単体テストが共用する。
+- cgrad・総括判定は `create_graph/cumulative_b.rs`。`replay_op` は公開 `Var::cumprod`／`logcumsumexp` へ委譲（forward の検証・CPU／CUDA／Metal のカーネル経路を迂回しない）。`build_cgrads` の腕は `Op::Cumsum` の隣。
+- `Op::supports_create_graph` の false 側から 2 Op を true 側（索引・累積族）へ移した（ワイルドカードは足していない。`IndexedScatterReduce` だけ false のまま）。公開名の追加なし（受理範囲の拡大のみ）。
+
+### 62.2 設計（§41）からの差・明確化
+
+- **`L` の構成**: §41.10 が実装に委ねた点を `Concat([1], Narrow(y_m, 0, n-1))` に確定した（追加の scan が不要で安い。`y_m` は replay の出力なので `Cumprod` 自身の VJP を通って二階が流れる）。
+- **`w = exp(x - out)` も係数判定に含めた**: §41.12 は `c` を明示し `w` は黙示だったため明確化した。`x = [1e8, 1e8]` では f32 の `out` が ln2 の差を失い `w[0] = 1`（参照 0.5）になる。
+- **`Cumprod` の拒否条件**: 入口規則（`g` の非有限・`x` の `±inf` は拒否、`x` の NaN は伝播）、構造の各段（`A`・`S`・`L`・`L⊙S`）の f32 ホスト再計算が非有限または `2^125` 以上、および二階の逆伝播の各段（「cotangent × 微分係数」）の上界が `2^125` 以上、のいずれか。上界は seed の各要素の絶対値を 1 として、絶対値の f64 で歩いて求める（scan 側は `scan_cotangent_bound` が段ごとに `S`・`A` の cotangent を逆順に積み、`L` 側は絶対値の入力を 1 階と同じ cumprod の VJP〈`WideFloat`〉に通す。§27.3 と同じ流儀）。0 への underflow は拒否しない（`[1e-30, 1e-30, 1e30]` は 1 階・`cg.grad`・孫テープの 3 段で有限）。当初案の `max|g|·n²·Π max(1,|x|)` はこのベクトルの孫テープ段を過剰に拒否したため、要素ごとの歩きに替えた。
+- **`Logcumsumexp` の拒否条件**: 入口規則に加え、f64 prefix の参照係数と f32 構造の係数 `c`・`w`、および Hessian 側の項 `c[j]·T[j+1]`・`w[j]·T[j]` を REQ-2 の統一複合判定（`tolerance::composite_close_f32`）で比べ、外れたら拒否する。新しい定数・カットオフは作らない。`c` が f32 で 0 へ underflow する段は絶対誤差 1e-5 未満の既存の救済で通る。`x = [5e4, 5e4]` は係数の相対誤差が約 1.7e-3 で拒否される。
+- **判定の置き場所**: 入口規則と総括判定はすべて cgrad 関数の中で、子テープへ構造を積む前に行う（upstream `g` は `build_cgrads` でしか得られないため。`validate_ancestors` へ前処理は足していない）。拒否時は `backward_create_graph` のロールバックで `child` は空に戻る。
+- **テストの名前**: §41.4 の仮名 `create_graph_index_cum_b.rs` は #3802 と同じファイルを奪い合うため、本イシュー専用の `create_graph_cumprod_logcumsumexp.rs` にした。GPU 族名も `cumulative_b` にした。
+- **§41.4 の差し替え**（反転した既存テスト）: `tests/create_graph.rs` の `create_graph_rejects_unsupported_op_cumprod` は、同ファイルの `create_graph_rejects_unsupported_op_custom` と重複するので、「`cumsum` の下流の `Op::Custom`」を拒否する `create_graph_rejects_custom_downstream_of_cumsum` へ置換した。隣接見本が `cumprod` だった 2 件（`..._gather_mixed_with_unsupported_op...`・`..._pad_mask_mixed_with_unsupported_op...`）は `Op::Custom` へ差し替えた。`tests/cumulative_parity.rs` の `create_graph_is_a_typed_error_not_a_panic` は、`logcumsumexp` が対象になったため ±inf 入力の型付き拒否を見る `create_graph_rejects_inf_input_with_typed_error` へ替えた（「型付きエラーで panic しない」の意図は保つ）。`tape.rs` の `index_cumulative_family_supports_create_graph` は 2 Op を `supported` へ移した。`indexed_update_parity.rs` の差し替えは #3802 の担当で触れていない。
+- **§25.1**: 本文（「fail-closed のまま」の `Cumprod`・`Logcumsumexp` の行）は兄弟 PR の慣行どおり書き換えず、本節で対象化したと前方参照する。
+- **正ガードの方式**: 本族を拒否する否定ガードも保留 doctest ガードも `api_surface.rs` に元から無かった。反転するものが無いので、facade の doctest の実在を固定する正ガード `backward_create_graph_cumulative_b_usage_doctest_is_present_and_compiled` を足した（存在しない needle を課すと違反が返る自己テスト付き）。累積の forward 公開形のガード（`cumulative_ops_hold_doctest_*` ほか）は create_graph と無関係で変えていない。
+
+### 62.3 テスト
+
+- `crates/autodiff/tests/create_graph_cumprod_logcumsumexp.rs`（CI）: 1 階 bit 同一と `cg.grad` の bit 同一（V3）、Hessian の有限差分突合（`Cumprod` は零 0／1／2 個・先頭と末尾の零・dim が先頭／最終軸／rank 3 の中間軸。零点では打ち切り誤差を避けるため多重線形な loss で突合。`Logcumsumexp` は一定 lane を含む）、最初の零より後ろの混合二階 `H[j,z]`（`x=[2,0,3]`・`g=[0,0,1]`。除算形を退けた根拠の回帰）、孫テープ（`jvp_create_graph`）と独立の方向微分の一致、必須ベクトル（受理／拒否。拒否は `Err(Backward)`・`child` 空・素の `backward` は NaN にならない）、`±inf` 入力・非有限 upstream の拒否と再試行・NaN 入力の伝播、空テンソル、`Op::Custom` 隣接の fail-closed。
+- 単体: `scan.rs` の `scan_structure_matches_sequential_host`（構造値がホスト逐次計算と REQ-2 で一致し、同じ f32 演算順のホスト再計算と bit 一致。段数 `⌈log2 n⌉`）・区切りマスク、`cumulative_b.rs` の総括判定の境界（受理・拒否の両側）、`tape.rs` の `index_cumulative_family_supports_create_graph`。
+- facade: `{cumprod,logcumsumexp}_create_graph_via_facade`（`grad_exact = true`。零を含む lane も）・`cumulative_b_create_graph_rejects_inf_input_via_facade`、`backward_create_graph` の rustdoc に `cumprod` の HVP と `logcumsumexp` の doctest。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `cumulative_b` の 2 ケース（`cumulative_b_cumprod` は `Route::K`、`cumulative_b_logcumsumexp` は `Route::H`。どちらも `Judge::Strict`・`SplitKShapes::NoMatMul`・±inf 入力の拒否一致〈Q5〉）を登録し、`create_graph_cumulative_b_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査 `cumulative_b_cases_pass_cpu_against_cpu` を足した。
+- 孫テープ: 必須ベクトルの 3 段目は `jvp_create_graph` の出力と、その孫テープでの逆伝播がともに有限であることを要求する（`[1e-30, 1e-30, 1e30]` を含む。jvp は子テープ上の累積 Op を再度 create_graph で微分するので、上流が `S` の大きさ〈1e30〉になるが、要素ごとの歩きで f32 に収まることを確かめている）。
+
+### 62.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（`grad.rs` は可視性だけの変更）。`cg.grad` は V3 により CPU で 1 階と bit 一致。`Logcumsumexp` の値は libm の `exp`／`ln_1p` に依存するため bit 同一は同じホストの中に限る（backend 間は REQ-2）。tolerance・baseline・ガードレール閾値・FMA 契約は変えない。新しい baseline は作らない。
+- 保証範囲は §27.3 と同じ（総括判定を通った入力・seed の各要素の絶対値 1 以下）。三階以上は対象外。
+- 既知の差: `Logcumsumexp` は f32 の `out` が係数の相対誤差 1e-3 を満たさない大きなオフセットの入力を拒否する。`Cumprod` の拒否は f32 の構造段または二階の逆伝播の上界が `2^125` に達する入力に限る。
+
+### 62.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。`cumprod` は CUDA・Metal のカーネル（経路区分 K）、`logcumsumexp` はホストフォールバック（経路区分 H）。
+- スコープ外: `IndexedScatterReduce`（#3802。scan 補助の区切りありの使用を含む）、GPU カーネルの新設、実機 parity の実測と測り方の変更（§48）、f64 テープの create_graph、他の B 区分・C 区分の Op、三階以上の保証、facade の公開名の追加。
+- 変えていないもの: 1 階の VJP の式・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
+- 本 PR は `Refs #3803 #3732 #3767 #3719 #3857 #3859`。

@@ -656,13 +656,20 @@ fn each_op_records_exactly_one_node() {
     assert_eq!(tape.len(), before + 3);
 }
 
+/// `logcumsumexp` は #3803 で create_graph の対象になった。±inf 入力は型付きエラーで拒否され
+/// （panic しない）、拒否時に子テープへ書かない（決定記録 §62・§33.14 論点 3）。
 #[test]
-fn create_graph_is_a_typed_error_not_a_panic() {
+fn create_graph_rejects_inf_input_with_typed_error() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let x = tape.var(&t(vec![1.0, f32::INFINITY], &[2]));
     let loss = logcumsumexp(&x, 0).unwrap().sum(None).unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::Backward(_)
+    ));
+    assert!(child.is_empty());
 }
 
 #[test]

@@ -1220,6 +1220,9 @@ pub(crate) enum Op {
     /// `materialize_fallible` 経由。零要素を含む場合でも厳密に成り立つ
     /// ため零位置での場合分けを持たない。`grad.rs::cumprod_vjp_along`
     /// doc 参照）。
+    ///
+    /// 高階微分（`create_graph`）はイシュー #3803 で対応（決定記録 §41・§62。
+    /// 除算を使わない scan 構造。`create_graph/cumulative_b.rs`）。
     Cumprod { input: NodeId, dim: usize },
     /// `Var::sort`（`torch.sort` 相当。`Var::argsort` は本 variant を
     /// 記録せず forward の `index` 出力のみを返す非微分演算。イシュー
@@ -1280,6 +1283,9 @@ pub(crate) enum Op {
     /// 累積 `logsumexp`（イシュー #2636）。VJP は入力値と上流勾配から共有カーネル
     /// `tensor_core::cumulative::logcumsumexp_vjp_host` で求める（`Op::Cumprod`
     /// と同型に入力を実体化する）。分類は [`Op::Cummax`] と同じ。
+    ///
+    /// 高階微分（`create_graph`）はイシュー #3803 で対応（決定記録 §41・§62。
+    /// 係数が [0,1] の再帰 scan 構造。`create_graph/cumulative_b.rs`）。
     Logcumsumexp { input: NodeId, dim: usize },
     /// 非定数モード（reflect／replicate／circular）の `pad`（イシュー #2642・
     /// `docs/autodiff-pad-modes-decision.md`）。`pads` は先頭軸から順の
@@ -2532,7 +2538,7 @@ impl Op {
     ///
     /// 索引・累積 8 variant（`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・
     /// `Cummax`・`Cummin`・`Cumsum`）はイシュー #3083（決定記録 §25）で `true` になった。
-    /// `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま。
+    /// `IndexedScatterReduce` だけ `false` のまま（`Cumprod`・`Logcumsumexp` は #3803 で `true`）。
     ///
     /// プーリング族（`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・
     /// `AdaptiveAvgPool2d`）はイシュー #3085（決定記録 §29）で `true` になった。
@@ -2610,11 +2616,14 @@ impl Op {
             | Op::LogSoftmax { .. }
             // 索引・累積族（イシュー #3083・決定記録 §25）。`Gather` の cgrad が
             // `Scatter` を、`Scatter` の d_src が `Gather` を積むため同時に対象。
-            // `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま。
+            // `Cumprod`・`Logcumsumexp` はイシュー #3803（§41・§62）で対象にした
+            // （`IndexedScatterReduce` だけ `false` のまま）。
             | Op::Gather { .. }
             | Op::Scatter { .. }
             | Op::Embedding { .. }
             | Op::Cumsum { .. }
+            | Op::Cumprod { .. }
+            | Op::Logcumsumexp { .. }
             | Op::Sort { .. }
             | Op::Topk { .. }
             | Op::Cummax { .. }
@@ -2742,11 +2751,9 @@ impl Op {
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
             // `Stft`／`Istft`（イシュー #2633）は非対応のまま（`PadMode` 再生不可。§29）。
-            | Op::Logcumsumexp { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
             | Op::IndexedScatterReduce { .. }
-            | Op::Cumprod { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
             // プラグイン。`docs/autodiff-custom-function-decision.md`）は
@@ -5596,7 +5603,8 @@ mod conv3d_op_tests {
     }
 
     /// イシュー #3083: 索引・累積 8 variant は create_graph 対応（`true`）。
-    /// `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま（fail-closed）。
+    /// イシュー #3803 で `Cumprod`・`Logcumsumexp` も `true`。`IndexedScatterReduce` は
+    /// `false` のまま（fail-closed。#3802 の担当）。
     #[test]
     fn index_cumulative_family_supports_create_graph() {
         let idx = || Tensor::<i32>::new(vec![0], &[1]).unwrap();
@@ -5640,22 +5648,20 @@ mod conv3d_op_tests {
                 dim: 0,
                 index: idx(),
             },
+            Op::Cumprod { input: a, dim: 0 },
+            Op::Logcumsumexp { input: a, dim: 0 },
         ];
         for op in supported {
             assert!(op.supports_create_graph());
         }
-        let rejected = [
-            Op::IndexedScatterReduce {
-                input: a,
-                dim: 0,
-                index: idx(),
-                src: b,
-                mode: fandhe_ai_tensor_core::ScatterReduceMode::Sum,
-                include_self: true,
-            },
-            Op::Cumprod { input: a, dim: 0 },
-            Op::Logcumsumexp { input: a, dim: 0 },
-        ];
+        let rejected = [Op::IndexedScatterReduce {
+            input: a,
+            dim: 0,
+            index: idx(),
+            src: b,
+            mode: fandhe_ai_tensor_core::ScatterReduceMode::Sum,
+            include_self: true,
+        }];
         for op in rejected {
             assert!(!op.supports_create_graph());
         }

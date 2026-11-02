@@ -44455,6 +44455,36 @@ fn backward_create_graph_conv3d_family_usage_doctest_is_present_and_compiled() {
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
 
+/// `create_graph` の累積 B 区分（`cumprod`・`logcumsumexp`）の受理範囲を固定する正ガード
+/// （イシュー #3803・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41・§62）。
+///
+/// 本族を拒否する否定ガードも保留 doctest ガードも `api_surface.rs` に存在しなかったため、反転ではなく
+/// 「受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。
+/// 挙動の本体は `tests/create_graph_facade.rs` の `{cumprod,logcumsumexp}_create_graph_via_facade`。
+/// 累積の forward 公開形のガード（`cumulative_ops_hold_doctest_*`・
+/// `facade_does_not_reexport_or_declare_cumulative_ops`）は公開面のもので create_graph と無関係なので、
+/// 本ガードは反転も変更もしない。
+/// 自己テストとして、存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_cumulative_b_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph cumulative b",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "x.cumprod(0)",
+        "z.logcumsumexp(0)",
+        "child.backward",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["x.cummax(0)"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
 /// `create_graph` の損失のクラス軸系（`cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・
 /// `multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss`）の受理範囲を固定する
 /// 正ガード（イシュー #3800・決定記録 `docs/autodiff-higher-order-grad-decision.md` §40・§55）。
