@@ -529,6 +529,39 @@ const CASES: &[Case] = &[
         run: run_loss_regression_gaussian_nll,
         reject: None,
     },
+    // 3D 畳み込み族（イシュー #3797・決定記録 §38/§59）。`im2col3d`／`col2im3d` は CUDA・Metal・ROCm で
+    // override されておらずホストへフォールバックする（GEMM のみデバイスで走る）ので H。d_weight・d_bias の
+    // 値は 1 階と同じホスト関数。構造に rank 2 MatMul を含むため `Listed` で子テープ構造の
+    // `(m, n, k)`（と、その VJP が積む MatMul）を宣言する。どの形状も縮約長 `k` が 128 未満で
+    // `should_split_k` は `None`（`k/16 < 8`）。実機は未実測（#3857・#3859）。
+    Case {
+        name: "conv3d_family_conv3d",
+        family: "conv3d_family",
+        route: Route::H,
+        judge: Judge::Strict,
+        // N=2・Cin=3・Cout=5・kvol=8・P=24: K_g=24・N·P=48。d_input (24,48,5)、d_weight (5,24,48)、
+        // およびそれぞれの VJP が積む MatMul。
+        split_k: SplitKShapes::Listed(&[
+            (24, 48, 5),
+            (24, 5, 48),
+            (5, 48, 24),
+            (5, 24, 48),
+            (48, 24, 5),
+        ]),
+        run: run_conv3d_family_conv3d,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "conv3d_family_conv_transpose3d",
+        family: "conv3d_family",
+        route: Route::H,
+        judge: Judge::Strict,
+        // N=2・Cin=3・Cout=4・kvol=8・P_x=18: K_g=32・N·P_x=36。d_input (3,36,32)、d_weight (3,32,36)、
+        // およびそれぞれの VJP が積む MatMul。
+        split_k: SplitKShapes::Listed(&[(3, 36, 32), (3, 32, 36), (32, 36, 3), (36, 32, 3)]),
+        run: run_conv3d_family_conv_transpose3d,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -1136,6 +1169,104 @@ fn run_loss_regression_gaussian_nll(tp: &Tapes) -> Outputs {
     })
 }
 
+/// [`run_conv3d_family_body`] の損失 `sum(y ⊙ y ⊙ c)`。葉 `p` から x・w・b を切り出す。
+fn conv3d_family_loss<'a>(
+    tape: &'a Tape,
+    p: &Var<'a>,
+    transposed: bool,
+    x_shape: [usize; 5],
+    w_shape: [usize; 5],
+    cout: usize,
+) -> Result<Var<'a>, AutodiffError> {
+    let (nx, nw) = (
+        x_shape.iter().product::<usize>(),
+        w_shape.iter().product::<usize>(),
+    );
+    let x = p.narrow(0, 0, nx)?.reshape(&x_shape)?;
+    let w = p.narrow(0, nx, nw)?.reshape(&w_shape)?;
+    let b = p.narrow(0, nx + nw, cout)?;
+    let y = if transposed {
+        x.conv_transpose3d(&w, Some(&b), [1; 3], [0; 3], [0; 3], [1; 3], 1)?
+    } else {
+        x.conv3d(&w, Some(&b), [1; 3], [0; 3], [1; 3], 1)?
+    };
+    let ys = y.to_tensor().shape().to_vec();
+    let coef: Vec<f32> = (0..ys.iter().product::<usize>())
+        .map(|i| 0.5 + ((i * 13 + 5) % 11) as f32 * 0.1)
+        .collect();
+    let c = tape.var_no_grad(&t(coef, &ys));
+    y.mul(&y)?.mul(&c)?.sum(None)
+}
+
+/// 3D 畳み込み族（#3797）の共通本体。x・w・b を 1 本の葉 `p` から切り出し（d_input・d_weight・d_bias を
+/// 同時に測る）、損失は `sum(y ⊙ y ⊙ c)`。Q4 は同じ損失の `jvp_create_graph` の出力を孫テープで逆伝播する。
+fn run_conv3d_family_body(
+    tp: &Tapes,
+    transposed: bool,
+    x_shape: [usize; 5],
+    w_shape: [usize; 5],
+    cout: usize,
+) -> Outputs {
+    let (nx, nw) = (
+        x_shape.iter().product::<usize>(),
+        w_shape.iter().product::<usize>(),
+    );
+    let n = nx + nw + cout;
+    let p0: Vec<f32> = (0..n)
+        .map(|i| (((i * 37 + 11) % 17) as f32 - 8.0) * 0.1)
+        .collect();
+    let dir: Vec<f32> = (0..n)
+        .map(|i| 0.6 - 0.23 * (i % 13) as f32 + 0.04 * (i % 5) as f32)
+        .collect();
+
+    let p = tp.parent.var(&t(p0, &[n]));
+    let loss =
+        conv3d_family_loss(&tp.parent, &p, transposed, x_shape, w_shape, cout).expect("forward");
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
+    let g = cg.grad(&p).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), &[n]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let pc = cg.child_var(&p).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, &[n]), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+/// N=2・Cin=3・Cout=5・入力 `[3, 4, 5]`・kernel `[2, 2, 2]`（2 のべき乗でない中形状）。
+fn run_conv3d_family_conv3d(tp: &Tapes) -> Outputs {
+    run_conv3d_family_body(tp, false, [2, 3, 3, 4, 5], [5, 3, 2, 2, 2], 5)
+}
+
+/// N=2・Cin=3・Cout=4・入力 `[2, 3, 3]`・kernel `[2, 2, 2]`。
+fn run_conv3d_family_conv_transpose3d(tp: &Tapes) -> Outputs {
+    run_conv3d_family_body(tp, true, [2, 3, 2, 3, 3], [3, 4, 2, 2, 2], 4)
+}
+
 /// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
 /// 子テープは空のまま。
 fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
@@ -1352,6 +1483,7 @@ cuda_family_test!(
     create_graph_loss_regression_cuda_matches_cpu,
     "loss_regression"
 );
+cuda_family_test!(create_graph_conv3d_family_cuda_matches_cpu, "conv3d_family");
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -1389,6 +1521,10 @@ metal_family_test!(create_graph_loss_class_metal_matches_cpu, "loss_class");
 metal_family_test!(
     create_graph_loss_regression_metal_matches_cpu,
     "loss_regression"
+);
+metal_family_test!(
+    create_graph_conv3d_family_metal_matches_cpu,
+    "conv3d_family"
 );
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
@@ -1449,6 +1585,11 @@ fn loss_class_cases_pass_cpu_against_cpu() {
 #[test]
 fn loss_regression_cases_pass_cpu_against_cpu() {
     run_family("loss_regression", None);
+}
+
+#[test]
+fn conv3d_family_cases_pass_cpu_against_cpu() {
+    run_family("conv3d_family", None);
 }
 
 #[test]

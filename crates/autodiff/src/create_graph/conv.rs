@@ -51,7 +51,7 @@ pub(super) struct ConvGrads<'c> {
     pub(super) d_bias: Option<Var<'c>>,
 }
 
-fn invalid(msg: String) -> AutodiffError {
+pub(super) fn invalid(msg: String) -> AutodiffError {
     AutodiffError::Backward(format!("create_graph: {msg}"))
 }
 
@@ -204,7 +204,7 @@ pub(super) fn fold_vjp<'c>(g: &Var<'c>, params: &Conv2dParams) -> Result<Var<'c>
     )
 }
 
-fn cat_or_single<'c>(parts: Vec<Var<'c>>, dim: usize) -> Result<Var<'c>, AutodiffError> {
+pub(super) fn cat_or_single<'c>(parts: Vec<Var<'c>>, dim: usize) -> Result<Var<'c>, AutodiffError> {
     if parts.len() == 1 {
         Ok(parts[0])
     } else {
@@ -214,7 +214,7 @@ fn cat_or_single<'c>(parts: Vec<Var<'c>>, dim: usize) -> Result<Var<'c>, Autodif
 
 /// `v: [N, C, ...]` の軸 1 を `[c0, c0+len)` で切り出し `[len, N·P]` へ並べ替える
 /// （N 軸を列軸へ畳み込む。子テープの matmul は rank 2 限定のため）。
-fn channel_rows<'c>(
+pub(super) fn channel_rows<'c>(
     v: &Var<'c>,
     c0: usize,
     len: usize,
@@ -230,7 +230,7 @@ fn channel_rows<'c>(
 }
 
 /// `col: [N, G·K_g, P]` の group `gi` を `[N·P, K_g]` へ並べ替える。
-fn col_np_by_k<'c>(
+pub(super) fn col_np_by_k<'c>(
     col: &Var<'c>,
     gi: usize,
     k_g: usize,
@@ -244,7 +244,7 @@ fn col_np_by_k<'c>(
 }
 
 /// `[rows, N·P]` の matmul 結果を `[N, rows, P]` へ戻す。
-fn np_cols_to_n_rows_p<'c>(
+pub(super) fn np_cols_to_n_rows_p<'c>(
     m: &Var<'c>,
     rows: usize,
     n: usize,
@@ -256,7 +256,7 @@ fn np_cols_to_n_rows_p<'c>(
         .contiguous()
 }
 
-fn zeros_var<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
+pub(super) fn zeros_var<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
     Ok(child.var_no_grad(&Tensor::zeros(shape)?))
 }
 

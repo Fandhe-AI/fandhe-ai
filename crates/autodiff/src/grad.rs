@@ -1522,12 +1522,7 @@ pub(crate) fn vjp(
             // d_weight（相関）: dw_full = gemm_batched_fp32_strict(g5, colᵀ)
             //   -> [N, G, Cout_g, K_g] -> N 軸を f64 で縮約
             //   -> [Cout, Cin_g, kD, kH, kW] へ reshape。
-            let col_t = transpose_last2(&col);
-            let dw_full = ops
-                .gemm_batched_fp32_strict(&g5, &col_t)
-                .map_err(AutodiffError::Backend)?;
-            let dw = reduce_batch_axes_f64(&dw_full, &[groups, cout_g, k_g])?;
-            let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+            let d_weight = conv3d_dw_from_col(ops, &g5, &col, groups, cout_g, k_g, &weight_shape)?;
 
             // d_input（転置畳み込み）: d_col = gemm_batched_fp32_strict(w_matᵀ, g5)
             //   -> [N, G, K_g, P] -> col2im3d。
@@ -1724,12 +1719,15 @@ pub(crate) fn vjp(
                     .contiguous()
                     .reshape(&[n_batch, groups, cin_g, dhw_in])
                     .map_err(AutodiffError::Shape)?;
-                let col_g_t = transpose_last2(&col_g);
-                let dw_full = ops
-                    .gemm_batched_fp32_strict(&x5, &col_g_t)
-                    .map_err(AutodiffError::Backend)?;
-                let dw = reduce_batch_axes_f64(&dw_full, &[groups, cin_g, k_g])?;
-                let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+                let d_weight = conv_transpose3d_dw_from_col(
+                    ops,
+                    &x5,
+                    &col_g,
+                    groups,
+                    cin_g,
+                    k_g,
+                    &weight_shape,
+                )?;
 
                 contributions = vec![(input, d_input), (weight, d_weight)];
                 if let Some(bias_id) = bias {
@@ -3234,7 +3232,9 @@ pub(crate) fn vjp(
         }
         // d_weight のホスト値ノード（`tape::Op::ConvWeightGradHost` doc）。
         // 微分経路は `structure` のみ（恒等）。
-        Op::ConvWeightGradHost { structure, .. } | Op::BatchNormGradHost { structure, .. } => {
+        Op::ConvWeightGradHost { structure, .. }
+        | Op::ConvWeightGradHost3d { structure, .. }
+        | Op::BatchNormGradHost { structure, .. } => {
             vec![(structure, upstream.clone())]
         }
         // `Var::one_hot`（**非微分演算**。イシュー #1755）。クラス id
@@ -3514,6 +3514,52 @@ pub(crate) fn vjp(
             } else {
                 let col_shape = [expected[0], 1, expected[1], expected[2]];
                 im2col_with_fallback(ops, &upstream_c, &params, &col_shape)?
+                    .reshape(&input_shape)
+                    .map_err(AutodiffError::Shape)?
+            };
+            vec![(input, d_input)]
+        }
+        // `create_graph/conv3d.rs` が子テープへ積む 3D の内部 Op（イシュー #3797・決定記録 §38・§59）。
+        // [`Op::Unfold`] と同型: forward は groups = 1 の im2col3d なので VJP は col2im3d（`f64`
+        // アキュムレータ）。shape 契約違反は型付きエラーで拒否し、空（`N = 0` 等）はバックエンドを
+        // 呼ばずゼロ勾配を返す。
+        Op::Unfold3d { input, params } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let upstream_c = upstream.contiguous();
+            let expected = unfold3d_out_shape(&input_shape, &params)?;
+            if upstream_c.shape() != expected.as_slice() {
+                return Err(AutodiffError::Backward(format!(
+                    "Op::Unfold3d の VJP: upstream {:?} が期待 shape {expected:?} と一致しない（契約違反）",
+                    upstream_c.shape()
+                )));
+            }
+            let d_input = if input_shape.iter().product::<usize>() == 0 || expected.contains(&0) {
+                Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?
+            } else {
+                let d_col = upstream_c
+                    .reshape(&[expected[0], 1, expected[1], expected[2]])
+                    .map_err(AutodiffError::Shape)?;
+                col2im3d_with_fallback(ops, &d_col, &input_shape, &params)?
+            };
+            vec![(input, d_input)]
+        }
+        // [`Op::Fold3d`]: forward は col2im3d（groups = 1）なので VJP は im2col3d（純コピー）。
+        // 出力空間 shape は `upstream.shape()` から導出する。
+        Op::Fold3d { input, params } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let upstream_c = upstream.contiguous();
+            let out_shape = upstream_c.shape().to_vec();
+            let expected = unfold3d_out_shape(&out_shape, &params)?;
+            if input_shape != expected {
+                return Err(AutodiffError::Backward(format!(
+                    "Op::Fold3d の VJP: input {input_shape:?} が upstream から導出した {expected:?} と一致しない（契約違反）"
+                )));
+            }
+            let d_input = if expected.contains(&0) || out_shape.contains(&0) {
+                Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?
+            } else {
+                let col_shape = [expected[0], 1, expected[1], expected[2]];
+                im2col3d_with_fallback(ops, &upstream_c, &params, &col_shape)?
                     .reshape(&input_shape)
                     .map_err(AutodiffError::Shape)?
             };
@@ -4277,6 +4323,69 @@ pub(crate) fn conv_transpose2d_dw_from_col(
         .map_err(AutodiffError::Backend)?;
     let dw = reduce_batch_axes_f64(&dw_full, &[groups, cin_g, k_g])?;
     dw.reshape(weight_shape).map_err(AutodiffError::Shape)
+}
+
+/// [`Op::Conv3d`] の d_weight（相関）を `im2col3d` 済みの `col` から求める共有ホスト関数
+/// （イシュー #3797。[`conv2d_dw_from_col`] の 3D 版）。1 階 VJP（`vjp` の `Op::Conv3d` 腕）と
+/// `create_graph/conv3d.rs`（d_weight ノードの前方値）の単一情報源。
+///
+/// `g5`: `[N, G, Cout_g, P]`、`col`: `[N, G, K_g, P]`。式・評価順は抽出前の腕と逐語同一
+/// （1 階は bit 同一のまま）。
+pub(crate) fn conv3d_dw_from_col(
+    ops: &dyn BackendOps,
+    g5: &Tensor<f32>,
+    col: &Tensor<f32>,
+    groups: usize,
+    cout_g: usize,
+    k_g: usize,
+    weight_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let col_t = transpose_last2(col);
+    let dw_full = ops
+        .gemm_batched_fp32_strict(g5, &col_t)
+        .map_err(AutodiffError::Backend)?;
+    let dw = reduce_batch_axes_f64(&dw_full, &[groups, cout_g, k_g])?;
+    dw.reshape(weight_shape).map_err(AutodiffError::Shape)
+}
+
+/// [`Op::ConvTranspose3d`] の d_weight を求める共有ホスト関数（イシュー #3797。
+/// [`conv_transpose2d_dw_from_col`] の 3D 版）。`x5`: `[N, G, Cin_g, D·H·W]`、`col_g`: 上流 `g` の
+/// im2col3d `[N, G, K_g, D·H·W]`。
+pub(crate) fn conv_transpose3d_dw_from_col(
+    ops: &dyn BackendOps,
+    x5: &Tensor<f32>,
+    col_g: &Tensor<f32>,
+    groups: usize,
+    cin_g: usize,
+    k_g: usize,
+    weight_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let col_g_t = transpose_last2(col_g);
+    let dw_full = ops
+        .gemm_batched_fp32_strict(x5, &col_g_t)
+        .map_err(AutodiffError::Backend)?;
+    let dw = reduce_batch_axes_f64(&dw_full, &[groups, cin_g, k_g])?;
+    dw.reshape(weight_shape).map_err(AutodiffError::Shape)
+}
+
+/// [`Op::Unfold3d`] の出力 shape `[N, C·kvol, P]`（groups = 1 の im2col3d shape `[N, 1, K, P]` を
+/// 平坦化したもの）。rank・窓数・確保サイズの検査は `im2col3d_out_shape` に委ね、契約違反は
+/// `AutodiffError::Backward` へ変換する。
+pub(crate) fn unfold3d_out_shape(
+    input_shape: &[usize],
+    params: &fandhe_ai_tensor_core::Conv3dParams,
+) -> Result<Vec<usize>, AutodiffError> {
+    let s = fandhe_ai_tensor_core::im2col3d_out_shape(input_shape, params).map_err(|e| {
+        AutodiffError::Backward(format!(
+            "unfold3d: shape {input_shape:?} が params と整合しない（{e:?}。契約違反）"
+        ))
+    })?;
+    if s.len() != 4 || s[1] != 1 {
+        return Err(AutodiffError::Backward(format!(
+            "unfold3d: groups = 1 の im2col3d shape が想定外: {s:?}（契約違反）"
+        )));
+    }
+    Ok(vec![s[0], s[2], s[3]])
 }
 
 /// [`Op::ConvTranspose2d`] の forward（`Var::conv_transpose2d`）が使う

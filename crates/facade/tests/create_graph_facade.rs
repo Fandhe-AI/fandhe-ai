@@ -640,6 +640,29 @@ fn conv2d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
     y.tanh().sum(None).unwrap()
 }
 
+/// 3D 畳み込み（#3797）。軸ごとに異なる kernel `[2, 2, 2]`・stride `[1, 1, 2]` で D/H/W の取り違えを拾う。
+fn conv3d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(
+        vec![0.5, -0.3, 0.2, 0.8, -0.6, 0.4, 0.1, -0.7],
+        &[1, 1, 2, 2, 2],
+    ));
+    let y = x
+        .conv3d(&w, None, [1, 1, 2], [0, 0, 0], [1, 1, 1], 1)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn conv_transpose3d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(
+        vec![0.5, -0.3, 0.2, 0.8, -0.6, 0.4, 0.1, -0.7],
+        &[1, 1, 2, 2, 2],
+    ));
+    let y = x
+        .conv_transpose3d(&w, None, [1, 2, 1], [0, 0, 0], [0, 0, 0], [1, 1, 1], 1)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
 fn gelu_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
     let y = x.gelu().unwrap();
     y.mul(&weights(tape, &[2, 3])).unwrap().sum(None).unwrap()
@@ -761,6 +784,31 @@ fn batch_norm_create_graph_via_facade() {
 #[test]
 fn conv2d_create_graph_via_facade() {
     check_create_graph_family("conv2d", &CONV_X, &[1, 1, 3, 3], conv2d_loss, true, 1e-2);
+}
+
+/// d_input は V1 合成（unfold3d／fold3d と rank 2 strict matmul）なので `cg.grad` は REQ-2 で判定する
+/// （bit 一致を主張しない。決定記録 §38.5・§59）。
+#[test]
+fn conv3d_create_graph_via_facade() {
+    let x: Vec<f32> = (0..18)
+        .map(|i| (((i * 7 + 3) % 11) as f32 - 5.0) * 0.15)
+        .collect();
+    check_create_graph_family("conv3d", &x, &[1, 1, 2, 3, 3], conv3d_loss, false, 1e-2);
+}
+
+#[test]
+fn conv_transpose3d_create_graph_via_facade() {
+    let x: Vec<f32> = (0..8)
+        .map(|i| (((i * 5 + 2) % 9) as f32 - 4.0) * 0.2)
+        .collect();
+    check_create_graph_family(
+        "conv_transpose3d",
+        &x,
+        &[1, 1, 2, 2, 2],
+        conv_transpose3d_loss,
+        false,
+        1e-2,
+    );
 }
 
 #[test]
