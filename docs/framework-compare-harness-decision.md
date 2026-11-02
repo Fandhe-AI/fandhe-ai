@@ -83,9 +83,9 @@ RUSTSEC ignore（`RUSTSEC-2025-0141` bincode unmaintained・`RUSTSEC-2024-0436`
 paste unmaintained）はいずれも情報提供型（脆弱性ではない）で、比較対象の固定
 バージョンの推移的依存にアップグレード先がないため受容する（理由コメントは
 `deny.toml` に記載。比較対象バージョンを更新する再計測キャンペーン時に再評価）。
-2026-10-17 に追加した `RUSTSEC-2026-0367`〜`0369`（`zip` の展開時の脆弱性）は
-脆弱性型だが、ハーネスが ZIP を展開する経路を持たないため同じく受容する（§4 の
-2026-10-17 の記録）。
+2026-10-17 に追加した `RUSTSEC-2026-0367`〜`0369`、2026-11-02 に追加した
+`RUSTSEC-2026-0429`（いずれも `zip` の展開時の脆弱性）は脆弱性型だが、ハーネスが
+ZIP を展開する経路を持たないため同じく受容する（§4 の 2026-10-17・2026-11-02 の記録）。
 
 ルート `deny.toml`・`docs/license-matrix.md` 2 節の本体 workspace 向け適合基準は
 一切変更しない。
@@ -219,7 +219,7 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   入力は自前生成のテンソルと safetensors のみで外部の ZIP を展開しない。
 
   **失効条件**: zip の修正版（>= 9.0.0）が candle-core の要求範囲に入った時点、または
-  比較対象（candle-core・burn）のピン更新時に、この 3 件の ignore を削除する。
+  比較対象（candle-core・burn）のピン更新時に、この 4 件の ignore（0367〜0369・0429）を削除する。
 
   **版集合の固定**: `scripts/check-forbidden-deps.sh lock-all`（`check_framework_compare`）が
   `Cargo.lock` 上の `zip` の版集合 {0.6.6, 7.2.0, 8.6.0} の完全一致と全エントリの
@@ -273,6 +273,18 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
     存在する既存のもの）。`burn =0.21.0`・`candle-core =0.11.0` のピンと契約検査のロジック・
     `deny.toml` の allow は変えていない。`git diff v0.13.0..HEAD -- crates/` は空。
   - ライセンス・監査は `docs/license-matrix.md` 8b（2026-10-31 再実測）。
+- 2026-11-02: 所有者の明示承認（出典:
+  https://github.com/Fandhe-AI/fandhe-ai/issues/3961#issuecomment-6575647964）に基づき、
+  `deny.toml` の `[advisories] ignore` に `RUSTSEC-2026-0429` を追加した（2026-10-17 の
+  0367〜0369 と同じ方式・同じ共通節に従う）。内容: `ZipArchive::extract` が symlink
+  エントリの宣言サイズ（`ZipFile::size()`）を検証せず `Vec::with_capacity` に渡し、
+  細工した archive でプロセスが abort する（修正版は >= 9.0.0。対象は `Cargo.lock` の
+  `zip 8.6.0`）。この勧告で `forbidden dependencies check` が `advisories FAILED` となり
+  全 PR が止まっていた。到達性は 2026-11-02 に上記の 0・A〜E を再実行して確認した:
+  0 は candle-core-0.11.0 の src パスが 1 件、A・B・C は出力なし（終了コード 1）、D・E は
+  `nothing to print`、`-i zip@8.6.0` は candle-core 0.11.0（bench-candle 経由）のみ。
+  本勧告は `ZipArchive::extract` が対象のため B の `.extract(` 検出で足りる。承認済みピン・
+  zip の版集合・`Cargo.lock`・ルート `deny.toml`・他の ignore は変更しない。
 
 ## 5. tch-rs を計測対象に含めない判断
 
