@@ -776,6 +776,28 @@ const CASES: &[Case] = &[
         run: run_linalg_cpl_lstsq,
         reject: None,
     },
+    // 分解 QR 族（イシュー #3807・決定記録 §44/§67）。`linalg_qr` は CUDA・Metal のデバイスカーネルが
+    // opt-in ゲートの後ろ（既定 OFF）で、既定ではホストの `eval::linalg::qr` へフォールバックする（値は 1 階と
+    // 同じホスト関数の V3）。構造の `MatMul`／`Solve` 等はデバイスで走るので H。構造の `matmul_fp32_strict` の
+    // 形状は小さく（k < 128）、Metal の split-K を発火させない。実機は未実測（#3857・#3859）。
+    Case {
+        name: "linalg_qr_tall",
+        family: "linalg_qr",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(2, 2, 4), (2, 4, 2), (4, 2, 2), (2, 2, 2)]),
+        run: run_linalg_qr_tall,
+        reject: Some(reject_qr_wide),
+    },
+    Case {
+        name: "linalg_qr_square",
+        family: "linalg_qr",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(3, 3, 3)]),
+        run: run_linalg_qr_square,
+        reject: None,
+    },
     // 行列ノルム・slogdet.sign・matrix_rank 族（イシュー #3806・決定記録 §43/§66）。`linalg_*` は CUDA・Metal・
     // ROCm のうち override されない経路でホストの `eval::linalg` へフォールバックし（値は 1 階と同じホスト関数の V3／
     // ゼロ定数）、構造は `Mul`／`Sum` 等の elementwise のみで MatMul を含まない。実機は未実測（#3857・#3859）。
@@ -2127,6 +2149,79 @@ fn run_linalg_cpl_lstsq(tp: &Tapes) -> Outputs {
     run_linalg_cpl_body(tp, 3)
 }
 
+/// 分解 QR 族（#3807）の損失 `sum(tanh(Q) ⊙ c1) + sum(R ⊙ R ⊙ c2)`（`Q`・`R` の両ノードを使う）。
+fn linalg_qr_loss<'a>(tape: &'a Tape, p: &Var<'a>) -> Result<Var<'a>, AutodiffError> {
+    let f = p.qr()?;
+    let weights = |shape: &[usize], phase: usize| {
+        let coef: Vec<f32> = (0..shape.iter().product::<usize>())
+            .map(|i| 0.5 + ((i * 13 + phase) % 11) as f32 * 0.1)
+            .collect();
+        tape.var_no_grad(&t(coef, shape))
+    };
+    let qs = f.q.to_tensor().shape().to_vec();
+    let rs = f.r.to_tensor().shape().to_vec();
+    let lq = f.q.tanh().mul(&weights(&qs, 5))?.sum(None)?;
+    let lr = f.r.mul(&f.r)?.mul(&weights(&rs, 3))?.sum(None)?;
+    lq.add(&lr)
+}
+
+/// 分解 QR 族（#3807）の共通本体。入力は条件の良いフルランクの縦長／正方。Q4 は同じ損失の
+/// `jvp_create_graph` の出力を孫テープで逆伝播する。
+fn run_linalg_qr_body(tp: &Tapes, shape: &[usize], p0: Vec<f32>) -> Outputs {
+    let n: usize = shape.iter().product();
+    let dir: Vec<f32> = (0..n)
+        .map(|i| 0.6 - 0.23 * (i % 13) as f32 + 0.04 * (i % 5) as f32)
+        .collect();
+
+    let p = tp.parent.var(&t(p0, shape));
+    let loss = linalg_qr_loss(&tp.parent, &p).expect("forward");
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
+    let g = cg.grad(&p).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), shape));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let pc = cg.child_var(&p).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, shape), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+fn run_linalg_qr_tall(tp: &Tapes) -> Outputs {
+    run_linalg_qr_body(tp, &[4, 2], vec![2.0, 0.3, -0.4, 1.5, 0.2, -0.6, 0.5, 0.9])
+}
+
+fn run_linalg_qr_square(tp: &Tapes) -> Outputs {
+    run_linalg_qr_body(
+        tp,
+        &[3, 3],
+        vec![2.0, 0.3, -0.4, 0.1, 1.5, 0.2, -0.6, 0.5, 1.8],
+    )
+}
+
 /// 行列ノルム族（#3806）の損失。`kind` は 0 = Fro・1 = One・2 = Inf（いずれも `[3,2]`。One／Inf はタイから離れた入力）、
 /// 3 = `sign · exp(logabsdet)` の二乗（`[3,3]`）、4 = `rank · Σx²`（`[3,3]`）。
 fn linalg_nr_loss<'a>(p: &Var<'a>, kind: usize) -> Result<Var<'a>, AutodiffError> {
@@ -2235,6 +2330,15 @@ fn reject_matrix_norm_nuc(tp: &Tapes) -> bool {
 fn reject_pinv_truncated(tp: &Tapes) -> bool {
     let x = tp.parent.var(&t(vec![2.0, 0.0, 0.0, 1.0], &[2, 2]));
     let loss = x.pinv(Some(0.75)).unwrap().sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
+/// Q5: 横長（`m < n`）の `qr` は GPU でも `Err(Backward)` で拒否され、子テープは空のまま。
+fn reject_qr_wide(tp: &Tapes) -> bool {
+    let x = tp
+        .parent
+        .var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 7.0], &[2, 3]));
+    let loss = x.qr().unwrap().r.sum(None).unwrap();
     is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
 }
 
@@ -2472,6 +2576,7 @@ cuda_family_test!(
     create_graph_linalg_norm_rank_cuda_matches_cpu,
     "linalg_norm_rank"
 );
+cuda_family_test!(create_graph_linalg_qr_cuda_matches_cpu, "linalg_qr");
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -2531,6 +2636,7 @@ metal_family_test!(
     create_graph_linalg_norm_rank_metal_matches_cpu,
     "linalg_norm_rank"
 );
+metal_family_test!(create_graph_linalg_qr_metal_matches_cpu, "linalg_qr");
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -2635,6 +2741,11 @@ fn linalg_cholesky_pinv_lstsq_cases_pass_cpu_against_cpu() {
 #[test]
 fn linalg_norm_rank_cases_pass_cpu_against_cpu() {
     run_family("linalg_norm_rank", None);
+}
+
+#[test]
+fn linalg_qr_cases_pass_cpu_against_cpu() {
+    run_family("linalg_qr", None);
 }
 
 #[test]

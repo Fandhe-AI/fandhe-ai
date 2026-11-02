@@ -1927,3 +1927,33 @@ fn matrix_norm_nuc_is_rejected_via_facade() {
     assert!(matches!(r, Err(AutodiffError::Backward(_))));
     assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
 }
+
+// --- 分解 QR（イシュー #3807・決定記録 §44・§67） ----------------------------------------------
+
+/// `QrQ`・`QrR` の両方を使う損失（重み付きにして、列ノルム 1 の制約で定数に縮まないようにする）。
+fn qr_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let f = x.qr().unwrap();
+    let wq = tape.var_no_grad(&t(vec![0.9, -0.4, 0.7, 0.3, -0.8, 0.5], &[3, 2]));
+    let wr = tape.var_no_grad(&t(vec![0.6, -0.5, 0.2, 0.8], &[2, 2]));
+    let lq = f.q.tanh().mul(&wq).unwrap().sum(None).unwrap();
+    let lr = f.r.mul(&f.r).unwrap().mul(&wr).unwrap().sum(None).unwrap();
+    lq.add(&lr).unwrap()
+}
+
+#[test]
+fn qr_create_graph_via_facade() {
+    let x0 = [2.0, 0.3, -0.4, 1.5, 0.2, 1.8];
+    check_create_graph_family("qr", &x0, &[3, 2], qr_loss, false, 0.01);
+}
+
+/// 横長（`m < n`）は 1 階も未対応のため型付きエラーで拒否され、`child` は空のまま。
+#[test]
+fn qr_wide_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 7.0], &[2, 3]));
+    let loss = x.qr().unwrap().r.sum(None).unwrap();
+    let r = tape.backward_create_graph(&loss, &child);
+    assert!(matches!(r, Err(AutodiffError::Backward(_))));
+    assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
+}

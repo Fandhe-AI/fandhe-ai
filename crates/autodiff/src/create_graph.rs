@@ -76,7 +76,8 @@
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
-//! `Qr*`・`Svd*`・`Eigh*`（と `MatrixNorm` の `Nuc`・`Spectral`）は fail-closed に固定した。
+//! `Svd*`・`Eigh*`（と `MatrixNorm` の `Nuc`・`Spectral`）は fail-closed に固定した（`Qr*` は
+//! イシュー #3807〈決定記録 §44・§67。実装は `decomp` サブモジュール。`m ≥ n` かつフルランクの入力だけ〉で対象にした）。
 //! `Stft`・`Istft` はイシュー #3804
 //! （決定記録 §42・§63。実装は `stft` サブモジュール。随伴 Op の対 `StftAdjoint`・`IstftAdjoint`）で
 //! 対象にした。`Cholesky`・`Pinv`・`Lstsq` はイシュー #3805（決定記録 §43・§65。実装は
@@ -143,6 +144,7 @@ use crate::var::Var;
 mod conv;
 mod conv3d;
 mod cumulative_b;
+mod decomp;
 mod index_cum;
 mod linalg_cholesky_pinv;
 mod linalg_fft;
@@ -534,6 +536,11 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         {
             linalg_fft::check_fft_norm(*norm)?;
         }
+        // QrQ／QrR（イシュー #3807）: push 順序契約・因子の整合・`m ≥ n`・フルランクを、
+        // 子テープへ書く前に確かめる（違反は型付き Err。`child.is_empty()` を保つ）。
+        if matches!(node.op, Op::QrQ { .. } | Op::QrR { .. }) {
+            decomp::check_qr_pair(&parent_nodes, parent.ops(), id, &node.op)?;
+        }
         // MatrixRank（イシュー #3806）: 特異値が rcond の閾値付近なら rank が再生で反転しうるため、
         // 子テープへ書く前に拒否する（`MatrixNorm` の ord・±inf は `validate_stat_varnorm` が扱う）。
         if let Op::MatrixRank { input, rcond } = &node.op {
@@ -740,7 +747,12 @@ fn build_mirror<'c>(
                 id.0
             )));
         }
-        let replayed = replay_op(node.op.clone(), &node.shape, node.fp32_strict, mirror)?;
+        // QrQ／QrR は兄弟（push 順序契約）を要するため、親 NodeId を渡せる専用経路で再生する。
+        let replayed = if matches!(node.op, Op::QrQ { .. } | Op::QrR { .. }) {
+            decomp::replay_qr(child, &parent_nodes, id, mirror)?
+        } else {
+            replay_op(node.op.clone(), &node.shape, node.fp32_strict, mirror)?
+        };
         mirror[id.0] = Some(replayed);
     }
 
@@ -3548,6 +3560,13 @@ fn build_cgrads<'c>(
                     )?;
                     accumulate(&parent_nodes, &mut cgrads, a, da)?;
                     accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                }
+            }
+            // QrQ・QrR（イシュー #3807・決定記録 §44・§67。方式は `decomp` モジュール doc 参照）。
+            Op::QrQ { input, .. } | Op::QrR { input, .. } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = decomp::qr_cgrad(child, &parent_nodes, parent_ops, mirror, id, &g)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
             // MatrixNorm・SlogdetSign・MatrixRank（イシュー #3806・決定記録 §43・§66。方式は

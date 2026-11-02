@@ -2754,7 +2754,12 @@ impl Op {
             | Op::RnnCell { .. }
             | Op::GruCell { .. }
             | Op::LstmCell { .. }
-            | Op::LstmHidden { .. } => true,
+            | Op::LstmHidden { .. }
+            // 分解の QR 2 Op（イシュー #3807・決定記録 §44・§67）。方式は `create_graph/decomp.rs`。
+            // push 順序契約（`QrQ` の直後に `QrR`）のため必ず同時に `true` にする。入口検査は
+            // `validate_ancestors`（`m ≥ n` かつフルランクだけ受理）。
+            | Op::QrQ { .. }
+            | Op::QrR { .. } => true,
             // `IndexedScatterReduce` は `mode` の Sum・Mean・Amax・Amin だけ true（イシュー #3802・
             // 決定記録 §41・§62）。`Prod` は #3803 の scan 補助待ちで false、
             // `#[non_exhaustive]` の未知 mode も false（`VectorNorm` の前例）。
@@ -2792,8 +2797,6 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::QrQ { .. }
-            | Op::QrR { .. }
             | Op::SvdU { .. }
             | Op::SvdS { .. }
             | Op::SvdVh { .. }
@@ -5557,7 +5560,8 @@ mod conv3d_op_tests {
     /// イシュー #3086: FFT 4 件・線形代数 4 件は create_graph 対応（`true`）。隣接する
     /// `MatrixNorm` の `Nuc`・`Spectral`・`QrQ` などは `false`（fail-closed。`MatrixNorm`（`Fro`・`One`・
     /// `Inf`）・`SlogdetSign`・`MatrixRank` は #3806 で対応済みのため `linalg_norm_rank_supports_create_graph` が扱う。型付きエラーでの拒否は
-    /// `tests/create_graph_linalg_fft.rs` が固定する。`Cholesky`・`Pinv`・`Lstsq` は #3805 で対応済みのため
+    /// `tests/create_graph_linalg_fft.rs` が固定する（`QrQ`・`QrR` は #3807 で対応済みのため
+    /// `qr_family_supports_create_graph` が扱う）。`Cholesky`・`Pinv`・`Lstsq` は #3805 で対応済みのため
     /// `linalg_cholesky_pinv_lstsq_supports_create_graph` が扱う。
     /// `Stft`／`Istft` は #3804 で対応済みのため `stft_family_supports_create_graph` が扱う）。
     #[test]
@@ -5607,12 +5611,45 @@ mod conv3d_op_tests {
                 input: a,
                 ord: fandhe_ai_tensor_core::MatrixNormOrd::Spectral,
             },
-            Op::QrQ {
+            // 分解族で未対応のまま残る見本（#3808 で対象化されたら差し替える）。
+            Op::SvdU {
                 input: a,
-                r: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
+                s: Tensor::<f32>::zeros(&[1]).unwrap(),
+                vh: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
             },
         ];
         for op in &unsupported {
+            assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
+        }
+    }
+
+    /// イシュー #3807: `QrQ`・`QrR` は create_graph 対応（`true`）。`Svd*`・`Eigh*` は #3808 まで `false`。
+    #[test]
+    fn qr_family_supports_create_graph() {
+        let a = NodeId(0);
+        let z = Tensor::<f32>::zeros(&[1, 1]).unwrap();
+        for op in [
+            Op::QrQ {
+                input: a,
+                r: z.clone(),
+            },
+            Op::QrR {
+                input: a,
+                q: z.clone(),
+            },
+        ] {
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
+        }
+        for op in [
+            Op::EighValues {
+                input: a,
+                vectors: z.clone(),
+            },
+            Op::EighVectors {
+                input: a,
+                values: z.clone(),
+            },
+        ] {
             assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
         }
     }
