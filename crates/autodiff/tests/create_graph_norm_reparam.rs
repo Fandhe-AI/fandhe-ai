@@ -766,3 +766,45 @@ fn weight_norm_zero_upstream_with_cancelling_vhat_is_rejected() {
         .expect("loss");
     expect_rejected(&tape, &loss, &child, "weight_norm/zero-up-cancel");
 }
+
+/// PR #3950 codex 指摘 P1: LRN の対角係数 a - 2ρβ·x_s²·b が f32 の d_s=1+k/x² の丸めで 0 へ消える
+/// （x=2^-33・k=1e-28。解析値 k/(x²+k)^1.5 ≈ 63）入力を、up=0 でも拒否する。
+#[test]
+fn lrn_zero_upstream_with_cancelling_diagonal_is_rejected() {
+    let shape = [1usize, 1, 1];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![(-33f32).exp2()], &shape));
+    let a = tape.var(&t(vec![0.0], &[1]));
+    let y = x.local_response_norm(1, 1.0, 0.5, 1e-28).expect("forward");
+    let loss = y
+        .reshape(&[1])
+        .and_then(|r| r.mul(&a))
+        .and_then(|r| r.sum(None))
+        .expect("loss");
+    expect_rejected(&tape, &loss, &child, "lrn/zero-up-diag-cancel");
+}
+
+/// PR #3950 codex 指摘 P1: SpectralNorm の対角係数 1 - Ŵ_i·P_i（I - ŴP）が σ_s の精度検査を通っても
+/// 相殺する入力（W=[2^-33,2^-33]・u=[1]・v=[1,1e-8]。解析値 ≈ 86）を、up=0 でも拒否する。
+#[test]
+fn spectral_norm_zero_upstream_with_cancelling_coefficient_matrix_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let mut st =
+        SpectralNormState::from_vectors(&[1, 2], 0, &[1.0], &[1.0, 1e-8], 1, 1e-12).expect("state");
+    let w2 = (-33f32).exp2();
+    let w = tape.var(&t(vec![w2, w2], &[1, 2]));
+    let a = tape.var(&t(vec![0.0], &[1]));
+    let y = w.spectral_norm(&mut st, false).expect("forward");
+    let y00 = y
+        .narrow(0, 0, 1)
+        .and_then(|r| r.narrow(1, 0, 1))
+        .expect("narrow");
+    let loss = y00
+        .reshape(&[1])
+        .and_then(|r| r.mul(&a))
+        .and_then(|r| r.sum(None))
+        .expect("loss");
+    expect_rejected(&tape, &loss, &child, "spectral/zero-up-matrix-cancel");
+}

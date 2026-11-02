@@ -156,6 +156,24 @@ fn shadow_check(
     Ok(())
 }
 
+/// up への二階係数 1 要素の相殺検査（up の現在値に依らない。PR #3950 codex 指摘 P1）。
+/// `exact` は係数の厳密値、`err` は構造の f32 丸め誤差の上界（各項の絶対値の和 × 丸め係数）。
+/// 係数が 2 項の差し引き（`a − b` 型）の場合、up = 0 でも二階の混合項が相殺で消えうるため、
+/// 誤差が REQ-2 の許容の半分（絶対救済 or 相対）に収まらない入力を拒否する（tolerance 定数は不変）。
+fn coef_cancel_check(exact: f64, err: f64, what: &str) -> Result<(), AutodiffError> {
+    if exact.is_nan() || err.is_nan() {
+        return Ok(());
+    }
+    if err.is_finite()
+        && (err < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * exact.abs())
+    {
+        return Ok(());
+    }
+    Err(invalid(&format!(
+        "{what}: up への二階係数が f32 構造の相殺で REQ-2 の判定を外れうるため拒否"
+    )))
+}
+
 /// 子テープ上の `Div(a, b)` の逆伝播が実際に使う偏微分係数（`eval/scalar.rs::binary_partials` の
 /// `da = 1/b`・`db = -(a/b)/b` を **f32 の評価順のまま**）を、f64 の厳密値と突き合わせる検査。
 /// `track_a`／`track_b` は当該オペランドが勾配追跡対象か（非追跡側の係数は使われないので検査しない）。
@@ -508,6 +526,18 @@ pub(super) fn lrn_cgrad<'c>(
                         "LRN の PowScalar 微分係数 e·d^(e-1)（f32 評価）",
                     )?;
                 }
+            }
+            // up への二階係数の対角 `d(dx_i)/d(g_i) = s^{-2β}·(a_i − 2ρβ·x_s,i²·b_i)` は 2 項の差し引き。
+            // 非対角は同符号の単項なので相殺しない。up の値に依らず対角の丸め誤差を検査する。
+            let coeff_lrn = rounding_coeff(nt_f + nt_r + 4);
+            for ci in 0..c {
+                let x2 = f64::from(xs[col_idx[ci]]).powi(2);
+                let t2 = 2.0 * rho * beta * x2 * b[ci];
+                coef_cancel_check(
+                    big_f * (a[ci] - t2),
+                    big_f * coeff_lrn * (beta.abs() + 1.0) * (a[ci].abs() + t2.abs()),
+                    "LocalResponseNorm",
+                )?;
             }
             let d_min = d.iter().cloned().fold(f64::INFINITY, f64::min);
             let col_u = col_idx
@@ -939,6 +969,20 @@ pub(super) fn spectral_norm_cgrad<'c>(
             return Err(invalid(
                 "SpectralNorm の σ_s の相殺で up への微分係数が REQ-2 の判定を外れうるため拒否",
             ));
+        }
+        // up への二階係数の対角 `(1 − Ŵ_i·P_i)/(σ_s·s)` は差し引き（I − ŴP）。非対角は単項で相殺しない。
+        // σ_s 自身の精度検査では捕捉できない係数行列内部の相殺を up の値に依らず拒否する。
+        {
+            let coeff_sp = rounding_coeff(w_data.len() + 4);
+            let denom = sa * f64::from(s);
+            for (&w, &pi) in ws.iter().zip(&p) {
+                let wp = f64::from(w) / sigma_s * f64::from(pi);
+                coef_cancel_check(
+                    (1.0 - wp) / denom,
+                    coeff_sp * (1.0 + wp.abs()) / denom,
+                    "SpectralNorm",
+                )?;
+            }
         }
         let sf = f64::from(s);
         let u_max = up_data
