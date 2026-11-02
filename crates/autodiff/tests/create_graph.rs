@@ -2046,7 +2046,7 @@ fn hessian_where_matches_finite_difference() {
 // - 子テープ上の 1 階勾配（`cg.grad`）を `Tape::backward` と突合する。
 // - V3（d_weight／d_bias）の前方値が 1 階と bit 一致することを、
 //   f32 逐次和では overflow するが f64 縮約では有限になる入力で固定する。
-// - 孫テープ（3 段目）・fail-closed（Conv3d）。
+// - 孫テープ（3 段目）。3D 族は #3797 で対象化（`create_graph_conv3d.rs`）。
 // ===========================================================================
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2573,10 +2573,11 @@ fn jvp_create_graph_through_conv_transpose2d_matches_directional_derivative() {
     conv_jvp_case(ConvKind::ConvTranspose2d);
 }
 
-// --- fail-closed: 3D 族は #3080(b) まで拒否のまま ------------------------------
+// --- 3D 族: #3797 で create_graph 対象になった（旧 fail-closed の反転。決定記録 §38・§59） ---
+// 詳細な突合（Hessian・overflow・孫テープ・空入力）は `tests/create_graph_conv3d.rs`。
 
 #[test]
-fn create_graph_still_rejects_conv3d() {
+fn create_graph_supports_conv3d_and_first_order_matches_backward() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![0.5; 8], &[1, 1, 2, 2, 2]));
@@ -2584,12 +2585,21 @@ fn create_graph_still_rejects_conv3d() {
     let y = x
         .conv3d(&w, None, [1, 1, 1], [0, 0, 0], [1, 1, 1], 1)
         .expect("conv3d forward");
-    let loss = y.sum(None).unwrap();
-    let err = tape
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = tape
         .backward_create_graph(&loss, &child)
-        .expect_err("Conv3d は fail-closed で拒否されるはず");
-    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
-    assert!(child.is_empty());
+        .expect("Conv3d は #3797 で create_graph 対象");
+    for v in [&x, &w] {
+        let a = plain.get(v).unwrap().unwrap();
+        let b = cg.first_order().get(v).unwrap().unwrap();
+        let (a, b) = (a.host_slice().into_owned(), b.host_slice().into_owned());
+        assert_eq!(
+            a.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            b.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            "first_order() は素の backward と bit 一致"
+        );
+    }
 }
 
 // --- Softmax／LogSoftmax（イシュー #3077・V3 方式。決定記録 §21.3・§24） ---
