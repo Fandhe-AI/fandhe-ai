@@ -583,6 +583,7 @@ facade `nn::Module` へ #2137 の凍結 API を鏡写しした（#2338 承認事
 雛形 `docs/decision-record-template.md`（#3716）の「保守・運用チェックリスト」9 節に沿った設計記録である。`docs/compat-matrix-ari-tracker.md` の行 #8（Issue 上は項目 9 と呼ばれる同一項目）に対応する。docs のみの PR で、`crates/**`・`docs/spec`・`Cargo.toml`／`Cargo.lock` は変えない。
 
 - 承認の状態: **未承認**。#3768 の論点 2 の回答待ちで、承認を得たとは書かない
+- 承認の追記（#3815 で反映）: 2026-11-01 に承認済み。#3768 の所有者の回答コメント 6554564412（<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）で論点 2 は案 A（`compat::Sequential` に `nn::Module` を実装）。補足は、凍結は既定の fail-closed、`children` は空、呼び出しは UFCS を案内、保存は #3750 の方針、学習は fail-closed。§23.10 の論点 1〜6 は推奨どおり。上の「未承認」は §23 起票時点（#3741）の記録として残す
 - 実装は #3815、受入テストは #3816。実機 parity は該当 issue なし
 - 根拠: §22.6（起票候補）、`docs/facade-nn-layer-type-exposure-decision.md` §6（残課題）、`docs/reference-models-decision.md` §10.8 (d)
 
@@ -704,3 +705,19 @@ REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e
 - REQ-12: 生の `Tape`・`BackendOps`・内部層型を公開シグネチャに出さない（既存ガードを維持）。新しい `unsafe`・秘密情報なし
 - スコープ外: `ReferenceModule`／`Trainable` の移行（§22.6 第 1 項）、独自層の学習対応（同第 2 項）、`compat::Sequential::parameter_count()`／`summary()` の inherent 化（同第 3 項）、manifest 保存・ONNX export の入れ子対応（#3750）、組み込み層の型名の公開（#3022 で対象外）
 - 参照: Closes #3741。Refs #3768・#3815・#3816
+
+## 24. 実装記録（イシュー #3815）
+
+`compat::Sequential` に facade `nn::Module` を実装した（§23 の案 A。親 #3741、承認は #3768 の回答コメント 6554564412）。PR 番号は PR 作成後に追記する。
+
+- **配置**: `crates/facade/src/compat/sequential.rs:643`（`impl Default for Sequential` の直後の `impl crate::nn::Module for Sequential`）。trait パスは必ず `crate::nn::Module` と書く（このファイルの素の `Module` は autodiff の trait）。公開名の追加は 0 件、`unsafe` なし、依存の追加なし
+- **override は 7 件**: `forward`（`self.inner.forward(tape.0, input)`。inherent と同じ関数で Linear→ReLU 融合を含む）・`named_parameters`・`set_parameter`・`state_dict`・`load_state_dict`・`set_training`・`training`。いずれも `self.inner` への 1 行委譲。`set_parameter` は inherent が無いため `inner` の `"{index}.{name}"` 分割・範囲検査へ委ねる（未 override だと入れ子の `load_state_dict` が既定の拒否で失敗する）。`training` は委譲しないと既定の `true` が返るため、テストで固定した
+- **override しないもの**: `set_requires_grad`／`freeze`／`requires_grad`（既定の fail-closed。パラメータを持てば `InvalidArgument`）、`children`／`children_mut`／`named_modules`（空）、`parameter_count`／`type_name`
+- **正ガード**（`crates/facade/tests/api_surface.rs`。基準 sha `acbee7ab6`）: `compat_sequential_nn_module_impl_matches_approved_shape`（:45992。impl が 1 件・ヘッダ `crate::nn::Module`・override 集合・`forward` の 1 行委譲・`unsafe` なし）、`compat_sequential_trait_impls_match_expected_set`（:46098。`src/compat/` 全体で `Sequential` の trait impl 集合が {`Default`, `crate::nn::Module`}）、到達性 `compat_sequential_is_facade_nn_module_via_facade_only`（:46157）、doctest 実在検査 `compat_sequential_nn_module_usage_doctest_is_present_and_compiled`（:46182）。前 2 者には `..._detects_each_category` の自己テストを付けた（override 不足／過剰・本体のすり替え・`unsafe`・ヘッダのすり替え・impl の 2 件化・`Deref`／`AsRef`・別ファイルへの impl を検出し、コメント・文字列中の impl は無害として扱う）。否定ガードは元々無かったため反転ではなく新設
+- **既存ガードの期待値更新**: `workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` の `facade/src/compat/sequential.rs` の `state_dict`／`load_state_dict` を 1 → 2 件へ更新（trait impl の宣言が各 1 件増えるため。optimizer への混入検出は不変）。他の既存ガードは無変更で通る
+- **統合テスト**: `crates/facade/tests/nn_compat_sequential_module.rs`（10 件）。UFCS と inherent の bit 一致（出力・入力勾配）、独自層からの UFCS 呼び出し、学習モードの入れ子伝播、キーと順序、safetensors 往復、拒否とロールバック、凍結の fail-closed、葉としての introspection、外側 `fit`／常駐経路の拒否、入れ子の `save_model`（`UnsupportedModel`）と ONNX export（`UnsupportedLayer`）の維持
+- **小実験（§23.1 の「未検証」の解消）**: `compat::Sequential` の値に対し `TapeRef` を渡すメソッド構文 `seq.forward(TapeRef::from(&tape), &x)` は inherent の `forward(&Tape)` が優先され `expected &Tape, found TapeRef` の型エラーになる。UFCS（`fandhe_ai::nn::Module::forward(&seq, tape, x)`）と `fandhe_ai::nn::Sequential::new().add(seq)` で包む形は通る（doctest とテストで固定）
+- **構造体 doc の訂正**: 「ネストは facade 経由では到達不能」を、`add_module` で入れ子にできる（最上位の `as_linear()` だけを見る学習契約は不変で、入れ子のパラメータは `fit`／`bind` が fail-closed）に直した
+- **§23 からのずれ**: なし。`set_parameter` の shape 不一致は層側の `Shape` エラー（`InvalidArgument` ではない）で拒否される。キー・index の不正は `InvalidArgument`
+- **`docs/reference-models-decision.md` の前提**: 同書の「`compat::Sequential` は `nn::Module` を実装していない」は過去時点の記録で、本件で前提が満たされた。同書は書き換えない
+- **申し送り**: 受入テスト（利用者の書き方・`ForwardHooked` 越し・複数段の入れ子）は #3816。`ReferenceModule` の移行、独自層や入れ子の学習対応（勾配を集める経路）、`compat::Sequential::parameter_count()`／`summary()` の inherent 化は §22.6 のとおり別承認・スコープ外。利用者の独自 trait が同名メソッドを持つと呼び出しが曖昧になりうる（RFC 1105 の minor の範囲）

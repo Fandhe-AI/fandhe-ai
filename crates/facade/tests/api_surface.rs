@@ -18957,8 +18957,8 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
         // メソッドを inner へ透過委譲する実装（optimizer の state_dict とは無関係）。
         ("autodiff/src/nn/forward_hook.rs::state_dict", 1usize),
         ("autodiff/src/nn/forward_hook.rs::load_state_dict", 1usize),
-        ("facade/src/compat/sequential.rs::state_dict", 1usize),
-        ("facade/src/compat/sequential.rs::load_state_dict", 1usize),
+        ("facade/src/compat/sequential.rs::state_dict", 2usize),
+        ("facade/src/compat/sequential.rs::load_state_dict", 2usize),
         // #2395: facade 独自 `nn::Module` の defaulted メソッド（承認済み）。
         ("facade/src/nn/module.rs::state_dict", 1usize),
         ("facade/src/nn/module.rs::load_state_dict", 1usize),
@@ -45921,4 +45921,278 @@ fn create_graph_facade_coverage_map_detects_each_category() {
         );
     }
     assert!(check_cg_coverage_map(&[("X", "real"), ("Y", "e")], &exp, fake).is_err());
+}
+// ---- イシュー #3815: `compat::Sequential` への facade `nn::Module` 実装の正ガード ----
+//
+// 否定ガードが存在しなかったため「反転」ではなく承認形の正ガードの新設
+// （`docs/facade-nn-module-exposure-decision.md` §23.1・§24）。承認形は、型 `Sequential` への
+// facade `crate::nn::Module` の trait impl がちょうど 1 件で、override は 7 件、`forward` は
+// `self.inner.forward(tape.0, input)` への 1 行委譲、`unsafe` なし。
+
+/// 承認済み override 集合（`set_requires_grad`／`freeze`／`children` 等は含めない）。
+const SEQUENTIAL_MODULE_IMPL_FNS: [&str; 7] = [
+    "forward",
+    "named_parameters",
+    "set_parameter",
+    "state_dict",
+    "load_state_dict",
+    "set_training",
+    "training",
+];
+
+/// トークン列を空白なしで連結したパス文字列（トークナイザの `::` 分割差に依存しない）。
+fn joined_path(tokens: &[String]) -> String {
+    tokens.concat()
+}
+
+/// 型 `Sequential` 向けの facade `nn::Module` impl が承認形か判定し、違反を返す。
+fn sequential_module_impl_violations(content: &str) -> Vec<String> {
+    let impls = collect_type_impls(content, "Sequential");
+    let module_impls: Vec<&ImplInfo> = impls
+        .iter()
+        .filter(|i| {
+            i.trait_tokens
+                .as_ref()
+                .is_some_and(|t| trait_name(t) == "Module")
+        })
+        .collect();
+    let mut v = Vec::new();
+    if module_impls.len() != 1 {
+        v.push(format!(
+            "Module impl が {} 件（承認形は 1 件）",
+            module_impls.len()
+        ));
+    }
+    for i in &module_impls {
+        let path = joined_path(i.trait_tokens.as_deref().unwrap_or(&[]));
+        if path != "crate::nn::Module" {
+            v.push(format!("trait パスが `crate::nn::Module` でない: `{path}`"));
+        }
+        let names: std::collections::BTreeSet<&str> =
+            i.fns.iter().map(|f| f.name.as_str()).collect();
+        let want: std::collections::BTreeSet<&str> =
+            SEQUENTIAL_MODULE_IMPL_FNS.iter().copied().collect();
+        if names != want || i.fns.len() != want.len() {
+            v.push(format!("override 集合が承認形と不一致: {names:?}"));
+        }
+        if let Some(f) = i.fns.iter().find(|f| f.name == "forward") {
+            let body = joined_path(&f.body);
+            if body != "self.inner.forward(tape.0,input)" {
+                v.push(format!("forward 本体が 1 行委譲でない: `{body}`"));
+            }
+        }
+        if i.fns.iter().any(|f| f.body.iter().any(|t| t == "unsafe")) {
+            v.push("impl 本体に unsafe".to_string());
+        }
+    }
+    v
+}
+
+#[test]
+fn compat_sequential_nn_module_impl_matches_approved_shape() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let v = sequential_module_impl_violations(&read_to_string_or_panic(&path));
+    assert!(v.is_empty(), "{v:?}");
+}
+
+#[test]
+fn compat_sequential_nn_module_impl_matches_approved_shape_detects_each_category() {
+    let fns = |names: &[&str], fwd: &str| -> String {
+        names
+            .iter()
+            .map(|n| {
+                if *n == "forward" {
+                    format!(
+                        "fn forward<'t>(&self, tape: TapeRef<'t>, input: &Var<'t>) -> R {{ {fwd} }}"
+                    )
+                } else {
+                    format!("fn {n}(&self) {{ todo!() }}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let good_fwd = "self.inner.forward(tape.0, input)";
+    let mk = |header: &str, names: &[&str], fwd: &str| {
+        format!("impl {header} for Sequential {{\n{}\n}}", fns(names, fwd))
+    };
+    let all = SEQUENTIAL_MODULE_IMPL_FNS;
+    // 正例
+    assert!(sequential_module_impl_violations(&mk("crate::nn::Module", &all, good_fwd)).is_empty());
+    // コメント・文字列中の impl は無害
+    let benign = format!(
+        "{}\n// impl Module for Sequential {{ fn forward() {{}} }}\nconst S: &str = \"impl Module for Sequential {{}}\";",
+        mk("crate::nn::Module", &all, good_fwd)
+    );
+    assert!(sequential_module_impl_violations(&benign).is_empty());
+    // override 不足
+    let fewer: Vec<&str> = all.iter().copied().filter(|n| *n != "training").collect();
+    assert!(
+        !sequential_module_impl_violations(&mk("crate::nn::Module", &fewer, good_fwd)).is_empty()
+    );
+    // override 過剰
+    for extra in ["set_requires_grad", "children", "parameter_count"] {
+        let mut more = all.to_vec();
+        more.push(extra);
+        assert!(
+            !sequential_module_impl_violations(&mk("crate::nn::Module", &more, good_fwd))
+                .is_empty(),
+            "{extra}"
+        );
+    }
+    // forward 本体のすり替え・unsafe 混入
+    for fwd in [
+        "self.inner.forward_host(tape.0, input)",
+        "Ok(input.clone())",
+        "other.forward(tape.0, input)",
+        "unsafe { self.inner.forward(tape.0, input) }",
+    ] {
+        assert!(
+            !sequential_module_impl_violations(&mk("crate::nn::Module", &all, fwd)).is_empty(),
+            "{fwd}"
+        );
+    }
+    // ヘッダのすり替え
+    for header in ["Module", "fandhe_ai_autodiff::nn::Module"] {
+        assert!(
+            !sequential_module_impl_violations(&mk(header, &all, good_fwd)).is_empty(),
+            "{header}"
+        );
+    }
+    // impl の 2 件化・0 件
+    let two = format!(
+        "{}\n{}",
+        mk("crate::nn::Module", &all, good_fwd),
+        mk("crate::nn::Module", &all, good_fwd)
+    );
+    assert!(!sequential_module_impl_violations(&two).is_empty());
+    assert!(!sequential_module_impl_violations("struct Sequential;").is_empty());
+}
+
+/// `src/compat/` 全体で型 `Sequential` 向けの手書き trait impl の (ファイル, trait パス) 集合を返す。
+fn compat_sequential_trait_impl_set(
+    files: &[(String, String)],
+) -> std::collections::BTreeSet<(String, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    for (name, content) in files {
+        for i in collect_type_impls(content, "Sequential") {
+            if let Some(t) = &i.trait_tokens {
+                out.insert((name.clone(), joined_path(t)));
+            }
+        }
+    }
+    out
+}
+
+fn compat_sequential_trait_impl_expected() -> std::collections::BTreeSet<(String, String)> {
+    [
+        ("sequential.rs", "Default"),
+        ("sequential.rs", "crate::nn::Module"),
+    ]
+    .iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect()
+}
+
+#[test]
+fn compat_sequential_trait_impls_match_expected_set() {
+    let mut files = Vec::new();
+    visit_rs_files(&facade_crate_root().join("src/compat"), &mut |p, c| {
+        if let Some(n) = p.file_name() {
+            files.push((n.to_string_lossy().to_string(), c.to_string()));
+        }
+    });
+    assert!(!files.is_empty());
+    assert_eq!(
+        compat_sequential_trait_impl_set(&files),
+        compat_sequential_trait_impl_expected()
+    );
+}
+
+#[test]
+fn compat_sequential_trait_impls_match_expected_set_detects_each_category() {
+    let base = "impl Default for Sequential { fn default() -> Self { todo!() } }\nimpl crate::nn::Module for Sequential { fn forward() {} }".to_string();
+    let f = |extra: &str, other: Option<&str>| {
+        let mut v = vec![("sequential.rs".to_string(), format!("{base}\n{extra}"))];
+        if let Some(o) = other {
+            v.push(("other.rs".to_string(), o.to_string()));
+        }
+        compat_sequential_trait_impl_set(&v)
+    };
+    let want = compat_sequential_trait_impl_expected();
+    assert_eq!(f("", None), want);
+    assert_ne!(
+        f("impl Deref for Sequential { type Target = X; }", None),
+        want
+    );
+    assert_ne!(
+        f(
+            "impl AsRef<X> for Sequential { fn as_ref(&self) -> &X { todo!() } }",
+            None
+        ),
+        want
+    );
+    assert_ne!(
+        f(
+            "impl fandhe_ai_autodiff::nn::Module for Sequential { fn forward() {} }",
+            None
+        ),
+        want
+    );
+    assert_ne!(
+        f(
+            "",
+            Some("impl crate::nn::Module for Sequential { fn forward() {} }")
+        ),
+        want
+    );
+    // コメント内は無害
+    assert_eq!(f("// impl Deref for Sequential { }", None), want);
+}
+
+/// facade の公開面だけで `compat::Sequential` が facade `nn::Module` として使えることの到達性
+/// （`surface_guard` README 手順 4）。シグネチャを関数ポインタ注釈で固定し、スタブ実装を
+/// 出力の一致で弾く。
+#[test]
+fn compat_sequential_is_facade_nn_module_via_facade_only() {
+    use fandhe_ai::compat::Sequential;
+    fn assert_module<M: fandhe_ai::nn::Module + 'static>() {}
+    assert_module::<Sequential>();
+    let _fwd: for<'t> fn(
+        &Sequential,
+        fandhe_ai::TapeRef<'t>,
+        &fandhe_ai::Var<'t>,
+    ) -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError> =
+        <Sequential as fandhe_ai::nn::Module>::forward;
+
+    let tape = fandhe_ai::tape();
+    let seq = Sequential::new().add_relu();
+    let x = tape.var(&fandhe_ai::Tensor::from_slice(&[-1.0_f32, 3.0], &[1, 2]).unwrap());
+    let via_trait =
+        <Sequential as fandhe_ai::nn::Module>::forward(&seq, fandhe_ai::TapeRef::from(&tape), &x)
+            .unwrap();
+    let via_inherent = seq.forward(&tape, &x).unwrap();
+    let a = via_trait.to_tensor();
+    let b = via_inherent.to_tensor();
+    assert_eq!(a.host_slice().as_ref(), b.host_slice().as_ref());
+    assert_eq!(a.host_slice().as_ref(), &[0.0_f32, 3.0]);
+}
+
+#[test]
+fn compat_sequential_nn_module_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "compat::Sequential の nn::Module impl",
+        file: "compat/sequential.rs",
+        anchor: surface_guard::DocAnchor::Item("impl crate::nn::Module for Sequential"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "fandhe_ai::nn::Module::forward",
+        "compat::Sequential",
+        "set_training",
+        "nn::Sequential",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["x.median(None)"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
 }

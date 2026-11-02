@@ -109,7 +109,7 @@ use crate::inference::batch::{
 use crate::{
     AutodiffError, BackendError, DeviceParamStore, EmbeddingBagMode, GlobalPoolMode, Gradients,
     InterpolateMode, LinearVars, ResidentLeaf, ResidentLoss, ResidentTensor, SgdConfig, Tape,
-    Tensor, Var,
+    TapeRef, Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
     Celu, Elu, Gelu, GeluTanh, Glu, Hardsigmoid, Hardswish, Hardtanh, LeakyRelu, LogSigmoid,
@@ -177,9 +177,9 @@ mod train_step_chain_tests_3251;
 /// 常駐経路（[`Sequential::init_device_param_store`] 等）は最上位の
 /// `as_linear()` のみを見る学習契約であり、この制限は本再構成でも
 /// 変わらない（`fandhe_ai_autodiff::nn::container` モジュール doc
-/// 「ネストの限界」参照。ただし compat 層は `NnSequential`／
-/// `ModuleList` を構築する経路自体を公開していないため、ネストは
-/// facade 経由では到達不能）。
+/// 「ネストの限界」参照）。`add_module` で `compat::Sequential` を入れ子にできる
+/// （イシュー #3815。facade `nn::Module` 実装による）が、入れ子のパラメータは
+/// `fit`／`bind` が fail-closed で拒否する。
 ///
 /// **独自層（`add_module`。イシュー #2398）と学習契約**: [`Sequential::add_module`] で積んだ
 /// facade `nn::Module` 実装が学習可能パラメータを持つ場合、`bind` はその層を追跡しない。
@@ -578,6 +578,98 @@ fn reparam_base_is_savable(spec: &LayerSpec) -> bool {
 impl Default for Sequential {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// `compat::Sequential` を facade `nn::Module` として使える入口（イシュー #3815・親 #3741。
+/// 承認根拠は #3768 の所有者回答コメント 6554564412、設計は
+/// `docs/facade-nn-module-exposure-decision.md` §23）。独自 `nn::Module` の中から組み込み層
+/// （`add_*` で組んだ層列）を呼ぶ、または `add_module`／`fandhe_ai::nn::Sequential::add` で
+/// 入れ子にするために使う。公開名の追加はなく、本体は inherent／`inner` への 1 行委譲で、
+/// 数値は inherent `forward` と同じ関数（Linear→ReLU 融合を含む）を通る。
+///
+/// - **呼び出し構文**: inherent の `forward(&Tape)` がメソッド解決で優先されるため、
+///   `TapeRef` を渡す呼び出しは UFCS（`fandhe_ai::nn::Module::forward(&seq, tape, x)`）で書くか、
+///   `fandhe_ai::nn::Sequential` で包む。
+/// - **凍結は fail-closed**: `set_requires_grad`／`freeze` は既定のまま（パラメータを持てば
+///   `InvalidArgument`）。`children` は空（葉扱い）。
+/// - **学習・保存**: パラメータ付きの入れ子を外側で `fit`／`bind` すると型付き `Err`
+///   （学習されないまま成功させない）。`save_model` は `UnsupportedModel`、ONNX export は
+///   `UnsupportedLayer` のまま。
+///
+/// ```
+/// use fandhe_ai::compat::Sequential;
+/// use fandhe_ai::nn::Module;
+/// use fandhe_ai::{AutodiffError, Tensor, TapeRef, Var};
+///
+/// struct Residual {
+///     block: Sequential,
+/// }
+///
+/// impl Module for Residual {
+///     fn forward<'t>(&self, tape: TapeRef<'t>, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+///         // inherent の forward(&Tape) ではなく UFCS で trait 版を呼ぶ
+///         let y = fandhe_ai::nn::Module::forward(&self.block, tape, x)?;
+///         y.add(x)
+///     }
+///     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+///         self.block
+///             .named_parameters()
+///             .into_iter()
+///             .map(|(n, t)| (format!("block.{n}"), t))
+///             .collect()
+///     }
+///     fn set_training(&mut self, training: bool) {
+///         self.block.set_training(training);
+///     }
+///     fn training(&self) -> bool {
+///         self.block.training()
+///     }
+/// }
+///
+/// let tape = fandhe_ai::tape();
+/// let tape_ref = TapeRef::from(&tape);
+/// let seq = Sequential::new().add_relu();
+/// let res = Residual { block: seq };
+/// let x = tape_ref.var(&Tensor::from_slice(&[-1.0_f32, 2.0], &[1, 2]).unwrap());
+/// let out = res.forward(tape_ref, &x).unwrap();
+/// assert_eq!(out.to_tensor().host_slice().as_ref(), &[-1.0, 4.0]);
+///
+/// // 包んで使う形（メソッド解決の優先を避ける）
+/// let wrapped = fandhe_ai::nn::Sequential::new().add(Sequential::new().add_relu());
+/// let y = fandhe_ai::nn::Module::forward(&wrapped, tape_ref, &x).unwrap();
+/// assert_eq!(y.to_tensor().host_slice().as_ref(), &[0.0, 2.0]);
+/// ```
+impl crate::nn::Module for Sequential {
+    fn forward<'t>(&self, tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.inner.forward(tape.0, input)
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.inner.named_parameters()
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        self.inner.set_parameter(name, value)
+    }
+
+    fn state_dict(&self) -> HashMap<String, Tensor<f32>> {
+        self.inner.state_dict()
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        self.inner.load_state_dict(state)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.inner.set_training(training);
+    }
+
+    fn training(&self) -> bool {
+        self.inner.training()
     }
 }
 
