@@ -4952,3 +4952,53 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: 窓への勾配、GPU の STFT カーネル、O(n log n) 化、GPU 実機 parity の実測と測り方の変更（§48）、f64 テープの create_graph、他の B 区分・C 区分の Op、facade の公開名の追加。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
 - 追跡表の項目 4 は「保留」のまま（`Cholesky` 等の他 Op が残るため）。
+
+## 65. 実装記録（イシュー #3805・親 #3719 系。create_graph の B 区分・`Cholesky`・`Pinv`・`Lstsq`）
+
+### 65.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity だけが Phase 10 に残り、本記録の範囲では未実測）。設計は §43（#3734）で、本節はその実装記録。節番号は、main が §63 まで使い、open PR #3959（#3803）が §64 を使うため §65 を取った（rebase 時に、兄弟の #3806 などと衝突していないか再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。「B 区分: Op ごとの範囲の絞り込みを含め、§38〜§44 の推奨どおり実装する」とあり、`Pinv`・`Lstsq` は打ち切りなしだけを実装する推奨（§43.0）に当たる。`Cholesky`・`Pinv`・`Lstsq` を対象外にする回答は無い。これ以上の承認は主張しない。
+
+### 65.1 実装したもの
+
+| 対象 | cgrad | 方式 |
+|---|---|---|
+| `Cholesky` | `dA = 0.5 (S + Sᵀ)` | V3 + f32 構造。`Φ = tril(Lᵀ g) ⊙ W`、`Y = solve(Lᵀ, Φ)`、`S = solve(Lᵀ, Yᵀ)ᵀ`。値は `cholesky_vjp` |
+| `Pinv`（打ち切りなしだけ） | 向き別の `gA`（下記） | V3 + f32 構造。値は `pinv_vjp` |
+| `Lstsq`（同上） | `gB = Pᵀ gX`、`gA` は `G = gX Bᵀ` の `Pinv` 構造 | V3 + f32 構造。子テープへ `P = pinv(A)` を新しく積む。値は `lstsq_vjp` の `(ga, gb)` |
+
+- 再生は公開メソッドへの自己再生（`cholesky()`・`pinv(Some(rcond))`・`lstsq(b, Some(rcond))`）。`supports_create_graph` は 3 Op を `true` 側へ移した（`Pinv` を `Lstsq` と同じ PR で有効化したので閉包性は保たれる）。網羅 match にワイルドカードは足していない。
+- `Pinv` の構造は **長辺側の `m×m`（`n×n`）を作らない結合順**。縦長（`m > n`。`PA ≡ I_n` なので第 3 項が落ちる）は `T1 = Pᵀ (G Pᵀ)`、`M = Gᵀ (P Pᵀ)`、`gA = (M − A (P M)) − T1`。横長（`m < n`。`AP ≡ I_m` で第 2 項が落ちる）は `T1 = (Pᵀ G) Pᵀ`、`M = (Pᵀ P) Gᵀ`、`gA = (M − (M P) A) − T1`。正方は `gA = −Pᵀ (G Pᵀ)`。
+- 実装は `crates/autodiff/src/create_graph/linalg_cholesky_pinv.rs`。判定用の共有ヘルパー（`stage_ok`・`rounding_ok`・`mm` など）は `linalg_fft.rs` で `pub(super)` にした（本体は不変）。`eval/linalg.rs` では `truncated_svd_rank` を `pub(crate)` にし、f64 の特異値と擬似逆行列を返す読み取り専用の `singular_values_and_pinv_f64` を足した（既存関数の挙動と数値は不変）。
+- 総括判定（`guard_cholesky`・`guard_pinv`・`guard_lstsq`）は `build_cgrads` の中で構造を積む前に呼ぶ。外れる入力は `Err(Backward)` で、呼び出し側のロールバックにより `child` は空に戻る。
+
+### 65.2 設計（§43）からの差・明確化
+
+- **行番号**: §43 の `file:line` は基準時点の値で、実装前に引き直した。
+- **Cholesky の上三角マスク**: §43.10 の `where_cond` と同じく、`Var::where_cond` で上三角を定数 0 に置換する（0 定数との `Mul` は `inf·0 = NaN` を生むため使わない）。対角 0.5 倍は定数 `W`（下三角と対角以外は 1）との `Mul`。
+- **`Pinv` の第 1 項の結合順**: §43.10 は第 2・3 項の順だけを書いていたが、縦長では `Pᵀ G` も `m×m` になるため、向きごとに第 1 項も結合順を変えた（縦長は `Pᵀ (G Pᵀ)`、横長は `(Pᵀ G) Pᵀ`）。f64 の判定側（`pinv_struct_check`）も同じ結合順で、`m×m` を確保しない。
+- **rcond の閾値付近の式**（§43.10・論点 6）: `rank == min(m,n)` のうえで、どの特異値 `σ_i` も `[σmax·prev_f32(rcond), σmax·next_f32(rcond)]` に入らないことを要求する。`prev_f32`・`next_f32` は f32 の隣接値（ビット列 ±1）で、新しい tolerance 定数は作らない。`rcond = 0` は下限を 0 とする。
+- **二階の上界の冪**: `Cholesky` は因子 `n·max|L⁻¹|`・`n·max|L|`、`Pinv`・`Lstsq` は `max(m,n)·max|P|`・`max(m,n)·max|A|` を使い、冪はいずれも 4（`Inv` の `guard_inv` と同型の保守的な値）、`extra` は `max|g|`（下限 1）。閾値 `STAGE_BOUND_GUARD` は不変。
+- **判定の位置**: guard は `Inv` の前例と同じく `build_cgrads` の中（構造を積む前）で呼ぶ。
+- **差し替えた既存テスト**（§43.4）: `tests/create_graph_linalg_fft.rs` の fail-closed の固定を 13 件から 10 件へ（`cholesky`・`pinv`・`lstsq` を外した。`matrix_norm`・`slogdet.sign`・`matrix_rank` は #3806 の分として残した）、untracked 部分木の見本を `cholesky` から `Op::Custom` へ、`tests/create_graph_stft.rs` の隣接見本を `cholesky` から `Op::Custom` へ、`tape.rs` の `linalg_fft_family_supports_create_graph` の unsupported 配列から `Cholesky`・`Pinv` を外し、RNN／LSTM 族の単体テストの隣接見本を `Op::OneHot`（非微分）へ替えた。
+- **関数名の制約**: `api_surface.rs` の関数名インベントリ（`LINALG_OPS_FN_NAMES`）と完全一致する `fn` を宣言しない（`pinv_struct`・`pinv_cgrad`・`guard_pinv` と命名）。
+
+### 65.3 テスト
+
+- `crates/autodiff/tests/create_graph_linalg_cholesky_pinv_lstsq.rs`（CI）: Hessian と 5 点中央差分の突合（`cholesky_hessian_matches_finite_difference`〈`A = (X+Xᵀ)/2 + cI`〉、`pinv_hessian_matches_finite_difference`〈縦長・横長・正方〉、`lstsq_mixed_second_derivatives`〈A・B の混合〉）、`cholesky_upper_triangle_upstream_has_zero_gradient`、`linalg_cpl_jvp_create_graph_matches_central_difference`、`linalg_cpl_cg_grad_bit_identical_for_linear_upstream`、拒否（`pinv_lstsq_truncation_rejected_child_empty_and_retry`〈打ち切り・rank 落ち・閾値付近〉、`linalg_cpl_unsafe_inputs_rejected_child_empty_and_retry`〈悪条件の Cholesky・`g = ±3e38`・cond の大きい Pinv〉）、`pinv_cgrad_does_not_materialize_m_by_m`（`[100000,1]`）、`linalg_cpl_neighbouring_unsupported_op_stays_fail_closed`。
+- 単体: `create_graph/linalg_cholesky_pinv.rs` の `pinv_cgrad_has_no_long_side_square_node`（子テープの全ノードに長辺側の正方行列がない）、`tape.rs` の `linalg_cholesky_pinv_lstsq_supports_create_graph`。
+- facade: `{cholesky,pinv,lstsq}_create_graph_via_facade`、`pinv_truncated_is_rejected_via_facade`、`backward_create_graph` の rustdoc に 1×1 の `cholesky`・`pinv` の閉形式の二階の doctest、正ガード `backward_create_graph_linalg_cholesky_pinv_lstsq_usage_doctest_is_present_and_compiled`（`api_surface.rs`。存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `linalg_cholesky_pinv_lstsq` の 4 ケース（`linalg_cholesky`・`linalg_pinv_tall`・`linalg_pinv_wide`・`linalg_lstsq`。`Route::H`・`Judge::Strict`・`Listed`〈`k < 128` の小形状で split-K を発火させない〉。Q5 は打ち切りありの `pinv` の拒否）、`create_graph_linalg_cholesky_pinv_lstsq_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査 `linalg_cholesky_pinv_lstsq_cases_pass_cpu_against_cpu`。
+
+### 65.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`first_order()` は素の `backward` と bit 一致する。値は V3 なので `cg.grad` も CPU で 1 階と bit 一致する（線形な上流で確認）。tolerance・baseline・ガードレール閾値・`STAGE_BOUND_GUARD`・FMA 契約は変えない。新しい baseline・定数は作らない。
+- 保証範囲は、総括判定を通った入力で、seed の各要素の絶対値が 1 以下の二階と孫テープまで。三階以上、打ち切りあり・rank 落ち・閾値付近の `Pinv`・`Lstsq` の二階（`docs/autodiff-linalg-ops-decision.md` §8 のスコープ外課題）、真値が f32 を超える場合は保証外。
+
+### 65.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。`linalg_*` は backend-cpu だけが実装し、CUDA・Metal はホストの `eval::linalg` へフォールバックする（新しいカーネルは作らない）。
+- スコープ外: `SlogdetSign`・`MatrixRank`・`MatrixNorm`（#3806）、分解系（`Qr*`・`Svd*`・`Eigh*`。#3807・#3808）、打ち切りありの `Pinv`・`Lstsq` の二階、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（§48）、facade の公開名の追加。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
+- 追跡表の項目 4 は「保留」のまま（`MatrixNorm` 等の他 Op が残るため）。

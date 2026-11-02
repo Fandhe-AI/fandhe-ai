@@ -39,6 +39,9 @@
 //! - `SlogdetLogAbsDet`: `dA = broadcast(g) * inv(A)^T`。
 //! - `Det`: `dA = broadcast(g * det) * inv(A)^T`。
 //!
+//! `Cholesky`・`Pinv`・`Lstsq` は同型の判定を `linalg_cholesky_pinv` サブモジュール（イシュー #3805）が
+//! 持ち、本モジュールの判定用ヘルパー（`stage_ok`・`rounding_ok`・`mm` など）を共有する。
+//!
 //! 保証範囲: 判定を通った入力では、`cg.grad` が 1 階と REQ-2 で一致し、seed の絶対値が 1 以下の
 //! 二階・孫テープへの再生が有限になる。対象外は上流 Op・|seed|>1・三階以上・真の値が f32 を超える場合。
 
@@ -235,25 +238,25 @@ fn zero_real_bin_imag<'c>(
 // ---------------------------------------------------------------------
 
 /// 構造の 1 段の値が安全か: 有限・`2^125` 未満・非零なら f32 正規化最小値以上。
-fn stage_ok(v: f64) -> bool {
+pub(super) fn stage_ok(v: f64) -> bool {
     v.is_finite()
         && v.abs() < STAGE_BOUND_GUARD
         && (v == 0.0 || v.abs() >= f64::from(f32::MIN_POSITIVE))
 }
 
-fn reject(what: &str) -> AutodiffError {
+pub(super) fn reject(what: &str) -> AutodiffError {
     invalid(format!(
         "{what}（f32 の子テープ構造が f64 の 1 階と食い違いうる入力。決定記録 §30。\
          拒否は保守的で、実際に overflow するとは限らない）"
     ))
 }
 
-fn max_abs(v: &[f64]) -> f64 {
+pub(super) fn max_abs(v: &[f64]) -> f64 {
     v.iter().fold(0.0f64, |m, x| m.max(x.abs()))
 }
 
 /// 行優先 `a: [r,k]` と `b: [k,c]` の f64 積。
-fn mm(a: &[f64], b: &[f64], r: usize, k: usize, c: usize) -> Vec<f64> {
+pub(super) fn mm(a: &[f64], b: &[f64], r: usize, k: usize, c: usize) -> Vec<f64> {
     let mut out = vec![0.0f64; r * c];
     for i in 0..r {
         for p in 0..k {
@@ -269,7 +272,7 @@ fn mm(a: &[f64], b: &[f64], r: usize, k: usize, c: usize) -> Vec<f64> {
     out
 }
 
-fn transpose(a: &[f64], r: usize, c: usize) -> Vec<f64> {
+pub(super) fn transpose(a: &[f64], r: usize, c: usize) -> Vec<f64> {
     let mut out = vec![0.0f64; r * c];
     for i in 0..r {
         for j in 0..c {
@@ -279,11 +282,11 @@ fn transpose(a: &[f64], r: usize, c: usize) -> Vec<f64> {
     out
 }
 
-fn to_f64(t: &Tensor<f32>) -> Vec<f64> {
+pub(super) fn to_f64(t: &Tensor<f32>) -> Vec<f64> {
     t.host_slice().iter().map(|&v| f64::from(v)).collect()
 }
 
-fn all_stage_ok(v: &[f64]) -> bool {
+pub(super) fn all_stage_ok(v: &[f64]) -> bool {
     v.iter().all(|&x| stage_ok(x))
 }
 
@@ -300,7 +303,7 @@ const CONSERVATIVE_RELATIVE_TOLERANCE: f64 = REQ2_RELATIVE_TOLERANCE / 2.0;
 /// `terms` は構造内の積和の総項数（段の長さ）。誤差上界を `(2 * terms + 4) * 2^-23 * magnitude`
 /// （入力 `X` 自体の f32 丸め 2 回分を含む）と見積もり、要素ごとに許容内かを調べる。
 /// 桁落ち（`magnitude` が `|reference|` より桁違いに大きい入力）を f32 構造のまま通さない。
-fn rounding_ok(reference: &[f64], magnitude: &[f64], terms: usize) -> bool {
+pub(super) fn rounding_ok(reference: &[f64], magnitude: &[f64], terms: usize) -> bool {
     let coeff = (2 * terms + 4) as f64 * (-23f64).exp2();
     reference.iter().zip(magnitude).all(|(&r, &m)| {
         let bound = coeff * m;
@@ -308,17 +311,17 @@ fn rounding_ok(reference: &[f64], magnitude: &[f64], terms: usize) -> bool {
     })
 }
 
-fn abs_vec(v: &[f64]) -> Vec<f64> {
+pub(super) fn abs_vec(v: &[f64]) -> Vec<f64> {
     v.iter().map(|x| x.abs()).collect()
 }
 
 /// `A` の f64 逆行列（特異は拒否）。
-fn inverse_of(a: &Tensor<f32>, what: &str) -> Result<(Vec<f64>, f64), AutodiffError> {
+pub(super) fn inverse_of(a: &Tensor<f32>, what: &str) -> Result<(Vec<f64>, f64), AutodiffError> {
     inv_and_det_f64(a).ok_or_else(|| reject(&format!("{what}: 行列が特異")))
 }
 
 /// 二階の逆伝播の上界（seed の各要素の絶対値 1 以下を仮定した保守的な見積もり）が閾値未満か。
-fn second_order_ok(factors: &[f64], power: i32, extra: f64) -> bool {
+pub(super) fn second_order_ok(factors: &[f64], power: i32, extra: f64) -> bool {
     let m = factors.iter().fold(1.0f64, |m, &x| m.max(x));
     let bound = m.powi(power) * extra;
     bound.is_finite() && bound < STAGE_BOUND_GUARD
@@ -463,7 +466,7 @@ pub(super) fn guard_det_like(
 // 線形代数: 1 階 VJP の子テープ記録（build_cgrads から呼ばれる）
 // ---------------------------------------------------------------------
 
-fn empty_grad<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
+pub(super) fn empty_grad<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
     Ok(child.var_no_grad(&Tensor::zeros(shape)?))
 }
 

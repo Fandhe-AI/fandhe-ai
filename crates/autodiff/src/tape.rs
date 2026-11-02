@@ -2678,8 +2678,8 @@ impl Op {
             | Op::Pad { .. }
             | Op::MaskedFill { .. }
             | Op::PadMode { .. }
-            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。分解系・`Cholesky`・
-            // `Pinv`・`Lstsq`・`MatrixNorm` などは `false` のまま。`Stft`／`Istft` と内部 Op
+            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。分解系・
+            // `MatrixNorm` などは `false` のまま。`Stft`／`Istft` と内部 Op
             // `StftAdjoint`／`IstftAdjoint` はイシュー #3804（決定記録 §42・§63。随伴 Op の対）。
             | Op::Stft { .. }
             | Op::Istft { .. }
@@ -2693,6 +2693,11 @@ impl Op {
             | Op::Solve { .. }
             | Op::Det { .. }
             | Op::SlogdetLogAbsDet { .. }
+            // Cholesky・Pinv・Lstsq（イシュー #3805・決定記録 §43・§65。V3 + f32 構造。
+            // Pinv・Lstsq は打ち切りなしの入力だけを総括判定で受理する）。
+            | Op::Cholesky { .. }
+            | Op::Pinv { .. }
+            | Op::Lstsq { .. }
             // 選択縮約 4 variant（イシュー #3789・決定記録 §34）。Max／Min は V2（先勝ちマスク＋
             // where_cond）、Amax／Amin は V3（均等分配）。
             | Op::Max { .. }
@@ -2774,7 +2779,6 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::Cholesky { .. }
             | Op::QrQ { .. }
             | Op::QrR { .. }
             | Op::SvdU { .. }
@@ -2785,8 +2789,6 @@ impl Op {
             | Op::EighValues { .. }
             | Op::EighVectors { .. }
             | Op::SlogdetSign { .. }
-            | Op::Pinv { .. }
-            | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
@@ -5548,8 +5550,9 @@ mod conv3d_op_tests {
     }
 
     /// イシュー #3086: FFT 4 件・線形代数 4 件は create_graph 対応（`true`）。隣接する
-    /// `Cholesky`・`Pinv`・`MatrixNorm`・`SlogdetSign`・`MatrixRank` などは `false`（fail-closed。
-    /// 型付きエラーでの拒否は `tests/create_graph_linalg_fft.rs` が全 13 件で固定する。
+    /// `MatrixNorm`・`SlogdetSign`・`MatrixRank` などは `false`（fail-closed。型付きエラーでの拒否は
+    /// `tests/create_graph_linalg_fft.rs` が固定する。`Cholesky`・`Pinv`・`Lstsq` は #3805 で対応済みのため
+    /// `linalg_cholesky_pinv_lstsq_supports_create_graph` が扱う。
     /// `Stft`／`Istft` は #3804 で対応済みのため `stft_family_supports_create_graph` が扱う）。
     #[test]
     fn linalg_fft_family_supports_create_graph() {
@@ -5590,13 +5593,8 @@ mod conv3d_op_tests {
             assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
         }
         let unsupported = [
-            Op::Cholesky { input: a },
             Op::SlogdetSign { input: a },
             Op::MatrixRank {
-                input: a,
-                rcond: 1e-6,
-            },
-            Op::Pinv {
                 input: a,
                 rcond: 1e-6,
             },
@@ -5608,6 +5606,25 @@ mod conv3d_op_tests {
         for op in &unsupported {
             assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
         }
+    }
+
+    /// イシュー #3805: `Cholesky`・`Pinv`・`Lstsq` は create_graph 対応（`true`。`Pinv`・`Lstsq` は
+    /// 打ち切りなしの入力だけを総括判定で受理する）。隣接する `Op::OneHot`（非微分）は `false`。
+    #[test]
+    fn linalg_cholesky_pinv_lstsq_supports_create_graph() {
+        let (a, b) = (NodeId(0), NodeId(1));
+        let supported = [
+            Op::Cholesky { input: a },
+            Op::Pinv {
+                input: a,
+                rcond: 1e-6,
+            },
+            Op::Lstsq { a, b, rcond: 1e-6 },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
+        }
+        assert!(!Op::OneHot { input: a }.supports_create_graph());
     }
 
     /// イシュー #3804: `Stft`／`Istft` と内部 Op `StftAdjoint`／`IstftAdjoint` は create_graph
@@ -5869,7 +5886,7 @@ mod conv_transpose3d_max_unpool_op_tests {
     }
 
     /// RNN セル 2 Op（イシュー #3795）: bias あり・なしの `RnnCell` と `GruCell` は
-    /// create_graph 対象、checkpoint 対象外のまま。隣接する `Cholesky` は `false` のまま。
+    /// create_graph 対象、checkpoint 対象外のまま。隣接する `OneHot`（非微分。恒久的に `false`）は `false` のまま。
     #[test]
     fn rnn_gru_cell_family_supports_create_graph() {
         let n = NodeId;
@@ -5900,7 +5917,7 @@ mod conv_transpose3d_max_unpool_op_tests {
             };
             assert!(gru.supports_create_graph() && !gru.is_checkpoint_eligible());
         }
-        assert!(!Op::Cholesky { input: n(0) }.supports_create_graph());
+        assert!(!Op::OneHot { input: n(0) }.supports_create_graph());
     }
 
     /// LSTM セル 2 Op（イシュー #3796）: bias あり・なしの `LstmCell`／`LstmHidden` は
@@ -5932,7 +5949,7 @@ mod conv_transpose3d_max_unpool_op_tests {
                 assert!(op.supports_create_graph() && !op.is_checkpoint_eligible());
             }
         }
-        assert!(!Op::Cholesky { input: n(0) }.supports_create_graph());
+        assert!(!Op::OneHot { input: n(0) }.supports_create_graph());
     }
 
     #[test]
