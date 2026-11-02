@@ -28,12 +28,23 @@
 //! **数値契約**: GRU の再構築は forward の `mul_add` と丸めがずれうるため、cgrad の値は
 //! 1 階と REQ-2 統一複合判定で一致する（bit 一致は主張しない。`first_order()` 側は素の
 //! `Tape::backward` と bit 同一）。tolerance・baseline は変えない。
+//!
+//! **型付きの拒否（PR #3952 の codex 指摘。§37.12 の「違反入力には拒否を足す」に従う）**:
+//! - FMA 相殺: forward は `r.mul_add(q, pre_i_n)`、再構築は積を先に f32 へ丸める。相殺で
+//!   `tanh` 引数が REQ-2 の複合判定外へずれる入力（`n` 値が不一致）は `Err` にする。
+//! - 中間積 overflow: 二階の随伴は上流 `g` に各オペランド（x・h_prev・W・q 等）を掛けるため、
+//!   `max|g| × max(1, オペランドの最大絶対値)` が `STAGE_BOUND_GUARD`（2^125）以上なら、
+//!   真値が 0 でも `0 × inf = NaN` になりうるので `Err` にする（保守的。cotangent の
+//!   絶対値は 1 以下と仮定）。いずれも構造を積む前後で判定し、`Err` 時は呼び出し側の
+//!   ロールバックで子テープは空へ戻る。
 
-use super::{accumulate, get_mirror, reduce_bias_grad_var};
+use super::{accumulate, get_mirror, reduce_bias_grad_var, value_of};
+use crate::create_graph_norm::STAGE_BOUND_GUARD;
 use crate::error::AutodiffError;
 use crate::tape::{NodeId, Tape, TapeNode};
 use crate::var::{GateParams, Var};
 use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
 
 /// セル Op の入力ノード束（`Op::RnnCell`／`Op::GruCell` の共通フィールド）。
 #[derive(Clone, Copy)]
@@ -101,6 +112,50 @@ pub(super) fn replay_gru_cell<'c>(
     )
 }
 
+fn reject(what: &str) -> AutodiffError {
+    AutodiffError::Backward(format!(
+        "create_graph: {what}（f32 の子テープ構造が 1 階と食い違いうる入力。決定記録 §37.12。\
+         拒否は保守的で、実際に誤るとは限らない）"
+    ))
+}
+
+fn max_abs_of(t: &Tensor<f32>) -> f64 {
+    t.host_slice()
+        .iter()
+        .fold(0.0f64, |m, &v| m.max(f64::from(v).abs()))
+}
+
+/// 二階の随伴が `g × オペランド` で overflow しうる入力を拒否する（RNN・GRU 共通）。
+/// `operands` は `g` に掛かりうる値（入力・重み・bias・GRU の `q` 等）。
+fn guard_overflow<'c>(
+    child: &'c Tape,
+    g: &Var<'c>,
+    operands: &[&Var<'c>],
+    what: &str,
+) -> Result<(), AutodiffError> {
+    let gv = value_of(child, g)?;
+    if !gv.host_slice().iter().all(|v| v.is_finite()) {
+        return Err(reject(&format!("{what}: 上流 g に非有限要素がある")));
+    }
+    let mut m = 1.0f64;
+    for v in operands {
+        let t = value_of(child, v)?;
+        let a = max_abs_of(&t);
+        if !a.is_finite() {
+            return Err(reject(&format!("{what}: オペランドに非有限要素がある")));
+        }
+        m = m.max(a);
+    }
+    let bound = max_abs_of(&gv) * m;
+    if bound.is_finite() && bound < STAGE_BOUND_GUARD {
+        Ok(())
+    } else {
+        Err(reject(&format!(
+            "{what}: 二階の逆伝播の中間積（上流 g × オペランド）の上界が 2^125 以上"
+        )))
+    }
+}
+
 fn ones_like<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
     Ok(child.var_no_grad(&Tensor::full(shape, 1.0f32)?))
 }
@@ -122,6 +177,9 @@ pub(super) fn rnn_cell_cgrad<'c>(
     let hidden = h_t.shape().get(1).copied().ok_or_else(|| {
         AutodiffError::Backward("create_graph: RnnCell の出力が rank 2 でない".into())
     })?;
+    let mut operands = vec![&m.x, &m.h_prev, &m.w_ih, &m.w_hh];
+    operands.extend(m.b_ih.iter().chain(m.b_hh.iter()));
+    guard_overflow(child, g, &operands, "RnnCell")?;
     let one = ones_like(child, &h_t.shape())?;
     let factor = one.sub(&h_t.mul(&h_t)?)?;
     let d_pre = g.mul(&factor)?;
@@ -187,6 +245,31 @@ pub(super) fn gru_cell_cgrad<'c>(
     let z = blk(&pre_i, 1)?.add(&blk(&pre_h, 1)?)?.sigmoid();
     let q = blk(&pre_h, 2)?;
     let n = r.mul(&q)?.add(&blk(&pre_i, 2)?)?.tanh();
+
+    // FMA 契約の判定: forward は `r.mul_add(q, pre_i_n)`、上の再構築は積を先に丸める。
+    // 相殺で `n` が REQ-2 複合判定外へずれる入力は拒否する（tolerance は緩めない）。
+    {
+        let rv = value_of(child, &r)?;
+        let qv = value_of(child, &q)?;
+        let pv = value_of(child, &blk(&pre_i, 2)?)?;
+        let (rs, qs, ps) = (rv.host_slice(), qv.host_slice(), pv.host_slice());
+        for ((&rr, &qq), &pp) in rs.iter().zip(qs.iter()).zip(ps.iter()) {
+            let fused = f64::from(rr.mul_add(qq, pp).tanh());
+            let split = f64::from((rr * qq + pp).tanh());
+            if fused.is_nan() && split.is_nan() {
+                continue;
+            }
+            let diff = (fused - split).abs();
+            if !(diff < ABSOLUTE_RESCUE_THRESHOLD || diff < RELATIVE_TOLERANCE * fused.abs()) {
+                return Err(reject(
+                    "GruCell: r·q + pre_i_n の FMA と分離丸めで n が REQ-2 の許容を超えてずれる（桁落ち）",
+                ));
+            }
+        }
+    }
+    let mut operands = vec![&m.x, &m.h_prev, &m.w_ih, &m.w_hh, &q];
+    operands.extend(m.b_ih.iter().chain(m.b_hh.iter()));
+    guard_overflow(child, g, &operands, "GruCell")?;
 
     // 1 階 `eval::gru_backward` と同じ式・同じ掛ける順。
     let one = ones_like(child, &out_shape)?;

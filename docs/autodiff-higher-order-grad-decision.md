@@ -2038,6 +2038,7 @@ CI の行は新設 `crates/autodiff/tests/create_graph_rnn_cell.rs` に置く。
 
 - 構造は 1 階と同じ f32 の積を同じ順で並べるだけで、スケール変換も f64 縮約も入らない。このため既定では §27.3 型の総括判定を置かない。
 - 掃引テストで「1 階が有限なら cgrad・二階も有限」を固定する。違反する入力が見つかったら、実装 PR で型付きの拒否を足し、本節に逸脱として追記する（37.14 の論点 5）。
+- **逸脱（PR #3952 の codex 指摘で追加）**: RNN・GRU は掃引で違反入力が見つかったため、型付きの拒否を足した。(1) GRU の `r·q + pre_i_n` は forward が FMA、再構築が分離丸めで、相殺入力で `n` が REQ-2 の許容を超えてずれる場合に `Err`。(2) 上流 `g` × オペランド（x・h_prev・W・bias・GRU の `q`）の上界が `STAGE_BOUND_GUARD`（2^125）以上なら、真の二階が 0 でも `0 × inf = NaN` になりうるため `Err`（RNN・GRU 共通）。tolerance は変えない。
 - `is_checkpoint_eligible` は触らない。§21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。
 
 ### 37.13 GPU の forward 経路と Phase 10

@@ -571,6 +571,35 @@ fn assert_cgrad_follows_first_order(ctx: &str, want: &[f32], got: &[f32]) {
     }
 }
 
+/// 型付き拒否（中間積 overflow・FMA 相殺。§37.12）が許される入力域の検査。
+/// 上流 g は高々 `2·c_scale`、オペランドの最大は `max(1, 各 scale)` なので、拒否は
+/// `c_scale × max(1, scale) ≥ 2^125 / 2` の域でしか起きてはならない（安全域の取りこぼしを防ぐ）。
+fn assert_guard_rejection_allowed(
+    ctx: &str,
+    e: &AutodiffError,
+    s: Scale,
+    c_scale: f32,
+    check_second: bool,
+) {
+    let msg = format!("{e:?}");
+    assert!(
+        msg.contains("create_graph:"),
+        "{ctx}: 型付きでない拒否 {msg}"
+    );
+    // 二階を問わない域（g·scale³ > 1e30）では、高階の入れ子で上流が増幅されるため拒否を許す。
+    if !check_second {
+        return;
+    }
+    let m = [1.0f32, s.x, s.h, s.w_ih, s.w_hh, s.bias]
+        .into_iter()
+        .fold(1.0f64, |a, v| a.max(f64::from(v)));
+    // GRU の q = h·W_hh（和は H 項）も overflow 側の寄与になるため余裕を 1e3 倍みる。
+    assert!(
+        f64::from(c_scale) * m * m * 1e3 >= 2e37,
+        "{ctx}: 安全域で拒否された: {msg}"
+    );
+}
+
 struct Stages {
     first_finite: bool,
 }
@@ -592,9 +621,15 @@ fn three_stage(ctx: &str, lay: Layout, s: Scale, c_scale: f32, check_second: boo
             .unwrap()
             .expect("theta"),
     );
-    let cg = tape
-        .backward_create_graph(&loss, &child)
-        .unwrap_or_else(|e| panic!("{ctx}: backward_create_graph: {e:?}"));
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert_guard_rejection_allowed(ctx, &e, s, c_scale, check_second);
+            return Stages {
+                first_finite: want.iter().all(|a| a.is_finite()),
+            };
+        }
+    };
     let first = dense(cg.first_order().get(&theta).unwrap().expect("first_order"));
     assert_eq!(bits(&first), bits(&want), "{ctx}: first_order()");
     let got = dense(cg.grad(&theta).unwrap().expect("cgrad").to_tensor());
@@ -609,8 +644,13 @@ fn three_stage(ctx: &str, lay: Layout, s: Scale, c_scale: f32, check_second: boo
         let theta = tape.var(&t(theta0.clone(), &[n]));
         let p = lay.unpack(&theta).unwrap();
         let loss = quad_scaled(&tape, &lay.step(&p).unwrap(), c_scale).unwrap();
-        let hv = hvp(&tape, &loss, &theta, &v, &child)
-            .unwrap_or_else(|e| panic!("{ctx}: hvp が拒否された: {e:?}"));
+        let hv = match hvp(&tape, &loss, &theta, &v, &child) {
+            Ok(hv) => hv,
+            Err(e) => {
+                assert_guard_rejection_allowed(ctx, &e, s, c_scale, check_second);
+                return Stages { first_finite };
+            }
+        };
         if first_finite && check_second {
             // 1 階が有限なら二階の行列ベクトル積も有限であることを期待する（掃引で確かめる）。
             let hv = dense(hv);
@@ -627,8 +667,13 @@ fn three_stage(ctx: &str, lay: Layout, s: Scale, c_scale: f32, check_second: boo
         let theta = tape.var(&t(theta0, &[n]));
         let p = lay.unpack(&theta).unwrap();
         let y = lay.step(&p).unwrap();
-        let res = jvp_create_graph(&tape, &y, &theta, &v, &child, &grand)
-            .unwrap_or_else(|e| panic!("{ctx}: jvp_create_graph が拒否された: {e:?}"));
+        let res = match jvp_create_graph(&tape, &y, &theta, &v, &child, &grand) {
+            Ok(res) => res,
+            Err(e) => {
+                assert_guard_rejection_allowed(ctx, &e, s, c_scale, check_second);
+                return Stages { first_finite };
+            }
+        };
         if first_finite && check_second {
             let out = dense(res.output().to_tensor());
             assert!(
@@ -809,5 +854,99 @@ fn rnn_gru_cells_neighbouring_unsupported_op_stays_fail_closed() {
         tape2
             .backward_create_graph(&loss2, &child)
             .expect("通常の入力は再試行で成功する");
+    }
+}
+// ---------------------------------------------------------------------
+// 型付き拒否のプローブ（PR #3952 codex 指摘。正のプローブ＝拒否、負のプローブ＝受理）
+// ---------------------------------------------------------------------
+
+/// B=D=1 の 1 要素セルを作り、`loss = c·Σh` に対する `backward_create_graph` の結果を返す。
+fn scalar_cell_cgrad(
+    kind: Kind,
+    x: f32,
+    h_prev: f32,
+    w_ih: Vec<f32>,
+    w_hh: Vec<f32>,
+    c: f32,
+) -> Result<Vec<f32>, AutodiffError> {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let g = w_ih.len();
+    let xv = tape.var(&t(vec![x], &[1, 1]));
+    let hv = tape.var(&t(vec![h_prev], &[1, 1]));
+    let wi = tape.var(&t(w_ih, &[1, g]));
+    let wh = tape.var(&t(w_hh, &[1, g]));
+    let gp = GateParams {
+        w_ih: &wi,
+        w_hh: &wh,
+        b_ih: None,
+        b_hh: None,
+    };
+    let y = match kind {
+        Kind::Rnn => xv.rnn_cell(&hv, gp)?,
+        Kind::Gru => xv.gru_cell(&hv, gp)?,
+    };
+    let cv = tape.var_no_grad(&t(vec![c], &[1, 1]));
+    let loss = y.mul(&cv)?.sum(None)?;
+    let cg = tape.backward_create_graph(&loss, &child)?;
+    Ok(dense(cg.grad(&wi)?.expect("w_ih").to_tensor()))
+}
+
+#[test]
+fn gru_fma_cancellation_is_rejected_typed() {
+    // forward の tanh 引数 ≈ 3.76 に対し、積を先に丸める再構築では 0 になる入力。
+    let r = scalar_cell_cgrad(
+        Kind::Gru,
+        1.0,
+        1.0,
+        vec![1.0, 0.0, -73105856.0],
+        vec![0.0, 0.0, 100000000.0],
+        1.0,
+    );
+    let e = r.expect_err("FMA 相殺入力は型付きで拒否される");
+    assert!(format!("{e:?}").contains("FMA"), "{e:?}");
+}
+
+#[test]
+fn gru_without_cancellation_is_accepted() {
+    // 負のプローブ: 相殺しない入力は受理される。
+    let r = scalar_cell_cgrad(
+        Kind::Gru,
+        1.0,
+        1.0,
+        vec![1.0, 0.5, 0.3],
+        vec![0.2, 0.1, 0.7],
+        1.0,
+    )
+    .expect("受理される");
+    assert!(r.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn rnn_gru_intermediate_overflow_is_rejected_typed() {
+    // x = W_ih = 1e10、loss = 1e30·h。1 階は飽和で 0 だが、二階の随伴 g × W が f32 を超える。
+    let r = scalar_cell_cgrad(Kind::Rnn, 1e10, 0.0, vec![1e10], vec![0.0], 1e30);
+    let e = r.expect_err("RNN の中間積 overflow は型付きで拒否される");
+    assert!(format!("{e:?}").contains("2^125"), "{e:?}");
+    let r = scalar_cell_cgrad(
+        Kind::Gru,
+        1e10,
+        0.0,
+        vec![1e10, 1e10, 1e10],
+        vec![0.0, 0.0, 0.0],
+        1e30,
+    );
+    let e = r.expect_err("GRU の中間積 overflow は型付きで拒否される");
+    assert!(format!("{e:?}").contains("2^125"), "{e:?}");
+}
+
+#[test]
+fn rnn_gru_large_but_safe_scale_is_accepted() {
+    // 負のプローブ: g × オペランドが安全域（1e20）なら受理され有限。
+    for kind in [Kind::Rnn, Kind::Gru] {
+        let n = if matches!(kind, Kind::Rnn) { 1 } else { 3 };
+        let r = scalar_cell_cgrad(kind, 1e5, 0.0, vec![1e5; n], vec![0.0; n], 1e15)
+            .unwrap_or_else(|e| panic!("{kind:?}: {e:?}"));
+        assert!(r.iter().all(|v| v.is_finite()), "{kind:?}: {r:?}");
     }
 }
