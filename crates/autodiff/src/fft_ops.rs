@@ -43,8 +43,8 @@
 //! downcast（`fandhe_ai_tensor_core::fft` のモジュール doc が正。直接 DFT
 //! のため 1 レーンあたり O(n²)）。非有限入力は拒否せず伝播する
 //! （PyTorch と同じ。linalg 系の「非有限は `InvalidArgument`」とは異なる）。
-//! 高階微分（`create_graph`）は `rfft`／`irfft`／`fft`／`ifft` が対象（イシュー #3086・
-//! 決定記録 §30。`stft`／`istft` は対象外）。activation checkpoint・f64 自動微分経路は
+//! 高階微分（`create_graph`）は `rfft`／`irfft`／`fft`／`ifft`（イシュー #3086・決定記録 §30）と
+//! `stft`／`istft`（イシュー #3804・§42・§63。随伴 Op 対。後半は `*_from_resolved`）が対象。activation checkpoint・f64 自動微分経路は
 //! 対象外。
 //!
 //! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{rfft,irfft,fft,ifft,stft,istft}` と `FftNorm`・`StftPadMode`・`StftOptions`・`IstftOptions`（クレートルート）。本モジュール自体は facade から再エクスポートしない。
@@ -443,10 +443,24 @@ pub fn stft<'t>(
     )?;
     // 形状検査（layout）を窓確保より先に行い、不正形状×巨大 n_fft で
     // 型付きエラーの前に大きな確保を試みないようにする。
-    let layout = fft::stft_layout(&x.shape(), &params)?;
+    fft::stft_layout(&x.shape(), &params)?;
     let win = resolve_window(window, options.win_length.unwrap_or(n_fft), n_fft)?;
+    stft_from_resolved(x, &win, &params)
+}
+
+/// 解決済みの窓と引数から `Op::Stft` を積む（[`stft`] の後半。`create_graph` の
+/// 子テープ再生〈`create_graph.rs::replay_op`〉と、随伴 Op `StftAdjoint` の VJP
+/// 〈`create_graph/stft.rs`〉が共有する）。`win` は長さ `n_fft` の実効窓で、公開の
+/// [`stft`] のように `win_length` から解決し直さない（再解決は失敗する）。
+/// layout の再検査は純関数で、既定経路の値は変わらない。
+pub(crate) fn stft_from_resolved<'t>(
+    x: &Var<'t>,
+    win: &Tensor<f32>,
+    params: &StftParams,
+) -> Result<Var<'t>, AutodiffError> {
+    let layout = fft::stft_layout(&x.shape(), params)?;
     let input = materialize_one(x)?;
-    let value = match x.tape().ops().fft_stft(&input, &win, &params) {
+    let value = match x.tape().ops().fft_stft(&input, win, params) {
         Ok(v) => {
             verify_shape(v.shape(), layout.out_shape())?;
             v
@@ -461,8 +475,8 @@ pub fn stft<'t>(
     let id = x.tape().push_eager(
         Op::Stft {
             input: x.node_id(),
-            window: win,
-            params,
+            window: win.clone(),
+            params: params.clone(),
         },
         value,
     );
@@ -493,11 +507,23 @@ pub fn istft<'t>(
         options.length,
     )?;
     // 形状検査（layout）を窓確保より先に行う（stft と同じ理由）。
-    let layout = fft::istft_layout(&x.shape(), &params)?;
+    fft::istft_layout(&x.shape(), &params)?;
     let win = resolve_window(window, params.win_length(), n_fft)?;
+    istft_from_resolved(x, &win, &params)
+}
+
+/// 解決済みの窓と引数から `Op::Istft` を積む（[`istft`] の後半。用途は
+/// [`stft_from_resolved`] と同じ）。NOLA 検査はバックエンド呼び出しより前に行い、
+/// 再生経路でも迂回させない。
+pub(crate) fn istft_from_resolved<'t>(
+    x: &Var<'t>,
+    win: &Tensor<f32>,
+    params: &IstftParams,
+) -> Result<Var<'t>, AutodiffError> {
+    let layout = fft::istft_layout(&x.shape(), params)?;
     fft::istft_check_nola(&win.host_slice(), &layout)?;
     let input = materialize_one(x)?;
-    let value = match x.tape().ops().fft_istft(&input, &win, &params) {
+    let value = match x.tape().ops().fft_istft(&input, win, params) {
         Ok(v) => {
             verify_shape(v.shape(), layout.out_shape())?;
             v
@@ -512,8 +538,8 @@ pub fn istft<'t>(
     let id = x.tape().push_eager(
         Op::Istft {
             input: x.node_id(),
-            window: win,
-            params,
+            window: win.clone(),
+            params: params.clone(),
         },
         value,
     );

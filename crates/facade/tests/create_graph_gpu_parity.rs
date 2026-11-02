@@ -644,6 +644,27 @@ const CASES: &[Case] = &[
         run: run_conv3d_family_conv_transpose3d,
         reject: None,
     },
+    // 短時間フーリエ変換族（イシュー #3804・決定記録 §42/§63）。`fft_stft`／`fft_istft` は CUDA・Metal・ROCm で
+    // override されておらずホストへフォールバックし、随伴 Op（`StftAdjoint`／`IstftAdjoint`）もホスト関数
+    // なので H。構造に MatMul は無い。実機は未実測（#3857・#3859）。
+    Case {
+        name: "stft_family_stft",
+        family: "stft_family",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stft_family_stft,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "stft_family_istft",
+        family: "stft_family",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_stft_family_istft,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -1594,6 +1615,90 @@ fn run_conv3d_family_conv_transpose3d(tp: &Tapes) -> Outputs {
     run_conv3d_family_body(tp, true, [2, 3, 2, 3, 3], [3, 4, 2, 2, 2], 4)
 }
 
+/// STFT 族（#3804）の損失 `sum(y ⊙ y ⊙ c)`。`istft` は `[5, 5, 2]` のスペクトル、`stft` は長さ 16 の信号。
+fn stft_family_loss<'a>(
+    tape: &'a Tape,
+    p: &Var<'a>,
+    inverse: bool,
+) -> Result<Var<'a>, AutodiffError> {
+    let y = if inverse {
+        let x = p.reshape(&[5, 5, 2])?;
+        x.istft(
+            8,
+            None,
+            &fandhe_ai::IstftOptions::default().with_hop_length(2),
+        )?
+    } else {
+        p.stft(
+            8,
+            None,
+            &fandhe_ai::StftOptions::default().with_hop_length(2),
+        )?
+    };
+    let ys = y.to_tensor().shape().to_vec();
+    let coef: Vec<f32> = (0..ys.iter().product::<usize>())
+        .map(|i| 0.5 + ((i * 13 + 5) % 11) as f32 * 0.1)
+        .collect();
+    let c = tape.var_no_grad(&t(coef, &ys));
+    y.mul(&y)?.mul(&c)?.sum(None)
+}
+
+/// STFT 族（#3804）の共通本体。Q4 は同じ損失の `jvp_create_graph` の出力を孫テープで逆伝播する。
+fn run_stft_family_body(tp: &Tapes, inverse: bool, n: usize) -> Outputs {
+    let p0: Vec<f32> = (0..n)
+        .map(|i| (((i * 37 + 11) % 17) as f32 - 8.0) * 0.1)
+        .collect();
+    let dir: Vec<f32> = (0..n)
+        .map(|i| 0.6 - 0.23 * (i % 13) as f32 + 0.04 * (i % 5) as f32)
+        .collect();
+
+    let p = tp.parent.var(&t(p0, &[n]));
+    let loss = stft_family_loss(&tp.parent, &p, inverse).expect("forward");
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
+    let g = cg.grad(&p).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), &[n]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let pc = cg.child_var(&p).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, &[n]), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+/// 長さ 16 の信号（`n_fft = 8`・`hop = 2`・`center`）。
+fn run_stft_family_stft(tp: &Tapes) -> Outputs {
+    run_stft_family_body(tp, false, 16)
+}
+
+/// `[5, 5, 2]` のスペクトル（`n_fft = 8`・`hop = 2`・`center`）。
+fn run_stft_family_istft(tp: &Tapes) -> Outputs {
+    run_stft_family_body(tp, true, 50)
+}
+
 /// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
 /// 子テープは空のまま。
 fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
@@ -1814,6 +1919,7 @@ cuda_family_test!(
 );
 cuda_family_test!(create_graph_norm_reparam_cuda_matches_cpu, "norm_reparam");
 cuda_family_test!(create_graph_conv3d_family_cuda_matches_cpu, "conv3d_family");
+cuda_family_test!(create_graph_stft_family_cuda_matches_cpu, "stft_family");
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -1859,6 +1965,7 @@ metal_family_test!(
     create_graph_conv3d_family_metal_matches_cpu,
     "conv3d_family"
 );
+metal_family_test!(create_graph_stft_family_metal_matches_cpu, "stft_family");
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -1938,6 +2045,11 @@ fn loss_regression_cases_pass_cpu_against_cpu() {
 #[test]
 fn conv3d_family_cases_pass_cpu_against_cpu() {
     run_family("conv3d_family", None);
+}
+
+#[test]
+fn stft_family_cases_pass_cpu_against_cpu() {
+    run_family("stft_family", None);
 }
 
 #[test]

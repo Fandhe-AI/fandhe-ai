@@ -1644,3 +1644,46 @@ fn lstm_create_graph_via_facade() {
     // CPU で bit 一致が観測されても主張は REQ-2 に留める（`grad_exact = false`）。
     check_create_graph_family("lstm", &z, &[2, 8], lstm_loss, false, 0.02);
 }
+/// STFT 族の損失用の穏やかな重み（`weights` は添字の二乗で大きく振れるため飽和を避けて別に持つ）。
+fn stft_weights<'a>(tape: &'a Tape, shape: &[usize]) -> Var<'a> {
+    let n: usize = shape.iter().product();
+    let w = (0..n)
+        .map(|i| 0.6 + 0.4 * ((i as f32) * 0.9).sin())
+        .collect();
+    tape.var_no_grad(&t(w, shape))
+}
+
+/// `Stft`（`stft`。イシュー #3804・決定記録 §42・§63）。窓なし（矩形窓）・`center` 既定。二次形式の損失は中央差分が厳密になる（決定記録 §31.4）。
+fn stft_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let opts = fandhe_ai::StftOptions::default().with_hop_length(2);
+    let y = x.stft(8, None, &opts).unwrap();
+    let shape = y.value().shape().to_vec();
+    let w = stft_weights(tape, &shape);
+    y.mul(&y).unwrap().mul(&w).unwrap().sum(None).unwrap()
+}
+
+#[test]
+fn stft_create_graph_via_facade() {
+    let x0: Vec<f32> = (0..16)
+        .map(|i| ((i as f32) * 0.7).sin() * 0.8 + 0.1)
+        .collect();
+    // 随伴 Op はホスト計算のため CPU でも主張は REQ-2 に留める（`grad_exact = false`）。
+    check_create_graph_family("stft", &x0, &[16], stft_loss, false, 0.25);
+}
+
+/// `Istft`（`istft`。同上）。`[N, T, 2]` のスペクトルから信号を再構成する。
+fn istft_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let opts = fandhe_ai::IstftOptions::default().with_hop_length(2);
+    let y = x.istft(8, None, &opts).unwrap();
+    let shape = y.value().shape().to_vec();
+    let w = stft_weights(tape, &shape);
+    y.mul(&y).unwrap().mul(&w).unwrap().sum(None).unwrap()
+}
+
+#[test]
+fn istft_create_graph_via_facade() {
+    let x0: Vec<f32> = (0..50)
+        .map(|i| ((i as f32) * 0.37).cos() * 0.6 - 0.05)
+        .collect();
+    check_create_graph_family("istft", &x0, &[5, 5, 2], istft_loss, false, 0.25);
+}
