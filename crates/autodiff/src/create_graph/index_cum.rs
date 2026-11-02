@@ -20,8 +20,9 @@
 //! - `Scatter` は d_src が `gather`（`Overwrite` は last-writer マスクの
 //!   `where_cond`。`mul` を使わず `inf*0` を避ける）、d_input は `Add` なら恒等、
 //!   `Overwrite` なら `scatter(g, index, 0)`。
-//! - `Embedding` は `Gather`（dim 0）として再生し、cgrad は `scatter_add` の後に
-//!   `padding_idx` 行を `where_cond` で 0 にする。
+//! - `Embedding` は `Op::Embedding` として再生し（イシュー #3811・決定記録 §47・§71。
+//!   子テープ上の 1 階 VJP が行 `p` をマスクするため二階でも行・列 `p` が 0 になる）、
+//!   cgrad は `scatter_add` の後に `padding_idx` 行を `where_cond` で 0 にする。
 //! - `Cumsum` は **V3**: 構造は `flip → cumsum → flip`、ノードの前方値は 1 階と
 //!   同じホスト関数 `grad::cumsum_vjp_along`（lane ごとの f64 アキュムレータ）。
 
@@ -56,6 +57,17 @@ pub(super) fn replay_scatter<'c>(
         ScatterReduce::Overwrite => input.scatter(dim, index, src),
         _ => Err(invalid(format!("未知の ScatterReduce variant {reduce:?}"))),
     }
+}
+
+/// `Embedding` の写し。親 payload の展開済み index（`[N, D]`）をそのまま
+/// [`Var::embedding_expanded_index`] へ渡し、子テープ上に `Op::Embedding` を積む。
+/// 値は親の `gather(0, index)` と bit 一致する。
+pub(super) fn replay_embedding<'c>(
+    weight: &Var<'c>,
+    index: &Tensor<i32>,
+    padding_idx: Option<usize>,
+) -> Result<Var<'c>, AutodiffError> {
+    weight.embedding_expanded_index(index, padding_idx)
 }
 
 // ---------------------------------------------------------------------
@@ -220,6 +232,41 @@ mod tests {
             let b: Vec<u32> = want.iter().map(|v| v.to_bits()).collect();
             assert_eq!(a, b, "shape={shape:?} dim={dim}");
         }
+    }
+
+    /// `replay_embedding` の値が `gather(0, index)` と bit 一致し、Op タグが
+    /// `Op::Embedding` であること、不正入力が型付き `Err` になることを固定する（#3811）。
+    #[test]
+    fn replay_embedding_is_bit_identical_and_validates() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let w = tape.var(&Tensor::new(vec![0.1f32, -2.5, 3.0, 4.5, 1e-3, 7.0], &[3, 2]).unwrap());
+        let idx = Tensor::<i32>::new(vec![2, 2, 0, 1, 1, 1], &[3, 2]).unwrap();
+        let e = replay_embedding(&w, &idx, Some(1)).unwrap();
+        let g = w.gather(0, &idx).unwrap();
+        let bits = |v: &Var<'_>| -> Vec<u32> {
+            v.to_tensor()
+                .host_slice()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect()
+        };
+        assert_eq!(bits(&e), bits(&g));
+        assert!(matches!(
+            tape.nodes.borrow()[e.node_id().0].op,
+            crate::tape::Op::Embedding {
+                padding_idx: Some(1),
+                ..
+            }
+        ));
+        assert!(replay_embedding(&w, &idx, Some(3)).is_err());
+        let bad = Tensor::<i32>::new(vec![0, 0, 3, 3], &[2, 2]).unwrap();
+        assert!(replay_embedding(&w, &bad, None).is_err());
+        let neg = Tensor::<i32>::new(vec![0, 0, -1, 0], &[2, 2]).unwrap();
+        assert!(replay_embedding(&w, &neg, None).is_err());
+        let r1 = Tensor::<i32>::new(vec![0, 1], &[2]).unwrap();
+        assert!(replay_embedding(&w, &r1, None).is_err());
+        let wide = Tensor::<i32>::new(vec![0, 0, 0], &[1, 3]).unwrap();
+        assert!(replay_embedding(&w, &wide, None).is_err());
     }
 
     /// `ScatterReduce` は `#[non_exhaustive]` のため未知 variant は構築できない。

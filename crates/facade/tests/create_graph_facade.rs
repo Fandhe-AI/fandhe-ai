@@ -1455,6 +1455,67 @@ fn det_row_scaled_create_graph_via_facade() {
     assert_eq!(rej_child.leaf_count(), 0, "拒否後は child が空");
 }
 
+/// `embedding` の `padding_idx` の二階の意味論（イシュー #3811・決定記録 §47・§71）: facade 経由でも
+/// Hessian の行と列 `p` が 0 で対称、`hvp` が `v` の行 `p` に依存しない。
+#[test]
+fn embedding_padding_hvp_via_facade() {
+    fn build(tape: &fandhe_ai::Tape) -> (fandhe_ai::Var<'_>, fandhe_ai::Var<'_>) {
+        let w = tape.var(&t(
+            vec![0.5, -0.5, 1.0, 2.0, -1.5, 0.25, 0.75, -1.0],
+            &[4, 2],
+        ));
+        let ids = Tensor::<i32>::new(vec![1, 2, 1, 0, 3], &[5]).unwrap();
+        let y = w.embedding(&ids, Some(1)).unwrap();
+        let s = y.sum(None).unwrap();
+        let loss = y
+            .mul(&y)
+            .unwrap()
+            .mul(&y)
+            .unwrap()
+            .sum(None)
+            .unwrap()
+            .add(&s.mul(&s).unwrap())
+            .unwrap();
+        (w, loss)
+    }
+    let tape = fandhe_ai::tape();
+    let (w, loss) = build(&tape);
+    let h = vals(&tape.hessian(&loss, &w, &fandhe_ai::tape()).unwrap());
+    assert_eq!(h.len(), 64);
+    for j in 0..8 {
+        for i in 0..8 {
+            if (2..=3).contains(&j) || (2..=3).contains(&i) {
+                assert_eq!(h[j * 8 + i], 0.0, "H[{j}][{i}] は 0");
+            }
+            let (a, b) = (h[j * 8 + i] as f64, h[i * 8 + j] as f64);
+            assert!(
+                (a - b).abs() <= 1e-5 + 1e-3 * a.abs().max(b.abs()),
+                "対称性 {j},{i}"
+            );
+        }
+    }
+    assert!(h.iter().any(|v| v.abs() > 1e-3), "Hessian が自明にゼロ");
+
+    let hv = |v: Vec<f32>| {
+        let tape = fandhe_ai::tape();
+        let (w, loss) = build(&tape);
+        vals(
+            &tape
+                .hvp(&loss, &w, &t(v, &[4, 2]), &fandhe_ai::tape())
+                .unwrap(),
+        )
+    };
+    let v1: Vec<f32> = (0..8).map(|i| 0.1 * i as f32 - 0.3).collect();
+    let mut v2 = v1.clone();
+    v2[2] += 4.0;
+    v2[3] -= 6.0;
+    let (a, b) = (hv(v1), hv(v2));
+    assert_eq!(&a[2..4], &[0.0, 0.0]);
+    for (x, y) in a.iter().zip(&b) {
+        assert!((x - y).abs() <= 1e-5 + 1e-3 * x.abs().max(y.abs()));
+    }
+}
+
 #[test]
 fn rfft_create_graph_via_facade() {
     check_create_graph_family("rfft", &[0.5, -1.0, 0.25, 2.0], &[4], rfft_loss, true, 1e-2);

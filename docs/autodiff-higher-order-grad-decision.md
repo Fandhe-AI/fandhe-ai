@@ -3783,7 +3783,7 @@ PR は `Refs` にする。
 
 ### 47.0 位置づけ・承認根拠・境界・推奨
 
-- **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md`・閾値は変えない
+- **状態（#3811 で更新）**: 承認済み・**実装済み**（実装記録は §71。以下は承認前の設計記録として残す）。旧記述: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md`・閾値は変えない
 - **節番号**: `origin/main` の最終節は §45。並行する設計 PR（#3897 の §44、#3899 の §46）が使うため §47 とした
 - **基準**: `origin/main` の `0dc5fa6ff`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
 - **対象**: `Op::Embedding`（`padding_idx: Some(p)`）を含むグラフの `create_graph`（`hessian`・`hvp`・`jvp_create_graph` など）が返す二階の意味論。追跡表（`docs/compat-matrix-ari-tracker.md`）の項目 5
@@ -3855,7 +3855,7 @@ PR は `Refs` にする。
 
 - 公開状態: 未公開（公開型の変化なし）
 - `docs/compat-api-scope.md` の適用記録は承認後の実装 PR（#3811）で書く。文案: 「適用記録（イシュー #3811・親 #3738。承認: 承認の回答 URL）: Embedding の padding_idx を含むグラフの create_graph で、二階の行・列 padding_idx を 0 にし PyTorch と同じ意味論にした。公開名の追加なし」
-- [ ] `docs/compat-api-scope.md`（承認後の PR）
+- [x] `docs/compat-api-scope.md`（#3811 で適用記録を追記。§71）
 - [x] `docs/README.md` の索引
 - [x] 追跡表（項目 5 の設計記録セルへ §47 を追記）
 
@@ -5298,3 +5298,41 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らない。
 - スコープ外: `Inv`・`Solve`・`SlogdetLogAbsDet` の受理拡大（恒久化）、区分 (iii) の救済（V4）・S2 フォールバック、区分 (iv) の冪の見直し、実機 parity の実測（#3857・#3859・#3739）、`padding_idx`（#3811）、追跡表の項目 5 を閉じること（#3812）。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`Op` の payload・facade の公開名とシグネチャ・`AutodiffError` の variant・`supports_create_graph` の値・tolerance・baseline・`STAGE_BOUND_GUARD`・依存（`Cargo.toml`／`Cargo.lock`）・既存節の本文（§46.0 に状態 1 行、§46.7 のチェック欄を更新したのみ）。
+
+## 71. 実装記録（イシュー #3811・親 #3719 系。create_graph の意味論・Embedding の `padding_idx` の二階を承認形〈B1・PyTorch 準拠〉にする）
+
+### 71.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity は未実測）。設計は §47（#3738）で、本節はその実装記録。節番号は、main が §70 まで使い open PR も無かったため §71 を取った。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。書かれているのは「推奨どおり全論点承認」で、論点 4 は案 B（PyTorch 準拠）の B1（子テープの写しを `Op::Embedding` として再生）、`padding_idx: Some(p)` のとき `hessian`・`hvp`・`jvp_create_graph` の列 `p` の値が変わること、移行ノートに独立した行で書くこと。点 4（受入テストの参照はマスク付き有限差分だけ）と点 5（実機 parity は #3857・#3859）も推奨どおり。これ以上の承認は主張しない。
+- §25.3（Embedding を `Gather` として再生し二階が行 `p` を通る）は本節で**置き換わる**（§25 の本文は書き換えない）。
+
+### 71.1 実装したもの
+
+- `create_graph.rs` の `replay_op` の `Op::Embedding` の腕を `index_cum::replay_embedding` へ差し替え（従来は `get_mirror(weight).gather(0, &index)`）。子テープ上の写しが `Op::Embedding{padding_idx}` になり、子テープ上の 1 階 VJP（`grad.rs` の Embedding VJP、孫テープでは `index_cum::embedding_vjp`）が行 `p` をゼロ上書きする。二階は `M·S·L''·Sᵀ·M`（`M` は行 `p` のマスク）で、行と列 `p` が 0 の対称行列になる。手書きの二階の項は無く、孫テープ以降も同じ規約が自動で続く。1 階・`cg.grad` の値は bit 同一のまま。
+- `Var::embedding`（`var.rs`）を、公開側の検査部（rank・`padding_idx` 範囲・ids の添字範囲・`[N, D]` への展開）と、共有の非公開コア `embedding_core`（weight の実体化 → `gather_with_fallback` → 戻り shape 検証 → `push_eager(Op::Embedding)`）に分けた。公開経路の呼び出し列・引数・payload は変更前と同じ。
+- 展開済み index（`[N, D]`）を受ける `pub(crate)` の入口 `Var::embedding_expanded_index` を追加。§47.3 の方式 (2) を採用（`embedding_dim == 0` で ids を作り直せない問題と、親と同じテンソルを子テープに置ける利点のため）。子テープへ書く前・確保の前に rank 2・`padding_idx < num_embeddings`・index の rank 2 と列幅・全添字範囲を検査し、既存の `Shape(RankMismatch/ShapeMismatch)`／`InvalidArgument` で返す（A03。新しい variant は無い）。範囲外の `padding_idx` は従来どおり `validate_ancestors` が子テープへ書く前に `Err(Backward)` で拒否する。
+- 「各行が定数」の追加検査は入れなかった（多層防御としての任意項目。`Op::Embedding` の不変条件は forward の構築経路が保つ）。
+
+### 71.2 設計（§47）からの逸脱
+
+- なし（方式 (2) は §47.3 が #3811 に任せた選択）。`hvp` の rustdoc 中の「C² の範囲で `H·v`」の文言は変えていない。
+
+### 71.3 テスト
+
+- `crates/autodiff/tests/create_graph.rs`: `hessian_embedding_padding_idx_matches_finite_difference_of_first_order`（§47.4 が置き換えを指定した 1 本。承認済みの値の変化をちょうど検出する形だったため）を `hessian_embedding_padding_idx_matches_masked_finite_difference`（数値 Hessian の行と列 `p` を 0 にした参照。マスク前の列 `p` が非零であることの assert 付き。tolerance は不変）へ置き換え。追加: `hessian_embedding_padding_idx_is_symmetric`、`hvp_embedding_padding_row_is_zero_and_independent_of_padding_column`、`jvp_embedding_padding_ignores_tangent_on_padding_row`（現行規約の固定）、`jvp_create_graph_embedding_padding_matches_masked_reference`。他の既存テストは無変更で green。
+- 検出力の確認（手元）: `replay_op` を一時的に旧実装（`gather`）へ戻すと、置き換えた 1 本を含む新規 4 本が落ちる（`hessian_embedding_padding_idx_matches_masked_finite_difference`・`..._is_symmetric`・`hvp_...`・`jvp_create_graph_...`）。確認後に戻した。
+- `index_cum.rs` の単体: `replay_embedding_is_bit_identical_and_validates`（`gather(0, index)` と bit 一致・Op タグが `Op::Embedding`・範囲外 `padding_idx`／添字・rank／列幅不一致が `Err`）。
+- facade: `embedding_padding_hvp_via_facade`、`Tape::backward_create_graph` の doctest（1 階の行 `p` と二階の行 `p` が 0）、正ガード `backward_create_graph_embedding_padding_usage_doctest_is_present_and_compiled`（存在しない needle で違反が返る自己テスト付き。facade に反転対象の否定ガードは元から無かった）。
+- GPU parity: 族 `embedding_padding`（`embedding_padding_dup_ids`。`Route::K`〔`gather`／`scatter` は CUDA・Metal で override 済み〕・`Judge::Strict`・`NoMatMul`・reject なし・Q4 の孫テープ再生を比較）、`create_graph_embedding_padding_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査。実機は未実測。
+
+### 71.4 PyTorch のソース確認と forward-mode の差
+
+- PyTorch v2.14.0 のソースを読んだ: `derivatives.yaml` の `embedding`（weight 勾配は `embedding_backward`、行 `p` をマスク）、`embedding_dense_backward` の `grad_output` の二階 `embedding_dense_double_backward_symint`（`index_select` の後に `indices == padding_idx` を 0 に埋める。式で `Sᵀ·M`）。reverse-over-reverse の二階は `M·S·L''·Sᵀ·M` で B1 と一致する（ソース読解。PyTorch での実測は未実施。torch は使えない）。
+- 新しく分かったこと: `embedding` は `result: auto_linear` なので、PyTorch の forward-mode（`torch.func.jvp`）は forward 関数をそのまま接ベクトルに当て、**行 `p` の接線も伝わる**と読める。fandhe の `jvp`／`jacfwd` は double-VJP 法で行 `p` の接線を落とす（§47.11）。`torch.func.hvp`（forward-over-reverse）も列 `p` が非零の非対称な値になりうる。本 PR は `jvp` を変えない（§47.15 で forward-mode は範囲外）。B1 が合わせるのは reverse-over-reverse（`torch.autograd.grad(create_graph=True)`・`torch.autograd.functional.hessian`）の意味論。`jvp` の規約を変えるかは別の承認事項として所有者へ報告する。
+
+### 71.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、#3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らない。ROCm は対象外。
+- スコープ外: `EmbeddingBag` の `padding_idx` の二階（create_graph の対象外のまま）、forward-mode AD の新設、PyTorch 実測ハーネス・fixture（§47.15）、追跡表の項目 5 を閉じること（#3812）。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`Op` の variant と payload・`supports_create_graph` の値・`AutodiffError` の variant・facade の公開名とシグネチャ・`jvp`／`jacfwd` の値・`padding_idx: None` の二階・tolerance・baseline・依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・`docs/spec`・既存節の本文（§47.0 の状態行と §47.7 のチェック欄を除く）。

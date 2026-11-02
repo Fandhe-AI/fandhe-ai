@@ -3669,11 +3669,127 @@ fn hessian_embedding_matches_finite_difference() {
     check_poly_hessian(build_embedding_plain, &spaced(8), &[8]);
 }
 
+/// 行 `padding_idx`（=1。`[4, 2]` の平坦添字 {2, 3}）の行と列を 0 にする（B1。
+/// 決定記録 §47・§71。二階でも行 `p` は定数として扱う PyTorch の double backward 規約）。
+fn mask_padding_row(h: &mut [Vec<f64>]) {
+    for (j, row) in h.iter_mut().enumerate() {
+        for (i, v) in row.iter_mut().enumerate() {
+            if (2..=3).contains(&j) || (2..=3).contains(&i) {
+                *v = 0.0;
+            }
+        }
+    }
+}
+
 #[test]
-fn hessian_embedding_padding_idx_matches_finite_difference_of_first_order() {
-    // 1 階勾配関数（行 padding_idx は 0 固定）を有限差分した値と一致する。
-    // PyTorch の double backward とは行 p の混合二階項で異なりうる（決定記録 §25）。
-    check_poly_hessian(build_embedding_padding, &spaced(8), &[8]);
+fn hessian_embedding_padding_idx_matches_masked_finite_difference() {
+    // 承認形（#3767 論点 4・案 B1）: 数値 Hessian（1 階勾配関数の有限差分）の行と列 p を 0 にした
+    // 参照と一致する。旧実装（Gather 再生）は列 p が非零で、このテスト構成では落ちる。
+    // tolerance は変えない。
+    let x0 = spaced(8);
+    let mut numeric = finite_diff_hessian(build_embedding_padding, &x0, &[8], 1e-1);
+    assert!(
+        numeric
+            .iter()
+            .any(|row| (2..=3).any(|i| row[i].abs() > 1e-3)),
+        "マスク前の数値 Hessian の列 p が非零でない（検出力がない）"
+    );
+    mask_padding_row(&mut numeric);
+    let analytic = analytic_hessian(build_embedding_padding, &x0, &[8]);
+    assert_hessian_close(&analytic, &numeric);
+    assert!(analytic.iter().flatten().any(|v| v.abs() > 1e-3));
+}
+
+#[test]
+fn hessian_embedding_padding_idx_is_symmetric() {
+    let analytic = analytic_hessian(build_embedding_padding, &spaced(8), &[8]);
+    for j in 0..8 {
+        for i in 0..8 {
+            assert!(
+                common::req2_close(analytic[j][i], analytic[i][j]),
+                "非対称: H[{j}][{i}]={} H[{i}][{j}]={}",
+                analytic[j][i],
+                analytic[i][j]
+            );
+        }
+    }
+}
+
+#[test]
+fn hvp_embedding_padding_row_is_zero_and_independent_of_padding_column() {
+    let hv = |v: Vec<f32>| -> Vec<f32> {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(spaced(8), &[8]));
+        let loss = build_embedding_padding(&tape, &x).unwrap();
+        let out =
+            fandhe_ai_autodiff::functional_ops::hvp(&tape, &loss, &x, &t(v, &[8]), &child).unwrap();
+        out.host_slice().into_owned()
+    };
+    let v1: Vec<f32> = (0..8).map(|i| 0.1 * (i as f32) - 0.3).collect();
+    let mut v2 = v1.clone();
+    v2[2] += 5.0;
+    v2[3] -= 7.0;
+    let (a, b) = (hv(v1), hv(v2));
+    assert_eq!(a[2], 0.0);
+    assert_eq!(a[3], 0.0);
+    // 列 p（v の行 p 成分）を変えても Hv は変わらない。
+    for k in 0..8 {
+        assert!(common::req2_close(a[k] as f64, b[k] as f64), "k={k}");
+    }
+}
+
+#[test]
+fn jvp_embedding_padding_ignores_tangent_on_padding_row() {
+    // 現行規約の固定: jvp（double-VJP 法）は行 p の接線を落とす（出力の ids==p 行は 0）。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let w = tape.var(&t(spaced(8), &[4, 2]));
+    let ids = idx_t(vec![1, 3], &[2]);
+    let y = w.embedding(&ids, Some(1)).unwrap();
+    let mut tan = vec![0.0f32; 8];
+    tan[2] = 1.0;
+    tan[3] = 2.0;
+    let jv =
+        fandhe_ai_autodiff::functional_ops::jvp(&tape, &y, &w, &t(tan, &[4, 2]), &child).unwrap();
+    let d = jv.host_slice().into_owned();
+    assert_eq!(&d[0..2], &[0.0, 0.0]);
+}
+
+#[test]
+fn jvp_create_graph_embedding_padding_matches_masked_reference() {
+    let x0 = spaced(8);
+    let tangent: Vec<f32> = (0..8)
+        .map(|i| ((i * 3 + 1) % 7) as f32 * 0.1 - 0.3)
+        .collect();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.clone(), &[8]));
+    let loss = build_embedding_padding(&tape, &x).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &x,
+        &t(tangent.clone(), &[8]),
+        &child,
+        &grand,
+    )
+    .unwrap();
+    let out = res.output();
+    let gx = res.child_var(&x).unwrap().unwrap();
+    let grads = grand.backward(&out).unwrap();
+    let ht = grads.get(&gx).unwrap().unwrap();
+    // 参照: マスク付き数値 Hessian · tangent。
+    let mut numeric = finite_diff_hessian(build_embedding_padding, &x0, &[8], 1e-1);
+    mask_padding_row(&mut numeric);
+    for j in 0..8 {
+        let want: f64 = (0..8).map(|i| numeric[j][i] * tangent[i] as f64).sum();
+        let got = ht.get(&[j]).unwrap() as f64;
+        assert!(common::req2_close(got, want), "j={j} got={got} want={want}");
+    }
+    assert_eq!(ht.get(&[2]).unwrap(), 0.0);
+    assert_eq!(ht.get(&[3]).unwrap(), 0.0);
 }
 
 #[test]
