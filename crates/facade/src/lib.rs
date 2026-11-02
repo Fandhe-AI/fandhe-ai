@@ -914,7 +914,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `var`・`std`・`norm_l1`・
-    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）で対象になった。
+    /// `norm_l2`・`norm_p` は §33・§52（#3791）、`logsumexp`／`nansum`／`nanmean` は §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1070,6 +1070,34 @@ impl Tape {
     /// # }
     /// ```
     ///
+    /// 構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d/2d/3d`（#3793）も
+    /// 二階へ進める。どれも入力について線形なので、素の `sum` の Hessian は 0 で、二階は下流の非線形から流れる。
+    /// 次は `interpolate`（`Nearest` の 2 倍アップサンプル）の例で、損失 `Σ y²` の Hessian の対角は
+    /// `2 ×（その入力が複製される回数）` = 4。`dropout` は写しが記録済みのマスクを固定して再生し、
+    /// グローバル乱数を消費しない。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, InterpolateMode, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![0.5_f32, -1.0], &[1, 1, 2])?);
+    /// let y = x.interpolate(&[4], InterpolateMode::Nearest)?;
+    /// let loss = y.mul(&y)?.sum(None)?;
+    /// let cg = t.backward_create_graph(&loss, &child)?;
+    /// let g = cg.grad(&x)?.unwrap();
+    /// let xc = cg.child_var(&x)?.unwrap();
+    /// for i in 0..2 {
+    ///     let gi = g.narrow(2, i, 1)?.sum(None)?;
+    ///     let row = child.backward(&gi)?.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
+    ///     assert!((row[i] - 4.0).abs() < 1e-5);
+    ///     assert!(row[1 - i].abs() < 1e-6);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// 損失の回帰系（`kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss`。#3798）も二階へ進める。
     /// 次は `poisson_nll_loss`（既定の `log_input = true`・`Reduction::Sum`）の例で、損失 `Σ (exp(x) − t·x)` の
     /// Hessian は `diag(exp(x))` なので、固定方向 `v` との積 `H v` は `exp(x) ⊙ v`。
@@ -1200,7 +1228,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1307,7 +1335,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1371,7 +1399,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1473,7 +1501,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
@@ -1558,7 +1586,7 @@ impl Tape {
     /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
     /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。選択縮約の `kthvalue`・`median`・`quantile` は
     /// §34（#3790）、`max`／`min`／`amax`／`amin` は §34（#3789）、統計縮約の `logsumexp`／`nansum`／`nanmean` は
-    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）で対象になった。
+    /// §33・§51（#3792）、損失の `kl_div_loss`・`poisson_nll_loss`・`gaussian_nll_loss` は §39・§53（#3798）、損失の `bce_loss`・`bce_with_logits_loss`（`_with`）・`soft_margin_loss`・`sigmoid_focal_loss`・`margin_ranking_loss`・`hinge_embedding_loss` は §39・§54（#3799）、損失の `cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss` は §40・§55（#3800）、構造変換の `dropout`（`dropout2d`・`alpha_dropout` を含む）・`interpolate`・`max_unpool1d`/`max_unpool2d`/`max_unpool3d` は §35・§56（#3793）で対象になった。
     /// `Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```

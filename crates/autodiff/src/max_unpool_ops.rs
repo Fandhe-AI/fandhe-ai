@@ -23,7 +23,8 @@
 //!
 //! **数値契約**: 算術を含まないコピーなので値は入力要素と bit 一致（NaN／inf も保存）。重複索引の
 //! forward は `ScatterReduce::Overwrite` の決定的契約（row-major 走査で最後の書き手が残る。PyTorch の
-//! 重複索引時の勝者は未規定〈実測では書き手により異なる〉）。高階微分（`create_graph`）・activation
+//! 重複索引時の勝者は未規定〈実測では書き手により異なる〉）。高階微分（`create_graph`）は
+//! イシュー #3793（決定記録 §35/§56）で対象になった（`replay_max_unpool`）。activation
 //! checkpoint・f64 経路は対象外。`N = 0`／`C = 0` は受理して空出力を返す（PyTorch は `C = 0` を拒否）。
 
 use fandhe_ai_tensor_core::max_unpool::{MaxUnpoolLayout, max_unpool_layout};
@@ -68,13 +69,27 @@ fn max_unpool_impl<'t>(
         }
     }
 
+    scatter_and_push(input, idx_c, &in_shape, &out_shape, flat_in, flat_out)
+}
+
+/// 共通本体の後半（③〜⑤: scatter→`Op::MaxUnpool` を 1 ノード記録）。索引の範囲検査は呼び出し側が
+/// 済ませている前提。公開入口（[`max_unpool_impl`]）と `create_graph` の写し
+/// （`replay_max_unpool`）が共有する。
+fn scatter_and_push<'t>(
+    input: &Var<'t>,
+    idx_c: Tensor<i32>,
+    in_shape: &[usize],
+    out_shape: &[usize],
+    flat_in: [usize; 2],
+    flat_out: [usize; 2],
+) -> Result<Var<'t>, AutodiffError> {
     let x = {
         let nodes = input.tape().nodes.borrow();
         materialize_fallible(&nodes, input.tape().ops(), input.node_id())?.clone()
     };
     let value = if flat_in[0] == 0 {
         // 空バッチ／空チャンネル: scatter を呼ばず空テンソルを直接返す。
-        Tensor::zeros(&out_shape).map_err(AutodiffError::Shape)?
+        Tensor::zeros(out_shape).map_err(AutodiffError::Shape)?
     } else {
         let x_flat = x
             .contiguous()
@@ -91,10 +106,10 @@ fn max_unpool_impl<'t>(
             ScatterReduce::Overwrite,
             &flat_out,
         )?
-        .reshape(&out_shape)
+        .reshape(out_shape)
         .map_err(AutodiffError::Shape)?
     };
-    let index_record = idx_c.reshape(&in_shape).map_err(AutodiffError::Shape)?;
+    let index_record = idx_c.reshape(in_shape).map_err(AutodiffError::Shape)?;
     let id = input.tape().push_eager(
         Op::MaxUnpool {
             input: input.node_id(),
@@ -103,6 +118,56 @@ fn max_unpool_impl<'t>(
         value,
     );
     Ok(Var::from_raw(input.tape(), id))
+}
+
+/// `create_graph` の写し（`create_graph/structural.rs` の `replay_op` 腕から呼ばれる。イシュー
+/// #3793・決定記録 §35/§56）。親ノードが記録した `index` と出力 shape（`out_shape`）をそのまま
+/// 使い、公開入口のカーネルサイズ・stride 解決は迂回する。shape 整合と索引の範囲は子テープへ
+/// 書く前に再検査する（REQ-8: 手動境界検査を省略しない）。
+pub(crate) fn replay_max_unpool<'t>(
+    input: &Var<'t>,
+    index: &Tensor<i32>,
+    out_shape: &[usize],
+) -> Result<Var<'t>, AutodiffError> {
+    let in_shape = input.shape();
+    if !(3..=5).contains(&in_shape.len())
+        || out_shape.len() != in_shape.len()
+        || in_shape[..2] != out_shape[..2]
+        || index.shape() != in_shape.as_slice()
+    {
+        return Err(AutodiffError::Backward(format!(
+            "create_graph: MaxUnpool の写し: shape が整合しない（input={in_shape:?}, \
+             out={out_shape:?}, index={:?}。内部契約違反）",
+            index.shape()
+        )));
+    }
+    let ovf = || AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow);
+    let nc = in_shape[0].checked_mul(in_shape[1]).ok_or_else(ovf)?;
+    let in_plane = in_shape[2..]
+        .iter()
+        .try_fold(1usize, |a, &d| a.checked_mul(d))
+        .ok_or_else(ovf)?;
+    let out_plane = out_shape[2..]
+        .iter()
+        .try_fold(1usize, |a, &d| a.checked_mul(d))
+        .ok_or_else(ovf)?;
+    let idx_c = index.contiguous();
+    for v in idx_c.host_slice().iter() {
+        let vi = i64::from(*v);
+        if vi < 0 || (vi as usize) >= out_plane {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: MaxUnpool の写し: index の値 {vi} が [0, {out_plane}) の範囲外"
+            )));
+        }
+    }
+    scatter_and_push(
+        input,
+        idx_c,
+        &in_shape,
+        out_shape,
+        [nc, in_plane],
+        [nc, out_plane],
+    )
 }
 
 /// 1D max unpooling（`F.max_unpool1d` 相当）。`input`: `[N, C, L]`・`indices`: 同 shape の

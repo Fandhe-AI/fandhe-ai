@@ -1361,3 +1361,110 @@ fn create_graph_extended_ops_cuda_matches_cpu() {
 fn create_graph_extended_ops_metal_matches_cpu() {
     gpu_extended_ops_match_cpu(Device::Metal);
 }
+// --- 構造変換 3 Op（イシュー #3793・決定記録 §35/§56） ----------------------------------
+
+/// グローバル RNG を使う `dropout` の再現（`manual_seed` → マスク抽選）をテスト間で直列化する。
+fn rng_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 線形 Op の出力 `y` を二乗和へ流して `H v ≠ 0` にする（素の `sum(op(x))` は Hessian が 0）。
+fn quad_loss<'a>(tape: &'a Tape, y: &Var<'a>) -> Var<'a> {
+    let shape = y.value().shape().to_vec();
+    let w = weights(tape, &shape);
+    y.mul(y).unwrap().mul(&w).unwrap().sum(None).unwrap()
+}
+
+fn dropout_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    // 呼び出しのたびに同じマスクを引く（`check_create_graph_family` は build を複数回呼ぶ）。
+    fandhe_ai::manual_seed(20_261_101);
+    quad_loss(tape, &x.dropout(0.4, true).unwrap())
+}
+
+fn interpolate_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x
+        .interpolate(
+            &[3, 4],
+            fandhe_ai::InterpolateMode::Bilinear {
+                align_corners: false,
+            },
+        )
+        .unwrap();
+    quad_loss(tape, &y)
+}
+
+fn max_unpool2d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let (p, idx) = x
+        .max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1], false)
+        .unwrap();
+    let y = p
+        .max_unpool2d(&idx, [2, 2], Some([1, 1]), [0, 0], None)
+        .unwrap();
+    quad_loss(tape, &y)
+}
+
+#[test]
+fn dropout_create_graph_via_facade() {
+    let _g = rng_lock();
+    let x = [
+        0.3, -0.7, 0.9, 0.2, -0.4, 0.8, 0.5, -0.1, 0.6, -0.9, 0.4, 0.7,
+    ];
+    // drop 位置の符号付きゼロは `==` で同一視されるが、本ケースの上流は有限・正負混在でも
+    // 1 階 `g·mask` と bit 一致する（drop 位置は `g·0` が ±0。`to_bits` ではなく値で比べる箇所は
+    // autodiff 側 `create_graph_structural.rs` が担う）。ここでは REQ-2 判定で突合する。
+    check_create_graph_family("dropout", &x, &[3, 4], dropout_loss, false, 1.0);
+}
+
+#[test]
+fn interpolate_create_graph_via_facade() {
+    let x = [
+        0.3, -0.7, 0.9, 0.2, -0.4, 0.8, 0.5, -0.1, 0.6, -0.9, 0.4, 0.7,
+    ];
+    check_create_graph_family(
+        "interpolate",
+        &x,
+        &[1, 2, 2, 3],
+        interpolate_loss,
+        true,
+        1.0,
+    );
+}
+
+#[test]
+fn max_unpool2d_create_graph_via_facade() {
+    // 勝者が入れ替わらない間隔（0.3 以上）の入力。
+    let x = [0.1, 0.9, 0.4, 1.3, 0.7, 0.2, 1.1, 0.5, 1.6, 0.3, 0.8, 1.9];
+    check_create_graph_family(
+        "max_unpool2d",
+        &x,
+        &[1, 1, 3, 4],
+        max_unpool2d_loss,
+        true,
+        0.05,
+    );
+}
+
+/// `Tape::backward_create_graph` の facade 経由で、ドキュメントの Hessian 例（`Nearest` の
+/// アップサンプル: 対角 = 2·（コピー回数））が成り立つ。
+#[test]
+fn interpolate_nearest_hessian_diagonal_is_twice_copy_count() {
+    let t0 = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = t0.var(&t(vec![0.5, -1.0], &[1, 1, 2]));
+    let y = x
+        .interpolate(&[4], fandhe_ai::InterpolateMode::Nearest)
+        .unwrap();
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let cg = t0.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    let xc = cg.child_var(&x).unwrap().unwrap();
+    for i in 0..2 {
+        let gi = g.narrow(2, i, 1).unwrap().sum(None).unwrap();
+        let h = child.backward(&gi).unwrap();
+        let row = vals(h.get(&xc).unwrap().unwrap());
+        // 各入力は 2 回コピーされる: d²/dx² Σ y² = 2·2 = 4。
+        assert!((row[i] - 4.0).abs() < 1e-5, "{row:?}");
+        assert!(row[1 - i].abs() < 1e-6, "{row:?}");
+    }
+}

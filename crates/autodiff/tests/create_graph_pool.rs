@@ -9,7 +9,8 @@
 //! - 平均系の値が 1 階と bit 一致すること（f32 逐次和では桁落ちする打ち消し入力）。
 //! - 1 階・`cg.grad`・二階・孫テープ（`jvp_create_graph`）の 3 段がすべて有限で、方向微分が独立な
 //!   中央差分と一致すること。
-//! - 隣接する未対応 Op（`MaxUnpool`）は fail-closed のままで `child` が空に保たれること。
+//! - `MaxUnpool` はイシュー #3793 で対象になり、プーリングと組み合わせても成功すること
+//!   （隣接する fail-closed Op の拒否は `create_graph_structural.rs`）。
 
 #![allow(clippy::needless_range_loop)]
 
@@ -631,10 +632,10 @@ fn jvp_create_graph_through_pooling_matches_directional_derivative() {
     );
 }
 
-// --- fail-closed: MaxUnpool は未対応のまま -------------------------------------------
+// --- MaxUnpool はイシュー #3793 で対象になった（プーリングと組み合わせても成功する） ------------
 
 #[test]
-fn create_graph_still_rejects_max_unpool_after_pooling() {
+fn create_graph_accepts_max_unpool_after_pooling() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(distinct(16), &[1, 1, 4, 4]));
@@ -643,9 +644,11 @@ fn create_graph_still_rejects_max_unpool_after_pooling() {
         .unwrap();
     let up = max_unpool2d(&y, &idx, [2, 2], Some([2, 2]), [0, 0], None).unwrap();
     let loss = up.sum(None).unwrap();
-    let err = tape
+    let cg = tape
         .backward_create_graph(&loss, &child)
-        .expect_err("MaxUnpool は fail-closed で拒否されるはず");
-    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
-    assert!(child.is_empty());
+        .expect("MaxUnpool は #3793 で create_graph 対象");
+    let plain = tape.backward(&loss).unwrap();
+    let a = dense(cg.first_order().get(&x).unwrap().expect("x は到達"));
+    let b = dense(plain.get(&x).unwrap().expect("x は到達"));
+    assert_eq!(bits(&a), bits(&b));
 }
