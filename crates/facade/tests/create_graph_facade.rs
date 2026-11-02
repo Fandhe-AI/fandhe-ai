@@ -2226,3 +2226,459 @@ fn batch_norm_prescaled_create_graph_via_facade() {
     ));
     assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
 }
+// --- 対象 Op 一覧の facade 経由の固定（イシュー #3812・決定記録 §72） ------------------------------------
+//
+// `Op::supports_create_graph` が受理する Op のうち、上の族別テストに facade 挙動テストが無かったものを足す。
+// 検出の正ガードは `api_surface.rs::create_graph_supported_op_set_matches_approved_list`
+// （対象集合そのもの）と `create_graph_facade_coverage_map_matches_supported_set`（各 Op がどの
+// テストで固定されるかの対応表。表が指すテスト名は本ファイルに実在する必要がある）。
+// 非線形の包み（tanh／要素積）で `H v ≠ 0` にする規則は上と同じ。tolerance は新設・緩和しない。
+
+const BX: [f32; 6] = [0.5, 1.1, -0.6, 0.2, -1.3, 0.8];
+const BX_POS: [f32; 6] = [0.5, 1.1, 0.6, 0.2, 1.3, 0.8];
+
+fn relu_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.relu())
+}
+fn exp_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.exp())
+}
+fn sigmoid_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.sigmoid())
+}
+fn mean_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.tanh().mean(Some(1)).unwrap())
+}
+fn reshape_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.reshape(&[3, 2]).unwrap())
+}
+fn broadcast_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.broadcast_to(&[2, 2, 3]).unwrap())
+}
+fn transpose_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.transpose(0, 1).unwrap())
+}
+fn permute_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.permute(&[1, 0]).unwrap())
+}
+fn narrow_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.narrow(1, 0, 2).unwrap())
+}
+fn concat_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let c = Var::cat(&[x.tanh(), x.mul(x).unwrap()], 0).unwrap();
+    quad_loss(tape, &c)
+}
+fn where_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let cond =
+        Tensor::<bool>::new(vec![true, false, true, false, false, true], &[2, 3]).expect("cond");
+    let y = Var::where_cond(&cond, &x.tanh(), &x.mul(x).unwrap()).unwrap();
+    quad_loss(tape, &y)
+}
+
+/// 基本 Op（要素式・縮約・形状・構造変換。`Transpose`／`Permute`／`Narrow`／`Concat`／`Where`／
+/// `BroadcastTo` は決定記録 §21・#2062 の無条件対象）が facade 経由で二階まで通る。
+#[test]
+fn basic_and_structure_ops_create_graph_via_facade() {
+    let cases: [(&str, Build); 11] = [
+        ("relu", relu_loss),
+        ("exp", exp_loss),
+        ("sigmoid", sigmoid_loss),
+        ("mean", mean_loss),
+        ("reshape", reshape_loss),
+        ("broadcast_to", broadcast_loss),
+        ("transpose", transpose_loss),
+        ("permute", permute_loss),
+        ("narrow", narrow_loss),
+        ("concat", concat_loss),
+        ("where", where_loss),
+    ];
+    for (label, build) in cases {
+        check_create_graph_family(label, &BX, &[2, 3], build, false, 1e-2);
+    }
+}
+
+fn conv_transpose2d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(vec![0.5, -0.3, 0.2, 0.8], &[1, 1, 2, 2]));
+    x.conv_transpose2d(&w, None, [1, 1], [0, 0], [0, 0], [1, 1], 1)
+        .unwrap()
+        .tanh()
+        .sum(None)
+        .unwrap()
+}
+
+/// `ConvTranspose2d`（§21・§23。`Conv2d` は `conv2d_create_graph_via_facade`）。
+#[test]
+fn conv_transpose2d_create_graph_via_facade() {
+    check_create_graph_family(
+        "conv_transpose2d",
+        &CONV_X,
+        &[1, 1, 3, 3],
+        conv_transpose2d_loss,
+        false,
+        1e-2,
+    );
+}
+
+fn scatter_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let idx = Tensor::<i32>::new(vec![2, 0, 1, 2], &[2, 2]).expect("index");
+    let src = x.narrow(1, 0, 2).unwrap().tanh();
+    quad_loss(tape, &x.tanh().scatter(1, &idx, &src).unwrap())
+}
+fn sort_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.sort(1, false).unwrap().0)
+}
+fn topk_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.topk(2, 1, true).unwrap().0)
+}
+fn cummax_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.cummax(1).unwrap().0)
+}
+fn cummin_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.cummin(1).unwrap().0)
+}
+fn embedding_loss<'a>(tape: &'a Tape, w: &Var<'a>) -> Var<'a> {
+    let ids = Tensor::<i32>::new(vec![0, 2, 2, 1], &[4]).expect("ids");
+    quad_loss(tape, &w.embedding(&ids, None).unwrap())
+}
+
+/// 索引・選択系（`Scatter`／`Sort`／`Topk`／`Cummax`／`Cummin`／`Embedding`〔`padding_idx: None`〕。§25）。
+#[test]
+fn index_select_ops_create_graph_via_facade() {
+    let cases: [(&str, Build, &[usize]); 6] = [
+        ("scatter", scatter_loss, &[2, 3]),
+        ("sort", sort_loss, &[2, 3]),
+        ("topk", topk_loss, &[2, 3]),
+        ("cummax", cummax_loss, &[2, 3]),
+        ("cummin", cummin_loss, &[2, 3]),
+        ("embedding", embedding_loss, &[3, 2]),
+    ];
+    for (label, build, shape) in cases {
+        check_create_graph_family(label, &BX, shape, build, false, 1e-2);
+    }
+}
+
+/// 値がすべて異なる 12 要素（最大値の入れ替わりを避ける）。
+fn pool3d_x() -> Vec<f32> {
+    (0..12).map(|i| ((i * 7) % 13) as f32 * 0.1).collect()
+}
+fn max_pool3d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let (y, _) = x
+        .max_pool3d([2, 2, 2], Some([1, 1, 1]), [0, 0, 0], [1, 1, 1], false)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+fn avg_pool3d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.avg_pool3d([2, 2, 2], Some([1, 1, 1]), [0, 0, 0], false, true)
+        .unwrap()
+        .tanh()
+        .sum(None)
+        .unwrap()
+}
+fn adaptive_avg_pool2d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.adaptive_avg_pool2d([2, 2])
+        .unwrap()
+        .tanh()
+        .sum(None)
+        .unwrap()
+}
+fn unfold_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.unfold([2, 2], [1, 1], [0, 0], [1, 1]).unwrap())
+}
+fn fold_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(
+        tape,
+        &x.fold([3, 3], [2, 2], [1, 1], [0, 0], [1, 1]).unwrap(),
+    )
+}
+fn pad_mode_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(
+        tape,
+        &x.pad_with_mode(&[(1, 1), (1, 0)], fandhe_ai::PadMode::Reflect)
+            .unwrap(),
+    )
+}
+
+/// プーリング 3D・適応平均・`unfold`／`fold`・モード付き pad（§29・§38）。
+#[test]
+fn pool3d_fold_padmode_ops_create_graph_via_facade() {
+    check_create_graph_family(
+        "max_pool3d",
+        &pool3d_x(),
+        &[1, 1, 2, 2, 3],
+        max_pool3d_loss,
+        false,
+        1e-2,
+    );
+    check_create_graph_family(
+        "avg_pool3d",
+        &pool3d_x(),
+        &[1, 1, 2, 2, 3],
+        avg_pool3d_loss,
+        false,
+        1e-2,
+    );
+    check_create_graph_family(
+        "adaptive_avg_pool2d",
+        &POOL_X,
+        &[1, 1, 3, 3],
+        adaptive_avg_pool2d_loss,
+        false,
+        1e-2,
+    );
+    check_create_graph_family("unfold", &POOL_X, &[1, 1, 3, 3], unfold_loss, false, 1e-2);
+    let fold_x: Vec<f32> = (0..16)
+        .map(|i| ((i * 5 + 3) % 11) as f32 * 0.1 - 0.4)
+        .collect();
+    check_create_graph_family("fold", &fold_x, &[1, 4, 4], fold_loss, false, 1e-2);
+    check_create_graph_family("pad_mode", &BX, &[2, 3], pad_mode_loss, false, 1e-2);
+}
+
+fn fft_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.fft(None, None, FftNorm::Backward).unwrap())
+}
+fn ifft_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.ifft(None, None, FftNorm::Backward).unwrap())
+}
+fn irfft_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.irfft(None, None, FftNorm::Backward).unwrap())
+}
+
+/// 複素 FFT（`Fft`・`Ifft`）と実数逆 FFT（`Irfft`。§30）。複素入力は末尾次元 2。
+#[test]
+fn fft_family_create_graph_via_facade() {
+    let c: Vec<f32> = (0..8)
+        .map(|i| ((i * 3 + 1) % 7) as f32 * 0.3 - 0.8)
+        .collect();
+    check_create_graph_family("fft", &c, &[4, 2], fft_loss, false, 1e-2);
+    check_create_graph_family("ifft", &c, &[4, 2], ifft_loss, false, 1e-2);
+    check_create_graph_family("irfft", &c[..6], &[3, 2], irfft_loss, false, 1e-2);
+}
+
+fn solve_loss<'a>(tape: &'a Tape, z: &Var<'a>) -> Var<'a> {
+    let a = z.narrow(0, 0, 4).unwrap().reshape(&[2, 2]).unwrap();
+    let b = z.narrow(0, 4, 2).unwrap().reshape(&[2, 1]).unwrap();
+    quad_loss(tape, &a.solve(&b).unwrap())
+}
+fn slogdet_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let l = x.slogdet().unwrap().logabsdet;
+    l.mul(&l).unwrap()
+}
+
+/// `Solve`（A と B の混合二階）と `SlogdetLogAbsDet`（§30。`Inv` は上の `inv_create_graph_via_facade`）。
+#[test]
+fn solve_slogdet_create_graph_via_facade() {
+    let z = [2.0, 0.5, 0.3, 1.5, 0.7, -0.4];
+    check_create_graph_family("solve", &z, &[6], solve_loss, false, 1e-2);
+    check_create_graph_family("slogdet", &INV_X, &[2, 2], slogdet_loss, false, 1e-2);
+}
+
+fn l1_loss_at<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let target = tape.var_no_grad(&t(vec![0.0; 6], &[2, 3]));
+    x.tanh().l1_loss(&target, Reduction::Mean).unwrap()
+}
+fn soft_margin_loss_at<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = t(vec![1.0, -1.0, 1.0, -1.0, -1.0, 1.0], &[2, 3]);
+    x.soft_margin_loss(&y, Reduction::Mean).unwrap()
+}
+fn hinge_embedding_loss_at<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = t(vec![1.0, -1.0, 1.0, -1.0, -1.0, 1.0], &[2, 3]);
+    x.tanh()
+        .hinge_embedding_loss(&y, 1.0, Reduction::Mean)
+        .unwrap()
+}
+
+/// 要素式損失の残り（`L1Loss`・`SoftMarginLoss`・`HingeEmbeddingLoss`。§26・§39）。
+#[test]
+fn elementwise_margin_losses_create_graph_via_facade() {
+    check_create_graph_family("l1_loss", &BX, &[2, 3], l1_loss_at, false, 1e-2);
+    check_create_graph_family(
+        "soft_margin_loss",
+        &BX,
+        &[2, 3],
+        soft_margin_loss_at,
+        false,
+        1e-2,
+    );
+    check_create_graph_family(
+        "hinge_embedding_loss",
+        &BX,
+        &[2, 3],
+        hinge_embedding_loss_at,
+        false,
+        1e-2,
+    );
+}
+
+fn su_neg<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.neg().unwrap())
+}
+fn su_abs<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.abs().unwrap())
+}
+fn su_sqrt<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.sqrt().unwrap().tanh())
+}
+fn su_log<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.sigmoid().log().unwrap())
+}
+fn su_sin<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.sin().unwrap())
+}
+fn su_cos<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.cos().unwrap())
+}
+fn su_silu<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.silu().unwrap())
+}
+fn su_pow_scalar<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    quad_loss(tape, &x.pow_scalar(2.0).unwrap())
+}
+fn sb_div<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let c = weights(tape, &[2, 3]);
+    quad_loss(tape, &x.div(&c).unwrap())
+}
+fn sb_sub<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let c = weights(tape, &[2, 3]);
+    quad_loss(tape, &c.sub(&x.tanh()).unwrap())
+}
+fn sb_pow<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let e = tape.var_no_grad(&t(vec![2.0; 6], &[2, 3]));
+    quad_loss(tape, &x.pow(&e).unwrap())
+}
+
+/// `Op::ScalarUnary`／`Op::ScalarBinary` の代表（受理は payload 判定。全 variant の列挙は
+/// `api_surface.rs` の正ガードが固定し、ここは facade 経由で二階が通ることを代表で確かめる。`Erf` は
+/// f32 の中央差分雑音が REQ-2 判定を外れやすいため代表から外し、`gelu_create_graph_via_facade` が
+/// 子テープ上の `Erf` 記録を通して固定する）。
+#[test]
+fn scalar_unary_binary_create_graph_via_facade() {
+    let unary: [(&str, Build); 8] = [
+        ("neg", su_neg),
+        ("abs", su_abs),
+        ("sqrt", su_sqrt),
+        ("log", su_log),
+        ("sin", su_sin),
+        ("cos", su_cos),
+        ("silu", su_silu),
+        ("pow_scalar", su_pow_scalar),
+    ];
+    for (label, build) in unary {
+        check_create_graph_family(label, &BX_POS, &[2, 3], build, false, 1e-2);
+    }
+    let binary: [(&str, Build); 3] = [("div", sb_div), ("sub", sb_sub), ("pow", sb_pow)];
+    for (label, build) in binary {
+        check_create_graph_family(label, &BX_POS, &[2, 3], build, false, 1e-2);
+    }
+}
+
+// --- 残る fail-closed（決定記録 §72）。拒否は `Err(Backward)` で、`child` は空のまま ---------------------
+
+/// `loss` の `backward_create_graph` が型付きエラーで拒否され、`child` が空のままであることを確かめる。
+fn assert_create_graph_rejected(ctx: &str, tape: &Tape, child: &Tape, loss: &Var<'_>) {
+    let r = tape.backward_create_graph(loss, child);
+    assert!(
+        matches!(r, Err(AutodiffError::Backward(_))),
+        "{ctx}: Err(Backward) のはず"
+    );
+    assert_eq!(child.leaf_count(), 0, "{ctx}: 拒否後は child が空");
+}
+
+/// `CtcLoss` は承認により恒久 fail-closed（#3767 回答 2・決定記録 §40.16・§60）。
+#[test]
+fn ctc_loss_create_graph_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![-0.5, -1.0, -0.7, -0.9, -0.4, -2.0], &[2, 1, 3]));
+    let tg = Tensor::<i32>::new(vec![1, 2], &[2]).expect("targets");
+    let opts = fandhe_ai::nn::loss::CtcLossOptions::default();
+    let loss = x.ctc_loss(&tg, &[2], &[2], &opts, Reduction::Sum).unwrap();
+    assert_create_graph_rejected("ctc_loss", &tape, &child, &loss);
+}
+
+/// `IndexedScatterReduce` の `Prod` は **承認済みだが未実装**（#3767 回答は §41.16 の 3 variant 実装を承認。
+/// 決定記録 §62 が scan 補助待ちとして先送りし、受け皿 issue は未起票）。本テストは「現状は拒否される」
+/// ことの固定であり、恒久契約ではない。実装されたらこのテストを受理テストへ反転する。
+#[test]
+fn scatter_reduce_prod_create_graph_is_rejected_today_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(scatter_reduce_x(), &[3, 4]));
+    let loss = scatter_reduce_loss_with(&tape, &x, fandhe_ai::ScatterReduceMode::Prod);
+    assert_create_graph_rejected("scatter_reduce_prod", &tape, &child, &loss);
+}
+
+/// `MatrixNorm` の `Spectral` は現時点 fail-closed（`Nuc` は `matrix_norm_nuc_is_rejected_via_facade`）。
+/// 再評価の起票は承認済み（§44 点 11）だが未起票のため、「恒久」とは記録しない。
+#[test]
+fn matrix_norm_spectral_create_graph_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let loss = x
+        .matrix_norm(fandhe_ai::MatrixNormOrd::Spectral)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    assert_create_graph_rejected("matrix_norm_spectral", &tape, &child, &loss);
+}
+
+/// `ScalarUnaryOp` の `Selu`／`Celu`／`Softsign`／`Hardsigmoid`／`LogSigmoid`（#2649）と
+/// `ScalarBinaryOp::Atan2`（#2634）は、本ツリー（項目 3〜5）の外の既存 fail-closed。
+#[test]
+fn unreplayable_scalar_ops_create_graph_are_rejected_via_facade() {
+    type Mk = for<'a> fn(&Var<'a>) -> Var<'a>;
+    let cases: [(&str, Mk); 6] = [
+        ("selu", |x| x.selu().unwrap()),
+        ("celu", |x| x.celu(1.0).unwrap()),
+        ("softsign", |x| x.softsign().unwrap()),
+        ("hardsigmoid", |x| x.hardsigmoid().unwrap()),
+        ("log_sigmoid", |x| x.log_sigmoid().unwrap()),
+        ("atan2", |x| x.atan2(&x.exp()).unwrap()),
+    ];
+    for (label, mk) in cases {
+        let tape = fandhe_ai::tape();
+        let child = fandhe_ai::tape();
+        let x = tape.var(&t(vec![0.3, -0.8, 1.2], &[1, 3]));
+        let loss = mk(&x).sum(None).unwrap();
+        assert_create_graph_rejected(label, &tape, &child, &loss);
+    }
+}
+
+/// `Inv`・`Solve` は Op としては受理だが、overflow／ゼロ化域に入る入力の拒否は対象外として恒久化した
+/// （#3767 回答 3・決定記録 §46.14・§70.2）。
+#[test]
+fn inv_solve_overflow_inputs_are_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1e-39], &[1, 1]));
+    let loss = x.inv().unwrap().sum(None).unwrap();
+    assert_create_graph_rejected("inv", &tape, &child, &loss);
+
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let a = tape.var(&t(vec![1e-10], &[1, 1]));
+    let b = tape.var(&t(vec![1e30], &[1, 1]));
+    let loss = a.solve(&b).unwrap().sum(None).unwrap();
+    assert_create_graph_rejected("solve", &tape, &child, &loss);
+}
+
+/// `Lstsq` の打ち切りあり（`pinv` は `pinv_truncated_is_rejected_via_facade`）。§43.16。
+#[test]
+fn lstsq_truncated_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let a = tape.var(&t(vec![2.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let b = tape.var(&t(vec![1.0, 1.0], &[2, 1]));
+    let loss = a.lstsq(&b, Some(0.75)).unwrap().sum(None).unwrap();
+    assert_create_graph_rejected("lstsq", &tape, &child, &loss);
+}
+
+/// `Svd` の縮退（特異値の重複。`eigh` は `eigh_degenerate_is_rejected_via_facade`）。§44・§68。
+#[test]
+fn svd_degenerate_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let loss = x.svd().unwrap().s.sum(None).unwrap();
+    assert_create_graph_rejected("svd", &tape, &child, &loss);
+}

@@ -44850,3 +44850,908 @@ fn backward_create_graph_loss_regression_usage_doctest_is_present_and_compiled()
     ])]);
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
+// --- `create_graph` の対象 Op 一覧の正ガード（イシュー #3812・決定記録 `docs/autodiff-higher-order-grad-decision.md` §72） ---
+//
+// `crates/autodiff/src/tape.rs::Op::supports_create_graph`（`pub(crate)`。網羅 match）が受理する Op 集合を、
+// facade の外から見える固定値と突き合わせる。内部クレートの `pub(crate)` 関数は facade から呼べないため、
+// ソース走査（`strip_comments_and_literals` 後の腕単位の構文解析）で検出する。
+//
+// - 受理（`=> true`）の Op 集合 T、payload で判定する Op 集合 P（腕ごとの列挙値まで）、
+//   恒久 fail-closed（`=> false`）の Op 集合 F1 を固定値と `assert_eq` で突き合わせる。
+// - 最上位 match にワイルドカード腕が無いこと（新 `Op` variant を判断漏れのまま既定 `false` にしない）。
+// - `scalar_unary_replayable`／`scalar_binary_replayable`／`scatter_reduce::mode_supported` の列挙値。
+// - 各 Op を facade 経由で固定する挙動テスト（`create_graph_facade.rs`）の対応表。表が指すテストは
+//   実在する `#[test]`（`#[ignore]` なし）でなければならない。
+//
+// 検出の空振りは自己テスト（合成ソースへの注入）で防ぐ。F2〜F5（Op は受理だが入力の拒否範囲・
+// 承認済み未実装・本ツリー外の既存 fail-closed）の分類は §72 を正とし、ここでは挙動テストの存在を固定する。
+
+/// 対象 Op 一覧の固定値と対応表の入力。
+struct CgExpected {
+    /// 無条件で受理する Op（`=> true`）。
+    accept: std::collections::BTreeSet<String>,
+    /// 恒久 fail-closed の Op（`=> false`）。
+    reject: std::collections::BTreeSet<String>,
+    /// payload で判定する Op と、その腕が参照する列挙パス。
+    payload: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+fn cg_is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn cg_find(chars: &[char], needle: &str, from: usize) -> Option<usize> {
+    let n: Vec<char> = needle.chars().collect();
+    if n.is_empty() || chars.len() < n.len() || from > chars.len() - n.len() {
+        return None;
+    }
+    (from..=chars.len() - n.len()).find(|&i| chars[i..i + n.len()] == n[..])
+}
+
+/// `open` 位置の `{` に対応する `}` の位置。
+fn cg_match_brace(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (k, &c) in chars.iter().enumerate().skip(open) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `fn <name>` の本体（外側の波括弧の内側）の char 範囲。名前は完全一致（`name_f64` 等は別物）。
+fn cg_fn_body_range(chars: &[char], name: &str) -> Option<(usize, usize)> {
+    let pat = format!("fn {name}");
+    let plen = pat.chars().count();
+    let mut from = 0;
+    while let Some(i) = cg_find(chars, &pat, from) {
+        let after = i + plen;
+        let before_ok = i == 0 || !cg_is_ident_char(chars[i - 1]);
+        let after_ok = after >= chars.len() || !cg_is_ident_char(chars[after]);
+        if before_ok && after_ok {
+            let open = (after..chars.len()).find(|&k| chars[k] == '{')?;
+            let close = cg_match_brace(chars, open)?;
+            return Some((open + 1, close));
+        }
+        from = i + 1;
+    }
+    None
+}
+
+/// `Name::Variant` 形（`::` で連結した 2 要素以上の識別子連鎖）の集合。
+fn cg_enum_paths(text: &str) -> std::collections::BTreeSet<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let starts = (c.is_alphabetic() || c == '_') && (i == 0 || !cg_is_ident_char(chars[i - 1]));
+        if !starts {
+            i += 1;
+            continue;
+        }
+        let mut chain = String::new();
+        let mut j = i;
+        loop {
+            while j < chars.len() && cg_is_ident_char(chars[j]) {
+                chain.push(chars[j]);
+                j += 1;
+            }
+            let next_is_seg = j + 2 < chars.len()
+                && chars[j] == ':'
+                && chars[j + 1] == ':'
+                && (chars[j + 2].is_alphabetic() || chars[j + 2] == '_');
+            if next_is_seg {
+                chain.push_str("::");
+                j += 2;
+            } else {
+                break;
+            }
+        }
+        if chain.contains("::") {
+            out.insert(chain);
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// パターン文字列中の `Op::<Name>`（直前が識別子文字でないもの）の `<Name>` を出現順に返す。
+fn cg_op_names(pattern: &str) -> Vec<String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(p) = cg_find(&chars, "Op::", i) {
+        let boundary = p == 0 || !cg_is_ident_char(chars[p - 1]);
+        let mut j = p + 4;
+        let mut name = String::new();
+        while j < chars.len() && cg_is_ident_char(chars[j]) {
+            name.push(chars[j]);
+            j += 1;
+        }
+        if boundary && !name.is_empty() {
+            out.push(name);
+        }
+        i = j.max(p + 1);
+    }
+    out
+}
+
+/// match 腕列を `(パターン, 式)` に分割する（式は深さ 0 の `,` まで）。
+fn cg_parse_arms(inner: &[char]) -> Result<Vec<(String, String)>, String> {
+    let mut arms = Vec::new();
+    let mut i = 0;
+    let len = inner.len();
+    loop {
+        while i < len && inner[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= len {
+            break;
+        }
+        let start = i;
+        let mut depth = 0i32;
+        while i < len {
+            let c = inner[i];
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 && c == '=' && i + 1 < len && inner[i + 1] == '>' {
+                break;
+            }
+            i += 1;
+        }
+        if i >= len {
+            return Err("match 腕のパターン終端 `=>` が見つからない".to_string());
+        }
+        let pat: String = inner[start..i].iter().collect();
+        i += 2;
+        let es = i;
+        depth = 0;
+        while i < len {
+            let c = inner[i];
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return Err("match 腕の式の括弧が閉じていない".to_string());
+            }
+            if depth == 0 && c == ',' {
+                break;
+            }
+            i += 1;
+        }
+        let expr: String = inner[es..i].iter().collect();
+        i += 1;
+        arms.push((pat.trim().to_string(), expr.trim().to_string()));
+    }
+    Ok(arms)
+}
+
+fn cg_set_diff(
+    label: &str,
+    actual: &std::collections::BTreeSet<String>,
+    expected: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    if actual == expected {
+        return None;
+    }
+    let extra: Vec<&String> = actual.difference(expected).collect();
+    let missing: Vec<&String> = expected.difference(actual).collect();
+    Some(format!(
+        "{label} が承認済み一覧と一致しない: 余分 {extra:?} / 不足 {missing:?}"
+    ))
+}
+
+/// `supports_create_graph` の腕を解析し、T／P／F1 を固定値と突き合わせる。
+fn check_create_graph_op_partition(src: &str, exp: &CgExpected) -> Result<(), String> {
+    let chars = strip_comments_and_literals(src);
+    let (bs, be) = cg_fn_body_range(&chars, "supports_create_graph")
+        .ok_or("`fn supports_create_graph` の本体が見つからない")?;
+    let body = &chars[bs..be];
+    let m = cg_find(body, "match self", 0).ok_or("`match self` が見つからない")?;
+    let open = (m..body.len())
+        .find(|&k| body[k] == '{')
+        .ok_or("match の `{` が見つからない")?;
+    let close = cg_match_brace(body, open).ok_or("match の `}` が見つからない")?;
+    let arms = cg_parse_arms(&body[open + 1..close])?;
+    let mut accept = std::collections::BTreeSet::new();
+    let mut reject = std::collections::BTreeSet::new();
+    let mut payload: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for (pat, expr) in &arms {
+        if pat.trim() == "_" || pat.split('|').any(|p| p.trim() == "_") {
+            return Err(
+                "ワイルドカード腕 `_ =>` がある（新 variant を既定 false にしてしまう）".into(),
+            );
+        }
+        let ops = cg_op_names(pat);
+        if ops.is_empty() {
+            return Err(format!("`Op::<Name>` を含まない腕がある: {pat}"));
+        }
+        for o in &ops {
+            if !seen.insert(o.clone()) {
+                return Err(format!("`Op::{o}` が複数の腕に現れる"));
+            }
+        }
+        match expr.as_str() {
+            "true" => accept.extend(ops),
+            "false" => reject.extend(ops),
+            _ => {
+                if ops.len() != 1 {
+                    return Err(format!("payload 腕が 2 つ以上の Op を束ねている: {ops:?}"));
+                }
+                payload.insert(ops[0].clone(), cg_enum_paths(expr));
+            }
+        }
+    }
+    if let Some(e) = cg_set_diff("受理 Op 集合 T", &accept, &exp.accept) {
+        return Err(e);
+    }
+    if let Some(e) = cg_set_diff("恒久 fail-closed の Op 集合 F1", &reject, &exp.reject) {
+        return Err(e);
+    }
+    let pk: std::collections::BTreeSet<String> = payload.keys().cloned().collect();
+    let ek: std::collections::BTreeSet<String> = exp.payload.keys().cloned().collect();
+    if let Some(e) = cg_set_diff("payload 判定の Op 集合 P", &pk, &ek) {
+        return Err(e);
+    }
+    for (op, paths) in &payload {
+        if let Some(e) = cg_set_diff(
+            &format!("`Op::{op}` の payload 列挙"),
+            paths,
+            &exp.payload[op],
+        ) {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// 関数本体が参照する `Name::Variant` の集合を固定値と突き合わせる
+/// （`scalar_unary_replayable` 等の列挙値の固定）。
+fn check_fn_enum_paths(src: &str, fn_name: &str, expected: &[&str]) -> Result<(), String> {
+    let chars = strip_comments_and_literals(src);
+    let (s, e) =
+        cg_fn_body_range(&chars, fn_name).ok_or(format!("`fn {fn_name}` の本体が見つからない"))?;
+    let body: String = chars[s..e].iter().collect();
+    let actual = cg_enum_paths(&body);
+    let exp: std::collections::BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
+    match cg_set_diff(&format!("`{fn_name}` の列挙値"), &actual, &exp) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// `payload` 判定の Op と腕が参照する列挙パス。
+const CG_PAYLOAD_EXPECTED: &[(&str, &[&str])] = &[
+    (
+        "IndexedScatterReduce",
+        &["crate::create_graph::scatter_reduce_mode_supported"],
+    ),
+    (
+        "Interpolate",
+        &[
+            "InterpolateMode::Nearest",
+            "InterpolateMode::NearestExact",
+            "InterpolateMode::Linear",
+            "InterpolateMode::Bilinear",
+            "InterpolateMode::Trilinear",
+            "InterpolateMode::Bicubic",
+            "InterpolateMode::Area",
+        ],
+    ),
+    (
+        "VectorNorm",
+        &[
+            "fandhe_ai_tensor_core::VectorNormOrd::L1",
+            "fandhe_ai_tensor_core::VectorNormOrd::L2",
+        ],
+    ),
+    (
+        "MatrixNorm",
+        &[
+            "fandhe_ai_tensor_core::MatrixNormOrd::Fro",
+            "fandhe_ai_tensor_core::MatrixNormOrd::One",
+            "fandhe_ai_tensor_core::MatrixNormOrd::Inf",
+        ],
+    ),
+    (
+        "ScalarUnary",
+        &["crate::create_graph::scalar_unary_replayable"],
+    ),
+    (
+        "ScalarBinary",
+        &["crate::create_graph::scalar_binary_replayable"],
+    ),
+];
+
+/// 恒久 fail-closed の Op（Op 単位。`=> false`）。`CtcLoss` は承認による恒久（#3767 回答 2）、
+/// 残る 5 つは §21.2 A 区分（構造的に再生不能）。
+const CG_REJECT_OPS: &[&str] = &[
+    "CtcLoss",
+    "Custom",
+    "LinearAct",
+    "LinearResident",
+    "OneHot",
+    "ResidentLeaf",
+];
+
+const CG_SCALAR_UNARY_ACCEPTED: &[&str] = &[
+    "ScalarUnaryOp::Neg",
+    "ScalarUnaryOp::Abs",
+    "ScalarUnaryOp::Sqrt",
+    "ScalarUnaryOp::Log",
+    "ScalarUnaryOp::Log2",
+    "ScalarUnaryOp::Log10",
+    "ScalarUnaryOp::Sin",
+    "ScalarUnaryOp::Cos",
+    "ScalarUnaryOp::Tan",
+    "ScalarUnaryOp::Relu",
+    "ScalarUnaryOp::Exp",
+    "ScalarUnaryOp::Tanh",
+    "ScalarUnaryOp::Sigmoid",
+    "ScalarUnaryOp::Silu",
+    "ScalarUnaryOp::Hardswish",
+    "ScalarUnaryOp::LeakyRelu",
+    "ScalarUnaryOp::Elu",
+    "ScalarUnaryOp::Softplus",
+    "ScalarUnaryOp::Clamp",
+    "ScalarUnaryOp::PowScalar",
+    "ScalarUnaryOp::Gelu",
+    "ScalarUnaryOp::GeluTanh",
+    "ScalarUnaryOp::Erf",
+];
+
+const CG_SCALAR_BINARY_ACCEPTED: &[&str] = &[
+    "ScalarBinaryOp::Add",
+    "ScalarBinaryOp::Sub",
+    "ScalarBinaryOp::Mul",
+    "ScalarBinaryOp::Div",
+    "ScalarBinaryOp::Pow",
+    "ScalarBinaryOp::Maximum",
+    "ScalarBinaryOp::Minimum",
+    "ScalarBinaryOp::Gt",
+    "ScalarBinaryOp::Ge",
+    "ScalarBinaryOp::Lt",
+    "ScalarBinaryOp::Le",
+    "ScalarBinaryOp::Eq",
+    "ScalarBinaryOp::Ne",
+];
+
+const CG_SCATTER_REDUCE_ACCEPTED: &[&str] = &[
+    "ScatterReduceMode::Sum",
+    "ScatterReduceMode::Mean",
+    "ScatterReduceMode::Amax",
+    "ScatterReduceMode::Amin",
+];
+
+/// 受理 Op（無条件〈T〉と payload〈P〉）→ それを facade 経由で固定する `create_graph_facade.rs` の
+/// `#[test]`。内部 Op（`Contiguous`・`*GradHost*`・`Unfold3d`／`Fold3d`・`*Adjoint`）は facade から
+/// 直接作れず、親の Op の二階再生（孫テープ）を通して間接的に固定される（対応先は親の族のテスト）。
+const CG_FACADE_ACCEPT_MAP: &[(&str, &str)] = &[
+    ("Leaf", "hessian_cubic_matches_closed_form_via_facade"),
+    ("Add", "qr_create_graph_via_facade"),
+    ("Mul", "hessian_cubic_matches_closed_form_via_facade"),
+    ("Relu", "basic_and_structure_ops_create_graph_via_facade"),
+    ("Exp", "basic_and_structure_ops_create_graph_via_facade"),
+    (
+        "Tanh",
+        "hvp_tanh_matmul_matches_finite_difference_via_facade",
+    ),
+    ("Sigmoid", "basic_and_structure_ops_create_graph_via_facade"),
+    ("Sum", "hessian_cubic_matches_closed_form_via_facade"),
+    ("Mean", "basic_and_structure_ops_create_graph_via_facade"),
+    ("Reshape", "basic_and_structure_ops_create_graph_via_facade"),
+    (
+        "BroadcastTo",
+        "basic_and_structure_ops_create_graph_via_facade",
+    ),
+    (
+        "MatMul",
+        "hvp_tanh_matmul_matches_finite_difference_via_facade",
+    ),
+    (
+        "Transpose",
+        "basic_and_structure_ops_create_graph_via_facade",
+    ),
+    ("Permute", "basic_and_structure_ops_create_graph_via_facade"),
+    ("Narrow", "basic_and_structure_ops_create_graph_via_facade"),
+    ("Concat", "basic_and_structure_ops_create_graph_via_facade"),
+    ("Contiguous", "layer_norm_create_graph_via_facade"),
+    ("ConvWeightGradHost", "conv2d_create_graph_via_facade"),
+    ("BatchNormGradHost", "batch_norm_create_graph_via_facade"),
+    ("Conv2d", "conv2d_create_graph_via_facade"),
+    (
+        "ConvTranspose2d",
+        "conv_transpose2d_create_graph_via_facade",
+    ),
+    ("Conv3d", "conv3d_create_graph_via_facade"),
+    (
+        "ConvTranspose3d",
+        "conv_transpose3d_create_graph_via_facade",
+    ),
+    ("Unfold3d", "conv3d_create_graph_via_facade"),
+    ("Fold3d", "conv3d_create_graph_via_facade"),
+    ("ConvWeightGradHost3d", "conv3d_create_graph_via_facade"),
+    ("MaxPool2d", "max_pool2d_create_graph_via_facade"),
+    (
+        "MaxPool3d",
+        "pool3d_fold_padmode_ops_create_graph_via_facade",
+    ),
+    ("AvgPool2d", "avg_pool2d_create_graph_via_facade"),
+    (
+        "AvgPool3d",
+        "pool3d_fold_padmode_ops_create_graph_via_facade",
+    ),
+    (
+        "AdaptiveAvgPool2d",
+        "pool3d_fold_padmode_ops_create_graph_via_facade",
+    ),
+    ("Unfold", "pool3d_fold_padmode_ops_create_graph_via_facade"),
+    ("Fold", "pool3d_fold_padmode_ops_create_graph_via_facade"),
+    ("Where", "basic_and_structure_ops_create_graph_via_facade"),
+    (
+        "Softmax",
+        "softmax_create_graph_matches_first_order_and_finite_difference_via_facade",
+    ),
+    (
+        "LogSoftmax",
+        "log_softmax_create_graph_matches_first_order_and_finite_difference_via_facade",
+    ),
+    ("Gather", "gather_create_graph_via_facade"),
+    ("Scatter", "index_select_ops_create_graph_via_facade"),
+    ("Embedding", "index_select_ops_create_graph_via_facade"),
+    ("Cumsum", "cumsum_create_graph_via_facade"),
+    ("Cumprod", "cumprod_create_graph_via_facade"),
+    ("Logcumsumexp", "logcumsumexp_create_graph_via_facade"),
+    ("Sort", "index_select_ops_create_graph_via_facade"),
+    ("Topk", "index_select_ops_create_graph_via_facade"),
+    ("Cummax", "index_select_ops_create_graph_via_facade"),
+    ("Cummin", "index_select_ops_create_graph_via_facade"),
+    (
+        "MseLoss",
+        "mse_loss_create_graph_matches_first_order_and_finite_difference_via_facade",
+    ),
+    (
+        "L1Loss",
+        "elementwise_margin_losses_create_graph_via_facade",
+    ),
+    ("HuberLoss", "huber_loss_create_graph_via_facade"),
+    (
+        "CrossEntropyLoss",
+        "cross_entropy_loss_create_graph_via_facade",
+    ),
+    (
+        "NllLoss",
+        "nll_loss_create_graph_matches_first_order_and_finite_difference_via_facade",
+    ),
+    ("KlDivLoss", "kl_div_loss_create_graph_via_facade"),
+    ("PoissonNllLoss", "poisson_nll_loss_create_graph_via_facade"),
+    (
+        "GaussianNllLoss",
+        "gaussian_nll_loss_create_graph_via_facade",
+    ),
+    ("RmsNorm", "rms_norm_create_graph_via_facade"),
+    ("LayerNorm", "layer_norm_create_graph_via_facade"),
+    ("BatchNorm", "batch_norm_create_graph_via_facade"),
+    ("Pad", "pad_create_graph_via_facade"),
+    ("MaskedFill", "masked_fill_create_graph_via_facade"),
+    ("PadMode", "pool3d_fold_padmode_ops_create_graph_via_facade"),
+    ("Stft", "stft_create_graph_via_facade"),
+    ("Istft", "istft_create_graph_via_facade"),
+    ("StftAdjoint", "stft_create_graph_via_facade"),
+    ("IstftAdjoint", "istft_create_graph_via_facade"),
+    ("Rfft", "rfft_create_graph_via_facade"),
+    ("Irfft", "fft_family_create_graph_via_facade"),
+    ("Fft", "fft_family_create_graph_via_facade"),
+    ("Ifft", "fft_family_create_graph_via_facade"),
+    ("Inv", "inv_create_graph_via_facade"),
+    ("Solve", "solve_slogdet_create_graph_via_facade"),
+    ("Det", "det_create_graph_via_facade"),
+    ("SlogdetLogAbsDet", "solve_slogdet_create_graph_via_facade"),
+    ("SlogdetSign", "slogdet_sign_create_graph_via_facade"),
+    ("MatrixRank", "matrix_rank_create_graph_via_facade"),
+    ("Cholesky", "cholesky_create_graph_via_facade"),
+    ("Pinv", "pinv_create_graph_via_facade"),
+    ("Lstsq", "lstsq_create_graph_via_facade"),
+    ("Max", "max_create_graph_via_facade"),
+    ("Min", "min_create_graph_via_facade"),
+    ("Amax", "amax_create_graph_via_facade"),
+    ("Amin", "amin_create_graph_via_facade"),
+    ("LogSumExp", "logsumexp_create_graph_via_facade"),
+    ("Nansum", "nansum_create_graph_via_facade"),
+    ("Nanmean", "nanmean_create_graph_via_facade"),
+    ("OrderSelect", "kthvalue_create_graph_via_facade"),
+    ("MedianAll", "median_all_create_graph_via_facade"),
+    ("Quantile", "quantile_create_graph_via_facade"),
+    ("Var", "var_create_graph_via_facade"),
+    ("Std", "std_create_graph_via_facade"),
+    ("PNorm", "norm_p_create_graph_via_facade"),
+    ("BceLoss", "bce_loss_create_graph_via_facade"),
+    (
+        "BceWithLogitsPosWeightLoss",
+        "bce_with_logits_pos_weight_loss_create_graph_via_facade",
+    ),
+    (
+        "SoftMarginLoss",
+        "elementwise_margin_losses_create_graph_via_facade",
+    ),
+    (
+        "HingeEmbeddingLoss",
+        "elementwise_margin_losses_create_graph_via_facade",
+    ),
+    (
+        "MarginRankingLoss",
+        "margin_ranking_loss_create_graph_via_facade",
+    ),
+    (
+        "SigmoidFocalLoss",
+        "sigmoid_focal_loss_create_graph_via_facade",
+    ),
+    (
+        "CrossEntropyLossWithOptions",
+        "cross_entropy_loss_with_create_graph_via_facade",
+    ),
+    (
+        "MultiMarginLoss",
+        "multi_margin_loss_create_graph_via_facade",
+    ),
+    (
+        "MultiLabelMarginLoss",
+        "multilabel_margin_loss_create_graph_via_facade",
+    ),
+    (
+        "MultiLabelSoftMarginLoss",
+        "multilabel_soft_margin_loss_create_graph_via_facade",
+    ),
+    (
+        "CosineEmbeddingLoss",
+        "cosine_embedding_loss_create_graph_via_facade",
+    ),
+    (
+        "TripletMarginLoss",
+        "triplet_margin_loss_create_graph_via_facade",
+    ),
+    ("Dropout", "dropout_create_graph_via_facade"),
+    ("MaxUnpool", "max_unpool2d_create_graph_via_facade"),
+    (
+        "LocalResponseNorm",
+        "local_response_norm_create_graph_via_facade",
+    ),
+    ("WeightNorm", "weight_norm_create_graph_via_facade"),
+    ("SpectralNorm", "spectral_norm_create_graph_via_facade"),
+    ("RnnCell", "rnn_create_graph_via_facade"),
+    ("GruCell", "gru_create_graph_via_facade"),
+    ("LstmCell", "lstm_create_graph_via_facade"),
+    ("LstmHidden", "lstm_create_graph_via_facade"),
+    ("QrQ", "qr_create_graph_via_facade"),
+    ("QrR", "qr_create_graph_via_facade"),
+    ("SvdU", "svd_create_graph_via_facade"),
+    ("SvdS", "svd_create_graph_via_facade"),
+    ("SvdVh", "svd_create_graph_via_facade"),
+    ("EighValues", "eigh_create_graph_via_facade"),
+    ("EighVectors", "eigh_create_graph_via_facade"),
+    // payload 判定の Op（受理側の代表。拒否側は下の拒否表）。
+    (
+        "IndexedScatterReduce",
+        "scatter_reduce_sum_create_graph_via_facade",
+    ),
+    ("Interpolate", "interpolate_create_graph_via_facade"),
+    ("VectorNorm", "norm_l2_create_graph_via_facade"),
+    ("MatrixNorm", "matrix_norm_create_graph_via_facade"),
+    ("ScalarUnary", "scalar_unary_binary_create_graph_via_facade"),
+    (
+        "ScalarBinary",
+        "scalar_unary_binary_create_graph_via_facade",
+    ),
+];
+
+/// 残る fail-closed → それを facade 経由で固定する拒否テスト。`None` は facade から到達できない
+/// （`ResidentLeaf`／`LinearResident` はデバイス常駐の内部 Op、`OneHot` は非微分で出力が追跡されず
+/// 定数葉になる〈§21.6〉。`LinearAct` は融合の内部 Op で autodiff 側の `create_graph_rejects_fused_linear_act`
+/// が固定する）。拒否の分類（恒久／承認済み未実装／本ツリー外）は決定記録 §72 の表を正とする。
+const CG_FACADE_REJECT_MAP: &[(&str, Option<&str>)] = &[
+    (
+        "CtcLoss",
+        Some("ctc_loss_create_graph_is_rejected_via_facade"),
+    ),
+    (
+        "Custom",
+        Some("rejects_unsupported_op_and_keeps_child_empty"),
+    ),
+    ("LinearAct", None),
+    ("LinearResident", None),
+    ("OneHot", None),
+    ("ResidentLeaf", None),
+    (
+        "IndexedScatterReduce::Prod",
+        Some("scatter_reduce_prod_create_graph_is_rejected_today_via_facade"),
+    ),
+    (
+        "MatrixNorm::Nuc",
+        Some("matrix_norm_nuc_is_rejected_via_facade"),
+    ),
+    (
+        "MatrixNorm::Spectral",
+        Some("matrix_norm_spectral_create_graph_is_rejected_via_facade"),
+    ),
+    (
+        "ScalarUnary::Selu_Celu_Softsign_Hardsigmoid_LogSigmoid_and_ScalarBinary::Atan2",
+        Some("unreplayable_scalar_ops_create_graph_are_rejected_via_facade"),
+    ),
+    (
+        "Inv_Solve::overflow",
+        Some("inv_solve_overflow_inputs_are_rejected_via_facade"),
+    ),
+    (
+        "Pinv::truncated",
+        Some("pinv_truncated_is_rejected_via_facade"),
+    ),
+    (
+        "Lstsq::truncated",
+        Some("lstsq_truncated_is_rejected_via_facade"),
+    ),
+    ("Qr::wide", Some("qr_wide_is_rejected_via_facade")),
+    (
+        "Svd::degenerate",
+        Some("svd_degenerate_is_rejected_via_facade"),
+    ),
+    (
+        "Eigh::degenerate",
+        Some("eigh_degenerate_is_rejected_via_facade"),
+    ),
+    (
+        "LayerNorm_BatchNorm::nonfinite_or_overflow",
+        Some("batch_norm_prescaled_create_graph_via_facade"),
+    ),
+];
+
+fn cg_expected_from_tables() -> CgExpected {
+    let payload: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        CG_PAYLOAD_EXPECTED
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+            .collect();
+    let accept = CG_FACADE_ACCEPT_MAP
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .filter(|k| !payload.contains_key(k))
+        .collect();
+    CgExpected {
+        accept,
+        reject: CG_REJECT_OPS.iter().map(|s| s.to_string()).collect(),
+        payload,
+    }
+}
+
+/// 対象 Op 集合・payload 列挙値・`mode_supported` 等の列挙値が承認済み一覧と一致する。
+#[test]
+fn create_graph_supported_op_set_matches_approved_list() {
+    let autodiff_src = facade_crate_root().join("../autodiff/src");
+    let tape = read_to_string_or_panic(&autodiff_src.join("tape.rs"));
+    if let Err(e) = check_create_graph_op_partition(&tape, &cg_expected_from_tables()) {
+        panic!("supports_create_graph の対象集合: {e}");
+    }
+    let cg = read_to_string_or_panic(&autodiff_src.join("create_graph.rs"));
+    for (name, exp) in [
+        ("scalar_unary_replayable", CG_SCALAR_UNARY_ACCEPTED),
+        ("scalar_binary_replayable", CG_SCALAR_BINARY_ACCEPTED),
+    ] {
+        if let Err(e) = check_fn_enum_paths(&cg, name, exp) {
+            panic!("{e}");
+        }
+    }
+    let sr = read_to_string_or_panic(&autodiff_src.join("create_graph/scatter_reduce.rs"));
+    if let Err(e) = check_fn_enum_paths(&sr, "mode_supported", CG_SCATTER_REDUCE_ACCEPTED) {
+        panic!("{e}");
+    }
+}
+
+/// 合成ソースへの注入で、各分類の改変が検出される（検出器の空振り防止）。
+#[test]
+fn create_graph_supported_op_set_detects_each_category() {
+    fn exp() -> CgExpected {
+        let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect();
+        CgExpected {
+            accept: s(&["A", "B", "Det"]),
+            reject: s(&["CtcLoss", "D"]),
+            payload: [("P".to_string(), s(&["E::X", "E::Y"]))]
+                .into_iter()
+                .collect(),
+        }
+    }
+    fn src(t: &str, p: &str, f: &str, extra: &str) -> String {
+        format!(
+            "impl Op {{ pub(crate) fn supports_create_graph(&self) -> bool {{ match self {{ \
+             {t} => true, Op::P {{ x, .. }} => matches!(x, {p}), {f} => false, {extra} }} }} }}\n\
+             fn supports_create_graph_f64(&self) -> bool {{ match self {{ Op::Z => true }} }}"
+        )
+    }
+    let t_ok = "Op::A | Op::B { .. } | Op::Det(..)";
+    let p_ok = "E::X | E::Y";
+    let f_ok = "Op::CtcLoss { .. } | Op::D";
+    let ok = src(t_ok, p_ok, f_ok, "");
+    assert_eq!(check_create_graph_op_partition(&ok, &exp()), Ok(()));
+    // コメント・空白・改行の変更は無害。
+    let harmless = src(
+        "Op::A\n // | Op::CtcLoss\n | Op::B { .. }   |   Op::Det(..)",
+        p_ok,
+        f_ok,
+        "",
+    );
+    assert_eq!(check_create_graph_op_partition(&harmless, &exp()), Ok(()));
+    let bad = [
+        // F1 -> T（CtcLoss を受理側へ）
+        src(&format!("{t_ok} | Op::CtcLoss {{ .. }}"), p_ok, "Op::D", ""),
+        // T -> F1（Det を拒否側へ）
+        src(
+            "Op::A | Op::B { .. }",
+            p_ok,
+            &format!("{f_ok} | Op::Det(..)"),
+            "",
+        ),
+        // T から 1 件削除
+        src("Op::A | Op::B { .. }", p_ok, f_ok, ""),
+        // ワイルドカード追加
+        src(t_ok, p_ok, f_ok, "_ => false,"),
+        // payload 列挙の拡大（Prod 相当）
+        src(t_ok, "E::X | E::Y | E::Prod", f_ok, ""),
+        // payload 列挙の縮小
+        src(t_ok, "E::X", f_ok, ""),
+        // payload 腕の削除（P が T へ移る）
+        format!(
+            "fn supports_create_graph(&self) -> bool {{ match self {{ {t_ok} | Op::P => true, \
+             {f_ok} => false, }} }}"
+        ),
+        // Op の重複
+        src(&format!("{t_ok} | Op::D"), p_ok, f_ok, ""),
+    ];
+    for (i, s) in bad.iter().enumerate() {
+        assert!(
+            check_create_graph_op_partition(s, &exp()).is_err(),
+            "改変 #{i} が検出されない: {s}"
+        );
+    }
+    // 列挙値関数（`scalar_unary_replayable` 等）の拡大・縮小・本体欠落。
+    let f = "fn replayable(op: U) -> bool { matches!(op, U::Neg | U::Abs) }";
+    assert_eq!(
+        check_fn_enum_paths(f, "replayable", &["U::Neg", "U::Abs"]),
+        Ok(())
+    );
+    assert!(check_fn_enum_paths(f, "replayable", &["U::Neg"]).is_err());
+    assert!(check_fn_enum_paths(f, "replayable", &["U::Neg", "U::Abs", "U::Selu"]).is_err());
+    assert!(check_fn_enum_paths(f, "missing", &["U::Neg"]).is_err());
+    // `name_f64` は別関数として扱う（完全一致）。
+    let g = "fn replayable_f64(op: U) -> bool { matches!(op, U::Neg) }";
+    assert!(check_fn_enum_paths(g, "replayable", &["U::Neg"]).is_err());
+}
+
+/// `#[test]`（`#[ignore]` なし）として `src` に存在するか。属性・doc コメントの連続を遡って判定する。
+fn cg_has_active_test_fn(src: &str, name: &str) -> bool {
+    let lines: Vec<&str> = src.lines().collect();
+    let head = format!("fn {name}(");
+    let Some(idx) = lines.iter().position(|l| l.trim_start().starts_with(&head)) else {
+        return false;
+    };
+    let mut has_test = false;
+    let mut ignored = false;
+    for l in lines[..idx].iter().rev() {
+        let tl = l.trim();
+        if tl.starts_with("#[") {
+            has_test |= tl == "#[test]";
+            ignored |= tl.starts_with("#[ignore");
+        } else if !tl.starts_with("///") {
+            break;
+        }
+    }
+    has_test && !ignored
+}
+
+/// 対応表のキー集合が期待集合と一致し、指すテストが `facade_src` に実在する。
+fn check_cg_coverage_map(
+    accept_map: &[(&str, &str)],
+    expected_accept: &std::collections::BTreeSet<String>,
+    facade_src: &str,
+) -> Result<(), String> {
+    let keys: std::collections::BTreeSet<String> =
+        accept_map.iter().map(|(k, _)| k.to_string()).collect();
+    if keys.len() != accept_map.len() {
+        return Err("対応表のキーが重複している".into());
+    }
+    if let Some(e) = cg_set_diff("対応表のキー集合", &keys, expected_accept) {
+        return Err(e);
+    }
+    for (op, test) in accept_map {
+        if !cg_has_active_test_fn(facade_src, test) {
+            return Err(format!(
+                "`{op}` の対応先 `{test}` が create_graph_facade.rs に有効な #[test] として無い"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 各対象 Op を facade 経由で固定する挙動テストの対応表・残る fail-closed の拒否テストの存在。
+#[test]
+fn create_graph_facade_coverage_map_matches_supported_set() {
+    let exp = cg_expected_from_tables();
+    let all: std::collections::BTreeSet<String> = exp
+        .accept
+        .iter()
+        .chain(exp.payload.keys())
+        .cloned()
+        .collect();
+    let facade_src =
+        read_to_string_or_panic(&facade_crate_root().join("tests/create_graph_facade.rs"));
+    if let Err(e) = check_cg_coverage_map(CG_FACADE_ACCEPT_MAP, &all, &facade_src) {
+        panic!("{e}");
+    }
+    // 拒否表: F1 の全 Op を含み、`Some` の指すテストが実在する。`None`（facade 未到達）は固定の 4 件だけ。
+    let reject_keys: std::collections::BTreeSet<String> = CG_FACADE_REJECT_MAP
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .collect();
+    assert_eq!(
+        reject_keys.len(),
+        CG_FACADE_REJECT_MAP.len(),
+        "拒否表のキー重複"
+    );
+    for op in CG_REJECT_OPS {
+        assert!(reject_keys.contains(*op), "拒否表に F1 の `{op}` が無い");
+    }
+    let unreachable: std::collections::BTreeSet<&str> = CG_FACADE_REJECT_MAP
+        .iter()
+        .filter(|(_, t)| t.is_none())
+        .map(|(k, _)| *k)
+        .collect();
+    assert_eq!(
+        unreachable,
+        ["LinearAct", "LinearResident", "OneHot", "ResidentLeaf"]
+            .into_iter()
+            .collect(),
+        "facade 未到達の拒否は承認済みの 4 件だけ"
+    );
+    for (k, t) in CG_FACADE_REJECT_MAP {
+        if let Some(t) = t {
+            assert!(
+                cg_has_active_test_fn(&facade_src, t),
+                "拒否表 `{k}` の対応先 `{t}` が有効な #[test] として無い"
+            );
+        }
+    }
+}
+
+/// 対応表検出器の自己テスト: キーの欠落・存在しないテスト名・`#[test]` なし・`#[ignore]` を検出する。
+#[test]
+fn create_graph_facade_coverage_map_detects_each_category() {
+    let src = "#[test]\nfn a() {}\n/// doc\n#[test]\nfn b() {}\nfn c() {}\n#[test]\n#[ignore]\nfn d() {}\n";
+    let exp: std::collections::BTreeSet<String> =
+        ["X", "Y"].into_iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        check_cg_coverage_map(&[("X", "a"), ("Y", "b")], &exp, src),
+        Ok(())
+    );
+    // 表からキーを 1 件落とす
+    assert!(check_cg_coverage_map(&[("X", "a")], &exp, src).is_err());
+    // 余分なキー
+    assert!(check_cg_coverage_map(&[("X", "a"), ("Y", "b"), ("Z", "a")], &exp, src).is_err());
+    // キー重複
+    assert!(check_cg_coverage_map(&[("X", "a"), ("X", "b")], &exp, src).is_err());
+    // 存在しないテスト名 / `#[test]` なし / `#[ignore]`
+    assert!(check_cg_coverage_map(&[("X", "a"), ("Y", "zzz")], &exp, src).is_err());
+    assert!(check_cg_coverage_map(&[("X", "a"), ("Y", "c")], &exp, src).is_err());
+    assert!(check_cg_coverage_map(&[("X", "a"), ("Y", "d")], &exp, src).is_err());
+}
