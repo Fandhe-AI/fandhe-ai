@@ -26,7 +26,7 @@
 //! `Sigmoid`・`Tanh`・`Sum`）に限る。
 //!
 //! **数値契約**: GRU の再構築は forward の `mul_add` と丸めがずれうるため、`n` の値には
-//! forward の FMA 値への定数補正を足し（`1 − n²` の増幅を防ぐ）、cgrad の値は
+//! 丸めが割れた要素を forward の FMA 値・傾き `1 − n_fwd²` の一次式へ置き換え（`1 − n²` の増幅と二階の不整合を防ぐ）、cgrad の値は
 //! 1 階と REQ-2 統一複合判定で一致する（bit 一致は主張しない。`first_order()` 側は素の
 //! `Tape::backward` と bit 同一）。tolerance・baseline は変えない。
 //!
@@ -245,31 +245,47 @@ pub(super) fn gru_cell_cgrad<'c>(
     let r = blk(&pre_i, 0)?.add(&blk(&pre_h, 0)?)?.sigmoid();
     let z = blk(&pre_i, 1)?.add(&blk(&pre_h, 1)?)?.sigmoid();
     let q = blk(&pre_h, 2)?;
-    let n = r.mul(&q)?.add(&blk(&pre_i, 2)?)?.tanh();
+    let n_pre = r.mul(&q)?.add(&blk(&pre_i, 2)?)?;
+    let n = n_pre.tanh();
 
     // FMA 契約の補正と判定: forward は `r.mul_add(q, pre_i_n)`、上の再構築は積を先に丸める。
-    // (1) `n` の値を forward の FMA 値へ合わせる定数補正 `c = n_fwd − n_rec` を足す
-    //     （勾配は `n_rec` の構造を通るので微分可能性は保たれ、値だけが forward と一致する）。
-    //     `1 − n²` は n が ±1 に近いと丸め差が増幅されるため、許容内のずれでも補正が要る。
+    // (1) 丸めが割れる要素（`n_fwd != n_rec`）は値だけでなく微分因子も forward に合わせる。
+    //     値だけ `n_fwd − n_rec` を足すと、`d_pre_n` の `1 − n²` は forward 基準でも、その `n` を
+    //     子テープで微分する Tanh の逆伝播が補正前の出力（`1 − n_rec²`）を使い、二階（reset 列への
+    //     混合二階等）が forward 基準（`1 − n_fwd²`）から大きく外れる（PR #3952 codex P1・再指摘）。
+    //     そこで割れた要素だけ、値 `n_fwd`・傾き `1 − n_fwd²` の 1 次式
+    //     `n_fwd + (a − a₀)·(1 − n_fwd²)`（`a₀` は `a` の値の定数写し）へ置き換える。割れない要素は
+    //     `tanh` のまま（一次式は割れた要素の 3 階以上の曲率だけを落とす。二階までは forward と整合）。
     // (2) 相殺で `n` が REQ-2 複合判定外へずれる入力は従来どおり拒否する（tolerance は緩めない）。
     let n = {
+        let av = value_of(child, &n_pre)?;
+        let pv = value_of(child, &blk(&pre_i, 2)?)?;
         let rv = value_of(child, &r)?;
         let qv = value_of(child, &q)?;
-        let pv = value_of(child, &blk(&pre_i, 2)?)?;
         let nv = value_of(child, &n)?;
-        let (rs, qs, ps, ns) = (
+        let (rs, qs, ps, ns, avs) = (
             rv.host_slice(),
             qv.host_slice(),
             pv.host_slice(),
             nv.host_slice(),
+            av.host_slice(),
         );
-        let mut corr = Vec::with_capacity(ns.len());
-        for (((&rr, &qq), &pp), &nn) in rs.iter().zip(qs.iter()).zip(ps.iter()).zip(ns.iter()) {
+        let len = ns.len();
+        let (mut keep, mut mask_n, mut slope) = (
+            Vec::with_capacity(len),
+            Vec::with_capacity(len),
+            Vec::with_capacity(len),
+        );
+        let mut any_split = false;
+        for i in 0..len {
+            let (rr, qq, pp, nn) = (rs[i], qs[i], ps[i], ns[i]);
             let fused_f = rr.mul_add(qq, pp).tanh();
             let fused = f64::from(fused_f);
             let split = f64::from((rr * qq + pp).tanh());
             if fused.is_nan() && split.is_nan() {
-                corr.push(0.0f32);
+                keep.push(1.0f32);
+                mask_n.push(0.0f32);
+                slope.push(0.0f32);
                 continue;
             }
             let diff = (fused - split).abs();
@@ -278,11 +294,34 @@ pub(super) fn gru_cell_cgrad<'c>(
                     "GruCell: r·q + pre_i_n の FMA と分離丸めで n が REQ-2 の許容を超えてずれる（桁落ち）",
                 ));
             }
-            let c = fused_f - nn;
-            corr.push(if c.is_finite() { c } else { 0.0 });
+            if fused_f != nn && fused_f.is_finite() {
+                any_split = true;
+                keep.push(0.0);
+                mask_n.push(fused_f);
+                slope.push(1.0 - fused_f * fused_f);
+            } else {
+                keep.push(1.0);
+                mask_n.push(0.0);
+                slope.push(0.0);
+            }
         }
-        let c = Tensor::new(corr, &out_shape)?;
-        n.add(&child.var_no_grad(&c))?
+        if any_split {
+            // 一次式の `(a − a₀)·0` が非有限の `a` で NaN を撒かないよう、非有限があれば拒否する。
+            if avs.iter().any(|v| !v.is_finite()) {
+                return Err(reject(
+                    "GruCell: n の丸め補正が必要な入力に非有限の tanh 引数が混在する",
+                ));
+            }
+            let keep = child.var_no_grad(&Tensor::new(keep, &out_shape)?);
+            let mask_n = child.var_no_grad(&Tensor::new(mask_n, &out_shape)?);
+            let slope = child.var_no_grad(&Tensor::new(slope, &out_shape)?);
+            let a0 = child.var_no_grad(&av);
+            n.mul(&keep)?
+                .add(&n_pre.sub(&a0)?.mul(&slope)?)?
+                .add(&mask_n)?
+        } else {
+            n
+        }
     };
     let mut operands = vec![&m.x, &m.h_prev, &m.w_ih, &m.w_hh, &q];
     operands.extend(m.b_ih.iter().chain(m.b_hh.iter()));

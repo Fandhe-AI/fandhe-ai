@@ -990,4 +990,27 @@ fn gru_n_rounding_gap_is_not_amplified_into_gradient() {
         &want.iter().map(|&a| f64::from(a)).collect::<Vec<_>>(),
         "n 丸め差の増幅",
     );
+
+    // 二階: forward 基準では n=1 の微分因子 `1 − n²` が 0 なので、n 列の勾配を reset 列
+    // （w_hh[0]・w_ih[0]）へ微分した混合二階は 0（補正前の Tanh 逆伝播だと約 -93752）。
+    let g_n = cg
+        .grad(&wi)
+        .unwrap()
+        .expect("w_ih")
+        .narrow(1, 2, 1)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let second = child.backward(&g_n).expect("2 階");
+    for (v, name) in [(&wh, "w_hh"), (&wi, "w_ih")] {
+        let cv = cg.child_var(v).unwrap().expect("写し");
+        if let Some(grad) = second.get(&cv).unwrap() {
+            let d = dense(grad);
+            assert!(
+                d[0].abs() < 1e-3,
+                "{name} の reset 列への混合二階が forward 基準(0)からずれた: {}",
+                d[0]
+            );
+        }
+    }
 }
