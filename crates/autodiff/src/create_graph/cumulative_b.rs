@@ -1086,78 +1086,98 @@ mod tests {
     /// f32 の再現 `V_str` と一致する（判定の前提。CPU の演算順を写すので値として一致する）。
     /// 上流 `g` は損失の重み `wc`（追跡する葉）で、`Sum`→`Mul` の VJP が `g = wc` を bit で通す。
     fn emulation_case(kind: &str, x0: &[f32], w: &[f32]) {
-        let n = x0.len();
+        emulation_case_shaped(kind, x0, w, &[x0.len()], 0);
+    }
+
+    /// [`emulation_case`] の多 lane 版（`shape`・`dim` の lane ごとに、seed の行の lane 内の要素を再現と
+    /// 比べ、入力に NaN が無ければ lane の外の要素が 0 であることも確かめる）。
+    fn emulation_case_shaped(kind: &str, x0: &[f32], w: &[f32], shape: &[usize], dim: usize) {
+        let numel = x0.len();
+        let d = Dims::new(shape, dim);
+        let n = d.n;
         let tape = Tape::new_with_ops(naive_ops());
         let child = Tape::new_with_ops(naive_ops());
-        let x = tape.var(&Tensor::new(x0.to_vec(), &[n]).unwrap());
-        let wc = tape.var(&Tensor::new(w.to_vec(), &[n]).unwrap());
+        let x = tape.var(&Tensor::new(x0.to_vec(), shape).unwrap());
+        let wc = tape.var(&Tensor::new(w.to_vec(), shape).unwrap());
         let y = match kind {
-            "cumprod" => x.cumprod(0).unwrap(),
-            _ => x.logcumsumexp(0).unwrap(),
+            "cumprod" => x.cumprod(dim).unwrap(),
+            _ => x.logcumsumexp(dim).unwrap(),
         };
         let yv = y.value().host_slice().into_owned();
         let loss = y.mul(&wc).unwrap().sum(None).unwrap();
         let cg = tape
             .backward_create_graph(&loss, &child)
             .unwrap_or_else(|e| panic!("{kind} {x0:?}: 受理されるはず: {e:?}"));
-        let gx = cg.grad(&x).unwrap().unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap().reshape(&[numel]).unwrap();
         let cx = cg.child_var(&x).unwrap().unwrap();
         let cw = cg.child_var(&wc).unwrap().unwrap();
         let layout = cumulative_layout(&[n], 0).unwrap();
-        let x_t = Tensor::new(x0.to_vec(), &[n]).unwrap();
-        for k in 0..n {
-            let row = child.backward(&gx.narrow(0, k, 1).unwrap().sum(None).unwrap());
-            let row = row.unwrap();
-            let read = |v: &Var<'_>| match row.get(v).unwrap() {
-                Some(t) => t.host_slice().into_owned(),
-                None => vec![0.0f32; n],
-            };
-            let (hx, hw) = (read(&cx), read(&cw));
-            let (ex, eg) = if kind == "cumprod" {
-                let l: Vec<f32> = (0..n)
-                    .map(|j| if j == 0 { 1.0 } else { yv[j - 1] })
-                    .collect();
-                let a: Vec<f32> = (0..n)
-                    .map(|j| if j + 1 < n { x0[j + 1] } else { 0.0 })
-                    .collect();
-                let (s, h) = scan_forward::<f32>(w, &a);
-                cumprod_seed::<f32>(k, 1.0, &l, &s, &h, |cot_y| {
-                    let t = Tensor::new(cot_y, &[n]).unwrap();
-                    Ok(crate::eval::dense_vec(&cumprod_vjp_along(&x_t, &t, 0)))
-                })
-                .unwrap()
-            } else {
-                let c: Vec<f32> = (0..n)
-                    .map(|j| {
-                        if j + 1 < n {
-                            (yv[j] - yv[j + 1]).exp()
-                        } else {
-                            0.0
+        let no_nan = x0.iter().all(|v| !v.is_nan());
+        let same = |a: f32, b: f32| a == b || (a.is_nan() && b.is_nan());
+        for o in 0..d.outer {
+            for i in 0..d.inner {
+                let (xl, wl, yl) = (d.lane(x0, o, i), d.lane(w, o, i), d.lane(&yv, o, i));
+                let pos: Vec<usize> = (0..n).map(|a| (o * n + a) * d.inner + i).collect();
+                let x_t = Tensor::new(xl.clone(), &[n]).unwrap();
+                for k in 0..n {
+                    let seed = gx.narrow(0, pos[k], 1).unwrap().sum(None).unwrap();
+                    let row = child.backward(&seed).unwrap();
+                    let read = |v: &Var<'_>| match row.get(v).unwrap() {
+                        Some(t) => t.contiguous().host_slice().into_owned(),
+                        None => vec![0.0f32; numel],
+                    };
+                    let (hx, hw) = (read(&cx), read(&cw));
+                    let (ex, eg) = if kind == "cumprod" {
+                        let l: Vec<f32> = (0..n)
+                            .map(|j| if j == 0 { 1.0 } else { yl[j - 1] })
+                            .collect();
+                        let a: Vec<f32> = (0..n)
+                            .map(|j| if j + 1 < n { xl[j + 1] } else { 0.0 })
+                            .collect();
+                        let (s, h) = scan_forward::<f32>(&wl, &a);
+                        cumprod_seed::<f32>(k, 1.0, &l, &s, &h, |cot_y| {
+                            let t = Tensor::new(cot_y, &[n]).unwrap();
+                            Ok(crate::eval::dense_vec(&cumprod_vjp_along(&x_t, &t, 0)))
+                        })
+                        .unwrap()
+                    } else {
+                        let c: Vec<f32> = (0..n)
+                            .map(|j| {
+                                if j + 1 < n {
+                                    (yl[j] - yl[j + 1]).exp()
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .collect();
+                        let wv: Vec<f32> = (0..n).map(|j| (xl[j] - yl[j]).exp()).collect();
+                        let (t, h) = scan_forward::<f32>(&wl, &c);
+                        lcse_seed::<f32>(k, 1.0, (&wv, &c), &t, &h, |cot_y| {
+                            Ok(logcumsumexp_vjp_host(&xl, &cot_y, &layout).unwrap())
+                        })
+                        .unwrap()
+                    };
+                    // 値で一致（NaN は位置の一致）。
+                    for m in 0..n {
+                        assert!(
+                            same(hx[pos[m]], ex[m]),
+                            "{kind} {x0:?} lane=({o},{i}) k={k}: x への二階[{m}] 子テープ={} 再現={}",
+                            hx[pos[m]],
+                            ex[m]
+                        );
+                        assert!(
+                            same(hw[pos[m]], eg[m]),
+                            "{kind} {x0:?} lane=({o},{i}) k={k}: g への二階[{m}] 子テープ={} 再現={}",
+                            hw[pos[m]],
+                            eg[m]
+                        );
+                    }
+                    if no_nan {
+                        for q in (0..numel).filter(|q| !pos.contains(q)) {
+                            assert_eq!((hx[q], hw[q]), (0.0, 0.0), "{kind}: lane の外の二階は 0");
                         }
-                    })
-                    .collect();
-                let wv: Vec<f32> = (0..n).map(|j| (x0[j] - yv[j]).exp()).collect();
-                let (t, h) = scan_forward::<f32>(w, &c);
-                lcse_seed::<f32>(k, 1.0, (&wv, &c), &t, &h, |cot_y| {
-                    Ok(logcumsumexp_vjp_host(x0, &cot_y, &layout).unwrap())
-                })
-                .unwrap()
-            };
-            // 値で一致（NaN は位置の一致）。
-            let same = |a: f32, b: f32| a == b || (a.is_nan() && b.is_nan());
-            for m in 0..n {
-                assert!(
-                    same(hx[m], ex[m]),
-                    "{kind} {x0:?} k={k}: x への二階[{m}] 子テープ={} 再現={}",
-                    hx[m],
-                    ex[m]
-                );
-                assert!(
-                    same(hw[m], eg[m]),
-                    "{kind} {x0:?} k={k}: g への二階[{m}] 子テープ={} 再現={}",
-                    hw[m],
-                    eg[m]
-                );
+                    }
+                }
             }
         }
     }
@@ -1198,6 +1218,18 @@ mod tests {
             (vec![f32::NAN, 0.5], vec![1.0, 1.0]),
         ] {
             emulation_case("logcumsumexp", &x0, &w);
+        }
+        // 多 lane（rank 3・中間軸）。lane は (outer, inner) の組ごとに独立。
+        let x3: Vec<f32> = (0..30)
+            .map(|i| 1.0 + 0.3 * ((i as f32) * 0.77).sin())
+            .collect();
+        let w3: Vec<f32> = (0..30)
+            .map(|i| ((i as f32) * 1.3 + 0.2).cos() * 1.5)
+            .collect();
+        for kind in ["cumprod", "logcumsumexp"] {
+            emulation_case_shaped(kind, &x3, &w3, &[2, 5, 3], 1);
+            emulation_case_shaped(kind, &x3, &w3, &[2, 5, 3], 2);
+            emulation_case_shaped(kind, &x3, &w3, &[2, 5, 3], 0);
         }
     }
 }
