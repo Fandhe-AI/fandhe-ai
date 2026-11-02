@@ -2562,12 +2562,14 @@ impl Op {
     /// `Erf` はイシュー #3081（決定記録 §21.5・§22）で `true` になった
     /// （`Gelu` の `Φ(x)` は子テープへ `Erf` として記録するため `Erf` も
     /// 同時に対象。依存追加なし）。`ScalarUnaryOp`・
-    /// `ScalarBinaryOp` の既知 variant はすべて `true`。
+    /// `ScalarBinaryOp` の受理 variant は `scalar_unary_replayable`／`scalar_binary_replayable` の列挙どおり
+    /// （`Selu`・`Celu`・`Softsign`・`Hardsigmoid`・`LogSigmoid`・`Atan2` は #2649・#2634 以来 `false`）。
     ///
     /// 索引・累積 8 variant（`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・
     /// `Cummax`・`Cummin`・`Cumsum`）はイシュー #3083（決定記録 §25）で `true` になった。
     /// `IndexedScatterReduce` は Sum・Mean・Amax・Amin だけ `true`（イシュー #3802・§62）。
-    /// `Prod` は `false` のまま（`Cumprod`・`Logcumsumexp` はイシュー #3803 で `true`）。
+    /// `Prod` は承認済みだが未実装のため現状は `false`（決定記録 §72。`Cumprod`・`Logcumsumexp` は
+    /// イシュー #3803 で `true`）。
     ///
     /// プーリング族（`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・
     /// `AdaptiveAvgPool2d`）はイシュー #3085（決定記録 §29）で `true` になった。
@@ -2576,7 +2578,7 @@ impl Op {
     ///
     /// 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・
     /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §26）で `true`
-    /// になった（残る 16 variant は fail-closed のまま。§26 の表）。
+    /// になった（残りの損失 Op は §39・§40・§53〜§55 で対象化済み。`CtcLoss` だけが承認による恒久 `false`）。
     ///
     /// 選択縮約 4 variant（`Max`・`Min`・`Amax`・`Amin`）はイシュー #3789（決定記録 §34）で `true` になった。
     /// 選択縮約の `OrderSelect`・`MedianAll`・`Quantile` はイシュー #3790（決定記録 §34）で
@@ -2585,6 +2587,15 @@ impl Op {
     ///
     /// `Pad`・`PadMode`・`MaskedFill` はイシュー #3084（決定記録 §29）で `true`
     /// になった（設計 doc §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
+    ///
+    /// **最終一覧と残る fail-closed（イシュー #3812・決定記録 §72）**: `Op` 単位で `false` なのは
+    /// `CtcLoss`（承認による恒久）と §21.2 A 区分の `ResidentLeaf`・`LinearResident`・`LinearAct`・`Custom`・
+    /// `OneHot` の 6 つ。`MatrixNorm` の `Nuc`・`Spectral` は現時点 `false`（再評価の起票は承認済み・未起票）、
+    /// `IndexedScatterReduce` の `Prod` は承認済み・未実装。Op は `true` でも入口検査
+    /// （`validate_ancestors`）が入力の範囲で拒否するもの（`Inv`・`Solve`・`SlogdetLogAbsDet` の overflow、
+    /// `Pinv`・`Lstsq` の打ち切り、QR の横長、SVD・Eigh の縮退、正規化の非有限要素、±inf 入力）は
+    /// 戻り値の `true` とは別軸の拒否範囲である。対象集合の固定値は facade の正ガード
+    /// （`crates/facade/tests/api_surface.rs::create_graph_supported_op_set_matches_approved_list`）が持つ。
     ///
     /// **網羅 match（ワイルドカードなし）とする理由**: `is_checkpoint_
     /// eligible`／`for_each_input` と同じ——新しい `Op` variant を
@@ -2680,7 +2691,7 @@ impl Op {
             | Op::MaskedFill { .. }
             | Op::PadMode { .. }
             // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30。`Det` の受理拡大は #3810・§70）。分解系は
-            // `false` のまま。`Stft`／`Istft` と内部 Op
+            // 後続で対象化済み（下の QR・SVD・Eigh）。`Stft`／`Istft` と内部 Op
             // `StftAdjoint`／`IstftAdjoint` はイシュー #3804（決定記録 §42・§63。随伴 Op の対）。
             | Op::Stft { .. }
             | Op::Istft { .. }

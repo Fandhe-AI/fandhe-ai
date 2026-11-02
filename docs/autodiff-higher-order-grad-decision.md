@@ -5336,3 +5336,49 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 実機（CUDA・Metal）の結果はすべて**未実測**で、#3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らない。ROCm は対象外。
 - スコープ外: `EmbeddingBag` の `padding_idx` の二階（create_graph の対象外のまま）、forward-mode AD の新設、PyTorch 実測ハーネス・fixture（§47.15）、追跡表の項目 5 を閉じること（#3812）。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`Op` の variant と payload・`supports_create_graph` の値・`AutodiffError` の variant・facade の公開名とシグネチャ・`jvp`／`jacfwd` の値・`padding_idx: None` の二階・tolerance・baseline・依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・`docs/spec`・既存節の本文（§47.0 の状態行と §47.7 のチェック欄を除く）。
+
+## 72. 実装記録（イシュー #3812・親 #3719 系。create_graph の対象 Op 一覧の正ガードと、残る fail-closed の契約化）
+
+### 72.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity は未実測）。コードの挙動は変えない。変えたのはテスト・rustdoc・docs だけ。節番号は、main が §71 まで使い open PR も無かったため §72 を取った。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。C 区分 24 Op はすべて実装、B 区分は §38〜§44 の推奨どおり（`CtcLoss` は恒久 fail-closed、`Pinv`・`Lstsq` は打ち切りなし、`MatrixNorm` は `Fro`・`One`・`Inf`、QR は m ≥ n）、拒否範囲は §45 の案 A（S0）と §46 の `Det` だけ受理（`Inv`・`Solve`・`SlogdetLogAbsDet` は対象外として恒久化）、§47 は B1。これ以上の承認は主張しない。
+
+### 72.1 最終一覧（`Op::supports_create_graph` の再抽出結果）
+
+`crates/autodiff/src/tape.rs` の `supports_create_graph`（網羅 match・ワイルドカードなし）の腕を機械的に抽出した結果。
+
+| 区分 | 内容 | 根拠 |
+|---|---|---|
+| T: 無条件で受理（118 Op） | 四則・`MatMul`（rank 2）・構造 Op・Conv2d／3d 族（内部 Op `ConvWeightGradHost`・`BatchNormGradHost`・`Unfold3d`・`Fold3d`・`ConvWeightGradHost3d`・`StftAdjoint`・`IstftAdjoint` を含む）・プーリング・Softmax 系・索引累積・損失・正規化・Pad 系・FFT・線形代数（`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`・`SlogdetSign`・`MatrixRank`・`Cholesky`・`Pinv`・`Lstsq`）・選択縮約・統計縮約・RNN・分解（`QrQ`・`QrR`・`Svd*`・`Eigh*`） | §21・§22〜§31・§49〜§71 |
+| P: payload で判定（6 Op） | `IndexedScatterReduce`（`Sum`・`Mean`・`Amax`・`Amin`）、`Interpolate`（既知 7 mode）、`VectorNorm`（`L1`・`L2`）、`MatrixNorm`（`Fro`・`One`・`Inf`）、`ScalarUnary`（`scalar_unary_replayable` の 23 variant）、`ScalarBinary`（同 13 variant） | 同上 |
+| F1: Op 単位の恒久 fail-closed（6 Op） | `ResidentLeaf`・`LinearResident`・`LinearAct`・`Custom`・`OneHot`（§21.2 A 区分）、`CtcLoss`（承認による恒久。§40.16・§60） | §21.2、#3767 回答 2 |
+| F2: Op は受理するが入力の拒否範囲を恒久化 | `Inv`・`Solve`・`SlogdetLogAbsDet` の overflow／ゼロ化域の入力（§46.14・§70.2。**Op 自体は `true`**）、`Pinv`・`Lstsq` の打ち切りあり／rcond 閾値付近（§43.16）、QR の横長・rank 落ち・空行列（§44.14）、SVD・Eigh の縮退・σ == 0・空行列（§44・§68）、`LayerNorm`／`BatchNorm` の非有限要素・`eps = 0` の定数行・構造段の判定（§45.19。案 B〈S2〉は採らない）、±inf 入力の型付き拒否（NaN は伝播） | #3767 回答 3、各節 |
+| F3: 現時点 fail-closed・再評価の起票は承認済み・未起票 | `MatrixNorm` の `Nuc`・`Spectral`（§43.16 で拒否を維持。§44 点 11 で起票は承認済みだが未起票。§66・§68 に記載） | **無条件の「恒久」とは書かない** |
+| F4: 承認済みだが未実装 | `IndexedScatterReduce` の `Prod`（§41.16 の承認は 3 variant の実装。§62 が scan 補助待ちとして先送りし、§64 で補助は入ったが受け皿 issue は未起票） | **恒久 fail-closed ではない** |
+| F5: 本ツリー（追跡表 3〜5）の外の既存 fail-closed | `ScalarUnaryOp` の `Selu`・`Celu`・`Softsign`・`Hardsigmoid`・`LogSigmoid`（#2649）、`ScalarBinaryOp::Atan2`（#2634） | 記録のみ。承認の有無は事実以上に書かない |
+| 未知 variant | `#[non_exhaustive]` の未知 variant（`ScalarUnaryOp`・`ScalarBinaryOp`・`InterpolateMode`・`VectorNormOrd`・`MatrixNormOrd`・`ScatterReduceMode`）は安全側の `false` | 契約の本文。外部クレートの `#[non_exhaustive]` のため、テストからは未知 variant を作れず実行では確かめられない（ソース上のワイルドカード腕で担保） |
+
+### 72.2 実装したもの
+
+- 正ガード（`crates/facade/tests/api_surface.rs`）:
+  - `create_graph_supported_op_set_matches_approved_list`: `strip_comments_and_literals` 後に `supports_create_graph` の腕を構文解析し、T・P・F1 の集合、payload の列挙値、ワイルドカード腕の不在、Op の重複を固定値と突き合わせる。`scalar_unary_replayable`・`scalar_binary_replayable`・`scatter_reduce::mode_supported` の列挙値も固定する。
+  - `create_graph_supported_op_set_detects_each_category`: F1 から T、T から F1、T の欠落、ワイルドカード追加、payload 列挙の拡大・縮小、payload 腕の削除、Op の重複、`name_f64` の取り違えを合成ソースで検出できることを確かめる（コメント内の `Op::CtcLoss`・空白改行の変更は無害）。
+  - `create_graph_facade_coverage_map_matches_supported_set`: 対象 Op ごとに、`create_graph_facade.rs` の有効な `#[test]` 名（`#[ignore]` なし）を対応表で固定する。拒否側は、F1 の全 Op と残る拒否の挙動テスト名を固定し、facade から到達できない 4 件（`LinearAct`・`LinearResident`・`OneHot`・`ResidentLeaf`）は `None` として明示する。
+  - `create_graph_facade_coverage_map_detects_each_category`: キー欠落・余分なキー・重複・存在しないテスト名・`#[test]` なし・`#[ignore]` を検出できることを確かめる。
+- facade 挙動テスト（`crates/facade/tests/create_graph_facade.rs`）: 受理側に `basic_and_structure_ops_`・`index_select_ops_`・`pool3d_fold_padmode_ops_`・`fft_family_`・`solve_slogdet_`・`elementwise_margin_losses_`・`scalar_unary_binary_`・`conv_transpose2d_` の各 `_create_graph_via_facade` を足した（非線形の包みで `H v ≠ 0`、`first_order` と素の `backward` の bit 一致、`create_graph` を経由しない中央差分と REQ-2 判定の突合。tolerance は新設・緩和しない）。拒否側に `ctc_loss`・`scatter_reduce(Prod)`・`matrix_norm(Spectral)`・`selu` 等 5 つと `atan2`・`inv`／`solve` の overflow・`lstsq` の打ち切り・`svd` の縮退の各テストを足した（`Err(Backward)` と `child.leaf_count() == 0`）。`scatter_reduce(Prod)` のテストは名前に `_rejected_today_` を含め、「未実装の現状固定」であって恒久契約ではない。実装されたら受理テストへ反転する。
+- rustdoc: `Op::supports_create_graph`（`tape.rs`）の古い記述（「残る 16 variant は fail-closed」「`Prod` は #3803 待ち」「ScalarUnary の既知 variant はすべて true」）を最終一覧へ直した。facade `Tape::backward_create_graph` の rustdoc に「対象外として残る範囲」を足し、`Prod` の文言を「承認済み・未実装のため現状は型付きエラー」へ直した。doctest と needle は変えていない。
+
+### 72.3 設計・計画からの逸脱と所有者への報告
+
+1. **逸脱（受け入れ条件 1）**: `IndexedScatterReduce` の `Prod` は #3767 で実装が承認されている（§41.16）が未実装で、受け皿 issue も無い。本件は `test(facade)` の範囲のため実装していない。受け皿の起票は所有者の判断を仰ぐ。
+2. `MatrixNorm` の `Nuc`・`Spectral` の再評価 issue は §44 点 11 で起票が承認済みだが未起票。無承認では起票しない（`out-of-scope-tracking.md`）ため、起票してよいかを所有者に確認する。
+3. 上の 2 点により追跡表の項目 4 は「保留 0 件」と言えず、「0.14.0 の区分」は「未確定」のままにした（項目 3・5 は「公開」）。PR は `Refs #3812` にとどめる。
+4. `SlogdetLogAbsDet` の overflow 入力は、facade から再現できる拒否入力を特定できなかったため、拒否テストは `Inv`・`Solve` のみ（`SlogdetLogAbsDet` は Op として受理する挙動テストだけ）。F2 の分類としては §46.14・§70.2 のとおり扱う。
+5. `ScalarUnary` の `Erf` は、f32 の中央差分の雑音が REQ-2 判定を外れやすく代表テストから外した（`gelu_create_graph_via_facade` が子テープ上の `Erf` 記録を通して固定する）。tolerance は動かしていない。
+
+### 72.4 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果は**未実測**。#3856〜#3859 へ申し送る。baseline は作らない。
+- スコープ外: `Prod`・`Nuc`・`Spectral` の実装、`TapeF64` の対象一覧（追跡表の項目 2）、GPU 実機 parity、新しい公開名、`docs/spec`、ruleset の変更。
+- 変えていないもの: `Op` の variant・payload・`supports_create_graph` の値・1 階の VJP・forward・facade の公開名とシグネチャ・`AutodiffError` の variant・tolerance・baseline・依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・`docs/spec`・既存節の本文。
