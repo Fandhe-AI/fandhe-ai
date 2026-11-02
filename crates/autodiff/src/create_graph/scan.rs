@@ -13,8 +13,10 @@
 //! 逐次ループ展開（O(n) ノード）と O(n²) の行列形は採らない（§41.10）。
 //! 最終段では `A` を更新しない（使わない積で余計な overflow を作らないため）。
 //!
-//! ホスト側の再計算 [`scan_lane_host`] は同じ f32 演算順で各段を再現し、総括判定
-//! （`cumulative_b` の `check_*`）と単体テストが共用する。
+//! ホスト側の再計算 [`scan_lane_host`] は同じ f32 演算順で各段を再現し、総括判定の第 1 軸
+//! （`cumulative_b` の段検査）と単体テストが共用する。第 2 軸（二階の要素ごとの判定。決定記録
+//! §64.2）は、[`scan_forward`]／[`scan_backward`] で構造の forward と子テープの逆伝播を
+//! [`Num`]（`f32` は構造そのもの、[`Rf`] は f64 の参照値と絶対値和）で演算順どおりに再現する。
 
 use fandhe_ai_tensor_core::Tensor;
 
@@ -219,6 +221,151 @@ pub(super) fn scan_cotangent_bound(
         cot_a = next_a;
     }
     (cot_s, cot_a, max_abs)
+}
+
+/// 二階の判定（第 2 軸）で構造の演算列を再現する数値型。`f32` は子テープが実際に行う演算
+/// （`V_str`）、[`Rf`] は同じ演算列を f64 で評価した参照値 `V` と各項の絶対値の和 `M`。
+pub(super) trait Num: Copy {
+    fn zero() -> Self;
+    fn add(self, o: Self) -> Self;
+    fn mul(self, o: Self) -> Self;
+    fn neg(self) -> Self;
+}
+
+impl Num for f32 {
+    fn zero() -> Self {
+        0.0
+    }
+    fn add(self, o: Self) -> Self {
+        self + o
+    }
+    fn mul(self, o: Self) -> Self {
+        self * o
+    }
+    fn neg(self) -> Self {
+        -self
+    }
+}
+
+/// f64 の参照値。`v` は値、`m` は同じ式を各項の絶対値で評価した大きさ（和は足し、積は掛ける。
+/// 相殺が無ければ `|v|` と等しい）、`t` は入力の NaN への依存（taint）。定数は [`Rf::k`] で作り、
+/// NaN の定数（forward の参照値のうち入力の NaN が届いたもの）で `t` が立ち、演算で被演算子から伝わる。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Rf {
+    pub(super) v: f64,
+    pub(super) m: f64,
+    pub(super) t: bool,
+}
+
+impl Rf {
+    /// 定数（f64 の forward 参照値・入力・seed）。大きさは `|v|`、NaN なら taint 付き。
+    pub(super) fn k(v: f64) -> Rf {
+        Rf {
+            v,
+            m: v.abs(),
+            t: v.is_nan(),
+        }
+    }
+}
+
+impl Num for Rf {
+    fn zero() -> Self {
+        Rf::k(0.0)
+    }
+    fn add(self, o: Self) -> Self {
+        Rf {
+            v: self.v + o.v,
+            m: self.m + o.m,
+            t: self.t || o.t,
+        }
+    }
+    fn mul(self, o: Self) -> Self {
+        Rf {
+            v: self.v * o.v,
+            m: self.m * o.m,
+            t: self.t || o.t,
+        }
+    }
+    fn neg(self) -> Self {
+        Rf { v: -self.v, ..self }
+    }
+}
+
+/// 段ごとの更新前の `(S, A)`（[`scan_forward`] が作り [`scan_backward`] が係数として読む）。
+pub(super) type ScanHist<T> = Vec<(Vec<T>, Vec<T>)>;
+
+/// [`linear_scan`] の forward を [`Num`] で再現し、最終の `S` と各段の更新前の `(S, A)` を返す
+/// （[`scan_backward`] が係数として使う）。演算順は [`scan_lane_host`] と同じ（積を丸めてから和、
+/// 最終段では `A` を更新しない。範囲外の `shift` は 0 との積も含めて密に計算する）。
+/// 反復回数は `2·steps·n`（`S`・`A` の更新）と各段の写し `2·steps·n` の計 `4·steps·n` 以下。
+pub(super) fn scan_forward<T: Num>(b: &[T], a: &[T]) -> (Vec<T>, ScanHist<T>) {
+    let n = b.len();
+    let steps = scan_steps(n);
+    let mut s = b.to_vec();
+    let mut a_cur = a.to_vec();
+    let mut hist = Vec::with_capacity(steps);
+    let mut k = 1usize;
+    for step in 0..steps {
+        let (s_old, a_old) = (s.clone(), a_cur.clone());
+        for i in 0..n {
+            let shifted = if i + k < n { s_old[i + k] } else { T::zero() };
+            s[i] = s_old[i].add(a_old[i].mul(shifted));
+        }
+        if step + 1 < steps {
+            for i in 0..n {
+                let shifted = if i + k < n { a_old[i + k] } else { T::zero() };
+                a_cur[i] = a_old[i].mul(shifted);
+            }
+        }
+        hist.push((s_old, a_old));
+        k *= 2;
+    }
+    (s, hist)
+}
+
+/// 子テープが [`linear_scan`] の Op 列（段ごとに `Narrow`・`Concat`・`Mul`・`Add`、最終段以外は
+/// `A` の `Narrow`・`Concat`・`Mul`）を逆順に処理する逆伝播を、同じ演算順で [`Num`] により再現する。
+/// `cot_out` は最終 `S` の cotangent。返り値は `(b への cotangent, 初期 A への cotangent)`。
+///
+/// 演算順（`backward.rs` はノードを生成の逆順に処理し、`accumulate` は既存の勾配に後から来た寄与を
+/// 足す）: 段の更新前の `A` へは「`A` 更新の `Mul` の左（`cot_A'·shift(A)`）」→「同じ `Mul` の右から
+/// `Narrow` を経た寄与（`cot_A'·A` を `k` だけ後ろへ）」→「`S` 更新の `Mul` の左（`cot_S'·shift(S)`）」の
+/// 順に、更新前の `S` へは「`Add` の恒等」→「`Mul` の右から `Narrow` を経た寄与（`cot_S'·A` を `k` だけ
+/// 後ろへ）」の順に足す。`shift` の詰め物（0 の定数）への寄与は捨てる。
+/// 反復回数は段ごとに `3·n`（作業領域の確保・`S` の写し・本体）の計 `3·steps·n` 以下。
+pub(super) fn scan_backward<T: Num>(
+    hist: &[(Vec<T>, Vec<T>)],
+    cot_out: Vec<T>,
+) -> (Vec<T>, Vec<T>) {
+    let n = cot_out.len();
+    let steps = hist.len();
+    let mut cot_s = cot_out;
+    let mut cot_a = vec![T::zero(); n];
+    for step in (0..steps).rev() {
+        let k = 1usize << step;
+        let (s_in, a_in) = &hist[step];
+        let a_updated = step + 1 < steps;
+        let mut ga = vec![T::zero(); n];
+        let mut gs = cot_s.clone();
+        for i in 0..n {
+            let mut acc = T::zero();
+            if a_updated {
+                let a_shift = if i + k < n { a_in[i + k] } else { T::zero() };
+                acc = cot_a[i].mul(a_shift);
+                if i >= k {
+                    acc = acc.add(cot_a[i - k].mul(a_in[i - k]));
+                }
+            }
+            let s_shift = if i + k < n { s_in[i + k] } else { T::zero() };
+            ga[i] = acc.add(cot_s[i].mul(s_shift));
+            if i >= k {
+                gs[i] = gs[i].add(cot_s[i - k].mul(a_in[i - k]));
+            }
+        }
+        cot_s = gs;
+        cot_a = ga;
+    }
+    (cot_s, cot_a)
 }
 
 #[cfg(test)]

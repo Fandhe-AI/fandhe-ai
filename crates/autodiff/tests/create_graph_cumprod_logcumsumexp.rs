@@ -6,6 +6,8 @@
 //!   入力と、最初の零より後ろの混合二階 `H[j,z]`（除算形では取りこぼす）を含む。
 //! - 孫テープ（`jvp_create_graph`）の再生が独立の方向微分と一致する。
 //! - 必須ベクトル（§41.5）は 3 段（1 階・`cg.grad`・孫テープ）で「有限」か「型付き拒否（`child` 空）」。
+//! - 総括判定の第 2 軸（二階の要素ごとの判定）: PR #3959 のレビューで指摘された入力の拒否と、同形の
+//!   受理入力の正のプローブ、計算量の上限（長い lane の拒否と上限内の受理）。
 //! - 入口規則・空テンソル・隣接する未対応 Op の fail-closed。
 //!
 //! GPU 実機 parity は `crates/facade/tests/create_graph_gpu_parity.rs`（族名 `cumulative_b`）。
@@ -557,6 +559,141 @@ fn cum_b_mandatory_vectors_finite_or_rejected_in_three_stages() {
         Expect::Reject,
         "lcse g=[3e38,-3e38]",
     );
+}
+
+// --- 総括判定の第 2 軸（PR #3959 のレビュー指摘の回帰） ------------------------------
+
+/// PR #3959 のレビューで指摘された入力。どれも二階の要素ごとの判定（構造の f32 の再現と f64 の参照の
+/// 直接比較）で拒否され、`child` は空のまま。指摘 1・2（最後の 2 件）は修正前の実装で受理されていた。
+#[test]
+fn cum_b_reviewed_cancellation_inputs_are_rejected() {
+    // Cumprod: scan の桁落ち（S[1] が 0、真値 1）。
+    run_vector(
+        Kind::Cumprod,
+        &[1.0; 4],
+        &[0.0, 1e10, 1.0, -1e10],
+        Expect::Reject,
+        "cumprod scan の桁落ち",
+    );
+    // Cumprod: 桁落ちの prefix 乗数での増幅（H[2,0] が 0、解析値 1）。
+    run_vector(
+        Kind::Cumprod,
+        &[1e20, 1.0, 1.0, 1.0, 1.0],
+        &[0.0, 0.0, 1e-10, 1e-20, -1e-10],
+        Expect::Reject,
+        "cumprod prefix 乗数",
+    );
+    // Logcumsumexp: 二階の桁落ち増幅（H[0,0] が 0、解析値 約 20.6）。
+    run_vector(
+        Kind::Logcumsumexp,
+        &[0.0, -20.0],
+        &[0.0, 1e10],
+        Expect::Reject,
+        "lcse 二階の桁落ち",
+    );
+    // Logcumsumexp: 項の合算での相殺（H[0,0] 解析値 0）。
+    run_vector(
+        Kind::Logcumsumexp,
+        &[0.0; 3],
+        &[1001.0, -8000.0, 9000.0],
+        Expect::Reject,
+        "lcse 合算の相殺",
+    );
+    // 指摘 1（P1）: Cumprod の scan の逆伝播の fan-in での相殺。H[0,1] は構造上
+    // 1e10 + f32(-1e10 + 1) = 0、解析値 1（forward の S は別の結合順で 1 になる）。
+    run_vector(
+        Kind::Cumprod,
+        &[1.0; 4],
+        &[1e10, 1e10, -1e10, 1.0],
+        Expect::Reject,
+        "cumprod 逆伝播の相殺",
+    );
+    // 指摘 2（P1）: Logcumsumexp の係数 c・w の丸め（f32 の out から作る）。構造の H[0,0] は
+    // 約 3.83e-4、解析値 0。
+    run_vector(
+        Kind::Logcumsumexp,
+        &[10000.0; 3],
+        &[0.0, -8.0, 9.0],
+        Expect::Reject,
+        "lcse 係数の丸め",
+    );
+}
+
+/// 正のプローブ: 上の拒否入力と同じ形で、相殺・係数の丸めが無い入力は受理され、二階が独立な
+/// 有限差分と REQ-2 で一致する。
+#[test]
+fn cum_b_reviewed_shapes_without_cancellation_are_accepted_and_match() {
+    let cases: [(Kind, &[f32], &[f32]); 4] = [
+        (Kind::Cumprod, &[1.0, 1.0, 1.0, 1.0], &[1.0, 1.0, -1.0, 1.0]),
+        (
+            Kind::Cumprod,
+            &[1.5, 1.0, 0.5, 2.0, 1.0],
+            &[0.0, 0.0, 1.0, 1.0, -1.0],
+        ),
+        (Kind::Logcumsumexp, &[0.0, 0.0, 0.0], &[0.0, -0.8, 0.9]),
+        (Kind::Logcumsumexp, &[0.0, -2.0], &[0.0, 1.0]),
+    ];
+    for (kind, x0, c) in cases {
+        run_vector(kind, x0, c, Expect::Accept, &format!("{kind:?} {x0:?}"));
+        let build = Loss {
+            kind,
+            dim: 0,
+            c,
+            cubic: false,
+        };
+        let shape = [x0.len()];
+        let a = analytic_hessian(&build, x0, &shape);
+        let num = finite_diff_hessian(&build, x0, &shape, 2e-2);
+        assert_hessian_close(&a, &num, &format!("{kind:?} {x0:?} c={c:?}"));
+    }
+}
+
+/// 計算量の上限（P2）: 二階の要素ごとの判定は lane あたり `n²` に比例するので、走査量が 2^27 を
+/// 超える入力（長さ 65536 の lane）は判定へ入る前に `Err(Backward)` で拒否され `child` は空。
+/// 上限内の長い lane（512）は受理され、`cg.grad` は 1 階と bit 一致する。修正前の実装は長さ 65536 の
+/// lane を受理していた（`Cumprod` は判定が O(n log n)、`Logcumsumexp` は n² の走査の後に受理）。
+#[test]
+fn cum_b_judge_budget_rejects_long_lane_and_accepts_within_budget() {
+    for kind in [Kind::Cumprod, Kind::Logcumsumexp] {
+        let n = 65536usize;
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![1.0; n], &[n]));
+        // 上流を小さくして第 1 軸・係数の照合を通す（修正前の実装は Logcumsumexp で n² の走査に入り、
+        // CPU の debug ビルドで約 90 秒かかって受理していた）。
+        let loss = linear_loss(&tape, kind, &x, 0, &vec![1e-10; n]).unwrap();
+        let err = tape
+            .backward_create_graph(&loss, &child)
+            .expect_err("走査量の上限を超える lane は拒否");
+        assert!(
+            matches!(err, AutodiffError::Backward(_)),
+            "{kind:?}: {err:?}"
+        );
+        assert!(child.is_empty(), "{kind:?}: child 空");
+
+        let n = 512usize;
+        let x0: Vec<f32> = (0..n)
+            .map(|i| match kind {
+                Kind::Cumprod => 1.0 + 0.002 * ((i as f32) * 0.37).sin(),
+                Kind::Logcumsumexp => ((i as f32) * 0.37).sin(),
+            })
+            .collect();
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(x0, &[n]));
+        let loss = linear_loss(&tape, kind, &x, 0, &vec![1.0; n]).unwrap();
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .unwrap_or_else(|e| panic!("{kind:?}: 上限内の lane は受理: {e:?}"));
+        let first = cg.first_order().get(&x).unwrap().unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap().to_tensor();
+        assert_eq!(
+            bits(first),
+            bits(&gx),
+            "{kind:?}: cg.grad は 1 階と bit 一致"
+        );
+        assert!(gx.host_slice().iter().all(|v| v.is_finite()));
+    }
 }
 
 // --- 入口規則 ---------------------------------------------------------------------
