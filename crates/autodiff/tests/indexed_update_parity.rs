@@ -811,16 +811,44 @@ fn huge_broadcast_view_is_rejected_before_allocation() {
 }
 
 #[test]
-fn create_graph_is_a_typed_error_not_a_panic() {
+fn create_graph_accepts_sum_mean_amax_amin_and_rejects_prod_typed() {
+    // イシュー #3802: Sum・Mean・Amax・Amin は受理（cg.grad は 1 階と bit 一致）、Prod は
+    // #3803 の scan 補助待ちで型付きエラー（panic しない・child は空）。
+    for mode in [
+        ScatterReduceMode::Sum,
+        ScatterReduceMode::Mean,
+        ScatterReduceMode::Amax,
+        ScatterReduceMode::Amin,
+    ] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+        let s = tape.var(&t(vec![1.0], &[1]));
+        let loss = scatter_reduce(&x, 0, &ti(vec![0], &[1]), &s, mode, true)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let want = tape.backward(&loss).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        assert!(!child.is_empty(), "{mode:?}");
+        let bits = |v: Vec<f32>| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        let dense = |v: &Tensor<f32>| v.contiguous().as_slice().unwrap().to_vec();
+        assert_eq!(
+            bits(dense(&cg.grad(&x).unwrap().unwrap().to_tensor())),
+            bits(dense(want.get(&x).unwrap().unwrap())),
+            "{mode:?}"
+        );
+    }
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0], &[2]));
     let s = tape.var(&t(vec![1.0], &[1]));
-    let loss = scatter_reduce(&x, 0, &ti(vec![0], &[1]), &s, ScatterReduceMode::Sum, true)
+    let loss = scatter_reduce(&x, 0, &ti(vec![0], &[1]), &s, ScatterReduceMode::Prod, true)
         .unwrap()
         .sum(None)
         .unwrap();
     assert!(tape.backward_create_graph(&loss, &child).is_err());
+    assert!(child.is_empty());
 }
 
 #[test]

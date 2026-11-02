@@ -1003,7 +1003,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 | `Sort`・`Topk` | 対象 | V2 | `gather(dim, index)` | Gather と同じ |
 | `Cummax`・`Cummin` | 対象 | V2 | `gather(dim, index)` | Gather と同じ（索引は必ず重複する） |
 | `Cumsum` | 対象 | V3 | `cumsum(dim)` | 構造 `flip → cumsum → flip`、値 `cumsum_vjp_along` |
-| `IndexedScatterReduce` | fail-closed のまま | — | — | 1 階 VJP がモードごとに入力依存のホストカーネル（prod／amax／amin のタイ規則）で、replayable な `Var` 演算だけの構造グラフを組めない |
+| `IndexedScatterReduce` | Sum・Mean・Amax・Amin は #3802 で対象（§41・§62）。Prod は fail-closed のまま | V3 | `scatter_reduce(dim, index, src, mode, include_self)` | 値は `scatter_reduce_vjp_host`、構造は `Gather`＋定数係数＋`where_cond`（当初は「モードごとの入力依存ホストカーネルで構造グラフを組めない」としていたが、値は V3 で載せ、構造は線形な合成に限る方式で解いた） |
 | `Cumprod` | fail-closed のまま | — | — | 1 階は `WideFloat` の Horner 型再帰。合成グラフでは §21.1(5) の overflow 契約を保てない |
 | `Logcumsumexp` | fail-closed のまま | — | — | 1 階は lane ごとの f64 prefix 再計算。合成すると `exp` の中間 overflow が出るため S1 スケーリングの設計が要り、2h 枠を超える |
 
@@ -4777,6 +4777,56 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: GPU 実機 parity の実測と測り方の変更（#3739・§48）、f64 テープの create_graph、非 fused モードの公開、双方向・projection などの新しい variant、facade の公開名の追加、他の B 区分の Op。stacked／packed 系の LSTM API は本 PR のテストで確かめていないため facade の rustdoc では対象として書いていない。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`is_checkpoint_eligible`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
 - 本 PR は `Refs #3796 #3728 #3767 #3719 #3856 #3858`。
+
+## 61. 実装記録（イシュー #3802・親 #3719 系。create_graph の B 区分・`IndexedScatterReduce` の Sum・Mean・Amax・Amin）
+
+### 62.0 位置づけ・承認根拠
+
+- 状態: **一部実装済み**。設計は §41（#3732）、本節はその実装記録。`Prod` mode は §41.11・§41.13 が「区分つき scan 補助（#3803 の ①）の後」と順序を固定しており、本 PR の時点で scan 補助が main に無いため**実装していない**（fail-closed のまま）。これは §41.16 の「3 variant を実装する」承認の範囲の一部を先送りするもので、隠さずここに明記する。受け皿（#3803 へ含めるか、新規 issue か）は所有者判断で、本 PR では起票しない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。「B 区分は §38〜§44 の推奨どおり」で、§41.16 の 10 点（3 variant を実装、値は V3、Amax／Amin のタイは均等分配、外れる入力は型付きで拒否、非有限は §33 と同じ規則、隣接見本は `Op::Custom`、GPU parity は §48 の S3 方式）も推奨どおり。個別の承認を上乗せして主張しない。
+- 節番号: 計画時点で #3801 の PR（#3956）が §60 を使うため、本節は §62（§61 は #3796 の LSTM）。
+
+### 62.1 実装したもの
+
+| mode | d_src（構造） | d_input（構造） | 値 |
+|---|---|---|---|
+| Sum | `Gather(g)` | `include_self` なら `g`、そうでなければ触れられた位置を `where_cond` で 0 | V3（`scatter_reduce_vjp_host`） |
+| Mean | `Gather(g) ⊙ 1/m`（`m = cnt + include_self`） | `include_self` なら `g ⊙ 1/(cnt+1)`（未タッチは係数 1）、そうでなければ触れられた位置を 0 | V3 |
+| Amax／Amin | `where_cond(sel, Gather(g) ⊙ 1/max(ties,1), 0)` | `include_self` かつ入力が極値と等しい位置だけ `g ⊙ 1/ties`、他の触れられた位置は 0 | V3 |
+
+- 値はすべて `scatter_reduce_vjp_host`（親の記録値の input・src・index と子テープ上の `g` の実体値）を `push_v3` で載せる。f32 の `Var` 合成は微分を流すためだけで、値は決めない（Mean の `g/m` を f32 のまま使うと、寄与数が 2^24 を超えたとき 1 階の f64 割り算と食い違うため）。
+- 未タッチ位置は全 mode で `g` を素通しする。`g.mul(0/1 定数)` は使わず `where_cond` で選ぶ（`inf × 0` を作らない）。
+- Amax／Amin の選択マスクは forward の先勝ちではなく **1 階 VJP の規則**（`src[p] == result[q]`、f32 の `==`）をホストで写す。`ties` が 0 になる NaN の結果は勾配 0。分母は `max(ties, 1)` で 0 にしない。
+- index の非 dim 軸が input より小さい形状は、`index_cum::scatter_vjp` と同じく gather の前に `g` を narrow する。index／src が空のときは 1 階に揃え、`d_input = g`・`d_src = []`（§41.4 の「全ゼロ」を `d_input` をゼロにする意味に読まない）。
+- 実装は `crates/autodiff/src/create_graph/scatter_reduce.rs`（新規。§41.4 の仮名 `create_graph_index_cum_b.rs` は #3803 と共有の名前なので使わず、本イシュー専用の名前にした）。`create_graph.rs` の `validate_ancestors`／`replay_op`／`build_cgrads` に腕を足した。`replay` は公開の `indexed_update_ops::scatter_reduce` へ委譲し、forward の検証を迂回しない。
+- `Op::supports_create_graph`（`tape.rs`）は `IndexedScatterReduce` を網羅 match の false 側から外し、payload 判定の腕 `Op::IndexedScatterReduce { mode, .. }` にした（`VectorNorm` の前例）。`Prod` と `#[non_exhaustive]` の未知 mode は false。
+- `tensor-core` の `ScatterReduceLayout::positions` を `pub` にした（追加のみ。既存関数の挙動は不変）。autodiff 側が 1 階 VJP と同じ位置規則でマスク・寄与数を作るため。
+- 1 階の VJP（`grad.rs` の腕と `scatter_reduce_vjp_host` の本体）・forward・`Tape::backward` は変えていない。
+
+### 62.2 fail-closed・総括判定（§41.12）
+
+- 子テープへ書く前（`validate_ancestors`）: 未知 mode、`Prod`（`supports_create_graph` が先に拒否する）、input／src の値に `±inf` を含むものを `AutodiffError::Backward` で拒否する。NaN は伝播させる（§33.14）。
+- cgrad 構築時: 上流 `g` が非有限、または `max|g| ≥ STAGE_BOUND_GUARD` なら拒否する。構造の各段は `|g|` 以下（係数は 0/1 か `1/n`）なので、この判定だけで足りる。拒否時は `backward_create_graph` のロールバックで `child` が空に戻り、同じ `child` で再試行できる。
+- 判定順・網羅 match・「未知 variant は false」は弱めていない。本番経路で `unwrap`／`expect` を使っていない。
+
+### 62.3 テスト
+
+- `crates/autodiff/tests/create_graph_scatter_reduce.rs`（CI）: 1 階・`cg.grad` が素の `backward` と bit 一致（4 mode × `include_self` × 重複索引 × 非末尾 dim × index の非 dim 軸が小さい形状 × input 側・src 側・結合）、Hessian の有限差分突合、未タッチ位置の曲率の素通し、`jvp_create_graph` の独立参照突合、`scatter_reduce_extremum_ties_follow_first_order_rule`（タイの均等分配）、NaN の結果の勾配 0 と二階の有限性、寄与数が大きい Mean、`±inf` 入力・`Prod` の拒否（`child` が空）、非有限・過大な上流の拒否と再試行、空の index。
+- 反転・差し替え: `tape.rs` の `index_cumulative_family_supports_create_graph`（4 mode は supported、`Prod` は rejected）、`tests/indexed_update_parity.rs` の `create_graph_is_a_typed_error_not_a_panic` を `create_graph_accepts_sum_mean_amax_amin_and_rejects_prod_typed` へ、`tests/create_graph.rs` のコメント。
+- 単体: `scatter_reduce.rs` の `masks_agree_with_first_order_vjp`（ホストで作るマスク・係数が `scatter_reduce_vjp_host` と整合）、`replay_matches_forward`。
+- facade: `scatter_reduce_{sum,mean,amax}_create_graph_via_facade`、`backward_create_graph` の rustdoc に `Mean` の HVP の doctest、正ガード `backward_create_graph_scatter_reduce_usage_doctest_is_present_and_compiled`（この Op の create_graph を拒否する否定ガードも保留 doctest ガードも元から無かったため、反転ではなく新設。存在しない needle を課すと違反が返る自己テスト付き。`IndexedUpdateOpsHoldDoctestGuard` は公開面の保留で無関係のため不変）。
+- GPU parity: `create_graph_gpu_parity.rs` に族 `scatter_reduce` の 4 ケース（`Route::H`・`Judge::Strict`・`SplitKShapes::NoMatMul`）、`create_graph_scatter_reduce_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査を登録した。
+
+### 62.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一。`cg.grad` は V3 なので CPU（naive）で 1 階と bit 一致。REQ-2 の統一複合判定・`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・baseline・ガードレール閾値は変えない。新しい baseline は作らない。FMA 契約には触れない。
+- 保証範囲は §27.3 と同じ（総括判定を通った入力で、seed の各要素の絶対値が 1 以下のとき。三階以上は対象外）。Amax／Amin のタイの点は微分不能で、二階は均等分配の劣勾配に従う（有限差分では検証しない）。
+
+### 62.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。`indexed_scatter_reduce` は CUDA・Metal・ROCm で override されておらずホストへフォールバックする（経路区分 H）。
+- スコープ外: `Prod` mode（#3803 の scan 補助待ち）、`Cumprod`・`Logcumsumexp`（#3803）、GPU 実機 parity の実測、GPU カーネルの新設、f64 テープの create_graph、三階以上の保証。
+- 変えていないもの: 1 階の VJP の式・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開名。`unsafe` は追加していない。
 
 ## 63. 実装記録（イシュー #3804・親 #3719 系。create_graph の B 区分・`Stft`・`Istft`）
 
