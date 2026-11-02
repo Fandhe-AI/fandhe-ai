@@ -316,3 +316,177 @@ fn save_and_load_round_trip_with_nearest_upsample_and_identity() {
         dense(&loaded.predict(&x).unwrap())
     );
 }
+
+// ---------------------------------------------------------------------
+// イシュー #3814: add_upsample_scale_factor（案 A の別名メソッド）
+// ---------------------------------------------------------------------
+
+#[test]
+fn add_upsample_scale_factor_rejects_invalid_scale() {
+    for bad in [
+        vec![],
+        vec![0.0],
+        vec![2.0, -1.0],
+        vec![-0.0],
+        vec![f64::NAN],
+        vec![f64::INFINITY],
+        vec![f64::NEG_INFINITY, 2.0],
+    ] {
+        match Sequential::new().add_upsample_scale_factor(bad.clone(), InterpolateMode::Nearest) {
+            Err(AutodiffError::InvalidArgument(_)) => {}
+            Err(other) => panic!("{bad:?}: InvalidArgument のはず: {other:?}"),
+            Ok(_) => panic!("{bad:?}: 構築時に拒否されるはず"),
+        }
+    }
+}
+
+#[test]
+fn add_upsample_scale_factor_floors_output_size() {
+    let up = Sequential::new()
+        .add_upsample_scale_factor(vec![1.5, 1.5], InterpolateMode::Nearest)
+        .unwrap();
+    assert_eq!(
+        up.predict(&ramp(&[1, 1, 3, 3], 1.0)).unwrap().shape(),
+        &[1, 1, 4, 4]
+    );
+    let down = Sequential::new()
+        .add_upsample_scale_factor(vec![0.5, 0.5], InterpolateMode::Nearest)
+        .unwrap();
+    assert_eq!(
+        down.predict(&ramp(&[1, 1, 4, 4], 1.0)).unwrap().shape(),
+        &[1, 1, 2, 2]
+    );
+}
+
+#[test]
+fn add_upsample_scale_factor_rejects_zero_output_and_rank_mismatch() {
+    // 出力サイズが 0 になる倍率は forward 時に InvalidArgument。
+    let tiny = Sequential::new()
+        .add_upsample_scale_factor(vec![0.1, 0.1], InterpolateMode::Nearest)
+        .unwrap();
+    let err = tiny.predict(&ramp(&[1, 1, 3, 3], 1.0)).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)), "{err:?}");
+    // rank 不足の入力は Shape。
+    let ok = Sequential::new()
+        .add_upsample_scale_factor(vec![2.0, 2.0], InterpolateMode::Nearest)
+        .unwrap();
+    let err = ok.predict(&ramp(&[3], 1.0)).unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)), "{err:?}");
+    // 倍率の個数と mode の空間軸数の不整合は forward 時のエラー（遅延検査）。
+    let mismatch = Sequential::new()
+        .add_upsample_scale_factor(
+            vec![2.0],
+            InterpolateMode::Bilinear {
+                align_corners: false,
+            },
+        )
+        .expect("構築時は mode と軸数の整合を見ない");
+    assert!(mismatch.predict(&ramp(&[1, 1, 2, 2], 1.0)).is_err());
+}
+
+#[test]
+fn add_upsample_scale_factor_matches_size_path_bit_exact() {
+    let x = ramp(&[2, 1, 3, 5], 1.0);
+    for (scale, size, mode) in [
+        (vec![2.0, 2.0], vec![6, 10], InterpolateMode::Nearest),
+        (vec![1.5, 1.7], vec![4, 8], InterpolateMode::Nearest),
+        (
+            vec![2.0, 1.5],
+            vec![6, 7],
+            InterpolateMode::Bilinear {
+                align_corners: false,
+            },
+        ),
+    ] {
+        let by_scale = Sequential::new()
+            .add_upsample_scale_factor(scale.clone(), mode)
+            .unwrap();
+        let by_size = Sequential::new().add_upsample(size, mode).unwrap();
+        assert_eq!(
+            dense(&by_scale.predict(&x).unwrap()),
+            dense(&by_size.predict(&x).unwrap()),
+            "{scale:?} {mode:?}"
+        );
+    }
+}
+
+#[test]
+fn add_upsample_scale_factor_passes_train_and_resident_paths() {
+    // 学習経路: fit でパラメータが更新される（前後に Linear を挟む）。
+    let mut m = Sequential::new()
+        .add_conv2d(1, 2, [3, 3], [1, 1], [1, 1], [1, 1], 1, 31)
+        .unwrap()
+        .add_upsample_scale_factor(vec![2.0, 2.0], InterpolateMode::Nearest)
+        .unwrap()
+        .add_flatten(1, 3)
+        .add_linear(128, 3, 32)
+        .unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.05)), Loss::Mse)
+        .unwrap();
+    let xs = ramp(&[4, 1, 4, 4], 1.0);
+    let ys = ramp(&[4, 3], 0.5);
+    let b: Vec<Vec<u32>> = m.trainable_parameters().iter().map(|p| dense(p)).collect();
+    let h = m.fit(&xs, &ys, FitConfig::new(3, 2)).unwrap();
+    assert!(h.loss.iter().all(|l| l.is_finite()), "{:?}", h.loss);
+    let a: Vec<Vec<u32>> = m.trainable_parameters().iter().map(|p| dense(p)).collect();
+    assert_ne!(b, a, "fit でパラメータが更新されるはず");
+
+    // 常駐経路: 無状態層として通過し predict と bit 一致。
+    let resident = Sequential::new()
+        .add_upsample_scale_factor(vec![2.0, 2.0], InterpolateMode::Nearest)
+        .unwrap()
+        .add_flatten(1, 3)
+        .add_linear(16, 4, 21)
+        .unwrap()
+        .add_relu()
+        .add_linear(4, 2, 22)
+        .unwrap();
+    let rx = ramp(&[2, 1, 2, 2], 1.0);
+    let init_tape = fandhe_ai::tape();
+    let store = resident.init_device_param_store(&init_tape).unwrap();
+    drop(init_tape);
+    assert_eq!(
+        dense(&resident.predict_resident(&store, &rx).unwrap()),
+        dense(&resident.predict(&rx).unwrap())
+    );
+
+    // Conv2d と混ぜた常駐は従来どおり拒否される。
+    let mixed = Sequential::new()
+        .add_conv2d(1, 2, [3, 3], [1, 1], [1, 1], [1, 1], 1, 11)
+        .unwrap()
+        .add_upsample_scale_factor(vec![2.0, 2.0], InterpolateMode::Nearest)
+        .unwrap();
+    let tape = fandhe_ai::tape();
+    assert!(mixed.init_device_param_store(&tape).is_err());
+}
+
+#[test]
+fn add_upsample_scale_factor_fn_pointer_signature_is_pinned() {
+    let _: fn(Sequential, Vec<f64>, InterpolateMode) -> Result<Sequential, AutodiffError> =
+        Sequential::add_upsample_scale_factor;
+}
+
+#[cfg(unix)]
+#[test]
+fn add_upsample_scale_factor_save_load_round_trip_bit_identical() {
+    let model = Sequential::new()
+        .add_upsample_scale_factor(vec![1.5, 2.0], InterpolateMode::Nearest)
+        .unwrap()
+        .add_flatten(1, 3)
+        .add_linear(48, 3, 5)
+        .unwrap();
+    let x = ramp(&[2, 1, 4, 4], 1.0);
+    let guard = TempDirGuard::new("spatial_layers_scale_factor_round_trip");
+    let dir = guard.path().join("m");
+    save_model(&model, &dir).expect("保存できるはず");
+    let text = std::fs::read_to_string(dir.join("manifest.json")).expect("読めるはず");
+    assert!(
+        text.contains("\"kind\":\"upsample_scale_factor\""),
+        "{text}"
+    );
+    let loaded = load_model(&dir).expect("復元できるはず");
+    assert_eq!(
+        dense(&model.predict(&x).unwrap()),
+        dense(&loaded.predict(&x).unwrap())
+    );
+}

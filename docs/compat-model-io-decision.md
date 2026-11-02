@@ -1677,3 +1677,12 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - parameter キーは weight_norm が `{i}.parametrizations.weight.original0`／`original1`／`bias`、spectral_norm が `{i}.parametrizations.weight.original`／`bias`。spectral_norm の `u`／`v` は buffer `{i}.parametrizations.weight.0._u`／`._v`（`buffer_keys` に記録し、再正規化せず bit のまま復元する）。
 - 旧形式（`format_version` 1）の manifest に再パラメータ化層があれば `Mismatch` で拒否する。非有限の `u`／`v`・上限超過の `n` は保存を `UnsupportedModel` で拒否する。
 - 設計判断・実測（rank 0 の `g` の往復を含む）は `facade-weight-reparam-wiring-decision.md` §18。ONNX export は従来どおり拒否。tolerance・baseline・依存は不変。
+
+## 追補（イシュー #3814）: `upsample_scale_factor` kind と f64 の表現
+
+- 承認: #3768 論点 4（<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。#3750 §13 の推奨に従い、f64 は (i)（正準 `{:?}` の f64 を足す）、`format_version` は 2 のまま。
+- kind `upsample_scale_factor`（`compat::Sequential::add_upsample_scale_factor`）。params は `mode`・`align_corners`（`upsample` と同じ allowlist と正準形）・`scale_len`（1..=3）・`scale_0`・`scale_1`・`scale_2`（添字 `< scale_len` は正準 f64、それ以外は `null`）の 6 キーで、buffer・parameter は持たない。
+- f64 の受理は `as_f32` と同型: `Json::Real` のみ、有限、`{:?}` で書き戻した字句と完全一致。`2.00`・`2`・`2E0` は `Manifest`。字句長はレクサの 64 バイト上限が先に効く。
+- 検証の順: キー集合の完全一致 → `align_corners`・mode → `scale_len` の上限（確保の前）→ `scale_i` の型と null 詰め → 意味の範囲（0 以下・`-0.0` は構築子が `Autodiff` で拒否）。保存前検査は `collect_checked_state` の 1 か所で、Functional 形式も共有する。
+- kind allowlist は 70 → 71 種。旧リーダー（0.13.0 以前）は未知 kind を `UnsupportedModel` で拒否する（前方互換なし。`docs/migration/0.14.0.md` §3.4）。ONNX export は `UnsupportedLayer` のまま。
+- 設計記録は `docs/autodiff-spatial-layers-decision.md` §9・§10。tolerance・baseline・依存は不変。

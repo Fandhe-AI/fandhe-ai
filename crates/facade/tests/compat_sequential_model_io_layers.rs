@@ -11,6 +11,8 @@
 //!
 //! 引数つきの活性化 4 層（celu・softmin・threshold・rrelu。イシュー #3054）の往復・改竄拒否も末尾のテストが受け持つ。
 //!
+//! `upsample_scale_factor`（f64 倍率。イシュー #3814）の往復・改竄拒否も末尾のテストが受け持つ（`ALL_KINDS` は不変）。
+//!
 //! 衝突注入・TOCTOU・網羅的な改竄行列は #2375・#2376。BN の running stats の保存・復元は #2371（`compat_sequential_model_io_batch_norm.rs`）。
 //! 実機（CUDA／Metal）は不要（ホスト側の I/O と層の再構築のみ）。
 
@@ -1552,4 +1554,119 @@ fn rrelu_train_mode_round_trip_restores_training_flag() {
         &loaded.predict(&x).unwrap(),
         "eval 後の predict",
     );
+}
+
+// ---------------------------------------------------------------------
+// イシュー #3814: upsample_scale_factor（f64 は正準 `{:?}`。#3750 §13 の (i)）
+// ---------------------------------------------------------------------
+
+fn scale_factor_model(scale: Vec<f64>) -> Sequential {
+    Sequential::new()
+        .add_upsample_scale_factor(scale, InterpolateMode::Nearest)
+        .expect("構築できるはず")
+}
+
+#[test]
+fn upsample_scale_factor_round_trips_bit_identically() {
+    // 0.29 は f64 の表現誤差が出る値。manifest の字句も往復で変わらない。
+    for scale in [vec![1.5, 2.0], vec![0.29, 1.0], vec![2.0]] {
+        let model = scale_factor_model(scale.clone());
+        let guard = TempDirGuard::new("scale-factor-rt");
+        let dir = guard.path().join("m");
+        save_model(&model, &dir).expect("保存できるはず");
+        let text = std::fs::read_to_string(dir.join("manifest.json")).expect("読めるはず");
+        assert!(
+            text.contains("\"kind\":\"upsample_scale_factor\""),
+            "{text}"
+        );
+        let loaded = load_model(&dir).expect("復元できるはず");
+        let g2 = TempDirGuard::new("scale-factor-rt2");
+        let d2 = g2.path().join("m");
+        save_model(&loaded, &d2).expect("再保存できるはず");
+        // safetensors_file 名は保存ごとにランダムなため、層の記述（layers 配列）で比較する。
+        let layers_of = |t: &str| -> String {
+            let start = t.find("\"layers\":").expect("layers がある");
+            let end = t
+                .find("\"safetensors_file\"")
+                .expect("safetensors_file がある");
+            t[start..end].to_string()
+        };
+        let text2 = std::fs::read_to_string(d2.join("manifest.json")).expect("読めるはず");
+        assert_eq!(
+            layers_of(&text),
+            layers_of(&text2),
+            "{scale:?}: 再保存の layers 記述が一致する"
+        );
+        if scale.len() == 2 {
+            let x = Tensor::new((0..16).map(|i| i as f32 * 0.5).collect(), &[1, 1, 4, 4])
+                .expect("shape 一致");
+            let a = model.predict(&x).expect("predict");
+            let b = loaded.predict(&x).expect("predict");
+            let bits = |t: &Tensor<f32>| -> Vec<u32> {
+                t.contiguous()
+                    .as_slice()
+                    .expect("slice")
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect()
+            };
+            assert_eq!(bits(&a), bits(&b));
+        }
+    }
+}
+
+#[test]
+fn tampered_upsample_scale_factor_is_rejected() {
+    let base = "\"mode\":\"nearest\",\"align_corners\":false,\"scale_len\":2,\"scale_0\":2.0,\"scale_1\":2.0,\"scale_2\":null";
+    let run = |label: &str, to: &str| -> ModelIoError {
+        let guard = TempDirGuard::new(label);
+        let dir = guard.path().join("m");
+        save_model(&scale_factor_model(vec![2.0, 2.0]), &dir).expect("保存できるはず");
+        let path = dir.join("manifest.json");
+        let text = std::fs::read_to_string(&path).expect("読めるはず");
+        assert!(text.contains(base), "{label}: {text}");
+        std::fs::write(&path, text.replacen(base, to, 1)).expect("書けるはず");
+        let before = entries(&dir);
+        let err = load_err(&dir);
+        assert_eq!(entries(&dir), before, "{label}: load は dir を変えない");
+        err
+    };
+    for (label, to) in [
+        (
+            "sf-2.00",
+            base.replace("\"scale_0\":2.0", "\"scale_0\":2.00"),
+        ),
+        ("sf-int", base.replace("\"scale_0\":2.0", "\"scale_0\":2")),
+        ("sf-exp", base.replace("\"scale_0\":2.0", "\"scale_0\":2E0")),
+        (
+            "sf-len0",
+            base.replace("\"scale_len\":2", "\"scale_len\":0"),
+        ),
+        (
+            "sf-len4",
+            base.replace("\"scale_len\":2", "\"scale_len\":4"),
+        ),
+        (
+            "sf-pad",
+            base.replace("\"scale_2\":null", "\"scale_2\":2.0"),
+        ),
+        (
+            "sf-null",
+            base.replace("\"scale_1\":2.0", "\"scale_1\":null"),
+        ),
+        ("sf-unknown-key", format!("{base},\"extra\":1")),
+        ("sf-missing-key", base.replace(",\"scale_2\":null", "")),
+    ] {
+        let err = run(label, &to);
+        assert!(
+            matches!(err, ModelIoError::Manifest { .. }),
+            "{label}: {err}"
+        );
+    }
+    // 意味の範囲外は build 時の add_upsample_scale_factor が Autodiff で拒否する。
+    for (label, v) in [("sf-neg", "-1.0"), ("sf-zero", "0.0")] {
+        let to = base.replace("\"scale_0\":2.0", &format!("\"scale_0\":{v}"));
+        let err = run(label, &to);
+        assert!(matches!(err, ModelIoError::Autodiff(_)), "{label}: {err}");
+    }
 }

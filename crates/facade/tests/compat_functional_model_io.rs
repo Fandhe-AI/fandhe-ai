@@ -234,6 +234,29 @@ fn param_activation_layers_round_trip_in_functional_graph() {
     }
 }
 
+/// イシュー #3814: `add_upsample_scale_factor` も `collect_checked_state` 共有で functional 形式を往復する。
+#[test]
+fn upsample_scale_factor_round_trips_in_functional_graph() {
+    let mut b = FunctionalBuilder::new();
+    let x = b.input().unwrap();
+    let blk = Sequential::new()
+        .add_upsample_scale_factor(vec![1.5, 2.0], fandhe_ai::InterpolateMode::Nearest)
+        .unwrap();
+    let y = b.apply(blk, x).unwrap();
+    let mut model = b.build(&[x], &[y]).unwrap();
+    model.eval();
+    let guard = TempDirGuard::new("functional_scale_factor");
+    let dir = guard.path().join("m");
+    save_functional_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_functional_model(&dir).expect("復元できるはず");
+    let input = tensor((0..16).map(|i| i as f32 * 0.3).collect(), &[1, 1, 4, 4]);
+    let want = model.predict(&[&input]).unwrap();
+    let got = loaded.predict(&[&input]).unwrap();
+    for (w, g) in want.iter().zip(&got) {
+        assert_eq!(bits(w), bits(g));
+    }
+}
+
 #[test]
 fn unsupported_layer_is_rejected_without_touching_dir() {
     // 利用者定義層（`add_module`）は manifest の kind を持たない（恒久的に保存不能。

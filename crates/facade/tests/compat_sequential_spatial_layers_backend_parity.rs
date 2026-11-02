@@ -32,6 +32,25 @@ fn device_forward(model: &Sequential, x: &Tensor<f32>, device: Device) -> Tensor
     model.forward(&tape, &xv).unwrap().to_tensor()
 }
 
+/// イシュー #3814: 倍率指定経路。Nearest は bit 一致、Bilinear は REQ-2 統一複合判定。
+fn run_scale_factor(device: Device, mode: InterpolateMode, bit_exact: bool) {
+    let model = Sequential::new()
+        .add_upsample_scale_factor(vec![2.5, 3.0], mode)
+        .unwrap();
+    let x = input();
+    let cpu = model.predict(&x).unwrap();
+    let dev = device_forward(&model, &x, device);
+    if bit_exact {
+        assert_eq!(dense(&dev), dense(&cpu));
+    } else {
+        assert_parity(
+            "compat::Sequential(Upsample scale_factor Bilinear) device vs CPU",
+            &dense(&dev),
+            &dense(&cpu),
+        );
+    }
+}
+
 fn run_bit_exact(device: Device) {
     let model = Sequential::new()
         .add_zero_pad2d([1, 2, 0, 1])
@@ -89,4 +108,42 @@ fn metal_spatial_layers_nearest_bit_exact() {
 #[ignore = "Metal 実機必須"]
 fn metal_spatial_layers_bilinear_matches_cpu() {
     run_bilinear_parity(Device::Metal);
+}
+
+#[test]
+#[ignore = "CUDA 実機必須。実測は #3860（Phase 10）"]
+fn cuda_upsample_scale_factor_nearest_bit_exact() {
+    run_scale_factor(Device::Cuda(0), InterpolateMode::Nearest, true);
+}
+
+#[test]
+#[ignore = "CUDA 実機必須。実測は #3860（Phase 10）"]
+fn cuda_upsample_scale_factor_bilinear_matches_cpu() {
+    run_scale_factor(
+        Device::Cuda(0),
+        InterpolateMode::Bilinear {
+            align_corners: false,
+        },
+        false,
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機必須。実測は #3861（Phase 10）"]
+fn metal_upsample_scale_factor_nearest_bit_exact() {
+    run_scale_factor(Device::Metal, InterpolateMode::Nearest, true);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機必須。実測は #3861（Phase 10）"]
+fn metal_upsample_scale_factor_bilinear_matches_cpu() {
+    run_scale_factor(
+        Device::Metal,
+        InterpolateMode::Bilinear {
+            align_corners: false,
+        },
+        false,
+    );
 }

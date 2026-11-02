@@ -312,6 +312,20 @@ fn sequential_with_sigmoid_is_rejected_with_unsupported_layer() {
     }
 }
 
+/// e-2c. `add_upsample_scale_factor`（イシュー #3814）を含む `Sequential` は ONNX export 対象外で
+///      `OnnxError::UnsupportedLayer` になる（`Sigmoid` と同型。0.14.0 に ONNX export は含めない）。
+#[test]
+fn sequential_with_upsample_scale_factor_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_upsample_scale_factor(vec![2.0, 2.0], fandhe_ai::InterpolateMode::Nearest)
+        .expect("test fixture: 層構築に失敗");
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    assert!(
+        matches!(err, OnnxError::UnsupportedLayer { index: 0, .. }),
+        "UnsupportedLayer を期待したが {err:?}"
+    );
+}
+
 /// e-3b. `Conv2d`（イシュー #2076 で対応層化）を含む `Sequential` は
 ///      `from_sequential` が `Ok` を返す到達性テスト（e-2b と同型）。
 #[test]
