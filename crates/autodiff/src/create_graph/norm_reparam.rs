@@ -1769,7 +1769,8 @@ mod tests {
         let tape = Tape::new_with_ops(test_ops());
         let child = Tape::new_with_ops(test_ops());
         let x = tape.var(&tt(x0.clone(), &shape));
-        let wc = tape.var_no_grad(&tt(w.clone(), &shape));
+        // 重み `wc` を追跡し、`up = wc`（Sum→Mul の VJP で bit 一致）への二階も子テープから読む。
+        let wc = tape.var(&tt(w.clone(), &shape));
         let y = x.local_response_norm(size, alpha, beta, k).unwrap();
         let loss = y.mul(&wc).unwrap().sum(None).unwrap();
         // 判定が保守的に拒否した入力は構造が積まれないので比べられない（呼び出し側で件数を確かめる）。
@@ -1778,6 +1779,7 @@ mod tests {
         };
         let gx = cg.grad(&x).unwrap().unwrap();
         let cx = cg.child_var(&x).unwrap().unwrap();
+        let cwc = cg.child_var(&wc).unwrap().unwrap();
         let rho = f64::from(alpha) / size as f64;
         let floor = (f64::from(k).abs() * size as f64 / f64::from(alpha).abs()).sqrt();
         let win = LrnWin {
@@ -1815,8 +1817,23 @@ mod tests {
                 lrn_col_rev(&fs, win, jc, &mut ss);
                 lrn_col_rev(&fr, win, jc, &mut sr);
                 let row = child_row(&child, &gx, idx[jc], &cx);
+                let row_up = child_row(&child, &gx, idx[jc], &cwc);
                 let (ulo, uhi) = (jc.saturating_sub(win.br), (jc + win.fr).min(c - 1));
                 let (xlo, xhi) = (ulo.saturating_sub(win.bf), (uhi + win.ff).min(c - 1));
+                for (m, &i) in idx.iter().enumerate() {
+                    let (s, r) = if (ulo..=uhi).contains(&m) {
+                        (ss.up[m], sr.up[m])
+                    } else {
+                        (0.0, Rf::k(0.0))
+                    };
+                    assert_within(
+                        row_up[i],
+                        s,
+                        r,
+                        coeff,
+                        &format!("lrn up size{size} beta{beta} col{si} j{jc} m{m}"),
+                    );
+                }
                 for (l, &i) in idx.iter().enumerate() {
                     let (s, r) = if (xlo..=xhi).contains(&l) {
                         (ss.xs[l], sr.xs[l])
@@ -1852,7 +1869,7 @@ mod tests {
         let child = Tape::new_with_ops(test_ops());
         let v = tape.var(&tt(v0.clone(), &[groups, rest]));
         let g = tape.var(&tt(g0.clone(), &[groups, 1]));
-        let wc = tape.var_no_grad(&tt(w.clone(), &[groups, rest]));
+        let wc = tape.var(&tt(w.clone(), &[groups, rest]));
         let y = v.weight_norm(&g, Some(0)).unwrap();
         let loss = y.mul(&wc).unwrap().sum(None).unwrap();
         let cg = tape.backward_create_graph(&loss, &child).unwrap();
@@ -1860,6 +1877,7 @@ mod tests {
         let gg = cg.grad(&g).unwrap().unwrap();
         let cv = cg.child_var(&v).unwrap().unwrap();
         let cgv = cg.child_var(&g).unwrap().unwrap();
+        let cwc = cg.child_var(&wc).unwrap().unwrap();
         let coeff = wn_coeff(rest);
         for kg in 0..groups {
             let lo = kg * rest;
@@ -1873,15 +1891,27 @@ mod tests {
             for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
                 let h_g_s = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
                 let h_g_r = wn_rev(&fr, seed, &mut hv_r, &mut hu_r);
-                let (row_v, row_g) = match seed {
+                let (row_v, row_u, row_g) = match seed {
                     WnSeed::Dv(j) => (
                         child_row(&child, &gv, lo + j, &cv),
+                        child_row(&child, &gv, lo + j, &cwc),
                         Some(child_row(&child, &gv, lo + j, &cgv)),
                     ),
-                    WnSeed::Dg => (child_row(&child, &gg, kg, &cv), None),
+                    WnSeed::Dg => (
+                        child_row(&child, &gg, kg, &cv),
+                        child_row(&child, &gg, kg, &cwc),
+                        None,
+                    ),
                 };
                 for i in 0..rest {
                     assert_within(row_v[lo + i], hv_s[i], hv_r[i], coeff, "wn v");
+                    assert_within(row_u[lo + i], hu_s[i], hu_r[i], coeff, "wn up");
+                }
+                // ほかのグループへの要素は 0。
+                for (i, (&a, &b)) in row_v.iter().zip(&row_u).enumerate() {
+                    if !(lo..lo + rest).contains(&i) {
+                        assert_eq!((a, b), (0.0, 0.0), "wn: グループをまたぐ二階は 0");
+                    }
                 }
                 if let (Some(row_g), Some(hs), Some(hr)) = (row_g, h_g_s, h_g_r) {
                     assert_within(row_g[kg], hs, hr, coeff, "wn g");
@@ -1900,12 +1930,13 @@ mod tests {
         let child = Tape::new_with_ops(test_ops());
         let mut st = SpectralNormState::from_vectors(&shape, 0, &u0, &v0, 1, 1e-12).unwrap();
         let w = tape.var(&tt(w0.clone(), &shape));
-        let wc = tape.var_no_grad(&tt(up.clone(), &shape));
+        let wc = tape.var(&tt(up.clone(), &shape));
         let y = w.spectral_norm(&mut st, false).unwrap();
         let loss = y.mul(&wc).unwrap().sum(None).unwrap();
         let cg = tape.backward_create_graph(&loss, &child).unwrap();
         let gw = cg.grad(&w).unwrap().unwrap();
         let cw = cg.child_var(&w).unwrap().unwrap();
+        let cwc = cg.child_var(&wc).unwrap().unwrap();
         // forward のスナップショット（`from_vectors` は u・v を正規化する。eval なので進まない）。
         let (us, vs) = (st.u().to_vec(), st.v().to_vec());
         let mut p = Vec::with_capacity(6);
@@ -1925,8 +1956,10 @@ mod tests {
             sn_rev(&fs, j, &mut hw_s, &mut hu_s);
             sn_rev(&fr, j, &mut hw_r, &mut hu_r);
             let row = child_row(&child, &gw, j, &cw);
+            let row_up = child_row(&child, &gw, j, &cwc);
             for i in 0..6 {
                 assert_within(row[i], hw_s[i], hw_r[i], coeff, "spectral W");
+                assert_within(row_up[i], hu_s[i], hu_r[i], coeff, "spectral up");
             }
         }
     }
