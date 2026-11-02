@@ -970,7 +970,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 | (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | #3798 で対象化済み（§53） |
 | (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | #3799 で対象化済み（§54） |
 | (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | #3800 で対象化済み（§55） |
-| 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
+| 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed。#3767 で対象外に確定（§60） |
 
 ### 26.3 `reduction` と既知の差
 
@@ -4696,6 +4696,39 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: GPU 版の im2col3d／col2im3d カーネル、低精度 conv3d、子テープのメモリ上限の新設（#3767 で「設けない」と承認済み。見積式は `conv3d.rs` のモジュール doc）、GPU 実機 parity の実測と測り方の変更（§48）、split-K が発火する形状の二階（§48 の論点 8）、他の B 区分・C 区分の Op、f64 テープの create_graph、facade の公開名の追加。
 - 変えていないもの: 1 階の VJP の式・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
 - 本 PR は `Refs #3797 #3729 #3767 #3719 #3857 #3859`。
+
+## 60. 実装記録（イシュー #3801・親 #3719 系。create_graph の B 区分・`CtcLoss` を対象外に確定）
+
+### 60.0 位置づけ・承認根拠
+
+- 状態: **対象外で確定（docs のみ）**。設計は §40（#3731）の論点 2。コード・テスト・公開面は変えない。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答の該当文は「CtcLoss は対象外とし、恒久的に fail-closed にする（§40.16）」。承認はこの回答の範囲を超えて主張しない。
+
+### 60.1 確定した扱い
+
+- `supports_create_graph` は `false` のまま。`backward_create_graph` の型付きエラーによる拒否経路と、拒否時に子テープを空に保つ扱い（§21.6）は不変。
+- fail-closed は `crates/autodiff/src/tape.rs` の単体テスト `class_axis_losses_support_create_graph` が固定している。反転する否定ガードは `api_surface.rs` に元から無い。
+- 理由は §40.10 の 1〜5 を正とし、ここには書き写さない。§40.10 の補足（PyTorch が CTC の double backward を提供するか）は未確認のまま残し、推測で事実にしない。
+
+### 60.2 受け入れ条件の読み替え
+
+| 受け入れ条件（要約） | 本 PR での扱い |
+|---|---|
+| 承認済みの設計記録どおりにする | §40.16 の論点 2「対象外」のとおり |
+| 否定ガードの反転 | 該当なし（元から無い） |
+| CI テスト・実機 `#[ignore]` テスト | 該当なし（挙動不変。既存単体テストが固定） |
+| 既定経路が bit 同一 | コード変更なしのため自明に満たす |
+| 追跡表・移行ノート | 追跡表の行 4 を更新。移行ノートは記入規則 11（対象外の項目は載せない）により編集しない |
+| 実機 parity | 該当なし（`cg.grad` を作らない） |
+
+### 60.3 §48・Phase 10 への申し送り
+
+- §48 の族名表の `ctc_loss` の欄は該当なし。`create_graph_gpu_parity.rs` に CtcLoss のケースは登録せず、baseline も作らない。#3857・#3859 で測る対象は無い。§48 の表そのものは書き換えない。
+
+### 60.4 変えていないもの
+
+- コード、公開 API、rustdoc、tolerance、baseline、ガードレール閾値、FMA 契約、依存（`Cargo.toml`／`Cargo.lock`）、`unsafe`、`docs/spec`、移行ノート。
+- 本 PR は `Closes #3801`、`Refs #3731 #3767 #3857 #3859`。
 
 ## 61. 実装記録（イシュー #3796・親 #3719 系。create_graph の C 区分・LSTM `LstmCell`・`LstmHidden`）
 
