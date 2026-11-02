@@ -798,6 +798,38 @@ const CASES: &[Case] = &[
         run: run_linalg_qr_square,
         reject: None,
     },
+    // 分解 SVD・Eigh 族（イシュー #3808・決定記録 §44/§68）。`linalg_svd` は CUDA・Metal のデバイスカーネルが
+    // 無く、`linalg_eigh` は CUDA のゲートが既定 OFF のため、どちらも既定ではホストの `eval::linalg::{svd,eigh}`
+    // へフォールバックする（値は 1 階と同じホスト関数の V3）。構造の `MatMul` 等はデバイスで走るので H。構造の
+    // `matmul_fp32_strict` の形状は小さく（k < 128）、Metal の split-K を発火させない。新しいカーネルは作らない。
+    // 実機は未実測（#3857・#3859）。
+    Case {
+        name: "linalg_svd_tall",
+        family: "linalg_svd",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(3, 3, 4), (4, 3, 3), (3, 3, 3)]),
+        run: run_linalg_svd_tall,
+        reject: None,
+    },
+    Case {
+        name: "linalg_svd_wide",
+        family: "linalg_svd",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(2, 2, 2), (2, 3, 2), (2, 2, 3), (3, 2, 2)]),
+        run: run_linalg_svd_wide,
+        reject: None,
+    },
+    Case {
+        name: "linalg_eigh_sym3",
+        family: "linalg_eigh",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(3, 3, 3)]),
+        run: run_linalg_eigh_sym3,
+        reject: Some(reject_eigh_degenerate),
+    },
     // 行列ノルム・slogdet.sign・matrix_rank 族（イシュー #3806・決定記録 §43/§66）。`linalg_*` は CUDA・Metal・
     // ROCm のうち override されない経路でホストの `eval::linalg` へフォールバックし（値は 1 階と同じホスト関数の V3／
     // ゼロ定数）、構造は `Mul`／`Sum` 等の elementwise のみで MatMul を含まない。実機は未実測（#3857・#3859）。
@@ -2168,13 +2200,25 @@ fn linalg_qr_loss<'a>(tape: &'a Tape, p: &Var<'a>) -> Result<Var<'a>, AutodiffEr
 /// 分解 QR 族（#3807）の共通本体。入力は条件の良いフルランクの縦長／正方。Q4 は同じ損失の
 /// `jvp_create_graph` の出力を孫テープで逆伝播する。
 fn run_linalg_qr_body(tp: &Tapes, shape: &[usize], p0: Vec<f32>) -> Outputs {
+    run_linalg_decomp_body(tp, shape, p0, linalg_qr_loss)
+}
+
+type DecompLoss = for<'a> fn(&'a Tape, &Var<'a>) -> Result<Var<'a>, AutodiffError>;
+
+/// 分解族（#3807・#3808）の共通本体。損失だけを差し替える。
+fn run_linalg_decomp_body(
+    tp: &Tapes,
+    shape: &[usize],
+    p0: Vec<f32>,
+    loss_fn: DecompLoss,
+) -> Outputs {
     let n: usize = shape.iter().product();
     let dir: Vec<f32> = (0..n)
         .map(|i| 0.6 - 0.23 * (i % 13) as f32 + 0.04 * (i % 5) as f32)
         .collect();
 
     let p = tp.parent.var(&t(p0, shape));
-    let loss = linalg_qr_loss(&tp.parent, &p).expect("forward");
+    let loss = loss_fn(&tp.parent, &p).expect("forward");
     let plain_grads = tp.parent.backward(&loss).expect("backward");
     let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
 
@@ -2220,6 +2264,81 @@ fn run_linalg_qr_square(tp: &Tapes) -> Outputs {
         &[3, 3],
         vec![2.0, 0.3, -0.4, 0.1, 1.5, 0.2, -0.6, 0.5, 1.8],
     )
+}
+
+/// 分解 SVD 族（#3808）の損失 `sum(tanh(U) ⊙ c1) + sum(s ⊙ s) + sum(tanh(Vh) ⊙ c2)`（3 ノード全てを使う）。
+fn linalg_svd_loss<'a>(tape: &'a Tape, p: &Var<'a>) -> Result<Var<'a>, AutodiffError> {
+    let f = p.svd()?;
+    let weights = |v: &Var<'a>, phase: usize| {
+        let shape = v.to_tensor().shape().to_vec();
+        let coef: Vec<f32> = (0..shape.iter().product::<usize>())
+            .map(|i| 0.5 + ((i * 13 + phase) % 11) as f32 * 0.1)
+            .collect();
+        tape.var_no_grad(&t(coef, &shape))
+    };
+    let lu = f.u.tanh().mul(&weights(&f.u, 5))?.sum(None)?;
+    let ls = f.s.mul(&f.s)?.sum(None)?;
+    let lv = f.vh.tanh().mul(&weights(&f.vh, 3))?.sum(None)?;
+    lu.add(&ls)?.add(&lv)
+}
+
+/// 分解 Eigh 族（#3808）の損失 `sum(tanh(λ) ⊙ c1) + sum(V ⊙ V ⊙ c2)`（2 ノードを使う）。
+fn linalg_eigh_loss<'a>(tape: &'a Tape, p: &Var<'a>) -> Result<Var<'a>, AutodiffError> {
+    let f = p.eigh()?;
+    let weights = |v: &Var<'a>, phase: usize| {
+        let shape = v.to_tensor().shape().to_vec();
+        let coef: Vec<f32> = (0..shape.iter().product::<usize>())
+            .map(|i| 0.5 + ((i * 13 + phase) % 11) as f32 * 0.1)
+            .collect();
+        tape.var_no_grad(&t(coef, &shape))
+    };
+    let ll = f
+        .eigenvalues
+        .tanh()
+        .mul(&weights(&f.eigenvalues, 5))?
+        .sum(None)?;
+    let lv = f
+        .eigenvectors
+        .mul(&f.eigenvectors)?
+        .mul(&weights(&f.eigenvectors, 3))?
+        .sum(None)?;
+    ll.add(&lv)
+}
+
+fn run_linalg_svd_tall(tp: &Tapes) -> Outputs {
+    run_linalg_decomp_body(
+        tp,
+        &[4, 3],
+        vec![
+            3.0, 0.3, -0.4, 0.1, 2.0, 0.2, -0.6, 0.5, 1.0, 0.2, -0.1, 0.3,
+        ],
+        linalg_svd_loss,
+    )
+}
+
+fn run_linalg_svd_wide(tp: &Tapes) -> Outputs {
+    run_linalg_decomp_body(
+        tp,
+        &[2, 3],
+        vec![3.0, 0.3, -0.4, 0.1, 2.0, 0.2],
+        linalg_svd_loss,
+    )
+}
+
+fn run_linalg_eigh_sym3(tp: &Tapes) -> Outputs {
+    run_linalg_decomp_body(
+        tp,
+        &[3, 3],
+        vec![4.0, 0.3, 0.2, 0.3, 2.5, 0.1, 0.2, 0.1, 1.0],
+        linalg_eigh_loss,
+    )
+}
+
+/// Q5: 縮退した固有値（`eigh(I2)`）は固有値だけの損失でも fail-closed で拒否され、子テープは空のまま。
+fn reject_eigh_degenerate(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let loss = x.eigh().unwrap().eigenvalues.sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
 }
 
 /// 行列ノルム族（#3806）の損失。`kind` は 0 = Fro・1 = One・2 = Inf（いずれも `[3,2]`。One／Inf はタイから離れた入力）、
@@ -2577,6 +2696,8 @@ cuda_family_test!(
     "linalg_norm_rank"
 );
 cuda_family_test!(create_graph_linalg_qr_cuda_matches_cpu, "linalg_qr");
+cuda_family_test!(create_graph_linalg_svd_cuda_matches_cpu, "linalg_svd");
+cuda_family_test!(create_graph_linalg_eigh_cuda_matches_cpu, "linalg_eigh");
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -2637,6 +2758,8 @@ metal_family_test!(
     "linalg_norm_rank"
 );
 metal_family_test!(create_graph_linalg_qr_metal_matches_cpu, "linalg_qr");
+metal_family_test!(create_graph_linalg_svd_metal_matches_cpu, "linalg_svd");
+metal_family_test!(create_graph_linalg_eigh_metal_matches_cpu, "linalg_eigh");
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -2746,6 +2869,16 @@ fn linalg_norm_rank_cases_pass_cpu_against_cpu() {
 #[test]
 fn linalg_qr_cases_pass_cpu_against_cpu() {
     run_family("linalg_qr", None);
+}
+
+#[test]
+fn linalg_svd_cases_pass_cpu_against_cpu() {
+    run_family("linalg_svd", None);
+}
+
+#[test]
+fn linalg_eigh_cases_pass_cpu_against_cpu() {
+    run_family("linalg_eigh", None);
 }
 
 #[test]

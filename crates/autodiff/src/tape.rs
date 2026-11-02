@@ -2759,7 +2759,16 @@ impl Op {
             // push 順序契約（`QrQ` の直後に `QrR`）のため必ず同時に `true` にする。入口検査は
             // `validate_ancestors`（`m ≥ n` かつフルランクだけ受理）。
             | Op::QrQ { .. }
-            | Op::QrR { .. } => true,
+            | Op::QrR { .. }
+            // 分解の SVD 3 Op・Eigh 2 Op（イシュー #3808・決定記録 §44・§68）。方式は
+            // `create_graph/decomp.rs`。push 順序契約（`SvdU`→`SvdS`→`SvdVh`・`EighValues`→
+            // `EighVectors`）のため、それぞれ必ず同時に `true` にする。入口検査は
+            // `validate_ancestors`（縮退・σ == 0・空分解を拒否）。
+            | Op::SvdU { .. }
+            | Op::SvdS { .. }
+            | Op::SvdVh { .. }
+            | Op::EighValues { .. }
+            | Op::EighVectors { .. } => true,
             // `IndexedScatterReduce` は `mode` の Sum・Mean・Amax・Amin だけ true（イシュー #3802・
             // 決定記録 §41・§62）。`Prod` は #3803 の scan 補助待ちで false、
             // `#[non_exhaustive]` の未知 mode も false（`VectorNorm` の前例）。
@@ -2797,13 +2806,7 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::SvdU { .. }
-            | Op::SvdS { .. }
-            | Op::SvdVh { .. }
-            // イシュー #2150 の 5 演算のうち `SlogdetLogAbsDet`・`SlogdetSign`・`MatrixRank` 以外は
-            // 非対応のまま保持する（`MatrixNorm` の `Nuc`・`Spectral` は上の payload 判定で false）。
-            | Op::EighValues { .. }
-            | Op::EighVectors { .. }
+            // `MatrixNorm` の `Nuc`・`Spectral` は上の payload 判定で false のまま。
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
             // プラグイン。`docs/autodiff-custom-function-decision.md`）は
@@ -5611,23 +5614,19 @@ mod conv3d_op_tests {
                 input: a,
                 ord: fandhe_ai_tensor_core::MatrixNormOrd::Spectral,
             },
-            // 分解族で未対応のまま残る見本（#3808 で対象化されたら差し替える）。
-            Op::SvdU {
-                input: a,
-                s: Tensor::<f32>::zeros(&[1]).unwrap(),
-                vh: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
-            },
         ];
         for op in &unsupported {
             assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
         }
     }
 
-    /// イシュー #3807: `QrQ`・`QrR` は create_graph 対応（`true`）。`Svd*`・`Eigh*` は #3808 まで `false`。
+    /// イシュー #3807・#3808: 分解族 7 Op（`QrQ`・`QrR`・`SvdU`・`SvdS`・`SvdVh`・`EighValues`・
+    /// `EighVectors`）は create_graph 対応（`true`）。隣接の `MatrixNorm` の `Nuc`・`Spectral` は `false`。
     #[test]
     fn qr_family_supports_create_graph() {
         let a = NodeId(0);
         let z = Tensor::<f32>::zeros(&[1, 1]).unwrap();
+        let z1 = Tensor::<f32>::zeros(&[1]).unwrap();
         for op in [
             Op::QrQ {
                 input: a,
@@ -5637,19 +5636,37 @@ mod conv3d_op_tests {
                 input: a,
                 q: z.clone(),
             },
-        ] {
-            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
-        }
-        for op in [
+            Op::SvdU {
+                input: a,
+                s: z1.clone(),
+                vh: z.clone(),
+            },
+            Op::SvdS {
+                input: a,
+                u: z.clone(),
+                vh: z.clone(),
+            },
+            Op::SvdVh {
+                input: a,
+                u: z.clone(),
+                s: z1.clone(),
+            },
             Op::EighValues {
                 input: a,
                 vectors: z.clone(),
             },
             Op::EighVectors {
                 input: a,
-                values: z.clone(),
+                values: z1.clone(),
             },
         ] {
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
+        }
+        for ord in [
+            fandhe_ai_tensor_core::MatrixNormOrd::Nuc,
+            fandhe_ai_tensor_core::MatrixNormOrd::Spectral,
+        ] {
+            let op = Op::MatrixNorm { input: a, ord };
             assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
         }
     }

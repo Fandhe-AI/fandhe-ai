@@ -1716,7 +1716,7 @@ const EIGH_MAX_SWEEPS: usize = 60;
 
 /// [`eigh_vjp`] の固有値縮退判定に使う相対しきい値
 /// （`docs/autodiff-linalg-ops-decision.md` §3「eigh」）。
-const EIGH_DEGENERATE_RTOL: f64 = 1e-9;
+pub(crate) const EIGH_DEGENERATE_RTOL: f64 = 1e-9;
 
 /// 下三角のみを読んで対称化した `[n,n]` 行列に古典的巡回 Jacobi 法を
 /// 適用し、`(固有値, 固有ベクトル行列)` を返す（固有値は未ソート・

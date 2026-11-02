@@ -1957,3 +1957,59 @@ fn qr_wide_is_rejected_via_facade() {
     assert!(matches!(r, Err(AutodiffError::Backward(_))));
     assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
 }
+// --- 分解 SVD・Eigh（イシュー #3808・決定記録 §44・§68） ------------------------------------------
+
+/// `SvdU`・`SvdS`・`SvdVh` の全てを使う損失（スペクトルがよく分離した縦長入力）。
+fn svd_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let f = x.svd().unwrap();
+    let wu = tape.var_no_grad(&t(vec![0.9, -0.4, 0.7, 0.3, -0.8, 0.5], &[3, 2]));
+    let wv = tape.var_no_grad(&t(vec![0.6, -0.5, 0.2, 0.8], &[2, 2]));
+    let lu = f.u.tanh().mul(&wu).unwrap().sum(None).unwrap();
+    let ls = f.s.mul(&f.s).unwrap().sum(None).unwrap();
+    let lv = f.vh.tanh().mul(&wv).unwrap().sum(None).unwrap();
+    lu.add(&ls).unwrap().add(&lv).unwrap()
+}
+
+#[test]
+fn svd_create_graph_via_facade() {
+    let x0 = [3.0, 0.3, -0.4, 1.5, 0.2, 0.9];
+    check_create_graph_family("svd", &x0, &[3, 2], svd_loss, false, 0.01);
+}
+
+/// `EighValues`・`EighVectors` の両方を使う損失。入力は対称（下三角のみ読まれる）。
+fn eigh_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let f = x.eigh().unwrap();
+    let wl = tape.var_no_grad(&t(vec![0.9, -0.4, 0.7], &[3]));
+    let wv = tape.var_no_grad(&t(
+        vec![0.6, -0.5, 0.2, 0.8, 0.3, -0.7, 0.4, 0.1, 0.5],
+        &[3, 3],
+    ));
+    let ll = f.eigenvalues.tanh().mul(&wl).unwrap().sum(None).unwrap();
+    let lv = f
+        .eigenvectors
+        .mul(&f.eigenvectors)
+        .unwrap()
+        .mul(&wv)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    ll.add(&lv).unwrap()
+}
+
+#[test]
+fn eigh_create_graph_via_facade() {
+    let x0 = [4.0, 0.3, 0.2, 0.3, 2.5, 0.1, 0.2, 0.1, 1.0];
+    check_create_graph_family("eigh", &x0, &[3, 3], eigh_loss, false, 0.01);
+}
+
+/// 固有値の縮退は（固有値だけの損失でも）型付きエラーで拒否され、`child` は空のまま。
+#[test]
+fn eigh_degenerate_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let loss = x.eigh().unwrap().eigenvalues.sum(None).unwrap();
+    let r = tape.backward_create_graph(&loss, &child);
+    assert!(matches!(r, Err(AutodiffError::Backward(_))));
+    assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
+}
