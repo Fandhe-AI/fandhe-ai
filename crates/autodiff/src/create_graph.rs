@@ -92,7 +92,9 @@
 //! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）・
 //! 統計縮約（`LogSumExp`・`Nansum`・`Nanmean`。イシュー #3792・決定記録 §33/§51・実装は `stat_reduce_lse_nan`）も対象——
 //! 方式は `pool` サブモジュール doc と決定記録 §30。構造変換の `Dropout`・`Interpolate`・`MaxUnpool` は
-//! イシュー #3793（決定記録 §35/§56・実装は `structural`）で対象にした。それ以外の追跡対象 Op・rank≥3 の
+//! イシュー #3793（決定記録 §35/§56・実装は `structural`）で対象にした。RNN セルの
+//! `RnnCell`・`GruCell` はイシュー #3795（決定記録 §37/§58・実装は `rnn_gru_cell`）で対象にした
+//! （`LstmCell`・`LstmHidden` は引き続き対象外）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -137,6 +139,7 @@ mod loss_class;
 mod loss_regression;
 mod pad_mask;
 mod pool;
+mod rnn_gru_cell;
 mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
@@ -1222,6 +1225,45 @@ fn replay_op<'c>(
         Op::Interpolate { input, size, mode } => {
             get_mirror(mirror, input)?.interpolate(&size, mode)
         }
+        // RNN セル 2 Op（イシュー #3795。方式は `rnn_gru_cell` モジュール doc 参照）。
+        // GruCell の payload（gates_rzn・q）は使わず、子テープ側が計算し直す。
+        Op::RnnCell {
+            x,
+            h_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+        } => rnn_gru_cell::replay_rnn_cell(
+            mirror,
+            &rnn_gru_cell::CellIds {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            },
+        ),
+        Op::GruCell {
+            x,
+            h_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+            ..
+        } => rnn_gru_cell::replay_gru_cell(
+            mirror,
+            &rnn_gru_cell::CellIds {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            },
+        ),
         Op::MaxUnpool { input, index } => {
             crate::max_unpool_ops::replay_max_unpool(&get_mirror(mirror, input)?, &index, shape)
         }
@@ -3056,6 +3098,54 @@ fn build_cgrads<'c>(
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
+            // RNN セル 2 Op（イシュー #3795。方式は `rnn_gru_cell` モジュール doc 参照）。
+            Op::RnnCell {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            } => rnn_gru_cell::rnn_cell_cgrad(
+                child,
+                &parent_nodes,
+                &mut cgrads,
+                mirror,
+                id,
+                &g,
+                &rnn_gru_cell::CellIds {
+                    x,
+                    h_prev,
+                    w_ih,
+                    w_hh,
+                    b_ih,
+                    b_hh,
+                },
+            )?,
+            Op::GruCell {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+                ..
+            } => rnn_gru_cell::gru_cell_cgrad(
+                child,
+                &parent_nodes,
+                &mut cgrads,
+                mirror,
+                id,
+                &g,
+                &rnn_gru_cell::CellIds {
+                    x,
+                    h_prev,
+                    w_ih,
+                    w_hh,
+                    b_ih,
+                    b_hh,
+                },
+            )?,
             _ => {
                 return Err(AutodiffError::Backward(
                     "create_graph: build_cgrads: supports_create_graph() が true の未対応 Op\
