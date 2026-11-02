@@ -269,6 +269,9 @@ pub(super) fn cgrad<'c>(
     }
     let layout = scatter_reduce_layout(&input_shape, index.shape(), &src_shape, dim)
         .map_err(AutodiffError::Shape)?;
+    // index の要素数に依らず同じ上流検査（fail-closed）を通す（空 index 経路も対象）。
+    let g_value = child_value(child, g)?;
+    check_upstream_bound(&g_value)?;
     let zeros_src = child.var_no_grad(&Tensor::zeros(&src_shape)?);
     // 何も書かれない場合（index／src が空）は全位置が未タッチで、1 階は `d_input = g`・`d_src = []`。
     if layout.index_numel() == 0 {
@@ -277,8 +280,6 @@ pub(super) fn cgrad<'c>(
             d_src: need_src.then_some(zeros_src),
         });
     }
-    let g_value = child_value(child, g)?;
-    check_upstream_bound(&g_value)?;
 
     let x_val = materialize_fallible(parent_nodes, parent.ops(), input)?;
     let s_val = materialize_fallible(parent_nodes, parent.ops(), src)?;

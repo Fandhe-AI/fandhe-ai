@@ -584,3 +584,31 @@ fn empty_index_matches_first_order() {
         assert_eq!(want, got, "{mode:?}");
     }
 }
+
+/// 空 index でも非有限／過大な上流を拒否する（index の要素数に依らず fail-closed。
+/// 子テープは空のまま、安全な上流での再試行は成功する）。
+#[test]
+fn empty_index_rejects_unsafe_upstream() {
+    for mode in MODES {
+        for scale in [3e38f32, f32::INFINITY, f32::NAN] {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(vec![0.5, 1.5, -0.5], &[3]));
+            let s = tape.var(&t(vec![], &[0]));
+            let c_bad = tape.var_no_grad(&t(vec![scale], &[1]));
+            let c_ok = tape.var_no_grad(&t(vec![1e3], &[1]));
+            let y = scatter_reduce(&x, 0, &ti(vec![], &[0]), &s, mode, true).unwrap();
+            let bad = y.mul(&c_bad).unwrap().sum(None).unwrap();
+            let ok = y.mul(&c_ok).unwrap().sum(None).unwrap();
+            let err = tape.backward_create_graph(&bad, &child).unwrap_err();
+            assert!(
+                matches!(err, AutodiffError::Backward(_)),
+                "{mode:?} {scale}: {err:?}"
+            );
+            assert!(child.is_empty(), "{mode:?} {scale}: child が空でない");
+            let cg = tape.backward_create_graph(&ok, &child).unwrap();
+            let g = dense(cg.grad(&x).unwrap().unwrap().to_tensor());
+            assert!(g.iter().all(|v| v.is_finite()), "{mode:?}: {g:?}");
+        }
+    }
+}
