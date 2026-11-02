@@ -857,3 +857,41 @@ fn lrn_scale_restoration_cotangent_underflow_is_rejected_or_exact() {
         "受理側が無い（判定が過剰）: {outcomes:?}"
     );
 }
+
+/// LRN の総括判定の計算量の上限が窓内の二重走査（seed ごとに反転窓 × 前方窓）を数える（Codex P2）。
+/// `C = 4096`・`size = 8191`（窓は `C` に打ち切って両窓とも幅 4096）・全ゼロ・`α = 0.5`・`β = 1`・
+/// `k = 1e10`・損失は出力の和。数値の検査では拒否されない入力で、二重走査の合計は約 1374 億回になる。
+/// 上限が出力要素数 × 帯幅だけを数えると判定へ入って長時間止まるので、走査量の上限で短時間に拒否される
+/// こと（`child` が空）を確かめる。
+#[test]
+fn lrn_judge_budget_counts_window_double_scan() {
+    let (c, size) = (4096usize, 8191usize);
+    let shape = [1usize, c, 1];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0; c], &shape));
+    let y = x
+        .local_response_norm(size, 0.5, 1.0, 1e10)
+        .expect("forward");
+    let loss = y.sum(None).expect("loss");
+    let start = std::time::Instant::now();
+    let err = tape
+        .backward_create_graph(&loss, &child)
+        .map(|_| ())
+        .unwrap_err();
+    let elapsed = start.elapsed();
+    match &err {
+        AutodiffError::Backward(msg) => {
+            assert!(
+                msg.contains("LocalResponseNorm") && msg.contains("2^27"),
+                "{msg}"
+            );
+        }
+        e => panic!("想定外のエラー {e:?}"),
+    }
+    assert!(child.is_empty(), "拒否後の child は空");
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "走査量の上限で短時間に拒否される: {elapsed:?}"
+    );
+}

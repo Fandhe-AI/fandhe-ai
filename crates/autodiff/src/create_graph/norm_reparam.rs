@@ -52,8 +52,9 @@
 //!   再現した `V_str` で求め、`(|V_str − V| + coeff·M)` が絶対 1e-5 未満か相対の半分以内でない要素が 1 つでも
 //!   あれば拒否する（`loss_class.rs::struct_check` と同じ形。tolerance 定数は変えない）。f32 の forward 値・
 //!   VJP 係数が 1 つでも非有限なら（逆伝播は全要素に `cot·係数` を作るので `0·inf = NaN`）拒否する。
-//!   走査量が `2^27` 要素を超える入力は計算量の fail-closed として拒否する。構造を積んだ後の 1 階の値の照合
-//!   （[`shadow_check`]）も残す。
+//!   走査量（f32 の再現 1 系統が回す内側ループの反復回数。LRN は seed ごとの反転窓 × 前方窓の二重走査を
+//!   含む。[`lrn_judge_cost`] 等）が `2^27` を超える入力は計算量の fail-closed として拒否する。構造を積んだ
+//!   後の 1 階の値の照合（[`shadow_check`]）も残す。
 //! - 拒否は `AutodiffError::Backward`。`backward_create_graph` のロールバックで `child` は空へ戻り、
 //!   安全な入力で再試行できる。
 //!
@@ -187,9 +188,53 @@ fn shadow_check(
 // 逆伝播は全要素に `cot·係数` を作るので、f32 の forward 値・VJP 係数が 1 つでも非有限なら `V_str` は
 // NaN になる（`0·inf`）。これは forward の再現で非有限を見つけた時点で拒否する。
 
-/// 総括判定で走査する二階の要素数の上限。超える入力は計算量の fail-closed として拒否する
-/// （保守的。上限内の入力だけに保証を限る）。
+/// 総括判定の走査量の上限。走査量は f32 の再現（`V_str`）1 系統が回す内側ループの反復回数で数え
+/// （[`lrn_judge_cost`]・[`wn_judge_cost`]・[`sn_judge_cost`]。参照の [`Rf`] も同じ回数を回す）、
+/// 超える入力は計算量の fail-closed として拒否する（保守的。上限内の入力だけに保証を限る）。
 const JUDGE_BUDGET: usize = 1 << 27;
+
+/// LRN の総括判定の走査量（[`lrn_col_fwd`]・[`lrn_col_rev`]・[`lrn_col_judge`] の反復回数の上界）。
+/// 列（`ncols` 本・長さ `c`）ごとに、forward が窓和 `d`・`sz` の `c·(nf + nr)`（[`win_sum`] は範囲外も
+/// 0 として回るので `nf = bf + ff + 1`・`nr = br + fr + 1` は打ち切らない。最大 `2c − 1`）と長さ `c` の走査
+/// `25 + 2·nchunks` 回（中間値 10 本・`dx`・有限性の検査 11 本・チャンクの `Mul` と検査・作業領域の確保
+/// 4 本）、seed（`c` 個）ごとに作業領域の初期化・`x_s` から `x` への戻し・`x` への判定が各 `sx`、反転窓の
+/// 走査と `up` への判定が各 `wr`、反転窓の各 `m` から前方窓への蓄積（二重走査）が `wr·wf`。seed 側の
+/// `wf`・`wr`・`sx` は前方窓・反転窓・`x` への要素の幅で、どれも `c` に打ち切る。f64 の参照（`d`・`m` の窓和）は
+/// forward の窓和と同じ大きさ。
+fn lrn_judge_cost(ncols: usize, c: usize, w: LrnWin, nchunks: usize) -> usize {
+    let wf = (w.bf + w.ff + 1).min(c);
+    let wr = (w.br + w.fr + 1).min(c);
+    let sx = (wr + w.bf + w.ff).min(c);
+    let (nf, nr) = (w.bf + w.ff + 1, w.br + w.fr + 1);
+    let fwd = c
+        .saturating_mul(nf + nr)
+        .saturating_add(c.saturating_mul(nchunks.saturating_mul(2).saturating_add(25)));
+    let per_seed = sx
+        .saturating_mul(3)
+        .saturating_add(wr.saturating_mul(2))
+        .saturating_add(wr.saturating_mul(wf));
+    ncols.saturating_mul(fwd.saturating_add(c.saturating_mul(per_seed)))
+}
+
+/// WeightNorm の総括判定の走査量（[`wn_fwd`]・[`wn_rev`]・[`wn_group_judge`] の反復回数）。グループ
+/// （`groups` 個・長さ `rest`）ごとに、forward が長さ `rest` の走査 13 回（`v_s`・`up`・`Σv_s²`・`v̂`・
+/// Div 係数・`dg`・`t`・`dv` と有限性の検査 5 本）、seed（`rest + 1` 個）ごとに逆伝播が 5 回（作業領域の
+/// 確保・`up` への要素の初期化・`dg`・`v̂`・`v_s` の逆伝播）と判定が `2·rest + 1`。
+fn wn_judge_cost(groups: usize, rest: usize) -> usize {
+    let per_seed = rest.saturating_mul(7).saturating_add(1);
+    let per_group = rest
+        .saturating_mul(13)
+        .saturating_add((rest + 1).saturating_mul(per_seed));
+    groups.saturating_mul(per_group)
+}
+
+/// SpectralNorm の総括判定の走査量（[`sn_fwd`]・[`sn_rev`]・[`sn_judge`] の反復回数）。forward が長さ
+/// `n` の走査 17 回（`W_s`・`P`・`up`・`σ_s`・`Ŵ`・Div 係数 2 本・`Σup⊙Ŵ`・`t`・`dW` と有限性の検査 7 本）、
+/// seed（`n` 個）ごとに逆伝播が 2 回（`Ŵ`・`up` と `σ_s` の逆伝播）と判定が `2·n`。
+fn sn_judge_cost(n: usize) -> usize {
+    n.saturating_mul(17)
+        .saturating_add(n.saturating_mul(n.saturating_mul(4)))
+}
 
 fn judge_budget(entries: usize, what: &str) -> Result<(), AutodiffError> {
     if entries <= JUDGE_BUDGET {
@@ -908,8 +953,10 @@ pub(super) fn lrn_cgrad<'c>(
         fr: fwd_r.min(c - 1),
     };
     let coeff_judge = lrn_coeff(nt_f, nt_r, chunks.len(), beta);
-    let per_elem = (win.br + win.fr + 1) + (win.br + win.fr + win.bf + win.ff + 1).min(c);
-    judge_budget(x_data.len().saturating_mul(per_elem), "LocalResponseNorm")?;
+    judge_budget(
+        lrn_judge_cost(ncols, c, win, chunks.len()),
+        "LocalResponseNorm",
+    )?;
 
     // ホスト側の f64 参照（構造の各段を再現）と第 1 軸の判定、第 2 軸の m の計算。
     let xs: Vec<f32> = (0..x_data.len())
@@ -1331,10 +1378,7 @@ pub(super) fn weight_norm_cgrads<'c>(
 
     // 第 1 軸（overflow）と第 2 軸の m・総括判定（係数は [`wn_coeff`]）。
     let coeff_judge = wn_coeff(rest);
-    judge_budget(
-        groups.saturating_mul(rest + 1).saturating_mul(2 * rest + 1),
-        "WeightNorm",
-    )?;
+    judge_budget(wn_judge_cost(groups, rest), "WeightNorm")?;
     let nf = rest as f64;
     let mut m_dv = vec![0.0f64; v_gm.len()];
     let mut m_dg = vec![0.0f64; groups];
@@ -1635,10 +1679,7 @@ pub(super) fn spectral_norm_cgrad<'c>(
         }
         // 第 2 軸の本体: seed が 1 要素のときの二階の各要素を f32 で再現して参照と比べる。σ_s の相殺・
         // 係数行列 `I − ŴP` の相殺・Div 係数の overflow・中間値の underflow はここで見える。
-        judge_budget(
-            w_data.len().saturating_mul(2 * w_data.len()),
-            "SpectralNorm",
-        )?;
+        judge_budget(sn_judge_cost(w_data.len()), "SpectralNorm")?;
         sn_judge(&w_data, &p_exact, &up_data, sf, sn_coeff(w_data.len()))?;
     }
 
@@ -2023,5 +2064,48 @@ mod tests {
         assert!(q.m >= q.v.abs() * 1999.0 * 0.999, "{q:?}");
         assert!(judge_budget(JUDGE_BUDGET, "t").is_ok());
         assert!(judge_budget(JUDGE_BUDGET + 1, "t").is_err());
+    }
+
+    /// LRN の窓（`lrn_cgrad` と同じ組み立て）。
+    fn lrn_win(c: usize, size: usize) -> LrnWin {
+        LrnWin {
+            bf: (size / 2).min(c - 1),
+            ff: ((size - 1) / 2).min(c - 1),
+            br: ((size - 1) / 2).min(c - 1),
+            fr: (size / 2).min(c - 1),
+        }
+    }
+
+    /// 走査量が forward の窓和（`win_sum`）と `lrn_col_rev` の seed ごとのループ（初期化・反転窓・二重走査・
+    /// 戻し）・判定の反復回数を下回らないこと、Codex の入力（`C = 4096`・`size = 8191`）が上限を超えること（二重走査を数える）。
+    #[test]
+    fn judge_cost_counts_inner_loops() {
+        for c in [1usize, 2, 3, 5, 8, 17] {
+            for size in [1usize, 2, 3, 4, 5, 9, 2 * c + 3] {
+                let w = lrn_win(c, size);
+                let mut actual = c * (w.bf + w.ff + 1) + c * (w.br + w.fr + 1);
+                for j in 0..c {
+                    let (ulo, uhi) = (j.saturating_sub(w.br), (j + w.fr).min(c - 1));
+                    let (xlo, xhi) = (ulo.saturating_sub(w.bf), (uhi + w.ff).min(c - 1));
+                    let (sx, su) = (xhi - xlo + 1, uhi - ulo + 1);
+                    actual += 3 * sx + 2 * su;
+                    for m in ulo..=uhi {
+                        actual += (m + w.ff).min(c - 1) - m.saturating_sub(w.bf) + 1;
+                    }
+                }
+                let cost = lrn_judge_cost(1, c, w, 0);
+                assert!(cost >= actual, "c={c} size={size}: {cost} < {actual}");
+            }
+        }
+        let codex = lrn_judge_cost(1, 4096, lrn_win(4096, 8191), 1);
+        assert!(codex > 4096 * 4096 * 4096, "{codex}");
+        assert!(judge_budget(codex, "t").is_err());
+        // 典型的な小さい窓は上限内。
+        assert!(judge_budget(lrn_judge_cost(64, 16, lrn_win(16, 5), 1), "t").is_ok());
+        // WeightNorm・SpectralNorm は seed 数 × 長さ（二乗）で数える。
+        assert_eq!(wn_judge_cost(1, 2), 2 * 13 + 3 * 15);
+        assert_eq!(sn_judge_cost(3), 3 * 17 + 3 * 12);
+        assert!(judge_budget(wn_judge_cost(1, 4400), "t").is_err());
+        assert!(judge_budget(sn_judge_cost(6000), "t").is_err());
     }
 }
