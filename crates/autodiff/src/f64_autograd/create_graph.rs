@@ -103,6 +103,12 @@ impl<'c, 't> CreateGraphResultF64<'c, 't> {
         self.vars.child_var(var)
     }
 
+    /// 親 `NodeIdF64` を添字とする子テープ上の写し列（`jvp_create_graph` が親→子→孫の
+    /// 2 段合成で写しを作るために使う crate 内部のアクセサ。公開しない。#3788）。
+    pub(crate) fn mirror(&self) -> &[Option<VarF64<'c, 't>>] {
+        &self.vars.mirror
+    }
+
     /// `first_order` と子テープ側の参照部分に分解する（facade の newtype が
     /// `unsafe` なしで `GradientsF64` を所有するため）。
     pub fn into_parts(self) -> (GradientsF64, CreateGraphVarsF64<'c, 't>) {
