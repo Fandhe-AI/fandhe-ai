@@ -122,7 +122,7 @@ pub(super) fn guard_cholesky(l: &Tensor<f32>, g: &Tensor<f32>) -> Result<(), Aut
 }
 
 /// 隣接する f32 値（`rcond` の閾値付近の判定に使う。新しい tolerance 定数は作らない）。
-fn prev_f32(r: f32) -> f32 {
+pub(super) fn prev_f32(r: f32) -> f32 {
     if r <= 0.0 {
         0.0
     } else {
@@ -130,7 +130,7 @@ fn prev_f32(r: f32) -> f32 {
     }
 }
 
-fn next_f32(r: f32) -> f32 {
+pub(super) fn next_f32(r: f32) -> f32 {
     if r.is_finite() && r >= 0.0 {
         f32::from_bits(r.to_bits() + 1)
     } else {

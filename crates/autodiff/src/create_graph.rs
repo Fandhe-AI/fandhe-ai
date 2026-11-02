@@ -75,12 +75,13 @@
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
-//! `MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・`SlogdetSign`・`MatrixRank` は fail-closed に固定した。
+//! `Qr*`・`Svd*`・`Eigh*`（と `MatrixNorm` の `Nuc`・`Spectral`）は fail-closed に固定した。
 //! `Stft`・`Istft` はイシュー #3804
 //! （決定記録 §42・§63。実装は `stft` サブモジュール。随伴 Op の対 `StftAdjoint`・`IstftAdjoint`）で
 //! 対象にした。`Cholesky`・`Pinv`・`Lstsq` はイシュー #3805（決定記録 §43・§65。実装は
 //! `linalg_cholesky_pinv` サブモジュール。`Pinv`・`Lstsq` は打ち切りなし `rank == min(m,n)` の入力だけ）で
-//! 対象にした。
+//! 対象にした。`MatrixNorm`（`Fro`・`One`・`Inf`）・`SlogdetSign`・`MatrixRank` はイシュー #3806（決定記録 §43・§66。
+//! 実装は `linalg_norm_rank` サブモジュールと `stat_varnorm` の `MatrixFro`）で対象にした。
 //! 損失の回帰系 `KlDivLoss`・`PoissonNllLoss`・`GaussianNllLoss` はイシュー #3798
 //! （決定記録 §39/§53・実装は `loss_regression`）で対象にした。
 //! 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・`NllLoss` の 5 variant を
@@ -143,6 +144,7 @@ mod conv3d;
 mod index_cum;
 mod linalg_cholesky_pinv;
 mod linalg_fft;
+mod linalg_norm_rank;
 mod loss_binary_margin;
 mod loss_class;
 mod loss_regression;
@@ -528,6 +530,13 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         | Op::Ifft { norm, .. } = &node.op
         {
             linalg_fft::check_fft_norm(*norm)?;
+        }
+        // MatrixRank（イシュー #3806）: 特異値が rcond の閾値付近なら rank が再生で反転しうるため、
+        // 子テープへ書く前に拒否する（`MatrixNorm` の ord・±inf は `validate_stat_varnorm` が扱う）。
+        if let Op::MatrixRank { input, rcond } = &node.op {
+            let a_val = materialize_fallible(&parent_nodes, parent.ops(), *input)?;
+            let recorded = materialize_fallible(&parent_nodes, parent.ops(), id)?;
+            linalg_norm_rank::validate_matrix_rank(a_val, recorded, *rcond)?;
         }
         // Stft／Istft と随伴 Op（イシュー #3804）: layout・窓長・NOLA・入力 shape の整合を
         // 子テープへ書く前に確かめる（違反は型付き Err。`child.is_empty()` を保つ）。
@@ -1397,6 +1406,12 @@ fn replay_op<'c>(
         Op::Solve { a, b } => get_mirror(mirror, a)?.solve(&get_mirror(mirror, b)?),
         Op::Det { input } => get_mirror(mirror, input)?.det(),
         Op::SlogdetLogAbsDet { input } => Ok(get_mirror(mirror, input)?.slogdet()?.logabsdet),
+        // MatrixNorm・SlogdetSign・MatrixRank（イシュー #3806・決定記録 §43・§66）。公開メソッドへの
+        // 自己再生。`SlogdetSign` は `slogdet` を重複して再生する（値は決定的で一致し、未使用ノードは
+        // どの根からも到達しない。§43 論点 8）。
+        Op::SlogdetSign { input } => Ok(get_mirror(mirror, input)?.slogdet()?.sign),
+        Op::MatrixRank { input, rcond } => get_mirror(mirror, input)?.matrix_rank(Some(rcond)),
+        Op::MatrixNorm { input, ord } => get_mirror(mirror, input)?.matrix_norm(ord),
         // 構造変換 3 Op（イシュー #3793。方式は `structural` モジュール doc 参照）。`Dropout` は
         // 記録済みマスクを固定して再生し、グローバル RNG を消費しない。
         Op::Dropout { input, mask } => {
@@ -3498,6 +3513,46 @@ fn build_cgrads<'c>(
                     )?;
                     accumulate(&parent_nodes, &mut cgrads, a, da)?;
                     accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                }
+            }
+            // MatrixNorm・SlogdetSign・MatrixRank（イシュー #3806・決定記録 §43・§66。方式は
+            // `linalg_norm_rank` モジュール doc 参照）。
+            Op::MatrixNorm { input, ord } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = match ord {
+                        fandhe_ai_tensor_core::MatrixNormOrd::Fro => {
+                            stat_varnorm::stat_varnorm_cgrad(
+                                parent,
+                                child,
+                                &parent_nodes,
+                                &get_mirror(mirror, input)?,
+                                stat_varnorm::StatSpec {
+                                    input,
+                                    dim: None,
+                                    kind: stat_varnorm::StatKind::MatrixFro,
+                                },
+                                &g,
+                            )?
+                        }
+                        fandhe_ai_tensor_core::MatrixNormOrd::One
+                        | fandhe_ai_tensor_core::MatrixNormOrd::Inf => {
+                            let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                            linalg_norm_rank::one_inf_cgrad(child, &g, a_val, ord)?
+                        }
+                        _ => {
+                            return Err(AutodiffError::Backward(
+                                "create_graph: build_cgrads: MatrixNorm の Nuc／Spectral／未知 ord は対象外（内部契約違反）"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::SlogdetSign { input } | Op::MatrixRank { input, .. } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = linalg_norm_rank::zero_cgrad(child, &parent_nodes[input.0].shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
             Op::Det { input } | Op::SlogdetLogAbsDet { input } => {

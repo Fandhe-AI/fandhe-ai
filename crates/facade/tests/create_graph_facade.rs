@@ -1809,3 +1809,83 @@ fn pinv_truncated_is_rejected_via_facade() {
     assert!(matches!(r, Err(AutodiffError::Backward(_))));
     assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
 }
+
+// --- 行列ノルム・slogdet.sign・matrix_rank（イシュー #3806・決定記録 §43・§66） ----------------------
+//
+// `One`・`Inf` は A に関する二階がゼロなので、外側の二次形式（`y²`）で `g` を経由する二階を非ゼロにする。
+// 入力は One の最大列和・Inf の最大行和が一意（タイから離れた）値。`sign`・`matrix_rank` は区分定数で
+// 単独では勾配がゼロのため、`sign · exp(logabsdet)`（= det）の二乗・`rank · Σx²` の中で検査する。
+
+fn matrix_norm_loss<'a>(tape: &'a Tape, x: &Var<'a>, ord: fandhe_ai::MatrixNormOrd) -> Var<'a> {
+    quad_loss(tape, &x.matrix_norm(ord).unwrap())
+}
+
+#[test]
+fn matrix_norm_create_graph_via_facade() {
+    use fandhe_ai::MatrixNormOrd::{Fro, Inf, One};
+    let fro = [2.0, 0.3, -0.4, 1.5, 0.2, -0.6];
+    check_create_graph_family(
+        "matrix_norm_fro",
+        &fro,
+        &[3, 2],
+        |t, x| matrix_norm_loss(t, x, Fro),
+        true,
+        0.01,
+    );
+    let tie_free = [1.0, -2.0, 3.0, 0.5, -0.7, 1.1];
+    check_create_graph_family(
+        "matrix_norm_one",
+        &tie_free,
+        &[3, 2],
+        |t, x| matrix_norm_loss(t, x, One),
+        true,
+        0.01,
+    );
+    check_create_graph_family(
+        "matrix_norm_inf",
+        &tie_free,
+        &[3, 2],
+        |t, x| matrix_norm_loss(t, x, Inf),
+        true,
+        0.01,
+    );
+}
+
+fn slogdet_sign_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let s = x.slogdet().unwrap();
+    let det = s.sign.mul(&s.logabsdet.exp()).unwrap();
+    quad_loss(tape, &det)
+}
+
+#[test]
+fn slogdet_sign_create_graph_via_facade() {
+    let x0 = [2.0, 0.3, -0.4, 0.1, 1.5, 0.2, -0.6, 0.5, 1.8];
+    check_create_graph_family("slogdet_sign", &x0, &[3, 3], slogdet_sign_loss, false, 0.01);
+}
+
+fn matrix_rank_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let r = x.matrix_rank(None).unwrap();
+    r.mul(&x.mul(x).unwrap().sum(None).unwrap()).unwrap()
+}
+
+#[test]
+fn matrix_rank_create_graph_via_facade() {
+    let x0 = [2.0, 0.3, -0.4, 0.1, 1.5, 0.2, -0.6, 0.5, 1.8];
+    check_create_graph_family("matrix_rank", &x0, &[3, 3], matrix_rank_loss, true, 0.01);
+}
+
+/// `Nuc` は型付きエラーで拒否され、`child` は空のまま。
+#[test]
+fn matrix_norm_nuc_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let loss = x
+        .matrix_norm(fandhe_ai::MatrixNormOrd::Nuc)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let r = tape.backward_create_graph(&loss, &child);
+    assert!(matches!(r, Err(AutodiffError::Backward(_))));
+    assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
+}
