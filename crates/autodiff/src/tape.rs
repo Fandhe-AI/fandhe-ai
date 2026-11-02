@@ -2544,9 +2544,10 @@ impl Op {
     /// `docs/autodiff-higher-order-grad-decision.md` §14）の 12
     /// variant に加え、`Transpose`・`Permute`・`Narrow`・`Concat`・
     /// `Contiguous`・`Where` は無条件で `true`（#2062）。イシュー #3078 で
-    /// `RmsNorm`・`LayerNorm` も `true`（V3 値＋S1 構造。入力が非有限・
-    /// overflow 域の場合は `create_graph_norm::validate_norm_s1` が入口で
-    /// 拒否する。決定記録 §27）。`BatchNorm`（train／eval。#3079）も `true`——値は
+    /// `RmsNorm`・`LayerNorm` も `true`（V3 値＋S1 構造。入力が非有限の場合は
+    /// `create_graph_norm::validate_norm_s1` が入口で拒否する。f32 の差・部分和が overflow する
+    /// 幅広の行は #3809 で S0 前スケーリングにより受理へ移った。非有限要素・`eps=0` の定数行・
+    /// 構造段の判定による拒否は残る。決定記録 §27・§45・§69）。`BatchNorm`（train／eval。#3079）も `true`——値は
     /// 1 階と同じ `batch_norm_vjp_channels`（V3）、構造はチャネル行上の `LayerNorm` と
     /// 同じ S1 合成で、適用判定も同じ `validate_norm_s1`／`check_structure_stages` が担う
     /// （`create_graph_norm.rs`・決定記録 §28）。

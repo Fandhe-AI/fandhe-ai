@@ -44681,6 +44681,34 @@ fn backward_create_graph_linalg_svd_eigh_usage_doctest_is_present_and_compiled()
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
 
+/// `create_graph` の正規化 `layer_norm`・`batch_norm`（train）の S0 前スケーリングによる受理範囲を固定する
+/// 正ガード（イシュー #3809・決定記録 `docs/autodiff-higher-order-grad-decision.md` §45・§69）。
+///
+/// facade に本件を拒否する否定ガード・保留 doctest ガードは元から無かったため、反転ではなく「`[3e38, -3e38]` が
+/// 受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。挙動の本体は
+/// `tests/create_graph_facade.rs` の `{layer_norm,batch_norm}_prescaled_create_graph_via_facade`。自己テストとして、
+/// 存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
+#[test]
+fn backward_create_graph_norm_prescale_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "backward_create_graph norm prescale",
+        file: "lib.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn backward_create_graph"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "backward_create_graph",
+        "x.layer_norm(None, None, 1e-5)?",
+        "3e38_f32, -3e38",
+        "const_child.leaf_count()",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    // すり替え検出: 同じ検査が、存在しない記述を課されると違反を返す。
+    let missing =
+        surface_guard::usage_doctest_violations(&[entry(&["x.layer_norm_missing_needle()"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
 /// `create_graph` の損失のクラス軸系（`cross_entropy_loss_with`・`multi_margin_loss`・`multilabel_margin_loss`・
 /// `multilabel_soft_margin_loss`・`cosine_embedding_loss`・`triplet_margin_loss`）の受理範囲を固定する
 /// 正ガード（イシュー #3800・決定記録 `docs/autodiff-higher-order-grad-decision.md` §40・§55）。

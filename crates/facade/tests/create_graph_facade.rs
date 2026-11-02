@@ -2013,3 +2013,116 @@ fn eigh_degenerate_is_rejected_via_facade() {
     assert!(matches!(r, Err(AutodiffError::Backward(_))));
     assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
 }
+
+// --- 正規化の S0 前スケーリング（イシュー #3809・決定記録 §45・§69） ----------------------------
+
+/// 受理された `x` の 1 階（`first_order` と `cg.grad`）・二階（`child.backward`）がすべて有限で、
+/// `cg.grad` が素の `backward` と REQ-2 判定で一致することを確かめる。
+fn assert_prescaled_accepted<'a>(
+    ctx: &str,
+    tape: &'a Tape,
+    child: &'a Tape,
+    x: &Var<'a>,
+    loss: &Var<'a>,
+) {
+    let plain = tape.backward(loss).unwrap();
+    let plain_x = plain
+        .get(x)
+        .unwrap()
+        .unwrap()
+        .contiguous()
+        .as_slice()
+        .unwrap()
+        .to_vec();
+    let cg = tape
+        .backward_create_graph(loss, child)
+        .unwrap_or_else(|e| panic!("{ctx}: 受理されるはず {e:?}"));
+    let g = cg.grad(x).unwrap().unwrap();
+    let gv = g.to_tensor().contiguous().as_slice().unwrap().to_vec();
+    assert!(gv.iter().all(|v| v.is_finite()), "{ctx}: cg.grad {gv:?}");
+    for (a, b) in gv.iter().zip(&plain_x) {
+        assert!(req2_close(*a as f64, *b as f64), "{ctx}: {a} vs {b}");
+    }
+    let grads2 = child.backward(&g.sum(None).unwrap()).unwrap();
+    let xc = cg.child_var(x).unwrap().unwrap();
+    let h = grads2
+        .get(&xc)
+        .unwrap()
+        .unwrap()
+        .contiguous()
+        .as_slice()
+        .unwrap()
+        .to_vec();
+    assert!(h.iter().all(|v| v.is_finite()), "{ctx}: 二階 {h:?}");
+}
+
+/// `[3e38, -3e38]`（入口の (b)）と `[-2e38, 1e38, 1e38]`（(c)）の `layer_norm` は S0 で受理される。
+/// `eps=0` の定数行は拒否のままで、`child` は空に保たれる。
+#[test]
+fn layer_norm_prescaled_create_graph_via_facade() {
+    for (row, n) in [
+        (vec![3e38_f32, -3e38], 2usize),
+        (vec![-2e38, 1e38, 1e38], 3),
+    ] {
+        let tape = fandhe_ai::tape();
+        let child = fandhe_ai::tape();
+        let x = tape.var(&t(row, &[1, n]));
+        let w = tape.var_no_grad(&t(vec![1.2, 0.7, -0.4][..n].to_vec(), &[n]));
+        let c = tape.var_no_grad(&t((0..n).map(|i| 1.0 + i as f32).collect(), &[1, n]));
+        let loss = x
+            .layer_norm(Some(&w), None, 1e-5)
+            .unwrap()
+            .mul(&c)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        assert_prescaled_accepted("layer_norm", &tape, &child, &x, &loss);
+    }
+    // 拒否が残る入力。
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![2.0, 2.0, 2.0], &[1, 3]));
+    let loss = x.layer_norm(None, None, 0.0).unwrap().sum(None).unwrap();
+    assert!(matches!(
+        tape.backward_create_graph(&loss, &child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
+}
+
+/// `batch_norm`（train）のチャネル行 `[3e38, -3e38]` は S0 で受理される。上流勾配が巨大
+/// （`g = 1e38`）な例は構造段の判定で拒否のままで、`child` は空に保たれる。
+#[test]
+fn batch_norm_prescaled_create_graph_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![3e38_f32, 1.0, -3e38, 2.0], &[2, 2]));
+    let w = tape.var_no_grad(&t(vec![1.2, 0.7], &[2]));
+    let c = tape.var_no_grad(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let loss = x
+        .batch_norm(Some(&w), None, 1e-5)
+        .unwrap()
+        .mul(&c)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    assert_prescaled_accepted("batch_norm", &tape, &child, &x, &loss);
+
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![3e38_f32, -3e38], &[2, 1]));
+    let w = tape.var(&t(vec![1.0], &[1]));
+    let c = tape.var_no_grad(&t(vec![1e38, 1e38], &[2, 1]));
+    let loss = x
+        .batch_norm(Some(&w), None, 1e-5)
+        .unwrap()
+        .mul(&c)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    assert!(matches!(
+        tape.backward_create_graph(&loss, &child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
+}

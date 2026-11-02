@@ -830,6 +830,19 @@ const CASES: &[Case] = &[
         run: run_linalg_eigh_sym3,
         reject: Some(reject_eigh_degenerate),
     },
+    // 正規化の S0 前スケーリング族（イシュー #3809・決定記録 §45/§69）。`layer_norm` の 1 階 VJP は CUDA・Metal の
+    // 正規化逆伝播カーネルを通るので K。子テープの構造（`Div`・`Mean`・`Sub` 等の elementwise と行方向の縮約）は
+    // デバイスで走り、`MatMul` を含まない。入力は `[3e38, -3e38, …]` の幅広の行（入口の (b) に当たり S0 が発動する）。
+    // 新しいカーネルは作らない。実機は未実測（#3857・#3859）。
+    Case {
+        name: "norm_prescale_layer_norm_wide",
+        family: "norm_prescale",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_norm_prescale_layer_norm,
+        reject: Some(reject_layer_norm_const_row_eps0),
+    },
     // 行列ノルム・slogdet.sign・matrix_rank 族（イシュー #3806・決定記録 §43/§66）。`linalg_*` は CUDA・Metal・
     // ROCm のうち override されない経路でホストの `eval::linalg` へフォールバックし（値は 1 階と同じホスト関数の V3／
     // ゼロ定数）、構造は `Mul`／`Sum` 等の elementwise のみで MatMul を含まない。実機は未実測（#3857・#3859）。
@@ -2341,6 +2354,39 @@ fn reject_eigh_degenerate(tp: &Tapes) -> bool {
     is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
 }
 
+/// 正規化 S0 族（#3809）の損失 `sum(layer_norm(x; w, b) ⊙ c)`（`w`・`b`・`c` は定数）。
+fn norm_prescale_loss<'a>(tape: &'a Tape, p: &Var<'a>) -> Result<Var<'a>, AutodiffError> {
+    let w = tape.var_no_grad(&t(vec![1.2, 0.7, -0.4, 0.9], &[4]));
+    let b = tape.var_no_grad(&t(vec![0.1, -0.2, 0.3, 0.0], &[4]));
+    let c = tape.var_no_grad(&t(
+        (0..12)
+            .map(|i| 0.5 + ((i * 7 + 3) % 5) as f32 * 0.3)
+            .collect(),
+        &[3, 4],
+    ));
+    p.layer_norm(Some(&w), Some(&b), 1e-5)?.mul(&c)?.sum(None)
+}
+
+/// 行 0 が (b)（`x_i − x_0` が f32 で非有限）、行 1 が (c)（部分和 overflow）に当たる `[3, 4]`。行 2 は
+/// 通常の値で、幅広の行の Hessian は f32 では 0 へ潰れる（`~1/x²`）ため、二階の値の検出力はここが担う。
+fn run_norm_prescale_layer_norm(tp: &Tapes) -> Outputs {
+    run_linalg_decomp_body(
+        tp,
+        &[3, 4],
+        vec![
+            3e38, -3e38, 3e38, -3e38, -2e38, 1e38, 1e38, 0.0, 0.8, -0.3, 1.4, 0.2,
+        ],
+        norm_prescale_loss,
+    )
+}
+
+/// Q5: `eps = 0` の定数行は S0 でも fail-closed で拒否され、子テープは空のまま。
+fn reject_layer_norm_const_row_eps0(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![2.0, 2.0, 2.0], &[1, 3]));
+    let loss = x.layer_norm(None, None, 0.0).unwrap().sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
 /// 行列ノルム族（#3806）の損失。`kind` は 0 = Fro・1 = One・2 = Inf（いずれも `[3,2]`。One／Inf はタイから離れた入力）、
 /// 3 = `sign · exp(logabsdet)` の二乗（`[3,3]`）、4 = `rank · Σx²`（`[3,3]`）。
 fn linalg_nr_loss<'a>(p: &Var<'a>, kind: usize) -> Result<Var<'a>, AutodiffError> {
@@ -2698,6 +2744,7 @@ cuda_family_test!(
 cuda_family_test!(create_graph_linalg_qr_cuda_matches_cpu, "linalg_qr");
 cuda_family_test!(create_graph_linalg_svd_cuda_matches_cpu, "linalg_svd");
 cuda_family_test!(create_graph_linalg_eigh_cuda_matches_cpu, "linalg_eigh");
+cuda_family_test!(create_graph_norm_prescale_cuda_matches_cpu, "norm_prescale");
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -2760,6 +2807,10 @@ metal_family_test!(
 metal_family_test!(create_graph_linalg_qr_metal_matches_cpu, "linalg_qr");
 metal_family_test!(create_graph_linalg_svd_metal_matches_cpu, "linalg_svd");
 metal_family_test!(create_graph_linalg_eigh_metal_matches_cpu, "linalg_eigh");
+metal_family_test!(
+    create_graph_norm_prescale_metal_matches_cpu,
+    "norm_prescale"
+);
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -2879,6 +2930,11 @@ fn linalg_svd_cases_pass_cpu_against_cpu() {
 #[test]
 fn linalg_eigh_cases_pass_cpu_against_cpu() {
     run_family("linalg_eigh", None);
+}
+
+#[test]
+fn norm_prescale_cases_pass_cpu_against_cpu() {
+    run_family("norm_prescale", None);
 }
 
 #[test]

@@ -527,6 +527,38 @@ fn layer_norm_required_vectors_three_stages_finite() {
     );
 }
 
+/// #3809（決定記録 §45・§69）: 入口の (b)(c) で拒否していた行が S0 前スケーリングで受理へ移り、
+/// 1 階・`cg.grad`・二階（HVP）・孫テープ再生がすべて有限かつ REQ-2 判定で一致する。
+#[test]
+fn layer_norm_prescaled_rows_three_stages_finite() {
+    let wide: Vec<f32> = (0..64)
+        .map(|i| if i % 2 == 0 { 1e36 } else { -1e36 })
+        .collect();
+    run_vectors(
+        Kind::Layer,
+        "ln-prescale",
+        &[
+            ("b-opposite-3e38", 1e-5, vec![3e38, -3e38]),
+            ("c-partial-sum", 1e-5, vec![-2e38, 1e38, 1e38]),
+            ("c-wide-hidden64", 1e-5, wide),
+            ("b-eps0", 0.0, vec![3e38, -3e38, 1e38]),
+        ],
+    );
+}
+
+/// RmsNorm は元から (b)(c) の入口拒否を持たず、広い行は変更前から受理されている（回帰確認）。
+#[test]
+fn rms_norm_wide_rows_stay_accepted() {
+    run_vectors(
+        Kind::Rms,
+        "rms-wide",
+        &[
+            ("opposite-3e38", 1e-5, vec![3e38, -3e38]),
+            ("c-partial-sum", 1e-5, vec![-2e38, 1e38, 1e38]),
+        ],
+    );
+}
+
 #[test]
 fn rms_norm_required_vectors_three_stages_finite() {
     run_vectors(
@@ -579,8 +611,7 @@ fn assert_rejected(kind: Kind, eps: f32, x0: &[f32], shape: &[usize]) {
 
 #[test]
 fn layer_norm_rejects_unsafe_inputs_and_keeps_child_empty() {
-    assert_rejected(Kind::Layer, 1e-5, &[3e38, -3e38], &[1, 2]); // (b) x_i − x_0 が f32 で非有限
-    assert_rejected(Kind::Layer, 1e-5, &[-2e38, 1e38, 1e38], &[1, 3]); // (c) Mean の部分和 overflow
+    // (b)(c) は #3809 で S0 前スケーリングにより受理へ移った（`layer_norm_prescaled_*` を参照）。
     assert_rejected(Kind::Layer, 0.0, &[2.0, 2.0, 2.0], &[1, 3]); // (d) eps=0 の定数行
     assert_rejected(Kind::Layer, 1e-5, &[1.0, f32::NAN, 2.0], &[1, 3]); // (a) 非有限
 }
@@ -884,6 +915,13 @@ fn sweep_rows(h: usize) -> Vec<Vec<f32>> {
         vec![1e-3; h],
         (0..h)
             .map(|i| [1e20, 2e20, -1e20].get(i).copied().unwrap_or(0.5))
+            .collect(),
+        // #3809（§45・§69）: 入口の (b)(c) に当たる幅広の行。S0 前スケーリングで受理へ移る。
+        (0..h)
+            .map(|i| if i % 2 == 0 { 2e38 } else { -2e38 })
+            .collect(),
+        (0..h)
+            .map(|i| [-2e38, 1e38, 1e38].get(i).copied().unwrap_or(0.0))
             .collect(),
     ]
 }

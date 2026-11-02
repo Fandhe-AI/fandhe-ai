@@ -1289,6 +1289,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 ### 33.0 位置づけ・承認根拠・境界・推奨
 
+- **追記（#3809）**: 案 A（S0）は #3767 の回答（2026-11-01）で承認され、#3809 で実装済み（実装記録は §69）。以下の本文は設計時点の記述のまま残す。
 - **状態**: 設計記録のみ。承認は #3767 の回答待ちで、本節は何も承認しない。回答があるまでコード・rustdoc・公開 API・`docs/compat-api-scope.md` は変えない
 - **基準**: `origin/main` の `69881d9da`。以下の `file:line` はこの時点で確かめた値で、実装 PR の前に引き直す
 - **対象**: §21.2 の C 区分（族を割り当てず fail-closed に固定した 24 Op）のうち、統計縮約の 7 Op（`Var`・`Std`・`VectorNorm`・`PNorm`・`LogSumExp`・`Nansum`・`Nanmean`）。§21.2 の C 表は方式欄を「V3」とだけ書くが、Op ごとに中身が違う（33.10）
@@ -2943,7 +2944,7 @@ Mean の分母は variant ごとに違う。`loss_scale_bcast`（`create_graph.r
 
 - 公開状態: 未公開（設計のみ）
 - `docs/compat-api-scope.md` の適用記録は承認後の実装 PR で書く。文案: `**適用記録（イシュー #3804・親 #3733。承認: <#3767 の回答 URL>）**: Stft・Istft を create_graph の対象にした。公開名の追加なし。` 0.14.0 の移行ノート（#3780）の該当欄も実装 PR で更新する
-- [ ] compat-api-scope（承認後の PR で行う）
+- [x] compat-api-scope（#3809 で §69 とともに記入済み）
 - [x] `docs/README.md` の索引
 - [x] 追跡表（項目 4 に §42 を追記）
 
@@ -5171,3 +5172,63 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: `MatrixNorm` の `Nuc`・`Spectral` の再評価と起票（#3767 の承認は得ているが、起票は別途ユーザー確認が要る）、縮退クラスタ内で `g` が一定の損失を射影子の構造で受理すること、GPU の opt-in ゲート ON の公開（#3405）、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（#3739）、`IndexedScatterReduce` の `Prod`、facade の公開名の追加。
 - 変えていないもの: 1 階の VJP 本体（`svd_vjp`・`eigh_vjp`）・forward・`Tape::backward`・`Var::svd`／`eigh` のシグネチャ・`Op` の payload・`SvdVars`／`EighVars`・`AutodiffError` の variant・tolerance・baseline・ガードレール閾値・`STAGE_BOUND_GUARD`・FMA 契約・`EIGH_DEGENERATE_RTOL` の値・SVD の 1e-9・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文。`unsafe` は追加していない。
 - 追跡表の項目 4 は「保留」のまま（`Nuc`／`Spectral` と `IndexedScatterReduce` の `Prod` が残るため。閉じるのは #3812 の役目）。
+
+## 69. 実装記録（イシュー #3809・親 #3719 系。create_graph の拒否範囲・LayerNorm・BatchNorm の S0 前スケーリング）
+
+### 69.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity だけが Phase 10 に残り、本記録の範囲では未実測）。設計は §45（#3736。§45.10〜§45.16 が実装の正）で、本節はその実装記録。節番号は、main が §68 まで使うため §69 を取った（open PR に衝突する節は無かった。rebase 時に、兄弟の #3810・#3811 と衝突していないか再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。書かれているのは「推奨どおり全論点承認」で、論点 3 は §45.19 の案 A（S0 前スケーリングで入口の (b)(c) を受理へ移す）を採り、案 B（S2）は採らない。点 2〜5 も推奨どおり（(d) の境界は現状維持、構造段の判定による拒否は範囲外のまま、BatchNorm eval の `x - mean` overflow は拒否のまま、実機 parity の範囲に S0 経路を含める）。これ以上の承認は主張しない。
+
+### 69.1 実装したもの
+
+恒等式 `LN(x; eps) = LN(x/p; eps/p²)`（`p = 2^k`）を使う。`crates/autodiff/src/create_graph_norm.rs`。
+
+- **指数の共有**: `prescale_exponents(data, rows, hidden)` が行ごとに、生の `x` で (b)（f32 の `x_i - x_0` が非有限）または (c)（`hidden·max|x_i - x_0| ≥ 2^125`）に当たる行だけ `k = ceil(log2(max|x_i|))`（`|x'| ≤ 1`）とし、当たらない行は 0。全行 0 なら `None`（構造へノードを足さない）。入口検査（`validate_norm_s1`・`validate_batch_norm`）と構造（`layer_norm_cgrads`・`batch_norm_cgrads`）の両方がこの関数の結果を使う（判定と構造は同じ値）。BatchNorm はチャネル行を行として扱うので rank 2／3／4／5 で同じ。
+- **入口検査**: (a) 非有限は従来どおり先に拒否する。その後 `x' = x/2^k` に対して (b)(c)(d) を判定し直す（`check_centered_row`。`k = 0` は従来と同一。S0 の行では再判定でも通るはずだが fail-closed のために残す）。RmsNorm と BatchNorm eval の検査は変えない。
+- **構造**: `prescale_exponents` が `Some` のときだけ、`p` の定数列 `[rows, 1]` を子テープへ置き、`stable_centering` の入力を `x/p` にする。dx の構造だけ `/p` で戻す（`Div` は `Div(·, s')` と別ノード。`s'·p` を 1 個の f32 定数にまとめない）。dw（`Σ g·xhat`）と db（`Σ g`）は `xhat` がスケール不変なので戻さない。値（V3）は元の `x` で計算するため、1 階と `cg.grad` の値は変わらない。`None` のときは今までと同じノード列。
+- **eps と行スケールの受け渡し**: `eps_scaled(eps, e, pre) = (eps / 2^(2(e+pre))) as f32` を f64 で 1 回計算して f32 へ 1 回だけ丸める単一の定義とし、構造（`scale_consts`）と判定（`check_structure_stages`）の両方が使う（丸め済みの `eps/p²` は f32 で 0 になりうるため経由しない）。`scale_exponent` も `√eps' = √eps/2^pre` を使う。`pre` が全 0 の入力では `e + 0` で従来と bit 同一。
+- **判定**: `check_structure_stages` の入力 `StageCheck` に `pre` を足し、`eps_s` を上の定義へ揃えた。`/p` は値を縮めるだけだが、段（`rstd（S0 の /p 後）`）として明示した。判定の seed は dx' に対し 1 のままで（真の seed は `1/p`）、保守側の拒否になる（閾値 `STAGE_BOUND_GUARD` は不変）。
+
+### 69.2 受理へ移った入力・拒否が残る入力
+
+| 入力 | 結果 |
+|---|---|
+| LayerNorm `[3e38, -3e38]`（(b)）、`[-2e38, 1e38, 1e38]`（(c)）、hidden = 64・値 ±1e36（(c)） | 受理（1 階・`cg.grad`・二階・孫テープ再生が有限で一致） |
+| BatchNorm train のチャネル行 `[3e38, -3e38]` 等（rank 2／3／4、affine あり・なし） | 受理 |
+| BatchNorm review の Codex 5（`g = 1e38`）・Codex 8（`g = 1e38`） | **拒否のまま**（入口は通るが構造段の判定で拒否。期待値は反転していない）。同じ `x` で `g = 1` に変えた変形は受理 |
+| 非有限要素 (a)、`eps = 0` の定数行 (d)・全ゼロ行 (d')、BatchNorm eval の非有限・`x - mean` overflow、巨大な上流勾配 | 拒否のまま（`child` は空） |
+| RmsNorm の広い行（`[3e38, -3e38]` など） | 変更前から受理（`s = ceil2(max|x|)` が二乗の前に割るため）。S0 は入れず、回帰テストだけを足した |
+
+### 69.3 設計（§45）からの逸脱
+
+- **RmsNorm には S0 を入れていない**: §45.4・§45.12 は RmsNorm にも S0 を書いていたが、RmsNorm には (b)(c) の入口拒否が元から無い。実測で広い行が受理されることを確かめたため、回帰テスト `rms_norm_wide_rows_stay_accepted` だけを足した。
+- **既存テストの書き換え**: (b)(c) の拒否を固定していた `layer_norm_rejects_unsafe_inputs_and_keeps_child_empty` の 2 行を受理テストへ移し、`tests/create_graph.rs` の `batch_norm_create_graph_overflow_regression_vectors_are_finite_or_rejected` の `prescale`（`[2,1]`・`[3e38,-3e38]`・`g = [1,2]`）を拒否から受理へ移した（§45.15 が予定していた承認済みの契約変更）。`prescale-huge-g`・`prescale-huge-g-eval`・`eval-opposite`・`huge-g` は拒否のまま。
+- **否定ガードの反転は無い**: `api_surface.rs` に反転対象のガードは元から無い（§45.1）。#3800・#3808 と同じく、受理を示す doctest の正ガードを新設した。
+- **強制 k のフック**: `prescale_exponents` に `#[cfg(test)]` 限定の thread_local フックを置いた（本番ビルドに残らない）。極端な行の Hessian は f32 で 0 へ潰れ（`~1/x²`）値テストの検出力が弱いため、中程度の入力に k を強制して S1 のみと比べる。強制 k の上限は 20 とした（k = 60 では判定の seed = 1 の保守性により、真の cotangent より約 `p` 倍大きい上界が 2^125 を超えて拒否される。実際の S0 の行は `|x'| ≤ 1` で、この領域には入らない）。
+
+### 69.4 テスト
+
+- `crates/autodiff/src/create_graph_norm.rs`（単体）: `prescale_forced_k_matches_s1_for_layer_norm_and_batch_norm`（k = 1・10・20 を全行へ強制し、`cg.grad`（x・w）・二階（x・w）・孫テープ再生が S1 のみと REQ-2 判定で一致）、`prescale_absent_adds_no_nodes`（当たらない入力は `None`）。
+- `crates/autodiff/tests/create_graph_norm.rs`: `layer_norm_prescaled_rows_three_stages_finite`、`rms_norm_wide_rows_stay_accepted`、拒否テストの縮小、掃引へ幅広の行（`±2e38` の交互・`[-2e38, 1e38, 1e38, 0, …]`）を追加（受理と拒否の両方が出ることを確認）。
+- `crates/autodiff/tests/create_graph_batch_norm.rs`: `batch_norm_prescaled_layouts_are_accepted_and_finite`（rank 2／3／4・affine あり／なし）、review 例へ Codex 5・8 の `g = 1` 変形（受理）、掃引へ幅広のチャネル値。
+- `crates/autodiff/tests/create_graph.rs`: 上記の `prescale` の期待値の反転。
+- facade: `{layer_norm,batch_norm}_prescaled_create_graph_via_facade`、`backward_create_graph` の rustdoc に `[3e38, -3e38]` の `layer_norm` が二階まで有限であることと `eps=0` の定数行の拒否を示す doctest、正ガード `backward_create_graph_norm_prescale_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `norm_prescale`（`norm_prescale_layer_norm_wide`。`Route::K`・`Judge::Strict`・`NoMatMul`。Q5 は `eps = 0` の定数行の拒否）、`create_graph_norm_prescale_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査 `norm_prescale_cases_pass_cpu_against_cpu`。幅広の行の Hessian は f32 で 0 に潰れるため、同ケースに通常の値の行を 1 行足して二階の検出力を持たせた。
+
+### 69.5 手動確認
+
+- `stage()` を一時的に常に通すと、BatchNorm 側の `review_examples_match_expected_outcome`・`sweep_every_structure_path_is_finite_or_rejected`・`rejected_input_leaves_child_empty_and_allows_retry` と、LayerNorm／RmsNorm 側の `layer_norm_upstream_1e38_is_rejected_instead_of_nan_hvp`・`rejected_upstream_leaves_child_empty_and_allows_retry`・`review_examples_are_rejected_with_empty_child`・掃引が落ちた（判定が効いていることの確認。コミットしていない）。
+- 掃引の所要時間（デバッグビルド）: LayerNorm／RmsNorm の掃引は約 36 秒、BatchNorm の統合テスト 7 件は約 31 秒。
+
+### 69.6 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`first_order()` は素の `backward` と bit 一致し、値は V3 なので `cg.grad` も CPU で 1 階と bit 一致する。tolerance・baseline・`STAGE_BOUND_GUARD`・`MEAN_OVERFLOW_GUARD`・`TINY_DEVIATION_GUARD`・FMA 契約は変えない。
+- 保証範囲は、入口と構造段の判定を通った入力で、seed の各要素の絶対値が 1 以下の二階まで（§27.3・§28 と同じ）。判定は保守的で、拒否されても実際に破綻するとは限らない。
+- 受理例の二階の値は、`p` が大きいほど f32 で 0 に潰れる（Hessian ~ `1/x²`）。判定が守るのは有限性と REQ-2 判定での一致までで、極端な行での Hessian の相対精度は保証しない。
+
+### 69.7 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。新しいカーネルは作らない。
+- スコープ外: 構造段の判定による拒否を狭めること（S2 の再検討。論点 3 で範囲外）、(d) の境界の変更（論点 2）、BatchNorm eval の `x - mean` overflow（論点 4）、実機 parity の実測と測り方（#3857・#3859・#3739）、Det 系（#3810）、`padding_idx`（#3811）、追跡表の項目 5 を閉じること（#3812）。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`Op` の payload・facade の公開名とシグネチャ・`AutodiffError` の variant・tolerance・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文（§45.0 に追記 1 行、§45.7 のチェック欄を更新したのみ）。`unsafe` は追加していない。
