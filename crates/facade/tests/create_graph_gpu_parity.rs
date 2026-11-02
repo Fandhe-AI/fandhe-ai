@@ -893,8 +893,8 @@ const CASES: &[Case] = &[
     },
     // Det の行別スケール族（イシュー #3810・決定記録 §46/§70。名前は §48 の表）。`det` の 1 階 VJP は
     // ホストの `eval::linalg::det_vjp`（V3 の値）で、デバイス経路は既定 OFF のためホストへフォールバックする
-    // （H）。構造は `Mul`／`Det`／`Inv` 等で MatMul を含まない。孫テープ再生は CPU 側のテスト
-    // （`det_row_scaled_grandchild_replay_is_finite`）で検査済み。実機は未実測のため `replay` は検査しない
+    // （H）。構造は `Mul`／`Det`／`Inv` 等で MatMul を含まない。孫テープ再生（Q4）も比較する
+    // （CPU 側は `det_row_scaled_grandchild_replay_is_finite` でも検査済み。実機は未実測）
     // （§70。#3857・#3859）。
     Case {
         name: "det_family_rowscale_diag_large",
@@ -2410,17 +2410,28 @@ fn run_det_family_rowscale(tp: &Tapes) -> Outputs {
     let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
     let g = cg.grad(&p).unwrap().expect("grad");
     let grad = vals(&g.value());
-    let v = tp.child.var_no_grad(&t(dir, &shape));
+    let v = tp.child.var_no_grad(&t(dir.clone(), &shape));
     let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
     let grads2 = tp.child.backward(&hv_loss).expect("child backward");
     let pc = cg.child_var(&p).unwrap().expect("mirror");
     let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。行別スケール入力でも有限に受理される（§70.3 の逸脱 1）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, &shape), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
     Outputs {
         first_order,
         plain,
         grad,
         hv,
-        replay: None,
+        replay: Some(replay),
     }
 }
 
