@@ -63,8 +63,9 @@
 //! [`scalar_binary_replayable`] 参照）。さらにイシュー #3080 で 2D 畳み込み族
 //! （`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`。実装は `conv` サブモジュール、
 //! 決定記録 §23）を拡張済み。`F32` 以外の `compute_dtype` を持つ `Conv2d`
-//! （低精度 forward）は [`validate_ancestors`] が明示拒否する。`Conv3d`・
-//! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。イシュー #3083 で索引・累積族
+//! （低精度 forward）は [`validate_ancestors`] が明示拒否する。イシュー #3797 で 3D 畳み込み族
+//! （`Conv3d`・`ConvTranspose3d` と内部 Op `Unfold3d`・`Fold3d`・`ConvWeightGradHost3d`。実装は
+//! `conv3d` サブモジュール、決定記録 §38・§59）も拡張済み。イシュー #3083 で索引・累積族
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
 //! `Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
@@ -92,7 +93,9 @@
 //! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）・
 //! 統計縮約（`LogSumExp`・`Nansum`・`Nanmean`。イシュー #3792・決定記録 §33/§51・実装は `stat_reduce_lse_nan`）も対象——
 //! 方式は `pool` サブモジュール doc と決定記録 §30。構造変換の `Dropout`・`Interpolate`・`MaxUnpool` は
-//! イシュー #3793（決定記録 §35/§56・実装は `structural`）で対象にした。それ以外の追跡対象 Op・rank≥3 の
+//! イシュー #3793（決定記録 §35/§56・実装は `structural`）で対象にした。RNN セルの
+//! `RnnCell`・`GruCell` はイシュー #3795（決定記録 §37/§58・実装は `rnn_gru_cell`）で対象にした
+//! （`LstmCell`・`LstmHidden` は引き続き対象外）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -130,6 +133,7 @@ use crate::tape::{NodeId, Op, Tape, TapeId, TapeNode, materialize_fallible};
 use crate::var::Var;
 
 mod conv;
+mod conv3d;
 mod index_cum;
 mod linalg_fft;
 mod loss_binary_margin;
@@ -138,6 +142,7 @@ mod loss_regression;
 mod norm_reparam;
 mod pad_mask;
 mod pool;
+mod rnn_gru_cell;
 mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
@@ -849,6 +854,59 @@ fn replay_op<'c>(
         Op::Fold { input, params } => {
             conv::replay_fold(shape, &get_mirror(mirror, input)?, &params)
         }
+        // 3D 畳み込み族（イシュー #3797・決定記録 §38・§59。方式は `conv3d` モジュール doc 参照）。
+        Op::Conv3d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let bias_m = bias.map(|b| get_mirror(mirror, b)).transpose()?;
+            conv3d::replay_conv3d(
+                &get_mirror(mirror, input)?,
+                &get_mirror(mirror, weight)?,
+                bias_m.as_ref(),
+                &params,
+            )
+        }
+        Op::ConvTranspose3d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let bias_m = bias.map(|b| get_mirror(mirror, b)).transpose()?;
+            conv3d::replay_conv_transpose3d(
+                shape,
+                &get_mirror(mirror, input)?,
+                &get_mirror(mirror, weight)?,
+                bias_m.as_ref(),
+                &params,
+            )
+        }
+        Op::Unfold3d { input, params } => {
+            conv3d::replay_unfold3d(&get_mirror(mirror, input)?, &params)
+        }
+        Op::Fold3d { input, params } => {
+            conv3d::replay_fold3d(shape, &get_mirror(mirror, input)?, &params)
+        }
+        Op::ConvWeightGradHost3d {
+            structure,
+            g,
+            x,
+            params,
+            transposed,
+        } => {
+            let structure_m = get_mirror(mirror, structure)?;
+            conv3d::host_weight_grad_node3d(
+                structure_m.tape(),
+                &structure_m,
+                &get_mirror(mirror, g)?,
+                &get_mirror(mirror, x)?,
+                &params,
+                transposed,
+            )
+        }
         // プーリング族（イシュー #3085。方式は `pool` モジュール doc 参照）。
         Op::MaxPool2d { input, index } | Op::MaxPool3d { input, index } => {
             pool::replay_max_pool(&get_mirror(mirror, input)?, &index, shape)
@@ -1245,6 +1303,45 @@ fn replay_op<'c>(
         Op::Interpolate { input, size, mode } => {
             get_mirror(mirror, input)?.interpolate(&size, mode)
         }
+        // RNN セル 2 Op（イシュー #3795。方式は `rnn_gru_cell` モジュール doc 参照）。
+        // GruCell の payload（gates_rzn・q）は使わず、子テープ側が計算し直す。
+        Op::RnnCell {
+            x,
+            h_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+        } => rnn_gru_cell::replay_rnn_cell(
+            mirror,
+            &rnn_gru_cell::CellIds {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            },
+        ),
+        Op::GruCell {
+            x,
+            h_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+            ..
+        } => rnn_gru_cell::replay_gru_cell(
+            mirror,
+            &rnn_gru_cell::CellIds {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            },
+        ),
         Op::MaxUnpool { input, index } => {
             crate::max_unpool_ops::replay_max_unpool(&get_mirror(mirror, input)?, &index, shape)
         }
@@ -2161,7 +2258,9 @@ fn build_cgrads<'c>(
                 // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, input, g)?;
             }
-            Op::ConvWeightGradHost { structure, .. } | Op::BatchNormGradHost { structure, .. } => {
+            Op::ConvWeightGradHost { structure, .. }
+            | Op::ConvWeightGradHost3d { structure, .. }
+            | Op::BatchNormGradHost { structure, .. } => {
                 // 恒等で `structure` のみへ（`grad.rs` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, structure, g)?;
             }
@@ -2670,6 +2769,78 @@ fn build_cgrads<'c>(
                 let d = conv::fold_vjp(&g, &params)?;
                 accumulate(&parent_nodes, &mut cgrads, input, d)?;
             }
+            // 3D 畳み込み族（イシュー #3797・決定記録 §38・§59。方式は `conv3d` モジュール doc 参照）。
+            Op::Conv3d {
+                input,
+                weight,
+                bias,
+                params,
+            } => {
+                let need = conv::ConvNeeds {
+                    input: parent_nodes[input.0].requires_grad,
+                    weight: parent_nodes[weight.0].requires_grad,
+                    bias: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
+                };
+                let bias_shape = bias.map(|b| parent_nodes[b.0].shape.clone());
+                let r = conv3d::conv3d_vjp(
+                    child,
+                    &g,
+                    &get_mirror(mirror, input)?,
+                    &get_mirror(mirror, weight)?,
+                    bias_shape.as_deref(),
+                    &params,
+                    need,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_weight {
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+                if let (Some(b), Some(d)) = (bias, r.d_bias) {
+                    accumulate(&parent_nodes, &mut cgrads, b, d)?;
+                }
+            }
+            Op::ConvTranspose3d {
+                input,
+                weight,
+                bias,
+                params,
+            } => {
+                let need = conv::ConvNeeds {
+                    input: parent_nodes[input.0].requires_grad,
+                    weight: parent_nodes[weight.0].requires_grad,
+                    bias: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
+                };
+                let bias_shape = bias.map(|b| parent_nodes[b.0].shape.clone());
+                let r = conv3d::conv_transpose3d_vjp(
+                    child,
+                    &g,
+                    &get_mirror(mirror, input)?,
+                    &get_mirror(mirror, weight)?,
+                    bias_shape.as_deref(),
+                    &params,
+                    need,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_weight {
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+                if let (Some(b), Some(d)) = (bias, r.d_bias) {
+                    accumulate(&parent_nodes, &mut cgrads, b, d)?;
+                }
+            }
+            Op::Unfold3d { input, params } => {
+                let input_shape = parent_nodes[input.0].shape.clone();
+                let d = conv3d::unfold3d_vjp(&g, &input_shape, &params)?;
+                accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
+            Op::Fold3d { input, params } => {
+                let d = conv3d::fold3d_vjp(&g, &params)?;
+                accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
             // プーリング族（イシュー #3085。方式は `pool` モジュール doc 参照）。
             Op::MaxPool2d { input, index } | Op::MaxPool3d { input, index } => {
                 if parent_nodes[input.0].requires_grad {
@@ -3125,6 +3296,54 @@ fn build_cgrads<'c>(
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
+            // RNN セル 2 Op（イシュー #3795。方式は `rnn_gru_cell` モジュール doc 参照）。
+            Op::RnnCell {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            } => rnn_gru_cell::rnn_cell_cgrad(
+                child,
+                &parent_nodes,
+                &mut cgrads,
+                mirror,
+                id,
+                &g,
+                &rnn_gru_cell::CellIds {
+                    x,
+                    h_prev,
+                    w_ih,
+                    w_hh,
+                    b_ih,
+                    b_hh,
+                },
+            )?,
+            Op::GruCell {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+                ..
+            } => rnn_gru_cell::gru_cell_cgrad(
+                child,
+                &parent_nodes,
+                &mut cgrads,
+                mirror,
+                id,
+                &g,
+                &rnn_gru_cell::CellIds {
+                    x,
+                    h_prev,
+                    w_ih,
+                    w_hh,
+                    b_ih,
+                    b_hh,
+                },
+            )?,
             _ => {
                 return Err(AutodiffError::Backward(
                     "create_graph: build_cgrads: supports_create_graph() が true の未対応 Op\

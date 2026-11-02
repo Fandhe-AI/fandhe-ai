@@ -640,6 +640,29 @@ fn conv2d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
     y.tanh().sum(None).unwrap()
 }
 
+/// 3D 畳み込み（#3797）。軸ごとに異なる kernel `[2, 2, 2]`・stride `[1, 1, 2]` で D/H/W の取り違えを拾う。
+fn conv3d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(
+        vec![0.5, -0.3, 0.2, 0.8, -0.6, 0.4, 0.1, -0.7],
+        &[1, 1, 2, 2, 2],
+    ));
+    let y = x
+        .conv3d(&w, None, [1, 1, 2], [0, 0, 0], [1, 1, 1], 1)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn conv_transpose3d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(
+        vec![0.5, -0.3, 0.2, 0.8, -0.6, 0.4, 0.1, -0.7],
+        &[1, 1, 2, 2, 2],
+    ));
+    let y = x
+        .conv_transpose3d(&w, None, [1, 2, 1], [0, 0, 0], [0, 0, 0], [1, 1, 1], 1)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
 fn gelu_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
     let y = x.gelu().unwrap();
     y.mul(&weights(tape, &[2, 3])).unwrap().sum(None).unwrap()
@@ -761,6 +784,31 @@ fn batch_norm_create_graph_via_facade() {
 #[test]
 fn conv2d_create_graph_via_facade() {
     check_create_graph_family("conv2d", &CONV_X, &[1, 1, 3, 3], conv2d_loss, true, 1e-2);
+}
+
+/// d_input は V1 合成（unfold3d／fold3d と rank 2 strict matmul）なので `cg.grad` は REQ-2 で判定する
+/// （bit 一致を主張しない。決定記録 §38.5・§59）。
+#[test]
+fn conv3d_create_graph_via_facade() {
+    let x: Vec<f32> = (0..18)
+        .map(|i| (((i * 7 + 3) % 11) as f32 - 5.0) * 0.15)
+        .collect();
+    check_create_graph_family("conv3d", &x, &[1, 1, 2, 3, 3], conv3d_loss, false, 1e-2);
+}
+
+#[test]
+fn conv_transpose3d_create_graph_via_facade() {
+    let x: Vec<f32> = (0..8)
+        .map(|i| (((i * 5 + 2) % 9) as f32 - 4.0) * 0.2)
+        .collect();
+    check_create_graph_family(
+        "conv_transpose3d",
+        &x,
+        &[1, 1, 2, 2, 2],
+        conv_transpose3d_loss,
+        false,
+        1e-2,
+    );
 }
 
 #[test]
@@ -1531,4 +1579,42 @@ fn interpolate_nearest_hessian_diagonal_is_twice_copy_count() {
         assert!((row[i] - 4.0).abs() < 1e-5, "{row:?}");
         assert!(row[1 - i].abs() < 1e-6, "{row:?}");
     }
+}
+
+// --- RNN セル 2 Op（イシュー #3795・決定記録 §37/§58） ------------------------------------
+//
+// 公開 API の `rnn_forward_seq`／`gru_forward_seq` の `x` は定数の `Tensor` で、`GateParams` は facade から
+// 使えない。そのため微分する葉は初期の隠れ状態 `h0`（`[B, H]`）。x・重みについての Hessian は
+// autodiff 側 `create_graph_rnn_gru_cell.rs` が担う。
+
+fn rnn_x() -> Tensor<f32> {
+    let v: Vec<f32> = (0..2 * 2 * 3)
+        .map(|i| 0.5 * ((i as f32) * 0.37 + 0.2).cos())
+        .collect();
+    t(v, &[2, 2, 3])
+}
+
+fn rnn_loss<'a>(tape: &'a Tape, h0: &Var<'a>) -> Var<'a> {
+    let rnn = fandhe_ai::nn::rnn::Rnn::new(3, 4, true, 7).unwrap();
+    let h_n = tape.rnn_forward_seq(&rnn, &rnn_x(), Some(h0)).unwrap().h_n;
+    quad_loss(tape, &h_n)
+}
+
+fn gru_loss<'a>(tape: &'a Tape, h0: &Var<'a>) -> Var<'a> {
+    let gru = fandhe_ai::nn::rnn::Gru::new(3, 4, true, 7).unwrap();
+    let h_n = tape.gru_forward_seq(&gru, &rnn_x(), Some(h0)).unwrap().h_n;
+    quad_loss(tape, &h_n)
+}
+
+#[test]
+fn rnn_create_graph_via_facade() {
+    let h0 = [0.3, -0.7, 0.9, 0.2, -0.4, 0.8, 0.5, -0.1];
+    check_create_graph_family("rnn", &h0, &[2, 4], rnn_loss, true, 0.02);
+}
+
+#[test]
+fn gru_create_graph_via_facade() {
+    let h0 = [0.3, -0.7, 0.9, 0.2, -0.4, 0.8, 0.5, -0.1];
+    // GRU は子テープでゲートを作り直す（forward の `mul_add` と丸めがずれる）ので REQ-2 で突合する。
+    check_create_graph_family("gru", &h0, &[2, 4], gru_loss, false, 0.02);
 }

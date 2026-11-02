@@ -1405,7 +1405,8 @@ CUDA／Metal は既定 `Unsupported`（override なし）のままホスト
   im2col3d_with_fallback`／`col2im3d_with_fallback`／
   `conv3d_with_fallback`（forward の段階的合成: `ops.conv3d` →
   im2col3d → `gemm_batched`〈常にバックエンド〉→ `add`〈bias〉）・
-  `Op::Conv3d`（`tape.rs`。checkpoint 対象外・create_graph 対象外・
+  `Op::Conv3d`（`tape.rs`。checkpoint 対象外・create_graph 対象外〈#3797 で対象化。
+  `docs/autodiff-higher-order-grad-decision.md` §38・§59 を参照〉・
   低精度非対応のため `compute_dtype` フィールドを持たない）・VJP
   （`grad.rs`。`Op::Conv2d` VJP と同型の d_input／d_weight／d_bias）。
 - 数値契約は `Op::Conv2d` と同一: `im2col3d` は bit 完全一致（純粋な

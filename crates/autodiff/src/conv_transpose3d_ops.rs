@@ -19,7 +19,7 @@
 //! **数値契約**: GEMM は forward が `gemm_batched`・VJP が `gemm_batched_fp32_strict`（FMA 契約）、
 //! `col2im3d` は `f64` アキュムレータ契約、bias 勾配は `f64` 逐次和・1 回 downcast
 //! （`.claude/rules/coding-rust.md`）。PyTorch とは総和順が異なるため bit 一致ではなく統一複合判定で
-//! 検証する。高階微分（`create_graph`）・activation checkpoint・低精度経路は対象外。
+//! 検証する。activation checkpoint・低精度経路は対象外。高階微分（`create_graph`）はイシュー #3797（決定記録 §38・§59）で対応済み（`create_graph/conv3d.rs`）。
 //!
 //! **PyTorch との意図的な差分**: `output_padding >= stride`（各軸）は拒否する（`col2im3d` の P 軸契約。
 //! PyTorch は `max(stride, dilation)` 未満まで許容）。`N = 0` は受理して空出力を返す。

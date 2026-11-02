@@ -684,7 +684,7 @@ fn huge_broadcast_view_is_rejected_before_allocation() {
 }
 
 #[test]
-fn records_exactly_one_node_and_rejects_create_graph() {
+fn records_exactly_one_node_and_supports_create_graph() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(wave(8, 0.3, 1.0), &[1, 1, 2, 2, 2]));
@@ -693,7 +693,8 @@ fn records_exactly_one_node_and_rejects_create_graph() {
     let y = conv_transpose3d(&x, &w, None, [1; 3], [0; 3], [0; 3], [1; 3], 1).unwrap();
     assert_eq!(tape.len(), before + 1);
     let loss = y.sum(None).unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+    // イシュー #3797 で create_graph 対象になった（旧: 拒否）。
+    assert!(tape.backward_create_graph(&loss, &child).is_ok());
 }
 
 #[test]

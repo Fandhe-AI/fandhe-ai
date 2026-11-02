@@ -1350,7 +1350,7 @@ pub(crate) enum Op {
     /// `None` 可。`output_padding` は保持しない（VJP は `upstream.shape()` から導出できる。
     /// `Op::ConvTranspose2d` と同型）。**常に実体化済み**（`push_eager`。GEMM を含む段階的合成の
     /// ため融合対象外）。`col` は保持せず backward で `im2col3d` を再計算する。非 checkpoint・
-    /// 高階微分非対応・低精度なし。
+    /// 低精度なし。高階微分（`create_graph`）はイシュー #3797（決定記録 §38・§59）で対応済み。
     ConvTranspose3d {
         input: NodeId,
         weight: NodeId,
@@ -1377,6 +1377,27 @@ pub(crate) enum Op {
     /// `upstream.shape()` から導出する）。VJP は [`Op::Unfold`] の随伴（`im2col`）。分類は
     /// [`Op::Unfold`] と同じ。
     Fold { input: NodeId, params: Conv2dParams },
+    /// 3D 畳み込み族の d_input／d_weight 構造を子テープへ積む内部 Op（イシュー #3797・決定記録
+    /// §38・§59）。`[N, C, D, H, W]` → `[N, C·kD·kH·kW, P]`（groups = 1 の im2col3d。K 軸は
+    /// `(c, kd, kh, kw)` row-major で groups 付き im2col3d の平坦化と一致）。`create_graph`
+    /// の子テープにだけ積まれ（`create_graph/conv3d.rs`）、公開 API からは積まれない。VJP は
+    /// [`Op::Fold3d`] と同じ col2im3d（随伴）。常に実体化済み・非 checkpoint。
+    Unfold3d { input: NodeId, params: Conv3dParams },
+    /// [`Op::Unfold3d`] の随伴（col2im3d。groups = 1）。`[N, C·kvol, P]` → `[N, C, D, H, W]`。
+    /// 出力空間 shape は保持せずノード自身の shape から導出する。VJP は im2col3d。
+    Fold3d { input: NodeId, params: Conv3dParams },
+    /// 3D 畳み込み族の d_weight ホスト値ノード（イシュー #3797・決定記録 §38・§59。
+    /// [`Op::ConvWeightGradHost`] の 3D 版）。`structure` は二階微分経路、`g`・`x` は 1 階 VJP と
+    /// 同じホスト関数（`grad::conv3d_dw_from_col`／`conv_transpose3d_dw_from_col`。N 軸 `f64`
+    /// 縮約）へ渡すオペランド。孫テープでの再生でも値をホスト関数で再計算する。VJP は恒等で
+    /// `structure` のみへ渡す。`transposed` は `ConvTranspose3d` 用（`x`・`g` の役割が入れ替わる）。
+    ConvWeightGradHost3d {
+        structure: NodeId,
+        g: NodeId,
+        x: NodeId,
+        params: Conv3dParams,
+        transposed: bool,
+    },
     /// LocalResponseNorm（`F.local_response_norm` 相当。入力 `[N, C, *S]`。イシュー #2646・
     /// `docs/autodiff-lrn-weight-reparam-decision.md`）。`crate::lrn_ops::local_response_norm`
     /// からのみ積まれる（`Op` 自体は非公開。入口の `Var::local_response_norm` は #2851 で公開済み）。`params` は VJP（共有カーネル
@@ -1523,6 +1544,7 @@ pub(crate) enum Op {
     /// `compute_dtype` を持たない——低精度 conv3d はスコープ外
     /// （設計 doc §16「スコープ外」）のため `Op::Conv2d` と異なり常に
     /// f32 forward／backward。
+    /// 高階微分（`create_graph`）はイシュー #3797（決定記録 §38・§59）で対応済み。
     Conv3d {
         input: NodeId,
         weight: NodeId,
@@ -1898,6 +1920,8 @@ impl Op {
             Op::Contiguous { .. } => false,
             // `Op::ConvWeightGradHost` も実体化演算で再導出分岐が無い。
             Op::ConvWeightGradHost { .. } | Op::BatchNormGradHost { .. } => false,
+            // 3D 畳み込み族の内部 Op（#3797）も eager 実体化演算で再導出分岐が無い。
+            Op::Unfold3d { .. } | Op::Fold3d { .. } | Op::ConvWeightGradHost3d { .. } => false,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -2159,6 +2183,9 @@ impl Op {
             }
             Op::ConvWeightGradHost {
                 structure, g, x, ..
+            }
+            | Op::ConvWeightGradHost3d {
+                structure, g, x, ..
             } => {
                 f(*structure);
                 f(*g);
@@ -2216,6 +2243,8 @@ impl Op {
             | Op::MaxUnpool { input, .. }
             | Op::Unfold { input, .. }
             | Op::Fold { input, .. }
+            | Op::Unfold3d { input, .. }
+            | Op::Fold3d { input, .. }
             | Op::LocalResponseNorm { input, .. }
             | Op::SpectralNorm { weight: input, .. }
             | Op::AvgPool3d { input, .. }
@@ -2559,9 +2588,15 @@ impl Op {
             // メソッドへの委譲）と `build_cgrads`（unfold／fold＋rank 2
             // strict matmul の合成）が対応済み。低精度 `Conv2d` は
             // `validate_ancestors` が `compute_dtype` で明示拒否する。
-            // `Conv3d`／`ConvTranspose3d` は引き続き `false`（#3080(b)）。
+            // 3D 畳み込み族（イシュー #3797・決定記録 §38・§59）も同じ方式で対応済み
+            // （`create_graph/conv3d.rs`。内部 Op `Unfold3d`／`Fold3d`／`ConvWeightGradHost3d` を含む）。
             | Op::Conv2d { .. }
             | Op::ConvTranspose2d { .. }
+            | Op::Conv3d { .. }
+            | Op::ConvTranspose3d { .. }
+            | Op::Unfold3d { .. }
+            | Op::Fold3d { .. }
+            | Op::ConvWeightGradHost3d { .. }
             // プーリング族（イシュー #3085・決定記録 §29。Max 系は index 固定、Avg 系は V3）。
             | Op::MaxPool2d { .. }
             | Op::MaxPool3d { .. }
@@ -2661,7 +2696,11 @@ impl Op {
             // `create_graph/norm_reparam.rs`。3 つとも V3 値＋S1 構造。
             | Op::LocalResponseNorm { .. }
             | Op::WeightNorm { .. }
-            | Op::SpectralNorm { .. } => true,
+            | Op::SpectralNorm { .. }
+            // RNN セル 2 Op（イシュー #3795・決定記録 §37/§58）。方式は
+            // `create_graph/rnn_gru_cell.rs`。`LstmCell`／`LstmHidden` は `false` のまま。
+            | Op::RnnCell { .. }
+            | Op::GruCell { .. } => true,
             // `Interpolate` は `mode` の既知 7 variant だけ true（`InterpolateMode` は
             // `#[non_exhaustive]` なので未知 variant は安全側の false。`VectorNorm` の前例）。
             Op::Interpolate { mode, .. } => matches!(
@@ -2686,10 +2725,8 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::RnnCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }
-            | Op::GruCell { .. }
             | Op::Cholesky { .. }
             | Op::QrQ { .. }
             | Op::QrR { .. }
@@ -2710,8 +2747,6 @@ impl Op {
             | Op::Istft { .. }
             | Op::IndexedScatterReduce { .. }
             | Op::Cumprod { .. }
-            | Op::ConvTranspose3d { .. }
-            | Op::Conv3d { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
             // プラグイン。`docs/autodiff-custom-function-decision.md`）は
@@ -5627,14 +5662,16 @@ mod conv3d_op_tests {
     }
 
     #[test]
-    fn conv3d_op_does_not_support_create_graph() {
+    fn conv3d_family_supports_create_graph() {
+        // イシュー #3797（決定記録 §38・§59）: create_graph 対象。checkpoint 対象外は不変。
         let op = Op::Conv3d {
             input: NodeId(0),
             weight: NodeId(1),
             bias: Some(NodeId(2)),
             params: make_params(),
         };
-        assert!(!op.supports_create_graph());
+        assert!(op.supports_create_graph());
+        assert!(!op.is_checkpoint_eligible());
     }
 
     #[test]
@@ -5695,7 +5732,7 @@ mod conv_transpose3d_max_unpool_op_tests {
     fn conv_transpose3d_op_meta_properties() {
         let op = conv_t(Some(NodeId(7)));
         assert!(!op.is_checkpoint_eligible());
-        assert!(!op.supports_create_graph());
+        assert!(op.supports_create_graph()); // #3797
         let mut seen = Vec::new();
         op.for_each_input(|id| seen.push(id.0));
         assert_eq!(seen, vec![3, 5, 7]);
@@ -5734,6 +5771,42 @@ mod conv_transpose3d_max_unpool_op_tests {
                 assert!(!op.is_checkpoint_eligible(), "{mode:?}");
             }
         }
+    }
+
+    /// RNN セル 2 Op（イシュー #3795）: bias あり・なしの `RnnCell` と `GruCell` は
+    /// create_graph 対象、checkpoint 対象外のまま。隣接する `Cholesky` は `false` のまま。
+    /// （`LstmCell`／`LstmHidden` は #3796 が並行して反転しうるため見本にしない。）
+    #[test]
+    fn rnn_gru_cell_family_supports_create_graph() {
+        let n = NodeId;
+        for with_bias in [false, true] {
+            let (b_ih, b_hh) = if with_bias {
+                (Some(n(4)), Some(n(5)))
+            } else {
+                (None, None)
+            };
+            let rnn = Op::RnnCell {
+                x: n(0),
+                h_prev: n(1),
+                w_ih: n(2),
+                w_hh: n(3),
+                b_ih,
+                b_hh,
+            };
+            assert!(rnn.supports_create_graph() && !rnn.is_checkpoint_eligible());
+            let gru = Op::GruCell {
+                x: n(0),
+                h_prev: n(1),
+                w_ih: n(2),
+                w_hh: n(3),
+                b_ih,
+                b_hh,
+                gates_rzn: Tensor::<f32>::zeros(&[1, 3]).unwrap(),
+                q: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
+            };
+            assert!(gru.supports_create_graph() && !gru.is_checkpoint_eligible());
+        }
+        assert!(!Op::Cholesky { input: n(0) }.supports_create_graph());
     }
 
     #[test]
@@ -5945,6 +6018,53 @@ mod fold_unfold_op_tests {
             op.for_each_input(|id| seen.push(id.0));
             assert_eq!(seen, vec![4]);
         }
+    }
+}
+/// 3D 畳み込み族の内部 Op（`Unfold3d`／`Fold3d`／`ConvWeightGradHost3d`。イシュー #3797）のメタ性質固定:
+/// checkpoint 対象外・create_graph 対象・`for_each_input` の列挙順（`ConvWeightGradHost3d` は
+/// `structure, g, x`。2D の `ConvWeightGradHost` と同じ）。
+#[cfg(test)]
+mod conv3d_internal_op_tests {
+    use super::*;
+
+    fn params() -> Conv3dParams {
+        Conv3dParams::new([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1).unwrap()
+    }
+
+    #[test]
+    fn unfold3d_fold3d_op_meta_properties() {
+        for op in [
+            Op::Unfold3d {
+                input: NodeId(4),
+                params: params(),
+            },
+            Op::Fold3d {
+                input: NodeId(4),
+                params: params(),
+            },
+        ] {
+            assert!(!op.is_checkpoint_eligible());
+            assert!(op.supports_create_graph());
+            let mut seen = Vec::new();
+            op.for_each_input(|id| seen.push(id.0));
+            assert_eq!(seen, vec![4]);
+        }
+    }
+
+    #[test]
+    fn conv_weight_grad_host3d_op_meta_properties() {
+        let op = Op::ConvWeightGradHost3d {
+            structure: NodeId(1),
+            g: NodeId(2),
+            x: NodeId(3),
+            params: params(),
+            transposed: false,
+        };
+        assert!(!op.is_checkpoint_eligible());
+        assert!(op.supports_create_graph());
+        let mut seen = Vec::new();
+        op.for_each_input(|id| seen.push(id.0));
+        assert_eq!(seen, vec![1, 2, 3]);
     }
 }
 /// `Op::LocalResponseNorm`／`Op::WeightNorm`／`Op::SpectralNorm`（イシュー #2646）のメタ性質固定:
