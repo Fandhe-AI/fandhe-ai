@@ -5873,7 +5873,7 @@ fn interpolate_fixed_tap_scatter_vjp(
 /// 簡略化。`.claude/rules/coding-rust.md`「勾配の長軸縮約」節と同じ
 /// 精度規律: 窓ごとの寄与 `upstream/count` を `f64` へ昇格してから
 /// 各入力位置へ加算し、最後に 1 回だけ `f32` へ downcast する）。
-fn interpolate_area_vjp(
+pub(crate) fn interpolate_area_vjp(
     upstream: &Tensor<f32>,
     input_shape: &[usize],
     out_shape: &[usize],

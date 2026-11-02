@@ -528,7 +528,7 @@ fn each_call_records_exactly_one_node_and_no_grad_input_is_supported() {
 }
 
 /// `create_graph` は panic せず、退化入力（`k=0` で窓内が全ゼロ＝D=0）を型付きエラー（`Backward`）で拒否して
-/// `child` を空に保ち、安全な入力では成功する（LRN は #3794 で対象になった。決定記録 §36・§56）。
+/// `child` を空に保ち、安全な入力では成功する（LRN は #3794 で対象になった。決定記録 §36・§57）。
 #[test]
 fn create_graph_is_a_typed_error_not_a_panic() {
     let tape = Tape::new_with_ops(common::naive_ops());

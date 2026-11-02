@@ -172,7 +172,7 @@ struct ClassIndex {
 
 /// 窓構造の索引表（1 平面ぶん。全 `N·C` 平面で共通）。窓を divisor で
 /// 分類して保持する（精度・overflow 方針は [`window_scatter_structure`] 参照）。
-struct WindowPlan {
+pub(super) struct WindowPlan {
     in_spatial: usize,
     out_spatial: usize,
     classes: std::collections::BTreeMap<usize, ClassIndex>,
@@ -304,6 +304,84 @@ fn plan_adaptive2d(
     Ok(plan)
 }
 
+/// `Interpolate`（`Area`）の窓表。空間軸が任意次元（`sp_in`・`sp_out` は同じ長さ）の
+/// `adaptive_window` を単一情報源とし、divisor は窓要素数（`plan_adaptive2d` の N 次元版。
+/// 2 次元では窓・divisor・並びが一致する）。確保前に窓要素の総数を検査する。
+pub(super) fn plan_adaptive_nd(
+    sp_in: &[usize],
+    sp_out: &[usize],
+) -> Result<WindowPlan, AutodiffError> {
+    if sp_in.len() != sp_out.len() || sp_in.is_empty() {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: sp_in.len(),
+            actual: sp_out.len(),
+        }));
+    }
+    let n = sp_in.len();
+    let in_spatial = sp_in
+        .iter()
+        .try_fold(1usize, |a, &d| a.checked_mul(d))
+        .ok_or_else(overflow)?;
+    let out_spatial = sp_out
+        .iter()
+        .try_fold(1usize, |a, &d| a.checked_mul(d))
+        .ok_or_else(overflow)?;
+    let mut plan = WindowPlan::new(in_spatial, out_spatial)?;
+    // 行優先の入力 stride（`in_spatial` の検査済み積の部分積なので桁あふれしない）。
+    let in_strides: Vec<usize> = (0..n).map(|a| sp_in[a + 1..].iter().product()).collect();
+    let mut total = 0usize;
+    let mut starts = vec![0usize; n];
+    let mut lens = vec![0usize; n];
+    let mut coords = vec![0usize; n];
+    let mut idx = vec![0usize; n];
+    let mut members: Vec<usize> = Vec::new();
+    for o in 0..out_spatial {
+        let mut rem = o;
+        for a in (0..n).rev() {
+            coords[a] = rem % sp_out[a];
+            rem /= sp_out[a];
+        }
+        let mut count = 1usize;
+        for a in 0..n {
+            let (s, e) = adaptive_window(coords[a], sp_in[a], sp_out[a]).ok_or_else(overflow)?;
+            starts[a] = s;
+            lens[a] = e - s;
+            count = count.checked_mul(lens[a]).ok_or_else(overflow)?;
+        }
+        // 窓要素の総数が過大なら確保前に拒否する（最悪でも 2^31 要素）。
+        total = total.checked_add(count).ok_or_else(overflow)?;
+        if total > (1usize << 31) {
+            return Err(overflow());
+        }
+        members.clear();
+        idx.iter_mut().for_each(|v| *v = 0);
+        'window: loop {
+            let mut pos = 0usize;
+            for a in 0..n {
+                pos += (starts[a] + idx[a]) * in_strides[a];
+            }
+            members.push(pos);
+            let mut k = n;
+            loop {
+                if k == 0 {
+                    break 'window;
+                }
+                k -= 1;
+                idx[k] += 1;
+                if idx[k] < lens[k] {
+                    break;
+                }
+                idx[k] = 0;
+                if k == 0 {
+                    break 'window;
+                }
+            }
+        }
+        plan.push_window(o, &members, count)?;
+    }
+    Ok(plan)
+}
+
 /// `AvgPool3d` の窓表（`tensor_core::pool3d` の窓走査・divisor 規約と同じ）。
 fn plan_avg3d(
     input_shape: &[usize],
@@ -382,7 +460,7 @@ fn plan_avg3d(
 /// - 残余: divisor が異なる分類の部分和は f32 で丸めてから足すため、桁違いの打ち消しが
 ///   起きる入力では 1 階値と食い違いうる。[`check_structure_contract`] がホストで構造を
 ///   模擬し、REQ-2 の範囲を外れる入力・f32 範囲を超える中間和は型付きエラーで拒否する。
-fn window_scatter_structure<'c>(
+pub(super) fn window_scatter_structure<'c>(
     child: &'c Tape,
     g: &Var<'c>,
     input_shape: &[usize],
@@ -440,7 +518,7 @@ fn pow2_floor(d: usize) -> usize {
 /// 複合判定（`tensor-core::tolerance` の REQ-2 統一定義）と、集約前中間和の f32 範囲を検査する。
 /// 範囲外は孫テープ再生で誤値が復活するため構築時に型付きエラーで拒否する（§27.3 と同型の
 /// fail-closed。tolerance は変更しない）。
-fn check_structure_contract(
+pub(super) fn check_structure_contract(
     plan: &WindowPlan,
     g: &Tensor<f32>,
     host: &Tensor<f32>,
@@ -449,7 +527,11 @@ fn check_structure_contract(
     let nc = input_shape[0] * input_shape[1];
     let gv = g.host_slice();
     let hv = host.host_slice();
-    let reject = |why: &str| invalid(format!("平均プーリングの構造合成が数値契約の範囲外: {why}"));
+    let reject = |why: &str| {
+        invalid(format!(
+            "窓集約（平均プーリング/Area 補間）の構造合成が数値契約の範囲外: {why}"
+        ))
+    };
     for plane in 0..nc {
         let gp = &gv[plane * plan.out_spatial..(plane + 1) * plan.out_spatial];
         let mut total = vec![0.0f32; plan.in_spatial];
@@ -711,5 +793,21 @@ mod tests {
             tape.var(&Tensor::new(vec![100_000_008.0f32, -150_000_016.0, 0.0], &oshape).unwrap());
         let r = avg_pool2d_cgrad(&tape, &g, &ishape, &params, false);
         assert!(r.is_err());
+    }
+
+    /// `plan_adaptive_nd` の 2 次元結果が `plan_adaptive2d` と一致する（窓・divisor・並び）。
+    #[test]
+    fn plan_adaptive_nd_matches_adaptive2d() {
+        for (hi, wi, ho, wo) in [(5usize, 5usize, 3usize, 3usize), (4, 7, 2, 5), (3, 3, 6, 4)] {
+            let a = plan_adaptive2d(&[1, 1, hi, wi], &[1, 1, ho, wo]).unwrap();
+            let b = plan_adaptive_nd(&[hi, wi], &[ho, wo]).unwrap();
+            assert_eq!((a.in_spatial, a.out_spatial), (b.in_spatial, b.out_spatial));
+            assert_eq!(a.classes.len(), b.classes.len());
+            for ((da, ca), (db, cb)) in a.classes.iter().zip(&b.classes) {
+                assert_eq!(da, db);
+                assert_eq!(ca.src, cb.src);
+                assert_eq!(ca.dst, cb.dst);
+            }
+        }
     }
 }

@@ -820,7 +820,7 @@ fn huge_output_is_rejected_before_allocation() {
 }
 
 #[test]
-fn records_exactly_one_node_and_rejects_create_graph() {
+fn records_exactly_one_node_and_accepts_create_graph() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 1, 3]));
@@ -829,7 +829,17 @@ fn records_exactly_one_node_and_rejects_create_graph() {
     let y = max_unpool1d(&x, &idx, 2, None, 0, None).unwrap();
     assert_eq!(tape.len(), before + 1);
     let loss = y.sum(None).unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+    // イシュー #3793（決定記録 §35/§56）で create_graph 対象になった。
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("MaxUnpool は create_graph 対象");
+    let plain = tape.backward(&loss).unwrap();
+    let dense = |t: &Tensor<f32>| t.contiguous().as_slice().expect("contiguous").to_vec();
+    let bits = |v: Vec<f32>| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(dense(cg.first_order().get(&x).unwrap().expect("x は到達"))),
+        bits(dense(plain.get(&x).unwrap().expect("x は到達")))
+    );
 }
 
 #[test]

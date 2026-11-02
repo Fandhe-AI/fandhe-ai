@@ -1105,7 +1105,8 @@ pub(crate) enum Op {
     ///
     /// VJP（`grad.rs`）: `d_input = upstream ⊙ mask`（`Op::Mul` と
     /// 同じ elementwise 積。`mask` は `input` と同 shape のため
-    /// broadcast 縮約は不要）。
+    /// broadcast 縮約は不要）。高階微分（`create_graph`）はイシュー #3793（決定記録 §35/§56）で
+    /// 対応済み（`where_cond(mask != 0, g·mask, 0)`。写しは記録済みマスクを固定して再生）。
     Dropout { input: NodeId, mask: Tensor<f32> },
     /// `Var::gather`（`torch.gather` 相当。`Var::index_select` も
     /// 1-D `index` を同 rank の stride-0 view へ拡張したうえで本
@@ -1361,7 +1362,8 @@ pub(crate) enum Op {
     /// `index` は入力と同 shape の contiguous な `Tensor<i32>`（`(n, c)` 平面内 flat 添字。
     /// 非追跡データ）。パラメータは保持しない（VJP は `nodes[input].shape`／`upstream.shape()` と
     /// `index` から導出する）。VJP は `gather`＋last-writer マスク（`Op::Scatter { Overwrite }`
-    /// の随伴と同一規則）。非融合・非 checkpoint・高階微分非対応。
+    /// の随伴と同一規則）。非融合・非 checkpoint。高階微分（`create_graph`）はイシュー #3793
+    /// （決定記録 §35/§56）で対応済み。
     MaxUnpool { input: NodeId, index: Tensor<i32> },
     /// Unfold（`F.unfold`／`nn.Unfold` 相当。入力 `[N, C, H, W]` → `[N, C·kH·kW, L]`。イシュー #2645・
     /// `docs/autodiff-fold-unfold-decision.md`）。`crate::fold_ops::unfold` からのみ積まれる（`Op` 自体は非公開。入口の
@@ -1382,7 +1384,7 @@ pub(crate) enum Op {
     /// backward で入力から再計算する。**既存 Op の合成にしない**（二乗が `f32` で先に確定し
     /// `f64` アキュムレータ契約に抵触するため）。常に実体化済み（`push_eager`）・非 checkpoint・
     /// 低精度なし。高階微分（`create_graph`）は V3 値＋S1 構造で対応（イシュー #3794・
-    /// 決定記録 §36/§56。方式は `create_graph/norm_reparam.rs`）。
+    /// 決定記録 §36/§57。方式は `create_graph/norm_reparam.rs`）。
     LocalResponseNorm {
         input: NodeId,
         params: fandhe_ai_tensor_core::lrn::LrnParams,
@@ -1428,7 +1430,8 @@ pub(crate) enum Op {
     /// モードは `weight` も）は forward と同じ座標式〈`tensor-core::
     /// interpolate` の単一情報源〉から VJP 側で構築する（「各出力が
     /// 有限個の入力を参照する演算の VJP は scatter_add」の原則——
-    /// `Op::Gather` と同型）。
+    /// `Op::Gather` と同型）。高階微分（`create_graph`）は既知 7 mode がイシュー #3793
+    /// （決定記録 §35/§56）で対応済み。
     Interpolate {
         input: NodeId,
         size: Vec<usize>,
@@ -2504,7 +2507,8 @@ impl Op {
     ///
     /// プーリング族（`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・
     /// `AdaptiveAvgPool2d`）はイシュー #3085（決定記録 §29）で `true` になった。
-    /// 隣接する `MaxUnpool` は `false` のまま。
+    /// 構造変換の `Dropout`・`Interpolate`・`MaxUnpool` はイシュー #3793（決定記録 §35/§56）で
+    /// `true` になった（`Interpolate` は既知 7 mode のみ）。
     ///
     /// 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・
     /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §26）で `true`
@@ -2649,11 +2653,27 @@ impl Op {
             | Op::MultiLabelSoftMarginLoss { .. }
             | Op::CosineEmbeddingLoss { .. }
             | Op::TripletMarginLoss { .. }
-            // 正規化・再パラメータ 3 Op（イシュー #3794・決定記録 §36/§56）。方式は
+            // 構造変換 3 Op（イシュー #3793・決定記録 §35/§56）。方式は
+            // `create_graph/structural.rs`。`Interpolate` は下の payload 判定。
+            | Op::Dropout { .. }
+            | Op::MaxUnpool { .. }
+            // 正規化・再パラメータ 3 Op（イシュー #3794・決定記録 §36/§57）。方式は
             // `create_graph/norm_reparam.rs`。3 つとも V3 値＋S1 構造。
             | Op::LocalResponseNorm { .. }
             | Op::WeightNorm { .. }
             | Op::SpectralNorm { .. } => true,
+            // `Interpolate` は `mode` の既知 7 variant だけ true（`InterpolateMode` は
+            // `#[non_exhaustive]` なので未知 variant は安全側の false。`VectorNorm` の前例）。
+            Op::Interpolate { mode, .. } => matches!(
+                mode,
+                InterpolateMode::Nearest
+                    | InterpolateMode::NearestExact
+                    | InterpolateMode::Linear { .. }
+                    | InterpolateMode::Bilinear { .. }
+                    | InterpolateMode::Trilinear { .. }
+                    | InterpolateMode::Bicubic { .. }
+                    | InterpolateMode::Area
+            ),
             // `VectorNorm` は payload で判定する（`ScalarUnary` の前例）。`L1`／`L2` だけ true、
             // `#[non_exhaustive]` の未知 `ord` は false。
             Op::VectorNorm { ord, .. } => matches!(
@@ -2688,12 +2708,9 @@ impl Op {
             | Op::Logcumsumexp { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
-            | Op::Dropout { .. }
             | Op::IndexedScatterReduce { .. }
             | Op::Cumprod { .. }
-            | Op::Interpolate { .. }
             | Op::ConvTranspose3d { .. }
-            | Op::MaxUnpool { .. }
             | Op::Conv3d { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
@@ -5390,7 +5407,7 @@ mod conv3d_op_tests {
 
     #[test]
     fn pooling_family_supports_create_graph() {
-        // イシュー #3085: プーリング 5 variant は対象。隣接する MaxUnpool は fail-closed のまま。
+        // イシュー #3085: プーリング 5 variant は対象。MaxUnpool はイシュー #3793 で対象になった。
         let p2 = Pool2dParams::new([2, 2], Some([2, 2]), [0, 0], [1, 1]).unwrap();
         let p3 = fandhe_ai_tensor_core::pool3d::Pool3dParams::new([2, 2, 2], None, [0; 3], [1; 3])
             .unwrap();
@@ -5427,7 +5444,7 @@ mod conv3d_op_tests {
         );
         assert!(Op::AdaptiveAvgPool2d { input: NodeId(0) }.supports_create_graph());
         assert!(
-            !Op::MaxUnpool {
+            Op::MaxUnpool {
                 input: NodeId(0),
                 index: idx()
             }
@@ -5687,11 +5704,44 @@ mod conv_transpose3d_max_unpool_op_tests {
         assert_eq!(seen, vec![3, 5]);
     }
 
+    /// 構造変換 3 Op（イシュー #3793）: `Dropout`・`MaxUnpool`・既知 7 mode の `Interpolate` は
+    /// create_graph 対象、checkpoint 対象外のまま。
+    #[test]
+    fn structural_family_supports_create_graph() {
+        let drop = Op::Dropout {
+            input: NodeId(0),
+            mask: Tensor::<f32>::zeros(&[1]).unwrap(),
+        };
+        assert!(drop.supports_create_graph() && !drop.is_checkpoint_eligible());
+        let unp = unpool();
+        assert!(unp.supports_create_graph() && !unp.is_checkpoint_eligible());
+        for ac in [false, true] {
+            for mode in [
+                InterpolateMode::Nearest,
+                InterpolateMode::NearestExact,
+                InterpolateMode::Area,
+                InterpolateMode::Linear { align_corners: ac },
+                InterpolateMode::Bilinear { align_corners: ac },
+                InterpolateMode::Trilinear { align_corners: ac },
+                InterpolateMode::Bicubic { align_corners: ac },
+            ] {
+                let op = Op::Interpolate {
+                    input: NodeId(0),
+                    size: vec![2],
+                    mode,
+                };
+                assert!(op.supports_create_graph(), "{mode:?}");
+                assert!(!op.is_checkpoint_eligible(), "{mode:?}");
+            }
+        }
+    }
+
     #[test]
     fn max_unpool_op_meta_properties() {
         let op = unpool();
         assert!(!op.is_checkpoint_eligible());
-        assert!(!op.supports_create_graph());
+        // イシュー #3793（決定記録 §35/§56）で create_graph 対象になった。
+        assert!(op.supports_create_graph());
         let mut seen = Vec::new();
         op.for_each_input(|id| seen.push(id.0));
         assert_eq!(seen, vec![4]);
@@ -5898,7 +5948,7 @@ mod fold_unfold_op_tests {
     }
 }
 /// `Op::LocalResponseNorm`／`Op::WeightNorm`／`Op::SpectralNorm`（イシュー #2646）のメタ性質固定:
-/// checkpoint 対象外・create_graph 対応（イシュー #3794・決定記録 §36/§56 で true へ反転）・`for_each_input` が追跡入力のみを順に列挙する
+/// checkpoint 対象外・create_graph 対応（イシュー #3794・決定記録 §36/§57 で true へ反転）・`for_each_input` が追跡入力のみを順に列挙する
 /// （`spectral_norm` の `u`／`v` スナップショットは入力ではない）。
 #[cfg(test)]
 mod lrn_weight_reparam_op_tests {

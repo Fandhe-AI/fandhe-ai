@@ -395,7 +395,7 @@ fn weight_norm_huge_broadcast_view_is_rejected_before_allocation() {
 
 /// `create_graph` は panic せず、退化入力（ゼロノルム・σ=0）を型付きエラー（`Backward`）で拒否して
 /// `child` を空に保ち、安全な入力では成功する（`weight_norm`／`spectral_norm` は #3794 で対象になった。
-/// 決定記録 §36・§56）。
+/// 決定記録 §36・§57）。
 #[test]
 fn create_graph_is_a_typed_error_not_a_panic() {
     let tape = Tape::new_with_ops(common::naive_ops());

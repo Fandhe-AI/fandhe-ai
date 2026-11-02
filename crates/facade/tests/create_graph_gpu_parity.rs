@@ -383,6 +383,66 @@ const CASES: &[Case] = &[
         run: run_loss_binary_margin_sigmoid_focal,
         reject: None,
     },
+    // 構造変換 3 Op（イシュー #3793・決定記録 §35/§56）。forward がデバイスカーネルなのは `interpolate` の
+    // `Nearest`・`Bilinear`（CUDA `ops.rs` の `interpolate`。ほかの mode は `Unsupported` でホストへ落ちる）と、
+    // `scatter`（Overwrite を GPU で処理する `max_unpool`）・`mul`（`dropout`）。1 階の scatter_add・mul も
+    // デバイスで走るので K。`Bicubic`・`Area` はホストフォールバックを含むので H。構造に MatMul は無い。
+    // Dropout のマスクはホスト RNG で、CPU と GPU で同じマスクを引くよう `manual_seed` で固定する。
+    // 実機は未実測（#3856・#3858）。
+    Case {
+        name: "structural_interpolate_nearest",
+        family: "structural",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_structural_interpolate_nearest,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "structural_interpolate_bilinear",
+        family: "structural",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_structural_interpolate_bilinear,
+        reject: None,
+    },
+    Case {
+        name: "structural_interpolate_bicubic",
+        family: "structural",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_structural_interpolate_bicubic,
+        reject: None,
+    },
+    Case {
+        name: "structural_interpolate_area",
+        family: "structural",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_structural_interpolate_area,
+        reject: None,
+    },
+    Case {
+        name: "structural_max_unpool",
+        family: "structural",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_structural_max_unpool,
+        reject: None,
+    },
+    Case {
+        name: "structural_dropout",
+        family: "structural",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_structural_dropout,
+        reject: None,
+    },
     // 損失のクラス軸系 6 variant（イシュー #3800・決定記録 §40/§55）。6 つとも 1 階がホスト関数（H）で、
     // 構造の Softmax・pointwise・Sum がデバイスで走る。構造に MatMul は無い。実機は未実測（#3857・#3859）。
     Case {
@@ -469,7 +529,7 @@ const CASES: &[Case] = &[
         run: run_loss_regression_gaussian_nll,
         reject: None,
     },
-    // 正規化・再パラメータ 3 Op（イシュー #3794・決定記録 §36/§56）。3 つとも forward・1 階がホスト関数
+    // 正規化・再パラメータ 3 Op（イシュー #3794・決定記録 §36/§57）。3 つとも forward・1 階がホスト関数
     // （H。`BackendOps::{lrn_forward, weight_norm_forward, spectral_norm_forward}` は CPU のみ実装）で、
     // 構造の Pad・Narrow・Mul・Div・Sum・Sqrt・PowScalar がデバイスで走る。構造に MatMul は無い。
     // SpectralNorm は u・v を定数として扱い状態を進めない。実機は未実測（#3856・#3858）。
@@ -942,6 +1002,102 @@ fn run_loss_class_triplet_margin(tp: &Tapes) -> Outputs {
         .unwrap()
     })
 }
+/// 構造変換（#3793）。葉 `z`（長さ 12。形状は `shape`）に線形 Op `f` を適用し、`Σ y²·c` で `H v ≠ 0` にする。
+fn run_structural(tp: &Tapes, shape: &[usize], f: for<'t> fn(&Var<'t>) -> Var<'t>) -> Outputs {
+    let z0: Vec<f32> = vec![
+        0.4, 0.55, 0.7, 0.85, 0.9, 0.1, 0.6, 0.3, 0.2, 0.5, 0.8, 0.45,
+    ];
+    // 符号付き勾配との内積が偶然 0 にならない非対称な方向。
+    let dir: Vec<f32> = (0..12)
+        .map(|i| 1.0 - 0.0625 * i as f32 + 0.03 * (i * i) as f32)
+        .collect();
+    let z = tp.parent.var(&t(z0, shape));
+    let y = f(&z);
+    let ys = y.value().shape().to_vec();
+    let c: Vec<f32> = (0..ys.iter().product::<usize>())
+        .map(|i| 0.4 + 0.37 * i as f32 - 0.05 * (i * i) as f32)
+        .collect();
+    let c = tp.parent.var_no_grad(&t(c, &ys));
+    let loss = y.mul(&y).unwrap().mul(&c).unwrap().sum(None).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&z).unwrap().expect("grad"));
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&z).unwrap().expect("first_order"));
+    let g = cg.grad(&z).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir, shape));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let zc = cg.child_var(&z).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&zc).unwrap().expect("second order"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: None,
+    }
+}
+
+fn run_structural_interpolate_nearest(tp: &Tapes) -> Outputs {
+    run_structural(tp, &[1, 2, 6], |z| {
+        z.interpolate(&[9], fandhe_ai::InterpolateMode::Nearest)
+            .unwrap()
+    })
+}
+
+fn run_structural_interpolate_bilinear(tp: &Tapes) -> Outputs {
+    run_structural(tp, &[1, 2, 2, 3], |z| {
+        z.interpolate(
+            &[3, 4],
+            fandhe_ai::InterpolateMode::Bilinear {
+                align_corners: false,
+            },
+        )
+        .unwrap()
+    })
+}
+
+fn run_structural_interpolate_bicubic(tp: &Tapes) -> Outputs {
+    run_structural(tp, &[1, 1, 3, 4], |z| {
+        z.interpolate(
+            &[4, 5],
+            fandhe_ai::InterpolateMode::Bicubic {
+                align_corners: false,
+            },
+        )
+        .unwrap()
+    })
+}
+
+fn run_structural_interpolate_area(tp: &Tapes) -> Outputs {
+    run_structural(tp, &[1, 1, 3, 4], |z| {
+        z.interpolate(&[2, 3], fandhe_ai::InterpolateMode::Area)
+            .unwrap()
+    })
+}
+
+fn run_structural_max_unpool(tp: &Tapes) -> Outputs {
+    run_structural(tp, &[1, 1, 3, 4], |z| {
+        let (p, idx) = z
+            .max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1], false)
+            .unwrap();
+        p.max_unpool2d(&idx, [2, 2], Some([1, 1]), [0, 0], None)
+            .unwrap()
+    })
+}
+
+fn run_structural_dropout(tp: &Tapes) -> Outputs {
+    // マスクはホスト RNG。CPU と GPU の双方で同じマスクを引くよう固定し、並行実行を直列化する。
+    static RNG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = RNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fandhe_ai::manual_seed(20_261_101);
+    run_structural(tp, &[3, 4], |z| z.dropout(0.4, true).unwrap())
+}
+
 /// 正規化・再パラメータ（#3794）。葉 `z`（長さ 12）から出力の二乗和を作り、`run_loss_class` の
 /// `loss²` 包みで `H v ≠ 0` にする。
 fn run_norm_reparam_lrn(tp: &Tapes) -> Outputs {
@@ -1262,6 +1418,7 @@ cuda_family_test!(
     create_graph_loss_binary_margin_cuda_matches_cpu,
     "loss_binary_margin"
 );
+cuda_family_test!(create_graph_structural_cuda_matches_cpu, "structural");
 cuda_family_test!(create_graph_loss_class_cuda_matches_cpu, "loss_class");
 cuda_family_test!(
     create_graph_loss_regression_cuda_matches_cpu,
@@ -1300,6 +1457,7 @@ metal_family_test!(
     create_graph_loss_binary_margin_metal_matches_cpu,
     "loss_binary_margin"
 );
+metal_family_test!(create_graph_structural_metal_matches_cpu, "structural");
 metal_family_test!(create_graph_loss_class_metal_matches_cpu, "loss_class");
 metal_family_test!(
     create_graph_loss_regression_metal_matches_cpu,
@@ -1350,6 +1508,11 @@ fn stat_reduce_lse_nan_cases_pass_cpu_against_cpu() {
 #[test]
 fn loss_binary_margin_cases_pass_cpu_against_cpu() {
     run_family("loss_binary_margin", None);
+}
+
+#[test]
+fn structural_cases_pass_cpu_against_cpu() {
+    run_family("structural", None);
 }
 
 #[test]

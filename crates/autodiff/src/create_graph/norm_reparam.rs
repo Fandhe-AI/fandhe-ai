@@ -1,5 +1,5 @@
 //! 正規化・再パラメータ 3 Op（`LocalResponseNorm`・`WeightNorm`・`SpectralNorm`）の `create_graph` 対応
-//! （イシュー #3794・親 #3727・設計 `docs/autodiff-higher-order-grad-decision.md` §36、実装記録 §56）。
+//! （イシュー #3794・親 #3727・設計 `docs/autodiff-higher-order-grad-decision.md` §36、実装記録 §57）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `validate_ancestors`（入口検査
 //! [`validate_norm_reparam`]）・`replay_op`（forward 再生。公開 `Var::local_response_norm`／
@@ -73,7 +73,7 @@ use crate::var::Var;
 fn invalid(msg: &str) -> AutodiffError {
     AutodiffError::Backward(format!(
         "create_graph: {msg}（正規化・再パラメータ LocalResponseNorm／WeightNorm／SpectralNorm の構造が\
-         安全に扱えない入力。docs/autodiff-higher-order-grad-decision.md §36・§56 参照）"
+         安全に扱えない入力。docs/autodiff-higher-order-grad-decision.md §36・§57 参照）"
     ))
 }
 

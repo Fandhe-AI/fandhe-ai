@@ -1,6 +1,6 @@
 //! `Op::LocalResponseNorm`・`Op::WeightNorm`・`Op::SpectralNorm` の `create_graph`
 //! （`Tape::backward_create_graph`）対応（イシュー #3794・親 #3727・決定記録
-//! `docs/autodiff-higher-order-grad-decision.md` §36・§56）の受け入れ条件を直接検証する統合テスト。
+//! `docs/autodiff-higher-order-grad-decision.md` §36・§57）の受け入れ条件を直接検証する統合テスト。
 //!
 //! - Hessian を `Tape::backward` の 5 点中央差分（`create_graph` を経由しない独立経路）と REQ-2 統一
 //!   複合判定（`common::req2_close`）で突合する（LRN は size 奇数・偶数・`size > C`・β・k・`α = 0`、
