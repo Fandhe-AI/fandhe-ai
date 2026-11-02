@@ -31,9 +31,15 @@
 //! 「二階の逆伝播の上界が `2^125` 以上」「`g` に非有限要素」「`Inv`・`Solve` の f32 積和の丸め誤差上界が
 //! REQ-2 の複合判定を超えうる（桁落ち。`rounding_ok`）」のいずれかなら
 //! `Err(AutodiffError::Backward)` で拒否する（呼び出し側のロールバックで `child` は空へ戻る）。
-//! 判定は保守的で、拒否されても実際に overflow するとは限らない。`Det` は §21.2 の行別スケール＋
-//! 2 のべき乗チャンク構造（V3）を実装せず、同じ判定を付けた V1（`g * det(A) * inv(A)^T`）とし、
-//! V3 が必要になる入力（`det` が `2^125` 以上など）は拒否する。
+//! 判定は保守的で、拒否されても実際に overflow するとは限らない。
+//! `Det` はイシュー #3810（決定記録 §46・§70）で §21.2 の行別スケール＋2 のべき乗チャンク構造を実装した
+//! （値は全入力で V3〈`det_vjp` を `push_v3`。`cg.grad` が 1 階と bit 一致〉）。[`det_row_scale_plan`] が
+//! 非スケール構造（V1: `g * det(A) * inv(A)^T`）の検査を従来と同じ順で行い、区分 (ii)（途中の段が `2^125`
+//! 以上など）だけで落ちた入力に限りスケール域で判定をやり直して行別スケール構造（[`det_row_scaled_cgrad`]）へ
+//! 回す。(i)（真の値が f32 を超える）・(iii)（桁落ち）・(iv) の拒否は残す。`Inv`・`Solve`・
+//! `SlogdetLogAbsDet` は対象外として恒久化した（§46.14・#3767 の承認）。
+//! 限界: 行別スケール入力の孫テープ再生（三階相当）は子テープの `det(B)` への cotangent が `2^c` 倍に
+//! なり (iii) で拒否される（保証範囲外。§70「設計からの逸脱」）。
 //! - `Inv`: `dA = -(X^T g X^T)`（`X` は `Inv` ノードの写し）。
 //! - `Solve`: `dB = solve(A^T, g)`、`dA = -dB X^T`（`X` は `Solve` ノードの写し）。
 //! - `SlogdetLogAbsDet`: `dA = broadcast(g) * inv(A)^T`。
@@ -408,7 +414,7 @@ pub(super) fn guard_solve(
 /// 実際には許容内の入力も拒否しうる）。
 /// 基底 seed の総和は因数分解でき、`mag[a][b] = |det| * |gv| * (T * |X^T|[a][b] + R[a] * C[b])`
 /// （`T` は `|X|` の全要素和、`R`・`C` は `|X^T|` の行和・列和）となる。O(n^2)。
-fn det_second_order_rounding_ok(x: &[f64], det: f64, gv: f64, n: usize) -> bool {
+fn det_second_order_rounding_ok(x: &[f64], det: f64, gv: f64, n: usize, mult: f64) -> bool {
     let coeff = (2 * n + 4) as f64 * (-23f64).exp2();
     let ax = abs_vec(&transpose(x, n, n));
     let total: f64 = ax.iter().sum();
@@ -419,14 +425,46 @@ fn det_second_order_rounding_ok(x: &[f64], det: f64, gv: f64, n: usize) -> bool 
             *c += v;
         }
     }
-    let scale = det.abs() * gv.abs();
+    // `mult` は行別スケール経路（B 域の量を最終域へ戻す復元係数。§70）。非スケール経路は 1.0。
+    let scale = det.abs() * gv.abs() * mult;
     ax.iter().enumerate().all(|(i, &v)| {
         let m = scale * (total * v + rows[i / n] * cols[i % n]);
         coeff * m < REQ2_ABSOLUTE_RESCUE_THRESHOLD
     })
 }
 
+/// 非スケール構造（V1。`g * det * inv(A)^T`）の段の判定（区分 (ii)）。`SlogdetLogAbsDet`
+/// （`with_det = false`）と `Det`（`with_det = true`）で共有する。
+fn det_like_stage_pass(x: &[f64], det: f64, gv: f64, with_det: bool) -> bool {
+    let scale = if with_det { gv * det } else { gv };
+    let rows: Vec<f64> = x.iter().map(|&v| scale * v).collect();
+    all_stage_ok(x) && all_stage_ok(&rows) && (!with_det || (stage_ok(det) && stage_ok(scale)))
+}
+
+/// 区分 (iii)（桁落ち）と (iv)（二階の逆伝播の上界）。段の判定を通った非スケール構造に対する検査。
+fn det_like_tail(
+    x: &[f64],
+    det: f64,
+    gv: f64,
+    n: usize,
+    with_det: bool,
+) -> Result<(), AutodiffError> {
+    if with_det && !det_second_order_rounding_ok(x, det, gv, n, 1.0) {
+        return Err(reject(
+            "Det: 二階微分の det と inv の経路間の桁落ちが REQ-2 の許容を超えうる",
+        ));
+    }
+    let bx = n as f64 * max_abs(x);
+    let extra = gv.abs().max(1.0) * if with_det { det.abs().max(1.0) } else { 1.0 };
+    if !second_order_ok(&[bx], 3, extra) {
+        return Err(reject("行列式系: 二階の逆伝播の上界が 2^125 以上"));
+    }
+    Ok(())
+}
+
 /// `SlogdetLogAbsDet`（`scale = 1`）と `Det`（`scale = det`）の判定。`g` は形状 `[]`。
+/// `SlogdetLogAbsDet` は対象外として恒久化した（決定記録 §46.14・§70）ため、本関数が唯一の判定。
+/// `Det` は [`det_row_scale_plan`] が同じ検査を先に行い、区分 (ii) だけで落ちた入力を行別スケール経路へ回す。
 pub(super) fn guard_det_like(
     a: &Tensor<f32>,
     g: &Tensor<f32>,
@@ -441,25 +479,10 @@ pub(super) fn guard_det_like(
         return Err(reject("上流 g が非有限"));
     }
     let (x, det) = inverse_of(a, "行列式系")?;
-    let scale = if with_det { gv * det } else { gv };
-    let rows: Vec<f64> = x.iter().map(|&v| scale * v).collect();
-    if !(all_stage_ok(&x)
-        && all_stage_ok(&rows)
-        && (!with_det || (stage_ok(det) && stage_ok(scale))))
-    {
+    if !det_like_stage_pass(&x, det, gv, with_det) {
         return Err(reject("行列式系: 構造の段が overflow／ゼロ化域に入る"));
     }
-    if with_det && !det_second_order_rounding_ok(&x, det, gv, n) {
-        return Err(reject(
-            "Det: 二階微分の det と inv の経路間の桁落ちが REQ-2 の許容を超えうる",
-        ));
-    }
-    let bx = n as f64 * max_abs(&x);
-    let extra = gv.abs().max(1.0) * if with_det { det.abs().max(1.0) } else { 1.0 };
-    if !second_order_ok(&[bx], 3, extra) {
-        return Err(reject("行列式系: 二階の逆伝播の上界が 2^125 以上"));
-    }
-    Ok(())
+    det_like_tail(&x, det, gv, n, with_det)
 }
 
 // ---------------------------------------------------------------------
@@ -514,4 +537,415 @@ pub(super) fn det_like_cgrad<'c>(
     }
     let inv_t = a_m.inv()?.transpose(0, 1)?;
     scale.broadcast_to(&a_shape)?.mul(&inv_t)
+}
+// ---------------------------------------------------------------------
+// Det: 行別スケール＋2 のべき乗チャンク（イシュー #3810・決定記録 §46・§70）
+// ---------------------------------------------------------------------
+
+/// 1 回の `Mul` で掛ける 2 のべき乗の指数の上限（絶対値）。`2^100` は f32 で有限かつ厳密で、
+/// 実行中の値が最終値へ向かって単調に動く限り途中で overflow／ゼロ化しない。
+const CHUNK_EXP: i64 = 100;
+/// チャンクの段数の上限。f32 で意味を持つ指数幅（約 ±300）の数倍で、作り込みの入力が子テープへ
+/// 大量のノードを積むのを防ぐ（A04）。超えたら拒否する。
+const MAX_CHUNK_STEPS: usize = 64;
+
+/// `Det` の行別スケール計画（[`det_row_scale_plan`] の結果）。判定と構造が同じ値を見るための
+/// 単一の源で、`create_graph.rs` の `Op::Det` 分岐が [`det_row_scaled_cgrad`] へ渡す。
+pub(super) struct DetRowScale {
+    /// 行 `i` のスケール指数 `e_i`（`r_i = 2^e_i` は行の最大絶対値以上で最小の 2 のべき乗。全ゼロ行は 0）。
+    row_exp: Vec<i32>,
+    /// `g` を割る共通スケール `s_g = 2^log2_sg`（`[2^-126, 2^127]` へクランプ。`g = 0` は 0）。
+    log2_sg: i32,
+    /// 復元指数 `c_i = E_i + log2_sg`、`E_i = Σ_{k≠i} e_k`。
+    out_exp: Vec<i64>,
+}
+
+/// `x`（正の有限値）以上で最小の 2 のべき乗の指数。
+fn pow2_ceil_exp(x: f64) -> i32 {
+    let mut e = x.log2().ceil() as i32;
+    while f64::powi(2.0, e) < x {
+        e += 1;
+    }
+    while f64::powi(2.0, e - 1) >= x {
+        e -= 1;
+    }
+    e
+}
+
+/// `2^k`（`|k| <= 100`）の厳密な f32。
+fn pow2_f32(k: i32) -> f32 {
+    f32::from_bits(((k + 127) as u32) << 23)
+}
+
+/// `exp` を同符号で各 `CHUNK_EXP` 以下の指数列へ分ける（係数を 1 個の f32 定数にまとめない）。
+fn chunk_list(exp: i64) -> Vec<i32> {
+    let sign: i64 = exp.signum();
+    let mut rem = exp.abs();
+    let mut out = Vec::new();
+    while rem > 0 {
+        let k = rem.min(CHUNK_EXP);
+        out.push((sign * k) as i32);
+        rem -= k;
+    }
+    out
+}
+
+/// 区分 (ii) だけで落ちる `Det` の入力に対し行別スケールの計画を作る。`Ok(None)` は「非スケール構造
+/// （現行の V1）のまま」の合図で、子テープへスケール用のノードを足さない。`Err` は拒否（呼び出し側の
+/// ロールバックで `child` は空へ戻る）。判定と構造の両方がこの結果を使う。
+///
+/// 手順は決定記録 §70.2。非スケール経路の検査（段・(iii)・(iv)）を従来と同じ順と式で行い、段（ii）だけが
+/// 落ちた入力に限りスケール域で判定をやり直す。`g_requires_grad` は `g` が子テープ上で勾配を要する
+/// （`g` へ戻る経路の cotangent を (iv) に含める）かどうか。
+pub(super) fn det_row_scale_plan(
+    a: &Tensor<f32>,
+    g: &Tensor<f32>,
+    g_requires_grad: bool,
+) -> Result<Option<DetRowScale>, AutodiffError> {
+    let n = a.shape()[0];
+    if n == 0 {
+        return Ok(None);
+    }
+    let gv = g.host_slice().first().map_or(0.0, |&v| f64::from(v));
+    if !gv.is_finite() {
+        return Err(reject("上流 g が非有限"));
+    }
+    let (x, det) = inverse_of(a, "行列式系")?;
+    #[cfg(test)]
+    let forced = tests::forced_scale();
+    #[cfg(not(test))]
+    let forced = false;
+    if !forced {
+        if det_like_stage_pass(&x, det, gv, true) {
+            det_like_tail(&x, det, gv, n, true)?;
+            return Ok(None);
+        }
+        // (i) 真の 1 階値 `g * det * X^T`（`det_vjp` と同じ f64 計算）が f32 に収まらないなら拒否。
+        let scale = gv * det;
+        if !x.iter().all(|&v| stage_ok(scale * v)) {
+            return Err(reject(
+                "Det: 真の 1 階値が f32 の範囲を超える（区分 (i)。行別スケールでも救えない）",
+            ));
+        }
+    }
+    scale_plan_checked(a, gv, n, g_requires_grad).map(Some)
+}
+
+/// 行別スケールの計画本体とスケール域での判定（段・桁落ち・cotangent 上界）。
+fn scale_plan_checked(
+    a: &Tensor<f32>,
+    gv: f64,
+    n: usize,
+    g_requires_grad: bool,
+) -> Result<DetRowScale, AutodiffError> {
+    let av = to_f64(a);
+    let row_exp: Vec<i32> = av
+        .chunks(n)
+        .map(|r| {
+            let m = max_abs(r);
+            if m > 0.0 { pow2_ceil_exp(m) } else { 0 }
+        })
+        .collect();
+    // B = D^-1 A（f64 で厳密。非零要素が正規化域に収まれば f32 でも厳密に表せる）。
+    let b64: Vec<f64> = av
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| v * f64::powi(2.0, -row_exp[k / n]))
+        .collect();
+    if !all_stage_ok(&b64) {
+        return Err(reject(
+            "Det: 行別スケール後の B が f32 の正規化域に収まらない（行内の桁差が表現幅超過）",
+        ));
+    }
+    let b32: Vec<f32> = b64.iter().map(|&v| v as f32).collect();
+    let b_t = Tensor::new(b32, &[n, n])?;
+    let (xb, det_b) = inverse_of(&b_t, "Det（スケール後）")?;
+    if !(stage_ok(det_b) && all_stage_ok(&xb)) {
+        return Err(reject(
+            "Det: スケール後の det(B)／inv(B) が overflow／ゼロ化域に入る",
+        ));
+    }
+    let log2_sg = if gv == 0.0 {
+        0
+    } else {
+        pow2_ceil_exp(gv.abs()).clamp(-126, 127)
+    };
+    let gt = gv * f64::powi(2.0, -log2_sg);
+    let q = gt * det_b;
+    // 復元指数 c_i = E_i + log2_sg（checked 演算。範囲外は拒否）。
+    let total: i64 = row_exp
+        .iter()
+        .try_fold(0i64, |acc, &e| acc.checked_add(i64::from(e)))
+        .ok_or_else(|| reject("Det: 指数の和が範囲外"))?;
+    let out_exp: Vec<i64> = row_exp
+        .iter()
+        .map(|&e| (total - i64::from(e)) + i64::from(log2_sg))
+        .collect();
+    // スケール域の段: g̃・g̃·det(B)・チャンク前の積 p_ij と、各チャンクを掛けた後の値。
+    if !(stage_ok(gt) && stage_ok(q)) {
+        return Err(reject(
+            "Det: スケール後の g̃／g̃·det(B) が overflow／ゼロ化域に入る",
+        ));
+    }
+    for (i, &c) in out_exp.iter().enumerate() {
+        let list = chunk_list(c);
+        if list.len() > MAX_CHUNK_STEPS {
+            return Err(reject("Det: 復元指数のチャンク段数が上限を超える"));
+        }
+        for j in 0..n {
+            let mut v = q * xb[j * n + i];
+            if !stage_ok(v) {
+                return Err(reject(
+                    "Det: チャンク前の積が overflow／ゼロ化域に入る（指数復元前のアンダーフロー等）",
+                ));
+            }
+            for &k in &list {
+                v *= f64::powi(2.0, k);
+                if !stage_ok(v) {
+                    return Err(reject("Det: チャンク適用後の値が overflow／ゼロ化域に入る"));
+                }
+            }
+        }
+    }
+    // 復元係数: 出力側の最大 2^{c_i}（保守側）、シード側の最大 1/r_k（B = D^-1 A の微分）。
+    let k_out = out_exp.iter().fold(0.0f64, |m, &c| {
+        m.max(f64::powi(2.0, c.clamp(-2000, 2000) as i32))
+    });
+    let r_inv = row_exp
+        .iter()
+        .fold(0.0f64, |m, &e| m.max(f64::powi(2.0, -e)));
+    // (iii) 桁落ち。B 域の量で求め、復元係数を掛けた最終域で絶対 1e-5 と比べる（g̃ だけで評価しない）。
+    if !det_second_order_rounding_ok(&xb, det_b, gt, n, k_out * r_inv) {
+        return Err(reject(
+            "Det: 二階微分の det と inv の経路間の桁落ちが REQ-2 の許容を超えうる（スケール域）",
+        ));
+    }
+    // (iv) 二階の逆伝播の cotangent 上界（冪 3 は不変）。B 経由（出力側の 2^c と 1/r）と、
+    // g が勾配を要する場合の g 経由（2^c_i / s_g = 2^E_i）の大きい方を使う。
+    let e_max = out_exp
+        .iter()
+        .map(|&c| c - i64::from(log2_sg))
+        .max()
+        .unwrap_or(0);
+    let path_b = k_out.max(1.0) * r_inv.max(1.0);
+    let path_g = if g_requires_grad {
+        f64::powi(2.0, e_max.clamp(-2000, 2000) as i32).max(1.0)
+    } else {
+        1.0
+    };
+    let bx = n as f64 * max_abs(&xb);
+    let extra = gt.abs().max(1.0) * det_b.abs().max(1.0) * path_b.max(path_g);
+    if !second_order_ok(&[bx], 3, extra) {
+        return Err(reject(
+            "Det: 二階の逆伝播の cotangent 上界が 2^125 以上（スケール域）",
+        ));
+    }
+    Ok(DetRowScale {
+        row_exp,
+        log2_sg,
+        out_exp,
+    })
+}
+
+/// 行列 `v`（`[n, m]`）の行 `i` に `2^{exps[i]}` を、`CHUNK_EXP` 以下のチャンクの `Mul` 列で掛ける。
+/// 各行のチャンクは同符号なので、実行中の値は最終値へ向かって単調に動く（途中で最終値を超えない）。
+fn scale_rows<'c>(child: &'c Tape, v: &Var<'c>, exps: &[i64]) -> Result<Var<'c>, AutodiffError> {
+    let n = exps.len();
+    let lists: Vec<Vec<i32>> = exps.iter().map(|&e| chunk_list(e)).collect();
+    let steps = lists.iter().map(Vec::len).max().unwrap_or(0);
+    let shape = v.shape();
+    let mut cur = *v;
+    for s in 0..steps {
+        let col: Vec<f32> = lists
+            .iter()
+            .map(|l| pow2_f32(l.get(s).copied().unwrap_or(0)))
+            .collect();
+        let c = child
+            .var_no_grad(&Tensor::new(col, &[n, 1])?)
+            .broadcast_to(&shape)?;
+        cur = cur.mul(&c)?;
+    }
+    Ok(cur)
+}
+
+/// スカラー `v`（形状 `[]`）に `2^exp` をチャンク列の `Mul` で掛ける。
+fn scale_scalar<'c>(child: &'c Tape, v: &Var<'c>, exp: i64) -> Result<Var<'c>, AutodiffError> {
+    let mut cur = *v;
+    for k in chunk_list(exp) {
+        let c = child.var_no_grad(&Tensor::new(vec![pow2_f32(k)], &[])?);
+        cur = cur.mul(&c)?;
+    }
+    Ok(cur)
+}
+
+/// `Det` の行別スケール構造（§21.2 の `Det` の数値契約）。`B = D^-1 A`、`g̃ = g / s_g` から
+/// `p = broadcast(g̃ · det(B)) ⊙ inv(B)^T` を作り、行 `i` に `2^{c_i}` をチャンクで掛け戻す。
+/// 積む Op は `Mul`・`Det`・`Inv`・`Transpose`・`BroadcastTo` だけ（いずれも再生可能）。値は呼び出し側が
+/// V3（`det_vjp`）で入れる。
+pub(super) fn det_row_scaled_cgrad<'c>(
+    child: &'c Tape,
+    g: &Var<'c>,
+    a_m: &Var<'c>,
+    plan: &DetRowScale,
+) -> Result<Var<'c>, AutodiffError> {
+    let a_shape = a_m.shape();
+    let neg_e: Vec<i64> = plan.row_exp.iter().map(|&e| -i64::from(e)).collect();
+    let b = scale_rows(child, a_m, &neg_e)?;
+    let gt = scale_scalar(child, g, -i64::from(plan.log2_sg))?;
+    let q = gt.mul(&b.det()?)?;
+    let inv_t = b.inv()?.transpose(0, 1)?;
+    let p = q.broadcast_to(&a_shape)?.mul(&inv_t)?;
+    scale_rows(child, &p, &plan.out_exp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// スケール経路の強制フック（テストビルド限定。#3809 の `FORCED_PRESCALE` と同型）。
+        static FORCED_SCALE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn forced_scale() -> bool {
+        FORCED_SCALE.with(Cell::get)
+    }
+
+    /// 強制フックを設定して `f` を実行し、終了時に必ず解除する。
+    pub(crate) fn with_forced_scale<R>(on: bool, f: impl FnOnce() -> R) -> R {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FORCED_SCALE.with(|c| c.set(false));
+            }
+        }
+        FORCED_SCALE.with(|c| c.set(on));
+        let _reset = Reset;
+        f()
+    }
+
+    fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
+        Tensor::new(data, shape).unwrap()
+    }
+
+    #[test]
+    fn pow2_helpers_are_exact() {
+        assert_eq!(pow2_ceil_exp(1.0), 0);
+        assert_eq!(pow2_ceil_exp(1.5), 1);
+        assert_eq!(pow2_ceil_exp(2.0), 1);
+        assert_eq!(pow2_ceil_exp(0.25), -2);
+        assert_eq!(pow2_ceil_exp(3e38), 128);
+        assert_eq!(pow2_f32(0), 1.0);
+        assert_eq!(pow2_f32(-100), 2f32.powi(-100));
+        assert_eq!(pow2_f32(100), 2f32.powi(100));
+        assert_eq!(chunk_list(250), vec![100, 100, 50]);
+        assert_eq!(chunk_list(-101), vec![-100, -1]);
+        assert!(chunk_list(0).is_empty());
+    }
+
+    #[test]
+    fn plan_is_none_for_inputs_accepted_by_the_unscaled_guard() {
+        let one = t(vec![1.0], &[]);
+        for a in [
+            t(vec![2.0, 0.5, -0.3, 1.5], &[2, 2]),
+            t(vec![1.0, 0.0, 0.0, 2.0], &[2, 2]),
+        ] {
+            let p = with_forced_scale(false, || det_row_scale_plan(&a, &one, false));
+            assert!(matches!(p, Ok(None)), "非スケールのまま");
+        }
+    }
+
+    #[test]
+    fn plan_exists_for_large_diagonal_and_rejects_true_overflow() {
+        let a = t(vec![1e20, 0.0, 0.0, 1e20], &[2, 2]);
+        let one = t(vec![1.0], &[]);
+        let p = det_row_scale_plan(&a, &one, false).unwrap().unwrap();
+        assert_eq!(p.row_exp, vec![67, 67]);
+        assert_eq!(p.out_exp, vec![67, 67]);
+        let eye = t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let huge = t(vec![3e38], &[]);
+        assert!(det_row_scale_plan(&eye, &huge, false).is_err());
+    }
+
+    #[test]
+    fn forced_scale_cancellation_regression_is_still_rejected() {
+        // 1e10 * det(dense) は強制スケールでも桁落ちで拒否される（§46.12 の落とし穴）。
+        let a = t(vec![2.0, 0.5, -0.3, 1.5], &[2, 2]);
+        let g = t(vec![1e10], &[]);
+        let r = with_forced_scale(true, || det_row_scale_plan(&a, &g, false));
+        assert!(r.is_err(), "強制スケールでも拒否のはず");
+    }
+
+    fn new_tape() -> Tape {
+        Tape::new_with_ops(crate::default_ops::naive_ops())
+    }
+
+    fn req2(a: f32, b: f32) -> bool {
+        let (a, b) = (f64::from(a), f64::from(b));
+        let diff = (a - b).abs();
+        diff / a.abs().max(b.abs()).max(1e-12) < 1e-3 || diff < 1e-5
+    }
+
+    /// `loss = g * det(A)` の（1 階 `cg.grad`、二階 Hessian 行列）を子テープで求める。
+    fn det_grad_and_hessian(
+        a0: &[f32],
+        n: usize,
+        g: f32,
+    ) -> Result<(Vec<f32>, Vec<f32>), AutodiffError> {
+        let tape = new_tape();
+        let child = new_tape();
+        let x = tape.var(&t(a0.to_vec(), &[n, n]));
+        let gc = tape.var_no_grad(&t(vec![g], &[]));
+        let loss = x.det()?.mul(&gc)?;
+        let cg = tape.backward_create_graph(&loss, &child)?;
+        let gx = cg.grad(&x)?.expect("到達");
+        let cx = cg.child_var(&x)?.expect("写し");
+        let grad = gx.to_tensor().contiguous().as_slice().expect("c").to_vec();
+        let mut hess = Vec::new();
+        for j in 0..n * n {
+            let s = gx.narrow(0, j / n, 1)?.narrow(1, j % n, 1)?.sum(None)?;
+            let rg = child.backward(&s)?;
+            let row = rg.get(&cx)?.expect("到達").contiguous();
+            hess.extend_from_slice(row.as_slice().expect("c"));
+        }
+        Ok((grad, hess))
+    }
+
+    /// 強制スケールとスケールなしの比較（§45 の「強制 k」と同じ確かめ方）: ほどほどの入力で、
+    /// 行別スケール構造の `cg.grad` が 1 階と bit 一致し、二階（Hessian）が非スケール構造と REQ-2 で一致する。
+    #[test]
+    fn forced_scale_matches_unscaled_for_moderate_inputs() {
+        let cases: [(&[f32], usize, f32); 3] = [
+            (&[2.0, 0.5, -0.3, 1.5], 2, 1.0),
+            (&[2.0, 0.5, -0.3, 1.5], 2, 0.25),
+            (&[2.0, 0.5, 0.1, -0.3, 1.5, 0.2, 0.1, -0.2, 1.8], 3, 0.25),
+        ];
+        for (a0, n, g) in cases {
+            let base = with_forced_scale(false, || det_grad_and_hessian(a0, n, g)).unwrap();
+            let forced = with_forced_scale(true, || det_grad_and_hessian(a0, n, g)).unwrap();
+            let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+            assert_eq!(
+                bits(&base.0),
+                bits(&forced.0),
+                "cg.grad は 1 階と bit 一致 (n={n} g={g})"
+            );
+            for (i, (&a, &b)) in base.1.iter().zip(&forced.1).enumerate() {
+                assert!(req2(a, b), "hessian[{i}] base={a} forced={b} (n={n} g={g})");
+            }
+        }
+    }
+
+    /// 強制スケールでも桁落ちの回帰（`1e10 * det(dense)`）は `Err(Backward)` で、`child` は空のまま。
+    #[test]
+    fn forced_scale_cancellation_regression_leaves_child_empty() {
+        let tape = new_tape();
+        let child = new_tape();
+        let x = tape.var(&t(vec![2.0, 0.5, -0.3, 1.5], &[2, 2]));
+        let gc = tape.var_no_grad(&t(vec![1e10], &[]));
+        let loss = x.det().unwrap().mul(&gc).unwrap();
+        let r = with_forced_scale(true, || tape.backward_create_graph(&loss, &child));
+        assert!(matches!(r, Err(AutodiffError::Backward(_))));
+        assert!(child.is_empty());
+    }
 }

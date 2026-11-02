@@ -172,7 +172,7 @@ where
     );
     let cg2 = child
         .backward_create_graph(&scalar, &grand)
-        .expect("孫テープへの再生（閉包性）");
+        .unwrap_or_else(|e| panic!("{ctx}: 孫テープへの再生（閉包性）: {e:?}"));
     let first = dense(cg2.first_order().get(&cx).expect("get").expect("到達"));
     let second = dense(&cg2.grad(&cx).expect("grad").expect("到達").to_tensor());
     for i in 0..direct.len() {
@@ -513,6 +513,7 @@ where
     );
 }
 
+// 区分 (i): 真の値が f32 を超える。Inv は対象外として恒久化（決定記録 §46.14・#3767）。
 #[test]
 fn inv_subnormal_input_is_rejected() {
     assert_rejected_and_child_reusable(
@@ -523,6 +524,7 @@ fn inv_subnormal_input_is_rejected() {
     );
 }
 
+// 区分 (i): 真の値が f32 を超える。Solve は対象外として恒久化（決定記録 §46.14・#3767）。
 #[test]
 fn solve_overflowing_state_is_rejected() {
     assert_rejected_and_child_reusable(
@@ -536,17 +538,274 @@ fn solve_overflowing_state_is_rejected() {
     );
 }
 
+/// f64 の Gauss-Jordan 逆行列（部分ピボット。テストの閉形式参照用）。
+fn inverse_f64(a: &[f32], n: usize) -> (Vec<f64>, f64) {
+    let mut m: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
+    let mut inv = vec![0.0f64; n * n];
+    for i in 0..n {
+        inv[i * n + i] = 1.0;
+    }
+    let mut det = 1.0f64;
+    for c in 0..n {
+        let p = (c..n)
+            .max_by(|&x, &y| m[x * n + c].abs().total_cmp(&m[y * n + c].abs()))
+            .expect("pivot");
+        if p != c {
+            for k in 0..n {
+                m.swap(c * n + k, p * n + k);
+                inv.swap(c * n + k, p * n + k);
+            }
+            det = -det;
+        }
+        let pv = m[c * n + c];
+        det *= pv;
+        for k in 0..n {
+            m[c * n + k] /= pv;
+            inv[c * n + k] /= pv;
+        }
+        for r in 0..n {
+            if r != c {
+                let f = m[r * n + c];
+                for k in 0..n {
+                    m[r * n + k] -= f * m[c * n + k];
+                    inv[r * n + k] -= f * inv[c * n + k];
+                }
+            }
+        }
+    }
+    (inv, det)
+}
+
+/// `loss = g * det(A)` の Hessian の閉形式 `H[(ij),(kl)] = g·det·(X_ji X_lk − X_li X_jk)`（`X = A^-1`）。
+fn det_closed_form_hessian(a0: &[f32], n: usize, g: f64) -> Vec<Vec<f64>> {
+    let (x, det) = inverse_f64(a0, n);
+    let mut h = vec![vec![0.0f64; n * n]; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                for l in 0..n {
+                    h[i * n + j][k * n + l] =
+                        g * det * (x[j * n + i] * x[l * n + k] - x[l * n + i] * x[j * n + k]);
+                }
+            }
+        }
+    }
+    h
+}
+
+/// `loss = g * det(A)`（`g != 1` なら定数との積）を組む。
+fn det_loss<'t>(tape: &'t Tape, x: &Var<'t>, g: f32) -> Built<'t> {
+    let d = x.det()?;
+    if g == 1.0 {
+        Ok(d)
+    } else {
+        d.mul(&tape.var_no_grad(&t(vec![g], &[])))
+    }
+}
+
+/// `det_loss` を（`g` を束縛した）高階ライフタイムの関数として返す。
+fn det_loss_builder(g: f32) -> impl for<'t> Fn(&'t Tape, &Var<'t>) -> Built<'t> {
+    move |tp, v| det_loss(tp, v, g)
+}
+
+/// 行別スケール経路で受理される入力の受け入れ検査（§70.5）: 1 階が素の `backward` と bit 同一、
+/// `cg.grad` が 1 階と bit 一致（V3）、全段が有限、Hessian が f64 閉形式と REQ-2 で一致、
+/// 孫テープ再生（`backward_create_graph`・`jvp_create_graph`）が有限で一致する。
+fn check_det_row_scaled(ctx: &str, a0: &[f32], n: usize, g: f32) {
+    let shape = [n, n];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(a0.to_vec(), &shape));
+    let loss = det_loss(&tape, &x, g).expect("forward 構築");
+    let plain = dense(
+        tape.backward(&loss)
+            .expect("backward")
+            .get(&x)
+            .expect("get")
+            .expect("到達"),
+    );
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .unwrap_or_else(|e| panic!("{ctx}: 受理されるはず: {e:?}"));
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    let first = dense(cg.first_order().get(&x).expect("get").expect("到達"));
+    assert_eq!(
+        bits(&first),
+        bits(&plain),
+        "{ctx}: first_order は backward と bit 同一"
+    );
+    let gx = dense(&cg.grad(&x).expect("grad").expect("到達").to_tensor());
+    assert!(gx.iter().all(|v| v.is_finite()), "{ctx}: cg.grad が非有限");
+    assert_eq!(
+        bits(&gx),
+        bits(&plain),
+        "{ctx}: cg.grad は 1 階と bit 一致（V3）"
+    );
+    // Hessian（子テープ上の逆伝播）を閉形式と突合する。
+    let build = det_loss_builder(g);
+    let analytic = analytic_hessian(&build, a0, &shape);
+    let closed = det_closed_form_hessian(a0, n, f64::from(g));
+    for (j, row) in analytic.iter().enumerate() {
+        for (i, &a) in row.iter().enumerate() {
+            assert!(a.is_finite(), "{ctx}: hessian[{j}][{i}] が非有限");
+            assert!(
+                common::req2_close(a, closed[j][i]),
+                "{ctx}: hessian[{j}][{i}] analytic={a} closed={}",
+                closed[j][i]
+            );
+        }
+    }
+}
+
+/// 限界の固定（決定記録 §70「設計からの逸脱」）: 行別スケール入力の**孫テープ再生**
+/// （`child.backward_create_graph`・`jvp_create_graph`）は、子テープ上の `det(B)` への cotangent が
+/// 下流の `2^c` チャンクで `2^c` 倍になり、非スケール (iii)（桁落ち上界 ∝ 上流勾配）に当たって
+/// `Err(Backward)` で拒否される（`grand` は空のまま）。二階（`child.backward`）は
+/// `check_det_row_scaled` が有限かつ正しいことを確かめている。三階以上は保証範囲外（§46.5）。
+fn assert_det_grandchild_replay_is_rejected(ctx: &str, a0: &[f32], n: usize, g: f32) {
+    let shape = [n, n];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(a0.to_vec(), &shape));
+    let loss = det_loss(&tape, &x, g).expect("forward 構築");
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .unwrap_or_else(|e| panic!("{ctx}: 1 階は受理されるはず: {e:?}"));
+    let gx = cg.grad(&x).expect("grad").expect("到達");
+    let c = child.var_no_grad(&t(pattern(n * n, 2.0), &shape));
+    let scalar = gx.mul(&c).expect("mul").sum(None).expect("sum");
+    let r = child.backward_create_graph(&scalar, &grand);
+    assert!(
+        is_backward_err(&r),
+        "{ctx}: 孫テープ再生は Err(Backward) のはず: {:?}",
+        r.as_ref().err()
+    );
+    assert!(grand.is_empty(), "{ctx}: 拒否後は grand が空");
+    // jvp_create_graph も同じ経路で拒否される。
+    let tape2 = Tape::new_with_ops(common::naive_ops());
+    let (child2, grand2) = (
+        Tape::new_with_ops(common::naive_ops()),
+        Tape::new_with_ops(common::naive_ops()),
+    );
+    let x2 = tape2.var(&t(a0.to_vec(), &shape));
+    let loss2 = det_loss(&tape2, &x2, g).expect("forward 構築");
+    let tangent = t(pattern(n * n, 3.0), &shape);
+    let j = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape2, &loss2, &x2, &tangent, &child2, &grand2,
+    );
+    assert!(
+        is_backward_err(&j),
+        "{ctx}: jvp_create_graph は Err(Backward) のはず"
+    );
+}
+
 #[test]
-fn det_large_input_is_rejected() {
-    // diag(1e20, 1e20): det = 1e40 は f32 を超える（V3 が必要な域。本 issue では拒否。§30）。
-    assert_rejected_and_child_reusable(
-        "det diag(1e20)",
-        |_tape, x| x.det(),
+fn det_row_scaled_grandchild_replay_is_rejected_by_cancellation_guard() {
+    assert_det_grandchild_replay_is_rejected(
+        "diag(1e20,1e20) g=1",
         &[1e20, 0.0, 0.0, 1e20],
+        2,
+        1.0,
+    );
+}
+
+/// 受理へ移す入力（§46.12 / §70）: `det` が f32 を超えるが 1 階・二階が有限。
+#[test]
+fn det_large_input_is_accepted_via_row_scale() {
+    check_det_row_scaled("diag(1e20,1e20) g=1", &[1e20, 0.0, 0.0, 1e20], 2, 1.0);
+    let mut d3 = vec![0.0f32; 9];
+    for i in 0..3 {
+        d3[i * 3 + i] = 1e20;
+    }
+    check_det_row_scaled("diag(1e20)x3 g=1e-30", &d3, 3, 1e-30);
+}
+
+/// 行の最大値が `2^127` 超（`1/r` が非正規化数になる行）でもチャンクで掛けて受理される。
+#[test]
+fn det_row_scale_handles_row_above_two_pow_127() {
+    check_det_row_scaled("diag(3e38,3e38) g=1e-8", &[3e38, 0.0, 0.0, 3e38], 2, 1e-8);
+}
+
+/// 拒否が残る入力（§46.12）。いずれも `Err(Backward)` で `child` が空、同じ `child` で再試行できる。
+#[test]
+fn det_rejections_remain_after_row_scale() {
+    // 区分 (i): 真の 1 階値が f32 を超える。
+    assert_rejected_and_child_reusable(
+        "det I g=3e38",
+        |tape, x| det_loss(tape, x, 3e38),
+        &[1.0, 0.0, 0.0, 1.0],
+        &[2, 2],
+    );
+    // 行列式のアンダーフロー: 1.001·I（160 次）。
+    let n = 160;
+    let mut a = vec![0.0f32; n * n];
+    for i in 0..n {
+        a[i * n + i] = 1.001;
+    }
+    assert_rejected_and_child_reusable("det 1.001 I 160", |_t, x| x.det(), &a, &[n, n]);
+    // 区分 (iii): 混在スケールの桁落ち。
+    assert_rejected_and_child_reusable(
+        "det diag(1e30,1e-30)",
+        |_t, x| x.det(),
+        &[1e30, 0.0, 0.0, 1e-30],
         &[2, 2],
     );
 }
 
+/// 区分 (iii)（桁落ち）の拒否は行別スケールで救わない（#3767 の点 4）。`moderate_scale_inputs_*` が
+/// `Det` で除外している対角スケール差の入力が、実装後も拒否のままであることを固定する。
+#[test]
+fn det_diagonal_scale_gap_stays_rejected_after_row_scale() {
+    assert_rejected_and_child_reusable(
+        "det diag(1e3,1e-3)",
+        |_t, x| x.det(),
+        &[1e3, 0.0, 0.0, 1e-3],
+        &[2, 2],
+    );
+    assert_rejected_and_child_reusable(
+        "det diag(30,0.05)",
+        |_t, x| x.det(),
+        &[30.0, 0.0, 0.0, 0.05],
+        &[2, 2],
+    );
+}
+
+/// 256 次上三角（対角 1.5・`A[0,1] = 2^-100`）・`g = 2^-100`: 指数復元前の積がアンダーフローする。
+#[test]
+fn det_upper_triangular_256_underflow_is_rejected() {
+    let n = 256;
+    let mut a = vec![0.0f32; n * n];
+    for i in 0..n {
+        a[i * n + i] = 1.5;
+    }
+    a[1] = 2f32.powi(-100);
+    assert_rejected_and_child_reusable(
+        "det 256 upper g=2^-100",
+        |tape, x| det_loss(tape, x, 2f32.powi(-100)),
+        &a,
+        &[n, n],
+    );
+}
+
+/// `g` が勾配を要する場合は `g` へ戻る経路の cotangent（`2^E_i`）が上界に入り、`2^125` 以上で拒否される
+/// （`d²/dg dA = det·X^T ≈ 1e40` は f32 を超える）。`g` が定数なら同じ `A` でも受理される（上のテスト）。
+#[test]
+fn det_cotangent_bound_includes_g_path_when_g_requires_grad() {
+    let mut d3 = vec![0.0f32; 9];
+    for i in 0..3 {
+        d3[i * 3 + i] = 1e20;
+    }
+    assert_rejected_and_child_reusable(
+        "det diag(1e20)x3 * w(var)",
+        |tape, x| {
+            let w = tape.var(&t(vec![1e-30], &[]));
+            x.det()?.mul(&w)
+        },
+        &d3,
+        &[3, 3],
+    );
+}
 /// 回帰（PR #3353 指摘）: det(A) と inv(A) の経路が打ち消し合う悪条件入力は、二階が厳密に 0 の
 /// ところ f32 で約 4e-3 残り REQ-2 の絶対誤差条件を破るため、型付きエラーで拒否する。
 #[test]

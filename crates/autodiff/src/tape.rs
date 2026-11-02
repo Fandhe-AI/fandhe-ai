@@ -2679,7 +2679,7 @@ impl Op {
             | Op::Pad { .. }
             | Op::MaskedFill { .. }
             | Op::PadMode { .. }
-            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。分解系は
+            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30。`Det` の受理拡大は #3810・§70）。分解系は
             // `false` のまま。`Stft`／`Istft` と内部 Op
             // `StftAdjoint`／`IstftAdjoint` はイシュー #3804（決定記録 §42・§63。随伴 Op の対）。
             | Op::Stft { .. }
