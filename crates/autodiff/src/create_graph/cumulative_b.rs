@@ -31,7 +31,7 @@
 //!   絶対値の入力を 1 階と同じ cumprod の VJP に通す）も同じ閾値で判定する。0 への underflow は
 //!   拒否しない（underflow した項の絶対誤差は 1e-5 の救済内に収まる）。加えて f32 scan の `S` を f64 逐次再帰の
 //!   参照と REQ-2 統一複合判定で突き合わせ、桁落ち（大きな項の相殺）による不一致も拒否する。
-//! - `Logcumsumexp`: f64 prefix の参照係数 `exp(out64[j]-out64[j+1])`・`exp(x-out64)` と f32 構造の
+//! - `Logcumsumexp`（最終 Hessian 成分 `∂d_x[k]/∂x_m` の合算相殺も `eps·|項|` 総和で判定する）: f64 prefix の参照係数 `exp(out64[j]-out64[j+1])`・`exp(x-out64)` と f32 構造の
 //!   係数 `c`・`w` を REQ-2 の統一複合判定（`tolerance::composite_close_f32`。新しい定数は作らない）で
 //!   比べ、さらに Hessian 側の項 `c[j]·T[j+1]`・`w[j]·T[j]` にも同じ判定を課す。外れたら拒否。
 //!
@@ -423,6 +423,55 @@ fn check_logcumsumexp_stages(
                     return Err(reject_coeff("Hessian 項 w[j]·T[j]"));
                 }
             }
+            // 最終 Hessian 成分 `J[k,m] = ∂d_x[k]/∂x_m` の相殺判定（Codex P1）。項ごとの一致を満たしても、
+            // 複数の項の合算で相殺すると（例 `x=[0,0,0]`・`g=[1001,-8000,9000]` の `H[0,0]` は
+            // `-8000/4 + 2·9000/9 = 0` だが f32 では約 -1.6e-4）絶対誤差が救済 1e-5 を外れる。
+            // `J[k,m] = δ_km·D[k] - sum_{j>=max(k,m)} g_j·exp(x_k+x_m-2·out_j)`、
+            // 絶対値版 `A[k,m]`（`g`→`|g|`・符号を全て +）で f32 の丸め誤差を `eps·A` と見積もり、
+            // 絶対救済内か、`|J|` の 1e-3 未満でなければ拒否する（許容誤差は緩和しない）。
+            // `R[p] = sum_{j>=p} g_j·exp(2(out_p-out_j))` の再帰で O(n^2)・指数は常に 0 以下。
+            let mut r = vec![0f64; n];
+            let mut ra = vec![0f64; n];
+            let mut dd = vec![0f64; n];
+            let mut da = vec![0f64; n];
+            for p in (0..n).rev() {
+                let (cf, cf1) = if p + 1 < n {
+                    (
+                        (2.0 * (out64[p] - out64[p + 1])).exp(),
+                        (out64[p] - out64[p + 1]).exp(),
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
+                let gp = f64::from(gl[p]);
+                let (rn, ran, dn, dan) = if p + 1 < n {
+                    (r[p + 1], ra[p + 1], dd[p + 1], da[p + 1])
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                };
+                r[p] = gp + cf * rn;
+                ra[p] = gp.abs() + cf * ran;
+                // dd[p] = sum_{j>=p} g_j exp(out_p-out_j)（x_k 倍は後で掛ける）。
+                dd[p] = gp + cf1 * dn;
+                da[p] = gp.abs() + cf1 * dan;
+            }
+            for k in 0..n {
+                for m in 0..n {
+                    let p = k.max(m);
+                    let scale = (f64::from(xl[k]) + f64::from(xl[m]) - 2.0 * out64[p]).exp();
+                    let mut jv = -scale * r[p];
+                    let mut av = scale * ra[p];
+                    if k == m {
+                        let sk = (f64::from(xl[k]) - out64[k]).exp();
+                        jv += sk * dd[k];
+                        av += sk * da[k];
+                    }
+                    let err = eps * av;
+                    if err > ABSOLUTE_RESCUE_THRESHOLD && err > RELATIVE_TOLERANCE * jv.abs() {
+                        return Err(reject_coeff("Hessian 成分の項の相殺による桁落ち"));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -564,6 +613,8 @@ mod tests {
     fn logcumsumexp_check_rejects_second_order_cancellation() {
         // Codex P1: H[0,0] が f32 で 0、解析値 約 20.6。
         assert!(lse(&[0.0, -20.0], &[0.0, 1e10]).is_err());
+        // Codex P1（再指摘）: 各項は一致するが合算で相殺する（H[0,0] 解析値 0）。
+        assert!(lse(&[0.0; 3], &[1001.0, -8000.0, 9000.0]).is_err());
         // 大きさが小さければ誤差が絶対救済内に収まり受理される。
         assert!(lse(&[0.0, -20.0], &[0.0, 1.0]).is_ok());
     }
