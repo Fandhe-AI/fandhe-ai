@@ -4975,3 +4975,59 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: `MatrixNorm` の `Nuc`・`Spectral`（拒否のまま。再評価の起票は所有者が承認済みの「§44 点 11」だが未起票）、分解系（`Qr*`・`Svd*`・`Eigh*`。#3807・#3808）、`Cumprod`・`Logcumsumexp`（#3803）、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（§48）、facade の公開名の追加。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`eval/linalg.rs`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
 - 追跡表の項目 4 は「保留」のまま（`Qr*`・`Svd*`・`Eigh*` が残るため）。
+
+## 67. 実装記録（イシュー #3807・親 #3719 系。create_graph の B 区分・`QrQ`・`QrR`）
+
+### 67.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity だけが Phase 10 に残り、本記録の範囲では未実測）。設計は §44（#3735）で、本節はその実装記録。節番号は、main が §66 まで使うため §67 を取った（rebase 時に、兄弟の #3808 などと衝突していないか再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。書かれているのは次の 3 点で、これ以上の承認は主張しない。
+  - 「B 区分: §38〜§44 の推奨どおり実装する」
+  - 「QR は m≥n だけを実装する（§44.14）」
+  - 「§44 点 4: 相対判定の定数は新設しない」
+
+### 67.1 実装したもの
+
+| 対象 | cgrad | 方式 |
+|---|---|---|
+| `QrQ`（`dR = 0` の部分寄与） | `M = −gᵀQ`、`C = copyltu(M)`、`dA = (g + Q C) R⁻ᵀ` | V3 + f32 構造。値は 1 階と同じ `eval::linalg::qr_vjp` |
+| `QrR`（`dQ = 0` の部分寄与） | `M = R gᵀ`、`C = copyltu(M)`、`dA = (Q C) R⁻ᵀ` | 同上 |
+
+- 再生は公開メソッド `Var::qr` への自己再生。`replay_op` には親 `NodeId` が渡らないため、`build_mirror` 段 2 で `QrQ`／`QrR` だけを専用の `decomp::replay_qr` へ振り分ける（`lstm_cell` の前例と同形）。`qr()` は 1 回しか呼ばない。`QrQ` が先に再生されていれば `QrR` はその隣接ノード（`id + 1`）から導く。
+- 兄弟は push 順序契約で取る（`Var::qr` は `QrQ` → `QrR` を連続で積む）。`decomp::sibling_of` が子テープ上の隣接ノードの Op と `input` を検査して返す（#3808 の `Svd*`・`Eigh*` も再利用する想定）。payload（`QrQ.r`・`QrR.q`）は値（V3）にだけ使い、構造には使わない。
+- 部分寄与はノードごとに別々に計算し、`accumulate` が逆祖先順で合算する（まとめて 1 回で計算すると丸めが変わるため。§44.5）。
+- 構造の MatMul は `matmul_fp32_strict`（§14a）。`copyltu` は上三角の bool マスクを `where_cond` に渡して作る（0 定数との `Mul` は `inf·0 = NaN` になるため使わない）。`m×m` を作らない結合順で、`gᵀQ`・`R gᵀ` は `n×n`、`Q C` は `m×n`。
+- `supports_create_graph` は `QrQ`・`QrR` を同時に `true` 側へ移した（外側の網羅 match にワイルドカードは足していない）。実装は `crates/autodiff/src/create_graph/decomp.rs`。
+
+### 67.2 設計（§44）からの差・明確化
+
+- **入口検査 `check_qr_pair`**（`validate_ancestors`。子テープへ書く前）: push 順序契約（`QrQ@id` なら `id + 1` が `QrR` で同じ `input`）、因子の整合（`QrQ.r` が `QrR` の記録値と、`QrR.q` が `QrQ` の記録値と bit 一致）、横長（`m < n`）、空分解（`n == 0`）、rank 落ち（`R` の対角が 0、または f64 で特異）を拒否する。これで `qr_vjp` の `InvalidArgument` 経路は事前に閉じ、拒否は常に `Err(Backward)` になる（1 階の `backward` 単体では横長が `InvalidArgument` になるのと対照的）。
+- **総括判定 `guard_qr`**（§44.12）: f64 参照で `M`・`C`・`inner`・`R⁻¹`・`dA` を求め、`g` の非有限、`all_stage_ok` 外れ、`rounding_ok`（桁落ち）、`second_order_ok` 外れを拒否する。新しい定数は作らない。
+  - 二階の上界: 因子は `n·max|R⁻¹|`・`n·max|R|`・`m·max|Q|`、冪 4、`extra = max(max|g|, 1)`（`guard_cholesky` と同じ保守的な値）。
+  - 積和の段長 `terms`: `QrQ` は `m + 2n`（`gᵀQ` の縮約が長さ `m`）、`QrR` は `3n`。`QrR` に `m` を入れると `[100000,1]` が正当な入力でも拒否されるため分けた。
+- **差し替えた既存テスト**: `tests/create_graph_linalg_fft.rs` の fail-closed 固定を 9 件から 7 件へ（`qr.q`・`qr.r` を外した）。`tape.rs` の `linalg_fft_family_supports_create_graph` の unsupported 見本を `QrQ` から `SvdU` へ替えた（#3808 で対象化されたら再度差し替える。§44.14 点 12 の第一候補は `Op::Custom` だが、単体テストで組みにくいため、この時点で `false` の `SvdU` にした）。
+- **関数名の制約**: `api_surface.rs` の `LINALG_OPS_FN_NAMES` と完全一致する `fn` を宣言しない（`check_qr_pair`・`replay_qr`・`guard_qr`・`qr_cgrad` と命名）。
+
+### 67.3 テスト
+
+- `crates/autodiff/tests/create_graph_decomp.rs`（CI。#3808 が追記する置き場）
+  - Hessian と 5 点中央差分の突合（`qr_hessian_matches_finite_difference`。縦長 `[4,2]`・`[3,2]` と正方 `[3,3]`、損失は Q だけ・R だけ・両方）
+  - 1 階の bit 同一と `cg.grad`（`qr_cg_grad_bit_identical_for_linear_upstream`）、`jvp_create_graph`（`qr_jvp_create_graph_matches_central_difference`）、孫テープ（`check_all_h` 内）
+  - 拒否: rank 落ち・横長・空行列（`qr_degenerate_inputs_rejected_child_empty_and_retry`）、横長の 1 階と create_graph の対照（`qr_wide_first_order_errs_but_create_graph_is_backward_err`）、巨大な上流 `±3e38`・悪条件（`qr_unsafe_inputs_rejected_child_empty`）
+  - 受理域（`1e-3`〜`1e3`）で 3 段とも有限（`qr_moderate_scales_accepted_and_finite`）。必須ベクトル（§44.5）の実測は、スケール `1e20`・`1e-20` が全損失で拒否（二階の上界または段の overflow／ゼロ化域）、`g = ±3e38` も拒否。決定的に固定した（`qr_extreme_scales_mandatory_vectors`）。
+  - `[100000,1]`（`qr_cgrad_does_not_materialize_m_by_m`）、隣接 Op（`Op::Custom`・`svd`）の fail-closed（`qr_neighbouring_unsupported_op_stays_fail_closed`）
+- 単体: `decomp.rs` の push 順序契約違反 3 通り（隙間・別 input・孤立した `QrR`）の入口拒否と `child` が空のまま、`qr()` が 1 回だけであること、子テープに `m×m` のノードが無いこと。`tape.rs` の `qr_family_supports_create_graph`。
+- facade: `qr_create_graph_via_facade`・`qr_wide_is_rejected_via_facade`、`backward_create_graph` の rustdoc に 2×1 の閉形式（1 階 `(0.6, 0.8)`・2 階 `(0.032, −0.024)`）と横長の拒否を示す doctest、正ガード `backward_create_graph_linalg_qr_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `linalg_qr` の 2 ケース（`linalg_qr_tall`・`linalg_qr_square`。`Route::H`・`Judge::Strict`・MatMul の形状を列挙。Q5 は横長の拒否）、`create_graph_linalg_qr_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査 `linalg_qr_cases_pass_cpu_against_cpu`。
+
+### 67.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`first_order()` は素の `backward` と bit 一致し、値は V3 なので `cg.grad` も CPU で 1 階と bit 一致する。tolerance・baseline・ガードレール閾値・`STAGE_BOUND_GUARD`・FMA 契約は変えない。新しい baseline・定数は作らない。
+- 保証範囲は、総括判定を通った入力で、seed の各要素の絶対値が 1 以下の二階と孫テープまで（有限差分と REQ-2 判定で一致）。三階以上、横長、rank 落ち、真値が f32 を超える場合は保証外。判定は保守的で、拒否されても実際に破綻するとは限らない。
+
+### 67.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。QR のデバイスカーネルは opt-in ゲートの後ろで既定 OFF のため既定ではホストの `eval::linalg::qr` へフォールバックし、構造の `MatMul`／`Solve` だけがデバイスで走る（新しいカーネルは作らない）。§44.4 の「ゲート ON の決定性」の行（`linalg_gpu_optin_cuda_parity.rs` の `GateOn` を使う `#[ignore]` テスト）は本 PR では未追加で、Phase 10 へ申し送る。
+- スコープ外: `Svd*`・`Eigh*`（#3808）、横長 QR の二階（1 階も未対応）、GPU の opt-in ゲート ON の公開（#3405）、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（#3739）、`MatrixNorm` の `Nuc`・`Spectral` の再評価の起票、facade の公開名の追加。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`eval/linalg.rs`・`Var::qr`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
+- 追跡表の項目 4 は「保留」のまま（`Svd*`・`Eigh*`・`Nuc`／`Spectral` が残るため）。

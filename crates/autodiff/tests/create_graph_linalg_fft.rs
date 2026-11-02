@@ -10,8 +10,8 @@
 //! - 閉包性: 子テープ上の勾配を孫テープへ再生（`child.backward_create_graph`）しても二階の値が一致する。
 //! - 総括的な適用判定（決定記録 §30）: 拒否域の入力は `Err(Backward)` かつ `child.is_empty()`、
 //!   拒否のあと同じ `child` で再試行できる。ほどほどの大きさの入力は受理され全段が有限で一致する。
-//! - fail-closed に固定した 9 件（`MatrixNorm` の `Nuc`・`Spectral`・
-//!   `QrQ`／`QrR`・`SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors`）が
+//! - fail-closed に固定した 7 件（`MatrixNorm` の `Nuc`・`Spectral`・
+//!   `SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors`。`QrQ`／`QrR` は #3807 で対象化）が
 //!   型付きエラーで拒否されること。`requires_grad == false` の部分木にある場合は拒否されない。
 
 #![allow(clippy::needless_range_loop)]
@@ -624,7 +624,7 @@ fn moderate_scale_inputs_are_accepted_and_finite() {
     }
 }
 
-// --- 4. fail-closed に固定した 9 件 --------------------------------------------------------
+// --- 4. fail-closed に固定した 7 件 --------------------------------------------------------
 
 type Case = (
     &'static str,
@@ -654,14 +654,6 @@ fn fail_closed_cases() -> Vec<(Case, Vec<f32>)> {
                 Box::new(|_t, x| x.matrix_norm(MatrixNormOrd::Spectral)),
             ),
             sym3.clone(),
-        ),
-        (
-            ("qr.q", vec![3, 2], Box::new(|_t, x| x.qr()?.q.sum(None))),
-            x_data(&[3, 2]),
-        ),
-        (
-            ("qr.r", vec![3, 2], Box::new(|_t, x| x.qr()?.r.sum(None))),
-            x_data(&[3, 2]),
         ),
         (
             ("svd.u", vec![3, 2], Box::new(|_t, x| x.svd()?.u.sum(None))),
@@ -703,8 +695,8 @@ fn fail_closed_ops_are_rejected_with_typed_error_and_leave_child_empty() {
     let cases = fail_closed_cases();
     assert_eq!(
         cases.len(),
-        9,
-        "fail-closed 固定は 9 件（Stft／Istft は #3804、Cholesky／Pinv／Lstsq は #3805、MatrixNorm〈Fro・One・Inf〉／SlogdetSign／MatrixRank は #3806 で対象化）"
+        7,
+        "fail-closed 固定は 7 件（Stft／Istft は #3804、Cholesky／Pinv／Lstsq は #3805、MatrixNorm〈Fro・One・Inf〉／SlogdetSign／MatrixRank は #3806、QrQ／QrR は #3807 で対象化）"
     );
     for ((name, shape, build), x0) in cases {
         let tape = Tape::new_with_ops(common::naive_ops());
@@ -755,7 +747,7 @@ fn fail_closed_op_in_untracked_subtree_is_treated_as_constant() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     // 恒久的に fail-closed な `Op::Custom`（Cholesky・Pinv・Lstsq は #3805 で対象化済み。
-    // `Qr*`・`Svd*` は #3807・#3808 の対象のため見本にしない）。
+    // `Svd*` は #3808 の対象のため見本にしない）。
     let l = tape
         .custom(
             std::sync::Arc::new(IdentityCustomFn),
