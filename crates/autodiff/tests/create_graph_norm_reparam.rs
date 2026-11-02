@@ -748,3 +748,21 @@ fn spectral_norm_div_partial_overflow_is_rejected() {
         .expect("loss");
     expect_rejected(&tape, &loss, &child, "spectral/div-overflow");
 }
+
+/// PR #3950 codex 指摘 P1: 上流 up が全ゼロでも、v̂² が 1 に丸まり up への二階係数
+/// （混合項 g·v₁²/‖v‖³ ≈ 100）が消える WeightNorm は拒否する（up の値に依存しない相殺検査）。
+#[test]
+fn weight_norm_zero_upstream_with_cancelling_vhat_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let v = tape.var(&t(vec![1.0, 1e-4], &[2]));
+    let g = tape.var(&t(vec![1e10], &[]));
+    let a = tape.var(&t(vec![0.0], &[1]));
+    let w = v.weight_norm(&g, None).expect("forward");
+    let loss = w
+        .narrow(0, 0, 1)
+        .and_then(|r| r.mul(&a))
+        .and_then(|r| r.sum(None))
+        .expect("loss");
+    expect_rejected(&tape, &loss, &child, "weight_norm/zero-up-cancel");
+}

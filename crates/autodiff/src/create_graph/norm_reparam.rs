@@ -735,6 +735,35 @@ pub(super) fn weight_norm_cgrads<'c>(
     for k in 0..groups {
         let lo = k * rest;
         let vs: Vec<f32> = v_gm[lo..lo + rest].iter().map(|&x| x / scales[k]).collect();
+        // 上流 up に依存しない相殺検査（PR #3950 codex 指摘 P1）。up への二階係数は
+        // coef·(I − v̂v̂ᵀ) で、構造は対角 1 − v̂_j² を f32 の v̂_j·v̂_j から作るため、v̂_j² が 1 に
+        // 丸まる入力（他成分が極小）では up = 0 でも二階の混合項（g·v_k²/‖v‖³ 型）が 0 へ消える。
+        // 厳密値 (Σ_{k≠j} v_k²)/‖v‖² に対し丸め誤差 coeff·v̂_j² が REQ-2 の相対許容を超えるなら拒否する。
+        if !vs.iter().any(|x| x.is_nan()) && rest > 1 {
+            let ss0: f64 = vs.iter().map(|&x| f64::from(x).powi(2)).sum();
+            let coeff0 = rounding_coeff(rest + 4);
+            for (j, &x) in vs.iter().enumerate() {
+                let xj2 = f64::from(x).powi(2);
+                let mut others = ss0 - xj2;
+                if others < 1e-9 * ss0 {
+                    others = vs
+                        .iter()
+                        .enumerate()
+                        .filter(|&(i, _)| i != j)
+                        .map(|(_, &y)| f64::from(y).powi(2))
+                        .sum();
+                }
+                if others <= 0.0 {
+                    continue;
+                }
+                let exact = others / ss0;
+                if coeff0 * (xj2 / ss0) > (RELATIVE_TOLERANCE / 2.0) * exact {
+                    return Err(invalid(
+                        "WeightNorm の 1 − v̂²: f32 構造の相殺で up への二階係数が消えうるため拒否",
+                    ));
+                }
+            }
+        }
         if vs.iter().any(|x| x.is_nan()) || up_gm[lo..lo + rest].iter().any(|x| x.is_nan()) {
             continue;
         }
