@@ -45640,8 +45640,12 @@ fn create_graph_supported_op_set_detects_each_category() {
 }
 
 /// `#[test]`（`#[ignore]` なし）として `src` に存在するか。属性・doc コメントの連続を遡って判定する。
+///
+/// コメント・文字列リテラル内の偽の `#[test] fn` を有効と誤認しないよう、
+/// `strip_comments_and_literals` で空白化したソースに対して判定する（doc コメントも空白行になるため空行は読み飛ばす）。
 fn cg_has_active_test_fn(src: &str, name: &str) -> bool {
-    let lines: Vec<&str> = src.lines().collect();
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let lines: Vec<&str> = cleaned.lines().collect();
     let head = format!("fn {name}(");
     let Some(idx) = lines.iter().position(|l| l.trim_start().starts_with(&head)) else {
         return false;
@@ -45653,7 +45657,7 @@ fn cg_has_active_test_fn(src: &str, name: &str) -> bool {
         if tl.starts_with("#[") {
             has_test |= tl == "#[test]";
             ignored |= tl.starts_with("#[ignore");
-        } else if !tl.starts_with("///") {
+        } else if !tl.is_empty() {
             break;
         }
     }
@@ -45754,4 +45758,14 @@ fn create_graph_facade_coverage_map_detects_each_category() {
     assert!(check_cg_coverage_map(&[("X", "a"), ("Y", "zzz")], &exp, src).is_err());
     assert!(check_cg_coverage_map(&[("X", "a"), ("Y", "c")], &exp, src).is_err());
     assert!(check_cg_coverage_map(&[("X", "a"), ("Y", "d")], &exp, src).is_err());
+    // ブロックコメント・行コメント・文字列リテラル内の偽テストは有効と認めない。
+    let fake = "/*\n#[test]\nfn e() {}\n*/\n// #[test]\n// fn f() {}\nconst S: &str = \"#[test]\\nfn g() {}\";\n#[test]\nfn real() {}\n";
+    assert!(cg_has_active_test_fn(fake, "real"));
+    for n in ["e", "f", "g"] {
+        assert!(
+            !cg_has_active_test_fn(fake, n),
+            "偽テスト `{n}` を有効と誤認"
+        );
+    }
+    assert!(check_cg_coverage_map(&[("X", "real"), ("Y", "e")], &exp, fake).is_err());
 }
