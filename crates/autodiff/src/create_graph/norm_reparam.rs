@@ -709,7 +709,13 @@ pub(super) fn weight_norm_cgrads<'c>(
         let ss: f64 = vs.iter().map(|&x| f64::from(x).powi(2)).sum();
         let n_s = ss.sqrt();
         let s = f64::from(scales[k]);
-        let gk = f64::from(g_data[k]).abs();
+        // g が NaN のグループは dv が NaN になる（1 階と同じ伝播）。g 依存の段だけを 0 として
+        // 評価し、g に依存しない dg の段検査と m は通常どおり行う（NaN の g で段を拒否しない）。
+        let gk = if g_data[k].is_nan() {
+            0.0
+        } else {
+            f64::from(g_data[k]).abs()
+        };
         let upk = &up_gm[lo..lo + rest];
         let u_max = upk.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
         let vhat: Vec<f64> = vs.iter().map(|&x| f64::from(x) / n_s).collect();
@@ -843,6 +849,21 @@ pub(super) fn spectral_norm_cgrad<'c>(
             return Err(invalid("SpectralNorm のスケール後 σ_s が 0 または非有限"));
         }
         let sa = sigma_s.abs();
+        // up への微分係数（W 側・up 側の両方）の独立検査。dW は up に線形で、係数行列は
+        // σ_s = Σ W_s·P の相殺で決まる。up の値（全ゼロでも）に依らず、σ_s の丸め誤差
+        // coeff·Σ|W_s·P| の相対値が dW の係数（1/σ_s と sp/σ_s の 2 重の 1/σ_s で最大 3 倍）を
+        // 通して REQ-2 の許容の半分に収まらない入力は拒否する（tolerance 定数は不変）。
+        let m_sigma: f64 = ws
+            .iter()
+            .zip(&p)
+            .map(|(&a, &b)| (f64::from(a) * f64::from(b)).abs())
+            .sum();
+        let rel_sigma = rounding_coeff(w_data.len() + 4) * m_sigma / sa;
+        if !rel_sigma.is_finite() || 3.0 * rel_sigma > RELATIVE_TOLERANCE / 2.0 {
+            return Err(invalid(
+                "SpectralNorm の σ_s の相殺で up への微分係数が REQ-2 の判定を外れうるため拒否",
+            ));
+        }
         let sf = f64::from(s);
         let u_max = up_data
             .iter()

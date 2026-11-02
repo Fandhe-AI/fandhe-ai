@@ -668,3 +668,40 @@ fn lrn_pow_scalar_coefficient_f32_overflow_is_rejected_child_empty() {
     let loss = y.sum(None).expect("loss");
     expect_rejected(&tape, &loss, &child, "lrn/pow-coefficient-overflow");
 }
+
+// --- 5. レビュー指摘の回帰（#3950） ----------------------------------------------------------
+
+/// g が NaN でも入口・段検査は拒否せず、1 階と同じく NaN を伝播させて受理する。
+#[test]
+fn weight_norm_nan_g_propagates_instead_of_rejecting() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let v = tape.var(&t(vec![3.0, 4.0], &[2]));
+    let g = tape.var(&t(vec![f32::NAN], &[]));
+    let w = v.weight_norm(&g, None).expect("forward");
+    let loss = w.sum(None).expect("loss");
+    tape.backward_create_graph(&loss, &child)
+        .expect("NaN の g は拒否せず伝播させる");
+}
+
+/// 上流勾配 up が全ゼロでも、σ の相殺で up への微分係数が REQ-2 を外れる SpectralNorm は拒否する。
+#[test]
+fn spectral_norm_zero_upstream_with_cancelling_sigma_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let mut st = SpectralNormState::from_vectors(&[2, 2], 0, &[0.6, 0.8], &[0.6, 0.8], 1, 1e-12)
+        .expect("state");
+    let w = tape.var(&t(vec![1.0, 1.0, 1.0, -2.06249], &[2, 2]));
+    let a = tape.var(&t(vec![0.0], &[1]));
+    let y = w.spectral_norm(&mut st, false).expect("forward");
+    let y00 = y
+        .narrow(0, 0, 1)
+        .and_then(|r| r.narrow(1, 0, 1))
+        .expect("narrow");
+    let loss = y00
+        .reshape(&[1])
+        .and_then(|r| r.mul(&a))
+        .and_then(|r| r.sum(None))
+        .expect("loss");
+    expect_rejected(&tape, &loss, &child, "spectral/zero-up-cancel");
+}
