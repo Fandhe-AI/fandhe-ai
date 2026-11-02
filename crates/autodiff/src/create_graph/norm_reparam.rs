@@ -156,6 +156,38 @@ fn shadow_check(
     Ok(())
 }
 
+/// 子テープ上の `Div(a, b)` の逆伝播が実際に使う偏微分係数（`eval/scalar.rs::binary_partials` の
+/// `da = 1/b`・`db = -(a/b)/b` を **f32 の評価順のまま**）を、f64 の厳密値と突き合わせる検査。
+/// `track_a`／`track_b` は当該オペランドが勾配追跡対象か（非追跡側の係数は使われないので検査しない）。
+/// 係数単体の overflow（cotangent が 0 でも `0·inf = NaN`）と、中間商 `a/b` の underflow による
+/// 係数の消失・精度劣化（二階項へ増幅される。PR #3950 codex 指摘 P1）を型付きエラーで拒否する。
+/// 判定は相対のみ（絶対救済は使わない: 係数が小さくても後段で桁違いに増幅されうるため）。
+fn div_partials_check(
+    a: f64,
+    b: f64,
+    track_a: bool,
+    track_b: bool,
+    what: &str,
+) -> Result<(), AutodiffError> {
+    let (a32, b32) = (a as f32, b as f32);
+    let da32 = 1.0f32 / b32;
+    let db32 = -(a32 / b32) / b32;
+    let da = 1.0 / b;
+    let db = -(a / b) / b;
+    let bad = |got: f32, exact: f64| -> bool {
+        if !got.is_finite() || !exact.is_finite() {
+            return true;
+        }
+        exact != 0.0 && (f64::from(got) - exact).abs() > (RELATIVE_TOLERANCE / 8.0) * exact.abs()
+    };
+    if (track_a && bad(da32, da)) || (track_b && bad(db32, db)) {
+        return Err(invalid(&format!(
+            "{what}: Div の偏微分係数が f32 で overflow／underflow し二階が REQ-2 の判定を外れうるため拒否"
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------
 // 入口検査（validate_ancestors から呼ぶ。子テープへ書く前に拒否する）
 // ---------------------------------------------------------------------
@@ -726,6 +758,21 @@ pub(super) fn weight_norm_cgrads<'c>(
             .sum();
         let t_max = u_max + dgb;
         let coef = gk / n_s / s;
+        // 構造中の Div（v_s/n_s・g/n_s・(·)/s）の偏微分係数を f32 評価順で検査する。
+        for &x in &vs {
+            div_partials_check(f64::from(x), n_s, true, true, "WeightNorm の v_s/n_s")?;
+        }
+        if !g_data[k].is_nan() {
+            div_partials_check(f64::from(g_data[k]), n_s, true, true, "WeightNorm の g/n_s")?;
+            div_partials_check(
+                f64::from(g_data[k]) / n_s,
+                s,
+                true,
+                false,
+                "WeightNorm の (g/n_s)/s",
+            )?;
+        }
+        div_partials_check(f64::from(vs[0]) * s, s, true, false, "WeightNorm の v/s")?;
         stage(dgb, "WeightNorm の dg")?;
         stage(t_max, "WeightNorm の up − dg·v̂")?;
         stage(coef, "WeightNorm の g/(n_s·s)")?;
@@ -896,6 +943,19 @@ pub(super) fn spectral_norm_cgrad<'c>(
         let cot_ws = cot_what / sa + cot_sigma * p_max;
         stage(cot_ws, "SpectralNorm の W_s への cotangent")?;
         stage(cot_ws / sf, "SpectralNorm の W への cotangent")?;
+        // 構造中の Div（W/s・W_s/σ_s・t/σ_s・(·)/s）の偏微分係数を f32 評価順で検査する。
+        let sp_chk: f64 = up_data
+            .iter()
+            .zip(&ws)
+            .map(|(&x, &w)| f64::from(x) * f64::from(w) / sigma_s)
+            .sum();
+        div_partials_check(1.0, sf, true, false, "SpectralNorm の W/s")?;
+        for (i, &w) in ws.iter().enumerate() {
+            div_partials_check(f64::from(w), sigma_s, true, true, "SpectralNorm の W_s/σ_s")?;
+            let t_i = f64::from(up_data[i]) - sp_chk * f64::from(p[i]);
+            div_partials_check(t_i, sigma_s, true, true, "SpectralNorm の t/σ_s")?;
+            div_partials_check(t_i / sigma_s, sf, true, false, "SpectralNorm の (t/σ_s)/s")?;
+        }
         let sp_val: f64 = up_data
             .iter()
             .zip(&ws)

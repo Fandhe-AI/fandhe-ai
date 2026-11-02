@@ -705,3 +705,46 @@ fn spectral_norm_zero_upstream_with_cancelling_sigma_is_rejected() {
         .expect("loss");
     expect_rejected(&tape, &loss, &child, "spectral/zero-up-cancel");
 }
+/// PR #3950 codex 指摘 P1: WeightNorm の中間商 g/n_s の underflow（二階が 0 になる）を拒否する。
+#[test]
+fn weight_norm_div_partial_underflow_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let v = tape.var(&t(vec![1e-30; 16], &[16]));
+    let g = tape.var(&t(vec![f32::from_bits(1)], &[]));
+    let w = v.weight_norm(&g, None).expect("forward");
+    let loss = w.narrow(0, 0, 1).and_then(|r| r.sum(None)).expect("loss");
+    expect_rejected(&tape, &loss, &child, "weight_norm/div-underflow");
+}
+
+/// PR #3950 codex 指摘 P1: Div の微分係数単体の overflow（cotangent が 0 でも 0·inf=NaN）を拒否する。
+#[test]
+fn weight_norm_div_partial_overflow_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let v = tape.var(&t(vec![3.0 * 2f32.powi(65)], &[1]));
+    let g = tape.var(&t(vec![2e38], &[]));
+    let a = tape.var(&t(vec![0.0], &[1]));
+    let w = v.weight_norm(&g, None).expect("forward");
+    let loss = w.mul(&a).and_then(|r| r.sum(None)).expect("loss");
+    expect_rejected(&tape, &loss, &child, "weight_norm/div-overflow");
+}
+
+/// PR #3950 codex 指摘 P1: SpectralNorm の σ_s 側 Div 係数の overflow を拒否する。
+#[test]
+fn spectral_norm_div_partial_overflow_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let mut st = SpectralNormState::from_vectors(&[1, 2], 0, &[1.0], &[4e-38, 1.0], 1, 1e-12)
+        .expect("state");
+    let w = tape.var(&t(vec![0.75 * 2f32.powi(127), 0.0], &[1, 2]));
+    let a = tape.var(&t(vec![0.0], &[1]));
+    let y = w.spectral_norm(&mut st, false).expect("forward");
+    let loss = y
+        .narrow(1, 0, 1)
+        .and_then(|r| r.reshape(&[1]))
+        .and_then(|r| r.mul(&a))
+        .and_then(|r| r.sum(None))
+        .expect("loss");
+    expect_rejected(&tape, &loss, &child, "spectral/div-overflow");
+}
