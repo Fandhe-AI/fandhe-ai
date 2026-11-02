@@ -10,8 +10,8 @@
 //! - 閉包性: 子テープ上の勾配を孫テープへ再生（`child.backward_create_graph`）しても二階の値が一致する。
 //! - 総括的な適用判定（決定記録 §30）: 拒否域の入力は `Err(Backward)` かつ `child.is_empty()`、
 //!   拒否のあと同じ `child` で再試行できる。ほどほどの大きさの入力は受理され全段が有限で一致する。
-//! - fail-closed に固定した 10 件（`MatrixNorm`・
-//!   `QrQ`／`QrR`・`SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors`・`SlogdetSign`・`MatrixRank`）が
+//! - fail-closed に固定した 9 件（`MatrixNorm` の `Nuc`・`Spectral`・
+//!   `QrQ`／`QrR`・`SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors`）が
 //!   型付きエラーで拒否されること。`requires_grad == false` の部分木にある場合は拒否されない。
 
 #![allow(clippy::needless_range_loop)]
@@ -624,7 +624,7 @@ fn moderate_scale_inputs_are_accepted_and_finite() {
     }
 }
 
-// --- 4. fail-closed に固定した 10 件 --------------------------------------------------------
+// --- 4. fail-closed に固定した 9 件 --------------------------------------------------------
 
 type Case = (
     &'static str,
@@ -641,9 +641,17 @@ fn fail_closed_cases() -> Vec<(Case, Vec<f32>)> {
     vec![
         (
             (
-                "matrix_norm",
+                "matrix_norm.nuc",
                 vec![3, 3],
-                Box::new(|_t, x| x.matrix_norm(MatrixNormOrd::Fro)),
+                Box::new(|_t, x| x.matrix_norm(MatrixNormOrd::Nuc)),
+            ),
+            sym3.clone(),
+        ),
+        (
+            (
+                "matrix_norm.spectral",
+                vec![3, 3],
+                Box::new(|_t, x| x.matrix_norm(MatrixNormOrd::Spectral)),
             ),
             sym3.clone(),
         ),
@@ -685,22 +693,6 @@ fn fail_closed_cases() -> Vec<(Case, Vec<f32>)> {
                 vec![3, 3],
                 Box::new(|_t, x| x.eigh()?.eigenvectors.sum(None)),
             ),
-            sym3.clone(),
-        ),
-        (
-            (
-                "slogdet.sign",
-                vec![3, 3],
-                Box::new(|_t, x| Ok(x.slogdet()?.sign)),
-            ),
-            sym3.clone(),
-        ),
-        (
-            (
-                "matrix_rank",
-                vec![3, 3],
-                Box::new(|_t, x| x.matrix_rank(None)),
-            ),
             sym3,
         ),
     ]
@@ -711,8 +703,8 @@ fn fail_closed_ops_are_rejected_with_typed_error_and_leave_child_empty() {
     let cases = fail_closed_cases();
     assert_eq!(
         cases.len(),
-        10,
-        "fail-closed 固定は 10 件（Stft／Istft は #3804、Cholesky／Pinv／Lstsq は #3805 で対象化）"
+        9,
+        "fail-closed 固定は 9 件（Stft／Istft は #3804、Cholesky／Pinv／Lstsq は #3805、MatrixNorm〈Fro・One・Inf〉／SlogdetSign／MatrixRank は #3806 で対象化）"
     );
     for ((name, shape, build), x0) in cases {
         let tape = Tape::new_with_ops(common::naive_ops());

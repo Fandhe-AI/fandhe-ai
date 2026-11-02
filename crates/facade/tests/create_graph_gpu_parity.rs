@@ -755,6 +755,54 @@ const CASES: &[Case] = &[
         run: run_linalg_cpl_lstsq,
         reject: None,
     },
+    // 行列ノルム・slogdet.sign・matrix_rank 族（イシュー #3806・決定記録 §43/§66）。`linalg_*` は CUDA・Metal・
+    // ROCm のうち override されない経路でホストの `eval::linalg` へフォールバックし（値は 1 階と同じホスト関数の V3／
+    // ゼロ定数）、構造は `Mul`／`Sum` 等の elementwise のみで MatMul を含まない。実機は未実測（#3857・#3859）。
+    Case {
+        name: "linalg_matrix_norm_fro",
+        family: "linalg_norm_rank",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_linalg_nr_fro,
+        reject: Some(reject_matrix_norm_nuc),
+    },
+    Case {
+        name: "linalg_matrix_norm_one",
+        family: "linalg_norm_rank",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_linalg_nr_one,
+        reject: None,
+    },
+    Case {
+        name: "linalg_matrix_norm_inf",
+        family: "linalg_norm_rank",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_linalg_nr_inf,
+        reject: None,
+    },
+    Case {
+        name: "linalg_slogdet_sign",
+        family: "linalg_norm_rank",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_linalg_nr_sign,
+        reject: None,
+    },
+    Case {
+        name: "linalg_matrix_rank",
+        family: "linalg_norm_rank",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_linalg_nr_rank,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -1975,6 +2023,109 @@ fn run_linalg_cpl_lstsq(tp: &Tapes) -> Outputs {
     run_linalg_cpl_body(tp, 3)
 }
 
+/// 行列ノルム族（#3806）の損失。`kind` は 0 = Fro・1 = One・2 = Inf（いずれも `[3,2]`。One／Inf はタイから離れた入力）、
+/// 3 = `sign · exp(logabsdet)` の二乗（`[3,3]`）、4 = `rank · Σx²`（`[3,3]`）。
+fn linalg_nr_loss<'a>(p: &Var<'a>, kind: usize) -> Result<Var<'a>, AutodiffError> {
+    let y = match kind {
+        0 => p.matrix_norm(fandhe_ai::MatrixNormOrd::Fro)?,
+        1 => p.matrix_norm(fandhe_ai::MatrixNormOrd::One)?,
+        2 => p.matrix_norm(fandhe_ai::MatrixNormOrd::Inf)?,
+        3 => {
+            let s = p.slogdet()?;
+            s.sign.mul(&s.logabsdet.exp())?
+        }
+        _ => {
+            let r = p.matrix_rank(None)?;
+            return r.mul(&p.mul(p)?.sum(None)?)?.sum(None);
+        }
+    };
+    y.mul(&y)?.sum(None)
+}
+
+/// 行列ノルム族（#3806）の共通本体。Q4 は同じ損失の `jvp_create_graph` の出力を孫テープで逆伝播する。
+fn run_linalg_nr_body(tp: &Tapes, kind: usize) -> Outputs {
+    let (shape, p0): (Vec<usize>, Vec<f32>) = match kind {
+        0 => (vec![3, 2], vec![2.0, 0.3, -0.4, 1.5, 0.2, -0.6]),
+        1 | 2 => (vec![3, 2], vec![1.0, -2.0, 3.0, 0.5, -0.7, 1.1]),
+        _ => (
+            vec![3, 3],
+            vec![2.0, 0.3, -0.4, 0.1, 1.5, 0.2, -0.6, 0.5, 1.8],
+        ),
+    };
+    let n: usize = shape.iter().product();
+    let dir: Vec<f32> = (0..n)
+        .map(|i| 0.6 - 0.23 * (i % 13) as f32 + 0.04 * (i % 5) as f32)
+        .collect();
+
+    let p = tp.parent.var(&t(p0, &shape));
+    let loss = linalg_nr_loss(&p, kind).expect("forward");
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
+    let g = cg.grad(&p).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), &shape));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let pc = cg.child_var(&p).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, &shape), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+fn run_linalg_nr_fro(tp: &Tapes) -> Outputs {
+    run_linalg_nr_body(tp, 0)
+}
+
+fn run_linalg_nr_one(tp: &Tapes) -> Outputs {
+    run_linalg_nr_body(tp, 1)
+}
+
+fn run_linalg_nr_inf(tp: &Tapes) -> Outputs {
+    run_linalg_nr_body(tp, 2)
+}
+
+fn run_linalg_nr_sign(tp: &Tapes) -> Outputs {
+    run_linalg_nr_body(tp, 3)
+}
+
+fn run_linalg_nr_rank(tp: &Tapes) -> Outputs {
+    run_linalg_nr_body(tp, 4)
+}
+
+/// Q5: `matrix_norm` の `Nuc`（SVD の多出力に依存するため拒否のまま）は GPU でも `Err(Backward)` で拒否され、
+/// 子テープは空のまま。
+fn reject_matrix_norm_nuc(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let loss = x
+        .matrix_norm(fandhe_ai::MatrixNormOrd::Nuc)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
 /// Q5: 打ち切りあり（`A = diag(2, 1)`・`rcond = 0.75`）の `pinv` は GPU でも `Err(Backward)` で拒否され、
 /// 子テープは空のまま。
 fn reject_pinv_truncated(tp: &Tapes) -> bool {
@@ -2212,6 +2363,10 @@ cuda_family_test!(
     create_graph_linalg_cholesky_pinv_lstsq_cuda_matches_cpu,
     "linalg_cholesky_pinv_lstsq"
 );
+cuda_family_test!(
+    create_graph_linalg_norm_rank_cuda_matches_cpu,
+    "linalg_norm_rank"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -2265,6 +2420,10 @@ metal_family_test!(create_graph_stft_family_metal_matches_cpu, "stft_family");
 metal_family_test!(
     create_graph_linalg_cholesky_pinv_lstsq_metal_matches_cpu,
     "linalg_cholesky_pinv_lstsq"
+);
+metal_family_test!(
+    create_graph_linalg_norm_rank_metal_matches_cpu,
+    "linalg_norm_rank"
 );
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
@@ -2360,6 +2519,11 @@ fn stft_family_cases_pass_cpu_against_cpu() {
 #[test]
 fn linalg_cholesky_pinv_lstsq_cases_pass_cpu_against_cpu() {
     run_family("linalg_cholesky_pinv_lstsq", None);
+}
+
+#[test]
+fn linalg_norm_rank_cases_pass_cpu_against_cpu() {
+    run_family("linalg_norm_rank", None);
 }
 
 #[test]

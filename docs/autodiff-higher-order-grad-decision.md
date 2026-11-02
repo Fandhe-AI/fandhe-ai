@@ -4927,3 +4927,51 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: `SlogdetSign`・`MatrixRank`・`MatrixNorm`（#3806）、分解系（`Qr*`・`Svd*`・`Eigh*`。#3807・#3808）、打ち切りありの `Pinv`・`Lstsq` の二階、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（§48）、facade の公開名の追加。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
 - 追跡表の項目 4 は「保留」のまま（`MatrixNorm` 等の他 Op が残るため）。
+
+## 66. 実装記録（イシュー #3806・親 #3719 系。create_graph の B 区分・`MatrixNorm`・`SlogdetSign`・`MatrixRank`）
+
+### 66.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity だけが Phase 10 に残り、本記録の範囲では未実測）。設計は §43（#3734）で、本節はその実装記録。節番号は、main が §65 まで使うため §66 を取った（rebase 時に、兄弟の #3807・#3808 などと衝突していないか再確認する）。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。「B 区分: Op ごとの範囲の絞り込みを含め、§38〜§44 の推奨どおり実装する」とあり、`MatrixNorm` を `Fro`・`One`・`Inf` に絞る推奨（§43.0）に当たる。`SlogdetSign`・`MatrixRank` を対象外にする回答は無い。これ以上の承認は主張しない。
+
+### 66.1 実装したもの
+
+| 対象 | cgrad | 方式 |
+|---|---|---|
+| `SlogdetSign` | 入力 shape のゼロ定数 | 1 階 VJP が恒等ゼロ。`accumulate` は省かない（1 階の `Some(zeros)` と揃える）。非有限の上流 `g` も受理（`g·0` を作らない） |
+| `MatrixRank` | 同上 | 同上。入口検査で rank 一定性を確かめる（66.2） |
+| `MatrixNorm(Fro)` | `g · A / ‖A‖_F` | V3 + S1。全要素を 1 レーンとする L2 の構造を `stat_varnorm` から再利用する（`StatKind::MatrixFro`）。値は `matrix_norm_vjp(Fro)` |
+| `MatrixNorm(One)`・`MatrixNorm(Inf)` | `g · S` | V3。値は `matrix_norm_vjp`。構造は `g_b ⊙ S`（`S = matrix_norm_vjp(A, ord, 1)` の符号定数）。A に関する二階は 0 で、`g` を経由する分だけが残る |
+| `MatrixNorm(Nuc)`・`MatrixNorm(Spectral)` | — | 拒否のまま（SVD の多出力に依存） |
+
+- 再生は公開メソッドへの自己再生（`matrix_norm(ord)`・`slogdet()?.sign`・`matrix_rank(Some(rcond))`）。`SlogdetSign` は `slogdet` を重複して再生する（値は決定的で一致し、未使用ノードはどの根からも到達しない。§43 論点 8）。`supports_create_graph` は `SlogdetSign`・`MatrixRank` を `true` 側へ移し、`MatrixNorm` は `ord` による payload 判定（`Fro`・`One`・`Inf` だけ `true`、`#[non_exhaustive]` の未知 `ord` は `false`）にした。外側の網羅 match にワイルドカードは足していない。
+- 実装は `crates/autodiff/src/create_graph/linalg_norm_rank.rs` と `stat_varnorm.rs`（`MatrixFro` と入口検査の `MatrixNorm` 腕）。`linalg_cholesky_pinv.rs` の `prev_f32`・`next_f32` を `pub(super)` にした（挙動は不変）。`eval/linalg.rs` は変更していない。
+
+### 66.2 設計（§43）からの差・明確化
+
+- **`One`・`Inf` は V3 に決めた**（§43.10 の併記案のうちホスト VJP を V3 で結合する案）。先勝ちのタイ・`sign(0) = 0`・`g < 0` での `-0` まで構造上 1 階と bit 一致するため。構造の符号定数 `S` は、同じ `matrix_norm_vjp` を `g = 1` で呼んで得る（選択ロジックを複製しない）。上流 `g` に非有限要素があれば拒否する。
+- **`MatrixRank` の rcond の閾値付近の判定は「rank 一定性」にした**。`prev_f32(rcond)`・`rcond`・`next_f32(rcond)` で数え直した rank と、親の記録値がすべて一致することを要求する（`validate_ancestors` の入口で、子テープへ書く前）。`Pinv` の「特異値が `[σmax·prev, σmax·next]` に入るか」の包含判定をそのまま当てると、零行列（`σmax = 0`）や `rcond = 0` で `σ = 0` を持つ入力まで拒否してしまうため。新しい tolerance・閾値定数は作らない。
+- **`Fro` の `1e-38` と巨大な上流**: 二階の上界（約 `1/‖A‖`）が `STAGE_BOUND_GUARD`（2^125）を超えるため `Err(Backward)` で拒否される（`child` は空）。`|g| = 3e38` も `q·g` などの段が 2^125 以上になり拒否される。受理されるのは `1e30`・良条件の入力（`g = 1`）、零行列、NaN（上流の大きさによらない）。§43.4 の「有限」という推測は実測で置き換え、実測結果を `matrix_norm_fro_mandatory_vectors_three_stages` が固定する。`STAGE_BOUND_GUARD` は変えない。
+- **ord と ±inf の入口検査**は `validate_stat_varnorm` の腕に足した（`Fro`・`One`・`Inf` は L2 と同じ ±inf 拒否、それ以外の `ord` は拒否。`supports_create_graph` の false との二重防御）。
+- **差し替えた既存テスト**（§43.4）: `tests/create_graph_linalg_fft.rs` の fail-closed の固定を 10 件から 9 件へ（`matrix_norm`〈Fro〉・`slogdet.sign`・`matrix_rank` を外し、`matrix_norm` の `Nuc`・`Spectral` を足した）、`tape.rs` の `linalg_fft_family_supports_create_graph` の unsupported 配列、統計縮約・選択縮約の単体テストの隣接見本（`MatrixNorm(Fro)`）を非微分の `Op::OneHot`／`Op::Custom` へ替えた。
+- **関数名の制約**: `api_surface.rs` の `LINALG_OPS_FN_NAMES` と完全一致する `fn` を宣言しない（`zero_cgrad`・`one_inf_cgrad`・`validate_matrix_rank` と命名）。
+
+### 66.3 テスト
+
+- `crates/autodiff/tests/create_graph_linalg_norm_rank.rs`（CI）: 1 階の bit 同一と `cg.grad`（`linalg_nr_first_order_bit_identical_and_cgrad`）、Hessian と 5 点中央差分の突合（`matrix_norm_slogdet_rank_hessian_matches_finite_difference`。`One`・`Inf` は `tanh` を噛ませる）、ゼロ cgrad と非有限の上流（`slogdet_sign_and_matrix_rank_zero_cgrad`・`..._accept_non_finite_upstream`）、`MatrixRank` の閾値付近（`matrix_rank_threshold_near_rejected_child_empty_and_retry`。零行列・`rcond = 0` は受理）、`One`・`Inf` のタイと `-0`（`matrix_norm_one_inf_tie_follows_first_order`）、空行列（`matrix_norm_empty_input_returns_empty_gradient`）、`Fro` の必須ベクトル（`matrix_norm_fro_mandatory_vectors_three_stages`）、拒否（`matrix_norm_rejects_inf_input_nuc_spectral_child_empty`・`matrix_norm_one_inf_reject_non_finite_upstream`）、孫テープ（`linalg_nr_grandchild_replay_matches_directional_derivative`）、隣接 Op（`linalg_nr_neighbouring_unsupported_op_stays_fail_closed`）。
+- 単体: `create_graph/linalg_norm_rank.rs` の rank 一定性判定、`tape.rs` の `linalg_norm_rank_supports_create_graph`。
+- facade: `{matrix_norm,slogdet_sign,matrix_rank}_create_graph_via_facade`、`matrix_norm_nuc_is_rejected_via_facade`、`backward_create_graph` の rustdoc に 1×1 の `matrix_norm(Fro)`・`slogdet` の二階 0 の doctest、正ガード `backward_create_graph_linalg_norm_rank_usage_doctest_is_present_and_compiled`（`api_surface.rs`。存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `linalg_norm_rank` の 5 ケース（`linalg_matrix_norm_{fro,one,inf}`・`linalg_slogdet_sign`・`linalg_matrix_rank`。`Route::H`・`Judge::Strict`・`NoMatMul`。Q5 は `Nuc` の拒否）、`create_graph_linalg_norm_rank_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査 `linalg_norm_rank_cases_pass_cpu_against_cpu`。
+
+### 66.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`first_order()` は素の `backward` と bit 一致し、値は V3／ゼロ定数なので `cg.grad` も CPU で 1 階と bit 一致する。tolerance・baseline・ガードレール閾値・`STAGE_BOUND_GUARD`・FMA 契約は変えない。新しい baseline・定数は作らない。
+- 保証範囲は、拒否条件を通った入力で、二階と孫テープまで（有限差分と REQ-2 判定で一致）。三階以上、`Nuc`・`Spectral`、真値が f32 を超える場合は保証外。
+
+### 66.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らず、置き場は空のまま。`linalg_*` は backend-cpu だけが実装し、CUDA・Metal はホストの `eval::linalg` へフォールバックする（新しいカーネルは作らない）。
+- スコープ外: `MatrixNorm` の `Nuc`・`Spectral`（拒否のまま。再評価の起票は所有者が承認済みの「§44 点 11」だが未起票）、分解系（`Qr*`・`Svd*`・`Eigh*`。#3807・#3808）、`Cumprod`・`Logcumsumexp`（#3803）、f64 テープの create_graph（#3722）、GPU 実機 parity の実測と測り方の変更（§48）、facade の公開名の追加。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`eval/linalg.rs`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
+- 追跡表の項目 4 は「保留」のまま（`Qr*`・`Svd*`・`Eigh*` が残るため）。
