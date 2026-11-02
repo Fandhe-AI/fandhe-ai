@@ -657,12 +657,10 @@ fn check_det_row_scaled(ctx: &str, a0: &[f32], n: usize, g: f32) {
     }
 }
 
-/// 限界の固定（決定記録 §70「設計からの逸脱」）: 行別スケール入力の**孫テープ再生**
-/// （`child.backward_create_graph`・`jvp_create_graph`）は、子テープ上の `det(B)` への cotangent が
-/// 下流の `2^c` チャンクで `2^c` 倍になり、非スケール (iii)（桁落ち上界 ∝ 上流勾配）に当たって
-/// `Err(Backward)` で拒否される（`grand` は空のまま）。二階（`child.backward`）は
-/// `check_det_row_scaled` が有限かつ正しいことを確かめている。三階以上は保証範囲外（§46.5）。
-fn assert_det_grandchild_replay_is_rejected(ctx: &str, a0: &[f32], n: usize, g: f32) {
+/// 行別スケール入力の孫テープ再生（`child.backward_create_graph`・`jvp_create_graph`）は有限に受理される
+/// （決定記録 §46.4・§70。`det(B)` の桁落ち判定 (iii) は下流の縮小率〈`B = D^-1 A`〉を最終域へ戻す係数
+/// として織り込む）。
+fn assert_det_grandchild_replay_is_finite(ctx: &str, a0: &[f32], n: usize, g: f32) {
     let shape = [n, n];
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
@@ -675,14 +673,10 @@ fn assert_det_grandchild_replay_is_rejected(ctx: &str, a0: &[f32], n: usize, g: 
     let gx = cg.grad(&x).expect("grad").expect("到達");
     let c = child.var_no_grad(&t(pattern(n * n, 2.0), &shape));
     let scalar = gx.mul(&c).expect("mul").sum(None).expect("sum");
-    let r = child.backward_create_graph(&scalar, &grand);
-    assert!(
-        is_backward_err(&r),
-        "{ctx}: 孫テープ再生は Err(Backward) のはず: {:?}",
-        r.as_ref().err()
-    );
-    assert!(grand.is_empty(), "{ctx}: 拒否後は grand が空");
-    // jvp_create_graph も同じ経路で拒否される。
+    child
+        .backward_create_graph(&scalar, &grand)
+        .unwrap_or_else(|e| panic!("{ctx}: 孫テープ再生は受理されるはず: {e:?}"));
+    assert!(!grand.is_empty(), "{ctx}: 受理後は grand に構造が積まれる");
     let tape2 = Tape::new_with_ops(common::naive_ops());
     let (child2, grand2) = (
         Tape::new_with_ops(common::naive_ops()),
@@ -693,21 +687,17 @@ fn assert_det_grandchild_replay_is_rejected(ctx: &str, a0: &[f32], n: usize, g: 
     let tangent = t(pattern(n * n, 3.0), &shape);
     let j = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
         &tape2, &loss2, &x2, &tangent, &child2, &grand2,
-    );
+    )
+    .unwrap_or_else(|e| panic!("{ctx}: jvp_create_graph は受理されるはず: {e:?}"));
     assert!(
-        is_backward_err(&j),
-        "{ctx}: jvp_create_graph は Err(Backward) のはず"
+        dense(&j.output().value()).iter().all(|v| v.is_finite()),
+        "{ctx}: jvp の出力が非有限"
     );
 }
 
 #[test]
-fn det_row_scaled_grandchild_replay_is_rejected_by_cancellation_guard() {
-    assert_det_grandchild_replay_is_rejected(
-        "diag(1e20,1e20) g=1",
-        &[1e20, 0.0, 0.0, 1e20],
-        2,
-        1.0,
-    );
+fn det_row_scaled_grandchild_replay_is_finite() {
+    assert_det_grandchild_replay_is_finite("diag(1e20,1e20) g=1", &[1e20, 0.0, 0.0, 1e20], 2, 1.0);
 }
 
 /// 受理へ移す入力（§46.12 / §70）: `det` が f32 を超えるが 1 階・二階が有限。

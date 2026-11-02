@@ -38,8 +38,8 @@
 //! 以上など）だけで落ちた入力に限りスケール域で判定をやり直して行別スケール構造（[`det_row_scaled_cgrad`]）へ
 //! 回す。(i)（真の値が f32 を超える）・(iii)（桁落ち）・(iv) の拒否は残す。`Inv`・`Solve`・
 //! `SlogdetLogAbsDet` は対象外として恒久化した（§46.14・#3767 の承認）。
-//! 限界: 行別スケール入力の孫テープ再生（三階相当）は子テープの `det(B)` への cotangent が `2^c` 倍に
-//! なり (iii) で拒否される（保証範囲外。§70「設計からの逸脱」）。
+//! 孫テープ再生: 子テープの `det(B)` への cotangent は `2^c` 倍になるが、A 側へ戻る際に `2^-c` 倍へ
+//! 戻る。`det(B)` ノードへ下流の縮小率を登録し (iii) の `mult` へ渡すため、再生は有限に受理される（§70.3）。
 //! - `Inv`: `dA = -(X^T g X^T)`（`X` は `Inv` ノードの写し）。
 //! - `Solve`: `dB = solve(A^T, g)`、`dA = -dB X^T`（`X` は `Solve` ノードの写し）。
 //! - `SlogdetLogAbsDet`: `dA = broadcast(g) * inv(A)^T`。
@@ -448,8 +448,9 @@ fn det_like_tail(
     gv: f64,
     n: usize,
     with_det: bool,
+    mult: f64,
 ) -> Result<(), AutodiffError> {
-    if with_det && !det_second_order_rounding_ok(x, det, gv, n, 1.0) {
+    if with_det && !det_second_order_rounding_ok(x, det, gv, n, mult) {
         return Err(reject(
             "Det: 二階微分の det と inv の経路間の桁落ちが REQ-2 の許容を超えうる",
         ));
@@ -469,6 +470,7 @@ pub(super) fn guard_det_like(
     a: &Tensor<f32>,
     g: &Tensor<f32>,
     with_det: bool,
+    mult: f64,
 ) -> Result<(), AutodiffError> {
     let n = a.shape()[0];
     if n == 0 {
@@ -482,7 +484,7 @@ pub(super) fn guard_det_like(
     if !det_like_stage_pass(&x, det, gv, with_det) {
         return Err(reject("行列式系: 構造の段が overflow／ゼロ化域に入る"));
     }
-    det_like_tail(&x, det, gv, n, with_det)
+    det_like_tail(&x, det, gv, n, with_det, mult)
 }
 
 // ---------------------------------------------------------------------
@@ -558,6 +560,8 @@ pub(super) struct DetRowScale {
     log2_sg: i32,
     /// 復元指数 `c_i = E_i + log2_sg`、`E_i = Σ_{k≠i} e_k`。
     out_exp: Vec<i64>,
+    /// 下流の縮小率 `max 2^-e_i`（`det(B)` ノードへ登録し、孫テープ再生の (iii) が使う）。
+    r_inv: f64,
 }
 
 /// `x`（正の有限値）以上で最小の 2 のべき乗の指数。
@@ -601,6 +605,7 @@ pub(super) fn det_row_scale_plan(
     a: &Tensor<f32>,
     g: &Tensor<f32>,
     g_requires_grad: bool,
+    mult: f64,
 ) -> Result<Option<DetRowScale>, AutodiffError> {
     let n = a.shape()[0];
     if n == 0 {
@@ -617,7 +622,7 @@ pub(super) fn det_row_scale_plan(
     let forced = false;
     if !forced {
         if det_like_stage_pass(&x, det, gv, true) {
-            det_like_tail(&x, det, gv, n, true)?;
+            det_like_tail(&x, det, gv, n, true, mult)?;
             return Ok(None);
         }
         // (i) 真の 1 階値 `g * det * X^T`（`det_vjp` と同じ f64 計算）が f32 に収まらないなら拒否。
@@ -744,6 +749,7 @@ fn scale_plan_checked(
         row_exp,
         log2_sg,
         out_exp,
+        r_inv,
     })
 }
 
@@ -792,7 +798,13 @@ pub(super) fn det_row_scaled_cgrad<'c>(
     let neg_e: Vec<i64> = plan.row_exp.iter().map(|&e| -i64::from(e)).collect();
     let b = scale_rows(child, a_m, &neg_e)?;
     let gt = scale_scalar(child, g, -i64::from(plan.log2_sg))?;
-    let q = gt.mul(&b.det()?)?;
+    let det_b = b.det()?;
+    // 孫テープ再生で当該 det(B) の桁落ち判定が下流の縮小（B = D^-1 A）を織り込めるよう登録する。
+    child
+        .det_downstream_gain
+        .borrow_mut()
+        .insert(det_b.node_id().0, plan.r_inv);
+    let q = gt.mul(&det_b)?;
     let inv_t = b.inv()?.transpose(0, 1)?;
     let p = q.broadcast_to(&a_shape)?.mul(&inv_t)?;
     scale_rows(child, &p, &plan.out_exp)
@@ -851,7 +863,7 @@ mod tests {
             t(vec![2.0, 0.5, -0.3, 1.5], &[2, 2]),
             t(vec![1.0, 0.0, 0.0, 2.0], &[2, 2]),
         ] {
-            let p = with_forced_scale(false, || det_row_scale_plan(&a, &one, false));
+            let p = with_forced_scale(false, || det_row_scale_plan(&a, &one, false, 1.0));
             assert!(matches!(p, Ok(None)), "非スケールのまま");
         }
     }
@@ -860,12 +872,12 @@ mod tests {
     fn plan_exists_for_large_diagonal_and_rejects_true_overflow() {
         let a = t(vec![1e20, 0.0, 0.0, 1e20], &[2, 2]);
         let one = t(vec![1.0], &[]);
-        let p = det_row_scale_plan(&a, &one, false).unwrap().unwrap();
+        let p = det_row_scale_plan(&a, &one, false, 1.0).unwrap().unwrap();
         assert_eq!(p.row_exp, vec![67, 67]);
         assert_eq!(p.out_exp, vec![67, 67]);
         let eye = t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
         let huge = t(vec![3e38], &[]);
-        assert!(det_row_scale_plan(&eye, &huge, false).is_err());
+        assert!(det_row_scale_plan(&eye, &huge, false, 1.0).is_err());
     }
 
     #[test]
@@ -873,7 +885,7 @@ mod tests {
         // 1e10 * det(dense) は強制スケールでも桁落ちで拒否される（§46.12 の落とし穴）。
         let a = t(vec![2.0, 0.5, -0.3, 1.5], &[2, 2]);
         let g = t(vec![1e10], &[]);
-        let r = with_forced_scale(true, || det_row_scale_plan(&a, &g, false));
+        let r = with_forced_scale(true, || det_row_scale_plan(&a, &g, false, 1.0));
         assert!(r.is_err(), "強制スケールでも拒否のはず");
     }
 

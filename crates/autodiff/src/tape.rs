@@ -3039,6 +3039,12 @@ pub struct Tape {
     /// `eager_release` の解放候補）。`reset`・`rollback_to` で必ず `None` へ戻す
     /// （truncate 後の ID 再利用による誤解放を防ぐ）。
     pub(crate) last_eager_matmul: Cell<Option<NodeId>>,
+    /// `Det` の行別スケール構造（#3810・決定記録 §70）が子テープへ積んだ `det(B)` ノードの
+    /// 「下流の縮小率」（`B = D^-1 A` の微分で A 側へ戻るときの最大係数 `max 2^-e_i`）。
+    /// 孫テープ再生で当該 `Det` の桁落ち判定 (iii) が、上流 cotangent の `2^c` 倍を B 域だけで
+    /// 見て過大に拒否しないよう、最終域へ戻す係数として使う。`rollback_to`・`reset` で
+    /// 切り詰めたノード ID 分を必ず除く（ID 再利用による誤適用を防ぐ）。
+    pub(crate) det_downstream_gain: RefCell<HashMap<usize, f64>>,
     /// 葉プレフィックス長（#1048）。最初の非葉ノード（`Op::Leaf`/
     /// `Op::ResidentLeaf` 以外）が push された時点の `nodes.len()` を
     /// [`Tape::freeze_leaf_prefix`] が 1 回だけ `Some` に固定する。
@@ -3166,6 +3172,7 @@ impl Tape {
             ops,
             epoch: Cell::new(0),
             last_eager_matmul: Cell::new(None),
+            det_downstream_gain: RefCell::new(HashMap::new()),
             retained_leaf_len: Cell::new(None),
             checkpoints: RefCell::new(HashMap::new()),
             hooks: RefCell::new(crate::hooks::HookRegistry::default()),
@@ -3376,6 +3383,9 @@ impl Tape {
     pub(crate) fn rollback_to(&self, point: (usize, Option<usize>)) {
         self.nodes.borrow_mut().truncate(point.0);
         self.last_eager_matmul.set(None);
+        self.det_downstream_gain
+            .borrow_mut()
+            .retain(|&id, _| id < point.0);
         self.retained_leaf_len.set(point.1);
     }
 
@@ -3486,6 +3496,9 @@ impl Tape {
         }
         self.nodes.get_mut().truncate(keep);
         self.last_eager_matmul.set(None);
+        self.det_downstream_gain
+            .get_mut()
+            .retain(|&id, _| id < keep);
         self.epoch.set(self.epoch.get() + 1);
         // checkpoint 区間（イシュー #1624）は葉プレフィックスより後ろの
         // ノードのみを指すため、上記 truncate で必ず区間の対象ノード

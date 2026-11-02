@@ -3650,13 +3650,20 @@ fn build_cgrads<'c>(
                     let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
                     let g_val = value_of(child, &g)?;
                     let a_m = get_mirror(mirror, input)?;
+                    // 行別スケール構造の det(B) ノードなら下流の縮小率（それ以外は 1.0）。
+                    let mult = parent
+                        .det_downstream_gain
+                        .borrow()
+                        .get(&id.0)
+                        .copied()
+                        .unwrap_or(1.0);
                     let d = if a_val.shape()[0] == 0 {
-                        linalg_fft::guard_det_like(a_val, &g_val, true)?;
+                        linalg_fft::guard_det_like(a_val, &g_val, true, 1.0)?;
                         let scale = g.mul(&get_mirror(mirror, id)?)?;
                         linalg_fft::det_like_cgrad(child, &scale, &a_m)?
                     } else {
                         let plan =
-                            linalg_fft::det_row_scale_plan(a_val, &g_val, g.requires_grad())?;
+                            linalg_fft::det_row_scale_plan(a_val, &g_val, g.requires_grad(), mult)?;
                         let composed = match &plan {
                             Some(p) => linalg_fft::det_row_scaled_cgrad(child, &g, &a_m, p)?,
                             None => {
@@ -3675,7 +3682,7 @@ fn build_cgrads<'c>(
             Op::SlogdetLogAbsDet { input } => {
                 if parent_nodes[input.0].requires_grad {
                     let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
-                    linalg_fft::guard_det_like(a_val, &value_of(child, &g)?, false)?;
+                    linalg_fft::guard_det_like(a_val, &value_of(child, &g)?, false, 1.0)?;
                     let a_m = get_mirror(mirror, input)?;
                     let d = linalg_fft::det_like_cgrad(child, &g, &a_m)?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;

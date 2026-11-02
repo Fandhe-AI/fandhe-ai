@@ -893,8 +893,9 @@ const CASES: &[Case] = &[
     },
     // Det の行別スケール族（イシュー #3810・決定記録 §46/§70。名前は §48 の表）。`det` の 1 階 VJP は
     // ホストの `eval::linalg::det_vjp`（V3 の値）で、デバイス経路は既定 OFF のためホストへフォールバックする
-    // （H）。構造は `Mul`／`Det`／`Inv` 等で MatMul を含まない。孫テープ再生は行別スケール入力で拒否される
-    // 限界があるため `replay` は検査しない（§70）。実機は未実測（#3857・#3859）。
+    // （H）。構造は `Mul`／`Det`／`Inv` 等で MatMul を含まない。孫テープ再生は CPU 側のテスト
+    // （`det_row_scaled_grandchild_replay_is_finite`）で検査済み。実機は未実測のため `replay` は検査しない
+    // （§70。#3857・#3859）。
     Case {
         name: "det_family_rowscale_diag_large",
         family: "det_family_rowscale",

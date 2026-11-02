@@ -5270,7 +5270,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 ### 70.3 設計（§46）からの逸脱
 
-1. **孫テープ再生は行別スケール入力で未達**: §46.4 は「孫テープ再生が有限」を要求しているが、行別スケール入力の `child.backward_create_graph`・`jvp_create_graph` は `Err(Backward)`（非スケール (iii) の文言）で拒否され、`grand` は空のまま。機構は、子テープ上の `det(B)` への cotangent が下流の `2^c` チャンクのため `2^c` 倍になり（`diag(1e20, 1e20)` で約 `2^67`）、(iii) の桁落ち上界が上流勾配に比例するため絶対 1e-5 を超えること。スケール経路に入っても `mult = 2^c·(1/r)` で同じ桁を復元するため救えない。既存の `det_hessian_matches_finite_difference` の「det squared」が係数 0.25 を使う理由（`gv ≈ 2.4` で孫再生が (iii) に落ちる）と同根。§21.2 の「孫テープ再生でも同じ行別スケール構造が再計算される」は PR #3353 の (iii) 追加より前の記述で、点 4（(iii) を残す）と両立しない。三階相当は保証範囲外（§46.5）のため、(iii) を緩めず現状の挙動を `det_row_scaled_grandchild_replay_is_rejected_by_cancellation_guard` で固定した。**所有者判断が要る論点**: (iii) を元変数のフレームで測り直すか、行別スケール入力の孫テープ再生を対象外と明記するか。本 PR では判断せず、承認も主張しない。
+1. **孫テープ再生は行別スケール入力でも有限に受理する（是正済み）**: 初版は、子テープ上の `det(B)` への cotangent が下流の `2^c` チャンクで `2^c` 倍になり（`diag(1e20, 1e20)` で約 `2^67`）、(iii) の桁落ち上界が上流勾配に比例するため孫テープ再生を拒否していた（§46.4 の受け入れ条件と矛盾）。レビュー指摘（PRRT_kwDOTuUCJc6y0YEW）を受け、実装で解消した: 行別スケール構造が積む `det(B)` ノードへ下流の縮小率 `max 2^-e_i`（`B = D^-1 A` の微分で A 側へ戻る最大係数）を `Tape::det_downstream_gain` に登録し、孫テープ再生の `Det` 分岐が (iii) の `mult` へ渡す。cotangent の `2^c` 倍は A 側へ戻る際に `2^-c` 倍に戻るため、最終域での誤差見積りは (iii) の式のまま変わらない（tolerance・判定式は緩めない。(iv) の上界は不変）。登録は `rollback_to`・`reset` で切り詰めたノード分を除く。テストは `det_row_scaled_grandchild_replay_is_finite`（`backward_create_graph`・`jvp_create_graph` が受理され有限）。所有者判断は不要になった（対象外化していない）。三階以上は引き続き保証範囲外（§46.5）。
 2. **(iv) の `g` 経路は `g` が勾配を要するときだけ含める**（`Var::requires_grad()`）。理由は 70.2 のとおり。
 3. **(iii) の復元係数**: 計画の `max_i 2^{c_i}` と `1/r_a` のうち、後者はシード側の最大 `1/r_k` にして保守側へ寄せた。
 4. **(i) の判定は `stage_ok`**: 真の 1 階値が非正規化数の入力も (i) 扱い（保守側）で拒否される。
@@ -5280,9 +5280,9 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 ### 70.4 テスト
 
 - `crates/autodiff/src/create_graph/linalg_fft.rs`（単体）: 2 のべき乗補助関数、スケールなしで受理される入力は計画が `None`、`diag(1e20,1e20)` は `Some`・`A=I, g=3e38` は拒否、強制スケールとスケールなしの比較（`cg.grad` bit 一致・Hessian REQ-2 一致。dense 2×2・3×3、`g` = 1／0.25）、強制スケールでも `1e10·det(dense)` が `Err(Backward)` で `child` が空。
-- `crates/autodiff/tests/create_graph_linalg_fft.rs`: 受理テスト（f64 閉形式 Hessian `H[(ij),(kl)] = g·det·(X_ji X_lk − X_li X_jk)` と REQ-2 判定）、`2^127` 超の行、拒否が残る入力、256 次上三角、`g` 経路の cotangent 上界、(iii) 拒否の固定、孫テープ再生の限界の固定。
+- `crates/autodiff/tests/create_graph_linalg_fft.rs`: 受理テスト（f64 閉形式 Hessian `H[(ij),(kl)] = g·det·(X_ji X_lk − X_li X_jk)` と REQ-2 判定）、`2^127` 超の行、拒否が残る入力、256 次上三角、`g` 経路の cotangent 上界、(iii) 拒否の固定、孫テープ再生が有限であることの検査。
 - facade: `det_row_scaled_create_graph_via_facade`、`det_create_graph_via_facade` の強化、`backward_create_graph` の rustdoc の doctest（`diag(1e20, 1e20)` の二階が有限・`inv([[1e-39]])` が拒否で `leaf_count() == 0`）、正ガード（存在しない needle で違反が返る自己テスト付き）。
-- GPU parity: 登録表に族 `det_family_rowscale`（`det_family_rowscale_diag_large`。`Route::H`・`Judge::Strict`・`NoMatMul`。Q5 は `A = I`・`g = 3e38` の拒否）、`create_graph_det_family_rowscale_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査。孫テープ再生（Q4）は 70.3 の逸脱 1 により検査しない（`replay: None`）。
+- GPU parity: 登録表に族 `det_family_rowscale`（`det_family_rowscale_diag_large`。`Route::H`・`Judge::Strict`・`NoMatMul`。Q5 は `A = I`・`g = 3e38` の拒否）、`create_graph_det_family_rowscale_{cuda,metal}_matches_cpu`（`#[ignore]`）、CPU 同士の自己検査。孫テープ再生（Q4）は CPU 側で `det_row_scaled_grandchild_replay_is_finite` が検査済み、実機 parity は未実測のため `replay: None` のまま（#3857・#3859）。
 
 ### 70.5 手動確認
 
@@ -5291,10 +5291,10 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 ### 70.6 数値契約と保証範囲
 
 - 1 階 `Tape::backward` は構造上 bit 同一（VJP 本体に触れていない）。`cg.grad` は CPU で 1 階と bit 一致する（V3）。tolerance・baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`unsafe`・`docs/spec` は変えない。
-- 保証範囲は、判定を通った入力で seed の各要素の絶対値が 1 以下の二階まで（§27.3・§31.3 と同じ）。行別スケール入力の孫テープ再生・三階以上は対象外（70.3 の逸脱 1）。
+- 保証範囲は、判定を通った入力で seed の各要素の絶対値が 1 以下の二階まで（§27.3・§31.3 と同じ）。行別スケール入力の孫テープ再生は有限に受理される（70.3 の逸脱 1・是正済み）。三階以上は対象外。
 
 ### 70.7 GPU（未実測）・スコープ外・変えていないもの
 
 - 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3857（`<cuda-node>`）・#3859（`<metal-node>`）へ申し送る。baseline は作らない。
-- スコープ外: `Inv`・`Solve`・`SlogdetLogAbsDet` の受理拡大（恒久化）、区分 (iii) の救済（V4）・S2 フォールバック、区分 (iv) の冪の見直し、(iii) の測り方の見直し（70.3 の逸脱 1・所有者判断）、実機 parity の実測（#3857・#3859・#3739）、`padding_idx`（#3811）、追跡表の項目 5 を閉じること（#3812）。
+- スコープ外: `Inv`・`Solve`・`SlogdetLogAbsDet` の受理拡大（恒久化）、区分 (iii) の救済（V4）・S2 フォールバック、区分 (iv) の冪の見直し、実機 parity の実測（#3857・#3859・#3739）、`padding_idx`（#3811）、追跡表の項目 5 を閉じること（#3812）。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`Op` の payload・facade の公開名とシグネチャ・`AutodiffError` の variant・`supports_create_graph` の値・tolerance・baseline・`STAGE_BOUND_GUARD`・依存（`Cargo.toml`／`Cargo.lock`）・既存節の本文（§46.0 に状態 1 行、§46.7 のチェック欄を更新したのみ）。
