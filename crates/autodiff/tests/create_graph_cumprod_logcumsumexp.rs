@@ -648,6 +648,90 @@ fn cum_b_reviewed_shapes_without_cancellation_are_accepted_and_match() {
     }
 }
 
+/// 共通オフセットの消失（PR #3959 の Codex P1 `PRRT_kwDOTuUCJc6yq6Hk`）。大きな共通オフセットの上に
+/// 小さな差（`ln 2` 等）が乗る lane は、f32 の `out` だけでなく f64 の prefix（`log_add_exp` の連鎖）でも
+/// 差が消え、`out` から作る係数 `c`・`w` が構造と参照で同じ誤った値（1）になる。参照の係数を `out` を
+/// 経由しない平行移動不変な形（prefix 最大値と正規化和）で作るので、構造との比較で拒否され、`child`
+/// は空のまま。修正前の実装はどれも受理していた（子テープの Hessian は `[[0,-1],[-1,0]]`、解析値は
+/// `[[0.25,-0.25],[-0.25,0.25]]`）。
+#[test]
+fn cum_b_common_offset_loss_inputs_are_rejected() {
+    // 指摘の入力。
+    run_vector(
+        Kind::Logcumsumexp,
+        &[1e30, 1e30],
+        &[0.0, 1.0],
+        Expect::Reject,
+        "lcse [1e30,1e30] g=[0,1]",
+    );
+    run_vector(
+        Kind::Logcumsumexp,
+        &[1e30, 1e30],
+        &[1.0, 1.0],
+        Expect::Reject,
+        "lcse [1e30,1e30] g=[1,1]",
+    );
+    // 長さ 3: f64 の ulp(3e20) ≈ 6.6e4 が ln 2・ln 3/2 を消す。
+    run_vector(
+        Kind::Logcumsumexp,
+        &[3e20, 3e20, 3e20],
+        &[0.0, 0.0, 1.0],
+        Expect::Reject,
+        "lcse [3e20;3] g=[0,0,1]",
+    );
+    // prefix の途中だけ情報が消える（先頭は独立、2 番目から共通オフセット）。
+    run_vector(
+        Kind::Logcumsumexp,
+        &[0.0, 2e20, 2e20, 1.0],
+        &[0.0, 1.0, 1.0, 1.0],
+        Expect::Reject,
+        "lcse [0,2e20,2e20,1]",
+    );
+    run_vector(
+        Kind::Logcumsumexp,
+        &[-3.0, 1.0, 5e19, 5e19, 5e19],
+        &[1.0, 0.0, 0.0, 0.0, 1.0],
+        Expect::Reject,
+        "lcse 途中から 5e19",
+    );
+}
+
+/// 正のプローブ: f32 で厳密に表せる共通オフセット（`+128`）を足した lane は受理され、Hessian が
+/// オフセット無しの lane の Hessian・有限差分と REQ-2 で一致する（平行移動不変）。差が f32 の `out` で
+/// 保たれる大きなオフセット（`[1e30, 0]`。`c = 1`・`w = [1, 0]` が真値）も受理される。
+#[test]
+fn cum_b_shifted_lanes_are_accepted_and_shift_invariant() {
+    let base: [f32; 3] = [0.0, -0.5, 0.25];
+    let c: [f32; 3] = [0.5, -1.0, 1.0];
+    let shifted: Vec<f32> = base.iter().map(|v| v + 128.0).collect();
+    run_vector(Kind::Logcumsumexp, &base, &c, Expect::Accept, "lcse base");
+    run_vector(
+        Kind::Logcumsumexp,
+        &shifted,
+        &c,
+        Expect::Accept,
+        "lcse base+128",
+    );
+    let build = Loss {
+        kind: Kind::Logcumsumexp,
+        dim: 0,
+        c: &c,
+        cubic: false,
+    };
+    let a0 = analytic_hessian(&build, &base, &[3]);
+    let a1 = analytic_hessian(&build, &shifted, &[3]);
+    assert_hessian_close(&a1, &a0, "lcse 平行移動不変");
+    let num = finite_diff_hessian(&build, &shifted, &[3], 2e-2);
+    assert_hessian_close(&a1, &num, "lcse base+128 の有限差分");
+    run_vector(
+        Kind::Logcumsumexp,
+        &[1e30, 0.0],
+        &[0.0, 1.0],
+        Expect::Accept,
+        "lcse [1e30,0]",
+    );
+}
+
 /// 計算量の上限（P2）: 二階の要素ごとの判定は lane あたり `n²` に比例するので、走査量が 2^27 を
 /// 超える入力（長さ 65536 の lane）は判定へ入る前に `Err(Backward)` で拒否され `child` は空。
 /// 上限内の長い lane（512）は受理され、`cg.grad` は 1 階と bit 一致する。修正前の実装は長さ 65536 の
