@@ -4738,6 +4738,10 @@ struct RngDistributionsHoldDoctestGuard;
 /// 多層防御の位置づけ・承認未取得の経緯は
 /// `docs/autodiff-spatial-layers-decision.md` §6「承認事項」節を参照。
 ///
+/// **イシュー #3814**: `add_upsample_scale_factor`（案 A の別名メソッド）を承認形で公開した。
+/// `UpsampleSize` 型は再エクスポートしないため、型名 `UpsampleSize` の衝突プローブで
+/// 出していないことを固定する。
+///
 /// 型の再エクスポート・自由関数での公開は引き続き未承認のため、型名・自由関数の
 /// 衝突プローブのみを本 doctest に残す。
 ///
@@ -4767,6 +4771,7 @@ struct RngDistributionsHoldDoctestGuard;
 /// mod __fandhe_spatial_hold_probe {
 ///     pub struct ConvTranspose1d;
 ///     pub struct Upsample;
+///     pub struct UpsampleSize;
 ///     pub struct ZeroPad2d;
 ///     pub struct Identity;
 ///     pub struct Unflatten;
@@ -4783,6 +4788,7 @@ struct RngDistributionsHoldDoctestGuard;
 /// fn __probe(
 ///     _: ConvTranspose1d,
 ///     _: Upsample,
+///     _: UpsampleSize,
 ///     _: ZeroPad2d,
 ///     _: Identity,
 ///     _: Unflatten,

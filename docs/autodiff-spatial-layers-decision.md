@@ -241,8 +241,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 追跡表 `docs/compat-matrix-ari-tracker.md` の行 #7（`add_upsample` の `scale_factor` 指定。Issue 上は「項目 8」と呼ばれる同一項目）の
 公開形を設計する。**設計のみ**で、コード・公開面・`docs/spec` は変えない。
 
-- **承認根拠**: なし。**未承認（#3768 待ち）**。実装は承認後の #3814、実機 parity は #3860（`<cuda-node>`）・#3861（`<metal-node>`）、
-  保存・export の横断方針は #3750（OPEN）。
+- **承認根拠**: #3768 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。論点 1 は案 A、論点 4 は #3750 §13 の推奨をすべて承認（model_io は全層に kind を足し `format_version` は 2 のまま、f64 は (i)、ONNX export は 0.14.0 に含めず `UnsupportedLayer` のまま、旧リーダーの前方互換なしは移行ノートに書く）。実装は #3814（§10）、実機 parity は #3860（`<cuda-node>`）・#3861（`<metal-node>`）。
 - **現状**: facade の `compat::Sequential::add_upsample(size: Vec<usize>, mode)`（`crates/facade/src/compat/sequential.rs:2435`、
   基準 `30bd1d046`）は出力サイズ直指定のみ。内部クレートには倍率経路が実装済み
   （`autodiff::nn::Upsample::with_scale_factor`・`UpsampleSize::ScaleFactor(Vec<f64>)`〈`#[non_exhaustive]`、
@@ -317,7 +316,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 - **model_io**: 倍率は f64 のまま bit 一致で往復する必要がある（`floor(in*s)` が値に依存）。現状の `model_io.rs` は `as_f32`・`put_real(f32)` のみ。
   - (i) 新 kind `upsample_scale_factor`: キー `mode`・`align_corners`・`scale_len`（1..=3）・`scale_0..2`（f64 最短往復表記 `{:?}` と正準表記検査、`as_f64` を新設。`MAX_NUMBER_LEXEME_LEN = 64`・キー上限 16 に収まる）。`format_version` 不変（#2522 の先例）。古い読み手は未知 kind を `UnsupportedModel` で拒否。
   - (ii) 当面 fail-closed: `dir` に触れる前に `UnsupportedModel`（§6 の `conv_transpose1d` の先例）。
-  - 横断方針は #3750 が決めるため、(i) は設計案として記録し、#3814 は「#3750 が先に入っていればその規則、無ければ (ii)」を推奨する。
+  - **(i) で確定**（#3768 論点 4 の承認。#3750 §13）。上記の分岐「#3750 が先に入っていればその規則、無ければ (ii)」は解消した。
 - **ONNX export**: `graph_from_layers` は 6 種のみ対応で size 指定 Upsample もすでに非対応。倍率指定も `OnnxError::UnsupportedLayer` で fail-closed。`Resize`（scales）対応は #3750 とスコープ外へ回す。
 
 ### §9.6 互換への影響
@@ -353,3 +352,26 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 
 - A03（manifest の非信頼入力）: f64 の正準表記・有限性検査、`scale_len` 上限、キー集合の完全一致を確保より前に行う。A04・A08: 構築と forward の判定を `resolve_size` 1 か所に寄せ迂回経路を作らない。`as usize` の飽和は前検査で防ぐ（既存実装）。
 - スコープ外: `recompute_scale_factor=None` 相当の座標系の公開、ONNX `Resize` の export、`UpsampleSize`／`Upsample` 型の再エクスポート、`Var` への倍率メソッド追加。
+
+## §10 実装記録（イシュー #3814。承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>〈2026-11-01〉）
+
+§9 の案 A をそのまま実装した。設計からの逸脱はない。
+
+- **公開面**: `compat::Sequential::add_upsample_scale_factor(self, scale_factor: Vec<f64>, mode: InterpolateMode) -> Result<Self, AutodiffError>`（inherent `pub fn` 1 件）。
+  `Upsample::with_scale_factor` で検査し、成功したときだけ層と構成記録を積む。`add_upsample` は不変（rustdoc の「scale_factor 未公開」の文を新メソッドへの案内に直しただけ）。
+  `UpsampleSize`・`Upsample` 型は再エクスポートしない。`ModelIoError`・`OnnxError` に variant は足さない。
+- **`LayerSpec`**: `UpsampleScaleFactor { scale_factor: Vec<f64>, mode }` を追加（公開面の外。f64 を持つため `Eq` は付かない）。
+- **保存（kind `upsample_scale_factor`）**: params は `mode`・`align_corners`・`scale_len`（1..=3）・`scale_0..2`（正準 f64 `{:?}`。添字が `scale_len` 以上は `null`）の 6 キー（`MAX_OBJECT_KEYS = 16` に収まる）、buffer・parameter なし。
+  `format_version` は 2 のまま。kind allowlist は 70 → 71 種。旧リーダーは未知 kind を `UnsupportedModel` で拒否する（前方互換なし。移行ノート §3.4）。
+  `model_io.rs` に `put_real_f64`・`as_f64`・`as_opt_f64`・`Params::opt_f64` を新設（`as_f32` と同型。`Json::Real` のみ受理し、有限かつ `{:?}` の正準字句に完全一致するものに限る。字句長はレクサの `MAX_NUMBER_LEXEME_LEN = 64` が先に効く）。
+  復元の検査順は キー集合 → `align_corners`／`mode` → `scale_len` の上限 → `scale_i` の正準 f64 と null 詰め で、`Vec::with_capacity` は上限検査の後。意味の範囲（0 以下・`-0.0`）は `build_model` 内の `add_upsample_scale_factor` が `Autodiff` で返し、二重実装しない。
+  保存前検査は `collect_checked_state` の 1 か所（Sequential と Functional が共有）で、`scale_len` と mode を `dir` に触れる前に検査し `UnsupportedModel` を返す。
+- **ONNX export**: `OnnxError::UnsupportedLayer` のまま（`Resize`〈scales〉は対象外）。
+- **ガード**: `api_surface.rs` の `SPATIAL_LAYER_APPROVED_ADD_METHODS` を 4 名にし、承認シグネチャの正ガード `compat_sequential_spatial_add_methods_have_approved_signatures` に `add_upsample_scale_factor` を追加。
+  自己テストに、`Vec<f32>`・`&[f64]`・引数の順序入れ替え・戻り値 `Self`・`&mut self`・名前の前方一致による取り違えを加えた。
+  `scale_factor` 用の否定ガードは元から無かったため「反転」は正ガードの新設である。保留 doctest `SpatialLayersHoldDoctestGuard` には型名 `UpsampleSize` の衝突プローブを足し、`SPATIAL_LAYERS_HOLD_PROBE_BODY` も同期した。
+- **テスト（CI）**: `compat_sequential_spatial_layers.rs`（構築時拒否・floor・forward 時拒否・サイズ指定経路との bit 一致・学習／常駐経路・fn ポインタ固定・保存往復）、`compat_sequential_model_io_layers.rs`（往復・改竄拒否）、`compat_functional_model_io.rs`、`interop_onnx_export_sequential.rs`、`model_io.rs` 単体（往復・`as_f64`・表駆動 Manifest 拒否・kind 数 71）。
+  既存テストの意図的な変更は kind 数のアサート（70 → 71）、「70 種」の文言、`all_kind_specs` への追加、`SPATIAL_LAYER_APPROVED_ADD_METHODS` の 3 → 4、`SPATIAL_LAYERS_HOLD_PROBE_BODY` の 2 行追加のみ（#3750 R9 による加算で、既定経路の挙動は変わらない）。
+- **`#[ignore]` テスト**: `cuda_upsample_scale_factor_nearest_bit_exact`・`cuda_upsample_scale_factor_bilinear_matches_cpu`・`metal_upsample_scale_factor_nearest_bit_exact`・`metal_upsample_scale_factor_bilinear_matches_cpu`。
+  実機 parity は**未実測**（#3860〈`<cuda-node>`〉・#3861〈`<metal-node>`〉）。tolerance・baseline・ガードレール閾値は不変で、baseline は追加しない。
+- **スコープ外**: `recompute_scale_factor=None` 相当の座標系の公開、ONNX `Resize`〈scales〉の export、`UpsampleSize`／`Upsample` 型の再エクスポート、`Var` への倍率メソッド追加。

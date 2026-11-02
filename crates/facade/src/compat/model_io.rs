@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 70 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 71 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -323,7 +323,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 70 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 71 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -390,6 +390,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::AdaptiveMaxPool1d { .. } => Some("adaptive_max_pool1d"),
         LayerSpec::GlobalPool { .. } => Some("global_pool"),
         LayerSpec::Upsample { .. } => Some("upsample"),
+        LayerSpec::UpsampleScaleFactor { .. } => Some("upsample_scale_factor"),
         LayerSpec::ZeroPad2d { .. } => Some("zero_pad2d"),
         LayerSpec::Identity => Some("identity"),
         LayerSpec::GroupNorm { .. } => Some("group_norm"),
@@ -483,6 +484,10 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
             alpha.is_finite() && beta.is_finite() && k.is_finite()
         }
         LayerSpec::Elu { alpha } => alpha.is_finite(),
+        // f64 の倍率（#3814）。構築時に拒否済みだが保存側でも多層防御として検査する。
+        LayerSpec::UpsampleScaleFactor { scale_factor, .. } => {
+            scale_factor.iter().all(|s| s.is_finite())
+        }
         // Threshold は構築時検査が無く ±inf／NaN を受理するため保存側で拒否する（#3054）。
         // Celu・RRelu は構築時に拒否済みだが多層防御として登録する。
         LayerSpec::Celu { alpha } => alpha.is_finite(),
@@ -793,6 +798,7 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::AdaptiveMaxPool1d { .. }
         | LayerSpec::GlobalPool { .. }
         | LayerSpec::Upsample { .. }
+        | LayerSpec::UpsampleScaleFactor { .. }
         | LayerSpec::Unflatten { .. }
         | LayerSpec::ZeroPad2d { .. }
         | LayerSpec::Identity
@@ -966,6 +972,11 @@ fn put_real(f: &mut ParamFields, key: &str, v: f32) {
     f.push((key.to_string(), format!("{v:?}")));
 }
 
+/// f64 は `{:?}`（往復可能な最短表現。#3750 §13 の (i)。有限性は保存前に検査済み。イシュー #3814）。
+fn put_real_f64(f: &mut ParamFields, key: &str, v: f64) {
+    f.push((key.to_string(), format!("{v:?}")));
+}
+
 fn put_bool(f: &mut ParamFields, key: &str, v: bool) {
     f.push((key.to_string(), v.to_string()));
 }
@@ -1014,6 +1025,10 @@ fn put_opt_triple(f: &mut ParamFields, base: &str, v: Option<[usize; 3]>) {
 /// `Upsample` の `size` に許す軸数の上限（`size_0`..`size_2` の固定キー。非信頼な整数から
 /// 確保しないための上限。`InterpolateMode::Trilinear` の 3 軸が最大。イシュー #2522）。
 const UPSAMPLE_MAX_SIZE_LEN: usize = 3;
+
+/// `UpsampleScaleFactor` の `scale_factor` に許す軸数の上限（`scale_0`..`scale_2`。根拠は
+/// [`UPSAMPLE_MAX_SIZE_LEN`] と同じ。イシュー #3814）。
+const UPSAMPLE_MAX_SCALE_LEN: usize = 3;
 
 /// `Unflatten` の `sizes` に許す軸数の上限（`size_0`..`size_7` の固定キー。`MAX_OBJECT_KEYS`
 /// に対し `dim`・`size_len` と合わせて 10 キーで収める。`Upsample` と同型。イシュー #3055・
@@ -1095,6 +1110,11 @@ fn embedding_bag_mode_from_wire(name: &str) -> Option<EmbeddingBagMode> {
 /// 保存可能な `Upsample` か（`size` の軸数が `1..=3` かつ mode が既知）。
 fn upsample_is_savable(size: &[usize], mode: InterpolateMode) -> bool {
     (1..=UPSAMPLE_MAX_SIZE_LEN).contains(&size.len()) && upsample_mode_to_wire(mode).is_some()
+}
+
+/// 保存可能な `UpsampleScaleFactor` か（倍率の軸数が `1..=3` かつ mode が既知。イシュー #3814）。
+fn upsample_scale_is_savable(scale: &[f64], mode: InterpolateMode) -> bool {
+    (1..=UPSAMPLE_MAX_SCALE_LEN).contains(&scale.len()) && upsample_mode_to_wire(mode).is_some()
 }
 
 /// 層の `params` を manifest 用の JSON object 文字列にする（キー順固定。整数は 10 進、
@@ -1506,6 +1526,19 @@ fn param_fields(spec: &LayerSpec) -> ParamFields {
                 put_opt(&mut f, &format!("size_{i}"), size.get(i).copied());
             }
         }
+        LayerSpec::UpsampleScaleFactor { scale_factor, mode } => {
+            // 保存前検査（`upsample_scale_is_savable`）通過後にだけ呼ばれる。
+            let (name, align_corners) = upsample_mode_to_wire(*mode).unwrap_or(("", false));
+            f.push(("mode".to_string(), format!("\"{name}\"")));
+            put_bool(&mut f, "align_corners", align_corners);
+            put_num(&mut f, "scale_len", scale_factor.len());
+            for i in 0..UPSAMPLE_MAX_SCALE_LEN {
+                match scale_factor.get(i) {
+                    Some(v) => put_real_f64(&mut f, &format!("scale_{i}"), *v),
+                    None => f.push((format!("scale_{i}"), "null".to_string())),
+                }
+            }
+        }
         LayerSpec::GroupNorm { groups, eps } => {
             put_num(&mut f, "groups", *groups);
             put_real(&mut f, "eps", *eps);
@@ -1714,6 +1747,16 @@ fn collect_checked_state(model: &Sequential) -> Result<CheckedState, ModelIoErro
                 reason: format!(
                     "層 {i}（upsample）の size 軸数（{}）または mode が保存に未対応です",
                     size.len()
+                ),
+            });
+        }
+        if let LayerSpec::UpsampleScaleFactor { scale_factor, mode } = spec
+            && !upsample_scale_is_savable(scale_factor, *mode)
+        {
+            return Err(ModelIoError::UnsupportedModel {
+                reason: format!(
+                    "層 {i}（upsample_scale_factor）の scale 軸数（{}）または mode が保存に未対応です",
+                    scale_factor.len()
                 ),
             });
         }
@@ -2634,6 +2677,9 @@ fn build_model(
             LayerSpec::Upsample { size, mode } => model
                 .add_upsample(size.clone(), *mode)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::UpsampleScaleFactor { scale_factor, mode } => model
+                .add_upsample_scale_factor(scale_factor.clone(), *mode)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::ZeroPad2d { padding } => model.add_zero_pad2d(*padding),
             LayerSpec::Identity => model.add_identity(),
             LayerSpec::GroupNorm { groups, eps } => model
@@ -3099,6 +3145,36 @@ fn as_f32(value: &Json, ctx: &str) -> Result<f32, ModelIoError> {
     Ok(v)
 }
 
+/// f64 欄（イシュー #3814。#3750 §13 の (i)）。[`as_f32`] と同型で、`Json::Real` のみ受理し、
+/// 有限かつ正準形（`{:?}` で書き戻した字句と一致）に限る。字句長はレクサの上限が先に効く。
+fn as_f64(value: &Json, ctx: &str) -> Result<f64, ModelIoError> {
+    let Json::Real(raw) = value else {
+        return Err(manifest_error(format!(
+            "{ctx} は小数表記の数値（f64）である必要があります"
+        )));
+    };
+    let v: f64 = raw
+        .parse()
+        .map_err(|_| manifest_error(format!("{ctx} を f64 として読めません")))?;
+    if !v.is_finite() {
+        return Err(manifest_error(format!("{ctx} が有限の f64 ではありません")));
+    }
+    if format!("{v:?}") != *raw {
+        return Err(manifest_error(format!(
+            "{ctx} が正準な f64 表記ではありません"
+        )));
+    }
+    Ok(v)
+}
+
+/// `null` または正準 f64。
+fn as_opt_f64(value: &Json, ctx: &str) -> Result<Option<f64>, ModelIoError> {
+    match value {
+        Json::Null => Ok(None),
+        other => as_f64(other, ctx).map(Some),
+    }
+}
+
 fn as_bool(value: &Json, ctx: &str) -> Result<bool, ModelIoError> {
     match value {
         Json::Bool(b) => Ok(*b),
@@ -3152,6 +3228,10 @@ impl<'a> Params<'a> {
 
     fn f32(&self, key: &str) -> Result<f32, ModelIoError> {
         as_f32(self.get(key)?, key)
+    }
+
+    fn opt_f64(&self, key: &str) -> Result<Option<f64>, ModelIoError> {
+        as_opt_f64(self.get(key)?, key)
     }
 
     fn bool(&self, key: &str) -> Result<bool, ModelIoError> {
@@ -4073,6 +4153,58 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
             }
             Ok(LayerSpec::Upsample { size, mode })
         }
+        "upsample_scale_factor" => {
+            let p = Params::new(
+                params,
+                &[
+                    "mode",
+                    "align_corners",
+                    "scale_len",
+                    "scale_0",
+                    "scale_1",
+                    "scale_2",
+                ],
+            )?;
+            let align_corners = p.bool("align_corners")?;
+            let mode_name = as_str(p.get("mode")?, "mode")?;
+            let mode = upsample_mode_from_wire(mode_name, align_corners).ok_or_else(|| {
+                manifest_error("upsample_scale_factor の mode が allowlist 外です")
+            })?;
+            if align_corners
+                && matches!(
+                    mode,
+                    InterpolateMode::Nearest
+                        | InterpolateMode::NearestExact
+                        | InterpolateMode::Area
+                )
+            {
+                return Err(manifest_error(
+                    "upsample_scale_factor の mode は align_corners=true を持てません",
+                ));
+            }
+            let scale_len = p.usize("scale_len")?;
+            if !(1..=UPSAMPLE_MAX_SCALE_LEN).contains(&scale_len) {
+                return Err(manifest_error(
+                    "upsample_scale_factor の scale_len は 1..=3 である必要があります",
+                ));
+            }
+            // 確保は scale_len の上限検査の後。意味の範囲（0 以下等）は build_model 側の
+            // `add_upsample_scale_factor` が返す Autodiff に任せ、二重実装しない。
+            let mut scale_factor = Vec::with_capacity(scale_len);
+            for i in 0..UPSAMPLE_MAX_SCALE_LEN {
+                let v = p.opt_f64(&format!("scale_{i}"))?;
+                match (i < scale_len, v) {
+                    (true, Some(x)) => scale_factor.push(x),
+                    (false, None) => {}
+                    _ => {
+                        return Err(manifest_error(
+                            "upsample_scale_factor の scale_i は scale_len 未満が f64、以上が null である必要があります",
+                        ));
+                    }
+                }
+            }
+            Ok(LayerSpec::UpsampleScaleFactor { scale_factor, mode })
+        }
         other => Err(ModelIoError::UnsupportedModel {
             reason: format!("未対応の層 kind {}", clip(other)),
         }),
@@ -4528,7 +4660,7 @@ mod tests {
         ));
     }
 
-    /// 70 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 71 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -4826,6 +4958,16 @@ mod tests {
                     align_corners: true,
                 },
             },
+            LayerSpec::UpsampleScaleFactor {
+                scale_factor: vec![2.0, 2.0],
+                mode: InterpolateMode::Nearest,
+            },
+            LayerSpec::UpsampleScaleFactor {
+                scale_factor: vec![1.5, 0.5, 3.0],
+                mode: InterpolateMode::Trilinear {
+                    align_corners: true,
+                },
+            },
             LayerSpec::ZeroPad2d {
                 padding: [1, 2, 3, 4],
             },
@@ -5020,7 +5162,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 70, "kind allowlist は 70 種: {kinds:?}");
+        assert_eq!(kinds.len(), 71, "kind allowlist は 71 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -5038,9 +5180,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 70 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 71 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("70 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("71 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -5048,7 +5190,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("70 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("71 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -5431,6 +5573,39 @@ mod tests {
                 "upsample",
                 r#"{"mode":"nearest","align_corners":false,"size_len":2,"size_0":4.5,"size_1":4,"size_2":null}"#,
             ),
+            // イシュー #3814: upsample_scale_factor の非信頼入力。
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":true,"scale_len":2,"scale_0":2.0,"scale_1":2.0,"scale_2":null}"#,
+            ),
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":false,"scale_len":0,"scale_0":null,"scale_1":null,"scale_2":null}"#,
+            ),
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":false,"scale_len":4,"scale_0":2.0,"scale_1":2.0,"scale_2":2.0}"#,
+            ),
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":false,"scale_len":2,"scale_0":2.0,"scale_1":2.0,"scale_2":2.0}"#,
+            ),
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":false,"scale_len":2,"scale_0":2.0,"scale_1":null,"scale_2":null}"#,
+            ),
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":false,"scale_len":2,"scale_0":2.00,"scale_1":2.0,"scale_2":null}"#,
+            ),
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":false,"scale_len":2,"scale_0":2,"scale_1":2.0,"scale_2":null}"#,
+            ),
+            (
+                "upsample_scale_factor",
+                r#"{"mode":"nearest","align_corners":false,"scale_len":2,"scale_0":2E0,"scale_1":2.0,"scale_2":null}"#,
+            ),
             // イシュー #3055: conv_transpose1d / unflatten の非信頼入力。
             (
                 "conv_transpose1d",
@@ -5542,6 +5717,56 @@ mod tests {
             prepare_save(&model),
             Err(ModelIoError::UnsupportedModel { .. })
         ));
+    }
+
+    #[test]
+    fn upsample_scale_factor_round_trip_and_reject_unsavable() {
+        let p = |s: &str| parse_json(s).expect("JSON として読めるはず");
+        for spec in [
+            LayerSpec::UpsampleScaleFactor {
+                scale_factor: vec![1.5],
+                mode: InterpolateMode::Linear {
+                    align_corners: false,
+                },
+            },
+            LayerSpec::UpsampleScaleFactor {
+                scale_factor: vec![0.29, 1e-7],
+                mode: InterpolateMode::Nearest,
+            },
+            LayerSpec::UpsampleScaleFactor {
+                scale_factor: vec![1e16, 1e-7, 2.5],
+                mode: InterpolateMode::Trilinear {
+                    align_corners: true,
+                },
+            },
+        ] {
+            let kind = spec_kind(&spec).expect("保存可能");
+            assert_eq!(kind, "upsample_scale_factor");
+            let back = spec_from_kind(kind, &p(&render_params(&spec))).expect("往復できるはず");
+            assert_eq!(back, spec);
+        }
+        // 4 軸の倍率は構築できても保存は UnsupportedModel。
+        if let Ok(model) =
+            Sequential::new().add_upsample_scale_factor(vec![2.0; 4], InterpolateMode::Nearest)
+        {
+            assert!(matches!(
+                prepare_save(&model),
+                Err(ModelIoError::UnsupportedModel { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn as_f64_accepts_only_finite_canonical_real() {
+        for v in [0.29_f64, 1e-7, 1e16, -0.5, 2.0] {
+            let raw = format!("{v:?}");
+            assert_eq!(as_f64(&Json::Real(raw), "x").expect("正準"), v);
+        }
+        for raw in ["2.00", "2", "2E0", "inf", "NaN", "1e999"] {
+            assert!(as_f64(&Json::Real(raw.to_string()), "x").is_err(), "{raw}");
+        }
+        assert!(as_f64(&Json::Null, "x").is_err());
+        assert_eq!(as_opt_f64(&Json::Null, "x").expect("null"), None);
     }
 
     #[cfg(unix)]
@@ -5731,7 +5956,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("70 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("71 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {
