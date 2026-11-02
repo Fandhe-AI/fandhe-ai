@@ -2697,10 +2697,13 @@ impl Op {
             | Op::LocalResponseNorm { .. }
             | Op::WeightNorm { .. }
             | Op::SpectralNorm { .. }
-            // RNN セル 2 Op（イシュー #3795・決定記録 §37/§58）。方式は
-            // `create_graph/rnn_gru_cell.rs`。`LstmCell`／`LstmHidden` は `false` のまま。
+            // RNN セル 4 Op（イシュー #3795・#3796・決定記録 §37/§58/§61）。方式は
+            // `create_graph/rnn_gru_cell.rs`・`create_graph/lstm_cell.rs`。
+            // `LstmCell`／`LstmHidden` は push 順序契約のため必ず同時に `true` にする。
             | Op::RnnCell { .. }
-            | Op::GruCell { .. } => true,
+            | Op::GruCell { .. }
+            | Op::LstmCell { .. }
+            | Op::LstmHidden { .. } => true,
             // `Interpolate` は `mode` の既知 7 variant だけ true（`InterpolateMode` は
             // `#[non_exhaustive]` なので未知 variant は安全側の false。`VectorNorm` の前例）。
             Op::Interpolate { mode, .. } => matches!(
@@ -2725,8 +2728,6 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::LstmCell { .. }
-            | Op::LstmHidden { .. }
             | Op::Cholesky { .. }
             | Op::QrQ { .. }
             | Op::QrR { .. }
@@ -5775,7 +5776,6 @@ mod conv_transpose3d_max_unpool_op_tests {
 
     /// RNN セル 2 Op（イシュー #3795）: bias あり・なしの `RnnCell` と `GruCell` は
     /// create_graph 対象、checkpoint 対象外のまま。隣接する `Cholesky` は `false` のまま。
-    /// （`LstmCell`／`LstmHidden` は #3796 が並行して反転しうるため見本にしない。）
     #[test]
     fn rnn_gru_cell_family_supports_create_graph() {
         let n = NodeId;
@@ -5805,6 +5805,38 @@ mod conv_transpose3d_max_unpool_op_tests {
                 q: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
             };
             assert!(gru.supports_create_graph() && !gru.is_checkpoint_eligible());
+        }
+        assert!(!Op::Cholesky { input: n(0) }.supports_create_graph());
+    }
+
+    /// LSTM セル 2 Op（イシュー #3796）: bias あり・なしの `LstmCell`／`LstmHidden` は
+    /// push 順序契約のため同時に create_graph 対象、checkpoint 対象外のまま。
+    #[test]
+    fn lstm_cell_family_supports_create_graph() {
+        let n = NodeId;
+        for with_bias in [false, true] {
+            let (b_ih, b_hh) = if with_bias {
+                (Some(n(5)), Some(n(6)))
+            } else {
+                (None, None)
+            };
+            let cell = Op::LstmCell {
+                x: n(0),
+                h_prev: n(1),
+                c_prev: n(2),
+                w_ih: n(3),
+                w_hh: n(4),
+                b_ih,
+                b_hh,
+                gates_ifg: Tensor::<f32>::zeros(&[1, 3]).unwrap(),
+            };
+            let hidden = Op::LstmHidden {
+                cell: n(7),
+                gate_o: Tensor::<f32>::zeros(&[1, 1]).unwrap(),
+            };
+            for op in [&cell, &hidden] {
+                assert!(op.supports_create_graph() && !op.is_checkpoint_eligible());
+            }
         }
         assert!(!Op::Cholesky { input: n(0) }.supports_create_graph());
     }

@@ -94,8 +94,9 @@
 //! 統計縮約（`LogSumExp`・`Nansum`・`Nanmean`。イシュー #3792・決定記録 §33/§51・実装は `stat_reduce_lse_nan`）も対象——
 //! 方式は `pool` サブモジュール doc と決定記録 §30。構造変換の `Dropout`・`Interpolate`・`MaxUnpool` は
 //! イシュー #3793（決定記録 §35/§56・実装は `structural`）で対象にした。RNN セルの
-//! `RnnCell`・`GruCell` はイシュー #3795（決定記録 §37/§58・実装は `rnn_gru_cell`）で対象にした
-//! （`LstmCell`・`LstmHidden` は引き続き対象外）。それ以外の追跡対象 Op・rank≥3 の
+//! `RnnCell`・`GruCell` はイシュー #3795（決定記録 §37/§58・実装は `rnn_gru_cell`）で、
+//! `LstmCell`・`LstmHidden` はイシュー #3796（決定記録 §37/§61・実装は `lstm_cell`）で対象にした
+//! （C 区分 24 Op の実装はこれで揃う）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -139,6 +140,7 @@ mod linalg_fft;
 mod loss_binary_margin;
 mod loss_class;
 mod loss_regression;
+mod lstm_cell;
 mod norm_reparam;
 mod pad_mask;
 mod pool;
@@ -510,6 +512,11 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         | Op::Ifft { norm, .. } = &node.op
         {
             linalg_fft::check_fft_norm(*norm)?;
+        }
+        // LSTM（イシュー #3796）: `LstmHidden.cell` が `LstmCell` を指す push 順序契約を
+        // 子テープへ書く前に確かめる（違反は型付き Err。`child.is_empty()` を保つ）。
+        if let Op::LstmHidden { cell, .. } = &node.op {
+            lstm_cell::check_lstm_hidden(&parent_nodes, *cell)?;
         }
         // 選択縮約（イシュー #3790）: payload（dim・index・q・補間方式）を子テープへ
         // 書く前に検証する（未知の `QuantileInterpolation` variant は拒否）。
@@ -1342,6 +1349,30 @@ fn replay_op<'c>(
                 b_hh,
             },
         ),
+        // LSTM セル 2 Op（イシュー #3796。方式は `lstm_cell` モジュール doc 参照）。
+        // `LstmCell` は `(h, c)` を積んで c を返し、`LstmHidden` は直後の h ノードを検査して拾う。
+        Op::LstmCell {
+            x,
+            h_prev,
+            c_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+            ..
+        } => lstm_cell::replay_lstm_cell(
+            mirror,
+            &lstm_cell::LstmIds {
+                x,
+                h_prev,
+                c_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            },
+        ),
+        Op::LstmHidden { cell, .. } => lstm_cell::replay_lstm_hidden(mirror, cell, shape),
         Op::MaxUnpool { input, index } => {
             crate::max_unpool_ops::replay_max_unpool(&get_mirror(mirror, input)?, &index, shape)
         }
@@ -3344,6 +3375,35 @@ fn build_cgrads<'c>(
                     b_hh,
                 },
             )?,
+            // LSTM セル 2 Op（イシュー #3796。方式は `lstm_cell` モジュール doc 参照）。
+            Op::LstmCell {
+                x,
+                h_prev,
+                c_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+                ..
+            } => lstm_cell::lstm_cell_cgrad(
+                child,
+                &parent_nodes,
+                &mut cgrads,
+                mirror,
+                &g,
+                &lstm_cell::LstmIds {
+                    x,
+                    h_prev,
+                    c_prev,
+                    w_ih,
+                    w_hh,
+                    b_ih,
+                    b_hh,
+                },
+            )?,
+            Op::LstmHidden { cell, .. } => {
+                lstm_cell::lstm_hidden_cgrad(child, &parent_nodes, &mut cgrads, mirror, cell, &g)?
+            }
             _ => {
                 return Err(AutodiffError::Backward(
                     "create_graph: build_cgrads: supports_create_graph() が true の未対応 Op\
