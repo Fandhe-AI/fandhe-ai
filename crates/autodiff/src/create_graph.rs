@@ -75,9 +75,11 @@
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
-//! `Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・
-//! `SlogdetSign`・`MatrixRank` の 13 件は fail-closed に固定した。`Stft`・`Istft` はイシュー #3804
+//! `MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・`SlogdetSign`・`MatrixRank` は fail-closed に固定した。
+//! `Stft`・`Istft` はイシュー #3804
 //! （決定記録 §42・§63。実装は `stft` サブモジュール。随伴 Op の対 `StftAdjoint`・`IstftAdjoint`）で
+//! 対象にした。`Cholesky`・`Pinv`・`Lstsq` はイシュー #3805（決定記録 §43・§65。実装は
+//! `linalg_cholesky_pinv` サブモジュール。`Pinv`・`Lstsq` は打ち切りなし `rank == min(m,n)` の入力だけ）で
 //! 対象にした。
 //! 損失の回帰系 `KlDivLoss`・`PoissonNllLoss`・`GaussianNllLoss` はイシュー #3798
 //! （決定記録 §39/§53・実装は `loss_regression`）で対象にした。
@@ -139,6 +141,7 @@ use crate::var::Var;
 mod conv;
 mod conv3d;
 mod index_cum;
+mod linalg_cholesky_pinv;
 mod linalg_fft;
 mod loss_binary_margin;
 mod loss_class;
@@ -1384,6 +1387,13 @@ fn replay_op<'c>(
             )
         }
         Op::Inv { input } => get_mirror(mirror, input)?.inv(),
+        // Cholesky・Pinv・Lstsq（イシュー #3805・決定記録 §43・§65）。公開メソッドへの自己再生
+        // （forward の検証を迂回しない）。`rcond` は payload の解決済みの値を使う。
+        Op::Cholesky { input } => get_mirror(mirror, input)?.cholesky(),
+        Op::Pinv { input, rcond } => get_mirror(mirror, input)?.pinv(Some(rcond)),
+        Op::Lstsq { a, b, rcond } => {
+            get_mirror(mirror, a)?.lstsq(&get_mirror(mirror, b)?, Some(rcond))
+        }
         Op::Solve { a, b } => get_mirror(mirror, a)?.solve(&get_mirror(mirror, b)?),
         Op::Det { input } => get_mirror(mirror, input)?.det(),
         Op::SlogdetLogAbsDet { input } => Ok(get_mirror(mirror, input)?.slogdet()?.logabsdet),
@@ -3446,6 +3456,46 @@ fn build_cgrads<'c>(
                     let a_m = get_mirror(mirror, a)?;
                     let x = get_mirror(mirror, id)?;
                     let (da, db) = linalg_fft::solve_cgrad(child, &g, &a_m, &x)?;
+                    accumulate(&parent_nodes, &mut cgrads, a, da)?;
+                    accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                }
+            }
+            // Cholesky・Pinv・Lstsq（イシュー #3805・決定記録 §43・§65。方式は
+            // `linalg_cholesky_pinv` モジュール doc 参照）。構造を積む前に総括判定を行う。
+            Op::Cholesky { input } => {
+                if parent_nodes[input.0].requires_grad {
+                    let l_val = materialize_fallible(&parent_nodes, parent_ops, id)?;
+                    linalg_cholesky_pinv::guard_cholesky(l_val, &value_of(child, &g)?)?;
+                    let l_m = get_mirror(mirror, id)?;
+                    let d = linalg_cholesky_pinv::cholesky_cgrad(child, &g, &l_m, l_val)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Pinv { input, rcond } => {
+                if parent_nodes[input.0].requires_grad {
+                    let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                    linalg_cholesky_pinv::guard_pinv(a_val, rcond, &value_of(child, &g)?)?;
+                    let a_m = get_mirror(mirror, input)?;
+                    let p_m = get_mirror(mirror, id)?;
+                    let d = linalg_cholesky_pinv::pinv_cgrad(child, &g, &a_m, &p_m, a_val, rcond)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Lstsq { a, b, rcond } => {
+                if parent_nodes[a.0].requires_grad || parent_nodes[b.0].requires_grad {
+                    let a_val = materialize_fallible(&parent_nodes, parent_ops, a)?;
+                    let b_val = materialize_fallible(&parent_nodes, parent_ops, b)?;
+                    linalg_cholesky_pinv::guard_lstsq(a_val, b_val, rcond, &value_of(child, &g)?)?;
+                    let a_m = get_mirror(mirror, a)?;
+                    let b_m = get_mirror(mirror, b)?;
+                    let (da, db) = linalg_cholesky_pinv::lstsq_cgrad(
+                        child,
+                        &g,
+                        &a_m,
+                        &b_m,
+                        (a_val, b_val),
+                        rcond,
+                    )?;
                     accumulate(&parent_nodes, &mut cgrads, a, da)?;
                     accumulate(&parent_nodes, &mut cgrads, b, db)?;
                 }

@@ -704,6 +704,57 @@ const CASES: &[Case] = &[
         run: run_stft_family_istft,
         reject: None,
     },
+    // 線形代数族（イシュー #3805・決定記録 §43/§65）。`linalg_cholesky`／`linalg_pinv`／`linalg_lstsq` は CUDA・Metal・
+    // ROCm のうち override されない経路でホストの `eval::linalg` へフォールバックし（値は 1 階と同じホスト関数の V3）、
+    // 構造の `MatMul`／`Solve` 等はデバイスで走るので H。構造の `matmul_fp32_strict` の形状は小さく（k < 128）、
+    // Metal の split-K を発火させない。`pinv`・`lstsq` は打ち切りなしの入力だけ（Q5 は打ち切りありの拒否）。
+    // 実機は未実測（#3857・#3859）。
+    Case {
+        name: "linalg_cholesky",
+        family: "linalg_cholesky_pinv_lstsq",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(3, 3, 3)]),
+        run: run_linalg_cpl_cholesky,
+        reject: Some(reject_pinv_truncated),
+    },
+    Case {
+        name: "linalg_pinv_tall",
+        family: "linalg_cholesky_pinv_lstsq",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(2, 2, 4), (2, 4, 2), (4, 2, 2)]),
+        run: run_linalg_cpl_pinv_tall,
+        reject: None,
+    },
+    Case {
+        name: "linalg_pinv_wide",
+        family: "linalg_cholesky_pinv_lstsq",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[(2, 2, 4), (2, 4, 2), (4, 2, 2)]),
+        run: run_linalg_cpl_pinv_wide,
+        reject: None,
+    },
+    Case {
+        name: "linalg_lstsq",
+        family: "linalg_cholesky_pinv_lstsq",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Listed(&[
+            (2, 2, 4),
+            (2, 4, 2),
+            (4, 2, 2),
+            (2, 4, 1),
+            (4, 2, 1),
+            (4, 1, 2),
+            (2, 1, 4),
+            (1, 2, 4),
+            (1, 4, 2),
+        ]),
+        run: run_linalg_cpl_lstsq,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -1818,6 +1869,120 @@ fn run_stft_family_istft(tp: &Tapes) -> Outputs {
     run_stft_family_body(tp, true, 50)
 }
 
+/// 線形代数族（#3805）の損失 `sum(y ⊙ y ⊙ c)`。`kind` は 0 = cholesky（`[3,3]`）、1 = pinv 縦長（`[4,2]`）、
+/// 2 = pinv 横長（`[2,4]`）、3 = lstsq（A `[4,2]` と B `[4,1]` を 1 本の長さ 12 のベクトルにまとめる）。
+fn linalg_cpl_loss<'a>(tape: &'a Tape, p: &Var<'a>, kind: usize) -> Result<Var<'a>, AutodiffError> {
+    let y = match kind {
+        0 => {
+            let half = tape.var_no_grad(&t(vec![0.5; 9], &[3, 3]));
+            let mut eye = vec![0.0f32; 9];
+            for i in 0..3 {
+                eye[i * 3 + i] = 4.0;
+            }
+            let eye = tape.var_no_grad(&t(eye, &[3, 3]));
+            p.add(&p.transpose(0, 1)?)?
+                .mul(&half)?
+                .add(&eye)?
+                .cholesky()?
+        }
+        1 | 2 => p.pinv(None)?,
+        _ => {
+            let a = p.narrow(0, 0, 8)?.reshape(&[4, 2])?;
+            let b = p.narrow(0, 8, 4)?.reshape(&[4, 1])?;
+            a.lstsq(&b, None)?
+        }
+    };
+    let ys = y.to_tensor().shape().to_vec();
+    let coef: Vec<f32> = (0..ys.iter().product::<usize>())
+        .map(|i| 0.5 + ((i * 13 + 5) % 11) as f32 * 0.1)
+        .collect();
+    let c = tape.var_no_grad(&t(coef, &ys));
+    y.mul(&y)?.mul(&c)?.sum(None)
+}
+
+/// 線形代数族（#3805）の共通本体。入力は条件の良い（打ち切りなしの）値。Q4 は同じ損失の
+/// `jvp_create_graph` の出力を孫テープで逆伝播する。
+fn run_linalg_cpl_body(tp: &Tapes, kind: usize) -> Outputs {
+    let (shape, p0): (Vec<usize>, Vec<f32>) = match kind {
+        0 => (
+            vec![3, 3],
+            vec![0.3, -0.5, 0.2, 0.1, 0.4, -0.2, 0.6, 0.0, -0.3],
+        ),
+        1 => (vec![4, 2], vec![2.0, 0.3, -0.4, 1.5, 0.2, -0.6, 0.5, 0.9]),
+        2 => (vec![2, 4], vec![2.0, 0.3, -0.4, 0.5, 0.2, -0.6, 1.5, 0.9]),
+        _ => (
+            vec![12],
+            vec![
+                2.0, 0.3, -0.4, 1.5, 0.2, -0.6, 0.5, 0.9, 0.7, -0.2, 0.5, 0.1,
+            ],
+        ),
+    };
+    let n: usize = shape.iter().product();
+    let dir: Vec<f32> = (0..n)
+        .map(|i| 0.6 - 0.23 * (i % 13) as f32 + 0.04 * (i % 5) as f32)
+        .collect();
+
+    let p = tp.parent.var(&t(p0, &shape));
+    let loss = linalg_cpl_loss(&tp.parent, &p, kind).expect("forward");
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
+    let g = cg.grad(&p).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), &shape));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let pc = cg.child_var(&p).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, &shape), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+fn run_linalg_cpl_cholesky(tp: &Tapes) -> Outputs {
+    run_linalg_cpl_body(tp, 0)
+}
+
+fn run_linalg_cpl_pinv_tall(tp: &Tapes) -> Outputs {
+    run_linalg_cpl_body(tp, 1)
+}
+
+fn run_linalg_cpl_pinv_wide(tp: &Tapes) -> Outputs {
+    run_linalg_cpl_body(tp, 2)
+}
+
+fn run_linalg_cpl_lstsq(tp: &Tapes) -> Outputs {
+    run_linalg_cpl_body(tp, 3)
+}
+
+/// Q5: 打ち切りあり（`A = diag(2, 1)`・`rcond = 0.75`）の `pinv` は GPU でも `Err(Backward)` で拒否され、
+/// 子テープは空のまま。
+fn reject_pinv_truncated(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![2.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let loss = x.pinv(Some(0.75)).unwrap().sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
 /// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
 /// 子テープは空のまま。
 fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
@@ -2043,6 +2208,10 @@ cuda_family_test!(
     "scatter_reduce"
 );
 cuda_family_test!(create_graph_stft_family_cuda_matches_cpu, "stft_family");
+cuda_family_test!(
+    create_graph_linalg_cholesky_pinv_lstsq_cuda_matches_cpu,
+    "linalg_cholesky_pinv_lstsq"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -2093,6 +2262,10 @@ metal_family_test!(
     "scatter_reduce"
 );
 metal_family_test!(create_graph_stft_family_metal_matches_cpu, "stft_family");
+metal_family_test!(
+    create_graph_linalg_cholesky_pinv_lstsq_metal_matches_cpu,
+    "linalg_cholesky_pinv_lstsq"
+);
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
 
@@ -2182,6 +2355,11 @@ fn scatter_reduce_cases_pass_cpu_against_cpu() {
 #[test]
 fn stft_family_cases_pass_cpu_against_cpu() {
     run_family("stft_family", None);
+}
+
+#[test]
+fn linalg_cholesky_pinv_lstsq_cases_pass_cpu_against_cpu() {
+    run_family("linalg_cholesky_pinv_lstsq", None);
 }
 
 #[test]

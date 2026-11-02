@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fandhe_ai_autodiff::functional_ops::jvp_create_graph;
-use fandhe_ai_autodiff::{AutodiffError, IstftOptions, StftOptions, Tape, Var};
+use fandhe_ai_autodiff::{AutodiffError, CustomFunction, IstftOptions, StftOptions, Tape, Var};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::fft::{IstftParams, StftParams};
 use fandhe_ai_tensor_core::{BackendOps, StftPadMode, Tensor};
@@ -684,6 +684,36 @@ fn istft_zero_padded_tail_and_upper_bins_have_zero_second_order() {
     }
 }
 
+/// 恒久的に create_graph 対象外の `Op::Custom`（隣接見本）。
+struct IdentityCustomFn;
+
+impl CustomFunction for IdentityCustomFn {
+    fn name(&self) -> &str {
+        "identity_custom_fn"
+    }
+
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].contiguous())
+    }
+
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        if !requires_grad[0] {
+            return Ok(vec![None]);
+        }
+        Ok(vec![Some(upstream.contiguous())])
+    }
+}
+
 // --- 7. 隣接する未対応 Op は fail-closed のまま -----------------------------------------------------
 
 #[test]
@@ -697,12 +727,17 @@ fn stft_family_neighbouring_unsupported_op_stays_fail_closed() {
         vec![4.0, 1.0, 0.5, 1.0, 3.0, 0.2, 0.5, 0.2, 2.0],
         &[3, 3],
     ));
+    // 隣接見本は恒久的に fail-closed な `Op::Custom` だけにする（Cholesky は #3805 で対象化済み）。
     let a = x
         .stft(8, Some(&win), &so)
         .expect("stft")
         .sum(None)
         .expect("sum");
-    let b = spd.cholesky().expect("cholesky").sum(None).expect("sum");
+    let b = tape
+        .custom(Arc::new(IdentityCustomFn), &[spd])
+        .expect("Tape::custom 登録成功")
+        .sum(None)
+        .expect("sum");
     let loss = a.add(&b).expect("add");
     let r = tape.backward_create_graph(&loss, &child);
     assert!(matches!(r, Err(AutodiffError::Backward(_))));
