@@ -18,8 +18,9 @@
 //! 共有ホストカーネルとした。
 //!
 //! **数値契約**: 窓内二乗和・`d^β`・除算は `f64`、最後に 1 回だけ `f32` へ downcast（規則の正は
-//! `fandhe_ai_tensor_core::lrn`）。非有限入力は拒否せず伝播する。高階微分（`create_graph`）・
-//! activation checkpoint・f64 自動微分経路は対象外。
+//! `fandhe_ai_tensor_core::lrn`）。非有限入力は拒否せず伝播する。activation checkpoint・f64 自動微分経路は対象外。
+//! 高階微分（`create_graph`）はイシュー #3794 で対象になった（方式は `create_graph/norm_reparam.rs`、
+//! 決定記録 §36・§57）。
 //!
 //! **PyTorch との意図的な差分**: 非有限の `alpha`／`beta`／`k` は拒否する（PyTorch は無検査）。
 //! `size == 0` は拒否する。詳細は決定記録 §5。

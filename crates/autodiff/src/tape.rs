@@ -1404,7 +1404,8 @@ pub(crate) enum Op {
     /// `tensor_core::lrn::local_response_norm_vjp_host`）に必要なため保持する。統計 `d` は保持せず
     /// backward で入力から再計算する。**既存 Op の合成にしない**（二乗が `f32` で先に確定し
     /// `f64` アキュムレータ契約に抵触するため）。常に実体化済み（`push_eager`）・非 checkpoint・
-    /// 高階微分非対応・低精度なし。
+    /// 低精度なし。高階微分（`create_graph`）は V3 値＋S1 構造で対応（イシュー #3794・
+    /// 決定記録 §36/§57。方式は `create_graph/norm_reparam.rs`）。
     LocalResponseNorm {
         input: NodeId,
         params: fandhe_ai_tensor_core::lrn::LrnParams,
@@ -2691,6 +2692,11 @@ impl Op {
             // `create_graph/structural.rs`。`Interpolate` は下の payload 判定。
             | Op::Dropout { .. }
             | Op::MaxUnpool { .. }
+            // 正規化・再パラメータ 3 Op（イシュー #3794・決定記録 §36/§57）。方式は
+            // `create_graph/norm_reparam.rs`。3 つとも V3 値＋S1 構造。
+            | Op::LocalResponseNorm { .. }
+            | Op::WeightNorm { .. }
+            | Op::SpectralNorm { .. }
             // RNN セル 2 Op（イシュー #3795・決定記録 §37/§58）。方式は
             // `create_graph/rnn_gru_cell.rs`。`LstmCell`／`LstmHidden` は `false` のまま。
             | Op::RnnCell { .. }
@@ -2741,9 +2747,6 @@ impl Op {
             | Op::Istft { .. }
             | Op::IndexedScatterReduce { .. }
             | Op::Cumprod { .. }
-            | Op::LocalResponseNorm { .. }
-            | Op::WeightNorm { .. }
-            | Op::SpectralNorm { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
             // プラグイン。`docs/autodiff-custom-function-decision.md`）は
@@ -6065,7 +6068,7 @@ mod conv3d_internal_op_tests {
     }
 }
 /// `Op::LocalResponseNorm`／`Op::WeightNorm`／`Op::SpectralNorm`（イシュー #2646）のメタ性質固定:
-/// checkpoint 対象外・create_graph replay 対象外・`for_each_input` が追跡入力のみを順に列挙する
+/// checkpoint 対象外・create_graph 対応（イシュー #3794・決定記録 §36/§57 で true へ反転）・`for_each_input` が追跡入力のみを順に列挙する
 /// （`spectral_norm` の `u`／`v` スナップショットは入力ではない）。
 #[cfg(test)]
 mod lrn_weight_reparam_op_tests {
@@ -6101,7 +6104,7 @@ mod lrn_weight_reparam_op_tests {
         ];
         for (op, want) in ops {
             assert!(!op.is_checkpoint_eligible());
-            assert!(!op.supports_create_graph());
+            assert!(op.supports_create_graph());
             let mut seen = Vec::new();
             op.for_each_input(|id| seen.push(id.0));
             assert_eq!(seen, want);
