@@ -29,7 +29,8 @@
 //!   `2^125` 以上なら拒否。さらに二階の逆伝播の各段（「cotangent × 微分係数」）を、seed の各要素の
 //!   絶対値を 1 として絶対値の f64 で歩いた上界（scan 側は `scan_cotangent_bound`、`L` 側は
 //!   絶対値の入力を 1 階と同じ cumprod の VJP に通す）も同じ閾値で判定する。0 への underflow は
-//!   拒否しない（underflow した項の絶対誤差は 1e-5 の救済内に収まる）。
+//!   拒否しない（underflow した項の絶対誤差は 1e-5 の救済内に収まる）。加えて f32 scan の `S` を f64 逐次再帰の
+//!   参照と REQ-2 統一複合判定で突き合わせ、桁落ち（大きな項の相殺）による不一致も拒否する。
 //! - `Logcumsumexp`: f64 prefix の参照係数 `exp(out64[j]-out64[j+1])`・`exp(x-out64)` と f32 構造の
 //!   係数 `c`・`w` を REQ-2 の統一複合判定（`tolerance::composite_close_f32`。新しい定数は作らない）で
 //!   比べ、さらに Hessian 側の項 `c[j]·T[j+1]`・`w[j]·T[j]` にも同じ判定を課す。外れたら拒否。
@@ -161,6 +162,29 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
                     "Cumprod の scan 構造の段が 2^125 以上または非有限のため拒否（§41・§63 参照）"
                         .into(),
                 ));
+            }
+            // 桁落ち検出: f32 scan の `S` を f64 逐次再帰 `S64[a] = g[a] + x[a+1]·S64[a+1]` の
+            // 参照と REQ-2 統一複合判定で突き合わせる（定数は新設・緩和しない）。大きな項の相殺
+            // （例 `g=[0,1e10,1,-1e10]`・`x=1` で f32 は `S[1]=0`、真値 1）で二階微分の
+            // 混合項が静かに壊れるのを拒否する。大きさ・有限性だけの上の判定では検出できない。
+            let mut s64 = vec![0f64; n];
+            let mut acc = 0f64;
+            for j in (0..n).rev() {
+                let next = if j + 1 < n {
+                    f64::from(xl[j + 1]) * acc
+                } else {
+                    0.0
+                };
+                acc = f64::from(gl[j]) + next;
+                s64[j] = acc;
+            }
+            for j in 0..n {
+                if !composite_close_f32(s[j], s64[j] as f32) {
+                    return Err(invalid(
+                        "Cumprod の scan 構造が桁落ちで f64 参照と REQ-2 の複合判定を外れるため拒否（§41・§63 参照）"
+                            .into(),
+                    ));
+                }
             }
             let mut l = vec![1f32; n];
             l[1..].copy_from_slice(&yl[..n - 1]);
@@ -477,6 +501,14 @@ mod tests {
         assert!(cp(&[1.0, f32::INFINITY], &[1.0, 1.0]).is_err());
         assert!(cp(&[1.0, 2.0], &[f32::NAN, 1.0]).is_err());
         assert!(cp(&[1.0, 2.0], &[3e38, 1.0]).is_err());
+    }
+
+    #[test]
+    fn cumprod_check_rejects_scan_cancellation() {
+        // f32 scan は S[1] = (1e10+1)-1e10 = 0、真値は 1（二階の混合項が 0 になる）。
+        assert!(cp(&[1.0; 4], &[0.0, 1e10, 1.0, -1e10]).is_err());
+        // 相殺のない同規模の入力は受理される。
+        assert!(cp(&[1.0; 4], &[0.0, 1e10, 1.0, 1e10]).is_ok());
     }
 
     #[test]

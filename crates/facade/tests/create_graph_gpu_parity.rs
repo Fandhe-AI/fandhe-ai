@@ -654,7 +654,7 @@ const CASES: &[Case] = &[
         judge: Judge::Strict,
         split_k: SplitKShapes::NoMatMul,
         run: run_cumulative_b_cumprod,
-        reject: Some(reject_cumulative_b_inf_input),
+        reject: Some(reject_cumulative_b_cumprod_inf_input),
     },
     Case {
         name: "cumulative_b_logcumsumexp",
@@ -663,7 +663,7 @@ const CASES: &[Case] = &[
         judge: Judge::Strict,
         split_k: SplitKShapes::NoMatMul,
         run: run_cumulative_b_logcumsumexp,
-        reject: Some(reject_cumulative_b_inf_input),
+        reject: Some(reject_cumulative_b_logcumsumexp_inf_input),
     },
     // 索引付き縮約族（イシュー #3802・決定記録 §41/§62）。`indexed_scatter_reduce` は CUDA・Metal・ROCm で
     // override されておらずホストへフォールバックする（`Gather`／`Where`／`Mul` はデバイスで走る）ので H。
@@ -1719,12 +1719,22 @@ fn run_cumulative_b_logcumsumexp(tp: &Tapes) -> Outputs {
 }
 
 /// Q5: ±inf の入力は型付きエラーで拒否され、子テープは空のまま（両デバイスで同じ結果にする）。
-fn reject_cumulative_b_inf_input(tp: &Tapes) -> bool {
+/// `lse` が真なら Logcumsumexp、偽なら Cumprod を対象にする（族の各 Case が自分の演算を検査する）。
+fn reject_cumulative_b_inf_input_op(tp: &Tapes, lse: bool) -> bool {
     let x = tp
         .parent
         .var(&t(vec![0.5, f32::INFINITY, 0.7, 0.9], &[1, 4]));
-    let loss = x.cumprod(1).unwrap().sum(None).unwrap();
+    let y = if lse { x.logcumsumexp(1) } else { x.cumprod(1) };
+    let loss = y.unwrap().sum(None).unwrap();
     is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
+fn reject_cumulative_b_cumprod_inf_input(tp: &Tapes) -> bool {
+    reject_cumulative_b_inf_input_op(tp, false)
+}
+
+fn reject_cumulative_b_logcumsumexp_inf_input(tp: &Tapes) -> bool {
+    reject_cumulative_b_inf_input_op(tp, true)
 }
 
 /// 索引付き縮約族（#3802）の共通本体。input `[3, 4]` と src `[2, 3]` を 1 本の葉 `p` から切り出し
