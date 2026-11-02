@@ -2682,3 +2682,151 @@ fn svd_degenerate_is_rejected_via_facade() {
     let loss = x.svd().unwrap().s.sum(None).unwrap();
     assert_create_graph_rejected("svd", &tape, &child, &loss);
 }
+
+// --- 重み勾配用の内部 Op（`ConvWeightGradHost`／`ConvWeightGradHost3d`）の孫テープ再生（イシュー #3812・Codex 指摘） ---
+//
+// 重みを `var_no_grad` で作る既存の `conv2d_create_graph_via_facade` 等は入力 `x` の勾配しか見ず、
+// 重み勾配用の内部 Op は通らない。ここでは重みも追跡対象にし、親→子（`cg.grad(&w)` が重み勾配 Op の出力）
+// →孫（子テープへ `backward_create_graph` を適用して重み勾配 Op を再生）まで通す。
+
+type BuildXw = for<'a> fn(&'a Tape, &Var<'a>, &Var<'a>) -> Var<'a>;
+
+fn conv2d_xw_loss<'a>(_tape: &'a Tape, x: &Var<'a>, w: &Var<'a>) -> Var<'a> {
+    let y = x.conv2d(w, None, [1, 1], [0, 0], [1, 1], 1).unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn conv3d_xw_loss<'a>(_tape: &'a Tape, x: &Var<'a>, w: &Var<'a>) -> Var<'a> {
+    let y = x
+        .conv3d(w, None, [1, 1, 2], [0, 0, 0], [1, 1, 1], 1)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+/// 素の `backward` による `(dx, dw)`（create_graph を通らない独立経路）。
+fn plain_grads_xw(
+    x0: &[f32],
+    xs: &[usize],
+    w0: &[f32],
+    ws: &[usize],
+    build: BuildXw,
+) -> (Vec<f32>, Vec<f32>) {
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&t(x0.to_vec(), xs));
+    let w = tape.var(&t(w0.to_vec(), ws));
+    let loss = build(&tape, &x, &w);
+    let grads = tape.backward(&loss).expect("backward");
+    (
+        vals(grads.get(&x).unwrap().expect("dx")),
+        vals(grads.get(&w).unwrap().expect("dw")),
+    )
+}
+
+fn check_weight_grad_replay(
+    label: &str,
+    x0: &[f32],
+    xs: &[usize],
+    w0: &[f32],
+    ws: &[usize],
+    build: BuildXw,
+    eps: f32,
+) {
+    let parent = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let grand = fandhe_ai::tape();
+    let x = parent.var(&t(x0.to_vec(), xs));
+    let w = parent.var(&t(w0.to_vec(), ws));
+    let loss = build(&parent, &x, &w);
+    let cg = parent
+        .backward_create_graph(&loss, &child)
+        .unwrap_or_else(|e| panic!("{label}: create_graph 対象のはず: {e:?}"));
+    // 子テープ上の重み勾配（重み勾配用の内部 Op の出力）と固定方向の内積 s = gw·v。
+    let gw = cg.grad(&w).unwrap().expect("重み勾配");
+    let vw = child.var_no_grad(&t(probe_dir(w0.len()), ws));
+    let s = gw.mul(&vw).unwrap().sum(None).unwrap();
+    // 子テープへ backward_create_graph を適用し、孫テープで重み勾配用の内部 Op を再生する。
+    let cg2 = child
+        .backward_create_graph(&s, &grand)
+        .unwrap_or_else(|e| panic!("{label}: 重み勾配 Op の再生（孫テープ）が拒否された: {e:?}"));
+    let xc = cg.child_var(&x).unwrap().expect("x の写し");
+    let wc = cg.child_var(&w).unwrap().expect("w の写し");
+    let first_x = vals(cg2.first_order().get(&xc).unwrap().expect("d s/dx"));
+    let first_w = vals(cg2.first_order().get(&wc).unwrap().expect("d s/dw"));
+    // 孫テープ上の勾配は子テープの素の backward と REQ-2 で一致する（再生の回帰検出）。
+    for (name, v, first) in [("x", &xc, &first_x), ("w", &wc, &first_w)] {
+        let g = cg2.grad(v).unwrap().expect("孫テープ上の勾配");
+        for (a, b) in first.iter().zip(vals(&g.value()).iter()) {
+            assert!(
+                req2_close(*a as f64, *b as f64),
+                "{label}: 孫テープの d s/d{name} {b} vs 子テープ {a}"
+            );
+        }
+    }
+    assert!(
+        first_w.iter().any(|v| v.abs() > 1e-4) && first_x.iter().any(|v| v.abs() > 1e-4),
+        "{label}: d s/dx・d s/dw がゼロでは再生の検証にならない"
+    );
+    // 独立経路: s(x, w) = gw(x, w)·v を素の backward の中央差分で突合する。
+    let v = probe_dir(w0.len());
+    let dot = |x: &[f32], w: &[f32]| -> f64 {
+        plain_grads_xw(x, xs, w, ws, build)
+            .1
+            .iter()
+            .zip(&v)
+            .map(|(&a, &d)| a as f64 * d as f64)
+            .sum()
+    };
+    for i in 0..x0.len() {
+        let (mut xp, mut xm) = (x0.to_vec(), x0.to_vec());
+        xp[i] += eps;
+        xm[i] -= eps;
+        let num = (dot(&xp, w0) - dot(&xm, w0)) / (2.0 * eps as f64);
+        assert!(
+            req2_close(first_x[i] as f64, num),
+            "{label}: d s/dx[{i}] analytic={} numeric={num}",
+            first_x[i]
+        );
+    }
+    for i in 0..w0.len() {
+        let (mut wp, mut wm) = (w0.to_vec(), w0.to_vec());
+        wp[i] += eps;
+        wm[i] -= eps;
+        let num = (dot(x0, &wp) - dot(x0, &wm)) / (2.0 * eps as f64);
+        assert!(
+            req2_close(first_w[i] as f64, num),
+            "{label}: d s/dw[{i}] analytic={} numeric={num}",
+            first_w[i]
+        );
+    }
+}
+
+/// `ConvWeightGradHost`: 重みを追跡して重み勾配 Op を孫テープで再生する。
+#[test]
+fn conv2d_weight_grad_replay_create_graph_via_facade() {
+    check_weight_grad_replay(
+        "conv2d_weight_grad",
+        &CONV_X,
+        &[1, 1, 3, 3],
+        &[0.5, -0.3, 0.2, 0.8],
+        &[1, 1, 2, 2],
+        conv2d_xw_loss,
+        1e-2,
+    );
+}
+
+/// `ConvWeightGradHost3d`: 同上（軸ごとに異なる kernel `[2, 2, 2]`・stride `[1, 1, 2]`）。
+#[test]
+fn conv3d_weight_grad_replay_create_graph_via_facade() {
+    let x: Vec<f32> = (0..18)
+        .map(|i| (((i * 7 + 3) % 11) as f32 - 5.0) * 0.15)
+        .collect();
+    check_weight_grad_replay(
+        "conv3d_weight_grad",
+        &x,
+        &[1, 1, 2, 3, 3],
+        &[0.5, -0.3, 0.2, 0.8, -0.6, 0.4, 0.1, -0.7],
+        &[1, 1, 2, 2, 2],
+        conv3d_xw_loss,
+        1e-2,
+    );
+}

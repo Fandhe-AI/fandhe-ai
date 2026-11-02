@@ -45093,7 +45093,18 @@ fn check_create_graph_op_partition(src: &str, exp: &CgExpected) -> Result<(), St
                 if ops.len() != 1 {
                     return Err(format!("payload 腕が 2 つ以上の Op を束ねている: {ops:?}"));
                 }
-                payload.insert(ops[0].clone(), cg_enum_paths(expr));
+                // 列挙パスの集合だけでなく判定の形（肯定形・対象引数・追加条件の不在）まで検証する。
+                match exp.payload.get(&ops[0]) {
+                    Some(paths) => {
+                        cg_check_payload_arm(pat, expr, paths)
+                            .map_err(|e| format!("`Op::{}` の payload 腕: {e}", ops[0]))?;
+                        payload.insert(ops[0].clone(), paths.clone());
+                    }
+                    // 想定外の payload 腕は集合 P の差分として報告させる。
+                    None => {
+                        payload.insert(ops[0].clone(), cg_enum_paths(expr));
+                    }
+                }
             }
         }
     }
@@ -45120,14 +45131,111 @@ fn check_create_graph_op_partition(src: &str, exp: &CgExpected) -> Result<(), St
     Ok(())
 }
 
-/// 関数本体が参照する `Name::Variant` の集合を固定値と突き合わせる
-/// （`scalar_unary_replayable` 等の列挙値の固定）。
+fn cg_squash(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn cg_is_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(cg_is_ident_char)
+        && !s.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// 式が厳密に `matches!(<ARG>, <Path> [{ .. }] | ...)` の肯定形であることを検証し、
+/// `(ARG, 列挙パス集合)` を返す。`!matches!`・`|| ...`・`&& ...`・ワイルドカード・ガード・
+/// パスの重複は `Err`（`matches!` 反転や追加条件による受理条件の変更を検出する）。
+fn cg_parse_matches(expr: &str) -> Result<(String, std::collections::BTreeSet<String>), String> {
+    let sq = cg_squash(expr);
+    let inner = sq
+        .strip_prefix("matches!(")
+        .and_then(|r| r.strip_suffix(')'))
+        .ok_or_else(|| format!("`matches!(..)` の肯定形そのものではない: {expr}"))?;
+    let (arg, alts) = inner
+        .split_once(',')
+        .ok_or_else(|| format!("`matches!` の引数区切りが無い: {expr}"))?;
+    if !cg_is_ident(arg) {
+        return Err(format!("`matches!` の対象が単一の識別子ではない: {arg}"));
+    }
+    let mut set = std::collections::BTreeSet::new();
+    for alt in alts.split('|') {
+        let path = alt.strip_suffix("{..}").unwrap_or(alt);
+        let ok = path.contains("::") && path.split("::").all(cg_is_ident) && !path.ends_with("::");
+        if !ok {
+            return Err(format!("`matches!` の選択肢が列挙パスではない: `{alt}`"));
+        }
+        if !set.insert(path.to_string()) {
+            return Err(format!("`matches!` の選択肢が重複している: `{path}`"));
+        }
+    }
+    Ok((arg.to_string(), set))
+}
+
+/// パターンが `arg` をフィールド略記で束縛している（`{ arg, .. }` 等）。
+fn cg_pattern_binds(pat: &str, arg: &str) -> bool {
+    let sq = cg_squash(pat);
+    ["{", ","].iter().any(|open| {
+        ["}", ","]
+            .iter()
+            .any(|close| sq.contains(&format!("{open}{arg}{close}")))
+    })
+}
+
+/// payload 腕 1 本の判定の形を検証する。期待が `crate::` 始まりの単一パスなら委譲形
+/// `<path>(*<arg>)`、それ以外は `matches!(<arg>, 期待パス…)` の肯定形。`arg` は腕のパターンで束縛された名前。
+fn cg_check_payload_arm(
+    pat: &str,
+    expr: &str,
+    expected: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let sq = cg_squash(expr);
+    if expected.len() == 1
+        && expected
+            .iter()
+            .next()
+            .is_some_and(|p| p.starts_with("crate::"))
+    {
+        let path = expected.iter().next().unwrap();
+        let arg = sq
+            .strip_prefix(&format!("{path}(*"))
+            .and_then(|r| r.strip_suffix(')'))
+            .ok_or_else(|| format!("委譲形 `{path}(*<arg>)` そのものではない: {expr}"))?;
+        if !cg_is_ident(arg) || !cg_pattern_binds(pat, arg) {
+            return Err(format!(
+                "委譲先へ渡す値 `{arg}` が腕で束縛された名前ではない"
+            ));
+        }
+        return Ok(());
+    }
+    let (arg, set) = cg_parse_matches(expr)?;
+    if !cg_pattern_binds(pat, &arg) {
+        return Err(format!(
+            "`matches!` の対象 `{arg}` が腕で束縛された名前ではない"
+        ));
+    }
+    match cg_set_diff("payload 列挙", &set, expected) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// 関数本体が厳密に `matches!(<引数>, 列挙パス…)` の肯定形であり（引数は関数の仮引数）、
+/// 列挙パス集合が固定値と一致する（`scalar_unary_replayable` 等の受理条件の固定）。
 fn check_fn_enum_paths(src: &str, fn_name: &str, expected: &[&str]) -> Result<(), String> {
     let chars = strip_comments_and_literals(src);
     let (s, e) =
         cg_fn_body_range(&chars, fn_name).ok_or(format!("`fn {fn_name}` の本体が見つからない"))?;
     let body: String = chars[s..e].iter().collect();
-    let actual = cg_enum_paths(&body);
+    let (arg, actual) = cg_parse_matches(&body).map_err(|e| format!("`{fn_name}`: {e}"))?;
+    let pre: String = chars[..s].iter().collect();
+    let header = pre
+        .rfind(&format!("fn {fn_name}"))
+        .map(|i| cg_squash(&pre[i..]))
+        .unwrap_or_default();
+    if !header.contains(&format!("({arg}:")) {
+        return Err(format!(
+            "`{fn_name}`: `matches!` の対象 `{arg}` が仮引数ではない"
+        ));
+    }
     let exp: std::collections::BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
     match cg_set_diff(&format!("`{fn_name}` の列挙値"), &actual, &exp) {
         Some(e) => Err(e),
@@ -45271,7 +45379,10 @@ const CG_FACADE_ACCEPT_MAP: &[(&str, &str)] = &[
     ("Narrow", "basic_and_structure_ops_create_graph_via_facade"),
     ("Concat", "basic_and_structure_ops_create_graph_via_facade"),
     ("Contiguous", "layer_norm_create_graph_via_facade"),
-    ("ConvWeightGradHost", "conv2d_create_graph_via_facade"),
+    (
+        "ConvWeightGradHost",
+        "conv2d_weight_grad_replay_create_graph_via_facade",
+    ),
     ("BatchNormGradHost", "batch_norm_create_graph_via_facade"),
     ("Conv2d", "conv2d_create_graph_via_facade"),
     (
@@ -45285,7 +45396,10 @@ const CG_FACADE_ACCEPT_MAP: &[(&str, &str)] = &[
     ),
     ("Unfold3d", "conv3d_create_graph_via_facade"),
     ("Fold3d", "conv3d_create_graph_via_facade"),
-    ("ConvWeightGradHost3d", "conv3d_create_graph_via_facade"),
+    (
+        "ConvWeightGradHost3d",
+        "conv3d_weight_grad_replay_create_graph_via_facade",
+    ),
     ("MaxPool2d", "max_pool2d_create_graph_via_facade"),
     (
         "MaxPool3d",
@@ -45573,12 +45687,15 @@ fn create_graph_supported_op_set_detects_each_category() {
                 .collect(),
         }
     }
-    fn src(t: &str, p: &str, f: &str, extra: &str) -> String {
+    fn src_pe(t: &str, pe: &str, f: &str, extra: &str) -> String {
         format!(
             "impl Op {{ pub(crate) fn supports_create_graph(&self) -> bool {{ match self {{ \
-             {t} => true, Op::P {{ x, .. }} => matches!(x, {p}), {f} => false, {extra} }} }} }}\n\
+             {t} => true, Op::P {{ x, .. }} => {pe}, {f} => false, {extra} }} }} }}\n\
              fn supports_create_graph_f64(&self) -> bool {{ match self {{ Op::Z => true }} }}"
         )
+    }
+    fn src(t: &str, p: &str, f: &str, extra: &str) -> String {
+        src_pe(t, &format!("matches!(x, {p})"), f, extra)
     }
     let t_ok = "Op::A | Op::B { .. } | Op::Det(..)";
     let p_ok = "E::X | E::Y";
@@ -45618,6 +45735,13 @@ fn create_graph_supported_op_set_detects_each_category() {
         ),
         // Op の重複
         src(&format!("{t_ok} | Op::D"), p_ok, f_ok, ""),
+        // payload の受理条件の反転・対象引数の差し替え・追加条件・ワイルドカード
+        src_pe(t_ok, "!matches!(x, E::X | E::Y)", f_ok, ""),
+        src_pe(t_ok, "matches!(y, E::X | E::Y)", f_ok, ""),
+        src_pe(t_ok, "matches!(x, E::X | E::Y) || true", f_ok, ""),
+        src_pe(t_ok, "matches!(x, E::X | E::Y) && x.ok()", f_ok, ""),
+        src_pe(t_ok, "matches!(x, E::X | E::Y | _)", f_ok, ""),
+        src_pe(t_ok, "true", f_ok, ""),
     ];
     for (i, s) in bad.iter().enumerate() {
         assert!(
@@ -45634,6 +45758,35 @@ fn create_graph_supported_op_set_detects_each_category() {
     assert!(check_fn_enum_paths(f, "replayable", &["U::Neg"]).is_err());
     assert!(check_fn_enum_paths(f, "replayable", &["U::Neg", "U::Abs", "U::Selu"]).is_err());
     assert!(check_fn_enum_paths(f, "missing", &["U::Neg"]).is_err());
+    // 受理条件の反転・追加条件・対象引数の差し替え・ワイルドカードは列挙値が同じでも検出する。
+    for bad in [
+        "fn replayable(op: U) -> bool { !matches!(op, U::Neg | U::Abs) }",
+        "fn replayable(op: U) -> bool { matches!(op, U::Neg | U::Abs) || true }",
+        "fn replayable(op: U) -> bool { matches!(op, U::Neg | U::Abs) && cond() }",
+        "fn replayable(op: U) -> bool { matches!(other, U::Neg | U::Abs) }",
+        "fn replayable(op: U) -> bool { matches!(op, U::Neg | U::Abs | _) }",
+        "fn replayable(op: U) -> bool { false }",
+    ] {
+        assert!(
+            check_fn_enum_paths(bad, "replayable", &["U::Neg", "U::Abs"]).is_err(),
+            "改変が検出されない: {bad}"
+        );
+    }
+    // 委譲形の payload 腕: 肯定形のみ受理し、否定・別引数・追加条件は拒否する。
+    let one: std::collections::BTreeSet<String> = ["crate::m::f".to_string()].into();
+    let pat = "Op::P { op, .. }";
+    assert_eq!(cg_check_payload_arm(pat, "crate::m::f(*op)", &one), Ok(()));
+    for bad in [
+        "!crate::m::f(*op)",
+        "crate::m::f(*other)",
+        "crate::m::f(*op) || true",
+        "true",
+    ] {
+        assert!(
+            cg_check_payload_arm(pat, bad, &one).is_err(),
+            "委譲形の改変が検出されない: {bad}"
+        );
+    }
     // `name_f64` は別関数として扱う（完全一致）。
     let g = "fn replayable_f64(op: U) -> bool { matches!(op, U::Neg) }";
     assert!(check_fn_enum_paths(g, "replayable", &["U::Neg"]).is_err());
