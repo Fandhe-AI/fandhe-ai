@@ -1468,3 +1468,41 @@ fn interpolate_nearest_hessian_diagonal_is_twice_copy_count() {
         assert!(row[1 - i].abs() < 1e-6, "{row:?}");
     }
 }
+
+// --- RNN セル 2 Op（イシュー #3795・決定記録 §37/§58） ------------------------------------
+//
+// 公開 API の `rnn_forward_seq`／`gru_forward_seq` の `x` は定数の `Tensor` で、`GateParams` は facade から
+// 使えない。そのため微分する葉は初期の隠れ状態 `h0`（`[B, H]`）。x・重みについての Hessian は
+// autodiff 側 `create_graph_rnn_gru_cell.rs` が担う。
+
+fn rnn_x() -> Tensor<f32> {
+    let v: Vec<f32> = (0..2 * 2 * 3)
+        .map(|i| 0.5 * ((i as f32) * 0.37 + 0.2).cos())
+        .collect();
+    t(v, &[2, 2, 3])
+}
+
+fn rnn_loss<'a>(tape: &'a Tape, h0: &Var<'a>) -> Var<'a> {
+    let rnn = fandhe_ai::nn::rnn::Rnn::new(3, 4, true, 7).unwrap();
+    let h_n = tape.rnn_forward_seq(&rnn, &rnn_x(), Some(h0)).unwrap().h_n;
+    quad_loss(tape, &h_n)
+}
+
+fn gru_loss<'a>(tape: &'a Tape, h0: &Var<'a>) -> Var<'a> {
+    let gru = fandhe_ai::nn::rnn::Gru::new(3, 4, true, 7).unwrap();
+    let h_n = tape.gru_forward_seq(&gru, &rnn_x(), Some(h0)).unwrap().h_n;
+    quad_loss(tape, &h_n)
+}
+
+#[test]
+fn rnn_create_graph_via_facade() {
+    let h0 = [0.3, -0.7, 0.9, 0.2, -0.4, 0.8, 0.5, -0.1];
+    check_create_graph_family("rnn", &h0, &[2, 4], rnn_loss, true, 0.02);
+}
+
+#[test]
+fn gru_create_graph_via_facade() {
+    let h0 = [0.3, -0.7, 0.9, 0.2, -0.4, 0.8, 0.5, -0.1];
+    // GRU は子テープでゲートを作り直す（forward の `mul_add` と丸めがずれる）ので REQ-2 で突合する。
+    check_create_graph_family("gru", &h0, &[2, 4], gru_loss, false, 0.02);
+}

@@ -2038,6 +2038,7 @@ CI の行は新設 `crates/autodiff/tests/create_graph_rnn_cell.rs` に置く。
 
 - 構造は 1 階と同じ f32 の積を同じ順で並べるだけで、スケール変換も f64 縮約も入らない。このため既定では §27.3 型の総括判定を置かない。
 - 掃引テストで「1 階が有限なら cgrad・二階も有限」を固定する。違反する入力が見つかったら、実装 PR で型付きの拒否を足し、本節に逸脱として追記する（37.14 の論点 5）。
+- **逸脱（PR #3952 の codex 指摘で追加）**: RNN・GRU は掃引で違反入力が見つかったため、型付きの拒否を足した。(1) GRU の `r·q + pre_i_n` は forward が FMA、再構築が分離丸めで、相殺入力で `n` が REQ-2 の許容を超えてずれる場合に `Err`。(2) 上流 `g` × オペランド（x・h_prev・W・bias・GRU の `q`）の上界が `STAGE_BOUND_GUARD`（2^125）以上なら、真の二階が 0 でも `0 × inf = NaN` になりうるため `Err`（RNN・GRU 共通）。(3) GRU の `n` は FMA と分離丸めの差が許容内でも `1 − n²` と上流勾配で増幅され勾配が REQ-2 を外れうる（`n` が 1 と 0.99999976 になる例。w_ih の n 列の勾配が素の backward 0・cgrad 約 0.002384）。このため再構築した `n` のうち丸めが割れた要素を、値 `n_fwd`・傾き `1 − n_fwd²` の一次式 `n_fwd + (a − a₀)(1 − n_fwd²)`（`a₀` は tanh 引数の値の定数写し）へ置き換え、値と微分因子の両方を forward と一致させる。値だけ定数補正すると Tanh の逆伝播が補正前の出力を使い、reset 列への混合二階が約 -93752 ずれたため（PR #3952 codex P1 再指摘）。割れない要素は `tanh` のまま。割れた要素は 3 階以上の曲率を落とす（二階までは forward と整合）。割れる要素に非有限の tanh 引数が混在する入力は `Err`。tolerance は変えない。
 - `is_checkpoint_eligible` は触らない。§21.6 の判定順・網羅 match・未知 variant を `false` に倒す規約は弱めない。
 
 ### 37.13 GPU の forward 経路と Phase 10
@@ -4542,3 +4543,53 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: GPU 実機 parity の実測（Phase 10）と測り方の変更（#3739・§48）、1 階の Dropout の非有限 upstream の意味論の変更、MaxUnpool の重複 index を PyTorch に寄せること、`InterpolateMode` の新しい variant、f64 テープの create_graph、facade の公開名の追加、他の C 区分・B 区分の Op。
 - 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
 - 本 PR は `Refs #3793 #3726 #3767 #3719 #3856 #3858`。
+
+## 58. 実装記録（イシュー #3795・親 #3719 系。create_graph の C 区分・RNN セル `RnnCell`・`GruCell`）
+
+### 58.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（本 PR は `Refs #3795`。実機 parity の実測が Phase 10 に残るため `Closes` は使わない）。設計は §37（#3728）で、本節はその実装記録。節番号は §57（#3794。open PR で予約済み）の次を取った。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）。回答は「C 区分 24 Op は全 5 族を実装する（§33〜§37 の推奨）」「§33.14〜§37.14 の個別の点も推奨どおり」「GPU parity は §48.11 の方式」とあり、RNN セルは §37 の対象に入っている。個別の承認を上乗せして主張しない。
+- 範囲は `RnnCell`・`GruCell` の 2 Op。`LstmCell`・`LstmHidden` は #3796 で 2 つ一緒に反転するため、本 PR では `false` の腕に残した。
+
+### 58.1 実装したもの
+
+| Op | 公開メソッド（facade） | 方式 | cgrad |
+|---|---|---|---|
+| `RnnCell` | `rnn_forward_seq`（内部は `Var::rnn_cell`） | V1 + bias のみ V3 | 自ノードの写し `h_t` から `factor = 1 − h_t²`、`d_pre = g ⊙ factor`。`dx = d_pre·W_ihᵀ`、`dW_ih = xᵀ·d_pre`、`dh_prev = d_pre·W_hhᵀ`、`dW_hh = h_prevᵀ·d_pre`（すべて `matmul_fp32_strict`）。`db_ih`・`db_hh` は 1 階 `affine_vjp` と同じ f64 縮約ホスト関数を `reduce_bias_grad_var` 経由で使う |
+| `GruCell` | `gru_forward_seq`（内部は `Var::gru_cell`） | V1 + bias のみ V3 | payload `gates_rzn`・`q` は x・h_prev・W の関数なので定数に使わず、子テープ上で `pre_i`・`pre_h` から `r,z,n`・`q` を作り直す（reset-after。§37.10 の例外）。1 階 `eval::gru_backward` と同じ式・同じ掛ける順で `d_pre_i = cat[d_pre_r, d_pre_z, d_pre_n]`、`d_pre_h = cat[d_pre_r, d_pre_z, d_pre_n ⊙ r]` を作り、重みごとに GEMM 1 本 |
+
+- 実装は `crates/autodiff/src/create_graph/rnn_gru_cell.rs`。`replay_op` と `build_cgrads` の腕は `create_graph.rs`、網羅 match の `supports_create_graph` は `tape.rs`（ワイルドカードは足していない）。写しは `Var::rnn_cell`／`gru_cell` で自己再生し、子テープでも forward と同じ `rnn_cell_forward_value`／`gru_cell_forward_values` を通る（`GruCell` の payload は子テープ側が計算し直す）。
+- 子テープへ積む Op は `MatMul`・`Transpose`・`Narrow`・`Concat`・`Add`・`Sub`・`Mul`・`Sigmoid`・`Tanh`・`Sum` と、写しの `RnnCell`・`GruCell`。すべて `supports_create_graph() == true`（閉包性。§21.1(4)）。孫テープ（`jvp_create_graph`）でも再生できる。
+- 入口の検査: 構築の冒頭で `H`・`3H` を `checked_mul` で導き、`w_ih` の列数が `3H` と合わなければ型付き `Err(Backward)`。構築中の失敗は既存のロールバックで `child` が空へ戻る。
+- `is_checkpoint_eligible` は触っていない（両 Op とも `false` のまま）。
+
+### 58.2 設計（§37）からの差・明確化
+
+- **GRU は全幅で `Pad`・列埋め込みが要らない**: 1 階でも GRU の `affine_vjp` は全幅 `[B,3H]` で呼ばれる。§37.10 の `Pad`／部分幅の記述は LSTM 向けで、本 PR の GRU では使っていない。
+- **ファイル名**: 設計表の族名 `rnn_gru_cell`（§48）に合わせ、実装は `rnn_gru_cell.rs`、統合テストは `create_graph_rnn_gru_cell.rs`（#3796 が並行して別名のファイルを足しても衝突しない）。
+- **RNN の bit 一致の実測**: facade の経路（CPU バックエンド）で `rnn_forward_seq` の `cg.grad` は素の `backward` と bit 一致した。`gru_forward_seq` は子テープでゲートを作り直す（forward の `mul_add` と丸めがずれる）ので REQ-2 で突合する。
+- **Hessian の突合方式**: f32 の 1 階勾配の中央差分は、解析 Hessian の対称性（`|H[j][i] − H[i][j]| ≲ 1e-7`）から見て、差分側に絶対誤差 ~2e-5 の丸め雑音がある（BPTT 3 step では ~6e-5）。そこで (1) 融合 Op を使わず既存の primitive（`matmul`・`add`・`tanh`・`sigmoid`・`narrow`・`mul`・`sub`）で書いた参照の解析 Hessian と REQ-2 で雑音なしに突合し（`assert_hessian_matches_primitives`）、(2) 有限差分は Richardson 外挿（h = 2e-2 と 1e-2）に差分側の分解能として絶対誤差 5e-5（BPTT は 1.5e-4）の床を足して併用する。tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）は変えていない。
+- **掃引の範囲（§37.12・§37.14 論点 5）**: 「1 階が有限なら cgrad が有限」は全スケール（1e-3〜1e30 の入力・重み、上流 1〜3e38）で成り立った。一方、二階の行列ベクトル積 `Hv` と孫テープの出力が有限であることは、`g × scale³ ≤ 1e30` の範囲に限って問う。外側（例: 重み・入力 1e10 で上流 1e30）では、1 階が有限（飽和して 0）でも cotangent × W × x の中間積が f32 を超え、真値が 0 でも `0 × inf = NaN` になる。これは §27.3 と同じ「真の二階が f32 に収まらない領域」で、§37.12 の逸脱どおり `guard_overflow`（上流 `g` の最大絶対値 × max(1, オペランドの最大絶対値) が `STAGE_BOUND_GUARD`〈2^125〉以上）が型付きの `Err` で拒否する。上の例（重み・入力 1e10、上流 1e30）は拒否対象で、受理されるのは上界が 2^125 未満の入力に限る。
+- 隣接する fail-closed Op の見本は恒久対象外の `Op::Custom`（§32 の前例）。#3796 で反転する `LstmCell`／`LstmHidden` は見本にしていない（単体テストの隣接見本は `Cholesky`）。
+- 既存テストの反転は無かった（RNN セルを「拒否される Op」の見本にしている既存テストは無い）。
+
+### 58.3 テスト
+
+- `crates/autodiff/tests/create_graph_rnn_gru_cell.rs`: `first_order()` の bit 一致と `cg.grad` の REQ-2 一致（2 Op × bias なし／あり × (B,D,H) = (1,1,1)・(3,4,5)、6 入力すべて）、全パラメータを 1 本の平坦ベクトルにまとめた Hessian（混合二階を含む）の primitive 参照との REQ-2 突合と有限差分突合、`hvp`・`jacfwd` が拒否されないこと、BPTT（重み共有・fan-in の 3 step）、`nn::Rnn`／`nn::Gru` の `forward_seq`（`h0` について）、必須ベクトル（飽和ゲート 1e4・1e30、上流 3e38、GRU の大きな `q`）を 1 階・`cg.grad`・孫テープの 3 段で、決定的な入力スケール掃引、`Op::Custom` の fail-closed と拒否後の `child` 空・再試行。
+- 単体: `tape.rs` の `rnn_gru_cell_family_supports_create_graph`。
+- facade: `{rnn,gru}_create_graph_via_facade`（`h0` について。公開 API の `x` は定数で、`GateParams` は facade から使えない）、`backward_create_graph` の rustdoc に `h0` の Hessian の doctest（RNN は独立な 1 階勾配の中央差分、GRU は対称性）。本族の create_graph を拒否する `api_surface.rs` の否定ガードは元から無く、反転するものは無い。代わりの正ガードは doctest 実在検査 `backward_create_graph_rnn_gru_cell_usage_doctest_is_present_and_compiled`（存在しない needle を課すと違反が返る自己テスト付き）。
+- GPU parity: `create_graph_gpu_parity.rs` の登録表に族 `rnn_gru_cell` の 2 ケース（`rnn_gru_cell_rnn`・`rnn_gru_cell_gru`。`Route::K`・`Judge::Strict`）を登録し、`create_graph_rnn_gru_cell_{cuda,metal}_matches_cpu`（`#[ignore]`）と CPU 同士の自己検査 `rnn_gru_cell_cases_pass_cpu_against_cpu` を足した。形状は B=3・D=4・H=5 で、構造とその二階の GEMM の k はすべて 15 以下（split-K は k/16 = 0 で発火しない）。S3 は `SplitKShapes::Rule` で宣言した。
+
+### 58.4 数値契約と保証範囲
+
+- 1 階 `Tape::backward` は構造上 bit 同一（VJP に触れていない）。`first_order()` は素の `backward` と bit 一致する。`cg.grad` は REQ-2 で一致し、CPU の RNN は bit 一致した。tolerance・baseline・ガードレール閾値は変えない。新しい baseline は作らない。
+- GPU では GEMM・pointwise を backend のカーネルで評価するので、契約は REQ-2 とし、bit 一致は主張しない。Metal の fast-math では pointwise の作り直しとカーネルの値が ulp 単位でずれうる（REQ-2 で受ける）。
+- 三階以上、真値が f32 を超える場合は対象外。
+
+### 58.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果はすべて**未実測**で、Phase 10 の #3856（`<cuda-node>`）・#3858（`<metal-node>`）へ申し送る。ROCm は雛形で `<rocm-node>` も未実測。baseline は作らず、置き場は空のまま。
+- スコープ外: `LstmCell`・`LstmHidden`（#3796）、GPU 実機 parity の実測（Phase 10）と測り方の変更（#3739・§48）、f64 テープの create_graph、非 fused モードの公開、双方向・projection などの新しい variant、facade の公開名の追加、他の C 区分・B 区分の Op。stacked／packed 系の公開 API は、本 PR のテストで確かめていないため facade の rustdoc では対象として書いていない。
+- 変えていないもの: 1 階の VJP 本体・forward・`Tape::backward`・`is_checkpoint_eligible`・tolerance・baseline・ガードレール閾値・FMA 契約・依存（`Cargo.toml`／`Cargo.lock`）・`docs/spec`・既存節の本文・公開 API。`unsafe` は追加していない。
+- 本 PR は `Refs #3795 #3728 #3767 #3719 #3856 #3858`。
