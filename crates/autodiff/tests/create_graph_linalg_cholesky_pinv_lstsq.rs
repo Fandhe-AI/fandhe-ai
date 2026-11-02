@@ -568,6 +568,20 @@ fn pinv_lstsq_truncation_rejected_child_empty_and_retry() {
 }
 
 #[test]
+fn lstsq_cancelling_gram_product_rejected_child_empty_and_retry() {
+    // A = [[1]]・B = [[1e8, 1, -1e8]]: G = gX Bᵀ は f64 で 1 だが f32 積和では 0（桁落ち）。
+    assert_rejected_and_child_reusable(
+        "lstsq cancelling G",
+        |_t, x| {
+            let (a, b) = split_ab(x, 1, 1, 3)?;
+            a.lstsq(&b, None)?.sum(None)
+        },
+        &[1.0, 1e8, 1.0, -1e8],
+        &[4],
+    );
+}
+
+#[test]
 fn linalg_cpl_unsafe_inputs_rejected_child_empty_and_retry() {
     // Cholesky の悪条件（対角 1e-20 付近）。
     assert_rejected_and_child_reusable(

@@ -294,6 +294,17 @@ pub(super) fn guard_lstsq(
     if !all_stage_ok(&g) {
         return Err(reject("Lstsq: G = gX Bᵀ が overflow／ゼロ化域に入る"));
     }
+    // G の f32 積和（縮約長 k）自体の桁落ちも検査する。f64 で通っても子テープの f32 では
+    // 打ち消し合う列（例: B = [1e8, 1, -1e8]）で G が 0 になり、二階の構造が崩れる。
+    if !rounding_ok(
+        &g,
+        &mm(&abs_vec(&gx), &abs_vec(&transpose(&bv, m, k)), n, k, m),
+        k,
+    ) {
+        return Err(reject(
+            "Lstsq: G = gX Bᵀ の f32 積和の丸め誤差が REQ-2 の許容を超えうる（桁落ち）",
+        ));
+    }
     pinv_struct_check(&to_f64(a), &p, &g, m, n)?;
     let pt = transpose(&p, n, m);
     let gb = mm(&pt, &gx, m, n, k);
