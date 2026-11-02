@@ -822,7 +822,7 @@ fn logcumsumexp_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
 }
 
 /// `cumprod` の `cg.grad` は V3（1 階と同じホスト関数の値ノード）なので CPU では bit 一致する。
-/// 零を含む lane も除算を使わない scan 構造のため二階が厳密（決定記録 §41.10・§62）。
+/// 零を含む lane も除算を使わない scan 構造のため二階が厳密（決定記録 §41.10・§63）。
 #[test]
 fn cumprod_create_graph_via_facade() {
     let x: Vec<f32> = vec![0.9, 1.1, 0.8, 1.2, 1.05, 0.95, 1.0, 0.85];
@@ -837,7 +837,7 @@ fn logcumsumexp_create_graph_via_facade() {
     check_create_graph_family("logcumsumexp", &x, &[2, 4], logcumsumexp_loss, true, 1e-2);
 }
 
-/// ±inf 入力は型付きエラーで拒否される（panic しない。決定記録 §33.14 論点 3・§62）。
+/// ±inf 入力は型付きエラーで拒否される（panic しない。決定記録 §33.14 論点 3・§63）。
 #[test]
 fn cumulative_b_create_graph_rejects_inf_input_via_facade() {
     for build in [cumprod_loss, logcumsumexp_loss] {

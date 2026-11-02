@@ -4773,6 +4773,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 1 階 `Tape::backward` は構造上 bit 同一（`grad.rs` は可視性だけの変更）。`cg.grad` は V3 により CPU で 1 階と bit 一致。`Logcumsumexp` の値は libm の `exp`／`ln_1p` に依存するため bit 同一は同じホストの中に限る（backend 間は REQ-2）。tolerance・baseline・ガードレール閾値・FMA 契約は変えない。新しい baseline は作らない。
 - 保証範囲は §27.3 と同じ（総括判定を通った入力・seed の各要素の絶対値 1 以下）。三階以上は対象外。
 - 既知の差: `Logcumsumexp` は f32 の `out` が係数の相対誤差 1e-3 を満たさない大きなオフセットの入力を拒否する。`Cumprod` の拒否は f32 の構造段または二階の逆伝播の上界が `2^125` に達する入力に限る。
+- 二階の桁落ち増幅の拒否（レビュー指摘）: `Cumprod` は scan の `S` の誤差に prefix 乗数の上界 `Π max(1,|x|)` を掛けて REQ-2 複合判定を課す（`x=[1e20,1,1,1,1]` は拒否）。`Logcumsumexp` は微分係数の差の厳密上界（`max(1-c_j, w_{j+1})`・`1-w_j`）に対し f32 の `eps` が 1e-3 未満でない項で、誤差 `eps·|c·T|`・`eps·|w·T|` が絶対救済 1e-5 を超えるものを拒否する（`x=[0,-20]`・`g=[0,1e10]` は拒否）。新しい定数・tolerance は作らない。
 
 ### 63.5 GPU（未実測）・スコープ外・変えていないもの
 

@@ -178,6 +178,11 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
                 acc = f64::from(gl[j]) + next;
                 s64[j] = acc;
             }
+            // 二階では `S[k]` の誤差が prefix 乗数（`∂(L_j·S_j)/∂x_m` に現れる `Π_{q<k, q≠m} x_q`）で
+            // 増幅される（例 `x=[1e20,1,1,1,1]`・`g=[0,0,1e-10,1e-20,-1e-10]` は `S[2]` が 0 に
+            // 桁落ちし `H[1,2]` が 0 になる）。乗数の上界 `Π_{q<k} max(1,|x_q|)`（f64）を誤差に掛けた値も
+            // 同じ複合判定で突き合わせる。
+            let mut mult = 1f64;
             for j in 0..n {
                 if !composite_close_f32(s[j], s64[j] as f32) {
                     return Err(invalid(
@@ -185,6 +190,19 @@ fn check_cumprod_stages(x: &[f32], g: &[f32], y: &[f32], d: Dims) -> Result<(), 
                             .into(),
                     ));
                 }
+                if over_guard(mult * f64::from(s[j]).abs().max(s64[j].abs())) {
+                    return Err(invalid(
+                        "Cumprod の二階の prefix 乗数と scan 値の積が 2^125 以上または非有限のため拒否（§41・§63 参照）"
+                            .into(),
+                    ));
+                }
+                if !composite_close_f32((mult * f64::from(s[j])) as f32, (mult * s64[j]) as f32) {
+                    return Err(invalid(
+                        "Cumprod の scan の桁落ちが prefix 乗数で増幅され二階の精度を保証できないため拒否（§41・§63 参照）"
+                            .into(),
+                    ));
+                }
+                mult *= f64::from(xl[j]).abs().max(1.0);
             }
             let mut l = vec![1f32; n];
             l[1..].copy_from_slice(&yl[..n - 1]);
@@ -369,7 +387,25 @@ fn check_logcumsumexp_stages(
                 let next = if j + 1 < n { c64[j] * t64[j + 1] } else { 0.0 };
                 t64[j] = f64::from(gl[j]) + next;
             }
+            // 二階の逆伝播では `out` 由来の微分係数の差（`dout_j - dout_{j+1}`・`dx - dout`）が
+            // f32 で桁落ちし、`c·T`・`w·T` の大きさで増幅される（例 `x=[0,-20]`・`g=[0,1e10]` は
+            // `H[0,0]` が 0、解析値 約 20.6）。厳密な微分係数の差の上界は `max(1-c_j, w_{j+1})`・
+            // `1-w_j`（f64 の `expm1`）で、f32 の丸め `eps` がその 1e-3 未満でなければ、誤差
+            // `eps·|項|` が REQ-2 の絶対救済 1e-5 内に収まるときだけ受理する。
+            let eps = f64::from(f32::EPSILON);
+            let amp_ok =
+                |exact_mag: f64, term: f64| eps * term.abs() <= 1e-5 || eps <= 1e-3 * exact_mag;
             for j in 0..n {
+                if j + 1 < n {
+                    let exact = (-(out64[j] - out64[j + 1]).exp_m1()).max(w64[j + 1]);
+                    if !amp_ok(exact, c64[j] * t64[j + 1]) {
+                        return Err(reject_coeff("Hessian 項 c[j]·T[j+1] の二階桁落ち増幅"));
+                    }
+                }
+                let exact_w = -(f64::from(xl[j]) - out64[j]).exp_m1();
+                if !amp_ok(exact_w, w64[j] * t64[j]) {
+                    return Err(reject_coeff("Hessian 項 w[j]·T[j] の二階桁落ち増幅"));
+                }
                 if j + 1 < n {
                     let h32 = c32[j] * t32[j + 1];
                     let h64 = c64[j] * t64[j + 1];
@@ -509,6 +545,23 @@ mod tests {
         assert!(cp(&[1.0; 4], &[0.0, 1e10, 1.0, -1e10]).is_err());
         // 相殺のない同規模の入力は受理される。
         assert!(cp(&[1.0; 4], &[0.0, 1e10, 1.0, 1e10]).is_ok());
+    }
+
+    #[test]
+    fn cumprod_check_rejects_prefix_amplified_cancellation() {
+        // Codex P1: S[2] が 0 に桁落ち（真値 1e-20）し、prefix 乗数 1e20 で H[1,2] が 0 になる。
+        let g = [0.0, 0.0, 1e-10, 1e-20, -1e-10];
+        assert!(cp(&[1e20, 1.0, 1.0, 1.0, 1.0], &g).is_err());
+        // 乗数が小さい同形は受理される。
+        assert!(cp(&[1.0; 5], &g).is_ok());
+    }
+
+    #[test]
+    fn logcumsumexp_check_rejects_second_order_cancellation() {
+        // Codex P1: H[0,0] が f32 で 0、解析値 約 20.6。
+        assert!(lse(&[0.0, -20.0], &[0.0, 1e10]).is_err());
+        // 大きさが小さければ誤差が絶対救済内に収まり受理される。
+        assert!(lse(&[0.0, -20.0], &[0.0, 1.0]).is_ok());
     }
 
     #[test]
