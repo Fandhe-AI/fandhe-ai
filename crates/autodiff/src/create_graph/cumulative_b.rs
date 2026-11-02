@@ -40,7 +40,9 @@
 
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::cumulative::{cumulative_layout, logcumsumexp_vjp_host};
-use fandhe_ai_tensor_core::tolerance::composite_close_f32;
+use fandhe_ai_tensor_core::tolerance::{
+    ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE, composite_close_f32,
+};
 
 use super::scan::{linear_scan, scan_cotangent_bound, scan_lane_host};
 use super::{child_value, push_v3};
@@ -393,8 +395,10 @@ fn check_logcumsumexp_stages(
             // `1-w_j`（f64 の `expm1`）で、f32 の丸め `eps` がその 1e-3 未満でなければ、誤差
             // `eps·|項|` が REQ-2 の絶対救済 1e-5 内に収まるときだけ受理する。
             let eps = f64::from(f32::EPSILON);
-            let amp_ok =
-                |exact_mag: f64, term: f64| eps * term.abs() <= 1e-5 || eps <= 1e-3 * exact_mag;
+            let amp_ok = |exact_mag: f64, term: f64| {
+                eps * term.abs() <= ABSOLUTE_RESCUE_THRESHOLD
+                    || eps <= RELATIVE_TOLERANCE * exact_mag
+            };
             for j in 0..n {
                 if j + 1 < n {
                     let exact = (-(out64[j] - out64[j + 1]).exp_m1()).max(w64[j + 1]);
