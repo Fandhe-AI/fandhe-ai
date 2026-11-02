@@ -901,8 +901,12 @@ pub(super) fn svd_cgrad<'c>(
         let eye = bool_mask(k, k, |i, j| i == j)?;
         let ones = const_full(child, &[k, k], 1.0)?;
         let zeros = const_full(child, &[k, k], 0.0)?;
-        let s2 = s_m.mul(&s_m)?;
-        let d = s2.reshape(&[1, k])?.sub(&s2.reshape(&[k, 1])?)?;
+        // 分母 `σj² − σi²` は `(σj − σi)(σj + σi)` の形で作る。f32 で二乗してから引くと、近接した
+        // 特異値（例 1.400001 と 1.4）で桁落ちし F とその微分（二階）が REQ-2 を外れる。
+        // 差は近接域で厳密（Sterbenz）、和・積の相対誤差は数 ulp に収まる。
+        let sr = s_m.reshape(&[1, k])?;
+        let sc = s_m.reshape(&[k, 1])?;
+        let d = sr.sub(&sc)?.mul(&sr.add(&sc)?)?;
         let d_safe = Var::where_cond(&eye, &ones, &d)?;
         let f = Var::where_cond(&eye, &zeros, &ones.div(&d_safe)?)?;
         let inv_s = const_full(child, &[k], 1.0)?.div(&s_m)?;

@@ -1007,3 +1007,94 @@ fn svd_eigh_neighbouring_unsupported_op_stays_fail_closed() {
         assert!(child.is_empty(), "{which}: 拒否後は child が空");
     }
 }
+/// 回帰（PR #3967 Codex P1）: 近接した特異値 `diag(1.400001, 1.4)` で、F の分母 `σj² − σi²` を f32 の
+/// 二乗差で作ると桁落ちして二階が約 1.6% ずれた。分母を `(σj − σi)(σj + σi)` で作る安定構成にし、
+/// 受理された場合は f64 の 2x2 閉形式（差分）と REQ-2 で一致、拒否（fail-closed）でも合格とする。
+/// `SvdU`・`SvdVh` の両経路を通す。tolerance は変えない。
+fn svd2_loss_ref(a: [f64; 4], w: [f64; 4], which: usize, sign: [f64; 2]) -> f64 {
+    let (p, q, r) = if which == 0 {
+        (
+            a[0] * a[0] + a[1] * a[1],
+            a[0] * a[2] + a[1] * a[3],
+            a[2] * a[2] + a[3] * a[3],
+        )
+    } else {
+        (
+            a[0] * a[0] + a[2] * a[2],
+            a[0] * a[1] + a[2] * a[3],
+            a[1] * a[1] + a[3] * a[3],
+        )
+    };
+    let th = 0.5 * (2.0 * q).atan2(p - r);
+    let (c, s) = (th.cos(), th.sin());
+    // 列ベクトル（which = 0: U の列、1: V の列。Vh は転置して重みを掛ける）。
+    let m = [[c * sign[0], -s * sign[1]], [s * sign[0], c * sign[1]]];
+    let mut acc = 0.0;
+    for i in 0..2 {
+        for j in 0..2 {
+            let v = if which == 0 { m[i][j] } else { m[j][i] };
+            acc += w[i * 2 + j] * v;
+        }
+    }
+    acc
+}
+
+#[test]
+fn svd_close_singular_values_second_order_is_stable() {
+    let x0 = vec![1.400001f32, 0.0, 0.0, 1.4];
+    let w = [1e-5f64 * 0.3, 1e-5 * 0.9, 1e-5 * 0.6, 1e-5 * 0.1];
+    for which in 0..2usize {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(x0.clone(), &[2, 2]));
+        let f = x.svd().unwrap();
+        let y = if which == 0 { f.u } else { f.vh };
+        let u_val = dense(&f.u.value());
+        let vh_val = dense(&f.vh.value());
+        let wt = tape.var_no_grad(&t(w.iter().map(|&v| v as f32).collect(), &[2, 2]));
+        let loss = y.mul(&wt).unwrap().sum(None).unwrap();
+        let cg = match tape.backward_create_graph(&loss, &child) {
+            Ok(cg) => cg,
+            Err(AutodiffError::Backward(_)) => {
+                assert!(child.is_empty());
+                continue;
+            }
+            Err(e) => panic!("想定外のエラー: {e:?}"),
+        };
+        let sign = if which == 0 {
+            [f64::from(u_val[0]).signum(), f64::from(u_val[3]).signum()]
+        } else {
+            [f64::from(vh_val[0]).signum(), f64::from(vh_val[3]).signum()]
+        };
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+        let h = 2e-8f64;
+        let base: [f64; 4] = [x0[0], x0[1], x0[2], x0[3]].map(f64::from);
+        for j in 0..4 {
+            let gj = extract_scalar(&gx, &[2, 2], j).unwrap();
+            let rg = child.backward(&gj).unwrap();
+            let row = dense(rg.get(&cx).unwrap().unwrap());
+            for i in 0..4 {
+                let ev = |di: f64, dj: f64| {
+                    let mut a = base;
+                    a[i] += di;
+                    a[j] += dj;
+                    svd2_loss_ref(a, w, which, sign)
+                };
+                let num = if i == j {
+                    (-ev(2.0 * h, 0.0) + 16.0 * ev(h, 0.0) - 30.0 * ev(0.0, 0.0)
+                        + 16.0 * ev(-h, 0.0)
+                        - ev(-2.0 * h, 0.0))
+                        / (12.0 * h * h)
+                } else {
+                    (ev(h, h) - ev(h, -h) - ev(-h, h) + ev(-h, -h)) / (4.0 * h * h)
+                };
+                assert!(
+                    common::req2_close(f64::from(row[i]), num),
+                    "which={which} hessian[{j}][{i}] analytic={} ref={num}",
+                    row[i]
+                );
+            }
+        }
+    }
+}
