@@ -1032,7 +1032,13 @@ fn replay_op<'c>(
         | Op::Topk { input, dim, index }
         | Op::Cummax { input, dim, index }
         | Op::Cummin { input, dim, index } => get_mirror(mirror, input)?.gather(dim, &index),
-        Op::Embedding { weight, index, .. } => get_mirror(mirror, weight)?.gather(0, &index),
+        // `Gather` ではなく `Op::Embedding` で再生し、子テープ上の 1 階 VJP が行 `p` を
+        // マスクするようにする（二階の意味論は PyTorch 準拠。イシュー #3811・決定記録 §71）。
+        Op::Embedding {
+            weight,
+            index,
+            padding_idx,
+        } => index_cum::replay_embedding(&get_mirror(mirror, weight)?, &index, padding_idx),
         // 選択縮約（イシュー #3790。方式は `stat_select` モジュール doc 参照）。
         Op::OrderSelect { input, dim, index } => {
             stat_select::replay_order_select(&get_mirror(mirror, input)?, dim, &index, shape)

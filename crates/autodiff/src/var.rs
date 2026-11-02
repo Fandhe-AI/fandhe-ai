@@ -6044,7 +6044,9 @@ impl<'t> Var<'t> {
     /// `padding_idx`（`Some(p)`）を渡すと forward は行 `p` の現在値を
     /// そのまま返すが、勾配は本メソッドの `Op::Embedding` VJP（
     /// `grad.rs`）が行 `p` をゼロ上書きするため流れない（PyTorch
-    /// `nn.Embedding(padding_idx=..)` の意味論）。
+    /// `nn.Embedding(padding_idx=..)` の意味論）。`create_graph` の二階でも
+    /// 行 `p` は定数として扱われ、Hessian の行と列 `p` は 0（PyTorch の
+    /// double backward と同じ。イシュー #3811・決定記録 §71）。
     ///
     /// 検査順序: ①`self.shape().len() == 2`（違反は
     /// `AutodiffError::Shape(ShapeError::RankMismatch)`）→
@@ -6103,13 +6105,79 @@ impl<'t> Var<'t> {
             .map_err(AutodiffError::Shape)?
             .contiguous();
 
+        let out = self.embedding_core(&index_nd, padding_idx)?;
+        if ids_rank == 1 {
+            Ok(out)
+        } else {
+            let mut final_shape = index.shape().to_vec();
+            final_shape.push(embedding_dim);
+            out.reshape(&final_shape)
+        }
+    }
+
+    /// `create_graph` の写し再生（`create_graph::index_cum::replay_embedding`）用の入口。
+    /// 親ノードの `Op::Embedding` payload が持つ展開済み index（`[N, D]`）をそのまま受け、
+    /// 子テープ上に `Op::Embedding` を積む（イシュー #3811・決定記録 §47・§71。`Gather` で
+    /// 再生すると二階が行 `p` を通り Hessian の列 `p` が非零になるため）。
+    /// 公開 [`Self::embedding`] と同等の検査（rank・`padding_idx` 範囲・index の rank/列幅・
+    /// 全添字範囲）を子テープへ書く前・確保の前に省略せず行う（A03・REQ-8）。
+    pub(crate) fn embedding_expanded_index(
+        &self,
+        index_nd: &Tensor<i32>,
+        padding_idx: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let weight_shape = self.shape();
+        if weight_shape.len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: weight_shape.len(),
+            }));
+        }
+        let num_embeddings = weight_shape[0];
+        let embedding_dim = weight_shape[1];
+        if let Some(p) = padding_idx
+            && p >= num_embeddings
+        {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::embedding_expanded_index: padding_idx {p} が範囲 [0, {num_embeddings}) を外れている"
+            )));
+        }
+        if index_nd.rank() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: index_nd.rank(),
+            }));
+        }
+        if index_nd.shape()[1] != embedding_dim {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: index_nd.shape().to_vec(),
+                rhs: vec![index_nd.shape()[0], embedding_dim],
+            }));
+        }
+        for v in eval::dense_vec_i32(index_nd) {
+            if v < 0 || (v as usize) >= num_embeddings {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::embedding_expanded_index: index 添字 {v} が範囲 [0, {num_embeddings}) を外れている"
+                )));
+            }
+        }
+        self.embedding_core(index_nd, padding_idx)
+    }
+
+    /// [`Self::embedding`] の⑤〜⑧（weight 実体化 → `gather_with_fallback` → 戻り shape 検証 →
+    /// `push_eager(Op::Embedding)`）。検査済みの `[N, D]` index を前提とし、公開経路と
+    /// [`Self::embedding_expanded_index`] が共有する。
+    fn embedding_core(
+        &self,
+        index_nd: &Tensor<i32>,
+        padding_idx: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let out_shape = vec![index_nd.shape()[0], self.shape()[1]];
         let weight_val = {
             let nodes = self.tape.nodes.borrow();
             materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
         };
-
-        let out_shape = vec![n, embedding_dim];
-        let value = gather_with_fallback(self.tape.ops(), &weight_val, 0, &index_nd, &out_shape)?;
+        let value = gather_with_fallback(self.tape.ops(), &weight_val, 0, index_nd, &out_shape)?;
         if value.shape() != out_shape.as_slice() {
             return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
                 ShapeError::ShapeMismatch {
@@ -6121,19 +6189,12 @@ impl<'t> Var<'t> {
         let id = self.tape.push_eager(
             Op::Embedding {
                 weight: self.id,
-                index: index_nd,
+                index: index_nd.clone(),
                 padding_idx,
             },
             value,
         );
-        let out = Var::from_raw(self.tape, id);
-        if ids_rank == 1 {
-            Ok(out)
-        } else {
-            let mut final_shape = index.shape().to_vec();
-            final_shape.push(embedding_dim);
-            out.reshape(&final_shape)
-        }
+        Ok(Var::from_raw(self.tape, id))
     }
 
     /// 一意値集合を返す（`torch.unique(input, sorted=True)` の values

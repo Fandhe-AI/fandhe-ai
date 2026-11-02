@@ -905,6 +905,19 @@ const CASES: &[Case] = &[
         run: run_det_family_rowscale,
         reject: Some(reject_det_identity_huge_g),
     },
+    // Embedding の `padding_idx` の二階（イシュー #3811・決定記録 §47/§71。名前は §48 の表）。写しを
+    // `Op::Embedding` で再生し、子テープ上の 1 階 VJP が行 `p` をマスクする。`gather`／`scatter` は
+    // CUDA・Metal の両方で override されているので K。Embedding に固有の create_graph 拒否は無いので reject は
+    // なし。孫テープ再生（Q4）も比較する。実機は未実測（#3857・#3859。baseline は作らない）。
+    Case {
+        name: "embedding_padding_dup_ids",
+        family: "embedding_padding",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_embedding_padding,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -2435,6 +2448,26 @@ fn run_det_family_rowscale(tp: &Tapes) -> Outputs {
     }
 }
 
+/// Embedding の `padding_idx` 族（#3811）。重複 id と `padding_idx` 行を含む `[4, 2]` の重み。
+fn embedding_padding_loss<'a>(_tape: &'a Tape, p: &Var<'a>) -> Result<Var<'a>, AutodiffError> {
+    let w = p.reshape(&[4, 2])?;
+    let ids = Tensor::<i32>::new(vec![1, 1, 3, 0, 2], &[5])?;
+    let y = w.embedding(&ids, Some(1))?;
+    let s = y.sum(None)?;
+    y.mul(&y)?.mul(&y)?.sum(None)?.add(&s.mul(&s)?)
+}
+
+fn run_embedding_padding(tp: &Tapes) -> Outputs {
+    run_linalg_decomp_body(
+        tp,
+        &[8],
+        (0..8)
+            .map(|i| 0.45 * ((i * 5 + 2) % 8) as f32 - 0.7)
+            .collect(),
+        embedding_padding_loss,
+    )
+}
+
 /// Q5: 真の 1 階値が f32 を超える `det`（`A = I`・`g = 3e38`）は拒否され、子テープは空のまま。
 fn reject_det_identity_huge_g(tp: &Tapes) -> bool {
     let x = tp.parent.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
@@ -2812,6 +2845,10 @@ cuda_family_test!(
     create_graph_det_family_rowscale_cuda_matches_cpu,
     "det_family_rowscale"
 );
+cuda_family_test!(
+    create_graph_embedding_padding_cuda_matches_cpu,
+    "embedding_padding"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -2881,6 +2918,10 @@ metal_family_test!(
 metal_family_test!(
     create_graph_det_family_rowscale_metal_matches_cpu,
     "det_family_rowscale"
+);
+metal_family_test!(
+    create_graph_embedding_padding_metal_matches_cpu,
+    "embedding_padding"
 );
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
@@ -3011,6 +3052,11 @@ fn norm_prescale_cases_pass_cpu_against_cpu() {
 #[test]
 fn det_family_rowscale_cases_pass_cpu_against_cpu() {
     run_family("det_family_rowscale", None);
+}
+
+#[test]
+fn embedding_padding_cases_pass_cpu_against_cpu() {
+    run_family("embedding_padding", None);
 }
 
 #[test]
