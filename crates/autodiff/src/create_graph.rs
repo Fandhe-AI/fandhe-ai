@@ -67,8 +67,9 @@
 //! （`Conv3d`・`ConvTranspose3d` と内部 Op `Unfold3d`・`Fold3d`・`ConvWeightGradHost3d`。実装は
 //! `conv3d` サブモジュール、決定記録 §38・§59）も拡張済み。イシュー #3083 で索引・累積族
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
-//! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
-//! `Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
+//! `index_cum` サブモジュール、決定記録 §25）を拡張済み。イシュー #3802 で `IndexedScatterReduce`
+//! （Sum・Mean・Amax・Amin。実装は `scatter_reduce` サブモジュール、決定記録 §41・§62）も拡張済み。
+//! `IndexedScatterReduce` の `Prod`・`Cumprod`・`Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
 //! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3791 で統計縮約の
 //! `Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm`（実装は `stat_varnorm` サブモジュール、決定記録 §33・§52）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
@@ -145,11 +146,20 @@ mod norm_reparam;
 mod pad_mask;
 mod pool;
 mod rnn_gru_cell;
+mod scatter_reduce;
 mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
 mod stat_varnorm;
 mod structural;
+
+/// `IndexedScatterReduce` の mode が create_graph 対応か（`Op::supports_create_graph` から。
+/// イシュー #3802）。実体は `scatter_reduce` サブモジュールの判定。
+pub(crate) fn scatter_reduce_mode_supported(
+    mode: fandhe_ai_tensor_core::ScatterReduceMode,
+) -> bool {
+    scatter_reduce::mode_supported(mode)
+}
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -605,6 +615,9 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         // RmsNorm／LayerNorm／BatchNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
         // `child` へ書く前に拒否する（イシュー #3078・#3079。`create_graph_norm` モジュール doc）。
         crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
+        // `IndexedScatterReduce` の未知 mode と ±inf 入力を子テープへ書く前に拒否する
+        // （イシュー #3802・決定記録 §41.12・§62）。
+        scatter_reduce::validate(&parent_nodes, parent.ops(), id, &node.op)?;
         // 統計縮約 4 Op（イシュー #3791）: 非有限入力・自由度不足を子テープへ書く前に拒否する。
         stat_varnorm::validate_stat_varnorm(&parent_nodes, parent.ops(), &node.op)?;
         // 正規化・再パラメータ 3 Op（イシュー #3794）: ±inf・退化統計（D≤0・ゼロノルム・σ=0）を
@@ -966,6 +979,21 @@ fn replay_op<'c>(
             reduce,
         ),
         Op::Cumsum { input, dim } => get_mirror(mirror, input)?.cumsum(dim),
+        Op::IndexedScatterReduce {
+            input,
+            dim,
+            index,
+            src,
+            mode,
+            include_self,
+        } => scatter_reduce::replay(
+            &get_mirror(mirror, input)?,
+            &get_mirror(mirror, src)?,
+            dim,
+            &index,
+            mode,
+            include_self,
+        ),
         // Pad 族（イシュー #3084）。forward の検証（上限・確保・shape）を迂回しないよう
         // 公開 `Var` メソッド／`pad_with_mode` へ委譲する。`mask` は forward 時点で
         // 出力 shape へ broadcast 済みの f32（`c != 0.0`）。
@@ -3214,6 +3242,37 @@ fn build_cgrads<'c>(
                         index: &index,
                         reduce,
                     },
+                    parent_nodes[input.0].requires_grad,
+                    parent_nodes[src.0].requires_grad,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_src {
+                    accumulate(&parent_nodes, &mut cgrads, src, d)?;
+                }
+            }
+            Op::IndexedScatterReduce {
+                input,
+                dim,
+                index,
+                src,
+                mode,
+                include_self,
+            } => {
+                let r = scatter_reduce::cgrad(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    &scatter_reduce::Spec {
+                        input,
+                        src,
+                        dim,
+                        index: &index,
+                        mode,
+                        include_self,
+                    },
+                    &g,
                     parent_nodes[input.0].requires_grad,
                     parent_nodes[src.0].requires_grad,
                 )?;

@@ -1160,7 +1160,8 @@ pub(crate) enum Op {
     /// `tensor_core::indexed_update::scatter_reduce_vjp_host` で再計算する
     /// （`Op::Logcumsumexp` と同じ「入力から再計算」方式）。既存の `ScatterReduce`
     /// とは別 enum（`ScatterReduceMode`）を使う（未知 variant が黙って `Overwrite`
-    /// になる経路を避ける。決定記録 §2）。非融合・非 checkpoint・高階微分非対応。
+    /// になる経路を避ける。決定記録 §2）。非融合・非 checkpoint。高階微分（`create_graph`）は
+    /// Sum・Mean・Amax・Amin のみ対応（イシュー #3802・決定記録 §41・§62。`Prod` は fail-closed）。
     IndexedScatterReduce {
         input: NodeId,
         dim: usize,
@@ -2532,7 +2533,8 @@ impl Op {
     ///
     /// 索引・累積 8 variant（`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・
     /// `Cummax`・`Cummin`・`Cumsum`）はイシュー #3083（決定記録 §25）で `true` になった。
-    /// `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま。
+    /// `IndexedScatterReduce` は Sum・Mean・Amax・Amin だけ `true`（イシュー #3802・§62）。
+    /// `Prod`・`Cumprod`・`Logcumsumexp` は `false` のまま。
     ///
     /// プーリング族（`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・
     /// `AdaptiveAvgPool2d`）はイシュー #3085（決定記録 §29）で `true` になった。
@@ -2610,7 +2612,7 @@ impl Op {
             | Op::LogSoftmax { .. }
             // 索引・累積族（イシュー #3083・決定記録 §25）。`Gather` の cgrad が
             // `Scatter` を、`Scatter` の d_src が `Gather` を積むため同時に対象。
-            // `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま。
+            // `IndexedScatterReduce` は payload 判定（下）。`Cumprod`・`Logcumsumexp` は `false` のまま。
             | Op::Gather { .. }
             | Op::Scatter { .. }
             | Op::Embedding { .. }
@@ -2704,6 +2706,10 @@ impl Op {
             | Op::GruCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. } => true,
+            // `IndexedScatterReduce` は `mode` の Sum・Mean・Amax・Amin だけ true（イシュー #3802・
+            // 決定記録 §41・§62）。`Prod` は #3803 の scan 補助待ちで false、
+            // `#[non_exhaustive]` の未知 mode も false（`VectorNorm` の前例）。
+            Op::IndexedScatterReduce { mode, .. } => crate::create_graph::scatter_reduce_mode_supported(*mode),
             // `Interpolate` は `mode` の既知 7 variant だけ true（`InterpolateMode` は
             // `#[non_exhaustive]` なので未知 variant は安全側の false。`VectorNorm` の前例）。
             Op::Interpolate { mode, .. } => matches!(
@@ -2746,7 +2752,6 @@ impl Op {
             | Op::Logcumsumexp { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
-            | Op::IndexedScatterReduce { .. }
             | Op::Cumprod { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
@@ -5597,7 +5602,8 @@ mod conv3d_op_tests {
     }
 
     /// イシュー #3083: 索引・累積 8 variant は create_graph 対応（`true`）。
-    /// `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま（fail-closed）。
+    /// `IndexedScatterReduce` は Sum・Mean・Amax・Amin だけ `true`（イシュー #3802）。
+    /// `Prod`・`Cumprod`・`Logcumsumexp` は `false` のまま（fail-closed）。
     #[test]
     fn index_cumulative_family_supports_create_graph() {
         let idx = || Tensor::<i32>::new(vec![0], &[1]).unwrap();
@@ -5645,13 +5651,25 @@ mod conv3d_op_tests {
         for op in supported {
             assert!(op.supports_create_graph());
         }
+        use fandhe_ai_tensor_core::ScatterReduceMode as M;
+        for mode in [M::Sum, M::Mean, M::Amax, M::Amin] {
+            let op = Op::IndexedScatterReduce {
+                input: a,
+                dim: 0,
+                index: idx(),
+                src: b,
+                mode,
+                include_self: true,
+            };
+            assert!(op.supports_create_graph(), "{mode:?}");
+        }
         let rejected = [
             Op::IndexedScatterReduce {
                 input: a,
                 dim: 0,
                 index: idx(),
                 src: b,
-                mode: fandhe_ai_tensor_core::ScatterReduceMode::Sum,
+                mode: M::Prod,
                 include_self: true,
             },
             Op::Cumprod { input: a, dim: 0 },

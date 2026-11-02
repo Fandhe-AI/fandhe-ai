@@ -644,6 +644,45 @@ const CASES: &[Case] = &[
         run: run_conv3d_family_conv_transpose3d,
         reject: None,
     },
+    // 索引付き縮約族（イシュー #3802・決定記録 §41/§62）。`indexed_scatter_reduce` は CUDA・Metal・ROCm で
+    // override されておらずホストへフォールバックする（`Gather`／`Where`／`Mul` はデバイスで走る）ので H。
+    // 構造に MatMul を含まない。値は 1 階と同じホスト関数 `scatter_reduce_vjp_host`。実機は未実測（#3857・#3859）。
+    Case {
+        name: "scatter_reduce_sum",
+        family: "scatter_reduce",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_scatter_reduce_sum,
+        reject: Some(reject_select_reduce_with_custom),
+    },
+    Case {
+        name: "scatter_reduce_mean",
+        family: "scatter_reduce",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_scatter_reduce_mean,
+        reject: None,
+    },
+    Case {
+        name: "scatter_reduce_amax",
+        family: "scatter_reduce",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_scatter_reduce_amax,
+        reject: None,
+    },
+    Case {
+        name: "scatter_reduce_amin",
+        family: "scatter_reduce",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_scatter_reduce_amin,
+        reject: None,
+    },
 ];
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -1594,6 +1633,86 @@ fn run_conv3d_family_conv_transpose3d(tp: &Tapes) -> Outputs {
     run_conv3d_family_body(tp, true, [2, 3, 2, 3, 3], [3, 4, 2, 2, 2], 4)
 }
 
+/// 索引付き縮約族（#3802）の共通本体。input `[3, 4]` と src `[2, 3]` を 1 本の葉 `p` から切り出し
+/// （d_input・d_src を同時に測る）、損失は `sum(y ⊙ y ⊙ c)`。Q4 は同じ損失の `jvp_create_graph` を孫テープで逆伝播する。
+fn scatter_reduce_family_loss<'a>(
+    tape: &'a Tape,
+    p: &Var<'a>,
+    mode: fandhe_ai::ScatterReduceMode,
+) -> Result<Var<'a>, AutodiffError> {
+    let x = p.narrow(0, 0, 12)?.reshape(&[3, 4])?;
+    let s = p.narrow(0, 12, 6)?.reshape(&[2, 3])?;
+    let idx = Tensor::<i32>::new(vec![1, 1, 3, 0, 2, 2], &[2, 3]).expect("index fixture");
+    let y = x.scatter_reduce(1, &idx, &s, mode, true)?;
+    let coef: Vec<f32> = (0..12)
+        .map(|i| 0.5 + ((i * 13 + 5) % 11) as f32 * 0.1)
+        .collect();
+    let c = tape.var_no_grad(&t(coef, &[3, 4]));
+    y.mul(&y)?.mul(&c)?.sum(None)
+}
+
+fn run_scatter_reduce_body(tp: &Tapes, mode: fandhe_ai::ScatterReduceMode) -> Outputs {
+    let n = 18;
+    let p0: Vec<f32> = (0..n)
+        .map(|i| (((i * 37 + 11) % 17) as f32 - 8.0) * 0.1)
+        .collect();
+    let dir: Vec<f32> = (0..n)
+        .map(|i| 0.6 - 0.23 * (i % 13) as f32 + 0.04 * (i % 5) as f32)
+        .collect();
+
+    let p = tp.parent.var(&t(p0, &[n]));
+    let loss = scatter_reduce_family_loss(&tp.parent, &p, mode).expect("forward");
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&p).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&p).unwrap().expect("first_order"));
+    let g = cg.grad(&p).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), &[n]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let pc = cg.child_var(&p).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&pc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &p, &t(dir, &[n]), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rp = res.child_var(&p).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rp).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+fn run_scatter_reduce_sum(tp: &Tapes) -> Outputs {
+    run_scatter_reduce_body(tp, fandhe_ai::ScatterReduceMode::Sum)
+}
+
+fn run_scatter_reduce_mean(tp: &Tapes) -> Outputs {
+    run_scatter_reduce_body(tp, fandhe_ai::ScatterReduceMode::Mean)
+}
+
+fn run_scatter_reduce_amax(tp: &Tapes) -> Outputs {
+    run_scatter_reduce_body(tp, fandhe_ai::ScatterReduceMode::Amax)
+}
+
+fn run_scatter_reduce_amin(tp: &Tapes) -> Outputs {
+    run_scatter_reduce_body(tp, fandhe_ai::ScatterReduceMode::Amin)
+}
+
 /// Q5: `quantile` に `Op::Custom`（恒久的に対象外）を合成すると fail-closed で拒否され、
 /// 子テープは空のまま。
 fn reject_select_reduce_with_custom(tp: &Tapes) -> bool {
@@ -1814,6 +1933,10 @@ cuda_family_test!(
 );
 cuda_family_test!(create_graph_norm_reparam_cuda_matches_cpu, "norm_reparam");
 cuda_family_test!(create_graph_conv3d_family_cuda_matches_cpu, "conv3d_family");
+cuda_family_test!(
+    create_graph_scatter_reduce_cuda_matches_cpu,
+    "scatter_reduce"
+);
 
 /// Metal 版（#3777）。マクロ定義は cfg 無しで、展開される `fn` だけを macOS に限る
 /// （Linux で `unused_macros` にならない）。名前は `create_graph_<族>_metal_matches_cpu`。
@@ -1858,6 +1981,10 @@ metal_family_test!(create_graph_norm_reparam_metal_matches_cpu, "norm_reparam");
 metal_family_test!(
     create_graph_conv3d_family_metal_matches_cpu,
     "conv3d_family"
+);
+metal_family_test!(
+    create_graph_scatter_reduce_metal_matches_cpu,
+    "scatter_reduce"
 );
 
 // --- CI で走る自己検査（GPU 不要。登録表と置き場の健全性だけを見る） ---
@@ -1938,6 +2065,11 @@ fn loss_regression_cases_pass_cpu_against_cpu() {
 #[test]
 fn conv3d_family_cases_pass_cpu_against_cpu() {
     run_family("conv3d_family", None);
+}
+
+#[test]
+fn scatter_reduce_cases_pass_cpu_against_cpu() {
+    run_family("scatter_reduce", None);
 }
 
 #[test]
