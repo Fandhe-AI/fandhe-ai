@@ -2036,7 +2036,7 @@ fn hessian_where_matches_finite_difference() {
 //     fail-closed の拒否契約はそのセクションの混在テストが固定する。
 
 // `Gather` は #3083 で対象になった。拒否契約は新セクション（索引・累積族）の
-// `create_graph_rejects_custom_downstream_of_gather`／`..._cumprod` が固定する。
+// `create_graph_rejects_custom_downstream_of_gather`／`..._cumsum` が固定する。
 // ===========================================================================
 // 2D 畳み込み族（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）の
 // create_graph 対応（イシュー #3080・決定記録 §23）。
@@ -3515,8 +3515,9 @@ fn create_graph_still_rejects_custom_downstream_of_loss() {
 // --- 索引・累積族（イシュー #3083。決定記録 §25） -----------------------------
 //
 // 対象: Gather・Scatter（Add／Overwrite）・Embedding・Sort・Topk・Cummax・
-// Cummin・Cumsum。fail-closed のまま: Cumprod・Logcumsumexp（IndexedScatterReduce の Sum・Mean・
-// Amax・Amin は #3802 で対象。Prod は #3803 待ちで fail-closed）。
+// Cummin・Cumsum。fail-closed のまま: IndexedScatterReduce の Prod（#3803 では対象外）。
+// Cumprod・Logcumsumexp は #3803 で対象になった（`create_graph_cumprod_logcumsumexp.rs`）。
+// IndexedScatterReduce の Sum・Mean・Amax・Amin は #3802 で対象。
 //
 // - Hessian: loss は y³·c（勾配が 2 次多項式のため中央差分は厳密。h=0.1 で f32
 //   ノイズを抑える。tolerance は変えない）。Sort／Topk／Cummax／Cummin は
@@ -3986,11 +3987,16 @@ fn create_graph_rejects_custom_downstream_of_gather() {
 }
 
 #[test]
-fn create_graph_rejects_unsupported_op_cumprod() {
+fn create_graph_rejects_custom_downstream_of_cumsum() {
+    // 累積 Op（Cumsum）の下流に未対応の `Op::Custom` があれば拒否される。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
-    let loss = x.cumsum(0).unwrap().cumprod(0).unwrap().sum(None).unwrap();
+    let h = x.cumsum(0).unwrap();
+    let out = tape
+        .custom(Arc::new(IdentityCustomFn), &[h])
+        .expect("Tape::custom 登録成功");
+    let loss = out.sum(None).unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
@@ -4001,13 +4007,11 @@ fn create_graph_rejects_gather_mixed_with_unsupported_op_and_keeps_child_empty()
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
-    let loss = x
-        .gather(0, &idx_t(vec![2, 0], &[2]))
-        .unwrap()
-        .cumprod(0)
-        .unwrap()
-        .sum(None)
-        .unwrap();
+    let h = x.gather(0, &idx_t(vec![2, 0], &[2])).unwrap();
+    let out = tape
+        .custom(Arc::new(IdentityCustomFn), &[h])
+        .expect("Tape::custom 登録成功");
+    let loss = out.sum(None).unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
@@ -5144,20 +5148,20 @@ fn create_graph_pad_family_degenerate_shapes_succeed() {
 
 #[test]
 fn create_graph_rejects_pad_mask_mixed_with_unsupported_op_and_keeps_child_empty() {
-    // Pad・MaskedFill 自体は対象だが、同じグラフに fail-closed の Op（cumprod）があれば拒否。
+    // Pad・MaskedFill 自体は対象だが、同じグラフに fail-closed の Op（Op::Custom）があれば拒否。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
     let mask = Tensor::new(vec![true, false, true, false], &[4]).expect("mask fixture");
-    let loss = x
+    let h = x
         .pad(&[(1, 0)], 0.5)
         .unwrap()
         .masked_fill(&mask, 0.0)
-        .unwrap()
-        .cumprod(0)
-        .unwrap()
-        .sum(None)
         .unwrap();
+    let out = tape
+        .custom(Arc::new(IdentityCustomFn), &[h])
+        .expect("Tape::custom 登録成功");
+    let loss = out.sum(None).unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());

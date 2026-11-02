@@ -644,6 +644,27 @@ const CASES: &[Case] = &[
         run: run_conv3d_family_conv_transpose3d,
         reject: None,
     },
+    // 累積 B 区分（イシュー #3803・決定記録 §41/§64）。`cumprod` は CUDA・Metal にカーネルがあり K、
+    // `logcumsumexp` はデバイスカーネルが無くホストへフォールバックする H。構造は narrow／concat／
+    // 要素ごとの演算だけ（MatMul なし）で、値ノードは 1 階と同じホスト関数。実機は未実測（#3857・#3859）。
+    Case {
+        name: "cumulative_b_cumprod",
+        family: "cumulative_b",
+        route: Route::K,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_cumulative_b_cumprod,
+        reject: Some(reject_cumulative_b_cumprod_inf_input),
+    },
+    Case {
+        name: "cumulative_b_logcumsumexp",
+        family: "cumulative_b",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_cumulative_b_logcumsumexp,
+        reject: Some(reject_cumulative_b_logcumsumexp_inf_input),
+    },
     // 索引付き縮約族（イシュー #3802・決定記録 §41/§62）。`indexed_scatter_reduce` は CUDA・Metal・ROCm で
     // override されておらずホストへフォールバックする（`Gather`／`Where`／`Mul` はデバイスで走る）ので H。
     // 構造に MatMul を含まない。値は 1 階と同じホスト関数 `scatter_reduce_vjp_host`。実機は未実測（#3857・#3859）。
@@ -1753,6 +1774,89 @@ fn run_conv3d_family_conv_transpose3d(tp: &Tapes) -> Outputs {
     run_conv3d_family_body(tp, true, [2, 3, 2, 3, 3], [3, 4, 2, 2, 2], 4)
 }
 
+/// 累積 B 区分（#3803）の共通本体（S2: 2 のべき乗でない中形状 `[17, 33]`・軸 1 の累積）。
+/// 入力は決定的で、`cumprod` が overflow／underflow しない範囲 `[0.8, 1.2]`・`logcumsumexp` が
+/// 係数の丸めで外れない範囲に収める（S5）。損失は `sum(y² ⊙ c)`（行ごとの非一様な重み）。
+fn run_cumulative_b_body(
+    tp: &Tapes,
+    scan: for<'a> fn(&fandhe_ai::Var<'a>) -> fandhe_ai::Var<'a>,
+    lo: f32,
+    span: f32,
+) -> Outputs {
+    let (rows, cols) = (17usize, 33usize);
+    let n = rows * cols;
+    let x0: Vec<f32> = (0..n)
+        .map(|i| lo + span * (((i * 389 + 17) % 1009) as f32 / 1009.0))
+        .collect();
+    let dir: Vec<f32> = (0..n).map(|i| 0.5 + 0.01 * (i % 7) as f32).collect();
+    let c: Vec<f32> = (0..rows).map(|i| 0.5 + 0.1 * i as f32).collect();
+
+    let x = tp.parent.var(&t(x0, &[rows, cols]));
+    let cv = tp.parent.var_no_grad(&t(c, &[rows, 1]));
+    let y = scan(&x);
+    let loss = y.mul(&y).unwrap().mul(&cv).unwrap().sum(None).unwrap();
+    let plain_grads = tp.parent.backward(&loss).expect("backward");
+    let plain = vals(plain_grads.get(&x).unwrap().expect("grad"));
+
+    let cg = tp
+        .parent
+        .backward_create_graph(&loss, &tp.child)
+        .expect("create_graph");
+    let first_order = vals(cg.first_order().get(&x).unwrap().expect("first_order"));
+    let g = cg.grad(&x).unwrap().expect("grad");
+    let grad = vals(&g.value());
+    let v = tp.child.var_no_grad(&t(dir.clone(), &[rows, cols]));
+    let hv_loss = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = tp.child.backward(&hv_loss).expect("child backward");
+    let xc = cg.child_var(&x).unwrap().expect("mirror");
+    let hv = vals(grads2.get(&xc).unwrap().expect("second order"));
+    // Q4: 孫テープ再生（§48.4）。
+    let res = tp
+        .parent
+        .jvp_create_graph(&loss, &x, &t(dir, &[rows, cols]), &tp.jvp_child, &tp.grand)
+        .expect("jvp_create_graph");
+    let rgrads = tp
+        .grand
+        .backward(&res.output().sum(None).unwrap())
+        .expect("grand backward");
+    let rx = res.child_var(&x).unwrap().expect("mirror");
+    let replay = vals(rgrads.get(&rx).unwrap().expect("replay grad"));
+    Outputs {
+        first_order,
+        plain,
+        grad,
+        hv,
+        replay: Some(replay),
+    }
+}
+
+fn run_cumulative_b_cumprod(tp: &Tapes) -> Outputs {
+    run_cumulative_b_body(tp, |x| x.cumprod(1).unwrap(), 0.8, 0.4)
+}
+
+fn run_cumulative_b_logcumsumexp(tp: &Tapes) -> Outputs {
+    run_cumulative_b_body(tp, |x| x.logcumsumexp(1).unwrap(), -1.0, 2.0)
+}
+
+/// Q5: ±inf の入力は型付きエラーで拒否され、子テープは空のまま（両デバイスで同じ結果にする）。
+/// `lse` が真なら Logcumsumexp、偽なら Cumprod を対象にする（族の各 Case が自分の演算を検査する）。
+fn reject_cumulative_b_inf_input_op(tp: &Tapes, lse: bool) -> bool {
+    let x = tp
+        .parent
+        .var(&t(vec![0.5, f32::INFINITY, 0.7, 0.9], &[1, 4]));
+    let y = if lse { x.logcumsumexp(1) } else { x.cumprod(1) };
+    let loss = y.unwrap().sum(None).unwrap();
+    is_clean_rejection(tp.parent.backward_create_graph(&loss, &tp.child), &tp.child)
+}
+
+fn reject_cumulative_b_cumprod_inf_input(tp: &Tapes) -> bool {
+    reject_cumulative_b_inf_input_op(tp, false)
+}
+
+fn reject_cumulative_b_logcumsumexp_inf_input(tp: &Tapes) -> bool {
+    reject_cumulative_b_inf_input_op(tp, true)
+}
+
 /// 索引付き縮約族（#3802）の共通本体。input `[3, 4]` と src `[2, 3]` を 1 本の葉 `p` から切り出し
 /// （d_input・d_src を同時に測る）、損失は `sum(y ⊙ y ⊙ c)`。Q4 は同じ損失の `jvp_create_graph` を孫テープで逆伝播する。
 fn scatter_reduce_family_loss<'a>(
@@ -2354,6 +2458,7 @@ cuda_family_test!(
 );
 cuda_family_test!(create_graph_norm_reparam_cuda_matches_cpu, "norm_reparam");
 cuda_family_test!(create_graph_conv3d_family_cuda_matches_cpu, "conv3d_family");
+cuda_family_test!(create_graph_cumulative_b_cuda_matches_cpu, "cumulative_b");
 cuda_family_test!(
     create_graph_scatter_reduce_cuda_matches_cpu,
     "scatter_reduce"
@@ -2412,6 +2517,7 @@ metal_family_test!(
     create_graph_conv3d_family_metal_matches_cpu,
     "conv3d_family"
 );
+metal_family_test!(create_graph_cumulative_b_metal_matches_cpu, "cumulative_b");
 metal_family_test!(
     create_graph_scatter_reduce_metal_matches_cpu,
     "scatter_reduce"
@@ -2504,6 +2610,11 @@ fn loss_regression_cases_pass_cpu_against_cpu() {
 #[test]
 fn conv3d_family_cases_pass_cpu_against_cpu() {
     run_family("conv3d_family", None);
+}
+
+#[test]
+fn cumulative_b_cases_pass_cpu_against_cpu() {
+    run_family("cumulative_b", None);
 }
 
 #[test]

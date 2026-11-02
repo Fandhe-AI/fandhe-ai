@@ -69,7 +69,8 @@
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。イシュー #3802 で `IndexedScatterReduce`
 //! （Sum・Mean・Amax・Amin。実装は `scatter_reduce` サブモジュール、決定記録 §41・§62）も拡張済み。
-//! `IndexedScatterReduce` の `Prod`・`Cumprod`・`Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
+//! `Cumprod`・`Logcumsumexp` はイシュー #3803（決定記録 §41・§64。実装は `cumulative_b`／`scan`）で
+//! 対象にした。`IndexedScatterReduce` の `Prod` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
 //! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3791 で統計縮約の
 //! `Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm`（実装は `stat_varnorm` サブモジュール、決定記録 §33・§52）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
@@ -141,6 +142,7 @@ use crate::var::Var;
 
 mod conv;
 mod conv3d;
+mod cumulative_b;
 mod index_cum;
 mod linalg_cholesky_pinv;
 mod linalg_fft;
@@ -153,6 +155,7 @@ mod norm_reparam;
 mod pad_mask;
 mod pool;
 mod rnn_gru_cell;
+mod scan;
 mod scatter_reduce;
 mod select_reduce;
 mod stat_reduce_lse_nan;
@@ -1026,6 +1029,10 @@ fn replay_op<'c>(
             reduce,
         ),
         Op::Cumsum { input, dim } => get_mirror(mirror, input)?.cumsum(dim),
+        // 累積 B 区分（イシュー #3803・決定記録 §41・§64）。公開 `Var` メソッドへ委譲する
+        // （forward の検証・CPU／CUDA／Metal のカーネル経路を迂回しない）。
+        Op::Cumprod { input, dim } => get_mirror(mirror, input)?.cumprod(dim),
+        Op::Logcumsumexp { input, dim } => get_mirror(mirror, input)?.logcumsumexp(dim),
         Op::IndexedScatterReduce {
             input,
             dim,
@@ -3368,6 +3375,34 @@ fn build_cgrads<'c>(
             Op::Cumsum { input, dim } => {
                 if parent_nodes[input.0].requires_grad {
                     let d = index_cum::cumsum_cgrad(child, &g, dim)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 累積 B 区分（イシュー #3803。方式は `cumulative_b` モジュール doc 参照）。
+            Op::Cumprod { input, dim } | Op::Logcumsumexp { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let x_m = get_mirror(mirror, input)?;
+                    let y_m = get_mirror(mirror, id)?;
+                    let spec = (id, input, dim);
+                    let d = if matches!(node.op, Op::Cumprod { .. }) {
+                        cumulative_b::cumprod_cgrad(
+                            parent,
+                            child,
+                            &parent_nodes,
+                            spec,
+                            (&x_m, &y_m),
+                            &g,
+                        )?
+                    } else {
+                        cumulative_b::logcumsumexp_cgrad(
+                            parent,
+                            child,
+                            &parent_nodes,
+                            spec,
+                            (&x_m, &y_m),
+                            &g,
+                        )?
+                    };
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
