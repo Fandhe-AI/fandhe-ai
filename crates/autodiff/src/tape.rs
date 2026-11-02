@@ -958,7 +958,9 @@ pub(crate) enum Op {
     /// `Op::Dropout { mask }` と同じ非追跡ペイロード）、`params` は検査済みの
     /// 解決済み引数。`crate::fft_ops::stft` からのみ積まれ、facade には公開しない。
     /// VJP は入力値を必要としない線形演算（`grad.rs`）。分類は [`Op::Rfft`] と
-    /// 同じ（非融合・非 checkpoint・高階微分非対応）。
+    /// 同じ（非融合・非 checkpoint）。高階微分（`create_graph`）はイシュー #3804
+    /// （決定記録 §42・§63）で対応し、随伴 Op の対 [`Op::StftAdjoint`]／
+    /// [`Op::IstftAdjoint`] で O(1) ノードに閉じる。
     Stft {
         input: NodeId,
         window: Tensor<f32>,
@@ -966,8 +968,28 @@ pub(crate) enum Op {
     },
     /// 逆短時間フーリエ変換（`[N, T, 2]`／`[B, N, T, 2]` → 実 `[L_out]`／
     /// `[B, L_out]`。イシュー #2633）。`crate::fft_ops::istft` からのみ積まれる。
-    /// 分類は [`Op::Stft`] と同じ。
+    /// 分類・高階微分の方式は [`Op::Stft`] と同じ。
     Istft {
+        input: NodeId,
+        window: Tensor<f32>,
+        params: IstftParams,
+    },
+    /// `Op::Stft` の随伴（`Sᵀ g`。入力はスペクトル shape、出力は信号 shape。イシュー #3804・
+    /// 決定記録 §42.2）。`create_graph` の子テープへだけ `create_graph/stft.rs` が積む
+    /// `pub(crate)` の内部 Op で、公開 API・§21.2 の 123 件の数えには入らない。値は
+    /// `fft::stft_vjp_host`（1 階 VJP と同一関数）。`params`・`window` は対応する `Op::Stft` と
+    /// 同じ値で、出力（信号）shape から `stft_layout` を再構築する。VJP は `stft_host`
+    /// （`grad.rs`）。非融合・非 checkpoint（再計算分岐を持たない）。
+    StftAdjoint {
+        input: NodeId,
+        window: Tensor<f32>,
+        params: StftParams,
+    },
+    /// `Op::Istft` の随伴（`Iᵀ g`。入力は信号 shape、出力はスペクトル shape。イシュー #3804・
+    /// 決定記録 §42.2）。性質は [`Op::StftAdjoint`] と同じ。値は `fft::istft_vjp_host`、
+    /// VJP は `istft_host`。`params` は対応する `Op::Istft` と同じ値（出力〈スペクトル〉shape から
+    /// `istft_layout` を再構築する）。
+    IstftAdjoint {
         input: NodeId,
         window: Tensor<f32>,
         params: IstftParams,
@@ -2008,7 +2030,7 @@ impl Op {
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
             // `Op::Rfft`／`Op::Irfft`（イシュー #2631）・`Op::Fft`／`Op::Ifft`
-            // （イシュー #2632）・`Op::Stft`／`Op::Istft`（イシュー #2633）も `recompute_value` に再計算分岐を持たない
+            // （イシュー #2632）・`Op::Stft`／`Op::Istft`（イシュー #2633）と内部 Op `StftAdjoint`／`IstftAdjoint`（イシュー #3804）も `recompute_value` に再計算分岐を持たない
             // ため非適格のまま保持する。
             | Op::Rfft { .. }
             | Op::Cummax { .. }
@@ -2027,6 +2049,8 @@ impl Op {
             | Op::Ifft { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
+            | Op::StftAdjoint { .. }
+            | Op::IstftAdjoint { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::RmsNorm { .. }
@@ -2259,6 +2283,8 @@ impl Op {
             | Op::Ifft { input, .. }
             | Op::Stft { input, .. }
             | Op::Istft { input, .. }
+            | Op::StftAdjoint { input, .. }
+            | Op::IstftAdjoint { input, .. }
             | Op::Permute { input, .. }
             | Op::BroadcastTo { input }
             | Op::Narrow { input, .. }
@@ -2643,8 +2669,13 @@ impl Op {
             | Op::Pad { .. }
             | Op::MaskedFill { .. }
             | Op::PadMode { .. }
-            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。`Stft`／`Istft`・
-            // 分解系・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm` などは `false` のまま。
+            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。分解系・`Cholesky`・
+            // `Pinv`・`Lstsq`・`MatrixNorm` などは `false` のまま。`Stft`／`Istft` と内部 Op
+            // `StftAdjoint`／`IstftAdjoint` はイシュー #3804（決定記録 §42・§63。随伴 Op の対）。
+            | Op::Stft { .. }
+            | Op::Istft { .. }
+            | Op::StftAdjoint { .. }
+            | Op::IstftAdjoint { .. }
             | Op::Rfft { .. }
             | Op::Irfft { .. }
             | Op::Fft { .. }
@@ -2748,10 +2779,7 @@ impl Op {
             | Op::Pinv { .. }
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
-            // `Stft`／`Istft`（イシュー #2633）は非対応のまま（`PadMode` 再生不可。§29）。
             | Op::Logcumsumexp { .. }
-            | Op::Stft { .. }
-            | Op::Istft { .. }
             | Op::Cumprod { .. }
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
@@ -5514,7 +5542,8 @@ mod conv3d_op_tests {
 
     /// イシュー #3086: FFT 4 件・線形代数 4 件は create_graph 対応（`true`）。隣接する
     /// `Cholesky`・`Pinv`・`MatrixNorm`・`SlogdetSign`・`MatrixRank` などは `false`（fail-closed。
-    /// 型付きエラーでの拒否は `tests/create_graph_linalg_fft.rs` が全 15 件で固定する）。
+    /// 型付きエラーでの拒否は `tests/create_graph_linalg_fft.rs` が全 13 件で固定する。
+    /// `Stft`／`Istft` は #3804 で対応済みのため `stft_family_supports_create_graph` が扱う）。
     #[test]
     fn linalg_fft_family_supports_create_graph() {
         let a = NodeId(0);
@@ -5571,6 +5600,48 @@ mod conv3d_op_tests {
         ];
         for op in &unsupported {
             assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
+        }
+    }
+
+    /// イシュー #3804: `Stft`／`Istft` と内部 Op `StftAdjoint`／`IstftAdjoint` は create_graph
+    /// 対応（`true`）。内部 Op は checkpoint の対象外で、`for_each_input` は `input` の 1 件。
+    #[test]
+    fn stft_family_supports_create_graph() {
+        use fandhe_ai_tensor_core::StftPadMode;
+        let a = NodeId(0);
+        let win = Tensor::<f32>::new(vec![1.0; 4], &[4]).unwrap();
+        let sp = || StftParams::new(4, Some(2), true, StftPadMode::Reflect, false, true).unwrap();
+        let ip = || IstftParams::new(4, Some(2), None, true, false, None, None).unwrap();
+        let ops = [
+            Op::Stft {
+                input: a,
+                window: win.clone(),
+                params: sp(),
+            },
+            Op::Istft {
+                input: a,
+                window: win.clone(),
+                params: ip(),
+            },
+            Op::StftAdjoint {
+                input: a,
+                window: win.clone(),
+                params: sp(),
+            },
+            Op::IstftAdjoint {
+                input: a,
+                window: win.clone(),
+                params: ip(),
+            },
+        ];
+        for op in &ops {
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
+            let mut inputs = Vec::new();
+            op.for_each_input(|id| inputs.push(id));
+            assert_eq!(inputs, vec![a], "{op:?} の入力は input の 1 件");
+        }
+        for op in &ops[2..] {
+            assert!(!op.is_checkpoint_eligible(), "{op:?} は checkpoint 対象外");
         }
     }
 

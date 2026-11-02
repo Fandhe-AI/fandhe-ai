@@ -75,8 +75,10 @@
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
-//! `Stft`・`Istft`・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・
-//! `SlogdetSign`・`MatrixRank` の 15 件は fail-closed に固定した。
+//! `Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・
+//! `SlogdetSign`・`MatrixRank` の 13 件は fail-closed に固定した。`Stft`・`Istft` はイシュー #3804
+//! （決定記録 §42・§63。実装は `stft` サブモジュール。随伴 Op の対 `StftAdjoint`・`IstftAdjoint`）で
+//! 対象にした。
 //! 損失の回帰系 `KlDivLoss`・`PoissonNllLoss`・`GaussianNllLoss` はイシュー #3798
 //! （決定記録 §39/§53・実装は `loss_regression`）で対象にした。
 //! 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・`NllLoss` の 5 variant を
@@ -151,6 +153,7 @@ mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
 mod stat_varnorm;
+mod stft;
 mod structural;
 
 /// `IndexedScatterReduce` の mode が create_graph 対応か（`Op::supports_create_graph` から。
@@ -522,6 +525,38 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         | Op::Ifft { norm, .. } = &node.op
         {
             linalg_fft::check_fft_norm(*norm)?;
+        }
+        // Stft／Istft と随伴 Op（イシュー #3804）: layout・窓長・NOLA・入力 shape の整合を
+        // 子テープへ書く前に確かめる（違反は型付き Err。`child.is_empty()` を保つ）。
+        match &node.op {
+            Op::Stft {
+                input,
+                window,
+                params,
+            } => stft::check_stft(&parent_nodes[input.0].shape, window, params)?,
+            Op::Istft {
+                input,
+                window,
+                params,
+            } => stft::check_istft(&parent_nodes[input.0].shape, window, params)?,
+            Op::StftAdjoint {
+                input,
+                window,
+                params,
+            } => {
+                stft::check_stft_adjoint(&parent_nodes[input.0].shape, &node.shape, window, params)?
+            }
+            Op::IstftAdjoint {
+                input,
+                window,
+                params,
+            } => stft::check_istft_adjoint(
+                &parent_nodes[input.0].shape,
+                &node.shape,
+                window,
+                params,
+            )?,
+            _ => {}
         }
         // LSTM（イシュー #3796）: `LstmHidden.cell` が `LstmCell` を指す push 順序契約を
         // 子テープへ書く前に確かめる（違反は型付き Err。`child.is_empty()` を保つ）。
@@ -1277,6 +1312,28 @@ fn replay_op<'c>(
             dim,
             norm,
         } => get_mirror(mirror, input)?.ifft(Some(n), Some(dim), norm),
+        // Stft／Istft と随伴 Op（イシュー #3804。方式は `stft` モジュール doc 参照）。解決済みの窓を
+        // そのまま渡す（公開 `Var::stft` は `win_length` から窓を再解決するため使えない）。
+        Op::Stft {
+            input,
+            window,
+            params,
+        } => crate::fft_ops::stft_from_resolved(&get_mirror(mirror, input)?, &window, &params),
+        Op::Istft {
+            input,
+            window,
+            params,
+        } => crate::fft_ops::istft_from_resolved(&get_mirror(mirror, input)?, &window, &params),
+        Op::StftAdjoint {
+            input,
+            window,
+            params,
+        } => stft::stft_adjoint_var(&get_mirror(mirror, input)?, &window, &params, shape),
+        Op::IstftAdjoint {
+            input,
+            window,
+            params,
+        } => stft::istft_adjoint_var(&get_mirror(mirror, input)?, &window, &params, shape),
         // 選択縮約（イシュー #3789。方式は `select_reduce` モジュール doc 参照）。写しの
         // Op タグを親と一致させる（`Amax`／`Amin` を `Max` で記録すると孫が先勝ち VJP になる）。
         Op::Max { input, dim } => get_mirror(mirror, input)?.max(dim),
@@ -3323,6 +3380,49 @@ fn build_cgrads<'c>(
                     };
                     let input_shape = parent_nodes[input.0].shape.clone();
                     let d = linalg_fft::fft_vjp(child, &g, kind, &input_shape, n, dim, norm)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // Stft／Istft と随伴 Op（イシュー #3804）。入力に対して実線形で、随伴は対の Op 1 ノード。
+            Op::Stft {
+                input,
+                window,
+                params,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let signal_shape = parent_nodes[input.0].shape.clone();
+                    let d = stft::stft_adjoint_var(&g, &window, &params, &signal_shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Istft {
+                input,
+                window,
+                params,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let spectrum_shape = parent_nodes[input.0].shape.clone();
+                    let d = stft::istft_adjoint_var(&g, &window, &params, &spectrum_shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::StftAdjoint {
+                input,
+                window,
+                params,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = crate::fft_ops::stft_from_resolved(&g, &window, &params)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::IstftAdjoint {
+                input,
+                window,
+                params,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = crate::fft_ops::istft_from_resolved(&g, &window, &params)?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }

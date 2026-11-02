@@ -10,7 +10,7 @@
 //! - 閉包性: 子テープ上の勾配を孫テープへ再生（`child.backward_create_graph`）しても二階の値が一致する。
 //! - 総括的な適用判定（決定記録 §30）: 拒否域の入力は `Err(Backward)` かつ `child.is_empty()`、
 //!   拒否のあと同じ `child` で再試行できる。ほどほどの大きさの入力は受理され全段が有限で一致する。
-//! - fail-closed に固定した 15 件（`Stft`・`Istft`・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・
+//! - fail-closed に固定した 13 件（`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・
 //!   `QrQ`／`QrR`・`SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors`・`SlogdetSign`・`MatrixRank`）が
 //!   型付きエラーで拒否されること。`requires_grad == false` の部分木にある場合は拒否されない。
 
@@ -18,7 +18,7 @@
 
 mod common;
 
-use fandhe_ai_autodiff::{AutodiffError, IstftOptions, StftOptions, Tape, Var};
+use fandhe_ai_autodiff::{AutodiffError, Tape, Var};
 use fandhe_ai_tensor_core::{FftNorm, MatrixNormOrd, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -624,7 +624,7 @@ fn moderate_scale_inputs_are_accepted_and_finite() {
     }
 }
 
-// --- 4. fail-closed に固定した 15 件 --------------------------------------------------------
+// --- 4. fail-closed に固定した 13 件 --------------------------------------------------------
 
 type Case = (
     &'static str,
@@ -639,28 +639,6 @@ fn spd3() -> Vec<f32> {
 fn fail_closed_cases() -> Vec<(Case, Vec<f32>)> {
     let sym3 = spd3();
     vec![
-        (
-            (
-                "stft",
-                vec![16],
-                Box::new(|_t, x| {
-                    x.stft(8, None, &StftOptions::default().with_center(false))?
-                        .sum(None)
-                }),
-            ),
-            x_data(&[16]),
-        ),
-        (
-            (
-                "istft",
-                vec![5, 4, 2],
-                Box::new(|_t, x| {
-                    x.istft(8, None, &IstftOptions::default().with_center(false))?
-                        .sum(None)
-                }),
-            ),
-            x_data(&[5, 4, 2]),
-        ),
         (
             (
                 "cholesky",
@@ -758,7 +736,11 @@ fn fail_closed_cases() -> Vec<(Case, Vec<f32>)> {
 #[test]
 fn fail_closed_ops_are_rejected_with_typed_error_and_leave_child_empty() {
     let cases = fail_closed_cases();
-    assert_eq!(cases.len(), 15, "fail-closed 固定は 15 件");
+    assert_eq!(
+        cases.len(),
+        13,
+        "fail-closed 固定は 13 件（Stft／Istft は #3804 で対象化）"
+    );
     for ((name, shape, build), x0) in cases {
         let tape = Tape::new_with_ops(common::naive_ops());
         let child = Tape::new_with_ops(common::naive_ops());
