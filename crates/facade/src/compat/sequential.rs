@@ -127,13 +127,13 @@ use fandhe_ai_autodiff::nn::{
     ConvTranspose3d, ConvTranspose3dVars, Dropout, Dropout2d, Embedding, EmbeddingBag,
     EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, Fold, FractionalMaxPool2d,
     FractionalMaxPool3d, GlobalPool, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS,
-    LayerNorm, LayerNormVars, Linear, LocalResponseNorm, MaxPool1d, MaxPool2d, MaxPool3d, Module,
-    MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
-    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, Transformer,
-    TransformerConfig, TransformerDecoderLayer, TransformerDecoderLayerVars,
-    TransformerEncoderLayer, TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold,
-    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
-    multihead_attention_forward_low_precision,
+    LayerNorm, LayerNormVars, Linear, LocalResponseNorm, LpPool1d, LpPool2d, LpPool3d, MaxPool1d,
+    MaxPool2d, MaxPool3d, Module, MultiheadAttention, MultiheadAttentionConfig,
+    MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
+    Sequential as NnSequential, Transformer, TransformerConfig, TransformerDecoderLayer,
+    TransformerDecoderLayerVars, TransformerEncoderLayer, TransformerEncoderLayerVars,
+    TransformerVars, Unflatten, Unfold, Upsample, ZeroPad2d, conv2d_forward_low_precision,
+    linear_forward_low_precision, multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -546,6 +546,24 @@ pub(super) enum LayerSpec {
     },
     InstanceNorm {
         eps: f32,
+    },
+    /// イシュー #3825。`nn::LpPool1d`（`ceil_mode=false` 固定）。
+    LpPool1d {
+        norm_type: f32,
+        kernel_size: usize,
+        stride: Option<usize>,
+    },
+    /// イシュー #3825。`nn::LpPool2d`。
+    LpPool2d {
+        norm_type: f32,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+    },
+    /// イシュー #3825。`nn::LpPool3d`。
+    LpPool3d {
+        norm_type: f32,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
     },
     /// イシュー #3822。groups のみ（rank・整除は forward 時の遅延検査）。
     ChannelShuffle {
@@ -2543,6 +2561,111 @@ impl Sequential {
             stride,
             padding,
             count_include_pad,
+        });
+        Ok(self)
+    }
+
+    /// 1 次元 LPPool 層を追加する（`nn::LpPool1d`。PyTorch `nn.LPPool1d` 相当。イシュー #3825）。
+    /// `(Σ_window x^p)^(1/p)`。`ceil_mode=false` 固定・無状態。`norm_type` は有限かつ `> 0`
+    /// （不正は即時 `Err`）。負の入力と非整数 `norm_type` は NaN。`create_graph` には対応しない。
+    /// 常駐経路は fail-closed（非常駐の tape 経路で動く）。保存（kind `lp_pool1d`）に対応し、
+    /// ONNX export は `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_lp_pool1d(1.0, 2, None)?;
+    /// let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 4])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.as_slice().unwrap(), &[3.0, 7.0]);
+    /// assert!(Sequential::new().add_lp_pool1d(0.0, 2, None).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_lp_pool1d(
+        mut self,
+        norm_type: f32,
+        kernel_size: usize,
+        stride: Option<usize>,
+    ) -> Result<Self, AutodiffError> {
+        let layer = LpPool1d::new(norm_type, kernel_size, stride)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::LpPool1d {
+            norm_type,
+            kernel_size,
+            stride,
+        });
+        Ok(self)
+    }
+
+    /// 2 次元 LPPool 層を追加する（`nn::LpPool2d`。PyTorch `nn.LPPool2d` 相当。イシュー #3825）。
+    /// `(Σ_window x^p)^(1/p)`。`ceil_mode=false` 固定・無状態。`norm_type` は有限かつ `> 0`
+    /// （不正は即時 `Err`）。負の入力と非整数 `norm_type` は NaN。`create_graph` には対応しない。
+    /// 常駐経路は fail-closed（非常駐の tape 経路で動く）。保存（kind `lp_pool2d`）に対応し、
+    /// ONNX export は `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_lp_pool2d(2.0, [2, 2], None)?;
+    /// let x = Tensor::new(vec![1.0, 2.0, 2.0, 4.0], &[1, 1, 2, 2])?;
+    /// let y = model.predict(&x)?;
+    /// assert!((y.as_slice().unwrap()[0] - 5.0).abs() < 1e-6);
+    /// assert!(Sequential::new().add_lp_pool2d(0.0, [2, 2], None).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_lp_pool2d(
+        mut self,
+        norm_type: f32,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+    ) -> Result<Self, AutodiffError> {
+        let layer = LpPool2d::new(norm_type, kernel_size, stride)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::LpPool2d {
+            norm_type,
+            kernel_size,
+            stride,
+        });
+        Ok(self)
+    }
+
+    /// 3 次元 LPPool 層を追加する（`nn::LpPool3d`。PyTorch `nn.LPPool3d` 相当。イシュー #3825）。
+    /// `(Σ_window x^p)^(1/p)`。`ceil_mode=false` 固定・無状態。`norm_type` は有限かつ `> 0`
+    /// （不正は即時 `Err`）。負の入力と非整数 `norm_type` は NaN。`create_graph` には対応しない。
+    /// 常駐経路は fail-closed（非常駐の tape 経路で動く）。保存（kind `lp_pool3d`）に対応し、
+    /// ONNX export は `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_lp_pool3d(1.0, [2, 2, 2], None)?;
+    /// let x = Tensor::new(vec![1.0; 8], &[1, 1, 2, 2, 2])?;
+    /// let y = model.predict(&x)?;
+    /// assert!((y.as_slice().unwrap()[0] - 8.0).abs() < 1e-6);
+    /// assert!(Sequential::new().add_lp_pool3d(0.0, [2, 2, 2], None).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_lp_pool3d(
+        mut self,
+        norm_type: f32,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+    ) -> Result<Self, AutodiffError> {
+        let layer = LpPool3d::new(norm_type, kernel_size, stride)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::LpPool3d {
+            norm_type,
+            kernel_size,
+            stride,
         });
         Ok(self)
     }

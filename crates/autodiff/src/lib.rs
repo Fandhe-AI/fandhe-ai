@@ -316,6 +316,9 @@ pub mod pad_ops;
 // `AvgPool3d` は #3027 で追加済み。facade の `Sequential::add_*` は未公開で保留継続。
 // `docs/autodiff-pool3d-ops-decision.md` §12・§13・§16）。
 pub mod pool3d_ops;
+// LPPool 3 演算（`lp_pool1d`／`lp_pool2d`／`lp_pool3d`。イシュー #3825）。`Var` の 1 行委譲メソッドとして
+// facade から到達できる（モジュール自体・層型は再エクスポートしない。#3022）。
+pub mod lp_pool_ops;
 // 3D 適応プーリング 2 演算（`adaptive_avg_pool3d`・`adaptive_max_pool3d`。イシュー #3823）。`Var` の
 // 1 行委譲メソッドとして facade から到達できる（モジュール自体は再エクスポートしない。層型・
 // `Sequential::add_adaptive_*_pool3d` は #3824。`docs/autodiff-pool3d-ops-decision.md` §18・§21）。

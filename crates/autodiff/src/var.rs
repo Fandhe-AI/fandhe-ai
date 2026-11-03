@@ -5622,6 +5622,74 @@ impl<'t> Var<'t> {
         )
     }
 
+    /// 1D LPPool（`torch.nn.functional.lp_pool1d` 相当。イシュー #3825）。`self`: `[N, C, L]`。
+    /// `crate::lp_pool_ops::lp_pool1d` へ 1 行委譲する。式は `(Σ_window x^p)^(1/p)`。
+    /// 負の入力と非整数 `norm_type` では NaN、全零窓の勾配は 0。`norm_type` は有限かつ `> 0`、
+    /// `ceil_mode=true` は型付きエラー。`create_graph`（二階微分）には対応しない。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let x = tape.var(&Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 1, 4]).unwrap());
+    /// let y = x.lp_pool1d(1.0, 2, None, false).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![3.0, 7.0]);
+    /// assert!(x.lp_pool1d(0.0, 2, None, false).is_err());
+    /// ```
+    pub fn lp_pool1d(
+        &self,
+        norm_type: f32,
+        kernel_size: usize,
+        stride: Option<usize>,
+        ceil_mode: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::lp_pool_ops::lp_pool1d(self, norm_type, kernel_size, stride, ceil_mode)
+    }
+
+    /// 2D LPPool（`torch.nn.functional.lp_pool2d` 相当。イシュー #3825）。`self`: `[N, C, H, W]`。
+    /// 契約は [`Self::lp_pool1d`] と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let x = tape.var(&Tensor::new(vec![1.0f32, 2.0, 2.0, 4.0], &[1, 1, 2, 2]).unwrap());
+    /// let y = x.lp_pool2d(2.0, [2, 2], None, false).unwrap();
+    /// assert!((y.value().host_slice()[0] - 5.0).abs() < 1e-6);
+    /// assert!(x.lp_pool2d(2.0, [2, 2], None, true).is_err());
+    /// ```
+    pub fn lp_pool2d(
+        &self,
+        norm_type: f32,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        ceil_mode: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::lp_pool_ops::lp_pool2d(self, norm_type, kernel_size, stride, ceil_mode)
+    }
+
+    /// 3D LPPool（`torch.nn.functional.lp_pool3d` 相当。イシュー #3825）。`self`: `[N, C, D, H, W]`。
+    /// 契約は [`Self::lp_pool1d`] と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let x = tape.var(&Tensor::new(vec![1.0f32; 8], &[1, 1, 2, 2, 2]).unwrap());
+    /// let y = x.lp_pool3d(1.0, [2, 2, 2], None, false).unwrap();
+    /// assert!((y.value().host_slice()[0] - 8.0).abs() < 1e-6);
+    /// assert!(x.lp_pool3d(f32::NAN, [2, 2, 2], None, false).is_err());
+    /// ```
+    pub fn lp_pool3d(
+        &self,
+        norm_type: f32,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        ceil_mode: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::lp_pool_ops::lp_pool3d(self, norm_type, kernel_size, stride, ceil_mode)
+    }
+
     // ---- conv_transpose3d_ops／max_unpool_ops 委譲メソッド（3D 転置畳み込み・MaxUnpool（Phase 4 行 13）。イシュー #2850。親 #2625・ルート #2499）----
     //
     // 実体は `crate::conv_transpose3d_ops`／`crate::max_unpool_ops` の自由関数。本体は 1 行委譲に固定し、

@@ -47984,6 +47984,353 @@ fn facade_does_not_reexport_or_declare_adaptive_pool3d_ops_detects_each_category
     assert!(offense("pub mod adaptive_pool3d_ops {}"));
     assert!(offense("pub mod adaptive_pool3d {}"));
 }
+// =====================================================================
+// イシュー #3825（LPPool の `Var` 演算と `Sequential` 層。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `Var::lp_pool{1,2,3}d`・`Sequential::add_lp_pool{1,2,3}d` の正ガード。
+// 反転対象の否定ガード・保留 doctest は元から無い（`lp_pool` 識別子は #3825 以前に 0 件。
+// `docs/autodiff-pool3d-ops-decision.md` §19）ため、承認形（1 行委譲・置き場所・facade 非再エクスポート）
+// だけを許す正ガードを新設する。
+// =====================================================================
+
+const LP_POOL_VAR_BODIES: [(&str, &str); 3] = [
+    (
+        "lp_pool1d",
+        "crate : : lp_pool_ops : : lp_pool1d ( self , norm_type , kernel_size , stride , ceil_mode )",
+    ),
+    (
+        "lp_pool2d",
+        "crate : : lp_pool_ops : : lp_pool2d ( self , norm_type , kernel_size , stride , ceil_mode )",
+    ),
+    (
+        "lp_pool3d",
+        "crate : : lp_pool_ops : : lp_pool3d ( self , norm_type , kernel_size , stride , ceil_mode )",
+    ),
+];
+
+/// 与えたソースで `Var::lp_pool{1,2,3}d` が各 1 件だけ宣言され、本体が承認形の 1 行委譲か。
+fn lp_pool_var_bodies_ok(source: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    LP_POOL_VAR_BODIES.iter().all(|(name, body)| {
+        count_fn_declarations_by_name(&tokens, name) == 1
+            && determinism_fn_body(&tokens, name).as_deref() == Some(*body)
+    })
+}
+
+/// `Var::lp_pool{1,2,3}d` が `var.rs` に各 1 件あり、本体が 1 行委譲である。
+#[test]
+fn var_lp_pool_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert!(
+        lp_pool_var_bodies_ok(&content),
+        "var.rs の Var::lp_pool{{1,2,3}}d が承認形（lp_pool_ops への 1 行委譲）と一致しない"
+    );
+}
+
+/// [`var_lp_pool_methods_are_thin_delegations`] の自己テスト（すり替え・引数固定・取り違え・重複・欠落の検出）。
+#[test]
+fn var_lp_pool_methods_are_thin_delegations_detects_offense() {
+    let mk = |n: &str, target: &str, args: &str| {
+        format!(
+            "pub fn lp_pool{n}(&self, norm_type: f32, kernel_size: K, stride: S, ceil_mode: bool) -> R {{ crate::lp_pool_ops::lp_pool{target}(self, {args}) }}"
+        )
+    };
+    let args = "norm_type, kernel_size, stride, ceil_mode";
+    let (a1, a2, a3) = (
+        mk("1d", "1d", args),
+        mk("2d", "2d", args),
+        mk("3d", "3d", args),
+    );
+    assert!(lp_pool_var_bodies_ok(&format!(
+        "impl Var {{ {a1} {a2} {a3} }}"
+    )));
+    for bad in [
+        // 本体のすり替え（独自実装）
+        format!(
+            "impl Var {{ pub fn lp_pool1d(&self, norm_type: f32, kernel_size: K, stride: S, ceil_mode: bool) -> R {{ self.clone() }} {a2} {a3} }}"
+        ),
+        // 引数の固定値化
+        format!(
+            "impl Var {{ {} {a2} {a3} }}",
+            mk("1d", "1d", "2.0, kernel_size, stride, ceil_mode")
+        ),
+        format!(
+            "impl Var {{ {a1} {a2} {} }}",
+            mk("3d", "3d", "norm_type, kernel_size, stride, false")
+        ),
+        // 1d／2d／3d の取り違え
+        format!("impl Var {{ {a1} {} {a3} }}", mk("2d", "3d", args)),
+        // 重複宣言
+        format!("impl Var {{ {a1} {a1} {a2} {a3} }}"),
+        // 欠落
+        format!("impl Var {{ {a1} {a2} }}"),
+        format!("impl Var {{ {a2} {a3} }}"),
+    ] {
+        assert!(!lp_pool_var_bodies_ok(&bad), "{bad}");
+    }
+}
+
+/// `fandhe_ai::{Var, AutodiffError}` だけで届き、fn ポインタ型が承認シグネチャと一致し、
+/// 手計算できる値（スタブでは通らない値）と `Err` を返す。
+#[test]
+fn var_lp_pool_is_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    type R<'t> = Result<Var<'t>, AutodiffError>;
+    type F1<'a, 't> = fn(&'a Var<'t>, f32, usize, Option<usize>, bool) -> R<'t>;
+    type F2<'a, 't> = fn(&'a Var<'t>, f32, [usize; 2], Option<[usize; 2]>, bool) -> R<'t>;
+    type F3<'a, 't> = fn(&'a Var<'t>, f32, [usize; 3], Option<[usize; 3]>, bool) -> R<'t>;
+    fn pin1<'a, 't>(_: F1<'a, 't>) {}
+    fn pin2<'a, 't>(_: F2<'a, 't>) {}
+    fn pin3<'a, 't>(_: F3<'a, 't>) {}
+    pin1(Var::lp_pool1d);
+    pin2(Var::lp_pool2d);
+    pin3(Var::lp_pool3d);
+    let tape = fandhe_ai::tape();
+    let x1 = tape.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[1, 1, 4]).unwrap());
+    let y1 = x1.lp_pool1d(1.0, 2, None, false).unwrap();
+    assert_eq!(y1.to_tensor().contiguous().as_slice().unwrap(), &[3.0, 7.0]);
+    let x2 = tape.var(&Tensor::new(vec![3.0_f32, 0.0, 0.0, 4.0], &[1, 1, 2, 2]).unwrap());
+    let y2 = x2.lp_pool2d(2.0, [2, 2], None, false).unwrap();
+    assert!((y2.to_tensor().contiguous().as_slice().unwrap()[0] - 5.0).abs() < 1e-6);
+    let x3 = tape.var(&Tensor::new(vec![1.0_f32; 8], &[1, 1, 2, 2, 2]).unwrap());
+    let y3 = x3.lp_pool3d(1.0, [2, 2, 2], None, false).unwrap();
+    assert!((y3.to_tensor().contiguous().as_slice().unwrap()[0] - 8.0).abs() < 1e-6);
+    assert!(x1.lp_pool1d(0.0, 2, None, false).is_err());
+    assert!(x2.lp_pool2d(2.0, [2, 2], None, true).is_err());
+    assert!(x3.lp_pool3d(f32::NAN, [2, 2, 2], None, false).is_err());
+}
+
+const LP_POOL_FN_NAMES: [&str; 6] = [
+    "lp_pool1d",
+    "lp_pool2d",
+    "lp_pool3d",
+    "add_lp_pool1d",
+    "add_lp_pool2d",
+    "add_lp_pool3d",
+];
+
+/// workspace 全体（`crates/*/src/`）の `fn lp_pool{1,2,3}d` が承認済みの置き場所
+/// （`autodiff/src/lp_pool_ops.rs`・`autodiff/src/var.rs`）に各 1 件ずつ、
+/// `fn add_lp_pool{1,2,3}d` が `facade/src/compat/sequential.rs` に各 1 件だけある。
+#[test]
+fn workspace_declares_lp_pool_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートが見つからない");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in LP_POOL_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for n in ["1d", "2d", "3d"] {
+        expected.insert(format!("autodiff/src/lp_pool_ops.rs::lp_pool{n}"), 1);
+        expected.insert(format!("autodiff/src/var.rs::lp_pool{n}"), 1);
+        expected.insert(
+            format!("facade/src/compat/sequential.rs::add_lp_pool{n}"),
+            1,
+        );
+    }
+    assert_eq!(
+        found, expected,
+        "lp_pool 関連の fn 宣言が承認済みの置き場所と一致しない（迂回経路の混入か未承認の実装追加）"
+    );
+}
+
+/// facade src の `pub use` が LPPool の内部実装（モジュール・層型）を含む、内部クレートの glob
+/// 再エクスポート、同名型の独自宣言、`pub mod lp_pool_ops` 宣言、`Tape`／`Tensor` 上の同名メソッド
+/// 宣言（`fn lp_pool*d` の facade 内宣言）がある場合に違反の説明を返す（層型の公開は #3022 の別判断）。
+fn scan_lp_pool_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in ["lp_pool_ops", "LpPool1d", "LpPool2d", "LpPool3d"] {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            if path_tokens.iter().any(|t| t == "fandhe_ai_autodiff")
+                && path_tokens.iter().any(|t| t == "*")
+            {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && matches!(
+                tokens.get(i + 1).map(String::as_str),
+                Some("LpPool1d" | "LpPool2d" | "LpPool3d")
+            )
+        {
+            offending.push(format!("{} {} 宣言", tokens[i], tokens[i + 1]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && tokens.get(i + 2).map(String::as_str) == Some("lp_pool_ops")
+        {
+            offending.push("pub mod lp_pool_ops 宣言".to_string());
+        }
+        if tokens[i] == "fn"
+            && matches!(
+                tokens.get(i + 1).map(String::as_str),
+                Some("lp_pool1d" | "lp_pool2d" | "lp_pool3d")
+            )
+        {
+            offending.push(format!("fn {} 宣言", tokens[i + 1]));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が LPPool の内部実装を再エクスポート・独自宣言していない。
+#[test]
+fn facade_does_not_reexport_or_declare_lp_pool_ops() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_lp_pool_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が LPPool の内部実装を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_lp_pool_ops`] の自己テスト（カテゴリごとの検出）。
+#[test]
+fn facade_does_not_reexport_or_declare_lp_pool_ops_detects_each_category() {
+    let offense = |src: &str| !scan_lp_pool_reexports_and_declarations(src).is_empty();
+    // 違反にならない例
+    assert!(!offense("use fandhe_ai_autodiff::lp_pool_ops::lp_pool1d;"));
+    assert!(!offense(
+        "// pub use lp_pool_ops::lp_pool1d;\nconst S: &str = \"pub struct LpPool1d;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    assert!(!offense(
+        "use fandhe_ai_autodiff::nn::{LpPool1d, LpPool2d, LpPool3d};"
+    ));
+    // 違反の例（モジュール再エクスポート）
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::lp_pool_ops::lp_pool1d;"
+    ));
+    assert!(offense("pub mod lp_pool_ops {}"));
+    // 層型の再エクスポート・独自宣言
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::{LpPool2d as P, Module};"
+    ));
+    assert!(offense("pub struct LpPool3d;"));
+    assert!(offense("enum LpPool1d {}"));
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    // Tape／Tensor 上の同名メソッド（facade 内での fn 宣言）
+    assert!(offense("impl Tape { pub fn lp_pool2d(&self) -> u8 { 0 } }"));
+    assert!(offense("impl Tensor { fn lp_pool1d(&self) -> u8 { 0 } }"));
+}
+
+const ADD_LP_POOL_PARAMS: [(&str, &str); 3] = [
+    (
+        "add_lp_pool1d",
+        "mut self, norm_type: f32, kernel_size: usize, stride: Option<usize>, ) -> Result<Self, AutodiffError>",
+    ),
+    (
+        "add_lp_pool2d",
+        "mut self, norm_type: f32, kernel_size: [usize; 2], stride: Option<[usize; 2]>, ) -> Result<Self, AutodiffError>",
+    ),
+    (
+        "add_lp_pool3d",
+        "mut self, norm_type: f32, kernel_size: [usize; 3], stride: Option<[usize; 3]>, ) -> Result<Self, AutodiffError>",
+    ),
+];
+
+/// `compat::Sequential::add_lp_pool{1,2,3}d` が承認シグネチャで 1 件ずつだけ存在する。
+#[test]
+fn compat_sequential_lp_pool_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in ADD_LP_POOL_PARAMS {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_lp_pool_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_lp_pool_add_methods_have_approved_signatures_detects_offense() {
+    let (name, params) = ADD_LP_POOL_PARAMS[1];
+    let ok = format!(
+        "pub fn {name}(mut self, norm_type: f32, kernel_size: [usize; 2], stride: Option<[usize; 2]>) -> Result<Self, AutodiffError> {{"
+    );
+    assert!(sequential_spatial_add_signature_ok(&ok, name, params));
+    for bad in [
+        // 戻り値の変更
+        format!(
+            "pub fn {name}(mut self, norm_type: f32, kernel_size: [usize; 2], stride: Option<[usize; 2]>) -> Self {{"
+        ),
+        // norm_type の型変更
+        format!(
+            "pub fn {name}(mut self, norm_type: f64, kernel_size: [usize; 2], stride: Option<[usize; 2]>) -> Result<Self, AutodiffError> {{"
+        ),
+        // ceil_mode の追加（Sequential には置かない）
+        format!(
+            "pub fn {name}(mut self, norm_type: f32, kernel_size: [usize; 2], stride: Option<[usize; 2]>, ceil_mode: bool) -> Result<Self, AutodiffError> {{"
+        ),
+        // stride の必須化
+        format!(
+            "pub fn {name}(mut self, norm_type: f32, kernel_size: [usize; 2], stride: [usize; 2]) -> Result<Self, AutodiffError> {{"
+        ),
+        // 1d／2d／3d の取り違え（kernel_size の次元）
+        format!(
+            "pub fn {name}(mut self, norm_type: f32, kernel_size: [usize; 3], stride: Option<[usize; 3]>) -> Result<Self, AutodiffError> {{"
+        ),
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(&bad, name, params),
+            "{bad}"
+        );
+    }
+}
 
 // =====================================================================
 // イシュー #3824（`compat::Sequential::add_adaptive_avg_pool3d`／`add_adaptive_max_pool3d`）:

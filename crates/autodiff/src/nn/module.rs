@@ -49,7 +49,7 @@ use crate::nn::pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveAvgPool3d, AdaptiveMaxPool1d, AdaptiveMaxPool2d,
     AdaptiveMaxPool3d, AvgPool1d, AvgPool2d, AvgPool3d, FractionalMaxPool2d, FractionalMaxPool3d,
-    GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d, MaxPool3d,
+    GlobalPool, GlobalPoolMode, LpPool1d, LpPool2d, LpPool3d, MaxPool1d, MaxPool2d, MaxPool3d,
 };
 use crate::nn::transformer::Transformer;
 use crate::nn::transformer_decoder_layer::TransformerDecoderLayer;
@@ -577,14 +577,14 @@ pub trait Module {
     /// [`AvgPool1d`]／[`AdaptiveAvgPool2d`]／[`AdaptiveAvgPool1d`]／
     /// [`AdaptiveMaxPool2d`]／[`AdaptiveMaxPool1d`]／[`GlobalPool`]／
     /// [`MaxPool3d`]／[`AvgPool3d`]／[`AdaptiveAvgPool3d`]／[`AdaptiveMaxPool3d`]／
-    /// [`FractionalMaxPool2d`]／[`FractionalMaxPool3d`]）
+    /// [`FractionalMaxPool2d`]／[`FractionalMaxPool3d`]／[`LpPool1d`]／[`LpPool2d`]／[`LpPool3d`]）
     /// かどうか（イシュー #1957・#2160）。`as_relu` と同じ bool フック
     /// 方式（`docs/compat-api-scope.md` §1 の閉集合維持。用途が
     /// `fandhe_ai_facade::compat::sequential::Sequential::
     /// contains_resident_unsupported_layer` の真偽判定のみであり
     /// 型付き参照を必要とする消費者が無いため、`as_conv2d` 等と異なり
     /// `Option<&T>` ではなく bool を返す）。既定は `false`
-    /// （Pooling 15 型のみオーバーライドする）。
+    /// （Pooling 18 型のみオーバーライドする）。
     fn is_pooling(&self) -> bool {
         false
     }
@@ -2132,6 +2132,54 @@ impl Module for AvgPool3d {
 
     fn as_avg_pool3d(&self) -> Option<&AvgPool3d> {
         Some(self)
+    }
+}
+
+/// `LpPool1d::forward` への委譲（イシュー #3825。`AvgPool3d` と同型）。tape 経路との bit 一致を
+/// 検証していない host 経路を作らないため `supports_forward_host` を `false` へ申告する。
+impl Module for LpPool1d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LpPool1d::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+}
+
+/// `LpPool2d::forward` への委譲（イシュー #3825。`AvgPool3d` と同型）。tape 経路との bit 一致を
+/// 検証していない host 経路を作らないため `supports_forward_host` を `false` へ申告する。
+impl Module for LpPool2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LpPool2d::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+}
+
+/// `LpPool3d::forward` への委譲（イシュー #3825。`AvgPool3d` と同型）。tape 経路との bit 一致を
+/// 検証していない host 経路を作らないため `supports_forward_host` を `false` へ申告する。
+impl Module for LpPool3d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LpPool3d::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
     }
 }
 

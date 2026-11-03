@@ -23,6 +23,9 @@
 //! `ceil_mode=false` 固定・新規 `Op`／`BackendOps` なし）。公開形の正は
 //! `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3。
 //!
+//! [`LpPool1d`]／[`LpPool2d`]／[`LpPool3d`]（イシュー #3825）は [`Var::lp_pool1d`] 等の薄いラッパー
+//! （`ceil_mode=false` 固定・無状態・新規 `Op` なし）。
+//!
 //! 3D 適応版 [`AdaptiveAvgPool3d`]／[`AdaptiveMaxPool3d`]（イシュー #3824・設計
 //! `docs/autodiff-pool3d-ops-decision.md` §18）は [`Var::adaptive_avg_pool3d`]／
 //! [`Var::adaptive_max_pool3d`] の薄いラッパー（`NCDHW`）。facade には
@@ -591,6 +594,102 @@ impl AvgPool3d {
             false,
             self.count_include_pad,
         )
+    }
+}
+
+/// PyTorch `torch.nn.LPPool1d` 相当（`ceil_mode=false` 固定。イシュー #3825）。
+/// [`Var::lp_pool1d`] への薄い層ラッパー。`new` で `norm_type`・`kernel_size`・`stride` を前倒し検査する。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LpPool1d {
+    norm_type: f32,
+    kernel_size: usize,
+    stride: Option<usize>,
+}
+
+impl LpPool1d {
+    /// 不正引数（`norm_type` が非有限／`<= 0`、`kernel_size`／`stride` が 0 等）は型付きエラー。
+    pub fn new(
+        norm_type: f32,
+        kernel_size: usize,
+        stride: Option<usize>,
+    ) -> Result<Self, AutodiffError> {
+        crate::lp_pool_ops::validate_norm_type("LpPool1d::new", norm_type)?;
+        crate::lp_pool_ops::window_elems("LpPool1d::new", &[kernel_size])?;
+        Pool2dParams::new([1, kernel_size], stride.map(|s| [1, s]), [0, 0], [1, 1])
+            .map_err(AutodiffError::Backend)?;
+        Ok(Self {
+            norm_type,
+            kernel_size,
+            stride,
+        })
+    }
+
+    /// `[N, C, L]` 入力に対し [`Var::lp_pool1d`] へ委譲する。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.lp_pool1d(self.norm_type, self.kernel_size, self.stride, false)
+    }
+}
+
+/// PyTorch `torch.nn.LPPool2d` 相当（`ceil_mode=false` 固定。イシュー #3825）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LpPool2d {
+    norm_type: f32,
+    kernel_size: [usize; 2],
+    stride: Option<[usize; 2]>,
+}
+
+impl LpPool2d {
+    /// 不正引数は型付きエラー（[`LpPool1d::new`] と同じ）。
+    pub fn new(
+        norm_type: f32,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+    ) -> Result<Self, AutodiffError> {
+        crate::lp_pool_ops::validate_norm_type("LpPool2d::new", norm_type)?;
+        crate::lp_pool_ops::window_elems("LpPool2d::new", &kernel_size)?;
+        Pool2dParams::new(kernel_size, stride, [0, 0], [1, 1]).map_err(AutodiffError::Backend)?;
+        Ok(Self {
+            norm_type,
+            kernel_size,
+            stride,
+        })
+    }
+
+    /// `[N, C, H, W]` 入力に対し [`Var::lp_pool2d`] へ委譲する。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.lp_pool2d(self.norm_type, self.kernel_size, self.stride, false)
+    }
+}
+
+/// PyTorch `torch.nn.LPPool3d` 相当（`ceil_mode=false` 固定。イシュー #3825）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LpPool3d {
+    norm_type: f32,
+    kernel_size: [usize; 3],
+    stride: Option<[usize; 3]>,
+}
+
+impl LpPool3d {
+    /// 不正引数は型付きエラー（[`LpPool1d::new`] と同じ）。
+    pub fn new(
+        norm_type: f32,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+    ) -> Result<Self, AutodiffError> {
+        crate::lp_pool_ops::validate_norm_type("LpPool3d::new", norm_type)?;
+        crate::lp_pool_ops::window_elems("LpPool3d::new", &kernel_size)?;
+        Pool3dParams::new(kernel_size, stride, [0, 0, 0], [1, 1, 1])
+            .map_err(AutodiffError::Backend)?;
+        Ok(Self {
+            norm_type,
+            kernel_size,
+            stride,
+        })
+    }
+
+    /// `NCDHW` 入力に対し [`Var::lp_pool3d`] へ委譲する。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.lp_pool3d(self.norm_type, self.kernel_size, self.stride, false)
     }
 }
 
