@@ -158,6 +158,17 @@ impl DeviceParamStore {
         Ok(false)
     }
 
+    /// groups ありの store は AMP 経路を拒否する（イシュー #3837・設計 §19.5）。unscale や
+    /// pending の消費より前に返すため、pending・パラメータ・scaler は変わらない。
+    fn reject_slot_groups_for_amp(&self) -> Result<(), AutodiffError> {
+        if self.has_slot_groups() {
+            return Err(AutodiffError::Backend(BackendError::InvalidArgument(
+                "DeviceParamStore: AMP steps do not support param groups".to_string(),
+            )));
+        }
+        Ok(())
+    }
+
     /// [`Self::step_amp`]／[`Self::step_adam_amp`]／[`Self::
     /// step_adamw_amp`] の共有ヘルパ: pending 順にスケール済み勾配を
     /// ホストへ読み出し（[`super::DeviceParamStore::param_grads_to_host`]
@@ -172,17 +183,6 @@ impl DeviceParamStore {
     /// 取る（`param_grads_to_host` 自身が「`pending.tape_id == tape.id`
     /// かつ `pending.epoch == tape.epoch()`」を検証済みのため、`tape.id`／
     /// `tape.epoch()` を直接使うのと等価）。
-    /// groups ありの store は AMP 経路を拒否する（イシュー #3837・設計 §19.5）。unscale や
-    /// pending の消費より前に返すため、pending・パラメータ・scaler は変わらない。
-    fn reject_slot_groups_for_amp(&self) -> Result<(), AutodiffError> {
-        if self.has_slot_groups() {
-            return Err(AutodiffError::Backend(BackendError::InvalidArgument(
-                "DeviceParamStore: AMP steps do not support param groups".to_string(),
-            )));
-        }
-        Ok(())
-    }
-
     fn amp_unscale_pending(
         &self,
         tape: &Tape,
