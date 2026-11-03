@@ -311,7 +311,7 @@ fn batch_norm_forward_host_updates_running_stats_in_train_mode() {
 }
 
 /// rank 限定契約: `BatchNorm1d` は rank 4 を拒否し、`BatchNorm2d` は
-/// rank 2 を拒否する（`Var::batch_norm` 自体は rank 2〜4 を一様に
+/// rank 2 を拒否する（`Var::batch_norm` 自体は rank 2〜5 を一様に
 /// 受理するため、本層が forward 時に追加検査する）。
 #[test]
 fn batch_norm_module_rejects_wrong_rank_via_forward_host() {
@@ -330,6 +330,31 @@ fn batch_norm_module_rejects_wrong_rank_via_forward_host() {
     let x_rank2 = Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap();
     let err = <BatchNorm2d as Module>::forward_host(&bn2d, common::naive_ops().as_ref(), &x_rank2)
         .unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::Shape(
+            fandhe_ai_tensor_core::ShapeError::RankMismatch { .. }
+        )
+    ));
+}
+
+/// #3819: `Var::batch_norm` 系が rank 5 を受理しても、層 `BatchNorm1d`／
+/// `BatchNorm2d` は rank 5 を拒否し続ける（層 `BatchNorm3d` は #3820）。
+#[test]
+fn batch_norm_1d_and_2d_reject_rank5_via_forward_host() {
+    let x = Tensor::new(vec![1.0f32; 16], &[1, 2, 2, 2, 2]).unwrap();
+    let bn1d = BatchNorm1d::new(2, 1e-5, 0.1).expect("valid ctor args");
+    let err =
+        <BatchNorm1d as Module>::forward_host(&bn1d, common::naive_ops().as_ref(), &x).unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::Shape(
+            fandhe_ai_tensor_core::ShapeError::RankMismatch { .. }
+        )
+    ));
+    let bn2d = BatchNorm2d::new(2, 1e-5, 0.1).expect("valid ctor args");
+    let err =
+        <BatchNorm2d as Module>::forward_host(&bn2d, common::naive_ops().as_ref(), &x).unwrap_err();
     assert!(matches!(
         err,
         fandhe_ai_autodiff::AutodiffError::Shape(
