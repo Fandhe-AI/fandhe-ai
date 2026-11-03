@@ -2690,6 +2690,41 @@ pub trait BackendOps {
         ))
     }
 
+    /// 2D Fractional max pooling（`F.fractional_max_pool2d(..., return_indices=True)` 相当。
+    /// イシュー #3826・`docs/autodiff-pool3d-ops-decision.md` §20・§24）。引数は**ホストで計算済みの
+    /// 整数の窓表**（[`crate::fractional_max_pool::FractionalMaxPoolWindows`]）で、乱数標本は渡さない
+    /// （GPU 側で窓の式を再計算せず、同じ標本ならバックエンド間で bit 一致させるため）。
+    /// 索引は `(n, c)` 平面内 flat 添字 `h·W + w`。
+    ///
+    /// # デフォルト実装
+    /// [`Self::pool3d_max`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff` の `fractional_max_pool_ops` は `Unsupported` のときだけ共有ホストカーネル
+    /// [`crate::fractional_max_pool::fractional_max_pool_host`] へフォールバックし、他のエラーは伝播する。
+    /// 実装側も窓表の `in_shape` と入力 shape の一致を実体化より前に再検査する（fail-closed）。
+    fn fractional_max_pool2d_windows(
+        &self,
+        _input: &Tensor<f32>,
+        _windows: &crate::fractional_max_pool::FractionalMaxPoolWindows<2>,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "fractional_max_pool2d_windows: default fail-safe (no device-side kernel available)"
+                .into(),
+        ))
+    }
+
+    /// 3D Fractional max pooling。索引は `d·H·W + h·W + w`。契約は
+    /// [`Self::fractional_max_pool2d_windows`] と同じ。
+    fn fractional_max_pool3d_windows(
+        &self,
+        _input: &Tensor<f32>,
+        _windows: &crate::fractional_max_pool::FractionalMaxPoolWindows<3>,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "fractional_max_pool3d_windows: default fail-safe (no device-side kernel available)"
+                .into(),
+        ))
+    }
+
     /// LocalResponseNorm の forward（`F.local_response_norm` 相当。入力 `[N, C, *S]`。
     /// イシュー #2646・`docs/autodiff-lrn-weight-reparam-decision.md`）。出力は入力と同 shape。
     /// 窓定義・数値契約の正は [`crate::lrn`]。

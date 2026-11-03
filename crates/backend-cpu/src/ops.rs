@@ -3598,6 +3598,25 @@ impl BackendOps for CpuBackendOps {
         ))
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::fractional_max_pool2d_windows`] の CPU 実装（イシュー #3826）。
+    /// 共有カーネル `fractional_max_pool_host` を呼ぶだけで窓規則は持たない。
+    fn fractional_max_pool2d_windows(
+        &self,
+        input: &Tensor<f32>,
+        windows: &fandhe_ai_tensor_core::fractional_max_pool::FractionalMaxPoolWindows<2>,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        fractional_max_pool_cpu(input, windows)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::fractional_max_pool3d_windows`] の CPU 実装（イシュー #3826）。
+    fn fractional_max_pool3d_windows(
+        &self,
+        input: &Tensor<f32>,
+        windows: &fandhe_ai_tensor_core::fractional_max_pool::FractionalMaxPoolWindows<3>,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        fractional_max_pool_cpu(input, windows)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::lrn_forward`] の CPU 実装（イシュー #2646）。
     /// 共有カーネル `fandhe_ai_tensor_core::lrn::local_response_norm_host` を呼ぶだけで窓規則は
     /// 持たない（autodiff のホストフォールバックと単一情報源）。形状は `lrn_layout` で再検査する。
@@ -4083,6 +4102,31 @@ fn checked_alloc_numel_f32(shape: &[usize]) -> Result<usize, BackendError> {
         ));
     }
     Ok(numel)
+}
+
+/// Fractional max pooling の CPU 実装本体（2d・3d 共通。イシュー #3826）。
+/// 窓表の `in_shape` と入力 shape の一致を `contiguous()` より前に検査する
+/// （巨大 broadcast view の実体化で容量 overflow の panic を起こさないため。#3823 の教訓）。
+fn fractional_max_pool_cpu<const R: usize>(
+    input: &Tensor<f32>,
+    windows: &fandhe_ai_tensor_core::fractional_max_pool::FractionalMaxPoolWindows<R>,
+) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+    use fandhe_ai_tensor_core::fractional_max_pool as fmp;
+    let in_shape = windows.in_shape();
+    if input.shape() != in_shape.as_slice() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: input.shape().to_vec(),
+            rhs: in_shape,
+        }));
+    }
+    let input = input.contiguous();
+    let (v, i) = fmp::fractional_max_pool_host(&input.host_slice(), windows)
+        .map_err(BackendError::ShapeMismatch)?;
+    let out_shape = windows.out_shape();
+    Ok((
+        Tensor::new(v, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        Tensor::new(i, &out_shape).map_err(BackendError::ShapeMismatch)?,
+    ))
 }
 
 #[cfg(test)]

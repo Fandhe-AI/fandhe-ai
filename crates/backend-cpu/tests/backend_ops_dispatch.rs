@@ -797,6 +797,72 @@ fn cpu_adaptive_pool3d_huge_broadcast_view_is_err_not_panic() {
     assert!(cpu.adaptive_pool3d_max(&huge, [1, 1, 1]).is_err());
 }
 
+/// イシュー #3826: `fractional_max_pool{2,3}d_windows` は CUDA に専用カーネルがなく既定の
+/// `Unsupported` を返す（panic しない）。autodiff 側が共有ホストカーネルへフォールバックする。
+#[test]
+fn cuda_fractional_max_pool_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::fractional_max_pool::fractional_max_pool_windows;
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![0.0; 16], &[1, 1, 4, 4]).expect("valid tensor");
+    let w2 =
+        fractional_max_pool_windows::<2>(&[1, 1, 4, 4], [2, 2], [2, 2], &[0.1, 0.2], &[1, 1, 2])
+            .expect("windows");
+    assert!(matches!(
+        cuda.fractional_max_pool2d_windows(&a, &w2),
+        Err(BackendError::Unsupported(_))
+    ));
+    let b = Tensor::new(vec![0.0; 64], &[1, 1, 4, 4, 4]).expect("valid tensor");
+    let w3 = fractional_max_pool_windows::<3>(
+        &[1, 1, 4, 4, 4],
+        [2, 2, 2],
+        [2, 2, 2],
+        &[0.1, 0.2, 0.3],
+        &[1, 1, 3],
+    )
+    .expect("windows");
+    assert!(matches!(
+        cuda.fractional_max_pool3d_windows(&b, &w3),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #3826: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_fractional_max_pool_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::fractional_max_pool::fractional_max_pool_windows;
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![0.0; 16], &[1, 1, 4, 4]).expect("valid tensor");
+    let w2 =
+        fractional_max_pool_windows::<2>(&[1, 1, 4, 4], [2, 2], [2, 2], &[0.1, 0.2], &[1, 1, 2])
+            .expect("windows");
+    assert!(matches!(
+        metal.fractional_max_pool2d_windows(&a, &w2),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #3826: CPU は窓表の `in_shape` と入力 shape の一致を実体化より前に検査し、巨大 broadcast
+/// view でも panic せず `Err` を返す。窓表と異なる shape の入力も `Err`。
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn cpu_fractional_max_pool_huge_broadcast_view_is_err_not_panic() {
+    use fandhe_ai_tensor_core::fractional_max_pool::fractional_max_pool_windows;
+    let cpu = CpuBackendOps::new();
+    let w2 =
+        fractional_max_pool_windows::<2>(&[1, 1, 4, 4], [2, 2], [2, 2], &[0.1, 0.2], &[1, 1, 2])
+            .expect("windows");
+    let one = Tensor::new(vec![1.0f32], &[1, 1, 1, 1]).expect("valid tensor");
+    let huge = one
+        .broadcast_to(&[1, 1, 1, 1usize << 61])
+        .expect("broadcast view");
+    assert!(cpu.fractional_max_pool2d_windows(&huge, &w2).is_err());
+    let wrong = Tensor::new(vec![0.0; 9], &[1, 1, 3, 3]).expect("valid tensor");
+    assert!(cpu.fractional_max_pool2d_windows(&wrong, &w2).is_err());
+    let ok = Tensor::new((0..16).map(|v| v as f32).collect(), &[1, 1, 4, 4]).expect("valid tensor");
+    assert!(cpu.fractional_max_pool2d_windows(&ok, &w2).is_ok());
+}
+
 /// イシュー #3823: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
 #[cfg(target_os = "macos")]
 #[test]

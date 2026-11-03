@@ -769,3 +769,68 @@ kind `adaptive_avg_pool3d`・`adaptive_max_pool3d`、`params` は `output_size_d
 - autodiff: `tests/nn_adaptive_pooling3d.rs`（層と `Var` 直呼びの forward・索引・入力勾配の bit 一致、0 軸拒否、rank 違反で孤児ノードなし、`is_pooling`・`supports_forward_host`）、`module.rs` の `is_pooling_true_only_for_pooling_layers`。
 - facade: `tests/compat_sequential_adaptive_pool3d.rs`（無効引数、`predict`／`forward`／backward の bit 一致、学習 1 step、`compile`／`fit`、常駐 `Unsupported`、保存往復、ONNX `UnsupportedLayer`）、`compat_sequential_model_io_layers.rs`・`compat_functional_model_io.rs`・`interop_onnx_export_sequential.rs` への追記、`model_io.rs` の単体テスト（77 種の往復、非信頼入力の表）。
 - 実機: `tests/compat_sequential_adaptive_pool3d_backend_parity.rs` の `cuda_compat_sequential_adaptive_pool3d_matches_cpu`・`metal_compat_sequential_adaptive_pool3d_matches_cpu`（`#[ignore]`）。**未実測**（Phase 10 の #3860・#3861。`docs/perf/logs/adaptive-pool3d-ops-3823/README.md`）。tolerance・baseline は変更していない。
+
+## 24. #3826 実施記録（FractionalMaxPool2d・FractionalMaxPool3d の `Var` 演算）
+
+§20 の設計に沿って `Var` 演算 2 件を実装した（親 #3813・設計 #3749）。承認は #3768 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）で、論点 Q1〜Q8 はいずれも §20.12 の推奨案 (a) である（FractionalMaxPool は §20.12 の乱数と parity の契約に従う。決定的なのは `manual_seed` の下だけで、fixture は `_random_samples` を明示して作る）。§20 の本文は書き換えず、本節に実施内容と現行値を記す。基準 sha は `5ad8f81ea`。`nn::FractionalMaxPool2d`／`3d`・`LayerSpec`・`Sequential::add_fractional_max_pool*`・model_io は #3827 の担当で本節の対象外。LPPool の実施記録（#3825）は §23 に入る前提で、本節は §23 と独立に §24 とした。
+
+### 24.1 公開した名前と置き場所
+
+| 項目 | 内容 |
+|---|---|
+| 公開名 | `Var::fractional_max_pool2d(&self, kernel_size: [usize; 2], output_size: [usize; 2]) -> Result<(Var, Tensor<i32>), AutodiffError>`、`Var::fractional_max_pool3d(...)`（`[usize; 3]`） |
+| 本体 | `crates/autodiff/src/fractional_max_pool_ops.rs`（非 `pub mod`・`pub(crate) fn`。Q2 (a)）。`Var` の 2 メソッドは 1 行委譲。標本を明示する `fractional_max_pool{2,3}d_with_samples`（PyTorch の `_random_samples` 相当）は `pub(crate)` かつ `#[cfg(test)]` で、単体テストと fixture 突合だけが使う（公開しない） |
+| 共有ホストカーネルと窓表 | `crates/tensor-core/src/fractional_max_pool.rs`（`fractional_max_pool_check`・`fractional_max_pool_windows`・`fractional_max_pool_host`・`FractionalMaxPoolWindows<R>`・`FractionalMaxPoolError`）。2d・3d は const generic `R` で共通。facade へは再エクスポートしない |
+| `BackendOps` | `fractional_max_pool2d_windows`／`fractional_max_pool3d_windows`（既定 `Unsupported`。CPU のみ override。引数は計算済みの整数の窓表で標本は渡さない）。**メソッド名は §20.10 の `fractional_max_pool2d`／`3d` ではなく `*_windows` とした**（`api_surface.rs` の宣言位置ガードが数える名前との衝突を避けるため。§20.10 の本文は変えない） |
+| 索引 | `(n, c)` 平面内 flat 添字（2d は `h·W + w`、3d は `d·H·W + h·W + w`、`Tensor<i32>`）。`max_unpool2d`／`3d` へそのまま渡せる |
+
+### 24.2 `Op` と `create_graph`
+
+新しい `Op` はない。既存の `Op::MaxPool2d { input, index }`／`Op::MaxPool3d { input, index }` を再利用する（`adaptive_max_pool_ops.rs` の先例。VJP は `index` だけで決まる scatter-add で、重なり窓の重複索引も足し込まれる）。`is_checkpoint_eligible` は両 variant とも `false` のまま、recompute 経路もないので標本は引き直されない。`create_graph` は `replay_max_pool` が `index` だけで動くため追加分なし（`tests/create_graph_pool.rs::hessian_fractional_max_pool_matches_finite_difference` が 2d・3d の Hessian を有限差分と突合）。`Op` の doc comment に「fractional max pool もこの variant を記録する」と追記した（コードは変えていない）。
+
+### 24.3 乱数と数値の契約
+
+- 検査順は §20.3 のとおり（rank → 空間軸 0 → `kernel`／`output` 0 → 実行可能性 → 出力要素数 → 平面 `<= i32::MAX`〈`N=0` でも検査〉 → 〈明示標本のみ〉標本の検証 → 標本を引く → 窓表 → 実体化 → backend／ホスト → 戻り shape 再検証 → `push_eager`）。検査エラーでは RNG を消費せず、`N·C = 0` も消費しない。
+- 標本は `rng::rand(&[N, C, R])` で一括に引く（消費数はちょうど `N·C·R`。`eval()` でも毎回引く）。軸の並びは PyTorch と同じ（2d は `[0]=W`・`[1]=H`、3d は `[0]=T`・`[1]=H`・`[2]=W`）。
+- 窓表は ATen の `generate_intervals` と同じ式を **f32 演算**（Q1 (a)）で評価し、`int` 化は 0 方向への切り捨て、最後の窓は `in - k` に固定する。加算と乗算は別々に丸め `mul_add` は使わない。各 start は `checked_add(start, k) <= in` で再検査する（fail-closed）。実行可能性は 2d が `out + k - 1 <= in`、3d が `out + k - 1 < in`（Q6 (a)。PyTorch 2.14.0 の実測と一致。§24.6）。
+- 窓の式の特性: `alpha = (in - k)/(out - 1)` が整数のとき窓は標本によらず固定になる。標本が `1` に極めて近いと f32 の丸めで `i + s` が整数へ繰り上がる（ATen と同じ挙動で、窓は範囲内に収まる）。
+- 選択は row-major・タイ先勝ち・窓内で最初の NaN の索引が残る。値は入力要素と bit 一致。同じ標本ならバックエンド間で値と索引が bit 一致する。FMA 契約・`f64` 長軸縮約の契約・tolerance 定数・baseline・ガードレール閾値は変更していない。
+- xorshift64* は暗号用途ではない。シードを PyTorch と合わせても同じ窓にはならない。
+
+### 24.4 新設した正ガード（`crates/facade/tests/api_surface.rs` の末尾の #3826 節）
+
+反転対象の否定ガード・保留 doctest は元から無い（§20.1）。`AdaptiveMaxGlobalPoolHoldDoctestGuard`・`Pool3dOpsHoldDoctestGuard` とその固定文言は変えていない。
+
+- `var_fractional_max_pool_methods_are_thin_delegations`（自己テスト `_detects_offense`: すり替え・kernel／output の固定値化・2d と 3d の取り違え・引数順の入れ替え・`_with_samples` への委譲・重複・欠落）
+- `var_fractional_max_pool_is_reachable_via_facade_only`（`fandhe_ai::{Var, Tensor, AutodiffError, manual_seed}` だけでシグネチャを固定し、窓が標本によらず決まる形状で手計算した値・索引と `Err` を確認）
+- `workspace_declares_fractional_max_pool_fn_names_only_in_allowed_locations`（`fractional_max_pool_ops.rs` に 4 件・`var.rs` に 2 件。`add_fractional_max_pool*` は 0 件で #3827 が `compat/sequential.rs` へ更新する）
+- `facade_does_not_reexport_or_declare_fractional_max_pool_ops`（自己テスト `_detects_each_category`）
+- 手元確認: `var.rs` の委譲先引数を一時的に固定値へ書き換えると `var_fractional_max_pool_methods_are_thin_delegations` と `var_fractional_max_pool_is_reachable_via_facade_only` が失敗することを確かめ、元へ戻した。
+- 既存のトークン走査（`POOL3D_WORKSPACE_FN_NAMES`・`ADAPTIVE_POOL3D_FN_NAMES`・`POOL3D_OPS_IDENTS` の `MaxPool3d` など）への誤検知がないことは、推測でなく `cargo test -p fandhe-ai --test api_surface` の全件 green（767 件）で確かめた。
+
+### 24.5 テスト
+
+- tensor-core: `fractional_max_pool.rs` の単体テスト（窓表の式・`out=1`・`out=in-k+1`・最後の窓の固定・標本の両端・軸並び・タイ先勝ち・NaN・`-inf`・実行可能性の 2d／3d 差・拒否系・空バッチ・決定性）。
+- backend-cpu: `backend_ops_dispatch.rs` に CUDA／Metal の `Unsupported` 確認と、CPU の「巨大 broadcast view と窓表不整合は `Err`（panic しない）」。実体化の前に窓表の `in_shape` と入力 shape を検査する（#3823 の教訓）。
+- autodiff: `fractional_max_pool_ops.rs` の単体テスト（PyTorch fixture 突合・孤児ノード無し・重なり窓の勾配加算）、`tests/fractional_max_pool_ops.rs`（`manual_seed_makes_fractional_max_pool_deterministic`・消費数 `N·C·D`・拒否時に RNG を消費しない・中心差分・実行可能性の境界・`N=0`／`C=0`・`N=0` でも平面超過を拒否・mock による `Unsupported` フォールバック／他エラー伝播／誤 shape 拒否）、`tests/create_graph_pool.rs`（Hessian の有限差分）。RNG に触るテストは `static LOCK` で直列化。
+- facade: `tests/fractional_max_pool_ops_backend_parity.rs`（`cpu_matches_naive_reference`〈CPU tape と `NaiveOps` tape を同じシードで bit 一致〉、`#[ignore]` の `cuda_*`／`metal_*`）。
+
+### 24.6 PyTorch 2.14.0 との突合
+
+使い捨て venv に `torch==2.14.0+cpu` を導入して実行値を得た（リポジトリの依存には入れていない）。fixture は `crates/autodiff/tests/fixtures/fractional-max-pool-pytorch-reference/`（生成条件・sha256 は同 README）。`_random_samples` を明示した 5 ケース（2d 3 件・3d 2 件。重なり窓・標本の両端・`out=1` を含む）で、値は bit 一致・索引は完全一致・入力勾配（重み付き和の backward）は bit 一致した（tolerance は使っていない）。f32 の窓計算の差は出なかった。実測した差分（いずれも本実装は fail-closed 側）:
+
+| 項目 | PyTorch 2.14.0 | 本実装 |
+|---|---|---|
+| 実行可能性（2d） | `out + k - 1 <= in` を受理 | 同じ |
+| 実行可能性（3d） | `out + k - 1 < in` を受理（等号は `RuntimeError`） | 同じ（Q6 (a)） |
+| 範囲外の明示標本（`1.0`・`-0.1`） | 受理（検査しない） | `InvalidArgument`（窓が入力の外へ出るため） |
+| NaN を含む窓の索引 | 最後の NaN | 最初の NaN（fixture に含めない） |
+| 索引の型 | int64 | `i32` |
+| `output_ratio`・バッチなし入力 | 受理 | 非対応（Q3 (a)） |
+| 乱数生成器 | PyTorch の生成器 | xorshift64*。シードを合わせても同じ値は出ない |
+
+### 24.7 逸脱・申し送り
+
+- 逸脱: (1) `BackendOps` のメソッド名を `fractional_max_pool{2,3}d_windows` にした（§24.1）。(2) 標本を明示する入口は `#[cfg(test)]` とした（`pub(crate)` のままだと非テストビルドで未使用警告になるため。公開しない方針は不変）。(3) doctest は RNG を使わない（`out = in - k + 1` など窓が標本によらず決まる形状で値を示し、`is_err` を確かめる）。決定性は `LOCK` で直列化した統合テストが保証する（doctest は 1 つのバイナリにまとまりグローバル RNG を共有しうるため）。
+- GPU 実機 parity は**未実測**。手順は `docs/perf/logs/fractional-max-pool-ops-3826/README.md`（実測は #3860／#3861）。
+- 未着手（後続）: `nn::FractionalMaxPool2d`／`3d`・`LayerSpec`・`Sequential::add_fractional_max_pool*`・model_io の kind・`Module` の申告・層経路の実機テスト（#3827）、保存・export の横断方針（#3750）、層型名の facade 公開（#3022）。
