@@ -72,7 +72,9 @@ use fandhe_ai::compat::{
 use fandhe_ai::interop::safetensors::{
     load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes,
 };
-use fandhe_ai::optim::{AdamConfig, AdamWConfig, LbfgsConfig, RmsPropConfig, SgdConfig};
+use fandhe_ai::optim::{
+    AdadeltaConfig, AdamConfig, AdamWConfig, AdamaxConfig, LbfgsConfig, RmsPropConfig, SgdConfig,
+};
 
 mod common;
 use common::temp_dir::TempDirGuard;
@@ -818,8 +820,17 @@ fn optimizer_kind_swap_is_rejected() {
     let adam = || compiled(Optimizer::Adam(AdamConfig::default()), "adam");
     let adamw = || compiled(Optimizer::AdamW(AdamWConfig::default()), "adamw");
     let rms = || compiled(Optimizer::RmsProp(RmsPropConfig::default()), "rmsprop");
+    let adamax = || compiled(Optimizer::Adamax(AdamaxConfig::default()), "adamax");
+    let adadelta = || compiled(Optimizer::Adadelta(AdadeltaConfig::default()), "adadelta");
     type Build<'a> = &'a dyn Fn() -> Fx;
     let cases: Vec<(Build, &str, &str, Want)> = vec![
+        // イシュー #3839: Adamax は adam 系と config のキー集合が同じ → 種別マーカー不一致。
+        (&adamax, "adamax", "adam", Want::Autodiff),
+        (&adam, "adam", "adamax", Want::Autodiff),
+        // Adadelta はキー集合が別 → config の厳密なキー検査。
+        (&sgd, "sgd", "adadelta", Want::Manifest),
+        (&adadelta, "adadelta", "adagrad", Want::Manifest),
+        (&adadelta, "adadelta", "lbfgs", Want::Manifest),
         // config のキー集合が同じ組は safetensors の種別マーカーの不一致で拒否される。
         (&adamw, "adamw", "adam", Want::Autodiff),
         (&adam, "adam", "adamw", Want::Autodiff),

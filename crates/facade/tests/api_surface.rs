@@ -4040,6 +4040,9 @@ fn fit_types_are_reachable_via_facade_only() {
     // 承認範囲外のため facade 未再エクスポートのまま。`optim.rs` 冒頭
     // コメント「L-BFGS」節参照）。
     let _optimizer_lbfgs = Optimizer::Lbfgs(fandhe_ai::optim::LbfgsConfig::default());
+    // イシュー #3839（設計 #3757・承認 #3769）: Adadelta／Adamax variant の到達性。
+    let _optimizer_adadelta = Optimizer::Adadelta(fandhe_ai::optim::AdadeltaConfig::default());
+    let _optimizer_adamax = Optimizer::Adamax(fandhe_ai::optim::AdamaxConfig::default());
 
     let config = FitConfig::new(3, 2).shuffle(true).drop_last(true);
     assert_eq!(config, FitConfig::new(3, 2).shuffle(true).drop_last(true));
@@ -21731,9 +21734,10 @@ fn compat_loss_enum_variants_are_exactly_approved_set() {
 /// 使う共通トークン走査。`tokens[start..]`（`pub enum <Name> {` の `{`
 /// 直後）から、対応する閉じ `}` までを brace 深さで追跡し、深さ 1 の
 /// 識別子トークンを variant 名として収集する（`#[...]` 属性・カンマは
-/// 読み飛ばす）。`Loss` は unit variant のみのため、tuple／struct
-/// variant の内部（`(...)`／`{...}`）は本関数の対象外——ネストした
-/// `{` は brace 深さのみを増減させ、内部の識別子は収集しない。
+/// 読み飛ばす）。unit variant に加え単一フィールドの tuple variant
+/// （`Optimizer` 型。#3839）も扱える——次のカンマまで variant 名の次の識別子を
+/// 拾わないため `Foo(Config)` の内部は収集しない。複数フィールドの `Foo(A, B)` は
+/// カンマで誤検出するため対象外。ネストした `{` は brace 深さのみを増減させる。
 fn collect_top_level_enum_variant_idents(tokens: &[String], start: usize) -> Vec<String> {
     let mut depth = 1usize;
     let mut i = start;
@@ -21815,6 +21819,116 @@ fn collect_top_level_enum_variant_idents_detects_each_category() {
         collect_top_level_enum_variant_idents(&tokens_no_trailing, 4),
         vec!["Mse".to_string(), "CrossEntropy".to_string()]
     );
+    // 単一フィールドの tuple variant（`Optimizer` 型）の内部識別子を variant として
+    // 拾わないこと。複数フィールドの `Foo(A, B)` は対象外。
+    let tokens_tuple = tokenize_including_punctuation(
+        "pub enum Optimizer { Sgd ( SgdConfig ) , # [ foo ] Adamax ( AdamaxConfig ) , }",
+    );
+    assert_eq!(
+        collect_top_level_enum_variant_idents(&tokens_tuple, 4),
+        vec!["Sgd".to_string(), "Adamax".to_string()]
+    );
+}
+
+// =====================================================================
+// イシュー #3839（設計 #3757・承認 #3769 の所有者回答コメント 6554564758、
+// <https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）:
+// `compat::Optimizer` enum の variant 集合を承認形へ固定する正ガード。
+// `compat_optimizer_enum_has_lbfgs_variant`（Lbfgs の表記揺れ検出の固有検査）とは役割が
+// 異なり、本ガードは集合と順序の固定を担う。#3840 は本定数を 11 種へ広げるだけでよい。
+// 決定記録は `docs/compat-optimizer-variants-0.14.0-decision.md` §1・§14。
+// =====================================================================
+
+/// 承認形の variant 列（宣言順）。NAdam・RAdam は #3840 で追加する。
+const APPROVED_COMPAT_OPTIMIZER_VARIANTS: [&str; 9] = [
+    "Sgd", "AdamW", "Adam", "RmsProp", "Adagrad", "Lamb", "Lbfgs", "Adadelta", "Adamax",
+];
+
+/// `training.rs` のソースから `pub enum Optimizer {` の variant 列を取り出す。
+/// 宣言がちょうど 1 件でなければ `Err`（検査対象を見失う場合も fail-closed）。
+fn compat_optimizer_enum_variants_of(src: &str) -> Result<Vec<String>, String> {
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut starts: Vec<usize> = Vec::new();
+    for i in 0..tokens.len() {
+        if tokens.get(i).map(String::as_str) == Some("pub")
+            && tokens.get(i + 1).map(String::as_str) == Some("enum")
+            && tokens.get(i + 2).map(String::as_str) == Some("Optimizer")
+            && tokens.get(i + 3).map(String::as_str) == Some("{")
+        {
+            starts.push(i + 4);
+        }
+    }
+    if starts.len() != 1 {
+        return Err(format!(
+            "`pub enum Optimizer {{` 宣言がちょうど 1 件ではない: {} 件",
+            starts.len()
+        ));
+    }
+    Ok(collect_top_level_enum_variant_idents(&tokens, starts[0]))
+}
+
+/// 検出結果が承認形と完全一致するか（集合・順序）。
+fn compat_optimizer_enum_matches_approved(src: &str) -> Result<(), String> {
+    let variants = compat_optimizer_enum_variants_of(src)?;
+    let approved: Vec<String> = APPROVED_COMPAT_OPTIMIZER_VARIANTS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if variants == approved {
+        Ok(())
+    } else {
+        Err(format!("variant 列が承認形と不一致: {variants:?}"))
+    }
+}
+
+#[test]
+fn compat_optimizer_enum_variants_are_exactly_approved_set() {
+    let path = facade_crate_root().join("src/compat/training.rs");
+    let content = read_to_string_or_panic(&path);
+    if let Err(e) = compat_optimizer_enum_matches_approved(&content) {
+        panic!(
+            "compat::Optimizer の variant 集合が承認形 {APPROVED_COMPAT_OPTIMIZER_VARIANTS:?} \
+             からドリフトしている（`docs/compat-optimizer-variants-0.14.0-decision.md` §1）: {e}"
+        );
+    }
+}
+
+/// [`compat_optimizer_enum_matches_approved`] のすり替え検出の自己テスト。
+#[test]
+fn compat_optimizer_enum_variants_detect_each_category() {
+    let build = |names: &[&str]| -> String {
+        let body: String = names
+            .iter()
+            .map(|n| format!("/// doc\n #[allow(dead_code)]\n {n}({n}Config),\n"))
+            .collect();
+        format!("#[non_exhaustive]\npub enum Optimizer {{\n{body}}}\n")
+    };
+    let approved = APPROVED_COMPAT_OPTIMIZER_VARIANTS;
+    // 承認形 9 種を受理する。
+    assert!(compat_optimizer_enum_matches_approved(&build(&approved)).is_ok());
+    // 順序の入れ替え。
+    let mut swapped = approved.to_vec();
+    swapped.swap(7, 8);
+    assert!(compat_optimizer_enum_matches_approved(&build(&swapped)).is_err());
+    // 表記揺れ。
+    let mut typo = approved.to_vec();
+    typo[7] = "AdaDelta";
+    assert!(compat_optimizer_enum_matches_approved(&build(&typo)).is_err());
+    // 承認外の追加。
+    let mut extra = approved.to_vec();
+    extra.push("NAdam");
+    assert!(compat_optimizer_enum_matches_approved(&build(&extra)).is_err());
+    // 欠落。
+    assert!(compat_optimizer_enum_matches_approved(&build(&approved[..8])).is_err());
+    // 別名への置き換え。
+    let mut alias = approved.to_vec();
+    alias[8] = "AdaMax";
+    assert!(compat_optimizer_enum_matches_approved(&build(&alias)).is_err());
+    // 宣言 0 件・2 件は Err。
+    assert!(compat_optimizer_enum_variants_of("pub enum Other { A }").is_err());
+    let one = build(&approved);
+    assert!(compat_optimizer_enum_variants_of(&format!("{one}{one}")).is_err());
 }
 
 // =====================================================================

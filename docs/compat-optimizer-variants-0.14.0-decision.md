@@ -2,7 +2,7 @@
 
 イシュー #3757（A3-g）。雛形 `docs/decision-record-template.md`（#3716）の 9 節に従う。ルートは #3711。承認は #3769 の論点 4、実装は #3839（Adadelta・Adamax）と #3840（NAdam・RAdam）で行う。
 
-**承認根拠: なし（未承認・#3769 待ち）。本書は何も承認しない。** コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変えない（docs のみ）。
+**承認根拠: #3769 の所有者の回答コメント 6554564758（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）。** 実装記録は §14。コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は本書の記述としては変えない。
 
 基準 sha は `02c0e5553`。本書の `path:line` はこの sha のもので、実装 PR の前に引き直す。
 
@@ -148,3 +148,13 @@
 - A03: §3 の検証順（allowlist → 固定キー集合 → パース → `*::new`）を守り、未知の値は fail-closed で拒否する。A06: 依存の追加・更新なし。A08: tolerance・baseline・ガードレール閾値・自己修復の判定経路に触れない。秘密情報・ホスト名は書かない
 - スコープ外は §0 の境界に書いたもの。無断で起票しない
 - PR は `Closes #3757`（設計記録が完了条件）、`Refs #3769`・`Refs #3839`・`Refs #3840`
+
+## §14 実装記録（イシュー #3839。Adadelta・Adamax）
+
+- 基準 sha: `b2cc07968`。承認は #3769 の所有者の回答コメント 6554564758（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）。NAdam・RAdam は #3840
+- 変えた match（`crates/facade/src/compat/training.rs`）: `Optimizer`・`OptimizerState` の variant、手書き `Debug`、`new`、`lr`、`set_lr`（専用の腕）、`step`、`step_grouped`、`supports_lr_schedule`（否定形から網羅 match〈肯定形〉へ。既存 7 種の戻り値は不変）、`snapshot_of_compiled`、`compiled_from_snapshot`
+- `crates/facade/src/compat/model_io/compiled.rs`: `optimizer_kind`（`adadelta`／`adamax`）、`config_fields`、`parse_non_lbfgs`、および設計の列挙から漏れていた `optimizer_lr`（網羅 match のため必須。逸脱ではなく補完）。config キー順は adadelta が `lr, rho, eps, weight_decay`、adamax が `ADAM_LIKE_KEYS`。`format_version` は 2 のまま
+- 正ガード: `api_surface.rs` の `compat_optimizer_enum_variants_are_exactly_approved_set`（期待列は定数 `APPROVED_COMPAT_OPTIMIZER_VARIANTS`、9 種・順序固定）と自己テスト `compat_optimizer_enum_variants_detect_each_category`。`fit_types_are_reachable_via_facade_only` に到達性を追加。既存の Lbfgs ガードは不変
+- テスト: `compat_sequential_fit_adadelta_adamax.rs`（手動ループとの bit 一致・fit 分割・再 compile・不正 config・AMP・`LrSchedule`）、`compat_sequential_param_groups.rs`、`compat_sequential_model_io_compiled.rs`（往復）、`compat_sequential_model_io_tamper.rs`（kind 改竄）、`functional/fit_tests.rs`、`compiled.rs` の `all_optimizers()`（添字 6 が Lbfgs の既存テストのため末尾に追加）
+- 実機テストは該当なし（ホスト値型で GPU カーネルなし）。`DeviceParamStore` の常駐経路への結線は範囲外
+- #3840 への申し送り: ガード定数を 11 種へ広げる。`compat_sequential_model_io_compiled.rs` の `tampered_kind_is_rejected` が未知 kind の例に使う `"nadam"` を別の値へ差し替える

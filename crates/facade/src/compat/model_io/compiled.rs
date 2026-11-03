@@ -37,8 +37,8 @@ use super::{
 use crate::Tensor;
 use crate::optim::ParamGroup;
 use crate::optim::{
-    AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, LbfgsConfig,
-    RmsPropConfig, SgdConfig,
+    AdadeltaConfig, AdagradConfig, AdamConfig, AdamWConfig, AdamaxConfig, GradScalerConfig,
+    LambConfig, LbfgsConfig, RmsPropConfig, SgdConfig,
 };
 // facade は `LbfgsLineSearch` を再エクスポートしない（承認範囲外）。ここは private use で、
 // manifest 文字列との相互変換にだけ使う（`api_surface` の公開面検査の対象外）。
@@ -71,6 +71,8 @@ fn optimizer_lr(o: &Optimizer) -> f32 {
         Optimizer::Adagrad(c) => c.lr,
         Optimizer::Lamb(c) => c.lr,
         Optimizer::Lbfgs(c) => c.lr,
+        Optimizer::Adadelta(c) => c.lr,
+        Optimizer::Adamax(c) => c.lr,
     }
 }
 
@@ -242,6 +244,8 @@ fn optimizer_kind(o: &Optimizer) -> &'static str {
         Optimizer::Adagrad(_) => "adagrad",
         Optimizer::Lamb(_) => "lamb",
         Optimizer::Lbfgs(_) => "lbfgs",
+        Optimizer::Adadelta(_) => "adadelta",
+        Optimizer::Adamax(_) => "adamax",
     }
 }
 
@@ -304,6 +308,19 @@ fn config_fields(o: &Optimizer) -> Vec<(String, String)> {
             real("weight_decay", c.weight_decay),
             real("initial_accumulator_value", c.initial_accumulator_value),
             real("eps", c.eps),
+        ],
+        Optimizer::Adadelta(c) => vec![
+            real("lr", c.lr),
+            real("rho", c.rho),
+            real("eps", c.eps),
+            real("weight_decay", c.weight_decay),
+        ],
+        Optimizer::Adamax(c) => vec![
+            real("lr", c.lr),
+            real("beta1", c.beta1),
+            real("beta2", c.beta2),
+            real("eps", c.eps),
+            real("weight_decay", c.weight_decay),
         ],
         Optimizer::Lbfgs(c) => vec![
             real("lr", c.lr),
@@ -557,6 +574,25 @@ fn parse_non_lbfgs(kind: &str, config: &Json) -> Result<Optimizer, ModelIoError>
                 weight_decay: p.f32("weight_decay")?,
                 initial_accumulator_value: p.f32("initial_accumulator_value")?,
                 eps: p.f32("eps")?,
+            }))
+        }
+        "adadelta" => {
+            let p = Params::named(CONFIG_CTX, config, &["lr", "rho", "eps", "weight_decay"])?;
+            Ok(Optimizer::Adadelta(AdadeltaConfig {
+                lr: p.f32("lr")?,
+                rho: p.f32("rho")?,
+                eps: p.f32("eps")?,
+                weight_decay: p.f32("weight_decay")?,
+            }))
+        }
+        "adamax" => {
+            let p = Params::named(CONFIG_CTX, config, &ADAM_LIKE_KEYS)?;
+            Ok(Optimizer::Adamax(AdamaxConfig {
+                lr: p.f32("lr")?,
+                beta1: p.f32("beta1")?,
+                beta2: p.f32("beta2")?,
+                eps: p.f32("eps")?,
+                weight_decay: p.f32("weight_decay")?,
             }))
         }
         other => Err(ModelIoError::UnsupportedModel {
@@ -940,6 +976,20 @@ mod tests {
                 history_size: MAX_LBFGS_HISTORY,
                 line_search: LbfgsLineSearch::StrongWolfe,
                 line_search_steps: 9,
+            }),
+            // イシュー #3839。添字 6 を Lbfgs とする既存テストのため末尾に置く。
+            Optimizer::Adadelta(AdadeltaConfig {
+                lr: 0.9,
+                rho: 0.8,
+                eps: 1e-5,
+                weight_decay: 0.01,
+            }),
+            Optimizer::Adamax(AdamaxConfig {
+                lr: 0.003,
+                beta1: 0.8,
+                beta2: 0.99,
+                eps: 1e-7,
+                weight_decay: 0.01,
             }),
         ]
     }

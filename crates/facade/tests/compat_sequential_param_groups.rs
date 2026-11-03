@@ -411,6 +411,76 @@ fn fit_with_layer_groups_bit_matches_manual_loop() {
     assert_eq!(history.loss, log);
 }
 
+/// #3839: Adadelta・Adamax も層別 lr の `fit` が手動 `step_with_groups` ループと bit 一致する。
+#[test]
+fn fit_with_layer_groups_bit_matches_manual_loop_adadelta_adamax() {
+    use fandhe_ai::optim::{Adadelta, AdadeltaConfig};
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = vec![
+        ParamGroup::new(layer_slot_indices(&probe, "0."), 0.01, 0.0),
+        ParamGroup::new(layer_slot_indices(&probe, "2."), 0.2, 0.01),
+    ];
+    type StepFn<'a> = &'a mut dyn FnMut(
+        &[&Tensor<f32>],
+        &[&Tensor<f32>],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError>;
+    let step_loop = |model: &mut Sequential, step: StepFn<'_>| {
+        let mut log = Vec::new();
+        for _ in 0..EPOCHS {
+            let updated = {
+                let tape = fandhe_ai::tape();
+                let bound = model.bind(&tape);
+                let xv = tape.var(&x);
+                let yv = tape.var(&y);
+                let loss = bound.forward(&tape, &xv).unwrap().mse_loss(&yv).unwrap();
+                log.push(scalar(&loss.to_tensor()));
+                let grads = tape.backward(&loss).unwrap();
+                let g = bound.trainable_grads(&grads).unwrap();
+                let p = model.trainable_parameters();
+                step(&p, &g).unwrap()
+            };
+            model.apply_parameters(updated).unwrap();
+        }
+        log
+    };
+
+    let ada_cfg = AdadeltaConfig {
+        lr: 0.5,
+        rho: 0.8,
+        eps: 1e-5,
+        weight_decay: 0.01,
+    };
+    let mut fitted = build_model();
+    fitted
+        .compile_with_param_groups(Optimizer::Adadelta(ada_cfg), Loss::Mse, &groups)
+        .unwrap();
+    let history = fitted.fit(&x, &y, fit_config()).unwrap();
+    let mut manual = build_model();
+    let mut opt = Adadelta::new(ada_cfg).unwrap();
+    let log = step_loop(&mut manual, &mut |p, g| opt.step_with_groups(p, g, &groups));
+    assert_eq!(snapshot(&fitted), snapshot(&manual), "Adadelta");
+    assert_eq!(history.loss, log, "Adadelta");
+
+    let amx_cfg = AdamaxConfig {
+        lr: 0.02,
+        beta1: 0.8,
+        beta2: 0.99,
+        eps: 1e-7,
+        weight_decay: 0.01,
+    };
+    let mut fitted = build_model();
+    fitted
+        .compile_with_param_groups(Optimizer::Adamax(amx_cfg), Loss::Mse, &groups)
+        .unwrap();
+    let history = fitted.fit(&x, &y, fit_config()).unwrap();
+    let mut manual = build_model();
+    let mut opt = Adamax::new(amx_cfg).unwrap();
+    let log = step_loop(&mut manual, &mut |p, g| opt.step_with_groups(p, g, &groups));
+    assert_eq!(snapshot(&fitted), snapshot(&manual), "Adamax");
+    assert_eq!(history.loss, log, "Adamax");
+}
+
 /// T3: `lr = 0, wd = 0` のグループへ入れた層は fit 後も不変で、他の層は変わる。
 #[test]
 fn fit_freezes_grouped_layer() {
