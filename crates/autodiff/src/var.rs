@@ -3084,6 +3084,30 @@ impl<'t> Var<'t> {
         crate::nn::pixel_unshuffle_forward(self, downscale_factor)
     }
 
+    /// チャネルをグループ間で転置する（PyTorch `F.channel_shuffle` 相当。イシュー #3822）。
+    ///
+    /// `[N, C, *S]` のチャネル軸（dim 1 固定）を `groups` 個に分けて転置し、
+    /// `out[:, j*g + i] = in[:, i*(C/g) + j]`（`g = groups`）を返す。出力 shape は
+    /// 入力と同じ。rank 3 以上、`groups >= 1` かつ C が `groups` で割り切れることが必要で、
+    /// 違反・オーバーフローは `Err`（shape 検査を通るまで tape を操作しないため
+    /// エラー時に孤児ノードを残さない）。`contiguous`／`reshape`／`permute` の合成で、
+    /// 新規 `Op` は無い。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    ///
+    /// let tape = Tape::new();
+    /// let x = tape.var(&Tensor::new(vec![0.0, 1.0, 2.0, 3.0], &[1, 4, 1, 1]).unwrap());
+    /// let y = x.channel_shuffle(2).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![0.0, 2.0, 1.0, 3.0]);
+    /// assert!(x.channel_shuffle(0).is_err());
+    /// assert!(x.channel_shuffle(3).is_err());
+    /// ```
+    pub fn channel_shuffle(&self, groups: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::channel_shuffle_forward(self, groups)
+    }
+
     /// 1 次元転置畳み込み（PyTorch `F.conv_transpose1d`。イシュー #2521）。
     ///
     /// `self` は `[N, Cin, L]`、`weight` は `[Cin, Cout/groups, k]`、`bias` は

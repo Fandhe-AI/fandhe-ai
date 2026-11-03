@@ -31,6 +31,7 @@ use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
+use crate::nn::channel_shuffle::ChannelShuffle;
 use crate::nn::container::{ModuleDict, ModuleList};
 use crate::nn::conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d};
 use crate::nn::embedding::Embedding;
@@ -1949,6 +1950,22 @@ impl Module for Identity {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Identity::forward_host(self, ops, input)
+    }
+}
+
+/// `ChannelShuffle::forward`／`forward_host` への委譲（イシュー #3822）。
+/// パラメータを持たないため `named_parameters` は既定（空）のまま。
+impl Module for ChannelShuffle {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        ChannelShuffle::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        ChannelShuffle::forward_host(self, ops, input)
     }
 }
 
