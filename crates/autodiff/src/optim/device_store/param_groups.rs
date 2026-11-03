@@ -44,6 +44,14 @@ pub(super) struct SlotGroupTable {
 }
 
 impl SlotGroupTable {
+    /// 単体テスト用: 全スロットを同じ `(lr, wd)` の group に入れた表。
+    #[cfg(test)]
+    pub(super) fn uniform_for_test(n_slots: usize, lr: f32, wd: f32) -> SlotGroupTable {
+        SlotGroupTable {
+            slots: vec![Some((lr, wd)); n_slots],
+        }
+    }
+
     /// スロット `i` の `(lr, weight_decay)`。group 外は渡された既定値。
     fn hp(&self, i: usize, default_lr: f32, default_wd: f32) -> (f32, f32) {
         self.slots

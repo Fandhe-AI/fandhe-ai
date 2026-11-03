@@ -8801,6 +8801,26 @@ mod tests {
             ));
         }
 
+        /// イシュー #3837: groups ありの store は distributed ステップを通信前に拒否し
+        /// （world_size 1 の素通しより前）、pending を消費しない。
+        #[test]
+        fn distributed_rejects_param_groups_before_passthrough() {
+            let (w, b) = init_params();
+            let tape = mk_tape(false);
+            let mut s = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+            s.slot_groups = Some(param_groups::SlotGroupTable::uniform_for_test(2, 0.1, 0.0));
+            let mut c = comm(establish_group(1).pop().unwrap());
+            let g = fwd_bwd(&tape, &mut s, &X, &T);
+            let e = step_sgd(&mut s, &tape, &g, &sgd_cfg(), &mut c).unwrap_err();
+            assert!(matches!(
+                e,
+                DistributedStepError::Backend(BackendError::InvalidArgument(_))
+            ));
+            // pending は未消費・store は poison されていない（groups を外せば通常 step が通る）。
+            s.slot_groups = None;
+            s.step(&tape, &g, &sgd_cfg()).unwrap();
+        }
+
         /// 2 ランク（半分ずつ）の k ステップ後のパラメータ。rank0／rank1 の順。
         fn run_two_ranks(resident: bool, steps: usize) -> Vec<Vec<f32>> {
             let links = establish_group(2);
