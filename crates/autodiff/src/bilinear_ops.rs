@@ -121,6 +121,8 @@ pub fn bilinear<'t>(
     // 中間 `[N, out, in2]` の確保量を tape 操作の前に検査する（要素数積の overflow も
     // `ElementCountOverflow` で返る）。
     checked_bytes_for::<f32>(&mid)?;
+    // in2 == 0 だと mid の確保量が 0 になり巨大な出力を検出できないため、出力側も別に検査する
+    checked_bytes_for::<f32>(&out_shape)?;
     checked_bytes_for::<f32>(&[n, in1])?;
     checked_bytes_for::<f32>(&[n, in2])?;
 
@@ -284,6 +286,11 @@ mod tests {
         let x2 = tape.var(&t(vec![1.0; 6], &[2, 3]));
         let w0 = tape.var(&t(vec![], &[0, 2, 3]));
         assert_eq!(bilinear(&x1, &x2, &w0, None).unwrap().shape(), vec![2, 0]);
+        // in2 == 0 かつ巨大 out: 事前検査で型付きエラーになり panic しない
+        let xe1 = tape.var(&t(vec![], &[1, 0]));
+        let xe2 = tape.var(&t(vec![], &[1, 0]));
+        let we = tape.var(&t(vec![], &[1usize << 61, 0, 0]));
+        assert!(bilinear(&xe1, &xe2, &we, None).is_err());
         // in1 == 0: 縮約が空で bias だけが出る。
         let x1z = tape.var(&t(vec![], &[2, 0]));
         let wz = tape.var(&t(vec![], &[1, 0, 3]));

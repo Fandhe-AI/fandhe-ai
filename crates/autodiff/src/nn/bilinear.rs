@@ -15,7 +15,7 @@
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
-use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, uniform_init};
+use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, checked_uniform_init, derive_seed};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -46,10 +46,10 @@ impl Bilinear {
             .and_then(|v| v.checked_mul(in2))
             .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
         let bound = 1.0 / (in1 as f32).sqrt();
-        let weight_data = uniform_init(len, bound, derive_seed(seed, WEIGHT_SEED_SALT));
+        let weight_data = checked_uniform_init(len, bound, derive_seed(seed, WEIGHT_SEED_SALT))?;
         let weight = Tensor::new(weight_data, &[out, in1, in2])?;
         let bias = if bias {
-            let data = uniform_init(out, bound, derive_seed(seed, BIAS_SEED_SALT));
+            let data = checked_uniform_init(out, bound, derive_seed(seed, BIAS_SEED_SALT))?;
             Some(Tensor::new(data, &[out])?)
         } else {
             None
@@ -151,6 +151,13 @@ mod tests {
             Bilinear::new(usize::MAX, 2, 2, false, 1),
             Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
         ));
+    }
+
+    #[test]
+    fn new_returns_err_on_huge_allocation() {
+        // 要素数は usize に収まるが Vec<f32> の容量上限を超える（panic せず Err）
+        assert!(Bilinear::new(1, 1, 1usize << 61, false, 0).is_err());
+        assert!(Bilinear::new(1, 0, 1usize << 61, true, 0).is_err());
     }
 
     #[test]
