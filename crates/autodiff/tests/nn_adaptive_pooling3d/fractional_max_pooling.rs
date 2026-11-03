@@ -9,8 +9,6 @@
 //!
 //! グローバル RNG を共有するため全テストを `LOCK` で直列化する。
 
-mod common;
-
 use std::sync::{Mutex, MutexGuard};
 
 use fandhe_ai_autodiff::nn::{FractionalMaxPool2d, FractionalMaxPool3d, Module};
@@ -54,7 +52,7 @@ fn run<F>(x: &Tensor<f32>, f: F) -> (Vec<u32>, Vec<usize>, Vec<u32>)
 where
     F: for<'t> Fn(&'t Tape, &Var<'t>) -> Var<'t>,
 {
-    let tape = Tape::new_with_ops(common::naive_ops());
+    let tape = Tape::new_with_ops(crate::common::naive_ops());
     let xv = tape.var(x);
     manual_seed(SEED);
     let y = f(&tape, &xv);
@@ -90,7 +88,7 @@ fn fractional_max_pool2d_layer_matches_var_direct_value_index_and_grad() {
         let r = run(&x, |_, v| v.fractional_max_pool2d(k, o).unwrap().0);
         assert_eq!(l, r, "2d {k:?} {o:?}");
 
-        let tape = Tape::new_with_ops(common::naive_ops());
+        let tape = Tape::new_with_ops(crate::common::naive_ops());
         let xv = tape.var(&x);
         manual_seed(SEED);
         let (_, i_l) = layer.forward(&xv).unwrap();
@@ -115,7 +113,7 @@ fn fractional_max_pool3d_layer_matches_var_direct_value_index_and_grad() {
         let r = run(&x, |_, v| v.fractional_max_pool3d(k, o).unwrap().0);
         assert_eq!(l, r, "3d {k:?} {o:?}");
 
-        let tape = Tape::new_with_ops(common::naive_ops());
+        let tape = Tape::new_with_ops(crate::common::naive_ops());
         let xv = tape.var(&x);
         manual_seed(SEED);
         let (_, i_l) = layer.forward(&xv).unwrap();
@@ -164,7 +162,7 @@ fn rank_violation_and_infeasible_shape_err_without_orphans_or_rng_use() {
     let _g = lock();
     let l2 = FractionalMaxPool2d::new([2, 2], [4, 4]).unwrap();
     let too_big = FractionalMaxPool2d::new([2, 2], [7, 7]).unwrap();
-    let tape = Tape::new_with_ops(common::naive_ops());
+    let tape = Tape::new_with_ops(crate::common::naive_ops());
     let x3 = tape.var(&input3());
     let x2 = tape.var(&input2());
     for r in [
@@ -193,7 +191,7 @@ fn layers_are_stateless_and_declare_pooling_without_host_path() {
     assert!(!f2.supports_forward_host());
     assert!(!f3.supports_forward_host());
 
-    let ops = common::naive_ops();
+    let ops = crate::common::naive_ops();
     for r in [
         f2.forward_host(ops.as_ref(), &input2()),
         f3.forward_host(ops.as_ref(), &input3()),
