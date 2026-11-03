@@ -785,13 +785,15 @@ pub fn row_norm_layout(shape: &[usize]) -> Result<(usize, usize), ShapeError> {
 ///   のを防ぐ。`interpolate_out_shape` の「非ゼロ次元のみ
 ///   `checked_numel`」規約と同型。Cursor Bugbot 指摘・イシュー
 ///   #1732・PR #1874 fix ループ）。
-/// - rank 0・1・5 以上は `ShapeError::RankMismatch`（`expected` は
-///   最も近い許容 rank。rank 0・1 は `2`、rank 5 以上は `4`）を返す。
+/// - rank 5（`[N, C, D, H, W]`。`BatchNorm3d` 相当。#3819）は
+///   `spatial = D*H*W`。空テンソル・オーバーフローの扱いは rank 4 と同じ。
+/// - rank 0・1・6 以上は `ShapeError::RankMismatch`（`expected` は
+///   最も近い許容 rank。rank 0・1 は `2`、rank 6 以上は `5`）を返す。
 ///
 /// `BatchNorm1d`／`BatchNorm2d` それぞれの rank 限定（1d はさらに
 /// rank 2/3 のみ・2d は rank 4 のみに絞る）は `nn::BatchNorm1d`／
 /// `BatchNorm2d` 側が検査する（`Var::batch_norm`／`batch_norm_infer`
-/// 自体は rank 2〜4 を一様に受理する）。`M = n * spatial`
+/// 自体は rank 2〜5 を一様に受理する）。`M = n * spatial`
 /// （チャネルごとの縮約要素数）の導出は呼び出し側の責務とする
 /// （train モードは `M <= 1` を追加で拒否する契約のため）。
 pub fn batch_norm_layout(shape: &[usize]) -> Result<(usize, usize, usize), ShapeError> {
@@ -803,9 +805,12 @@ pub fn batch_norm_layout(shape: &[usize]) -> Result<(usize, usize, usize), Shape
         }),
         2 => Ok((shape[0], shape[1], 1)),
         3 => Ok((shape[0], shape[1], shape[2])),
-        4 => {
-            // `shape` の 4 軸（`N`／`C`／`H`／`W`）のいずれかが `0` なら
-            // `x` 全体が空テンソルであり `spatial`（`H*W`）は数学的に
+        // rank 5（`[N, C, D, H, W]`。`BatchNorm3d` 相当。イシュー #3819・
+        // 承認 #3768）も rank 4 と同じ規則（`spatial = D*H*W`）で導出する。
+        4 | 5 => {
+            // `shape` の全軸（rank 4 は `N`／`C`／`H`／`W`、rank 5 は
+            // `N`／`C`／`D`／`H`／`W`）のいずれかが `0` なら
+            // `x` 全体が空テンソルであり `spatial`（`H*W`／`D*H*W`）は数学的に
             // 意味を持たないため積の計算自体を避ける（doc comment
             // 参照）。`N`／`C` は `shape[2..]` に現れないため、
             // `checked_numel(&shape[2..])` 単体の overflow 検査だけでは
@@ -818,7 +823,7 @@ pub fn batch_norm_layout(shape: &[usize]) -> Result<(usize, usize, usize), Shape
             Ok((shape[0], shape[1], spatial))
         }
         _ => Err(ShapeError::RankMismatch {
-            expected: 4,
+            expected: 5,
             actual: rank,
         }),
     }
@@ -862,14 +867,38 @@ mod batch_norm_layout_tests {
     }
 
     #[test]
-    fn rank5_is_rejected() {
+    fn rank5_spatial_is_dhw() {
+        assert_eq!(batch_norm_layout(&[2, 3, 4, 5, 6]).unwrap(), (2, 3, 120));
+    }
+
+    #[test]
+    fn rank6_is_rejected() {
         assert!(matches!(
-            batch_norm_layout(&[1, 2, 3, 4, 5]).unwrap_err(),
+            batch_norm_layout(&[1, 2, 3, 4, 5, 6]).unwrap_err(),
             ShapeError::RankMismatch {
-                expected: 4,
-                actual: 5
+                expected: 5,
+                actual: 6
             }
         ));
+    }
+
+    #[test]
+    fn rank5_zero_axis_yields_spatial_zero() {
+        assert_eq!(batch_norm_layout(&[2, 3, 0, 4, 5]).unwrap(), (2, 3, 0));
+        assert_eq!(
+            batch_norm_layout(&[0, 3, usize::MAX, 2, 2]).unwrap(),
+            (0, 3, 0)
+        );
+        assert_eq!(
+            batch_norm_layout(&[2, 0, usize::MAX, 2, 2]).unwrap(),
+            (2, 0, 0)
+        );
+    }
+
+    #[test]
+    fn rank5_spatial_overflow_is_element_count_overflow() {
+        let err = batch_norm_layout(&[1, 1, usize::MAX, 2, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
     #[test]

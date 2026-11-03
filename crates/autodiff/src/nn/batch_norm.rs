@@ -17,7 +17,7 @@
 //! batch_norm_layout` が `(n, c, spatial)` を導出）。`BatchNorm1d` は
 //! rank 2（`[N, C]`）／rank 3（`[N, C, L]`）を受理し、`BatchNorm2d` は
 //! rank 4（`[N, C, H, W]`）のみを受理する（`Var::batch_norm`／
-//! `batch_norm_infer` 自体は rank 2〜4 を一様に受理するため、この
+//! `batch_norm_infer` 自体は rank 2〜5 を一様に受理するため、この
 //! rank 限定は本層が forward 時に追加検査する）。
 //!
 //! # running stats 更新契約
@@ -44,7 +44,7 @@
 //!
 //! `momentum=None`（累積移動平均）・`track_running_stats=false`・
 //! `named_buffers`／state_dict 直列化（running stats は buffer であり
-//! `named_parameters` に含めない）・rank 5（BatchNorm3d）・
+//! `named_parameters` に含めない）・層 `BatchNorm3d`（#3820。`Var` 系は rank 5 を受理済み）・
 //! channels-last レイアウトはいずれも本 issue の対象外。
 
 use std::cell::{Cell, Ref, RefCell};
@@ -940,6 +940,32 @@ mod tests {
         let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let x = tape.var(&Tensor::new(vec![1.0f32; 8], &[1, 2, 2, 2]).unwrap());
         let bn = BatchNorm1d::new(2, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let err = bn.bind(&tape).forward(&x).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::RankMismatch { .. })
+        ));
+    }
+
+    /// #3819: `Var::batch_norm` が rank 5 を受理しても、層 1d／2d は
+    /// `accepted_ranks` で rank 5 を拒否し続ける（層 3d は #3820）。
+    #[test]
+    fn batch_norm_1d_rejects_rank5_input() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![1.0f32; 16], &[1, 2, 2, 2, 2]).unwrap());
+        let bn = BatchNorm1d::new(2, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let err = bn.bind(&tape).forward(&x).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::RankMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn batch_norm_2d_rejects_rank5_input() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![1.0f32; 16], &[1, 2, 2, 2, 2]).unwrap());
+        let bn = BatchNorm2d::new(2, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
         let err = bn.bind(&tape).forward(&x).unwrap_err();
         assert!(matches!(
             err,
