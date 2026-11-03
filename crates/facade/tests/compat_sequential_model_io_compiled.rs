@@ -22,8 +22,8 @@ use fandhe_ai::interop::safetensors::{
     load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes,
 };
 use fandhe_ai::optim::{
-    AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, RmsPropConfig, SgdConfig,
-    StepLr,
+    AdadeltaConfig, AdagradConfig, AdamConfig, AdamWConfig, AdamaxConfig, GradScalerConfig,
+    LambConfig, RmsPropConfig, SgdConfig, StepLr,
 };
 
 mod common;
@@ -112,6 +112,26 @@ fn optimizers() -> Vec<(&'static str, Optimizer)> {
                 beta1: 0.9,
                 beta2: 0.999,
                 eps: 1e-6,
+                weight_decay: 0.01,
+            }),
+        ),
+        // イシュー #3839: Adadelta・Adamax（非既定 config）。
+        (
+            "adadelta",
+            Optimizer::Adadelta(AdadeltaConfig {
+                lr: 0.9,
+                rho: 0.8,
+                eps: 1e-5,
+                weight_decay: 0.01,
+            }),
+        ),
+        (
+            "adamax",
+            Optimizer::Adamax(AdamaxConfig {
+                lr: 0.01,
+                beta1: 0.8,
+                beta2: 0.99,
+                eps: 1e-7,
                 weight_decay: 0.01,
             }),
         ),

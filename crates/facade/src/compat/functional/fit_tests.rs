@@ -16,7 +16,8 @@
 use super::{FunctionalBuilder, FunctionalModel};
 use crate::compat::{FitConfig, History, Loss, Optimizer, Sequential};
 use crate::optim::{
-    AdagradConfig, AdamConfig, AdamWConfig, LambConfig, LbfgsConfig, RmsPropConfig, SgdConfig,
+    AdadeltaConfig, AdagradConfig, AdamConfig, AdamWConfig, AdamaxConfig, LambConfig, LbfgsConfig,
+    RmsPropConfig, SgdConfig,
 };
 use crate::{AutodiffError, Tensor};
 
@@ -119,6 +120,26 @@ fn six_optimizers() -> Vec<(&'static str, Optimizer)> {
                 beta1: 0.9,
                 beta2: 0.999,
                 eps: 1e-6,
+                weight_decay: 0.01,
+            }),
+        ),
+        // イシュー #3839: Adadelta・Adamax も FunctionalModel の compile で使える。
+        (
+            "adadelta",
+            Optimizer::Adadelta(AdadeltaConfig {
+                lr: 0.9,
+                rho: 0.8,
+                eps: 1e-5,
+                weight_decay: 0.01,
+            }),
+        ),
+        (
+            "adamax",
+            Optimizer::Adamax(AdamaxConfig {
+                lr: 0.01,
+                beta1: 0.8,
+                beta2: 0.99,
+                eps: 1e-7,
                 weight_decay: 0.01,
             }),
         ),

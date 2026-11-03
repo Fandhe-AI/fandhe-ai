@@ -254,7 +254,7 @@ RAdam, RAdamConfig};` を追加、`api_surface.rs` の
 
 ## 9. スコープ外
 
-- `compile()`（`compat::Optimizer` enum）への統合（#2170 系）。
+- `compile()`（`compat::Optimizer` enum）への統合（#2170 系）。追記: Adadelta・Adamax は #3839 で解消。NAdam・RAdam は #3840。
 - param groups（#2173。タイトルは "param groups" であり、実装計画
   立案時に一時誤認していた「CUDA／Metal 常駐実装」ではない）。
   本 4 種への `ParamGroupStep` 実装はイシュー #2298（親 #2131）で対応

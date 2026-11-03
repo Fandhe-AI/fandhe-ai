@@ -38,8 +38,9 @@
 //! 変わらない。
 
 use crate::optim::{
-    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, GradScaler, GradScalerConfig,
-    Lamb, LambConfig, LbfgsConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig,
+    Adadelta, AdadeltaConfig, Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Adamax,
+    AdamaxConfig, GradScaler, GradScalerConfig, Lamb, LambConfig, LbfgsConfig, RmsProp,
+    RmsPropConfig, Sgd, SgdConfig,
 };
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
@@ -281,6 +282,22 @@ pub enum Optimizer {
     /// `LbfgsLineSearch::StrongWolfe` を指定できる（既定は固定ステップの
     /// `LbfgsLineSearch::None`。`crate::optim` モジュール doc「L-BFGS」節）。
     Lbfgs(LbfgsConfig),
+    /// Adadelta（Zeiler 2012。`torch.optim.Adadelta` 相当。イシュー #3839・
+    /// 設計 #3757。承認 #3769）。`LrSchedule`・param groups・AMP・EMA/SWA と
+    /// 併用できる（`set_lr` あり）。NAdam・RAdam は #3840 で追加する。
+    Adadelta(AdadeltaConfig),
+    /// Adamax（Kingma & Ba 2015 §7.1。`torch.optim.Adamax` 相当。イシュー
+    /// #3839・設計 #3757。承認 #3769）。`LrSchedule`・param groups・AMP と
+    /// 併用できる。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{Loss, Optimizer, Sequential};
+    /// use fandhe_ai::optim::AdamaxConfig;
+    /// let mut model = Sequential::new();
+    /// model.compile(Optimizer::Adamax(AdamaxConfig::default()), Loss::Mse)?;
+    /// # Ok::<(), fandhe_ai::AutodiffError>(())
+    /// ```
+    Adamax(AdamaxConfig),
 }
 
 /// `fit()` の構成（Keras `fit(epochs=, batch_size=, shuffle=)` の
@@ -1175,8 +1192,8 @@ fn weighted_cross_entropy_loss<'t>(
 /// [`crate::optim::RmsProp`]／[`crate::optim::Adagrad`]／
 /// [`crate::optim::Lamb`]／`Lbfgs`〈内部クレート限定。イシュー #2172〉
 /// のいずれか。イシュー #2170 で `RmsProp`／`Adagrad`／`Lamb` を、
-/// イシュー #2172 で `Lbfgs` を追加）。先頭 6 者は `step` のシグネチャが
-/// 異なる（`Sgd::step` は位置対応スライス 2 本・他 5 者の `step` は
+/// イシュー #2172 で `Lbfgs` を追加）。先頭 6 者（および #3839 で追加した `Adadelta`／`Adamax`）は `step` のシグネチャが
+/// 異なる（`Sgd::step` は位置対応スライス 2 本・他の `step` は
 /// タプルスライス 1 本）ため、ここで [`Sequential::trainable_parameters`]／
 /// `grad_refs` から共通の `Result<Vec<Tensor<f32>>, AutodiffError>` へ
 /// 橋渡しする。`Lbfgs` はさらに異なり、`step`（本 impl）経由では更新
@@ -1191,6 +1208,8 @@ pub(super) enum OptimizerState {
     Adagrad(Adagrad),
     Lamb(Lamb),
     Lbfgs(Lbfgs),
+    Adadelta(Adadelta),
+    Adamax(Adamax),
 }
 
 impl std::fmt::Debug for OptimizerState {
@@ -1209,6 +1228,8 @@ impl std::fmt::Debug for OptimizerState {
             OptimizerState::Adagrad(_) => f.debug_tuple("Adagrad").finish(),
             OptimizerState::Lamb(_) => f.debug_tuple("Lamb").finish(),
             OptimizerState::Lbfgs(_) => f.debug_tuple("Lbfgs").finish(),
+            OptimizerState::Adadelta(_) => f.debug_tuple("Adadelta").finish(),
+            OptimizerState::Adamax(_) => f.debug_tuple("Adamax").finish(),
         }
     }
 }
@@ -1223,6 +1244,8 @@ impl OptimizerState {
             Optimizer::Adagrad(config) => Ok(OptimizerState::Adagrad(Adagrad::new(config)?)),
             Optimizer::Lamb(config) => Ok(OptimizerState::Lamb(Lamb::new(config)?)),
             Optimizer::Lbfgs(config) => Ok(OptimizerState::Lbfgs(Lbfgs::new(config)?)),
+            Optimizer::Adadelta(config) => Ok(OptimizerState::Adadelta(Adadelta::new(config)?)),
+            Optimizer::Adamax(config) => Ok(OptimizerState::Adamax(Adamax::new(config)?)),
         }
     }
 
@@ -1239,6 +1262,8 @@ impl OptimizerState {
             OptimizerState::Adagrad(adagrad) => adagrad.config().lr,
             OptimizerState::Lamb(lamb) => lamb.config().lr,
             OptimizerState::Lbfgs(lbfgs) => lbfgs.config().lr,
+            OptimizerState::Adadelta(o) => o.config().lr,
+            OptimizerState::Adamax(o) => o.config().lr,
         }
     }
 
@@ -1262,6 +1287,8 @@ impl OptimizerState {
             OptimizerState::AdamW(adamw) => adamw.set_lr(new_lr),
             OptimizerState::Adam(adam) => adam.set_lr(new_lr),
             OptimizerState::Lbfgs(lbfgs) => lbfgs.set_lr(new_lr),
+            OptimizerState::Adadelta(o) => o.set_lr(new_lr),
+            OptimizerState::Adamax(o) => o.set_lr(new_lr),
             OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_) => {
                 Err(AutodiffError::InvalidArgument(
                     "OptimizerState::set_lr: RmsProp／Adagrad／Lamb は set_lr を \
@@ -1328,6 +1355,16 @@ impl OptimizerState {
                     params.iter().copied().zip(grads.iter().copied()).collect();
                 lamb.step(&pairs)
             }
+            OptimizerState::Adadelta(o) => {
+                let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
+                    params.iter().copied().zip(grads.iter().copied()).collect();
+                o.step(&pairs)
+            }
+            OptimizerState::Adamax(o) => {
+                let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
+                    params.iter().copied().zip(grads.iter().copied()).collect();
+                o.step(&pairs)
+            }
             OptimizerState::Lbfgs(_) => Err(AutodiffError::InvalidArgument(
                 "OptimizerState::step: Lbfgs は closure 駆動の \
                  try_step_closure のみで更新するため、この汎用 step 経由の \
@@ -1356,6 +1393,8 @@ impl OptimizerState {
             OptimizerState::RmsProp(o) => o.step_with_groups(params, grads, groups),
             OptimizerState::Adagrad(o) => o.step_with_groups(params, grads, groups),
             OptimizerState::Lamb(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::Adadelta(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::Adamax(o) => o.step_with_groups(params, grads, groups),
             OptimizerState::Lbfgs(_) => Err(AutodiffError::InvalidArgument(
                 "OptimizerState::step_grouped: Lbfgs は param groups と併用できない \
                  （compile_with_param_groups が compile 時に拒否する）"
@@ -1387,10 +1426,19 @@ impl OptimizerState {
     /// fail-closed 拒否判定に使う。`OptimizerState::set_lr` doc 参照）。
     /// `Lbfgs`（イシュー #2172）は `set_lr` を持つため対応（`true`）。
     fn supports_lr_schedule(&self) -> bool {
-        !matches!(
-            self,
-            OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_)
-        )
+        // 網羅 match（肯定形）。`set_lr` を持たない variant が将来足されたとき
+        // fail-open にならないようコンパイルエラーで気付けるようにする（#3757 論点 6）。
+        match self {
+            OptimizerState::Sgd(_)
+            | OptimizerState::AdamW(_)
+            | OptimizerState::Adam(_)
+            | OptimizerState::Lbfgs(_)
+            | OptimizerState::Adadelta(_)
+            | OptimizerState::Adamax(_) => true,
+            OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_) => {
+                false
+            }
+        }
     }
 }
 
@@ -1511,6 +1559,8 @@ pub(super) fn snapshot_of_compiled(compiled: &Compiled) -> Result<CompiledSnapsh
         OptimizerState::RmsProp(o) => (Optimizer::RmsProp(*o.config()), o.state_dict()?, None),
         OptimizerState::Adagrad(o) => (Optimizer::Adagrad(*o.config()), o.state_dict()?, None),
         OptimizerState::Lamb(o) => (Optimizer::Lamb(*o.config()), o.state_dict()?, None),
+        OptimizerState::Adadelta(o) => (Optimizer::Adadelta(*o.config()), o.state_dict()?, None),
+        OptimizerState::Adamax(o) => (Optimizer::Adamax(*o.config()), o.state_dict()?, None),
         OptimizerState::Lbfgs(o) => (
             Optimizer::Lbfgs(*o.config()),
             o.state_dict()?,
@@ -1567,6 +1617,8 @@ pub(super) fn compiled_from_snapshot(
         OptimizerState::RmsProp(o) => o.load_state_dict(optimizer_state)?,
         OptimizerState::Adagrad(o) => o.load_state_dict(optimizer_state)?,
         OptimizerState::Lamb(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::Adadelta(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::Adamax(o) => o.load_state_dict(optimizer_state)?,
         OptimizerState::Lbfgs(o) => {
             o.load_state_dict(optimizer_state, slot_shapes, lbfgs_history_len.unwrap_or(0))?
         }
