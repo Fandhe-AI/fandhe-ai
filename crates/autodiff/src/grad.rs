@@ -9419,6 +9419,14 @@ pub(crate) fn cosine_similarity_vjp(
     let d1 = dense_vec(x1);
     let d2 = dense_vec(x2);
     let g = dense_vec(upstream);
+    // 入力が空なら勾配も空。巨大な軸と 0 の軸が並ぶ shape で外側ループが空の内側を
+    // 事実上無限回まわるのを防ぐ。
+    if d1.is_empty() {
+        return (
+            build_tensor(Vec::new(), &shape),
+            build_tensor(Vec::new(), &shape),
+        );
+    }
     let (outer, len, inner) = eval::axis_split(&shape, dim);
     let mut dx1 = vec![0f32; d1.len()];
     let mut dx2 = vec![0f32; d1.len()];

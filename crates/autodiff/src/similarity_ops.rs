@@ -153,6 +153,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_output_with_huge_outer_axis_returns_immediately() {
+        // shape [2^60, 1, 0] で dim = 1: 出力 shape [2^60, 0] は空。外側ループを回さず即返る。
+        let shape = [1usize << 60, 1, 0];
+        let x = t(vec![], &shape);
+        let out = crate::eval::cosine_similarity_forward(&x, &x, 1, 1e-8);
+        assert_eq!(out.shape(), &[1usize << 60, 0]);
+        let up = t(vec![], &[1usize << 60, 0]);
+        let (d1, d2) = crate::grad::cosine_similarity_vjp(&x, &x, &up, 1, 1e-8);
+        assert_eq!(d1.shape(), &shape);
+        assert_eq!(d2.shape(), &shape);
+    }
+
+    #[test]
     fn zero_length_reduction_axis_with_huge_output_is_rejected() {
         let tape = Tape::new();
         let shape = [1usize << 61, 0];

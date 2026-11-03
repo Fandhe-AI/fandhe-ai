@@ -4948,6 +4948,14 @@ pub(crate) fn cosine_similarity_forward(
     let shape = x1.shape().to_vec();
     let d1 = dense_vec(x1);
     let d2 = dense_vec(x2);
+    // 出力要素数 0（`dim` 以外の軸に 0 を含む）なら空テンソルを即返す。巨大な軸と 0 の軸が
+    // 並ぶ shape で外側ループが空の内側を事実上無限回まわるのを防ぐ（縮約軸のみ 0 の場合は
+    // 出力が非空なので下のループでゼロ出力契約を維持する）。
+    let mut out_shape = shape.clone();
+    out_shape.remove(dim);
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), &out_shape);
+    }
     let (outer, len, inner) = axis_split(&shape, dim);
     let mut out = vec![0f32; outer * inner];
     for o in 0..outer {
@@ -4956,8 +4964,6 @@ pub(crate) fn cosine_similarity_forward(
             out[o * inner + i] = st.s as f32;
         }
     }
-    let mut out_shape = shape;
-    out_shape.remove(dim);
     build_tensor(out, &out_shape)
 }
 
