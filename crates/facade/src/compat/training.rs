@@ -3553,6 +3553,14 @@ impl Sequential {
                     }
                     let mut v = Vec::with_capacity(compiled.param_groups.len());
                     for g in &compiled.param_groups {
+                        // 倍率適用前の group.lr も検証する（負値×0 倍率が -0.0 となり
+                        // `resolve_slot_hparams` の lr >= 0 検査をすり抜けるのを防ぐ）。
+                        if !g.lr.is_finite() || g.lr < 0.0 {
+                            break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::{method}: param group の学習率（{}）が負または非有限",
+                                g.lr
+                            )));
+                        }
                         let lr = ((g.lr as f64) * (cur_lr as f64) / (base as f64)) as f32;
                         if !lr.is_finite() {
                             break 'epochs_block Err(AutodiffError::InvalidArgument(format!(

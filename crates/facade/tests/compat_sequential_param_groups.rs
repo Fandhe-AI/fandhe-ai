@@ -702,6 +702,29 @@ fn zero_base_lr_with_groups_and_schedule_is_rejected_without_touching_state() {
     model.fit(&x, &y, fit_config()).unwrap();
 }
 
+/// T4e2: group.lr が負で、スケジュール値が 0（倍率 0 → 有効 lr が -0.0）でも拒否される。
+#[test]
+fn negative_group_lr_with_zero_schedule_is_rejected() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let mut model = build_model();
+    let before = snapshot(&model);
+    model
+        .compile_with_param_groups(
+            Optimizer::Sgd(SgdConfig::new(0.1)),
+            Loss::Mse,
+            &[ParamGroup::new(vec![0], -0.01, 0.0)],
+        )
+        .unwrap();
+    let zero = StepLr::new(0.1, 1, 1e-45).unwrap();
+    assert_eq!(zero.lr_at(1), 0.0);
+    let mut cbs = [Callback::LrSchedule(LrSchedule::per_epoch(zero))];
+    assert_invalid_argument(
+        model.fit_with_callbacks(&x, &y, fit_config(), None, &mut cbs),
+        "負の group.lr × スケジュール値 0",
+    );
+    assert_eq!(snapshot(&model), before, "拒否時にパラメータが変化した");
+}
+
 /// T4f: `set_lr` を持たない optimizer は groups の有無によらず `LrSchedule` を拒否する（(2.05)）。
 #[test]
 fn set_lr_less_optimizers_with_groups_and_schedule_stay_rejected() {
