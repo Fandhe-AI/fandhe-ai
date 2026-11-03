@@ -708,7 +708,7 @@ REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e
 
 ## 24. 実装記録（イシュー #3815）
 
-`compat::Sequential` に facade `nn::Module` を実装した（§23 の案 A。親 #3741、承認は #3768 の回答コメント 6554564412）。PR 番号は PR 作成後に追記する。
+`compat::Sequential` に facade `nn::Module` を実装した（§23 の案 A。親 #3741、承認は #3768 の回答コメント 6554564412）。PR #3973。
 
 - **配置**: `crates/facade/src/compat/sequential.rs:643`（`impl Default for Sequential` の直後の `impl crate::nn::Module for Sequential`）。trait パスは必ず `crate::nn::Module` と書く（このファイルの素の `Module` は autodiff の trait）。公開名の追加は 0 件、`unsafe` なし、依存の追加なし
 - **override は 7 件**: `forward`（`self.inner.forward(tape.0, input)`。inherent と同じ関数で Linear→ReLU 融合を含む）・`named_parameters`・`set_parameter`・`state_dict`・`load_state_dict`・`set_training`・`training`。いずれも `self.inner` への 1 行委譲。`set_parameter` は inherent が無いため `inner` の `"{index}.{name}"` 分割・範囲検査へ委ねる（未 override だと入れ子の `load_state_dict` が既定の拒否で失敗する）。`training` は委譲しないと既定の `true` が返るため、テストで固定した
@@ -721,3 +721,13 @@ REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e
 - **§23 からのずれ**: なし。`set_parameter` の shape 不一致は層側の `Shape` エラー（`InvalidArgument` ではない）で拒否される。キー・index の不正は `InvalidArgument`
 - **`docs/reference-models-decision.md` の前提**: 同書の「`compat::Sequential` は `nn::Module` を実装していない」は過去時点の記録で、本件で前提が満たされた。同書は書き換えない
 - **申し送り**: 受入テスト（利用者の書き方・`ForwardHooked` 越し・複数段の入れ子）は #3816。`ReferenceModule` の移行、独自層や入れ子の学習対応（勾配を集める経路）、`compat::Sequential::parameter_count()`／`summary()` の inherent 化は §22.6 のとおり別承認・スコープ外。利用者の独自 trait が同名メソッドを持つと呼び出しが曖昧になりうる（RFC 1105 の minor の範囲）
+
+## 25. 実装記録（イシュー #3816）
+
+独自 `Module` 経路の受入テストと正ガードを足した（§23.4 の受入列。親 #3741、承認は #3768 の回答コメント 6554564412）。`crates/facade/src/**`・`Cargo.toml`・`Cargo.lock` は無変更で、既定経路の挙動は bit 単位で変わらない（既存テストは書き換えていない）。実機依存の経路はなく（§23.4 の実機列はすべて「該当なし」）、`#[ignore]` テストは置かず、未実測の項目もない。
+
+- **受入テスト**（`crates/facade/tests/nn_compat_sequential_module_acceptance.rs`、10 件）: facade だけに依存し（`fandhe_ai_autodiff` は import しない）、tolerance なしの bit 一致で比べる。利用者の複合層 `Encoder`（`stem`／`head` の 2 つの `compat::Sequential` を UFCS で呼び、`named_parameters` と `set_parameter` を対で override して接頭辞を付け外し）の forward・入力勾配の手組みとの bit 一致、キー列と `parameter_count`・`children`・`named_modules`・`summary`、safetensors の**ファイル**往復（#3815 はバイト列往復のみ）、欠落・余剰・接頭辞誤り・shape 不一致の拒否と無変更、`set_parameter` 未 override の複合層の既定拒否、3 段の入れ子（`compat::Sequential` → `nn::Sequential` → `compat::Sequential`）での `set_training` 伝播とキー（`0.0.0.weight` 形式）・往復、`ForwardHooked` 越し（1 forward 1 発火・透過・hook の `Err` 伝播・`nn::Sequential`／`compat::Sequential::add_module` 内での発火回数）、入れ子ブロックを持つ外側 `predict` と `Module::forward` の bit 一致
+- **BatchNorm の観測**: running stats は `named_parameters`／`state_dict` に出ない buffer のため、「eval 出力が train forward の前後で変わる」という間接観測で固定し、inherent 経路の対照と bit 一致を確かめた（計画どおり成立）
+- **正ガード**（`crates/facade/tests/api_surface.rs`、#3815 ブロックの直後）: `compat_sequential_module_acceptance_coverage_map_matches`（受入シナリオ 10 件→テスト関数の対応表。キー集合の完全一致、各テストが有効な `#[test]`、`fandhe_ai_autodiff` 参照なし、`#[ignore]` なし）と、自己テスト `compat_sequential_module_acceptance_coverage_map_detects_each_category`（キー欠落・余剰・重複、存在しないテスト名、`#[test]` なし、`#[ignore]` 付き、コメント内の偽テスト、autodiff の混入、`#[ignore]` 単独の混入を検出）。反転対象の否定ガード・保留 doctest は元から無かった（§23.1・§24）ため、反転ではなく正ガードの新設として扱った。#3815 のガードは無変更で通る
+- **§23 からのずれ**: なし
+- **申し送り**: `nn/forward_hook.rs` のモジュール doc の「包める型」の列挙に `compat::Sequential` が載っていない（`compat::Sequential` は facade `Module` 実装なので誤りではないが、書き足しは `src/**` の変更になるため本件では行わない。ドリフト候補）。§22.6 の残課題（`ReferenceModule` の移行、入れ子パラメータの学習対応、`parameter_count()`／`summary()` の inherent 化）は別承認・スコープ外

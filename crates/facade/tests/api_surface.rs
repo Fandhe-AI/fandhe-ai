@@ -46264,6 +46264,144 @@ fn compat_sequential_nn_module_usage_doctest_is_present_and_compiled() {
     let missing = surface_guard::usage_doctest_violations(&[entry(&["x.median(None)"])]);
     assert!(!missing.is_empty(), "検出器が空振りしている");
 }
+// ---- イシュー #3816: 独自 Module 経路の受入テストの正ガード ----
+//
+// 反転対象の否定ガード・保留 doctest は元から無い（`docs/facade-nn-module-exposure-decision.md`
+// §23.1・§24）ため、受入シナリオ→テスト関数の対応表を正ガードとして新設する（先例: #3971 の
+// `create_graph_facade_coverage_map_matches_supported_set`）。受入テストの削除・`#[ignore]` 化・
+// コメントアウト・autodiff の直接 import へのすり替えを CI で検出する。
+
+/// 受入シナリオ（設計記録 §23.4）→ `tests/nn_compat_sequential_module_acceptance.rs` のテスト関数。
+const COMPAT_SEQ_MODULE_ACCEPTANCE_MAP: &[(&str, &str)] = &[
+    (
+        "user_composite_forward",
+        "user_composite_forward_matches_manual_composition_bit_exact",
+    ),
+    (
+        "user_composite_param_enum",
+        "user_composite_named_parameters_enumerates_prefixed_keys",
+    ),
+    (
+        "safetensors_file_roundtrip",
+        "user_composite_state_dict_safetensors_file_roundtrip",
+    ),
+    (
+        "load_reject_rollback",
+        "user_composite_load_state_dict_rejects_unknown_and_missing_keys_without_mutation",
+    ),
+    (
+        "training_multi_level",
+        "training_mode_propagates_through_multi_level_nesting",
+    ),
+    (
+        "batch_norm_mode",
+        "batch_norm_running_stats_follow_training_mode_through_custom_module",
+    ),
+    (
+        "multi_level_keys_roundtrip",
+        "multi_level_nesting_named_parameters_and_state_dict_roundtrip",
+    ),
+    (
+        "forward_hooked_transparent",
+        "forward_hooked_compat_sequential_is_transparent",
+    ),
+    (
+        "forward_hooked_nested",
+        "forward_hooked_inside_nested_containers_fires_once_per_forward",
+    ),
+    (
+        "outer_predict",
+        "outer_predict_with_nested_block_matches_module_forward_bit_exact",
+    ),
+];
+
+/// 期待シナリオ集合（対応表のキーと過不足なく一致させる）。
+const COMPAT_SEQ_MODULE_ACCEPTANCE_KEYS: &[&str] = &[
+    "user_composite_forward",
+    "user_composite_param_enum",
+    "safetensors_file_roundtrip",
+    "load_reject_rollback",
+    "training_multi_level",
+    "batch_norm_mode",
+    "multi_level_keys_roundtrip",
+    "forward_hooked_transparent",
+    "forward_hooked_nested",
+    "outer_predict",
+];
+
+/// 対応表と受入テストのソースを突き合わせ、違反を列挙する（空なら適合）。
+fn compat_seq_module_acceptance_violations(
+    map: &[(&str, &str)],
+    expected_keys: &[&str],
+    src: &str,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    let keys: std::collections::BTreeSet<&str> = map.iter().map(|(k, _)| *k).collect();
+    if keys.len() != map.len() {
+        v.push("対応表のキーが重複している".to_string());
+    }
+    let expected: std::collections::BTreeSet<&str> = expected_keys.iter().copied().collect();
+    for k in expected.difference(&keys) {
+        v.push(format!("対応表にシナリオ `{k}` が無い"));
+    }
+    for k in keys.difference(&expected) {
+        v.push(format!("対応表に期待外のシナリオ `{k}` がある"));
+    }
+    for (k, t) in map {
+        if !cg_has_active_test_fn(src, t) {
+            v.push(format!("`{k}` の対応先 `{t}` が有効な #[test] として無い"));
+        }
+    }
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    if cleaned.contains("fandhe_ai_autodiff") {
+        v.push("fandhe_ai_autodiff を参照している（facade のみに依存すること）".to_string());
+    }
+    if cleaned.contains("#[ignore") {
+        v.push("#[ignore] がある（実機依存はなく、CI で動くテストだけを置く）".to_string());
+    }
+    v
+}
+
+#[test]
+fn compat_sequential_module_acceptance_coverage_map_matches() {
+    let src = read_to_string_or_panic(
+        &facade_crate_root().join("tests/nn_compat_sequential_module_acceptance.rs"),
+    );
+    let v = compat_seq_module_acceptance_violations(
+        COMPAT_SEQ_MODULE_ACCEPTANCE_MAP,
+        COMPAT_SEQ_MODULE_ACCEPTANCE_KEYS,
+        &src,
+    );
+    assert!(v.is_empty(), "{v:?}");
+}
+
+#[test]
+fn compat_sequential_module_acceptance_coverage_map_detects_each_category() {
+    let good = "//! fandhe_ai_autodiff は doc コメント内なら無害\n#[test]\nfn a() {}\n#[test]\nfn b() {}\n";
+    let keys = ["X", "Y"];
+    let ok = [("X", "a"), ("Y", "b")];
+    let bad = |map: &[(&str, &str)], src: &str| {
+        !compat_seq_module_acceptance_violations(map, &keys, src).is_empty()
+    };
+    assert!(compat_seq_module_acceptance_violations(&ok, &keys, good).is_empty());
+    // キー欠落・余剰・重複
+    assert!(bad(&[("X", "a")], good));
+    assert!(bad(&[("X", "a"), ("Y", "b"), ("Z", "a")], good));
+    assert!(bad(&[("X", "a"), ("X", "b")], good));
+    // 存在しないテスト名
+    assert!(bad(&[("X", "a"), ("Y", "zzz")], good));
+    // #[test] なし / #[ignore] 付き
+    assert!(bad(&ok, "#[test]\nfn a() {}\nfn b() {}\n"));
+    assert!(bad(
+        &ok,
+        "#[test]\nfn a() {}\n#[test]\n#[ignore]\nfn b() {}\n"
+    ));
+    // コメント内の偽テスト
+    assert!(bad(&ok, "#[test]\nfn a() {}\n// #[test]\n// fn b() {}\n"));
+    // autodiff の直接 import / #[ignore] 単独の混入
+    assert!(bad(&ok, &format!("use fandhe_ai_autodiff::Tape;\n{good}")));
+    assert!(bad(&ok, &format!("#[ignore]\nfn helper() {{}}\n{good}")));
+}
 // =====================================================================
 // イシュー #3817（親 #3813・Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:
 // `Var::{hardshrink, softshrink}` と `compat::Sequential::{add_hardshrink, add_softshrink}` の正ガード。
