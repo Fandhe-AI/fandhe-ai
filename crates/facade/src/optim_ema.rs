@@ -20,7 +20,10 @@
 //! 更新式は `shadow = f32::mul_add(decay, shadow, (1 - decay) * param)`
 //! （内部実装と同一。`.claude/rules/coding-rust.md` の FMA 契約）。PyTorch
 //! `AveragedModel` の `lerp` 形とは丸めが異なるため bit 一致は主張しない。
-//! 非有限値は伝播する。
+//! 非有限値は伝播する。減衰率ウォームアップ（[`ExponentialMovingAverage::with_warmup`]。
+//! 既定 OFF。イシュー #3833、決定記録 §18・§20）は ON のとき実効 decay を
+//! `min(decay, ((1 + n) as f64 / (10 + n) as f64) as f32)`（n は更新前の `num_updates`）にする。
+//! OFF の経路は従来と bit 同一。
 //!
 //! # スコープ
 //!
@@ -52,6 +55,11 @@ use crate::{AutodiffError, Tensor};
 ///
 /// // decay は有限かつ [0, 1]。範囲外は型付きエラー。
 /// assert!(ExponentialMovingAverage::new(1.5, &[&w0]).is_err());
+///
+/// // 減衰率ウォームアップは opt-in（既定 OFF。イシュー #3833）。
+/// assert!(!ema.warmup());
+/// let warm = ExponentialMovingAverage::new(0.999, &[&w0])?.with_warmup(true);
+/// assert!(warm.warmup());
 /// # Ok(())
 /// # }
 /// ```
@@ -90,6 +98,38 @@ impl ExponentialMovingAverage {
     /// 構築時に検証済みの `decay`。
     pub fn decay(&self) -> f32 {
         self.inner.decay()
+    }
+
+    /// 減衰率ウォームアップ（TensorFlow 方式 `min(decay, (1 + n) / (10 + n))`。n は更新前の
+    /// `num_updates`）を有効・無効にする（既定 OFF。イシュー #3833）。途中で切り替えた場合は
+    /// 次の更新から効き、n は続く。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::optim::ExponentialMovingAverage;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let w0 = Tensor::new(vec![1.0f32], &[1])?;
+    /// let mut ema = ExponentialMovingAverage::new(0.999, &[&w0])?.with_warmup(true);
+    /// let w1 = Tensor::new(vec![3.0f32], &[1])?;
+    /// ema.update(&[&w1])?;
+    /// // 初回は n = 0 なので実効 decay は 0.1。
+    /// let expected = f32::mul_add(0.1, 1.0, 0.9 * 3.0);
+    /// let shadow = ema.shadow_parameters()[0].contiguous();
+    /// assert_eq!(shadow.as_slice().unwrap()[0].to_bits(), expected.to_bits());
+    /// assert!(ema.warmup());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_warmup(self, enabled: bool) -> Self {
+        Self {
+            inner: self.inner.with_warmup(enabled),
+        }
+    }
+
+    /// 減衰率ウォームアップが有効か。
+    pub fn warmup(&self) -> bool {
+        self.inner.warmup()
     }
 
     /// これまでの `update` 系の成功回数。

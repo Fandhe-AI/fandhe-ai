@@ -58,9 +58,12 @@
 //! 初期化は構築時パラメータの `clone`（Keras／TF ExponentialMovingAverage
 //! と同じ）。`num_updates`（[`ExponentialMovingAverage::num_updates`]）は
 //! 呼び出し回数のカウンタのみで、TensorFlow の `num_updates` による
-//! decay ウォームアップ（`min(decay, (1 + n) / (10 + n))`）は本イシュー
-//! では採用しない（将来拡張候補として `docs/autodiff-ema-decision.md`
-//! に記録する）。
+//! decay ウォームアップ（`min(decay, (1 + n) / (10 + n))`）は opt-in
+//! （既定 OFF）の [`ExponentialMovingAverage::with_warmup`] として
+//! 提供する（イシュー #3833。`docs/autodiff-ema-decision.md` §18・§20）。
+//! n は更新の**前**の `num_updates`（初回は 0）で、実効 decay は
+//! `min(decay, ((1 + n) as f64 / (10 + n) as f64) as f32)`。OFF の経路は
+//! 従来と bit 単位で同一（実効 decay が `self.decay` そのもの）。
 //!
 //! # スコープ
 //!
@@ -105,6 +108,8 @@ pub struct ExponentialMovingAverage {
     names: Vec<String>,
     shadow_vars: HashMap<String, Tensor<f32>>,
     num_updates: u64,
+    /// 減衰率ウォームアップの有効フラグ（既定 `false`。イシュー #3833）。
+    warmup: bool,
 }
 
 impl ExponentialMovingAverage {
@@ -145,7 +150,38 @@ impl ExponentialMovingAverage {
             names,
             shadow_vars,
             num_updates: 0,
+            warmup: false,
         })
+    }
+
+    /// 減衰率ウォームアップ（TensorFlow 方式）の有効・無効を設定する
+    /// （既定 OFF。イシュー #3833、決定記録 §18・§20）。
+    ///
+    /// ON のとき、更新 1 回ごとの実効 decay は
+    /// `min(decay, (1 + n) / (10 + n))`（n は更新前の `num_updates`、
+    /// 初回は 0 なので `min(decay, 0.1)`）。比は f64 で 1 回割り f32 へ
+    /// 1 回だけ丸める。`decay <= 0.1` では常に OFF と同じ。`decay == 1.0`
+    /// は ON にすると shadow が動く。途中で切り替えた場合は次の更新から
+    /// 効き、n は続く。OFF の経路は従来と bit 同一。
+    pub fn with_warmup(mut self, enabled: bool) -> Self {
+        self.warmup = enabled;
+        self
+    }
+
+    /// 減衰率ウォームアップが有効か。
+    pub fn warmup(&self) -> bool {
+        self.warmup
+    }
+
+    /// 今回の更新で使う実効 decay。OFF では `self.decay` をそのまま返し
+    /// 比の計算も `min` も走らない（既定経路の bit 同一性を守る）。
+    fn effective_decay(&self) -> f32 {
+        if !self.warmup {
+            return self.decay;
+        }
+        let n = self.num_updates;
+        let ratio = (n.saturating_add(1) as f64 / n.saturating_add(10) as f64) as f32;
+        self.decay.min(ratio)
     }
 
     /// `module.named_parameters()`（[`Module`] trait 経由）から構築する。
@@ -161,7 +197,7 @@ impl ExponentialMovingAverage {
     }
 
     /// 実行済み `update`／`update_named`／`update_from_module` の
-    /// 合計回数。
+    /// 合計回数（減衰率ウォームアップの n はこの値）。
     pub fn num_updates(&self) -> u64 {
         self.num_updates
     }
@@ -237,7 +273,7 @@ impl ExponentialMovingAverage {
 
         // パス 2（適用）。`shadow[i] = decay*shadow[i] +
         // (1-decay)*param[i]`（モジュール doc「数値契約」節参照）。
-        let decay = self.decay;
+        let decay = self.effective_decay();
         let one_minus_decay = 1.0 - decay;
         for name in &self.names {
             let Some(tensor) = provided.get(name.as_str()) else {
@@ -535,5 +571,166 @@ mod tests {
         };
 
         assert_eq!(run(&p0, &updates), run(&p0, &updates));
+    }
+    // --- 減衰率ウォームアップ（イシュー #3833）。判定はすべて bit 一致。 ---
+
+    fn bits_of(ema: &ExponentialMovingAverage, name: &str) -> Vec<u32> {
+        ema.shadow(name)
+            .unwrap()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    /// 独立に計算した期待の実効 decay。
+    fn expected_decay(decay: f32, n: u64) -> f32 {
+        let r = ((1 + n) as f64 / (10 + n) as f64) as f32;
+        decay.min(r)
+    }
+
+    #[test]
+    fn warmup_off_is_bit_identical_to_default() {
+        let p0 = t(vec![1.0, -2.0, 0.5], &[3]);
+        let mut a = ExponentialMovingAverage::new(0.9, &[&p0])
+            .unwrap()
+            .with_warmup(false);
+        let mut b = ExponentialMovingAverage::new(0.9, &[&p0]).unwrap();
+        for i in 0..6 {
+            let u = t(vec![i as f32, 1.5 * i as f32, -0.25], &[3]);
+            a.update(&[&u]).unwrap();
+            b.update(&[&u]).unwrap();
+            assert_eq!(bits_of(&a, "0"), bits_of(&b, "0"));
+        }
+        assert!(!a.warmup() && !b.warmup());
+    }
+
+    #[test]
+    fn warmup_first_update_uses_n_zero() {
+        let p0 = t(vec![1.0, 2.0], &[2]);
+        let mut ema = ExponentialMovingAverage::new(0.999, &[&p0])
+            .unwrap()
+            .with_warmup(true);
+        let u = t(vec![3.0, 5.0], &[2]);
+        ema.update(&[&u]).unwrap();
+        let eff = 0.1f32;
+        assert_eq!(expected_decay(0.999, 0), eff);
+        let expected: Vec<u32> = [(1.0f32, 3.0f32), (2.0, 5.0)]
+            .iter()
+            .map(|&(s, p)| f32::mul_add(eff, s, (1.0 - eff) * p).to_bits())
+            .collect();
+        assert_eq!(bits_of(&ema, "0"), expected);
+    }
+
+    #[test]
+    fn warmup_sequence_matches_closed_form_bit_exact() {
+        let p0 = t(vec![0.5], &[1]);
+        let mut ema = ExponentialMovingAverage::new(0.999, &[&p0])
+            .unwrap()
+            .with_warmup(true);
+        let mut expected = 0.5f32;
+        for n in 0..10u64 {
+            let param = (n + 1) as f32;
+            ema.update(&[&t(vec![param], &[1])]).unwrap();
+            let eff = expected_decay(0.999, n);
+            expected = f32::mul_add(eff, expected, (1.0 - eff) * param);
+            assert_eq!(bits_of(&ema, "0"), vec![expected.to_bits()]);
+        }
+        assert_eq!(ema.num_updates(), 10);
+    }
+
+    #[test]
+    fn warmup_reaches_configured_decay() {
+        // decay 0.5: n = 8 で 9/18 = 0.5 に達し、以降の実効 decay は OFF と同じ。
+        let p0 = t(vec![0.0], &[1]);
+        let mut on = ExponentialMovingAverage::new(0.5, &[&p0])
+            .unwrap()
+            .with_warmup(true);
+        let mut off = ExponentialMovingAverage::new(0.5, &[&p0]).unwrap();
+        for _ in 0..8 {
+            let u = t(vec![1.0], &[1]);
+            on.update(&[&u]).unwrap();
+            off.update(&[&u]).unwrap();
+        }
+        assert_eq!(expected_decay(0.5, 8), 0.5);
+        let u = t(vec![2.0], &[1]);
+        for ema in [&mut on, &mut off] {
+            let s = ema.shadow("0").unwrap().as_slice().unwrap()[0];
+            ema.update(&[&u]).unwrap();
+            let e = f32::mul_add(0.5, s, 0.5 * 2.0);
+            assert_eq!(bits_of(ema, "0"), vec![e.to_bits()]);
+        }
+    }
+
+    #[test]
+    fn warmup_boundaries_decay_zero_small_and_one() {
+        let p0 = t(vec![1.0], &[1]);
+        let u = t(vec![9.0], &[1]);
+        // decay <= 0.1 は常に OFF と同じ。
+        for d in [0.0f32, 0.05, 0.1] {
+            let mut on = ExponentialMovingAverage::new(d, &[&p0])
+                .unwrap()
+                .with_warmup(true);
+            let mut off = ExponentialMovingAverage::new(d, &[&p0]).unwrap();
+            for _ in 0..5 {
+                on.update(&[&u]).unwrap();
+                off.update(&[&u]).unwrap();
+                assert_eq!(bits_of(&on, "0"), bits_of(&off, "0"));
+            }
+        }
+        // decay == 0.0 は最新の param になる。
+        let mut zero = ExponentialMovingAverage::new(0.0, &[&p0])
+            .unwrap()
+            .with_warmup(true);
+        zero.update(&[&u]).unwrap();
+        assert_eq!(bits_of(&zero, "0"), vec![9.0f32.to_bits()]);
+        // decay == 1.0: OFF では動かず、ON では shadow が動く。
+        let mut one_off = ExponentialMovingAverage::new(1.0, &[&p0]).unwrap();
+        let mut one_on = ExponentialMovingAverage::new(1.0, &[&p0])
+            .unwrap()
+            .with_warmup(true);
+        one_off.update(&[&u]).unwrap();
+        one_on.update(&[&u]).unwrap();
+        assert_eq!(bits_of(&one_off, "0"), vec![1.0f32.to_bits()]);
+        assert_ne!(bits_of(&one_on, "0"), vec![1.0f32.to_bits()]);
+    }
+
+    #[test]
+    fn warmup_rejected_update_keeps_counter_and_shadow() {
+        let p0 = t(vec![1.0, 2.0], &[2]);
+        let mut ema = ExponentialMovingAverage::new(0.999, &[&p0])
+            .unwrap()
+            .with_warmup(true);
+        ema.update(&[&t(vec![3.0, 4.0], &[2])]).unwrap();
+        let before = bits_of(&ema, "0");
+        assert!(ema.update(&[&t(vec![1.0], &[1])]).is_err());
+        assert!(ema.update(&[]).is_err());
+        assert_eq!(ema.num_updates(), 1);
+        assert_eq!(bits_of(&ema, "0"), before);
+        // 次に成功する更新は n = 1 を使う。
+        let u = t(vec![5.0, 6.0], &[2]);
+        ema.update(&[&u]).unwrap();
+        let eff = expected_decay(0.999, 1);
+        let s = f32::from_bits(before[0]);
+        let expected = f32::mul_add(eff, s, (1.0 - eff) * 5.0);
+        assert_eq!(bits_of(&ema, "0")[0], expected.to_bits());
+    }
+
+    #[test]
+    fn warmup_toggle_mid_sequence_continues_counter() {
+        let p0 = t(vec![0.0], &[1]);
+        let mut ema = ExponentialMovingAverage::new(0.999, &[&p0]).unwrap();
+        let u = t(vec![1.0], &[1]);
+        ema.update(&[&u]).unwrap();
+        ema.update(&[&u]).unwrap();
+        let s = ema.shadow("0").unwrap().as_slice().unwrap()[0];
+        let mut ema = ema.with_warmup(true);
+        ema.update(&[&u]).unwrap();
+        // 途中で ON にすると次の更新から効き、n は 2 のまま続く。
+        let eff = expected_decay(0.999, 2);
+        let expected = f32::mul_add(eff, s, (1.0 - eff) * 1.0);
+        assert_eq!(bits_of(&ema, "0"), vec![expected.to_bits()]);
+        assert_eq!(ema.num_updates(), 3);
     }
 }

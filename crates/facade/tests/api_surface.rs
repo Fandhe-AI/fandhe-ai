@@ -19822,6 +19822,13 @@ fn ema_types_are_reachable_via_facade_only() {
     let _cb_decay: fn(&EmaCallback) -> f32 = EmaCallback::decay;
     let _cb_num_updates: fn(&EmaCallback) -> u64 = EmaCallback::num_updates;
     let _cb_shadow: fn(&EmaCallback) -> Option<StateDict> = EmaCallback::shadow_state_dict;
+    // イシュー #3833: 減衰率ウォームアップ（既定 OFF）。
+    let _with_warmup: fn(Ema, bool) -> Ema = Ema::with_warmup;
+    let _warmup: fn(&Ema) -> bool = Ema::warmup;
+    let _cb_with_warmup: fn(EmaCallback, bool) -> EmaCallback = EmaCallback::with_warmup;
+    let _cb_warmup: fn(&EmaCallback) -> bool = EmaCallback::warmup;
+    assert!(!EmaCallback::new(0.5).unwrap().warmup());
+    assert!(EmaCallback::new(0.5).unwrap().with_warmup(true).warmup());
 
     // 振る舞いの最小確認: decay の範囲外は型付きエラー。
     assert!(Ema::new(1.5, &[]).is_err());
@@ -19854,6 +19861,7 @@ fn ema_usage_doctests_are_present_and_compiled() {
             "use fandhe_ai::optim::ExponentialMovingAverage",
             "ExponentialMovingAverage::new",
             "shadow_parameters",
+            "with_warmup",
         ],
     ));
     v.extend(doctest_probe_violations(
@@ -19865,6 +19873,12 @@ fn ema_usage_doctests_are_present_and_compiled() {
             "EmaCallback::new",
             "shadow_state_dict",
         ],
+    ));
+    // イシュー #3833: ウォームアップの利用例も実在し、コンパイルされる形であること。
+    v.extend(doctest_probe_violations(
+        "EmaCallback の doc（ウォームアップ例）",
+        &doc_lines_above_fn(&callbacks, "pub struct EmaCallback"),
+        &["Callback::Ema", "with_warmup(true)", "warmup()"],
     ));
     assert!(v.is_empty(), "{v:?}");
 
@@ -20075,6 +20089,219 @@ fn ema_with_amp_usage_doctest_is_present_and_compiled() {
     assert!(!doctest_probe_violations("t", &hidden, &needles).is_empty());
     let ignored = lines("```ignore\ncompile_with_amp AmpConfig Callback::Ema\n```");
     assert!(!doctest_probe_violations("t", &ignored, &needles).is_empty());
+}
+// =====================================================================
+// イシュー #3833（設計 #3769 論点 4・決定記録 `docs/autodiff-ema-decision.md` §18・§20）:
+// `EmaCallback`／`optim::ExponentialMovingAverage` の減衰率ウォームアップ
+// （`with_warmup(self, bool)`・`warmup()`。既定 OFF）の承認形を固定する正ガード群。
+// ウォームアップ専用の否定ガードは元から無いため、「反転」は正ガードの新設・拡張で行う
+// （#3831 と同じ読み替え。決定記録 §20.3）。
+// =====================================================================
+
+/// コメント・文字列リテラルを除いて空白を詰めた本文を返す（コメントだけに書いた文言で
+/// 通らないようにする）。
+fn code_squashed(src: &str) -> String {
+    squash_ws(&strip_comments_and_literals(src).iter().collect::<String>())
+}
+
+/// 空白詰め済みの `src` から最初の `marker`（`fn 名(` を含む接頭辞）直後の `{ ... }` 本文を返す。
+/// 見つからない・括弧が閉じないときは `None`（fail-closed）。同名 fn が複数ある型は呼び出し側が
+/// `impl` 位置から切り出した `src` を渡して曖昧さを避ける。
+fn squashed_fn_body<'a>(src: &'a str, marker: &str) -> Option<&'a str> {
+    let at = src.find(marker)?;
+    let open = at + src[at..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open + 1..open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// ウォームアップの承認形から外れている点を返す（空なら承認形）。
+/// - `ema.rs`: `effective_decay` が OFF で `self.decay` を早期 return し、ON は f64 で 1 回割った比を
+///   f32 へ 1 回だけ丸めて `self.decay.min(..)` を取る。pass 2 は `self.effective_decay()` を読む
+/// - `optim_ema.rs`: `with_warmup`／`warmup` は内部型への 1 行委譲
+/// - `callbacks.rs`: `begin_fit` の初期化が `with_warmup(self.warmup)` を伝播し、`warmup()` は
+///   `self.warmup` を返す
+fn ema_warmup_shape_violations(
+    ema_src: &str,
+    wrapper_src: &str,
+    callback_src: &str,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    let ema = code_squashed(ema_src);
+    match squashed_fn_body(&ema, "fneffective_decay(") {
+        None => v.push("ema.rs: `fn effective_decay` の本体を一意に検出できない".to_string()),
+        Some(body) => {
+            if !body.starts_with("if!self.warmup{returnself.decay;}") {
+                v.push("effective_decay: OFF で self.decay を早期 return する形が無い".into());
+            }
+            if !body.contains("letn=self.num_updates;") {
+                v.push("effective_decay: n が更新前の self.num_updates でない".into());
+            }
+            if !body.contains("letratio=(n.saturating_add(1)asf64/n.saturating_add(10)asf64)asf32;")
+            {
+                v.push(
+                    "effective_decay: 比が f64 の (1+n)/(10+n) を f32 へ 1 回丸める形でない".into(),
+                );
+            }
+            if body.matches("asf32").count() != 1 {
+                v.push("effective_decay: `as f32` がちょうど 1 回でない（二重丸め）".into());
+            }
+            if !body.ends_with("self.decay.min(ratio)") {
+                v.push("effective_decay: 末尾が self.decay.min(ratio) でない".into());
+            }
+            if body.contains("max(") {
+                v.push("effective_decay: max を使っている".into());
+            }
+        }
+    }
+    if !ema.contains("letdecay=self.effective_decay();") {
+        v.push("ema.rs: pass 2 が self.effective_decay() を読んでいない".into());
+    }
+    if ema.contains("letdecay=self.decay;") {
+        v.push("ema.rs: pass 2 に `let decay = self.decay;` が残っている".into());
+    }
+
+    let wrapper = code_squashed(wrapper_src);
+    for (marker, want) in [
+        (
+            "pubfnwith_warmup(",
+            "Self{inner:self.inner.with_warmup(enabled),}",
+        ),
+        ("pubfnwarmup(", "self.inner.warmup()"),
+    ] {
+        match squashed_fn_body(&wrapper, marker) {
+            Some(body) if body == want => {}
+            Some(_) => v.push(format!("optim_ema.rs: {marker} が 1 行委譲でない")),
+            None => v.push(format!("optim_ema.rs: {marker} の本体を一意に検出できない")),
+        }
+    }
+
+    let cb_all = code_squashed(callback_src);
+    let cb = cb_all
+        .find("implEmaCallback{")
+        .map_or("", |at| &cb_all[at..]);
+    match squashed_fn_body(cb, "pub(super)fnbegin_fit(") {
+        Some(body) if body.contains(".with_warmup(self.warmup)") => {}
+        Some(_) => {
+            v.push("callbacks.rs: begin_fit が with_warmup(self.warmup) を伝播しない".into())
+        }
+        None => v.push("callbacks.rs: begin_fit の本体を一意に検出できない".into()),
+    }
+    match squashed_fn_body(cb, "pubfnwarmup(&self)->bool") {
+        Some("self.warmup") => {}
+        _ => v.push("callbacks.rs: EmaCallback::warmup が self.warmup を返さない".into()),
+    }
+    v
+}
+
+#[test]
+fn ema_warmup_matches_approved_shape() {
+    let root = facade_crate_root();
+    let ema = read_to_string_or_panic(&root.join("../autodiff/src/nn/ema.rs"));
+    let wrapper = read_to_string_or_panic(&root.join("src/optim_ema.rs"));
+    let cb = read_to_string_or_panic(&root.join("src/compat/callbacks.rs"));
+    let v = ema_warmup_shape_violations(&ema, &wrapper, &cb);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+#[test]
+fn ema_warmup_matches_approved_shape_detects_each_category() {
+    let root = facade_crate_root();
+    let ema = read_to_string_or_panic(&root.join("../autodiff/src/nn/ema.rs"));
+    let wrapper = read_to_string_or_panic(&root.join("src/optim_ema.rs"));
+    let cb = read_to_string_or_panic(&root.join("src/compat/callbacks.rs"));
+    assert!(ema_warmup_shape_violations(&ema, &wrapper, &cb).is_empty());
+
+    let mutate = |src: &str, from: &str, to: &str| -> String {
+        assert!(src.contains(from), "test fixture: 置換対象が無い: {from}");
+        src.replacen(from, to, 1)
+    };
+    let detected = |e: &str, w: &str, c: &str| !ema_warmup_shape_violations(e, w, c).is_empty();
+
+    // 比の演算・定数・min/max・丸めのすり替え。
+    let ratio = "(n.saturating_add(1) as f64 / n.saturating_add(10) as f64) as f32;";
+    for (from, to) in [
+        (
+            ratio,
+            "(n.saturating_add(10) as f64 / n.saturating_add(1) as f64) as f32;",
+        ),
+        (
+            ratio,
+            "(n.saturating_add(1) as f64 / n.saturating_add(2) as f64) as f32;",
+        ),
+        (
+            ratio,
+            "(n.saturating_add(1) as f32 / n.saturating_add(10) as f32) as f32;",
+        ),
+        (
+            ratio,
+            "((n.saturating_add(1) as f64 / n.saturating_add(10) as f64) as f32) as f32;",
+        ),
+        ("self.decay.min(ratio)", "self.decay.max(ratio)"),
+        (
+            "let n = self.num_updates;",
+            "let n = self.num_updates.saturating_add(1);",
+        ),
+        (
+            "if !self.warmup {\n            return self.decay;\n        }\n",
+            "",
+        ),
+        (
+            "let decay = self.effective_decay();",
+            "let decay = self.decay;",
+        ),
+    ] {
+        assert!(
+            detected(&mutate(&ema, from, to), &wrapper, &cb),
+            "未検出: {from}"
+        );
+    }
+    // ラッパーのスタブ。
+    for (from, to) in [
+        ("self.inner.warmup()", "false"),
+        (
+            "inner: self.inner.with_warmup(enabled),",
+            "inner: self.inner,",
+        ),
+    ] {
+        assert!(
+            detected(&ema, &mutate(&wrapper, from, to), &cb),
+            "未検出: {from}"
+        );
+    }
+    // begin_fit の伝播漏れ・warmup() のスタブ。
+    assert!(detected(
+        &ema,
+        &wrapper,
+        &mutate(&cb, ".with_warmup(self.warmup)", "")
+    ));
+    assert!(detected(
+        &ema,
+        &wrapper,
+        &mutate(&cb, "        self.warmup\n    }", "        false\n    }")
+    ));
+    // コメントに書いた文言だけでは通らない。
+    let commented = mutate(
+        &ema,
+        "let decay = self.effective_decay();",
+        "// let decay = self.effective_decay();\n        let decay = self.decay;",
+    );
+    assert!(detected(&commented, &wrapper, &cb));
+    // マーカー欠落・空入力は fail-closed。
+    assert!(detected("", &wrapper, &cb));
+    assert!(detected(&ema, "", &cb));
+    assert!(detected(&ema, &wrapper, ""));
 }
 
 // =====================================================================

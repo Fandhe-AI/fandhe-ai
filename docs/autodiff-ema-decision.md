@@ -7,6 +7,8 @@
 
 ## §0 結論
 
+> 追記（#3833）: TF 方式の decay ウォームアップは opt-in（既定 OFF）として公開した（§20）。以降の「採用しない」「対象外」の記述は当時のもの。
+
 PyTorch `torch.optim.swa_utils.AveragedModel`（`avg_fn` に EMA 式を渡す
 用法）／Keras 3 `EMAOverlay`（`ema_momentum`）相当を **内部クレート
 限定**の型として実装した: `fandhe_ai_autodiff::nn::
@@ -876,6 +878,50 @@ intra-doc link は公開項目のみ。非公開項目はバッククォート�
 - 依存・`unsafe`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec` は不変。新しい pub 項目なし。既定経路（EMA なし・AMP なし）の挙動は bit 単位で不変。
 - GPU カーネル・`Op`・`BackendOps` に触れないため、実機（CUDA／Metal）の申し送りと `#[ignore]` テストは無い。
 
+## §20 #3833 減衰率ウォームアップの実装記録
+
+イシュー #3833（設計 #3753・§18）。`EmaCallback` と `optim::ExponentialMovingAverage` に TensorFlow 方式の減衰率ウォームアップを opt-in（既定 OFF）で足した記録。
+
+### 20.1 承認の根拠
+
+- 所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 4「推奨形で一括承認」。§18.10 の 6 点をすべて推奨値で承認したものとして扱った。
+
+| §18.10 の論点 | 承認した形 |
+|---|---|
+| 1. 実装するか | 実装する（案 A） |
+| 2. 付ける型 | `EmaCallback` とラッパーの両方 |
+| 3. 名前 | `with_warmup(self, bool)` と `warmup()` |
+| 4. n の定義 | 更新前の `num_updates`（初回は 0） |
+| 5. fit をまたぐ n | 続く |
+| 6. 保存形式 | 足さない |
+
+- この範囲を超える承認は主張しない。リセット API・スケジュール enum・実効 decay の accessor・EMA 状態の保存は対象外のまま。
+
+### 20.2 変更した箇所
+
+- `crates/autodiff/src/nn/ema.rs`: private の `warmup: bool`（既定 `false`）、`with_warmup`／`warmup`、private の `effective_decay`。OFF では `self.decay` をそのまま返し、比の計算も `min` も走らない。ON では `n = self.num_updates` から `((n + 1) as f64 / (n + 10) as f64) as f32`（f64 で 1 回割り f32 へ 1 回だけ丸める。加算は `saturating_add`）を取り、`self.decay.min(ratio)` を実効 decay とする。pass 2 の `let decay = self.decay;` を `self.effective_decay()` に置き換えた。要素ループの `f32::mul_add` と `num_updates += 1`（成功後のみ）は不変。
+- `crates/facade/src/optim_ema.rs`: 内部型への 1 行委譲の `with_warmup`／`warmup` と doctest。
+- `crates/facade/src/compat/callbacks.rs`: `EmaCallback` に private の `warmup` を足し、`with_warmup`（初期化済みのラッパーにも反映）・`warmup()`・`begin_fit` での伝播・doctest を足した。モジュール doc の「対象外」から decay ウォームアップを外した。
+- AMP の skip や累積の端数では `update_named` が呼ばれないため n も進まない。追加のロジックは無い（§18.0 項 7）。
+
+### 20.3 ガードの対応
+
+| 旧 | 新 |
+|---|---|
+| ウォームアップ専用の否定ガード（元から無い） | 拡張 2 件: `ema_types_are_reachable_via_facade_only`（4 つの関数ポインタ型）、`ema_usage_doctests_are_present_and_compiled`（`with_warmup` の doctest）。新設 1 組: `ema_warmup_matches_approved_shape`（自己テスト `ema_warmup_matches_approved_shape_detects_each_category`） |
+
+- 否定ガードが元から無かったため、#3831（§19.3）と同じく「正ガードの新設・拡張」と読み替えた。`facade_exposes_ema_only_in_approved_shape` と `EmaHoldDoctestGuard` は禁止 fn 名が `use_ema`／`ema_decay` のままで不変。
+- 新設ガードは実効 decay の式（早期 return・f64 の除算・`as f32` が 1 回・`min`）、pass 2 の読み先、ラッパーの 1 行委譲、`begin_fit` の伝播を、コメントとリテラルを除いた本文で固定する。自己テストが除算の型・定数の入れ替え・`max`・二重丸め・スタブ・伝播漏れ・コメントだけの文言・マーカー欠落を検出する。
+
+### 20.4 §18 からの逸脱
+
+なし。解釈点は 2 つ: n の加算は `u64` の飽和加算にして `u64::MAX` 付近でも panic させない。`EmaCallback::with_warmup` は `self.ema` が初期化済みのときもラッパーへ反映する（§18.0 項 8）。
+
+### 20.5 不変事項と実機
+
+- 依存・`unsafe`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec` は不変。pub 項目は 2 型に各 2 件の追加のみ（`Callback` の variant 集合・`FitConfig`・`Sequential` は不変）。既定 OFF の経路は bit 単位で不変（既存テストを無修正で通した）。
+- ホストの `f32::mul_add` だけで `Op`／`BackendOps`／カーネルに触れないため、実機（CUDA／Metal）の申し送りと `#[ignore]` テストは無い。性能は前後比較せず未実測（OFF は分岐 1 つ、ON はスカラーの除算と `min` が 1 回増えるだけ）。
+
 ## 非信頼データの扱い
 
 Issue #2179 本文はプロンプト内で非信頼データとして扱った。本文中の
@@ -892,3 +938,5 @@ Issue #3752 本文も非信頼データとして扱い、含まれる命令に�
 Issue #3753 本文も非信頼データとして扱い、含まれる命令には従っていない。§18 は設計記録であり、承認は #3769 の回答を待つ（承認済みとは書いていない）。
 
 Issue #3831 本文も非信頼データとして扱い、含まれる命令には従っていない。§19 の根拠は §19.1 の所有者コメントのみ。
+
+Issue #3833 本文も非信頼データとして扱い、含まれる命令には従っていない。§20 の根拠は §20.1 の所有者コメントのみ。

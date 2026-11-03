@@ -874,3 +874,154 @@ fn ema_with_amp_and_swa_is_still_rejected() {
     assert_eq!(model_bits(&m), before);
     assert!(ema_of(&cbs[0]).shadow_state_dict().is_none());
 }
+// ---------------------------------------------------------------------
+// イシュー #3833（決定記録 `docs/autodiff-ema-decision.md` §18・§20）: 減衰率ウォームアップ。
+// 既定 OFF の経路は従来と bit 同一、ON は `min(decay, (1 + n) / (10 + n))`（n は更新前の
+// `num_updates`）。判定はすべて bit 一致。
+// ---------------------------------------------------------------------
+
+fn warm_cb(decay: f32, on: bool) -> Callback {
+    Callback::Ema(
+        EmaCallback::new(decay)
+            .expect("test fixture: 有効な decay")
+            .with_warmup(on),
+    )
+}
+
+#[test]
+fn ema_warmup_fit_matches_manual_loop_bit_exact() {
+    let (x, y) = gen_data();
+    let epochs = 4;
+
+    let mut model_a = build_model();
+    let mut cbs = [warm_cb(0.999, true)];
+    model_a
+        .fit_with_callbacks(&x, &y, FitConfig::new(epochs, N), None, &mut cbs)
+        .expect("fit");
+
+    let mut model_b = build_model();
+    let mut ema = ExponentialMovingAverage::from_named(0.999, model_b.named_parameters())
+        .expect("from_named")
+        .with_warmup(true);
+    for _ in 0..epochs {
+        model_b.fit(&x, &y, FitConfig::new(1, N)).expect("fit");
+        ema.update_named(model_b.named_parameters())
+            .expect("update");
+    }
+
+    assert_eq!(
+        dict_bits(&shadow_of(&cbs[0])),
+        dict_bits(&ema.shadow_state_dict())
+    );
+    let e = ema_of(&cbs[0]);
+    assert!(e.warmup() && ema.warmup());
+    assert_eq!(e.num_updates(), epochs as u64);
+    assert_eq!(e.num_updates(), ema.num_updates());
+}
+
+#[test]
+fn ema_warmup_off_fit_is_bit_identical() {
+    let (x, y) = gen_data();
+    let run = |explicit_off: bool| {
+        let mut model = build_model();
+        let mut cbs = if explicit_off {
+            [warm_cb(DECAY, false)]
+        } else {
+            [ema_cb(DECAY)]
+        };
+        let h = model
+            .fit_with_callbacks(&x, &y, FitConfig::new(3, 4), None, &mut cbs)
+            .expect("fit");
+        (
+            dict_bits(&shadow_of(&cbs[0])),
+            model_bits(&model),
+            format!("{h:?}"),
+            ema_of(&cbs[0]).warmup(),
+        )
+    };
+    let a = run(true);
+    let b = run(false);
+    assert_eq!(a, b);
+    assert!(!a.3);
+}
+
+#[test]
+fn ema_warmup_counter_continues_across_fits() {
+    let (x, y) = gen_data();
+    let mut model_a = build_model();
+    let mut cbs = [warm_cb(0.999, true)];
+    for _ in 0..2 {
+        model_a
+            .fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut cbs)
+            .expect("fit");
+    }
+
+    let mut model_b = build_model();
+    let mut ema = ExponentialMovingAverage::from_named(0.999, model_b.named_parameters())
+        .expect("from_named")
+        .with_warmup(true);
+    for _ in 0..2 {
+        model_b.fit(&x, &y, FitConfig::new(1, N)).expect("fit");
+        ema.update_named(model_b.named_parameters())
+            .expect("update");
+    }
+    assert_eq!(
+        dict_bits(&shadow_of(&cbs[0])),
+        dict_bits(&ema.shadow_state_dict())
+    );
+    assert_eq!(ema_of(&cbs[0]).num_updates(), 2);
+
+    // fit の間で切り替えても n は続く（OFF にした 3 回目は decay そのもので更新される）。
+    let Callback::Ema(inner) = cbs.into_iter().next().expect("fixture") else {
+        panic!("test fixture: Callback::Ema のはず");
+    };
+    let mut cbs = [Callback::Ema(inner.with_warmup(false))];
+    assert!(!ema_of(&cbs[0]).warmup());
+    model_a
+        .fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut cbs)
+        .expect("fit");
+    model_b.fit(&x, &y, FitConfig::new(1, N)).expect("fit");
+    let mut ema = ema.with_warmup(false);
+    ema.update_named(model_b.named_parameters())
+        .expect("update");
+    assert_eq!(
+        dict_bits(&shadow_of(&cbs[0])),
+        dict_bits(&ema.shadow_state_dict())
+    );
+    assert_eq!(ema_of(&cbs[0]).num_updates(), 3);
+}
+
+#[test]
+fn ema_warmup_counts_actual_steps_with_accumulation() {
+    let (x, y) = gen_data();
+    let mut model = build_model();
+    let mut cbs = [warm_cb(0.999, true)];
+    model
+        .fit_with_callbacks(
+            &x,
+            &y,
+            FitConfig::new(2, 4).accumulate_steps(3),
+            None,
+            &mut cbs,
+        )
+        .expect("fit");
+    // 実際に step した数（窓 1 回＋端数 flush 1 回 = 2 step／epoch）だけ n が進む。
+    assert_eq!(ema_of(&cbs[0]).num_updates(), 4);
+
+    // 同じ学習を OFF で回した shadow とは係数が違う（ウォームアップが効いている）。
+    let mut model_off = build_model();
+    let mut cbs_off = [ema_cb(0.999)];
+    model_off
+        .fit_with_callbacks(
+            &x,
+            &y,
+            FitConfig::new(2, 4).accumulate_steps(3),
+            None,
+            &mut cbs_off,
+        )
+        .expect("fit");
+    assert_ne!(
+        dict_bits(&shadow_of(&cbs[0])),
+        dict_bits(&shadow_of(&cbs_off[0]))
+    );
+}

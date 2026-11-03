@@ -1908,8 +1908,8 @@ EMA（#2179 で内部クレート限定実装済み）を、決定記録（`docs
 名前を維持（ドリフト検査 2 件は不変。理由は決定記録 §14.3）。利用例は `optim.rs`・`optim_ema.rs`・
 `compat/callbacks.rs` の doctest と `crates/facade/tests/compat_sequential_fit_ema.rs`・
 `compat_sequential_ema_manual.rs`。保留を継続する項目: `compile_with_amp` 併用（#3831 で受理。末尾の適用記録。当時は fit 開始前に
-`InvalidArgument` で拒否）・decay ウォームアップ・`BatchNorm` running buffer・`DeviceParamStore` 常駐経路・
-`FitConfig`／`Sequential` への接続。`Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` 併用は、
+`InvalidArgument` で拒否）・`BatchNorm` running buffer・`DeviceParamStore` 常駐経路・
+`FitConfig`／`Sequential` への接続。decay ウォームアップは #3833 で公開（末尾の適用記録）。`Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` 併用は、
 #2844 で決定記録 §15 の形（判定値は生の重みの訓練損失・保存／復元重みは EMA 重み）により受理した
 （根拠: ルート #2499 のコメント `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`。§16）。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec` は不変、実機申し送りは不要。
@@ -2942,3 +2942,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（イシュー #3831・設計 #3752。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: Callback::Ema と compile_with_amp の併用拒否を撤去。skip した step では shadow と num_updates を更新しない。新しい pub 項目なし。詳細は決定記録 `docs/autodiff-ema-decision.md` §19。
 
 **適用記録（イシュー #3832・設計 #3752。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: param groups と AMP を同時に設定する `compile_with_amp_and_param_groups` を追加。skip の判定は全 group 共通。追加のみ。詳細は決定記録 `docs/autodiff-param-groups-decision.md` §14.12。
+
+**適用記録（イシュー #3833・設計 #3753。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: EmaCallback と optim::ExponentialMovingAverage に TF 方式の decay ウォームアップ（with_warmup／warmup。既定 OFF で従来と bit 同一）を追加した。追加のみ。公開済み。詳細は決定記録 `docs/autodiff-ema-decision.md` §20。

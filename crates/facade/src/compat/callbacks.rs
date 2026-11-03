@@ -152,7 +152,11 @@
 //! - **AMP との併用（イシュー #3831。決定記録 §17）**: `compile_with_amp` と併用でき、
 //!   AMP が非有限勾配で skip した step では shadow と `num_updates` を更新しない
 //!   （`num_updates` は実際に適用した step の数）。
-//! - **対象外**: decay ウォームアップ・`BatchNorm` の running buffer・デバイス常駐経路
+//! - **減衰率のウォームアップ（イシュー #3833。決定記録 §18・§20）**: [`EmaCallback::with_warmup`] で
+//!   opt-in（既定 OFF）。ON のとき実効 decay は `min(decay, ((1 + n) as f64 / (10 + n) as f64) as f32)`。
+//!   n はそれまでに適用した step の数（更新前の `num_updates`）で、fit をまたいで続く。AMP の
+//!   skip や累積の端数では n が進まない。OFF の経路は従来と bit 同一。
+//! - **対象外**: `BatchNorm` の running buffer・デバイス常駐経路
 //!   （`fit` 経路は構造上到達しない。手動で併用すると shadow が stale 化する）・SWA。
 //!
 //! # SWA（確率的重み平均。イシュー #3058・親 #3057。決定記録 `docs/autodiff-swa-decision.md` §16・§17）
@@ -1249,6 +1253,28 @@ impl std::fmt::Debug for LambdaCallback {
 /// model.load_state_dict(ema.shadow_state_dict().unwrap()).unwrap();
 /// ```
 ///
+/// 減衰率のウォームアップを有効にする例（イシュー #3833。既定は OFF）:
+///
+/// ```
+/// use fandhe_ai::compat::{Callback, EmaCallback, FitConfig, Loss, Optimizer, Sequential};
+/// use fandhe_ai::optim::SgdConfig;
+/// use fandhe_ai::Tensor;
+///
+/// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+/// model
+///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+///     .unwrap();
+/// let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).unwrap();
+/// let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+/// let mut cbs = [Callback::Ema(EmaCallback::new(0.999).unwrap().with_warmup(true))];
+/// model
+///     .fit_with_callbacks(&x, &y, FitConfig::new(3, 2), None, &mut cbs)
+///     .unwrap();
+/// let Callback::Ema(ema) = &cbs[0] else { unreachable!() };
+/// assert!(ema.warmup());
+/// assert_eq!(ema.num_updates(), 3);
+/// ```
+///
 /// AMP（`compile_with_amp`）と組み合わせる例（skip した step は shadow を更新しない。イシュー #3831）:
 ///
 /// ```
@@ -1278,6 +1304,8 @@ impl std::fmt::Debug for LambdaCallback {
 #[derive(Debug)]
 pub struct EmaCallback {
     decay: f32,
+    /// 減衰率ウォームアップの有効フラグ（既定 `false`。イシュー #3833）。
+    warmup: bool,
     /// 最初の fit 開始時に `named_parameters()` から遅延初期化する。
     ema: Option<crate::optim::ExponentialMovingAverage>,
 }
@@ -1290,7 +1318,25 @@ impl EmaCallback {
     /// `decay` が非有限または範囲外のとき [`AutodiffError::InvalidArgument`]。
     pub fn new(decay: f32) -> Result<Self, AutodiffError> {
         crate::optim::ExponentialMovingAverage::new(decay, &[])?;
-        Ok(Self { decay, ema: None })
+        Ok(Self {
+            decay,
+            warmup: false,
+            ema: None,
+        })
+    }
+
+    /// 減衰率ウォームアップ（`min(decay, (1 + n) / (10 + n))`）を有効・無効にする
+    /// （既定 OFF。イシュー #3833、決定記録 §18・§20）。初期化済みの shadow にも反映する
+    /// （n は続く）。失敗経路は無い。
+    pub fn with_warmup(mut self, enabled: bool) -> Self {
+        self.warmup = enabled;
+        self.ema = self.ema.take().map(|e| e.with_warmup(enabled));
+        self
+    }
+
+    /// 減衰率ウォームアップが有効か。
+    pub fn warmup(&self) -> bool {
+        self.warmup
     }
 
     /// 構築時に検証済みの `decay`。
@@ -1312,10 +1358,13 @@ impl EmaCallback {
     /// fit 開始時の初期化（未初期化のときだけ現在の重みから shadow を作る）。
     pub(super) fn begin_fit(&mut self, model: &Sequential) -> Result<(), AutodiffError> {
         if self.ema.is_none() {
-            self.ema = Some(crate::optim::ExponentialMovingAverage::from_named(
-                self.decay,
-                model.named_parameters(),
-            )?);
+            self.ema = Some(
+                crate::optim::ExponentialMovingAverage::from_named(
+                    self.decay,
+                    model.named_parameters(),
+                )?
+                .with_warmup(self.warmup),
+            );
             return Ok(());
         }
         // 初期化済み（fit をまたぐ継続）: 最初の step で `update_named` が不一致を検出して
