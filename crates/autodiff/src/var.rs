@@ -4271,6 +4271,77 @@ impl<'t> Var<'t> {
         crate::adaptive_pool3d_ops::adaptive_max_pool3d(self, output_size)
     }
 
+    /// 2D fractional max pooling（`torch.nn.functional.fractional_max_pool2d(...,
+    /// return_indices=True)` 相当。NCHW 固定。イシュー #3826・
+    /// `docs/autodiff-pool3d-ops-decision.md` §20・§24）。
+    /// `crate::fractional_max_pool_ops::fractional_max_pool2d` へ 1 行委譲する。
+    ///
+    /// `self`: `[N, C, H, W]`、`kernel_size`・`output_size`: `[H, W]` 順で各軸 1 以上。窓は
+    /// `(n, c)` ごとの標本 `[W 用, H 用]`（PyTorch と同じ軸並び）から
+    /// `seq[i] = (int)((i + s)·alpha) - (int)(s·alpha)`（`alpha = (in - k)/(out - 1)`・f32 演算・
+    /// 最後の窓は `in - k` に固定）で決まる。実行可能性は `output + kernel - 1 <= in`（各軸）。
+    ///
+    /// **乱数契約**: 標本はグローバル RNG（`rng::rand`）から、検査をすべて通った後に `N·C·2` 個を
+    /// 一括で引く（`N·C = 0` と検査エラーでは消費しない）。`eval()` でも毎回引く。決定的になるのは
+    /// `manual_seed` の下だけで、PyTorch と同じシードでも同じ窓にはならない。xorshift64* は暗号用途
+    /// ではない。スレッドをまたぐ呼び出し順は保証しない。
+    ///
+    /// 戻り値は `(values, index)`。`index` は `(n, c)` 平面内 flat 添字 `h·W + w` の `Tensor<i32>` で
+    /// `max_unpool2d` へそのまま渡せる。タイは先勝ち、NaN を含む窓は NaN を返し窓内で最初の NaN の
+    /// 索引を残す（PyTorch は最後。索引型も int64 ではなく `i32`）。`output_ratio`・バッチなし入力は
+    /// 受け付けない。rank 不一致・空間軸 0・`kernel_size`／`output_size` の 0・実行不能・
+    /// `H·W > i32::MAX` は `Err`（検査は RNG 消費・tape 操作より前に完了し孤児ノードを残さない）。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    ///
+    /// let tape = Tape::new();
+    /// let data: Vec<f32> = (0..9).map(|i| i as f32).collect();
+    /// let x = tape.var(&Tensor::new(data, &[1, 1, 3, 3]).unwrap());
+    /// // output = input - kernel + 1 なら窓は標本によらず決まる。
+    /// let (y, idx) = x.fractional_max_pool2d([2, 2], [2, 2]).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![4.0, 5.0, 7.0, 8.0]);
+    /// assert_eq!(idx.host_slice().to_vec(), vec![4, 5, 7, 8]);
+    /// assert!(x.fractional_max_pool2d([2, 2], [3, 3]).is_err());
+    /// ```
+    pub fn fractional_max_pool2d(
+        &self,
+        kernel_size: [usize; 2],
+        output_size: [usize; 2],
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::fractional_max_pool_ops::fractional_max_pool2d(self, kernel_size, output_size)
+    }
+
+    /// 3D fractional max pooling（`F.fractional_max_pool3d(..., return_indices=True)` 相当。NCDHW
+    /// 固定。イシュー #3826）。`crate::fractional_max_pool_ops::fractional_max_pool3d` へ 1 行委譲する。
+    ///
+    /// `self`: `[N, C, D, H, W]`、`kernel_size`・`output_size`: `[D, H, W]` 順。標本は `(n, c)` ごとに
+    /// `[T, H, W]`（`N·C·3` 個）。実行可能性は **`output + kernel - 1 < input`**（各軸。2d の `<=` と
+    /// 式が異なり PyTorch と同じ）。索引は `d·H·W + h·W + w`。乱数契約・NaN・エラー条件は
+    /// [`Self::fractional_max_pool2d`] と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    ///
+    /// let tape = Tape::new();
+    /// let data: Vec<f32> = (0..27).map(|i| i as f32).collect();
+    /// let x = tape.var(&Tensor::new(data, &[1, 1, 3, 3, 3]).unwrap());
+    /// // output = 1 の窓は標本によらず末尾 [1, 3) に固定される。3d は out + k - 1 < in。
+    /// let (y, idx) = x.fractional_max_pool3d([2, 2, 2], [1, 1, 1]).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![26.0]);
+    /// assert_eq!(idx.host_slice().to_vec(), vec![26]);
+    /// assert!(x.fractional_max_pool3d([2, 2, 2], [2, 2, 2]).is_err());
+    /// ```
+    pub fn fractional_max_pool3d(
+        &self,
+        kernel_size: [usize; 3],
+        output_size: [usize; 3],
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::fractional_max_pool_ops::fractional_max_pool3d(self, kernel_size, output_size)
+    }
+
     /// 1 次元 adaptive max pooling（[`Self::adaptive_max_pool2d`] の `H`
     /// 軸固定版。イシュー #2527）。`self`: `[N, C, L]`。`index` は `l`
     /// 軸の flat 添字。エラー条件・検査順序は 2d 版と同じ。

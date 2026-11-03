@@ -48112,3 +48112,294 @@ fn facade_declares_adaptive_pool3d_add_names_only_in_approved_form() {
         "3D 適応プーリングの add_* が承認形から逸脱: {offending:?}"
     );
 }
+// =====================================================================
+// イシュー #3826（Phase 10 の `Var` 演算。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `Var::fractional_max_pool2d`／`Var::fractional_max_pool3d` の正ガード。
+// 反転すべき否定ガード・保留 doctest は元から無い（`docs/autodiff-pool3d-ops-decision.md` §20.1）ため、
+// 承認形（1 行委譲・宣言位置・facade 非再エクスポート）だけを許す正ガードを新設する。
+// `AdaptiveMaxGlobalPoolHoldDoctestGuard`・`Pool3dOpsHoldDoctestGuard` と固定文言は変更しない。
+// 標本を明示する `*_with_samples` は `pub(crate)` のままで（Q2(a)）、facade へは出さない。
+// `compat::Sequential::add_fractional_max_pool*`・層型は #3827 の担当で、本節では 0 件を固定する。
+// BackendOps のメソッド名は `fractional_max_pool{2,3}d_windows` で、ここで数える名前と衝突しない。
+// =====================================================================
+
+const FRACTIONAL_MAX_POOL2D_VAR_BODY: &str = "crate : : fractional_max_pool_ops : : fractional_max_pool2d ( self , kernel_size , output_size )";
+const FRACTIONAL_MAX_POOL3D_VAR_BODY: &str = "crate : : fractional_max_pool_ops : : fractional_max_pool3d ( self , kernel_size , output_size )";
+
+/// 与えたソースで `Var::fractional_max_pool{2,3}d` が各 1 件だけ宣言され、本体が承認形の 1 行委譲か。
+fn fractional_max_pool_var_bodies_ok(source: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    [
+        ("fractional_max_pool2d", FRACTIONAL_MAX_POOL2D_VAR_BODY),
+        ("fractional_max_pool3d", FRACTIONAL_MAX_POOL3D_VAR_BODY),
+    ]
+    .iter()
+    .all(|(name, body)| {
+        count_fn_declarations_by_name(&tokens, name) == 1
+            && determinism_fn_body(&tokens, name).as_deref() == Some(*body)
+    })
+}
+
+/// `Var::fractional_max_pool2d`／`fractional_max_pool3d` が `var.rs` に各 1 件あり、本体が 1 行委譲である。
+#[test]
+fn var_fractional_max_pool_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert!(
+        fractional_max_pool_var_bodies_ok(&content),
+        "var.rs の Var::fractional_max_pool{{2,3}}d が承認形（fractional_max_pool_ops への 1 行委譲）と一致しない"
+    );
+}
+
+/// [`var_fractional_max_pool_methods_are_thin_delegations`] の自己テスト
+/// （すり替え・引数固定・2d／3d の取り違え・引数順の入れ替え・重複・欠落の検出）。
+#[test]
+fn var_fractional_max_pool_methods_are_thin_delegations_detects_offense() {
+    let d2 = "pub fn fractional_max_pool2d(&self, kernel_size: [usize; 2], output_size: [usize; 2]) -> R { crate::fractional_max_pool_ops::fractional_max_pool2d(self, kernel_size, output_size) }";
+    let d3 = "pub fn fractional_max_pool3d(&self, kernel_size: [usize; 3], output_size: [usize; 3]) -> R { crate::fractional_max_pool_ops::fractional_max_pool3d(self, kernel_size, output_size) }";
+    assert!(fractional_max_pool_var_bodies_ok(&format!(
+        "impl Var {{ {d2} {d3} }}"
+    )));
+    let sig2 = "pub fn fractional_max_pool2d(&self, kernel_size: [usize; 2], output_size: [usize; 2]) -> R";
+    for bad in [
+        // 本体のすり替え（独自実装）
+        format!("impl Var {{ {sig2} {{ self.clone() }} {d3} }}"),
+        // kernel_size の固定値化
+        format!(
+            "impl Var {{ {sig2} {{ crate::fractional_max_pool_ops::fractional_max_pool2d(self, [1, 1], output_size) }} {d3} }}"
+        ),
+        // output_size の固定値化
+        format!(
+            "impl Var {{ {sig2} {{ crate::fractional_max_pool_ops::fractional_max_pool2d(self, kernel_size, [1, 1]) }} {d3} }}"
+        ),
+        // 2d と 3d の取り違え
+        format!(
+            "impl Var {{ {sig2} {{ crate::fractional_max_pool_ops::fractional_max_pool3d(self, kernel_size, output_size) }} {d3} }}"
+        ),
+        // kernel と output の引数順の入れ替え
+        format!(
+            "impl Var {{ {sig2} {{ crate::fractional_max_pool_ops::fractional_max_pool2d(self, output_size, kernel_size) }} {d3} }}"
+        ),
+        // 標本を明示する別関数への委譲
+        format!(
+            "impl Var {{ {sig2} {{ crate::fractional_max_pool_ops::fractional_max_pool2d_with_samples(self, kernel_size, output_size) }} {d3} }}"
+        ),
+        // 重複宣言
+        format!("impl Var {{ {d2} {d2} {d3} }}"),
+        // 欠落
+        format!("impl Var {{ {d2} }}"),
+        format!("impl Var {{ {d3} }}"),
+    ] {
+        assert!(!fractional_max_pool_var_bodies_ok(&bad), "{bad}");
+    }
+}
+
+/// `fandhe_ai::{Var, Tensor, AutodiffError, manual_seed}` だけで届き、fn ポインタ型が承認シグネチャと一致し、
+/// 窓が標本によらず決まる形状（`out = in - k + 1`）で手計算した値・索引と `Err` を返す。
+#[test]
+fn var_fractional_max_pool_is_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var, manual_seed};
+    type R<'t> = Result<(Var<'t>, Tensor<i32>), AutodiffError>;
+    fn pin2<'a, 't>(_: fn(&'a Var<'t>, [usize; 2], [usize; 2]) -> R<'t>) {}
+    fn pin3<'a, 't>(_: fn(&'a Var<'t>, [usize; 3], [usize; 3]) -> R<'t>) {}
+    pin2(Var::fractional_max_pool2d);
+    pin3(Var::fractional_max_pool3d);
+    // グローバル RNG に触る（テストバイナリ内の他テストは RNG を使わないが、念のため seed を固定する）。
+    manual_seed(3826);
+    let tape = fandhe_ai::tape();
+    let data: Vec<f32> = (0..9).map(|i| i as f32).collect();
+    let x = tape.var(&Tensor::new(data, &[1, 1, 3, 3]).unwrap());
+    let (y, idx) = x.fractional_max_pool2d([2, 2], [2, 2]).unwrap();
+    assert_eq!(
+        y.to_tensor().contiguous().as_slice().unwrap(),
+        &[4.0, 5.0, 7.0, 8.0]
+    );
+    assert_eq!(idx.contiguous().as_slice().unwrap(), &[4, 5, 7, 8]);
+    assert!(x.fractional_max_pool2d([2, 2], [3, 3]).is_err());
+    assert!(x.fractional_max_pool2d([0, 2], [2, 2]).is_err());
+    let data: Vec<f32> = (0..27).map(|i| i as f32).collect();
+    let x3 = tape.var(&Tensor::new(data, &[1, 1, 3, 3, 3]).unwrap());
+    // 3d の実行可能性は out + k - 1 < in（2d の <= と異なる）。out = 1 の窓は末尾 [1, 3) 固定。
+    let (y3, idx3) = x3.fractional_max_pool3d([2, 2, 2], [1, 1, 1]).unwrap();
+    assert_eq!(y3.to_tensor().contiguous().as_slice().unwrap(), &[26.0]);
+    assert_eq!(idx3.contiguous().as_slice().unwrap(), &[26]);
+    assert!(x3.fractional_max_pool3d([2, 2, 2], [2, 2, 2]).is_err());
+}
+
+const FRACTIONAL_MAX_POOL_FN_NAMES: [&str; 6] = [
+    "fractional_max_pool2d",
+    "fractional_max_pool3d",
+    "fractional_max_pool2d_with_samples",
+    "fractional_max_pool3d_with_samples",
+    "add_fractional_max_pool2d",
+    "add_fractional_max_pool3d",
+];
+
+/// workspace 全体（`crates/*/src/`）の `fn fractional_max_pool*` が承認済みの置き場所
+/// （`autodiff/src/fractional_max_pool_ops.rs` の 4 件・`autodiff/src/var.rs` の 2 件）に各 1 件ずつだけあり、
+/// `fn add_fractional_max_pool*` は 0 件である（#3827 で `facade/src/compat/sequential.rs` へ更新する）。
+/// `src/` だけを走査するため、`tests/` のテスト専用 mock は対象外。
+#[test]
+fn workspace_declares_fractional_max_pool_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートが見つからない");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in FRACTIONAL_MAX_POOL_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/fractional_max_pool_ops.rs::fractional_max_pool2d",
+        "autodiff/src/fractional_max_pool_ops.rs::fractional_max_pool3d",
+        "autodiff/src/fractional_max_pool_ops.rs::fractional_max_pool2d_with_samples",
+        "autodiff/src/fractional_max_pool_ops.rs::fractional_max_pool3d_with_samples",
+        "autodiff/src/var.rs::fractional_max_pool2d",
+        "autodiff/src/var.rs::fractional_max_pool3d",
+    ]
+    .into_iter()
+    .map(|k| (k.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "fractional_max_pool* 関連の fn 宣言が承認済みの置き場所と一致しない（迂回経路の混入か未承認の実装追加）"
+    );
+}
+
+/// facade src の `pub use` が FractionalMaxPool の内部実装（モジュール・型・窓表・標本を明示する入口）を含む、
+/// 内部クレートの glob 再エクスポート、同名型の独自宣言、`pub mod fractional_max_pool(_ops)` 宣言がある場合に
+/// 違反の説明を返す（層型の公開は #3022 の別判断、`_with_samples` の公開は Q2 で非承認のため固定する）。
+fn scan_fractional_max_pool_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in [
+                "fractional_max_pool_ops",
+                "fractional_max_pool",
+                "FractionalMaxPoolWindows",
+                "FractionalMaxPoolError",
+                "FractionalMaxPool2d",
+                "FractionalMaxPool3d",
+                "fractional_max_pool2d_with_samples",
+                "fractional_max_pool3d_with_samples",
+            ] {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            if path_tokens.iter().any(|t| t == "fandhe_ai_autodiff")
+                && path_tokens.iter().any(|t| t == "*")
+            {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && matches!(
+                tokens.get(i + 1).map(String::as_str),
+                Some(
+                    "FractionalMaxPool2d"
+                        | "FractionalMaxPool3d"
+                        | "FractionalMaxPoolWindows"
+                        | "FractionalMaxPoolError"
+                )
+            )
+        {
+            offending.push(format!("{} {} 宣言", tokens[i], tokens[i + 1]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && matches!(
+                tokens.get(i + 2).map(String::as_str),
+                Some("fractional_max_pool_ops" | "fractional_max_pool")
+            )
+        {
+            offending.push(format!("pub mod {} 宣言", tokens[i + 2]));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が FractionalMaxPool の内部実装を再エクスポート・独自宣言していない。
+#[test]
+fn facade_does_not_reexport_or_declare_fractional_max_pool_ops() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_fractional_max_pool_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が FractionalMaxPool の内部実装を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_fractional_max_pool_ops`] の自己テスト。
+#[test]
+fn facade_does_not_reexport_or_declare_fractional_max_pool_ops_detects_each_category() {
+    let offense = |src: &str| !scan_fractional_max_pool_reexports_and_declarations(src).is_empty();
+    // 違反にならない例
+    assert!(!offense(
+        "use fandhe_ai_autodiff::fractional_max_pool_ops::fractional_max_pool2d;"
+    ));
+    assert!(!offense(
+        "// pub use fractional_max_pool_ops::fractional_max_pool2d;\nconst S: &str = \"pub struct FractionalMaxPool2d;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    // 違反の例
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::fractional_max_pool_ops::fractional_max_pool2d;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::fractional_max_pool::{fractional_max_pool_windows, FractionalMaxPoolWindows};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::{FractionalMaxPool2d as P, Module};"
+    ));
+    assert!(offense(
+        "pub use crate::x::fractional_max_pool3d_with_samples;"
+    ));
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    assert!(offense("pub struct FractionalMaxPool3d;"));
+    assert!(offense("enum FractionalMaxPoolWindows {}"));
+    assert!(offense("pub mod fractional_max_pool_ops {}"));
+    assert!(offense("pub mod fractional_max_pool {}"));
+}

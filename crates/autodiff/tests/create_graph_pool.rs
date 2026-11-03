@@ -680,3 +680,37 @@ fn hessian_adaptive_pool3d_matches_finite_difference() {
         &shape,
     );
 }
+/// グローバル RNG に触る FractionalMaxPool の テストを直列化する（イシュー #3826）。
+static FRACTIONAL_RNG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// イシュー #3826: FractionalMaxPool は既存の `Op::MaxPool2d`／`Op::MaxPool3d` を再利用するため
+/// `create_graph` がそのまま通る。窓は乱数標本で決まるので、各 forward の直前に同じシードで
+/// `manual_seed` を呼んで窓を固定し、Hessian を独立な有限差分と突合する。
+#[test]
+fn hessian_fractional_max_pool_matches_finite_difference() {
+    let _g = FRACTIONAL_RNG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let shape2 = [1usize, 2, 6, 6];
+    let x2 = distinct(flat_len(&shape2));
+    hessian_case(
+        "fractional max2d 6x6 k2 -> 4x3",
+        |tp, x| {
+            fandhe_ai_tensor_core::rng::manual_seed(9);
+            quad(tp, &x.fractional_max_pool2d([2, 2], [4, 3])?.0)
+        },
+        &x2,
+        &shape2,
+    );
+    let shape3 = [1usize, 1, 4, 5, 4];
+    let x3 = distinct(flat_len(&shape3));
+    hessian_case(
+        "fractional max3d 4x5x4 k2 -> 2x3x2",
+        |tp, x| {
+            fandhe_ai_tensor_core::rng::manual_seed(9);
+            quad(tp, &x.fractional_max_pool3d([2, 2, 2], [2, 3, 2])?.0)
+        },
+        &x3,
+        &shape3,
+    );
+}

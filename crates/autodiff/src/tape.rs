@@ -1382,6 +1382,8 @@ pub(crate) enum Op {
     /// VJP（`grad.rs`）は `Op::MaxPool2d` の rank 5 版（`[N·C, D·H·W]` へ reshape して
     /// `scatter_with_fallback`〈`Add`〉）。非融合・非 checkpoint。高階微分（`create_graph`）は #3085 で対応
     /// （決定記録 §29。記録済み `index` を固定して `gather`／`scatter_add` で再生・VJP を積む）。
+    /// fractional max pool 3d（イシュー #3826）の forward もこの variant を記録する
+    /// （`Op::MaxPool2d` の doc 参照。標本は引き直さない）。
     MaxPool3d { input: NodeId, index: Tensor<i32> },
     /// 3D average pooling（`torch.nn.functional.avg_pool3d` 相当。イシュー #2643）。
     /// `params`／`count_include_pad` は VJP（共有カーネル
@@ -1641,6 +1643,10 @@ pub(crate) enum Op {
     /// adaptive_window`] で決まる点のみ異なり、VJP は `params` に
     /// 非依存（`input` shape と `index` のみで scatter_add が完結する）
     /// ため、新規 variant を追加せず本 variant をそのまま共有する。
+    ///
+    /// **fractional max pooling（`fractional_max_pool_ops::fractional_max_pool2d`。イシュー #3826）の
+    /// forward もこの variant を記録する**: 窓は乱数標本からホストで整数に確定済みで、VJP は
+    /// `index` だけで決まり checkpoint／recompute の対象外のため標本を引き直さない。
     MaxPool2d { input: NodeId, index: Tensor<i32> },
     /// `Var::avg_pool2d`（`torch.nn.functional.avg_pool2d` 相当。NCHW
     /// 固定。イシュー #1728・設計 `docs/pooling-ops-design.md` §7）。
