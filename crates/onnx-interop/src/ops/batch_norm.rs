@@ -20,7 +20,7 @@
 //! ```
 //! `idx` は `(n*C + ch)*spatial + sp`（`spatial = shape[2..]` の要素数積。
 //! rank 2 なら `spatial = 1`）。本関数は `tensor_core::batch_norm_layout`
-//! （rank 4 まで）に依存せず、ONNX BN が許す rank 2 以上を自前でレイアウト
+//! （rank 5 まで）に依存せず、ONNX BN が許す rank 2 以上を自前でレイアウト
 //! 計算する。
 //!
 //! `ops::conv`・`ops::layer_normalization` と同じ「入力テンソル＋属性 →

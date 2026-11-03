@@ -384,3 +384,48 @@ fn cuda_batch_norm_train_forward_rank4_matches_cpu() {
         cpu_out.as_slice().expect("contiguous"),
     );
 }
+
+/// rank 5（`[N, C, D, H, W]`。BatchNorm3d 相当。イシュー #3819）入力の
+/// train forward。GPU と CPU の bit 一致は主張せず REQ-2 統一複合判定で突合する。
+fn batch_norm_train_forward_rank5_on(device: Device) -> Tensor<f32> {
+    let x = Tensor::new(
+        (0..48).map(|i| (i as f32 - 24.0) * 0.1).collect(),
+        &[2, 3, 2, 2, 2],
+    )
+    .expect("valid rank 5 tensor");
+    let w = Tensor::new(vec![1.5, -0.8, 1.0], &[3]).expect("weight: shape 一致");
+    let b = Tensor::new(vec![0.1, -0.2, 0.3], &[3]).expect("bias: shape 一致");
+
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let w_var = tape.make_var(&w);
+    let b_var = tape.make_var(&b);
+    tape.make_var(&x)
+        .batch_norm(Some(&w_var), Some(&b_var), 1e-5)
+        .expect("batch_norm: weight/bias shape [3] は c=3 と一致")
+        .to_tensor()
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_batch_norm_train_forward_rank5_matches_cpu() {
+    let cuda_out = batch_norm_train_forward_rank5_on(Device::Cuda(0));
+    let cpu_out = batch_norm_train_forward_rank5_on(Device::Cpu);
+    assert_parity(
+        "batch_norm train forward rank5 (BatchNorm3d 相当): CUDA tape_for vs CPU tape_for",
+        cuda_out.as_slice().expect("contiguous"),
+        cpu_out.as_slice().expect("contiguous"),
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_batch_norm_train_forward_rank5_matches_cpu() {
+    let metal_out = batch_norm_train_forward_rank5_on(Device::Metal);
+    let cpu_out = batch_norm_train_forward_rank5_on(Device::Cpu);
+    assert_parity(
+        "batch_norm train forward rank5 (BatchNorm3d 相当): Metal tape_for vs CPU tape_for",
+        metal_out.as_slice().expect("contiguous"),
+        cpu_out.as_slice().expect("contiguous"),
+    );
+}

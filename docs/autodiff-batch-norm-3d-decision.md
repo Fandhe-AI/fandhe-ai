@@ -4,7 +4,7 @@
 
 - 本書は追跡表 `docs/compat-matrix-ari-tracker.md` の **行 # 11**（C3 BatchNorm3d）の設計記録である（イシュー #3744）。イシュー本文は「項目 12」と書くが、追跡表の通し番号とは 1 ずれている（# 12 は C5。`docs/nn-shrink-bilinear-channel-shuffle-decision.md` §1.0 の # 9 と同じずれ方）。更新対象は # 11 行である。
 - 流れ: 設計 #3744 → 承認 #3768 → 実装 #3819（`Var::batch_norm` の rank 5）・#3820（`BatchNorm3d` 層と `add_batch_norm3d`）→ 実機 parity #3860（`<cuda-node>`）・#3861（`<metal-node>`）。保存・export の横断方針は #3750（未記述）。
-- **承認根拠: なし。未承認（#3768 待ち）。** 本書は何も承認しない。
+- **承認根拠: 承認済み。#3768 の所有者回答コメント 6554564412（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。**（#3819 実装時に未承認の記述を訂正）
 - 書式は `docs/decision-record-template.md`（#3716）の「保守・運用チェックリスト（必須 9 節）」に従う（§1〜§9 が対応）。
 - **設計のみ**で、コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変えない。
 - 行番号は origin/main の `86b3d279f` を基準にする。実装 PR の前に引き直すこと。実機は `<cuda-node>`・`<metal-node>`・`<rocm-node>` で表す。
@@ -185,3 +185,11 @@
 - 秘密情報・ホスト名・個人パスは書かない。
 - スコープ外（無断で起票せず、所有者の承認を得てから起票する）: channels-last、`momentum=None`（累積移動平均）、`track_running_stats=false`、3D 入力向け GPU カーネル最適化（`M` が大きい場合の並列化）、ONNX export への BatchNorm 追加（#3750 の範囲）。
 - `Closes`／`Refs`: 本 PR は設計記録のみで実測を伴わない。運用は兄弟 PR #3904／#3905 に合わせる。#3819／#3820 は `Refs` のみ。
+
+## §13 実装記録（#3819）
+
+- 変更点: `tensor_core::batch_norm_layout`（`crates/tensor-core/src/ops_shape.rs`）に rank 5 の腕（`spatial = D*H*W`。空テンソル・overflow は rank 4 と同じ規則）を足し、rank 6 以上の `RankMismatch.expected` を 4 から 5 にした。doc とコメント（`nn/batch_norm.rs`・`var.rs`・`nn_module_mode.rs`・`onnx-interop/src/ops/batch_norm.rs`）を rank 2〜5 に更新した。
+- 追加テスト: `batch_norm_layout_tests`（`rank5_is_rejected` を `rank5_spatial_is_dhw` に置換。`rank6_is_rejected`・`rank5_zero_axis_yields_spatial_zero`・`rank5_spatial_overflow_is_element_count_overflow`）、`crates/autodiff/tests/batch_norm_rank5.rs`（rank 3 reshape との bit 一致〈出力・統計・dx・dw・db・infer〉、f64 参照との REQ-2 判定、rank 6 拒否、`M<=1` 拒否、空テンソル）、`nn_module_mode.rs`／`nn/batch_norm.rs` の 1d／2d が rank 5 を拒否する回帰、`create_graph_norm.rs::channel_rows_round_trip_for_rank5`、facade の正のプローブ `crates/facade/tests/batch_norm_rank5_facade.rs`、実機 `#[ignore]` の `batch_norm_backend_parity.rs::{cuda,metal}_batch_norm_train_forward_rank5_matches_cpu`。
+- GPU カーネルは無変更。Metal は soft-f64 のまま（scale/ssq ではない）。実機 parity は未実測（#3860・#3861。`docs/perf/logs/batch-norm-rank5-3819/README.md`）。
+- #3820 に残した範囲: `nn::BatchNorm3d` 層、`Module::as_batch_norm3d*`、`LayerSpec::BatchNorm3d`、`add_batch_norm3d`、model_io の kind、`api_surface.rs` の正ガード、backend-cuda／backend-metal／create_graph の rank 5 テスト拡充。
+- 設計からの逸脱: backend-cpu／backend-cuda／backend-metal クレート直下の rank 5 parity テストは本 PR では足していない（facade 経由の CPU bit 一致テストと facade の実機 `#[ignore]` テストで代替。#3860・#3861 の実測時に必要なら追加する）。create_graph の rank 5 二階テストも未追加。
