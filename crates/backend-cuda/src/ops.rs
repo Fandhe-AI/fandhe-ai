@@ -3491,117 +3491,25 @@ impl BackendOps for CudaBackendOps {
         velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
         config: &fandhe_ai_tensor_core::SgdStepConfig,
     ) -> Result<(), BackendError> {
-        if param.device() != Device::Cuda(self.ordinal)
-            || grad.device() != Device::Cuda(self.ordinal)
-        {
-            return Err(BackendError::DeviceMismatch);
-        }
-        if param.shape() != grad.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: grad.shape().to_vec(),
-            }));
-        }
-        let use_momentum = config.momentum != 0.0;
-        if let Some(v) = &velocity {
-            // デバイス不一致とテンソル shape 不一致を同一の
-            // `ShapeMismatch` に丸めていた（Review 指摘）。
-            // `BackendOps::sgd_step_device` の契約（`param`/`grad` と同じ
-            // く、デバイス不一致は `DeviceMismatch` を返す）に velocity
-            // も揃えるため、判定を分離する。
-            if v.device() != Device::Cuda(self.ordinal) {
-                return Err(BackendError::DeviceMismatch);
-            }
-            if v.shape() != param.shape() {
-                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                    lhs: param.shape().to_vec(),
-                    rhs: v.shape().to_vec(),
-                }));
-            }
-        }
-        if use_momentum && velocity.is_none() {
-            return Err(BackendError::Unsupported(
-                "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
-            ));
-        }
+        sgd_step_device_impl(self, param, grad, velocity, config, None)
+    }
 
-        // イシュー #1013 設計文書 §9 item 7: `param`／`grad`／`velocity` は
-        // 学習ループを跨いで生存するデバイス常駐バッファ（`docs/
-        // device-resident-update-design.md` §3.2）であり、`invalidate` に
-        // よる回復（poison → 新世代）を跨いで使い回されうる唯一の経路
-        // （`gemm`／`elementwise` 等はホスト `Tensor` を都度アップロードし
-        // 直すため世代を跨がない）。ハンドルを可変借用する前に、この
-        // 時点の世代を収集しておく（`downcast_handle_mut` 後は `param`／
-        // `velocity` を再度 `&` で読めないため）。
-        let resource_generations: Vec<u64> = std::iter::once(param.generation())
-            .chain(std::iter::once(grad.generation()))
-            .chain(velocity.as_deref().map(|v| v.generation()))
-            .collect();
+    /// 区間テーブル版 SGD（イシュー #3837・設計 `docs/autodiff-param-groups-decision.md`
+    /// §19）。区間ごとに既存 `sgd_step_f32` カーネルを部分ビューへ起動する（新規 NVRTC
+    /// ソースなし。実機 parity は #3862）。
+    fn sgd_step_device_grouped(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+        segments: &[fandhe_ai_tensor_core::SgdStepSegment],
+    ) -> Result<(), BackendError> {
+        sgd_step_device_impl(self, param, grad, velocity, config, Some(segments))
+    }
 
-        let sgd = self.with_driver_call(&resource_generations, map_cuda_error, || {
-            let device = self.device_handle_raw()?;
-            context_cache::cached_sgd(&device)
-        })?;
-
-        let grad_handle = grad
-            .downcast_handle::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        // `download`（`memory.rs::CudaMemory::download`）と同じ「空バッファ
-        // は `storage: None`」契約のため、numel == 0 はカーネル起動前に
-        // 早期 return する（`CudaSgd::run` 側の `numel == 0` early-return
-        // では `grad_slice` を取り出す前に `param_slice` を要求してしまう
-        // ため、ここで先に判定する）。
-        let numel = param.numel();
-        if numel == 0 {
-            return Ok(());
-        }
-        let Some(grad_storage) = grad_handle.storage.as_ref() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "sgd_step_device: grad buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        // 配置非依存の読み取り専用引数へ変換する（イシュー #1352。
-        // `crate::memory::CudaArg` ドキュメンテーションコメント参照。
-        // `launch_builder` の前に名前付きローカルとして宣言する）。
-        let grad_arg = grad_storage.as_arg();
-
-        let velocity_arg = match velocity {
-            Some(v) => {
-                let handle = v
-                    .downcast_handle_mut::<CudaBufferHandle>()
-                    .ok_or(BackendError::DeviceMismatch)?;
-                let storage = handle.storage.as_mut().ok_or_else(|| {
-                    BackendError::DeviceAllocationFailed(
-                        "sgd_step_device: velocity buffer has numel > 0 but no device allocation"
-                            .into(),
-                    )
-                })?;
-                Some(storage.as_arg_mut())
-            }
-            None => None,
-        };
-
-        let param_handle = param
-            .downcast_handle_mut::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(param_storage) = param_handle.storage.as_mut() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "sgd_step_device: param buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let param_arg = param_storage.as_arg_mut();
-
-        let kernel_params = crate::sgd::SgdKernelParams {
-            lr: config.lr,
-            momentum: config.momentum,
-            dampening: config.dampening,
-            weight_decay: config.weight_decay,
-            nesterov: config.nesterov,
-            is_first_step: config.is_first_step,
-        };
-        self.with_driver_call(&resource_generations, map_cuda_error, || {
-            sgd.run(param_arg, grad_arg, velocity_arg, &kernel_params)
-        })
+    fn supports_grouped_optimizer_step(&self) -> bool {
+        true
     }
 
     /// Adam・AdamW の 1 パラメータ分の更新を in-place で実行する
@@ -3621,123 +3529,27 @@ impl BackendOps for CudaBackendOps {
         v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
         config: &fandhe_ai_tensor_core::AdamStepConfig,
     ) -> Result<(), BackendError> {
-        if param.device() != Device::Cuda(self.ordinal)
-            || grad.device() != Device::Cuda(self.ordinal)
-            || m.device() != Device::Cuda(self.ordinal)
-            || v.device() != Device::Cuda(self.ordinal)
-        {
-            return Err(BackendError::DeviceMismatch);
-        }
-        if param.shape() != grad.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: grad.shape().to_vec(),
-            }));
-        }
-        if param.shape() != m.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: m.shape().to_vec(),
-            }));
-        }
-        if param.shape() != v.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: v.shape().to_vec(),
-            }));
-        }
+        adam_step_device_impl(self, param, grad, m, v, config, None)
+    }
 
-        // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
-        // ため、driver 接触前に fail-closed で拒否する（`backend-cpu::
-        // ops::adam_step_device` と同じ「どの要素も更新前」契約。
-        // `.claude/rules/security.md` A08）。
-        let use_coupled_wd = match config.kind {
-            fandhe_ai_tensor_core::AdamStepKind::Coupled => config.weight_decay != 0.0,
-            fandhe_ai_tensor_core::AdamStepKind::Decoupled => false,
-            _ => {
-                return Err(BackendError::Unsupported(
-                    "adam_step_device: unknown AdamStepKind variant".into(),
-                ));
-            }
-        };
-        let decoupled = matches!(config.kind, fandhe_ai_tensor_core::AdamStepKind::Decoupled);
-
-        // `sgd_step_device` と同じ理由（イシュー #1013 設計文書 §9
-        // item 7）: `param`／`grad`／`m`／`v` は学習ループを跨いで生存する
-        // デバイス常駐バッファであり、ハンドルを可変借用する前にこの
-        // 時点の世代を収集しておく。
-        let resource_generations: Vec<u64> = vec![
-            param.generation(),
-            grad.generation(),
-            m.generation(),
-            v.generation(),
-        ];
-
-        let adam = self.with_driver_call(&resource_generations, map_cuda_error, || {
-            let device = self.device_handle_raw()?;
-            context_cache::cached_adam(&device)
-        })?;
-
-        let grad_handle = grad
-            .downcast_handle::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        // `sgd_step_device` と同じ「空バッファは storage: None」契約の
-        // ため、numel == 0 はカーネル起動前に早期 return する。
-        let numel = param.numel();
-        if numel == 0 {
-            return Ok(());
-        }
-        let Some(grad_storage) = grad_handle.storage.as_ref() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "adam_step_device: grad buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let grad_arg = grad_storage.as_arg();
-
-        let m_handle = m
-            .downcast_handle_mut::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(m_storage) = m_handle.storage.as_mut() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "adam_step_device: m buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let m_arg = m_storage.as_arg_mut();
-
-        let v_handle = v
-            .downcast_handle_mut::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(v_storage) = v_handle.storage.as_mut() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "adam_step_device: v buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let v_arg = v_storage.as_arg_mut();
-
-        let param_handle = param
-            .downcast_handle_mut::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(param_storage) = param_handle.storage.as_mut() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "adam_step_device: param buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let param_arg = param_storage.as_arg_mut();
-
-        let kernel_params = crate::adam::AdamKernelParams {
-            beta1: config.beta1,
-            beta2: config.beta2,
-            eps: config.eps,
-            weight_decay: config.weight_decay,
-            decay_factor: config.decay_factor,
-            step_size: config.step_size,
-            bias_correction2_sqrt: config.bias_correction2_sqrt,
-            decoupled,
-            use_coupled_wd,
-        };
-        self.with_driver_call(&resource_generations, map_cuda_error, || {
-            adam.run(param_arg, grad_arg, m_arg, v_arg, &kernel_params)
-        })
+    /// 区間テーブル版 Adam／AdamW（`sgd_step_device_grouped` と同方針）。
+    fn adam_step_device_grouped(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        moments: fandhe_ai_tensor_core::LambMoments<'_>,
+        config: &fandhe_ai_tensor_core::AdamStepConfig,
+        segments: &[fandhe_ai_tensor_core::AdamStepSegment],
+    ) -> Result<(), BackendError> {
+        adam_step_device_impl(
+            self,
+            param,
+            grad,
+            moments.m,
+            moments.v,
+            config,
+            Some(segments),
+        )
     }
 
     /// 学習 step の update 区間（[`Self::sgd_step_device_tracked`]）を
@@ -8063,6 +7875,349 @@ impl BackendOps for CudaBackendOps {
         let allocator = context_cache::cached_allocator(&device).ok()?;
         Some(allocator.stats())
     }
+}
+
+/// 区間 `numel` の合計が `expected` と一致することを driver 接触前に検証する
+/// （overflow も `InvalidArgument`。イシュー #3837・REQ-8）。
+fn check_grouped_segment_total(
+    numels: impl Iterator<Item = usize>,
+    expected: usize,
+    what: &str,
+) -> Result<(), BackendError> {
+    let mut acc: usize = 0;
+    for n in numels {
+        acc = acc.checked_add(n).ok_or_else(|| {
+            BackendError::InvalidArgument(format!("{what}: segment numels sum overflowed usize"))
+        })?;
+    }
+    if acc != expected {
+        return Err(BackendError::InvalidArgument(format!(
+            "{what}: segment numels sum ({acc}) does not match param numel ({expected})"
+        )));
+    }
+    Ok(())
+}
+
+fn sgd_step_device_impl(
+    ops: &CudaBackendOps,
+    param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+    config: &fandhe_ai_tensor_core::SgdStepConfig,
+    segments: Option<&[fandhe_ai_tensor_core::SgdStepSegment]>,
+) -> Result<(), BackendError> {
+    if param.device() != Device::Cuda(ops.ordinal) || grad.device() != Device::Cuda(ops.ordinal) {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if param.shape() != grad.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: grad.shape().to_vec(),
+        }));
+    }
+    if let Some(segs) = segments {
+        check_grouped_segment_total(
+            segs.iter().map(|s| s.numel),
+            param.numel(),
+            "sgd_step_device_grouped",
+        )?;
+    }
+    let use_momentum = config.momentum != 0.0;
+    if let Some(v) = &velocity {
+        // デバイス不一致とテンソル shape 不一致を同一の
+        // `ShapeMismatch` に丸めていた（Review 指摘）。
+        // `BackendOps::sgd_step_device` の契約（`param`/`grad` と同じ
+        // く、デバイス不一致は `DeviceMismatch` を返す）に velocity
+        // も揃えるため、判定を分離する。
+        if v.device() != Device::Cuda(ops.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if v.shape() != param.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: v.shape().to_vec(),
+            }));
+        }
+    }
+    if use_momentum && velocity.is_none() {
+        return Err(BackendError::Unsupported(
+            "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
+        ));
+    }
+
+    // イシュー #1013 設計文書 §9 item 7: `param`／`grad`／`velocity` は
+    // 学習ループを跨いで生存するデバイス常駐バッファ（`docs/
+    // device-resident-update-design.md` §3.2）であり、`invalidate` に
+    // よる回復（poison → 新世代）を跨いで使い回されうる唯一の経路
+    // （`gemm`／`elementwise` 等はホスト `Tensor` を都度アップロードし
+    // 直すため世代を跨がない）。ハンドルを可変借用する前に、この
+    // 時点の世代を収集しておく（`downcast_handle_mut` 後は `param`／
+    // `velocity` を再度 `&` で読めないため）。
+    let resource_generations: Vec<u64> = std::iter::once(param.generation())
+        .chain(std::iter::once(grad.generation()))
+        .chain(velocity.as_deref().map(|v| v.generation()))
+        .collect();
+
+    let sgd = ops.with_driver_call(&resource_generations, map_cuda_error, || {
+        let device = ops.device_handle_raw()?;
+        context_cache::cached_sgd(&device)
+    })?;
+
+    let grad_handle = grad
+        .downcast_handle::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    // `download`（`memory.rs::CudaMemory::download`）と同じ「空バッファ
+    // は `storage: None`」契約のため、numel == 0 はカーネル起動前に
+    // 早期 return する（`CudaSgd::run` 側の `numel == 0` early-return
+    // では `grad_slice` を取り出す前に `param_slice` を要求してしまう
+    // ため、ここで先に判定する）。
+    let numel = param.numel();
+    if numel == 0 {
+        return Ok(());
+    }
+    let Some(grad_storage) = grad_handle.storage.as_ref() else {
+        return Err(BackendError::DeviceAllocationFailed(
+            "sgd_step_device: grad buffer has numel > 0 but no device allocation".into(),
+        ));
+    };
+    // 配置非依存の読み取り専用引数へ変換する（イシュー #1352。
+    // `crate::memory::CudaArg` ドキュメンテーションコメント参照。
+    // `launch_builder` の前に名前付きローカルとして宣言する）。
+
+    let velocity_arg = match velocity {
+        Some(v) => {
+            let handle = v
+                .downcast_handle_mut::<CudaBufferHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            let storage = handle.storage.as_mut().ok_or_else(|| {
+                BackendError::DeviceAllocationFailed(
+                    "sgd_step_device: velocity buffer has numel > 0 but no device allocation"
+                        .into(),
+                )
+            })?;
+            Some(storage)
+        }
+        None => None,
+    };
+
+    let param_handle = param
+        .downcast_handle_mut::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let Some(param_storage) = param_handle.storage.as_mut() else {
+        return Err(BackendError::DeviceAllocationFailed(
+            "sgd_step_device: param buffer has numel > 0 but no device allocation".into(),
+        ));
+    };
+
+    let kernel_params = crate::sgd::SgdKernelParams {
+        lr: config.lr,
+        momentum: config.momentum,
+        dampening: config.dampening,
+        weight_decay: config.weight_decay,
+        nesterov: config.nesterov,
+        is_first_step: config.is_first_step,
+    };
+    let mut velocity_storage = velocity_arg;
+    ops.with_driver_call(&resource_generations, map_cuda_error, || match segments {
+        None => sgd.run(
+            param_storage.as_arg_mut(),
+            grad_storage.as_arg(),
+            velocity_storage.as_deref_mut().map(|v| v.as_arg_mut()),
+            &kernel_params,
+        ),
+        // param groups（イシュー #3837）: 区間ごとに既存カーネルを部分ビューへ起動する。
+        // カーネル本体・FMA 順序は無変更のため、区間 s の結果は「config の lr／weight_decay
+        // を区間値で上書きしたスカラー版を部分範囲へ適用した結果」と構造的に同一になる。
+        Some(segs) => {
+            let mut off = 0usize;
+            for seg in segs {
+                if seg.numel == 0 {
+                    continue;
+                }
+                let end = off + seg.numel;
+                let kp = crate::sgd::SgdKernelParams {
+                    lr: seg.lr,
+                    weight_decay: seg.weight_decay,
+                    ..kernel_params
+                };
+                sgd.run(
+                    param_storage.view_mut(off..end),
+                    grad_storage.view(off..end),
+                    velocity_storage
+                        .as_deref_mut()
+                        .map(|v| v.view_mut(off..end)),
+                    &kp,
+                )?;
+                off = end;
+            }
+            Ok(())
+        }
+    })
+}
+
+fn adam_step_device_impl(
+    ops: &CudaBackendOps,
+    param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    m: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    config: &fandhe_ai_tensor_core::AdamStepConfig,
+    segments: Option<&[fandhe_ai_tensor_core::AdamStepSegment]>,
+) -> Result<(), BackendError> {
+    if param.device() != Device::Cuda(ops.ordinal)
+        || grad.device() != Device::Cuda(ops.ordinal)
+        || m.device() != Device::Cuda(ops.ordinal)
+        || v.device() != Device::Cuda(ops.ordinal)
+    {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if param.shape() != grad.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: grad.shape().to_vec(),
+        }));
+    }
+    if param.shape() != m.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: m.shape().to_vec(),
+        }));
+    }
+    if param.shape() != v.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: v.shape().to_vec(),
+        }));
+    }
+
+    if let Some(segs) = segments {
+        check_grouped_segment_total(
+            segs.iter().map(|s| s.numel),
+            param.numel(),
+            "adam_step_device_grouped",
+        )?;
+    }
+    // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
+    // ため、driver 接触前に fail-closed で拒否する（`backend-cpu::
+    // ops::adam_step_device` と同じ「どの要素も更新前」契約。
+    // `.claude/rules/security.md` A08）。
+    let use_coupled_wd = match config.kind {
+        fandhe_ai_tensor_core::AdamStepKind::Coupled => config.weight_decay != 0.0,
+        fandhe_ai_tensor_core::AdamStepKind::Decoupled => false,
+        _ => {
+            return Err(BackendError::Unsupported(
+                "adam_step_device: unknown AdamStepKind variant".into(),
+            ));
+        }
+    };
+    let decoupled = matches!(config.kind, fandhe_ai_tensor_core::AdamStepKind::Decoupled);
+
+    // `sgd_step_device` と同じ理由（イシュー #1013 設計文書 §9
+    // item 7）: `param`／`grad`／`m`／`v` は学習ループを跨いで生存する
+    // デバイス常駐バッファであり、ハンドルを可変借用する前にこの
+    // 時点の世代を収集しておく。
+    let resource_generations: Vec<u64> = vec![
+        param.generation(),
+        grad.generation(),
+        m.generation(),
+        v.generation(),
+    ];
+
+    let adam = ops.with_driver_call(&resource_generations, map_cuda_error, || {
+        let device = ops.device_handle_raw()?;
+        context_cache::cached_adam(&device)
+    })?;
+
+    let grad_handle = grad
+        .downcast_handle::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    // `sgd_step_device` と同じ「空バッファは storage: None」契約の
+    // ため、numel == 0 はカーネル起動前に早期 return する。
+    let numel = param.numel();
+    if numel == 0 {
+        return Ok(());
+    }
+    let Some(grad_storage) = grad_handle.storage.as_ref() else {
+        return Err(BackendError::DeviceAllocationFailed(
+            "adam_step_device: grad buffer has numel > 0 but no device allocation".into(),
+        ));
+    };
+
+    let m_handle = m
+        .downcast_handle_mut::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let Some(m_storage) = m_handle.storage.as_mut() else {
+        return Err(BackendError::DeviceAllocationFailed(
+            "adam_step_device: m buffer has numel > 0 but no device allocation".into(),
+        ));
+    };
+
+    let v_handle = v
+        .downcast_handle_mut::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let Some(v_storage) = v_handle.storage.as_mut() else {
+        return Err(BackendError::DeviceAllocationFailed(
+            "adam_step_device: v buffer has numel > 0 but no device allocation".into(),
+        ));
+    };
+
+    let param_handle = param
+        .downcast_handle_mut::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let Some(param_storage) = param_handle.storage.as_mut() else {
+        return Err(BackendError::DeviceAllocationFailed(
+            "adam_step_device: param buffer has numel > 0 but no device allocation".into(),
+        ));
+    };
+
+    let kernel_params = crate::adam::AdamKernelParams {
+        beta1: config.beta1,
+        beta2: config.beta2,
+        eps: config.eps,
+        weight_decay: config.weight_decay,
+        decay_factor: config.decay_factor,
+        step_size: config.step_size,
+        bias_correction2_sqrt: config.bias_correction2_sqrt,
+        decoupled,
+        use_coupled_wd,
+    };
+    ops.with_driver_call(&resource_generations, map_cuda_error, || match segments {
+        None => adam.run(
+            param_storage.as_arg_mut(),
+            grad_storage.as_arg(),
+            m_storage.as_arg_mut(),
+            v_storage.as_arg_mut(),
+            &kernel_params,
+        ),
+        // param groups（イシュー #3837）: 区間ごとに既存 `adam_step_f32` を部分ビューへ起動する
+        // （`sgd_step_device_impl` の grouped 分岐と同方針。coupled の weight decay 有無は
+        // 区間の値で再判定する）。
+        Some(segs) => {
+            let mut off = 0usize;
+            for seg in segs {
+                if seg.numel == 0 {
+                    continue;
+                }
+                let end = off + seg.numel;
+                let kp = crate::adam::AdamKernelParams {
+                    step_size: seg.step_size,
+                    weight_decay: seg.weight_decay,
+                    decay_factor: seg.decay_factor,
+                    use_coupled_wd: !decoupled && seg.weight_decay != 0.0,
+                    ..kernel_params
+                };
+                adam.run(
+                    param_storage.view_mut(off..end),
+                    grad_storage.view(off..end),
+                    m_storage.view_mut(off..end),
+                    v_storage.view_mut(off..end),
+                    &kp,
+                )?;
+                off = end;
+            }
+            Ok(())
+        }
+    })
 }
 
 #[cfg(test)]
