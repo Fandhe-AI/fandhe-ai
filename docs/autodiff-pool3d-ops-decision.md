@@ -596,11 +596,11 @@ impl<'t> Var<'t> {
 | CI | `crates/autodiff/tests/fractional_max_pool_ops.rs` | 中心差分の勾配・重なり窓での勾配加算・実行可能性の検査による拒否・拒否した入力で RNG を消費しないこと・`manual_seed_makes_fractional_max_pool_deterministic`（#3826 の受入条件）・消費数がちょうど `N·C·D` であること（後続の `fandhe_ai::rand` で確認）・孤児ノード無し・`create_graph` の二階有限差分 |
 | CI | PyTorch 2.14.0 fixture 突合（案: `crates/autodiff/tests/fixtures/fractional-max-pool-pytorch-reference/`） | xorshift64* と PyTorch の生成器は一致しないため `_random_samples` を明示して作り、samples・input・output・indices を一緒に収める。実行するまでは「未実測」 |
 | CI | `crates/facade/tests/fractional_max_pool_ops_backend_parity.rs::cpu_matches_naive_reference` | CPU と Naive の bit 一致 |
-| CI | `crates/facade/tests/compat_sequential_fractional_max_pool.rs` | 層経路と `Var` 直呼びの bit 一致・`eval()` でも標本を引くこと |
+| CI | `crates/facade/tests/compat_sequential_adaptive_pool3d/fractional_max_pool.rs` | 層経路と `Var` 直呼びの bit 一致・`eval()` でも標本を引くこと |
 | CI | §20.1 の正ガード | 1 行委譲・宣言位置・未承認経路の否定 |
 | `#[ignore]`（Phase 10） | `fractional_max_pool_ops_backend_parity.rs::cuda_fractional_max_pool_ops_match_cpu_reference` | #3860（`<cuda-node>`）。同じ標本で bit 一致 |
 | `#[ignore]`（Phase 10） | `fractional_max_pool_ops_backend_parity.rs::metal_fractional_max_pool_ops_match_cpu_reference`（`cfg(target_os = "macos")`） | #3861（`<metal-node>`） |
-| `#[ignore]`（Phase 10） | `compat_sequential_fractional_max_pool_backend_parity.rs::{cuda_*, metal_*}` | 層経路 |
+| `#[ignore]`（Phase 10） | `compat_sequential_adaptive_pool3d/fractional_max_pool.rs（backend_parity モジュール）::{cuda_*, metal_*}` | 層経路 |
 
 - グローバル RNG に触るテストは `static LOCK: Mutex<()>` で直列化するか専用のテストバイナリに分ける（`api_surface.rs` の先例）。
 - 実機の手順置き場の案: `docs/perf/logs/fractional-max-pool-ops-3826/README.md`（#3826 で新設）。
@@ -834,3 +834,49 @@ kind `adaptive_avg_pool3d`・`adaptive_max_pool3d`、`params` は `output_size_d
 - 逸脱: (1) `BackendOps` のメソッド名を `fractional_max_pool{2,3}d_windows` にした（§24.1）。(2) 標本を明示する入口は `#[cfg(test)]` とした（`pub(crate)` のままだと非テストビルドで未使用警告になるため。公開しない方針は不変）。(3) doctest は RNG を使わない（`out = in - k + 1` など窓が標本によらず決まる形状で値を示し、`is_err` を確かめる）。決定性は `LOCK` で直列化した統合テストが保証する（doctest は 1 つのバイナリにまとまりグローバル RNG を共有しうるため）。
 - GPU 実機 parity は**未実測**。手順は `docs/perf/logs/fractional-max-pool-ops-3826/README.md`（実測は #3860／#3861）。
 - 未着手（後続）: `nn::FractionalMaxPool2d`／`3d`・`LayerSpec`・`Sequential::add_fractional_max_pool*`・model_io の kind・`Module` の申告・層経路の実機テスト（#3827）、保存・export の横断方針（#3750）、層型名の facade 公開（#3022）。
+
+## 25. #3827 実施記録（FractionalMaxPool2d・FractionalMaxPool3d の `Sequential` 層）
+
+§20.1 の承認形に沿って、層型と `Sequential::add_fractional_max_pool*`、model_io の kind を足した（親 #3813・設計 #3749）。承認は #3768 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）で、論点 3（FractionalMaxPool は §20.12 の乱数と parity の契約に従う）と論点 4（model_io は全層に kind を足す。`format_version` は 2 のまま。ONNX export は含めない）による。§20 の本文は書き換えない。基準 sha は `0d5b35ac6`。
+
+### 25.1 公開した名前
+
+| 項目 | 内容 |
+|---|---|
+| 公開名 | `Sequential::add_fractional_max_pool2d(mut self, kernel_size: [usize; 2], output_size: [usize; 2]) -> Result<Self, AutodiffError>`、`add_fractional_max_pool3d`（`[usize; 3]`） |
+| 層型 | `fandhe_ai_autodiff::nn::{FractionalMaxPool2d, FractionalMaxPool3d}`（`crates/autodiff/src/nn/pooling.rs`）。`Var::fractional_max_pool*` への 1 行委譲。新しい `Op`／`BackendOps` はなし。0 軸は `new` で `InvalidArgument`。実行可能性は forward 時に `Var` 側で検査する。facade へは再エクスポートしない（#3022） |
+| `Module` の申告 | `supports_forward_host() = false`・`is_pooling() = true`。`as_*` フックは追加しない（#3750 §11・§14） |
+| 乱数 | forward ごとにグローバル RNG から `N·C·R` 個の標本を引く（`eval()` でも引く。Q4(a)）。決定的なのは `manual_seed` の下だけ。層は seed を受け取らない |
+| 戻り | 層は値だけを返す。索引が要る場合は `Var::fractional_max_pool*` を使う |
+| 常駐経路 | `is_pooling` により `Unsupported`（fail-closed）。コードは足していない |
+
+### 25.2 保存（model_io）
+
+kind `fractional_max_pool2d`（`kernel_size_h`・`kernel_size_w`・`output_size_h`・`output_size_w`）と `fractional_max_pool3d`（各 `_d`・`_h`・`_w`）。kind 数は 77 から 79、`format_version` は 2 のまま。buffer を持たず、RNG 状態も保存しない。`build_model` は `add_*` → `new` を経由するため、保存ファイル由来の 0 軸も構築時に拒否される。0.13.0 以前のリーダーは `UnsupportedModel` で拒否する（`docs/migration/0.14.0.md`）。ONNX export は `UnsupportedLayer` のまま（対応する ONNX op が無い）。
+
+### 25.3 テストの乱数に関する方針
+
+保存・復元の往復テストは seed を設定せずに `predict` を 2 回比較する。このため共有テストバイナリ（`compat_sequential_model_io_layers.rs`・`compat_functional_model_io.rs`・model_io の単体テスト）では、窓が標本に依存しない `output_size` 全軸 1 の形状だけを使った。「alpha が整数なら窓が固定」という性質は標本が 1 に極めて近いとき f32 の繰り上がりで崩れる（§24.3）ため使わない。標本に依存する形状の検査は、`LOCK` で直列化し各経路の直前に `manual_seed` を置く専用バイナリだけで行う。
+
+### 25.4 新設した正ガード（`crates/facade/tests/api_surface.rs` の末尾の #3827 節）
+
+反転対象の否定ガード・保留 doctest は元から無い。`facade_does_not_reexport_or_declare_fractional_max_pool_ops` は変えていない（層型・`_with_samples` の非再エクスポートを維持）。
+
+- `add_fractional_max_pool_signatures_match_approved_contract`（自己テスト: 軸数違い・戻り値 `Self`・`&mut self`・`seed` 引数の追加・引数順の入れ替え・`Option`）
+- `add_fractional_max_pool_bodies_construct_approved_layer`（自己テスト: 別の層・2d と 3d の取り違え・引数順・固定値・`LayerSpec` の取り違え）
+- `compat_sequential_exposes_fractional_max_pool_add_methods_issue_3827`（自己テスト `_counts_declarations`）
+- `facade_declares_fractional_max_pool_add_names_only_in_approved_form`
+- `compat_sequential_fractional_max_pool_is_reachable_via_facade_only`
+- `workspace_declares_fractional_max_pool_fn_names_only_in_allowed_locations` の期待値に `facade/src/compat/sequential.rs::add_fractional_max_pool{2,3}d` を各 1 件追加
+
+### 25.5 テスト
+
+- autodiff: `tests/nn_adaptive_pooling3d/fractional_max_pooling.rs`（`nn_adaptive_pooling3d` ターゲットの子モジュール）（同じシードの下で層と `Var` 直呼びの値・索引・入力勾配が bit 一致、alpha が整数にならない形状を含む。0 軸拒否、rank 違反・実行不能で RNG 不消費、`is_pooling`・`supports_forward_host`）、`module.rs` の `is_pooling_true_only_for_pooling_layers`。
+- facade: `tests/compat_sequential_adaptive_pool3d/fractional_max_pool.rs`（`compat_sequential_adaptive_pool3d` ターゲットの子モジュール）（無効引数、`predict`／`forward`／backward の bit 一致、同じシード 2 回の一致、消費数がちょうど `N·C·R`〈`eval()` 後も〉、実行不能で RNG 不消費、学習・`compile`／`fit`、常駐 `Unsupported`、保存往復、ONNX `UnsupportedLayer`）、`compat_sequential_model_io_layers.rs`・`compat_functional_model_io.rs`・`interop_onnx_export_sequential.rs` への追記、`model_io.rs` の単体テスト（79 種の往復、非信頼入力の表、0 軸拒否）、doctest（RNG に依存しない形状）。
+- 実機: `tests/compat_sequential_adaptive_pool3d/fractional_max_pool.rs`（`compat_sequential_adaptive_pool3d` ターゲットの子モジュール） の `backend_parity` モジュール内の `cuda_compat_sequential_fractional_max_pool_matches_cpu`・`metal_compat_sequential_fractional_max_pool_matches_cpu`（`#[ignore]`。各デバイスの直前に同じシードで `manual_seed`）。**未実測**（Phase 10 の #3860・#3861。`docs/perf/logs/fractional-max-pool-ops-3826/README.md`）。tolerance・baseline は変更していない。
+
+### 25.6 逸脱・申し送り
+
+- 逸脱: なし（§20.1 の承認形どおり）。
+- 実機 parity の実測は Phase 10。`train_gpu_parity.rs` の CASES への登録も Phase 10 に回す。
+- 未着手（後続）: LPPool の層（#3825）、層型名の facade 公開（#3022）、ONNX export（#3750 §11）、`output_ratio`・バッチなし入力・`Generator` 版・`_with_samples` の公開（Q2・Q3）。

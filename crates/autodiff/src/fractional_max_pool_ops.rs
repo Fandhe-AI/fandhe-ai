@@ -5,8 +5,8 @@
 //! グローバル RNG 経路への 1 行委譲）として公開する。委譲本体は
 //! `crates/facade/tests/api_surface.rs` の `var_fractional_max_pool_methods_are_thin_delegations` が
 //! 固定する。モジュール自体・標本を明示する入口（`*_with_samples`。PyTorch の `_random_samples` 相当）は
-//! `pub(crate)` のままで再エクスポートしない（Q2(a)）。層型・`Sequential::add_fractional_max_pool*`
-//! は #3827 の担当。
+//! `pub(crate)` のままで再エクスポートしない（Q2(a)）。層型 `nn::FractionalMaxPool{2,3}d` と
+//! `Sequential::add_fractional_max_pool*` は #3827 で追加した（層型は facade へ再エクスポートしない）。
 //!
 //! **PyTorch 相当**: `F.fractional_max_pool{2,3}d(x, kernel_size, output_size=..., return_indices=True)`。
 //! NCHW／NCDHW 固定（バッチなし入力・`output_ratio` は v1 では受け付けない。Q3(a)）。

@@ -27,6 +27,10 @@
 //! `docs/autodiff-pool3d-ops-decision.md` §18）は [`Var::adaptive_avg_pool3d`]／
 //! [`Var::adaptive_max_pool3d`] の薄いラッパー（`NCDHW`）。facade には
 //! `Sequential::add_adaptive_*_pool3d` として公開し、層型は再エクスポートしない。
+//!
+//! [`FractionalMaxPool2d`]／[`FractionalMaxPool3d`]（イシュー #3827・設計 §20）は
+//! [`Var::fractional_max_pool2d`]／[`Var::fractional_max_pool3d`] の薄いラッパー。forward ごとに
+//! グローバル RNG を消費し、決定的になるのは `manual_seed` の下だけ。
 
 use crate::adaptive_max_pool_ops;
 use crate::error::AutodiffError;
@@ -640,5 +644,68 @@ impl AdaptiveMaxPool3d {
     /// `NCDHW` 入力に対し [`Var::adaptive_max_pool3d`] へ委譲し `(values, index)` を返す。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
         input.adaptive_max_pool3d(self.output_size)
+    }
+}
+
+/// PyTorch `torch.nn.FractionalMaxPool2d(kernel_size, output_size=…)` 相当（イシュー #3827・設計
+/// `docs/autodiff-pool3d-ops-decision.md` §20）。[`Var::fractional_max_pool2d`] への薄い層ラッパー。
+/// `NCHW` 入力のみ。`forward` ごとにグローバル RNG から `N·C·R` 個の標本を引く（`eval()` でも引く）。
+/// 結果が決定的になるのは `manual_seed` の下だけで、RNG 状態は保存しない。
+/// `forward` は `(values, index)` を返す（索引は `(n,c)` 平面内 flat 添字）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FractionalMaxPool2d {
+    kernel_size: [usize; 2],
+    output_size: [usize; 2],
+}
+
+impl FractionalMaxPool2d {
+    /// 窓サイズと出力サイズから構築する。いずれかの軸が `0` なら
+    /// `AutodiffError::InvalidArgument`。実行可能性（`out + k - 1 <= in`）は入力サイズで決まるため
+    /// `forward` 時に `Var` 側で検査する。
+    pub fn new(kernel_size: [usize; 2], output_size: [usize; 2]) -> Result<Self, AutodiffError> {
+        if kernel_size.contains(&0) || output_size.contains(&0) {
+            return Err(AutodiffError::InvalidArgument(
+                "FractionalMaxPool2d::new: kernel_size と output_size の各軸は 1 以上である必要がある"
+                    .into(),
+            ));
+        }
+        Ok(Self {
+            kernel_size,
+            output_size,
+        })
+    }
+
+    /// `NCHW` 入力に対し [`Var::fractional_max_pool2d`] へ委譲し `(values, index)` を返す。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        input.fractional_max_pool2d(self.kernel_size, self.output_size)
+    }
+}
+
+/// PyTorch `torch.nn.FractionalMaxPool3d(kernel_size, output_size=…)` 相当（イシュー #3827・設計 §20）。
+/// [`FractionalMaxPool2d`] の `NCDHW` 版（乱数契約も同じ）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FractionalMaxPool3d {
+    kernel_size: [usize; 3],
+    output_size: [usize; 3],
+}
+
+impl FractionalMaxPool3d {
+    /// 窓サイズと出力サイズから構築する。いずれかの軸が `0` なら `AutodiffError::InvalidArgument`。
+    pub fn new(kernel_size: [usize; 3], output_size: [usize; 3]) -> Result<Self, AutodiffError> {
+        if kernel_size.contains(&0) || output_size.contains(&0) {
+            return Err(AutodiffError::InvalidArgument(
+                "FractionalMaxPool3d::new: kernel_size と output_size の各軸は 1 以上である必要がある"
+                    .into(),
+            ));
+        }
+        Ok(Self {
+            kernel_size,
+            output_size,
+        })
+    }
+
+    /// `NCDHW` 入力に対し [`Var::fractional_max_pool3d`] へ委譲し `(values, index)` を返す。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        input.fractional_max_pool3d(self.kernel_size, self.output_size)
     }
 }
