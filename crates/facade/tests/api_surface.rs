@@ -17749,10 +17749,11 @@ const PARAM_GROUPS_FORBIDDEN_FN: &str = "step_with_groups";
 
 /// [`facade_param_groups_public_surface_matches_approved_contract`] とその自己テスト
 /// が共用する検出本体。`rel` は `crates/facade/src` からの `/` 区切り相対パス。
-/// 承認要素の鍵は 4 種: `optim.rs` の `pub use` 葉 `use:ParamGroup`・
+/// 承認要素の鍵は 5 種: `optim.rs` の `pub use` 葉 `use:ParamGroup`・
 /// `use:ParamGroupStep`（`as` による別名は違反）、`compat/training.rs` の
 /// `impl Sequential` 内 `fn:compile_with_param_groups`・
-/// `fn:compile_with_amp_and_param_groups`（#3832 で追加。計 4 種）。それ以外の場所・形の
+/// `fn:compile_with_amp_and_param_groups`（#3832 で追加）、`compat/sequential.rs` の
+/// `impl Sequential` 内 `fn:init_device_param_store_with_param_groups`（#3838 で追加。計 5 種）。それ以外の場所・形の
 /// 出現と、facade 内の `fn step_with_groups` 宣言は違反。
 fn scan_param_groups_reexports_and_declarations(
     rel: &str,
@@ -17760,6 +17761,7 @@ fn scan_param_groups_reexports_and_declarations(
 ) -> (Vec<String>, Vec<String>) {
     let is_optim_rs = rel == "optim.rs";
     let is_training_rs = rel == "compat/training.rs";
+    let is_sequential_rs = rel == "compat/sequential.rs";
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
@@ -17840,6 +17842,23 @@ fn scan_param_groups_reexports_and_declarations(
             ));
         }
     }
+    // #3838: 常駐 store の param groups 付き構築の承認形。`compat/sequential.rs` の
+    // `impl Sequential` 内の 1 件目だけを許可する。
+    let resident_decls =
+        count_fn_declarations_by_name(&tokens, "init_device_param_store_with_param_groups");
+    let resident_in_impl_sequential = is_sequential_rs
+        && scan_type_impl_surface(content, "Sequential")
+            .0
+            .contains("init_device_param_store_with_param_groups");
+    for n in 0..resident_decls {
+        if resident_in_impl_sequential && n == 0 {
+            allowed.push("fn:init_device_param_store_with_param_groups".to_string());
+        } else {
+            offending.push(format!(
+                "fn init_device_param_store_with_param_groups 宣言（{rel}）"
+            ));
+        }
+    }
     offending.extend(
         (0..count_fn_declarations_by_name(&tokens, PARAM_GROUPS_FORBIDDEN_FN))
             .map(|_| format!("fn {PARAM_GROUPS_FORBIDDEN_FN} 宣言（{rel}）")),
@@ -17847,13 +17866,16 @@ fn scan_param_groups_reexports_and_declarations(
     (offending, allowed)
 }
 
-/// 承認形（#2553・決定記録 §9.2、#3832 で AMP 併用を追加）の鍵 4 種。各ちょうど 1 件であることを固定する。
-const PARAM_GROUPS_APPROVED_KEYS: [&str; 4] = [
+/// 承認形（#2553・決定記録 §9.2、#3832 で AMP 併用、#3838 で常駐 store 構築を追加）の鍵 5 種。
+/// 各ちょうど 1 件であることを固定する。
+const PARAM_GROUPS_APPROVED_KEYS: [&str; 5] = [
     "use:ParamGroup",
     "use:ParamGroupStep",
     "fn:compile_with_param_groups",
     // #3832: AMP 併用の承認形（決定記録 §14.12。否定ガードは元から無く、正ガードの在庫へ追加）。
     "fn:compile_with_amp_and_param_groups",
+    // #3838: 常駐 store の param groups 付き構築（決定記録 §19.13。#3837 の否定ガードを反転した正ガード）。
+    "fn:init_device_param_store_with_param_groups",
 ];
 
 /// 承認要素の鍵一覧が [`PARAM_GROUPS_APPROVED_KEYS`] とちょうど一致する
@@ -18085,7 +18107,15 @@ fn param_groups_types_are_reachable_via_facade_only() {
     type AmpGroupsSig =
         fn(&mut Sequential, Optimizer, Loss, AmpConfig, &[ParamGroup]) -> Result<(), AutodiffError>;
     let amp_sig: AmpGroupsSig = Sequential::compile_with_amp_and_param_groups;
-    let _ = (sig, amp_sig, SgdConfig::new(0.1));
+    // #3838: 常駐 store の param groups 付き構築の承認形シグネチャ。
+    type ResidentGroupsSig = fn(
+        &Sequential,
+        &fandhe_ai::Tape,
+        &[ParamGroup],
+    )
+        -> Result<fandhe_ai::DeviceParamStore, fandhe_ai::BackendError>;
+    let resident_sig: ResidentGroupsSig = Sequential::init_device_param_store_with_param_groups;
+    let _ = (sig, amp_sig, resident_sig, SgdConfig::new(0.1));
 }
 
 /// doc コメント（`//!` または `///` の連続行）から、フェンス付きコードブロックを
@@ -18171,6 +18201,7 @@ fn param_groups_usage_doctests_are_present_and_compiled() {
     let training = read_to_string_or_panic(&facade_crate_root().join("src/compat/training.rs"));
     let optim_doc = inner_doc_lines(&optim);
     let compile_doc = doc_lines_above_fn(&training, "pub fn compile_with_param_groups");
+    let sequential = read_to_string_or_panic(&facade_crate_root().join("src/compat/sequential.rs"));
     let mut v = doctest_probe_violations(
         "optim.rs モジュール doc",
         &optim_doc,
@@ -18211,10 +18242,44 @@ fn param_groups_usage_doctests_are_present_and_compiled() {
         &compile_doc,
         &save_needles,
     ));
+    // #3838: 常駐 store の param groups 付き構築の利用例（group 内スロットの bit 不変）。
+    let resident_needles = [
+        "init_device_param_store_with_param_groups",
+        "ParamGroup",
+        "sync_device_param_store_to_host",
+    ];
+    let resident_doc = doc_lines_above_fn(
+        &sequential,
+        "pub fn init_device_param_store_with_param_groups",
+    );
+    v.extend(doctest_probe_violations(
+        "init_device_param_store_with_param_groups の doc",
+        &resident_doc,
+        &resident_needles,
+    ));
     assert!(v.is_empty(), "{v:?}");
 
     // 自己テスト: 各カテゴリを正例・負例で踏む。
     let lines = |s: &str| s.lines().map(|l| l.to_string()).collect::<Vec<_>>();
+    // 常駐構築プローブの正例・欠落・ignore 化。
+    let rs_good = lines(
+        "```
+init_device_param_store_with_param_groups(ParamGroup, sync_device_param_store_to_host)
+```",
+    );
+    assert!(doctest_probe_violations("t", &rs_good, &resident_needles).is_empty());
+    let rs_missing = lines(
+        "```
+init_device_param_store_with_param_groups(ParamGroup)
+```",
+    );
+    assert!(!doctest_probe_violations("t", &rs_missing, &resident_needles).is_empty());
+    let rs_ignored = lines(
+        "```ignore
+init_device_param_store_with_param_groups(ParamGroup, sync_device_param_store_to_host)
+```",
+    );
+    assert!(!doctest_probe_violations("t", &rs_ignored, &resident_needles).is_empty());
     // save/load 往復プローブの正例・欠落・ignore 化。
     let sv_good = lines(
         "```
@@ -18320,6 +18385,27 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
              pub fn compile_with_amp_and_param_groups(&self) {} }\n",
         ),
         (
+            "常駐構築が別ファイル",
+            "compat/other.rs",
+            "impl Sequential { pub fn init_device_param_store_with_param_groups(&self) {} }\n",
+        ),
+        (
+            "常駐構築が training.rs",
+            "compat/training.rs",
+            "impl Sequential { pub fn init_device_param_store_with_param_groups(&self) {} }\n",
+        ),
+        (
+            "常駐構築が impl Sequential 外",
+            "compat/sequential.rs",
+            "impl Other { pub fn init_device_param_store_with_param_groups(&self) {} }\n",
+        ),
+        (
+            "常駐構築の二重宣言",
+            "compat/sequential.rs",
+            "impl Sequential { pub fn init_device_param_store_with_param_groups(&self) {} \
+             pub fn init_device_param_store_with_param_groups(&self) {} }\n",
+        ),
+        (
             "struct ParamGroup 宣言",
             "optim.rs",
             "pub struct ParamGroup {}\n",
@@ -18341,6 +18427,11 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
     let (off, allowed) = scan("compat/training.rs", amp_ok);
     assert!(off.is_empty(), "{off:?}");
     assert_eq!(allowed, ["fn:compile_with_amp_and_param_groups"]);
+    let resident_ok =
+        "impl Sequential { pub fn init_device_param_store_with_param_groups(&self) {} }\n";
+    let (off, allowed) = scan("compat/sequential.rs", resident_ok);
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(allowed, ["fn:init_device_param_store_with_param_groups"]);
     // 負例: コメント中の出現・無関係な名前。
     assert_eq!(
         scan("lib.rs", "// pub use x::ParamGroup;\n"),
@@ -18380,6 +18471,22 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
     assert!(
         v.iter()
             .any(|m| m.contains("二重化: fn:compile_with_amp_and_param_groups")),
+        "{v:?}"
+    );
+    let mut resident_missing = full.clone();
+    resident_missing.retain(|k| k != "fn:init_device_param_store_with_param_groups");
+    let v = param_groups_inventory_violations(&resident_missing);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("欠落: fn:init_device_param_store_with_param_groups")),
+        "{v:?}"
+    );
+    let mut resident_dup = full.clone();
+    resident_dup.push("fn:init_device_param_store_with_param_groups".to_string());
+    let v = param_groups_inventory_violations(&resident_dup);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("二重化: fn:init_device_param_store_with_param_groups")),
         "{v:?}"
     );
     let mut extra = full;
@@ -18456,10 +18563,49 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
         );
     }
 }
+/// [`workspace_declares_resident_param_group_entry_only_in_allowed_locations`] の facade 側検出本体。
+/// `cleaned` はコメント・リテラル除去済みの facade ソース。参照は `mention:<rel>`
+/// （許可されるのは `facade/src/compat/sequential.rs` だけ。呼び出し側のテストが件数と場所を固定する）、
+/// 再公開は `pub-use:<rel>`、同名 fn の宣言は `decl:<rel>` として返す。
+fn resident_entry_facade_violations(rel: &str, cleaned: &str) -> Vec<String> {
+    const NAME: &str = "device_param_store_with_slot_groups";
+    const MODULE: &str = "resident_param_groups";
+    let mut out = Vec::new();
+    if !(cleaned.contains(NAME) || cleaned.contains(MODULE)) {
+        return out;
+    }
+    let tokens = tokenize_including_punctuation(cleaned);
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            if tokens[i + 2..end.min(tokens.len())]
+                .iter()
+                .any(|t| t == NAME || t == MODULE)
+            {
+                out.push(format!("pub-use:{rel}"));
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        i += 1;
+    }
+    if count_fn_declarations_by_name(&tokens, NAME) > 0 {
+        out.push(format!("decl:{rel}"));
+    }
+    out.push(format!("mention:{rel}"));
+    out
+}
+
 /// イシュー #3837: `DeviceParamStore` の param groups 付き構築の内部入口
 /// `device_param_store_with_slot_groups` は `autodiff/src/optim/device_store/param_groups.rs` に
-/// 1 件だけ宣言され、facade の `src/` からは宣言も参照も無いこと（facade の入口は #3838 が
-/// `impl Sequential` 内に 1 件足す。その際に本ガードの facade 側の期待を更新する）。
+/// 1 件だけ宣言され、facade の `src/` では `compat/sequential.rs`（承認形
+/// `init_device_param_store_with_param_groups` の委譲）だけが参照すること。#3837 の時点の否定
+/// （facade は参照しない）を #3838 で正ガードへ反転した。facade が `pub use` で内部入口を
+/// 公開面に出す・同名 fn を宣言する・別ファイルから参照するのは違反。
 /// `DeviceParamStore` の inherent `pub fn` を増やさず `optim::resident_param_groups`
 /// （`pub mod`）のフリー関数にしているのは、facade が型ごと再エクスポートして公開面になるのを
 /// 避けるため。
@@ -18493,10 +18639,8 @@ fn workspace_declares_resident_param_group_entry_only_in_allowed_locations() {
             if count > 0 {
                 *declared.entry(rel.clone()).or_insert(0) += count;
             }
-            if rel.starts_with("facade/src/")
-                && (cleaned.contains(NAME) || cleaned.contains("resident_param_groups"))
-            {
-                facade_mentions.push(rel);
+            if rel.starts_with("facade/src/") {
+                facade_mentions.extend(resident_entry_facade_violations(&rel, &cleaned));
             }
         });
     }
@@ -18510,9 +18654,64 @@ fn workspace_declares_resident_param_group_entry_only_in_allowed_locations() {
         declared, expected,
         "内部入口の宣言位置・件数が承認形と異なる"
     );
+    facade_mentions.sort();
+    let mentions: Vec<&str> = facade_mentions
+        .iter()
+        .filter(|m| m.starts_with("mention:"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        mentions,
+        ["mention:facade/src/compat/sequential.rs"],
+        "内部入口を参照する facade ファイルは compat/sequential.rs ちょうど 1 件のはず"
+    );
+    let bad: Vec<&String> = facade_mentions
+        .iter()
+        .filter(|m| !m.starts_with("mention:"))
+        .collect();
     assert!(
-        facade_mentions.is_empty(),
-        "facade の src/ が内部入口を宣言・参照している（#3838 の承認前）: {facade_mentions:?}"
+        bad.is_empty(),
+        "facade が内部入口を再公開・再宣言している: {bad:?}"
+    );
+
+    // 自己テスト: 承認形は通り、各すり替えは検出される。
+    let probe = |rel: &str, src: &str| {
+        let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+        resident_entry_facade_violations(rel, &cleaned)
+    };
+    assert_eq!(
+        probe(
+            "facade/src/compat/sequential.rs",
+            "fn f() { resident_param_groups::device_param_store_with_slot_groups(); }"
+        ),
+        ["mention:facade/src/compat/sequential.rs"]
+    );
+    assert!(probe("facade/src/lib.rs", "fn f() {}").is_empty());
+    assert_eq!(
+        probe(
+            "facade/src/compat/other.rs",
+            "fn f() { device_param_store_with_slot_groups(); }"
+        ),
+        ["mention:facade/src/compat/other.rs"]
+    );
+    for src in [
+        "pub use fandhe_ai_autodiff::optim::resident_param_groups;",
+        "pub use fandhe_ai_autodiff::optim::resident_param_groups::device_param_store_with_slot_groups;",
+    ] {
+        assert!(
+            probe("facade/src/lib.rs", src)
+                .iter()
+                .any(|m| m.starts_with("pub-use:")),
+            "{src}"
+        );
+    }
+    assert!(
+        probe(
+            "facade/src/compat/sequential.rs",
+            "pub fn device_param_store_with_slot_groups() {}"
+        )
+        .iter()
+        .any(|m| m.starts_with("decl:"))
     );
 
     // 自己テスト: 二重宣言・別ファイルの宣言は件数として検出できる。
@@ -18538,7 +18737,8 @@ fn workspace_declares_resident_param_group_entry_only_in_allowed_locations() {
 /// `optim/sgd.rs`・`adadelta.rs`・`adamax.rs`・`nadam.rs`・`radam.rs` に
 /// 各 1 件）・`compile_with_param_groups`（#2553 で facade の
 /// `compat/training.rs` に承認形として 1 件）・`compile_with_amp_and_param_groups`
-/// （#3832 で同ファイルに 1 件）。
+/// （#3832 で同ファイルに 1 件）・`init_device_param_store_with_param_groups`
+/// （#3838 で `compat/sequential.rs` に 1 件）。
 #[test]
 fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -18562,12 +18762,13 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
          （テスト自体が検査対象を見失っている可能性がある）"
     );
 
-    const NAMES: [&str; 5] = [
+    const NAMES: [&str; 6] = [
         "step_with_groups",
         "resolve_slot_hparams",
         "step_with_slot_hparams",
         "compile_with_param_groups",
         "compile_with_amp_and_param_groups",
+        "init_device_param_store_with_param_groups",
     ];
 
     for crate_dir in &crate_dirs {
@@ -18646,6 +18847,11 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
         // #3832: AMP 併用の承認形（`impl Sequential` 内 1 件）。
         (
             "facade/src/compat/training.rs::compile_with_amp_and_param_groups",
+            1usize,
+        ),
+        // #3838: 常駐 store の param groups 付き構築の承認形（`impl Sequential` 内 1 件）。
+        (
+            "facade/src/compat/sequential.rs::init_device_param_store_with_param_groups",
             1usize,
         ),
     ]

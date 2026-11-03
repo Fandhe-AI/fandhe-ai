@@ -1288,4 +1288,19 @@ fail-closed。公開状態: 公開済み」。
 - 不変事項: 依存の追加・更新、tolerance（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・ガードレール閾値、`docs/spec` はいずれも変えていない。
 - 実機列: CUDA・Metal とも **未実測**（#3862・#3863）。本環境（Linux）は GPU はあるが NVRTC が無く、CUDA の実機テストは実行できない（`libnvrtc` が見つからず失敗する。未検証）。Metal は `aarch64-apple-darwin` の型検査（clippy）までで、実行は未検証。
 - ベンチ（Linux CPU。record only）: groups 空の既定経路を変更前（`origin/main`）と変更後で `device_param_store_bench`（CPU）の resident の 1 step 全体と更新フェーズの中央値を比べた。詳細は `docs/perf/device-resident-update-bench.md` の #3837 追補。
-- 公開状態: 未公開（facade の入口は #3838）。
+- 公開状態: 未公開（facade の入口は #3838。公開は §19.13）。
+
+### 19.13 実装記録（イシュー #3838）
+
+- 承認: #3769 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 4。
+- 入口: `compat::Sequential::init_device_param_store_with_param_groups(&self, tape: &Tape, groups: &[ParamGroup]) -> Result<DeviceParamStore, BackendError>`（`crates/facade/src/compat/sequential.rs`、`init_device_param_store` の直後）。内部入口 `optim::resident_param_groups::device_param_store_with_slot_groups`（§19.12）への薄い委譲で、`ParamGroup` は `use` するだけで `pub use` しない。
+- 検査順: ① 非対応層（Conv／Norm 等）と追跡外の学習可能層は `Unsupported`（group の検証より先）→ ② group の検証（`InvalidArgument`）→ ③ capability（ROCm 等は `Unsupported`）→ ④ 構築。②〜④は内部入口が upload の前に行う。groups が空なら `init_device_param_store` と bit 同一。
+- ガードの反転: §19.1 は「反転対象なし」と書いたが、その後 #3837 が否定ガード `workspace_declares_resident_param_group_entry_only_in_allowed_locations`（facade src が内部入口を参照しない）を新設していた。これを正ガードへ反転した（検出本体 `resident_entry_facade_violations`。参照は `compat/sequential.rs` ちょうど 1 件、`pub use` による再公開と同名 fn 宣言は違反、自己テストつき）。
+- 更新したガード（基準 sha `aa0f73bbc`）: `scan_param_groups_reexports_and_declarations`（`compat/sequential.rs` の `impl Sequential` 内 1 件目を許可）・`PARAM_GROUPS_APPROVED_KEYS`（4 → 5 鍵）・`facade_param_groups_public_surface_guards_detect_each_category`（別ファイル・`impl` 外・二重宣言・許可例・在庫の欠落と二重化）・`param_groups_types_are_reachable_via_facade_only`（シグネチャ束縛）・`param_groups_usage_doctests_are_present_and_compiled`（正例・欠落・`ignore` 化）・`workspace_declares_param_group_fn_names_only_in_allowed_locations`（§19.1 が委ねた点。`NAMES` を 6 件へ）。変更不要で通ったもの: `check_resident_train_step_surface`・`RESIDENT_*_APPROVED_SIGNATURES`・distributed の到達性・`!Send` プローブ。
+- doctest: 2 層 `Linear` で第 1 層（スロット 0・1）を `lr = 0` の group に入れ、`forward_resident` → `mse_loss` → `backward_device_param_store` → `step_device_param_store` を 3 回回し、group 内が bit 不変・group 外が更新されることを assert する（CPU）。
+- テスト（CI）: `crates/facade/tests/compat_sequential_init_device_param_store_param_groups.rs`（groups 空が既定入口と bit 同一・facade の入口と内部入口が SGD／Adam／AdamW で bit 一致・groups が結果を変える・`lr = 0` の group・検証違反は `InvalidArgument`・検査順・AMP 拒否・`train_step_resident` のフォールバック）。ホスト `step_with_groups` との bit 一致は内部入口を使う `device_param_store_param_groups_train.rs` が持ち、ROCm と distributed の拒否は #3837 の autodiff 単体テストに委ねる（facade から模擬バックエンドの `Tape` を作る公開手段がないため重複させない）。実機（`#[ignore]`）の `device_param_store_param_groups_backend_parity.rs` は store の構築を facade の入口へ差し替えた（実行は #3862・#3863）。
+- 変異確認（手元のみ・戻した）: 入口が groups を無視して `DeviceParamStore::new` を呼ぶと、新テスト 5 件が失敗した。内部入口の参照を `compat/training.rs` へ足すと、反転したガードが失敗した。
+- 逸脱: issue 本文の「fit の拒否条件を解除する」は §19.0 のとおり読み替えた（fit 側に解除すべき拒否がなく、中身は facade の入口の追加）。
+- 不変事項: 依存・tolerance・parity baseline・ガードレール閾値・`docs/spec` は変えていない。新しい `unsafe` は無い。
+- 実機列: **未実測**（#3862・#3863）。
+- 公開状態: 公開済み。
