@@ -702,9 +702,11 @@ fn zero_base_lr_with_groups_and_schedule_is_rejected_without_touching_state() {
     model.fit(&x, &y, fit_config()).unwrap();
 }
 
-/// T4e2: group.lr が負で、スケジュール値が 0（倍率 0 → 有効 lr が -0.0）でも拒否される。
+/// T4e2: group.lr が負で、epoch 0 の時点で倍率適用後に -0.0 へ潰れる構成でも拒否される。
+/// 初期 lr 1e-45（compile 時の 0.1 と異なる）なので epoch 0 から倍率経路を通り、
+/// 倍率適用前ガードを外すと `resolve_slot_hparams` の `lr >= 0` 検査をすり抜けて通る。
 #[test]
-fn negative_group_lr_with_zero_schedule_is_rejected() {
+fn negative_group_lr_scaled_to_negative_zero_is_rejected() {
     let (x, y) = gen_regression_data(SEED_DATA);
     let mut model = build_model();
     let before = snapshot(&model);
@@ -715,12 +717,16 @@ fn negative_group_lr_with_zero_schedule_is_rejected() {
             &[ParamGroup::new(vec![0], -0.01, 0.0)],
         )
         .unwrap();
-    let zero = StepLr::new(0.1, 1, 1e-45).unwrap();
-    assert_eq!(zero.lr_at(1), 0.0);
-    let mut cbs = [Callback::LrSchedule(LrSchedule::per_epoch(zero))];
+    let tiny = StepLr::new(1e-45, 1, 0.5).unwrap();
+    let scaled = ((-0.01f32 as f64) * (tiny.lr_at(0) as f64) / (0.1f32 as f64)) as f32;
+    assert!(
+        scaled == 0.0 && scaled.is_sign_negative(),
+        "前提: -0.0 に潰れる"
+    );
+    let mut cbs = [Callback::LrSchedule(LrSchedule::per_epoch(tiny))];
     assert_invalid_argument(
         model.fit_with_callbacks(&x, &y, fit_config(), None, &mut cbs),
-        "負の group.lr × スケジュール値 0",
+        "負の group.lr × 倍率適用後 -0.0",
     );
     assert_eq!(snapshot(&model), before, "拒否時にパラメータが変化した");
 }
