@@ -21,7 +21,7 @@
 //! 1 回だけ `f32` へ下げる。host 計算のみなのでバックエンド間は bit 一致で比べる（REQ-2 より強い判定）。
 //! tolerance・baseline は変えない。
 //!
-//! **検査順（REQ-8・A03）**: ① 同一 tape → ② 同 shape → ③ rank >= 1 と軸範囲 → ④ 確保量
+//! **検査順（REQ-8・A03）**: ① 同一 tape → ② 同 shape → ③ rank >= 1 と軸範囲 → ④ 確保量（入力と縮約後の出力の双方）
 //! （`checked_bytes_for`）→ ⑤ スカラー（`p`・`eps`）→ ⑥ 実体化 → ⑦ host 計算 → ⑧ tape へ push。
 //! ⑥ の前にすべて済ませるため、エラー時に孤児ノードを残さない。
 
@@ -77,6 +77,10 @@ pub fn cosine_similarity<'t>(
         }));
     }
     check_eps("cosine_similarity", eps)?;
+    // 縮約軸が長さ 0 だと入力は 0 要素で通るが出力は他軸の積になりうる。実体化前に出力側も検査する。
+    let mut out_shape = shape;
+    out_shape.remove(dim);
+    checked_bytes_for::<f32>(&out_shape)?;
     let (a, b) = materialize_pair(x1, x2)?;
     let value = eval::cosine_similarity_forward(&a, &b, dim, eps);
     let id = x1.tape().push_eager(
@@ -102,7 +106,9 @@ pub fn pairwise_distance<'t>(
     eps: f32,
     keepdim: bool,
 ) -> Result<Var<'t>, AutodiffError> {
-    check_pair(x1, x2)?;
+    let shape = check_pair(x1, x2)?;
+    // 末尾軸が長さ 0 でも出力（他軸の積）が巨大になりうるため、実体化前に出力側も検査する。
+    checked_bytes_for::<f32>(&shape[..shape.len() - 1])?;
     if !p.is_finite() || p < 1.0 {
         return Err(AutodiffError::InvalidArgument(format!(
             "pairwise_distance: p は有限かつ 1 以上でなければならない（got {p}）"
@@ -144,6 +150,26 @@ mod tests {
         vs.iter()
             .map(|v| g.get(v).unwrap().unwrap().host_slice().to_vec())
             .collect()
+    }
+
+    #[test]
+    fn zero_length_reduction_axis_with_huge_output_is_rejected() {
+        let tape = Tape::new();
+        let shape = [1usize << 61, 0];
+        let a = tape.var(&t(vec![], &shape));
+        let b = tape.var(&t(vec![], &shape));
+        assert!(matches!(
+            cosine_similarity(&a, &b, 1, 1e-8),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+        assert!(matches!(
+            pairwise_distance(&a, &b, 2.0, 1e-6, false),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+        assert!(matches!(
+            pairwise_distance(&a, &b, 2.0, 1e-6, true),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
     }
 
     #[test]
