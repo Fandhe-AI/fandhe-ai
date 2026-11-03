@@ -71,6 +71,7 @@ pub struct MetalAdam {
 /// `AdamStepKind` の分岐をホストで事前評価した bool 相当フラグ
 /// （`crate::adam_model::validate_adam_step_inputs` が導出する
 /// [`AdamKernelFlags`] から写す）。
+#[derive(Clone, Copy)]
 pub struct AdamKernelParams {
     pub beta1: f32,
     pub beta2: f32,
@@ -174,6 +175,7 @@ impl MetalAdam {
                     m,
                     v,
                     numel as u32,
+                    0,
                     params,
                 );
             },
@@ -181,6 +183,66 @@ impl MetalAdam {
 
         // `token` が `None` の場合のみここで待つ（上記ドキュメント参照）。
         // `Some` の場合はバッチ化された非同期契約のため待たずに返す。
+        match token {
+            None => ctx.synchronize(),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// 区間テーブル版 Adam／AdamW（イシュー #3837。[`MetalSgd::run_grouped`] と同方針:
+    /// 既存 `adam_step_f32` を区間ごとのバイトオフセット・`numel` で同一 encoder 内に起動する）。
+    /// `kind` は区間の `weight_decay` で `use_coupled_wd` を再評価するために渡す。
+    /// 実機 parity は未実測（#3863）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_grouped(
+        &self,
+        ctx: &MetalContext,
+        param: &MetalBuffer,
+        grad: &MetalBuffer,
+        m: &MetalBuffer,
+        v: &MetalBuffer,
+        segments: &[(fandhe_ai_tensor_core::AdamStepSegment, AdamKernelFlags)],
+        base: &AdamKernelParams,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<(), MetalError> {
+        let numel = segments.iter().map(|(s, _)| s.numel).sum::<usize>();
+        validate_adam_len(numel)?;
+        if numel == 0 {
+            return Ok(());
+        }
+        ctx.encode(
+            "adam_step_f32",
+            &[param.raw(), grad.raw(), m.raw(), v.raw()],
+            token,
+            |encoder| {
+                let mut off = 0usize;
+                for (seg, flags) in segments {
+                    if seg.numel == 0 {
+                        continue;
+                    }
+                    let p = AdamKernelParams {
+                        step_size: seg.step_size,
+                        weight_decay: seg.weight_decay,
+                        decay_factor: seg.decay_factor,
+                        decoupled: flags.decoupled,
+                        use_coupled_wd: flags.use_coupled_wd,
+                        ..*base
+                    };
+                    encode_adam_dispatch(
+                        encoder,
+                        &self.adam_step_f32,
+                        param,
+                        grad,
+                        m,
+                        v,
+                        seg.numel as u32,
+                        off * std::mem::size_of::<f32>(),
+                        &p,
+                    );
+                    off += seg.numel;
+                }
+            },
+        )?;
         match token {
             None => ctx.synchronize(),
             Some(_) => Ok(()),
@@ -200,6 +262,7 @@ fn encode_adam_dispatch(
     m_buf: &MetalBuffer,
     v_buf: &MetalBuffer,
     numel: u32,
+    offset_bytes: usize,
     params: &AdamKernelParams,
 ) {
     encoder.setComputePipelineState(pipeline);
@@ -211,10 +274,10 @@ fn encode_adam_dispatch(
     // `ctx.encode` の `resources` へ渡し、`Batch::in_flight` へ retain
     // されるため `ctx.synchronize()` が完了するまで生存する。
     unsafe {
-        encoder.setBuffer_offset_atIndex(Some(param_buf.raw()), 0, 0);
-        encoder.setBuffer_offset_atIndex(Some(grad_buf.raw()), 0, 1);
-        encoder.setBuffer_offset_atIndex(Some(m_buf.raw()), 0, 2);
-        encoder.setBuffer_offset_atIndex(Some(v_buf.raw()), 0, 3);
+        encoder.setBuffer_offset_atIndex(Some(param_buf.raw()), offset_bytes, 0);
+        encoder.setBuffer_offset_atIndex(Some(grad_buf.raw()), offset_bytes, 1);
+        encoder.setBuffer_offset_atIndex(Some(m_buf.raw()), offset_bytes, 2);
+        encoder.setBuffer_offset_atIndex(Some(v_buf.raw()), offset_bytes, 3);
     }
 
     let kind_decoupled_i: i32 = if params.decoupled { 1 } else { 0 };

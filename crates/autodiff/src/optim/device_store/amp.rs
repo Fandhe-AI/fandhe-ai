@@ -62,6 +62,7 @@
 //! `amp_skip_then_next_backward_step_still_fresh` で固定する）。
 
 use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::device::BackendError;
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
@@ -101,6 +102,7 @@ impl DeviceParamStore {
         config: &SgdConfig,
         scaler: &mut GradScaler,
     ) -> Result<bool, AutodiffError> {
+        self.reject_slot_groups_for_amp()?;
         let (synthetic, found_non_finite) = self.amp_unscale_pending(tape, grads, scaler)?;
         if found_non_finite {
             self.abandon_pending_forward();
@@ -123,6 +125,7 @@ impl DeviceParamStore {
         config: &AdamConfig,
         scaler: &mut GradScaler,
     ) -> Result<bool, AutodiffError> {
+        self.reject_slot_groups_for_amp()?;
         let (synthetic, found_non_finite) = self.amp_unscale_pending(tape, grads, scaler)?;
         if found_non_finite {
             self.abandon_pending_forward();
@@ -143,6 +146,7 @@ impl DeviceParamStore {
         config: &AdamWConfig,
         scaler: &mut GradScaler,
     ) -> Result<bool, AutodiffError> {
+        self.reject_slot_groups_for_amp()?;
         let (synthetic, found_non_finite) = self.amp_unscale_pending(tape, grads, scaler)?;
         if found_non_finite {
             self.abandon_pending_forward();
@@ -152,6 +156,17 @@ impl DeviceParamStore {
         self.step_adamw(tape, &synthetic, config)?;
         scaler.update(false)?;
         Ok(false)
+    }
+
+    /// groups ありの store は AMP 経路を拒否する（イシュー #3837・設計 §19.5）。unscale や
+    /// pending の消費より前に返すため、pending・パラメータ・scaler は変わらない。
+    fn reject_slot_groups_for_amp(&self) -> Result<(), AutodiffError> {
+        if self.has_slot_groups() {
+            return Err(AutodiffError::Backend(BackendError::InvalidArgument(
+                "DeviceParamStore: AMP steps do not support param groups".to_string(),
+            )));
+        }
+        Ok(())
     }
 
     /// [`Self::step_amp`]／[`Self::step_adam_amp`]／[`Self::

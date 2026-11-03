@@ -1261,3 +1261,31 @@ fail-closed。公開状態: 公開済み」。
   group 追従。新しい issue は起票しない（起票には承認が要る）。
 - 本 PR は設計記録のみで `Closes #3756`。`Refs #3769`（承認待ち）・`Refs #3837`・`Refs #3838`（実装）・
   `Refs #3862`・`Refs #3863`（実機）。
+
+### 19.12 実装記録（イシュー #3837）
+
+- 承認: #3769 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 4（§19.10 の点 1〜9 は推奨どおり）。本件は autodiff・tensor-core・各バックエンドの内部実装で、facade の公開面は増やさない（入口 `Sequential::init_device_param_store_with_param_groups`・ガード更新・公開の適用記録は #3838）。
+- 入口の配置: `DeviceParamStore` の inherent `pub fn` は facade が型ごと再エクスポートして公開面になるため足さず、`optim::resident_input` と同じく `pub mod` のフリー関数にした。`fandhe_ai_autodiff::optim::resident_param_groups::device_param_store_with_slot_groups(tape, params, groups)`（実装は `optim/device_store/param_groups.rs`）。facade の `src/` は無変更で、`impl ParamGroupStep` も足していない。groups が空なら `DeviceParamStore::new` と同じ store（`slot_groups == None`）を返す。構築の順は、group の検証（`resolve_slot_hparams`。既定値は番兵の NaN で未割り当てスロットを判別する）→ capability の検査 → `new` による upload で、エラーでは store を作らない。検証エラーは `InvalidArgument`、capability が無いバックエンド（ROCm）は `Unsupported`。
+- `BackendOps` の追加（tensor-core。facade の安定性保証の外）: 区間型 5 種（`SgdStepSegment`・`AdamStepSegment`・`RmsPropStepSegment`・`AdagradStepSegment`・`LambStepSegment`）、`*_step_device_grouped`（5 種）、`_tracked` 版（SGD・Adam・Adagrad・Lamb）、`supports_grouped_optimizer_step`（既定 `false`）。既定の grouped は `Unsupported`、`_tracked` は非 tracked へ委譲する。引数が 7 を超える Adam は `LambMoments` を `m`／`v` の束として再利用し、RmsProp は `_tracked` 版を持たない（`clippy::too_many_arguments` を `allow` で黙らせない方針。GPU の RmsProp は対象外のため影響なし）。
+- 各 `step*` の分岐: `slot_groups.is_none()` なら既存コードを通り道ごと変えない。groups ありのときだけ `param_groups.rs` の `*_group_segments` が区間を作る。隣り合う同値の統合は `to_bits()` の完全一致だけ（`-0.0 == 0.0` では統合しない）、`numel == 0` は捨て、Lamb は 1 層 1 行で統合しない。導出値の式と順序はホストの `step_with_slot_hparams` と同じ。非有限の導出値（Adam の `step_size`、AdamW の `decay_factor`、Adagrad の `clr`、Lamb の `step_size`）はカーネル起動前に `InvalidArgument` にし、poison せず pending も消費しない。エラーの分類は optimizer ごとの既存のスカラー経路をそのまま写した。CUDA Graph capture は groups ありでは使わない。
+- 非対応経路（fail-closed）: AMP 3 入口は `amp_unscale_pending` より前に `InvalidArgument`（pending・パラメータ・scaler 不変）、distributed は `mean_reduce_grads` の先頭（world_size 1 の素通しより前）で拒否して通信に入らない、`train_step_resident` のチェーンは `precheck` の後・最初の確保より前に `Unsupported` を返し、facade の第 2 段が Tape 経路へ全体フォールバックする（共有 `precheck` や facade 第 1 段の validate には置かない。第 1 段はフォールバックしないため）。
+- ホスト式と常駐側の式の突き合わせ（導出値）:
+
+  | optimizer | group で変わる値 | 式（ホスト = 常駐。丸めの位置） |
+  |---|---|---|
+  | SGD | `lr`・`weight_decay` | 導出なし。区間値を config の同名フィールドに上書きして `sgd_step_slices`（`wd.mul_add(p, g)`、`p -= lr * g`）を適用 |
+  | Adam／AdamW | `step_size`・`weight_decay`・`decay_factor` | `step_size = (lr as f64 / bias_correction1) as f32`（f64 で割って 1 回だけ f32 へ丸める）。AdamW の `decay_factor = 1.0 - lr * weight_decay`（f32 の積と差）。Adam の coupled は区間の `weight_decay != 0.0` で decay 項を判定 |
+  | RmsProp | `lr`・`weight_decay` | 導出なし（上書きのみ） |
+  | Adagrad | `clr`・`weight_decay` | `clr = (lr as f64 / (1.0 + (step - 1) as f64 * lr_decay as f64)) as f32` |
+  | Lamb | `lr`・`step_size`・`weight_decay` | `step_size = (lr as f64 / bias_correction1) as f32`、trust ratio は層単位のまま |
+
+- 逸脱その 1（SGD の比べ方。契約の明確化）: §19.4／§19.5 の「CPU 常駐 + groups はホスト `step_with_groups` と bit 一致」のうち SGD だけは、既存の CPU 常駐 SGD の FMA 契約（常駐は `mul_add`、ホスト `Sgd` は PyTorch fixture 用に `mul_add` を使わない。`device_param_store_train.rs` 冒頭）に従い、ホストとは統一複合判定で比べた。bit 一致の契約は「config と同値の group を全スロットに置いた store」と「groups なしの store」の bit 一致で補った。Adam・AdamW・RmsProp・Adagrad・Lamb はホストと bit 一致。
+- 逸脱その 2（GPU の実現方式。所有者へ報告）: インタフェースは設計どおり区間テーブル（案 A）だが、CUDA・Metal の実現は、新しい NVRTC／MSL カーネル 1 本（二分探索）ではなく、**既存の `sgd_step_f32`／`adam_step_f32` を区間ごとに部分ビュー（CUDA の `CudaStorage::view_mut`）またはバッファオフセット（Metal の `setBuffer` のバイトオフセット）で起動する**形にした。区間数（隣り合う同値は統合済みで通常数個）だけ起動が増える代わりに、カーネル本体・FMA 順序・境界検査・失敗トークンの登録が無変更となり、区間 s の結果が「区間値で上書きしたスカラー版を部分範囲へ適用した結果」と構造的に同一になる。新しい NVRTC／MSL ソースも、新しい FFI `unsafe` ブロックも足していない（既存の起動関数の引数にオフセットを足しただけ）。起動回数の増加は Phase 10（#3862・#3863）で測る。1 回起動の専用カーネルへ置き換える場合は別判断（インタフェースは変わらない）。
+- ガードの対応: 反転の対象は無い（A3-d 専用の否定ガード・保留 doctest は元から無い。§19.1）。既存の param groups・resident 系ガード（`facade_param_groups_public_surface_matches_approved_contract`・`PARAM_GROUPS_APPROVED_KEYS`・`workspace_declares_param_group_fn_names_only_in_allowed_locations`・`check_resident_train_step_surface` ほか）は無変更で通る。新設: `workspace_declares_resident_param_group_entry_only_in_allowed_locations`（内部入口の宣言が `param_groups.rs` に 1 件だけ、facade の `src/` に宣言・参照が 0 件。自己テストつき）。**#3838 への申し送り**: facade の入口を足すとき、このガードの facade 側の期待を「`impl Sequential` 内に 1 件」へ更新する。
+- テスト（CI）: `crates/backend-cpu/tests/grouped_optimizer_step_device_parity.rs`（区間ごとのスカラー呼び出しと bit 一致・区間 1 個はスカラーと一致・合計長の不一致／overflow は書き込み前に `InvalidArgument`）、tensor-core の既定実装、autodiff の単体（capability 無しの拒否・groups 空は `new` と同値・検証エラー・distributed の拒否）、`crates/facade/tests/device_param_store_param_groups_train.rs`（6 optimizer、`lr = 0` の group、構築拒否、AMP 拒否、非有限導出値、チェーンのフォールバック）、Metal の `grouped_optimizer_step_source_evidence.rs`（Linux で動く証跡）。実機（`#[ignore]`）: `crates/backend-cuda/tests/grouped_optimizer_step_real_device.rs`、`crates/backend-metal/tests/grouped_optimizer_step_parity.rs`、`crates/facade/tests/device_param_store_param_groups_backend_parity.rs`。
+- 変異確認（手元のみ・確認後に戻した）: Adam の区間で `step_size` を group の lr でなく config の lr から作ると、facade の Adam・AdamW・`lr = 0` の 3 件が失敗した。そのほかの変異（統合条件の `==` 化、チェーンの拒否を `precheck` へ移す）は実施していない。
+- セキュリティ: 区間の合計長と overflow はホストで書き込み前に検証し（CPU・CUDA・Metal とも）、カーネル側の `idx < numel` の境界検査は無変更（REQ-8）。groups の検証・導出値の有限性は upload・状態変更・起動より前。新しい `unsafe` は無い（security-auditor の監査は新規 FFI 区画が無いことの確認として実施する）。
+- 不変事項: 依存の追加・更新、tolerance（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・ガードレール閾値、`docs/spec` はいずれも変えていない。
+- 実機列: CUDA・Metal とも **未実測**（#3862・#3863）。本環境（Linux）は GPU はあるが NVRTC が無く、CUDA の実機テストは実行できない（`libnvrtc` が見つからず失敗する。未検証）。Metal は `aarch64-apple-darwin` の型検査（clippy）までで、実行は未検証。
+- ベンチ（Linux CPU。record only）: groups 空の既定経路を変更前（`origin/main`）と変更後で `device_param_store_bench`（CPU）の resident の 1 step 全体と更新フェーズの中央値を比べた。詳細は `docs/perf/device-resident-update-bench.md` の #3837 追補。
+- 公開状態: 未公開（facade の入口は #3838）。

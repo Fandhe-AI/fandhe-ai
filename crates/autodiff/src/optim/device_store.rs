@@ -120,7 +120,10 @@
 // ため（`amp.rs` モジュール冒頭コメント参照）。
 mod amp;
 mod distributed;
+mod param_groups;
 mod train_chain;
+
+pub use param_groups::device_param_store_with_slot_groups;
 
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
@@ -479,6 +482,9 @@ pub struct DeviceParamStore {
     /// LAMB の 2 次モーメント（`v`）。`lamb_m` と対で確保する。
     lamb_v: Option<DeviceBuffer<f32>>,
     lamb_state: Option<LambStoreState>,
+    /// param groups（イシュー #3837。`param_groups.rs` 参照）。`None` は groups なし
+    /// （既定経路。構築後に変わらない）。
+    slot_groups: Option<param_groups::SlotGroupTable>,
     step_count: u64,
     /// `step()`（SGD）が過去に少なくとも 1 回成功したかどうか
     /// （Cursor Bugbot 指摘対応・PR #2002 レビュー是正。イシュー
@@ -1334,6 +1340,7 @@ impl DeviceParamStore {
             lamb_m: None,
             lamb_v: None,
             lamb_state: None,
+            slot_groups: None,
             step_count: 0,
             sgd_used: false,
             poisoned: AtomicBool::new(false),
@@ -2590,6 +2597,8 @@ impl DeviceParamStore {
             nesterov: config.nesterov,
             is_first_step,
         };
+        // param groups ありのときだけ区間テーブルを作る（イシュー #3837。None は従来経路）。
+        let grouped_segments = self.sgd_group_segments(config.lr, config.weight_decay);
         // `sgd_step_device_tracked`（イシュー #1017）: Metal は encode
         // と同一ロック区間で `self.failure_token` をバッチへ登録する
         // ため、`step()` 自身の即時エラーに加え `check_not_poisoned`
@@ -2612,7 +2621,10 @@ impl DeviceParamStore {
             // 空 graph になり `run_captured_sgd_step_segment` が fail-closed
             // エラーを返してしまう。この場合は capture 対象から常に除外
             // する（design doc §4.5 手順 1）。
-            let graph_capture_available = self.total_numel > 0
+            // param groups ありは CUDA Graph capture の対象外（区間テーブルは capture
+            // しない。イシュー #3837・設計 §19）。
+            let graph_capture_available = self.slot_groups.is_none()
+                && self.total_numel > 0
                 && match ops.captured_segment_key(&[], config_key) {
                     Ok(maybe_key) => maybe_key.is_some(),
                     // Cursor Bugbot 指摘対応（PR #1390 是正）: `DeviceContextCaptureInProgress`
@@ -2867,13 +2879,24 @@ impl DeviceParamStore {
                 } else {
                     None
                 };
-                if let Err(e) = ops.sgd_step_device_tracked(
-                    &mut self.params,
-                    &grad_buf,
-                    velocity_ref,
-                    &step_config,
-                    &self.failure_token,
-                ) {
+                let step_result = match grouped_segments.as_deref() {
+                    None => ops.sgd_step_device_tracked(
+                        &mut self.params,
+                        &grad_buf,
+                        velocity_ref,
+                        &step_config,
+                        &self.failure_token,
+                    ),
+                    Some(segs) => ops.sgd_step_device_grouped_tracked(
+                        &mut self.params,
+                        &grad_buf,
+                        velocity_ref,
+                        &step_config,
+                        segs,
+                        &self.failure_token,
+                    ),
+                };
+                if let Err(e) = step_result {
                     // codex-review P1 指摘対応（PR #1390 是正）: デフォルト
                     // 実装（CPU／CUDA）は `sgd_step_device` へそのまま
                     // 委譲する（本関数コメント「デフォルト実装」参照）が、
@@ -2926,13 +2949,24 @@ impl DeviceParamStore {
             } else {
                 None
             };
-            if let Err(e) = ops.sgd_step_device_tracked(
-                &mut self.params,
-                &staging.buf,
-                velocity_ref,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.sgd_step_device_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    velocity_ref,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.sgd_step_device_grouped_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    velocity_ref,
+                    &step_config,
+                    segs,
+                    &self.failure_token,
+                ),
+            };
+            if let Err(e) = step_result {
                 self.poisoned.store(true, Ordering::SeqCst);
                 return Err(e);
             }
@@ -3232,6 +3266,11 @@ impl DeviceParamStore {
             kind,
         };
 
+        // param groups あり: 区間テーブル（導出値が非有限ならカーネル起動前に拒否。
+        // poison せず pending も消費しない。イシュー #3837）。
+        let grouped_segments =
+            self.adam_group_segments(kind, lr, weight_decay, bias_correction1)?;
+
         // `pending` を消費するのはここから（以降のエラーは `poisoned`
         // 遷移で `pending` の意味自体が失われるため、これより手前で
         // `take()` しない。`step()` と同じ理由）。
@@ -3273,14 +3312,25 @@ impl DeviceParamStore {
                         .to_string(),
                 ));
             };
-            if let Err(e) = ops.adam_step_device_tracked(
-                &mut self.params,
-                &grad_buf,
-                m,
-                v,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.adam_step_device_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    m,
+                    v,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.adam_step_device_grouped_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    fandhe_ai_tensor_core::LambMoments { m, v },
+                    &step_config,
+                    segs,
+                    &self.failure_token,
+                ),
+            };
+            if let Err(e) = step_result {
                 // Cursor Bugbot 指摘対応（PR #2002 レビュー是正）:
                 // `DeviceContextCaptureInProgress`（一過性の別スレッド
                 // capture 競合）に加え、`BackendError::Unsupported` も
@@ -3329,14 +3379,25 @@ impl DeviceParamStore {
                         .to_string(),
                 ));
             };
-            if let Err(e) = ops.adam_step_device_tracked(
-                &mut self.params,
-                &staging.buf,
-                m,
-                v,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.adam_step_device_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    m,
+                    v,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.adam_step_device_grouped_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    fandhe_ai_tensor_core::LambMoments { m, v },
+                    &step_config,
+                    segs,
+                    &self.failure_token,
+                ),
+            };
+            if let Err(e) = step_result {
                 // 直前の `!any_resident` 分岐と同じ理由（Cursor Bugbot
                 // 指摘対応・PR #2002 レビュー是正）: `DeviceContext
                 // CaptureInProgress`・`Unsupported` はいずれも
@@ -3521,6 +3582,7 @@ impl DeviceParamStore {
             momentum,
             centered,
         };
+        let grouped_segments = self.rmsprop_group_segments(lr, weight_decay);
 
         let pending_backup = self.pending.take();
 
@@ -3587,14 +3649,25 @@ impl DeviceParamStore {
                 }
             };
             let (square_avg, optional) = rmsprop_bufs!();
-            if let Err(e) = ops.rmsprop_step_device_tracked(
-                &mut self.params,
-                &grad_buf,
-                square_avg,
-                optional,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.rmsprop_step_device_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    square_avg,
+                    optional,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.rmsprop_step_device_grouped(
+                    &mut self.params,
+                    &grad_buf,
+                    square_avg,
+                    optional,
+                    &step_config,
+                    segs,
+                ),
+            };
+            if let Err(e) = step_result {
                 if matches!(
                     e,
                     BackendError::DeviceContextCaptureInProgress { .. }
@@ -3623,14 +3696,25 @@ impl DeviceParamStore {
                 }
             }
             let (square_avg, optional) = rmsprop_bufs!();
-            if let Err(e) = ops.rmsprop_step_device_tracked(
-                &mut self.params,
-                &staging.buf,
-                square_avg,
-                optional,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.rmsprop_step_device_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    square_avg,
+                    optional,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.rmsprop_step_device_grouped(
+                    &mut self.params,
+                    &staging.buf,
+                    square_avg,
+                    optional,
+                    &step_config,
+                    segs,
+                ),
+            };
+            if let Err(e) = step_result {
                 if matches!(
                     e,
                     BackendError::DeviceContextCaptureInProgress { .. }
@@ -3795,6 +3879,7 @@ impl DeviceParamStore {
             eps,
             weight_decay,
         };
+        let grouped_segments = self.adagrad_group_segments(lr, weight_decay, step, lr_decay)?;
 
         let pending_backup = self.pending.take();
 
@@ -3827,13 +3912,24 @@ impl DeviceParamStore {
                         .to_string(),
                 ));
             };
-            if let Err(e) = ops.adagrad_step_device_tracked(
-                &mut self.params,
-                &grad_buf,
-                state_sum,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.adagrad_step_device_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    state_sum,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.adagrad_step_device_grouped_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    state_sum,
+                    &step_config,
+                    segs,
+                    &self.failure_token,
+                ),
+            };
+            if let Err(e) = step_result {
                 if matches!(
                     e,
                     BackendError::DeviceContextCaptureInProgress { .. }
@@ -3870,13 +3966,24 @@ impl DeviceParamStore {
                         .to_string(),
                 ));
             };
-            if let Err(e) = ops.adagrad_step_device_tracked(
-                &mut self.params,
-                &staging.buf,
-                state_sum,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.adagrad_step_device_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    state_sum,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.adagrad_step_device_grouped_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    state_sum,
+                    &step_config,
+                    segs,
+                    &self.failure_token,
+                ),
+            };
+            if let Err(e) = step_result {
                 if matches!(
                     e,
                     BackendError::DeviceContextCaptureInProgress { .. }
@@ -4062,6 +4169,7 @@ impl DeviceParamStore {
             bias_correction2_sqrt: bias_correction2.sqrt() as f32,
         };
         let segment_numels: Vec<usize> = self.layout.iter().map(|l| l.numel).collect();
+        let grouped_segments = self.lamb_group_segments(lr, weight_decay, bias_correction1)?;
 
         let pending_backup = self.pending.take();
 
@@ -4103,14 +4211,25 @@ impl DeviceParamStore {
                         .to_string(),
                 ));
             };
-            if let Err(e) = ops.lamb_step_device_tracked(
-                &mut self.params,
-                &grad_buf,
-                fandhe_ai_tensor_core::LambMoments { m, v },
-                &segment_numels,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.lamb_step_device_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    fandhe_ai_tensor_core::LambMoments { m, v },
+                    &segment_numels,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.lamb_step_device_grouped_tracked(
+                    &mut self.params,
+                    &grad_buf,
+                    fandhe_ai_tensor_core::LambMoments { m, v },
+                    &step_config,
+                    segs,
+                    &self.failure_token,
+                ),
+            };
+            if let Err(e) = step_result {
                 if is_nonfatal(&e) {
                     self.pending = pending_backup;
                     return Err(e);
@@ -4143,14 +4262,25 @@ impl DeviceParamStore {
                         .to_string(),
                 ));
             };
-            if let Err(e) = ops.lamb_step_device_tracked(
-                &mut self.params,
-                &staging.buf,
-                fandhe_ai_tensor_core::LambMoments { m, v },
-                &segment_numels,
-                &step_config,
-                &self.failure_token,
-            ) {
+            let step_result = match grouped_segments.as_deref() {
+                None => ops.lamb_step_device_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    fandhe_ai_tensor_core::LambMoments { m, v },
+                    &segment_numels,
+                    &step_config,
+                    &self.failure_token,
+                ),
+                Some(segs) => ops.lamb_step_device_grouped_tracked(
+                    &mut self.params,
+                    &staging.buf,
+                    fandhe_ai_tensor_core::LambMoments { m, v },
+                    &step_config,
+                    segs,
+                    &self.failure_token,
+                ),
+            };
+            if let Err(e) = step_result {
                 if is_nonfatal(&e) {
                     drop(staging_ref);
                     self.pending = pending_backup;
@@ -7128,6 +7258,40 @@ mod tests {
         store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
     }
 
+    /// イシュー #3837: capability（`supports_grouped_optimizer_step`）が `false` の
+    /// バックエンドでは groups あり構築が `Unsupported` で拒否され、groups が空なら
+    /// `DeviceParamStore::new` と同じ store（`slot_groups == None`）になる。検証エラーは
+    /// `InvalidArgument`（capability より先に判定し、store を作らない）。
+    #[test]
+    fn param_groups_construction_respects_capability_and_validation() {
+        use crate::nn::optim::ParamGroup;
+        let tape = simple_tape(None);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+
+        let empty = device_param_store_with_slot_groups(&tape, &[&w], &[]).unwrap();
+        assert!(empty.slot_groups.is_none());
+        assert_eq!(empty.len(), 1);
+
+        let err = device_param_store_with_slot_groups(
+            &tape,
+            &[&w],
+            &[ParamGroup::new(vec![0], 0.1, 0.0)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::Unsupported(_)), "{err:?}");
+
+        for bad in [
+            ParamGroup::new(vec![], 0.1, 0.0),
+            ParamGroup::new(vec![1], 0.1, 0.0),
+            ParamGroup::new(vec![0, 0], 0.1, 0.0),
+            ParamGroup::new(vec![0], f32::NAN, 0.0),
+            ParamGroup::new(vec![0], 0.1, -1.0),
+        ] {
+            let err = device_param_store_with_slot_groups(&tape, &[&w], &[bad]).unwrap_err();
+            assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+        }
+    }
+
     /// イシュー #2175: `rmsprop_step_device_tracked` が `BackendError::
     /// Unsupported`（`MockDeviceOps` が `rmsprop_step_device` を実装
     /// しないため既定 fail-safe を踏む）を返しても `poisoned` へ遷移
@@ -8635,6 +8799,26 @@ mod tests {
                 e2,
                 DistributedStepError::Backend(BackendError::Unsupported(_))
             ));
+        }
+
+        /// イシュー #3837: groups ありの store は distributed ステップを通信前に拒否し
+        /// （world_size 1 の素通しより前）、pending を消費しない。
+        #[test]
+        fn distributed_rejects_param_groups_before_passthrough() {
+            let (w, b) = init_params();
+            let tape = mk_tape(false);
+            let mut s = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+            s.slot_groups = Some(param_groups::SlotGroupTable::uniform_for_test(2, 0.1, 0.0));
+            let mut c = comm(establish_group(1).pop().unwrap());
+            let g = fwd_bwd(&tape, &mut s, &X, &T);
+            let e = step_sgd(&mut s, &tape, &g, &sgd_cfg(), &mut c).unwrap_err();
+            assert!(matches!(
+                e,
+                DistributedStepError::Backend(BackendError::InvalidArgument(_))
+            ));
+            // pending は未消費・store は poison されていない（groups を外せば通常 step が通る）。
+            s.slot_groups = None;
+            s.step(&tape, &g, &sgd_cfg()).unwrap();
         }
 
         /// 2 ランク（半分ずつ）の k ステップ後のパラメータ。rank0／rank1 の順。

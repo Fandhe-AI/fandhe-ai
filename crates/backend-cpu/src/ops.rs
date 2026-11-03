@@ -16,13 +16,14 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, AdagradStepConfig, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput,
-    BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, Conv3dParams, DType,
-    DeviceMatrixLayout, DispatchFailureCell, EighFactors, FusionPlan, GemmChecksum,
-    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget, LambMoments,
-    LambStepConfig, LstmPointwiseOutput, MatrixNormOrd, MseReduction, PagedAttentionArgs,
-    PagedKvLayout, Pool2dParams, QrFactors, RmsPropOptionalBuffers, RmsPropStepConfig,
-    ScatterReduce, SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors, Tensor,
+    Activation, AdagradStepConfig, AdagradStepSegment, AdamStepConfig, AdamStepKind,
+    AdamStepSegment, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp,
+    ChecksumReadout, Conv2dParams, Conv3dParams, DType, DeviceMatrixLayout, DispatchFailureCell,
+    EighFactors, FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind,
+    InterpolateMode, KlDivTarget, LambMoments, LambStepConfig, LambStepSegment,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, PagedAttentionArgs, PagedKvLayout,
+    Pool2dParams, QrFactors, RmsPropOptionalBuffers, RmsPropStepConfig, RmsPropStepSegment,
+    ScatterReduce, SgdStepConfig, SgdStepSegment, ShapeError, SlogdetFactors, SvdFactors, Tensor,
     UnaryElementwiseOp, VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout,
     gather_out_shape, im2col_out_shape, im2col3d_out_shape, interpolate_out_shape_for_mode,
     one_hot_out_shape, pad_out_shape, pool2d_out_shape, require_same_shape, row_norm_layout,
@@ -721,65 +722,7 @@ impl BackendOps for CpuBackendOps {
         velocity: Option<&mut DeviceBuffer<f32>>,
         config: &SgdStepConfig,
     ) -> Result<(), BackendError> {
-        if param.device() != Device::Cpu || grad.device() != Device::Cpu {
-            return Err(BackendError::DeviceMismatch);
-        }
-        if param.shape() != grad.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: grad.shape().to_vec(),
-            }));
-        }
-        let numel = param.numel();
-        let grad_handle = grad
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        check_sgd_handle_len(grad_handle.data().len(), numel)?;
-
-        let use_momentum = config.momentum != 0.0;
-        let velocity_handle = match velocity {
-            Some(v) => {
-                if v.device() != Device::Cpu {
-                    return Err(BackendError::DeviceMismatch);
-                }
-                if v.shape() != param.shape() {
-                    return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                        lhs: param.shape().to_vec(),
-                        rhs: v.shape().to_vec(),
-                    }));
-                }
-                let h = v
-                    .downcast_handle_mut::<CpuBufferHandle>()
-                    .ok_or(BackendError::DeviceMismatch)?;
-                check_sgd_handle_len(h.data().len(), numel)?;
-                Some(h)
-            }
-            None => {
-                if use_momentum {
-                    return Err(BackendError::Unsupported(
-                        "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
-                    ));
-                }
-                None
-            }
-        };
-        let param_handle = param
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        check_sgd_handle_len(param_handle.data().len(), numel)?;
-
-        // momentum 無効時は velocity を検証だけして触らない（従前挙動）。
-        let velocity_slice = if use_momentum {
-            velocity_handle.map(|h| &mut h.data_mut()[..numel])
-        } else {
-            None
-        };
-        sgd_step_slices(
-            &mut param_handle.data_mut()[..numel],
-            &grad_handle.data()[..numel],
-            velocity_slice,
-            config,
-        )
+        sgd_step_impl(param, grad, velocity, config, None)
     }
 
     /// `fandhe_ai_autodiff::nn::optim::{adam::Adam::step, adamw::AdamW::
@@ -794,103 +737,7 @@ impl BackendOps for CpuBackendOps {
         v: &mut DeviceBuffer<f32>,
         config: &AdamStepConfig,
     ) -> Result<(), BackendError> {
-        if param.device() != Device::Cpu
-            || grad.device() != Device::Cpu
-            || m.device() != Device::Cpu
-            || v.device() != Device::Cpu
-        {
-            return Err(BackendError::DeviceMismatch);
-        }
-        if param.shape() != grad.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: grad.shape().to_vec(),
-            }));
-        }
-        if param.shape() != m.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: m.shape().to_vec(),
-            }));
-        }
-        if param.shape() != v.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: v.shape().to_vec(),
-            }));
-        }
-        let grad_handle = grad
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let m_handle = m
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let v_handle = v
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let param_handle = param
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-
-        // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
-        // ため、未知の variant は fail-closed に拒否する（`.claude/rules/
-        // security.md` A08）。ループ本体ではなくここで 1 回だけ検査する
-        // ことで、未知 variant 検出時に `param`／`m`／`v` が部分的に
-        // 更新された状態のまま `Err` を返すことを構造的に防ぐ（他の
-        // 早期 return〈shape／device 不一致〉と同じ「どの要素も更新前」
-        // 契約を維持する）。
-        match config.kind {
-            AdamStepKind::Coupled | AdamStepKind::Decoupled => {}
-            _ => {
-                return Err(BackendError::Unsupported(
-                    "adam_step_device: unknown AdamStepKind variant".into(),
-                ));
-            }
-        }
-
-        let grad_data = grad_handle.data();
-        let m_data = m_handle.data_mut();
-        let v_data = v_handle.data_mut();
-        let param_data = param_handle.data_mut();
-        for j in 0..param_data.len() {
-            let p = param_data[j];
-            let g = grad_data[j];
-
-            // `Adam::step`（coupled L2）: `weight_decay == 0.0` では
-            // decay 項の演算自体を skip する（`docs/perf` の
-            // bit 一致契約と同じ理由。`AdamStepConfig` doc 参照）。
-            // `AdamW::step`（decoupled）: `g_eff` は常に生の `g`。
-            let g_eff = match config.kind {
-                AdamStepKind::Coupled if config.weight_decay != 0.0 => {
-                    f32::mul_add(config.weight_decay, p, g)
-                }
-                AdamStepKind::Coupled => g,
-                AdamStepKind::Decoupled => g,
-                _ => unreachable!("AdamStepKind variant validated before the loop"),
-            };
-            // `Adam::step` は decay 適用前の `p` をそのまま使う
-            // （coupled 方式は勾配側へ decay を織り込むため）。
-            // `AdamW::step` は `p_eff = p * decay_factor` を先に計算
-            // してから更新式へ渡す（decoupled 方式）。
-            let p_eff = match config.kind {
-                AdamStepKind::Coupled => p,
-                AdamStepKind::Decoupled => p * config.decay_factor,
-                _ => unreachable!("AdamStepKind variant validated before the loop"),
-            };
-
-            let m_new = f32::mul_add(config.beta1, m_data[j], (1.0 - config.beta1) * g_eff);
-            let v_new = f32::mul_add(
-                config.beta2,
-                v_data[j],
-                (1.0 - config.beta2) * g_eff * g_eff,
-            );
-            m_data[j] = m_new;
-            v_data[j] = v_new;
-
-            let denom = v_new.sqrt() / config.bias_correction2_sqrt + config.eps;
-            param_data[j] = p_eff - config.step_size * m_new / denom;
-        }
-        Ok(())
+        adam_step_impl(param, grad, m, v, config, None)
     }
 
     /// `fandhe_ai_autodiff::nn::optim::rmsprop::RmsProp::
@@ -905,148 +752,7 @@ impl BackendOps for CpuBackendOps {
         optional: RmsPropOptionalBuffers<'_>,
         config: &RmsPropStepConfig,
     ) -> Result<(), BackendError> {
-        let RmsPropOptionalBuffers {
-            grad_avg,
-            momentum_buf,
-        } = optional;
-        if param.device() != Device::Cpu
-            || grad.device() != Device::Cpu
-            || square_avg.device() != Device::Cpu
-        {
-            return Err(BackendError::DeviceMismatch);
-        }
-        if param.shape() != grad.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: grad.shape().to_vec(),
-            }));
-        }
-        if param.shape() != square_avg.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: square_avg.shape().to_vec(),
-            }));
-        }
-
-        // `centered`／`momentum > 0.0` の場合に必須となる optional
-        // バッファの検査（どの要素も書き込む前に行う。`.claude/rules/
-        // security.md` A08「書き込み前にのみ拒否する」契約）。
-        if config.centered && grad_avg.is_none() {
-            return Err(BackendError::Unsupported(
-                "rmsprop_step_device: centered enabled but no grad_avg buffer provided".into(),
-            ));
-        }
-        let use_momentum = config.momentum > 0.0;
-        if use_momentum && momentum_buf.is_none() {
-            return Err(BackendError::Unsupported(
-                "rmsprop_step_device: momentum enabled but no momentum_buf buffer provided".into(),
-            ));
-        }
-
-        let grad_avg_handle = match grad_avg {
-            Some(ga) => {
-                if ga.device() != Device::Cpu {
-                    return Err(BackendError::DeviceMismatch);
-                }
-                if ga.shape() != param.shape() {
-                    return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                        lhs: param.shape().to_vec(),
-                        rhs: ga.shape().to_vec(),
-                    }));
-                }
-                Some(
-                    ga.downcast_handle_mut::<CpuBufferHandle>()
-                        .ok_or(BackendError::DeviceMismatch)?,
-                )
-            }
-            None => None,
-        };
-        let momentum_handle = match momentum_buf {
-            Some(mb) => {
-                if mb.device() != Device::Cpu {
-                    return Err(BackendError::DeviceMismatch);
-                }
-                if mb.shape() != param.shape() {
-                    return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                        lhs: param.shape().to_vec(),
-                        rhs: mb.shape().to_vec(),
-                    }));
-                }
-                Some(
-                    mb.downcast_handle_mut::<CpuBufferHandle>()
-                        .ok_or(BackendError::DeviceMismatch)?,
-                )
-            }
-            None => None,
-        };
-
-        let grad_handle = grad
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let square_avg_handle = square_avg
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let param_handle = param
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-
-        let alpha = config.alpha;
-        let one_minus_alpha = 1.0 - alpha;
-
-        let grad_data = grad_handle.data();
-        let square_avg_data = square_avg_handle.data_mut();
-        let param_data = param_handle.data_mut();
-        let mut grad_avg_data: Option<&mut [f32]> = grad_avg_handle.map(|h| h.data_mut());
-        let mut momentum_data: Option<&mut [f32]> = momentum_handle.map(|h| h.data_mut());
-        for j in 0..param_data.len() {
-            let p = param_data[j];
-            let mut g = grad_data[j];
-            if config.weight_decay != 0.0 {
-                g = f32::mul_add(config.weight_decay, p, g);
-            }
-
-            square_avg_data[j] = f32::mul_add(alpha, square_avg_data[j], one_minus_alpha * g * g);
-
-            let avg = if config.centered {
-                // `centered == true` は上の事前検査で `grad_avg_handle`
-                // が `Some` であることを保証済み。
-                let Some(grad_avg_data) = grad_avg_data.as_deref_mut() else {
-                    return Err(BackendError::Unsupported(
-                        "rmsprop_step_device: centered enabled but no grad_avg buffer provided"
-                            .into(),
-                    ));
-                };
-                let start = grad_avg_data[j];
-                let end = g;
-                let weight = one_minus_alpha;
-                grad_avg_data[j] = if weight.abs() < 0.5 {
-                    start + weight * (end - start)
-                } else {
-                    end - (end - start) * alpha
-                };
-                (square_avg_data[j] - grad_avg_data[j] * grad_avg_data[j]).sqrt()
-            } else {
-                square_avg_data[j].sqrt()
-            };
-            let avg = avg + config.eps;
-
-            if use_momentum {
-                // 直前の事前検査により `momentum_handle` は必ず `Some`。
-                let Some(momentum_data) = momentum_data.as_deref_mut() else {
-                    return Err(BackendError::Unsupported(
-                        "rmsprop_step_device: momentum enabled but no momentum_buf buffer \
-                         provided"
-                            .into(),
-                    ));
-                };
-                let buf = f32::mul_add(config.momentum, momentum_data[j], g / avg);
-                momentum_data[j] = buf;
-                param_data[j] = p - config.lr * buf;
-            } else {
-                param_data[j] = p - (config.lr * g) / avg;
-            }
-        }
-        Ok(())
+        rmsprop_step_impl(param, grad, square_avg, optional, config, None)
     }
 
     /// `fandhe_ai_autodiff::nn::optim::adagrad::Adagrad::
@@ -1059,48 +765,7 @@ impl BackendOps for CpuBackendOps {
         state_sum: &mut DeviceBuffer<f32>,
         config: &AdagradStepConfig,
     ) -> Result<(), BackendError> {
-        if param.device() != Device::Cpu
-            || grad.device() != Device::Cpu
-            || state_sum.device() != Device::Cpu
-        {
-            return Err(BackendError::DeviceMismatch);
-        }
-        if param.shape() != grad.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: grad.shape().to_vec(),
-            }));
-        }
-        if param.shape() != state_sum.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: state_sum.shape().to_vec(),
-            }));
-        }
-        let grad_handle = grad
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let state_sum_handle = state_sum
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let param_handle = param
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-
-        let grad_data = grad_handle.data();
-        let state_sum_data = state_sum_handle.data_mut();
-        let param_data = param_handle.data_mut();
-        for j in 0..param_data.len() {
-            let p = param_data[j];
-            let mut g = grad_data[j];
-            if config.weight_decay != 0.0 {
-                g = f32::mul_add(config.weight_decay, p, g);
-            }
-            state_sum_data[j] = f32::mul_add(g, g, state_sum_data[j]);
-            let std = state_sum_data[j].sqrt() + config.eps;
-            param_data[j] = p - (config.clr * g) / std;
-        }
-        Ok(())
+        adagrad_step_impl(param, grad, state_sum, config, None)
     }
 
     /// `fandhe_ai_autodiff::nn::optim::lamb::Lamb::step_with_slot_hparams`
@@ -1121,146 +786,75 @@ impl BackendOps for CpuBackendOps {
         segment_numels: &[usize],
         config: &LambStepConfig,
     ) -> Result<(), BackendError> {
-        let LambMoments { m, v } = moments;
-        if param.device() != Device::Cpu
-            || grad.device() != Device::Cpu
-            || m.device() != Device::Cpu
-            || v.device() != Device::Cpu
-        {
-            return Err(BackendError::DeviceMismatch);
-        }
-        if param.shape() != grad.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: grad.shape().to_vec(),
-            }));
-        }
-        if param.shape() != m.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: m.shape().to_vec(),
-            }));
-        }
-        if param.shape() != v.shape() {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: v.shape().to_vec(),
-            }));
-        }
+        lamb_step_impl(param, grad, moments, segment_numels, config, None)
+    }
 
-        let grad_handle = grad
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let m_handle = m
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let v_handle = v
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let param_handle = param
-            .downcast_handle_mut::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
+    fn supports_grouped_optimizer_step(&self) -> bool {
+        true
+    }
 
-        let total: usize = {
-            let mut acc: usize = 0;
-            for &n in segment_numels {
-                acc = acc.checked_add(n).ok_or_else(|| {
-                    BackendError::InvalidArgument(
-                        "lamb_step_device: segment_numels sum overflowed usize".into(),
-                    )
-                })?;
-            }
-            acc
-        };
-        let grad_data = grad_handle.data();
-        let m_data = m_handle.data_mut();
-        let v_data = v_handle.data_mut();
-        let param_data = param_handle.data_mut();
-        if total != param_data.len() {
-            return Err(BackendError::InvalidArgument(format!(
-                "lamb_step_device: segment_numels sum ({total}) does not match param numel ({})",
-                param_data.len()
-            )));
-        }
+    /// 区間テーブル版 SGD（イシュー #3837・`docs/autodiff-param-groups-decision.md`
+    /// §19）。スカラー版と同じ `sgd_step_impl` を使い、区間ごとに lr／weight_decay を
+    /// 上書きした `sgd_step_slices` を適用する（bit 一致は構造で保証）。
+    fn sgd_step_device_grouped(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        velocity: Option<&mut DeviceBuffer<f32>>,
+        config: &SgdStepConfig,
+        segments: &[SgdStepSegment],
+    ) -> Result<(), BackendError> {
+        sgd_step_impl(param, grad, velocity, config, Some(segments))
+    }
 
-        // 計算フェーズ（状態変更なし）: segment ごとに新しい m/v/t と
-        // trust ratio を scratch へ積む。
-        let mut new_m: Vec<f32> = Vec::with_capacity(param_data.len());
-        let mut new_v: Vec<f32> = Vec::with_capacity(param_data.len());
-        let mut t: Vec<f32> = Vec::with_capacity(param_data.len());
-        let mut trust_ratios: Vec<f32> = Vec::with_capacity(segment_numels.len());
+    /// 区間テーブル版 Adam／AdamW（`sgd_step_device_grouped` と同型）。
+    fn adam_step_device_grouped(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        moments: LambMoments<'_>,
+        config: &AdamStepConfig,
+        segments: &[AdamStepSegment],
+    ) -> Result<(), BackendError> {
+        adam_step_impl(param, grad, moments.m, moments.v, config, Some(segments))
+    }
 
-        let mut offset = 0usize;
-        for &seg_len in segment_numels {
-            let mut norm_x_sq: f64 = 0.0;
-            let mut norm_t_sq: f64 = 0.0;
-            for j in offset..offset + seg_len {
-                let g = grad_data[j];
-                let prev_m = m_data[j];
-                let prev_v = v_data[j];
-                let m_new = f32::mul_add(config.beta1, prev_m, (1.0 - config.beta1) * g);
-                let v_new = f32::mul_add(config.beta2, prev_v, (1.0 - config.beta2) * g * g);
-                if !m_new.is_finite() || !v_new.is_finite() {
-                    return Err(BackendError::InvalidArgument(format!(
-                        "lamb_step_device: non-finite second moment estimate (m={m_new}, \
-                         v={v_new}) at element {j}; refusing to commit state"
-                    )));
-                }
-                new_m.push(m_new);
-                new_v.push(v_new);
+    /// 区間テーブル版 RmsProp（`sgd_step_device_grouped` と同型）。
+    fn rmsprop_step_device_grouped(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        square_avg: &mut DeviceBuffer<f32>,
+        optional: RmsPropOptionalBuffers<'_>,
+        config: &RmsPropStepConfig,
+        segments: &[RmsPropStepSegment],
+    ) -> Result<(), BackendError> {
+        rmsprop_step_impl(param, grad, square_avg, optional, config, Some(segments))
+    }
 
-                let denom = v_new.sqrt() / config.bias_correction2_sqrt + config.eps;
-                let s = config.step_size * m_new / denom;
-                let x = param_data[j];
-                let ti = if config.weight_decay == 0.0 {
-                    s
-                } else {
-                    f32::mul_add(config.lr * config.weight_decay, x, s)
-                };
-                t.push(ti);
+    /// 区間テーブル版 Adagrad（`sgd_step_device_grouped` と同型）。
+    fn adagrad_step_device_grouped(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        state_sum: &mut DeviceBuffer<f32>,
+        config: &AdagradStepConfig,
+        segments: &[AdagradStepSegment],
+    ) -> Result<(), BackendError> {
+        adagrad_step_impl(param, grad, state_sum, config, Some(segments))
+    }
 
-                let x64 = x as f64;
-                norm_x_sq += x64 * x64;
-                let ti64 = ti as f64;
-                norm_t_sq += ti64 * ti64;
-            }
-
-            let norm_x = norm_x_sq.sqrt();
-            let norm_t = norm_t_sq.sqrt();
-            if !norm_x.is_finite() || !norm_t.is_finite() {
-                return Err(BackendError::InvalidArgument(format!(
-                    "lamb_step_device: non-finite parameter or update norm (norm_x={norm_x}, \
-                     norm_t={norm_t})"
-                )));
-            }
-            let f: f32 = if norm_x == 0.0 || norm_t == 0.0 {
-                1.0
-            } else {
-                (config.lr as f64 * norm_x / norm_t) as f32
-            };
-            if !f.is_finite() {
-                return Err(BackendError::InvalidArgument(format!(
-                    "lamb_step_device: trust ratio is non-finite (norm_x={norm_x}, \
-                     norm_t={norm_t})"
-                )));
-            }
-            trust_ratios.push(f);
-            offset += seg_len;
-        }
-
-        // コミットフェーズ: 全 segment の計算・検証が成功した場合のみ
-        // ここへ到達する。
-        offset = 0;
-        for (seg_idx, &seg_len) in segment_numels.iter().enumerate() {
-            let f = trust_ratios[seg_idx];
-            for j in offset..offset + seg_len {
-                m_data[j] = new_m[j];
-                v_data[j] = new_v[j];
-                param_data[j] = f32::mul_add(-f, t[j], param_data[j]);
-            }
-            offset += seg_len;
-        }
-        Ok(())
+    /// 区間テーブル版 LAMB。1 層 1 行（`segments[i].numel` が層 i の要素数）。
+    fn lamb_step_device_grouped(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        moments: LambMoments<'_>,
+        config: &LambStepConfig,
+        segments: &[LambStepSegment],
+    ) -> Result<(), BackendError> {
+        let numels: Vec<usize> = segments.iter().map(|s| s.numel).collect();
+        lamb_step_impl(param, grad, moments, &numels, config, Some(segments))
     }
 
     /// VJP 専用 NT/TN 2 パターン入口（イシュー #1213）: `matmul_vjp` の
@@ -5087,6 +4681,769 @@ pub(crate) fn sgd_step_slices(
                 *p -= lr * g;
             }
         }
+    }
+    Ok(())
+}
+
+fn sgd_step_impl(
+    param: &mut DeviceBuffer<f32>,
+    grad: &DeviceBuffer<f32>,
+    velocity: Option<&mut DeviceBuffer<f32>>,
+    config: &SgdStepConfig,
+    segments: Option<&[SgdStepSegment]>,
+) -> Result<(), BackendError> {
+    if param.device() != Device::Cpu || grad.device() != Device::Cpu {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if param.shape() != grad.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: grad.shape().to_vec(),
+        }));
+    }
+    let numel = param.numel();
+    let grad_handle = grad
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    check_sgd_handle_len(grad_handle.data().len(), numel)?;
+
+    let use_momentum = config.momentum != 0.0;
+    let velocity_handle = match velocity {
+        Some(v) => {
+            if v.device() != Device::Cpu {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if v.shape() != param.shape() {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: param.shape().to_vec(),
+                    rhs: v.shape().to_vec(),
+                }));
+            }
+            let h = v
+                .downcast_handle_mut::<CpuBufferHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            check_sgd_handle_len(h.data().len(), numel)?;
+            Some(h)
+        }
+        None => {
+            if use_momentum {
+                return Err(BackendError::Unsupported(
+                    "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
+                ));
+            }
+            None
+        }
+    };
+    let param_handle = param
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    check_sgd_handle_len(param_handle.data().len(), numel)?;
+
+    // momentum 無効時は velocity を検証だけして触らない（従前挙動）。
+    let velocity_slice = if use_momentum {
+        velocity_handle.map(|h| &mut h.data_mut()[..numel])
+    } else {
+        None
+    };
+    sgd_step_segments(
+        &mut param_handle.data_mut()[..numel],
+        &grad_handle.data()[..numel],
+        velocity_slice,
+        config,
+        segments,
+    )
+}
+
+fn adam_step_impl(
+    param: &mut DeviceBuffer<f32>,
+    grad: &DeviceBuffer<f32>,
+    m: &mut DeviceBuffer<f32>,
+    v: &mut DeviceBuffer<f32>,
+    config: &AdamStepConfig,
+    segments: Option<&[AdamStepSegment]>,
+) -> Result<(), BackendError> {
+    if param.device() != Device::Cpu
+        || grad.device() != Device::Cpu
+        || m.device() != Device::Cpu
+        || v.device() != Device::Cpu
+    {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if param.shape() != grad.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: grad.shape().to_vec(),
+        }));
+    }
+    if param.shape() != m.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: m.shape().to_vec(),
+        }));
+    }
+    if param.shape() != v.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: v.shape().to_vec(),
+        }));
+    }
+    let grad_handle = grad
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let m_handle = m
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let v_handle = v
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let param_handle = param
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+
+    // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
+    // ため、未知の variant は fail-closed に拒否する（`.claude/rules/
+    // security.md` A08）。ループ本体ではなくここで 1 回だけ検査する
+    // ことで、未知 variant 検出時に `param`／`m`／`v` が部分的に
+    // 更新された状態のまま `Err` を返すことを構造的に防ぐ（他の
+    // 早期 return〈shape／device 不一致〉と同じ「どの要素も更新前」
+    // 契約を維持する）。
+    match config.kind {
+        AdamStepKind::Coupled | AdamStepKind::Decoupled => {}
+        _ => {
+            return Err(BackendError::Unsupported(
+                "adam_step_device: unknown AdamStepKind variant".into(),
+            ));
+        }
+    }
+
+    let grad_data = grad_handle.data();
+    let m_data = m_handle.data_mut();
+    let v_data = v_handle.data_mut();
+    let param_data = param_handle.data_mut();
+    adam_step_segments(param_data, grad_data, m_data, v_data, config, segments)
+}
+
+fn rmsprop_step_impl(
+    param: &mut DeviceBuffer<f32>,
+    grad: &DeviceBuffer<f32>,
+    square_avg: &mut DeviceBuffer<f32>,
+    optional: RmsPropOptionalBuffers<'_>,
+    config: &RmsPropStepConfig,
+    segments: Option<&[RmsPropStepSegment]>,
+) -> Result<(), BackendError> {
+    let RmsPropOptionalBuffers {
+        grad_avg,
+        momentum_buf,
+    } = optional;
+    if param.device() != Device::Cpu
+        || grad.device() != Device::Cpu
+        || square_avg.device() != Device::Cpu
+    {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if param.shape() != grad.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: grad.shape().to_vec(),
+        }));
+    }
+    if param.shape() != square_avg.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: square_avg.shape().to_vec(),
+        }));
+    }
+
+    // `centered`／`momentum > 0.0` の場合に必須となる optional
+    // バッファの検査（どの要素も書き込む前に行う。`.claude/rules/
+    // security.md` A08「書き込み前にのみ拒否する」契約）。
+    if config.centered && grad_avg.is_none() {
+        return Err(BackendError::Unsupported(
+            "rmsprop_step_device: centered enabled but no grad_avg buffer provided".into(),
+        ));
+    }
+    let use_momentum = config.momentum > 0.0;
+    if use_momentum && momentum_buf.is_none() {
+        return Err(BackendError::Unsupported(
+            "rmsprop_step_device: momentum enabled but no momentum_buf buffer provided".into(),
+        ));
+    }
+
+    let grad_avg_handle = match grad_avg {
+        Some(ga) => {
+            if ga.device() != Device::Cpu {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if ga.shape() != param.shape() {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: param.shape().to_vec(),
+                    rhs: ga.shape().to_vec(),
+                }));
+            }
+            Some(
+                ga.downcast_handle_mut::<CpuBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?,
+            )
+        }
+        None => None,
+    };
+    let momentum_handle = match momentum_buf {
+        Some(mb) => {
+            if mb.device() != Device::Cpu {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if mb.shape() != param.shape() {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: param.shape().to_vec(),
+                    rhs: mb.shape().to_vec(),
+                }));
+            }
+            Some(
+                mb.downcast_handle_mut::<CpuBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?,
+            )
+        }
+        None => None,
+    };
+
+    let grad_handle = grad
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let square_avg_handle = square_avg
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let param_handle = param
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+
+    let grad_data = grad_handle.data();
+    let square_avg_data = square_avg_handle.data_mut();
+    let param_data = param_handle.data_mut();
+    let grad_avg_data: Option<&mut [f32]> = grad_avg_handle.map(|h| h.data_mut());
+    let momentum_data: Option<&mut [f32]> = momentum_handle.map(|h| h.data_mut());
+    rmsprop_step_segments(
+        param_data,
+        grad_data,
+        square_avg_data,
+        grad_avg_data,
+        momentum_data,
+        config,
+        segments,
+    )
+}
+
+fn adagrad_step_impl(
+    param: &mut DeviceBuffer<f32>,
+    grad: &DeviceBuffer<f32>,
+    state_sum: &mut DeviceBuffer<f32>,
+    config: &AdagradStepConfig,
+    segments: Option<&[AdagradStepSegment]>,
+) -> Result<(), BackendError> {
+    if param.device() != Device::Cpu
+        || grad.device() != Device::Cpu
+        || state_sum.device() != Device::Cpu
+    {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if param.shape() != grad.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: grad.shape().to_vec(),
+        }));
+    }
+    if param.shape() != state_sum.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: state_sum.shape().to_vec(),
+        }));
+    }
+    let grad_handle = grad
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let state_sum_handle = state_sum
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let param_handle = param
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+
+    let grad_data = grad_handle.data();
+    let state_sum_data = state_sum_handle.data_mut();
+    let param_data = param_handle.data_mut();
+    adagrad_step_segments(param_data, grad_data, state_sum_data, config, segments)
+}
+
+fn lamb_step_impl(
+    param: &mut DeviceBuffer<f32>,
+    grad: &DeviceBuffer<f32>,
+    moments: LambMoments<'_>,
+    segment_numels: &[usize],
+    config: &LambStepConfig,
+    layer_overrides: Option<&[LambStepSegment]>,
+) -> Result<(), BackendError> {
+    let LambMoments { m, v } = moments;
+    if param.device() != Device::Cpu
+        || grad.device() != Device::Cpu
+        || m.device() != Device::Cpu
+        || v.device() != Device::Cpu
+    {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if param.shape() != grad.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: grad.shape().to_vec(),
+        }));
+    }
+    if param.shape() != m.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: m.shape().to_vec(),
+        }));
+    }
+    if param.shape() != v.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: param.shape().to_vec(),
+            rhs: v.shape().to_vec(),
+        }));
+    }
+
+    let grad_handle = grad
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let m_handle = m
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let v_handle = v
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let param_handle = param
+        .downcast_handle_mut::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+
+    let total: usize = {
+        let mut acc: usize = 0;
+        for &n in segment_numels {
+            acc = acc.checked_add(n).ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "lamb_step_device: segment_numels sum overflowed usize".into(),
+                )
+            })?;
+        }
+        acc
+    };
+    let grad_data = grad_handle.data();
+    let m_data = m_handle.data_mut();
+    let v_data = v_handle.data_mut();
+    let param_data = param_handle.data_mut();
+    if total != param_data.len() {
+        return Err(BackendError::InvalidArgument(format!(
+            "lamb_step_device: segment_numels sum ({total}) does not match param numel ({})",
+            param_data.len()
+        )));
+    }
+
+    if let Some(o) = layer_overrides
+        && o.len() != segment_numels.len()
+    {
+        return Err(BackendError::InvalidArgument(
+            "lamb_step_device_grouped: segments and layer numels differ in length".into(),
+        ));
+    }
+
+    // 計算フェーズ（状態変更なし）: segment ごとに新しい m/v/t と
+    // trust ratio を scratch へ積む。
+    let mut new_m: Vec<f32> = Vec::with_capacity(param_data.len());
+    let mut new_v: Vec<f32> = Vec::with_capacity(param_data.len());
+    let mut t: Vec<f32> = Vec::with_capacity(param_data.len());
+    let mut trust_ratios: Vec<f32> = Vec::with_capacity(segment_numels.len());
+
+    let mut offset = 0usize;
+    for (layer_idx, &seg_len) in segment_numels.iter().enumerate() {
+        // 層ごとの lr／step_size／weight_decay（grouped 経路のみ上書き。
+        // スカラー経路は `config` そのまま）。
+        let seg_cfg = match layer_overrides {
+            Some(o) => LambStepConfig {
+                lr: o[layer_idx].lr,
+                step_size: o[layer_idx].step_size,
+                weight_decay: o[layer_idx].weight_decay,
+                ..*config
+            },
+            None => *config,
+        };
+        let mut norm_x_sq: f64 = 0.0;
+        let mut norm_t_sq: f64 = 0.0;
+        for j in offset..offset + seg_len {
+            let g = grad_data[j];
+            let prev_m = m_data[j];
+            let prev_v = v_data[j];
+            let m_new = f32::mul_add(seg_cfg.beta1, prev_m, (1.0 - seg_cfg.beta1) * g);
+            let v_new = f32::mul_add(seg_cfg.beta2, prev_v, (1.0 - seg_cfg.beta2) * g * g);
+            if !m_new.is_finite() || !v_new.is_finite() {
+                return Err(BackendError::InvalidArgument(format!(
+                    "lamb_step_device: non-finite second moment estimate (m={m_new}, \
+                     v={v_new}) at element {j}; refusing to commit state"
+                )));
+            }
+            new_m.push(m_new);
+            new_v.push(v_new);
+
+            let denom = v_new.sqrt() / seg_cfg.bias_correction2_sqrt + seg_cfg.eps;
+            let s = seg_cfg.step_size * m_new / denom;
+            let x = param_data[j];
+            let ti = if seg_cfg.weight_decay == 0.0 {
+                s
+            } else {
+                f32::mul_add(seg_cfg.lr * seg_cfg.weight_decay, x, s)
+            };
+            t.push(ti);
+
+            let x64 = x as f64;
+            norm_x_sq += x64 * x64;
+            let ti64 = ti as f64;
+            norm_t_sq += ti64 * ti64;
+        }
+
+        let norm_x = norm_x_sq.sqrt();
+        let norm_t = norm_t_sq.sqrt();
+        if !norm_x.is_finite() || !norm_t.is_finite() {
+            return Err(BackendError::InvalidArgument(format!(
+                "lamb_step_device: non-finite parameter or update norm (norm_x={norm_x}, \
+                 norm_t={norm_t})"
+            )));
+        }
+        let f: f32 = if norm_x == 0.0 || norm_t == 0.0 {
+            1.0
+        } else {
+            (seg_cfg.lr as f64 * norm_x / norm_t) as f32
+        };
+        if !f.is_finite() {
+            return Err(BackendError::InvalidArgument(format!(
+                "lamb_step_device: trust ratio is non-finite (norm_x={norm_x}, \
+                 norm_t={norm_t})"
+            )));
+        }
+        trust_ratios.push(f);
+        offset += seg_len;
+    }
+
+    // コミットフェーズ: 全 segment の計算・検証が成功した場合のみ
+    // ここへ到達する。
+    offset = 0;
+    for (seg_idx, &seg_len) in segment_numels.iter().enumerate() {
+        let f = trust_ratios[seg_idx];
+        for j in offset..offset + seg_len {
+            m_data[j] = new_m[j];
+            v_data[j] = new_v[j];
+            param_data[j] = f32::mul_add(-f, t[j], param_data[j]);
+        }
+        offset += seg_len;
+    }
+    Ok(())
+}
+
+/// 区間 `numel` の合計が `expected` と一致することを書き込み前に検証する
+/// （overflow も `InvalidArgument`。イシュー #3837・REQ-8）。
+fn check_segments_total(
+    numels: impl Iterator<Item = usize>,
+    expected: usize,
+    what: &str,
+) -> Result<(), BackendError> {
+    let mut acc: usize = 0;
+    for n in numels {
+        acc = acc.checked_add(n).ok_or_else(|| {
+            BackendError::InvalidArgument(format!("{what}: segment numels sum overflowed usize"))
+        })?;
+    }
+    if acc != expected {
+        return Err(BackendError::InvalidArgument(format!(
+            "{what}: segment numels sum ({acc}) does not match param numel ({expected})"
+        )));
+    }
+    Ok(())
+}
+
+/// 全スライスの長さが `n` に一致することを書き込み前に検証する。
+fn check_all_len(n: usize, others: &[usize]) -> Result<(), BackendError> {
+    for &len in others {
+        check_sgd_handle_len(len, n)?;
+    }
+    Ok(())
+}
+
+/// SGD の区間適用。`segments == None` は従来のスカラー経路そのまま。
+fn sgd_step_segments(
+    param: &mut [f32],
+    grad: &[f32],
+    mut velocity: Option<&mut [f32]>,
+    config: &SgdStepConfig,
+    segments: Option<&[SgdStepSegment]>,
+) -> Result<(), BackendError> {
+    let Some(segs) = segments else {
+        return sgd_step_slices(param, grad, velocity, config);
+    };
+    let n = param.len();
+    check_segments_total(segs.iter().map(|s| s.numel), n, "sgd_step_device_grouped")?;
+    check_all_len(n, &[grad.len(), velocity.as_deref().map_or(n, |v| v.len())])?;
+    let mut off = 0usize;
+    for s in segs {
+        let end = off + s.numel;
+        let cfg = SgdStepConfig {
+            lr: s.lr,
+            weight_decay: s.weight_decay,
+            ..*config
+        };
+        sgd_step_slices(
+            &mut param[off..end],
+            &grad[off..end],
+            velocity.as_deref_mut().map(|v| &mut v[off..end]),
+            &cfg,
+        )?;
+        off = end;
+    }
+    Ok(())
+}
+
+/// Adam／AdamW の要素ループ（スカラー経路・区間経路で共有。演算列は従前のまま）。
+fn adam_step_slices(
+    param_data: &mut [f32],
+    grad_data: &[f32],
+    m_data: &mut [f32],
+    v_data: &mut [f32],
+    config: &AdamStepConfig,
+) {
+    for j in 0..param_data.len() {
+        let p = param_data[j];
+        let g = grad_data[j];
+
+        // `Adam::step`（coupled L2）: `weight_decay == 0.0` では decay 項の演算自体を
+        // skip する。`AdamW::step`（decoupled）: `g_eff` は常に生の `g`。
+        let g_eff = match config.kind {
+            AdamStepKind::Coupled if config.weight_decay != 0.0 => {
+                f32::mul_add(config.weight_decay, p, g)
+            }
+            AdamStepKind::Coupled => g,
+            AdamStepKind::Decoupled => g,
+            _ => g,
+        };
+        // coupled は decay 適用前の `p`、decoupled は `p * decay_factor`。
+        let p_eff = match config.kind {
+            AdamStepKind::Decoupled => p * config.decay_factor,
+            _ => p,
+        };
+
+        let m_new = f32::mul_add(config.beta1, m_data[j], (1.0 - config.beta1) * g_eff);
+        let v_new = f32::mul_add(
+            config.beta2,
+            v_data[j],
+            (1.0 - config.beta2) * g_eff * g_eff,
+        );
+        m_data[j] = m_new;
+        v_data[j] = v_new;
+
+        let denom = v_new.sqrt() / config.bias_correction2_sqrt + config.eps;
+        param_data[j] = p_eff - config.step_size * m_new / denom;
+    }
+}
+
+/// Adam の区間適用（`segments == None` はスカラー経路）。
+fn adam_step_segments(
+    param: &mut [f32],
+    grad: &[f32],
+    m: &mut [f32],
+    v: &mut [f32],
+    config: &AdamStepConfig,
+    segments: Option<&[AdamStepSegment]>,
+) -> Result<(), BackendError> {
+    let n = param.len();
+    check_all_len(n, &[grad.len(), m.len(), v.len()])?;
+    let Some(segs) = segments else {
+        adam_step_slices(param, grad, m, v, config);
+        return Ok(());
+    };
+    check_segments_total(segs.iter().map(|s| s.numel), n, "adam_step_device_grouped")?;
+    let mut off = 0usize;
+    for s in segs {
+        let end = off + s.numel;
+        let cfg = AdamStepConfig {
+            step_size: s.step_size,
+            weight_decay: s.weight_decay,
+            decay_factor: s.decay_factor,
+            ..*config
+        };
+        adam_step_slices(
+            &mut param[off..end],
+            &grad[off..end],
+            &mut m[off..end],
+            &mut v[off..end],
+            &cfg,
+        );
+        off = end;
+    }
+    Ok(())
+}
+
+/// RmsProp の要素ループ（スカラー・区間で共有）。`centered`／momentum の
+/// optional スライスは呼び出し側が事前検査済み（欠落は `Unsupported`）。
+fn rmsprop_step_slices(
+    param_data: &mut [f32],
+    grad_data: &[f32],
+    square_avg_data: &mut [f32],
+    mut grad_avg_data: Option<&mut [f32]>,
+    mut momentum_data: Option<&mut [f32]>,
+    config: &RmsPropStepConfig,
+) -> Result<(), BackendError> {
+    let use_momentum = config.momentum > 0.0;
+    let alpha = config.alpha;
+    let one_minus_alpha = 1.0 - alpha;
+    for j in 0..param_data.len() {
+        let p = param_data[j];
+        let mut g = grad_data[j];
+        if config.weight_decay != 0.0 {
+            g = f32::mul_add(config.weight_decay, p, g);
+        }
+
+        square_avg_data[j] = f32::mul_add(alpha, square_avg_data[j], one_minus_alpha * g * g);
+
+        let avg = if config.centered {
+            let Some(grad_avg_data) = grad_avg_data.as_deref_mut() else {
+                return Err(BackendError::Unsupported(
+                    "rmsprop_step_device: centered enabled but no grad_avg buffer provided".into(),
+                ));
+            };
+            let start = grad_avg_data[j];
+            let end = g;
+            let weight = one_minus_alpha;
+            grad_avg_data[j] = if weight.abs() < 0.5 {
+                start + weight * (end - start)
+            } else {
+                end - (end - start) * alpha
+            };
+            (square_avg_data[j] - grad_avg_data[j] * grad_avg_data[j]).sqrt()
+        } else {
+            square_avg_data[j].sqrt()
+        };
+        let avg = avg + config.eps;
+
+        if use_momentum {
+            let Some(momentum_data) = momentum_data.as_deref_mut() else {
+                return Err(BackendError::Unsupported(
+                    "rmsprop_step_device: momentum enabled but no momentum_buf buffer provided"
+                        .into(),
+                ));
+            };
+            let buf = f32::mul_add(config.momentum, momentum_data[j], g / avg);
+            momentum_data[j] = buf;
+            param_data[j] = p - config.lr * buf;
+        } else {
+            param_data[j] = p - (config.lr * g) / avg;
+        }
+    }
+    Ok(())
+}
+
+/// RmsProp の区間適用（`segments == None` はスカラー経路）。
+fn rmsprop_step_segments(
+    param: &mut [f32],
+    grad: &[f32],
+    square_avg: &mut [f32],
+    mut grad_avg: Option<&mut [f32]>,
+    mut momentum: Option<&mut [f32]>,
+    config: &RmsPropStepConfig,
+    segments: Option<&[RmsPropStepSegment]>,
+) -> Result<(), BackendError> {
+    let n = param.len();
+    check_all_len(
+        n,
+        &[
+            grad.len(),
+            square_avg.len(),
+            grad_avg.as_deref().map_or(n, |s| s.len()),
+            momentum.as_deref().map_or(n, |s| s.len()),
+        ],
+    )?;
+    let Some(segs) = segments else {
+        return rmsprop_step_slices(param, grad, square_avg, grad_avg, momentum, config);
+    };
+    check_segments_total(
+        segs.iter().map(|s| s.numel),
+        n,
+        "rmsprop_step_device_grouped",
+    )?;
+    let mut off = 0usize;
+    for s in segs {
+        let end = off + s.numel;
+        let cfg = RmsPropStepConfig {
+            lr: s.lr,
+            weight_decay: s.weight_decay,
+            ..*config
+        };
+        rmsprop_step_slices(
+            &mut param[off..end],
+            &grad[off..end],
+            &mut square_avg[off..end],
+            grad_avg.as_deref_mut().map(|x| &mut x[off..end]),
+            momentum.as_deref_mut().map(|x| &mut x[off..end]),
+            &cfg,
+        )?;
+        off = end;
+    }
+    Ok(())
+}
+
+/// Adagrad の要素ループ（スカラー・区間で共有）。
+fn adagrad_step_slices(
+    param_data: &mut [f32],
+    grad_data: &[f32],
+    state_sum_data: &mut [f32],
+    config: &AdagradStepConfig,
+) {
+    for j in 0..param_data.len() {
+        let p = param_data[j];
+        let mut g = grad_data[j];
+        if config.weight_decay != 0.0 {
+            g = f32::mul_add(config.weight_decay, p, g);
+        }
+        state_sum_data[j] = f32::mul_add(g, g, state_sum_data[j]);
+        let std = state_sum_data[j].sqrt() + config.eps;
+        param_data[j] = p - (config.clr * g) / std;
+    }
+}
+
+/// Adagrad の区間適用（`segments == None` はスカラー経路）。
+fn adagrad_step_segments(
+    param: &mut [f32],
+    grad: &[f32],
+    state_sum: &mut [f32],
+    config: &AdagradStepConfig,
+    segments: Option<&[AdagradStepSegment]>,
+) -> Result<(), BackendError> {
+    let n = param.len();
+    check_all_len(n, &[grad.len(), state_sum.len()])?;
+    let Some(segs) = segments else {
+        adagrad_step_slices(param, grad, state_sum, config);
+        return Ok(());
+    };
+    check_segments_total(
+        segs.iter().map(|s| s.numel),
+        n,
+        "adagrad_step_device_grouped",
+    )?;
+    let mut off = 0usize;
+    for s in segs {
+        let end = off + s.numel;
+        let cfg = AdagradStepConfig {
+            clr: s.clr,
+            weight_decay: s.weight_decay,
+            ..*config
+        };
+        adagrad_step_slices(
+            &mut param[off..end],
+            &grad[off..end],
+            &mut state_sum[off..end],
+            &cfg,
+        );
+        off = end;
     }
     Ok(())
 }

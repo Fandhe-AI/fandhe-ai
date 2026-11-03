@@ -355,6 +355,16 @@ impl DeviceParamStore {
         config: &SgdConfig,
     ) -> Result<TrainStepLoss, BackendError> {
         let layers = self.precheck_train_chain(tape, x, y, steps, config)?;
+        // groups ありはチェーン非対応。最初の確保・書き込み・capture 試行より前に
+        // `Unsupported` を返し、facade の第 2 段が Tape 経路へ全体フォールバックして
+        // そこで group が効く（イシュー #3837・設計 §19.5。共有の precheck には置かない:
+        // facade 第 1 段の validate はフォールバックしないため）。
+        if self.has_slot_groups() {
+            return Err(BackendError::Unsupported(
+                "DeviceParamStore::train_step_device_chain: param groups are not supported on the chain path"
+                    .to_string(),
+            ));
+        }
         let use_momentum = config.momentum != 0.0;
         let is_first_step = !self.sgd_used;
         let ops = tape.ops();

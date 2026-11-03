@@ -29,4 +29,13 @@ pub mod resident_input;
 mod sgd;
 
 pub use device_store::{DeviceParamStore, ResidentLeaf};
+
+/// `DeviceParamStore` の param groups 付き構築の内部入口（イシュー #3837・設計
+/// `docs/autodiff-param-groups-decision.md` §19）。`DeviceParamStore` の inherent
+/// `pub fn` は facade が型ごと再エクスポートして公開面になるため、`resident_input` と
+/// 同じくフリー関数をこの `pub mod` に置く（facade はフルパスで呼ぶだけで
+/// 再エクスポートしない。facade の入口は #3838）。
+pub mod resident_param_groups {
+    pub use super::device_store::device_param_store_with_slot_groups;
+}
 pub use sgd::{Sgd, SgdConfig};

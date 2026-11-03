@@ -243,3 +243,12 @@ facade/tests/device_param_store_bench.rs`）が計測する `forward_resident`
 は内部で新経路 `register_resident_params` を呼ぶため、6〜8 節の実測値・
 理論値の解釈に変更はない。設計の詳細は `docs/device-resident-update-
 design.md`「追補（#1022・#1023 統合、R3）」節の同項目を正とする。
+
+## 10. 追補（イシュー #3837）: param groups 対応後の既定経路（groups 空）の前後比較
+
+`DeviceParamStore` の常駐更新に param groups の区間テーブル分岐を足した（`docs/autodiff-param-groups-decision.md` §19.12）。groups 空（`slot_groups == None`）の既定経路が変わらないことの確認として、**同一マシン・同一コマンド**で変更前（`origin/main` = `d1b5acd97`）と変更後のベンチを交互に 5 回ずつ、2 セット（計 10 回ずつ）計測した。record only（hard assert なし）で、判定は中央値の比較。
+
+- コマンド: `cargo test --release -p fandhe-ai --test device_param_store_bench --no-run` で得た実行ファイルを前後それぞれ保存し、`legacy_vs_resident_per_step_cpu --nocapture` を交互に実行（Linux CPU。GPU は計測していない）。
+- 比べ方（計測前に固定）: resident の 1 step 全体（`resident_total_median_s`）と更新フェーズ単体（`resident_update_median_s`）の、10 回の中央値。
+- 結果（10 回の中央値）: 1 step 全体は変更前 68.5 µs、変更後 72.1 µs（+5%）。更新フェーズは変更前 1.065 µs、変更後 1.083 µs（+1.7%）。1 回ごとの値は 1 step 全体で 59.99〜81.76 µs に散らばり（同一バイナリの繰り返しでも四分位が ±20% 程度）、差はノイズの範囲内。変更後のコードが groups 空で足すのは `Option::is_none` の分岐だけで、区間表の構築やアロケーションは行わない。
+- 結論: 既定経路の有意な後退は観測されない（ただし CPU の小さい形状では揺らぎが大きく、±数 % の差は検出できない）。GPU（GB10・Mac）は **未実測**（#3862・#3863）。groups ありの性能は計測していない。

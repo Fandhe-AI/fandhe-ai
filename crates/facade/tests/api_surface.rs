@@ -18456,6 +18456,73 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
         );
     }
 }
+/// イシュー #3837: `DeviceParamStore` の param groups 付き構築の内部入口
+/// `device_param_store_with_slot_groups` は `autodiff/src/optim/device_store/param_groups.rs` に
+/// 1 件だけ宣言され、facade の `src/` からは宣言も参照も無いこと（facade の入口は #3838 が
+/// `impl Sequential` 内に 1 件足す。その際に本ガードの facade 側の期待を更新する）。
+/// `DeviceParamStore` の inherent `pub fn` を増やさず `optim::resident_param_groups`
+/// （`pub mod`）のフリー関数にしているのは、facade が型ごと再エクスポートして公開面になるのを
+/// 避けるため。
+#[test]
+fn workspace_declares_resident_param_group_entry_only_in_allowed_locations() {
+    const NAME: &str = "device_param_store_with_slot_groups";
+    let crates_dir = workspace_crates_dir();
+    let mut declared: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut facade_mentions: Vec<String> = Vec::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .expect("workspace crates ディレクトリが読める")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let count = count_fn_declarations_by_name(&tokens, NAME);
+            if count > 0 {
+                *declared.entry(rel.clone()).or_insert(0) += count;
+            }
+            if rel.starts_with("facade/src/")
+                && (cleaned.contains(NAME) || cleaned.contains("resident_param_groups"))
+            {
+                facade_mentions.push(rel);
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [(
+        "autodiff/src/optim/device_store/param_groups.rs".to_string(),
+        1usize,
+    )]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        declared, expected,
+        "内部入口の宣言位置・件数が承認形と異なる"
+    );
+    assert!(
+        facade_mentions.is_empty(),
+        "facade の src/ が内部入口を宣言・参照している（#3838 の承認前）: {facade_mentions:?}"
+    );
+
+    // 自己テスト: 二重宣言・別ファイルの宣言は件数として検出できる。
+    let double =
+        tokenize_including_punctuation(&format!("pub fn {NAME}() {{}} pub fn {NAME}() {{}}"));
+    assert_eq!(count_fn_declarations_by_name(&double, NAME), 2);
+    let none = tokenize_including_punctuation("pub fn other_name() {}");
+    assert_eq!(count_fn_declarations_by_name(&none, NAME), 0);
+}
+
 /// workspace 全体（`crates/*/src/`）を再帰走査し、`step_with_groups`・
 /// `step_with_slot_hparams`・`resolve_slot_hparams`・
 /// `compile_with_param_groups` の `fn` 宣言の定義元集合を固定する

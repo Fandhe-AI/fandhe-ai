@@ -67,6 +67,7 @@ pub struct MetalSgd {
 /// `SgdStepConfig`（`tensor-core::backend_ops`）と同一のハイパー
 /// パラメータをカーネル起動用にまとめたもの（`backend-cuda::sgd::
 /// SgdKernelParams` の Metal 対応）。
+#[derive(Clone, Copy)]
 pub struct SgdKernelParams {
     pub lr: f32,
     pub momentum: f32,
@@ -159,6 +160,7 @@ impl MetalSgd {
                     grad,
                     velocity_buf,
                     numel as u32,
+                    0,
                     params,
                     use_momentum,
                 );
@@ -167,6 +169,68 @@ impl MetalSgd {
 
         // `token` が `None` の場合のみここで待つ（上記ドキュメント参照）。
         // `Some` の場合はバッチ化された非同期契約のため待たずに返す。
+        match token {
+            None => ctx.synchronize(),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// 区間テーブル版 SGD（イシュー #3837・設計 `docs/autodiff-param-groups-decision.md`
+    /// §19）。同一の encoder 内で、区間ごとに既存 `sgd_step_f32` を `setBuffer` の
+    /// バイトオフセット（`区間先頭 * 4`）と区間 `numel` で起動する（新規 MSL なし。
+    /// カーネル本体・`fma` 順序・境界検査は無変更のため、区間 s の結果は「config の
+    /// lr／weight_decay を区間値で上書きしたスカラー版を部分範囲へ適用した結果」と
+    /// 構造的に同一）。同期契約は [`MetalSgd::run`] と同一（`token` 有無）。
+    /// 実機 parity は未実測（#3863）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_grouped(
+        &self,
+        ctx: &MetalContext,
+        param: &MetalBuffer,
+        grad: &MetalBuffer,
+        velocity: Option<&MetalBuffer>,
+        segments: &[fandhe_ai_tensor_core::SgdStepSegment],
+        base: &SgdKernelParams,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<(), MetalError> {
+        let numel = segments.iter().map(|s| s.numel).sum::<usize>();
+        validate_sgd_len(numel)?;
+        if numel == 0 {
+            return Ok(());
+        }
+        let use_momentum = if velocity.is_some() { 1i32 } else { 0i32 };
+        let velocity_buf = velocity.unwrap_or(grad);
+        // `resources` の retain 契約は `run` と同一（バッチの synchronize 完了まで 3 本を保持）。
+        ctx.encode(
+            "sgd_step_f32",
+            &[param.raw(), grad.raw(), velocity_buf.raw()],
+            token,
+            |encoder| {
+                let mut off = 0usize;
+                for seg in segments {
+                    if seg.numel == 0 {
+                        continue;
+                    }
+                    let p = SgdKernelParams {
+                        lr: seg.lr,
+                        weight_decay: seg.weight_decay,
+                        ..*base
+                    };
+                    encode_sgd_dispatch(
+                        encoder,
+                        &self.sgd_step_f32,
+                        param,
+                        grad,
+                        velocity_buf,
+                        seg.numel as u32,
+                        off * std::mem::size_of::<f32>(),
+                        &p,
+                        use_momentum,
+                    );
+                    off += seg.numel;
+                }
+            },
+        )?;
         match token {
             None => ctx.synchronize(),
             Some(_) => Ok(()),
@@ -186,6 +250,7 @@ fn encode_sgd_dispatch(
     grad_buf: &MetalBuffer,
     velocity_buf: &MetalBuffer,
     numel: u32,
+    offset_bytes: usize,
     params: &SgdKernelParams,
     use_momentum: i32,
 ) {
@@ -201,9 +266,9 @@ fn encode_sgd_dispatch(
     // 生存を保証していたが、`ctx.encode` は待たずに復帰するため、この
     // retain 列が生存契約の担い手になった）。
     unsafe {
-        encoder.setBuffer_offset_atIndex(Some(param_buf.raw()), 0, 0);
-        encoder.setBuffer_offset_atIndex(Some(grad_buf.raw()), 0, 1);
-        encoder.setBuffer_offset_atIndex(Some(velocity_buf.raw()), 0, 2);
+        encoder.setBuffer_offset_atIndex(Some(param_buf.raw()), offset_bytes, 0);
+        encoder.setBuffer_offset_atIndex(Some(grad_buf.raw()), offset_bytes, 1);
+        encoder.setBuffer_offset_atIndex(Some(velocity_buf.raw()), offset_bytes, 2);
     }
 
     let nesterov_i = if params.nesterov { 1i32 } else { 0i32 };
