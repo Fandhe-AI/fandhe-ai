@@ -1379,6 +1379,7 @@ impl MetalBackendOps {
         velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
         config: &fandhe_ai_tensor_core::SgdStepConfig,
         token: Option<&DispatchFailureCell>,
+        segments: Option<&[fandhe_ai_tensor_core::SgdStepSegment]>,
     ) -> Result<(), BackendError> {
         if param.device() != Device::Metal || grad.device() != Device::Metal {
             return Err(BackendError::DeviceMismatch);
@@ -1414,6 +1415,13 @@ impl MetalBackendOps {
         }
 
         let numel = param.numel();
+        if let Some(segs) = segments {
+            check_grouped_segment_total(
+                segs.iter().map(|s| s.numel),
+                numel,
+                "sgd_step_device_grouped",
+            )?;
+        }
         if numel == 0 {
             return Ok(());
         }
@@ -1462,15 +1470,26 @@ impl MetalBackendOps {
             nesterov: config.nesterov,
             is_first_step: config.is_first_step,
         };
-        sgd.run(
-            &ctx,
-            param_metal_buf,
-            grad_metal_buf,
-            velocity_metal_buf,
-            numel,
-            &kernel_params,
-            token,
-        )
+        match segments {
+            None => sgd.run(
+                &ctx,
+                param_metal_buf,
+                grad_metal_buf,
+                velocity_metal_buf,
+                numel,
+                &kernel_params,
+                token,
+            ),
+            Some(segs) => sgd.run_grouped(
+                &ctx,
+                param_metal_buf,
+                grad_metal_buf,
+                velocity_metal_buf,
+                segs,
+                &kernel_params,
+                token,
+            ),
+        }
         .map_err(map_metal_error)
     }
 
@@ -1824,11 +1843,12 @@ impl MetalBackendOps {
         &self,
         param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
         grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
-        m: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
-        v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        moments: fandhe_ai_tensor_core::LambMoments<'_>,
         config: &fandhe_ai_tensor_core::AdamStepConfig,
         token: Option<&DispatchFailureCell>,
+        segments: Option<&[fandhe_ai_tensor_core::AdamStepSegment]>,
     ) -> Result<(), BackendError> {
+        let fandhe_ai_tensor_core::LambMoments { m, v } = moments;
         if param.device() != Device::Metal
             || grad.device() != Device::Metal
             || m.device() != Device::Metal
@@ -1849,6 +1869,26 @@ impl MetalBackendOps {
         // する（`backend-cpu::ops::adam_step_device`／`backend-cuda::
         // ops::adam_step_device` と同じ「どの要素も更新前」契約）。
         let flags = crate::adam_model::adam_kernel_flags(config.kind, config.weight_decay)?;
+        // 区間ごとのフラグ（coupled の weight decay 有無は区間値で再評価する）。ドライバ接触前に
+        // 全区間を評価し、未知 kind は書き込み前に拒否する。
+        let seg_flags: Option<Vec<(fandhe_ai_tensor_core::AdamStepSegment, _)>> = match segments {
+            Some(segs) => {
+                check_grouped_segment_total(
+                    segs.iter().map(|s| s.numel),
+                    param.numel(),
+                    "adam_step_device_grouped",
+                )?;
+                let mut out = Vec::with_capacity(segs.len());
+                for seg in segs {
+                    out.push((
+                        *seg,
+                        crate::adam_model::adam_kernel_flags(config.kind, seg.weight_decay)?,
+                    ));
+                }
+                Some(out)
+            }
+            None => None,
+        };
 
         let numel = param.numel();
         if numel == 0 {
@@ -1895,16 +1935,28 @@ impl MetalBackendOps {
         };
 
         let kernel_params = crate::adam::AdamKernelParams::from_config(config, flags);
-        adam.run(
-            &ctx,
-            param_metal_buf,
-            grad_metal_buf,
-            m_metal_buf,
-            v_metal_buf,
-            numel,
-            &kernel_params,
-            token,
-        )
+        match seg_flags.as_deref() {
+            None => adam.run(
+                &ctx,
+                param_metal_buf,
+                grad_metal_buf,
+                m_metal_buf,
+                v_metal_buf,
+                numel,
+                &kernel_params,
+                token,
+            ),
+            Some(segs) => adam.run_grouped(
+                &ctx,
+                param_metal_buf,
+                grad_metal_buf,
+                m_metal_buf,
+                v_metal_buf,
+                segs,
+                &kernel_params,
+                token,
+            ),
+        }
         .map_err(map_metal_error)
     }
 
@@ -2352,7 +2404,7 @@ impl BackendOps for MetalBackendOps {
         velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
         config: &fandhe_ai_tensor_core::SgdStepConfig,
     ) -> Result<(), BackendError> {
-        self.sgd_step_device_impl(param, grad, velocity, config, None)
+        self.sgd_step_device_impl(param, grad, velocity, config, None, None)
     }
 
     /// [`BackendOps::sgd_step_device_tracked`] の Metal オーバーライド
@@ -2374,7 +2426,38 @@ impl BackendOps for MetalBackendOps {
         config: &fandhe_ai_tensor_core::SgdStepConfig,
         token: &DispatchFailureCell,
     ) -> Result<(), BackendError> {
-        self.sgd_step_device_impl(param, grad, velocity, config, Some(token))
+        self.sgd_step_device_impl(param, grad, velocity, config, Some(token), None)
+    }
+
+    fn supports_grouped_optimizer_step(&self) -> bool {
+        true
+    }
+
+    /// 区間テーブル版 SGD（イシュー #3837・設計 §19）。区間ごとに既存 `sgd_step_f32` を
+    /// バッファオフセット付きで同一 encoder に起動する（`sgd.rs::MetalSgd::run_grouped`）。
+    /// `token: None` の本メソッドは `sgd_step_device` と同じ同期契約。
+    fn sgd_step_device_grouped(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+        segments: &[fandhe_ai_tensor_core::SgdStepSegment],
+    ) -> Result<(), BackendError> {
+        self.sgd_step_device_impl(param, grad, velocity, config, None, Some(segments))
+    }
+
+    /// [`Self::sgd_step_device_grouped`] のバッチ化（失敗トークン付き）版。
+    fn sgd_step_device_grouped_tracked(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+        segments: &[fandhe_ai_tensor_core::SgdStepSegment],
+        token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.sgd_step_device_impl(param, grad, velocity, config, Some(token), Some(segments))
     }
 
     /// Adam・AdamW の 1 パラメータ分の更新を in-place で実行する
@@ -2400,7 +2483,14 @@ impl BackendOps for MetalBackendOps {
         v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
         config: &fandhe_ai_tensor_core::AdamStepConfig,
     ) -> Result<(), BackendError> {
-        self.adam_step_device_impl(param, grad, m, v, config, None)
+        self.adam_step_device_impl(
+            param,
+            grad,
+            fandhe_ai_tensor_core::LambMoments { m, v },
+            config,
+            None,
+            None,
+        )
     }
 
     /// [`BackendOps::adam_step_device_tracked`] の Metal オーバーライド
@@ -2421,7 +2511,39 @@ impl BackendOps for MetalBackendOps {
         config: &fandhe_ai_tensor_core::AdamStepConfig,
         token: &DispatchFailureCell,
     ) -> Result<(), BackendError> {
-        self.adam_step_device_impl(param, grad, m, v, config, Some(token))
+        self.adam_step_device_impl(
+            param,
+            grad,
+            fandhe_ai_tensor_core::LambMoments { m, v },
+            config,
+            Some(token),
+            None,
+        )
+    }
+
+    /// 区間テーブル版 Adam／AdamW（`sgd_step_device_grouped` と同方針。イシュー #3837）。
+    fn adam_step_device_grouped(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        moments: fandhe_ai_tensor_core::LambMoments<'_>,
+        config: &fandhe_ai_tensor_core::AdamStepConfig,
+        segments: &[fandhe_ai_tensor_core::AdamStepSegment],
+    ) -> Result<(), BackendError> {
+        self.adam_step_device_impl(param, grad, moments, config, None, Some(segments))
+    }
+
+    /// [`Self::adam_step_device_grouped`] のバッチ化（失敗トークン付き）版。
+    fn adam_step_device_grouped_tracked(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        moments: fandhe_ai_tensor_core::LambMoments<'_>,
+        config: &fandhe_ai_tensor_core::AdamStepConfig,
+        segments: &[fandhe_ai_tensor_core::AdamStepSegment],
+        token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.adam_step_device_impl(param, grad, moments, config, Some(token), Some(segments))
     }
 
     /// GEMM 本体（f32）。片側のみが転置 view（NT: `b` が転置・TN: `a` が
@@ -6622,6 +6744,27 @@ fn validate_fused_leaf<'a>(
         }));
     }
     Ok(*x)
+}
+
+/// 区間 `numel` の合計が `expected` と一致することをデバイス接触前に検証する
+/// （overflow も `InvalidArgument`。イシュー #3837・REQ-8）。
+fn check_grouped_segment_total(
+    numels: impl Iterator<Item = usize>,
+    expected: usize,
+    what: &str,
+) -> Result<(), BackendError> {
+    let mut acc: usize = 0;
+    for n in numels {
+        acc = acc.checked_add(n).ok_or_else(|| {
+            BackendError::InvalidArgument(format!("{what}: segment numels sum overflowed usize"))
+        })?;
+    }
+    if acc != expected {
+        return Err(BackendError::InvalidArgument(format!(
+            "{what}: segment numels sum ({acc}) does not match param numel ({expected})"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
