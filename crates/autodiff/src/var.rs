@@ -5798,6 +5798,69 @@ impl<'t> Var<'t> {
         crate::bilinear_ops::bilinear(self, x2, weight, bias)
     }
 
+    // ---- similarity_ops 委譲メソッド（CosineSimilarity・PairwiseDistance。イシュー #3821・親 #3813）----
+    //
+    // 実体は `crate::similarity_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回を facade の正ガード
+    // （`var_similarity_ops_methods_are_thin_delegations`）で拒否する。
+
+    /// コサイン類似度（`torch.nn.functional.cosine_similarity(self, x2, dim, eps)` 相当）。
+    /// イシュー #3821。`crate::similarity_ops::cosine_similarity` へ 1 行委譲する。
+    ///
+    /// `s = Σ_dim (x1 / max(‖x1‖, eps)) · (x2 / max(‖x2‖, eps))`。`eps` は各ノルムへ個別のクランプで、
+    /// クランプは勾配に記録しない（straight-through。PyTorch と同じ）。`‖x1‖ == 0` の勾配は第 2 項のみ 0、
+    /// `0 < ‖x1‖ < eps` でも第 2 項を流す。NaN は伝播し、`eps = 0` のゼロベクトルは NaN になる。
+    /// 出力 shape は入力から `dim` を除いたもの。`self` と `other` は同 shape（broadcast しない）、
+    /// `eps` は有限かつ 0 以上、`dim < rank`。違反は `Result` の `Err`。PyTorch の既定値は
+    /// `dim = 1`・`eps = 1e-8`（Rust には既定引数が無いので明示する）。`create_graph` は型付きエラー。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let a = tape.var(&Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0], &[2, 2]).unwrap());
+    /// let b = tape.var(&Tensor::new(vec![1.0f32, 0.0, 1.0, 0.0], &[2, 2]).unwrap());
+    /// let s = a.cosine_similarity(&b, 1, 1e-8).unwrap();
+    /// assert_eq!(s.value().host_slice().to_vec(), vec![1.0, 0.0]);
+    /// assert!(a.cosine_similarity(&b, 2, 1e-8).is_err());
+    /// ```
+    pub fn cosine_similarity(
+        &self,
+        other: &Var<'t>,
+        dim: usize,
+        eps: f32,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::similarity_ops::cosine_similarity(self, other, dim, eps)
+    }
+
+    /// ペアワイズ距離（`torch.nn.functional.pairwise_distance(self, x2, p, eps, keepdim)` 相当）。
+    /// イシュー #3821。`crate::similarity_ops::pairwise_distance` へ 1 行委譲する。
+    ///
+    /// `d = ‖self − x2 + eps‖_p`（最後の軸で縮約。`eps` は差へ先に足す。`triplet_margin_loss` と同じ規約）。
+    /// `keepdim` が真なら最後の軸を長さ 1 で残す。`self` と `other` は同 shape（broadcast しない）、
+    /// rank 1 以上、`p` は有限かつ 1 以上（`0`・`inf`・`(0, 1)` は拒否。PyTorch との差分）、`eps` は有限かつ
+    /// 0 以上（PyTorch は無検査）。NaN は伝播し、`±inf` 要素を含む行の距離は `inf`。PyTorch の既定値は
+    /// `p = 2.0`・`eps = 1e-6`・`keepdim = false`。`create_graph` は型付きエラー。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let a = tape.var(&Tensor::new(vec![3.0f32, 4.0], &[1, 2]).unwrap());
+    /// let b = tape.var(&Tensor::new(vec![0.0f32, 0.0], &[1, 2]).unwrap());
+    /// let d = a.pairwise_distance(&b, 2.0, 0.0, false).unwrap();
+    /// assert_eq!(d.value().host_slice().to_vec(), vec![5.0]);
+    /// assert!(a.pairwise_distance(&b, 0.5, 0.0, false).is_err());
+    /// ```
+    pub fn pairwise_distance(
+        &self,
+        other: &Var<'t>,
+        p: f32,
+        eps: f32,
+        keepdim: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::similarity_ops::pairwise_distance(self, other, p, eps, keepdim)
+    }
+
     // ---- shape_view_ops 関連関数（meshgrid。イシュー #2678）----
 
     /// 1 次元テンソル列から座標格子を作る（`torch.meshgrid` 相当）。イシュー #2678。

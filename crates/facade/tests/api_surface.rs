@@ -45342,14 +45342,18 @@ const CG_PAYLOAD_EXPECTED: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// 恒久 fail-closed の Op（Op 単位。`=> false`）。`CtcLoss` は承認による恒久（#3767 回答 2）、
-/// 残る 5 つは §21.2 A 区分（構造的に再生不能）。
+/// fail-closed の Op（Op 単位。`=> false`）。区分は 3 つ。`CtcLoss` は承認による恒久（#3767 回答 2）、
+/// `Custom`・`LinearAct`・`LinearResident`・`OneHot`・`ResidentLeaf` は §21.2 A 区分（構造的に再生不能）。
+/// **`CosineSimilarity`・`PairwiseDistance` は恒久ではない**: #3768 の Q9 (a) で「false で始め、
+/// create_graph は別設計」と承認された（イシュー #3821・決定記録 §73）。対応する設計が入ればこの集合から外す。
 const CG_REJECT_OPS: &[&str] = &[
+    "CosineSimilarity",
     "CtcLoss",
     "Custom",
     "LinearAct",
     "LinearResident",
     "OneHot",
+    "PairwiseDistance",
     "ResidentLeaf",
 ];
 
@@ -45634,6 +45638,14 @@ const CG_FACADE_ACCEPT_MAP: &[(&str, &str)] = &[
 /// 定数葉になる〈§21.6〉。`LinearAct` は融合の内部 Op で autodiff 側の `create_graph_rejects_fused_linear_act`
 /// が固定する）。拒否の分類（恒久／承認済み未実装／本ツリー外）は決定記録 §72 の表を正とする。
 const CG_FACADE_REJECT_MAP: &[(&str, Option<&str>)] = &[
+    (
+        "CosineSimilarity",
+        Some("cosine_similarity_create_graph_is_rejected_via_facade"),
+    ),
+    (
+        "PairwiseDistance",
+        Some("pairwise_distance_create_graph_is_rejected_via_facade"),
+    ),
     (
         "CtcLoss",
         Some("ctc_loss_create_graph_is_rejected_via_facade"),
@@ -46940,6 +46952,366 @@ fn compat_sequential_has_no_bilinear_add_method_detects_offense() {
             .0
             .contains("add_bilinear")
     );
+}
+// =====================================================================
+// イシュー #3821（親 #3813・Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `Var::cosine_similarity`／`Var::pairwise_distance` の正ガード。承認形は「`Var` の inherent メソッド 2 件だけを
+// 公開し、自由関数モジュール `similarity_ops` は再エクスポートしない・層構造体を置かない・broadcast しない・
+// `Tensor<f32>`／`Tape` 上に同名メソッドを置かない」（Q1〜Q9 すべて (a)）。反転対象の否定ガード・保留 doctest は
+// 元から 0 件（設計記録 §0・§1）のため、承認形だけを許す正ガードを新設する。
+// 基準 sha: origin/main `1455ddbef`（行番号は固定しない）。
+// =====================================================================
+
+const SIMILARITY_COSINE_EXPECTED_BODY: &str =
+    "crate : : similarity_ops : : cosine_similarity ( self , other , dim , eps )";
+const SIMILARITY_PAIRWISE_EXPECTED_BODY: &str =
+    "crate : : similarity_ops : : pairwise_distance ( self , other , p , eps , keepdim )";
+
+/// 承認済みシグネチャ（`fn` 名から `{` の直前まで）のトークン列を空白区切りにした文字列。
+const SIMILARITY_COSINE_EXPECTED_SIGNATURE: &str = "fn cosine_similarity ( & self , other : & Var < 't > , dim : usize , eps : f32 ) -> Result < Var < 't > , AutodiffError >";
+const SIMILARITY_PAIRWISE_EXPECTED_SIGNATURE: &str = "fn pairwise_distance ( & self , other : & Var < 't > , p : f32 , eps : f32 , keepdim : bool ) -> Result < Var < 't > , AutodiffError >";
+
+/// 与えたソースで `fn <name>` が 1 件だけ宣言され、本体が `expected_body` の 1 行委譲か。
+fn similarity_var_body_ok(source: &str, name: &str, expected_body: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    count_fn_declarations_by_name(&tokens, name) == 1
+        && determinism_fn_body(&tokens, name).as_deref() == Some(expected_body)
+}
+
+/// `fn <name>` のシグネチャ（`fn` から最初の `{` の直前まで）を空白区切りで返す。宣言が 1 件でなければ `None`。
+fn similarity_fn_signature(source: &str, name: &str) -> Option<String> {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    if count_fn_declarations_by_name(&tokens, name) != 1 {
+        return None;
+    }
+    let start = (0..tokens.len().saturating_sub(1))
+        .find(|&i| tokens[i] == "fn" && tokens[i + 1] == name)?;
+    let end = (start..tokens.len()).find(|&i| tokens[i] == "{")?;
+    // rustfmt の末尾カンマと、トークナイザが 2 トークンへ割る `->` を正規化する。
+    Some(
+        tokens[start..end]
+            .join(" ")
+            .replace(" , )", " )")
+            .replace("- >", "->"),
+    )
+}
+
+/// `Var::cosine_similarity`／`Var::pairwise_distance` が `var.rs` に 1 件ずつあり、本体が
+/// `similarity_ops` への 1 行委譲である。
+#[test]
+fn var_similarity_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert!(
+        similarity_var_body_ok(
+            &content,
+            "cosine_similarity",
+            SIMILARITY_COSINE_EXPECTED_BODY
+        ),
+        "var.rs の Var::cosine_similarity が承認形（similarity_ops への 1 行委譲）と一致しない"
+    );
+    assert!(
+        similarity_var_body_ok(
+            &content,
+            "pairwise_distance",
+            SIMILARITY_PAIRWISE_EXPECTED_BODY
+        ),
+        "var.rs の Var::pairwise_distance が承認形（similarity_ops への 1 行委譲）と一致しない"
+    );
+}
+
+/// [`var_similarity_ops_methods_are_thin_delegations`] の自己テスト（すり替え・引数差し替え・欠落・重複）。
+#[test]
+fn var_similarity_ops_methods_are_thin_delegations_detects_offense() {
+    let ok_c = "impl Var { pub fn cosine_similarity(&self, other: &Var, dim: usize, eps: f32) -> R { \
+                crate::similarity_ops::cosine_similarity(self, other, dim, eps) } }";
+    let ok_p = "impl Var { pub fn pairwise_distance(&self, other: &Var, p: f32, eps: f32, keepdim: bool) -> R { \
+                crate::similarity_ops::pairwise_distance(self, other, p, eps, keepdim) } }";
+    assert!(similarity_var_body_ok(
+        ok_c,
+        "cosine_similarity",
+        SIMILARITY_COSINE_EXPECTED_BODY
+    ));
+    assert!(similarity_var_body_ok(
+        ok_p,
+        "pairwise_distance",
+        SIMILARITY_PAIRWISE_EXPECTED_BODY
+    ));
+    for bad in [
+        // 独自実装へのすり替え
+        "impl Var { pub fn cosine_similarity(&self, other: &Var, dim: usize, eps: f32) -> R { self.clone() } }",
+        // 引数の差し替え（eps を固定）
+        "impl Var { pub fn cosine_similarity(&self, other: &Var, dim: usize, eps: f32) -> R { \
+         crate::similarity_ops::cosine_similarity(self, other, dim, 0.0) } }",
+        // 欠落
+        "impl Var { pub fn other(&self) -> R { self.clone() } }",
+        // 重複宣言
+        "impl Var { pub fn cosine_similarity(&self, other: &Var, dim: usize, eps: f32) -> R { \
+         crate::similarity_ops::cosine_similarity(self, other, dim, eps) } \
+         pub fn cosine_similarity(&self, other: &Var, dim: usize, eps: f32) -> R { \
+         crate::similarity_ops::cosine_similarity(self, other, dim, eps) } }",
+    ] {
+        assert!(
+            !similarity_var_body_ok(bad, "cosine_similarity", SIMILARITY_COSINE_EXPECTED_BODY),
+            "{bad}"
+        );
+    }
+    for bad in [
+        "impl Var { pub fn pairwise_distance(&self, other: &Var, p: f32, eps: f32, keepdim: bool) -> R { \
+         crate::similarity_ops::pairwise_distance(self, other, p, eps, false) } }",
+        "impl Var { pub fn pairwise_distance(&self, other: &Var, p: f32, eps: f32, keepdim: bool) -> R { \
+         self.clone() } }",
+    ] {
+        assert!(
+            !similarity_var_body_ok(bad, "pairwise_distance", SIMILARITY_PAIRWISE_EXPECTED_BODY),
+            "{bad}"
+        );
+    }
+}
+
+/// `Var::cosine_similarity`／`Var::pairwise_distance` のシグネチャが承認形（設計記録 §1。`dim` は `usize`、
+/// `eps`・`p` は `f32`、`keepdim` は `bool`、broadcast 用の追加引数なし）と一致する。
+#[test]
+fn var_similarity_ops_methods_have_approved_signatures() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert_eq!(
+        similarity_fn_signature(&content, "cosine_similarity").as_deref(),
+        Some(SIMILARITY_COSINE_EXPECTED_SIGNATURE)
+    );
+    assert_eq!(
+        similarity_fn_signature(&content, "pairwise_distance").as_deref(),
+        Some(SIMILARITY_PAIRWISE_EXPECTED_SIGNATURE)
+    );
+}
+
+/// [`var_similarity_ops_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn var_similarity_ops_methods_have_approved_signatures_detects_offense() {
+    let ok = "impl<'t> Var<'t> { pub fn cosine_similarity(&self, other: &Var<'t>, dim: usize, eps: f32) \
+              -> Result<Var<'t>, AutodiffError> { crate::similarity_ops::cosine_similarity(self, other, dim, eps) } }";
+    assert_eq!(
+        similarity_fn_signature(ok, "cosine_similarity").as_deref(),
+        Some(SIMILARITY_COSINE_EXPECTED_SIGNATURE)
+    );
+    for bad in [
+        // dim を i64 に変更（負の dim の持ち込み）
+        "impl<'t> Var<'t> { pub fn cosine_similarity(&self, other: &Var<'t>, dim: i64, eps: f32) \
+         -> Result<Var<'t>, AutodiffError> { x } }",
+        // eps の欠落
+        "impl<'t> Var<'t> { pub fn cosine_similarity(&self, other: &Var<'t>, dim: usize) \
+         -> Result<Var<'t>, AutodiffError> { x } }",
+        // 戻り値の型の変更
+        "impl<'t> Var<'t> { pub fn cosine_similarity(&self, other: &Var<'t>, dim: usize, eps: f32) \
+         -> Var<'t> { x } }",
+        // 宣言なし
+        "impl Var { pub fn other(&self) {} }",
+    ] {
+        assert_ne!(
+            similarity_fn_signature(bad, "cosine_similarity").as_deref(),
+            Some(SIMILARITY_COSINE_EXPECTED_SIGNATURE),
+            "{bad}"
+        );
+    }
+}
+
+/// `fandhe_ai::{Var, Tensor, AutodiffError}` だけで 2 メソッドのシグネチャが承認形と一致し、手計算できる値が出る
+/// （スタブでは通らない値を選ぶ）。
+#[test]
+fn var_similarity_ops_are_reachable_via_facade_var() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    fn pin_c<'a, 't>(
+        _: fn(&'a Var<'t>, &'a Var<'t>, usize, f32) -> Result<Var<'t>, AutodiffError>,
+    ) {
+    }
+    fn pin_p<'a, 't>(
+        _: fn(&'a Var<'t>, &'a Var<'t>, f32, f32, bool) -> Result<Var<'t>, AutodiffError>,
+    ) {
+    }
+    pin_c(|a, b, dim, eps| a.cosine_similarity(b, dim, eps));
+    pin_p(|a, b, p, eps, kd| a.pairwise_distance(b, p, eps, kd));
+    let tape = fandhe_ai::tape();
+    let a = tape.var(&Tensor::new(vec![3.0f32, 4.0], &[1, 2]).unwrap());
+    let b = tape.var(&Tensor::new(vec![4.0f32, 3.0], &[1, 2]).unwrap());
+    let s = a.cosine_similarity(&b, 1, 1e-8).unwrap();
+    assert!((s.value().host_slice()[0] - 0.96).abs() < 1e-6);
+    let zero = tape.var(&Tensor::new(vec![0.0f32, 0.0], &[1, 2]).unwrap());
+    let d = a.pairwise_distance(&zero, 2.0, 0.0, false).unwrap();
+    assert_eq!(d.value().host_slice().to_vec(), vec![5.0]);
+}
+
+const SIMILARITY_FN_NAMES: [&str; 2] = ["cosine_similarity", "pairwise_distance"];
+
+/// `crates_dir` 配下の各クレート `src/` から [`SIMILARITY_FN_NAMES`] の `fn` 宣言を `相対パス::名前 -> 件数` で集める。
+fn scan_similarity_fn_declarations(
+    crates_dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートが見つからない");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in SIMILARITY_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    found
+}
+
+/// workspace 全体（`crates/*/src/`）の `fn cosine_similarity`／`fn pairwise_distance` が承認済みの置き場所だけにある
+/// （`autodiff/src/similarity_ops.rs` の自由関数と `autodiff/src/var.rs` の委譲を各 1 件）。`Tensor<f32>`／`Tape` 上の
+/// 同名メソッド（未承認経路）が増えるとここで検出する。
+#[test]
+fn workspace_declares_similarity_ops_fn_names_only_in_allowed_locations() {
+    let found = scan_similarity_fn_declarations(&workspace_crates_dir());
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/similarity_ops.rs::cosine_similarity",
+        "autodiff/src/similarity_ops.rs::pairwise_distance",
+        "autodiff/src/var.rs::cosine_similarity",
+        "autodiff/src/var.rs::pairwise_distance",
+    ]
+    .into_iter()
+    .map(|k| (k.to_string(), 1))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "cosine_similarity／pairwise_distance の fn 宣言が承認済みの置き場所と一致しない（迂回経路の混入か未承認の実装追加）"
+    );
+}
+
+/// [`workspace_declares_similarity_ops_fn_names_only_in_allowed_locations`] の否定プローブ。一時ディレクトリに
+/// 合成クレートを作り、未承認の置き場所（`Tensor`／`Tape` 上の同名メソッド）が検出され、コメント・文字列内の
+/// 記述は数えないことを確かめる。
+#[test]
+fn workspace_declares_similarity_ops_fn_names_detects_unapproved_locations() {
+    let root = std::env::temp_dir().join(format!(
+        "similarity_ops_probe_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let src = root.join("tensor-core").join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("lib.rs"),
+        "impl<T> Tensor<T> { pub fn cosine_similarity(&self) {} }\nimpl Tape { pub fn pairwise_distance(&self) {} }",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("other.rs"),
+        "// fn cosine_similarity() {}\nconst S: &str = \"fn pairwise_distance() {}\";",
+    )
+    .unwrap();
+    let found = scan_similarity_fn_declarations(&root);
+    let _ = std::fs::remove_dir_all(&root);
+    let keys: Vec<&str> = found.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "tensor-core/src/lib.rs::cosine_similarity",
+            "tensor-core/src/lib.rs::pairwise_distance"
+        ]
+    );
+}
+
+const SIMILARITY_IDENTS: [&str; 1] = ["similarity_ops"];
+
+/// facade src の `pub use` が `similarity_ops`（内部モジュール）を含む、または `pub mod similarity_ops`・内部クレートの
+/// glob 再エクスポートがある場合に違反の説明を返す。非 pub の `use`・コメント・文字列内の記述は違反としない。
+fn scan_similarity_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in SIMILARITY_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            if path_tokens.iter().any(|t| t == "fandhe_ai_autodiff")
+                && path_tokens.iter().any(|t| t == "*")
+            {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && let Some(name) = tokens.get(i + 2)
+            && name == "similarity_ops"
+        {
+            offending.push(format!("pub mod {name} 宣言"));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が `similarity_ops` を再エクスポート・独自宣言していない。
+#[test]
+fn facade_does_not_reexport_or_declare_similarity_ops() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_similarity_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が similarity_ops を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_similarity_ops`] の自己テスト。
+#[test]
+fn facade_does_not_reexport_or_declare_similarity_ops_detects_each_category() {
+    let offense = |src: &str| !scan_similarity_reexports_and_declarations(src).is_empty();
+    // 違反にならない例
+    assert!(!offense("use fandhe_ai_autodiff::similarity_ops;"));
+    assert!(!offense(
+        "// pub use similarity_ops::cosine_similarity;\nconst S: &str = \"pub use similarity_ops;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    // 違反の例
+    assert!(offense("pub use fandhe_ai_autodiff::similarity_ops;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::similarity_ops::{cosine_similarity, pairwise_distance};"
+    ));
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    assert!(offense("pub mod similarity_ops {}"));
 }
 // =====================================================================
 // イシュー #3822（Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:

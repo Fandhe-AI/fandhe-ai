@@ -1609,6 +1609,8 @@ impl Tape {
     ///   SVD・`eigh` の縮退、`layer_norm`／`batch_norm` の非有限要素、`±inf` 入力（NaN は伝播）。
     /// - 承認済みだが未実装（現状は拒否）: `scatter_reduce` の `Prod`。
     /// - 現時点の拒否で再評価の起票は承認済み・未起票: `matrix_norm` の `Nuc`・`Spectral`。
+    /// - 承認済み（#3768 Q9 (a)）・create_graph は別設計待ち（現状は拒否。恒久ではない）: `cosine_similarity`・
+    ///   `pairwise_distance`（イシュー #3821・決定記録 §73）。
     /// - 本ツリー外の既存の拒否: `selu`／`celu`／`softsign`／`hardsigmoid`／`log_sigmoid`／`atan2`。
     ///
     /// 対象 Op の集合は `crates/facade/tests/api_surface.rs` の正ガードが固定する。

@@ -350,6 +350,10 @@ pub mod shrink_ops;
 // Bilinear（`bilinear`。イシュー #3818・親 #3813）。既存 Op の合成のみ（新規 Op・カーネル・依存ゼロ）。
 // `Var::bilinear` の委譲メソッドだけ facade 公開（層型 `nn::Bilinear` は autodiff 内部）。
 pub mod bilinear_ops;
+// CosineSimilarity・PairwiseDistance（`cosine_similarity`・`pairwise_distance`。イシュー #3821・親 #3813）。
+// 新規 Op 2 種 + ホスト参照実装（`BackendOps`・カーネル・`unsafe`・依存ゼロ）。`Var` の委譲メソッドだけ
+// facade 公開（本モジュール自体は再エクスポートしない。`docs/autodiff-similarity-distance-decision.md`）。
+pub mod similarity_ops;
 // pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL（`bce_with_logits_loss_with`・
 // `hinge_embedding_loss`・`soft_margin_loss`・`gaussian_nll_loss`。イシュー #2652）。新規 Op 4 種 +
 // ホスト参照実装。`Var` の委譲メソッドとオプション型は #2677・#2854 で facade 公開済み（本モジュール自体は
