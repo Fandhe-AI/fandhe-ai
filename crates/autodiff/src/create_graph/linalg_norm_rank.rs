@@ -1,5 +1,5 @@
-//! `MatrixNorm`（`Fro`・`One`・`Inf`）・`SlogdetSign`・`MatrixRank` の `create_graph` 対応
-//! （イシュー #3806・親 #3734・決定記録 `docs/autodiff-higher-order-grad-decision.md` §43・§66）。
+//! `MatrixNorm`（`Fro`・`One`・`Inf`・`Nuc`・`Spectral`）・`SlogdetSign`・`MatrixRank` の `create_graph` 対応
+//! （イシュー #3806・#3991・親 #3734・決定記録 `docs/autodiff-higher-order-grad-decision.md` §43・§66・§76）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `validate_ancestors`（入口検査）・`replay_op`
 //! （公開メソッドへの自己再生）・`build_cgrads`（1 階 VJP の子テープ記録）から呼ばれる。
@@ -18,7 +18,13 @@
 //!   `g < 0` での `-0` まで 1 階と bit 一致）。構造は `g_b ⊙ S`（`S = matrix_norm_vjp(a, ord, 1)` の
 //!   符号定数。選択位置では ±1／0、他は 0）で、`A` に関する二階は 0、`g` を経由する分だけが残る
 //!   （[`one_inf_cgrad`]）。上流 `g` に非有限要素があれば拒否する（`g·0` を NaN にしないため）。
-//! - `Nuc`・`Spectral`: SVD の多出力に依存するため fail-closed のまま（`supports_create_graph` が false）。
+//! - `MatrixNorm`（`Nuc`・`Spectral`。#3991・§75 A1・§76）: 子テープ上の入力の写しに `Var::svd` を積み
+//!   （`SvdU`→`SvdS`→`SvdVh` の連続 push で push 順序契約を満たす）、構造は `g·(U Vh)`（`Nuc`）／
+//!   `g·(u₀ v₀ᵀ)`（`Spectral`）。`k` を経由する結合順で `m×m`・`n×n` を作らない。値は 1 階と同じ
+//!   `matrix_norm_vjp`（V3）。二階以降は §68 の SVD 基盤（`svd_vjp`）を通る。入口検査
+//!   （[`check_matrix_norm_svd`]）は §68 の `check_svd_triple` と同じ述語（空・σ == 0・縮退）を、
+//!   `Spectral` でも全ペアに当てる（二階の `svd_vjp` が全ペアで失敗するため。下位 σ のみの縮退も
+//!   保守的に拒否する）。
 //!
 //! **拒否条件**: `MatrixNorm` の入力に ±inf がある（NaN は伝播する。`stat_varnorm` の入口検査と共有）、
 //! `MatrixRank` で特異値が `rcond` の閾値付近にあり rank が f32 隣接値の範囲で一定でない
@@ -31,8 +37,9 @@
 
 use fandhe_ai_tensor_core::{MatrixNormOrd, Tensor};
 
+use super::decomp::{guard_matrix_norm_svd, svd_gap_degenerate};
 use super::linalg_cholesky_pinv::{next_f32, prev_f32};
-use super::linalg_fft::empty_grad;
+use super::linalg_fft::{empty_grad, to_f64};
 use super::select_reduce::bcast_upstream;
 use super::{child_value, push_v3};
 use crate::error::AutodiffError;
@@ -114,6 +121,76 @@ pub(super) fn one_inf_cgrad<'c>(
     let s_const = child.var_no_grad(&sign);
     let g_b = bcast_upstream(g, &in_shape, None)?;
     let composed = g_b.mul(&s_const)?;
+    push_v3(child, &composed, host)
+}
+
+/// `MatrixNorm`（`Nuc`・`Spectral`）の入口検査（`validate_ancestors` から、子テープへ書く前に呼ばれる）。
+/// 親テープには `Op::MatrixNorm` 1 ノードしかなく `check_svd_triple` が使えないため、ホストの SVD を
+/// 1 回実行して同じ述語（空の分解・σ == 0・`|σj² − σi²| < 1e-9`）を当てる。SVD が収束しない・σ が
+/// 非有限の入力も拒否する（fail-closed）。
+pub(super) fn check_matrix_norm_svd(a_val: &Tensor<f32>) -> Result<(), AutodiffError> {
+    if a_val.shape().len() != 2 || a_val.shape().contains(&0) {
+        return Err(reject(
+            "MatrixNorm(Nuc／Spectral): 空の分解、または入力が rank 2 でない",
+        ));
+    }
+    let (_u, s, _vh) = svd(a_val)
+        .map_err(|_| reject("MatrixNorm(Nuc／Spectral): SVD が収束しない、または入力が非有限"))?;
+    let s = to_f64(&s);
+    if s.iter().any(|x| !x.is_finite()) {
+        return Err(reject("MatrixNorm(Nuc／Spectral): 特異値が非有限"));
+    }
+    if s.contains(&0.0) {
+        return Err(reject(
+            "MatrixNorm(Nuc／Spectral): σ == 0 がある（二階は 1/σ が定義されない）",
+        ));
+    }
+    if svd_gap_degenerate(&s) {
+        return Err(reject(
+            "MatrixNorm(Nuc／Spectral): 特異値が近接／重複している（|σj² − σi²| < 1e-9。1 階の svd_vjp と同じ判定）",
+        ));
+    }
+    Ok(())
+}
+
+/// `MatrixNorm`（`Nuc`・`Spectral`）の d_input（V3）。`a_m` は子テープ上の入力の写し、`a_val` は
+/// 親の入力値、`g` は上流（shape `[]`）。入口検査は呼び出し前に済んでおり、ここでは総括判定
+/// （[`guard_matrix_norm_svd`]）を構造を積む前に行う（拒否は呼び出し側のロールバックで `child` を空へ戻す）。
+pub(super) fn nuc_spectral_cgrad<'c>(
+    child: &'c Tape,
+    g: &Var<'c>,
+    a_val: &Tensor<f32>,
+    a_m: &Var<'c>,
+    ord: MatrixNormOrd,
+) -> Result<Var<'c>, AutodiffError> {
+    let spectral = match ord {
+        MatrixNormOrd::Nuc => false,
+        MatrixNormOrd::Spectral => true,
+        _ => return Err(reject("MatrixNorm: Nuc／Spectral 以外の ord は対象外")),
+    };
+    let in_shape = a_val.shape().to_vec();
+    let g_data = dense_vec(&child_value(child, g)?);
+    if g_data.len() != 1 || !g_data[0].is_finite() {
+        return Err(reject("MatrixNorm: 上流 g が非有限、またはスカラーでない"));
+    }
+    let g_scalar = g_data[0];
+    let host = matrix_norm_vjp(a_val, ord, g_scalar)?;
+    let f = a_m.svd()?;
+    guard_matrix_norm_svd(
+        &child_value(child, &f.u)?,
+        &child_value(child, &f.s)?,
+        &child_value(child, &f.vh)?,
+        g_scalar,
+        spectral,
+    )?;
+    let p = if spectral {
+        let u0 = f.u.narrow(1, 0, 1)?.contiguous()?;
+        let v0 = f.vh.narrow(0, 0, 1)?.contiguous()?;
+        u0.matmul_fp32_strict(&v0)?
+    } else {
+        f.u.matmul_fp32_strict(&f.vh)?
+    };
+    let composed = bcast_upstream(g, &in_shape, None)?.mul(&p)?;
     push_v3(child, &composed, host)
 }
 

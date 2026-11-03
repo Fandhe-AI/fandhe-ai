@@ -1,6 +1,6 @@
-//! `MatrixNorm`（`Fro`・`One`・`Inf`）・`SlogdetSign`・`MatrixRank` の `create_graph`
-//! （`Tape::backward_create_graph`）対応（イシュー #3806・親 #3734・決定記録
-//! `docs/autodiff-higher-order-grad-decision.md` §43・§66）の受け入れ条件を公開 API 経由で直接検証する
+//! `MatrixNorm`（`Fro`・`One`・`Inf`・`Nuc`・`Spectral`）・`SlogdetSign`・`MatrixRank` の `create_graph`
+//! （`Tape::backward_create_graph`）対応（イシュー #3806・#3991・親 #3734・決定記録
+//! `docs/autodiff-higher-order-grad-decision.md` §43・§66・§76）の受け入れ条件を公開 API 経由で直接検証する
 //! 統合テスト。
 //!
 //! - Hessian を `Tape::backward` の 5 点中央差分（`create_graph` を経由しない独立経路）と REQ-2 統一複合
@@ -10,8 +10,9 @@
 //! - `cg.first_order()` は `Tape::backward` と bit 同一、`cg.grad(..)` も V3／ゼロ定数のため CPU で bit 一致。
 //!   先勝ちのタイ・`sign(0) = 0`・`g < 0` での `-0` も 1 階と一致する。孫テープと `jvp_create_graph` も確かめる。
 //! - 非有限の上流は `SlogdetSign`・`MatrixRank` では受理（ゼロ）、`MatrixNorm` では拒否。±inf の入力、
-//!   `Nuc`・`Spectral`、閾値付近の `MatrixRank` は `Err(Backward)` かつ `child.is_empty()` で、同じ `child` を
-//!   再利用できる。隣接する未対応 Op（`Op::Custom`）は fail-closed のまま。
+//!   閾値付近の `MatrixRank` は `Err(Backward)` かつ `child.is_empty()` で、同じ `child` を再利用できる。
+//! - `Nuc`・`Spectral`（#3991・§76）は節 8: Hessian・1 階 bit 一致・縮退／σ = 0／空／±inf／NaN の拒否と再試行・
+//!   `[100000,1]` で m×m を作らないこと・隣接 `Op::Custom` の fail-closed。隣接する未対応 Op（`Op::Custom`）は fail-closed のまま。
 //!
 //! GPU 実機 parity は `crates/facade/tests/create_graph_gpu_parity.rs`（`#[ignore]`・未実測。Phase 10 の
 //! #3857・#3859）で扱う。
@@ -169,9 +170,19 @@ where
             .expect("get")
             .expect("到達"),
     );
-    let cg2 = child
-        .backward_create_graph(&scalar, &grand)
-        .expect("孫テープへの再生（閉包性）");
+    let cg2 = match child.backward_create_graph(&scalar, &grand) {
+        Ok(cg2) => cg2,
+        // SVD 系（`nuc`／`spectral`）の総括判定は保守的で、三階の機構では桁落ちの見積りに掛かって
+        // 拒否されうる（§68.2・§76.4）。拒否なら型付きエラーで孫テープは空のままであること。
+        Err(AutodiffError::Backward(msg))
+            if ctx.starts_with("nuc") || ctx.starts_with("spectral") =>
+        {
+            assert!(grand.is_empty(), "{ctx}: 拒否後は孫テープが空");
+            eprintln!("NOTE {ctx}: 孫テープは保守的に拒否: {msg}");
+            return;
+        }
+        Err(e) => panic!("{ctx}: 孫テープへの再生（閉包性）: {e:?}"),
+    };
     let first = dense(cg2.first_order().get(&cx).expect("get").expect("到達"));
     let second = dense(&cg2.grad(&cx).expect("grad").expect("到達").to_tensor());
     for i in 0..direct.len() {
@@ -581,7 +592,7 @@ fn matrix_norm_fro_mandatory_vectors_three_stages() {
 // --- 6. 拒否域 ---------------------------------------------------------------------------
 
 #[test]
-fn matrix_norm_rejects_inf_input_nuc_spectral_child_empty() {
+fn matrix_norm_rejects_inf_input_child_empty() {
     for name in ["fro", "one", "inf"] {
         assert_rejected_and_child_reusable(
             &format!("{name} inf input"),
@@ -592,9 +603,9 @@ fn matrix_norm_rejects_inf_input_nuc_spectral_child_empty() {
     }
     for ord in [MatrixNormOrd::Nuc, MatrixNormOrd::Spectral] {
         assert_rejected_and_child_reusable(
-            &format!("{ord:?}"),
+            &format!("{ord:?} inf input"),
             move |_t, x| x.matrix_norm(ord)?.sum(None),
-            &[1.0, 2.0, 3.0, 4.0],
+            &[1.0, f32::INFINITY, 2.0, 3.0],
             &[2, 2],
         );
     }
@@ -700,4 +711,173 @@ fn linalg_nr_neighbouring_unsupported_op_stays_fail_closed() {
     let ok = y.sum(None).unwrap();
     tape.backward_create_graph(&ok, &child)
         .expect("拒否後の再試行は成功する");
+}
+
+// --- 8. Nuc・Spectral（イシュー #3991・決定記録 §75 A1・§76） ---------------------------------
+
+/// スペクトルがよく分離した（σ ≈ 3, 2, 1）一般行列。縦長・横長・正方で使う（`create_graph_decomp` と同型）。
+fn sv_separated(shape: &[usize]) -> Vec<f32> {
+    let cols = shape[1];
+    x_data(shape)
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let (r, c) = (i / cols, i % cols);
+            let d = if r == c { 3.0 - r as f32 } else { 0.0 };
+            v * 0.15 + d
+        })
+        .collect()
+}
+
+const SVD_NORMS: [(&str, MatrixNormOrd); 2] = [
+    ("nuc", MatrixNormOrd::Nuc),
+    ("spectral", MatrixNormOrd::Spectral),
+];
+
+#[test]
+fn nuc_spectral_hessian_matches_finite_difference() {
+    for shape in [[4usize, 3], [2, 3], [3, 3]] {
+        let x0 = sv_separated(&shape);
+        for (name, ord) in SVD_NORMS {
+            check_all(
+                &format!("{name} tanh {shape:?}"),
+                move |_t, x| x.matrix_norm(ord)?.tanh().sum(None),
+                &x0,
+                &shape,
+            );
+            check_all(
+                &format!("{name} sq {shape:?}"),
+                move |tape, x| {
+                    // 0.2 倍: 有限差分側（f32 の 1 階勾配）の丸めが REQ-2 の絶対許容に収まる大きさにする。
+                    let k = tape.var_no_grad(&t(vec![0.2], &[]));
+                    let n = x.matrix_norm(ord)?.mul(&k)?;
+                    n.mul(&n)?.sum(None)
+                },
+                &x0,
+                &shape,
+            );
+        }
+    }
+}
+
+#[test]
+fn nuc_spectral_first_order_and_cg_grad_bit_identical() {
+    for shape in [[4usize, 3], [2, 3], [3, 3]] {
+        let x0 = sv_separated(&shape);
+        for (name, ord) in SVD_NORMS {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(x0.clone(), &shape));
+            let loss = x.matrix_norm(ord).unwrap().sum(None).unwrap();
+            let plain = dense(tape.backward(&loss).unwrap().get(&x).unwrap().unwrap());
+            let cg = tape.backward_create_graph(&loss, &child).expect(name);
+            let first = dense(cg.first_order().get(&x).unwrap().unwrap());
+            let got = dense(&cg.grad(&x).unwrap().expect(name).to_tensor());
+            assert_eq!(bits(&first), bits(&plain), "{name} {shape:?}: first_order");
+            assert_eq!(
+                bits(&got),
+                bits(&plain),
+                "{name} {shape:?}: cg.grad は V3 で bit 一致"
+            );
+        }
+    }
+}
+
+#[test]
+fn nuc_spectral_degenerate_sigma0_empty_nan_rejected_child_empty_and_retry() {
+    let cases: Vec<(&str, Vec<f32>, Vec<usize>)> = vec![
+        (
+            "identity3",
+            vec![1., 0., 0., 0., 1., 0., 0., 0., 1.],
+            vec![3, 3],
+        ),
+        ("rotation", vec![0.6, -0.8, 0.8, 0.6], vec![2, 2]),
+        ("sigma0", vec![1., 0., 0., 0.], vec![2, 2]),
+        ("empty_0x3", vec![], vec![0, 3]),
+        ("empty_3x0", vec![], vec![3, 0]),
+        ("neg_inf", vec![1., f32::NEG_INFINITY, 2., 3.], vec![2, 2]),
+        ("nan", vec![1., f32::NAN, 2., 3.], vec![2, 2]),
+    ];
+    for (label, x0, shape) in cases {
+        for (name, ord) in SVD_NORMS {
+            let ctx = format!("{name} {label}");
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(x0.clone(), &shape));
+            let Ok(norm) = x.matrix_norm(ord) else {
+                continue; // forward 自体が拒否する入力は対象外。
+            };
+            let loss = norm.sum(None).unwrap();
+            let r = tape.backward_create_graph(&loss, &child);
+            assert!(
+                is_backward_err(&r),
+                "{ctx}: Err(Backward) のはず: {:?}",
+                r.as_ref().err()
+            );
+            assert!(child.is_empty(), "{ctx}: 拒否後は child が空");
+            let ok = x.sum(None).unwrap();
+            assert!(
+                tape.backward_create_graph(&ok, &child).is_ok(),
+                "{ctx}: 同じ child で再試行できる"
+            );
+        }
+    }
+}
+
+#[test]
+fn nuc_spectral_huge_upstream_rejected() {
+    for (name, ord) in SVD_NORMS {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(sv_separated(&[3, 2]), &[3, 2]));
+        let k = tape.var_no_grad(&t(vec![3e38], &[]));
+        let loss = x
+            .matrix_norm(ord)
+            .unwrap()
+            .mul(&k)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let r = tape.backward_create_graph(&loss, &child);
+        assert!(is_backward_err(&r), "{name}: 過大な上流は拒否");
+        assert!(child.is_empty(), "{name}: child は空");
+    }
+}
+
+#[test]
+fn nuc_spectral_cgrad_does_not_materialize_m_by_m() {
+    let (m, n) = (100_000usize, 1usize);
+    let data: Vec<f32> = (0..m * n)
+        .map(|i| (1.0 + ((i * 7) % 11) as f32 * 0.37) * 1000.0)
+        .collect();
+    for (name, ord) in SVD_NORMS {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(data.clone(), &[m, n]));
+        let loss = x.matrix_norm(ord).unwrap().sum(None).unwrap();
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .unwrap_or_else(|e| panic!("{name}: [100000,1] は受理されるはず: {e}"));
+        let g = dense(&cg.grad(&x).unwrap().unwrap().to_tensor());
+        assert!(g.iter().all(|v| v.is_finite()));
+    }
+}
+
+#[test]
+fn nuc_spectral_neighbouring_custom_stays_fail_closed() {
+    for (name, ord) in SVD_NORMS {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(sv_separated(&[3, 2]), &[3, 2]));
+        let y = x.matrix_norm(ord).unwrap();
+        let z = tape
+            .custom(Arc::new(IdentityCustomFn), &[y])
+            .expect("Tape::custom 登録成功");
+        let loss = z.sum(None).unwrap();
+        assert!(
+            is_backward_err(&tape.backward_create_graph(&loss, &child)),
+            "{name}: Op::Custom は拒否される"
+        );
+        assert!(child.is_empty(), "{name}: 拒否後は child が空");
+    }
 }

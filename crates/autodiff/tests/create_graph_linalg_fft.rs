@@ -10,16 +10,16 @@
 //! - 閉包性: 子テープ上の勾配を孫テープへ再生（`child.backward_create_graph`）しても二階の値が一致する。
 //! - 総括的な適用判定（決定記録 §30）: 拒否域の入力は `Err(Backward)` かつ `child.is_empty()`、
 //!   拒否のあと同じ `child` で再試行できる。ほどほどの大きさの入力は受理され全段が有限で一致する。
-//! - fail-closed に固定した 2 件（`MatrixNorm` の `Nuc`・`Spectral`。`QrQ`／`QrR` は #3807、
-//!   `SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors` は #3808 で対象化）が
-//!   型付きエラーで拒否されること。`requires_grad == false` の部分木にある場合は拒否されない。
+//! - fail-closed に固定していた 2 件（`MatrixNorm` の `Nuc`・`Spectral`）は #3991 で対象化し 0 件になった
+//!   （`QrQ`／`QrR` は #3807、`SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors` は #3808）。
+//!   恒久的に対象外の `Op::Custom` は `requires_grad == false` の部分木にある場合は拒否されない。
 
 #![allow(clippy::needless_range_loop)]
 
 mod common;
 
 use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Tape, Var};
-use fandhe_ai_tensor_core::{FftNorm, MatrixNormOrd, Tensor};
+use fandhe_ai_tensor_core::{FftNorm, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -873,60 +873,12 @@ fn moderate_scale_inputs_are_accepted_and_finite() {
     }
 }
 
-// --- 4. fail-closed に固定した 2 件 --------------------------------------------------------
-
-type Case = (
-    &'static str,
-    Vec<usize>,
-    Box<dyn for<'t> Fn(&'t Tape, &Var<'t>) -> Built<'t>>,
-);
+// --- 4. 共通の入力と fail-closed 見本 ------------------------------------------------------
+// `MatrixNorm` の `Nuc`・`Spectral` は #3991 で対象化したため、固定していた 2 件は 0 件になった
+// （拒否範囲は `create_graph_linalg_norm_rank.rs` の節 8 が扱う）。
 
 fn spd3() -> Vec<f32> {
     vec![4.0, 1.0, 0.5, 1.0, 3.0, 0.2, 0.5, 0.2, 2.0]
-}
-
-fn fail_closed_cases() -> Vec<(Case, Vec<f32>)> {
-    let sym3 = spd3();
-    vec![
-        (
-            (
-                "matrix_norm.nuc",
-                vec![3, 3],
-                Box::new(|_t, x| x.matrix_norm(MatrixNormOrd::Nuc)),
-            ),
-            sym3.clone(),
-        ),
-        (
-            (
-                "matrix_norm.spectral",
-                vec![3, 3],
-                Box::new(|_t, x| x.matrix_norm(MatrixNormOrd::Spectral)),
-            ),
-            sym3,
-        ),
-    ]
-}
-
-#[test]
-fn fail_closed_ops_are_rejected_with_typed_error_and_leave_child_empty() {
-    let cases = fail_closed_cases();
-    assert_eq!(
-        cases.len(),
-        2,
-        "fail-closed 固定は 2 件（Stft／Istft は #3804、Cholesky／Pinv／Lstsq は #3805、MatrixNorm〈Fro・One・Inf〉／SlogdetSign／MatrixRank は #3806、QrQ／QrR は #3807、SvdU／SvdS／SvdVh／EighValues／EighVectors は #3808 で対象化）"
-    );
-    for ((name, shape, build), x0) in cases {
-        let tape = Tape::new_with_ops(common::naive_ops());
-        let child = Tape::new_with_ops(common::naive_ops());
-        let x = tape.var(&t(x0, &shape));
-        let loss = build(&tape, &x).unwrap_or_else(|e| panic!("{name}: forward 構築: {e:?}"));
-        let r = tape.backward_create_graph(&loss, &child);
-        assert!(
-            is_backward_err(&r),
-            "{name}: Err(Backward) のはず（Ok または別エラー）"
-        );
-        assert!(child.is_empty(), "{name}: 拒否後は child が空");
-    }
 }
 
 /// 恒久的に create_graph 対象外の `Op::Custom` を使う恒等関数（untracked 部分木の見本）。

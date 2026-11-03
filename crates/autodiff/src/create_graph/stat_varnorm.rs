@@ -141,11 +141,13 @@ pub(super) fn validate_stat_varnorm(
             _ => return Err(invalid(format!("未知の VectorNormOrd {ord:?}"))),
         },
         Op::PNorm { input, dim, .. } => (*input, *dim, Kind::PNorm),
-        // MatrixNorm（イシュー #3806）: Fro・One・Inf だけ受理。±inf の拒否は L2 と同じ。
+        // MatrixNorm（イシュー #3806・#3991）: 全 ord（Fro・One・Inf・Nuc・Spectral）を受理。±inf の拒否は L2 と同じ。
         Op::MatrixNorm { input, ord } => match ord {
-            MatrixNormOrd::Fro | MatrixNormOrd::One | MatrixNormOrd::Inf => {
-                (*input, None, Kind::L2)
-            }
+            MatrixNormOrd::Fro
+            | MatrixNormOrd::One
+            | MatrixNormOrd::Inf
+            | MatrixNormOrd::Nuc
+            | MatrixNormOrd::Spectral => (*input, None, Kind::L2),
             _ => return Err(invalid(format!("MatrixNorm の ord {ord:?} は対象外"))),
         },
         _ => return Ok(()),

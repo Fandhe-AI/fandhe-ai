@@ -2025,20 +2025,46 @@ fn matrix_rank_create_graph_via_facade() {
     check_create_graph_family("matrix_rank", &x0, &[3, 3], matrix_rank_loss, true, 0.01);
 }
 
-/// `Nuc` は型付きエラーで拒否され、`child` は空のまま。
+/// `Nuc`・`Spectral`（イシュー #3991・決定記録 §76）は二階へ進む。σ が分離した縦長入力で、1 階 bit 一致・
+/// 二階の中心差分一致を `check_create_graph_family` が確かめる。
 #[test]
-fn matrix_norm_nuc_is_rejected_via_facade() {
-    let tape = fandhe_ai::tape();
-    let child = fandhe_ai::tape();
-    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
-    let loss = x
-        .matrix_norm(fandhe_ai::MatrixNormOrd::Nuc)
-        .unwrap()
-        .sum(None)
-        .unwrap();
-    let r = tape.backward_create_graph(&loss, &child);
-    assert!(matches!(r, Err(AutodiffError::Backward(_))));
-    assert_eq!(child.leaf_count(), 0, "拒否後は child が空");
+fn matrix_norm_nuc_spectral_create_graph_via_facade() {
+    use fandhe_ai::MatrixNormOrd::{Nuc, Spectral};
+    let x0 = [3.0, 0.1, 0.2, 2.0, 0.05, 0.15];
+    check_create_graph_family(
+        "matrix_norm_nuc",
+        &x0,
+        &[3, 2],
+        |t, x| matrix_norm_loss(t, x, Nuc),
+        true,
+        0.01,
+    );
+    check_create_graph_family(
+        "matrix_norm_spectral",
+        &x0,
+        &[3, 2],
+        |t, x| matrix_norm_loss(t, x, Spectral),
+        true,
+        0.01,
+    );
+}
+
+/// `Nuc`・`Spectral` は特異値が縮退する入力（単位行列）を型付きエラーで拒否し、`child` は空のまま。
+#[test]
+fn matrix_norm_nuc_spectral_degenerate_is_rejected_via_facade() {
+    for (label, ord) in [
+        ("matrix_norm_nuc_degenerate", fandhe_ai::MatrixNormOrd::Nuc),
+        (
+            "matrix_norm_spectral_degenerate",
+            fandhe_ai::MatrixNormOrd::Spectral,
+        ),
+    ] {
+        let tape = fandhe_ai::tape();
+        let child = fandhe_ai::tape();
+        let x = tape.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
+        let loss = x.matrix_norm(ord).unwrap().sum(None).unwrap();
+        assert_create_graph_rejected(label, &tape, &child, &loss);
+    }
 }
 
 // --- 分解 QR（イシュー #3807・決定記録 §44・§67） ----------------------------------------------
@@ -2685,21 +2711,6 @@ fn scatter_reduce_prod_overflow_is_rejected_via_facade() {
         .sum(None)
         .unwrap();
     assert_create_graph_rejected("scatter_reduce_prod_overflow", &tape, &child, &loss);
-}
-
-/// `MatrixNorm` の `Spectral` は現時点 fail-closed（`Nuc` は `matrix_norm_nuc_is_rejected_via_facade`）。
-/// 再評価の起票は承認済み（§44 点 11）だが未起票のため、「恒久」とは記録しない。
-#[test]
-fn matrix_norm_spectral_create_graph_is_rejected_via_facade() {
-    let tape = fandhe_ai::tape();
-    let child = fandhe_ai::tape();
-    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
-    let loss = x
-        .matrix_norm(fandhe_ai::MatrixNormOrd::Spectral)
-        .unwrap()
-        .sum(None)
-        .unwrap();
-    assert_create_graph_rejected("matrix_norm_spectral", &tape, &child, &loss);
 }
 
 /// `ScalarUnaryOp` の `Selu`／`Celu`／`Softsign`／`Hardsigmoid`／`LogSigmoid`（#2649）と

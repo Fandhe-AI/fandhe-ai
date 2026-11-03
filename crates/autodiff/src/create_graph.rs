@@ -76,7 +76,8 @@
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
 //! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。イシュー #3810（決定記録 §46・§70）で `Det` の拒否範囲を行別スケール＋2 のべき乗チャンク（値は V3）で受理へ広げた（`Inv`・`Solve`・`SlogdetLogAbsDet` は対象外として恒久化）。
-//! `MatrixNorm` の `Nuc`・`Spectral` は fail-closed に固定した（`Qr*` はイシュー #3807〈決定記録 §44・§67。実装は
+//! `MatrixNorm` の `Nuc`・`Spectral` は当初 fail-closed に固定したが、イシュー #3991（決定記録 §75・§76。実装は `linalg_norm_rank`
+//! サブモジュール。縮退・σ == 0・空行列は拒否）で対象にした（`Qr*` はイシュー #3807〈決定記録 §44・§67。実装は
 //! `decomp` サブモジュール。`m ≥ n` かつフルランクの入力だけ〉、`Svd*`・`Eigh*` はイシュー #3808〈決定記録 §44・§68。
 //! 同サブモジュール。縮退・σ == 0・空行列は拒否〉で対象にした）。
 //! `Stft`・`Istft` はイシュー #3804
@@ -690,6 +691,18 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         scatter_reduce::validate(&parent_nodes, parent.ops(), id, &node.op)?;
         // 統計縮約 4 Op（イシュー #3791）: 非有限入力・自由度不足を子テープへ書く前に拒否する。
         stat_varnorm::validate_stat_varnorm(&parent_nodes, parent.ops(), &node.op)?;
+        // MatrixNorm（Nuc・Spectral。イシュー #3991・決定記録 §76）: 空・σ == 0・縮退を、±inf の拒否
+        // （上の `validate_stat_varnorm`）の後で子テープへ書く前に確かめる。
+        if let Op::MatrixNorm {
+            input,
+            ord:
+                fandhe_ai_tensor_core::MatrixNormOrd::Nuc
+                | fandhe_ai_tensor_core::MatrixNormOrd::Spectral,
+        } = &node.op
+        {
+            let a_val = materialize_fallible(&parent_nodes, parent.ops(), *input)?;
+            linalg_norm_rank::check_matrix_norm_svd(a_val)?;
+        }
         // 正規化・再パラメータ 3 Op（イシュー #3794）: ±inf・退化統計（D≤0・ゼロノルム・σ=0）を
         // 子テープへ書く前に拒否する。
         norm_reparam::validate_norm_reparam(&parent_nodes, parent.ops(), &node.op)?;
@@ -3651,9 +3664,15 @@ fn build_cgrads<'c>(
                             let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
                             linalg_norm_rank::one_inf_cgrad(child, &g, a_val, ord)?
                         }
+                        fandhe_ai_tensor_core::MatrixNormOrd::Nuc
+                        | fandhe_ai_tensor_core::MatrixNormOrd::Spectral => {
+                            let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                            let a_m = get_mirror(mirror, input)?;
+                            linalg_norm_rank::nuc_spectral_cgrad(child, &g, a_val, &a_m, ord)?
+                        }
                         _ => {
                             return Err(AutodiffError::Backward(
-                                "create_graph: build_cgrads: MatrixNorm の Nuc／Spectral／未知 ord は対象外（内部契約違反）"
+                                "create_graph: build_cgrads: MatrixNorm の未知 ord は対象外（内部契約違反）"
                                     .into(),
                             ));
                         }
