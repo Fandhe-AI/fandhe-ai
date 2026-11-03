@@ -396,6 +396,26 @@ pub(crate) enum Op {
         options: crate::loss_ops::TripletMarginOptions,
         reduction: crate::var::Reduction,
     },
+    /// コサイン類似度（`F.cosine_similarity`。イシュー #3821・設計記録
+    /// `docs/autodiff-similarity-distance-decision.md`）。`x1`・`x2` は同 shape の追跡対象。
+    /// 縮約軸 `dim` を除いた shape を返す。`eps` は各ノルムへ個別のクランプ（勾配は
+    /// straight-through）。host の f64 で計算する融合対象外・常に実体化済みの Op。
+    CosineSimilarity {
+        x1: NodeId,
+        x2: NodeId,
+        dim: usize,
+        eps: f32,
+    },
+    /// ペアワイズ距離（`F.pairwise_distance`。イシュー #3821）。`x1`・`x2` は同 shape の追跡対象。
+    /// `‖x1 − x2 + eps‖_p` を最後の軸で縮約する（`keepdim` 真なら長さ 1 で残す）。
+    /// `CosineSimilarity` と同型の融合対象外・常に実体化済み。
+    PairwiseDistance {
+        x1: NodeId,
+        x2: NodeId,
+        p: f32,
+        eps: f32,
+        keepdim: bool,
+    },
     /// ポアソン負対数尤度損失（`PoissonNLLLoss`。PyTorch
     /// `nn.PoissonNLLLoss` 相当。イシュー #2167）。`input`・`target` の
     /// 両方が追跡対象（`target` は `KlDivLoss::target` と同型——値検査は
@@ -1972,6 +1992,7 @@ impl Op {
             // 理由で非適格）／`CosineEmbeddingLoss`／
             // `MarginRankingLoss`／`TripletMarginLoss`／
             // `PoissonNllLoss`（イシュー #2167。同型の理由で非適格）／
+            // `CosineSimilarity`／`PairwiseDistance`（イシュー #3821。同型の理由で非適格）／
             // `CtcLoss`（イシュー #2168。同型の理由で非適格）／
             // `BceWithLogitsPosWeightLoss`／`HingeEmbeddingLoss`／`SoftMarginLoss`／
             // `GaussianNllLoss`（イシュー #2652。同型の理由で非適格）／
@@ -1998,6 +2019,8 @@ impl Op {
             | Op::CosineEmbeddingLoss { .. }
             | Op::MarginRankingLoss { .. }
             | Op::TripletMarginLoss { .. }
+            | Op::CosineSimilarity { .. }
+            | Op::PairwiseDistance { .. }
             | Op::PoissonNllLoss { .. }
             | Op::BceWithLogitsPosWeightLoss { .. }
             | Op::HingeEmbeddingLoss { .. }
@@ -2323,6 +2346,10 @@ impl Op {
                 f(*anchor);
                 f(*positive);
                 f(*negative);
+            }
+            Op::CosineSimilarity { x1, x2, .. } | Op::PairwiseDistance { x1, x2, .. } => {
+                f(*x1);
+                f(*x2);
             }
             Op::CtcLoss { log_probs, .. } => f(*log_probs),
             Op::PoissonNllLoss { input, target, .. }
@@ -2814,7 +2841,11 @@ impl Op {
             ),
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
-            Op::CtcLoss { .. }
+            // `CosineSimilarity`／`PairwiseDistance`（イシュー #3821）は #3768 Q9 (a) の承認で
+            // false 開始。恒久ではなく、create_graph 対応は別設計の対象（`CG_REJECT_OPS` の区分参照）。
+            Op::CosineSimilarity { .. }
+            | Op::PairwiseDistance { .. }
+            | Op::CtcLoss { .. }
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }

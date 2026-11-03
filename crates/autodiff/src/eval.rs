@@ -4609,7 +4609,7 @@ pub(crate) fn sign0_f64(d: f64) -> f64 {
 /// (Σ (|v_i|/mx)^p)^(1/p)` を計算する）へ揃える。`mx == 0` は `0.0`・
 /// `mx` が `NaN` はそのまま伝播・`mx` が `inf`（入力に `±inf` 要素を
 /// 含む）は `inf` を返す（`vector_norm_p_along` と同じ判定順）。
-fn p_norm_f64(v: &[f64], p: f64) -> f64 {
+pub(crate) fn p_norm_f64(v: &[f64], p: f64) -> f64 {
     let mut mx = 0.0f64;
     for &d in v {
         mx = nan_propagating_max_f64(mx, d.abs());
@@ -4875,6 +4875,127 @@ pub(crate) fn triplet_distance_stats(
         diff_an,
         diff_pn,
     )
+}
+
+/// `CosineSimilarity` の 1 スライス分の統計（forward と VJP が共有。イシュー #3821）。
+/// すべて `f64`。`n*` はクランプ前の L2 ノルム、`c*` は `max(n*, eps)`（NaN は伝播）、
+/// `s` は `Σ (x1/c1)(x2/c2)`。
+pub(crate) struct CosineSliceStats {
+    pub(crate) n1: f64,
+    pub(crate) c1: f64,
+    pub(crate) c2: f64,
+    pub(crate) n2: f64,
+    pub(crate) s: f64,
+}
+
+/// `(outer, len, inner)` 分解で `base + k * inner`（`k < len`）の要素列から
+/// [`CosineSliceStats`] を計算する。要素は先に `f64` へ昇格してから二乗・積算する
+/// （正規化統計の `f64` アキュムレータ契約。`.claude/rules/coding-rust.md`）。
+pub(crate) fn cosine_slice_stats(
+    x1: &[f32],
+    x2: &[f32],
+    base: usize,
+    len: usize,
+    inner: usize,
+    eps: f64,
+) -> CosineSliceStats {
+    let mut ss1 = 0.0f64;
+    let mut ss2 = 0.0f64;
+    for k in 0..len {
+        let a = x1[base + k * inner] as f64;
+        let b = x2[base + k * inner] as f64;
+        ss1 += a * a;
+        ss2 += b * b;
+    }
+    let n1 = ss1.sqrt();
+    let n2 = ss2.sqrt();
+    // PyTorch の `clamp_min_(eps)` と同じく NaN は伝播させる（`f64::max` は NaN を無視する）。
+    let clamp = |n: f64| if n.is_nan() || n >= eps { n } else { eps };
+    let c1 = clamp(n1);
+    let c2 = clamp(n2);
+    let mut s = 0.0f64;
+    for k in 0..len {
+        let a = x1[base + k * inner] as f64;
+        let b = x2[base + k * inner] as f64;
+        s += (a / c1) * (b / c2);
+    }
+    CosineSliceStats { n1, c1, c2, n2, s }
+}
+
+/// `(outer, len, inner)` 分解（`dim` 軸を `len` とする）。呼び出し元が `dim < rank` を検証済みの前提。
+pub(crate) fn axis_split(shape: &[usize], dim: usize) -> (usize, usize, usize) {
+    let outer: usize = shape[..dim].iter().product();
+    let inner: usize = shape[dim + 1..].iter().product();
+    (outer, shape[dim], inner)
+}
+
+/// コサイン類似度の forward（`F.cosine_similarity` 相当。イシュー #3821）。数式・規約は
+/// `crate::similarity_ops` のモジュール doc 参照。検証（同 shape・`dim < rank`・`eps`）は
+/// 呼び出し元が済ませている前提。出力 shape は `dim` を除いた shape。
+pub(crate) fn cosine_similarity_forward(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    dim: usize,
+    eps: f32,
+) -> Tensor<f32> {
+    let shape = x1.shape().to_vec();
+    let d1 = dense_vec(x1);
+    let d2 = dense_vec(x2);
+    let (outer, len, inner) = axis_split(&shape, dim);
+    let mut out = vec![0f32; outer * inner];
+    for o in 0..outer {
+        for i in 0..inner {
+            let st = cosine_slice_stats(&d1, &d2, o * len * inner + i, len, inner, eps as f64);
+            out[o * inner + i] = st.s as f32;
+        }
+    }
+    let mut out_shape = shape;
+    out_shape.remove(dim);
+    build_tensor(out, &out_shape)
+}
+
+/// `PairwiseDistance` の 1 行分の差分ベクトル `x1 − x2 + eps`（`f64`、`eps` を差へ先に足す。
+/// `triplet_distance_stats` の `diff_ap` と同じ規約。forward と VJP が共有。イシュー #3821）。
+pub(crate) fn pairwise_row_diff(
+    x1: &[f32],
+    x2: &[f32],
+    base: usize,
+    d: usize,
+    eps: f64,
+) -> Vec<f64> {
+    (0..d)
+        .map(|k| x1[base + k] as f64 - x2[base + k] as f64 + eps)
+        .collect()
+}
+
+/// ペアワイズ距離の forward（`F.pairwise_distance` 相当。イシュー #3821）。最後の軸を縮約し、
+/// `keepdim` 真なら長さ 1 で残す。検証は呼び出し元が済ませている前提（rank >= 1）。
+pub(crate) fn pairwise_distance_forward(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    p: f32,
+    eps: f32,
+    keepdim: bool,
+) -> Tensor<f32> {
+    let shape = x1.shape().to_vec();
+    let d = shape[shape.len() - 1];
+    let rows: usize = shape[..shape.len() - 1].iter().product();
+    let d1 = dense_vec(x1);
+    let d2 = dense_vec(x2);
+    let out: Vec<f32> = (0..rows)
+        .map(|r| {
+            let diff = pairwise_row_diff(&d1, &d2, r * d, d, eps as f64);
+            p_norm_f64(&diff, p as f64) as f32
+        })
+        .collect();
+    let mut out_shape = shape;
+    if keepdim {
+        let last = out_shape.len() - 1;
+        out_shape[last] = 1;
+    } else {
+        out_shape.pop();
+    }
+    build_tensor(out, &out_shape)
 }
 
 /// トリプレットマージン損失の forward（PyTorch `nn.TripletMarginLoss`

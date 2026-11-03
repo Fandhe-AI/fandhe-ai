@@ -767,6 +767,30 @@ pub(crate) fn vjp(
                 (negative, dnegative),
             ]
         }
+        Op::CosineSimilarity { x1, x2, dim, eps } => {
+            let x1_val = materialize_fallible(nodes, ops, x1)?;
+            let x2_val = materialize_fallible(nodes, ops, x2)?;
+            let (dx1, dx2) = cosine_similarity_vjp(x1_val, x2_val, upstream, dim, eps);
+            vec![(x1, dx1), (x2, dx2)]
+        }
+        Op::PairwiseDistance {
+            x1,
+            x2,
+            p,
+            eps,
+            keepdim,
+        } => {
+            let x1_val = materialize_fallible(nodes, ops, x1)?;
+            let x2_val = materialize_fallible(nodes, ops, x2)?;
+            // upstream は出力 shape（`keepdim` 真なら入力と同 rank、偽なら 1 つ少ない）。要素数は行数で
+            // どちらでも同じなので VJP 本体は `keepdim` を見ない。不変条件だけ検査する。
+            debug_assert_eq!(
+                upstream.shape().len(),
+                x1_val.shape().len() - usize::from(!keepdim)
+            );
+            let (dx1, dx2) = pairwise_distance_vjp(x1_val, x2_val, upstream, p, eps);
+            vec![(x1, dx1), (x2, dx2)]
+        }
         Op::PoissonNllLoss {
             input,
             target,
@@ -9377,6 +9401,85 @@ pub(crate) fn triplet_margin_loss_vjp(
         build_tensor(dpositive, &shape),
         build_tensor(dnegative, &shape),
     )
+}
+
+/// `CosineSimilarity` の VJP（イシュー #3821）。`upstream` は出力 shape（`dim` を除いた shape）の
+/// テンソルで、損失のスカラー upstream とは異なり (outer, inner) の添字でスライスごとに掛ける。
+/// `∂s/∂x1_k = g·(x2_k/(c1·c2) − s·x1_k/(c1·n1))`。`n1 == 0` のとき第 2 項は 0。
+/// `0 < n1 < eps` でも第 2 項を流す（クランプを勾配に記録しない straight-through。
+/// PyTorch と同じ。設計記録 §5・#3768 Q2 (a)）。x2 側は対称。
+pub(crate) fn cosine_similarity_vjp(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    upstream: &Tensor<f32>,
+    dim: usize,
+    eps: f32,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = x1.shape().to_vec();
+    let d1 = dense_vec(x1);
+    let d2 = dense_vec(x2);
+    let g = dense_vec(upstream);
+    let (outer, len, inner) = eval::axis_split(&shape, dim);
+    let mut dx1 = vec![0f32; d1.len()];
+    let mut dx2 = vec![0f32; d1.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let base = o * len * inner + i;
+            let gv = g[o * inner + i] as f64;
+            let st = eval::cosine_slice_stats(&d1, &d2, base, len, inner, eps as f64);
+            for k in 0..len {
+                let idx = base + k * inner;
+                let a = d1[idx] as f64;
+                let b = d2[idx] as f64;
+                let t1 = if st.n1 == 0.0 {
+                    0.0
+                } else {
+                    st.s * a / (st.c1 * st.n1)
+                };
+                let t2 = if st.n2 == 0.0 {
+                    0.0
+                } else {
+                    st.s * b / (st.c2 * st.n2)
+                };
+                dx1[idx] = (gv * (b / (st.c1 * st.c2) - t1)) as f32;
+                dx2[idx] = (gv * (a / (st.c1 * st.c2) - t2)) as f32;
+            }
+        }
+    }
+    (build_tensor(dx1, &shape), build_tensor(dx2, &shape))
+}
+
+/// `PairwiseDistance` の VJP（イシュー #3821）。`upstream` は距離ごとのテンソル（`keepdim` に
+/// 依らず要素数は行数）。`dx1 = g·∇‖diff‖_p`・`dx2 = −dx1`（`diff = x1 − x2 + eps`、
+/// `eval::p_norm_grad_f64` を triplet と共有）。
+pub(crate) fn pairwise_distance_vjp(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    upstream: &Tensor<f32>,
+    p: f32,
+    eps: f32,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = x1.shape().to_vec();
+    let d = shape[shape.len() - 1];
+    let rows: usize = shape[..shape.len() - 1].iter().product();
+    let d1 = dense_vec(x1);
+    let d2 = dense_vec(x2);
+    let g = dense_vec(upstream);
+    let mut dx1 = vec![0f32; d1.len()];
+    let mut dx2 = vec![0f32; d1.len()];
+    for (r, &g_r) in g.iter().enumerate().take(rows) {
+        let base = r * d;
+        let diff = eval::pairwise_row_diff(&d1, &d2, base, d, eps as f64);
+        let dist = eval::p_norm_f64(&diff, p as f64);
+        let grad = eval::p_norm_grad_f64(&diff, p as f64, dist);
+        let gv = g_r as f64;
+        for k in 0..d {
+            let v = (gv * grad[k]) as f32;
+            dx1[base + k] = v;
+            dx2[base + k] = (-(gv * grad[k])) as f32;
+        }
+    }
+    (build_tensor(dx1, &shape), build_tensor(dx2, &shape))
 }
 
 /// `PoissonNllLoss` の VJP（イシュー #2167）。`crate::loss_ops::

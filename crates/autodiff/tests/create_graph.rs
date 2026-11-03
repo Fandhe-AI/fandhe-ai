@@ -5283,3 +5283,25 @@ fn create_graph_rejects_pad_mask_mixed_with_unsupported_op_and_keeps_child_empty
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());
 }
+
+// --- CosineSimilarity・PairwiseDistance の型付き拒否（イシュー #3821・設計記録
+//     `docs/autodiff-similarity-distance-decision.md` §4・§10）。#3768 Q9 (a) の承認で false 開始。
+//     恒久ではなく、create_graph 対応は別設計の対象。拒否は入口検査で、child は空のまま。
+
+#[test]
+fn create_graph_rejects_cosine_similarity_and_pairwise_distance() {
+    for which in ["cosine_similarity", "pairwise_distance"] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+        let b = tape.var(&t(vec![0.5, -1.0, 2.0, 1.0], &[2, 2]));
+        let y = match which {
+            "cosine_similarity" => a.cosine_similarity(&b, 1, 1e-8).unwrap(),
+            _ => a.pairwise_distance(&b, 2.0, 1e-6, false).unwrap(),
+        };
+        let loss = y.sum(None).unwrap();
+        let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+        assert!(matches!(err, AutodiffError::Backward(_)), "{which}");
+        assert!(child.is_empty(), "{which}: 拒否後は child が空");
+    }
+}

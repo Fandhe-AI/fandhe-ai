@@ -5382,3 +5382,11 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 実機（CUDA・Metal）の結果は**未実測**。#3856〜#3859 へ申し送る。baseline は作らない。
 - スコープ外: `Prod`・`Nuc`・`Spectral` の実装、`TapeF64` の対象一覧（追跡表の項目 2）、GPU 実機 parity、新しい公開名、`docs/spec`、ruleset の変更。
 - 変えていないもの: `Op` の variant・payload・`supports_create_graph` の値・1 階の VJP・forward・facade の公開名とシグネチャ・`AutodiffError` の variant・tolerance・baseline・依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・`docs/spec`・既存節の本文。
+
+## 73. 実装記録（イシュー #3821・親 #3813。`CosineSimilarity`・`PairwiseDistance` を `create_graph` の拒否集合へ追加する）
+
+- 背景: C5 `Var::cosine_similarity`・C6 `Var::pairwise_distance` は新しい host `Op`（`Op::CosineSimilarity`・`Op::PairwiseDistance`）で実装した（`docs/autodiff-similarity-distance-decision.md` §13）。#3768 の Q9 (a)（<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）で「`create_graph` は false で始め、別設計」と承認されている。
+- 区分: §72.1 の F1（恒久）とは別に、**承認済み（#3768 Q9 (a)）・`create_graph` は別設計待ち（現状は拒否。恒久ではない）**とする。起票は所有者の承認事項で、未起票。
+- 実装: `Op::supports_create_graph` の false 側（ワイルドカードなし）へ 2 variant を追加。#3812 の正ガードに合わせ、`CG_REJECT_OPS`（`crates/facade/tests/api_surface.rs`）へ 2 件、`CG_FACADE_REJECT_MAP` へ `cosine_similarity_create_graph_is_rejected_via_facade`・`pairwise_distance_create_graph_is_rejected_via_facade`（`create_graph_facade.rs`）を追加した。`CG_REJECT_OPS` の doc コメントは「恒久」と「承認済み・別設計待ち」を書き分けた。autodiff 側の拒否は `tests/create_graph.rs::create_graph_rejects_cosine_similarity_and_pairwise_distance`。facade `Tape::backward_create_graph` の rustdoc「対象外として残る範囲」に 1 項目を足した。
+- 拒否は入口検査で `Err(Backward)`、`child` は空のまま。1 階の VJP・forward は他の Op と同じく動く。
+- 変えていないもの: §72 の本文、既存 Op の値、tolerance・baseline、依存。
