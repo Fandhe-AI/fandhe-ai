@@ -489,3 +489,29 @@ fn sequential_with_batch_norm3d_is_rejected_with_unsupported_layer() {
         "UnsupportedLayer(index=0) を期待したが {err:?}"
     );
 }
+
+/// 3D 適応プーリングも ONNX export 非対応（イシュー #3824・#3750 §11。`layer_kind_name` は変えない）。
+#[test]
+fn sequential_with_adaptive_avg_pool3d_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_adaptive_avg_pool3d([1, 1, 1])
+        .expect("test fixture: 層構築に失敗");
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    assert!(
+        matches!(err, OnnxError::UnsupportedLayer { index: 0, .. }),
+        "UnsupportedLayer(index=0) を期待したが {err:?}"
+    );
+}
+
+/// Max 版（イシュー #3824）。
+#[test]
+fn sequential_with_adaptive_max_pool3d_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_adaptive_max_pool3d([1, 1, 1])
+        .expect("test fixture: 層構築に失敗");
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    assert!(
+        matches!(err, OnnxError::UnsupportedLayer { index: 0, .. }),
+        "UnsupportedLayer(index=0) を期待したが {err:?}"
+    );
+}

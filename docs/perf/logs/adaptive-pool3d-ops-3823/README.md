@@ -13,7 +13,12 @@ bit 一致すること」で、GPU カーネル自体の parity ではない。�
 | `crates/facade/tests/adaptive_pool3d_ops_backend_parity.rs` | `cuda_adaptive_pool3d_ops_match_cpu_reference` | `#[ignore]` | CPU と bit 一致（Max の値・索引、Avg の forward、両 backward） |
 | 同上 | `metal_adaptive_pool3d_ops_match_cpu_reference` | `#[ignore]`・macOS 限定 | CPU と bit 一致 |
 
-層経路（`Sequential::add_adaptive_*_pool3d`）の実機テスト `compat_sequential_adaptive_pool3d_backend_parity.rs` は #3824 が追加する。
+層経路（`Sequential::add_adaptive_*_pool3d`。#3824）の実機テスト:
+
+| ファイル | テスト | 条件 | 判定 |
+|---|---|---|---|
+| `crates/facade/tests/compat_sequential_adaptive_pool3d_backend_parity.rs` | `cuda_compat_sequential_adaptive_pool3d_matches_cpu` | `#[ignore]` | CPU と REQ-2 統一複合判定（`assert_parity`）で一致（forward と入力勾配） |
+| 同上 | `metal_compat_sequential_adaptive_pool3d_matches_cpu` | `#[ignore]`・macOS 限定 | 同上 |
 
 ## 実行コマンド（1 本ずつ別プロセス）
 
@@ -22,6 +27,13 @@ bit 一致すること」で、GPU カーネル自体の parity ではない。�
 cargo test -p fandhe-ai --test adaptive_pool3d_ops_backend_parity -- --ignored --exact cuda_adaptive_pool3d_ops_match_cpu_reference
 # <metal-node>
 cargo test -p fandhe-ai --test adaptive_pool3d_ops_backend_parity -- --ignored --exact metal_adaptive_pool3d_ops_match_cpu_reference
+```
+
+```sh
+# <cuda-node>
+cargo test -p fandhe-ai --test compat_sequential_adaptive_pool3d_backend_parity -- --ignored --exact cuda_compat_sequential_adaptive_pool3d_matches_cpu
+# <metal-node>
+cargo test -p fandhe-ai --test compat_sequential_adaptive_pool3d_backend_parity -- --ignored --exact metal_compat_sequential_adaptive_pool3d_matches_cpu
 ```
 
 cfg により 0 本しか実行されなかった結果を pass の根拠にしない（`running 1 test` を確認する）。

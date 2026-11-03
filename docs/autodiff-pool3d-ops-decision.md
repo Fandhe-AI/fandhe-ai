@@ -702,7 +702,7 @@ Max は比較・選択のみ（値は入力要素と bit 一致、タイ先勝�
 
 - `var_adaptive_pool3d_methods_are_thin_delegations`（自己テスト `_detects_offense`: すり替え・引数固定・avg/max 取り違え・重複・欠落）
 - `var_adaptive_pool3d_is_reachable_via_facade_only`（`fandhe_ai::{Var, Tensor, AutodiffError}` だけでシグネチャを固定し、手計算できる値を確認）
-- `workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations`（`add_adaptive_*_pool3d` は 0 件。#3824 が期待値を更新する）
+- `workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations`（#3823 時点では `add_adaptive_*_pool3d` は 0 件。#3824 が `compat/sequential.rs` の各 1 件へ更新済み。§22）
 - `facade_does_not_reexport_or_declare_adaptive_pool3d_ops`（自己テスト `_detects_each_category`）
 - create_graph 表: `CG_FACADE_ACCEPT_MAP` に `("AdaptiveAvgPool3d", "adaptive_pool3d_create_graph_via_facade")` を追加（`create_graph_supported_op_set_matches_approved_list` は `tape.rs` を文字列で照合する）
 - 手元確認: `var.rs` の委譲先引数を一時的に固定値へ書き換えると `var_adaptive_pool3d_methods_are_thin_delegations` と `var_adaptive_pool3d_is_reachable_via_facade_only` が失敗することを確かめ、元へ戻した。
@@ -732,3 +732,40 @@ Max は比較・選択のみ（値は入力要素と bit 一致、タイ先勝�
 - 参照していた §18 の行番号は基準 sha の値で、現行の位置は上表のファイル名と関数名で引く。
 - GPU 実機 parity は**未実測**。手順は `docs/perf/logs/adaptive-pool3d-ops-3823/README.md`（実測は #3860／#3861）。
 - 未着手（後続）: `Sequential::add_adaptive_*_pool3d`・層型・`LayerSpec`（#3824）、model_io・ONNX export（#3828）、層型名の facade 公開（#3022）。
+
+## 22. #3824 実施記録（`Sequential` 層）
+
+§18 の設計に沿って `compat::Sequential` の層 2 件を実装した（親 #3813・設計 #3747）。承認は #3768 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。論点 3 は §18.12 の推奨 (a)（ホストへのフォールバック）、論点 4 は「model_io は全層に kind を足し、`format_version` は 2 のまま。ONNX export は含めない」。§18 の本文は書き換えない。基準 sha は `375930734`（#3823 マージ後）。
+
+### 22.1 公開した名前
+
+| 項目 | 内容 |
+|---|---|
+| 公開名 | `Sequential::add_adaptive_avg_pool3d(mut self, output_size: [usize; 3]) -> Result<Self, AutodiffError>`、`add_adaptive_max_pool3d`（同形） |
+| 層型 | `fandhe_ai_autodiff::nn::{AdaptiveAvgPool3d, AdaptiveMaxPool3d}`（`crates/autodiff/src/nn/pooling.rs`）。`Var::adaptive_*_pool3d` への 1 行委譲。新しい `Op`／`BackendOps` はなし。`output_size` の 0 軸は `new` で `InvalidArgument`。facade へは再エクスポートしない（#3022） |
+| `Module` の申告 | `supports_forward_host() = false`・`is_pooling() = true`（`nn::MaxPool3d` と同じ）。`as_*` フックは追加しない（#3750 §11・§14） |
+| Max の戻り | 層は値だけを返す。索引が要る場合は `Var::adaptive_max_pool3d` を使う |
+| 常駐経路 | `is_pooling` により `Unsupported`（fail-closed）。コードは足していない |
+
+### 22.2 保存（model_io）
+
+kind `adaptive_avg_pool3d`・`adaptive_max_pool3d`、`params` は `output_size_d`・`output_size_h`・`output_size_w`。kind 数は 75 から 77、`format_version` は 2 のまま（#3750 §10 R1・R2・R9、§12）。buffer を持たないため v1 の manifest でも受理される。0.13.0 以前のリーダーは `UnsupportedModel` で拒否する（`docs/migration/0.14.0.md`）。ONNX export は `UnsupportedLayer` のまま（対応する ONNX op が無い。`layer_kind_name` は `"unknown"` のまま）。
+
+### 22.3 設計記録との差分
+
+§18.12 Q7 の「当面は `Unsupported`」は #3750 が未決だったときの暫定案である。#3768 論点 4 の承認で kind を足す方針が確定したため、本 PR は kind を実装した。
+
+### 22.4 新設した正ガード（`crates/facade/tests/api_surface.rs` の末尾の #3824 節）
+
+反転対象の否定ガード・保留 doctest は元から無い。`AdaptiveMaxGlobalPoolHoldDoctestGuard`・`Pool3dOpsHoldDoctestGuard`・`facade_does_not_reexport_or_declare_adaptive_pool3d_ops` は変えていない。
+
+- `add_adaptive_pool3d_signatures_match_approved_contract`（自己テスト `_detects_offense`: `[usize; 2]`・戻り値 `Self`・`&mut self`・引数追加・`Option<[usize; 3]>`）
+- `compat_sequential_exposes_adaptive_pool3d_add_methods_issue_3824`（自己テスト `_counts_declarations`）
+- `facade_declares_adaptive_pool3d_add_names_only_in_approved_form`
+- `workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations` の期待値に `facade/src/compat/sequential.rs::add_adaptive_{avg,max}_pool3d` を各 1 件追加
+
+### 22.5 テスト
+
+- autodiff: `tests/nn_adaptive_pooling3d.rs`（層と `Var` 直呼びの forward・索引・入力勾配の bit 一致、0 軸拒否、rank 違反で孤児ノードなし、`is_pooling`・`supports_forward_host`）、`module.rs` の `is_pooling_true_only_for_pooling_layers`。
+- facade: `tests/compat_sequential_adaptive_pool3d.rs`（無効引数、`predict`／`forward`／backward の bit 一致、学習 1 step、`compile`／`fit`、常駐 `Unsupported`、保存往復、ONNX `UnsupportedLayer`）、`compat_sequential_model_io_layers.rs`・`compat_functional_model_io.rs`・`interop_onnx_export_sequential.rs` への追記、`model_io.rs` の単体テスト（77 種の往復、非信頼入力の表）。
+- 実機: `tests/compat_sequential_adaptive_pool3d_backend_parity.rs` の `cuda_compat_sequential_adaptive_pool3d_matches_cpu`・`metal_compat_sequential_adaptive_pool3d_matches_cpu`（`#[ignore]`）。**未実測**（Phase 10 の #3860・#3861。`docs/perf/logs/adaptive-pool3d-ops-3823/README.md`）。tolerance・baseline は変更していない。

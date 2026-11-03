@@ -339,3 +339,29 @@ fn batch_norm3d_round_trips_in_functional_graph() {
         assert_eq!(bits(w), bits(g));
     }
 }
+
+/// イシュー #3824（#3750 R10）: 3D 適応プーリングを含む Sequential ブロックも functional 形式を往復する。
+#[test]
+fn adaptive_pool3d_round_trips_in_functional_graph() {
+    let mut b = FunctionalBuilder::new();
+    let x = b.input().unwrap();
+    let blk = Sequential::new()
+        .add_adaptive_avg_pool3d([2, 1, 2])
+        .and_then(|m| m.add_adaptive_max_pool3d([1, 1, 1]))
+        .unwrap();
+    let y = b.apply(blk, x).unwrap();
+    let model = b.build(&[x], &[y]).unwrap();
+    let input = tensor(
+        (0..54).map(|i| ((i * 7) % 11) as f32 * 0.3 - 1.0).collect(),
+        &[1, 2, 3, 3, 3],
+    );
+    let guard = TempDirGuard::new("functional_adaptive_pool3d");
+    let dir = guard.path().join("m");
+    save_functional_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_functional_model(&dir).expect("復元できるはず");
+    let want = model.predict(&[&input]).unwrap();
+    let got = loaded.predict(&[&input]).unwrap();
+    for (w, g) in want.iter().zip(&got) {
+        assert_eq!(bits(w), bits(g));
+    }
+}

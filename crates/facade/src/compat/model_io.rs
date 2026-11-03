@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 75 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 77 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -323,7 +323,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 75 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 77 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -391,6 +391,8 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::AdaptiveAvgPool1d { .. } => Some("adaptive_avg_pool1d"),
         LayerSpec::AdaptiveMaxPool2d { .. } => Some("adaptive_max_pool2d"),
         LayerSpec::AdaptiveMaxPool1d { .. } => Some("adaptive_max_pool1d"),
+        LayerSpec::AdaptiveAvgPool3d { .. } => Some("adaptive_avg_pool3d"),
+        LayerSpec::AdaptiveMaxPool3d { .. } => Some("adaptive_max_pool3d"),
         LayerSpec::GlobalPool { .. } => Some("global_pool"),
         LayerSpec::Upsample { .. } => Some("upsample"),
         LayerSpec::UpsampleScaleFactor { .. } => Some("upsample_scale_factor"),
@@ -806,6 +808,8 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::AdaptiveAvgPool1d { .. }
         | LayerSpec::AdaptiveMaxPool2d { .. }
         | LayerSpec::AdaptiveMaxPool1d { .. }
+        | LayerSpec::AdaptiveAvgPool3d { .. }
+        | LayerSpec::AdaptiveMaxPool3d { .. }
         | LayerSpec::GlobalPool { .. }
         | LayerSpec::Upsample { .. }
         | LayerSpec::UpsampleScaleFactor { .. }
@@ -1529,6 +1533,10 @@ fn param_fields(spec: &LayerSpec) -> ParamFields {
         }
         LayerSpec::AdaptiveMaxPool1d { output_size } => {
             put_num(&mut f, "output_size", *output_size)
+        }
+        LayerSpec::AdaptiveAvgPool3d { output_size }
+        | LayerSpec::AdaptiveMaxPool3d { output_size } => {
+            put_triple(&mut f, "output_size", *output_size)
         }
         LayerSpec::GlobalPool { mode, keepdims } => {
             // 保存前検査（`global_pool_mode_to_wire`）通過後にだけ呼ばれる。
@@ -2718,6 +2726,12 @@ fn build_model(
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::AdaptiveMaxPool1d { output_size } => model
                 .add_adaptive_max_pool1d(*output_size)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::AdaptiveAvgPool3d { output_size } => model
+                .add_adaptive_avg_pool3d(*output_size)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::AdaptiveMaxPool3d { output_size } => model
+                .add_adaptive_max_pool3d(*output_size)
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::GlobalPool { mode, keepdims } => model.add_global_pool(*mode, *keepdims),
             LayerSpec::Upsample { size, mode } => model
@@ -4154,6 +4168,18 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 output_size: p.usize("output_size")?,
             })
         }
+        "adaptive_avg_pool3d" => {
+            let p = Params::new(params, &["output_size_d", "output_size_h", "output_size_w"])?;
+            Ok(LayerSpec::AdaptiveAvgPool3d {
+                output_size: p.triple("output_size")?,
+            })
+        }
+        "adaptive_max_pool3d" => {
+            let p = Params::new(params, &["output_size_d", "output_size_h", "output_size_w"])?;
+            Ok(LayerSpec::AdaptiveMaxPool3d {
+                output_size: p.triple("output_size")?,
+            })
+        }
         "global_pool" => {
             let p = Params::new(params, &["mode", "keepdims"])?;
             let mode_name = as_str(p.get("mode")?, "mode")?;
@@ -4750,7 +4776,7 @@ mod tests {
         ));
     }
 
-    /// 75 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 77 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -5023,6 +5049,12 @@ mod tests {
                 output_size: [2, 3],
             },
             LayerSpec::AdaptiveMaxPool1d { output_size: 4 },
+            LayerSpec::AdaptiveAvgPool3d {
+                output_size: [2, 3, 1],
+            },
+            LayerSpec::AdaptiveMaxPool3d {
+                output_size: [1, 2, 3],
+            },
             LayerSpec::GlobalPool {
                 mode: GlobalPoolMode::Avg,
                 keepdims: true,
@@ -5260,7 +5292,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 75, "kind allowlist は 75 種: {kinds:?}");
+        assert_eq!(kinds.len(), 77, "kind allowlist は 77 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -5278,9 +5310,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 75 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 77 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("75 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("77 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -5288,7 +5320,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("75 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("77 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -5467,6 +5499,47 @@ mod tests {
             (
                 "conv3d",
                 r#"{"in_channels":4,"out_channels":2,"kernel_size_d":3,"kernel_size_h":3,"kernel_size_w":3,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":1,"x":1}"#,
+            ),
+            // イシュー #3824: adaptive_{avg,max}_pool3d の非信頼入力（キー欠落・余分なキー・負値・小数・型違い）。
+            (
+                "adaptive_avg_pool3d",
+                r#"{"output_size_h":2,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_avg_pool3d",
+                r#"{"output_size_d":1,"output_size_h":2,"output_size_w":2,"x":1}"#,
+            ),
+            (
+                "adaptive_avg_pool3d",
+                r#"{"output_size_d":-1,"output_size_h":2,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_avg_pool3d",
+                r#"{"output_size_d":1.5,"output_size_h":2,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_avg_pool3d",
+                r#"{"output_size_d":"1","output_size_h":2,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_max_pool3d",
+                r#"{"output_size_h":2,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_max_pool3d",
+                r#"{"output_size_d":1,"output_size_h":2,"output_size_w":2,"x":1}"#,
+            ),
+            (
+                "adaptive_max_pool3d",
+                r#"{"output_size_d":-1,"output_size_h":2,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_max_pool3d",
+                r#"{"output_size_d":1.5,"output_size_h":2,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_max_pool3d",
+                r#"{"output_size_d":"1","output_size_h":2,"output_size_w":2}"#,
             ),
             // イシュー #3029: max_pool3d / avg_pool3d の非信頼入力（_d 欠落・stride 部分 null・負値・小数・余分なキー・型違い）。
             (
@@ -5972,6 +6045,12 @@ mod tests {
                 output_size: [2, 0],
             },
             LayerSpec::AdaptiveMaxPool1d { output_size: 0 },
+            LayerSpec::AdaptiveAvgPool3d {
+                output_size: [0, 1, 1],
+            },
+            LayerSpec::AdaptiveMaxPool3d {
+                output_size: [1, 1, 0],
+            },
         ] {
             assert!(
                 matches!(
@@ -6068,7 +6147,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("75 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("77 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 6);
         for (i, spec) in specs.iter().enumerate() {
