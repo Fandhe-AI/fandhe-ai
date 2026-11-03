@@ -18,7 +18,7 @@ bit 一致すること」で、GPU カーネル自体の parity ではない。�
 
 | ファイル | テスト | 条件 | 判定 |
 |---|---|---|---|
-| `crates/facade/tests/compat_sequential_fractional_max_pool_backend_parity.rs` | `cuda_compat_sequential_fractional_max_pool_matches_cpu` | `#[ignore]` | REQ-2 統一複合判定（`assert_parity`）。forward と入力勾配。各デバイスの直前に同じシードで `manual_seed` |
+| `crates/facade/tests/compat_sequential_fractional_max_pool.rs（backend_parity モジュール）` | `cuda_compat_sequential_fractional_max_pool_matches_cpu` | `#[ignore]` | REQ-2 統一複合判定（`assert_parity`）。forward と入力勾配。各デバイスの直前に同じシードで `manual_seed` |
 | 同上 | `metal_compat_sequential_fractional_max_pool_matches_cpu` | `#[ignore]`・macOS 限定 | 同上 |
 
 ## 実行コマンド（1 本ずつ別プロセス）
@@ -32,9 +32,9 @@ cargo test -p fandhe-ai --test fractional_max_pool_ops_backend_parity -- --ignor
 
 ```sh
 # <cuda-node>（層経路。#3827）
-cargo test -p fandhe-ai --test compat_sequential_fractional_max_pool_backend_parity -- --ignored --exact cuda_compat_sequential_fractional_max_pool_matches_cpu
+cargo test -p fandhe-ai --test compat_sequential_fractional_max_pool -- --ignored --exact backend_parity::cuda_compat_sequential_fractional_max_pool_matches_cpu
 # <metal-node>（層経路。#3827）
-cargo test -p fandhe-ai --test compat_sequential_fractional_max_pool_backend_parity -- --ignored --exact metal_compat_sequential_fractional_max_pool_matches_cpu
+cargo test -p fandhe-ai --test compat_sequential_fractional_max_pool -- --ignored --exact backend_parity::metal_compat_sequential_fractional_max_pool_matches_cpu
 ```
 
 cfg により 0 本しか実行されなかった結果を pass の根拠にしない（`running 1 test` を確認する）。

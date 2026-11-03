@@ -600,7 +600,7 @@ impl<'t> Var<'t> {
 | CI | §20.1 の正ガード | 1 行委譲・宣言位置・未承認経路の否定 |
 | `#[ignore]`（Phase 10） | `fractional_max_pool_ops_backend_parity.rs::cuda_fractional_max_pool_ops_match_cpu_reference` | #3860（`<cuda-node>`）。同じ標本で bit 一致 |
 | `#[ignore]`（Phase 10） | `fractional_max_pool_ops_backend_parity.rs::metal_fractional_max_pool_ops_match_cpu_reference`（`cfg(target_os = "macos")`） | #3861（`<metal-node>`） |
-| `#[ignore]`（Phase 10） | `compat_sequential_fractional_max_pool_backend_parity.rs::{cuda_*, metal_*}` | 層経路 |
+| `#[ignore]`（Phase 10） | `compat_sequential_fractional_max_pool.rs（backend_parity モジュール）::{cuda_*, metal_*}` | 層経路 |
 
 - グローバル RNG に触るテストは `static LOCK: Mutex<()>` で直列化するか専用のテストバイナリに分ける（`api_surface.rs` の先例）。
 - 実機の手順置き場の案: `docs/perf/logs/fractional-max-pool-ops-3826/README.md`（#3826 で新設）。
@@ -873,7 +873,7 @@ kind `fractional_max_pool2d`（`kernel_size_h`・`kernel_size_w`・`output_size_
 
 - autodiff: `tests/nn_fractional_max_pooling.rs`（同じシードの下で層と `Var` 直呼びの値・索引・入力勾配が bit 一致、alpha が整数にならない形状を含む。0 軸拒否、rank 違反・実行不能で RNG 不消費、`is_pooling`・`supports_forward_host`）、`module.rs` の `is_pooling_true_only_for_pooling_layers`。
 - facade: `tests/compat_sequential_fractional_max_pool.rs`（無効引数、`predict`／`forward`／backward の bit 一致、同じシード 2 回の一致、消費数がちょうど `N·C·R`〈`eval()` 後も〉、実行不能で RNG 不消費、学習・`compile`／`fit`、常駐 `Unsupported`、保存往復、ONNX `UnsupportedLayer`）、`compat_sequential_model_io_layers.rs`・`compat_functional_model_io.rs`・`interop_onnx_export_sequential.rs` への追記、`model_io.rs` の単体テスト（79 種の往復、非信頼入力の表、0 軸拒否）、doctest（RNG に依存しない形状）。
-- 実機: `tests/compat_sequential_fractional_max_pool_backend_parity.rs` の `cuda_compat_sequential_fractional_max_pool_matches_cpu`・`metal_compat_sequential_fractional_max_pool_matches_cpu`（`#[ignore]`。各デバイスの直前に同じシードで `manual_seed`）。**未実測**（Phase 10 の #3860・#3861。`docs/perf/logs/fractional-max-pool-ops-3826/README.md`）。tolerance・baseline は変更していない。
+- 実機: `tests/compat_sequential_fractional_max_pool.rs` の `backend_parity` モジュール内の `cuda_compat_sequential_fractional_max_pool_matches_cpu`・`metal_compat_sequential_fractional_max_pool_matches_cpu`（`#[ignore]`。各デバイスの直前に同じシードで `manual_seed`）。**未実測**（Phase 10 の #3860・#3861。`docs/perf/logs/fractional-max-pool-ops-3826/README.md`）。tolerance・baseline は変更していない。
 
 ### 25.6 逸脱・申し送り
 
