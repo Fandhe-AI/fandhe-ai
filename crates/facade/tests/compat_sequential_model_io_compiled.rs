@@ -23,7 +23,7 @@ use fandhe_ai::interop::safetensors::{
 };
 use fandhe_ai::optim::{
     AdadeltaConfig, AdagradConfig, AdamConfig, AdamWConfig, AdamaxConfig, GradScalerConfig,
-    LambConfig, RmsPropConfig, SgdConfig, StepLr,
+    LambConfig, NAdamConfig, RAdamConfig, RmsPropConfig, SgdConfig, StepLr,
 };
 
 mod common;
@@ -133,6 +133,30 @@ fn optimizers() -> Vec<(&'static str, Optimizer)> {
                 beta2: 0.99,
                 eps: 1e-7,
                 weight_decay: 0.01,
+            }),
+        ),
+        // イシュー #3840: NAdam・RAdam（非既定 config。decoupled は両方の値を通す）。
+        (
+            "nadam",
+            Optimizer::NAdam(NAdamConfig {
+                lr: 0.01,
+                beta1: 0.8,
+                beta2: 0.99,
+                eps: 1e-7,
+                weight_decay: 0.01,
+                momentum_decay: 0.01,
+                decoupled_weight_decay: false,
+            }),
+        ),
+        (
+            "radam",
+            Optimizer::RAdam(RAdamConfig {
+                lr: 0.01,
+                beta1: 0.8,
+                beta2: 0.9,
+                eps: 1e-7,
+                weight_decay: 0.01,
+                decoupled_weight_decay: true,
             }),
         ),
     ]
@@ -456,7 +480,8 @@ fn tampered_kind_is_rejected() {
     let t = read_manifest(&dir).replace("\"kind\":\"lbfgs\"", "\"kind\":\"adam\"");
     write_manifest(&dir, &t);
 
-    for bad in ["nadam", "SGD", ""] {
+    // "nadam"・"radam" は #3840 で有効な kind になったため、承認外の値を使う。
+    for bad in ["rprop", "SGD", ""] {
         let t = read_manifest(&dir).replace("\"kind\":\"adam\"", &format!("\"kind\":\"{bad}\""));
         write_manifest(&dir, &t);
         assert!(

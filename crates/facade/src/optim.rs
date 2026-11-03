@@ -293,8 +293,8 @@
 //! （`&[(&Tensor<f32>, &Tensor<f32>)]`）で、`Tape`／`Var`／`BackendOps`
 //! に依存しない値型・純関数。位置対応契約（「呼び出し文脈」節）が
 //! そのまま適用される。**`crate::DeviceParamStore` 非対応**（決定記録
-//! §7）。`crate::compat::Optimizer`（`compile()`）へは Adadelta・Adamax が #3839 で
-//! 統合済み（NAdam・RAdam は #3840。同 §9）。
+//! §7）。`crate::compat::Optimizer`（`compile()`）へは Adadelta・Adamax が #3839、NAdam・RAdam が #3840 で
+//! 統合済み（同 §9）。
 //! 状態保存用の `OptimizerStateDict` trait は #2556 で公開済み（下記
 //! 「optimizer 状態の保存・復元」節）。`ParamGroupStep` は #2553 で公開済み
 //! （下記「param groups」節）。
@@ -374,7 +374,7 @@
 //!   `Lbfgs`・Rprop・ASGD・Adafactor・Lion は対象外。メソッドを呼ぶには
 //!   `ParamGroupStep` の import が要る。
 //! - [`crate::compat::Sequential::compile_with_param_groups`]（`compile()` 経路）で
-//!   使えるのは `Optimizer` enum にある 8 種（`Lbfgs` は拒否。Adadelta・Adamax は #3839 で追加）。それ以外の種は
+//!   使えるのは `Optimizer` enum にある 10 種（`Lbfgs` は拒否。Adadelta・Adamax は #3839、NAdam・RAdam は #3840 で追加）。それ以外の種は
 //!   手動ループで `step_with_groups` を呼ぶ。
 //! - AMP と併用するときは [`crate::compat::Sequential::compile_with_amp_and_param_groups`]
 //!   （イシュー #3832）。非有限勾配による skip の判定は全 group 共通で、全 group の更新を一括で飛ばす。

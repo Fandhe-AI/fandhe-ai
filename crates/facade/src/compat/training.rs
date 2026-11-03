@@ -39,8 +39,8 @@
 
 use crate::optim::{
     Adadelta, AdadeltaConfig, Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Adamax,
-    AdamaxConfig, GradScaler, GradScalerConfig, Lamb, LambConfig, LbfgsConfig, RmsProp,
-    RmsPropConfig, Sgd, SgdConfig,
+    AdamaxConfig, GradScaler, GradScalerConfig, Lamb, LambConfig, LbfgsConfig, NAdam, NAdamConfig,
+    RAdam, RAdamConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig,
 };
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
@@ -284,7 +284,7 @@ pub enum Optimizer {
     Lbfgs(LbfgsConfig),
     /// Adadelta（Zeiler 2012。`torch.optim.Adadelta` 相当。イシュー #3839・
     /// 設計 #3757。承認 #3769）。`LrSchedule`・param groups・AMP・EMA/SWA と
-    /// 併用できる（`set_lr` あり）。NAdam・RAdam は #3840 で追加する。
+    /// 併用できる（`set_lr` あり）。
     Adadelta(AdadeltaConfig),
     /// Adamax（Kingma & Ba 2015 §7.1。`torch.optim.Adamax` 相当。イシュー
     /// #3839・設計 #3757。承認 #3769）。`LrSchedule`・param groups・AMP と
@@ -298,6 +298,23 @@ pub enum Optimizer {
     /// # Ok::<(), fandhe_ai::AutodiffError>(())
     /// ```
     Adamax(AdamaxConfig),
+    /// NAdam（Dozat 2016。`torch.optim.NAdam` 相当。イシュー #3840・設計
+    /// #3757。承認 #3769）。`LrSchedule`・param groups・AMP と併用できる。
+    /// param groups は `decoupled_weight_decay` を group で上書きしない
+    /// （group の `weight_decay` は config のフラグが決める意味で適用される）。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{Loss, Optimizer, Sequential};
+    /// use fandhe_ai::optim::NAdamConfig;
+    /// let mut model = Sequential::new();
+    /// model.compile(Optimizer::NAdam(NAdamConfig::default()), Loss::Mse)?;
+    /// # Ok::<(), fandhe_ai::AutodiffError>(())
+    /// ```
+    NAdam(NAdamConfig),
+    /// RAdam（Liu et al. 2019/2020。`torch.optim.RAdam` 相当。イシュー
+    /// #3840・設計 #3757。承認 #3769）。`LrSchedule`・param groups・AMP と
+    /// 併用できる。`decoupled_weight_decay` の扱いは [`Optimizer::NAdam`] と同じ。
+    RAdam(RAdamConfig),
 }
 
 /// `fit()` の構成（Keras `fit(epochs=, batch_size=, shuffle=)` の
@@ -1192,7 +1209,7 @@ fn weighted_cross_entropy_loss<'t>(
 /// [`crate::optim::RmsProp`]／[`crate::optim::Adagrad`]／
 /// [`crate::optim::Lamb`]／`Lbfgs`〈内部クレート限定。イシュー #2172〉
 /// のいずれか。イシュー #2170 で `RmsProp`／`Adagrad`／`Lamb` を、
-/// イシュー #2172 で `Lbfgs` を追加）。先頭 6 者（および #3839 で追加した `Adadelta`／`Adamax`）は `step` のシグネチャが
+/// イシュー #2172 で `Lbfgs` を追加）。先頭 6 者（および #3839 で追加した `Adadelta`／`Adamax`・#3840 で追加した `NAdam`／`RAdam`）は `step` のシグネチャが
 /// 異なる（`Sgd::step` は位置対応スライス 2 本・他の `step` は
 /// タプルスライス 1 本）ため、ここで [`Sequential::trainable_parameters`]／
 /// `grad_refs` から共通の `Result<Vec<Tensor<f32>>, AutodiffError>` へ
@@ -1210,6 +1227,8 @@ pub(super) enum OptimizerState {
     Lbfgs(Lbfgs),
     Adadelta(Adadelta),
     Adamax(Adamax),
+    NAdam(NAdam),
+    RAdam(RAdam),
 }
 
 impl std::fmt::Debug for OptimizerState {
@@ -1230,6 +1249,8 @@ impl std::fmt::Debug for OptimizerState {
             OptimizerState::Lbfgs(_) => f.debug_tuple("Lbfgs").finish(),
             OptimizerState::Adadelta(_) => f.debug_tuple("Adadelta").finish(),
             OptimizerState::Adamax(_) => f.debug_tuple("Adamax").finish(),
+            OptimizerState::NAdam(_) => f.debug_tuple("NAdam").finish(),
+            OptimizerState::RAdam(_) => f.debug_tuple("RAdam").finish(),
         }
     }
 }
@@ -1246,6 +1267,8 @@ impl OptimizerState {
             Optimizer::Lbfgs(config) => Ok(OptimizerState::Lbfgs(Lbfgs::new(config)?)),
             Optimizer::Adadelta(config) => Ok(OptimizerState::Adadelta(Adadelta::new(config)?)),
             Optimizer::Adamax(config) => Ok(OptimizerState::Adamax(Adamax::new(config)?)),
+            Optimizer::NAdam(config) => Ok(OptimizerState::NAdam(NAdam::new(config)?)),
+            Optimizer::RAdam(config) => Ok(OptimizerState::RAdam(RAdam::new(config)?)),
         }
     }
 
@@ -1264,6 +1287,8 @@ impl OptimizerState {
             OptimizerState::Lbfgs(lbfgs) => lbfgs.config().lr,
             OptimizerState::Adadelta(o) => o.config().lr,
             OptimizerState::Adamax(o) => o.config().lr,
+            OptimizerState::NAdam(o) => o.config().lr,
+            OptimizerState::RAdam(o) => o.config().lr,
         }
     }
 
@@ -1289,6 +1314,8 @@ impl OptimizerState {
             OptimizerState::Lbfgs(lbfgs) => lbfgs.set_lr(new_lr),
             OptimizerState::Adadelta(o) => o.set_lr(new_lr),
             OptimizerState::Adamax(o) => o.set_lr(new_lr),
+            OptimizerState::NAdam(o) => o.set_lr(new_lr),
+            OptimizerState::RAdam(o) => o.set_lr(new_lr),
             OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_) => {
                 Err(AutodiffError::InvalidArgument(
                     "OptimizerState::set_lr: RmsProp／Adagrad／Lamb は set_lr を \
@@ -1365,6 +1392,16 @@ impl OptimizerState {
                     params.iter().copied().zip(grads.iter().copied()).collect();
                 o.step(&pairs)
             }
+            OptimizerState::NAdam(o) => {
+                let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
+                    params.iter().copied().zip(grads.iter().copied()).collect();
+                o.step(&pairs)
+            }
+            OptimizerState::RAdam(o) => {
+                let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
+                    params.iter().copied().zip(grads.iter().copied()).collect();
+                o.step(&pairs)
+            }
             OptimizerState::Lbfgs(_) => Err(AutodiffError::InvalidArgument(
                 "OptimizerState::step: Lbfgs は closure 駆動の \
                  try_step_closure のみで更新するため、この汎用 step 経由の \
@@ -1395,6 +1432,8 @@ impl OptimizerState {
             OptimizerState::Lamb(o) => o.step_with_groups(params, grads, groups),
             OptimizerState::Adadelta(o) => o.step_with_groups(params, grads, groups),
             OptimizerState::Adamax(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::NAdam(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::RAdam(o) => o.step_with_groups(params, grads, groups),
             OptimizerState::Lbfgs(_) => Err(AutodiffError::InvalidArgument(
                 "OptimizerState::step_grouped: Lbfgs は param groups と併用できない \
                  （compile_with_param_groups が compile 時に拒否する）"
@@ -1434,7 +1473,9 @@ impl OptimizerState {
             | OptimizerState::Adam(_)
             | OptimizerState::Lbfgs(_)
             | OptimizerState::Adadelta(_)
-            | OptimizerState::Adamax(_) => true,
+            | OptimizerState::Adamax(_)
+            | OptimizerState::NAdam(_)
+            | OptimizerState::RAdam(_) => true,
             OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_) => {
                 false
             }
@@ -1561,6 +1602,8 @@ pub(super) fn snapshot_of_compiled(compiled: &Compiled) -> Result<CompiledSnapsh
         OptimizerState::Lamb(o) => (Optimizer::Lamb(*o.config()), o.state_dict()?, None),
         OptimizerState::Adadelta(o) => (Optimizer::Adadelta(*o.config()), o.state_dict()?, None),
         OptimizerState::Adamax(o) => (Optimizer::Adamax(*o.config()), o.state_dict()?, None),
+        OptimizerState::NAdam(o) => (Optimizer::NAdam(*o.config()), o.state_dict()?, None),
+        OptimizerState::RAdam(o) => (Optimizer::RAdam(*o.config()), o.state_dict()?, None),
         OptimizerState::Lbfgs(o) => (
             Optimizer::Lbfgs(*o.config()),
             o.state_dict()?,
@@ -1619,6 +1662,8 @@ pub(super) fn compiled_from_snapshot(
         OptimizerState::Lamb(o) => o.load_state_dict(optimizer_state)?,
         OptimizerState::Adadelta(o) => o.load_state_dict(optimizer_state)?,
         OptimizerState::Adamax(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::NAdam(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::RAdam(o) => o.load_state_dict(optimizer_state)?,
         OptimizerState::Lbfgs(o) => {
             o.load_state_dict(optimizer_state, slot_shapes, lbfgs_history_len.unwrap_or(0))?
         }
@@ -1952,7 +1997,7 @@ fn lbfgs_batch_step<T: FitTarget>(
 impl Sequential {
     /// optimizer／loss を設定する（Keras `model.compile(optimizer, loss)`
     /// 相当）。ハイパーパラメータ検証（`lr < 0.0` 等）は各
-    /// `Sgd`／`AdamW`／`Adam::new` へ委譲する。
+    /// optimizer の `*::new` へ委譲する。
     ///
     /// 既に compile 済みのモデルへ再度呼ぶと、それまでの optimizer
     /// 状態（momentum バッファ・m/v 等）を破棄して新しい `optimizer`／
