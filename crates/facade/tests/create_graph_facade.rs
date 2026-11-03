@@ -2629,6 +2629,33 @@ fn ctc_loss_create_graph_is_rejected_via_facade() {
     assert_create_graph_rejected("ctc_loss", &tape, &child, &loss);
 }
 
+/// `CosineSimilarity` は #3768 Q9 (a) の承認で false 開始（恒久ではない。create_graph は別設計待ち。
+/// イシュー #3821・`docs/autodiff-higher-order-grad-decision.md` §73）。入口検査で拒否され、child は空のまま。
+#[test]
+fn cosine_similarity_create_graph_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let b = tape.var(&t(vec![0.5, -1.0, 2.0, 1.0], &[2, 2]));
+    let loss = a.cosine_similarity(&b, 1, 1e-8).unwrap().sum(None).unwrap();
+    assert_create_graph_rejected("cosine_similarity", &tape, &child, &loss);
+}
+
+/// `PairwiseDistance` も同じ区分（上と同様）。
+#[test]
+fn pairwise_distance_create_graph_is_rejected_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let b = tape.var(&t(vec![0.5, -1.0, 2.0, 1.0], &[2, 2]));
+    let loss = a
+        .pairwise_distance(&b, 2.0, 1e-6, false)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    assert_create_graph_rejected("pairwise_distance", &tape, &child, &loss);
+}
+
 /// `IndexedScatterReduce` の `Prod` は **承認済みだが未実装**（#3767 回答は §41.16 の 3 variant 実装を承認。
 /// 決定記録 §62 が scan 補助待ちとして先送りし、受け皿 issue は未起票）。本テストは「現状は拒否される」
 /// ことの固定であり、恒久契約ではない。実装されたらこのテストを受理テストへ反転する。

@@ -4,9 +4,9 @@
 
 - 本書は追跡表 `docs/compat-matrix-ari-tracker.md` の **行 # 12（C5 CosineSimilarity）・# 13（C6 PairwiseDistance）** の設計記録である（イシュー #3745）。イシュー本文は「項目 13・14」と書くが、追跡表の通し番号とは 1 ずれている（`docs/nn-shrink-bilinear-channel-shuffle-decision.md` §1.0 と同じずれ方）。更新対象は # 12・# 13 行である。
 - 流れ: 設計 #3745 → 承認 #3768 → 実装 #3821 → 実機 parity #3860（`<cuda-node>`）・#3861（`<metal-node>`）。
-- **承認根拠: なし。未承認（#3768 待ち）。** 本書は何も承認しない。
+- **承認根拠: 承認済み。** #3768 の所有者回答（<@URL@>、2026-11-01）が §11 の Q1〜Q9 をすべて推奨どおり (a) で承認した（pairwise の `p >= 1` は個別に明記）。**実装済み**（§13。イシュー #3821。GPU 実機 parity は未実測）。
 - 書式は `docs/decision-record-template.md`（#3716）の必須 9 節に従う（§1〜§9 が対応）。
-- **設計のみ**で、コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変えない。
+- §1〜§12 は**設計のみ**で、コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変えない（実装は §13 の #3821 で行った）。
 - 行番号は origin/main の `6537d0925` を基準にする。実装 PR の前に引き直すこと。実機は `<cuda-node>`・`<metal-node>`・`<rocm-node>` で表す。
 
 ### 現状
@@ -178,3 +178,30 @@
 - 層型名の公開（#3022）
 - ONNX（該当する op が無い）
 - `Sequential` の保存（2 入力なので #3750 の対象外）
+
+## §13 実装記録（イシュー #3821・親 #3813。承認: #3768 の所有者回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）
+
+### 13.1 実装したもの
+
+- `crates/autodiff/src/similarity_ops.rs`: 自由関数 `cosine_similarity`・`pairwise_distance`。検証順は §3 のとおり（同一 tape → 同 shape → rank >= 1 と `dim < rank` → `checked_bytes_for` → スカラー → 実体化 → host 計算 → push）で、新しい `AutodiffError` の variant は作っていない。
+- `Op::CosineSimilarity { x1, x2, dim, eps }`・`Op::PairwiseDistance { x1, x2, p, eps, keepdim }`（`pub(crate)`）。`tape.rs` の網羅 match 3 か所（`is_checkpoint_eligible` は非適格、`for_each_input`、`supports_create_graph` は false）と `grad.rs` の VJP dispatch に腕を足した。`create_graph.rs` は `_ =>` で型付きエラーへ倒れるため無変更。
+- forward は `eval.rs`（`cosine_similarity_forward`・`pairwise_distance_forward`。共有ヘルパー `cosine_slice_stats`・`pairwise_row_diff`・`axis_split`）、VJP は `grad.rs`（`cosine_similarity_vjp`・`pairwise_distance_vjp`）。upstream は損失のスカラーではなく出力 shape のテンソルで、(outer, dim, inner) の添字でスライスごとに掛ける。長軸縮約は `f64` アキュムレータ（要素を先に昇格）で最後に 1 回 `f32` へ下げる。
+- `Var::cosine_similarity(other, dim, eps)`・`Var::pairwise_distance(other, p, eps, keepdim)`（`var.rs`。1 行委譲）。
+- triplet の既存経路（`triplet_distance_stats`・`triplet_margin_loss_forward`／`_vjp`）は書き換えていない。`pairwise_distance` の各値が `triplet_distance_stats(..).d_ap as f32` と bit 一致することを crate 内テストで固定した。
+
+### 13.2 ガードとテスト
+
+- 正ガード（`crates/facade/tests/api_surface.rs` 末尾の #3821 節。基準 sha `1455ddbef`）: `var_similarity_ops_methods_are_thin_delegations`（`_detects_offense` 付き）、`var_similarity_ops_methods_have_approved_signatures`（同）、`var_similarity_ops_are_reachable_via_facade_var`、`workspace_declares_similarity_ops_fn_names_only_in_allowed_locations`（否定プローブ `..._detects_unapproved_locations` 付き）、`facade_does_not_reexport_or_declare_similarity_ops`（`..._detects_each_category` 付き）。反転した否定ガードは元から 0 件。
+- 中央差分と PyTorch 2.14.0 の実行値 fixture（`crates/autodiff/tests/fixtures/similarity-distance-pytorch-reference/`。REQ-2 判定。クランプ内とゼロノルムの straight-through 勾配を含む 25 + 2 件）で突合した。tolerance・baseline は変えていない。
+- 実機テストは `similarity_ops_backend_parity.rs` の `cuda_*`／`metal_*`（`#[ignore]`）。手順は `docs/perf/logs/similarity-ops-3821/README.md`。**実機は未実測**（#3860・#3861）。
+
+### 13.3 設計・計画からの逸脱と所有者への報告
+
+1. **`create_graph` の拒否集合の拡張（§10 の想定外）**: §10 は「新しい 2 variant を false 側に置く」とだけ書いていたが、#3812 の正ガード `create_graph_supported_op_set_matches_approved_list`・`create_graph_facade_coverage_map_matches_supported_set` は拒否集合 `CG_REJECT_OPS` と facade の拒否テスト対応表 `CG_FACADE_REJECT_MAP` を完全一致で照合する。このため同じコミットで両表に 2 件を足し、facade の拒否テスト 2 件（`create_graph_facade.rs`）と autodiff 側の拒否テスト（`tests/create_graph.rs`）を足した。`CG_REJECT_OPS` の doc コメントは「恒久」と書き分け、この 2 件を「#3768 Q9 (a) の承認で false 開始・別設計待ち（恒久ではない）」と区分した。`docs/autodiff-higher-order-grad-decision.md` §73 に記録した。**所有者への報告事項**。
+2. **`p_norm_f64` の可視性**: §10 は「`p_norm_f64` の可視性は変えずに済む」と書いたが、forward は `eval.rs` でも VJP は `grad.rs` にあり、距離値の再計算に必要なため `pub(crate)` へ上げた（公開面は不変）。
+3. **PyTorch fixture**: 実装環境で torch 2.14.0 の CPU wheel を一時 venv に導入でき、実行値を生成した（§5 で「未実測」だった PyTorch との差は、全ケースが REQ-2 判定内に収まった）。値を手計算して PyTorch と名乗るものはない。
+
+### 13.4 スコープ外・変えていないもの
+
+- スコープ外: CUDA／Metal の実機 parity（#3860・#3861）、`train_gpu_parity.rs` の CASES への登録（Phase 10）、`create_graph` への対応（別設計。起票は所有者の判断）、broadcast、`p = 0`／`inf`／`(0, 1)`、専用 GPU カーネル、`Tensor<f32>`／`Tape` 上のメソッド、層型名の公開（#3022）、ONNX、`Sequential` の保存。
+- 変えていないもの: tolerance（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・baseline・ガードレール閾値・依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・`BackendOps`・`docs/spec`・`AutodiffError` の variant・facade の既存公開名・triplet と `cosine_embedding_loss` の既存経路。
