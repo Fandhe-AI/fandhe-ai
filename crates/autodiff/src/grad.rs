@@ -3708,6 +3708,13 @@ pub(crate) fn vjp(
             let d_input = adaptive_avg_pool2d_vjp(upstream, &input_shape)?;
             vec![(input, d_input)]
         }
+        // `adaptive_pool3d_ops::adaptive_avg_pool3d`（イシュー #3823）。ホスト側のみの VJP。
+        // Max 側は `Op::MaxPool3d` を再利用するため腕は追加しない。
+        Op::AdaptiveAvgPool3d { input } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let d_input = adaptive_avg_pool3d_vjp(upstream, &input_shape)?;
+            vec![(input, d_input)]
+        }
         // `Tape::custom`（イシュー #1946・`docs/autodiff-custom-function-
         // decision.md` §12.4）が登録するユーザー定義 forward／backward。
         // 各入力を層 1（`materialize_fallible`）で実体化し、
@@ -7460,6 +7467,41 @@ pub(crate) fn avg_pool3d_vjp(
         &upstream_c.host_slice(),
         &layout,
         count_include_pad,
+    )
+    .map_err(AutodiffError::Shape)?;
+    Tensor::new(data, input_shape).map_err(AutodiffError::Shape)
+}
+
+/// [`Op::AdaptiveAvgPool3d`] の VJP 本体（イシュー #3823。1 階 `Tape::backward` の腕と
+/// `create_graph` の V3 ホスト値が共有する単一情報源）。レイアウトを再構築し共有カーネル
+/// `adaptive_avg_pool3d_vjp_host`（`f64` アキュムレータ・1 回 downcast）へ委譲する。
+/// 出力サイズは `upstream` の shape から取る。
+pub(crate) fn adaptive_avg_pool3d_vjp(
+    upstream: &Tensor<f32>,
+    input_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let upstream_c = upstream.contiguous();
+    let us = upstream_c.shape();
+    if us.len() != 5 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 5,
+            actual: us.len(),
+        }));
+    }
+    let layout = fandhe_ai_tensor_core::adaptive_pool3d::adaptive_pool3d_layout(
+        input_shape,
+        [us[2], us[3], us[4]],
+    )
+    .map_err(AutodiffError::Shape)?;
+    if us != layout.out_shape() {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: us.to_vec(),
+            rhs: layout.out_shape().to_vec(),
+        }));
+    }
+    let data = fandhe_ai_tensor_core::adaptive_pool3d::adaptive_avg_pool3d_vjp_host(
+        &upstream_c.host_slice(),
+        &layout,
     )
     .map_err(AutodiffError::Shape)?;
     Tensor::new(data, input_shape).map_err(AutodiffError::Shape)

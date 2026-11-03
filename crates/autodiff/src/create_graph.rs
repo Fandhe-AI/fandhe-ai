@@ -98,7 +98,7 @@
 //! `CtcLoss`（イシュー #2168。所有者承認により恒久的に対象外・fail-closed のまま。§40・#3767）
 //! のみである。`BatchNorm`（train／eval。
 //! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。プーリング族
-//! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）、
+//! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`・`AdaptiveAvgPool3d`。イシュー #3085・#3823）、
 //! 選択縮約（`Max`・`Min`・`Amax`・`Amin`。イシュー #3789・決定記録 §34・実装は `select_reduce`）・
 //! 統計縮約（`LogSumExp`・`Nansum`・`Nanmean`。イシュー #3792・決定記録 §33/§51・実装は `stat_reduce_lse_nan`）も対象——
 //! 方式は `pool` サブモジュール doc と決定記録 §30。構造変換の `Dropout`・`Interpolate`・`MaxUnpool` は
@@ -1024,6 +1024,9 @@ fn replay_op<'c>(
         } => pool::replay_avg_pool3d(&get_mirror(mirror, input)?, &params, count_include_pad),
         Op::AdaptiveAvgPool2d { input } => {
             pool::replay_adaptive_avg_pool2d(&get_mirror(mirror, input)?, shape)
+        }
+        Op::AdaptiveAvgPool3d { input } => {
+            pool::replay_adaptive_avg_pool3d(&get_mirror(mirror, input)?, shape)
         }
         // 索引・累積族（イシュー #3083。方式は `index_cum` モジュール doc 参照）。
         // `Sort`／`Topk`／`Cummax`／`Cummin` は値の選択のみのため `gather` で再生する。
@@ -3072,6 +3075,13 @@ fn build_cgrads<'c>(
                 if parent_nodes[input.0].requires_grad {
                     let input_shape = parent_nodes[input.0].shape.clone();
                     let d = pool::adaptive_avg_pool2d_cgrad(child, &g, &input_shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::AdaptiveAvgPool3d { input } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = pool::adaptive_avg_pool3d_cgrad(child, &g, &input_shape)?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }

@@ -2110,6 +2110,41 @@ pub fn adaptive_pool2d_out_shape(
     Ok(out_shape)
 }
 
+/// 3D Adaptive pooling の出力 shape 検査（[`adaptive_pool2d_out_shape`] の 3 軸版。
+/// イシュー #3823・`docs/autodiff-pool3d-ops-decision.md` §18・§21）。
+///
+/// 検査順: rank 5 → 空間軸 `D`／`H`／`W == 0` 拒否（`N`／`C == 0` は受理し空出力）→
+/// `output_size` の 0 拒否 → 出力要素数／バイト数の `checked_numel_for`。
+/// 出力サイズが入力より大きい場合（窓が重なる）も受理する。
+pub fn adaptive_pool3d_out_shape(
+    input_shape: &[usize],
+    output_size: [usize; 3],
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 5 {
+        return Err(ShapeError::RankMismatch {
+            expected: 5,
+            actual: input_shape.len(),
+        });
+    }
+    let (n, c) = (input_shape[0], input_shape[1]);
+    let spatial = [input_shape[2], input_shape[3], input_shape[4]];
+    if spatial.contains(&0) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: spatial.to_vec(),
+            rhs: vec![1, 1, 1],
+        });
+    }
+    if output_size.contains(&0) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: output_size.to_vec(),
+            rhs: vec![1, 1, 1],
+        });
+    }
+    let out_shape = vec![n, c, output_size[0], output_size[1], output_size[2]];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
+}
+
 /// Adaptive pooling の動的窓（PyTorch と同式・整数演算のみで決定的。
 /// イシュー #1728・設計 `docs/pooling-ops-design.md` §4）:
 ///
@@ -3445,6 +3480,26 @@ mod tests {
     fn adaptive_pool2d_out_shape_rank_mismatch() {
         let err = adaptive_pool2d_out_shape(&[1, 4, 4], [2, 2]).unwrap_err();
         assert!(matches!(err, ShapeError::RankMismatch { .. }));
+    }
+
+    #[test]
+    fn adaptive_pool3d_out_shape_basic_and_rejections() {
+        assert_eq!(
+            adaptive_pool3d_out_shape(&[2, 3, 4, 5, 6], [2, 2, 2]).unwrap(),
+            vec![2, 3, 2, 2, 2]
+        );
+        // 出力が入力より大きい場合も受理する。
+        assert_eq!(
+            adaptive_pool3d_out_shape(&[1, 1, 1, 1, 1], [3, 3, 3]).unwrap(),
+            vec![1, 1, 3, 3, 3]
+        );
+        assert!(matches!(
+            adaptive_pool3d_out_shape(&[1, 1, 4, 4], [2, 2, 2]),
+            Err(ShapeError::RankMismatch { .. })
+        ));
+        assert!(adaptive_pool3d_out_shape(&[1, 1, 0, 4, 4], [2, 2, 2]).is_err());
+        assert!(adaptive_pool3d_out_shape(&[1, 1, 4, 4, 4], [2, 0, 2]).is_err());
+        assert!(adaptive_pool3d_out_shape(&[1, 1, 4, 4, 4], [usize::MAX, usize::MAX, 2]).is_err());
     }
 
     #[test]

@@ -45470,6 +45470,10 @@ const CG_FACADE_ACCEPT_MAP: &[(&str, &str)] = &[
         "AdaptiveAvgPool2d",
         "pool3d_fold_padmode_ops_create_graph_via_facade",
     ),
+    (
+        "AdaptiveAvgPool3d",
+        "adaptive_pool3d_create_graph_via_facade",
+    ),
     ("Unfold", "pool3d_fold_padmode_ops_create_graph_via_facade"),
     ("Fold", "pool3d_fold_padmode_ops_create_graph_via_facade"),
     ("Where", "basic_and_structure_ops_create_graph_via_facade"),
@@ -47341,4 +47345,262 @@ fn facade_does_not_reexport_or_declare_batch_norm3d_detects_each_category() {
     assert!(offense("pub struct BatchNorm3d;"));
     assert!(offense("enum BatchNorm3d {}"));
     assert!(offense("pub type BatchNorm3d = u8;"));
+}
+// =====================================================================
+// イシュー #3823（Phase 10 の `Var` 演算。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `Var::adaptive_avg_pool3d`／`Var::adaptive_max_pool3d` の正ガード。
+// 反転対象の否定ガード・保留 doctest は元から無い（`docs/autodiff-pool3d-ops-decision.md` §18.1）ため、
+// 承認形（1 行委譲・置き場所・facade 非再エクスポート）だけを許す正ガードを新設する。
+// `compat::Sequential::add_adaptive_*_pool3d` と層型は #3824 の担当で、ここでは未実装（0 件）を固定する
+// （#3824 が期待値を更新する前提）。
+// =====================================================================
+
+const ADAPTIVE_POOL3D_AVG_VAR_BODY: &str =
+    "crate : : adaptive_pool3d_ops : : adaptive_avg_pool3d ( self , output_size )";
+const ADAPTIVE_POOL3D_MAX_VAR_BODY: &str =
+    "crate : : adaptive_pool3d_ops : : adaptive_max_pool3d ( self , output_size )";
+
+/// 与えたソースで `Var::adaptive_{avg,max}_pool3d` が各 1 件だけ宣言され、本体が承認形の 1 行委譲か。
+fn adaptive_pool3d_var_bodies_ok(source: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    [
+        ("adaptive_avg_pool3d", ADAPTIVE_POOL3D_AVG_VAR_BODY),
+        ("adaptive_max_pool3d", ADAPTIVE_POOL3D_MAX_VAR_BODY),
+    ]
+    .iter()
+    .all(|(name, body)| {
+        count_fn_declarations_by_name(&tokens, name) == 1
+            && determinism_fn_body(&tokens, name).as_deref() == Some(*body)
+    })
+}
+
+/// `Var::adaptive_avg_pool3d`／`adaptive_max_pool3d` が `var.rs` に各 1 件あり、本体が 1 行委譲である。
+#[test]
+fn var_adaptive_pool3d_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert!(
+        adaptive_pool3d_var_bodies_ok(&content),
+        "var.rs の Var::adaptive_{{avg,max}}_pool3d が承認形（adaptive_pool3d_ops への 1 行委譲）と一致しない"
+    );
+}
+
+/// [`var_adaptive_pool3d_methods_are_thin_delegations`] の自己テスト（すり替え・引数固定・重複・欠落の検出）。
+#[test]
+fn var_adaptive_pool3d_methods_are_thin_delegations_detects_offense() {
+    let avg = "pub fn adaptive_avg_pool3d(&self, output_size: [usize; 3]) -> R { crate::adaptive_pool3d_ops::adaptive_avg_pool3d(self, output_size) }";
+    let max = "pub fn adaptive_max_pool3d(&self, output_size: [usize; 3]) -> R { crate::adaptive_pool3d_ops::adaptive_max_pool3d(self, output_size) }";
+    assert!(adaptive_pool3d_var_bodies_ok(&format!(
+        "impl Var {{ {avg} {max} }}"
+    )));
+    for bad in [
+        // 本体のすり替え（独自実装）
+        format!(
+            "impl Var {{ pub fn adaptive_avg_pool3d(&self, output_size: [usize; 3]) -> R {{ self.clone() }} {max} }}"
+        ),
+        // 引数の固定値化
+        format!(
+            "impl Var {{ pub fn adaptive_avg_pool3d(&self, output_size: [usize; 3]) -> R {{ crate::adaptive_pool3d_ops::adaptive_avg_pool3d(self, [1, 1, 1]) }} {max} }}"
+        ),
+        // 別関数への委譲（avg と max の取り違え）
+        format!(
+            "impl Var {{ {avg} pub fn adaptive_max_pool3d(&self, output_size: [usize; 3]) -> R {{ crate::adaptive_pool3d_ops::adaptive_avg_pool3d(self, output_size) }} }}"
+        ),
+        // 重複宣言
+        format!("impl Var {{ {avg} {avg} {max} }}"),
+        // 欠落
+        format!("impl Var {{ {avg} }}"),
+        format!("impl Var {{ {max} }}"),
+    ] {
+        assert!(!adaptive_pool3d_var_bodies_ok(&bad), "{bad}");
+    }
+}
+
+/// `fandhe_ai::{Var, Tensor, AutodiffError}` だけで届き、fn ポインタ型が承認シグネチャと一致し、
+/// 手計算できる値（スタブでは通らない値）と `Err` を返す。
+#[test]
+fn var_adaptive_pool3d_is_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    fn pin_avg<'a, 't>(_: fn(&'a Var<'t>, [usize; 3]) -> Result<Var<'t>, AutodiffError>) {}
+    type MaxResult<'t> = Result<(Var<'t>, Tensor<i32>), AutodiffError>;
+    fn pin_max<'a, 't>(_: fn(&'a Var<'t>, [usize; 3]) -> MaxResult<'t>) {}
+    pin_avg(Var::adaptive_avg_pool3d);
+    pin_max(Var::adaptive_max_pool3d);
+    let tape = fandhe_ai::tape();
+    // D 軸 in=3,out=2: 窓 [0,2),[1,3)。入力 [0,1,2] → avg [0.5,1.5]、max [1,2]・索引 [1,2]。
+    let x = tape.var(&Tensor::new(vec![0.0_f32, 1.0, 2.0], &[1, 1, 3, 1, 1]).unwrap());
+    let a = x.adaptive_avg_pool3d([2, 1, 1]).unwrap();
+    assert_eq!(a.to_tensor().contiguous().as_slice().unwrap(), &[0.5, 1.5]);
+    let (m, idx) = x.adaptive_max_pool3d([2, 1, 1]).unwrap();
+    assert_eq!(m.to_tensor().contiguous().as_slice().unwrap(), &[1.0, 2.0]);
+    assert_eq!(idx.contiguous().as_slice().unwrap(), &[1, 2]);
+    assert!(x.adaptive_avg_pool3d([0, 1, 1]).is_err());
+    assert!(x.adaptive_max_pool3d([1, 0, 1]).is_err());
+}
+
+const ADAPTIVE_POOL3D_FN_NAMES: [&str; 4] = [
+    "adaptive_avg_pool3d",
+    "adaptive_max_pool3d",
+    "add_adaptive_avg_pool3d",
+    "add_adaptive_max_pool3d",
+];
+
+/// workspace 全体（`crates/*/src/`）の `fn adaptive_{avg,max}_pool3d` が承認済みの置き場所
+/// （`autodiff/src/adaptive_pool3d_ops.rs`・`autodiff/src/var.rs`）に各 1 件ずつだけあり、
+/// `fn add_adaptive_{avg,max}_pool3d` は 0 件である（`Sequential` 側は #3824。実装時に本期待値を更新する）。
+#[test]
+fn workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートが見つからない");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in ADAPTIVE_POOL3D_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        (
+            "autodiff/src/adaptive_pool3d_ops.rs::adaptive_avg_pool3d".to_string(),
+            1,
+        ),
+        (
+            "autodiff/src/adaptive_pool3d_ops.rs::adaptive_max_pool3d".to_string(),
+            1,
+        ),
+        ("autodiff/src/var.rs::adaptive_avg_pool3d".to_string(), 1),
+        ("autodiff/src/var.rs::adaptive_max_pool3d".to_string(), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "adaptive_*_pool3d 関連の fn 宣言が承認済みの置き場所と一致しない（迂回経路の混入か未承認の実装追加）"
+    );
+}
+
+/// facade src の `pub use` が 3D 適応プーリングの内部実装（モジュール・型・ホストカーネル）を含む、
+/// 内部クレートの glob 再エクスポート、同名型の独自宣言、`pub mod adaptive_pool3d(_ops)` 宣言がある場合に
+/// 違反の説明を返す（層型の公開は #3022 の別判断のため非公開を固定する）。
+fn scan_adaptive_pool3d_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in [
+                "adaptive_pool3d_ops",
+                "adaptive_pool3d",
+                "AdaptivePool3dLayout",
+                "AdaptiveAvgPool3d",
+                "AdaptiveMaxPool3d",
+            ] {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            if path_tokens.iter().any(|t| t == "fandhe_ai_autodiff")
+                && path_tokens.iter().any(|t| t == "*")
+            {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && matches!(
+                tokens.get(i + 1).map(String::as_str),
+                Some("AdaptiveAvgPool3d" | "AdaptiveMaxPool3d" | "AdaptivePool3dLayout")
+            )
+        {
+            offending.push(format!("{} {} 宣言", tokens[i], tokens[i + 1]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && matches!(
+                tokens.get(i + 2).map(String::as_str),
+                Some("adaptive_pool3d_ops" | "adaptive_pool3d")
+            )
+        {
+            offending.push(format!("pub mod {} 宣言", tokens[i + 2]));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が 3D 適応プーリングの内部実装を再エクスポート・独自宣言していない。
+#[test]
+fn facade_does_not_reexport_or_declare_adaptive_pool3d_ops() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_adaptive_pool3d_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が 3D 適応プーリングの内部実装を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_adaptive_pool3d_ops`] の自己テスト。
+#[test]
+fn facade_does_not_reexport_or_declare_adaptive_pool3d_ops_detects_each_category() {
+    let offense = |src: &str| !scan_adaptive_pool3d_reexports_and_declarations(src).is_empty();
+    // 違反にならない例
+    assert!(!offense(
+        "use fandhe_ai_autodiff::adaptive_pool3d_ops::adaptive_avg_pool3d;"
+    ));
+    assert!(!offense(
+        "// pub use adaptive_pool3d_ops::adaptive_avg_pool3d;\nconst S: &str = \"pub struct AdaptiveAvgPool3d;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    // 違反の例
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::adaptive_pool3d_ops::adaptive_avg_pool3d;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::adaptive_pool3d::{adaptive_pool3d_layout, AdaptivePool3dLayout};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::{AdaptiveMaxPool3d as P, Module};"
+    ));
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    assert!(offense("pub struct AdaptiveAvgPool3d;"));
+    assert!(offense("enum AdaptiveMaxPool3d {}"));
+    assert!(offense("pub mod adaptive_pool3d_ops {}"));
+    assert!(offense("pub mod adaptive_pool3d {}"));
 }

@@ -160,6 +160,7 @@
 //! issue #1754 実装計画・PR 本文、詳細契約は `tensor_fmt` モジュール
 //! doc 参照）。
 // ホスト `Vec<f32>` の thread-local arena（#2104）。crate 間結線のための内部面で公開契約外。
+pub mod adaptive_pool3d;
 #[doc(hidden)]
 pub mod alloc;
 mod backend_ops;
@@ -276,8 +277,8 @@ pub use low_precision::{
 };
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
-    BatchedMatmulPlan, adaptive_pool2d_out_shape, adaptive_window, batch_norm_layout,
-    batched_matmul_plan, concat_out_shape, conv_out_len, conv_transpose_out_len,
+    BatchedMatmulPlan, adaptive_pool2d_out_shape, adaptive_pool3d_out_shape, adaptive_window,
+    batch_norm_layout, batched_matmul_plan, concat_out_shape, conv_out_len, conv_transpose_out_len,
     conv_transpose2d_out_shape, conv2d_out_shape, conv3d_out_shape, elementwise_out_shape,
     flatten_out_shape, gather_out_shape, gemm_out_shape, im2col_out_shape, im2col3d_out_shape,
     interpolate_out_shape, interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape,

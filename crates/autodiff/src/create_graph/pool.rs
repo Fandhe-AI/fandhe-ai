@@ -27,7 +27,10 @@ use fandhe_ai_tensor_core::{Pool2dParams, ShapeError, Tensor, adaptive_window};
 
 use super::{push_v3, value_of};
 use crate::error::AutodiffError;
-use crate::grad::{adaptive_avg_pool2d_vjp, avg_pool2d_vjp, avg_pool3d_vjp, pool_window_input_pos};
+use crate::grad::{
+    adaptive_avg_pool2d_vjp, adaptive_avg_pool3d_vjp, avg_pool2d_vjp, avg_pool3d_vjp,
+    pool_window_input_pos,
+};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -116,6 +119,19 @@ pub(super) fn replay_adaptive_avg_pool2d<'c>(
         )));
     }
     input.adaptive_avg_pool2d([node_shape[2], node_shape[3]])
+}
+
+/// `AdaptiveAvgPool3d` の写し（イシュー #3823）。出力サイズはノード自身の shape から取る。
+pub(super) fn replay_adaptive_avg_pool3d<'c>(
+    input: &Var<'c>,
+    node_shape: &[usize],
+) -> Result<Var<'c>, AutodiffError> {
+    if node_shape.len() != 5 {
+        return Err(invalid(format!(
+            "AdaptiveAvgPool3d のノード shape {node_shape:?} が rank 5 でない（内部契約違反）"
+        )));
+    }
+    input.adaptive_avg_pool3d([node_shape[2], node_shape[3], node_shape[4]])
 }
 
 // ---------------------------------------------------------------------
@@ -299,6 +315,51 @@ fn plan_adaptive2d(
             }
             let divisor = members.len();
             plan.push_window(oh * w_out + ow, &members, divisor)?;
+        }
+    }
+    Ok(plan)
+}
+
+/// `AdaptiveAvgPool3d` の窓表（イシュー #3823。`adaptive_window` を軸ごとに呼ぶ。divisor は窓要素数）。
+fn plan_adaptive3d(
+    input_shape: &[usize],
+    out_shape: &[usize],
+) -> Result<WindowPlan, AutodiffError> {
+    if input_shape.len() != 5 || out_shape.len() != 5 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 5,
+            actual: input_shape.len().min(out_shape.len()),
+        }));
+    }
+    let (d_in, h_in, w_in) = (input_shape[2], input_shape[3], input_shape[4]);
+    let (d_out, h_out, w_out) = (out_shape[2], out_shape[3], out_shape[4]);
+    let mut plan = WindowPlan::new(
+        d_in.checked_mul(h_in)
+            .and_then(|v| v.checked_mul(w_in))
+            .ok_or_else(overflow)?,
+        d_out
+            .checked_mul(h_out)
+            .and_then(|v| v.checked_mul(w_out))
+            .ok_or_else(overflow)?,
+    )?;
+    let mut members = Vec::new();
+    for od in 0..d_out {
+        let (ds, de) = adaptive_window(od, d_in, d_out).ok_or_else(overflow)?;
+        for oh in 0..h_out {
+            let (hs, he) = adaptive_window(oh, h_in, h_out).ok_or_else(overflow)?;
+            for ow in 0..w_out {
+                let (ws, we) = adaptive_window(ow, w_in, w_out).ok_or_else(overflow)?;
+                members.clear();
+                for d in ds..de {
+                    for h in hs..he {
+                        for w in ws..we {
+                            members.push((d * h_in + h) * w_in + w);
+                        }
+                    }
+                }
+                let divisor = members.len();
+                plan.push_window((od * h_out + oh) * w_out + ow, &members, divisor)?;
+            }
         }
     }
     Ok(plan)
@@ -608,6 +669,22 @@ pub(super) fn adaptive_avg_pool2d_cgrad<'c>(
     let plan = plan_adaptive2d(input_shape, &g.shape())?;
     let composed = window_scatter_structure(child, g, input_shape, &plan)?;
     let host = adaptive_avg_pool2d_vjp(&value_of(child, g)?, input_shape)?;
+    check_structure_contract(&plan, &value_of(child, g)?, &host, input_shape)?;
+    push_v3(child, &composed, host)
+}
+
+/// `AdaptiveAvgPool3d` の d_input（V3。イシュー #3823）。
+pub(super) fn adaptive_avg_pool3d_cgrad<'c>(
+    child: &'c Tape,
+    g: &Var<'c>,
+    input_shape: &[usize],
+) -> Result<Var<'c>, AutodiffError> {
+    if let Some(z) = empty_case(child, g, input_shape)? {
+        return Ok(z);
+    }
+    let plan = plan_adaptive3d(input_shape, &g.shape())?;
+    let composed = window_scatter_structure(child, g, input_shape, &plan)?;
+    let host = adaptive_avg_pool3d_vjp(&value_of(child, g)?, input_shape)?;
     check_structure_contract(&plan, &value_of(child, g)?, &host, input_shape)?;
     push_v3(child, &composed, host)
 }

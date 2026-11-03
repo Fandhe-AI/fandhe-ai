@@ -669,3 +669,66 @@ impl<'t> Var<'t> {
 - Q8 補足: #3750 が決めるまでは `LayerSpec` に variant を置き、保存は `Unsupported` で fail-closed にする。
 - セキュリティ: A03 shape・`kernel_size`・`output_size`・明示標本（保存ファイル経由で復元されるものを含む）は外部入力として、確保と RNG 消費より前に検証し、窓の start は二重に検査する。A02 標本の生成器は暗号用途ではない。A08 判定を迂回する経路を作らず、正ガードで 1 行委譲を固定する。実機ホスト名・秘密情報は書かない。
 - スコープ外: GPU 専用カーネル、`output_ratio`、バッチなし入力、`Generator` 版、層型名の facade 公開（#3022）、ONNX export（#3750）、`docs/pooling-ops-design.md:394` への参照追記。新規 issue は所有者承認なしに起票しない。
+
+
+## 21. #3823 実施記録（AdaptiveAvgPool3d・AdaptiveMaxPool3d の `Var` 演算）
+
+§18 の設計に沿って `Var` 演算 2 件を実装した（親 #3813・設計 #3747）。承認は #3768 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）で、論点 Q1〜Q7 はいずれも §18.12 の推奨案 (a) である。§18 の本文は書き換えず、本節に実施内容と現行値を記す。基準 sha は `3f8b1ca42`。
+
+### 21.1 公開した名前と置き場所
+
+| 項目 | 内容 |
+|---|---|
+| 公開名 | `Var::adaptive_avg_pool3d(&self, output_size: [usize; 3]) -> Result<Var, AutodiffError>`、`Var::adaptive_max_pool3d(...) -> Result<(Var, Tensor<i32>), AutodiffError>` |
+| 本体 | `crates/autodiff/src/adaptive_pool3d_ops.rs` の自由関数（`pub mod`。`pool3d_ops` と同じ並び）。`Var` の 2 メソッドは 1 行委譲 |
+| 共有ホストカーネル | `crates/tensor-core/src/adaptive_pool3d.rs`（`adaptive_pool3d_layout`・`adaptive_{avg,max}_pool3d_host`・`adaptive_avg_pool3d_vjp_host`）。窓は軸ごとに既存の `adaptive_window` を呼ぶ |
+| 形状検査 | `crates/tensor-core/src/ops_shape.rs::adaptive_pool3d_out_shape`（rank 5 → 空間軸 0 → `output_size` 0 → `checked_numel_for`） |
+| `BackendOps` | `adaptive_pool3d_avg`／`adaptive_pool3d_max`（既定 `Unsupported`。CPU のみ override。CUDA／Metal／ROCm は変更なし＝ホストへフォールバック） |
+| 索引 | `(n, c)` 平面内 flat 添字 `d·H·W + h·W + w`（`Tensor<i32>`）。`max_unpool3d` へそのまま渡せる |
+
+### 21.2 `Op` と `create_graph`
+
+- Avg: 新設 `Op::AdaptiveAvgPool3d { input }`（`pub(crate)`）。VJP は `grad.rs::adaptive_avg_pool3d_vjp`（共有カーネルへ委譲。`f64` アキュムレータ・1 回 downcast）。`create_graph` は V3（`create_graph/pool.rs` の `plan_adaptive3d`・`adaptive_avg_pool3d_cgrad`・`replay_adaptive_avg_pool3d`）。`supports_create_graph` は `true`、`is_checkpoint_eligible` は `false`。
+- Max: 既存の `Op::MaxPool3d { input, index }` を再利用する（Q5 (a)）。新 `Op` も `create_graph` の追加分もない。
+- 検査順は §18.3 のとおり（rank 5 → 空間軸 0 → `output_size` 0 → 出力要素数 → Max のみ `D·H·W <= i32::MAX`〈`N=0` でも検査〉→ 実体化 → backend → 戻り shape 再検証 → `push_eager`）。`Unsupported` 以外のバックエンドエラーはフォールバックせず伝播する。
+
+### 21.3 数値契約
+
+Max は比較・選択のみ（値は入力要素と bit 一致、タイ先勝ち、窓内で最初の NaN の索引が残る）。Avg は窓内 `f64` 逐次加算・窓要素数で除算・1 回だけ `f32` へ downcast。VJP は出力 major で `f64` 配列へ加算して 1 回 downcast。`mul_add` は使わず FMA 契約は不変。tolerance 定数・baseline は変更していない。
+
+### 21.4 新設した正ガード（`crates/facade/tests/api_surface.rs` の末尾の #3823 節）
+
+反転対象の否定ガード・保留 doctest は元から無い（§18.1）。`AdaptiveMaxGlobalPoolHoldDoctestGuard`・`Pool3dOpsHoldDoctestGuard` とその固定文言は変えていない。
+
+- `var_adaptive_pool3d_methods_are_thin_delegations`（自己テスト `_detects_offense`: すり替え・引数固定・avg/max 取り違え・重複・欠落）
+- `var_adaptive_pool3d_is_reachable_via_facade_only`（`fandhe_ai::{Var, Tensor, AutodiffError}` だけでシグネチャを固定し、手計算できる値を確認）
+- `workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations`（`add_adaptive_*_pool3d` は 0 件。#3824 が期待値を更新する）
+- `facade_does_not_reexport_or_declare_adaptive_pool3d_ops`（自己テスト `_detects_each_category`）
+- create_graph 表: `CG_FACADE_ACCEPT_MAP` に `("AdaptiveAvgPool3d", "adaptive_pool3d_create_graph_via_facade")` を追加（`create_graph_supported_op_set_matches_approved_list` は `tape.rs` を文字列で照合する）
+- 手元確認: `var.rs` の委譲先引数を一時的に固定値へ書き換えると `var_adaptive_pool3d_methods_are_thin_delegations` と `var_adaptive_pool3d_is_reachable_via_facade_only` が失敗することを確かめ、元へ戻した。
+
+### 21.5 テスト
+
+- tensor-core: `adaptive_pool3d.rs` の単体テスト（窓境界・重なり窓・出力 > 入力・タイ・NaN・`-inf`・拒否系・空バッチ・決定性）。
+- backend-cpu: `backend_ops_dispatch.rs` に CUDA／Metal の `Unsupported` 確認（panic しない）。
+- autodiff: `tests/adaptive_pool3d_parity.rs`（素朴な窓参照との一致、中心差分の勾配、重なり窓の手計算、mock による `Unsupported` フォールバック・他エラー伝播・誤 shape 拒否、孤児ノード無し、`N=0`/`C=0`、`N=0` でも plane > `i32::MAX` を Max で拒否、決定性）、`tests/create_graph_pool.rs`（二階微分の有限差分）。
+- facade: `tests/adaptive_pool3d_ops_backend_parity.rs`（CPU tape と `NaiveOps` tape の bit 一致。`#[ignore]` の `cuda_*`／`metal_*`）、`tests/create_graph_facade.rs::adaptive_pool3d_create_graph_via_facade`。
+
+### 21.6 PyTorch 2.14.0 との突合
+
+使い捨て venv に `torch==2.14.0+cpu` を導入して実行値を得た（リポジトリの依存には入れていない）。fixture は `crates/autodiff/tests/fixtures/adaptive-pool3d-pytorch-reference/`（生成条件・sha256 は同 README）。有限 22 件・非有限 12 件・エラー 16 件で、Max の値は bit 一致（NaN はクラス一致）・索引は完全一致、Avg の forward と勾配は REQ-2 統一複合判定で一致した。既知の差分（いずれも本実装は fail-closed 側）:
+
+| 項目 | PyTorch 2.14.0 | 本実装 |
+|---|---|---|
+| NaN を含む窓の索引 | 最後の NaN | 最初の NaN（§5 と同じ決定。比較から除外） |
+| `output_size` に 0 | 空出力で受理 | `Err`（各軸 1 以上） |
+| 空間軸 0 | `adaptive_avg_pool3d` の W=0 は受理する構成がある | 常に `Err` |
+| `C=0` | 拒否 | 空出力で受理（`N=0` と同じ） |
+| rank 4（バッチなし） | 受理 | `Err`（rank 5 のみ） |
+
+### 21.7 逸脱・申し送り
+
+- 逸脱: 計画では rustdoc の doctest を facade に置く案もあったが、`Var` の rustdoc は autodiff にあるため doctest は `Var::adaptive_{avg,max}_pool3d` の rustdoc に置いた。facade からの到達性は `var_adaptive_pool3d_is_reachable_via_facade_only` が担保する。
+- 参照していた §18 の行番号は基準 sha の値で、現行の位置は上表のファイル名と関数名で引く。
+- GPU 実機 parity は**未実測**。手順は `docs/perf/logs/adaptive-pool3d-ops-3823/README.md`（実測は #3860／#3861）。
+- 未着手（後続）: `Sequential::add_adaptive_*_pool3d`・層型・`LayerSpec`（#3824）、model_io・ONNX export（#3828）、層型名の facade 公開（#3022）。
