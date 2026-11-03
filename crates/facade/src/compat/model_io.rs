@@ -294,6 +294,12 @@ pub fn save_model(model: &Sequential, dir: impl AsRef<Path>) -> Result<(), Model
 /// 影響しない）。
 /// 途中で失敗しても部分的に構築したモデルは返さない。非信頼入力の扱いはモジュール doc を参照。
 ///
+/// param groups（`compiled.param_groups`）は、キーのない旧ファイルを空 groups として読み、
+/// ある場合は復元する。形式違反・負値・非有限・重複・`offsets` の不整合は `Manifest`、
+/// スロットが訓練対象パラメータ数以上なら `Mismatch`、`Lbfgs` との組み合わせは
+/// `UnsupportedModel`、`format_version` 1 に groups があれば `Manifest` で拒否する
+/// （決定記録 `docs/autodiff-param-groups-decision.md` §18・§18.13）。
+///
 /// 同じ `dir` への並行する [`save_model`] 中の読み込みは非サポート（決定記録 §12.3 手順 7）。
 /// 非 unix では `ErrorKind::Unsupported` で拒否し、対応範囲は Linux x86_64／aarch64・macOS
 /// （旧世代ファイルの手動掃除・耐久性は [`save_model`] の doc を参照）。

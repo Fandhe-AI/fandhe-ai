@@ -1018,7 +1018,24 @@ baseline の追加・更新はない。
 - 変異確認（手元のみ・確認後に戻した）: `compiled_from_snapshot` で groups を空にすると往復と `LrSchedule` の 2 件が失敗し、base_lr の拒否を外すとスケジュール後の保存拒否の 1 件が失敗した。
 - セキュリティ: manifest は非信頼データとして扱い、長さ・`offsets` の単調性・添字・有限性・正準 f32 の検証をすべて確保とモデル状態の変更より前に行う。確保量は `offsets`／`slots` の値でなく既存上限（`MAX_ARRAY_LEN` 等）で抑えられたパース済み配列長で決まる。読込失敗時は construct-before-assign により部分状態を返さない。
 - 不変事項: 依存の追加・更新、`unsafe`、tolerance・baseline・ガードレール閾値、`docs/spec`、GPU カーネル・`Op`・`BackendOps` はいずれも変えていない（実機列は該当なし）。既定経路（groups なし）は分岐 1 つと空チェックだけで bit 不変。
-- 公開状態: 公開（挙動のみ。追跡表の行 21）。読込の互換検査の残りは #3836。
+- 公開状態: 公開（挙動のみ。追跡表の行 21）。読込の互換検査の残りは #3836（§18.13 で実装済み）。
+
+### 18.13 実装記録（イシュー #3836）
+
+- 承認: #3769 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 3。形式・エラー型・検証順は §18.0〜§18.3 のとおりで、新たな承認事項はない。
+- 本番コードの変更: 無し。読み込み側の本体（`parse_param_groups`・`check_param_group_slots`・`compiled_from_snapshot`・版 1／Functional の拒否）は #3835（§18.12）で実装済みで、本件は #3835 が #3836 に残した互換検査のテストを足した（`feat` ではなく `test` の変更）。`load_model` の doc に互換の規則を 1〜3 行足した（挙動は不変）。
+- 足したテスト（`crates/facade/tests/compat_sequential_model_io_param_groups.rs`。facade の公開 API と `std` だけを使う。判定は bit 一致と variant 照合のみで tolerance は使わない）:
+  - T1 `legacy_manifest_without_param_groups_loads_as_empty_groups`・`compiled_without_groups_has_no_key_and_round_trips`: groups 付きで保存した manifest から `param_groups` キーを除いた旧形式が `Ok` で読め、続きの `fit` が groups なしの参照モデルと bit 一致し、groups を保ったモデルとは不一致（判別）。再保存してもキーが出ない。SGD／AdamW の groups なしは往復する。0.13.0 の実ファイルは `"compiled":null` のケースしか無く（`tests/fixtures/model-io-0.13.0/`）、compile 状態つきの実ファイルの fixture は生成していない（手順は README にあるが、推測で作った値を置かないため。T1 の生成 manifest を正とする）。
+  - T2 `tampered_param_groups_are_rejected_as_manifest`: 長さ不整合・G=0・`offsets` の各不正・group 内／group 間の重複・負値・非正準 f32（`0.10`・`1`・`1E0`）・非有限（`1e39`・`NaN`・`inf`）・型違い・`slots` の非整数／負数／u64 超過・未知キー／キー欠落／`null`／`{}`／配列・深い入れ子・キー重複の 30 ケース超を `Manifest` で拒否し、毎回 dir 不変と元へ戻した `Ok`（陽性対照）を確かめる。
+  - T3 `out_of_range_slots_are_rejected_as_mismatch_at_boundary`: `n-1` は `Ok`、`n`・`n+1`・`u64::MAX` は `Mismatch`（確保で落ちない）。`load_model` は値を返す API なので、部分状態を返さないことは `Err` と dir 不変で固定した。
+  - T4 `lbfgs_with_groups_is_unsupported`・`format_version_1_with_groups_is_rejected_but_legacy_loads`: Lbfgs + groups は `UnsupportedModel`、版 1 + groups は `Manifest`（groups を持たない版 1 は `Ok`）。Functional manifest の拒否は既存の `functional_io/tests.rs::param_groups_in_functional_manifest_are_rejected` に任せ重複させない。
+  - T5 `group_validators_agree_across_step_save_and_load`: 同じ拒否集合（空 params・NaN／+inf／負の lr・NaN／負の wd・group 内／group 間の重複・範囲外）を `step_with_groups`（`Err`）・`save_model`（`UnsupportedModel`、範囲外のみ `Mismatch`、保存先は作られない）・manifest 注入の `load_model`（`Manifest`、範囲外のみ `Mismatch`）に流して一致を確かめる。受理集合（`lr=0`・`weight_decay=-0.0`・非昇順 params・単一スロット）は 3 経路で受理され、往復後の続きの学習が bit 一致する。
+- §18.4 のテスト計画との対応: 旧ファイルの互換 = T1、パーサの網羅的な負テスト = T2、`Mismatch` で部分状態を返さない = T3、版 1／Lbfgs の拒否 = T4、検証器の突合 = T5。`compiled.rs` の単体テストは #3835 の `param_groups_parse_rejects_basic_malformations` ほかで足り、統合テストが公開経路で同じ検査を網羅するため単体の追加はしていない。
+- `api_surface.rs`: 反転対象の否定ガードは元から無い（§18.1・§18.12）。正ガード群（`facade_param_groups_public_surface_matches_approved_contract`・`param_groups_types_match_approved_shape`・`param_groups_types_are_reachable_via_facade_only`・`param_groups_usage_doctests_are_present_and_compiled`）は #3835 の状態のまま通る。`load_model` への新しい doctest は足していない（`compile_with_param_groups` の doc が保存・読込の往復を実行 doctest で持つため）。公開名は増えず、承認済み集合も変えていない。
+- 変異確認（手元のみ・確認後に戻した）: `parse_param_groups` のスロット重複検査を外すと T2 と T5 が失敗した。
+- セキュリティ: 新しいテストはいずれも「確保とモデル状態の変更より前に型付きエラーで拒否する」既存の契約を固定するもので、新しい信頼境界は作らない。巨大な添字（`u64::MAX`）は確保でなく `Mismatch` になることを T3 で確かめた。一時ファイルは `TempDirGuard` に置く。
+- 不変事項: 依存の追加・更新、`unsafe`、tolerance・baseline・ガードレール閾値、manifest の上限定数、`docs/spec`、GPU カーネル・`Op`・`BackendOps` はいずれも変えていない（実機列は該当なし）。
+- 公開状態: 公開（挙動のみ。追跡表の行 21）。保存形式は #3835 から不変。
 
 ## §19 保守・運用チェックリスト（イシュー #3756）: param groups と `DeviceParamStore` 常駐更新の併用（A3-d）
 
