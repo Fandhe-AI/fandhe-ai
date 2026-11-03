@@ -5392,3 +5392,70 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 実装: `Op::supports_create_graph` の false 側（ワイルドカードなし）へ 2 variant を追加。#3812 の正ガードに合わせ、`CG_REJECT_OPS`（`crates/facade/tests/api_surface.rs`）へ 2 件、`CG_FACADE_REJECT_MAP` へ `cosine_similarity_create_graph_is_rejected_via_facade`・`pairwise_distance_create_graph_is_rejected_via_facade`（`create_graph_facade.rs`）を追加した。`CG_REJECT_OPS` の doc コメントは「恒久」と「承認済み・別設計待ち」を書き分けた。autodiff 側の拒否は `tests/create_graph.rs::create_graph_rejects_cosine_similarity_and_pairwise_distance`。facade `Tape::backward_create_graph` の rustdoc「対象外として残る範囲」に 1 項目を足した。
 - 拒否は入口検査で `Err(Backward)`、`child` は空のまま。1 階の VJP・forward は他の Op と同じく動く。
 - 変えていないもの: §72 の本文、既存 Op の値、tolerance・baseline、依存。
+
+## 75. 設計記録（イシュー #3978・親 #3719 系。create_graph の B 区分・MatrixNorm の Nuc・Spectral の再評価）
+
+### 75.0 位置づけ・承認根拠・境界
+
+- 状態: **設計記録のみ。実装はしない**。所有者の採否は未取得で、本節は承認を代行しない。コードの参照はすべて基準 sha `b5cf87f18` の `path:line`。
+- 節番号: 本 doc の main 上の最終節は §73。open PR #3988（#3977・`IndexedScatterReduce` の `Prod`）が §74 を使うため、本節は §75 とする。
+- 承認根拠は「起票の承認」だけ。#3767 の回答コメント（<https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>）と §44.14 点 11 で、#3808 の後に再評価する issue の起票が承認された。実装の承認は無い。
+- §72.1 の F3（現時点 fail-closed・起票は承認済み・未起票）の「未起票」は、#3978 の起票で解消した。§72 の本文は変えない。
+
+### 75.1 現状（コード事実）
+
+- `Var::matrix_norm`（`crates/autodiff/src/var.rs:7315`）は `Op::MatrixNorm { input, ord }` を 1 ノードだけ積み、`Svd*` ノードは積まない。親テープの mirror に SVD の因子は無い。
+- forward は `eval::linalg::matrix_norm`（`crates/autodiff/src/eval/linalg.rs:1120`）。`Nuc` はホストの SVD の σ を `f64` で合計して 1 回だけ `f32` にする（:1129-1132）。`Spectral` は σ の先頭（最大値）を返す（:1134-1137）。
+- 1 階 VJP は `matrix_norm_vjp`（`eval/linalg.rs:1526`）。`Nuc` は `g·U Vh`（:1669）、`Spectral` は `g·u₀v₀ᵀ`（:1678）。縮退・σ = 0 の検査は無く、特異ベクトルの選び方に任せる。
+- create_graph は拒否。`supports_create_graph` の payload 判定（`crates/autodiff/src/tape.rs:2853-2858`）が `Fro`・`One`・`Inf` だけ true。入口検査は `create_graph/stat_varnorm.rs:144-149`、cgrad の振り分けは `create_graph.rs:3623-3647`、再生は `create_graph.rs:1461`（公開メソッドへの自己再生）。
+- §68 の基盤: `check_svd_triple`（`create_graph/decomp.rs:393`。`k == 0` は :447、σ に 0 を含むと :454、`svd_gap_degenerate` は :377 で閾値 `1e-9`）、`guard_svd`（:622）、`svd_cgrad`（:850）、`replay_svd`（:524）。1 階の `svd_vjp`（`eval/linalg.rs:1371`）は全ペアの縮退を検査する（:1399）。
+
+### 75.2 数学的な可微分域と §68 の拒否域のずれ
+
+- `Nuc` = Σσᵢ。σ_min > 0 なら滑らか。σᵢ = 0 があると |x| と同じ形で二階が定義できない。σᵢ = σⱼ > 0 の縮退でも滑らかなはずだが、本セッションでは数値で確かめていない（実装 issue の FD 検証事項）。
+- `Spectral` = σ₁。σ₁ > σ₂ なら滑らか。σ₁ = σ₂ と σ₁ = 0 では微分できない。j ≥ 2 の σⱼ = 0 や i, j ≥ 2 同士の縮退は、σ₁ の微分に影響しないはず（同上、未検証）。
+- §68 の拒否域は「σ に 0 を含む」「全ペアの縮退（`|σj² − σi²| < 1e-9`）」をすべて拒否する。したがって `Nuc` の縮退（単位行列・直交行列を含む）と、`Spectral` の rank 落ち（rank 1 など）・下位の縮退は、可微分でも拒否しすぎになる。拒否は fail-closed 側に倒れる。
+
+### 75.3 選択肢
+
+- **A1: §68 の上に組む**
+  - 再生は 2 段。値は公開メソッドへの自己再生 `a_m.matrix_norm(ord)`（forward の `f64` 合計と丸めを揃えるため）。構造は子テープで `a_m.svd()` を新しく積み、cgrad は `Nuc` が `g·(U Vh)`、`Spectral` が `g·(U の列 0)(Vh の行 0)`。列・行の取り出しに使う Op が `supports_create_graph` で true かは実装 PR で確かめる。値は V3（`matrix_norm_vjp`）で CPU の 1 階と bit 一致を目標にする。
+  - 拒否範囲は `check_svd_triple`＋`guard_svd` と同じ。子テープへ書く前（`validate_ancestors`）に同じ述語で拒否し、`child` を空に保つ。型付きエラー（`AutodiffError::Backward`）で、新しい定数・閾値は作らない（§44 点 4）。
+  - 計算量: 子テープでホストの SVD を 1 回、§68 の結合順の MatMul、`guard_svd` のホスト走査。`Spectral` は 1 組しか使わないのに分解全体の費用を払う。m×m は作らない。
+  - 公開面: 公開名は増えない。`MatrixNormOrd` は `#[non_exhaustive]` で、受理範囲が広がるだけ（`docs/api-compat-0.14.0-decision.md` §1.2 項目 3）。
+  - 追跡表: 実装 issue が追加で要る。行 4 は実装と実機 parity まで「未確定」のまま。
+- **A2: 専用の構造（`Nuc` は極分解の微分、`Spectral` は先頭の特異値の組だけを使う）**
+  - 拒否範囲を 75.2 の可微分域に合わせられる。ただし子テープで微分可能にするには新しい内部 Op と固有の 1 階 VJP が要り、規模は A1 より大きい。
+  - §44.14 点 3 で推奨しなかった「クラスタ内で g が一定なら受理」と同じ型で、§68.0 の承認（どの兄弟でも拒否）の延長ではない。**新しい承認が要る**。
+- **B: 恒久 fail-closed（対象外）**
+  - §72.1 の F3 から F1（恒久）へ移す。`CtcLoss`（§60）が前例。拒否範囲は `Nuc`・`Spectral` の全入力。計算量・公開面は不変。
+  - 追跡表: #3988 がマージされた後なら、追加の実装 issue なしに行 4 が「未確定」を抜けられる唯一の選択肢（区分の変更は承認後の PR が行う）。後続に rustdoc（`tape.rs:2636`・`create_graph.rs:79`）と区分コメントを「恒久」に直す小さな PR が要る。
+- 組み合わせ案: `Spectral` だけ A1、`Nuc` は B など、ord ごとに分けることもできる。
+
+### 75.4 推奨
+
+- 第一候補は **A1（縮退・σ = 0 は §68 と同じ型付き拒否）**、代替は B。理由は、§68 の基盤・承認済みの方針（縮退は兄弟を問わず拒否・σ = 0 は拒否・定数は新設しない）・テストの型をそのまま使えて新しい承認事項が最小になること、拒否しすぎは fail-closed 側に倒れること、公開面が変わらないこと。
+- A1 は実装 issue が追加で要るため、0.14.0 の日程との兼ね合いを所有者が判断する。他フレームワークの挙動は本セッションで確かめていないため書かない。
+
+### 75.5 A1 を採った場合の申し送り（後続の実装 issue 向け）
+
+- 反転する箇所: `tape.rs:2853-2858`、`stat_varnorm.rs:144-149`、`create_graph.rs:3623-3647`、`create_graph.rs:79`・`tape.rs:2636` の doc、`create_graph/linalg_norm_rank.rs:21` の doc、`crates/autodiff/tests/create_graph_linalg_fft.rs:895-903`（fail-closed 固定の 2 件。件数が 0 になる扱いも決める）、`tests/create_graph_linalg_norm_rank.rs:593`、facade の `crates/facade/tests/create_graph_facade.rs:2015-2022`・`:2671-2679`、`api_surface.rs` の payload 列挙と拒否の対応表、`create_graph_gpu_parity.rs` の `linalg_norm_rank` 族。
+- テストの型は §68.3 に揃える（5 点中央差分との Hessian 突合を縦長・横長・正方で、1 階と `cg.grad` の bit 一致、孫テープ、縮退・σ = 0・空行列での拒否と `child` が空であること、`[100000,1]` で m×m を作らないこと、隣接の `Op::Custom`）。実機 parity は Phase 10（#3857・#3859）に任せ未実測のままにする。関数名は `LINALG_OPS_FN_NAMES` と同名にしない。
+
+### 75.6 所有者へ戻す論点
+
+| 点 | 論点 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1 | 採否（A1／A2／B／ord ごとに分ける） | A1 | fail-closed を維持（F3 のまま） |
+| 2 | `Nuc` と `Spectral` を同じ扱いにするか | 同じ（A1） | 同上 |
+| 3 | 縮退・σ = 0: §68 準拠／可微分域に合わせた専用判定（新しい承認が要る） | §68 準拠 | 同上 |
+| 4 | 値の方式（V3／V1） | V3 | 同上 |
+| 5 | 隣接見本 | `Op::Custom` のみ | 同上 |
+| 6 | GPU parity の判定方式 | #3739（§48）に従い tolerance は変えない | 同上 |
+| 7 | B を選んだ場合の後続 rustdoc 修正 PR の起票要否 | 要否だけ問う | 起票しない |
+
+### 75.7 セキュリティ観点・変えていないもの
+
+- 実行コードを足さない。設計要件として、入力（rank 2・有限）は forward の検証を通ったものだけが届くこと、A1 は m×m の中間行列を作らないこと、拒否時に `child` を空に保つこと、`supports_create_graph` の網羅 match と総括判定を迂回しないことを維持する。依存・設定・ruleset に触れない。実機のホスト名・個人のパス・秘密情報は書かない。
+- 変えていないもの: コード・公開 API・rustdoc・tolerance・baseline・`STAGE_BOUND_GUARD`・SVD の `1e-9`・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
+- スコープ外: 実装（A1・A2・B のいずれも。所有者の回答後に別 issue で起票）、rustdoc の「未起票」表現の修正、`Prod`（#3977・#3988）、GPU 実機 parity（#3857・#3859）、f64 テープ（#3722）。
