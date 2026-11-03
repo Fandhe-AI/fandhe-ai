@@ -211,7 +211,10 @@ fn user_composite_state_dict_safetensors_file_roundtrip() {
 fn user_composite_load_state_dict_rejects_unknown_and_missing_keys_without_mutation() {
     let mut enc = Encoder::new(SEED);
     let before = snapshot(&enc);
-    let full = enc.state_dict();
+    // 検証前の部分適用を検出できるよう、現在値と異なる有効パラメータ（別シードの Encoder）を土台にする。
+    let donor = Encoder::new(SEED + 100);
+    assert_ne!(snapshot(&donor), before, "土台は現在値と異なる");
+    let full = donor.state_dict();
 
     let mut missing = full.clone();
     missing.remove("head.0.bias");
