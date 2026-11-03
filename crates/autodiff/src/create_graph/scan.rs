@@ -122,6 +122,18 @@ pub(super) fn linear_scan_steps<'c>(
 /// 非有限値が 1 つでも現れたら最大は `f64::INFINITY` にする（NaN も INFINITY 扱い）。
 /// `cut` は `A` を先に 0 にする位置（`None` なら切らない）。
 pub(super) fn scan_lane_host(b: &[f32], a: &[f32], cut: Option<&[bool]>) -> (Vec<f32>, f64) {
+    scan_lane_host_steps(b, a, cut, scan_steps(b.len()))
+}
+
+/// [`scan_lane_host`] の段数明示版。子テープの [`linear_scan_steps`] が `steps` 段だけ積む場合に、
+/// ホスト側の上界計算も同じ段数に揃える（余分な段が `cut` 済みの区間境界をまたいで参照し、
+/// 子テープに無い overflow を見て安全な入力を誤って拒否するのを防ぐ）。
+pub(super) fn scan_lane_host_steps(
+    b: &[f32],
+    a: &[f32],
+    cut: Option<&[bool]>,
+    steps: usize,
+) -> (Vec<f32>, f64) {
     let n = b.len();
     let mut s: Vec<f32> = b.to_vec();
     let mut a_cur: Vec<f32> = a.to_vec();
@@ -144,7 +156,6 @@ pub(super) fn scan_lane_host(b: &[f32], a: &[f32], cut: Option<&[bool]>) -> (Vec
     };
     note(&s);
     note(&a_cur);
-    let steps = scan_steps(n);
     let mut k = 1usize;
     for step in 0..steps {
         let s_old = s.clone();
@@ -180,10 +191,19 @@ pub(super) fn scan_cotangent_bound(
     a: &[f32],
     cot_out: &[f64],
 ) -> (Vec<f64>, Vec<f64>, f64) {
+    scan_cotangent_bound_steps(b, a, cot_out, scan_steps(b.len()))
+}
+
+/// [`scan_cotangent_bound`] の段数明示版（[`scan_lane_host_steps`] と同じ理由）。
+pub(super) fn scan_cotangent_bound_steps(
+    b: &[f32],
+    a: &[f32],
+    cot_out: &[f64],
+    steps: usize,
+) -> (Vec<f64>, Vec<f64>, f64) {
     let n = b.len();
     let mut s: Vec<f64> = b.iter().map(|v| f64::from(*v).abs()).collect();
     let mut a_cur: Vec<f64> = a.iter().map(|v| f64::from(*v).abs()).collect();
-    let steps = scan_steps(n);
     // 各段の更新前の (S, A)。逆伝播で係数として使う。
     let mut history: Vec<(Vec<f64>, Vec<f64>)> = Vec::with_capacity(steps);
     let mut k = 1usize;

@@ -54,8 +54,8 @@ use fandhe_ai_tensor_core::Tensor;
 use super::cumulative_b::{JUDGE_COEFF, entry_check, host_ref_check, judge_budget, over_guard};
 use super::push_v3;
 use super::scan::{
-    Num, Rf, linear_scan_steps, scan_backward, scan_cotangent_bound, scan_forward, scan_lane_host,
-    scan_steps,
+    Num, Rf, linear_scan_steps, scan_backward, scan_cotangent_bound, scan_cotangent_bound_steps,
+    scan_forward, scan_lane_host, scan_lane_host_steps, scan_steps,
 };
 use super::scatter_reduce::Grads;
 use crate::error::AutodiffError;
@@ -416,6 +416,8 @@ fn whole_lane_bounds(
     g_host: &[f32],
 ) -> Result<(), AutodiffError> {
     let k = plan.k;
+    // 子テープ（linear_scan_steps）が積む段数と一致させる（全体長 K の段数ではない）。
+    let steps = scan_steps(plan.max_len);
     let v: Vec<f32> = plan
         .perm
         .iter()
@@ -441,8 +443,8 @@ fn whole_lane_bounds(
     };
     let a_suf = shifted(&v);
     let a_pre = shifted(&v_rev);
-    let (suf, mx_s) = scan_lane_host(&b, &a_suf, Some(&plan.last));
-    let (sp, mx_p) = scan_lane_host(&b, &a_pre, Some(&plan.last));
+    let (suf, mx_s) = scan_lane_host_steps(&b, &a_suf, Some(&plan.last), steps);
+    let (sp, mx_p) = scan_lane_host_steps(&b, &a_pre, Some(&plan.last), steps);
     if over_guard(mx_s) || over_guard(mx_p) {
         return Err(invalid(format!(
             "{WHAT}: 連結 scan の段が 2^125 以上または非有限のため拒否（区間をまたぐ積。§74 参照）"
@@ -466,8 +468,8 @@ fn whole_lane_bounds(
         cot_suf[i] = gg * f64::from(pre[i]).abs();
         cot_sp[plan.rev[i] as usize] = gg * f64::from(suf[i]).abs();
     }
-    let (_, ca_s, mx_cs) = scan_cotangent_bound(&b, &a_suf_c, &cot_suf);
-    let (_, ca_p, mx_cp) = scan_cotangent_bound(&b, &a_pre_c, &cot_sp);
+    let (_, ca_s, mx_cs) = scan_cotangent_bound_steps(&b, &a_suf_c, &cot_suf, steps);
+    let (_, ca_p, mx_cp) = scan_cotangent_bound_steps(&b, &a_pre_c, &cot_sp, steps);
     if over_guard(mx_cs) || over_guard(mx_cp) {
         return Err(invalid(format!(
             "{WHAT}: 連結 scan の二階の逆伝播の中間値が 2^125 以上または非有限のため拒否（区間をまたぐ積。§74 参照）"
@@ -1021,5 +1023,30 @@ mod tests {
             Ok(_) => panic!("連結 scan の区間またぎ overflow は拒否されるはず"),
             Err(e) => panic!("想定外のエラー: {e:?}"),
         }
+    }
+
+    /// 回帰: 複数区間で全体長 K の段数 > 最長区間長の段数のとき、ホスト側の総括判定は子テープと同じ
+    /// 段数（`scan_steps(max_len)`）で走査する。余分な段が区間をまたいで作る overflow で、
+    /// 安全な入力を誤って拒否しない。
+    #[test]
+    fn multi_segment_safe_input_with_k_above_max_len_is_accepted() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let child = Tape::new_with_ops(naive_ops());
+        let x = tape.var(&Tensor::new(vec![1.0f32; 4], &[4]).unwrap());
+        // 4 区間 × 2 要素（K = 8 → 3 段、最長区間 2 → 1 段）。
+        let src = tape.var(
+            &Tensor::new(
+                vec![1e19f32, 1e19, 1e19, 1e19, 1e19, 1e19, 1e19, 1e19],
+                &[8],
+            )
+            .unwrap(),
+        );
+        let idx = Tensor::<i32>::new(vec![0, 0, 1, 1, 2, 2, 3, 3], &[8]).unwrap();
+        let y = x
+            .scatter_reduce(0, &idx, &src, ScatterReduceMode::Prod, false)
+            .unwrap();
+        let loss = y.sum(None).unwrap();
+        tape.backward_create_graph(&loss, &child)
+            .expect("安全な複数区間の Prod グラフは拒否されない");
     }
 }
