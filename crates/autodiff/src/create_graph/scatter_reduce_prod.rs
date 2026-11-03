@@ -188,8 +188,11 @@ const SEED_BASE: usize = 16;
 /// 2 scan 分の `2·m·(3·steps + 16)` と参照・判定の `16·m`。区間は互いに独立なので `K²` ではなく
 /// 区間ごとの和で数える。構築（置換・マスク）の `8·K` も加える。
 fn judge_cost(lens: impl Iterator<Item = usize>, k: usize) -> usize {
+    // 連結 lane の判定（`whole_lane_bounds`）は 4 scan 相当を K 要素で回す。
     let mut total = k.saturating_mul(8);
+    let mut max_m = 0usize;
     for m in lens {
+        max_m = max_m.max(m);
         let steps = scan_steps(m);
         let fwd = m.saturating_mul(
             2usize
@@ -207,6 +210,8 @@ fn judge_cost(lens: impl Iterator<Item = usize>, k: usize) -> usize {
         );
         total = total.saturating_add(fwd.saturating_add(m.saturating_mul(per_seed)));
     }
+    total = total
+        .saturating_add(k.saturating_mul(scan_steps(max_m).saturating_mul(32).saturating_add(64)));
     total
 }
 
@@ -397,6 +402,90 @@ fn judge_window(win: &Window) -> Result<(), AutodiffError> {
     Ok(())
 }
 
+/// 全区間を連結した lane（子テープが実際に積む演算列）での総括判定（第 1 軸の連結版）。
+///
+/// 区間ごとの窓は区間をまたぐ項を含まないが、連結 scan の逆伝播では境界スロットの cotangent
+/// （例 `1e30×1e30 = inf`）に `cut` の 0 を掛ける `inf × 0 = NaN` が次区間の非境界スロットへ流れうる
+/// （Codex P1。入力例 `include_self=false`・`index=[0,0,1,1,1]`・`src=[1e30,1,1e-30,1,1e30]`）。
+/// そのため forward（suffix・prefix の 2 scan）と二階の逆伝播の上界を連結 lane 上で再計算し、
+/// 2^125 以上または非有限なら構築前に型付きエラーで拒否する（§74）。
+fn whole_lane_bounds(
+    plan: &Plan,
+    x: &[f32],
+    s: &[f32],
+    g_host: &[f32],
+) -> Result<(), AutodiffError> {
+    let k = plan.k;
+    let v: Vec<f32> = plan
+        .perm
+        .iter()
+        .map(|&a| {
+            let a = a as usize;
+            if a < plan.s_len {
+                s[a]
+            } else {
+                x[plan.self_idx[a - plan.s_len] as usize]
+            }
+        })
+        .collect();
+    let v_rev: Vec<f32> = plan.rev.iter().map(|&r| v[r as usize]).collect();
+    let b: Vec<f32> = plan
+        .last
+        .iter()
+        .map(|&l| if l { 1.0 } else { 0.0 })
+        .collect();
+    let shifted = |w: &[f32]| -> Vec<f32> {
+        (0..k)
+            .map(|i| if i + 1 < k { w[i + 1] } else { 0.0 })
+            .collect()
+    };
+    let a_suf = shifted(&v);
+    let a_pre = shifted(&v_rev);
+    let (suf, mx_s) = scan_lane_host(&b, &a_suf, Some(&plan.last));
+    let (sp, mx_p) = scan_lane_host(&b, &a_pre, Some(&plan.last));
+    if over_guard(mx_s) || over_guard(mx_p) {
+        return Err(invalid(format!(
+            "{WHAT}: 連結 scan の段が 2^125 以上または非有限のため拒否（区間をまたぐ積。§74 参照）"
+        )));
+    }
+    let cut_a = |a: &[f32]| -> Vec<f32> {
+        a.iter()
+            .zip(&plan.last)
+            .map(|(&x, &c)| if c { 0.0 } else { x })
+            .collect()
+    };
+    let (a_suf_c, a_pre_c) = (cut_a(&a_suf), cut_a(&a_pre));
+    let mut cot_suf = vec![0f64; k];
+    let mut cot_sp = vec![0f64; k];
+    let mut pre = vec![0f32; k];
+    for i in 0..k {
+        pre[i] = sp[plan.rev[i] as usize];
+    }
+    for i in 0..k {
+        let gg = f64::from(g_host[plan.q_of_slot[i] as usize]).abs();
+        cot_suf[i] = gg * f64::from(pre[i]).abs();
+        cot_sp[plan.rev[i] as usize] = gg * f64::from(suf[i]).abs();
+    }
+    let (_, ca_s, mx_cs) = scan_cotangent_bound(&b, &a_suf_c, &cot_suf);
+    let (_, ca_p, mx_cp) = scan_cotangent_bound(&b, &a_pre_c, &cot_sp);
+    if over_guard(mx_cs) || over_guard(mx_cp) {
+        return Err(invalid(format!(
+            "{WHAT}: 連結 scan の二階の逆伝播の中間値が 2^125 以上または非有限のため拒否（区間をまたぐ積。§74 参照）"
+        )));
+    }
+    for j in 0..k {
+        let from_s = if j >= 1 { ca_s[j - 1] } else { 0.0 };
+        let jr = plan.rev[j] as usize;
+        let from_p = if jr >= 1 { ca_p[jr - 1] } else { 0.0 };
+        if over_guard(from_s + from_p) {
+            return Err(invalid(format!(
+                "{WHAT}: 連結 scan の寄与列への cotangent が 2^125 以上または非有限のため拒否（§74 参照）"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// 全区間の総括判定。
 fn judge(
     plan: &Plan,
@@ -407,6 +496,7 @@ fn judge(
 ) -> Result<(), AutodiffError> {
     let (d_in, d_src) = hosts;
     judge_budget(judge_cost(plan.segs.iter().map(|g| g.len), plan.k), WHAT)?;
+    whole_lane_bounds(plan, x, s, g_host)?;
     for seg in &plan.segs {
         let mut w = Vec::with_capacity(seg.len);
         let mut host = Vec::with_capacity(seg.len);
@@ -911,5 +1001,25 @@ mod tests {
         let row = child.backward(&seed).unwrap();
         let hs = row.get(&cs).unwrap().unwrap().host_slice().into_owned();
         assert_eq!(&hs[2..], &[0.0, 0.0]);
+    }
+
+    /// Codex P1 回帰: 区間ごとの窓は通るが連結 scan の逆伝播が区間をまたいで `inf × 0 = NaN` を作る入力は、
+    /// 構築前に型付きエラーで拒否される（NaN の二階を返さない）。
+    #[test]
+    fn concatenated_scan_overflow_across_segments_is_rejected() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let child = Tape::new_with_ops(naive_ops());
+        let x = tape.var(&Tensor::new(vec![1.0f32, 1.0], &[2]).unwrap());
+        let src = tape.var(&Tensor::new(vec![1e30f32, 1.0, 1e-30, 1.0, 1e30], &[5]).unwrap());
+        let idx = Tensor::<i32>::new(vec![0, 0, 1, 1, 1], &[5]).unwrap();
+        let y = x
+            .scatter_reduce(0, &idx, &src, ScatterReduceMode::Prod, false)
+            .unwrap();
+        let loss = y.sum(None).unwrap();
+        match tape.backward_create_graph(&loss, &child) {
+            Err(AutodiffError::Backward(_)) => {}
+            Ok(_) => panic!("連結 scan の区間またぎ overflow は拒否されるはず"),
+            Err(e) => panic!("想定外のエラー: {e:?}"),
+        }
     }
 }
