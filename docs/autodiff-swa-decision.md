@@ -202,6 +202,8 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 
 `FitConfig` は `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`（`crates/facade/src/compat/training.rs:294` 付近）で、`swa_lr: f32` は `Eq` を満たさない。derive を弱めることは `fandhe-ai =0.10.0` 公開 API の破壊的変更になるため、フィールドは追加せず callback で結線する。`Sequential` へ `use_swa`／`swa_start`／`swa_lr` メソッドも追加しない（`SwaHoldDoctestGuard` の衝突プローブを維持）。
 
+> 本節の理由は §20.0 で置き換え、#3769 で承認された（§21）。
+
 ### 16.6 スコープ外とその根拠
 
 - `update_bn`: `BatchNorm` の `momentum=None`（累積移動平均）が未対応（§8）で、平均重みでの BN 統計再計算ができない。`BatchNorm` を含むモデルでは fit 終了後の平均重みの running 統計が平均化されていない点を doc に明記し、16.2 で validation を平均重みで行わない理由にも使う。
@@ -298,6 +300,7 @@ SWA 系列（親 #3057）の最後の 1 件。承認根拠は §15 の D-A の�
 
 - 追跡表 `docs/compat-matrix-ari-tracker.md` の行 #16 が本件である。#3769 の論点 1 では「項目 17」と呼んでいるが、追跡表の通し番号では行 #16 にあたる（行 #17 は EMA×AMP〈#3752〉で別件）。
 - 承認の状態: **未承認**。#3769 の論点 1 の回答待ちで、承認を得たとは書かない。
+> 承認状況は §21 を参照（#3769 で案 A「対象外」を承認。本節の「未承認」は #3751 時点の記述）。
 - 実装または対象外の記録は #3830（承認された場合のみ）。実機 parity は該当なし。
 
 ### 20.0 課題と案の比較
@@ -400,3 +403,22 @@ REQ-2 の統一複合判定は不変。FMA 契約・f64 の長軸縮約への影
 - スコープ外: `update_bn`（§16.6）、param group ごとの `swa_lr`、resident 経路、カスタム `avg_fn`、EMA 側の `FitConfig` 形（#3753）・EMA×AMP（#3752）、承認後の記録 PR（#3830）と `docs/compat-api-scope.md` への追記、`SwaHoldDoctestGuard` の説明文更新。
 - Closes #3751。Refs #3769・#3830。
 - **不変**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`・既存節の本文・コード。
+
+> 承認状況は §21 を参照（#3769 で案 A「対象外」を承認）。
+
+## 21. 実装記録（イシュー #3830。対象外の確定）
+
+基準 sha は `origin/main` = `aadae3392`（行番号はこの sha ではなく、本 PR の編集後の値）。日付は 2026-11-01 の承認を 2026-11-03 に記録。
+
+- 承認: #3769 の所有者回答（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 1 で、案 A「対象外」と §16.5 の理由の置き換え（§20.0 の理由 1〜4）の両方が承認された。
+- 結論: SWA の入口は `Callback::Swa(SwaCallback)` に一本化する。`FitConfig` と `Sequential` に SWA の入口（`use_swa`・`swa_start`・`swa_lr` のメソッドもフィールドも）を足さない。公開名・シグネチャ・数値経路は変えない。
+- §16.5 の理由（`Eq` が壊れる）は §20.0 の理由 1〜4（状態を持てない・入口が 2 系統になる・EMA と揃える・得るものが小さい）に置き換わる。§16.5 本文は書き換えず、§19 が §9 を上書きしたのと同じ形で、本節が上書きする。
+- 維持するガード（正ガードへ反転しない。禁止経路専用）:
+  - `SwaHoldDoctestGuard`（`crates/facade/src/lib.rs:5624`）
+  - `crates/facade/tests/api_surface.rs`: `swa_hold_doctest_globs_all_pub_modules`（:19815）、`swa_hold_doctest_probe_body_matches_fixed_contract`（:19839）、`swa_surface_violations`（:19938）、`facade_exposes_swa_only_in_approved_shape`（:20083）、同 `_detects_each_category`（:20105）、`fit_config_declares_no_swa_fields`（:20539）、同 `_detects_each_category`（:20547）、`fit_config_keeps_copy_eq_for_0_9_0_compat`（:22071）
+  - 正の経路は `Callback::Swa` 側の正ガード（`callback_swa_variant_*`・`compat_callback_swa_variant_has_exact_approved_shape`）が引き続き固定する。
+- 構造体名とテスト名は改名しない（固定文言のドリフト検査が参照する名前を保つため。先例 `LossOpsHoldDoctestGuard`・#3784）。変えたのは `SwaHoldDoctestGuard` と `api_surface.rs` のコメントだけで、doctest ブロック・`assert!` 文言・テスト本体・定数は 1 バイトも変えていない。
+- 移行ノート: 該当欄なし（`docs/migration/0.14.0.md` の記入規則 11 が # 16 を除外している）。実機 parity: 該当なし（新しい数値経路がない）。
+- 変更したファイル: 本書、`docs/compat-api-scope.md`（§2 対象外・§5.1 行 23・末尾の適用記録）、`docs/compat-matrix-ari-tracker.md`（行 #16・§2）、上記 2 ファイルのコメント。
+- 不変: コード経路・テスト本体・tolerance・baseline・ガードレール閾値・依存・`unsafe`・`docs/spec`・`FitConfig` の derive。
+- 残課題（見送り）: `api_surface.rs` の `assert!` 文字列リテラルに「未承認」系の古い文言が残る場合の更新（テストコードの変更になるため）。`SwaHoldDoctestGuard` の改名。

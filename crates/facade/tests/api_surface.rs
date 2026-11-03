@@ -19802,8 +19802,8 @@ fn ema_usage_doctests_are_present_and_compiled() {
 // イシュー #2658（親 #2657）で保留として導入し、イシュー #2679 で承認形の公開
 // （`optim::AveragedModel`＝facade 独自ラッパー、`optim::{SwaLr, SwaAnneal}`＝素の
 // 再エクスポート）へ反転した SWA の正ガード群。`SwaHoldDoctestGuard`（`src/lib.rs`。
-// `FitConfig`／`Sequential` への `use_swa`／`swa_start`／`swa_lr` 追加という未承認経路
-// 専用の衝突プローブ）のドリフト検査に加え、承認形だけを許すインベントリ
+// `FitConfig`／`Sequential` への `use_swa`／`swa_start`／`swa_lr` 追加という対象外経路
+// （#3769 で確定。決定記録 §21）専用の衝突プローブ）のドリフト検査に加え、承認形だけを許すインベントリ
 // （`facade_exposes_swa_only_in_approved_shape`）・承認シグネチャのコンパイル時固定・
 // 正の doctest プローブを固定する（`docs/autodiff-swa-decision.md` §7・§9）。
 // =====================================================================
@@ -20533,7 +20533,8 @@ fn fit_config_swa_field_violations(src: &str) -> Result<Vec<String>, String> {
 }
 
 /// 補強ガード（#3060。禁止経路）: `FitConfig` に SWA 用のフィールドを足さない。`FitConfig` は
-/// `Copy + Eq` を保つ公開型で、SWA は `Callback::Swa` で渡す（決定記録 §16.1・§19）。
+/// `Copy + Eq` を保つ公開型で、SWA は `Callback::Swa` で渡す（決定記録 §16.1・§19。
+/// この形は #3769 で対象外に確定した。理由は §20・§21）。
 #[test]
 fn fit_config_declares_no_swa_fields() {
     let content = read_to_string_or_panic(&facade_crate_root().join("src/compat/training.rs"));

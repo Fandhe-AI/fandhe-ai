@@ -322,6 +322,12 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
     `Var::*_low_precision` 6 本が唯一の入口。承認は https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674（2026-11-01）、
     決定記録は `docs/autodiff-low-precision-op-extension-decision.md` §8・§9。
     `VarLowPrecisionOpsHoldDoctestGuard` が禁止経路を固定する。再開は 5 節手続きを要する
+  - SWA の `FitConfig`／`Sequential` 形（`use_swa`・`swa_start`・`swa_lr` のフィールドとメソッド）。
+    理由は、`FitConfig` が状態を持てないこと、入口が 2 系統になること、EMA（`Callback::Ema` 一本化）と揃えること、
+    `fit_with_callbacks` の 1 行で代替できて得るものが小さいこと。唯一の入口は `Callback::Swa(SwaCallback)`。
+    承認は https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758（2026-11-01）、
+    決定記録は `docs/autodiff-swa-decision.md` §20・§21。
+    `SwaHoldDoctestGuard` と `fit_config_declares_no_swa_fields` が禁止経路を固定する。再開は 5 節手続きを要する
   - 汎用グラフ JIT（`torch.compile`／`tf.function` 相当）: 範囲整理は
     `docs/autodiff-graph-optimization-scope-decision.md`（#1632）で確定
     済み（実装済み／延長候補／非目標の 3 区分）。汎用 JIT 自体は引き続き
@@ -647,6 +653,7 @@ P1」）を受けた是正である。
 - 行 23（#3058 適用記録）: `SwaCallback`・`Callback::Swa` を公開した（epoch 末の平均更新・fit `Ok` 終了時の平均化重み適用と `raw_state_dict()` 退避。`FitConfig`／`Sequential`・既存シグネチャは不変）。学習率アニールと拒否条件は #3059。詳細は `autodiff-swa-decision.md` §17。
 - 行 23（#3059 適用記録）: `SwaCallback` の学習率アニール（`epochs_seen >= swa_start` の epoch 開始時に `SwaLr` の学習率を書く）と fit 開始前の併用拒否 7 項目を実装した。公開名・accessor・`FitConfig`／`Sequential` のシグネチャは不変。詳細は `autodiff-swa-decision.md` §18。
 - 行 23（#3060 適用記録）: SWA の fit 結線テスト（アニール込みの手動ループ突合・分割 fit・途中終了・`ModelCheckpoint` 併用）と `Callback::Swa(SwaCallback)` の形の正ガード・`FitConfig` のフィールド名ガードを追加し、保留を解消した（`SwaHoldDoctestGuard` は禁止経路専用）。公開 API・既存シグネチャは不変。詳細は `autodiff-swa-decision.md` §19。
+- 行 23（#3830 適用記録）: `FitConfig` 形は対象外に確定した（#3769）。公開 API は不変。詳細は `autodiff-swa-decision.md` §21。
 - 行 7・9・11（#2638・#2641・#2642）: 推奨形は `Var`／`Tape` の委譲メソッドと型の再エクスポート（演算系）だが、§5 の適用記録は #2678 と #2679 の両方を挙げている（層は推奨に含まれない）。#2677 の承認の記録どおり #2678 が公開した。
 - 行 16（可変長系列）は `nn::rnn` へのモジュール再エクスポートで、#2678・#2679 の両方を挙げている。
 
@@ -2929,3 +2936,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（イシュー #3820・親 #3813。承認: #3768 の所有者の回答コメント 6554564412〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>〉）**: `compat::Sequential::add_batch_norm3d(num_features: usize, eps: f32, momentum: f32) -> Result<Self, AutodiffError>` を公開した（受理する入力 rank は 5〈`[N, C, D, H, W]`〉のみ。rank 4／6 以上は `RankMismatch { expected: 5 }`）。`save_model`／`load_model` は kind `batch_norm3d` を追加した（`format_version` は 2 のまま。v1 の manifest に現れたら `Mismatch`。0.13.0 以前のリーダーは `UnsupportedModel` で拒否する）。ONNX export は `UnsupportedLayer` のまま。層型 `BatchNorm3d` は autodiff 内部に留め、facade へ再エクスポートしない。正ガードは `crates/facade/tests/api_surface.rs` の `compat_sequential_batch_norm3d_add_method_has_approved_signature`・`compat_sequential_exposes_batch_norm3d_add_method_issue_3820`・`facade_does_not_reexport_or_declare_batch_norm3d`。新規 `Op`・依存・`unsafe` はない。公開状態は「公開済み」。実機 parity は未実測（#3860・#3861）。
 
 **適用記録（イシュー #3828・親 #3813。承認: #3768 の所有者の回答コメント 6554564412〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>〉）**: Phase 6 で足した 12 層（`add_upsample_scale_factor`・Hardshrink／Softshrink・BatchNorm3d・ChannelShuffle・Adaptive 3D の 2 種・LPPool の 3 種・FractionalMaxPool の 2 種）の保存・読込を横断方針（#3750）どおりに確認した。kind は 12 種（`format_version` は 2 のまま。到達数 70 → 82）で、ONNX export は全層 `UnsupportedLayer` のまま。0.13.0 の `save_model` が書いた実ファイルを現行の `load_model` で読む互換テスト（`crates/facade/tests/compat_sequential_model_io_compat_0_13_0.rs`）、12 層の横断テスト（`compat_sequential_model_io_new_layers.rs`）、`api_surface.rs` 末尾の #3828 節の正ガードを足した。公開名の追加はない。`Cargo.toml`・tolerance・baseline・`unsafe`・`docs/spec` は不変。実機 parity は未実測（#3860・#3861）。
+
+**適用記録（イシュー #3830・設計 #3751。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: SWA の `FitConfig`／`Sequential` 形（`use_swa`・`swa_start`・`swa_lr`）を対象外に確定した。SWA の唯一の入口は `Callback::Swa(SwaCallback)`。`SwaHoldDoctestGuard` と `fit_config_declares_no_swa_fields` は禁止経路専用で維持し、正ガードへは反転しない。公開状態は「未公開（対象外）」。公開 API・依存・tolerance・baseline・`unsafe`・`docs/spec` は不変で、変更は docs とコメントのみ。実機 parity は該当なし。詳細は `docs/autodiff-swa-decision.md` §21。
