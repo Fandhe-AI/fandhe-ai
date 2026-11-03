@@ -48,6 +48,13 @@ impl DeviceParamStore {
         grads: &Gradients,
         comm: &mut RingCommunicator,
     ) -> Result<Option<Gradients>, DistributedStepError> {
+        // groups ありは distributed 非対応（world_size 1 の素通しより前に拒否。通信には
+        // 入らない。イシュー #3837・設計 §19.5）。
+        if self.has_slot_groups() {
+            return Err(DistributedStepError::from(BackendError::InvalidArgument(
+                "DeviceParamStore: distributed steps do not support param groups".to_string(),
+            )));
+        }
         if comm.world_size() == 1 {
             return Ok(None);
         }
