@@ -1876,7 +1876,7 @@ Optimizer, Loss, &[ParamGroup])` の追加（計 3 件）を、設計判断記�
 （`docs/autodiff-param-groups-decision.md` §9・§12）の推奨形どおり実装した。
 `SlotHparams`・`resolve_slot_hparams`・`step_with_slot_hparams` は `pub(crate)` のまま
 非公開。保留ガード `ParamGroupsHoldDoctestGuard` は削除し、`api_surface.rs` の
-否定テストは承認形のみを許す正ガードへ反転した。AMP 併用 API・`LrSchedule` 併用・
+否定テストは承認形のみを許す正ガードへ反転した。AMP 併用 API〈#3832 で公開。末尾の適用記録〉・`LrSchedule` 併用・
 groups の保存形式・`DeviceParamStore` 常駐経路は含まない。実装記録は同 decision doc §12。
 
 **適用記録（イシュー #2554・親 #2551。#2553 の正ガードの仕上げ）**: 公開面は増やしていない
@@ -1890,7 +1890,7 @@ groups の保存形式・`DeviceParamStore` 常駐経路は含まない。実装
 `workspace_declares_param_group_fn_names_only_in_allowed_locations`（不変）。旧名との対応は
 同 decision doc §13.3。利用例は `optim.rs` のモジュール doc・`compile_with_param_groups` の doc
 （doctest）と `crates/facade/tests/compat_sequential_param_groups.rs`（15 件。#2554 で
-`named_parameters_position_is_slot_index_for_groups` を追加）。保留は継続する項目: AMP 併用 API・
+`named_parameters_position_is_slot_index_for_groups` を追加）。保留は継続する項目: AMP 併用 API〈#3832 で公開。末尾の適用記録〉・
 `LrSchedule` 併用（案 A）・groups の保存形式・`DeviceParamStore` 常駐経路・`Lbfgs` 併用・
 スロット添字の公開ヘルパー。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec` は不変、
 実機申し送りは不要。記録は同 decision doc §13。
@@ -2940,3 +2940,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（イシュー #3830・設計 #3751。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: SWA の `FitConfig`／`Sequential` 形（`use_swa`・`swa_start`・`swa_lr`）を対象外に確定した。SWA の唯一の入口は `Callback::Swa(SwaCallback)`。`SwaHoldDoctestGuard` と `fit_config_declares_no_swa_fields` は禁止経路専用で維持し、正ガードへは反転しない。公開状態は「未公開（対象外）」。公開 API・依存・tolerance・baseline・`unsafe`・`docs/spec` は不変で、変更は docs とコメントのみ。実機 parity は該当なし。詳細は `docs/autodiff-swa-decision.md` §21。
 
 **適用記録（イシュー #3831・設計 #3752。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: Callback::Ema と compile_with_amp の併用拒否を撤去。skip した step では shadow と num_updates を更新しない。新しい pub 項目なし。詳細は決定記録 `docs/autodiff-ema-decision.md` §19。
+
+**適用記録（イシュー #3832・設計 #3752。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: param groups と AMP を同時に設定する `compile_with_amp_and_param_groups` を追加。skip の判定は全 group 共通。追加のみ。詳細は決定記録 `docs/autodiff-param-groups-decision.md` §14.12。

@@ -17749,9 +17749,10 @@ const PARAM_GROUPS_FORBIDDEN_FN: &str = "step_with_groups";
 
 /// [`facade_param_groups_public_surface_matches_approved_contract`] とその自己テスト
 /// が共用する検出本体。`rel` は `crates/facade/src` からの `/` 区切り相対パス。
-/// 承認要素の鍵は 3 種: `optim.rs` の `pub use` 葉 `use:ParamGroup`・
+/// 承認要素の鍵は 4 種: `optim.rs` の `pub use` 葉 `use:ParamGroup`・
 /// `use:ParamGroupStep`（`as` による別名は違反）、`compat/training.rs` の
-/// `impl Sequential` 内 `fn:compile_with_param_groups`。それ以外の場所・形の
+/// `impl Sequential` 内 `fn:compile_with_param_groups`・
+/// `fn:compile_with_amp_and_param_groups`（#3832 で追加。計 4 種）。それ以外の場所・形の
 /// 出現と、facade 内の `fn step_with_groups` 宣言は違反。
 fn scan_param_groups_reexports_and_declarations(
     rel: &str,
@@ -17824,6 +17825,21 @@ fn scan_param_groups_reexports_and_declarations(
             offending.push(format!("fn compile_with_param_groups 宣言（{rel}）"));
         }
     }
+    // #3832: AMP 併用の承認形。`impl Sequential` 内の 1 件目だけを許可する。
+    let amp_decls = count_fn_declarations_by_name(&tokens, "compile_with_amp_and_param_groups");
+    let amp_in_impl_sequential = is_training_rs
+        && scan_type_impl_surface(content, "Sequential")
+            .0
+            .contains("compile_with_amp_and_param_groups");
+    for n in 0..amp_decls {
+        if amp_in_impl_sequential && n == 0 {
+            allowed.push("fn:compile_with_amp_and_param_groups".to_string());
+        } else {
+            offending.push(format!(
+                "fn compile_with_amp_and_param_groups 宣言（{rel}）"
+            ));
+        }
+    }
     offending.extend(
         (0..count_fn_declarations_by_name(&tokens, PARAM_GROUPS_FORBIDDEN_FN))
             .map(|_| format!("fn {PARAM_GROUPS_FORBIDDEN_FN} 宣言（{rel}）")),
@@ -17831,11 +17847,13 @@ fn scan_param_groups_reexports_and_declarations(
     (offending, allowed)
 }
 
-/// 承認形（#2553・決定記録 §9.2）の鍵 3 種。各ちょうど 1 件であることを固定する。
-const PARAM_GROUPS_APPROVED_KEYS: [&str; 3] = [
+/// 承認形（#2553・決定記録 §9.2、#3832 で AMP 併用を追加）の鍵 4 種。各ちょうど 1 件であることを固定する。
+const PARAM_GROUPS_APPROVED_KEYS: [&str; 4] = [
     "use:ParamGroup",
     "use:ParamGroupStep",
     "fn:compile_with_param_groups",
+    // #3832: AMP 併用の承認形（決定記録 §14.12。否定ガードは元から無く、正ガードの在庫へ追加）。
+    "fn:compile_with_amp_and_param_groups",
 ];
 
 /// 承認要素の鍵一覧が [`PARAM_GROUPS_APPROVED_KEYS`] とちょうど一致する
@@ -18028,7 +18046,7 @@ fn param_groups_types_match_approved_shape() {
 /// と同型）。`ParamGroupStep` を持つ公開済み 10 種すべてで型検査する。
 #[test]
 fn param_groups_types_are_reachable_via_facade_only() {
-    use fandhe_ai::compat::{Loss, Optimizer, Sequential};
+    use fandhe_ai::compat::{AmpConfig, Loss, Optimizer, Sequential};
     use fandhe_ai::optim::{
         Adadelta, Adagrad, Adam, AdamW, Adamax, Lamb, NAdam, ParamGroup, ParamGroupStep, RAdam,
         RmsProp, Sgd, SgdConfig,
@@ -18063,7 +18081,11 @@ fn param_groups_types_are_reachable_via_facade_only() {
     assert_eq!(group.weight_decay, 0.0);
     let sig: fn(&mut Sequential, Optimizer, Loss, &[ParamGroup]) -> Result<(), AutodiffError> =
         Sequential::compile_with_param_groups;
-    let _ = (sig, SgdConfig::new(0.1));
+    // #3832: AMP 併用の承認形シグネチャ。
+    type AmpGroupsSig =
+        fn(&mut Sequential, Optimizer, Loss, AmpConfig, &[ParamGroup]) -> Result<(), AutodiffError>;
+    let amp_sig: AmpGroupsSig = Sequential::compile_with_amp_and_param_groups;
+    let _ = (sig, amp_sig, SgdConfig::new(0.1));
 }
 
 /// doc コメント（`//!` または `///` の連続行）から、フェンス付きコードブロックを
@@ -18163,6 +18185,17 @@ fn param_groups_usage_doctests_are_present_and_compiled() {
             "compile_with_param_groups",
         ],
     ));
+    // #3832: AMP 併用版の doc にも実行される利用例がある。
+    let amp_doc = doc_lines_above_fn(&training, "pub fn compile_with_amp_and_param_groups");
+    v.extend(doctest_probe_violations(
+        "compile_with_amp_and_param_groups の doc",
+        &amp_doc,
+        &[
+            "compile_with_amp_and_param_groups",
+            "AmpConfig",
+            "ParamGroup",
+        ],
+    ));
     assert!(v.is_empty(), "{v:?}");
 
     // 自己テスト: 各カテゴリを正例・負例で踏む。
@@ -18229,6 +18262,22 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
              pub fn compile_with_param_groups(&self) {} }\n",
         ),
         (
+            "amp 併用版が別ファイル",
+            "compat/other.rs",
+            "impl Sequential { pub fn compile_with_amp_and_param_groups(&self) {} }\n",
+        ),
+        (
+            "amp 併用版が impl Sequential 外",
+            "compat/training.rs",
+            "impl Other { pub fn compile_with_amp_and_param_groups(&self) {} }\n",
+        ),
+        (
+            "amp 併用版の二重宣言",
+            "compat/training.rs",
+            "impl Sequential { pub fn compile_with_amp_and_param_groups(&self) {} \
+             pub fn compile_with_amp_and_param_groups(&self) {} }\n",
+        ),
+        (
             "struct ParamGroup 宣言",
             "optim.rs",
             "pub struct ParamGroup {}\n",
@@ -18246,6 +18295,10 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
     let (off, allowed) = scan("compat/training.rs", compile_ok);
     assert!(off.is_empty(), "{off:?}");
     assert_eq!(allowed, ["fn:compile_with_param_groups"]);
+    let amp_ok = "impl Sequential { pub fn compile_with_amp_and_param_groups(&self) {} }\n";
+    let (off, allowed) = scan("compat/training.rs", amp_ok);
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(allowed, ["fn:compile_with_amp_and_param_groups"]);
     // 負例: コメント中の出現・無関係な名前。
     assert_eq!(
         scan("lib.rs", "// pub use x::ParamGroup;\n"),
@@ -18269,6 +18322,22 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
     );
     assert!(
         v.iter().any(|m| m.contains("二重化: use:ParamGroup")),
+        "{v:?}"
+    );
+    let mut amp_missing = full.clone();
+    amp_missing.retain(|k| k != "fn:compile_with_amp_and_param_groups");
+    let v = param_groups_inventory_violations(&amp_missing);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("欠落: fn:compile_with_amp_and_param_groups")),
+        "{v:?}"
+    );
+    let mut amp_dup = full.clone();
+    amp_dup.push("fn:compile_with_amp_and_param_groups".to_string());
+    let v = param_groups_inventory_violations(&amp_dup);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("二重化: fn:compile_with_amp_and_param_groups")),
         "{v:?}"
     );
     let mut extra = full;
@@ -18359,7 +18428,8 @@ fn facade_param_groups_public_surface_guards_detect_each_category() {
 /// （`adamw.rs`・`adam.rs`・`rmsprop.rs`・`adagrad.rs`・`lamb.rs`・
 /// `optim/sgd.rs`・`adadelta.rs`・`adamax.rs`・`nadam.rs`・`radam.rs` に
 /// 各 1 件）・`compile_with_param_groups`（#2553 で facade の
-/// `compat/training.rs` に承認形として 1 件）。
+/// `compat/training.rs` に承認形として 1 件）・`compile_with_amp_and_param_groups`
+/// （#3832 で同ファイルに 1 件）。
 #[test]
 fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -18383,11 +18453,12 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
          （テスト自体が検査対象を見失っている可能性がある）"
     );
 
-    const NAMES: [&str; 4] = [
+    const NAMES: [&str; 5] = [
         "step_with_groups",
         "resolve_slot_hparams",
         "step_with_slot_hparams",
         "compile_with_param_groups",
+        "compile_with_amp_and_param_groups",
     ];
 
     for crate_dir in &crate_dirs {
@@ -18461,6 +18532,11 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
         // #2553: facade の承認形 `compile_with_param_groups`（`impl Sequential` 内 1 件）。
         (
             "facade/src/compat/training.rs::compile_with_param_groups",
+            1usize,
+        ),
+        // #3832: AMP 併用の承認形（`impl Sequential` 内 1 件）。
+        (
+            "facade/src/compat/training.rs::compile_with_amp_and_param_groups",
             1usize,
         ),
     ]
