@@ -340,6 +340,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_tensor_with_huge_inner_product_does_not_panic() {
+        // 回帰: shape [0, 1, 1<<62, 4] は要素数 0 だが inner の積が usize を超える（panic 禁止）。
+        let tape = Tape::new();
+        let shape = [0usize, 1, 1usize << 62, 4];
+        let a = tape.var(&t(vec![], &shape));
+        let b = tape.var(&t(vec![], &shape));
+        let r = cosine_similarity(&a, &b, 1, 1e-8);
+        if let Ok(v) = r {
+            assert!(vals(&v).is_empty());
+        }
+    }
+
+    #[test]
     fn rejects_invalid_arguments_without_orphan_nodes() {
         let tape = Tape::new();
         let other = Tape::new();

@@ -4923,9 +4923,16 @@ pub(crate) fn cosine_slice_stats(
 }
 
 /// `(outer, len, inner)` 分解（`dim` 軸を `len` とする）。呼び出し元が `dim < rank` を検証済みの前提。
+///
+/// 空テンソル（例 `[0, 1, 1<<62, 4]`）では出力要素数が 0 で事前検査を通るが、`inner` の積自体は
+/// `usize` を超えうる。overflow 検査有効ビルドでの panic を避けるため `wrapping_mul` で畳む。
+/// 積が溢れる場合は出力側の shape 検査（`checked_bytes_for`）が非空なら拒否済み、空なら
+/// `outer == 0` か `len == 0` でループが回らないため、折り返した値は参照されない。
 pub(crate) fn axis_split(shape: &[usize], dim: usize) -> (usize, usize, usize) {
-    let outer: usize = shape[..dim].iter().product();
-    let inner: usize = shape[dim + 1..].iter().product();
+    let outer: usize = shape[..dim].iter().fold(1usize, |a, &d| a.wrapping_mul(d));
+    let inner: usize = shape[dim + 1..]
+        .iter()
+        .fold(1usize, |a, &d| a.wrapping_mul(d));
     (outer, shape[dim], inner)
 }
 
