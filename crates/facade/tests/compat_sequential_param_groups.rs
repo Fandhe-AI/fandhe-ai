@@ -20,12 +20,13 @@
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::{
-    Callback, FitConfig, Loss, LrSchedule, ModelIoError, Optimizer, Sequential, TrainStepFn,
-    TrainStepOptimizer, TrainStepOutput, load_model, save_model,
+    Callback, FitConfig, Loss, LrSchedule, ModelIoError, Monitor, Optimizer, Sequential,
+    TrainStepFn, TrainStepOptimizer, TrainStepOutput, load_model, save_model,
 };
 use fandhe_ai::optim::{
-    AdamW, AdamWConfig, Adamax, AdamaxConfig, LbfgsConfig, ParamGroup, ParamGroupStep as _, Sgd,
-    SgdConfig, StepLr,
+    AdagradConfig, AdamW, AdamWConfig, Adamax, AdamaxConfig, LbfgsConfig, LrScheduler as _,
+    ParamGroup, ParamGroupStep as _, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, RmsPropConfig,
+    Sgd, SgdConfig, StepLr,
 };
 use fandhe_ai::{AutodiffError, Tensor};
 
@@ -436,39 +437,434 @@ fn fit_freezes_grouped_layer() {
     );
 }
 
-/// T4: groups 非空 × `LrSchedule` は拒否。状態は保たれ、groups 空なら従来どおり動く。
+// =====================================================================
+// T4 系（イシュー #3834・決定記録 §15.3／§15.4）: groups 非空 × `LrSchedule`。
+// 全 group 共通の倍率 `現在 lr ／ compile 時の lr` を group の lr に掛ける
+// （weight_decay は不変）。判定はすべて bit 一致で、新しい tolerance は置かない。
+// =====================================================================
+
+/// 手動ループ側の倍率適用（fit 側の実装と同じ式を、テスト側で独立に書く）。
+fn scale_groups(groups: &[ParamGroup], cur: f32, base: f32) -> Vec<ParamGroup> {
+    groups
+        .iter()
+        .map(|g| {
+            let lr = ((g.lr as f64) * (cur as f64) / (base as f64)) as f32;
+            ParamGroup::new(g.params.clone(), lr, g.weight_decay)
+        })
+        .collect()
+}
+
+fn step_lr() -> StepLr {
+    StepLr::new(0.1, 1, 0.5).unwrap()
+}
+
+fn step_lr_callbacks() -> [Callback; 1] {
+    [Callback::LrSchedule(LrSchedule::per_epoch(step_lr()))]
+}
+
+fn lrs_of_step_lr() -> Vec<f32> {
+    (0..EPOCHS).map(|e| step_lr().lr_at(e)).collect()
+}
+
+/// Sgd の手動ループ。`lrs[e]` を epoch e の現在 lr とし、`mode` で group の扱いを変える
+/// （誤実装の再現用）。`Scale` が承認形。
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Scale,
+    FixedGroupLr,
+    Absolute,
+    ScaleWeightDecayToo,
+}
+
+fn manual_sgd_scheduled(
+    cfg: SgdConfig,
+    groups: &[ParamGroup],
+    lrs: &[f32],
+    mode: Mode,
+    x: &Tensor<f32>,
+    y: &Tensor<f32>,
+) -> (Vec<Vec<f32>>, Vec<f32>) {
+    let mut model = build_model();
+    let mut opt = Sgd::new(cfg).unwrap();
+    let mut log = Vec::new();
+    for &cur in lrs {
+        opt.set_lr(cur).unwrap();
+        let g = match mode {
+            Mode::Scale => scale_groups(groups, cur, cfg.lr),
+            Mode::FixedGroupLr => groups.to_vec(),
+            Mode::Absolute => groups
+                .iter()
+                .map(|g| ParamGroup::new(g.params.clone(), cur, g.weight_decay))
+                .collect(),
+            Mode::ScaleWeightDecayToo => scale_groups(groups, cur, cfg.lr)
+                .into_iter()
+                .map(|g| {
+                    let wd = ((g.weight_decay as f64) * (cur as f64) / (cfg.lr as f64)) as f32;
+                    ParamGroup::new(g.params.clone(), g.lr, wd)
+                })
+                .collect(),
+        };
+        train_step_sgd(&mut model, &mut opt, x, y, &g, &mut log).unwrap();
+    }
+    (snapshot(&model), log)
+}
+
+fn manual_adamw_scheduled(
+    cfg: AdamWConfig,
+    groups: &[ParamGroup],
+    lrs: &[f32],
+    x: &Tensor<f32>,
+    y: &Tensor<f32>,
+) -> (Vec<Vec<f32>>, Vec<f32>) {
+    let mut model = build_model();
+    let mut opt = AdamW::new(cfg).unwrap();
+    let mut log = Vec::new();
+    for &cur in lrs {
+        opt.set_lr(cur).unwrap();
+        let g = scale_groups(groups, cur, cfg.lr);
+        train_step(&mut model, &mut opt, x, y, &g, &mut log).unwrap();
+    }
+    (snapshot(&model), log)
+}
+
+fn layered_groups(probe: &Sequential) -> Vec<ParamGroup> {
+    vec![
+        ParamGroup::new(layer_slot_indices(probe, "0."), 0.02, 0.01),
+        ParamGroup::new(layer_slot_indices(probe, "2."), 0.3, 0.0),
+    ]
+}
+
+/// T4: groups 非空 × `LrSchedule` は共通倍率で受理され、手動ループと bit 一致する
+/// （Sgd・AdamW）。groups 空 × `LrSchedule` は従来どおり動く。
 #[test]
-fn lr_schedule_is_rejected_only_when_groups_present() {
+fn lr_schedule_with_groups_scales_group_lr_by_common_factor() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let sched = || {
-        [Callback::LrSchedule(LrSchedule::per_epoch(
-            StepLr::new(0.1, 1, 0.5).unwrap(),
-        ))]
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let lrs = lrs_of_step_lr();
+
+    // Sgd（base_lr = 0.1。epoch 0 は倍率 1 で compile 時の groups そのまま）。
+    let cfg = SgdConfig::new(0.1);
+    let mut fitted = build_model();
+    fitted
+        .compile_with_param_groups(Optimizer::Sgd(cfg), Loss::Mse, &groups)
+        .unwrap();
+    let h = fitted
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    let (snap, log) = manual_sgd_scheduled(cfg, &groups, &lrs, Mode::Scale, &x, &y);
+    assert_eq!(h.lr, lrs, "history.lr は同期後の optimizer lr のまま");
+    assert_eq!(h.loss, log);
+    assert_eq!(snapshot(&fitted), snap);
+
+    // AdamW。
+    let cfg = AdamWConfig {
+        lr: 0.1,
+        ..AdamWConfig::default()
     };
+    let mut fitted = build_model();
+    fitted
+        .compile_with_param_groups(Optimizer::AdamW(cfg), Loss::Mse, &groups)
+        .unwrap();
+    let h = fitted
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    let (snap, log) = manual_adamw_scheduled(cfg, &groups, &lrs, &x, &y);
+    assert_eq!(h.loss, log);
+    assert_eq!(snapshot(&fitted), snap);
+
+    // groups 空 × LrSchedule は従来どおり。
+    let mut plain = build_model();
+    plain
+        .compile_with_param_groups(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse, &[])
+        .unwrap();
+    plain
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+}
+
+/// T4b: 誤実装（拒否を外すだけ・絶対値置換・weight_decay への倍率）の手動ループとは一致しない。
+#[test]
+fn lr_schedule_with_groups_discriminates_wrong_implementations() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let lrs = lrs_of_step_lr();
+    let cfg = SgdConfig::new(0.1);
+    let mut fitted = build_model();
+    fitted
+        .compile_with_param_groups(Optimizer::Sgd(cfg), Loss::Mse, &groups)
+        .unwrap();
+    fitted
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    let got = snapshot(&fitted);
+    let good = manual_sgd_scheduled(cfg, &groups, &lrs, Mode::Scale, &x, &y).0;
+    assert_eq!(got, good);
+    for wrong in [
+        Mode::FixedGroupLr,
+        Mode::Absolute,
+        Mode::ScaleWeightDecayToo,
+    ] {
+        let w = manual_sgd_scheduled(cfg, &groups, &lrs, wrong, &x, &y).0;
+        assert_ne!(got, w, "誤実装の手動ループと一致してしまった");
+    }
+}
+
+/// T4c: `ReduceLrOnPlateau`（`Monitor::Loss`）でも、記録された `history.lr` を現在 lr とした
+/// 手動ループと bit 一致する。
+#[test]
+fn plateau_schedule_with_groups_bit_matches_manual_loop() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let cfg = SgdConfig::new(0.1);
+    let plateau = ReduceLrOnPlateau::new(
+        0.1,
+        ReduceLrOnPlateauConfig {
+            factor: 0.5,
+            patience: 0,
+            threshold: 10.0,
+            ..ReduceLrOnPlateauConfig::default()
+        },
+    )
+    .unwrap();
+    let mut fitted = build_model();
+    fitted
+        .compile_with_param_groups(Optimizer::Sgd(cfg), Loss::Mse, &groups)
+        .unwrap();
+    let h = fitted
+        .fit_with_callbacks(
+            &x,
+            &y,
+            fit_config(),
+            None,
+            &mut [Callback::LrSchedule(LrSchedule::plateau_with_monitor(
+                plateau,
+                Monitor::Loss,
+            ))],
+        )
+        .unwrap();
+    assert!(
+        h.lr.windows(2).any(|w| w[1] < w[0]),
+        "plateau が lr を下げていない: {:?}",
+        h.lr
+    );
+    let (snap, log) = manual_sgd_scheduled(cfg, &groups, &h.lr, Mode::Scale, &x, &y);
+    assert_eq!(h.loss, log);
+    assert_eq!(snapshot(&fitted), snap);
+}
+
+/// T4d: `lr = 0` の group はスケジュールがあっても bit 不変で、他の層は変わる。
+#[test]
+fn frozen_group_stays_bit_unchanged_under_lr_schedule() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let mut model = build_model();
+    let l1 = layer_slot_indices(&model, "0.");
+    let l2 = layer_slot_indices(&model, "2.");
+    let before = snapshot(&model);
+    model
+        .compile_with_param_groups(
+            Optimizer::Sgd(SgdConfig::new(0.1)),
+            Loss::Mse,
+            &[ParamGroup::new(l1.clone(), 0.0, 0.0)],
+        )
+        .unwrap();
+    model
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    let after = snapshot(&model);
+    for &i in &l1 {
+        assert_eq!(after[i], before[i], "凍結層のスロット {i} が変化した");
+    }
+    assert!(l2.iter().any(|&i| after[i] != before[i]));
+}
+
+/// T4e: compile 時の lr が 0 の groups + `LrSchedule` は fit 入口で拒否され、状態は保たれる。
+#[test]
+fn zero_base_lr_with_groups_and_schedule_is_rejected_without_touching_state() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let mut model = build_model();
+    let before = snapshot(&model);
+    model
+        .compile_with_param_groups(
+            Optimizer::Sgd(SgdConfig::new(0.0)),
+            Loss::Mse,
+            &[ParamGroup::new(vec![0], 0.1, 0.0)],
+        )
+        .unwrap();
+    assert_invalid_argument(
+        model.fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks()),
+        "base_lr = 0 × groups × LrSchedule",
+    );
+    assert_eq!(snapshot(&model), before, "拒否時にパラメータが変化した");
+    assert!(model.is_compiled(), "拒否後も compile 状態が残るはず");
+    model.fit(&x, &y, fit_config()).unwrap();
+}
+
+/// T4e2: group.lr が負で、epoch 0 の時点で倍率適用後に -0.0 へ潰れる構成でも拒否される。
+/// 初期 lr 1e-45（compile 時の 0.1 と異なる）なので epoch 0 から倍率経路を通り、
+/// 倍率適用前ガードを外すと `resolve_slot_hparams` の `lr >= 0` 検査をすり抜けて通る。
+#[test]
+fn negative_group_lr_scaled_to_negative_zero_is_rejected() {
+    let (x, y) = gen_regression_data(SEED_DATA);
     let mut model = build_model();
     let before = snapshot(&model);
     model
         .compile_with_param_groups(
             Optimizer::Sgd(SgdConfig::new(0.1)),
             Loss::Mse,
-            &[ParamGroup::new(vec![0], 0.1, 0.0)],
+            &[ParamGroup::new(vec![0], -0.01, 0.0)],
         )
         .unwrap();
+    let tiny = StepLr::new(1e-45, 1, 0.5).unwrap();
+    let scaled = ((-0.01f32 as f64) * (tiny.lr_at(0) as f64) / (0.1f32 as f64)) as f32;
+    assert!(
+        scaled == 0.0 && scaled.is_sign_negative(),
+        "前提: -0.0 に潰れる"
+    );
+    let mut cbs = [Callback::LrSchedule(LrSchedule::per_epoch(tiny))];
     assert_invalid_argument(
-        model.fit_with_callbacks(&x, &y, fit_config(), None, &mut sched()),
-        "groups 非空 × LrSchedule",
+        model.fit_with_callbacks(&x, &y, fit_config(), None, &mut cbs),
+        "負の group.lr × 倍率適用後 -0.0",
     );
     assert_eq!(snapshot(&model), before, "拒否時にパラメータが変化した");
-    assert!(model.is_compiled(), "拒否後も compile 状態が残るはず");
-    model.fit(&x, &y, fit_config()).unwrap();
+}
 
-    let mut plain = build_model();
-    plain
-        .compile_with_param_groups(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse, &[])
+/// T4f: `set_lr` を持たない optimizer は groups の有無によらず `LrSchedule` を拒否する（(2.05)）。
+#[test]
+fn set_lr_less_optimizers_with_groups_and_schedule_stay_rejected() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    for optimizer in [
+        Optimizer::RmsProp(RmsPropConfig {
+            lr: 0.01,
+            ..RmsPropConfig::default()
+        }),
+        Optimizer::Adagrad(AdagradConfig {
+            lr: 0.01,
+            ..AdagradConfig::default()
+        }),
+    ] {
+        let mut model = build_model();
+        let before = snapshot(&model);
+        model
+            .compile_with_param_groups(optimizer, Loss::Mse, &[ParamGroup::new(vec![0], 0.1, 0.0)])
+            .unwrap();
+        let r = model.fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks());
+        match r {
+            Err(AutodiffError::InvalidArgument(msg)) => {
+                assert!(msg.contains("set_lr"), "(2.05) のメッセージのはず: {msg}")
+            }
+            other => panic!("InvalidArgument のはず: {other:?}"),
+        }
+        assert_eq!(snapshot(&model), before);
+    }
+}
+
+/// T4g: 累積境界の step にも有効 groups（倍率反映）が渡る。
+#[test]
+fn accumulate_steps_with_groups_and_schedule_applies_scaled_groups() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let cfg = SgdConfig::new(0.1);
+    let lrs = lrs_of_step_lr();
+
+    // batch 2 × accumulate 2 = 全 4 サンプルで 1 step / epoch。累積勾配は
+    // 全バッチ 1 step と同値でないため、groups 付き accumulate で倍率ありと
+    // 倍率なし（FixedGroupLr 相当）が区別できることを確かめる。
+    let mut a = build_model();
+    a.compile_with_param_groups(Optimizer::Sgd(cfg), Loss::Mse, &groups)
         .unwrap();
-    plain
-        .fit_with_callbacks(&x, &y, fit_config(), None, &mut sched())
+    a.fit_with_callbacks(
+        &x,
+        &y,
+        FitConfig::new(EPOCHS, 2).accumulate_steps(2),
+        None,
+        &mut step_lr_callbacks(),
+    )
+    .unwrap();
+
+    // 倍率反映済み groups を固定 lr 列で与える等価構成: epoch ごとに compile し直すと
+    // optimizer 状態が失われるため、Sgd（momentum なし）の無状態性を使い、
+    // 1 epoch ずつ fit した結果と比べる。
+    let mut b = build_model();
+    for (e, &cur) in lrs.iter().enumerate() {
+        let scaled = scale_groups(&groups, cur, cfg.lr);
+        b.compile_with_param_groups(Optimizer::Sgd(SgdConfig::new(cur)), Loss::Mse, &scaled)
+            .unwrap();
+        b.fit(&x, &y, FitConfig::new(1, 2).accumulate_steps(2))
+            .unwrap();
+        let _ = e;
+    }
+    assert_eq!(snapshot(&a), snapshot(&b));
+}
+
+/// T4h: `fit_with_train_step` のフック内 `opt.step` にも倍率反映済み groups が効く。
+#[test]
+fn custom_train_step_receives_scaled_groups() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let cfg = SgdConfig::new(0.1);
+    let lrs = lrs_of_step_lr();
+    let mut model = build_model();
+    model
+        .compile_with_param_groups(Optimizer::Sgd(cfg), Loss::Mse, &groups)
         .unwrap();
+    let mut step = |m: &Sequential,
+                    xb: &Tensor<f32>,
+                    yb: &Tensor<f32>,
+                    opt: &mut TrainStepOptimizer<'_>|
+     -> Result<TrainStepOutput, AutodiffError> {
+        let tape = fandhe_ai::tape();
+        let bound = m.bind(&tape);
+        let pred = bound.forward(&tape, &tape.var(xb))?;
+        let loss = pred.mse_loss(&tape.var(yb))?;
+        let value = loss.to_tensor().get(&[]).unwrap_or(f32::NAN);
+        let grads = tape.backward(&loss)?;
+        let grad_refs = bound.trainable_grads(&grads)?;
+        let stepped = opt.step(&m.trainable_parameters(), &grad_refs)?;
+        Ok(TrainStepOutput::new(value).with_updated(stepped))
+    };
+    let hook: &mut TrainStepFn<'_, f32> = &mut step;
+    model
+        .fit_with_train_step(
+            &x,
+            &y,
+            fit_config(),
+            None,
+            &mut step_lr_callbacks(),
+            &[],
+            hook,
+        )
+        .unwrap();
+    let (snap, _) = manual_sgd_scheduled(cfg, &groups, &lrs, Mode::Scale, &x, &y);
+    assert_eq!(snapshot(&model), snap);
+}
+
+/// T4i: スケジュールつき fit の後の素の `fit()` でも group の lr に倍率が持ち越される。
+#[test]
+fn plain_fit_after_scheduled_fit_carries_group_multiplier() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let cfg = SgdConfig::new(0.1);
+    let lrs = lrs_of_step_lr();
+    let mut model = build_model();
+    model
+        .compile_with_param_groups(Optimizer::Sgd(cfg), Loss::Mse, &groups)
+        .unwrap();
+    model
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    model.fit(&x, &y, FitConfig::new(2, BATCH)).unwrap();
+    // 最終 epoch の現在 lr（lrs の末尾）が素の fit の 2 epoch にも持ち越される。
+    let mut all = lrs.clone();
+    let last = *lrs.last().unwrap();
+    all.extend([last, last]);
+    let (snap, _) = manual_sgd_scheduled(cfg, &groups, &all, Mode::Scale, &x, &y);
+    assert_eq!(snapshot(&model), snap);
 }
 
 /// T5: `Lbfgs` × groups 非空は compile で拒否され直前の compile 状態が残る。`&[]` は成功する。

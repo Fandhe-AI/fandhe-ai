@@ -1409,6 +1409,13 @@ pub(super) struct Compiled {
     /// （イシュー #2553。既定は空 = 従来の `compile()` 経路）。step 時の検証
     /// （`resolve_slot_hparams`）が使うため compile 時には中身を検証しない。
     pub(super) param_groups: Vec<ParamGroup>,
+    /// compile 時点の optimizer config の lr の控え（イシュー #3834・決定記録
+    /// §15.0／§15.3）。`Callback::LrSchedule` と param groups の併用時に、
+    /// epoch 開始時の group の有効 lr を `group.lr × (現在の optimizer lr ／
+    /// base_lr)` で求める分母になる。epoch ごとに `set_lr` で上書きされる
+    /// `optimizer.lr()` は基準にできないため別に持つ（`LrScheduler` trait は
+    /// 破壊的変更になるため拡張しない）。
+    pub(super) base_lr: f32,
 }
 
 /// `save_model` が取り出す compile 状態の写し（イシュー #2372）。
@@ -1571,12 +1578,16 @@ pub(super) fn compiled_from_snapshot(
             scaler: grad_scaler_from_state(a.grad_scaler_config, a.scale, a.growth_tracker)?,
         }),
     };
+    // 読込後の基準 lr は復元した現在 lr（groups の保存・読込は #3835／#3836 の
+    // 範囲。決定記録 §15.12 の申し送り参照）。
+    let base_lr = state.lr();
     Ok(Compiled {
         optimizer: state,
         loss,
         amp,
         // `save_model` は groups 非空を拒否する（#2553）ため復元は常に空。
         param_groups: Vec::new(),
+        base_lr,
     })
 }
 
@@ -1612,7 +1623,7 @@ pub type TrainStepFn<'h, T> = dyn FnMut(
 /// （`docs/compat-train-step-hook-decision.md` §8.1）。
 pub struct TrainStepOptimizer<'a> {
     state: &'a mut OptimizerState,
-    /// compile 時の param groups（#2553。空なら従来どおり `step`）。
+    /// epoch 開始時の有効 param groups（#2553。#3834 で学習率スケジュールの倍率を反映。空なら従来どおり `step`）。
     groups: &'a [ParamGroup],
 }
 
@@ -1892,11 +1903,14 @@ impl Sequential {
     /// 状態（momentum バッファ・m/v 等）を破棄して新しい `optimizer`／
     /// `loss` へ置き換える（Keras の再 `compile()` と同じ挙動）。
     pub fn compile(&mut self, optimizer: Optimizer, loss: Loss) -> Result<(), AutodiffError> {
+        let optimizer_state = OptimizerState::new(optimizer)?;
+        let base_lr = optimizer_state.lr();
         self.compiled = Some(Compiled {
-            optimizer: OptimizerState::new(optimizer)?,
+            optimizer: optimizer_state,
             loss,
             amp: None,
             param_groups: Vec::new(),
+            base_lr,
         });
         Ok(())
     }
@@ -1927,16 +1941,39 @@ impl Sequential {
     /// `crates/facade/tests/api_surface.rs` の
     /// `facade_param_groups_public_surface_matches_approved_contract`（#2554）が固定している。
     ///
+    /// # 学習率スケジュールとの関係
+    ///
+    /// `Callback::LrSchedule`（[`Self::fit_with_callbacks`] 系。決定記録
+    /// `docs/autodiff-param-groups-decision.md` §15）は、全 group 共通の倍率として働く。
+    /// epoch 開始時の group の有効 lr は `group.lr × (現在の optimizer lr ／ base_lr)`
+    /// （f64 で計算し最後に 1 回だけ f32 へ downcast）。`base_lr` は compile 時の
+    /// optimizer config の lr。
+    ///
+    /// - `weight_decay` には倍率を掛けない。`lr = 0` の group は 0 のまま（凍結を保つ）。
+    /// - `base_lr` が 0 または非有限のとき、groups とスケジュールの併用は fit 入口で
+    ///   `InvalidArgument`（スケジュールなしなら従来どおり動く）。
+    /// - `History::lr` は従来どおり同期後の optimizer の lr で、group の lr は
+    ///   `group.lr × history.lr[e] ／ base_lr` で導ける。
+    /// - スケジュールつき fit の後の素の [`Self::fit`] でも倍率は持ち越される
+    ///   （グループ外スロットが現在の optimizer lr を使うのと同じ）。
+    /// - 加法項を持つスケジュール（`eta_min > 0` の Cosine・CyclicLr・OneCycleLr・
+    ///   Plateau の下限など）が PyTorch の group ごとの評価と一致するかは**未確認**。
+    /// - AMP 版（[`Self::compile_with_amp_and_param_groups`]）では引き続き拒否する。
+    /// - `Lbfgs`・`Callback::Swa`・`set_lr` を持たない 3 種（`RmsProp`／`Adagrad`／
+    ///   `Lamb`）の扱いは不変。
+    ///
     /// # 制約
     ///
     /// - `Optimizer::Lbfgs` と空でない groups は併用できない。
     /// - AMP と併用するときは [`Self::compile_with_amp_and_param_groups`] を使う
     ///   （本メソッドは AMP なし）。
-    /// - groups が空でないとき `Callback::LrSchedule` は [`Self::fit`] 系で拒否する
-    ///   （`History::lr` の意味は従来どおり optimizer の config の学習率）。
+    /// - groups が空でないときの `Callback::LrSchedule` は共通倍率で受理する
+    ///   （次節「学習率スケジュールとの関係」）。`History::lr` の意味は従来どおり
+    ///   optimizer の config の学習率。
     /// - groups が空でない compile 状態は `save_model` で保存できない。
-    /// - [`Self::fit_with_train_step`] のフック内 `opt.step` には compile 時の
-    ///   groups が適用される（スロット添字は `step` に渡した `params` の位置）。
+    /// - [`Self::fit_with_train_step`] のフック内 `opt.step` には epoch 開始時の
+    ///   有効 groups（学習率スケジュールの倍率を反映）が適用される（スロット添字は
+    ///   `step` に渡した `params` の位置）。
     /// - 再 compile は groups も置き換える。下流が同名メソッドを自前 trait で
     ///   `Sequential` に実装していると、この inherent メソッドが優先される。
     ///
@@ -1991,6 +2028,64 @@ impl Sequential {
     /// // 2 層目の bias（グループ外）は config の lr で更新される。
     /// assert_ne!(after[3].as_slice().unwrap(), before[3].as_slice());
     /// ```
+    ///
+    /// 学習率スケジュール（`StepLr`）と併用すると group の lr も共通倍率で追従する。
+    /// 毎 epoch 倍率適用済みの groups で compile し直した場合と bit 一致する
+    /// （`Sgd`・momentum なしは状態を持たない）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::{Callback, FitConfig, Loss, LrSchedule, Optimizer, Sequential};
+    /// use fandhe_ai::optim::{ParamGroup, SgdConfig, StepLr};
+    ///
+    /// let build = || {
+    ///     Sequential::new()
+    ///         .add_linear(2, 3, 1)
+    ///         .unwrap()
+    ///         .add_relu()
+    ///         .add_linear(3, 1, 2)
+    ///         .unwrap()
+    /// };
+    /// let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3, 2]).unwrap();
+    /// let y = Tensor::new(vec![0.0f32, 1.0, 0.5], &[3, 1]).unwrap();
+    /// // 1 層目（スロット 0・1）だけ lr 0.02 の group にする。
+    /// let group = ParamGroup::new(vec![0, 1], 0.02, 0.0);
+    ///
+    /// let mut model = build();
+    /// model
+    ///     .compile_with_param_groups(
+    ///         Optimizer::Sgd(SgdConfig::new(0.1)),
+    ///         Loss::Mse,
+    ///         std::slice::from_ref(&group),
+    ///     )
+    ///     .unwrap();
+    /// let mut callbacks = [Callback::LrSchedule(LrSchedule::per_epoch(
+    ///     StepLr::new(0.1, 1, 0.5).unwrap(),
+    /// ))];
+    /// let history = model
+    ///     .fit_with_callbacks(&x, &y, FitConfig::new(2, 3), None, &mut callbacks)
+    ///     .unwrap();
+    /// assert_eq!(history.lr, vec![0.1, 0.05]);
+    ///
+    /// // 手動側: epoch ごとに「現在 lr」と倍率適用済みの group で compile し直す。
+    /// let mut reference = build();
+    /// for &cur in &history.lr {
+    ///     let scaled = ((0.02f32 as f64) * (cur as f64) / (0.1f32 as f64)) as f32;
+    ///     reference
+    ///         .compile_with_param_groups(
+    ///             Optimizer::Sgd(SgdConfig::new(cur)),
+    ///             Loss::Mse,
+    ///             &[ParamGroup::new(vec![0, 1], scaled, 0.0)],
+    ///         )
+    ///         .unwrap();
+    ///     reference.fit(&x, &y, FitConfig::new(1, 3)).unwrap();
+    /// }
+    /// let a = model.trainable_parameters();
+    /// let b = reference.trainable_parameters();
+    /// for (p, q) in a.iter().zip(b.iter()) {
+    ///     assert_eq!(p.as_slice().unwrap(), q.as_slice().unwrap());
+    /// }
+    /// ```
     pub fn compile_with_param_groups(
         &mut self,
         optimizer: Optimizer,
@@ -2008,11 +2103,13 @@ impl Sequential {
         }
         // construct-before-assign: 全構築成功後に代入し、失敗時は直前の compile 状態を残す。
         let optimizer_state = OptimizerState::new(optimizer)?;
+        let base_lr = optimizer_state.lr();
         self.compiled = Some(Compiled {
             optimizer: optimizer_state,
             loss,
             amp: None,
             param_groups: param_groups.to_vec(),
+            base_lr,
         });
         Ok(())
     }
@@ -2086,6 +2183,7 @@ impl Sequential {
             ));
         }
         let optimizer_state = OptimizerState::new(optimizer)?;
+        let base_lr = optimizer_state.lr();
         let scaler = GradScaler::new(amp.grad_scaler)?;
         self.compiled = Some(Compiled {
             optimizer: optimizer_state,
@@ -2097,6 +2195,7 @@ impl Sequential {
                 scaler,
             }),
             param_groups: Vec::new(),
+            base_lr,
         });
         Ok(())
     }
@@ -2130,8 +2229,10 @@ impl Sequential {
     /// # 制約
     ///
     /// - `Optimizer::Lbfgs` は groups の空・非空にかかわらず拒否する（#2172）。
-    /// - `Callback::LrSchedule`・`save_model`・`accumulate_steps > 1`・
-    ///   [`Self::fit_with_train_step`]・`Callback::Swa` は従来どおり拒否される。
+    /// - `Callback::LrSchedule` は AMP 入口では拒否を維持する（決定記録 §14.10 点 4・
+    ///   §15.10 点 6。非 AMP の [`Self::compile_with_param_groups`] は #3834 で共通倍率として受理）。
+    /// - `save_model`・`accumulate_steps > 1`・[`Self::fit_with_train_step`]・
+    ///   `Callback::Swa` は従来どおり拒否される。
     /// - 再 compile は AMP 状態と groups の両方を置き換える。
     ///
     /// # Errors
@@ -2202,6 +2303,7 @@ impl Sequential {
         }
         // construct-before-assign: 全構築成功後に 1 回だけ代入する。
         let optimizer_state = OptimizerState::new(optimizer)?;
+        let base_lr = optimizer_state.lr();
         let scaler = GradScaler::new(amp.grad_scaler)?;
         self.compiled = Some(Compiled {
             optimizer: optimizer_state,
@@ -2213,6 +2315,7 @@ impl Sequential {
                 scaler,
             }),
             param_groups: param_groups.to_vec(),
+            base_lr,
         });
         Ok(())
     }
@@ -2414,6 +2517,11 @@ impl Sequential {
     ///   [`super::callbacks::Callback::LrSchedule`] を含む場合 →
     ///   `InvalidArgument`（train／eval モード変更前に検査するため
     ///   復元は不要。[`Optimizer`] enum doc 参照）
+    /// - param groups が空でなく `Callback::LrSchedule` を含む場合（#3834）:
+    ///   compile 時の optimizer の lr が 0 または非有限、または AMP 入口
+    ///   （[`Self::compile_with_amp_and_param_groups`]）で compile 済みの場合 →
+    ///   `InvalidArgument`（モード変更前）。epoch 開始時の group の有効 lr が
+    ///   非有限になった場合も、その epoch の step 前に `InvalidArgument`
     /// - `LrSchedule::advance`／`optimizer.set_lr` が失敗した場合
     ///   （例: ユーザー定義 `LrScheduler` が非有限値を返した）→
     ///   `restore_best_weights` を（該当すれば）適用したうえで、
@@ -2628,7 +2736,7 @@ impl Sequential {
     /// # param groups との関係（イシュー #2553）
     ///
     /// [`Self::compile_with_param_groups`] で groups を設定していると、フック内
-    /// `opt.step` に compile 時の groups が適用される。スロット添字は `step` に
+    /// `opt.step` に epoch 開始時の有効 groups（学習率スケジュールの倍率を反映。#3834）が適用される。スロット添字は `step` に
     /// 渡した `params` の位置。
     ///
     /// # 例
@@ -3080,20 +3188,30 @@ impl Sequential {
                  Callback::LrSchedule と併用できない"
             )));
         }
-        // (2.06) param groups（イシュー #2553。決定記録 §9.2 項目 3 の案 B）:
-        // groups が空でないとき `Callback::LrSchedule` は拒否する（`set_lr` は
-        // グループ外スロットにしか効かず、黙って意味が変わるため）。続けて
-        // 範囲外のスロット添字を件数検査で拒否する（空・重複・非有限・負値は
-        // step 時の `resolve_slot_hparams` が optimizer 状態の変更前に検出する）。
+        // (2.06) param groups（イシュー #2553・#3834。決定記録 §15.3）:
+        // groups が空でないとき `Callback::LrSchedule` は、AMP 入口だけ拒否を
+        // 維持する（§14.10 点 4・§15.10 点 6）。非 AMP 入口では全 group 共通の
+        // 倍率（group.lr × 現在 lr ／ base_lr）で受理し、epoch 開始時に有効
+        // groups を組み立てる。
+        let has_lr_schedule = callbacks
+            .iter()
+            .any(|cb| matches!(cb, Callback::LrSchedule(_)));
         if !compiled.param_groups.is_empty() {
-            if callbacks
-                .iter()
-                .any(|cb| matches!(cb, Callback::LrSchedule(_)))
-            {
+            if compiled.amp.is_some() && has_lr_schedule {
                 self.compiled = Some(compiled);
                 return Err(AutodiffError::InvalidArgument(format!(
-                    "Sequential::{method}: compile_with_param_groups で param groups を \
-                     設定した状態では Callback::LrSchedule と併用できない"
+                    "Sequential::{method}: compile_with_amp_and_param_groups（AMP）で param \
+                     groups を設定した状態では Callback::LrSchedule と併用できない"
+                )));
+            }
+            // (2.06a) 倍率の分母 base_lr が 0／非有限なら倍率が定義できない。
+            // compile 時には拒否しない（スケジュールなしの lr = 0 は現行で合法）。
+            if has_lr_schedule && (compiled.base_lr == 0.0 || !compiled.base_lr.is_finite()) {
+                let base = compiled.base_lr;
+                self.compiled = Some(compiled);
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: compile 時の optimizer の lr（{base}）が 0 または \
+                     非有限のため、param groups と Callback::LrSchedule は併用できない"
                 )));
             }
             let n_slots = self.trainable_parameters().len();
@@ -3414,6 +3532,50 @@ impl Sequential {
                 }
                 history.lr.push(compiled.optimizer.lr());
 
+                // (1c) 有効 param groups（イシュー #3834・決定記録 §15.3／§15.10 点 5）:
+                // 現在 lr が compile 時の lr と異なるとき、各 group の lr に共通倍率
+                // `現在 lr ／ base_lr` を掛ける（f64 計算・最後に 1 回 f32 へ downcast。
+                // weight_decay には掛けない。lr = 0 の group は 0 のまま）。スケジュール
+                // の有無によらず毎 epoch 評価し、素の fit でも倍率を持ち越す。一致時は
+                // compile 時の groups をそのまま使い、既定経路を bit 同一に保つ。
+                let cur_lr = compiled.optimizer.lr();
+                let scaled_groups: Option<Vec<ParamGroup>> = if compiled.param_groups.is_empty()
+                    || cur_lr.to_bits() == compiled.base_lr.to_bits()
+                {
+                    None
+                } else {
+                    let base = compiled.base_lr;
+                    if base == 0.0 || !base.is_finite() {
+                        break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                            "Sequential::{method}: compile 時の optimizer の lr（{base}）が 0 \
+                             または非有限のため param groups の学習率倍率を定義できない"
+                        )));
+                    }
+                    let mut v = Vec::with_capacity(compiled.param_groups.len());
+                    for g in &compiled.param_groups {
+                        // 倍率適用前の group.lr も検証する（負値×0 倍率が -0.0 となり
+                        // `resolve_slot_hparams` の lr >= 0 検査をすり抜けるのを防ぐ）。
+                        if !g.lr.is_finite() || g.lr < 0.0 {
+                            break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::{method}: param group の学習率（{}）が負または非有限",
+                                g.lr
+                            )));
+                        }
+                        let lr = ((g.lr as f64) * (cur_lr as f64) / (base as f64)) as f32;
+                        if !lr.is_finite() {
+                            break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::{method}: param group の有効学習率が非有限（\
+                                 group.lr={}・現在 lr={cur_lr}・基準 lr={base}）",
+                                g.lr
+                            )));
+                        }
+                        v.push(ParamGroup::new(g.params.clone(), lr, g.weight_decay));
+                    }
+                    Some(v)
+                };
+                let eff_groups: &[ParamGroup] =
+                    scaled_groups.as_deref().unwrap_or(&compiled.param_groups);
+
                 // (2) バッチループ（[`Self::fit`] と同一の演算列）。
                 let mut weighted_sum = 0.0f64;
                 let mut count = 0usize;
@@ -3467,7 +3629,7 @@ impl Sequential {
                             &x_batch,
                             &y_batch,
                             &mut compiled.optimizer,
-                            &compiled.param_groups,
+                            eff_groups,
                         ) {
                             Ok(v) => v,
                             Err(e) => break 'epochs_block Err(e),
@@ -3622,7 +3784,7 @@ impl Sequential {
                                 let stepped = match compiled.optimizer.step_dispatch(
                                     &param_refs,
                                     &unscaled_refs,
-                                    &compiled.param_groups,
+                                    eff_groups,
                                 ) {
                                     Ok(v) => v,
                                     Err(e) => break 'epochs_block Err(e),
@@ -3722,7 +3884,7 @@ impl Sequential {
                                 let stepped = match compiled.optimizer.step_dispatch(
                                     &param_refs,
                                     &acc_refs,
-                                    &compiled.param_groups,
+                                    eff_groups,
                                 ) {
                                     Ok(v) => v,
                                     Err(e) => break 'epochs_block Err(e),
@@ -3776,14 +3938,14 @@ impl Sequential {
                         break 'epochs_block Err(e);
                     }
                     let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
-                    let stepped = match compiled.optimizer.step_dispatch(
-                        &param_refs,
-                        &acc_refs,
-                        &compiled.param_groups,
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => break 'epochs_block Err(e),
-                    };
+                    let stepped =
+                        match compiled
+                            .optimizer
+                            .step_dispatch(&param_refs, &acc_refs, eff_groups)
+                        {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        };
                     if let Err(e) = self.apply_parameters(stepped) {
                         break 'epochs_block Err(e);
                     }

@@ -790,7 +790,7 @@ f64 長軸縮約の契約にも影響しない（倍率はホスト側スカラ�
 
 - [x] `docs/README.md` の索引を更新した
 - [x] 追跡表（行 20）を更新した
-- [ ] `docs/compat-api-scope.md` の適用記録（実装 PR が行う）
+- [x] `docs/compat-api-scope.md` の適用記録（#3834 の実装 PR が書いた。§15.12）
 
 ### 15.8 ベンチと性能への影響
 
@@ -823,6 +823,18 @@ bit 比較だけ。スケジュールありでも組み立ては epoch あたり
   4 種（#3757）、SWA と groups の組み合わせ、`set_lr` を持たない 3 種への `set_lr` 追加、group ごとの
   スケジュール（案 B）。新しい issue は起票しない（起票には承認が要る）。
 - 本 PR は設計記録のみで `Closes #3754`。`Refs #3769`（承認待ち）・`Refs #3834`（実装）。
+
+### 15.12 実装記録（イシュー #3834）
+
+- 承認: #3769 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 4（案 A・一括承認）。§15.10 の点 1〜7 は推奨どおり。
+- 変えた箇所: `crates/facade/src/compat/training.rs` の `Compiled` に `base_lr: f32`（compile 時の optimizer config の lr の控え。全 6 構築箇所で `OptimizerState::new` の直後に取る）を追加した。入口検査 (2.06) を AMP 入口だけの拒否（§14.10 点 4・§15.10 点 6）に狭め、(2.06a) として「groups あり × `LrSchedule` あり × `base_lr` が 0／非有限」の拒否を足した（(2.05) は無変更で groups の有無によらず先に効く）。epoch 開始時（LR 同期・SWA の後）に有効 groups を組み立てる (1c) を足し、現在 lr が `base_lr` と bit 違いのときだけ各 group の lr を `((g.lr as f64) * (cur as f64) / (base as f64)) as f32` に作り直す（`weight_decay` は不変・`lr = 0` は 0 のまま・非有限は step 前に `InvalidArgument`）。一致時と groups 空は compile 時の groups をそのまま使うため、既定経路は変更前と bit 同一。有効 groups は run_fit 内の 4 つの `step_dispatch` 経路（カスタム step フック・AMP・通常／累積境界・端数 flush）へ渡す。`compile_with_param_groups` の rustdoc に「学習率スケジュールとの関係」節と doctest を足し、`compile_with_amp_and_param_groups`・`fit_with_callbacks`・`fit_with_train_step`・`optim.rs` の doc を整合させた。
+- ガードの対応（A3-b を止める否定ガード・保留 doctest ガードは元から無い。そのため「反転」ではなく「正ガードの在庫への追加」）: 旧 = なし → 新 = `crates/facade/tests/api_surface.rs` の `param_groups_usage_doctests_are_present_and_compiled` に `compile_with_param_groups` の doc（`LrSchedule`・`StepLr` を含む実行 doctest）のプローブ 1 件と、その正例・負例（欠落・`ignore` 化）の自己テスト。公開名は増えないため `PARAM_GROUPS_APPROVED_KEYS` ほかは変えていない。
+- テスト: `crates/facade/tests/compat_sequential_param_groups.rs` の旧 T4（拒否を固定）を反転して `lr_schedule_with_groups_scales_group_lr_by_common_factor` に改め（反転を含む計 9 件）、判別（拒否を外すだけ・絶対値置換・`weight_decay` への倍率の 3 種の誤実装と一致しない）・Plateau・凍結 group・`base_lr = 0` の拒否（状態不変）・`set_lr` 非対応 2 種（RmsProp・Adagrad）の (2.05) 維持・累積境界・カスタム step フック・素の `fit` への持ち越しを足した（同ファイル 15 → 23 件）。AMP + groups + `LrSchedule` の拒否維持は既存の `compat_sequential_fit_amp_param_groups.rs::fit_rejections_leave_model_untouched` が無変更で通ることで担保し、コメントのみ更新した。判定は bit 一致のみで tolerance は新設していない。
+- 変異確認（手元のみ・確認後に戻した）: カスタム step フックだけ `&compiled.param_groups` のままにすると `custom_train_step_receives_scaled_groups` が失敗、有効 lr を現在 lr の絶対値にすると 7 件が失敗した。
+- 制約の扱い・申し送り: 読込経路（`compiled_from_snapshot`）の `base_lr` は復元した `state.lr()`（保存時点の現在 lr）である。groups は保存されない（#3835／#3836）ため現行では実害はない。groups の保存に対応するとき、読込後は倍率が引き継がれない点を §18.10 点 5（「A3-b の形で意味が変わるならそのとき任意キーを足す」）で扱う。加法項を持つスケジュール（`eta_min > 0` の Cosine・CyclicLr・OneCycleLr・Plateau の下限）が PyTorch の group ごとの評価と一致するかは未確認のまま。
+- §15 からの逸脱: なし（有効 groups の持ち方を `Option<Vec<ParamGroup>>` にした点は実装判断で、逸脱ではない）。
+- 不変事項: 依存の追加・更新、`unsafe`、tolerance・baseline・ガードレール閾値、`docs/spec` はいずれも変えていない。GPU カーネル・`Op`・`BackendOps` も変えないため実機列は該当なし。
+- 公開状態: 公開（挙動のみ。追跡表の行 20）。
 
 ## §18 保守・運用チェックリスト（イシュー #3755）: param groups の保存形式（A3-c）
 

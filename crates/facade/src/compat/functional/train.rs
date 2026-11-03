@@ -268,11 +268,13 @@ impl FunctionalModel {
             ));
         }
         let state = OptimizerState::new(optimizer)?;
+        let base_lr = state.lr();
         self.compiled = Some(Compiled {
             optimizer: state,
             loss,
             amp: None,
             param_groups: Vec::new(),
+            base_lr,
         });
         Ok(())
     }
