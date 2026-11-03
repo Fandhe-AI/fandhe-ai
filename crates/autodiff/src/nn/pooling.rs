@@ -25,6 +25,11 @@
 //!
 //! [`LpPool1d`]／[`LpPool2d`]／[`LpPool3d`]（イシュー #3825）は [`Var::lp_pool1d`] 等の薄いラッパー
 //! （`ceil_mode=false` 固定・無状態・新規 `Op` なし）。
+//!
+//! 3D 適応版 [`AdaptiveAvgPool3d`]／[`AdaptiveMaxPool3d`]（イシュー #3824・設計
+//! `docs/autodiff-pool3d-ops-decision.md` §18）は [`Var::adaptive_avg_pool3d`]／
+//! [`Var::adaptive_max_pool3d`] の薄いラッパー（`NCDHW`）。facade には
+//! `Sequential::add_adaptive_*_pool3d` として公開し、層型は再エクスポートしない。
 
 use crate::adaptive_max_pool_ops;
 use crate::error::AutodiffError;
@@ -681,5 +686,58 @@ impl LpPool3d {
     /// `NCDHW` 入力に対し [`Var::lp_pool3d`] へ委譲する。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.lp_pool3d(self.norm_type, self.kernel_size, self.stride, false)
+    }
+}
+
+/// PyTorch `torch.nn.AdaptiveAvgPool3d` 相当（イシュー #3824・設計 `docs/autodiff-pool3d-ops-decision.md`
+/// §18）。[`Var::adaptive_avg_pool3d`] への薄い層ラッパーで、`NCDHW` 入力を受ける。窓は
+/// [`fandhe_ai_tensor_core::adaptive_window`] の規則で決まる。facade には
+/// `compat::Sequential::add_adaptive_avg_pool3d` として公開し、層型そのものは再エクスポートしない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveAvgPool3d {
+    output_size: [usize; 3],
+}
+
+impl AdaptiveAvgPool3d {
+    /// 出力サイズ `[out_d, out_h, out_w]` から構築する。いずれかの軸が `0` なら
+    /// `AutodiffError::InvalidArgument`（テープ操作より前に拒否する）。
+    pub fn new(output_size: [usize; 3]) -> Result<Self, AutodiffError> {
+        if output_size.contains(&0) {
+            return Err(AutodiffError::InvalidArgument(
+                "AdaptiveAvgPool3d::new: output_size の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        Ok(Self { output_size })
+    }
+
+    /// `NCDHW` 入力に対し [`Var::adaptive_avg_pool3d`] へ委譲する。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.adaptive_avg_pool3d(self.output_size)
+    }
+}
+
+/// PyTorch `torch.nn.AdaptiveMaxPool3d` 相当（イシュー #3824・設計 §18）。
+/// [`Var::adaptive_max_pool3d`] への薄い層ラッパー。`forward` は `(values, index)` を返し、
+/// 索引は `(n,c)` 体積内 flat 添字 `d·H·W + h·W + w`（NaN は最初の NaN の索引が残る）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveMaxPool3d {
+    output_size: [usize; 3],
+}
+
+impl AdaptiveMaxPool3d {
+    /// 出力サイズ `[out_d, out_h, out_w]` から構築する。いずれかの軸が `0` なら
+    /// `AutodiffError::InvalidArgument`。
+    pub fn new(output_size: [usize; 3]) -> Result<Self, AutodiffError> {
+        if output_size.contains(&0) {
+            return Err(AutodiffError::InvalidArgument(
+                "AdaptiveMaxPool3d::new: output_size の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        Ok(Self { output_size })
+    }
+
+    /// `NCDHW` 入力に対し [`Var::adaptive_max_pool3d`] へ委譲し `(values, index)` を返す。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        input.adaptive_max_pool3d(self.output_size)
     }
 }

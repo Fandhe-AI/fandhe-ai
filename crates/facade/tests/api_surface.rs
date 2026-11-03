@@ -47723,8 +47723,8 @@ fn facade_does_not_reexport_or_declare_batch_norm3d_detects_each_category() {
 // `Var::adaptive_avg_pool3d`／`Var::adaptive_max_pool3d` の正ガード。
 // 反転対象の否定ガード・保留 doctest は元から無い（`docs/autodiff-pool3d-ops-decision.md` §18.1）ため、
 // 承認形（1 行委譲・置き場所・facade 非再エクスポート）だけを許す正ガードを新設する。
-// `compat::Sequential::add_adaptive_*_pool3d` と層型は #3824 の担当で、ここでは未実装（0 件）を固定する
-// （#3824 が期待値を更新する前提）。
+// `compat::Sequential::add_adaptive_*_pool3d` は #3824 で公開済み（末尾の #3824 節の正ガードが承認形を固定する）。
+// 層型は facade へ再エクスポートしない。
 // =====================================================================
 
 const ADAPTIVE_POOL3D_AVG_VAR_BODY: &str =
@@ -47819,7 +47819,7 @@ const ADAPTIVE_POOL3D_FN_NAMES: [&str; 4] = [
 
 /// workspace 全体（`crates/*/src/`）の `fn adaptive_{avg,max}_pool3d` が承認済みの置き場所
 /// （`autodiff/src/adaptive_pool3d_ops.rs`・`autodiff/src/var.rs`）に各 1 件ずつだけあり、
-/// `fn add_adaptive_{avg,max}_pool3d` は 0 件である（`Sequential` 側は #3824。実装時に本期待値を更新する）。
+/// `fn add_adaptive_{avg,max}_pool3d` は `facade/src/compat/sequential.rs` に各 1 件である（#3824 で公開）。
 #[test]
 fn workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -47869,6 +47869,14 @@ fn workspace_declares_adaptive_pool3d_ops_fn_names_only_in_allowed_locations() {
         ),
         ("autodiff/src/var.rs::adaptive_avg_pool3d".to_string(), 1),
         ("autodiff/src/var.rs::adaptive_max_pool3d".to_string(), 1),
+        (
+            "facade/src/compat/sequential.rs::add_adaptive_avg_pool3d".to_string(),
+            1,
+        ),
+        (
+            "facade/src/compat/sequential.rs::add_adaptive_max_pool3d".to_string(),
+            1,
+        ),
     ]
     .into_iter()
     .collect();
@@ -48322,4 +48330,132 @@ fn compat_sequential_lp_pool_add_methods_have_approved_signatures_detects_offens
             "{bad}"
         );
     }
+}
+
+// =====================================================================
+// イシュー #3824（`compat::Sequential::add_adaptive_avg_pool3d`／`add_adaptive_max_pool3d`）:
+// 承認: #3768 の所有者回答 issuecomment-6554564412（設計は `docs/autodiff-pool3d-ops-decision.md` §18.1・§22）。
+// 反転対象の否定ガード・保留 doctest は元から無い（§18.1・§21.4）ため、承認形（シグネチャ・宣言位置）だけを
+// 許す正ガードを新設する。`AdaptiveMaxGlobalPoolHoldDoctestGuard`・`Pool3dOpsHoldDoctestGuard`・
+// `facade_does_not_reexport_or_declare_adaptive_pool3d_ops`（層型の非再エクスポート）は変更しない。
+// =====================================================================
+
+const ADD_ADAPTIVE_POOL3D_PARAMS: &str =
+    "mut self, output_size: [usize; 3], ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_adaptive_avg_pool3d`／`add_adaptive_max_pool3d` が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn add_adaptive_pool3d_signatures_match_approved_contract() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for name in ["add_adaptive_avg_pool3d", "add_adaptive_max_pool3d"] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, ADD_ADAPTIVE_POOL3D_PARAMS),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`add_adaptive_pool3d_signatures_match_approved_contract`] の自己テスト。
+#[test]
+fn add_adaptive_pool3d_signatures_match_approved_contract_detects_offense() {
+    for name in ["add_adaptive_avg_pool3d", "add_adaptive_max_pool3d"] {
+        let ok = format!(
+            "pub fn {name}(mut self, output_size: [usize; 3],) -> Result<Self, AutodiffError> {{"
+        );
+        assert!(sequential_spatial_add_signature_ok(
+            &ok,
+            name,
+            ADD_ADAPTIVE_POOL3D_PARAMS
+        ));
+        for bad in [
+            // 2 軸
+            format!(
+                "pub fn {name}(mut self, output_size: [usize; 2],) -> Result<Self, AutodiffError> {{"
+            ),
+            // 戻り値が Self
+            format!("pub fn {name}(mut self, output_size: [usize; 3],) -> Self {{"),
+            // &mut self
+            format!(
+                "pub fn {name}(&mut self, output_size: [usize; 3],) -> Result<Self, AutodiffError> {{"
+            ),
+            // 引数の追加
+            format!(
+                "pub fn {name}(mut self, output_size: [usize; 3], extra: bool,) -> Result<Self, AutodiffError> {{"
+            ),
+            // None 軸を許す形
+            format!(
+                "pub fn {name}(mut self, output_size: Option<[usize; 3]>,) -> Result<Self, AutodiffError> {{"
+            ),
+        ] {
+            assert!(
+                !sequential_spatial_add_signature_ok(&bad, name, ADD_ADAPTIVE_POOL3D_PARAMS),
+                "{bad}"
+            );
+        }
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_adaptive_avg_pool3d(`／`add_adaptive_max_pool3d(` がそれぞれちょうど 1 件。
+#[test]
+fn compat_sequential_exposes_adaptive_pool3d_add_methods_issue_3824() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let (mut avg_n, mut max_n) = (0usize, 0usize);
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        avg_n += count_pub_fn_declarations(content, "add_adaptive_avg_pool3d");
+        max_n += count_pub_fn_declarations(content, "add_adaptive_max_pool3d");
+    });
+    assert_eq!(
+        (avg_n, max_n),
+        (1, 1),
+        "add_adaptive_avg_pool3d／add_adaptive_max_pool3d の pub fn 宣言数が各 1 件でない"
+    );
+}
+
+/// [`compat_sequential_exposes_adaptive_pool3d_add_methods_issue_3824`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_adaptive_pool3d_add_methods_issue_3824_counts_declarations() {
+    let one = "    pub fn add_adaptive_avg_pool3d(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations("", "add_adaptive_avg_pool3d"), 0);
+    assert_eq!(count_pub_fn_declarations(one, "add_adaptive_avg_pool3d"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_adaptive_max_pool3d"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(
+        count_pub_fn_declarations(&dup, "add_adaptive_avg_pool3d"),
+        2
+    );
+    // コメント内の宣言は数えない。
+    let commented = "// pub fn add_adaptive_avg_pool3d(mut self) -> Self {}\n";
+    assert_eq!(
+        count_pub_fn_declarations(commented, "add_adaptive_avg_pool3d"),
+        0
+    );
+}
+
+/// facade src 全体で `fn add_adaptive_{avg,max}_pool3d` が `compat/sequential.rs` に 1 件、他ファイルに 0 件。
+#[test]
+fn facade_declares_adaptive_pool3d_add_names_only_in_approved_form() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let allowed = usize::from(path.ends_with("compat/sequential.rs"));
+        for fn_name in ["add_adaptive_avg_pool3d", "add_adaptive_max_pool3d"] {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count != allowed {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件（許容 {allowed} 件）",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "3D 適応プーリングの add_* が承認形から逸脱: {offending:?}"
+    );
 }
