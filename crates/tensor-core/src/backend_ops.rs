@@ -254,6 +254,74 @@ pub struct LambStepConfig {
     pub bias_correction2_sqrt: f32,
 }
 
+/// param groups（イシュー #3837・設計 `docs/autodiff-param-groups-decision.md`
+/// §19）向けの区間テーブル要素群。`DeviceParamStore` の連結バッファを
+/// 「連続する同値ハイパラの区間」に分け、`*_step_device_grouped` へ 1 回の
+/// 起動で渡す。各型は `numel`（区間の要素数）と、対応する `*StepConfig` の
+/// うち group で変わる導出済みスカラーだけを持つ。
+///
+/// 契約: 区間 s の結果は「既存スカラーカーネルを、config の該当フィールドを
+/// 区間の値で上書きして区間の部分範囲へ適用した結果」と演算順まで同一。
+/// facade の安定性保証の外（内部型。facade は再エクスポートしない）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SgdStepSegment {
+    /// 区間の要素数。
+    pub numel: usize,
+    /// 区間の学習率（`SgdStepConfig::lr` を上書き）。
+    pub lr: f32,
+    /// 区間の weight decay（`SgdStepConfig::weight_decay` を上書き）。
+    pub weight_decay: f32,
+}
+
+/// [`SgdStepSegment`] の Adam／AdamW 版。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdamStepSegment {
+    /// 区間の要素数。
+    pub numel: usize,
+    /// 区間の `step_size`（`AdamStepConfig::step_size` を上書き）。
+    pub step_size: f32,
+    /// 区間の coupled weight decay（`AdamStepConfig::weight_decay` を上書き）。
+    pub weight_decay: f32,
+    /// 区間の `decay_factor`（`AdamStepConfig::decay_factor` を上書き）。
+    pub decay_factor: f32,
+}
+
+/// [`SgdStepSegment`] の RmsProp 版。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RmsPropStepSegment {
+    /// 区間の要素数。
+    pub numel: usize,
+    /// 区間の学習率。
+    pub lr: f32,
+    /// 区間の weight decay。
+    pub weight_decay: f32,
+}
+
+/// [`SgdStepSegment`] の Adagrad 版。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdagradStepSegment {
+    /// 区間の要素数。
+    pub numel: usize,
+    /// 区間の逓減後学習率（`AdagradStepConfig::clr` を上書き）。
+    pub clr: f32,
+    /// 区間の weight decay。
+    pub weight_decay: f32,
+}
+
+/// [`SgdStepSegment`] の LAMB 版。LAMB の trust ratio は層単位の縮約のため、
+/// 区間は統合せず 1 層 1 行（並びと数は層と一致させる）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LambStepSegment {
+    /// 層の要素数。
+    pub numel: usize,
+    /// 層の学習率。
+    pub lr: f32,
+    /// 層の `step_size`。
+    pub step_size: f32,
+    /// 層の weight decay。
+    pub weight_decay: f32,
+}
+
 /// Conv2d（`BackendOps::im2col`／`col2im`／`conv2d`）のパラメータ記述子
 /// （イシュー #1764・設計 `docs/conv-ops-design.md` §8）。
 ///
@@ -1610,6 +1678,183 @@ pub trait BackendOps {
         _token: &DispatchFailureCell,
     ) -> Result<(), BackendError> {
         self.lamb_step_device(param, grad, moments, segment_numels, config)
+    }
+
+    /// [`BackendOps::sgd_step_device`] の param groups 版（イシュー #3837・
+    /// 設計 §19）。`segments` の各区間へ、`config` の該当フィールドを区間の値で
+    /// 上書きしたスカラー版と同じ演算を適用する（演算順まで同一）。
+    /// `segments` の `numel` 合計が `param.numel()` と一致しない・overflow する
+    /// 場合は、どの要素も更新せず [`BackendError::InvalidArgument`] を返す。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`]（fail-closed。
+    /// [`BackendOps::supports_grouped_optimizer_step`] が `false` のまま）。
+    fn sgd_step_device_grouped(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _velocity: Option<&mut DeviceBuffer<f32>>,
+        _config: &SgdStepConfig,
+        _segments: &[SgdStepSegment],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "sgd_step_device_grouped: default fail-safe (no grouped kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::sgd_step_device_grouped`] の失敗トークン付き版。既定は
+    /// `token` を無視して非 tracked 版へ委譲する。
+    fn sgd_step_device_grouped_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        velocity: Option<&mut DeviceBuffer<f32>>,
+        config: &SgdStepConfig,
+        segments: &[SgdStepSegment],
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.sgd_step_device_grouped(param, grad, velocity, config, segments)
+    }
+
+    /// [`BackendOps::adam_step_device`] の param groups 版（イシュー #3837・
+    /// 設計 §19）。`segments` の各区間へ、`config` の該当フィールドを区間の値で
+    /// 上書きしたスカラー版と同じ演算を適用する（演算順まで同一）。
+    /// `segments` の `numel` 合計が `param.numel()` と一致しない・overflow する
+    /// 場合は、どの要素も更新せず [`BackendError::InvalidArgument`] を返す。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`]（fail-closed。
+    /// [`BackendOps::supports_grouped_optimizer_step`] が `false` のまま）。
+    fn adam_step_device_grouped(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _moments: LambMoments<'_>,
+        _config: &AdamStepConfig,
+        _segments: &[AdamStepSegment],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "adam_step_device_grouped: default fail-safe (no grouped kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::adam_step_device_grouped`] の失敗トークン付き版。既定は
+    /// `token` を無視して非 tracked 版へ委譲する。
+    fn adam_step_device_grouped_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        moments: LambMoments<'_>,
+        config: &AdamStepConfig,
+        segments: &[AdamStepSegment],
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.adam_step_device_grouped(param, grad, moments, config, segments)
+    }
+
+    /// [`BackendOps::rmsprop_step_device`] の param groups 版（イシュー #3837・
+    /// 設計 §19）。`segments` の各区間へ、`config` の該当フィールドを区間の値で
+    /// 上書きしたスカラー版と同じ演算を適用する（演算順まで同一）。
+    /// `segments` の `numel` 合計が `param.numel()` と一致しない・overflow する
+    /// 場合は、どの要素も更新せず [`BackendError::InvalidArgument`] を返す。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`]（fail-closed。
+    /// [`BackendOps::supports_grouped_optimizer_step`] が `false` のまま）。
+    fn rmsprop_step_device_grouped(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _square_avg: &mut DeviceBuffer<f32>,
+        _optional: RmsPropOptionalBuffers<'_>,
+        _config: &RmsPropStepConfig,
+        _segments: &[RmsPropStepSegment],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "rmsprop_step_device_grouped: default fail-safe (no grouped kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::adagrad_step_device`] の param groups 版（イシュー #3837・
+    /// 設計 §19）。`segments` の各区間へ、`config` の該当フィールドを区間の値で
+    /// 上書きしたスカラー版と同じ演算を適用する（演算順まで同一）。
+    /// `segments` の `numel` 合計が `param.numel()` と一致しない・overflow する
+    /// 場合は、どの要素も更新せず [`BackendError::InvalidArgument`] を返す。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`]（fail-closed。
+    /// [`BackendOps::supports_grouped_optimizer_step`] が `false` のまま）。
+    fn adagrad_step_device_grouped(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _state_sum: &mut DeviceBuffer<f32>,
+        _config: &AdagradStepConfig,
+        _segments: &[AdagradStepSegment],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "adagrad_step_device_grouped: default fail-safe (no grouped kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::adagrad_step_device_grouped`] の失敗トークン付き版。既定は
+    /// `token` を無視して非 tracked 版へ委譲する。
+    fn adagrad_step_device_grouped_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        state_sum: &mut DeviceBuffer<f32>,
+        config: &AdagradStepConfig,
+        segments: &[AdagradStepSegment],
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.adagrad_step_device_grouped(param, grad, state_sum, config, segments)
+    }
+
+    /// [`BackendOps::lamb_step_device`] の param groups 版（イシュー #3837・
+    /// 設計 §19）。`segments` の各区間へ、`config` の該当フィールドを区間の値で
+    /// 上書きしたスカラー版と同じ演算を適用する（演算順まで同一）。
+    /// `segments` の `numel` 合計が `param.numel()` と一致しない・overflow する
+    /// 場合は、どの要素も更新せず [`BackendError::InvalidArgument`] を返す。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`]（fail-closed。
+    /// [`BackendOps::supports_grouped_optimizer_step`] が `false` のまま）。
+    fn lamb_step_device_grouped(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _moments: LambMoments<'_>,
+        _config: &LambStepConfig,
+        _segments: &[LambStepSegment],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "lamb_step_device_grouped: default fail-safe (no grouped kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::lamb_step_device_grouped`] の失敗トークン付き版。既定は
+    /// `token` を無視して非 tracked 版へ委譲する。
+    fn lamb_step_device_grouped_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        moments: LambMoments<'_>,
+        config: &LambStepConfig,
+        segments: &[LambStepSegment],
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.lamb_step_device_grouped(param, grad, moments, config, segments)
+    }
+
+    /// `*_step_device_grouped`（param groups 向け区間テーブル更新）を実カーネルで
+    /// 持つかの capability（イシュー #3837）。`DeviceParamStore` の groups あり
+    /// 構築はこれが `false` なら `Unsupported` で拒否する（ROCm 等）。
+    /// 既定 `false`。CPU・CUDA・Metal が `true` を返す。ただし GPU の RmsProp・
+    /// Adagrad・LAMB の grouped メソッドは既定の `Unsupported` のまま（実行時に
+    /// 型付きエラー。スカラー経路と同じ扱い）。
+    fn supports_grouped_optimizer_step(&self) -> bool {
+        false
     }
 
     /// 学習 step の一区間（イシュー #1349 では
@@ -7578,6 +7823,70 @@ mod tests {
         let buf = empty_device_buffer(Device::Cpu);
         let key = ops.captured_segment_key(&[&buf], 0);
         assert!(matches!(key, Ok(None)));
+    }
+
+    /// 区間テーブル版 `*_step_device_grouped` の既定実装は `Unsupported` で、
+    /// 対象バッファを一切変更しない（イシュー #3837）。capability も既定 `false`。
+    #[test]
+    fn grouped_step_defaults_are_unsupported_and_have_no_effect() {
+        let ops = MockOps(Device::Cpu);
+        assert!(!ops.supports_grouped_optimizer_step());
+        let mut param = empty_device_buffer(Device::Cpu);
+        let grad = empty_device_buffer(Device::Cpu);
+        let token = DispatchFailureCell::new();
+        let sgd = SgdStepConfig {
+            lr: 0.1,
+            momentum: 0.0,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+            is_first_step: true,
+        };
+        let seg = [SgdStepSegment {
+            numel: 0,
+            lr: 0.1,
+            weight_decay: 0.0,
+        }];
+        assert!(matches!(
+            ops.sgd_step_device_grouped(&mut param, &grad, None, &sgd, &seg),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.sgd_step_device_grouped_tracked(&mut param, &grad, None, &sgd, &seg, &token),
+            Err(BackendError::Unsupported(_))
+        ));
+        let adam = AdamStepConfig {
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+            decay_factor: 1.0,
+            step_size: 0.1,
+            bias_correction2_sqrt: 1.0,
+            kind: AdamStepKind::Coupled,
+        };
+        let aseg = [AdamStepSegment {
+            numel: 0,
+            step_size: 0.1,
+            weight_decay: 0.0,
+            decay_factor: 1.0,
+        }];
+        let mut m = empty_device_buffer(Device::Cpu);
+        let mut v = empty_device_buffer(Device::Cpu);
+        assert!(matches!(
+            ops.adam_step_device_grouped_tracked(
+                &mut param,
+                &grad,
+                LambMoments {
+                    m: &mut m,
+                    v: &mut v
+                },
+                &adam,
+                &aseg,
+                &token
+            ),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     /// [`BackendOps::run_captured_sgd_step_segment`] の既定実装は区間
