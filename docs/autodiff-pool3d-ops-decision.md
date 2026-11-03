@@ -732,3 +732,58 @@ Max は比較・選択のみ（値は入力要素と bit 一致、タイ先勝�
 - 参照していた §18 の行番号は基準 sha の値で、現行の位置は上表のファイル名と関数名で引く。
 - GPU 実機 parity は**未実測**。手順は `docs/perf/logs/adaptive-pool3d-ops-3823/README.md`（実測は #3860／#3861）。
 - 未着手（後続）: `Sequential::add_adaptive_*_pool3d`・層型・`LayerSpec`（#3824）、model_io・ONNX export（#3828）、層型名の facade 公開（#3022）。
+
+## 22. #3825 実施記録（LPPool の `Var` 演算と `Sequential` 層）
+
+承認: #3768 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。§19 の本文は書き換えず、実装した内容をここに記録する。
+
+### 22.1 公開した名前と置き場所
+
+- `Var::lp_pool1d(norm_type: f32, kernel_size: usize, stride: Option<usize>, ceil_mode: bool)`、`Var::lp_pool2d`（`[usize; 2]`）、`Var::lp_pool3d`（`[usize; 3]`）。いずれも `Result<Var, AutodiffError>`。本体は `crates/autodiff/src/lp_pool_ops.rs` への 1 行委譲（`var.rs`）。
+- `compat::Sequential::add_lp_pool1d`／`add_lp_pool2d`／`add_lp_pool3d`（`norm_type: f32, kernel_size, stride: Option<_>` → `Result<Self, AutodiffError>`。`ceil_mode` は置かない）。
+- 層型 `nn::LpPool1d`／`LpPool2d`／`LpPool3d`（`crates/autodiff/src/nn/pooling.rs`）は autodiff 内部のみで、facade からは再エクスポートしない（#3022 の別判断）。`lp_pool_ops` モジュールも facade からは出さない。`Tape`／`Tensor<f32>` に同名メソッドは作らない。
+- 新しい `Op`・`BackendOps`・カーネル・`unsafe`・依存はない（案 A）。
+
+### 22.2 実装の要点
+
+- 合成は PyTorch `F.lp_pool*d` と同じ順: `s = avg_pool(x^p)`（padding 0、`count_include_pad=true`。padding 0 のため divisor は常に `K` で結果に影響しない）→ `z = sign(s) * relu(|s|)` → `y = (z * K)^(1/p)`。`K` は `f32` スカラーの勾配なし Var（`Tape::var_no_grad`）として掛ける。
+- 検査順（確保と tape 操作より前）: `norm_type` が有限かつ `> 0`（0・負・NaN・±inf は `InvalidArgument`）→ `ceil_mode=true` 拒否 → rank → `Pool2dParams`／`Pool3dParams`（padding 0、dilation 1）と出力 shape → `K = Π kernel_size` を `checked_mul` で計算 → **`K > 2^24` は `InvalidArgument`**。最後の `2^24` 上限は §19.3 で未決だった点をここで決めた（`K` を `f32` で厳密に表せる範囲に限る fail-closed）。新しいエラー variant は足さない。
+- 層の `new` は同じ検査を前倒しする（`AvgPool*::new` と同じ形）。`supports_forward_host` は `false`、`is_pooling` は `true`（pooling は常駐経路で fail-closed になり、非常駐の tape 経路で動く）。
+- `create_graph` には対応しない（承認 Q3 (a)）。`Sign` が replay できないため、二階微分は型付きエラーになる（テストで固定）。
+
+### 22.3 §19.1 からの意図的な逸脱（model_io）
+
+§19.1 と Q7 は「`LayerSpec` に variant を置き、保存は fail-closed」としていた。#3768 の論点 4 で「model_io は全層に kind を追加し、`format_version` は 2 のまま」と承認されたため、kind `lp_pool1d`／`lp_pool2d`／`lp_pool3d` を model_io に追加した（ChannelShuffle #3822・Shrink #3817 と同じ扱い）。`params` は `norm_type`（実数）・`kernel_size`・`stride`（2d は `_h`／`_w`、3d は `_d`／`_h`／`_w` 接尾辞。`stride` は全軸 null または全軸数値）。kind の allowlist は 75 → 78 種。復元は `add_lp_pool*d` を通るため、保存ファイル由来の値も層の `new` の検査を受ける。旧リーダーは新しい kind を fail-closed で拒否する（前方互換はない）。ONNX export は 0.14.0 に含めず `UnsupportedLayer` のまま。
+
+### 22.4 正ガード（`crates/facade/tests/api_surface.rs` 末尾の #3825 節）
+
+反転対象の否定ガード・保留 doctest は元から無い（`crates/` に `lp_pool` 識別子は 0 件だった）。承認形だけを許す正ガードを新設した。
+
+- `var_lp_pool_methods_are_thin_delegations`（自己テスト `_detects_offense`: すり替え・引数の固定値化・1d／2d／3d の取り違え・重複・欠落）
+- `var_lp_pool_is_reachable_via_facade_only`（`fandhe_ai::{Var, AutodiffError}` だけでシグネチャと手計算値を固定）
+- `workspace_declares_lp_pool_fn_names_only_in_allowed_locations`（`lp_pool*d` は `lp_pool_ops.rs`／`var.rs` に各 1 件、`add_lp_pool*d` は `sequential.rs` に各 1 件）
+- `facade_does_not_reexport_or_declare_lp_pool_ops`（自己テスト `_detects_each_category`: モジュール・層型の再エクスポート、同名型の宣言、`Tape`／`Tensor` 上の同名メソッド）
+- `compat_sequential_lp_pool_add_methods_have_approved_signatures`（自己テスト `_detects_offense`）
+- 手元確認: `var.rs` の `lp_pool2d` の委譲先引数を固定値へ一時的に書き換えると `var_lp_pool_methods_are_thin_delegations` が失敗することを確かめ、元へ戻した。
+
+### 22.5 テスト
+
+- autodiff: `lp_pool_ops.rs` の単体テスト、`tests/lp_pool_ops.rs`（閉形式〈p=1 は窓和、p=2 は二乗和の平方根、3d・stride〉、中心差分の勾配、全零窓の勾配が厳密に 0、`0 < p < 1` かつ窓内に 0 の勾配が非有限になる記録、拒否系と孤児ノード無し、決定性、`create_graph` が型付きエラー）、`tests/lp_pool_parity.rs`（PyTorch fixture との突合）。
+- facade: `tests/lp_pool_ops_backend_parity.rs`（CPU tape と `NaiveOps` tape を REQ-2 統一複合判定で突合。`#[ignore]` の `cuda_*`／`metal_*`）、`tests/compat_sequential_lp_pool.rs`（層経路が `Var` と bit 一致、`predict`／`fit`、不正引数の即時拒否、save→load 往復の bit 一致、manifest 改竄の拒否、ONNX export が `UnsupportedLayer`）、`tests/compat_sequential_lp_pool_backend_parity.rs`（`#[ignore]`）、model_io の単体テスト（78 kind の往復、非信頼 JSON の拒否 fixture、拒否 spec）。
+
+### 22.6 PyTorch 2.14.0 との突合
+
+使い捨て venv に `torch==2.14.0+cpu` を導入して実行値を得た（リポジトリの依存には入れていない）。fixture は `crates/autodiff/tests/fixtures/lp-pool-pytorch-reference/`（生成条件・sha256 は同 README）。PyTorch に `nn.LPPool3d`／`F.lp_pool3d` があることを確認した。22 件（1d 9・2d 7・3d 6。p ∈ {0.5, 1, 1.5, 2, 3}、stride の有無、全零窓、負の入力、`0 < p < 1` かつ窓内に 0）で forward は REQ-2 統一複合判定で一致し、forward が NaN でないケースの勾配も一致した（`p=0.5` で 0 を含む窓の非有限勾配も一致）。既知の差分:
+
+| 項目 | PyTorch 2.14.0 | 本実装 |
+|---|---|---|
+| 負の入力 × 非整数 `p`（forward が NaN）の勾配 | NaN | 0（上流勾配 0 と `pow_scalar` の VJP の積が 0 になる）。比較から除外 |
+| `ceil_mode=true` | 受理 | `Err`（v1 未対応） |
+| `norm_type` | 検査なし（0・負・NaN は IEEE のまま） | 有限かつ `> 0` に限り `Err` |
+| バッチなし入力（rank 2／3／4） | 受理 | `Err`（rank 3／4／5 のみ） |
+| 窓和の蓄積 | `f32` | `f64`（`avg_pool` の契約。bit 一致は求めない） |
+
+### 22.7 申し送り
+
+- GPU 実機 parity は**未実測**。手順は `docs/perf/logs/lp-pool-ops-3825/README.md`（実測は #3860／#3861）。`train_gpu_parity.rs` の CASES への登録は Phase 10。
+- 未着手（後続）: ONNX export、専用 `Op` と GPU カーネル（案 B）、層型名の facade 公開（#3022）、`ceil_mode=true` への対応。

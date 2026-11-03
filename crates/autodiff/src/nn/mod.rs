@@ -193,6 +193,9 @@
 //! `add_pixel_unshuffle`・`Var::pixel_shuffle`／`pixel_unshuffle` は
 //! イシュー #2526（親 #2520）で facade 公開済み（`Module` の `as_*` フックは
 //! 無状態層のため追加しない。`docs/autodiff-pixel-shuffle-decision.md` §6）。
+//! イシュー #3825（設計 #3748・承認 #3768）で [`LpPool1d`]／[`LpPool2d`]／[`LpPool3d`] を追加した。
+//! `pow_scalar`／`avg_pool`／`sign` 等の合成のみで新規 `Op`／カーネルは追加しない
+//! （`create_graph` 非対応）。`Var::lp_pool*d`／`compat::Sequential::add_lp_pool*d` で公開する。
 //! イシュー #3822（設計 #3746・承認 #3768）で [`ChannelShuffle`]
 //! （`channel_shuffle` モジュール。チャネル軸 dim 1 固定）を追加した。
 //! `contiguous`／`reshape`／`permute` の合成のみで新規 `Op`／カーネルは
@@ -339,7 +342,8 @@ pub use pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 pub(crate) use pixel_shuffle::{pixel_shuffle_forward, pixel_unshuffle_forward};
 pub use pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
-    AvgPool2d, AvgPool3d, GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d, MaxPool3d,
+    AvgPool2d, AvgPool3d, GlobalPool, GlobalPoolMode, LpPool1d, LpPool2d, LpPool3d, MaxPool1d,
+    MaxPool2d, MaxPool3d,
 };
 pub use rnn::{
     Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,
