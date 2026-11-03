@@ -347,6 +347,9 @@ pub mod softmin_threshold_ops;
 // Hardshrink・Softshrink（`hardshrink`・`softshrink`。イシュー #3817・親 #3813）。既存 Op の合成のみ
 // （新規 Op・カーネル・依存ゼロ）。`Var` 委譲メソッドと `Sequential::add_*` のみ facade 公開。
 pub mod shrink_ops;
+// Bilinear（`bilinear`。イシュー #3818・親 #3813）。既存 Op の合成のみ（新規 Op・カーネル・依存ゼロ）。
+// `Var::bilinear` の委譲メソッドだけ facade 公開（層型 `nn::Bilinear` は autodiff 内部）。
+pub mod bilinear_ops;
 // pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL（`bce_with_logits_loss_with`・
 // `hinge_embedding_loss`・`soft_margin_loss`・`gaussian_nll_loss`。イシュー #2652）。新規 Op 4 種 +
 // ホスト参照実装。`Var` の委譲メソッドとオプション型は #2677・#2854 で facade 公開済み（本モジュール自体は

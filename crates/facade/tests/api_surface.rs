@@ -46547,3 +46547,259 @@ fn facade_does_not_reexport_or_declare_shrink_ops_detects_each_category() {
     assert!(offense("pub struct Softshrink;"));
     assert!(offense("pub mod shrink_ops {}"));
 }
+// =====================================================================
+// イシュー #3818（親 #3813・Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `Var::bilinear` の正ガード。承認形は「`Var::bilinear` だけを公開し、層型 `Bilinear`／`BilinearVars` は
+// autodiff 内部に留め、`Sequential::add_bilinear` は設けない（2 入力のため）」。反転対象の否定ガード・
+// 保留 doctest は元から無い（設計記録 §2.0・§2.1）ため、承認形だけを許す正ガードを新設する。
+// `fn bilinear` はトークン完全一致のため `eval.rs` の `bilinear_*` や補間の `InterpolateMode::Bilinear` とは干渉しない。
+// =====================================================================
+
+const BILINEAR_VAR_EXPECTED_BODY: &str =
+    "crate : : bilinear_ops : : bilinear ( self , x2 , weight , bias )";
+
+/// 与えたソースで `Var::bilinear` が 1 件だけ宣言され、本体が承認形の 1 行委譲か。
+fn bilinear_var_body_ok(source: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    count_fn_declarations_by_name(&tokens, "bilinear") == 1
+        && determinism_fn_body(&tokens, "bilinear").as_deref() == Some(BILINEAR_VAR_EXPECTED_BODY)
+}
+
+/// `Var::bilinear` が `var.rs` に 1 件あり、本体が `bilinear_ops` への 1 行委譲である。
+#[test]
+fn var_bilinear_ops_method_is_thin_delegation() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert!(
+        bilinear_var_body_ok(&content),
+        "var.rs の Var::bilinear が承認形（bilinear_ops への 1 行委譲）と一致しない"
+    );
+}
+
+/// [`var_bilinear_ops_method_is_thin_delegation`] の自己テスト（すり替えの検出）。
+#[test]
+fn var_bilinear_ops_method_is_thin_delegation_detects_offense() {
+    let ok = "impl Var { pub fn bilinear(&self, x2: &Var, weight: &Var, bias: Option<&Var>) -> R { \
+              crate::bilinear_ops::bilinear(self, x2, weight, bias) } }";
+    assert!(bilinear_var_body_ok(ok));
+    for bad in [
+        // 独自実装へのすり替え
+        "impl Var { pub fn bilinear(&self, x2: &Var, weight: &Var, bias: Option<&Var>) -> R { self.clone() } }",
+        // 引数の差し替え（bias を None 固定）
+        "impl Var { pub fn bilinear(&self, x2: &Var, weight: &Var, bias: Option<&Var>) -> R { \
+         crate::bilinear_ops::bilinear(self, x2, weight, None) } }",
+        // 欠落
+        "impl Var { pub fn other(&self) -> R { self.clone() } }",
+        // 重複宣言
+        "impl Var { pub fn bilinear(&self, x2: &Var, weight: &Var, bias: Option<&Var>) -> R { \
+         crate::bilinear_ops::bilinear(self, x2, weight, bias) } \
+         pub fn bilinear(&self, x2: &Var, weight: &Var, bias: Option<&Var>) -> R { \
+         crate::bilinear_ops::bilinear(self, x2, weight, bias) } }",
+    ] {
+        assert!(!bilinear_var_body_ok(bad), "{bad}");
+    }
+}
+
+/// `fandhe_ai::{Var, Tensor, AutodiffError}` だけで `Var::bilinear` のシグネチャが承認形と一致し、
+/// 手計算できる値が出る（スタブでは通らない値を選ぶ）。
+#[test]
+fn var_bilinear_is_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    fn pin<'a, 't>(
+        _: fn(
+            &'a Var<'t>,
+            &'a Var<'t>,
+            &'a Var<'t>,
+            Option<&'a Var<'t>>,
+        ) -> Result<Var<'t>, AutodiffError>,
+    ) {
+    }
+    pin(|x1, x2, w, b| x1.bilinear(x2, w, b));
+    let tape = fandhe_ai::tape();
+    let x1 = tape.var(&Tensor::new(vec![1.0f32, 2.0], &[1, 2]).unwrap());
+    let x2 = tape.var(&Tensor::new(vec![3.0f32, 4.0], &[1, 2]).unwrap());
+    let w = tape.var(&Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 2, 2]).unwrap());
+    let b = tape.var(&Tensor::new(vec![0.5f32], &[1]).unwrap());
+    let y = x1.bilinear(&x2, &w, Some(&b)).unwrap();
+    assert_eq!(y.value().host_slice().to_vec(), vec![61.5]);
+}
+
+const BILINEAR_FN_NAMES: [&str; 2] = ["bilinear", "add_bilinear"];
+
+/// workspace 全体（`crates/*/src/`）の `fn bilinear` が承認済みの置き場所だけにある
+/// （`autodiff/src/bilinear_ops.rs` の自由関数 1 件・`autodiff/src/var.rs` の委譲 1 件）。
+/// `add_bilinear` は 0 件（2 入力の層を `Sequential` に載せない決定の固定）。
+#[test]
+fn workspace_declares_bilinear_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートが見つからない");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in BILINEAR_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/bilinear_ops.rs::bilinear",
+        "autodiff/src/var.rs::bilinear",
+        // 無関係な既存の宣言: ROCm 補間カーネルのホスト参照モデル（`InterpolateMode::Bilinear` 用。
+        // 二線形補間であり `F.bilinear` ではない）。増減は迂回経路の混入として検出する。
+        "backend-rocm/src/interpolate_model.rs::bilinear",
+    ]
+    .into_iter()
+    .map(|k| (k.to_string(), 1))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "bilinear 関連の fn 宣言が承認済みの置き場所と一致しない（迂回経路の混入か未承認の実装追加）"
+    );
+}
+
+const BILINEAR_IDENTS: [&str; 3] = ["bilinear_ops", "Bilinear", "BilinearVars"];
+
+/// facade src の `pub use` が bilinear の内部実装（モジュール・層型）を含む、または層型の独自宣言・
+/// `pub mod` がある場合に違反の説明を返す。非 pub の `use`・コメント・文字列内の記述と、補間の
+/// `InterpolateMode::Bilinear`（match 腕・別名の再エクスポート）は違反としない。
+fn scan_bilinear_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in BILINEAR_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            if path_tokens.iter().any(|t| t == "fandhe_ai_autodiff")
+                && path_tokens.iter().any(|t| t == "*")
+            {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && matches!(name.as_str(), "Bilinear" | "BilinearVars")
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && let Some(name) = tokens.get(i + 2)
+            && matches!(name.as_str(), "bilinear_ops" | "bilinear")
+        {
+            offending.push(format!("pub mod {name} 宣言"));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が bilinear の内部実装を再エクスポート・独自宣言していない。
+#[test]
+fn facade_does_not_reexport_or_declare_bilinear_ops() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_bilinear_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が bilinear の内部実装を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_bilinear_ops`] の自己テスト。
+#[test]
+fn facade_does_not_reexport_or_declare_bilinear_ops_detects_each_category() {
+    let offense = |src: &str| !scan_bilinear_reexports_and_declarations(src).is_empty();
+    // 違反にならない例（非 pub の use・コメント・文字列・無関係な pub use・補間の Bilinear）
+    assert!(!offense(
+        "use fandhe_ai_autodiff::nn::{Bilinear, BilinearVars};"
+    ));
+    assert!(!offense(
+        "// pub use bilinear_ops::bilinear;\nconst S: &str = \"pub use Bilinear;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    assert!(!offense("pub use fandhe_ai_tensor_core::InterpolateMode;"));
+    assert!(!offense(
+        "match m { InterpolateMode::Bilinear { align_corners } => align_corners, _ => false }"
+    ));
+    // 違反の例
+    assert!(offense("pub use fandhe_ai_autodiff::bilinear_ops;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::{Bilinear, BilinearVars};"
+    ));
+    assert!(offense("pub use fandhe_ai_autodiff::nn::Bilinear as B;"));
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    assert!(offense("pub struct BilinearVars;"));
+    assert!(offense("pub mod bilinear_ops {}"));
+}
+
+/// `compat::Sequential` に `add_bilinear` が無い（2 入力の層を載せない決定の固定）。
+#[test]
+fn compat_sequential_has_no_bilinear_add_method() {
+    let content = read_to_string_or_panic(&facade_crate_root().join("src/compat/sequential.rs"));
+    let (public, nonpublic, _) = scan_type_impl_surface(&content, "Sequential");
+    assert!(
+        !public.contains("add_bilinear"),
+        "add_bilinear が公開された"
+    );
+    assert!(
+        !nonpublic.iter().any(|n| n == "add_bilinear"),
+        "add_bilinear が非公開で宣言された"
+    );
+}
+
+/// [`compat_sequential_has_no_bilinear_add_method`] の自己テスト。
+#[test]
+fn compat_sequential_has_no_bilinear_add_method_detects_offense() {
+    let bad = "impl Sequential { pub fn add_bilinear(mut self) -> Self { self } }";
+    assert!(
+        scan_type_impl_surface(bad, "Sequential")
+            .0
+            .contains("add_bilinear")
+    );
+    let ok = "impl Sequential { pub fn add_linear(mut self) -> Self { self } }";
+    assert!(
+        !scan_type_impl_surface(ok, "Sequential")
+            .0
+            .contains("add_bilinear")
+    );
+}

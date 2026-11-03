@@ -5740,6 +5740,39 @@ impl<'t> Var<'t> {
         crate::shrink_ops::softshrink(self, lambd)
     }
 
+    // ---- bilinear_ops 委譲メソッド（Bilinear。イシュー #3818・親 #3813）----
+    //
+    // 実体は `crate::bilinear_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回を facade の正ガード
+    // （`var_bilinear_ops_method_is_thin_delegation`）で拒否する。
+
+    /// 双線形変換（`torch.nn.functional.bilinear(input1, input2, weight, bias)` 相当。`self` が `input1`）。
+    /// イシュー #3818。`crate::bilinear_ops::bilinear` へ 1 行委譲する。
+    ///
+    /// `y[.., o] = Σ_{i,j} self[.., i] · weight[o, i, j] · x2[.., j] (+ bias[o])`。形状は
+    /// `self = [*, in1]`・`x2 = [*, in2]`（rank 2 以上・先頭の次元は完全一致）、
+    /// `weight = [out, in1, in2]`、`bias = [out]`、出力 `[*, out]`。違反は `Result` の `Err`。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    /// let tape = Tape::new();
+    /// let x1 = tape.var(&Tensor::new(vec![1.0f32, 2.0], &[1, 2]).unwrap());
+    /// let x2 = tape.var(&Tensor::new(vec![3.0f32, 4.0], &[1, 2]).unwrap());
+    /// let w = tape.var(&Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 2, 2]).unwrap());
+    /// let y = x1.bilinear(&x2, &w, None).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![61.0]);
+    /// let bad = tape.var(&Tensor::new(vec![1.0f32, 2.0, 3.0], &[1, 3]).unwrap());
+    /// assert!(x1.bilinear(&bad, &w, None).is_err());
+    /// ```
+    pub fn bilinear(
+        &self,
+        x2: &Var<'t>,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::bilinear_ops::bilinear(self, x2, weight, bias)
+    }
+
     // ---- shape_view_ops 関連関数（meshgrid。イシュー #2678）----
 
     /// 1 次元テンソル列から座標格子を作る（`torch.meshgrid` 相当）。イシュー #2678。
