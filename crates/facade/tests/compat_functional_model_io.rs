@@ -313,3 +313,29 @@ fn load_rejects_missing_dir_and_tampered_manifests_without_panicking() {
     std::fs::write(&path, &original).unwrap();
     assert!(load_functional_model(&dir).is_ok());
 }
+
+/// イシュー #3820（#3750 R10）: BatchNorm3d を含む Sequential ブロックも functional 形式を往復する。
+/// 学習 forward で running stats を動かしてから eval で保存し、復元後の出力が bit 一致する。
+#[test]
+fn batch_norm3d_round_trips_in_functional_graph() {
+    let mut b = FunctionalBuilder::new();
+    let x = b.input().unwrap();
+    let blk = Sequential::new().add_batch_norm3d(2, 1e-5, 0.1).unwrap();
+    let y = b.apply(blk, x).unwrap();
+    let mut model = b.build(&[x], &[y]).unwrap();
+    let input = tensor(
+        (0..32).map(|i| i as f32 * 0.07 - 0.5).collect(),
+        &[2, 2, 2, 2, 2],
+    );
+    model.predict(&[&input]).unwrap();
+    model.eval();
+    let guard = TempDirGuard::new("functional_bn3d");
+    let dir = guard.path().join("m");
+    save_functional_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_functional_model(&dir).expect("復元できるはず");
+    let want = model.predict(&[&input]).unwrap();
+    let got = loaded.predict(&[&input]).unwrap();
+    for (w, g) in want.iter().zip(&got) {
+        assert_eq!(bits(w), bits(g));
+    }
+}

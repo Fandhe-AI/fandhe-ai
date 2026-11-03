@@ -31,7 +31,7 @@
 
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{Sgd, SgdConfig};
-use fandhe_ai::{AutodiffError, BackendError, Tensor};
+use fandhe_ai::{AutodiffError, BackendError, ShapeError, Tensor};
 
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -80,6 +80,24 @@ fn add_batch_norm1d_rejects_zero_num_features() {
 fn add_batch_norm2d_rejects_momentum_out_of_range() {
     let err = Sequential::new()
         .add_batch_norm2d(4, 1e-5, 1.5)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn add_batch_norm3d_rejects_zero_num_features() {
+    let err = Sequential::new()
+        .add_batch_norm3d(0, 1e-5, 0.1)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn add_batch_norm3d_rejects_momentum_out_of_range() {
+    let err = Sequential::new()
+        .add_batch_norm3d(4, 1e-5, 1.5)
         .map(|_| ())
         .unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
@@ -218,6 +236,92 @@ fn batch_norm2d_predict_matches_forward_bit_exact() {
     let forwarded = model.forward(&tape, &xv).unwrap().to_tensor();
 
     assert_eq!(dense_vec(&predicted), dense_vec(&forwarded));
+}
+
+fn bn3d_input() -> Tensor<f32> {
+    tensor(
+        (0..2 * 3 * 2 * 2 * 2)
+            .map(|i| (i as f32) * 0.01 - 0.2)
+            .collect(),
+        &[2, 3, 2, 2, 2],
+    )
+}
+
+#[test]
+fn batch_norm3d_predict_matches_forward_bit_exact() {
+    let model = Sequential::new().add_batch_norm3d(3, 1e-5, 0.1).unwrap();
+    let x = bn3d_input();
+
+    let predicted = model.predict(&x).unwrap();
+    let tape = fandhe_ai::tape();
+    let xv = tape.var(&x);
+    let forwarded = model.forward(&tape, &xv).unwrap().to_tensor();
+
+    assert_eq!(predicted.shape(), &[2, 3, 2, 2, 2]);
+    assert_eq!(dense_vec(&predicted), dense_vec(&forwarded));
+}
+
+/// #3820: 受理 rank は 5 のみ。rank 4 と rank 6 は `RankMismatch { expected: 5 }`。
+#[test]
+fn batch_norm3d_rejects_rank4_and_rank6_input() {
+    let model = Sequential::new().add_batch_norm3d(2, 1e-5, 0.1).unwrap();
+    for shape in [&[2usize, 2, 2, 2][..], &[2, 2, 2, 2, 2, 2][..]] {
+        let n: usize = shape.iter().product();
+        let x = tensor(vec![0.5; n], shape);
+        let err = model.predict(&x).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AutodiffError::Shape(ShapeError::RankMismatch { expected: 5, .. })
+            ),
+            "{err:?}"
+        );
+    }
+}
+
+/// #3820: train の predict は running stats を unbiased 分散（`M/(M-1)`、`M = N*D*H*W`）で更新し、
+/// eval の predict はそれを使い更新しない。
+#[test]
+fn batch_norm3d_train_updates_running_stats_and_eval_uses_them() {
+    let mut model = Sequential::new().add_batch_norm3d(1, 0.0, 1.0).unwrap();
+    let x = tensor(vec![1.0, 2.0, 3.0, 6.0], &[1, 1, 2, 1, 2]);
+    model.predict(&x).unwrap();
+    model.eval();
+    // momentum = 1.0 なので running stats == 直近バッチの統計（mean 3、unbiased var 14/3）。
+    let y = model.predict(&x).unwrap();
+    let std = (14.0f32 / 3.0).sqrt();
+    let want: Vec<f32> = [1.0f32, 2.0, 3.0, 6.0]
+        .iter()
+        .map(|v| (v - 3.0) / std)
+        .collect();
+    for (g, w) in dense_vec(&y).iter().zip(&want) {
+        assert!((g - w).abs() < 1e-5, "{g} vs {w}");
+    }
+    assert_eq!(dense_vec(&y), dense_vec(&model.predict(&x).unwrap()));
+}
+
+/// #3820: 学習経路（`bind` → `trainable_vars`／`trainable_grads`）が BN3d を認識し、
+/// weight／bias の 2 件を返す（収集漏れだと黙って学習されない）。
+#[test]
+fn batch_norm3d_bind_collects_trainable_vars_and_grads() {
+    let model = Sequential::new().add_batch_norm3d(3, 1e-5, 0.1).unwrap();
+    let tape = fandhe_ai::tape();
+    let bound = model.bind(&tape);
+    assert_eq!(bound.trainable_vars().len(), 2);
+    let xv = tape.var(&bn3d_input());
+    let loss = bound.forward(&tape, &xv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    assert_eq!(bound.trainable_grads(&grads).unwrap().len(), 2);
+    assert_eq!(model.trainable_parameters().len(), 2);
+}
+
+/// #3820: 常駐経路は BN3d を黙って受理せず `Unsupported` で拒否する。
+#[test]
+fn batch_norm3d_resident_path_rejects_unsupported() {
+    let model = Sequential::new().add_batch_norm3d(3, 1e-5, 0.1).unwrap();
+    let tape = fandhe_ai::tape();
+    let err = model.init_device_param_store(&tape).unwrap_err();
+    assert!(matches!(err, BackendError::Unsupported(_)));
 }
 
 #[test]

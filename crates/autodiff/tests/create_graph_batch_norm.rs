@@ -349,11 +349,16 @@ fn review_examples() -> Vec<(&'static str, Probe, Outcome)> {
     ]
 }
 
-/// #3809（§45・§69）: 幅広の行（(b)(c)）を持つ train を rank 2／3／4・affine あり／なしで通し、
+/// #3809（§45・§69）: 幅広の行（(b)(c)）を持つ train を rank 2／3／4／5・affine あり／なしで通し、
 /// 受理かつ 3 段が有限・一致することを `probe` が確かめる。
 #[test]
 fn batch_norm_prescaled_layouts_are_accepted_and_finite() {
-    for shape in [vec![3usize, 2], vec![2, 2, 2], vec![2, 1, 2, 2]] {
+    for shape in [
+        vec![3usize, 2],
+        vec![2, 2, 2],
+        vec![2, 1, 2, 2],
+        vec![2, 1, 2, 2, 2],
+    ] {
         let ch = shape[1];
         let m = shape[0] * shape[2..].iter().product::<usize>();
         let n_el = m * ch;
@@ -554,7 +559,7 @@ fn sweep_affines(w0: &[f32]) -> Vec<(Option<Affine>, Option<Affine>, Vec<Wrt>)> 
 
 #[test]
 fn sweep_every_structure_path_is_finite_or_rejected() {
-    // train／eval（通常分散・分散 0）× rank 2／3／4 × weight なし／あり（0 と非ゼロ）／定数・bias ×
+    // train／eval（通常分散・分散 0）× rank 2／3／4／5（#3820）× weight なし／あり（0 と非ゼロ）／定数・bias ×
     // チャネル値 × upstream の大きさ × 線形／入力依存の損失 × upstream と seed の符号パターンを
     // 掛け合わせ、どのケースも「受理なら全段が有限で一致」「拒否なら child 空」を満たすことを
     // 確かめる。判定（`check_structure_stages`）を外すと、巨大 upstream の受理ケースで構造の中間値
@@ -564,7 +569,12 @@ fn sweep_every_structure_path_is_finite_or_rejected() {
     // cotangent までで、g を作る上流の Mul の逆伝播は対象外（決定記録 §27.3・§28）。
     let quadratic_scales = [1.0f32, 1e20, 1e30];
     let (mut accepted, mut rejected) = (0usize, 0usize);
-    for shape in [vec![3usize, 2], vec![2, 2, 2], vec![2, 1, 2, 2]] {
+    for shape in [
+        vec![3usize, 2],
+        vec![2, 2, 2],
+        vec![2, 1, 2, 2],
+        vec![2, 1, 2, 2, 2],
+    ] {
         let ch = shape[1];
         let m = shape[0] * shape[2..].iter().product::<usize>();
         let n_el = m * ch;

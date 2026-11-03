@@ -1733,3 +1733,95 @@ fn tampered_upsample_scale_factor_is_rejected() {
         assert!(matches!(err, ModelIoError::Autodiff(_)), "{label}: {err}");
     }
 }
+// ---------------------------------------------------------------------
+// イシュー #3820: batch_norm3d の保存・復元（kind 追加・format_version 2 据え置き。#3750 R1・R5）
+// ---------------------------------------------------------------------
+
+fn bn3d_model() -> Sequential {
+    Sequential::new()
+        .add_conv3d(1, 2, [1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1, 4)
+        .and_then(|m| m.add_batch_norm3d(2, 1e-5, 0.1))
+        .map(|m| m.add_flatten(1, 4))
+        .and_then(|m| m.add_linear(16, 2, 5))
+        .expect("構築できるはず")
+}
+
+#[test]
+fn batch_norm3d_round_trips_with_kind_name_and_format_version_2() {
+    let input = tensor(&[3, 1, 2, 2, 2], 0.3);
+    let kinds = round_trip("bn3d-kind", &bn3d_model(), &input);
+    assert!(kinds.contains("batch_norm3d"), "{kinds:?}");
+    let (_g, _dir, text) = manifest_of(&bn3d_model(), "bn3d-manifest");
+    assert!(text.contains("\"format_version\":2"), "{text}");
+    assert!(
+        text.contains("\"kind\":\"batch_norm3d\",\"params\":{\"num_features\":2,"),
+        "{text}"
+    );
+}
+
+/// 非信頼 manifest の表駆動: キー欠落・未知キー・型違い・非正準表記・NaN は `Manifest`、
+/// 意味の範囲外（momentum > 1）は層の構築側が `Autodiff` で拒否する。いずれも dir を変えない。
+#[test]
+fn tampered_batch_norm3d_params_are_rejected() {
+    let (_g, _dir, text) = manifest_of(&bn3d_model(), "bn3d-tamper");
+    let head = "\"kind\":\"batch_norm3d\",\"params\":{";
+    let start = text.find(head).expect("batch_norm3d 層がある") + head.len();
+    let end = start + text[start..].find('}').expect("params の終端");
+    let params = text[start..end].to_string();
+    assert!(params.contains("\"momentum\":"), "{params}");
+    let momentum_value: String = params[params.find("\"momentum\":").expect("momentum") + 11..]
+        .chars()
+        .take_while(|c| *c != ',' && *c != '}')
+        .collect();
+    let cases: Vec<(&str, String, bool)> = vec![
+        (
+            "missing-key",
+            params.replacen("\"momentum\":", "\"momentum_x\":", 1),
+            true,
+        ),
+        ("unknown-key", format!("{params},\"extra\":1"), true),
+        (
+            "type-mismatch",
+            params.replacen("\"num_features\":2", "\"num_features\":\"2\"", 1),
+            true,
+        ),
+        (
+            "non-canonical",
+            params.replacen("\"num_features\":2", "\"num_features\":02", 1),
+            true,
+        ),
+        (
+            "nan",
+            params.replacen("\"num_features\":2", "\"num_features\":NaN", 1),
+            true,
+        ),
+        (
+            "momentum-out-of-range",
+            params.replacen(
+                &format!("\"momentum\":{momentum_value}"),
+                "\"momentum\":1.5",
+                1,
+            ),
+            false,
+        ),
+    ];
+    for (label, tampered, is_manifest) in cases {
+        let g = TempDirGuard::new(&format!("bn3d-tamper-{label}"));
+        let d = g.path().join("m");
+        save_model(&bn3d_model(), &d).expect("保存できるはず");
+        let t = std::fs::read_to_string(d.join("manifest.json")).expect("読めるはず");
+        std::fs::write(d.join("manifest.json"), t.replacen(&params, &tampered, 1))
+            .expect("書けるはず");
+        let before = entries(&d);
+        let err = load_err(&d);
+        assert_eq!(entries(&d), before, "{label}: load は dir を変えない");
+        if is_manifest {
+            assert!(
+                matches!(err, ModelIoError::Manifest { .. }),
+                "{label}: {err}"
+            );
+        } else {
+            assert!(matches!(err, ModelIoError::Autodiff(_)), "{label}: {err}");
+        }
+    }
+}
