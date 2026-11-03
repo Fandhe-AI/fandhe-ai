@@ -2632,7 +2632,7 @@ impl Op {
     ///
     /// **最終一覧と残る fail-closed（イシュー #3812・決定記録 §72）**: `Op` 単位で `false` なのは
     /// `CtcLoss`（承認による恒久）と §21.2 A 区分の `ResidentLeaf`・`LinearResident`・`LinearAct`・`Custom`・
-    /// `OneHot` の 6 つ。`MatrixNorm` の `Nuc`・`Spectral` は現時点 `false`（再評価の起票は承認済み・未起票）、
+    /// `OneHot` の 6 つ。`MatrixNorm` の `Nuc`・`Spectral` は #3991（決定記録 §76）で `true` になった。
     /// `IndexedScatterReduce` の `Prod` は本節の時点では承認済み・未実装だったが、イシュー #3977（決定記録
     /// §74）で `true` になった。Op は `true` でも入口検査
     /// （`validate_ancestors`）が入力の範囲で拒否するもの（`Inv`・`Solve`・`SlogdetLogAbsDet` の overflow、
@@ -2848,13 +2848,15 @@ impl Op {
                 fandhe_ai_tensor_core::VectorNormOrd::L1 | fandhe_ai_tensor_core::VectorNormOrd::L2
             ),
             // `MatrixNorm` も payload で判定する（イシュー #3806・決定記録 §43・§66）。`Fro`・`One`・
-            // `Inf` だけ true。`Nuc`・`Spectral` は SVD の多出力に依存するため false のまま、
-            // `#[non_exhaustive]` の未知 `ord` も false。
+            // `Inf` に加え、`Nuc`・`Spectral` も true（イシュー #3991・決定記録 §75・§76。SVD の子テープ
+            // 再生で対応）。`#[non_exhaustive]` の未知 `ord` は false。
             Op::MatrixNorm { ord, .. } => matches!(
                 ord,
                 fandhe_ai_tensor_core::MatrixNormOrd::Fro
                     | fandhe_ai_tensor_core::MatrixNormOrd::One
                     | fandhe_ai_tensor_core::MatrixNormOrd::Inf
+                    | fandhe_ai_tensor_core::MatrixNormOrd::Nuc
+                    | fandhe_ai_tensor_core::MatrixNormOrd::Spectral
             ),
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
@@ -2866,7 +2868,7 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            // `MatrixNorm` の `Nuc`・`Spectral` は上の payload 判定で false のまま。
+            // `MatrixNorm` は上の payload 判定（全 ord が true）。
             | Op::OneHot { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
             // プラグイン。`docs/autodiff-custom-function-decision.md`）は
@@ -5675,11 +5677,7 @@ mod conv3d_op_tests {
             Op::Solve { a, b },
             Op::Det { input: a },
             Op::SlogdetLogAbsDet { input: a },
-        ];
-        for op in &supported {
-            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
-        }
-        let unsupported = [
+            // イシュー #3991: 節 4 の fail-closed 見本だった `Nuc`・`Spectral` も対応済み。
             Op::MatrixNorm {
                 input: a,
                 ord: fandhe_ai_tensor_core::MatrixNormOrd::Nuc,
@@ -5689,8 +5687,8 @@ mod conv3d_op_tests {
                 ord: fandhe_ai_tensor_core::MatrixNormOrd::Spectral,
             },
         ];
-        for op in &unsupported {
-            assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
         }
     }
 
@@ -5736,12 +5734,13 @@ mod conv3d_op_tests {
         ] {
             assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
         }
+        // イシュー #3991: 隣接の `MatrixNorm` の `Nuc`・`Spectral` も対応済み。
         for ord in [
             fandhe_ai_tensor_core::MatrixNormOrd::Nuc,
             fandhe_ai_tensor_core::MatrixNormOrd::Spectral,
         ] {
             let op = Op::MatrixNorm { input: a, ord };
-            assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
         }
     }
 
@@ -5773,9 +5772,10 @@ mod conv3d_op_tests {
         for op in &supported {
             assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
         }
+        // イシュー #3991: `Nuc`・`Spectral` も SVD の子テープ再生で対応済み。
         for ord in [MatrixNormOrd::Nuc, MatrixNormOrd::Spectral] {
             let op = Op::MatrixNorm { input: a, ord };
-            assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
         }
     }
 

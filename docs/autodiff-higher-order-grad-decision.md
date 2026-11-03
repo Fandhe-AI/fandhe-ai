@@ -5520,3 +5520,44 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 実行コードを足さない。設計要件として、入力（rank 2・有限）は forward の検証を通ったものだけが届くこと、A1 は m×m の中間行列を作らないこと、拒否時に `child` を空に保つこと、`supports_create_graph` の網羅 match と総括判定を迂回しないことを維持する。依存・設定・ruleset に触れない。実機のホスト名・個人のパス・秘密情報は書かない。
 - 変えていないもの: コード・公開 API・rustdoc・tolerance・baseline・`STAGE_BOUND_GUARD`・SVD の `1e-9`・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
 - スコープ外: 実装（A1・A2・B のいずれも。所有者の回答後に別 issue で起票）、rustdoc の「未起票」表現の修正、`Prod`（#3977・#3988）、GPU 実機 parity（#3857・#3859）、f64 テープ（#3722）。
+
+## 76. 実装記録（イシュー #3991・親 #3719 系。create_graph の B 区分・MatrixNorm の Nuc・Spectral）
+
+### 76.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity は未実測）。§72.1 の F3（`Nuc`・`Spectral` が fail-closed）を、§75 の推奨 A1 で解消した。節番号は、main が §75 まで使い、open PR に本ファイルを触れるものが無かったため §76 を取った。
+- 承認根拠: #3711 の所有者コメント 6604937225（2026-11-03）が §75.6 への回答として、点 1 は A1、点 2〜6 は推奨どおり（`Nuc`・`Spectral` は同じ扱い／縮退と σ = 0 は §68 準拠の型付き拒否で新しい定数・閾値は作らない／値は V3／隣接見本は `Op::Custom` だけ／GPU parity は §48 に従い tolerance を変えない）とした。これ以上の承認は主張しない。A2（可微分域に合わせた専用判定）は別途承認が要るため実装しない。
+- 既存節（§72・§75 の本文）は書き換えず、本節から前方参照する。
+
+### 76.1 実装したもの
+
+- `supports_create_graph`（`tape.rs`）の `MatrixNorm` の payload 判定へ `Nuc`・`Spectral` を足した（外側の網羅 match にワイルドカードは足していない）。公開名の追加なし（`Err` が `Ok` になる受理範囲の拡大のみ）。
+- 入口検査 `linalg_norm_rank::check_matrix_norm_svd`（`validate_ancestors` の `validate_stat_varnorm` の後。子テープへ書く前）。親テープに `Op::MatrixNorm` の 1 ノードしか無く `check_svd_triple` は使えないため、ホストの `eval::linalg::svd` を 1 回実行し、同じ述語（空の分解・σ == 0・`decomp::svd_gap_degenerate`）を当てる。SVD の失敗と σ の非有限は `Backward` へ変換して拒否する。±inf は先に `validate_stat_varnorm`（`Kind::L2` へ回した）が拒否する。
+- cgrad `linalg_norm_rank::nuc_spectral_cgrad`（`build_cgrads` の `MatrixNorm` 腕）: 子テープ上の入力の写しに `Var::svd` を積み（`SvdU`→`SvdS`→`SvdVh` の連続 push で push 順序契約を満たす）、構造は `g ⊙ (U Vh)`（`Nuc`）／`g ⊙ (u₀ v₀ᵀ)`（`Spectral`）。`k` を経由する結合順で `m×m`・`n×n` を作らない。値は 1 階と同じ `matrix_norm_vjp` を `push_v3` で載せる（`cg.grad` は 1 階と bit 一致）。
+- 総括判定 `decomp::guard_matrix_norm_svd`（構造を積む前）: 上流 `g` の有限性、構造の段（`U Vh`・`g·U Vh`）の有限性、二階の上界（`guard_svd` と同じ 4 因子・冪 4・`extra = max(|g|, 1)`）。`guard_svd` は因子 shape の `g` 前提のためスカラー上流には使えず、シグネチャを変えずに別関数にした。新しい定数は無い。拒否は `rollback_to` で `child` を空に戻す。
+
+積む Op は `SvdU`/`SvdS`/`SvdVh`・`MatMul`・`Narrow`・`Contiguous`・`BroadcastTo`・`Mul`・定数葉で、すべて `supports_create_graph() == true`（閉包性）。
+
+### 76.2 設計（§75）からの差・明確化
+
+- **`rounding_ok` は使わない**: 値は V3 でホスト値が入るため、構造の f32 丸めは `cg.grad` の値に効かず、逆伝播の経路だけを決める。段の有限性と二階の上界だけを見る。
+- **空行列の非対称**: `Fro`・`One`・`Inf` は空行列を受理し `empty_grad` を返すが、`Nuc`・`Spectral` は空の分解（`k == 0`）として拒否する（§68 の SVD と同じ）。
+- **`Spectral` の保守的拒否**: 二階の `svd_vjp` が全ペアの縮退で失敗するため、最大 σ だけが可微分域でも、下位 σ のみが縮退・0 の入力は拒否する（§75.2 の保守的な拒否。A2 の対象で本節では扱わない）。
+- **NaN**: 入口検査で SVD が非有限の特異値を返す（または収束しない）入力は拒否する。テストで `Err(Backward)`・`child` が空・再試行可で固定した。
+
+### 76.3 テスト
+
+`crates/autodiff/tests/create_graph_linalg_norm_rank.rs` 節 8（縦長・横長・正方の Hessian を 5 点中央差分と REQ-2 判定で突合・1 階と `cg.grad` の bit 一致・単位行列／回転／σ = 0／空／±inf／NaN の拒否と再試行・過大な上流の拒否・`[100000,1]` で m×m を作らない・隣接 `Op::Custom` の fail-closed）。`tape.rs` の `supports_create_graph` 3 テストを反転。facade は `matrix_norm_nuc_spectral_create_graph_via_facade`・`matrix_norm_nuc_spectral_degenerate_is_rejected_via_facade`、`api_surface.rs` の正ガード（`CG_PAYLOAD_EXPECTED`・拒否対応表）を更新。`create_graph_linalg_fft.rs` の「fail-closed に固定した 2 件」は 0 件になったため削除した。
+
+### 76.4 数値契約と保証範囲
+
+- 受理した入力で `cg.grad` は 1 階と bit 一致（V3）。二階は seed の各要素の絶対値 1 以下の範囲で有限差分と REQ-2 判定で一致する。
+- 孫テープ（三階の機構）は `guard_svd` の桁落ち見積りで保守的に拒否されうる（§68.2 と同じ）。テストは拒否なら `Err(Backward)` かつ孫テープが空であることを確かめる。
+- tolerance 定数・baseline・SVD の `1e-9`・`STAGE_BOUND_GUARD`・FMA 契約・ガードレール閾値は変えていない。
+
+### 76.5 GPU（未実測）・スコープ外・変えていないもの
+
+- GPU 実機（CUDA・Metal）は未実測（#3857・#3859）。`create_graph_gpu_parity.rs` の `reject_matrix_norm_nuc` は今後受理されるため縮退入力の拒否 `reject_matrix_norm_nuc_degenerate` へ変えた。`linalg_matrix_norm_nuc`／`spectral` の実機比較ケース（MatMul の形状列挙を伴う）は実機側の作業と合わせて追加する。
+- スコープ外: A2、f64 テープ（#3722）、三階以上の保証、公開名の追加。
+- ホストの SVD を入口・cgrad・子テープ再生で複数回行う費用は §75.3 で受容済み。
+- 変えていないもの: `svd_vjp`・`matrix_norm_vjp`、forward、`Tape::backward`、`Op` の payload、`AutodiffError` の variant、`guard_svd` のシグネチャ、依存、`docs/spec`。

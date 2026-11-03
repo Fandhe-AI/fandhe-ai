@@ -864,7 +864,7 @@ const CASES: &[Case] = &[
         judge: Judge::Strict,
         split_k: SplitKShapes::NoMatMul,
         run: run_linalg_nr_fro,
-        reject: Some(reject_matrix_norm_nuc),
+        reject: Some(reject_matrix_norm_nuc_degenerate),
     },
     Case {
         name: "linalg_matrix_norm_one",
@@ -2589,10 +2589,10 @@ fn run_linalg_nr_rank(tp: &Tapes) -> Outputs {
     run_linalg_nr_body(tp, 4)
 }
 
-/// Q5: `matrix_norm` の `Nuc`（SVD の多出力に依存するため拒否のまま）は GPU でも `Err(Backward)` で拒否され、
+/// Q5: `matrix_norm` の `Nuc`（#3991 で対象化。特異値が縮退する単位行列は拒否）は GPU でも `Err(Backward)` で拒否され、
 /// 子テープは空のまま。
-fn reject_matrix_norm_nuc(tp: &Tapes) -> bool {
-    let x = tp.parent.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+fn reject_matrix_norm_nuc_degenerate(tp: &Tapes) -> bool {
+    let x = tp.parent.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
     let loss = x
         .matrix_norm(fandhe_ai::MatrixNormOrd::Nuc)
         .unwrap()

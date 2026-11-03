@@ -45331,6 +45331,8 @@ const CG_PAYLOAD_EXPECTED: &[(&str, &[&str])] = &[
             "fandhe_ai_tensor_core::MatrixNormOrd::Fro",
             "fandhe_ai_tensor_core::MatrixNormOrd::One",
             "fandhe_ai_tensor_core::MatrixNormOrd::Inf",
+            "fandhe_ai_tensor_core::MatrixNormOrd::Nuc",
+            "fandhe_ai_tensor_core::MatrixNormOrd::Spectral",
         ],
     ),
     (
@@ -45669,12 +45671,8 @@ const CG_FACADE_REJECT_MAP: &[(&str, Option<&str>)] = &[
         Some("scatter_reduce_prod_overflow_is_rejected_via_facade"),
     ),
     (
-        "MatrixNorm::Nuc",
-        Some("matrix_norm_nuc_is_rejected_via_facade"),
-    ),
-    (
-        "MatrixNorm::Spectral",
-        Some("matrix_norm_spectral_create_graph_is_rejected_via_facade"),
+        "MatrixNorm::Nuc_Spectral::degenerate",
+        Some("matrix_norm_nuc_spectral_degenerate_is_rejected_via_facade"),
     ),
     (
         "ScalarUnary::Selu_Celu_Softsign_Hardsigmoid_LogSigmoid_and_ScalarBinary::Atan2",

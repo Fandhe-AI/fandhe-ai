@@ -374,7 +374,7 @@ fn svd_position(op: &Op) -> Option<(NodeId, usize)> {
 
 /// 1 階 `eval::linalg::svd_vjp` と同じ絶対判定（`|σj² − σi²| < 1e-9`。同関数の F 行列の分母検査）。
 /// 定数は新設せず述語だけを写す（承認 §44 点 4）。単体テストで `svd_vjp` との一致を固定する。
-fn svd_gap_degenerate(s: &[f64]) -> bool {
+pub(super) fn svd_gap_degenerate(s: &[f64]) -> bool {
     let k = s.len();
     (0..k).any(|i| (0..k).any(|j| i != j && (s[j] * s[j] - s[i] * s[i]).abs() < 1e-9))
 }
@@ -740,6 +740,58 @@ pub(super) fn guard_svd(
         max_abs(&gv).max(1.0),
     ) {
         return Err(reject("SVD: 二階の逆伝播の上界が 2^125 以上"));
+    }
+    Ok(())
+}
+
+/// `MatrixNorm`（`Nuc`・`Spectral`）の総括判定（イシュー #3991・決定記録 §76。
+/// `linalg_norm_rank::nuc_spectral_cgrad` が構造を積む前に呼ぶ）。`u: [m,k]`・`s: [k]`・`vh: [k,n]` は
+/// 子テープ上の SVD 因子の値、`g_scalar` は上流スカラー。構造は `g·U Vh`（`Nuc`）／`g·u₀v₀ᵀ`
+/// （`Spectral`）で、`m×m`・`n×n` を確保しない。
+///
+/// [`guard_svd`] はシグネチャが因子 shape の `g` 前提のためスカラー上流には使えず、同じ判定式を
+/// 写した別関数にした（新しい定数は作らない）。値（V3）は 1 階と bit 一致するホスト値のため、構造の
+/// f32 丸め（`rounding_ok`）は `cg.grad` の値に効かず、逆伝播の経路だけを決める。よって `rounding_ok`
+/// は使わず、段の有限性（`all_stage_ok`）と二階の上界（`second_order_ok`。`guard_svd` と同じ 4 因子）
+/// だけを見る。
+pub(super) fn guard_matrix_norm_svd(
+    u: &Tensor<f32>,
+    s: &Tensor<f32>,
+    vh: &Tensor<f32>,
+    g_scalar: f32,
+    spectral: bool,
+) -> Result<(), AutodiffError> {
+    let (m, k) = (u.shape()[0], u.shape()[1]);
+    let n = vh.shape()[1];
+    if k == 0 {
+        return Err(reject("空の分解"));
+    }
+    if !g_scalar.is_finite() {
+        return Err(reject("MatrixNorm: 上流 g が非有限"));
+    }
+    let g = f64::from(g_scalar);
+    let (uv, sv, vhv) = (to_f64(u), to_f64(s), to_f64(vh));
+    let p = if spectral {
+        // u₀ v₀ᵀ: 先頭列 × 先頭行。
+        let u0: Vec<f64> = (0..m).map(|r| uv[r * k]).collect();
+        mm(&u0, &vhv[..n], m, 1, n)
+    } else {
+        mm(&uv, &vhv, m, k, n)
+    };
+    let gp: Vec<f64> = p.iter().map(|x| g * x).collect();
+    if !(all_stage_ok(&p) && all_stage_ok(&gp)) {
+        return Err(reject("MatrixNorm: 構造の段が overflow／ゼロ化域に入る"));
+    }
+    let f = svd_f_matrix(&sv);
+    let inv_s: Vec<f64> = sv.iter().map(|x| 1.0 / x).collect();
+    let bu = m.max(n) as f64 * max_abs(&uv).max(max_abs(&vhv));
+    let fa = max_abs(&f) * max_abs(&sv).max(1.0).powi(2);
+    if !second_order_ok(
+        &[bu, fa, max_abs(&inv_s), max_abs(&sv)],
+        4,
+        g.abs().max(1.0),
+    ) {
+        return Err(reject("MatrixNorm: 二階の逆伝播の上界が 2^125 以上"));
     }
     Ok(())
 }
