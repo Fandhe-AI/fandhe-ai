@@ -95,6 +95,29 @@ fn run_batch_norm2d_parity(device: Device) {
     );
 }
 
+fn run_batch_norm3d_parity(device: Device) {
+    let model = Sequential::new().add_batch_norm3d(3, 1e-5, 0.1).unwrap();
+    let x = tensor(
+        (0..2 * 3 * 2 * 2 * 2)
+            .map(|i| (i as f32) * 0.01 - 0.2)
+            .collect(),
+        &[2, 3, 2, 2, 2],
+    );
+
+    let cpu_out = model.predict(&x).unwrap();
+
+    let tape = fandhe_ai::tape_for(device)
+        .expect("実機必須（本テストは #[ignore]。実行時は事前に到達確認する）");
+    let xv = tape.var(&x);
+    let device_out = model.forward(&tape, &xv).unwrap().to_tensor();
+
+    assert_parity(
+        "compat::Sequential(add_batch_norm3d) device vs CPU",
+        &dense(&device_out),
+        &dense(&cpu_out),
+    );
+}
+
 fn run_multihead_attention_parity(device: Device) {
     let model = Sequential::new()
         .add_multihead_attention(4, 2, SEED2)
@@ -220,6 +243,12 @@ fn cuda_batch_norm2d_matches_cpu() {
 
 #[test]
 #[ignore = "CUDA 実機必須"]
+fn cuda_batch_norm3d_matches_cpu() {
+    run_batch_norm3d_parity(Device::Cuda(0));
+}
+
+#[test]
+#[ignore = "CUDA 実機必須"]
 fn cuda_multihead_attention_matches_cpu() {
     run_multihead_attention_parity(Device::Cuda(0));
 }
@@ -260,6 +289,13 @@ fn metal_norm_embedding_matches_cpu() {
 #[ignore = "Metal 実機必須"]
 fn metal_batch_norm2d_matches_cpu() {
     run_batch_norm2d_parity(Device::Metal);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機必須"]
+fn metal_batch_norm3d_matches_cpu() {
+    run_batch_norm3d_parity(Device::Metal);
 }
 
 #[cfg(target_os = "macos")]

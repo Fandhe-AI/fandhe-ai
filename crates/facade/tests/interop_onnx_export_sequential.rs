@@ -475,3 +475,17 @@ fn sequential_with_softshrink_is_rejected_with_unsupported_layer() {
         "UnsupportedLayer(index=1) を期待したが {err:?}"
     );
 }
+
+/// BatchNorm3d も ONNX export 非対応（イシュー #3820・#3750 §11。`layer_kind_name` は変えない）。
+/// `UnsupportedLayer` で fail-closed。
+#[test]
+fn sequential_with_batch_norm3d_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_batch_norm3d(2, 1e-5, 0.1)
+        .expect("test fixture: 層構築に失敗");
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    assert!(
+        matches!(err, OnnxError::UnsupportedLayer { index: 0, .. }),
+        "UnsupportedLayer(index=0) を期待したが {err:?}"
+    );
+}

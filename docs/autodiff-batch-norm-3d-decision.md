@@ -145,10 +145,10 @@
 ## §7 適用記録・索引・追跡表
 
 - 適用記録の案（実装 PR #3820 が `docs/compat-api-scope.md` へ書く）: `**適用記録（イシュー #3820・親 …。承認: <URL>）**: <公開形・公開状態>`。現時点の公開状態は「未公開」。
-- [ ] `docs/compat-api-scope.md` に適用記録を追記した（実装 PR #3820 で行う）
+- [x] `docs/compat-api-scope.md` に適用記録を追記した（実装 PR #3820 で実施。§14）
 - [x] `docs/README.md` の索引を更新した（本 PR）
 - [x] 追跡表 `docs/compat-matrix-ari-tracker.md` の # 11 行の設計記録列を更新した（本 PR。正ガード列は「未特定」のまま。予定名は §1）
-- 0.14.0 移行ノート（#3780）への反映は実装後に行う。
+- 0.14.0 移行ノート（#3780）への反映は #3820 で行った（`docs/migration/0.14.0.md` §1・§3.4）。
 
 ## §8 ベンチと性能
 
@@ -193,3 +193,14 @@
 - GPU カーネルは無変更。Metal は soft-f64 のまま（scale/ssq ではない）。実機 parity は未実測（#3860・#3861。`docs/perf/logs/batch-norm-rank5-3819/README.md`）。
 - #3820 に残した範囲: `nn::BatchNorm3d` 層、`Module::as_batch_norm3d*`、`LayerSpec::BatchNorm3d`、`add_batch_norm3d`、model_io の kind、`api_surface.rs` の正ガード、backend-cuda／backend-metal／create_graph の rank 5 テスト拡充。
 - 設計からの逸脱: backend-cpu／backend-cuda／backend-metal クレート直下の rank 5 parity テストは本 PR では足していない（facade 経由の CPU bit 一致テストと facade の実機 `#[ignore]` テストで代替。#3860・#3861 の実測時に必要なら追加する）。create_graph の rank 5 二階テストも未追加。
+
+## §14 実装記録（#3820）
+
+- 変更点（autodiff）: `nn::BatchNorm3d`（`BatchNormCore` を共有。受理 rank は `BATCH_NORM_3D_RANKS = [5]`）、`Module::as_batch_norm3d`／`as_batch_norm3d_mut`（既定 `None`）、`impl Module for BatchNorm3d`（`forward_host` は rank を先に検査し、外れたら `RankMismatch { expected: 5 }`）。層型は autodiff 内部に留め、facade へ再エクスポートしない（承認論点 5・#3022 の別判断）。
+- 変更点（facade）: `compat::Sequential::add_batch_norm3d(num_features, eps, momentum) -> Result<Self, AutodiffError>`、`LayerSpec::BatchNorm3d`、復元専用の `add_batch_norm3d_restored`。`bind` の BN 収集、`first_untracked_parametric_layer`、`contains_resident_unsupported_layer`（常駐経路は `Unsupported`）、`SequentialVars::forward`／`trainable_vars`／`trainable_grads` の全 dispatch 箇所へ 3d を足した。
+- 保存（#3750 R1・R5・R9）: kind `batch_norm3d`（`params`: `num_features`・`eps`・`momentum`）を追加した。`format_version` は 2 のまま。kind 数は 74（従来 73）、BatchNorm の buffer 期待キーは `all_kind_specs` で 4 件から 6 件。v1（`format_version` 1）の manifest に `batch_norm3d` が現れたら `buffer_keys` の中身に関わらず `Mismatch` で拒否する（初期 running stats で黙って補う経路を作らない）。0.13.0 以前のリーダーは未知 kind を `UnsupportedModel` で拒否する。
+- ONNX export: `layer_kind_name` は `"unknown"` のまま変更しない（#3750 §11。`as_*` フックの追加は別承認）。BatchNorm3d は既存の else 経路で `UnsupportedLayer` になる。
+- 追加した正ガード（`crates/facade/tests/api_surface.rs`、#3820 節）: `compat_sequential_batch_norm3d_add_method_has_approved_signature`（自己テスト `..._detects_offense`）、`compat_sequential_exposes_batch_norm3d_add_method_issue_3820`（自己テスト `..._counts_declarations`）、`facade_does_not_reexport_or_declare_batch_norm3d`（自己テスト `..._detects_each_category`）。反転対象の否定ガードは元から無い（§0 事実 7）。
+- 追加テスト: autodiff の `nn::batch_norm` 単体（初期値・拒否・rank 4／6 の拒否・unbiased running_var）、`module.rs` の state_dict 往復、`create_graph_batch_norm.rs` の rank 5 掃引（#3819 が残した rank 5 二階テスト）。facade は `compat_sequential_layers.rs`（rank 5 の predict／forward bit 一致・rank 4／6 拒否・running stats・学習経路の収集・常駐経路拒否）、`compat_sequential_model_io_batch_norm.rs`・`compat_sequential_model_io_layers.rs`（往復・非信頼 manifest の表駆動）、`model_io.rs` の v1 拒否テスト、`compat_functional_model_io.rs`、`interop_onnx_export_sequential.rs`、実機 `#[ignore]` の `compat_sequential_layers_backend_parity.rs::{cuda,metal}_batch_norm3d_matches_cpu`。
+- GPU カーネル・`Op`・`BackendOps`・依存・`unsafe` は変更なし。tolerance・baseline・ガードレール閾値も不変。実機 parity は未実測（#3860・#3861。`docs/perf/logs/batch-norm-rank5-3819/README.md`）。
+- 設計からの逸脱: backend-cuda／backend-metal クレート直下の rank 5 parity テストは本 PR では足していない（facade の `#[ignore]` テストで代替。#3860・#3861 の実測時に必要なら追加する）。`interop/safetensors.rs` の層数の記述は履歴の注記のため更新していない。

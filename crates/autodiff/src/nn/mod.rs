@@ -291,7 +291,8 @@ pub use attention::{
     StatefulAttention, multihead_attention_forward_low_precision,
 };
 pub use batch_norm::{
-    BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
+    BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNorm3d,
+    BatchNormVars,
 };
 pub use bilinear::{Bilinear, BilinearVars};
 pub use container::{ModuleDict, ModuleList, Sequential, summary};
