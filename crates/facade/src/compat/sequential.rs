@@ -10,7 +10,7 @@
 //! LeakyRelu/Elu/Dropout・Conv2d/Conv1d〈#1770〉・LayerNorm/RmsNorm/
 //! BatchNorm1d/BatchNorm2d/BatchNorm3d/Embedding/MultiheadAttention〈#1760〉・
 //! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
-//! AdaptiveAvgPool1d〈#1957〉・AdaptiveAvgPool3d/AdaptiveMaxPool3d〈#3824〉・
+//! AdaptiveAvgPool1d〈#1957〉・AdaptiveAvgPool3d/AdaptiveMaxPool3d〈#3824〉・FractionalMaxPool2d/FractionalMaxPool3d〈#3827〉・
 //! AdaptiveMaxPool2d/AdaptiveMaxPool1d/
 //! GlobalPool〈#2527〉・Dropout2d/AlphaDropout/EmbeddingBag〈#2528〉・
 //! Mish/Hardtanh/Relu6/Glu/PRelu〈#2529〉・Softmax/LogSoftmax・
@@ -125,14 +125,14 @@ use fandhe_ai_autodiff::nn::{
     BatchNorm3d, BatchNormVars, ChannelShuffle, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d,
     Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars,
     ConvTranspose3d, ConvTranspose3dVars, Dropout, Dropout2d, Embedding, EmbeddingBag,
-    EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, Fold, GlobalPool, GroupNorm,
-    Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear,
-    LocalResponseNorm, MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention,
-    MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm,
-    RmsNormVars, Sequential as NnSequential, Transformer, TransformerConfig,
-    TransformerDecoderLayer, TransformerDecoderLayerVars, TransformerEncoderLayer,
-    TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold, Upsample, ZeroPad2d,
-    conv2d_forward_low_precision, linear_forward_low_precision,
+    EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, Fold, FractionalMaxPool2d,
+    FractionalMaxPool3d, GlobalPool, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS,
+    LayerNorm, LayerNormVars, Linear, LocalResponseNorm, MaxPool1d, MaxPool2d, MaxPool3d, Module,
+    MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
+    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, Transformer,
+    TransformerConfig, TransformerDecoderLayer, TransformerDecoderLayerVars,
+    TransformerEncoderLayer, TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold,
+    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
     multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
@@ -509,6 +509,16 @@ pub(super) enum LayerSpec {
     },
     /// イシュー #3824。kind は `adaptive_max_pool3d`。
     AdaptiveMaxPool3d {
+        output_size: [usize; 3],
+    },
+    /// イシュー #3827。kind は `fractional_max_pool2d`。
+    FractionalMaxPool2d {
+        kernel_size: [usize; 2],
+        output_size: [usize; 2],
+    },
+    /// イシュー #3827。kind は `fractional_max_pool3d`。
+    FractionalMaxPool3d {
+        kernel_size: [usize; 3],
         output_size: [usize; 3],
     },
     /// イシュー #2527。
@@ -2678,6 +2688,71 @@ impl Sequential {
         self.inner.push(Box::new(layer));
         self.specs
             .push(LayerSpec::AdaptiveMaxPool3d { output_size });
+        Ok(self)
+    }
+
+    /// 2 次元 FractionalMaxPool 層を追加する（`nn::FractionalMaxPool2d`。PyTorch
+    /// `nn.FractionalMaxPool2d(kernel_size, output_size=…)` 相当。イシュー #3827・設計 §20）。
+    /// 入力は `NCHW`（rank 4）。バッチなし入力・`output_ratio` は非対応。
+    ///
+    /// - 0 を含む軸は `Err`（構築時）。実行可能性（`out + k - 1 <= in`）は forward 時に `Err`
+    /// - forward ごとにグローバル RNG から標本を引く（`eval()` でも引く）。結果が決定的になるのは
+    ///   [`crate::manual_seed`] の下だけ
+    /// - 層は値だけを返す（索引が要る場合は `Var::fractional_max_pool2d`）
+    /// - 常駐経路は Pooling 層として `Unsupported`（fail-closed）
+    /// - 保存は kind `fractional_max_pool2d`（RNG 状態は保存しない）。ONNX export は `UnsupportedLayer`
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::Tensor;
+    /// // output_size を全軸 1 にすると窓が `in - k` に固定され、乱数に依存しない。
+    /// let x = Tensor::new((0..9).map(|v| v as f32).collect::<Vec<_>>(), &[1, 1, 3, 3]).unwrap();
+    /// let model = Sequential::new().add_fractional_max_pool2d([2, 2], [1, 1]).unwrap();
+    /// let y = model.predict(&x).unwrap();
+    /// assert_eq!(y.shape(), &[1, 1, 1, 1]);
+    /// assert_eq!(y.contiguous().as_slice().unwrap(), &[8.0]);
+    /// assert!(Sequential::new().add_fractional_max_pool2d([0, 2], [1, 1]).is_err());
+    /// ```
+    pub fn add_fractional_max_pool2d(
+        mut self,
+        kernel_size: [usize; 2],
+        output_size: [usize; 2],
+    ) -> Result<Self, AutodiffError> {
+        let layer = FractionalMaxPool2d::new(kernel_size, output_size)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::FractionalMaxPool2d {
+            kernel_size,
+            output_size,
+        });
+        Ok(self)
+    }
+
+    /// 3 次元 FractionalMaxPool 層を追加する（`nn::FractionalMaxPool3d`。PyTorch
+    /// `nn.FractionalMaxPool3d` 相当。イシュー #3827・設計 §20）。入力は `NCDHW`（rank 5）。
+    /// 不正引数・乱数契約・常駐・保存・ONNX の扱いは [`Sequential::add_fractional_max_pool2d`] と同じ
+    /// （kind は `fractional_max_pool3d`）。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::Tensor;
+    /// let x = Tensor::new((0..8).map(|v| v as f32).collect::<Vec<_>>(), &[1, 1, 2, 2, 2]).unwrap();
+    /// let model = Sequential::new().add_fractional_max_pool3d([1, 1, 1], [1, 1, 1]).unwrap();
+    /// let y = model.predict(&x).unwrap();
+    /// assert_eq!(y.shape(), &[1, 1, 1, 1, 1]);
+    /// assert_eq!(y.contiguous().as_slice().unwrap(), &[7.0]);
+    /// assert!(Sequential::new().add_fractional_max_pool3d([1, 1, 1], [1, 0, 1]).is_err());
+    /// ```
+    pub fn add_fractional_max_pool3d(
+        mut self,
+        kernel_size: [usize; 3],
+        output_size: [usize; 3],
+    ) -> Result<Self, AutodiffError> {
+        let layer = FractionalMaxPool3d::new(kernel_size, output_size)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::FractionalMaxPool3d {
+            kernel_size,
+            output_size,
+        });
         Ok(self)
     }
 

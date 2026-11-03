@@ -48121,7 +48121,8 @@ fn facade_declares_adaptive_pool3d_add_names_only_in_approved_form() {
 // 承認形（1 行委譲・宣言位置・facade 非再エクスポート）だけを許す正ガードを新設する。
 // `AdaptiveMaxGlobalPoolHoldDoctestGuard`・`Pool3dOpsHoldDoctestGuard` と固定文言は変更しない。
 // 標本を明示する `*_with_samples` は `pub(crate)` のままで（Q2(a)）、facade へは出さない。
-// `compat::Sequential::add_fractional_max_pool*`・層型は #3827 の担当で、本節では 0 件を固定する。
+// `compat::Sequential::add_fractional_max_pool*` は #3827 で公開済み（末尾の #3827 節が承認形を固定する）。
+// 層型は facade へ再エクスポートしない。
 // BackendOps のメソッド名は `fractional_max_pool{2,3}d_windows` で、ここで数える名前と衝突しない。
 // =====================================================================
 
@@ -48239,7 +48240,7 @@ const FRACTIONAL_MAX_POOL_FN_NAMES: [&str; 6] = [
 
 /// workspace 全体（`crates/*/src/`）の `fn fractional_max_pool*` が承認済みの置き場所
 /// （`autodiff/src/fractional_max_pool_ops.rs` の 4 件・`autodiff/src/var.rs` の 2 件）に各 1 件ずつだけあり、
-/// `fn add_fractional_max_pool*` は 0 件である（#3827 で `facade/src/compat/sequential.rs` へ更新する）。
+/// `fn add_fractional_max_pool*` は `facade/src/compat/sequential.rs` に各 1 件である（#3827 で公開）。
 /// `src/` だけを走査するため、`tests/` のテスト専用 mock は対象外。
 #[test]
 fn workspace_declares_fractional_max_pool_fn_names_only_in_allowed_locations() {
@@ -48286,6 +48287,8 @@ fn workspace_declares_fractional_max_pool_fn_names_only_in_allowed_locations() {
         "autodiff/src/fractional_max_pool_ops.rs::fractional_max_pool3d_with_samples",
         "autodiff/src/var.rs::fractional_max_pool2d",
         "autodiff/src/var.rs::fractional_max_pool3d",
+        "facade/src/compat/sequential.rs::add_fractional_max_pool2d",
+        "facade/src/compat/sequential.rs::add_fractional_max_pool3d",
     ]
     .into_iter()
     .map(|k| (k.to_string(), 1usize))
@@ -48404,4 +48407,326 @@ fn facade_does_not_reexport_or_declare_fractional_max_pool_ops_detects_each_cate
     assert!(offense("enum FractionalMaxPoolWindows {}"));
     assert!(offense("pub mod fractional_max_pool_ops {}"));
     assert!(offense("pub mod fractional_max_pool {}"));
+}
+
+// =====================================================================
+// イシュー #3827（`compat::Sequential::add_fractional_max_pool2d`／`add_fractional_max_pool3d`）:
+// 承認: #3768 の所有者回答 issuecomment-6554564412（設計は `docs/autodiff-pool3d-ops-decision.md` §20.1）。
+// 反転対象の否定ガード・保留 doctest は元から無い（§20.1・§24.4）ため、承認形（シグネチャ・本体の委譲・
+// 宣言位置）だけを許す正ガードを新設する。層型・`*_with_samples` の非再エクスポート
+// （`facade_does_not_reexport_or_declare_fractional_max_pool_ops`）は変更しない。
+// =====================================================================
+
+const ADD_FRACTIONAL_MAX_POOL2D_PARAMS: &str =
+    "mut self, kernel_size: [usize; 2], output_size: [usize; 2], ) -> Result<Self, AutodiffError>";
+const ADD_FRACTIONAL_MAX_POOL3D_PARAMS: &str =
+    "mut self, kernel_size: [usize; 3], output_size: [usize; 3], ) -> Result<Self, AutodiffError>";
+
+/// `add_fractional_max_pool{2,3}d` が各 1 件宣言され、シグネチャが承認形と一致する。
+#[test]
+fn add_fractional_max_pool_signatures_match_approved_contract() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in [
+        (
+            "add_fractional_max_pool2d",
+            ADD_FRACTIONAL_MAX_POOL2D_PARAMS,
+        ),
+        (
+            "add_fractional_max_pool3d",
+            ADD_FRACTIONAL_MAX_POOL3D_PARAMS,
+        ),
+    ] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`add_fractional_max_pool_signatures_match_approved_contract`] の自己テスト。
+#[test]
+fn add_fractional_max_pool_signatures_match_approved_contract_detects_offense() {
+    let name = "add_fractional_max_pool2d";
+    let ok = format!(
+        "pub fn {name}(mut self, kernel_size: [usize; 2], output_size: [usize; 2],) -> Result<Self, AutodiffError> {{"
+    );
+    assert!(sequential_spatial_add_signature_ok(
+        &ok,
+        name,
+        ADD_FRACTIONAL_MAX_POOL2D_PARAMS
+    ));
+    for bad in [
+        // 3 軸
+        format!(
+            "pub fn {name}(mut self, kernel_size: [usize; 3], output_size: [usize; 2],) -> Result<Self, AutodiffError> {{"
+        ),
+        // 戻り値が Self
+        format!(
+            "pub fn {name}(mut self, kernel_size: [usize; 2], output_size: [usize; 2],) -> Self {{"
+        ),
+        // &mut self
+        format!(
+            "pub fn {name}(&mut self, kernel_size: [usize; 2], output_size: [usize; 2],) -> Result<Self, AutodiffError> {{"
+        ),
+        // 引数の追加（seed を受ける形は承認外。乱数はグローバル RNG に限る）
+        format!(
+            "pub fn {name}(mut self, kernel_size: [usize; 2], output_size: [usize; 2], seed: u64,) -> Result<Self, AutodiffError> {{"
+        ),
+        // 引数順の入れ替え
+        format!(
+            "pub fn {name}(mut self, output_size: [usize; 2], kernel_size: [usize; 2],) -> Result<Self, AutodiffError> {{"
+        ),
+        // Option
+        format!(
+            "pub fn {name}(mut self, kernel_size: [usize; 2], output_size: Option<[usize; 2]>,) -> Result<Self, AutodiffError> {{"
+        ),
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(&bad, name, ADD_FRACTIONAL_MAX_POOL2D_PARAMS),
+            "{bad}"
+        );
+    }
+}
+
+/// `pub fn <name>` から次の `pub fn` までの本文を、空白と末尾カンマを除いて返す（コメント・文字列除去済み入力用）。
+fn fractional_add_body_compact(cleaned: &str, name: &str) -> Option<String> {
+    let start = cleaned.find(&format!("pub fn {name}("))?;
+    let rest = &cleaned[start + 1..];
+    let end = rest
+        .find("pub fn ")
+        .map_or(cleaned.len(), |e| start + 1 + e);
+    let compact: String = cleaned[start..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    Some(compact.replace(",}", "}").replace(",)", ")"))
+}
+
+/// 本文が承認形（承認層の `new(kernel_size, output_size)?` の構築と対応する `LayerSpec` の記録）か。
+fn add_fractional_max_pool_bodies_ok(cleaned: &str) -> bool {
+    [("2d", "2"), ("3d", "3")].into_iter().all(|(sfx, dim)| {
+        let name = format!("add_fractional_max_pool{sfx}");
+        let layer = format!("FractionalMaxPool{dim}d");
+        let Some(body) = fractional_add_body_compact(cleaned, &name) else {
+            return false;
+        };
+        body.contains(&format!("letlayer={layer}::new(kernel_size,output_size)?;"))
+            && body.contains("self.inner.push(Box::new(layer));")
+            && body.contains(&format!(
+                "self.specs.push(LayerSpec::{layer}{{kernel_size,output_size}});"
+            ))
+    })
+}
+
+/// `add_fractional_max_pool{2,3}d` の本体が承認層の構築と `LayerSpec` 記録になっている（すり替え検出）。
+#[test]
+fn add_fractional_max_pool_bodies_construct_approved_layer() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    assert!(
+        add_fractional_max_pool_bodies_ok(&cleaned),
+        "add_fractional_max_pool{{2,3}}d の本体が承認形と一致しない"
+    );
+}
+
+/// [`add_fractional_max_pool_bodies_construct_approved_layer`] の自己テスト。
+#[test]
+fn add_fractional_max_pool_bodies_construct_approved_layer_detects_offense() {
+    let body = |sfx: &str, layer2: &str, layer3: &str, args: &str, spec2: &str, spec3: &str| {
+        format!(
+            "pub fn add_fractional_max_pool2d(mut self, k: [usize; 2], o: [usize; 2]) -> R {{ \
+             let layer = {layer2}::new({args})?; self.inner.push(Box::new(layer)); \
+             self.specs.push(LayerSpec::{spec2} {{ kernel_size, output_size, }}); Ok(self) }} \
+             pub fn add_fractional_max_pool3d(mut self, k: [usize; 3], o: [usize; 3]) -> R {{ \
+             let layer = {layer3}::new({args})?; self.inner.push(Box::new(layer)); \
+             self.specs.push(LayerSpec::{spec3} {{ kernel_size, output_size, }}); Ok(self) }}{sfx}"
+        )
+    };
+    let ok = body(
+        "",
+        "FractionalMaxPool2d",
+        "FractionalMaxPool3d",
+        "kernel_size, output_size",
+        "FractionalMaxPool2d",
+        "FractionalMaxPool3d",
+    );
+    assert!(add_fractional_max_pool_bodies_ok(&ok));
+    for bad in [
+        // 別の層へのすり替え
+        body(
+            "",
+            "MaxPool2d",
+            "FractionalMaxPool3d",
+            "kernel_size, output_size",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+        ),
+        body(
+            "",
+            "AdaptiveMaxPool2d",
+            "FractionalMaxPool3d",
+            "kernel_size, output_size",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+        ),
+        // 2d と 3d の取り違え
+        body(
+            "",
+            "FractionalMaxPool3d",
+            "FractionalMaxPool2d",
+            "kernel_size, output_size",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+        ),
+        // 引数順の入れ替え・固定値
+        body(
+            "",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+            "output_size, kernel_size",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+        ),
+        body(
+            "",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+            "[1, 1], [1, 1]",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+        ),
+        // LayerSpec の取り違え
+        body(
+            "",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+            "kernel_size, output_size",
+            "AdaptiveMaxPool2d",
+            "FractionalMaxPool3d",
+        ),
+        body(
+            "",
+            "FractionalMaxPool2d",
+            "FractionalMaxPool3d",
+            "kernel_size, output_size",
+            "FractionalMaxPool3d",
+            "FractionalMaxPool2d",
+        ),
+    ] {
+        assert!(!add_fractional_max_pool_bodies_ok(&bad), "{bad}");
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_fractional_max_pool{2,3}d(` がそれぞれちょうど 1 件。
+#[test]
+fn compat_sequential_exposes_fractional_max_pool_add_methods_issue_3827() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let (mut n2, mut n3) = (0usize, 0usize);
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        n2 += count_pub_fn_declarations(content, "add_fractional_max_pool2d");
+        n3 += count_pub_fn_declarations(content, "add_fractional_max_pool3d");
+    });
+    assert_eq!(
+        (n2, n3),
+        (1, 1),
+        "add_fractional_max_pool{{2,3}}d の pub fn 宣言数が各 1 件でない"
+    );
+}
+
+/// [`compat_sequential_exposes_fractional_max_pool_add_methods_issue_3827`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_fractional_max_pool_add_methods_issue_3827_counts_declarations() {
+    let one = "    pub fn add_fractional_max_pool2d(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(
+        count_pub_fn_declarations("", "add_fractional_max_pool2d"),
+        0
+    );
+    assert_eq!(
+        count_pub_fn_declarations(one, "add_fractional_max_pool2d"),
+        1
+    );
+    assert_eq!(
+        count_pub_fn_declarations(one, "add_fractional_max_pool3d"),
+        0
+    );
+    let dup = format!("{one}{one}");
+    assert_eq!(
+        count_pub_fn_declarations(&dup, "add_fractional_max_pool2d"),
+        2
+    );
+    let commented = "// pub fn add_fractional_max_pool2d(mut self) -> Self {}\n";
+    assert_eq!(
+        count_pub_fn_declarations(commented, "add_fractional_max_pool2d"),
+        0
+    );
+}
+
+/// facade src 全体で `fn add_fractional_max_pool{2,3}d` が `compat/sequential.rs` に 1 件、他ファイルに 0 件。
+#[test]
+fn facade_declares_fractional_max_pool_add_names_only_in_approved_form() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let allowed = usize::from(path.ends_with("compat/sequential.rs"));
+        for fn_name in ["add_fractional_max_pool2d", "add_fractional_max_pool3d"] {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count != allowed {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件（許容 {allowed} 件）",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "FractionalMaxPool の add_* が承認形から逸脱: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::compat::Sequential`・`Tensor` だけで届き、窓が標本によらず決まる形状（`out` 全軸 1）で
+/// 手計算した値を返し、0 軸と実行不能な形状は `Err` になる。
+#[test]
+fn compat_sequential_fractional_max_pool_is_reachable_via_facade_only() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::compat::Sequential;
+    let x = Tensor::new((0..9).map(|v| v as f32).collect::<Vec<_>>(), &[1, 1, 3, 3]).unwrap();
+    let model = Sequential::new()
+        .add_fractional_max_pool2d([2, 2], [1, 1])
+        .unwrap();
+    let y = model.predict(&x).unwrap();
+    assert_eq!(y.shape(), &[1, 1, 1, 1]);
+    assert_eq!(y.contiguous().as_slice().unwrap(), &[8.0]);
+    let x3 = Tensor::new(
+        (0..27).map(|v| v as f32).collect::<Vec<_>>(),
+        &[1, 1, 3, 3, 3],
+    )
+    .unwrap();
+    let model3 = Sequential::new()
+        .add_fractional_max_pool3d([2, 2, 2], [1, 1, 1])
+        .unwrap();
+    let y3 = model3.predict(&x3).unwrap();
+    assert_eq!(y3.contiguous().as_slice().unwrap(), &[26.0]);
+    assert!(
+        Sequential::new()
+            .add_fractional_max_pool2d([0, 2], [1, 1])
+            .is_err()
+    );
+    assert!(
+        Sequential::new()
+            .add_fractional_max_pool3d([1, 1, 1], [1, 0, 1])
+            .is_err()
+    );
+    // 実行不能（out + k - 1 > in）は forward 時に Err。
+    let too_big = Sequential::new()
+        .add_fractional_max_pool2d([2, 2], [3, 3])
+        .unwrap();
+    assert!(too_big.predict(&x).is_err());
 }

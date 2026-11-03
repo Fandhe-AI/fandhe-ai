@@ -7,6 +7,10 @@
 
 mod common;
 
+// 同一バイナリ化のため FractionalMaxPool の検証を子モジュールとして同居させる（CI のリンク量削減）。
+#[path = "nn_adaptive_pooling3d/fractional_max_pooling.rs"]
+mod fractional_max_pooling;
+
 use fandhe_ai_autodiff::nn::{AdaptiveAvgPool3d, AdaptiveMaxPool3d, Module};
 use fandhe_ai_autodiff::{AutodiffError, Tape, Var};
 use fandhe_ai_tensor_core::{BackendError, ShapeError, Tensor};
