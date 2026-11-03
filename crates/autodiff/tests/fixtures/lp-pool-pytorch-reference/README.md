@@ -1,6 +1,6 @@
 # LPPool（lp_pool1d・lp_pool2d・lp_pool3d）PyTorch 参照値フィクスチャの出自
 
-イシュー #3825 の `tests/lp_pool_parity.rs` が参照する固定フィクスチャ。
+イシュー #3825 の `tests/lp_pool.rs` の `parity` モジュール が参照する固定フィクスチャ。
 `adaptive-pool3d-pytorch-reference/README.md` と同じ方針で、生成条件・sha256 を記録した状態で JSON を
 コミットする。CI は Python／PyTorch に依存せず、コミット済み JSON のみを読む（`.claude/rules/ci.md`）。
 

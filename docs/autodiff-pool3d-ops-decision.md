@@ -458,7 +458,7 @@ impl<'t> Var<'t> {
 
 | 区分 | テスト（置き場の案） | 内容 |
 |------|------------------|------|
-| CI | `crates/autodiff/tests/lp_pool_ops.rs` | 閉形式（`p=1` は窓和、`p=2` は二乗和の平方根）・非整数 `p` で負の入力は NaN・全零窓の勾配が 0（NaN でない）・中心差分の勾配・拒否系（`norm_type`・`ceil_mode`・rank・`kernel_size` 0）・孤児ノード無し・決定性 |
+| CI | `crates/autodiff/tests/lp_pool.rs（`ops` モジュール）` | 閉形式（`p=1` は窓和、`p=2` は二乗和の平方根）・非整数 `p` で負の入力は NaN・全零窓の勾配が 0（NaN でない）・中心差分の勾配・拒否系（`norm_type`・`ceil_mode`・rank・`kernel_size` 0）・孤児ノード無し・決定性 |
 | CI | PyTorch 2.14.0 の fixture 突合（案: `crates/autodiff/tests/fixtures/lp-pool-pytorch-reference/`） | 1d／2d／3d、`p ∈ {1, 2, 3, 1.5}`、全零窓の勾配。fixture を作って実行するまでは「未実測」 |
 | CI | `crates/facade/tests/lp_pool_ops_backend_parity.rs::cpu_matches_naive_reference` | CPU と Naive の bit 一致 |
 | CI | `crates/facade/tests/compat_sequential_lp_pool.rs` | 層経路（`Var` 直呼びとの bit 一致・不正引数の拒否・常駐経路の fail-closed） |
@@ -805,7 +805,7 @@ kind `adaptive_avg_pool3d`・`adaptive_max_pool3d`、`params` は `output_size_d
 
 ### 23.5 テスト
 
-- autodiff: `lp_pool_ops.rs` の単体テスト、`tests/lp_pool_ops.rs`（閉形式〈p=1 は窓和、p=2 は二乗和の平方根、3d・stride〉、中心差分の勾配、全零窓の勾配が厳密に 0、`0 < p < 1` かつ窓内に 0 の勾配が非有限になる記録、拒否系と孤児ノード無し、決定性、`create_graph` が型付きエラー）、`tests/lp_pool_parity.rs`（PyTorch fixture との突合）。
+- autodiff: `lp_pool_ops.rs` の単体テスト、`tests/lp_pool.rs` の `ops` モジュール（閉形式〈p=1 は窓和、p=2 は二乗和の平方根、3d・stride〉、中心差分の勾配、全零窓の勾配が厳密に 0、`0 < p < 1` かつ窓内に 0 の勾配が非有限になる記録、拒否系と孤児ノード無し、決定性、`create_graph` が型付きエラー）、`tests/lp_pool_parity.rs`（PyTorch fixture との突合）。
 - facade: `tests/lp_pool_ops_backend_parity.rs`（CPU tape と `NaiveOps` tape を REQ-2 統一複合判定で突合。`#[ignore]` の `cuda_*`／`metal_*`）、`tests/compat_sequential_lp_pool.rs`（層経路が `Var` と bit 一致、`predict`／`fit`、不正引数の即時拒否、save→load 往復の bit 一致、manifest 改竄の拒否、ONNX export が `UnsupportedLayer`）、`tests/compat_sequential_lp_pool_backend_parity.rs`（`#[ignore]`）、model_io の単体テスト（78 kind の往復、非信頼 JSON の拒否 fixture、拒否 spec）。
 
 ### 23.6 PyTorch 2.14.0 との突合

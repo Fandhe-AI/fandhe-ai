@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """lp_pool1d／lp_pool2d／lp_pool3d の PyTorch 参照値を生成する。
 
-イシュー #3825 の `tests/lp_pool_parity.rs` が参照する固定フィクスチャ
+イシュー #3825 の `tests/lp_pool.rs` の `parity` モジュール が参照する固定フィクスチャ
 `lp_pool_reference.json` の生成スクリプト。CI は Python／PyTorch に依存せず、コミット済み JSON のみを
 読む（`README.md` 参照。`adaptive-pool3d-pytorch-reference` と同方針）。
 
