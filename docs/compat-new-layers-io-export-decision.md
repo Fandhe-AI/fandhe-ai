@@ -15,6 +15,7 @@
 
 - 流れ: 設計 #3750 → 承認 #3768（論点 4）→ 各層の実装 issue（#3814・#3817・#3819／#3820・#3822・#3823〜#3827）。
 - **承認根拠: なし。未承認（#3768 待ち）。** 本書は何も承認しない。
+- 追記（#3828）: #3768 の所有者の回答（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）で論点 4 を承認済み。決まったこと: model_io は全層に kind を足す（`format_version` は 2 のまま）、f64 は案 (i)、v1 で拒否するのは buffer を持つ kind だけ、ONNX export は 0.14.0 に含めず `UnsupportedLayer` のまま、旧リーダーが新しい kind を拒否すること（前方互換なし）は移行ノートに書く。
 - 書式は `docs/decision-record-template.md`（#3716）の必須 9 節（§1〜§9）に従い、横断規則を §10〜§12、所有者へ戻す論点を §13、周辺項目を §14 に置く。
 - **設計のみ**で、コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は変えない。行番号は origin/main の `969095335` を基準にする。実装 PR の前に引き直すこと。実機は `<cuda-node>`・`<metal-node>`・`<rocm-node>` で表す。
 - 境界: Bilinear（# 10。`Sequential` に載らない）と CosineSimilarity・PairwiseDistance（# 12・13。2 入力）は `Sequential` の保存の対象外で、本書では扱わない。FractionalMaxPool（#3749）は設計記録がまだ無いため、規則だけを適用し kind 名・スキーマは決めない。
@@ -83,7 +84,7 @@ model_io と export はホストで実行し、数値経路に依存しない。
 ## §7 適用記録・索引・追跡表
 
 - 適用記録の文案（書くのは実装 PR）: `**適用記録（イシュー #N・親 #P。承認: <#3768 回答 URL>）**: kind <x> を追加（format_version 2 据え置き）。ONNX export は UnsupportedLayer のまま。公開状態: 公開済み`
-- [ ] `docs/compat-api-scope.md` に適用記録を追記した（実装 PR の担当。本 PR では未実施）
+- [x] `docs/compat-api-scope.md` に適用記録を追記した（#3828。各層の分は #3814 ほか各 PR が先に追記済み）
 - [x] `docs/README.md` の索引を更新した
 - [x] 追跡表の # 7・9・11・14・15 の「設計記録」列へ本書を足した（イシューが 5 行を指定する横断 issue のため、追跡表 §4.6 の「1 PR は自分の行だけ」の例外にあたる。「承認」「0.14.0 の区分」は変えない）
 
@@ -132,7 +133,7 @@ model_io と export はホストで実行し、数値経路に依存しない。
 | ChannelShuffle | `channel_shuffle` | `groups` | 0 |
 | AdaptiveAvg／MaxPool3d | `adaptive_avg_pool3d`／`adaptive_max_pool3d` | `output_size_{d,h,w}` | 0 |
 | LPPool | `lp_pool1d`／`lp_pool2d`／`lp_pool3d` | `norm_type`（f32）・`kernel_size*`・`stride*`（`null` 対可） | 0 |
-| FractionalMaxPool | （#3749 確定後に記入） | （同） | （同） |
+| FractionalMaxPool | `fractional_max_pool2d`／`fractional_max_pool3d` | `kernel_size_{h,w}`／`kernel_size_{d,h,w}`・`output_size_*`（RNG 状態は保存しない。R7） | 0 |
 
 - 増える数の見込みは +12（FractionalMaxPool を除く）。目安にとどめ、到達数は R9 で確定する。
 
@@ -153,3 +154,38 @@ model_io と export はホストで実行し、数値経路に依存しない。
 - A06: 依存の追加なし。秘密情報・実機のホスト名を書かない。
 - スコープ外（新しい issue は起票せず、所有者の承認事項として列挙するだけ）: ONNX export の新しい op（Shrink・LpPool・Resize・ChannelShuffle の分解）、BN1d／2d・Upsample(size) の export、`as_*` フックの追加、FractionalMaxPool の具体スキーマ（#3749）。
 - `Closes`／`Refs`: 完了条件が設計記録の作成で実測を要しないため `Closes #3750` とする。
+
+## §15 実装記録（イシュー #3828）
+
+基準 sha `362ab06c4`（行番号はこの時点。以降は引き直す）。コードの大半は各層の実装 PR（#3814・#3817・#3820・#3822・#3824・#3825・#3827）が先に入れ終えており、#3828 は横断の確認と、残っていた「0.13.0 で保存したファイルを読む互換テスト」・正ガード・docs の集約だけを行った。ランタイムコード（forward・save・load）は変えていない。
+
+### 確定した kind
+
+| 層 | kind | `params` | 期待 buffer | `spec_kind`（`crates/facade/src/compat/model_io.rs`） |
+|---|---|---|---|---|
+| upsample（倍率） | `upsample_scale_factor` | `mode`・`align_corners`・`scale_len`・`scale_0..2`（f64。R6 案 (i)。`as_f64` は #3814） | 0 | :400 |
+| Hardshrink／Softshrink | `hardshrink`／`softshrink` | `lambd` | 0 | :349・:350 |
+| BatchNorm3d | `batch_norm3d` | `num_features`・`eps`・`momentum` | `running_mean`・`running_var`（v1 では拒否。R5） | :373 |
+| ChannelShuffle | `channel_shuffle` | `groups` | 0 | :408 |
+| AdaptiveAvg／MaxPool3d | `adaptive_avg_pool3d`／`adaptive_max_pool3d` | `output_size_{d,h,w}` | 0 | :394・:395 |
+| LPPool | `lp_pool1d`／`2d`／`3d` | `norm_type`・`kernel_size*`・`stride*`（`null` 可） | 0 | :405〜:407 |
+| FractionalMaxPool | `fractional_max_pool2d`／`3d` | `kernel_size*`・`output_size*` | 0 | :396・:397 |
+
+- 到達 kind 数は 70 → 82（+12。R9）。
+- R5 は BN3d に限る（buffer を持たない kind は v1 でも受理）。
+- ONNX export は全層 `UnsupportedLayer`。固定するテストは `crates/facade/tests/compat_sequential_model_io_new_layers.rs` の `twelve_new_layers_save_load_and_reject_onnx_export`（12 層を 1 か所で）。層別のテストは `interop_onnx_export_sequential.rs`・`compat_sequential_channel_shuffle.rs`・`compat_sequential_lp_pool.rs` が持つ。
+
+### #3828 で足したもの
+
+- 0.13.0 互換: `tests/fixtures/model-io-0.13.0/`（0.13.0 の `save_model` の実出力 2 ケース。生成手順と sha256 は同 README）と `tests/compat_sequential_model_io_compat_0_13_0.rs`。現行リーダーが読めること、パラメータが bit 一致すること、現行ライターで保存し直すと（世代名を除き）バイト一致すること＝既存 kind のスキーマが不変であること（R3）、欠損ファイルを拒否することを確かめる。
+- 横断テスト: `tests/compat_sequential_model_io_new_layers.rs`（12 kind の保存・読込・保存し直し一致・export 拒否・v1 の扱い）。
+- 正ガード: `tests/api_surface.rs` 末尾の #3828 節。`model_io_new_layer_kinds_match_approved_mapping_issue_3828`・`onnx_export_has_no_arm_for_new_layers_issue_3828`・自己テスト `new_layer_guards_issue_3828_detect_swaps`（kind の改名・variant のすり替え・欠落・export の腕の追加を検出）。
+- 反転対象の否定ガード・保留 doctest ガードは無い（§1。新しい kind と model_io／export に関するものは `api_surface.rs`・`lib.rs` に 0 件）。
+
+### 点検で確かめたこと
+
+12 kind すべてが `spec_kind`・`spec_from_kind` に在り、各層のテスト（`compat_sequential_model_io_layers.rs`・`..._batch_norm.rs`・`compat_sequential_channel_shuffle.rs`・`compat_sequential_lp_pool.rs`）が往復 bit 一致と非信頼 manifest の拒否を持つ。functional（R10）への適用は、shrink・channel_shuffle・lp_pool の往復を `compat_functional_model_io.rs` に足していない（設計 §4 の要求は 1 件。既存の層の往復で R10 の経路は実証済みのため、追加は本 PR の範囲に含めず後続の余地とする）。
+
+### 逸脱
+
+なし（設計どおり。得ていない承認は書いていない）。実機 parity は Phase 10（#3860・#3861）の担当で未実測のまま。
