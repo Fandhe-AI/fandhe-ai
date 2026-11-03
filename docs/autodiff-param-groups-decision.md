@@ -613,7 +613,7 @@ bit 不変で他が更新されることを固定する（§9.2 項目 4: スロ
 - 公開状態: 未公開。
 - [x] `docs/README.md` の索引を更新した
 - [x] 追跡表を更新した
-- [ ] `docs/compat-api-scope.md` の適用記録（実装 PR が行う）
+- [x] `docs/compat-api-scope.md` の適用記録（#3832 の実装 PR が書いた。§14.12）
 
 ### 14.8 ベンチと性能への影響
 
@@ -636,6 +636,18 @@ bit 不変で他が更新されることを固定する（§9.2 項目 4: スロ
 
 - A03: 外部入力の新しいパースは無く、検証順は状態を変える前に拒否する既存の形を保つ。A08: 閾値・tolerance・baseline は変えない。
 - スコープ外: A3-b（#3754）、A3-c（#3755）、A3-d（#3756）、A3-e（Lbfgs）、`Optimizer` に無い 4 種（#3757）。新しい issue は起票しない。#3832 は実装と完了条件の確認が済むまで `Refs` を使う。
+
+### 14.12 実装記録（イシュー #3832）
+
+- 承認: #3769 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 2。新メソッド `compile_with_amp_and_param_groups`・skip は group 一括・検証は現行どおり step 時・他の拒否は維持（§14.10 の 1〜4）。
+- 変えた箇所: `crates/facade/src/compat/training.rs` に `Sequential::compile_with_amp_and_param_groups(optimizer, loss, amp, param_groups)` を追加した（`compile_with_amp` の直後）。処理は `Lbfgs` の拒否（groups の空・非空によらない）→ `OptimizerState::new` → `GradScaler::new` → `Compiled` を 1 回で代入、の順（construct-before-assign）。`run_fit` と検査 (1.5)〜(2.06)・`snapshot_of_compiled` は変えていない。AMP の fit 経路は元から `step_dispatch(.., &compiled.param_groups)` を通っていたため、足りなかったのは入口だけだった。`compile_with_amp` 本体は共通 helper へ切り出さず、文言と挙動の bit 同一性を保った。
+- ガードの対応（§14.1 のとおり、A3-a を止める否定ガード・保留 doctest ガードは元から無い。そのため「反転」ではなく「正ガードの在庫への追加」）: 旧 = なし → 新 = `crates/facade/tests/api_surface.rs` の `scan_param_groups_reexports_and_declarations`・`PARAM_GROUPS_APPROVED_KEYS`（3 → 4 鍵）・`facade_param_groups_public_surface_guards_detect_each_category`（別ファイル・`impl Sequential` 外・二重宣言の検出、許可の正例、在庫の欠落・二重化）・`param_groups_types_are_reachable_via_facade_only`（シグネチャ束縛）・`param_groups_usage_doctests_are_present_and_compiled`（doctest プローブ）・`workspace_declares_param_group_fn_names_only_in_allowed_locations`（期待集合に 1 件追加）。新メソッド追加後にガード編集前の `api_surface` は全件通っており、`compat::Sequential` の pub メソッド全集合を固定するガードは無かった。
+- テスト: `crates/facade/tests/compat_sequential_fit_amp_param_groups.rs`（12 件）。空 groups・全スロット 1 group が `compile_with_amp` と bit 一致、空でない groups が手書きの `GradScaler` + `step_with_groups` ループと bit 一致（F16・Bf16）、skip が全 group 一括で `step_count` を進めないこと（AdamW の bias 補正が手書きループと bit 一致することで示す）、凍結 group が bit 不変、不正な hparams が最初の非 skip step で `InvalidArgument`（skip 済みの `scaler.update(true)` は残る）、範囲外スロットは fit の入口で拒否、compile の拒否が直前の状態を残すこと、`accumulate_steps > 1`・カスタム step・SWA・`LrSchedule`・`save_model` の拒否、EMA 併用の受理。判定は bit 一致のみで tolerance は新設していない。
+- 変異確認（手元のみ・確認後に戻した）: `impl Sequential` 外（別の型の impl）への同名 `fn` の追加で `facade_param_groups_public_surface_matches_approved_contract` が失敗することを確認した。同一 impl 内の二重宣言はコンパイラ自身が E0592 で拒否する。二重宣言・別ファイル・外部 impl の検出は `facade_param_groups_public_surface_guards_detect_each_category` の自己テストが文字列入力で踏む。
+- 制約の扱い: 着手時の base（`3acbc225f`）に #3834（`LrSchedule` 併用）・#3835（保存）は未マージで、doc とテスト 9 は「groups 非空では `LrSchedule`・`save_model` は拒否」を現行契約として固定した。両 issue が先にマージされた場合はそちらの契約に合わせて更新する。
+- §14 からの逸脱: なし。
+- 不変事項: 依存の追加・更新、`unsafe`、tolerance・baseline・ガードレール閾値、`docs/spec` はいずれも変えていない。GPU カーネル・`Op`・`BackendOps` も変えないため実機列は該当なし。ベンチの前後比較は不要（既定経路を変えない）。
+- 公開状態: 公開（追跡表の行 19）。
 
 ## §15 保守・運用チェックリスト（イシュー #3754）: param groups と `LrSchedule` の併用（A3-b）
 

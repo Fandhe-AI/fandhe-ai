@@ -375,6 +375,8 @@
 //! - [`crate::compat::Sequential::compile_with_param_groups`]（`compile()` 経路）で
 //!   使えるのは `Optimizer` enum にある 6 種（`Lbfgs` は拒否）。それ以外の種は
 //!   手動ループで `step_with_groups` を呼ぶ。
+//! - AMP と併用するときは [`crate::compat::Sequential::compile_with_amp_and_param_groups`]
+//!   （イシュー #3832）。非有限勾配による skip の判定は全 group 共通で、全 group の更新を一括で飛ばす。
 //! - `set_lr` は既定グループ（グループ外スロット）にだけ効く。
 //! - glob import（`use fandhe_ai::optim::*;`）の利用者が同名の型を自前で定義して
 //!   いると衝突しうる。

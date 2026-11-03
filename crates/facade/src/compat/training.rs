@@ -1930,7 +1930,8 @@ impl Sequential {
     /// # 制約
     ///
     /// - `Optimizer::Lbfgs` と空でない groups は併用できない。
-    /// - AMP 併用の API はない（`compile_with_amp` は groups を持たない）。
+    /// - AMP と併用するときは [`Self::compile_with_amp_and_param_groups`] を使う
+    ///   （本メソッドは AMP なし）。
     /// - groups が空でないとき `Callback::LrSchedule` は [`Self::fit`] 系で拒否する
     ///   （`History::lr` の意味は従来どおり optimizer の config の学習率）。
     /// - groups が空でない compile 状態は `save_model` で保存できない。
@@ -2043,7 +2044,8 @@ impl Sequential {
     /// [`Self::predict`][crate::compat::Sequential::predict] は f32 の
     /// ままで AMP の対象外（2h 粒度のスコープ外。実装計画 §8）。
     ///
-    /// 再度 [`Self::compile`]／[`Self::compile_with_amp`] を呼ぶと
+    /// 再度 [`Self::compile`]／[`Self::compile_with_amp`]／
+    /// [`Self::compile_with_amp_and_param_groups`] を呼ぶと
     /// optimizer 状態と同様に AMP 状態（`GradScaler` のスケール値・
     /// backoff 履歴）も破棄される（`Self::compile` doc の再 compile
     /// 契約と同じ）。
@@ -2095,6 +2097,122 @@ impl Sequential {
                 scaler,
             }),
             param_groups: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// [`Self::compile_with_amp`] と param groups の併用版（イシュー #3832・設計
+    /// #3752。形は `docs/autodiff-param-groups-decision.md` §14、承認は #3769 の
+    /// 所有者の回答コメント〈issuecomment-6554564758〉）。層別の学習率・weight
+    /// decay を AMP の 1 step（scale → backward → unscale → step）へ適用する。
+    ///
+    /// groups が空（`&[]`）なら [`Self::compile_with_amp`] と bit 一致する。
+    ///
+    /// # skip は全 group 一括
+    ///
+    /// 非有限勾配の検出（`should_skip_step`）は全パラメータに対して 1 回だけ判定する。
+    /// 1 つでも非有限があれば**全 group とグループ外スロット**の更新と optimizer の
+    /// `step_count` の前進を飛ばし、`scaler.update(true)` を 1 回だけ呼ぶ
+    /// （scaler の backoff の意味を保つため group ごとの skip にはしない）。
+    ///
+    /// # スロット添字
+    ///
+    /// [`Self::compile_with_param_groups`] と同じ（[`Self::trainable_parameters`] の位置。
+    /// グループ外のスロットは optimizer の config を使う）。
+    ///
+    /// # 検証の時点
+    ///
+    /// compile 時は groups の中身を検証しない。[`Self::fit`] 系の入口で範囲外の
+    /// 添字を拒否し、step 時に空 `params`・重複・非有限・負値を拒否する。skip した
+    /// step では `step_dispatch` を呼ばないため、groups の中身の不正は最初の skip
+    /// しない step で `Err` になる（その前の `scaler.update(true)` は残る）。
+    ///
+    /// # 制約
+    ///
+    /// - `Optimizer::Lbfgs` は groups の空・非空にかかわらず拒否する（#2172）。
+    /// - `Callback::LrSchedule`・`save_model`・`accumulate_steps > 1`・
+    ///   [`Self::fit_with_train_step`]・`Callback::Swa` は従来どおり拒否される。
+    /// - 再 compile は AMP 状態と groups の両方を置き換える。
+    ///
+    /// # Errors
+    ///
+    /// `Lbfgs`、optimizer／`amp.grad_scaler` の検証違反で `InvalidArgument`。
+    /// 失敗時は `self.compiled` を変更しない（construct-before-assign）。
+    ///
+    /// # Examples
+    ///
+    /// 1 層目を `lr = 0`・`weight_decay = 0` のグループで凍結して AMP で学習する。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::{AmpConfig, AmpDType, FitConfig, Loss, Optimizer, Sequential};
+    /// use fandhe_ai::optim::{ParamGroup, SgdConfig};
+    ///
+    /// let mut model = Sequential::new()
+    ///     .add_linear(2, 3, 1)
+    ///     .unwrap()
+    ///     .add_relu()
+    ///     .add_linear(3, 1, 2)
+    ///     .unwrap();
+    /// let first_layer: Vec<usize> = model
+    ///     .named_parameters()
+    ///     .iter()
+    ///     .enumerate()
+    ///     .filter_map(|(i, (name, _))| name.starts_with("0.").then_some(i))
+    ///     .collect();
+    /// let frozen = ParamGroup::new(first_layer.clone(), 0.0, 0.0);
+    /// model
+    ///     .compile_with_amp_and_param_groups(
+    ///         Optimizer::Sgd(SgdConfig::new(0.1)),
+    ///         Loss::Mse,
+    ///         AmpConfig::new(AmpDType::F16),
+    ///         &[frozen],
+    ///     )
+    ///     .unwrap();
+    ///
+    /// let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3, 2]).unwrap();
+    /// let y = Tensor::new(vec![0.0f32, 1.0, 0.5], &[3, 1]).unwrap();
+    /// let before: Vec<Vec<f32>> = model
+    ///     .trainable_parameters()
+    ///     .iter()
+    ///     .map(|t| t.as_slice().unwrap().to_vec())
+    ///     .collect();
+    /// model.fit(&x, &y, FitConfig::new(2, 3)).unwrap();
+    /// let after = model.trainable_parameters();
+    /// for &i in &first_layer {
+    ///     assert_eq!(after[i].as_slice().unwrap(), before[i].as_slice());
+    /// }
+    /// ```
+    pub fn compile_with_amp_and_param_groups(
+        &mut self,
+        optimizer: Optimizer,
+        loss: Loss,
+        amp: AmpConfig,
+        param_groups: &[ParamGroup],
+    ) -> Result<(), AutodiffError> {
+        // AMP 側の規則（#2172）: groups の空・非空にかかわらず Lbfgs を拒否する。
+        if matches!(optimizer, Optimizer::Lbfgs(_)) {
+            return Err(AutodiffError::InvalidArgument(
+                "Sequential::compile_with_amp_and_param_groups: Optimizer::Lbfgs は AMP \
+                 （損失スケーリング）と併用できない（イシュー #2172。closure 駆動の \
+                 outer step 内で forward／backward を複数回評価するため scale／unscale の \
+                 適用箇所が定義できない）"
+                    .to_string(),
+            ));
+        }
+        // construct-before-assign: 全構築成功後に 1 回だけ代入する。
+        let optimizer_state = OptimizerState::new(optimizer)?;
+        let scaler = GradScaler::new(amp.grad_scaler)?;
+        self.compiled = Some(Compiled {
+            optimizer: optimizer_state,
+            loss,
+            amp: Some(AmpState {
+                dtype: amp.compute_dtype.to_scalar_dtype(),
+                amp_dtype: amp.compute_dtype,
+                grad_scaler_config: amp.grad_scaler,
+                scaler,
+            }),
+            param_groups: param_groups.to_vec(),
         });
         Ok(())
     }
