@@ -1664,6 +1664,13 @@ pub(crate) enum Op {
     /// 非融合対象（`push_eager` で常に実体化）。`create_graph` は #3085 で対応
     /// （V3。決定記録 §29）。
     AdaptiveAvgPool2d { input: NodeId },
+    /// 3D adaptive average pooling（`torch.nn.functional.adaptive_avg_pool3d` 相当。NCDHW 固定。
+    /// イシュー #3823・`docs/autodiff-pool3d-ops-decision.md` §18・§21）。
+    /// `crate::adaptive_pool3d_ops::adaptive_avg_pool3d` からのみ積まれる（`Op` 自体は非公開）。
+    /// 出力サイズはノード shape から導出できるため保持しない（`AdaptiveAvgPool2d` と同型）。
+    /// adaptive max 3d は索引を保持する既存の `Op::MaxPool3d` を再利用するため新 `Op` は無い。
+    /// 非融合（`push_eager` で常に実体化）。`create_graph` は V3（決定記録 §21）。
+    AdaptiveAvgPool3d { input: NodeId },
     /// ユーザー定義 forward／backward プラグイン（案 B。イシュー #1946・
     /// `docs/autodiff-custom-function-decision.md` §12.4）。`inputs` の
     /// 順序が [`crate::custom::CustomFunction::forward`]／`backward` に
@@ -2196,6 +2203,8 @@ impl Op {
             // 経路を持たないため解放しない（非網羅 match 是正で新規
             // variant 追加時に強制される）。
             Op::MaxPool2d { .. } | Op::AvgPool2d { .. } | Op::AdaptiveAvgPool2d { .. } => false,
+            // `Op::AdaptiveAvgPool3d`（イシュー #3823）も eager 実体化演算で再計算経路を持たない。
+            Op::AdaptiveAvgPool3d { .. } => false,
             // `Op::Custom`（イシュー #1946）はユーザー実装の
             // `forward`／`backward` を host 上で実行する。checkpoint
             // 解放後の再計算は同じユーザー `forward` をもう一度呼ぶ
@@ -2302,6 +2311,7 @@ impl Op {
             | Op::LocalResponseNorm { input, .. }
             | Op::SpectralNorm { weight: input, .. }
             | Op::AvgPool3d { input, .. }
+            | Op::AdaptiveAvgPool3d { input }
             | Op::PadMode { input, .. }
             | Op::OrderSelect { input, .. }
             | Op::MedianAll { input }
@@ -2676,6 +2686,7 @@ impl Op {
             | Op::AvgPool2d { .. }
             | Op::AvgPool3d { .. }
             | Op::AdaptiveAvgPool2d { .. }
+            | Op::AdaptiveAvgPool3d { .. }
             | Op::Unfold { .. }
             | Op::Fold { .. }
             | Op::Where { .. }
@@ -5588,6 +5599,7 @@ mod conv3d_op_tests {
             .supports_create_graph()
         );
         assert!(Op::AdaptiveAvgPool2d { input: NodeId(0) }.supports_create_graph());
+        assert!(Op::AdaptiveAvgPool3d { input: NodeId(0) }.supports_create_graph());
         assert!(
             Op::MaxUnpool {
                 input: NodeId(0),

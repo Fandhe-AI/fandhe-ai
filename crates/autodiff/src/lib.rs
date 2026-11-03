@@ -316,6 +316,10 @@ pub mod pad_ops;
 // `AvgPool3d` は #3027 で追加済み。facade の `Sequential::add_*` は未公開で保留継続。
 // `docs/autodiff-pool3d-ops-decision.md` §12・§13・§16）。
 pub mod pool3d_ops;
+// 3D 適応プーリング 2 演算（`adaptive_avg_pool3d`・`adaptive_max_pool3d`。イシュー #3823）。`Var` の
+// 1 行委譲メソッドとして facade から到達できる（モジュール自体は再エクスポートしない。層型・
+// `Sequential::add_adaptive_*_pool3d` は #3824。`docs/autodiff-pool3d-ops-decision.md` §18・§21）。
+pub mod adaptive_pool3d_ops;
 // ConvTranspose3d と MaxUnpool1d／2d／3d（`conv_transpose3d`・`max_unpool{1,2,3}d`。イシュー #2644）。
 // `Var` の 1 行委譲メソッドとして #2850 で facade へ公開済み（モジュール自体は再エクスポートしない。
 // autodiff 側の `nn::ConvTranspose3d` は #3031 で追加済み、facade 側の `Sequential::add_conv_transpose3d` は #3032 で公開済み（`nn::MaxUnpool{1,2,3}d` は #3035 で追加済み。facade 側は未公開）。

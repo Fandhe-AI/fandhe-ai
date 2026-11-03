@@ -1219,6 +1219,8 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・公開 API（`api_surface`）。
 
+追記（#3823）: `Op::AdaptiveAvgPool3d` を V3 で `create_graph` の対象に加えた（窓表は `adaptive_window` を軸ごとに呼ぶ `plan_adaptive3d`）。adaptive max 3d は `Op::MaxPool3d` を記録するため追加の `Op` はない。記録は `docs/autodiff-pool3d-ops-decision.md` §21。
+
 ## 31. 実装記録（#3086・線形代数 Op と FFT の create_graph 対応の可否と対応分。親 #3076）
 
 ### 31.1 23 件の判断

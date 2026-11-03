@@ -2657,6 +2657,39 @@ pub trait BackendOps {
         ))
     }
 
+    /// 3D Adaptive average pooling（`torch.nn.functional.adaptive_avg_pool3d` 相当。NCDHW 固定。
+    /// イシュー #3823・`docs/autodiff-pool3d-ops-decision.md` §18・§21）。窓は軸ごとの
+    /// [`crate::adaptive_window`]、数値契約の正は [`crate::adaptive_pool3d`]。
+    ///
+    /// # デフォルト実装
+    /// [`Self::pool3d_max`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::adaptive_pool3d_ops::adaptive_avg_pool3d` は `Unsupported` のときだけ
+    /// ホスト参照実装 [`crate::adaptive_pool3d::adaptive_avg_pool3d_host`] へフォールバックし、
+    /// それ以外のエラーは伝播する。実装側も [`crate::adaptive_pool3d::adaptive_pool3d_layout`] で
+    /// 形状を再検査する（fail-closed）。
+    fn adaptive_pool3d_avg(
+        &self,
+        _input: &Tensor<f32>,
+        _output_size: [usize; 3],
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "adaptive_pool3d_avg: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 3D Adaptive max pooling（値と索引。`F.adaptive_max_pool3d(..., return_indices=True)` 相当）。
+    /// 索引は `(n, c)` 平面内 flat 添字 `d·H·W + h·W + w`。契約は [`Self::adaptive_pool3d_avg`] と
+    /// 同じ（フォールバック先は [`crate::adaptive_pool3d::adaptive_max_pool3d_host`]）。
+    fn adaptive_pool3d_max(
+        &self,
+        _input: &Tensor<f32>,
+        _output_size: [usize; 3],
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "adaptive_pool3d_max: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// LocalResponseNorm の forward（`F.local_response_norm` 相当。入力 `[N, C, *S]`。
     /// イシュー #2646・`docs/autodiff-lrn-weight-reparam-decision.md`）。出力は入力と同 shape。
     /// 窓定義・数値契約の正は [`crate::lrn`]。

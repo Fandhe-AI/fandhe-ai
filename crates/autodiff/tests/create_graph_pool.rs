@@ -652,3 +652,31 @@ fn create_graph_accepts_max_unpool_after_pooling() {
     let b = dense(plain.get(&x).unwrap().expect("x は到達"));
     assert_eq!(bits(&a), bits(&b));
 }
+
+// --- 3D 適応プーリング（イシュー #3823） --------------------------------------------
+
+#[test]
+fn hessian_adaptive_pool3d_matches_finite_difference() {
+    // 割り切れない軸（in=3→out=2、in=5→out=3）で窓が重なる構成と、出力が入力より大きい構成。
+    let shape = [1usize, 2, 3, 5, 4];
+    let x0 = common::det_seq(flat_len(&shape), 0.4);
+    hessian_case(
+        "adaptive avg3d 3x5x4 -> 2x3x2",
+        |tp, x| quad(tp, &x.adaptive_avg_pool3d([2, 3, 2])?),
+        &x0,
+        &shape,
+    );
+    hessian_case(
+        "adaptive avg3d output larger than input",
+        |tp, x| quad(tp, &x.adaptive_avg_pool3d([4, 6, 5])?),
+        &x0,
+        &shape,
+    );
+    let xd = distinct(flat_len(&shape));
+    hessian_case(
+        "adaptive max3d 3x5x4 -> 2x3x2",
+        |tp, x| quad(tp, &x.adaptive_max_pool3d([2, 3, 2])?.0),
+        &xd,
+        &shape,
+    );
+}

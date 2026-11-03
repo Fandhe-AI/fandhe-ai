@@ -3554,6 +3554,50 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(v, &layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::adaptive_pool3d_avg`] の CPU 実装（イシュー #3823）。
+    /// 共有カーネル `fandhe_ai_tensor_core::adaptive_pool3d::adaptive_avg_pool3d_host` を呼ぶだけで
+    /// 窓規則は持たない（autodiff のホストフォールバックと単一情報源）。形状は
+    /// `adaptive_pool3d_layout` で再検査する（fail-closed）。非連続入力は論理順へ実体化する。
+    fn adaptive_pool3d_avg(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 3],
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::adaptive_pool3d as ap3;
+        // 実体化（contiguous）は巨大 broadcast view で容量 overflow の panic を起こしうるため、
+        // 元の shape で layout（と Max は索引上限）を先に検証してから行う。
+        let layout = ap3::adaptive_pool3d_layout(input.shape(), output_size)
+            .map_err(BackendError::ShapeMismatch)?;
+        let input = input.contiguous();
+        let v = ap3::adaptive_avg_pool3d_host(&input.host_slice(), &layout)
+            .map_err(BackendError::ShapeMismatch)?;
+        Tensor::new(v, &layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::adaptive_pool3d_max`] の CPU 実装（イシュー #3823）。
+    /// [`Self::adaptive_pool3d_avg`] と同型。索引上限（`D·H·W <= i32::MAX`）も再検査する。
+    fn adaptive_pool3d_max(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 3],
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        use fandhe_ai_tensor_core::adaptive_pool3d as ap3;
+        // 実体化（contiguous）は巨大 broadcast view で容量 overflow の panic を起こしうるため、
+        // 元の shape で layout（と Max は索引上限）を先に検証してから行う。
+        let layout = ap3::adaptive_pool3d_layout(input.shape(), output_size)
+            .map_err(BackendError::ShapeMismatch)?;
+        layout
+            .check_i32_indices()
+            .map_err(BackendError::ShapeMismatch)?;
+        let input = input.contiguous();
+        let (v, i) = ap3::adaptive_max_pool3d_host(&input.host_slice(), &layout)
+            .map_err(BackendError::ShapeMismatch)?;
+        Ok((
+            Tensor::new(v, &layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(i, &layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::lrn_forward`] の CPU 実装（イシュー #2646）。
     /// 共有カーネル `fandhe_ai_tensor_core::lrn::local_response_norm_host` を呼ぶだけで窓規則は
     /// 持たない（autodiff のホストフォールバックと単一情報源）。形状は `lrn_layout` で再検査する。

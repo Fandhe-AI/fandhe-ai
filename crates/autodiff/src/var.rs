@@ -4221,6 +4221,56 @@ impl<'t> Var<'t> {
         crate::adaptive_max_pool_ops::adaptive_max_pool2d(self, output_size)
     }
 
+    /// 3D 適応平均プーリング（`torch.nn.functional.adaptive_avg_pool3d` 相当。NCDHW 固定。
+    /// イシュー #3823・`docs/autodiff-pool3d-ops-decision.md` §18・§21）。
+    /// `crate::adaptive_pool3d_ops::adaptive_avg_pool3d` へ 1 行委譲する。
+    ///
+    /// `self`: `[N, C, D, H, W]`、`output_size: [Dout, Hout, Wout]`（各軸 1 以上。入力より大きくてもよい）。
+    /// 軸ごとの窓は `start = floor(o·in/out)`・`end = ceil((o+1)·in/out)`（2D と同式）。rank 不一致・
+    /// 空間軸 0・`output_size` の 0 は `Err`（検査は tape 操作より前に完了するため孤児ノードを残さない）。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    ///
+    /// let tape = Tape::new();
+    /// let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    /// let x = tape.var(&Tensor::new(data, &[1, 1, 2, 2, 2]).unwrap());
+    /// let y = x.adaptive_avg_pool3d([1, 1, 1]).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![3.5]);
+    /// assert!(x.adaptive_avg_pool3d([0, 1, 1]).is_err());
+    /// ```
+    pub fn adaptive_avg_pool3d(&self, output_size: [usize; 3]) -> Result<Var<'t>, AutodiffError> {
+        crate::adaptive_pool3d_ops::adaptive_avg_pool3d(self, output_size)
+    }
+
+    /// 3D 適応最大プーリング（`F.adaptive_max_pool3d(..., return_indices=True)` 相当。
+    /// イシュー #3823）。`crate::adaptive_pool3d_ops::adaptive_max_pool3d` へ 1 行委譲する。
+    ///
+    /// 戻り値は `(values, index)`。`index` は `(n, c)` 平面内 flat 添字 `d·H·W + h·W + w` の
+    /// `Tensor<i32>` で、`max_unpool3d` へそのまま渡せる。タイは先勝ち、NaN を含む窓は NaN を返し
+    /// 窓内で最初の NaN の索引を残す。`D·H·W > i32::MAX` を含め、エラー条件は
+    /// [`Self::adaptive_avg_pool3d`] と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    ///
+    /// let tape = Tape::new();
+    /// let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    /// let x = tape.var(&Tensor::new(data, &[1, 1, 2, 2, 2]).unwrap());
+    /// let (y, idx) = x.adaptive_max_pool3d([1, 1, 1]).unwrap();
+    /// assert_eq!(y.value().host_slice().to_vec(), vec![7.0]);
+    /// assert_eq!(idx.host_slice().to_vec(), vec![7]);
+    /// assert!(x.adaptive_max_pool3d([1, 0, 1]).is_err());
+    /// ```
+    pub fn adaptive_max_pool3d(
+        &self,
+        output_size: [usize; 3],
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::adaptive_pool3d_ops::adaptive_max_pool3d(self, output_size)
+    }
+
     /// 1 次元 adaptive max pooling（[`Self::adaptive_max_pool2d`] の `H`
     /// 軸固定版。イシュー #2527）。`self`: `[N, C, L]`。`index` は `l`
     /// 軸の flat 添字。エラー条件・検査順序は 2d 版と同じ。

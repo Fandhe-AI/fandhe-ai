@@ -2433,6 +2433,40 @@ fn pool3d_fold_padmode_ops_create_graph_via_facade() {
     check_create_graph_family("pad_mode", &BX, &[2, 3], pad_mode_loss, false, 1e-2);
 }
 
+fn adaptive_avg_pool3d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.adaptive_avg_pool3d([1, 2, 2])
+        .unwrap()
+        .tanh()
+        .sum(None)
+        .unwrap()
+}
+fn adaptive_max_pool3d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let (y, _) = x.adaptive_max_pool3d([1, 2, 2]).unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+/// 3D 適応プーリング（`AdaptiveAvgPool3d`〈V3〉と、`MaxPool3d` を再利用する adaptive max。イシュー #3823。
+/// W 軸 3→2 で窓が重なる形状）。
+#[test]
+fn adaptive_pool3d_create_graph_via_facade() {
+    check_create_graph_family(
+        "adaptive_avg_pool3d",
+        &pool3d_x(),
+        &[1, 1, 2, 2, 3],
+        adaptive_avg_pool3d_loss,
+        false,
+        1e-2,
+    );
+    check_create_graph_family(
+        "adaptive_max_pool3d",
+        &pool3d_x(),
+        &[1, 1, 2, 2, 3],
+        adaptive_max_pool3d_loss,
+        false,
+        1e-2,
+    );
+}
+
 fn fft_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
     quad_loss(tape, &x.fft(None, None, FftNorm::Backward).unwrap())
 }
