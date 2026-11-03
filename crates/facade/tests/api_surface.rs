@@ -47193,3 +47193,152 @@ fn facade_does_not_reexport_or_declare_channel_shuffle_layer_detects_each_catego
     assert!(offense("pub struct ChannelShuffle;"));
     assert!(offense("pub mod channel_shuffle {}"));
 }
+// =====================================================================
+// イシュー #3820（親 #3813・Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `compat::Sequential::add_batch_norm3d` の正ガード。承認形は「`add_batch_norm3d(num_features, eps, momentum)`
+// だけを公開し、層型 `BatchNorm3d` は autodiff 内部に留める（facade へ再エクスポートしない。#3022 の別判断）」。
+// 反転対象の否定ガード・保留 doctest は元から無い（`docs/autodiff-batch-norm-3d-decision.md` §0 事実 7）ため、
+// 承認形だけを許す正ガードを新設する。
+// =====================================================================
+
+const ADD_BATCH_NORM3D_PARAMS: &str =
+    "mut self, num_features: usize, eps: f32, momentum: f32, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_batch_norm3d` が承認シグネチャで 1 件だけ存在する。
+#[test]
+fn compat_sequential_batch_norm3d_add_method_has_approved_signature() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_batch_norm3d"),
+        1
+    );
+    assert!(
+        sequential_spatial_add_signature_ok(&cleaned, "add_batch_norm3d", ADD_BATCH_NORM3D_PARAMS),
+        "add_batch_norm3d のシグネチャが承認形と一致しない"
+    );
+}
+
+/// [`compat_sequential_batch_norm3d_add_method_has_approved_signature`] の自己テスト。
+#[test]
+fn compat_sequential_batch_norm3d_add_method_has_approved_signature_detects_offense() {
+    let name = "add_batch_norm3d";
+    let ok = "pub fn add_batch_norm3d(mut self, num_features: usize, eps: f32, momentum: f32,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        name,
+        ADD_BATCH_NORM3D_PARAMS
+    ));
+    for bad in [
+        // 引数の入れ替え
+        "pub fn add_batch_norm3d(mut self, eps: f32, num_features: usize, momentum: f32,) -> Result<Self, AutodiffError> {",
+        // 型違い
+        "pub fn add_batch_norm3d(mut self, num_features: usize, eps: f64, momentum: f32,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_batch_norm3d(mut self, num_features: usize, eps: f32, momentum: f32,) -> Self {",
+        // 引数の欠落
+        "pub fn add_batch_norm3d(mut self, num_features: usize, eps: f32,) -> Result<Self, AutodiffError> {",
+        // 引数の追加
+        "pub fn add_batch_norm3d(mut self, num_features: usize, eps: f32, momentum: f32, affine: bool,) -> Result<Self, AutodiffError> {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, name, ADD_BATCH_NORM3D_PARAMS),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `add_batch_norm3d` がちょうど 1 件の `pub fn` として宣言されている。
+#[test]
+fn compat_sequential_exposes_batch_norm3d_add_method_issue_3820() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut count = 0usize;
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        count += count_pub_fn_declarations(content, "add_batch_norm3d");
+    });
+    assert_eq!(count, 1, "add_batch_norm3d の pub fn 宣言数が 1 件でない");
+}
+
+/// 宣言数の数え方の自己テスト（0 件・2 件を区別する）。
+#[test]
+fn compat_sequential_exposes_batch_norm3d_add_method_issue_3820_counts_declarations() {
+    let one = "    pub fn add_batch_norm3d(mut self, n: usize) -> R {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_batch_norm3d"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_batch_norm2d"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_batch_norm3d"), 2);
+    assert_eq!(
+        count_pub_fn_declarations("// pub fn add_batch_norm3d() {}", "add_batch_norm3d"),
+        0
+    );
+}
+
+/// facade src の `pub use` が層型 `BatchNorm3d` を含む、または `BatchNorm3d` の独自宣言がある場合に
+/// 違反の説明を返す。`sequential.rs` の非 pub の `use`・コメント・文字列内の記述は違反としない。
+fn scan_batch_norm3d_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            if path_tokens.iter().any(|t| t == "BatchNorm3d") {
+                offending.push("pub use が `BatchNorm3d` を含む".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens.get(i + 1).map(String::as_str) == Some("BatchNorm3d")
+        {
+            offending.push(format!("{} BatchNorm3d 宣言", tokens[i]));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が層型 `BatchNorm3d` を再エクスポート・独自宣言していない（承認論点 5）。
+#[test]
+fn facade_does_not_reexport_or_declare_batch_norm3d() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_batch_norm3d_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が層型 BatchNorm3d を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_batch_norm3d`] の自己テスト。
+#[test]
+fn facade_does_not_reexport_or_declare_batch_norm3d_detects_each_category() {
+    let offense = |src: &str| !scan_batch_norm3d_reexports_and_declarations(src).is_empty();
+    // 違反にならない例（sequential.rs の非 pub の use・コメント・文字列・無関係な pub use）
+    assert!(!offense(
+        "use fandhe_ai_autodiff::nn::batch_norm::{BatchNorm2d, BatchNorm3d};"
+    ));
+    assert!(!offense(
+        "// pub use batch_norm::BatchNorm3d;\nconst S: &str = \"pub struct BatchNorm3d;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    // 違反の例
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::batch_norm::BatchNorm3d;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::{BatchNorm2d, BatchNorm3d as B};"
+    ));
+    assert!(offense("pub struct BatchNorm3d;"));
+    assert!(offense("enum BatchNorm3d {}"));
+    assert!(offense("pub type BatchNorm3d = u8;"));
+}

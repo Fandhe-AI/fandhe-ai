@@ -118,6 +118,15 @@ fn build_bn2d() -> Sequential {
         .expect("構築できるはず")
 }
 
+fn build_bn3d() -> Sequential {
+    Sequential::new()
+        .add_conv3d(1, 2, [1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1, 4)
+        .and_then(|m| m.add_batch_norm3d(2, 1e-5, 0.1))
+        .map(|m| m.add_flatten(1, 4))
+        .and_then(|m| m.add_linear(16, 2, 5))
+        .expect("構築できるはず")
+}
+
 /// 学習 → 保存 → 復元の往復を eval モードの bit 一致で検証する（A1 の共通本体）。
 fn assert_round_trip(label: &str, build: fn() -> Sequential, x: &Tensor<f32>, y: &Tensor<f32>) {
     let mut model = build();
@@ -190,6 +199,44 @@ fn bn1d_rank3_and_bn2d_trained_models_round_trip() {
     let x4 = tensor(&[5, 1, 2, 2], 0.4);
     let y4 = tensor(&[5, 2], 0.6);
     assert_round_trip("bn2d", build_bn2d, &x4, &y4);
+}
+
+/// #3820（#3750 R10）: BatchNorm3d（kind `batch_norm3d`）を含む学習済みモデルが eval 出力 bit 一致で往復する。
+#[test]
+fn bn3d_trained_model_round_trips_eval_bit_identically() {
+    let x = tensor(&[5, 1, 2, 2, 2], 0.5);
+    let y = tensor(&[5, 2], 0.8);
+    assert_round_trip("bn3d", build_bn3d, &x, &y);
+}
+
+/// #3820: eval 保存の training フラグ復元・manifest の kind 名・再保存の buffer bit 一致。
+#[test]
+fn bn3d_eval_flag_kind_name_and_resave_are_preserved() {
+    let x = tensor(&[5, 1, 2, 2, 2], 0.5);
+    let y = tensor(&[5, 2], 0.8);
+    let mut model = build_bn3d();
+    train_steps(&mut model, &x, &y, 3);
+    model.eval();
+    let g = TempDirGuard::new("bn3d-eval");
+    let dir = g.path().join("m");
+    save_model(&model, &dir).expect("保存できるはず");
+    let manifest = std::fs::read_to_string(manifest_path(&dir)).expect("manifest を読めるはず");
+    assert!(manifest.contains("\"batch_norm3d\""), "{manifest}");
+    let loaded = load_model(&dir).expect("復元できるはず");
+    assert!(!loaded.training());
+    let ya = model.predict(&x).expect("predict できるはず");
+    let yb = loaded.predict(&x).expect("predict できるはず");
+    assert_bit_identical(&ya, &yb, "bn3d eval 出力");
+    // 再保存で buffer が bit 一致する。
+    let g2 = TempDirGuard::new("bn3d-resave");
+    let dir2 = g2.path().join("m");
+    save_model(&loaded, &dir2).expect("再保存できるはず");
+    let a = load_safetensors_f32(&only_safetensors(&dir)).expect("読めるはず");
+    let b = load_safetensors_f32(&only_safetensors(&dir2)).expect("読めるはず");
+    assert_eq!(a.len(), b.len());
+    for (k, v) in &a {
+        assert_bit_identical(v, &b[k], k);
+    }
 }
 
 #[test]

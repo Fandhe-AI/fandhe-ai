@@ -42,7 +42,7 @@
 //! `Sequential::add_*`（`sequential.rs` 冒頭・[`crate::compat::
 //! Sequential`] 参照）が対応する種類に限る。当初の Linear・ReLU・
 //! Sigmoid・Tanh の 3 種限定は、`Dropout`（#1603）・Conv2d／Conv1d
-//! （#1770）・LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／
+//! （#1770）・LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／BatchNorm3d（#3820）／
 //! Embedding／MultiheadAttention（#1760・親 #1618）を経て拡張済み。
 //! `Sequential` 経由の学習
 //! （勾配取得・パラメータ更新）は #294 で対応済み（`sequential.rs`

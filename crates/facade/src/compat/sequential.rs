@@ -8,7 +8,7 @@
 //! レイヤーは `docs/compat-api-scope.md` §1 の範囲拡張手続き（同 §5）を
 //! 経て追加された集合限定（Linear・ReLU/Sigmoid/Tanh・Silu/Hardswish/
 //! LeakyRelu/Elu/Dropout・Conv2d/Conv1d〈#1770〉・LayerNorm/RmsNorm/
-//! BatchNorm1d/BatchNorm2d/Embedding/MultiheadAttention〈#1760〉・
+//! BatchNorm1d/BatchNorm2d/BatchNorm3d/Embedding/MultiheadAttention〈#1760〉・
 //! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
 //! AdaptiveAvgPool1d〈#1957〉・AdaptiveMaxPool2d/AdaptiveMaxPool1d/
 //! GlobalPool〈#2527〉・Dropout2d/AlphaDropout/EmbeddingBag〈#2528〉・
@@ -120,8 +120,8 @@ use fandhe_ai_autodiff::nn::shrink::{Hardshrink, Softshrink};
 use fandhe_ai_autodiff::nn::softmin_threshold::{RRelu, Softmin, Tanhshrink, Threshold};
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
-    AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNormVars, ChannelShuffle,
-    Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
+    AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNorm3d, BatchNormVars,
+    ChannelShuffle, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
     ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, ConvTranspose3d,
     ConvTranspose3dVars, Dropout, Dropout2d, Embedding, EmbeddingBag, EmbeddingBagVars,
     EmbeddingVars, FeedForwardActivation, Flatten, Fold, GlobalPool, GroupNorm, Identity,
@@ -339,6 +339,11 @@ pub(super) enum LayerSpec {
         momentum: f32,
     },
     BatchNorm2d {
+        num_features: usize,
+        eps: f32,
+        momentum: f32,
+    },
+    BatchNorm3d {
         num_features: usize,
         eps: f32,
         momentum: f32,
@@ -1862,6 +1867,47 @@ impl Sequential {
         Ok(self)
     }
 
+    /// BatchNorm3d 層を追加する（`nn::batch_norm::BatchNorm3d`。イシュー #3820・
+    /// 設計 `docs/autodiff-batch-norm-3d-decision.md`）。PyTorch `nn.BatchNorm3d` 相当で、
+    /// [`Sequential::add_batch_norm1d`] と同様 affine あり既定・モード契約
+    /// （追加直後は train モード。決定的な推論には先に [`Sequential::eval`]）。
+    /// 受理する入力 rank は 5〈`[N, C, D, H, W]`〉のみで、rank 4／6 以上は
+    /// `RankMismatch { expected: 5 }` で拒否する。
+    ///
+    /// `save_model` で保存・復元できる（kind `batch_norm3d`）。ONNX export は
+    /// `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::Tensor;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut model = Sequential::new().add_batch_norm3d(2, 1e-5, 0.1)?;
+    /// model.eval();
+    /// let x = Tensor::new(vec![0.5f32; 32], &[2, 2, 2, 2, 2])?;
+    /// assert_eq!(model.predict(&x)?.shape(), &[2, 2, 2, 2, 2]);
+    /// // rank 4 の入力は拒否される。
+    /// let bad = Tensor::new(vec![0.5f32; 16], &[2, 2, 2, 2])?;
+    /// assert!(model.predict(&bad).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_batch_norm3d(
+        mut self,
+        num_features: usize,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        let layer = BatchNorm3d::new(num_features, eps, momentum)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::BatchNorm3d {
+            num_features,
+            eps,
+            momentum,
+        });
+        Ok(self)
+    }
+
     /// `compat::model_io::load_model` 専用: running stats を持つ BatchNorm1d を積む
     /// （イシュー #2371）。`from_parameters` 経由で weight／bias／running stats を
     /// そのまま持つ層を作り、`LayerSpec` の `num_features` は `running_mean` の長さから決める。
@@ -1915,6 +1961,34 @@ impl Sequential {
         )?;
         self.inner.push(Box::new(layer));
         self.specs.push(LayerSpec::BatchNorm2d {
+            num_features,
+            eps,
+            momentum,
+        });
+        Ok(self)
+    }
+
+    /// [`Sequential::add_batch_norm1d_restored`] の BatchNorm3d 版（イシュー #3820）。
+    pub(super) fn add_batch_norm3d_restored(
+        mut self,
+        weight: Tensor<f32>,
+        bias: Tensor<f32>,
+        running_mean: Tensor<f32>,
+        running_var: Tensor<f32>,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        let num_features = running_mean.shape().first().copied().unwrap_or(0);
+        let layer = BatchNorm3d::from_parameters(
+            Some(weight),
+            Some(bias),
+            running_mean,
+            running_var,
+            eps,
+            momentum,
+        )?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::BatchNorm3d {
             num_features,
             eps,
             momentum,
@@ -3227,8 +3301,10 @@ impl Sequential {
             .filter_map(|layer| {
                 if let Some(bn) = layer.as_batch_norm1d() {
                     Some(bn.bind(&tape.0))
+                } else if let Some(bn) = layer.as_batch_norm2d() {
+                    Some(bn.bind(&tape.0))
                 } else {
-                    layer.as_batch_norm2d().map(|bn| bn.bind(&tape.0))
+                    layer.as_batch_norm3d().map(|bn| bn.bind(&tape.0))
                 }
             })
             .collect();
@@ -3373,6 +3449,7 @@ impl Sequential {
                 && layer.as_rms_norm().is_none()
                 && layer.as_batch_norm1d().is_none()
                 && layer.as_batch_norm2d().is_none()
+                && layer.as_batch_norm3d().is_none()
                 && layer.as_embedding().is_none()
                 && layer.as_embedding_bag().is_none()
                 && layer.as_prelu().is_none()
@@ -3458,6 +3535,7 @@ impl Sequential {
                 || layer.as_rms_norm().is_some()
                 || layer.as_batch_norm1d().is_some()
                 || layer.as_batch_norm2d().is_some()
+                || layer.as_batch_norm3d().is_some()
                 || layer.as_embedding().is_some()
                 || layer.as_embedding_bag().is_some()
                 || layer.as_prelu().is_some()
@@ -4684,10 +4762,13 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward(&current)?;
                 i += 1;
-            } else if layer.as_batch_norm1d().is_some() || layer.as_batch_norm2d().is_some() {
+            } else if layer.as_batch_norm1d().is_some()
+                || layer.as_batch_norm2d().is_some()
+                || layer.as_batch_norm3d().is_some()
+            {
                 // `BatchNormVars::forward` は `accepted_ranks`（1d は
-                // rank 2/3・2d は rank 4）を自身で検査する（`bind`
-                // doc 参照）ため、ここでは 1d／2d を区別しない。
+                // rank 2/3・2d は rank 4・3d は rank 5）を自身で検査する
+                // （`bind` doc 参照）ため、ここでは 1d／2d／3d を区別しない。
                 let vars = batch_norms.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
                         "SequentialVars::forward: bind 済み BatchNormVars が model.layers の \
@@ -4928,7 +5009,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 && let Some(w) = &vars.weight
             {
                 out.push(w);
-            } else if (layer.as_batch_norm1d().is_some() || layer.as_batch_norm2d().is_some())
+            } else if (layer.as_batch_norm1d().is_some()
+                || layer.as_batch_norm2d().is_some()
+                || layer.as_batch_norm3d().is_some())
                 && let Some(vars) = batch_norms.next()
             {
                 if let Some(w) = &vars.weight {
@@ -5084,7 +5167,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 && let Some(vars) = rms_norms.next()
             {
                 push_opt_weight_bias(&mut out, grads, vars.weight.as_ref(), None)?;
-            } else if (layer.as_batch_norm1d().is_some() || layer.as_batch_norm2d().is_some())
+            } else if (layer.as_batch_norm1d().is_some()
+                || layer.as_batch_norm2d().is_some()
+                || layer.as_batch_norm3d().is_some())
                 && let Some(vars) = batch_norms.next()
             {
                 push_opt_weight_bias(&mut out, grads, vars.weight.as_ref(), vars.bias.as_ref())?;
@@ -5584,6 +5669,18 @@ mod tests {
             .unwrap()
             .add_mish();
         assert_eq!(model.first_untracked_parametric_layer(), None);
+    }
+
+    /// イシュー #3820: `BatchNorm3d` は型付き追跡層で、独自パラメータ層扱いされない。
+    /// 除外が漏れると `fit`／`forward`／`trainable_grads` がすべて拒否される。
+    #[test]
+    fn first_untracked_parametric_layer_does_not_flag_batch_norm3d() {
+        let model = Sequential::new()
+            .add_batch_norm3d(2, 1e-5, 0.1)
+            .unwrap()
+            .add_relu();
+        assert_eq!(model.first_untracked_parametric_layer(), None);
+        assert!(model.contains_resident_unsupported_layer());
     }
 
     #[test]

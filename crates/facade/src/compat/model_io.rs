@@ -370,6 +370,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::RmsNorm { .. } => Some("rms_norm"),
         LayerSpec::BatchNorm1d { .. } => Some("batch_norm1d"),
         LayerSpec::BatchNorm2d { .. } => Some("batch_norm2d"),
+        LayerSpec::BatchNorm3d { .. } => Some("batch_norm3d"),
         LayerSpec::Embedding { .. } => Some("embedding"),
         LayerSpec::EmbeddingBag { .. } => Some("embedding_bag"),
         LayerSpec::MultiheadAttention { .. } => Some("multihead_attention"),
@@ -510,7 +511,8 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
         | LayerSpec::Transformer { eps, .. }
         | LayerSpec::InstanceNorm { eps } => eps.is_finite(),
         LayerSpec::BatchNorm1d { eps, momentum, .. }
-        | LayerSpec::BatchNorm2d { eps, momentum, .. } => eps.is_finite() && momentum.is_finite(),
+        | LayerSpec::BatchNorm2d { eps, momentum, .. }
+        | LayerSpec::BatchNorm3d { eps, momentum, .. } => eps.is_finite() && momentum.is_finite(),
         _ => true,
     }
 }
@@ -724,7 +726,8 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
             normalized_size, ..
         } => vec![("weight", vec![*normalized_size])],
         LayerSpec::BatchNorm1d { num_features, .. }
-        | LayerSpec::BatchNorm2d { num_features, .. } => vec![
+        | LayerSpec::BatchNorm2d { num_features, .. }
+        | LayerSpec::BatchNorm3d { num_features, .. } => vec![
             ("weight", vec![*num_features]),
             ("bias", vec![*num_features]),
         ],
@@ -949,7 +952,8 @@ fn expected_buffer_keys(specs: &[LayerSpec]) -> Vec<(String, Vec<usize>)> {
     let mut keys = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
         if let LayerSpec::BatchNorm1d { num_features, .. }
-        | LayerSpec::BatchNorm2d { num_features, .. } = spec
+        | LayerSpec::BatchNorm2d { num_features, .. }
+        | LayerSpec::BatchNorm3d { num_features, .. } = spec
         {
             keys.push((format!("{i}.running_mean"), vec![*num_features]));
             keys.push((format!("{i}.running_var"), vec![*num_features]));
@@ -1327,6 +1331,11 @@ fn param_fields(spec: &LayerSpec) -> ParamFields {
             momentum,
         }
         | LayerSpec::BatchNorm2d {
+            num_features,
+            eps,
+            momentum,
+        }
+        | LayerSpec::BatchNorm3d {
             num_features,
             eps,
             momentum,
@@ -1827,6 +1836,12 @@ fn collect_checked_state(model: &Sequential) -> Result<CheckedState, ModelIoErro
                     .ok_or_else(|| bn_downcast_error(i))?;
                 (bn.running_mean(), bn.running_var())
             }
+            LayerSpec::BatchNorm3d { .. } => {
+                let bn = model.layers()[i]
+                    .as_batch_norm3d()
+                    .ok_or_else(|| bn_downcast_error(i))?;
+                (bn.running_mean(), bn.running_var())
+            }
             _ => continue,
         };
         for (name, t) in [("running_mean", mean), ("running_var", var)] {
@@ -1910,6 +1925,7 @@ fn check_layer_state(model: &Sequential, i: usize, spec: &LayerSpec) -> Result<(
             | LayerSpec::RRelu { .. }
             | LayerSpec::BatchNorm1d { .. }
             | LayerSpec::BatchNorm2d { .. }
+            | LayerSpec::BatchNorm3d { .. }
             // spectral_norm は train の forward でだけ `u`／`v` を進めるため、層のモードが食い違うと
             // 復元後の forward がずれる（イシュー #3050）。weight_norm はモードに依存しない。
             | LayerSpec::Reparam {
@@ -2541,6 +2557,18 @@ fn build_model(
                 check_restored_features(&next, i, *num_features)?;
                 next
             }
+            LayerSpec::BatchNorm3d {
+                num_features,
+                eps,
+                momentum,
+            } => {
+                let (w, b, m, v) = take_bn_tensors(i, buffers, tensors)?;
+                let next = model
+                    .add_batch_norm3d_restored(w, b, m, v, *eps, *momentum)
+                    .map_err(ModelIoError::Autodiff)?;
+                check_restored_features(&next, i, *num_features)?;
+                next
+            }
             LayerSpec::Embedding {
                 num_embeddings,
                 embedding_dim,
@@ -2811,6 +2839,7 @@ fn check_restored_features(
     match model.specs().get(i) {
         Some(LayerSpec::BatchNorm1d { num_features, .. })
         | Some(LayerSpec::BatchNorm2d { num_features, .. })
+        | Some(LayerSpec::BatchNorm3d { num_features, .. })
             if *num_features == expected =>
         {
             Ok(())
@@ -3844,6 +3873,14 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 momentum: p.f32("momentum")?,
             })
         }
+        "batch_norm3d" => {
+            let p = Params::new(params, &["num_features", "eps", "momentum"])?;
+            Ok(LayerSpec::BatchNorm3d {
+                num_features: p.usize("num_features")?,
+                eps: p.f32("eps")?,
+                momentum: p.f32("momentum")?,
+            })
+        }
         "embedding" => {
             let p = Params::new(params, &["num_embeddings", "embedding_dim", "padding_idx"])?;
             Ok(LayerSpec::Embedding {
@@ -4329,6 +4366,19 @@ fn parse_layers_and_keys(
                 .into(),
         });
     }
+    // 旧形式（v1）に BatchNorm3d は存在し得ない（kind は 0.14.0 で追加。#3750 R5・#3820）。
+    // `buffer_keys` が空かどうかに関わらず拒否し、空配列の旧形式として初期 running stats で
+    // 黙って補う経路を作らない（A08）。
+    if allow_legacy_empty_buffers
+        && specs
+            .iter()
+            .any(|s| matches!(s, LayerSpec::BatchNorm3d { .. }))
+    {
+        return Err(ModelIoError::Mismatch {
+            message: "旧形式（format_version 1）の manifest に batch_norm3d 層は含められません"
+                .into(),
+        });
+    }
     if !legacy_empty && buffer_keys != expected_buffers {
         return Err(ModelIoError::Mismatch {
             message: "buffer_keys が層構成から導いた期待キー・shape と一致しません".into(),
@@ -4642,7 +4692,8 @@ mod tests {
         let mut tensors = std::collections::HashMap::new();
         for (i, spec) in specs.iter().enumerate() {
             if let LayerSpec::BatchNorm1d { num_features, .. }
-            | LayerSpec::BatchNorm2d { num_features, .. } = spec
+            | LayerSpec::BatchNorm2d { num_features, .. }
+            | LayerSpec::BatchNorm3d { num_features, .. } = spec
             {
                 let n = *num_features;
                 let t = |v: f32| Tensor::new(vec![v; n], &[n]).expect("構築できるはず");
@@ -4827,6 +4878,11 @@ mod tests {
                 momentum: 0.1,
             },
             LayerSpec::BatchNorm2d {
+                num_features: 3,
+                eps: 1e-5,
+                momentum: 0.1,
+            },
+            LayerSpec::BatchNorm3d {
                 num_features: 3,
                 eps: 1e-5,
                 momentum: 0.1,
@@ -6014,7 +6070,7 @@ mod tests {
         let specs = all_kind_specs();
         let model = build_model_fresh(&specs).expect("74 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
-        assert_eq!(expected.len(), 4);
+        assert_eq!(expected.len(), 6);
         for (i, spec) in specs.iter().enumerate() {
             let (mean, var) = match spec {
                 LayerSpec::BatchNorm1d { .. } => {
@@ -6023,6 +6079,10 @@ mod tests {
                 }
                 LayerSpec::BatchNorm2d { .. } => {
                     let bn = model.layers()[i].as_batch_norm2d().expect("BN2d");
+                    (bn.running_mean(), bn.running_var())
+                }
+                LayerSpec::BatchNorm3d { .. } => {
+                    let bn = model.layers()[i].as_batch_norm3d().expect("BN3d");
                     (bn.running_mean(), bn.running_var())
                 }
                 _ => continue,
@@ -6102,6 +6162,42 @@ mod tests {
         assert!(stripped.contains("\"format_version\":2"), "{stripped}");
         assert!(matches!(
             parse_manifest(stripped.as_bytes()),
+            Err(ModelIoError::Mismatch { .. })
+        ));
+    }
+
+    /// #3750 R5・#3820: v1（旧形式）の manifest に `batch_norm3d` が現れたら、`buffer_keys` が
+    /// 空でも完全でも `Mismatch` で拒否する（v2 では受理される）。
+    #[test]
+    fn parse_manifest_rejects_batch_norm3d_in_legacy_format() {
+        let model = Sequential::new()
+            .add_linear(3, 4, 1)
+            .and_then(|m| m.add_batch_norm3d(4, 1e-5, 0.1))
+            .expect("構築できるはず");
+        let prepared = prepare_save(&model).expect("検証を通るはず");
+        let name = format!("model.{}.safetensors", "d".repeat(32));
+        let good = render_manifest(&prepared, &name, 1);
+        assert!(good.contains("\"kind\":\"batch_norm3d\""), "{good}");
+        assert!(parse_manifest(good.as_bytes()).is_ok());
+        // buffer_keys が完全なまま版だけ 1 にしたもの。
+        let full_v1 = good.replacen("\"format_version\":2", "\"format_version\":1", 1);
+        assert!(full_v1.contains("\"format_version\":1"), "{full_v1}");
+        assert!(matches!(
+            parse_manifest(full_v1.as_bytes()),
+            Err(ModelIoError::Mismatch { .. })
+        ));
+        // buffer_keys が空の旧形式。
+        let start = good.find("\"buffer_keys\":[").expect("buffer_keys");
+        let end = good
+            .find(",\"safetensors_file\"")
+            .expect("safetensors_file");
+        let empty_v1 = format!("{}\"buffer_keys\":[]{}", &good[..start], &good[end..]).replacen(
+            "\"format_version\":2",
+            "\"format_version\":1",
+            1,
+        );
+        assert!(matches!(
+            parse_manifest(empty_v1.as_bytes()),
             Err(ModelIoError::Mismatch { .. })
         ));
     }

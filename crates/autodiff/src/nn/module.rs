@@ -29,7 +29,8 @@ use crate::nn::activation::{
 };
 use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
-    BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
+    BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BATCH_NORM_3D_RANKS, BatchNorm1d, BatchNorm2d,
+    BatchNorm3d, BatchNormCore,
 };
 use crate::nn::channel_shuffle::ChannelShuffle;
 use crate::nn::container::{ModuleDict, ModuleList};
@@ -413,6 +414,17 @@ pub trait Module {
 
     /// [`Module::as_batch_norm2d`] の可変版。
     fn as_batch_norm2d_mut(&mut self) -> Option<&mut BatchNorm2d> {
+        None
+    }
+
+    /// [`Module::as_batch_norm2d`] と同型の明示フック（イシュー #3820）。
+    /// `BatchNorm3d` 層向け。既定 `None`。
+    fn as_batch_norm3d(&self) -> Option<&BatchNorm3d> {
+        None
+    }
+
+    /// [`Module::as_batch_norm3d`] の可変版。
+    fn as_batch_norm3d_mut(&mut self) -> Option<&mut BatchNorm3d> {
         None
     }
 
@@ -3235,6 +3247,71 @@ impl Module for BatchNorm2d {
     }
 }
 
+/// `BatchNorm3d::bind(tape).forward(input)` への委譲（イシュー
+/// #3820）。[`Module for BatchNorm1d`](trait.Module.html)
+/// と同じ理由・同じ構造だが rank 限定契約のみ異なる（rank 5 のみ）。
+impl Module for BatchNorm3d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.core.set_training(training);
+    }
+
+    fn training(&self) -> bool {
+        self.core.training()
+    }
+
+    /// イシュー #1760: `compat::Sequential` の学習経路が `BatchNorm3d`
+    /// 層を認識するためのフック（`as_linear` と同型）。
+    fn as_batch_norm3d(&self) -> Option<&BatchNorm3d> {
+        Some(self)
+    }
+
+    /// [`Module::as_batch_norm3d`] の可変版。
+    fn as_batch_norm3d_mut(&mut self) -> Option<&mut BatchNorm3d> {
+        Some(self)
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.core.named_parameters()
+    }
+
+    /// [`Module::set_parameter`] の実装。
+    /// [`Module for BatchNorm1d`](trait.Module.html) と同じ理由・
+    /// 同じ委譲先。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        self.core.set_parameter(name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。
+    /// `BatchNorm1d` と同じ理由・同じ委譲先）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.core.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.core.requires_grad()
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let rank = input.shape().len();
+        if !BATCH_NORM_3D_RANKS.contains(&rank) {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: BATCH_NORM_3D_RANKS[0],
+                actual: rank,
+            }));
+        }
+        batch_norm_forward_host(&self.core, ops, input)
+    }
+}
+
 /// `Softmax::forward` への委譲（イシュー #1594）。`Relu`/`Sigmoid`/
 /// `Tanh` と異なり `forward` 自体が `dim` の軸範囲検査により失敗しうる
 /// ため（fallible）、`?` で伝播するだけの `Relu` と違い戻り値をそのまま
@@ -3930,6 +4007,21 @@ mod tests {
             bn.bias().unwrap().contiguous().as_slice().unwrap(),
             &[0.5f32, 0.6, 0.7]
         );
+    }
+
+    #[test]
+    fn batch_norm3d_state_dict_round_trip_is_no_op_for_identity_state() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm3d::new(4, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let before = bn.state_dict();
+        bn.load_state_dict(bn.state_dict())
+            .expect("自身の state_dict をそのまま load_state_dict へ渡すのは成功するはず");
+        let after = bn.state_dict();
+        assert_eq!(before.len(), after.len());
+        assert!(bn.as_batch_norm3d().is_some());
+        assert!(bn.as_batch_norm2d().is_none());
     }
 
     #[test]
