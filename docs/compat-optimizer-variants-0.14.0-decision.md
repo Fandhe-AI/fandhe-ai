@@ -2,7 +2,7 @@
 
 イシュー #3757（A3-g）。雛形 `docs/decision-record-template.md`（#3716）の 9 節に従う。ルートは #3711。承認は #3769 の論点 4、実装は #3839（Adadelta・Adamax）と #3840（NAdam・RAdam）で行う。
 
-**承認根拠: #3769 の所有者の回答コメント 6554564758（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）。** 実装記録は §14。コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は本書の記述としては変えない。
+**承認根拠: #3769 の所有者の回答コメント 6554564758（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）。** 実装記録は §14（#3839）・§15（#3840）。コード・公開面・tolerance・baseline・ガードレール閾値・依存・`docs/spec` は本書の記述としては変えない。
 
 基準 sha は `02c0e5553`。本書の `path:line` はこの sha のもので、実装 PR の前に引き直す。
 
@@ -158,3 +158,16 @@
 - テスト: `compat_sequential_fit_adadelta_adamax.rs`（手動ループとの bit 一致・fit 分割・再 compile・不正 config・AMP・`LrSchedule`）、`compat_sequential_param_groups.rs`、`compat_sequential_model_io_compiled.rs`（往復）、`compat_sequential_model_io_tamper.rs`（kind 改竄）、`functional/fit_tests.rs`、`compiled.rs` の `all_optimizers()`（添字 6 が Lbfgs の既存テストのため末尾に追加）
 - 実機テストは該当なし（ホスト値型で GPU カーネルなし）。`DeviceParamStore` の常駐経路への結線は範囲外
 - #3840 への申し送り: ガード定数を 11 種へ広げる。`compat_sequential_model_io_compiled.rs` の `tampered_kind_is_rejected` が未知 kind の例に使う `"nadam"` を別の値へ差し替える
+
+## §15 実装記録（イシュー #3840。NAdam・RAdam）
+
+- 基準 sha: `a3f4b9952`。承認は #3769 の所有者の回答コメント 6554564758（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）。これで `Optimizer` は 11 種（Sgd・AdamW・Adam・RmsProp・Adagrad・Lamb・Lbfgs・Adadelta・Adamax・NAdam・RAdam）になった
+- 変えた match（`crates/facade/src/compat/training.rs`）: `Optimizer`・`OptimizerState` の variant（Adamax の後ろに NAdam、RAdam の順）、手書き `Debug`、`new`、`lr`、`set_lr`（専用の腕）、`step`、`step_grouped`、`supports_lr_schedule`（肯定形の網羅 match の `true` 側へ追加）、`snapshot_of_compiled`、`compiled_from_snapshot`。`functional/train.rs`・`functional_io.rs`・`callbacks.rs` の拒否条件（Lbfgs と AMP だけを特別扱いする箇所）は変えていない
+- `crates/facade/src/compat/model_io/compiled.rs`: `optimizer_lr`・`optimizer_kind`（`nadam`／`radam`。safetensors 側の種別マーカー `marker_key("nadam")`／`("radam")` と同じ綴り）・`config_fields`・`parse_non_lbfgs`。キー集合は新しい定数 `NADAM_KEYS`（7 キー: `lr, beta1, beta2, eps, weight_decay, momentum_decay, decoupled_weight_decay`）と `RADAM_KEYS`（6 キー: `lr, beta1, beta2, eps, weight_decay, decoupled_weight_decay`）。f32 は既存の `real(..)`（`{:?}` の正準形）、bool は SGD の `nesterov` と同じく `to_string()` で描画し、`Params::bool` でパースする（JSON の `true`／`false` 以外は `Manifest`）。検証順は allowlist → 固定キー集合 → パース → `NAdam::new`／`RAdam::new`（範囲外は `Autodiff`）で、§3 のとおり。`format_version` は 2 のまま
+- param groups は `decoupled_weight_decay` を group で上書きしない。group の `weight_decay` は config のフラグが決める意味（decoupled／coupled）で適用される。手動 `step_with_groups` と bit 一致するテストで両方の値を固定した
+- 正ガード: `api_surface.rs` の `APPROVED_COMPAT_OPTIMIZER_VARIANTS` を 9 → 11 種に広げ、`compat_optimizer_enum_variants_detect_each_category` を直した（承認形 11 種の受理、`swap(9, 10)`、承認外の追加の例を NAdam から `Rprop` へ差し替え、欠落を `[..10]` に、NAdam・RAdam の表記揺れ〈`Nadam`〉・別名〈`RAdamW`〉を追加）。`fit_types_are_reachable_via_facade_only` に NAdam・RAdam の到達性を追加。A3-g に反転する否定ガード・保留 doctest は `rg -n "HoldDoctestGuard|hold" crates/facade/src/lib.rs crates/facade/tests/api_surface.rs` を NAdam／RAdam／Optimizer で絞って確かめた結果、元から無い（NAdam・RAdam の facade 再エクスポートの正ガードは #2501 で済み）
+- テスト: `compat_sequential_fit_nadam_radam.rs`（新規。手動ループとの bit 一致〈decoupled の false／true〉・fit 分割・再 compile・不正 config〈beta／eps／lr／momentum_decay〉と拒否後の状態維持・AMP・`LrSchedule`）、`compat_sequential_param_groups.rs`（層別 lr の bit 一致）、`compat_sequential_model_io_compiled.rs`（往復。decoupled は false／true の両方）、`compat_sequential_model_io_tamper.rs`（kind 取り違え・bool 欄の改竄・`momentum_decay` 負値）、`functional/fit_tests.rs`、`compiled.rs` の `all_optimizers()`（添字 6 が Lbfgs の既存テストのため末尾に追加）
+- RAdam の両分岐: `beta2 = 0.9`（`rho_inf = 19`）では `rho_t` が t=1..5 で約 1.0〜4.6（`<= 5`、適応項なし）、t=6 で約 5.4（`> 5`）になる（`crates/autodiff/src/nn/optim/radam.rs` の `rho_t` の式）。fit・手動ループは 10 step（`batch_size = N` なので epoch 数 = step 数）で、両分岐を通る
+- #3839 からの申し送り: `tampered_kind_is_rejected`（`compat_sequential_model_io_compiled.rs`）と `compiled.rs` 内の `parse_compiled_rejects_schema_violations` が未知 kind の例に使っていた `"nadam"` は有効な kind になったため、承認外の値 `"rprop"` に差し替えた
+- 実機テストは該当なし（ホスト値型で GPU カーネルなし）。`DeviceParamStore` の常駐経路への結線は範囲外（変えていない）
+- 設計からの逸脱: なし。追跡表の行 #21 の「0.14.0 の区分」セルが語彙外の `公開（挙動のみ）` で `scripts/tally-compat-tracker.py` が終了コード 1 になっていたため、最小修正として値を語彙内の `公開` にし、補足を同じ行の「実装 issue」セルへ移した（意味は変えていない。スクリプトの語彙は広げていない）。ほかの行は触っていない

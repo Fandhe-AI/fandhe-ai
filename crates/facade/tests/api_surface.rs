@@ -4043,6 +4043,9 @@ fn fit_types_are_reachable_via_facade_only() {
     // イシュー #3839（設計 #3757・承認 #3769）: Adadelta／Adamax variant の到達性。
     let _optimizer_adadelta = Optimizer::Adadelta(fandhe_ai::optim::AdadeltaConfig::default());
     let _optimizer_adamax = Optimizer::Adamax(fandhe_ai::optim::AdamaxConfig::default());
+    // イシュー #3840（設計 #3757・承認 #3769）: NAdam／RAdam variant の到達性。
+    let _optimizer_nadam = Optimizer::NAdam(fandhe_ai::optim::NAdamConfig::default());
+    let _optimizer_radam = Optimizer::RAdam(fandhe_ai::optim::RAdamConfig::default());
 
     let config = FitConfig::new(3, 2).shuffle(true).drop_last(true);
     assert_eq!(config, FitConfig::new(3, 2).shuffle(true).drop_last(true));
@@ -21835,13 +21838,14 @@ fn collect_top_level_enum_variant_idents_detects_each_category() {
 // <https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）:
 // `compat::Optimizer` enum の variant 集合を承認形へ固定する正ガード。
 // `compat_optimizer_enum_has_lbfgs_variant`（Lbfgs の表記揺れ検出の固有検査）とは役割が
-// 異なり、本ガードは集合と順序の固定を担う。#3840 は本定数を 11 種へ広げるだけでよい。
-// 決定記録は `docs/compat-optimizer-variants-0.14.0-decision.md` §1・§14。
+// 異なり、本ガードは集合と順序の固定を担う。#3840 で NAdam・RAdam を足して 11 種になった。
+// 決定記録は `docs/compat-optimizer-variants-0.14.0-decision.md` §1・§14・§15。
 // =====================================================================
 
-/// 承認形の variant 列（宣言順）。NAdam・RAdam は #3840 で追加する。
-const APPROVED_COMPAT_OPTIMIZER_VARIANTS: [&str; 9] = [
-    "Sgd", "AdamW", "Adam", "RmsProp", "Adagrad", "Lamb", "Lbfgs", "Adadelta", "Adamax",
+/// 承認形の variant 列（宣言順）。Adadelta・Adamax は #3839、NAdam・RAdam は #3840 で追加した。
+const APPROVED_COMPAT_OPTIMIZER_VARIANTS: [&str; 11] = [
+    "Sgd", "AdamW", "Adam", "RmsProp", "Adagrad", "Lamb", "Lbfgs", "Adadelta", "Adamax", "NAdam",
+    "RAdam",
 ];
 
 /// `training.rs` のソースから `pub enum Optimizer {` の variant 列を取り出す。
@@ -21905,11 +21909,11 @@ fn compat_optimizer_enum_variants_detect_each_category() {
         format!("#[non_exhaustive]\npub enum Optimizer {{\n{body}}}\n")
     };
     let approved = APPROVED_COMPAT_OPTIMIZER_VARIANTS;
-    // 承認形 9 種を受理する。
+    // 承認形 11 種を受理する。
     assert!(compat_optimizer_enum_matches_approved(&build(&approved)).is_ok());
     // 順序の入れ替え。
     let mut swapped = approved.to_vec();
-    swapped.swap(7, 8);
+    swapped.swap(9, 10);
     assert!(compat_optimizer_enum_matches_approved(&build(&swapped)).is_err());
     // 表記揺れ。
     let mut typo = approved.to_vec();
@@ -21917,14 +21921,21 @@ fn compat_optimizer_enum_variants_detect_each_category() {
     assert!(compat_optimizer_enum_matches_approved(&build(&typo)).is_err());
     // 承認外の追加。
     let mut extra = approved.to_vec();
-    extra.push("NAdam");
+    extra.push("Rprop");
     assert!(compat_optimizer_enum_matches_approved(&build(&extra)).is_err());
     // 欠落。
-    assert!(compat_optimizer_enum_matches_approved(&build(&approved[..8])).is_err());
+    assert!(compat_optimizer_enum_matches_approved(&build(&approved[..10])).is_err());
     // 別名への置き換え。
     let mut alias = approved.to_vec();
     alias[8] = "AdaMax";
     assert!(compat_optimizer_enum_matches_approved(&build(&alias)).is_err());
+    // NAdam・RAdam の表記揺れ・別名。
+    let mut nadam_typo = approved.to_vec();
+    nadam_typo[9] = "Nadam";
+    assert!(compat_optimizer_enum_matches_approved(&build(&nadam_typo)).is_err());
+    let mut radam_alias = approved.to_vec();
+    radam_alias[10] = "RAdamW";
+    assert!(compat_optimizer_enum_matches_approved(&build(&radam_alias)).is_err());
     // 宣言 0 件・2 件は Err。
     assert!(compat_optimizer_enum_variants_of("pub enum Other { A }").is_err());
     let one = build(&approved);

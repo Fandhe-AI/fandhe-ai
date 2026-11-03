@@ -17,7 +17,7 @@ use super::{FunctionalBuilder, FunctionalModel};
 use crate::compat::{FitConfig, History, Loss, Optimizer, Sequential};
 use crate::optim::{
     AdadeltaConfig, AdagradConfig, AdamConfig, AdamWConfig, AdamaxConfig, LambConfig, LbfgsConfig,
-    RmsPropConfig, SgdConfig,
+    NAdamConfig, RAdamConfig, RmsPropConfig, SgdConfig,
 };
 use crate::{AutodiffError, Tensor};
 
@@ -141,6 +141,30 @@ fn six_optimizers() -> Vec<(&'static str, Optimizer)> {
                 beta2: 0.99,
                 eps: 1e-7,
                 weight_decay: 0.01,
+            }),
+        ),
+        // イシュー #3840: NAdam・RAdam も FunctionalModel の compile で使える。
+        (
+            "nadam",
+            Optimizer::NAdam(NAdamConfig {
+                lr: 0.01,
+                beta1: 0.8,
+                beta2: 0.99,
+                eps: 1e-7,
+                weight_decay: 0.01,
+                momentum_decay: 0.01,
+                decoupled_weight_decay: true,
+            }),
+        ),
+        (
+            "radam",
+            Optimizer::RAdam(RAdamConfig {
+                lr: 0.01,
+                beta1: 0.8,
+                beta2: 0.9,
+                eps: 1e-7,
+                weight_decay: 0.01,
+                decoupled_weight_decay: false,
             }),
         ),
     ]

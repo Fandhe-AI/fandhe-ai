@@ -1686,3 +1686,9 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - 検証の順: キー集合の完全一致 → `align_corners`・mode → `scale_len` の上限（確保の前）→ `scale_i` の型と null 詰め → 意味の範囲（0 以下・`-0.0` は構築子が `Autodiff` で拒否）。保存前検査は `collect_checked_state` の 1 か所で、Functional 形式も共有する。
 - kind allowlist は 70 → 71 種。旧リーダー（0.13.0 以前）は未知 kind を `UnsupportedModel` で拒否する（前方互換なし。`docs/migration/0.14.0.md` §3.4）。ONNX export は `UnsupportedLayer` のまま。
 - 設計記録は `docs/autodiff-spatial-layers-decision.md` §9・§10。tolerance・baseline・依存は不変。
+
+## 追補（イシュー #3839・#3840。optimizer kind の追加）
+
+- `compiled.optimizer.kind` に `adadelta`・`adamax`（#3839）、`nadam`・`radam`（#3840）を追加した。設計は `docs/compat-optimizer-variants-0.14.0-decision.md` §3・§14・§15
+- config のキー集合は kind ごとの固定: adadelta は `lr, rho, eps, weight_decay`、adamax は adam 系と同じ 5 キー、nadam は `lr, beta1, beta2, eps, weight_decay, momentum_decay, decoupled_weight_decay`、radam は `lr, beta1, beta2, eps, weight_decay, decoupled_weight_decay`。bool 欄 `decoupled_weight_decay` は JSON の `true`／`false` だけを受理する
+- `format_version` は 2 のまま。0.13.0 以前のリーダーは新しい kind を `UnsupportedModel` で拒否する（前方互換なし）。新しいリーダーは旧ファイルを読める

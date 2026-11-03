@@ -73,7 +73,8 @@ use fandhe_ai::interop::safetensors::{
     load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes,
 };
 use fandhe_ai::optim::{
-    AdadeltaConfig, AdamConfig, AdamWConfig, AdamaxConfig, LbfgsConfig, RmsPropConfig, SgdConfig,
+    AdadeltaConfig, AdamConfig, AdamWConfig, AdamaxConfig, LbfgsConfig, NAdamConfig, RAdamConfig,
+    RmsPropConfig, SgdConfig,
 };
 
 mod common;
@@ -822,8 +823,19 @@ fn optimizer_kind_swap_is_rejected() {
     let rms = || compiled(Optimizer::RmsProp(RmsPropConfig::default()), "rmsprop");
     let adamax = || compiled(Optimizer::Adamax(AdamaxConfig::default()), "adamax");
     let adadelta = || compiled(Optimizer::Adadelta(AdadeltaConfig::default()), "adadelta");
+    let nadam = || compiled(Optimizer::NAdam(NAdamConfig::default()), "nadam");
+    let radam = || compiled(Optimizer::RAdam(RAdamConfig::default()), "radam");
     type Build<'a> = &'a dyn Fn() -> Fx;
     let cases: Vec<(Build, &str, &str, Want)> = vec![
+        // イシュー #3840: NAdam（7 キー）・RAdam（6 キー）・adam 系（5 キー）は互いに
+        // config のキー集合が違う → config の厳密なキー検査で拒否される。
+        (&nadam, "nadam", "radam", Want::Manifest),
+        (&radam, "radam", "nadam", Want::Manifest),
+        (&radam, "radam", "adam", Want::Manifest),
+        (&adam, "adam", "radam", Want::Manifest),
+        (&nadam, "nadam", "adam", Want::Manifest),
+        (&nadam, "nadam", "sgd", Want::Manifest),
+        (&nadam, "nadam", "lbfgs", Want::Manifest),
         // イシュー #3839: Adamax は adam 系と config のキー集合が同じ → 種別マーカー不一致。
         (&adamax, "adamax", "adam", Want::Autodiff),
         (&adam, "adam", "adamax", Want::Autodiff),
@@ -852,6 +864,44 @@ fn optimizer_kind_swap_is_rejected() {
         );
         fx.reject_text(&format!("{from} -> {to}"), &t, want);
     }
+}
+
+/// イシュー #3840: NAdam・RAdam の bool 欄（`decoupled_weight_decay`）は JSON の
+/// `true`／`false` 以外（数値・文字列・null）を `Manifest` で拒否し、`momentum_decay` の
+/// 範囲外は `NAdam::new` が `Autodiff` で拒否する。
+#[test]
+fn nadam_radam_config_tampering_is_rejected() {
+    for (fx, label) in [
+        (
+            compiled(Optimizer::NAdam(NAdamConfig::default()), "nadam"),
+            "nadam",
+        ),
+        (
+            compiled(Optimizer::RAdam(RAdamConfig::default()), "radam"),
+            "radam",
+        ),
+    ] {
+        let t = fx.text();
+        for bad in ["1", "0", "\"false\"", "null"] {
+            let tampered = replace_once(
+                &t,
+                "\"decoupled_weight_decay\":false",
+                &format!("\"decoupled_weight_decay\":{bad}"),
+            );
+            fx.reject_text(
+                &format!("{label} decoupled_weight_decay={bad}"),
+                &tampered,
+                Want::Manifest,
+            );
+        }
+    }
+    let fx = compiled(Optimizer::NAdam(NAdamConfig::default()), "nadam");
+    let t = replace_once(
+        &fx.text(),
+        "\"momentum_decay\":0.004",
+        "\"momentum_decay\":-0.5",
+    );
+    fx.reject_text("nadam momentum_decay<0", &t, Want::Autodiff);
 }
 
 #[test]

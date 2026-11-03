@@ -38,7 +38,7 @@ use crate::Tensor;
 use crate::optim::ParamGroup;
 use crate::optim::{
     AdadeltaConfig, AdagradConfig, AdamConfig, AdamWConfig, AdamaxConfig, GradScalerConfig,
-    LambConfig, LbfgsConfig, RmsPropConfig, SgdConfig,
+    LambConfig, LbfgsConfig, NAdamConfig, RAdamConfig, RmsPropConfig, SgdConfig,
 };
 // facade は `LbfgsLineSearch` を再エクスポートしない（承認範囲外）。ここは private use で、
 // manifest 文字列との相互変換にだけ使う（`api_surface` の公開面検査の対象外）。
@@ -73,6 +73,8 @@ fn optimizer_lr(o: &Optimizer) -> f32 {
         Optimizer::Lbfgs(c) => c.lr,
         Optimizer::Adadelta(c) => c.lr,
         Optimizer::Adamax(c) => c.lr,
+        Optimizer::NAdam(c) => c.lr,
+        Optimizer::RAdam(c) => c.lr,
     }
 }
 
@@ -246,6 +248,8 @@ fn optimizer_kind(o: &Optimizer) -> &'static str {
         Optimizer::Lbfgs(_) => "lbfgs",
         Optimizer::Adadelta(_) => "adadelta",
         Optimizer::Adamax(_) => "adamax",
+        Optimizer::NAdam(_) => "nadam",
+        Optimizer::RAdam(_) => "radam",
     }
 }
 
@@ -321,6 +325,29 @@ fn config_fields(o: &Optimizer) -> Vec<(String, String)> {
             real("beta2", c.beta2),
             real("eps", c.eps),
             real("weight_decay", c.weight_decay),
+        ],
+        Optimizer::NAdam(c) => vec![
+            real("lr", c.lr),
+            real("beta1", c.beta1),
+            real("beta2", c.beta2),
+            real("eps", c.eps),
+            real("weight_decay", c.weight_decay),
+            real("momentum_decay", c.momentum_decay),
+            (
+                "decoupled_weight_decay".into(),
+                c.decoupled_weight_decay.to_string(),
+            ),
+        ],
+        Optimizer::RAdam(c) => vec![
+            real("lr", c.lr),
+            real("beta1", c.beta1),
+            real("beta2", c.beta2),
+            real("eps", c.eps),
+            real("weight_decay", c.weight_decay),
+            (
+                "decoupled_weight_decay".into(),
+                c.decoupled_weight_decay.to_string(),
+            ),
         ],
         Optimizer::Lbfgs(c) => vec![
             real("lr", c.lr),
@@ -420,6 +447,25 @@ fn render_param_groups(groups: &[ParamGroup]) -> String {
 
 const CONFIG_CTX: &str = "compiled.optimizer.config";
 const ADAM_LIKE_KEYS: [&str; 5] = ["lr", "beta1", "beta2", "eps", "weight_decay"];
+/// NAdam の config キー集合（イシュー #3840）。`config_fields` の描画順と一致させる。
+const NADAM_KEYS: [&str; 7] = [
+    "lr",
+    "beta1",
+    "beta2",
+    "eps",
+    "weight_decay",
+    "momentum_decay",
+    "decoupled_weight_decay",
+];
+/// RAdam の config キー集合（イシュー #3840）。`config_fields` の描画順と一致させる。
+const RADAM_KEYS: [&str; 6] = [
+    "lr",
+    "beta1",
+    "beta2",
+    "eps",
+    "weight_decay",
+    "decoupled_weight_decay",
+];
 
 /// `optimizer` object（`kind` の allowlist と kind ごとの固定キー集合）を読む。
 /// `kind` を先に読み、`lbfgs` だけ `history_len` を加えたキー集合で厳格に照合する。
@@ -593,6 +639,29 @@ fn parse_non_lbfgs(kind: &str, config: &Json) -> Result<Optimizer, ModelIoError>
                 beta2: p.f32("beta2")?,
                 eps: p.f32("eps")?,
                 weight_decay: p.f32("weight_decay")?,
+            }))
+        }
+        "nadam" => {
+            let p = Params::named(CONFIG_CTX, config, &NADAM_KEYS)?;
+            Ok(Optimizer::NAdam(NAdamConfig {
+                lr: p.f32("lr")?,
+                beta1: p.f32("beta1")?,
+                beta2: p.f32("beta2")?,
+                eps: p.f32("eps")?,
+                weight_decay: p.f32("weight_decay")?,
+                momentum_decay: p.f32("momentum_decay")?,
+                decoupled_weight_decay: p.bool("decoupled_weight_decay")?,
+            }))
+        }
+        "radam" => {
+            let p = Params::named(CONFIG_CTX, config, &RADAM_KEYS)?;
+            Ok(Optimizer::RAdam(RAdamConfig {
+                lr: p.f32("lr")?,
+                beta1: p.f32("beta1")?,
+                beta2: p.f32("beta2")?,
+                eps: p.f32("eps")?,
+                weight_decay: p.f32("weight_decay")?,
+                decoupled_weight_decay: p.bool("decoupled_weight_decay")?,
             }))
         }
         other => Err(ModelIoError::UnsupportedModel {
@@ -991,6 +1060,24 @@ mod tests {
                 eps: 1e-7,
                 weight_decay: 0.01,
             }),
+            // イシュー #3840。同様に末尾へ置く。
+            Optimizer::NAdam(NAdamConfig {
+                lr: 0.003,
+                beta1: 0.85,
+                beta2: 0.99,
+                eps: 1e-7,
+                weight_decay: 0.01,
+                momentum_decay: 0.003,
+                decoupled_weight_decay: false,
+            }),
+            Optimizer::RAdam(RAdamConfig {
+                lr: 0.002,
+                beta1: 0.85,
+                beta2: 0.99,
+                eps: 1e-7,
+                weight_decay: 0.01,
+                decoupled_weight_decay: true,
+            }),
         ]
     }
 
@@ -1070,7 +1157,7 @@ mod tests {
         assert!(is_unsupported(&good.replace("cross_entropy", "x")));
         // adamw の config のまま lbfgs にすると config のキー集合・history_len が合わず Manifest。
         assert!(is_manifest(&good.replace("\"adamw\"", "\"lbfgs\"")));
-        assert!(is_unsupported(&good.replace("\"adamw\"", "\"nadam\"")));
+        assert!(is_unsupported(&good.replace("\"adamw\"", "\"rprop\"")));
         // 重複キー
         let dup = good.replace(
             "\"optimizer.num_slots.u64_u16x4\"",
