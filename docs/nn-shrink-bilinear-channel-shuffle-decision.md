@@ -333,7 +333,7 @@
 
 - 追跡表の **行 # 14**（C7）。イシュー本文は「項目 15」と書くが、§1.0・§2.0 と同じく 1 ずれている。更新対象は # 14 行である。
 - 流れ: 設計 #3746 → 承認 #3768（論点 3・4）→ 実装 #3822 → 実機 parity #3860（`<cuda-node>`）・#3861（`<metal-node>`）。保存・export の横断方針は #3750（設計中）。
-- **承認根拠: なし。未承認（#3768 待ち）。**
+- **承認根拠: #3768 の所有者の回答コメント 6554564412（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>）。論点 3（C1〜C9 は推奨形で一括承認。ChannelShuffle は「dim は 1 で固定」）と論点 4（model_io は kind を追加し `format_version` 2 据え置き、ONNX export は 0.14.0 に含めず `UnsupportedLayer`）。**
 - 現状: `crates/` に `channel_shuffle`／`ChannelShuffle` は 0 件。棚卸し `docs/compat-unlisted-holds-inventory.md:77` が「未公開・起票する（優先度は低い。`add_pixel_shuffle` と同型。`reshape`／`permute` で合成できる）」と分類した。先例は PixelShuffle（`crates/autodiff/src/nn/pixel_shuffle.rs`・`docs/autodiff-pixel-shuffle-decision.md`）。
 
 | 案 | 内容 | 利点 | 欠点・影響 |
@@ -471,4 +471,19 @@
 - A08: forward と forward_host で同じ `channel_shuffle_out_shape` を使い、判定の迂回経路を作らない。1 行委譲は正ガードで固定する。
 - REQ-12: 内部の層型を公開シグネチャに出さない。秘密情報・ホスト名は書かない。
 - スコープ外: 専用 GPU カーネル、層型名の facade 公開（#3022）、ONNX export（#3750）、`Tensor<f32>`／`Tape` 上のメソッド。新しいイシューは起票しない（所有者の承認事項）。
-- #3822 は実機 parity が済むまで `Refs` 運用とする。
+- #3822 は実機 parity が済むまで `Refs` 運用とする（#3711 ツリーでの `Closes` 読み替えは PR 側で判断する）。
+
+### §3.13 実装記録（イシュー #3822・親 #3813）
+
+- 置き場所: 新モジュール `crates/autodiff/src/nn/channel_shuffle.rs`（Q3）。`channel_shuffle_out_shape`（`pub(crate)`。検査順: rank 3 未満 → `groups == 0`／C の非整除 → 空間軸の積の `checked_mul`）、`channel_shuffle_forward`（`pub(crate)`。`groups == 0` を `InvalidArgument` で拒否してから `contiguous → reshape([N,g,C/g,S]) → permute([0,2,1,3]) → contiguous → reshape`）、層 `nn::ChannelShuffle`（`new`・`groups`・`forward`・`forward_host`。`Module` 実装は `nn/module.rs`）。`Var::channel_shuffle` は `crates/autodiff/src/var.rs` の 1 行委譲。facade は `compat::Sequential::add_channel_shuffle`（`LayerSpec::ChannelShuffle`）。チャネル軸は dim 1 固定（承認）。
+- 不変条件: 新規 `Op`・`BackendOps`・カーネル・`unsafe`・依存はゼロ。`grad.rs`・`eval.rs`・`tape.rs`・`lib.rs`（facade 含む）は無変更。tolerance・baseline・ガードレール閾値は変えていない。層型と `channel_shuffle_forward` は facade へ再エクスポートしない（#3022）。
+- 保存・export（Q5・Q6）: model_io に kind `channel_shuffle`（`params`: `groups`）を追加し、`format_version` は 2 のまま。kind 数は 74 → 75（#3750 R9 の加算規則による必須更新で、テストを弱める変更ではない）。`groups == 0` の manifest は `add_channel_shuffle` 経由で `Autodiff` の型付きエラーになる。ONNX export は追加せず `UnsupportedLayer`。`onnx-interop` は無変更。
+- 正ガード（`crates/facade/tests/api_surface.rs` の末尾の #3822 節）: `var_channel_shuffle_method_is_thin_delegation`（`_detects_offense` 付き）、`var_channel_shuffle_method_is_reachable_via_facade_only`、`compat_sequential_channel_shuffle_add_method_has_approved_signature`（`_detects_offense` 付き）、`workspace_declares_channel_shuffle_facade_fn_names_only_in_approved_locations`、`facade_does_not_reexport_or_declare_channel_shuffle_layer`（`_detects_each_category` 付き）。反転対象の否定ガード・保留 doctest は元から無かった。保留 doctest ガードは新設していない（Q4 の (a)）。
+- テスト: autodiff 単体（`nn::channel_shuffle::tests`）、`crates/autodiff/tests/nn_channel_shuffle.rs`（手計算・rank 3/4/5・逆置換・g=1／g=C 恒等・大きさ 0 の軸〈空テンソルとして受理〉・拒否と孤児ノード無し・forward と forward_host の bit 一致・中央差分）、`create_graph_channel_shuffle.rs`（二階を有限差分と突合）、facade の `compat_sequential_channel_shuffle.rs`（値・遅延検査・fit・save/load 往復・manifest 改竄・ONNX `UnsupportedLayer`）、`channel_shuffle_backend_parity.rs`・`compat_sequential_channel_shuffle_backend_parity.rs`（CPU 対 NaiveOps の bit 一致は CI、`cuda_*`／`metal_*` は `#[ignore]`）。model_io の単体表（往復・非信頼入力・不正値）に channel_shuffle を追加した。
+- 逸脱と注記:
+  - create_graph のテストは `create_graph.rs` に足さず別ファイル `create_graph_channel_shuffle.rs` にした（並列 PR との競合回避。§1.13・§2.13 と同じ）。
+  - 計画の `channel_shuffle_facade.rs`・`compat_sequential_model_io_layers.rs` 追記・`interop_onnx_export_sequential.rs` 追記は、重複を避けて `compat_sequential_channel_shuffle.rs` 1 本に集約した（pixel_shuffle の先例と同じ構成）。検証内容は変えていない。
+  - `Var` の doctest は autodiff クレートで動くため `fandhe_ai_autodiff::Tape` を使う。facade だけで通る例は `add_channel_shuffle` の doctest と `compat_sequential_channel_shuffle.rs` が担う。
+  - `train_gpu_parity.rs` の `CASES` への登録は §1.13 と同じ理由で見送り、Phase 10（#3860・#3861）へ送る。
+  - PyTorch の rank 条件・大きさ 0 の挙動は参照版で確認できておらず、「未確認」のまま残す。
+- GPU 実機 parity は未実測（`docs/perf/logs/channel-shuffle-3822/README.md`）。
