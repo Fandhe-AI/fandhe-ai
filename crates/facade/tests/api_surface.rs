@@ -49077,3 +49077,136 @@ fn compat_sequential_fractional_max_pool_is_reachable_via_facade_only() {
         .unwrap();
     assert!(too_big.predict(&x).is_err());
 }
+// ---------------------------------------------------------------------------
+// #3828 節: 新しい 12 層の model_io kind と ONNX export 非対応の正ガード
+// （親 #3813・横断方針 #3750・承認 #3768 の論点 4。設計記録
+// `docs/compat-new-layers-io-export-decision.md` §15）。
+//
+// 反転対象の否定ガード・保留 doctest ガードは無い（新しい kind と model_io／export に関する
+// 否定ガードは本ファイル・`src/lib.rs` に 0 件。設計 §1）。そのため、承認済みの対応表
+// （variant → kind）と「export に腕を足さない」承認形を、すり替え検出の自己テストつきで固定する。
+// ---------------------------------------------------------------------------
+
+/// 承認済みの 12 組（`LayerSpec` の variant 名 → 保存 kind）。0.14.0 で `format_version` 2 のまま足す。
+const APPROVED_NEW_LAYER_KINDS_3828: [(&str, &str); 12] = [
+    ("Hardshrink", "hardshrink"),
+    ("Softshrink", "softshrink"),
+    ("BatchNorm3d", "batch_norm3d"),
+    ("ChannelShuffle", "channel_shuffle"),
+    ("AdaptiveAvgPool3d", "adaptive_avg_pool3d"),
+    ("AdaptiveMaxPool3d", "adaptive_max_pool3d"),
+    ("LpPool1d", "lp_pool1d"),
+    ("LpPool2d", "lp_pool2d"),
+    ("LpPool3d", "lp_pool3d"),
+    ("FractionalMaxPool2d", "fractional_max_pool2d"),
+    ("FractionalMaxPool3d", "fractional_max_pool3d"),
+    ("UpsampleScaleFactor", "upsample_scale_factor"),
+];
+
+/// `model_io.rs` のソースから `spec_kind` 内の `LayerSpec::V {..} => Some("k")` 対応を調べ、
+/// 承認済み 12 組との差分（欠落・kind 違い・`spec_from_kind` 側の文字列欠落）を違反として返す。
+fn new_layer_kind_violations_3828(src: &str) -> Vec<String> {
+    let mut offenses = Vec::new();
+    let start = src.find("fn spec_kind(").unwrap_or(src.len());
+    let body = &src[start..];
+    let end = body.find("\n}\n").unwrap_or(body.len());
+    let kind_fn = &body[..end];
+    let from_start = src.find("fn spec_from_kind(").unwrap_or(src.len());
+    let from_fn = &src[from_start..];
+    for (variant, kind) in APPROVED_NEW_LAYER_KINDS_3828 {
+        let want = format!("LayerSpec::{variant} {{ .. }} => Some(\"{kind}\"),");
+        if !kind_fn.contains(&want) {
+            offenses.push(format!("spec_kind に `{want}` が無い"));
+        }
+        if !from_fn.contains(&format!("\"{kind}\"")) {
+            offenses.push(format!("spec_from_kind に kind `{kind}` が無い"));
+        }
+    }
+    offenses
+}
+
+/// export 側ソースに新しい層・未承認 op が現れたら違反（0.14.0 では export しない。`UnsupportedLayer`）。
+fn export_new_layer_arm_violations_3828(export_nn: &str, export_ops: &str) -> Vec<String> {
+    let mut offenses = Vec::new();
+    for name in [
+        "Hardshrink",
+        "Softshrink",
+        "BatchNorm3d",
+        "ChannelShuffle",
+        "AdaptiveAvgPool3d",
+        "AdaptiveMaxPool3d",
+        "LpPool",
+        "FractionalMaxPool",
+        "UpsampleScaleFactor",
+    ] {
+        if export_nn.contains(name) {
+            offenses.push(format!("export_nn.rs に `{name}` の腕がある"));
+        }
+    }
+    let list_start = export_ops.find("SUPPORTED_OP_TYPES").unwrap_or(0);
+    let list = &export_ops[list_start..];
+    let list = &list[..list.find("];").unwrap_or(list.len())];
+    for op in ["\"Shrink\"", "\"LpPool\"", "\"Resize\""] {
+        if list.contains(op) {
+            offenses.push(format!("SUPPORTED_OP_TYPES に {op} がある"));
+        }
+    }
+    offenses
+}
+
+/// 正ガード: 新しい 12 層の保存 kind が承認済みの対応どおりに実在する。
+#[test]
+fn model_io_new_layer_kinds_match_approved_mapping_issue_3828() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/compat/model_io.rs"));
+    let offenses = new_layer_kind_violations_3828(&src);
+    assert!(offenses.is_empty(), "承認外の差分: {offenses:#?}");
+}
+
+/// 正ガード: ONNX export は新しい層に腕を持たず、未承認 op も allowlist に無い（`UnsupportedLayer`）。
+#[test]
+fn onnx_export_has_no_arm_for_new_layers_issue_3828() {
+    let dir = facade_crate_root().join("../onnx-interop/src/onnx");
+    let nn = read_to_string_or_panic(&dir.join("export_nn.rs"));
+    let ops = read_to_string_or_panic(&dir.join("export_ops.rs"));
+    let offenses = export_new_layer_arm_violations_3828(&nn, &ops);
+    assert!(offenses.is_empty(), "承認外の差分: {offenses:#?}");
+}
+
+/// 自己テスト: kind の改名・variant のすり替え・欠落・export の腕の追加を検出し、承認形は 0 件。
+#[test]
+fn new_layer_guards_issue_3828_detect_swaps() {
+    let mut good = String::from("fn spec_kind(s: &S) {\n");
+    for (v, k) in APPROVED_NEW_LAYER_KINDS_3828 {
+        good.push_str(&format!("    LayerSpec::{v} {{ .. }} => Some(\"{k}\"),\n"));
+    }
+    good.push_str("}\nfn spec_from_kind() {\n");
+    for (_, k) in APPROVED_NEW_LAYER_KINDS_3828 {
+        good.push_str(&format!("    \"{k}\" => 1,\n"));
+    }
+    good.push_str("}\n");
+    assert!(new_layer_kind_violations_3828(&good).is_empty());
+    // kind の改名
+    let renamed = good.replace("Some(\"hardshrink\")", "Some(\"hard_shrink\")");
+    assert!(!new_layer_kind_violations_3828(&renamed).is_empty());
+    // variant のすり替え
+    let swapped = good.replace(
+        "LayerSpec::Softshrink { .. } => Some(\"softshrink\")",
+        "LayerSpec::Softshrink { .. } => Some(\"hardshrink\")",
+    );
+    assert!(!new_layer_kind_violations_3828(&swapped).is_empty());
+    // 欠落
+    let missing = good.replace(
+        "    LayerSpec::LpPool3d { .. } => Some(\"lp_pool3d\"),\n",
+        "",
+    );
+    assert!(!new_layer_kind_violations_3828(&missing).is_empty());
+    // spec_from_kind 側の欠落
+    let no_from = good.replace("    \"channel_shuffle\" => 1,\n", "");
+    assert!(!new_layer_kind_violations_3828(&no_from).is_empty());
+    // export 側
+    let ops_ok = "SUPPORTED_OP_TYPES = [\"Gemm\"];";
+    assert!(export_new_layer_arm_violations_3828("fn f() {}", ops_ok).is_empty());
+    assert!(!export_new_layer_arm_violations_3828("x LpPool y", ops_ok).is_empty());
+    let ops_bad = "SUPPORTED_OP_TYPES = [\"Resize\"];";
+    assert!(!export_new_layer_arm_violations_3828("", ops_bad).is_empty());
+}
