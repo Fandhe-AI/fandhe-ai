@@ -704,6 +704,17 @@ const CASES: &[Case] = &[
         run: run_scatter_reduce_amin,
         reject: None,
     },
+    // `Prod`（イシュー #3977・決定記録 §74）。区分つき scan 補助の構造（`Gather`／`Narrow`／`Concat`／`Mul`／
+    // `Add`／`Where`）で、値は 1 階と同じホスト関数。経路は同じく H。実機は未実測（#3857・#3859）。
+    Case {
+        name: "scatter_reduce_prod",
+        family: "scatter_reduce",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::NoMatMul,
+        run: run_scatter_reduce_prod,
+        reject: None,
+    },
     // 短時間フーリエ変換族（イシュー #3804・決定記録 §42/§63）。`fft_stft`／`fft_istft` は CUDA・Metal・ROCm で
     // override されておらずホストへフォールバックし、随伴 Op（`StftAdjoint`／`IstftAdjoint`）もホスト関数
     // なので H。構造に MatMul は無い。実機は未実測（#3857・#3859）。
@@ -2029,6 +2040,10 @@ fn run_scatter_reduce_amax(tp: &Tapes) -> Outputs {
 
 fn run_scatter_reduce_amin(tp: &Tapes) -> Outputs {
     run_scatter_reduce_body(tp, fandhe_ai::ScatterReduceMode::Amin)
+}
+
+fn run_scatter_reduce_prod(tp: &Tapes) -> Outputs {
+    run_scatter_reduce_body(tp, fandhe_ai::ScatterReduceMode::Prod)
 }
 
 /// STFT 族（#3804）の損失 `sum(y ⊙ y ⊙ c)`。`istft` は `[5, 5, 2]` のスペクトル、`stft` は長さ 16 の信号。

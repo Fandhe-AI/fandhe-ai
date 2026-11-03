@@ -38,8 +38,8 @@
 //! だけに流れる）。`index_add` の `alpha` は持たない（呼び出し側が `source` を事前に
 //! スケールすれば等価。隠し定数ノードが葉プレフィックスに入る副作用を避ける）。
 //! activation checkpoint・f64 自動微分経路は対象外。高階微分（`create_graph`）は `scatter_reduce` の
-//! Sum・Mean・Amax・Amin のみ対応（イシュー #3802・決定記録 `autodiff-higher-order-grad-decision.md` §41・§62。
-//! `Prod` は #3803 の scan 補助待ちで fail-closed）。
+//! Sum・Mean・Amax・Amin（イシュー #3802・決定記録 `autodiff-higher-order-grad-decision.md` §41・§62）と
+//! Prod（イシュー #3977・§74。区分つき scan 補助の上に載る）に対応。
 //!
 //! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{scatter_reduce,index_add,index_copy,masked_scatter}` と `ScatterReduceMode`（クレートルート）。本モジュール自体は facade から再エクスポートしない。
 //! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った

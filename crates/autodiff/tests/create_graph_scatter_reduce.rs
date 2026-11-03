@@ -1,5 +1,5 @@
-//! `Op::IndexedScatterReduce`（`Var::scatter_reduce`。Sum・Mean・Amax・Amin）の `create_graph` 対応
-//! （イシュー #3802・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41、実装記録 §62）の
+//! `Op::IndexedScatterReduce`（`Var::scatter_reduce`。Sum・Mean・Amax・Amin、およびイシュー #3977 の Prod）の
+//! `create_graph` 対応（イシュー #3802・決定記録 `docs/autodiff-higher-order-grad-decision.md` §41、実装記録 §62）の
 //! 受け入れ条件を確かめる統合テスト。
 //!
 //! - `first_order()` と `cg.grad` が 1 階 `Tape::backward` と bit 一致する（4 mode × `include_self` ×
@@ -7,7 +7,7 @@
 //! - Hessian を独立な有限差分（1 階解析勾配の中央差分）と REQ-2 統一複合判定で突合する。
 //! - 孫テープ（`jvp_create_graph`）の出力を独立参照と突合する。
 //! - Amax／Amin のタイは均等分配、NaN の結果は勾配 0 で二階も有限。
-//! - 総括判定: ±inf 入力・非有限／過大な上流・`Prod` は子テープへ書く前に拒否され、`child` は空のまま
+//! - 総括判定: ±inf 入力・非有限／過大な上流・`Prod` の NaN／overflow／underflow は子テープへ書く前に拒否され、`child` は空のまま
 //!   再試行できる。空の index は 1 階に揃う。
 //!
 //! GPU parity は `crates/facade/tests/create_graph_gpu_parity.rs`（実機待ち・`#[ignore]`）。
@@ -169,6 +169,13 @@ fn quad<'t>(tape: &'t Tape, y: &Var<'t>) -> BuildResult<'t> {
     y.mul(y)?.mul(&c)?.sum(None)
 }
 
+/// `sum(y ⊙ c)`（`y` に線形。零を含む多重線形な `Prod` の混合二階〈`∂²y/∂s_i∂s_j`〉が直接現れる）。
+fn lin<'t>(tape: &'t Tape, y: &Var<'t>) -> BuildResult<'t> {
+    let shape = shp(y);
+    let c = tape.var_no_grad(&t(common::det_pos(flat_len(&shape).max(1), 0.7), &shape));
+    y.mul(&c)?.sum(None)
+}
+
 struct Cfg {
     name: &'static str,
     x_shape: Vec<usize>,
@@ -204,7 +211,7 @@ fn cfgs() -> Vec<Cfg> {
     ]
 }
 
-const MODES: [Mode; 4] = [Mode::Sum, Mode::Mean, Mode::Amax, Mode::Amin];
+const MODES: [Mode; 5] = [Mode::Sum, Mode::Mean, Mode::Amax, Mode::Amin, Mode::Prod];
 
 /// 結合パラメータ `z = [x; src]` から `scatter_reduce` を作り二乗和損失へ流す。
 fn joint<'t>(tape: &'t Tape, z: &Var<'t>, c: &Cfg, mode: Mode, inc: bool) -> BuildResult<'t> {
@@ -482,7 +489,7 @@ where
 }
 
 #[test]
-fn inf_inputs_and_prod_are_rejected_with_empty_child() {
+fn inf_inputs_are_rejected_with_empty_child() {
     let idx = ti(vec![0, 0, 1], &[3]);
     let s = [1.0f32, 2.0, 3.0];
     for mode in MODES {
@@ -505,16 +512,129 @@ fn inf_inputs_and_prod_are_rejected_with_empty_child() {
             &[2],
         );
     }
-    // Prod は #3803 の scan 補助待ちで fail-closed のまま。
+}
+
+/// `Prod` の拒否範囲（実装記録 §74）: 触れられた位置の寄与の NaN、隣接スロットの積の overflow、
+/// underflow で二階が参照から外れる入力は、子テープへ書く前に型付きで拒否され、1 階は有限のまま。
+#[test]
+fn prod_nan_overflow_and_underflow_are_rejected_with_empty_child() {
+    let idx3 = ti(vec![0, 0, 0], &[3]);
+    // 触れられた位置の src の NaN。
     assert_rejected(
-        "Prod",
+        "Prod NaN src",
         |tp, x| {
-            let sv = tape_var(tp, &s);
-            scatter_reduce(x, 0, &idx, &sv, Mode::Prod, true)?.sum(None)
+            let sv = tape_var(tp, &[1.0, f32::NAN, 3.0]);
+            scatter_reduce(x, 0, &idx3, &sv, Mode::Prod, true)?.sum(None)
         },
         &[1.5, 2.5],
         &[2],
     );
+    // include_self の自己寄与（触れられた位置）の NaN。
+    assert_rejected(
+        "Prod NaN self",
+        |tp, x| {
+            let sv = tape_var(tp, &[1.0, 2.0, 3.0]);
+            scatter_reduce(x, 0, &idx3, &sv, Mode::Prod, true)?.sum(None)
+        },
+        &[f32::NAN, 2.5],
+        &[2],
+    );
+    // 隣接スロットの積が overflow する（排他的積は有限）。
+    assert_rejected(
+        "Prod overflow",
+        |tp, x| {
+            let sv = tape_var(tp, &[1e30, 1e-30]);
+            scatter_reduce(x, 0, &ti(vec![0, 0], &[2]), &sv, Mode::Prod, true)?.sum(None)
+        },
+        &[1e30, 2.5],
+        &[2],
+    );
+    // underflow で excl が 0 に潰れる。
+    assert_rejected(
+        "Prod underflow",
+        |tp, x| {
+            let sv = tape_var(tp, &[1e-30, 1e30, 1e30, 1e30]);
+            scatter_reduce(x, 0, &ti(vec![0; 4], &[4]), &sv, Mode::Prod, true)?.sum(None)
+        },
+        &[1e-30, 2.5],
+        &[2],
+    );
+}
+
+/// 零が 0／1／2 個の区間と自己寄与の零で、除算を使わない構造の混合二階が有限差分と一致する。
+/// 除算形（総積÷各値）や最初の零より後ろを落とす形では、`[2, 0, 3]` の零より後ろの混合二階を取りこぼす。
+#[test]
+fn prod_zero_patterns_match_finite_difference() {
+    for (name, s0, x_self, inc) in [
+        ("zero x0", vec![2.0f32, 3.0, 1.5], 1.25f32, false),
+        ("zero x1 (middle)", vec![2.0, 0.0, 3.0], 1.25, false),
+        ("zero x2 (both)", vec![0.0, 0.0, 3.0], 1.25, false),
+        ("self zero", vec![2.0, 3.0, 1.5], 0.0, true),
+        ("self zero + src zero", vec![2.0, 0.0, 1.5], 0.0, true),
+        ("inc nonzero", vec![0.0, 1.5, -2.0], 0.75, true),
+    ] {
+        let n = s0.len();
+        let ix = ti(vec![0; n], &[n]);
+        // 結合パラメータ z = [x; src]（x 単独・src 単独では零のとき Hessian が自明に 0 になる）。
+        let mut z0 = vec![x_self];
+        z0.extend_from_slice(&s0);
+        hessian_case(
+            name,
+            |tp, z| {
+                let x = z.narrow(0, 0, 1)?;
+                let s = z.narrow(0, 1, n)?;
+                let y = scatter_reduce(&x, 0, &ix, &s, Mode::Prod, inc)?;
+                lin(tp, &y)
+            },
+            &z0,
+            &[n + 1],
+        );
+    }
+}
+
+/// 桁の離れた寄与列 `[1e-30, 1e30]` は受理し、1 階・`cg.grad`・孫テープ（`child.backward`）が有限になる。
+#[test]
+fn prod_wide_range_pair_is_accepted_and_finite_at_three_stages() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0], &[1]));
+    let s = tape.var(&t(vec![1e-30, 1e30], &[2]));
+    let y = scatter_reduce(&x, 0, &ti(vec![0, 0], &[2]), &s, Mode::Prod, false).unwrap();
+    let w = tape.var(&t(vec![2.0], &[1]));
+    let loss = y.mul(&w).unwrap().sum(None).unwrap();
+    let first = tape.backward(&loss).unwrap();
+    assert!(
+        dense(first.get(&s).unwrap().unwrap())
+            .iter()
+            .all(|v| v.is_finite())
+    );
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gs = cg.grad(&s).unwrap().unwrap();
+    assert!(dense(gs.to_tensor()).iter().all(|v| v.is_finite()));
+    let cs = cg.child_var(&s).unwrap().unwrap();
+    let cw = cg.child_var(&w).unwrap().unwrap();
+    for p in 0..2 {
+        let seed = gs.narrow(0, p, 1).unwrap().sum(None).unwrap();
+        let row = child.backward(&seed).unwrap();
+        for v in [&cs, &cw] {
+            if let Some(g) = row.get(v).unwrap() {
+                assert!(dense(g).iter().all(|e| e.is_finite()), "seed {p}");
+            }
+        }
+    }
+}
+
+/// 未タッチ位置の NaN は素通しで、`Prod` の受理を妨げない。
+#[test]
+fn prod_untouched_nan_is_not_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.5, f32::NAN], &[2]));
+    let s = tape.var(&t(vec![2.0, 3.0], &[2]));
+    let y = scatter_reduce(&x, 0, &ti(vec![0, 0], &[2]), &s, Mode::Prod, true).unwrap();
+    let w = tape.var_no_grad(&t(vec![1.0, 0.0], &[2]));
+    let loss = y.mul(&w).unwrap().sum(None).unwrap();
+    assert!(tape.backward_create_graph(&loss, &child).is_ok());
 }
 
 #[test]

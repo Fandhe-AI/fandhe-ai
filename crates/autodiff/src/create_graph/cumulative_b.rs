@@ -102,13 +102,13 @@ impl Dims {
 }
 
 /// 段の上界 `v` が `STAGE_BOUND_GUARD`（`2^125`）以上、または NaN なら `true`（拒否側に倒す）。
-fn over_guard(v: f64) -> bool {
+pub(super) fn over_guard(v: f64) -> bool {
     v.is_nan() || v >= STAGE_BOUND_GUARD
 }
 
 /// 入口規則。`g` に非有限があれば拒否、`x` に `±inf` があれば拒否（NaN は通す）、
 /// `max|g|·max(1, n)` が `STAGE_BOUND_GUARD` 以上でも拒否する。
-fn check_entry(x: &[f32], g: &[f32], n: usize, what: &str) -> Result<(), AutodiffError> {
+pub(super) fn check_entry(x: &[f32], g: &[f32], n: usize, what: &str) -> Result<(), AutodiffError> {
     let mut max_g = 0f64;
     for &v in g {
         if !v.is_finite() {
@@ -176,7 +176,7 @@ fn nan_to_zero(v: &[f32]) -> Vec<f32> {
 
 /// 第 2 軸の走査量の上限（`norm_reparam.rs` と同じ値）。走査量は [`judge_cost`] で数え、超える入力は
 /// 計算量の fail-closed として拒否する（保守的。上限内の入力だけに保証を限る）。
-const JUDGE_BUDGET: usize = 1 << 27;
+pub(super) const JUDGE_BUDGET: usize = 1 << 27;
 
 /// 判定 1 lane の forward 側の走査量の係数（`n` 1 要素あたり。`steps = ⌈log2 n⌉`）。
 const FWD_PER_STEP: usize = 22;
@@ -206,7 +206,7 @@ fn judge_cost(lanes: usize, n: usize) -> usize {
     lanes.saturating_mul(fwd.saturating_add(n.saturating_mul(per_seed)))
 }
 
-fn judge_budget(cost: usize, what: &str) -> Result<(), AutodiffError> {
+pub(super) fn judge_budget(cost: usize, what: &str) -> Result<(), AutodiffError> {
     if cost <= JUDGE_BUDGET {
         Ok(())
     } else {
@@ -223,14 +223,14 @@ fn judge_budget(cost: usize, what: &str) -> Result<(), AutodiffError> {
 /// （`2^-53` の桁で、二階の 1 項が通る演算の回数倍）と、再現が子テープと 1 回の丸めだけずれる場合への
 /// 余裕で、相殺の大きい要素（`M ≫ |V|`）はこの項でも拒否される。CPU 以外（GPU の `exp` の実装・
 /// cumprod のカーネル）の差は見込まない（保証の対象外。§64.4）。
-const JUDGE_COEFF: f64 = 1.0 / 8_388_608.0;
+pub(super) const JUDGE_COEFF: f64 = 1.0 / 8_388_608.0;
 
 /// 二階の 1 要素の判定。`r` は参照値 `V` と大きさ `M`、`s` は構造の f32 の再現値 `V_str`。
 /// `|V_str − V| + coeff·M` が絶対 1e-5 未満か相対の半分以内（tolerance 定数は
 /// `tensor-core::tolerance` から読み、値は変えない）でなければ拒否する。外すのは f32 の再現と参照の
 /// **両方が NaN** で、参照の NaN が入力の NaN の届いたもの（taint 付き）の要素だけ（NaN は伝播させる
 /// 契約）。片側だけ NaN・演算で生まれた NaN・どちらかが `±inf` は拒否する。
-fn entry_check(r: Rf, s: f32, coeff: f64, what: &str) -> Result<(), AutodiffError> {
+pub(super) fn entry_check(r: Rf, s: f32, coeff: f64, what: &str) -> Result<(), AutodiffError> {
     if entry_ok(r, s, coeff) {
         return Ok(());
     }
@@ -240,7 +240,7 @@ fn entry_check(r: Rf, s: f32, coeff: f64, what: &str) -> Result<(), AutodiffErro
 }
 
 /// [`entry_check`] の規則（真なら受理）。
-fn entry_ok(r: Rf, s: f32, coeff: f64) -> bool {
+pub(super) fn entry_ok(r: Rf, s: f32, coeff: f64) -> bool {
     if s.is_nan() && r.v.is_nan() && r.t {
         return true;
     }
@@ -260,13 +260,13 @@ fn entry_ok(r: Rf, s: f32, coeff: f64) -> bool {
 /// 同じ計算値なので積では `Z` の累積誤差が打ち消し合い（`Π c = Z[a]·Π exp(…) / Z[b]`）、残るのは
 /// 両端の `Z`（正の項の和なので相対誤差は `n·2^-53` 以下）と演算ごとの丸めだけで、`n` について一次。大きくすると `g` の相殺で
 /// `d_x ≈ 0`・`M` の大きい良性の入力を拒否する。
-const HOST_COEFF: f64 = 1.0 / 68_719_476_736.0;
+pub(super) const HOST_COEFF: f64 = 1.0 / 68_719_476_736.0;
 
 /// ホストの 1 階（V3 の値）を、構造と丸めた中間値を共有しない f64 の参照 `refs` と比べる。規則は
 /// [`entry_check`] と同じで、余裕の係数だけ [`HOST_COEFF`]。`Logcumsumexp` のホストの 1 階
 /// （`logcumsumexp_vjp_host`）は f64 の prefix の差から係数を作るので、共通オフセットの上の小さな差を
 /// 失う入力（`[1e30, 1e30]`）で誤った値を返す。この照合はそれを `cg.grad` へ載せる前に拒否する。
-fn host_ref_check(refs: &[Rf], host: &[f32], what: &str) -> Result<(), AutodiffError> {
+pub(super) fn host_ref_check(refs: &[Rf], host: &[f32], what: &str) -> Result<(), AutodiffError> {
     if refs
         .iter()
         .zip(host)

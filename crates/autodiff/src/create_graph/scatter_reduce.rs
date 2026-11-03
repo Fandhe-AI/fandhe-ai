@@ -4,9 +4,9 @@
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `validate_ancestors`（入口検査）・
 //! `replay_op`（forward 再生）・`build_cgrads`（1 階 VJP の子テープ記録）から呼ばれる。
-//! 対象 mode は `Sum`・`Mean`・`Amax`・`Amin`。`Prod` は §41.11 が定める区分つき scan 補助
-//! （#3803 ①）の上に載る設計のため本イシューでは実装せず、fail-closed のままにする
-//! （`Op::supports_create_graph` が false。実装記録 §62 に理由を残す）。
+//! 対象 mode は `Sum`・`Mean`・`Amax`・`Amin`（イシュー #3802・実装記録 §62）と `Prod`
+//! （イシュー #3977・実装記録 §74。区分つき scan 補助 §64 の上に載る。構造と総括判定は兄弟
+//! [`super::scatter_reduce_prod`] に置き、本モジュールの `cgrad` が Prod のとき委譲する）。
 //!
 //! **方式**（値は 1 階 `grad.rs` の VJP と同じホスト関数 `scatter_reduce_vjp_host` の結果で、
 //! `push_v3` で載せる。構造は二階微分を流すためだけの線形な `Var` 合成）:
@@ -47,7 +47,7 @@ fn invalid(msg: String) -> AutodiffError {
     AutodiffError::Backward(format!("create_graph: {msg}"))
 }
 
-/// create_graph が受理する mode か（`Prod` と `#[non_exhaustive]` の未知 mode は false）。
+/// create_graph が受理する mode か（`#[non_exhaustive]` の未知 mode は false）。
 pub(crate) fn mode_supported(mode: ScatterReduceMode) -> bool {
     matches!(
         mode,
@@ -55,6 +55,7 @@ pub(crate) fn mode_supported(mode: ScatterReduceMode) -> bool {
             | ScatterReduceMode::Mean
             | ScatterReduceMode::Amax
             | ScatterReduceMode::Amin
+            | ScatterReduceMode::Prod
     )
 }
 
@@ -75,8 +76,8 @@ pub(super) fn validate(
     };
     if !mode_supported(*mode) {
         return Err(invalid(format!(
-            "IndexedScatterReduce の mode {mode:?}（NodeId({}))は非対応（Prod は #3803 の scan 補助待ち。\
-             docs/autodiff-higher-order-grad-decision.md §41・§62 参照）",
+            "IndexedScatterReduce の mode {mode:?}（NodeId({}))は非対応（未知 mode。\
+             docs/autodiff-higher-order-grad-decision.md §41・§62・§74 参照）",
             id.0
         )));
     }
@@ -112,13 +113,15 @@ pub(super) fn replay<'c>(
 }
 
 /// `IndexedScatterReduce` ノードの静的な形（親テープの shape と `Op` payload）。
-pub(super) struct Spec<'a> {
+pub(super) struct Spec<'a, 'c> {
     pub(super) input: NodeId,
     pub(super) src: NodeId,
     pub(super) dim: usize,
     pub(super) index: &'a Tensor<i32>,
     pub(super) mode: ScatterReduceMode,
     pub(super) include_self: bool,
+    /// `Prod` のときだけ `(input_m, src_m)`（子テープ上の写し）。他 mode は `None`。
+    pub(super) mirrors: Option<(&'a Var<'c>, &'a Var<'c>)>,
 }
 
 /// `(d_input, d_src)`。必要な側だけ構築する。
@@ -241,7 +244,7 @@ pub(super) fn cgrad<'c>(
     parent: &Tape,
     child: &'c Tape,
     parent_nodes: &[TapeNode],
-    spec: &Spec<'_>,
+    spec: &Spec<'_, 'c>,
     g: &Var<'c>,
     need_input: bool,
     need_src: bool,
@@ -253,6 +256,7 @@ pub(super) fn cgrad<'c>(
         index,
         mode,
         include_self,
+        mirrors,
     } = *spec;
     if !mode_supported(mode) {
         return Err(invalid(format!(
@@ -295,10 +299,34 @@ pub(super) fn cgrad<'c>(
         ),
         _ => None,
     };
-    let masks = build_masks(&pos, &x, &s, result.as_deref(), mode, include_self)?;
     let (d_in_host, d_src_host) =
         scatter_reduce_vjp_host(&x, &idx, &s, &g_host, &layout, mode, include_self)
             .map_err(AutodiffError::Shape)?;
+    if mode == ScatterReduceMode::Prod {
+        // `Prod` は区分つき scan の構造と専用の総括判定（兄弟モジュール）。写しは `build_cgrads` が
+        // Prod のときだけ渡す（他 mode は構造が定数係数だけで写しを要さない）。
+        let (input_m, src_m) = mirrors.ok_or_else(|| {
+            invalid("IndexedScatterReduce(Prod) の写しが未供給（内部契約違反）".to_string())
+        })?;
+        return super::scatter_reduce_prod::cgrad(super::scatter_reduce_prod::ProdArgs {
+            child,
+            input_shape: &input_shape,
+            src_shape: &src_shape,
+            include_self,
+            x: &x,
+            s: &s,
+            g_host: &g_host,
+            pos: &pos,
+            d_in_host,
+            d_src_host,
+            input_m,
+            src_m,
+            g,
+            need_input,
+            need_src,
+        });
+    }
+    let masks = build_masks(&pos, &x, &s, result.as_deref(), mode, include_self)?;
 
     let d_src = if need_src {
         // 非 dim 軸が input より小さい場合は g を先頭から narrow してから gather する。
@@ -431,6 +459,11 @@ mod tests {
             y.to_tensor().host_slice().into_owned(),
             vec![10.0, 2.0, 3.0]
         );
-        assert!(replay(&x, &s, 0, &idx, ScatterReduceMode::Prod, true).is_err());
+        // `Prod` も受理する（イシュー #3977）。
+        let y = replay(&x, &s, 0, &idx, ScatterReduceMode::Prod, true).unwrap();
+        assert_eq!(
+            y.to_tensor().host_slice().into_owned(),
+            vec![20.0, 2.0, 3.0]
+        );
     }
 }

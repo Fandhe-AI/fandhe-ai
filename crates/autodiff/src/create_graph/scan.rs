@@ -2,9 +2,10 @@
 //! （イシュー #3803・親 #3732。決定記録 `docs/autodiff-higher-order-grad-decision.md`
 //! §41.10・実装記録 §64）。
 //!
-//! 親モジュール [`super`] 配下の `cumulative_b`（`Cumprod`・`Logcumsumexp` の cgrad）から
-//! 呼ばれる。将来 `IndexedScatterReduce` の `Prod`（イシュー #3802）が区切りマスク付きで
-//! 同じ補助を使う（`cut` 引数がそのフック）。
+//! 親モジュール [`super`] 配下の `cumulative_b`（`Cumprod`・`Logcumsumexp` の cgrad）と
+//! `scatter_reduce_prod`（`IndexedScatterReduce` の `Prod`。イシュー #3977・実装記録 §74）から
+//! 呼ばれる。`Prod` は区間（出力位置ごとの寄与列）を連結した 1 本の lane に `cut` 付きで使い、
+//! 段数は最長区間に合わせて [`linear_scan_steps`] で明示する。
 //!
 //! **方式**: Hillis–Steele 型の `⌈log2 n⌉` 段展開。段 `k = 1, 2, 4, …`（`k < n`）で
 //! `S ← S + A ⊙ shift(S, k)`・`A ← A ⊙ shift(A, k)` を行う。`shift` は `dim` 方向に
@@ -62,6 +63,23 @@ pub(super) fn linear_scan<'c>(
     dim: usize,
     cut: Option<&Tensor<bool>>,
 ) -> Result<Var<'c>, AutodiffError> {
+    let n = b.shape().get(dim).copied().unwrap_or(0);
+    linear_scan_steps(child, b, a, dim, cut, scan_steps(n))
+}
+
+/// [`linear_scan`] の段数明示版（`steps` 段。`2^(steps-1) < shape[dim]` が必要）。
+///
+/// `cut` で区間に分けた lane では、全体長ではなく最長区間長の `⌈log2⌉` 段で足りる（区間をまたぐ
+/// 係数は `cut` で 0 なので、段を余分に重ねても 0 を足すだけ）。段を減らすとノード数と
+/// `0·inf` の危険が減る。`steps = scan_steps(shape[dim])` なら [`linear_scan`] と bit 同一。
+pub(super) fn linear_scan_steps<'c>(
+    child: &'c Tape,
+    b: &Var<'c>,
+    a: &Var<'c>,
+    dim: usize,
+    cut: Option<&Tensor<bool>>,
+    steps: usize,
+) -> Result<Var<'c>, AutodiffError> {
     let shape = b.shape();
     if a.shape() != shape || dim >= shape.len() {
         return Err(AutodiffError::Backward(format!(
@@ -81,7 +99,11 @@ pub(super) fn linear_scan<'c>(
         None => *a,
     };
     let mut s_cur = *b;
-    let steps = scan_steps(n);
+    if steps > scan_steps(n) {
+        return Err(AutodiffError::Backward(format!(
+            "create_graph: scan の段数 {steps} が長さ {n} の段数を超える（内部契約違反）"
+        )));
+    }
     let mut k = 1usize;
     for step in 0..steps {
         let s_shift = shift_left(child, &s_cur, dim, k)?;
