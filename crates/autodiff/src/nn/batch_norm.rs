@@ -1,4 +1,4 @@
-//! BatchNorm1d／2d 層（イシュー #1732・親 #1608。`docs/compat-api-scope.md`
+//! BatchNorm1d／2d／3d 層（イシュー #1732・親 #1608、3d は #3820。`docs/compat-api-scope.md`
 //! §1.2 Tier 1・`docs/batch-norm-ops-design.md`）。
 //!
 //! `nn::LayerNorm`／`RmsNorm`（`norm.rs`）と同じ「本体（`Tensor<f32>` を
@@ -16,7 +16,8 @@
 //! チャネル軸は常に dim 1（NCHW／NCL 固定。`fandhe_ai_tensor_core::
 //! batch_norm_layout` が `(n, c, spatial)` を導出）。`BatchNorm1d` は
 //! rank 2（`[N, C]`）／rank 3（`[N, C, L]`）を受理し、`BatchNorm2d` は
-//! rank 4（`[N, C, H, W]`）のみを受理する（`Var::batch_norm`／
+//! rank 4（`[N, C, H, W]`）のみ、`BatchNorm3d` は rank 5
+//! （`[N, C, D, H, W]`）のみを受理する（`Var::batch_norm`／
 //! `batch_norm_infer` 自体は rank 2〜5 を一様に受理するため、この
 //! rank 限定は本層が forward 時に追加検査する）。
 //!
@@ -37,14 +38,14 @@
 //! `forward_host`／`set_training`／`named_parameters` から `core`
 //! フィールドへアクセスする必要があるため、`BatchNormCore` 自体とその
 //! メソッド群は `pub(crate)` とする（クレート外には非公開のまま——
-//! `BatchNorm1d`／`BatchNorm2d` 自体の公開 API はこのモジュール末尾の
+//! `BatchNorm1d`／`BatchNorm2d`／`BatchNorm3d` 自体の公開 API はこのモジュール末尾の
 //! `pub` メソッドに限られる）。
 //!
 //! # 対象外（設計 doc `docs/batch-norm-ops-design.md` §7 参照）
 //!
 //! `momentum=None`（累積移動平均）・`track_running_stats=false`・
 //! `named_buffers`／state_dict 直列化（running stats は buffer であり
-//! `named_parameters` に含めない）・層 `BatchNorm3d`（#3820。`Var` 系は rank 5 を受理済み）・
+//! `named_parameters` に含めない）・
 //! channels-last レイアウトはいずれも本 issue の対象外。
 
 use std::cell::{Cell, Ref, RefCell};
@@ -68,6 +69,9 @@ pub const BATCH_NORM_DEFAULT_MOMENTUM: f32 = 0.1;
 pub(crate) const BATCH_NORM_1D_RANKS: &[usize] = &[2, 3];
 /// `BatchNorm2d` が受理する rank（rank 4: `[N, C, H, W]` のみ）。
 pub(crate) const BATCH_NORM_2D_RANKS: &[usize] = &[4];
+
+/// `BatchNorm3d` が受理する rank（rank 5: `[N, C, D, H, W]` のみ。#3820）。
+pub(crate) const BATCH_NORM_3D_RANKS: &[usize] = &[5];
 
 /// `eps` の fail-closed 検査（`nn::norm::validate_eps` と同じ「有限かつ
 /// 非負」契約）。
@@ -788,6 +792,136 @@ impl BatchNorm2d {
     }
 }
 
+/// `BatchNorm3d`（rank 5 `[N, C, D, H, W]` の入力のみを受理。PyTorch
+/// `nn.BatchNorm3d` 相当）。
+#[derive(Debug)]
+pub struct BatchNorm3d {
+    pub(crate) core: BatchNormCore,
+}
+
+impl BatchNorm3d {
+    /// affine あり（`weight`／`bias` を持つ）`BatchNorm3d` を構築する。
+    /// `weight` は 1・`bias` は 0・`running_mean` は 0・`running_var` は 1
+    /// で初期化し、初期モードは train（[`Self::bind`] 直後は
+    /// `Var::batch_norm_with_batch_stats` 経由で running stats を
+    /// 更新する）。`num_features` は非 0 を要求する。対象入力 shape は
+    /// rank 5 `[N, C, D, H, W]`（チャネル軸は常に dim 1）。
+    pub fn new(num_features: usize, eps: f32, momentum: f32) -> Result<Self, AutodiffError> {
+        Ok(Self {
+            core: BatchNormCore::new(num_features, eps, momentum, "BatchNorm3d::new")?,
+        })
+    }
+
+    /// affine なし（`weight`／`bias` を持たない）`BatchNorm3d` を
+    /// 構築する。PyTorch `nn.BatchNorm*d(..., affine=False)` 相当。
+    /// `running_mean`／`running_var`・初期モード（train）は
+    /// [`Self::new`] と同じ。`num_features` は非 0 を要求する。
+    pub fn without_affine(
+        num_features: usize,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        Ok(Self {
+            core: BatchNormCore::without_affine(
+                num_features,
+                eps,
+                momentum,
+                "BatchNorm3d::without_affine",
+            )?,
+        })
+    }
+
+    /// 既存の `weight`／`bias`／`running_mean`／`running_var` から
+    /// `BatchNorm3d` を構築する（チェックポイント復元等）。`weight`
+    /// と `bias` は独立に `Some`／`None` を取れる。`running_mean`／
+    /// `running_var` は形状が一致する非 0 長の rank 1 テンソルを
+    /// 要求し、`num_features` はその長さから導出する。初期モードは
+    /// train。
+    pub fn from_parameters(
+        weight: Option<Tensor<f32>>,
+        bias: Option<Tensor<f32>>,
+        running_mean: Tensor<f32>,
+        running_var: Tensor<f32>,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        Ok(Self {
+            core: BatchNormCore::from_parameters(
+                weight,
+                bias,
+                running_mean,
+                running_var,
+                eps,
+                momentum,
+                "BatchNorm3d::from_parameters",
+            )?,
+        })
+    }
+
+    /// affine の重み（shape `[num_features]`）。`without_affine` 構成
+    /// では `None`。
+    pub fn weight(&self) -> Option<&Tensor<f32>> {
+        self.core.weight()
+    }
+
+    /// affine のバイアス（shape `[num_features]`）。`without_affine`
+    /// 構成では `None`。
+    pub fn bias(&self) -> Option<&Tensor<f32>> {
+        self.core.bias()
+    }
+
+    /// 現在の running mean（shape `[num_features]`）の clone。train
+    /// モードの forward を呼ぶたびに momentum に従って更新される
+    /// （モジュール doc comment「running stats 更新契約」参照）。
+    pub fn running_mean(&self) -> Tensor<f32> {
+        self.core.running_mean()
+    }
+
+    /// 現在の running variance（shape `[num_features]`。unbiased）の
+    /// clone。更新契約は [`Self::running_mean`] と同じ。
+    pub fn running_var(&self) -> Tensor<f32> {
+        self.core.running_var()
+    }
+
+    /// train モードの forward を呼んだ回数（`update_running_stats` の
+    /// 呼び出し回数）。`saturating_add` で飽和する。
+    pub fn num_batches_tracked(&self) -> u64 {
+        self.core.num_batches_tracked()
+    }
+
+    /// 分散へ加える数値安定化定数（構築時に固定・非負かつ有限）。
+    pub fn eps(&self) -> f32 {
+        self.core.eps()
+    }
+
+    /// running stats 更新の momentum（構築時に固定）。
+    pub fn momentum(&self) -> f32 {
+        self.core.momentum()
+    }
+
+    /// このステップの `tape` へ `weight`／`bias`（あれば）を葉ノード
+    /// として登録し、`forward` を呼べる [`BatchNormVars`] を返す。
+    /// 受理する入力 rank は rank 5 `[N, C, D, H, W]`（`accepted_ranks`）に限る。
+    pub fn bind<'t>(&self, tape: &'t Tape) -> BatchNormVars<'t, '_> {
+        let weight = self
+            .core
+            .weight
+            .as_ref()
+            .map(|w| tape.var_with_requires_grad(w, self.core.requires_grad));
+        let bias = self
+            .core
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.core.requires_grad));
+        BatchNormVars {
+            core: &self.core,
+            accepted_ranks: BATCH_NORM_3D_RANKS,
+            weight,
+            bias,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,7 +1082,7 @@ mod tests {
     }
 
     /// #3819: `Var::batch_norm` が rank 5 を受理しても、層 1d／2d は
-    /// `accepted_ranks` で rank 5 を拒否し続ける（層 3d は #3820）。
+    /// `accepted_ranks` で rank 5 を拒否し続ける（層 3d は #3820 で実装済み）。
     #[test]
     fn batch_norm_1d_rejects_rank5_input() {
         let tape = Tape::new_with_ops(crate::test_support::test_ops());
@@ -971,6 +1105,66 @@ mod tests {
             err,
             AutodiffError::Shape(ShapeError::RankMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn batch_norm_3d_new_initial_state_and_rejections() {
+        let bn = BatchNorm3d::new(2, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        assert_eq!(dense(&bn.weight().unwrap().contiguous()), vec![1.0f32; 2]);
+        assert_eq!(dense(&bn.bias().unwrap().contiguous()), vec![0.0f32; 2]);
+        assert_eq!(dense(&bn.running_mean()), vec![0.0f32; 2]);
+        assert_eq!(dense(&bn.running_var()), vec![1.0f32; 2]);
+        assert!(matches!(
+            BatchNorm3d::new(0, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap_err(),
+            AutodiffError::InvalidArgument(_)
+        ));
+        assert!(matches!(
+            BatchNorm3d::new(
+                usize::MAX,
+                BATCH_NORM_DEFAULT_EPS,
+                BATCH_NORM_DEFAULT_MOMENTUM
+            )
+            .unwrap_err(),
+            AutodiffError::Shape(_)
+        ));
+        assert!(matches!(
+            BatchNorm3d::new(2, f32::NAN, BATCH_NORM_DEFAULT_MOMENTUM).unwrap_err(),
+            AutodiffError::InvalidArgument(_)
+        ));
+        assert!(matches!(
+            BatchNorm3d::new(2, BATCH_NORM_DEFAULT_EPS, 1.5).unwrap_err(),
+            AutodiffError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn batch_norm_3d_rejects_rank4_and_rank6_input() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let bn = BatchNorm3d::new(2, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        for shape in [&[1usize, 2, 2, 2][..], &[1, 2, 2, 2, 2, 2][..]] {
+            let n: usize = shape.iter().product();
+            let x = tape.var(&Tensor::new(vec![1.0f32; n], shape).unwrap());
+            let err = bn.bind(&tape).forward(&x).unwrap_err();
+            assert!(matches!(
+                err,
+                AutodiffError::Shape(ShapeError::RankMismatch { expected: 5, .. })
+            ));
+        }
+    }
+
+    /// train の running_var は unbiased（`M/(M-1)`、`M = N*D*H*W`）。
+    #[test]
+    fn batch_norm_3d_train_updates_running_stats_unbiased() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        // N=1, C=1, D=H=W=... M = 1*2*1*2 = 4 の 1 チャネル
+        let data = vec![1.0f32, 2.0, 3.0, 6.0];
+        let x = tape.var(&Tensor::new(data, &[1, 1, 2, 1, 2]).unwrap());
+        let bn = BatchNorm3d::new(1, BATCH_NORM_DEFAULT_EPS, 1.0).unwrap();
+        bn.bind(&tape).forward(&x).unwrap();
+        // mean = 3, biased var = (4+1+0+9)/4 = 3.5, unbiased = 3.5*4/3
+        assert!((dense(&bn.running_mean())[0] - 3.0).abs() < 1e-6);
+        assert!((dense(&bn.running_var())[0] - 3.5 * 4.0 / 3.0).abs() < 1e-5);
+        assert_eq!(bn.num_batches_tracked(), 1);
     }
 
     #[test]
