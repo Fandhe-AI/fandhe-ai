@@ -227,8 +227,9 @@ permissions:
 #     debuginfo なしのため影響しない。依存（workspace メンバー以外）は Cargo.toml の
 #     `[profile.dev.package."*"]` でも同じ line-tables-only に固定済み（ローカル開発・
 #     `make ci` と共用。package 指定は profile 本体より優先されるが値が同じため衝突しない）。
-#     Cargo.toml ではメンバーを full debuginfo のまま残しているため、メンバーまで
-#     行番号のみにする本 env は CI 側で引き続き必要
+#     メンバーも Cargo.toml の `[profile.dev] debug = "line-tables-only"` で同じ値に
+#     固定済み（2026-11-03。本 env が届かない rust-ci〈reusable workflow〉の cargo test
+#     でディスク不足が出たため）。本 env は値が同じで衝突せず、Cargo.toml と二重の保険として残す
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
