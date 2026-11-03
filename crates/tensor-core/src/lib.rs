@@ -179,6 +179,7 @@ mod element;
 mod error;
 pub mod fft;
 pub mod fold;
+pub mod fractional_max_pool;
 mod fusion;
 pub mod indexed_update;
 pub mod interpolate;

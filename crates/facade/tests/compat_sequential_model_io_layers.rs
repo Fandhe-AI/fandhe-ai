@@ -1855,3 +1855,53 @@ fn adaptive_pool3d_round_trips_with_kind_names_and_format_version_2() {
         "{text}"
     );
 }
+
+// ---------------------------------------------------------------------
+// イシュー #3827: fractional_max_pool2d / fractional_max_pool3d の保存・復元（kind 追加・format_version 2 据え置き。#3768 論点 4）
+// 往復テストは seed 無しで predict を 2 回比較するため、窓が標本に依存しない output_size 全軸 1 の形だけを使う。
+// ---------------------------------------------------------------------
+
+fn fractional_max_pool_models() -> (Sequential, Sequential) {
+    let m2 = Sequential::new()
+        .add_conv2d(1, 2, [1, 1], [1, 1], [0, 0], [1, 1], 1, 4)
+        .and_then(|m| m.add_fractional_max_pool2d([2, 2], [1, 1]))
+        .map(|m| m.add_flatten(1, 3))
+        .and_then(|m| m.add_linear(2, 2, 5))
+        .expect("構築できるはず");
+    let m3 = Sequential::new()
+        .add_conv3d(1, 2, [1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1, 4)
+        .and_then(|m| m.add_fractional_max_pool3d([1, 2, 2], [1, 1, 1]))
+        .map(|m| m.add_flatten(1, 4))
+        .and_then(|m| m.add_linear(2, 2, 5))
+        .expect("構築できるはず");
+    (m2, m3)
+}
+
+#[test]
+fn fractional_max_pool_round_trips_with_kind_names_and_format_version_2() {
+    let (m2, m3) = fractional_max_pool_models();
+    let kinds = round_trip("fractional-pool2d-kind", &m2, &tensor(&[3, 1, 3, 3], 0.3));
+    assert!(kinds.contains("fractional_max_pool2d"), "{kinds:?}");
+    let kinds = round_trip(
+        "fractional-pool3d-kind",
+        &m3,
+        &tensor(&[3, 1, 3, 3, 3], 0.3),
+    );
+    assert!(kinds.contains("fractional_max_pool3d"), "{kinds:?}");
+
+    let (_g, _dir, text) = manifest_of(&m2, "fractional-pool2d-manifest");
+    assert!(text.contains("\"format_version\":2"), "{text}");
+    assert!(
+        text.contains(
+            "\"kind\":\"fractional_max_pool2d\",\"params\":{\"kernel_size_h\":2,\"kernel_size_w\":2,\"output_size_h\":1,\"output_size_w\":1}"
+        ),
+        "{text}"
+    );
+    let (_g, _dir, text) = manifest_of(&m3, "fractional-pool3d-manifest");
+    assert!(
+        text.contains(
+            "\"kind\":\"fractional_max_pool3d\",\"params\":{\"kernel_size_d\":1,\"kernel_size_h\":2,\"kernel_size_w\":2,\"output_size_d\":1,\"output_size_h\":1,\"output_size_w\":1}"
+        ),
+        "{text}"
+    );
+}

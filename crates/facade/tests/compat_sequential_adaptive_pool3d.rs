@@ -10,6 +10,10 @@
 //!
 //! ホストフォールバック経路のため実機非依存。実機 parity は未実測（Phase 10 の #3860・#3861）。
 
+// 同一バイナリ化のため FractionalMaxPool の検証を子モジュールとして同居させる（CI のリンク量削減）。
+#[path = "compat_sequential_adaptive_pool3d/fractional_max_pool.rs"]
+mod fractional_max_pool;
+
 use std::path::PathBuf;
 
 use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, load_model, save_model};

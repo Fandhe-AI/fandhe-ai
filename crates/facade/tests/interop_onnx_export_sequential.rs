@@ -515,3 +515,21 @@ fn sequential_with_adaptive_max_pool3d_is_rejected_with_unsupported_layer() {
         "UnsupportedLayer(index=0) を期待したが {err:?}"
     );
 }
+
+/// FractionalMaxPool も ONNX export 非対応（イシュー #3827・#3750 §11。`layer_kind_name` は変えない）。
+#[test]
+fn sequential_with_fractional_max_pool_is_rejected_with_unsupported_layer() {
+    let m2 = Sequential::new()
+        .add_fractional_max_pool2d([2, 2], [1, 1])
+        .expect("test fixture: 層構築に失敗");
+    let m3 = Sequential::new()
+        .add_fractional_max_pool3d([2, 2, 2], [1, 1, 1])
+        .expect("test fixture: 層構築に失敗");
+    for model in [m2, m3] {
+        let err = OnnxModel::from_sequential(&model).unwrap_err();
+        assert!(
+            matches!(err, OnnxError::UnsupportedLayer { index: 0, .. }),
+            "UnsupportedLayer(index=0) を期待したが {err:?}"
+        );
+    }
+}

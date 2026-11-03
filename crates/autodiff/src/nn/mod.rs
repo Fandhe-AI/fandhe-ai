@@ -342,8 +342,8 @@ pub use pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 pub(crate) use pixel_shuffle::{pixel_shuffle_forward, pixel_unshuffle_forward};
 pub use pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveAvgPool3d, AdaptiveMaxPool1d, AdaptiveMaxPool2d,
-    AdaptiveMaxPool3d, AvgPool1d, AvgPool2d, AvgPool3d, GlobalPool, GlobalPoolMode, LpPool1d,
-    LpPool2d, LpPool3d, MaxPool1d, MaxPool2d, MaxPool3d,
+    AdaptiveMaxPool3d, AvgPool1d, AvgPool2d, AvgPool3d, FractionalMaxPool2d, FractionalMaxPool3d,
+    GlobalPool, GlobalPoolMode, LpPool1d, LpPool2d, LpPool3d, MaxPool1d, MaxPool2d, MaxPool3d,
 };
 pub use rnn::{
     Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,

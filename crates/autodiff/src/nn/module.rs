@@ -48,8 +48,8 @@ use crate::nn::padding::ZeroPad2d;
 use crate::nn::pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveAvgPool3d, AdaptiveMaxPool1d, AdaptiveMaxPool2d,
-    AdaptiveMaxPool3d, AvgPool1d, AvgPool2d, AvgPool3d, GlobalPool, GlobalPoolMode, LpPool1d,
-    LpPool2d, LpPool3d, MaxPool1d, MaxPool2d, MaxPool3d,
+    AdaptiveMaxPool3d, AvgPool1d, AvgPool2d, AvgPool3d, FractionalMaxPool2d, FractionalMaxPool3d,
+    GlobalPool, GlobalPoolMode, LpPool1d, LpPool2d, LpPool3d, MaxPool1d, MaxPool2d, MaxPool3d,
 };
 use crate::nn::transformer::Transformer;
 use crate::nn::transformer_decoder_layer::TransformerDecoderLayer;
@@ -576,14 +576,15 @@ pub trait Module {
     /// この層が Pooling（[`MaxPool2d`]／[`MaxPool1d`]／[`AvgPool2d`]／
     /// [`AvgPool1d`]／[`AdaptiveAvgPool2d`]／[`AdaptiveAvgPool1d`]／
     /// [`AdaptiveMaxPool2d`]／[`AdaptiveMaxPool1d`]／[`GlobalPool`]／
-    /// [`MaxPool3d`]／[`AvgPool3d`]／[`AdaptiveAvgPool3d`]／[`AdaptiveMaxPool3d`]／[`LpPool1d`]／[`LpPool2d`]／[`LpPool3d`]）
+    /// [`MaxPool3d`]／[`AvgPool3d`]／[`AdaptiveAvgPool3d`]／[`AdaptiveMaxPool3d`]／
+    /// [`FractionalMaxPool2d`]／[`FractionalMaxPool3d`]／[`LpPool1d`]／[`LpPool2d`]／[`LpPool3d`]）
     /// かどうか（イシュー #1957・#2160）。`as_relu` と同じ bool フック
     /// 方式（`docs/compat-api-scope.md` §1 の閉集合維持。用途が
     /// `fandhe_ai_facade::compat::sequential::Sequential::
     /// contains_resident_unsupported_layer` の真偽判定のみであり
     /// 型付き参照を必要とする消費者が無いため、`as_conv2d` 等と異なり
     /// `Option<&T>` ではなく bool を返す）。既定は `false`
-    /// （Pooling 16 型のみオーバーライドする）。
+    /// （Pooling 18 型のみオーバーライドする）。
     fn is_pooling(&self) -> bool {
         false
     }
@@ -2202,6 +2203,38 @@ impl Module for AdaptiveAvgPool3d {
 impl Module for AdaptiveMaxPool3d {
     fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         let (values, _index) = AdaptiveMaxPool3d::forward(self, input)?;
+        Ok(values)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+}
+
+/// `FractionalMaxPool{2,3}d::forward` への委譲（イシュー #3827）。`values` のみを返す
+/// （索引が必要な場合は `Var::fractional_max_pool*` を直接呼ぶ）。forward ごとにグローバル RNG を消費する。
+impl Module for FractionalMaxPool2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (values, _index) = FractionalMaxPool2d::forward(self, input)?;
+        Ok(values)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+}
+
+impl Module for FractionalMaxPool3d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (values, _index) = FractionalMaxPool3d::forward(self, input)?;
         Ok(values)
     }
 
@@ -4259,6 +4292,12 @@ mod tests {
         assert!(Module::is_pooling(&avg_pool3d));
         assert!(Module::is_pooling(&adaptive_avg_pool3d));
         assert!(Module::is_pooling(&adaptive_max_pool3d));
+        assert!(Module::is_pooling(
+            &FractionalMaxPool2d::new([2, 2], [1, 1]).unwrap()
+        ));
+        assert!(Module::is_pooling(
+            &FractionalMaxPool3d::new([2, 2, 2], [1, 1, 1]).unwrap()
+        ));
 
         assert!(!Module::is_pooling(&Relu));
         let linear = Linear::new(3, 2, true, 7).unwrap();

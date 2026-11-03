@@ -323,6 +323,11 @@ pub mod lp_pool_ops;
 // 1 行委譲メソッドとして facade から到達できる（モジュール自体は再エクスポートしない。層型・
 // `Sequential::add_adaptive_*_pool3d` は #3824。`docs/autodiff-pool3d-ops-decision.md` §18・§21）。
 pub mod adaptive_pool3d_ops;
+// FractionalMaxPool2d／3d の 2 演算（`fractional_max_pool2d`・`fractional_max_pool3d`。イシュー #3826）。
+// `Var` の 1 行委譲メソッドとして facade から到達できる（モジュール自体・標本を明示する
+// `*_with_samples` は非公開で再エクスポートしない。層型・`Sequential::add_fractional_max_pool*` は
+// #3827。`docs/autodiff-pool3d-ops-decision.md` §20・§24）。
+mod fractional_max_pool_ops;
 // ConvTranspose3d と MaxUnpool1d／2d／3d（`conv_transpose3d`・`max_unpool{1,2,3}d`。イシュー #2644）。
 // `Var` の 1 行委譲メソッドとして #2850 で facade へ公開済み（モジュール自体は再エクスポートしない。
 // autodiff 側の `nn::ConvTranspose3d` は #3031 で追加済み、facade 側の `Sequential::add_conv_transpose3d` は #3032 で公開済み（`nn::MaxUnpool{1,2,3}d` は #3035 で追加済み。facade 側は未公開）。
