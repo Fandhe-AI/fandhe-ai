@@ -349,7 +349,9 @@ fn prepare_functional_save(
         .compile_state_snapshot()
         .map_err(ModelIoError::Autodiff)?;
     if let Some(snap) = &snapshot
-        && (matches!(snap.optimizer, Optimizer::Lbfgs(_)) || snap.amp.is_some())
+        && (matches!(snap.optimizer, Optimizer::Lbfgs(_))
+            || snap.amp.is_some()
+            || !snap.param_groups.is_empty())
     {
         return Err(ModelIoError::UnsupportedModel {
             reason: "Functional モデルは Lbfgs・AMP を含む compile 状態を保存できません".into(),
@@ -1001,6 +1003,15 @@ fn parse_functional_manifest(bytes: &[u8]) -> Result<ParsedFunctional, ModelIoEr
     } = parse_layers_and_keys(layers, parameter_keys, buffer_keys, false)?;
 
     let compiled = parse_compiled(f[12])?;
+    // Functional には param groups の入口がない。manifest に現れるのは改竄（#3835・§18.3）。
+    if compiled
+        .as_ref()
+        .is_some_and(|c| !c.param_groups.is_empty())
+    {
+        return Err(ModelIoError::Manifest {
+            message: "Functional manifest に param_groups は含められません".into(),
+        });
+    }
     if let Some(meta) = &compiled
         && (matches!(meta.optimizer, Optimizer::Lbfgs(_)) || meta.amp.is_some())
     {

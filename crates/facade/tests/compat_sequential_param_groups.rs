@@ -1032,37 +1032,168 @@ fn custom_train_step_applies_compile_time_groups() {
     assert_ne!(after[2], before[2], "グループ外の層は更新される");
 }
 
-/// T9: groups 非空では `save_model` が失敗し何も残さない。`&[]` は従来どおり保存・復元できる。
-#[test]
-fn save_model_rejects_groups_and_keeps_empty_groups_working() {
-    let dir = std::env::temp_dir().join(format!("fandhe_ai_2553_save_{}", std::process::id()));
+/// 保存先ディレクトリ（テストごとに一意。作成前に掃除する）。
+fn save_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("fandhe_ai_3835_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mut model = build_model();
-    model
-        .compile_with_param_groups(
-            Optimizer::Sgd(SgdConfig::new(0.1)),
-            Loss::Mse,
-            &[ParamGroup::new(vec![0], 0.0, 0.0)],
-        )
+    dir
+}
+
+fn model_with_groups(optimizer: Optimizer, groups: &[ParamGroup]) -> Sequential {
+    let mut m = build_model();
+    m.compile_with_param_groups(optimizer, Loss::Mse, groups)
         .unwrap();
-    let err = save_model(&model, &dir).unwrap_err();
+    m
+}
+
+fn bits(snap: &[Vec<f32>]) -> Vec<Vec<u32>> {
+    snap.iter()
+        .map(|v| v.iter().map(|x| x.to_bits()).collect())
+        .collect()
+}
+
+/// T9（#3835 で反転）: groups 付き compile 状態は `save_model`／`load_model` で往復し、
+/// 続きの学習が保存しない連続 `fit` と bit 一致する。`&[]` も従来どおり往復する。
+#[test]
+fn save_model_round_trips_param_groups_and_keeps_empty_groups_bit_identical() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    // 1 層目は凍結（lr 0）、2 層目は lr 0.2・wd 0.01。-0.0 の weight_decay も往復させる。
+    let groups = vec![
+        ParamGroup::new(layer_slot_indices(&probe, "0."), 0.0, -0.0),
+        ParamGroup::new(layer_slot_indices(&probe, "2."), 0.2, 0.01),
+    ];
+    let optimizers = [
+        Optimizer::AdamW(AdamWConfig::default()),
+        Optimizer::Sgd(SgdConfig {
+            momentum: 0.9,
+            ..SgdConfig::new(0.05)
+        }),
+    ];
+    for (i, opt) in optimizers.into_iter().enumerate() {
+        let dir = save_dir(&format!("rt{i}"));
+        let mut continuous = model_with_groups(opt, &groups);
+        continuous.fit(&x, &y, fit_config()).unwrap();
+        let mid = snapshot(&continuous);
+        save_model(&continuous, &dir).unwrap();
+        let mut restored = load_model(&dir).unwrap();
+        assert_eq!(bits(&snapshot(&restored)), bits(&mid));
+
+        let h_cont = continuous.fit(&x, &y, fit_config()).unwrap();
+        let h_rest = restored.fit(&x, &y, fit_config()).unwrap();
+        assert_eq!(bits(&snapshot(&restored)), bits(&snapshot(&continuous)));
+        assert_eq!(h_rest.loss, h_cont.loss);
+        // 凍結 group は復元後も bit 不変。
+        let l1 = layer_slot_indices(&probe, "0.");
+        for &s in &l1 {
+            assert_eq!(bits(&snapshot(&restored))[s], bits(&mid)[s]);
+        }
+        // 判別: groups を落とす誤実装（復元後に groups が空）なら結果が変わる入力であること。
+        let mut dropped = model_with_groups(opt, &[]);
+        dropped.fit(&x, &y, fit_config()).unwrap();
+        dropped.fit(&x, &y, fit_config()).unwrap();
+        assert_ne!(bits(&snapshot(&dropped)), bits(&snapshot(&restored)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 空 groups: キーなしで従来どおり保存・復元できる。
+    let dir = save_dir("empty");
+    let plain = model_with_groups(Optimizer::Sgd(SgdConfig::new(0.1)), &[]);
+    save_model(&plain, &dir).unwrap();
+    let manifest = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .unwrap();
     assert!(
-        matches!(
-            err,
-            ModelIoError::Autodiff(AutodiffError::InvalidArgument(_))
-        ),
+        !manifest.contains("param_groups"),
+        "空 groups はキーを書かない"
+    );
+    let restored = load_model(&dir).unwrap();
+    assert_eq!(snapshot(&restored), snapshot(&plain));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T9b: 保存直後（lr 未変更）に読み込んで `LrSchedule` を回すと、保存しない場合と bit 一致する
+/// （読込後の base_lr = 現在 lr = compile 時 lr のため。決定記録 §18.12）。
+#[test]
+fn loaded_groups_follow_lr_schedule_like_unsaved_model() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let cfg = SgdConfig::new(0.1);
+    let dir = save_dir("sched");
+    let mut direct = model_with_groups(Optimizer::Sgd(cfg), &groups);
+    save_model(&direct, &dir).unwrap();
+    let mut loaded = load_model(&dir).unwrap();
+    direct
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    loaded
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    assert_eq!(bits(&snapshot(&loaded)), bits(&snapshot(&direct)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T9c: `LrSchedule` で lr が変わった後の groups 付き保存は拒否し、保存先を作らない（§18.12）。
+#[test]
+fn save_after_lr_schedule_changed_lr_is_rejected_with_groups() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let probe = build_model();
+    let groups = layered_groups(&probe);
+    let dir = save_dir("sched_rej");
+    let mut m = model_with_groups(Optimizer::Sgd(SgdConfig::new(0.1)), &groups);
+    m.fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
+        .unwrap();
+    let err = save_model(&m, &dir).unwrap_err();
+    assert!(
+        matches!(err, ModelIoError::UnsupportedModel { .. }),
         "{err:?}"
     );
     assert!(!dir.exists(), "拒否時に保存先を作ってはならない");
 
-    let mut plain = build_model();
+    // groups が空なら従来どおり（lr が変わっていても保存できる）。
+    let mut plain = model_with_groups(Optimizer::Sgd(SgdConfig::new(0.1)), &[]);
     plain
-        .compile_with_param_groups(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse, &[])
+        .fit_with_callbacks(&x, &y, fit_config(), None, &mut step_lr_callbacks())
         .unwrap();
     save_model(&plain, &dir).unwrap();
-    let restored = load_model(&dir).unwrap();
-    assert_eq!(snapshot(&restored), snapshot(&plain));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T9d: 不正な groups の保存は拒否され保存先を作らない（NaN・空 group・重複は `UnsupportedModel`、
+/// 範囲外スロットは `Mismatch`）。
+#[test]
+fn save_rejects_invalid_groups_without_creating_dir() {
+    let dir = save_dir("invalid");
+    let cases: Vec<(Vec<ParamGroup>, bool)> = vec![
+        (vec![ParamGroup::new(vec![0], f32::NAN, 0.0)], false),
+        (vec![ParamGroup::new(vec![0], -1.0, 0.0)], false),
+        (vec![ParamGroup::new(vec![], 0.1, 0.0)], false),
+        (
+            vec![
+                ParamGroup::new(vec![0, 1], 0.1, 0.0),
+                ParamGroup::new(vec![1], 0.1, 0.0),
+            ],
+            false,
+        ),
+        (vec![ParamGroup::new(vec![99], 0.1, 0.0)], true),
+    ];
+    for (groups, is_mismatch) in cases {
+        let m = model_with_groups(Optimizer::Sgd(SgdConfig::new(0.1)), &groups);
+        let err = save_model(&m, &dir).unwrap_err();
+        if is_mismatch {
+            assert!(matches!(err, ModelIoError::Mismatch { .. }), "{err:?}");
+        } else {
+            assert!(
+                matches!(err, ModelIoError::UnsupportedModel { .. }),
+                "{err:?}"
+            );
+        }
+        assert!(!dir.exists(), "拒否時に保存先を作ってはならない");
+    }
 }
 
 /// T10: `Optimizer` enum に無い種（Adamax）の `step_with_groups` を facade の import だけで呼べる。

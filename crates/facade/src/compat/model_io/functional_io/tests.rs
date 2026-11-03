@@ -766,3 +766,12 @@ fn compiled_lbfgs_is_never_saved_or_restored() {
     .expect("write");
     assert!(load_functional_model(&dir).is_err());
 }
+
+/// #3835: Functional に param groups の入口は無い。manifest に `param_groups` が現れるのは
+/// 改竄であり `Manifest` で拒否する（`compiled_from_snapshot` へ groups を流さない）。
+#[test]
+fn param_groups_in_functional_manifest_are_rejected() {
+    let compiled = "\"compiled\":{\"loss\":\"mse\",\"optimizer\":{\"kind\":\"sgd\",\"config\":{\"lr\":0.1,\"momentum\":0.0,\"dampening\":0.0,\"weight_decay\":0.0,\"nesterov\":false}},\"optimizer_state_keys\":[],\"amp\":null,\"param_groups\":{\"lr\":[0.1],\"weight_decay\":[0.0],\"offsets\":[0,1],\"slots\":[0]}}";
+    let r = load_after_manifest_edit("pg-3835", "\"compiled\":null", compiled);
+    assert!(is_manifest_err(&r));
+}

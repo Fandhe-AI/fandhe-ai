@@ -9,9 +9,8 @@
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::{
-    AmpConfig, AmpDType, Callback, EmaCallback, FitConfig, Loss, LrSchedule, ModelIoError,
-    Optimizer, Sequential, SwaCallback, TrainStepFn, TrainStepOptimizer, TrainStepOutput,
-    save_model,
+    AmpConfig, AmpDType, Callback, EmaCallback, FitConfig, Loss, LrSchedule, Optimizer, Sequential,
+    SwaCallback, TrainStepFn, TrainStepOptimizer, TrainStepOutput, load_model, save_model,
 };
 use fandhe_ai::optim::{
     AdamW, AdamWConfig, GradScaler, GradScalerConfig, LbfgsConfig, ParamGroup, ParamGroupStep as _,
@@ -452,18 +451,6 @@ fn fit_rejections_leave_model_untouched() {
         &mut sched
     )));
 
-    let dir = std::env::temp_dir().join(format!("fandhe_ai_3832_save_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let err = save_model(&m, &dir).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ModelIoError::Autodiff(AutodiffError::InvalidArgument(_))
-        ),
-        "{err:?}"
-    );
-    assert!(!dir.exists());
-
     assert_eq!(snapshot(&m), before);
     assert_eq!(m.amp_loss_scale(), Some(256.0));
     assert!(m.is_compiled());
@@ -521,4 +508,25 @@ fn ema_amp_groups_combination_is_accepted() {
     let mut plain = mk();
     plain.fit(&x, &y, FitConfig::new(epochs, N)).expect("fit");
     assert_eq!(snapshot(&with_ema), snapshot(&plain));
+}
+
+// #3835: AMP + groups は save_model／load_model で往復し、続きの学習と GradScaler 状態が
+// 保存しない連続 fit と bit 一致する（#3832 の実装により UnsupportedModel の条件は解消済み）。
+#[test]
+fn amp_groups_save_load_round_trip_continues_bit_identically() {
+    let (x, y) = data(1.0);
+    let dir = std::env::temp_dir().join(format!("fandhe_ai_3835_amp_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut a = build_model();
+    let groups = two_groups(&a);
+    compile_groups(&mut a, AmpDType::F16, normal_scaler(), &groups);
+    a.fit(&x, &y, FitConfig::new(3, N)).expect("fit");
+    save_model(&a, &dir).expect("save");
+    let mut b = load_model(&dir).expect("load");
+    assert_eq!(b.amp_loss_scale(), a.amp_loss_scale());
+    a.fit(&x, &y, FitConfig::new(3, N)).expect("fit");
+    b.fit(&x, &y, FitConfig::new(3, N)).expect("fit");
+    assert_eq!(snapshot(&a), snapshot(&b));
+    assert_eq!(a.amp_loss_scale(), b.amp_loss_scale());
+    let _ = std::fs::remove_dir_all(&dir);
 }
