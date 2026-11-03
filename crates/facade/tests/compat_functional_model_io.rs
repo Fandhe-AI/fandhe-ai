@@ -365,3 +365,29 @@ fn adaptive_pool3d_round_trips_in_functional_graph() {
         assert_eq!(bits(w), bits(g));
     }
 }
+
+/// イシュー #3827（#3768 論点 4）: FractionalMaxPool を含む Sequential ブロックも functional 形式を往復する。
+/// 2 回の predict を bit 比較するため、窓が標本に依存しない output_size 全軸 1 の形を使う。
+#[test]
+fn fractional_max_pool_round_trips_in_functional_graph() {
+    let mut b = FunctionalBuilder::new();
+    let x = b.input().unwrap();
+    let blk = Sequential::new()
+        .add_fractional_max_pool3d([2, 2, 2], [1, 1, 1])
+        .unwrap();
+    let y = b.apply(blk, x).unwrap();
+    let model = b.build(&[x], &[y]).unwrap();
+    let input = tensor(
+        (0..54).map(|i| ((i * 7) % 11) as f32 * 0.3 - 1.0).collect(),
+        &[1, 2, 3, 3, 3],
+    );
+    let guard = TempDirGuard::new("functional_fractional_max_pool");
+    let dir = guard.path().join("m");
+    save_functional_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_functional_model(&dir).expect("復元できるはず");
+    let want = model.predict(&[&input]).unwrap();
+    let got = loaded.predict(&[&input]).unwrap();
+    for (w, g) in want.iter().zip(&got) {
+        assert_eq!(bits(w), bits(g));
+    }
+}
