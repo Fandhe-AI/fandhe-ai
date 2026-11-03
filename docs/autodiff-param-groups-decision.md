@@ -972,7 +972,7 @@ baseline の追加・更新はない。
 **適用記録（イシュー #3835・#3836。承認: <#3769 の回答コメント URL>）**: compile_with_param_groups の groups を save_model／load_model の manifest（compiled.param_groups・format_version 据え置き）で保存・復元。公開名の追加なし。公開状態: 未公開
 ```
 
-- [ ] `docs/compat-api-scope.md` に適用記録を追記した（実装 PR が行う）
+- [x] `docs/compat-api-scope.md` に適用記録を追記した（#3835 で追記）
 - [x] `docs/README.md` の索引を更新した
 - [x] 追跡表 `docs/compat-matrix-ari-tracker.md`（行 21）を更新した
 
@@ -1004,6 +1004,21 @@ baseline の追加・更新はない。
 - 秘密情報は書かず、実機ホスト名は `<cuda-node>` 等で表す。
 - スコープ外: A3-a（#3752／#3832）、A3-b（#3754）、A3-d（#3756）、`Lbfgs` 併用、`Optimizer` にない 4 種（#3757）、
   `OptimizerStateDict` への groups の追加（optimizer が groups を持たないため）、`LrSchedule` の状態保存。新しい issue は起票しない。
+
+### 18.12 実装記録（イシュー #3835）
+
+- 承認: #3769 の所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）の論点 3。形式は §18.0〜§18.3 のとおり（`compiled.param_groups` の CSR 形・`format_version` 据え置き・旧リーダーは fail-closed）。
+- 変えた箇所: `CompiledSnapshot`／`CompiledMeta` に `param_groups` を追加し、`snapshot_of_compiled` の groups 拒否（#2553）を外した。`render_compiled` は groups が空のとき従来と同一の文字列を出し、空でないときだけ末尾（`amp` の後）に CSR を足す。`parse_compiled` は `param_groups` の有無でキー集合を選び（`parse_optimizer` と同型）、`parse_param_groups` が 4 キー完全一致・長さ・`offsets` の単調性・正準な有限 f32 かつ 0 以上・スロット重複を確保前に検査する（違反は `Manifest`）。スロット範囲は保存側 `prepare_save` と読込側 `load_from_dir_with_limits` の両方で `check_param_group_slots` が `Mismatch` にする。`format_version` 1 と Functional の manifest に groups があれば `Manifest`、Functional の保存側は groups を `UnsupportedModel` にする。`Lbfgs` と groups は保存・パースの両側で `UnsupportedModel`。
+- 本 PR の範囲: 往復の実装と、それに必要な書き出し・パース・復元・fail-closed の判定までを入れた。`verify_round_trip` が書き出し前に読み戻すため、パースを分けると書き出しが必ず失敗するのが理由。旧ファイル（`param_groups` キーなし）の fixture テスト、パーサの網羅的な負テスト、`Mismatch` で部分状態を返さないことの網羅テスト、版 1／Functional の拒否の網羅テスト、facade の検証器と `step_with_groups` の拒否集合の突合は #3836 に残す。
+- §18 からの逸脱（fail-closed 側）: `Callback::LrSchedule` で lr が変わった後の groups 付き保存を `UnsupportedModel` で拒否する。読込後の `base_lr` は復元した現在 lr（§15.12）で、groups は絶対値で保存されるため、保存時に現在 lr が compile 時の lr と異なると読込後に倍率が 1 へ戻り、続きの学習が保存しない場合と bit 一致しない（黙って学習率が変わる）。承認された形は 4 キーで `base_lr` 用のキーは含まれないため、キーは足さず保存側で `snap.base_lr` と optimizer config の lr の bit 比較をして拒否した。groups ありでスケジュールが lr を変えていない状態の保存は受理し、読込後は `base_lr == 現在 lr` なので後の `LrSchedule` も保存しない場合と bit 一致する。
+- 所有者へ戻す論点: スケジュール途中の保存を受理するために `base_lr` を `param_groups` 内の任意キーとして保存するか（§18.10 点 5 の「意味が変わるならそのとき任意キーを足す」に当たる）。承認がないので本 PR では実装も起票もしていない。
+- AMP の読み方: §18.3／§18.10 点 5 の「AMP と groups は #3832 が実装されるまで `UnsupportedModel`」は #3832 のマージにより条件が満たされたため、AMP + groups の保存・復元を受理する。AMP 入口は `LrSchedule` を拒否しているので `base_lr == 現在 lr` が常に成り立つ。
+- ガードの対応（A3-d〈#3756〉は別件）: 旧 = `compat_sequential_param_groups.rs` の T9（groups 非空の保存拒否を固定）→ 新 = `save_model_round_trips_param_groups_and_keeps_empty_groups_bit_identical`（往復の正テスト）に反転した。`compat_sequential_fit_amp_param_groups.rs` の AMP + groups の `save_model` 拒否の検査は外し、AMP + groups の往復テストを足した。`api_surface.rs` の `param_groups_usage_doctests_are_present_and_compiled` に `compile_with_param_groups` の doc（`save_model`・`load_model` を含む実行 doctest）のプローブ 1 件と、その正例・欠落・`ignore` 化の自己テストを足した。公開名は増えないため `PARAM_GROUPS_APPROVED_KEYS` ほかは変えていない。
+- テスト: 往復（AdamW・SGD momentum、凍結 group、`-0.0`）と判別（groups を落とした復元と bit 不一致になる入力）、保存直後に読み込んで `LrSchedule` を回したときの bit 一致、スケジュール後の保存拒否と保存先を作らないこと、不正 groups（NaN・負・空・重複は `UnsupportedModel`、範囲外は `Mismatch`）、`compiled.rs` の render／parse 往復と最小限の負例、版 1 と Functional の拒否。既存テスト（ゴールデン文字列・0.13.0 の実ファイル fixture 等）は無変更で通る。判定は bit 一致のみで tolerance は新設していない。
+- 変異確認（手元のみ・確認後に戻した）: `compiled_from_snapshot` で groups を空にすると往復と `LrSchedule` の 2 件が失敗し、base_lr の拒否を外すとスケジュール後の保存拒否の 1 件が失敗した。
+- セキュリティ: manifest は非信頼データとして扱い、長さ・`offsets` の単調性・添字・有限性・正準 f32 の検証をすべて確保とモデル状態の変更より前に行う。確保量は `offsets`／`slots` の値でなく既存上限（`MAX_ARRAY_LEN` 等）で抑えられたパース済み配列長で決まる。読込失敗時は construct-before-assign により部分状態を返さない。
+- 不変事項: 依存の追加・更新、`unsafe`、tolerance・baseline・ガードレール閾値、`docs/spec`、GPU カーネル・`Op`・`BackendOps` はいずれも変えていない（実機列は該当なし）。既定経路（groups なし）は分岐 1 つと空チェックだけで bit 不変。
+- 公開状態: 公開（挙動のみ。追跡表の行 21）。読込の互換検査の残りは #3836。
 
 ## §19 保守・運用チェックリスト（イシュー #3756）: param groups と `DeviceParamStore` 常駐更新の併用（A3-d）
 

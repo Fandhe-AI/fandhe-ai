@@ -20,6 +20,9 @@
 //! `Lbfgs`〈イシュー #2373。履歴ペア数は固定上限 `MAX_LBFGS_HISTORY` で保存・復元の両側を挟む〉）。
 //! `optimizer_state_keys` は配列長上限（`MAX_ARRAY_LEN`）に数えられるため、パラメータ数の
 //! 多いモデルは `save_model` が書き込み前に `TooLarge` で拒否する。
+//! param groups（`compile_with_param_groups` 系。#3835）は `compiled.param_groups` の任意キーで往復する
+//! （groups が空ならキーなし・`format_version` 据え置き。`LrSchedule` で lr が変わった後の保存は
+//! `UnsupportedModel`。形式は `docs/autodiff-param-groups-decision.md` §18）。
 //! 次は `save_model` が [`ModelIoError::UnsupportedModel`]／[`ModelIoError::TooLarge`] で拒否し、
 //! `dir` には何も作らない（fail-closed。REQ-7 の無言 skip 禁止）:
 //!
@@ -93,8 +96,8 @@ mod compiled;
 pub(super) mod functional_io;
 
 use self::compiled::{
-    CompiledMeta, OPTIMIZER_PREFIX, check_lbfgs_history, check_slot_shapes, parse_compiled,
-    render_compiled, split_optimizer_tensors,
+    CompiledMeta, OPTIMIZER_PREFIX, check_lbfgs_history, check_param_group_slots,
+    check_slot_shapes, parse_compiled, render_compiled, split_optimizer_tensors,
 };
 use super::sequential::{LayerSpec, ReparamSpec, Sequential, spectral_state_of};
 use crate::fs_guard::{LeafError, MAX_MODEL_FILE_BYTES, OpenedLeaf, open_leaf_checked};
@@ -1716,6 +1719,7 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
         // 維持するため、パラメータ数が増えた状態を書き出すと load が Mismatch で拒否する
         // ディレクトリができてしまう（「書き出したものは必ず load できる」契約の保持）。
         check_slot_shapes(&snap.optimizer_state, &model.trainable_parameters())?;
+        check_param_group_slots(&snap.param_groups, model.trainable_parameters().len())?;
         // `Lbfgs` は `state.` 接頭辞のキーを持たず上の検査が効かないため、新しい `Lbfgs` へ
         // 試験復元して同じ契約（構成のずれ・非有限値の拒否）を保存前に確認する（#2373）。
         model
@@ -2287,6 +2291,7 @@ fn load_from_dir_with_limits(
         // optimizer の load はスロット内の整合しか見ないため、パラメータとの数・shape の
         // 照合は先にここで行う。復元は construct-before-assign（失敗時は部分状態を返さない）。
         check_slot_shapes(&optimizer_state, &model.trainable_parameters())?;
+        check_param_group_slots(&meta.param_groups, model.trainable_parameters().len())?;
         model
             .restore_compiled(meta.into_snapshot(optimizer_state))
             .map_err(ModelIoError::Autodiff)?;
@@ -4652,6 +4657,16 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
     )?;
 
     let compiled = parse_compiled(f[9])?;
+    // param groups は format_version 2 で導入した任意キー。版 1 に現れるのは改竄（#3835）。
+    if format_version == LEGACY_FORMAT_VERSION
+        && compiled
+            .as_ref()
+            .is_some_and(|c| !c.param_groups.is_empty())
+    {
+        return Err(manifest_error(
+            "format_version 1 の manifest に param_groups は含められません",
+        ));
+    }
 
     Ok(ParsedManifest {
         training: *training,
@@ -6651,6 +6666,20 @@ mod tests {
         assert!(is_manifest_err(parse_manifest(wrong_params.as_bytes())));
         let bad_file = good.replace(&name, "../evil");
         assert!(is_manifest_err(parse_manifest(bad_file.as_bytes())));
+    }
+
+    #[test]
+    fn parse_manifest_rejects_param_groups_in_format_version_1() {
+        let compiled = "{\"loss\":\"mse\",\"optimizer\":{\"kind\":\"sgd\",\"config\":{\"lr\":0.1,\"momentum\":0.0,\"dampening\":0.0,\"weight_decay\":0.0,\"nesterov\":false}},\"optimizer_state_keys\":[],\"amp\":null,\"param_groups\":{\"lr\":[0.1],\"weight_decay\":[0.0],\"offsets\":[0,1],\"slots\":[0]}}";
+        let text = |version: u64| {
+            format!(
+                "{{\"format\":\"{FORMAT_NAME}\",\"format_version\":{version},\"training\":true,\"num_layers\":0,\"layers\":[],\"parameter_keys\":[],\"buffer_keys\":[],\"safetensors_file\":\"model.{}.safetensors\",\"safetensors_bytes\":0,\"compiled\":{compiled}}}",
+                "0".repeat(32)
+            )
+        };
+        assert!(is_manifest_err(parse_manifest(text(1).as_bytes())));
+        // 版 2 では構文上受理される（スロット範囲は読込時に照合）。
+        assert!(parse_manifest(text(2).as_bytes()).is_ok());
     }
 
     #[test]

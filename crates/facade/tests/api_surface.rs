@@ -18203,10 +18203,37 @@ fn param_groups_usage_doctests_are_present_and_compiled() {
         &compile_doc,
         &["compile_with_param_groups", "LrSchedule", "StepLr"],
     ));
+    // #3835: groups の `save_model`／`load_model` 往復の利用例も実行される doctest として固定する
+    // （A3-d には否定ガードが元から無く、反転ではなく正ガードの在庫への追加）。
+    let save_needles = ["compile_with_param_groups", "save_model", "load_model"];
+    v.extend(doctest_probe_violations(
+        "compile_with_param_groups の doc（save/load 往復）",
+        &compile_doc,
+        &save_needles,
+    ));
     assert!(v.is_empty(), "{v:?}");
 
     // 自己テスト: 各カテゴリを正例・負例で踏む。
     let lines = |s: &str| s.lines().map(|l| l.to_string()).collect::<Vec<_>>();
+    // save/load 往復プローブの正例・欠落・ignore 化。
+    let sv_good = lines(
+        "```
+compile_with_param_groups(save_model, load_model)
+```",
+    );
+    assert!(doctest_probe_violations("t", &sv_good, &save_needles).is_empty());
+    let sv_missing = lines(
+        "```
+compile_with_param_groups(save_model)
+```",
+    );
+    assert!(!doctest_probe_violations("t", &sv_missing, &save_needles).is_empty());
+    let sv_ignored = lines(
+        "```ignore
+compile_with_param_groups(save_model, load_model)
+```",
+    );
+    assert!(!doctest_probe_violations("t", &sv_ignored, &save_needles).is_empty());
     // LrSchedule 併用プローブの正例・負例（needle 集合を満たす doc は通り、欠落・ignore 化は検出）。
     let lr_needles = ["compile_with_param_groups", "LrSchedule", "StepLr"];
     let lr_good = lines("```\ncompile_with_param_groups(LrSchedule, StepLr)\n```");

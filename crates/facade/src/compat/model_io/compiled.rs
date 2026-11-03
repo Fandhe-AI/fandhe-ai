@@ -13,6 +13,10 @@
 //! キー集合・shape の照合だけを行う。値の範囲検証（`lr` の正値・`scale` の非正規化数・
 //! `growth_tracker < growth_interval` 等）は各コンストラクタへ委ね、検証の迂回経路を作らない。
 //!
+//! param groups（#3835）は任意キー `compiled.param_groups`（CSR 形。groups が空ならキーなし。
+//! `format_version` は据え置き。旧リーダーは未知キーで fail-closed。正は
+//! `docs/autodiff-param-groups-decision.md` §18）。
+//!
 //! 呼び出し元: `model_io.rs` の `prepare_save`・`render_manifest`・`verify_round_trip`・
 //! `parse_manifest`・`load_from_dir_with_limits`。
 //!
@@ -31,6 +35,7 @@ use super::{
     exact_fields, manifest_error,
 };
 use crate::Tensor;
+use crate::optim::ParamGroup;
 use crate::optim::{
     AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, LbfgsConfig,
     RmsPropConfig, SgdConfig,
@@ -52,6 +57,65 @@ pub(super) struct CompiledMeta {
     pub(super) amp: Option<AmpSnapshot>,
     /// `Lbfgs` の履歴ペア件数（`Lbfgs` のときだけ `Some`。manifest の `history_len`）。
     pub(super) lbfgs_history_len: Option<usize>,
+    /// param groups（#3835。空 = `param_groups` キーなし。形式は決定記録 §18）。
+    pub(super) param_groups: Vec<ParamGroup>,
+}
+
+/// optimizer config の現在 lr（`from_snapshot` の base_lr 照合用）。
+fn optimizer_lr(o: &Optimizer) -> f32 {
+    match o {
+        Optimizer::Sgd(c) => c.lr,
+        Optimizer::AdamW(c) => c.lr,
+        Optimizer::Adam(c) => c.lr,
+        Optimizer::RmsProp(c) => c.lr,
+        Optimizer::Adagrad(c) => c.lr,
+        Optimizer::Lamb(c) => c.lr,
+        Optimizer::Lbfgs(c) => c.lr,
+    }
+}
+
+/// `ParamGroup` の検証（autodiff の `resolve_slot_hparams` と同じ規則のうちスロット範囲以外。
+/// 違反は保存不能な構成として `UnsupportedModel` 用の理由文を返す）。
+fn validate_groups(groups: &[ParamGroup]) -> Result<(), String> {
+    let mut seen: Vec<usize> = groups
+        .iter()
+        .flat_map(|g| g.params.iter().copied())
+        .collect();
+    for (i, g) in groups.iter().enumerate() {
+        if g.params.is_empty() {
+            return Err(format!("param_groups[{i}] の params が空です"));
+        }
+        for (name, v) in [("lr", g.lr), ("weight_decay", g.weight_decay)] {
+            if !v.is_finite() || v < 0.0 {
+                return Err(format!(
+                    "param_groups[{i}].{name} が有限の非負値ではありません"
+                ));
+            }
+        }
+    }
+    seen.sort_unstable();
+    if seen.windows(2).any(|w| w[0] == w[1]) {
+        return Err("param_groups にスロットの重複があります".to_string());
+    }
+    Ok(())
+}
+
+/// `param_groups` のスロット添字が訓練対象パラメータ数に収まることを確認する
+/// （保存側 `prepare_save`・読込側 `load_from_dir_with_limits` の両方から呼ぶ。範囲外は `Mismatch`）。
+pub(super) fn check_param_group_slots(
+    groups: &[ParamGroup],
+    n_params: usize,
+) -> Result<(), ModelIoError> {
+    for g in groups {
+        if let Some(&slot) = g.params.iter().find(|&&s| s >= n_params) {
+            return Err(ModelIoError::Mismatch {
+                message: format!(
+                    "param_groups がスロット添字 {slot} を参照していますが、訓練対象パラメータは {n_params} 個です"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// `Lbfgs` の履歴に関する固定上限の検査（`what` は `TooLarge` の対象名）。
@@ -92,6 +156,23 @@ impl CompiledMeta {
                 });
             }
         }
+        if !snap.param_groups.is_empty() {
+            if matches!(snap.optimizer, Optimizer::Lbfgs(_)) {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: "Lbfgs と param groups の併用は保存できません".into(),
+                });
+            }
+            // groups は絶対値で保存する。LrSchedule で lr が変わっていると読込後の base_lr
+            // （= 現在 lr）との倍率が失われ、続きの学習率が黙って変わるため拒否する（§18.12）。
+            if snap.base_lr.to_bits() != optimizer_lr(&snap.optimizer).to_bits() {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: "LrSchedule で学習率が変わった後の param groups 付き compile 状態は保存できません"
+                        .into(),
+                });
+            }
+            validate_groups(&snap.param_groups)
+                .map_err(|reason| ModelIoError::UnsupportedModel { reason })?;
+        }
         let mut state_keys: Vec<String> = snap
             .optimizer_state
             .keys()
@@ -109,6 +190,7 @@ impl CompiledMeta {
                 growth_tracker: a.growth_tracker,
             }),
             lbfgs_history_len: snap.lbfgs_history_len,
+            param_groups: snap.param_groups.clone(),
         })
     }
 
@@ -123,6 +205,8 @@ impl CompiledMeta {
             optimizer_state,
             lbfgs_history_len: self.lbfgs_history_len,
             amp: self.amp,
+            base_lr: optimizer_lr(&self.optimizer),
+            param_groups: self.param_groups,
         }
     }
 }
@@ -276,11 +360,44 @@ pub(super) fn render_compiled(m: &CompiledMeta) -> String {
         _ => String::new(),
     };
     format!(
-        "{{\"loss\":\"{}\",\"optimizer\":{{\"kind\":\"{}\",\"config\":{}{history_len}}},\"optimizer_state_keys\":[{}],\"amp\":{amp}}}",
+        "{{\"loss\":\"{}\",\"optimizer\":{{\"kind\":\"{}\",\"config\":{}{history_len}}},\"optimizer_state_keys\":[{}],\"amp\":{amp}{}}}",
         loss_name(m.loss),
         optimizer_kind(&m.optimizer),
         render_object(&config_fields(&m.optimizer)),
-        keys.join(",")
+        keys.join(","),
+        render_param_groups(&m.param_groups)
+    )
+}
+
+/// groups が空なら空文字（キーを書かない＝従来の manifest と完全一致）。空でなければ
+/// CSR 形 `,"param_groups":{"lr":[..],"weight_decay":[..],"offsets":[0,..,N],"slots":[..]}`。
+fn render_param_groups(groups: &[ParamGroup]) -> String {
+    if groups.is_empty() {
+        return String::new();
+    }
+    let join = |it: Vec<String>| it.join(",");
+    let lr = join(groups.iter().map(|g| format!("{:?}", g.lr)).collect());
+    let wd = join(
+        groups
+            .iter()
+            .map(|g| format!("{:?}", g.weight_decay))
+            .collect(),
+    );
+    let mut offsets = vec!["0".to_string()];
+    let mut end = 0usize;
+    for g in groups {
+        end += g.params.len();
+        offsets.push(end.to_string());
+    }
+    let slots = join(
+        groups
+            .iter()
+            .flat_map(|g| g.params.iter().map(|s| s.to_string()))
+            .collect(),
+    );
+    format!(
+        ",\"param_groups\":{{\"lr\":[{lr}],\"weight_decay\":[{wd}],\"offsets\":[{}],\"slots\":[{slots}]}}",
+        join(offsets)
     )
 }
 
@@ -495,11 +612,20 @@ pub(super) fn parse_compiled(value: &Json) -> Result<Option<CompiledMeta>, Model
     if matches!(value, Json::Null) {
         return Ok(None);
     }
-    let f = exact_fields(
-        value,
-        "compiled",
-        &["loss", "optimizer", "optimizer_state_keys", "amp"],
-    )?;
+    // param_groups は任意キー（#3835）。有無を先に見てキー集合を選ぶ（parse_optimizer と同型）。
+    let has_groups = matches!(value, Json::Obj(e) if e.iter().any(|(k, _)| k == "param_groups"));
+    let keys: &[&str] = if has_groups {
+        &[
+            "loss",
+            "optimizer",
+            "optimizer_state_keys",
+            "amp",
+            "param_groups",
+        ]
+    } else {
+        &["loss", "optimizer", "optimizer_state_keys", "amp"]
+    };
+    let f = exact_fields(value, "compiled", keys)?;
     let loss = match as_str(f[0], "compiled.loss")? {
         "mse" => Loss::Mse,
         "cross_entropy" => Loss::CrossEntropy,
@@ -540,13 +666,80 @@ pub(super) fn parse_compiled(value: &Json) -> Result<Option<CompiledMeta>, Model
             reason: "Lbfgs と AMP の併用は復元できません".into(),
         });
     }
+    let param_groups = match f.get(4) {
+        Some(v) => parse_param_groups(v)?,
+        None => Vec::new(),
+    };
+    if !param_groups.is_empty() && lbfgs_history_len.is_some() {
+        return Err(ModelIoError::UnsupportedModel {
+            reason: "Lbfgs と param groups の併用は復元できません".into(),
+        });
+    }
     Ok(Some(CompiledMeta {
         loss,
         optimizer,
         state_keys,
         amp,
         lbfgs_history_len,
+        param_groups,
     }))
+}
+
+/// `compiled.param_groups`（CSR 形。決定記録 §18.3）を検証して読む。確保量は
+/// パース済み配列（`MAX_ARRAY_LEN` で抑止済み）の長さだけで決め、非信頼な値は使わない。
+/// スロット範囲（`slot < n_params`）はモデル構築後に `check_param_group_slots` が見る。
+fn parse_param_groups(value: &Json) -> Result<Vec<ParamGroup>, ModelIoError> {
+    const CTX: &str = "compiled.param_groups";
+    let f = exact_fields(value, CTX, &["lr", "weight_decay", "offsets", "slots"])?;
+    let lr_arr = as_arr(f[0], "compiled.param_groups.lr")?;
+    let wd_arr = as_arr(f[1], "compiled.param_groups.weight_decay")?;
+    let off_arr = as_arr(f[2], "compiled.param_groups.offsets")?;
+    let slot_arr = as_arr(f[3], "compiled.param_groups.slots")?;
+    let g = lr_arr.len();
+    if g == 0 || wd_arr.len() != g || off_arr.len() != g + 1 {
+        return Err(manifest_error(
+            "compiled.param_groups の lr／weight_decay／offsets の長さが不整合です",
+        ));
+    }
+    let mut offsets = Vec::with_capacity(off_arr.len());
+    for v in off_arr {
+        offsets.push(as_usize(v, "compiled.param_groups.offsets[]")?);
+    }
+    if offsets[0] != 0 || offsets.windows(2).any(|w| w[0] >= w[1]) || offsets[g] != slot_arr.len() {
+        return Err(manifest_error(
+            "compiled.param_groups.offsets が 0 始まりの狭義増加で slots 長に一致する必要があります",
+        ));
+    }
+    let mut slots = Vec::with_capacity(slot_arr.len());
+    for v in slot_arr {
+        slots.push(as_usize(v, "compiled.param_groups.slots[]")?);
+    }
+    let mut sorted = slots.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|w| w[0] == w[1]) {
+        return Err(manifest_error(
+            "compiled.param_groups.slots にスロットの重複があります",
+        ));
+    }
+    let nonneg = |v: &Json, ctx: &str| -> Result<f32, ModelIoError> {
+        let x = as_f32(v, ctx)?;
+        if x >= 0.0 {
+            Ok(x)
+        } else {
+            Err(manifest_error(format!("{ctx} が負です")))
+        }
+    };
+    let mut groups = Vec::with_capacity(g);
+    for i in 0..g {
+        let lr = nonneg(&lr_arr[i], "compiled.param_groups.lr[]")?;
+        let wd = nonneg(&wd_arr[i], "compiled.param_groups.weight_decay[]")?;
+        groups.push(ParamGroup::new(
+            slots[offsets[i]..offsets[i + 1]].to_vec(),
+            lr,
+            wd,
+        ));
+    }
+    Ok(groups)
 }
 
 /// safetensors のテンソル集合から optimizer 状態を取り分ける（接頭辞除去済みの map と、
@@ -762,6 +955,7 @@ mod tests {
                 "optimizer.num_slots.u64_u16x4".into(),
             ],
             amp,
+            param_groups: Vec::new(),
         }
     }
 
@@ -1132,6 +1326,80 @@ mod tests {
         ));
         // Lbfgs 以外は何も見ない。
         assert!(check_lbfgs_history(&meta(all_optimizers()[0], None), &two).is_ok());
+    }
+
+    fn groups_meta(groups: Vec<ParamGroup>) -> CompiledMeta {
+        let mut m = meta(all_optimizers()[0], None);
+        m.param_groups = groups;
+        m
+    }
+
+    #[test]
+    fn param_groups_render_parse_round_trip_and_empty_has_no_key() {
+        // 空 groups: キーを書かず、固定文字列の末尾は従来どおり `"amp":null}`。
+        let plain = render_compiled(&groups_meta(Vec::new()));
+        assert!(!plain.contains("param_groups"));
+        assert!(plain.ends_with("\"amp\":null}"));
+        assert!(
+            parse(&plain)
+                .expect("parse")
+                .expect("some")
+                .param_groups
+                .is_empty()
+        );
+
+        // 複数 group・group 内の非昇順 params・-0.0 を含む。
+        let groups = vec![
+            ParamGroup::new(vec![3, 0], 0.01, -0.0),
+            ParamGroup::new(vec![2], 0.0, 0.5),
+        ];
+        let text = render_compiled(&groups_meta(groups.clone()));
+        assert!(text.ends_with(
+            ",\"param_groups\":{\"lr\":[0.01,0.0],\"weight_decay\":[-0.0,0.5],\"offsets\":[0,2,3],\"slots\":[3,0,2]}}"
+        ));
+        let back = parse(&text).expect("parse").expect("some");
+        assert_eq!(back.param_groups, groups);
+        assert_eq!(render_compiled(&back), text);
+    }
+
+    #[test]
+    fn param_groups_parse_rejects_basic_malformations() {
+        let good = render_compiled(&groups_meta(vec![
+            ParamGroup::new(vec![0, 1], 0.1, 0.0),
+            ParamGroup::new(vec![2], 0.2, 0.0),
+        ]));
+        let is_manifest = |t: &str| matches!(parse(t), Err(ModelIoError::Manifest { .. }));
+        assert!(parse(&good).is_ok());
+        // 未知キー・offsets の長さ不整合・重複スロット。
+        assert!(is_manifest(&good.replace("\"slots\"", "\"slotz\"")));
+        assert!(is_manifest(
+            &good.replace("\"offsets\":[0,2,3]", "\"offsets\":[0,2]")
+        ));
+        assert!(is_manifest(
+            &good.replace("\"slots\":[0,1,2]", "\"slots\":[0,1,1]")
+        ));
+    }
+
+    #[test]
+    fn param_groups_with_lbfgs_is_unsupported_both_ways() {
+        let mut m = lbfgs_meta(3);
+        m.param_groups = vec![ParamGroup::new(vec![0], 0.1, 0.0)];
+        let text = render_compiled(&m);
+        assert!(matches!(
+            parse(&text),
+            Err(ModelIoError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[test]
+    fn check_param_group_slots_rejects_out_of_range_as_mismatch() {
+        let g = vec![ParamGroup::new(vec![0, 3], 0.1, 0.0)];
+        assert!(check_param_group_slots(&g, 4).is_ok());
+        assert!(matches!(
+            check_param_group_slots(&g, 3),
+            Err(ModelIoError::Mismatch { .. })
+        ));
+        assert!(check_param_group_slots(&[], 0).is_ok());
     }
 
     #[test]

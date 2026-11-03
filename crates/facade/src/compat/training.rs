@@ -1408,6 +1408,7 @@ pub(super) struct Compiled {
     /// [`Sequential::compile_with_param_groups`] で渡された param groups
     /// （イシュー #2553。既定は空 = 従来の `compile()` 経路）。step 時の検証
     /// （`resolve_slot_hparams`）が使うため compile 時には中身を検証しない。
+    /// `save_model`／`load_model` で保存・復元される（#3835。決定記録 §18）。
     pub(super) param_groups: Vec<ParamGroup>,
     /// compile 時点の optimizer config の lr の控え（イシュー #3834・決定記録
     /// §15.0／§15.3）。`Callback::LrSchedule` と param groups の併用時に、
@@ -1432,6 +1433,12 @@ pub(super) struct CompiledSnapshot {
     pub(super) optimizer_state: HashMap<String, Tensor<f32>>,
     pub(super) lbfgs_history_len: Option<usize>,
     pub(super) amp: Option<AmpSnapshot>,
+    /// [`Sequential::compile_with_param_groups`] 系の param groups（#3835。空 = 従来経路）。
+    /// manifest の `compiled.param_groups`（CSR 形。決定記録 §18）へ往復する。
+    pub(super) param_groups: Vec<ParamGroup>,
+    /// 保存時点の [`Compiled::base_lr`]（#3835）。manifest には書かず、`LrSchedule` で lr が
+    /// 変わった後の groups 付き保存を `from_snapshot` が拒否する判定にだけ使う（決定記録 §18.12）。
+    pub(super) base_lr: f32,
 }
 
 /// [`CompiledSnapshot`] の AMP 部分（`GradScaler` の save 時点の状態）。
@@ -1497,15 +1504,6 @@ impl Sequential {
 ///
 /// `config()` は `set_lr` 反映後の現在値を返す（LR scheduler の書き換えを含む）。
 pub(super) fn snapshot_of_compiled(compiled: &Compiled) -> Result<CompiledSnapshot, AutodiffError> {
-    // イシュー #2553: snapshot／manifest に param groups の欄が無い。黙って落とすと
-    // 復元後に学習率が変わるため fail-closed で拒否する（決定記録 §12）。
-    if !compiled.param_groups.is_empty() {
-        return Err(AutodiffError::InvalidArgument(
-            "save_model: param groups を持つ compile 状態（compile_with_param_groups）は \
-             保存に未対応。重みだけなら state_dict 系を使う"
-                .to_string(),
-        ));
-    }
     let (optimizer, optimizer_state, lbfgs_history_len) = match &compiled.optimizer {
         OptimizerState::Sgd(o) => (Optimizer::Sgd(*o.config()), o.state_dict()?, None),
         OptimizerState::AdamW(o) => (Optimizer::AdamW(*o.config()), o.state_dict()?, None),
@@ -1531,6 +1529,8 @@ pub(super) fn snapshot_of_compiled(compiled: &Compiled) -> Result<CompiledSnapsh
         optimizer_state,
         lbfgs_history_len,
         amp,
+        param_groups: compiled.param_groups.clone(),
+        base_lr: compiled.base_lr,
     })
 }
 
@@ -1548,6 +1548,8 @@ pub(super) fn compiled_from_snapshot(
         optimizer_state,
         lbfgs_history_len,
         amp,
+        param_groups,
+        base_lr: _,
     } = snap;
     // 多層防御: 履歴件数は Lbfgs のときだけ持つ。AMP との併用は compile_with_amp が拒否する組合せ。
     let is_lbfgs = matches!(optimizer, Optimizer::Lbfgs(_));
@@ -1578,15 +1580,16 @@ pub(super) fn compiled_from_snapshot(
             scaler: grad_scaler_from_state(a.grad_scaler_config, a.scale, a.growth_tracker)?,
         }),
     };
-    // 読込後の基準 lr は復元した現在 lr（groups の保存・読込は #3835／#3836 の
-    // 範囲。決定記録 §15.12 の申し送り参照）。
+    // 読込後の基準 lr は復元した現在 lr（決定記録 §15.12 の申し送り）。groups は絶対値で
+    // 保存されるため、保存時に現在 lr ≠ compile 時 lr の状態は `from_snapshot` が拒否済み
+    // （§18.12。読込後に倍率が 1 へ戻って黙って学習率が変わるのを防ぐ）。
     let base_lr = state.lr();
     Ok(Compiled {
         optimizer: state,
         loss,
         amp,
-        // `save_model` は groups 非空を拒否する（#2553）ため復元は常に空。
-        param_groups: Vec::new(),
+        // 保存された groups（空なら従来経路）。値の検証は parse 側と `check_param_group_slots`。
+        param_groups,
         base_lr,
     })
 }
@@ -1970,7 +1973,12 @@ impl Sequential {
     /// - groups が空でないときの `Callback::LrSchedule` は共通倍率で受理する
     ///   （次節「学習率スケジュールとの関係」）。`History::lr` の意味は従来どおり
     ///   optimizer の config の学習率。
-    /// - groups が空でない compile 状態は `save_model` で保存できない。
+    /// - groups が空でない compile 状態も `save_model`／`load_model` で保存・復元される
+    ///   （形式は決定記録 §18。manifest の `compiled.param_groups`、`format_version` は据え置き）。
+    ///   ただし `Callback::LrSchedule` で lr が compile 時から変わった後の保存は
+    ///   `ModelIoError::UnsupportedModel`（groups は絶対値で保存され、読込後に倍率が 1 へ
+    ///   戻って学習率が黙って変わるため。§18.12）。groups 付きファイルは 0.13.0 以前の
+    ///   リーダーでは読めない（fail-closed。`docs/migration/0.14.0.md`）。
     /// - [`Self::fit_with_train_step`] のフック内 `opt.step` には epoch 開始時の
     ///   有効 groups（学習率スケジュールの倍率を反映）が適用される（スロット添字は
     ///   `step` に渡した `params` の位置）。
@@ -2083,6 +2091,48 @@ impl Sequential {
     /// let a = model.trainable_parameters();
     /// let b = reference.trainable_parameters();
     /// for (p, q) in a.iter().zip(b.iter()) {
+    ///     assert_eq!(p.as_slice().unwrap(), q.as_slice().unwrap());
+    /// }
+    /// ```
+    ///
+    /// groups は `save_model`／`load_model` で保存・復元され、読み込んだモデルの続き
+    /// の学習は保存しない連続 `fit` と bit 一致する（形式は決定記録 §18）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, load_model, save_model};
+    /// use fandhe_ai::optim::{ParamGroup, SgdConfig};
+    ///
+    /// let mut model = Sequential::new()
+    ///     .add_linear(2, 3, 1)
+    ///     .unwrap()
+    ///     .add_relu()
+    ///     .add_linear(3, 1, 2)
+    ///     .unwrap();
+    /// let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3, 2]).unwrap();
+    /// let y = Tensor::new(vec![0.0f32, 1.0, 0.5], &[3, 1]).unwrap();
+    /// model
+    ///     .compile_with_param_groups(
+    ///         Optimizer::Sgd(SgdConfig::new(0.1)),
+    ///         Loss::Mse,
+    ///         &[ParamGroup::new(vec![0, 1], 0.02, 0.0)],
+    ///     )
+    ///     .unwrap();
+    /// model.fit(&x, &y, FitConfig::new(2, 3)).unwrap();
+    ///
+    /// let dir = std::env::temp_dir().join(format!("fandhe_ai_doc_3835_{}", std::process::id()));
+    /// let _ = std::fs::remove_dir_all(&dir);
+    /// save_model(&model, &dir).unwrap();
+    /// let mut restored = load_model(&dir).unwrap();
+    /// let _ = std::fs::remove_dir_all(&dir);
+    ///
+    /// model.fit(&x, &y, FitConfig::new(2, 3)).unwrap();
+    /// restored.fit(&x, &y, FitConfig::new(2, 3)).unwrap();
+    /// for (p, q) in model
+    ///     .trainable_parameters()
+    ///     .iter()
+    ///     .zip(restored.trainable_parameters().iter())
+    /// {
     ///     assert_eq!(p.as_slice().unwrap(), q.as_slice().unwrap());
     /// }
     /// ```
