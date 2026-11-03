@@ -1825,3 +1825,33 @@ fn tampered_batch_norm3d_params_are_rejected() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// イシュー #3824: adaptive_avg_pool3d / adaptive_max_pool3d の保存・復元（kind 追加・format_version 2 据え置き。#3750 R1・R2）
+// ---------------------------------------------------------------------
+
+fn adaptive_pool3d_model() -> Sequential {
+    Sequential::new()
+        .add_conv3d(1, 2, [1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1, 4)
+        .and_then(|m| m.add_adaptive_avg_pool3d([2, 1, 2]))
+        .and_then(|m| m.add_adaptive_max_pool3d([1, 1, 2]))
+        .map(|m| m.add_flatten(1, 4))
+        .and_then(|m| m.add_linear(4, 2, 5))
+        .expect("構築できるはず")
+}
+
+#[test]
+fn adaptive_pool3d_round_trips_with_kind_names_and_format_version_2() {
+    let input = tensor(&[3, 1, 3, 3, 3], 0.3);
+    let kinds = round_trip("adaptive-pool3d-kind", &adaptive_pool3d_model(), &input);
+    assert!(kinds.contains("adaptive_avg_pool3d"), "{kinds:?}");
+    assert!(kinds.contains("adaptive_max_pool3d"), "{kinds:?}");
+    let (_g, _dir, text) = manifest_of(&adaptive_pool3d_model(), "adaptive-pool3d-manifest");
+    assert!(text.contains("\"format_version\":2"), "{text}");
+    assert!(
+        text.contains(
+            "\"kind\":\"adaptive_avg_pool3d\",\"params\":{\"output_size_d\":2,\"output_size_h\":1,\"output_size_w\":2}"
+        ),
+        "{text}"
+    );
+}

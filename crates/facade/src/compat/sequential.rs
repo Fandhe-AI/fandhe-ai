@@ -10,7 +10,8 @@
 //! LeakyRelu/Elu/Dropout・Conv2d/Conv1d〈#1770〉・LayerNorm/RmsNorm/
 //! BatchNorm1d/BatchNorm2d/BatchNorm3d/Embedding/MultiheadAttention〈#1760〉・
 //! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
-//! AdaptiveAvgPool1d〈#1957〉・AdaptiveMaxPool2d/AdaptiveMaxPool1d/
+//! AdaptiveAvgPool1d〈#1957〉・AdaptiveAvgPool3d/AdaptiveMaxPool3d〈#3824〉・
+//! AdaptiveMaxPool2d/AdaptiveMaxPool1d/
 //! GlobalPool〈#2527〉・Dropout2d/AlphaDropout/EmbeddingBag〈#2528〉・
 //! Mish/Hardtanh/Relu6/Glu/PRelu〈#2529〉・Softmax/LogSoftmax・
 //! GELU（誤差関数版・tanh 近似版）/Softplus・Flatten〈#2065 で
@@ -119,19 +120,20 @@ use fandhe_ai_autodiff::nn::activation::{
 use fandhe_ai_autodiff::nn::shrink::{Hardshrink, Softshrink};
 use fandhe_ai_autodiff::nn::softmin_threshold::{RRelu, Softmin, Tanhshrink, Threshold};
 use fandhe_ai_autodiff::nn::{
-    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
-    AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNorm3d, BatchNormVars,
-    ChannelShuffle, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
-    ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, ConvTranspose3d,
-    ConvTranspose3dVars, Dropout, Dropout2d, Embedding, EmbeddingBag, EmbeddingBagVars,
-    EmbeddingVars, FeedForwardActivation, Flatten, Fold, GlobalPool, GroupNorm, Identity,
-    InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, LocalResponseNorm,
-    MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention, MultiheadAttentionConfig,
-    MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
-    Sequential as NnSequential, Transformer, TransformerConfig, TransformerDecoderLayer,
-    TransformerDecoderLayerVars, TransformerEncoderLayer, TransformerEncoderLayerVars,
-    TransformerVars, Unflatten, Unfold, Upsample, ZeroPad2d, conv2d_forward_low_precision,
-    linear_forward_low_precision, multihead_attention_forward_low_precision,
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveAvgPool3d, AdaptiveMaxPool1d, AdaptiveMaxPool2d,
+    AdaptiveMaxPool3d, AlphaDropout, AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d,
+    BatchNorm3d, BatchNormVars, ChannelShuffle, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d,
+    Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars,
+    ConvTranspose3d, ConvTranspose3dVars, Dropout, Dropout2d, Embedding, EmbeddingBag,
+    EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, Fold, GlobalPool, GroupNorm,
+    Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear,
+    LocalResponseNorm, MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention,
+    MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm,
+    RmsNormVars, Sequential as NnSequential, Transformer, TransformerConfig,
+    TransformerDecoderLayer, TransformerDecoderLayerVars, TransformerEncoderLayer,
+    TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold, Upsample, ZeroPad2d,
+    conv2d_forward_low_precision, linear_forward_low_precision,
+    multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -500,6 +502,14 @@ pub(super) enum LayerSpec {
     /// イシュー #2527。
     AdaptiveMaxPool1d {
         output_size: usize,
+    },
+    /// イシュー #3824。kind は `adaptive_avg_pool3d`。
+    AdaptiveAvgPool3d {
+        output_size: [usize; 3],
+    },
+    /// イシュー #3824。kind は `adaptive_max_pool3d`。
+    AdaptiveMaxPool3d {
+        output_size: [usize; 3],
     },
     /// イシュー #2527。
     GlobalPool {
@@ -2613,6 +2623,61 @@ impl Sequential {
         self.inner.push(Box::new(layer));
         self.specs
             .push(LayerSpec::AdaptiveMaxPool1d { output_size });
+        Ok(self)
+    }
+
+    /// 3 次元 AdaptiveAvgPool 層を追加する（`nn::AdaptiveAvgPool3d`。PyTorch `nn.AdaptiveAvgPool3d` 相当。
+    /// イシュー #3824・設計の正は `docs/autodiff-pool3d-ops-decision.md` §18）。
+    /// 入力は `NCDHW`（rank 5）。各出力要素は `adaptive_window` の窓（重なり許容）の平均で、
+    /// `output_size` に `0` を含む場合は `Err`（panic しない）。学習経路はそのまま通る。
+    /// 常駐経路は Pooling 層として `Unsupported`（fail-closed）。`save_model` で保存・復元できる
+    /// （kind `adaptive_avg_pool3d`）。ONNX export は `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::Tensor;
+    /// let x = Tensor::new((0..8).map(|v| v as f32).collect::<Vec<_>>(), &[1, 1, 2, 2, 2]).unwrap();
+    /// let model = Sequential::new().add_adaptive_avg_pool3d([1, 1, 1]).unwrap();
+    /// let y = model.predict(&x).unwrap();
+    /// assert_eq!(y.shape(), &[1, 1, 1, 1, 1]);
+    /// assert_eq!(y.contiguous().as_slice().unwrap(), &[3.5]);
+    /// assert!(Sequential::new().add_adaptive_avg_pool3d([0, 1, 1]).is_err());
+    /// ```
+    pub fn add_adaptive_avg_pool3d(
+        mut self,
+        output_size: [usize; 3],
+    ) -> Result<Self, AutodiffError> {
+        let layer = AdaptiveAvgPool3d::new(output_size)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::AdaptiveAvgPool3d { output_size });
+        Ok(self)
+    }
+
+    /// 3 次元 AdaptiveMaxPool 層を追加する（`nn::AdaptiveMaxPool3d`。PyTorch `nn.AdaptiveMaxPool3d` 相当。
+    /// イシュー #3824・設計 §18）。入力は `NCDHW`（rank 5）。層は値だけを返す
+    /// （索引が要る場合は `crate::Var::adaptive_max_pool3d` を使う）。
+    /// 不正引数・学習・常駐・保存・ONNX の扱いは [`Sequential::add_adaptive_avg_pool3d`] と同じ
+    /// （kind は `adaptive_max_pool3d`）。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::Tensor;
+    /// let x = Tensor::new((0..8).map(|v| v as f32).collect::<Vec<_>>(), &[1, 1, 2, 2, 2]).unwrap();
+    /// let model = Sequential::new().add_adaptive_max_pool3d([1, 1, 1]).unwrap();
+    /// let y = model.predict(&x).unwrap();
+    /// assert_eq!(y.shape(), &[1, 1, 1, 1, 1]);
+    /// assert_eq!(y.contiguous().as_slice().unwrap(), &[7.0]);
+    /// assert!(Sequential::new().add_adaptive_max_pool3d([1, 0, 1]).is_err());
+    /// ```
+    pub fn add_adaptive_max_pool3d(
+        mut self,
+        output_size: [usize; 3],
+    ) -> Result<Self, AutodiffError> {
+        let layer = AdaptiveMaxPool3d::new(output_size)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::AdaptiveMaxPool3d { output_size });
         Ok(self)
     }
 
