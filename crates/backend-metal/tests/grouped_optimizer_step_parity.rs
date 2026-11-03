@@ -21,8 +21,7 @@ const N: usize = 40;
 const SPLIT: [usize; 3] = [13, 0, 27];
 
 fn close(a: f32, b: f32) -> bool {
-    let d = (a - b).abs();
-    d < 1e-5 || d / b.abs().max(1e-12) < 1e-3
+    fandhe_ai_tensor_core::tolerance::composite_close_f32(a, b)
 }
 
 fn vals(seed: f32) -> Vec<f32> {

@@ -45,10 +45,8 @@ fn groups() -> Vec<ParamGroup> {
 }
 
 fn assert_close(actual: f32, expected: f32, ctx: &str) {
-    let abs_diff = (actual - expected).abs();
-    let rel_diff = abs_diff / expected.abs().max(1e-12);
     assert!(
-        abs_diff < 1e-5 || rel_diff < 1e-3,
+        fandhe_ai_tensor_core::tolerance::composite_close_f32(actual, expected),
         "{ctx}: actual={actual} expected={expected}"
     );
 }
