@@ -100,21 +100,57 @@ fn lp_pool_matches_pytorch_reference_forward_and_backward() {
             &from_bits(&case.out_bits),
             &format!("{} forward", case.name),
         );
-        // forward に NaN を含む（負の入力 × 非整数 p）ケースの勾配は比較しない。PyTorch は NaN を返すが、
-        // 本実装は `pow_scalar` の VJP と上流 0 の積が 0 になり NaN にならない（既知の差分。実装記録に記載）。
-        if from_bits(&case.out_bits).iter().any(|v| v.is_nan()) {
+        let out_has_nan = from_bits(&case.out_bits).iter().any(|v| v.is_nan());
+        if out_has_nan {
             nan_cases += 1;
-            continue;
         }
         let g = tape.var_no_grad(&Tensor::new(from_bits(&case.g_bits), out.shape()).unwrap());
         let loss = y.mul(&g).unwrap().sum(None).unwrap();
         let grads = tape.backward(&loss).unwrap();
         let got = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
-        assert_close_all(
-            &got,
-            &from_bits(&case.grad_bits),
-            &format!("{} grad", case.name),
-        );
+        let want = from_bits(&case.grad_bits);
+        if out_has_nan {
+            // forward に NaN を含む（負の入力 × 非整数 p）ケース。PyTorch の勾配は NaN 要素を含むが、
+            // 本実装は `pow_scalar` の VJP と上流 0 の積が 0 になる要素があり、全要素が NaN にはならない（既知の差分。実装記録に記載）。
+            // 参照勾配が NaN の要素だけを比較から除外し、有限の参照勾配は検証する。除外した要素は
+            // 本実装が NaN か 0 のいずれかを返す挙動を独立に固定する（特殊値処理の回帰を検出する）。
+            assert_eq!(got.len(), want.len(), "{} grad 長", case.name);
+            let mut known_diff = 0usize;
+            let mut zero_diff = 0usize;
+            for (i, (g_i, w_i)) in got.iter().zip(want.iter()).enumerate() {
+                if w_i.is_nan() {
+                    known_diff += 1;
+                    // 差分として記録した要素の挙動を固定する: NaN（PyTorch と一致）か厳密な 0（既知の差分）の
+                    // いずれかで、有限の非零値へ変わったら回帰として検出する。
+                    assert!(
+                        g_i.is_nan() || *g_i == 0.0,
+                        "{} grad[{i}]: NaN 参照要素は NaN または 0 のみ許す: {g_i}",
+                        case.name
+                    );
+                    if *g_i == 0.0 {
+                        zero_diff += 1;
+                    }
+                } else {
+                    assert_close_all(
+                        std::slice::from_ref(g_i),
+                        std::slice::from_ref(w_i),
+                        &format!("{} grad[{i}]", case.name),
+                    );
+                }
+            }
+            assert!(
+                known_diff >= 1,
+                "{}: NaN 参照勾配が 1 件以上ある",
+                case.name
+            );
+            assert!(
+                zero_diff >= 1,
+                "{}: 0 を返す既知の差分が 1 件以上ある",
+                case.name
+            );
+        } else {
+            assert_close_all(&got, &want, &format!("{} grad", case.name));
+        }
     }
     assert!(dims.iter().all(|&n| n >= 5), "1d/2d/3d の件数: {dims:?}");
     assert!(nan_cases >= 1, "NaN ケースが fixture に含まれる");
