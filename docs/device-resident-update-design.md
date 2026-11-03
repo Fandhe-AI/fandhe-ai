@@ -2300,3 +2300,11 @@ ratio）の状態バッファをデバイス常駐バッファとして保持し
   AMP 自体はホスト計算フォールバックのためバックエンド非依存だが、
   Adam カーネル自体が CUDA／Metal で `Unsupported`〈CPU 実装のみ。
   #1959 コメント参照〉という既存の別軸の制約はそのまま残る）。
+
+## param groups の常駐更新（イシュー #3837）
+
+層別の学習率・weight decay（param groups）を常駐学習で使うための内部実装。**正本は `docs/autodiff-param-groups-decision.md` §19（実装記録は §19.12）**で、ここでは本設計の読者向けの要点だけを記す。
+
+- `DeviceParamStore` は groups なしでは従来どおり（`slot_groups == None`）。groups あり構築は内部入口 `optim::resident_param_groups`（フリー関数）で行い、スロットごとの `(lr, weight_decay)` を固定する（途中変更は store の作り直し）。
+- 各 `step*` は groups ありのとき、連結バッファを「隣り合う同値の区間」に分けた区間テーブルを `BackendOps::*_step_device_grouped` へ渡す。導出スカラー（Adam の `step_size`、AdamW の `decay_factor`、Adagrad の `clr`、Lamb の `step_size`）の式はホストの `step_with_slot_hparams` と同じ。
+- 対応範囲: CPU は 6 optimizer（ホストと bit 一致。SGD のみ常駐 `mul_add` 契約のため統一複合判定）、CUDA・Metal は SGD・Adam・AdamW（既存カーネルを区間ごとに部分ビュー／バッファオフセットで起動）。ROCm、AMP、distributed、`train_step_resident` のチェーン、CUDA Graph capture は groups ありを拒否する（チェーンは Tape 経路へ全体フォールバック）。
