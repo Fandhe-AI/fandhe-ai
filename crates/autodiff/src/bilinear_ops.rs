@@ -176,7 +176,11 @@ mod tests {
     }
 
     fn close(a: f64, e: f64) -> bool {
-        (a - e).abs() < 1e-5 || (a - e).abs() / e.abs() < 1e-3
+        use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
+        // REQ-2 統一複合判定。相対誤差の分母は max(|actual|, |reference|, 1e-12)。
+        let diff = (a - e).abs();
+        let scale = a.abs().max(e.abs()).max(1e-12);
+        diff / scale < RELATIVE_TOLERANCE || diff < ABSOLUTE_RESCUE_THRESHOLD
     }
 
     #[test]
