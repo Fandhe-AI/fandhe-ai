@@ -19798,6 +19798,209 @@ fn ema_usage_doctests_are_present_and_compiled() {
     assert!(!doctest_probe_violations("t", &hidden, &["ExponentialMovingAverage"]).is_empty());
 }
 
+// ---------------------------------------------------------------------
+// イシュー #3831（設計 #3752・決定記録 `docs/autodiff-ema-decision.md` §17・§19）:
+// `Callback::Ema` × `compile_with_amp` の併用拒否を撤去して受理へ反転した正ガード群。
+// 旧い実行時テスト (d)（拒否を固定）は api_surface に否定ガードが無かったため正のテストへ
+// 置換し、ここでは (1) facade のみの import での到達、(2) `training.rs` の検査腕が承認集合
+// （EMA 側は複数指定・Lbfgs・カスタム step の 3 本、AMP は SWA／accumulate／カスタム step 側だけ
+// 残る）であること、(3) 正の doctest の実在を固定する。
+// ---------------------------------------------------------------------
+
+/// `src` の `needle` を含む行から `max_lines` 行（コメント行を除く）を連結して返す。
+/// マーカーが無ければ `None`（空振りの合格を防ぐ fail-closed）。
+fn code_window_after(src: &str, needle: &str, until: Option<&str>) -> Option<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let start = lines.iter().position(|l| l.contains(needle))?;
+    let mut out = Vec::new();
+    for l in &lines[start + 1..] {
+        if let Some(u) = until
+            && l.contains(u)
+        {
+            return Some(out.join("\n"));
+        }
+        if !l.trim_start().starts_with("//") {
+            out.push(*l);
+        }
+        if until.is_none() && out.len() >= 40 {
+            break;
+        }
+    }
+    if until.is_some() {
+        None
+    } else {
+        Some(out.join("\n"))
+    }
+}
+
+/// 空白を除いた文字列（`as_ref()` 等の別書きによる腕の再導入を空白差で素通りさせない）。
+fn squash_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// `training.rs` の EMA 併用検査腕が承認集合から外れている点を返す。
+/// - `(1.8) EMA` ブロック: 複数指定・`OptimizerState::Lbfgs`・`custom_step` の 3 腕が残り、
+///   `amp` を参照する腕が無い（AMP 腕の再導入禁止）
+/// - `(1.8b) SWA` ブロック: SWA×AMP 拒否が残る
+/// - fit 全体: AMP×accumulate・AMP×カスタム step の拒否が残る
+fn ema_amp_arm_violations(training_src: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let Some(ema) = code_window_after(training_src, "// (1.8) EMA", Some("// (1.8b) SWA")) else {
+        return vec!["`// (1.8) EMA`〜`// (1.8b) SWA` のマーカーを検出できない".to_string()];
+    };
+    let ema = squash_ws(&ema);
+    for (label, frag) in [
+        ("複数指定の腕", "ema_count>1"),
+        ("Lbfgs の腕", "OptimizerState::Lbfgs("),
+        ("カスタム step の腕", "custom_step.is_some()"),
+    ] {
+        if !ema.contains(frag) {
+            v.push(format!("EMA 検査ブロックに {label} が無い"));
+        }
+    }
+    if ema.contains(".amp") || ema.contains("amp.") {
+        v.push("EMA 検査ブロックが AMP を参照している（AMP 腕の再導入）".to_string());
+    }
+    match code_window_after(training_src, "// (1.8b) SWA", None) {
+        Some(swa) if squash_ws(&swa).contains("compiled.amp.is_some()") => {}
+        _ => v.push("SWA 検査ブロックの SWA×AMP 拒否が無い".to_string()),
+    }
+    let all = squash_ws(training_src);
+    for (label, frag) in [
+        (
+            "AMP×accumulate_steps",
+            "config.accumulate_steps>1&&compiled.amp.is_some()",
+        ),
+        (
+            "AMP×カスタム step",
+            "custom_step.is_some()&&compiled.amp.is_some()",
+        ),
+    ] {
+        if !all.contains(frag) {
+            v.push(format!("{label} の拒否が無い"));
+        }
+    }
+    v
+}
+
+/// `Callback::Ema` × AMP の併用が受理され、検査腕が承認集合のままであることを固定する。
+#[test]
+fn ema_fit_rejection_arms_match_approved_set() {
+    let training = read_to_string_or_panic(&facade_crate_root().join("src/compat/training.rs"));
+    let v = ema_amp_arm_violations(&training);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// [`ema_amp_arm_violations`] の自己テスト: 各カテゴリの合成入力が検出される。
+#[test]
+fn ema_fit_rejection_arms_detects_each_category() {
+    let base = "if config.accumulate_steps > 1 && compiled.amp.is_some() {}\n\
+        if custom_step.is_some() && compiled.amp.is_some() {}\n\
+        // (1.8) EMA\n\
+        let r = if ema_count > 1 { 1 } else if matches!(compiled.optimizer, OptimizerState::Lbfgs(_)) { 2 } else if custom_step.is_some() { 3 } else { 0 };\n\
+        // (1.8b) SWA\n\
+        let r = if compiled.amp.is_some() { 1 } else { 0 };\n";
+    assert!(ema_amp_arm_violations(base).is_empty());
+    // コメントに AMP と書いても違反にしない。
+    let commented = base.replace(
+        "// (1.8) EMA\n",
+        "// (1.8) EMA\n// AMP は拒否しない compiled.amp\n",
+    );
+    assert!(ema_amp_arm_violations(&commented).is_empty());
+
+    // AMP 腕の再導入（空白差・as_ref 経由を含む）。
+    for arm in [
+        "else if compiled.amp.is_some() { 4 }",
+        "else if compiled.amp.as_ref().is_some() { 4 }",
+        "else if compiled\n    .amp\n    .is_some() { 4 }",
+    ] {
+        let bad = base.replace(
+            "else { 0 };\n// (1.8b)",
+            &format!("{arm} else {{ 0 }};\n// (1.8b)"),
+        );
+        let bad = if bad == base {
+            base.replacen(
+                "{ 3 } else { 0 };",
+                &format!("{{ 3 }} {arm} else {{ 0 }};"),
+                1,
+            )
+        } else {
+            bad
+        };
+        assert!(
+            !ema_amp_arm_violations(&bad).is_empty(),
+            "AMP 腕の再導入を検出しない: {arm}"
+        );
+    }
+    // 承認腕の欠落。
+    let no_lbfgs = base.replace("OptimizerState::Lbfgs(_)", "Foo(_)");
+    assert!(!ema_amp_arm_violations(&no_lbfgs).is_empty());
+    let no_multi = base.replace("ema_count > 1", "false");
+    assert!(!ema_amp_arm_violations(&no_multi).is_empty());
+    // SWA×AMP・accumulate×AMP の欠落。
+    let no_swa = base.replace(
+        "let r = if compiled.amp.is_some() { 1 }",
+        "let r = if false { 1 }",
+    );
+    assert!(!ema_amp_arm_violations(&no_swa).is_empty());
+    let no_acc = base.replace("config.accumulate_steps > 1 &&", "");
+    assert!(!ema_amp_arm_violations(&no_acc).is_empty());
+    // マーカー欠落は fail-closed。
+    assert!(!ema_amp_arm_violations("fn x() {}").is_empty());
+    assert!(!ema_amp_arm_violations(&base.replace("// (1.8b) SWA", "// other")).is_empty());
+}
+
+/// `Callback::Ema` × `compile_with_amp` が `fandhe_ai` の公開パスだけで組め、受理される。
+#[test]
+fn ema_with_amp_is_reachable_via_facade_only() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::compat::{
+        AmpConfig, AmpDType, Callback, EmaCallback, FitConfig, Loss, Optimizer, Sequential,
+    };
+    use fandhe_ai::optim::SgdConfig;
+
+    let mut model = Sequential::new().add_linear(2, 1, 7).expect("test fixture");
+    model
+        .compile_with_amp(
+            Optimizer::Sgd(SgdConfig::new(0.1)),
+            Loss::Mse,
+            AmpConfig::new(AmpDType::Bf16),
+        )
+        .expect("test fixture");
+    let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).expect("test fixture");
+    let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).expect("test fixture");
+    let mut cbs = [Callback::Ema(EmaCallback::new(0.9).expect("test fixture"))];
+    model
+        .fit_with_callbacks(&x, &y, FitConfig::new(3, 2), None, &mut cbs)
+        .expect("EMA×AMP は受理される");
+    let Callback::Ema(ema) = &cbs[0] else {
+        unreachable!()
+    };
+    assert!(ema.num_updates() <= 3);
+}
+
+/// 正の doctest プローブ（#3831）: `EmaCallback` の doc に AMP と組み合わせる利用例が
+/// 実在し、コンパイル・実行される形（`ignore` 等の指定なし）であることを固定する。
+#[test]
+fn ema_with_amp_usage_doctest_is_present_and_compiled() {
+    let callbacks = read_to_string_or_panic(&facade_crate_root().join("src/compat/callbacks.rs"));
+    let needles = ["compile_with_amp", "AmpConfig", "Callback::Ema"];
+    let v = doctest_probe_violations(
+        "EmaCallback の doc（AMP 併用例）",
+        &doc_lines_above_fn(&callbacks, "pub struct EmaCallback"),
+        &needles,
+    );
+    assert!(v.is_empty(), "{v:?}");
+
+    // 自己テスト: 空入力・隠し行・ignore は検出される。
+    let lines = |s: &str| s.lines().map(|l| l.to_string()).collect::<Vec<_>>();
+    assert!(!doctest_probe_violations("t", &[], &needles).is_empty());
+    let hidden = lines("```\n# compile_with_amp AmpConfig Callback::Ema\n```");
+    assert!(!doctest_probe_violations("t", &hidden, &needles).is_empty());
+    let ignored = lines("```ignore\ncompile_with_amp AmpConfig Callback::Ema\n```");
+    assert!(!doctest_probe_violations("t", &ignored, &needles).is_empty());
+}
+
 // =====================================================================
 // イシュー #2658（親 #2657）で保留として導入し、イシュー #2679 で承認形の公開
 // （`optim::AveragedModel`＝facade 独自ラッパー、`optim::{SwaLr, SwaAnneal}`＝素の

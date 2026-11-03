@@ -1907,7 +1907,7 @@ EMA（#2179 で内部クレート限定実装済み）を、決定記録（`docs
 `EmaHoldDoctestGuard` は `FitConfig`／`Sequential` への `use_ema`／`ema_decay` 追加という禁止経路専用として
 名前を維持（ドリフト検査 2 件は不変。理由は決定記録 §14.3）。利用例は `optim.rs`・`optim_ema.rs`・
 `compat/callbacks.rs` の doctest と `crates/facade/tests/compat_sequential_fit_ema.rs`・
-`compat_sequential_ema_manual.rs`。保留を継続する項目: `compile_with_amp` 併用（fit 開始前に
+`compat_sequential_ema_manual.rs`。保留を継続する項目: `compile_with_amp` 併用（#3831 で受理。末尾の適用記録。当時は fit 開始前に
 `InvalidArgument` で拒否）・decay ウォームアップ・`BatchNorm` running buffer・`DeviceParamStore` 常駐経路・
 `FitConfig`／`Sequential` への接続。`Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` 併用は、
 #2844 で決定記録 §15 の形（判定値は生の重みの訓練損失・保存／復元重みは EMA 重み）により受理した
@@ -2938,3 +2938,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（イシュー #3828・親 #3813。承認: #3768 の所有者の回答コメント 6554564412〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3768#issuecomment-6554564412>〉）**: Phase 6 で足した 12 層（`add_upsample_scale_factor`・Hardshrink／Softshrink・BatchNorm3d・ChannelShuffle・Adaptive 3D の 2 種・LPPool の 3 種・FractionalMaxPool の 2 種）の保存・読込を横断方針（#3750）どおりに確認した。kind は 12 種（`format_version` は 2 のまま。到達数 70 → 82）で、ONNX export は全層 `UnsupportedLayer` のまま。0.13.0 の `save_model` が書いた実ファイルを現行の `load_model` で読む互換テスト（`crates/facade/tests/compat_sequential_model_io_compat_0_13_0.rs`）、12 層の横断テスト（`compat_sequential_model_io_new_layers.rs`）、`api_surface.rs` 末尾の #3828 節の正ガードを足した。公開名の追加はない。`Cargo.toml`・tolerance・baseline・`unsafe`・`docs/spec` は不変。実機 parity は未実測（#3860・#3861）。
 
 **適用記録（イシュー #3830・設計 #3751。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: SWA の `FitConfig`／`Sequential` 形（`use_swa`・`swa_start`・`swa_lr`）を対象外に確定した。SWA の唯一の入口は `Callback::Swa(SwaCallback)`。`SwaHoldDoctestGuard` と `fit_config_declares_no_swa_fields` は禁止経路専用で維持し、正ガードへは反転しない。公開状態は「未公開（対象外）」。公開 API・依存・tolerance・baseline・`unsafe`・`docs/spec` は不変で、変更は docs とコメントのみ。実機 parity は該当なし。詳細は `docs/autodiff-swa-decision.md` §21。
+
+**適用記録（イシュー #3831・設計 #3752。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: Callback::Ema と compile_with_amp の併用拒否を撤去。skip した step では shadow と num_updates を更新しない。新しい pub 項目なし。詳細は決定記録 `docs/autodiff-ema-decision.md` §19。

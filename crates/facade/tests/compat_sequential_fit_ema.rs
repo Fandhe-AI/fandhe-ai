@@ -12,11 +12,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use fandhe_ai::compat::{
     AmpConfig, AmpDType, Callback, EarlyStopping, EmaCallback, FitConfig, LambdaCallback, Loss,
-    ModelCheckpoint, Monitor, Optimizer, Sequential, TrainStepFn, TrainStepOptimizer,
+    ModelCheckpoint, Monitor, Optimizer, Sequential, SwaCallback, TrainStepFn, TrainStepOptimizer,
     TrainStepOutput,
 };
 use fandhe_ai::nn::Module;
-use fandhe_ai::optim::{ExponentialMovingAverage, LbfgsConfig, SgdConfig};
+use fandhe_ai::optim::SwaAnneal;
+use fandhe_ai::optim::{ExponentialMovingAverage, GradScalerConfig, LbfgsConfig, SgdConfig};
 use fandhe_ai::{AutodiffError, TapeRef, Tensor, Var};
 
 const N: usize = 16;
@@ -339,27 +340,8 @@ fn rejected_combinations_leave_model_untouched() {
     )));
     assert_eq!(model_bits(&m), before);
 
-    // (d) AMP（skip step の扱いが決定記録 §10.2 (g) で未決のため拒否）。
-    let mut m = Sequential::new()
-        .add_linear(D_IN, D_OUT, 1)
-        .expect("fixture");
-    m.compile_with_amp(
-        Optimizer::Sgd(SgdConfig::new(0.05)),
-        Loss::Mse,
-        AmpConfig::new(AmpDType::Bf16),
-    )
-    .expect("compile_with_amp");
-    let before = model_bits(&m);
-    let mut cbs = [ema_cb(0.9)];
-    assert!(is_invalid_arg(m.fit_with_callbacks(
-        &x,
-        &y,
-        FitConfig::new(1, N),
-        None,
-        &mut cbs
-    )));
-    assert_eq!(model_bits(&m), before);
-    m.evaluate(&x, &y, N).expect("compile 状態が保持されている");
+    // (d) AMP は #3831 で受理へ反転（決定記録 §17・§19）。受理側は下記テスト 8a〜8d が
+    // 正のテストとして担保し、残る拒否（AMP×accumulate／カスタム step／SWA）はテスト 8e が担保する。
     // (e) の Monitor::Loss 併用は #2844 で拒否を撤去済み（決定記録 §15）。受理側は下記
     // テスト 7b／7c が正のテストとして担保する。
 }
@@ -625,4 +607,270 @@ fn wrapper_module_apply_restore_round_trip() {
     );
     ExponentialMovingAverage::restore(&mut m, backup).expect("restore");
     assert_eq!(dict_bits(&m.state_dict()), live);
+}
+
+// =====================================================================
+// 8. EMA × AMP（イシュー #3831・決定記録 §17）。skip した step では shadow も
+//    `num_updates` も変えない。skip の判定は `amp_loss_scale()` の半減で行う
+//    （`growth_interval` を試行数より大きくし、増加と混ざらないようにする）。
+//    低精度 forward と手書き GradScaler ループの bit 一致は
+//    `compat_sequential_fit_amp.rs` が担保しており、ここはその上に推移的に乗る
+//    （内部クレートを import しないための構成）。
+// =====================================================================
+
+const AMP_STEPS: usize = 8;
+
+/// 勾配 overflow を誘発するため target を 1e3 倍にしたデータ。
+fn amp_data() -> (Tensor<f32>, Tensor<f32>) {
+    let (x, y) = gen_data();
+    let ys: Vec<f32> = y
+        .contiguous()
+        .as_slice()
+        .expect("test fixture: contiguous 化済み")
+        .iter()
+        .map(|v| v * 1.0e3)
+        .collect();
+    (x, Tensor::new(ys, y.shape()).expect("test fixture"))
+}
+
+fn amp_model(dtype: AmpDType) -> Sequential {
+    let mut m = Sequential::new()
+        .add_linear(D_IN, 8, 0x11)
+        .expect("test fixture")
+        .add_relu()
+        .add_linear(8, D_OUT, 0x22)
+        .expect("test fixture");
+    m.compile_with_amp(
+        Optimizer::Sgd(SgdConfig::new(0.05)),
+        Loss::Mse,
+        AmpConfig::new(dtype).grad_scaler(GradScalerConfig {
+            init_scale: 2.0f32.powi(127),
+            growth_factor: 2.0,
+            backoff_factor: 0.5,
+            growth_interval: 1000,
+        }),
+    )
+    .expect("test fixture");
+    m
+}
+
+fn scale_of(m: &Sequential) -> f32 {
+    m.amp_loss_scale().expect("test fixture: AMP compile 済み")
+}
+
+/// 参照: EMA なしの AMP モデルを 1 step ずつ `fit` し、skip でない step だけ手動で
+/// `update_named` する。戻り値は (参照モデル, 手動 EMA, 各 step の skip 判定)。
+fn amp_reference(
+    dtype: AmpDType,
+    x: &Tensor<f32>,
+    y: &Tensor<f32>,
+    batch: usize,
+    steps: usize,
+) -> (Sequential, ExponentialMovingAverage, Vec<bool>) {
+    let mut m = amp_model(dtype);
+    let mut ema =
+        ExponentialMovingAverage::from_named(DECAY, m.named_parameters()).expect("from_named");
+    let mut skips = Vec::new();
+    for _ in 0..steps {
+        let before = scale_of(&m);
+        m.fit(x, y, FitConfig::new(1, batch)).expect("fit");
+        let skipped = scale_of(&m) < before;
+        if !skipped {
+            ema.update_named(m.named_parameters()).expect("update");
+        }
+        skips.push(skipped);
+    }
+    (m, ema, skips)
+}
+
+fn run_amp_matches_reference(dtype: AmpDType) {
+    let (x, y) = amp_data();
+    let (reference, ema, skips) = amp_reference(dtype, &x, &y, N, AMP_STEPS);
+    assert!(skips.iter().any(|&s| s), "skip が 1 回以上ある構成のはず");
+    assert!(
+        skips.iter().any(|&s| !s),
+        "非 skip が 1 回以上ある構成のはず"
+    );
+
+    let mut m = amp_model(dtype);
+    let mut cbs = [ema_cb(DECAY)];
+    m.fit_with_callbacks(&x, &y, FitConfig::new(AMP_STEPS, N), None, &mut cbs)
+        .expect("EMA×AMP は受理される");
+    assert_eq!(
+        dict_bits(&shadow_of(&cbs[0])),
+        dict_bits(&ema.shadow_state_dict())
+    );
+    assert_eq!(ema_of(&cbs[0]).num_updates(), ema.num_updates());
+    assert!(ema.num_updates() < AMP_STEPS as u64);
+    assert_eq!(model_bits(&m), model_bits(&reference));
+}
+
+// 8a. 参照（skip を除いた手動 EMA）と shadow・num_updates が bit 一致する。
+#[test]
+fn ema_with_amp_matches_fit_amp_reference_bit_exact_f16() {
+    run_amp_matches_reference(AmpDType::F16);
+}
+
+#[test]
+fn ema_with_amp_matches_fit_amp_reference_bit_exact_bf16() {
+    run_amp_matches_reference(AmpDType::Bf16);
+}
+
+// 8b. skip した step の前後で shadow・num_updates が変わらない。
+#[test]
+fn ema_with_amp_skips_shadow_update_on_skipped_steps() {
+    let (x, y) = amp_data();
+    let mut m = amp_model(AmpDType::F16);
+    let initial = model_bits(&m);
+    let mut cbs = [ema_cb(DECAY)];
+    let (mut skipped_n, mut applied_n) = (0, 0);
+    for i in 0..AMP_STEPS {
+        let before_scale = scale_of(&m);
+        let before_shadow = ema_of(&cbs[0]).shadow_state_dict().map(|d| dict_bits(&d));
+        let before_n = ema_of(&cbs[0]).num_updates();
+        m.fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut cbs)
+            .expect("fit");
+        let skipped = scale_of(&m) < before_scale;
+        let after_n = ema_of(&cbs[0]).num_updates();
+        if skipped {
+            skipped_n += 1;
+            assert_eq!(
+                after_n, before_n,
+                "skip step で num_updates が変化 (step={i})"
+            );
+            if let Some(b) = before_shadow {
+                assert_eq!(
+                    dict_bits(&shadow_of(&cbs[0])),
+                    b,
+                    "skip step で shadow が変化"
+                );
+            }
+        } else {
+            applied_n += 1;
+            assert_eq!(after_n, before_n + 1);
+        }
+        if i == 0 {
+            assert!(skipped, "先頭 step は skip する構成のはず");
+            assert_eq!(ema_of(&cbs[0]).num_updates(), 0);
+            assert_eq!(dict_bits(&shadow_of(&cbs[0])), initial);
+        }
+    }
+    assert!(skipped_n >= 1 && applied_n >= 1);
+}
+
+// 8c. 1 epoch の全 step が skip しても、shadow・num_updates は不変・val_loss は push・
+//     fit 後の重みは生の重み（EMA なしの AMP fit と bit 一致）。
+#[test]
+fn ema_with_amp_all_skipped_epoch_keeps_shadow_and_restores_raw() {
+    let (x, y) = amp_data();
+    let batch = N / 4;
+    // 参照: EMA なしの AMP で 1 epoch（4 batch = 4 step）。全 step が skip なら scale は
+    // 4 回半減し、重みは初期値のまま。
+    let mut reference = amp_model(AmpDType::F16);
+    let initial_scale = scale_of(&reference);
+    let initial = model_bits(&reference);
+    reference
+        .fit(&x, &y, FitConfig::new(1, batch))
+        .expect("fit");
+    assert_eq!(
+        scale_of(&reference),
+        initial_scale / 16.0,
+        "4 step 全 skip の構成のはず"
+    );
+    assert_eq!(model_bits(&reference), initial);
+    let mut m = amp_model(AmpDType::F16);
+    let mut cbs = [ema_cb(DECAY)];
+    let h = m
+        .fit_with_callbacks(&x, &y, FitConfig::new(1, batch), Some((&x, &y)), &mut cbs)
+        .expect("fit");
+    assert_eq!(ema_of(&cbs[0]).num_updates(), 0);
+    assert_eq!(dict_bits(&shadow_of(&cbs[0])), initial);
+    assert_eq!(h.val_loss.len(), 1);
+    assert_eq!(model_bits(&m), model_bits(&reference));
+}
+
+// 8d. EMA は生の学習軌道（重み・loss・lr・scale）を乱さない。
+#[test]
+fn ema_with_amp_does_not_change_raw_trajectory() {
+    let (x, y) = amp_data();
+    let mut plain = amp_model(AmpDType::Bf16);
+    let hp = plain
+        .fit(&x, &y, FitConfig::new(AMP_STEPS, N))
+        .expect("fit");
+    let mut with = amp_model(AmpDType::Bf16);
+    let mut cbs = [ema_cb(DECAY)];
+    let hw = with
+        .fit_with_callbacks(&x, &y, FitConfig::new(AMP_STEPS, N), None, &mut cbs)
+        .expect("fit");
+    assert_eq!(model_bits(&plain), model_bits(&with));
+    let b = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(b(&hp.loss), b(&hw.loss));
+    assert_eq!(b(&hp.lr), b(&hw.lr));
+    assert_eq!(scale_of(&plain).to_bits(), scale_of(&with).to_bits());
+}
+
+// 8e. 残る拒否は fit 開始前・モデル不変・EMA 未初期化のまま。
+#[test]
+fn ema_with_amp_remaining_rejections_leave_state_untouched() {
+    let (x, y) = gen_data();
+
+    // AMP×EMA×accumulate_steps > 1。
+    let mut m = amp_model(AmpDType::Bf16);
+    let before = model_bits(&m);
+    let scale = scale_of(&m);
+    let mut cbs = [ema_cb(0.9)];
+    assert!(is_invalid_arg(m.fit_with_callbacks(
+        &x,
+        &y,
+        FitConfig::new(1, 4).accumulate_steps(2),
+        None,
+        &mut cbs
+    )));
+    assert_eq!(model_bits(&m), before);
+    assert_eq!(scale_of(&m).to_bits(), scale.to_bits());
+    assert_eq!(ema_of(&cbs[0]).num_updates(), 0);
+    assert!(ema_of(&cbs[0]).shadow_state_dict().is_none());
+
+    // AMP×EMA×カスタム step。
+    let mut m = amp_model(AmpDType::Bf16);
+    let before = model_bits(&m);
+    let mut cbs = [ema_cb(0.9)];
+    let mut step = |_: &Sequential,
+                    _: &Tensor<f32>,
+                    _: &Tensor<f32>,
+                    _: &mut TrainStepOptimizer<'_>|
+     -> Result<TrainStepOutput, AutodiffError> { Ok(TrainStepOutput::new(0.0)) };
+    let hook: &mut TrainStepFn<'_, f32> = &mut step;
+    assert!(is_invalid_arg(m.fit_with_train_step(
+        &x,
+        &y,
+        FitConfig::new(1, N),
+        None,
+        &mut cbs,
+        &[],
+        hook
+    )));
+    assert_eq!(model_bits(&m), before);
+    assert!(ema_of(&cbs[0]).shadow_state_dict().is_none());
+}
+
+// 8f. AMP×EMA×SWA は SWA 側の理由で引き続き拒否される（SWA×AMP は §17.3 で維持）。
+#[test]
+fn ema_with_amp_and_swa_is_still_rejected() {
+    let (x, y) = gen_data();
+    let mut m = amp_model(AmpDType::Bf16);
+    let before = model_bits(&m);
+    let mut cbs = [
+        ema_cb(0.9),
+        Callback::Swa(SwaCallback::new(0, 0.01, 0, SwaAnneal::Cos).expect("test fixture")),
+    ];
+    assert!(is_invalid_arg(m.fit_with_callbacks(
+        &x,
+        &y,
+        FitConfig::new(1, N),
+        None,
+        &mut cbs
+    )));
+    assert_eq!(model_bits(&m), before);
+    assert!(ema_of(&cbs[0]).shadow_state_dict().is_none());
 }
