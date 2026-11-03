@@ -2236,9 +2236,12 @@ impl Sequential {
     /// shadow を更新し、epoch 末の validation と callbacks は shadow へ差し替えた重みの下で
     /// 実行して全経路で生の重みへ復帰する。fit 終了時にモデルの重みは上書きしない
     /// （[`super::callbacks::EmaCallback::shadow_state_dict`] を呼び出し側が適用する）。
-    /// `Callback::Ema` の複数指定・`Optimizer::Lbfgs`・`compile_with_amp`・カスタム
+    /// `Callback::Ema` の複数指定・`Optimizer::Lbfgs`・カスタム
     /// train_step フックとの併用は `InvalidArgument`（決定記録
-    /// `docs/autodiff-ema-decision.md` §10.2・§13）。
+    /// `docs/autodiff-ema-decision.md` §10.2・§13）。`compile_with_amp` とは併用でき、
+    /// AMP が非有限勾配で skip した step では shadow と `num_updates` を更新しない
+    /// （`num_updates` は実際に適用した step の数）。validation と epoch 末の差し替えは
+    /// skip の有無に関係なく実行する（決定記録 §17・イシュー #3831）。
     ///
     /// `Monitor::Loss` を監視する `ModelCheckpoint`／`EarlyStopping` を `Callback::Ema` と併用すると、改善判定にはその epoch の訓練損失
     /// （各バッチ時点の生の重みで計算した値。EMA 重みで計算した値ではない）を使い、保存・`restore_best_weights` で戻す重みは EMA 重みになる。
@@ -2798,7 +2801,8 @@ impl Sequential {
         // - `Callback::Ema` の複数指定（shadow が二重になり意味が定まらない）
         // - L-BFGS（1 outer step 内の複数回評価で「step 直後」が定義できない）
         // - カスタム train_step フック（更新位置をフック側が持つ）
-        // - AMP（skip step で shadow を更新するか否かが記録上未決のため、追従せず拒否）
+        // AMP は拒否しない（イシュー #3831。決定記録 §17）。skip step では `updated == None` と
+        // なり shadow と `num_updates` は更新されない。
         // `Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` との併用は拒否しない
         // （決定記録 §15。イシュー #2844）。
         let ema_count = callbacks
@@ -2812,10 +2816,6 @@ impl Sequential {
                 Some("Callback::Ema は Optimizer::Lbfgs と併用できない")
             } else if custom_step.is_some() {
                 Some("Callback::Ema はカスタム学習 step フックと併用できない")
-            } else if compiled.amp.is_some() {
-                Some(
-                    "Callback::Ema は compile_with_amp（AMP）と併用できない（AMP の skip step の扱いが未決のため。docs/autodiff-ema-decision.md §10.2 (g)）",
-                )
             } else {
                 None
             };
@@ -3332,6 +3332,8 @@ impl Sequential {
                     // （`compiled.amp.is_none()`）のときは常に `Some`
                     // であり、下記のブロック全体・エラー経路は
                     // AMP 導入前の実装と完全に同一（bit 同一契約）。
+                    // EMA の shadow 更新もこの `Some` の内側でのみ走るため、skip step
+                    // では shadow・`num_updates` とも変わらない（イシュー #3831）。
                     // カスタム学習 step フック（イシュー #2184）: `Some`
                     // なら既定のバッチ処理（このブロック直下の
                     // `else`）を丸ごと迂回し、フックの呼び出しだけで

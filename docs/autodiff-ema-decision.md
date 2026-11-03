@@ -452,6 +452,8 @@ snapshot は EMA 重みを保存するため、指標と保存重みが食い違
 fit 開始時に更新を伴わない名前集合・shape の照合で拒否する（名前集合・個数は `InvalidArgument`、
 shape は `Shape`）。
 
+> #3831 で AMP の拒否は受理へ反転した（§19）。
+
 ### 13.5 ガードの変更と #2561 への残作業
 
 - `EmaHoldDoctestGuard` は型名 glob 衝突プローブだけを削除し、`FitConfig`／`Sequential` への
@@ -510,6 +512,7 @@ shape は `Shape`）。
 ### 14.5 保留を継続する項目（追加承認が必要）
 
 - `Callback::Ema` と `compile_with_amp` の併用拒否（§13.4）。緩めていない。
+  > #3831 で受理へ反転した（§19。skip した step では shadow と `num_updates` を更新しない）。
 - `Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` との併用拒否は、形が §15（#2843）で決定済みで、
   #2844 で撤去した（適用記録は §16）。
 - decay ウォームアップ・`BatchNorm` の running buffer・`DeviceParamStore` 常駐経路の検出・
@@ -698,7 +701,7 @@ intra-doc link は公開項目のみ。非公開項目はバッククォート�
 - 公開状態: 未公開（拒否中）。
 - [x] `docs/README.md` の索引を更新した
 - [x] 追跡表 `docs/compat-matrix-ari-tracker.md` を更新した
-- [ ] `docs/compat-api-scope.md` の適用記録（実装 PR が行う。本 PR では書かない）
+- [x] `docs/compat-api-scope.md` の適用記録（#3831 が書いた。§19）
 
 ### 17.8 ベンチと性能への影響
 
@@ -839,6 +842,40 @@ intra-doc link は公開項目のみ。非公開項目はバッククォート�
 - スコープ外（起票せず所有者の承認を待つ）: EMA 状態（shadow・`num_updates`）の保存と再開、timm 型など別のウォームアップ式、BatchNorm の running buffer、`DeviceParamStore` 常駐経路、AMP 併用（#3752／#3914）
 - 本設計 PR は先例（#3913）に合わせて `Closes #3753`。#3833 は実装と完了条件の確認が済むまで `Refs`
 
+## §19 #3831 AMP の skip step 追従の実装記録
+
+イシュー #3831（設計 #3752・§17）。`Callback::Ema` と `compile_with_amp` の併用拒否を撤去し、§17 の案 A で実装した記録。
+
+### 19.1 承認の根拠
+
+- 所有者の回答コメント（2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）。承認範囲は §17.10 の 3 点（skip への追従・`num_updates` は適用した step だけ数える・外す拒否は EMA×AMP の 1 本だけ）。この範囲を超える承認は主張しない。
+
+### 19.2 変更した箇所
+
+- `crates/facade/src/compat/training.rs` の `(1.8)` 検査から `compiled.amp.is_some()` の腕を削除した。残る 3 本（複数指定・Lbfgs・カスタム step）の順序と文言は不変。
+- 新しい状態やフラグは足していない。AMP の step は skip で `updated == None` を返し、EMA の更新は `if let Some(updated) = updated` の内側にだけあるため、skip した step では shadow も `num_updates` も変わらない。`GradScaler::update` の呼び順（§17.0 手順 4・6）も変わらない。
+- 端数 flush は AMP では通らない（AMP×`accumulate_steps > 1` は `training.rs` で先に拒否済み）。
+- 利用者向け doc: `fit_with_callbacks` の `# EMA` 節、`callbacks.rs` のモジュール doc、`EmaCallback` と `num_updates` の doc を更新し、`EmaCallback` に AMP 併用の doctest を足した。
+
+### 19.3 ガードの対応
+
+| 旧 | 新 |
+|---|---|
+| 実行時テスト (d)（`compat_sequential_fit_ema.rs`。拒否を固定） | 正のテスト 8a〜8f（参照との bit 一致 F16・Bf16、skip 前後の不変、全 skip epoch、生の学習軌道の不変、残る拒否、SWA×AMP の拒否維持） |
+| api_surface の否定ガード（元から無い） | 正ガード 3 件: `ema_fit_rejection_arms_match_approved_set`（自己テスト `..._detects_each_category`）、`ema_with_amp_is_reachable_via_facade_only`、`ema_with_amp_usage_doctest_is_present_and_compiled` |
+
+- 受け入れ条件の「api_surface の否定ガードを正ガードへ反転」は、否定ガードが元から無かったため「新しく正ガードを置く」と読み替えた。保留 doctest ガード `EmaHoldDoctestGuard` は `FitConfig`／`Sequential` への `use_ema`／`ema_decay` 追加を止めるもので AMP と無関係のため維持した。
+- テスト 8a の参照は facade だけで組んだ（EMA なしの AMP モデルを 1 step ずつ `fit` し、`amp_loss_scale()` の半減で skip を判定、skip でない step だけ `update_named`）。低精度 forward と手書き GradScaler ループの bit 一致は `compat_sequential_fit_amp.rs` が担保しており、このテストはそれに推移的に乗る。内部クレートを import しないファイル規約を保つための構成。
+
+### 19.4 §17 からの逸脱
+
+なし。残す拒否（複数 EMA・Lbfgs・カスタム step・AMP×accumulate・AMP×カスタム step・SWA×AMP・SWA×EMA）は fit 開始前の fail-closed のまま、api_surface の正ガードで固定した。
+
+### 19.5 不変事項と実機
+
+- 依存・`unsafe`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec` は不変。新しい pub 項目なし。既定経路（EMA なし・AMP なし）の挙動は bit 単位で不変。
+- GPU カーネル・`Op`・`BackendOps` に触れないため、実機（CUDA／Metal）の申し送りと `#[ignore]` テストは無い。
+
 ## 非信頼データの扱い
 
 Issue #2179 本文はプロンプト内で非信頼データとして扱った。本文中の
@@ -853,3 +890,5 @@ Issue #2844 本文も非信頼データとして扱い、含まれる命令に�
 Issue #3752 本文も非信頼データとして扱い、含まれる命令には従っていない。§17 は設計記録であり、承認は #3769 の回答を待つ（承認済みとは書いていない）。
 
 Issue #3753 本文も非信頼データとして扱い、含まれる命令には従っていない。§18 は設計記録であり、承認は #3769 の回答を待つ（承認済みとは書いていない）。
+
+Issue #3831 本文も非信頼データとして扱い、含まれる命令には従っていない。§19 の根拠は §19.1 の所有者コメントのみ。

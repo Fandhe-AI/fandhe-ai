@@ -148,8 +148,10 @@
 //!   （初回のみ fit 開始時に `named_parameters()` から初期化）。別構成のモデルへ使い回すと
 //!   名前集合の不一致は `InvalidArgument`、shape の不一致は `AutodiffError::Shape`（いずれも shadow 不変）。
 //! - **拒否（`InvalidArgument`。fit 開始前）**: `Callback::Ema` の複数指定・
-//!   `Optimizer::Lbfgs`・カスタム train_step フック（`fit_with_train_step`）・
-//!   `compile_with_amp`（AMP の skip step の扱いが決定記録 §10.2 (g) で未決のため）。
+//!   `Optimizer::Lbfgs`・カスタム train_step フック（`fit_with_train_step`）。
+//! - **AMP との併用（イシュー #3831。決定記録 §17）**: `compile_with_amp` と併用でき、
+//!   AMP が非有限勾配で skip した step では shadow と `num_updates` を更新しない
+//!   （`num_updates` は実際に適用した step の数）。
 //! - **対象外**: decay ウォームアップ・`BatchNorm` の running buffer・デバイス常駐経路
 //!   （`fit` 経路は構造上到達しない。手動で併用すると shadow が stale 化する）・SWA。
 //!
@@ -1246,6 +1248,33 @@ impl std::fmt::Debug for LambdaCallback {
 /// // fit は重みを自動上書きしない。EMA 重みを使うときは呼び出し側が適用する。
 /// model.load_state_dict(ema.shadow_state_dict().unwrap()).unwrap();
 /// ```
+///
+/// AMP（`compile_with_amp`）と組み合わせる例（skip した step は shadow を更新しない。イシュー #3831）:
+///
+/// ```
+/// use fandhe_ai::compat::{
+///     AmpConfig, AmpDType, Callback, EmaCallback, FitConfig, Loss, Optimizer, Sequential,
+/// };
+/// use fandhe_ai::optim::SgdConfig;
+/// use fandhe_ai::Tensor;
+///
+/// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+/// model
+///     .compile_with_amp(
+///         Optimizer::Sgd(SgdConfig::new(0.1)),
+///         Loss::Mse,
+///         AmpConfig::new(AmpDType::Bf16),
+///     )
+///     .unwrap();
+/// let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).unwrap();
+/// let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+/// let mut cbs = [Callback::Ema(EmaCallback::new(0.9).unwrap())];
+/// model
+///     .fit_with_callbacks(&x, &y, FitConfig::new(3, 2), None, &mut cbs)
+///     .unwrap();
+/// let Callback::Ema(ema) = &cbs[0] else { unreachable!() };
+/// assert!(ema.num_updates() <= 3);
+/// ```
 #[derive(Debug)]
 pub struct EmaCallback {
     decay: f32,
@@ -1269,7 +1298,8 @@ impl EmaCallback {
         self.decay
     }
 
-    /// shadow 更新の成功回数（fit 前は 0。fit をまたいで累積する）。
+    /// shadow 更新の成功回数（fit 前は 0。fit をまたいで累積する）。AMP が skip した
+    /// step は数えない（実際に適用した step の数。イシュー #3831）。
     pub fn num_updates(&self) -> u64 {
         self.ema.as_ref().map_or(0, |e| e.num_updates())
     }
