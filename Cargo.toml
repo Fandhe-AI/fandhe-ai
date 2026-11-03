@@ -262,3 +262,15 @@ libloading = "=0.9.0"
 # 同じで矛盾しない。
 [profile.dev.package."*"]
 debug = "line-tables-only"
+
+# workspace メンバー自身のデバッグ情報も行番号のみにする（2026-11-03 所有者承認）。
+# workflow env は reusable workflow（`rust-ci`。Fandhe-AI/actions の rust-base-ci）へ
+# 引き継がれないため、`rust-ci / cargo test` ではメンバーが full debuginfo のままだった。
+# 統合テスト約 930 本がそれぞれメンバーを静的リンクするため、GitHub ホステッドランナーで
+# `No space left on device`・リンカの Bus error（signal 7）が出ていた。ローカル実測
+# （`cargo test --workspace --all-features --no-run`、main 1dca289a9）の target は
+# 既定 88G → 本設定 42G（`debug = 0` なら 28G だが file:line を失うため採らない）。
+# - 残るもの・失うものは上の依存向け設定と同じ（デバッガでメンバーの変数・型を見る機能のみ失う）
+# - `test` は `dev` を継承する。`release`・`bench` は影響しない
+[profile.dev]
+debug = "line-tables-only"
