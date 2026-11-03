@@ -475,7 +475,23 @@ fn fit_rejections_leave_model_untouched() {
 fn ema_amp_groups_combination_is_accepted() {
     let (x, y) = data(1.0e3);
     let epochs = 8;
-    let skips = manual_loop(AmpDType::F16, skip_first_scaler(), &[], epochs, &x, &y).skips;
+    // 予測側も fit と同一の groups（1 層目凍結）・初期重み・データ順で回す。
+    // skip 判定は unscale 後勾配の有限性で重みに依存するため、groups を省くと
+    // 最初の non-skip 以降で予測がずれる。
+    let frozen_groups = vec![ParamGroup::new(layer_slots(&build_model(), "0."), 0.0, 0.0)];
+    let skips = manual_loop(
+        AmpDType::F16,
+        skip_first_scaler(),
+        &frozen_groups,
+        epochs,
+        &x,
+        &y,
+    )
+    .skips;
+    // 凍結層の有無で予測が変わらないこと（skip 列が groups 非依存）も確認する。
+    let no_groups_skips =
+        manual_loop(AmpDType::F16, skip_first_scaler(), &[], epochs, &x, &y).skips;
+    assert_eq!(skips, no_groups_skips, "skip 列は凍結層の有無でずれない");
     let non_skip = skips.iter().filter(|s| !**s).count() as u64;
     assert!(non_skip > 0 && non_skip < epochs as u64);
 
