@@ -44577,7 +44577,8 @@ fn backward_create_graph_cumulative_b_usage_doctest_is_present_and_compiled() {
 /// 反転ではなく「受理されること」を示す facade の doctest（実際にコンパイル・実行される）の実在を固定する。
 /// 挙動の本体は `tests/create_graph_facade.rs` の `scatter_reduce_*_create_graph_via_facade`。
 /// 公開面の保留ガード（`IndexedUpdateOpsHoldDoctestGuard`）は create_graph と無関係なので変更しない。
-/// `Prod` は #3803 の scan 補助待ちで対象外のため、ここでは受理を固定しない。
+/// `Prod`（#3977・決定記録 §74）は受理に加わったが、自己テストの「存在しないはずの needle」が `Prod` の呼び出し形のため、
+/// ここでは `Prod` の doctest を固定しない（挙動は `scatter_reduce_prod_create_graph_via_facade`）。
 /// 自己テストとして、存在しない needle を課すと違反が出ること（検出器が空振りしないこと）も確かめる。
 #[test]
 fn backward_create_graph_scatter_reduce_usage_doctest_is_present_and_compiled() {
@@ -45404,6 +45405,7 @@ const CG_SCATTER_REDUCE_ACCEPTED: &[&str] = &[
     "ScatterReduceMode::Mean",
     "ScatterReduceMode::Amax",
     "ScatterReduceMode::Amin",
+    "ScatterReduceMode::Prod",
 ];
 
 /// 受理 Op（無条件〈T〉と payload〈P〉）→ それを facade 経由で固定する `create_graph_facade.rs` の
@@ -45663,8 +45665,8 @@ const CG_FACADE_REJECT_MAP: &[(&str, Option<&str>)] = &[
     ("OneHot", None),
     ("ResidentLeaf", None),
     (
-        "IndexedScatterReduce::Prod",
-        Some("scatter_reduce_prod_create_graph_is_rejected_today_via_facade"),
+        "IndexedScatterReduce::Prod::overflow",
+        Some("scatter_reduce_prod_overflow_is_rejected_via_facade"),
     ),
     (
         "MatrixNorm::Nuc",

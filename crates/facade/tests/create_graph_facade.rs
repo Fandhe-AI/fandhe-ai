@@ -892,6 +892,19 @@ fn scatter_reduce_mean_create_graph_via_facade() {
     );
 }
 
+/// `Prod`（イシュー #3977・§74）。`scatter_reduce_x()` は零を含むので零の経路も通る。
+#[test]
+fn scatter_reduce_prod_create_graph_via_facade() {
+    check_create_graph_family(
+        "scatter_reduce_prod",
+        &scatter_reduce_x(),
+        &[3, 4],
+        |tp, x| scatter_reduce_loss_with(tp, x, fandhe_ai::ScatterReduceMode::Prod),
+        true,
+        1e-2,
+    );
+}
+
 #[test]
 fn scatter_reduce_amax_create_graph_via_facade() {
     check_create_graph_family(
@@ -2656,16 +2669,22 @@ fn pairwise_distance_create_graph_is_rejected_via_facade() {
     assert_create_graph_rejected("pairwise_distance", &tape, &child, &loss);
 }
 
-/// `IndexedScatterReduce` の `Prod` は **承認済みだが未実装**（#3767 回答は §41.16 の 3 variant 実装を承認。
-/// 決定記録 §62 が scan 補助待ちとして先送りし、受け皿 issue は未起票）。本テストは「現状は拒否される」
-/// ことの固定であり、恒久契約ではない。実装されたらこのテストを受理テストへ反転する。
+/// `IndexedScatterReduce` の `Prod` の拒否範囲（イシュー #3977・決定記録 §74）: 隣接スロットの積が
+/// overflow する寄与列（排他的積は有限で、1 階は有限のまま）は子テープへ書く前に型付きで拒否される。
+/// 受理側は `scatter_reduce_prod_create_graph_via_facade`。
 #[test]
-fn scatter_reduce_prod_create_graph_is_rejected_today_via_facade() {
+fn scatter_reduce_prod_overflow_is_rejected_via_facade() {
     let tape = fandhe_ai::tape();
     let child = fandhe_ai::tape();
-    let x = tape.var(&t(scatter_reduce_x(), &[3, 4]));
-    let loss = scatter_reduce_loss_with(&tape, &x, fandhe_ai::ScatterReduceMode::Prod);
-    assert_create_graph_rejected("scatter_reduce_prod", &tape, &child, &loss);
+    let x = tape.var(&t(vec![1e30, 2.0], &[2]));
+    let s = tape.var_no_grad(&t(vec![1e30, 1e-30], &[2]));
+    let idx = Tensor::<i32>::new(vec![0, 0], &[2]).unwrap();
+    let loss = x
+        .scatter_reduce(0, &idx, &s, fandhe_ai::ScatterReduceMode::Prod, true)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    assert_create_graph_rejected("scatter_reduce_prod_overflow", &tape, &child, &loss);
 }
 
 /// `MatrixNorm` の `Spectral` は現時点 fail-closed（`Nuc` は `matrix_norm_nuc_is_rejected_via_facade`）。

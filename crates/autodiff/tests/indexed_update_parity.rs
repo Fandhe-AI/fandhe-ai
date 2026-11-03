@@ -811,14 +811,15 @@ fn huge_broadcast_view_is_rejected_before_allocation() {
 }
 
 #[test]
-fn create_graph_accepts_sum_mean_amax_amin_and_rejects_prod_typed() {
-    // イシュー #3802: Sum・Mean・Amax・Amin は受理（cg.grad は 1 階と bit 一致）、Prod は
-    // #3803 の scan 補助待ちで型付きエラー（panic しない・child は空）。
+fn create_graph_accepts_all_five_modes_and_rejects_prod_inf_typed() {
+    // イシュー #3802・#3977: Sum・Mean・Amax・Amin・Prod は受理（cg.grad は 1 階と bit 一致）。
+    // Prod の ±inf 入力は型付きエラー（panic しない・child は空）。
     for mode in [
         ScatterReduceMode::Sum,
         ScatterReduceMode::Mean,
         ScatterReduceMode::Amax,
         ScatterReduceMode::Amin,
+        ScatterReduceMode::Prod,
     ] {
         let tape = Tape::new_with_ops(common::naive_ops());
         let child = Tape::new_with_ops(common::naive_ops());
@@ -841,7 +842,7 @@ fn create_graph_accepts_sum_mean_amax_amin_and_rejects_prod_typed() {
     }
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let x = tape.var(&t(vec![1.0, f32::INFINITY], &[2]));
     let s = tape.var(&t(vec![1.0], &[1]));
     let loss = scatter_reduce(&x, 0, &ti(vec![0], &[1]), &s, ScatterReduceMode::Prod, true)
         .unwrap()

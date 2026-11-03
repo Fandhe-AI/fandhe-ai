@@ -5393,6 +5393,67 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 拒否は入口検査で `Err(Backward)`、`child` は空のまま。1 階の VJP・forward は他の Op と同じく動く。
 - 変えていないもの: §72 の本文、既存 Op の値、tolerance・baseline、依存。
 
+## 74. 実装記録（イシュー #3977・親 #3719 系。create_graph の B 区分・`IndexedScatterReduce` の `Prod`）
+
+### 74.0 位置づけ・承認根拠
+
+- 状態: **実装済み**（GPU 実機 parity は未実測）。§72.1 の F4（承認済み・未実装）だった `IndexedScatterReduce` の `Prod` を実装した。設計は §41.10・§41.11・§41.13、土台の区分つき scan 補助は §64（#3803）。節番号は、main が §73 まで使い、open PR に本ファイルを触れるものが無かったため §74 を取った。
+- 承認根拠: #3767 の所有者の回答コメント（2026-11-01、`https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013`）が §41.16 の 3 variant（`IndexedScatterReduce` 全 mode・`Cumprod`・`Logcumsumexp`）の実装を承認した。これ以上の承認は主張しない。§74.3 の NaN の拒否は §41.16 点 8（NaN は伝播）からの逸脱で、所有者への報告事項である。
+- 既存節（§41・§62・§72 の本文）は書き換えず、本節から前方参照する。§72.1 の F4 行は本節で解消した。
+
+### 74.1 実装したもの
+
+値は 1 階と同じ `tensor_core::indexed_update::scatter_reduce_vjp_host`（(仮数, 指数) の前置積×後置積。本体は不変）の結果を `push_v3` で載せる。構造は `crates/autodiff/src/create_graph/scatter_reduce_prod.rs`。除算は使わない（除算形は寄与列の最初の零より後ろの混合二階を取りこぼす。§41.10、§64 の `Cumprod` と同じ理由）。
+
+1. 出力位置 `q` ごとの寄与列を「区間」とし、全区間を連結した長さ `K` の 1 本の lane に並べる（区間内は src の走査順→自己寄与〈`include_self`〉。1 階の lane と同じ並び）。`v = Gather(Concat([src_m, self_m]), perm)`。`src_m`・`input_m` は子テープ上の写しで、`build_cgrads` が Prod のときだけ `get_mirror` で渡す（他 mode の経路は不変）。
+2. 排他的 suffix 積: `linear_scan_steps(b, A, cut)`。`b` は区間末尾で 1、`A = Concat(Narrow(v, 1, K-1), [0])`、`cut` は区間末尾で真。`S[last] = 1`・`S[a] = v[a+1]·S[a+1]`。
+3. 排他的 prefix 積: 区間内だけを逆順にした置換 `rev`（自己逆）で同じ scan を行い、`Gather(·, rev)` で戻す。全体の逆順にしないのは、区間の位置を保って `b`・`cut` を共有するため。
+4. `d = Gather(g, q_of_slot) ⊙ (pre ⊙ suf)`。`d_src = Gather(d, src_slot)`、`d_input` は自己寄与スロットを `Gather(Concat([d, 0]))` で戻し、未タッチ位置は `where_cond` で `g` を素通しする。`!include_self` の触れられた位置は 0。
+5. `scan.rs` に段数明示版 `linear_scan_steps` を足した（`linear_scan` はこれへ委譲し bit 同一）。段数は最長区間長の `⌈log2⌉`。区間をまたぐ係数は `cut` で 0 なので、余分な段は 0 を足すだけであり、減らすとノード数と `0·inf` の危険が減る。
+6. 索引は `i32`。`K`・`n`・`S` が `i32::MAX` を超える場合は確保の前に型付き `Err(Backward)`（§41.14 A03）。
+
+子テープへ積む Op は `Narrow`・`Concat`・`Gather`・`Mul`・`Add`・`Where`・`Reshape`・`Contiguous`・定数葉で、すべて `supports_create_graph() == true`（閉包性）。`Op::supports_create_graph` の網羅 match の腕は変えていない（payload 腕が `scatter_reduce_mode_supported` に委譲済みで、`mode_supported` の肯定形 `matches!` に `Prod` を足しただけ）。公開名の追加なし（受理範囲の拡大のみ）。
+
+### 74.2 設計（§41）からの差・明確化
+
+- **窓（区間ごと）での判定**: 区間は互いに独立なので、判定は区間ごと（窓）に行う。窓の再現が全体 lane の子テープと値で一致するのは、区間をまたぐ項が `cut` により厳密な `0 × 有限` になるため（有限でなければ第 1 軸が先に拒否する）。窓では `A[m-1] = 0` で `cut` は不要になり、`A[last]` への cotangent は `cut` の `Where` で捨てられるのと同じく無視する。この同値は単体テスト `emulation_reproduces_child_tape_second_order` が `==` で固定する（複数区間・重複 index・単一スロット区間・零を含む区間・自己寄与の零・非末尾 dim・index の非 dim 軸が input より小さい形状・末尾 dim の複数行）。`segments_do_not_leak_into_each_other` は、ある区間への seed が別区間に二階を作らないことを子テープで固定する。
+- **`v` への 2 経路の合算**: `v` は suffix 側の `Narrow` と prefix 側の `Gather(rev)` の 2 消費者を持つ。2 項の f32 の和は可換なので、`backward.rs` の逆順処理・`accumulate` の加算順に依らず再現は一致する。
+- **NaN は拒否する（§41.16 点 8 からの逸脱）**: §74.3。
+
+### 74.3 総括判定（すべて子テープへ構造を積む前に行う）
+
+拒否は型付き `Err(Backward)` で、親の rollback により `child` は空へ戻り、同じ `child` で再試行できる。
+
+| 段 | 内容 |
+|---|---|
+| 入口（親） | `validate`: input／src の `±inf` を拒否（NaN は通す）。`cgrad` 冒頭の `check_upstream_bound`: 上流 `g` の非有限と `max|g| >= 2^125` を拒否（空 index も同じ） |
+| 入口（Prod） | `max|g|·最長区間長 >= 2^125` を拒否。**触れられた位置の寄与（src と `include_self` の自己寄与）の NaN を拒否**。未タッチ位置の NaN は素通しなので影響しない |
+| 計算量 | `judge_cost` が `JUDGE_BUDGET = 2^27`（`cumulative_b.rs` と共有）を超えたら、区間の走査より前に拒否 |
+| 第 1 軸（overflow） | 窓の 2 本の scan・`excl`・`d` を f32 で再計算し、非有限または `2^125` 以上なら拒否。二階の逆伝播の上界（seed の各要素の絶対値 1）も `scan_cotangent_bound` で同じ閾値 |
+| ホストの 1 階 | 非有限は拒否。値は独立な f64 参照（`g·Π_{l≠i} v_l`）と `host_ref_check`（`HOST_COEFF`）で比べる |
+| 第 2 軸 | seed を区間内の 1 スロット（値 1）にしたときの `v` への要素と `g` への要素を、子テープの f32 演算列の再現 `V_str` と独立な f64 の解析形 `V`・`M` で `entry_check`（`JUDGE_COEFF`）にかける |
+
+**拒否範囲（契約）**:
+
+- **NaN**: 触れられた位置の寄与に NaN があれば拒否する。理由: Hillis–Steele の段の積が区間をまたぎ、`cut` で 0 にした係数も `0 × NaN = NaN` になる。順伝播では後ろの区間から前へ、逆伝播では前から後ろへ流れるので、NaN を含む区間を配列の端に寄せるだけでは両方向を閉じられない。§41.16 点 8（NaN は伝播）からの逸脱であり、所有者への報告事項。1 階（forward・`Tape::backward`）の NaN の挙動は変わらない。
+- **予算**: 走査量は区間ごとの和 `Σ_q cost(m_q)`（区間は独立なので `K²` では数えない）に構築の `8K` を足す。`cost(m)`（`steps = ⌈log2 m⌉`）は forward 側 `m·(2·(22·steps+44)+64)`、seed 側 `m·m·(2·(3·steps+16)+16)`。1 区間なら長さ 1082 まで受理し 1083 は拒否（134159344 対 134406798、上限 134217728）。長さ 8 の区間なら約 2 万本まで。境界は単体テスト `judge_cost_budget_boundary` が両側で固定する。
+- **overflow（第 1 軸）**: Hillis–Steele の段で、隣接スロットの積は排他的積が有限でも overflow しうる。例 `[1e30, 1e30, 1e-30]`（排他的積は 1e-30・1e30・1 で有限だが、段の積 `1e30·1e30` が非有限）は拒否する契約で、1 階の (仮数, 指数) の値は有限のまま変わらない。`[1e30, 1e30]` は各排他的積が 1e30 で `2^125` 未満のため受理する。`[1e30, 1e30, 1e30]` は拒否。facade では `scatter_reduce_prod_overflow_is_rejected_via_facade`。
+- **underflow（第 2 軸）**: `[1e-30, 1e-30, 1e30, 1e30, 1e30]` は構造の `excl` が 0 に潰れ、`∂d/∂g` の要素が参照と食い違うので第 2 軸で拒否する。`[1e-30, 1e30]` は受理する（`excl` が 1e30・1e-30 で潰れない）。
+- **過大な上流**: `g` の非有限と `max|g| >= 2^125`（`3e38` 等）を拒否する。
+
+### 74.4 テスト・数値契約と保証範囲
+
+- 単体（`scatter_reduce_prod.rs`）: `prod_reference_matches_analytic_hessian`（参照が定義どおりの総当たりと f64 の桁で一致）、`forward32_matches_exclusive_products`、`plan_matches_lane_order_and_rev_is_involution`（置換・逆置換と `scatter_reduce_vjp_host` の lane 並びの整合）、`judge_cost_budget_boundary`、`judge_accepts_and_rejects_reviewed_vectors`、`host_ref_rule_rejects_wrong_first_order`、`emulation_reproduces_child_tape_second_order`、`segments_do_not_leak_into_each_other`。`scatter_reduce.rs` の `replay_matches_forward` は Prod の受理へ反転した。
+- autodiff 統合（`tests/create_graph_scatter_reduce.rs`）: `MODES` に `Prod` を加え、1 階と `cg.grad` の bit 一致（`include_self` × 重複索引 × 非末尾 dim × index の非 dim 軸が小さい形状 × input／src／結合）、Hessian の有限差分突合、孫テープ（`jvp_create_graph`）、`±inf`・過大な上流の拒否と再試行、空 index、中程度の上流（1e30）の受理を共通に通す。加えて `prod_zero_patterns_match_finite_difference`（零が 0／1／2 個の区間・自己寄与の零。多重線形な loss で零点の打ち切り誤差を避ける。除算形を退けた根拠の回帰）、`prod_wide_range_pair_is_accepted_and_finite_at_three_stages`（`[1e-30, 1e30]`）、`prod_nan_overflow_and_underflow_are_rejected_with_empty_child`、`prod_untouched_nan_is_not_rejected`。`tests/indexed_update_parity.rs` は 5 mode の受理（`cg.grad` が 1 階と bit 一致）と Prod の `±inf` の型付き拒否へ差し替えた。隣接見本 `Op::Custom` の拒否は既存テストのまま。
+- facade: `scatter_reduce_prod_create_graph_via_facade`（`scatter_reduce_x()` は零を含む）、`scatter_reduce_prod_overflow_is_rejected_via_facade`。`api_surface.rs` の `CG_SCATTER_REDUCE_ACCEPTED` に `ScatterReduceMode::Prod` を足し、`CG_FACADE_REJECT_MAP` の `IndexedScatterReduce::Prod` を F2 型の `IndexedScatterReduce::Prod::overflow` へ置き換えた。doctest は足していない（`backward_create_graph_scatter_reduce_usage_doctest_is_present_and_compiled` の「存在しないはずの needle」が壊れるため）。
+- 保証範囲: 第 2 軸の再現は CPU の演算順（GPU の演算順は保証の対象外）。保証は Hessian の要素ごと（seed が 1 要素のとき）で、1 要素でない seed の縮約での相殺は対象外（§64.2 と同じ扱い）。`src_m`・`input_m` に本 Op 以外の消費者がある場合の合算と、`g` を作る上流の Op の逆伝播は対象外。
+
+### 74.5 GPU（未実測）・スコープ外・変えていないもの
+
+- 実機（CUDA・Metal）の結果は**未実測**。`crates/facade/tests/create_graph_gpu_parity.rs` の族 `scatter_reduce` に `scatter_reduce_prod`（`Route::H`・`Judge::Strict`・`SplitKShapes::NoMatMul`）を登録し、CPU 同士の自己検査が通ることだけを確かめた。実機は #3857（`<cuda-node>`）・#3859（`<metal-node>`）に申し送る。baseline は作らない。
+- スコープ外: GPU カーネルの新設、実機 parity の実測と baseline、`MatrixNorm` の `Nuc`・`Spectral`（追跡表の項目 4 が「未確定」のまま残る理由）、三階以上の保証、f64 テープの create_graph、公開名の追加。
+- 変えていないもの: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・baseline・ガードレール閾値・FMA 契約・1 階 VJP（`scatter_reduce_vjp_host`）・forward・既定経路（`Tape::backward`）・依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・`docs/spec`・既存節の本文。
+
 ## 75. 設計記録（イシュー #3978・親 #3719 系。create_graph の B 区分・MatrixNorm の Nuc・Spectral の再評価）
 
 ### 75.0 位置づけ・承認根拠・境界

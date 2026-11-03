@@ -1319,7 +1319,7 @@ impl Tape {
     /// # }
     /// ```
     ///
-    /// `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`。#3802。`Prod` は承認済み・未実装のため現状は型付きエラー。決定記録 §72）も二階へ進める。
+    /// `scatter_reduce`（`Sum`・`Mean`・`Amax`・`Amin`。#3802。`Prod` は #3977。決定記録 §62・§74）も二階へ進める。
     /// 次は `Mean`（`include_self = true`）の例で、位置 0 の出力は `(x0 + s0 + s1) / 3`、触れられていない位置は
     /// `x` を素通しする。損失 `Σ y²` について `H v = [2/9·v0, 2·v1, 2·v2]`。
     ///
@@ -1607,7 +1607,9 @@ impl Tape {
     /// - 恒久: `ctc_loss`（承認による恒久）、`Tape::custom`・デバイス常駐／融合の内部 Op・`one_hot` 経由の
     ///   再生不能な Op、`inv`・`solve`・`slogdet` の overflow 入力、`pinv`／`lstsq` の打ち切り、QR の横長、
     ///   SVD・`eigh` の縮退、`layer_norm`／`batch_norm` の非有限要素、`±inf` 入力（NaN は伝播）。
-    /// - 承認済みだが未実装（現状は拒否）: `scatter_reduce` の `Prod`。
+    /// - `scatter_reduce` の `Prod`（#3977・決定記録 §74）は二階へ進めるが、触れられた位置の寄与（`src` と
+    ///   `include_self` の自己寄与）の NaN、隣接スロットの積が overflow する寄与列、underflow で二階が参照から外れる
+    ///   寄与列、過大な上流勾配、計算量の予算超過は拒否する（入力の拒否範囲）。
     /// - 現時点の拒否で再評価の起票は承認済み・未起票: `matrix_norm` の `Nuc`・`Spectral`。
     /// - 承認済み（#3768 Q9 (a)）・create_graph は別設計待ち（現状は拒否。恒久ではない）: `cosine_similarity`・
     ///   `pairwise_distance`（イシュー #3821・決定記録 §73）。

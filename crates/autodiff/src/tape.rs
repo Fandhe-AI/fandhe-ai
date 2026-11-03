@@ -1203,7 +1203,7 @@ pub(crate) enum Op {
     /// （`Op::Logcumsumexp` と同じ「入力から再計算」方式）。既存の `ScatterReduce`
     /// とは別 enum（`ScatterReduceMode`）を使う（未知 variant が黙って `Overwrite`
     /// になる経路を避ける。決定記録 §2）。非融合・非 checkpoint。高階微分（`create_graph`）は
-    /// Sum・Mean・Amax・Amin のみ対応（イシュー #3802・決定記録 §41・§62。`Prod` は fail-closed）。
+    /// Sum・Mean・Amax・Amin（イシュー #3802・決定記録 §41・§62）と Prod（イシュー #3977・§74）に対応。
     IndexedScatterReduce {
         input: NodeId,
         dim: usize,
@@ -2610,9 +2610,8 @@ impl Op {
     ///
     /// 索引・累積 8 variant（`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・
     /// `Cummax`・`Cummin`・`Cumsum`）はイシュー #3083（決定記録 §25）で `true` になった。
-    /// `IndexedScatterReduce` は Sum・Mean・Amax・Amin だけ `true`（イシュー #3802・§62）。
-    /// `Prod` は承認済みだが未実装のため現状は `false`（決定記録 §72。`Cumprod`・`Logcumsumexp` は
-    /// イシュー #3803 で `true`）。
+    /// `IndexedScatterReduce` は Sum・Mean・Amax・Amin（イシュー #3802・§62）と Prod（イシュー #3977・§74。
+    /// 区分つき scan 補助の上に載る）が `true`。`Cumprod`・`Logcumsumexp` はイシュー #3803 で `true`。
     ///
     /// プーリング族（`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・
     /// `AdaptiveAvgPool2d`）はイシュー #3085（決定記録 §29）で `true` になった。
@@ -2634,7 +2633,8 @@ impl Op {
     /// **最終一覧と残る fail-closed（イシュー #3812・決定記録 §72）**: `Op` 単位で `false` なのは
     /// `CtcLoss`（承認による恒久）と §21.2 A 区分の `ResidentLeaf`・`LinearResident`・`LinearAct`・`Custom`・
     /// `OneHot` の 6 つ。`MatrixNorm` の `Nuc`・`Spectral` は現時点 `false`（再評価の起票は承認済み・未起票）、
-    /// `IndexedScatterReduce` の `Prod` は承認済み・未実装。Op は `true` でも入口検査
+    /// `IndexedScatterReduce` の `Prod` は本節の時点では承認済み・未実装だったが、イシュー #3977（決定記録
+    /// §74）で `true` になった。Op は `true` でも入口検査
     /// （`validate_ancestors`）が入力の範囲で拒否するもの（`Inv`・`Solve`・`SlogdetLogAbsDet` の overflow、
     /// `Pinv`・`Lstsq` の打ち切り、QR の横長、SVD・Eigh の縮退、正規化の非有限要素、±inf 入力）は
     /// 戻り値の `true` とは別軸の拒否範囲である。対象集合の固定値は facade の正ガード
@@ -2825,9 +2825,9 @@ impl Op {
             | Op::SvdVh { .. }
             | Op::EighValues { .. }
             | Op::EighVectors { .. } => true,
-            // `IndexedScatterReduce` は `mode` の Sum・Mean・Amax・Amin だけ true（イシュー #3802・
-            // 決定記録 §41・§62）。`Prod` は #3803 の scan 補助待ちで false、
-            // `#[non_exhaustive]` の未知 mode も false（`VectorNorm` の前例）。
+            // `IndexedScatterReduce` は `mode` の Sum・Mean・Amax・Amin（イシュー #3802・決定記録
+            // §41・§62）と Prod（イシュー #3977・§74）が true、
+            // `#[non_exhaustive]` の未知 mode は false（`VectorNorm` の前例）。
             Op::IndexedScatterReduce { mode, .. } => crate::create_graph::scatter_reduce_mode_supported(*mode),
             // `Interpolate` は `mode` の既知 7 variant だけ true（`InterpolateMode` は
             // `#[non_exhaustive]` なので未知 variant は安全側の false。`VectorNorm` の前例）。
@@ -5868,8 +5868,8 @@ mod conv3d_op_tests {
     }
 
     /// イシュー #3083: 索引・累積 8 variant は create_graph 対応（`true`）。
-    /// `IndexedScatterReduce` は Sum・Mean・Amax・Amin だけ `true`（イシュー #3802）。
-    /// `Prod` は `false` のまま（fail-closed）。`Cumprod`・`Logcumsumexp` はイシュー #3803 で `true`。
+    /// `IndexedScatterReduce` は Sum・Mean・Amax・Amin（イシュー #3802）と Prod（イシュー #3977）が `true`。
+    /// `Cumprod`・`Logcumsumexp` はイシュー #3803 で `true`。
     #[test]
     fn index_cumulative_family_supports_create_graph() {
         let idx = || Tensor::<i32>::new(vec![0], &[1]).unwrap();
@@ -5920,7 +5920,7 @@ mod conv3d_op_tests {
             assert!(op.supports_create_graph());
         }
         use fandhe_ai_tensor_core::ScatterReduceMode as M;
-        for mode in [M::Sum, M::Mean, M::Amax, M::Amin] {
+        for mode in [M::Sum, M::Mean, M::Amax, M::Amin, M::Prod] {
             let op = Op::IndexedScatterReduce {
                 input: a,
                 dim: 0,
@@ -5930,17 +5930,6 @@ mod conv3d_op_tests {
                 include_self: true,
             };
             assert!(op.supports_create_graph(), "{mode:?}");
-        }
-        let rejected = [Op::IndexedScatterReduce {
-            input: a,
-            dim: 0,
-            index: idx(),
-            src: b,
-            mode: M::Prod,
-            include_self: true,
-        }];
-        for op in rejected {
-            assert!(!op.supports_create_graph());
         }
     }
 

@@ -70,7 +70,7 @@
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。イシュー #3802 で `IndexedScatterReduce`
 //! （Sum・Mean・Amax・Amin。実装は `scatter_reduce` サブモジュール、決定記録 §41・§62）も拡張済み。
 //! `Cumprod`・`Logcumsumexp` はイシュー #3803（決定記録 §41・§64。実装は `cumulative_b`／`scan`）で
-//! 対象にした。`IndexedScatterReduce` の `Prod` は引き続き対象外（fail-closed）。イシュー #3790 で選択縮約の
+//! 対象にした。`IndexedScatterReduce` の `Prod` はイシュー #3977（決定記録 §74。実装は `scatter_reduce_prod`）で対象にした。イシュー #3790 で選択縮約の
 //! `OrderSelect`・`MedianAll`・`Quantile`（実装は `stat_select` サブモジュール、決定記録 §34）も拡張済み。イシュー #3791 で統計縮約の
 //! `Var`・`Std`・`VectorNorm`（L1・L2）・`PNorm`（実装は `stat_varnorm` サブモジュール、決定記録 §33・§52）も拡張済み。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
 //! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
@@ -160,6 +160,7 @@ mod pool;
 mod rnn_gru_cell;
 mod scan;
 mod scatter_reduce;
+mod scatter_reduce_prod;
 mod select_reduce;
 mod stat_reduce_lse_nan;
 mod stat_select;
@@ -3396,6 +3397,13 @@ fn build_cgrads<'c>(
                 mode,
                 include_self,
             } => {
+                // `Prod` の構造は寄与値そのもの（二階微分が流れる）を要するため写しを渡す。
+                let prod_mirrors = if mode == fandhe_ai_tensor_core::ScatterReduceMode::Prod {
+                    Some((get_mirror(mirror, input)?, get_mirror(mirror, src)?))
+                } else {
+                    None
+                };
+                let prod_mirrors = prod_mirrors.as_ref().map(|(a, b)| (a, b));
                 let r = scatter_reduce::cgrad(
                     parent,
                     child,
@@ -3407,6 +3415,7 @@ fn build_cgrads<'c>(
                         index: &index,
                         mode,
                         include_self,
+                        mirrors: prod_mirrors,
                     },
                     &g,
                     parent_nodes[input.0].requires_grad,
