@@ -1,8 +1,9 @@
 //! イシュー #3837（`DeviceParamStore` の常駐更新を param groups に対応させる内部実装。
 //! 設計 `docs/autodiff-param-groups-decision.md` §19）の CPU 受け入れテスト。
 //!
-//! store は内部入口 `fandhe_ai_autodiff::optim::resident_param_groups` で構築し（facade の
-//! 入口は #3838）、学習ループは facade の `Tape`（`forward_resident`・
+//! store は内部入口 `fandhe_ai_autodiff::optim::resident_param_groups` で構築し（facade の入口
+//! `init_device_param_store_with_param_groups`〈#3838〉は
+//! `compat_sequential_init_device_param_store_param_groups.rs` で測る）、学習ループは facade の `Tape`（`forward_resident`・
 //! `backward_device_param_store`・`step_device_param_store*`）で回す。契約:
 //! - Adam／AdamW／RmsProp／Adagrad／Lamb: 毎 step、勾配をホストへ読み出して
 //!   `step_with_groups` へ与えた結果と **bit 完全一致**

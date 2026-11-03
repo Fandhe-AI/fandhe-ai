@@ -117,6 +117,7 @@ use fandhe_ai_autodiff::nn::activation::{
     LogSoftmax, Mish, PRelu, PReluVars, Relu, Relu6, Selu, Sigmoid, Silu, Softmax, Softplus,
     Softsign, Tanh,
 };
+use fandhe_ai_autodiff::nn::optim::ParamGroup;
 use fandhe_ai_autodiff::nn::shrink::{Hardshrink, Softshrink};
 use fandhe_ai_autodiff::nn::softmin_threshold::{RRelu, Softmin, Tanhshrink, Threshold};
 use fandhe_ai_autodiff::nn::{
@@ -4231,6 +4232,9 @@ impl Sequential {
     /// 新しい `tape`（`crate::tape_for` 等で構築）を [`Sequential::
     /// forward_resident`]／[`Tape::step_device_param_store`] へ渡しつつ、
     /// 同じ `DeviceParamStore` インスタンスを使い回す。
+    ///
+    /// スロットごとの lr／weight_decay（層別学習率）が要る場合は
+    /// [`Sequential::init_device_param_store_with_param_groups`] を使う。
     pub fn init_device_param_store(&self, tape: &Tape) -> Result<DeviceParamStore, BackendError> {
         // イシュー #1770: `forward_from_flat_leaves`／`build_device_
         // chain_steps` は `Linear` 層（`as_linear()`）のみを消費する
@@ -4253,6 +4257,83 @@ impl Sequential {
         self.reject_untracked_parametric_layer_resident("Sequential::init_device_param_store")?;
         let params = self.trainable_parameters();
         DeviceParamStore::new(&tape.0, &params)
+    }
+
+    /// [`Self::init_device_param_store`] の param groups 版（イシュー #3838・設計
+    /// `docs/autodiff-param-groups-decision.md` §19。承認: #3769 の所有者回答）。スロットごとの
+    /// 学習率・weight decay を持つ [`DeviceParamStore`] を構築し、層別学習率をデバイス常駐の
+    /// 更新（[`Tape::step_device_param_store`] 系）で使えるようにする。内部入口
+    /// `optim::resident_param_groups::device_param_store_with_slot_groups` への薄い委譲で、
+    /// その前にモデル構成の検査だけを行う。
+    ///
+    /// - **スロット添字の契約**: `ParamGroup::params` の添字は [`Sequential::trainable_parameters`]
+    ///   の位置（層順に weight → bias。`Some` の場合のみ）と同一。
+    /// - **group 外スロット**は各 step の config の lr／weight_decay を使う。group の lr／
+    ///   weight_decay は**絶対値**で、config の lr には追従しない。group を変えるには store を
+    ///   作り直す（setter はない）。
+    /// - **対応範囲**: CPU は SGD・Adam・AdamW・RmsProp・Adagrad・Lamb、CUDA・Metal は SGD・Adam・
+    ///   AdamW。ROCm など group 付き更新の capability がないバックエンドは `Unsupported`。
+    /// - **groups ありの store では**、AMP（`step_*_amp`）と `distributed::step_*` は
+    ///   `InvalidArgument` で拒否され、CUDA Graph capture は使わず直接実行になる。
+    ///   [`Self::train_step_resident`] はチェーンが `Unsupported` を返すと Tape 経路へ全体
+    ///   フォールバックし、group が効く。
+    /// - **`groups` が空**なら [`Self::init_device_param_store`] と bit 同一の store を返す。
+    /// - **エラーと検査順**: ① Conv／Norm 等の非対応層・追跡外の学習可能層は `Unsupported`
+    ///   （group の検証より先）、② group の検証（空・範囲外・重複・非有限・負は
+    ///   `InvalidArgument`）、③ capability 不足は `Unsupported`。いずれも store を作らない。
+    ///
+    /// ```
+    /// use fandhe_ai::optim::ParamGroup;
+    /// use fandhe_ai::{SgdConfig, Tensor, compat::Sequential};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let model = Sequential::new().add_linear(2, 3, 1)?.add_relu().add_linear(3, 1, 2)?;
+    /// // 第 1 層（スロット 0・1）は lr = 0 で凍結し、第 2 層（スロット 2・3）は config の lr で学習する。
+    /// let groups = [ParamGroup::new(vec![0, 1], 0.0, 0.0)];
+    /// let mut store = model.init_device_param_store_with_param_groups(&tape, &groups)?;
+    /// let before = tape.sync_device_param_store_to_host(&store)?;
+    /// let x = Tensor::new(vec![0.5_f32, -0.25, 1.0, 0.75], &[2, 2])?;
+    /// let y = Tensor::new(vec![1.0_f32, 0.0], &[2, 1])?;
+    /// let config = SgdConfig::new(0.1);
+    /// for _ in 0..3 {
+    ///     let tape = fandhe_ai::tape();
+    ///     let pred = model.forward_resident(&tape, &tape.var(&x), &mut store)?;
+    ///     let loss = pred.mse_loss(&tape.var(&y))?;
+    ///     let grads = tape.backward_device_param_store(&loss, &mut store)?;
+    ///     tape.step_device_param_store(&mut store, &grads, &config)?;
+    /// }
+    /// let after = tape.sync_device_param_store_to_host(&store)?;
+    /// let bits = |t: &Tensor<f32>| -> Vec<u32> {
+    ///     t.contiguous().as_slice().unwrap_or(&[]).iter().map(|v| v.to_bits()).collect()
+    /// };
+    /// assert_eq!(bits(&after[0]), bits(&before[0])); // group 内は bit 不変
+    /// assert_eq!(bits(&after[1]), bits(&before[1]));
+    /// assert_ne!(bits(&after[2]), bits(&before[2])); // group 外は更新される
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn init_device_param_store_with_param_groups(
+        &self,
+        tape: &Tape,
+        groups: &[ParamGroup],
+    ) -> Result<DeviceParamStore, BackendError> {
+        // 検査順は §19.3: モデル構成（層）→ group の検証 → capability → 構築。
+        // 前二者は本関数、後二者は内部入口が確保・upload の前に行う（store を作らない）。
+        if self.contains_resident_unsupported_layer() {
+            return Err(BackendError::Unsupported(
+                "Sequential::init_device_param_store_with_param_groups: Conv／Norm／Embedding／\
+                 Attention／Pooling／PReLU 層を含む Sequential はデバイス常駐経路非対応\
+                 （イシュー #1770・#1760・#1957・#2529・#3838）"
+                    .to_string(),
+            ));
+        }
+        self.reject_untracked_parametric_layer_resident(
+            "Sequential::init_device_param_store_with_param_groups",
+        )?;
+        let params = self.trainable_parameters();
+        fandhe_ai_autodiff::optim::resident_param_groups::device_param_store_with_slot_groups(
+            &tape.0, &params, groups,
+        )
     }
 
     /// デバイス常駐パラメータでの学習用 forward（イシュー #935・

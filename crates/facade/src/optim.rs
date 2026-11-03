@@ -377,6 +377,9 @@
 //!   手動ループで `step_with_groups` を呼ぶ。
 //! - AMP と併用するときは [`crate::compat::Sequential::compile_with_amp_and_param_groups`]
 //!   （イシュー #3832）。非有限勾配による skip の判定は全 group 共通で、全 group の更新を一括で飛ばす。
+//! - デバイス常駐更新で使うときは [`crate::compat::Sequential::init_device_param_store_with_param_groups`]
+//!   （イシュー #3838）で store を作る。GPU は SGD・Adam・AdamW だけ（CPU は 6 種）で、AMP・
+//!   `distributed::step_*`・ROCm は拒否（型付きエラー）。
 //! - 手動ループでは `set_lr` は既定グループ（グループ外スロット）にだけ効く。compile 経路で
 //!   `Callback::LrSchedule` を使うと group の lr も共通倍率（`group.lr × 現在 lr ／ compile 時の lr`）で
 //!   追従する（イシュー #3834。AMP 版の入口では拒否のまま）。

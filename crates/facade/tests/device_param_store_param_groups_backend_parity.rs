@@ -7,7 +7,8 @@
 //!
 //! 実機（CUDA・Metal）依存のため理由付き `#[ignore]` で通常 CI から分離する。実測は
 //! #3862（CUDA。GB10）・#3863（Metal。Mac mini）が持ち、本ファイルは未実測のまま。
-//! store は内部入口 `optim::resident_param_groups` で作る（facade の入口は #3838）。
+//! store は facade の公開入口 `Sequential::init_device_param_store_with_param_groups`（#3838）で作る
+//! （公開経路そのものを実機で測る）。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::SgdConfig;
@@ -16,7 +17,6 @@ use fandhe_ai::optim::{AdamConfig, AdamWConfig};
 use fandhe_ai_autodiff::nn::loss::{MseLoss, Reduction};
 use fandhe_ai_autodiff::nn::optim::ParamGroup;
 use fandhe_ai_autodiff::optim::DeviceParamStore;
-use fandhe_ai_autodiff::optim::resident_param_groups::device_param_store_with_slot_groups;
 use fandhe_ai_tensor_core::Tensor;
 
 const STEPS: usize = 100;
@@ -53,18 +53,15 @@ fn assert_close(actual: f32, expected: f32, ctx: &str) {
 
 /// `ops` へ結線した autodiff Tape で store を作り、`tape_for(device)` の facade Tape で
 /// `STEPS` 回学習して最終パラメータを返す。
-fn train(
-    device: fandhe_ai::Device,
-    store_tape: &fandhe_ai_autodiff::Tape,
-    opt: Opt,
-) -> Vec<Tensor<f32>> {
+fn train(device: fandhe_ai::Device, opt: Opt) -> Vec<Tensor<f32>> {
     let m = model();
     let mut rng = Xorshift64Star::new(0xC0FFEE);
     let x = Tensor::new(rng.fill_vec(4 * 8), &[4, 8]).unwrap();
     let y = Tensor::new(rng.fill_vec(4 * 4), &[4, 4]).unwrap();
-    let mut store: DeviceParamStore =
-        device_param_store_with_slot_groups(store_tape, &m.trainable_parameters(), &groups())
-            .unwrap();
+    let store_tape = fandhe_ai::tape_for(device).unwrap();
+    let mut store: DeviceParamStore = m
+        .init_device_param_store_with_param_groups(&store_tape, &groups())
+        .unwrap();
     for _ in 0..STEPS {
         let tape = fandhe_ai::tape_for(device).unwrap();
         let (xv, yv) = (tape.var(&x), tape.var(&y));
@@ -94,10 +91,7 @@ fn train(
 }
 
 fn cpu_reference(opt: Opt) -> Vec<Tensor<f32>> {
-    let t = fandhe_ai_autodiff::Tape::new_with_ops(Box::new(
-        fandhe_ai_backend_cpu::CpuBackendOps::new(),
-    ));
-    train(fandhe_ai::Device::Cpu, &t, opt)
+    train(fandhe_ai::Device::Cpu, opt)
 }
 
 fn compare(a: &[Tensor<f32>], b: &[Tensor<f32>], ctx: &str) {
@@ -124,10 +118,7 @@ fn cuda_param_groups_match_cpu_for_sgd_adam_adamw() {
         (Opt::Adam, "adam"),
         (Opt::AdamW, "adamw"),
     ] {
-        let t = fandhe_ai_autodiff::Tape::new_with_ops(Box::new(
-            fandhe_ai_backend_cuda::CudaBackendOps::new(0),
-        ));
-        let dev = train(fandhe_ai::Device::Cuda(0), &t, opt);
+        let dev = train(fandhe_ai::Device::Cuda(0), opt);
         compare(&dev, &cpu_reference(opt), &format!("cuda/{name}"));
     }
 }
@@ -141,10 +132,7 @@ fn metal_param_groups_match_cpu_for_sgd_adam_adamw() {
         (Opt::Adam, "adam"),
         (Opt::AdamW, "adamw"),
     ] {
-        let t = fandhe_ai_autodiff::Tape::new_with_ops(Box::new(
-            fandhe_ai_backend_metal::MetalBackendOps::new(),
-        ));
-        let dev = train(fandhe_ai::Device::Metal, &t, opt);
+        let dev = train(fandhe_ai::Device::Metal, opt);
         compare(&dev, &cpu_reference(opt), &format!("metal/{name}"));
     }
 }
