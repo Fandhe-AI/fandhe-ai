@@ -1438,6 +1438,30 @@ mod tests {
         }
     }
 
+    /// #3819: rank 5（`[N, C, D, H, W]`）でも channel-rows 往復が成立する。
+    #[test]
+    fn channel_rows_round_trip_for_rank5() {
+        let shape = vec![2usize, 2, 2, 2, 3];
+        let (n, c, spatial) = batch_norm_layout(&shape).unwrap();
+        assert_eq!(spatial, 12);
+        let m = channel_row_len(n, spatial).unwrap();
+        let numel: usize = shape.iter().product();
+        let data: Vec<f32> = (0..numel).map(|i| i as f32).collect();
+        let tape = new_tape();
+        let v = tape.var_no_grad(&Tensor::new(data.clone(), &shape).unwrap());
+        let rows = to_channel_rows(&v, n, c, spatial, m).unwrap();
+        assert_eq!(rows.shape(), vec![c, m]);
+        let rv = rows.to_tensor();
+        for ch in 0..c {
+            assert_eq!(
+                &rv.as_slice().unwrap()[ch * m..(ch + 1) * m],
+                channel_row(&data, c, spatial, m, ch).as_slice()
+            );
+        }
+        let back = from_channel_rows(&rows, n, c, spatial, &shape).unwrap();
+        assert_eq!(back.to_tensor().as_slice().unwrap(), data.as_slice());
+    }
+
     /// 強制 k を設定して `f` を実行し、終了時に必ず解除する（他テストへ漏らさない）。
     fn with_forced_prescale<R>(k: Option<i32>, f: impl FnOnce() -> R) -> R {
         struct Reset;

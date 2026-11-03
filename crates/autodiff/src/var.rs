@@ -1851,7 +1851,8 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
-    /// BatchNorm1d／2d の train モード（バッチ統計。チャネル軸は常に
+    /// BatchNorm1d／2d／3d 相当の train モード（rank 2〜5。rank 6 以上は
+    /// `RankMismatch { expected: 5 }`。バッチ統計。チャネル軸は常に
     /// dim 1。イシュー #1732・親 #1608・`docs/batch-norm-ops-design.md`）。
     /// [`Self::batch_norm_with_batch_stats`] の `.0`（output のみ）を
     /// 返す薄いラッパー。
@@ -1956,7 +1957,7 @@ impl<'t> Var<'t> {
         Ok((Var::from_raw(self.tape, id), batch_mean, batch_var))
     }
 
-    /// BatchNorm1d／2d の eval モード（固定統計。`running_mean`／
+    /// BatchNorm1d／2d／3d 相当の eval モード（rank 2〜5。固定統計。`running_mean`／
     /// `running_var` は呼び出し元〈`nn::BatchNorm1d`／`BatchNorm2d`〉が
     /// 保持する running stats。イシュー #1732・親 #1608）。
     /// [`Self::batch_norm_with_batch_stats`] と同じ検査順序だが、`M`
