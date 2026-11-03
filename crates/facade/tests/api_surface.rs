@@ -47314,6 +47314,258 @@ fn facade_does_not_reexport_or_declare_similarity_ops_detects_each_category() {
     assert!(offense("pub mod similarity_ops {}"));
 }
 // =====================================================================
+// イシュー #3822（Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:
+// `Var::channel_shuffle` と `compat::Sequential::add_channel_shuffle` の正ガード。
+// 反転対象の否定ガード・保留 doctest は元から無い（設計記録 §3.1）ため、承認形だけを許す正ガードを
+// 新設する（保留 doctest ガードは作らない。Q4 (a)）。内部の `channel_shuffle_forward`／
+// `channel_shuffle_out_shape` はトークン完全一致のため `channel_shuffle` と干渉しない。
+// =====================================================================
+
+const CHANNEL_SHUFFLE_VAR_BODY: &str = "crate : : nn : : channel_shuffle_forward ( self , groups )";
+
+/// 与えたソースで `Var::channel_shuffle` が 1 件だけ宣言され、本体が承認形の 1 行委譲か。
+fn channel_shuffle_var_body_ok(source: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(source).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    count_fn_declarations_by_name(&tokens, "channel_shuffle") == 1
+        && determinism_fn_body(&tokens, "channel_shuffle").as_deref()
+            == Some(CHANNEL_SHUFFLE_VAR_BODY)
+}
+
+/// `Var::channel_shuffle` が `var.rs` に 1 件あり、本体が 1 行委譲である。
+#[test]
+fn var_channel_shuffle_method_is_thin_delegation() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    assert!(
+        channel_shuffle_var_body_ok(&content),
+        "var.rs の Var::channel_shuffle が承認形（nn::channel_shuffle_forward への 1 行委譲）と一致しない"
+    );
+}
+
+/// [`var_channel_shuffle_method_is_thin_delegation`] の自己テスト（すり替え・重複・欠落の検出）。
+#[test]
+fn var_channel_shuffle_method_is_thin_delegation_detects_offense() {
+    let ok = "impl Var { pub fn channel_shuffle(&self, groups: usize) -> R { crate::nn::channel_shuffle_forward(self, groups) } }";
+    assert!(channel_shuffle_var_body_ok(ok));
+    for bad in [
+        // 本体のすり替え
+        "impl Var { pub fn channel_shuffle(&self, groups: usize) -> R { self.clone() } }",
+        // 引数のすり替え
+        "impl Var { pub fn channel_shuffle(&self, groups: usize) -> R { crate::nn::channel_shuffle_forward(self, 2) } }",
+        // 重複宣言
+        "impl Var { pub fn channel_shuffle(&self, groups: usize) -> R { crate::nn::channel_shuffle_forward(self, groups) } \
+         pub fn channel_shuffle(&self, groups: usize) -> R { crate::nn::channel_shuffle_forward(self, groups) } }",
+        // 欠落
+        "impl Var { pub fn other(&self) -> R { self.clone() } }",
+    ] {
+        assert!(!channel_shuffle_var_body_ok(bad), "{bad}");
+    }
+}
+
+/// `fandhe_ai::Var` 経由でだけ届く: fn ポインタ型が承認シグネチャと一致し、値と `Err` を返す。
+#[test]
+fn var_channel_shuffle_method_is_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    fn pin<'a, 't>(_: fn(&'a Var<'t>, usize) -> Result<Var<'t>, AutodiffError>) {}
+    pin(Var::channel_shuffle);
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&Tensor::new(vec![0.0_f32, 1.0, 2.0, 3.0], &[1, 4, 1, 1]).unwrap());
+    let y = x.channel_shuffle(2).unwrap();
+    assert_eq!(
+        y.to_tensor().contiguous().as_slice().unwrap(),
+        &[0.0, 2.0, 1.0, 3.0]
+    );
+    assert!(x.channel_shuffle(0).is_err());
+    assert!(x.channel_shuffle(3).is_err());
+}
+
+const ADD_CHANNEL_SHUFFLE_PARAMS: &str = "mut self, groups: usize) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_channel_shuffle` が承認シグネチャで 1 件だけ存在する。
+#[test]
+fn compat_sequential_channel_shuffle_add_method_has_approved_signature() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_channel_shuffle"),
+        1
+    );
+    assert!(
+        sequential_spatial_add_signature_ok(
+            &cleaned,
+            "add_channel_shuffle",
+            ADD_CHANNEL_SHUFFLE_PARAMS
+        ),
+        "add_channel_shuffle のシグネチャが承認形と一致しない"
+    );
+}
+
+/// [`compat_sequential_channel_shuffle_add_method_has_approved_signature`] の自己テスト。
+#[test]
+fn compat_sequential_channel_shuffle_add_method_has_approved_signature_detects_offense() {
+    let name = "add_channel_shuffle";
+    let ok = format!("pub fn {name}(mut self, groups: usize) -> Result<Self, AutodiffError> {{");
+    assert!(sequential_spatial_add_signature_ok(
+        &ok,
+        name,
+        ADD_CHANNEL_SHUFFLE_PARAMS
+    ));
+    for bad in [
+        format!("pub fn {name}(mut self, groups: usize) -> Self {{"),
+        format!("pub fn {name}(mut self, groups: u32) -> Result<Self, AutodiffError> {{"),
+        format!("pub fn {name}(mut self) -> Result<Self, AutodiffError> {{"),
+        format!(
+            "pub fn {name}(mut self, groups: usize, dim: usize) -> Result<Self, AutodiffError> {{"
+        ),
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(&bad, name, ADD_CHANNEL_SHUFFLE_PARAMS),
+            "{bad}"
+        );
+    }
+}
+
+/// workspace 全体（`crates/*/src/`）の `fn channel_shuffle`／`fn add_channel_shuffle` が承認済みの
+/// 置き場所（`autodiff/src/var.rs`・`facade/src/compat/sequential.rs`）に 1 件ずつだけある。
+#[test]
+fn workspace_declares_channel_shuffle_facade_fn_names_only_in_approved_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートが見つからない");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in ["channel_shuffle", "add_channel_shuffle"] {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("autodiff/src/var.rs::channel_shuffle".to_string(), 1),
+        (
+            "facade/src/compat/sequential.rs::add_channel_shuffle".to_string(),
+            1,
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "channel_shuffle 関連の fn 宣言が承認済みの置き場所と一致しない（迂回経路の混入か未承認の実装追加）"
+    );
+}
+
+/// facade src の `pub use` が `ChannelShuffle` 型・`channel_shuffle_forward` を含む、または
+/// 層型の独自宣言がある場合に違反の説明を返す（#3022 の 3 条件を満たさないため非公開を固定）。
+fn scan_channel_shuffle_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in [
+                "channel_shuffle",
+                "ChannelShuffle",
+                "channel_shuffle_forward",
+            ] {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            if path_tokens.iter().any(|t| t == "fandhe_ai_autodiff")
+                && path_tokens.iter().any(|t| t == "*")
+            {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens.get(i + 1).map(String::as_str) == Some("ChannelShuffle")
+        {
+            offending.push(format!("{} ChannelShuffle 宣言", tokens[i]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && tokens.get(i + 2).map(String::as_str) == Some("channel_shuffle")
+        {
+            offending.push("pub mod channel_shuffle 宣言".to_string());
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体が `ChannelShuffle` 層型・内部関数を再エクスポート・独自宣言していない。
+#[test]
+fn facade_does_not_reexport_or_declare_channel_shuffle_layer() {
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let offending = scan_channel_shuffle_reexports_and_declarations(content);
+        assert!(
+            offending.is_empty(),
+            "{} が ChannelShuffle の内部実装を公開している: {offending:?}",
+            path.display()
+        );
+    });
+}
+
+/// [`facade_does_not_reexport_or_declare_channel_shuffle_layer`] の自己テスト。
+#[test]
+fn facade_does_not_reexport_or_declare_channel_shuffle_layer_detects_each_category() {
+    let offense = |src: &str| !scan_channel_shuffle_reexports_and_declarations(src).is_empty();
+    // 違反にならない例
+    assert!(!offense(
+        "use fandhe_ai_autodiff::nn::{ChannelShuffle, Module};"
+    ));
+    assert!(!offense(
+        "// pub use nn::ChannelShuffle;\nconst S: &str = \"pub use ChannelShuffle;\";"
+    ));
+    assert!(!offense("pub use fandhe_ai_autodiff::Tape;"));
+    // 違反の例
+    assert!(offense("pub use fandhe_ai_autodiff::nn::ChannelShuffle;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::{ChannelShuffle as C, Module};"
+    ));
+    assert!(offense("pub use fandhe_ai_autodiff::nn::channel_shuffle;"));
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    assert!(offense("pub struct ChannelShuffle;"));
+    assert!(offense("pub mod channel_shuffle {}"));
+}
+// =====================================================================
 // イシュー #3820（親 #3813・Phase 6。承認: #3768 の所有者回答 issuecomment-6554564412）:
 // `compat::Sequential::add_batch_norm3d` の正ガード。承認形は「`add_batch_norm3d(num_features, eps, momentum)`
 // だけを公開し、層型 `BatchNorm3d` は autodiff 内部に留める（facade へ再エクスポートしない。#3022 の別判断）」。

@@ -193,6 +193,11 @@
 //! `add_pixel_unshuffle`・`Var::pixel_shuffle`／`pixel_unshuffle` は
 //! イシュー #2526（親 #2520）で facade 公開済み（`Module` の `as_*` フックは
 //! 無状態層のため追加しない。`docs/autodiff-pixel-shuffle-decision.md` §6）。
+//! イシュー #3822（設計 #3746・承認 #3768）で [`ChannelShuffle`]
+//! （`channel_shuffle` モジュール。チャネル軸 dim 1 固定）を追加した。
+//! `contiguous`／`reshape`／`permute` の合成のみで新規 `Op`／カーネルは
+//! 追加しない。`Var::channel_shuffle`／`compat::Sequential::add_channel_shuffle`
+//! で公開する（層型自体は facade から再エクスポートしない）。
 //! イシュー #2163（親 #2131）で [`MultiheadAttention`] に
 //! [`attention::MultiheadAttentionConfig`]（`batch_first`・`kdim`・
 //! `vdim`）・`MultiheadAttentionVars::forward_with_key_padding_mask`
@@ -247,6 +252,7 @@
 mod attention;
 mod batch_norm;
 mod bilinear;
+mod channel_shuffle;
 mod container;
 mod conv;
 mod dropout;
@@ -295,6 +301,8 @@ pub use batch_norm::{
     BatchNormVars,
 };
 pub use bilinear::{Bilinear, BilinearVars};
+pub use channel_shuffle::ChannelShuffle;
+pub(crate) use channel_shuffle::channel_shuffle_forward;
 pub use container::{ModuleDict, ModuleList, Sequential, summary};
 pub(crate) use conv::conv_transpose1d_forward;
 pub use conv::{

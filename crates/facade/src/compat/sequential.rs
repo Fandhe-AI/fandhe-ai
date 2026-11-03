@@ -120,18 +120,18 @@ use fandhe_ai_autodiff::nn::shrink::{Hardshrink, Softshrink};
 use fandhe_ai_autodiff::nn::softmin_threshold::{RRelu, Softmin, Tanhshrink, Threshold};
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
-    AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNorm3d, BatchNormVars, Conv1d,
-    Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars,
-    ConvTranspose2d, ConvTranspose2dVars, ConvTranspose3d, ConvTranspose3dVars, Dropout, Dropout2d,
-    Embedding, EmbeddingBag, EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, Fold,
-    GlobalPool, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm,
-    LayerNormVars, Linear, LocalResponseNorm, MaxPool1d, MaxPool2d, MaxPool3d, Module,
-    MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
-    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, Transformer,
-    TransformerConfig, TransformerDecoderLayer, TransformerDecoderLayerVars,
-    TransformerEncoderLayer, TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold,
-    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
-    multihead_attention_forward_low_precision,
+    AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNorm3d, BatchNormVars,
+    ChannelShuffle, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
+    ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, ConvTranspose3d,
+    ConvTranspose3dVars, Dropout, Dropout2d, Embedding, EmbeddingBag, EmbeddingBagVars,
+    EmbeddingVars, FeedForwardActivation, Flatten, Fold, GlobalPool, GroupNorm, Identity,
+    InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, LocalResponseNorm,
+    MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention, MultiheadAttentionConfig,
+    MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
+    Sequential as NnSequential, Transformer, TransformerConfig, TransformerDecoderLayer,
+    TransformerDecoderLayerVars, TransformerEncoderLayer, TransformerEncoderLayerVars,
+    TransformerVars, Unflatten, Unfold, Upsample, ZeroPad2d, conv2d_forward_low_precision,
+    linear_forward_low_precision, multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -526,6 +526,10 @@ pub(super) enum LayerSpec {
     },
     InstanceNorm {
         eps: f32,
+    },
+    /// イシュー #3822。groups のみ（rank・整除は forward 時の遅延検査）。
+    ChannelShuffle {
+        groups: usize,
     },
     /// イシュー #2526。
     PixelShuffle {
@@ -2764,6 +2768,35 @@ impl Sequential {
         self.inner.push(Box::new(layer));
         self.specs
             .push(LayerSpec::PixelUnshuffle { downscale_factor });
+        Ok(self)
+    }
+
+    /// ChannelShuffle 層を追加する（`nn::ChannelShuffle`。イシュー #3822）。
+    /// `[N, C, *S]`（rank 3 以上）のチャネル軸（dim 1 固定）を `groups` 個に分けて転置する
+    /// （PyTorch `nn.ChannelShuffle` 相当・`Var::channel_shuffle` と同一の共有 forward）。
+    /// `out[:, j*g + i] = in[:, i*(C/g) + j]`。`groups == 0` は即時 `Err`
+    /// （`AutodiffError::InvalidArgument`）で、rank 3 未満・C の非整除は forward 時の `Err`
+    /// （遅延検査）。無状態層で、学習・常駐経路を通過し保存（kind `channel_shuffle`・`groups`）に
+    /// 対応する。ONNX export は `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_channel_shuffle(2)?;
+    /// let x = Tensor::new((0..4).map(|v| v as f32).collect(), &[1, 4, 1, 1])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[1, 4, 1, 1]);
+    /// assert_eq!(y.as_slice().unwrap(), &[0.0, 2.0, 1.0, 3.0]);
+    /// assert!(Sequential::new().add_channel_shuffle(0).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_channel_shuffle(mut self, groups: usize) -> Result<Self, AutodiffError> {
+        let layer = ChannelShuffle::new(groups)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::ChannelShuffle { groups });
         Ok(self)
     }
 
