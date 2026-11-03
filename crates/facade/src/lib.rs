@@ -5518,8 +5518,9 @@ struct EmaHoldDoctestGuard;
 /// 再エクスポート。`docs/autodiff-swa-decision.md` §7）へ部分反転した SWA の保留
 /// ガード（`EmaHoldDoctestGuard` と同型の「正のプローブ 1 ブロック方式」）。
 ///
-/// 型名の glob 衝突プローブは承認形の公開に伴い削除した。残すのは**未承認の経路**
-/// である `compat::FitConfig`／`compat::Sequential` への inherent メソッド追加
+/// 型名の glob 衝突プローブは承認形の公開に伴い削除した。残すのは、#3769 の所有者回答
+/// （2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>）で
+/// **対象外に確定した禁止経路**である `compat::FitConfig`／`compat::Sequential` への inherent メソッド追加
 /// （`fit` への SWA 結線）専用のプローブだけである: ローカル `__FandheSwaHoldProbe`
 /// （`use_swa`／`swa_start`／`swa_lr`）を両型へ実装し、UFCS 形とメソッド呼び出し形の
 /// 両方で呼ぶ。同名の inherent メソッドが生えると戻り値型の不一致で失敗する。
@@ -5534,7 +5535,9 @@ struct EmaHoldDoctestGuard;
 /// イシュー #3058 で `Callback::Swa(SwaCallback)` として結線が公開されたが（決定記録 §16・§17）、
 /// `FitConfig`／`Sequential` へは SWA 用メソッドを足さない契約（§16）は不変のため、プローブは維持する
 /// （`SwaCallback` の accessor `swa_start`／`swa_lr` は別型の inherent メソッドで衝突しない）。
-/// 将来これらの契約自体が変わる日が来たら、本構造体・本 doctest を削除する。
+/// 本構造体は**禁止経路専用の恒久ガード**として維持する（`EmaHoldDoctestGuard`・`LossOpsHoldDoctestGuard` と
+/// 同じ扱い。構造体名は固定文言のドリフト検査が参照するため変えない。判断の出典は
+/// `docs/autodiff-swa-decision.md` §20・§21）。
 ///
 /// イシュー #3060 で `Callback::Swa(SwaCallback)` の形の正ガード（`api_surface.rs` の
 /// `callback_swa_variant_*`・`compat_callback_swa_variant_has_exact_approved_shape`・
