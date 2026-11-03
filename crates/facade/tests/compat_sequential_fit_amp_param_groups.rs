@@ -397,7 +397,8 @@ fn compile_rejections_keep_previous_compiled() {
     assert!(m.is_compiled());
 }
 
-// 9. 従来どおり拒否される組み合わせはモデルと compiled 状態を変えない。
+//    `LrSchedule`・`save_model` は groups 非空の拒否を現行契約として固定する。`LrSchedule` は AMP 入口では
+//    拒否を維持する確定事項（決定記録 §14.10 点 4・§15.10 点 6）で、`save_model` は #3835 で変わりうる。
 //    `LrSchedule`・`save_model` は groups 非空の拒否（#3834／#3835 で変わりうる）を現行契約として固定する。
 #[test]
 fn fit_rejections_leave_model_untouched() {

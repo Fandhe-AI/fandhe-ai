@@ -18196,10 +18196,25 @@ fn param_groups_usage_doctests_are_present_and_compiled() {
             "ParamGroup",
         ],
     ));
+    // #3834: `LrSchedule` 併用（共通倍率）の利用例も実行される doctest として固定する。
+    // A3-b には否定ガードが元から無かったため、反転ではなく正ガードの在庫への追加。
+    v.extend(doctest_probe_violations(
+        "compile_with_param_groups の doc（LrSchedule 併用）",
+        &compile_doc,
+        &["compile_with_param_groups", "LrSchedule", "StepLr"],
+    ));
     assert!(v.is_empty(), "{v:?}");
 
     // 自己テスト: 各カテゴリを正例・負例で踏む。
     let lines = |s: &str| s.lines().map(|l| l.to_string()).collect::<Vec<_>>();
+    // LrSchedule 併用プローブの正例・負例（needle 集合を満たす doc は通り、欠落・ignore 化は検出）。
+    let lr_needles = ["compile_with_param_groups", "LrSchedule", "StepLr"];
+    let lr_good = lines("```\ncompile_with_param_groups(LrSchedule, StepLr)\n```");
+    assert!(doctest_probe_violations("t", &lr_good, &lr_needles).is_empty());
+    let lr_missing = lines("```\ncompile_with_param_groups(StepLr)\n```");
+    assert!(!doctest_probe_violations("t", &lr_missing, &lr_needles).is_empty());
+    let lr_ignored = lines("```ignore\ncompile_with_param_groups(LrSchedule, StepLr)\n```");
+    assert!(!doctest_probe_violations("t", &lr_ignored, &lr_needles).is_empty());
     let good = lines("```\nuse x::ParamGroup;\nlet a = ParamGroup::new();\n```");
     assert!(doctest_probe_violations("t", &good, &["ParamGroup"]).is_empty());
     let rust_good = lines("```rust\nParamGroup\n```");
