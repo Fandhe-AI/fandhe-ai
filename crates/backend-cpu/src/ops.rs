@@ -3564,9 +3564,11 @@ impl BackendOps for CpuBackendOps {
         output_size: [usize; 3],
     ) -> Result<Tensor<f32>, BackendError> {
         use fandhe_ai_tensor_core::adaptive_pool3d as ap3;
-        let input = input.contiguous();
+        // 実体化（contiguous）は巨大 broadcast view で容量 overflow の panic を起こしうるため、
+        // 元の shape で layout（と Max は索引上限）を先に検証してから行う。
         let layout = ap3::adaptive_pool3d_layout(input.shape(), output_size)
             .map_err(BackendError::ShapeMismatch)?;
+        let input = input.contiguous();
         let v = ap3::adaptive_avg_pool3d_host(&input.host_slice(), &layout)
             .map_err(BackendError::ShapeMismatch)?;
         Tensor::new(v, &layout.out_shape()).map_err(BackendError::ShapeMismatch)
@@ -3580,12 +3582,14 @@ impl BackendOps for CpuBackendOps {
         output_size: [usize; 3],
     ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
         use fandhe_ai_tensor_core::adaptive_pool3d as ap3;
-        let input = input.contiguous();
+        // 実体化（contiguous）は巨大 broadcast view で容量 overflow の panic を起こしうるため、
+        // 元の shape で layout（と Max は索引上限）を先に検証してから行う。
         let layout = ap3::adaptive_pool3d_layout(input.shape(), output_size)
             .map_err(BackendError::ShapeMismatch)?;
         layout
             .check_i32_indices()
             .map_err(BackendError::ShapeMismatch)?;
+        let input = input.contiguous();
         let (v, i) = ap3::adaptive_max_pool3d_host(&input.host_slice(), &layout)
             .map_err(BackendError::ShapeMismatch)?;
         Ok((

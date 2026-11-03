@@ -782,6 +782,21 @@ fn cuda_adaptive_pool3d_ops_are_unsupported_not_panic() {
     ));
 }
 
+/// イシュー #3823（codex P1）: `adaptive_pool3d_avg`／`adaptive_pool3d_max` は実体化（contiguous）より
+/// 先に形状を検証するため、巨大 broadcast view を直接渡しても capacity overflow で panic せず
+/// 型付きエラーを返す。
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn cpu_adaptive_pool3d_huge_broadcast_view_is_err_not_panic() {
+    let cpu = CpuBackendOps::new();
+    let one = Tensor::new(vec![1.0f32], &[1, 1, 1, 1, 1]).expect("valid tensor");
+    let huge = one
+        .broadcast_to(&[1, 1, 1, 1, 1usize << 61])
+        .expect("broadcast view");
+    assert!(cpu.adaptive_pool3d_avg(&huge, [1, 1, 1]).is_err());
+    assert!(cpu.adaptive_pool3d_max(&huge, [1, 1, 1]).is_err());
+}
+
 /// イシュー #3823: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
 #[cfg(target_os = "macos")]
 #[test]
