@@ -14,7 +14,7 @@
 ## 状態
 
 **実測済み: 1 本 pass、fail 0、undetermined 0**（2026-11-04・`<cuda-node>`）。6 ケース 24 量がすべて REQ-2 で pass した
-（`fail_count` は全量 0）。Adam・AdamW の 12 量は `max_abs_diff`・`max_rel_err` とも 0、SGD の 12 量は max_abs_diff 2.980232e-8 以下。
+（`fail_count` は全量 0）。Adam・AdamW の 16 量（2 手法 × 2 ケース × 4 量）は `max_abs_diff`・`max_rel_err` とも 0、SGD の 8 量は max_abs_diff 2.980232e-8 以下。
 
 - 実行コミット（`rev-stamp.txt`）: `f81eedd9cd4478ff3f57e65f3d82c9a8e0c3f8a1`・`dirty=0`。事前登録と実行スクリプトを入れた最初のコミットで、
   `crates/`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` は対象コミット `2f59b9638` と同じ（送信前に `git diff --quiet` で確かめた）。
