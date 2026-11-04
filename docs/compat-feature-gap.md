@@ -76,6 +76,7 @@ fandhe-ai の公開面は現時点で **MLP（全結合＋3 活性化＋MSE/Cros
 | `cuda_graph_step_mode`/`cuda_graph_step_stats`（診断） | `crates/facade/src/lib.rs:426-437` |
 | `set_cuda_managed_memory_enabled`/`cuda_managed_memory_enabled`（managed memory opt-in） | `crates/facade/src/lib.rs:518-526` |
 | `set_metal_split_k_gemm_enabled`/`metal_split_k_gemm_enabled`（Metal split-K opt-out。macOS 限定） | `crates/facade/src/lib.rs:556-565` |
+| `set_cuda_gpu_linalg_enabled`/`cuda_gpu_linalg_enabled`・`set_metal_gpu_linalg_enabled`/`metal_gpu_linalg_enabled`（GPU 線形代数 opt-in。既定 OFF。Metal は macOS 限定。#3405） | `crates/facade/src/lib.rs`（`set_cuda_gpu_linalg_enabled` 付近） |
 | `Tape::reset`/`leaf_count`/`leaf`（tape 再利用。学習ループ最適化） | `crates/facade/src/lib.rs:169-184` |
 | `Tape::step_device_param_store`/`backward_device_param_store`/`sync_device_param_store_to_host`/`resident_grads_to_host`/`param_grads_to_host`（デバイス常駐更新） | `crates/facade/src/lib.rs:194-262` |
 

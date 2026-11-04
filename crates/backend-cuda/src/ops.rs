@@ -6209,7 +6209,7 @@ impl BackendOps for CudaBackendOps {
 
     /// 線形代数 LU 系（`inv`／`solve`／`det`。イシュー #2674・#3135・設計記録
     /// `docs/backend-gpu-linalg-decision.md` §3〜§6）は内部 opt-in ゲート
-    /// （`crate::linalg::set_gpu_linalg_enabled`。既定 OFF・facade 非公開）
+    /// （`crate::linalg::set_gpu_linalg_enabled`。既定 OFF・facade は 1 行委譲で公開〈#3405〉）
     /// の背後にある。ゲート OFF なら従来どおり `device_handle()`（driver
     /// 初期化）を経由せず `Unsupported` を返し、`Var` 側がホスト `f64` 参照
     /// 実装へフォールバックする（既存契約不変）。ゲート ON では

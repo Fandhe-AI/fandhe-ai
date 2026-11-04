@@ -24,9 +24,10 @@
 //!
 //! # 公開範囲
 //!
-//! 本モジュールは `backend-cuda` 内 `pub` だが **`facade` へは再公開しない**
-//! （`crates/facade/tests/api_surface.rs` の保留ガードで機械固定。公開形の
-//! 推奨は設計記録 §7、公開は別 issue でユーザー承認後）。
+//! 本モジュールは `backend-cuda` 内 `pub`。`facade` は `fandhe_ai::set_cuda_gpu_linalg_enabled`／
+//! `cuda_gpu_linalg_enabled` で 1 行委譲により公開する（イシュー #3405。`pub use` による
+//! 再公開はしない。`crates/facade/tests/api_surface.rs` の正ガードで機械固定。公開形の
+//! 正は設計記録 §11）。
 //!
 //! # カーネル起動（Stage B。イシュー #3135・親イシュー #3133）
 //!
@@ -74,7 +75,7 @@ static GPU_LINALG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// CUDA の LU 系線形代数（`linalg_inv`／`linalg_solve`／`linalg_det`）を
 /// 有効化する（既定 OFF。プロセスワイド）。`backend-cuda` 内 `pub` だが
-/// `facade` への再公開は行わない（モジュール冒頭「公開範囲」参照）。
+/// `facade` は 1 行委譲で公開する（`pub use` では再公開しない。モジュール冒頭「公開範囲」参照）。
 pub fn set_gpu_linalg_enabled(enabled: bool) {
     GPU_LINALG_ENABLED.store(enabled, Ordering::SeqCst);
 }
