@@ -22,7 +22,7 @@
 //!
 //! # 到達性
 //! `memory_ops()` は R0 の方針で `None` のままなので、crate の外から ROCm の `DeviceBuffer` は作れない
-//! （`ops/ew.rs` の R2 と同じ制約。#3157）。判別は `downcast_handle::<RocmBufferHandle>()` の型だけで
+//! （`ops/ew.rs` の R2 と同じ制約。facade 結線〈#3853〉後も変わらず、常駐経路を外へ開くのは別承認）。判別は `downcast_handle::<RocmBufferHandle>()` の型だけで
 //! 行う。テストは `upload_resident`／`download_resident` で組み立てる。
 //!
 //! # 数値契約

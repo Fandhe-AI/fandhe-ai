@@ -153,7 +153,7 @@ pub(crate) fn cached<T>(
 
 /// ROCm（AMD GPU）向け `BackendOps`。必須 9 メソッド・R2 の elementwise 一式・縮約 5 メソッド（R3）・正規化 6 メソッド（R6）を実装する。
 ///
-/// HIP のデバイス ID は `RocmGemmF32::new` と同じく 0 固定。gfx target の照会は #3157・#3159。
+/// HIP のデバイス ID は `RocmGemmF32::new` と同じく 0 固定。gfx target 対応（gfx942）の判定は `RocmDeviceProvider` が code object のロードで行う（#3853）。実機確認は #3159・#3867。
 #[derive(Debug, Clone, Copy)]
 pub struct RocmBackendOps {
     target: GfxTarget,
@@ -801,7 +801,7 @@ impl BackendOps for RocmBackendOps {
     }
 
     /// 新トークンの K／V 行をデバイス常駐のページ化 KV プールへスロット写像どおりに書く（R12・#3443）。
-    /// 同期実行。結線は `ops/paged_kv.rs`。`_tracked` 版は trait 既定の委譲。到達性は #3157 待ち。
+    /// 同期実行。結線は `ops/paged_kv.rs`。`_tracked` 版は trait 既定の委譲。facade 結線（#3853）後も `memory_ops()` は `None` のままで、crate の外から ROCm の `DeviceBuffer` は作れない（常駐経路を外へ開くのは承認範囲外・別承認）。
     fn paged_kv_append(
         &self,
         k_new: &DeviceBuffer<f32>,

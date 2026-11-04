@@ -6,7 +6,7 @@ Rust 製 AI/ML ライブラリ [fandhe-ai](https://github.com/Fandhe-AI/fandhe-a
 composition root であり、**唯一のサポートされる公開 API 面**です。テンソル・autodiff・
 バックエンド抽象層を完全自作コアとして実装した内部クレート群（`fandhe-ai-tensor-core`・
 `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
-`fandhe-ai-backend-metal`）を結線し、`Device` 指定によるバックエンド選択と
+`fandhe-ai-backend-metal`・`fandhe-ai-backend-rocm`）を結線し、`Device` 指定によるバックエンド選択と
 compat 公開面（`compat::array`／`compat::Sequential`）・optimizer 公開面
 （`optim::{Sgd, AdamW, clip_grad_norm, LrScheduler}` 等）を提供します。
 
@@ -60,7 +60,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `fandhe_ai::tape()` は常に利用可能な CPU バックエンドを結線し、`Device::Cuda(_)`／
 `Device::Metal` を明示指定したい場合は `fandhe_ai::tape_for(Device)` を使います。
 CUDA・Metal は実行時にデバイスの存在を検証し、利用できない場合はエラーを返します
-（自動フォールバックはしません）。バックエンド間の数値一致は「相対誤差 1e-3 未満
+（自動フォールバックはしません）。
+
+`Device::Rocm(0)`（AMD GPU）は**条件付き・実験的**です。HIP・HIPRTC・gfx942 の code object の
+ロードがそろうホストだけで使え、それ以外のホストと `Device::Rocm(n >= 1)` は
+`DeviceUnavailable` になります（自動フォールバックはしません）。実機での確認は未実施です
+（#3159・#3867）。バックエンド間の数値一致は「相対誤差 1e-3 未満
 または絶対誤差 1e-5 未満」の複合判定で担保します。
 
 ## 相互運用（interop）

@@ -340,3 +340,15 @@ Q2 の手順（#3774）:
   - **D3**: 承認点 4 により ordinal≠0 を HIP より前に弾くので、§10.3 の `device_count` との比較は ordinal=0 だけになる
 - **既定経路**: `Cpu`／`Cuda`／`Metal` の腕と provider の生成は変えておらず、既存テストは無変更で通る。外部 crate の追加・版の更新・tolerance・baseline・`unsafe` の追加はない
 - **実機**: すべて未実測のまま（MI300X での facade 経由の parity は #3867）。本 PR は `Refs #3853` で、`Closes` は使わない
+
+## 14. 実装記録（イシュー #3854・第 4 段＝文書の仕上げ）
+
+§1〜§13 は書き換えず、本節で実装結果を記す（§12・§13 と同じ流儀）。冒頭見出しの「（所有者判断待ち）」は §11 で承認済みに訂正済みで、見出し自体は §9 以来の流儀で変えない。
+
+- **承認**: #3771 の所有者の回答コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>（2026-11-01。Q1 = A＋B＋E、Q2、付随点 3〜8）。0.14.0 への同梱と追跡表の「0.14.0 の区分＝公開」への移動は、#3159・#3867 の実機 parity pass が条件のまま
+- **更新したファイル**: `crates/facade/Cargo.toml`（description に experimental ROCm を明記。承認点 7）・`crates/facade/README.md`（内部クレート列挙と「条件付き・実験的」の説明）・`crates/backend-rocm/README.md` と `src/{gemm,ops}.rs`・`src/ops/{paged_kv,gemm_derived}.rs` のコメント（「#3157 待ち」「`Device::Cpu` の仮置き」「facade から参照されない」を現状に修正。`memory_ops()` は `None` のままで、常駐経路を外へ開くのは承認範囲外）・`docs/compat-api-scope.md`（適用記録と内部クレートの扱い）・`docs/public-api-design.md` §4.1・`docs/migration/0.14.0.md`（# 24 の各欄）・`docs/compat-matrix-ari-tracker.md` # 24・`docs/README.md`
+- **正ガード**: 反転は #3851（`device_variant_classify_with_wildcard_arm_includes_rocm` ほか）・#3852（`facade_depends_on_backend_rocm_only_in_approved_shape`）・#3853（`facade_wires_rocm_into_resolve_ops_and_available_devices`）で済み。本 PR は公開例の実在を固定する `rocm_device_usage_doctests_are_present_and_compiled`（`crates/facade/tests/api_surface.rs:52039`。空入力・隠し行・`ignore` の負例を自己テストに含む）を足した。CI で動く（ROCm 不要）
+- **設計からの逸脱**: なし（§10.7 の適用記録の文案のうち「crates.io 公開」は、公開していないため「公開状態: 未公開」に直した。これは事実への訂正で設計変更ではない）
+- **やらなかったこと**: 追跡表 # 24 の「0.14.0 の区分」を「公開」へ移すこと（#3867・#3159 の pass の後。Phase 11）、crates.io 公開・版のバンプ・`RELEASE_CRATES` の変更（Phase 11、所有者の明示指示が要る）、`site/` の ROCm 追記（0.14.0 のリリース文書で扱う）、移行ノート §5・§6（#3869）
+- **既定経路**: Rust のコード経路は変えておらず（description・README・コメント・テストの追加のみ）、既存テストは無変更で通る。依存・tolerance・baseline・`unsafe`・`docs/spec` は不変
+- **実機**: すべて未実測のまま（`<rocm-node>` での facade 経由の parity は #3867）。本 PR は `Refs #3854` で、`Closes` は使わない（バックエンド行の「保留 0 件」は区分が確定するまで満たせないため）
