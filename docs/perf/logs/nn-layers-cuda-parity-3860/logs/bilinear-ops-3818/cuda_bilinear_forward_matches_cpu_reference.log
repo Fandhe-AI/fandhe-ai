@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/bilinear_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/bilinear_ops_backend_parity-758d304e5240cabb)
+
+running 1 test
+test cuda_bilinear_forward_matches_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.96s
+
+rc=0

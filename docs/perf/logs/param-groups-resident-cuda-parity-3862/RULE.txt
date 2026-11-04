@@ -1,0 +1,77 @@
+# RULE.txt — param groups と DeviceParamStore の GPU 常駐更新の CUDA 実機 parity（事前登録。イシュー #3862・親 #3711 Phase 10）
+#
+# 雛形 docs/perf/logs/train-gpu-parity-template/RULE.txt（#3778）を写して埋めた。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<cuda-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-04T13:00Z（実機での実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+issue: 3862
+machine: <cuda-node>（DGX Spark GB10・aarch64・sm_121）。parity 測定で時間計測ではないため専有条件は課さない。
+  常駐 compute プロセスの件数を実行前後に env_info.txt へ記録する（#3856〜#3860 と同じ既定の CUDA 実機テスト用ノード）
+target_commit: b82b1e5d129bc25cabf779e64401bf3809526cdb
+  条件: 実行時の HEAD で `git diff --quiet b82b1e5d129bc25cabf779e64401bf3809526cdb <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_cuda_parity.sh が検査する）。
+  転送後にノード側で .rev-stamp とスクリプトの SHA-256 を読み、送信側と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-3862、出力先は <home>/work/out-3862。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai。
+  転送は docs/real-hardware-verification-env.md §3 の rsync だけ（ノードに git は無い）
+hw_lock: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3862 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。各テストの前後で owner が自分のままか確かめ、
+  失っていればその回と以降を undetermined にする（ロックを持たずに測った値は採らない）。ほかのサービスのプロセスは止めない
+script: 同ディレクトリの run_cuda_parity.sh（#3860 版の複製。package をターゲット引数に含める変更だけ。差分はヘッダに記載。
+  コミット済みのものをそのまま送る。env_info.txt の script_sha256 で照合）。ノード上で setsid nohup により切り離して起動する
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定の定数は fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない
+switches_left_default: TF32 opt-in は OFF のまま、GPU linalg ゲートは OFF のまま（触らない。環境変数で切替を変えない）
+
+# ---- 対象テストの選び方 ----
+# 雛形の optim 族（crates/facade/tests/train_gpu_parity.rs の train_parity_optim_cuda_matches_cpu）は、対象コミットの登録表 CASES に
+# family "optim" の行が 0 件で、harness::run_family が「undetermined: 族 optim の登録が 0 件」で panic する（構造的に pass にならない）。
+# そのため、docs/autodiff-param-groups-decision.md §19.4 が Phase 10 で測ると定めた CUDA 側の #[ignore] 3 本を測定対象にする
+# （#3837 の backend-cuda 2 本と #3838 の facade 1 本）。雛形の optim 族は 4 番として 1 回だけ実行し、undetermined を記録する。
+# 完了判定には数えない。テストの実在は対象コミットで --ignored --list により確かめた（cfg で除かれない）。
+# #3837 の cuda_reports_grouped_capability は #[ignore] ではない（--ignored では選ばれない）ため対象外。
+
+# ---- 腕 ----
+arms:
+  1〜2（#3837）: A=CUDA の grouped optimizer カーネル（CudaBackendOps）  B=CPU の grouped 参照
+  3（#3838）: A=Device::Cuda(0) の DeviceParamStore 常駐更新（param groups あり。SGD・Adam・AdamW を 100 step）  B=CPU ホスト参照
+  4（#3778 雛形）: A=tape_for(Device::Cuda(0))  B=ホスト参照（登録 0 件のため比較に至らない）
+
+# ---- テストと判定（判定契約は各テストのコードが正。ここでは変えない）----
+build_then_run:
+  1) 先に次を --no-run でビルドする（判定外。計測中は他の cargo・ビルドを走らせない。開始前に pgrep で他の cargo／rustc が無いことを確かめる）:
+     cargo test -p fandhe-ai-backend-cuda --test grouped_optimizer_step_real_device --no-run
+     cargo test -p fandhe-ai --test device_param_store_param_groups_backend_parity --no-run
+     cargo test -p fandhe-ai --test train_gpu_parity --no-run
+  2) 各テストの前に同じ引数で -- --ignored --exact --list <テスト名> を実行し、": test" で終わる行がちょうど 1 行であることを確かめる。
+     0 行または 2 行以上なら実行せず undetermined
+  3) 1 本ずつ別プロセスで実行する（--release は付けない。--nocapture・--test-threads=1 は出力と並列度だけに効き判定には影響しない）:
+     timeout 1800 cargo test -p <package> --test <target> -- --ignored --exact --nocapture --test-threads=1 <テスト名>
+tests:
+  1. #3837 -p fandhe-ai-backend-cuda --test grouped_optimizer_step_real_device        sgd_grouped_matches_cpu_grouped                          judge=Req2
+  2. #3837 -p fandhe-ai-backend-cuda --test grouped_optimizer_step_real_device        adam_grouped_matches_cpu_grouped_and_rejects_bad_totals  judge=Req2（不正な合計の拒否を含む）
+  3. #3838 -p fandhe-ai --test device_param_store_param_groups_backend_parity         cuda_param_groups_match_cpu_for_sgd_adam_adamw           judge=Req2
+  4. #3778 -p fandhe-ai --test train_gpu_parity                                       train_parity_optim_cuda_matches_cpu                      （登録 0 件。undetermined を記録するだけ）
+  説明: 数値契約は docs/autodiff-param-groups-decision.md §19.5 の (3)「CUDA + groups → CPU 参照と REQ-2 統一複合判定
+    （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）」。GPU の bit 一致・run-to-run の bit 同一は観測値であり合否の基準にしない
+    （テストが観測として出力すれば記録する）
+pass: exit 0 かつ出力に "running 1 test" と "test result: ok. 1 passed; 0 failed" があること
+fail: 1 件以上の失敗（パニックを含む）。CUDA と CPU は自前バックエンド同士なので判定不能にしない
+undetermined: ノードに届かない、ビルドできない、timeout（exit 124）、--list の不一致、実機ロックの取得不能・喪失、自己検査の失敗、
+  train_gpu_parity の undetermined（登録 0 件の族・run 関数の Err・全ゼロの量）。pass として扱わない
+completion: 1.〜3. がすべて pass のときだけ #3862 を Closes する。1 本でも fail・undetermined なら Refs。
+  4. の undetermined（登録 0 件）は完了判定に数えないが、雛形の optim 族が空であることを README と PR に書き、所有者へ報告する。
+  対象の実装 issue #3837・#3838 は既に CLOSED
+
+# ---- run 数 ----
+runs: 各コマンド 1 回。時間の計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。
+  再実行するなら RULE.txt を登録し直す
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を保存する。各ログ末尾に rc=<終了コード>。summary.tsv に exit code・running 件数・test result 行・判定を書く
+masking: ホスト名・ユーザー名・ホームのパスを <cuda-node>／<user>／<home> へ置換する（前後が識別子文字でない場合のみ）。
+  漏れたら記録を捨てて取り直す（fail-closed）。回収ログは手で編集しない
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail が出ても tolerance・判定方式・入力・テストコードを変えない。panic メッセージの値をそのまま引用して事実を記録し、
+  README と PR に「要対応」と書く。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
