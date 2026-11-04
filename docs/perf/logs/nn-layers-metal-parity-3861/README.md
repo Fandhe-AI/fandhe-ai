@@ -17,7 +17,7 @@ ChannelShuffle・3 次元適応プーリング・LPPool・FractionalMaxPool。�
 **要対応（所有者へ報告。GB10 の #3860 と同じ）: 雛形 `crates/facade/tests/train_gpu_parity.rs` の nn 族は登録 0 件。**
 `train_parity_nn_metal_matches_cpu` は `undetermined: 族 nn の登録が 0 件`（`crates/facade/tests/common/train_gpu_parity.rs:193`）で panic し、
 exit 101・判定 undetermined だった。構造上 pass にならないため、RULE.txt で事前に宣言したとおり各実装 issue の `#[ignore]` Metal テストを
-測定対象にし、雛形の nn 族は完了判定に数えていない。
+測定対象にし、雛形の nn 族は完了判定に数えていない。所有者の判断（2026-11-04）により、雛形への nn 族の追加は #4026 で行う。雛形（学習ステップ）は #4026 の登録待ちで未実測であり、#3861 は #4026 のマージ後に雛形テストを再計測してから閉じる（この記録の PR は `Refs`。RULE.txt はこの判断より前に固定したため変えていない）。
 
 - 実行コミット（`rev-stamp.txt`）: `6c29359cc6d798a7f1b73ee396ff3e4e30c72f2c`・`dirty=0`。事前登録と実行スクリプトを含むコミットそのもので、
   `crates/`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` は対象コミット `b82b1e5d1` と同一（送信前に `git diff --quiet` で確認）。
@@ -74,7 +74,7 @@ exit 101・判定 undetermined だった。構造上 pass にならないため�
 | 20 | #3778（雛形） | `train_gpu_parity`／`train_parity_nn_metal_matches_cpu` | - | undetermined（登録 0 件。完了判定外） |
 
 判定列は RULE.txt の参考の写し（判定契約は各テストのコードが正）。各行の根拠は `summary.tsv`（exit code・`running 1 test` の件数・
-`test result` 行）と `logs/<群>/<テスト名>.log`（末尾に `rc=`）。対象の実装 issue #3814・#3817〜#3827 は既に CLOSED。CUDA（GB10）は #3860 が測る。
+`test result` 行）と `logs/<群>/<テスト名>.log`（末尾に `rc=`）。対象の実装 issue #3814・#3817〜#3827 は既に CLOSED。CUDA（GB10）は #3860（PR #4022・マージ済み）で 19 本中 19 本 pass。
 
 ## 回収物
 
