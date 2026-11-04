@@ -6,9 +6,9 @@
 //! （`docs/backend-gpu-linalg-decision.md` §5。tolerance・入力集合は変えない）。
 //! 事前登録規則・測定コマンドは `docs/perf/logs/cuda-linalg-parity-3138/`。
 //!
-//! ゲート（`fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled`）は facade 非公開
-//! （同 §7。`api_surface.rs::facade_does_not_expose_gpu_linalg_optin` は `crates/facade/src`
-//! のみ走査し `tests/` は対象外）のため、本ファイルが backend-cuda を直接参照して操作する。
+//! ゲートは facade の公開関数 `fandhe_ai::set_cuda_gpu_linalg_enabled`／
+//! `cuda_gpu_linalg_enabled`（イシュー #3405。同 §11。正ガードは
+//! `api_surface.rs::gpu_linalg_optin_is_reachable_via_facade`）経由で操作する。
 //! ゲートはプロセス全体のグローバル状態なので、ゲート OFF のフォールバック経路を確かめ続ける
 //! 既存の `linalg_ops_backend_parity.rs` とはファイルを分け、本ファイル内では `GATE_LOCK` で直列化し
 //! drop で OFF へ戻す。
@@ -20,7 +20,6 @@ use std::sync::Mutex;
 
 use fandhe_ai::Device;
 use fandhe_ai_backend_cuda::CudaBackendOps;
-use fandhe_ai_backend_cuda::linalg::{gpu_linalg_enabled, set_gpu_linalg_enabled};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
@@ -34,15 +33,18 @@ struct GateOn {
 impl GateOn {
     fn new() -> Self {
         let g = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_gpu_linalg_enabled(true);
-        assert!(gpu_linalg_enabled(), "ゲートが ON にならない");
+        fandhe_ai::set_cuda_gpu_linalg_enabled(true);
+        assert!(
+            fandhe_ai::cuda_gpu_linalg_enabled(),
+            "ゲートが ON にならない"
+        );
         GateOn { _guard: g }
     }
 }
 
 impl Drop for GateOn {
     fn drop(&mut self) {
-        set_gpu_linalg_enabled(false);
+        fandhe_ai::set_cuda_gpu_linalg_enabled(false);
     }
 }
 

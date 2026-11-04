@@ -3777,6 +3777,63 @@ pub fn metal_elementwise_fusion_enabled() -> bool {
     fandhe_ai_backend_metal::fused_elementwise::gpu_elementwise_fusion_enabled()
 }
 
+/// CUDA の GPU 線形代数 opt-in を設定する（イシュー #3405。機構は #2674・公開形の
+/// 正は `docs/backend-gpu-linalg-decision.md` §11）。
+///
+/// `fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled` への 1 行委譲
+/// （`pub use` による再公開ではない）。
+///
+/// - **既定は無効**。プロセスワイドの切替で `Device` 単位ではない。環境変数は設けない
+/// - **到達する演算**: `Var::inv`／`solve`／`det`／`cholesky`／`qr`／`eigh` の forward
+/// - **無効のとき**: デバイスに触れず `BackendError::Unsupported` を返し、`Var` が
+///   ホスト f64 へフォールバックする（導入前と bit 同一）
+/// - **有効のとき**: f64 内部計算で精度クラスは変わらない。範囲外の Op は従来どおり
+///   `Unsupported` でホスト f64 へ回る。VJP は常にホスト f64 で、効くのは forward だけ
+/// - **非対応環境**: CUDA 非搭載でも呼べる（フラグを立てるだけで driver に触れず、
+///   panic しない）
+///
+/// ```
+/// fandhe_ai::set_cuda_gpu_linalg_enabled(false);
+/// assert!(!fandhe_ai::cuda_gpu_linalg_enabled());
+/// ```
+pub fn set_cuda_gpu_linalg_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled(enabled);
+}
+
+/// CUDA の GPU 線形代数 opt-in の現在状態を返す
+/// （[`set_cuda_gpu_linalg_enabled`] 参照。イシュー #3405）。
+pub fn cuda_gpu_linalg_enabled() -> bool {
+    fandhe_ai_backend_cuda::linalg::gpu_linalg_enabled()
+}
+
+/// Metal 版の GPU 線形代数 opt-in（macOS 限定。契約・既定・制約は
+/// [`set_cuda_gpu_linalg_enabled`] と同じ。非 macOS ビルドには存在しない。
+/// イシュー #3405）。
+///
+/// 到達する演算は `inv`／`solve`／`det`／`cholesky`／`qr` で、`eigh`・SVD 等は
+/// 従来どおり `Unsupported` でホスト f64 へ回る。**Metal はネイティブ f32 のため
+/// 精度クラスが変わる**（判定は統一複合判定・厳密ゼロ fail・κ ≤ 1e3。
+/// `docs/backend-gpu-linalg-decision.md` §5）。
+///
+/// ```
+/// # #[cfg(target_os = "macos")]
+/// # {
+/// fandhe_ai::set_metal_gpu_linalg_enabled(false);
+/// assert!(!fandhe_ai::metal_gpu_linalg_enabled());
+/// # }
+/// ```
+#[cfg(target_os = "macos")]
+pub fn set_metal_gpu_linalg_enabled(enabled: bool) {
+    fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled(enabled);
+}
+
+/// Metal の GPU 線形代数 opt-in の現在状態を返す
+/// （[`set_metal_gpu_linalg_enabled`] 参照。macOS 限定。イシュー #3405）。
+#[cfg(target_os = "macos")]
+pub fn metal_gpu_linalg_enabled() -> bool {
+    fandhe_ai_backend_metal::linalg::gpu_linalg_enabled()
+}
+
 /// CUDA GEMM 精度モード（既定 `Fp32Strict`・単発 `Tf32`・3×TF32
 /// `Tf32x3`。イシュー #1355。親ツリー #1354・承認元 #1338）の再公開。
 /// `set_cuda_gemm_precision`／`cuda_gemm_precision` の戻り値・引数型

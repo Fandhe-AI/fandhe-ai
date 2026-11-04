@@ -452,7 +452,7 @@ mod kernels_nll;
 mod kernels_norm_backward;
 mod kernels_rmsnorm;
 mod kernels_rnn_cell;
-// イシュー #2674: LU 系線形代数の内部 opt-in ゲート（既定 OFF・facade 非公開）。
+// イシュー #2674: LU 系線形代数の内部 opt-in ゲート（既定 OFF・facade は 1 行委譲で公開〈#3405〉）。
 // 設計判断は docs/backend-gpu-linalg-decision.md。
 pub mod linalg;
 // イシュー #1700: `ScalarUnaryOp`／`ScalarBinaryOp`（`tensor-core::

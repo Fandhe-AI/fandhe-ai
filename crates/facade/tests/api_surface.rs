@@ -44375,70 +44375,222 @@ fn models_usage_doctest_is_present_and_compiled() {
     assert!(v.is_empty(), "{v:?}");
 }
 
-/// CUDA の LU 系線形代数 opt-in ゲート（イシュー #2674。`fandhe_ai_backend_cuda::linalg::
-/// set_gpu_linalg_enabled`／`gpu_linalg_enabled`）と Metal の同種ゲート（イシュー #2676。
-/// `fandhe_ai_backend_metal::linalg::*`）を facade が公開しないことを固定する保留ガード
-/// （公開形の推奨は `docs/backend-gpu-linalg-decision.md` §7。公開は承認後の別 issue）。
-/// コメント行を除く facade `src/` の全行で、ゲート関数名・`backend_cuda::linalg` 経路・
-/// `fandhe_ai_backend_cuda` の glob 再エクスポートを検出する。
-fn scan_gpu_linalg_optin_exposure(content: &str) -> Vec<String> {
-    let mut offenses = Vec::new();
-    for line in content.lines() {
-        let t = line.trim_start();
+/// GPU 線形代数 opt-in（イシュー #3405。公開形の正は `docs/backend-gpu-linalg-decision.md`
+/// §11）の承認形の委譲本体 4 行（完全一致）。facade `src/**` でゲート関数名・
+/// `backend_{cuda,metal}::linalg` 経路を含む非コメント行はこれ以外を許さない（allowlist）。
+const GPU_LINALG_APPROVED_LINES: [&str; 4] = [
+    "fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled(enabled);",
+    "fandhe_ai_backend_cuda::linalg::gpu_linalg_enabled()",
+    "fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled(enabled);",
+    "fandhe_ai_backend_metal::linalg::gpu_linalg_enabled()",
+];
+
+/// 承認形の委譲本体（トークンを空白連結した形）。`determinism_fn_body` で抽出して照合する。
+const GPU_LINALG_EXPECTED_BODIES: [(&str, &str); 4] = [
+    (
+        "set_cuda_gpu_linalg_enabled",
+        "fandhe_ai_backend_cuda : : linalg : : set_gpu_linalg_enabled ( enabled ) ;",
+    ),
+    (
+        "cuda_gpu_linalg_enabled",
+        "fandhe_ai_backend_cuda : : linalg : : gpu_linalg_enabled ( )",
+    ),
+    (
+        "set_metal_gpu_linalg_enabled",
+        "fandhe_ai_backend_metal : : linalg : : set_gpu_linalg_enabled ( enabled ) ;",
+    ),
+    (
+        "metal_gpu_linalg_enabled",
+        "fandhe_ai_backend_metal : : linalg : : gpu_linalg_enabled ( )",
+    ),
+];
+
+/// facade `src` の 1 ファイルに対する公開面違反の一覧（空なら適合）。方式は allowlist:
+/// ゲート関数名・backend linalg 経路を含む行は承認形 4 行と自 facade の公開関数宣言行のみ
+/// 許し、`pub use` による再公開・glob 再エクスポート・`pub mod linalg` は違反とする。
+fn gpu_linalg_surface_violations(src: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    for line in src.lines() {
+        let t = line.trim();
         if t.starts_with("//") {
             continue;
         }
-        for token in [
+        let touches_gate = [
             "set_gpu_linalg_enabled",
             "gpu_linalg_enabled",
             "backend_cuda::linalg",
             "backend_metal::linalg",
-        ] {
-            if t.contains(token) {
-                offenses.push(format!("`{token}` を含む行: {t}"));
-            }
+        ]
+        .iter()
+        .any(|tok| t.contains(tok));
+        // 自 facade の公開関数宣言行は名前の部分一致で拾うため除外する。シグネチャと本体は
+        // 別途 `gpu_linalg_optin_is_reachable_via_facade` が固定する。
+        let is_own_decl = t.starts_with("pub fn ") && !t.contains("::");
+        if touches_gate && !is_own_decl && !GPU_LINALG_APPROVED_LINES.contains(&t) {
+            v.push(format!("承認形以外のゲート参照: {t}"));
         }
-        if t.starts_with("pub use fandhe_ai_backend_cuda::*") {
-            offenses.push(format!("backend-cuda の glob 再エクスポート: {t}"));
+        if t.starts_with("pub use")
+            && (t.contains("::linalg::") || t.contains("linalg::{") || t.contains("gpu_linalg"))
+        {
+            v.push(format!("linalg ゲートの再エクスポート: {t}"));
         }
-        if t.starts_with("pub use fandhe_ai_backend_metal::*") {
-            offenses.push(format!("backend-metal の glob 再エクスポート: {t}"));
+        if t.starts_with("pub use fandhe_ai_backend_cuda::*")
+            || t.starts_with("pub use fandhe_ai_backend_metal::*")
+        {
+            v.push(format!("backend の glob 再エクスポート: {t}"));
+        }
+        if t.starts_with("pub mod linalg") {
+            v.push(format!("pub mod linalg: {t}"));
         }
     }
-    offenses
+    v
 }
 
+/// facade の GPU 線形代数 opt-in 4 関数が root から到達可能で、承認形のシグネチャが
+/// 1 回ずつ現れ（Metal は直前行が macOS cfg）、委譲本体が承認形で、公開面違反が無いこと。
 #[test]
-fn facade_does_not_expose_gpu_linalg_optin() {
+fn gpu_linalg_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::cuda_gpu_linalg_enabled();
+    fandhe_ai::set_cuda_gpu_linalg_enabled(true);
+    assert!(fandhe_ai::cuda_gpu_linalg_enabled());
+    fandhe_ai::set_cuda_gpu_linalg_enabled(false);
+    assert!(!fandhe_ai::cuda_gpu_linalg_enabled());
+    fandhe_ai::set_cuda_gpu_linalg_enabled(original);
+
+    let src = include_str!("../src/lib.rs");
+    let count = |needle: &str| src.matches(needle).count();
+    assert_eq!(
+        count("pub fn set_cuda_gpu_linalg_enabled(enabled: bool) {"),
+        1
+    );
+    assert_eq!(count("pub fn cuda_gpu_linalg_enabled() -> bool {"), 1);
+    let lines: Vec<&str> = src.lines().collect();
+    for sig in [
+        "pub fn set_metal_gpu_linalg_enabled(enabled: bool) {",
+        "pub fn metal_gpu_linalg_enabled() -> bool {",
+    ] {
+        assert_eq!(count(sig), 1, "{sig}");
+        let idx = lines.iter().position(|l| l.trim() == sig).expect(sig);
+        assert_eq!(
+            lines[idx - 1].trim(),
+            "#[cfg(target_os = \"macos\")]",
+            "{sig}"
+        );
+    }
+
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected) in GPU_LINALG_EXPECTED_BODIES {
+        assert_eq!(
+            determinism_fn_body(&tokens, name).as_deref(),
+            Some(expected),
+            "`{name}` の本体が承認形（backend linalg への 1 行委譲）と一致しない"
+        );
+    }
+
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_gpu_linalg_optin_exposure(content) {
+        for offense in gpu_linalg_surface_violations(content) {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
+    assert!(offending.is_empty(), "{offending:?}");
+}
+
+/// 宣言インベントリ（fail-closed）: 4 公開名は `facade/src/lib.rs` にのみ各 1 件、
+/// backend のゲート関数は各 backend の `linalg.rs` にのみ各 1 件で、過不足を許さない。
+#[test]
+fn workspace_declares_gpu_linalg_optin_fn_names_only_in_approved_locations() {
+    let crates = workspace_crates_dir();
+    let names = [
+        "set_cuda_gpu_linalg_enabled",
+        "cuda_gpu_linalg_enabled",
+        "set_metal_gpu_linalg_enabled",
+        "metal_gpu_linalg_enabled",
+        "set_gpu_linalg_enabled",
+        "gpu_linalg_enabled",
+    ];
+    let mut found: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(&crates).expect("crates dir") {
+        let dir = entry.expect("entry").path().join("src");
+        if !dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for name in names {
+                let n = count_fn_declarations_by_name(&tokens, name);
+                if n > 0 {
+                    let rel = path
+                        .strip_prefix(&crates)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .into_owned();
+                    *found.entry((rel, name.to_string())).or_insert(0) += n;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for name in &names[..4] {
+        expected.insert(("facade/src/lib.rs".to_string(), name.to_string()), 1);
+    }
+    for be in ["backend-cuda", "backend-metal", "backend-rocm"] {
+        for name in &names[4..] {
+            expected.insert((format!("{be}/src/linalg.rs"), name.to_string()), 1);
+        }
+    }
+    assert_eq!(found, expected);
+}
+
+/// 正のプローブ: 承認形・空・コメントは検出されず、再公開・glob・`pub mod`・承認形以外の
+/// 参照は検出される。委譲本体の比較がすり替えを検出することも合成トークン列で示す。
+#[test]
+fn gpu_linalg_surface_guard_detects_violations() {
+    assert!(gpu_linalg_surface_violations("").is_empty());
     assert!(
-        offending.is_empty(),
-        "facade が CUDA の GPU 線形代数 opt-in ゲート（#2674。公開は承認後の別 issue）を公開している: \
-         {offending:?}"
+        gpu_linalg_surface_violations("// pub use fandhe_ai_backend_cuda::linalg::x;").is_empty()
+    );
+    for line in GPU_LINALG_APPROVED_LINES {
+        assert!(gpu_linalg_surface_violations(line).is_empty(), "{line}");
+    }
+    for bad in [
+        "pub use fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled;",
+        "pub use fandhe_ai_backend_metal::linalg::gpu_linalg_enabled;",
+        "pub use fandhe_ai_backend_cuda::*;",
+        "pub use fandhe_ai_backend_metal::*;",
+        "pub mod linalg;",
+        "fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled(!enabled);",
+        "fandhe_ai_backend_cuda::linalg::other_gate(enabled);",
+    ] {
+        assert!(!gpu_linalg_surface_violations(bad).is_empty(), "{bad}");
+    }
+    let swapped = "pub fn set_cuda_gpu_linalg_enabled ( enabled : bool ) { GPU_LINALG_ENABLED . store ( enabled ) ; }"
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_ne!(
+        determinism_fn_body(&swapped, "set_cuda_gpu_linalg_enabled").as_deref(),
+        Some(GPU_LINALG_EXPECTED_BODIES[0].1)
     );
 }
 
+/// Metal 版（macOS 限定）の往復固定（イシュー #3405）。
+#[cfg(target_os = "macos")]
 #[test]
-fn facade_does_not_expose_gpu_linalg_optin_detects_each_category() {
-    let offense = |src: &str| !scan_gpu_linalg_optin_exposure(src).is_empty();
-    assert!(offense(
-        "pub use fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled;"
-    ));
-    assert!(offense("pub fn gpu_linalg_enabled() -> bool { false }"));
-    assert!(offense("pub use fandhe_ai_backend_cuda::*;"));
-    assert!(offense(
-        "pub use fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled;"
-    ));
-    assert!(offense("pub use fandhe_ai_backend_metal::*;"));
-    assert!(!offense("// pub use fandhe_ai_backend_cuda::linalg::x;"));
-    assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
-    assert!(!offense("fn linalg_inv_helper() {}"));
+fn metal_gpu_linalg_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::metal_gpu_linalg_enabled();
+    fandhe_ai::set_metal_gpu_linalg_enabled(true);
+    assert!(fandhe_ai::metal_gpu_linalg_enabled());
+    fandhe_ai::set_metal_gpu_linalg_enabled(original);
 }
 // =====================================================================
 // イシュー #3048（親 #3018・ルート #2499）: `compat::Sequential::parametrize_weight_norm`／
