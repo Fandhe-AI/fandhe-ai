@@ -289,3 +289,21 @@ CUDA／Metal 実機は本実装エージェント実行環境から到達不能�
 - §8.4 からの逸脱: 実機 parity の置き場は、§8.4 の仮置き `interop_onnx_autograd_gpu_parity.rs` ではなく、#3778 の追記と追跡表 # 25 が決めた `crates/facade/tests/train_gpu_parity.rs` の `onnx` 族にした。行は `onnx_from_sequential_forward_backward_s1`・`_s2`（route は H、judge は REQ-2）、CI の自己検査は `onnx_family_passes_cpu_against_cpu`。実機の入口 `train_parity_onnx_{cuda,metal}_matches_cpu` は既存のまま使い、新しい `#[ignore]` テストは足していない。
 - 実機 parity は **未実測**（#3864 は GB10、#3865 は Mac mini）。この PR は実機の値を書かない。
 - 互換: 追加のみ。依存・`Cargo.toml`・`unsafe`・tolerance・baseline の変更はない。
+
+### 8.13 受入テスト記録（イシュー #3843・基準 sha `200ee44f7`）
+
+§8.4 の利用者の書き方の受入テストを `crates/facade/tests/interop_onnx_autograd.rs` に足した。公開面・`src/`・依存・`Cargo.toml`・fixture・tolerance・baseline の変更はない。
+
+| §8.4 の行 | テスト |
+|---|---|
+| `onnx_autograd_sgd_loop_decreases_loss` | 同名。`model.onnx`（fine-tuning の想定）と `from_sequential` の 2 モデルで、毎ステップ新しい `tape()` へ bind し、重みは initializer と同名の feed（`tape.var(&w)`）で渡して SGD を回す。最終損失が初回より小さいこと、序盤 3 ステップが単調減少であること、出力が 1 ステップ目と 2 ステップ目で変わること（feed の上書きが効いている）、bind 時の葉（`g.param`）の勾配が `None` で feed 側に付くこと、同条件の再実行で損失列が bit 一致することを確かめる。終盤は固定データで頭打ちになりうるため、全区間の単調性や係数の閾値は置かない |
+| `unsupported_op_in_autograd_is_rejected_fail_closed` | 同名。実際の PyTorch export 9 件（CNN 6 op 側の `_ts` 6 件、16 op 側の `flatten_default_dynamo`〈`Reshape`〉・`gap2d_dynamo`〈`ReduceMean`〉・`slice_repro`〈非勾配の `Shape` は通過し `Gather` で止まる〉）を `from_path` で読む。`bind_autograd` は `Ok`、`forward`／`run` は `UnsupportedInAutograd`（期待 op・非空の node 名・Display に op 名）で、誤診断の `UnsupportedOp` ではない。同じ bytes の推論 `run` は成功する。mnist-12 は推論でも `auto_pad` で止まるため使わない |
+| `cast_severs_gradient_only_for_non_f32_target` | 同名。`proto` で作る合成モデルで、`Cast` を INT64・BOOL・FLOAT16 へ通すと `x` の勾配が `None`（`w` の勾配は `Some`）、F32 から F32 は透過で `x` の勾配が `w` と bit 一致する。出力が `Cast(to=INT64)` のままだと `run` は `Const(I64)`、`forward` は `FeedTypeMismatch`。autograd の forward は同じモデルの `OnnxModel::run` と bit 一致する |
+| `trainable_default_and_filter_semantics` | 同名。既定は全 F32 initializer 6 件（名前順）。`with_trainable` で絞ると `params()` がその分だけになり、凍結層を通しても入力へ勾配が届く。typo と非 F32 initializer 名（`slice_repro` の `const_axes`）は bind 時に `UnknownTrainable` |
+| `onnx_autograd_error_paths_*` | #3842 の `onnx_autograd_error_paths_map_to_typed_variants` が担うため重ねて足さない。代わりに、#3842 で CI の失敗経路を作れていなかった `Autodiff` variant を `onnx_autograd_cross_tape_feed_maps_to_autodiff_variant`（別 tape の `Var` を渡す。`source()` が `Some`）で埋めた |
+
+- import の例外: 実行経路は `fandhe_ai` だけで、`Cast` ノードを持つ bytes を作る `fandhe_ai_onnx_interop::onnx::proto` だけを import する（`Cast` を持つ fixture はコミットされていないため）。`onnx::autograd`・`interp`・`fandhe_ai_autodiff`・`fandhe_ai_backend_cpu` は参照しない。
+- 正ガード: `api_surface.rs` の `onnx_autograd_acceptance_coverage_map_matches`（シナリオ→テストの対応表、`#[test]` の実在、`#[ignore]` 混入、内部クレート参照のすり替えを検出）と、検出器の自己テスト `onnx_autograd_acceptance_coverage_map_detects_each_category`。公開面の allowlist（20 件・禁止語 17 語）は変えていない。
+- 新しい `#[ignore]` テストは足さない。実機 parity は `train_gpu_parity.rs` の `onnx` 族（#3864 は GB10、#3865 は Mac mini）が担当し、**未実測**のまま。この記録は実機の値を書かない。
+- 数値は bit 一致か型・`Option` の判定だけで、tolerance は持ち込まない（§8.4）。
+- スコープ外は §8.11 のとおり（view・shape 系と CNN 系 op の勾配、書き戻しと export、GPU 上のネイティブ実行、性能計測、制御フロー op、optimizer state）。
