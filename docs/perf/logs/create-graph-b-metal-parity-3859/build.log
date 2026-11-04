@@ -1,0 +1,11 @@
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/autodiff)
+   Compiling fandhe-ai-backend-metal v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/backend-metal)
+   Compiling fandhe-ai-backend-rocm v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/backend-rocm)
+   Compiling bench-harness v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/onnx-interop)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3859/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.03s
+  Executable tests/create_graph_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/create_graph_gpu_parity-881e526924c5e1ed)
