@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/compat_sequential_layers_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_layers_backend_parity-bbe74cdfa93a52cc)
+
+running 1 test
+test metal_batch_norm3d_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.21s
+
+rc=0
