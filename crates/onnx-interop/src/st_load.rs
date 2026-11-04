@@ -310,7 +310,13 @@ pub enum SafetensorsTensor {
 
 /// f32 の確保量が `isize::MAX` バイトを超えないことを確かめる
 /// （`CastElement` 未実装の f16／bf16 向けに `cast` 系と同じ fail-closed 検査を再現）。
-fn check_f32_alloc(numel: usize) -> Result<(), ShapeError> {
+fn check_f32_alloc(shape: &[usize]) -> Result<(), ShapeError> {
+    // host_slice() は非 contiguous view を実体化する（Vec::with_capacity）ため、
+    // 呼ぶ前に shape から checked な要素数積で検査する（panic 回避）。
+    let numel = shape
+        .iter()
+        .try_fold(1usize, |a, &d| a.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
     match numel.checked_mul(std::mem::size_of::<f32>()) {
         Some(b) if b <= isize::MAX as usize => Ok(()),
         _ => Err(ShapeError::ElementCountOverflow),
@@ -354,14 +360,14 @@ impl SafetensorsTensor {
             SafetensorsTensor::I64(t) => cast_to_f32(t),
             SafetensorsTensor::Bool(t) => cast_to_f32(t),
             SafetensorsTensor::F16(t) => {
+                check_f32_alloc(t.shape())?;
                 let src = t.host_slice();
-                check_f32_alloc(src.len())?;
                 let data: Vec<f32> = src.iter().map(|v| v.to_f32()).collect();
                 Tensor::new(data, t.shape())
             }
             SafetensorsTensor::BF16(t) => {
+                check_f32_alloc(t.shape())?;
                 let src = t.host_slice();
-                check_f32_alloc(src.len())?;
                 let data: Vec<f32> = src.iter().map(|v| v.to_f32()).collect();
                 Tensor::new(data, t.shape())
             }
@@ -378,14 +384,14 @@ impl SafetensorsTensor {
             SafetensorsDtype::I64 => cast_from_f32::<i64>(t).map(SafetensorsTensor::I64),
             SafetensorsDtype::Bool => cast_from_f32::<bool>(t).map(SafetensorsTensor::Bool),
             SafetensorsDtype::F16 => {
+                check_f32_alloc(t.shape())?;
                 let src = t.host_slice();
-                check_f32_alloc(src.len())?;
                 let data: Vec<f16> = src.iter().map(|v| f16::from_f32(*v)).collect();
                 Tensor::new(data, t.shape()).map(SafetensorsTensor::F16)
             }
             SafetensorsDtype::BF16 => {
+                check_f32_alloc(t.shape())?;
                 let src = t.host_slice();
-                check_f32_alloc(src.len())?;
                 let data: Vec<bf16> = src.iter().map(|v| bf16::from_f32(*v)).collect();
                 Tensor::new(data, t.shape()).map(SafetensorsTensor::BF16)
             }
@@ -607,5 +613,37 @@ mod tests {
         let mut map: HashMap<String, Tensor<f32>> = HashMap::new();
         map.insert("fc1.weight".to_string(), Tensor::zeros(&[1]).unwrap());
         require_keys(&map, &["fc1.weight"]).unwrap();
+    }
+
+    /// 巨大 broadcast view でも host_slice() 実体化前に ElementCountOverflow で拒否する（panic しない）。
+    #[test]
+    fn huge_broadcast_view_is_rejected_before_materialization() {
+        let n = (isize::MAX as usize) / 4 + 10;
+        let f = Tensor::<f32>::zeros(&[1])
+            .unwrap()
+            .broadcast_to(&[n])
+            .unwrap();
+        for dt in [SafetensorsDtype::F16, SafetensorsDtype::BF16] {
+            assert!(matches!(
+                SafetensorsTensor::from_f32(&f, dt),
+                Err(ShapeError::ElementCountOverflow)
+            ));
+        }
+        let h = Tensor::<f16>::zeros(&[1])
+            .unwrap()
+            .broadcast_to(&[n])
+            .unwrap();
+        assert!(matches!(
+            SafetensorsTensor::F16(h).to_f32(),
+            Err(ShapeError::ElementCountOverflow)
+        ));
+        let b = Tensor::<bf16>::zeros(&[1])
+            .unwrap()
+            .broadcast_to(&[n])
+            .unwrap();
+        assert!(matches!(
+            SafetensorsTensor::BF16(b).to_f32(),
+            Err(ShapeError::ElementCountOverflow)
+        ));
     }
 }
