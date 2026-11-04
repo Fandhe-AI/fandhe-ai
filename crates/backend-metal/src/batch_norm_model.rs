@@ -561,6 +561,63 @@ mod tests {
         );
     }
 
+    /// #4031: 2e20 級入力でホスト soft-f64 逐語モデルが中間 overflow せず
+    /// CPU 参照と一致することを確かめる。シェーダはこのモデルの逐語複製で、
+    /// Linux CI で実行される唯一の裏付け（Metal 実機の実測の代わりには
+    /// ならない）。`var` は CPU 参照が `+inf`（f64 では有限・f32 narrow で
+    /// overflow）のチャネルをクラス一致で、有限チャネルを REQ-2 で比べる
+    /// （`docs/batch-norm-ops-design.md` §9.8）。
+    #[test]
+    fn train_host_model_2e20_scale_matches_cpu_reference_with_inf_var_class() {
+        use fandhe_ai_backend_cpu::parity::assert_parity;
+
+        let (n, c, spatial) = (3usize, 3usize, 13usize);
+        let m = n * spatial;
+        let base: Vec<f32> = (0..(n * c * spatial))
+            .map(|i| (((i * 37 + 11) % 101) as f32 - 50.0) / 50.0)
+            .collect();
+        let scales = [2e20f32, 1e18f32, 1.0f32];
+        let mut x = base.clone();
+        for i in 0..m {
+            let (batch, sp) = (i / spatial, i % spatial);
+            for (ch, &s) in scales.iter().enumerate() {
+                let idx = batch * (c * spatial) + ch * spatial + sp;
+                x[idx] = base[idx] * s;
+            }
+        }
+        let ch0: Vec<f64> = (0..m)
+            .map(|i| x[(i / spatial) * (c * spatial) + (i % spatial)] as f64)
+            .collect();
+        let mean0 = ch0.iter().sum::<f64>() / m as f64;
+        let var0 = ch0.iter().map(|v| (v - mean0).powi(2)).sum::<f64>() / m as f64;
+        assert!(
+            var0.is_finite() && var0 > f32::MAX as f64,
+            "前提: var0={var0}"
+        );
+
+        let w = [1.5f32, -0.8, 1.0];
+        let b = [0.1f32, -0.2, 0.3];
+        let eps = 1e-5f32;
+        for (wv, bv) in [(None, None), (Some(&w[..]), Some(&b[..]))] {
+            let model =
+                batch_norm_train_host_model(&x, wv, bv, eps, n, c, spatial).expect("valid shape");
+            let cpu =
+                fandhe_ai_backend_cpu::run_batch_norm_train_f32(&x, wv, bv, eps, n, c, spatial)
+                    .expect("valid shape");
+            assert!(cpu.var[0].is_infinite() && cpu.var[0].is_sign_positive());
+            assert!(cpu.var[1].is_finite() && cpu.var[2].is_finite());
+            assert!(model.out.iter().all(|v| v.is_finite()), "out は有限");
+            assert_parity("2e20 host model out", &model.out, &cpu.out);
+            assert_parity("2e20 host model mean", &model.mean, &cpu.mean);
+            assert_eq!(model.var[0], cpu.var[0], "var[0] は +inf クラス一致");
+            assert_parity(
+                "2e20 host model var(finite)",
+                &model.var[1..],
+                &cpu.var[1..],
+            );
+        }
+    }
+
     #[test]
     fn infer_host_model_matches_cpu_reference_req2() {
         use fandhe_ai_backend_cpu::parity::assert_parity;

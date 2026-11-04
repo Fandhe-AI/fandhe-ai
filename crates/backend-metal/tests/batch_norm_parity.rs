@@ -264,7 +264,8 @@ fn batch_norm_train_extreme_values_stay_finite() {
     // これより大きい値〈例 `2e20`〉では内部 `f64` 計算自体は正しく
     // 有限のまま完了する一方、最終 narrow が正当に `+inf` を返す
     // ため本テストの意図〈NaN／中間 overflow の不在確認〉に合わない。
-    // codex-review 指摘参照）。
+    // codex-review 指摘参照）。2e20 級は #4031 の
+    // `batch_norm_train_2e20_scale_...` で別に検証する（§9.8）。
     let x = vec![
         1e18f32, -1e18f32, 1e-4, -1e-4, 3.0, -1.0, 0.5, -0.5, // batch 0
         5e17f32, -5e17f32, 2e-4, -2e-4, 1.0, -2.0, 0.3, -0.3, // batch 1
@@ -279,6 +280,93 @@ fn batch_norm_train_extreme_values_stay_finite() {
         assert!(mean.is_finite(), "mean[{ch}] は有限であるべき: {mean}");
         assert!(var.is_finite(), "var[{ch}] は有限であるべき: {var}");
         assert!(var >= 0.0, "var[{ch}] は非負であるべき: {var}");
+    }
+}
+
+/// #4031: 2e20 級入力のチャネルで CPU 参照の `var` が `+inf`
+/// （f64 では有限だが最終 `f32` narrow で overflow）になる場合に、
+/// 非有限チャネルは同クラス一致（`+inf` 対 `+inf`・NaN 対 NaN）で、
+/// 有限チャネルだけを `assert_parity`（REQ-2 統一複合判定）で比べる。
+/// `inf - inf = NaN` となり `assert_parity` へ直接通せないための
+/// テスト内補助であり、`backend-cpu::parity` の判定契約・tolerance は
+/// 変えない。出典: `docs/batch-norm-ops-design.md` §9.8。
+fn assert_var_parity_with_nonfinite_class(label: &str, got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), want.len(), "{label}: 長さ不一致");
+    let (mut g_fin, mut w_fin) = (Vec::new(), Vec::new());
+    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        if w.is_finite() {
+            assert!(
+                g.is_finite(),
+                "{label}[{i}]: 参照は有限だが実装は非有限: {g}"
+            );
+            g_fin.push(g);
+            w_fin.push(w);
+        } else if w.is_nan() {
+            assert!(g.is_nan(), "{label}[{i}]: 参照 NaN に対し実装は {g}");
+        } else {
+            assert_eq!(g, w, "{label}[{i}]: 非有限クラス（符号）不一致");
+        }
+    }
+    if !g_fin.is_empty() {
+        assert_parity(label, &g_fin, &w_fin);
+    }
+}
+
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn batch_norm_train_2e20_scale_has_no_intermediate_overflow_and_matches_cpu_reference() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let bn = MetalBatchNorm::new(&ctx).expect("BatchNorm パイプラインの構築に失敗した");
+
+    // M = 39（32 の倍数でなく 32 超）で複数レーンの butterfly 縮約も通す。
+    let (n, c, spatial) = (3usize, 3usize, 13usize);
+    let m = n * spatial;
+    let base = Xorshift64Star::new(0x4031).fill_vec(n * c * spatial);
+    // ch0: 2e20 級（f64 分散は有限だが f32 narrow で +inf）・ch1: 1e18 級・ch2: 通常値。
+    let scales = [2e20f32, 1e18f32, 1.0f32];
+    let mut x = base.clone();
+    for i in 0..m {
+        let (batch, sp) = (i / spatial, i % spatial);
+        for (ch, &s) in scales.iter().enumerate() {
+            let idx = batch * (c * spatial) + ch * spatial + sp;
+            x[idx] = base[idx] * s;
+        }
+    }
+    // 前提検査: ch0 の f64 分散は有限かつ f32::MAX 超（テストが空振りしない）。
+    let ch0: Vec<f64> = (0..m)
+        .map(|i| x[(i / spatial) * (c * spatial) + (i % spatial)] as f64)
+        .collect();
+    let mean0 = ch0.iter().sum::<f64>() / m as f64;
+    let var0 = ch0.iter().map(|v| (v - mean0).powi(2)).sum::<f64>() / m as f64;
+    assert!(
+        var0.is_finite() && var0 > f32::MAX as f64,
+        "前提: var0={var0}"
+    );
+
+    let w = Xorshift64Star::new(0x4032).fill_vec(c);
+    let b = Xorshift64Star::new(0x4033).fill_vec(c);
+    let eps = 1e-5f32;
+    for (tag, wv, bv) in [
+        ("affine なし", None, None),
+        ("affine あり", Some(&w[..]), Some(&b[..])),
+    ] {
+        let gpu = bn
+            .run_batch_norm_train_f32(&ctx, &x, wv, bv, eps, n, c, spatial)
+            .expect("must succeed");
+        let cpu = fandhe_ai_backend_cpu::run_batch_norm_train_f32(&x, wv, bv, eps, n, c, spatial)
+            .expect("valid shape");
+        assert!(
+            cpu.var[0].is_infinite() && cpu.var[0].is_sign_positive(),
+            "前提: CPU var[0] は +inf: {}",
+            cpu.var[0]
+        );
+        assert!(cpu.var[1].is_finite() && cpu.var[2].is_finite());
+        for (i, &v) in gpu.out.iter().enumerate() {
+            assert!(v.is_finite(), "[{tag}] out[{i}] は有限であるべき: {v}");
+        }
+        assert_parity(&format!("[{tag}] 2e20 out"), &gpu.out, &cpu.out);
+        assert_parity(&format!("[{tag}] 2e20 mean"), &gpu.mean, &cpu.mean);
+        assert_var_parity_with_nonfinite_class(&format!("[{tag}] 2e20 var"), &gpu.var, &cpu.var);
     }
 }
 

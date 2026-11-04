@@ -371,7 +371,7 @@ assert_parity`）で CPU 参照実装と検証する。
   値〈`1e18`。内部 soft-f64 計算自体は `2e20` 級でも有限のまま完結
   するが、`var` を最終的に `f32` へ narrow する時点で正当に `+inf`
   になりうるため、本テストの意図〈NaN／中間 overflow の不在確認〉に
-  沿う規模へ調整済み。codex-review 指摘〉での有限性・NaN の該当
+  沿う規模へ調整済み。2e20 級は #4031 で別テストとして追加〈§9.8〉。codex-review 指摘〉での有限性・NaN の該当
   チャネル限定伝播・run-to-run 決定性・`MetalBackendOps` vs
   `CpuBackendOps` 直接突合・非 contiguous 入力・weight 長さ不一致
   拒否・空軸早期 return）
@@ -424,6 +424,37 @@ tolerance／baseline 変更なし）。
 `metal_batch_norm_train_backward_matches_cpu`／
 `metal_batch_norm_train_forward_rank4_matches_cpu` の追加（§9.6
 訂正参照）も本 issue のスコープ外のまま後続 issue へ引き継ぐ。
+
+### 9.8 2e20 級入力の中間 overflow 耐性の検証（#4031）
+
+- 背景: #4028／#3861 の監査で、2e20 級の有限入力で Metal の soft-f64
+  縮約が中間 overflow しないことを確かめるテストが無いと判明した
+  （既存の極端値テストは `var` が `+inf` になるため 1e18 に留めていた）
+- 期待値の決め方（併用）: `out`・`mean` は f32 の範囲に収まるため、
+  CPU 参照 `run_batch_norm_train_f32` と `assert_parity`（REQ-2 統一複合
+  判定）でそのまま比べる。`var` は CPU 参照が `+inf`（f64 では有限・
+  最終 `f32` narrow で overflow）のチャネルを `+inf` 対 `+inf` の
+  クラス一致で、有限チャネルだけを `assert_parity` で比べる
+- 中間 overflow を見分けられる理由: f32 のまま二乗して overflow すると
+  `var=inf` → `rstd=0` → `out` が `b`（affine なしなら 0）に潰れ、CPU の
+  `out≈±1` と食い違って `assert_parity(out)` が fail する。`var` の
+  `+inf` 一致だけでは証拠にならず、主証拠は `out` の REQ-2 一致である
+- クラス一致の補助関数はテストファイル内に置き、`backend-cpu::parity`
+  の判定契約は変えない。`inf - inf = NaN` で `assert_parity` に通せない
+  ための別検査であり、REQ-2 判定を緩めるものではない
+- 追加テスト: `tests/batch_norm_parity.rs::
+  batch_norm_train_2e20_scale_has_no_intermediate_overflow_and_matches_cpu_reference`
+  （`#[ignore]`・Metal 実機）、`src/batch_norm_model.rs` の
+  `train_host_model_2e20_scale_matches_cpu_reference_with_inf_var_class`
+  （Linux CI で実行されるホスト逐語モデル版）
+- tolerance 定数・baseline・閾値は変更していない
+- Metal 実機実測: **未実測**（`<metal-node>`。手順は
+  `docs/perf/logs/metal-batch-norm-1736/README.md` の #4031 節）。
+  Linux では `--ignored --list` を実行できないため、
+  `make check-cross-metal-tests` による型検査で代替している
+- 対象外: infer 経路（固定の f32 統計では 2e20 級の分散を持てない）・
+  facade／`BackendOps` 経路・CUDA
+
 ## 10. CUDA 実装記録（#1735）
 
 §3.1「CUDA（1 warp = 1 channel）が再現すべき契約」（`warp_reduce_f64`
