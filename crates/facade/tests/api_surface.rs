@@ -9203,6 +9203,9 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     // `inference/mod.rs`（イシュー #2934。greedy 版 speculative decoding。承認形は設計記録
     // `facade-speculative-decoding-batching-design.md` §17.2。承認コメント issuecomment-6067263650 項 1）。
     "generate_speculative",
+    // `inference/mod.rs`（イシュー #3849。内部状態モデル版 speculative decoding の入口。承認形は設計記録
+    // §29・§31。承認コメント issuecomment-6554565145）。
+    "generate_speculative_stateful",
     // `distributed/step.rs`（イシュー #3147。分散ステップのフリー関数 3 本。承認形は決定記録
     // `facade-distributed-host-collective-decision.md` §16。承認は §11 の D-A・D-B）。
     "step_sgd",
@@ -25577,6 +25580,13 @@ const SCHEDULER_APPROVED_REEXPORT: &str =
 const SPECULATIVE_APPROVED_REEXPORT: &str =
     "fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig,generate_speculative}";
 
+/// `inference/mod.rs` の内部状態モデル承認形（イシュー #3849・親 #3719。公開形の正は
+/// `docs/facade-speculative-decoding-batching-design.md` §29・§31、承認コメント
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145>）。
+/// `pub use` 文のトークンを空白なしで連結したもの。`BatchScheduler::step_stateful` は
+/// `BatchScheduler` の inherent メソッドのため、この 1 文に追加の名前は要らない。
+const STATEFUL_APPROVED_REEXPORT: &str = "fandhe_ai_autodiff::generate::stateful::{StatefulAutoregressiveModel,generate_speculative_stateful}";
+
 /// 公開 4 名のうち型・トレイト名（3 個）。
 const GENERATE_TYPE_NAMES: [&str; 3] =
     ["AutoregressiveModel", "GenerateConfig", "SamplingStrategy"];
@@ -25625,9 +25635,10 @@ fn generate_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
 /// 分割・別ファイルの再エクスポートはすべて拒否する（件数 0 の空振りも拒否）。
 #[test]
 fn facade_exposes_generate_items_only_in_approved_shape() {
-    // 期待は (ファイル, 文) のソート順。#2934 で追加した連続バッチング・speculative の承認形 2 文は
-    // パスに `generate` トークンを含むため本検出器にも掛かる（検出器は変えず期待を 3 文に広げる。
-    // 設計記録 §17.6・§18）。`GENERATE_APPROVED_REEXPORT` 自体は 1 文字も変えない。
+    // 期待は (ファイル, 文) のソート順。#2934 で追加した連続バッチング・speculative の承認形 2 文と
+    // #3849 の内部状態モデルの承認形 1 文は、パスに `generate` トークンを含むため本検出器にも掛かる
+    // （検出器は変えず期待を 4 文に広げる。設計記録 §17.6・§18・§31）。
+    // `GENERATE_APPROVED_REEXPORT` 自体は 1 文字も変えない。
     let expected = vec![
         (
             "inference/mod.rs".to_string(),
@@ -25639,6 +25650,10 @@ fn facade_exposes_generate_items_only_in_approved_shape() {
         ),
         (
             "inference/mod.rs".to_string(),
+            STATEFUL_APPROVED_REEXPORT.to_string(),
+        ),
+        (
+            "inference/mod.rs".to_string(),
             GENERATE_APPROVED_REEXPORT.to_string(),
         ),
     ];
@@ -25647,7 +25662,7 @@ fn facade_exposes_generate_items_only_in_approved_shape() {
         expected,
         "generate 一式の facade 公開は inference/mod.rs の承認形 1 文（イシュー #2575・決定記録 §13.2・§17）\
          と、パスに generate を含む連続バッチング・speculative の承認形 2 文（イシュー #2934・\
-         設計記録 §17.2）のみ"
+         設計記録 §17.2）と内部状態モデルの承認形 1 文（イシュー #3849・設計記録 §31）のみ"
     );
 }
 
@@ -25820,6 +25835,7 @@ fn inference_module_reexports_exactly_expected_surface() {
         GENERATE_APPROVED_REEXPORT,
         SCHEDULER_APPROVED_REEXPORT,
         SPECULATIVE_APPROVED_REEXPORT,
+        STATEFUL_APPROVED_REEXPORT,
     ];
     let mut expected: Vec<String> = approved.iter().map(|s| s.to_string()).collect();
     expected.sort();
@@ -25828,7 +25844,7 @@ fn inference_module_reexports_exactly_expected_surface() {
     ));
     assert_eq!(
         found, expected,
-        "src/inference/mod.rs の pub use が承認形 4 文と一致しない（イシュー #2576・#2934）"
+        "src/inference/mod.rs の pub use が承認形 5 文と一致しない（イシュー #2576・#2934・#3849）"
     );
 
     // 自己テスト: 承認形は許可、追加文・欠落・別名・glob・モジュール再エクスポート・pub(crate) は検出される。
@@ -25840,6 +25856,10 @@ fn inference_module_reexports_exactly_expected_surface() {
         "pub use fandhe_ai_autodiff::generate::scheduler;",
         "pub use fandhe_ai_autodiff::generate::speculative::*;",
         "pub use fandhe_ai_autodiff::generate::kv_rewind::KvSnapshot;",
+        // #3849: 内部状態モデルの承認形を崩す追加（モジュール・glob・分割）。
+        "pub use fandhe_ai_autodiff::generate::stateful;",
+        "pub use fandhe_ai_autodiff::generate::stateful::*;",
+        "pub use fandhe_ai_autodiff::generate::stateful::StatefulAutoregressiveModel;",
     ] {
         assert_ne!(
             pub_use_stmts_normalized(&format!("{ok}\n{extra}")),
@@ -25858,6 +25878,14 @@ fn inference_module_reexports_exactly_expected_surface() {
     }
     let alias = ok.replace("BatchScheduler,", "BatchScheduler as B,");
     assert_ne!(pub_use_stmts_normalized(&alias), expected);
+    // #3849: 別名と、`generate_speculative_stateful` を `generate_speculative` へすり替える変異。
+    let alias = ok.replace(
+        "StatefulAutoregressiveModel,",
+        "StatefulAutoregressiveModel as S,",
+    );
+    assert_ne!(pub_use_stmts_normalized(&alias), expected);
+    let swapped = ok.replace("generate_speculative_stateful", "generate_speculative");
+    assert_ne!(pub_use_stmts_normalized(&swapped), expected);
 }
 
 /// `autodiff/src/generate/mod.rs` の公開形（承認形 = 決定記録 §2・§13.2・§17.2）の違反を返す。
@@ -42440,11 +42468,13 @@ fn fit_with_prefetch_is_reachable_via_facade_only() {
 // 正のプローブとインベントリで組む。
 
 /// 公開 5 名のうち型名（4 個）。
-const SPEC_SCHED_TYPE_NAMES: [&str; 4] = [
+const SPEC_SCHED_TYPE_NAMES: [&str; 5] = [
     "BatchScheduler",
     "RequestId",
     "SchedulerLimits",
     "SpeculativeConfig",
+    // #3849: 内部状態モデルの trait（facade 独自の宣言を拒否する対象に加える）。
+    "StatefulAutoregressiveModel",
 ];
 
 /// facade `src/` から、(a) 公開 5 名または `scheduler`／`speculative`／`kv_rewind`／`KvSnapshot` を
@@ -42474,6 +42504,8 @@ fn speculative_scheduler_exposures(files: &[(String, String)]) -> Vec<(String, S
                         || matches!(
                             x.as_str(),
                             "generate_speculative"
+                                | "generate_speculative_stateful"
+                                | "stateful"
                                 | "scheduler"
                                 | "speculative"
                                 | "kv_rewind"
@@ -42484,15 +42516,22 @@ fn speculative_scheduler_exposures(files: &[(String, String)]) -> Vec<(String, S
                 }
             }
         }
-        for _ in 0..count_fn_declarations_by_name(&tokens, "generate_speculative") {
-            out.push((rel.clone(), "<fn:generate_speculative>".to_string()));
+        // #3849: 内部状態モデル版の入口名（`Tape`／`Sequential` への inherent 追加も拒否する）。
+        for name in [
+            "generate_speculative",
+            "generate_speculative_stateful",
+            "step_stateful",
+        ] {
+            for _ in 0..count_fn_declarations_by_name(&tokens, name) {
+                out.push((rel.clone(), format!("<fn:{name}>")));
+            }
         }
     }
     out.sort();
     out
 }
 
-/// facade の speculative／スケジューラ公開は `inference/mod.rs` の承認形 2 文がそれぞれちょうど 1 件のみで、
+/// facade の speculative／スケジューラ／内部状態モデル公開は `inference/mod.rs` の承認形 3 文がそれぞれちょうど 1 件のみで、
 /// 別名・分割・別ファイル・glob・モジュール再エクスポート・facade 独自の型宣言・`fn generate_speculative`
 /// （`Tape`／`Sequential` への inherent メソッド追加を含む）・`kv_rewind`／`KvSnapshot` の再エクスポートは
 /// すべて拒否する（件数 0 の空振りも拒否）。
@@ -42507,12 +42546,16 @@ fn facade_exposes_speculative_scheduler_items_only_in_approved_shape() {
             "inference/mod.rs".to_string(),
             SPECULATIVE_APPROVED_REEXPORT.to_string(),
         ),
+        (
+            "inference/mod.rs".to_string(),
+            STATEFUL_APPROVED_REEXPORT.to_string(),
+        ),
     ];
     assert_eq!(
         speculative_scheduler_exposures(&facade_src_files()),
         expected,
-        "speculative／スケジューラの facade 公開は inference/mod.rs の承認形 2 文のみ\
-         （イシュー #2934・設計記録 §17.2）"
+        "speculative／スケジューラ／内部状態モデルの facade 公開は inference/mod.rs の承認形 3 文のみ\
+         （イシュー #2934・#3849・設計記録 §17.2・§31）"
     );
 }
 
@@ -42522,7 +42565,8 @@ fn facade_exposes_speculative_scheduler_items_only_in_approved_shape_detects_eac
     let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
     let ok_s = "pub use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, RequestId, SchedulerLimits};";
     let ok_p = "pub use fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig, generate_speculative};";
-    let both = format!("{ok_s}\n{ok_p}");
+    let ok_t = "pub use fandhe_ai_autodiff::generate::stateful::{StatefulAutoregressiveModel, generate_speculative_stateful};";
+    let both = format!("{ok_s}\n{ok_p}\n{ok_t}");
     assert_eq!(
         speculative_scheduler_exposures(&f("inference/mod.rs", &both)),
         vec![
@@ -42533,6 +42577,10 @@ fn facade_exposes_speculative_scheduler_items_only_in_approved_shape_detects_eac
             (
                 "inference/mod.rs".to_string(),
                 SPECULATIVE_APPROVED_REEXPORT.to_string()
+            ),
+            (
+                "inference/mod.rs".to_string(),
+                STATEFUL_APPROVED_REEXPORT.to_string()
             ),
         ]
     );
@@ -42557,13 +42605,24 @@ fn facade_exposes_speculative_scheduler_items_only_in_approved_shape_detects_eac
         "pub fn generate_speculative() {}",
         "impl Tape { pub fn generate_speculative(&self) {} }",
         "fn generate_speculative() {}",
+        // #3849: 内部状態モデルの承認形を崩す変異（別名・分割・glob・モジュール・独自宣言・inherent 追加）。
+        "pub use fandhe_ai_autodiff::generate::stateful::{StatefulAutoregressiveModel as S, generate_speculative_stateful};",
+        "pub use fandhe_ai_autodiff::generate::stateful::StatefulAutoregressiveModel;",
+        "pub use fandhe_ai_autodiff::generate::stateful::generate_speculative_stateful;",
+        "pub use fandhe_ai_autodiff::generate::stateful::*;",
+        "pub use fandhe_ai_autodiff::generate::stateful;",
+        "pub use fandhe_ai_autodiff::generate::stateful as st;",
+        "pub trait StatefulAutoregressiveModel {}",
+        "pub fn generate_speculative_stateful() {}",
+        "impl Tape { pub fn step_stateful(&self) {} }",
+        "impl Sequential { pub fn generate_speculative_stateful(&self) {} }",
     ] {
         let got = speculative_scheduler_exposures(&f("inference/mod.rs", bad));
         assert!(!got.is_empty(), "{bad}");
         assert!(
-            got.iter().all(
-                |(_, s)| s != SCHEDULER_APPROVED_REEXPORT && s != SPECULATIVE_APPROVED_REEXPORT
-            ),
+            got.iter().all(|(_, s)| s != SCHEDULER_APPROVED_REEXPORT
+                && s != SPECULATIVE_APPROVED_REEXPORT
+                && s != STATEFUL_APPROVED_REEXPORT),
             "{bad}"
         );
     }
@@ -42574,6 +42633,10 @@ fn facade_exposes_speculative_scheduler_items_only_in_approved_shape_detects_eac
         "pub(crate) use a::{BatchScheduler, RequestId};",
         "impl X for BatchScheduler {}",
         "// fn generate_speculative() {}",
+        "// pub use a::StatefulAutoregressiveModel;",
+        "let s = \"pub use a::stateful::generate_speculative_stateful;\";",
+        "pub(crate) use a::stateful::StatefulAutoregressiveModel;",
+        "impl StatefulAutoregressiveModel for M {}",
     ] {
         assert!(
             speculative_scheduler_exposures(&f("inference/mod.rs", src)).is_empty(),
@@ -42588,7 +42651,8 @@ fn facade_exposes_speculative_scheduler_items_only_in_approved_shape_detects_eac
 fn speculative_scheduler_items_are_reachable_via_facade_inference_path() {
     use fandhe_ai::inference::{
         AutoregressiveModel, BatchScheduler, GenerateConfig, RequestId, SchedulerLimits,
-        SpeculativeConfig, generate_speculative,
+        SpeculativeConfig, StatefulAutoregressiveModel, generate_speculative,
+        generate_speculative_stateful,
     };
     use fandhe_ai::nn::kv_cache::KvCache;
     use fandhe_ai::{AutodiffError, Tensor};
@@ -42656,6 +42720,58 @@ fn speculative_scheduler_items_are_reachable_via_facade_inference_path() {
     }
     let _ = dyn_models_are_accepted;
 
+    // #3849: 内部状態モデルの 3 名（trait・入口・`step_stateful`）。`State = u32` の最小実装で
+    // 署名・`?Sized` 境界・内部クレートの trait との同一性をコンパイルだけで検査する。
+    struct StatefulProbe;
+    impl StatefulAutoregressiveModel for StatefulProbe {
+        type State = u32;
+        fn init_state(&self) -> Result<u32, AutodiffError> {
+            Ok(0)
+        }
+        fn forward_step_stateful(
+            &self,
+            new_ids: &Tensor<i32>,
+            _state: &mut u32,
+        ) -> Result<Tensor<f32>, AutodiffError> {
+            let n: usize = new_ids.shape().iter().product();
+            Tensor::new(vec![0.0; n * 2], &[1, new_ids.shape()[1], 2]).map_err(AutodiffError::from)
+        }
+        fn save_state(&self, state: &u32) -> Result<u32, AutodiffError> {
+            Ok(*state)
+        }
+        fn restore_state(&self, state: &mut u32, saved: u32) -> Result<(), AutodiffError> {
+            *state = saved;
+            Ok(())
+        }
+    }
+    let _: fn(&mut BatchScheduler, &StatefulProbe) -> Result<usize, AutodiffError> =
+        BatchScheduler::step_stateful::<StatefulProbe>;
+    type StatefulSpecFn = fn(
+        &StatefulProbe,
+        &StatefulProbe,
+        &Tensor<i32>,
+        &GenerateConfig,
+        &SpeculativeConfig,
+    ) -> Result<Tensor<i32>, AutodiffError>;
+    let _: StatefulSpecFn = generate_speculative_stateful::<StatefulProbe, StatefulProbe>;
+    fn dyn_stateful_models_are_accepted(
+        s: &mut BatchScheduler,
+        m: &dyn StatefulAutoregressiveModel<State = u32>,
+        ids: &Tensor<i32>,
+        cfg: &GenerateConfig,
+        spec: &SpeculativeConfig,
+    ) -> Result<(), AutodiffError> {
+        s.step_stateful(m)?;
+        generate_speculative_stateful(m, m, ids, cfg, spec)?;
+        Ok(())
+    }
+    let _ = dyn_stateful_models_are_accepted;
+    fn same_stateful_trait<
+        T: fandhe_ai_autodiff::generate::stateful::StatefulAutoregressiveModel,
+    >() {
+    }
+    same_stateful_trait::<StatefulProbe>();
+
     // derive の固定。
     fn assert_spec<T: std::fmt::Debug + Clone + PartialEq>() {}
     assert_spec::<SpeculativeConfig>();
@@ -42665,6 +42781,10 @@ fn speculative_scheduler_items_are_reachable_via_facade_inference_path() {
     assert_limits::<SchedulerLimits>();
     fn assert_debug<T: std::fmt::Debug>() {}
     assert_debug::<BatchScheduler>();
+    // #3849: 内部状態を型消去して持っても `BatchScheduler` が `Send + Sync` のままであること
+    // （設計記録 §29.0・§29.6。`Box<dyn Any + Send + Sync>` の境界を外すとここが落ちる）。
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<BatchScheduler>();
 
     // 公開フィールド `k` の読み出しと、型の同一性（内部クレートの型と同じであること）。
     let spec = SpeculativeConfig::new(3);
@@ -42718,6 +42838,8 @@ fn speculative_scheduler_usage_doctests_are_present_and_compiled() {
         ),
         // 公開面だけで組んだ表引き KV モデルの成功例（#3098）。
         ("speculative（成功例）", &SPECULATIVE_SUCCESS_NEEDLES[..]),
+        // 内部状態モデルの成功例（#3849）。
+        ("内部状態モデル（成功例）", &STATEFUL_SUCCESS_NEEDLES[..]),
     ] {
         let v = doctest_probe_violations(
             &format!("inference/mod.rs モジュール doc（{label}）"),
@@ -42731,6 +42853,12 @@ fn speculative_scheduler_usage_doctests_are_present_and_compiled() {
         "inference/mod.rs モジュール doc",
         &lines,
         &SPECULATIVE_SUCCESS_NEEDLES,
+    );
+    assert!(v.is_empty(), "{v:?}");
+    let v = doctest_internal_crate_violations(
+        "inference/mod.rs モジュール doc（内部状態モデル）",
+        &lines,
+        &STATEFUL_SUCCESS_NEEDLES,
     );
     assert!(v.is_empty(), "{v:?}");
 
@@ -42748,6 +42876,16 @@ fn speculative_scheduler_usage_doctests_are_present_and_compiled() {
     assert!(!doctest_internal_crate_violations("t", &ignored, &needles).is_empty());
     assert!(!doctest_internal_crate_violations("t", &[], &needles).is_empty());
 }
+
+/// 内部状態モデルの成功例 doctest ブロックを識別する必須語（#3849。公開パスだけで書かれていること）。
+const STATEFUL_SUCCESS_NEEDLES: [&str; 6] = [
+    "use fandhe_ai::inference::{",
+    "impl StatefulAutoregressiveModel for",
+    "type State",
+    "generate_speculative_stateful(&",
+    ".step_stateful(&",
+    ".take_finished()",
+];
 
 /// speculative 成功例 doctest ブロックを識別する必須語（ブロック固有の語。fail-closed 例とは別ブロック）。
 const SPECULATIVE_SUCCESS_NEEDLES: [&str; 7] = [
@@ -42795,6 +42933,83 @@ fn doctest_internal_crate_violations(
         .collect()
 }
 
+/// `autodiff/src/generate/stateful.rs` の公開形（設計記録 §29.0.1・§31）の違反を返す。承認形:
+/// `pub trait StatefulAutoregressiveModel` が 1 件で、本体は境界なしの `type State;` が 1 件と
+/// `init_state`／`forward_step_stateful`／`save_state`／`restore_state` の 4 メソッドのみ（関連定数なし）。
+/// 深さ 0 の自由な `pub fn` は `generate_speculative_stateful` の 1 件のみで、ほかの公開アイテム
+/// （struct／enum／const／static／mod／use／type）は無い。`generate_stateful` 等の別入口は
+/// #3770 で足さないと決めたため、この否定プローブで締める。
+fn stateful_public_shape_violations(src: &str) -> Vec<String> {
+    let toks = tokens_of(without_test_mod(src));
+    let mut v = Vec::new();
+    match pb_single_block(
+        &toks,
+        &["pub", "trait", "StatefulAutoregressiveModel", "{"],
+        "StatefulAutoregressiveModel",
+    ) {
+        Ok((_, body)) => {
+            if pb_find_seq(body, &["type", "State", ";"]).len() != 1
+                || body.iter().filter(|t| *t == "type").count() != 1
+            {
+                v.push("trait の関連型が境界なしの `type State;` 1 件ではない".to_string());
+            }
+            if body.iter().any(|t| t == "const") {
+                v.push("trait に関連定数がある".to_string());
+            }
+            let fns: Vec<&str> = body
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| *t == "fn")
+                .filter_map(|(k, _)| body.get(k + 1).map(String::as_str))
+                .collect();
+            if fns
+                != [
+                    "init_state",
+                    "forward_step_stateful",
+                    "save_state",
+                    "restore_state",
+                ]
+            {
+                v.push(format!("trait のメソッドが承認 4 件と不一致: {fns:?}"));
+            }
+        }
+        Err(e) => v.push(e),
+    }
+    let mut depth = 0usize;
+    let mut free_pub_fns = Vec::new();
+    let mut other_pub = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        match t.as_str() {
+            "{" => depth += 1,
+            "}" => depth = depth.saturating_sub(1),
+            "pub" if depth == 0 && toks.get(i + 1).map(String::as_str) != Some("(") => {
+                let k = skip_fn_declaration_qualifiers(&toks, i + 1);
+                match toks.get(k).map(String::as_str) {
+                    Some("fn") => {
+                        if let Some(n) = toks.get(k + 1) {
+                            free_pub_fns.push(n.clone());
+                        }
+                    }
+                    Some("trait") => {}
+                    other => other_pub.push(other.unwrap_or("").to_string()),
+                }
+            }
+            _ => {}
+        }
+    }
+    if free_pub_fns != ["generate_speculative_stateful"] {
+        v.push(format!(
+            "stateful.rs の自由な pub fn が generate_speculative_stateful 1 件のみではない: {free_pub_fns:?}"
+        ));
+    }
+    if !other_pub.is_empty() {
+        v.push(format!(
+            "stateful.rs に承認外の公開アイテムがある: {other_pub:?}"
+        ));
+    }
+    v
+}
+
 /// 実ファイルの `#[cfg(test)]` 以降を除いたソースを返す（テスト mod 内の `fn` を数えない）。
 fn without_test_mod(src: &str) -> &str {
     src.find("#[cfg(test)]").map_or(src, |i| &src[..i])
@@ -42825,6 +43040,7 @@ fn speculative_scheduler_public_shape_violations(sched_src: &str, spec_src: &str
             "submit",
             "step",
             "step_batched",
+            "step_stateful",
             "take_finished",
             "take_failed",
         ],
@@ -42839,6 +43055,61 @@ fn speculative_scheduler_public_shape_violations(sched_src: &str, spec_src: &str
         pb_pub_fn_names_in_inherent_impls(&spec, "SpeculativeConfig"),
         &["new"],
     );
+    // #3849: `step_stateful` の署名と where 句を固定する。`'static` だけに弱めると `Send + Sync`
+    // （`BatchScheduler` の auto trait を保つ境界。設計記録 §29.6）を失うため、トークン列の完全一致で締める。
+    let step_stateful_sig: &[&str] = &[
+        "pub",
+        "fn",
+        "step_stateful",
+        "<",
+        "M",
+        ">",
+        "(",
+        "&",
+        "mut",
+        "self",
+        ",",
+        "model",
+        ":",
+        "&",
+        "M",
+        ")",
+        "-",
+        ">",
+        "Result",
+        "<",
+        "usize",
+        ",",
+        "AutodiffError",
+        ">",
+        "where",
+        "M",
+        ":",
+        "StatefulAutoregressiveModel",
+        "+",
+        "?",
+        "Sized",
+        ",",
+        "M",
+        ":",
+        ":",
+        "State",
+        ":",
+        "Send",
+        "+",
+        "Sync",
+        "+",
+        "'static",
+        ",",
+        "{",
+    ];
+    if pb_find_seq(&sched, step_stateful_sig).len() != 1 {
+        v.push(
+            "step_stateful の署名・where 句（M: StatefulAutoregressiveModel + ?Sized, \
+             M::State: Send + Sync + 'static）が承認形と不一致"
+                .to_string(),
+        );
+    }
     // 型の本体（フィールド）。
     match pb_single_block(
         &spec,
@@ -42969,8 +43240,67 @@ fn speculative_scheduler_public_shape_is_pinned() {
         )
         .is_empty()
     );
+    // #3849: `step_stateful` の公開・署名の変異。
+    assert!(!mutate_s("pub fn step_stateful<", "fn step_stateful<").is_empty());
+    assert!(
+        !mutate_s(
+            "    pub fn queued_len(",
+            "    pub fn step_batched_stateful(&self) {}\n    pub fn queued_len("
+        )
+        .is_empty()
+    );
+    assert!(
+        !mutate_s(
+            "M::State: Send + Sync + 'static,\n    {\n        let mut completed = self.admit_with(",
+            "M::State: 'static,\n    {\n        let mut completed = self.admit_with("
+        )
+        .is_empty()
+    );
     // 空振り（対象不在）は拒否される。
     assert!(!speculative_scheduler_public_shape_violations("", "").is_empty());
+}
+
+/// `stateful.rs` の公開形の固定（#3849。承認形は設計記録 §29.0.1）と、各類型の逸脱を検出する自己テスト。
+#[test]
+fn stateful_public_shape_is_pinned() {
+    let src =
+        read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/generate/stateful.rs"));
+    let v = stateful_public_shape_violations(&src);
+    assert!(
+        v.is_empty(),
+        "stateful.rs の公開形が承認形（設計記録 §29.0.1）と不一致（公開面の拡張は承認事項）: {v:?}"
+    );
+    let mutate = |from: &str, to: &str| {
+        assert!(src.contains(from), "{from}");
+        stateful_public_shape_violations(&src.replacen(from, to, 1))
+    };
+    // 関連型に境界を足す／trait にメソッドを足す。
+    assert!(!mutate("    type State;", "    type State: Clone;").is_empty());
+    assert!(
+        !mutate(
+            "    fn init_state(",
+            "    fn extra(&self) {}\n    fn init_state("
+        )
+        .is_empty()
+    );
+    // 別入口（`generate_stateful`・B > 1 版等）の新設は承認外。
+    assert!(
+        !mutate(
+            "pub fn generate_speculative_stateful<",
+            "pub fn generate_stateful() {}\npub fn generate_speculative_stateful<"
+        )
+        .is_empty()
+    );
+    // 新しい公開型・定数の追加。
+    assert!(
+        !mutate(
+            "pub fn generate_speculative_stateful<",
+            "pub struct Extra;\npub fn generate_speculative_stateful<"
+        )
+        .is_empty()
+    );
+    // 空振り（対象不在）は拒否される。
+    assert!(!stateful_public_shape_violations("").is_empty());
 }
 
 /// 否定プローブ: `KvCache` の公開メソッド集合が承認形（9 件。#3105 で `valid_len` を 1 件追加。

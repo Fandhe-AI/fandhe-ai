@@ -1015,3 +1015,33 @@ impl BatchScheduler {
 ### 30.5 変えないもの・範囲外
 
 B > 1 の stateful speculative、`step_batched` の stateful 版、stateful 版の paged attention、KV 形と stateful 形を混在させる入口、`generate_stateful`（#3770 で足さないと決定）。
+
+## 31. 実装記録（#3849・親 #3719。scheduler と facade の後半）
+
+承認の根拠は #3770 の所有者回答（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145）の 1 件だけで、これ以上の承認は主張しない。依存・`unsafe`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance・baseline・`docs/spec` は変更していない。
+
+### 31.1 実装した範囲（§29.0 の分担）
+
+| 項目 | 内容 |
+|------|------|
+| `generate/scheduler.rs` | `Active` に非公開の `state: Option<Box<dyn Any + Send + Sync>>` を追加。`admit` を中核 `admit_with` と薄い呼び出しに分割。`advance` を `next_ids`／`finish_with_logits` に分割（演算の種類と順序は不変）。`advance_stateful` と `pub fn step_stateful`（`M: StatefulAutoregressiveModel + ?Sized`、`M::State: Send + Sync + 'static`）を追加。`step`／`step_batched` のシグネチャは不変 |
+| `crates/facade/src/inference/mod.rs` | `pub use fandhe_ai_autodiff::generate::stateful::{StatefulAutoregressiveModel, generate_speculative_stateful};` の 1 文（5 文目）。既存 4 文は無変更。モジュール doc に節と成功例 doctest を追加 |
+| `crates/facade/tests/api_surface.rs` | `STATEFUL_APPROVED_REEXPORT` の新設、承認形 5 文への拡張と変異の自己テスト、`speculative_scheduler_exposures` の拡張（別名・分割・glob・モジュール・独自宣言・inherent 追加の拒否）、`step_stateful` の署名と where 句のトークン列固定、`stateful.rs` のインベントリ（`stateful_public_shape_is_pinned`。`generate_stateful` 等の別入口の否定プローブを含む）、到達プローブ（`?Sized`・内部 trait との同一性）、成功例 doctest の実在検査 |
+| テスト | `crates/autodiff/tests/generate_scheduler_stateful.rs`、`crates/facade/tests/speculative_batching_stateful_facade.rs`（新設） |
+
+この項目専用の保留 doctest・否定ガードは元から無い（§29.1 末尾）ため、§17.6 の先例どおり「反転」は正ガードの新設・拡張と承認外経路の否定プローブで表した。実機依存のテストは新設しない（§29.4）。
+
+### 31.2 決定事項
+
+- **prompt だけの要求（`max_length == prompt_len`）では `init_state` を呼ばない**。forward が無く状態が要らないため。`step` が KV キャッシュを作らないのと揃う。`generate_speculative_stateful` は `max_length == T` でも `init_state` を呼ぶので扱いが違う（rustdoc に明記）
+- **`advance` の冒頭で `state.is_some()` を検査する**。`num_kv_layers() == 0` のモデルでは既存の `caches.len() != num_kv_layers()` 検査が内部状態形の要求を見逃すため。`step_batched` は内部状態形の要求を束ねる対象から外し、要求単位の失敗にする（ほかの要求のフォールバックを起こさない）
+- fail-closed: (a) 内部状態形の要求を `step`／`step_batched` で進める、(b) KV 形の要求を `step_stateful` で進める、(c) `State` の型が合わない（`downcast_mut` の失敗）、(d) `init_state` が `Err`。いずれも当該要求だけを `take_failed` に積み forward は呼ばない。`unsafe` は使わない
+- 型消去の箱を足す**前**に `BatchScheduler: Send + Sync` の正のプローブを足し、変更前の tree で通ることを確かめた（`speculative_scheduler_items_are_reachable_via_facade_inference_path`）
+
+### 31.3 §29.1 からの逸脱（所有者への報告事項）
+
+§29.1 は `facade_exposes_generate_items_only_in_approved_shape` を「変えないもの」に挙げるが、検出器 `generate_exposures` はパスに `generate` トークンを含む `pub use` をすべて拾うため、5 文目（`...::generate::stateful::{...}`）も検出される。#2934 の先例（scheduler・speculative の 2 文を期待に足した）どおり、**検出器と `GENERATE_APPROVED_REEXPORT` は変えず、期待だけを 3 文から 4 文に広げた**。あわせて `facade_pub_use_leaves_are_not_modules` の小文字葉 allowlist に `generate_speculative_stateful` を 1 件足した（承認形の葉の名前そのもの）。公開面の追加はなく、ガードが承認形を知るための変更である。
+
+### 31.4 変えないもの・範囲外
+
+既定経路（`generate`・`generate_speculative`・`step`・`step_batched`）は変更前と bit 単位で同じ（既存テストは `api_surface.rs` のガード拡張を除き無変更で緑）。前後比較の性能計測はしていない（未計測。増えるのは `Option` フィールド 1 つと `is_some()` の分岐だけ）。範囲外: B > 1 の stateful speculative、`step_batched` の stateful 版、stateful 版の paged attention、KV 形と stateful 形を混在させる入口、`generate_stateful`（#3770 で足さないと決定）。§30.4 の申し送りのうち `speculative.rs` のモジュール doc に残る古い記述（「検査順 8」「論点 3」）は、挙動に関係しない doc の整理であり本 PR では直していない。
