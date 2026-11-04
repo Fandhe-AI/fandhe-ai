@@ -1,0 +1,6 @@
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<home>/work/rust-ai-library-run-3866/crates/backend-cpu)
+   Compiling fandhe-ai-backend-rocm v0.13.0 (<home>/work/rust-ai-library-run-3866/crates/backend-rocm)
+   Compiling bench-harness v0.13.0 (<home>/work/rust-ai-library-run-3866/crates/bench-harness)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3866/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.87s
+  Executable tests/linalg_gpu_optin_metal_parity.rs (<home>/work/target-fandhe-ai/debug/deps/linalg_gpu_optin_metal_parity-71f6a835052f856c)

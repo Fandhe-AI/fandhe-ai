@@ -1,0 +1,7 @@
+group	target	test	exit_code	running	result	verdict
+gpu-linalg-3405	-p fandhe-ai --test linalg_gpu_optin_cuda_parity	facade_inv_gate_on_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.32s	pass
+gpu-linalg-3405	-p fandhe-ai --test linalg_gpu_optin_cuda_parity	facade_solve_gate_on_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.25s	pass
+gpu-linalg-3405	-p fandhe-ai --test linalg_gpu_optin_cuda_parity	facade_det_gate_on_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.24s	pass
+gpu-linalg-3405	-p fandhe-ai --test linalg_gpu_optin_cuda_parity	facade_cholesky_gate_on_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.41s	pass
+gpu-linalg-3405	-p fandhe-ai --test linalg_gpu_optin_cuda_parity	facade_qr_gate_on_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.27s	pass
+gpu-linalg-3405	-p fandhe-ai --test linalg_gpu_optin_cuda_parity	facade_eigh_gate_on_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.70s	pass
