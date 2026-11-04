@@ -218,4 +218,5 @@ G1 の承認コメント URL を特定し、G2 の実測 pass を確認したう
 - (c) 常時実行の受入テスト `crates/facade/tests/gpu_linalg_optin.rs`（往復・backend 静的との一致・CPU tape の ON/OFF bit 同一）を追加した。CUDA 実機 parity テストは `GateOn` を facade 経由に変更し、Metal 版 `linalg_gpu_optin_metal_parity.rs`（`#[ignore]`・入力は #3139 の正本を共有）を新設した。
 - (d) backend 側の doc と `docs/compat-api-scope.md`・`docs/compat-matrix-ari-tracker.md`・`docs/compat-feature-gap.md` を更新した。
 - 変えていないもの: 既定 OFF、tolerance・baseline・`RULE.txt`、`unsafe`、依存、`docs/spec`、`Unsupported` メッセージの文言。
-- **未実測**: facade 経由の GB10／Mac mini 実機 parity は #3866。DDP の GB10 実測（#3141・#3149）も実機が要るため #3405 で引き続き追跡する。このため #3405 は open のまま残す。
+- **未実測**: facade 経由の GB10／Mac mini 実機 parity は #3866 が追跡する（「未実測」のまま）。
+- **#3405 のクローズ（2026-11-04 追記）**: #3405 は実装 PR #4014 の `Closes` で closed になった。実装 issue を実装 PR で閉じることは #3711 コメント 6570118646 の読み替えで認められている。#3405 で追跡していた DDP の GB10 実測（#3141・#3149）は、2026-10-27 に 5 run すべて pass で済んでいる（`docs/perf/logs/ddp-host-collective-gb10-3149/README.md`）。このため「#3405 は open のまま残す」とした前版の記述は取り下げる。
