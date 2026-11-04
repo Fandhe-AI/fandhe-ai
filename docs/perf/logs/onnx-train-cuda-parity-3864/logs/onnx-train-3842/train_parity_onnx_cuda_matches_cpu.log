@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/train_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/train_gpu_parity-7f8cdf980f4362cb)
+
+running 1 test
+test train_parity_onnx_cuda_matches_cpu ... TRAIN_PARITY case=onnx_from_sequential_forward_backward_s1 family=onnx quantity=forward arm=Cuda(0) route=H judge=Req2 total=16 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s1 family=onnx quantity=loss arm=Cuda(0) route=H judge=Req2 total=1 fail_count=0 max_abs_diff=5.960464e-8 mean_abs_diff=5.960464e-8 max_rel_err=1.138059e-7 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s1 family=onnx quantity=grad_0_bias arm=Cuda(0) route=H judge=Req2 total=16 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s1 family=onnx quantity=grad_0_weight arm=Cuda(0) route=H judge=Req2 total=128 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s1 family=onnx quantity=grad_2_bias arm=Cuda(0) route=H judge=Req2 total=4 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s1 family=onnx quantity=grad_2_weight arm=Cuda(0) route=H judge=Req2 total=64 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s2 family=onnx quantity=forward arm=Cuda(0) route=H judge=Req2 total=35 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s2 family=onnx quantity=loss arm=Cuda(0) route=H judge=Req2 total=1 fail_count=0 max_abs_diff=2.980232e-8 mean_abs_diff=2.980232e-8 max_rel_err=9.010528e-8 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s2 family=onnx quantity=grad_0_bias arm=Cuda(0) route=H judge=Req2 total=17 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s2 family=onnx quantity=grad_0_weight arm=Cuda(0) route=H judge=Req2 total=221 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s2 family=onnx quantity=grad_2_bias arm=Cuda(0) route=H judge=Req2 total=7 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=onnx_from_sequential_forward_backward_s2 family=onnx quantity=grad_2_weight arm=Cuda(0) route=H judge=Req2 total=119 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.24s
+
+rc=0
