@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/compat_sequential_adaptive_pool3d.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_adaptive_pool3d-6e56c87c9f0465c6)
+
+running 1 test
+test fractional_max_pool::backend_parity::cuda_compat_sequential_fractional_max_pool_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.33s
+
+rc=0
