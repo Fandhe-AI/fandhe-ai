@@ -5,7 +5,7 @@
 # 線形代数 f64 カーネル（#3444）を起動できる。
 #
 # 依存方向: `tensor-core`（`BackendOps` 等）と `backend-cpu`（ホスト経路の委譲先・parity 参照）へ
-# 依存する（R0・イシュー #3431）。facade からは #3853 まで参照しない（Device への ROCm 追加は #3157）。
+# 依存する（R0・イシュー #3431）。facade が通常依存に持つ（#3852。結線は #3853。依存方向は facade -> backend-rocm の一方向）。
 #
 # 公開区分: `publish = true`（crates.io 公開準備済み・未公開。イシュー #3774）。facade に
 # `Device::Rocm` を出すには facade が本クレートを通常依存に持つ必要があり、そのためには
