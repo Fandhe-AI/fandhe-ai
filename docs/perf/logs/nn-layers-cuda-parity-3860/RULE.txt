@@ -1,0 +1,91 @@
+# RULE.txt — Phase 6 の NN 層の CUDA 実機 parity（事前登録。イシュー #3860・親 #3711 Phase 10）
+#
+# 雛形 docs/perf/logs/train-gpu-parity-template/RULE.txt（#3778）を写して埋めた。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<cuda-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-04T12:55Z（実機での実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+issue: 3860
+machine: <cuda-node>（DGX Spark GB10・aarch64・sm_121）。parity 測定で時間計測ではないため専有条件は課さない。
+  常駐 compute プロセスの件数を実行前後に env_info.txt へ記録する（#3856・#3857 と同じ既定の CUDA 実機テスト用ノード）
+target_commit: b82b1e5d129bc25cabf779e64401bf3809526cdb
+  条件: 実行時の HEAD で `git diff --quiet b82b1e5d129bc25cabf779e64401bf3809526cdb <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_cuda_parity.sh が検査する）。
+  転送後にノード側で .rev-stamp とスクリプトの SHA-256 を読み、送信側と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-3860、出力先は <home>/work/out-3860。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai。
+  転送は docs/real-hardware-verification-env.md §3 の rsync だけ（ノードに git は無い）
+hw_lock: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3860 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。各テストの前後で owner が自分のままか確かめ、
+  失っていればその回と以降を undetermined にする（ロックを持たずに測った値は採らない）。ほかのサービスのプロセスは止めない
+script: 同ディレクトリの run_cuda_parity.sh（#3856 版の複製。差分はヘッダに記載。コミット済みのものをそのまま送る。
+  env_info.txt の script_sha256 で照合）。ノード上で setsid nohup により切り離して起動する
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity）の定数は fandhe_ai_tensor_core::tolerance が正本。
+  baseline は追加しない
+switches_left_default: TF32 opt-in は OFF のまま、GPU linalg ゲートは OFF のまま（触らない。環境変数で切替を変えない）
+
+# ---- 対象テストの選び方 ----
+# 雛形の nn 族（crates/facade/tests/train_gpu_parity.rs の train_parity_nn_cuda_matches_cpu）は、対象コミットの登録表 CASES に
+# family "nn" の行が 0 件で、harness::run_family が「undetermined: 族 nn の登録が 0 件」で panic する（構造的に pass にならない）。
+# そのため、各実装 issue が足した #[ignore] の CUDA parity テスト（各 PR が #3860 へ申し送ったもの）を測定対象にする。
+# 雛形の nn 族は 20 番として 1 回だけ実行し、undetermined（登録 0 件）を記録する。完了判定には数えない。
+# テストの実在は対象コミットで --ignored --list により確かめた（Linux でも cfg で除かれない。metal_* だけが cfg(target_os = "macos")）。
+# 実装 issue 以前からある CUDA テスト（interpolate_backend_parity・spatial_layers_backend_parity・batch_norm の rank 5 以外 等）は対象外。
+
+# ---- 腕 ----
+arms: A=Device::Cuda(0)（tape_for(Device::Cuda(0)) の expect、または Device::Cuda(0) を渡す層経路）  B=CPU（tape()／Device::Cpu）
+  CUDA が使えなければ expect 等で panic する（CPU への無言のフォールバックは無い）
+
+# ---- テストと判定（判定契約は各テストのコードが正。ここでは変えない。下の judge は参考の写し）----
+build_then_run:
+  1) 先に次を --no-run でビルドする（判定外。計測中は他の cargo・ビルドを走らせない。開始前に pgrep で他の cargo／rustc が無いことを確かめる）:
+     cargo test -p fandhe-ai --test <t> --no-run  （t = 下表の 15 ターゲット）
+  2) 各テストの前に cargo test -p fandhe-ai --test <t> -- --ignored --exact --list <テスト名> で ": test" で終わる行が
+     ちょうど 1 行であることを確かめる。0 行または 2 行以上なら実行せず undetermined
+  3) 1 本ずつ別プロセスで実行する（--release は付けない。各実装 issue の README のコマンド形に --nocapture・--test-threads=1 を足す。
+     この 2 つは出力と並列度だけに効き判定には影響しない）:
+     timeout 1800 cargo test -p fandhe-ai --test <t> -- --ignored --exact --nocapture --test-threads=1 <テスト名>
+tests:
+   1. #3814 --test compat_sequential_spatial_layers_backend_parity  cuda_upsample_scale_factor_nearest_bit_exact        judge=Bit
+   2. #3814 --test compat_sequential_spatial_layers_backend_parity  cuda_upsample_scale_factor_bilinear_matches_cpu     judge=Req2
+   3. #3817 --test shrink_ops_backend_parity                        cuda_bit_exact_forward_matches_cpu_reference        judge=Bit
+   4. #3817 --test shrink_ops_backend_parity                        cuda_bit_exact_backward_matches_cpu_reference       judge=Bit
+   5. #3818 --test bilinear_ops_backend_parity                      cuda_bilinear_forward_matches_cpu_reference         judge=Req2
+   6. #3818 --test bilinear_ops_backend_parity                      cuda_bilinear_backward_matches_cpu_reference        judge=Req2
+   7. #3819 --test batch_norm_backend_parity                        cuda_batch_norm_train_forward_rank5_matches_cpu     judge=Req2
+   8. #3820 --test compat_sequential_layers_backend_parity          cuda_batch_norm3d_matches_cpu                       judge=Req2
+   9. #3821 --test similarity_ops_backend_parity                    cuda_bit_exact_forward_matches_cpu_reference        judge=Bit
+  10. #3821 --test similarity_ops_backend_parity                    cuda_bit_exact_backward_matches_cpu_reference       judge=Bit
+  11. #3822 --test channel_shuffle_backend_parity                   cuda_channel_shuffle_forward_matches_cpu            judge=Bit
+  12. #3822 --test channel_shuffle_backend_parity                   cuda_channel_shuffle_backward_matches_cpu           judge=Bit
+  13. #3822 --test compat_sequential_channel_shuffle_backend_parity cuda_channel_shuffle_layers_bit_exact               judge=Bit
+  14. #3823 --test adaptive_pool3d_ops_backend_parity               cuda_adaptive_pool3d_ops_match_cpu_reference        judge=Bit（最大値の索引一致を含む）
+  15. #3824 --test compat_sequential_adaptive_pool3d_backend_parity cuda_compat_sequential_adaptive_pool3d_matches_cpu  judge=Req2
+  16. #3825 --test lp_pool_ops_backend_parity                       cuda_lp_pool_ops_match_cpu_reference                judge=Req2
+  17. #3825 --test compat_sequential_lp_pool_backend_parity         cuda_lp_pool_layers_match_cpu                       judge=Req2
+  18. #3826 --test fractional_max_pool_ops_backend_parity           cuda_fractional_max_pool_ops_match_cpu_reference    judge=Bit（索引一致を含む）
+  19. #3827 --test compat_sequential_adaptive_pool3d                 fractional_max_pool::backend_parity::cuda_compat_sequential_fractional_max_pool_matches_cpu  judge=Req2
+  20. #3778 --test train_gpu_parity                                 train_parity_nn_cuda_matches_cpu                    （登録 0 件。undetermined を記録するだけ）
+  説明: Req2 は fandhe_ai_backend_cpu::parity の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。Bit は to_bits の一致
+  説明: 各テストの route（デバイスカーネルかホスト実行か）は記録しない。pass はテストの経路で CPU 参照と判定内で一致したことだけを示す
+pass: exit 0 かつ出力に "running 1 test" と "test result: ok. 1 passed; 0 failed" があること
+fail: 1 件以上の失敗（パニックを含む）。CUDA と CPU は自前バックエンド同士なので判定不能にしない
+undetermined: ノードに届かない、ビルドできない、timeout（exit 124）、--list の不一致、実機ロックの取得不能・喪失、自己検査の失敗、
+  train_gpu_parity の undetermined（登録 0 件の族・run 関数の Err・全ゼロの量）。pass として扱わない
+completion: 1.〜19. がすべて pass のときだけ #3860 を Closes する。1 本でも fail・undetermined なら Refs。
+  20. の undetermined（登録 0 件）は完了判定に数えないが、雛形の nn 族が空であることを README と PR に書き、所有者へ報告する。
+  対象の実装 issue #3814・#3817〜#3827 は既に CLOSED
+
+# ---- run 数 ----
+runs: 各コマンド 1 回。時間の計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。
+  再実行するなら RULE.txt を登録し直す
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を保存する。各ログ末尾に rc=<終了コード>。summary.tsv に exit code・running 件数・test result 行・判定を書く
+masking: ホスト名・ユーザー名・ホームのパスを <cuda-node>／<user>／<home> へ置換する（前後が識別子文字でない場合のみ）。
+  漏れたら記録を捨てて取り直す（fail-closed）。回収ログは手で編集しない
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail が出ても tolerance・判定方式・入力・テストコードを変えない。panic メッセージの値（fail_count・max_abs_diff・
+  max_rel_err、bit 不一致の位置など）をそのまま引用して事実を記録し、README と PR に「要対応」と書く。原因を推測で結論づけない。
+  起票と baseline 化は所有者の承認を得てから行う
