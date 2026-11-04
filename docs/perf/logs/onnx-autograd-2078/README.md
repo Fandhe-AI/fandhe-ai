@@ -26,4 +26,5 @@ GPU tape 版は `Tape::new_with_ops(Box::new(CudaBackendOps::new(..)))` 等へ�
 - backward: `Tape::custom` の backward はホスト実行のみのため device 差分なし。
 
 - 追記（#3778）: GPU tape 上の ONNX の学習の parity テストは onnx-interop の `onnx_autograd_device_parity.rs` 案ではなく、facade の `crates/facade/tests/train_gpu_parity.rs` の `onnx` 族に置く。測定は #3864（GB10）・#3865（Mac mini）。
+- 追記（#3864）: GB10（`<cuda-node>`）で `train_parity_onnx_cuda_matches_cpu` を実測し pass（2026-11-04）。`onnx_from_sequential_forward_backward_s1`・`_s2` の forward・loss・4 つの勾配の計 12 量がすべて REQ-2 統一複合判定で一致（最大絶対誤差は loss の 5.960464e-8、ほかは 0）。route は H（経路の parity）。記録は `docs/perf/logs/onnx-train-cuda-parity-3864/`。Metal（Mac mini）は #3865 で未実測のまま。
 - 追記（#3865）: Mac mini（`<metal-node>`）で `train_parity_onnx_metal_matches_cpu` を実測し pass（2026-11-04）。`onnx_from_sequential_forward_backward_s1`・`_s2` の forward・loss・4 つの勾配の計 12 量がすべて REQ-2 統一複合判定で一致（最大絶対誤差は s2 の loss の 2.980232e-8、ほかは 0）。route は H（経路の parity）。記録は `docs/perf/logs/onnx-train-metal-parity-3865/`。
