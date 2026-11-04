@@ -306,3 +306,16 @@ Q2 の手順（#3774）:
 - **やらなかったこと**: `RocmBackendOps::device()` の `Device::Rocm(0)` への差し替え（バッファと同時。#3853）、`RocmDeviceProvider` の新設、facade の依存追加と G2 の反転（#3852・#3853）、`available_devices` への ROCm の追加（facade 結線まで列挙しない。一貫性契約は保たれる）。
 - **既定経路**: `Cpu`／`Cuda`／`Metal` の腕と列挙は変えておらず、既存テストは無変更で通る。
 - **実機**: すべて未実測のまま（実機テストは #3853・#3867）。
+
+## 12. 実装記録（イシュー #3852・第 2 段）
+
+§1〜§11 は書き換えず、本節で実装結果を記す（§11 と同じ流儀）。
+
+- **承認**: #3771 の所有者の回答コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>（2026-11-01。Q1 = A＋B＋E、Q2 = 0.14.0 で `fandhe-ai-backend-rocm` を公開）。論点 5 は「main への依存追加は進めてよい。0.14.0 への同梱は #3159・#3867 の pass を条件にする」と解釈する。同梱の判断は Phase 11 のゲート（`docs/crates-io-publishing-order.md` §15.7）で行い、本 PR は publish も版のバンプもしない。
+- **入れた変更**: `crates/facade/Cargo.toml` の素の `[dependencies]` に `fandhe-ai-backend-rocm = { path = "../backend-rocm", version = "=0.13.0" }`（cfg・optional・features なし）。`Cargo.lock` の差分は `fandhe-ai` ブロックの依存 1 行のみ。G2 を正ガード `facade_depends_on_backend_rocm_only_in_approved_shape`（`Cargo.lock` の 2 層目を含む）と自己テスト `backend_rocm_approved_shape_synthetic_inputs` へ反転した。「facade は参照しない」と書いたコメント 4 か所（ルート `Cargo.toml`・`backend-rocm` の `Cargo.toml`／`lib.rs`／`linalg.rs`）を訂正した。
+- **設計からの逸脱**: (1) onnx-interop 用の走査 `scan_onnx_dependency_shape` を `scan_approved_path_dependency_shape`（対象キー・別名・承認 path を引数にとる）へ括り出し、onnx 側は同名・同シグネチャの薄いラッパーにした（既存の onnx テストは無変更）。(2) §10.1 が「残す」とした再エクスポート禁止の否定ガードが実在しなかったため `facade_does_not_reexport_backend_rocm_items`（非公開の `use` は許す）と自己テスト `facade_backend_rocm_reexport_guard_detects_violations` を新設した。(3) `Cargo.lock` に facade -> backend-rocm が在り、逆向きは無いことの 2 層目検査を足した。
+- **やらなかったこと**: `resolve_ops`・`available_devices`・`tape_for` の ROCm 腕と `RocmDeviceProvider`、`RocmBackendOps::device()` の差し替え（#3853）。`description`・README・rustdoc・`docs/public-api-design.md` §4.1・索引注釈（#3854）。`RELEASE_CRATES` の変更・publish・版のバンプ。実機 parity（#3159・#3867）。
+- **テストの扱い**: 依存を足す PR なので、CI で動くテストは上記の正ガード・自己テスト・否定ガードである。`#[ignore]` の実機テストはない（#3853・#3867 が置く）。外部 crate の追加・版の更新はなく（`libloading =0.9.0` は cudarc 経由で既に入っている同じ版）、`docs/license-matrix.md`・tolerance・baseline・`unsafe` は不変。
+- **既定経路**: Rust のコード経路は変えておらず（`Cargo.toml`・テスト・コメントのみ）、既存テストは無変更で通る。ROCm 非搭載でもビルドは通る（`scripts/check-rocm-absent.sh assert` 後に build・test・clippy）。
+- **単体 dry-run の注意**: 公開物の manifest から path が外れ、crates.io に `fandhe-ai-backend-rocm 0.13.0` が無い間は、`release.yml` による `fandhe-ai` の単体の dry-run／publish は失敗する。`release-all.yml` の一括 dry-run は workspace 内の兄弟を解決するので通る（本 PR で 9 クレートの一括 dry-run を確認）。詳細は `docs/crates-io-publishing-order.md` §15.8。
+- **実機**: すべて未実測のまま。

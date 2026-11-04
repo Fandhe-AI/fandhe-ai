@@ -1079,7 +1079,22 @@ dry-run の Verifying 段は、展開した `.crate` を ROCm 非搭載の環境
 **#3159・#3867 の実機 parity が pass していること**を確かめる。両方とも**未実測**（本節の時点）である。
 未実測のままなら公開せず所有者へ戻し、`RELEASE_CRATES` から一時的に外すかを判断してもらう。
 
+### 15.8 facade の通常依存化（#3852）
+
+#3852 で `fandhe-ai`（facade）が `fandhe-ai-backend-rocm` を素の `[dependencies]` に持つようになった（承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>）。
+§15.1 の「facade は現時点で backend-rocm に依存しない（#3853）」と §15.4 の「`cargo tree -p fandhe-ai` に backend-rocm は出ない」は、この時点で古くなった。更新後の依存の向き:
+
+```
+① tensor-core, autodiff, backend-cpu → ②″ backend-rocm → ③ fandhe-ai（backend-cuda・backend-metal・onnx-interop も依存）→ hf-hub
+```
+
+- 公開順は変わらない（backend-rocm は fandhe-ai より前）。外部 crate の増減はない（`libloading =0.9.0` は既に cudarc 経由で入っている）。
+- **単体の dry-run／publish の注意**: 公開物の manifest から path が外れ、crates.io に `fandhe-ai-backend-rocm 0.13.0` が無い間は、`release.yml`（単体クレートの再実行・復旧経路）で `fandhe-ai` を dry-run／publish すると失敗する。`release-all.yml` の一括 dry-run は workspace 内の兄弟を解決するので通る（#3852 で `cargo publish --dry-run --locked --allow-dirty` を 9 クレート一括で実行し通ることを確認）。
+- **Phase 11 への申し送り**: #3159・#3867 が未実測のまま backend-rocm を `RELEASE_CRATES` から一時的に外す場合は、facade の依存も同時に外す必要がある（外さないと facade の publish が失敗する）。判断は所有者。
+
 ## 変更履歴
+
+- 2026-11-04（#3852）: facade が backend-rocm を通常依存に持つようにしたことを §15.8 に記録した。単体 dry-run の注意と Phase 11 への申し送りを含む。
 
 - 2026-11-01（#3775）: CLAUDE.md・README・`site/`・`Cargo.toml` コメント・`.claude/agents` の
   公開クレート表記を、公開済み 7・公開対象 9 に合わせた。`.claude/rules/ci.md` の

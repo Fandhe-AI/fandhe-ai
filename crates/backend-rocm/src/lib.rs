@@ -56,7 +56,7 @@
 //!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
-//! facade からは参照しない。
+//! facade が通常依存に持つ（#3852）が、本クレートの型は再エクスポートしない（`api_surface.rs` の否定ガードで固定）。
 
 mod arg_reduce;
 #[cfg(test)]

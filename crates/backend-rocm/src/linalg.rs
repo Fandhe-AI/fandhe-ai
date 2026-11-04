@@ -16,8 +16,8 @@
 //!
 //! # 公開範囲
 //!
-//! 本モジュールは crate 内 `pub` だが `facade` は `backend-rocm` を参照しないため再公開されない
-//! （保留ガード不要。Device への ROCm 追加は #3157）。
+//! 本モジュールは crate 内 `pub` で、facade は `backend-rocm` に依存するが本モジュールを再エクスポート
+//! しない（`facade_does_not_reexport_backend_rocm_items` で固定。#3852）。
 //!
 //! # 初期化と fail-closed（A04・A08）
 //!

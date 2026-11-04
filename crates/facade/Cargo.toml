@@ -34,6 +34,7 @@ categories = ["science", "mathematics"]
 # 依存形状は `crates/bench-harness/Cargo.toml` と同型（spec 確定。
 # docs/spec/05-tasks.md TASK-9.3）: `backend-cuda` は無条件依存（`cudarc`
 # 動的ロード方式により CUDA toolkit 非搭載環境でもビルド成立）、
+# `backend-rocm` も無条件依存（libloading 動的ロード・#3852）、
 # `backend-metal` は `cfg(target_os = "macos")` 限定で分離する。外部
 # クレートの新規追加はなく workspace member 間の path 依存のみのため、
 # ユーザー承認不要と判断する（イシュー #410 実装計画 §2-3。
@@ -55,6 +56,12 @@ fandhe-ai-autodiff = { path = "../autodiff", version = "=0.13.0" }
 fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.13.0" }
 # `Device::Cuda(_)` 指定時に `CudaBackendOps`／`CudaDeviceProvider` を解決する。
 fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.13.0" }
+# `Device::Rocm(_)` 指定時に `RocmBackendOps`／`RocmDeviceProvider` を解決する（結線は #3853。
+# イシュー #3852）。`libloading`（第 12 区分）で HIP を実行時に動的ロードするため ROCm 非搭載
+# でもビルドが通る（facade は libloading を直接参照しない）。workspace 内の path 依存で外部
+# クレートの追加ではない。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469
+# （`docs/backend-rocm-device-exposure-decision.md` §10.1・§12）。cfg・optional・features は付けない。
+fandhe-ai-backend-rocm = { path = "../backend-rocm", version = "=0.13.0" }
 # ONNX import ラッパー（`fandhe_ai::interop::onnx`。イシュー #2017・
 # 2026-09-17 ユーザー承認）。workspace 内クレートの結線であり外部依存の
 # 新規追加ではない（`prost`／`safetensors` は許容依存「相互運用」区分で

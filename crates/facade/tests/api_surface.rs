@@ -1453,7 +1453,13 @@ fn value_has_package_rename_to(value: &str, names: &[&str]) -> bool {
 /// `dependency_section_header_with_trailing_comment_is_recognized` 用の
 /// 構造を #2017 でも踏襲する）。戻り値は
 /// `(offending, saw_known_dependency_line)`。
-fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
+fn scan_approved_path_dependency_shape(
+    content: &str,
+    target_key: &str,
+    alt_names: &[&str],
+    approved_path: &str,
+) -> (Vec<String>, bool) {
+    let target_label = target_key;
     // 1 パス目: バンプ時ドリフト検出の基準となる `fandhe-ai-tensor-core`
     // の version リテラルを、素の `[dependencies]` セクション内から
     // 先に集める（出現順序に依存しないようにする）。
@@ -1502,13 +1508,11 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
             if is_relevant_dependency_section(&current_section)
                 && current_section != APPROVED_PLAIN_DEPENDENCIES_SECTION
             {
-                let mentions_target = current_section.contains(ONNX_INTEROP_DEPENDENCY_KEY)
-                    || ONNX_INTEROP_ALT_NAMES
-                        .iter()
-                        .any(|name| current_section.contains(name));
+                let mentions_target = current_section.contains(target_key)
+                    || alt_names.iter().any(|name| current_section.contains(name));
                 if mentions_target {
                     offending.push(format!(
-                        "section header `{current_section}` が onnx-interop への言及を含む\
+                        "section header `{current_section}` が 対象クレートへの言及を含む\
                          （承認形状は素の `{APPROVED_PLAIN_DEPENDENCIES_SECTION}` のみ）"
                     ));
                 }
@@ -1530,7 +1534,7 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
             saw_known_dependency_line = true;
         }
 
-        let is_target_key = key == ONNX_INTEROP_DEPENDENCY_KEY;
+        let is_target_key = key == target_key;
         // 別名キー（`onnx-interop = { .. }` のように prefix なしでキー
         // そのものが別名）の検出。`path = "../onnx-interop"` のように
         // 値の一部として正当に "onnx-interop" 文字列が現れる（依存先
@@ -1538,11 +1542,11 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
         // `package = "..."` キーによるリネーム迂回（クォート内完全一致）
         // に限定する（単純な部分文字列一致は path 値を誤検出するため
         // 不採用）。
-        let is_alt_key = ONNX_INTEROP_ALT_NAMES.contains(&key);
-        let package_rename_names: Vec<&str> = ONNX_INTEROP_ALT_NAMES
+        let is_alt_key = alt_names.contains(&key);
+        let package_rename_names: Vec<&str> = alt_names
             .iter()
             .copied()
-            .chain(std::iter::once(ONNX_INTEROP_DEPENDENCY_KEY))
+            .chain(std::iter::once(target_key))
             .collect();
         let value_has_package_rename = value_has_package_rename_to(value, &package_rename_names);
         // テーブル形式（`[dependencies.<alias>]`／`[build-dependencies.alias]`
@@ -1574,8 +1578,8 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
         }
         if is_alt_key {
             offending.push(format!(
-                "`{trimmed}` は別名キー `{key}` による onnx-interop 依存（承認名は \
-                 `{ONNX_INTEROP_DEPENDENCY_KEY}` のみ）"
+                "`{trimmed}` は別名キー `{key}` による対象クレート依存（承認名は \
+                 `{target_label}` のみ）"
             ));
         }
         if has_package_rename {
@@ -1589,9 +1593,9 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
         }
 
         plain_dependency_occurrences += 1;
-        if !value.contains("path = \"../onnx-interop\"") {
+        if !value.contains(&format!("path = \"{approved_path}\"")) {
             offending.push(format!(
-                "`{trimmed}` に承認済み path `path = \"../onnx-interop\"` がない"
+                "`{trimmed}` に承認済み path `path = \"{approved_path}\"` がない"
             ));
         }
         match (extract_version_literal(value), &approved_version) {
@@ -1621,16 +1625,73 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
 
     if plain_dependency_occurrences == 0 {
         offending.push(format!(
-            "`{APPROVED_PLAIN_DEPENDENCIES_SECTION}` に `{ONNX_INTEROP_DEPENDENCY_KEY}` が見つからない"
+            "`{APPROVED_PLAIN_DEPENDENCIES_SECTION}` に `{target_label}` が見つからない"
         ));
     } else if plain_dependency_occurrences > 1 {
         offending.push(format!(
-            "`{APPROVED_PLAIN_DEPENDENCIES_SECTION}` に `{ONNX_INTEROP_DEPENDENCY_KEY}` が\
+            "`{APPROVED_PLAIN_DEPENDENCIES_SECTION}` に `{target_label}` が\
              {plain_dependency_occurrences} 回出現（丁度 1 回のはず）"
         ));
     }
 
     (offending, saw_known_dependency_line)
+}
+
+fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
+    scan_approved_path_dependency_shape(
+        content,
+        ONNX_INTEROP_DEPENDENCY_KEY,
+        &ONNX_INTEROP_ALT_NAMES,
+        "../onnx-interop",
+    )
+}
+
+const BACKEND_ROCM_DEPENDENCY_KEY: &str = "fandhe-ai-backend-rocm";
+const BACKEND_ROCM_ALT_NAMES: [&str; 3] =
+    ["backend-rocm", "backend_rocm", "fandhe_ai_backend_rocm"];
+
+/// backend-rocm 用の承認形走査（イシュー #3852・`docs/backend-rocm-device-exposure-decision.md`
+/// §10.1）。onnx と同じ共通走査を、キー `fandhe-ai-backend-rocm`・path `../backend-rocm` で呼ぶ。
+fn scan_backend_rocm_dependency_shape(content: &str) -> (Vec<String>, bool) {
+    let (mut offending, saw) = scan_approved_path_dependency_shape(
+        content,
+        BACKEND_ROCM_DEPENDENCY_KEY,
+        &BACKEND_ROCM_ALT_NAMES,
+        "../backend-rocm",
+    );
+    // 共通走査は dev-dependencies を除外する（onnx 側の既存契約は維持）。ROCm 側は dev にも
+    // 対象クレート（別名・package 改名を含む）を置けないよう追加で走査する（Codex P2）。
+    let mut in_dev = false;
+    for line in content.lines() {
+        let code = line.split_once('#').map(|(a, _)| a).unwrap_or(line).trim();
+        if code.starts_with('[') && code.ends_with(']') {
+            in_dev = is_dev_dependencies_section(code);
+            if in_dev
+                && (code.contains(BACKEND_ROCM_DEPENDENCY_KEY)
+                    || BACKEND_ROCM_ALT_NAMES.iter().any(|n| code.contains(n)))
+            {
+                offending.push(format!("dev 系ヘッダ `{code}` が backend-rocm に言及"));
+            }
+            continue;
+        }
+        if !in_dev || code.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = code.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"');
+        let mut names: Vec<&str> = BACKEND_ROCM_ALT_NAMES.to_vec();
+        names.push(BACKEND_ROCM_DEPENDENCY_KEY);
+        let top_pkg =
+            key == "package" && names.contains(&value.trim().trim_matches('"').trim_matches('\''));
+        if names.contains(&key) || value_has_package_rename_to(value, &names) || top_pkg {
+            offending.push(format!(
+                "dev-dependencies の行 `{code}` が backend-rocm を参照"
+            ));
+        }
+    }
+    (offending, saw)
 }
 
 #[test]
@@ -45629,7 +45690,7 @@ fn distributed_usage_doctest_is_present_and_compiled() {
 /// `fandhe_ai::Device` に `Rocm(_)` が公開パスで存在し、`#[non_exhaustive]` 下の
 /// 網羅 `match`（`_` 腕つき）で各 variant が期待どおり分類されること。承認:
 /// <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>、
-/// `docs/backend-rocm-device-exposure-decision.md` §10.1。G2（依存の形）は #3852 で反転する。
+/// `docs/backend-rocm-device-exposure-decision.md` §10.1。G2（依存の形）は #3852 で反転済み。
 #[test]
 fn device_variant_classify_with_wildcard_arm_includes_rocm() {
     fn classify(d: fandhe_ai::Device) -> &'static str {
@@ -45705,61 +45766,270 @@ fn device_enum_inventory_guard_detects_substitutions() {
     }
 }
 
-/// 保留ガード G2（イシュー #3157）: 公開クレート facade が非公開の
-/// `backend-rocm` を `[dev-dependencies]` 以外で参照しないこと
-/// （`cargo publish` を壊さない。決定記録 Q2 の承認まで保留）。
-/// G2 の検査本体。`manifest` 中の dev 以外の依存節で backend-rocm の参照
-/// （キー行・値・`[dependencies.backend-rocm]` 形のヘッダ行自体）を探し、
-/// 最初の違反行を返す。
-fn find_backend_rocm_reference_outside_dev(manifest: &str) -> Option<String> {
-    let names = ["backend-rocm", "backend_rocm", "fandhe-ai-backend-rocm"];
-    let mut section = String::new();
-    for raw in manifest.lines() {
-        let line = raw.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') {
-            section = line.to_string();
-            // テーブルヘッダ形式（`[dependencies.backend-rocm]`）は
-            // ヘッダ自体が依存名を含むため、ヘッダ行も検査する。
-            if is_relevant_dependency_section(&section) && names.iter().any(|n| line.contains(n)) {
-                return Some(line.to_string());
+/// 正ガード G2（イシュー #3852。保留ガード G2〈#3157〉からの反転）: 公開クレート facade が
+/// `fandhe-ai-backend-rocm` を素の `[dependencies]` にちょうど 1 回、`path = "../backend-rocm"`・
+/// tensor-core と同一 version の承認形でだけ持つこと。dev／build／target 別／ヘッダ形式・別名・
+/// `package` 改名・`optional`／`features`／`git`／`registry` は違反。承認:
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>、
+/// `docs/backend-rocm-device-exposure-decision.md` §10.1・§12。
+#[test]
+fn facade_depends_on_backend_rocm_only_in_approved_shape() {
+    let path = facade_crate_root().join("Cargo.toml");
+    let content = read_to_string_or_panic(&path);
+    let (offending, saw_known) = scan_backend_rocm_dependency_shape(&content);
+    assert!(
+        saw_known,
+        "自己検証: 既知の依存行（tensor-core／autodiff）が走査されていない（{path:?}）"
+    );
+    assert!(
+        offending.is_empty(),
+        "facade の backend-rocm 依存が承認形から逸脱している: {offending:?}"
+    );
+
+    // 2 層目: Cargo.lock。facade -> backend-rocm は存在し、逆向きは存在しない。
+    let lock = read_to_string_or_panic(&facade_crate_root().join("../../Cargo.lock"));
+    let deps = lock_package_dependencies(&lock, "fandhe-ai")
+        .expect("Cargo.lock に fandhe-ai の package が無い");
+    assert!(
+        deps.iter().any(|d| d == "fandhe-ai-tensor-core"),
+        "正のプローブ: 既知の依存が読めていない: {deps:?}"
+    );
+    assert!(
+        deps.iter().any(|d| d == BACKEND_ROCM_DEPENDENCY_KEY),
+        "Cargo.lock 上で facade が backend-rocm に依存していない: {deps:?}"
+    );
+    let rocm_deps = lock_package_dependencies(&lock, BACKEND_ROCM_DEPENDENCY_KEY)
+        .expect("Cargo.lock に fandhe-ai-backend-rocm の package が無い");
+    assert!(
+        !rocm_deps.iter().any(|d| d == "fandhe-ai"),
+        "依存方向は facade -> backend-rocm の一方向のみ: {rocm_deps:?}"
+    );
+}
+
+/// G2 の自己テスト: 承認形は違反 0 件、すり替え各類型は 1 件以上で検出される。
+#[test]
+fn backend_rocm_approved_shape_synthetic_inputs() {
+    let head = "[package]\nname = \"fandhe-ai\"\n\n";
+    let base = "fandhe-ai-tensor-core = { path = \"../tensor-core\", version = \"=0.9.0\" }\nfandhe-ai-autodiff = { path = \"../autodiff\", version = \"=0.9.0\" }\n";
+    let ok_line = "fandhe-ai-backend-rocm = { path = \"../backend-rocm\", version = \"=0.9.0\" }\n";
+    let ok = format!("{head}[dependencies]\n{base}{ok_line}");
+    let (v, saw) = scan_backend_rocm_dependency_shape(&ok);
+    assert!(saw && v.is_empty(), "承認形が誤検出された: {v:?}");
+
+    let dep = format!("{head}[dependencies]\n{base}");
+    let bad: Vec<(&str, String)> = vec![
+        ("dev のみ", format!("{dep}[dev-dependencies]\n{ok_line}")),
+        (
+            "target 別",
+            format!("{dep}[target.'cfg(unix)'.dependencies]\n{ok_line}"),
+        ),
+        (
+            "ヘッダ形式",
+            format!("{dep}[dependencies.fandhe-ai-backend-rocm]\npath = \"../backend-rocm\"\n"),
+        ),
+        (
+            "別名キー",
+            format!(
+                "{dep}{ok_line}backend-rocm = {{ path = \"../backend-rocm\", version = \"=0.9.0\" }}\n"
+            ),
+        ),
+        (
+            "package 二重引用符",
+            format!(
+                "{dep}{ok_line}x = {{ package = \"fandhe-ai-backend-rocm\", path = \"../x\" }}\n"
+            ),
+        ),
+        (
+            "package 単一引用符",
+            format!("{dep}{ok_line}x = {{ package = 'backend-rocm', path = \"../x\" }}\n"),
+        ),
+        (
+            "package 独立行",
+            format!("{dep}{ok_line}[dependencies.x]\npackage = \"fandhe-ai-backend-rocm\"\n"),
+        ),
+        (
+            "optional",
+            format!(
+                "{dep}fandhe-ai-backend-rocm = {{ path = \"../backend-rocm\", version = \"=0.9.0\", optional = true }}\n"
+            ),
+        ),
+        (
+            "features",
+            format!(
+                "{dep}fandhe-ai-backend-rocm = {{ path = \"../backend-rocm\", version = \"=0.9.0\", features = [\"x\"] }}\n"
+            ),
+        ),
+        (
+            "git",
+            format!(
+                "{dep}fandhe-ai-backend-rocm = {{ path = \"../backend-rocm\", version = \"=0.9.0\", git = \"https://x\" }}\n"
+            ),
+        ),
+        (
+            "registry",
+            format!(
+                "{dep}fandhe-ai-backend-rocm = {{ path = \"../backend-rocm\", version = \"=0.9.0\", registry = \"x\" }}\n"
+            ),
+        ),
+        (
+            "version 不一致",
+            format!(
+                "{dep}fandhe-ai-backend-rocm = {{ path = \"../backend-rocm\", version = \"=0.8.0\" }}\n"
+            ),
+        ),
+        (
+            "version なし",
+            format!("{dep}fandhe-ai-backend-rocm = {{ path = \"../backend-rocm\" }}\n"),
+        ),
+        (
+            "path 違い",
+            format!(
+                "{dep}fandhe-ai-backend-rocm = {{ path = \"../other\", version = \"=0.9.0\" }}\n"
+            ),
+        ),
+        ("0 回", dep.clone()),
+        (
+            "通常依存＋dev 別名",
+            format!(
+                "{head}[dependencies]\n{base}{ok_line}[dev-dependencies]\nbackend-rocm = {{ path = \"../backend-rocm\" }}\n"
+            ),
+        ),
+        (
+            "通常依存＋dev package 改名",
+            format!(
+                "{head}[dependencies]\n{base}{ok_line}[dev-dependencies]\nx = {{ package = \"fandhe-ai-backend-rocm\", path = \"../x\" }}\n"
+            ),
+        ),
+        (
+            "通常依存＋dev 同名キー",
+            format!("{head}[dependencies]\n{base}{ok_line}[dev-dependencies]\n{ok_line}"),
+        ),
+        ("2 回", format!("{dep}{ok_line}{ok_line}")),
+        (
+            "コメント付きヘッダ",
+            format!("{dep}{ok_line}[build-dependencies] # x\n{ok_line}"),
+        ),
+    ];
+    for (label, src) in &bad {
+        assert!(
+            !scan_backend_rocm_dependency_shape(src).0.is_empty(),
+            "すり替え「{label}」が検出されない"
+        );
+    }
+}
+
+/// 空白正規化済みの文頭から `#[...]`／`#![...]` 属性を（括弧の入れ子を数えて）全て剥がす。
+fn strip_leading_attributes(norm: &str) -> String {
+    let mut rest = norm.trim_start();
+    while rest.starts_with("#[") || rest.starts_with("#![") {
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
             }
-            continue;
         }
-        if !is_relevant_dependency_section(&section) {
-            continue;
-        }
-        if names.iter().any(|n| line.contains(n))
-            || value_has_package_rename_to(line, &["fandhe-ai-backend-rocm", "backend-rocm"])
-        {
-            return Some(format!("{section}: {line}"));
+        match end {
+            Some(e) => rest = rest[e..].trim_start(),
+            None => break,
         }
     }
-    None
+    rest.to_string()
 }
 
+/// 再エクスポート禁止ガードの検査本体: facade の公開面に backend-rocm の型を出す `pub use`・
+/// `pub type`・`pub extern crate` を文単位（空白正規化後）で探す。非公開の `use`
+/// （#3853 の `resolve_ops` が使う形）と `pub(crate)` 等の制限付き可視性は許す。
+fn backend_rocm_reexport_violations(src: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut stmt = String::new();
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        stmt.push(' ');
+        stmt.push_str(t);
+        if !t.ends_with(';') && !t.ends_with('{') && !t.ends_with('}') {
+            continue;
+        }
+        let norm = stmt.split_whitespace().collect::<Vec<_>>().join(" ");
+        stmt.clear();
+        // 属性（`#[doc(hidden)]` 等）が文頭に蓄積されると `pub` 判定を外すため、先に剥がす。
+        let norm = strip_leading_attributes(&norm);
+        let restricted = ["pub(crate)", "pub(super)", "pub(self)", "pub(in"]
+            .iter()
+            .any(|p| norm.starts_with(p));
+        if !norm.starts_with("pub") || restricted {
+            continue;
+        }
+        let item_like = norm.contains(" use ")
+            || norm.contains(" type ")
+            || norm.contains("extern crate")
+            || norm.starts_with("pub use ");
+        if item_like && norm.contains("backend_rocm") {
+            v.push(norm);
+        }
+    }
+    v
+}
+
+/// 否定ガード: facade の `src/**/*.rs` が backend-rocm の型を再エクスポートしない
+/// （公開面は増やさない。`docs/backend-rocm-device-exposure-decision.md` §10.1）。
 #[test]
-fn facade_does_not_depend_on_backend_rocm_outside_dev_dependencies_while_3157_on_hold() {
-    let manifest = read_to_string_or_panic(&facade_crate_root().join("Cargo.toml"));
-    if let Some(hit) = find_backend_rocm_reference_outside_dev(&manifest) {
-        panic!("facade が backend-rocm を参照している（Q2 承認前は禁止）: {hit}");
+fn facade_does_not_reexport_backend_rocm_items() {
+    let mut files = Vec::new();
+    collect_rs_3844(&facade_crate_root().join("src"), &mut files);
+    assert!(!files.is_empty(), "inventory: 走査ファイルが 0 件");
+    for (p, body) in &files {
+        let v = backend_rocm_reexport_violations(body);
+        assert!(
+            v.is_empty(),
+            "{p} が backend-rocm を再エクスポートしている: {v:?}"
+        );
     }
 }
 
-/// G2 の負のプローブ: テーブルヘッダ形式・通常形式は検出し、
-/// `[dev-dependencies]` は許容する。
+/// 再エクスポート禁止ガードの自己テスト（正負のプローブ）。
 #[test]
-fn backend_rocm_guard_detects_header_style_dependency() {
-    let header = "[dependencies.backend-rocm]\npath = \"../backend-rocm\"\n";
-    assert!(find_backend_rocm_reference_outside_dev(header).is_some());
-    let target = "[target.'cfg(unix)'.dependencies.backend-rocm]\npath = \"../x\"\n";
-    assert!(find_backend_rocm_reference_outside_dev(target).is_some());
-    let inline = "[dependencies]\nbackend-rocm = { path = \"../backend-rocm\" }\n";
-    assert!(find_backend_rocm_reference_outside_dev(inline).is_some());
-    let dev = "[dev-dependencies]\nbackend-rocm = { path = \"../backend-rocm\" }\n[dev-dependencies.backend-rocm]\npath = \"x\"\n";
-    assert!(find_backend_rocm_reference_outside_dev(dev).is_none());
+fn facade_backend_rocm_reexport_guard_detects_violations() {
+    for bad in [
+        "pub use fandhe_ai_backend_rocm::RocmBackendOps;",
+        "pub use fandhe_ai_backend_rocm::{GfxTarget, RocmBackendOps};",
+        "pub use fandhe_ai_backend_rocm as rocm;",
+        "pub type Ops = fandhe_ai_backend_rocm::RocmBackendOps;",
+        "pub extern crate fandhe_ai_backend_rocm;",
+        "pub use fandhe_ai_backend_rocm::{\n    GfxTarget,\n};",
+        "pub(crate) use x::Y;\npub use fandhe_ai_backend_rocm::Z;",
+        "#[doc(hidden)]\npub use fandhe_ai_backend_rocm::RocmBackendOps;",
+        "#[doc(hidden)]\n#[allow(unused)]\npub type Ops = fandhe_ai_backend_rocm::RocmBackendOps;",
+    ] {
+        assert!(
+            !backend_rocm_reexport_violations(bad).is_empty(),
+            "検出すべき入力を見逃した: {bad}"
+        );
+    }
+    for ok in [
+        "use fandhe_ai_backend_rocm::RocmBackendOps;",
+        "pub(crate) use fandhe_ai_backend_rocm::RocmBackendOps;",
+        "#[doc(hidden)]\npub(crate) use fandhe_ai_backend_rocm::RocmBackendOps;",
+        "// pub use fandhe_ai_backend_rocm::X;",
+        "pub use fandhe_ai_backend_cuda::CudaBackendOps;",
+        "",
+    ] {
+        assert!(
+            backend_rocm_reexport_violations(ok).is_empty(),
+            "誤検出: {ok}"
+        );
+    }
 }
 // ---------------------------------------------------------------------------
 // イシュー #3847: facade は hf-hub に依存しない（設計 `docs/hf-hub-integration-design.md` §10.1）
@@ -45807,8 +46077,15 @@ fn find_hf_hub_reference_in_any_dependency_section(
 /// `[[package]]` ブロックの `dependencies` 要素を返す。該当ブロックが無ければ `None`。
 /// lock の依存は dev 依存も含むため、manifest 走査とは独立した 2 層目になる。
 fn facade_lock_dependencies(lock: &str) -> Option<Vec<String>> {
+    lock_package_dependencies(lock, "fandhe-ai")
+}
+
+/// `Cargo.lock` から `name = "<name>"`（完全一致）の `[[package]]` ブロックの
+/// `dependencies` 要素を返す（#3852 で package 名を引数化）。
+fn lock_package_dependencies(lock: &str, name: &str) -> Option<Vec<String>> {
+    let want = format!("name = \"{name}\"");
     for block in lock.split("[[package]]") {
-        if !block.lines().any(|l| l.trim() == "name = \"fandhe-ai\"") {
+        if !block.lines().any(|l| l.trim() == want) {
             continue;
         }
         let mut deps = Vec::new();
