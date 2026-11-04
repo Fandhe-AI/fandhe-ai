@@ -307,3 +307,14 @@ export（#2018）も引き続き対象外。
 - OWASP: A03 は §13.3 の検証順（確保と変換の前に検証。BOOL の値も検査）。A04 は対応外 dtype を無言で飛ばさず fail-closed、非可逆変換を暗黙にしない。A06 は依存変更なし。A08 は決定的出力と一時ファイル＋`rename` を typed 側にも適用し、公開面を allowlist で固定する。秘密情報・実ホスト名は書かない。
 - スコープ外（起票は所有者承認後）: U8／I8 等 `Element` 未実装の dtype、`__metadata__` の読出し API、入力サイズ上限（§11.3 から継続）、`Var`／`Tape` の f16 値型、`docs/huggingface-safetensors-interop-guide.md` への bf16 手順の追記。
 - 本 PR は docs のみ。`Closes #3761`、`Refs #3770 #3845 #3846`。
+
+## 14. 実装記録（イシュー #3845・読込側）
+
+- 承認: #3770 の所有者の回答コメント（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145）。§13 の案 C どおりに実装した。§13 からの逸脱: なし
+- 実装（`crates/onnx-interop/src/st_load.rs`）: `SafetensorsDtype`（7 種・`header_name`）、`SafetensorsTensor`（`dtype`／`shape`／`to_f32`／`from_f32`）、`load_safetensors_typed`／`load_safetensors_typed_from_bytes`／`require_keys_typed`、`LoadError::InvalidBoolValue`。`UnsupportedDtype` の doc を「対応外の dtype」に直した（シグネチャ・挙動は不変）。既存の `load_safetensors_f32_from_bytes` 本体は 1 バイトも変更していない
+- 補足: 名前を昇順で走査してエラーを決定的にした。dtype 判定は要素幅の計算より前で `_ => None` により fail-closed（F4 等のサブバイト型を含む）。f16／bf16 の `to_f32`／`from_f32` は `CastElement` が封印されているためクレート内で確保量の `isize::MAX` 検査を再現し、他 dtype は `cast_to_f32`／`cast_from_f32` へ委譲した
+- facade: `fandhe_ai::interop::safetensors` へ読込側 5 件を再エクスポート（7 → 12 件）。`half` は再エクスポートしない
+- 正ガード（基準 76b5a6139）: `interop_safetensors_reexports_exactly_expected_surface`（`crates/facade/tests/api_surface.rs:3003`。期待集合を 12 件へ反転）、`interop_safetensors_types_are_reachable_via_facade`（:3123。関数ポインタの型強制・全 variant の網羅 match を追加）、自己テスト `interop_safetensors_reexport_scanner_rejects_alias_and_swap`（:3096。走査器が識別子形以外〈`as` 別名・glob〉を offending にするよう修正）。B5 には保留 doctest ガード（`*HoldDoctestGuard`）は存在せず、完全一致 allowlist の反転で充足した
+- テスト: `crates/onnx-interop/tests/st_typed.rs`、`crates/facade/tests/interop_safetensors_typed_load.rs`、facade モジュール doc の doctest。実機依存テストはない
+- 書出側（`save_safetensors_typed*`・期待集合 14 件・往復テスト・§13.2 の (a)／(b) のファイル経由部分）は #3846
+- 依存・`unsafe`・tolerance・ガードレール閾値の変更はない

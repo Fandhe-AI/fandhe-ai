@@ -74,6 +74,40 @@
 //! other.load_state_dict(loaded).unwrap();
 //! ```
 //!
+//! ## dtype 混在ファイルの読込（イシュー #3845・設計記録 §13 案 C・読込側）
+//!
+//! HF Hub の bf16／f16 チェックポイントや f32 重み + i64 buffer の混在ファイルは
+//! 既存の `*_f32` では [`LoadError::UnsupportedDtype`] で拒否される（不変）。
+//! 別名の [`load_safetensors_typed_from_bytes`]／[`load_safetensors_typed`] は
+//! F32／F16／BF16／F64／I32／I64／BOOL の 7 種を [`SafetensorsTensor`] として bit 単位で
+//! 読み、それ以外の dtype と BOOL の 0／1 以外は拒否する。f32 への昇格は明示 opt-in の
+//! [`SafetensorsTensor::to_f32`]（`half` は再エクスポートしないため dtype 判定は
+//! [`SafetensorsTensor::dtype`] を使う）。書出側は #3846。
+//!
+//! ```
+//! use fandhe_ai::interop::safetensors::{
+//!     SafetensorsDtype, SafetensorsTensor, load_safetensors_typed_from_bytes,
+//! };
+//!
+//! // F64 [1.5] + I64 [7] + BOOL [1, 0] を手組みした safetensors バイト列。
+//! let header = br#"{"a":{"dtype":"F64","shape":[1],"data_offsets":[0,8]},"b":{"dtype":"I64","shape":[1],"data_offsets":[8,16]},"c":{"dtype":"BOOL","shape":[2],"data_offsets":[16,18]}}"#;
+//! let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+//! bytes.extend_from_slice(header);
+//! bytes.extend_from_slice(&1.5f64.to_le_bytes());
+//! bytes.extend_from_slice(&7i64.to_le_bytes());
+//! bytes.extend_from_slice(&[1, 0]);
+//!
+//! let m = load_safetensors_typed_from_bytes(&bytes).unwrap();
+//! assert_eq!(m["a"].dtype(), SafetensorsDtype::F64);
+//! assert!(matches!(m["b"], SafetensorsTensor::I64(_)));
+//! assert_eq!(m["a"].to_f32().unwrap().host_slice()[0], 1.5);
+//! assert_eq!(m["c"].to_f32().unwrap().host_slice().to_vec(), vec![1.0, 0.0]);
+//!
+//! let t = fandhe_ai::Tensor::<f32>::new(vec![0.5, 2.0], &[2]).unwrap();
+//! let bf = SafetensorsTensor::from_f32(&t, SafetensorsDtype::BF16).unwrap();
+//! assert_eq!(bf.to_f32().unwrap().host_slice().to_vec(), vec![0.5, 2.0]);
+//! ```
+//!
 //! ## 対象外
 //!
 //! `compat::callbacks::ModelCheckpoint` からの薄いラッパー結線
@@ -92,7 +126,11 @@
 // `tests/api_surface.rs::interop_safetensors_reexports_exactly_expected_surface`
 // が `pub use` を行単位で走査する契約に合わせる。`src/optim.rs` と
 // 同じ理由）。
+pub use fandhe_ai_onnx_interop::st_load::load_safetensors_typed;
+pub use fandhe_ai_onnx_interop::st_load::load_safetensors_typed_from_bytes;
+pub use fandhe_ai_onnx_interop::st_load::require_keys_typed;
 pub use fandhe_ai_onnx_interop::st_load::{LoadError, load_safetensors_f32};
+pub use fandhe_ai_onnx_interop::st_load::{SafetensorsDtype, SafetensorsTensor};
 pub use fandhe_ai_onnx_interop::st_load::{load_safetensors_f32_from_bytes, require_keys};
 pub use fandhe_ai_onnx_interop::st_save::save_safetensors_f32_to_bytes;
 pub use fandhe_ai_onnx_interop::st_save::{SaveError, save_safetensors_f32};

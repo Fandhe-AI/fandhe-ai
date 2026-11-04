@@ -11,6 +11,9 @@
 //! - [`st_load`]: safetensors パース → `tensor-core::Tensor<f32>` へのマッピング
 //!   （TASK-7.1a・#73・REQ-7）。PyTorch で保存した重みファイルのロード経路を提供する。
 //!   キー不足時は [`st_load::LoadError::MissingKeys`] で報告する。
+//!   dtype 混在の読込は [`st_load::load_safetensors_typed`]・
+//!   [`st_load::load_safetensors_typed_from_bytes`]・[`st_load::require_keys_typed`]・
+//!   [`st_load::SafetensorsTensor`]・[`st_load::SafetensorsDtype`]（イシュー #3845）。
 //!   [`st_load::LoadError`]・[`st_load::load_safetensors_f32`]・
 //!   [`st_load::load_safetensors_f32_from_bytes`]・[`st_load::require_keys`]
 //!   は `fandhe-ai::interop::safetensors` として facade から再エクスポート
