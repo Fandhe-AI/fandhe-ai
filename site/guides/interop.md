@@ -13,8 +13,8 @@ safetensors save／load は `fandhe_ai::interop::safetensors`
 `fandhe_ai::interop::npy`（`NpyError`／`load_npy`／`save_npy`／`load_npz`／`save_npz`。
 `Tensor<f32>` 限定・パス版のみ。書き出しは原子的ではなく、読み込みは symlink を辿る）です。** import 済みモデルの
 roundtrip export に加え、学習済み `compat::Sequential`（対応層は
-`Linear`／`ReLU`／`Softmax`／`LayerNorm`／`GELU`〈erf 版〉／
-`Conv2d` の 6 種。`Sigmoid` は数値契約が承認保留のため対象外）から
+`Linear`／`ReLU`／`Sigmoid`／`Softmax`／`LayerNorm`／`GELU`〈erf 版〉／
+`Conv2d` の 7 種、`Sigmoid` を含む）から
 直接 ONNX へ書き出すこともできます
 （`OnnxModel::from_sequential`）
 （`onnx-interop` クレート。公開名 `fandhe-ai-onnx-interop`。依存解決の
@@ -141,8 +141,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 以下の点に注意してください:
 
-- **対応層は `Linear`／`ReLU`／`Softmax`／`LayerNorm`／
-  `GELU`（erf 版）／`Conv2d` の 6 種**です（`Sigmoid`・Tanh・GeluTanh・
+- **対応層は `Linear`／`ReLU`／`Sigmoid`／`Softmax`／`LayerNorm`／
+  `GELU`（erf 版）／`Conv2d` の 7 種**です。`Sigmoid` を含むモデルの数値は
+  複合判定で一致し、bit 一致は保証しません（Tanh・GeluTanh・
   LogSoftmax・Conv1d 等の非対応層を 1 つでも含む場合、`Graph` を
   一切構築せず `OnnxError::UnsupportedLayer { index, layer_kind }`
   を返します。部分的なモデルは返りません）。`LayerNorm` は

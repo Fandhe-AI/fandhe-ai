@@ -723,7 +723,7 @@ sigmoid_is_rejected_as_unsupported`・`crates/facade/tests/
 interop_onnx_export_sequential.rs::
 sequential_with_sigmoid_is_rejected_with_unsupported_layer` で固定）。
 項 5 が承認された場合は、別 issue で `as_sigmoid` フックと
-`export_nn` の Sigmoid 腕を再結線する。
+`export_nn` の Sigmoid 腕を再結線する（→ #3844 で再結線。§19.12）。
 
 ### 18.3 スコープ外（引き続き対象外）
 
@@ -822,7 +822,7 @@ sequential_with_sigmoid_is_rejected_with_unsupported_layer` で固定）。
 
 ### 19.0 位置づけ・課題・推奨
 
-- 位置づけ: ルート #3711 の Phase 2 の設計記録である。追跡表 `docs/compat-matrix-ari-tracker.md` の行 26（B3）に対応する。承認の回答先は #3770（論点 2）、実装は #3844 である。**承認: 未取得（#3770 待ち）**。本節は承認を得たとは主張しない。コード・公開面・tolerance・baseline・ガードレール閾値は変えない（docs のみ）
+- 位置づけ: ルート #3711 の Phase 2 の設計記録である。追跡表 `docs/compat-matrix-ari-tracker.md` の行 26（B3）に対応する。承認の回答先は #3770（論点 2）、実装は #3844 である。**承認: 取得済み（#3770 の所有者回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145>〉論点 2。(α) と `Module::as_sigmoid` の既定実装つき追加）**。実装は #3844（§19.12）
 - 番号の注記: Issue・#3770・#3844 の本文は Sigmoid を「項目 27」と書くが、追跡表の通し番号では Sigmoid は行 26 で、行 27 は safetensors（B5）である。行は番号ではなく項目名で探す。表の番号は直さない
 - 現状のコード事実（基準 sha `5834b0958`。行番号は編集で動くため、実装 PR が現行の行に直す）:
   - G1: `ExportOp::Sigmoid` と `SUPPORTED_OP_TYPES` の `"Sigmoid"` は既にある（`crates/onnx-interop/src/onnx/export_ops.rs:76,155,202`）。interp の `sigmoid` も既にある（`crates/onnx-interop/src/ops/activation.rs:46-48`）
@@ -910,7 +910,7 @@ sequential_with_sigmoid_is_rejected_with_unsupported_layer` で固定）。
 
 - 適用記録の案（`docs/compat-api-scope.md` への実際の記入は #3844 が行う。#3906 の先例）: 「**適用記録（イシュー #3844・親 #3760。承認: <#3770 の回答 URL>）**: `from_sequential` の対応層に `Sigmoid` を追加（6→7 種）。数値契約 (α)。新規 pub 名なし。公開状態: 公開済み（既存 `from_sequential` の受理範囲の拡大）」
 - #3844 が一緒に直すもの: `docs/onnx-export-op-mapping.md`、`site/guides/interop.md`、`crates/facade/src/interop/onnx.rs` のモジュール doc と `from_sequential` の doc、`crates/onnx-interop/src/onnx/export_nn.rs` の冒頭 doc、テスト冒頭のコメント（`onnx_export_layers_parity.rs`・`interop_onnx_export_layers_parity.rs`）
-- [ ] `docs/compat-api-scope.md` に適用記録を追記した（#3844 に回す。本 PR では案のみ）
+- [x] `docs/compat-api-scope.md` に適用記録を追記した（#3844）
 - [x] `docs/README.md` の索引を更新した（本 PR）
 - [x] 追跡表 `docs/compat-matrix-ari-tracker.md` の行 26 の設計記録を更新した（本 PR）
 
@@ -932,9 +932,19 @@ sequential_with_sigmoid_is_rejected_with_unsupported_layer` で固定）。
 | Sigmoid の数値契約 | (α)／(β)／(γ) | (α) | 確認があるまで #3844 に進まない。現在の拒否テスト（G6）による fail-closed 拒否を続ける |
 | 実装するか対象外にするか | 実装する／対象外にする | 実装する | 同上 |
 
-承認: 未取得（#3770 待ち）。
+承認: 取得済み（<https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145>）。(α) で実装した（§19.12）。
 
 ### 19.11 セキュリティ・スコープ外
 
 - OWASP の観点: A08 閉じた集合のフックで判別し、未知の層は fail-closed で拒否する（部分 export をしない）。A03 新しい外部入力はなく、import 側の検証順も変えない。A06 依存の追加なし。秘密情報・ホスト名は書かない（ノードは `<cuda-node>` 等で表す）
 - スコープ外（無断で起票しない）: (β) の interp 統一、`Tanh`／`Hardsigmoid`／`LogSigmoid` の export 対応、外部 ONNX ランタイムとの一致保証（§7 (a) を引き継ぐ）、`value_info` の出力
+
+### 19.12 実装記録（イシュー #3844）
+
+- 変更ファイル: `crates/autodiff/src/nn/module.rs`（`Module::as_sigmoid` の既定実装 `false` と `Sigmoid` のオーバーライド）、`crates/onnx-interop/src/onnx/export_nn.rs`（`as_sigmoid()` の腕と冒頭 doc。対応層 7 種）、`crates/facade/src/interop/onnx.rs`（doc と doctest）
+- 置換したテスト（実行時の否定テスト 2 本を正テストへ）: `sigmoid_is_rejected_as_unsupported` → `sigmoid_layer_parity`、`sequential_with_sigmoid_is_rejected_with_unsupported_layer` → `sequential_with_sigmoid_is_accepted`
+- 追加したテスト: `sigmoid_export_op_types_are_exact`、`sigmoid_lookalike_layers_are_rejected_as_unsupported`、`relu_then_sigmoid_is_bit_identical`、`sequential_with_hardsigmoid_is_rejected_with_unsupported_layer`、`sequential_with_log_sigmoid_is_rejected_with_unsupported_layer`、`sigmoid_model_parity`、`sigmoid_edge_sweep_parity`、`sigmoid_negative_strided_sweep_parity`、`sigmoid_nan_class_matches`、`sigmoid_hook_is_true_only_for_sigmoid`（autodiff）、api_surface の正ガード `onnx_export_sigmoid_matches_approved_shape_issue_3844`・自己テスト `onnx_export_sigmoid_guard_issue_3844_detects_swaps`・`onnx_export_sigmoid_usage_doctest_is_present_and_compiled`・`onnx_export_sigmoid_is_reachable_via_facade_only`
+- api_surface に Sigmoid 専用の否定ガード・保留 doctest ガードは元から無かった（§19.1 のとおり）
+- 検証: `cargo test -p fandhe-ai-autodiff --lib`、`-p fandhe-ai-onnx-interop`、`-p fandhe-ai --test api_surface ほか`、`--doc` が pass。clippy（`-D warnings`）pass。実機は該当なし（export・interp・`forward_host` はホスト実行のみ）で測っていない
+- 逸脱: なし。tolerance・interp の `sigmoid`・baseline は不変。依存追加なし、新規 `unsafe` 0 件
+- 単体の `cargo publish --dry-run -p fandhe-ai-onnx-interop` は registry 上の autodiff に `as_sigmoid` が無い間は失敗しうる既知の非ブロッカー（§19.6）

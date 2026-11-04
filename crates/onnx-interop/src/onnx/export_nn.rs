@@ -16,21 +16,27 @@
 //! 扱う trait object（`Box<dyn Module>`）だが、実際の型を判別する公開手段は
 //! `as_linear()`／`as_relu()` 等の閉じたダウンキャストフック集合のみで
 //! `Any` は使わない（`docs/compat-api-scope.md` §1 の閉集合方針）。本モジュールは
-//! そのうち以下 6 種に対応する:
+//! そのうち以下 7 種に対応する:
 //!
 //! | フック | 対応 [`ExportOp`] |
 //! |---|---|
 //! | `as_linear` が `Some` | [`ExportOp::Gemm`] |
 //! | `as_relu` が `true` | [`ExportOp::Relu`] |
+//! | `as_sigmoid` が `true` | [`ExportOp::Sigmoid`] |
 //! | `as_softmax` が `Some` | [`ExportOp::Softmax`]（`axis = Softmax::dim() as i64`） |
 //! | `as_layer_norm` が `Some` | [`ExportOp::LayerNormalization`]（`axis = -1`） |
 //! | `as_gelu` が `true` | `Mul → Erf → Add → Mul → Mul` の 5 演算ノード（下記） |
 //! | `as_conv2d` が `Some` | [`ExportOp::Conv`] |
 //!
-//! `Sigmoid` は `docs/facade-onnx-export-exposure-decision.md` §15.7 項 5
-//! （数値契約）が承認保留のままのため、本 issue（#2076）の対応範囲から
-//! 除外する（代替 (γ)。§18.2 参照）。`Module::as_sigmoid` フックは
-//! 追加しない。承認が得られ次第、別 PR で結線する。
+//! `Sigmoid` はイシュー #3844（設計 #3760・§19）で対応層に加えた。数値契約は
+//! (α)（#3770 で承認済み）: `predict` 側の `eval::sigmoid_scalar` は x<0 で
+//! `exp(x)/(1+exp(x))` に分岐し、interp 側は全域 `1/(1+exp(-x))` のため
+//! bit 一致は主張しない。bit 一致は `Linear`／`ReLU`（および非負入力の
+//! `ReLU→Sigmoid`）に限り、`Sigmoid` を含むモデルは REQ-2 の統一複合判定
+//! （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で一致を確認する。
+//! `Module::as_sigmoid` は `as_gelu` と同じく既定実装つきのフック追加で、
+//! 単体の `cargo publish --dry-run` は registry 上の autodiff に未収録の間
+//! 失敗しうる既知の非ブロッカー（一括 dry-run は成立する）。
 //!
 //! `LayerNorm::weight() == None`（`without_affine`）は ONNX
 //! `LayerNormalization` の `Scale` 必須制約と両立しないため
@@ -46,8 +52,7 @@
 //! Softmax` を再エクスポートしないため facade の公開面は拡張しない）。
 //! `LogSoftmax` は対応する ONNX 演算が無いため対象外のまま。
 //!
-//! それ以外の層（Sigmoid〈上記のとおり承認保留のため対象外〉・
-//! Tanh・GeluTanh・LogSoftmax・Dropout・Conv1d・RmsNorm・
+//! それ以外の層（Tanh・GeluTanh・LogSoftmax・Dropout・Conv1d・RmsNorm・
 //! BatchNorm・Embedding・MultiheadAttention 等）は
 //! [`ExportError::UnsupportedLayer`] で fail-closed に拒否する。`layer_kind`
 //! フィールドは `Module` trait が公開する既存ダウンキャストフックのうち
@@ -95,7 +100,7 @@
 //! を返す（部分的に構築されたグラフを返さない）。検証対象:
 //!
 //! 1. 層列が空でないこと（[`ExportError::EmptyModel`]）
-//! 2. 各層が対応 6 種のいずれかに該当すること
+//! 2. 各層が対応 7 種のいずれかに該当すること
 //!    （[`ExportError::UnsupportedLayer`]）
 //! 3. `Linear`／`Conv2d` の `weight`／`bias` の rank・長さ整合、
 //!    `LayerNorm` の `weight`（`Scale`）が `Some` であること
@@ -349,6 +354,17 @@ pub fn export_parts_from_layers(layers: &[Box<dyn Module>]) -> Result<NnExportPa
                 nodes: vec![ExportNode {
                     name: format!("layer{index}"),
                     op: ExportOp::Relu,
+                    inputs: vec![current_output.clone()],
+                    outputs: vec![out_name.clone()],
+                }],
+                initializers: Vec::new(),
+            });
+        } else if layer.as_sigmoid() {
+            insert_name(out_name.clone())?;
+            planned.push(PlannedLayer {
+                nodes: vec![ExportNode {
+                    name: format!("layer{index}"),
+                    op: ExportOp::Sigmoid,
                     inputs: vec![current_output.clone()],
                     outputs: vec![out_name.clone()],
                 }],

@@ -563,6 +563,15 @@ pub trait Module {
         false
     }
 
+    /// この層が `Sigmoid` かどうか（イシュー #3844・設計 #3760）。`as_gelu` と
+    /// 同じ bool フックで、`onnx-interop::onnx::export_nn` が
+    /// `ExportOp::Sigmoid` を組み立てるための層判別専用。融合判定・学習経路
+    /// からは呼ばれない。`Hardsigmoid`／`LogSigmoid`／`Silu` は ONNX の
+    /// `Sigmoid` と数値・意味が異なるためオーバーライドしない。既定は `false`。
+    fn as_sigmoid(&self) -> bool {
+        false
+    }
+
     /// この層が `Softmax` かどうか（イシュー #2076）。`as_linear` と同型
     /// の明示フック（`Option<&Softmax>`）。`onnx-interop::onnx::
     /// export_nn` が `Softmax::dim()`（`pub`。`nn/activation.rs`）を
@@ -1766,6 +1775,10 @@ impl Module for Relu {
 impl Module for Sigmoid {
     fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         Ok(Sigmoid::forward(self, input))
+    }
+
+    fn as_sigmoid(&self) -> bool {
+        true
     }
 
     /// `Var::sigmoid()` は `BackendOps` ディスパッチを経由せず
@@ -3614,6 +3627,24 @@ mod tests {
     use super::*;
     use crate::eval::dense_vec;
     use fandhe_ai_tensor_core::Tensor;
+
+    /// `as_sigmoid` は `Sigmoid` だけが `true`（閉集合。似た名前の層へ漏らさない）。
+    #[test]
+    fn sigmoid_hook_is_true_only_for_sigmoid() {
+        use crate::nn::activation::{
+            Gelu, GeluTanh, Hardsigmoid, LogSigmoid, Relu, Sigmoid, Silu, Softmax, Tanh,
+        };
+        assert!(Module::as_sigmoid(&Sigmoid));
+        assert!(!Module::as_sigmoid(&Relu));
+        assert!(!Module::as_sigmoid(&Tanh));
+        assert!(!Module::as_sigmoid(&Gelu));
+        assert!(!Module::as_sigmoid(&GeluTanh));
+        assert!(!Module::as_sigmoid(&Hardsigmoid));
+        assert!(!Module::as_sigmoid(&LogSigmoid));
+        assert!(!Module::as_sigmoid(&Silu));
+        assert!(!Module::as_sigmoid(&Softmax::new(1)));
+        assert!(!Module::as_sigmoid(&Linear::new(2, 2, true, 1).unwrap()));
+    }
 
     #[test]
     fn linear_module_forward_matches_bind_forward() {

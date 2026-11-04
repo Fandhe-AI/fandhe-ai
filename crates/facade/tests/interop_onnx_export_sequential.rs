@@ -284,36 +284,80 @@ fn sequential_with_conv1d_is_rejected_with_unsupported_layer_conv1d() {
     }
 }
 
-/// e-2b. `Sigmoid` を含む `Sequential` は `layer_kind == "unknown"` の
-///      `OnnxError::UnsupportedLayer` で拒否される（`Tanh` と同型。
-///      `docs/facade-onnx-export-exposure-decision.md` §15.7 項 5
-///      〈数値契約〉が承認保留のため、本 issue（#2076）では
-///      `Module::as_sigmoid` フックを追加していない。承認が得られ
-///      次第、別 PR で結線する。onnx-interop 側の到達性テストは
-///      `crates/onnx-interop/tests/onnx_export_layers_parity.rs::
-///      sigmoid_is_rejected_as_unsupported`）。
+/// e-2b. `Sigmoid` を含む `Sequential` は `from_sequential` が `Ok` を返し、
+///      `to_bytes` → `from_bytes` → `run` まで成功する（イシュー #3844・
+///      数値契約 (α)。従来の拒否テストを置換。数値の突き合わせは
+///      `interop_onnx_export_layers_parity.rs` の複合判定が担う）。
 #[test]
-fn sequential_with_sigmoid_is_rejected_with_unsupported_layer() {
+fn sequential_with_sigmoid_is_accepted() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+
     let model = Sequential::new()
-        .add_linear(2, 2, 0x2076_1111)
+        .add_linear(2, 3, 0x3844_1111)
         .expect("test fixture: 層構築に失敗")
         .add_sigmoid();
+    let exported = OnnxModel::from_sequential(&model).expect("Sigmoid は対応層のはず");
+    let bytes = exported
+        .to_bytes(&OnnxExportOptions::default())
+        .expect("to_bytes 成功");
+    let reimported = OnnxModel::from_bytes(&bytes).expect("from_bytes 成功");
+    let x = gen_input(0x3844_0001, 4, 2);
+    let out = run_single_output(&reimported, &x);
+    assert_eq!(out.shape(), &[4, 3]);
+}
 
-    let err = OnnxModel::from_sequential(&model).unwrap_err();
-    match err {
+/// `Linear→ReLU→Sigmoid` は Sigmoid への入力が非負になるため、`predict` と
+/// export 往復が bit 完全一致する（(α) が bit 一致を主張する唯一の範囲）。
+#[test]
+fn relu_then_sigmoid_is_bit_identical() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+    let model = Sequential::new()
+        .add_linear(4, 8, 0x3844_2222)
+        .expect("test fixture: 層構築に失敗")
+        .add_relu()
+        .add_sigmoid();
+    let x = gen_input(0x3844_0002, 6, 4);
+    let predicted = model.predict(&x).expect("predict 成功");
+    let exported = OnnxModel::from_sequential(&model).expect("from_sequential 成功");
+    let onnx_out = run_single_output(&exported, &x);
+    assert_bit_exact(&predicted, &onnx_out, "Linear->ReLU->Sigmoid");
+}
+
+/// `Hardsigmoid`／`LogSigmoid` は ONNX `Sigmoid` と別物のため、`as_sigmoid` が
+/// 漏れていないことを確認する（`Tanh` と同型に `unknown` で拒否）。
+#[test]
+fn sequential_with_hardsigmoid_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_linear(2, 2, 0x3844_3333)
+        .expect("test fixture: 層構築に失敗")
+        .add_hardsigmoid();
+    match OnnxModel::from_sequential(&model).unwrap_err() {
         OnnxError::UnsupportedLayer { index, layer_kind } => {
-            assert_eq!(index, 1, "Sigmoid は index=1（Linear の次）のはず");
-            assert_eq!(
-                layer_kind, "unknown",
-                "Sigmoid は判別フック非対応のため unknown のはず"
-            );
+            assert_eq!(index, 1);
+            assert_eq!(layer_kind, "unknown");
+        }
+        other => panic!("UnsupportedLayer を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn sequential_with_log_sigmoid_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_linear(2, 2, 0x3844_4444)
+        .expect("test fixture: 層構築に失敗")
+        .add_log_sigmoid();
+    match OnnxModel::from_sequential(&model).unwrap_err() {
+        OnnxError::UnsupportedLayer { index, layer_kind } => {
+            assert_eq!(index, 1);
+            assert_eq!(layer_kind, "unknown");
         }
         other => panic!("UnsupportedLayer を期待したが {other:?}"),
     }
 }
 
 /// e-2c. `add_upsample_scale_factor`（イシュー #3814）を含む `Sequential` は ONNX export 対象外で
-///      `OnnxError::UnsupportedLayer` になる（`Sigmoid` と同型。0.14.0 に ONNX export は含めない）。
+///      `OnnxError::UnsupportedLayer` になる（`Tanh` と同型。0.14.0 に ONNX export は含めない）。
 #[test]
 fn sequential_with_upsample_scale_factor_is_rejected_with_unsupported_layer() {
     let model = Sequential::new()

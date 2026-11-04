@@ -96,11 +96,11 @@
 //! による正規化を挟まず直接 [`OnnxModel`] が保持する。以下を doc として
 //! 明記する:
 //!
-//! - **対応層は `Linear`／`ReLU`／`Softmax`／`LayerNorm`／
-//!   `GELU`（erf 版）／`Conv2d` の 6 種**（イシュー #2076・親 #2034 で
-//!   `Linear`／`ReLU` の 2 種から拡大。`Sigmoid` は数値契約
-//!   〈`docs/facade-onnx-export-exposure-decision.md` §15.7 項 5〉が
-//!   承認保留のため対象外のまま。Tanh・GeluTanh・LogSoftmax・
+//! - **対応層は `Linear`／`ReLU`／`Sigmoid`／`Softmax`／`LayerNorm`／
+//!   `GELU`（erf 版）／`Conv2d` の 7 種**（イシュー #2076・親 #2034 で
+//!   `Linear`／`ReLU` の 2 種から拡大。`Sigmoid` はイシュー #3844 で追加し、
+//!   数値契約 (α)〈`docs/facade-onnx-export-exposure-decision.md` §19〉に
+//!   従い bit 一致は主張せず複合判定で一致する。Tanh・GeluTanh・LogSoftmax・
 //!   Conv1d 等は引き続き非対応）。1 つでも非対応層を含む場合は `Graph`
 //!   を一切構築せず [`OnnxError::UnsupportedLayer`] で fail-closed に
 //!   拒否する（部分的に構築されたモデルを返さない）
@@ -336,6 +336,29 @@ impl OnnxModel {
     /// [`OnnxError::UnsupportedLayer`] を返す（全層事前検証・
     /// fail-closed。`security.md` A08）。空の `Sequential` は
     /// [`OnnxError::InvalidModel`] で拒否される。
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::interop::onnx::{OnnxExportOptions, OnnxModel, OnnxValue};
+    /// use fandhe_ai::Tensor;
+    ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let model = Sequential::new().add_linear(2, 3, 7)?.add_sigmoid();
+    ///     let exported = OnnxModel::from_sequential(&model)?;
+    ///     let bytes = exported.to_bytes(&OnnxExportOptions::default())?;
+    ///     let reimported = OnnxModel::from_bytes(&bytes)?;
+    ///     let x = Tensor::new(vec![0.5_f32, -0.5, 1.0, 2.0], &[2, 2])?;
+    ///     let mut feeds = HashMap::new();
+    ///     feeds.insert("input".to_string(), OnnxValue::F32(x));
+    ///     let outputs = reimported.run(feeds)?;
+    ///     match outputs.get("output") {
+    ///         Some(OnnxValue::F32(t)) => assert_eq!(t.shape(), &[2, 3]),
+    ///         _ => panic!("output が F32 でない"),
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn from_sequential(model: &Sequential) -> Result<Self, OnnxError> {
         let graph = graph_from_layers(model.layers()).map_err(map_export_error)?;
         Ok(Self { graph })
