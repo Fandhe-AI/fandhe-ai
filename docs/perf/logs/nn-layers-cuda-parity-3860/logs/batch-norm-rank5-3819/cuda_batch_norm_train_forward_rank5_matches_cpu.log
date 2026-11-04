@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/batch_norm_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/batch_norm_backend_parity-0cfa6a9d78b65b5f)
+
+running 1 test
+test cuda_batch_norm_train_forward_rank5_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.29s
+
+rc=0
