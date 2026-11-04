@@ -1,0 +1,27 @@
+== before ==
+date_utc: 2026-11-04T12:46Z
+hostname: masked
+gpu: NVIDIA GB10, 580.173.02, 0 %
+compute_apps: 3 x <resident-process>
+nvcc: Build cuda_13.0.r13.0/compiler.36424714_0
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+arch: aarch64
+load: 0.23, 0.22, 0.18
+rev_stamp: 6852ef6bd067a74e3090b4f390f59a5a70f8b4a5
+script_sha256: c4be6b6bc60c923c2aec6307201f2da3a299833e52df07809551d9e0f4efd1c0
+hw_lock: held owner=#3856 2026-11-04T12:46:48Z
+concurrent_cargo_rustc: none
+== after ==
+date_utc: 2026-11-04T12:47Z
+hostname: masked
+gpu: NVIDIA GB10, 580.173.02, 0 %
+compute_apps: 3 x <resident-process>
+nvcc: Build cuda_13.0.r13.0/compiler.36424714_0
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+arch: aarch64
+load: 0.98, 0.40, 0.24
+rev_stamp: 6852ef6bd067a74e3090b4f390f59a5a70f8b4a5
+script_sha256: c4be6b6bc60c923c2aec6307201f2da3a299833e52df07809551d9e0f4efd1c0
+hw_lock: held owner=#3856 2026-11-04T12:46:48Z
