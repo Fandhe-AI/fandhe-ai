@@ -58,7 +58,7 @@ Q4 孫テープ再生の REQ-2 統一複合判定／Q5 拒否は `Err(Backward)`
 
 ケースごとの route と S3 の形状は `RULE.txt` の「経路区分」「Metal の S3 宣言」欄。各行の根拠は `summary.tsv`（exit code・
 `running 1 test` の件数・`test result` 行）と `logs/<群>/<テスト名>.log`（末尾に `rc=0`）。
-対象の実装 issue #3797〜#3811 は既に CLOSED。CUDA（GB10）は #3857 が測る。
+対象の実装 issue #3797〜#3811 は既に CLOSED。CUDA（GB10）は #3857（PR #4021・マージ済み）で 15 本 pass。
 
 ## 回収物
 
