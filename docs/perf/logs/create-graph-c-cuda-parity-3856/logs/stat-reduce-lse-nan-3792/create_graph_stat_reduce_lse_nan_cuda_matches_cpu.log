@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/create_graph_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/create_graph_gpu_parity-43f86a2c2940f8f0)
+
+running 1 test
+test create_graph_stat_reduce_lse_nan_cuda_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.47s
+
+rc=0
