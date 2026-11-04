@@ -64,6 +64,9 @@
 //!   検証を迂回した組み立てが可能になる
 //! - `speculative` はサンプリング版（#3101）でも `sampling_weights_f32` を再利用し、
 //!   TopK／Temperature の分布定義を `generate` と共有する
+//! - `speculative` のモデル非依存の純関数（`row_at`・`verify_sampling` 等）は `pub(super)`
+//!   で、兄弟の `stateful`（#3848）が RNG 消費順と受理判定を共有するために再利用する
+//!   （見える範囲は `generate` 配下に限られる）
 //! - `kv_rewind`（KV キャッシュ巻き戻し。#2885）は非公開子モジュールで、項目は
 //!   `pub(super)`（`generate` 配下限定。1 段深いため `pub(crate)` より厳密に狭い）
 //! - `validate*` は非公開を保つ（A03。facade の `api_surface.rs` の
@@ -84,6 +87,10 @@ pub mod scheduler;
 /// greedy 版 speculative decoding（#2886）。facade `inference` へ純再エクスポート済み
 /// （イシュー #2934。`docs/compat-api-scope.md` §5.1 S1）。
 pub mod speculative;
+
+/// 内部状態を持つモデル（RNN・SSM 等）向けの trait と speculative decoding の入口
+/// （#3848。設計記録 `docs/facade-speculative-decoding-batching-design.md` §29・§30）。
+pub mod stateful;
 
 /// 次トークンの選び方（イシュー #2191 受入条件 2）。`#[non_exhaustive]`
 /// は他の `AutodiffError` 系列挙型と同じ理由（公開 API 非破壊。
