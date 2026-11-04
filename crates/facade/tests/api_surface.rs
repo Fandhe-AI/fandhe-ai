@@ -50508,3 +50508,194 @@ fn onnx_autograd_acceptance_coverage_map_detects_each_category() {
         );
     }
 }
+// =====================================================================
+// イシュー #3844（設計 #3760・承認: #3770 の所有者回答）: ONNX export の `Sigmoid` 層の正ガード。
+// 反転対象の否定ガード・保留 doctest ガードは本ファイルと `src/lib.rs` に元から 0 件だった。
+// 実行時の否定テスト 2 本（`sigmoid_layer_parity`・`sequential_with_sigmoid_is_accepted`）を
+// 正テストへ置換し、本節で承認形（`Module::as_sigmoid` → `ExportOp::Sigmoid`）を固定する。
+// =====================================================================
+
+/// `src` からコメント・文字列リテラルを除いた文字列を返す。
+fn cleaned_source_3844(src: &str) -> String {
+    strip_comments_and_literals(src).into_iter().collect()
+}
+
+/// `from` 以降で最初の `{ ... }` の本体範囲（波括弧の対応を数える）を返す。
+fn brace_range_after_3844(text: &str, from: usize) -> Option<std::ops::Range<usize>> {
+    let open = from + text[from..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + 1..open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 承認形の違反を列挙する（空なら適合）。`module` は autodiff の `nn/module.rs`、`export_nn` は
+/// onnx-interop の `export_nn.rs`、`others` は他の src ファイル（`fn as_sigmoid` が無いことの検査用）。
+fn export_sigmoid_violations_3844(
+    module: &str,
+    export_nn: &str,
+    others: &[(String, String)],
+) -> Vec<String> {
+    let mut v = Vec::new();
+    let m = cleaned_source_3844(module);
+    let decls: Vec<usize> = m.match_indices("fn as_sigmoid(").map(|(i, _)| i).collect();
+    if decls.len() != 2 {
+        v.push(format!(
+            "module.rs の `fn as_sigmoid` が 2 件（既定 1 + Sigmoid 1）ではない: {}",
+            decls.len()
+        ));
+    } else {
+        let body = |i: usize| {
+            brace_range_after_3844(&m, i)
+                .map(|r| m[r].split_whitespace().collect::<String>())
+                .unwrap_or_default()
+        };
+        if body(decls[0]) != "false" {
+            v.push("trait の既定 `as_sigmoid` が `false` ではない".to_string());
+        }
+        if body(decls[1]) != "true" {
+            v.push("オーバーライドの `as_sigmoid` が `true` ではない".to_string());
+        }
+        // 2 件目が `impl Module for Sigmoid` ブロック内にあること。
+        let prefix = "impl Module for ";
+        let ok = m[..decls[1]].rfind(prefix).is_some_and(|o| {
+            let name: String = m[o + prefix.len()..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            name == "Sigmoid"
+                && brace_range_after_3844(&m, o).is_some_and(|r| r.contains(&decls[1]))
+        });
+        if !ok {
+            v.push("`true` を返す `as_sigmoid` が `impl Module for Sigmoid` 内にない".to_string());
+        }
+    }
+    let e = cleaned_source_3844(export_nn);
+    match e.find("as_sigmoid()") {
+        None => v.push("export_nn.rs に `as_sigmoid()` の腕がない".to_string()),
+        Some(i) => {
+            let arm = brace_range_after_3844(&e, i).map(|r| &e[r]).unwrap_or("");
+            if !arm.contains("ExportOp::Sigmoid") {
+                v.push("`as_sigmoid()` の腕が `ExportOp::Sigmoid` を作っていない".to_string());
+            }
+        }
+    }
+    for (rel, body) in others {
+        if cleaned_source_3844(body).contains("fn as_sigmoid(") {
+            v.push(format!("{rel} に想定外の `fn as_sigmoid` 宣言がある"));
+        }
+    }
+    v
+}
+
+fn collect_rs_3844(dir: &Path, out: &mut Vec<(String, String)>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("test fixture: read_dir").path();
+        if path.is_dir() {
+            collect_rs_3844(&path, out);
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            out.push((path.display().to_string(), read_to_string_or_panic(&path)));
+        }
+    }
+}
+
+/// 正ガード: `Module::as_sigmoid`（既定 `false`・`Sigmoid` のみ `true`）と export の腕が承認形。
+#[test]
+fn onnx_export_sigmoid_matches_approved_shape_issue_3844() {
+    let root = facade_crate_root();
+    let module = read_to_string_or_panic(&root.join("../autodiff/src/nn/module.rs"));
+    let export_nn = read_to_string_or_panic(&root.join("../onnx-interop/src/onnx/export_nn.rs"));
+    let mut others = Vec::new();
+    for krate in ["../autodiff/src", "../onnx-interop/src", "src"] {
+        collect_rs_3844(&root.join(krate), &mut others);
+    }
+    others.retain(|(p, _)| !p.ends_with("nn/module.rs"));
+    let v = export_sigmoid_violations_3844(&module, &export_nn, &others);
+    assert!(v.is_empty(), "承認外の差分: {v:#?}");
+}
+
+/// 自己テスト: 承認形は 0 件、すり替え各類型は検出、コメント・文字列内の言及は無視する。
+#[test]
+fn onnx_export_sigmoid_guard_issue_3844_detects_swaps() {
+    let good_mod = "trait Module { fn as_gelu(&self) -> bool { false }\n fn as_sigmoid(&self) -> bool { false } }\nimpl Module for Sigmoid {\n fn as_sigmoid(&self) -> bool { true }\n}\nimpl Module for Hardsigmoid { fn forward() {} }\n";
+    let good_nn =
+        "fn f() { if a { } else if layer.as_sigmoid() { op: ExportOp::Sigmoid, } else if b { } }";
+    let none: Vec<(String, String)> = Vec::new();
+    let check = |m: &str, n: &str| export_sigmoid_violations_3844(m, n, &none);
+    assert!(check(good_mod, good_nn).is_empty());
+    // コメント・文字列内の言及・無関係な `fn as_gelu` は数えない
+    let noisy = format!("// fn as_sigmoid(&self)\nconst S: &str = \"fn as_sigmoid\";\n{good_mod}");
+    assert!(check(&noisy, good_nn).is_empty());
+    // 既定実装の欠落
+    let no_default = good_mod.replace("fn as_sigmoid(&self) -> bool { false }", "");
+    assert!(!check(&no_default, good_nn).is_empty());
+    // 既定を true にする改変
+    let default_true = good_mod.replacen("{ false } }\nimpl", "{ true } }\nimpl", 1);
+    assert_ne!(default_true, good_mod);
+    assert!(!check(&default_true, good_nn).is_empty());
+    // オーバーライドの Hardsigmoid への移動
+    let moved = good_mod
+        .replace("impl Module for Sigmoid {", "impl Module for Tmp {")
+        .replace("impl Module for Hardsigmoid {", "impl Module for Sigmoid {")
+        .replace("impl Module for Tmp {", "impl Module for Hardsigmoid {");
+    assert_ne!(moved, good_mod);
+    assert!(!check(&moved, good_nn).is_empty());
+    // LogSigmoid への重複オーバーライド
+    let dup = format!(
+        "{good_mod}impl Module for LogSigmoid {{ fn as_sigmoid(&self) -> bool {{ true }} }}\n"
+    );
+    assert!(!check(&dup, good_nn).is_empty());
+    // export の腕の削除・op のすり替え
+    assert!(!check(good_mod, "fn f() {}").is_empty());
+    assert!(
+        !check(
+            good_mod,
+            &good_nn.replace("ExportOp::Sigmoid", "ExportOp::Relu")
+        )
+        .is_empty()
+    );
+    // 他ファイルでの宣言
+    let extra = vec![("x.rs".to_string(), "fn as_sigmoid() {}".to_string())];
+    assert!(!export_sigmoid_violations_3844(good_mod, good_nn, &extra).is_empty());
+}
+
+/// `from_sequential` の利用例 doctest（Sigmoid を含む往復）が実在し、実際にコンパイルされる形であること。
+#[test]
+fn onnx_export_sigmoid_usage_doctest_is_present_and_compiled() {
+    let entry = |needles: &'static [&'static str]| surface_guard::UsageDoctest {
+        label: "from_sequential sigmoid",
+        file: "interop/onnx.rs",
+        anchor: surface_guard::DocAnchor::Item("pub fn from_sequential"),
+        needles,
+    };
+    let ok = surface_guard::usage_doctest_violations(&[entry(&[
+        "add_sigmoid",
+        "from_sequential",
+        "to_bytes",
+        "from_bytes",
+        "run",
+    ])]);
+    assert!(ok.is_empty(), "{ok:?}");
+    let missing = surface_guard::usage_doctest_violations(&[entry(&["add_tanh_nonexistent"])]);
+    assert!(!missing.is_empty(), "検出器が空振りしている");
+}
+
+/// 到達性: `fandhe_ai` の公開面だけで `Sigmoid` を含む `Sequential` を export できる。
+#[test]
+fn onnx_export_sigmoid_is_reachable_via_facade_only() {
+    let model = fandhe_ai::compat::Sequential::new()
+        .add_linear(2, 2, 3844)
+        .expect("test fixture")
+        .add_sigmoid();
+    fandhe_ai::interop::onnx::OnnxModel::from_sequential(&model).expect("Sigmoid は対応層のはず");
+}

@@ -175,12 +175,12 @@ ONNX_INTEROP_TRANSFORMER_ONNX=<path> \
 op マッピング表自体（§2）は変更しない。
 
 - **対応層（イシュー #2076・親 #2034 で Softmax・LayerNorm・
-  GELU（erf 版）・Conv2d へ拡大。`Sigmoid` は §15.7 項 5〈数値契約〉が
-  承認保留のため対象外のまま——`Module::as_sigmoid` フックは追加して
-  いない）**: `Module::as_linear()` が `Some` →
+  GELU（erf 版）・Conv2d へ拡大。#3844 で `Sigmoid` を追加し 7 種。
+  数値契約は (α)〈§19〉）**: `Module::as_linear()` が `Some` →
   `ExportOp::Gemm(GemmAttrs { alpha: 1.0, beta: 1.0, trans_a: false,
   trans_b: false })`（weight `[in, out]` のまま・転置しない）。
-  `Module::as_relu()` が `true` → `ExportOp::Relu`。`Module::as_softmax()` が `Some` →
+  `Module::as_relu()` が `true` → `ExportOp::Relu`。`Module::as_sigmoid()` が
+  `true` → `ExportOp::Sigmoid`（bit 一致は非負入力のみ。複合判定で一致）。`Module::as_softmax()` が `Some` →
   `ExportOp::Softmax { axis: dim as i64 }`（`Softmax::dim()`。`pub` へ
   変更済み）。`Module::as_layer_norm()` が `Some` → `ExportOp::
   LayerNormalization(LayerNormAttrs { axis: -1, epsilon: eps() })`

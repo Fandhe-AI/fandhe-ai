@@ -1079,7 +1079,7 @@ facade_only` で機械固定）。`evaluate_with_metrics`・第 3 の公開型�
 2 フックを追加した（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
 方式。§1 の閉集合方針の維持）。`Sigmoid` は §15.7 項 5（数値契約）が
 承認保留のため `as_sigmoid` フックは追加していない（代替 (γ)。承認が
-得られ次第、別 PR で結線する）。**本 2 フックは `compat::Sequential`
+得られ次第、別 PR で結線する→ #3844 で結線済み）。**本 2 フックは `compat::Sequential`
 （`bind`／`trainable_parameters`／`apply_parameters` 等の学習経路）から
 は使われない**——用途は `onnx-interop::onnx::export_nn`
 （非公開クレート内部限定。`docs/onnx-export-op-mapping.md` §7）が
@@ -2958,3 +2958,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（イシュー #3840・設計 #3757。承認: #3769 の所有者の回答コメント 6554564758〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>〉）**: `compat::Optimizer` へ `NAdam(NAdamConfig)`・`RAdam(RAdamConfig)` を追加（`*Config` は再エクスポート済み）。`LrSchedule`・param groups・AMP と併用可（param groups は `decoupled_weight_decay` を上書きしない）。model_io の kind `nadam`・`radam` を追加（`format_version` は 2 のまま）。追加のみ。公開状態: 公開済み。これで `Optimizer` は 11 種。詳細は決定記録 `docs/compat-optimizer-variants-0.14.0-decision.md` §15。
 
 **適用記録（イシュー #3842・設計 #3759。承認: #3770 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145>〉）**: `OnnxModel::bind_autograd` と `OnnxAutogradGraph`・`OnnxAutogradOptions`・`OnnxTapeValue` を facade に公開。勾配経路 11 op（GPU の `Tape` でもホスト実行）、学習できない 22 op は fail-closed（`OnnxError::UnsupportedInAutograd`）。`OnnxError` に 5 variant を追加（`#[non_exhaustive]`）。追加のみ。公開状態: 公開済み（実機 parity は #3864・#3865 で未実測）。詳細は決定記録 `docs/onnx-autograd-decision.md` §8.12。受入テスト（イシュー #3843）: 利用者の書き方での SGD・未対応 op の fail-closed・`Cast` の勾配切断・`trainable` を `crates/facade/tests/interop_onnx_autograd.rs` で固定し、対応表の正ガード `onnx_autograd_acceptance_coverage_map_matches` を `api_surface.rs` に置いた（公開面の変化なし。§8.13）。
+
+**適用記録（イシュー #3844・設計 #3760。承認: #3770 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145>〉）**: `OnnxModel::from_sequential` の対応層に `Sigmoid` を追加した（6→7 種）。数値契約は (α)（bit 一致は `Linear`／`ReLU` と非負入力の `ReLU→Sigmoid` のみ、`Sigmoid` を含むモデルは REQ-2 の統一複合判定。tolerance・interp は不変）。新規 pub 名なし。autodiff の `Module::as_sigmoid` を既定実装つきで追加した（facade の公開名ではない）。公開状態: 公開済み（既存 `from_sequential` の受理範囲の拡大）。設計・実装記録は `docs/facade-onnx-export-exposure-decision.md` §19・§19.12。

@@ -51,11 +51,95 @@ fn assert_export_parity(context: &str, model: &Sequential, input: &Tensor<f32>) 
     assert_parity(context, &flat(&actual), &flat(&expected));
 }
 
-// `Sigmoid` は `docs/facade-onnx-export-exposure-decision.md` §15.7
-// 項 5（数値契約）が承認保留のため export 対応範囲から除外している
-// （`sigmoid_model_parity` は追加しない。拒否側の回帰は
-// `crates/facade/tests/interop_onnx_export_sequential.rs::
-// sequential_with_sigmoid_is_rejected_with_unsupported_layer` が担う）。
+// `Sigmoid`（イシュー #3844・数値契約 (α)）は x<0 の分岐形の差があるため
+// bit 一致ではなく複合判定で突き合わせる。
+
+#[test]
+fn sigmoid_model_parity() {
+    let model = Sequential::new()
+        .add_linear(4, 6, 0x3844_0101)
+        .expect("test fixture: 層構築に失敗")
+        .add_sigmoid();
+    let input = Tensor::new(
+        (0..12).map(|i| (i as f32 - 6.0) * 0.7).collect::<Vec<_>>(),
+        &[3, 4],
+    )
+    .expect("test fixture");
+    assert_export_parity("Linear -> Sigmoid", &model, &input);
+
+    let model2 = Sequential::new()
+        .add_linear(4, 6, 0x3844_0102)
+        .expect("test fixture: 層構築に失敗")
+        .add_sigmoid()
+        .add_linear(6, 2, 0x3844_0103)
+        .expect("test fixture: 層構築に失敗");
+    assert_export_parity("Linear -> Sigmoid -> Linear", &model2, &input);
+}
+
+fn sigmoid_only_model() -> Sequential {
+    Sequential::new().add_sigmoid()
+}
+
+fn column(values: Vec<f32>) -> Tensor<f32> {
+    let n = values.len();
+    Tensor::new(values, &[n, 1]).expect("test fixture")
+}
+
+#[test]
+fn sigmoid_edge_sweep_parity() {
+    let values = vec![
+        -1000.0,
+        -103.9,
+        -88.7,
+        -88.0,
+        -87.3,
+        -16.0,
+        -1.0,
+        -0.0,
+        0.0,
+        1.0,
+        16.0,
+        88.0,
+        1000.0,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+    ];
+    assert_export_parity("Sigmoid 境界値", &sigmoid_only_model(), &column(values));
+}
+
+#[test]
+fn sigmoid_negative_strided_sweep_parity() {
+    // 有限の負の f32（符号ビット 1・NaN/inf を除く）を bit パターン上で等間隔に走査する。
+    let values: Vec<f32> = (0x8000_0000u32..=0xFF7F_FFFFu32)
+        .step_by(4099)
+        .map(f32::from_bits)
+        .collect();
+    assert!(values.len() > 100_000, "走査点数が不足: {}", values.len());
+    assert_export_parity(
+        "Sigmoid 負域 stride 走査",
+        &sigmoid_only_model(),
+        &column(values),
+    );
+}
+
+#[test]
+fn sigmoid_nan_class_matches() {
+    // assert_parity は NaN 同士を fail と判定するため要素ごとの is_nan で見る。
+    let model = sigmoid_only_model();
+    let input = column(vec![f32::NAN, 0.5]);
+    let expected = model.predict(&input).expect("predict 成功");
+    let exported = OnnxModel::from_sequential(&model).expect("from_sequential 成功");
+    let mut feeds = HashMap::new();
+    feeds.insert("input".to_string(), OnnxValue::F32(input));
+    let mut outputs = exported.run(feeds).expect("run 成功");
+    let actual = match outputs.remove("output").expect("output 無し") {
+        OnnxValue::F32(t) => t,
+        other => panic!("output は F32 のはず（実際 {other:?}）"),
+    };
+    let (e, a) = (flat(&expected), flat(&actual));
+    assert!(e[0].is_nan() && a[0].is_nan(), "NaN 入力は両経路で NaN");
+    assert!(!e[1].is_nan() && !a[1].is_nan());
+}
 
 #[test]
 fn softmax_model_parity() {
