@@ -1,0 +1,105 @@
+事前登録規則（イシュー #3857: 二階微分 create_graph の B 区分（#3797〜#3808）と拒否範囲（#3809・#3810、項目 5 の #3811）の
+族の CUDA 実機 parity。親 #3711 Phase 10。雛形は docs/perf/logs/create-graph-gpu-parity-template/RULE.txt〈#3776〉。
+測り方は docs/autodiff-higher-order-grad-decision.md §48）
+宣言日時（UTC）: 2026-11-04T12:50Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+機体: <cuda-node>（DGX Spark GB10・aarch64・sm_121）。ホスト名は記録しない。Linux／M4 Max 開発機では測らない・記録しない
+  （docs/real-hardware-verification-env.md §1）。parity 測定であり時間計測ではないため専有条件は課さない。常駐プロセス
+  （compute_apps）は実行前後の件数を env_info.txt に記録する（#3856 と同じ既定の CUDA 実機テスト用ノード）。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  b82b1e5d129bc25cabf779e64401bf3809526cdb
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること。
+    git diff --quiet b82b1e5d129bc25cabf779e64401bf3809526cdb <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 2 行形式（1 行目: HEAD の 40 桁小文字 16 進数、2 行目: dirty=<status --porcelain の件数>）。
+  展開ツリー直下に書く。dirty=0 以外は無効（実行しない。run_cuda_parity.sh が検査する）。
+
+展開先: <home>/work/rust-ai-library-run-3857（ログではマスクする）。出力先: <home>/work/out-3857。
+  CARGO_TARGET_DIR: <home>/work/target-fandhe-ai（同）。転送は docs/real-hardware-verification-env.md §3 の rsync だけ
+  （ノードに git は無い）。転送後にノード側で .rev-stamp を読み、送信側の HEAD と照合する。
+
+実機ロック: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3857 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。各テストの前後で owner が自分のままか確かめ、
+  失っていればその回と以降を undetermined にする（ロックを持たずに測った値は採らない）。ほかのサービスのプロセスは止めない。
+
+実行スクリプト: 同ディレクトリの run_cuda_parity.sh（#3856 版の複製。コミット済みのものをそのまま送る。env_info.txt の
+  script_sha256 で照合）。ノード上で setsid nohup により切り離して起動する:
+    env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+      bash <tree>/docs/perf/logs/create-graph-b-cuda-parity-3857/run_cuda_parity.sh <tree> <out>
+
+事前ビルド（判定外。計測中にコンパイルを並走させない。開始前に他の cargo／rustc が無いことを pgrep で確かめる）:
+  cargo test -p fandhe-ai --test create_graph_gpu_parity --no-run
+
+コマンド（16 本。上から順に 1 本ずつ。1 テスト 1 プロセス 1 回。--release なし。外部 timeout 1800 秒）:
+  timeout 1800 cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>
+   0. create_graph_scaffold_cuda_matches_cpu                   （経路の自己検査。測定対象外。#3776 の雛形行）
+   1. create_graph_conv3d_family_cuda_matches_cpu              （#3797: Conv3d・ConvTranspose3d）
+   2. create_graph_loss_regression_cuda_matches_cpu            （#3798: KlDiv・PoissonNll・GaussianNll）
+   3. create_graph_loss_binary_margin_cuda_matches_cpu         （#3799: 二値・マージン系 6 variant）
+   4. create_graph_loss_class_cuda_matches_cpu                 （#3800: クラス軸系 6 variant）
+   5. create_graph_scatter_reduce_cuda_matches_cpu             （#3802: IndexedScatterReduce の sum・mean・amax・amin・prod）
+   6. create_graph_cumulative_b_cuda_matches_cpu               （#3803: Cumprod・Logcumsumexp）
+   7. create_graph_stft_family_cuda_matches_cpu                （#3804: Stft・Istft）
+   8. create_graph_linalg_cholesky_pinv_lstsq_cuda_matches_cpu （#3805: Cholesky・Pinv・Lstsq）
+   9. create_graph_linalg_norm_rank_cuda_matches_cpu           （#3806: MatrixNorm・SlogdetSign・MatrixRank）
+  10. create_graph_linalg_qr_cuda_matches_cpu                  （#3807: QrQ・QrR）
+  11. create_graph_linalg_svd_cuda_matches_cpu                 （#3808: SvdU・SvdS・SvdVh）
+  12. create_graph_linalg_eigh_cuda_matches_cpu                （#3808: EighValues・EighVectors）
+  13. create_graph_norm_prescale_cuda_matches_cpu              （#3809: LayerNorm の S0 前スケーリング）
+  14. create_graph_det_family_rowscale_cuda_matches_cpu        （#3810: Det の行別スケール）
+  15. create_graph_embedding_padding_cuda_matches_cpu          （#3811: Embedding の padding_idx の二階）
+  （--release は付けない。docs/real-hardware-verification-env.md §4.9。--exact・--nocapture・--test-threads=1 は
+  テストの選び方と出力だけに効き判定には影響しない。）
+  15. はイシュー本文の列挙（#3797〜#3810）に無いが、追跡表の項目 5「二階微分の拒否範囲と意味論」が #3811 を含み、
+  同表の実機 parity 欄が #3857 を GB10 の担当としているため、同じテストバイナリで加えて測る（#3168 が他 README の申し送り分を
+  加えたのと同じ扱い）。#3811 の結果は項目 5 の欄に書く。
+  #3801（CtcLoss）は #3767 で対象外（恒久 fail-closed）に確定し（decision §21.2・§60）、登録表に族が無い。測定対象外として記録し、
+  未実測にも pass にも数えない。
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行であること。0 行または 2 行以上なら
+  実行せず undetermined とする。
+
+経路区分と既定の切替状態（ケースごと。対象コミットの CASES の route をそのまま写す）:
+  conv3d_family_{conv3d,conv_transpose3d}: H
+  loss_regression_kl_div: K／loss_regression_{poisson_nll,gaussian_nll}: H
+  loss_binary_margin_bce: K／loss_binary_margin_{bce_pos_weight,soft_margin,hinge_embedding,margin_ranking,sigmoid_focal}: H
+  loss_class_{cewo,multi_margin,multilabel_margin,multilabel_soft_margin,cosine_embedding,triplet_margin}: H
+  scatter_reduce_{sum,mean,amax,amin,prod}: H
+  cumulative_b_cumprod: K／cumulative_b_logcumsumexp: H
+  stft_family_{stft,istft}: H
+  linalg_cholesky・linalg_pinv_tall・linalg_pinv_wide・linalg_lstsq: H
+  linalg_matrix_norm_{fro,one,inf}・linalg_slogdet_sign・linalg_matrix_rank: H
+  linalg_qr_{tall,square}: H
+  linalg_svd_{tall,wide}: H／linalg_eigh_sym3: H
+  norm_prescale_layer_norm_wide: K
+  det_family_rowscale_diag_large: H
+  embedding_padding_dup_ids: K
+  （H の pass は経路の parity でありカーネル同士の parity ではない）
+  既定のまま触らない: TF32 opt-in OFF・GPU linalg ゲート OFF。環境変数で切替を変えない。
+  判定方式: 上記の全ケースが Judge::Strict（Judge::Baseline のケースは無い。baseline の置き場は空のまま）。
+  Metal の S3 宣言は CUDA では使わない（対象外）。
+
+判定（判定契約は各テストのコードが定める。ここでは変えない）:
+  Q1 first_order が同デバイスの素の backward と bit 一致かつ GPU・CPU の REQ-2 複合判定／Q2 cg.grad・Q3 二階 H v（ゼロでない）・
+  Q4 孫テープ再生は GPU と CPU の REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
+  tolerance 定数 RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD・baseline は不変）／Q5 拒否は Err(Backward) かつ子テープが空。
+  pass: exit 0 かつ "running 1 test"・"test result: ok. 1 passed; 0 failed"。
+  fail: 1 件以上の失敗（パニックを含む。CUDA と CPU は自前バックエンド同士なので判定不能にしない）。
+  undetermined: ノード到達不能、ビルド不能、timeout（exit 124）、--list の選択が期待と異なる、実機ロックの取得不能・喪失、
+    自己検査失敗、baseline に行が無いケース。
+  scaffold（0.）は経路の自己検査であり、どの実装 issue の判定にも数えない。scaffold が fail・undetermined なら、
+    1.〜15. の結果は記録するが、README で経路の異常として併記する。
+  イシュー単位の完了: 1.〜14.（イシュー本文の対象 #3797〜#3810 のうち族があるもの）がすべて pass のときだけ #3857 を Closes する。
+    1 本でも fail・undetermined なら Refs。15.（#3811）の結果は項目 5 の欄に書き、#3857 の完了判定には数えない。
+  対象の実装 issue #3797〜#3811 は既に CLOSED。fail・undetermined の族は README と PR に「要対応」と書き、所有者へ報告する。
+
+実行回数: 各コマンド 1 回。時間計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。
+  再実行するなら RULE.txt を登録し直す。計測中は他のビルドを並走させない。
+
+fail 時の扱い: tolerance・baseline・判定方式・入力・テストコードは変えない。panic メッセージの fail_count・max_abs_diff・
+  max_rel_err を引用して事実を記録し、README と PR に「要対応」と書く。原因を推測で結論づけない。
+  起票と baseline 化は所有者の承認を得てから。
+
+記録規則: ホスト名・ユーザー名・個人のパス（$HOME・/home/）は前後が識別子文字でない場合のみマスクする（<cuda-node>／<user>／<home>）。
+  漏れがあれば記録を捨てる（fail-closed）。回収ログは手で編集しない。各ログ末尾に rc=<終了コード>。
+  実行と提出物の対応は env_info.txt の script_sha256・rev_stamp と SHA256SUMS で検証する。
