@@ -12,10 +12,10 @@
 //! - `scaffold`: 雛形の自己検査用（実機の測定対象ではない）
 //! - `nn`: NN 層の forward・backward（#3860 GB10・#3861 Mac mini）
 //! - `optim`: param groups の常駐更新（#3862・#3863）
-//! - `onnx`: ONNX の学習（#3864・#3865。facade 公開形 #3842 が入ってからつなぐ。
-//!   それまで 0 件で、実行すると undetermined で止まる）
+//! - `onnx`: ONNX の学習（#3864・#3865。facade 公開形 `OnnxModel::bind_autograd`
+//!   〈#3842〉につないだ。11 op はホスト実行のため route は H）
 //!
-//! `nn`・`optim`・`onnx` の行は Phase 6〜8 の実装 issue が足す。実機テストの名前は
+//! `nn`・`optim` の行は Phase 6〜8 の実装 issue が足す。実機テストの名前は
 //! 本 PR で固定し、Phase 10 の issue と RULE.txt が参照する。ROCm は対象外
 //! （#3779・#3853）。
 //!
@@ -32,6 +32,7 @@ mod harness;
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::Sequential;
+use fandhe_ai::interop::onnx::{OnnxAutogradOptions, OnnxModel};
 use fandhe_ai::{Device, SgdConfig as FacadeSgdConfig};
 use fandhe_ai_autodiff::nn::loss::{MseLoss, Reduction};
 use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
@@ -74,6 +75,26 @@ const CASES: &[Case] = &[
         shape: "S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 lr=0.02 seed=0xC0FFEE",
         run: sgd_resident,
         reference: Some(sgd_host),
+    },
+    // onnx 族（#3842）。公開経路 `OnnxModel::bind_autograd` だけを通す。11 op の計算は
+    // ホストで実行されるため route は H（テンプレ README の規則 4）。
+    Case {
+        name: "onnx_from_sequential_forward_backward_s1",
+        family: "onnx",
+        route: Route::H,
+        judge: Judge::Req2,
+        shape: "S1: batch=4 d_in=8 hidden=16 d_out=4 seed=0xC0FFEE",
+        run: |d| onnx_forward_backward(d, 4, 8, 16, 4),
+        reference: None,
+    },
+    Case {
+        name: "onnx_from_sequential_forward_backward_s2",
+        family: "onnx",
+        route: Route::H,
+        judge: Judge::Req2,
+        shape: "S2: batch=5 d_in=13 hidden=17 d_out=7 seed=0xC0FFEE",
+        run: |d| onnx_forward_backward(d, 5, 13, 17, 7),
+        reference: None,
     },
 ];
 
@@ -151,6 +172,67 @@ fn mlp_forward_backward(
         out.push(Quantity {
             name,
             values: dense(g)?,
+            require_nonzero: true,
+        });
+    }
+    Ok(out)
+}
+
+/// ONNX 学習の測定（#3842）。`from_sequential` → `bind_autograd` → `forward` → MSE →
+/// `backward`。出力・損失・各 param の勾配（`params()` の名前順）を返す。
+fn onnx_forward_backward(
+    device: Device,
+    batch: usize,
+    d_in: usize,
+    hidden: usize,
+    d_out: usize,
+) -> Result<Vec<Quantity>, String> {
+    let seq = build_model(d_in, hidden, d_out)?;
+    let model = OnnxModel::from_sequential(&seq).map_err(|e| format!("{e:?}"))?;
+    let (x_data, y_data) = regression_data(batch, d_in, d_out)?;
+    let tape = fandhe_ai::tape_for(device).map_err(|e| format!("tape_for 失敗: {e:?}"))?;
+    let g = model
+        .bind_autograd(&tape, &OnnxAutogradOptions::default())
+        .map_err(|e| format!("{e:?}"))?;
+    let x = tape.var(&x_data);
+    let y = tape.var(&y_data);
+    let pred = g.forward(&x).map_err(|e| format!("{e:?}"))?;
+    let loss = MseLoss::new(Reduction::Mean)
+        .forward(&pred, &y)
+        .map_err(|e| format!("{e:?}"))?;
+    let grads = tape.backward(&loss).map_err(|e| format!("{e:?}"))?;
+
+    let mut out = vec![
+        Quantity {
+            name: "forward",
+            values: dense(&pred.to_tensor())?,
+            require_nonzero: true,
+        },
+        Quantity {
+            name: "loss",
+            values: dense(&loss.to_tensor())?,
+            require_nonzero: true,
+        },
+    ];
+    // `params()` は名前順: 0.bias, 0.weight, 2.bias, 2.weight。
+    const GRAD_NAMES: [&str; 4] = [
+        "grad_0_bias",
+        "grad_0_weight",
+        "grad_2_bias",
+        "grad_2_weight",
+    ];
+    let params = g.params();
+    if params.len() != GRAD_NAMES.len() {
+        return Err(format!("param の本数が想定外: {}", params.len()));
+    }
+    for (name, (pname, v)) in GRAD_NAMES.iter().zip(&params) {
+        let grad = grads
+            .get(v)
+            .map_err(|e| format!("{e:?}"))?
+            .ok_or_else(|| format!("{pname} の勾配がない"))?;
+        out.push(Quantity {
+            name,
+            values: dense(grad)?,
             require_nonzero: true,
         });
     }
@@ -298,6 +380,11 @@ fn every_case_family_is_declared() {
 #[test]
 fn scaffold_family_passes_cpu_against_cpu() {
     harness::run_family(CASES, "scaffold", Device::Cpu);
+}
+
+#[test]
+fn onnx_family_passes_cpu_against_cpu() {
+    harness::run_family(CASES, "onnx", Device::Cpu);
 }
 
 #[test]

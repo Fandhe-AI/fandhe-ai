@@ -1962,7 +1962,7 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// （`ModelProto` 等）の露出を見逃していた（codex-review 指摘 P2・
 /// #2024。本関数へ統合し単一の走査でシグネチャ全体を検査する）。
 fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
-    const ALLOWED_PUB_ITEMS: [(&str, &str); 12] = [
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 20] = [
         ("struct", "OnnxModel"),
         ("enum", "OnnxValue"),
         ("enum", "OnnxError"),
@@ -1975,6 +1975,15 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         ("fn", "from_sequential"),
         ("struct", "OnnxExternalDataLimits"),
         ("fn", "from_path_with_limits"),
+        // イシュー #3842: 学習（autograd）の承認形（`docs/onnx-autograd-decision.md` §8.1）。
+        ("fn", "bind_autograd"),
+        ("struct", "OnnxAutogradGraph"),
+        ("struct", "OnnxAutogradOptions"),
+        ("enum", "OnnxTapeValue"),
+        ("fn", "with_trainable"),
+        ("fn", "forward"),
+        ("fn", "params"),
+        ("fn", "param"),
     ];
     const SCANNED_KINDS: [&str; 9] = [
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
@@ -1985,7 +1994,7 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
     // 走査対象は `src/interop/onnx.rs` 限定で、facade `nn::Module` を受ける ONNX API は
     // 承認範囲外のため、この一致は意図した fail-closed（衝突ではない）。将来承認する場合は
     // 本エントリを同時に見直す（`onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module`）。
-    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 12] = [
+    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 17] = [
         "ModelProto",
         "NodeProto",
         "prost::",
@@ -1998,6 +2007,11 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         "nn::Module",
         "ExternalDataOptions",
         "external_data::",
+        "onnx::autograd",
+        "BoundGraph",
+        "BindOptions",
+        "AutogradValue",
+        "AutogradError",
     ];
 
     let cleaned = strip_comments_and_literals(original);
@@ -2298,10 +2312,13 @@ impl OnnxModel {
     );
 }
 
-/// `scan_unapproved_onnx_pub_items` が承認範囲 12 件（`OnnxModel`／
+/// `scan_unapproved_onnx_pub_items` が承認範囲 20 件（`OnnxModel`／
 /// `OnnxValue`／`OnnxError`／`OnnxExportOptions`／`OnnxExternalDataLimits` の
 /// 型定義 5 件と `OnnxModel::{from_bytes, from_path, from_path_with_limits,
-/// run, to_bytes, to_path, from_sequential}` のメソッド 7 件）をすべて含む合成ソースに対して
+/// run, to_bytes, to_path, from_sequential}` のメソッド 7 件に、イシュー #3842 の
+/// 学習面 8 件〈`bind_autograd`・`OnnxAutogradGraph`・`OnnxAutogradOptions`・
+/// `OnnxTapeValue`・`with_trainable`・`forward`・`params`・`param`。`run` は
+/// 既存エントリを共用〉）をすべて含む合成ソースに対して
 /// オフェンス 0 件を返すことを確認する（空虚 pass 防止。承認範囲の
 /// 拡張〈#2018・#2037〉自体が正しく反映されていることの正例テスト）。
 #[test]
@@ -2362,12 +2379,59 @@ impl OnnxModel {
     ) -> Result<Self, OnnxError> {
         unimplemented!()
     }
+
+    pub fn bind_autograd<'m, 't>(
+        &'m self,
+        tape: &'t Tape,
+        options: &OnnxAutogradOptions,
+    ) -> Result<OnnxAutogradGraph<'m, 't>, OnnxError> {
+        unimplemented!()
+    }
+}
+
+pub struct OnnxAutogradGraph<'m, 't> {
+    inner: (),
+}
+
+impl<'m, 't> OnnxAutogradGraph<'m, 't> {
+    pub fn run(
+        &self,
+        feeds: HashMap<String, OnnxTapeValue<'t>>,
+    ) -> Result<HashMap<String, OnnxTapeValue<'t>>, OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn params(&self) -> Vec<(String, Var<'t>)> {
+        unimplemented!()
+    }
+
+    pub fn param(&self, name: &str) -> Option<Var<'t>> {
+        unimplemented!()
+    }
+}
+
+pub struct OnnxAutogradOptions {
+    trainable: (),
+}
+
+impl OnnxAutogradOptions {
+    pub fn with_trainable(names: HashSet<String>) -> Self {
+        unimplemented!()
+    }
+}
+
+pub enum OnnxTapeValue<'t> {
+    Var(Var<'t>),
 }
 "#;
     let offenses = scan_unapproved_onnx_pub_items(synthetic);
     assert!(
         offenses.is_empty(),
-        "承認範囲 12 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
+        "承認範囲 20 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
          テストの前提が崩れている）: {offenses:?}"
     );
 }
@@ -2418,7 +2482,8 @@ impl OnnxModel {
 }
 
 /// `src/interop/` の公開面が承認範囲（`interop::onnx::{OnnxModel,
-/// OnnxValue, OnnxError}` と `OnnxModel::{from_bytes, from_path, run}`）
+/// OnnxValue, OnnxError}` と `OnnxModel::{from_bytes, from_path, run}`、
+/// ほか #2018・#2037・#2360 の追加分と #3842 の学習面 8 件）
 /// のみであることを固定する。`prost`・`onnx-interop` の内部型
 /// （`ModelProto`／`NodeProto`／`Graph` 等）が `pub` シグネチャへ現れない
 /// ことも併せて検査する（薄いラッパー原則の機械的裏付け。#2017）。
@@ -2497,6 +2562,11 @@ fn interop_module_exposes_only_approved_onnx_surface() {
             "nn::Module",
             "ExternalDataOptions",
             "external_data::",
+            "onnx::autograd",
+            "BoundGraph",
+            "BindOptions",
+            "AutogradValue",
+            "AutogradError",
         ] {
             if line.contains(forbidden) {
                 leaked_internal_types.push(format!("`{trimmed}` が {forbidden} を含む"));
@@ -2523,6 +2593,14 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         "pub fn from_sequential",
         "pub struct OnnxExternalDataLimits",
         "pub fn from_path_with_limits",
+        "pub fn bind_autograd",
+        "pub struct OnnxAutogradGraph",
+        "pub struct OnnxAutogradOptions",
+        "pub enum OnnxTapeValue",
+        "pub fn with_trainable",
+        "pub fn forward",
+        "pub fn params",
+        "pub fn param",
     ] {
         assert!(
             onnx_rs_content.contains(expected),
@@ -2543,6 +2621,152 @@ fn interop_module_exposes_only_approved_onnx_surface() {
     );
 }
 
+/// イシュー #3842: 学習面の承認外追加・内部型すり替えを検出する負例。
+#[test]
+fn unapproved_onnx_autograd_items_are_flagged() {
+    let synthetic = r#"
+impl OnnxModel {
+    pub fn bind_autograd(&self) -> BoundGraph<'_, '_> {
+        unimplemented!()
+    }
+}
+
+impl OnnxAutogradGraph<'_, '_> {
+    pub fn run(&self, feeds: HashMap<String, AutogradValue<'_>>) -> Result<(), OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn forward(&self) -> Result<(), AutogradError> {
+        unimplemented!()
+    }
+
+    pub fn options(&self, o: &fandhe_ai_onnx_interop::onnx::autograd::BindOptions) {
+        unimplemented!()
+    }
+
+    pub fn into_inner(self) {
+        unimplemented!()
+    }
+}
+
+pub use fandhe_ai_onnx_interop::onnx::autograd::BoundGraph;
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    for needle in [
+        "BoundGraph",
+        "AutogradValue",
+        "AutogradError",
+        "BindOptions",
+        "into_inner",
+        "use",
+    ] {
+        assert!(
+            offenses.iter().any(|o| o.contains(needle)),
+            "`{needle}` に関する違反が検出されなかった: {offenses:?}"
+        );
+    }
+}
+
+/// イシュー #3842: 正名（`OnnxAutogradGraph`・`OnnxAutogradOptions`・
+/// `OnnxTapeValue`・`AutodiffError`）が禁止部分文字列に誤って当たらないこと
+/// （正名が内部型禁止語と衝突すると正ガードが恒常的に落ちるため）。
+#[test]
+fn approved_onnx_autograd_names_do_not_collide_with_forbidden_substrings() {
+    let synthetic = r#"
+pub struct OnnxAutogradGraph<'m, 't> {
+    inner: (),
+}
+
+pub struct OnnxAutogradOptions {
+    trainable: (),
+}
+
+pub enum OnnxTapeValue<'t> {
+    Var(Var<'t>),
+}
+
+pub enum OnnxError {
+    Autodiff(AutodiffError),
+}
+
+impl OnnxModel {
+    pub fn bind_autograd<'m, 't>(
+        &'m self,
+        tape: &'t Tape,
+        options: &OnnxAutogradOptions,
+    ) -> Result<OnnxAutogradGraph<'m, 't>, OnnxError> {
+        unimplemented!()
+    }
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(offenses.is_empty(), "正名が禁止語に衝突した: {offenses:?}");
+}
+
+/// イシュー #3842: 学習の承認形が facade の公開名だけで到達でき、流れ
+/// （`from_sequential` → bind → forward → backward → 勾配取得）が通ること。
+#[test]
+fn onnx_autograd_types_are_reachable_via_facade() {
+    use fandhe_ai::compat::Sequential;
+    use fandhe_ai::interop::onnx::{
+        OnnxAutogradGraph, OnnxAutogradOptions, OnnxError, OnnxModel, OnnxTapeValue,
+    };
+    use fandhe_ai::{Tensor, Var};
+    use std::collections::{HashMap, HashSet};
+
+    // シグネチャ固定プローブ（呼び出さない。型検査だけが目的）。
+    fn _sig<'m, 't>(
+        m: &'m OnnxModel,
+        t: &'t fandhe_ai::Tape,
+        o: &OnnxAutogradOptions,
+        x: &Var<'t>,
+    ) -> Result<(), OnnxError> {
+        let g: OnnxAutogradGraph<'m, 't> = m.bind_autograd(t, o)?;
+        let _: Var<'t> = g.forward(x)?;
+        let _: Vec<(String, Var<'t>)> = g.params();
+        let _: Option<Var<'t>> = g.param("w");
+        let feeds: HashMap<String, OnnxTapeValue<'t>> = HashMap::new();
+        let _: HashMap<String, OnnxTapeValue<'t>> = g.run(feeds)?;
+        let _: OnnxAutogradOptions = OnnxAutogradOptions::with_trainable(HashSet::new());
+        Ok(())
+    }
+
+    let seq = Sequential::new()
+        .add_linear(2, 3, 1)
+        .unwrap()
+        .add_relu()
+        .add_linear(3, 1, 2)
+        .unwrap();
+    let model = OnnxModel::from_sequential(&seq).unwrap();
+    let tape = fandhe_ai::tape();
+    let g = model
+        .bind_autograd(&tape, &OnnxAutogradOptions::default())
+        .unwrap();
+    let x = tape.var(&Tensor::new(vec![0.5_f32, -0.25, 1.0, 2.0], &[2, 2]).unwrap());
+    let loss = g.forward(&x).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let params = g.params();
+    assert_eq!(params.len(), 4);
+    let names: Vec<&str> = params.iter().map(|(n, _)| n.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "params() は名前順");
+    for (_, v) in &params {
+        assert!(grads.get(v).unwrap().is_some());
+    }
+
+    // 新 variant は wildcard と併用して match できる（`#[non_exhaustive]`）。
+    let err = model
+        .bind_autograd(
+            &tape,
+            &OnnxAutogradOptions::with_trainable(HashSet::from(["nope".to_string()])),
+        )
+        .unwrap_err();
+    match err {
+        OnnxError::UnknownTrainable { name } => assert_eq!(name, "nope"),
+        other => panic!("UnknownTrainable を期待: {other:?}"),
+    }
+}
 /// external data 予算まわり（イシュー #2360）の承認外追加を検出する負例。
 #[test]
 fn unapproved_onnx_external_data_items_are_flagged() {

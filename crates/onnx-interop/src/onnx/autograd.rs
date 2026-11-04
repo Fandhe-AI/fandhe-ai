@@ -31,7 +31,9 @@
 //! `Gather`・`Unsqueeze`・`Concat`・`Slice`・`Mod`・`Reshape`・`Squeeze`・
 //! `Transpose`・`Clip`・`Tanh`・`Gelu`・`Where`・`Expand`・`ReduceMean`・
 //! `Pad`・`Resize`（イシュー #2186 で `interp`〈非勾配〉に追加した 8 op を
-//! 含む）は本スコープでは未実装で、これらのノードに到達すると
+//! 含む）と `Conv`・`MaxPool`・`AveragePool`・`BatchNormalization`・
+//! `GlobalAveragePool`・`Flatten`（CNN 系 6 op。イシュー #3842 で明示腕へ
+//! 統一）の計 22 op は本スコープでは未実装で、これらのノードに到達すると
 //! [`AutogradError::UnsupportedInAutograd`] で fail-closed に拒否する
 //! （no-silent-skip 契約。`.claude/rules/coding-rust.md`）。view／shape 系
 //! 演算の勾配対応は後続スコープとして PR 本文に記録する
@@ -1522,12 +1524,18 @@ fn dispatch_node<'t>(
         // `Expand`／`ReduceMean`／`Pad`／`Resize`）も同じ理由（`interp_ext`
         // への委譲は `Tape::new()`〈naive CPU 参照実装〉を新規に生成する形で
         // 実装しており、呼び出し元の `tape`／`Var` を経由しないため autograd
-        // 経路には接続できない）で本スコープ外とする。`other =>` の一般
+        // 経路には接続できない）で本スコープ外とする。イシュー #3842 で
+        // `Conv`／`MaxPool`／`AveragePool`／`BatchNormalization`／
+        // `GlobalAveragePool`／`Flatten` の 6 op も同じ明示 fail-closed 腕へ
+        // 揃えた（interp は import 対応のため `other =>` に落とすと
+        // 「未対応 op_type」と誤診断される。`docs/onnx-autograd-decision.md`
+        // §8.10・§8.12）。`other =>` の一般
         // `UnsupportedOp` に落とすと「未対応 op_type」と誤診断され interp
         // 側の対応状況と矛盾するため、明示 fail-closed 腕へ追加する。
         "Gather" | "Unsqueeze" | "Concat" | "Slice" | "Mod" | "Reshape" | "Squeeze"
         | "Transpose" | "Clip" | "Tanh" | "Gelu" | "Where" | "Expand" | "ReduceMean" | "Pad"
-        | "Resize" => {
+        | "Resize" | "Conv" | "MaxPool" | "AveragePool" | "BatchNormalization"
+        | "GlobalAveragePool" | "Flatten" => {
             // 参照する入力が Const のみであっても、本 PR のスコープでは
             // 常に fail-closed とする（Const-only 最適化は将来の拡張余地として
             // 残すが、いま実装すると Var/Const 判定漏れが no-silent-skip

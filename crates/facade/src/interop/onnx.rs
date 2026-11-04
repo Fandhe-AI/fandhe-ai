@@ -4,9 +4,11 @@
 //! `fandhe_ai_onnx_interop`（内部クレート。crates.io 公開名
 //! `fandhe-ai-onnx-interop`）の `onnx::proto::decode_model` →
 //! `onnx::graph::build_graph` → `onnx::interp::run`／`run_with_ops` を
-//! 1 つの薄い型 [`OnnxModel`] に束ねる。**推論専用**であり
-//! **autograd 未接続**（入出力は [`crate::Tensor`] であり `Var` ではない。
-//! 勾配は取れない）。
+//! 1 つの薄い型 [`OnnxModel`] に束ねる。[`OnnxModel::run`] は**推論専用**
+//! （入出力は [`crate::Tensor`] であり `Var` ではない。勾配は取れない）。
+//! 学習（autograd）は別の入口 [`OnnxModel::bind_autograd`]
+//! （[`OnnxAutogradGraph`]。イシュー #3842・`docs/onnx-autograd-decision.md`
+//! §8）を使う。
 //!
 //! **既定はホスト CPU 実行のみ**（`BackendOps`／`Device` 非経由。
 //! イシュー #2077 導入前と bit 完全に不変）。[`crate::
@@ -141,11 +143,14 @@
 //! `map_decode_error`（非公開関数）でそのまま [`OnnxError::SparseInitializerNotSupported`]
 //! へ写像する（`build_graph` 側の同名エラーと同じ payload）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use fandhe_ai_onnx_interop::onnx::autograd::{
+    AutogradError, AutogradValue, BindOptions, BoundGraph,
+};
 use fandhe_ai_onnx_interop::onnx::export::{
     ExportError, ExportOptions, build_model_proto, try_encode_model,
 };
@@ -164,6 +169,7 @@ use fandhe_ai_tensor_core::f16;
 use crate::Device;
 use crate::Tensor;
 use crate::compat::Sequential;
+use crate::{AutodiffError, Tape, Var};
 
 /// [`set_cuda_onnx_gpu_execution_enabled`]（`crate::lib` の薄い公開
 /// ラッパー経由）が読み書きする opt-in 状態（イシュー #2077）。既定
@@ -338,8 +344,8 @@ impl OnnxModel {
     /// グラフを実行する。`feeds` はグラフ入力名 → 値の対応（未対応の
     /// initializer 上書きを含む pre-IR-4 セマンティクス）。
     ///
-    /// 推論専用・autograd 未接続（戻り値は [`crate::Tensor`] であり
-    /// `Var` ではない）。**既定はホスト CPU 実行のみ**（`BackendOps`／
+    /// 推論専用（戻り値は [`crate::Tensor`] であり `Var` ではない。学習は
+    /// [`OnnxModel::bind_autograd`] を使う）。**既定はホスト CPU 実行のみ**（`BackendOps`／
     /// `Device` 非経由。導入前と bit 完全に不変）。
     /// [`crate::set_cuda_onnx_gpu_execution_enabled`]／
     /// `crate::set_metal_onnx_gpu_execution_enabled`（macOS 限定 cfg のため非
@@ -615,6 +621,23 @@ pub enum OnnxError {
     /// 上記以外の実行時エラー（型不一致・属性欠落・未対応 dtype の演算
     /// 等。`InterpError` の `Display` 文字列を保持する）。
     Execution { message: String },
+    /// [`OnnxModel::bind_autograd`] 経路で、勾配追跡を実装していない op
+    /// （`docs/onnx-autograd-decision.md` §8.10 の 22 op）へ到達した
+    /// （イシュー #3842。fail-closed）。
+    UnsupportedInAutograd { node: String, op_type: String },
+    /// [`OnnxAutogradOptions::with_trainable`] の名前が F32 initializer に
+    /// 存在しない（typo・非 F32 名。fine-tuning が無言で何も更新しない
+    /// 状態を防ぐ fail-closed 検査）。
+    UnknownTrainable { name: String },
+    /// [`OnnxAutogradGraph::forward`] は「initializer を除く入力 1 個・出力
+    /// 1 個」のグラフ専用。
+    NotSingleInputOutput { inputs: usize, outputs: usize },
+    /// feed／中間値の dtype 種別が op の期待と異なる（`expected` は
+    /// 内部表記の説明文字列。内部の変更が公開シグネチャへ波及しないよう
+    /// `String` とした）。
+    FeedTypeMismatch { name: String, expected: String },
+    /// autodiff 層（`Var` 演算）が返したエラー。
+    Autodiff(AutodiffError),
 }
 
 impl fmt::Display for OnnxError {
@@ -648,6 +671,22 @@ impl fmt::Display for OnnxError {
             }
             OnnxError::InvalidModel { message } => write!(f, "不正な ONNX モデル: {message}"),
             OnnxError::Execution { message } => write!(f, "ONNX 実行時エラー: {message}"),
+            OnnxError::UnsupportedInAutograd { node, op_type } => write!(
+                f,
+                "autograd 経路が未対応の ONNX op（node={node}・op_type={op_type}）: 勾配追跡を実装していない"
+            ),
+            OnnxError::UnknownTrainable { name } => write!(
+                f,
+                "trainable に指定された '{name}' は F32 initializer に存在しません"
+            ),
+            OnnxError::NotSingleInputOutput { inputs, outputs } => write!(
+                f,
+                "forward は入力 1 個・出力 1 個のグラフ専用です（入力={inputs}・出力={outputs}）"
+            ),
+            OnnxError::FeedTypeMismatch { name, expected } => {
+                write!(f, "値 '{name}' の型が期待と異なります（期待: {expected}）")
+            }
+            OnnxError::Autodiff(e) => write!(f, "autodiff エラー: {e}"),
         }
     }
 }
@@ -656,6 +695,7 @@ impl std::error::Error for OnnxError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             OnnxError::Io(e) => Some(e),
+            OnnxError::Autodiff(e) => Some(e),
             _ => None,
         }
     }
@@ -792,6 +832,195 @@ fn map_export_error(e: ExportError) -> OnnxError {
             OnnxError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory))
         }
         other => OnnxError::InvalidModel {
+            message: other.to_string(),
+        },
+    }
+}
+
+// ================= autograd（学習）公開面（イシュー #3842） =================
+
+impl OnnxModel {
+    /// ONNX グラフを `tape` 上へ束縛し、学習可能な [`OnnxAutogradGraph`] を返す
+    /// （`fandhe_ai_onnx_interop::onnx::autograd::BoundGraph::bind` への薄い
+    /// 委譲。`docs/onnx-autograd-decision.md` §8.1・所有者承認 #3770）。
+    ///
+    /// - 勾配経路の op は 11 種（`Gemm`・`MatMul`・`Add`・`Mul`・`Div`・
+    ///   `Sqrt`・`Relu`・`Sigmoid`・`Erf`・`Softmax`・`LayerNormalization`）、
+    ///   非勾配経路は 3 種（`Shape`・`Cast`・`Constant`）。残り 22 op
+    ///   （`Gather`・`Reshape`・`Transpose`・`Conv`・`Flatten` 等）に到達すると
+    ///   [`OnnxError::UnsupportedInAutograd`] で fail-closed に拒否する
+    ///   （無言 skip しない）
+    /// - GPU の `Tape` でも 11 op の計算はホストで実行され、**性能は保証
+    ///   しない**。実行先は `Tape` の device で決まり、
+    ///   [`crate::set_cuda_onnx_gpu_execution_enabled`] 等の opt-in は
+    ///   [`OnnxModel::run`] だけに効く（`bind_autograd` は見ない）
+    /// - `Cast`（F32 から F32 以外）では勾配が切れる（意図的）
+    /// - `options` の `trainable` 既定は全 F32 initializer。存在しない名前は
+    ///   [`OnnxError::UnknownTrainable`] で拒否する
+    /// - 書き戻し API はない。学習ループはステップごとに新しい `Tape` へ
+    ///   bind し、更新後の重みを initializer と同名の feed として
+    ///   [`OnnxModel::run`] に渡す
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::interop::onnx::{OnnxAutogradOptions, OnnxModel};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let seq = Sequential::new()
+    ///     .add_linear(2, 3, 1)?
+    ///     .add_relu()
+    ///     .add_linear(3, 1, 2)?;
+    /// let model = OnnxModel::from_sequential(&seq)?;
+    /// let tape = fandhe_ai::tape();
+    /// let g = model.bind_autograd(&tape, &OnnxAutogradOptions::default())?;
+    /// let x = tape.var(&Tensor::new(vec![0.5_f32, -0.25, 1.0, 2.0], &[2, 2])?);
+    /// let y = g.forward(&x)?;
+    /// let loss = y.sum(None)?;
+    /// let grads = tape.backward(&loss)?;
+    /// let params = g.params();
+    /// assert!(!params.is_empty());
+    /// for (_, v) in &params {
+    ///     assert!(grads.get(v)?.is_some());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bind_autograd<'m, 't>(
+        &'m self,
+        tape: &'t Tape,
+        options: &OnnxAutogradOptions,
+    ) -> Result<OnnxAutogradGraph<'m, 't>, OnnxError> {
+        let inner = BoundGraph::bind(&self.graph, &tape.0, &options.to_internal())
+            .map_err(map_autograd_error)?;
+        Ok(OnnxAutogradGraph { inner })
+    }
+}
+
+/// [`OnnxModel::bind_autograd`] のオプション（`#[non_exhaustive]`・
+/// フィールド非公開）。既定は全 F32 initializer を学習対象にする。
+#[non_exhaustive]
+#[derive(Clone, Debug, Default)]
+pub struct OnnxAutogradOptions {
+    trainable: Option<HashSet<String>>,
+}
+
+impl OnnxAutogradOptions {
+    /// 学習対象を `names` の F32 initializer に絞る（それ以外は凍結）。
+    pub fn with_trainable(names: HashSet<String>) -> Self {
+        OnnxAutogradOptions {
+            trainable: Some(names),
+        }
+    }
+
+    fn to_internal(&self) -> BindOptions {
+        match &self.trainable {
+            Some(names) => BindOptions::with_trainable(names.clone()),
+            None => BindOptions::default(),
+        }
+    }
+}
+
+/// `Tape` 上へ束縛された ONNX グラフ（[`OnnxModel::bind_autograd`] の戻り値）。
+/// 内部型 `BoundGraph` への薄い委譲で、フィールドは非公開。
+pub struct OnnxAutogradGraph<'m, 't> {
+    inner: BoundGraph<'m, 't>,
+}
+
+impl fmt::Debug for OnnxAutogradGraph<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 内部 `BoundGraph` は `Debug` 非実装（facade `Tape` と同じ方針）。
+        f.debug_struct("OnnxAutogradGraph").finish_non_exhaustive()
+    }
+}
+
+impl<'m, 't> OnnxAutogradGraph<'m, 't> {
+    /// グラフを実行する。検証順序は [`OnnxModel::run`] と同じ
+    /// （`MissingFeed` → `UnknownFeed`）。
+    pub fn run(
+        &self,
+        feeds: HashMap<String, OnnxTapeValue<'t>>,
+    ) -> Result<HashMap<String, OnnxTapeValue<'t>>, OnnxError> {
+        let feeds = feeds
+            .into_iter()
+            .map(|(k, v)| (k, tape_value_to_autograd(v)))
+            .collect();
+        let outputs = self.inner.run(feeds).map_err(map_autograd_error)?;
+        Ok(outputs
+            .into_iter()
+            .map(|(k, v)| (k, autograd_to_tape_value(v)))
+            .collect())
+    }
+
+    /// 「initializer を除く入力 1 個・出力 1 個」のグラフ専用の便宜 API。
+    /// それ以外は [`OnnxError::NotSingleInputOutput`]。
+    pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, OnnxError> {
+        self.inner.forward(input).map_err(map_autograd_error)
+    }
+
+    /// 学習対象 initializer の `(名前, Var)` 列（名前順で決定的）。
+    pub fn params(&self) -> Vec<(String, Var<'t>)> {
+        let mut v: Vec<(String, Var<'t>)> = self
+            .inner
+            .params()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// 名前で 1 個の学習対象 initializer を取り出す。
+    pub fn param(&self, name: &str) -> Option<Var<'t>> {
+        self.inner.param(name)
+    }
+}
+
+/// [`OnnxAutogradGraph::run`] の feed／出力値。勾配追跡対象の `Var` か、
+/// 非追跡の [`OnnxValue`]。
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub enum OnnxTapeValue<'t> {
+    /// 勾配追跡対象の F32 テンソル。
+    Var(Var<'t>),
+    /// 非追跡値（任意 dtype）。
+    Const(OnnxValue),
+}
+
+fn tape_value_to_autograd(v: OnnxTapeValue<'_>) -> AutogradValue<'_> {
+    match v {
+        OnnxTapeValue::Var(x) => AutogradValue::Var(x),
+        OnnxTapeValue::Const(c) => AutogradValue::Const(onnx_value_to_interp(c)),
+    }
+}
+
+fn autograd_to_tape_value(v: AutogradValue<'_>) -> OnnxTapeValue<'_> {
+    match v {
+        AutogradValue::Var(x) => OnnxTapeValue::Var(x),
+        AutogradValue::Const(c) => OnnxTapeValue::Const(interp_value_to_onnx(c)),
+    }
+}
+
+fn map_autograd_error(e: AutogradError) -> OnnxError {
+    match e {
+        AutogradError::MissingFeed { input } => OnnxError::MissingFeed { input },
+        AutogradError::UnknownFeed { name } => OnnxError::UnknownFeed { name },
+        AutogradError::Interp(e) => map_interp_error(e),
+        AutogradError::Autodiff(e) => OnnxError::Autodiff(e),
+        // `reason` は内部の固定文のため公開 variant には持ち込まない
+        // （Display の固定文で足りる）。
+        AutogradError::UnsupportedInAutograd { node, op_type, .. } => {
+            OnnxError::UnsupportedInAutograd { node, op_type }
+        }
+        AutogradError::UnknownTrainable { name } => OnnxError::UnknownTrainable { name },
+        AutogradError::NotSingleInputOutput { inputs, outputs } => {
+            OnnxError::NotSingleInputOutput { inputs, outputs }
+        }
+        AutogradError::FeedTypeMismatch { name, expected } => OnnxError::FeedTypeMismatch {
+            name,
+            expected: expected.to_string(),
+        },
+        other => OnnxError::Execution {
             message: other.to_string(),
         },
     }
