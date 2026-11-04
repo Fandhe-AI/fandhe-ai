@@ -110,6 +110,7 @@ docs/
     │   ├── logs/similarity-ops-3821/ # CosineSimilarity・PairwiseDistance（#3821）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（対象テスト・実行コマンド・記入欄。host 計算のため判定は bit 一致）
     │   ├── logs/batch-norm-rank5-3819/ # `Var::batch_norm` rank 5（#3819）・BatchNorm3d 層（#3820）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り
     │   ├── logs/nn-layers-metal-parity-3861/ # Phase 6 の NN 層（#3814・#3817〜#3827）の Metal 実機 parity（`<metal-node>`・Mac mini）。雛形の nn 族は登録 0 件のため各実装 issue の `#[ignore]` Metal テスト 19 本を測った。BatchNorm3d の統計は soft-f64 の実装形を REQ-2 で確かめた。事前登録 `RULE.txt`・実行スクリプト `run_metal_parity.sh`（#3858 版の複製）・結果表 `README.md`・回収ログ。**Mac mini で実測済み・19 本中 19 本 pass**（2026-11-04、イシュー #3861。雛形の nn 族は undetermined。GB10 は #3860）
+    │   ├── logs/nn-train-template-metal-parity-3861/ # 学習ステップの parity 雛形 `train_gpu_parity.rs` の nn 族（#4026 で登録した 18 ケース）の Metal 実機 parity（`<metal-node>`・Mac mini。#3861 の 2 回目）。事前登録 `RULE.txt`・実行スクリプト `run_metal_parity.sh`（1 回目の複製に `TRAIN_PARITY` 集計を追加）・結果表 `README.md`・記録集計 `summary.tsv`・回収ログ。**Mac mini で実測済み・`TRAIN_PARITY` 記録 120 行中 120 行 pass**（2026-11-04、イシュー #3861。GB10 は #3860）
     │   ├── logs/lp-pool-ops-3825/ # LPPool（#3825）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（対象テスト・実行コマンド・記入欄。判定は REQ-2 統一複合判定）
     │   ├── logs/channel-shuffle-3822/ # ChannelShuffle（#3822）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（対象テスト・実行コマンド・記入欄。判定は bit 一致）
     │   ├── logs/bilinear-ops-3818/ # Bilinear（#3818）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（対象テスト・実行コマンド・記入欄。判定は REQ-2 統一複合判定）
