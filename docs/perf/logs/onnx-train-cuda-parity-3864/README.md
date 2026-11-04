@@ -29,7 +29,7 @@
 - 集計上の注意: `--nocapture` では各ログの最初の `TRAIN_PARITY` 記録が `test <名前> ... ` と同じ行に出る。下表は行頭に限らず
   `TRAIN_PARITY` 以降を数えた（onnx 族 12 行・scaffold 族 16 行。verdict は 28 行すべて pass）。スクリプトの判定は exit 0 と
   `test result` 行で決まり、`TRAIN_PARITY` の行頭 grep は非 0 終了時の fail／undetermined の区別にだけ使う（今回は非 0 終了なし）。
-- テストは scaffold 0.24 秒、onnx 1.17 秒で終わった（`test result` 行の `finished in`）。
+- テストは scaffold 1.17 秒、onnx 0.24 秒で終わった（`test result` 行の `finished in`）。
 
 ## 結果表（onnx 族。`logs/onnx-train-3842/train_parity_onnx_cuda_matches_cpu.log` の `TRAIN_PARITY` 行の写し）
 
