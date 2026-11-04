@@ -16,7 +16,7 @@ Phase 10 で測ると定めた Metal 側の `#[ignore]` 3 本を CPU 参照と�
 **要対応（所有者へ報告。GB10 の #3862 と同じ）: 雛形 `crates/facade/tests/train_gpu_parity.rs` の optim 族は登録 0 件。**
 `train_parity_optim_metal_matches_cpu` は `undetermined: 族 optim の登録が 0 件`（`crates/facade/tests/common/train_gpu_parity.rs:193`）で
 panic し、exit 101・判定 undetermined だった。RULE.txt で事前に宣言したとおり §19.4 の 3 本を測定対象にし、雛形の optim 族は
-完了判定に数えていない。
+完了判定に数えていない。所有者の判断（2026-11-04）により、雛形への optim 族の追加は #4026 で行う。雛形（学習ステップ）は #4026 の登録待ちで未実測であり、#3863 は #4026 のマージ後に雛形テストを再計測してから閉じる（この記録の PR は `Refs`。RULE.txt はこの判断より前に固定したため変えていない）。
 
 - 実行コミット（`rev-stamp.txt`）: `39cb7d10160115ebdbbe23958ce8c43ae390c115`・`dirty=0`。事前登録と実行スクリプトを含むコミットそのもので、
   `crates/`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` は対象コミット `b82b1e5d1` と同一（送信前に `git diff --quiet` で確認）。
@@ -44,7 +44,7 @@ panic し、exit 101・判定 undetermined だった。RULE.txt で事前に宣�
 
 Metal 版の adam テストは CUDA 版（`adam_grouped_matches_cpu_grouped_and_rejects_bad_totals`）と違い、不正な合計の拒否を含まない
 （テスト名・内容は対象コミットのまま）。各行の根拠は `summary.tsv`（exit code・`running 1 test` の件数・`test result` 行）と
-`logs/<群>/<テスト名>.log`（末尾に `rc=`）。対象の実装 issue #3837・#3838 は既に CLOSED。CUDA（GB10）は #3862 が測る。
+`logs/<群>/<テスト名>.log`（末尾に `rc=`）。対象の実装 issue #3837・#3838 は既に CLOSED。CUDA（GB10）は #3862（PR #4023・マージ済み）で 3 本中 3 本 pass。
 
 ## 回収物
 
