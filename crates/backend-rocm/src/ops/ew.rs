@@ -9,15 +9,15 @@
 //! # デバイス常駐 API の到達性（要報告事項）
 //! `binary_elementwise_device`／`unary_elementwise_device` は実装するが、`memory_ops()` は R0 の方針
 //! （被覆計画 §4・既定継承の `None`）のままなので、**crate の外から ROCm の `DeviceBuffer` を作れない**。
-//! 判別は `downcast_handle::<RocmBufferHandle>()` の型だけで行う（`device()` は #3157 まで仮置きの
-//! `Device::Cpu` で、CPU 由来のバッファと区別できない）。テストは `upload_resident`／
+//! 判別は `downcast_handle::<RocmBufferHandle>()` の型だけで行う（`device()` は `Rocm(0)` だが
+//! CPU 由来のバッファの名乗りと区別できない）。テストは `upload_resident`／
 //! `download_resident`（`#[cfg(test)]`）で組み立てる。
 //!
 //! # 融合の opt-in ゲートは設けない
 //! CUDA の融合は `AtomicBool` の opt-in ゲート（facade の Tier B 公開判断に結びつく）の背後にある。
 //! 新しいプロセスワイドの setter は公開面の判断で自律的に決められず、ROCm はどの候補リストにも
-//! 登録していないため、CPU 版と同じくゲートなしの allowlist にした。facade へ ROCm を露出する
-//! #3157 の時点で所有者が揃えるか判断する。
+//! 登録していないため、CPU 版と同じくゲートなしの allowlist にした。facade へ ROCm を結線した
+//! #3853 でも揃えていない（公開判断は #3854 以降）。
 
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, BinaryElementwiseOp, DType, DeviceBuffer, FusionPlan, ScalarBinaryOp,

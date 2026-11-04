@@ -38,7 +38,7 @@ fn raw_tape_for(device: Device) -> fandhe_ai_autodiff::Tape {
         #[cfg(target_os = "macos")]
         Device::Metal => Box::new(fandhe_ai_backend_metal::MetalBackendOps::new()),
         other => {
-            panic!("raw_tape_for: {other:?} はこのテストの対象外（ROCm の facade 結線は #3853）")
+            panic!("raw_tape_for: {other:?} はこのテストの対象外（ROCm は未対応）")
         }
     };
     fandhe_ai_autodiff::Tape::new_with_ops(ops)

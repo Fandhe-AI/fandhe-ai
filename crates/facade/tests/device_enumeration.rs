@@ -117,3 +117,88 @@ fn non_macos_build_never_yields_metal_variant() {
         );
     }
 }
+// ---------------------------------------------------------------------------
+// イシュー #3853: ROCm（`Device::Rocm(0)`）の結線。ROCm 非搭載の CI でも通る
+// 環境適応型（provider の判定と突き合わせる）。
+// ---------------------------------------------------------------------------
+
+fn rocm_provider_available() -> bool {
+    fandhe_ai_tensor_core::DeviceProvider::is_available(
+        &fandhe_ai_backend_rocm::RocmDeviceProvider::new(),
+    )
+}
+
+/// `Device::Rocm(_)` の有無が provider の判定と一致し、あるときは `Rocm(0)` がちょうど 1 件。
+#[test]
+fn available_devices_excludes_rocm_without_hip() {
+    let rocm: Vec<Device> = fandhe_ai::available_devices()
+        .into_iter()
+        .filter(|d| matches!(d, Device::Rocm(_)))
+        .collect();
+    if rocm_provider_available() {
+        assert_eq!(rocm, vec![Device::Rocm(0)]);
+    } else {
+        assert!(rocm.is_empty(), "ROCm 不在なのに列挙された: {rocm:?}");
+    }
+}
+
+/// provider が使えないとき `tape_for(Rocm(0))`・メモリ API は `DeviceUnavailable`（panic しない）。
+#[test]
+fn tape_for_rocm_is_device_unavailable_without_hip() {
+    if rocm_provider_available() {
+        return;
+    }
+    assert!(matches!(
+        fandhe_ai::tape_for(Device::Rocm(0)),
+        Err(fandhe_ai::BackendError::DeviceUnavailable(_))
+    ));
+    assert!(fandhe_ai::release_cached_memory(Device::Rocm(0)).is_err());
+    assert!(fandhe_ai::memory_pool_stats(Device::Rocm(0)).is_err());
+}
+
+/// 範囲外 ordinal は無条件に `DeviceUnavailable`（承認 #3771 の点 4）。
+#[test]
+fn tape_for_rocm_out_of_range_ordinal_is_err() {
+    for d in [Device::Rocm(1), Device::Rocm(usize::MAX)] {
+        assert!(
+            matches!(
+                fandhe_ai::tape_for(d),
+                Err(fandhe_ai::BackendError::DeviceUnavailable(_))
+            ),
+            "{d:?}"
+        );
+    }
+}
+
+/// 列挙順は Cpu → Cuda → Metal → Rocm（rank が単調非減少）。
+#[test]
+fn available_devices_order_is_cpu_cuda_metal_rocm() {
+    fn rank(d: &Device) -> u8 {
+        match d {
+            Device::Cpu => 0,
+            Device::Cuda(_) => 1,
+            #[cfg(target_os = "macos")]
+            Device::Metal => 2,
+            Device::Rocm(_) => 3,
+            _ => 4,
+        }
+    }
+    let ranks: Vec<u8> = fandhe_ai::available_devices().iter().map(rank).collect();
+    assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{ranks:?}");
+}
+
+/// 性能比較の事前登録（設計記録 §13）用の計測。assert なし・結果は標準出力のみ。
+#[test]
+#[ignore = "計測専用（設計記録 §13 の事前登録規則。5 回別プロセスで中央値）"]
+fn available_devices_call_time_report() {
+    const N: u32 = 200;
+    let _ = fandhe_ai::available_devices(); // ウォームアップ
+    let start = std::time::Instant::now();
+    for _ in 0..N {
+        std::hint::black_box(fandhe_ai::available_devices());
+    }
+    println!(
+        "available_devices_ns_per_call={}",
+        start.elapsed().as_nanos() / u128::from(N)
+    );
+}

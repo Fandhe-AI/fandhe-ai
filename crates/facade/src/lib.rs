@@ -141,6 +141,10 @@
 //!   軽量な値であり、重い初期化コストはバックエンド側キャッシュが吸収する。
 //! - `Device::Metal`（`cfg(target_os = "macos")`）→ `MetalDeviceProvider::select`
 //!   で検証したうえで `MetalBackendOps::new()` を構築する。
+//! - `Device::Rocm(0)` → `RocmDeviceProvider::select`（HIP・HIPRTC・gfx942 の
+//!   code object のロードを検証。条件付き・実験的。イシュー #3853）したうえで
+//!   `RocmBackendOps::new(target)` を構築する。`Rocm(n >= 1)`・HIP 不在は
+//!   `DeviceUnavailable`（panic しない）。
 //!
 //! 既定デバイスの自動選択（GPU フォールバック等）・デバイス列挙の集約入口
 //! （`Device::available()` 相当の facade 結線）は本イシューのスコープ外
@@ -3194,6 +3198,19 @@ pub fn tape() -> Tape {
 /// を返す（fail-fast。本番経路で `panic!`／`unwrap()` しない。
 /// `.claude/rules/coding-rust.md`）。構築規則はモジュール冒頭コメント
 /// 参照。
+///
+/// `Device::Rocm(0)` は HIP・HIPRTC・gfx942 のロードがそろう ROCm 搭載ホストでだけ `Ok` になる
+/// （条件付き・実験的。`Rocm(n >= 1)` は常に `DeviceUnavailable`）。
+///
+/// ```
+/// use fandhe_ai::{Device, available_devices, tape_for};
+/// // ROCm の有無に依らず成り立つ（範囲外 ordinal は panic せず Err）。
+/// assert!(tape_for(Device::Rocm(1)).is_err());
+/// // ROCm が列挙されないホストでは Rocm(0) も Err。
+/// if !available_devices().contains(&Device::Rocm(0)) {
+///     assert!(tape_for(Device::Rocm(0)).is_err());
+/// }
+/// ```
 pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
     let ops = resolve_ops(device)?;
     Ok(Tape(fandhe_ai_autodiff::Tape::new_with_ops(ops)))
@@ -3217,14 +3234,14 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
 /// **順序契約**: `Device::Cpu`（常に含まれる）→ `Device::Cuda(0..n)`
 /// （ordinal 昇順。CUDA driver 不在なら 0 件）→ `Device::Metal`
 /// （`cfg(target_os = "macos")` 限定。デバイス検出 0 件なら含まれない）
-/// の順で、同一プロセス内の複数回呼び出しでも決定的。`Device::Rocm` は
-/// 0.14.0 で追加済み（#3851、承認 #3771）だが、facade の結線（#3853）までは
-/// 列挙されず、`tape_for(Device::Rocm(_))` は `DeviceUnavailable` を返す
-/// （`docs/backend-rocm-device-exposure-decision.md`）。
+/// → `Device::Rocm(0)` の順で、同一プロセス内の複数回呼び出しでも決定的。
+/// `Device::Rocm(0)` は 0.14.0 で追加（#3851、承認 #3771）、facade 結線は #3853。
+/// HIP・HIPRTC・gfx942 の code object のロードがそろうときだけ 1 件含まれる
+/// （条件付き・実験的。`docs/backend-rocm-device-exposure-decision.md`）。
 ///
 /// ```
 /// // ROCm 非搭載の CI でも通る。`Device` は `#[non_exhaustive]` なので下流の
-/// // 網羅 `match` には `_` 腕が要る。ROCm は facade 結線（#3853）まで列挙されない。
+/// // 網羅 `match` には `_` 腕が要る。
 /// let devices = fandhe_ai::available_devices();
 /// for d in &devices {
 ///     match d {
@@ -3232,19 +3249,21 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
 ///         fandhe_ai::Device::Cuda(_) => {}
 ///         #[cfg(target_os = "macos")]
 ///         fandhe_ai::Device::Metal => {}
+///         fandhe_ai::Device::Rocm(_) => {}
 ///         _ => {}
 ///     }
 /// }
 /// assert!(devices.contains(&fandhe_ai::Device::Cpu));
-/// // facade 未結線の間だけ成り立つ（#3853 で外す）。
-/// assert!(!devices.iter().any(|d| matches!(d, fandhe_ai::Device::Rocm(_))));
 /// ```
 ///
 /// **副作用**: `CudaDeviceProvider::enumerate` は検出した CUDA
 /// ordinal ごとに `context_cache` のコンテキストを初期化する
 /// （`crates/backend-cuda/src/device.rs`。2 回目以降はキャッシュ
 /// ヒットで軽量）。これは後で [`tape_for`] が払うはずのコストを
-/// 前倒しするだけであり、追加コストではない。
+/// 前倒しするだけであり、追加コストではない。`RocmDeviceProvider::enumerate` は
+/// ROCm 非搭載環境で HIP の動的ロード試行が 1 回増え、ROCm ホストでは初回に
+/// gfx942 の GEMM カーネルのコンパイルが走る（成功はプロセス全体でキャッシュ。
+/// 失敗はキャッシュしない）。
 ///
 /// **一貫性契約**: 本関数が返した各 `Device` に対して [`tape_for`]
 /// を呼べば `Ok` になることを意図する（ただし列挙と `tape_for` の
@@ -3259,14 +3278,15 @@ pub fn available_devices() -> Vec<Device> {
     let cuda = fandhe_ai_backend_cuda::CudaDeviceProvider::new();
     #[cfg(target_os = "macos")]
     let metal = fandhe_ai_backend_metal::MetalDeviceProvider::new();
+    let rocm = fandhe_ai_backend_rocm::RocmDeviceProvider::new();
 
-    // macOS 以外では 2 要素で固定（`providers` を `mut` にすると
-    // 非 macOS ビルドで `push` が到達不能になり `unused_mut` 警告
+    // 順序は Cpu → Cuda → Metal → Rocm。macOS 以外では 3 要素で固定（`providers` を
+    // `mut` にすると非 macOS ビルドで `push` が到達不能になり `unused_mut` 警告
     // （`-D warnings` で fail）になるため、cfg ごとに構築を分ける）。
     #[cfg(target_os = "macos")]
-    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda, &metal];
+    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda, &metal, &rocm];
     #[cfg(not(target_os = "macos"))]
-    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda];
+    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda, &rocm];
 
     fandhe_ai_tensor_core::enumerate_all(&providers)
         .into_iter()
@@ -3580,14 +3600,20 @@ fn resolve_ops(device: Device) -> Result<Box<dyn BackendOps + Send>, BackendErro
             })?;
             Ok(Box::new(fandhe_ai_backend_metal::MetalBackendOps::new()))
         }
-        // `Device` は `#[non_exhaustive]`（0.14.0。#3851）のため別クレートの本 match
-        // には `_` 腕が必須。`Device::Rocm(_)` はここで `DeviceUnavailable` を返す
-        // （facade の ROCm 結線は #3853。そこで `Rocm(_)` の実構築腕に置き換える）。
-        // `available_devices` は ROCm を列挙しないので「列挙された各 Device で
-        // `tape_for` が Ok」という一貫性契約は崩れない。メッセージは固定文言＋Debug
-        // 表現のみ（パス・ホスト名を含めない）。
+        Device::Rocm(_) => {
+            // `RocmDeviceProvider::select` で存在検証（HIP 不在・n>=1・gfx942 のロード失敗は
+            // `DeviceUnavailable`。イシュー #3853）してから構築する。
+            let provider = fandhe_ai_backend_rocm::RocmDeviceProvider::new();
+            let providers: [&dyn DeviceProvider; 1] = [&provider];
+            select_from(&providers, device)?;
+            let target = provider.resolve_target(device)?; // 成功済みはキャッシュ済みで軽い
+            let ops = fandhe_ai_backend_rocm::RocmBackendOps::new(target);
+            Ok(Box::new(ops))
+        }
+        // `Device` は `#[non_exhaustive]`（#3851）のため別クレートの本 match には `_` 腕が必須。
+        // メッセージは固定文言＋Debug 表現のみ（パス・ホスト名を含めない）。
         other => Err(BackendError::DeviceUnavailable(format!(
-            "{other:?} is not wired into fandhe-ai yet (ROCm facade wiring: #3853)"
+            "{other:?} is not supported by this fandhe-ai build"
         ))),
     }
 }

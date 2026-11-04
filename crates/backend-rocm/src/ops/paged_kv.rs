@@ -14,8 +14,8 @@
 //!
 //! # 到達性
 //! `memory_ops()` は R0 の方針（既定継承の `None`）のままなので、crate の外から ROCm の `DeviceBuffer` を
-//! 作れない。判別は `downcast_handle::<RocmBufferHandle>()` だけで行う（`device()` は #3157 まで仮置きの
-//! `Device::Cpu` で、CPU 由来のバッファと区別できない）。到達性は #3157 待ち。
+//! 作れない。判別は `downcast_handle::<RocmBufferHandle>()` だけで行う（`device()` は `Rocm(0)` だが
+//! CPU 由来のバッファの名乗りと区別できない）。到達性は #3157 待ち。
 //!
 //! 結線を子モジュールに置くのは、兄弟 issue の `ops.rs` 変更との衝突面を小さくするため。thread_local の
 //! キャッシュもここで宣言し、親の宣言群には触れない。

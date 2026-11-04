@@ -19,7 +19,7 @@
 # backend-rocm（13 個目・イシュー #3154）は ROCm（AMD GPU）バックエンドの雛形（`publish = true`・公開準備済みで crates.io 未公開。0.14.0 で公開予定・#3771 承認・#3774）。
 # HIP は `libloading`（第 12 区分）で実行時に動的ロードし、ビルド時にはリンクしない
 # （ROCm 非搭載環境でもビルドが通る。docs/backend-rocm-hip-ffi-decision.md）。
-# `BackendOps` の骨格（#3431）として tensor-core・backend-cpu へ path 依存する。facade が通常依存に持つ（#3852。結線は #3853）。
+# `BackendOps` の骨格（#3431）として tensor-core・backend-cpu へ path 依存する。facade が通常依存に持つ（#3852。結線済み: #3853）。
 #
 # 本体 workspace の直接依存として許容する 11 区分（第 1〜8・第 10〜12 区分。
 # .claude/rules/deps-policy.md。第 9 区分はベンチ比較対象の独立ハーネス限定で本体

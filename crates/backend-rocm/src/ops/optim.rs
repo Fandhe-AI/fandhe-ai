@@ -7,8 +7,8 @@
 //! ため `DispatchFailureCell` の結線は不要）。
 //!
 //! # 検証の順序（fail-closed・部分更新を残さない）
-//! すべての検証を **どの要素も書き換える前・HIP に触れる前** に終える。`device()` は #3157 まで
-//! `Device::Cpu` の仮置きで判別に使えないため、`ops/ew.rs` と同じくハンドル型の downcast で判別する。
+//! すべての検証を **どの要素も書き換える前・HIP に触れる前** に終える。`device()` は `Rocm(0)` だが
+//! 型までは保証しないため、`ops/ew.rs` と同じくハンドル型の downcast で判別する。
 //! - 手順: downcast（失敗は `DeviceMismatch`）、shape 一致、ハンドルの要素数 = `numel`、
 //!   SGD の momentum 有効かつ velocity なし・Adam の未知 kind は `Unsupported`、`numel` の `i32` 収容、
 //!   `numel == 0` は HIP に触れず `Ok`、最後に engine とハンドル種別の組み合わせ

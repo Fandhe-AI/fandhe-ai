@@ -51784,3 +51784,243 @@ fn onnx_export_sigmoid_is_reachable_via_facade_only() {
         .add_sigmoid();
     fandhe_ai::interop::onnx::OnnxModel::from_sequential(&model).expect("Sigmoid は対応層のはず");
 }
+// ---------------------------------------------------------------------------
+// イシュー #3853: ROCm の facade 結線の正ガード
+// （保留ガード〈`available_devices` の doctest にあった「ROCm は列挙されない」assert・
+//  `resolve_ops` の `DeviceUnavailable` 固定〉からの反転。
+//  設計 `docs/backend-rocm-device-exposure-decision.md` §10・§13）
+// ---------------------------------------------------------------------------
+
+/// `tokens` が連続部分列 `needle` を含む回数。
+fn rocm_count_seq(tokens: &[String], needle: &[String]) -> usize {
+    if needle.is_empty() || tokens.len() < needle.len() {
+        return 0;
+    }
+    tokens
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
+}
+
+/// `fn <name>` の本体の内側トークン列（宣言がちょうど 1 件で本体を読めるときだけ）。
+fn rocm_fn_body_tokens(tokens: &[String], name: &str) -> Result<Vec<String>, String> {
+    let positions: Vec<usize> = tokens
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| w[0] == "fn" && w[1] == name)
+        .map(|(i, _)| i)
+        .collect();
+    if positions.len() != 1 {
+        return Err(format!(
+            "fn {name} の宣言が {} 件（1 件であるべき）",
+            positions.len()
+        ));
+    }
+    let open = (positions[0]..tokens.len())
+        .find(|&j| tokens[j] == "{")
+        .ok_or_else(|| format!("fn {name} の本体を読めない"))?;
+    let close = matching_close(tokens, open, "{", "}")
+        .ok_or_else(|| format!("fn {name} の本体を読めない"))?;
+    Ok(tokens[open + 1..close].to_vec())
+}
+
+/// 正ガードの検査本体: `lib.rs` のソースが承認形の ROCm 結線を持つかをトークン走査で検査し、
+/// 違反の説明を返す（空なら承認形）。
+///
+/// 検出範囲はトークン走査に限る。マクロ生成・別名経由・`use` による別名導入での迂回は範囲外
+/// （検出を過剰に保証しない）。見るもの:
+/// - `resolve_ops` の `Device::Rocm(_)` 腕がちょうど 1 つで、腕の中に `RocmDeviceProvider::new()`・
+///   `select_from(&providers, device)?`・`RocmBackendOps::new(target)` が各 1 回ずつあり、`Err` を含まない
+/// - `Rocm` 腕の後ろに `_`／`other` の fallback 腕が残る（`Device` は `#[non_exhaustive]`）
+/// - `available_devices` の `rocm` 束縛が `fandhe_ai_backend_rocm::RocmDeviceProvider::new()` で、
+///   `vec![..]` の配列リテラルがちょうど 2 つ（macOS 側・非 macOS 側）で、順序が
+///   `[&cpu,&cuda,&metal,&rocm]`・`[&cpu,&cuda,&rocm]` と完全一致する
+fn rocm_wiring_violations(lib_src: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let tokens = tokens_of(lib_src);
+    let seq = tokens_of;
+
+    match rocm_fn_body_tokens(&tokens, "resolve_ops") {
+        Err(e) => v.push(e),
+        Ok(body) => {
+            let arm = seq("Device :: Rocm (");
+            let n = rocm_count_seq(&body, &arm);
+            if n != 1 {
+                v.push(format!(
+                    "resolve_ops の Device::Rocm 腕が {n} 件（1 件であるべき）"
+                ));
+            } else if let Some(p) = body.windows(arm.len()).position(|w| w == arm.as_slice()) {
+                let arrow = (p..body.len())
+                    .find(|&j| body[j] == "=" && body.get(j + 1).map(String::as_str) == Some(">"));
+                let brace = arrow
+                    .map(|a| a + 2)
+                    .filter(|&b| body.get(b).map(String::as_str) == Some("{"));
+                match brace.and_then(|b| matching_close(&body, b, "{", "}").map(|c| (b, c))) {
+                    None => v.push("Device::Rocm 腕が `=> { .. }` のブロックでない".to_string()),
+                    Some((b, c)) => {
+                        let inner = &body[b + 1..c];
+                        for need in [
+                            "fandhe_ai_backend_rocm :: RocmDeviceProvider :: new ( )",
+                            "select_from ( & providers , device ) ?",
+                            "fandhe_ai_backend_rocm :: RocmBackendOps :: new ( target )",
+                        ] {
+                            let k = rocm_count_seq(inner, &seq(need));
+                            if k != 1 {
+                                v.push(format!(
+                                    "Device::Rocm 腕の `{need}` が {k} 件（1 件であるべき）"
+                                ));
+                            }
+                        }
+                        if inner.iter().any(|t| t == "Err") {
+                            v.push("Device::Rocm 腕が Err を直接返している".to_string());
+                        }
+                        let has_fallback = body[c + 1..].windows(3).any(|w| {
+                            (w[0] == "_" || w[0] == "other") && w[1] == "=" && w[2] == ">"
+                        });
+                        if !has_fallback {
+                            v.push(
+                                "Device::Rocm 腕の後ろに `_`／`other` の fallback 腕が無い"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    match rocm_fn_body_tokens(&tokens, "available_devices") {
+        Err(e) => v.push(e),
+        Ok(body) => {
+            let bind = seq("let rocm = fandhe_ai_backend_rocm :: RocmDeviceProvider :: new ( ) ;");
+            let c = rocm_count_seq(&body, &bind);
+            if c != 1 {
+                v.push(format!(
+                    "`let rocm = ..RocmDeviceProvider::new()` が {c} 件（1 件であるべき）"
+                ));
+            }
+            let vec_open = seq("vec ! [");
+            let mut lits: Vec<String> = Vec::new();
+            let mut k = 0;
+            while k + vec_open.len() <= body.len() {
+                if body[k..k + vec_open.len()] == vec_open[..] {
+                    let lb = k + vec_open.len() - 1;
+                    if let Some(rb) = matching_close(&body, lb, "[", "]") {
+                        lits.push(body[lb + 1..rb].join(" "));
+                        k = rb;
+                    }
+                }
+                k += 1;
+            }
+            let expect = [
+                seq("& cpu , & cuda , & metal , & rocm").join(" "),
+                seq("& cpu , & cuda , & rocm").join(" "),
+            ];
+            if lits != expect {
+                v.push(format!(
+                    "providers の配列リテラルが承認形と一致しない: {lits:?}"
+                ));
+            }
+        }
+    }
+    v
+}
+
+/// 承認形の合成ソース（自己テストの基準）。実ソースの該当部分と同じ形に保つ。
+const ROCM_WIRING_APPROVED: &str = r#"
+fn resolve_ops(device: Device) -> Result<Box<dyn BackendOps + Send>, BackendError> {
+    match device {
+        Device::Cpu => Ok(Box::new(fandhe_ai_backend_cpu::CpuBackendOps::new())),
+        Device::Rocm(_) => {
+            let provider = fandhe_ai_backend_rocm::RocmDeviceProvider::new();
+            let providers: [&dyn DeviceProvider; 1] = [&provider];
+            select_from(&providers, device)?;
+            let target = provider.resolve_target(device)?;
+            let ops = fandhe_ai_backend_rocm::RocmBackendOps::new(target);
+            Ok(Box::new(ops))
+        }
+        other => Err(BackendError::DeviceUnavailable(format!("{other:?}"))),
+    }
+}
+pub fn available_devices() -> Vec<Device> {
+    let cpu = fandhe_ai_backend_cpu::CpuDeviceProvider::new();
+    let rocm = fandhe_ai_backend_rocm::RocmDeviceProvider::new();
+    #[cfg(target_os = "macos")]
+    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda, &metal, &rocm];
+    #[cfg(not(target_os = "macos"))]
+    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda, &rocm];
+    Vec::new()
+}
+"#;
+
+/// 正ガード: 実 `lib.rs` が ROCm を `resolve_ops`・`available_devices` へ承認形で結線している
+/// （#3853。旧保留ガード〈列挙しない・`DeviceUnavailable` 固定〉の反転）。
+#[test]
+fn facade_wires_rocm_into_resolve_ops_and_available_devices() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let v = rocm_wiring_violations(&content);
+    assert!(v.is_empty(), "ROCm 結線が承認形と一致しない: {v:?}");
+}
+
+/// 正ガードの自己テスト: 承認形は違反 0 件、各すり替えは 1 件以上（検出の空振りを防ぐ）。
+#[test]
+fn rocm_wiring_guard_detects_substitutions() {
+    assert_eq!(
+        rocm_wiring_violations(ROCM_WIRING_APPROVED),
+        Vec::<String>::new(),
+        "承認形の合成ソースが違反と判定された"
+    );
+    let a = ROCM_WIRING_APPROVED;
+    let arm_start = a.find("        Device::Rocm(_) => {").expect("arm");
+    let arm_end = a.find("        other =>").expect("other");
+    let no_arm = format!("{}{}", &a[..arm_start], &a[arm_end..]);
+    let err_only = format!(
+        "{}        Device::Rocm(_) => Err(BackendError::DeviceUnavailable(String::new())),\n{}",
+        &a[..arm_start],
+        &a[arm_end..]
+    );
+    let err_in_block = a.replace(
+        "Ok(Box::new(ops))",
+        "Err(BackendError::DeviceUnavailable(String::new()))",
+    );
+    let no_select = a.replace("            select_from(&providers, device)?;\n", "");
+    let no_wildcard = a.replace(
+        "        other => Err(BackendError::DeviceUnavailable(format!(\"{other:?}\"))),\n",
+        "",
+    );
+    let order_swapped = a.replace(
+        "vec![&cpu, &cuda, &metal, &rocm]",
+        "vec![&cpu, &rocm, &cuda, &metal]",
+    );
+    let dup_rocm = a.replace(
+        "vec![&cpu, &cuda, &rocm]",
+        "vec![&cpu, &cuda, &rocm, &rocm]",
+    );
+    let non_macos_missing = a.replace("vec![&cpu, &cuda, &rocm]", "vec![&cpu, &cuda]");
+    let other_provider = a.replace(
+        "let rocm = fandhe_ai_backend_rocm::RocmDeviceProvider::new();",
+        "let rocm = fandhe_ai_backend_cuda::CudaDeviceProvider::new();",
+    );
+    let doubled = format!("{a}{a}");
+    for (name, bad) in [
+        ("Rocm 腕の削除", no_arm),
+        ("Rocm 腕が Err のみ", err_only),
+        ("Rocm 腕が Err を返す", err_in_block),
+        ("select_from の省略", no_select),
+        ("fallback 腕の削除", no_wildcard),
+        ("providers の順序違い", order_swapped),
+        ("&rocm の重複", dup_rocm),
+        ("非 macOS 側の &rocm 欠落", non_macos_missing),
+        ("rocm の別 provider へのすり替え", other_provider),
+        ("ソース全体の二重化", doubled),
+    ] {
+        assert_ne!(
+            bad, a,
+            "{name}: すり替えが適用されていない（テスト自体の空振り）"
+        );
+        assert!(
+            !rocm_wiring_violations(&bad).is_empty(),
+            "{name}: 検出すべきすり替えを見逃した"
+        );
+    }
+}
