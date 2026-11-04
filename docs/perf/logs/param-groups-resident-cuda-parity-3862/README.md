@@ -15,7 +15,7 @@ Phase 10 で測ると定めた CUDA 側の `#[ignore]` 3 本を、`<cuda-node>`�
 
 **要対応（所有者へ報告）: 雛形 `crates/facade/tests/train_gpu_parity.rs` の optim 族は登録 0 件。** `train_parity_optim_cuda_matches_cpu` は
 `undetermined: 族 optim の登録が 0 件`（`crates/facade/tests/common/train_gpu_parity.rs:193`）で panic し、exit 101・判定 undetermined だった。
-RULE.txt で事前に宣言したとおり完了判定には数えていない。雛形に optim 族の行を足すかどうかは所有者の判断を待つ。
+RULE.txt で事前に宣言したとおり完了判定には数えていない。所有者の判断（2026-11-04）により、雛形への optim 族の追加は #4026 で行う。雛形（学習ステップ）は #4026 の登録待ちで未実測であり、#3862 は #4026 のマージ後に雛形テストを再計測してから閉じる（この記録の PR は `Refs`）。
 
 - 数値契約は決定記録 §19.5 の (3)「CUDA + groups → CPU 参照と REQ-2 統一複合判定」。GPU の bit 一致・run-to-run の bit 同一は
   観測値で合否の基準ではない。今回のテスト出力には bit 一致の観測行は無かった（記録していない）。
