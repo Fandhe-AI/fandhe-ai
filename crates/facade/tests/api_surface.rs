@@ -52024,3 +52024,46 @@ fn rocm_wiring_guard_detects_substitutions() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// イシュー #3854（設計 `docs/backend-rocm-device-exposure-decision.md` §10.2・§14）:
+// ROCm 公開の利用例 doctest が実在し、実際にコンパイルされる形であることを固定する正ガード。
+// 結線そのものの正ガードは #3851〜#3853 側（`facade_wires_rocm_into_resolve_ops_and_available_devices` 等）。
+// ---------------------------------------------------------------------
+
+/// 正の doctest プローブ（#3854。`ema_usage_doctests_are_present_and_compiled` と同型）:
+/// `available_devices`（`Device::Rocm(_)` 腕と `_` 腕を含む網羅 `match` の例）と
+/// `tape_for`（`Rocm(1)` が `Err`、`Rocm(0)` は列挙されないホストでだけ `Err` の例）の
+/// doctest が、`ignore`・`no_run`・隠し行ではない形で実在する。
+#[test]
+fn rocm_device_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let lib = read_to_string_or_panic(&root.join("src/lib.rs"));
+
+    let mut v = doctest_probe_violations(
+        "available_devices の doc（Rocm 腕）",
+        &doc_lines_above_fn(&lib, "pub fn available_devices"),
+        &[
+            "available_devices()",
+            "fandhe_ai::Device::Rocm(_) => {}",
+            "_ => {}",
+        ],
+    );
+    v.extend(doctest_probe_violations(
+        "tape_for の doc（Rocm の Err 例）",
+        &doc_lines_above_fn(&lib, "pub fn tape_for"),
+        &[
+            "tape_for(Device::Rocm(1)).is_err()",
+            "available_devices().contains(&Device::Rocm(0))",
+        ],
+    ));
+    assert!(v.is_empty(), "{v:?}");
+
+    // 自己テスト: 空入力・隠し行化・ignore 指定は検出される。
+    let needle = ["fandhe_ai::Device::Rocm(_) => {}"];
+    assert!(!doctest_probe_violations("t", &[], &needle).is_empty());
+    let hidden = ["```", "# fandhe_ai::Device::Rocm(_) => {}", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &hidden, &needle).is_empty());
+    let ignored = ["```ignore", "fandhe_ai::Device::Rocm(_) => {}", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &ignored, &needle).is_empty());
+}

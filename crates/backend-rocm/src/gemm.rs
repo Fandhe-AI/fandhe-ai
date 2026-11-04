@@ -3,7 +3,7 @@
 //! 役割: `backend-cuda::gemm` の ROCm 側対応物の最小版。公開型 [`RocmGemmF32`] が HIP/HIPRTC を
 //! ロードし、検証済みソースをコンパイルして module を保持し、`run` で `C = A·B`（行優先・f32）を
 //! 計算する。ホスト側で形状・グリッドを fail-closed に検証してから起動する（REQ-8 のカーネル側
-//! 境界チェックと二重化）。facade への統合は #3157、実機での実行確認は #3159。
+//! 境界チェックと二重化）。facade への統合は #3853 で完了、実機での実行確認は #3159。
 
 use crate::error::RocmError;
 use crate::hip::{self, HipRuntime};

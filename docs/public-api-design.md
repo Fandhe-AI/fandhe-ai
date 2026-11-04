@@ -585,6 +585,8 @@ impl Device {
 
 **ROCm variant の追加（イシュー #3851。2026-11-04 追記）**: 0.14.0 の唯一の承認済み破壊的変更として `Device` に `Rocm(usize)` を追加し `#[non_exhaustive]` を付けた（承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>）。下流の網羅 `match` には `_` 腕が要る（`docs/migration/0.14.0.md` §2.1）。facade の結線（`tape_for(Device::Rocm(_))` の実構築）は #3853 で、結線までは `DeviceUnavailable` を返し `available_devices` にも列挙しない。上のコードブロックは本追記の内容を反映済みで、従来の本文は書き換えていない。
 
+**facade 結線の反映（イシュー #3853・#3854）**: 上の「結線までは `DeviceUnavailable` を返し `available_devices` にも列挙しない」は #3853 で次のとおり変わった。`Device::Rocm(0)` だけが有効で、HIP・HIPRTC・gfx942 の code object のロードがそろう ROCm 搭載ホストでは `tape_for(Device::Rocm(0))` が `Ok` になり、`available_devices()` の末尾（Cpu → Cuda → Metal → Rocm の順）に 1 件含まれる。それ以外のホストと `Rocm(n >= 1)` は `DeviceUnavailable`（panic しない・自動フォールバックなし）。条件付き・実験的で、実機での確認は未実施（#3159・#3867）。
+
 **既定選択の方針（未決事項。ただし CPU 分は下記の承認済み改訂で確定済み）**: CUDA を既定で有効化するかどうかの具体的な構成決定は REQ-2 でも未検証のまま残っている（`docs/spec/04-requirements.md` REQ-2 受け入れ基準「バックエンド有効化構成」の項）。GPU バックエンド（CUDA／Metal）を既定で使う規則は本文書では確定しない。TASK-1.9 実装時にユーザー承認を得て決定すること。
 
 **構成変更（10 クレート化・`facade` composition root への集約。イシュー #52・spec PR #53 マージ済み。第 16〜18 波が到達した「`autodiff` 内結線モジュール」構成は撤回済み）**: `docs/fusion-graph-design.md` §1 に第 16〜18 波の設計変遷・撤回理由の詳細を記録する（本節は結論のみを記す）。第 18 波の codex-review は、9 クレート構成では「利用者に融合制御を許さず（REQ-12）・`autodiff` を `BackendOps` 抽象に限定したまま」既定バックエンド供給の composition root を置く場所が存在しないことを指摘し、仕様側でのクレート構成変更を要求した。**ユーザー承認（spec イシュー #52 → spec PR #53 マージ済み、`docs/spec/04-requirements.md` REQ-1・REQ-9・REQ-12 の 2026-08-08 追記・`docs/spec/05-tasks.md` TASK-9.3・TASK-9.4・TASK-2.5 の 2026-08-08 追記）により、10 クレート目として `facade`（composition root・compat 公開面の 2 責務。`docs/spec/04-requirements.md:50`）を新設する構成へ確定した**。

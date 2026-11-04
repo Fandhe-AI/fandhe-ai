@@ -155,6 +155,7 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
   いずれも `_` 分岐を持つ形で参照を更新済み（`backend-cpu::
   fused_elementwise::eval_one` 等）であるため、この一般論はここには
   適用されない
+- **内部クレートの扱い: `fandhe-ai-backend-rocm`（イシュー #3854）**: crates.io で公開しても内部クレート（`backend-*` と同じ扱い）で、直接依存はサポート対象外。ROCm の利用は `fandhe_ai::Device::Rocm` 経由に限る（承認 #3771 Q2 の範囲内）。
 - **限定例外: `fandhe-ai-hf-hub`（イシュー #3847）**: HF Hub 連携の補助クレートで、
   facade の公開 API だけに依存する。`crates/hf-hub/tests/api_surface.rs` の
   `EXPECTED_LIB_PUBLIC` に限りサポート対象とし、内部クレートへの直接依存は持たない。
@@ -2982,3 +2983,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（第 2 段・イシュー #3852・親 #3711。承認: #3771 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>〉）**: facade が `fandhe-ai-backend-rocm` を path＋version の通常依存（cfg なし）に持つようにした。公開面は増えない（backend-rocm の型は再エクスポートせず、否定ガードで固定）。外部 crate の追加・版の更新・tolerance・baseline の変更はない。結線（#3853）と crates.io 公開（Phase 11）は未完了で、完全な適用記録は #3854 が書く。公開状態: 未公開。実装記録は `docs/backend-rocm-device-exposure-decision.md` §12。
 
 **適用記録（第 3 段・イシュー #3853・親 #3711。承認: #3771 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>〉）**: `resolve_ops`・`available_devices`・`tape_for` に ROCm の腕を足した。`Device::Rocm(0)` だけが有効で、`Rocm(n >= 1)`・HIP 不在・gfx942 のロード失敗は `DeviceUnavailable`（panic しない）。`available_devices` は Cpu → Cuda → Metal → Rocm の順で、条件付き・実験的。`RocmDeviceProvider` は backend-rocm の型で、facade は再エクスポートしない（否定ガード維持）。保留 doctest ガードは正ガード `facade_wires_rocm_into_resolve_ops_and_available_devices` と自己テストへ反転した。外部 crate の追加・版の更新・tolerance・baseline の変更はない。公開状態: 未公開（0.14.0 への同梱は #3159・#3867 の parity pass が条件）。実装記録は `docs/backend-rocm-device-exposure-decision.md` §13。完全な適用記録は #3854 が書く。
+
+**適用記録（第 4 段・イシュー #3854・親 #3711。承認: #3771 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>〉）**: ROCm の facade 公開（第 1〜3 段）の説明をそろえた。要約: `Device::Rocm(usize)` を追加し `#[non_exhaustive]` を付与した（0.14.0・破壊的）。有効なのは `Rocm(0)` だけで、`Rocm(n >= 1)`・HIP 不在・gfx942 のロード失敗は `DeviceUnavailable`（自動フォールバックなし）。`available_devices` は Cpu → Cuda → Metal → Rocm の順。「条件付き・実験的」と表示する。facade は backend-rocm の型を再エクスポートしない。本段で facade の `description`・README、backend-rocm の README とコメント、設計 §14、移行ノート、追跡表を更新し、公開例 doctest の実在を正ガードで固定した。公開状態: 未公開（crates.io 公開は Phase 11。0.14.0 同梱は #3159・#3867 の parity pass が条件）。依存・tolerance・baseline・`unsafe`・`docs/spec` は不変。実機は未実測。実装記録は `docs/backend-rocm-device-exposure-decision.md` §14。

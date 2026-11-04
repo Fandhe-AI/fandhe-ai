@@ -6,7 +6,7 @@
 name = "fandhe-ai"
 # crates.io 公開向け説明文（英語。イシュー #880）。内部向け旧説明:
 # 「composition root・compat 公開面（REQ-1・REQ-9・TASK-9.3）」
-description = "Facade crate for a from-scratch Rust AI/ML library: tensors, autodiff, and CPU/CUDA/Metal backends behind one composition root"
+description = "Facade crate for a from-scratch Rust AI/ML library: tensors, autodiff, and CPU/CUDA/Metal (plus experimental ROCm) backends behind one composition root"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
