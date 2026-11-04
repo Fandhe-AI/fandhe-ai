@@ -153,13 +153,13 @@ const CASES: &[Case] = &[
     ),
     nn_case!(
         "nn_shrink_train_step_s1",
-        Route::K,
+        Route::H,
         "S1: x=[2,2,6,6] conv2d(2,3,k3,p1) hardshrink(0.05) softshrink(0.05) linear lr=0.05",
         |d| seq_train_step(d, build_shrink, &[2, 2, 6, 6], 108)
     ),
     nn_case!(
         "nn_shrink_train_step_s2",
-        Route::K,
+        Route::H,
         "S2: x=[3,2,7,5] conv2d(2,3,k3,p1) hardshrink(0.05) softshrink(0.05) linear lr=0.05",
         |d| seq_train_step(d, build_shrink, &[3, 2, 7, 5], 105)
     ),
@@ -177,13 +177,13 @@ const CASES: &[Case] = &[
     ),
     nn_case!(
         "nn_channel_shuffle_train_step_s1",
-        Route::K,
+        Route::H,
         "S1: x=[2,2,6,6] conv2d(2,4) channel_shuffle(2) conv2d(4,4) linear lr=0.05",
         |d| seq_train_step(d, build_channel_shuffle, &[2, 2, 6, 6], 144)
     ),
     nn_case!(
         "nn_channel_shuffle_train_step_s2",
-        Route::K,
+        Route::H,
         "S2: x=[3,2,7,5] conv2d(2,4) channel_shuffle(2) conv2d(4,4) linear lr=0.05",
         |d| seq_train_step(d, build_channel_shuffle, &[3, 2, 7, 5], 140)
     ),
@@ -225,13 +225,13 @@ const CASES: &[Case] = &[
     ),
     nn_case!(
         "nn_bilinear_train_step_s1",
-        Route::K,
+        Route::H,
         "S1: x1=[4,3] x2=[4,4] w=[5,3,4] b=[5] Var::bilinear MSE lr=0.05 seed=0x00DDBA11",
         |d| var_train_step(d, VarKind::Bilinear, [4, 3, 4, 5])
     ),
     nn_case!(
         "nn_bilinear_train_step_s2",
-        Route::K,
+        Route::H,
         "S2: x1=[5,7] x2=[5,6] w=[3,7,6] b=[3] Var::bilinear MSE lr=0.05 seed=0x00DDBA11",
         |d| var_train_step(d, VarKind::Bilinear, [5, 7, 6, 3])
     ),

@@ -57,11 +57,11 @@ ONNX 族は #3842 の公開形（`OnnxModel::bind_autograd`）でつないだ。
 | 行（`_s1`／`_s2`） | 追跡表 | route | 骨格 |
 |---|---|---|---|
 | `nn_upsample_scale_factor_train_step` | 7 | K | conv2d → upsample（bilinear）→ linear |
-| `nn_shrink_train_step` | 9 | K | conv2d → hardshrink → softshrink → linear |
-| `nn_bilinear_train_step` | 10 | K | `Var::bilinear` → MSE |
+| `nn_shrink_train_step` | 9 | H | conv2d → hardshrink → softshrink → linear |
+| `nn_bilinear_train_step` | 10 | H | `Var::bilinear` → MSE |
 | `nn_batch_norm3d_train_step` | 11 | K | conv3d → batch_norm3d → relu → linear |
 | `nn_similarity_distance_train_step` | 12・13 | H | matmul → cosine_similarity・pairwise_distance |
-| `nn_channel_shuffle_train_step` | 14 | K | conv2d → channel_shuffle → conv2d → linear |
+| `nn_channel_shuffle_train_step` | 14 | H | conv2d → channel_shuffle → conv2d → linear |
 | `nn_adaptive_pool3d_train_step` | 15 | H | conv3d → adaptive avg／max pool3d → linear |
 | `nn_lp_pool_train_step` | 15 | H | conv2d → lp_pool2d → linear |
 | `nn_fractional_max_pool_train_step` | 15 | H | conv2d → fractional_max_pool2d → linear |
