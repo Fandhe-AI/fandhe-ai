@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/device_param_store_param_groups_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/device_param_store_param_groups_backend_parity-a02e29da82d43cf1)
+
+running 1 test
+test cuda_param_groups_match_cpu_for_sgd_adam_adamw ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+
+rc=0
