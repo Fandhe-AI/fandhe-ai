@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/adaptive_pool3d_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/adaptive_pool3d_ops_backend_parity-fc21cec923899a86)
+
+running 1 test
+test metal_adaptive_pool3d_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.20s
+
+rc=0

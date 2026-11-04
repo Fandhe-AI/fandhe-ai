@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/channel_shuffle_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/channel_shuffle_backend_parity-2d0af9e60f066c7c)
+
+running 1 test
+test metal_channel_shuffle_forward_matches_cpu ... metal_channel_shuffle_forward[out].fold_bits=0x99093618fef5312d
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.12s
+
+rc=0
