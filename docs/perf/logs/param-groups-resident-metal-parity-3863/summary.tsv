@@ -1,0 +1,5 @@
+group	target	test	exit_code	running	result	verdict
+grouped-kernel-3837	-p fandhe-ai-backend-metal --test grouped_optimizer_step_parity	sgd_grouped_matches_cpu_grouped	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.25s	pass
+grouped-kernel-3837	-p fandhe-ai-backend-metal --test grouped_optimizer_step_parity	adam_grouped_matches_cpu_grouped	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.23s	pass
+facade-param-groups-3838	-p fandhe-ai --test device_param_store_param_groups_backend_parity	metal_param_groups_match_cpu_for_sgd_adam_adamw	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.77s	pass
+template-optim-3778	-p fandhe-ai --test train_gpu_parity	train_parity_optim_metal_matches_cpu	101	1	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s	undetermined
