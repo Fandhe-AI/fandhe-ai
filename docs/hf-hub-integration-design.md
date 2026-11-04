@@ -877,3 +877,10 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 - **§10.10 の各点の決着**: 点 1 は案 A、点 2 は公開に数える、点 3 は限定例外、点 4 は含めない、点 5 は数える。
 - **#3773 で行った変更**: `crates/hf-hub/Cargo.toml` の公開メタデータと `publish = true`、facade 依存への `version = "=0.13.0"` 併記、LICENSE の追加、`release-all.yml`／`release.yml` への追加。検証の詳細は `docs/crates-io-publishing-order.md` §14。
 - **未実施**: 実公開（Phase 11）。公開前に #3847（README・クレート doc・§0・facade 側ガード）のマージと 0.14.0 の lockstep バンプが必要。
+
+### 10.13 #3847 実装記録
+
+- **実装範囲**: (1) `crates/hf-hub/README.md`・`src/lib.rs` の `//!`・`Cargo.toml` のコメントを公開クレート向けに修正（§10.2 の 6 項目: download 非公開・sha256 pin が真正性の根拠で allowlist は未実装・private／gated 非対応・接続先固定・非 unix で `Unsupported`・第三者 `hf-hub` と無関係）。設定値・本番コードは不変。(2) `docs/compat-api-scope.md` §0 に限定例外と適用記録を追加。(3) facade 側の正ガード `facade_does_not_depend_on_hf_hub` と自己テスト `hf_hub_guard_detects_disguised_dependencies`（`crates/facade/tests/api_surface.rs`）を新設。dev 依存の循環は cargo が許すため、dev／build／target 別を含む全依存節の走査と `Cargo.lock` 上の facade の依存列の 2 層で固定し、inventory と正負のプローブを付けた。(4) hf-hub 側に `readme_and_crate_doc_state_publication_contract`（と自己テスト）を追加。
+- **設計からの逸脱（所有者への報告）**: 受け入れ条件の「facade の否定ガードの反転」は、反転対象が存在しない（§10.1 の事実の訂正どおり facade に hf-hub の否定ガード・保留 doctest ガードは無い）ため、正ガードの新設で満たした。hf-hub 側の `lib_public_surface_is_exactly_the_expected_items`・`new_public_methods_are_present_and_download_stays_internal` は、承認点 4（download は `pub(crate)` のまま）により維持した。
+- **検証**: `cargo test -p fandhe-ai --test api_surface hf_hub` 2 passed、`cargo test -p fandhe-ai-hf-hub` 57 passed・6 ignored／18 passed／2 passed、clippy（`-D warnings`）・`RUSTDOCFLAGS=-D warnings cargo doc`・fmt 通過。実通信テスト（`live_*`）は `#[ignore]` のまま未実測。実機 parity は該当なし。
+- **未実施**: 0.14.0 への lockstep バンプと実公開（Phase 11。所有者の明示指示が要る）。リダイレクト先 allowlist と `download` の公開は別承認。

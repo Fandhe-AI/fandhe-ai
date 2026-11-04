@@ -604,3 +604,68 @@ fn probe_exact_surface_detects_added_and_removed_items() {
     let wrapped = "pub struct A;\nimpl A { pub fn x(\n &self,\n ) -> u8 { 0 } }\n";
     assert_eq!(public_signatures_of(wrapped), expected);
 }
+
+// ---------------------------------------------------------------------------
+// イシュー #3847: README とクレート doc の公開契約（設計 §10.2）
+// ---------------------------------------------------------------------------
+
+/// README に必須の利用上の注意の要点語句（download 非公開・sha256 pin・gated 非対応・接続先固定・
+/// 非 unix の Unsupported・第三者 `hf-hub` との無関係）で欠けているものを返す。
+fn missing_contract_phrases(readme: &str) -> Vec<&'static str> {
+    [
+        "pub(crate)",
+        "sha256",
+        "gated",
+        "huggingface.co",
+        "Unsupported",
+        "第三者の `hf-hub` クレートとは無関係",
+    ]
+    .into_iter()
+    .filter(|p| !readme.contains(p))
+    .collect()
+}
+
+/// 公開前の文言（1 段目・雛形・`publish = false`）が残っていないかを返す。
+fn stale_stage1_phrases(text: &str) -> Vec<&'static str> {
+    ["publish = false", "1 段目", "雛形"]
+        .into_iter()
+        .filter(|p| text.contains(p))
+        .collect()
+}
+
+#[test]
+fn readme_and_crate_doc_state_publication_contract() {
+    let readme = read("README.md");
+    assert!(
+        missing_contract_phrases(&readme).is_empty(),
+        "README に公開契約の語句が欠けている: {:?}",
+        missing_contract_phrases(&readme)
+    );
+    assert!(
+        stale_stage1_phrases(&readme).is_empty(),
+        "README に公開前の文言が残っている: {:?}",
+        stale_stage1_phrases(&readme)
+    );
+    let lib = read("src/lib.rs");
+    let crate_doc: String = lib
+        .lines()
+        .take_while(|l| l.starts_with("//!"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!crate_doc.is_empty(), "クレート doc が読めない");
+    assert!(
+        stale_stage1_phrases(&crate_doc).is_empty(),
+        "クレート doc に公開前の文言が残っている: {:?}",
+        stale_stage1_phrases(&crate_doc)
+    );
+}
+
+#[test]
+fn probe_publication_contract_checks_detect_violations() {
+    assert_eq!(missing_contract_phrases("").len(), 6);
+    assert!(stale_stage1_phrases("ok").is_empty());
+    assert_eq!(
+        stale_stage1_phrases("（`publish = false`・1 段目）雛形").len(),
+        3
+    );
+}

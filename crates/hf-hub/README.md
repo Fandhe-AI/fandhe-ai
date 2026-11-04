@@ -1,7 +1,9 @@
 # fandhe-ai-hf-hub
 
-Hugging Face Hub 連携の補助クレート（`publish = false`・1 段目）。設計は
-`docs/hf-hub-integration-design.md` を正とする。facade の公開 API には含まれない。
+Hugging Face Hub 連携の補助クレート。設計は `docs/hf-hub-integration-design.md` を正とする。
+
+- `docs/compat-api-scope.md` §0 の限定例外として、公開面（`tests/api_surface.rs` の `EXPECTED_LIB_PUBLIC`）に限りサポート対象とする。facade の公開 API だけに依存し、facade は本クレートに依存しない。
+- 版は facade と lockstep。crates.io へは 0.14.0 で公開予定（承認 #3771）。
 
 ## 公開 API（#3394）
 
@@ -15,6 +17,15 @@ Hugging Face Hub 連携の補助クレート（`publish = false`・1 段目）�
 - 接続先は `https://huggingface.co` 固定。リダイレクトは追従せず `HfError::Http` で拒否する。認証トークンは読まず送らず、private／gated repo は fail-closed で非対応（401／403／404 は `Unauthorized`／`Gated`／`NotFound`）。
 - 転送層は `cfg(unix)` のみ。非 unix で ref 指定の解決・一覧を呼ぶと `HfError::Network`（`Unsupported`）を返す（sha 指定の `resolve_revision` は全プラットフォームで成功）。
 - `HfHub::download` は crate 内限定（`pub(crate)`）のまま。facade の `download_with` のリダイレクト先 allowlist が別承認のため公開しない。
+
+## 利用上の注意
+
+- **第三者の `hf-hub` クレートとは無関係**である。公開名は `fandhe-ai-hf-hub`（取り違えに注意）。
+- `HfHub::download` は非公開（`pub(crate)`）。ファイル本体の取得は facade の `ModelRegistry::download_with` と、呼び出し側の sha256 pin で行う。
+- 取得内容の真正性の根拠は sha256 pin である。リダイレクト先ホストの allowlist は未実装で、残留リスクとして受容している（設計 §9.10 A10）。JSON 取得（解決・一覧）はリダイレクトを追従しない。
+- private／gated repo は非対応（fail-closed）。認証トークンは扱わない。
+- 接続先は `https://huggingface.co` 固定。
+- 非 unix では ref 指定の解決・一覧が `Unsupported`（`HfError::Network`）になる。
 
 ## テスト構成
 
