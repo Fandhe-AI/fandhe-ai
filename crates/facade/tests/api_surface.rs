@@ -50379,3 +50379,132 @@ fn new_layer_guards_issue_3828_detect_swaps() {
     let ops_bad = "SUPPORTED_OP_TYPES = [\"Resize\"];";
     assert!(!export_new_layer_arm_violations_3828("", ops_bad).is_empty());
 }
+// =====================================================================
+// イシュー #3843（親 #3759・承認: #3770 の所有者回答）: ONNX の学習（autograd）の受入テストの正ガード。
+// 公開面の反転は #3842 で済んでおり（`scan_unapproved_onnx_pub_items` ほか）、本ガードは受入シナリオ→
+// `tests/interop_onnx_autograd.rs` のテスト関数の対応表を固定する（先例: #3816 の
+// `compat_sequential_module_acceptance_coverage_map_matches`）。受入テストの削除・`#[ignore]` 化・
+// コメントアウト、および内部 API（autodiff・backend-cpu・`onnx::autograd`・`interp`）へのすり替えを CI で検出する。
+// =====================================================================
+
+/// 受入シナリオ（設計記録 `docs/onnx-autograd-decision.md` §8.4・§8.13）→ テスト関数。
+const ONNX_AUTOGRAD_ACCEPTANCE_MAP: &[(&str, &str)] = &[
+    ("sgd_loop", "onnx_autograd_sgd_loop_decreases_loss"),
+    (
+        "unsupported_fail_closed",
+        "unsupported_op_in_autograd_is_rejected_fail_closed",
+    ),
+    ("cast_sever", "cast_severs_gradient_only_for_non_f32_target"),
+    (
+        "trainable_semantics",
+        "trainable_default_and_filter_semantics",
+    ),
+    (
+        "autodiff_variant",
+        "onnx_autograd_cross_tape_feed_maps_to_autodiff_variant",
+    ),
+];
+
+/// 期待シナリオ集合（対応表のキーと過不足なく一致させる）。
+const ONNX_AUTOGRAD_ACCEPTANCE_KEYS: &[&str] = &[
+    "sgd_loop",
+    "unsupported_fail_closed",
+    "cast_sever",
+    "trainable_semantics",
+    "autodiff_variant",
+];
+
+/// 対応表と受入テストのソースを突き合わせ、違反を列挙する（空なら適合）。
+/// `fandhe_ai_onnx_interop` は `::onnx::proto` 経由（Cast を含む bytes の組み立て）だけを許す。
+fn onnx_autograd_acceptance_violations(
+    map: &[(&str, &str)],
+    expected_keys: &[&str],
+    src: &str,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    let keys: std::collections::BTreeSet<&str> = map.iter().map(|(k, _)| *k).collect();
+    if keys.len() != map.len() {
+        v.push("対応表のキーが重複している".to_string());
+    }
+    let expected: std::collections::BTreeSet<&str> = expected_keys.iter().copied().collect();
+    for k in expected.difference(&keys) {
+        v.push(format!("対応表にシナリオ `{k}` が無い"));
+    }
+    for k in keys.difference(&expected) {
+        v.push(format!("対応表に期待外のシナリオ `{k}` がある"));
+    }
+    for (k, t) in map {
+        if !cg_has_active_test_fn(src, t) {
+            v.push(format!("`{k}` の対応先 `{t}` が有効な #[test] として無い"));
+        }
+    }
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    for banned in ["fandhe_ai_autodiff", "fandhe_ai_backend_cpu"] {
+        if cleaned.contains(banned) {
+            v.push(format!("{banned} を参照している（facade が正の入口）"));
+        }
+    }
+    for (idx, _) in cleaned.match_indices("fandhe_ai_onnx_interop") {
+        let rest = &cleaned[idx + "fandhe_ai_onnx_interop".len()..];
+        if !rest.starts_with("::onnx::proto") {
+            v.push("fandhe_ai_onnx_interop は ::onnx::proto 経由だけを許す".to_string());
+        }
+    }
+    if cleaned.contains("#[ignore") {
+        v.push("#[ignore] がある（実機依存はなく、CI で動くテストだけを置く）".to_string());
+    }
+    v
+}
+
+#[test]
+fn onnx_autograd_acceptance_coverage_map_matches() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("tests/interop_onnx_autograd.rs"));
+    let v = onnx_autograd_acceptance_violations(
+        ONNX_AUTOGRAD_ACCEPTANCE_MAP,
+        ONNX_AUTOGRAD_ACCEPTANCE_KEYS,
+        &src,
+    );
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// [`onnx_autograd_acceptance_coverage_map_matches`] の自己テスト（各類型が 1 件ずつ検出される）。
+#[test]
+fn onnx_autograd_acceptance_coverage_map_detects_each_category() {
+    let good = "//! fandhe_ai_autodiff は doc コメント内なら無害\nuse fandhe_ai_onnx_interop::onnx::proto::{self};\n#[test]\nfn a() {}\n#[test]\nfn b() {}\n";
+    let keys = ["X", "Y"];
+    let ok = [("X", "a"), ("Y", "b")];
+    let bad = |map: &[(&str, &str)], src: &str| {
+        !onnx_autograd_acceptance_violations(map, &keys, src).is_empty()
+    };
+    assert!(onnx_autograd_acceptance_violations(&ok, &keys, good).is_empty());
+    // キー欠落・余剰・重複
+    assert!(bad(&[("X", "a")], good));
+    assert!(bad(&[("X", "a"), ("Y", "b"), ("Z", "a")], good));
+    assert!(bad(&[("X", "a"), ("X", "b")], good));
+    // 存在しないテスト名
+    assert!(bad(&[("X", "a"), ("Y", "zzz")], good));
+    // #[test] なし / #[ignore] 付き / コメントアウト
+    assert!(bad(&ok, &good.replace("#[test]\nfn b", "fn b")));
+    assert!(bad(&ok, &format!("{good}#[ignore]\nfn helper() {{}}\n")));
+    assert!(bad(
+        &ok,
+        "use fandhe_ai_onnx_interop::onnx::proto;\n#[test]\nfn a() {}\n// #[test]\n// fn b() {}\n"
+    ));
+    // 内部クレートの直接参照
+    assert!(bad(&ok, &format!("use fandhe_ai_autodiff::Tape;\n{good}")));
+    assert!(bad(
+        &ok,
+        &format!("use fandhe_ai_backend_cpu::CpuBackendOps;\n{good}")
+    ));
+    // onnx-interop は proto 以外の経路（autograd・interp 等）へのすり替えを許さない
+    for path in [
+        "onnx::autograd::BoundGraph",
+        "onnx::interp::run",
+        "onnx::graph::Graph",
+    ] {
+        assert!(
+            bad(&ok, &format!("use fandhe_ai_onnx_interop::{path};\n{good}")),
+            "{path}"
+        );
+    }
+}
