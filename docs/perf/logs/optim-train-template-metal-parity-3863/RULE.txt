@@ -1,0 +1,101 @@
+# RULE.txt — 学習ステップの parity 雛形 optim 族の Metal 実機 parity（事前登録。イシュー #3863 の 2 回目・親 #3711 Phase 10）
+#
+# 雛形 docs/perf/logs/train-gpu-parity-template/RULE.txt（#3778）を写して埋めた。1 回目（../param-groups-resident-metal-parity-3863/。
+# docs/autodiff-param-groups-decision.md §19.4 の Metal 側 #[ignore] 3 本）では雛形の optim 族が登録 0 件で undetermined だった。
+# #4026（PR #4034・main 2f59b9638）で optim 族の行が登録されたため、その雛形テストを測り直す。1 回目のディレクトリは書き換えない。
+# 実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<metal-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-04T19:10Z（実機での実行より前。実機結果を見た後に入力・判定・コマンド・この RULE を変えない）
+issue: 3863
+machine: <metal-node>（Mac mini・Apple M4 10 コア・メモリ 16GB・macOS）。Linux／M4 Max 開発機では測らない・記録しない
+  （docs/real-hardware-verification-env.md §1・§7.1）。parity 測定で時間計測ではないため専有条件は課さない。
+  メモリは他の利用者と共有しているため、空き率（memory_pressure）と負荷を実行前後で env_info.txt に記録する
+target_commit: 2f59b963802e44230cc2ee5a1fea4151ed160669（origin/main。#4034 のマージ後）
+  条件: 実行時の HEAD で `git diff --quiet 2f59b963802e44230cc2ee5a1fea4151ed160669 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_metal_parity.sh が検査する）。
+  HEAD はこの RULE.txt と run_metal_parity.sh を入れた最初のコミット。転送後にノード側で .rev-stamp を読み、送信側の HEAD と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-3863t、出力先は <home>/work/out-3863t。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai
+  （内蔵 SSD が小さいため target はこの 1 つだけ）。転送は docs/real-hardware-verification-env.md §3・§7.1 の rsync だけ
+  （.git/・.claude/worktrees/・.codex/・.env*・settings.local.json・.venv*/・*.local.md は送らない）
+hw_lock: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3863 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。テストの前後で owner が自分のままか確かめ、
+  失っていればその回を undetermined にする（ロックを持たずに測った値は採らない）。ほかの利用者のプロセスは止めない
+script: 同ディレクトリの run_metal_parity.sh（../nn-layers-metal-parity-3861/run_metal_parity.sh の複製。#3861 の 2 回目〈../nn-train-template-metal-parity-3861/〉と同じ改変で、
+  違いは ISSUE・CASES・EXPECTED_RECORDS だけ。差分はヘッダに記載。
+  コミット済みのものをそのまま送る。env_info.txt の script_sha256 で照合）。非対話 SSH では PATH が通らないため zsh -lc で包み、
+  macOS には setsid が無いので nohup で切り離して起動する:
+    zsh -lc "cd <tree> && CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai nohup bash \
+      <tree>/docs/perf/logs/optim-train-template-metal-parity-3863/run_metal_parity.sh <tree> <out> \
+      > \$HOME/work/run-3863t.log 2>&1 < /dev/null &"
+  完了はスクリプトの "done:" 行とロックの解放をポーリングで確かめる
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::compare）の定数は
+  fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない
+switches_left_default: GPU linalg ゲートは OFF のまま、Metal split-K の実行時トグルは既定のまま（触らない。環境変数で切替を変えない）
+timeout: macOS に timeout(1) が無いため外部 timeout は付けない（Metal 前例 #3166・#3169・#3858・#3859・#3861・#3863 の 1 回目と同じ）。
+  1800 秒を超えて終わらなければ外から止め、その回を undetermined とする
+
+# ---- 対象テスト ----
+test: cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 train_parity_optim_metal_matches_cpu
+  （crates/facade/tests/train_gpu_parity.rs の metal_family_test!。harness::run_family(CASES, "optim", Device::Metal)。
+  cfg(target_os = "macos")・#[ignore]。--release は付けない。docs/real-hardware-verification-env.md §4.10・§7.1）
+  --nocapture・--test-threads=1 は出力と並列度だけに効き判定には影響しない
+
+# ---- 腕 ----
+arms: A=デバイス常駐の param groups 更新（optim_resident(Device::Metal, ...)。run_family が Device::Metal を渡す）
+  B=ホスト参照（Case.reference の optim_host。ParamGroupStep::step_with_groups + apply_parameters）
+  docs/autodiff-param-groups-decision.md §19.5 (3) により GPU 対参照は REQ-2 で判定する
+
+# ---- 形状（Case.shape の写し。ケースの正はテストコード）----
+shapes:
+  optim_param_groups_resident_sgd_s1: S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 sgd lr=0.02 momentum=0.9 nesterov groups=[0]/[1,2]
+  optim_param_groups_resident_sgd_s2: S2: batch=5 d_in=13 hidden=17 d_out=7 steps=20 sgd lr=0.02 momentum=0.9 nesterov groups=[0]/[1,2]
+  optim_param_groups_resident_adam_s1: S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 adam default groups=[0]/[1,2]
+  optim_param_groups_resident_adam_s2: S2: batch=5 d_in=13 hidden=17 d_out=7 steps=20 adam default groups=[0]/[1,2]
+  optim_param_groups_resident_adamw_s1: S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 adamw default groups=[0]/[1,2]
+  optim_param_groups_resident_adamw_s2: S2: batch=5 d_in=13 hidden=17 d_out=7 steps=20 adamw default groups=[0]/[1,2]
+
+# ---- 判定（ケースごとに事前宣言。判定契約はテストコードが正）----
+judgment:
+  route=K・judge=Req2: 全 6 ケース（compare の CompareReport::passes()。相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。require_nonzero 付き）
+  量: 20 step 後の param_w1・param_b1・param_w2・param_b2（各ケース 4 量）
+expected_records: 24（TRAIN_PARITY 記録行の総数。6 ケース × 4 量。宣言時に開発機の CPU 自己検査
+  optim_family_passes_cpu_against_cpu（Device::Cpu。値は採らない）の記録行数で確かめた。記録行の数はケースと量の構成だけで決まる）
+pass: exit 0、出力に "running 1 test" と "test result: ok. 1 passed; 0 failed" があり、TRAIN_PARITY 記録行がちょうど 24 行で
+  全行 verdict=pass であること
+fail: TRAIN_PARITY 記録に verdict=fail が 1 行以上ある、または exit 非 0 で undetermined の記録・文言が無い
+undetermined: ノードに届かない、ビルドできない、1800 秒超で外から止めた回、--list の不一致、実機ロックの取得不能・喪失、
+  他の cargo／rustc の並走、自己検査の失敗、TRAIN_PARITY の verdict=undetermined（run 関数の Err・全ゼロの量）、登録 0 件の族、
+  exit 0 でも記録行数が 24 でない回。pass として扱わない
+completion: 上の pass を満たしたときだけ #3863 を Closes する（§19.4 の Metal 側 3 本は 1 回目で 3 本 pass 済み）。
+  fail・undetermined なら Refs にして記録して止まり、所有者へ報告する
+
+# ---- run 数 ----
+runs: 1 回。時間の計測ではないので中央値は取らない。fail・undetermined の後に再実行して置き換えない。
+  再実行するなら RULE.txt を新しいディレクトリで登録し直す
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  1) 開始前に pgrep で他の cargo／rustc が無いことを確かめ、あれば停止する
+  2) cargo test -p fandhe-ai --test train_gpu_parity --no-run でビルドを終える（判定外。build.log）
+  3) テストの前にも他の cargo／rustc が無いことを確かめ、あれば undetermined
+  4) cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --list train_parity_optim_metal_matches_cpu で
+     ": test" で終わる行がちょうど 1 行であることを確かめる。0 行または 2 行以上なら実行せず undetermined
+  5) 上の test のコマンドを 1 回だけ別プロセスで実行する
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を logs/optim-template-3863/train_parity_optim_metal_matches_cpu.log に保存する（末尾に rc= と
+  train_parity_records: 行）。テスト単位の結果（exit code・running 件数・test result 行・判定）は test_result.tsv、
+  TRAIN_PARITY 記録はマスク後のログから 1 記録 1 行で summary.tsv へスクリプトが集計する（列: case family quantity arm route judge
+  total fail_count max_abs_diff mean_abs_diff max_rel_err verdict reason）。--nocapture では 1 行目の記録が「test <名前> ... 」の後ろに
+  続くため、行頭アンカーを使わずに取り出す。summary.tsv の本体行数がログの記録行数と一致しなければ停止する
+masking: ホスト名・ユーザー名・ホームのパスを <metal-node>／<user>／<home> へ置換する（前後が識別子文字でない場合のみ）。
+  漏れたら記録を捨てて取り直す（fail-closed）。回収ログは手で編集しない。回収後に送信側でも PR 差分全体をユーザー名・/Users/・
+  内部ドメイン・SSH 別名で grep し、0 件であることを確かめる
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail・undetermined が出ても tolerance・判定方式・入力・テストコード・この RULE を変えない。再実行で置き換えない。
+  TRAIN_PARITY 行と panic メッセージの fail_count・max_abs_diff・max_rel_err をそのまま引用して事実を記録し、README と PR に
+  「要対応」と書く。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う

@@ -1,0 +1,34 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/train_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/train_gpu_parity-9152d234530cb15d)
+
+running 1 test
+test train_parity_optim_metal_matches_cpu ... TRAIN_PARITY case=optim_param_groups_resident_sgd_s1 family=optim quantity=param_w1 arm=Metal route=K judge=Req2 total=128 fail_count=0 max_abs_diff=2.980232e-8 mean_abs_diff=9.094947e-10 max_rel_err=2.311265e-7 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_sgd_s1 family=optim quantity=param_b1 arm=Metal route=K judge=Req2 total=16 fail_count=0 max_abs_diff=2.980232e-8 mean_abs_diff=3.841706e-9 max_rel_err=2.157306e-7 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_sgd_s1 family=optim quantity=param_w2 arm=Metal route=K judge=Req2 total=64 fail_count=0 max_abs_diff=2.980232e-8 mean_abs_diff=3.412424e-9 max_rel_err=7.364657e-6 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_sgd_s1 family=optim quantity=param_b2 arm=Metal route=K judge=Req2 total=4 fail_count=0 max_abs_diff=1.490116e-8 mean_abs_diff=1.024455e-8 max_rel_err=2.020266e-7 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_sgd_s2 family=optim quantity=param_w1 arm=Metal route=K judge=Req2 total=221 fail_count=0 max_abs_diff=1.490116e-8 mean_abs_diff=2.187396e-10 max_rel_err=4.173096e-7 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_sgd_s2 family=optim quantity=param_b1 arm=Metal route=K judge=Req2 total=17 fail_count=0 max_abs_diff=7.450581e-9 mean_abs_diff=6.026205e-10 max_rel_err=1.653750e-7 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_sgd_s2 family=optim quantity=param_w2 arm=Metal route=K judge=Req2 total=119 fail_count=0 max_abs_diff=1.490116e-8 mean_abs_diff=1.582368e-9 max_rel_err=1.377204e-6 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_sgd_s2 family=optim quantity=param_b2 arm=Metal route=K judge=Req2 total=7 fail_count=0 max_abs_diff=2.980232e-8 mean_abs_diff=8.248857e-9 max_rel_err=4.456076e-7 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s1 family=optim quantity=param_w1 arm=Metal route=K judge=Req2 total=128 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s1 family=optim quantity=param_b1 arm=Metal route=K judge=Req2 total=16 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s1 family=optim quantity=param_w2 arm=Metal route=K judge=Req2 total=64 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s1 family=optim quantity=param_b2 arm=Metal route=K judge=Req2 total=4 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s2 family=optim quantity=param_w1 arm=Metal route=K judge=Req2 total=221 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s2 family=optim quantity=param_b1 arm=Metal route=K judge=Req2 total=17 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s2 family=optim quantity=param_w2 arm=Metal route=K judge=Req2 total=119 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adam_s2 family=optim quantity=param_b2 arm=Metal route=K judge=Req2 total=7 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s1 family=optim quantity=param_w1 arm=Metal route=K judge=Req2 total=128 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s1 family=optim quantity=param_b1 arm=Metal route=K judge=Req2 total=16 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s1 family=optim quantity=param_w2 arm=Metal route=K judge=Req2 total=64 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s1 family=optim quantity=param_b2 arm=Metal route=K judge=Req2 total=4 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s2 family=optim quantity=param_w1 arm=Metal route=K judge=Req2 total=221 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s2 family=optim quantity=param_b1 arm=Metal route=K judge=Req2 total=17 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s2 family=optim quantity=param_w2 arm=Metal route=K judge=Req2 total=119 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+TRAIN_PARITY case=optim_param_groups_resident_adamw_s2 family=optim quantity=param_b2 arm=Metal route=K judge=Req2 total=7 fail_count=0 max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0 max_rel_err=0.000000e0 verdict=pass
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.53s
+
+rc=0
+train_parity_records: total=24 pass=24 expected=24
