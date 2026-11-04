@@ -1,0 +1,27 @@
+   Compiling libc v0.2.189
+   Compiling syn v2.0.119
+   Compiling serde_core v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling getrandom v0.3.4
+   Compiling rand_core v0.9.5
+   Compiling zerocopy-derive v0.8.56
+   Compiling zerocopy v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.13.0 (<home>/work/rust-ai-library-run-3862/crates/tensor-core)
+   Compiling cudarc v0.19.8
+   Compiling fandhe-ai-backend-cuda v0.13.0 (<home>/work/rust-ai-library-run-3862/crates/backend-cuda)
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<home>/work/rust-ai-library-run-3862/crates/backend-cpu)
+   Compiling fandhe-ai-autodiff v0.13.0 (<home>/work/rust-ai-library-run-3862/crates/autodiff)
+   Compiling bench-harness v0.13.0 (<home>/work/rust-ai-library-run-3862/crates/bench-harness)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.81s
+  Executable tests/grouped_optimizer_step_real_device.rs (<home>/work/target-fandhe-ai/debug/deps/grouped_optimizer_step_real_device-4f5efdd9f33d1041)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3862/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.83s
+  Executable tests/device_param_store_param_groups_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/device_param_store_param_groups_backend_parity-a02e29da82d43cf1)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+  Executable tests/train_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/train_gpu_parity-7f8cdf980f4362cb)
