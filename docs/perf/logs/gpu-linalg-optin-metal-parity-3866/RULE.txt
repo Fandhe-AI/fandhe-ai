@@ -1,0 +1,99 @@
+# RULE.txt — GPU 線形代数の opt-in 関数の facade 経由の実機 parity（Metal。事前登録。イシュー #3866・親 #3855〈#3711 Phase 10〉）
+#
+# Phase 10 の Mac mini 版 RULE（#3865。PR #4030 の docs/perf/logs/onnx-train-metal-parity-3865/RULE.txt）と、同 PR の GB10 版
+# ../gpu-linalg-optin-cuda-parity-3866/RULE.txt の形を写して埋めた。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<metal-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-04T15:01Z（実機での実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+issue: 3866
+machine: <metal-node>（Mac mini・Apple M4 10 コア・メモリ 16GB・macOS）。Linux／M4 Max 開発機では測らない・記録しない
+  （docs/real-hardware-verification-env.md §1・§7.1）。parity 測定で時間計測ではないため専有条件は課さない。
+  メモリは他の利用者と共有しているため、空き率（memory_pressure）と負荷を実行前後で env_info.txt に記録する
+target_commit: 2b00e494b0317381eb9876700e3e84ee7cd312b9
+  条件: 実行時の HEAD で `git diff --quiet 2b00e494b0317381eb9876700e3e84ee7cd312b9 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+  （#3405 の実装 PR #4014 は bd3e91d8a でマージ済み。#3405 は 2026-11-04T07:33:52Z に CLOSED〈COMPLETED〉を gh issue view で確認した）
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_metal_parity.sh が検査する）。
+  転送後にノード側で .rev-stamp とスクリプトの SHA-256 を読み、送信側と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-3866、出力先は <home>/work/out-3866。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai
+  （内蔵 SSD が小さいため target はこの 1 つだけ）。転送は docs/real-hardware-verification-env.md §3・§7.1 の rsync だけ
+  （.git/・.claude/worktrees/ は送らない）
+hw_lock: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3866 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。各テストの前後で owner が自分のままか確かめ、
+  失っていればその回と以降を undetermined にする（ロックを持たずに測った値は採らない）。ほかの利用者のプロセスは止めない
+script: 同ディレクトリの run_metal_parity.sh（#3865 版の複製。変えたのは対象一覧と非 0 終了の判定分岐で、差分はスクリプト冒頭に列挙した。
+  コミット済みのものをそのまま送る。env_info.txt の script_sha256 で照合）。非対話 SSH では PATH が通らないため zsh -lc で包み、
+  macOS には setsid が無いので nohup で切り離して起動する:
+    zsh -lc "cd <tree> && CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai nohup bash \
+      <tree>/docs/perf/logs/gpu-linalg-optin-metal-parity-3866/run_metal_parity.sh <tree> <out> \
+      > \$HOME/work/run-3866.log 2>&1 < /dev/null &"
+  完了はスクリプトの "done:" 行とロックの解放をポーリングで確かめる
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::assert_parity）の定数は
+  fandhe_ai_tensor_core::tolerance が正本。厳密ゼロ fail（docs/backend-gpu-linalg-decision.md §5）。baseline は追加しない
+switches_left_default: GPU linalg ゲートは各テストが facade の set_metal_gpu_linalg_enabled(true) で ON にし、drop で OFF へ戻す
+  （テストコードのとおり）。Metal split-K の実行時トグルは既定のまま（触らない。環境変数で切替を変えない）
+timeout: macOS に timeout(1) が無いため外部 timeout は付けない（Metal 前例 #3166・#3169・#3858〜#3865 と同じ）。1 本が 1800 秒を超えて
+  終わらなければ外から止め、その回と以降を undetermined とする（summary に行が無い回は README で undetermined と書く）
+
+# ---- 位置づけ（何が新しいか）----
+scope_note: このテストファイル（crates/facade/tests/linalg_gpu_optin_metal_parity.rs）は #3405（PR #4014）で新設され、実機ではまだ一度も
+  実行していない。カーネル parity（G2）は backend 層で充足済み（docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md の 2026-10-28 再実測。
+  Mac mini・5/5 run 全件 pass・2e30c15b2）。入力は backend-metal の正本 crates/backend-metal/tests/linalg_parity_inputs.rs を #[path] で共有する。
+  本測定は facade の公開関数 fandhe_ai::set_metal_gpu_linalg_enabled／metal_gpu_linalg_enabled の 1 行委譲を通しても同じ結果になることを確かめる
+
+# ---- 腕 ----
+arms:
+  A（被検腕）: fandhe_ai::tape_for(Device::Metal) 上の Var の inv／solve／det／cholesky／qr（ゲート ON。eigh は Metal の範囲外で対象外）
+  B（参照腕）: fandhe_ai::tape()（CPU tape）上の同じ演算
+  各ケースで先に MetalBackendOps::new() の linalg_* を直接呼び、Err(BackendError::Unsupported) でないこと（デバイス経路に入ること）を確かめる
+  tape_for が Err なら expect("Metal 実機が必要") の panic で undetermined（CPU への無言のフォールバックは無い）
+
+# ---- 入力（対象コミットの linalg_parity_inputs.rs とテストコードを写す。広げない）----
+inputs:
+  SIZES=[1, 2, 8, 17, 64]  SCALES=[1.0, 1e20, 1e-20]  DET_MAX_N=17  EYE2_SCALE=1e20  QR_SHAPES=[(8,3), (3,8), (17,17)]
+  facade_inv_gate_on_matches_cpu:      1e20×I₂ + diag_dominant 5×3 = 16 ケース
+  facade_solve_gate_on_matches_cpu:    同じ 16 ケース（b は [n, 2]、要素 1.0 + (i % 5)×0.25）
+  facade_det_gate_on_matches_cpu:      等倍の diag_dominant(n)、n ≤ DET_MAX_N（n = 1, 2, 8, 17）= 4 ケース（テストコードのとおり）
+  facade_cholesky_gate_on_matches_cpu: 1e20×I₂ + spd 5×3 = 16 ケース
+  facade_qr_gate_on_matches_cpu:       qr_input(m, n) 3 形状 × SCALES 3 = 9 ケース（Q と R を別々に判定）
+
+# ---- 判定（事前宣言）----
+judgment:
+  各ケース: assert_parity（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。fail_count=0 が必要）と、被検腕の出力がすべて有限であること
+pass: コマンドが exit 0 で、出力に「running 1 test」と「test result: ok. 1 passed; 0 failed」があること
+fail: 上記以外の非 0 終了のうち undetermined に当たらないもの。assert_parity の「複合判定 FAIL」、「非有限値が出力された」、
+  「Unsupported（デバイス経路に入っていない）」（facade のゲートがデバイス経路に入れていない＝被検対象の不成立）、
+  演算の expect の panic を含む
+undetermined: ノードに届かない、ビルドできない、ハング（1800 秒超で外から停止）、--list の不一致、実機ロックの取得不能・喪失、
+  各テスト前の他の cargo／rustc の並走、出力に「Metal 実機が必要」（tape_for の expect）がある非 0 終了。pass として扱わない
+completion: 5 本すべて pass で Mac mini 側の完了とする。#3866 の Closes は GB10 側（同 PR の ../gpu-linalg-optin-cuda-parity-3866/RULE.txt）も
+  完了条件を満たした場合に限る。どちらかが fail・undetermined なら Refs にとどめる。対象の実装 issue #3405 は既に CLOSED
+
+# ---- run 数 ----
+runs: 各テスト 1 回（Phase 10 の他の issue〈#3856〜#3865〉と同じ）。カーネル parity の 5 run は G2（#2676 の再実測）で充足済みで、本件は
+  facade の 1 行委譲の経路確認のため。時間の計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  1) 先に cargo test -p fandhe-ai --test linalg_gpu_optin_metal_parity --no-run でビルドを終える。計測中は他の cargo・ビルドを走らせない
+     （開始前と各テストの前に pgrep で他の cargo／rustc が無いことを確かめる）
+  2) 各テストの前に cargo test -p fandhe-ai --test linalg_gpu_optin_metal_parity -- --ignored --exact --list <テスト名> の出力で、
+     ": test" で終わる行がちょうど 1 件であることを確かめる
+  3) 1 本ずつ別プロセスで実行する（--release は付けない。Phase 10 の他の issue と同じ）:
+     1. cargo test -p fandhe-ai --test linalg_gpu_optin_metal_parity -- --ignored --exact --nocapture --test-threads=1 facade_inv_gate_on_matches_cpu
+     2. 同 facade_solve_gate_on_matches_cpu
+     3. 同 facade_det_gate_on_matches_cpu
+     4. 同 facade_cholesky_gate_on_matches_cpu
+     5. 同 facade_qr_gate_on_matches_cpu
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を保存する。各ログの「running 1 test」「test result:」行と終了コードを集計する。
+  fail のときは panic メッセージ（assert_parity は fail_count・max_abs_diff・max_rel_err・mean_abs_diff 等を出す）をそのまま引用する
+masking: ホスト名・ユーザー名・ホームのパスを収録しない。収録する場合は <metal-node>／<user>／<home> へ置換。
+  漏れたら記録を捨てて取り直す
+integrity: 保存したファイル群の SHA256SUMS を作り、README に載せる
+
+# ---- fail の扱い ----
+fail_handling: fail が出ても tolerance・判定方式・入力集合・κ 上限・テストコード・カーネルを変えない。
+  panic メッセージの fail_count・max_abs_diff・max_rel_err をそのまま引用して事実を記録し、README と PR に「要対応」と書く。
+  原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
