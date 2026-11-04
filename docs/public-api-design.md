@@ -567,11 +567,14 @@ facade 公開がイシュー #2149 の承認事項のため引き続き `Reject`
 /// `cudarc` は無条件依存 + 動的ロードのため `Cuda` variant は
 /// 全 OS で存在するが、実行時に CUDA ドライバ不在なら
 /// `BackendError` を返す（4.4 参照）。
+#[non_exhaustive]
 pub enum Device {
     Cpu,
     Cuda(usize),
     #[cfg(target_os = "macos")]
     Metal,
+    /// ROCm（AMD GPU）。HIP のデバイス ID。条件付き・実験的（0.14.0 で追加）。
+    Rocm(usize),
 }
 
 impl Device {
@@ -579,6 +582,8 @@ impl Device {
     pub fn available() -> Vec<Device>;
 }
 ```
+
+**ROCm variant の追加（イシュー #3851。2026-11-04 追記）**: 0.14.0 の唯一の承認済み破壊的変更として `Device` に `Rocm(usize)` を追加し `#[non_exhaustive]` を付けた（承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>）。下流の網羅 `match` には `_` 腕が要る（`docs/migration/0.14.0.md` §2.1）。facade の結線（`tape_for(Device::Rocm(_))` の実構築）は #3853 で、結線までは `DeviceUnavailable` を返し `available_devices` にも列挙しない。上のコードブロックは本追記の内容を反映済みで、従来の本文は書き換えていない。
 
 **既定選択の方針（未決事項。ただし CPU 分は下記の承認済み改訂で確定済み）**: CUDA を既定で有効化するかどうかの具体的な構成決定は REQ-2 でも未検証のまま残っている（`docs/spec/04-requirements.md` REQ-2 受け入れ基準「バックエンド有効化構成」の項）。GPU バックエンド（CUDA／Metal）を既定で使う規則は本文書では確定しない。TASK-1.9 実装時にユーザー承認を得て決定すること。
 

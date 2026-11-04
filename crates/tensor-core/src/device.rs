@@ -27,6 +27,10 @@
 //!   実装しない。CUDA 既定有効化の構成決定はユーザー承認必須のため、本
 //!   イシューは列挙と明示選択のみを提供する。
 //!
+//! 0.14.0 で ROCm（`backend-rocm`）が 4 つ目の backend として加わり、
+//! [`Device::Rocm`] と [`select_from`] の `"rocm"` 腕を追加した（#3851、承認
+//! #3771）。facade への結線は #3853 の範囲。
+//!
 //! `DeviceBuffer`／`upload`／`download`（§4.2）は本イシューのスコープ外
 //! （TASK-1.9b・#45）。`BackendOps` カーネルディスパッチは
 //! `crate::backend_ops`（TASK-1.9c・#46）を参照。
@@ -43,6 +47,13 @@ use crate::error::ShapeError;
 /// variant は `cudarc` が無条件依存＋動的ロード方式であるため、全 OS で
 /// variant 自体は存在する（実行時に CUDA ドライバ不在なら
 /// [`BackendError::CudaUnavailable`] を返す。実装は `backend-cuda` 側）。
+///
+/// `#[non_exhaustive]` を付けている。0.14.0 で承認された破壊的変更
+/// （ROCm variant の追加。承認: Fandhe-AI/fandhe-ai#3771 の回答
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>、
+/// `docs/backend-rocm-device-exposure-decision.md` §10.1）で、以後の variant
+/// 追加を非破壊にするため。別クレートの網羅 `match` には `_` 腕が要る。
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     /// CPU バックエンド（`backend-cpu`）。常に利用可能。
@@ -55,6 +66,17 @@ pub enum Device {
     /// と同じ cfg 境界）。
     #[cfg(target_os = "macos")]
     Metal,
+    /// ROCm（AMD GPU）バックエンド（`backend-rocm`）。`usize` は HIP の
+    /// デバイス ID（`hipSetDevice` の引数）。HIP を `libloading` で実行時に
+    /// 動的ロードするため（deps-policy 第 12 区分）、ROCm 非搭載でも
+    /// variant 自体は全 OS で存在しビルドが通る。
+    ///
+    /// **条件付き・実験的**で、REQ-2 の確定バックエンドには含まれない。
+    /// 初期は `Rocm(0)` だけが有効で、`Rocm(n)`（n >= 1）は
+    /// [`BackendError::DeviceUnavailable`] を返す（承認 #3771 点 4）。
+    /// facade への結線は #3853 で、結線前の `tape_for(Device::Rocm(_))` は
+    /// [`BackendError::DeviceUnavailable`] を返す。
+    Rocm(usize),
 }
 
 /// デバイスのプロパティ。取得可否がバックエンドごとに異なる項目
@@ -125,7 +147,7 @@ impl DeviceInfo {
 /// 使用し、TASK-1.9c のディスパッチ機構・TASK-1.9d の統合テストが
 /// `dyn` 経由で束ねる前提を担保する）。
 pub trait DeviceProvider {
-    /// バックエンド名（`"cpu"`／`"cuda"`／`"metal"`）。ログ・エラー
+    /// バックエンド名（`"cpu"`／`"cuda"`／`"metal"`／`"rocm"`）。ログ・エラー
     /// メッセージでの識別用。
     fn backend_name(&self) -> &'static str;
 
@@ -164,8 +186,8 @@ pub fn enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo> {
 
 /// 複数の [`DeviceProvider`] を横断して `device` に一致するデバイスを選択
 /// する。`device` の variant（[`Device::Cpu`]／[`Device::Cuda`]／
-/// `Device::Metal`）に応じて対応する provider（`backend_name` が
-/// `"cpu"`／`"cuda"`／`"metal"`）の `select` を呼び出す。対応する provider
+/// `Device::Metal`／[`Device::Rocm`]）に応じて対応する provider
+/// （`backend_name` が `"cpu"`／`"cuda"`／`"metal"`／`"rocm"`）の `select` を呼び出す。対応する provider
 /// が `providers` に含まれない場合は
 /// [`BackendError::DeviceUnavailable`] を返す。
 pub fn select_from(
@@ -177,6 +199,7 @@ pub fn select_from(
         Device::Cuda(_) => "cuda",
         #[cfg(target_os = "macos")]
         Device::Metal => "metal",
+        Device::Rocm(_) => "rocm",
     };
     providers
         .iter()
@@ -558,6 +581,57 @@ mod tests {
         let err = select_from(&providers, Device::Cuda(0)).expect_err("no cuda provider");
 
         assert!(matches!(err, BackendError::DeviceUnavailable(_)));
+    }
+
+    #[test]
+    fn select_from_dispatches_rocm_to_rocm_provider() {
+        let cpu = cpu_provider();
+        let rocm = MockProvider {
+            name: "rocm",
+            available: true,
+            devices: vec![DeviceInfo::new(Device::Rocm(0), "mock-rocm-0", None, None)],
+        };
+        let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &rocm];
+
+        let selected = select_from(&providers, Device::Rocm(0)).expect("selection succeeds");
+
+        assert_eq!(selected.device, Device::Rocm(0));
+        assert_eq!(selected.name, "mock-rocm-0");
+    }
+
+    #[test]
+    fn select_from_rocm_without_provider_is_device_unavailable() {
+        let cpu = cpu_provider();
+        let cuda = cuda_provider_available();
+        let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda];
+
+        let err = select_from(&providers, Device::Rocm(0)).expect_err("no rocm provider");
+
+        assert!(matches!(err, BackendError::DeviceUnavailable(_)));
+        assert!(err.to_string().contains("rocm"));
+    }
+
+    #[test]
+    fn select_from_rocm_does_not_match_cpu_or_cuda_provider() {
+        // cpu／cuda の provider が Rocm の選択を拾う腕のすり替えを検出する。
+        let cpu = cpu_provider();
+        let cuda = cuda_provider_available();
+        let providers: Vec<&dyn DeviceProvider> = vec![&cuda, &cpu];
+
+        assert!(select_from(&providers, Device::Rocm(0)).is_err());
+        assert!(select_from(&providers, Device::Cuda(0)).is_ok());
+    }
+
+    #[test]
+    fn device_rocm_is_distinct_and_hashable() {
+        use std::collections::HashSet;
+        assert_ne!(Device::Rocm(0), Device::Cpu);
+        assert_ne!(Device::Rocm(0), Device::Cuda(0));
+        assert_ne!(Device::Rocm(0), Device::Rocm(1));
+        let a = Device::Rocm(0);
+        let b = a; // Copy
+        let set: HashSet<Device> = [a, b, Device::Rocm(1), Device::Cpu].into_iter().collect();
+        assert_eq!(set.len(), 3);
     }
 
     #[test]

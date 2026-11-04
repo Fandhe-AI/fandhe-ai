@@ -3217,12 +3217,14 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
 /// **順序契約**: `Device::Cpu`（常に含まれる）→ `Device::Cuda(0..n)`
 /// （ordinal 昇順。CUDA driver 不在なら 0 件）→ `Device::Metal`
 /// （`cfg(target_os = "macos")` 限定。デバイス検出 0 件なら含まれない）
-/// の順で、同一プロセス内の複数回呼び出しでも決定的。ROCm は未公開
-/// （`docs/backend-rocm-device-exposure-decision.md`。所有者判断待ち）。
+/// の順で、同一プロセス内の複数回呼び出しでも決定的。`Device::Rocm` は
+/// 0.14.0 で追加済み（#3851、承認 #3771）だが、facade の結線（#3853）までは
+/// 列挙されず、`tape_for(Device::Rocm(_))` は `DeviceUnavailable` を返す
+/// （`docs/backend-rocm-device-exposure-decision.md`）。
 ///
 /// ```
-/// // ROCm 非搭載の CI でも通る。`Device` に ROCm variant が無いことを
-/// // 網羅的 `match` で示し、`Cpu` が必ず含まれることを確認する。
+/// // ROCm 非搭載の CI でも通る。`Device` は `#[non_exhaustive]` なので下流の
+/// // 網羅 `match` には `_` 腕が要る。ROCm は facade 結線（#3853）まで列挙されない。
 /// let devices = fandhe_ai::available_devices();
 /// for d in &devices {
 ///     match d {
@@ -3230,9 +3232,12 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
 ///         fandhe_ai::Device::Cuda(_) => {}
 ///         #[cfg(target_os = "macos")]
 ///         fandhe_ai::Device::Metal => {}
+///         _ => {}
 ///     }
 /// }
 /// assert!(devices.contains(&fandhe_ai::Device::Cpu));
+/// // facade 未結線の間だけ成り立つ（#3853 で外す）。
+/// assert!(!devices.iter().any(|d| matches!(d, fandhe_ai::Device::Rocm(_))));
 /// ```
 ///
 /// **副作用**: `CudaDeviceProvider::enumerate` は検出した CUDA
@@ -3575,6 +3580,15 @@ fn resolve_ops(device: Device) -> Result<Box<dyn BackendOps + Send>, BackendErro
             })?;
             Ok(Box::new(fandhe_ai_backend_metal::MetalBackendOps::new()))
         }
+        // `Device` は `#[non_exhaustive]`（0.14.0。#3851）のため別クレートの本 match
+        // には `_` 腕が必須。`Device::Rocm(_)` はここで `DeviceUnavailable` を返す
+        // （facade の ROCm 結線は #3853。そこで `Rocm(_)` の実構築腕に置き換える）。
+        // `available_devices` は ROCm を列挙しないので「列挙された各 Device で
+        // `tape_for` が Ok」という一貫性契約は崩れない。メッセージは固定文言＋Debug
+        // 表現のみ（パス・ホスト名を含めない）。
+        other => Err(BackendError::DeviceUnavailable(format!(
+            "{other:?} is not wired into fandhe-ai yet (ROCm facade wiring: #3853)"
+        ))),
     }
 }
 

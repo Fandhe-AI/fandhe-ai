@@ -45473,23 +45473,84 @@ fn distributed_usage_doctest_is_present_and_compiled() {
     );
 }
 
-/// 保留ガード G1（イシュー #3157）: `Device` の variant 集合を、ワイルド
-/// カード腕なしの網羅的 `match` で固定する正のプローブ。variant を足すと
-/// コンパイルが落ち、`docs/backend-rocm-device-exposure-decision.md` の
-/// 所有者判断（Q1）なしに公開 enum が変わる経路を塞ぐ。承認後（Phase B）に
-/// `Rocm(_)` 腕を足す形で反転する。
+/// 正ガード G1 の正のプローブ（イシュー #3851。保留ガード G1 からの反転）:
+/// `fandhe_ai::Device` に `Rocm(_)` が公開パスで存在し、`#[non_exhaustive]` 下の
+/// 網羅 `match`（`_` 腕つき）で各 variant が期待どおり分類されること。承認:
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>、
+/// `docs/backend-rocm-device-exposure-decision.md` §10.1。G2（依存の形）は #3852 で反転する。
 #[test]
-fn device_variant_set_is_fixed_while_3157_on_hold() {
+fn device_variant_classify_with_wildcard_arm_includes_rocm() {
     fn classify(d: fandhe_ai::Device) -> &'static str {
         match d {
             fandhe_ai::Device::Cpu => "cpu",
             fandhe_ai::Device::Cuda(_) => "cuda",
             #[cfg(target_os = "macos")]
             fandhe_ai::Device::Metal => "metal",
+            fandhe_ai::Device::Rocm(_) => "rocm",
+            _ => "other",
         }
     }
     assert_eq!(classify(fandhe_ai::Device::Cpu), "cpu");
     assert_eq!(classify(fandhe_ai::Device::Cuda(0)), "cuda");
+    assert_eq!(classify(fandhe_ai::Device::Rocm(0)), "rocm");
+    assert_eq!(classify(fandhe_ai::Device::Rocm(7)), "rocm");
+}
+
+/// 正ガード G1 の在庫検査本体（イシュー #3851）: `tensor-core/src/device.rs` のソース
+/// を受け取り、`Device` が `#[non_exhaustive]` 付きで承認形 4 variant（宣言順
+/// `Cpu`／`Cuda`／`Metal`／`Rocm`）ちょうどであることを検査して違反を返す。トークン走査
+/// のため、マクロ生成・別名経由の定義は検出範囲外（過剰な保証はしない）。
+fn device_enum_inventory_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let (start, body) = match pb_single_block(&tokens, &["pub", "enum", "Device", "{"], "Device") {
+        Ok(v) => v,
+        Err(e) => return vec![e],
+    };
+    let mut v = Vec::new();
+    if !pb_has_non_exhaustive_before(&tokens, start) {
+        v.push("Device に #[non_exhaustive] が無い".to_string());
+    }
+    let mut with_close = body.to_vec();
+    with_close.push("}".to_string());
+    let variants = collect_top_level_enum_variant_idents(&with_close, 0);
+    let want = ["Cpu", "Cuda", "Metal", "Rocm"].map(String::from);
+    if variants != want {
+        v.push(format!(
+            "Device の variant が承認形 4 種（本順）と不一致: {variants:?}"
+        ));
+    }
+    v
+}
+
+/// 正ガード G1（イシュー #3851）: 実ソースの `Device` が承認形であること。
+#[test]
+fn device_enum_variant_inventory_is_fixed() {
+    let path = facade_crate_root().join("../tensor-core/src/device.rs");
+    let src = read_to_string_or_panic(&path);
+    let v = device_enum_inventory_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正ガード G1 の自己テスト: 承認形は違反 0 件、すり替えは 1 件以上で検出される。
+#[test]
+fn device_enum_inventory_guard_detects_substitutions() {
+    let ok = "#[non_exhaustive]\n#[derive(Debug)]\npub enum Device {\n Cpu,\n Cuda(usize),\n #[cfg(target_os = \"macos\")]\n Metal,\n Rocm(usize),\n}\n";
+    assert!(device_enum_inventory_violations(ok).is_empty());
+    let bad = [
+        ok.replace("#[non_exhaustive]\n", ""),
+        ok.replace(" Rocm(usize),\n", ""),
+        ok.replace("Rocm(usize)", "Hip(usize)"),
+        ok.replace(" Rocm(usize),\n", " Rocm(usize),\n Extra,\n"),
+        ok.replace(" Rocm(usize),\n", "")
+            .replace(" Cpu,\n", " Rocm(usize),\n Cpu,\n"),
+        format!("{ok}{ok}"),
+    ];
+    for (i, src) in bad.iter().enumerate() {
+        assert!(
+            !device_enum_inventory_violations(src).is_empty(),
+            "すり替え {i} が検出されない"
+        );
+    }
 }
 
 /// 保留ガード G2（イシュー #3157）: 公開クレート facade が非公開の

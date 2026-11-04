@@ -725,9 +725,9 @@ fn softmax_rows_with(
 }
 
 impl BackendOps for RocmBackendOps {
-    /// 仮置き: `Device::Cpu` を返す。`tensor-core::Device` に ROCm の variant がなく、追加は
-    /// 破壊的変更で所有者判断待ちのため。承認後に #3157 Phase B で `Device::Rocm(usize)` へ
-    /// 差し替える。それまで `ops_for` や autodiff のデバイス一致検査では CPU と区別されない
+    /// 仮置き: `Device::Cpu` を返す。`Device::Rocm(usize)` は #3851 で追加済みだが、`device()` の
+    /// 差し替えはバッファ（`buffer_handle.rs`。同じく `Device::Cpu` を名乗る）と同時に行う必要が
+    /// あり、#3853 で扱う。それまで `ops_for` や autodiff のデバイス一致検査では CPU と区別されない
     /// （このため本型はどの候補リストにも登録しない）。
     fn device(&self) -> Device {
         Device::Cpu
@@ -1695,7 +1695,7 @@ mod tests {
         let _b: Box<dyn BackendOps + Send> = Box::new(RocmBackendOps::new(GfxTarget::Gfx942));
     }
 
-    /// 仮置き。#3157 Phase B で `Device::Rocm(usize)` に差し替える。
+    /// 仮置き。`Device::Rocm(usize)` への差し替えはバッファと同時に #3853 で行う（variant は #3851 で追加済み）。
     #[test]
     fn device_is_cpu_placeholder() {
         assert_eq!(ops().device(), Device::Cpu);

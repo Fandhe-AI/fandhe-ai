@@ -62,14 +62,11 @@ fn apply_gate_from_env(device: Device) {
         #[cfg(target_os = "macos")]
         Device::Metal => {
             fandhe_ai::set_metal_elementwise_fusion_enabled(enabled);
-        } // `Device`（`tensor-core::device::Device`）は `Cpu`／`Cuda(_)`／
-          // （macOS 限定の）`Metal` の variant のみを持つ。非 macOS では
-          // `Cpu`／`Cuda(_)` の 2 アームで、macOS では上記 3 アームで既に
-          // 網羅的（exhaustive）であるため、フォールバック `_` アームは
-          // いずれのターゲットでも到達しえず `unreachable_patterns`
-          // warning の原因になる。ワイルドカードは追加せず、`Device` に
-          // 将来 variant が増えた場合は非網羅 match のコンパイルエラーで
-          // 検知させる（安全側）。
+        }
+        // `Device` は `#[non_exhaustive]`（0.14.0。#3851）のため別クレートの match には
+        // `_` 腕が必須。ROCm には elementwise 融合の opt-in ゲートがない（承認 #3771
+        // 点 8「ゲートなし」）ので no-op。
+        _ => {}
     }
 }
 
