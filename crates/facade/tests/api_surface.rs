@@ -1653,12 +1653,45 @@ const BACKEND_ROCM_ALT_NAMES: [&str; 3] =
 /// backend-rocm 用の承認形走査（イシュー #3852・`docs/backend-rocm-device-exposure-decision.md`
 /// §10.1）。onnx と同じ共通走査を、キー `fandhe-ai-backend-rocm`・path `../backend-rocm` で呼ぶ。
 fn scan_backend_rocm_dependency_shape(content: &str) -> (Vec<String>, bool) {
-    scan_approved_path_dependency_shape(
+    let (mut offending, saw) = scan_approved_path_dependency_shape(
         content,
         BACKEND_ROCM_DEPENDENCY_KEY,
         &BACKEND_ROCM_ALT_NAMES,
         "../backend-rocm",
-    )
+    );
+    // 共通走査は dev-dependencies を除外する（onnx 側の既存契約は維持）。ROCm 側は dev にも
+    // 対象クレート（別名・package 改名を含む）を置けないよう追加で走査する（Codex P2）。
+    let mut in_dev = false;
+    for line in content.lines() {
+        let code = line.split_once('#').map(|(a, _)| a).unwrap_or(line).trim();
+        if code.starts_with('[') && code.ends_with(']') {
+            in_dev = is_dev_dependencies_section(code);
+            if in_dev
+                && (code.contains(BACKEND_ROCM_DEPENDENCY_KEY)
+                    || BACKEND_ROCM_ALT_NAMES.iter().any(|n| code.contains(n)))
+            {
+                offending.push(format!("dev 系ヘッダ `{code}` が backend-rocm に言及"));
+            }
+            continue;
+        }
+        if !in_dev || code.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = code.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"');
+        let mut names: Vec<&str> = BACKEND_ROCM_ALT_NAMES.to_vec();
+        names.push(BACKEND_ROCM_DEPENDENCY_KEY);
+        let top_pkg =
+            key == "package" && names.contains(&value.trim().trim_matches('"').trim_matches('\''));
+        if names.contains(&key) || value_has_package_rename_to(value, &names) || top_pkg {
+            offending.push(format!(
+                "dev-dependencies の行 `{code}` が backend-rocm を参照"
+            ));
+        }
+    }
+    (offending, saw)
 }
 
 #[test]
@@ -45855,6 +45888,22 @@ fn backend_rocm_approved_shape_synthetic_inputs() {
             ),
         ),
         ("0 回", dep.clone()),
+        (
+            "通常依存＋dev 別名",
+            format!(
+                "{head}[dependencies]\n{base}{ok_line}[dev-dependencies]\nbackend-rocm = {{ path = \"../backend-rocm\" }}\n"
+            ),
+        ),
+        (
+            "通常依存＋dev package 改名",
+            format!(
+                "{head}[dependencies]\n{base}{ok_line}[dev-dependencies]\nx = {{ package = \"fandhe-ai-backend-rocm\", path = \"../x\" }}\n"
+            ),
+        ),
+        (
+            "通常依存＋dev 同名キー",
+            format!("{head}[dependencies]\n{base}{ok_line}[dev-dependencies]\n{ok_line}"),
+        ),
         ("2 回", format!("{dep}{ok_line}{ok_line}")),
         (
             "コメント付きヘッダ",
@@ -45867,6 +45916,33 @@ fn backend_rocm_approved_shape_synthetic_inputs() {
             "すり替え「{label}」が検出されない"
         );
     }
+}
+
+/// 空白正規化済みの文頭から `#[...]`／`#![...]` 属性を（括弧の入れ子を数えて）全て剥がす。
+fn strip_leading_attributes(norm: &str) -> String {
+    let mut rest = norm.trim_start();
+    while rest.starts_with("#[") || rest.starts_with("#![") {
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(e) => rest = rest[e..].trim_start(),
+            None => break,
+        }
+    }
+    rest.to_string()
 }
 
 /// 再エクスポート禁止ガードの検査本体: facade の公開面に backend-rocm の型を出す `pub use`・
@@ -45887,6 +45963,8 @@ fn backend_rocm_reexport_violations(src: &str) -> Vec<String> {
         }
         let norm = stmt.split_whitespace().collect::<Vec<_>>().join(" ");
         stmt.clear();
+        // 属性（`#[doc(hidden)]` 等）が文頭に蓄積されると `pub` 判定を外すため、先に剥がす。
+        let norm = strip_leading_attributes(&norm);
         let restricted = ["pub(crate)", "pub(super)", "pub(self)", "pub(in"]
             .iter()
             .any(|p| norm.starts_with(p));
@@ -45931,6 +46009,8 @@ fn facade_backend_rocm_reexport_guard_detects_violations() {
         "pub extern crate fandhe_ai_backend_rocm;",
         "pub use fandhe_ai_backend_rocm::{\n    GfxTarget,\n};",
         "pub(crate) use x::Y;\npub use fandhe_ai_backend_rocm::Z;",
+        "#[doc(hidden)]\npub use fandhe_ai_backend_rocm::RocmBackendOps;",
+        "#[doc(hidden)]\n#[allow(unused)]\npub type Ops = fandhe_ai_backend_rocm::RocmBackendOps;",
     ] {
         assert!(
             !backend_rocm_reexport_violations(bad).is_empty(),
@@ -45940,6 +46020,7 @@ fn facade_backend_rocm_reexport_guard_detects_violations() {
     for ok in [
         "use fandhe_ai_backend_rocm::RocmBackendOps;",
         "pub(crate) use fandhe_ai_backend_rocm::RocmBackendOps;",
+        "#[doc(hidden)]\npub(crate) use fandhe_ai_backend_rocm::RocmBackendOps;",
         "// pub use fandhe_ai_backend_rocm::X;",
         "pub use fandhe_ai_backend_cuda::CudaBackendOps;",
         "",
