@@ -424,6 +424,7 @@ tolerance／baseline 変更なし）。
 `metal_batch_norm_train_backward_matches_cpu`／
 `metal_batch_norm_train_forward_rank4_matches_cpu` の追加（§9.6
 訂正参照）も本 issue のスコープ外のまま後続 issue へ引き継ぐ。
+
 ### 9.8 2e20 級入力の中間 overflow 耐性の検証（#4031）
 
 - 背景: #4028／#3861 の監査で、2e20 級の有限入力で Metal の soft-f64
