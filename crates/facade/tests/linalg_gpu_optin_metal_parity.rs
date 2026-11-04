@@ -132,11 +132,11 @@ fn facade_det_gate_on_matches_cpu() {
     let _g = GateOn::new();
     let (cpu_t, gpu_t) = tapes();
     let ops = MetalBackendOps::new();
-    for (tag, a) in &lu_cases() {
-        // n=64 の det は f32 範囲外（inf）になるため判定対象外（inputs::DET_MAX_N）。
-        if a.shape()[0] > DET_MAX_N {
-            continue;
-        }
+    // det は等倍かつ n <= DET_MAX_N のみ。スケール倍・1e20*I2 は行列式が f32 範囲を超えて inf となり
+    // check() の有限値要件に反する（backend-metal/tests/linalg_parity.rs と同根拠）。
+    for n in SIZES.into_iter().filter(|&n| n <= DET_MAX_N) {
+        let tag = format!("n={n}");
+        let a = &diag_dominant(n);
         let ctx = format!("det {tag}");
         assert_device_path(&ctx, ops.linalg_det(a));
         let c = cpu_t.var(a).det().expect("cpu det").to_tensor();
