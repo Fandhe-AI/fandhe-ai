@@ -1,0 +1,97 @@
+# RULE.txt — ONNX モデルの学習の GPU tape 実機 parity（Metal。事前登録。イシュー #3865・親 #3711 Phase 10。#3864 の Metal 版）
+#
+# 雛形 docs/perf/logs/train-gpu-parity-template/RULE.txt（#3778）と GB10 版（#3864）を写して埋めた。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<metal-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-04T14:19Z（実機での実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+issue: 3865
+machine: <metal-node>（Mac mini・Apple M4 10 コア・メモリ 16GB・macOS）。Linux／M4 Max 開発機では測らない・記録しない
+  （docs/real-hardware-verification-env.md §1・§7.1）。parity 測定で時間計測ではないため専有条件は課さない。
+  メモリは他の利用者と共有しているため、空き率（memory_pressure）と負荷を実行前後で env_info.txt に記録する
+target_commit: b82b1e5d129bc25cabf779e64401bf3809526cdb
+  条件: 実行時の HEAD で `git diff --quiet b82b1e5d129bc25cabf779e64401bf3809526cdb <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_metal_parity.sh が検査する）。
+  転送後にノード側で .rev-stamp を読み、送信側の HEAD と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-3865、出力先は <home>/work/out-3865。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai
+  （内蔵 SSD が小さいため target はこの 1 つだけ）。転送は docs/real-hardware-verification-env.md §3・§7.1 の rsync だけ
+  （.git/・.claude/worktrees/ は送らない）
+hw_lock: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3865 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。各テストの前後で owner が自分のままか確かめ、
+  失っていればその回と以降を undetermined にする（ロックを持たずに測った値は採らない）。ほかの利用者のプロセスは止めない
+script: 同ディレクトリの run_metal_parity.sh（#3863 版の複製で対象一覧だけを変えた。コミット済みのものをそのまま送る。
+  env_info.txt の script_sha256 で照合）。非対話 SSH では PATH が通らないため zsh -lc で包み、macOS には setsid が無いので
+  nohup で切り離して起動する:
+    zsh -lc "cd <tree> && CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai nohup bash \
+      <tree>/docs/perf/logs/onnx-train-metal-parity-3865/run_metal_parity.sh <tree> <out> \
+      > \$HOME/work/run-3865.log 2>&1 < /dev/null &"
+  完了はスクリプトの "done:" 行とロックの解放をポーリングで確かめる
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::compare）の定数は
+  fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない
+switches_left_default: GPU linalg ゲートは OFF のまま、Metal split-K の実行時トグルは既定（true）のまま（触らない。環境変数で切替を変えない）
+split_k_note: train_gpu_parity の登録表に S3 欄は無い。下の形状の MatMul の縮約次元 k は最大 17 で、crates/backend-metal/src/tile.rs:2939-2942
+  （k/16 < min_k_tiles16 = 8 なら None）により split-K は発火しない（宣言時に確認した事実。判定には使わない）
+timeout: macOS に timeout(1) が無いため外部 timeout は付けない（Metal 前例 #3166・#3169・#3858〜#3863 と同じ）。1 本が 1800 秒を超えて
+  終わらなければ外から止め、その回と以降を undetermined とする（summary に行が無い回は README で undetermined と書く）
+
+# ---- 腕（族ごとに書く）----
+# 腕 A（被検腕）は fandhe_ai::tape_for(Device::Metal) 経由。腕 B（参照腕）は CPU tape。
+arms:
+  scaffold: A=tape_for(Device::Metal)  B=CPU（雛形の自己検査用。測定対象ではない。scaffold_sgd_resident_vs_host は reference=sgd_host）
+  onnx:     A=tape_for(Device::Metal) 上の OnnxModel::from_sequential → bind_autograd → forward → MseLoss(Mean) → backward
+            B=CPU tape 上の同じ手順（#3842 の公開形。reference: None）
+  tape_for が Err なら run 関数の Err となり undetermined（CPU への無言のフォールバックは無い）
+
+# ---- 形状（対象コミットの Case.shape を写す）----
+shapes:
+  scaffold_mlp_forward_backward_s1: S1: batch=4 d_in=8 hidden=16 d_out=4 seed=0xC0FFEE
+  scaffold_mlp_forward_backward_s2: S2: batch=5 d_in=13 hidden=17 d_out=7 seed=0xC0FFEE
+  scaffold_sgd_resident_vs_host:    S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 lr=0.02 seed=0xC0FFEE
+  onnx_from_sequential_forward_backward_s1: S1: batch=4 d_in=8 hidden=16 d_out=4 seed=0xC0FFEE
+  onnx_from_sequential_forward_backward_s2: S2: batch=5 d_in=13 hidden=17 d_out=7 seed=0xC0FFEE
+
+# ---- 判定（ケースごとに事前宣言する）----
+judgment:
+  scaffold_mlp_forward_backward_s1: judge=Req2 route=K
+  scaffold_mlp_forward_backward_s2: judge=Req2 route=K
+  scaffold_sgd_resident_vs_host:    judge=Req2 route=K
+  onnx_from_sequential_forward_backward_s1: judge=Req2 route=H（対象コミットの CASES のコメントどおり、bind_autograd の 11 op の計算はホストで実行される）
+  onnx_from_sequential_forward_backward_s2: judge=Req2 route=H
+  量: forward・loss・grad_0_bias・grad_0_weight・grad_2_bias・grad_2_weight（各 require_nonzero=true）
+  説明: Req2 は compare の CompareReport::passes()（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）
+  説明: route H の pass は経路の parity であり、カーネル同士の parity ではない
+  説明: Metal の fast-math による pointwise の ulp 差は REQ-2 で受け、bit 一致は主張しない
+pass: コマンドが exit 0 で、出力に「running 1 test」と「1 passed; 0 failed」があること
+fail: TRAIN_PARITY 行に verdict=fail がある、または undetermined の印が無い非 0 終了
+undetermined: ノードに届かない、ビルドできない、1800 秒超で外から止めた回、--list の不一致、実機ロックの取得不能・喪失、
+  他の cargo／rustc の並走、自己検査の失敗、登録 0 件の族、run 関数の Err、全ゼロの量（require_nonzero）。pass として扱わない
+completion: 1.（onnx 族）が pass のときだけ #3865 を Closes する。fail・undetermined なら Refs。
+  0.（scaffold）は経路の自己検査で完了判定に数えない。scaffold が fail・undetermined なら README で経路の異常として併記する。
+  対象の実装 issue #3842 は既に CLOSED。docs/perf/logs/onnx-autograd-2078/README.md の申し送りに Mac mini の結果を追記する
+
+# ---- run 数 ----
+runs: 各コマンド 1 回。時間の計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。
+  再実行するなら RULE.txt を登録し直す
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  1) 先に cargo test -p fandhe-ai --test train_gpu_parity --no-run でビルドを終える。計測中は他の cargo・ビルドを走らせない
+     （開始前に pgrep で他の cargo／rustc が無いことを確かめ、あれば停止する。各テストの前にも確かめ、あればそのテストを undetermined にする）
+  2) 各テストの前に cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --list <テスト名> の出力で、
+     ": test" で終わる行がちょうど 1 件であることを確かめる
+  3) 1 本ずつ別プロセスで実行する（--release は付けない。docs/real-hardware-verification-env.md §4.10）:
+     0. cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 train_parity_scaffold_metal_matches_cpu
+     1. cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 train_parity_onnx_metal_matches_cpu
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を保存する。TRAIN_PARITY 行を grep して集計する。
+  1 行に case・family・quantity・arm・route・judge・total・fail_count・max_abs_diff・mean_abs_diff・max_rel_err・verdict が入る
+masking: ホスト名・ユーザー名・ホームのパスを <metal-node>／<user>／<home> へ置換する（前後が識別子文字でない場合のみ）。
+  漏れたら記録を捨てて取り直す（fail-closed）。回収ログは手で編集しない。回収後に送信側でも PR 差分全体をユーザー名・/Users/・
+  内部ドメイン・SSH 別名で grep し、0 件であることを確かめる
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail が出ても tolerance・判定方式・入力・テストコードを変えない。
+  TRAIN_PARITY 行と panic メッセージの fail_count・max_abs_diff・max_rel_err をそのまま引用して事実を記録し、
+  README と PR に「要対応」と書く。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う

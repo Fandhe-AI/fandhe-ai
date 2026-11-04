@@ -1,0 +1,3 @@
+group	target	test	exit_code	running	result	verdict
+scaffold-3778	-p fandhe-ai --test train_gpu_parity	train_parity_scaffold_metal_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.28s	pass
+onnx-train-3842	-p fandhe-ai --test train_gpu_parity	train_parity_onnx_metal_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.20s	pass
