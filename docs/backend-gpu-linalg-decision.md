@@ -104,8 +104,8 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 
 ### #2674（CUDA LU 系）の実施内容
 
-- ゲート `fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled`（既定 OFF・facade 非公開。保留ガードは
-  `crates/facade/tests/api_surface.rs::facade_does_not_expose_gpu_linalg_optin`）、LU／代入カーネルソース、
+- ゲート `fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled`（既定 OFF。当時は facade 非公開で保留ガード `facade_does_not_expose_gpu_linalg_optin` を置いたが、#3405 で facade が 1 行委譲で公開し、
+  正ガード `gpu_linalg_optin_is_reachable_via_facade` ほかへ反転した。§11.4）、LU／代入カーネルソース、
   NVRTC ロード、入力検証、ホスト後処理の複製を追加（`unsafe` なし）。
 - **カーネル起動（新規 `unsafe` 2 ブロック）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の
   `Unsupported`。承認依頼と残作業は `docs/perf/logs/cuda-linalg-lu-2674/README.md`。実機は未実測。
@@ -205,3 +205,17 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 G1 の承認コメント URL を特定し、G2 の実測 pass を確認したうえで、(a) `lib.rs` に上記関数を追加、(b) `api_surface.rs` の否定ガード 2 件を「シグネチャ・委譲本体の固定＋allowlist 方式の違反スキャナ＋正のプローブ自己テスト＋到達性テスト」へ置換、(c) 常時実行の受入テスト `gpu_linalg_optin.rs` と実機 parity テスト（CUDA は `GateOn` を facade 経由へ、Metal は新規）、(d) backend 側 doc の「facade へ再公開しない」更新、(e) 本節への実装記録と `compat-api-scope.md` の適用記録を行う。既定 ON（Stage E）は別承認で本件の範囲外。
 
 §9 の「facade 公開の実施」は #3405 で扱う（公開形は承認済み・実機 parity は G2 充足済み、2026-10-28）。
+
+### 11.4 実装記録（#3405。2026-11-04）
+
+§11.3 の (a)〜(e) を実施した。
+
+- (a) `crates/facade/src/lib.rs` に 4 関数を追加した（CUDA の 2 関数と、`#[cfg(target_os = "macos")]` 付きの Metal の 2 関数）。本体は `fandhe_ai_backend_{cuda,metal}::linalg::*` への 1 行委譲で、`pub use`・新しい演算名・モジュール公開はない。
+- (b) `api_surface.rs` の否定ガード 3 件を次の正ガードへ置き換えた。
+  - `gpu_linalg_optin_is_reachable_via_facade`: シグネチャ（Metal は直前行の macOS cfg も）・委譲本体のトークン列・allowlist 方式の違反スキャナを固定する。
+  - `workspace_declares_gpu_linalg_optin_fn_names_only_in_approved_locations`: 宣言インベントリ。過不足を fail-closed にする。
+  - `gpu_linalg_surface_guard_detects_violations`: 正のプローブ（再公開・glob・`pub mod linalg`・承認形以外の参照・本体のすり替え）。
+- (c) 常時実行の受入テスト `crates/facade/tests/gpu_linalg_optin.rs`（往復・backend 静的との一致・CPU tape の ON/OFF bit 同一）を追加した。CUDA 実機 parity テストは `GateOn` を facade 経由に変更し、Metal 版 `linalg_gpu_optin_metal_parity.rs`（`#[ignore]`・入力は #3139 の正本を共有）を新設した。
+- (d) backend 側の doc と `docs/compat-api-scope.md`・`docs/compat-matrix-ari-tracker.md`・`docs/compat-feature-gap.md` を更新した。
+- 変えていないもの: 既定 OFF、tolerance・baseline・`RULE.txt`、`unsafe`、依存、`docs/spec`、`Unsupported` メッセージの文言。
+- **未実測**: facade 経由の GB10／Mac mini 実機 parity は #3866。DDP の GB10 実測（#3141・#3149）も実機が要るため #3405 で引き続き追跡する。このため #3405 は open のまま残す。
