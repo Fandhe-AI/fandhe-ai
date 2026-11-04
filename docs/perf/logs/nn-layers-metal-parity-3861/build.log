@@ -1,0 +1,53 @@
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/tensor-core)
+   Compiling fandhe-ai-backend-metal v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/backend-metal)
+   Compiling fandhe-ai-backend-cuda v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/autodiff)
+   Compiling fandhe-ai-backend-rocm v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/backend-rocm)
+   Compiling bench-harness v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/onnx-interop)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.85s
+  Executable tests/compat_sequential_spatial_layers_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_spatial_layers_backend_parity-ffedd2dbf81ac68f)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+  Executable tests/shrink_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/shrink_ops_backend_parity-229f04bed1f830e9)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+  Executable tests/bilinear_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/bilinear_ops_backend_parity-25fa7d6a205a4f66)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+  Executable tests/batch_norm_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/batch_norm_backend_parity-4503850f676216ff)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+  Executable tests/compat_sequential_layers_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_layers_backend_parity-bbe74cdfa93a52cc)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+  Executable tests/similarity_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/similarity_ops_backend_parity-8461bee50a92cde3)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+  Executable tests/channel_shuffle_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/channel_shuffle_backend_parity-2d0af9e60f066c7c)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+  Executable tests/compat_sequential_channel_shuffle_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_channel_shuffle_backend_parity-1a259124e5d7b672)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+  Executable tests/adaptive_pool3d_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/adaptive_pool3d_ops_backend_parity-fc21cec923899a86)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+  Executable tests/compat_sequential_adaptive_pool3d_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_adaptive_pool3d_backend_parity-34754e7ba64a354c)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+  Executable tests/lp_pool_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/lp_pool_ops_backend_parity-7bd88e0436947e25)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+  Executable tests/compat_sequential_lp_pool_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_lp_pool_backend_parity-1cf559928e9261db)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+  Executable tests/fractional_max_pool_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/fractional_max_pool_ops_backend_parity-fc222cc60a53ddbf)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+  Executable tests/compat_sequential_adaptive_pool3d.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_adaptive_pool3d-f460d1ac29d4a7a9)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3861/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+  Executable tests/train_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/train_gpu_parity-9152d234530cb15d)

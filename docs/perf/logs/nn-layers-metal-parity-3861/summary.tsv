@@ -1,0 +1,21 @@
+group	target	test	exit_code	running	result	verdict
+upsample-scale-factor-3814	--test compat_sequential_spatial_layers_backend_parity	metal_upsample_scale_factor_nearest_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.21s	pass
+upsample-scale-factor-3814	--test compat_sequential_spatial_layers_backend_parity	metal_upsample_scale_factor_bilinear_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.17s	pass
+shrink-ops-3817	--test shrink_ops_backend_parity	metal_bit_exact_forward_matches_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.19s	pass
+shrink-ops-3817	--test shrink_ops_backend_parity	metal_bit_exact_backward_matches_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.17s	pass
+bilinear-ops-3818	--test bilinear_ops_backend_parity	metal_bilinear_forward_matches_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.20s	pass
+bilinear-ops-3818	--test bilinear_ops_backend_parity	metal_bilinear_backward_matches_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.17s	pass
+batch-norm-rank5-3819	--test batch_norm_backend_parity	metal_batch_norm_train_forward_rank5_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.37s	pass
+batch-norm3d-layer-3820	--test compat_sequential_layers_backend_parity	metal_batch_norm3d_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.21s	pass
+similarity-ops-3821	--test similarity_ops_backend_parity	metal_bit_exact_forward_matches_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.21s	pass
+similarity-ops-3821	--test similarity_ops_backend_parity	metal_bit_exact_backward_matches_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.17s	pass
+channel-shuffle-ops-3822	--test channel_shuffle_backend_parity	metal_channel_shuffle_forward_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.12s	pass
+channel-shuffle-ops-3822	--test channel_shuffle_backend_parity	metal_channel_shuffle_backward_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.17s	pass
+channel-shuffle-layer-3822	--test compat_sequential_channel_shuffle_backend_parity	metal_channel_shuffle_layers_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.13s	pass
+adaptive-pool3d-ops-3823	--test adaptive_pool3d_ops_backend_parity	metal_adaptive_pool3d_ops_match_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.20s	pass
+adaptive-pool3d-layer-3824	--test compat_sequential_adaptive_pool3d_backend_parity	metal_compat_sequential_adaptive_pool3d_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.19s	pass
+lp-pool-ops-3825	--test lp_pool_ops_backend_parity	metal_lp_pool_ops_match_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.21s	pass
+lp-pool-layer-3825	--test compat_sequential_lp_pool_backend_parity	metal_lp_pool_layers_match_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.20s	pass
+fractional-max-pool-ops-3826	--test fractional_max_pool_ops_backend_parity	metal_fractional_max_pool_ops_match_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.21s	pass
+fractional-max-pool-layer-3827	--test compat_sequential_adaptive_pool3d	fractional_max_pool::backend_parity::metal_compat_sequential_fractional_max_pool_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.22s	pass
+template-nn-3778	--test train_gpu_parity	train_parity_nn_metal_matches_cpu	101	1	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s	undetermined
