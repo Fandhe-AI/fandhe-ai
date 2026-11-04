@@ -1,0 +1,86 @@
+# RULE.txt — 雛形 train_gpu_parity.rs の optim 族（param groups 付き GPU 常駐更新）の CUDA 実機 parity（事前登録。イシュー #3862 の再計測・親 #3711 Phase 10）
+#
+# 雛形 docs/perf/logs/train-gpu-parity-template/RULE.txt（#3778）を写して埋めた。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<cuda-node>／<user>／<home> で表す。
+# 前回の #3862（../param-groups-resident-cuda-parity-3862/。PR #4023）では雛形の optim 族が登録 0 件で undetermined だった。
+# #4026（PR #4034）が optim 族 6 ケースを登録したので、雛形テスト 1 本を測り直す。前回の記録は書き換えない。
+
+declared_at_utc: 2026-11-04T19:08Z（実機での実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+issue: 3862
+machine: <cuda-node>（DGX Spark GB10・aarch64・sm_121）。parity 測定で時間計測ではないため専有条件は課さない。
+  常駐 compute プロセスの件数を実行前後に env_info.txt へ記録する（#3856〜#3864 と同じ既定の CUDA 実機テスト用ノード）
+target_commit: 2f59b963802e44230cc2ee5a1fea4151ed160669（origin/main。#4026 の PR #4034 のマージコミット）
+  条件: 実行時の HEAD で `git diff --quiet 2f59b963802e44230cc2ee5a1fea4151ed160669 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_cuda_parity.sh が検査する）。
+  HEAD は本 RULE.txt と run_cuda_parity.sh を入れた最初のコミット（push 済み）であること。
+  転送後にノード側で .rev-stamp とスクリプトの SHA-256 を読み、送信側と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-3862-train、出力先は <home>/work/out-3862-train。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai。
+  転送は docs/real-hardware-verification-env.md §3 の rsync だけ（ノードに git は無い）
+hw_lock: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3862 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。テストの前後で owner が自分のままか確かめ、
+  失っていればその回を undetermined にする（ロックを持たずに測った値は採らない）。ほかのサービスのプロセスは止めない
+script: 同ディレクトリの run_cuda_parity.sh（#3860 再計測版 ../nn-train-template-cuda-parity-3860/run_cuda_parity.sh の複製。差分はヘッダに記載。コミット済みのものをそのまま送る。
+  env_info.txt の script_sha256 で照合）。ノード上で setsid nohup により切り離して起動する
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::compare）の定数は
+  fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない
+switches_left_default: TF32 opt-in は OFF のまま、GPU linalg ゲートは OFF のまま（触らない。環境変数で切替を変えない）
+
+# ---- 腕 ----
+# 腕 A（被検腕）は Device::Cuda(0) のデバイス常駐更新。腕 B（参照腕）はホスト参照（Case.reference = optim_host）。
+arms:
+  optim: A=tape_for(Device::Cuda(0)) 上で init_device_param_store_with_param_groups → 20 step の
+           forward_resident → MseLoss(Mean) → backward_device_param_store → step_device_param_store{,_adam,_adamw}
+           → sync_device_param_store_to_host
+         B=CPU tape（fandhe_ai::tape()）上で同じ 20 step を ParamGroupStep::step_with_groups（Sgd／Adam／AdamW）＋ apply_parameters
+  groups: ParamGroup(slots=[0], lr=5e-3, weight_decay=0.05)・ParamGroup(slots=[1,2], lr=2e-2, weight_decay=0.0)。スロット 3 は optimizer 既定値
+  tape_for が Err なら run 関数の Err となり undetermined（CPU への無言のフォールバックは無い）
+
+# ---- 形状（対象コミットの Case.shape を写す）----
+shapes:
+  optim_param_groups_resident_sgd_s1:   S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 sgd lr=0.02 momentum=0.9 nesterov groups=[0]/[1,2]
+  optim_param_groups_resident_sgd_s2:   S2: batch=5 d_in=13 hidden=17 d_out=7 steps=20 sgd lr=0.02 momentum=0.9 nesterov groups=[0]/[1,2]
+  optim_param_groups_resident_adam_s1:  S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 adam default groups=[0]/[1,2]
+  optim_param_groups_resident_adam_s2:  S2: batch=5 d_in=13 hidden=17 d_out=7 steps=20 adam default groups=[0]/[1,2]
+  optim_param_groups_resident_adamw_s1: S1: batch=4 d_in=8 hidden=16 d_out=4 steps=20 adamw default groups=[0]/[1,2]
+  optim_param_groups_resident_adamw_s2: S2: batch=5 d_in=13 hidden=17 d_out=7 steps=20 adamw default groups=[0]/[1,2]
+
+# ---- 判定（ケースごとに事前宣言する。対象コミットの CASES の写し）----
+judgment:
+  optim_param_groups_resident_{sgd,adam,adamw}_{s1,s2}: judge=Req2 route=K
+  量: 20 step 後の param_w1・param_b1・param_w2・param_b2（各 require_nonzero=true）
+  説明: Req2 は compare の CompareReport::passes()（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+    docs/autodiff-param-groups-decision.md §19.5 (3) が GPU 対参照を REQ-2 と定めるため Bit は使わない
+pass: コマンドが exit 0 で、出力に「running 1 test」と「1 passed; 0 failed」があり、かつ TRAIN_PARITY 記録行がすべて
+  family=optim・verdict=pass で、上の 6 ケースがそれぞれ 1 行以上現れること
+fail: TRAIN_PARITY 行に verdict=fail がある（exit 0 でも pass 以外の verdict があれば fail）、または undetermined の印が無い非 0 終了
+undetermined: ノードに届かない、ビルドできない、timeout、--list の不一致、実機ロックの取得不能・喪失、自己検査の失敗、
+  登録 0 件の族、run 関数の Err、全ゼロの量（require_nonzero）、6 ケースのいずれかが記録行に現れない、族の違う記録行。pass として扱わない
+completion: 1. が pass のときだけ #3862 を Closes する。fail・undetermined なら Refs。
+  対象の実装 issue #3837・#3838 は既に CLOSED。前回の 3 本（../param-groups-resident-cuda-parity-3862/）は全 pass 済み
+
+# ---- run 数 ----
+runs: 1 コマンド 1 回。時間の計測ではないので中央値は取らない。fail・undetermined の後に再実行して置き換えない
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  1) 先に cargo test -p fandhe-ai --test train_gpu_parity --no-run でビルドを終える。計測中は他の cargo・ビルドを走らせない
+     （開始前に pgrep で他の cargo／rustc が無いことを確かめる）
+  2) テストの前に cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --list train_parity_optim_cuda_matches_cpu の出力で、
+     ": test" で終わる行がちょうど 1 件であることを確かめる
+  3) 別プロセスで実行する（--release は付けない。docs/real-hardware-verification-env.md §4.10）:
+     1. timeout 1800 cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 train_parity_optim_cuda_matches_cpu
+external_timeout: timeout 1800。ハングを pass にしない。timeout は undetermined
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を保存する。末尾に rc=<終了コード>。TRAIN_PARITY 行を grep して集計する（行頭に限らない）。
+  1 行に case・family・quantity・arm・route・judge・total・fail_count・max_abs_diff・mean_abs_diff・max_rel_err・verdict が入る。
+  tests.tsv にテスト単位の exit code・running 件数・test result 行・判定、summary.tsv に TRAIN_PARITY 記録の 1 行 1 量の集計を書く
+masking: ホスト名・ユーザー名・ホームのパス・インスタンス識別子を収録しない。収録する場合は <cuda-node>／<user>／<home> へ置換。
+  漏れたら記録を捨てて取り直す（fail-closed）。回収ログは手で編集しない
+integrity: 保存したファイル群の SHA256SUMS を作り、README に載せる
+
+# ---- fail の扱い ----
+fail_handling: fail・undetermined が出ても tolerance・判定方式・入力・テストコード・本 RULE を変えず、再実行で置き換えない。
+  TRAIN_PARITY 行と panic メッセージの fail_count・max_abs_diff・max_rel_err をそのまま引用して事実を記録し、
+  README と PR に「要対応」と書き、所有者へ報告して止まる。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
