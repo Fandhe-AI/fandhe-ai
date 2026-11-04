@@ -2938,6 +2938,25 @@ fn is_plain_rust_ident(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// `interop/safetensors.rs` の再エクスポート期待集合（14 件。dtype 混在の読込 3 関数は
+/// イシュー #3845、書出 2 関数は #3846）。自己テストと共有する。
+const INTEROP_SAFETENSORS_EXPECTED_REEXPORTS: &[&str] = &[
+    "LoadError",
+    "SafetensorsDtype",
+    "SafetensorsTensor",
+    "SaveError",
+    "load_safetensors_f32",
+    "load_safetensors_f32_from_bytes",
+    "load_safetensors_typed",
+    "load_safetensors_typed_from_bytes",
+    "require_keys",
+    "require_keys_typed",
+    "save_safetensors_f32",
+    "save_safetensors_f32_to_bytes",
+    "save_safetensors_typed",
+    "save_safetensors_typed_to_bytes",
+];
+
 /// 上記走査器の本体（`pub use` 行を承認接頭辞で分類する）。
 fn scan_safetensors_reexport_lines(
     content: &str,
@@ -3018,23 +3037,10 @@ fn interop_safetensors_reexports_exactly_expected_surface() {
          解釈できない形式の行を含む: {offending_lines:?}"
     );
 
-    let expected: std::collections::BTreeSet<String> = [
-        "LoadError",
-        "SafetensorsDtype",
-        "SafetensorsTensor",
-        "SaveError",
-        "load_safetensors_f32",
-        "load_safetensors_f32_from_bytes",
-        "load_safetensors_typed",
-        "load_safetensors_typed_from_bytes",
-        "require_keys",
-        "require_keys_typed",
-        "save_safetensors_f32",
-        "save_safetensors_f32_to_bytes",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
+    let expected: std::collections::BTreeSet<String> = INTEROP_SAFETENSORS_EXPECTED_REEXPORTS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     assert_eq!(
         found, expected,
@@ -3102,6 +3108,8 @@ fn interop_safetensors_reexport_scanner_rejects_alias_and_swap() {
         "pub use fandhe_ai_onnx_interop::st_load::{SafetensorsTensor as Tensor};",
         "pub use fandhe_ai_onnx_interop::st_load::SafetensorsTensor as Tensor;",
         "pub use fandhe_ai_onnx_interop::st_load::{load_safetensors_f32_from_bytes as load_safetensors_typed_from_bytes};",
+        "pub use fandhe_ai_onnx_interop::st_save::{save_safetensors_f32_to_bytes as save_safetensors_typed_to_bytes};",
+        "pub use fandhe_ai_onnx_interop::st_save::save_safetensors_f32 as save_safetensors_typed;",
     ] {
         let (offending, found) = scan_safetensors_reexport_lines(bad, &allowed_prefixes);
         assert!(
@@ -3115,6 +3123,42 @@ fn interop_safetensors_reexport_scanner_rejects_alias_and_swap() {
     }
 }
 
+/// 実ファイルの typed 書出 `pub use` 行を削除／f32 版へ置換した合成入力が、期待集合と
+/// 一致しなくなる（正ガードが検出できる）ことを固定する（イシュー #3846）。
+#[test]
+fn interop_safetensors_expected_surface_detects_missing_or_swapped_typed_save() {
+    let allowed_prefixes = [
+        "pub use fandhe_ai_onnx_interop::st_load::",
+        "pub use fandhe_ai_onnx_interop::st_save::",
+    ];
+    let expected: std::collections::BTreeSet<String> = INTEROP_SAFETENSORS_EXPECTED_REEXPORTS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let content = read_to_string_or_panic(&interop_safetensors_rs_path());
+    let (_, base) = scan_safetensors_reexport_lines(&content, &allowed_prefixes);
+    assert_eq!(base, expected, "実ファイルが期待集合と一致しない");
+
+    for name in ["save_safetensors_typed", "save_safetensors_typed_to_bytes"] {
+        let line = format!("pub use fandhe_ai_onnx_interop::st_save::{name};");
+        assert!(content.contains(&line), "実ファイルに {line} が無い");
+        // 削除
+        let removed = content.replace(&line, "");
+        let (_, found) = scan_safetensors_reexport_lines(&removed, &allowed_prefixes);
+        assert_ne!(found, expected, "{name} の削除を検出できない");
+        // f32 版の名前への置換
+        let swapped = content.replace(
+            &line,
+            "pub use fandhe_ai_onnx_interop::st_save::save_safetensors_f32;",
+        );
+        let (_, found) = scan_safetensors_reexport_lines(&swapped, &allowed_prefixes);
+        assert_ne!(
+            found, expected,
+            "{name} の f32 版へのすり替えを検出できない"
+        );
+    }
+}
+
 /// `fandhe_ai::interop::safetensors::{LoadError, SaveError, ...}` が
 /// facade から到達可能であること・両エラー型が `#[non_exhaustive]` の
 /// ためワイルドカード腕併用で `match` できることをコンパイル時に固定
@@ -3124,6 +3168,7 @@ fn interop_safetensors_types_are_reachable_via_facade() {
     use fandhe_ai::interop::safetensors::{
         LoadError, SafetensorsDtype, SafetensorsTensor, SaveError, load_safetensors_f32_from_bytes,
         load_safetensors_typed, load_safetensors_typed_from_bytes, require_keys_typed,
+        save_safetensors_typed, save_safetensors_typed_to_bytes,
     };
     use std::collections::HashMap;
 
@@ -3133,6 +3178,10 @@ fn interop_safetensors_types_are_reachable_via_facade() {
     let _: fn(&[u8]) -> Result<TypedMap, LoadError> = load_safetensors_typed_from_bytes;
     let _: fn(&std::path::Path) -> Result<TypedMap, LoadError> = load_safetensors_typed;
     let _: fn(&TypedMap, &[&str]) -> Result<(), LoadError> = require_keys_typed;
+    // 書出側（イシュー #3846）。f32 版へのすり替え・シグネチャ変更を検出する。
+    type Metadata = Option<HashMap<String, String>>;
+    let _: fn(&TypedMap, Metadata) -> Result<Vec<u8>, SaveError> = save_safetensors_typed_to_bytes;
+    let _: fn(&std::path::Path, &TypedMap) -> Result<(), SaveError> = save_safetensors_typed;
     let _dtype_label = |d: SafetensorsDtype| match d {
         SafetensorsDtype::F32 => "f32",
         SafetensorsDtype::F16 => "f16",
@@ -9101,6 +9150,9 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "load_safetensors_typed",
     "load_safetensors_typed_from_bytes",
     "require_keys_typed",
+    // `interop/safetensors.rs` の dtype 混在書出（イシュー #3846。書出側 2 関数）。
+    "save_safetensors_typed",
+    "save_safetensors_typed_to_bytes",
     // `interop/npy.rs`（イシュー #2590。npy／npz 読み書きのパス版 4 関数）。
     "load_npy",
     "load_npz",

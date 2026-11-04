@@ -74,7 +74,7 @@
 //! other.load_state_dict(loaded).unwrap();
 //! ```
 //!
-//! ## dtype 混在ファイルの読込（イシュー #3845・設計記録 §13 案 C・読込側）
+//! ## dtype 混在ファイルの読み書き（イシュー #3845 読込側・#3846 書出側・設計記録 §13 案 C）
 //!
 //! HF Hub の bf16／f16 チェックポイントや f32 重み + i64 buffer の混在ファイルは
 //! 既存の `*_f32` では [`LoadError::UnsupportedDtype`] で拒否される（不変）。
@@ -82,7 +82,10 @@
 //! F32／F16／BF16／F64／I32／I64／BOOL の 7 種を [`SafetensorsTensor`] として bit 単位で
 //! 読み、それ以外の dtype と BOOL の 0／1 以外は拒否する。f32 への昇格は明示 opt-in の
 //! [`SafetensorsTensor::to_f32`]（`half` は再エクスポートしないため dtype 判定は
-//! [`SafetensorsTensor::dtype`] を使う）。書出側は #3846。
+//! [`SafetensorsTensor::dtype`] を使う）。書出側の [`save_safetensors_typed_to_bytes`]／
+//! [`save_safetensors_typed`] は同じ [`SafetensorsTensor`] マップをそのまま書き、値を bit 単位で
+//! 保つ（暗黙の型変換なし。決定的出力・一時ファイル＋`rename` は `*_f32` と同じ契約）。
+//! 既存の `*_f32` は F32 専用のまま不変。
 //!
 //! ```
 //! use fandhe_ai::interop::safetensors::{
@@ -108,6 +111,63 @@
 //! assert_eq!(bf.to_f32().unwrap().host_slice().to_vec(), vec![0.5, 2.0]);
 //! ```
 //!
+//! F64・I64・BOOL を混ぜたマップのバイト列往復:
+//!
+//! ```
+//! use std::collections::HashMap;
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::interop::safetensors::{
+//!     SafetensorsDtype, SafetensorsTensor, load_safetensors_typed_from_bytes,
+//!     save_safetensors_typed_to_bytes,
+//! };
+//!
+//! let mut m: HashMap<String, SafetensorsTensor> = HashMap::new();
+//! m.insert("a".into(), SafetensorsTensor::F64(Tensor::new(vec![1.5f64], &[1]).unwrap()));
+//! m.insert("b".into(), SafetensorsTensor::I64(Tensor::new(vec![7i64, -1], &[2]).unwrap()));
+//! m.insert("c".into(), SafetensorsTensor::Bool(Tensor::new(vec![true, false], &[2]).unwrap()));
+//!
+//! let bytes = save_safetensors_typed_to_bytes(&m, None).unwrap();
+//! let back = load_safetensors_typed_from_bytes(&bytes).unwrap();
+//! assert_eq!(back["a"].dtype(), SafetensorsDtype::F64);
+//! assert_eq!(back["b"].dtype(), SafetensorsDtype::I64);
+//! assert_eq!(back["c"].dtype(), SafetensorsDtype::Bool);
+//! match &back["b"] {
+//!     SafetensorsTensor::I64(t) => assert_eq!(t.host_slice().to_vec(), vec![7, -1]),
+//!     _ => unreachable!(),
+//! }
+//! ```
+//!
+//! `Sequential::state_dict` を bf16 チェックポイントとして書き、読み戻して f32 へ昇格する例:
+//!
+//! ```
+//! use std::collections::HashMap;
+//! use fandhe_ai::compat::Sequential;
+//! use fandhe_ai::interop::safetensors::{
+//!     SafetensorsDtype, SafetensorsTensor, load_safetensors_typed, save_safetensors_typed,
+//! };
+//!
+//! let model = Sequential::new().add_linear(4, 8, /* seed = */ 1).unwrap();
+//! let mut typed: HashMap<String, SafetensorsTensor> = HashMap::new();
+//! for (k, v) in model.state_dict() {
+//!     typed.insert(k, SafetensorsTensor::from_f32(&v, SafetensorsDtype::BF16).unwrap());
+//! }
+//!
+//! let dir = std::env::temp_dir().join(format!("fandhe-ai-st-typed-doc-{}", std::process::id()));
+//! std::fs::create_dir_all(&dir).unwrap();
+//! let path = dir.join("bf16.safetensors");
+//! save_safetensors_typed(&path, &typed).unwrap();
+//! let loaded = load_safetensors_typed(&path).unwrap();
+//! std::fs::remove_dir_all(&dir).unwrap();
+//!
+//! let mut f32s = HashMap::new();
+//! for (k, v) in &loaded {
+//!     assert_eq!(v.dtype(), SafetensorsDtype::BF16);
+//!     f32s.insert(k.clone(), v.to_f32().unwrap());
+//! }
+//! let mut other = Sequential::new().add_linear(4, 8, /* seed = */ 2).unwrap();
+//! other.load_state_dict(f32s).unwrap();
+//! ```
+//!
 //! ## 対象外
 //!
 //! `compat::callbacks::ModelCheckpoint` からの薄いラッパー結線
@@ -119,8 +179,8 @@
 //! 設計は `docs/compat-model-io-decision.md`。本モジュールの
 //! `save_safetensors_f32_to_bytes`／`load_safetensors_f32_from_bytes` を再利用する。
 //! 本モジュール自体への変更はなく、案 A の素の再エクスポートのみのまま）。F32 以外の
-//! dtype・入力サイズ上限の導入・`st_load`／`st_save` 本体ロジックの
-//! 変更も対象外。
+//! dtype（U8／I8 等）・入力サイズ上限の導入・`st_load`／`st_save` 本体ロジックの
+//! 変更も対象外（F16／BF16／F64／I32／I64／BOOL の読み書きは #3845・#3846 で公開済み）。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。
 // `tests/api_surface.rs::interop_safetensors_reexports_exactly_expected_surface`
@@ -133,4 +193,6 @@ pub use fandhe_ai_onnx_interop::st_load::{LoadError, load_safetensors_f32};
 pub use fandhe_ai_onnx_interop::st_load::{SafetensorsDtype, SafetensorsTensor};
 pub use fandhe_ai_onnx_interop::st_load::{load_safetensors_f32_from_bytes, require_keys};
 pub use fandhe_ai_onnx_interop::st_save::save_safetensors_f32_to_bytes;
+pub use fandhe_ai_onnx_interop::st_save::save_safetensors_typed;
+pub use fandhe_ai_onnx_interop::st_save::save_safetensors_typed_to_bytes;
 pub use fandhe_ai_onnx_interop::st_save::{SaveError, save_safetensors_f32};

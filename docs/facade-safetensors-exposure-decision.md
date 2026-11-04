@@ -318,3 +318,14 @@ export（#2018）も引き続き対象外。
 - テスト: `crates/onnx-interop/tests/st_typed.rs`、`crates/facade/tests/interop_safetensors_typed_load.rs`、facade モジュール doc の doctest。実機依存テストはない
 - 書出側（`save_safetensors_typed*`・期待集合 14 件・往復テスト・§13.2 の (a)／(b) のファイル経由部分）は #3846
 - 依存・`unsafe`・tolerance・ガードレール閾値の変更はない
+
+## 15. 実装記録（イシュー #3846・書出側）
+
+- 承認: #3770 の所有者の回答コメント（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145）。§13 の案 C どおりに実装した。§13 からの逸脱: なし
+- 実装（`crates/onnx-interop/src/st_save.rs`）: `save_safetensors_typed_to_bytes`／`save_safetensors_typed`。キー昇順の決定的出力、dtype ごとのリトルエンディアン変換（`unsafe` なし）、非 contiguous は `host_slice()` で 1 回だけ実体化。`SaveError` に variant は足していない。`st_load.rs` に `SafetensorsDtype::to_wire`（`from_wire` の逆写像・ワイルドカードなし）を追加し、インベントリテストに往復検査を足した
+- 判断 D1: `save_safetensors_f32` 末尾の一時ファイル書込み＋`rename`＋失敗時削除を private の `write_via_temp_and_rename` へ逐語で移し、f32 版と typed 版で共有した（整合性に関わる処理の複製を避ける。OWASP A08）。`save_safetensors_f32_to_bytes` 本体は 1 バイトも変更していない
+- 判断 D2: typed 書出しでは確保量の事前検査を意図して入れていない。f32 版の書出しにも同検査はなく、入力は呼び出し側が所有するテンソルである（読込側の `check_f32_alloc` は非信頼バイト列から確保する経路向け）。必要なら別 Issue（所有者承認後）
+- facade: `fandhe_ai::interop::safetensors` へ 2 件を再エクスポート（12 → 14 件）。モジュール doc に §13.2 の doctest (a)（F64／I64／BOOL 混在の往復）・(b)（`state_dict` → bf16 → ファイル → `to_f32` → `load_state_dict`）を追加
+- 正ガード（基準 10c107236）: `interop_safetensors_reexports_exactly_expected_surface`（`crates/facade/tests/api_surface.rs:3022`。期待集合を定数 `INTEROP_SAFETENSORS_EXPECTED_REEXPORTS` の 14 件へ反転）、`interop_safetensors_types_are_reachable_via_facade`（:3167。書出側 2 関数の関数ポインタ型強制）、自己テスト `interop_safetensors_reexport_scanner_rejects_alias_and_swap`（:3102。書出側の別名すり替え行を追加）・`interop_safetensors_expected_surface_detects_missing_or_swapped_typed_save`（:3129。typed 書出 `pub use` の削除・f32 版名への置換で期待集合と不一致になることを固定）。`LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に 2 件を追加した
+- テスト: `crates/onnx-interop/tests/st_typed_save.rs`（7 dtype の bit 一致往復・特殊値・ファイル経由・ヘッダ dtype 表記・決定性・非 contiguous・F32 のみで既存 `*_f32` とバイト列一致）、`crates/facade/tests/interop_safetensors_typed_roundtrip.rs`、facade モジュール doc の doctest。既存テストは無修正で通る。device 経路を通らないため実機依存テストはなく、実機列は「該当なし」
+- 依存・`unsafe`・tolerance・ガードレール閾値の変更はない

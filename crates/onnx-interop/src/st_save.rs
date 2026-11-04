@@ -16,9 +16,11 @@
 //!    キーリネームは一切行わない。PyTorch 慣習キー（`<module>.weight` は
 //!    `[out_features, in_features]` 等）に合わせるかどうかは呼び出し側の責務
 //!    （[`st_load`](crate::st_load) モジュール冒頭ドキュメント参照）。
-//! 2. **dtype は F32 のみ**: 本関数群は `Tensor<f32>` にのみ型付けされるため
-//!    型レベルで保証される。f16 等の追加 dtype 対応はイシュー #274 で追跡済み
-//!    （本イシューのスコープ外）。
+//! 2. **`*_f32` の dtype は F32 のみ**: `save_safetensors_f32*` は `Tensor<f32>`
+//!    にのみ型付けされるため型レベルで保証される。f32 以外（F16／BF16／F64／I32／
+//!    I64／BOOL）を書き出すときは [`save_safetensors_typed`]／
+//!    [`save_safetensors_typed_to_bytes`]（イシュー #3846・設計記録 §13）を使う。
+//!    typed 版も決定的出力・一時ファイル＋`rename` の契約は `*_f32` と同じ。
 //!
 //! ## 決定的出力
 //!
@@ -60,6 +62,8 @@ use std::path::Path;
 
 use fandhe_ai_tensor_core::Tensor;
 use safetensors::Dtype;
+
+use crate::st_load::SafetensorsTensor;
 use safetensors::tensor::{TensorView, serialize};
 
 /// safetensors 書き出し経路の型付きエラー。
@@ -190,7 +194,13 @@ pub fn save_safetensors_f32(
     tensors: &HashMap<String, Tensor<f32>>,
 ) -> Result<(), SaveError> {
     let bytes = save_safetensors_f32_to_bytes(tensors, None)?;
+    write_via_temp_and_rename(path, &bytes)
+}
 
+/// 同一ディレクトリの一時ファイルへ書いてから `rename` する（OWASP A08）。
+/// `save_safetensors_f32` と `save_safetensors_typed` が共有する唯一の実装
+/// （整合性に関わる処理を複製して片方だけ直す事故を避ける。イシュー #3846）。
+fn write_via_temp_and_rename(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
@@ -205,7 +215,7 @@ pub fn save_safetensors_f32(
         std::thread::current().id()
     ));
 
-    std::fs::write(&tmp_path, &bytes).map_err(SaveError::Io)?;
+    std::fs::write(&tmp_path, bytes).map_err(SaveError::Io)?;
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         // rename 失敗時は書き込み済みの一時ファイルを残さない（best-effort）。
         // 削除自体が失敗しても rename の元エラーを優先して返す
@@ -216,6 +226,73 @@ pub fn save_safetensors_f32(
         return Err(SaveError::Io(e));
     }
     Ok(())
+}
+
+/// 要素列を 1 要素 `N` バイトのリトルエンディアン列へ詰める（`unsafe` なし）。
+fn le_bytes<T: Copy, const N: usize>(src: &[T], f: impl Fn(T) -> [u8; N]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(src.len() * N);
+    for v in src {
+        out.extend_from_slice(&f(*v));
+    }
+    out
+}
+
+/// dtype 混在の `name -> SafetensorsTensor` を safetensors バイト列へ変換する
+/// （`load_safetensors_typed_from_bytes` と対になる書出側。イシュー #3846）。
+///
+/// 値は bit 単位で保たれ、暗黙の型変換は行わない。キー昇順の決定的出力。
+/// 非 contiguous は論理 row-major で 1 回だけ実体化する。確保量の事前検査は
+/// [`save_safetensors_f32_to_bytes`] と同じく設けない（入力は呼び出し側所有）。
+pub fn save_safetensors_typed_to_bytes(
+    tensors: &HashMap<String, SafetensorsTensor>,
+    metadata: Option<HashMap<String, String>>,
+) -> Result<Vec<u8>, SaveError> {
+    let mut keys: Vec<&String> = tensors.keys().collect();
+    keys.sort();
+
+    let mut buffers: Vec<(String, Dtype, Vec<usize>, Vec<u8>)> = Vec::with_capacity(keys.len());
+    for key in keys {
+        let t = &tensors[key];
+        let bytes = match t {
+            SafetensorsTensor::F32(x) => le_bytes(&x.host_slice(), f32::to_le_bytes),
+            SafetensorsTensor::F64(x) => le_bytes(&x.host_slice(), f64::to_le_bytes),
+            SafetensorsTensor::I32(x) => le_bytes(&x.host_slice(), i32::to_le_bytes),
+            SafetensorsTensor::I64(x) => le_bytes(&x.host_slice(), i64::to_le_bytes),
+            SafetensorsTensor::F16(x) => le_bytes(&x.host_slice(), |v| v.to_bits().to_le_bytes()),
+            SafetensorsTensor::BF16(x) => le_bytes(&x.host_slice(), |v| v.to_bits().to_le_bytes()),
+            SafetensorsTensor::Bool(x) => le_bytes(&x.host_slice(), |v| [u8::from(v)]),
+        };
+        buffers.push((
+            key.to_string(),
+            t.dtype().to_wire(),
+            t.shape().to_vec(),
+            bytes,
+        ));
+    }
+
+    let views: Vec<(String, TensorView<'_>)> = buffers
+        .iter()
+        .map(|(key, dtype, shape, bytes)| {
+            let view = TensorView::new(*dtype, shape.clone(), bytes)
+                .map_err(|e| SaveError::SafetensorsFormat(format!("{key}: {e:?}")))?;
+            Ok((key.clone(), view))
+        })
+        .collect::<Result<Vec<_>, SaveError>>()?;
+
+    serialize(views, metadata).map_err(|e| SaveError::SafetensorsFormat(format!("{e:?}")))
+}
+
+/// `path` へ dtype 混在のまま safetensors ファイルとして書き出す
+/// （[`save_safetensors_typed_to_bytes`] + 一時ファイル＋`rename`。metadata は `None` 固定）。
+///
+/// `load_safetensors_typed` と対になる。ファイル書き込みの整合性・スレッド安全性の
+/// 契約は [`save_safetensors_f32`] と同じ（実装を共有）。
+pub fn save_safetensors_typed(
+    path: &Path,
+    tensors: &HashMap<String, SafetensorsTensor>,
+) -> Result<(), SaveError> {
+    let bytes = save_safetensors_typed_to_bytes(tensors, None)?;
+    write_via_temp_and_rename(path, &bytes)
 }
 
 #[cfg(test)]
