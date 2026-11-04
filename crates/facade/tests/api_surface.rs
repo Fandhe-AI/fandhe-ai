@@ -2932,6 +2932,13 @@ fn interop_safetensors_module_is_pure_reexport() {
 /// offending として拒否する（元実装は glob をブレースなし単一識別子と
 /// 誤って受理し、後続の `assert_eq!` 頼みでしか検出できなかったため、
 /// この関数自体を合成入力テストで直接検証できるよう是正した）。
+fn is_plain_rust_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// 上記走査器の本体（`pub use` 行を承認接頭辞で分類する）。
 fn scan_safetensors_reexport_lines(
     content: &str,
     allowed_prefixes: &[&str],
@@ -2959,7 +2966,10 @@ fn scan_safetensors_reexport_lines(
                 if ident.is_empty() {
                     continue;
                 }
-                if ident.contains('*') {
+                // 識別子形でないもの（glob・`as` 別名・空白混入。#3845: 別名による
+                // すり替え `{f32_loader as typed_loader}` を後段の assert_eq 頼みにせず
+                // 走査器自身で拒否する）は offending。
+                if !is_plain_rust_ident(ident) {
                     braced_offending = true;
                     continue;
                 }
@@ -2970,7 +2980,7 @@ fn scan_safetensors_reexport_lines(
             }
         } else {
             let ident = rest.trim_end_matches(';').trim();
-            if ident.is_empty() || ident.contains(['{', '}', ':', '*']) {
+            if !is_plain_rust_ident(ident) {
                 offending_lines.push(trimmed.to_string());
                 continue;
             }
@@ -3010,10 +3020,15 @@ fn interop_safetensors_reexports_exactly_expected_surface() {
 
     let expected: std::collections::BTreeSet<String> = [
         "LoadError",
+        "SafetensorsDtype",
+        "SafetensorsTensor",
         "SaveError",
         "load_safetensors_f32",
         "load_safetensors_f32_from_bytes",
+        "load_safetensors_typed",
+        "load_safetensors_typed_from_bytes",
         "require_keys",
+        "require_keys_typed",
         "save_safetensors_f32",
         "save_safetensors_f32_to_bytes",
     ]
@@ -3075,13 +3090,69 @@ fn interop_safetensors_reexport_scanner_rejects_root_path_and_glob() {
     );
 }
 
+/// 走査器が別名（`as`）によるすり替えを offending として拒否し `found` へ混入させない
+/// ことを合成入力で固定する（イシュー #3845。正ガード反転後の自己テスト）。
+#[test]
+fn interop_safetensors_reexport_scanner_rejects_alias_and_swap() {
+    let allowed_prefixes = [
+        "pub use fandhe_ai_onnx_interop::st_load::",
+        "pub use fandhe_ai_onnx_interop::st_save::",
+    ];
+    for bad in [
+        "pub use fandhe_ai_onnx_interop::st_load::{SafetensorsTensor as Tensor};",
+        "pub use fandhe_ai_onnx_interop::st_load::SafetensorsTensor as Tensor;",
+        "pub use fandhe_ai_onnx_interop::st_load::{load_safetensors_f32_from_bytes as load_safetensors_typed_from_bytes};",
+    ] {
+        let (offending, found) = scan_safetensors_reexport_lines(bad, &allowed_prefixes);
+        assert!(
+            !offending.is_empty(),
+            "別名・すり替え行が検出されなかった: {bad}"
+        );
+        assert!(
+            found.is_empty(),
+            "offending 行から識別子が混入した: {bad} -> {found:?}"
+        );
+    }
+}
+
 /// `fandhe_ai::interop::safetensors::{LoadError, SaveError, ...}` が
 /// facade から到達可能であること・両エラー型が `#[non_exhaustive]` の
 /// ためワイルドカード腕併用で `match` できることをコンパイル時に固定
 /// する（`onnx_import_types_are_reachable_via_facade` と同型。#2019）。
 #[test]
 fn interop_safetensors_types_are_reachable_via_facade() {
-    use fandhe_ai::interop::safetensors::{LoadError, SaveError, load_safetensors_f32_from_bytes};
+    use fandhe_ai::interop::safetensors::{
+        LoadError, SafetensorsDtype, SafetensorsTensor, SaveError, load_safetensors_f32_from_bytes,
+        load_safetensors_typed, load_safetensors_typed_from_bytes, require_keys_typed,
+    };
+    use std::collections::HashMap;
+
+    // シグネチャを関数ポインタへの型強制で固定する（f32 版へのすり替え・シグネチャ変更を
+    // コンパイル時に検出する。イシュー #3845）。
+    type TypedMap = HashMap<String, SafetensorsTensor>;
+    let _: fn(&[u8]) -> Result<TypedMap, LoadError> = load_safetensors_typed_from_bytes;
+    let _: fn(&std::path::Path) -> Result<TypedMap, LoadError> = load_safetensors_typed;
+    let _: fn(&TypedMap, &[&str]) -> Result<(), LoadError> = require_keys_typed;
+    let _dtype_label = |d: SafetensorsDtype| match d {
+        SafetensorsDtype::F32 => "f32",
+        SafetensorsDtype::F16 => "f16",
+        SafetensorsDtype::BF16 => "bf16",
+        SafetensorsDtype::F64 => "f64",
+        SafetensorsDtype::I32 => "i32",
+        SafetensorsDtype::I64 => "i64",
+        SafetensorsDtype::Bool => "bool",
+        _ => "unknown",
+    };
+    let _tensor_label = |t: &SafetensorsTensor| match t {
+        SafetensorsTensor::F32(_) => "f32",
+        SafetensorsTensor::F16(_) => "f16",
+        SafetensorsTensor::BF16(_) => "bf16",
+        SafetensorsTensor::F64(_) => "f64",
+        SafetensorsTensor::I32(_) => "i32",
+        SafetensorsTensor::I64(_) => "i64",
+        SafetensorsTensor::Bool(_) => "bool",
+        _ => "unknown",
+    };
 
     let err = load_safetensors_f32_from_bytes(&[]).unwrap_err();
     let _label = match &err {
@@ -3090,6 +3161,7 @@ fn interop_safetensors_types_are_reachable_via_facade() {
         LoadError::MissingKeys(_) => "missing_keys",
         LoadError::UnsupportedDtype { .. } => "unsupported_dtype",
         LoadError::DataLengthMismatch { .. } => "data_length_mismatch",
+        LoadError::InvalidBoolValue { .. } => "invalid_bool_value",
         LoadError::Shape(_) => "shape",
         _ => "unknown",
     };
@@ -9025,6 +9097,10 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "require_keys",
     "save_safetensors_f32",
     "save_safetensors_f32_to_bytes",
+    // `interop/safetensors.rs` の dtype 混在読込（イシュー #3845。読込側 3 関数）。
+    "load_safetensors_typed",
+    "load_safetensors_typed_from_bytes",
+    "require_keys_typed",
     // `interop/npy.rs`（イシュー #2590。npy／npz 読み書きのパス版 4 関数）。
     "load_npy",
     "load_npz",

@@ -33,7 +33,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{ShapeError, Tensor, cast_from_f32, cast_to_f32};
+use half::{bf16, f16};
 use safetensors::Dtype;
 use safetensors::tensor::SafeTensors;
 
@@ -54,8 +55,16 @@ pub enum LoadError {
     /// [`require_keys`] が検出した不足キー（**全件**。無言 skip 禁止の
     /// 契約を診断性の面から強化する）。
     MissingKeys(Vec<String>),
-    /// F32 以外の dtype（本イシューのスコープ外。明示エラーとして扱う）。
+    /// 対応外の dtype（`*_f32` 系では F32 以外、`*_typed` 系では
+    /// [`SafetensorsDtype`] の 7 種以外。明示エラーとして扱い無言で飛ばさない）。
     UnsupportedDtype { key: String, dtype: String },
+    /// `*_typed` 系で BOOL テンソルに 0／1 以外のバイトが含まれていた
+    /// （イシュー #3845・設計記録 §13。不正値を `true` に丸めず拒否する）。
+    InvalidBoolValue {
+        key: String,
+        index: usize,
+        value: u8,
+    },
     /// テンソルの生データ長（バイト数 / 4）が safetensors ヘッダの shape
     /// が要求する要素数積と一致しない（ヘッダとデータ本体の不整合）。
     ///
@@ -95,6 +104,10 @@ impl fmt::Display for LoadError {
             } => write!(
                 f,
                 "テンソルデータ長不整合（key={key}）: shape が要求する要素数 {expected}、実データ要素数 {actual}"
+            ),
+            LoadError::InvalidBoolValue { key, index, value } => write!(
+                f,
+                "BOOL テンソルに 0／1 以外の値（key={key}, index={index}）: {value}"
             ),
             LoadError::Shape(e) => write!(f, "shape エラー: {e}"),
         }
@@ -206,6 +219,352 @@ pub fn require_keys(map: &HashMap<String, Tensor<f32>>, keys: &[&str]) -> Result
     }
 }
 
+// ---------------------------------------------------------------------
+// dtype 混在ファイルの読込（イシュー #3845・設計記録 §13 案 C・読込側）
+// ---------------------------------------------------------------------
+
+/// `*_typed` 系が扱う safetensors dtype のタグ（7 種）。
+///
+/// `safetensors::Dtype` は公開面へ出さない（許容依存の型を facade の安定性保証へ
+/// 持ち込まないため）。呼び出し元は [`SafetensorsTensor::dtype`] で判定する。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SafetensorsDtype {
+    F32,
+    F16,
+    BF16,
+    F64,
+    I32,
+    I64,
+    Bool,
+}
+
+impl SafetensorsDtype {
+    /// safetensors ヘッダの `"dtype"` 文字列（PyTorch・safetensors 表記と一致）。
+    pub fn header_name(&self) -> &'static str {
+        match self {
+            SafetensorsDtype::F32 => "F32",
+            SafetensorsDtype::F16 => "F16",
+            SafetensorsDtype::BF16 => "BF16",
+            SafetensorsDtype::F64 => "F64",
+            SafetensorsDtype::I32 => "I32",
+            SafetensorsDtype::I64 => "I64",
+            SafetensorsDtype::Bool => "BOOL",
+        }
+    }
+
+    /// 1 要素のバイト幅（safetensors の `Dtype::size()` には頼らない）。
+    fn element_width(self) -> usize {
+        match self {
+            SafetensorsDtype::Bool => 1,
+            SafetensorsDtype::F16 | SafetensorsDtype::BF16 => 2,
+            SafetensorsDtype::F32 | SafetensorsDtype::I32 => 4,
+            SafetensorsDtype::F64 | SafetensorsDtype::I64 => 8,
+        }
+    }
+
+    /// ワイヤ dtype から対応 7 種へ。`_ => None` で fail-closed
+    /// （`Dtype` は `#[non_exhaustive]`、F4 等のサブバイト型は `size()` が 0）。
+    fn from_wire(d: Dtype) -> Option<Self> {
+        match d {
+            Dtype::F32 => Some(SafetensorsDtype::F32),
+            Dtype::F16 => Some(SafetensorsDtype::F16),
+            Dtype::BF16 => Some(SafetensorsDtype::BF16),
+            Dtype::F64 => Some(SafetensorsDtype::F64),
+            Dtype::I32 => Some(SafetensorsDtype::I32),
+            Dtype::I64 => Some(SafetensorsDtype::I64),
+            Dtype::BOOL => Some(SafetensorsDtype::Bool),
+            _ => None,
+        }
+    }
+}
+
+/// dtype 混在ファイルの 1 テンソル（値は読み込んだバイト列と bit 単位で一致）。
+///
+/// f32 への昇格は暗黙に行わず、明示的な [`SafetensorsTensor::to_f32`] のみで行う。
+/// 既存の `load_safetensors_f32*` は F32 以外を拒否したままである。
+/// `half` は facade から再エクスポートしない（`F16`／`BF16` を名指ししたい利用者は
+/// `half` に直接依存する。判定だけなら [`SafetensorsTensor::dtype`] で足りる）。
+///
+/// 対応 dtype: F32／F16／BF16／F64／I32／I64／BOOL。変換 `to_f32` は
+/// F32 恒等・F16／BF16 は完全表現・F64／I64／I32 は丸め（非可逆）・BOOL は 0／1。
+///
+/// PyTorch 側での確認手順（例）:
+///
+/// ```text
+/// from safetensors.torch import load_file
+/// t = load_file("model.safetensors")   # dtype はヘッダ表記のまま保たれる
+/// print({k: v.dtype for k, v in t.items()})
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum SafetensorsTensor {
+    F32(Tensor<f32>),
+    F16(Tensor<f16>),
+    BF16(Tensor<bf16>),
+    F64(Tensor<f64>),
+    I32(Tensor<i32>),
+    I64(Tensor<i64>),
+    Bool(Tensor<bool>),
+}
+
+/// f32 の確保量が `isize::MAX` バイトを超えないことを確かめる
+/// （`CastElement` 未実装の f16／bf16 向けに `cast` 系と同じ fail-closed 検査を再現）。
+fn check_f32_alloc(numel: usize) -> Result<(), ShapeError> {
+    match numel.checked_mul(std::mem::size_of::<f32>()) {
+        Some(b) if b <= isize::MAX as usize => Ok(()),
+        _ => Err(ShapeError::ElementCountOverflow),
+    }
+}
+
+impl SafetensorsTensor {
+    /// このテンソルの dtype タグ。
+    pub fn dtype(&self) -> SafetensorsDtype {
+        match self {
+            SafetensorsTensor::F32(_) => SafetensorsDtype::F32,
+            SafetensorsTensor::F16(_) => SafetensorsDtype::F16,
+            SafetensorsTensor::BF16(_) => SafetensorsDtype::BF16,
+            SafetensorsTensor::F64(_) => SafetensorsDtype::F64,
+            SafetensorsTensor::I32(_) => SafetensorsDtype::I32,
+            SafetensorsTensor::I64(_) => SafetensorsDtype::I64,
+            SafetensorsTensor::Bool(_) => SafetensorsDtype::Bool,
+        }
+    }
+
+    /// テンソルの shape。
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            SafetensorsTensor::F32(t) => t.shape(),
+            SafetensorsTensor::F16(t) => t.shape(),
+            SafetensorsTensor::BF16(t) => t.shape(),
+            SafetensorsTensor::F64(t) => t.shape(),
+            SafetensorsTensor::I32(t) => t.shape(),
+            SafetensorsTensor::I64(t) => t.shape(),
+            SafetensorsTensor::Bool(t) => t.shape(),
+        }
+    }
+
+    /// 明示的な f32 への変換（opt-in）。F64／I32／I64／BOOL は
+    /// `tensor-core::cast_to_f32` に委譲する（単一情報源）。
+    pub fn to_f32(&self) -> Result<Tensor<f32>, ShapeError> {
+        match self {
+            SafetensorsTensor::F32(t) => Ok(t.clone()),
+            SafetensorsTensor::F64(t) => cast_to_f32(t),
+            SafetensorsTensor::I32(t) => cast_to_f32(t),
+            SafetensorsTensor::I64(t) => cast_to_f32(t),
+            SafetensorsTensor::Bool(t) => cast_to_f32(t),
+            SafetensorsTensor::F16(t) => {
+                let src = t.host_slice();
+                check_f32_alloc(src.len())?;
+                let data: Vec<f32> = src.iter().map(|v| v.to_f32()).collect();
+                Tensor::new(data, t.shape())
+            }
+            SafetensorsTensor::BF16(t) => {
+                let src = t.host_slice();
+                check_f32_alloc(src.len())?;
+                let data: Vec<f32> = src.iter().map(|v| v.to_f32()).collect();
+                Tensor::new(data, t.shape())
+            }
+        }
+    }
+
+    /// f32 テンソルから指定 dtype へ明示変換する（opt-in）。F16／BF16 は最近接偶数丸め
+    /// （範囲超過は ±inf）、BOOL は `v != 0.0`（NaN は true。`CastElement` の規則）。
+    pub fn from_f32(t: &Tensor<f32>, dtype: SafetensorsDtype) -> Result<Self, ShapeError> {
+        match dtype {
+            SafetensorsDtype::F32 => Ok(SafetensorsTensor::F32(t.clone())),
+            SafetensorsDtype::F64 => cast_from_f32::<f64>(t).map(SafetensorsTensor::F64),
+            SafetensorsDtype::I32 => cast_from_f32::<i32>(t).map(SafetensorsTensor::I32),
+            SafetensorsDtype::I64 => cast_from_f32::<i64>(t).map(SafetensorsTensor::I64),
+            SafetensorsDtype::Bool => cast_from_f32::<bool>(t).map(SafetensorsTensor::Bool),
+            SafetensorsDtype::F16 => {
+                let src = t.host_slice();
+                check_f32_alloc(src.len())?;
+                let data: Vec<f16> = src.iter().map(|v| f16::from_f32(*v)).collect();
+                Tensor::new(data, t.shape()).map(SafetensorsTensor::F16)
+            }
+            SafetensorsDtype::BF16 => {
+                let src = t.host_slice();
+                check_f32_alloc(src.len())?;
+                let data: Vec<bf16> = src.iter().map(|v| bf16::from_f32(*v)).collect();
+                Tensor::new(data, t.shape()).map(SafetensorsTensor::BF16)
+            }
+        }
+    }
+}
+
+/// safetensors バイト列を dtype 混在のまま `name -> SafetensorsTensor` へ変換する
+/// （読込側。[`load_safetensors_typed`] から呼ばれる）。
+///
+/// 検証順: ヘッダ・レイアウト → dtype（要素幅の計算より前に fail-closed）→
+/// checked な要素数積と長さ一致 → 変換（BOOL は同じループで 0／1 検査）→ `Tensor::new`。
+/// 名前を昇順で走査するため、複数の不正があっても報告されるエラーは決定的。
+/// 値は bit 単位で保たれ、f32 への昇格は行わない。
+///
+/// ```
+/// use fandhe_ai_onnx_interop::st_load::{load_safetensors_typed_from_bytes, SafetensorsTensor};
+/// let v = safetensors::tensor::TensorView::new(
+///     safetensors::Dtype::I64, vec![2], &[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
+/// ).unwrap();
+/// let bytes = safetensors::tensor::serialize([("n", v)], None).unwrap();
+/// let m = load_safetensors_typed_from_bytes(&bytes).unwrap();
+/// assert!(matches!(m["n"], SafetensorsTensor::I64(_)));
+/// ```
+pub fn load_safetensors_typed_from_bytes(
+    bytes: &[u8],
+) -> Result<HashMap<String, SafetensorsTensor>, LoadError> {
+    let st = SafeTensors::deserialize(bytes)
+        .map_err(|e| LoadError::SafetensorsFormat(format!("{e:?}")))?;
+
+    let mut names = st.names();
+    names.sort();
+
+    let mut out = HashMap::new();
+    for name in names {
+        let view = st
+            .tensor(name)
+            .map_err(|e| LoadError::SafetensorsFormat(format!("{name}: {e:?}")))?;
+
+        let Some(dtype) = SafetensorsDtype::from_wire(view.dtype()) else {
+            return Err(LoadError::UnsupportedDtype {
+                key: name.to_string(),
+                dtype: format!("{:?}", view.dtype()),
+            });
+        };
+
+        let shape: Vec<usize> = view.shape().to_vec();
+        let raw = view.data();
+        let width = dtype.element_width();
+
+        let expected = shape
+            .iter()
+            .try_fold(1usize, |a, &d| a.checked_mul(d))
+            .ok_or(LoadError::Shape(ShapeError::ElementCountOverflow))?;
+        if raw.len() % width != 0 || raw.len() / width != expected {
+            return Err(LoadError::DataLengthMismatch {
+                key: name.to_string(),
+                expected,
+                actual: raw.len() / width,
+            });
+        }
+
+        // safetensors のデータは常にリトルエンディアン。`unsafe` なしで変換する。
+        let tensor = match dtype {
+            SafetensorsDtype::F32 => SafetensorsTensor::F32(
+                Tensor::new(
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| f32::from_le_bytes(*b))
+                        .collect(),
+                    &shape,
+                )
+                .map_err(LoadError::Shape)?,
+            ),
+            SafetensorsDtype::F16 => SafetensorsTensor::F16(
+                Tensor::new(
+                    raw.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|b| f16::from_bits(u16::from_le_bytes(*b)))
+                        .collect(),
+                    &shape,
+                )
+                .map_err(LoadError::Shape)?,
+            ),
+            SafetensorsDtype::BF16 => SafetensorsTensor::BF16(
+                Tensor::new(
+                    raw.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|b| bf16::from_bits(u16::from_le_bytes(*b)))
+                        .collect(),
+                    &shape,
+                )
+                .map_err(LoadError::Shape)?,
+            ),
+            SafetensorsDtype::F64 => SafetensorsTensor::F64(
+                Tensor::new(
+                    raw.as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|b| f64::from_le_bytes(*b))
+                        .collect(),
+                    &shape,
+                )
+                .map_err(LoadError::Shape)?,
+            ),
+            SafetensorsDtype::I32 => SafetensorsTensor::I32(
+                Tensor::new(
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| i32::from_le_bytes(*b))
+                        .collect(),
+                    &shape,
+                )
+                .map_err(LoadError::Shape)?,
+            ),
+            SafetensorsDtype::I64 => SafetensorsTensor::I64(
+                Tensor::new(
+                    raw.as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|b| i64::from_le_bytes(*b))
+                        .collect(),
+                    &shape,
+                )
+                .map_err(LoadError::Shape)?,
+            ),
+            SafetensorsDtype::Bool => {
+                let mut data = Vec::with_capacity(raw.len());
+                for (index, &value) in raw.iter().enumerate() {
+                    match value {
+                        0 => data.push(false),
+                        1 => data.push(true),
+                        _ => {
+                            return Err(LoadError::InvalidBoolValue {
+                                key: name.to_string(),
+                                index,
+                                value,
+                            });
+                        }
+                    }
+                }
+                SafetensorsTensor::Bool(Tensor::new(data, &shape).map_err(LoadError::Shape)?)
+            }
+        };
+        out.insert(name.to_string(), tensor);
+    }
+    Ok(out)
+}
+
+/// `path` の safetensors ファイルを dtype 混在のまま読む
+/// （`std::fs::read` + [`load_safetensors_typed_from_bytes`] の薄い合成）。
+pub fn load_safetensors_typed(
+    path: &Path,
+) -> Result<HashMap<String, SafetensorsTensor>, LoadError> {
+    let bytes = std::fs::read(path).map_err(LoadError::Io)?;
+    load_safetensors_typed_from_bytes(&bytes)
+}
+
+/// [`require_keys`] の typed 版。不足キーを**全件**入力順で [`LoadError::MissingKeys`] に集める。
+pub fn require_keys_typed(
+    map: &HashMap<String, SafetensorsTensor>,
+    keys: &[&str],
+) -> Result<(), LoadError> {
+    let missing: Vec<String> = keys
+        .iter()
+        .filter(|k| !map.contains_key(**k))
+        .map(|k| (*k).to_string())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(LoadError::MissingKeys(missing))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +579,27 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn safetensors_dtype_inventory_is_exact() {
+        let all = [
+            (SafetensorsDtype::F32, "F32", 4, Dtype::F32),
+            (SafetensorsDtype::F16, "F16", 2, Dtype::F16),
+            (SafetensorsDtype::BF16, "BF16", 2, Dtype::BF16),
+            (SafetensorsDtype::F64, "F64", 8, Dtype::F64),
+            (SafetensorsDtype::I32, "I32", 4, Dtype::I32),
+            (SafetensorsDtype::I64, "I64", 8, Dtype::I64),
+            (SafetensorsDtype::Bool, "BOOL", 1, Dtype::BOOL),
+        ];
+        for (d, name, w, wire) in all {
+            assert_eq!(d.header_name(), name);
+            assert_eq!(d.element_width(), w);
+            assert_eq!(wire.bitsize(), w * 8);
+            assert_eq!(SafetensorsDtype::from_wire(wire), Some(d));
+        }
+        assert_eq!(SafetensorsDtype::from_wire(Dtype::U8), None);
+        assert_eq!(SafetensorsDtype::from_wire(Dtype::I8), None);
     }
 
     #[test]

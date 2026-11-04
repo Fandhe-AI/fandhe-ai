@@ -18,7 +18,10 @@ import 済みモデルの roundtrip 限定）。safetensors save／load も
 `fandhe-ai::interop::safetensors`（`LoadError`／`SaveError`／
 `load_safetensors_f32`／`load_safetensors_f32_from_bytes`／
 `require_keys`／`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）
-として `fandhe-ai` から公開済みです（イシュー #2019）。
+として `fandhe-ai` から公開済みです（イシュー #2019）。dtype 混在ファイルの読込
+（`SafetensorsTensor`／`SafetensorsDtype`／`load_safetensors_typed`／
+`load_safetensors_typed_from_bytes`／`require_keys_typed`。読込側のみ）は
+イシュー #3845 で追加しました。
 
 本クレートは ONNX（protobuf）・safetensors という外部フォーマットの
 パーサーを含みます。信頼できない入力のパースは長さ・形状検証を先行させる
