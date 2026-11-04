@@ -18,7 +18,7 @@
 //! |---|---|
 //! | 渡された `caches` だけに状態を持つ（`num_kv_layers() > 0`） | 対象 |
 //! | 状態を持たない（`num_kv_layers() == 0` で呼び出し間で結果が独立） | 対象 |
-//! | 生成状態を、渡された `caches` の外に持つ型（`RefCell<StatefulAttention>` 等） | **対象外**（出力を保証しない） |
+//! | 生成状態を、渡された `caches` の外に持つ型（`RefCell<StatefulAttention>` 等） | `step`／`step_batched` では**対象外**（出力を保証しない）。`StatefulAutoregressiveModel` を実装して [`BatchScheduler::step_stateful`] で進める（#3849） |
 //!
 //! 内部状態保持型とは「生成状態を、渡された `caches` の外に持つ型」であり、
 //! `num_kv_layers()` の値では決まらない（`> 0` を返しつつ内部にも状態を持つ型も作れる）。
@@ -63,6 +63,9 @@ use fandhe_ai_tensor_core::{ShapeError, Tensor};
 use crate::error::AutodiffError;
 use crate::nn::KvCache;
 
+use std::any::Any;
+
+use super::stateful::StatefulAutoregressiveModel;
 use super::{
     AutoregressiveModel, GenerateConfig, build_output, sample_step, validate_forward_step_output,
 };
@@ -133,6 +136,9 @@ fn check_buffer_bytes(max_length: usize) -> Result<(), AutodiffError> {
     }
 }
 
+/// `admit_with` の `build` が返す、参加する要求のキャッシュと型消去済みの内部状態。
+type AdmitParts = (Vec<KvCache>, Option<Box<dyn Any + Send + Sync>>);
+
 /// 待ち行列上の要求（prompt は所有して複製済み）。
 struct Pending {
     id: RequestId,
@@ -152,15 +158,103 @@ struct Active {
     vocab: Option<usize>,
     config: GenerateConfig,
     want_rank1: bool,
+    /// 内部状態モデル（`step_stateful`）で参加した要求だけが持つ型消去済みの状態
+    /// （イシュー #3849。設計記録 §29.0.2・§31）。KV 形の要求は `None`。
+    /// `Send + Sync` を境界に含めるのは `BatchScheduler` の auto trait を失わないため。
+    /// 要求の種類は参加した時点で決まり、`Debug` は付けない（状態を出さない）。
+    state: Option<Box<dyn Any + Send + Sync>>,
 }
 
 impl Active {
+    /// 次の forward に渡す入力 id を作る（prefill なら `[1, len]`、decode なら `[1, 1]`）。
+    /// `advance`（KV 形）と `advance_stateful`（内部状態形）が共有し、形状を同一にする。
+    fn next_ids(&self) -> Result<Tensor<i32>, AutodiffError> {
+        match self.vocab {
+            None => {
+                let len = self.tokens.len();
+                Tensor::new(self.tokens.clone(), &[1, len]).map_err(AutodiffError::Shape)
+            }
+            Some(_) => {
+                let last = self.tokens.last().copied().ok_or_else(|| {
+                    AutodiffError::InvalidArgument("scheduler: token 列が空である".to_string())
+                })?;
+                Tensor::new(vec![last], &[1, 1]).map_err(AutodiffError::Shape)
+            }
+        }
+    }
+
+    /// forward の戻り logits を検証し、サンプリングして token を積む。`Ok(Some(出力))` は
+    /// `max_length` 到達で完了。検証・サンプリング・RNG 消費順は `generate` と同一。
+    fn finish_with_logits(
+        &mut self,
+        logits: &Tensor<f32>,
+    ) -> Result<Option<Tensor<i32>>, AutodiffError> {
+        let next = match self.vocab {
+            None => {
+                let len = self.tokens.len();
+                let vocab = validate_forward_step_output(logits, 1, len)?;
+                self.config.validate_top_k_le_vocab(vocab)?;
+                let next = sample_step(logits, 1, len, vocab, &self.config, &mut self.rng)?;
+                self.vocab = Some(vocab);
+                next
+            }
+            Some(vocab) => {
+                let step_vocab = validate_forward_step_output(logits, 1, 1)?;
+                if step_vocab != vocab {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: vec![1, 1, step_vocab],
+                        rhs: vec![1, 1, vocab],
+                    }));
+                }
+                sample_step(logits, 1, 1, vocab, &self.config, &mut self.rng)?
+            }
+        };
+        let tok = next.first().copied().ok_or_else(|| {
+            AutodiffError::InvalidArgument("scheduler: サンプリング結果が空である".to_string())
+        })?;
+        self.push_and_maybe_finish(tok)
+    }
+
+    /// 内部状態モデルの要求を 1 トークン進める（`step_stateful` 用）。要求の種類・`State` 型が
+    /// 合わない場合は forward を呼ばず `Err`（fail-closed。設計記録 §29.0.2 の (b)(c)）。
+    fn advance_stateful<M>(&mut self, model: &M) -> Result<Option<Tensor<i32>>, AutodiffError>
+    where
+        M: StatefulAutoregressiveModel + ?Sized,
+        M::State: 'static,
+    {
+        let ids = self.next_ids()?;
+        let logits = {
+            let Some(boxed) = self.state.as_mut() else {
+                return Err(AutodiffError::InvalidArgument(
+                    "scheduler: KV 形で参加した要求を step_stateful で進めることはできない"
+                        .to_string(),
+                ));
+            };
+            let Some(state) = (**boxed).downcast_mut::<M::State>() else {
+                return Err(AutodiffError::InvalidArgument(
+                    "scheduler: 要求の内部状態の型が model::State と一致しない \
+                     （step 間で異なるモデルが渡された）"
+                        .to_string(),
+                ));
+            };
+            model.forward_step_stateful(&ids, state)?
+        };
+        self.finish_with_logits(&logits)
+    }
+
     /// 1 トークン進める。`Ok(Some(出力))` は `max_length` 到達で完了。
     /// 制御フローは `generate` の prefill／decode を逐語的に再現する。
     fn advance<M: AutoregressiveModel + ?Sized>(
         &mut self,
         model: &M,
     ) -> Result<Option<Tensor<i32>>, AutodiffError> {
+        if self.state.is_some() {
+            return Err(AutodiffError::InvalidArgument(
+                "scheduler: 内部状態モデル（step_stateful）で参加した要求を step／step_batched \
+                 で進めることはできない"
+                    .to_string(),
+            ));
+        }
         if self.caches.len() != model.num_kv_layers() {
             return Err(AutodiffError::InvalidArgument(format!(
                 "scheduler: キャッシュ数 ({}) が model.num_kv_layers() ({}) と一致しない \
@@ -169,38 +263,9 @@ impl Active {
                 model.num_kv_layers()
             )));
         }
-        let next = match self.vocab {
-            None => {
-                let len = self.tokens.len();
-                let ids =
-                    Tensor::new(self.tokens.clone(), &[1, len]).map_err(AutodiffError::Shape)?;
-                let logits = model.forward_step(&ids, &mut self.caches)?;
-                let vocab = validate_forward_step_output(&logits, 1, len)?;
-                self.config.validate_top_k_le_vocab(vocab)?;
-                let next = sample_step(&logits, 1, len, vocab, &self.config, &mut self.rng)?;
-                self.vocab = Some(vocab);
-                next
-            }
-            Some(vocab) => {
-                let last = self.tokens.last().copied().ok_or_else(|| {
-                    AutodiffError::InvalidArgument("scheduler: token 列が空である".to_string())
-                })?;
-                let ids = Tensor::new(vec![last], &[1, 1]).map_err(AutodiffError::Shape)?;
-                let logits = model.forward_step(&ids, &mut self.caches)?;
-                let step_vocab = validate_forward_step_output(&logits, 1, 1)?;
-                if step_vocab != vocab {
-                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
-                        lhs: vec![1, 1, step_vocab],
-                        rhs: vec![1, 1, vocab],
-                    }));
-                }
-                sample_step(&logits, 1, 1, vocab, &self.config, &mut self.rng)?
-            }
-        };
-        let tok = next.first().copied().ok_or_else(|| {
-            AutodiffError::InvalidArgument("scheduler: サンプリング結果が空である".to_string())
-        })?;
-        self.push_and_maybe_finish(tok)
+        let ids = self.next_ids()?;
+        let logits = model.forward_step(&ids, &mut self.caches)?;
+        self.finish_with_logits(&logits)
     }
 
     /// 生成 token を積み、`max_length` 到達なら出力を組んで返す。`advance`（B = 1）と
@@ -323,8 +388,9 @@ fn try_batched_decode<M: AutoregressiveModel + ?Sized>(
 /// 連続バッチングのスケジューラ（第 1 段階）。モジュール doc の契約に従う。
 ///
 /// 対象: `caches` を進める形の KV 付きモデル（`forward_with_external_cache` 経由。設計 §19.6）と状態なしモデル。
-/// 対象外: 生成状態を、渡された `caches` の外に持つ型（内部状態保持型）は要求間で状態が
-/// 混ざるため出力を保証しない。`num_kv_layers()` の値によらず、型でも実行時でも検出できない
+/// `step`／`step_batched` の対象外: 生成状態を、渡された `caches` の外に持つ型（内部状態保持型）は
+/// 要求間で状態が混ざるため出力を保証しない（`StatefulAutoregressiveModel` を実装して
+/// [`Self::step_stateful`] で進める形は対象。#3849）。`num_kv_layers()` の値によらず、型でも実行時でも検出できない
 /// ため、対象モデルの形は利用者が保証する（設計記録 §17.5）。
 pub struct BatchScheduler {
     limits: SchedulerLimits,
@@ -440,6 +506,22 @@ impl BatchScheduler {
     /// 待ち行列から空きの分だけ参加させる。`max_length == prompt_len` の要求は forward を
     /// 呼ばずに完了させ、その件数を返す。`step`／`step_batched` が共有する受け入れ段。
     fn admit<M: AutoregressiveModel + ?Sized>(&mut self, model: &M) -> usize {
+        self.admit_with(|_| {
+            Ok((
+                (0..model.num_kv_layers()).map(|_| KvCache::new()).collect(),
+                None,
+            ))
+        })
+    }
+
+    /// 受け入れ段の中核（モデルに依存しない）。`build` が参加する要求のキャッシュと内部状態を
+    /// 作る。`Err` の要求は `failed` に積んで次へ進む（`step_stateful` の `init_state` 失敗。
+    /// fail-closed (d)）。prompt だけの要求は `build` を呼ばずに完了させる（forward が無く
+    /// 状態が要らないため。`step` が KV キャッシュを作らないのと揃う。設計記録 §31）。
+    fn admit_with(
+        &mut self,
+        mut build: impl FnMut(&Pending) -> Result<AdmitParts, AutodiffError>,
+    ) -> usize {
         let mut completed = 0usize;
         while self.active.len() < self.limits.max_active {
             let Some(p) = self.queue.pop_front() else {
@@ -457,16 +539,24 @@ impl BatchScheduler {
                 }
                 continue;
             }
+            let (caches, state) = match build(&p) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    self.failed.push((p.id, e));
+                    continue;
+                }
+            };
             let mut tokens = Vec::with_capacity(p.config.max_length);
             tokens.extend_from_slice(&p.prompt);
             self.active.push(Active {
                 id: p.id,
                 tokens,
-                caches: (0..model.num_kv_layers()).map(|_| KvCache::new()).collect(),
+                caches,
                 rng: Generator::new(p.config.seed),
                 vocab: None,
                 config: p.config,
                 want_rank1: p.want_rank1,
+                state,
             });
         }
         completed
@@ -524,7 +614,7 @@ impl BatchScheduler {
     /// - attention はすべて `forward_with_cache` 系の入口を通す
     /// - 行ごとの位置は `KvCache::valid_len(r)` から決め、`seq_len()`（物理長）は使わない
     /// - attention 以外は行ごとに独立した演算に限る（バッチ方向の統計を取る層を持たない）
-    /// - 内部状態保持型は対象外（モジュール doc）
+    /// - 内部状態保持型は対象外（`step_stateful` を使う。モジュール doc）
     ///
     /// # 判定
     ///
@@ -542,7 +632,7 @@ impl BatchScheduler {
         let decode: Vec<usize> = current
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.vocab.is_some())
+            .filter(|(_, a)| a.vocab.is_some() && a.state.is_none())
             .map(|(i, _)| i)
             .collect();
         let mut results: Vec<Option<BatchedRow>> = (0..current.len()).map(|_| None).collect();
@@ -557,6 +647,8 @@ impl BatchScheduler {
         }
 
         for (mut a, row) in current.into_iter().zip(results) {
+            // 内部状態モデルの要求は束ねず、`advance` の冒頭検査で要求単位の失敗にする
+            // （他の要求のフォールバックを起こさない。fail-closed (a)）。
             let res = match row {
                 Some(r) => {
                     a.caches = r.caches;
@@ -566,6 +658,45 @@ impl BatchScheduler {
                 None => a.advance(model),
             };
             match res {
+                Ok(None) => self.active.push(a),
+                Ok(Some(out)) => {
+                    self.finished.push((a.id, out));
+                    completed += 1;
+                }
+                Err(e) => self.failed.push((a.id, e)),
+            }
+        }
+        Ok(completed)
+    }
+
+    /// [`Self::step`] の内部状態モデル版（イシュー #3849。設計記録 §29.0.2・§31）。
+    /// `StatefulAutoregressiveModel` を実装したモデルで、進行中の各要求を 1 トークンずつ進める。
+    /// 戻り値は成功完了した要求数。facade では `fandhe_ai::inference::BatchScheduler` から呼ぶ。
+    ///
+    /// - 要求が参加するとき `init_state` を要求ごとに 1 回呼ぶ（prompt だけの要求は forward が
+    ///   無いので呼ばない。`generate_speculative_stateful` は呼ぶ点が異なる）。`Err` の要求は
+    ///   [`Self::take_failed`] に積み、ほかの要求は進める
+    /// - 要求の種類（KV 形か内部状態形か）は参加した時点で決まる。種類の違う step
+    ///   （`step`／`step_batched` と `step_stateful` の取り違え）や `State` 型の違うモデルで進めると、
+    ///   その要求だけが `take_failed` に積まれる。同じ型の別インスタンスは検出できず、
+    ///   利用者が保証する（設計記録 §17.5 と同じ）
+    /// - 状態のサイズは利用者の責任。完了・失敗した要求の状態は drop される
+    /// - `Err` はスケジューラ全体の不変条件破れに予約する（現状は返す経路がない）
+    /// - 出力は要求ごとに B = 1 の単独 `generate`（または同じ論理の参照）と token 列で完全一致する。
+    ///   乱数は非暗号（xorshift64*）で、生成 token をセキュリティ用途に使わないこと
+    pub fn step_stateful<M>(&mut self, model: &M) -> Result<usize, AutodiffError>
+    where
+        M: StatefulAutoregressiveModel + ?Sized,
+        M::State: Send + Sync + 'static,
+    {
+        let mut completed = self.admit_with(|_| {
+            let s = model.init_state()?;
+            Ok((Vec::new(), Some(Box::new(s) as Box<dyn Any + Send + Sync>)))
+        });
+
+        let current = std::mem::take(&mut self.active);
+        for mut a in current {
+            match a.advance_stateful(model) {
                 Ok(None) => self.active.push(a),
                 Ok(Some(out)) => {
                     self.finished.push((a.id, out));

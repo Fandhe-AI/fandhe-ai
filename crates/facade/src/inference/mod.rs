@@ -131,8 +131,10 @@
 //!   attention 以外を行ごとに独立な演算に限る形（型でも実行時でも検出できないため利用者が保証する）。
 //! - **対象モデルの契約**: 対象は、生成状態を渡された `caches` だけに持つモデル（`stateful_attention_forward_with_cache`
 //!   で `caches[i]` を進める形を含む）と、状態を持たないモデル。「内部状態保持型」（生成状態を、渡された `caches` の外に持つ型。`RefCell<StatefulAttention>`
-//!   等）は `num_kv_layers()` の値によらず**対象外**で、出力を保証しない。型でも実行時でも検出できない
-//!   ため、利用者が保証する（設計記録 §17.5・§19.6）。
+//!   等）は `num_kv_layers()` の値によらず `step`／`step_batched`／`generate_speculative` では**対象外**で、
+//!   出力を保証しない。型でも実行時でも検出できないため、利用者が保証する（設計記録 §17.5・§19.6）。
+//!   隠れ状態を渡された `caches` の外に持つモデルは、下の「内部状態を持つモデル」の
+//!   [`StatefulAutoregressiveModel`] を実装して `step_stateful`／`generate_speculative_stateful` で扱う。
 //! - 乱数は独立した `Generator`（xorshift64*）のみで非暗号。生成 token をセキュリティ用途に使わないこと。
 //!
 //! **KV 付きモデルの渡し方**: [`generate_speculative`] には、`stateful_attention_forward_with_cache` で
@@ -351,6 +353,103 @@
 //! let r = generate_speculative(&Table, &Table, &prompt, &topk, &spec);
 //! assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));
 //! ```
+//!
+//! # 内部状態を持つモデル（イシュー #3849・親 #3719。#3848 の trait を公開）
+//!
+//! `caches`（`KvCache`）で表せない状態（RNN の隠れ状態・SSM の再帰状態）を持つモデルは、
+//! [`StatefulAutoregressiveModel`] を実装して次の 3 名で扱う。公開形の正は
+//! `docs/facade-speculative-decoding-batching-design.md` §29・§31（リポジトリ所有者本人の承認コメント
+//! issuecomment-6554565145）。facade 独自の newtype・`generate_stateful` は作らない。
+//!
+//! - [`StatefulAutoregressiveModel`]: `type State`（状態の型）と `init_state`・`forward_step_stateful`・
+//!   `save_state`・`restore_state` の 4 メソッド。棄却時の巻き戻しは `save_state`／`restore_state` で行う
+//! - [`generate_speculative_stateful`]: [`generate_speculative`] の内部状態モデル版（B = 1）。
+//!   `num_kv_layers() == 0` を拒否する検査はない（状態が `caches` の外にあるため）
+//! - [`BatchScheduler::step_stateful`]: [`BatchScheduler::step`] の内部状態モデル版。要求ごとに
+//!   `init_state` を 1 回呼び（prompt だけの要求では呼ばない）、`M::State: Send + Sync + 'static` を要する。
+//!   要求の種類（KV 形か内部状態形か）は参加時に決まり、`step`／`step_batched` と混ぜて進めると
+//!   その要求だけが `take_failed` に積まれる（fail-closed）。`State` のサイズは利用者の責任
+//!
+//! 乱数は独立した `Generator`（xorshift64*）のみで非暗号。生成 token をセキュリティ用途に使わないこと。
+//!
+//! ```
+//! use fandhe_ai::inference::{
+//!     BatchScheduler, GenerateConfig, SamplingStrategy, SchedulerLimits, SpeculativeConfig,
+//!     StatefulAutoregressiveModel, generate_speculative_stateful,
+//! };
+//! use fandhe_ai::{AutodiffError, Tensor};
+//!
+//! const V: usize = 7;
+//!
+//! /// 状態が「処理済みトークン数」だけの純 RNN 相当モデル。次 token は (直前 token, 位置) で決まる。
+//! struct Rnn;
+//!
+//! impl StatefulAutoregressiveModel for Rnn {
+//!     type State = usize;
+//!
+//!     fn init_state(&self) -> Result<usize, AutodiffError> {
+//!         Ok(0)
+//!     }
+//!     fn forward_step_stateful(
+//!         &self,
+//!         new_ids: &Tensor<i32>,
+//!         state: &mut usize,
+//!     ) -> Result<Tensor<f32>, AutodiffError> {
+//!         let ids = new_ids.as_slice().unwrap();
+//!         let mut out = vec![0.0f32; ids.len() * V];
+//!         for (i, &tok) in ids.iter().enumerate() {
+//!             out[i * V + (3 * tok as usize + *state + i + 1) % V] = 1.0;
+//!         }
+//!         *state += ids.len();
+//!         Ok(Tensor::new(out, &[1, ids.len(), V]).unwrap())
+//!     }
+//!     fn save_state(&self, state: &usize) -> Result<usize, AutodiffError> {
+//!         Ok(*state)
+//!     }
+//!     fn restore_state(&self, state: &mut usize, saved: usize) -> Result<(), AutodiffError> {
+//!         *state = saved;
+//!         Ok(())
+//!     }
+//! }
+//!
+//! // 参照値: 同じ規則を素朴に回した token 列（Greedy）。
+//! let expected = |first: i32, len: usize| -> Vec<i32> {
+//!     let mut v = vec![first];
+//!     while v.len() < len {
+//!         let pos = v.len() - 1;
+//!         v.push(((3 * *v.last().unwrap() as usize + pos + 1) % V) as i32);
+//!     }
+//!     v
+//! };
+//! let cfg = GenerateConfig::new(6, SamplingStrategy::Greedy);
+//!
+//! // speculative decoding（target == draft なので全受理）。
+//! let prompt = Tensor::<i32>::new(vec![0], &[1]).unwrap();
+//! let out = generate_speculative_stateful(&Rnn, &Rnn, &prompt, &cfg, &SpeculativeConfig::new(2))
+//!     .unwrap();
+//! assert_eq!(out.as_slice().unwrap(), expected(0, 6).as_slice());
+//!
+//! // 連続バッチング（2 要求）。各要求の出力は単独の参照と token 列が一致する。
+//! let mut scheduler = BatchScheduler::new(SchedulerLimits::new(2, 4, 8).unwrap());
+//! let p0 = Tensor::<i32>::new(vec![0], &[1]).unwrap();
+//! let p1 = Tensor::<i32>::new(vec![2], &[1]).unwrap();
+//! let id0 = scheduler.submit(&p0, &cfg).unwrap();
+//! let _id1 = scheduler.submit(&p1, &cfg).unwrap();
+//! let mut finished = Vec::new();
+//! for _ in 0..16 {
+//!     scheduler.step_stateful(&Rnn).unwrap();
+//!     finished.extend(scheduler.take_finished());
+//!     if scheduler.queued_len() + scheduler.active_len() == 0 {
+//!         break;
+//!     }
+//! }
+//! assert!(scheduler.take_failed().is_empty());
+//! assert_eq!(finished.len(), 2);
+//! for (id, out) in &finished {
+//!     let first = if *id == id0 { 0 } else { 2 };
+//!     assert_eq!(out.as_slice().unwrap(), expected(first, 6).as_slice());
+//! }
+//! ```
 pub(crate) mod batch;
 
 pub use batch::{
@@ -375,3 +474,14 @@ pub use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, RequestId, Sch
 // greedy 版 speculative decoding（B = 1。イシュー #2934・親 #2932）。承認根拠・検査は
 // 上の連続バッチング文と同じ（`api_surface.rs::SPECULATIVE_APPROVED_REEXPORT`）。
 pub use fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig, generate_speculative};
+
+// 内部状態を持つモデルの trait と speculative decoding の入口（イシュー #3849・親 #3719）。
+// 承認根拠: リポジトリ所有者本人の承認コメント
+// https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145 、公開形の正は
+// `docs/facade-speculative-decoding-batching-design.md` §29・§31。`BatchScheduler::step_stateful` は
+// 上の `BatchScheduler` の inherent メソッドとして公開される。
+// `api_surface.rs::STATEFUL_APPROVED_REEXPORT` が完全一致を検査するため、分割・別名・
+// モジュール自体の再エクスポート・別ファイルへの移動をしない。
+pub use fandhe_ai_autodiff::generate::stateful::{
+    StatefulAutoregressiveModel, generate_speculative_stateful,
+};
