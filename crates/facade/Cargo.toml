@@ -56,7 +56,7 @@ fandhe-ai-autodiff = { path = "../autodiff", version = "=0.13.0" }
 fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.13.0" }
 # `Device::Cuda(_)` 指定時に `CudaBackendOps`／`CudaDeviceProvider` を解決する。
 fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.13.0" }
-# `Device::Rocm(_)` 指定時に `RocmBackendOps`／`RocmDeviceProvider` を解決する（結線は #3853。
+# `Device::Rocm(_)` 指定時に `RocmBackendOps`／`RocmDeviceProvider` を解決する（結線済み: #3853。
 # イシュー #3852）。`libloading`（第 12 区分）で HIP を実行時に動的ロードするため ROCm 非搭載
 # でもビルドが通る（facade は libloading を直接参照しない）。workspace 内の path 依存で外部
 # クレートの追加ではない。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469

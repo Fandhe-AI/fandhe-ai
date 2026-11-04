@@ -6,10 +6,9 @@
 //! 呼び出し元は `ops/ew.rs` の device 系メソッドだけ。
 //!
 //! # 判別手段
-//! `RocmBackendOps::device()` は #3157 まで仮置きの `Device::Cpu` を返し、`CpuMemory` のバッファも
-//! `Device::Cpu` を名乗る。このため **`DeviceBuffer::device()` の比較では CPU 由来のバッファと区別
-//! できない**。#3157 で `Device::Rocm` が入るまでは、`downcast_handle::<RocmBufferHandle>()` が
-//! 唯一の判別手段であり、`None` なら `DeviceMismatch` にする（fail-closed）。
+//! `RocmBackendOps::device()` は `Device::Rocm(0)`（#3853）を返すが、`CpuMemory` 由来のバッファは
+//! `Device::Cpu` を名乗り、`Rocm(0)` を名乗るバッファも型までは保証しない。判別の正は従来どおり
+//! `downcast_handle::<RocmBufferHandle>()` であり、`None` なら `DeviceMismatch` にする（fail-closed）。
 
 use fandhe_ai_tensor_core::BufferHandle;
 use std::any::Any;

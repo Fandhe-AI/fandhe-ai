@@ -29,7 +29,7 @@
 //!
 //! 0.14.0 で ROCm（`backend-rocm`）が 4 つ目の backend として加わり、
 //! [`Device::Rocm`] と [`select_from`] の `"rocm"` 腕を追加した（#3851、承認
-//! #3771）。facade への結線は #3853 の範囲。
+//! #3771）。facade への結線は #3853 で完了している。
 //!
 //! `DeviceBuffer`／`upload`／`download`（§4.2）は本イシューのスコープ外
 //! （TASK-1.9b・#45）。`BackendOps` カーネルディスパッチは
@@ -74,7 +74,7 @@ pub enum Device {
     /// **条件付き・実験的**で、REQ-2 の確定バックエンドには含まれない。
     /// 初期は `Rocm(0)` だけが有効で、`Rocm(n)`（n >= 1）は
     /// [`BackendError::DeviceUnavailable`] を返す（承認 #3771 点 4）。
-    /// facade への結線は #3853 で、結線前の `tape_for(Device::Rocm(_))` は
+    /// facade は #3853 で結線済みで、HIP・HIPRTC・gfx942 のロードがそろわないとき `tape_for(Device::Rocm(_))` は
     /// [`BackendError::DeviceUnavailable`] を返す。
     Rocm(usize),
 }

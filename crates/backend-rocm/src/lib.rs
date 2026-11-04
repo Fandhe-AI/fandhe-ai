@@ -11,7 +11,7 @@
 //! argmax/argmin（[`RocmArgReduce`]。wave 幅非依存）の HIPRTC カーネルを `RocmBackendOps` へ結線した。
 //! `BackendOps` の骨格（必須 9 メソッド。[`RocmBackendOps`]）は R0（#3431）、縮約系カーネル向けの
 //! wave 幅注入部品は `WarpGeometry`（#3432）、facade の
-//! Device 追加は #3157（所有者判断待ち）、unsafe 監査記録は #3158、実機 parity は #3159。
+//! `Device::Rocm(0)` と facade 結線は #3851〜#3853、unsafe 監査記録は #3158、実機 parity は #3159。
 //!
 //! 添字系演算（分解案 R8・#3439）として cumsum/cumprod（[`RocmScan`]）・gather/scatter/one_hot
 //! （[`RocmGatherScatter`]）・interpolate の nearest/bilinear（[`RocmInterpolate`]）・sort/topk
@@ -56,7 +56,7 @@
 //!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
-//! facade が通常依存に持つ（#3852）が、本クレートの型は再エクスポートしない（`api_surface.rs` の否定ガードで固定）。
+//! facade が通常依存に持ち（#3852）、`RocmDeviceProvider`・`RocmBackendOps` を結線済み（#3853）だが、本クレートの型は再エクスポートしない（`api_surface.rs` の否定ガードで固定）。
 
 mod arg_reduce;
 #[cfg(test)]
@@ -65,6 +65,7 @@ mod buffer_handle;
 mod constant_pad;
 #[cfg(test)]
 mod conv_pool_model;
+mod device;
 mod elementwise;
 #[cfg(test)]
 mod elementwise_model;
@@ -155,6 +156,7 @@ mod warp_model;
 
 pub use arg_reduce::RocmArgReduce;
 pub use constant_pad::RocmConstantPad;
+pub use device::RocmDeviceProvider;
 pub use elementwise::{RocmElementwise, RocmFusedElementwise, RocmScalarOp};
 pub use error::RocmError;
 pub use gather_scatter::{RocmGatherScatter, ScatterMode};

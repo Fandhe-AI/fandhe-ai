@@ -57,7 +57,7 @@
 //!   結線の本体（ハンドル判別・形状検査・退化形状・engine 分岐）は子モジュール `gemm_derived`
 //!   （`ops/gemm_derived.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。`gemm_resident_rhs_act` と
 //!   `*_tracked` は既定のまま継承する（`gemm_bias_act` の専用化は性能だけの差のため見送り）。
-//! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
+//! - facade の `resolve_ops`／`available_devices` へは `RocmDeviceProvider` 経由で結線済み（#3853）。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -106,7 +106,7 @@ type Cache<T> = RefCell<Vec<(GfxTarget, Rc<T>)>>;
 
 thread_local! {
     /// target ごとにコンパイル済みの GEMM を遅延保持する。失敗はキャッシュしない。
-    static GEMM_CACHE: Cache<RocmGemmF32> = const { RefCell::new(Vec::new()) };
+    pub(crate) static GEMM_CACHE: Cache<RocmGemmF32> = const { RefCell::new(Vec::new()) };
     /// 正規化（R6・#3437）。
     static NORM_CACHE: Cache<RocmNorm> = const { RefCell::new(Vec::new()) };
     /// elementwise 基本カーネル（R2）。
@@ -127,7 +127,7 @@ thread_local! {
 ///
 /// 構築は HIPRTC コンパイルを伴い高価なので族ごとに遅延し、失敗はキャッシュしない
 /// （ROCm 非搭載のまま後から有効になる環境でも再試行できる）。
-fn cached<T>(
+pub(crate) fn cached<T>(
     key: &'static LocalKey<Cache<T>>,
     target: GfxTarget,
     make: fn(GfxTarget) -> Result<T, RocmError>,
@@ -725,12 +725,10 @@ fn softmax_rows_with(
 }
 
 impl BackendOps for RocmBackendOps {
-    /// 仮置き: `Device::Cpu` を返す。`Device::Rocm(usize)` は #3851 で追加済みだが、`device()` の
-    /// 差し替えはバッファ（`buffer_handle.rs`。同じく `Device::Cpu` を名乗る）と同時に行う必要が
-    /// あり、#3853 で扱う。それまで `ops_for` や autodiff のデバイス一致検査では CPU と区別されない
-    /// （このため本型はどの候補リストにも登録しない）。
+    /// `Device::Rocm(0)` を返す（HIP デバイス ID 0 固定。承認 #3771 の点 4・イシュー #3853）。
+    /// autodiff のデバイス一致検査や eager release は CUDA・Metal と同じく GPU として扱う。
     fn device(&self) -> Device {
-        Device::Cpu
+        Device::Rocm(0)
     }
 
     /// `RocmGemmF32` へ結線した f32 GEMM。ROCm 非搭載では `DeviceUnavailable`（panic しない）。
@@ -1695,10 +1693,10 @@ mod tests {
         let _b: Box<dyn BackendOps + Send> = Box::new(RocmBackendOps::new(GfxTarget::Gfx942));
     }
 
-    /// 仮置き。`Device::Rocm(usize)` への差し替えはバッファと同時に #3853 で行う（variant は #3851 で追加済み）。
+    /// `device()` は HIP デバイス ID 0 固定の `Device::Rocm(0)`（#3853）。
     #[test]
-    fn device_is_cpu_placeholder() {
-        assert_eq!(ops().device(), Device::Cpu);
+    fn device_is_rocm0() {
+        assert_eq!(ops().device(), Device::Rocm(0));
     }
 
     #[test]

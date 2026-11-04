@@ -348,7 +348,7 @@ ldconfig -p | grep -E 'libamdhip64\.so |libhiprtc\.so '
 
 ### 9.5 facade 経由（(B) #3867。条件付き・現時点では実行できない）
 
-- 前提（すべて必要）: #3771 で Q1・Q2 が承認済み、spec#87 が受理済み、#3851〜#3853 のマージで `Device::Rocm` が main にある、#3867 が `RULE.txt` とログ置き場 `docs/perf/logs/rocm-facade-3867/` を用意している（本節の作業ではこのディレクトリを作らない）。現時点でこれらは未成立（`docs/backend-rocm-device-exposure-decision.md` §10）
+- 前提（すべて必要）: #3771 で Q1・Q2 が承認済み、spec#87 が受理済み、#3851〜#3853 のマージで `Device::Rocm` が main にある（#3853 で成立）、#3867 が `RULE.txt` とログ置き場 `docs/perf/logs/rocm-facade-3867/` を用意している（本節の作業ではこのディレクトリを作らない）。現時点でこれらは未成立（`docs/backend-rocm-device-exposure-decision.md` §10）
 - 予定のテスト（同 §10.4）: `crates/facade/tests/rocm_facade_real_device.rs` の `rocm_available_devices_lists_rocm0_and_tape_for_ok`・`rocm_facade_matmul_parity_vs_cpu`・`rocm_facade_mlp_train_step_parity_vs_cpu`・`rocm_tape_for_out_of_range_ordinal_is_err`
 - 最初に `cargo test -p fandhe-ai --test rocm_facade_real_device -- --ignored --list` で 4 本が出ることを確かめる。出なければ「未実測」と記録して止める
 - facade は `ureq` と vendored OpenSSL に依存する（deps-policy 第 11 区分）。ノードに `perl`・`make`（build-essential）が要る（backend-rocm 単体では不要）

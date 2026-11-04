@@ -319,3 +319,24 @@ Q2 の手順（#3774）:
 - **既定経路**: Rust のコード経路は変えておらず（`Cargo.toml`・テスト・コメントのみ）、既存テストは無変更で通る。ROCm 非搭載でもビルドは通る（`scripts/check-rocm-absent.sh assert` 後に build・test・clippy）。
 - **単体 dry-run の注意**: 公開物の manifest から path が外れ、crates.io に `fandhe-ai-backend-rocm 0.13.0` が無い間は、`release.yml` による `fandhe-ai` の単体の dry-run／publish は失敗する。`release-all.yml` の一括 dry-run は workspace 内の兄弟を解決するので通る（本 PR で 9 クレートの一括 dry-run を確認）。詳細は `docs/crates-io-publishing-order.md` §15.8。
 - **実機**: すべて未実測のまま。
+
+## 13. 実装記録（イシュー #3853・第 3 段）
+
+§1〜§12 は書き換えず、本節で実装結果を記す（§12 と同じ流儀）。
+
+- **承認**: #3771 の所有者の回答コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>（2026-11-01。Q1 = A＋B＋E、Q2。付随点 3〜8 を含む。gfx 判定は (c)、ordinal は `Rocm(0)` だけ、エラーは既存の `DeviceUnavailable`、「条件付き・実験的」と表示する）。0.14.0 への同梱は #3159・#3867 の pass が条件のまま
+- **入れた変更**:
+  - `crates/backend-rocm/src/device.rs` に `RocmDeviceProvider`（`DeviceProvider` 実装。`resolve_target` は facade の `resolve_ops` が使う）を新設。検証は ordinal（`Rocm(0)` 以外は HIP に触れる前に弾く）→ HIP ロード → `device_count` → gfx942 の code object のロード（既存の `RocmGemmF32::new` のコンパイルと `Module::load`）の順で、失敗はすべて固定文言の `DeviceUnavailable`。成功だけをプロセス全体でキャッシュする
+  - `RocmBackendOps::device()` を `Device::Rocm(0)` にした（仮置きの `Device::Cpu` を廃止）。バッファの判別は従来どおり `downcast_handle::<RocmBufferHandle>()` の型で行い、コードは変えない
+  - facade の `resolve_ops` に `Device::Rocm(_)` の腕、`available_devices` に `rocm` provider を追加（順序は Cpu → Cuda → Metal → Rocm）。`_` 腕は残した（`Device` は別クレートの `#[non_exhaustive]`）。保留の doctest ガード（ROCm は列挙されない）を削除し、`tape_for` に条件付き doctest を足した
+  - 正ガード `facade_wires_rocm_into_resolve_ops_and_available_devices`（`crates/facade/tests/api_surface.rs:51959`）と自己テスト `rocm_wiring_guard_detects_substitutions`（同 `:51967`。腕の削除・Err のみ・`select_from` 省略・`_` 腕削除・順序違い・重複・非 macOS 側の欠落・別 provider へのすり替え・二重化の 10 種）。検出範囲はトークン走査に限り、マクロ生成と別名経由は範囲外
+- **CI のテスト**: `crates/backend-rocm/tests/device_provider_absent.rs`（`#[ignore]` なし。ignored 本数 16 は不変）、`crates/facade/tests/device_enumeration.rs` の 4 本（環境適応型）。不在側の分岐を実際に通すのは `build-no-cuda-toolkit` ジョブ
+- **実機テストの雛形**: `crates/facade/tests/rocm_facade_real_device.rs` の 4 本（§10.4 の名前。すべて `#[ignore]`）。
+- **事前登録した性能比較**（計測前に確定）: 対象は `available_devices()` の 1 呼び出しあたりの時間。環境は ROCm なしの Linux 開発機（ホスト名は書かない）。方法は `cargo test --release -p fandhe-ai --test device_enumeration -- --ignored --exact --nocapture available_devices_call_time_report` を 5 回別プロセスで実行して中央値をとる。判定は変更前後の中央値の増分を記録し、1 呼び出しあたり 1 ms 以上増えたら所有者へ報告する。既定経路の `tape()`・`tape_for(Cpu|Cuda|Metal)` は match の腕が増えるだけなので対象外
+- **計測値**（ROCm なしの Linux 開発機。5 回の中央値）: 変更前 12380 ns（11662〜24099）、変更後 20087 ns（20033〜21312）。増分は約 7.7 µs で、HIP の動的ロード試行 1 回分の見込み内。閾値 1 ms を大きく下回る。ROCm 搭載ホストの値は未実測（#3867）
+- **設計からの逸脱**:
+  - **D1**: provider の `is_available` を、§10.1 の「crate の `is_available()` と同じ判定」ではなく「`enumerate` が空でない」にした（HIP はあるが HIPRTC か gfx942 のロードが無いホストで、一貫性契約が崩れるのを防ぐため。crate の `is_available()` 自体は変えない）
+  - **D2**: 承認点 (c) の判定を GEMM カーネルのコンパイルとロードで代用し、成功だけをプロセス全体でキャッシュした（新しい HIP シンボルも `unsafe` も足していない）
+  - **D3**: 承認点 4 により ordinal≠0 を HIP より前に弾くので、§10.3 の `device_count` との比較は ordinal=0 だけになる
+- **既定経路**: `Cpu`／`Cuda`／`Metal` の腕と provider の生成は変えておらず、既存テストは無変更で通る。外部 crate の追加・版の更新・tolerance・baseline・`unsafe` の追加はない
+- **実機**: すべて未実測のまま（MI300X での facade 経由の parity は #3867）。本 PR は `Refs #3853` で、`Closes` は使わない
