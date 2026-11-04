@@ -36,7 +36,7 @@
 
 onnx 族の 12 量はすべて REQ-2 統一複合判定で一致した（loss 以外の 11 量は CPU tape と誤差 0）。各量の値は
 `logs/onnx-train-3842/train_parity_onnx_metal_matches_cpu.log` の `TRAIN_PARITY` 行（total・fail_count・max_abs_diff・mean_abs_diff・max_rel_err・verdict）。
-対象の実装 issue #3842 は既に CLOSED。CUDA（GB10）は #3864 が測る。申し送り元 `../onnx-autograd-2078/README.md` に結果を追記した。
+対象の実装 issue #3842 は既に CLOSED。CUDA（GB10）は #3864（PR #4024・マージ済み）で pass。申し送り元 `../onnx-autograd-2078/README.md` に結果を追記した。
 
 ## 回収物
 
