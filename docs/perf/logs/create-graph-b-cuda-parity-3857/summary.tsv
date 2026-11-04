@@ -1,0 +1,17 @@
+group	target	test	exit_code	running	result	verdict
+scaffold-3776	--test create_graph_gpu_parity	create_graph_scaffold_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.55s	pass
+conv3d-family-3797	--test create_graph_gpu_parity	create_graph_conv3d_family_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 1.05s	pass
+loss-regression-3798	--test create_graph_gpu_parity	create_graph_loss_regression_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.44s	pass
+loss-binary-margin-3799	--test create_graph_gpu_parity	create_graph_loss_binary_margin_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.42s	pass
+loss-class-3800	--test create_graph_gpu_parity	create_graph_loss_class_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.59s	pass
+scatter-reduce-3802	--test create_graph_gpu_parity	create_graph_scatter_reduce_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.39s	pass
+cumulative-b-3803	--test create_graph_gpu_parity	create_graph_cumulative_b_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.75s	pass
+stft-family-3804	--test create_graph_gpu_parity	create_graph_stft_family_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.34s	pass
+linalg-cholesky-pinv-lstsq-3805	--test create_graph_gpu_parity	create_graph_linalg_cholesky_pinv_lstsq_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.54s	pass
+linalg-norm-rank-3806	--test create_graph_gpu_parity	create_graph_linalg_norm_rank_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.55s	pass
+linalg-qr-3807	--test create_graph_gpu_parity	create_graph_linalg_qr_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.54s	pass
+linalg-svd-3808	--test create_graph_gpu_parity	create_graph_linalg_svd_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.63s	pass
+linalg-eigh-3808	--test create_graph_gpu_parity	create_graph_linalg_eigh_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.55s	pass
+norm-prescale-3809	--test create_graph_gpu_parity	create_graph_norm_prescale_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.52s	pass
+det-family-rowscale-3810	--test create_graph_gpu_parity	create_graph_det_family_rowscale_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.52s	pass
+embedding-padding-3811	--test create_graph_gpu_parity	create_graph_embedding_padding_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.36s	pass
