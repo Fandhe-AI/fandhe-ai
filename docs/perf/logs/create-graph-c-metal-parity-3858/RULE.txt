@@ -1,0 +1,109 @@
+事前登録規則（イシュー #3858: 二階微分 create_graph の C 区分 8 族の Metal 実機 parity。親 #3711 Phase 10。#3856 の Metal 版。
+雛形は docs/perf/logs/create-graph-gpu-parity-template/RULE.txt〈#3776・#3777〉。測り方は docs/autodiff-higher-order-grad-decision.md §48）
+宣言日時（UTC）: 2026-11-04T13:57Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+機体: <metal-node>（Mac mini・Apple M4 10 コア・メモリ 16GB・macOS）。ホスト名は記録しない。Linux／M4 Max 開発機では
+  測らない・記録しない（docs/real-hardware-verification-env.md §1・§7.1）。parity 測定であり時間計測ではないため専有条件は
+  課さない。メモリは他の利用者と共有しているため、空き率（memory_pressure）と負荷を実行前後で env_info.txt に記録する。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  b82b1e5d129bc25cabf779e64401bf3809526cdb
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること。
+    git diff --quiet b82b1e5d129bc25cabf779e64401bf3809526cdb <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 2 行形式（1 行目: HEAD の 40 桁小文字 16 進数、2 行目: dirty=<status --porcelain の件数>）。
+  展開ツリー直下に書く。dirty=0 以外は無効（実行しない。run_metal_parity.sh が検査する）。
+
+展開先: <home>/work/rust-ai-library-run-3858（ログではマスクする）。出力先: <home>/work/out-3858。
+  CARGO_TARGET_DIR: <home>/work/target-fandhe-ai（同。内蔵 SSD が小さいため target はこの 1 つだけ）。
+  転送は docs/real-hardware-verification-env.md §3・§7.1 の rsync だけ（.git/・.claude/worktrees/ は送らない）。
+  転送後にノード側で .rev-stamp を読み、送信側の HEAD と照合する。
+
+実機ロック: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#3858 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。各テストの前後で owner が自分のままか確かめ、
+  失っていればその回と以降を undetermined にする（ロックを持たずに測った値は採らない）。ほかの利用者のプロセスは止めない。
+
+実行スクリプト: 同ディレクトリの run_metal_parity.sh（コミット済みのものをそのまま送る。env_info.txt の script_sha256 で照合）。
+  非対話 SSH では PATH が通らないため zsh -lc で包み、macOS には setsid が無いので nohup で切り離して起動する:
+    zsh -lc "cd <tree> && CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai nohup bash \
+      <tree>/docs/perf/logs/create-graph-c-metal-parity-3858/run_metal_parity.sh <tree> <out> \
+      > \$HOME/work/run-3858.log 2>&1 < /dev/null &"
+  完了はスクリプトの "done:" 行とロックの解放をポーリングで確かめる。
+
+事前ビルド（判定外。計測中にコンパイルを並走させない。開始前と各テストの前に他の cargo／rustc が無いことを pgrep で確かめる。
+  事前ビルド前に見つかれば停止、各テストの前に見つかればそのテストを undetermined にする）:
+  cargo test -p fandhe-ai --test create_graph_gpu_parity --no-run
+
+コマンド（9 本。上から順に 1 本ずつ。1 テスト 1 プロセス 1 回。--release なし。外部 timeout なし）:
+  cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>
+  0. create_graph_scaffold_metal_matches_cpu                 （経路の自己検査。測定対象外。#3777 の雛形行）
+  1. create_graph_select_reduce_minmax_metal_matches_cpu     （#3789: Max・Min・Amax・Amin）
+  2. create_graph_select_reduce_order_metal_matches_cpu      （#3790: OrderSelect・MedianAll・Quantile）
+  3. create_graph_stat_varnorm_metal_matches_cpu             （#3791: Var・Std・VectorNorm・PNorm）
+  4. create_graph_stat_reduce_lse_nan_metal_matches_cpu      （#3792: LogSumExp・Nansum・Nanmean）
+  5. create_graph_structural_metal_matches_cpu               （#3793: Dropout・Interpolate・MaxUnpool）
+  6. create_graph_norm_reparam_metal_matches_cpu             （#3794: LocalResponseNorm・WeightNorm・SpectralNorm）
+  7. create_graph_rnn_gru_cell_metal_matches_cpu             （#3795: RnnCell・GruCell）
+  8. create_graph_lstm_cell_metal_matches_cpu                （#3796: LstmCell・LstmHidden）
+  （--release は付けない。docs/real-hardware-verification-env.md §7.3。--exact・--nocapture・--test-threads=1 は
+  テストの選び方と出力だけに効き判定には影響しない。）
+  外部 timeout: macOS に timeout(1) が無いため付けない（Metal 前例 metal-facade-parity-3166・metal-autodiff-parity-3169 と同じ）。
+  1 本が 1800 秒を超えて終わらなければ外から止め、その回と以降を undetermined とする（スクリプトの summary に行が無い回は
+  README で undetermined と書く）。
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行であること。0 行または 2 行以上なら
+  実行せず undetermined とする。
+
+経路区分と既定の切替状態（ケースごと。対象コミットの CASES の route をそのまま写す）:
+  select_reduce_minmax_{max,min,amax,amin}: K
+  select_reduce_order_{kthvalue,median_all,quantile_linear}: H
+  stat_varnorm_{var,std,norm_l1,norm_l2,norm_p}: H
+  stat_reduce_lse_nan_{logsumexp,nansum,nanmean}: H
+  structural_interpolate_nearest: K／structural_interpolate_bilinear: K／structural_interpolate_bicubic: H／
+    structural_interpolate_area: H／structural_max_unpool: K／structural_dropout: K
+  norm_reparam_{lrn,weight_norm,spectral_norm}: H
+  rnn_gru_cell_{rnn,gru}: K
+  lstm_cell_{h,c}: K
+  （H の pass は経路の parity でありカーネル同士の parity ではない）
+  既定のまま触らない: GPU linalg ゲート OFF・Metal split-K の実行時トグル（既定 true のまま）。環境変数で切替を変えない。
+  判定方式: 上記の全ケースが Judge::Strict（Judge::Baseline のケースは無い。baseline の置き場は空のまま）。
+
+Metal の S3 宣言（ケースごと。§48.4。対象コミットの CASES の split_k を逐語で写す）:
+  scaffold_cubic: NoMatMul
+  select_reduce_minmax_{max,min,amax,amin}: NoMatMul
+  select_reduce_order_{kthvalue,median_all,quantile_linear}: NoMatMul
+  stat_varnorm_{var,std,norm_l1,norm_l2,norm_p}: NoMatMul
+  stat_reduce_lse_nan_{logsumexp,nansum,nanmean}: NoMatMul
+  structural_{interpolate_nearest,interpolate_bilinear,interpolate_bicubic,interpolate_area,max_unpool,dropout}: NoMatMul
+  norm_reparam_{lrn,weight_norm,spectral_norm}: NoMatMul
+  rnn_gru_cell_{rnn,gru}: Rule("k ∈ {B=3, D=4, H=5, 3H=15} ≤ 15 < 16 のため split-K 非発火")
+  lstm_cell_{h,c}: Rule("k ∈ {B=3, D=4, H=5, 3H=15, 4H=20} ≤ 20、k/16 = 1 < min_k_tiles16 = 8 のため split-K 非発火")
+  Rule の根拠（実行時には機械検査されないため、宣言時に実装と突き合わせた）: crates/backend-metal/src/tile.rs:2939-2942
+    （should_split_k_with は tk16 = k/16 < min_k_tiles16 のとき None）と同 :2806（既定 MLX_CASE1_M4_MAX の
+    min_k_tiles16 = 8）。よって k < 128 では split-K は発火しない。上の Rule の k は最大 20 で、この条件に入る。
+  split-K が避けられない族: 無い（8 族とも NoMatMul または Rule で回避済み）。Listed の族も無い。
+
+判定（判定契約は各テストのコードが定める。ここでは変えない）:
+  Q1 first_order が同デバイスの素の backward と bit 一致かつ GPU・CPU の REQ-2 複合判定／Q2 cg.grad・Q3 二階 H v（ゼロでない）・
+  Q4 孫テープ再生は GPU と CPU の REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
+  tolerance 定数 RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD・baseline は不変）／Q5 拒否は Err(Backward) かつ子テープが空。
+  Metal の fast-math による pointwise の ulp 差は REQ-2 で受け、bit 一致は主張しない（§48.5）。Q1 は同一デバイス内の bit 一致なので対象外。
+  pass: exit 0 かつ "running 1 test"・"test result: ok. 1 passed; 0 failed"。
+  fail: 1 件以上の失敗（パニックを含む。Metal と CPU は自前バックエンド同士なので判定不能にしない）。
+  undetermined: ノード到達不能、ビルド不能、1800 秒超で外から止めた回、--list の選択が期待と異なる、実機ロックの取得不能・喪失、
+    他の cargo／rustc の並走、自己検査失敗、baseline に行が無いケース、Metal の S3 違反（宣言した形状で split-K が発火する）。
+  scaffold（0.）は経路の自己検査であり、どの実装 issue の判定にも数えない。scaffold が fail・undetermined なら、
+    1.〜8. の結果は記録するが、README で経路の異常として併記する。
+  イシュー単位の完了: 1.〜8. の 8 本がすべて pass のときだけ #3858 を Closes する。1 本でも fail・undetermined なら Refs。
+  対象の実装 issue #3789〜#3796 は既に CLOSED。fail・undetermined の族は README と PR に「要対応」と書き、所有者へ報告する。
+
+実行回数: 各コマンド 1 回。時間計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない。
+  再実行するなら RULE.txt を登録し直す。計測中は他のビルドを並走させない。
+
+fail 時の扱い: tolerance・baseline・判定方式・入力・テストコードは変えない。panic メッセージの fail_count・max_abs_diff・
+  max_rel_err を引用して事実を記録し、README と PR に「要対応」と書く。原因を推測で結論づけない。
+  起票と baseline 化は所有者の承認を得てから。
+
+記録規則: ホスト名・ユーザー名・個人のパス（$HOME・/Users/）は前後が識別子文字でない場合のみマスクする（<metal-node>／<user>／<home>）。
+  漏れがあれば記録を捨てる（fail-closed）。回収ログは手で編集しない。各ログ末尾に rc=<終了コード>。
+  実行と提出物の対応は env_info.txt の script_sha256・rev_stamp と SHA256SUMS で検証する。
+  回収後に送信側でも PR 差分全体をユーザー名・/Users/・内部ドメイン・SSH 別名で grep し、0 件であることを確かめる。
