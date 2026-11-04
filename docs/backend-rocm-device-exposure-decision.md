@@ -295,3 +295,14 @@ Q2 の手順（#3774）:
 | 8 elementwise 融合の opt-in ゲート（`docs/backend-rocm-ops-coverage-plan.md` が #3157 に委ねた点） | ゲートなし（CPU と同じ）／ CUDA と同じ `AtomicBool` ゲート | ゲートなし |
 
 - 確認時点: base `81e23f9ec`・2026-11-01（UTC）。#3159・#3771・spec#87 の状態は書き込み時点の認識で、実装 PR 着手時に再確認する。
+
+## 11. 実装記録（イシュー #3851・第 1 段）
+
+§1〜§10 は書き換えず、本節で訂正と実装結果を記す（§9 と同じ流儀）。
+
+- **承認**: §10 冒頭の「未承認」は、#3771 の所有者の回答コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>（2026-11-01。Q1 = A＋B＋E、Q2 = 0.14.0 で公開、付随点 3〜8 を承認）で承認済みに訂正する。破壊的変更は `Device` だけで 0.14.0 にまとめる範囲は #3718 の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3718#issuecomment-6543681116>。追加条件の spec 改訂 Fandhe-AI/fandhe-ai-spec#87 は 2026-11-04 に受理済み（spec PR #88）。
+- **入れた変更**: `Device` に cfg なしの `Rocm(usize)` と `#[non_exhaustive]` を追加（derive 不変）。`select_from` に `Device::Rocm(_) => "rocm"`。facade の `resolve_ops` に `_` 腕（`DeviceUnavailable`）。G1 を正ガード 2 本＋自己テストへ反転。
+- **設計からの逸脱（3 点）**: (1) `#[non_exhaustive]` により別クレートの網羅 `match` が `_` 腕なしではビルドできないため、§10.6 の在庫のうち facade の `resolve_ops`・doctest・テスト 4 ファイルの `_` 腕を #3853 から本 PR へ前倒しした。(2) G1 は同じ理由で本 PR のうちに壊れるため、§10.1 の置換計画を本 PR で行った。(3) 移行ノート §2.1 のコンパイルエラーの実出力は本 PR で確定した。
+- **やらなかったこと**: `RocmBackendOps::device()` の `Device::Rocm(0)` への差し替え（バッファと同時。#3853）、`RocmDeviceProvider` の新設、facade の依存追加と G2 の反転（#3852・#3853）、`available_devices` への ROCm の追加（facade 結線まで列挙しない。一貫性契約は保たれる）。
+- **既定経路**: `Cpu`／`Cuda`／`Metal` の腕と列挙は変えておらず、既存テストは無変更で通る。
+- **実機**: すべて未実測のまま（実機テストは #3853・#3867）。
