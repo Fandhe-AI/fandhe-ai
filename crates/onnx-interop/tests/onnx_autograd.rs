@@ -659,6 +659,35 @@ fn new_ext_op_from_issue_2186_is_rejected_fail_closed_in_autograd() {
 }
 
 #[test]
+fn cnn_ops_are_rejected_fail_closed_with_explicit_diagnosis_in_autograd() {
+    // イシュー #3842: interp が import 対応する CNN 系 6 op が `other =>` の
+    // 一般 `UnsupportedOp`（「未対応 op_type」の誤診断）へ落ちず、明示の
+    // `UnsupportedInAutograd` を返すこと（`docs/onnx-autograd-decision.md` §8.10）。
+    for op in [
+        "Conv",
+        "MaxPool",
+        "AveragePool",
+        "BatchNormalization",
+        "GlobalAveragePool",
+        "Flatten",
+    ] {
+        let graph = single_node_graph(node(op, vec!["x"], vec!["y"]), vec!["x"], "y");
+        let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+        let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+        let mut feeds = HashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            AutogradValue::Var(tape.var(&f32(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]))),
+        );
+        let err = bound.run(feeds).unwrap_err();
+        assert!(
+            matches!(&err, AutogradError::UnsupportedInAutograd { op_type, .. } if op_type == op),
+            "{op}: {err:?}"
+        );
+    }
+}
+
+#[test]
 fn shape_and_cast_const_paths_work_without_severing_needed_gradients() {
     // `Shape`（Var 入力可・非勾配出力）と `Cast(F32->F32)`（恒等・Var のまま）の
     // const 経路 2 op を確認する。

@@ -61,9 +61,14 @@ limits.max_total_bytes = 8 << 30; // 8 GiB
 let model = OnnxModel::from_path_with_limits("model.onnx", &limits)?;
 ```
 
-**推論専用・ホスト CPU 実行のみ**（`OnnxModel::run` は `BackendOps`／
-`Device` を経由しないため GPU 実行にはなりません）で**autograd 未接続**
-（入出力は [`Tensor`](/api/)であり `Var` ではないため勾配は取れません）。
+**`OnnxModel::run` は推論専用・ホスト CPU 実行のみ**です（`BackendOps`／
+`Device` を経由しないため GPU 実行にはなりません）。入出力は
+[`Tensor`](/api/)であり `Var` ではないため、`run` では勾配は取れません。
+学習（autograd）は `OnnxModel::bind_autograd(&tape, &OnnxAutogradOptions::default())`
+で `Tape` に束縛します。勾配が取れる op は 11 種で、学習できない 22 op
+（`Reshape`・`Transpose`・`Conv` など）に到達すると
+`OnnxError::UnsupportedInAutograd` で拒否されます。GPU の `Tape` でも計算は
+ホストで実行され、性能は保証しません。
 `OnnxValue::F16` は `half::f16` を素通しするため、扱うには利用者側が
 `half` クレートへ直接依存する必要があります。数値契約は
 「`abs_err/(|ref|+1e-6) <= 1e-3`」という ONNX 固有の判定式であり、

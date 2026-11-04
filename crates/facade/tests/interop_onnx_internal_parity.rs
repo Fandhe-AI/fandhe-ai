@@ -910,3 +910,206 @@ fn external_data_limits_default_matches_internal_default() {
     assert_eq!(f.max_total_bytes, i.max_total_bytes);
     assert_eq!(f.max_external_files, i.max_external_files);
 }
+// --- イシュー #3842: 学習（autograd）公開面と内部 `BoundGraph` の突合 ---
+//
+// facade の `OnnxModel::bind_autograd` が `BoundGraph` への薄い委譲であり、
+// forward・勾配が内部直接呼び出しと bit 一致すること、およびエラーが型付き
+// variant へ写像されることを固定する（`docs/onnx-autograd-decision.md` §8.12）。
+
+use fandhe_ai::interop::onnx::{OnnxAutogradOptions, OnnxTapeValue};
+use fandhe_ai_onnx_interop::onnx::autograd::{BindOptions, BoundGraph};
+use fandhe_ai_onnx_interop::onnx::graph::Graph;
+
+type AutogradRun = (Vec<u32>, Vec<(String, Vec<u32>)>, Vec<String>);
+
+fn bits(t: &Tensor<f32>) -> Vec<u32> {
+    t.contiguous()
+        .as_slice()
+        .expect("連続化済み")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
+/// facade 側: `tape()` → `bind_autograd` → `forward` → 損失 → `backward`。
+/// 出力ビット列・名前順の (名前, 勾配ビット列)・名前列を返す。
+fn facade_autograd_run(model: &OnnxModel, x: &Tensor<f32>) -> AutogradRun {
+    let tape = fandhe_ai::tape();
+    let g = model
+        .bind_autograd(&tape, &OnnxAutogradOptions::default())
+        .expect("bind_autograd 成功");
+    let xv = tape.var(x);
+    let y = g.forward(&xv).expect("forward 成功");
+    let out = bits(&y.value());
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let params = g.params();
+    let names = params.iter().map(|(n, _)| n.clone()).collect();
+    let gs = params
+        .iter()
+        .map(|(n, v)| {
+            let t = grads.get(v).unwrap().expect("勾配あり");
+            (n.clone(), bits(t))
+        })
+        .collect();
+    (out, gs, names)
+}
+
+/// 内部側: 同じ `Graph` を `BoundGraph` へ直接 bind する（facade の `tape()`
+/// と同じ `CpuBackendOps`）。
+fn internal_autograd_run(graph: &Graph, x: &Tensor<f32>) -> AutogradRun {
+    let tape = fandhe_ai_autodiff::Tape::new_with_ops(Box::new(
+        fandhe_ai_backend_cpu::CpuBackendOps::new(),
+    ));
+    let g = BoundGraph::bind(graph, &tape, &BindOptions::default()).expect("bind 成功");
+    let xv = tape.var(x);
+    let y = g.forward(&xv).expect("forward 成功");
+    let out = bits(&y.value());
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let mut params: Vec<_> = g.params().iter().map(|(k, v)| (k.clone(), *v)).collect();
+    params.sort_by(|a, b| a.0.cmp(&b.0));
+    let names = params.iter().map(|(n, _)| n.clone()).collect();
+    let gs = params
+        .iter()
+        .map(|(n, v)| {
+            let t = grads.get(v).unwrap().expect("勾配あり");
+            (n.clone(), bits(t))
+        })
+        .collect();
+    (out, gs, names)
+}
+
+fn autograd_parity_cases() -> Vec<(OnnxModel, Graph, Tensor<f32>)> {
+    // (a) fixture model.onnx（入力 [1, 2]）。
+    let bytes = std::fs::read(onnx_interop_fixture("model.onnx")).unwrap();
+    let a = OnnxModel::from_bytes(&bytes).unwrap();
+    let ag = build_graph(&proto::decode_model(&bytes).unwrap()).unwrap();
+    let ax = Tensor::<f32>::new(vec![0.3, -0.7], &[1, 2]).unwrap();
+    // (b) from_sequential（2 のべき乗でない形状）。
+    let seq = build_facade_mlp(5, 7, 3, 11, 12);
+    let b = OnnxModel::from_sequential(&seq).unwrap();
+    let bbytes = b.to_bytes(&OnnxExportOptions::default()).unwrap();
+    let bg = build_graph(&proto::decode_model(&bbytes).unwrap()).unwrap();
+    let bx = Tensor::<f32>::new((0..20).map(|i| i as f32 * 0.13 - 1.1).collect(), &[4, 5]).unwrap();
+    vec![(a, ag, ax), (b, bg, bx)]
+}
+
+#[test]
+fn onnx_autograd_forward_matches_internal_bound_graph_bit_identical() {
+    for (model, graph, x) in autograd_parity_cases() {
+        let (f_out, _, _) = facade_autograd_run(&model, &x);
+        let (i_out, _, _) = internal_autograd_run(&graph, &x);
+        assert!(!f_out.is_empty(), "空虚 pass 防止");
+        assert_eq!(f_out, i_out, "forward が内部 BoundGraph と bit 不一致");
+    }
+}
+
+#[test]
+fn onnx_autograd_gradients_match_internal_bound_graph_bit_identical() {
+    for (model, graph, x) in autograd_parity_cases() {
+        let (_, f_grads, f_names) = facade_autograd_run(&model, &x);
+        let (_, i_grads, i_names) = internal_autograd_run(&graph, &x);
+        assert!(!f_grads.is_empty(), "空虚 pass 防止: param が 0 個");
+        assert_eq!(f_names, i_names, "param 名集合・順序の不一致");
+        let mut sorted = f_names.clone();
+        sorted.sort();
+        assert_eq!(f_names, sorted, "params() は名前順");
+        assert_eq!(f_grads, i_grads, "勾配が内部 BoundGraph と bit 不一致");
+    }
+}
+
+fn single_node_model(op: &str, inputs: &[&str], outputs: &[&str]) -> OnnxModel {
+    let node = NodeProto {
+        input: inputs.iter().map(|s| s.to_string()).collect(),
+        output: outputs.iter().map(|s| s.to_string()).collect(),
+        name: "n1".to_string(),
+        op_type: op.to_string(),
+        attribute: vec![],
+        domain: String::new(),
+    };
+    let m = minimal_model_with_node(node, inputs.to_vec(), outputs.to_vec());
+    OnnxModel::from_bytes(&proto::encode_model(&m)).expect("構築は妥当")
+}
+
+#[test]
+fn onnx_autograd_error_paths_map_to_typed_variants() {
+    let tape = fandhe_ai::tape();
+    let opts = OnnxAutogradOptions::default();
+    let x1 = Tensor::<f32>::new(vec![1.0, 2.0], &[2]).unwrap();
+
+    // UnknownTrainable（葉化より前に拒否）。
+    let relu = single_node_model("Relu", &["x"], &["y"]);
+    let err = relu
+        .bind_autograd(
+            &tape,
+            &OnnxAutogradOptions::with_trainable(std::collections::HashSet::from([
+                "ghost".to_string()
+            ])),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, OnnxError::UnknownTrainable { name } if name == "ghost"),
+        "{err:?}"
+    );
+
+    // MissingFeed → UnknownFeed の順序（run と同じ契約）。
+    let g = relu.bind_autograd(&tape, &opts).unwrap();
+    let err = g.run(HashMap::new()).unwrap_err();
+    assert!(
+        matches!(&err, OnnxError::MissingFeed { input } if input == "x"),
+        "{err:?}"
+    );
+    let mut feeds = HashMap::new();
+    feeds.insert("x".to_string(), OnnxTapeValue::Var(tape.var(&x1)));
+    feeds.insert("zzz".to_string(), OnnxTapeValue::Var(tape.var(&x1)));
+    let err = g.run(feeds).unwrap_err();
+    assert!(
+        matches!(&err, OnnxError::UnknownFeed { name } if name == "zzz"),
+        "{err:?}"
+    );
+
+    // run の正常系は Var を返す。
+    let mut feeds = HashMap::new();
+    feeds.insert("x".to_string(), OnnxTapeValue::Var(tape.var(&x1)));
+    let out = g.run(feeds).unwrap();
+    assert!(matches!(out["y"], OnnxTapeValue::Var(_)));
+
+    // NotSingleInputOutput（入力 2 個）。
+    let add = single_node_model("Add", &["a", "b"], &["c"]);
+    let g = add.bind_autograd(&tape, &opts).unwrap();
+    let err = g.forward(&tape.var(&x1)).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            OnnxError::NotSingleInputOutput {
+                inputs: 2,
+                outputs: 1
+            }
+        ),
+        "{err:?}"
+    );
+
+    // UnsupportedInAutograd: 16 op 側（Reshape）と CNN 6 op 側（Flatten）。
+    for op in ["Reshape", "Flatten"] {
+        let m = single_node_model(op, &["x"], &["y"]);
+        let g = m.bind_autograd(&tape, &opts).unwrap();
+        let err = g.forward(&tape.var(&x1)).unwrap_err();
+        assert!(
+            matches!(&err, OnnxError::UnsupportedInAutograd { op_type, .. } if op_type == op),
+            "{op}: {err:?}"
+        );
+    }
+
+    // FeedTypeMismatch: 非 F32 の Const を勾配 op へ。
+    let g = relu.bind_autograd(&tape, &opts).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "x".to_string(),
+        OnnxTapeValue::Const(OnnxValue::I64(
+            Tensor::<i64>::new(vec![1, 2], &[2]).unwrap(),
+        )),
+    );
+    let err = g.run(feeds).unwrap_err();
+    assert!(matches!(err, OnnxError::FeedTypeMismatch { .. }), "{err:?}");
+}

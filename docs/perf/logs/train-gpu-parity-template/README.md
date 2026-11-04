@@ -39,9 +39,9 @@ Phase 6〜8 で GPU に触れる機能が増える。NN 層の forward・backwar
 5. 参照腕がデバイス常駐対ホスト参照のように CPU tape 以外なら `reference: Some(...)` を指定する
 6. まず CI で走る自己検査（`cargo test -p fandhe-ai --test train_gpu_parity`）が CPU 同士で通ることを確かめる
 
-ONNX 族は #3842 の公開形でつなぐ。素の `fandhe_ai_autodiff::Tape` が要る間は
-`crates/facade/tests/spatial_layers_backend_parity.rs::raw_tape_for` の組み立てを参照する。それまで `onnx` 族は
-0 件で、実行すると undetermined で止まる。
+ONNX 族は #3842 の公開形（`OnnxModel::bind_autograd`）でつないだ。行は `onnx_from_sequential_forward_backward_s1`・`_s2`
+（route は H。11 op はホスト実行）で、CI の自己検査は `onnx_family_passes_cpu_against_cpu`。結果欄は未実測のまま
+（#3864・#3865）。
 
 ## Phase 10 での手順
 

@@ -273,3 +273,19 @@ CUDA／Metal 実機は本実装エージェント実行環境から到達不能�
 - OWASP: A03 は §8.3 の検証順（信頼できない ONNX の initializer 葉化は失敗可能な確保のまま、検証を計算・確保の前に行う）。A04 は未対応 op を無言で飛ばさず fail-closed、`trainable` の typo を拒否（fine-tuning が何も更新しないまま成功するのを防ぐ）。A06 は依存変更なし。A08 はガードレール・tolerance を迂回する経路を作らず、公開面を allowlist と否定プローブで固定。
 - スコープ外（起票は所有者承認後）: view・shape 系の勾配／CNN 系 op の勾配／書き戻しと export／GPU 上のネイティブ実行／性能計測／制御フロー op／optimizer state。
 - 本 PR は docs のみで `Closes #3759`。`Refs #3770 #3842 #3843 #3864 #3865`。
+
+### 8.12 実装記録（イシュー #3842・基準 sha `887718587`）
+
+§8.1〜§8.11 の設計と所有者承認（#3770。https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145）どおりに実装した。本節は実装時の確定事項と、設計からの差分だけを書く。
+
+- 公開名: `OnnxModel::bind_autograd`、`OnnxAutogradGraph`（`run`・`forward`・`params`・`param`）、`OnnxAutogradOptions`（`Default`・`with_trainable`）、`OnnxTapeValue`（`Var`／`Const`。`#[non_exhaustive]`）、`OnnxError` の新 variant 5 件。実装は `crates/facade/src/interop/onnx.rs` の 1 ファイルで、`BoundGraph` への薄い委譲とエラー写像だけ。`OnnxValue` は変えていない。
+- `params()` は名前順の `Vec<(String, Var)>` で、内部の `HashMap` は出さない。
+- `OnnxError::FeedTypeMismatch.expected` は `String`。内部は `&'static str` だが、内部の変更が facade のシグネチャへ波及しないよう `String` にした（§8.3 は型を指定していないので逸脱ではない）。
+- `OnnxError::UnsupportedInAutograd` は `node` と `op_type` だけを持つ。内部の `reason`（固定文）は公開 variant に持ち込まず、Display の固定文で足りる。
+- 内部 `AutogradError` の `Shape`・`Op` と今後の variant は、`Execution { message }` へ写像する（内部 enum は `#[non_exhaustive]` のため wildcard が必須）。
+- 内部 6 op の診断の統一: `Conv`・`MaxPool`・`AveragePool`・`BatchNormalization`・`GlobalAveragePool`・`Flatten` は、従来 `dispatch_node` の `other =>` に落ちて `AutogradError::Interp(UnsupportedOp)`（「未対応 op_type」）になっていた。明示 fail-closed の腕へ足し、`UnsupportedInAutograd` を返すようにした。内部 enum は `#[non_exhaustive]` で、公開クレート `fandhe-ai-onnx-interop` の既存の呼び出し側が別 variant を受ける挙動差が出るが、API の型は変わらない。テストは `cnn_ops_are_rejected_fail_closed_with_explicit_diagnosis_in_autograd`。
+- ガード（`crates/facade/tests/api_surface.rs`）: allowlist を 12 → 20 件、内部型の禁止語を 12 → 17 語（`onnx::autograd`・`BoundGraph`・`BindOptions`・`AutogradValue`・`AutogradError` を追加）にして、行単位の検査にも同じ語を足した。正ガード `onnx_autograd_types_are_reachable_via_facade`、否定の自己テスト `unapproved_onnx_autograd_items_are_flagged`、名前衝突の自己テスト `approved_onnx_autograd_names_do_not_collide_with_forbidden_substrings`、拡張した `approved_onnx_surface_yields_no_offenses`。残した否定側（`mod.rs` の pub 項目 4 件など）は変えていない。
+- テスト: `crates/facade/tests/interop_onnx_internal_parity.rs` に forward と勾配の bit 一致（`model.onnx` と `from_sequential` の 2 モデル）、エラー写像（`UnknownTrainable`・`MissingFeed`／`UnknownFeed` の順序・`NotSingleInputOutput`・`UnsupportedInAutograd`〈Reshape と Flatten〉・`FeedTypeMismatch`）。`Autodiff` variant は Display と `source()` の実装のみで、CI では直接の失敗経路を作れていない。利用者の書き方の受入テスト（SGD で損失が下がる等）は #3843。
+- §8.4 からの逸脱: 実機 parity の置き場は、§8.4 の仮置き `interop_onnx_autograd_gpu_parity.rs` ではなく、#3778 の追記と追跡表 # 25 が決めた `crates/facade/tests/train_gpu_parity.rs` の `onnx` 族にした。行は `onnx_from_sequential_forward_backward_s1`・`_s2`（route は H、judge は REQ-2）、CI の自己検査は `onnx_family_passes_cpu_against_cpu`。実機の入口 `train_parity_onnx_{cuda,metal}_matches_cpu` は既存のまま使い、新しい `#[ignore]` テストは足していない。
+- 実機 parity は **未実測**（#3864 は GB10、#3865 は Mac mini）。この PR は実機の値を書かない。
+- 互換: 追加のみ。依存・`Cargo.toml`・`unsafe`・tolerance・baseline の変更はない。
