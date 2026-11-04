@@ -69,7 +69,7 @@ CUDA・Metal は実行時にデバイスの存在を検証し、利用できな�
 （`compat::Sequential::state_dict`／`load_state_dict` と組み合わせて
 使います）へ到達できます。bf16／f16／i64 等が混在するファイルは
 `load_safetensors_typed`／`load_safetensors_typed_from_bytes` と
-`SafetensorsTensor::to_f32`（明示 opt-in）で読めます（読込側。書出側は別イシュー）。NumPy 互換の `.npy`／`.npz` 読み書き
+`SafetensorsTensor::to_f32`（明示 opt-in）で読めます。書出しは `save_safetensors_typed`／`save_safetensors_typed_to_bytes` です。NumPy 互換の `.npy`／`.npz` 読み書き
 （`Tensor<f32>` 限定のパス版 `load_npy`／`save_npy`／`load_npz`／`save_npz` と
 `NpyError`）は `fandhe_ai::interop::npy` から利用できます（書き出しは
 原子的ではなく、読み込みは symlink を辿ります。詳細はモジュール doc）。

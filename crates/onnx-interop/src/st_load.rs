@@ -263,6 +263,20 @@ impl SafetensorsDtype {
         }
     }
 
+    /// 対応 7 種からワイヤ dtype へ（書出側 `st_save` が使う `from_wire` の逆写像）。
+    /// ワイルドカードを置かず、variant 追加時にコンパイルエラーで気付けるようにする。
+    pub(crate) fn to_wire(self) -> Dtype {
+        match self {
+            SafetensorsDtype::F32 => Dtype::F32,
+            SafetensorsDtype::F16 => Dtype::F16,
+            SafetensorsDtype::BF16 => Dtype::BF16,
+            SafetensorsDtype::F64 => Dtype::F64,
+            SafetensorsDtype::I32 => Dtype::I32,
+            SafetensorsDtype::I64 => Dtype::I64,
+            SafetensorsDtype::Bool => Dtype::BOOL,
+        }
+    }
+
     /// ワイヤ dtype から対応 7 種へ。`_ => None` で fail-closed
     /// （`Dtype` は `#[non_exhaustive]`、F4 等のサブバイト型は `size()` が 0）。
     fn from_wire(d: Dtype) -> Option<Self> {
@@ -603,6 +617,8 @@ mod tests {
             assert_eq!(d.element_width(), w);
             assert_eq!(wire.bitsize(), w * 8);
             assert_eq!(SafetensorsDtype::from_wire(wire), Some(d));
+            assert_eq!(d.to_wire(), wire);
+            assert_eq!(SafetensorsDtype::from_wire(d.to_wire()), Some(d));
         }
         assert_eq!(SafetensorsDtype::from_wire(Dtype::U8), None);
         assert_eq!(SafetensorsDtype::from_wire(Dtype::I8), None);
