@@ -326,12 +326,14 @@ impl OnnxModel {
     ///
     /// `fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers` への
     /// 1 段委譲のみ（薄いラッパー原則）。対応層は `Linear`／`ReLU`／
-    /// `Softmax`／`LayerNorm`／`GELU`（erf 版）／`Conv2d` の
-    /// 6 種（イシュー #2076・親 #2034 で拡大。`Sigmoid` は §15.7 項 5
-    /// が承認保留のため対象外。`Linear`／`ReLU` のみの
-    /// モデルは `predict` と bit 完全一致、それ以外を含むモデルは
-    /// REQ-2 統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5
-    /// 未満〉で検証する）。それ以外の層（Tanh・GeluTanh・LogSoftmax・
+    /// `Sigmoid`／`Softmax`／`LayerNorm`／`GELU`（erf 版）／`Conv2d` の
+    /// 7 種（イシュー #2076・親 #2034 で `Linear`／`ReLU` の 2 種から拡大。
+    /// `Sigmoid` はイシュー #3844 で追加し、数値契約 (α)
+    /// 〈`docs/facade-onnx-export-exposure-decision.md` §19〉に従い bit
+    /// 一致は主張しない）。`Linear`／`ReLU` のみのモデルは `predict` と
+    /// bit 完全一致、それ以外を含むモデルは REQ-2 統一複合判定〈相対誤差
+    /// 1e-3 未満 または 絶対誤差 1e-5 未満〉で検証する）。それ以外の層（Tanh・
+    /// GeluTanh・LogSoftmax・
     /// Conv1d 等）を 1 つでも含む場合は [`Graph`] を一切構築せず
     /// [`OnnxError::UnsupportedLayer`] を返す（全層事前検証・
     /// fail-closed。`security.md` A08）。空の `Sequential` は
