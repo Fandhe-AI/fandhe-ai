@@ -1,4 +1,6 @@
-//! Hugging Face Hub 連携の補助クレート（イシュー #3130 の雛形。実装本体は #3131）。
+//! Hugging Face Hub 連携の補助クレート（repo_id・revision の検証、revision 解決、ファイル一覧）。
+//!
+//! 第三者の `hf-hub` クレートとは無関係である（本クレートの公開名は `fandhe-ai-hf-hub`）。
 //!
 //! # 役割と責務境界
 //!
@@ -8,8 +10,11 @@
 //!   [`fandhe_ai::model`] に任せ、本クレートは独自にファイル I/O をしない。
 //!   ファイル本体の取得は将来 `ModelRegistry::download_with` と呼び出し側の sha256 pin に委ねる。
 //! - 依存方向は hf-hub → facade の一方向のみ。`docs/compat-api-scope.md` §0 の (b) に従い、
-//!   facade の安定性保証の外にある補助クレートである。
-//! - 1 段目は `publish = false`。private／gated repo は初期状態で非対応とする（§4.1）。
+//!   `docs/compat-api-scope.md` §0 の限定例外として、公開面（`tests/api_surface.rs` の
+//!   `EXPECTED_LIB_PUBLIC`）に限りサポート対象とする。facade の公開 API だけに依存し、内部クレートへ
+//!   直接依存しない。facade は本クレートに依存しない。
+//! - crates.io へは 0.14.0 で facade と lockstep 公開する予定（承認 #3771）。private／gated repo は
+//!   非対応（fail-closed。§4.1）。
 //!
 //! # 実装範囲（イシュー #3131・#3394）
 //!

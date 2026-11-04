@@ -986,7 +986,8 @@ lock-all` も green。
 ### 14.4 Phase 11（実公開）の前提（本 PR の範囲外）
 
 - #3847（README・クレート doc の「1 段目は `publish = false`」の記述更新、
-  `docs/compat-api-scope.md` §0 の限定例外、facade 側ガード）のマージ。
+  `docs/compat-api-scope.md` §0 の限定例外、facade 側ガード）のマージ
+  （#3847 で実施済み。ガードは `facade_does_not_depend_on_hf_hub`）。
 - 0.14.0 への lockstep バンプ（§4。hf-hub の facade 依存の `version` 併記を含む）。
 - environment `crates-io-release` の承認。
 - CLAUDE.md・README・`site/` の「7 クレート」「非公開の hf-hub」表記の更新は #3775（#3775 で更新済み）。

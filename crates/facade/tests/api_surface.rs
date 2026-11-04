@@ -45219,6 +45219,143 @@ fn backend_rocm_guard_detects_header_style_dependency() {
     assert!(find_backend_rocm_reference_outside_dev(dev).is_none());
 }
 // ---------------------------------------------------------------------------
+// イシュー #3847: facade は hf-hub に依存しない（設計 `docs/hf-hub-integration-design.md` §10.1）
+// ---------------------------------------------------------------------------
+
+/// `fandhe-ai-hf-hub` は facade の公開 API だけに依存する補助クレートで、依存方向は
+/// hf-hub → facade の一方向に限る。cargo の循環依存禁止は dev 依存の循環を許すため、
+/// それだけでは守れない。そこで dev／build／target 別を含む全ての依存節を走査する
+/// （`is_relevant_dependency_section` は dev を除くので使わない）。戻り値は
+/// `(最初の違反行, 走査した依存節の名前一覧)`。後者は空振りで通ることを防ぐ inventory。
+fn find_hf_hub_reference_in_any_dependency_section(
+    manifest: &str,
+) -> (Option<String>, Vec<String>) {
+    let names = ["hf-hub", "hf_hub", "fandhe-ai-hf-hub", "fandhe_ai_hf_hub"];
+    let mut section = String::new();
+    let mut scanned: Vec<String> = Vec::new();
+    for raw in manifest.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            section = line.to_string();
+            if section.contains("dependencies") {
+                scanned.push(section.clone());
+                if names.iter().any(|n| line.contains(n)) {
+                    return (Some(line.to_string()), scanned);
+                }
+            }
+            continue;
+        }
+        if !section.contains("dependencies") {
+            continue;
+        }
+        if names.iter().any(|n| line.contains(n))
+            || value_has_package_rename_to(line, &["fandhe-ai-hf-hub", "hf-hub"])
+        {
+            return (Some(format!("{section}: {line}")), scanned);
+        }
+    }
+    (None, scanned)
+}
+
+/// `Cargo.lock` から `name = "fandhe-ai"`（完全一致。`fandhe-ai-*` は拾わない）の
+/// `[[package]]` ブロックの `dependencies` 要素を返す。該当ブロックが無ければ `None`。
+/// lock の依存は dev 依存も含むため、manifest 走査とは独立した 2 層目になる。
+fn facade_lock_dependencies(lock: &str) -> Option<Vec<String>> {
+    for block in lock.split("[[package]]") {
+        if !block.lines().any(|l| l.trim() == "name = \"fandhe-ai\"") {
+            continue;
+        }
+        let mut deps = Vec::new();
+        let mut in_deps = false;
+        for l in block.lines().map(str::trim) {
+            if l.starts_with("dependencies = [") {
+                in_deps = true;
+                continue;
+            }
+            if in_deps {
+                if l.starts_with(']') {
+                    break;
+                }
+                deps.push(l.trim_end_matches(',').trim_matches('"').to_string());
+            }
+        }
+        return Some(deps);
+    }
+    None
+}
+
+#[test]
+fn facade_does_not_depend_on_hf_hub() {
+    let manifest = read_to_string_or_panic(&facade_crate_root().join("Cargo.toml"));
+    let (hit, scanned) = find_hf_hub_reference_in_any_dependency_section(&manifest);
+    if let Some(hit) = hit {
+        panic!("facade が hf-hub を参照している（依存方向は hf-hub → facade のみ。#3847）: {hit}");
+    }
+    for expected in ["[dependencies]", "[dev-dependencies]"] {
+        assert!(
+            scanned.iter().any(|s| s == expected),
+            "inventory: {expected} を走査していない: {scanned:?}"
+        );
+    }
+    assert!(
+        scanned.iter().any(|s| s.contains("cfg(unix)")),
+        "inventory: target 別の依存節を走査していない: {scanned:?}"
+    );
+
+    let lock = read_to_string_or_panic(&facade_crate_root().join("../../Cargo.lock"));
+    let deps = facade_lock_dependencies(&lock).expect("Cargo.lock に fandhe-ai の package が無い");
+    assert!(
+        deps.iter().any(|d| d == "fandhe-ai-tensor-core"),
+        "正のプローブ: 既知の依存が読めていない: {deps:?}"
+    );
+    assert!(
+        !deps
+            .iter()
+            .any(|d| d.contains("hf-hub") || d.contains("hf_hub")),
+        "Cargo.lock 上で facade が hf-hub に依存している: {deps:?}"
+    );
+}
+
+/// 上記ガードのすり替え検出の自己テスト（正負のプローブ）。
+#[test]
+fn hf_hub_guard_detects_disguised_dependencies() {
+    let must_detect = [
+        "[dependencies]\nfandhe-ai-hf-hub = { path = \"../hf-hub\" }\n",
+        "[dependencies.hf-hub]\npath = \"../hf-hub\"\n",
+        "[target.'cfg(unix)'.dependencies.fandhe-ai-hf-hub]\npath = \"../x\"\n",
+        "[dev-dependencies]\nhub = { package = 'fandhe-ai-hf-hub', path = \"../x\" }\n",
+        "[target.'cfg(unix)'.dev-dependencies]\nh = { package = \"hf-hub\", version = \"1\" }\n",
+        "[build-dependencies]\nfandhe_ai_hf_hub = \"1\"\n",
+        "[dependencies.foo]\npackage = \"fandhe-ai-hf-hub\"\n",
+    ];
+    for m in must_detect {
+        assert!(
+            find_hf_hub_reference_in_any_dependency_section(m)
+                .0
+                .is_some(),
+            "検出すべき入力を見逃した: {m}"
+        );
+    }
+    let must_pass = "# hf-hub は依存しない\n[package]\nname = \"x\"\ndescription = \"... hf-hub ...\"\n[[test]]\nname = \"hf_hub_probe\"\n[dependencies]\nserde = \"1\"\n";
+    let (hit, scanned) = find_hf_hub_reference_in_any_dependency_section(must_pass);
+    assert!(hit.is_none(), "誤検出: {hit:?}");
+    assert_eq!(scanned, vec!["[dependencies]".to_string()]);
+
+    // lock: facade -> hf-hub は検出、hf-hub -> facade（実際の構造）は検出しない。
+    let bad = "[[package]]\nname = \"fandhe-ai\"\nversion = \"0.13.0\"\ndependencies = [\n \"fandhe-ai-hf-hub\",\n \"serde\",\n]\n";
+    let deps = facade_lock_dependencies(bad).expect("fandhe-ai ブロックを見つけられない");
+    assert!(deps.iter().any(|d| d.contains("hf-hub")));
+    let good = "[[package]]\nname = \"fandhe-ai-hf-hub\"\nversion = \"0.13.0\"\ndependencies = [\n \"fandhe-ai\",\n]\n\n[[package]]\nname = \"fandhe-ai\"\nversion = \"0.13.0\"\ndependencies = [\n \"serde\",\n]\n";
+    let deps = facade_lock_dependencies(good).expect("fandhe-ai ブロックを見つけられない");
+    assert_eq!(deps, vec!["serde".to_string()]);
+    let none = "[[package]]\nname = \"fandhe-ai-hf-hub\"\ndependencies = [\n \"fandhe-ai\",\n]\n";
+    assert!(facade_lock_dependencies(none).is_none());
+}
+
+// ---------------------------------------------------------------------------
 // イシュー #3254: 常駐学習ステップの公開面（P1〜P7）の正ガード
 // （決定記録 `docs/compat-resident-train-step-decision.md` §4・§8・§14）
 // ---------------------------------------------------------------------------

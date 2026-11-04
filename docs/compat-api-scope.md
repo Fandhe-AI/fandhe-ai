@@ -155,6 +155,12 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
   いずれも `_` 分岐を持つ形で参照を更新済み（`backend-cpu::
   fused_elementwise::eval_one` 等）であるため、この一般論はここには
   適用されない
+- **限定例外: `fandhe-ai-hf-hub`（イシュー #3847）**: HF Hub 連携の補助クレートで、
+  facade の公開 API だけに依存する。`crates/hf-hub/tests/api_surface.rs` の
+  `EXPECTED_LIB_PUBLIC` に限りサポート対象とし、内部クレートへの直接依存は持たない。
+  `HfHub::download` は `pub(crate)` のままでサポート対象外。facade は本クレートに依存しない
+  （`crates/facade/tests/api_surface.rs::facade_does_not_depend_on_hf_hub` で担保）。
+  承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>
 
 ## 1. 対象範囲（in scope）
 
@@ -2964,3 +2970,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（イシュー #3845・親 #3711。承認: #3770 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145>〉）**: safetensors の dtype 混在読込（読込側）として `SafetensorsTensor`・`SafetensorsDtype`・`load_safetensors_typed`・`load_safetensors_typed_from_bytes`・`require_keys_typed` を facade に追加のみで公開した。対応 dtype は 7 種（F32／F16／BF16／F64／I32／I64／BOOL）で、それ以外と BOOL の 0／1 以外は fail-closed。既存の `*_f32` は不変。公開状態: 読込側は公開済み、書出側（`save_safetensors_typed`・`save_safetensors_typed_to_bytes`）は #3846 で追記。設計・実装記録は `docs/facade-safetensors-exposure-decision.md` §13・§14。
 
 **適用記録（イシュー #3846・親 #3711。承認: #3770 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145>〉）**: safetensors の dtype 混在書出（書出側）として `save_safetensors_typed`・`save_safetensors_typed_to_bytes` を facade に追加のみで公開した。読込側（#3845）と合わせて B5 の公開名は 7 種の dtype（F32／F16／BF16／F64／I32／I64／BOOL）を読み書きできる。書出は値を bit 単位で保ち、暗黙の型変換を行わない（f32 からの縮小は呼び出し側の明示 opt-in `SafetensorsTensor::from_f32`）。キー昇順の決定的出力と一時ファイル＋`rename` は `*_f32` と同じ契約で、既存の `*_f32` は不変。公開状態: 公開済み（読込側・書出側とも）。設計・実装記録は `docs/facade-safetensors-exposure-decision.md` §13・§15。
+
+**適用記録（イシュー #3847・親 #3711。承認: #3771 の所有者の回答コメント〈2026-11-01、<https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>〉）**: §0 に `fandhe-ai-hf-hub` の限定例外を追加した。サポート対象の公開面は `HfRepoId`・`Revision`・`CommitSha`・`HfHub::{new, registry, resolve_revision, list_files}`・`CachedModel`・`RepoFile`・`HfError` ほか `EXPECTED_LIB_PUBLIC` の範囲で、`download` は含まない。facade の公開面は不変。facade が hf-hub に依存しないことを `facade_does_not_depend_on_hf_hub`（manifest の全依存節と `Cargo.lock` の 2 層）と自己テスト `hf_hub_guard_detects_disguised_dependencies` で固定した。公開状態: 未公開（crates.io への実公開は Phase 11・0.14.0 lockstep）。依存・tolerance・baseline・`unsafe`・`docs/spec` は不変。設計・実装記録は `docs/hf-hub-integration-design.md` §10.13。
