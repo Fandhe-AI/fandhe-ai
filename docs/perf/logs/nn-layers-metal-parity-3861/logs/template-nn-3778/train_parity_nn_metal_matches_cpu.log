@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/train_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/train_gpu_parity-9152d234530cb15d)
+
+running 1 test
+test train_parity_nn_metal_matches_cpu ... 
+thread 'train_parity_nn_metal_matches_cpu' (31026809) panicked at crates/facade/tests/common/train_gpu_parity.rs:193:9:
+undetermined: 族 nn の登録が 0 件
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    train_parity_nn_metal_matches_cpu
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p fandhe-ai --test train_gpu_parity`
+rc=101

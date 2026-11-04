@@ -1,0 +1,22 @@
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/tensor-core)
+   Compiling fandhe-ai-backend-metal v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/backend-metal)
+   Compiling fandhe-ai-backend-cuda v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/autodiff)
+   Compiling bench-harness v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/bench-harness)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.83s
+  Executable tests/grouped_optimizer_step_parity.rs (<home>/work/target-fandhe-ai/debug/deps/grouped_optimizer_step_parity-5be70e0debcc3b78)
+   Compiling fandhe-ai-tensor-core v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/tensor-core)
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/backend-cpu)
+   Compiling fandhe-ai-backend-metal v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/backend-metal)
+   Compiling fandhe-ai-backend-cuda v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/autodiff)
+   Compiling fandhe-ai-backend-rocm v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/backend-rocm)
+   Compiling bench-harness v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/onnx-interop)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.92s
+  Executable tests/device_param_store_param_groups_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/device_param_store_param_groups_backend_parity-a08a12d080390f30)
+   Compiling fandhe-ai v0.13.0 (<home>/work/rust-ai-library-run-3863/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+  Executable tests/train_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/train_gpu_parity-9152d234530cb15d)

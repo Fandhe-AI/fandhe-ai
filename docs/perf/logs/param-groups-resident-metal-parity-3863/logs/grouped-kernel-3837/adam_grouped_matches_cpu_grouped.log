@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running tests/grouped_optimizer_step_parity.rs (<home>/work/target-fandhe-ai/debug/deps/grouped_optimizer_step_parity-5be70e0debcc3b78)
+
+running 1 test
+test adam_grouped_matches_cpu_grouped ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.23s
+
+rc=0
