@@ -43,6 +43,33 @@ ONNX 族は #3842 の公開形（`OnnxModel::bind_autograd`）でつないだ。
 （route は H。11 op はホスト実行）で、CI の自己検査は `onnx_family_passes_cpu_against_cpu`。結果欄は未実測のまま
 （#3864・#3865）。
 
+## nn・optim 族の登録行（#4026）
+
+実機 parity は #3860〜#3863 で未実測（結果欄は未実測のまま）。tolerance・baseline・閾値は変えていない。
+全行 `Judge::Req2`（骨格に Linear／Conv の GEMM が入るため。optim も `docs/autodiff-param-groups-decision.md`
+§19.5 (3) が GPU 対参照を REQ-2 と定めるため）。
+
+- 量: nn 族は `forward`・`loss`・`grad_p<i>`（スロット順）・`loss_after_step`（ホスト SGD 1 step 後の loss）。
+  `Var` グラフ行（bilinear・similarity）は `loss`・`grad_p<i>`・`loss_after_step`。optim 族は N step 後の `param_*`
+- 選定規則: 追跡表の「実機 parity」列が #4026 待ちだった 7・9〜15・22 行。8 行（独自 `Module`）は新しい数値経路がなく対象外
+- FractionalMaxPool の行は共有 RNG に依存するため各 forward の直前で `manual_seed` を呼ぶ。実機は `--test-threads=1` で走らせる
+
+| 行（`_s1`／`_s2`） | 追跡表 | route | 骨格 |
+|---|---|---|---|
+| `nn_upsample_scale_factor_train_step` | 7 | K | conv2d → upsample（bilinear）→ linear |
+| `nn_shrink_train_step` | 9 | K | conv2d → hardshrink → softshrink → linear |
+| `nn_bilinear_train_step` | 10 | K | `Var::bilinear` → MSE |
+| `nn_batch_norm3d_train_step` | 11 | K | conv3d → batch_norm3d → relu → linear |
+| `nn_similarity_distance_train_step` | 12・13 | H | matmul → cosine_similarity・pairwise_distance |
+| `nn_channel_shuffle_train_step` | 14 | K | conv2d → channel_shuffle → conv2d → linear |
+| `nn_adaptive_pool3d_train_step` | 15 | H | conv3d → adaptive avg／max pool3d → linear |
+| `nn_lp_pool_train_step` | 15 | H | conv2d → lp_pool2d → linear |
+| `nn_fractional_max_pool_train_step` | 15 | H | conv2d → fractional_max_pool2d → linear |
+| `optim_param_groups_resident_{sgd,adam,adamw}` | 22 | K | param groups 常駐更新 対 ホスト `step_with_groups` |
+
+CI の自己検査は `nn_family_passes_cpu_against_cpu`・`optim_family_passes_cpu_against_cpu`・
+`every_declared_family_has_cases`（登録 0 件の族を防ぐ）。
+
 ## Phase 10 での手順
 
 1. `RULE.txt` を `docs/perf/logs/<名前>-<issue 番号>/RULE.txt` へ写し、`<...>` を埋める
