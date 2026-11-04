@@ -67,7 +67,7 @@ impl SpeculativeConfig {
 /// `logits`（`[1, l_new, vocab]`。形状は `validate_forward_step_output` で検証済み）の
 /// 位置 `pos` の行を取り出す。非有限値を含む行は拒否する。greedy／サンプリング両版が
 /// 「トークン選択に使う位置だけ」検査するための共通入口。
-fn row_at(
+pub(super) fn row_at(
     logits: &Tensor<f32>,
     pos: usize,
     l_new: usize,
@@ -96,7 +96,7 @@ fn row_at(
 }
 
 /// 位置 `pos` から greedy にトークンを選ぶ。
-fn greedy_token_at(
+pub(super) fn greedy_token_at(
     logits: &Tensor<f32>,
     pos: usize,
     l_new: usize,
@@ -111,7 +111,7 @@ fn greedy_token_at(
 /// f32 重みを index 順の `f64` 総和で確率へ正規化する（`Generator::multinomial` の
 /// 累積と同じ規則。設計記録 §20.3。`p`・`q` を同じ規則で正規化し生の重みを確率として
 /// 扱わない）。総和が 0 以下・非有限、または要素が負・非有限なら `Err`。
-fn normalize_f64(weights: &[f32]) -> Result<Vec<f64>, AutodiffError> {
+pub(super) fn normalize_f64(weights: &[f32]) -> Result<Vec<f64>, AutodiffError> {
     let mut sum = 0.0f64;
     for &w in weights {
         if !w.is_finite() || w < 0.0 {
@@ -132,7 +132,7 @@ fn normalize_f64(weights: &[f32]) -> Result<Vec<f64>, AutodiffError> {
 /// 受理確率 `min(1, p(x)/q(x))` を `[0, 1]` に収めて `f32` で返す。`q(x) <= 0`
 /// （draft が引いたトークンの確率が 0 = 内部不整合）や非有限は `Err`
 /// （RNG を引く前に fail-closed）。`p == q` なら厳密に `1.0`。
-fn acceptance_prob_f32(p_x: f64, q_x: f64) -> Result<f32, AutodiffError> {
+pub(super) fn acceptance_prob_f32(p_x: f64, q_x: f64) -> Result<f32, AutodiffError> {
     if !q_x.is_finite() || q_x <= 0.0 || !p_x.is_finite() || p_x < 0.0 {
         return Err(AutodiffError::InvalidArgument(
             "generate_speculative: 受理確率の計算に使う q(x) が 0 以下、または確率が非有限"
@@ -144,7 +144,7 @@ fn acceptance_prob_f32(p_x: f64, q_x: f64) -> Result<f32, AutodiffError> {
 
 /// 残差分布 `max(0, p - q) / Z` を `multinomial` へ渡す f32 重みで返す。`Z <= 0`
 /// または非有限（`p == q` 等）は `Err`。非支持位置（`p_i <= q_i`）は厳密に `0.0`。
-fn residual_weights_f32(p: &[f64], q: &[f64]) -> Result<Vec<f32>, AutodiffError> {
+pub(super) fn residual_weights_f32(p: &[f64], q: &[f64]) -> Result<Vec<f32>, AutodiffError> {
     if p.len() != q.len() {
         return Err(AutodiffError::InvalidArgument(
             "generate_speculative: p と q の語彙長が不一致（内部不整合）".to_string(),
@@ -161,7 +161,7 @@ fn residual_weights_f32(p: &[f64], q: &[f64]) -> Result<Vec<f32>, AutodiffError>
 }
 
 /// `weights`（長さ `vocab`）から `multinomial` で 1 トークン抽出する（RNG を 1 回消費）。
-fn sample_from(
+pub(super) fn sample_from(
     rng: &mut Generator,
     weights: Vec<f32>,
     context: &str,
@@ -181,7 +181,7 @@ fn sample_from(
 }
 
 /// 受理確率 `a` で Bernoulli 判定する（RNG を 1 回消費）。`true` なら受理。
-fn accept_draw(rng: &mut Generator, a: f32) -> Result<bool, AutodiffError> {
+pub(super) fn accept_draw(rng: &mut Generator, a: f32) -> Result<bool, AutodiffError> {
     let t = Tensor::new(vec![a], &[1]).map_err(AutodiffError::Shape)?;
     let out = rng
         .bernoulli(&t)
@@ -243,7 +243,7 @@ fn rewind_to<M: AutoregressiveModel + ?Sized>(
 /// サンプリング版の検証（設計記録 §20.4）。位置 `i = 0..k_eff` で `a = min(1, p/q)` を求め
 /// （RNG を引く前に検査）、bernoulli が 0 なら棄却して残差から補正トークンを抽出する。
 /// 全受理なら位置 `k_eff` の重みから bonus を抽出する。`(n_acc, 追加トークン)` を返す。
-fn verify_sampling(
+pub(super) fn verify_sampling(
     rng: &mut Generator,
     logits: &Tensor<f32>,
     drafts: &[i32],

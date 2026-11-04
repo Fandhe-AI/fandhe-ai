@@ -829,6 +829,8 @@ tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec` は不変�
 
 ### 29.0 位置づけ・承認根拠・境界・調査事実
 
+> → #3770 で承認済み（所有者回答 2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145）。論点 4 は B2、`generate_stateful` は追加しない。autodiff 側の実装記録は §30（#3848）。以下の本文は承認前の記述を残す。
+
 - **承認根拠: 未承認（#3770 論点 4 の回答待ち）**。§19.10 は保留だったため D-A（#3018 コメント 6111643437）の範囲に入らない。本節は D-A を承認根拠として引かず、得ていない承認は書かない
 - 項目番号: issue・#3770・#3848・#3849 は「項目 30」と書くが、追跡表 `docs/compat-matrix-ari-tracker.md` ではこの項目は **# 29**（推論・サービング行）。更新するのは # 29 行だけ
 - 後続 issue: #3848（autodiff の trait・`stateful.rs`・`generate_speculative_stateful`・単体／結合テスト。facade 変更なし）、#3849（`step_stateful`・facade の `pub use`・`api_surface.rs` の反転と新設・doctest・適用記録・追跡表・#3780 移行ノート。#3848 に依存）
@@ -983,3 +985,33 @@ impl BatchScheduler {
 - セキュリティ観点: A03（`KvCache` に任意 `Tensor` を入れる経路は作らず、型が合わなければ要求を切り離す）、A04（B1 は fail-open のため不採用。`SchedulerLimits` の 3 上限と検査順 1〜7 は不変。`State` のサイズは利用者の責任）、A06（依存・`unsafe` なし）、A08（承認を代行・記述しない）、A09（`Debug` は件数のみ）、A02（`Generator` は非暗号の xorshift64* で、生成 token をセキュリティ用途に使わない既存注記を引き継ぐ）
 - スコープ外: §29.0 の境界のとおり。起票は所有者承認後
 - PR は `Closes #3763`（設計記録の追記が完了条件）、#3848・#3849・#3770 は `Refs`
+
+## 30. 実装記録（#3848・親 #3719。autodiff 側の前半）
+
+承認の根拠は #3770 の所有者回答（2026-11-01、https://github.com/Fandhe-AI/fandhe-ai/issues/3770#issuecomment-6554565145）の 1 件だけで、これ以上の承認は主張しない。依存・`unsafe`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance・baseline・`docs/spec` は変更していない。
+
+### 30.1 実装した範囲（§29.0 の分担）
+
+| 項目 | 内容 |
+|------|------|
+| `crates/autodiff/src/generate/stateful.rs`（新設） | `StatefulAutoregressiveModel`（§29.0.2 の逐語。`State` に境界なし）、`generate_speculative_stateful`、非公開の `forward_checked_stateful`／`rewind_stateful`、単体テスト 11 件 |
+| `generate/speculative.rs` | モデル非依存の純関数 8 件（`row_at`・`greedy_token_at`・`normalize_f64`・`acceptance_prob_f32`・`residual_weights_f32`・`sample_from`・`accept_draw`・`verify_sampling`）を `fn` から `pub(super) fn` にしただけ（見える範囲は `generate` 配下）。`generate_speculative` の本体は不変で既存テストは無変更 |
+| `crates/autodiff/tests/nn_generate_speculative_stateful.rs`（新設） | 整数の隠れ状態モデルと `generate` の Greedy 完全一致、`State = Vec<KvCache>` と `generate_speculative` の bit 一致（Greedy・TopK・Temperature）、C1・C2・C4・C5 |
+
+実機依存のテストは新設しない（§29.4）。新しいカーネル・バックエンド経路が無く、`#[ignore]` で分けるものが無い。
+
+### 30.2 検査順
+
+1〜7 は `generate_speculative` と同じ条件・同じ順（メッセージ接頭辞は `generate_speculative_stateful:`）。8. `target.init_state()`、9. `draft.init_state()`。`max_length == T` の早期 return より前に置くので、そのときも `init_state` は呼ばれ forward は 0 回。`num_kv_layers() == 0` の拒否は置かない（新しい trait に無く、純 RNN は KV 層 0 が正当）。状態の長さは外から検査できないため `check_snapshot_len` 相当は無く、ラウンド不変条件は利用者の契約（rustdoc）。
+
+### 30.3 §29.0.2 からの明確化（巻き戻し失敗時の扱い）
+
+§29.0.2 は「`restore_state` や再 forward が失敗したら `Err` を返す前に退避時点へ戻す努力をする」と書く。しかし `restore_state` は `saved` を値で消費するため、戻すには 2 本目の `save_state` が要り、毎ラウンドの退避コストが倍になる。そこで **2 本目の退避は取らず、失敗したら直ちに `Err` を返す**。`target_state`／`draft_state` は関数内の `init_state` 由来のローカル値で、`Err` と共に drop されて呼び出し側から観測できないためである（`kv_rewind` が復元するのは呼び出し側に見えうるスライスを扱うからで、前提が異なる）。例外は利用者の `State` が `Arc` などで外部と共有される場合で、失敗後の中身は利用者の責任とし rustdoc に書いた。§29.0.2 からの逸脱なので、所有者への報告事項とする。
+
+### 30.4 #3849 への申し送り
+
+`BatchScheduler::step_stateful`、`Active` の型消去（`Option<Box<dyn Any + Send + Sync>>`）、fail-closed の (a)〜(d)、`BatchScheduler: Send + Sync` の正のプローブ、facade の `pub use`、`api_surface.rs` の否定ガードの反転と新設（`stateful.rs` のインベントリを含む。#3848 では足していない。既存ガードは無変更で緑）、facade 経由の成功例 doctest、`compat-api-scope.md` の適用記録（§29.7）、移行ノートの公開名。`speculative.rs` のモジュール doc にある古い記述（「検査順 8」「論点 3」）は差分最小化のため本 PR では直していない。
+
+### 30.5 変えないもの・範囲外
+
+B > 1 の stateful speculative、`step_batched` の stateful 版、stateful 版の paged attention、KV 形と stateful 形を混在させる入口、`generate_stateful`（#3770 で足さないと決定）。
