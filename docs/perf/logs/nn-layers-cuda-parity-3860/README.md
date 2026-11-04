@@ -16,7 +16,7 @@ PairwiseDistance・ChannelShuffle・3 次元適応プーリング／LPPool／Fra
 **要対応（所有者へ報告）: 雛形 `crates/facade/tests/train_gpu_parity.rs` の nn 族は登録 0 件。** `train_parity_nn_cuda_matches_cpu` は
 `undetermined: 族 nn の登録が 0 件`（`crates/facade/tests/common/train_gpu_parity.rs:193`）で panic し、exit 101・判定 undetermined だった。
 構造上 pass にならないため、RULE.txt で事前に宣言したとおり、各実装 issue が足した `#[ignore]` の CUDA parity テスト（各 PR が #3860 へ
-申し送ったもの）を測定対象にした。雛形の nn 族は完了判定に数えていない。雛形に nn 族の行を足すかどうかは所有者の判断を待つ。
+申し送ったもの）を測定対象にした。雛形の nn 族は完了判定に数えていない。所有者の判断（2026-11-04）により、雛形への nn 族の追加は #4026 で行う。雛形（学習ステップ）は #4026 の登録待ちで未実測であり、#3860 は #4026 のマージ後に雛形テストを再計測してから閉じる（この記録の PR は `Refs`）。
 
 - 対象テストの実在は対象コミットで `--ignored --list` により確かめた（Linux でも cfg で除かれない。`metal_*` だけが `cfg(target_os = "macos")`）。
   ノード上でも各テストの前に `--list` の選択件数が 1 であることを確かめた（`summary.tsv` に undetermined が無い）。
