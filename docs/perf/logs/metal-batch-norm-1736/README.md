@@ -82,9 +82,11 @@ tolerance／baseline 定数の変更はなし（本イシューでは提案・�
 
 本ディレクトリのログ（`*.log`・`env_info.txt`）は 2026-09-16 の Mac セッションで取得済み。結果一覧と判定は `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §2 と、design doc の該当節を参照。
 
-## #4031 追記: 2e20 級入力の overflow 耐性（未実測）
+## #4031 追記: 2e20 級入力の overflow 耐性（実測済み・pass）
 
-状態: **未実測**（`<metal-node>` で未実施。実測値は推測で書かない）。
+状態: **実測済み（pass）**（2026-11-05・`<metal-node>`・`82326b253`。1 本実行・exit 0・`1 passed; 0 failed`。
+記録は `docs/perf/logs/metal-batch-norm-2e20-4031-rerun2/`）。
+先の 2 回は無効: `docs/perf/logs/metal-batch-norm-2e20-4031/` は展開ツリーの上書き、`docs/perf/logs/metal-batch-norm-2e20-4031-rerun/` は無効回のビルド成果物の再利用。実行時は下のコマンドの部分一致フィルタを `--exact` の完全一致に替えた。
 
 実行コマンド:
 
@@ -95,4 +97,4 @@ cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity batch_n
 
 事前登録判定規則: `out`・`mean` は REQ-2 統一複合判定、`var` は
 `docs/batch-norm-ops-design.md` §9.8 のクラス一致。fail 0 なら pass。
-保存するログ名: `batch_norm_parity_2e20_4031.log`（内部ホスト名は含めない）。
+保存したログ名: `batch_norm_parity_2e20_4031.log`（内部ホスト名は含めない。`docs/perf/logs/metal-batch-norm-2e20-4031-rerun2/` に置いた）。

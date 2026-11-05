@@ -1,0 +1,5 @@
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<home>/work/rust-ai-library-run-4031-rerun/crates/backend-cpu)
+   Compiling bench-harness v0.13.0 (<home>/work/rust-ai-library-run-4031-rerun/crates/bench-harness)
+   Compiling fandhe-ai-backend-metal v0.13.0 (<home>/work/rust-ai-library-run-4031-rerun/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 5.38s
+  Executable tests/batch_norm_parity.rs (<home>/work/target-fandhe-ai/release/deps/batch_norm_parity-dc6fa32b852194cd)

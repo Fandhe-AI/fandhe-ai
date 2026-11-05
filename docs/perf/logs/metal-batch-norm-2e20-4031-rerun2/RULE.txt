@@ -1,0 +1,120 @@
+# RULE.txt — Metal の BatchNorm で 2e20 級の入力が途中で overflow しないことの実機 parity の 2 回目の測り直し（事前登録。イシュー #4031）
+#
+# 1 回目 ../metal-batch-norm-2e20-4031/ は実行中に展開ツリーが上書きされ無効。測り直し ../metal-batch-norm-2e20-4031-rerun/ は、
+# 検証対象の libfandhe_ai_backend_metal と libfandhe_ai_tensor_core が無効回のビルド成果物の再利用だったため無効。どちらも所有者の判断。
+# 判定（入力・腕・judgment・pass・fail）は rerun の RULE.txt と同じ。足したのは次の 2 点で、どちらも undetermined の条件を増やす方向で pass を緩めない:
+#   1. --no-run の前に workspace の全メンバーの release 成果物を消す（clean）
+#   2. ビルド後に成果物の更新時刻がロック取得より後であることを確かめる（build_artifacts）
+#
+# 判定規則は docs/perf/logs/metal-batch-norm-1736/README.md「#4031 追記」節の事前登録判定規則を写した。期待値の決め方の正は
+# docs/batch-norm-ops-design.md §9.8。テストは PR #4039（main 0c79dfc2f）で追加済み。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<metal-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-05T03:31:55Z（コミットの直前に date -u で取った値。実機での実行より前。実機結果を見た後に入力・判定・コマンド・この RULE を変えない）
+issue: 4031
+machine: <metal-node>（Mac mini・Apple M4 10 コア・メモリ 16GB・macOS）。Linux／M4 Max 開発機では測らない・記録しない
+  （docs/real-hardware-verification-env.md §1・§7.1）。parity 測定で時間計測ではないため専有条件は課さない。
+  メモリは他の利用者と共有しているため、空き率（memory_pressure）と負荷を実行前後で env_info.txt に記録する
+target_commit: 86797e1b75a226ade4758880a57f98e19bd1329c（origin/main。テストを追加した 0c79dfc2f を含み、crates/・Cargo.toml・Cargo.lock・
+  rust-toolchain.toml は 0c79dfc2f と同一）
+  条件: 実行時の HEAD で `git diff --quiet 86797e1b75a226ade4758880a57f98e19bd1329c <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+source_fingerprint: faf953ec518fde73cec4d3354e82941223306ffd2d2d16a419a36ff24e3f84c8
+  crates/・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの SHA-256 を名前順に並べた一覧の SHA-256。上の target_commit の git archive から計算した。
+  再現方法: git archive <commit> crates Cargo.toml Cargo.lock rust-toolchain.toml を空のディレクトリへ展開し、
+  find crates Cargo.toml Cargo.lock rust-toolchain.toml -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 shasum -a 256 | shasum -a 256
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_metal_parity.sh が検査する）。
+  HEAD はこの RULE.txt と run_metal_parity.sh だけを入れたコミット。転送後、起動前にノード側で .rev-stamp を読み、送信側の HEAD と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-4031-rerun2、出力先は <home>/work/out-4031-rerun2（他のセッションと重ならない固有の名前。既存の
+  rust-ai-library-run-4031・out-4031・rust-ai-library-run-4031-rerun・out-4031-rerun は再利用しない）。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai（内蔵 SSD が小さいため target はこの 1 つだけ）。
+  転送は docs/real-hardware-verification-env.md §3・§7.1 の rsync だけ（.git・.claude/worktrees/・.codex/・.env*・settings.local.json・.venv*/・*.local.md は送らない）
+hw_lock: 送信側の手順。rsync の直前に、<home>/work/.fandhe-hw-lock が無いこと、展開先と出力先が存在しないこと、他の cargo／rustc が無いことを確かめる。
+  どれかが成立しなければ転送せず停止する（待たない・奪わない）。次に mkdir でロックを取り、owner に「#4031 rerun2 <UTC>」を書いてから転送と実行を行う。
+  スクリプトは owner を引数で受け取り、一致するときだけ引き継ぐ。終了時は失敗・中断でも外す（スクリプトの trap。起動前に失敗したら送信側が、自分の owner のときだけ外す）。
+  テストの前後で owner が自分のままか確かめ、失っていればその回を undetermined にする。ほかの利用者のプロセスは止めない
+tree_check: スクリプトはビルド前とテストの前後で、.rev-stamp の内容・スクリプトの SHA-256・ソースの指紋を確かめ、env_info.txt に *_now として実行前後の値を書く。
+  ビルド前に source_fingerprint と不一致なら停止、テストの前後で開始時と不一致ならその回を undetermined にする（前回の上書きの検出漏れを塞ぐ）。
+  回収後に送信側でも、ノードの .rev-stamp・指紋を読み直して照合する
+clean: スクリプトは --no-run の前に、展開ツリーで cargo metadata --no-deps --format-version 1 の packages[].name を読み、全メンバーを
+  cargo clean --release -p <name> で消す（4 クレートに絞らない）。crates.io の依存は消さない。CARGO_TARGET_DIR が <home>/work/target-fandhe-ai でなければ停止する。
+  メンバーの一覧と cargo の出力は clean.log に残す。名前を読めない、または clean が失敗したら停止する（undetermined）
+build_artifacts: ビルド後（--list の後・テストの前）に、次のすべての更新時刻がロック取得の時刻より後（秒単位で厳密に後）であることを確かめ、一覧を build_artifacts.txt に書く。
+    テストバイナリ（build.log の Executable 行。ちょうど 1 行であること）
+    <target>/release/deps の libfandhe_ai_*.rlib・libfandhe_ai_*.rmeta のすべて（名前の条件は所有者の指示のとおり）
+    <target>/release/deps の libbench_harness-*.rlib・libbench_harness-*.rmeta（テストにリンクされるメンバーで、上の名前に当たらないので足した）
+  ロック取得の時刻は、ノードの owner ファイルの mtime とする（送信側の時計とのずれを受けない）。1 つでも後でなければテストを実行せず undetermined。
+  libfandhe_ai_backend_metal・libfandhe_ai_tensor_core・libfandhe_ai_backend_cpu・libbench_harness の rlib が無い回、テストバイナリが無い回も同じ。
+  実行ログの Running 行のバイナリが、確かめたテストバイナリと違う回も undetermined
+script: 同ディレクトリの run_metal_parity.sh（../metal-batch-norm-2e20-4031-rerun/run_metal_parity.sh の複製。差分はヘッダの R4・R5。
+  コミット済みのものをそのまま送る。env_info.txt の script_sha256 で照合）。非対話 SSH では PATH が通らないため zsh -lc で包み、
+  macOS には setsid が無いので nohup で切り離して起動する:
+    zsh -lc "cd <tree> && CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai nohup bash \
+      <tree>/docs/perf/logs/metal-batch-norm-2e20-4031-rerun2/run_metal_parity.sh <tree> <out> '<owner>' \
+      > \$HOME/work/run-4031-rerun2.log 2>&1 < /dev/null &"
+  完了はスクリプトの "done:" 行とロックの解放をポーリングで確かめる
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::assert_parity）の定数は
+  fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない。判定の helper（テストファイル内の
+  assert_var_parity_with_nonfinite_class）も変えない
+switches_left_default: GPU linalg ゲートは OFF のまま、Metal split-K の実行時トグルは既定のまま（触らない。環境変数で切替を変えない）
+timeout: macOS に timeout(1) が無いため外部 timeout は付けない（Metal 前例 #3166・#3169・#3858・#3859・#3861・#3863 と同じ）。
+  テスト本体が 1800 秒を超えて終わらなければ外から止め、その回を undetermined とする
+
+# ---- 対象テスト ----
+test: cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity -- --ignored --exact --nocapture --test-threads=1 batch_norm_train_2e20_scale_has_no_intermediate_overflow_and_matches_cpu_reference
+  （crates/backend-metal/tests/batch_norm_parity.rs。cfg(target_os = "macos")・#[ignore]。1736 README の #4031 節のコマンドの部分一致フィルタを
+  --exact の完全一致に替え、--test-threads=1 を足した。どちらも選択と並列度だけに効き判定には影響しない）
+
+# ---- 腕 ----
+arms: A=MetalBatchNorm::run_batch_norm_train_f32（Metal の soft-f64 カーネル batch_norm_train_f32）
+  B=fandhe_ai_backend_cpu::run_batch_norm_train_f32（f64 で蓄積し最後に 1 回だけ f32 へ丸める CPU 参照）
+
+# ---- 入力（テストコードが正。ここは写し）----
+input: n=3 c=3 spatial=13（チャネルあたり M=39）。Xorshift64Star(0x4031) の値に、ch0 は 2e20、ch1 は 1e18、ch2 は 1.0 を掛ける。eps=1e-5
+  affine: 「affine なし」と「affine あり」（w=Xorshift64Star(0x4032)、b=Xorshift64Star(0x4033)）の 2 通り
+preconditions: テスト内で確かめる。ch0 の f64 分散が有限かつ f32::MAX 超、CPU の var[0] が +inf、CPU の var[1]・var[2] が有限
+
+# ---- 判定（判定契約はテストコードが正。ここでは変えない）----
+judgment:
+  out: 全要素が有限であること、かつ assert_parity による REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）
+  mean: assert_parity による REQ-2 統一複合判定
+  var: §9.8 のクラス一致（assert_var_parity_with_nonfinite_class）。CPU 参照が +inf のチャネル（ch0）は +inf 同士、
+    有限チャネル（ch1・ch2）は assert_parity による REQ-2 統一複合判定
+  説明: §9.8 のとおり、中間 overflow の主証拠は out の REQ-2 一致である。var の +inf 一致だけでは証拠にならない
+  説明: テストは pass のとき値を出力しない。pass の記録に残るのはテストの合否だけで、誤差の値は記録されない
+  範囲外: infer 経路・facade／BackendOps 経路・CUDA（§9.8 の対象外）
+pass: exit 0 で、出力に "running 1 test" と "test result: ok. 1 passed; 0 failed" があること
+fail: exit 非 0（assert・panic を含む）。Metal と CPU は自前バックエンド同士なので判定不能にしない
+undetermined: ノードに届かない、ビルドできない、1800 秒超で外から止めた回、--list の不一致、実機ロックの取得不能・喪失、
+  他の cargo／rustc の並走、自己検査の失敗、exit 0 でも running 1 test と 1 passed が揃わない回（0 本実行を含む）、
+  tree_check の不一致（テストの結果によらない）、clean の失敗、build_artifacts の不成立。pass として扱わない
+completion: 上の pass を満たし、build_artifacts の確認も成立したときだけ #4031 を Closes する。fail・undetermined なら Refs にして記録して止まり、所有者へ報告する
+
+# ---- run 数 ----
+runs: 1 回。時間の計測ではないので中央値は取らない。fail・undetermined の後に再実行して置き換えない。
+  再実行するなら RULE.txt を新しいディレクトリで登録し直す
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  0) 送信側で上の hw_lock の確認とロックの取得、転送、.rev-stamp の照合を行ってからスクリプトを起動する
+  1) 開始前に pgrep で他の cargo／rustc が無いことを確かめ、あれば停止する。tree_check の不一致でも停止する
+  1a) 上の clean を行う（clean.log）
+  2) cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity --no-run でビルドを終える（判定外。build.log）
+  3) cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity -- --ignored --exact --list <テスト名> で
+     ": test" で終わる行がちょうど 1 行であることを確かめる（list.log）。0 行または 2 行以上なら実行せず undetermined
+  3a) 上の build_artifacts を確かめる（build_artifacts.txt）
+  4) テストの前にも他の cargo／rustc が無いこと、tree_check が一致することを確かめ、なければ undetermined
+  5) 上の test のコマンドを 1 回だけ別プロセスで実行する
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を batch_norm_parity_2e20_4031.log に保存する（末尾に rc=）。終了コードは exit_code、
+  判定は summary.tsv（1 行。exit code・running 件数・test result 行・判定）に書く。実行前後の環境は env_info.txt、展開ツリーの
+  .rev-stamp は rev-stamp.txt、clean の記録は clean.log、成果物の一覧は build_artifacts.txt に保存する
+masking: ホスト名・ユーザー名・ホームのパスを <metal-node>／<user>／<home> へ置換する（前後が識別子文字でない場合のみ）。
+  漏れたら記録を捨てて取り直す（fail-closed）。回収ログは手で編集しない。回収後に送信側でも PR 差分全体をユーザー名・/Users/・
+  内部ドメイン・SSH 別名で grep し、0 件であることを確かめる
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail・undetermined が出ても tolerance・baseline・閾値・判定方式・判定の helper・入力・テストコード・この RULE を変えない。
+  再実行で置き換えない。panic メッセージの量（out・mean・var）・チャネル・値をそのまま引用して事実を記録し、README と PR に
+  「要対応」と書き、所有者へ報告して止まる。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
