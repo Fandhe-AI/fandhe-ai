@@ -1,0 +1,104 @@
+# RULE.txt — ONNX モデルの学習の GPU tape 実機 parity の測り直し（CUDA。事前登録。イシュー #4046。元の回は #3864）
+#
+# 元の回 ../onnx-train-cuda-parity-3864/ は #4044 の棚卸しで C（テストバイナリの由来を確かめられない）になった。
+# 判定（腕・形状・judgment・pass・fail・undetermined）は元の回の RULE.txt を写した。元の回との違いは次だけで、どれも pass を緩めない:
+#   1. 対象は onnx 族の 1 本だけ。scaffold 族（経路の自己検査。元の回でも完了判定に数えない）は実行しない
+#   2. 末尾に build_freshness: を足した（共有 target の成果物の再利用を防ぐ）
+#   3. スクリプトは雛形 ../hw-parity-run-template/run_parity_template.sh の複製（差分は固定値だけ）。下の script: と record: に、雛形に合わせて変えた点を書いた
+# 実測値を推測で埋めない。ホスト名・ユーザー名・ホームのパスは書かない。<cuda-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-05T06:22:03Z（コミットの直前に date -u で取った値。実機での実行より前。実機結果を見た後に入力・判定・コマンド・この RULE を変えない）
+issue: 4046
+machine: <cuda-node>（DGX Spark GB10・aarch64・sm_121）。parity 測定で時間計測ではないため専有条件は課さない。
+  常駐 compute プロセスの件数と GPU 使用率は、実行の前後に送信側で docs/real-hardware-verification-env.md §6.1 の形で確かめて README に書く
+  （元の回は env_info.txt に書いていたが、雛形の env_info は件数を持たない）。ほかのサービスのプロセスは止めない
+target_commit: ff71e77739d6f52f7831283226d39df9267131af（origin/main）
+  条件: 実行時の HEAD で `git diff --quiet ff71e77739d6f52f7831283226d39df9267131af <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+source_fingerprint: faf953ec518fde73cec4d3354e82941223306ffd2d2d16a419a36ff24e3f84c8
+  crates/・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの SHA-256 を名前順に並べた一覧の SHA-256。上の target_commit の git archive から計算した。
+  再現方法: git archive <commit> crates Cargo.toml Cargo.lock rust-toolchain.toml を空のディレクトリへ展開し、
+  find crates Cargo.toml Cargo.lock rust-toolchain.toml -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 shasum -a 256 | shasum -a 256
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_cuda_parity.sh が検査する）。
+  HEAD はこの RULE.txt と run_cuda_parity.sh だけを入れたコミット。転送後、起動前にノード側で .rev-stamp・スクリプトの SHA-256・ソースの指紋を読み、送信側と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-4046、出力先は <home>/work/out-4046（固有の名前。既存の展開先・出力先は再利用しない）。
+  CARGO_TARGET_DIR は <home>/work/target-fandhe-ai。
+  転送は docs/real-hardware-verification-env.md §3 の rsync だけ（ノードに git は無い。.git・.claude/worktrees/・.codex/・.env*・settings.local.json・.venv*/・*.local.md は送らない）
+hw_lock: 送信側の手順。rsync の直前に、<home>/work/.fandhe-hw-lock が無いこと、展開先と出力先が存在しないこと、他の cargo／rustc が無いことを確かめる。
+  どれかが成立しなければ転送せず停止する（待たない・奪わない）。次に mkdir でロックを取り、owner に「#4046 run <UTC>」を書いてから転送と実行を行う
+  （雛形の LOCK_OWNER_RE は「#<番号> <語> <UTC>」の 3 語を要求し、変更不要とされているので語 run を入れる）。
+  スクリプトは owner を引数で受け取り、一致するときだけ引き継ぐ。終了時は失敗・中断でも外す（スクリプトの trap。起動前に失敗したら送信側が、自分の owner のときだけ外す）。
+  テストの前後で owner が自分のままか確かめ、失っていればその回を undetermined にする（ロックを持たずに測った値は採らない）
+tree_check: スクリプトはビルド前とテストの前後で、.rev-stamp の内容・スクリプトの SHA-256・ソースの指紋を確かめ、env_info.txt に *_now として実行前後の値を書く。
+  ビルド前に source_fingerprint と不一致なら停止、テストの前後で開始時と不一致ならその回を undetermined にする。回収後に送信側でも、ノードの .rev-stamp・指紋を読み直して照合する
+script: 同ディレクトリの run_cuda_parity.sh（../hw-parity-run-template/run_parity_template.sh の複製。差分は固定値の 9 行だけ。コミット済みのものをそのまま送る。
+  env_info.txt の script_sha256 で照合）。ノード上で setsid nohup により切り離して起動する。
+  REQUIRED_LIBS は fandhe_ai に加えて、#3862 の optim 回の build.log で Compiling を確かめた残り 7 メンバーの lib 名を入れた（pass を緩めない）
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::compare）の定数は
+  fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない
+switches_left_default: TF32 opt-in は OFF のまま、GPU linalg ゲートは OFF のまま（触らない。環境変数で切替を変えない）
+
+# ---- 腕 ----
+# 腕 A（被検腕）は fandhe_ai::tape_for(Device::Cuda(0)) 経由。腕 B（参照腕）は CPU tape。
+arms:
+  onnx:     A=tape_for(Device::Cuda(0)) 上の OnnxModel::from_sequential → bind_autograd → forward → MseLoss(Mean) → backward
+            B=CPU tape 上の同じ手順（#3842 の公開形。reference: None）
+  tape_for が Err なら run 関数の Err となり undetermined（CPU への無言のフォールバックは無い）
+
+# ---- 形状（対象コミットの Case.shape を写す）----
+shapes:
+  onnx_from_sequential_forward_backward_s1: S1: batch=4 d_in=8 hidden=16 d_out=4 seed=0xC0FFEE
+  onnx_from_sequential_forward_backward_s2: S2: batch=5 d_in=13 hidden=17 d_out=7 seed=0xC0FFEE
+
+# ---- 判定（ケースごとに事前宣言する）----
+judgment:
+  onnx_from_sequential_forward_backward_s1: judge=Req2 route=H（対象コミットの CASES のコメントどおり、bind_autograd の 11 op の計算はホストで実行される）
+  onnx_from_sequential_forward_backward_s2: judge=Req2 route=H
+  量: forward・loss・grad_0_bias・grad_0_weight・grad_2_bias・grad_2_weight（各 require_nonzero=true）
+  説明: Req2 は compare の CompareReport::passes()（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）
+  説明: route H の pass は経路の parity であり、カーネル同士の parity ではない
+pass: コマンドが exit 0 で、出力に「running 1 test」と「1 passed; 0 failed」があること
+fail: TRAIN_PARITY 行に verdict=fail がある、または undetermined の印が無い非 0 終了
+undetermined: ノードに届かない、ビルドできない、timeout、--list の不一致、実機ロックの取得不能・喪失、自己検査の失敗、
+  登録 0 件の族、run 関数の Err、全ゼロの量（require_nonzero）、tree_check の不一致、build_freshness の不成立。pass として扱わない
+completion: 上の pass を満たし、build_freshness の確認も成立したときだけ #4046 を Closes する。fail・undetermined なら Refs にして記録して止まり、所有者へ報告する。
+  scaffold 族は実行しない。そのログの TRAIN_PARITY 行は onnx 族だけになり、scaffold 族は 0 行（未実行）と記録する。元の回の scaffold の値を今回の値として書かない
+
+# ---- run 数 ----
+runs: 1 回。時間の計測ではないので中央値は取らない。fail・undetermined の後に再実行して置き換えない。
+  再実行するなら RULE.txt を新しいディレクトリで登録し直す
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  0) 送信側で上の hw_lock の確認とロックの取得、転送、照合を行ってからスクリプトを起動する
+  1) 開始前に pgrep で他の cargo／rustc が無いことを確かめる。tree_check の不一致でも停止する
+  2) build_freshness の clean の後、cargo test -p fandhe-ai --test train_gpu_parity --no-run でビルドを終える（判定外。build.log）
+  3) cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --list train_parity_onnx_cuda_matches_cpu の出力で、
+     ": test" で終わる行がちょうど 1 件であることを確かめる（list_1.log）
+  4) build_freshness の time_check を行い、次を 1 回だけ別プロセスで実行する（--release は付けない。docs/real-hardware-verification-env.md §4.10）:
+     timeout 1800 cargo test -p fandhe-ai --test train_gpu_parity -- --ignored --exact --nocapture --test-threads=1 train_parity_onnx_cuda_matches_cpu
+external_timeout: timeout 1800。ハングを pass にしない。timeout は undetermined
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を train_parity_onnx_cuda_1.log に保存する（末尾に rc=）。終了コードは exit_code_1、判定は summary.tsv に書く。
+  TRAIN_PARITY 行を集計する。1 行に case・family・quantity・arm・route・judge・total・fail_count・max_abs_diff・mean_abs_diff・max_rel_err・verdict が入る。
+  --nocapture では最初の TRAIN_PARITY 記録が「test <名前> ... 」と同じ行に出るので、行頭に限らず数える（元の回の README と同じ数え方）。
+  onnx 族は 2 ケース × 6 量で 12 行のはず。12 行でない、または verdict=pass 以外の行があれば、pass と書かず所有者へ報告する（pass を緩めない）。
+  summary.tsv の verdict は exit code と test result 行で決まり、非 0 終了はすべて fail と書かれる（雛形は TRAIN_PARITY 行を見ない）。
+  非 0 終了のときの fail／undetermined は、上の fail・undetermined の定義でログの TRAIN_PARITY 行と panic メッセージから決め、README に書く
+masking: ホスト名・ユーザー名・ホームのパスを <cuda-node>／<user>／<home> へ置換する（前後が識別子文字でない場合のみ）。
+  漏れたら記録を捨てて、所有者へ報告する。回収ログは手で編集しない。回収後に送信側でも PR 差分全体をユーザー名・/home/・内部ドメイン・SSH 別名で grep し、0 件であることを確かめる
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail・undetermined が出ても tolerance・baseline・閾値・判定方式・判定の helper・入力・テストコード・この RULE を変えない。再実行で置き換えない。
+  TRAIN_PARITY 行と panic メッセージの行名・量・fail_count・max_abs_diff・max_rel_err をそのまま引用して事実を記録し、
+  README と PR に「要対応」と書き、所有者へ報告して止まる。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
+build_freshness:
+  背景: 共有 CARGO_TARGET_DIR の workspace メンバー成果物が前の回のものの再利用になりうる。条件と対策は
+    docs/real-hardware-shared-target-reuse-decision.md、手順は docs/real-hardware-verification-env.md §4.11
+  clean: build_then_run の 2) の前に、cargo metadata --no-deps の全メンバーへ cargo clean -p <名前> を実行する（--release なしなので dev プロファイル）。crates.io の依存は消さない
+  time_check: ビルド後、テストバイナリと全メンバーの lib 成果物（target/debug/deps の lib<名前>-*.rlib・.rmeta。facade 自身の libfandhe_ai-* を含む）の
+    更新時刻が、ロック取得（ノード上の owner ファイルの mtime）より秒単位で厳密に後であること。結果を build_artifacts.txt に保存する
+  undetermined: 古い成果物が 1 つでもある、ロックと同じ秒、必須 lib の欠落、テストバイナリの欠落、実行したバイナリが確かめたものと違う。全テストを実行しない
+  script: 同ディレクトリの run_cuda_parity.sh（雛形 docs/perf/logs/hw-parity-run-template/run_parity_template.sh の R4・R5 をそのまま含む）
