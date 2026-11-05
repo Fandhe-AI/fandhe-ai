@@ -1,0 +1,10 @@
+   Compiling fandhe-ai-tensor-core v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/tensor-core)
+   Compiling fandhe-ai-backend-cpu v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/backend-cpu)
+   Compiling fandhe-ai-autodiff v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/autodiff)
+   Compiling fandhe-ai-backend-cuda v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/backend-cuda)
+   Compiling fandhe-ai-backend-rocm v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/backend-rocm)
+   Compiling bench-harness v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/onnx-interop)
+   Compiling fandhe-ai v0.14.0 (<home>/work/rust-ai-library-run-4053-cuda/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.22s
+  Executable tests/f64_create_graph_facade.rs (<home>/work/target-fandhe-ai/debug/deps/f64_create_graph_facade-86d513369da7eea7)
