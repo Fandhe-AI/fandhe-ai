@@ -13,10 +13,10 @@ Metal の BatchNorm train カーネル（soft-f64）に 2e20 級の有限入力�
 
 ## 状態
 
-**要確認（所有者の判断待ち）: 実行中に展開ツリーが別セッションの rsync で上書きされた**（下の「実行中の展開ツリーの上書き」）。
-この回を有効とするかは所有者が判断する。そのため PR は `Refs #4031` とした。
+**無効（展開ツリーの上書きにより判定に使わない。#4031 は metal-batch-norm-2e20-4031-rerun/ で判定する）**（所有者の判断。理由は下の「実行中の展開ツリーの上書き」）。
+テストバイナリが事前登録コミット `a0ae7bdbc` ではなく上書き後の `cc3917d93` のツリーでビルドされ、rev_stamp と実行時のツリーが一致するという監査条件を満たしていない。
 
-テストの結果そのものは pass（2026-11-05・`<metal-node>`）。1 本実行、exit 0、`running 1 test`、
+この回のテストの結果は pass（2026-11-05・`<metal-node>`）だったが、#4031 の根拠にはしない。記録として残す。1 本実行、exit 0、`running 1 test`、
 `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.08s`（`batch_norm_parity_2e20_4031.log`・`summary.tsv`）。
 
 | 量 | 判定（RULE.txt の judgment。テストコードが正） | 結果 |
@@ -39,7 +39,7 @@ Metal の BatchNorm train カーネル（soft-f64）に 2e20 級の有限入力�
 - 回収物は手で編集していない。`SHA256SUMS` はこのディレクトリで `shasum -a 256 -c SHA256SUMS` が通る（7 ファイルすべて OK）。
   ホスト名・`/Users/`・ユーザー名の残存は 0 件（`<metal-node>`／`<user>`／`<home>` へマスク済み。送信側でも grep で確認）。
 
-## 実行中の展開ツリーの上書き（要確認）
+## 実行中の展開ツリーの上書き（無効の理由）
 
 同じ計測の指示を受けた別セッションが、同じ展開先 `<home>/work/rust-ai-library-run-4031` へ rsync した。その別セッションから連絡を受け、
 次のことを読み取りで確かめた。その別セッションの計測は起動しておらず、`out-4031` と実機ロックには触っていない（その別セッションの報告）。
