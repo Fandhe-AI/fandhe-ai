@@ -2659,8 +2659,10 @@ impl Tape {
     /// 勾配は付かない）。バックエンドが対応しない場合は `None`
     /// （fail-closed。例: Metal は f64 型自体が既定非対応）。`Some` が
     /// 返っても個々の演算が [`BackendError::Unsupported`] を返す場合が
-    /// ある（例: CUDA の `TypedOps<f64>` は 8 演算すべて
-    /// `Unsupported`）——`Some`/`None` は型としての対応可否のみを表す。
+    /// ある（例: CUDA の `TypedOps<f64>` は 8 演算ともネイティブカーネルで
+    /// 実装済み〈イシュー #2060〉だが、`gemm` は素朴カーネルのグリッド上限を
+    /// 超える `m`〈1,048,560 超〉を `Unsupported` で拒否する）——`Some`/`None` は
+    /// 型としての対応可否のみを表す。
     ///
     /// REQ-12: 返すのは `TypedOps<f64>` の不変借用のみで、`BackendOps`
     /// 自体の注入経路は増えない（`fandhe_ai_autodiff::Tape::ops()` は
