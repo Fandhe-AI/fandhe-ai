@@ -1,0 +1,5 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/f64_functional_transforms_facade.rs (<home>/work/target-fandhe-ai/debug/deps/f64_functional_transforms_facade-b3867639f64e1d74)
+f64_jvp_family_cuda_matches_cpu: test
+
+1 test, 0 benchmarks

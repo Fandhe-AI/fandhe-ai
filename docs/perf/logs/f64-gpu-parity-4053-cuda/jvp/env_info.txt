@@ -1,0 +1,34 @@
+== before ==
+date_utc: 2026-11-05T11:35Z
+hostname: masked
+gpu: NVIDIA GB10, 580.173.02, [N/A]
+kernel: Linux 6.17.0-1031-nvidia
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+arch: aarch64
+profile: dev
+rev_stamp: c9b5e16356a0ab174dacdc1b717f5e6a021cc30d
+script_sha256: 995b2e608fab4cc7a7f81b5f16d3b04bb312b969dd788ab31ae906fc107126ca
+hw_lock: held owner=#4053 run 2026-11-05T11:35:56Z
+rev_stamp_now: c9b5e16356a0ab174dacdc1b717f5e6a021cc30d
+script_sha256_now: 995b2e608fab4cc7a7f81b5f16d3b04bb312b969dd788ab31ae906fc107126ca
+source_fingerprint_expected: 32191e981ef0467ccf93c858b7501cd4433edc0d9c247a85035aa11667e09792
+source_fingerprint_now: 32191e981ef0467ccf93c858b7501cd4433edc0d9c247a85035aa11667e09792
+concurrent_cargo_rustc: none
+build_artifacts_ok: 1
+== after ==
+date_utc: 2026-11-05T11:36Z
+hostname: masked
+gpu: NVIDIA GB10, 580.173.02, [N/A]
+kernel: Linux 6.17.0-1031-nvidia
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+arch: aarch64
+profile: dev
+rev_stamp: c9b5e16356a0ab174dacdc1b717f5e6a021cc30d
+script_sha256: 995b2e608fab4cc7a7f81b5f16d3b04bb312b969dd788ab31ae906fc107126ca
+hw_lock: held owner=#4053 run 2026-11-05T11:35:56Z
+rev_stamp_now: c9b5e16356a0ab174dacdc1b717f5e6a021cc30d
+script_sha256_now: 995b2e608fab4cc7a7f81b5f16d3b04bb312b969dd788ab31ae906fc107126ca
+source_fingerprint_expected: 32191e981ef0467ccf93c858b7501cd4433edc0d9c247a85035aa11667e09792
+source_fingerprint_now: 32191e981ef0467ccf93c858b7501cd4433edc0d9c247a85035aa11667e09792
