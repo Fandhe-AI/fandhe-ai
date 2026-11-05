@@ -201,7 +201,7 @@ python3 aggregate/judge_gb10_0140.py --emit-verify gb10/verify_0140.txt --emit-m
 
 ## スコアボード
 
-本ディレクトリに `scoreboard/` は作らない（#3876 の範囲）。#3876 は `gb10/run{1..5}/`・`gb10/*-median5.jsonl` を入力に使える（配置と命名は 0.13.0 と同じ）。
+両機体を合わせた 27 セルのスコアボード（生成器・テンプレート・`gen_args.txt`・`unreached_0140.tsv`・判定一覧 `gen_0140.out`・HTML `out/scoreboard_0140.html`）は `scoreboard/` にある（#3876）。`gb10/run{1..5}/`・`gb10/*-median5.jsonl` と Mac mini 側の `macmini-series-b/` を入力に使い、`scoreboard/run_0140.sh` が GB10 の 14 行を `gb10/judge_0140.out` と、Mac mini の 13 行を `../framework-compare-0.14.0-macmini-remeasure/aggregate/gen_0140_macmini.out` と byte 一致で照合する。両機体の tally の和は `tally 13 3 11 invalid 1 noise na total 27`。1.0 以下の 14 セルの分類は 0.13.0 のものを引き継いだ（`scoreboard/unreached_0140.tsv`）。HTML の Artifact への公開は別の作業で、GitHub Pages には載せない。
 
 ## 所有者判断を仰ぐ点
 
