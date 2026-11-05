@@ -448,9 +448,13 @@ tolerance／baseline 変更なし）。
   `train_host_model_2e20_scale_matches_cpu_reference_with_inf_var_class`
   （Linux CI で実行されるホスト逐語モデル版）
 - tolerance 定数・baseline・閾値は変更していない
-- Metal 実機実測: **未実測**（`<metal-node>`。手順は
+- Metal 実機実測: **実測済み・pass**（2026-11-05・`<metal-node>`・`a0ae7bdbc`。
+  1 本実行・exit 0・`1 passed; 0 failed`。`out`・`mean` の REQ-2 一致と `var` の
+  クラス一致を「affine なし」「affine あり」の両方で確かめた。pass のときテストは
+  値を出力しないので、誤差の値は記録に無い。記録は
+  `docs/perf/logs/metal-batch-norm-2e20-4031/`、手順は
   `docs/perf/logs/metal-batch-norm-1736/README.md` の #4031 節）。
-  Linux では `--ignored --list` を実行できないため、
+  Linux では `--ignored --list` を実行できないため、CI 上は
   `make check-cross-metal-tests` による型検査で代替している
 - 対象外: infer 経路（固定の f32 統計では 2e20 級の分散を持てない）・
   facade／`BackendOps` 経路・CUDA
