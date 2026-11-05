@@ -884,6 +884,32 @@ const CASES: &[Case] = &[
         run: run_linalg_nr_inf,
         reject: None,
     },
+    // `Nuc`・`Spectral` の値の経路（イシュー #4052・決定記録 §76）。ホストの SVD（`eval::linalg::svd`）へフォールバックし
+    // （値は 1 階と同じ `matrix_norm_vjp` の V3）、構造の `MatMul` 等はデバイスで走るので H（`linalg_svd_*` と同じ区分）。
+    // 入力は縦長 `[4, 3]`（特異値が約 3・2・1 で互いに離れ、σ == 0 でも縮退でもない）。構造とその二階の GEMM は
+    // すべて各次元 4 以下で k/16 = 0 < min_k_tiles16 のため split-K は発火しない。実機は未実測（#4052 で測る）。
+    Case {
+        name: "linalg_matrix_norm_nuc",
+        family: "linalg_norm_rank",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Rule(
+            "全 MatMul の次元が 4 以下（k ≤ 4）で k/16 = 0 < min_k_tiles16 = 8 のため split-K 非発火",
+        ),
+        run: run_linalg_nr_nuc,
+        reject: None,
+    },
+    Case {
+        name: "linalg_matrix_norm_spectral",
+        family: "linalg_norm_rank",
+        route: Route::H,
+        judge: Judge::Strict,
+        split_k: SplitKShapes::Rule(
+            "全 MatMul の次元が 4 以下（k ≤ 4）で k/16 = 0 < min_k_tiles16 = 8 のため split-K 非発火",
+        ),
+        run: run_linalg_nr_spectral,
+        reject: None,
+    },
     Case {
         name: "linalg_slogdet_sign",
         family: "linalg_norm_rank",
@@ -2499,12 +2525,15 @@ fn reject_layer_norm_const_row_eps0(tp: &Tapes) -> bool {
 }
 
 /// 行列ノルム族（#3806）の損失。`kind` は 0 = Fro・1 = One・2 = Inf（いずれも `[3,2]`。One／Inf はタイから離れた入力）、
-/// 3 = `sign · exp(logabsdet)` の二乗（`[3,3]`）、4 = `rank · Σx²`（`[3,3]`）。
+/// 3 = `sign · exp(logabsdet)` の二乗（`[3,3]`）、4 = `rank · Σx²`（`[3,3]`）、
+/// 5 = Nuc・6 = Spectral（#4052。いずれも縦長 `[4,3]` で特異値が約 3・2・1 と離れた縮退しない入力）。
 fn linalg_nr_loss<'a>(p: &Var<'a>, kind: usize) -> Result<Var<'a>, AutodiffError> {
     let y = match kind {
         0 => p.matrix_norm(fandhe_ai::MatrixNormOrd::Fro)?,
         1 => p.matrix_norm(fandhe_ai::MatrixNormOrd::One)?,
         2 => p.matrix_norm(fandhe_ai::MatrixNormOrd::Inf)?,
+        5 => p.matrix_norm(fandhe_ai::MatrixNormOrd::Nuc)?,
+        6 => p.matrix_norm(fandhe_ai::MatrixNormOrd::Spectral)?,
         3 => {
             let s = p.slogdet()?;
             s.sign.mul(&s.logabsdet.exp())?
@@ -2522,6 +2551,12 @@ fn run_linalg_nr_body(tp: &Tapes, kind: usize) -> Outputs {
     let (shape, p0): (Vec<usize>, Vec<f32>) = match kind {
         0 => (vec![3, 2], vec![2.0, 0.3, -0.4, 1.5, 0.2, -0.6]),
         1 | 2 => (vec![3, 2], vec![1.0, -2.0, 3.0, 0.5, -0.7, 1.1]),
+        5 | 6 => (
+            vec![4, 3],
+            vec![
+                3.0, 0.3, -0.4, 0.1, 2.0, 0.2, -0.6, 0.5, 1.0, 0.2, -0.1, 0.3,
+            ],
+        ),
         _ => (
             vec![3, 3],
             vec![2.0, 0.3, -0.4, 0.1, 1.5, 0.2, -0.6, 0.5, 1.8],
@@ -2579,6 +2614,14 @@ fn run_linalg_nr_one(tp: &Tapes) -> Outputs {
 
 fn run_linalg_nr_inf(tp: &Tapes) -> Outputs {
     run_linalg_nr_body(tp, 2)
+}
+
+fn run_linalg_nr_nuc(tp: &Tapes) -> Outputs {
+    run_linalg_nr_body(tp, 5)
+}
+
+fn run_linalg_nr_spectral(tp: &Tapes) -> Outputs {
+    run_linalg_nr_body(tp, 6)
 }
 
 fn run_linalg_nr_sign(tp: &Tapes) -> Outputs {
