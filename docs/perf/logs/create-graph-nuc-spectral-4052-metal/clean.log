@@ -1,0 +1,41 @@
+profile: dev
+workspace_members:
+fandhe-ai-tensor-core
+fandhe-ai-autodiff
+bench-harness
+fandhe-ai-backend-cpu
+fandhe-ai-backend-cuda
+fandhe-ai-backend-metal
+fandhe-ai-onnx-interop
+guardrail
+self-repair
+fandhe-ai
+fandhe-ai-backend-rocm
+docs-site
+fandhe-ai-hf-hub
+== cargo clean  -p fandhe-ai-tensor-core
+     Removed 6686 files, 590.0MiB total
+== cargo clean  -p fandhe-ai-autodiff
+     Removed 6731 files, 2.5GiB total
+== cargo clean  -p bench-harness
+     Removed 4458 files, 288.7MiB total
+== cargo clean  -p fandhe-ai-backend-cpu
+     Removed 7048 files, 1.6GiB total
+== cargo clean  -p fandhe-ai-backend-cuda
+     Removed 6929 files, 1.5GiB total
+== cargo clean  -p fandhe-ai-backend-metal
+     Removed 7331 files, 1.2GiB total
+== cargo clean  -p fandhe-ai-onnx-interop
+     Removed 5037 files, 473.2MiB total
+== cargo clean  -p guardrail
+     Removed 0 files
+== cargo clean  -p self-repair
+     Removed 0 files
+== cargo clean  -p fandhe-ai
+     Removed 11179 files, 3.2GiB total
+== cargo clean  -p fandhe-ai-backend-rocm
+     Removed 2107 files, 106.2MiB total
+== cargo clean  -p docs-site
+     Removed 0 files
+== cargo clean  -p fandhe-ai-hf-hub
+     Removed 0 files
