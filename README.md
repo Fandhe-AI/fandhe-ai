@@ -26,8 +26,8 @@ cargo run -p docs-site -- --out dist/
 ## インストール
 
 本ライブラリは Rust の `stable` チャンネルを前提としています（リポジトリ直下の
-[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io（v0.13.0・
-2026-10-31 公開済み）から利用できます。
+[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io（v0.14.0・
+2026-11-05 公開済み）から利用できます。
 
 ```toml
 [dependencies]
@@ -96,8 +96,8 @@ cargo run -p fandhe-ai --example getting_started
 | `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`tape()`／`tape_for(Device)`）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`（`Sgd`／`AdamW` 等）・デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）の 4 つを確定入口として提供します（[`docs/compat-api-scope.md`](docs/compat-api-scope.md) §0） |
 | `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
 
-上記 6 クレートと、下記の `fandhe-ai-onnx-interop` の計 7 クレートを crates.io に公開しています（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
-`fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` も公開準備済みで、0.14.0 で公開する予定です（未公開）。
+上記 6 クレートと、下記の `fandhe-ai-onnx-interop`・`fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` の計 9 クレートを crates.io に公開しています（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
+`fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` は v0.14.0（2026-11-05）で初回公開しました。
 ディレクトリ名（`crates/tensor-core` 等）はリネーム前のまま維持しており、
 `[package] name`（crates.io 公開名）のみ `fandhe-ai` prefix 付きへ変更しています。
 相互運用（ONNX／safetensors）を担う `fandhe-ai-onnx-interop`（`crates/onnx-interop`）は
@@ -110,7 +110,7 @@ save／load は引き続き `fandhe-ai` からの再エクスポートが未提�
 利用できません。
 
 このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
-ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。公開準備済みで crates.io 未公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする。公開準備済みで crates.io 未公開）を担う内部クレートがあります。
+ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。v0.14.0 で crates.io へ初回公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする。v0.14.0 で crates.io へ初回公開。ROCm 実機 parity は未実測のまま所有者判断で公開）を担う内部クレートがあります。
 compat API のサポート境界の詳細は [`docs/compat-api-scope.md`](docs/compat-api-scope.md) を参照してください。
 
 ## バックエンド
@@ -129,7 +129,7 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 - **crates.io 公開済み**: 初回公開 v0.3.0（6 クレート: `fandhe-ai`・
   `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
   `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`）を 2026-08-23 に、
-  最新 v0.13.0 を 2026-10-31 に公開済み（公開履歴の正は [`docs/crates-io-publishing-order.md`](docs/crates-io-publishing-order.md) §10）
+  最新 v0.14.0（9 クレート。`fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` は初回公開）を 2026-11-05 に公開済み（公開履歴の正は [`docs/crates-io-publishing-order.md`](docs/crates-io-publishing-order.md) §10）
 - **ドキュメントサイト公開済み**: https://fandhe-ai.github.io/fandhe-ai/
 - **実装の進行状況**: コア（テンソル・autodiff・演算グラフ／カーネル融合機構）・
   3 バックエンド（CPU／CUDA／Metal）の実装と性能実測を継続中
@@ -304,7 +304,7 @@ URL と SHA-256 は両方設定するか両方未設定にします（両方未�
 
 ### ロードマップ・タスク
 
-`docs/spec/06-roadmap.md` のマイルストーン（M0〜M5）と `docs/spec/05-tasks.md` のタスク（4h 粒度）に従って実装します。M0（workspace・CI・依存監査ベースライン）は完了し、コア・3 バックエンドの実装と性能実測、crates.io 公開（最新 v0.13.0）・ドキュメントサイト公開まで到達しています（「ステータス」節参照）。未着手・進行中の作業は GitHub Issues で追跡しています。
+`docs/spec/06-roadmap.md` のマイルストーン（M0〜M5）と `docs/spec/05-tasks.md` のタスク（4h 粒度）に従って実装します。M0（workspace・CI・依存監査ベースライン）は完了し、コア・3 バックエンドの実装と性能実測、crates.io 公開（最新 v0.14.0）・ドキュメントサイト公開まで到達しています（「ステータス」節参照）。未着手・進行中の作業は GitHub Issues で追跡しています。
 
 ### Conventional Commits と git hooks
 

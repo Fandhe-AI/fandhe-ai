@@ -598,6 +598,24 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > （7 クレート sparse index 反映確認済み）。リリースタグ `v0.13.0` は注釈付きタグで
 > コミット `db2b385fb` を指す。
 
+> **追補（2026-11-05・v0.14.0 公開完了）**: `.github/workflows/release-all.yml`
+> （`mode: publish`・`version: 0.14.0` run 42034541697。同 run の verify ジョブが 9 クレートの
+> dry-run を success、publish ジョブが environment `crates-io-release` の承認後に success。
+> publish 完了 2026-11-05T13:26:21Z。事前の dry-run-only run 42003820472〈main `c5c39c112`〉。
+> 公開 ref は main `b6ae8170168c768c1fca152dae4173975b0a53d1`＝#4061 のマージ）により、公開対象
+> 9 クレート（`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
+> `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`・`fandhe-ai-backend-rocm`・
+> `fandhe-ai-onnx-interop`・`fandhe-ai-hf-hub`・`fandhe-ai`）の **v0.14.0 の公開を完了した**
+> （9 クレートとも sparse index で 0.14.0・yanked=false を確認済み）。うち `fandhe-ai-hf-hub`・
+> `fandhe-ai-backend-rocm` は本版が初回公開で、crates.io 公開済みは 9 クレートになった。
+> リリースタグ `v0.14.0`（メッセージ "release: v0.14.0"）は注釈付きタグでコミット `b6ae81701` を指し、
+> push 済み。所有者の明示指示（2026-11-05・チャットでの明示指示。原文「ok / MI300X は保留で公開して
+> 大丈夫です」。記録コメント: <https://github.com/Fandhe-AI/fandhe-ai/issues/3872#issuecomment-6658988726>）
+> に基づく。backend-rocm は §15.7 の条件（#3159・#3867 の ROCm 実機 parity pass）を**満たしていない**
+> （MI300X の実機 parity は未実測のまま）。所有者の判断による例外として `RELEASE_CRATES` に残したまま
+> 公開した（§15.7 の追補）。framework-compare のピン `fandhe-ai =0.13.0` は変えていない
+> （更新は #3873・所有者承認待ち）。
+
 > **追補（2026-10-31・v0.13.0 ピン更新）**: 所有者の承認（2026-10-31 の所有者発言
 > 「0.13.0 で公開してください。framework-compare のピン =0.13.0 も承認します。」。
 > チャットでの明示指示で issue コメントの URL はない）により、framework-compare の承認ピンを
@@ -992,6 +1010,10 @@ lock-all` も green。
 - environment `crates-io-release` の承認。
 - CLAUDE.md・README・`site/` の「7 クレート」「非公開の hf-hub」表記の更新は #3775（#3775 で更新済み）。
 
+> **追補（2026-11-05・v0.14.0 公開完了。#3872）**: 上記の前提を経て `fandhe-ai-hf-hub` 0.14.0 を
+> 初回公開した（`release-all.yml` `mode: publish` run 42034541697。sparse index で 0.14.0・
+> yanked=false を確認済み。詳細は §10 の追補）。
+
 ## 15. 8 クレート目 `fandhe-ai-backend-rocm` の公開準備と検証記録（#3774）
 
 所有者の承認（#3771 の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>、
@@ -1092,7 +1114,24 @@ dry-run の Verifying 段は、展開した `.crate` を ROCm 非搭載の環境
 - **単体の dry-run／publish の注意**: 公開物の manifest から path が外れ、crates.io に `fandhe-ai-backend-rocm 0.13.0` が無い間は、`release.yml`（単体クレートの再実行・復旧経路）で `fandhe-ai` を dry-run／publish すると失敗する。`release-all.yml` の一括 dry-run は workspace 内の兄弟を解決するので通る（#3852 で `cargo publish --dry-run --locked --allow-dirty` を 9 クレート一括で実行し通ることを確認）。
 - **Phase 11 への申し送り**: #3159・#3867 が未実測のまま backend-rocm を `RELEASE_CRATES` から一時的に外す場合は、facade の依存も同時に外す必要がある（外さないと facade の publish が失敗する）。判断は所有者。
 
+> **追補（2026-11-05・v0.14.0 公開完了。#3872）**: #3159・#3867 の ROCm 実機 parity は
+> **未実測のままで、本節の条件は満たしていない**。MI300X の実機 parity は未実測のまま所有者が保留とし、
+> 所有者の明示指示（2026-11-05・チャットでの明示指示。原文「ok / MI300X は保留で公開して大丈夫です」。
+> 記録コメント: <https://github.com/Fandhe-AI/fandhe-ai/issues/3872#issuecomment-6658988726>）により、
+> 条件を満たしたのではなく**所有者の判断による例外として**、backend-rocm を `RELEASE_CRATES` に残したまま
+> `fandhe-ai-backend-rocm` 0.14.0 を公開した（初回公開。`release-all.yml` run 42034541697）。
+> 実機 parity の追跡は #3159・#3867 に残る。
+
 ## 変更履歴
+
+- 2026-11-05（v0.14.0 公開完了。#3872）: `release-all.yml`（`mode: publish`・`version: 0.14.0`
+  run 42034541697。事前 dry-run-only run 42003820472〈main `c5c39c112`〉。main
+  `b6ae8170168c768c1fca152dae4173975b0a53d1`＝#4061 のマージ）で公開対象 9 クレートの
+  v0.14.0 の公開を完了した（9 クレートとも sparse index で 0.14.0・yanked=false を確認済み）。
+  `fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` は本版が初回公開で、crates.io 公開済みは 9 クレートに
+  なった。注釈付きタグ `v0.14.0` は `b6ae81701`。backend-rocm は §15.7 の条件（#3159・#3867 の
+  ROCm 実機 parity pass）を満たさないまま、所有者の判断による例外として公開した。§10 の追補と
+  §14.4・§15.7 の追補に記録した。framework-compare のピン `=0.13.0` は変えていない（更新は #3873）。
 
 - 2026-11-05（v0.14.0 リリースサイクル・バンプ。#3871）: 公開対象 9 クレートを lockstep で
   0.13.0 → 0.14.0 に上げた。変えたもの: ルート `Cargo.toml` の `workspace.version`、

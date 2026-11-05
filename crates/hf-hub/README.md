@@ -3,7 +3,7 @@
 Hugging Face Hub 連携の補助クレート。設計は `docs/hf-hub-integration-design.md` を正とする。
 
 - `docs/compat-api-scope.md` §0 の限定例外として、公開面（`tests/api_surface.rs` の `EXPECTED_LIB_PUBLIC`）に限りサポート対象とする。facade の公開 API だけに依存し、facade は本クレートに依存しない。
-- 版は facade と lockstep。crates.io へは 0.14.0 で公開予定（承認 #3771）。
+- 版は facade と lockstep。crates.io へは 0.14.0（2026-11-05）で初回公開した（承認 #3771）。
 
 ## 公開 API（#3394）
 
