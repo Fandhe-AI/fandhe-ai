@@ -69,3 +69,9 @@ judge は全量 Req2（REQ-2 統一複合判定。相対誤差 1e-3 未満 ま�
 | `summary.tsv` | 2 行の判定表 |
 | `logs/<群>/` | 各テストの全出力（`--nocapture`）と終了コード |
 | `SHA256SUMS` | 上記の SHA-256 |
+
+## #4044 追記（共有 target の成果物の再利用の棚卸し）
+
+- 分類: **C（再利用の可能性を排除できない）**
+- 根拠: build.log に `Compiling` が 0 件（`Finished … in 0.06s`）。テストバイナリ `train_gpu_parity-7f8cdf980f4362cb` は 3862 のビルドにも既に存在し、作った回が記録に無いため、そのときのテストのコードを確かめられない。ライブラリのコードは前任（3862）と同一（差分 0 件）。取り直すかどうかは所有者の判断。
+- 判定基準・全 16 計測の表・限界は [`docs/real-hardware-shared-target-reuse-decision.md`](../../../real-hardware-shared-target-reuse-decision.md) §4。本追記は結果を変えない（既存の本文・回収ログは無改変）。

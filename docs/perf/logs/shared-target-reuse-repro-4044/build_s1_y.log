@@ -1,0 +1,24 @@
+   0.028076821s  INFO prepare_target{force=false package_id=fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu) target="fandhe_ai_backend_cpu"}: cargo::core::compiler::fingerprint: fingerprint dirty for fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu)/Build/TargetInner { name_inferred: true, ..: lib_target("fandhe_ai_backend_cpu", ["lib"], "<work>/D/crates/backend-cpu/src/lib.rs", Edition2024) }
+   0.028094679s  INFO prepare_target{force=false package_id=fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu) target="fandhe_ai_backend_cpu"}: cargo::core::compiler::fingerprint:     dirty: UnitDependencyInfoChanged { unit: UnitIndex(13) }
+   0.028223477s  INFO prepare_target{force=false package_id=fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu) target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint dirty for fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu)/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "<work>/D/crates/backend-cpu/build.rs", Edition2024) }
+   0.028227848s  INFO prepare_target{force=false package_id=fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu) target="build-script-build"}: cargo::core::compiler::fingerprint:     dirty: PrecalculatedComponentsChanged { old: "1767312000.000000000s (tests/grace_sve2_probe_report.rs)", new: "1767225600.000000000s (tests/grace_sve2_probe_report.rs)" }
+       Fresh unicode-ident v1.0.24
+       Fresh proc-macro2 v1.0.107
+       Fresh cfg-if v1.0.4
+       Fresh either v1.17.0
+       Fresh quote v1.0.47
+       Dirty fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu): the precalculated components changed
+   Compiling fandhe-ai-backend-cpu v0.13.0 (<work>/D/crates/backend-cpu)
+       Fresh crossbeam-utils v0.8.22
+       Fresh syn v2.0.119
+       Fresh crossbeam-epoch v0.9.20
+       Fresh zerocopy-derive v0.8.56
+       Fresh crossbeam-deque v0.8.7
+       Fresh zerocopy v0.8.56
+       Fresh half v2.7.1
+       Fresh rayon-core v1.13.0
+     Running `<work>/target/debug/build/fandhe-ai-backend-cpu-d900957d7f823180/build-script-build`
+       Fresh rayon v1.12.0
+       Fresh fandhe-ai-tensor-core v0.13.0 (<work>/D/crates/tensor-core)
+     Running `<home>/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name fandhe_ai_backend_cpu --edition=2024 crates/backend-cpu/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=da320223df3b78d9 -C extra-filename=-24d27a142cf932da --out-dir <work>/target/debug/deps -L dependency=<work>/target/debug/deps --extern fandhe_ai_tensor_core=<work>/target/debug/deps/libfandhe_ai_tensor_core-1037abea4461a376.rmeta --extern half=<work>/target/debug/deps/libhalf-2f149d72302817dc.rmeta --extern rayon=<work>/target/debug/deps/librayon-5919c5a8a81a244a.rmeta --cfg avx512_stable --check-cfg 'cfg(avx512_stable)'`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.48s

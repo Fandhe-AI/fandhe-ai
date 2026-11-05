@@ -50,3 +50,13 @@ fail 時の扱い: tolerance・baseline・判定方式・入力・テストコ�
 記録規則: ホスト名・ユーザー名・個人のパス（$HOME・/home/）は前後が識別子文字でない場合のみマスクする。
   漏れがあれば記録を捨てる（fail-closed）。回収ログは手で編集しない。各ログ末尾に rc=<終了コード>。
   実行と提出物の対応は env_info.txt の script_sha256・rev_stamp と SHA256SUMS で検証する。
+
+# ---- 共有 target の成果物の再利用を防ぐ（イシュー #4044。追記。上の既存行は変えない） ----
+build_freshness:
+  背景: 共有 CARGO_TARGET_DIR の workspace メンバー成果物が前の回のものの再利用になりうる。条件と対策は
+    docs/real-hardware-shared-target-reuse-decision.md、手順は docs/real-hardware-verification-env.md §4.11
+  clean: --no-run の前に、cargo metadata --no-deps の全メンバーへ cargo clean -p <名前> を実行する（このテストは --release なしなので dev プロファイル）。crates.io の依存は消さない
+  time_check: ビルド後、テストバイナリと全メンバーの lib 成果物（target/debug/deps の lib<名前>-*.rlib・.rmeta。facade 自身の libfandhe_ai-* を含む）の
+    更新時刻が、ロック取得（ノード上の owner ファイルの mtime）より秒単位で厳密に後であること。結果を build_artifacts.txt に保存する
+  undetermined: 古い成果物が 1 つでもある、ロックと同じ秒、必須 lib の欠落、テストバイナリの欠落、実行したバイナリが確かめたものと違う。全テストを実行しない
+  script: docs/perf/logs/hw-parity-run-template/run_parity_template.sh（R4・R5 を組み込み済み）

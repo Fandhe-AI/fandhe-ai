@@ -76,3 +76,9 @@ Var グラフの 4 ケース（bilinear・similarity）が `loss`・`grad_p<i>`�
 | `summary.tsv` | `TRAIN_PARITY` 記録の集計（1 行 1 量・120 行） |
 | `logs/nn-train-4026/` | テストの全出力（`--nocapture`）と終了コード |
 | `SHA256SUMS` | 上記の SHA-256 |
+
+## #4044 追記（共有 target の成果物の再利用の棚卸し）
+
+- 分類: **A（再コンパイルを確認）**
+- 根拠: build.log に 8 メンバー全部の `Compiling` がある。
+- 判定基準・全 16 計測の表・限界は [`docs/real-hardware-shared-target-reuse-decision.md`](../../../real-hardware-shared-target-reuse-decision.md) §4。本追記は結果を変えない（既存の本文・回収ログは無改変）。

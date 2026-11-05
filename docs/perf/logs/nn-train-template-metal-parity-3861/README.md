@@ -76,3 +76,9 @@ GB10 版は #3860。雛形は `../train-gpu-parity-template/`（#3778）。
 | `summary.tsv` | `TRAIN_PARITY` 記録の集計（120 行。スクリプトがマスク後のログから作る） |
 | `logs/nn-template-3861/` | テストの全出力（`--nocapture`。末尾に `rc=` と `train_parity_records:`）と終了コード |
 | `SHA256SUMS` | 上記の SHA-256 |
+
+## #4044 追記（共有 target の成果物の再利用の棚卸し）
+
+- 分類: **A（再コンパイルを確認）**
+- 根拠: build.log に 9 メンバー全部の `Compiling` がある。
+- 判定基準・全 16 計測の表・限界は [`docs/real-hardware-shared-target-reuse-decision.md`](../../../real-hardware-shared-target-reuse-decision.md) §4。本追記は結果を変えない（既存の本文・回収ログは無改変）。
