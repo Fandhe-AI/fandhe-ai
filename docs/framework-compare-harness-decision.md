@@ -9,8 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.13.0`。2026-10-31 に crates.io 公開済み
-  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.13.0 リリースサイクルで `=0.12.0` から更新）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.14.0`。2026-11-05 に crates.io 公開済み
+  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.14.0 リリースサイクルで `=0.13.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -30,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.13.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.14.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -38,7 +38,7 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.13.0）の存在
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.14.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
      `source = "registry+https://github.com/rust-lang/crates.io-index"` を
      伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
@@ -273,6 +273,33 @@ ZIP を展開する経路を持たないため同じく受容する（§4 の 20
     存在する既存のもの）。`burn =0.21.0`・`candle-core =0.11.0` のピンと契約検査のロジック・
     `deny.toml` の allow は変えていない。`git diff v0.13.0..HEAD -- crates/` は空。
   - ライセンス・監査は `docs/license-matrix.md` 8b（2026-10-31 再実測）。
+- 2026-11-05: 所有者の承認（2026-11-05・チャットでの明示指示。原文「ok」。記録コメント:
+  https://github.com/Fandhe-AI/fandhe-ai/issues/3873#issuecomment-6659367020）に基づき、
+  v0.14.0 の crates.io 公開（`release-all.yml` `mode: publish` run 42034541697・tag `v0.14.0`
+  = main `b6ae81701`。9 クレート公開、`fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` は初回公開）を
+  受けて `fandhe-ai` 承認ピンを `=0.13.0` から `=0.14.0` へ更新した（#3873）。
+  - 承認された範囲: ピンの版の更新（`=0.13.0` → `=0.14.0`）と、それに伴う承認済みピンの契約検査・
+    記録の追従まで。これ以外の外部 crate の追加・allow 識別子が必要になった場合は作業を止めて
+    所有者へ戻す。
+  - `Cargo.lock` の差分: 自社クレート 7 件が 0.13.0 → 0.14.0（版・checksum）、自社クレート
+    `fandhe-ai-backend-rocm 0.14.0` が 1 件新規（facade の通常依存。依存は自社 2 クレートと
+    `libloading 0.9.0` のみ）。パッケージ数は 657 → 658（`name` 行数の実測。増分は自社 1 件のみ）。
+    外部 crate の追加 0・削除 0・版更新 0。`libloading 0.9.0` は cudarc 経由で既に lock にあり
+    （第 12 区分と同版・同 checksum）、新しいライセンス識別子もない。`fandhe-ai-hf-hub` は
+    facade の依存ではないため lock に入らない。`cargo update -p fandhe-ai --precise 0.14.0` は
+    前回同様に一部の Windows 向け `windows-sys` 参照を 0.52.0 から 0.61.2（どちらも既存エントリ）へ
+    付け替えたが、元の辺のまま `cargo metadata --locked` が成立するため採用せず、差分を自社
+    クレートに限った。
+  - 契約検査の追従: 承認ピンの `fandhe-ai=0.13.0` → `0.14.0`（`FRAMEWORK_COMPARE_PINS`・
+    `bench-fandhe` 直接依存 allowlist・self-test fixture）。`check_framework_compare` の
+    ロジックと allowlist の構造は変えていない（自社クレートの増加は直接依存 allowlist の
+    対象外のため追従不要）。
+  - 再実行結果: `check-forbidden-deps.sh lock-all`・`self-test`（28 件）は rc 0。専用
+    `deny.toml` の `advisories bans licenses sources` は ok（`chacha20 0.10.1` の yanked warning・
+    `libloading` 等の duplicate warning は変更前から存在する既存のもの）。`burn =0.21.0`・
+    `candle-core =0.11.0` のピンと `deny.toml` の allow は変えていない。
+    `git diff v0.14.0..HEAD -- crates/` は `crates/hf-hub/README.md` の 1 行のみ（facade 差分なし）。
+  - ライセンス・監査は `docs/license-matrix.md` 8b（2026-11-05 再実測）。
 - 2026-11-02: 所有者の明示承認（出典:
   https://github.com/Fandhe-AI/fandhe-ai/issues/3961#issuecomment-6575647964）に基づき、
   `deny.toml` の `[advisories] ignore` に `RUSTSEC-2026-0429` を追加した（2026-10-17 の
