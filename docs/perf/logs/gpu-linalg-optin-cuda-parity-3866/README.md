@@ -60,3 +60,9 @@ det は CPU の期待値が非有限（例: `1e20 × I₂` → 1e40）のとき 
 | `summary.tsv` | 6 行の判定表 |
 | `logs/gpu-linalg-3405/` | 各テストの全出力（`--nocapture`）と終了コード |
 | `SHA256SUMS` | 上記の SHA-256 |
+
+## #4044 追記（共有 target の成果物の再利用の棚卸し）
+
+- 分類: **B（再利用あり、ただし前任とライブラリのコードが同一）**
+- 根拠: build.log の `Compiling` は `fandhe-ai`（新しいテストターゲット）のみ。前任（3864）とのライブラリのコードの差分は 0 件だが、間隔が約 2 時間で、記録に無いビルドがありうる。
+- 判定基準・全 16 計測の表・限界は [`docs/real-hardware-shared-target-reuse-decision.md`](../../../real-hardware-shared-target-reuse-decision.md) §4。本追記は結果を変えない（既存の本文・回収ログは無改変）。

@@ -56,3 +56,9 @@ Metal 版の adam テストは CUDA 版（`adam_grouped_matches_cpu_grouped_and_
 | `summary.tsv` | 4 行の判定表 |
 | `logs/<群>/` | 各テストの全出力（`--nocapture`）と終了コード |
 | `SHA256SUMS` | 上記の SHA-256 |
+
+## #4044 追記（共有 target の成果物の再利用の棚卸し）
+
+- 分類: **A（再コンパイルを確認）**
+- 根拠: build.log に 9 メンバー全部の `Compiling` がある（大半が 2 回）。
+- 判定基準・全 16 計測の表・限界は [`docs/real-hardware-shared-target-reuse-decision.md`](../../../real-hardware-shared-target-reuse-decision.md) §4。本追記は結果を変えない（既存の本文・回収ログは無改変）。

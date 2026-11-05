@@ -51,3 +51,9 @@ judge は RULE.txt の参考の写しで、判定契約の正は各テストの�
 | `summary.tsv` | 4 行の判定表 |
 | `logs/<群>/` | 各テストの全出力（`--nocapture`）と終了コード |
 | `SHA256SUMS` | 上記の SHA-256 |
+
+## #4044 追記（共有 target の成果物の再利用の棚卸し）
+
+- 分類: **B（再利用あり、ただし前任とライブラリのコードが同一）**
+- 根拠: 5 メンバーと crates.io の依存まで再コンパイルしたが、`backend-rocm`・`onnx-interop` は `Compiling` が無く再利用された可能性がある。前任（3860）とのライブラリのコードの差分は 0 件。
+- 判定基準・全 16 計測の表・限界は [`docs/real-hardware-shared-target-reuse-decision.md`](../../../real-hardware-shared-target-reuse-decision.md) §4。本追記は結果を変えない（既存の本文・回収ログは無改変）。

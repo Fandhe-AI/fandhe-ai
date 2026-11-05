@@ -105,6 +105,7 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 
 - ノード側の作業ディレクトリは `~/work/rust-ai-library-run`（ソースのみ。ビルドキャッシュは置かない）
 - **ビルドキャッシュは同期ツリー外の `$HOME/work/target-fandhe-ai` に置く**（`CARGO_TARGET_DIR` で指定）。同期ツリー内に `target/` を置くと `--delete-excluded` で消えるため、この分離が前提。この構成なら再 rsync 後もキャッシュが残り warm ビルドになる（実測: 再 rsync 後も 176MB のキャッシュが残存し `--ignored` テストが 0.29s で pass）
+  - **ただし計測では、残ったキャッシュが前の回の workspace メンバー成果物の再利用になり、古いコードを測る危険がある**（`rsync -a` が送信側の mtime を保ち、cargo の freshness 判定は mtime 比較のため。#4044）。計測では §4.11 に従う
 - `~/work/rust-ai-library`（末尾 `-run` なし）は 2026-08-04 時点の古い checkout。使わない
 - `docs/spec`（submodule）の実体も worktree のコピーとして転送される（PyTorch 参照スクリプトが submodule 配下にあるため必要）
 
@@ -200,6 +201,8 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 
 雛形は `crates/facade/tests/create_graph_gpu_parity.rs`（登録表 `CASES` に 1 行足して族を増やす。測り方は `docs/autodiff-higher-order-grad-decision.md` §48）。GPU テストは `#[ignore]` で、実装 issue ごとに `create_graph_<族>_cuda_matches_cpu` を 1 本ずつ、§4.1 の形式で `cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>` として別プロセスで実行する（`--release` なし。事前に `--no-run` でビルドを済ませ、各コマンドの前に `--list` で選ばれるテストがちょうど 1 件か確かめる）。事前登録の雛形は `docs/perf/logs/create-graph-gpu-parity-template/RULE.txt`。baseline の置き場 `crates/facade/tests/common/create_graph_gpu_parity_baseline.rs` は空で、行の追加は実機の実測値と所有者の承認 URL が揃った場合に限る。この雛形の時点では実機で実行していない（未実測）。
 
+ビルドの前に §4.11 を適用する。
+
 ### 4.10 NN 層・最適化・ONNX の学習の parity 雛形（#3778）
 
 雛形は `crates/facade/tests/train_gpu_parity.rs`（共通部品は `tests/common/train_gpu_parity.rs`）。実機テストは族ごとに 1 本で、名前は `train_parity_<scaffold|nn|optim|onnx>_<cuda|metal>_matches_cpu`（`metal` は macOS のみ）。`--exact` で 1 本ずつ別プロセスで実行し、`--release` は付けない。事前登録の雛形は `docs/perf/logs/train-gpu-parity-template/RULE.txt`。本節は手順の雛形であり、**未実測**である。
@@ -212,6 +215,23 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 ```
 
 Metal は §7.1 と同じく `zsh -lc` で包み、テスト名を `train_parity_<族>_metal_matches_cpu` にする。出力の `TRAIN_PARITY` 行を集計する。
+
+ビルドの前に §4.11 を適用する。
+
+### 4.11 共有 target の成果物の再利用を防ぐ（#4044）
+
+実機の計測は、ビルドキャッシュを同期ツリー外の共有 `CARGO_TARGET_DIR`（`$HOME/work/target-fandhe-ai`）に置く（§3 注意）。workspace メンバー（`path` 依存）の成果物は、内容が違っても **送信側のソースの mtime が既存成果物の dep-info より古ければ Fresh と判定され、前の回の rlib がそのままリンクされる**。`rsync -a` は mtime を保つので、起こりうる。実例は #4031 の測り直し（`docs/perf/logs/metal-batch-norm-2e20-4031-rerun/`。検証対象のカーネルを含む `libfandhe_ai_backend_metal` が前の回の再利用で無効）。条件の再現・仕組み・Phase 10 の過去の計測への影響は `docs/real-hardware-shared-target-reuse-decision.md` を正とする。
+
+**標準手順（計測のビルドの前後に必ず行う）**:
+
+1. `cargo metadata --no-deps --format-version 1` の全メンバー（`packages[].name`）へ `cargo clean [--release] -p <名前>` を実行する。`--release` は計測を `--release` で行うときだけ付ける（Phase 10 の facade テストは付けない）。crates.io の依存は消さない。`CARGO_TARGET_DIR` が `$HOME/work/target-fandhe-ai` でなければ消さずに止める
+2. `--no-run` でビルドする（他の cargo・rustc を走らせない）
+3. テストバイナリと全メンバーの lib 成果物（`target/<debug|release>/deps/lib<lib 名>-*.rlib`・`.rmeta`。**facade 自身の `libfandhe_ai-*` を含む**。lib 名は `cargo metadata` の lib ターゲット名で、ハイフンは `_`）の更新時刻が、実機ロック取得の時刻（ノード上の owner ファイルの mtime。送信側の時計を使わない）より秒単位で厳密に後であることを確かめ、一覧を `build_artifacts.txt` に保存する。1 つでも古い・ロックと同じ秒・必須 lib の欠落・テストバイナリの欠落があれば、テストを実行せず undetermined とする
+4. 実行したテストバイナリ（実行ログの `Running tests/<名前>.rs (<パス>)`）が、3 で確かめたバイナリと同じであることを確かめる
+
+deps ディレクトリはプロファイルで決まる: `--release` あり → `target/release/deps`、なし（`test` プロファイル）→ `target/debug/deps`。**手書きの glob（`libfandhe_ai_*` 等）で成果物を選ばない**（facade の lib `libfandhe_ai-<hash>.rlib` に一致しない）。1〜4 は雛形 `docs/perf/logs/hw-parity-run-template/run_parity_template.sh` に組み込み済み（使い方は同ディレクトリの README.md）。事前登録の `RULE.txt` には `build_freshness:` ブロックを写す。
+
+展開先のディレクトリ名を変えても再利用は防げない（ファイル名のハッシュが変わらない。決定記録 §2）。`rsync` の転送時に mtime を更新する案は、実機と送信側で挙動が変わるため採らず、clean と時刻検査を標準とする。
 
 ## 5. PyTorch 参照値の再計測（同一実機）
 
@@ -272,6 +292,7 @@ ssh "$METAL_NODE" 'zsh -lc "cd ~/work/rust-ai-library-run && \
 - Xcode 本体は不要（Command Line Tools のみで可）。Metal シェーダは実行時に `newLibraryWithSource` でコンパイルされる（2026-10-11 実測: `tests/device.rs` の `select_metal_device_on_real_hardware` が pass）
 - 内蔵 SSD は 228GiB と小さい。target ディレクトリは `$HOME/work/target-fandhe-ai` の 1 つに保ち、worktree ごとに作らない
 - 長時間の計測は SSH 切断で止まらないよう `nohup` で切り離し、ログをファイルへ出して回収する（macOS には `setsid` がない）
+- 計測のビルドの前に §4.11（全メンバーの `cargo clean -p` と成果物の時刻検査）を適用する。共有 target の再利用で古いコードを測らないため（#4044）
 
 ### 7.2 PyTorch MPS 参照計測
 
@@ -284,6 +305,8 @@ torch は system には未導入。venv 作成手順（`python3 -m venv .venv-mp
 ### 7.3 二階微分（`create_graph`）の Metal parity 雛形（#3777）
 
 雛形は §4.9 と同じ `crates/facade/tests/create_graph_gpu_parity.rs` で、Metal 版は `create_graph_<族>_metal_matches_cpu`（`cfg(target_os = "macos")`・`#[ignore]`）。§7.1 の形（`zsh -lc` で包む・`CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai`）で `cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>` を別プロセスで実行する（`--release` なし。事前に `--no-run`、各コマンドの前に `--list` でちょうど 1 件か確かめる）。事前登録の雛形は `docs/perf/logs/create-graph-gpu-parity-template/RULE.txt`。Metal の `gemm_fp32_strict` は split-K を通りうるため、各族は子テープ構造内の MatMul 形状を `SplitKShapes` で宣言し、`should_split_k` が `None` であること（S3）を macOS で検査する。避けられない族は baseline の Metal 行（実測値と所有者の承認 URL が揃った場合に限る。置き場は空）に回す。この雛形の時点では実機で実行していない（未実測。実測は #3858・#3859）。
+
+ビルドの前に §4.11 を適用する。
 
 ## 8. 結果の記録先
 

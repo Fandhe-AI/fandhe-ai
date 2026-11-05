@@ -74,10 +74,11 @@ CI の自己検査は `nn_family_passes_cpu_against_cpu`・`optim_family_passes_
 
 1. `RULE.txt` を `docs/perf/logs/<名前>-<issue 番号>/RULE.txt` へ写し、`<...>` を埋める
 2. 実機での実行より前にコミットする
-3. `--no-run` でビルド、`--ignored --list` で選ばれるテストが 1 件であることを確認
-4. `--exact` で 1 本ずつ別プロセスで実行
-5. `TRAIN_PARITY` 行を集計し、結果をその README に書く
-6. `docs/README.md` の索引に 1 行足し、`docs/compat-matrix-ari-tracker.md` の「実機 parity」列を更新する
+3. （#4044）ビルドの前に、全 workspace メンバーの成果物を `cargo clean -p <名前>`（dev プロファイル）で消す。ビルド後、テストバイナリと全メンバーの lib 成果物の更新時刻がロック取得より後であることを確かめ、外れれば undetermined。雛形は `docs/perf/logs/hw-parity-run-template/`、手順は `docs/real-hardware-verification-env.md` §4.11
+4. `--no-run` でビルド、`--ignored --list` で選ばれるテストが 1 件であることを確認
+5. `--exact` で 1 本ずつ別プロセスで実行
+6. `TRAIN_PARITY` 行を集計し、結果をその README に書く
+7. `docs/README.md` の索引に 1 行足し、`docs/compat-matrix-ari-tracker.md` の「実機 parity」列を更新する
 
 ## 禁止事項
 
