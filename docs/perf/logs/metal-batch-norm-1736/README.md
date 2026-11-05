@@ -82,9 +82,9 @@ tolerance／baseline 定数の変更はなし（本イシューでは提案・�
 
 本ディレクトリのログ（`*.log`・`env_info.txt`）は 2026-09-16 の Mac セッションで取得済み。結果一覧と判定は `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §2 と、design doc の該当節を参照。
 
-## #4031 追記: 2e20 級入力の overflow 耐性（実測済み）
+## #4031 追記: 2e20 級入力の overflow 耐性（テストは pass・有効性は判断待ち）
 
-状態: **実測済み・pass**（2026-11-05・`<metal-node>`・`a0ae7bdbc`。1 本実行・exit 0・`1 passed; 0 failed`。
+状態: **テストは pass・有効性は所有者の判断待ち**（実行中に展開ツリーが別セッションの rsync で上書きされた。記録の README を参照）。2026-11-05・`<metal-node>`・`a0ae7bdbc`。1 本実行・exit 0・`1 passed; 0 failed`（
 記録は `docs/perf/logs/metal-batch-norm-2e20-4031/`。実行時は下のコマンドの部分一致フィルタを `--exact` の完全一致に替えた）。
 
 実行コマンド:
