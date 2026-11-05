@@ -223,11 +223,12 @@ CUDA／Metal 実機は本実装エージェント実行環境から到達不能�
 | 新 `OnnxError` variant 全て | 同 `onnx_autograd_error_paths_*` | CI | 該当なし | 該当なし | 該当なし |
 | 既定経路 `OnnxModel::run` が変更前と bit 同一 | 既存 `interop_onnx_*` が無修正で通る | CI | 該当なし | 該当なし | 該当なし |
 | 公開面の正ガード・否定ガード | §8.1 の 1〜6 | CI | 該当なし | 該当なし | 該当なし |
-| GPU tape と CPU tape の forward／勾配が REQ-2 統一複合判定で一致（CUDA） | `crates/facade/tests/interop_onnx_autograd_gpu_parity.rs::cuda_onnx_autograd_tape_matches_cpu_tape_within_req2_on_real_device` | `#[ignore]` | 未実測（#3864） | 該当なし | 該当なし |
-| 同（Metal） | 同 `metal_onnx_autograd_tape_matches_cpu_tape_within_req2_on_real_device`（`#[cfg(target_os = "macos")]` ＋ `#[ignore]`） | `#[ignore]` | 該当なし | 未実測（#3865） | 該当なし |
+| GPU tape と CPU tape の forward／勾配が REQ-2 統一複合判定で一致（CUDA） | `crates/facade/tests/interop_onnx_autograd_gpu_parity.rs::cuda_onnx_autograd_tape_matches_cpu_tape_within_req2_on_real_device` | `#[ignore]` | 実測済み・pass（#3864。2026-11-04。#4046 で測り直し 2026-11-05・pass） | 該当なし | 該当なし |
+| 同（Metal） | 同 `metal_onnx_autograd_tape_matches_cpu_tape_within_req2_on_real_device`（`#[cfg(target_os = "macos")]` ＋ `#[ignore]`） | `#[ignore]` | 該当なし | 実測済み・pass（#3865。2026-11-04） | 該当なし |
 
 - 実機テストが測るもの: 11 op は GPU tape 上でもホスト実行のため、GPU のカーネルではなく (a) device 常駐入力の `materialize` とホスト往復での値の保存、(b) 利用者の損失など device 上で動く組み込み `Var` 演算と組み合わせたときの一致、の 2 点である。形は既存の `crates/facade/tests/interop_onnx_gpu_execution_parity.rs` に倣い、置き場は共通雛形 #3778（OPEN）が入ってから合わせる。`<rocm-node>` は facade に `Device::Rocm` がないため該当なし。
 - §5 の有限差分用 5e-2 基準は REQ-2 ではないため facade のテストへ持ち込まない。
+- 追記（#4046）: 実機 parity は上の表のテスト名（計画時の案で、ファイルは作られていない）ではなく、共通雛形 #3778 の `crates/facade/tests/train_gpu_parity.rs` の `onnx` 族（`train_parity_onnx_cuda_matches_cpu`・`train_parity_onnx_metal_matches_cpu`）で測った。CUDA は `docs/perf/logs/onnx-train-cuda-parity-3864/` と、共有 target の成果物の再利用（#4044）を除いた測り直し `docs/perf/logs/onnx-train-cuda-parity-3864-rerun/`、Metal は `docs/perf/logs/onnx-train-metal-parity-3865/`。どれも 2 ケース 12 量が REQ-2 統一複合判定で pass。
 
 ### 8.5 数値契約
 
@@ -304,6 +305,6 @@ CUDA／Metal 実機は本実装エージェント実行環境から到達不能�
 
 - import の例外: 実行経路は `fandhe_ai` だけで、`Cast` ノードを持つ bytes を作る `fandhe_ai_onnx_interop::onnx::proto` だけを import する（`Cast` を持つ fixture はコミットされていないため）。`onnx::autograd`・`interp`・`fandhe_ai_autodiff`・`fandhe_ai_backend_cpu` は参照しない。
 - 正ガード: `api_surface.rs` の `onnx_autograd_acceptance_coverage_map_matches`（シナリオ→テストの対応表、`#[test]` の実在、`#[ignore]` 混入、内部クレート参照のすり替えを検出）と、検出器の自己テスト `onnx_autograd_acceptance_coverage_map_detects_each_category`。公開面の allowlist（20 件・禁止語 17 語）は変えていない。
-- 新しい `#[ignore]` テストは足さない。実機 parity は `train_gpu_parity.rs` の `onnx` 族（#3864 は GB10、#3865 は Mac mini）が担当し、**未実測**のまま。この記録は実機の値を書かない。
+- 新しい `#[ignore]` テストは足さない。実機 parity は `train_gpu_parity.rs` の `onnx` 族（#3864 は GB10、#3865 は Mac mini）が担当し、**未実測**のまま。この記録は実機の値を書かない（追記: その後どちらも実測済み・pass。§8.4 の表の後の「追記（#4046）」を参照）。
 - 数値は bit 一致か型・`Option` の判定だけで、tolerance は持ち込まない（§8.4）。
 - スコープ外は §8.11 のとおり（view・shape 系と CNN 系 op の勾配、書き戻しと export、GPU 上のネイティブ実行、性能計測、制御フロー op、optimizer state）。
