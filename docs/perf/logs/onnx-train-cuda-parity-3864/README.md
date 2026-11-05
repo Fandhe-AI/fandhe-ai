@@ -75,3 +75,7 @@ judge は全量 Req2（REQ-2 統一複合判定。相対誤差 1e-3 未満 ま�
 - 分類: **C（再利用の可能性を排除できない）**
 - 根拠: build.log に `Compiling` が 0 件（`Finished … in 0.06s`）。テストバイナリ `train_gpu_parity-7f8cdf980f4362cb` は 3862 のビルドにも既に存在し、作った回が記録に無いため、そのときのテストのコードを確かめられない。ライブラリのコードは前任（3862）と同一（差分 0 件）。取り直すかどうかは所有者の判断。
 - 判定基準・全 16 計測の表・限界は [`docs/real-hardware-shared-target-reuse-decision.md`](../../../real-hardware-shared-target-reuse-decision.md) §4。本追記は結果を変えない（既存の本文・回収ログは無改変）。
+
+## #4046 追記（測り直し）
+
+- 上の C を受けて、#4046 が同じ判定規則で共有 target の対策を入れて GB10 で測り直し、**pass** だった（onnx 族 2 ケース 12 量。2026-11-05）。記録は [`../onnx-train-cuda-parity-3864-rerun/`](../onnx-train-cuda-parity-3864-rerun/README.md)。本追記は結果を変えない（既存の本文・回収ログ・RULE は無改変）。
