@@ -38,9 +38,9 @@ categories = ["science", "mathematics", "hardware-support"]
 [dependencies]
 libloading.workspace = true
 # `impl BackendOps for RocmBackendOps`（src/ops.rs）の trait・Tensor・エラー型。workspace 内の path 依存で
-# 許容依存区分（外部クレート）の追加には当たらない。`publish = true` のため `version = "=0.13.0"`
+# 許容依存区分（外部クレート）の追加には当たらない。`publish = true` のため `version = "=0.14.0"`
 # （workspace 公開バージョンと完全一致）を併記する（併記しないと cargo-deny の wildcards で deny される）。
 # 0.14.0 へのバンプ時は他の公開クレートと同時に更新する（docs/crates-io-publishing-order.md §15）。
-fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.13.0" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.14.0" }
 # sum/max のホスト経路（R3 でカーネル化するまで）の委譲先と、テストの CPU 参照。
-fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.13.0" }
+fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.14.0" }
