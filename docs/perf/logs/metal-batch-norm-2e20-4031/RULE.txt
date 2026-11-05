@@ -1,0 +1,70 @@
+# RULE.txt — Metal の BatchNorm の 2e20 級入力の中間 overflow 耐性の実機 parity（事前登録。イシュー #4031）
+#
+# 対象は PR #4039（main 0c79dfc2f）が足した #[ignore] テスト 1 本。手順の正は ../metal-batch-norm-1736/README.md の「#4031 追記」節と
+# docs/batch-norm-ops-design.md §9.8、docs/real-hardware-verification-env.md（§3・§4・§6・§7.1）。実測値を推測で埋めない。
+# ホスト名・ユーザー名・ホームのパスは書かない。<metal-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-05T02:54:04Z（コミット直前に date -u で取った値。実機での実行より前。実機結果を見た後に入力・判定・コマンド・この RULE を変えない）
+issue: 4031
+machine: <metal-node>（Mac mini・Apple M4 10 コア・メモリ 16GB・macOS）。Linux／M4 Max 開発機では測らない・記録しない
+  （docs/real-hardware-verification-env.md §1・§7.1）。parity 測定で時間計測ではないため専有条件は課さない。
+  メモリは他の利用者と共有しているため、空き率（memory_pressure）と負荷を実行前後で env_info.txt に記録する
+target_commit: 86797e1b75a226ade4758880a57f98e19bd1329c（origin/main）。
+  crates/・Cargo.toml・Cargo.lock・rust-toolchain.toml は PR #4039 のマージコミット 0c79dfc2f と同じ（git diff --quiet で確認済み）
+  条件: 実行時の HEAD で `git diff --quiet 86797e1b75a226ade4758880a57f98e19bd1329c <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_metal_parity.sh が検査する）。
+  HEAD はこの RULE.txt と run_metal_parity.sh を入れた最初のコミット（push 済み）。転送後にノード側で .rev-stamp を読み、送信側の HEAD と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-4031、出力先は <home>/work/out-4031。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai
+  （内蔵 SSD が小さいため target はこの 1 つだけ）。転送は docs/real-hardware-verification-env.md §3・§7.1 の rsync だけ
+  （.git・.claude/worktrees/・.codex/・.env*・settings.local.json・.venv*/・*.local.md は送らない）
+hw_lock: <home>/work/.fandhe-hw-lock を mkdir で取り、owner に「#4031 <UTC>」を書く。取れなければ待たず・奪わず停止する。
+  終了時は失敗・中断でも trap で必ず rm -rf で外す（自分の owner のときだけ）。テストの前後で owner が自分のままか確かめ、
+  失っていればその回を undetermined にする（ロックを持たずに測った値は採らない）。ほかの利用者のプロセスは止めない
+script: 同ディレクトリの run_metal_parity.sh（../optim-train-template-metal-parity-3863/run_metal_parity.sh の複製。差分はヘッダに記載）。
+  コミット済みのものをそのまま送り、env_info.txt の script_sha256 で照合する。非対話 SSH では PATH が通らないため zsh -lc で包み、
+  macOS には setsid が無いので nohup で切り離して起動する。完了はスクリプトの "done:" 行とロックの解放をポーリングで確かめる
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity）の定数は fandhe_ai_tensor_core::tolerance が正本。
+  baseline は追加しない。判定の helper（assert_parity・assert_var_parity_with_nonfinite_class）もテストコードも変えない
+switches_left_default: 環境変数で実行時の切替を変えない
+
+# ---- 対象 ----
+test: crates/backend-metal/tests/batch_norm_parity.rs::batch_norm_train_2e20_scale_has_no_intermediate_overflow_and_matches_cpu_reference
+input: n=3 c=3 spatial=13（M=39）。ch0 は 2e20 倍・ch1 は 1e18 倍・ch2 は 1 倍。種 0x4031（入力）・0x4032（w）・0x4033（b）。eps=1e-5。affine なし・あり の 2 通り
+arms: A=MetalBatchNorm::run_batch_norm_train_f32（Metal 実機）  B=fandhe_ai_backend_cpu::run_batch_norm_train_f32（CPU 参照）
+
+# ---- 判定（../metal-batch-norm-1736/README.md「#4031 追記」の事前登録判定規則の写し）----
+judgment:
+  out・mean: REQ-2 統一複合判定（assert_parity。相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）
+  var: docs/batch-norm-ops-design.md §9.8 のクラス一致（assert_var_parity_with_nonfinite_class）。CPU 参照が +inf の 2e20 チャネルは
+    +inf 同士、ほかの有限チャネルは REQ-2
+  説明: 中間 overflow の主証拠は out の REQ-2 一致である（f32 のまま二乗して overflow すると var=inf → rstd=0 → out が潰れ、CPU と食い違う。§9.8）
+  説明: fail 0 なら pass。このテストは pass 時に量ごとの値を出力しない（記録されるのは exit code と test result 行だけ）
+pass: コマンドが exit 0 で、出力に「running 1 test」と「test result: ok. 1 passed; 0 failed」があること
+fail: 非 0 終了（テストの panic を含む）
+undetermined: ノードに届かない、ビルドできない、--list の選択件数が 1 でない、実機ロックの取得不能・喪失、他の cargo／rustc の並走、
+  exit 0 で 1 passed が揃わない（0 本の実行など）、ハング（macOS に timeout(1) が無いので外から止める）。pass として扱わない
+completion: pass のときだけ #4031 を Closes する。fail・undetermined なら Refs
+
+# ---- run 数 ----
+runs: 1 コマンド 1 回。時間の計測ではないので中央値は取らない。fail・undetermined の後に再実行して置き換えない
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  1) 先に cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity --no-run でビルドを終える。計測中は他の cargo・ビルドを走らせない
+     （開始前とテストの前に pgrep で他の cargo／rustc が無いことを確かめる）
+  2) cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity -- --ignored --exact --list <テスト名> の出力で、
+     ": test" で終わる行がちょうど 1 件であることを確かめ、出力を list.log に残す
+  3) 別プロセスで 1 回実行する:
+     cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity -- --ignored --exact --nocapture --test-threads=1 batch_norm_train_2e20_scale_has_no_intermediate_overflow_and_matches_cpu_reference
+
+# ---- 記録 ----
+record: 実行ログ全文を batch_norm_parity_2e20_4031.log に保存する（末尾に rc=<終了コード>）。終了コードは batch_norm_parity_2e20_4031.exit_code。
+  summary.tsv にテスト単位の exit code・running 件数・test result 行・判定を書く。ほかに env_info.txt・rev-stamp.txt・build.log・list.log
+masking: ホスト名・ユーザー名・ホームのパスを <metal-node>／<user>／<home> へ置換する。漏れたら記録を捨てて取り直す（fail-closed）。回収ログは手で編集しない
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail が出ても tolerance・baseline・閾値・判定の helper・テストコード・この RULE を変えず、再実行で置き換えない。
+  panic メッセージの値（どの量〈out・mean・var〉・どのチャネル・fail_count・max_abs_diff・max_rel_err など）をそのまま引用して事実を記録し、
+  README と PR に「要対応」と書き、所有者へ報告して止まる。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
