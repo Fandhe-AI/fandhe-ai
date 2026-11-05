@@ -1,0 +1,15 @@
+prev_tally_all tally 13 3 11 invalid 1 noise na total 27
+gemm Metal N=256       前版 1 位  1.15x → 1 位  1.13x
+gemm Metal N=512       前版 1 位  1.08x → 1 位  1.07x
+gemm Metal N=1024      前版 僅差   0.99x → 僅差   0.98x
+gemm Metal N=2048      前版 僅差   0.94x → 僅差   0.94x
+gemm Metal N=4096      前版 2 位  0.88x → 2 位  0.88x
+gemm CPU N=256         前版 3 位  0.71x → 3 位  0.69x
+gemm CPU N=512         前版 2 位  0.76x → 2 位  0.75x
+gemm CPU N=1024        前版 2 位  0.70x → 2 位  0.66x
+gemm CPU N=2048        前版 2 位  0.52x → 2 位  0.53x
+train Metal            前版 僅差   0.95x → 僅差   0.96x
+infer Metal            前版 1 位  1.02x → 1 位  1.02x
+train CPU              前版 3 位  0.28x → 3 位  0.24x
+infer CPU              前版 4 位  0.15x → 4 位  0.15x
+prev_macmini_subset 3 3 7 total 13
