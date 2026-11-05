@@ -156,9 +156,9 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
   - **記入欄は未実測（別ディレクトリで実測）**: Phase 5／6 の実装時に作られた README で、記入欄が空のまま残っているが、同じテストが `nn-layers-{cuda,metal}-parity-3860/3861` の 19 本に含まれて pass している 8 件（`shrink-ops-3817`・`bilinear-ops-3818`・`batch-norm-rank5-3819`・`similarity-ops-3821`・`channel-shuffle-3822`・`adaptive-pool3d-ops-3823`・`lp-pool-ops-3825`・`fractional-max-pool-ops-3826`）。テスト名は `nn-layers-cuda-parity-3860/README.md:45` 以降の表と、両ディレクトリの `summary.tsv` で突き合わせた。実機を使わない開発環境の代替値で pass にしていない。
 - 実測値を推測で埋めていない。ホスト名は `<cuda-node>`・`<metal-node>`・`<rocm-node>` の表記だけを使う。
 
-### 5.2 Phase 10（#3855）の子 issue 17 件
+### 5.2 Phase 10（#3855）の子 issue 18 件
 
-`gh api repos/Fandhe-AI/fandhe-ai/issues/3855/sub_issues` の全件。状態は 2026-11-05T08:19:21Z に取得した（CLOSED 15・OPEN 2）。判定は各 README の記入欄（`path:line`）で、実行コミットは `rev-stamp.txt` の完全 sha。#4044 の分類は `docs/real-hardware-shared-target-reuse-decision.md` §4.2（A: 全メンバー再コンパイル／B: 前の回の成果物が再利用された可能性／C: 由来を確かめられない）。
+`gh api repos/Fandhe-AI/fandhe-ai/issues/3855/sub_issues` の全件。状態は 2026-11-05T08:19:21Z に取得した（CLOSED 16・OPEN 2）。判定は各 README の記入欄（`path:line`）で、実行コミットは `rev-stamp.txt` の完全 sha。#4044 の分類は `docs/real-hardware-shared-target-reuse-decision.md` §4.2（A: 全メンバー再コンパイル／B: 前の回の成果物が再利用された可能性／C: 由来を確かめられない）。
 
 | issue | 状態 | ディレクトリ | 対応表の行／追跡表 # | 判定（記入欄） | 実測日 | 実行コミット（完全 sha） | #4044 分類 |
 |---|---|---|---|---|---|---|---|
@@ -401,7 +401,7 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 
 | 区分 | 件数 | 内訳 |
 |---|---|---|
-| 実測済み | 97 | 0.12.0 の 70 + §5.4 の 9 + Phase 10 の 17（`create-graph-*` 4・`nn-layers-*` 2・`nn-train-template-*` 2・`param-groups-resident-*` 2・`optim-train-template-*` 2・`onnx-train-*` 3・`gpu-linalg-optin-*` 2）+ `metal-batch-norm-2e20-4031-rerun2` 1 |
+| 実測済み | 97 | 0.12.0 の 70 + §5.4 の 9 + Phase 10 の 17 ディレクトリ（issue 数 18 とは別。§5.2 の「ディレクトリ」列の数。`create-graph-*` 4・`nn-layers-*` 2・`nn-train-template-*` 2・`param-groups-resident-*` 2・`optim-train-template-*` 2・`onnx-train-*` 3・`gpu-linalg-optin-*` 2）+ `metal-batch-norm-2e20-4031-rerun2` 1 |
 | 実機未実測 | 3 | `rocm-parity-3159`・`f64-create-graph-3786`・`f64-jvp-facade-3788` |
 | 記入欄は未実測（別ディレクトリで実測） | 8 | §5.1 の 8 件 |
 | 判定対象外 | 3 | 0.12.0 から不変（`facade-custom-function-2549`・`int8-mma-probe-2608`・`int8-quant-baseline-2609`） |
