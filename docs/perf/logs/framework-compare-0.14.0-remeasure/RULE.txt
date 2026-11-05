@@ -1,0 +1,59 @@
+事前登録規則（DGX Spark GB10）0.14.0 6 フレームワーク同席計測 — 【固定済み】
+イシュー #3875。固定時刻: 2026-11-05T16:00:58Z（以後編集しない。固定後の変更は RULE.v2.txt を新設する）。本ファイルは時間の実測値を含まない（行数スモークの行数のみ）。
+0.13.0 の RULE.txt（../framework-compare-0.13.0-remeasure/RULE.txt）を雛形にした。0.13.0 との違いは、腕・版（0.14.0）・前版比の参照先（0.13.0）・前版の勝敗 tally の参照先の 4 点だけで、
+判定規則・N=5・ゲート・期待行数・既定設定（SME OFF・Graph capture OFF）・tolerance・baseline は 0.13.0 と同一。
+ほかに形の違いが 2 つある（判定の中身は変えない。下の「形の違い」）。
+
+形の違い:
+  (a) 0.13.0 の GB10 の RULE は判定・前版比の定義を Mac mini 側の RULE へ委ねていた。0.14.0 の Mac mini 側（#3874）は別セッションの別ディレクトリなので、
+      ../framework-compare-0.13.0-macmini-remeasure/RULE.txt の該当文を本ファイルへ写し、本ファイルだけで読めるようにした。
+  (b) 判定一覧の出力元。0.13.0 は scoreboard/gen_0130.py（Mac mini のデータを必須とし HTML も作る）だったが、スコアボードは #3876 の範囲で本 PR は scoreboard/ を作らない。
+      そこで判定関数を字句そのままで GB10 の 14 セルに限って切り出した aggregate/judge_gb10_0140.py を計測前に固定する。
+      同じ判定であることの根拠: --regress-0130 が 0.13.0 の GB10 データ（前版 0.12.0）で gen_0130.out の GB10 14 行と byte 一致し、tally が 10 0 4 invalid 1 total 14 になること（固定前に確認済み）。
+      両機体を合わせた tally は #3876 が出す。本計測の tally は GB10 の 14 セルだけで、前版 tally（両機体 27 セル）と数を直接比べない。前版の GB10 分は gen_0130.out の GB10 行から数える。
+
+腕（単腕）:
+  計測腕 ARM = 18a7f4b87fe61029a179cb1922cc82928440f2c9（main の #4063 マージ。fandhe-ai =0.14.0 ピン入り）
+  方針: bench-fandhe は 0.13.0 から変えず、registry ピン（fandhe-ai）だけが =0.14.0 に上がっている。旧条件腕は置かない。
+  計測前の事前確認（結果は README の「事前確認」に記録する。未確認のまま固定しない）:
+    scripts/bench/framework-compare について、0.13.0 の腕 5d05a50235138645b0b069060ed54dfd2c46db7f との差分が
+    ・*.rs の差は bench-fandhe/src/main.rs の VERSION 定数（"0.13.0"→"0.14.0"）と、ピンの版を述べた文字列・コメントだけ、
+    ・Cargo.toml の差は fandhe-ai の版の行とコメントだけ、
+    ・Cargo.lock の差は fandhe-ai 系クレートの版・checksum と、新しく入る自社クレート fandhe-ai-backend-rocm 0.14.0 の 1 件だけ（外部 crate の増減・版変更 0）、
+    ・deny.toml の差は #3962 の RUSTSEC-2026-0429 の ignore 追加だけ（計測には影響しない。記録のみ）、であること。
+  常駐入力の判別式（計測ツリーで 1 件ヒットしなければ fail。0.13.0 と同じ式。run ごとに検査）:
+    ^[[:space:]]+let c0 = tape\.matmul_resident\(
+  bench_py.py sha256: 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b（0.13.0 と同値。run ごとに照合）
+
+機体: <cuda-node>（GB10 / sm_121）を専有する（#3875 で指定したノード。ホスト名は公開テキストに書かない）。
+  専有ノードは計測前に決めて途中で変えない。実機ロック（~/work/.fandhe-hw-lock・owner "#3875 rel-0.14.0 2026-11-05T15:54:09Z"）を取って専有し、ロックなしの値は採らない。
+  ロックは行数スモークの前に取り、系列の終わりまで持つ。系列が失敗しても外す（dgx-0140-loop.sh の終了時処理）。
+  専有の確認（#3875 の所有者指示）: 系列の前と各 round の前に nvidia-smi --query-compute-apps で compute プロセスが無いことを確かめ、env_info.txt に記録する（vLLM・ComfyUI・Kokoro の常駐の有無も）。
+  compute プロセスが 1 件でも出たら「専有未達」、nvidia-smi が失敗したら EXCLUSIVE-INVALID として系列を打ち切り、pass にしない（0.13.0 は記録のみだった点が違う。ゲートの条件は変えない）。
+  driver は計測時の env_info.txt に記録する（0.13.0 は 580.173.02。違っていれば記録のみ）。
+Python 3 FW の版: 0.13.0 の計測と同じ版を使う（違っていれば記録のみ・上げない）。0.13.0 の記録（参照用）:
+  Python 3.12.3（システム）・~/work/.venv-bench: torch 2.14.0+cu130・tensorflow 2.21.0（CPU のみ）・scipy 1.18.1・numpy 2.5.4・keras 3.15.1。pip freeze は env/ に収録する。
+期待行数: stage1 112（skipped 0）/ stage2 8 / stage3 28。旧条件腕はない。
+  行数スモーク（RULE 固定前・ビルド込み 1 round・値は判定に使わない。2026-11-05T15:56:14Z 開始〜2026-11-05T16:00:22Z 終了（ビルド後の計測区間）（<cuda-node>）: stage1 112・skipped 0・stage2 8・stage3 28・rc 0・cargo tree で fandhe-ai v0.14.0）。
+ゲート（0.13.0 と同一）: 各 round 前に load1 < 1.0 かつ GPU 使用率 0% が 3 サンプル連続（30 秒間隔・最大 30 分）。
+  値が数値で取れなければ GATE-INVALID、30 分超過は GATE-TIMEOUT として系列を打ち切る。5/5 完走のみ採用。打ち切りはそのまま記録し、取り直しは RULE.v2.txt。
+判定（0.13.0 から不変）: 比 = 同一 run 内の「有効な相手のうち最速 / fandhe-ai reuse」の 5 run 中央値（推論はスループット比。同じ式）。
+  比 > 1 で 1 位、>= 0.90 で僅差、それ未満は負け。相手側の parity_fail_count > 0 の行は判定不能（その相手を順位・最速に含めない）。
+  判定側（fandhe-ai reuse）の要素検証（parity_fail_count）が 1 件でも不合格なら、判定不能にせず生成を停止する（fail-closed）。
+  欠損 run・有効な相手の不在も生成停止。負けの「N 位」と相手名は 5 run 中央値で数える。tolerance・baseline は変えない。
+  N = 5。設定は既定（SME OFF・Graph capture OFF）。
+  GB10 には対照系列を置かない（0.13.0 も置いていない）ので、ノイズ帯は算出しない（「対照系列なし・未算出」。判定一覧の tally 行は `noise na`）。
+  要素検証の欄は gemm の行にだけあり、train／infer の行には無い（0.13.0 と同じ出力仕様）。合否の集計は gemm の行で行う。
+前版比（0.13.0 比。表示のみ・勝敗には使わない）: 同一セル・同一モードの fandhe-ai 中央値同士の比（0.14.0 の 5 run 中央値 ÷ 0.13.0 の 5 run 中央値。
+  推論はスループット比。<1 が高速化・推論は >1 が改善。0.13.0 に同モードの記録がないセルは fresh 同士）。0.13.0 は 2026-10-31 の計測で、日をまたぐため
+  計測日の負荷・機体の状態の揺れを含む（ライブラリの変更だけの効果ではない）。参照ファイル（sha256 を固定。aggregate/judge_gb10_0140.py が照合する）:
+  framework-compare-0.13.0-remeasure/gb10/results-dgx-0.13.0-median5.jsonl
+    6a0e3c7530b353dcb82662f0c08affa72b126533978084b053970239b1e22896
+  framework-compare-0.13.0-remeasure/gb10/results-dgx-0.13.0-extra-median5.jsonl
+    12f8c0c607a9b3770e9e860b8b374c095893d52e5778019aff20613078623828
+  framework-compare-0.13.0-remeasure/gb10/results-dgx-py-0.13.0-median5.jsonl
+    4a7416222d8cbe8b56d9aa96f9cf4825b871acaf2d5a8f270663f35dd1e0008a
+  勝敗の前版 tally は ../framework-compare-0.13.0-remeasure/scoreboard/gen_0130.out（tally 13 3 11 invalid 1 noise na total 27）を参照する。
+  （Mac mini 側の参照ファイルは #3874 の RULE に固定する）
+実機テスト: #3256 の C1〜C9・#3272 の X1 は本計測の範囲外とする。
+ビルドは各ターゲットとも系列開始前に 1 回だけ（dgx-0140-loop.sh）。fail が出ても tolerance・assert・baseline は変えない。計測中にビルド・並走負荷を置かない。
