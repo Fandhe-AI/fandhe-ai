@@ -5525,7 +5525,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 ### 76.0 位置づけ・承認根拠
 
-- 状態: **実装済み**（GPU 実機 parity は未実測）。§72.1 の F3（`Nuc`・`Spectral` が fail-closed）を、§75 の推奨 A1 で解消した。節番号は、main が §75 まで使い、open PR に本ファイルを触れるものが無かったため §76 を取った。
+- 状態: **実装済み**（GPU 実機 parity は未実測）。§72.1 の F3（`Nuc`・`Spectral` が fail-closed）を、§75 の推奨 A1 で解消した。節番号は、main が §75 まで使い、open PR に本ファイルを触れるものが無かったため §76 を取った。 **CUDA 実機の結果（追記・#4052・2026-11-05）**: 値のケース `linalg_matrix_norm_nuc`・`linalg_matrix_norm_spectral` を含む `create_graph_linalg_norm_rank_cuda_matches_cpu` は `<cuda-node>` で族単位の pass（コミット `8966befde`）。ケース別の数値は出ず、ケースの実行は事前登録した代替証拠による（`docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）。Metal は未実測。
 - 承認根拠: #3711 の所有者コメント 6604937225（2026-11-03）が §75.6 への回答として、点 1 は A1、点 2〜6 は推奨どおり（`Nuc`・`Spectral` は同じ扱い／縮退と σ = 0 は §68 準拠の型付き拒否で新しい定数・閾値は作らない／値は V3／隣接見本は `Op::Custom` だけ／GPU parity は §48 に従い tolerance を変えない）とした。これ以上の承認は主張しない。A2（可微分域に合わせた専用判定）は別途承認が要るため実装しない。
 - 既存節（§72・§75 の本文）は書き換えず、本節から前方参照する。
 

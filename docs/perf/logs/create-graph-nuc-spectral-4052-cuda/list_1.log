@@ -1,0 +1,5 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/create_graph_gpu_parity.rs (<home>/work/target-fandhe-ai/debug/deps/create_graph_gpu_parity-7cd85656ab24ea57)
+create_graph_linalg_norm_rank_cuda_matches_cpu: test
+
+1 test, 0 benchmarks

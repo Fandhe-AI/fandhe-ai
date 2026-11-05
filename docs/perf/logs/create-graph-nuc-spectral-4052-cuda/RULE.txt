@@ -1,0 +1,107 @@
+# RULE.txt — create_graph の MatrixNorm Nuc・Spectral の値のケースの CUDA 実機 parity（事前登録。イシュー #4052）
+#
+# 判定は ../create-graph-b-cuda-parity-3857/RULE.txt を写し、対象を 1 本に絞った。測り方は docs/autodiff-higher-order-grad-decision.md §48。
+# 元の RULE との違いは次だけで、どれも pass を緩めない:
+#   1. 対象は create_graph_linalg_norm_rank_cuda_matches_cpu の 1 本だけ（scaffold は実行しない）
+#   2. 末尾に build_freshness: を足した（共有 target の成果物の再利用を防ぐ）
+#   3. スクリプトは雛形 ../hw-parity-run-template/run_parity_template.sh の複製（差分は固定値の 9 行だけ）
+#   4. case_evidence: を足した（このテストは pass 時にケース名を出力しないため、所有者の判断で代替証拠を事前に定めた）
+# 新しい閾値は書かない。実測値を推測で埋めない。ホスト名・ユーザー名・ホームのパスは書かない。<cuda-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-05T10:27:55Z（コミットの直前に date -u で取った値。実機での実行より前。実機結果を見た後に入力・判定・コマンド・この RULE を変えない）
+issue: 4052
+machine: <cuda-node>（DGX Spark GB10・aarch64・sm_121）。Linux 開発機や M4 Max では測らない・記録しない（docs/real-hardware-verification-env.md §1）。
+  parity 測定で時間計測ではないため専有条件は課さない。常駐 compute プロセスの件数と GPU 使用率は、実行の前後に送信側で §6.1 の形で確かめて README に書く
+  （雛形の env_info は件数を持たない）。ほかのサービスのプロセスは止めない
+target_commit: 0545513ec243199096d7f30f51bb7eeed5eb91ea（origin/main。PR #4054 で Nuc・Spectral の値のケースを足したコミット）
+  条件: 実行時の HEAD で `git diff --quiet 0545513ec243199096d7f30f51bb7eeed5eb91ea <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+source_fingerprint: 32191e981ef0467ccf93c858b7501cd4433edc0d9c247a85035aa11667e09792
+  crates/・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの SHA-256 を名前順に並べた一覧の SHA-256。上の target_commit の git archive から計算した。
+  再現方法: git archive <commit> crates Cargo.toml Cargo.lock rust-toolchain.toml を空のディレクトリへ展開し、
+  find crates Cargo.toml Cargo.lock rust-toolchain.toml -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 shasum -a 256 | shasum -a 256
+rev_stamp: 展開先の .rev-stamp は 2 行形式（1 行目 HEAD、2 行目 dirty=<件数>）。dirty=0 であること（run_cuda_parity.sh が検査する）。
+  HEAD はこの RULE.txt と run_cuda_parity.sh だけを入れたコミット。転送後、起動前にノード側で .rev-stamp・スクリプトの SHA-256・ソースの指紋を読み、送信側と照合する
+deploy: 展開先は <home>/work/rust-ai-library-run-4052-cuda、出力先は <home>/work/out-4052-cuda（固有の名前。既存の展開先・出力先は再利用しない）。
+  CARGO_TARGET_DIR は <home>/work/target-fandhe-ai。
+  転送は docs/real-hardware-verification-env.md §3 の rsync だけ（ノードに git は無い。worktree の .git はファイルなので --exclude '.git' で除外する。.codex/・.env*・settings.local.json・.venv*/・*.local.md は送らない）
+hw_lock: 送信側の手順。rsync の直前に、<home>/work/.fandhe-hw-lock が無いこと、展開先と出力先が存在しないこと、他の cargo／rustc が無いことを確かめる。
+  どれかが成立しなければ転送せず停止する（待たない・奪わない）。次に mkdir でロックを取り、owner に「#4052 run <UTC>」を書いてから転送と実行を行う。
+  スクリプトは owner を引数で受け取り、一致するときだけ引き継ぐ。終了時は失敗・中断でも外す（スクリプトの trap。起動前に失敗したら送信側が、自分の owner のときだけ外す）。
+  テストの前後で owner が自分のままか確かめ、失っていればその回を undetermined にする（ロックを持たずに測った値は採らない）
+tree_check: スクリプトはビルド前とテストの前後で、.rev-stamp の内容・スクリプトの SHA-256・ソースの指紋を確かめ、env_info.txt に *_now として実行前後の値を書く。
+  ビルド前に source_fingerprint と不一致なら停止、テストの前後で開始時と不一致ならその回を undetermined にする
+script: 同ディレクトリの run_cuda_parity.sh（雛形の複製。差分は固定値の 9 行だけ。コミット済みのものをそのまま送る。env_info.txt の script_sha256 で照合）。
+  ノード上で setsid nohup により切り離して起動する。
+  REQUIRED_LIBS は fandhe_ai に加えて、#4046 と同じ残り 7 メンバーの lib 名を入れた（pass を緩めない）
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::parity::compare）の定数は fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない（空のまま）
+switches_left_default: TF32 opt-in は OFF のまま、GPU linalg ゲートは OFF のまま（触らない。環境変数で切替を変えない）
+
+# ---- 対象（対象コミットの CASES の family=linalg_norm_rank をそのまま写す）----
+target: create_graph_linalg_norm_rank_cuda_matches_cpu（crates/facade/tests/create_graph_gpu_parity.rs）
+cases: 全ケース route=H・judge=Judge::Strict
+  linalg_matrix_norm_fro（Q5 の拒否 reject_matrix_norm_nuc_degenerate つき）
+  linalg_matrix_norm_one
+  linalg_matrix_norm_inf
+  linalg_matrix_norm_nuc（値のケース。#4052 の主対象）
+  linalg_matrix_norm_spectral（値のケース。#4052 の主対象）
+  linalg_slogdet_sign
+  linalg_matrix_rank
+  H の pass は経路の parity であり、カーネル同士の parity ではない
+
+# ---- 判定（判定契約はテストのコードが定める。ここでは変えない）----
+judgment: Q1 first_order が同デバイスの素の backward と bit 一致かつ GPU・CPU の REQ-2 複合判定／Q2 cg.grad・Q3 二階 H v（ゼロでない）・
+  Q4 孫テープ再生は GPU と CPU の REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）／Q5 拒否は Err(Backward) かつ子テープが空
+pass: exit 0 かつ「running 1 test」かつ「test result: ok. 1 passed; 0 failed」
+fail: 1 件以上の失敗（パニックを含む）
+undetermined: ノードに届かない、ビルドできない、timeout（exit 124）、--list の不一致、実機ロックの取得不能・喪失、自己検査の失敗、
+  tree_check の不一致、build_freshness の不成立、case_evidence の不成立。pass として扱わない
+completion: 上の pass を満たし、build_freshness と case_evidence も成立し、かつもう一方のノード（Metal）の計測 PR がすでに main にマージされていて pass のときだけ #4052 を Closes する。
+  それ以外は Refs #4052。追跡表 # 4 の区分（未確定）は変えない。「公開」へ動かすかは所有者が決める
+
+# ---- ケースの実行の根拠（代替証拠。pass を緩めない。上の pass に追加で要求する）----
+case_evidence:
+  背景: run_family は pass 時に何も出力しない（テストファイルに println!／eprintln! は無い。ケース名は失敗時の panic にだけ出る）。
+    このためログにケース別の実行の跡は残らない。テストコードは変えない。所有者の判断（2026-11-05、計測前の確認）で次の代替証拠を定めた
+  e1: 実行ログの Running 行のテストバイナリ（build_artifacts.txt で新しさを確かめたもの）に対し、実行後にノード上で grep -a -o を行い、
+    linalg_matrix_norm_nuc と linalg_matrix_norm_spectral がそれぞれ 1 件以上含まれること。対照として、登録の無い文字列 linalg_matrix_norm_absent_4052 は 0 件であること。
+    バイナリの更新時刻が build_artifacts.txt の値と同じであること。結果を case_evidence.txt に保存する（送信側が回収時に作る。SHA256SUMS の対象外）
+  e2: ソースの指紋が source_fingerprint と一致すること（対象コミットの CASES に両ケースがある。crates/facade/tests/create_graph_gpu_parity.rs:892・:903）
+  e3: run_family が族の全ケースを打ち切らずに回すこと（crates/facade/tests/create_graph_gpu_parity.rs:2831 の filter_map〈:2839〉。失敗を集めて最後に assert する）
+  扱い: e1〜e3 は実行の直接の観測ではない。README と PR に代替証拠であることを明記し、結果は族単位の pass と書く。ケース別の数値（max_abs_diff 等）は出ないので埋めない。
+    pass 時にログへケース名が出ないことは fail にも undetermined にも数えない
+
+# ---- run 数 ----
+runs: 1 回。時間の計測ではないので中央値は取らない。fail・undetermined の後に再実行して置き換えない。
+  再実行するなら RULE.txt を新しいディレクトリで登録し直す
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  0) 送信側で上の hw_lock の確認とロックの取得、転送、照合を行ってからスクリプトを起動する
+  1) 開始前に pgrep で他の cargo／rustc が無いことを確かめる。tree_check の不一致でも停止する
+  2) build_freshness の clean の後、cargo test -p fandhe-ai --test create_graph_gpu_parity --no-run でビルドを終える（判定外。build.log）
+  3) cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --list create_graph_linalg_norm_rank_cuda_matches_cpu の出力で、
+     ": test" で終わる行がちょうど 1 件であることを確かめる（list_1.log）
+  4) build_freshness の time_check を行い、次を 1 回だけ別プロセスで実行する（--release は付けない。docs/real-hardware-verification-env.md §4.9）:
+     timeout 1800 cargo test -p fandhe-ai --test create_graph_gpu_parity -- --ignored --exact --nocapture --test-threads=1 create_graph_linalg_norm_rank_cuda_matches_cpu
+external_timeout: timeout 1800。ハングを pass にしない。timeout は undetermined
+
+# ---- 記録 ----
+record: 実行ログ全文（--nocapture）を create_graph_linalg_norm_rank_cuda_1.log に保存する（末尾に rc=）。終了コードは exit_code_1、判定は summary.tsv に書く。
+  summary.tsv の verdict は exit code と test result 行で決まり、非 0 終了はすべて fail と書かれる。timeout と不成立の区別は上の定義でログから決め、README に書く
+masking: ホスト名・ユーザー名・ホームのパスを <cuda-node>／<user>／<home> へ置換する（前後が識別子文字でない場合のみ）。
+  漏れたら記録を捨てて、所有者へ報告する。回収ログは手で編集しない。回収後に送信側でも PR 差分全体をユーザー名・/home/・内部ドメイン・SSH 別名で grep し、0 件であることを確かめる
+integrity: 保存したファイル群の SHA256SUMS を作り、env_info.txt の script_sha256・rev_stamp と合わせて実行と提出物の対応を検証する
+
+# ---- fail の扱い ----
+fail_handling: fail・undetermined が出ても tolerance・baseline・閾値・判定方式・判定の helper・入力・テストコード・この RULE を変えない。再実行で置き換えない。
+  panic メッセージのケース名・Q 番号・fail_count・max_abs_diff・max_rel_err をそのまま引用して事実を記録し、
+  README と PR に「要対応」と書き、所有者へ報告して止まる。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
+build_freshness:
+  背景: 共有 CARGO_TARGET_DIR の workspace メンバー成果物が前の回のものの再利用になりうる。条件と対策は
+    docs/real-hardware-shared-target-reuse-decision.md、手順は docs/real-hardware-verification-env.md §4.11
+  clean: build_then_run の 2) の前に、cargo metadata --no-deps の全メンバーへ cargo clean -p <名前> を実行する（--release なしなので dev プロファイル）。crates.io の依存は消さない
+  time_check: ビルド後、テストバイナリと全メンバーの lib 成果物（target/debug/deps の lib<名前>-*.rlib・.rmeta。facade 自身の libfandhe_ai-* を含む）の
+    更新時刻が、ロック取得（ノード上の owner ファイルの mtime）より秒単位で厳密に後であること。結果を build_artifacts.txt に保存する
+  undetermined: 古い成果物が 1 つでもある、ロックと同じ秒、必須 lib の欠落、テストバイナリの欠落、実行したバイナリが確かめたものと違う。全テストを実行しない
+  script: 同ディレクトリの run_cuda_parity.sh（雛形 docs/perf/logs/hw-parity-run-template/run_parity_template.sh の R4・R5 をそのまま含む）
