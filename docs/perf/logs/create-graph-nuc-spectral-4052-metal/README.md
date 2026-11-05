@@ -26,6 +26,8 @@
 | `linalg_slogdet_sign` | H | NoMatMul | - | なし | pass |
 | `linalg_matrix_rank` | H | NoMatMul | - | なし | pass |
 
+7 ケースとも直接の跡は無い。Nuc・Spectral にだけ注記があるのは、既存の 5 ケースが #3859 までの族単位の pass の扱いのままで、新しい 2 ケースだけ今回の計測指示がログの直接の跡を求めたためである。
+
 根拠は `summary.tsv`（exit code 0・`running` 1・`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.19s`）と `create_graph_linalg_norm_rank_metal_1.log`（末尾 `rc=0`）。route H の pass は経路の parity で、カーネル同士の parity ではない（linalg は GPU linalg ゲート既定 OFF のまま）。
 
 - **S3**: `Nuc`・`Spectral` の `Rule` は実行時に機械検査されない（`check_split_k_not_fired` が `should_split_k` で調べるのは `Listed` だけ）。S3 違反の出力は無いが、それは非発火の実測ではない。規則の文はテストの宣言のままで、本計測で確かめ直していない。
