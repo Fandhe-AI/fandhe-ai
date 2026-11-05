@@ -11,8 +11,10 @@
 
 ## 状態
 
-**要確認（所有者の判断待ち）: テストは pass で、RULE.txt の条件もすべて満たしたが、テストバイナリの一部が無効になった回のビルド成果物だった**（下の「リンクされた成果物」）。
-そのため PR は `Refs #4031` のままにした。
+**無効（workspace メンバーの成果物が無効回のビルドの再利用だったため判定に使わない。#4031 は [`../metal-batch-norm-2e20-4031-rerun2/`](../metal-batch-norm-2e20-4031-rerun2/) で判定する）**（所有者の判断。理由は下の「リンクされた成果物」）。
+RULE.txt に足したロックの引き継ぎとテスト前後のツリー照合は、undetermined の条件を足しただけなので受け入れられた。
+
+以下はこの回の記録である。
 
 1 本実行、exit 0、`running 1 test`、`test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.02s`
 （`batch_norm_parity_2e20_4031.log`・`summary.tsv`）。判定は pass。
@@ -25,7 +27,7 @@
 
 「affine なし」「affine あり」の 2 通りで確かめる。テストは pass のとき値を出力しないので、**誤差の値はログに無い**。
 
-## リンクされた成果物（要確認）
+## リンクされた成果物（無効の理由）
 
 `RULE.txt` のとおり `CARGO_TARGET_DIR` は共有の `<home>/work/target-fandhe-ai` を使った。実行後に deps の時刻を読み取りで確かめた結果（UTC）:
 
