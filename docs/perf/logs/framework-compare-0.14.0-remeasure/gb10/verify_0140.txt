@@ -1,0 +1,9 @@
+env_info 先頭行（5 run 一致）: NVIDIA GB10, 580.173.02
+fandhe-ai gemm reuse/fresh の parity_fail_count: median5 合計 0（20 行）
+run1: fandhe-ai gemm reuse/fresh の parity_fail_count 合計 0（20 行）・compute-apps 0 件
+run2: fandhe-ai gemm reuse/fresh の parity_fail_count 合計 0（20 行）・compute-apps 0 件
+run3: fandhe-ai gemm reuse/fresh の parity_fail_count 合計 0（20 行）・compute-apps 0 件
+run4: fandhe-ai gemm reuse/fresh の parity_fail_count 合計 0（20 行）・compute-apps 0 件
+run5: fandhe-ai gemm reuse/fresh の parity_fail_count 合計 0（20 行）・compute-apps 0 件
+相手側の判定不能（parity_fail_count > 0。5 run 中央値の行）: 1 件
+  pytorch gemm cpu N=4096: parity_fail_count 1／16777216

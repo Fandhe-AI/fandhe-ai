@@ -1,0 +1,7 @@
+NVIDIA GB10, 580.173.02
+compute-apps:
+resident-services:
+vllm=0
+comfyui=0
+kokoro=0
+hw-lock-owner: #3875 rel-0.14.0 2026-11-05T15:54:09Z
