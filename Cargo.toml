@@ -146,7 +146,15 @@ members = [
 # 実機 parity の記録（#3658・#3660・#3661・#3665）。facade の公開面（`pub` 宣言）は
 # 変わらない。内部クレートの `MemoryBackend` 系に `download_owned` が加わった
 # （既定実装つきの追加）。
-version = "0.13.0"
+#
+# v0.14.0（2026-11）: 0.13.0 公開（2026-10-31）以降の約 164 コミットを含める
+# lockstep バンプ。#3711 ツリー（対応表の「部分的」の引き上げ）の実装が中心。
+# 破壊的変更は `Device::Rocm` の追加と `#[non_exhaustive]` の後付けの 1 件
+# （所有者承認 #3771）。公開対象は 9 クレートで `fandhe-ai-hf-hub`・
+# `fandhe-ai-backend-rocm` が加わる。backend-rocm の実公開は #3159・#3867 の
+# 実機 parity が条件で、現時点では未実測。変更点の網羅は
+# `docs/migration/0.14.0.md` を正とする。
+version = "0.14.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
