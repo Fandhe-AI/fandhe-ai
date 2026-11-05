@@ -288,8 +288,8 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 | `dinput-skip-ab-3247/README.md` | d_input 省略の前後 A/B | — | 性能計測（parity 判定対象外） | - | - |
 | `elementwise-loss-ops-2652/README.md` | pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL | 演算 | 実測済み（pass） | 2026-10-19 | CUDA `b640875f`／Metal `d79f4895` |
 | `f64-autograd-facade-2599/README.md` | `TapeF64`／`VarF64`／`GradientsF64` | dtype | 実測済み（pass） | 2026-10-19 | CUDA `9e2f7ddcc`／Metal `bf894108a` |
-| `f64-create-graph-3786/README.md` | `TapeF64::backward_create_graph` の GPU 実機検証 | 自動微分・dtype | 実機未実測（`README.md:6`「実機は未実測」。別ディレクトリでの実測も無い） | - | - |
-| `f64-jvp-facade-3788/README.md` | `TapeF64::{jvp, jacfwd, jvp_multi, jvp_create_graph}` の GPU 実機検証 | 自動微分・dtype | 実機未実測（`README.md:6`「実機は未実測」。別ディレクトリでの実測も無い） | - | - |
+| `f64-create-graph-3786/README.md` | `TapeF64::backward_create_graph` の GPU 実機検証 | 自動微分・dtype | CUDA は実測済み（pass。#4053。記録は `f64-gpu-parity-4053-cuda/README.md`）。Metal は未実測 | CUDA 2026-11-05 | CUDA `c9b5e1635` |
+| `f64-jvp-facade-3788/README.md` | `TapeF64::{jvp, jacfwd, jvp_multi, jvp_create_graph}` の GPU 実機検証 | 自動微分・dtype | CUDA は実測済み（pass。#4053。記録は `f64-gpu-parity-4053-cuda/README.md`）。Metal は未実測 | CUDA 2026-11-05 | CUDA `c9b5e1635` |
 | `facade-custom-function-2549/README.md` | `Tape::custom`／`CustomFunction` | 自動微分 | 判定対象外（README が REQ-2 の判定対象外と明記） | - | - |
 | `fft-fft-ifft-2632/README.md` | fft／ifft | 演算 | 実測済み（pass） | 2026-10-11 | CUDA `784b4e79`／Metal `c8e1ceb1` |
 | `fft-rfft-irfft-2631/README.md` | rfft／irfft | 演算 | 実測済み（pass） | 2026-10-11 | CUDA `784b4e79`／Metal `c8e1ceb1` |
@@ -402,7 +402,7 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 | 区分 | 件数 | 内訳 |
 |---|---|---|
 | 実測済み | 97 | 0.12.0 の 70 + §5.4 の 9 + Phase 10 の 17 ディレクトリ（issue 数 18 とは別。§5.2 の「ディレクトリ」列の数。`create-graph-*` 4・`nn-layers-*` 2・`nn-train-template-*` 2・`param-groups-resident-*` 2・`optim-train-template-*` 2・`onnx-train-*` 3・`gpu-linalg-optin-*` 2）+ `metal-batch-norm-2e20-4031-rerun2` 1 |
-| 実機未実測 | 3 | `rocm-parity-3159`・`f64-create-graph-3786`・`f64-jvp-facade-3788` |
+| 実機未実測 | 3 | `rocm-parity-3159`・`f64-create-graph-3786`・`f64-jvp-facade-3788`（後ろの 2 件は CUDA が pass〈#4053〉で、Metal が未実測のためここに数える） |
 | 記入欄は未実測（別ディレクトリで実測） | 8 | §5.1 の 8 件 |
 | 判定対象外 | 3 | 0.12.0 から不変（`facade-custom-function-2549`・`int8-mma-probe-2608`・`int8-quant-baseline-2609`） |
 | 性能計測 | 55 | 0.12.0 の 37 + 新しい 18（`cpu-gemm-*` 10・`cpu-pack-kernel-breakdown-3614`・`resident-chain-*` 2・`sme-gb10-attribution-3613`・`framework-compare-0.1{2,3}.0-*remeasure` 4） |
@@ -445,7 +445,7 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 ### 5.8 食い違いと申し送り
 
 - **追跡表の先頭語と本文の食い違い**: 追跡表 `docs/compat-matrix-ari-tracker.md` の # 7・# 9〜# 15・# 22 の「実機 parity」欄は、先頭の語が「未実測」のまま残っているが、本文には GB10・Mac mini とも pass が書いてある（本書 §3 の NN 層・最適化・学習ループ行と §5.2 を参照）。追跡表は凍結済み（#3869 の §5 手順 6）なので本 PR では直さず、ここに記録する。
-- **3786・3788 の実機 parity を追跡する issue が無い**: `f64-create-graph-3786`・`f64-jvp-facade-3788`（f64 の `create_graph` と `jvp`）は CPU のみ実行され、CUDA・Metal は `#[ignore]` テストを用意しただけで未実測である。Phase 10 の子 issue にも対応する issue が見つからなかった。起票は所有者の承認が要るため、本 PR では行わず、申し送りとして PR 本文に書く。
+- **3786・3788 の実機 parity は #4053 で追跡する**: `f64-create-graph-3786`・`f64-jvp-facade-3788`（f64 の `create_graph` と `jvp`）は、本付録の作成時点では追跡する issue が無く、CPU のみ実行されていた。その後 #4053 が起票された。CUDA は 2 本とも pass（2026-11-05・`<cuda-node>`・`c9b5e1635`。テスト単位の pass で、量ごとの数値は出ない。記録は `docs/perf/logs/f64-gpu-parity-4053-cuda/`）。Metal は未実測である。
 - **# 4 の `Nuc`・`Spectral` の値の経路**は、CUDA（`8966befde`・`docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）・Metal（`df9e060a0`・`docs/perf/logs/create-graph-nuc-spectral-4052-metal/`）とも族単位で pass（2026-11-05・#4052。`Prod` は #3857・#3859 の `scatter_reduce` 族で pass 済み）。どちらもログにケース名の直接の跡は無く、CUDA は事前登録した代替証拠、Metal は間接の根拠にもとづく所有者の判断（2026-11-05）による。追跡表の # 4 を「公開」へ動かすかは所有者の判断待ちである。
 - **#3159・#3867 の MI300X 計測**は未実測のまま、所有者の判断待ちである。
 - **`framework-compare-0.1{2,3}.0-*remeasure`**: 性能の同席計測で、本付録は parity の判定対象外として数えた。スコアボードへの反映は #3871 の範囲である。

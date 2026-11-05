@@ -1,0 +1,2 @@
+package	target	test	exit_code	running	result	verdict
+fandhe-ai	f64_functional_transforms_facade	f64_jvp_family_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.31s	pass

@@ -1,0 +1,5 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/f64_create_graph_facade.rs (<home>/work/target-fandhe-ai/debug/deps/f64_create_graph_facade-86d513369da7eea7)
+f64_create_graph_cuda_matches_cpu: test
+
+1 test, 0 benchmarks
