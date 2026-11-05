@@ -6,9 +6,10 @@
 0.12.0 版（`docs/perf/framework-compare-feature-matrix-0.12.0.md`・イシュー #3269）と同じ節構成で、入力は追跡表 `docs/compat-matrix-ari-tracker.md`（#3717）である。
 **本書は crates.io 公開版ではなく main の事前監査である**。スコアボードへの反映・タグとの差分確認は本書の範囲外で、実機 parity の付録表は §5 に作成済みである（#3870）。
 
-**結論**: イシュー題名の「9 行すべての未公開・保留が 0 件」は**達成できていない**。「ある」は 7 行（dtype・演算の範囲・NN 層・モデル構築・最適化・学習ループ・相互運用・事前学習済みモデル・推論・サービング）、
-「部分的」のまま残るのは 2 行（自動微分・バックエンド・ハード）である。いずれも追跡表の「未確定」2 件（# 4・# 24）が原因で、緩めずその形で記録し、所有者への報告事項に挙げた（§6）。
+**結論**: イシュー題名の「9 行すべての未公開・保留が 0 件」は**達成できていない**。「ある」は 8 行（dtype・自動微分・演算の範囲・NN 層・モデル構築・最適化・学習ループ・相互運用・事前学習済みモデル・推論・サービング）、
+「部分的」のまま残るのは 1 行（バックエンド・ハード）である。原因は追跡表の「未確定」1 件（# 24。#3159・#3867 が所有者の判断で保留）で、緩めずその形で記録し、所有者への報告事項に挙げた（§6）。
 「未公開」は 9 行すべてで 0 件である。
+初版（基準 sha の時点）は「ある」7 行・「部分的」2 行（自動微分＝# 4 も「未確定」）だった。# 4 は #3711 の所有者の判断（2026-11-05、<https://github.com/Fandhe-AI/fandhe-ai/issues/3711#issuecomment-6656856029>）で追跡表の「公開」へ移り、§2 の規則のまま自動微分行を「ある」へ出し直した（基準 sha と `path:line` は動かしていない）。
 
 ## 1. 基準面の証明
 
@@ -38,11 +39,12 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
    - `hf-hub` は案 A で、`HfHub::download` は `pub(crate)` のまま「公開に数える」。`docs/compat-api-scope.md` §0 の限定例外として扱う。
    - `backend-rocm` の crates.io 公開は 0.14.0 で承認済みである。ただし ROCm の facade 同梱は #3159・#3867 の parity pass が条件である（回答の点 1）。
    - 両クレートとも `publish = true` になった（`crates/hf-hub/Cargo.toml:36`・`crates/backend-rocm/Cargo.toml:33`）ため、規則 3 の文面の条件（`publish = false`）にはもう当たらない。**crates.io にはまだ公開していない**。
-2. **「未確定」の数え方**: 追跡表の「未確定」は新しい区分を作らず、0.12.0 での区分（# 4・# 24 とも「保留」）のまま数える。「公開」には上げない。
+2. **「未確定」の数え方**: 追跡表の「未確定」は新しい区分を作らず、0.12.0 での区分（# 24 は「保留」）のまま数える。「公開」には上げない。初版では # 4 も「未確定」（0.12.0 での区分は「保留」）として保留に数えたが、所有者の判断（#3711 の `-6656856029`）で追跡表の # 4 が「公開」になったため、公開に数え直した。
 3. **承認の出所（規則 4）への追加**: 0.12.0 版の出所に、次の所有者コメントを加える（作成者・日時は `gh api repos/Fandhe-AI/fandhe-ai/issues/comments/<id>` で確認した。いずれも `aLiz-Nancy`。本文は転記せず要約する）。
    - Phase 3 の回答 6 件（2026-11-01）: #3766 `-6554563674`（06:42:58Z。低精度演算の配置と `TapeF64` の `jvp` 系）、#3767 `-6554564013`（06:43:00Z。`create_graph` の B／C 区分と拒否範囲）、#3768 `-6554564412`（06:43:03Z。NN 層）、
      #3769 `-6554564758`（06:43:05Z。最適化）、#3770 `-6554565145`（06:43:08Z。相互運用と推論）、#3771 `-6554565469`（06:43:11Z。ROCm と HF Hub）。
    - #3711 のコメント 3 件: `-6570118646`（2026-11-02。運用の読み替え）、`-6594034494`（2026-11-03。#3977・#3978 の起票）、`-6604937225`（2026-11-03。#3978 への回答と、行 4 の「実装と実機 parity が確定するまで未確定」という条件）。
+   - 再判定で加えた所有者コメント 2 件（2026-11-05）: #4052 `-6656452767`（11:08:26Z。`Nuc`・`Spectral` の Metal 実機 parity を族単位の pass と扱う）、#3711 `-6656856029`（11:29:31Z。上の条件が満たされたとして追跡表 # 4 を「未確定」から「公開」へ動かす）。
    - 「承認」はこれらのコメント ID と各イシュー番号の事実に限って書き、得ていない承認は書かない。
 
 ## 3. 対応表
@@ -52,7 +54,7 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 | 行 | 0.12.0 時点 | 0.14.0 事前監査判定 | 根拠（公開／未公開／対象外／保留／実機 parity） |
 |---|---|---|---|
 | dtype | 部分的（未公開 1・保留 1） | ある | **公開（6 件）:** f64 の自動微分 `TapeF64`（`crates/facade/src/lib.rs:2781`）／`VarF64`（`crates/facade/src/lib.rs:3029`）；低精度 forward の opt-in `matmul_low_precision`（`crates/autodiff/src/var.rs:3659`）；dtype 変換と型付き演算 `CastDType`（`crates/facade/src/lib.rs:428`）・`TypedOps`（`crates/facade/src/lib.rs:440`）・`typed_ops_f64`（`crates/facade/src/lib.rs:2668`）；AMP `compile_with_amp`（`crates/facade/src/compat/training.rs:2306`）；CUDA GEMM の精度 opt-in `set_cuda_gemm_precision`（`crates/facade/src/lib.rs:3909`。既定は FP32 のまま）；# 2 の `TapeF64` の `jvp`（`crates/facade/src/lib.rs:2887`）・`jacfwd`（`crates/facade/src/lib.rs:2919`）・`jvp_multi`（`crates/facade/src/lib.rs:2959`）・`jvp_create_graph`（`crates/facade/src/lib.rs:3010`）と f64 の `backward_create_graph`（`crates/facade/src/lib.rs:2845`）。正ガードは `f64_autograd_public_surface_is_exactly_approved_delegations`（`crates/facade/tests/api_surface.rs:41871`）と `f64_jvp_family_usage_doctest_is_present_and_compiled`（`crates/facade/tests/api_surface.rs:46580`）<br>**未公開（0 件）:** なし（0 件）。0.12.0 の未公開 1 件（# 1）は対象外へ移った<br>**対象外（4 件）:** # 1 `Var` 以外への低精度演算の配置（承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674>。禁止経路専用で `VarLowPrecisionOpsHoldDoctestGuard`〈`crates/facade/src/lib.rs:7079`〉を維持し、正ガードは `var_low_precision_ops_hold_doctest_globs_all_pub_modules`〈`crates/facade/tests/api_surface.rs:29041`〉・`var_low_precision_ops_hold_doctest_probe_body_matches_fixed_contract`〈`crates/facade/tests/api_surface.rs:29065`〉・`facade_does_not_reexport_or_declare_low_precision_ops`〈`crates/facade/tests/api_surface.rs:29232`〉）；f16／bf16 を値型とする `Tape`／`Var`（#3021 の `#issuecomment-6111746880` の項目 2。0.12.0 §3 から不変）；sparse／complex（#2499 の `#issuecomment-6033824965`。0.12.0 §3 から不変）；int8 量子化（spec の除外事項「Won't・条件付き」。0.12.0 §3 から不変）<br>**保留（0 件）:** なし（0 件）。0.12.0 の保留 1 件（# 2。`TapeF64` の `jvp` 系）は上のとおり公開へ移った。承認は <https://github.com/Fandhe-AI/fandhe-ai/issues/3766#issuecomment-6554563674><br>**実機 parity:** f64 と低精度 opt-in は 0.12.0 §5 のとおり実測済み（pass）。# 2 の追跡表の欄は「該当 issue なし」、# 1 も「該当 issue なし」（新しい数値経路なし）。int8 は性能判定対象外 |
-| 自動微分 | 部分的（保留 4） | 部分的 | **公開（15 件）:** 0.12.0 の 12 件（`backward_create_graph`〈`crates/facade/src/lib.rs:1623`〉、`custom`〈`crates/facade/src/lib.rs:2389`〉、`register_backward_hook`〈`crates/facade/src/lib.rs:2447`〉、`jacobian`〈`crates/facade/src/lib.rs:1706`〉・`hessian`〈`crates/facade/src/lib.rs:1743`〉、`gradcheck`〈`crates/facade/src/lib.rs:2299`〉・`backward_detect_anomaly`〈`crates/facade/src/lib.rs:2266`〉、`vjp`〈`crates/facade/src/lib.rs:1793`〉・`hvp`〈`crates/facade/src/lib.rs:1851`〉・`vmap`〈`crates/facade/src/lib.rs:2169`〉、`jvp`〈`crates/facade/src/lib.rs:1925`〉・`jacfwd`〈`crates/facade/src/lib.rs:1962`〉、`jvp_multi`〈`crates/facade/src/lib.rs:2030`〉、`jvp_create_graph`〈`crates/facade/src/lib.rs:2114`〉、`vmap_grad`〈`crates/facade/src/lib.rs:2233`〉、`set_deterministic`〈`crates/facade/src/lib.rs:3329`〉、`var_no_grad`〈`crates/facade/src/lib.rs:638`〉・`backward_accumulate`〈`crates/facade/src/lib.rs:657`〉・`detach`〈`crates/autodiff/src/var.rs:278`〉・`checkpoint_from`〈`crates/autodiff/src/var.rs:2502`〉。宣言行を基準 sha で引き直し、すべて存在する）；# 2 `TapeF64` の `jvp` 系（dtype 行と同じ）；# 3 `create_graph` の C 区分 24 Op（実装は #3789〜#3796。対象 Op 集合の正ガードは `create_graph_supported_op_set_matches_approved_list`〈`crates/facade/tests/api_surface.rs:47984`〉、facade 挙動テストとの対応表は `create_graph_facade_coverage_map_matches_supported_set`〈`crates/facade/tests/api_surface.rs:48174`〉、定義元は `supports_create_graph`〈`crates/autodiff/src/tape.rs:2654`〉）；# 5 二階微分の拒否範囲と意味論（`Inv`・`Solve`・`SlogdetLogAbsDet` の overflow 入力の拒否を `inv_solve_overflow_inputs_are_rejected_via_facade`〈`crates/facade/tests/create_graph_facade.rs:2741`〉が固定）<br>**未公開（0 件）:** なし（0 件）<br>**対象外（4 件）:** D-0 の除外名（`Var::custom` 系・`functional_ops` の自由関数・gradcheck の自由関数。#3018 の `#issuecomment-6111643437`）；ネイティブ forward-mode の JVP 規則とバッチ規則型 vmap（#2499 の `#issuecomment-6033824965`）；`jvp` の f16 対応（#3021 の `#issuecomment-6111746880` の項目 3）；`create_graph` が構造的に定義できない Op（`ResidentLeaf`・`LinearResident`・`LinearAct`・`Custom`・`OneHot` と、`CtcLoss` の恒久 fail-closed〈`ctc_loss_create_graph_is_rejected_via_facade`、`crates/facade/tests/create_graph_facade.rs:2661`〉。`Inv`・`Solve`・`SlogdetLogAbsDet` の拒否範囲の恒久化。承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>）。件数は 0.12.0 の 4 件のまま（集計の単位が項目か区分かの差で、増減はない）<br>**保留（1 件）:** # 4 `create_graph` の B 区分（追跡表では「未確定」。0.12.0 での区分は保留）。実装は済んでいる: `Prod` は #3977（`scatter_reduce_prod_create_graph_via_facade`、`crates/facade/tests/create_graph_facade.rs:897`）、`Nuc`・`Spectral` は #3991（`supports_create_graph` の `MatrixNorm` の腕、`crates/autodiff/src/tape.rs:2853`。`matrix_norm_nuc_spectral_create_graph_via_facade`、`crates/facade/tests/create_graph_facade.rs:2031`。縮退入力の拒否は同:2054）。それでも**保留のままにする理由**: #3711 の所有者コメント `-6604937225` が「実装が済み、実機 parity も確定するまで未確定」とし、`Nuc`・`Spectral` の値の経路の GPU 実機 parity が確定していない（決定記録 `docs/autodiff-higher-order-grad-decision.md:5558`〈§76.5〉。`create_graph_gpu_parity.rs` の `reject_matrix_norm_nuc_degenerate`〈`crates/facade/tests/create_graph_gpu_parity.rs:2594`〉は縮退入力の拒否へ変えただけで、値のケースは #4052 で追加した。CUDA は族単位で pass（2026-11-05・`<cuda-node>`・`8966befde`。#4052。ケース別の数値は出ず、ケースの実行は代替証拠。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）、Metal も族単位で pass（2026-11-05・`<metal-node>`・`df9e060a0`。#4052。ログにケース名の直接の跡は無く、間接の根拠〈ソースの指紋の一致・族の全ケースを打ち切らずに判定するコード構造〉にもとづき所有者の判断〈2026-11-05〉で族単位の pass と扱う。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-metal/`））。解除条件はこの実機 parity の確定であり、CUDA・Metal とも族単位の pass が出た。追跡表の # 4 を「公開」へ動かすかは所有者の判断待ちで、それまで本行は「部分的」のままにする。承認は <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>。**範囲外の注記（件数に数えない）**: `CosineSimilarity`・`PairwiseDistance` の `create_graph` 拒否（`cosine_similarity_create_graph_is_rejected_via_facade`〈`crates/facade/tests/create_graph_facade.rs:2674`〉・`pairwise_distance_create_graph_is_rejected_via_facade`〈`crates/facade/tests/create_graph_facade.rs:2685`〉。決定記録 `docs/autodiff-higher-order-grad-decision.md` §73〈5388 行〉は「承認済み（#3768 Q9 (a)）・別設計待ち・恒久ではない・起票は所有者の承認事項で未起票」とする）。29 項目の外で、0.12.0 §2 規則 6 の「保留」（所有者の回答が無い論点）には当たらないが、所有者への報告事項に挙げる（§6）<br>**実機 parity:** # 2 は該当 issue なし。# 3・# 5 は pass（2026-11-04・`<cuda-node>` `6852ef6bd` と `48d0263ac`、`<metal-node>` `0c170cee2` と `bbfcaee6b`。#3856〜#3859。記録は `docs/perf/logs/create-graph-c-cuda-parity-3856/`・`docs/perf/logs/create-graph-b-cuda-parity-3857/` と各 metal 版）。# 4 は B 区分の 12 族が pass（同上）。`Prod` は `scatter_reduce_prod` ケースが `scatter_reduce` 族で pass 済み（#3857〈`docs/perf/logs/create-graph-b-cuda-parity-3857/README.md:47`〉・#3859。両測定コミットとも #3977 の `362ab06c4` を含む）。`Nuc`・`Spectral` の値の経路は、CUDA は族単位で pass（2026-11-05・`<cuda-node>`・`8966befde`。#4052。ケース別の数値は出ず、ケースの実行は代替証拠。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）、Metal も族単位で pass（2026-11-05・`<metal-node>`・`df9e060a0`。#4052。ログにケース名の直接の跡は無く、間接の根拠〈ソースの指紋の一致・族の全ケースを打ち切らずに判定するコード構造〉にもとづき所有者の判断〈2026-11-05〉で族単位の pass と扱う。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-metal/`） |
+| 自動微分 | 部分的（保留 4） | ある | **公開（16 件）:** 0.12.0 の 12 件（`backward_create_graph`〈`crates/facade/src/lib.rs:1623`〉、`custom`〈`crates/facade/src/lib.rs:2389`〉、`register_backward_hook`〈`crates/facade/src/lib.rs:2447`〉、`jacobian`〈`crates/facade/src/lib.rs:1706`〉・`hessian`〈`crates/facade/src/lib.rs:1743`〉、`gradcheck`〈`crates/facade/src/lib.rs:2299`〉・`backward_detect_anomaly`〈`crates/facade/src/lib.rs:2266`〉、`vjp`〈`crates/facade/src/lib.rs:1793`〉・`hvp`〈`crates/facade/src/lib.rs:1851`〉・`vmap`〈`crates/facade/src/lib.rs:2169`〉、`jvp`〈`crates/facade/src/lib.rs:1925`〉・`jacfwd`〈`crates/facade/src/lib.rs:1962`〉、`jvp_multi`〈`crates/facade/src/lib.rs:2030`〉、`jvp_create_graph`〈`crates/facade/src/lib.rs:2114`〉、`vmap_grad`〈`crates/facade/src/lib.rs:2233`〉、`set_deterministic`〈`crates/facade/src/lib.rs:3329`〉、`var_no_grad`〈`crates/facade/src/lib.rs:638`〉・`backward_accumulate`〈`crates/facade/src/lib.rs:657`〉・`detach`〈`crates/autodiff/src/var.rs:278`〉・`checkpoint_from`〈`crates/autodiff/src/var.rs:2502`〉。宣言行を基準 sha で引き直し、すべて存在する）；# 2 `TapeF64` の `jvp` 系（dtype 行と同じ）；# 3 `create_graph` の C 区分 24 Op（実装は #3789〜#3796。対象 Op 集合の正ガードは `create_graph_supported_op_set_matches_approved_list`〈`crates/facade/tests/api_surface.rs:47984`〉、facade 挙動テストとの対応表は `create_graph_facade_coverage_map_matches_supported_set`〈`crates/facade/tests/api_surface.rs:48174`〉、定義元は `supports_create_graph`〈`crates/autodiff/src/tape.rs:2654`〉）；# 4 `create_graph` の B 区分（実装は #3797〜#3808・#3977・#3991。`Prod` は `scatter_reduce_prod_create_graph_via_facade`〈`crates/facade/tests/create_graph_facade.rs:897`〉、`Nuc`・`Spectral` は `supports_create_graph` の `MatrixNorm` の腕〈`crates/autodiff/src/tape.rs:2853`〉と `matrix_norm_nuc_spectral_create_graph_via_facade`〈`crates/facade/tests/create_graph_facade.rs:2031`〉。縮退入力の拒否は同:2054。初版では「未確定」として保留に数えたが、所有者の判断〈#3711 の `-6656856029`、2026-11-05〉が、コメント `-6604937225` の条件〈#3977・#3991 の実装と実機 parity の確定〉を満たしたとして追跡表の区分を「公開」へ動かした。承認は <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>）；# 5 二階微分の拒否範囲と意味論（`Inv`・`Solve`・`SlogdetLogAbsDet` の overflow 入力の拒否を `inv_solve_overflow_inputs_are_rejected_via_facade`〈`crates/facade/tests/create_graph_facade.rs:2741`〉が固定）<br>**未公開（0 件）:** なし（0 件）<br>**対象外（4 件）:** D-0 の除外名（`Var::custom` 系・`functional_ops` の自由関数・gradcheck の自由関数。#3018 の `#issuecomment-6111643437`）；ネイティブ forward-mode の JVP 規則とバッチ規則型 vmap（#2499 の `#issuecomment-6033824965`）；`jvp` の f16 対応（#3021 の `#issuecomment-6111746880` の項目 3）；`create_graph` が構造的に定義できない Op（`ResidentLeaf`・`LinearResident`・`LinearAct`・`Custom`・`OneHot` と、`CtcLoss` の恒久 fail-closed〈`ctc_loss_create_graph_is_rejected_via_facade`、`crates/facade/tests/create_graph_facade.rs:2661`〉。`Inv`・`Solve`・`SlogdetLogAbsDet` の拒否範囲の恒久化。承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3767#issuecomment-6554564013>）。件数は 0.12.0 の 4 件のまま（集計の単位が項目か区分かの差で、増減はない）<br>**保留（0 件）:** なし（0 件）。0.12.0 の保留 4 件（# 2〜# 5）はすべて公開へ移った（# 4 は上の所有者の判断による）。**範囲外の注記（件数に数えない）**: `CosineSimilarity`・`PairwiseDistance` の `create_graph` 拒否（`cosine_similarity_create_graph_is_rejected_via_facade`〈`crates/facade/tests/create_graph_facade.rs:2674`〉・`pairwise_distance_create_graph_is_rejected_via_facade`〈`crates/facade/tests/create_graph_facade.rs:2685`〉。決定記録 `docs/autodiff-higher-order-grad-decision.md` §73〈5388 行〉は「承認済み（#3768 Q9 (a)）・別設計待ち・恒久ではない・起票は所有者の承認事項で未起票」とする）。29 項目の外で、0.12.0 §2 規則 6 の「保留」（所有者の回答が無い論点）には当たらないが、所有者への報告事項に挙げる（§6）<br>**実機 parity:** # 2 は該当 issue なし。# 3・# 5 は pass（2026-11-04・`<cuda-node>` `6852ef6bd` と `48d0263ac`、`<metal-node>` `0c170cee2` と `bbfcaee6b`。#3856〜#3859。記録は `docs/perf/logs/create-graph-c-cuda-parity-3856/`・`docs/perf/logs/create-graph-b-cuda-parity-3857/` と各 metal 版）。# 4 は B 区分の 12 族が pass（同上）。`Prod` は `scatter_reduce_prod` ケースが `scatter_reduce` 族で pass 済み（#3857〈`docs/perf/logs/create-graph-b-cuda-parity-3857/README.md:47`〉・#3859。両測定コミットとも #3977 の `362ab06c4` を含む）。`Nuc`・`Spectral` の値の経路は、CUDA は族単位で pass（2026-11-05・`<cuda-node>`・`8966befde`。#4052。ケース別の数値は出ず、ケースの実行は代替証拠。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）、Metal も族単位で pass（2026-11-05・`<metal-node>`・`df9e060a0`。#4052。ログにケース名の直接の跡は無く、間接の根拠〈ソースの指紋の一致・族の全ケースを打ち切らずに判定するコード構造〉にもとづき所有者の判断〈2026-11-05、#4052 の `-6656452767`〉で族単位の pass と扱う。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-metal/`） |
 | 演算の範囲 | 部分的（未公開 1） | ある | **公開（8 件）:** 0.12.0 の 7 件（`Var` 委譲、`rfft`〈`crates/autodiff/src/var.rs:5112`〉、`median`〈`crates/autodiff/src/var.rs:5356`〉・`kron`〈`crates/autodiff/src/var.rs:5536`〉・`pad_with_mode`〈`crates/autodiff/src/var.rs:5577`〉、`max_pool3d`〈`crates/autodiff/src/var.rs:5594`〉・`conv_transpose3d`〈`crates/autodiff/src/var.rs:5703`〉・`max_unpool2d`〈`crates/autodiff/src/var.rs:5747`〉、`fold`〈`crates/autodiff/src/var.rs:5807`〉・`local_response_norm`〈`crates/autodiff/src/var.rs:5825`〉・`weight_norm`〈`crates/autodiff/src/var.rs:5839`〉・`spectral_norm`〈`crates/autodiff/src/var.rs:5846`〉、`bce_with_logits_loss_with`〈`crates/autodiff/src/var.rs:4953`〉、`bincount`〈`crates/facade/src/lib.rs:1648`〉）；# 6 GPU 線形代数の opt-in `set_cuda_gpu_linalg_enabled`（`crates/facade/src/lib.rs:3839`）・`set_metal_gpu_linalg_enabled`（`crates/facade/src/lib.rs:3866`）。正ガードは `gpu_linalg_optin_is_reachable_via_facade`（`crates/facade/tests/api_surface.rs:44513`）と `workspace_declares_gpu_linalg_optin_fn_names_only_in_approved_locations`（`crates/facade/tests/api_surface.rs:44567`）<br>**未公開（0 件）:** なし（0 件）。0.12.0 の 1 件（# 6）は公開へ移った<br>**対象外（4 件）:** 0.12.0 §3 から不変（D-0 の除外名、sparse／complex、Metal の eigh・SVD と CUDA の SVD、int／bool 演算の網羅。承認は 0.12.0 版の出所のとおり）<br>**保留（0 件）:** なし（0 件）<br>**実機 parity:** # 6 は pass（#3866。facade 経由・ゲート ON。`<cuda-node>` は 6 本、`<metal-node>` は 5 本〈eigh は範囲外〉。2026-11-04。記録は `docs/perf/logs/gpu-linalg-optin-cuda-parity-3866/`・`docs/perf/logs/gpu-linalg-optin-metal-parity-3866/`）。0.12.0 時点で未実測だった `cuda-linalg-*`・`metal-linalg-*` の README の記入欄は、2026-10-27／28 に実測済み（pass。`metal-linalg-*` は 2026-10-27 の fail の後、入力を是正して 2026-10-28 に pass。§5.4） |
 | NN 層・モデル構築 | 部分的（未公開 2。0.12.0 §8.5 の確定は未公開 9） | ある | **公開（15 件）:** 0.12.0 の 6 件（`add_max_pool3d`〈`crates/facade/src/compat/sequential.rs:2423`〉・`add_avg_pool3d`〈`crates/facade/src/compat/sequential.rs:2551`〉・`add_conv_transpose3d`〈`crates/facade/src/compat/sequential.rs:1723`〉・`add_fold`〈`crates/facade/src/compat/sequential.rs:2487`〉・`add_unfold`〈`crates/facade/src/compat/sequential.rs:2455`〉・`add_local_response_norm`〈`crates/facade/src/compat/sequential.rs:2523`〉、MaxUnpool の層経路〈`crates/facade/src/compat/functional.rs:552`〉、`parametrize_weight_norm`〈`crates/facade/src/compat/sequential.rs:838`〉・`parametrize_spectral_norm`〈`crates/facade/src/compat/sequential.rs:903`〉、`save_model`〈`crates/facade/src/compat/model_io.rs:283`〉・`load_model`〈`crates/facade/src/compat/model_io.rs:306`〉と kind 追加の `spec_kind`〈`crates/facade/src/compat/model_io.rs:336`〉、参照モデル `models`〈`crates/facade/src/lib.rs:248`〉）；# 7 `add_upsample_scale_factor`（`crates/facade/src/compat/sequential.rs:2978`。正ガード `compat_sequential_spatial_add_methods_have_approved_signatures`〈`crates/facade/tests/api_surface.rs:14947`〉）；# 8 `Sequential` への `nn::Module` 実装（`crates/facade/src/compat/sequential.rs:706`。正ガード `compat_sequential_nn_module_impl_matches_approved_shape`〈`crates/facade/tests/api_surface.rs:48320`〉）；# 9 `add_hardshrink`（`crates/facade/src/compat/sequential.rs:1267`）・`add_softshrink`（`crates/facade/src/compat/sequential.rs:1291`）、`Var` 側は `hardshrink`（`crates/autodiff/src/var.rs:5937`）・`softshrink`（`crates/autodiff/src/var.rs:5953`）；# 10 `bilinear`（`crates/autodiff/src/var.rs:5981`。正ガード `var_bilinear_ops_method_is_thin_delegation`〈`crates/facade/tests/api_surface.rs:48981`〉）；# 11 `add_batch_norm3d`（`crates/facade/src/compat/sequential.rs:1934`）と rank 5 の `batch_norm`（`crates/autodiff/src/var.rs:1859`）；# 12 `cosine_similarity`（`crates/autodiff/src/var.rs:6015`）；# 13 `pairwise_distance`（`crates/autodiff/src/var.rs:6043`）；# 14 `add_channel_shuffle`（`crates/facade/src/compat/sequential.rs:3060`）、`Var` 側は `channel_shuffle`（`crates/autodiff/src/var.rs:3107`）；# 15 `add_adaptive_avg_pool3d`（`crates/facade/src/compat/sequential.rs:2780`）・`add_adaptive_max_pool3d`（`crates/facade/src/compat/sequential.rs:2807`）・`add_lp_pool1d`（`crates/facade/src/compat/sequential.rs:2588`）・`add_lp_pool2d`（`crates/facade/src/compat/sequential.rs:2623`）・`add_lp_pool3d`（`crates/facade/src/compat/sequential.rs:2658`）・`add_fractional_max_pool2d`（`crates/facade/src/compat/sequential.rs:2840`）・`add_fractional_max_pool3d`（`crates/facade/src/compat/sequential.rs:2869`）。新層の保存 kind の正ガードは `model_io_new_layer_kinds_match_approved_mapping_issue_3828`（`crates/facade/tests/api_surface.rs:51413`）<br>**未公開（0 件）:** なし（0 件）。0.12.0 §8.5 の 9 件（# 7〜15）はすべて公開へ移った<br>**対象外（1 件）:** 層型名の公開（`fandhe_ai::nn::*` の全層型。#3022 の決定記録＝公開対象外 (i)+(iv)。`SpatialLayersHoldDoctestGuard`〈`crates/facade/src/lib.rs:4903`〉は維持）<br>**保留（0 件）:** なし（0 件）<br>**実機 parity:** # 7・# 9・# 10・# 11 は、追跡表の欄の先頭語が「未実測」のまま残っているが、本文には `<cuda-node>`・`<metal-node>` とも pass の記録がある（#3860・#3861。2026-11-04。記録は `docs/perf/logs/nn-layers-cuda-parity-3860/`・`docs/perf/logs/nn-layers-metal-parity-3861/`。学習ステップの雛形は `docs/perf/logs/nn-train-template-cuda-parity-3860/`・`docs/perf/logs/nn-train-template-metal-parity-3861/` で pass）。# 8 は該当 issue なし。# 12〜15 の欄は追跡表のとおり写す（個別記録は §5.5 の `shrink-ops-3817` 等の行と、`nn-layers-{cuda,metal}-parity-3860/3861` の 19 本 pass を参照） |
 | 最適化・学習ループ | 部分的（未公開 1。0.12.0 §8.5 の確定は未公開 1・保留 7） | ある | **公開（14 件）:** 0.12.0 の 7 件（optimizer の `Adamax`〈`crates/facade/src/optim.rs:528`〉・`Asgd`〈`crates/facade/src/optim.rs:529`〉・`Lion`〈`crates/facade/src/optim.rs:537`〉・`Rprop`〈`crates/facade/src/optim.rs:538`〉、`PolynomialLr`〈`crates/facade/src/optim.rs:530`〉・`CyclicLr`〈`crates/facade/src/optim.rs:534`〉、`ParamGroup`〈`crates/facade/src/optim.rs:554`〉、`OptimizerStateDict`〈`crates/facade/src/optim.rs:551`〉、`SwaLr`〈`crates/facade/src/optim.rs:539`〉、`fit_with_weights`〈`crates/facade/src/compat/training.rs:3026`〉・`fit_with_train_step`〈`crates/facade/src/compat/training.rs:2928`〉、`train_step_resident`〈`crates/facade/src/compat/sequential.rs:4550`〉）；# 17 EMA と AMP の併用（正ガード `ema_fit_rejection_arms_match_approved_set`〈`crates/facade/tests/api_surface.rs:20715`〉）；# 18 EMA のウォームアップ（`ema_warmup_matches_approved_shape`〈`crates/facade/tests/api_surface.rs:20946`〉）；# 19 param groups と AMP（`compile_with_amp_and_param_groups`、`crates/facade/src/compat/training.rs:2434`）；# 20 param groups と `LrSchedule`（`compile_with_param_groups`、`crates/facade/src/compat/training.rs:2236`。正ガード `param_groups_usage_doctests_are_present_and_compiled`〈`crates/facade/tests/api_surface.rs:18621`〉）；# 21 param groups の `state_dict` 保存（`save_model`・`load_model`。# 20 と同じ正ガード）；# 22 param groups と `DeviceParamStore`（`init_device_param_store_with_param_groups`、`crates/facade/src/compat/sequential.rs:4315`）；# 23 `NAdam`（`crates/facade/src/optim.rs:546`）・`RAdam`（`crates/facade/src/optim.rs:556`）と `Optimizer` の腕（`crates/facade/src/compat/training.rs:313`・`crates/facade/src/compat/training.rs:317`）、保存 kind（`crates/facade/src/compat/model_io/compiled.rs:251`・`crates/facade/src/compat/model_io/compiled.rs:252`）、正ガード `APPROVED_COMPAT_OPTIMIZER_VARIANTS`（`crates/facade/tests/api_surface.rs:22262`。11 種）<br>**未公開（0 件）:** なし（0 件）。0.12.0 の未公開 1 件（# 16）は対象外へ移った<br>**対象外（2 件）:** `FitConfig` への EMA（D-0 の除外名。#3018 の `#issuecomment-6111643437`。機能は `Callback::Ema`〈`crates/facade/src/compat/callbacks.rs:1750`〉で到達できる）；# 16 SWA の `FitConfig` 形（承認: <https://github.com/Fandhe-AI/fandhe-ai/issues/3769#issuecomment-6554564758>。機能は `Callback::Swa`〈`crates/facade/src/compat/callbacks.rs:1752`〉で公開済み。禁止経路専用で `SwaHoldDoctestGuard`〈`crates/facade/src/lib.rs:5721`〉と `swa_hold_doctest_globs_all_pub_modules`〈`crates/facade/tests/api_surface.rs:21058`〉を維持）<br>**保留（0 件）:** なし（0 件）。0.12.0 §8.5 の 7 件（# 17〜23）はすべて公開へ移った<br>**実機 parity:** # 22 は CUDA・Metal ともに実測済み（#3862: `docs/perf/logs/optim-train-template-cuda-parity-3862/README.md:16`、24 量 pass・fail 0。#3863: `docs/perf/logs/optim-train-template-metal-parity-3863/README.md:20`、24 行 pass・fail 0）。# 23 は該当 issue なし。0.12.0 §5 の `dataset-compose-2661`・`iterable-batch-sampler-2662` は host ユーティリティで、2026-10-27 に GB10・Mac mini とも pass（§5.4）。学習ステップ常駐チェーンは 0.12.0 §5 のとおり実測済み |
@@ -70,7 +72,7 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 | 行 | 0.12.0 判定 | 公開 | 未公開 | 対象外 | 保留 | 0.14.0 事前監査判定 |
 |---|---|---|---|---|---|---|
 | dtype | 部分的 | 6 | 0 | 4 | 0 | ある |
-| 自動微分 | 部分的 | 15 | 0 | 4 | 1 | 部分的 |
+| 自動微分 | 部分的 | 16 | 0 | 4 | 0 | ある |
 | 演算の範囲 | 部分的 | 8 | 0 | 4 | 0 | ある |
 | NN 層・モデル構築 | 部分的 | 15 | 0 | 1 | 0 | ある |
 | 最適化・学習ループ | 部分的 | 14 | 0 | 2 | 0 | ある |
@@ -79,7 +81,8 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 | 事前学習済みモデル | 部分的 | 5 | 0 | 1 | 0 | ある |
 | 推論・サービング | 部分的 | 9 | 0 | 5 | 0 | ある |
 
-- 「ある」は 7 行、「部分的」は 2 行（自動微分・バックエンド・ハード）。残る保留 2 件は、どちらも追跡表の「未確定」（# 4・# 24）である。
+- 「ある」は 8 行、「部分的」は 1 行（バックエンド・ハード）。残る保留 1 件は追跡表の「未確定」（# 24）である。
+- 自動微分行は初版で「公開 15・保留 1・部分的」だった。# 4 が所有者の判断（#3711 の `-6656856029`）で追跡表の「公開」へ移ったため、同じ数え方（0.12.0 §3 の 12 件＋追跡表で公開へ移った # 2・# 3・# 4・# 5 の 4 件）で公開 16・保留 0 になり、§2 の規則のまま「ある」になった。
 - 0.12.0 版の相互運用行は §8.2 で「部分的」へ戻した行で、本書では # 25〜27 がすべて公開になったため「ある」にした。
 
 ### 4.2 追跡表の集計との照合
@@ -108,16 +111,42 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 重複を除いた項目数: 残件 2（未確定 2・未公開 0・保留 0）、公開 25、対象外 2
 ```
 
-照合表（行別。「追跡表」は上の出力の未確定＋未公開＋保留、「監査」は §3 の未公開＋保留）:
+上は基準 sha の時点（初版）の出力で、記録として残す。# 4 を「公開」へ動かした後の出力（main `67a02e60c` に追跡表 # 4 の更新を加えた tree で `python3 -I scripts/tally-compat-tracker.py` を実行。終了コード 0。`--self-test` も PASS）は次のとおりで、行別では自動微分行だけが変わり（未確定 1→0・公開 3→4）、それに伴い合計（未確定 2→1・公開 26→27）と重複を除いた項目数（残件 2→1・公開 25→26）が変わった。
+
+```
+0.12.0 の照合: OK（§1 の集計 == §2 == §8.5 固定値）
+- 行別合計 30 件（未公開 16・保留 14）、重複を除いた項目数 29
+
+0.14.0 の区分（行別。複数行の項目は各行に数える）
+
+| 行 | 未確定 | 未公開 | 保留 | 残件 | 公開 | 対象外 |
+|---|---|---|---|---|---|---|
+| dtype | 0 | 0 | 0 | 0 | 1 | 1 |
+| 自動微分 | 0 | 0 | 0 | 0 | 4 | 0 |
+| 演算の範囲 | 0 | 0 | 0 | 0 | 1 | 0 |
+| NN 層・モデル構築 | 0 | 0 | 0 | 0 | 9 | 0 |
+| 最適化・学習ループ | 0 | 0 | 0 | 0 | 7 | 1 |
+| バックエンド・ハード | 1 | 0 | 0 | 1 | 0 | 0 |
+| 相互運用 | 0 | 0 | 0 | 0 | 3 | 0 |
+| 事前学習済みモデル | 0 | 0 | 0 | 0 | 1 | 0 |
+| 推論・サービング | 0 | 0 | 0 | 0 | 1 | 0 |
+| 合計 | 1 | 0 | 0 | 1 | 27 | 2 |
+
+重複を除いた項目数: 残件 1（未確定 1・未公開 0・保留 0）、公開 26、対象外 2
+
+注: 出すのは「追跡している残件が 0 か」まで。行判定（「ある」）は公開・対象外の基準件数（§8.5）と合わせて監査側が判断する。
+```
+
+照合表（行別。「追跡表」は # 4 の更新後の出力の未確定＋未公開＋保留、「監査」は §3 の未公開＋保留）:
 
 | 行 | 追跡表の残件 | 監査の未公開＋保留 | 一致 | 差の理由 |
 |---|---|---|---|---|
 | dtype | 0 | 0 | 一致 | — |
-| 自動微分 | 1（# 4） | 1（保留 1） | 一致 | 「未確定」を 0.12.0 での区分（保留）で数えた（§2 の 2） |
+| 自動微分 | 0 | 0 | 一致 | — （初版は 1〈# 4〉同士で一致。# 4 は所有者の判断で「公開」へ移った） |
 | 演算の範囲 | 0 | 0 | 一致 | — |
 | NN 層・モデル構築 | 0 | 0 | 一致 | — |
 | 最適化・学習ループ | 0 | 0 | 一致 | — |
-| バックエンド・ハード | 1（# 24） | 1（保留 1） | 一致 | 同上 |
+| バックエンド・ハード | 1（# 24） | 1（保留 1） | 一致 | 「未確定」を 0.12.0 での区分（保留）で数えた（§2 の 2） |
 | 相互運用 | 0 | 0 | 一致 | — |
 | 事前学習済みモデル | 0 | 0 | 一致 | — |
 | 推論・サービング | 0 | 0 | 一致 | — |
@@ -135,7 +164,7 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 | 3 低精度演算の配置 | # 1（対象外） |
 | 4 HF Hub の 2 段目 | # 28（公開に数える） |
 | 5 `TapeF64` の `jvp` 系 | # 2（公開） |
-| 6 `create_graph` の残り | # 3〜# 5（# 3・# 5 は公開、# 4 は「未確定」） |
+| 6 `create_graph` の残り | # 3〜# 5（すべて公開。# 4 は所有者の判断〈2026-11-05、#3711 の `-6656856029`〉で「未確定」から公開へ） |
 | 7 GPU 線形代数 | # 6（公開） |
 | 8 NN 層・推論の未公開 | # 29・# 7・# 8（公開） |
 | 9 #3022 の包括承認（層型名は対象外） | 29 項目の外で 0.12.0 と同じ扱いのまま |
@@ -418,7 +447,7 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 
 | 項目 | 現状 | 根拠 |
 |---|---|---|
-| # 4 の `Nuc`・`Spectral`（#3991） | 実装済み。値の経路の GPU 実機 parity は、CUDA は族単位で pass（2026-11-05・`<cuda-node>`・`8966befde`。#4052。ケース別の数値は出ず、ケースの実行は代替証拠。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）、Metal も族単位で pass（2026-11-05・`<metal-node>`・`df9e060a0`。#4052。ログにケース名の直接の跡は無く、間接の根拠〈ソースの指紋の一致・族の全ケースを打ち切らずに判定するコード構造〉にもとづき所有者の判断〈2026-11-05〉で族単位の pass と扱う。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-metal/`） | `docs/autodiff-higher-order-grad-decision.md` の §76 の「状態」行（§3 の自動微分行の根拠と同じ） |
+| # 4 の `Nuc`・`Spectral`（#3991） | 実装済み。値の経路の GPU 実機 parity は、CUDA は族単位で pass（2026-11-05・`<cuda-node>`・`8966befde`。#4052。ケース別の数値は出ず、ケースの実行は代替証拠。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）、Metal も族単位で pass（2026-11-05・`<metal-node>`・`df9e060a0`。#4052。ログにケース名の直接の跡は無く、間接の根拠〈ソースの指紋の一致・族の全ケースを打ち切らずに判定するコード構造〉にもとづき所有者の判断〈2026-11-05、#4052 の `-6656452767`〉で族単位の pass と扱う。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-metal/`）。これを受けて所有者の判断（2026-11-05、#3711 の `-6656856029`）で追跡表の # 4 は「公開」へ移った（§3 の自動微分行） | `docs/autodiff-higher-order-grad-decision.md` の §76 の「状態」行（§3 の自動微分行の根拠と同じ） |
 | #3867（ROCm を facade 経由で測る） | 未実測。ディレクトリを作っていない | §5.3 |
 
 ### 5.7 測定コミットと基準 sha の `crates/` 差分
@@ -446,22 +475,23 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 
 - **追跡表の先頭語と本文の食い違い**: 追跡表 `docs/compat-matrix-ari-tracker.md` の # 7・# 9〜# 15・# 22 の「実機 parity」欄は、先頭の語が「未実測」のまま残っているが、本文には GB10・Mac mini とも pass が書いてある（本書 §3 の NN 層・最適化・学習ループ行と §5.2 を参照）。追跡表は凍結済み（#3869 の §5 手順 6）なので本 PR では直さず、ここに記録する。
 - **3786・3788 の実機 parity は #4053 で追跡する**: `f64-create-graph-3786`・`f64-jvp-facade-3788`（f64 の `create_graph` と `jvp`）は、本付録の作成時点では追跡する issue が無く、CPU のみ実行されていた。その後 #4053 が起票された。CUDA は 2 本とも pass（2026-11-05・`<cuda-node>`・`c9b5e1635`。テスト単位の pass で、量ごとの数値は出ない。記録は `docs/perf/logs/f64-gpu-parity-4053-cuda/`）。Metal は未実測である。
-- **# 4 の `Nuc`・`Spectral` の値の経路**は、CUDA（`8966befde`・`docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）・Metal（`df9e060a0`・`docs/perf/logs/create-graph-nuc-spectral-4052-metal/`）とも族単位で pass（2026-11-05・#4052。`Prod` は #3857・#3859 の `scatter_reduce` 族で pass 済み）。どちらもログにケース名の直接の跡は無く、CUDA は事前登録した代替証拠、Metal は間接の根拠にもとづく所有者の判断（2026-11-05）による。追跡表の # 4 を「公開」へ動かすかは所有者の判断待ちである。
+- **# 4 の `Nuc`・`Spectral` の値の経路**は、CUDA（`8966befde`・`docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）・Metal（`df9e060a0`・`docs/perf/logs/create-graph-nuc-spectral-4052-metal/`）とも族単位で pass（2026-11-05・#4052。`Prod` は #3857・#3859 の `scatter_reduce` 族で pass 済み）。どちらもログにケース名の直接の跡は無く、CUDA は事前登録した代替証拠、Metal は間接の根拠にもとづく所有者の判断（2026-11-05、<https://github.com/Fandhe-AI/fandhe-ai/issues/4052#issuecomment-6656452767>）による。これを受けて所有者の判断（2026-11-05、<https://github.com/Fandhe-AI/fandhe-ai/issues/3711#issuecomment-6656856029>）で追跡表の # 4 は「公開」へ移り、自動微分行は「ある」になった（§3・§4.1）。
 - **#3159・#3867 の MI300X 計測**は未実測のまま、所有者の判断待ちである。
 - **`framework-compare-0.1{2,3}.0-*remeasure`**: 性能の同席計測で、本付録は parity の判定対象外として数えた。スコアボードへの反映は #3871 の範囲である。
 
 ## 6. スコープ外・申し送り・所有者への報告
 
-### 6.1 行判定を下げた 2 行（所有者への報告）
+### 6.1 行判定を下げた 1 行（所有者への報告）
 
 追跡表 §5 手順 1 のとおり、「未確定」が残る行は監査の前に所有者へ報告する対象である。自動運転のため issue へのコメントは投稿していない。**報告は main セッションが行う**。
 
 | 項目 | 状態 | 解除条件 |
 |---|---|---|
-| # 4 `create_graph` の B 区分（自動微分行） | 実装は済み（#3977・#3991）。`Nuc`・`Spectral` の値の経路の GPU 実機 parity は、CUDA は族単位で pass（2026-11-05・`<cuda-node>`・`8966befde`。#4052。ケース別の数値は出ず、ケースの実行は代替証拠。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-cuda/`）、Metal も族単位で pass（2026-11-05・`<metal-node>`・`df9e060a0`。#4052。ログにケース名の直接の跡は無く、間接の根拠〈ソースの指紋の一致・族の全ケースを打ち切らずに判定するコード構造〉にもとづき所有者の判断〈2026-11-05〉で族単位の pass と扱う。記録は `docs/perf/logs/create-graph-nuc-spectral-4052-metal/`）（`Prod` は pass 済み）。追跡表の # 4 を「公開」へ動かすかは所有者の判断待ち | `Nuc`・`Spectral` の値の経路の実機 parity の確定（#4052）。確定後、追跡表の # 4 を「公開」へ更新して再監査する |
 | # 24 ROCm の facade 公開（バックエンド・ハード行） | 実装は済み（`Device::Rocm`・facade 結線）。#3159・#3867 が OPEN で MI300X の測定が無い。#3771 の回答の条件を満たさない | #3159・#3867 の parity pass |
 
-題名の「9 行すべて 0 件」は、この 2 行が残るため達成していない。ルート #3711 の「示せない行は所有者へ報告して次のツリーへ引き継ぐ」に従い、次のツリーへ引き継ぐ。
+初版では # 4 `create_graph` の B 区分（自動微分行）も本表に載せた（解除条件は `Nuc`・`Spectral` の値の経路の実機 parity の確定〈#4052〉）。#4052 で CUDA（`8966befde`）・Metal（`df9e060a0`）とも族単位の pass が出て（Metal の扱いは <https://github.com/Fandhe-AI/fandhe-ai/issues/4052#issuecomment-6656452767>）、所有者の判断（2026-11-05、<https://github.com/Fandhe-AI/fandhe-ai/issues/3711#issuecomment-6656856029>）で追跡表の # 4 が「公開」へ移ったため、本表から外し、自動微分行を「ある」へ出し直した（§3・§4.1）。
+
+題名の「9 行すべて 0 件」は、バックエンド・ハード行の # 24（#3159・#3867 が所有者の判断で保留）が残るため、未達のままである。ルート #3711 の「示せない行は所有者へ報告して次のツリーへ引き継ぐ」に従い、次のツリーへ引き継ぐ。
 
 ### 6.2 29 項目の外の候補（所有者への確認事項）
 
@@ -473,8 +503,9 @@ $ git diff --shortstat v0.12.0 1cbb475989e32051b337efb81b38b843de80145b -- crate
 
 - 本 PR は docs のみで、issue へのコメント・起票は行っていない。ruleset・リポジトリ設定も変えていない。
 - 追跡表は §5 手順 6 に従い、凍結の注記だけを足した（§1 の表・列・語彙は変えていない）。
+- 再判定の PR（# 4 の公開。#3711 の所有者の判断 `-6656856029`）は、追跡表の # 4 の行・§2 の行別残件・凍結後の更新の注記と、本書の行判定（冒頭の結論・§2・§3 の自動微分行・§4・§5.6・§5.8・§6.1）を更新した。基準 sha と `path:line` は動かしていない。
 
 ## 7. 変更していないもの
 
 `crates/`、`docs/spec/`、tolerance 定数・parity baseline・ガードレール閾値、依存、CI、`docs/compat-api-scope.md`、0.9.0／0.11.0／0.12.0 版の本文、`docs/perf/logs/*`（#3870 の付録表も読むだけで、回収ログと `SHA256SUMS` を変えていない）、
-`scripts/tally-compat-tracker.py`、スコアボードの Artifact と生成スクリプト。追跡表 `docs/compat-matrix-ari-tracker.md` は凍結の注記の追記だけである。
+`scripts/tally-compat-tracker.py`、スコアボードの Artifact と生成スクリプト。追跡表 `docs/compat-matrix-ari-tracker.md` は凍結の注記の追記だけである（再判定の PR は # 4 の行・§2・凍結後の更新の注記だけを更新した。# 24 ほかの行の区分は変えていない）。
