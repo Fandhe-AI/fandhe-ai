@@ -1,0 +1,5 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/batch_norm_parity.rs (<home>/work/target-fandhe-ai/release/deps/batch_norm_parity-dc6fa32b852194cd)
+batch_norm_train_2e20_scale_has_no_intermediate_overflow_and_matches_cpu_reference: test
+
+1 test, 0 benchmarks

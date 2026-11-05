@@ -448,14 +448,11 @@ tolerance／baseline 変更なし）。
   `train_host_model_2e20_scale_matches_cpu_reference_with_inf_var_class`
   （Linux CI で実行されるホスト逐語モデル版）
 - tolerance 定数・baseline・閾値は変更していない
-- Metal 実機実測: **テストは pass・有効性は所有者の判断待ち**（実行中に展開ツリーが
-  別セッションの rsync で上書きされた。記録の README の「実行中の展開ツリーの上書き」。
-  2026-11-05・`<metal-node>`・`a0ae7bdbc`。
-  1 本実行・exit 0・`1 passed; 0 failed`。`out`・`mean` の REQ-2 一致と `var` の
-  クラス一致を「affine なし」「affine あり」の両方で確かめた。pass のときテストは
-  値を出力しないので、誤差の値は記録に無い。記録は
-  `docs/perf/logs/metal-batch-norm-2e20-4031/`、手順は
-  `docs/perf/logs/metal-batch-norm-1736/README.md` の #4031 節）。
+- Metal 実機実測: **測り直しのテストは pass・有効性は所有者の判断待ち**（2026-11-05・`<metal-node>`・
+  `3493be202`。1 本実行・exit 0・`1 passed; 0 failed`。テストは pass のとき値を出力しないので、
+  誤差の値は記録に無い。Metal の lib の rlib が無効になった回の成果物だった点が要確認。記録は
+  `docs/perf/logs/metal-batch-norm-2e20-4031-rerun/`。1 回目の
+  `docs/perf/logs/metal-batch-norm-2e20-4031/` は展開ツリーの上書きにより無効）。
   Linux では `--ignored --list` を実行できないため、CI 上は
   `make check-cross-metal-tests` による型検査で代替している
 - 対象外: infer 経路（固定の f32 統計では 2e20 級の分散を持てない）・
