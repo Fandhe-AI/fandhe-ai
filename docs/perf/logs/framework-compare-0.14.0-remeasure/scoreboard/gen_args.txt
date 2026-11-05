@@ -1,0 +1,19 @@
+# 0.14.0 スコアボード生成の引数（2026-11-05 の実測ログと git から転記）。run_0140.sh が「--key=value」行をそのまま gen_0140.py へ渡す。
+# 出典: GB10 は framework-compare-0.14.0-remeasure/gb10/ の gate.log・loop.log・run{1..5}.log・compute_apps_before_series.txt・compute_apps_after_series.txt・
+#   run{1..5}/{env_info.txt,uptime_before_all.txt,gpu_util_before.txt,skipped-dgx-0.14.0.log}。
+#   Mac mini は framework-compare-0.14.0-macmini-remeasure/ の loop-macmini.log・macmini-series-b/gate.log・macmini-series-b/run{1..5}/{uptime_before.txt,run.log,skipped-macmini-0.14.0.log}。
+#   公開日・コミット数は git（タグ v0.14.0 = b6ae81701）と docs/crates-io-publishing-order.md の v0.14.0 公開完了の追補。
+# `<要記入` を含む行が 1 つでも残っていると gen_0140.py は HTML を生成しない（推測値で埋めない）。
+# 値は生のテキストで書く（`<` や `&` は生成器が HTML エスケープする。`&lt;` を手で書かない）。
+# 0.13.0 版の gen_args.txt との違い: 計測日・負荷・公開日・コミット数を 0.14.0 の値にし、--gb-cpu-note は 0.14.0 の実測だけで書き直した（0.13.0 の変更内容の帰属は引き継がない）。
+--m4-series=系列 B のみ（各 run 開始前に load1 < 3.0 を最大 30 分待つゲート付き）・対照系列（ゲートなしの系列 A）は置かない
+--m4-load=系列 B の各 run 開始時 load1 = 2.37／1.89／2.04／1.97／2.34（ゲート通過時の値。gate.log 10 行・各 run の uptime_before.txt と一致）。全 5 run の前で最初のサンプルが 3.63／3.12／3.07／3.65／3.63 で、1 分待機してから通過（待機なしで通過した run はない）・5/5 run がゲートを通過・GATE-INVALID／GATE-TIMEOUT なし。計測は 2026-11-05 15:56:54Z〜16:08:35Z（gate.log の最初のサンプル〜run5 終了）
+--m4-date=2026-11-05
+--m4-skipped-note=bench-burn gemm metal size=512/1024/2048/4096 mode=fresh: MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor is all-zero or non-finite; refusing to record timing（0.13.0 の同ログと同一・全 5 run 共通。それ以外の失敗なし）
+--gb-load=2026-11-05 16:04:05〜16:39:35 UTC に 5 ラウンド（ラウンド開始＝ゲート通過は 16:04:05／16:11:10／16:18:47／16:26:21／16:35:28。系列の終了は 16:39:35）。各ラウンド前に load1 < 1.0 かつ GPU 0% の 3 連続ゲートを通過（gate.log 37 行）。ラウンド開始時 load1 = 0.45／0.62／0.53／0.32／0.63・GPU 使用率 0／0／0／0／0%・compute プロセスなし（全 5 run の env_info.txt。常駐の vllm・comfyui・kokoro も 0 件）。系列の前（16:03:04）と後（16:39:35）にも compute プロセスなし（compute_apps_before_series.txt・compute_apps_after_series.txt）。run1 は待機なし（3 サンプル）、run2〜5 は 3〜5 分待機した（待機の最初のサンプルは load1 = 5.91／5.22／6.49／5.30 で、直前ラウンドの終了直後。run5 の前は途中で load1 が 1.02・1.09 に戻り数え直した）。全 37 サンプルで GPU 0%。GATE-INVALID・GATE-TIMEOUT なし
+--gb-date=2026-11-05
+--gb-skipped-note=なし（全 5 ラウンドの skipped-dgx-0.14.0.log が 0 バイト）
+--updated=2026-11-05
+--release-date=2026-11-05
+--commit-count=172
+--gb-cpu-note=0.14.0 で reuse が fresh より遅いのは N=256（1.87）だけで、N=512 は 0.92（reuse の方が速い）、N=1024・2048・4096 は 1.00〜1.01（reuse と fresh が並ぶ）。0.13.0 は N=256（1.91）と N=1024（1.14）が遅く、N=512・2048・4096 は 0.99〜1.00 だった。本計測では区間の切り分けをしていない（reuse／fresh の変化がライブラリの変更によるものか、計測日・負荷の違いによるものかは、本計測では示さない）。N=256 の reuse が fresh より遅い後退は 0.14.0 でも残る
