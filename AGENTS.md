@@ -140,7 +140,13 @@ prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先�
   overflow して `NaN` を生むため必須。`NaN`／`inf` 入力の伝播も明示的に扱う〉を
   正規化統計の「`f64` 相当」実装形として適用する（イシュー #1102。ユーザー承認
   2026-09-01。GB10 実機実測・Metal 実機実測: `docs/perf/cuda-parity-baseline.md`
-  §9.8〜§9.10）。**勾配の長軸縮約の Metal 実装形**は正規化統計とは別に規定する。
+  §9.8〜§9.10）。Metal では soft-f64 方式（IEEE 754 binary64 を 64bit 整数
+  演算でソフトウェアエミュレートし、要素を binary64 へ広げてから二乗・蓄積して
+  最後に 1 回だけ `f32` へ丸める方式）も同じ「`f64` 相当」実装形として認める。
+  両方式とも現役で、rmsnorm は scale/ssq 方式、LayerNorm・BatchNorm は soft-f64
+  方式を使う。正規化統計の soft-f64 は bit 一致契約ではなく、CPU 参照実装とは
+  REQ-2 統一複合判定で検証する（`docs/batch-norm-ops-design.md` §9.1・§9.3）。
+  **勾配の長軸縮約の Metal 実装形**は正規化統計とは別に規定する。
   MSL は `double` 非対応のため、IEEE 754 binary64 逐次加算の 64bit 整数ソフト
   ウェアエミュレーションとして実装し、ホスト `f64` 逐次和（index 順）を 1 回
   `f32` へ downcast した値と**bit 完全一致**する（NaN のみ quiet NaN へ正規化
