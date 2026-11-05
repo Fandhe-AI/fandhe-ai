@@ -12,7 +12,7 @@
 
 このテストは pass のときケース名を出力しない（`run_family`・`check_case`）。実行ログに `linalg_matrix_norm` は 0 件である。`RULE.txt` の `record:` が宣言時にこれを記録しており、宣言どおり、この pass を Nuc・Spectral の値の経路の pass の根拠にはしない。Nuc・Spectral の pass と扱うかどうかは、RULE.txt のとおり所有者の判断へ回した。
 
-**所有者の判断（2026-11-05）**: 下の「間接の根拠」1（ソースの指紋の一致と、族の全ケースを打ち切らずに判定するコード構造。`check_case` に skip の経路は無い）にもとづき、GB10 側（`../create-graph-nuc-spectral-4052-cuda/`。事前登録した代替証拠 e1〜e3）と同じく**族単位の pass** と扱う。ケース別の数値は出ないので書かない。RULE.txt と回収ログは変えていない。GB10 側の計測（PR #4055）が main に入ったため、本 PR で #4052 を Closes する。
+**所有者の判断（2026-11-05。記録: <https://github.com/Fandhe-AI/fandhe-ai/issues/4052#issuecomment-6656452767>）**: 下の「間接の根拠」1（ソースの指紋の一致と、族の全ケースを打ち切らずに判定するコード構造。`check_case` に skip の経路は無い）にもとづき、GB10 側（`../create-graph-nuc-spectral-4052-cuda/`。事前登録した代替証拠 e1〜e3）と同じく**族単位の pass** と扱う。ケース別の数値は出ないので書かない。RULE.txt と回収ログは変えていない。GB10 側の計測（PR #4055）が main に入ったため、本 PR で #4052 を Closes する。
 
 ## 結果表
 
