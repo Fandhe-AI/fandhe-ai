@@ -39,7 +39,8 @@
 | 固定値が未記入のままの通常起動 | exit 2 で停止することを確認 |
 | 通し実行（Linux、`NODE_KIND=cuda`・`PROFILE=dev`、tensor-core に足した使い捨ての `#[ignore]` テスト 1 本。他の cargo 検査だけ無効化した複製で、実行後に削除） | pass。`clean.log`・`build_artifacts.txt`・`summary.tsv`（verdict=pass）が回収され、ロックが解放された |
 | macOS の bash 3.2 での `--self-test`・通し実行 | **未検証**（Linux からは確かめられない）。初回の `<metal-node>` での実行時に、実行前に `--self-test` を通して確かめる |
-| 実機（GB10・Mac mini）での実行 | 未実施 |
+| 実機（GB10）での実行 | 複製 1 本を実行し pass（#4046、2026-11-05、`NODE_KIND=cuda`・`PROFILE=dev`。記録は `../onnx-train-cuda-parity-3864-rerun/`。固定値のほか、`REQUIRED_LIBS` にビルド対象の全 8 メンバーを入れた） |
+| 実機（Mac mini）での実行 | 未実施 |
 
 ## 既知の限界
 
