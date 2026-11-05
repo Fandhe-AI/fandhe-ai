@@ -1,0 +1,145 @@
+事前登録規則（イシュー #4053: f64 の create_graph〈#3786〉と jvp 系〈#3788〉の Metal 実機 parity。対象は 2 本。
+手順は ../f64-create-graph-3786/README.md・../f64-jvp-facade-3788/README.md の「実行コマンド」、docs/real-hardware-verification-env.md §3・§4・§4.11・§6・§7.1、
+../hw-parity-run-template/README.md。書式は ../create-graph-nuc-spectral-4052-metal/RULE.txt を写し、末尾の build_freshness: は ../train-gpu-parity-template/RULE.txt から写した）
+新しい閾値は書かない。判定は既存テストの REQ-2 統一複合判定（assert_parity_f64）そのままである。
+declared_at_utc: 2026-11-05T11:36:15Z（コミットの直前に date -u で取った値。実機実行より前。実機結果を見た後に入力・判定・コマンド・この RULE・スクリプトを変えない）
+issue: 4053
+
+機体: <metal-node>（Mac mini・Apple M4 10 コア・メモリ 16GB・macOS）。ホスト名は記録しない。Linux の開発機・M4 Max の開発機では
+  測らない・記録しない（docs/real-hardware-verification-env.md §1・§7.1）。CUDA 側は別の計測で、本 RULE の範囲外。
+  parity 測定であり時間計測ではないため専有条件は課さない。メモリは他の利用者と共有している。雛形の env_info は空き率と負荷を持たないため、
+  実行の前後に送信側で memory_pressure の空き率と uptime の負荷を読み、README に書く。ほかのサービスのプロセスは止めない。
+
+経路の事実（宣言時に確かめた範囲）: 両 README の「背景」と docs/autodiff-functional-transforms-design.md（「Metal は typed_ops_f64() が None でホスト経路のみ」）のとおり、
+  Metal の f64 は GPU カーネルを持たず、ホスト参照実装で計算する。したがって本計測の pass は Metal デバイスの tape 経由の経路と CPU の parity であり、
+  カーネル同士の parity ではない。README・PR・報告にそう書き、GPU カーネルの検証とは書かない。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  target_commit: 67a02e60cd1d865ba14c4d9323c4511bd61538d0（origin/main。PR #4056）
+  実行時の HEAD はこの RULE.txt と run_metal_parity_create_graph.sh・run_metal_parity_jvp.sh の 3 ファイルだけを入れたコミット。次が成立すること。
+    git diff --quiet 67a02e60cd1d865ba14c4d9323c4511bd61538d0 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  かつ送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず、新しいディレクトリで再登録してから測る。
+  source_fingerprint: 32191e981ef0467ccf93c858b7501cd4433edc0d9c247a85035aa11667e09792
+    crates/・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの SHA-256 を名前順に並べた一覧の SHA-256。上の target_commit の git archive から計算した。
+    再現方法: git archive <commit> crates Cargo.toml Cargo.lock rust-toolchain.toml を空のディレクトリへ展開し、
+    find crates Cargo.toml Cargo.lock rust-toolchain.toml -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 shasum -a 256 | shasum -a 256
+  .rev-stamp は 2 行形式（1 行目: HEAD の 40 桁小文字 16 進数、2 行目: dirty=<status --porcelain の件数>）。
+  件数は .rev-stamp を書く前に数え、展開ツリー直下に書き、転送後に送信元から消す。dirty=0 以外は無効（実行しない。スクリプトが検査する）。
+
+展開先: <home>/work/rust-ai-library-run-4053-metal（ログではマスクする）。転送は 1 回で、2 本とも同じツリーで測る。
+出力先: <home>/work/out-4053-metal の下にサブディレクトリで分ける。create-graph/ と jvp/。雛形は出力先が既にあると exit 2 で止まるため、1 本ごとに別の出力先にする。
+  どちらも固有の名前で、既存は再利用しない。
+  CARGO_TARGET_DIR: <home>/work/target-fandhe-ai（内蔵 SSD が小さいため target はこの 1 つだけ）。
+  転送は docs/real-hardware-verification-env.md §3・§7.1 の rsync だけ。送信元は worktree で .git はファイルなので、.git（ファイル・ディレクトリの両方）・
+  .claude/worktrees/・.codex/・.env*・.claude/settings.local.json・.venv*/・real-hardware-verification-env.local.md は送らない。
+  転送後、起動前にノード側で .rev-stamp・スクリプト 2 本の SHA-256・ソースの指紋を読み、送信側と照合する。
+
+実機ロック: <home>/work/.fandhe-hw-lock。送信側の手順。rsync の直前に、同じ ssh コマンドの中で、ロックが無いこと、展開先と出力先が存在しないこと、
+  他の cargo／rustc が無いことを確かめ、続けて mkdir でロックを取り、owner に「#4053 run <UTC>」を書いてから転送と実行を行う
+  （雛形の LOCK_OWNER_RE は「#<番号> <語> <UTC>」の 3 語を要求する）。どれかが成立しなければ転送せず停止する（待たない・奪わない）。
+  スクリプトは owner を引数で受け取り、一致するときだけ引き継ぐ。
+  雛形は終了時の trap でロックを外す（固定値以外を変えないので、この動作は変えない）。したがってロックは 1 本ごとに取る:
+    1 本目（create_graph）: 送信側が転送の前に取ったロックをそのまま使う。
+    2 本目（jvp）: 1 本目が exit 0 で終わった後、下の起動役が mkdir で取り直し、その時点の UTC を入れた別の owner「#4053 run <UTC>」を書く。
+    取り直しの間（1 本目の trap から mkdir まで）はロックが外れる。mkdir が失敗したら（他の利用者が取っていれば）2 本目を実行せず undetermined とする。待たない・奪わない。
+  起動前に失敗した場合など、スクリプトが外さなかった自分のロックは起動役または送信側が外す（owner が自分のときだけ）。失敗しても必ず外す。
+  テストの前後で owner が自分のままか確かめ、失っていればその回を undetermined にする（ロックを持たずに測った値は採らない）。ほかの利用者のプロセスは止めない。
+
+実行スクリプト: 同ディレクトリの run_metal_parity_create_graph.sh・run_metal_parity_jvp.sh（どちらも ../hw-parity-run-template/run_parity_template.sh の複製で、差分は固定値の 8 行だけ。
+  コミット済みのものをそのまま送る。env_info.txt の script_sha256 で照合）。EXTERNAL_TIMEOUT は雛形のまま（metal では使わない。macOS に timeout(1) が無く、雛形の固定値検査も metal では見ない）。
+  REQUIRED_LIBS は facade テストのビルドに入る 9 メンバー（fandhe_ai・fandhe_ai_tensor_core・fandhe_ai_autodiff・fandhe_ai_backend_cpu・fandhe_ai_backend_cuda・
+  fandhe_ai_backend_metal・fandhe_ai_backend_rocm・fandhe_ai_onnx_interop・bench_harness）。送信側の cargo tree -p fandhe-ai で確かめた。
+起動役: 次の drive-begin から drive-end までの行（各行の先頭 2 文字を除いたもの）を、送信側がこの RULE.txt から取り出して <home>/work/drive-4053-metal.sh に書く。
+  ノードの一時ファイルで、スクリプトの SHA256SUMS の外にある。起動役の SHA-256 を README に書く。
+  非対話 SSH では PATH が通らないため zsh -lc で包み、macOS には setsid が無いので nohup で切り離す:
+    zsh -lc "nohup bash \$HOME/work/drive-4053-metal.sh '<1 本目の owner>' > \$HOME/work/run-4053-metal.log 2>&1 < /dev/null &"
+  完了は run-4053-metal.log の「driver: finished」または「driver: stopped」の行とロックの解放をポーリングで確かめる。
+  # drive-begin
+  set -u
+  OWNER1=$1
+  TREE=$HOME/work/rust-ai-library-run-4053-metal
+  OUT=$HOME/work/out-4053-metal
+  LOCK=$HOME/work/.fandhe-hw-lock
+  D=$TREE/docs/perf/logs/f64-gpu-parity-4053-metal
+  export CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai
+  release_if_mine() { if [ -f "$LOCK/owner" ] && [ "$(cat "$LOCK/owner")" = "$1" ]; then rm -rf "$LOCK"; fi; }
+  if ! cd "$TREE"; then release_if_mine "$OWNER1"; echo "driver: stopped (no tree)"; exit 2; fi
+  bash "$D/run_metal_parity_create_graph.sh" "$TREE" "$OUT/create-graph" "$OWNER1"
+  RC1=$?
+  release_if_mine "$OWNER1"
+  echo "driver: create-graph rc=$RC1 owner=$OWNER1"
+  if [ "$RC1" -ne 0 ]; then echo "driver: stopped (first test not exit 0; second not run)"; exit "$RC1"; fi
+  OWNER2="#4053 run $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if ! mkdir "$LOCK" 2>/dev/null; then echo "driver: stopped (relock failed; second not run)"; exit 2; fi
+  printf '%s\n' "$OWNER2" >"$LOCK/owner"
+  bash "$D/run_metal_parity_jvp.sh" "$TREE" "$OUT/jvp" "$OWNER2"
+  RC2=$?
+  release_if_mine "$OWNER2"
+  echo "driver: jvp rc=$RC2 owner=$OWNER2"
+  echo "driver: finished"
+  exit "$RC2"
+  # drive-end
+
+事前ビルド（判定外。計測中にコンパイルを並走させない。開始前と各テストの前に他の cargo／rustc が無いことを pgrep で確かめる。
+  事前ビルド前に見つかれば停止、テストの前に見つかればそのテストを undetermined にする）:
+  各本とも build_freshness の clean の後、cargo test -p fandhe-ai --test <テストターゲット> --no-run
+  2 本目も全メンバーを clean してビルドし直す（スクリプトの動作）。成果物の時刻はそれぞれの回のロックと比べる。
+
+コマンド（2 本。1 テスト 1 プロセス 1 回。順に実行。--release なし。外部 timeout なし）:
+  1. cargo test -p fandhe-ai --test f64_create_graph_facade -- --ignored --exact --nocapture --test-threads=1 f64_create_graph_metal_matches_cpu
+  2. cargo test -p fandhe-ai --test f64_functional_transforms_facade -- --ignored --exact --nocapture --test-threads=1 f64_jvp_family_metal_matches_cpu
+  （--release は付けない。両 README の実行コマンドのとおり。--exact・--nocapture・--test-threads=1 はテストの選び方と出力だけに効き判定には影響しない。）
+  外部 timeout: macOS に timeout(1) が無いため付けない。1800 秒を超えて終わらなければ外から止め、undetermined とする。
+選択の検証: 各コマンドの前に cargo test -p fandhe-ai --test <テストターゲット> -- --ignored --exact --list <テスト名> を実行し、": test" で終わる行がちょうど 1 行であること。
+  0 行または 2 行以上なら実行せず undetermined とする（0 本実行を pass の根拠にしない）。
+
+比較する量（対象コミットのテストコードをそのまま写す。ここでは変えない）:
+  f64_create_graph_metal_matches_cpu: 二階 a・二階 b（second_order_on の Σ grad を入力で微分した値）の 2 量を Metal の tape と CPU の tape で比べる。
+  f64_jvp_family_metal_matches_cpu: jvp・jacfwd・jvp_multi・jvp_create_graph.output・jvp_create_graph.d_output_d_a の 5 量を同様に比べる。
+
+判定（判定はテストのコードが定める。ここでは変えない）:
+  判定式は assert_parity_f64（crates/backend-cpu/src/parity.rs）の REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+  tolerance 定数 RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD・baseline・判定の helper は不変。
+  pass: 各テストが exit 0 かつ "running 1 test" かつ "test result: ok"（スクリプトは "test result: ok. 1 passed; 0 failed" を要求する）。
+  fail: panic メッセージが「<量>(gpu vs cpu): 複合判定 FAIL（fail_count=…」のもの、または長さの不一致などのそれ以外の panic・Err（expect("create_graph")・unwrap() 等）。
+    「それ以外」は原因を推測せず、要対応として記録する。
+  undetermined: panic メッセージが「実機が利用可能な前提のテスト」のもの（tape_for(Device::Metal) に失敗＝実機に到達できない）、ノード到達不能、ビルド不能、1800 秒超で外から止めた回、
+    --list の選択が期待と異なる、実機ロックの取得不能・喪失、他の cargo／rustc の並走、自己検査失敗、tree_check の不一致、build_freshness の不成立。pass として扱わない。
+    スクリプトの summary.tsv は非 0 終了をすべて fail と書くため、非 0 終了のときの fail／undetermined はログの panic メッセージで上の定義に従って決め、README に書く。
+  1 本目が exit 0 でなければ 2 本目は実行せず、結果を記録して所有者へ報告する（起動役が止まる。2 本目を実行するかは所有者が決める）。
+  イシュー単位の完了: 2 本とも pass で、build_freshness と下の「回収物の確認」も成立し、かつもう一方のノード（cuda）の計測 PR が main にマージされていて pass の場合だけ
+    #4053 を Closes する。それ以外は Refs。
+
+実行回数: 各 1 回。時間計測ではないので中央値は取らない。fail・undetermined の後に再実行して置き換えない。
+  再実行するなら RULE.txt を新しいディレクトリで登録し直す。計測中は他のビルドを並走させない。
+
+tree_check: スクリプトはビルド前とテストの前後で、.rev-stamp の内容・スクリプトの SHA-256・ソースの指紋を確かめ、env_info.txt に *_now として実行前後の値を書く。
+  ビルド前に source_fingerprint と不一致なら停止、テストの前後で開始時と不一致ならその回を undetermined にする。
+
+record: 実行ログ全文（--nocapture）を create-graph/f64_create_graph_metal_1.log・jvp/f64_jvp_family_metal_1.log に保存する（末尾に rc=）。終了コードは各 exit_code_1、判定は各 summary.tsv。
+  量ごとの実行の跡について（宣言時に確かめた事実）: 対象コミットの gpu_matches_cpu と assert_parity_f64 は pass のとき量の名前も数値も出力しない。
+    量の名前と fail_count は fail の panic メッセージにだけ現れる。テストコードは変えないので、pass の回のログに量ごとの直接の跡は出ない見込みである。
+  その場合の書き方: 結果はテスト単位の pass と書き、量ごとの pass と数値は主張しない。README の記入欄の「fail 要素数」は、ログに件数が出ないので
+    「0（pass のため panic なし。数値はログに出ない）」のように根拠の種類が分かる形で書く。fail のときは panic メッセージの fail_count をそのまま書く。
+回収物の確認（2 本それぞれ）: ログ・exit_code_1・env_info.txt・rev-stamp.txt・clean.log・build_artifacts.txt・summary.tsv・SHA256SUMS が揃う。running 1 test・test result: ok・exit 0。
+  rev_stamp は事前登録コミット、dirty=0、script_sha256 はそれぞれのスクリプトと一致、ソースの指紋はテスト前後で一致。
+  build_artifacts.txt でテストバイナリと全メンバー（fandhe_ai を含む）の lib 成果物がすべて after_lock。
+
+fail 時の扱い: tolerance・baseline・閾値・判定方式・判定の helper・入力・テストコード・この RULE は変えない。panic メッセージの量の名前・fail_count・max_abs_diff・
+  max_rel_err を引用して事実を記録し、README と PR に「要対応」と書き、所有者へ報告して止まる。原因を推測で結論づけない。
+  起票と baseline 化は所有者の承認を得てから。
+
+記録規則: ホスト名・ユーザー名・個人のパス（$HOME・/Users/）は前後が識別子文字でない場合のみマスクする（<metal-node>／<user>／<home>）。
+  漏れがあれば記録を捨てて、所有者へ報告する（fail-closed）。回収ログは手で編集しない。
+  実行と提出物の対応は env_info.txt の script_sha256・rev_stamp と SHA256SUMS で検証する。
+  回収後に送信側でも PR 差分全体をユーザー名・/Users/・内部ドメイン・SSH 別名で grep し、0 件であることを確かめる。
+
+# ---- 共有 target の成果物の再利用を防ぐ（イシュー #4044。../train-gpu-parity-template/RULE.txt の末尾から写した） ----
+build_freshness:
+  背景: 共有 CARGO_TARGET_DIR の workspace メンバー成果物が前の回のものの再利用になりうる。条件と対策は
+    docs/real-hardware-shared-target-reuse-decision.md、手順は docs/real-hardware-verification-env.md §4.11
+  clean: 事前ビルドの前に、cargo metadata --no-deps の全メンバーへ cargo clean -p <名前> を実行する（--release なしなので dev プロファイル）。crates.io の依存は消さない
+  time_check: ビルド後、テストバイナリと全メンバーの lib 成果物（target/debug/deps の lib<名前>-*.rlib・.rmeta。facade 自身の libfandhe_ai-* を含む）の
+    更新時刻が、ロック取得（ノード上の owner ファイルの mtime）より秒単位で厳密に後であること。結果を build_artifacts.txt に保存する
+  undetermined: 古い成果物が 1 つでもある、ロックと同じ秒、必須 lib の欠落、テストバイナリの欠落、実行したバイナリが確かめたものと違う。全テストを実行しない
+  script: 同ディレクトリの run_metal_parity_create_graph.sh・run_metal_parity_jvp.sh（雛形 docs/perf/logs/hw-parity-run-template/run_parity_template.sh の R4・R5 をそのまま含む）

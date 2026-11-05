@@ -1063,8 +1063,8 @@ impl<'t> TapeF64<'t> {
 | CI | 同上 | 入口検査 4 種と範囲外 Op（`Max`）の拒否。拒否後に `child.is_empty()` であること |
 | CI | 既存 f64 テスト | 無変更で通ること |
 | CI | `crates/facade/tests/f64_create_graph_facade.rs`（新設） | 到達性とシグネチャ |
-| `#[ignore]` | 同ファイル | `f64_create_graph_cuda_matches_cpu`（CUDA は `TypedOps<f64>` のネイティブ経路）。未実測 |
-| `#[ignore]` | 同ファイル | `f64_create_graph_metal_matches_cpu`（Metal は `typed_ops_f64()` が `None` でホスト経路のみ）。未実測 |
+| `#[ignore]` | 同ファイル | `f64_create_graph_cuda_matches_cpu`（CUDA は `TypedOps<f64>` のネイティブ経路）。未実測（記入時点。2026-11-05 に pass。#4053・`c9b5e1635`・`docs/perf/logs/f64-gpu-parity-4053-cuda/`） |
+| `#[ignore]` | 同ファイル | `f64_create_graph_metal_matches_cpu`（Metal は `typed_ops_f64()` が `None` でホスト経路のみ）。未実測（記入時点。2026-11-05 に pass。#4053・`5c3e1472e`・`docs/perf/logs/f64-gpu-parity-4053-metal/`） |
 
 - 実機の記入欄は `docs/perf/logs/f64-create-graph-3786/README.md`（実装 PR で新設）。実測は Phase 10 で行う。
 - 線形の Op だけでは Hessian が 0 になりテストが意味を失うので、非線形な包みを入れる（§34.3 の方針）。
@@ -1300,8 +1300,8 @@ impl<'t> TapeF64<'t> {
 | 拒否と順序 | 入口検査の各種と順序。`Max` の拒否で f32・f64 とも `Backward`。失敗時に親へ 2 ノード残り、子・孫は無変更（`is_empty`） | CI | 同上 | — | — | — |
 | 既定経路が bit 同一 | 既存の f64・f32 テストが無変更で通る | CI | 両方 | — | — | — |
 | 到達性・シグネチャ | `crates/facade/tests/f64_functional_transforms_facade.rs`（新設） | CI | #3788 | — | — | — |
-| GPU | 同ファイル `f64_jvp_family_cuda_matches_cpu`（`TypedOps<f64>` のネイティブ経路） | `#[ignore]` | #3788 | 未実測 | — | — |
-| GPU | 同ファイル `f64_jvp_family_metal_matches_cpu`（Metal はホスト経路のみ） | `#[ignore]` | #3788 | — | 未実測 | — |
+| GPU | 同ファイル `f64_jvp_family_cuda_matches_cpu`（`TypedOps<f64>` のネイティブ経路） | `#[ignore]` | #3788 | pass（2026-11-05・#4053・`c9b5e1635`） | — | — |
+| GPU | 同ファイル `f64_jvp_family_metal_matches_cpu`（Metal はホスト経路のみ） | `#[ignore]` | #3788 | — | pass（2026-11-05・#4053・`5c3e1472e`。ホスト経路） | — |
 | ROCm | 該当なし（ROCm は facade 未公開。項目 24） | — | — | — | — | 該当なし |
 
 - 実機の記入欄は `docs/perf/logs/f64-jvp-facade-3788/README.md`（#3788 で新設）。実測は Phase 10。追跡表の行 2 の実機 parity は「該当 issue なし」なので、起票は承認後の論点にする（§35.13 論点 9 と統合）
