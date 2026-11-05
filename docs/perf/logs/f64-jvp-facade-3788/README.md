@@ -27,4 +27,4 @@ cargo test -p fandhe-ai --test f64_functional_transforms_facade -- --ignored f64
 | 環境 | 実行日 | コミット | 結果 | fail 要素数 |
 |------|--------|---------|------|-------------|
 | `<cuda-node>`（CUDA） | 未実測 | 未実測 | 未実測 | 未実測 |
-| `<metal-node>`（Metal） | 未実測 | 未実測 | 未実測 | 未実測 |
+| `<metal-node>`（Metal） | 2026-11-05 | `5c3e1472e` | pass（テスト 1 本。記録は `../f64-gpu-parity-4053-metal/`） | 0（pass のため panic なし。数値はログに出ない） |
