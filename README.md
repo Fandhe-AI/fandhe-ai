@@ -31,7 +31,7 @@ cargo run -p docs-site -- --out dist/
 
 ```toml
 [dependencies]
-fandhe-ai = "0.13.0"
+fandhe-ai = "0.14.0"
 ```
 
 公開ドキュメントは以下のとおりです。

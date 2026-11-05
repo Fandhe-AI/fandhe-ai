@@ -616,6 +616,15 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > 公開した（§15.7 の追補）。framework-compare のピン `fandhe-ai =0.13.0` は変えていない
 > （更新は #3873・所有者承認待ち）。
 
+> **追補（2026-11-05・v0.14.0 ピン更新。#3873）**: 所有者の承認（2026-11-05・チャットでの
+> 明示指示。原文「ok」。記録コメント:
+> <https://github.com/Fandhe-AI/fandhe-ai/issues/3873#issuecomment-6659367020>）により、
+> framework-compare の承認ピンを `fandhe-ai =0.13.0` から `=0.14.0` へ更新した。
+> `Cargo.lock` の差分は自社 7 クレートの版・checksum と、facade の通常依存になった自社
+> `fandhe-ai-backend-rocm 0.14.0` の新規 1 件のみで、外部依存の増減なし（`libloading 0.9.0` は
+> cudarc 経由で既に lock にある）。`deny.toml` の allow は変更していない。内訳と承認範囲は
+> `docs/framework-compare-harness-decision.md` 4 節。
+
 > **追補（2026-10-31・v0.13.0 ピン更新）**: 所有者の承認（2026-10-31 の所有者発言
 > 「0.13.0 で公開してください。framework-compare のピン =0.13.0 も承認します。」。
 > チャットでの明示指示で issue コメントの URL はない）により、framework-compare の承認ピンを
@@ -1153,6 +1162,11 @@ dry-run の Verifying 段は、展開した `.crate` を ROCm 非搭載の環境
 
 - 2026-11-01（8 クレート目 backend-rocm の公開準備。#3774）: §15 を追加した。公開準備のみで、publish・版の 0.14.0 へのバンプは未実施。
 
+- 2026-11-05（v0.14.0 ピン更新。#3873）: 所有者の承認（2026-11-05・チャットでの明示指示。
+  記録コメント: <https://github.com/Fandhe-AI/fandhe-ai/issues/3873#issuecomment-6659367020>）により
+  framework-compare の承認ピンを `fandhe-ai =0.13.0` → `=0.14.0` へ更新した（`Cargo.lock` は
+  自社 7 クレートの版・checksum と自社 `fandhe-ai-backend-rocm` の新規 1 件のみ。外部依存の
+  増減なし。`deny.toml` の allow は変更なし）。§10 に追補を記録した。
 - 2026-10-31（v0.13.0 公開完了）: `release-all.yml`（`mode: publish` run 41168270894。
   事前 dry-run〈verify〉run 41168022860。main `db2b385fb`）で公開 7 クレートの v0.13.0
   公開を完了した（7 クレート sparse index 反映確認済み）。注釈付きタグ `v0.13.0` は
