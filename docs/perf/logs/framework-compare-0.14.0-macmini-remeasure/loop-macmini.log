@@ -1,0 +1,8 @@
+run1: done. rows=48 pyrows=32 skipped=4 2026-11-05T15:59:16Z
+run2: done. rows=48 pyrows=32 skipped=4 2026-11-05T16:01:36Z
+run3: done. rows=48 pyrows=32 skipped=4 2026-11-05T16:03:55Z
+run4: done. rows=48 pyrows=32 skipped=4 2026-11-05T16:06:15Z
+run5: done. rows=48 pyrows=32 skipped=4 2026-11-05T16:08:35Z
+ALL-DONE completed=5/5
+series rc=0 2026-11-05T16:08:39Z
+lock released 2026-11-05T16:08:39Z

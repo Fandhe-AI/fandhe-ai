@@ -1,0 +1,28 @@
+2026-11-05T15:56:50Z
+Apple M4
+10
+4
+6
+17179869184
+Darwin 27.0.0 arm64
+27.0.1
+26A434
+{ 3.42 7.90 5.46 }
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+Now drawing from 'AC Power'
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: aarch64-apple-darwin
+release: 1.99.0
+LLVM version: 23.1.1
+cargo 1.99.0 (5f94df478 2026-08-27)
+Python 3.12.15
+Python 3.12.15
+rev_stamp=18a7f4b87fe61029a179cb1922cc82928440f2c9
+arm_re_count=1
+bench_py_sha256=9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+CARGO_TARGET_DIR=unset
