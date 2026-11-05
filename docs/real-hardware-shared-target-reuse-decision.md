@@ -95,7 +95,7 @@ mtime を転送で更新する案（`rsync --no-times` 等）は、送信側と�
 | create-graph-b-cuda-parity-3857 | cuda | 48d0263ac | 12:51 | 0 件（`Finished … 0.05s`）。テストバイナリ `create_graph_gpu_parity-43f86a2c2940f8f0` が 3856 と同一 | 0 件（tests も 0 件） | B |
 | nn-layers-cuda-parity-3860 | cuda | 77c2cbd58 | 12:56 | `fandhe-ai` のみ | 0 件 | B |
 | param-groups-resident-cuda-parity-3862 | cuda | 6ba9db57f | 13:01 | tensor-core・backend-cuda・backend-cpu・autodiff・bench-harness と crates.io の依存（libc 等）、続けて `fandhe-ai`。`backend-rocm`・`onnx-interop` は無し | 0 件 | B（依存まで再コンパイルしており、target が別だった可能性。`backend-rocm`・`onnx-interop` は `Compiling` が無く再利用された可能性） |
-| onnx-train-cuda-parity-3864 | cuda | a05e3caeb | 13:04 | 0 件（`Finished … 0.06s`）。テストバイナリ `train_gpu_parity-7f8cdf980f4362cb` | 0 件 | **C**（このテストバイナリは 3862 のビルドにも既に存在した。作った回が記録に無く、そのときのテストのコードを確かめられない） |
+| onnx-train-cuda-parity-3864 | cuda | a05e3caeb | 13:04 | 0 件（`Finished … 0.06s`）。テストバイナリ `train_gpu_parity-7f8cdf980f4362cb` | 0 件 | **C**（このテストバイナリは 3862 のビルドにも既に存在した。作った回が記録に無く、そのときのテストのコードを確かめられない。**#4046 が 2026-11-05 に測り直し、pass**。記録は `docs/perf/logs/onnx-train-cuda-parity-3864-rerun/`。テストバイナリと全メンバーの lib 成果物がロック取得より後に書かれたことを確かめた） |
 | gpu-linalg-optin-cuda-parity-3866 | cuda | 49a470f4b | 15:03 | `fandhe-ai` のみ（新しいテストターゲット） | 0 件 | B（前任との間隔が約 2 時間で、記録に無いビルドがありうる） |
 | nn-train-template-cuda-parity-3860 | cuda | bf118b365 | 19:05 | 8 メンバー全部 | lib 0 件・tests 1 件 | A |
 | optim-train-template-cuda-parity-3862 | cuda | f81eedd9c | 19:09 | 8 メンバー全部 | 0 件 | A |
@@ -108,12 +108,12 @@ mtime を転送で更新する案（`rsync --no-times` 等）は、送信側と�
 | nn-train-template-metal-parity-3861 | metal | c71ef53a2 | 19:05 | 9 メンバー全部 | lib 0 件・tests 1 件 | A |
 | optim-train-template-metal-parity-3863 | metal | 31656bccc | 19:09 | 9 メンバー全部 | 0 件 | A |
 
-集計: A 10 件・B 5 件・C 1 件。
+集計: A 10 件・B 5 件・C 1 件（元の 16 計測の分類。C の 1 件は #4046 の測り直しで pass。分類そのものは変えていない）。
 
 ### 4.3 読み方
 
 - ライブラリのコードは、記録上のどの隣り合う組でも同一だった。したがって B の回は、記録上の前任が実際の前任なら、測ったコードと再利用された成果物のコードが同じで、結果への影響は無い。この判断は上の「B の限界」に依る
-- C の 1 件（#3864 の CUDA、ONNX の学習）は、テストバイナリの由来を記録から確かめられない。ライブラリのコードは同一なので、影響が出るとすればテストのコードが古い場合に限られる。**同じ族（`train_gpu_parity`）の 19:05・19:09 の回は全メンバーを再コンパイルしており、そこでは nn・optim の族を測ったが、onnx の族は測っていない**。取り直すかどうかは所有者の判断（本書の範囲外。実機での取り直しはしない）
+- C の 1 件（#3864 の CUDA、ONNX の学習）は、テストバイナリの由来を記録から確かめられない。ライブラリのコードは同一なので、影響が出るとすればテストのコードが古い場合に限られる。**同じ族（`train_gpu_parity`）の 19:05・19:09 の回は全メンバーを再コンパイルしており、そこでは nn・optim の族を測ったが、onnx の族は測っていない**。所有者の判断で #4046 が取り直し、pass だった（`docs/perf/logs/onnx-train-cuda-parity-3864-rerun/`）
 - #4031 の rerun（無効）と rerun2（有効）は本書の対象外（release プロファイル。rerun2 が正）
 
 ### 4.4 各 README への反映
@@ -122,7 +122,7 @@ mtime を転送で更新する案（`rsync --no-times` 等）は、送信側と�
 
 ## 5. 範囲外・残件
 
-- C（#3864 の CUDA）の実機での取り直しは所有者の判断。起票は承認後に行う
+- C（#3864 の CUDA）の実機での取り直しは #4046 で実施済み（pass。§4.2）
 - 計測済みの過去の run スクリプト（rerun2 を含む）の `libfandhe_ai_*` glob の漏れは、回収物なので直していない
 - 雛形の macOS（bash 3.2）での `--self-test`・実機での実行は未検証。次回の `<metal-node>` 計測時に確かめる
 - 作業ノードの片付け（`rust-ai-library-run-4031-rerun2/` 等）は本書の範囲外で、所有者の指示待ち
