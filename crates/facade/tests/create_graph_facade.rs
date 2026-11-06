@@ -1382,10 +1382,7 @@ fn local_response_norm_create_graph_via_facade() {
 
 #[test]
 fn weight_norm_create_graph_via_facade() {
-    // g = [1.5, 0.9] では group 0 の Hessian 対角（射影の項が約 7.5 で打ち消し合い値は約 0.01）の
-    // f32 の最悪誤差が REQ-2 を外れうるため、総括判定が保守的に拒否する（決定記録 §57.2）。
-    // 判定を通る g へ下げて facade 経由の二階を確かめる。
-    let z = [0.3, -0.8, 0.5, 1.0, 0.7, 0.4, 0.8, 0.5];
+    let z = [0.3, -0.8, 0.5, 1.0, 0.7, 0.4, 1.5, 0.9];
     check_create_graph_family("weight_norm", &z, &[8], weight_norm_loss, true, 3e-3);
 }
 

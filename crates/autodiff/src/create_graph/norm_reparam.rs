@@ -265,6 +265,11 @@ trait Num: Copy {
     fn over(self, o: Self) -> Self;
     fn negate(self) -> Self;
     fn root(self) -> Self;
+    /// 多項の和（縮約・勾配の蓄積）。f32 の再現は先頭から逐次に足す（`0 + x₀` は厳密なので `x₀.plus(x₁)…`
+    /// と同じ丸め）。実行側のカーネルは和の順序が異なりうるため、[`Eb`] だけは順序に依らない上界で上書きする。
+    fn total(terms: &[Self]) -> Self {
+        terms.iter().fold(Self::k(0.0), |a, &x| a.plus(x))
+    }
     /// `PowScalar` の forward `x^e`（構造は `e as f32` を使う）。
     fn powe(self, e: f64) -> Self;
     /// `PowScalar` の VJP 係数 `e·x^(e−1)`（`e == 0` は 0。`eval/scalar.rs::unary_grad_factor`）。
@@ -410,6 +415,273 @@ impl Num for Rf {
     }
 }
 
+/// 丸め誤差の一次伝播を丸めの事象ごとに追う数値型（イシュー #3955・決定記録 §77）。値は f64 の参照値 `v`
+/// （厳密な定数・入力から組んだ値）と、f32 の実行がそこから外れる誤差の一次式 `Σ cₖ·δₖ`（`δₖ` は k 番目の
+/// 丸めの事象の相対誤差。`|δₖ| ≤ μₖ`）で表す。誤差の上界は `Σ|cₖ|·μₖ`（[`Lin::bound`]）。
+/// [`Rf`] の「全演算を最終の大きさ `M` に一律に課す」係数 `coeff·M` や、演算ごとに独立な誤差として足す
+/// running error bound と違い、**同じ中間値を何度も使う式**（`n_s` を `v̂`・`g/n_s`・VJP 係数で共有する
+/// WeightNorm 等）で、共有した丸めの誤差が項の間で打ち消し合う分も一次式の係数に畳まれる。これが、大きな項
+/// が相殺して小さい値になる Hessian 対角（g=1.5 の値約 0.01 など）を、実際の誤差の桁で見積もれる理由。
+/// - 演算の丸め: 結果 `r` ごとに新しい事象 `μ = u·|r| + 2^-150`（`u = 2^-24`。除算・平方根を含め IEEE 754 の
+///   正しい丸めを仮定する。CPU・CUDA の既定と、Metal の `MathMode::Safe` + `Precise`〈`pipeline::compile_options`〉
+///   の想定。GPU の実機は未実測）。絶対項は非正規数の間隔の半分。
+/// - 定数: f32 へ丸めた誤差を厳密に計算した事象（f32 で厳密な値は事象を持たない）。
+/// - 多項の和 [`Num::total`]: 実カーネルの和の順序に依らないよう、各項の一次式を足したうえで、順序によらない
+///   丸めの上界 `γ_{n−1}·Σ|vᵢ|` を 1 つの独立な事象にする。
+/// - 一次近似の二次項: 事象の総数 `N` に対し `1 + 16·N·u` を掛け、`16·N·u ≥ 0.01` の入力は拒否する
+///   （[`entry_check_lin`]）。
+///
+/// 係数の列は thread-local の領域（[`LIN_ARENA`]）に置き、`Lin` 自体は `Copy` にする。事象の数に比例する
+/// 長さの列を値ごとに持つので、グループの幅が [`LIN_REST_MAX`] 以下のときだけ使う（[`wn_group_judge`]）。
+/// `PowScalar`（`powe`・`pow_grad`）は WeightNorm が使わないので、上界を持たない NaN の値にする（常に拒否）。
+#[derive(Clone, Copy, Debug)]
+struct Lin {
+    v: f64,
+    id: usize,
+    t: bool,
+}
+
+/// 一次式の項（事象の番号, 係数）の列。事象の番号は昇順。
+type LinTerms = Vec<(u32, f64)>;
+
+#[derive(Default)]
+struct LinArena {
+    terms: Vec<LinTerms>,
+    mus: Vec<f64>,
+}
+
+thread_local! {
+    static LIN_ARENA: std::cell::RefCell<LinArena> = std::cell::RefCell::new(LinArena::default());
+}
+
+/// f32 の丸め単位 `u = 2^-24`。
+const LIN_U: f64 = 1.0 / 16_777_216.0;
+/// 非正規数の領域の絶対丸め誤差の上界 `2^-150`。
+const LIN_TINY: f64 = 7.006_492_321_624_085e-46;
+/// [`Lin`] を使うグループの幅の上限（事象の数が幅に比例して増え、係数の列が長くなるため）。
+const LIN_REST_MAX: usize = 8;
+/// [`Lin`] で判定するグループ 1 つの走査量の見積り（幅 8 で約 4e5 反復相当の実測。幅の 2 乗に比例）。
+fn lin_group_cost(rest: usize) -> usize {
+    6000 * rest * rest
+}
+/// [`Lin`] を使う判定の走査量の上限。超える（グループ数が多い）テンソルは全グループを従来の [`Rf`] で判定する
+/// （グループの位置で判定方式が変わらないよう、テンソル単位で選ぶ）。
+const LIN_BUDGET: usize = 1 << 26;
+
+/// 領域を空にする（グループの判定の先頭で呼ぶ）。
+fn lin_reset() {
+    LIN_ARENA.with(|a| *a.borrow_mut() = LinArena::default());
+}
+
+/// 領域の現在の大きさ（`(値の数, 事象の数)`）。seed ごとに [`lin_truncate`] で戻すための印。
+fn lin_mark() -> (usize, usize) {
+    LIN_ARENA.with(|a| {
+        let a = a.borrow();
+        (a.terms.len(), a.mus.len())
+    })
+}
+
+fn lin_truncate(mark: (usize, usize)) {
+    LIN_ARENA.with(|a| {
+        let mut a = a.borrow_mut();
+        a.terms.truncate(mark.0);
+        a.mus.truncate(mark.1);
+    });
+}
+
+/// 事象の総数（二次項の余裕係数の入力）。
+fn lin_events() -> usize {
+    LIN_ARENA.with(|a| a.borrow().mus.len())
+}
+
+/// 2 つの一次式の線形結合 `ka·a + kb·b`（事象の番号の昇順の併合）。
+fn lin_comb(a: &[(u32, f64)], ka: f64, b: &[(u32, f64)], kb: f64) -> LinTerms {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() || j < b.len() {
+        if j == b.len() || (i < a.len() && a[i].0 < b[j].0) {
+            out.push((a[i].0, ka * a[i].1));
+            i += 1;
+        } else if i == a.len() || b[j].0 < a[i].0 {
+            out.push((b[j].0, kb * b[j].1));
+            j += 1;
+        } else {
+            out.push((a[i].0, ka * a[i].1 + kb * b[j].1));
+            i += 1;
+            j += 1;
+        }
+    }
+    out
+}
+
+impl Lin {
+    fn terms_of(self) -> LinTerms {
+        LIN_ARENA.with(|a| a.borrow().terms[self.id].clone())
+    }
+
+    fn make(v: f64, terms: LinTerms, t: bool) -> Self {
+        let id = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            a.terms.push(terms);
+            a.terms.len() - 1
+        });
+        Lin { v, id, t }
+    }
+
+    /// 結果 `v` の丸めの事象を 1 つ足す。
+    fn rounded(v: f64, mut terms: LinTerms, t: bool) -> Self {
+        let mu = LIN_U * v.abs() + LIN_TINY;
+        let ev = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            a.mus.push(mu);
+            (a.mus.len() - 1) as u32
+        });
+        terms.push((ev, 1.0));
+        Lin::make(v, terms, t)
+    }
+
+    /// 誤差の絶対値の一次の上界 `Σ|cₖ|·μₖ`。
+    fn bound(self) -> f64 {
+        LIN_ARENA.with(|a| {
+            let a = a.borrow();
+            a.terms[self.id]
+                .iter()
+                .map(|&(k, c)| c.abs() * a.mus[k as usize])
+                .sum()
+        })
+    }
+
+    /// 入力の NaN が届いた NaN（taint 付きの NaN）。
+    fn input_nan(self) -> bool {
+        self.v.is_nan() && self.t
+    }
+
+    fn lin2(self, ka: f64, o: Self, kb: f64) -> LinTerms {
+        LIN_ARENA.with(|a| {
+            let a = a.borrow();
+            lin_comb(&a.terms[self.id], ka, &a.terms[o.id], kb)
+        })
+    }
+}
+
+impl Num for Lin {
+    fn k(x: f64) -> Self {
+        // 定数は f32 へ丸めて載る。丸めの誤差は厳密に計算できる（f32 で厳密な値は事象を持たない）。
+        let mut terms = LinTerms::new();
+        let err = if x.is_finite() {
+            (f64::from(x as f32) - x).abs()
+        } else {
+            0.0
+        };
+        if err > 0.0 {
+            let ev = LIN_ARENA.with(|a| {
+                let mut a = a.borrow_mut();
+                a.mus.push(err);
+                (a.mus.len() - 1) as u32
+            });
+            terms.push((ev, 1.0));
+        }
+        Lin::make(x, terms, x.is_nan())
+    }
+    fn plus(self, o: Self) -> Self {
+        Lin::rounded(self.v + o.v, self.lin2(1.0, o, 1.0), self.t || o.t)
+    }
+    fn minus(self, o: Self) -> Self {
+        Lin::rounded(self.v - o.v, self.lin2(1.0, o, -1.0), self.t || o.t)
+    }
+    fn times(self, o: Self) -> Self {
+        Lin::rounded(self.v * o.v, self.lin2(o.v, o, self.v), self.t || o.t)
+    }
+    fn over(self, o: Self) -> Self {
+        let q = self.v / o.v;
+        Lin::rounded(q, self.lin2(1.0 / o.v, o, -q / o.v), self.t || o.t)
+    }
+    fn negate(self) -> Self {
+        let terms = self.terms_of().into_iter().map(|(k, c)| (k, -c)).collect();
+        Lin::make(-self.v, terms, self.t)
+    }
+    fn root(self) -> Self {
+        let r = self.v.sqrt();
+        let terms = self
+            .terms_of()
+            .into_iter()
+            .map(|(k, c)| (k, c / (2.0 * r)))
+            .collect();
+        Lin::rounded(r, terms, self.t)
+    }
+    fn powe(self, e: f64) -> Self {
+        Lin::make(self.v.powf(e), vec![], self.t).unbounded()
+    }
+    fn pow_grad(self, e: f64) -> Self {
+        if e == 0.0 {
+            return Lin::make(0.0, vec![], false);
+        }
+        Lin::make(e * self.v.powf(e - 1.0), vec![], self.t).unbounded()
+    }
+    fn root_grad(self) -> Self {
+        Lin::k(0.5).over(self)
+    }
+    fn total(terms: &[Self]) -> Self {
+        let v: f64 = terms.iter().map(|x| x.v).sum();
+        let t = terms.iter().any(|x| x.t);
+        let n = terms.len();
+        let mut acc = LinTerms::new();
+        for x in terms {
+            acc = LIN_ARENA.with(|a| lin_comb(&acc, 1.0, &a.borrow().terms[x.id], 1.0));
+        }
+        let abs: f64 = terms.iter().map(|x| x.v.abs()).sum();
+        let k = n.saturating_sub(1) as f64 * LIN_U;
+        let mu = k / (1.0 - k) * abs + n as f64 * LIN_TINY;
+        let ev = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            a.mus.push(mu);
+            (a.mus.len() - 1) as u32
+        });
+        acc.push((ev, 1.0));
+        Lin::make(v, acc, t)
+    }
+    fn no_inf(self) -> bool {
+        !self.v.is_infinite()
+    }
+    fn nan(self) -> bool {
+        self.v.is_nan()
+    }
+    fn generated_nan(self) -> bool {
+        self.v.is_nan() && !self.t
+    }
+}
+
+impl Lin {
+    /// 上界を持たない値（常に拒否される）。係数の NaN で表す。
+    fn unbounded(self) -> Self {
+        let ev = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            a.mus.push(f64::NAN);
+            (a.mus.len() - 1) as u32
+        });
+        Lin::make(self.v, vec![(ev, 1.0)], self.t)
+    }
+}
+
+/// [`entry_check`] の [`Lin`] 版。`|V_str − V| + 一次の上界·(1 + 16·N·u)` が絶対 1e-5 未満か相対の半分以内で
+/// なければ拒否する（tolerance 定数は変えない）。NaN・±inf の扱いは [`entry_check`] と同じ。
+fn entry_check_lin(r: Lin, s: f32, what: &str) -> Result<(), AutodiffError> {
+    if s.is_nan() && r.input_nan() {
+        return Ok(());
+    }
+    let slack = 16.0 * lin_events() as f64 * LIN_U;
+    let err = (f64::from(s) - r.v).abs() + r.bound() * (1.0 + slack);
+    if slack < 0.01
+        && r.v.is_finite()
+        && err.is_finite()
+        && (err < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * r.v.abs())
+    {
+        return Ok(());
+    }
+    Err(invalid(&format!(
+        "{what}: 二階の要素が f32 構造の丸め・相殺・underflow・overflow で REQ-2 の判定を外れうるため拒否"
+    )))
+}
 /// 入力の NaN の依存を追う数値型（[`lrn_col_scan`] 等の走査用）。`nan` は値が入力の NaN で NaN になること、
 /// `mx` はその値が依存する入力 `x`（[`Num::input`] で載せた値）の最大絶対値。NaN の伝わり方は構造の f32 の
 /// 演算と同じにする: 四則・`√` は被演算子のどれかが NaN なら NaN（`0·NaN = NaN` なので定数 0 も特別扱い
@@ -1496,19 +1768,15 @@ fn wn_fwd<T: Num>(v: &[f32], up: &[f32], g: f32, s: f64) -> Option<WnFwd<T>> {
     let inv_s = T::k(1.0).over(s);
     let vs: Vec<T> = v.iter().map(|&x| T::k(f64::from(x)).over(s)).collect();
     let up: Vec<T> = up.iter().map(|&x| T::k(f64::from(x))).collect();
-    let mut ss = T::k(0.0);
-    for &x in &vs {
-        ss = ss.plus(x.times(x));
-    }
+    let sq: Vec<T> = vs.iter().map(|&x| x.times(x)).collect();
+    let ss = T::total(&sq);
     let n = ss.root();
     let fsq = n.root_grad();
     let inv_n = T::k(1.0).over(n);
     let vh: Vec<T> = vs.iter().map(|&x| x.over(n)).collect();
     let dvb: Vec<T> = vs.iter().map(|&x| x.over(n).over(n).negate()).collect();
-    let mut dg = T::k(0.0);
-    for (&u, &h) in up.iter().zip(&vh) {
-        dg = dg.plus(u.times(h));
-    }
+    let dgt: Vec<T> = up.iter().zip(&vh).map(|(&u, &h)| u.times(h)).collect();
+    let dg = T::total(&dgt);
     let t: Vec<T> = up
         .iter()
         .zip(&vh)
@@ -1575,15 +1843,17 @@ fn wn_rev<T: Num>(f: &WnFwd<T>, seed: WnSeed, hv: &mut [T], hu: &mut [T]) -> Opt
         cot_vh[i] = cot_vh[i].plus(cot_dg.times(f.up[i]));
     }
     // v̂ = v_s/n_s。
+    let mut n_terms = vec![cot_n];
     for i in 0..r {
         hv[i] = cot_vh[i].times(f.inv_n);
-        cot_n = cot_n.plus(cot_vh[i].times(f.dvb[i]));
+        n_terms.push(cot_vh[i].times(f.dvb[i]));
     }
+    cot_n = T::total(&n_terms);
     // n_s = √(Σ v_s²)、v_s = v/s。
     let cot_ss = cot_n.times(f.fsq);
     for (h, &x) in hv.iter_mut().zip(&f.vs) {
         let g = cot_ss.times(x);
-        *h = h.plus(g).plus(g).times(f.inv_s);
+        *h = T::total(&[*h, g, g]).times(f.inv_s);
     }
     h_g
 }
@@ -1614,10 +1884,34 @@ fn wn_group_all_nan(v: &[f32], up: &[f32], g: f32) -> bool {
 }
 
 /// WeightNorm の 1 グループの総括判定。seed が 1 要素（`dv` の各要素と `dg`）のときの二階
-/// （`v`・`up`・`g` への要素）を [`entry_check`] に掛ける。
-fn wn_group_judge(v: &[f32], up: &[f32], g: f32, s: f64, coeff: f64) -> Result<(), AutodiffError> {
+/// （`v`・`up`・`g` への要素）を判定する。`use_lin` なら丸めの一次伝播を事象ごとに追う [`Lin`]
+/// （[`entry_check_lin`]。呼び出し側が幅 [`LIN_REST_MAX`] 以下かつ走査量 [`LIN_BUDGET`] 以内で選ぶ）、
+/// そうでなければ従来の [`Rf`] と係数 `coeff`（[`entry_check`]）。
+fn wn_group_judge(
+    v: &[f32],
+    up: &[f32],
+    g: f32,
+    s: f64,
+    coeff: f64,
+    use_lin: bool,
+) -> Result<(), AutodiffError> {
+    if use_lin {
+        lin_reset();
+        wn_group_judge_with::<Lin>(v, up, g, s, &|r, x, what| entry_check_lin(r, x, what))
+    } else {
+        wn_group_judge_with::<Rf>(v, up, g, s, &|r, x, what| entry_check(r, x, coeff, what))
+    }
+}
+
+fn wn_group_judge_with<R: Num>(
+    v: &[f32],
+    up: &[f32],
+    g: f32,
+    s: f64,
+    check: &dyn Fn(R, f32, &str) -> Result<(), AutodiffError>,
+) -> Result<(), AutodiffError> {
     const WHAT: &str = "WeightNorm の二階";
-    let (Some(fs), Some(fr)) = (wn_fwd::<f32>(v, up, g, s), wn_fwd::<Rf>(v, up, g, s)) else {
+    let (Some(fs), Some(fr)) = (wn_fwd::<f32>(v, up, g, s), wn_fwd::<R>(v, up, g, s)) else {
         return Err(nonfinite_struct(WHAT));
     };
     let nan_ok = [
@@ -1638,16 +1932,19 @@ fn wn_group_judge(v: &[f32], up: &[f32], g: f32, s: f64, coeff: f64) -> Result<(
     }
     let r = v.len();
     let (mut hv_s, mut hu_s) = (vec![0f32; r], vec![0f32; r]);
-    let (mut hv_r, mut hu_r) = (vec![Rf::k(0.0); r], vec![Rf::k(0.0); r]);
+    // forward の事象は seed 間で共有し、逆伝播の事象だけ seed ごとに戻す（領域を持たない型では無害）。
+    let mark = lin_mark();
     for seed in (0..r).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+        lin_truncate(mark);
+        let (mut hv_r, mut hu_r) = (vec![R::k(0.0); r], vec![R::k(0.0); r]);
         let gs = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
         let gr = wn_rev(&fr, seed, &mut hv_r, &mut hu_r);
         if let (Some(gs), Some(gr)) = (gs, gr) {
-            entry_check(gr, gs, coeff, WHAT)?;
+            check(gr, gs, WHAT)?;
         }
         for i in 0..r {
-            entry_check(hv_r[i], hv_s[i], coeff, WHAT)?;
-            entry_check(hu_r[i], hu_s[i], coeff, WHAT)?;
+            check(hv_r[i], hv_s[i], WHAT)?;
+            check(hu_r[i], hu_s[i], WHAT)?;
         }
     }
     Ok(())
@@ -1716,9 +2013,10 @@ pub(super) fn weight_norm_cgrads<'c>(
     let scales: Vec<f32> = exps.iter().map(|&e| pow2(e)).collect();
 
     // 第 1 軸（overflow）と第 2 軸の m・総括判定（係数は [`wn_coeff`]）。
-    let coeff_judge = wn_coeff(rest);
     // 走査量は全グループ分を数える（`v` に NaN があるグループは判定の代わりに同じ規模の依存の走査
     // [`wn_group_all_nan`] を回す）。
+    let coeff_judge = wn_coeff(rest);
+    let use_lin = rest <= LIN_REST_MAX && groups.saturating_mul(lin_group_cost(rest)) <= LIN_BUDGET;
     judge_budget(wn_judge_cost(groups, rest), "WeightNorm")?;
     let nf = rest as f64;
     let mut m_dv = vec![0.0f64; v_gm.len()];
@@ -1790,7 +2088,14 @@ pub(super) fn weight_norm_cgrads<'c>(
         // g が NaN のグループも判定する。g の NaN は `coef = (g/n_s)/s` を通って `dv` と、`dv` への seed
         // から `v`・`up` への二階へ届くが、`dg` への seed の二階（`v`・`up` への要素）と `dv` への seed の
         // `g` への要素は g に依存せず有限なので、通常どおり判定する（両側 NaN の要素だけ外す）。
-        wn_group_judge(&v_gm[lo..lo + rest], upk, g_data[k], s, coeff_judge)?;
+        wn_group_judge(
+            &v_gm[lo..lo + rest],
+            upk,
+            g_data[k],
+            s,
+            coeff_judge,
+            use_lin,
+        )?;
     }
 
     // 構造。
@@ -2798,5 +3103,142 @@ mod tests {
         assert_eq!(sn_judge_cost(3), 3 * 23 + 3 * 12);
         assert!(judge_budget(wn_judge_cost(1, 4400), "t").is_err());
         assert!(judge_budget(sn_judge_cost(6000), "t").is_err());
+    }
+    /// 和の順序だけが [`f32`] と違う再現（多項の和を末尾から足す）。実カーネルの和の順序が違っても
+    /// [`Lin`] の上界が覆うこと（[`Num::total`] の順序非依存）を確かめるために使う。
+    #[derive(Clone, Copy)]
+    struct F32Rev(f32);
+
+    impl Num for F32Rev {
+        fn k(x: f64) -> Self {
+            F32Rev(x as f32)
+        }
+        fn plus(self, o: Self) -> Self {
+            F32Rev(self.0 + o.0)
+        }
+        fn minus(self, o: Self) -> Self {
+            F32Rev(self.0 - o.0)
+        }
+        fn times(self, o: Self) -> Self {
+            F32Rev(self.0 * o.0)
+        }
+        fn over(self, o: Self) -> Self {
+            F32Rev(self.0 / o.0)
+        }
+        fn negate(self) -> Self {
+            F32Rev(-self.0)
+        }
+        fn root(self) -> Self {
+            F32Rev(self.0.sqrt())
+        }
+        fn total(terms: &[Self]) -> Self {
+            terms.iter().rev().fold(F32Rev(0.0), |a, &x| a.plus(x))
+        }
+        fn powe(self, e: f64) -> Self {
+            F32Rev(self.0.powf(e as f32))
+        }
+        fn pow_grad(self, e: f64) -> Self {
+            F32Rev(self.0.pow_grad(e))
+        }
+        fn root_grad(self) -> Self {
+            F32Rev(0.5 / self.0)
+        }
+        fn no_inf(self) -> bool {
+            !self.0.is_infinite()
+        }
+        fn nan(self) -> bool {
+            self.0.is_nan()
+        }
+        fn generated_nan(self) -> bool {
+            false
+        }
+    }
+
+    /// 総括判定の soundness（#3955 の最重要テスト）: 乱数・スケールを振った WeightNorm のグループで、[`Lin`] の
+    /// 一次の上界が、f32 の再現と和の順序を変えた再現の実測の誤差 `|V_str − V|` を seed 全部・全要素で
+    /// 上から押さえる（二階の `v`・`up`・`g` への要素）。
+    #[test]
+    fn lin_bound_covers_f32_deviation_for_weight_norm_sweep() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f64) / f64::from(1u32 << 31)
+        };
+        let mut checked = 0usize;
+        let mut tight = 0usize;
+        for case in 0..300 {
+            let rest = 2 + case % 7;
+            let amp = [1e-3, 1.0, 1e3][case % 3];
+            let v: Vec<f32> = (0..rest)
+                .map(|_| ((next() * 2.0 - 1.0) * 2.0 * amp) as f32)
+                .collect();
+            if v.iter().all(|&x| x == 0.0) {
+                continue;
+            }
+            let up: Vec<f32> = (0..rest)
+                .map(|_| ((next() * 2.0 - 1.0) * 3.0) as f32)
+                .collect();
+            let g = (0.05 + next() * 2.0) as f32;
+            let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            lin_reset();
+            let (Some(fl), Some(fs), Some(fa)) = (
+                wn_fwd::<Lin>(&v, &up, g, s),
+                wn_fwd::<f32>(&v, &up, g, s),
+                wn_fwd::<F32Rev>(&v, &up, g, s),
+            ) else {
+                continue;
+            };
+            let mark = lin_mark();
+            for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+                lin_truncate(mark);
+                let (mut hv_l, mut hu_l) = (vec![Lin::k(0.0); rest], vec![Lin::k(0.0); rest]);
+                let (mut hv_s, mut hu_s) = (vec![0f32; rest], vec![0f32; rest]);
+                let (mut hv_a, mut hu_a) = (vec![F32Rev(0.0); rest], vec![F32Rev(0.0); rest]);
+                let gl = wn_rev(&fl, seed, &mut hv_l, &mut hu_l);
+                let gs = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+                let ga = wn_rev(&fa, seed, &mut hv_a, &mut hu_a);
+                let slack = 1.0 + 16.0 * lin_events() as f64 * LIN_U;
+                let mut pairs: Vec<(Lin, f32, f32)> = (0..rest)
+                    .flat_map(|i| [(hv_l[i], hv_s[i], hv_a[i].0), (hu_l[i], hu_s[i], hu_a[i].0)])
+                    .collect();
+                if let (Some(gl), Some(gs), Some(ga)) = (gl, gs, ga) {
+                    pairs.push((gl, gs, ga.0));
+                }
+                for (l, f, a) in pairs {
+                    if !l.v.is_finite() || !f.is_finite() || !a.is_finite() {
+                        continue;
+                    }
+                    let bound = l.bound() * slack;
+                    for actual in [f, a] {
+                        let dev = (f64::from(actual) - l.v).abs();
+                        assert!(
+                            dev <= bound,
+                            "case {case} rest {rest}: 実測の誤差 {dev:e} が上界 {bound:e} を超えた（V = {:e}）",
+                            l.v
+                        );
+                        checked += 1;
+                        if dev > 0.1 * bound {
+                            tight += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000, "検査した要素数 {checked}");
+        // 上界が緩すぎて自明に成り立っているだけでないこと（実測の誤差が上界の 1 割を超える要素がある）。
+        assert!(tight > 0, "上界が実測より桁違いに大きい");
+    }
+
+    /// 判定方式（[`Lin`]／従来の [`Rf`]。後者は幅の広いグループ・グループ数の多いテンソルの経路）のどちらでも、
+    /// 相殺のない普通のグループは受理される。
+    #[test]
+    fn wn_group_judge_modes_agree_on_easy_group() {
+        let (v, up) = ([0.9f32, 0.1, 0.6, 0.3], [0.7f32, -0.2, 0.4, 0.1]);
+        for use_lin in [true, false] {
+            assert!(wn_group_judge(&v, &up, 0.5, 1.0, wn_coeff(4), use_lin).is_ok());
+        }
     }
 }

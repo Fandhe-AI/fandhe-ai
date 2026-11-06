@@ -1216,3 +1216,81 @@ fn lrn_nan_column_scale_ignores_values_only_in_nan_windows() {
         "{h:e} と {h_ref:e}"
     );
 }
+// --- 5. 総括判定の拒否範囲の縮小（イシュー #3955・決定記録 §77）------------------------------
+
+/// `(Σ tanh(g_k·v_k/‖v_k‖))²` の f64 の値。入力は `x = [v(groups·rest); g(groups)]`。
+fn wn_sq_tanh_f64(x: &[f64], rest: usize) -> f64 {
+    let groups = x.len() / (rest + 1);
+    let mut sum = 0.0;
+    for k in 0..groups {
+        let v = &x[k * rest..(k + 1) * rest];
+        let n = v.iter().map(|a| a * a).sum::<f64>().sqrt();
+        let g = x[groups * rest + k];
+        sum += v.iter().map(|a| (g * a / n).tanh()).sum::<f64>();
+    }
+    sum * sum
+}
+
+/// f64 の損失の Hessian（二階中央差分。刻み 1e-4 で誤差は絶対 1e-7 程度）。
+fn wn_sq_tanh_hessian_f64(x0: &[f32], rest: usize) -> Vec<Vec<f64>> {
+    let n = x0.len();
+    let h = 1e-4;
+    let f = |d: &[(usize, f64)]| {
+        let mut x: Vec<f64> = x0.iter().map(|&a| f64::from(a)).collect();
+        for &(i, s) in d {
+            x[i] += s;
+        }
+        wn_sq_tanh_f64(&x, rest)
+    };
+    let mut out = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            out[i][j] = (f(&[(i, h), (j, h)]) - f(&[(i, h), (j, -h)]) - f(&[(i, -h), (j, h)])
+                + f(&[(i, -h), (j, -h)]))
+                / (4.0 * h * h);
+        }
+    }
+    out
+}
+
+/// `(Σ tanh(weight_norm(v, g)))²`（`x = [v(2·rest); g(2)]`、`dim = 0`）。
+fn sq_tanh_loss<'t>(_tape: &'t Tape, x: &Var<'t>, rest: usize) -> Built<'t> {
+    let v = x.narrow(0, 0, 2 * rest)?.reshape(&[2, rest])?;
+    let g = x.narrow(0, 2 * rest, 2)?.reshape(&[2, 1])?;
+    let l = v.weight_norm(&g, Some(0))?.tanh().sum(None)?;
+    l.mul(&l)
+}
+
+/// 正のプローブ（#3955）: PR #3950 が拒否を避けるため入力を下げた 2 つの普通の WeightNorm
+/// （g≈0.5〜1.5・幅 3〜4・上流 約 2。Hessian 対角に値の数百倍の項が打ち消し合う要素がある）が
+/// 受理され、二階が f64 参照と REQ-2 統一複合判定で一致する。tolerance は変えない。
+#[test]
+fn weight_norm_ordinary_cancelling_hessian_is_accepted_and_matches_f64() {
+    let cases: [(&str, usize, Vec<f32>); 2] = [
+        (
+            "facade 入力（幅 3・g=[1.5, 0.9]）",
+            3,
+            vec![0.3, -0.8, 0.5, 1.0, 0.7, 0.4, 1.5, 0.9],
+        ),
+        (
+            "GPU parity 入力（幅 4・g=[0.2, 0.5]）",
+            4,
+            vec![0.4, 0.55, 0.7, 0.85, 0.9, 0.1, 0.6, 0.3, 0.2, 0.5],
+        ),
+    ];
+    for (ctx, rest, x0) in cases {
+        let n = x0.len();
+        let got = analytic_hessian(&|tape, x| sq_tanh_loss(tape, x, rest), &x0, &[n]);
+        let want = wn_sq_tanh_hessian_f64(&x0, rest);
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    common::req2_close(got[i][j], want[i][j]),
+                    "{ctx}: H[{i}][{j}] = {:e}（f64 参照 {:e}）",
+                    got[i][j],
+                    want[i][j]
+                );
+            }
+        }
+    }
+}

@@ -4572,7 +4572,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 ### 57.2 設計（§36）からの差・明確化
 
-- **総括判定の第 2 軸（相殺・f32 の underflow／overflow）の具体形**: §36.12 の「f64 の参照 `V`・各項の絶対値和 `M`・f32 で再現した `V_str`」を、`loss_class.rs`（§55.2）と同じ形で二階の各要素に掛ける。構造を積む前に、seed が 1 要素（値 1）のときの二階の各要素を 2 通りに計算する（`norm_reparam.rs` の `lrn_col_judge`・`wn_group_judge`・`sn_judge`。判定は `entry_check`）。`V`・`M` は構造の演算列を f64 の厳密な定数で評価した参照値と各項の絶対値の和（和・差は足し、積は掛け、商・平方根・累乗の分母・底には値を使い、その相殺は増幅率 `κ = M/|V|` として掛ける）。`V_str` は構造が子テープで実際に行う f32 の演算列を同じ順で再現した値で、forward の中間値、`eval/scalar.rs` の VJP 係数（Div は `1/b`・`-(a/b)/b`、Sqrt は `0.5/y`、PowScalar は `e·x^(e−1)` で `e == 0` は 0）、`grad.rs` の `cot·係数` の積、LRN のチャンクの `Mul` を逆順にたどる cotangent（スケール復元）を含む。誤差の見積り `|V_str − V| + coeff·M` が絶対 1e-5 未満か `(1e-3/2)·|V|` 以内でない要素が 1 つでもあれば型付き `Err(Backward)` で拒否する。`coeff = (len + depth + amp)·u`（`u = 2^-24`）は、二階の 1 項が通る丸めの回数を一次で数えたもので、`loss_class.rs` の `(2L + 4)·2^-23` と同じ水準である。`len` は縮約の長さと、和から作った値が同じ項に何度も現れる分の合計（LRN は `2·(nt_f + nt_r)`、WeightNorm は `n_s` が最大 5 回現れるので `5·rest`、SpectralNorm は `σ_s` が最大 4 回現れるので `6·N`）、`depth` は残りの段数（24、LRN はチャンク数の 2 倍を足す）、`amp` は累乗が底 `d` の丸めを増幅する分（LRN だけ `(2|β| + 4)·(nt_f + 4)`。Triplet の扱い〈§55.2〉と同じく係数側に足す）。f32 の forward 値・VJP 係数に `±inf` が 1 つでもあれば拒否する（逆伝播は全要素に `cot·係数` を作るので `0·inf = NaN`）。NaN の扱いは下の「NaN の到達範囲」による。計算量の上限: 走査量（f32 の再現 1 系統が回す内側ループの反復回数。f64 の参照〈`Rf`〉も同じ回数を回す）が `2^27` を超える入力は、判定へ入る前に計算量の fail-closed として拒否する（`lrn_judge_cost`・`wn_judge_cost`・`sn_judge_cost`）。LRN は列（`ncols` 本・長さ `C`）ごとに、forward の窓和 `C·(nf + nr)`（窓和の再現は範囲外も 0 として回るので `nf = bf + ff + 1`・`nr = br + fr + 1` は打ち切らない。最大 `2C − 1`）と長さ `C` の走査 `33 + 2·nchunks` 回、seed（`C` 個）ごとに `3·sx + 2·wr + wr·wf`（作業領域の初期化・`x` への戻し・判定、反転窓の走査と判定、反転窓の各位置から前方窓への蓄積〈二重走査〉）を数える。seed 側の `wf`・`wr`・`sx` は前方窓・反転窓・`x` への要素の幅で、どれも `C` に打ち切る。WeightNorm はグループごとに forward `18·rest` と seed（`rest + 1` 個）ごとに `7·rest + 1`、SpectralNorm は forward `23·N` と seed（`N` 個）ごとに `4·N`。当初は二階の出力要素数（LRN は `numel·帯幅`、WeightNorm は `groups·(rest+1)·(2·rest+1)`、SpectralNorm は `2·N²`）だけを数えており、LRN の二重走査 `wr·wf` が漏れていた（Codex P2: `shape = [1, 4096, 1]`・`size = 8191`・全ゼロ・`α = 0.5`・`β = 1`・`k = 1e10`・損失は出力の和で、旧い数え方では約 5033 万で上限内なのに、判定は合計約 1374 億回の内側加算になり `backward_create_graph` が長時間止まる）。窓への蓄積を累積和で速くすると構造の f32 の加算順を写せなくなるため、数え方を直す方を採った（上限の値は変えない。数え方が厳しくなった分、拒否は広がる）。構造を積んだ後の 1 階の値の照合（`shadow_check`。`|構造 − ホスト| + coeff·m`）も残す。tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）は `tensor-core::tolerance` から読み、値は変えない。
+- **総括判定の第 2 軸（相殺・f32 の underflow／overflow）の具体形**: §36.12 の「f64 の参照 `V`・各項の絶対値和 `M`・f32 で再現した `V_str`」を、`loss_class.rs`（§55.2）と同じ形で二階の各要素に掛ける。構造を積む前に、seed が 1 要素（値 1）のときの二階の各要素を 2 通りに計算する（`norm_reparam.rs` の `lrn_col_judge`・`wn_group_judge`・`sn_judge`。判定は `entry_check`）。`V`・`M` は構造の演算列を f64 の厳密な定数で評価した参照値と各項の絶対値の和（和・差は足し、積は掛け、商・平方根・累乗の分母・底には値を使い、その相殺は増幅率 `κ = M/|V|` として掛ける）。`V_str` は構造が子テープで実際に行う f32 の演算列を同じ順で再現した値で、forward の中間値、`eval/scalar.rs` の VJP 係数（Div は `1/b`・`-(a/b)/b`、Sqrt は `0.5/y`、PowScalar は `e·x^(e−1)` で `e == 0` は 0）、`grad.rs` の `cot·係数` の積、LRN のチャンクの `Mul` を逆順にたどる cotangent（スケール復元）を含む。誤差の見積り `|V_str − V| + coeff·M` が絶対 1e-5 未満か `(1e-3/2)·|V|` 以内でない要素が 1 つでもあれば型付き `Err(Backward)` で拒否する。`coeff = (len + depth + amp)·u`（`u = 2^-24`）は、二階の 1 項が通る丸めの回数を一次で数えたもので、`loss_class.rs` の `(2L + 4)·2^-23` と同じ水準である。`len` は縮約の長さと、和から作った値が同じ項に何度も現れる分の合計（LRN は `2·(nt_f + nt_r)`、WeightNorm は `n_s` が最大 5 回現れるので `5·rest`、SpectralNorm は `σ_s` が最大 4 回現れるので `6·N`）、`depth` は残りの段数（24、LRN はチャンク数の 2 倍を足す）、`amp` は累乗が底 `d` の丸めを増幅する分（LRN だけ `(2|β| + 4)·(nt_f + 4)`。Triplet の扱い〈§55.2〉と同じく係数側に足す）。f32 の forward 値・VJP 係数に `±inf` が 1 つでもあれば拒否する（逆伝播は全要素に `cot·係数` を作るので `0·inf = NaN`）。NaN の扱いは下の「NaN の到達範囲」による。計算量の上限: 走査量（f32 の再現 1 系統が回す内側ループの反復回数。f64 の参照〈`Rf`〉も同じ回数を回す）が `2^27` を超える入力は、判定へ入る前に計算量の fail-closed として拒否する（`lrn_judge_cost`・`wn_judge_cost`・`sn_judge_cost`）。LRN は列（`ncols` 本・長さ `C`）ごとに、forward の窓和 `C·(nf + nr)`（窓和の再現は範囲外も 0 として回るので `nf = bf + ff + 1`・`nr = br + fr + 1` は打ち切らない。最大 `2C − 1`）と長さ `C` の走査 `33 + 2·nchunks` 回、seed（`C` 個）ごとに `3·sx + 2·wr + wr·wf`（作業領域の初期化・`x` への戻し・判定、反転窓の走査と判定、反転窓の各位置から前方窓への蓄積〈二重走査〉）を数える。seed 側の `wf`・`wr`・`sx` は前方窓・反転窓・`x` への要素の幅で、どれも `C` に打ち切る。WeightNorm はグループごとに forward `18·rest` と seed（`rest + 1` 個）ごとに `7·rest + 1`、SpectralNorm は forward `23·N` と seed（`N` 個）ごとに `4·N`。当初は二階の出力要素数（LRN は `numel·帯幅`、WeightNorm は `groups·(rest+1)·(2·rest+1)`、SpectralNorm は `2·N²`）だけを数えており、LRN の二重走査 `wr·wf` が漏れていた（Codex P2: `shape = [1, 4096, 1]`・`size = 8191`・全ゼロ・`α = 0.5`・`β = 1`・`k = 1e10`・損失は出力の和で、旧い数え方では約 5033 万で上限内なのに、判定は合計約 1374 億回の内側加算になり `backward_create_graph` が長時間止まる）。窓への蓄積を累積和で速くすると構造の f32 の加算順を写せなくなるため、数え方を直す方を採った（上限の値は変えない。数え方が厳しくなった分、拒否は広がる）。構造を積んだ後の 1 階の値の照合（`shadow_check`。`|構造 − ホスト| + coeff·m`）も残す。tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）は `tensor-core::tolerance` から読み、値は変えない。 WeightNorm の幅の小さいグループの判定は §78 で丸めの一次伝播へ置き換えた（拒否範囲の変化は §78 を参照）。
 - **第 2 軸を二階の要素へ寄せた経緯（PR #3950 のレビュー）**: 当初は構造の forward 値（1 階）による代理検査だけで、Codex の指摘が続いた（LRN の PowScalar 係数の f32 overflow、Div 係数の overflow〈`0·inf`〉と中間商 `g/n_s` の underflow、up = 0 で見えない `1 − v̂²`・LRN 対角・`I − ŴP`・σ_s の相殺、LRN のスケール復元の cotangent の underflow〈`x = 2^-80`・`α = 1e36`・`β = −1`・`k = 0`・size 1 で `2^-60·2^-100 = 2^-160` が f32 で 0、解析値 `6αx ≈ 4.96e12`〉）。経路ごとの個別検査（`div_partials_check`・`coef_cancel_check`・`1 − v̂²` の検査・σ_s の相対誤差の検査・PowScalar 係数の検査）を足すのをやめ、上の 1 つの判定へ置き換えた。指摘の入力はすべて回帰テストで拒否され、判定を外すとそれらが受理されてしまうことを確かめた。スケール復元の cotangent `s^{-2β}` は真の偏微分そのものなので、スケールの置き方を変えても f32 で表せない列は表せない。このため構造の組み替えではなく、判定で拒否する。
 - **検出範囲（契約）**: LRN は列ごとに `x`・`up` への全要素（帯の内側）と `α = 0` の縮退分岐の `up` への対角。WeightNorm はグループごとに `dv` の各 seed と `dg` の seed からの `v`・`up`・`g` への全要素。SpectralNorm は `dW` の各 seed からの `W`・`up` への全要素。f32 の中間値として再現するもの: forward のスケール `x/s`・2 乗・窓和・`ρ` 倍と `kk` の加算・`d^{-β}`・`d^{-β-1}`・`up·x_s·b`・`Σv_s²`・`√`・`v̂`・`Σup⊙v̂`・`g/n_s`・`/s`・`σ_s`・`Ŵ`・`Σup⊙Ŵ`・`t`。逆伝播の VJP 係数・cotangent の積・チャンクの逆順の積も再現する。構造が f32 の値から決める離散量（符号・マスク・分岐）は無い。スケール指数・窓・グループ分け・PowScalar の `e == 0` の扱いはホストの V2 定数か構造の f32 定数で決まり、`V_str` もそれを共有して正しい。`up` が追跡されない場合も `up` への要素を判定に含める（保守的）。NaN を含む列・グループ（WeightNorm は `g` が NaN のグループも）は判定から外し、NaN を伝播させる。f32 の再現は CPU の逐次の演算順で行う。和の順序の違いは `coeff` の長さの項が覆う。
 - 判定の前提（`V_str` が子テープの実際の二階を写すこと）は単体テスト `{lrn,weight_norm,spectral_norm}_emulation_reproduces_child_tape_second_order` で固定する。これらは子テープの `backward` で求めた Hessian の行（`x`／`v`／`W` に加え `up` と WeightNorm の `g` への要素。`up` は損失の重みを追跡して読む）が、f32 の再現値から `coeff·M` 以内にあることを確かめる（LRN は size 1〜5・β ∈ {0.75, 2, −1}、WeightNorm は `dv` と `dg` の両方の seed）。
@@ -5599,3 +5599,50 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 ### 77.6 変えていないもの
 
 - tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・1 階の VJP・forward・依存・`docs/spec`・公開 API。
+
+## 78. 実装記録（イシュー #3955・親 #3719 系。create_graph の総括判定の補助関数の共通化と WeightNorm の拒否範囲の縮小）
+
+### 78.0 位置づけ
+
+- 状態: 実装済み（Tier A・Tier B）。起票は 2026-11-02 の所有者承認（#3955 本文）。#3767 で承認済みの B 区分の方針の範囲内で、tolerance・baseline・`STAGE_BOUND_GUARD`・依存・公開 API は変えない。新たな承認は上乗せして主張しない。
+
+### 78.1 Tier A: 補助関数の共通化（挙動不変）
+
+- 新規 `crates/autodiff/src/create_graph/judge.rs` に、`loss_class.rs`・`loss_regression.rs`・`loss_binary_margin.rs`・`norm_reparam.rs` で複製されていた次を集約した。`stage`・`upstream_abs`／`upstream_scale`／`upstream_scale32`・`check_g_cotangent`・`dense`・`reject_inf`・`rounding_coeff`・`struct_check`。
+- エラー文面は族ごとの `invalid`（族名と節番号つき）なので、共通関数は `reject: fn(&str) -> AutodiffError` を引数に取る。各モジュールには同名の薄いラッパーを残し、呼び出し箇所とメッセージは byte 同一。
+- NaN の扱いが 2 系統ある事実は統合せず並置した。loss 系（`stage`・`struct_check`）は NaN レーンを素通しし、norm 系（`stage_strict_ok`・`struct_check_unscaled`）は段検査の NaN を拒否し、`m` が NaN の有限要素も拒否する。
+- 対象外（形が異なるため触っていない）: `linalg_fft.rs` の `stage_ok`／`rounding_ok`（bool 返し）、`create_graph_norm.rs::stage`、`scatter_reduce_prod.rs::stage_bounds`。
+
+### 78.2 Tier B: WeightNorm の見積りを丸めの一次伝播へ置き換える
+
+- 原因: 従来の見積り `(|V_str − V| + coeff·M)` は、`coeff` が全演算の丸めを一次で数えた係数で、`M` が各項の絶対値和である。同じ中間値（`n_s` 等）を複数の項が共有し、共有した丸めの誤差が項の間で打ち消し合う式（Hessian 対角に値の数百倍の項が相殺する要素）でも、各項の丸めを独立に足すため過剰に拒否した。PR #3950 は facade／GPU parity のテスト入力を下げて回避していた。
+- 実測（Step 0）: facade 入力の拒否は `entry_check`（二階の総括判定）由来で、値 1.017e-2 の要素に対し、演算ごとに独立な誤差として足す running error bound（丸め単位 `u`）では 1.15e-5 と見積もられ、閾値（絶対 1e-5、相対は `5.09e-6`）を超えた。丸めの事象ごとの一次式で追うと 4.26e-6 で収まった。
+- 実装: `norm_reparam.rs` に数値型 `Lin` を追加した。値は f64 の参照値と、誤差の一次式 `Σ cₖ·δₖ`（`δₖ` は k 番目の丸め事象。`|δₖ| ≤ μₖ`）で、上界は `Σ|cₖ|·μₖ`。各演算の結果ごとに新しい事象 `μ = u·|r| + 2^-150`（`u = 2^-24`）を足す。定数は f32 へ丸めた誤差を厳密に計算した事象（f32 で厳密な値は事象なし）。多項の和（`Num::total`。`ss`・`dg`・逆伝播の蓄積）は、実カーネルの和の順序に依らないよう各項の一次式を足したうえで `γ_{n−1}·Σ|vᵢ|` を 1 つの独立な事象にする。`wn_fwd`／`wn_rev` の縮約はこの `total` 経由に変えた（`f32` の再現は先頭から逐次で従来と同じ丸め）。判定は `|V_str − V| + 一次の上界·(1 + 16·N·u)` を従来と同じ閾値で比べる（`N` は事象の総数。`16·N·u ≥ 0.01` は拒否）。
+- 適用範囲: WeightNorm のグループの幅が 8 以下で、`groups × 6000·rest²`（実測で幅 8 が約 4e5 反復相当）が `2^26` 以内のテンソルに限る（テンソル単位で選ぶ）。幅が広い、またはグループが多いテンソルは従来の `Rf` と `coeff·M` のまま（拒否範囲は従来と同じ。走査量の上限 `JUDGE_BUDGET` は変えていない）。LRN・SpectralNorm・`shadow_check`（構造を積んだ後の 1 階の照合）は変えていない。
+- 仮定: 除算・平方根を含め IEEE 754 の正しい丸めを仮定する（CPU・CUDA の既定と、Metal の `MathMode::Safe` + `Precise` の想定）。丸めを 2 倍にすると上の入力は `5.84e-6` で拒否に戻る。GPU 実機は未実測。
+- 二次項: 一次近似の二次項は事象数に比例する余裕係数で覆う。厳密な証明ではなく、soundness テストで実測と突き合わせている。
+
+### 78.3 拒否範囲の変化
+
+- 受理に変わる: PR #3950 が下げた 2 入力（facade の `z = [0.3, -0.8, 0.5, 1.0, 0.7, 0.4, 1.5, 0.9]`、GPU parity の `g.mul(&g)` を外した形）。CPU で二階が f64 参照と REQ-2 で一致する。
+- 拒否のまま: 既存の拒否プローブ（`*_is_rejected*` 群）は無変更で通る。相殺が実際に大きい入力は `|V_str − V|` の項が見えるため拒否される。
+- 変えていない: LRN・SpectralNorm の拒否範囲、幅が 8 を超える・グループが多い WeightNorm、`JUDGE_BUDGET`、`STAGE_BOUND_GUARD`。
+
+### 78.4 保証範囲
+
+- 保証は判定を通った入力に限る（§55.2・§57.2 と同じ書き方）。拒否は保守的で、許容内の入力も拒否しうる。対象外は §57.2 と同じ（1 要素でない seed の縮約、三階以上、GPU の演算順・実装差）。
+
+### 78.5 テスト
+
+- `crates/autodiff/tests/create_graph_norm_reparam.rs::weight_norm_ordinary_cancelling_hessian_is_accepted_and_matches_f64`: 上の 2 入力が受理され、二階が f64 の二階中央差分参照と REQ-2 で一致する。
+- `norm_reparam.rs` の `lin_bound_covers_f32_deviation_for_weight_norm_sweep`: 乱数・スケール（振幅 1e-3〜1e3）・幅 2〜8 の掃引で、f32 の再現と和の順序を変えた再現の実測の誤差が上界を超えないこと、上界が桁違いに緩くないことを確かめる。
+- 変異確認（実測）: `Lin::bound` を 0 にすると soundness テストが失敗する。既存の拒否プローブは `|V_str − V|` の項で拒否されるため変わらず通る（上界を 0 にしても失敗しない）。
+- facade の `weight_norm_create_graph_via_facade`・GPU parity の `run_norm_reparam_weight_norm` は入力を元に戻した（GPU 比較は `#[ignore]` のまま）。
+
+### 78.6 未着手（後続候補）
+
+- `loss_class` の行系の見積り、`JUDGE_BUDGET`（2^27）の見直し、SpectralNorm の `shadow_check` の `rounding_coeff(N+4)`、幅 8 超の WeightNorm への適用（係数列の疎化が前提）。Issue は未起票（起票は所有者承認後）。
+
+### 78.7 変えていないもの
+
+- tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`docs/spec`・公開 API。GPU 実機 parity は未実測。
