@@ -38,8 +38,7 @@
 
 use fandhe_ai_tensor_core::{KlDivTarget, Tensor};
 
-use super::{child_value, push_v3};
-use crate::create_graph_norm::STAGE_BOUND_GUARD;
+use super::{child_value, judge, push_v3};
 use crate::error::AutodiffError;
 use crate::tape::{NodeId, Tape, TapeNode, materialize_fallible};
 use crate::var::{Reduction, Var};
@@ -53,13 +52,7 @@ fn invalid(msg: &str) -> AutodiffError {
 /// 1 段の上界 `v`（f64）を検査する。NaN のレーンは伝播させるため素通し、非有限または
 /// `STAGE_BOUND_GUARD` 以上は拒否する。
 fn stage(v: f64) -> Result<(), AutodiffError> {
-    if v.is_nan() {
-        return Ok(());
-    }
-    if !v.is_finite() || v.abs() >= STAGE_BOUND_GUARD {
-        return Err(invalid("構造の中間値が f32 範囲を超えうる入力のため拒否"));
-    }
-    Ok(())
+    judge::stage(v, invalid)
 }
 
 /// 上流 `g`（スカラ）の値と、reduction 後の scale 上界 `|g|/n`（Mean）／`|g|`（Sum）を返す。
@@ -68,43 +61,20 @@ fn upstream_scale(
     reduction: Reduction,
     n: usize,
 ) -> Result<f64, AutodiffError> {
-    let data = crate::eval::dense_vec(g_value);
-    let Some(&gv) = data.first() else {
-        return Err(invalid("上流勾配が空"));
-    };
-    if data.len() != 1 || !gv.is_finite() {
-        return Err(invalid("上流勾配が非有限（または非スカラ）のため拒否"));
-    }
-    let gv = f64::from(gv).abs();
-    stage(gv)?;
-    Ok(match reduction {
-        Reduction::Mean => gv / n as f64,
-        Reduction::Sum => gv,
-    })
+    judge::upstream_scale(g_value, reduction, n, invalid)
 }
 
 /// `g` への cotangent 上界（要素寄与の絶対値和 × 要素あたりの係数 `1/n`／`1`）を検査する。
 fn check_g_cotangent(sum_abs: f64, reduction: Reduction, n: usize) -> Result<(), AutodiffError> {
-    let v = match reduction {
-        Reduction::Mean => sum_abs / n as f64,
-        Reduction::Sum => sum_abs,
-    };
-    stage(v)
+    judge::check_g_cotangent(sum_abs, reduction, n, invalid)
 }
 
 fn dense(parent: &Tape, parent_nodes: &[TapeNode], id: NodeId) -> Result<Vec<f32>, AutodiffError> {
-    Ok(crate::eval::dense_vec(materialize_fallible(
-        parent_nodes,
-        parent.ops(),
-        id,
-    )?))
+    judge::dense(parent, parent_nodes, id)
 }
 
 fn reject_inf(values: &[&[f32]]) -> Result<(), AutodiffError> {
-    if values.iter().any(|v| v.iter().any(|x| x.is_infinite())) {
-        return Err(invalid("入力に ±inf を含むため拒否"));
-    }
-    Ok(())
+    judge::reject_inf(values, invalid)
 }
 
 fn zeros_like<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
