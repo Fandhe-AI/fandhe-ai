@@ -68,6 +68,10 @@
 - VJP: `d_x[j] = Σ_{i>=j} g[i]·exp(x[j] - out[i])` を O(n) の逆向き再帰で計算する
   （`T[n-1] = g[n-1]`・`T[j] = g[j] + exp(out[j] - out[j+1])·T[j+1]`・`d_x[j] = exp(x[j] - out[j])·T[j]`）。
   `out` は forward と同じ `log_add_exp` で `f64` のまま lane 内で再計算する（`f32` へ丸めた記録値は使わない）。
+  **（#3965 で変更）** 有限入力の lane は `out` を経由せず、入力どうしの差（prefix 最大値 `m`・正規化和 `Z`）から
+  係数 `c[j] = lead[j+1]/Z[j+1]`・`w[j] = exp(x[j]-m[j])/Z[j]` を作る。大きな共通オフセット（`[1e30,1e30]`）で
+  `out` の差が f64 でも消えて勾配が誤る問題の修正。非有限を含む lane は従来式のまま。詳細は
+  `autodiff-higher-order-grad-decision.md` §78。
   `out` は単調非減少で `x[j] <= out[j]` のため指数の引数は常に 0 以下で overflow しない。O(n²) の直接形は
   テスト用オラクル限定。作業バッファは lane 長の `Vec<f64>` 1 本のみ。
 

@@ -688,3 +688,35 @@ fn results_are_bit_deterministic_run_to_run() {
         assert_eq!(a.index, b.index, "{}", case.name);
     }
 }
+
+/// イシュー #3965: 大きな共通オフセットの入力でも素の `Tape::backward` の 1 階が正しい
+/// （`out` の f64 prefix の差から係数を作ると `x + ln 2 == x` で係数が 1 に潰れていた）。
+/// 期待値は共通オフセットを引いた等価な小さい入力の解析値（`[0,0]` なら p=1/2）。
+#[test]
+fn logcumsumexp_first_order_resists_common_offset() {
+    let run = |x: Vec<f32>, shape: &[usize], dim: usize, g: Vec<f32>| {
+        run_case(common::naive_ops(), "logcumsumexp", x, shape, dim, g).grad
+    };
+    assert_eq!(
+        run(vec![1e30, 1e30], &[2], 0, vec![0.0, 1.0]),
+        vec![0.5, 0.5]
+    );
+    assert_eq!(
+        run(vec![1e30, 1e30], &[2], 0, vec![1.0, 1.0]),
+        vec![1.5, 0.5]
+    );
+    // 長さ 3 の共通オフセット: d_x[j] = Σ_{k>=j} g[k]/(k+1)。
+    let d = run(vec![3e20; 3], &[3], 0, vec![1.0, 1.0, 1.0]);
+    let want = [1.0 + 0.5 + 1.0 / 3.0, 0.5 + 1.0 / 3.0, 1.0 / 3.0];
+    for (a, e) in d.iter().zip(want) {
+        assert!((f64::from(*a) - e).abs() < 1e-6, "{a} vs {e}");
+    }
+    // dim が先頭の rank 2（2 本の lane をそれぞれ独立に解く）。
+    let d = run(
+        vec![1e30, 2.0, 1e30, 2.0],
+        &[2, 2],
+        0,
+        vec![0.0, 0.0, 1.0, 1.0],
+    );
+    assert_eq!(d, vec![0.5, 0.5, 0.5, 0.5]);
+}
