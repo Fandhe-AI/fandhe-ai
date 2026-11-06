@@ -6515,3 +6515,46 @@ f64 の参照は閉じた式（判定の `v` は使わない）:
 - `cumulative_b.rs` の「ヘルパーは共有しない」コメントは、計算量の上限については撤回した。第 2 軸の判定（`entry_check`・`host_ref_check` など）は族ごとに持つまま。
 - #4087 への申し送り: 値を見直すときは `judge.rs` の定義 1 か所と、コンパイル時検査・エラー文の `2^27` を直せばよい。
 - 変えていないもの: 判定、`JUDGE_BUDGET` の値、`LIN_BUDGET`、走査量の式、拒否範囲（既存の拒否プローブと正のプローブは同じ結果）、tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline、`STAGE_BOUND_GUARD`、依存、公開 API、`docs/spec`。GPU 実機 parity は未実測のまま。
+
+### 83.3 #4087: JUDGE_BUDGET の値の判断（2^27 に据え置き）
+
+- 位置づけ: 判断の記録。`JUDGE_BUDGET = 2^27`・走査量の数え方（f32 再現 1 系統の内側ループの反復回数）・判定・拒否範囲・エラー文は変えていない。コードの差分は `judge.rs` のコメントだけ。承認は #4072 の起票に書かれた範囲だけで、本節は上乗せしていない。
+- 判断: 値 `2^27` と反復回数で数える方式を据え置く。実測が値の変更を支えないため、実測の無い変更はしない。
+
+#### 根拠
+
+1. 最悪時間を縛っているのは SpectralNorm（`Rf`）だけである。上限ぎりぎりの全走査は、SpectralNorm（`Rf`・76×76）が 3.1〜3.4 s、それ以外の族は 0.5 s 未満（§83.1 表 1）。上げればこの最悪時間はさらに伸びる（向きのみ。上げた値での時間は測っていないので数値は書かない）。
+2. 1 つの定数では時間を均一に縛れない。1 反復あたりの時間は族で最大約 57 倍（SpectralNorm〈`Rf`〉を除くと約 6.4 倍）違う。反復回数に掛かる 1 つの値を動かしても族ごとの偏りは解消しない。族ごとの上限や時間で重み付けした数え方は別の設計になり、本イシューの範囲外とする。
+3. 上げても受理は増えない見込みが高い。§83.1 表 1 の上限ぎりぎりの入力で、本番の判定は SpectralNorm（`Rf`）が拒否、WeightNorm（`Rf`・1 グループ・rest=4376）が 0/1 受理だった。つまり走査量とは別の判定（`sn_judge` の拒否など）で落ちている。§81.2 で走査量により拒否された SpectralNorm の `[64,96]`（N=6144）も、同じ範囲では `sn_judge`・`shadow_check` の両方が拒否している。現在のコードで上限を上げた場合の受理数は再測定していない（見込みであり実測ではない）。
+4. 下げると拒否範囲が広がる。SpectralNorm 以外の族は 0.5 s 未満で、下げる理由になる実測も無い。
+5. 元の問題（WeightNorm が厳しい）は別の経路で和らいでいる。#4082（§80.5）で、WeightNorm の `Lin` は幅 128 まで別の予算 `LIN_BUDGET` の範囲で使われる。`Lin` 経路の全走査は 0.08〜0.46 s（§83.1 表 2）。#4082（PR #4110）は #4085（PR #4112）より前にマージ済みなので、表 2 が「#4074 の後の `Lin` 経路の再計測」にあたる。
+6. 数え方は反復回数のまま。§83.1 の族をまたいだ比較で、時間は要素数より反復回数の方とよく並んだ。
+7. ゲートの順序（`norm_reparam.rs`）: WeightNorm は `wn_use_lin` の後に `judge_budget(wn_judge_cost(..))`、SpectralNorm は `judge_budget(sn_judge_cost(..))` の後に `sn_use_lin`。つまり `JUDGE_BUDGET` は `Lin` を選ぶ入力にも `Rf` の式で掛かる。ただし `Lin` を選ぶ範囲の `Rf` 換算は上限より十分小さい（WeightNorm の `Lin` 行は `Rf` 換算で 2^27 の 0.008〜0.019 倍、SpectralNorm は N ≤ 472 で `sn_judge_cost` が約 9.0e5）ので、`Lin` を選ぶ入力が `JUDGE_BUDGET` で落ちることはない。
+
+#### 再実測（現在の HEAD）
+
+- 再実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture --test-threads=1 judge_budget_timing`（4 本とも ok）。§83.1 と同じ機種・設定（i7-13700K・Linux 7.0.0-34-generic・rustc 1.98.1・`--release`・1 スレッド・5 回中央値。計測日 2026-11-06）。
+- 結果: §83.1 の表と大半が 1% 以内で一致。差があった行は SpectralNorm（`Rf`）の 3074 ms（§83.1 は 3366 ms、共有機の負荷差と推定）、LRN (b) の 142.7 ms（同 134 ms）、WeightNorm（`Lin`）rest=8 の `Rf` 側 4.08 ns（同 4.00 ns）。結論は変わらない。
+- 未再測: SpectralNorm の `[64,96]` 行の公開経路の結果（本節では測っていない。§81.2 の記録を引くのみ）。
+
+#### 検討して採らなかった代替案
+
+- (a) 2^28 などへ上げる: SpectralNorm（`Rf`）の最悪時間が伸び、受理は増えない見込み。新しい値で実測していない。
+- (b) 下げる: 拒否範囲が広がる。
+- (c) 族ごとの上限、時間で重み付けした数え方: 別の設計になり範囲外。
+
+#### 値を変える場合の影響範囲（参考）
+
+`judge.rs` の定数・コンパイル時検査・エラー文の `2^27`、`cumulative_b.rs` の境界テスト（1 lane の長さ 1652／1653 と `assert_eq!(n_single, 1652)`）、`scatter_reduce_prod.rs` の境界（m=1080）、`norm_reparam.rs` の拒否プローブ（`wn_judge_cost(1, 4400)`・`sn_judge_cost(6000)`）と境界（rest=4376・side=76）、§64.2 の拒否範囲の契約、§81.2 の「約 5.79k 要素を超えると拒否」、`docs/README.md` の記述。
+
+#### 拒否範囲・境界テスト
+
+- 拒否範囲は変わらない。既存の拒否プローブと正のプローブの結果も同じ。
+- 境界テスト（`judge_budget(JUDGE_BUDGET)` が通り `JUDGE_BUDGET + 1` が拒否。Cumprod・Logcumsumexp の 1 lane 長さ 1652／1653 を含む）は変更なしで通る。
+
+#### GPU・スコープ外・未測定・変えていないもの
+
+- GPU 実機は未実測（CPU の値で代替しない）。
+- 未測定: 他の CPU・OS、上げた値での時間。
+- 後続の候補（未起票。起票は所有者の承認後）: 族ごとの上限、時間で重み付けした数え方、SpectralNorm（`Rf`）の 1 反復あたりの時間（約 23〜25 ns）の削減。
+- 変えていないもの: `JUDGE_BUDGET`、`LIN_BUDGET`、走査量の式、判定、tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline、`STAGE_BOUND_GUARD`、依存、公開 API、`docs/spec`。
