@@ -5,8 +5,9 @@
 //! REQ-2 の統一複合判定を外れうる入力を拒否する検査）で、f32 の構造と f64 の参照を同じ式で評価するための型。
 //! `Lin` は丸めの事象ごとに誤差の一次式を持ち、同じ中間値を共有する式の誤差の打ち消しを上界へ畳む。
 //!
-//! 呼び出し元: 現状は `norm_reparam.rs` の WeightNorm の総括判定（`wn_group_judge`）と、同ファイルの
-//! `T: Num` 総称関数群。SpectralNorm・LRN（#4073）や損失のクラス軸系（#4071）が流用する予定のため、
+//! 呼び出し元: `norm_reparam.rs` の WeightNorm の総括判定（`wn_group_judge`）と SpectralNorm の総括判定
+//! （`sn_judge`。#4080。全要素に依存する値の係数列は [`Num::settle`] で束ねる）、同ファイルの
+//! `T: Num` 総称関数群。LRN（#4073）や損失のクラス軸系（#4071）が流用する予定のため、
 //! norm 専用ではない共通モジュールとして切り出した（挙動不変の移動）。norm 専用の `Rf`・`Dm` は
 //! `norm_reparam.rs` に残す。
 //!
@@ -37,6 +38,12 @@ pub(super) trait Num: Copy {
     /// と同じ丸め）。実行側のカーネルは和の順序が異なりうるため、[`Lin`] だけは順序に依らない上界で上書きする。
     fn total(terms: &[Self]) -> Self {
         terms.iter().fold(Self::k(0.0), |a, &x| a.plus(x))
+    }
+    /// 係数列を束ねる（[`Lin`] だけが実装する。他の型は恒等）。`anchors` の係数列に現れる事象（共有するスカラー値の
+    /// 誤差）は厳密に残し、それ以外の項を `Σ|cₖ|·μₖ` を大きさとする独立な事象 1 つへまとめる。三角不等式で上界は
+    /// 広がる側にしか動かないので健全で、係数列の長さが全要素に依存して O(N) になるのを抑える（#4080）。
+    fn settle(self, _anchors: &[Self]) -> Self {
+        self
     }
     /// `PowScalar` の forward `x^e`（構造は `e as f32` を使う）。
     fn powe(self, e: f64) -> Self;
@@ -117,11 +124,11 @@ impl Num for f32 {
 ///   （[`entry_check_lin`]）。
 ///
 /// 係数の列は thread-local の領域（[`LIN_ARENA`]）に置き、`Lin` 自体は `Copy` にする。事象の数に比例する
-/// 長さの列を値ごとに持つので、グループの幅が [`LIN_REST_MAX`] 以下のときだけ使う（`norm_reparam.rs` の `wn_group_judge`）。
+/// 長さの列を値ごとに持つので、WeightNorm はグループの幅が [`LIN_REST_MAX`] 以下のときだけ、SpectralNorm は `sn_use_lin` の条件内（係数列を束ねて走査量を `O(N²)` に抑える）のときだけ使う。
 /// `PowScalar`（`powe`・`pow_grad`）は WeightNorm が使わないので、上界を持たない NaN の値にする（常に拒否）。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Lin {
-    v: f64,
+    pub(super) v: f64,
     id: usize,
     t: bool,
 }
@@ -140,7 +147,7 @@ thread_local! {
 }
 
 /// f32 の丸め単位 `u = 2^-24`。
-const LIN_U: f64 = 1.0 / 16_777_216.0;
+pub(super) const LIN_U: f64 = 1.0 / 16_777_216.0;
 /// 非正規数の領域の絶対丸め誤差の上界 `2^-150`。
 const LIN_TINY: f64 = 7.006_492_321_624_085e-46;
 /// [`Lin`] を使うグループの幅の上限（事象の数が幅に比例して増え、係数の列が長くなるため）。
@@ -210,7 +217,7 @@ pub(super) fn lin_truncate(mark: (usize, usize)) {
 }
 
 /// 事象の総数（二次項の余裕係数の入力）。
-fn lin_events() -> usize {
+pub(super) fn lin_events() -> usize {
     LIN_ARENA.with(|a| a.borrow().mus.len())
 }
 
@@ -274,7 +281,7 @@ impl Lin {
     }
 
     /// 誤差の絶対値の一次の上界 `Σ|cₖ|·μₖ`。
-    fn bound(self) -> f64 {
+    pub(super) fn bound(self) -> f64 {
         LIN_ARENA.with(|a| {
             let a = a.borrow();
             a.terms[self.id]
@@ -285,7 +292,7 @@ impl Lin {
     }
 
     /// 入力の NaN が届いた NaN（taint 付きの NaN）。
-    fn input_nan(self) -> bool {
+    pub(super) fn input_nan(self) -> bool {
         self.v.is_nan() && self.t
     }
 
@@ -358,9 +365,22 @@ impl Num for Lin {
         let v: f64 = terms.iter().map(|x| x.v).sum();
         let t = terms.iter().any(|x| x.t);
         let n = terms.len();
-        let mut acc = LinTerms::new();
-        for x in terms {
-            acc = LIN_ARENA.with(|a| lin_comb(&acc, 1.0, &a.borrow().terms[x.id], 1.0));
+        // 各項の一次式を足す。全項の（事象, 係数）を事象の番号で安定に並べて同じ番号を項の順に足す
+        // （逐次の併合と同じ加算順。項数に対し O(L log L)）。
+        let mut all: Vec<(u32, f64)> = LIN_ARENA.with(|a| {
+            let a = a.borrow();
+            terms
+                .iter()
+                .flat_map(|x| a.terms[x.id].iter().copied())
+                .collect()
+        });
+        all.sort_by_key(|&(k, _)| k);
+        let mut acc = LinTerms::with_capacity(all.len());
+        for (k, c) in all {
+            match acc.last_mut() {
+                Some((lk, lc)) if *lk == k => *lc += c,
+                _ => acc.push((k, c)),
+            }
         }
         let abs: f64 = terms.iter().map(|x| x.v.abs()).sum();
         let k = n.saturating_sub(1) as f64 * LIN_U;
@@ -372,6 +392,38 @@ impl Num for Lin {
         });
         acc.push((ev, 1.0));
         Lin::make(v, acc, t)
+    }
+    fn settle(self, anchors: &[Self]) -> Self {
+        let (kept, mu) = LIN_ARENA.with(|a| {
+            let a = a.borrow();
+            let mut keep: Vec<u32> = anchors
+                .iter()
+                .flat_map(|x| a.terms[x.id].iter().map(|&(k, _)| k))
+                .collect();
+            keep.sort_unstable();
+            keep.dedup();
+            let mut kept = LinTerms::new();
+            let mut mu = 0.0f64;
+            for &(k, c) in &a.terms[self.id] {
+                if keep.binary_search(&k).is_ok() {
+                    kept.push((k, c));
+                } else {
+                    mu += c.abs() * a.mus[k as usize];
+                }
+            }
+            (kept, mu)
+        });
+        if mu == 0.0 {
+            return Lin::make(self.v, kept, self.t);
+        }
+        let ev = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            a.mus.push(mu);
+            (a.mus.len() - 1) as u32
+        });
+        let mut kept = kept;
+        kept.push((ev, 1.0));
+        Lin::make(self.v, kept, self.t)
     }
     fn no_inf(self) -> bool {
         !self.v.is_infinite()
@@ -423,7 +475,9 @@ pub(super) fn entry_check_lin(
 
 #[cfg(test)]
 mod tests {
-    use super::super::norm_reparam::{WnSeed, pow2, wn_coeff, wn_fwd, wn_group_judge, wn_rev};
+    use super::super::norm_reparam::{
+        WnSeed, pow2, sn_fwd, sn_rev, wn_coeff, wn_fwd, wn_group_judge, wn_rev,
+    };
     use super::*;
     use crate::create_graph_norm::pow2_ceil_exponent;
 
@@ -553,6 +607,136 @@ mod tests {
         assert!(checked > 1000, "検査した要素数 {checked}");
         // 上界が緩すぎて自明に成り立っているだけでないこと（実測の誤差が上界の 1 割を超える要素がある）。
         assert!(tight > 0, "上界が実測より桁違いに大きい");
+    }
+
+    /// SpectralNorm 版の soundness（#4080）: 乱数・スケール・`σ_s` の相殺の強さ（`W` を `P` 方向へ寄せる α）を振り、
+    /// [`Lin`]（`σ_s`・`sp`・`σ_s` への cotangent の係数列を [`Num::settle`] で束ねる）の一次の上界が、f32 の再現と
+    /// 縮約の順序を変えた再現の実測の誤差 `|V_str − V|` を seed 全部・全要素で上から押さえる（二階の `W`・`up`
+    /// への要素）。
+    #[test]
+    fn lin_bound_covers_f32_deviation_for_spectral_norm_sweep() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f64) / f64::from(1u32 << 31)
+        };
+        let (mut checked, mut tight) = (0usize, 0usize);
+        for case in 0..240 {
+            let (rows, cols) = [(2, 3), (3, 3), (4, 4), (2, 8), (5, 6), (6, 6), (9, 9)][case % 7];
+            let n = rows * cols;
+            let amp = [1e-3, 1.0, 1e3][case % 3];
+            let alpha = [0.0, 2.0][(case / 3) % 2];
+            let up_scale = [1.0, 1e3][(case / 6) % 2];
+            let unit = |len: usize, next: &mut dyn FnMut() -> f64| -> Vec<f32> {
+                let raw: Vec<f64> = (0..len).map(|_| next() * 2.0 - 1.0).collect();
+                let norm = raw.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-9);
+                raw.iter().map(|x| (x / norm) as f32).collect()
+            };
+            let (u, v) = (unit(rows, &mut next), unit(cols, &mut next));
+            let p: Vec<f64> = (0..n)
+                .map(|k| f64::from(u[k / cols]) * f64::from(v[k % cols]))
+                .collect();
+            let w: Vec<f32> = (0..n)
+                .map(|k| (amp * ((next() * 2.0 - 1.0) + alpha * p[k] * n as f64 * 0.5)) as f32)
+                .collect();
+            let up: Vec<f32> = (0..n)
+                .map(|_| (up_scale * (next() * 2.0 - 1.0) * 3.0) as f32)
+                .collect();
+            let mx = w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            if mx == 0.0 {
+                continue;
+            }
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            lin_reset();
+            let (Some(fl), Some(fs), Some(fa)) = (
+                sn_fwd::<Lin>(&w, &p, &up, s),
+                sn_fwd::<f32>(&w, &p, &up, s),
+                sn_fwd::<F32Rev>(&w, &p, &up, s),
+            ) else {
+                continue;
+            };
+            let mark = lin_mark();
+            for j in 0..n {
+                lin_truncate(mark);
+                let (mut hw_l, mut hu_l) = (vec![Lin::k(0.0); n], vec![Lin::k(0.0); n]);
+                let (mut hw_s, mut hu_s) = (vec![0f32; n], vec![0f32; n]);
+                let (mut hw_a, mut hu_a) = (vec![F32Rev(0.0); n], vec![F32Rev(0.0); n]);
+                sn_rev(&fl, j, &mut hw_l, &mut hu_l);
+                sn_rev(&fs, j, &mut hw_s, &mut hu_s);
+                sn_rev(&fa, j, &mut hw_a, &mut hu_a);
+                let slack = 1.0 + 16.0 * lin_events() as f64 * LIN_U;
+                for i in 0..n {
+                    for (l, f, a) in [(hw_l[i], hw_s[i], hw_a[i].0), (hu_l[i], hu_s[i], hu_a[i].0)]
+                    {
+                        if !l.v.is_finite() || !f.is_finite() || !a.is_finite() {
+                            continue;
+                        }
+                        let bound = l.bound() * slack;
+                        for actual in [f, a] {
+                            let dev = (f64::from(actual) - l.v).abs();
+                            assert!(
+                                dev <= bound,
+                                "case {case} n {n}: 実測の誤差 {dev:e} が上界 {bound:e} を超えた（V = {:e}）",
+                                l.v
+                            );
+                            checked += 1;
+                            if dev > 0.1 * bound {
+                                tight += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000, "検査した要素数 {checked}");
+        assert!(tight > 0, "上界が実測より桁違いに大きい");
+    }
+
+    /// [`Num::settle`] の性質: 束ねた上界は束ねない上界以上（三角不等式）で、値は変わらず、anchors の係数は
+    /// 残る。anchors に含まれない事象は 1 つにまとまる。
+    #[test]
+    fn settle_never_shrinks_bound_and_keeps_anchor_events() {
+        lin_reset();
+        let xs: Vec<Lin> = (0..12)
+            .map(|i| Lin::k(0.1 * f64::from(i + 1)).times(Lin::k(1.0 / 3.0)))
+            .collect();
+        let anchor = Lin::k(0.7).over(Lin::k(3.0));
+        let total = Lin::total(&xs).times(anchor);
+        let before = total.bound();
+        let events_before = lin_events();
+        let settled = total.settle(&[anchor]);
+        assert_eq!(settled.v, total.v);
+        assert!(
+            settled.bound() >= before * (1.0 - 1e-12),
+            "束ねた上界 {} が束ねない上界 {before} を下回った",
+            settled.bound()
+        );
+        assert_eq!(lin_events(), events_before + 1);
+        let n_terms = settled.terms_of().len();
+        let anchor_events = anchor.terms_of().len();
+        assert!(n_terms <= anchor_events + 1, "項数 {n_terms}");
+        // anchors が空なら全部が 1 つの事象になる。
+        assert_eq!(total.settle(&[]).terms_of().len(), 1);
+        lin_reset();
+    }
+
+    /// 縮約 [`Num::total`] の書き換え（事象の番号で安定に並べて足す）が、逐次の併合と同じ係数を作る。
+    #[test]
+    fn total_matches_sequential_merge() {
+        lin_reset();
+        let xs: Vec<Lin> = (0..9)
+            .map(|i| Lin::k(0.3 + f64::from(i)).over(Lin::k(7.0)))
+            .collect();
+        let got = Lin::total(&xs).terms_of();
+        let mut acc = LinTerms::new();
+        for x in &xs {
+            acc = lin_comb(&acc, 1.0, &x.terms_of(), 1.0);
+        }
+        // 末尾は `total` が足す順序によらない丸めの事象。
+        assert_eq!(&got[..got.len() - 1], &acc[..]);
+        lin_reset();
     }
 
     /// 判定方式（[`Lin`]／従来の `Rf`。後者は幅の広いグループ・グループ数の多いテンソルの経路）のどちらでも、
