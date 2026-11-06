@@ -86,8 +86,8 @@ use fandhe_ai_tensor_core::weight_reparam::{self as wr};
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 use super::lin::{
-    LIN_BUDGET, LIN_REST_MAX, Lin, Num, entry_check_lin, lin_group_cost, lin_mark, lin_reset,
-    lin_truncate,
+    LIN_BUDGET, LIN_REST_MAX, LIN_U, Lin, Num, entry_check_lin, lin_group_cost, lin_mark,
+    lin_reset, lin_truncate,
 };
 use super::{child_value, judge, push_v3};
 use crate::create_graph_norm::pow2_ceil_exponent;
@@ -243,6 +243,27 @@ fn wn_judge_cost(groups: usize, rest: usize) -> usize {
 fn sn_judge_cost(n: usize) -> usize {
     n.saturating_mul(23)
         .saturating_add(n.saturating_mul(n.saturating_mul(4)))
+}
+
+/// SpectralNorm の総括判定を [`Lin`] で行う走査量の見積り（[`Rf`] の 1 反復相当）。実測（`--release`・x86_64 Linux・
+/// `spectral_norm_lin_judge_cost_measurement`。`σ_s`・`sp`・`σ_s` への cotangent の係数列を [`Num::settle`] で束ねた
+/// 後）は N = 16 で約 6.7e4、64 で約 9.0e5、144 で約 4.9e6、256 で約 1.6e7、400 で約 3.5e7 で、N の 2 乗に比例する。
+/// 全点を覆うよう 300·N² とする。
+fn sn_lin_cost(n: usize) -> usize {
+    300usize.saturating_mul(n).saturating_mul(n)
+}
+
+/// [`Lin`] 版の事象の総数の上界（forward の分と、seed 1 回分の逆伝播の分。実測は 20·N + 12）。事象の数は値に
+/// ほとんど依らず N で決まる（定数の丸めの事象が無いときだけ減る）。テスト `sn_lin_events_stay_within_bound` が固定する。
+fn sn_lin_events_max(n: usize) -> usize {
+    20usize.saturating_mul(n).saturating_add(16)
+}
+
+/// SpectralNorm の総括判定で [`Lin`] を選ぶか。走査量が [`LIN_BUDGET`] 以内で、かつ事象の総数が
+/// [`entry_check_lin`] の余裕係数の上限（`16·事象数·u < 0.01`）に収まるときだけ。収まらないテンソルは従来の
+/// [`Rf`] のままにする（`Lin` を選んで全要素が余裕係数の上限で拒否される、という拒否範囲の拡大を避ける）。
+fn sn_use_lin(n: usize) -> bool {
+    sn_lin_cost(n) <= LIN_BUDGET && 16.0 * sn_lin_events_max(n) as f64 * LIN_U < 0.01
 }
 
 fn judge_budget(entries: usize, what: &str) -> Result<(), AutodiffError> {
@@ -1791,7 +1812,7 @@ pub(super) fn weight_norm_cgrads<'c>(
 // ---------------------------------------------------------------------
 
 /// SpectralNorm の構造の forward（二階の逆伝播が使う中間値と VJP 係数）。
-struct SnFwd<T> {
+pub(super) struct SnFwd<T> {
     ws: Vec<T>,
     p: Vec<T>,
     wh: Vec<T>,
@@ -1802,27 +1823,28 @@ struct SnFwd<T> {
     dob: Vec<T>,
     inv_s: T,
     inv_sig: T,
+    /// `σ_s = ΣW_s⊙P` と `sp = Σup⊙Ŵ`（[`Num::settle`] の anchors として逆伝播が使う）。
+    sig: T,
+    sp: T,
 }
 
 /// `spectral_norm_cgrad` が積む構造（`W_s = W/s` 〜 `dW = (up − Σ(up⊙Ŵ)·P)/σ_s/s`）の forward を再現する。
 /// `p` は `P[i] = u_i·v_j` の f64 の厳密値（構造は f32 へ丸めた値を載せる）。
-fn sn_fwd<T: Num>(w: &[f32], p: &[f64], up: &[f32], s: f64) -> Option<SnFwd<T>> {
+pub(super) fn sn_fwd<T: Num>(w: &[f32], p: &[f64], up: &[f32], s: f64) -> Option<SnFwd<T>> {
     let s = T::k(s);
     let inv_s = T::k(1.0).over(s);
     let ws: Vec<T> = w.iter().map(|&x| T::k(f64::from(x)).over(s)).collect();
     let p: Vec<T> = p.iter().map(|&x| T::k(x)).collect();
     let up: Vec<T> = up.iter().map(|&x| T::k(f64::from(x))).collect();
-    let mut sig = T::k(0.0);
-    for (&a, &b) in ws.iter().zip(&p) {
-        sig = sig.plus(a.times(b));
-    }
+    // 縮約は [`Num::total`] で書く（f32・`Rf`・`Dm` は従来と同じ逐次和、`Lin` は和の順序に依らない上界）。
+    let sig_terms: Vec<T> = ws.iter().zip(&p).map(|(&a, &b)| a.times(b)).collect();
+    // 全要素に依存する `σ_s` の係数列は 1 つの事象へ束ねる（束ねた事象は共有の誤差として全経路で係数が残る）。
+    let sig = T::total(&sig_terms).settle(&[]);
     let inv_sig = T::k(1.0).over(sig);
     let wh: Vec<T> = ws.iter().map(|&x| x.over(sig)).collect();
     let dwb: Vec<T> = ws.iter().map(|&x| x.over(sig).over(sig).negate()).collect();
-    let mut sp = T::k(0.0);
-    for (&u, &h) in up.iter().zip(&wh) {
-        sp = sp.plus(u.times(h));
-    }
+    let sp_terms: Vec<T> = up.iter().zip(&wh).map(|(&u, &h)| u.times(h)).collect();
+    let sp = T::total(&sp_terms).settle(&[sig, inv_s]);
     let t: Vec<T> = up
         .iter()
         .zip(&p)
@@ -1843,24 +1865,29 @@ fn sn_fwd<T: Num>(w: &[f32], p: &[f64], up: &[f32], s: f64) -> Option<SnFwd<T>> 
         dob,
         inv_s,
         inv_sig,
+        sig,
+        sp,
     })
 }
 
 /// seed `e_j`（`dW_j` に 1）の二階の逆伝播を構造の演算順で再現し、`W`・`up` への要素を `hw`・`hu` へ書く。
-fn sn_rev<T: Num>(f: &SnFwd<T>, j: usize, hw: &mut [T], hu: &mut [T]) {
+pub(super) fn sn_rev<T: Num>(f: &SnFwd<T>, j: usize, hw: &mut [T], hu: &mut [T]) {
     let n = f.ws.len();
     // dW = (t/σ_s)/s。
     let cot_o = f.inv_s;
     let cot_t = cot_o.times(f.inv_sig);
-    let mut cot_sig = cot_o.times(f.dob[j]);
+    // `σ_s` への cotangent は、分母側の Div 係数からの 1 項と `Ŵ` の n 項の縮約（[`Num::total`]）。
+    let mut sig_terms = Vec::with_capacity(n + 1);
+    sig_terms.push(cot_o.times(f.dob[j]));
     // t = up − sp·P（sp は [1] のブロードキャスト）、sp = Σ up⊙Ŵ。
     let cot_sp = cot_t.negate().times(f.p[j]);
     for i in 0..n {
         hu[i] = cot_sp.times(f.wh[i]);
         let cot_wh = cot_sp.times(f.up[i]);
         hw[i] = cot_wh.times(f.inv_sig);
-        cot_sig = cot_sig.plus(cot_wh.times(f.dwb[i]));
+        sig_terms.push(cot_wh.times(f.dwb[i]));
     }
+    let cot_sig = T::total(&sig_terms).settle(&[f.sig, f.sp, f.inv_sig, f.inv_s, cot_t, cot_sp]);
     hu[j] = cot_t.plus(hu[j]);
     // σ_s = Σ W_s⊙P、W_s = W/s。
     for (h, &pi) in hw.iter_mut().zip(&f.p) {
@@ -1891,10 +1918,39 @@ fn sn_all_nan(w: &[f32], p: &[f64], up: &[f32]) -> bool {
     true
 }
 
-/// SpectralNorm の総括判定。seed が 1 要素のときの二階（`W`・`up` への要素）を [`entry_check`] に掛ける。
-fn sn_judge(w: &[f32], p: &[f64], up: &[f32], s: f64, coeff: f64) -> Result<(), AutodiffError> {
+/// SpectralNorm の総括判定。seed が 1 要素のときの二階（`W`・`up` への要素）を判定する。`use_lin` なら
+/// 丸めの一次伝播を事象ごとに追う [`Lin`]（[`entry_check_lin`]。呼び出し側が [`sn_use_lin`] で選ぶ）、
+/// そうでなければ従来の [`Rf`] と係数 `coeff`（[`entry_check`]）。`spectral_norm_cgrad` から呼ばれる。
+pub(super) fn sn_judge(
+    w: &[f32],
+    p: &[f64],
+    up: &[f32],
+    s: f64,
+    coeff: f64,
+    use_lin: bool,
+) -> Result<(), AutodiffError> {
+    if use_lin {
+        lin_reset();
+        let r = sn_judge_with::<Lin>(w, p, up, s, &|r, x, what| {
+            entry_check_lin(r, x, what, invalid)
+        });
+        // 係数列の領域は N に比例して伸びるので、判定後に解放する。
+        lin_reset();
+        r
+    } else {
+        sn_judge_with::<Rf>(w, p, up, s, &|r, x, what| entry_check(r, x, coeff, what))
+    }
+}
+
+fn sn_judge_with<R: Num>(
+    w: &[f32],
+    p: &[f64],
+    up: &[f32],
+    s: f64,
+    check: &dyn Fn(R, f32, &str) -> Result<(), AutodiffError>,
+) -> Result<(), AutodiffError> {
     const WHAT: &str = "SpectralNorm の二階";
-    let (Some(fs), Some(fr)) = (sn_fwd::<f32>(w, p, up, s), sn_fwd::<Rf>(w, p, up, s)) else {
+    let (Some(fs), Some(fr)) = (sn_fwd::<f32>(w, p, up, s), sn_fwd::<R>(w, p, up, s)) else {
         return Err(nonfinite_struct(WHAT));
     };
     let nan_ok = [
@@ -1913,13 +1969,16 @@ fn sn_judge(w: &[f32], p: &[f64], up: &[f32], s: f64, coeff: f64) -> Result<(), 
     }
     let n = w.len();
     let (mut hw_s, mut hu_s) = (vec![0f32; n], vec![0f32; n]);
-    let (mut hw_r, mut hu_r) = (vec![Rf::k(0.0); n], vec![Rf::k(0.0); n]);
+    // forward の事象は seed 間で共有し、逆伝播の事象だけ seed ごとに戻す（領域を持たない型では無害）。
+    let mark = lin_mark();
     for j in 0..n {
+        lin_truncate(mark);
+        let (mut hw_r, mut hu_r) = (vec![R::k(0.0); n], vec![R::k(0.0); n]);
         sn_rev(&fs, j, &mut hw_s, &mut hu_s);
         sn_rev(&fr, j, &mut hw_r, &mut hu_r);
         for i in 0..n {
-            entry_check(hw_r[i], hw_s[i], coeff, WHAT)?;
-            entry_check(hu_r[i], hu_s[i], coeff, WHAT)?;
+            check(hw_r[i], hw_s[i], WHAT)?;
+            check(hu_r[i], hu_s[i], WHAT)?;
         }
     }
     Ok(())
@@ -2051,7 +2110,14 @@ pub(super) fn spectral_norm_cgrad<'c>(
         }
         // 第 2 軸の本体: seed が 1 要素のときの二階の各要素を f32 で再現して参照と比べる。σ_s の相殺・
         // 係数行列 `I − ŴP` の相殺・Div 係数の overflow・中間値の underflow はここで見える。
-        sn_judge(&w_data, &p_exact, &up_data, sf, sn_coeff(w_data.len()))?;
+        sn_judge(
+            &w_data,
+            &p_exact,
+            &up_data,
+            sf,
+            sn_coeff(w_data.len()),
+            sn_use_lin(w_data.len()),
+        )?;
     }
 
     // 構造。
@@ -2076,6 +2142,7 @@ pub(super) fn spectral_norm_cgrad<'c>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::lin::lin_events;
     use super::*;
     use crate::create_graph_norm::STAGE_BOUND_GUARD;
 
@@ -2914,8 +2981,17 @@ mod tests {
 
     impl Worst {
         fn take(&mut self, v: f64, v_str: f64, m: f64, coeff: f64) {
+            self.take_with(v, v_str, m, coeff * m);
+        }
+
+        /// 誤差の見積り `est`（[`Lin`] の `bound·(1 + 16·N·u)`）を直接与える版。`m` は 0 で記録する。
+        fn take_est(&mut self, v: f64, v_str: f64, est: f64) {
+            self.take_with(v, v_str, 0.0, est);
+        }
+
+        fn take_with(&mut self, v: f64, v_str: f64, m: f64, est: f64) {
             let diff = (v_str - v).abs();
-            let err = diff + coeff * m;
+            let err = diff + est;
             let thr = ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * v.abs());
             let ratio = if err.is_finite() {
                 err / thr
@@ -2926,7 +3002,7 @@ mod tests {
                 *self = Worst {
                     ratio,
                     diff,
-                    est: coeff * m,
+                    est,
                     v,
                     m,
                     set: true,
@@ -2935,7 +3011,8 @@ mod tests {
         }
     }
 
-    /// `sn_judge` と同じループで最悪の余裕を求める。戻り値の `bool` は `entry_check` が全要素で通すか。
+    /// `sn_judge` と同じループで最悪の余裕を求める。戻り値の `bool` は検査が全要素で通すか。`use_lin` なら
+    /// [`Lin`] の判定（[`entry_check_lin`]）、そうでなければ [`Rf`] の判定（[`entry_check`]）。
     /// `sn_fwd` が非有限で `None` のときは `None`。
     fn sn_judge_margins(
         w: &[f32],
@@ -2943,20 +3020,44 @@ mod tests {
         up: &[f32],
         s: f64,
         coeff: f64,
+        use_lin: bool,
     ) -> Option<(Worst, bool)> {
-        let (fs, fr) = (sn_fwd::<f32>(w, p, up, s)?, sn_fwd::<Rf>(w, p, up, s)?);
         let n = w.len();
+        let fs = sn_fwd::<f32>(w, p, up, s)?;
         let (mut hw_s, mut hu_s) = (vec![0f32; n], vec![0f32; n]);
-        let (mut hw_r, mut hu_r) = (vec![Rf::k(0.0); n], vec![Rf::k(0.0); n]);
         let (mut worst, mut all_ok) = (Worst::default(), true);
-        for j in 0..n {
-            sn_rev(&fs, j, &mut hw_s, &mut hu_s);
-            sn_rev(&fr, j, &mut hw_r, &mut hu_r);
-            for i in 0..n {
-                for (r, sv) in [(hw_r[i], hw_s[i]), (hu_r[i], hu_s[i])] {
-                    all_ok &= entry_check(r, sv, coeff, "m").is_ok();
-                    if !(sv.is_nan() && r.input_nan()) {
-                        worst.take(r.v, f64::from(sv), r.m, coeff);
+        if use_lin {
+            lin_reset();
+            let fl = sn_fwd::<Lin>(w, p, up, s)?;
+            let mark = lin_mark();
+            for j in 0..n {
+                lin_truncate(mark);
+                let (mut hw_l, mut hu_l) = (vec![Lin::k(0.0); n], vec![Lin::k(0.0); n]);
+                sn_rev(&fs, j, &mut hw_s, &mut hu_s);
+                sn_rev(&fl, j, &mut hw_l, &mut hu_l);
+                let slack = 1.0 + 16.0 * lin_events() as f64 * LIN_U;
+                for i in 0..n {
+                    for (r, sv) in [(hw_l[i], hw_s[i]), (hu_l[i], hu_s[i])] {
+                        all_ok &= entry_check_lin(r, sv, "m", invalid).is_ok();
+                        if !(sv.is_nan() && r.input_nan()) {
+                            worst.take_est(r.v, f64::from(sv), r.bound() * slack);
+                        }
+                    }
+                }
+            }
+            lin_reset();
+        } else {
+            let fr = sn_fwd::<Rf>(w, p, up, s)?;
+            let (mut hw_r, mut hu_r) = (vec![Rf::k(0.0); n], vec![Rf::k(0.0); n]);
+            for j in 0..n {
+                sn_rev(&fs, j, &mut hw_s, &mut hu_s);
+                sn_rev(&fr, j, &mut hw_r, &mut hu_r);
+                for i in 0..n {
+                    for (r, sv) in [(hw_r[i], hw_s[i]), (hu_r[i], hu_s[i])] {
+                        all_ok &= entry_check(r, sv, coeff, "m").is_ok();
+                        if !(sv.is_nan() && r.input_nan()) {
+                            worst.take(r.v, f64::from(sv), r.m, coeff);
+                        }
                     }
                 }
             }
@@ -3050,7 +3151,10 @@ mod tests {
     struct SnReport {
         verdict: SnVerdict,
         cost: usize,
+        /// 本番が選ぶ方式（[`sn_use_lin`]）の `sn_judge` の余裕。
         sn: Option<(Worst, bool)>,
+        /// 従来の `Rf` 版の `sn_judge` の余裕（`Lin` に置き換えた効果の比較用）。
+        sn_rf: Option<(Worst, bool)>,
         sh: Option<(Worst, bool)>,
         host_err: f64,
         str_err: f64,
@@ -3082,11 +3186,23 @@ mod tests {
         let s = pow2(pow2_ceil_exponent(mx));
         let m_abs = sn_m_abs(&inp, s);
         // sn_judge の余裕（走査量の上限内で σ_s が有限・非零のときだけ）。
-        let sn = if cost <= JUDGE_BUDGET && m_abs.is_some() {
-            sn_judge_margins(&inp.w, &inp.p_exact, &inp.up, f64::from(s), sn_coeff(n))
-        } else {
-            None
+        let judged = cost <= JUDGE_BUDGET && m_abs.is_some();
+        let margins = |lin: bool| {
+            if judged {
+                sn_judge_margins(
+                    &inp.w,
+                    &inp.p_exact,
+                    &inp.up,
+                    f64::from(s),
+                    sn_coeff(n),
+                    lin,
+                )
+            } else {
+                None
+            }
         };
+        let sn = margins(sn_use_lin(n));
+        let sn_rf = margins(false);
         if let Some((_, ok)) = sn {
             match verdict {
                 SnVerdict::SnJudge => assert!(!ok, "本番は sn_judge 拒否だが再計算は全要素通過"),
@@ -3145,6 +3261,7 @@ mod tests {
             verdict,
             cost,
             sn,
+            sn_rf,
             sh,
             host_err,
             str_err,
@@ -3198,7 +3315,7 @@ mod tests {
     #[ignore = "計測（O(N^2) の再計算を含む）。--release で実行する"]
     fn spectral_norm_rejection_breakdown_measurement() {
         eprintln!(
-            "SNROW shape|amp|alpha|up|scale|verdict|cost/budget|sn_ratio(diff,est,|V|,kappa)|sh_ratio(diff,est,|V|)|host_err|str_err|str_req2|flag"
+            "SNROW shape|amp|alpha|up|scale|verdict|cost/budget|sn_ratio(diff,est,|V|,kappa)|rf_ratio|sh_ratio(diff,est,|V|)|host_err|str_err|str_req2|flag"
         );
         for c in sn_measure_cases() {
             let r = sn_measure(&c);
@@ -3212,6 +3329,9 @@ mod tests {
                     w.m / w.v.abs().max(f64::MIN_POSITIVE)
                 )
             });
+            let rf = r
+                .sn_rf
+                .map_or("-".to_string(), |(w, _)| format!("{:.3e}", w.ratio));
             let sh = r.sh.map_or("-".to_string(), |(w, _)| {
                 format!(
                     "{:.3e}({:.1e},{:.1e},{:.1e})",
@@ -3222,7 +3342,7 @@ mod tests {
                 )
             });
             eprintln!(
-                "SNROW {:?}|{:e}|{}|{:?}|{:e}|{:?}|{:.3}|{}|{}|{:.2e}|{:.2e}|{:.2e}|{}",
+                "SNROW {:?}|{:e}|{}|{:?}|{:e}|{:?}|{:.3}|{}|{}|{}|{:.2e}|{:.2e}|{:.2e}|{}",
                 c.shape,
                 c.amp,
                 c.alpha,
@@ -3231,6 +3351,7 @@ mod tests {
                 r.verdict,
                 r.cost as f64 / JUDGE_BUDGET as f64,
                 sn,
+                rf,
                 sh,
                 r.host_err,
                 r.str_err,
@@ -3240,10 +3361,148 @@ mod tests {
         }
     }
 
-    /// 後続（#4080 `sn_judge` を `Lin` で追う・#4081 `shadow_check` を `Lin` の上界で置き換える）が
-    /// 「受理に変える入力」として再利用する入力（§81.5）。選定基準は §81.5 の (a)〜(e)。
-    /// 各要素は（入力, 現在の拒否の種別）。重みの振幅が大きい（`amp = 1e3`・2 のべき乗 `s = 1024`）形が、
-    /// `shadow_check` だけが拒否する入力として現れる。
+    /// `sn_judge` の直接テスト用に、`spectral_norm_cgrad` と同じ式で `(W, P の f64, s)` を作る。
+    fn sn_probe(shape: &[usize], u: &[f32], v: &[f32], w: Vec<f32>) -> (Vec<f32>, Vec<f64>, f64) {
+        let (_, p_exact) = sn_p(shape, 0, u, v);
+        let mx = w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+        (w, p_exact, s)
+    }
+
+    /// `Lin` 版の `sn_judge` が、§81.5 の「`sn_judge` だけが拒否していた」2 入力を受理し、`Rf` 版は拒否のままである
+    /// こと（#4080 の受入基準）。
+    #[test]
+    fn sn_judge_lin_accepts_what_rf_rejected() {
+        for c in [
+            sn_case(&[4, 4], 1.0, 2.0, SnUp::General, 1.0),
+            sn_case(&[16, 16], 1e3, 0.0, SnUp::General, 1.0),
+        ] {
+            let inp = sn_inputs(&c);
+            let n = inp.w.len();
+            let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            assert!(sn_use_lin(n), "{c:?}: Lin を選ぶ条件内");
+            assert!(
+                sn_judge(&inp.w, &inp.p_exact, &inp.up, s, sn_coeff(n), true).is_ok(),
+                "{c:?}: Lin 版は受理"
+            );
+            assert!(
+                sn_judge(&inp.w, &inp.p_exact, &inp.up, s, sn_coeff(n), false).is_err(),
+                "{c:?}: Rf 版は拒否のまま"
+            );
+        }
+    }
+
+    /// 既存の拒否プローブ 3 件（`tests/create_graph_norm_reparam.rs`）の入力を `sn_judge` 単体へ再構成し、`Lin` 版でも
+    /// 拒否のままであること。`σ_s` の相殺（[2,2]）と係数行列の相殺（[1,2]）は `|V_str − V|` と一次の上界の項で、Div 係数の
+    /// overflow（[1,2]）は `sn_fwd` の f32 の ±inf の検査で拒否される。
+    #[test]
+    fn sn_judge_lin_still_rejects_the_three_probes() {
+        let w2 = (-33f32).exp2();
+        let probes = [
+            (
+                vec![2usize, 2],
+                vec![0.6f32, 0.8],
+                vec![0.6f32, 0.8],
+                vec![1.0f32, 1.0, 1.0, -2.06249],
+            ),
+            (
+                vec![1, 2],
+                vec![1.0],
+                vec![4e-38, 1.0],
+                vec![0.75 * 2f32.powi(127), 0.0],
+            ),
+            (vec![1, 2], vec![1.0], vec![1.0, 1e-8], vec![w2, w2]),
+        ];
+        for (shape, u, v, w) in probes {
+            let n = w.len();
+            let (w, p, s) = sn_probe(&shape, &u, &v, w);
+            let up = vec![0.0f32; n];
+            assert!(sn_use_lin(n));
+            let r = sn_judge(&w, &p, &up, s, sn_coeff(n), true);
+            assert!(r.is_err(), "{shape:?}: Lin 版でも拒否のまま");
+        }
+    }
+
+    /// 事象の総数が [`sn_lin_events_max`] 以下であること（[`sn_use_lin`] の余裕係数の条件の根拠）。値の違う入力
+    /// （定数の丸めの事象が出る・出ない）でも成り立つ。
+    #[test]
+    fn sn_lin_events_stay_within_bound() {
+        for (side, amp) in [(2usize, 1.0f32), (4, 1.0), (8, 1e3), (16, 1.0), (16, 1e-3)] {
+            let c = sn_case(&[side, side], amp, 2.0, SnUp::General, 1.0);
+            let inp = sn_inputs(&c);
+            let n = inp.w.len();
+            let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx.max(1e-3))));
+            lin_reset();
+            let seen = std::cell::Cell::new(0usize);
+            let _ = sn_judge_with::<Lin>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| {
+                seen.set(seen.get().max(lin_events()));
+                Ok(())
+            });
+            lin_reset();
+            assert!(
+                seen.get() <= sn_lin_events_max(n),
+                "n={n}: 事象 {} が上界 {} を超えた",
+                seen.get(),
+                sn_lin_events_max(n)
+            );
+            assert!(seen.get() > 0);
+        }
+        // 走査量の上限と余裕係数の上限は、どちらも [16, 16] を含み、[32, 32] 以上を除く。
+        assert!(sn_use_lin(256));
+        assert!(!sn_use_lin(1024));
+    }
+
+    /// 計測（`#[ignore]`）: `sn_judge` の `Lin` 版と `Rf` 版の所要時間・事象数・§81.5 の入力の余裕。
+    /// `cargo test -p fandhe-ai-autodiff --release --lib spectral_norm_lin_judge_cost_measurement -- --ignored --nocapture`
+    #[test]
+    #[ignore = "計測。--release で実行する"]
+    fn spectral_norm_lin_judge_cost_measurement() {
+        use std::time::Instant;
+        for side in [2usize, 4, 8, 12, 16, 20, 22] {
+            let c = sn_case(&[side, side], 1.0, 2.0, SnUp::General, 1.0);
+            let inp = sn_inputs(&c);
+            let n = inp.w.len();
+            let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            let median = |f: &dyn Fn() -> bool| {
+                let mut ts: Vec<f64> = (0..5)
+                    .map(|_| {
+                        let t = Instant::now();
+                        let _ = f();
+                        t.elapsed().as_secs_f64()
+                    })
+                    .collect();
+                ts.sort_by(|a, b| a.total_cmp(b));
+                ts[2]
+            };
+            // 全要素を走査させるため、検査は常に通す（早期拒否で時間が短くならないように）。
+            let t_rf = median(&|| {
+                sn_judge_with::<Rf>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(())).is_ok()
+            });
+            let ev = std::cell::Cell::new(0usize);
+            let t_lin = median(&|| {
+                lin_reset();
+                let ok = sn_judge_with::<Lin>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(()))
+                    .is_ok();
+                ev.set(lin_events());
+                lin_reset();
+                ok
+            });
+            let cost = sn_judge_cost(n) as f64;
+            eprintln!(
+                "SNLIN events={} n={n} t_rf={t_rf:.4e}s t_lin={t_lin:.4e}s ns_per_rf_iter={:.2} lin_cost_equiv={:.3e} (cost={cost:.3e})",
+                ev.get(),
+                t_rf / cost * 1e9,
+                t_lin / (t_rf / cost)
+            );
+        }
+    }
+
+    /// #4079（§81.5）が選んだ入力。各要素は（入力, 現在の判定の種別）。`sn_judge` を `Lin` に置き換えた
+    /// #4080 で、`sn_judge` だけが拒否していた 2 件は受理に変わった。`shadow_check` だけが拒否する 2 件
+    /// （重みの振幅が大きい形）は #4081（`shadow_check` を `Lin` の上界で置き換える）の入力として残す。
     fn sn_followup_candidates() -> Vec<(SnCase, SnVerdict)> {
         vec![
             (
@@ -3256,11 +3515,11 @@ mod tests {
             ),
             (
                 sn_case(&[4, 4], 1.0, 2.0, SnUp::General, 1.0),
-                SnVerdict::SnJudge,
+                SnVerdict::Accepted,
             ),
             (
                 sn_case(&[16, 16], 1e3, 0.0, SnUp::General, 1.0),
-                SnVerdict::SnJudge,
+                SnVerdict::Accepted,
             ),
         ]
     }
@@ -3293,25 +3552,52 @@ mod tests {
         (first, second)
     }
 
-    /// 後続の入力が、現在は想定どおりの判定で拒否され（`sn_judge` のみ／`shadow_check` のみ）、実際の f32 の
-    /// 1 階・二階は独立な f64 の閉じた式から REQ-2 の閾値の 1/4 以内に収まること（受理に変えても REQ-2 の
-    /// 範囲内）。tolerance は変えない。`--nocapture` で実測値を出す。
+    /// 後続の入力が想定どおりの判定になり、実際の f32 の 1 階・二階は独立な f64 の閉じた式から REQ-2 の閾値の
+    /// 1/4 以内に収まること（受理に変えても REQ-2 の範囲内）。`sn_judge` を `Lin` にして受理に変わった 2 件
+    /// は、従来の `Rf` 版の余裕が 1 以上（拒否）だった入力でもある。tolerance は変えない。`--nocapture` で実測値を出す。
     #[test]
     fn spectral_norm_followup_candidates_are_req2_within_f64() {
         for (c, want) in sn_followup_candidates() {
             let r = sn_measure(&c);
-            assert_eq!(r.verdict, want, "{c:?}: 現在の拒否の種別");
+            assert_eq!(r.verdict, want, "{c:?}: 判定の種別");
             let (sn, sh) = (r.sn.unwrap().0.ratio, r.sh.unwrap().0.ratio);
+            let rf = r.sn_rf.unwrap().0.ratio;
             match want {
                 SnVerdict::Shadow => assert!(sn < 1.0 && sh >= 1.0, "{c:?}: sn={sn} sh={sh}"),
-                _ => assert!(sn >= 1.0 && sh < 1.0, "{c:?}: sn={sn} sh={sh}"),
+                _ => assert!(
+                    sn < 1.0 && rf >= 1.0 && sh < 1.0,
+                    "{c:?}: Lin {sn} は 1 未満・Rf {rf} は 1 以上・sh={sh}"
+                ),
             }
             let (first, second) = sn_structure_vs_f64(&c);
             eprintln!(
-                "SNCAND {c:?} sn={sn:.3e} sh={sh:.3e} req2_first={first:.3e} req2_second={second:.3e}"
+                "SNCAND {c:?} lin={sn:.3e} rf={rf:.3e} sh={sh:.3e} req2_first={first:.3e} req2_second={second:.3e}"
             );
             assert!(first < 0.25, "{c:?}: 1 階の REQ-2 比 {first}");
             assert!(second < 0.25, "{c:?}: 二階の REQ-2 比 {second}");
+        }
+    }
+
+    /// `Lin` で受理に変わった入力（`Rf` 版の `sn_judge` は拒否していたもの）の公開経路の二階が、f64 の閉じた式と
+    /// REQ-2 の範囲で一致すること（拒否範囲を狭めても REQ-2 を外さない裏づけ）。
+    #[test]
+    fn spectral_norm_newly_accepted_by_lin_match_f64_second_order() {
+        let cases = [
+            sn_case(&[4, 4], 1e-3, 0.0, SnUp::General, 1.0),
+            sn_case(&[4, 4], 1.0, 0.0, SnUp::General, 1e3),
+            sn_case(&[8, 8], 1.0, 0.0, SnUp::ParallelP, 1.0),
+            sn_case(&[8, 8], 1e3, 2.0, SnUp::General, 1.0),
+            sn_case(&[16, 16], 1.0, 2.0, SnUp::ParallelP, 1.0),
+            sn_case(&[16, 16], 1e3, 0.0, SnUp::ParallelP, 1.0),
+        ];
+        for c in cases {
+            let r = sn_measure(&c);
+            let rf = r.sn_rf.unwrap().0.ratio;
+            assert_eq!(r.verdict, SnVerdict::Accepted, "{c:?}");
+            assert!(rf >= 1.0, "{c:?}: Rf 版は拒否していたはず（{rf}）");
+            let (first, second) = sn_structure_vs_f64(&c);
+            assert!(first < 1.0, "{c:?}: 1 階 {first}");
+            assert!(second < 1.0, "{c:?}: 二階 {second}");
         }
     }
 

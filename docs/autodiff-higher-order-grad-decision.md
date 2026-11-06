@@ -5807,3 +5807,66 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 ### 81.7 後続の追記先
 
 - #4080（`sn_judge` を `Lin` で追う）・#4081（`shadow_check` を `Lin` の上界とホスト側の丸めで置き換える）が、それぞれの結果を 81.7 以降へ追記する。上の 81.5 の入力を使い、受理に変えたときの余裕を同じ表の形で記録する。
+
+### 81.8 #4080: `sn_judge` の `Lin` 化の実装記録
+
+#### 81.8.0 位置づけ
+
+- #4080 の実装記録。承認は #4073 の起票の範囲に限り、上乗せしない。親 #4073 に割り当て済みの節番号（§81）への追記。
+- 変えていないもの: tolerance 定数（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET` の値・`sn_coeff`・`shadow_check` とその係数 `N+4`（#4081 の担当）・依存・公開 API・`docs/spec`。
+- GPU 実機 parity は未実測のまま。CPU の値で代替しない。
+
+#### 81.8.1 実装
+
+- `sn_judge` を `sn_judge_with::<R: Num>` と分岐 `sn_judge(…, use_lin)` に分けた（WeightNorm の `wn_group_judge` と同じ形）。`use_lin` なら `Lin`＋`entry_check_lin`、そうでなければ従来の `Rf`＋`sn_coeff(N)·M`。判定後は thread-local の領域を `lin_reset()` で解放する。
+- `sn_fwd`・`sn_rev` の縮約（`σ_s`・`sp`・`σ_s` への cotangent）を `Num::total` に置き換えた。f32・`Rf`・`Dm` は従来と同じ逐次和なので値は不変（`σ_s` への cotangent の初項 `0 + c₀` の 0 の符号だけが違いうるが、比較する値には影響しない）。`Lin` は順序に依らない丸めの上界を足す。
+- `Lin::total` を、項ごとの併合の繰り返し（`O(n²)`）から、事象の番号での安定な並べ替えと加算（`O(L log L)`）に変えた。同じ事象の係数を足す順序は項の順のままで、係数は逐次の併合と同じ（`total_matches_sequential_merge`）。WeightNorm の結果は変わらない。
+- 係数列の束ね `Num::settle(self, anchors)`（既定は恒等。`Lin` だけが実装）を足し、`σ_s`（anchors なし）・`sp`（anchors: `σ_s`・`1/s`）・逆伝播の `σ_s` への cotangent（anchors: `σ_s`・`sp`・`1/σ_s`・`1/s`・`cot_t`・`cot_sp`）の直後に掛ける。
+  - 理由: `σ_s`・`sp`・`σ_s` への cotangent・`Ŵ` は全要素に依存し、そのまま通すと各値の係数列が `O(N)` になって判定全体が `O(N³)` になる（N = 144 で `Rf` の約 3e8〜1e9 反復相当、N = 256 で約 1e11 反復相当。実測 3.6 秒）。
+  - 健全性: anchors の係数列に現れる事象は厳密に残し、それ以外の項 `Σcₖδₖ` を `Σ|cₖ|μₖ` を大きさとする独立な事象 1 つ（係数 1）にまとめる。`|Σcₖδₖ| ≤ Σ|cₖ|μₖ` なので、束ねた上界は束ねない上界以上になる（`settle_never_shrinks_bound_and_keeps_anchor_events`）。`σ_s` の誤差（支配項。共有する事象）は全経路で係数を保つので、Hessian の項の間の打ち消しは残る。失うのは「`W_s` の要素ごとの事象」と「その要素を直接使う値」の相関だけ。
+  - 閾値による残余事象への集約（#4078）とは選び方が違う（構造で anchors を指定する）。#4078 で統合しうる。本 PR は #4078 の作業を取り込まない。
+- `Lin` を選ぶ条件 `sn_use_lin(N)`: `sn_lin_cost(N) = 300·N² ≤ LIN_BUDGET` かつ `16·sn_lin_events_max(N)·u < 0.01`（`sn_lin_events_max(N) = 20·N + 16`）。後者は `entry_check_lin` の余裕係数の上限で、超える N で `Lin` を選ぶと全要素が拒否されるため、`Rf` に残す（拒否範囲を広げない）。`N ≤ 472` が上限で、`[16,16]`（N = 256）は含み、`[32,32]` 以上は含まない（従来どおり `Rf`）。
+
+#### 81.8.2 仮定
+
+- §79.2 から引き継ぐ。除算・平方根を含め IEEE 754 の正しい丸めを仮定する（CPU・CUDA の既定と、Metal の `MathMode::Safe` + `Precise` の想定）。SpectralNorm の構造に `Sqrt` は無いが、仮定は `Lin` 全体の契約として書く。GPU 実機は未実測。
+
+#### 81.8.3 実測（`spectral_norm_lin_judge_cost_measurement`。`#[ignore]`）
+
+- 測定条件: CPU（x86_64 Linux）・rustc 1.98.1・`--release`・5 回の中央値。検査を常に通して全要素を走査させる。実行: `cargo test -p fandhe-ai-autodiff --release --lib spectral_norm_lin_judge_cost_measurement -- --ignored --nocapture`。
+
+| N | 事象の総数 | `Lin` の所要時間 | `Rf` の 1 反復あたり | `Lin` の `Rf` 反復相当 |
+|---|---|---|---|---|
+| 16 | 332 | 0.25 ms | 4.2 ns | 5.9e4 |
+| 64 | 1292 | 3.6 ms | 4.1 ns | 8.9e5 |
+| 144 | 2892 | 10.5 ms | 2.0 ns | 5.2e6 |
+| 256 | 5132 | 33 ms | 2.1 ns | 1.6e7 |
+| 400 | 8012 | 80 ms | 2.2 ns | 3.7e7 |
+| 484 | 9692 | 120 ms | 2.2 ns | 5.4e7 |
+
+- 事象の総数は `20·N + 12`（forward と seed 1 回分の逆伝播）。`Lin` の反復相当は `N²` に比例し、`300·N²` が全点を覆う。
+
+#### 81.8.4 拒否範囲の変化
+
+- §81.2 の計測行列（112 行）のうち `sn_judge` の余裕を出せる 108 行（残る 4 行は走査量の上限）で、従来の `Rf` 版が拒否していたのは 75 行、`Lin` 版（`Lin` の条件内の行だけ `Lin`）が拒否するのは 55 行。**`Rf` で受理していた行が `Lin` で拒否に変わったものは 0 件**。`sn_judge` の拒否が外れた 20 行のうち 14 行は公開経路の判定が受理に、6 行は `shadow_check` のみの拒否に変わった。`[32,32]` 以上の行は `Rf` のままで余裕は不変。
+- §81.5 の入力（余裕は `err/閾値`、1 以上で拒否）:
+
+| 区分 | 形状 | amp | α | 上流スケール | `Rf` の余裕 | `Lin` の余裕 | `sh` の余裕 | 判定 |
+|---|---|---|---|---|---|---|---|---|
+| `sn_judge` のみが拒否していた | `[4,4]` | 1 | 2 | 1 | 2.898 | 0.128 | 1.7e-2 | 受理 |
+| `sn_judge` のみが拒否していた | `[16,16]` | 1e3 | 0 | 1 | 18.08 | 0.209 | 0.150 | 受理 |
+| `shadow_check` のみが拒否 | `[8,8]` | 1e3 | 0 | 1e3 | 6.3e-3 | 4.5e-4 | 1.093 | `shadow_check` で拒否（#4081） |
+| `shadow_check` のみが拒否 | `[16,16]` | 1e3 | 2 | 1e3 | 9.8e-2 | 2.3e-3 | 1.630 | `shadow_check` で拒否（#4081） |
+
+- 受理に変わった入力は、公開経路の 1 階・二階が独立な f64 の閉じた式と REQ-2 の閾値の 1/4 以内で一致する（`spectral_norm_followup_candidates_are_req2_within_f64`）。ほかに受理に変わった 6 入力でも REQ-2 比 < 1 を確かめる（`spectral_norm_newly_accepted_by_lin_match_f64_second_order`）。
+
+#### 81.8.5 テスト
+
+- soundness: `lin_bound_covers_f32_deviation_for_spectral_norm_sweep`（乱数・振幅 {1e-3, 1, 1e3}・α ∈ {0, 2}・上流 {1, 1e3}・形状 N = 6〜81 の 240 通り。`Lin` の上界が f32 の再現と縮約順を変えた再現の実測の誤差を全要素で押さえる。`tight > 0` で上界が桁違いに緩くないことも課す）。
+- 変異確認（手動・コミットしない）: `Lin::bound` を 0 に変えると、この soundness テスト（と WeightNorm 版）が失敗する。戻して通ることを確認した。
+- 拒否プローブ 3 件（`spectral_norm_zero_upstream_with_cancelling_sigma_is_rejected`・`spectral_norm_div_partial_overflow_is_rejected`・`spectral_norm_zero_upstream_with_cancelling_coefficient_matrix_is_rejected`）は無変更で拒否のまま通る。`sn_judge_lin_still_rejects_the_three_probes` が入力を `sn_judge` 単体へ再構成して `Lin` 版でも拒否されることを確かめる。`Lin::bound` を 0 にしても拒否のままなので、拒否の理由は上界の項ではなく `|V_str − V|`（`σ_s` の相殺・係数行列の相殺）と `sn_fwd` の f32 の ±inf の検査（Div 係数の overflow）である。
+- `sn_judge_lin_accepts_what_rf_rejected`（§81.5 の 2 入力で `Lin` 版は受理・`Rf` 版は拒否）・`sn_lin_events_stay_within_bound`（事象の実測が `sn_lin_events_max` 以下）。
+
+#### 81.8.6 後続
+
+- `shadow_check` で止まる入力（上の表の下 2 行）と、N が大きい入力は #4081 で扱う。閾値による疎化の一般化は #4078、確保・clone の削減は #4077、LRN は #4088、`JUDGE_BUDGET` の見直しは #4072。
