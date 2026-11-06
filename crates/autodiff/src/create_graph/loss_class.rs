@@ -46,6 +46,9 @@
 //! g 経路、MultiMargin・MultiLabelMargin・MultiLabelSoft の定数と g 経路、MultiLabelSoft の σ の
 //! 曲率である。保証はこの判定を通った入力に限る。
 //!
+//! 既定オプションの `CrossEntropyLoss` も同じ CEWO の相殺判定を `A = 1`・`B = onehot`・`W = n` で通す
+//! （[`ce_cancel_check`]。#3954・設計 §77）。
+//!
 //! GPU: 6 つとも 1 階はホスト関数（経路区分 H）。実機 parity は未実測（Phase 10 の #3857・#3859）。
 
 use fandhe_ai_tensor_core::Tensor;
@@ -486,6 +489,63 @@ pub(super) fn cewo_cgrad<'c>(
     let scaled = s_b.mul(&a_c.mul(&sm)?.sub(&b_c)?)?;
     let dx = Var::where_cond(&valid_m, &scaled, &zeros)?;
     push_v3(child, &dx, host)
+}
+
+/// 既定オプションの `CrossEntropyLoss`（`Op::CrossEntropyLoss`）の相殺の総括判定（イシュー #3954、設計 §77）。
+///
+/// 親モジュールの `build_cgrads` の `Op::CrossEntropyLoss` 腕から、子テープへ何かを積む前に呼ばれる。
+/// 既定 CE は CEWO の特殊ケース（重み全 1・ε=0・ignore なし: `A = 1`・`B = onehot`・`W = n`）なので、
+/// 構造 `s_b⊙(softmax − onehot)` は変えず [`cewo_cancel_check`] をそのまま再利用する。確信度の高い行では
+/// f32 の Softmax の VJP `y(1−y)` が 0 に潰れ、上流係数が大きいと REQ-2 を外れる値を沈黙で返すため、
+/// 外れうる入力を型付き `Err` で拒否する（親の rollback で `child` は空に戻る）。
+/// 非有限の `g` を新たに拒否することはしない（既存の受理挙動を保つ。NaN は素通し、inf は上界が非有限で拒否）。
+pub(super) fn ce_cancel_check(
+    parent: &Tape,
+    parent_nodes: &[TapeNode],
+    logits: NodeId,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    g_value: &Tensor<f32>,
+) -> Result<(), AutodiffError> {
+    let shape = &parent_nodes[logits.0].shape;
+    if class_dim >= shape.len() {
+        return Err(invalid("class_dim が範囲外（内部契約違反）"));
+    }
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let target_data = crate::eval::dense_vec_i32(targets);
+    if target_data.len() != outer * inner {
+        return Err(invalid("targets の要素数が不整合（内部契約違反）"));
+    }
+    let n = outer * inner;
+    let xs = dense(parent, parent_nodes, logits)?;
+    let gv = crate::eval::dense_vec(g_value)
+        .first()
+        .map_or(0.0, |&v| f64::from(v).abs());
+    let sb = match reduction {
+        Reduction::Mean => gv / n as f64,
+        Reduction::Sum => gv,
+    };
+    let rho = sb_ratio(upstream_scale32(g_value, reduction, n), sb);
+    let gscale = g_scale(reduction, n);
+    let weights = vec![1.0f64; axis_len];
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if t < 0 || (t as usize) >= axis_len {
+                continue;
+            }
+            cewo_cancel_check(
+                &xs,
+                (o, i, inner, axis_len),
+                (1.0, &weights, t as usize, 0.0),
+                (sb, gscale, rho),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// CEWO の 1 サンプル（`(o, i)` の class 軸）の相殺検査（設計 §55.2 の相殺の総括判定）。
