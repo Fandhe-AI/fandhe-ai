@@ -1439,8 +1439,8 @@ fn cewo_confident_row_softmax_curvature_is_rejected_or_exact() {
             &i32t(vec![1], &[1]),
             1,
             Reduction::Sum,
-            // 既定オプションは既存の `CrossEntropyLoss` 経路へ委譲されるため、重み 1 を明示して
-            // `CrossEntropyLossWithOptions` を通す（A = B_t = 1 で参照は既定と同じ）。
+            // 既定オプションは `CrossEntropyLoss` 経路へ委譲されるため、重み 1 を明示して
+            // `CrossEntropyLossWithOptions` を通す（既定側は下の `ce_default_*` が専用に確かめる）。
             &CrossEntropyOptions::default().class_weight(t(vec![1.0, 1.0], &[2])),
         )?;
         scaled(tape, l, scale)
@@ -1450,6 +1450,66 @@ fn cewo_confident_row_softmax_curvature_is_rejected_or_exact() {
     let k = y0 * y1;
     let reference = vec![vec![k, -k], vec![-k, k]];
     sweep_guard_sound("cewo confident row", build, &[0.0, 20.0], &reference, 1e4);
+}
+
+/// イシュー #3954: 既定の `CrossEntropyLoss` 経路（`Op::CrossEntropyLoss`）でも、確信度の高い行
+/// logits=[0, 20]・target=1 の Softmax 曲率（真値 約 2e-9）が f32 で 0 に潰れる。総括判定で拒否され、
+/// 受理された係数は f64 の閉形式の参照と REQ-2 で一致すること（Sum・Mean(n=1)・既定オプション委譲）。
+#[test]
+fn ce_default_confident_row_softmax_curvature_is_rejected_or_exact() {
+    fn build_sum<'t>(tape: &'t Tape, z: &Var<'t>, scale: f32) -> BuildResult<'t> {
+        let l = z
+            .reshape(&[1, 2])?
+            .cross_entropy_loss(&i32t(vec![1], &[1]), 1, Reduction::Sum)?;
+        scaled(tape, l, scale)
+    }
+    fn build_mean<'t>(tape: &'t Tape, z: &Var<'t>, scale: f32) -> BuildResult<'t> {
+        let l = z
+            .reshape(&[1, 2])?
+            .cross_entropy_loss(&i32t(vec![1], &[1]), 1, Reduction::Mean)?;
+        scaled(tape, l, scale)
+    }
+    fn build_default_opts<'t>(tape: &'t Tape, z: &Var<'t>, scale: f32) -> BuildResult<'t> {
+        let l = z.reshape(&[1, 2])?.cross_entropy_loss_with(
+            &i32t(vec![1], &[1]),
+            1,
+            Reduction::Sum,
+            &CrossEntropyOptions::default(),
+        )?;
+        scaled(tape, l, scale)
+    }
+    let y0 = 1.0 / (1.0 + 20f64.exp());
+    let k = y0 * (1.0 - y0);
+    let reference = vec![vec![k, -k], vec![-k, k]];
+    sweep_guard_sound("ce default sum", build_sum, &[0.0, 20.0], &reference, 1e4);
+    sweep_guard_sound(
+        "ce default mean n=1",
+        build_mean,
+        &[0.0, 20.0],
+        &reference,
+        1e4,
+    );
+    sweep_guard_sound(
+        "ce default opts",
+        build_default_opts,
+        &[0.0, 20.0],
+        &reference,
+        1e4,
+    );
+}
+
+/// 確信度の低い通常の入力（既存 `ce_*` と同程度の logits）は新判定でも受理され続ける。
+#[test]
+fn ce_default_moderate_logits_still_accepted() {
+    fn build<'t>(_tape: &'t Tape, z: &Var<'t>) -> BuildResult<'t> {
+        z.reshape(&[2, 3])?
+            .cross_entropy_loss(&i32t(vec![0, 2], &[2]), 1, Reduction::Mean)
+    }
+    let z0 = [0.3f32, -0.2, 0.5, 1.0, 0.1, -0.4];
+    assert!(
+        try_hessian("ce default moderate", build, &z0).is_some(),
+        "通常の入力が拒否された"
+    );
 }
 
 /// 同類型（Triplet p=2）: 1 成分が支配的な差分 `a − p = [1, 1e-3]` では `(1 − û²)/‖v‖` が相殺する

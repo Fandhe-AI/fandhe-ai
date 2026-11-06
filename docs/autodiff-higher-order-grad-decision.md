@@ -4444,6 +4444,8 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 ### 55.2 設計（§40）からの差・明確化
 
+（既定オプションの `CrossEntropyLoss` への同判定の適用は §77。）
+
 - **`Op::VectorNorm`／`Op::PNorm` を使わない理由**: §40 の基準 sha 以降、`VectorNorm`（L1・L2）と `PNorm` は #3942（§52）で `supports_create_graph` が `true` になった。それでも Cosine・Triplet のノルムは §40.10 のとおり `Mul`・`Sum`・`Sqrt`・`Div`（Triplet は `Abs`・`PowScalar`）で手に組み、S1 の行スケールと `ε → ε/s²` の変換を入れた。承認は S1 の構造（スケール・`ε/s²` の扱い・総括判定）に対して出ており、`norm_l2`／`norm_p` への簡略化はその前提を変えるため。
 - Triplet のスケール `mx` は、設計の「2 のべき乗」ではなく**行ごとの差分の最大絶対値**（ホスト定数）にした。2 のべき乗に切り上げると最大要素が `(0.5, 1]` に入り、`p` が大きいとき（`p = 1024` 等）`Σ(|v|/mx)^p` が f32 で 0 に潰れて `norm'` が 0 になるため。最大絶対値で割れば最大要素が約 1 になり、`norm' ≥ 約 1` が保たれる。`1/mx` が f32 で表せない小さな差分（`max|v| < 2^-100`、全要素 0 の行を除く）は拒否する。Cosine は `norm'` が `ε'` 側でも `m' ≥ 約 0.25` となるので、設計どおり 2 のべき乗を使う。
 - Triplet の `1<p<2` で差分が 0 のレーンは、**活性でない行も含めて**拒否する。非活性行の構造にも `PowScalar(p−1)` が積まれ、`0·inf = NaN` が二階へ混ざるのを避けるため（設計は「二階が発散するので拒否」。承認は論点 5 の拒否）。`p = 1`・`p = 2`・`p > 2` では差分 0 のレーンを受理する（p=2 は `u/norm'` で曲率を保つ）。
@@ -5561,3 +5563,39 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: A2、f64 テープ（#3722）、三階以上の保証、公開名の追加。
 - ホストの SVD を入口・cgrad・子テープ再生で複数回行う費用は §75.3 で受容済み。
 - 変えていないもの: `svd_vjp`・`matrix_norm_vjp`、forward、`Tape::backward`、`Op` の payload、`AutodiffError` の variant、`guard_svd` のシグネチャ、依存、`docs/spec`。
+
+## 77. 実装記録（イシュー #3954・親 #3719 系。既定 `CrossEntropyLoss` の create_graph の相殺の総括判定）
+
+### 77.0 位置づけ
+
+- 状態: 実装済み。#3947（#3800）のレビューで発見された §55.2（相殺の総括判定）の漏れの修正である。#3767 で承認済みの B 区分の方針の範囲内の欠陥修正で、新たな承認を上乗せしては主張しない。
+
+### 77.1 原因
+
+- 既定オプションの `cross_entropy_loss`／`cross_entropy_loss_with`（既定値）は `Op::CrossEntropyLoss` に落ち、`build_cgrads` の腕は構造 `s_b⊙(softmax(x) − onehot)` を相殺の総括判定なしで積んでいた。
+- 確信度の高い行では f32 の Softmax の VJP `y(1−y)` が、`y_t` が 1 に丸まって 0 になる。例: logits=[0, 20]・target=1 の f64 参照は `y0·y1 ≈ 2.06e-9`。上流係数が 1e4 なら 2.06e-5、1e6 なら 2.06e-3 になり、REQ-2 の統一複合判定を外れる値を沈黙で返していた。
+- `CrossEntropyLossWithOptions` 側は §55.2 の `cewo_cancel_check` で拒否済みだった。既存テスト `cewo_confident_row_softmax_curvature_is_rejected_or_exact` は `class_weight=[1,1]` を明示して CEWO へ迂回しており、既定側が検査の外に残っていた。
+
+### 77.2 修正
+
+- `loss_class.rs::ce_cancel_check` を追加し、`Op::CrossEntropyLoss` の腕で子テープへ何かを積む前に呼ぶ。既定 CE は CEWO の特殊ケース（`A = 1`・`B = onehot`・`W = n`、重み全 1・ε = 0・ignore なし）なので `cewo_cancel_check` をそのまま再利用し、構造は変えない。
+- 非有限の `g` を新たに拒否することはしない（既存の受理挙動を保つ。NaN は素通し、inf は上界が非有限になり自然に拒否される）。CEWO 並みの `stage`／`reject_inf` の厳格化は本節のスコープ外。
+- 範囲外の target は 1 階・onehot と同じくスキップする。計算量は O(N·C)（外れる行のみ O(C²)）。
+
+### 77.3 保証範囲
+
+- 保証は判定を通った入力に限る（§55.2・§27.3 と同じ書き方）。拒否は保守的で、許容内の入力も拒否しうる。確信度の高い行で上流係数が大きい場合や C が大きい場合が該当する。三階以上と、1 要素でない seed の縮約の相殺は対象外。
+
+### 77.4 テスト
+
+- `crates/autodiff/tests/create_graph_loss_class.rs` の `ce_default_confident_row_softmax_curvature_is_rejected_or_exact`（Sum・Mean(n=1)・既定オプション委譲。係数 1・1e2・1e4・1e6・1e10 を振り、受理なら f64 閉形式と REQ-2 で一致、拒否なら `child` が空、1e4 以上は拒否）と `ce_default_moderate_logits_still_accepted`（通常の logits は受理され続ける）。
+- 変異確認（実測）: `ce_cancel_check` を即 `Ok(())` にするとプローブは 1e4 以上の係数の受理で失敗した。確認後に元へ戻した。
+- 既存の create_graph 系テストは無変更で通る。
+
+### 77.5 GPU
+
+- 1 階は既定 CE のホスト／デバイス経路に変更なし。親の変更は検査のみで、GPU 実機 parity は未実測のまま（`#[ignore]`、baseline は作らない）。
+
+### 77.6 変えていないもの
+
+- tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・1 階の VJP・forward・依存・`docs/spec`・公開 API。
