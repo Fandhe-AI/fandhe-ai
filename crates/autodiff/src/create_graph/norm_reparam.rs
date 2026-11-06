@@ -67,6 +67,8 @@
 //!   走査量（f32 の再現 1 系統が回す内側ループの反復回数。LRN は seed ごとの反転窓 × 前方窓の二重走査を
 //!   含む。[`lrn_judge_cost`] 等）が `2^27` を超える入力は計算量の fail-closed として拒否する。構造を積んだ
 //!   後の 1 階の値の照合（[`shadow_check`]）も残す。
+//!   SpectralNorm の照合の見積りは `Lin` の上界 + ホスト側の丸めの上界（[`sn_shadow_bound`]）で、出せない
+//!   ときだけ従来の `rounding_coeff(N+4)·m_abs`（#4081。docs の決定記録 §81.9）。
 //! - 拒否は `AutodiffError::Backward`。`backward_create_graph` のロールバックで `child` は空へ戻り、
 //!   安全な入力で再試行できる。
 //!
@@ -86,8 +88,8 @@ use fandhe_ai_tensor_core::weight_reparam::{self as wr};
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 use super::lin::{
-    LIN_BUDGET, LIN_REST_MAX, LIN_U, Lin, Num, entry_check_lin, lin_group_cost, lin_mark,
-    lin_reset, lin_truncate,
+    LIN_BUDGET, LIN_REST_MAX, LIN_U, Lin, Num, entry_check_lin, lin_events, lin_group_cost,
+    lin_mark, lin_reset, lin_truncate,
 };
 use super::{child_value, judge, push_v3};
 use crate::create_graph_norm::pow2_ceil_exponent;
@@ -1826,6 +1828,8 @@ pub(super) struct SnFwd<T> {
     /// `σ_s = ΣW_s⊙P` と `sp = Σup⊙Ŵ`（[`Num::settle`] の anchors として逆伝播が使う）。
     sig: T,
     sp: T,
+    /// 1 階 `dW = (t/σ_s)/s`（[`sn_shadow_bound`] が `Lin` の上界を読む）。
+    dw: Vec<T>,
 }
 
 /// `spectral_norm_cgrad` が積む構造（`W_s = W/s` 〜 `dW = (up − Σ(up⊙Ŵ)·P)/σ_s/s`）の forward を再現する。
@@ -1867,7 +1871,92 @@ pub(super) fn sn_fwd<T: Num>(w: &[f32], p: &[f64], up: &[f32], s: f64) -> Option
         inv_sig,
         sig,
         sp,
+        dw,
     })
+}
+
+/// 構造側の 1 階の丸めの上界 `B_str`（要素ごと）。[`sn_fwd`] を [`Lin`] で 1 回だけ回し（`O(N log N)`。
+/// 二階の判定 [`sn_judge`] の `O(N²)` とは別）、`dW` の一次の上界に [`entry_check_lin`] と同じ二次項の
+/// 余裕 `1 + 16·E·u` を掛ける。和の順序に依らない上界なので、他バックエンドの和の順序でも覆う。
+/// `16·E·u ≥ 0.01`・非有限・上界を作れない場合は `None`（呼び出し側が従来の見積りへ戻す）。
+fn sn_str_bound(w: &[f32], p: &[f64], up: &[f32], s: f64) -> Option<Vec<f64>> {
+    // 事象数は N に比例する。上限を超える N では領域を作る前に諦める（[`sn_use_lin`] と同じ事象数の見積り）。
+    if 16.0 * sn_lin_events_max(w.len()) as f64 * LIN_U >= 0.01 {
+        return None;
+    }
+    lin_reset();
+    let out = sn_fwd::<Lin>(w, p, up, s).and_then(|f| {
+        let slack = 16.0 * lin_events() as f64 * LIN_U;
+        let b: Vec<f64> = f.dw.iter().map(|d| d.bound() * (1.0 + slack)).collect();
+        (slack < 0.01 && b.iter().all(|x| x.is_finite())).then_some(b)
+    });
+    lin_reset();
+    out
+}
+
+/// ホスト側の丸めの上界 `B_host`（要素ごと）。`wr::spectral_norm_vjp_host` の演算列を数える（その実装を
+/// 変えるときはここも更新する。ホスト側の健全性テストが食い違いを検出する）:
+/// - `σ_h`: f64 の行和・外側の和。`|σ_h − σ| ≤ γ_{N+2}·A`（`A = Σ|W||P|`。`W·v`・`u·row` の積は f64 で
+///   厳密または 1 丸め）。
+/// - `S_h = Σ f64(f32(up·W))`: f32 の積の丸め `u/(1−u)·B + N·2^-150` と f64 の和 `γ_N·B`（`B = Σ|f32(up·W)|`）。
+/// - `val = up/σ_h − (S_h/σ_h²)·u_i·v_j`: `σ_h` の相対誤差 `ε` を `1/σ` と `1/σ²` へ（`ε/(1−ε)`・
+///   `ε(2+ε)/(1−ε)²`）、`S_h` の誤差、f64 の演算の丸め `γ_5·(|up/σ_h| + |S_h/σ_h²·P|)`。
+/// - 最後の `as f32`: `u(1+2u)|host| + 2^-150`。
+///
+/// `ε ≥ 0.01`・非有限・`σ_h = 0` は `None`。一次近似の余裕 `1 + 8ε` を f64 評価の項に掛ける。
+fn sn_host_bound(w: &[f32], p: &[f64], up: &[f32], sigma_h: f64, host: &[f32]) -> Option<Vec<f64>> {
+    const D: f64 = 1.0 / 9_007_199_254_740_992.0; // 2^-53
+    const TINY: f64 = 7.006_492_321_624_085e-46; // 2^-150
+    let n = w.len() as f64;
+    let gamma = |k: f64| k * D / (1.0 - k * D);
+    if !(sigma_h.is_finite() && sigma_h != 0.0 && (n + 2.0) * D < 0.01) || host.len() != w.len() {
+        return None;
+    }
+    let (mut a, mut b, mut s_h) = (0.0f64, 0.0f64, 0.0f64);
+    for ((&x, &pk), &g) in w.iter().zip(p).zip(up) {
+        a += f64::from(x).abs() * pk.abs();
+        let term = g * x;
+        b += f64::from(term).abs();
+        s_h += f64::from(term);
+    }
+    let inv = 1.0 / sigma_h.abs();
+    let inv2 = inv * inv;
+    let eps = gamma(n + 2.0) * a * inv;
+    if !(eps.is_finite() && eps < 0.01) {
+        return None;
+    }
+    let ds = LIN_U / (1.0 - LIN_U) * b + n * TINY + gamma(n) * b;
+    let k1 = eps / (1.0 - eps);
+    let k2 = eps * (2.0 + eps) / ((1.0 - eps) * (1.0 - eps));
+    let out: Vec<f64> = (0..w.len())
+        .map(|i| {
+            let (g, pi) = (f64::from(up[i]).abs(), p[i].abs());
+            let t1 = g * inv * k1;
+            let t2 = (ds * inv2 + (s_h.abs() + ds) * inv2 * k2) * pi;
+            let t3 = gamma(5.0) * (g * inv + s_h.abs() * inv2 * pi);
+            let t4 = LIN_U * (1.0 + 2.0 * LIN_U) * f64::from(host[i]).abs() + TINY;
+            (t1 + t2 + t3) * (1.0 + 8.0 * eps) + t4
+        })
+        .collect();
+    out.iter().all(|x| x.is_finite()).then_some(out)
+}
+
+/// [`shadow_check`] の SpectralNorm 用の見積り `B_str·(1 + 16·E·u) + B_host`（要素ごと。係数 1 で渡す）。
+/// `|composed − true| ≤ |composed − host| + |host − true|` の第 2 項を `B_host` が、他の和の順序の構造の
+/// ずれを `B_str` が覆う。どちらかを出せない場合は `None`（従来の `rounding_coeff(N+4)·m_abs` のまま）。
+/// `spectral_norm_cgrad` から呼ばれる。
+pub(super) fn sn_shadow_bound(
+    w: &[f32],
+    p: &[f64],
+    up: &[f32],
+    s: f64,
+    sigma_h: f64,
+    host: &[f32],
+) -> Option<Vec<f64>> {
+    let st = sn_str_bound(w, p, up, s)?;
+    let ho = sn_host_bound(w, p, up, sigma_h, host)?;
+    let b: Vec<f64> = st.iter().zip(&ho).map(|(a, h)| a + h).collect();
+    b.iter().all(|x| x.is_finite()).then_some(b)
 }
 
 /// seed `e_j`（`dW_j` に 1）の二階の逆伝播を構造の演算順で再現し、`W`・`up` への要素を `hw`・`hu` へ書く。
@@ -2057,6 +2146,7 @@ pub(super) fn spectral_norm_cgrad<'c>(
     }
     // `W` に NaN があると判定を外すので、`m` は NaN にしてホストが有限なら照合で拒否する側へ倒す。
     let mut m_abs = vec![if has_nan { f64::NAN } else { 0.0 }; w_data.len()];
+    let mut sh_bound: Option<Vec<f64>> = None;
     if !has_nan {
         let n = w_data.len() as f64;
         let sigma_s: f64 = ws
@@ -2118,6 +2208,9 @@ pub(super) fn spectral_norm_cgrad<'c>(
             sn_coeff(w_data.len()),
             sn_use_lin(w_data.len()),
         )?;
+        let sigma_h = wr::spectral_sigma_host(&w_data, &layout, &u_data, &v_data)
+            .map_err(AutodiffError::Shape)?;
+        sh_bound = sn_shadow_bound(&w_data, &p_exact, &up_data, sf, sigma_h, &host_vec);
     }
 
     // 構造。
@@ -2129,20 +2222,24 @@ pub(super) fn spectral_norm_cgrad<'c>(
     let sp = up.mul(&w_hat)?.sum(None)?.reshape(&[1])?;
     let t = up.sub(&sp.mul(&p_t)?)?;
     let composed = t.div(&sigma_s)?.div(&s_c)?;
-    shadow_check(
-        child,
-        &composed,
-        &host_vec,
-        &m_abs,
-        rounding_coeff(w_data.len() + 4),
-        "SpectralNorm",
-    )?;
+    // 見積り: 出せるときは `Lin` の上界 + ホスト側の丸めの上界（係数 1）、出せないときは従来の
+    // `rounding_coeff(N+4)·m_abs`。`W` に NaN があるときは従来どおり NaN の `m_abs` のまま。
+    match &sh_bound {
+        Some(b) => shadow_check(child, &composed, &host_vec, b, 1.0, "SpectralNorm")?,
+        None => shadow_check(
+            child,
+            &composed,
+            &host_vec,
+            &m_abs,
+            rounding_coeff(w_data.len() + 4),
+            "SpectralNorm",
+        )?,
+    }
     push_v3(child, &composed, Tensor::new(host_vec, &shape)?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::lin::lin_events;
     use super::*;
     use crate::create_graph_norm::STAGE_BOUND_GUARD;
 
@@ -3160,6 +3257,10 @@ mod tests {
         str_err: f64,
         str_req2: f64,
         flag: bool,
+        /// 従来の見積り（`rounding_coeff(N+4)·m_abs`）が全要素を通すか（#4081 の前後比較用）。
+        old_ok: Option<bool>,
+        /// 本番が新しい見積りを使えたか（`None` なら従来式へ戻った）。
+        used_new: bool,
     }
 
     /// 1 入力の計測。公開経路の判定・`sn_judge`／`shadow_check` の余裕・f64 参照との実誤差を求める。
@@ -3217,14 +3318,22 @@ mod tests {
         let host = wr::spectral_norm_vjp_host(&inp.w, &inp.up, &layout, &inp.u, &inp.v).unwrap();
         let (mut sh, mut host_err, mut str_err, mut str_req2, mut flag) =
             (None, f64::NAN, f64::NAN, f64::NAN, false);
+        let (mut old_ok, mut used_new) = (None, false);
         if let Some(m_abs) = m_abs {
             let ch = Tape::new_with_ops(test_ops());
             let w_m = ch.var(&tt(inp.w.clone(), &c.shape));
             let up_v = ch.var(&tt(inp.up.clone(), &c.shape));
             let composed = sn_build(&ch, &w_m, &up_v, &inp.p, s, &c.shape);
             let comp = dense_vec(&child_value(&ch, &composed).unwrap());
-            let coeff = rounding_coeff(n + 4);
-            let res = shadow_check(&ch, &composed, &host, &m_abs, coeff, "SpectralNorm");
+            // 本番と同じ見積り（出せれば `Lin` の上界 + ホスト側の丸めの上界、出せなければ従来式）。
+            let sigma_h = wr::spectral_sigma_host(&inp.w, &layout, &inp.u, &inp.v).unwrap();
+            let bound =
+                sn_shadow_bound(&inp.w, &inp.p_exact, &inp.up, f64::from(s), sigma_h, &host);
+            let (est_vec, coeff) = match &bound {
+                Some(b) => (b.clone(), 1.0),
+                None => (m_abs.clone(), rounding_coeff(n + 4)),
+            };
+            let res = shadow_check(&ch, &composed, &host, &est_vec, coeff, "SpectralNorm");
             let mut worst = Worst::default();
             let mut all_ok = true;
             for i in 0..n {
@@ -3232,12 +3341,21 @@ mod tests {
                 if v.is_nan() {
                     continue;
                 }
-                let err = (vs - v).abs() + coeff * m_abs[i];
+                let err = (vs - v).abs() + coeff * est_vec[i];
                 all_ok &=
                     err < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * v.abs();
-                worst.take(v, vs, m_abs[i], coeff);
+                worst.take(v, vs, est_vec[i], coeff);
             }
             assert_eq!(res.is_ok(), all_ok, "shadow_check の再計算が本番と不一致");
+            used_new = bound.is_some();
+            let oc = rounding_coeff(n + 4);
+            old_ok = Some((0..n).all(|i| {
+                let v = f64::from(host[i]);
+                let err = (f64::from(comp[i]) - v).abs() + oc * m_abs[i];
+                v.is_nan()
+                    || err < ABSOLUTE_RESCUE_THRESHOLD
+                    || err <= (RELATIVE_TOLERANCE / 2.0) * v.abs()
+            }));
             match verdict {
                 SnVerdict::Accepted => assert!(res.is_ok()),
                 SnVerdict::Shadow => assert!(res.is_err()),
@@ -3267,6 +3385,8 @@ mod tests {
             str_err,
             str_req2,
             flag,
+            old_ok,
+            used_new,
         }
     }
 
@@ -3309,6 +3429,58 @@ mod tests {
         out
     }
 
+    /// 計測（`#[ignore]`）: 新しい見積りの内訳（`|composed − host|`・`B_str`・`B_host`）を、余裕が最悪の要素で出す。
+    /// `cargo test -p fandhe-ai-autodiff --release --lib spectral_norm_shadow_bound_breakdown_measurement -- --ignored --nocapture`
+    #[test]
+    #[ignore = "計測。--release で実行する"]
+    fn spectral_norm_shadow_bound_breakdown_measurement() {
+        for (c, _) in sn_followup_candidates() {
+            let inp = sn_inputs(&c);
+            let n = inp.w.len();
+            let layout = wr::spectral_norm_layout(&c.shape, c.dim).unwrap();
+            let host =
+                wr::spectral_norm_vjp_host(&inp.w, &inp.up, &layout, &inp.u, &inp.v).unwrap();
+            let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            let sigma_h = wr::spectral_sigma_host(&inp.w, &layout, &inp.u, &inp.v).unwrap();
+            let st = sn_str_bound(&inp.w, &inp.p_exact, &inp.up, s);
+            let ho = sn_host_bound(&inp.w, &inp.p_exact, &inp.up, sigma_h, &host);
+            let ch = Tape::new_with_ops(test_ops());
+            let w_m = ch.var(&tt(inp.w.clone(), &c.shape));
+            let up_v = ch.var(&tt(inp.up.clone(), &c.shape));
+            let composed = sn_build(
+                &ch,
+                &w_m,
+                &up_v,
+                &inp.p,
+                pow2(pow2_ceil_exponent(mx)),
+                &c.shape,
+            );
+            let comp = dense_vec(&child_value(&ch, &composed).unwrap());
+            let (mut worst, mut at) = (0.0f64, 0usize);
+            for i in 0..n {
+                let v = f64::from(host[i]);
+                let thr = ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * v.abs());
+                let e = (f64::from(comp[i]) - v).abs()
+                    + st.as_ref().map_or(f64::NAN, |b| b[i])
+                    + ho.as_ref().map_or(f64::NAN, |b| b[i]);
+                if e / thr > worst {
+                    (worst, at) = (e / thr, i);
+                }
+            }
+            eprintln!(
+                "SNBRK shape={:?} amp={} alpha={} n={n} worst_ratio={worst:.3e} at={at} |c-h|={:.2e} B_str={:?} B_host={:?} |host|={:.2e}",
+                c.shape,
+                c.amp,
+                c.alpha,
+                (f64::from(comp[at]) - f64::from(host[at])).abs(),
+                st.as_ref().map(|b| b[at]),
+                ho.as_ref().map(|b| b[at]),
+                f64::from(host[at]).abs()
+            );
+        }
+    }
+
     /// 計測（`#[ignore]`）。出力は §81.2 の表の素データ。
     /// `cargo test -p fandhe-ai-autodiff --release --lib spectral_norm_rejection_breakdown_measurement -- --ignored --nocapture`
     #[test]
@@ -3342,7 +3514,7 @@ mod tests {
                 )
             });
             eprintln!(
-                "SNROW {:?}|{:e}|{}|{:?}|{:e}|{:?}|{:.3}|{}|{}|{}|{:.2e}|{:.2e}|{:.2e}|{}",
+                "SNROW {:?}|{:e}|{}|{:?}|{:e}|{:?}|{:.3}|{}|{}|{}|{:.2e}|{:.2e}|{:.2e}|{}|old_ok={:?}|new_est={}",
                 c.shape,
                 c.amp,
                 c.alpha,
@@ -3356,7 +3528,9 @@ mod tests {
                 r.host_err,
                 r.str_err,
                 r.str_req2,
-                if r.flag { "要注意" } else { "" }
+                if r.flag { "要注意" } else { "" },
+                r.old_ok,
+                r.used_new
             );
         }
     }
@@ -3501,13 +3675,16 @@ mod tests {
     }
 
     /// #4079（§81.5）が選んだ入力。各要素は（入力, 現在の判定の種別）。`sn_judge` を `Lin` に置き換えた
-    /// #4080 で、`sn_judge` だけが拒否していた 2 件は受理に変わった。`shadow_check` だけが拒否する 2 件
-    /// （重みの振幅が大きい形）は #4081（`shadow_check` を `Lin` の上界で置き換える）の入力として残す。
+    /// #4080 で `sn_judge` だけが拒否していた 2 件が受理に変わり、`shadow_check` の見積りを `Lin` の上界 +
+    /// ホスト側の丸めの上界に置き換えた #4081 で、`[8, 8]`（amp 1e3・α 0）が受理に変わった。`[16, 16]`
+    /// （amp 1e3・α 2）は `B_str`（`Lin` の上界）が閾値を超えるため拒否のまま。最後の `[16, 16]`
+    /// （amp 1e3・α 0・上流 1）は従来の見積りでは受理だったが、`B_str` が `σ_s` の相殺を含めて追うため
+    /// #4081 で拒否に変わった（§81.9.3）。
     fn sn_followup_candidates() -> Vec<(SnCase, SnVerdict)> {
         vec![
             (
                 sn_case(&[8, 8], 1e3, 0.0, SnUp::General, 1e3),
-                SnVerdict::Shadow,
+                SnVerdict::Accepted,
             ),
             (
                 sn_case(&[16, 16], 1e3, 2.0, SnUp::General, 1e3),
@@ -3519,7 +3696,7 @@ mod tests {
             ),
             (
                 sn_case(&[16, 16], 1e3, 0.0, SnUp::General, 1.0),
-                SnVerdict::Accepted,
+                SnVerdict::Shadow,
             ),
         ]
     }
@@ -3564,10 +3741,7 @@ mod tests {
             let rf = r.sn_rf.unwrap().0.ratio;
             match want {
                 SnVerdict::Shadow => assert!(sn < 1.0 && sh >= 1.0, "{c:?}: sn={sn} sh={sh}"),
-                _ => assert!(
-                    sn < 1.0 && rf >= 1.0 && sh < 1.0,
-                    "{c:?}: Lin {sn} は 1 未満・Rf {rf} は 1 以上・sh={sh}"
-                ),
+                _ => assert!(sn < 1.0 && sh < 1.0, "{c:?}: sn={sn} sh={sh}"),
             }
             let (first, second) = sn_structure_vs_f64(&c);
             eprintln!(
@@ -3599,6 +3773,133 @@ mod tests {
             assert!(first < 1.0, "{c:?}: 1 階 {first}");
             assert!(second < 1.0, "{c:?}: 二階 {second}");
         }
+    }
+
+    /// #4081 で `shadow_check` の見積りを置き換えて受理に変わった入力（従来の見積りは拒否していたもの）の
+    /// 公開経路の 1 階・二階が、f64 の閉じた式と REQ-2 の範囲で一致すること。
+    #[test]
+    fn spectral_norm_newly_accepted_by_shadow_bound_match_f64() {
+        let cases = [
+            sn_case(&[8, 8], 1e3, 0.0, SnUp::General, 1e3),
+            sn_case(&[8, 8], 1.0, 0.0, SnUp::General, 1.0),
+        ];
+        for c in cases {
+            let r = sn_measure(&c);
+            assert_eq!(r.verdict, SnVerdict::Accepted, "{c:?}");
+            assert_eq!(
+                r.old_ok,
+                Some(false),
+                "{c:?}: 従来の見積りは拒否していたはず"
+            );
+            assert!(r.used_new, "{c:?}: 新しい見積りが使われたはず");
+            let (first, second) = sn_structure_vs_f64(&c);
+            assert!(first < 1.0, "{c:?}: 1 階 {first}");
+            assert!(second < 1.0, "{c:?}: 二階 {second}");
+        }
+    }
+
+    /// 健全性（2 成分を別々に）。乱数掃引で (a) 構造側: f32 の再現と、和の順序を変えた再現（要素を逆順・
+    /// 回転に並べ替えて回す）の 1 階が f64 の閉じた式から `B_str` 以内、(b) ホスト側: `spectral_norm_vjp_host`
+    /// の値が f64 の閉じた式から `B_host` 以内。観測差（`|composed − host|`）を足した合成ではなく成分ごとに
+    /// 見るので、どちらかの上界を 0 にすると落ちる。真値の f64 自体の誤差（約 `N·2^-53`）は小さい許容で足す。
+    #[test]
+    fn spectral_norm_shadow_bound_components_cover_deviations() {
+        let (mut tot_bound, mut tot_err) = (0.0f64, 0.0f64);
+        let (mut tot_hbound, mut tot_herr) = (0.0f64, 0.0f64);
+        for shape in [[2usize, 3], [4, 4], [8, 8], [16, 16]] {
+            for amp in [1e-3f32, 1.0, 1e3] {
+                for alpha in [0.0f32, 2.0] {
+                    for scale in [1.0f32, 1e3] {
+                        let c = sn_case(&shape, amp, alpha, SnUp::General, scale);
+                        let inp = sn_inputs(&c);
+                        let n = inp.w.len();
+                        let layout = wr::spectral_norm_layout(&c.shape, c.dim).unwrap();
+                        let host =
+                            wr::spectral_norm_vjp_host(&inp.w, &inp.up, &layout, &inp.u, &inp.v)
+                                .unwrap();
+                        let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+                        let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+                        let sigma_h =
+                            wr::spectral_sigma_host(&inp.w, &layout, &inp.u, &inp.v).unwrap();
+                        let t64 = sn_dw64(&inp.w, &inp.p_exact, &inp.up);
+                        let st = sn_str_bound(&inp.w, &inp.p_exact, &inp.up, s);
+                        let ho = sn_host_bound(&inp.w, &inp.p_exact, &inp.up, sigma_h, &host);
+                        let (Some(st), Some(ho)) = (st, ho) else {
+                            continue;
+                        };
+                        // 真値の f64 自体の誤差の許容（理由: 閉じた式の f64 評価は項の大きさに比例して `~N·2^-53`）。
+                        let mag = |i: usize| {
+                            (f64::from(inp.up[i]).abs() + f64::from(host[i]).abs())
+                                * 8.0
+                                * (n as f64 + 4.0)
+                                * 2f64.powi(-53)
+                        };
+                        // 構造側: 元の順序・逆順・回転。
+                        let orders: Vec<Vec<usize>> = vec![
+                            (0..n).collect(),
+                            (0..n).rev().collect(),
+                            (0..n).map(|i| (i + n / 3) % n).collect(),
+                        ];
+                        for ord in &orders {
+                            let w: Vec<f32> = ord.iter().map(|&i| inp.w[i]).collect();
+                            let p: Vec<f64> = ord.iter().map(|&i| inp.p_exact[i]).collect();
+                            let up: Vec<f32> = ord.iter().map(|&i| inp.up[i]).collect();
+                            let f = sn_fwd::<f32>(&w, &p, &up, s).unwrap();
+                            for (k, &i) in ord.iter().enumerate() {
+                                let err = (f64::from(f.dw[k]) - t64[i]).abs();
+                                assert!(
+                                    err <= st[i] + mag(i),
+                                    "{c:?} i={i}: 構造側の実誤差 {err:e} が B_str {:e} を超えた",
+                                    st[i]
+                                );
+                                tot_err += err;
+                                tot_bound += st[i];
+                            }
+                        }
+                        for i in 0..n {
+                            let err = (f64::from(host[i]) - t64[i]).abs();
+                            assert!(
+                                err <= ho[i] + mag(i),
+                                "{c:?} i={i}: ホスト側の実誤差 {err:e} が B_host {:e} を超えた",
+                                ho[i]
+                            );
+                            tot_herr += err;
+                            tot_hbound += ho[i];
+                        }
+                    }
+                }
+            }
+        }
+        // 上界が桁違いに緩くないこと（0 に潰す変異や、無意味に大きい上界の両方を検出する）。
+        assert!(
+            tot_err > 0.0 && tot_bound / tot_err < 1e4,
+            "{tot_bound:e} / {tot_err:e}"
+        );
+        assert!(
+            tot_herr > 0.0 && tot_hbound / tot_herr < 1e4,
+            "{tot_hbound:e} / {tot_herr:e}"
+        );
+    }
+
+    /// 出せない条件では `None`（呼び出し側が従来の見積りへ戻す。`None` の入力では拒否範囲が広がらない）。
+    /// 新見積り（B_str+B_host）を出せる入力では、従来式で受理だった入力が拒否に変わりうる（意図的。
+    /// `min` を採らず置換にしたのは、従来式の見積りが Lin の上界に包含されない別系統の近似で、健全性を
+    /// 新見積り 1 本の解析に揃えるため。`sn_followup_candidates` のコメントと docs §81.9.3 を参照）。
+    #[test]
+    fn spectral_norm_shadow_bound_falls_back_to_none() {
+        // N が大きく `16·E·u ≥ 0.01` になる形は、領域を作る前に諦める。
+        let n = 4096;
+        let w = vec![1.0f32; n];
+        let p = vec![1.0f64; n];
+        let up = vec![1.0f32; n];
+        assert!(sn_str_bound(&w, &p, &up, 1.0).is_none());
+        assert!(sn_shadow_bound(&w, &p, &up, 1.0, f64::from(n as u32), &vec![0.0; n]).is_none());
+        // `σ_h` が `A` に対して相殺しすぎ（ε ≥ 0.01）なら、ホスト側の上界を出せない。
+        let (w, p, up) = ([1.0f32, -1.0], [1.0f64, 1.0], [1.0f32, 1.0]);
+        assert!(sn_host_bound(&w, &p, &up, 1e-15, &[0.0, 0.0]).is_none());
+        assert!(sn_host_bound(&w, &p, &up, 0.0, &[0.0, 0.0]).is_none());
+        assert!(sn_host_bound(&w, &p, &up, 1.0, &[f32::NAN, 0.0]).is_none());
+        assert!(sn_host_bound(&w, &p, &up, 1.0, &[0.0, 0.0]).is_some());
     }
 
     /// f64 の閉じた式（1 階・二階）が f64 の中央差分と一致すること（計測の真値の検算）。
