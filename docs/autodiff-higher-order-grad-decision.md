@@ -6321,3 +6321,20 @@ f64 の参照は閉じた式（判定の `v` は使わない）:
 ### 82.6 後続の追記先
 
 - #4090／#4091（Cosine）、#4093／#4094（CE・CEWO。#4092 に依存）、#4095／#4096（Triplet）が、それぞれの結果を 82.6 以降へ追記する。82.4 の入力を使い、受理に変えたときの余裕を同じ表の形で記録する。
+
+### 82.7 #4090: Cosine の相殺判定の上界を `Lin` で並行計算する（判定は変えない）
+
+親 #4071 の 1 段目。判定への切り替え（受理に変えること）は #4091 で、本イシューは判定を一切変えない。
+
+- 変更範囲（`crates/autodiff/src/create_graph/`）:
+  - `lin.rs`: `impl Num for f64` を追加（素の f64 演算。`total` は従来の参照実装と同じ `Iterator::sum::<f64>()`）。
+  - `loss_class.rs`: `cosine_cancel_check` が f64 の参照と f32 の再現で 2 回書いていた forward を、総称関数 `cos_fwd<T: Num>`（`CosFwd<T>`）に統一した。`cos_m`・`flag`・`CosSide`・`struct_check`・`fast_ok` は変えていない。
+  - `loss_class.rs`（`#[cfg(test)]` のみ）: 二階の逆伝播のモデル `cos_rev<T: Num>` と、`Lin` の上界を seed ごとに並行計算する `cosine_lin_rows`。本番の経路では `Lin` を計算しない（`d` が最大 4096 の行で seed ごとに O(d²) 個の `Lin` を作ると、結果を判定に使わないまま性能が大きく落ちるため）。#4091 が判定へ配線するときに、`cfg` を外し、走査量の上限（`sn_use_lin` 相当）と、行のスカラー（`m1`・`m2`・`den`・`dot`・`cos`）への `Num::settle` を入れる見込み。
+- `cos_rev` の写し方（`grad.rs` の eager VJP と `eval/scalar.rs::binary_partials` に合わせた丸めの位置）: `Mul` は `上流·相手の値`（丸め 1 回）、`Div` は係数 `1/b` と `−(a/b)/b` を f32 で作ってから上流を掛ける、`Sqrt` は `0.5/y`、`Sub` の ±1 は厳密。複数回使う値への寄与の合算と `[1,1]→[1,d]` の broadcast の縮約は `Num::total`（順序に依らない上界）。`where`・`reshape`・`narrow`・`contiguous`・`Sum` の VJP は値を変えない。
+- テスト（`loss_class_tests.rs`）:
+  - `cosine_fwd_generic_matches_previous_formulas`: 総称化の前の式を逐語でコピーした参照と、`cos_fwd::<f64>`／`cos_fwd::<f32>` の全中間値が bit 一致する（NaN・0・微小値・巨大値の行を含む）。判定を変えていないことの主な錠。
+  - `lin_bound_covers_f32_deviation_for_cosine_sweep`: 乱数の掃引（`d ∈ {1,2,3,8,16,32}`・振幅 `{1e-3,1,1e3}`・`δ ∈ {0,1e-6,1e-4,1e-2,1}`・`y = ±1`・上流 `2^{0,13,20}`）で、手組みの構造の f32 の二階（実際の eager 逆伝播）と `cos_rev::<f32>` の双方について `|実測 − Lin.v| ≤ Lin.bound()·(1 + 16·N·u)` を確かめる。非有限の要素は除く。
+  - `cosine_f32_model_stays_close_to_hand_built_structure`: `cos_rev::<f32>` が手組みの構造と REQ-2 比 1 未満で一致する（縮約の順序の違いで bit 一致しない要素は許す。soundness は上のテストが正）。
+- 実測（上の掃引。debug ビルド）: 検査した要素 343,440、実測の誤差が非 0 の要素 342,710、`dev > 0.1·bound` の要素 4,246、最大の `dev/bound` は 0.445。上界は実測を覆い、かつ空振り（上界が常に桁違いに大きい）ではない。
+- 未測定: `d ≥ 512` の候補（`cosine_followup_candidates()`）での `Lin` の上界と走査量は測っていない。#4091 が測る。GPU 実機 parity は未実測のまま（CPU の値で代替しない）。
+- 変えていないもの: 判定・閾値・本番経路の戻り値とエラー文面・tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・依存・`docs/spec`・公開 API・既存の拒否プローブ。
