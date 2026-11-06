@@ -1639,6 +1639,7 @@ mod tests {
 
     /// 受け入れ条件 2: 幅 2〜64（#4082 で 32 から拡大）の soundness（疎モード）。f32 の再現と和の順序を変えた再現の実測の誤差が、疎モードの
     /// 上界 × 余裕を超えない。`Lin::bound` を 0 にすると失敗する（変異確認は §80.4）。
+    /// 幅 65〜128 は [`lin_bound_covers_f32_deviation_for_weight_norm_sweep_65_to_128`]（§80.6）。
     #[test]
     fn lin_bound_covers_f32_deviation_for_weight_norm_wide_sweep() {
         let mut next = sweep_rng();
@@ -1696,6 +1697,119 @@ mod tests {
         lin_reset();
         assert!(checked > 1000, "検査した要素数 {checked}");
         assert!(tight > 0, "上界が実測より桁違いに大きい");
+    }
+
+    /// 幅 65〜128（#4082 で `Lin` の適用範囲に加えた範囲。§80.6）の掃引の幅の表。96・128・奇数幅を含み、
+    /// 上限 `LIN_REST_MAX` ちょうどの 128 を必ず含める。
+    const WIDE_RESTS: [usize; 8] = [65, 72, 81, 96, 100, 113, 127, 128];
+
+    /// 幅 65〜128 用の入力生成。`variant` 0〜5 は 振幅 {1e-3, 1, 1e3} × 符号パターン
+    /// {符号付き一様, 正のみ `[0.2, 1.0)·amp`}。`up`・`g`・`s` の作り方は [`wn_sweep_input`] と同じ。
+    fn wn_sweep_input_at(
+        rest: usize,
+        variant: usize,
+        next: &mut impl FnMut() -> f64,
+    ) -> BenchInput {
+        let amp = [1e-3, 1.0, 1e3][variant % 3];
+        let signed = variant < 3;
+        let v: Vec<f32> = (0..rest)
+            .map(|_| {
+                if signed {
+                    ((next() * 2.0 - 1.0) * 2.0 * amp) as f32
+                } else {
+                    ((0.2 + 0.8 * next()) * amp) as f32
+                }
+            })
+            .collect();
+        let up: Vec<f32> = (0..rest)
+            .map(|_| ((next() * 2.0 - 1.0) * 3.0) as f32)
+            .collect();
+        let g = (0.05 + next() * 2.0) as f32;
+        let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+        (v, up, g, s)
+    }
+
+    /// 受け入れ条件 2（#4117）: 幅 65〜128（96・128 を含む 8 幅 × 6 ケース）の soundness（疎モード）。
+    /// 照合の本体は [`lin_bound_covers_f32_deviation_for_weight_norm_wide_sweep`] と同じ（幅 2〜64 の入力列と
+    /// 乱数の消費順を変えないため別テストにし、本体は複製した）。`Lin::bound` を 0 にすると失敗する（変異確認は §80.6）。
+    /// 上界の緩さ（tight > 0）は幅 65〜128 では成立しないため合否にしない（§80.6）。
+    /// 幅ごとの被覆も fail-closed に検査する（`wn_fwd` が `None` で幅が黙って消えるのを防ぐ）。
+    #[test]
+    fn lin_bound_covers_f32_deviation_for_weight_norm_sweep_65_to_128() {
+        let mut next = sweep_rng();
+        let (mut checked, mut tight) = (0usize, 0usize);
+        for &rest in &WIDE_RESTS {
+            let (mut w_checked, mut w_tight, mut w_cases) = (0usize, 0usize, 0usize);
+            let mut max_ratio = 0.0f64;
+            for variant in 0..6 {
+                let (v, up, g, s) = wn_sweep_input_at(rest, variant, &mut next);
+                if v.iter().all(|&x| x == 0.0) {
+                    continue;
+                }
+                lin_reset_sparse();
+                let (Some(fl), Some(fs), Some(fa)) = (
+                    wn_fwd::<Lin>(&v, &up, g, s),
+                    wn_fwd::<f32>(&v, &up, g, s),
+                    wn_fwd::<F32Rev>(&v, &up, g, s),
+                ) else {
+                    continue;
+                };
+                w_cases += 1;
+                let mark = lin_mark();
+                for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+                    lin_truncate(mark);
+                    let (mut hv_l, mut hu_l) = (vec![Lin::k(0.0); rest], vec![Lin::k(0.0); rest]);
+                    let (mut hv_s, mut hu_s) = (vec![0f32; rest], vec![0f32; rest]);
+                    let (mut hv_a, mut hu_a) = (vec![F32Rev(0.0); rest], vec![F32Rev(0.0); rest]);
+                    let gl = wn_rev(&fl, seed, &mut hv_l, &mut hu_l);
+                    let gs = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+                    let ga = wn_rev(&fa, seed, &mut hv_a, &mut hu_a);
+                    let slack = 1.0 + 16.0 * lin_events() as f64 * LIN_U;
+                    let mut pairs: Vec<(Lin, f32, f32)> = (0..rest)
+                        .flat_map(|i| {
+                            [(hv_l[i], hv_s[i], hv_a[i].0), (hu_l[i], hu_s[i], hu_a[i].0)]
+                        })
+                        .collect();
+                    if let (Some(gl), Some(gs), Some(ga)) = (gl, gs, ga) {
+                        pairs.push((gl, gs, ga.0));
+                    }
+                    for (l, f, a) in pairs {
+                        if !l.v.is_finite() || !f.is_finite() || !a.is_finite() {
+                            continue;
+                        }
+                        let bound = l.bound() * slack;
+                        for actual in [f, a] {
+                            let dev = (f64::from(actual) - l.v).abs();
+                            assert!(
+                                dev <= bound,
+                                "rest {rest} variant {variant}: 実測の誤差 {dev:e} が上界 {bound:e} を超えた（V = {:e}）",
+                                l.v
+                            );
+                            w_checked += 1;
+                            if dev > 0.1 * bound {
+                                w_tight += 1;
+                            }
+                            if bound > 0.0 {
+                                max_ratio = max_ratio.max(dev / bound);
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "[4117] rest {rest}: cases {w_cases} checked {w_checked} tight {w_tight} max(dev/bound) {max_ratio:e}"
+            );
+            assert!(w_cases >= 2, "rest {rest}: 照合できたケースが {w_cases}");
+            assert!(w_checked > 0, "rest {rest}: 検査した要素が無い");
+            checked += w_checked;
+            tight += w_tight;
+        }
+        lin_reset();
+        assert!(checked > 1000, "検査した要素数 {checked}");
+        // 幅 65〜128 では tight（dev > 0.1·bound）が 0 になる（上界が緩い側。§80.6）。0.1 の係数は緩めず、
+        // soundness（dev <= bound）だけを合否にし、緩さは最大比の出力（上の eprintln）で記録する。
+        eprintln!("[4117] total checked {checked} tight {tight}");
     }
 
     /// 乱数の演算列を疎モードまたは厳密モードで走らせ、作った値すべての `(v, t, 上界)` を返す
