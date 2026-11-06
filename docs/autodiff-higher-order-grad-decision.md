@@ -5672,6 +5672,21 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 - tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`docs/spec`・公開 API。GPU 実機 parity は未実測。
 
+## 80. 実装記録（イシュー #4074 系・親 #4097／#4101。`Lin` の共通化と WeightNorm の一次伝播の適用範囲）
+
+### 80.0 位置づけ
+
+- §79 で入れた丸めの一次伝播の数値型 `Lin` を、SpectralNorm・LRN（#4073）や損失のクラス軸系（#4071）が使えるよう共通モジュールへ切り出す系統の記録。本節は挙動不変のリファクタで、新たな承認は主張しない。兄弟（#4076〜#4078・#4082）の記録は後続の小節へ追記する。
+
+### 80.1 #4075: `Num`・`Lin` の `create_graph/lin.rs` への切り出し
+
+- 移したもの: `Num` trait と `impl Num for f32`、`Lin`・`LinArena`・`LIN_ARENA`・`LIN_U`・`LIN_TINY`・`LIN_REST_MAX`・`LIN_BUDGET`・`lin_group_cost`・`lin_reset`・`lin_mark`・`lin_truncate`・`lin_events`・`lin_comb`・`impl Num for Lin`・`entry_check_lin`。
+- 残したもの: norm 専用の `Rf`・`Dm`・`entry_check`・`*_coeff`・`JUDGE_BUDGET` 等（`norm_reparam.rs`）。
+- `entry_check_lin` は `judge::Reject`（`reject: fn(&str) -> AutodiffError`）を最後の引数に取る。呼び出し側（`wn_group_judge`）は従来の `invalid` を渡すので、エラー文面（`format!` のリテラルと族名・節番号の接尾辞）は byte 同一。
+- 可視性は `pub(super)` に留めた（`create_graph` は private モジュール）。`Lin` のフィールドと補助関数は `lin.rs` 内に閉じる。
+- テスト: `F32Rev`・`lin_bound_covers_f32_deviation_for_weight_norm_sweep`・`wn_group_judge_modes_agree_on_easy_group` を `lin.rs` へ移した（中身は不変）。これらが使う `wn_fwd`・`wn_rev`・`WnSeed`・`WnFwd`・`wn_group_judge`・`wn_coeff`・`pow2` を `norm_reparam.rs` で `pub(super)` に上げた。
+- 変えていないもの: tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_REST_MAX`／`LIN_BUDGET` の値・拒否範囲・依存・公開 API・`docs/spec`。GPU 実機 parity は未実測（`#[ignore]` のまま）。
+
 ## 81. 計測・設計記録（イシュー #4079・親 #4073。SpectralNorm の create_graph の拒否の内訳と係数 `N+4` の由来）
 
 ### 81.0 位置づけ
