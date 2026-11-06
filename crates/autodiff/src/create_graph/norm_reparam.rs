@@ -228,7 +228,7 @@ fn lrn_judge_cost(ncols: usize, c: usize, w: LrnWin, nchunks: usize) -> usize {
 /// （`groups` 個・長さ `rest`）ごとに、forward が長さ `rest` の走査 18 回（`v_s`・`up`・`Σv_s²`・`v̂`・
 /// Div 係数・`dg`・`t`・`dv` と ±inf の検査 5 本・NaN の位置の照合 5 本）、seed（`rest + 1` 個）ごとに逆伝播が 5 回（作業領域の
 /// 確保・`up` への要素の初期化・`dg`・`v̂`・`v_s` の逆伝播）と判定が `2·rest + 1`。
-fn wn_judge_cost(groups: usize, rest: usize) -> usize {
+pub(super) fn wn_judge_cost(groups: usize, rest: usize) -> usize {
     let per_seed = rest.saturating_mul(7).saturating_add(1);
     let per_group = rest
         .saturating_mul(18)
