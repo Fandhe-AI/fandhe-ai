@@ -71,7 +71,7 @@
   **（#3965 で変更）** 有限入力の lane は `out` を経由せず、入力どうしの差（prefix 最大値 `m`・正規化和 `Z`）から
   係数 `c[j] = lead[j+1]/Z[j+1]`・`w[j] = exp(x[j]-m[j])/Z[j]` を作る。大きな共通オフセット（`[1e30,1e30]`）で
   `out` の差が f64 でも消えて勾配が誤る問題の修正。非有限を含む lane は従来式のまま。詳細は
-  `autodiff-higher-order-grad-decision.md` §77。
+  `autodiff-higher-order-grad-decision.md` §78。
   `out` は単調非減少で `x[j] <= out[j]` のため指数の引数は常に 0 以下で overflow しない。O(n²) の直接形は
   テスト用オラクル限定。作業バッファは lane 長の `Vec<f64>` 1 本のみ。
 

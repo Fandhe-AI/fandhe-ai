@@ -2431,6 +2431,16 @@ fn build_cgrads<'c>(
                     child.var_no_grad(&Tensor::zeros(&shape)?)
                 } else {
                     let n = class_sample_count(&shape, class_dim);
+                    // 確信度の高い行の Softmax 曲率消失（#3954・設計 §77）を子テープへ積む前に拒否する。
+                    loss_class::ce_cancel_check(
+                        parent,
+                        &parent_nodes,
+                        logits,
+                        &targets,
+                        class_dim,
+                        reduction,
+                        &child_value(child, &g)?,
+                    )?;
                     let s_b = loss_scale_bcast(child, &g, reduction, false, n, &shape)?;
                     let onehot = child.var_no_grad(&onehot_f32(&targets, &shape, class_dim)?);
                     let y = logits_m.softmax(class_dim)?;

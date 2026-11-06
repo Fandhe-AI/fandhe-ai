@@ -246,7 +246,7 @@ pub fn logcumsumexp_host(x: &[f32], layout: &CumulativeLayout) -> Result<Vec<f32
 /// `d_x[j] = Σ_{i>=j} g[i]·exp(x[j] - out[i])` を O(n) の逆向き再帰で求める:
 /// `T[n-1] = g[n-1]`・`T[j] = g[j] + c[j]·T[j+1]`・`d_x[j] = w[j]·T[j]`。係数 `c`・`w` は
 /// 出力 `out`（prefix の logsumexp）を経由せず入力どうしの差だけから作る（イシュー #3965。
-/// `docs/autodiff-higher-order-grad-decision.md` §77）。`out` の差から作ると、大きな共通オフセット
+/// `docs/autodiff-higher-order-grad-decision.md` §78）。`out` の差から作ると、大きな共通オフセット
 /// の上の小さな差（`[1e30, 1e30]` の `ln 2`）が `f64` でも `x + ln 2 == x` で消え、係数が 1 に
 /// 潰れて勾配が誤る。prefix 最大値 `m[k] = max_{i<=k} x[i]` と正規化和
 /// `Z[k] = Σ_{i<=k} exp(x[i] - m[k])`（`[1, k+1]`）を

@@ -4444,6 +4444,8 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 ### 55.2 設計（§40）からの差・明確化
 
+（既定オプションの `CrossEntropyLoss` への同判定の適用は §77。）
+
 - **`Op::VectorNorm`／`Op::PNorm` を使わない理由**: §40 の基準 sha 以降、`VectorNorm`（L1・L2）と `PNorm` は #3942（§52）で `supports_create_graph` が `true` になった。それでも Cosine・Triplet のノルムは §40.10 のとおり `Mul`・`Sum`・`Sqrt`・`Div`（Triplet は `Abs`・`PowScalar`）で手に組み、S1 の行スケールと `ε → ε/s²` の変換を入れた。承認は S1 の構造（スケール・`ε/s²` の扱い・総括判定）に対して出ており、`norm_l2`／`norm_p` への簡略化はその前提を変えるため。
 - Triplet のスケール `mx` は、設計の「2 のべき乗」ではなく**行ごとの差分の最大絶対値**（ホスト定数）にした。2 のべき乗に切り上げると最大要素が `(0.5, 1]` に入り、`p` が大きいとき（`p = 1024` 等）`Σ(|v|/mx)^p` が f32 で 0 に潰れて `norm'` が 0 になるため。最大絶対値で割れば最大要素が約 1 になり、`norm' ≥ 約 1` が保たれる。`1/mx` が f32 で表せない小さな差分（`max|v| < 2^-100`、全要素 0 の行を除く）は拒否する。Cosine は `norm'` が `ε'` 側でも `m' ≥ 約 0.25` となるので、設計どおり 2 のべき乗を使う。
 - Triplet の `1<p<2` で差分が 0 のレーンは、**活性でない行も含めて**拒否する。非活性行の構造にも `PowScalar(p−1)` が積まれ、`0·inf = NaN` が二階へ混ざるのを避けるため（設計は「二階が発散するので拒否」。承認は論点 5 の拒否）。`p = 1`・`p = 2`・`p > 2` では差分 0 のレーンを受理する（p=2 は `u/norm'` で曲率を保つ）。
@@ -5562,25 +5564,61 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - ホストの SVD を入口・cgrad・子テープ再生で複数回行う費用は §75.3 で受容済み。
 - 変えていないもの: `svd_vjp`・`matrix_norm_vjp`、forward、`Tape::backward`、`Op` の payload、`AutodiffError` の variant、`guard_svd` のシグネチャ、依存、`docs/spec`。
 
-## 77. 実装記録（イシュー #3965。`logcumsumexp` の 1 階 VJP の共通オフセット修正）
+## 77. 実装記録（イシュー #3954・親 #3719 系。既定 `CrossEntropyLoss` の create_graph の相殺の総括判定）
 
-### 77.1 症状と原因
+### 77.0 位置づけ
+
+- 状態: 実装済み。#3947（#3800）のレビューで発見された §55.2（相殺の総括判定）の漏れの修正である。#3767 で承認済みの B 区分の方針の範囲内の欠陥修正で、新たな承認を上乗せしては主張しない。
+
+### 77.1 原因
+
+- 既定オプションの `cross_entropy_loss`／`cross_entropy_loss_with`（既定値）は `Op::CrossEntropyLoss` に落ち、`build_cgrads` の腕は構造 `s_b⊙(softmax(x) − onehot)` を相殺の総括判定なしで積んでいた。
+- 確信度の高い行では f32 の Softmax の VJP `y(1−y)` が、`y_t` が 1 に丸まって 0 になる。例: logits=[0, 20]・target=1 の f64 参照は `y0·y1 ≈ 2.06e-9`。上流係数が 1e4 なら 2.06e-5、1e6 なら 2.06e-3 になり、REQ-2 の統一複合判定を外れる値を沈黙で返していた。
+- `CrossEntropyLossWithOptions` 側は §55.2 の `cewo_cancel_check` で拒否済みだった。既存テスト `cewo_confident_row_softmax_curvature_is_rejected_or_exact` は `class_weight=[1,1]` を明示して CEWO へ迂回しており、既定側が検査の外に残っていた。
+
+### 77.2 修正
+
+- `loss_class.rs::ce_cancel_check` を追加し、`Op::CrossEntropyLoss` の腕で子テープへ何かを積む前に呼ぶ。既定 CE は CEWO の特殊ケース（`A = 1`・`B = onehot`・`W = n`、重み全 1・ε = 0・ignore なし）なので `cewo_cancel_check` をそのまま再利用し、構造は変えない。
+- 非有限の `g` を新たに拒否することはしない（既存の受理挙動を保つ。NaN は素通し、inf は上界が非有限になり自然に拒否される）。CEWO 並みの `stage`／`reject_inf` の厳格化は本節のスコープ外。
+- 範囲外の target は 1 階・onehot と同じくスキップする。計算量は O(N·C)（外れる行のみ O(C²)）。
+
+### 77.3 保証範囲
+
+- 保証は判定を通った入力に限る（§55.2・§27.3 と同じ書き方）。拒否は保守的で、許容内の入力も拒否しうる。確信度の高い行で上流係数が大きい場合や C が大きい場合が該当する。三階以上と、1 要素でない seed の縮約の相殺は対象外。
+
+### 77.4 テスト
+
+- `crates/autodiff/tests/create_graph_loss_class.rs` の `ce_default_confident_row_softmax_curvature_is_rejected_or_exact`（Sum・Mean(n=1)・既定オプション委譲。係数 1・1e2・1e4・1e6・1e10 を振り、受理なら f64 閉形式と REQ-2 で一致、拒否なら `child` が空、1e4 以上は拒否）と `ce_default_moderate_logits_still_accepted`（通常の logits は受理され続ける）。
+- 変異確認（実測）: `ce_cancel_check` を即 `Ok(())` にするとプローブは 1e4 以上の係数の受理で失敗した。確認後に元へ戻した。
+- 既存の create_graph 系テストは無変更で通る。
+
+### 77.5 GPU
+
+- 1 階は既定 CE のホスト／デバイス経路に変更なし。親の変更は検査のみで、GPU 実機 parity は未実測のまま（`#[ignore]`、baseline は作らない）。
+
+### 77.6 変えていないもの
+
+- tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・1 階の VJP・forward・依存・`docs/spec`・公開 API。
+
+## 78. 実装記録（イシュー #3965。`logcumsumexp` の 1 階 VJP の共通オフセット修正）
+
+### 78.1 症状と原因
 
 - `tensor_core::cumulative::logcumsumexp_vjp_host` は f64 の prefix `out` の差 `exp(out[j] - out[j+1])`・`exp(x - out)` を係数にしていた。`x` が大きいと f64 でも `x + ln 2 == x` と丸まり、係数の情報が消える。
 - 素の `Tape::backward` で `x=[1e30,1e30]` が `g=[0,1]` で `[1,1]`（真値 `[0.5,0.5]`）、`g=[1,1]` で `[2,1]`（真値 `[1.5,0.5]`）になっていた。create_graph は §64 で拒否側に倒していたが、1 階そのものは誤ったままだった（§64.4 の「既知の差」）。
 
-### 77.2 修正
+### 78.2 修正
 
 - 係数を `out` を経由せず入力どうしの差だけから作る（PR #3959 の `lcse_ref_coeffs` と同型）。prefix 最大値 `m[k]` と正規化和 `Z[k] = Σ exp(x[i] - m[k])` を `lead[k] = Z[k-1]·exp(m[k-1] - m[k])`・`Z[k] = lead[k] + exp(x[k] - m[k])` で求め、`c[j] = lead[j+1]/Z[j+1]`・`w[j] = exp(x[j] - m[j])/Z[j]`。指数の引数は常に 0 以下で、共通オフセット不変・overflow なし。逆向き再帰 `T[j] = g[j] + c[j]·T[j+1]`・`d_x[j] = w[j]·T[j]` は従来と同じ。
 - 参照（`lcse_ref_coeffs`）は create_graph の独立な突き合わせ（§64.2）のため実装を共有しない。
 - 非有限（NaN・±inf）を含む lane は従来の prefix の差の式のまま残した。実測で、新式をそのまま使うと `[inf, 0]`（旧 `[NaN, 0]`→新 `[NaN, NaN]`）・`[0, inf]`（旧 `[1, NaN]`→新 `[NaN, NaN]`）のように NaN／有限のクラスが変わり、PyTorch fixture との一致数（`cumulative_parity` の 9 一致・4 不一致）が 8 一致に後退したため。非有限 lane の値・クラスは bit 同一で、拒否もしない。
 
-### 77.3 旧実装との差の実測
+### 78.3 旧実装との差の実測
 
 - `cfg(test)` の旧式 `logcumsumexp_vjp_legacy` と、決定的な LCG 入力（`n` 1〜64 × スケール 0.5／8／40）6240 要素を比較した。f32 downcast 後の bit 差は 0 件、最大 ULP 差 0（実行環境 x86_64 Linux。libm 依存のため他環境での bit 一致は保証しない）。一般には式が変わるので bit 一致は保証しないが、REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）内に収まることを必須アサートにした。
 - rank 3（`dim` 0／1／2）の多 lane でも旧式と一致し、run-to-run で bit 同一。`x=[-1000,1000]` で有限。f32 で厳密な +128 シフトで結果が一致（共通オフセット不変）。
 
-### 77.4 GPU・変えていないもの
+### 78.4 GPU・変えていないもの
 
 - GPU（CUDA・Metal・ROCm）に `logcumsumexp` の VJP カーネルは無い（`crates/backend-{cuda,metal,rocm}/src` を grep して該当なし。backend-cpu の `scan_logcumsumexp` は forward のみ）。1 階はこのホスト関数を全バックエンドが共用するので GPU の修正は不要。GPU 実機 parity は未実測のまま、新しい baseline は作らない。
 - create_graph: 構造側の `c32 = exp(ol[j]-ol[j+1])`（f32 の `out` から作る）は変えていないので、`[1e30,1e30]` 等は係数の照合・第 2 軸で引き続き拒否される。ホストの 1 階の照合だけが受理に変わり、`host_ref_check_rules` と `logcumsumexp_check_rejects_common_offset_loss` の期待値を更新した。
