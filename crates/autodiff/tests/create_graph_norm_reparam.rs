@@ -1216,6 +1216,7 @@ fn lrn_nan_column_scale_ignores_values_only_in_nan_windows() {
         "{h:e} と {h_ref:e}"
     );
 }
+
 // --- 5. 総括判定の拒否範囲の縮小（イシュー #3955・決定記録 §77）------------------------------
 
 /// `(Σ tanh(g_k·v_k/‖v_k‖))²` の f64 の値。入力は `x = [v(groups·rest); g(groups)]`。

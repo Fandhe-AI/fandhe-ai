@@ -682,6 +682,7 @@ fn entry_check_lin(r: Lin, s: f32, what: &str) -> Result<(), AutodiffError> {
         "{what}: 二階の要素が f32 構造の丸め・相殺・underflow・overflow で REQ-2 の判定を外れうるため拒否"
     )))
 }
+
 /// 入力の NaN の依存を追う数値型（[`lrn_col_scan`] 等の走査用）。`nan` は値が入力の NaN で NaN になること、
 /// `mx` はその値が依存する入力 `x`（[`Num::input`] で載せた値）の最大絶対値。NaN の伝わり方は構造の f32 の
 /// 演算と同じにする: 四則・`√` は被演算子のどれかが NaN なら NaN（`0·NaN = NaN` なので定数 0 も特別扱い
@@ -3104,6 +3105,7 @@ mod tests {
         assert!(judge_budget(wn_judge_cost(1, 4400), "t").is_err());
         assert!(judge_budget(sn_judge_cost(6000), "t").is_err());
     }
+
     /// 和の順序だけが [`f32`] と違う再現（多項の和を末尾から足す）。実カーネルの和の順序が違っても
     /// [`Lin`] の上界が覆うこと（[`Num::total`] の順序非依存）を確かめるために使う。
     #[derive(Clone, Copy)]
