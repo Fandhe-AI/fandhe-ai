@@ -441,9 +441,10 @@ impl CeCase {
         };
         seed_list
             .iter()
-            .filter_map(|&j| {
-                let r = child_rows(&child, &dx, j, &[&x_m, &g])?;
-                Some((j, r[0].clone(), r[1][0]))
+            .map(|&j| {
+                let r = child_rows(&child, &dx, j, &[&x_m, &g])
+                    .unwrap_or_else(|| panic!("CE: seed {j} の子テープの逆伝播が失敗"));
+                (j, r[0].clone(), r[1][0])
             })
             .collect()
     }
@@ -519,13 +520,17 @@ impl CeCase {
         let (verdict, _) = self.public();
         let sd = seeds(self.c, &[CE_TARGET, CE_TARGET + 1, self.c / 2]);
         let (mut x, mut g) = (Acc::default(), Acc::default());
-        for (j, row, gval) in self.hand_rows(&sd) {
+        let rows = self.hand_rows(&sd);
+        assert_eq!(rows.len(), sd.len(), "CE: 計測した seed 数が予定と違う");
+        for (j, row, gval) in rows {
             let (rf, gv, mabs, gm) = self.reference(j);
             for i in 0..self.c {
                 x.add(row[i], rf[i], mabs[i]);
             }
             g.add(gval, gv, gm);
         }
+        assert_eq!(g.n, sd.len(), "CE: g の計測数が seed 数と違う");
+        assert_eq!(x.n, sd.len() * self.c, "CE: x の計測数が違う");
         Meas {
             verdict,
             x: Some(x),
@@ -671,10 +676,12 @@ impl CosCase {
         .unwrap();
         seed_list
             .iter()
-            .filter_map(|&j| {
-                let r1 = child_rows(&child, &dx1, j, &[&a_m, &b_m, &g])?;
-                let r2 = child_rows(&child, &dx2, j, &[&a_m, &b_m, &g])?;
-                Some((j, [r1, r2]))
+            .map(|&j| {
+                let r1 = child_rows(&child, &dx1, j, &[&a_m, &b_m, &g])
+                    .unwrap_or_else(|| panic!("Cosine: seed {j} の dx1 の逆伝播が失敗"));
+                let r2 = child_rows(&child, &dx2, j, &[&a_m, &b_m, &g])
+                    .unwrap_or_else(|| panic!("Cosine: seed {j} の dx2 の逆伝播が失敗"));
+                (j, [r1, r2])
             })
             .collect()
     }
@@ -728,7 +735,13 @@ impl CosCase {
         let (verdict, _) = self.public();
         let sd = seeds(self.d, &[]);
         let (mut x, mut g) = (Acc::default(), Acc::default());
-        for (j, rows) in self.hand_rows(&sd) {
+        let all_rows = self.hand_rows(&sd);
+        assert_eq!(
+            all_rows.len(),
+            sd.len(),
+            "Cosine: 計測した seed 数が予定と違う"
+        );
+        for (j, rows) in all_rows {
             for side in 0..2 {
                 let (h, gv, m, gm) = self.reference(side, j);
                 // wrt は [a, b, g]。side 0 は own = a・other = b、side 1 は逆。
@@ -740,6 +753,8 @@ impl CosCase {
                 g.add(rows[side][2][0], gv, gm);
             }
         }
+        assert_eq!(g.n, 2 * sd.len(), "Cosine: g の計測数が違う");
+        assert_eq!(x.n, 4 * self.d * sd.len(), "Cosine: x の計測数が違う");
         Meas {
             verdict,
             x: Some(x),
@@ -834,9 +849,19 @@ impl TriCase {
                 }
             })
             .collect();
+        // swap なしは `a − n ≈ [−2, …]`（`d_an > d_ap` 側で `p − n` の距離が大きい）。swap ありは `p − n` を
+        // `a − n` より近くする配置（`p − n = [0.5, …]`、`a − n = (a − p) + (p − n) = [1.5, …]`）にして
+        // `d_pn < d_an` とし、`an_coeff = 0`・`c_pn = 1` の `g_pn`／`epn` 経路（Bugbot 指摘）を実際に通す。
         let van: Vec<f32> = (0..self.d)
             .map(|k| {
-                if k == 0 {
+                if self.swap {
+                    let vpn = if k == 0 {
+                        0.5
+                    } else {
+                        self.ratio * (0.7 + 0.2 * ((k as f32) * 0.5).cos())
+                    };
+                    vap[k] + vpn
+                } else if k == 0 {
                     -2.0
                 } else {
                     self.ratio * (0.7 + 0.2 * ((k as f32) * 0.5).cos())
@@ -975,12 +1000,16 @@ impl TriCase {
         Some(
             seed_list
                 .iter()
-                .filter_map(|&j| {
-                    let r: Option<Vec<_>> = outs
+                .map(|&j| {
+                    let r: Vec<_> = outs
                         .iter()
-                        .map(|o| child_rows(&child, o, j, &[&a_m, &p_m, &n_m, &g]))
+                        .map(|o| {
+                            child_rows(&child, o, j, &[&a_m, &p_m, &n_m, &g]).unwrap_or_else(|| {
+                                panic!("Triplet: seed {j} の子テープの逆伝播が失敗")
+                            })
+                        })
                         .collect();
-                    Some((j, r?))
+                    (j, r)
                 })
                 .collect(),
         )
@@ -1050,6 +1079,11 @@ impl TriCase {
                 g: None,
             };
         };
+        assert_eq!(
+            rows.len(),
+            sd.len(),
+            "Triplet: 計測した seed 数が予定と違う"
+        );
         let (mut x, mut g) = (Acc::default(), Acc::default());
         for (j, per_out) in rows {
             let r = self.reference(j);
@@ -1062,6 +1096,8 @@ impl TriCase {
                 g.add(per_out[o][3][0], r.g[o].0, r.g[o].1);
             }
         }
+        assert_eq!(g.n, 3 * sd.len(), "Triplet: g の計測数が違う");
+        assert_eq!(x.n, 9 * self.d * sd.len(), "Triplet: x の計測数が違う");
         Meas {
             verdict,
             x: Some(x),
@@ -1238,6 +1274,12 @@ fn triplet_hand_built_structure_matches_public_path() {
             exp,
         };
         assert_eq!(c.public().0, Verdict::Accept, "{c:?}");
+        // swap あり: `g_pn`／`epn` の項を実際に通す配置（`c_pn = 1`）であること。
+        assert_eq!(
+            c.coefs(),
+            if swap { (0.0, 1.0) } else { (1.0, 0.0) },
+            "{c:?}"
+        );
         let sd: Vec<usize> = (0..c.d).collect();
         let hand = c.hand_rows(&sd).expect("pair_info を通る");
         let idx: Vec<usize> = (0..3 * c.d).collect();
@@ -1361,6 +1403,7 @@ fn triplet_closed_form_matches_f64_central_difference() {
         };
         let (a0, p0, n0) = c.f64_inputs();
         let (c_an, c_pn) = c.coefs();
+        assert_eq!(c_pn == 1.0, swap, "{c:?}: swap ありは c_pn を通す");
         let pe = f64::from(p);
         let core = |v: &[f64]| -> Vec<f64> {
             let nn = v
@@ -1488,6 +1531,7 @@ fn loss_class_followup_candidates_are_req2_within_f64() {
         check(&format!("{c:?}"), c.measure(), false);
     }
     for (k, c) in triplet_followup_candidates().into_iter().enumerate() {
+        assert_eq!(c.coefs().1 == 1.0, c.swap, "{c:?}: swap ありは c_pn を通す");
         check(&format!("{c:?}"), c.measure(), k == 4);
     }
 }
