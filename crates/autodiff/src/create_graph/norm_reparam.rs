@@ -261,6 +261,22 @@ fn sn_lin_events_max(n: usize) -> usize {
     20usize.saturating_mul(n).saturating_add(16)
 }
 
+/// WeightNorm の疎モードの [`Lin`] 版の事象数 `N`（forward の分と seed 1 回分の逆伝播の分）の上界。実測の最大は
+/// 約 `34·rest + 12`（幅 2〜256・振幅 1e-3〜1e3。厳密モードの `18·rest + 17` の約 2 倍）に余裕を乗せて
+/// `40·rest + 40` とする。テスト `wn_lin_events_stay_within_bound` が固定する（決定記録 §80.5）。
+fn wn_lin_events_max(rest: usize) -> usize {
+    40usize.saturating_mul(rest).saturating_add(40)
+}
+
+/// WeightNorm の総括判定で [`Lin`] を選ぶか（テンソル単位）。幅が [`LIN_REST_MAX`] 以下、走査量が
+/// [`LIN_BUDGET`] 以内、かつ事象の総数が余裕係数の上限（`16·事象数·u < 0.01`）に収まるときだけ。収まらない
+/// テンソルは従来の [`Rf`] のままにする（`sn_use_lin` と同じ方針。#4082・§80.5）。
+fn wn_use_lin(groups: usize, rest: usize) -> bool {
+    rest <= LIN_REST_MAX
+        && groups.saturating_mul(lin_group_cost(rest)) <= LIN_BUDGET
+        && 16.0 * wn_lin_events_max(rest) as f64 * LIN_U < 0.01
+}
+
 /// SpectralNorm の総括判定で [`Lin`] を選ぶか。走査量が [`LIN_BUDGET`] 以内で、かつ事象の総数が
 /// [`entry_check_lin`] の余裕係数の上限（`16·事象数·u < 0.01`）に収まるときだけ。収まらないテンソルは従来の
 /// [`Rf`] のままにする（`Lin` を選んで全要素が余裕係数の上限で拒否される、という拒否範囲の拡大を避ける）。
@@ -1564,7 +1580,7 @@ fn wn_group_all_nan(v: &[f32], up: &[f32], g: f32) -> bool {
 
 /// WeightNorm の 1 グループの総括判定。seed が 1 要素（`dv` の各要素と `dg`）のときの二階
 /// （`v`・`up`・`g` への要素）を判定する。`use_lin` なら丸めの一次伝播を事象ごとに追う [`Lin`]
-/// （[`entry_check_lin`]。呼び出し側が幅 [`LIN_REST_MAX`] 以下かつ走査量 [`LIN_BUDGET`] 以内で選ぶ）、
+/// （[`entry_check_lin`]。呼び出し側が [`wn_use_lin`] で選ぶ）、
 /// そうでなければ従来の [`Rf`] と係数 `coeff`（[`entry_check`]）。
 pub(super) fn wn_group_judge(
     v: &[f32],
@@ -1698,7 +1714,7 @@ pub(super) fn weight_norm_cgrads<'c>(
     // 走査量は全グループ分を数える（`v` に NaN があるグループは判定の代わりに同じ規模の依存の走査
     // [`wn_group_all_nan`] を回す）。
     let coeff_judge = wn_coeff(rest);
-    let use_lin = rest <= LIN_REST_MAX && groups.saturating_mul(lin_group_cost(rest)) <= LIN_BUDGET;
+    let use_lin = wn_use_lin(groups, rest);
     judge_budget(wn_judge_cost(groups, rest), "WeightNorm")?;
     let nf = rest as f64;
     let mut m_dv = vec![0.0f64; v_gm.len()];
@@ -3627,6 +3643,130 @@ mod tests {
         // 走査量の上限と余裕係数の上限は、どちらも [16, 16] を含み、[32, 32] 以上を除く。
         assert!(sn_use_lin(256));
         assert!(!sn_use_lin(1024));
+    }
+
+    /// WeightNorm の疎モードの事象数（forward + seed 1 回分の逆伝播の最大）を数える。`Dg`・先頭と末尾の `Dv` の 3 seed。
+    fn wn_events_of(v: &[f32], up: &[f32], g: f32, s: f64) -> usize {
+        lin_reset_sparse();
+        let Some(fl) = wn_fwd::<Lin>(v, up, g, s) else {
+            return 0;
+        };
+        let r = v.len();
+        let mark = lin_mark();
+        let mut n = 0;
+        for seed in [WnSeed::Dg, WnSeed::Dv(0), WnSeed::Dv(r - 1)] {
+            lin_truncate(mark);
+            let (mut hv, mut hu) = (vec![Lin::k(0.0); r], vec![Lin::k(0.0); r]);
+            let _ = wn_rev(&fl, seed, &mut hv, &mut hu);
+            n = n.max(lin_events());
+        }
+        lin_reset();
+        n
+    }
+
+    /// 疎モードの事象数が [`wn_lin_events_max`] 以下であること（[`wn_use_lin`] の余裕係数の条件の根拠。#4082）。
+    /// 幅 2〜[`LIN_REST_MAX`]・振幅 1e-3／1／1e3・`g` を振る。`wn_lin_events_max` を小さくすると失敗する。
+    #[test]
+    fn wn_lin_events_stay_within_bound() {
+        let mut st = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((st >> 33) as f64) / f64::from(1u32 << 31)
+        };
+        for rest in [2usize, 3, 8, 9, 16, 33, 64, LIN_REST_MAX] {
+            for amp in [1e-3f64, 1.0, 1e3] {
+                for _ in 0..2 {
+                    let v: Vec<f32> = (0..rest)
+                        .map(|_| ((next() * 2.0 - 1.0) * 2.0 * amp) as f32)
+                        .collect();
+                    let up: Vec<f32> = (0..rest)
+                        .map(|_| ((next() * 2.0 - 1.0) * 3.0) as f32)
+                        .collect();
+                    let g = (0.05 + next() * 2.0) as f32;
+                    let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+                    if mx == 0.0 {
+                        continue;
+                    }
+                    let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+                    let n = wn_events_of(&v, &up, g, s);
+                    assert!(n > 0);
+                    assert!(
+                        n <= wn_lin_events_max(rest),
+                        "rest={rest} amp={amp}: 事象 {n} が上界 {} を超えた",
+                        wn_lin_events_max(rest)
+                    );
+                }
+            }
+        }
+    }
+
+    /// 計測（`#[ignore]`・#4082）: 幅 9〜[`LIN_REST_MAX`] の決定的な入力で、グループ判定を従来の `Rf`（`use_lin = false`）と
+    /// `Lin`（疎モード）の両方で行い、受理→拒否・拒否→受理の件数を幅ごとに `WIDEFLIP` 行で出す。判定は変えない。
+    /// `cargo test -p fandhe-ai-autodiff --release --lib wn_wide_rejection_breakdown_measurement -- --ignored --nocapture`
+    #[test]
+    #[ignore = "計測。--release で実行する（決定記録 §80.5）"]
+    fn wn_wide_rejection_breakdown_measurement() {
+        let mut st = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = move || {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((st >> 33) as f64) / f64::from(1u32 << 31)
+        };
+        for rest in [9usize, 12, 16, 24, 32, 48, 64, 96, 128] {
+            let (mut both_ok, mut both_err, mut rf_only, mut lin_only) = (0, 0, 0, 0);
+            for case in 0..60 {
+                let amp = [1e-3f64, 1.0, 1e3][case % 3];
+                // 0..3: 乱数、3..: `[0.2, 1.0)` の正の入力（相殺しやすい普通の入力）。
+                let v: Vec<f32> = (0..rest)
+                    .map(|_| {
+                        let r = next();
+                        (if case % 6 < 3 {
+                            (r * 2.0 - 1.0) * 2.0
+                        } else {
+                            0.2 + 0.8 * r
+                        } * amp) as f32
+                    })
+                    .collect();
+                let up: Vec<f32> = (0..rest)
+                    .map(|_| ((next() * 2.0 - 1.0) * 3.0) as f32)
+                    .collect();
+                let g = (0.3 + next() * 1.5) as f32;
+                let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+                if mx == 0.0 {
+                    continue;
+                }
+                let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+                let rf = wn_group_judge(&v, &up, g, s, wn_coeff(rest), false).is_ok();
+                let lin = wn_group_judge(&v, &up, g, s, wn_coeff(rest), true).is_ok();
+                match (rf, lin) {
+                    (true, true) => both_ok += 1,
+                    (false, false) => both_err += 1,
+                    (true, false) => rf_only += 1,
+                    (false, true) => lin_only += 1,
+                }
+            }
+            lin_reset();
+            eprintln!(
+                "WIDEFLIP rest={rest} both_accept={both_ok} both_reject={both_err} \
+                 rf_accept_lin_reject={rf_only} rf_reject_lin_accept={lin_only}"
+            );
+        }
+    }
+
+    /// [`wn_use_lin`] の境界: 幅 [`LIN_REST_MAX`] とその +1、走査量 [`LIN_BUDGET`] の境界のグループ数、余裕係数の条件。
+    #[test]
+    fn wn_use_lin_boundaries() {
+        assert!(wn_use_lin(1, 2));
+        assert!(wn_use_lin(1, LIN_REST_MAX));
+        assert!(!wn_use_lin(1, LIN_REST_MAX + 1));
+        let per = lin_group_cost(16);
+        assert!(wn_use_lin(LIN_BUDGET / per, 16));
+        assert!(!wn_use_lin(LIN_BUDGET / per + 1, 16));
+        // 余裕係数の条件は幅の上限の範囲内で満たされる（満たされなければ幅の上限が広すぎる）。
+        assert!(16.0 * wn_lin_events_max(LIN_REST_MAX) as f64 * LIN_U < 0.01);
     }
 
     /// 計測（`#[ignore]`）: `sn_judge` の `Lin` 版と `Rf` 版の所要時間・事象数・§81.5 の入力の余裕。
