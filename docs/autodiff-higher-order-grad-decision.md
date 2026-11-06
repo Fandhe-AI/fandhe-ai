@@ -6555,3 +6555,21 @@ tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 - GPU 実機は未実測（CPU の値で代替しない）。この計測は CPU の `create_graph` の総括判定（ホスト側の走査）だけを対象にしている。
 - 未測定: LRN の NaN 列の走査（`lrn_col_scan`。`lrn_judge_cost(n_nan, c, win, 0)` で別に数える分）、`include_self = true` の scatter Prod、拒否される入力での本番の判定の時間（最初の拒否で止まる側）、他の CPU・OS。
 - 変えていないもの: 判定、`JUDGE_BUDGET`、`LIN_BUDGET`、`lin_group_cost`、走査量の式、tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline、`STAGE_BOUND_GUARD`、既存の拒否プローブと正のプローブ、依存、公開 API、`docs/spec`。
+
+### 83.2 #4086: JUDGE_BUDGET と judge_budget の judge.rs への集約
+
+- 位置づけ: 定義の場所を移すだけ。値 `2^27`、比較 `cost <= JUDGE_BUDGET`、各族の走査量の式、拒否範囲、エラー文（`2^27` を含む全文）は変えていない。
+- 変更: 定義を `create_graph/judge.rs` の 1 か所にした。
+  - `cumulative_b.rs` は `JUDGE_BUDGET` の再エクスポートと、委譲だけの `judge_budget`（`。§64 参照` の注記を渡す）を持つ。
+  - `norm_reparam.rs` は import と、委譲だけの `judge_budget`（注記なし）を持つ。
+  - `scatter_reduce_prod.rs` は従来どおり `cumulative_b` の `judge_budget` を使う。
+  - 委譲用の関数と再エクスポートを残したのは、既存の単体テスト（2 引数の呼び出しと `cumulative_b::JUDGE_BUDGET` の import）を変えないため。
+  - 文面の `2^27` と値は、コンパイル時検査（`const _: () = assert!(JUDGE_BUDGET == 1 << 27)`）で結び付けた。
+- §41・§64 との整合:
+  - §64.2 の「上限の値は norm_reparam.rs と同じ `2^27`（ヘルパーは共有しない）」と §64.4 の「`JUDGE_BUDGET` は norm_reparam.rs と同値」は、並行する PR を独立にマージするための当時の制約で、設計上の不変条件ではない。§53〜§57 の loss 系・norm 系のヘルパーを §79 が `judge.rs` へ共通化したのと同じ扱いで、値が同じという事実は本節で 1 定義に置き換えた。§64 の本文は書き換えず、本節を参照先とする。
+  - §41.11（族間の依存）: `judge.rs` は族ではなく総括判定の共通補助なので、scan 補助が他の族に依存しないという性質は変わらない。
+  - §41.12（`check_structure_stages` と同型の総括判定）: 共通の上限は、この「同型」を計算量の側でも 1 つの定義で表すもので、整合する。
+  - §74 の表の「`cumulative_b.rs` と共有」は、`judge.rs` の定義を `cumulative_b` 経由で使う形として引き続き正しい。
+- `cumulative_b.rs` の「ヘルパーは共有しない」コメントは、計算量の上限については撤回した。第 2 軸の判定（`entry_check`・`host_ref_check` など）は族ごとに持つまま。
+- #4087 への申し送り: 値を見直すときは `judge.rs` の定義 1 か所と、コンパイル時検査・エラー文の `2^27` を直せばよい。
+- 変えていないもの: 判定、`JUDGE_BUDGET` の値、`LIN_BUDGET`、走査量の式、拒否範囲（既存の拒否プローブと正のプローブは同じ結果）、tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline、`STAGE_BOUND_GUARD`、依存、公開 API、`docs/spec`。GPU 実機 parity は未実測のまま。

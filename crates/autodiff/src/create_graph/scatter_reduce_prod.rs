@@ -5,7 +5,7 @@
 //! 兄弟モジュール [`super::scatter_reduce`] の `cgrad`（Prod のとき）から呼ばれる。区分つき scan
 //! 補助 [`super::scan`]（§64）の上に載り、**除算を使わない**（除算形は 0 を含む寄与列の最初の零より
 //! 後ろの混合二階を取りこぼす。§41.10）。総括判定の道具（予算・`entry_check`・`host_ref_check`）は
-//! 兄弟 [`super::cumulative_b`] と共有し、値は変えない。
+//! 兄弟 [`super::cumulative_b`] と共有し（予算は `judge.rs` の定義を `cumulative_b` 経由で使う）、値は変えない。
 //!
 //! **値**: 1 階は `scatter_reduce_vjp_host`（`tensor_core::indexed_update`。(仮数, 指数) の前置積×
 //! 後置積）の結果を `push_v3` で載せる。構造は二階微分を流すためだけの `Var` 列。
@@ -33,7 +33,7 @@
 //!   拒否する。NaN の拒否は §41.16 点 8（NaN は伝播）からの逸脱で、`0 × NaN = NaN` が `cut` を越えて
 //!   別区間へ漏れる（順伝播では後ろ→前、逆伝播では前→後ろ。Hillis–Steele の段の積が区間をまたぐ）ため
 //!   NaN を区間に閉じ込められない。未タッチ位置の NaN は素通しなので影響しない。
-//! - 計算量: 予算 [`JUDGE_BUDGET`]（`2^27`）に対し [`judge_cost`] を、区間走査の前に判定する。
+//! - 計算量: 予算 [`JUDGE_BUDGET`](super::judge::JUDGE_BUDGET)（`2^27`）に対し [`judge_cost`] を、区間走査の前に判定する。
 //! - 第 1 軸（overflow）: 窓の 2 本の scan・`excl`・`d` を f32 で再計算し、非有限または `2^125` 以上なら
 //!   拒否。二階の逆伝播の上界（seed の各要素の絶対値 1）も [`scan_cotangent_bound`] で同じ閾値。
 //!   Hillis–Steele の段では隣接スロットの積が、排他的積が有限でも overflow しうる（例 `[1e30, 1e30,
