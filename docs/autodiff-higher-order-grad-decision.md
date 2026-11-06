@@ -6030,6 +6030,55 @@ soundness 違反（実測の誤差 > 上界×slack）は 0 件。最大比は 0.
 
 tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_REST_MAX`・`LIN_BUDGET`・`lin_group_cost`・`wn_lin_events_max`・`LIN_FOLD_FRAC`・`slack`・既存テストの期待値・依存・公開 API・`docs/spec`。GPU 実機 parity は未実測のまま（Linux の値を GPU の代わりにしない）。
 
+### 80.7 #4118: `Rf` 拒否から `Lin` 受理に変わった入力の f64 照合を幅 24〜128 へ広げる
+
+#### 位置づけ
+
+検証の補強のみ。判定・定数・既存テストの期待値は変えない（新たな承認は主張しない）。§80.5 で総括判定の `Lin` が幅 128 まで使われ、従来の `Rf` + `coeff·M` で拒否していた入力の一部が受理に変わった。受理後の二階が f64 参照と一致することは、幅 12・16 の 2 件（`weight_norm_wide_cancelling_hessian_is_accepted_and_matches_f64`）でしか確かめていなかった。幅 24・32・48・64・96・128 に広げる。
+
+#### 入力の選び方
+
+- 系統は既存の `wn_wide_input`（`v` は `[0.2, 1.0)` の LCG、`g = [g0, 0.8·g0]`）で、損失は `(Σ tanh(weight_norm(v, g)))²`（`sq_tanh_loss`）。シードは `12345 + 幅 + 1000·k`。
+- 幅 24 は g0 = 0.1 と 0.2、幅 32 以上は g0 = 0.05・0.1・0.2 を k = 0..39 で走査した（計測テスト `wn_sq_tanh_flip_search_measurement`〈`#[ignore]`〉。`cargo test -p fandhe-ai-autodiff --release --lib wn_sq_tanh_flip_search_measurement -- --ignored --nocapture`）。条件は「2 グループとも `Lin` が受理・少なくとも 1 グループを `Rf` が拒否・`backward_create_graph` が受理」。
+- g0 が 0.5 以上の入力は条件を満たさない。幅 64 以上では `Rf` と `Lin` の両方が拒否し、幅 24〜48 の一部で `Lin` だけが受理しても、`WeightNorm` 全体は `shadow_check`（`Rf`・`rounding_coeff(rest + 4)` の係数）が拒否した。そのため「`Rf` 拒否・`Lin` 受理」の入力は g0 ≈ 0.05〜0.2 の範囲にある。g0 = 0.02 は幅 24〜128 のすべてで `Rf` も受理する。
+- 条件を満たす入力は g0 = 0.1 で幅 32・48・64・96 は 40/40、幅 24 は 8/40、幅 128 は 36/40。
+- 採用は幅ごとに 3 件の計 18 件（`WN_FLIP_CASES`）。幅 24: (0.1, 12369)・(0.1, 15369)・(0.2, 13369)、幅 32: (0.1, 12377)・(0.1, 13377)・(0.2, 12377)、幅 48: (0.1, 12393)・(0.1, 13393)・(0.2, 12393)、幅 64: (0.05, 12409)・(0.1, 12409)・(0.2, 12409)、幅 96: (0.05, 12441)・(0.1, 12441)・(0.1, 13441)、幅 128: (0.05, 12473)・(0.1, 12473)・(0.1, 15473)（`(g0, シード)`）。
+
+#### 照合
+
+- `crates/autodiff/tests/create_graph_norm_reparam.rs::weight_norm_wide_flip_hessian_matches_f64_up_to_width_128`（`#[ignore]` なし）。`analytic_hessian`（`create_graph` 経由の二階）と `wn_sq_tanh_hessian_f64`（f64 の二階中央差分・刻み 1e-4）を REQ-2 統一複合判定（`common::req2_close`）で**全要素**比べる。行の部分集合には絞っていない（全 18 件で debug 約 7 秒）。
+- 「`Rf` 拒否・`Lin` 受理・全体受理」の確認は `norm_reparam.rs` の `tests::wn_sq_tanh_flip_inputs_reject_rf_accept_lin`（同じ 18 件。`up` は `Tape::backward` の `weight_norm` 出力の勾配。本番の `wn_group_judge` を `use_lin = false`／`true` で呼ぶ）。入力表と LCG は 2 つのテストで複製しており、互いのコメントに同一に保つことを書いた。
+- 注意: クレート内の確認は `test_ops()`、f64 照合は `naive_ops()` を使う。同じ f32 意味論をうたうが独立した実装で、`up` の bit がずれれば理屈の上では判定が変わりうる。これを補う根拠が下の変異確認。
+
+#### 結果
+
+| 幅 | 件数 | 比べた要素 | REQ-2 不一致 | 最大絶対誤差 | 最大相対誤差（絶対誤差 1e-5 以上の要素） |
+|---|---|---|---|---|---|
+| 24 | 3 | 全要素（50 行 × 50 列） | 0 | 2.88e-6 | 該当要素なし |
+| 32 | 3 | 全要素（66 × 66） | 0 | 1.02e-5 | 1.83e-7 |
+| 48 | 3 | 全要素（98 × 98） | 0 | 8.30e-6 | 該当要素なし |
+| 64 | 3 | 全要素（130 × 130） | 0 | 3.20e-5 | 2.86e-7 |
+| 96 | 3 | 全要素（194 × 194） | 0 | 4.32e-5 | 2.61e-7 |
+| 128 | 3 | 全要素（258 × 258） | 0 | 8.85e-5 | 3.94e-7 |
+
+絶対誤差 1e-5 未満の要素は絶対側で受理されるため、相対誤差は絶対側で救われない要素だけを集計した（値は `WNFLIP` 行）。全 18 件で soundness 違反（REQ-2 不一致）は 0 件。
+
+#### 変異確認
+
+`LIN_REST_MAX` を一時的に 8 へ戻すと（コミットしていない）、`wn_sq_tanh_flip_inputs_reject_rf_accept_lin` が失敗し、統合テストも最初の幅 24 の入力で `backward_create_graph` が WeightNorm の二階の拒否を返して失敗する。計測テストの走査では幅 24〜128 の全 g0 で、条件を満たす入力は 0 件になる。つまり選んだ入力はいずれも `Lin` を幅 128 まで広げたことで受理に変わった入力である。元に戻して確認済み。
+
+#### 実行環境
+
+i7-13700K・Linux・rustc 1.98.1。照合は debug、探索は `--release`。
+
+#### 変えていないもの
+
+tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_REST_MAX`・`LIN_BUDGET`・`lin_group_cost`・`wn_lin_events_max`・`LIN_FOLD_FRAC`・`slack`・`shadow_check`・既存テストの期待値・依存・公開 API・`docs/spec`。GPU 実機 parity は未実測のまま（Linux の値を GPU の代わりにしない）。
+
+#### 後続
+
+- `shadow_check` の `Lin` 化（g0 ≥ 0.5 の入力は `shadow_check` が拒否するため受理にならない）は本イシューの範囲外。
+
 ## 81. 計測・設計記録（イシュー #4079・親 #4073。SpectralNorm の create_graph の拒否の内訳と係数 `N+4` の由来）
 
 ### 81.0 位置づけ
