@@ -126,6 +126,12 @@ impl Num for f32 {
 /// 係数の列は thread-local の領域（[`LIN_ARENA`]）に置き、`Lin` 自体は `Copy` にする。事象の数に比例する
 /// 長さの列を値ごとに持つので、WeightNorm はグループの幅が [`LIN_REST_MAX`] 以下のときだけ、SpectralNorm は `sn_use_lin` の条件内（係数列を束ねて走査量を `O(N²)` に抑える）のときだけ使う。
 /// `PowScalar`（`powe`・`pow_grad`）は WeightNorm が使わないので、上界を持たない NaN の値にする（常に拒否）。
+///
+/// **疎モード**（[`lin_reset_sparse`]。WeightNorm の総括判定だけが使う。イシュー #4078・決定記録 §80.4）:
+/// グループの幅が広いと `n_s` などのハブ値が全要素の事象を持ち、下流の係数列がほぼ密になって併合の書き込み量が幅の
+/// 3 乗に近く伸びる。疎モードは演算の結果の列のうち上界に比べて小さい項を、係数 1 の独立な残余事象 1 つへまとめる
+/// （[`LinArena::pool_small_terms`]）。三角不等式により上界は広がる側にしか動かず、判定は緩まない。既定の厳密モード
+/// （[`lin_reset`]。SpectralNorm など）は従来どおり一切まとめない。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Lin {
     pub(super) v: f64,
@@ -152,6 +158,10 @@ struct LinArena {
     /// [`Num::total`] の作業バッファ 2 本（逐次併合の途中の和と併合先を交互に使う。値としては残らない）。
     scratch: Vec<Term>,
     scratch2: Vec<Term>,
+    /// 事象ごとの「残余事象か」の印（`mus` と同じ長さ。[`LinArena::pool_small_terms`] が足した事象だけ `true`）。
+    residual: Vec<bool>,
+    /// 疎モード（[`lin_reset_sparse`]）か。`false`（既定・[`lin_reset`]）なら演算の結果を一切まとめない。
+    sparse: bool,
 }
 
 /// [`lin_mark`] が返す領域の印（値の数・係数の長さ・事象の数）。
@@ -170,6 +180,29 @@ thread_local! {
 pub(super) const LIN_U: f64 = 1.0 / 16_777_216.0;
 /// 非正規数の領域の絶対丸め誤差の上界 `2^-150`。
 const LIN_TINY: f64 = 7.006_492_321_624_085e-46;
+/// 疎モード（[`lin_reset_sparse`]）で小さな項を残余事象へ落とす閾値の比 `θ`（項 `|c|·μ` が `θ·B/L` 未満なら落とす。
+/// `B` は列の上界、`L` は列の長さ）。落とす量の合計は `θ·B` 以下。値の選定（§79.2 で受理に戻した入力の余裕との
+/// 兼ね合い）は決定記録 §80.4。
+const LIN_FOLD_FRAC: f64 = 0.25;
+
+#[cfg(test)]
+thread_local! {
+    /// テストが `θ` を差し替える（選定の掃引用）。`None` なら [`LIN_FOLD_FRAC`]。
+    static FOLD_FRAC_OVERRIDE: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn fold_frac() -> f64 {
+    FOLD_FRAC_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or(LIN_FOLD_FRAC)
+}
+
+#[cfg(not(test))]
+const fn fold_frac() -> f64 {
+    LIN_FOLD_FRAC
+}
+
 /// [`Lin`] を使うグループの幅の上限（事象の数が幅に比例して増え、係数の列が長くなるため）。
 pub(super) const LIN_REST_MAX: usize = 8;
 /// [`Lin`] で判定するグループ 1 つの走査量の見積り（幅 8 で約 4e5 反復相当、幅の 2 乗に比例とした見積り）。
@@ -189,7 +222,7 @@ pub(super) const LIN_BUDGET: usize = 1 << 26;
 // 増えた回数・要素数になる。
 #[cfg(test)]
 thread_local! {
-    static LIN_PROF: std::cell::Cell<[u64; 6]> = const { std::cell::Cell::new([0; 6]) };
+    static LIN_PROF: std::cell::Cell<[u64; 8]> = const { std::cell::Cell::new([0; 8]) };
 }
 /// 係数列の格納域（`coefs`・`scratch`）の確保・再確保の回数（容量が増えた回数）。
 #[cfg(test)]
@@ -209,6 +242,13 @@ const PROF_MAKES: usize = 4;
 /// 係数列へ書いた要素数（`coefs` の出力と、`total` の作業バッファへの併合結果の合計）。
 #[cfg(test)]
 const PROF_WRITE_ENTRIES: usize = 5;
+
+/// 疎モードで小さな項をまとめた回数（#4078）。
+#[cfg(test)]
+const PROF_FOLDS: usize = 6;
+/// まとめて落とした項の数の合計（#4078）。
+#[cfg(test)]
+const PROF_FOLD_DROPS: usize = 7;
 
 #[cfg(test)]
 fn prof_add(idx: usize, n: usize) {
@@ -232,6 +272,20 @@ pub(super) fn lin_reset() {
     LIN_ARENA.with(|a| *a.borrow_mut() = LinArena::default());
 }
 
+/// [`lin_reset`] と同じく領域を空にしたうえで、疎モードへ入る（イシュー #4078・決定記録 §80.4）。疎モードでは、
+/// 演算の結果の係数列のうち「上界 `B = Σ|c|·μ` に比べて小さい項」を 1 つの独立な残余事象へまとめる
+/// （[`LinArena::pool_small_terms`]）。呼び出し元は WeightNorm の総括判定（`norm_reparam.rs::wn_group_judge`）だけで、
+/// SpectralNorm（`sn_judge`）と他の呼び出しは従来どおりの厳密モード（`lin_reset`）を使う。モードは領域に属し、
+/// `lin_mark`／`lin_truncate` では変わらず、次の reset で毎回設定し直される。
+pub(super) fn lin_reset_sparse() {
+    LIN_ARENA.with(|a| {
+        *a.borrow_mut() = LinArena {
+            sparse: true,
+            ..LinArena::default()
+        }
+    });
+}
+
 /// 領域の現在の大きさ。seed ごとに [`lin_truncate`] で戻すための印（容量は戻さず次の seed で使い回す）。
 pub(super) fn lin_mark() -> LinMark {
     LIN_ARENA.with(|a| {
@@ -250,6 +304,7 @@ pub(super) fn lin_truncate(mark: LinMark) {
         a.spans.truncate(mark.values);
         a.coefs.truncate(mark.coefs);
         a.mus.truncate(mark.mus);
+        a.residual.truncate(mark.mus);
     });
 }
 
@@ -307,7 +362,80 @@ impl LinArena {
     /// 事象を 1 つ足してその番号を返す。
     fn push_event(&mut self, mu: f64) -> u32 {
         self.mus.push(mu);
+        self.residual.push(false);
         (self.mus.len() - 1) as u32
+    }
+
+    /// 疎モードのとき、`coefs[start..]`（いま書いたばかりの値の列）の小さな項と既存の残余事象を、1 つの残余事象へまとめる。
+    ///
+    /// 呼び出し元は `binary`・`root`・`total`（結果の列が伸びる演算）で、`finish` の直前に呼ぶ。
+    /// - 落とす項: `|c|·μ < θ·B / L`（`B` は列の上界、`L` は列の長さ、`θ` は [`fold_frac`]）の項と、既存の残余事象の項。
+    ///   落とす量の合計は高々 `θ·B`。残余事象は係数 1・`μ = Σ_落とす |c|·μ`（+ 総和の丸めの余裕）の独立な事象で、
+    ///   三角不等式により上界は広がる側にしか動かない（相殺を失うだけ）。
+    /// - `B` が有限でない列（NaN／inf の事象〈`unbounded`〉や `0·NaN`）は触らない。NaN の上界を有限の残余へ畳んで
+    ///   「常に拒否」を受理に変えないため。`B` が有限なら `c = 0` の項の `μ` も有限で、落としても寄与は厳密に 0。
+    /// - 落とす項（`c ≠ 0`）が 2 個未満なら列を変えない（1 個を落として 1 個足しても短くならない）。
+    /// - 残余事象の番号は最大なので、列の事象の番号の昇順は保たれる。確保は増やさず、`coefs` をその場で詰める。
+    ///
+    /// 残余の `μ` には、`B` の和の順序の差（まとめる前は index 順の一括和、後は「残す項 + 残余」）を覆う
+    /// `2·L·ε·B` を足し、まとめた後の [`Lin::bound`] がまとめる前以上であることを丸めの順序まで含めて保つ。
+    fn pool_small_terms(&mut self, start: usize) {
+        if !self.sparse {
+            return;
+        }
+        let len = self.coefs.len() - start;
+        let mus = &self.mus;
+        let bound: f64 = self.coefs[start..]
+            .iter()
+            .map(|&(k, c)| c.abs() * mus[k as usize])
+            .sum();
+        if !bound.is_finite() || bound == 0.0 || len < 3 {
+            return;
+        }
+        let thr = fold_frac() * bound / len as f64;
+        let (mut drops, mut dropped) = (0usize, 0.0f64);
+        for &(k, c) in &self.coefs[start..] {
+            let w = c.abs() * mus[k as usize];
+            if self.residual[k as usize] || w < thr {
+                if c != 0.0 {
+                    drops += 1;
+                }
+                dropped += w;
+            }
+        }
+        if drops < 2 {
+            return;
+        }
+        let mut w = start;
+        for i in start..start + len {
+            let (k, c) = self.coefs[i];
+            let x = c.abs() * self.mus[k as usize];
+            if !(self.residual[k as usize] || x < thr) {
+                self.coefs[w] = (k, c);
+                w += 1;
+            }
+        }
+        #[cfg(test)]
+        {
+            prof_add(PROF_FOLDS, 1);
+            prof_add(PROF_FOLD_DROPS, len - (w - start));
+        }
+        self.coefs.truncate(w);
+        let ev = self.push_event(dropped + 2.0 * len as f64 * f64::EPSILON * bound);
+        self.residual[ev as usize] = true;
+        self.coefs.push((ev, 1.0));
+        // まとめた時点の性質(受け入れ条件 1)を、疎モードで走る全テストの全まとめ箇所で検査する。
+        #[cfg(test)]
+        {
+            let after: f64 = self.coefs[start..]
+                .iter()
+                .map(|&(k, c)| c.abs() * self.mus[k as usize])
+                .sum();
+            assert!(
+                after >= bound,
+                "まとめた後の上界 {after:e} がまとめる前 {bound:e} を下回った"
+            );
+        }
     }
 
     /// 2 つの値の一次式の線形結合 `ka·a + kb·b`（事象の番号の昇順の併合）を `coefs` の末尾へ追記し、開始位置を返す。
@@ -377,6 +505,7 @@ impl Lin {
             let start = a.comb(self.id, ka, o.id, kb);
             let ev = a.push_event(mu);
             a.coefs.push((ev, 1.0));
+            a.pool_small_terms(start);
             a.finish(start)
         });
         Lin {
@@ -453,6 +582,7 @@ impl Num for Lin {
             let start = a.map_copy(self.id, |c| c / (2.0 * r));
             let ev = a.push_event(mu);
             a.coefs.push((ev, 1.0));
+            a.pool_small_terms(start);
             a.finish(start)
         });
         Lin {
@@ -515,6 +645,7 @@ impl Num for Lin {
             a.coefs.extend_from_slice(&a.scratch);
             let ev = a.push_event(mu);
             a.coefs.push((ev, 1.0));
+            a.pool_small_terms(start);
             a.finish(start)
         });
         Lin { v, id, t }
@@ -1319,6 +1450,305 @@ mod tests {
             assert!(wn_group_judge(&v, &up, 0.5, 1.0, wn_coeff(4), use_lin).is_ok());
         }
     }
+    // ---- 疎モード（イシュー #4078・決定記録 §80.4） ----
+
+    /// 1 つの出力要素の記録（値・taint・上界・受理／拒否）。
+    #[derive(Clone, Copy)]
+    struct Out {
+        v: u64,
+        t: bool,
+        bound: f64,
+        ok: bool,
+    }
+
+    /// WeightNorm の 1 グループを指定モードで走らせ、全 seed・全出力要素の記録と seed ごとの事象数を返す。
+    fn wn_outputs(
+        v: &[f32],
+        up: &[f32],
+        g: f32,
+        s: f64,
+        sparse: bool,
+    ) -> Option<(Vec<Out>, Vec<usize>)> {
+        let rest = v.len();
+        if sparse {
+            lin_reset_sparse();
+        } else {
+            lin_reset();
+        }
+        let (fl, fs) = (wn_fwd::<Lin>(v, up, g, s)?, wn_fwd::<f32>(v, up, g, s)?);
+        let mark = lin_mark();
+        let (mut outs, mut events) = (Vec::new(), Vec::new());
+        for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+            lin_truncate(mark);
+            let (mut hv_l, mut hu_l) = (vec![Lin::k(0.0); rest], vec![Lin::k(0.0); rest]);
+            let (mut hv_s, mut hu_s) = (vec![0f32; rest], vec![0f32; rest]);
+            let gl = wn_rev(&fl, seed, &mut hv_l, &mut hu_l);
+            let gs = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+            events.push(lin_events());
+            let mut pairs: Vec<(Lin, f32)> = (0..rest)
+                .flat_map(|i| [(hv_l[i], hv_s[i]), (hu_l[i], hu_s[i])])
+                .collect();
+            if let (Some(gl), Some(gs)) = (gl, gs) {
+                pairs.push((gl, gs));
+            }
+            for (l, f) in pairs {
+                outs.push(Out {
+                    v: canon_bits(l.v),
+                    t: l.t,
+                    bound: l.bound(),
+                    ok: entry_check_lin(l, f, "p", bench_reject).is_ok(),
+                });
+            }
+        }
+        Some((outs, events))
+    }
+
+    /// 幅・振幅・乱数を振った WeightNorm の入力（幅 2〜8 を中心に 12・16・24・32 を混ぜる）。
+    fn wn_sweep_input(case: usize, next: &mut impl FnMut() -> f64) -> BenchInput {
+        let rest = match case {
+            c if c % 50 == 49 => 32,
+            c if c % 25 == 24 => 24,
+            c if c % 12 == 11 => 16,
+            c if c % 6 == 5 => 12,
+            c => 2 + c % 7,
+        };
+        let amp = [1e-3, 1.0, 1e3][case % 3];
+        let v: Vec<f32> = (0..rest)
+            .map(|_| ((next() * 2.0 - 1.0) * 2.0 * amp) as f32)
+            .collect();
+        let up: Vec<f32> = (0..rest)
+            .map(|_| ((next() * 2.0 - 1.0) * 3.0) as f32)
+            .collect();
+        let g = (0.05 + next() * 2.0) as f32;
+        let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+        (v, up, g, s)
+    }
+
+    fn sweep_rng() -> impl FnMut() -> f64 {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f64) / f64::from(1u32 << 31)
+        }
+    }
+
+    /// 受け入れ条件 1（下流まで含む）: 同じ WeightNorm の掃引を厳密モードと疎モードで走らせ、全 seed・全出力要素で
+    /// 値と taint が bit 同一、疎モードの上界が厳密モード以上、事象数が減らず、疎モードで受理なら厳密モードでも
+    /// 受理である（判定を緩めない向きの含意）。まとめが実際に起きることも確かめる。
+    #[test]
+    fn sparse_lin_never_looser_than_exact_for_weight_norm_sweep() {
+        let mut next = sweep_rng();
+        let (mut compared, mut folded) = (0usize, 0u64);
+        for case in 0..150 {
+            let (v, up, g, s) = wn_sweep_input(case, &mut next);
+            if v.iter().all(|&x| x == 0.0) {
+                continue;
+            }
+            let Some((exact, ev_exact)) = wn_outputs(&v, &up, g, s, false) else {
+                continue;
+            };
+            LIN_PROF.with(|c| c.set([0; 8]));
+            let (sparse, ev_sparse) = wn_outputs(&v, &up, g, s, true).expect("同じ入力");
+            folded += LIN_PROF.with(|c| c.get())[PROF_FOLDS];
+            assert_eq!(exact.len(), sparse.len());
+            for (e, p) in ev_exact.iter().zip(&ev_sparse) {
+                assert!(p >= e, "case {case}: 事象数が減った");
+            }
+            for (e, p) in exact.iter().zip(&sparse) {
+                assert_eq!(e.v, p.v, "case {case}: 値は不変");
+                assert_eq!(e.t, p.t, "case {case}: taint は不変");
+                assert!(
+                    p.bound.is_nan() == e.bound.is_nan()
+                        && (e.bound.is_nan() || p.bound >= e.bound * (1.0 - 1e-12)),
+                    "case {case}: 疎の上界 {:e} が厳密 {:e} を下回った",
+                    p.bound,
+                    e.bound
+                );
+                assert!(!p.ok || e.ok, "case {case}: 疎で受理なのに厳密で拒否");
+                compared += 1;
+            }
+        }
+        lin_reset();
+        assert!(compared > 1000, "比較した要素数 {compared}");
+        assert!(folded > 0, "まとめが一度も起きていない");
+    }
+
+    /// 受け入れ条件 2: 幅 2〜32 の soundness（疎モード）。f32 の再現と和の順序を変えた再現の実測の誤差が、疎モードの
+    /// 上界 × 余裕を超えない。`Lin::bound` を 0 にすると失敗する（変異確認は §80.4）。
+    #[test]
+    fn lin_bound_covers_f32_deviation_for_weight_norm_wide_sweep() {
+        let mut next = sweep_rng();
+        let (mut checked, mut tight) = (0usize, 0usize);
+        for case in 0..120 {
+            let (v, up, g, s) = wn_sweep_input(case, &mut next);
+            let rest = v.len();
+            if v.iter().all(|&x| x == 0.0) {
+                continue;
+            }
+            lin_reset_sparse();
+            let (Some(fl), Some(fs), Some(fa)) = (
+                wn_fwd::<Lin>(&v, &up, g, s),
+                wn_fwd::<f32>(&v, &up, g, s),
+                wn_fwd::<F32Rev>(&v, &up, g, s),
+            ) else {
+                continue;
+            };
+            let mark = lin_mark();
+            for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+                lin_truncate(mark);
+                let (mut hv_l, mut hu_l) = (vec![Lin::k(0.0); rest], vec![Lin::k(0.0); rest]);
+                let (mut hv_s, mut hu_s) = (vec![0f32; rest], vec![0f32; rest]);
+                let (mut hv_a, mut hu_a) = (vec![F32Rev(0.0); rest], vec![F32Rev(0.0); rest]);
+                let gl = wn_rev(&fl, seed, &mut hv_l, &mut hu_l);
+                let gs = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+                let ga = wn_rev(&fa, seed, &mut hv_a, &mut hu_a);
+                let slack = 1.0 + 16.0 * lin_events() as f64 * LIN_U;
+                let mut pairs: Vec<(Lin, f32, f32)> = (0..rest)
+                    .flat_map(|i| [(hv_l[i], hv_s[i], hv_a[i].0), (hu_l[i], hu_s[i], hu_a[i].0)])
+                    .collect();
+                if let (Some(gl), Some(gs), Some(ga)) = (gl, gs, ga) {
+                    pairs.push((gl, gs, ga.0));
+                }
+                for (l, f, a) in pairs {
+                    if !l.v.is_finite() || !f.is_finite() || !a.is_finite() {
+                        continue;
+                    }
+                    let bound = l.bound() * slack;
+                    for actual in [f, a] {
+                        let dev = (f64::from(actual) - l.v).abs();
+                        assert!(
+                            dev <= bound,
+                            "case {case} rest {rest}: 実測の誤差 {dev:e} が上界 {bound:e} を超えた（V = {:e}）",
+                            l.v
+                        );
+                        checked += 1;
+                        if dev > 0.1 * bound {
+                            tight += 1;
+                        }
+                    }
+                }
+            }
+        }
+        lin_reset();
+        assert!(checked > 1000, "検査した要素数 {checked}");
+        assert!(tight > 0, "上界が実測より桁違いに大きい");
+    }
+
+    /// 乱数の演算列を疎モードまたは厳密モードで走らせ、作った値すべての `(v, t, 上界)` を返す
+    /// （疎モードではまとめ箇所ごとの上界の非後退が [`LinArena::pool_small_terms`] 内で検査される）。
+    fn run_op_program(seed: u64, sparse: bool) -> Vec<(u64, bool, f64)> {
+        const KS: [f64; 8] = [0.3, -0.7, 1.0, 2.5, 0.1, -1.9, 3.3, 0.6];
+        let mut state = seed;
+        let mut next = move |m: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize) % m
+        };
+        if sparse {
+            lin_reset_sparse();
+        } else {
+            lin_reset();
+        }
+        let mut pool: Vec<Lin> = KS.iter().map(|&x| Lin::k(x)).collect();
+        for _ in 0..400 {
+            let a = pool[next(pool.len())];
+            let b = pool[next(pool.len())];
+            let r = match next(8) {
+                0 => a.plus(b),
+                1 => a.minus(b),
+                2 | 3 => a.times(b),
+                4 => a.times(Lin::k(KS[next(KS.len())])),
+                5 => a.negate(),
+                6 => {
+                    let n = 2 + next(6);
+                    let xs: Vec<Lin> = (0..n).map(|_| pool[next(pool.len())]).collect();
+                    Lin::total(&xs)
+                }
+                _ => {
+                    let sq = a.times(a).plus(Lin::k(1.0));
+                    sq.root().over(sq)
+                }
+            };
+            pool.push(r);
+        }
+        let out: Vec<_> = pool
+            .iter()
+            .map(|x| (canon_bits(x.v), x.t, x.bound()))
+            .collect();
+        lin_reset();
+        out
+    }
+
+    /// まとめた時点の性質のプロパティ（決定的な乱数の演算列）: 各まとめ箇所で上界が非後退（`fold` 内の assert）、
+    /// 値と taint は不変、下流でも疎モードの上界が厳密モード以上。
+    #[test]
+    fn sparse_fold_never_shrinks_bound_for_random_op_programs() {
+        LIN_PROF.with(|c| c.set([0; 8]));
+        for seed in 1..=40u64 {
+            let exact = run_op_program(seed, false);
+            let sparse = run_op_program(seed, true);
+            for (i, (e, p)) in exact.iter().zip(&sparse).enumerate() {
+                assert_eq!(
+                    (e.0, e.1),
+                    (p.0, p.1),
+                    "seed {seed} 値 {i}: 値・taint は不変"
+                );
+                assert!(
+                    (e.2.is_nan() && p.2.is_nan()) || p.2 >= e.2 * (1.0 - 1e-12),
+                    "seed {seed} 値 {i}: 疎の上界 {:e} が厳密 {:e} を下回った",
+                    p.2,
+                    e.2
+                );
+            }
+        }
+        let p = LIN_PROF.with(|c| c.get());
+        assert!(
+            p[PROF_FOLDS] > 0 && p[PROF_FOLD_DROPS] > 0,
+            "まとめが一度も起きていない"
+        );
+    }
+
+    /// 上界が NaN／inf の列はまとめない（NaN の上界を有限の残余へ畳んで常に拒否を受理に変えない）。
+    #[test]
+    fn sparse_fold_leaves_non_finite_bounds_alone() {
+        lin_reset_sparse();
+        let n = Lin::k(2.0).powe(0.5);
+        assert!(n.bound().is_nan());
+        let mut acc = n.plus(Lin::k(1.0));
+        for i in 0..20 {
+            acc = acc.plus(Lin::k(0.1 * f64::from(i + 1)).times(Lin::k(1.0 / 3.0)));
+        }
+        assert!(acc.bound().is_nan(), "NaN の上界は NaN のまま");
+        assert!(entry_check_lin(acc, acc.v as f32, "p", bench_reject).is_err());
+        // 0 を掛けても NaN の事象の項は残る（0·NaN = NaN）。
+        let z = n.times(Lin::k(0.0));
+        assert!(z.bound().is_nan());
+        lin_reset();
+    }
+
+    /// 本番経路（`wn_group_judge(use_lin = true)`）は疎モードで走り、`lin_reset` は厳密モードへ戻す。
+    /// `lin_mark`／`lin_truncate` はモードを変えない。
+    #[test]
+    fn wn_judge_uses_sparse_mode_and_reset_restores_exact() {
+        let sparse_flag = || LIN_ARENA.with(|a| a.borrow().sparse);
+        let (v, up) = ([0.9f32, 0.1, 0.6, 0.3], [0.7f32, -0.2, 0.4, 0.1]);
+        lin_reset();
+        assert!(!sparse_flag());
+        assert!(wn_group_judge(&v, &up, 0.5, 1.0, wn_coeff(4), true).is_ok());
+        assert!(sparse_flag(), "WeightNorm の判定は疎モード");
+        lin_reset();
+        assert!(!sparse_flag(), "lin_reset は厳密モードへ戻す");
+        lin_reset_sparse();
+        let m = lin_mark();
+        lin_truncate(m);
+        assert!(sparse_flag(), "mark／truncate はモードを変えない");
+        lin_reset();
+    }
+
     // ---- 判定時間の計測（イシュー #4076。`#[ignore]`・手動実行専用。記録は決定記録 §80.2） ----
 
     use super::super::norm_reparam::wn_judge_cost;
@@ -1371,12 +1801,25 @@ mod tests {
         rejected: usize,
     }
 
+    thread_local! {
+        /// 計測の走査（[`scan_lin`]・[`n_probe`]）を疎モードで走らせるか（#4078。既定は厳密モード＝#4076・#4077 の計測と同じ）。
+        static PROFILE_SPARSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn profile_reset() {
+        if PROFILE_SPARSE.with(|c| c.get()) {
+            lin_reset_sparse();
+        } else {
+            lin_reset();
+        }
+    }
+
     /// `wn_group_judge_with::<Lin>` の判定ループを、最初の拒否で打ち切らず全要素を検査する版。本番は拒否で
     /// 短絡するため、拒否される入力でも時間が途中で切れないようにする計測専用の再実装。forward の NaN 位置の
     /// 照合（`same_nan`）は走査の主要コストでないため省く。
     fn scan_lin(v: &[f32], up: &[f32], g: f32, s: f64) -> Scan {
         let rest = v.len();
-        lin_reset();
+        profile_reset();
         let (Some(fl), Some(fs)) = (wn_fwd::<Lin>(v, up, g, s), wn_fwd::<f32>(v, up, g, s)) else {
             return Scan::default();
         };
@@ -1442,7 +1885,7 @@ mod tests {
     /// 全走査の `N` と一致することを確かめる）。
     fn n_probe(v: &[f32], up: &[f32], g: f32, s: f64) -> usize {
         let rest = v.len();
-        lin_reset();
+        profile_reset();
         let Some(fl) = wn_fwd::<Lin>(v, up, g, s) else {
             return 0;
         };
@@ -1495,7 +1938,7 @@ mod tests {
             });
             prev = Some((rest, med));
             let (v, up, g, s) = &inputs[0];
-            LIN_PROF.with(|c| c.set([0; 6]));
+            LIN_PROF.with(|c| c.set([0; 8]));
             let sc = scan_lin(v, up, *g, *s);
             let p = LIN_PROF.with(|c| c.get());
             let n = sc.n_dv.max(sc.n_dg);
@@ -1602,5 +2045,53 @@ mod tests {
             16.0 * n_hi as f64 * LIN_U,
         );
         assert!(slack_ok(n_lo) && !slack_ok(n_hi) && hi_rejected);
+    }
+    /// 疎モードの効果の計測（イシュー #4078）。幅ごとに、厳密モードと疎モード（`θ` を差し替えて）の判定時間
+    /// （release・5 回中央値）・係数列へ書いた要素数・事象数 `N`・まとめた回数・落とした項数・受理／拒否の件数を
+    /// `FOLDPROF` 行で出す。判定・定数は変えない。
+    ///
+    /// 実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture --test-threads=1 lin_sparse_cost_profile`
+    /// 記録先: `docs/autodiff-higher-order-grad-decision.md` §80.4。
+    #[test]
+    #[ignore = "手動実行専用の計測（stderr 出力のみ。#4078・§80.4）"]
+    fn lin_sparse_cost_profile() {
+        let mut rng = Lcg(0x2545_F491_4F6C_DD1D);
+        let configs: [(&str, bool, f64); 4] = [
+            ("exact", false, 0.0),
+            ("sparse", true, 0.5),
+            ("sparse", true, 0.25),
+            ("sparse", true, 0.125),
+        ];
+        for &rest in &[8usize, 16, 32, 64] {
+            let groups = match rest {
+                0..=8 => 32,
+                9..=16 => 8,
+                17..=32 => 2,
+                _ => 1,
+            };
+            let inputs: Vec<_> = (0..groups).map(|_| gen_input(&mut rng, rest)).collect();
+            for &(mode, sparse, theta) in &configs {
+                PROFILE_SPARSE.with(|c| c.set(sparse));
+                FOLD_FRAC_OVERRIDE.with(|c| c.set(sparse.then_some(theta)));
+                let (med, _) = measure_lin(&inputs);
+                let (v, up, g, s) = &inputs[0];
+                LIN_PROF.with(|c| c.set([0; 8]));
+                let sc = scan_lin(v, up, *g, *s);
+                let p = LIN_PROF.with(|c| c.get());
+                eprintln!(
+                    "FOLDPROF rest={rest} mode={mode} theta={theta} median_ns_per_group={med:.0} N_dv={} N_dg={} \
+                     write_entries={} folds={} fold_drops={} entries_accepted={} entries_rejected={}",
+                    sc.n_dv,
+                    sc.n_dg,
+                    p[PROF_WRITE_ENTRIES],
+                    p[PROF_FOLDS],
+                    p[PROF_FOLD_DROPS],
+                    sc.accepted,
+                    sc.rejected,
+                );
+            }
+        }
+        PROFILE_SPARSE.with(|c| c.set(false));
+        FOLD_FRAC_OVERRIDE.with(|c| c.set(None));
     }
 }

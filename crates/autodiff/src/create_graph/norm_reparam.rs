@@ -89,7 +89,7 @@ use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 use super::lin::{
     LIN_BUDGET, LIN_REST_MAX, LIN_U, Lin, Num, entry_check_lin, lin_events, lin_group_cost,
-    lin_mark, lin_reset, lin_truncate,
+    lin_mark, lin_reset, lin_reset_sparse, lin_truncate,
 };
 use super::{child_value, judge, push_v3};
 use crate::create_graph_norm::pow2_ceil_exponent;
@@ -1575,7 +1575,8 @@ pub(super) fn wn_group_judge(
     use_lin: bool,
 ) -> Result<(), AutodiffError> {
     if use_lin {
-        lin_reset();
+        // WeightNorm だけが疎モード（小さな誤差項を残余事象へまとめる。#4078・§80.4）を使う。
+        lin_reset_sparse();
         wn_group_judge_with::<Lin>(v, up, g, s, &|r, x, what| {
             entry_check_lin(r, x, what, invalid)
         })
