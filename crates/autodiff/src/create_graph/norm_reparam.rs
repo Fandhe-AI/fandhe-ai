@@ -4155,6 +4155,21 @@ mod tests {
     }
 
     /// ウォームアップ 1 回の後の 5 回計測（1 回が 6 s 超なら 3 回）の中央値と各回の値（ns）。
+    /// 計測用の検査（`Lin`）。本番の [`entry_check_lin`]（`Lin::bound()` の係数列走査を含む）を実行し、結果を
+    /// `black_box` で消費する。拒否しても `Ok` を返し、全要素の走査を続ける（短絡で走査量が減らないように）。
+    fn timing_check_lin(r: Lin, x: f32, what: &str) -> Result<(), AutodiffError> {
+        let _ = std::hint::black_box(entry_check_lin(r, x, what, invalid));
+        Ok(())
+    }
+
+    /// 計測用の検査（`Rf`）。[`timing_check_lin`] の `Rf` 版（本番の [`entry_check`] を実行して消費する）。
+    fn timing_check_rf(coeff: f64) -> impl Fn(Rf, f32, &str) -> Result<(), AutodiffError> {
+        move |r, x, what| {
+            let _ = std::hint::black_box(entry_check(r, x, coeff, what));
+            Ok(())
+        }
+    }
+
     fn timing_median(mut f: impl FnMut()) -> (f64, Vec<f64>) {
         let mut once = || {
             let t = std::time::Instant::now();
@@ -4275,10 +4290,11 @@ mod tests {
         );
     }
 
-    /// WeightNorm の `Rf` 経路（幅が [`LIN_REST_MAX`] 超）を、何もしない検査（全 seed を走査）で計測する。
+    /// WeightNorm の `Rf` 経路（幅が [`LIN_REST_MAX`] 超）を、本番と同じ検査（`entry_check`）を実行して結果を `black_box` で消費し、戻り値では短絡せず全 seed を走査して計測する。
     /// 併せて本番の検査（`wn_group_judge(use_lin = false)`）の受理件数を出す。
     fn timing_wn_rf(label: &str, groups: usize, rest: usize) {
         let cost = wn_judge_cost(groups, rest);
+        let coeff = wn_coeff(rest);
         assert!(cost <= JUDGE_BUDGET);
         let mut rng = TimingLcg(0x4085 + rest as u64);
         let n_unique = groups.min(TIMING_UNIQUE);
@@ -4288,7 +4304,7 @@ mod tests {
         let run = || {
             for gi in 0..groups {
                 let (v, up, g, s) = &inputs[gi % n_unique];
-                wn_group_judge_with::<Rf>(v, up, *g, *s, &|_, _, _| Ok(()))?;
+                wn_group_judge_with::<Rf>(v, up, *g, *s, &timing_check_rf(coeff))?;
             }
             Ok::<(), AutodiffError>(())
         };
@@ -4298,11 +4314,11 @@ mod tests {
         });
         let prod_ok = inputs
             .iter()
-            .filter(|(v, up, g, s)| wn_group_judge(v, up, *g, *s, wn_coeff(rest), false).is_ok())
+            .filter(|(v, up, g, s)| wn_group_judge(v, up, *g, *s, coeff, false).is_ok())
             .count();
         let entries = groups * (rest + 1) * 2 * rest;
         eprintln!(
-            "JUDGETIME kind=WeightNorm(Rf) {label} groups={groups} rest={rest} cost={cost} cost/2^27={:.4} entries={entries} result=full-scan(no-op check) prod_accepts={prod_ok}/{n_unique}(unique inputs) median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
+            "JUDGETIME kind=WeightNorm(Rf) {label} groups={groups} rest={rest} cost={cost} cost/2^27={:.4} entries={entries} result=full-scan(real check executed) prod_accepts={prod_ok}/{n_unique}(unique inputs) median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
             cost as f64 / JUDGE_BUDGET as f64,
             med / 1e6,
             timing_runs_ms(&all),
@@ -4313,7 +4329,7 @@ mod tests {
 
     /// LRN・WeightNorm（`Rf`）・SpectralNorm（`Rf`）の総括判定を、走査量 [`JUDGE_BUDGET`] ぎりぎりの入力で
     /// 計測する。`Lin` 経路は別の予算なので `judge_budget_timing_norm_lin` で測る。
-    /// WeightNorm・SpectralNorm は検査を何もしない関数にして全走査させ、本番の検査の結果は別に出す。
+    /// WeightNorm・SpectralNorm は検査は本番と同じ関数を実行し結果を `black_box` で消費するが、拒否しても短絡せず全走査させる（本番の検査の結果は別に出す）。
     /// 実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture
     /// --test-threads=1 judge_budget_timing`。出力は stderr の `JUDGETIME` 行のみ。
     #[test]
@@ -4342,7 +4358,8 @@ mod tests {
         let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
         let s = f64::from(pow2(pow2_ceil_exponent(mx)));
         let cost = sn_judge_cost(n);
-        let run = || sn_judge_with::<Rf>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(()));
+        let sn_c = sn_coeff(n);
+        let run = || sn_judge_with::<Rf>(&inp.w, &inp.p_exact, &inp.up, s, &timing_check_rf(sn_c));
         assert!(run().is_ok());
         let (med, all) = timing_median(|| {
             let _ = std::hint::black_box(run());
@@ -4350,7 +4367,7 @@ mod tests {
         let prod = sn_judge(&inp.w, &inp.p_exact, &inp.up, s, sn_coeff(n), false);
         let entries = n * 2 * n;
         eprintln!(
-            "JUDGETIME kind=SpectralNorm(Rf) shape={side}x{side} n={n} cost={cost} cost/2^27={:.4} entries={entries} result=full-scan(no-op check) prod={} median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
+            "JUDGETIME kind=SpectralNorm(Rf) shape={side}x{side} n={n} cost={cost} cost/2^27={:.4} entries={entries} result=full-scan(real check executed) prod={} median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
             cost as f64 / JUDGE_BUDGET as f64,
             if prod.is_ok() { "accepted" } else { "rejected" },
             med / 1e6,
@@ -4362,7 +4379,7 @@ mod tests {
 
     /// `Lin` 経路（WeightNorm の疎モード・SpectralNorm）の総括判定を、`Lin` 側の予算 [`LIN_BUDGET`] ぎりぎり
     /// の入力で計測する。時間当たりのコストが `Rf` と違うので `Rf` とは別に測り、同じ入力の `Rf` の
-    /// ns/反復との比も出す。検査は何もしない関数にして全走査させ、本番の判定の結果は別に出す。`Lin` の
+    /// ns/反復との比も出す。検査は本番と同じ関数を実行し結果を `black_box` で消費するが、拒否しても短絡せず全走査させる（本番の判定の結果は別に出す）。`Lin` の
     /// 領域は thread-local なので `--test-threads=1` で実行する。
     #[test]
     #[ignore = "手動実行専用の計測（stderr 出力のみ。#4085・§83.1）"]
@@ -4380,7 +4397,7 @@ mod tests {
                 for gi in 0..groups {
                     let (v, up, g, s) = &inputs[gi % n_unique];
                     lin_reset_sparse();
-                    wn_group_judge_with::<Lin>(v, up, *g, *s, &|_, _, _| Ok(()))?;
+                    wn_group_judge_with::<Lin>(v, up, *g, *s, &timing_check_lin)?;
                 }
                 Ok::<(), AutodiffError>(())
             };
@@ -4388,12 +4405,13 @@ mod tests {
             let (med, all) = timing_median(|| {
                 let _ = std::hint::black_box(run_lin());
             });
-            // 同じ入力の Rf（何もしない検査）の ns/反復。グループ数は 64 件に絞る。
+            // 同じ入力の Rf（本番と同じ検査を実行）の ns/反復。グループ数は 64 件に絞る。
+            let wn_c = wn_coeff(rest);
             let rf_groups = groups.min(64);
             let run_rf = || {
                 for gi in 0..rf_groups {
                     let (v, up, g, s) = &inputs[gi % n_unique];
-                    wn_group_judge_with::<Rf>(v, up, *g, *s, &|_, _, _| Ok(()))?;
+                    wn_group_judge_with::<Rf>(v, up, *g, *s, &timing_check_rf(wn_c))?;
                 }
                 Ok::<(), AutodiffError>(())
             };
@@ -4408,7 +4426,7 @@ mod tests {
             lin_reset();
             let total_units = groups * unit;
             eprintln!(
-                "JUDGETIME kind=WeightNorm(Lin,sparse) rest={rest} groups={groups} lin_group_cost={unit} units={total_units} units/LIN_BUDGET={:.4} rf_equiv_cost/2^27={:.4} result=full-scan(no-op check) prod_accepts={prod_ok}/{n_unique}(unique inputs) median_ms={:.1} runs_ms={:?} ns_per_unit={:.3} rf_ns_per_iter={:.3} ratio_unit_to_rf_iter={:.3}",
+                "JUDGETIME kind=WeightNorm(Lin,sparse) rest={rest} groups={groups} lin_group_cost={unit} units={total_units} units/LIN_BUDGET={:.4} rf_equiv_cost/2^27={:.4} result=full-scan(real check executed) prod_accepts={prod_ok}/{n_unique}(unique inputs) median_ms={:.1} runs_ms={:?} ns_per_unit={:.3} rf_ns_per_iter={:.3} ratio_unit_to_rf_iter={:.3}",
                 total_units as f64 / LIN_BUDGET as f64,
                 wn_judge_cost(groups, rest) as f64 / JUDGE_BUDGET as f64,
                 med / 1e6,
@@ -4429,7 +4447,7 @@ mod tests {
             let s = f64::from(pow2(pow2_ceil_exponent(mx)));
             let run_lin = || {
                 lin_reset();
-                let r = sn_judge_with::<Lin>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(()));
+                let r = sn_judge_with::<Lin>(&inp.w, &inp.p_exact, &inp.up, s, &timing_check_lin);
                 lin_reset();
                 r
             };
@@ -4437,8 +4455,9 @@ mod tests {
             let (med, all) = timing_median(|| {
                 let _ = std::hint::black_box(run_lin());
             });
+            let sn_c = sn_coeff(n);
             let run_rf =
-                || sn_judge_with::<Rf>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(()));
+                || sn_judge_with::<Rf>(&inp.w, &inp.p_exact, &inp.up, s, &timing_check_rf(sn_c));
             let (rf_med, _) = timing_median(|| {
                 let _ = std::hint::black_box(run_rf());
             });
@@ -4446,7 +4465,7 @@ mod tests {
             let prod = sn_judge(&inp.w, &inp.p_exact, &inp.up, s, sn_coeff(n), true);
             let units = sn_lin_cost(n);
             eprintln!(
-                "JUDGETIME kind=SpectralNorm(Lin) shape={}x{} n={n} n_max_for_lin={n_max} sn_lin_cost={units} units/LIN_BUDGET={:.4} result=full-scan(no-op check) prod={} median_ms={:.1} runs_ms={:?} ns_per_unit={:.3} rf_ns_per_iter={:.3} ratio_unit_to_rf_iter={:.3}",
+                "JUDGETIME kind=SpectralNorm(Lin) shape={}x{} n={n} n_max_for_lin={n_max} sn_lin_cost={units} units/LIN_BUDGET={:.4} result=full-scan(real check executed) prod={} median_ms={:.1} runs_ms={:?} ns_per_unit={:.3} rf_ns_per_iter={:.3} ratio_unit_to_rf_iter={:.3}",
                 shape[0],
                 shape[1],
                 units as f64 / LIN_BUDGET as f64,
