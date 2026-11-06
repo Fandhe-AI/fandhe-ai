@@ -6411,3 +6411,61 @@ f64 の参照は閉じた式（判定の `v` は使わない）:
 - 実測（上の掃引。debug ビルド）: 検査した要素 343,440、実測の誤差が非 0 の要素 342,710、`dev > 0.1·bound` の要素 4,246、最大の `dev/bound` は 0.445。上界は実測を覆い、かつ空振り（上界が常に桁違いに大きい）ではない。
 - 未測定: `d ≥ 512` の候補（`cosine_followup_candidates()`）での `Lin` の上界と走査量は測っていない。#4091 が測る。GPU 実機 parity は未実測のまま（CPU の値で代替しない）。
 - 変えていないもの: 判定・閾値・本番経路の戻り値とエラー文面・tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・依存・`docs/spec`・公開 API・既存の拒否プローブ。
+
+### 82.8 #4091: Cosine の判定を `Lin` の上界へ切り替える
+
+親 #4071 の 2 段目。承認は #4071 の起票の範囲に限り、上乗せしない。実際に得ていない承認は主張しない。
+
+**結論（先に）**: 判定は `Lin` の上界で救う形に配線した。ただし #4089 が選んだ 3 候補（§82.4）は、`Lin` の契約（和の誤差を実カーネルの順序に依らない最悪値 `γ_{n−1}·Σ|vᵢ|` で追う）のままでは受理に変えられない。受理に変わった行は、本イシューの掃引で `d = 128`・上流 `2^20` の 2 行（旧判定は `coeff·m` のみで拒否していた行）である。AC1（3 候補の受理）は未達で、理由と後続候補を下に実測で書く。
+
+#### 実装（`crates/autodiff/src/create_graph/loss_class.rs`）
+
+- **either 受理**: 要素ごとに従来の見積り（`judge::struct_check`）を先に評価し、拒否した要素だけ `Lin` の判定（`entry_check_lin`）を評価する（`cos_elem`）。どちらの見積りも f32 構造の誤差の上界として独立に健全なので、片方が閾値内なら REQ-2 は成り立つ。従来の受理を拒否へ変えることは構造的に起きない（実測でも 0 件）。拒否するときのエラー文面は従来と同じで、計測フックには最終的に拒否した要素だけを積む。`fast_ok` の速い経路・`flag` の行・`CosSide`・`cos_m` は変えていない。
+- **`Lin` の状態 `CosLinState`**: 従来の見積りが最初に拒否した要素で forward を 1 回だけ作る（速い経路や受理される行では `Lin` を一切作らない）。seed のスカラー cotangent は `(side, j)` が変わるたびに作り直し、要素ごとの値は作ってすぐ `lin_truncate` で戻す（`cos_rev_seed`・`cos_rev_own`・`cos_rev_other` に分割。全要素版 `cos_rev` は test 限定の合成として残す）。判定時の事象数は forward ＋ seed のスカラー ＋ 要素 1 つ分で、約 `5d + 50`。`Drop` で thread-local の領域を解放する。
+- **`Num::settle`**: `cos_fwd` の行全体の縮約 `Σa'²`・`Σb'²`・`Σa'b'` の直後に `settle(&[])`（anchors なし）を掛ける。`f64`・`f32` では恒等で、`cosine_fwd_generic_matches_previous_formulas`（bit 一致の錠）は無変更で通る。束ね方の選択は実測で確かめた: `settle` を外しても（係数列が O(d) に伸びて判定が `d = 512` で 約 22 秒・`d = 1024` で 約 170 秒になる）、全要素の余裕は `d = 512`・`d = 2048` とも小数第 2 位まで同じで、相関を失う影響は無い。
+- **Mean の `s_b` の写し**: 子テープの `loss_scale_bcast` に合わせ、Mean は f32 の `g / n`、`g` への二階は `Div` の VJP の係数 `1/n` を f32 で作ってから掛ける。soundness の掃引に Mean（分母 3・7）を足した（§82.5 で Cosine の Mean は未測定だった）。
+- **適用条件 `cos_use_lin(n, d)`**（テンソル単位）: `16·cos_lin_events_max(d)·u < 0.01`（`entry_check_lin` の余裕係数の上限）かつ `n·cos_lin_cost(d) ≤ LIN_BUDGET`。満たさないテンソルは従来の見積りだけで判定する（受理集合は従来と同じ）。`cos_lin_events_max(d) = 5d + 80`、`cos_lin_cost(d) = 1000·d²`。`LIN_BUDGET`（`2^26`）の値は変えていない。
+
+#### 実測（CPU・x86_64 Linux・rustc 1.98.1・`--release`・seed を先頭 4・末尾 4・中央から 9 本取り全 seed に換算。入力は `a = pattern(d, 0)`・`b = a + 1e-2·pattern(d, 3)`・上流 1。1 `Rf` 反復 = 3.45 ns〈§80.5〉で換算）
+
+| d | forward の事象数 | 判定時の最大事象数 | `16·N·u` | 1 行の判定時間（全要素を `Lin` で見たとき） | 反復相当 | ÷ d² |
+|---|---|---|---|---|---|---|
+| 64 | 334 | 369 | 0.0004 | 0.005 秒 | 1.45e6 | 355 |
+| 256 | 1294 | 1329 | 0.0013 | 0.086 秒 | 2.48e7 | 379 |
+| 512 | 2574 | 2609 | 0.0025 | 0.383 秒 | 1.11e8 | 423 |
+| 1024 | 5134 | 5169 | 0.0049 | 1.856 秒 | 5.38e8 | 513 |
+| 1536 | 7694 | 7729 | 0.0074 | 4.948 秒 | 1.43e9 | 608 |
+| 2048 | 10254 | 10289 | 0.0098 | 10.17 秒 | 2.95e9 | 703 |
+| 4096 | 20494 | 20529 | 0.0196（上限 0.01 超） | 約 62 秒 | 1.8e10 | 1074 |
+
+- `cos_lin_cost = 1000·d²` は測った全点（d ≤ 2048）を覆い、見積り／実測は 1.4 倍以上。`LIN_BUDGET = 2^26` に当たるのは `n = 1` で `d = 259`。**測った d = 512 の 1.11e8 は上限を超えるため、本番では `d ≤ 259`（n = 1）のテンソルだけが `Lin` を使う**。
+- 余裕係数の条件（`16·N·u < 0.01`）は `d ≥ 2082` で効く。`d = 4096` は N ≈ 20529 で 0.0196 となり、`Lin` の契約（余裕係数の規則）を変えない限り全要素が拒否される。
+
+#### 拒否範囲の変化
+
+| 候補（§82.4） | 旧の余裕 | `Lin` で全要素を見たときの拒否要素・最大の `err/閾値` | 本番の判定 |
+|---|---|---|---|
+| `d=512`・`δ=1e-2`・`y=+1`・`2^20` | 1.32 | 31／18450 要素（標本）が拒否・最大 4.17 | 拒否のまま（走査量の上限で `Lin` を使わない。使っても拒否） |
+| `d=2048`・`δ=0`・`y=−1`・`2^13` | 2.11 | 1066／73746 要素が拒否・最大 1.18 | 拒否のまま（走査量の上限で `Lin` を使わない。使っても拒否） |
+| `d=4096`・`δ=1e-4`・`y=+1`・`2^13` | 1.95 | 全要素が拒否（余裕係数の上限超）・最大 1.50 | 拒否のまま（同上） |
+
+- 理由: 3 候補の実際の f32 の二階は REQ-2 の閾値の 1/160〜1/600 で一致している（REQ-2 比 1.2e-5〜6.1e-3）が、`Lin` の和の誤差は実カーネルの順序に依らない最悪値で、平行に近い行（`cos ≈ 1`）では `inner = bp/den − cos·ap/m` の差し引きで `1/δ` 倍に増幅される。`d = 512` では `Σa'²`・`Σa'b'` の `γ_{511}Σ|v|`（相対 約 3e-5）が `δ = 1e-2` で増幅され、一部の要素（値が 0.01〜0.06 で相対許容 5e-4 が絶対 1e-5 に近い要素）で上界が閾値を超える。これは `Lin` の契約の帰結であり、本イシューで契約は変えない。
+- 168 行（§82.2 の `cos_cases()`）に `d ∈ {128, 256}` の 48 行を足した 216 行で、旧判定／新判定の公開経路を比べた（`cosine_lin_switch_rejection_delta_measurement`）: 旧拒否 76 行 → 新拒否 74 行。**「旧受理 → 新拒否」は 0 件**。「旧拒否 → 新受理」は 2 行（`d=128`・`δ=1e-2`・`y=±1`・`2^20`。旧判定は `coeff·m` のみで拒否）で、REQ-2 比は x が 4.6e-3、`g` が 9.0e-4（参照の不確かさ 2.1e-11）。§82.2 の 168 行そのものの受理・拒否は変わらない（`d ≥ 512` は走査量の上限で `Lin` を使わず、`d ≤ 64` は旧判定で受理済み）。
+
+#### テスト・変異確認
+
+- `loss_class_followup_candidates_are_req2_within_f64`: Cosine の 3 候補は拒否のまま（`coeff·m` のみ・REQ-2 比 < 0.25）。受理に変えられない理由を `cosine_followup_candidates_exceed_lin_bound`（`#[ignore]`・`--release`）が固定する。
+- `cosine_lin_accepts_rows_rejected_by_coeff_bound_and_matches_f64`: 旧判定が `coeff·m` で拒否する `d=128`・`2^20` の行が受理に変わり、REQ-2 比 < 1・参照の不確かさ < 5% であること。
+- `lin_bound_covers_f32_deviation_for_cosine_sweep`（Mean の分母 3・7 を追加）・`lin_bound_covers_f32_deviation_for_cosine_underflow_rows`（微小成分が非正規数・0 へ落ちる `flag` の行）: `|実測 − Lin.v| ≤ Lin.bound()·(1 + 16·N·u)`。
+- `cos_lin_events_stay_within_bound`（事象数 ≤ `cos_lin_events_max`）・`cos_use_lin_boundaries`（走査量の上限・テンソル単位の選択・余裕係数の条件）。
+- 既存の拒否プローブ（統合テスト `create_graph_loss_class.rs` の 27 件、`cosine_epsilon_absorption_second_order_is_rejected_or_exact` を含む）と `existing_rejection_probes_stay_rejected_and_truly_fail_req2` は無変更で通る。
+- 変異確認（手動・コミットなし）: `Lin::bound` を常に 0 にすると、(i) soundness の 2 テスト（`lin_bound_covers_f32_deviation_for_cosine_sweep`・`..._underflow_rows`）が失敗し、(ii) Codex P1 の統合テスト `cosine_epsilon_absorption_second_order_is_rejected_or_exact`（`x1=x2=[1]`・scale 掃引）が失敗した（上界の項を落とすと拒否すべき scale で受理に変わる）。元に戻して全テストが通ることを確かめた。
+
+#### 後続候補（Issue は未起票。起票は所有者承認後）
+
+- 候補 3 件を受理に変えるには、和の誤差の上界を現行の最悪値から精密化する `Lin` の契約の変更が要る（例: 実カーネルの縮約順序〈pairwise など〉を仮定した `total` の上界、`16·N·u` の余裕係数を値ごとの依存事象数で数える精密化）。契約の変更は所有者承認の対象。
+- 走査量の見積り（`1000·d²`）を下げる最適化（要素ごとの `Lin` の演算の削減）で `LIN_BUDGET` 内に収まる `d` を広げる案。ただし上記の理由で候補は受理にならない。
+
+#### 変えていないもの
+
+tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET` の値・`entry_check_lin` と `Lin` の意味論・`rounding_coeff`・CE／CEWO／Triplet の判定（#4093〜#4096 の担当）・依存・`docs/spec`・公開 API・既存の拒否プローブ。GPU 実機 parity は未実測のまま（CPU の値で代替しない）。
