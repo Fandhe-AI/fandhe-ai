@@ -1632,4 +1632,152 @@ mod tests {
             emulation_case_shaped(kind, &x3, &w3, &[2, 5, 3], 0);
         }
     }
+    // -----------------------------------------------------------------
+    // 総括判定の走査時間の実測（イシュー #4085・決定記録 §83.1）。判定・定数は変えない
+    // -----------------------------------------------------------------
+
+    /// 決定的な LCG（[0, 1)）。計測の入力生成用（環境変数・ファイルは読まない）。
+    struct TimingLcg(u64);
+    impl TimingLcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as f64) / f64::from(1u32 << 31)
+        }
+    }
+
+    /// ウォームアップ 1 回の後の 5 回計測（1 回が 6 s 超なら 3 回）の中央値と各回の値（ns）。
+    fn timing_median(mut f: impl FnMut()) -> (f64, Vec<f64>) {
+        let mut once = || {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_nanos() as f64
+        };
+        let first = once();
+        let reps = if first > 6e9 { 3 } else { 5 };
+        let mut xs: Vec<f64> = (0..reps).map(|_| once()).collect();
+        let all = xs.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (xs[xs.len() / 2], all)
+    }
+
+    /// `lanes` 本・長さ `n` の入力（`x` は 1 近傍、`g` は正。受理される形）。
+    fn timing_inputs(lanes: usize, n: usize, lse_kind: bool) -> (Vec<f32>, Vec<f32>) {
+        let mut rng = TimingLcg(0x4085 + (lanes * 31 + n) as u64);
+        let total = lanes * n;
+        let x: Vec<f32> = (0..total)
+            .map(|_| {
+                if lse_kind {
+                    (rng.next() * 2.0 - 1.0) as f32
+                } else {
+                    (0.99 + 0.02 * rng.next()) as f32
+                }
+            })
+            .collect();
+        let g: Vec<f32> = (0..total).map(|_| (0.5 + rng.next()) as f32).collect();
+        (x, g)
+    }
+
+    /// 走査量が上限内に収まる最大の lane 数（`n` 固定）。`n` が単独で超えるなら 0。
+    fn timing_max_lanes(n: usize) -> usize {
+        let (mut lo, mut hi) = (0usize, 1usize);
+        while judge_cost(hi, n) <= JUDGE_BUDGET {
+            lo = hi;
+            hi *= 2;
+        }
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if judge_cost(mid, n) <= JUDGE_BUDGET {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Cumprod／Logcumsumexp の総括判定（`check_*_stages`）を、走査量が `JUDGE_BUDGET` ぎりぎりの
+    /// 入力で計測する。形は (a) 1 lane の最大長、(b) 長さ 8・64 の lane を上限まで並べた 2 系統。
+    /// 受理される入力を使い、判定が全 lane を走査したこと（`Ok`）を assert する。
+    /// 実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture
+    /// --test-threads=1 judge_budget_timing`。出力は stderr の `JUDGETIME` 行のみ。
+    #[test]
+    #[ignore = "手動実行専用の計測（stderr 出力のみ。#4085・§83.1）"]
+    fn judge_budget_timing_cumulative() {
+        let mut n_single = 1usize;
+        while judge_cost(1, n_single + 1) <= JUDGE_BUDGET {
+            n_single += 1;
+        }
+        assert_eq!(n_single, 1652);
+        let shapes = [
+            (1usize, n_single),
+            (timing_max_lanes(64), 64),
+            (timing_max_lanes(8), 8),
+        ];
+        for kind in ["Cumprod", "Logcumsumexp"] {
+            let lse_kind = kind == "Logcumsumexp";
+            for &(lanes, n) in &shapes {
+                let cost = judge_cost(lanes, n);
+                assert!(cost <= JUDGE_BUDGET && judge_cost(lanes + 1, n) > JUDGE_BUDGET);
+                let (x, g) = timing_inputs(lanes, n, lse_kind);
+                let d = Dims {
+                    outer: lanes,
+                    n,
+                    inner: 1,
+                };
+                let shape = [lanes, n];
+                let (y, host) = if lse_kind {
+                    let mut y = Vec::with_capacity(lanes * n);
+                    for l in 0..lanes {
+                        y.extend(lse_out(&x[l * n..(l + 1) * n]));
+                    }
+                    let layout = cumulative_layout(&shape, 1).unwrap();
+                    (y, logcumsumexp_vjp_host(&x, &g, &layout).unwrap())
+                } else {
+                    let mut y = Vec::with_capacity(lanes * n);
+                    for l in 0..lanes {
+                        y.extend(cumprod_y(&x[l * n..(l + 1) * n]));
+                    }
+                    let h = cumprod_vjp_along(
+                        &Tensor::new(x.clone(), &shape).unwrap(),
+                        &Tensor::new(g.clone(), &shape).unwrap(),
+                        1,
+                    );
+                    (y, crate::eval::dense_vec(&h))
+                };
+                check_entry(&x, &g, n, kind).unwrap();
+                let run = || {
+                    if lse_kind {
+                        check_logcumsumexp_stages(&x, &g, &y, &host, d)
+                    } else {
+                        check_cumprod_stages(&x, &g, &y, &host, d)
+                    }
+                };
+                let result = run();
+                // 全 lane を走査した（途中で拒否して短絡していない）ことの担保。
+                assert!(result.is_ok(), "{kind} lanes={lanes} n={n}: {result:?}");
+                let (med, all) = timing_median(|| {
+                    let _ = std::hint::black_box(run());
+                });
+                let entries = lanes * 2 * n * n;
+                eprintln!(
+                    "JUDGETIME kind={kind} lanes={lanes} n={n} cost={cost} cost/2^27={:.4} entries={entries} result={} median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
+                    cost as f64 / JUDGE_BUDGET as f64,
+                    if result.is_ok() {
+                        "accepted(full-scan)"
+                    } else {
+                        "REJECTED(lower-bound)"
+                    },
+                    med / 1e6,
+                    all.iter()
+                        .map(|v| (v / 1e5).round() / 10.0)
+                        .collect::<Vec<_>>(),
+                    med / cost as f64,
+                    med / entries as f64,
+                );
+            }
+        }
+    }
 }

@@ -1049,4 +1049,107 @@ mod tests {
         tape.backward_create_graph(&loss, &child)
             .expect("安全な複数区間の Prod グラフは拒否されない");
     }
+    // -----------------------------------------------------------------
+    // 総括判定の走査時間の実測（イシュー #4085・決定記録 §83.1）。判定・定数は変えない
+    // -----------------------------------------------------------------
+
+    /// 決定的な LCG（[0, 1)）。計測の入力生成用。
+    struct TimingLcg(u64);
+    impl TimingLcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as f64) / f64::from(1u32 << 31)
+        }
+    }
+
+    /// 単調な条件 `ok(v)`（`v` が小さいほど真）が成り立つ最大の `v >= 1`（倍々＋二分探索）。
+    fn timing_max_by(ok: impl Fn(usize) -> bool) -> usize {
+        let (mut lo, mut hi) = (1usize, 2usize);
+        assert!(ok(lo));
+        while ok(hi) {
+            lo = hi;
+            hi *= 2;
+        }
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// ウォームアップ 1 回の後の 5 回計測（1 回が 6 s 超なら 3 回）の中央値と各回の値（ns）。
+    fn timing_median(mut f: impl FnMut()) -> (f64, Vec<f64>) {
+        let mut once = || {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_nanos() as f64
+        };
+        let first = once();
+        let reps = if first > 6e9 { 3 } else { 5 };
+        let mut xs: Vec<f64> = (0..reps).map(|_| once()).collect();
+        let all = xs.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (xs[xs.len() / 2], all)
+    }
+
+    /// scatter_reduce Prod の総括判定 `judge`（`whole_lane_bounds` と区間ごとの `judge_window` を含む）を、
+    /// 走査量が `JUDGE_BUDGET` ぎりぎりの入力で計測する。形は (a) 1 区間の最大長、(b) 長さ 8 の区間を
+    /// 上限まで並べた場合。`include_self = false`・寄与値は 1 近傍で受理される入力にし、`Ok`（全区間を
+    /// 走査した）を assert する。実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored
+    /// --nocapture --test-threads=1 judge_budget_timing`。出力は stderr の `JUDGETIME` 行のみ。
+    #[test]
+    #[ignore = "手動実行専用の計測（stderr 出力のみ。#4085・§83.1）"]
+    fn judge_budget_timing_scatter_prod() {
+        let one_seg = timing_max_by(|l| judge_cost(std::iter::once(l), l) <= JUDGE_BUDGET);
+        let many8 = timing_max_by(|c| judge_cost(std::iter::repeat_n(8, c), 8 * c) <= JUDGE_BUDGET);
+        let many64 =
+            timing_max_by(|c| judge_cost(std::iter::repeat_n(64, c), 64 * c) <= JUDGE_BUDGET);
+        for (segs, m) in [(1usize, one_seg), (many64, 64), (many8, 8)] {
+            let k = segs * m;
+            let cost = judge_cost(std::iter::repeat_n(m, segs), k);
+            assert!(cost <= JUDGE_BUDGET);
+            assert!(
+                judge_cost(std::iter::repeat_n(m, segs + 1), k + m) > JUDGE_BUDGET || segs == 1
+            );
+            if segs == 1 {
+                assert!(judge_cost(std::iter::once(m + 1), m + 1) > JUDGE_BUDGET);
+            }
+            let mut rng = TimingLcg(0x4085 + k as u64);
+            let s: Vec<f32> = (0..k).map(|_| (0.99 + 0.02 * rng.next()) as f32).collect();
+            let x = vec![1.0f32; segs];
+            let g: Vec<f32> = (0..segs).map(|_| (0.5 + rng.next()) as f32).collect();
+            let idx: Vec<i32> = (0..k).map(|p| (p / m) as i32).collect();
+            let layout = scatter_reduce_layout(&[segs], &[k], &[k], 0).unwrap();
+            let pos = layout.positions(&idx).unwrap();
+            let plan = build_plan(&pos, segs, false).unwrap();
+            let (d_in, d_src) =
+                scatter_reduce_vjp_host(&x, &idx, &s, &g, &layout, ScatterReduceMode::Prod, false)
+                    .unwrap();
+            let run = || judge(&plan, &x, &s, &g, (&d_in, &d_src));
+            // 全区間を走査した（途中で拒否して短絡していない）ことの担保。
+            let result = run();
+            assert!(result.is_ok(), "segs={segs} m={m}: {result:?}");
+            let (med, all) = timing_median(|| {
+                let _ = std::hint::black_box(run());
+            });
+            let entries = segs * 2 * m * m;
+            eprintln!(
+                "JUDGETIME kind=ScatterReduceProd segs={segs} m={m} k={k} cost={cost} cost/2^27={:.4} entries={entries} result=accepted(full-scan) median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
+                cost as f64 / JUDGE_BUDGET as f64,
+                med / 1e6,
+                all.iter()
+                    .map(|v| (v / 1e5).round() / 10.0)
+                    .collect::<Vec<_>>(),
+                med / cost as f64,
+                med / entries as f64,
+            );
+        }
+    }
 }

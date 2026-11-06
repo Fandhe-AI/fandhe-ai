@@ -6394,3 +6394,90 @@ f64 の参照は閉じた式（判定の `v` は使わない）:
 ### 82.6 後続の追記先
 
 - #4090／#4091（Cosine）、#4093／#4094（CE・CEWO。#4092 に依存）、#4095／#4096（Triplet）が、それぞれの結果を 82.6 以降へ追記する。82.4 の入力を使い、受理に変えたときの余裕を同じ表の形で記録する。
+
+
+## 83. 計測・設計記録（親 #4072。create_graph の総括判定の走査量の上限 `JUDGE_BUDGET` の見直し）
+
+### 83.0 位置づけ
+
+- 親 #4072 は、PR #3950 で走査量の数え方を「f32 で再現する 1 系統の内側ループの反復回数」に変えたため上限 `JUDGE_BUDGET = 2^27` が実質厳しくなった（WeightNorm で約 3.5 倍、SpectralNorm で約 2 倍）が、値と数え方を支える実測が無い（§79.6）、という前提に立つ。実測を根拠に値を見直すか、据え置く根拠を残すかを決める。
+- 分担: #4085（本節 §83.1）は計測と記録だけ。`judge.rs` への定義の集約は #4086、値の見直しは #4087。本節は #4087 が使う材料を示すだけで、値の提案はしない。承認は #4072 の起票に書かれた範囲だけで、本節は上乗せしていない。
+
+### 83.1 #4085: 総括判定の走査時間を上限ぎりぎりの入力で実測
+
+- 位置づけ: 計測のみ。判定・`JUDGE_BUDGET`・`LIN_BUDGET`・`lin_group_cost`・走査量の式・拒否範囲は変えていない。本番コード（`#[cfg(test)]` の外）の差分は無い。
+- 計測テスト（いずれも `#[ignore]`。通常の CI では走らない）:
+  - `create_graph/cumulative_b.rs` の `tests::judge_budget_timing_cumulative`（Cumprod・Logcumsumexp）
+  - `create_graph/scatter_reduce_prod.rs` の `tests::judge_budget_timing_scatter_prod`（scatter_reduce Prod。`whole_lane_bounds` と区間ごとの `judge_window` を含む `judge` 全体）
+  - `create_graph/norm_reparam.rs` の `tests::judge_budget_timing_norm_rf`（LRN・WeightNorm〈`Rf`〉・SpectralNorm〈`Rf`〉）と `tests::judge_budget_timing_norm_lin`（WeightNorm〈`Lin`・疎モード〉・SpectralNorm〈`Lin`〉）
+- 再実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture --test-threads=1 judge_budget_timing`（stderr に `JUDGETIME` 行。全体で 1 分未満）。`Lin` の領域は thread-local なので `--test-threads=1` が要る。
+
+#### 実行環境
+
+| 項目 | 値 |
+|------|----|
+| CPU | 13th Gen Intel(R) Core(TM) i7-13700K（論理 10 コア・x86_64。計測は 1 スレッド） |
+| OS | Linux 7.0.0-34-generic |
+| rustc | 1.98.1 (48a229cea 2026-09-01) |
+| ビルド | `cargo test --release`（ワークスペースは `[profile.dev]` のみ上書き。release は既定の opt-level 3・LTO なし）、`--test-threads=1` |
+| 方法 | ウォームアップ 1 回の後 5 回計測の中央値（1 回が 6 s 超なら 3 回。今回は全て 5 回）。入力は決定的な LCG。境界は式から二分探索で求め、`cost ≤ 2^27 < cost(+1 単位)` をテスト内で assert |
+| 注意 | 他の並列作業がある共有機で全体を 2 回走らせた。中央値は 2 回で 3% 以内（大半は 1% 以内）で一致した。表は 1 回目 |
+
+#### 計測の方法（全走査の担保）
+
+- 本番の判定は最初に拒否した要素で止まるため、上限ぎりぎりの時間が全走査の時間になるのは全要素が受理されるときだけである。そこで次の 2 通りで全走査させた。
+  - Cumprod・Logcumsumexp・scatter Prod・LRN: 受理される入力を選び、本番の判定関数をそのまま呼んで `Ok`（全走査）を assert した（x は 1 近傍または [0.3, 1]、上流は正または小さな振幅）。
+  - WeightNorm・SpectralNorm: 判定は検査を引数で受け取るので、何もしない検査を渡して全 seed を走査させた（既存の `spectral_norm_lin_judge_cost_measurement` と同じ方法）。本番の検査を通した受理／拒否は別に出した。
+- 形は (a) 長い lane／区間／グループ 1 本、(b) 短い lane／区間／グループを多数並べて、同じ走査量の上限に合わせた。(b) の入力は、グループ・列が多い形では異なる入力を最大 256 種作って循環させた（判定は入力ごとに独立で全件を走査する）。
+- 「二階要素数」は判定が検査する二階の要素数で、判定ごとの定義による（Cumprod・Logcumsumexp は lane あたり `2n²`、scatter Prod は区間あたり `2m²`、LRN は seed ごとの帯の内側の `x`・`up` の要素、WeightNorm は `(rest+1)·2·rest`、SpectralNorm は `2n²`）。
+
+#### 表 1: `Rf` 系の判定の上限ぎりぎりの時間
+
+| 判定 | 形 | 走査量 / 2^27 | 二階要素数 | 中央値 | ns/反復 | ns/要素 | 全走査の担保 |
+|------|----|---:|---:|---:|---:|---:|------|
+| Cumprod | (a) 1 lane・n=1652 | 0.9999 | 5.46M | 213 ms | 1.59 | 39.1 | 受理（本番の判定） |
+| Cumprod | (b) 891 lane・n=64 | 0.9993 | 7.30M | 237 ms | 1.77 | 32.5 | 同 |
+| Cumprod | (b) 54120 lane・n=8 | 1.0000 | 6.93M | 377 ms | 2.81 | 54.5 | 同 |
+| Logcumsumexp | (a) 1 lane・n=1652 | 0.9999 | 5.46M | 217 ms | 1.61 | 39.7 | 同 |
+| Logcumsumexp | (b) 891 lane・n=64 | 0.9993 | 7.30M | 240 ms | 1.79 | 32.9 | 同 |
+| Logcumsumexp | (b) 54120 lane・n=8 | 1.0000 | 6.93M | 302 ms | 2.25 | 43.6 | 同 |
+| scatter Prod | (a) 1 区間・m=1080 | 0.9992 | 2.33M | 58.8 ms | 0.44 | 25.2 | 同 |
+| scatter Prod | (b) 346 区間・m=64 | 0.9992 | 2.83M | 68.3 ms | 0.51 | 24.1 | 同 |
+| scatter Prod | (b) 17119 区間・m=8 | 1.0000 | 2.19M | 90.5 ms | 0.67 | 41.3 | 同 |
+| LRN | (a) 79891 列・C=16・size=5 | 1.0000 | 15.8M | 264 ms | 1.97 | 16.7 | 受理（`lrn_col_judge`） |
+| LRN | (b) 1 列・C=508・size=1017 | 0.9942 | 0.52M | 134 ms | 1.00 | 260 | 同 |
+| WeightNorm（`Rf`） | (a) 1 グループ・rest=4376 | 0.9996 | 38.3M | 202 ms | 1.51 | 5.28 | 何もしない検査（本番の検査は 0/1 受理） |
+| WeightNorm（`Rf`） | (b) 288 グループ・rest=256 | 0.9987 | 37.9M | 202 ms | 1.51 | 5.33 | 同（本番の検査は 59/256 受理） |
+| SpectralNorm（`Rf`） | 76×76（n=5776） | 0.9953 | 66.7M | 300 ms | 2.25 | 4.50 | 同（本番の検査は拒否） |
+
+- LRN の入力は `alpha = size`・`k = 1`・`beta = 0.75`、x は [0.3, 1.0]（スケール指数 0・チャンク 0 個）。窓は `lrn_cgrad` と同じ組み立て（`size/2` 前・`(size-1)/2` 後）。(b) の C=508 は `size = 2C+1` で二重走査 `wr·wf` が効く形の境界。
+- 走査量の境界は式から: Cumprod・Logcumsumexp の 1 lane は n=1652（既知の境界と一致）、scatter Prod の 1 区間は m=1080、WeightNorm の 1 グループは rest=4376（`wn_judge_cost(1, 4400)` は拒否という既知の事実と整合）、SpectralNorm は side=76。
+
+#### 表 2: `Lin` 経路（別の予算 `LIN_BUDGET = 2^26`）
+
+`Lin` の走査量の単位は `Rf` の 1 反復相当の見積り（`lin_group_cost`・`sn_lin_cost`）で、`ns/単位` はその単位 1 つ当たりの時間。「`Rf` の ns/反復」は同じ入力を `Rf`（何もしない検査）で回した 1 反復当たりの時間で、比が 1 を超える行は、見積りの単位が実際の時間より少ないことを示す。
+
+| 判定 | 幅・形 | グループ数 | 単位 / `LIN_BUDGET` | 中央値 | ns/単位 | `Rf` の ns/反復 | 比 | 本番の検査 |
+|------|--------|---:|---:|---:|---:|---:|---:|------|
+| WeightNorm（`Lin`・疎モード） | rest=8 | 1613 | 0.9999 | 164 ms | 2.44 | 3.76 | 0.65 | 256/256 受理 |
+| WeightNorm（`Lin`・疎モード） | rest=32 | 238 | 0.9987 | 78.1 ms | 1.17 | 2.23 | 0.52 | 238/238 受理 |
+| WeightNorm（`Lin`・疎モード） | rest=128 | 22 | 0.9735 | 132 ms | 2.01 | 1.59 | 1.27 | 22/22 受理 |
+| SpectralNorm（`Lin`） | 8×59（n=472） | - | 0.9959 | 453 ms | 6.78 | 2.06 | 3.29 | 拒否 |
+| SpectralNorm（`Lin`） | 21×21（n=441） | - | 0.8694 | 369 ms | 6.33 | 2.06 | 3.07 | 拒否 |
+
+- WeightNorm の `groups` は `LIN_BUDGET / lin_group_cost(rest)`（`wn_use_lin(groups, rest)` が真、`groups+1` が偽になることを assert）。SpectralNorm の n=472 は `sn_use_lin` が真になる最大の N（形は積で作れる 8×59 と 21×21）。
+- 本番の検査の列は、入力が全件受理される行と、SpectralNorm のように拒否される行がある。拒否される行の本番の時間は、最初の拒否で止まるので表の時間より短い（本節では測っていない）。
+
+#### 数え方の根拠の整理（実測から言えることだけ）
+
+- 上限ぎりぎりの最悪の時間（全走査）は、`Rf` 系で 0.06〜0.38 s、`Lin` 経路で 0.08〜0.45 s。どの判定も 0.5 s を超えない。
+- ns/反復は判定をまたいで 0.44〜2.81 の範囲（約 6.4 倍）、ns/要素は 4.5〜260（約 58 倍）。判定をまたいだ比較では、要素数より反復回数の方が時間とよく並ぶ。ただし二階要素数の定義が判定ごとに違う点に注意（LRN の (b) は seed ごとの二重走査が反復を占めるため ns/要素が大きく出る）。
+- 同じ判定の形 (a)/(b) の差: Cumprod・Logcumsumexp は短い lane（n=8）で 1.4〜1.8 倍、scatter Prod は短い区間（m=8）で 1.5 倍、LRN は小さい窓で約 2 倍、WeightNorm（`Rf`）は 1.00 倍（形に依らない）。判定ごとの式の定数（lane・区間あたりの定数項）が、短い lane・区間の多い形で時間を押し上げている。
+- `Lin` 経路: WeightNorm の疎モードは単位当たりの時間が幅で 1.17〜2.44 ns と動き、`Rf` 比は 0.52〜1.27（rest=128 で見積りの単位が実際の時間より約 27% 少ない）。SpectralNorm は `Rf` 比が約 3.1〜3.3 で、`sn_lin_cost` の注記（`sn_lin_cost` の doc コメントの実測値、N=400 で約 3.5e7 ≒ `219·N²`）とは合わない（本節の換算は N=441 で約 `910·N²`）。注記を測ったときの構成は確認していない。
+- #4087 への材料（事実の提示に留める。値の提案はしない）: (1) 上限ぎりぎりの全走査の最悪時間は上のとおり 0.5 s 未満。 (2) 反復回数あたりの時間は判定ごとに最大約 6.4 倍の幅がある。 (3) Cumprod・Logcumsumexp・scatter Prod・LRN は、上限ぎりぎりの走査量で本番の判定が受理する入力を作れた。WeightNorm・SpectralNorm の本番の検査が拒否した入力は、全走査の時間だけを何もしない検査で測ったもので、入力の性質による拒否であり走査量とは別。
+
+#### GPU・スコープ外・未測定・変えていないもの
+
+- GPU 実機は未実測（CPU の値で代替しない）。この計測は CPU の `create_graph` の総括判定（ホスト側の走査）だけを対象にしている。
+- 未測定: LRN の NaN 列の走査（`lrn_col_scan`。`lrn_judge_cost(n_nan, c, win, 0)` で別に数える分）、`include_self = true` の scatter Prod、拒否される入力での本番の判定の時間（最初の拒否で止まる側）、他の CPU・OS。
+- 変えていないもの: 判定、`JUDGE_BUDGET`、`LIN_BUDGET`、`lin_group_cost`、走査量の式、tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline、`STAGE_BOUND_GUARD`、既存の拒否プローブと正のプローブ、依存、公開 API、`docs/spec`。

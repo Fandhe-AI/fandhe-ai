@@ -4119,4 +4119,345 @@ mod tests {
             );
         }
     }
+    // -----------------------------------------------------------------
+    // 総括判定の走査時間の実測（イシュー #4085・決定記録 §83.1）。判定・定数は変えない
+    // -----------------------------------------------------------------
+
+    /// 決定的な LCG（[0, 1)）。計測の入力生成用（環境変数・ファイルは読まない）。
+    struct TimingLcg(u64);
+    impl TimingLcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as f64) / f64::from(1u32 << 31)
+        }
+    }
+
+    /// 条件 `ok(v)`（`v` が小さいほど真に単調）が成り立つ最大の `v >= lo`（倍々＋二分探索）。
+    fn timing_max_by(lo: usize, ok: impl Fn(usize) -> bool) -> usize {
+        let (mut lo, mut hi) = (lo, lo * 2);
+        assert!(ok(lo));
+        while ok(hi) {
+            lo = hi;
+            hi *= 2;
+        }
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// ウォームアップ 1 回の後の 5 回計測（1 回が 6 s 超なら 3 回）の中央値と各回の値（ns）。
+    fn timing_median(mut f: impl FnMut()) -> (f64, Vec<f64>) {
+        let mut once = || {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_nanos() as f64
+        };
+        let first = once();
+        let reps = if first > 6e9 { 3 } else { 5 };
+        let mut xs: Vec<f64> = (0..reps).map(|_| once()).collect();
+        let all = xs.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (xs[xs.len() / 2], all)
+    }
+
+    fn timing_runs_ms(all: &[f64]) -> Vec<f64> {
+        all.iter().map(|v| (v / 1e5).round() / 10.0).collect()
+    }
+
+    /// 計測に使う異なる入力の最大数。グループ・列が多い形では、この数の入力を循環させて並べる
+    /// （入力の生成と保持を抑えるため。判定は入力ごとに独立で、全件が走査される）。
+    const TIMING_UNIQUE: usize = 256;
+
+    /// WeightNorm の 1 グループの入力 `(v, up, g, s)`（`lin.rs::gen_input` と同じ分布。振幅 1・上流 3 程度）。
+    fn timing_wn_input(rng: &mut TimingLcg, rest: usize) -> (Vec<f32>, Vec<f32>, f32, f64) {
+        loop {
+            let v: Vec<f32> = (0..rest)
+                .map(|_| ((rng.next() * 2.0 - 1.0) * 2.0) as f32)
+                .collect();
+            let up: Vec<f32> = (0..rest)
+                .map(|_| ((rng.next() * 2.0 - 1.0) * 3.0) as f32)
+                .collect();
+            let g = (0.05 + rng.next() * 2.0) as f32;
+            if v.iter().all(|&x| x == 0.0) {
+                continue;
+            }
+            let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            return (v, up, g, f64::from(pow2(pow2_ceil_exponent(mx))));
+        }
+    }
+
+    /// LRN の判定（`lrn_col_judge`）を、走査量 [`JUDGE_BUDGET`] ぎりぎりの入力で計測する。
+    /// (a) 小さい窓（size 5・C 16）の列を上限まで並べる、(b) 1 列で C を増やし size = 2C + 1（二重走査
+    /// `wr·wf` が効く形）。全列の判定を `lrn_col_judge` で回し `Ok`（全列を走査）を assert する。
+    fn timing_lrn(label: &str, ncols_fixed: Option<usize>, c: usize, size: usize) {
+        let win = lrn_win(c, size);
+        let (alpha, beta, k) = (size as f64 * 1.0, 0.75f64, 1.0f64);
+        let rho = alpha / size as f64;
+        let floor = (k * size as f64 / alpha).sqrt();
+        let mut rng = TimingLcg(0x4085 + (c * 7 + size) as u64);
+        let n_unique = ncols_fixed.unwrap_or(TIMING_UNIQUE).min(TIMING_UNIQUE);
+        let cols: Vec<(Vec<f32>, Vec<f32>)> = (0..n_unique)
+            .map(|_| {
+                let x: Vec<f32> = (0..c).map(|_| (0.3 + 0.7 * rng.next()) as f32).collect();
+                let up: Vec<f32> = (0..c).map(|_| (rng.next() * 2.0 - 1.0) as f32).collect();
+                (x, up)
+            })
+            .collect();
+        let mx = cols
+            .iter()
+            .flat_map(|(x, _)| x.iter())
+            .fold(0.0f64, |m, &v| m.max(f64::from(v).abs()));
+        let e = pow2_ceil_exponent(mx.max(floor));
+        let chunks: Vec<f64> = chunk_factors(&[-2.0 * beta * f64::from(e)])
+            .iter()
+            .map(|ch| ch[0])
+            .collect();
+        let nchunks = chunks.len();
+        let ncols = ncols_fixed.unwrap_or_else(|| {
+            timing_max_by(1, |m| lrn_judge_cost(m, c, win, nchunks) <= JUDGE_BUDGET)
+        });
+        let cost = lrn_judge_cost(ncols, c, win, nchunks);
+        assert!(cost <= JUDGE_BUDGET);
+        if ncols_fixed.is_none() {
+            assert!(lrn_judge_cost(ncols + 1, c, win, nchunks) > JUDGE_BUDGET);
+        }
+        let kc = LrnColConst {
+            s: f64::from(pow2(e)),
+            kk: k / 2f64.powi(2 * e),
+            rho,
+            beta,
+            chunks: &chunks,
+        };
+        let coeff = lrn_coeff(
+            window_terms(c, win.bf, win.ff),
+            window_terms(c, win.br, win.fr),
+            nchunks,
+            beta,
+        );
+        let run = || {
+            for col in 0..ncols {
+                let (x, up) = &cols[col % n_unique];
+                lrn_col_judge(x, up, &kc, win, coeff)?;
+            }
+            Ok::<(), AutodiffError>(())
+        };
+        // 全列を走査した（途中で拒否して短絡していない）ことの担保。
+        let result = run();
+        assert!(result.is_ok(), "{label}: {result:?}");
+        let (med, all) = timing_median(|| {
+            let _ = std::hint::black_box(run());
+        });
+        // 二階の要素数: seed（c 個）ごとの x・up への要素（帯の内側）。
+        let entries = ncols
+            * (0..c)
+                .map(|j| {
+                    let (ulo, uhi) = (j.saturating_sub(win.br), (j + win.fr).min(c - 1));
+                    let (xlo, xhi) = (ulo.saturating_sub(win.bf), (uhi + win.ff).min(c - 1));
+                    (xhi - xlo + 1) + (uhi - ulo + 1)
+                })
+                .sum::<usize>();
+        eprintln!(
+            "JUDGETIME kind=LRN {label} ncols={ncols} c={c} size={size} nchunks={nchunks} cost={cost} cost/2^27={:.4} entries={entries} result=accepted(full-scan) median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
+            cost as f64 / JUDGE_BUDGET as f64,
+            med / 1e6,
+            timing_runs_ms(&all),
+            med / cost as f64,
+            med / entries as f64,
+        );
+    }
+
+    /// WeightNorm の `Rf` 経路（幅が [`LIN_REST_MAX`] 超）を、何もしない検査（全 seed を走査）で計測する。
+    /// 併せて本番の検査（`wn_group_judge(use_lin = false)`）の受理件数を出す。
+    fn timing_wn_rf(label: &str, groups: usize, rest: usize) {
+        let cost = wn_judge_cost(groups, rest);
+        assert!(cost <= JUDGE_BUDGET);
+        let mut rng = TimingLcg(0x4085 + rest as u64);
+        let n_unique = groups.min(TIMING_UNIQUE);
+        let inputs: Vec<_> = (0..n_unique)
+            .map(|_| timing_wn_input(&mut rng, rest))
+            .collect();
+        let run = || {
+            for gi in 0..groups {
+                let (v, up, g, s) = &inputs[gi % n_unique];
+                wn_group_judge_with::<Rf>(v, up, *g, *s, &|_, _, _| Ok(()))?;
+            }
+            Ok::<(), AutodiffError>(())
+        };
+        assert!(run().is_ok());
+        let (med, all) = timing_median(|| {
+            let _ = std::hint::black_box(run());
+        });
+        let prod_ok = inputs
+            .iter()
+            .filter(|(v, up, g, s)| wn_group_judge(v, up, *g, *s, wn_coeff(rest), false).is_ok())
+            .count();
+        let entries = groups * (rest + 1) * 2 * rest;
+        eprintln!(
+            "JUDGETIME kind=WeightNorm(Rf) {label} groups={groups} rest={rest} cost={cost} cost/2^27={:.4} entries={entries} result=full-scan(no-op check) prod_accepts={prod_ok}/{n_unique}(unique inputs) median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
+            cost as f64 / JUDGE_BUDGET as f64,
+            med / 1e6,
+            timing_runs_ms(&all),
+            med / cost as f64,
+            med / entries as f64,
+        );
+    }
+
+    /// LRN・WeightNorm（`Rf`）・SpectralNorm（`Rf`）の総括判定を、走査量 [`JUDGE_BUDGET`] ぎりぎりの入力で
+    /// 計測する。`Lin` 経路は別の予算なので `judge_budget_timing_norm_lin` で測る。
+    /// WeightNorm・SpectralNorm は検査を何もしない関数にして全走査させ、本番の検査の結果は別に出す。
+    /// 実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture
+    /// --test-threads=1 judge_budget_timing`。出力は stderr の `JUDGETIME` 行のみ。
+    #[test]
+    #[ignore = "手動実行専用の計測（stderr 出力のみ。#4085・§83.1）"]
+    fn judge_budget_timing_norm_rf() {
+        // LRN: (a) 小さい窓で列数を上限まで、(b) 広い窓（size = 2C + 1）で C を上限まで。
+        timing_lrn("shape=a(small-window)", None, 16, 5);
+        let c_wide = timing_max_by(2, |c| {
+            // 1 列。チャンク数は指数 0 の入力で 0 になる。
+            let w = lrn_win(c, 2 * c + 1);
+            lrn_judge_cost(1, c, w, 0) <= JUDGE_BUDGET
+        });
+        timing_lrn("shape=b(wide-window)", Some(1), c_wide, 2 * c_wide + 1);
+        // WeightNorm（Rf）: (a) 1 グループの最大幅、(b) 幅 256 のグループを上限まで。
+        let rest_max = timing_max_by(LIN_REST_MAX + 1, |r| wn_judge_cost(1, r) <= JUDGE_BUDGET);
+        timing_wn_rf("shape=a(one-group)", 1, rest_max);
+        let groups = timing_max_by(1, |g| wn_judge_cost(g, 256) <= JUDGE_BUDGET);
+        assert!(wn_judge_cost(groups + 1, 256) > JUDGE_BUDGET);
+        timing_wn_rf("shape=b(many-groups)", groups, 256);
+        // SpectralNorm（Rf）: 上限内で最大の正方形（`sn_judge_cost` は N だけで決まる）。
+        let side = timing_max_by(2, |m| sn_judge_cost(m * m) <= JUDGE_BUDGET);
+        assert!(sn_judge_cost((side + 1) * (side + 1)) > JUDGE_BUDGET);
+        let c = sn_case(&[side, side], 1.0, 2.0, SnUp::General, 1.0);
+        let inp = sn_inputs(&c);
+        let n = inp.w.len();
+        let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+        let cost = sn_judge_cost(n);
+        let run = || sn_judge_with::<Rf>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(()));
+        assert!(run().is_ok());
+        let (med, all) = timing_median(|| {
+            let _ = std::hint::black_box(run());
+        });
+        let prod = sn_judge(&inp.w, &inp.p_exact, &inp.up, s, sn_coeff(n), false);
+        let entries = n * 2 * n;
+        eprintln!(
+            "JUDGETIME kind=SpectralNorm(Rf) shape={side}x{side} n={n} cost={cost} cost/2^27={:.4} entries={entries} result=full-scan(no-op check) prod={} median_ms={:.1} runs_ms={:?} ns_per_iter={:.3} ns_per_entry={:.3}",
+            cost as f64 / JUDGE_BUDGET as f64,
+            if prod.is_ok() { "accepted" } else { "rejected" },
+            med / 1e6,
+            timing_runs_ms(&all),
+            med / cost as f64,
+            med / entries as f64,
+        );
+    }
+
+    /// `Lin` 経路（WeightNorm の疎モード・SpectralNorm）の総括判定を、`Lin` 側の予算 [`LIN_BUDGET`] ぎりぎり
+    /// の入力で計測する。時間当たりのコストが `Rf` と違うので `Rf` とは別に測り、同じ入力の `Rf` の
+    /// ns/反復との比も出す。検査は何もしない関数にして全走査させ、本番の判定の結果は別に出す。`Lin` の
+    /// 領域は thread-local なので `--test-threads=1` で実行する。
+    #[test]
+    #[ignore = "手動実行専用の計測（stderr 出力のみ。#4085・§83.1）"]
+    fn judge_budget_timing_norm_lin() {
+        for rest in [8usize, 32, LIN_REST_MAX] {
+            let unit = lin_group_cost(rest);
+            let groups = LIN_BUDGET / unit;
+            assert!(wn_use_lin(groups, rest) && !wn_use_lin(groups + 1, rest));
+            let mut rng = TimingLcg(0x4085 + rest as u64);
+            let n_unique = groups.min(TIMING_UNIQUE);
+            let inputs: Vec<_> = (0..n_unique)
+                .map(|_| timing_wn_input(&mut rng, rest))
+                .collect();
+            let run_lin = || {
+                for gi in 0..groups {
+                    let (v, up, g, s) = &inputs[gi % n_unique];
+                    lin_reset_sparse();
+                    wn_group_judge_with::<Lin>(v, up, *g, *s, &|_, _, _| Ok(()))?;
+                }
+                Ok::<(), AutodiffError>(())
+            };
+            assert!(run_lin().is_ok());
+            let (med, all) = timing_median(|| {
+                let _ = std::hint::black_box(run_lin());
+            });
+            // 同じ入力の Rf（何もしない検査）の ns/反復。グループ数は 64 件に絞る。
+            let rf_groups = groups.min(64);
+            let run_rf = || {
+                for gi in 0..rf_groups {
+                    let (v, up, g, s) = &inputs[gi % n_unique];
+                    wn_group_judge_with::<Rf>(v, up, *g, *s, &|_, _, _| Ok(()))?;
+                }
+                Ok::<(), AutodiffError>(())
+            };
+            let (rf_med, _) = timing_median(|| {
+                let _ = std::hint::black_box(run_rf());
+            });
+            let rf_ns_iter = rf_med / wn_judge_cost(rf_groups, rest) as f64;
+            let prod_ok = inputs
+                .iter()
+                .filter(|(v, up, g, s)| wn_group_judge(v, up, *g, *s, wn_coeff(rest), true).is_ok())
+                .count();
+            lin_reset();
+            let total_units = groups * unit;
+            eprintln!(
+                "JUDGETIME kind=WeightNorm(Lin,sparse) rest={rest} groups={groups} lin_group_cost={unit} units={total_units} units/LIN_BUDGET={:.4} rf_equiv_cost/2^27={:.4} result=full-scan(no-op check) prod_accepts={prod_ok}/{n_unique}(unique inputs) median_ms={:.1} runs_ms={:?} ns_per_unit={:.3} rf_ns_per_iter={:.3} ratio_unit_to_rf_iter={:.3}",
+                total_units as f64 / LIN_BUDGET as f64,
+                wn_judge_cost(groups, rest) as f64 / JUDGE_BUDGET as f64,
+                med / 1e6,
+                timing_runs_ms(&all),
+                med / total_units as f64,
+                rf_ns_iter,
+                (med / total_units as f64) / rf_ns_iter,
+            );
+        }
+        // SpectralNorm（Lin）: 走査量 `300·N²` が LIN_BUDGET 以内の最大の N（積で作れる形）。
+        let n_max = timing_max_by(2, sn_use_lin);
+        for shape in [[8usize, n_max / 8], [21, 21]] {
+            let c = sn_case(&shape, 1.0, 2.0, SnUp::General, 1.0);
+            let inp = sn_inputs(&c);
+            let n = inp.w.len();
+            assert!(sn_use_lin(n), "shape={shape:?} n={n}");
+            let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            let run_lin = || {
+                lin_reset();
+                let r = sn_judge_with::<Lin>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(()));
+                lin_reset();
+                r
+            };
+            assert!(run_lin().is_ok());
+            let (med, all) = timing_median(|| {
+                let _ = std::hint::black_box(run_lin());
+            });
+            let run_rf =
+                || sn_judge_with::<Rf>(&inp.w, &inp.p_exact, &inp.up, s, &|_, _, _| Ok(()));
+            let (rf_med, _) = timing_median(|| {
+                let _ = std::hint::black_box(run_rf());
+            });
+            let rf_ns_iter = rf_med / sn_judge_cost(n) as f64;
+            let prod = sn_judge(&inp.w, &inp.p_exact, &inp.up, s, sn_coeff(n), true);
+            let units = sn_lin_cost(n);
+            eprintln!(
+                "JUDGETIME kind=SpectralNorm(Lin) shape={}x{} n={n} n_max_for_lin={n_max} sn_lin_cost={units} units/LIN_BUDGET={:.4} result=full-scan(no-op check) prod={} median_ms={:.1} runs_ms={:?} ns_per_unit={:.3} rf_ns_per_iter={:.3} ratio_unit_to_rf_iter={:.3}",
+                shape[0],
+                shape[1],
+                units as f64 / LIN_BUDGET as f64,
+                if prod.is_ok() { "accepted" } else { "rejected" },
+                med / 1e6,
+                timing_runs_ms(&all),
+                med / units as f64,
+                rf_ns_iter,
+                (med / units as f64) / rf_ns_iter,
+            );
+        }
+        lin_reset();
+    }
 }
