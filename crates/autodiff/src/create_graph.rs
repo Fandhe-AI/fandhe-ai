@@ -149,6 +149,7 @@ mod cumulative_b;
 mod decomp;
 mod index_cum;
 mod judge;
+mod lin;
 mod linalg_cholesky_pinv;
 mod linalg_fft;
 mod linalg_norm_rank;
