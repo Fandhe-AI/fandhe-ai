@@ -4776,7 +4776,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
   | `Logcumsumexp` `x=[0,0,0]`・`g=[1001,-8000,9000]`（合算での相殺） | 約 -1.6e-4 | 0 | `abs(V_str − V) ≈ 1.6e-4`、`coeff·M ≈ 3.5e-3` |
   | `Logcumsumexp` `x=[1e4,1e4,1e4]`・`g=[0,-8,9]`（係数の丸め。P1 `PRRT_kwDOTuUCJc6ypSUU`） | 約 3.83e-4 | 0 | `abs(V_str − V) ≈ 3.8e-4`（`coeff·M ≈ 3.2e-6` は単独では通る） |
   | `Logcumsumexp` `x=[1e8,1e8]`・`g=[0,1]`、`[1e8,1e8+1,1e8]`、`[5e4,5e4]` | — | — | 係数の照合で拒否（第 2 軸だけでも `abs(V_str − V)` で拒否されることを確かめた） |
-  | `Logcumsumexp` `x=[1e30,1e30]`・`g=[0,1]`（共通オフセットの消失。P1 `PRRT_kwDOTuUCJc6yq6Hk`） | `[[0,-1],[-1,0]]` | `[[0.25,-0.25],[-0.25,0.25]]` | 係数の照合（`c = 1` 対 参照 0.5）・ホストの 1 階の照合（`[1,1]` 対 `[0.5,0.5]`）・第 2 軸のどれでも単独で拒否 |
+  | `Logcumsumexp` `x=[1e30,1e30]`・`g=[0,1]`（共通オフセットの消失。P1 `PRRT_kwDOTuUCJc6yq6Hk`） | `[[0,-1],[-1,0]]` | `[[0.25,-0.25],[-0.25,0.25]]` | 係数の照合（`c = 1` 対 参照 0.5）・ホストの 1 階の照合（`[1,1]` 対 `[0.5,0.5]`。**#3965 でホストの 1 階が正しくなり、ホスト値は受理される。誤値 `[1,1]` を直接渡した場合に拒否する安全網として残る。§77**）・第 2 軸のどれでも単独で拒否 |
   | `Logcumsumexp` `x=[1e30,1e30]`・`g=[1,1]`、`[3e20,3e20,3e20]`・`g=[0,0,1]`、`[0,2e20,2e20,1]`・`g=[0,1,1,1]`（prefix の途中から）、`[-3,1,5e19,5e19,5e19]`・`g=[1,0,0,0,1]`（途中から） | — | — | 同上（3 つの検出のどれでも単独で拒否） |
 
   指摘 1・2 と共通オフセットの 5 入力は修正前の実装で受理され（指摘 1・2 は判定関数と `backward_create_graph` の両方で、共通オフセットの 5 入力は `backward_create_graph` で確かめた）、修正後は拒否される。`[1e8, 1e8+1]` は f32 では `[1e8, 1e8]` に潰れ、上の表の行と同じ入力になる（f64 の prefix では差が残るので、修正前から係数の照合で拒否されていた）。
@@ -5561,3 +5561,28 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - スコープ外: A2、f64 テープ（#3722）、三階以上の保証、公開名の追加。
 - ホストの SVD を入口・cgrad・子テープ再生で複数回行う費用は §75.3 で受容済み。
 - 変えていないもの: `svd_vjp`・`matrix_norm_vjp`、forward、`Tape::backward`、`Op` の payload、`AutodiffError` の variant、`guard_svd` のシグネチャ、依存、`docs/spec`。
+
+## 77. 実装記録（イシュー #3965。`logcumsumexp` の 1 階 VJP の共通オフセット修正）
+
+### 77.1 症状と原因
+
+- `tensor_core::cumulative::logcumsumexp_vjp_host` は f64 の prefix `out` の差 `exp(out[j] - out[j+1])`・`exp(x - out)` を係数にしていた。`x` が大きいと f64 でも `x + ln 2 == x` と丸まり、係数の情報が消える。
+- 素の `Tape::backward` で `x=[1e30,1e30]` が `g=[0,1]` で `[1,1]`（真値 `[0.5,0.5]`）、`g=[1,1]` で `[2,1]`（真値 `[1.5,0.5]`）になっていた。create_graph は §64 で拒否側に倒していたが、1 階そのものは誤ったままだった（§64.4 の「既知の差」）。
+
+### 77.2 修正
+
+- 係数を `out` を経由せず入力どうしの差だけから作る（PR #3959 の `lcse_ref_coeffs` と同型）。prefix 最大値 `m[k]` と正規化和 `Z[k] = Σ exp(x[i] - m[k])` を `lead[k] = Z[k-1]·exp(m[k-1] - m[k])`・`Z[k] = lead[k] + exp(x[k] - m[k])` で求め、`c[j] = lead[j+1]/Z[j+1]`・`w[j] = exp(x[j] - m[j])/Z[j]`。指数の引数は常に 0 以下で、共通オフセット不変・overflow なし。逆向き再帰 `T[j] = g[j] + c[j]·T[j+1]`・`d_x[j] = w[j]·T[j]` は従来と同じ。
+- 参照（`lcse_ref_coeffs`）は create_graph の独立な突き合わせ（§64.2）のため実装を共有しない。
+- 非有限（NaN・±inf）を含む lane は従来の prefix の差の式のまま残した。実測で、新式をそのまま使うと `[inf, 0]`（旧 `[NaN, 0]`→新 `[NaN, NaN]`）・`[0, inf]`（旧 `[1, NaN]`→新 `[NaN, NaN]`）のように NaN／有限のクラスが変わり、PyTorch fixture との一致数（`cumulative_parity` の 9 一致・4 不一致）が 8 一致に後退したため。非有限 lane の値・クラスは bit 同一で、拒否もしない。
+
+### 77.3 旧実装との差の実測
+
+- `cfg(test)` の旧式 `logcumsumexp_vjp_legacy` と、決定的な LCG 入力（`n` 1〜64 × スケール 0.5／8／40）6240 要素を比較した。f32 downcast 後の bit 差は 0 件、最大 ULP 差 0（実行環境 x86_64 Linux。libm 依存のため他環境での bit 一致は保証しない）。一般には式が変わるので bit 一致は保証しないが、REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）内に収まることを必須アサートにした。
+- rank 3（`dim` 0／1／2）の多 lane でも旧式と一致し、run-to-run で bit 同一。`x=[-1000,1000]` で有限。f32 で厳密な +128 シフトで結果が一致（共通オフセット不変）。
+
+### 77.4 GPU・変えていないもの
+
+- GPU（CUDA・Metal・ROCm）に `logcumsumexp` の VJP カーネルは無い（`crates/backend-{cuda,metal,rocm}/src` を grep して該当なし。backend-cpu の `scan_logcumsumexp` は forward のみ）。1 階はこのホスト関数を全バックエンドが共用するので GPU の修正は不要。GPU 実機 parity は未実測のまま、新しい baseline は作らない。
+- create_graph: 構造側の `c32 = exp(ol[j]-ol[j+1])`（f32 の `out` から作る）は変えていないので、`[1e30,1e30]` 等は係数の照合・第 2 軸で引き続き拒否される。ホストの 1 階の照合だけが受理に変わり、`host_ref_check_rules` と `logcumsumexp_check_rejects_common_offset_loss` の期待値を更新した。
+- テスト: `tensor-core` の `vjp_resists_common_offset` ほか、`cumulative_parity.rs` の `logcumsumexp_first_order_resists_common_offset`。
+- tolerance 定数・baseline・ガードレール閾値・FMA 契約・依存・`docs/spec`・公開 API のシグネチャは不変。

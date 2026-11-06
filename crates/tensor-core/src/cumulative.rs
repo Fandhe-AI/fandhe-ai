@@ -239,16 +239,26 @@ pub fn logcumsumexp_host(x: &[f32], layout: &CumulativeLayout) -> Result<Vec<f32
     Ok(out)
 }
 
-/// [`logcumsumexp_host`] の VJP（入力勾配）。
+/// [`logcumsumexp_host`] の VJP（入力勾配）。`autodiff::grad`（`Op::Logcumsumexp` の 1 階）と
+/// create_graph の V3 値・二階の再現（`autodiff::create_graph::cumulative_b`）から呼ばれる。
+/// GPU（CUDA・Metal・ROCm）に本 VJP のカーネルは無く、全バックエンドがこのホスト関数を共用する。
 ///
 /// `d_x[j] = Σ_{i>=j} g[i]·exp(x[j] - out[i])` を O(n) の逆向き再帰で求める:
-/// `T[n-1] = g[n-1]`・`T[j] = g[j] + exp(out[j] - out[j+1])·T[j+1]`・
-/// `d_x[j] = exp(x[j] - out[j])·T[j]`。`out` は forward と同じ `log_add_exp`
-/// で `f64` のまま再計算する（`f32` へ丸めた記録値は使わない）。`out` は単調
-/// 非減少かつ `x[j] <= out[j]` のため指数の引数は常に 0 以下で、係数は
-/// `[0, 1]` に収まり overflow しない。最後に 1 回だけ `f32` へ downcast する。
-/// 非有限を含む lane の勾配は式の IEEE 伝播に従う（拒否・panic しない）。
-/// 作業バッファは lane 長の `Vec<f64>` 1 本のみ。
+/// `T[n-1] = g[n-1]`・`T[j] = g[j] + c[j]·T[j+1]`・`d_x[j] = w[j]·T[j]`。係数 `c`・`w` は
+/// 出力 `out`（prefix の logsumexp）を経由せず入力どうしの差だけから作る（イシュー #3965。
+/// `docs/autodiff-higher-order-grad-decision.md` §77）。`out` の差から作ると、大きな共通オフセット
+/// の上の小さな差（`[1e30, 1e30]` の `ln 2`）が `f64` でも `x + ln 2 == x` で消え、係数が 1 に
+/// 潰れて勾配が誤る。prefix 最大値 `m[k] = max_{i<=k} x[i]` と正規化和
+/// `Z[k] = Σ_{i<=k} exp(x[i] - m[k])`（`[1, k+1]`）を
+/// `lead[k] = Z[k-1]·exp(m[k-1] - m[k])`・`Z[k] = lead[k] + exp(x[k] - m[k])` で求め、
+/// `c[j] = lead[j+1] / Z[j+1]`・`w[j] = exp(x[j] - m[j]) / Z[j]` とする。指数の引数はすべて
+/// 入力どうしの差（0 以下）なので共通オフセット不変で overflow せず、係数は `[0, 1]` に収まる。
+/// 同型の式を PR #3959 の create_graph 参照 `lcse_ref_coeffs` も使うが、参照の独立性（§64.2）の
+/// ため実装は共有しない。`f64` アキュムレータで最後に 1 回だけ `f32` へ downcast する（REQ-2・
+/// FMA 契約は不変）。非有限（NaN・±inf）を含む lane だけは従来どおり `f64` の prefix の差から
+/// 係数を作る（共通オフセットの消失は有限入力の問題で、非有限 lane の NaN／有限のクラスと
+/// PyTorch との一致数〈`cumulative_parity`〉を変えないため）。勾配は式の IEEE 伝播に従う
+/// （拒否・panic しない）。作業バッファは lane 長の `Vec<f64>` 3 本。
 pub fn logcumsumexp_vjp_host(
     x: &[f32],
     upstream: &[f32],
@@ -257,11 +267,64 @@ pub fn logcumsumexp_vjp_host(
     layout.check_len(x.len())?;
     layout.check_len(upstream.len())?;
     // 空レイアウト（numel == 0）は走査対象の要素が無い。`axis_len` は
-    // `[usize::MAX, 0]` のように巨大でありうるため、prefix 確保前に空勾配を返す
+    // `[usize::MAX, 0]` のように巨大でありうるため、作業バッファ確保前に空勾配を返す
     // （巨大確保による OOM・panic を避ける。境界検査の契約）。
     if layout.numel == 0 {
         return Ok(Vec::new());
     }
+    let mut d_x = vec![0.0_f32; layout.numel];
+    let n = layout.axis_len;
+    let mut m = vec![0.0_f64; n];
+    let mut z = vec![0.0_f64; n];
+    let mut lead = vec![0.0_f64; n];
+    for o in 0..layout.outer {
+        for i in 0..layout.inner {
+            // 非有限（NaN・±inf）を含む lane は従来どおり f64 の prefix の差から係数を作る。
+            // 共通オフセットで係数が潰れる問題は有限入力の話で、非有限 lane は式の IEEE 伝播の
+            // クラス（PyTorch との一致数を含む。`cumulative_parity`・決定記録 §5）を変えないため。
+            let finite = (0..n).all(|a| x[layout.pos(o, a, i)].is_finite());
+            if finite {
+                for a in 0..n {
+                    let v = f64::from(x[layout.pos(o, a, i)]);
+                    if a == 0 {
+                        m[0] = v;
+                        z[0] = 1.0;
+                        continue;
+                    }
+                    let mk = m[a - 1].max(v);
+                    lead[a] = z[a - 1] * (m[a - 1] - mk).exp();
+                    z[a] = lead[a] + (v - mk).exp();
+                    m[a] = mk;
+                }
+            } else {
+                for a in 0..n {
+                    let v = f64::from(x[layout.pos(o, a, i)]);
+                    m[a] = if a == 0 { v } else { log_add_exp(m[a - 1], v) };
+                }
+            }
+            let mut t = 0.0_f64;
+            for a in (0..n).rev() {
+                let p = layout.pos(o, a, i);
+                let g = f64::from(upstream[p]);
+                let xv = f64::from(x[p]);
+                let (c, w) = match (finite, a + 1 < n) {
+                    (true, true) => (lead[a + 1] / z[a + 1], (xv - m[a]).exp() / z[a]),
+                    (true, false) => (0.0, (xv - m[a]).exp() / z[a]),
+                    (false, true) => ((m[a] - m[a + 1]).exp(), (xv - m[a]).exp()),
+                    (false, false) => (0.0, (xv - m[a]).exp()),
+                };
+                t = if a + 1 == n { g } else { g + c * t };
+                d_x[p] = (w * t) as f32;
+            }
+        }
+    }
+    Ok(d_x)
+}
+
+/// 修正前（#3965 以前）の実装。`out` の f64 prefix の差から係数を作る。回帰テストで新方式との
+/// NaN／inf のクラス一致と通常入力での差を実測するためだけに `cfg(test)` で残す。
+#[cfg(test)]
+fn logcumsumexp_vjp_legacy(x: &[f32], upstream: &[f32], layout: &CumulativeLayout) -> Vec<f32> {
     let mut d_x = vec![0.0_f32; layout.numel];
     let mut prefix = vec![0.0_f64; layout.axis_len];
     for o in 0..layout.outer {
@@ -287,7 +350,7 @@ pub fn logcumsumexp_vjp_host(
             }
         }
     }
-    Ok(d_x)
+    d_x
 }
 
 #[cfg(test)]
@@ -470,5 +533,158 @@ mod tests {
         // run-to-run bit 決定性。
         let d2 = logcumsumexp_vjp_host(&x, &g, &l).unwrap();
         assert!(d.iter().zip(&d2).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    /// f64 の二次オラクル。オフセット `m_k` を引いた差から `p_{jk} = exp(x_j - m_k)/Z_k` を作る
+    /// （`out` 経由の素朴な式ではない）。`d_x[j] = Σ_{k>=j} g[k]·p_{jk}`。
+    fn offset_free_oracle(x: &[f32], g: &[f32]) -> Vec<f64> {
+        let xs: Vec<f64> = x.iter().map(|&v| f64::from(v)).collect();
+        let n = xs.len();
+        let mut d = vec![0.0_f64; n];
+        for k in 0..n {
+            let mk = xs[..=k].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let zk: f64 = xs[..=k].iter().map(|v| (v - mk).exp()).sum();
+            for j in 0..=k {
+                d[j] += f64::from(g[k]) * (xs[j] - mk).exp() / zk;
+            }
+        }
+        d
+    }
+
+    #[test]
+    fn vjp_resists_common_offset() {
+        let l2 = layout(&[2], 0);
+        let d = logcumsumexp_vjp_host(&[1e30, 1e30], &[0.0, 1.0], &l2).unwrap();
+        assert_eq!(d, vec![0.5, 0.5]);
+        let d = logcumsumexp_vjp_host(&[1e30, 1e30], &[1.0, 1.0], &l2).unwrap();
+        assert_eq!(d, vec![1.5, 0.5]);
+        let cases: [&[f32]; 3] = [
+            &[3e20, 3e20, 3e20],
+            &[0.0, 2e20, 2e20, 1.0],
+            &[-3.0, 1.0, 5e19, 5e19, 5e19],
+        ];
+        for x in cases {
+            let g: Vec<f32> = (0..x.len()).map(|i| 0.5 + 0.25 * i as f32).collect();
+            let d = logcumsumexp_vjp_host(x, &g, &layout(&[x.len()], 0)).unwrap();
+            let want = offset_free_oracle(x, &g);
+            for j in 0..x.len() {
+                assert!(
+                    (f64::from(d[j]) - want[j]).abs() <= 1e-6 * want[j].abs().max(1.0),
+                    "x={x:?} j={j} d={} want={}",
+                    d[j],
+                    want[j]
+                );
+            }
+        }
+        // 旧実装は誤る（[1,1]）ことを固定し、回帰テストが検出力を持つことを示す。
+        assert_eq!(
+            logcumsumexp_vjp_legacy(&[1e30, 1e30], &[0.0, 1.0], &l2),
+            vec![1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn vjp_wide_range_and_translation_invariance() {
+        let l = layout(&[2], 0);
+        let d = logcumsumexp_vjp_host(&[-1000.0, 1000.0], &[1.0, 1.0], &l).unwrap();
+        assert!(d.iter().all(|v| v.is_finite()));
+        // f32 で厳密な +128 シフトでも同じ値（共通オフセット不変）。
+        let x = [0.5_f32, -1.25, 2.0, 0.75, -3.0];
+        let g = [0.3_f32, -0.7, 1.1, 0.2, -0.4];
+        let xs: Vec<f32> = x.iter().map(|v| v + 128.0).collect();
+        let l = layout(&[5], 0);
+        let a = logcumsumexp_vjp_host(&x, &g, &l).unwrap();
+        let b = logcumsumexp_vjp_host(&xs, &g, &l).unwrap();
+        for (p, q) in a.iter().zip(&b) {
+            assert!((p - q).abs() <= 1e-6 * p.abs().max(1.0), "{p} vs {q}");
+        }
+    }
+
+    #[test]
+    fn vjp_multi_lane_all_dims_match_legacy_and_are_deterministic() {
+        // rank 3・全 dim で lane の取り違えが無いこと。
+        let shape = [2_usize, 3, 4];
+        let n: usize = shape.iter().product();
+        let x: Vec<f32> = (0..n).map(|i| ((i * 7 % 11) as f32) * 0.4 - 2.0).collect();
+        let g: Vec<f32> = (0..n).map(|i| ((i * 5 % 13) as f32) * 0.2 - 1.0).collect();
+        for dim in 0..3 {
+            let l = layout(&shape, dim);
+            let d = logcumsumexp_vjp_host(&x, &g, &l).unwrap();
+            let legacy = logcumsumexp_vjp_legacy(&x, &g, &l);
+            for (p, q) in d.iter().zip(&legacy) {
+                assert!((p - q).abs() <= 1e-5 * q.abs().max(1.0), "dim={dim}");
+            }
+            let again = logcumsumexp_vjp_host(&x, &g, &l).unwrap();
+            assert!(
+                d.iter()
+                    .zip(&again)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        }
+    }
+
+    #[test]
+    fn vjp_matches_legacy_on_ordinary_inputs_and_nonfinite_classes() {
+        // 決定的な LCG。通常入力では旧実装と REQ-2 複合判定内で一致する。
+        let mut s = 0x1234_5678_u64;
+        let mut rnd = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 40) as f32 / 16777216.0) * 2.0 - 1.0
+        };
+        let mut bit_diff = 0usize;
+        let mut total = 0usize;
+        let mut max_ulp = 0u32;
+        for n in 1..=64usize {
+            for scale in [0.5_f32, 8.0, 40.0] {
+                let x: Vec<f32> = (0..n).map(|_| rnd() * scale).collect();
+                let g: Vec<f32> = (0..n).map(|_| rnd()).collect();
+                let l = layout(&[n], 0);
+                let d = logcumsumexp_vjp_host(&x, &g, &l).unwrap();
+                let o = logcumsumexp_vjp_legacy(&x, &g, &l);
+                for (p, q) in d.iter().zip(&o) {
+                    total += 1;
+                    if p.to_bits() != q.to_bits() {
+                        bit_diff += 1;
+                        if p.is_sign_negative() == q.is_sign_negative() {
+                            max_ulp = max_ulp.max(p.to_bits().abs_diff(q.to_bits()));
+                        }
+                    }
+                    let diff = (p - q).abs();
+                    assert!(diff < 1e-5 || diff < 1e-3 * q.abs(), "n={n} {p} vs {q}");
+                }
+            }
+        }
+        eprintln!("legacy bit diff: {bit_diff}/{total}, max ulp {max_ulp}");
+        // 非有限: NaN／有限のクラスが旧実装と一致する。
+        let nan = f32::NAN;
+        for x in [
+            vec![1.0_f32, nan, 2.0],
+            vec![nan, 1.0, 2.0],
+            vec![0.0, 1.0, nan],
+        ] {
+            let g = vec![1.0_f32; x.len()];
+            let l = layout(&[x.len()], 0);
+            let d = logcumsumexp_vjp_host(&x, &g, &l).unwrap();
+            let o = logcumsumexp_vjp_legacy(&x, &g, &l);
+            let cls = |v: &[f32]| v.iter().map(|a| a.is_nan()).collect::<Vec<_>>();
+            assert_eq!(cls(&d), cls(&o), "x={x:?}");
+        }
+        for x in [
+            [f32::INFINITY, 0.0],
+            [f32::NEG_INFINITY, 0.0],
+            [0.0, f32::INFINITY],
+        ] {
+            let l = layout(&[2], 0);
+            let d = logcumsumexp_vjp_host(&x, &[1.0, 1.0], &l).unwrap();
+            let o = logcumsumexp_vjp_legacy(&x, &[1.0, 1.0], &l);
+            assert!(
+                d.iter()
+                    .zip(&o)
+                    .all(|(p, q)| p.to_bits() == q.to_bits() || (p.is_nan() && q.is_nan())),
+                "inf case {x:?}: new={d:?} legacy={o:?}"
+            );
+        }
     }
 }
