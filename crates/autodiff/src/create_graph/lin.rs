@@ -656,7 +656,7 @@ mod tests {
         out
     }
 
-    fn median(mut xs: Vec<f64>) -> f64 {
+    fn middle_value(mut xs: Vec<f64>) -> f64 {
         xs.sort_by(|a, b| a.total_cmp(b));
         xs[xs.len() / 2]
     }
@@ -679,7 +679,7 @@ mod tests {
             5
         };
         let xs: Vec<f64> = (0..reps).map(|_| time_scan_lin(inputs)).collect();
-        (median(xs.clone()), xs)
+        (middle_value(xs.clone()), xs)
     }
 
     /// 事象数 `N` の最大を、検査を省いて 3 つの seed（`Dg`・先頭と末尾の `Dv`）の逆伝播だけで数える
@@ -809,9 +809,9 @@ mod tests {
                 t0.elapsed().as_nanos() as f64 / reps_inner as f64
             };
             let _ = one(false);
-            let rf_ns = median((0..5).map(|_| one(false)).collect());
+            let rf_ns = middle_value((0..5).map(|_| one(false)).collect());
             let ns_per_iter = rf_ns / wn_judge_cost(1, rest) as f64;
-            let lin_ns = median((0..5).map(|_| one(true)).collect());
+            let lin_ns = middle_value((0..5).map(|_| one(true)).collect());
             eprintln!(
                 "LINPROF kind=equiv rest={rest} tries={tries} rf_ns_per_group={rf_ns:.0} ns_per_iter={ns_per_iter:.3} \
                  lin_prod_ns_per_group={lin_ns:.0} lin_equiv_iters={:.0} lin_group_cost={}",
