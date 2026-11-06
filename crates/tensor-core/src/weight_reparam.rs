@@ -419,6 +419,9 @@ pub fn spectral_norm_host(
 }
 
 /// VJP。`dW_ij = up_ij/σ − (s/σ²)·u_i·v_j`、`s = Σ up·W`。
+// 注意: autodiff の `create_graph/norm_reparam.rs::sn_host_bound` が、この関数の演算列（f32 の積 →
+// f64 の和 → `S/σ²` → `up/σ − coeff·u·v` → f32 への丸め）を数えて丸めの上界を作る。演算を変えるときは
+// 上界も更新する。
 pub fn spectral_norm_vjp_host(
     weight: &[f32],
     upstream: &[f32],

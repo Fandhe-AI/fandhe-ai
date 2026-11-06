@@ -5937,3 +5937,52 @@ tolerance 定数（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 #### 81.8.6 後続
 
 - `shadow_check` で止まる入力（上の表の下 2 行）と、N が大きい入力は #4081 で扱う。閾値による疎化の一般化は #4078、確保・clone の削減は #4077、LRN は #4088、`JUDGE_BUDGET` の見直しは #4072。
+
+### 81.9 #4081: `shadow_check` の見積りを `Lin` の上界とホスト側の丸めで置き換える
+
+#### 81.9.0 位置づけ
+
+- #4081 の実装記録（親 #4073）。承認は #4073 の起票の範囲だけで、上乗せしない。変えていないもの: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`sn_judge`・`sn_coeff`・`rounding_coeff`・LRN と WeightNorm の `shadow_check`・依存・公開 API・`docs/spec`。`lin.rs` は触っていない。
+- GPU 実機 parity は未実測のまま。値はすべて CPU（x86_64 Linux・rustc 1.98.1・`--release`）の決定的入力の実測で、GPU の代替ではない。
+
+#### 81.9.1 新しい見積り
+
+`spectral_norm_cgrad` の `shadow_check` は、要素ごとに `err_i = |composed_i − host_i| + B_i`（係数 1。判定の閾値と式は従来どおり `judge::struct_check_unscaled`）で判定する。`B_i = B_str_i·(1 + 16·E·u) + B_host_i`（`norm_reparam.rs::sn_shadow_bound`）。根拠は `|composed − true| ≤ |composed − host| + |host − true|` で、`B_host` が第 2 項を、`B_str` が和の順序の違う構造の実現（他バックエンド・孫テープの再生）のずれを覆う。
+
+- `B_str`: `sn_fwd::<Lin>` を 1 回だけ回し（`O(N log N)`。`sn_judge` の `O(N²)` とは別）、1 階 `dW = (t/σ_s)/s` の `Lin::bound()` に `1 + 16·E·u`（`E` は forward の事象数）を掛ける。そのために `SnFwd` に `dw` を保存した（値は不変）。
+- `B_host`（`sn_host_bound`。`spectral_norm_vjp_host` の演算列を数える）: `σ_h` の f64 の和 `γ_{N+2}·Σ|W||P|`、`S_h = Σ f64(f32(up·W))` の積の丸め `u/(1−u)·B + N·2^-150` と f64 の和 `γ_N·B`、`σ_h` の相対誤差 `ε` の `1/σ`・`1/σ²` への伝播（`ε/(1−ε)`・`ε(2+ε)/(1−ε)²`）、f64 の演算の丸め `γ_5·(|up/σ_h| + |S_h/σ_h²·P|)`、最後の `as f32` の `u(1+2u)|host| + 2^-150`。一次近似の余裕として f64 評価の項に `1 + 8ε` を掛ける。`spectral_norm_vjp_host` 側にも対応のコメントを足した。
+- フォールバック（拒否を増やさないための規則）: `16·E·u ≥ 0.01`（領域を作る前に `sn_lin_events_max` で判定）・`ε ≥ 0.01`・`σ_h = 0`・上界か host が非有限なら `None` とし、従来の `rounding_coeff(N+4)·m_abs` を使う。`W` に NaN があるときは従来どおり `m_abs` を NaN にして照合で拒否する側へ倒す。旧見積りとの `min` は取らない（旧見積りは `σ_s` の相殺を含まず健全性の根拠が無い）。
+- 仮定: IEEE 754 の正しい丸め（§79.2・§81.8.2 から引き継ぐ）。
+
+#### 81.9.2 実測
+
+CPU・`spectral_norm_shadow_bound_breakdown_measurement`（`#[ignore]`）。余裕は `err/閾値`（1 以上で拒否）、内訳は余裕が最悪の要素。
+
+| 形状 | amp | α | 上流 | 旧 `sh` の余裕 | 新 `sh` の余裕 | `|c−h|` | `B_str` | `B_host` | 判定 |
+|---|---|---|---|---|---|---|---|---|---|
+| `[8,8]` | 1e3 | 0 | 1e3 | 1.093 | 0.656 | 1.1e-7 | 6.4e-6 | 6.3e-8 | 受理（旧: `shadow_check` で拒否） |
+| `[16,16]` | 1e3 | 2 | 1e3 | 1.630 | 2.241 | 3.7e-9 | 3.7e-5 | 9.5e-8 | `shadow_check` で拒否のまま |
+| `[4,4]` | 1 | 2 | 1 | 1.7e-2 | 1.7e-2 | 6.0e-8 | 1.6e-6 | 7.3e-8 | 受理 |
+| `[16,16]` | 1e3 | 0 | 1 | 0.150 | 1.651 | 3.2e-8 | 1.8e-5 | 6.1e-9 | 拒否に変わった（81.9.3） |
+
+`B_host` は `B_str` の 1/100 以下で、見積りを決めるのは `B_str`（`Lin` の上界）である。`[16,16]`（amp 1e3・α 2・上流 1e3）は `B_str`（3.7e-5）が閾値（1.65e-5）を超えるため、判定を合わせ込まず拒否のまま残した（受け入れ条件 1 の片方は未達）。
+
+#### 81.9.3 拒否範囲の変化
+
+§81.2 の 112 行（`spectral_norm_rejection_breakdown_measurement`）で、公開経路の判定は 受理 45→46、`shadow_check` のみの拒否 8→7、`sn_judge` の拒否 55、走査量 4 で、変化は次の 3 行だけ。
+
+- 拒否→受理 2 行: `[8,8]`（amp 1e3・α 0・上流 1e3）、`[8,8]`（amp 1・α 0・上流 1）。
+- 受理→拒否 1 行: `[16,16]`（amp 1e3・α 0・上流 1）。構造の 1 階の REQ-2 比は 1.5e-3 で実際の誤差は小さいが、`B_str` が `Σ|up·Ŵ|` の和の誤差 `γ_{N−1}` を順序に依らない上界として含み（相殺した `sp` の大きさに比例する旧見積りより大きい）、閾値を超えた。旧見積りは `σ_s` の相殺・和の順序を含まないため、この行の受理は旧見積りでは健全性の根拠が無かった。
+- 「要注意」（`shadow_check` が通るのに構造の 1 階が f64 参照から REQ-2 を外す行）は 0 件のまま。1 階が REQ-2 を外す行は引き続き拒否される。
+
+#### 81.9.4 テスト・変異確認
+
+- `spectral_norm_shadow_bound_components_cover_deviations`: 乱数掃引（形状 4 通り・振幅 {1e-3, 1, 1e3}・α ∈ {0, 2}・上流 {1, 1e3}）で、構造側は f32 の再現と要素の並びを逆順・回転にした再現の 1 階が f64 の閉じた式から `B_str` 以内、ホスト側は `spectral_norm_vjp_host` の値が `B_host` 以内であることを成分ごとに確かめる（観測差を足した合成では見ない。真値の f64 評価の誤差 `~N·2^-53` だけ明示の許容を足す）。上界の総和が実誤差の総和の 1e4 倍未満であることも課す。
+- `spectral_norm_shadow_bound_falls_back_to_none`（フォールバックの条件）・`spectral_norm_newly_accepted_by_shadow_bound_match_f64`（受理に変わった 2 入力の 1 階・二階が f64 参照と REQ-2 比 < 1）。`spectral_norm_followup_candidates_are_req2_within_f64` は新しい判定に更新した（REQ-2 比 < 0.25 の assert は残す）。
+- 変異確認（手動・コミットしない）: `B_host` を 0 にすると、ホスト側の assert が失敗し、`B_str` を 0 にすると構造側の assert が失敗する。戻して通ることを確認した。
+- 拒否プローブ（`*_is_rejected*` 群・`sn_judge_lin_still_rejects_the_three_probes`）は無変更で拒否のまま通る。
+
+#### 81.9.5 後続・スコープ外
+
+- WeightNorm へは `shadow_check(…, bound, 1.0, …)` に「`Lin` の上界 + ホスト側の上界」を渡す同じ形で使えるが、WN 用のホスト側の上界は未実装で、適用の判断は #4074。
+- `B_str` の `γ_{N−1}Σ|·|` は最悪ケースの上界で、N が大きいと `[16,16]` のような入力が閾値を超える。さらに狭めるには和の順序を固定する等の前提が要る（本イシューの範囲外。#4072・#4077・#4078・#4088 とも別）。
