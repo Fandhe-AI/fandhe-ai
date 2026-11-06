@@ -4778,7 +4778,7 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
   | `Logcumsumexp` `x=[0,0,0]`・`g=[1001,-8000,9000]`（合算での相殺） | 約 -1.6e-4 | 0 | `abs(V_str − V) ≈ 1.6e-4`、`coeff·M ≈ 3.5e-3` |
   | `Logcumsumexp` `x=[1e4,1e4,1e4]`・`g=[0,-8,9]`（係数の丸め。P1 `PRRT_kwDOTuUCJc6ypSUU`） | 約 3.83e-4 | 0 | `abs(V_str − V) ≈ 3.8e-4`（`coeff·M ≈ 3.2e-6` は単独では通る） |
   | `Logcumsumexp` `x=[1e8,1e8]`・`g=[0,1]`、`[1e8,1e8+1,1e8]`、`[5e4,5e4]` | — | — | 係数の照合で拒否（第 2 軸だけでも `abs(V_str − V)` で拒否されることを確かめた） |
-  | `Logcumsumexp` `x=[1e30,1e30]`・`g=[0,1]`（共通オフセットの消失。P1 `PRRT_kwDOTuUCJc6yq6Hk`） | `[[0,-1],[-1,0]]` | `[[0.25,-0.25],[-0.25,0.25]]` | 係数の照合（`c = 1` 対 参照 0.5）・ホストの 1 階の照合（`[1,1]` 対 `[0.5,0.5]`）・第 2 軸のどれでも単独で拒否 |
+  | `Logcumsumexp` `x=[1e30,1e30]`・`g=[0,1]`（共通オフセットの消失。P1 `PRRT_kwDOTuUCJc6yq6Hk`） | `[[0,-1],[-1,0]]` | `[[0.25,-0.25],[-0.25,0.25]]` | 係数の照合（`c = 1` 対 参照 0.5）・ホストの 1 階の照合（`[1,1]` 対 `[0.5,0.5]`。**#3965 でホストの 1 階が正しくなり、ホスト値は受理される。誤値 `[1,1]` を直接渡した場合に拒否する安全網として残る。§77**）・第 2 軸のどれでも単独で拒否 |
   | `Logcumsumexp` `x=[1e30,1e30]`・`g=[1,1]`、`[3e20,3e20,3e20]`・`g=[0,0,1]`、`[0,2e20,2e20,1]`・`g=[0,1,1,1]`（prefix の途中から）、`[-3,1,5e19,5e19,5e19]`・`g=[1,0,0,0,1]`（途中から） | — | — | 同上（3 つの検出のどれでも単独で拒否） |
 
   指摘 1・2 と共通オフセットの 5 入力は修正前の実装で受理され（指摘 1・2 は判定関数と `backward_create_graph` の両方で、共通オフセットの 5 入力は `backward_create_graph` で確かめた）、修正後は拒否される。`[1e8, 1e8+1]` は f32 では `[1e8, 1e8]` に潰れ、上の表の行と同じ入力になる（f64 の prefix では差が残るので、修正前から係数の照合で拒否されていた）。
@@ -5600,20 +5600,45 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 
 - tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・1 階の VJP・forward・依存・`docs/spec`・公開 API。
 
-## 78. 実装記録（イシュー #3955・親 #3719 系。create_graph の総括判定の補助関数の共通化と WeightNorm の拒否範囲の縮小）
+## 78. 実装記録（イシュー #3965。`logcumsumexp` の 1 階 VJP の共通オフセット修正）
 
-### 78.0 位置づけ
+### 78.1 症状と原因
+
+- `tensor_core::cumulative::logcumsumexp_vjp_host` は f64 の prefix `out` の差 `exp(out[j] - out[j+1])`・`exp(x - out)` を係数にしていた。`x` が大きいと f64 でも `x + ln 2 == x` と丸まり、係数の情報が消える。
+- 素の `Tape::backward` で `x=[1e30,1e30]` が `g=[0,1]` で `[1,1]`（真値 `[0.5,0.5]`）、`g=[1,1]` で `[2,1]`（真値 `[1.5,0.5]`）になっていた。create_graph は §64 で拒否側に倒していたが、1 階そのものは誤ったままだった（§64.4 の「既知の差」）。
+
+### 78.2 修正
+
+- 係数を `out` を経由せず入力どうしの差だけから作る（PR #3959 の `lcse_ref_coeffs` と同型）。prefix 最大値 `m[k]` と正規化和 `Z[k] = Σ exp(x[i] - m[k])` を `lead[k] = Z[k-1]·exp(m[k-1] - m[k])`・`Z[k] = lead[k] + exp(x[k] - m[k])` で求め、`c[j] = lead[j+1]/Z[j+1]`・`w[j] = exp(x[j] - m[j])/Z[j]`。指数の引数は常に 0 以下で、共通オフセット不変・overflow なし。逆向き再帰 `T[j] = g[j] + c[j]·T[j+1]`・`d_x[j] = w[j]·T[j]` は従来と同じ。
+- 参照（`lcse_ref_coeffs`）は create_graph の独立な突き合わせ（§64.2）のため実装を共有しない。
+- 非有限（NaN・±inf）を含む lane は従来の prefix の差の式のまま残した。実測で、新式をそのまま使うと `[inf, 0]`（旧 `[NaN, 0]`→新 `[NaN, NaN]`）・`[0, inf]`（旧 `[1, NaN]`→新 `[NaN, NaN]`）のように NaN／有限のクラスが変わり、PyTorch fixture との一致数（`cumulative_parity` の 9 一致・4 不一致）が 8 一致に後退したため。非有限 lane の値・クラスは bit 同一で、拒否もしない。
+
+### 78.3 旧実装との差の実測
+
+- `cfg(test)` の旧式 `logcumsumexp_vjp_legacy` と、決定的な LCG 入力（`n` 1〜64 × スケール 0.5／8／40）6240 要素を比較した。f32 downcast 後の bit 差は 0 件、最大 ULP 差 0（実行環境 x86_64 Linux。libm 依存のため他環境での bit 一致は保証しない）。一般には式が変わるので bit 一致は保証しないが、REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）内に収まることを必須アサートにした。
+- rank 3（`dim` 0／1／2）の多 lane でも旧式と一致し、run-to-run で bit 同一。`x=[-1000,1000]` で有限。f32 で厳密な +128 シフトで結果が一致（共通オフセット不変）。
+
+### 78.4 GPU・変えていないもの
+
+- GPU（CUDA・Metal・ROCm）に `logcumsumexp` の VJP カーネルは無い（`crates/backend-{cuda,metal,rocm}/src` を grep して該当なし。backend-cpu の `scan_logcumsumexp` は forward のみ）。1 階はこのホスト関数を全バックエンドが共用するので GPU の修正は不要。GPU 実機 parity は未実測のまま、新しい baseline は作らない。
+- create_graph: 構造側の `c32 = exp(ol[j]-ol[j+1])`（f32 の `out` から作る）は変えていないので、`[1e30,1e30]` 等は係数の照合・第 2 軸で引き続き拒否される。ホストの 1 階の照合だけが受理に変わり、`host_ref_check_rules` と `logcumsumexp_check_rejects_common_offset_loss` の期待値を更新した。
+- テスト: `tensor-core` の `vjp_resists_common_offset` ほか、`cumulative_parity.rs` の `logcumsumexp_first_order_resists_common_offset`。
+- tolerance 定数・baseline・ガードレール閾値・FMA 契約・依存・`docs/spec`・公開 API のシグネチャは不変。
+
+## 79. 実装記録（イシュー #3955・親 #3719 系。create_graph の総括判定の補助関数の共通化と WeightNorm の拒否範囲の縮小）
+
+### 79.0 位置づけ
 
 - 状態: 実装済み（Tier A・Tier B）。起票は 2026-11-02 の所有者承認（#3955 本文）。#3767 で承認済みの B 区分の方針の範囲内で、tolerance・baseline・`STAGE_BOUND_GUARD`・依存・公開 API は変えない。新たな承認は上乗せして主張しない。
 
-### 78.1 Tier A: 補助関数の共通化（挙動不変）
+### 79.1 Tier A: 補助関数の共通化（挙動不変）
 
 - 新規 `crates/autodiff/src/create_graph/judge.rs` に、`loss_class.rs`・`loss_regression.rs`・`loss_binary_margin.rs`・`norm_reparam.rs` で複製されていた次を集約した。`stage`・`upstream_abs`／`upstream_scale`／`upstream_scale32`・`check_g_cotangent`・`dense`・`reject_inf`・`rounding_coeff`・`struct_check`。
 - エラー文面は族ごとの `invalid`（族名と節番号つき）なので、共通関数は `reject: fn(&str) -> AutodiffError` を引数に取る。各モジュールには同名の薄いラッパーを残し、呼び出し箇所とメッセージは byte 同一。
 - NaN の扱いが 2 系統ある事実は統合せず並置した。loss 系（`stage`・`struct_check`）は NaN レーンを素通しし、norm 系（`stage_strict_ok`・`struct_check_unscaled`）は段検査の NaN を拒否し、`m` が NaN の有限要素も拒否する。
 - 対象外（形が異なるため触っていない）: `linalg_fft.rs` の `stage_ok`／`rounding_ok`（bool 返し）、`create_graph_norm.rs::stage`、`scatter_reduce_prod.rs::stage_bounds`。
 
-### 78.2 Tier B: WeightNorm の見積りを丸めの一次伝播へ置き換える
+### 79.2 Tier B: WeightNorm の見積りを丸めの一次伝播へ置き換える
 
 - 原因: 従来の見積り `(|V_str − V| + coeff·M)` は、`coeff` が全演算の丸めを一次で数えた係数で、`M` が各項の絶対値和である。同じ中間値（`n_s` 等）を複数の項が共有し、共有した丸めの誤差が項の間で打ち消し合う式（Hessian 対角に値の数百倍の項が相殺する要素）でも、各項の丸めを独立に足すため過剰に拒否した。PR #3950 は facade／GPU parity のテスト入力を下げて回避していた。
 - 実測（Step 0）: facade 入力の拒否は `entry_check`（二階の総括判定）由来で、値 1.017e-2 の要素に対し、演算ごとに独立な誤差として足す running error bound（丸め単位 `u`）では 1.15e-5 と見積もられ、閾値（絶対 1e-5、相対は `5.09e-6`）を超えた。丸めの事象ごとの一次式で追うと 4.26e-6 で収まった。
@@ -5622,27 +5647,27 @@ KlDiv の 1 階は融合カーネル `kl_div_loss_backward` を通り、Poisson�
 - 仮定: 除算・平方根を含め IEEE 754 の正しい丸めを仮定する（CPU・CUDA の既定と、Metal の `MathMode::Safe` + `Precise` の想定）。丸めを 2 倍にすると上の入力は `5.84e-6` で拒否に戻る。GPU 実機は未実測。
 - 二次項: 一次近似の二次項は事象数に比例する余裕係数で覆う。厳密な証明ではなく、soundness テストで実測と突き合わせている。
 
-### 78.3 拒否範囲の変化
+### 79.3 拒否範囲の変化
 
 - 受理に変わる: PR #3950 が下げた 2 入力（facade の `z = [0.3, -0.8, 0.5, 1.0, 0.7, 0.4, 1.5, 0.9]`、GPU parity の `g.mul(&g)` を外した形）。CPU で二階が f64 参照と REQ-2 で一致する。
 - 拒否のまま: 既存の拒否プローブ（`*_is_rejected*` 群）は無変更で通る。相殺が実際に大きい入力は `|V_str − V|` の項が見えるため拒否される。
 - 変えていない: LRN・SpectralNorm の拒否範囲、幅が 8 を超える・グループが多い WeightNorm、`JUDGE_BUDGET`、`STAGE_BOUND_GUARD`。
 
-### 78.4 保証範囲
+### 79.4 保証範囲
 
 - 保証は判定を通った入力に限る（§55.2・§57.2 と同じ書き方）。拒否は保守的で、許容内の入力も拒否しうる。対象外は §57.2 と同じ（1 要素でない seed の縮約、三階以上、GPU の演算順・実装差）。
 
-### 78.5 テスト
+### 79.5 テスト
 
 - `crates/autodiff/tests/create_graph_norm_reparam.rs::weight_norm_ordinary_cancelling_hessian_is_accepted_and_matches_f64`: 上の 2 入力が受理され、二階が f64 の二階中央差分参照と REQ-2 で一致する。
 - `norm_reparam.rs` の `lin_bound_covers_f32_deviation_for_weight_norm_sweep`: 乱数・スケール（振幅 1e-3〜1e3）・幅 2〜8 の掃引で、f32 の再現と和の順序を変えた再現の実測の誤差が上界を超えないこと、上界が桁違いに緩くないことを確かめる。
 - 変異確認（実測）: `Lin::bound` を 0 にすると soundness テストが失敗する。既存の拒否プローブは `|V_str − V|` の項で拒否されるため変わらず通る（上界を 0 にしても失敗しない）。
 - facade の `weight_norm_create_graph_via_facade`・GPU parity の `run_norm_reparam_weight_norm` は入力を元に戻した（GPU 比較は `#[ignore]` のまま）。
 
-### 78.6 未着手（後続候補）
+### 79.6 未着手（後続候補）
 
 - `loss_class` の行系の見積り、`JUDGE_BUDGET`（2^27）の見直し、SpectralNorm の `shadow_check` の `rounding_coeff(N+4)`、幅 8 超の WeightNorm への適用（係数列の疎化が前提）。Issue は未起票（起票は所有者承認後）。
 
-### 78.7 変えていないもの
+### 79.7 変えていないもの
 
 - tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・FMA 契約・依存・`docs/spec`・公開 API。GPU 実機 parity は未実測。

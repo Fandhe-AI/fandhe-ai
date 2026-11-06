@@ -32,8 +32,8 @@
 //!   （入力の NaN が届かない有限の中間値は置き換え後の値と同じなので、その上界になる）。
 //! - ホストの 1 階（V3 で `cg.grad` に載る値）: 非有限の要素は、NaN で、かつ入力の NaN が届く
 //!   位置にあるものだけを伝播として通す（[`host_nonfinite_check`]）。さらに値そのものを、下の
-//!   独立な f64 の参照の 1 階と比べる（[`host_ref_check`]。`Logcumsumexp` のホストの 1 階は f64 の
-//!   prefix の差から係数を作るので、共通オフセットの上の小さな差を失う入力で誤る）。
+//!   独立な f64 の参照の 1 階と比べる（[`host_ref_check`]。`Logcumsumexp` のホストの 1 階は #3965 で
+//!   入力どうしの差から係数を作る形に直り共通オフセットで誤らない。照合はホストと参照の独立な突き合わせとして残す）。
 //! - **参照の独立性**（§64.2）: f64 の参照は入力 `x`・`g`（f32 の値そのもの）だけから作り、構造の
 //!   丸めた中間値（記録値 `y`・`out`、f32 の係数、scan の段）を一切使わない（[`RefLane`]）。
 //!   `Cumprod` の `L` は f64 の prefix 積、`Logcumsumexp` の係数 `c`・`w` は prefix の最大値と
@@ -264,8 +264,9 @@ pub(super) const HOST_COEFF: f64 = 1.0 / 68_719_476_736.0;
 
 /// ホストの 1 階（V3 の値）を、構造と丸めた中間値を共有しない f64 の参照 `refs` と比べる。規則は
 /// [`entry_check`] と同じで、余裕の係数だけ [`HOST_COEFF`]。`Logcumsumexp` のホストの 1 階
-/// （`logcumsumexp_vjp_host`）は f64 の prefix の差から係数を作るので、共通オフセットの上の小さな差を
-/// 失う入力（`[1e30, 1e30]`）で誤った値を返す。この照合はそれを `cg.grad` へ載せる前に拒否する。
+/// （`logcumsumexp_vjp_host`）は #3965 までは f64 の prefix の差から係数を作り、共通オフセットの上の
+/// 小さな差を失う入力（`[1e30, 1e30]`）で誤った値を返していた（現在は入力どうしの差から作り正しい）。
+/// この照合は、ホストが誤った値を返した場合に `cg.grad` へ載せる前に拒否する安全網として残す。
 pub(super) fn host_ref_check(refs: &[Rf], host: &[f32], what: &str) -> Result<(), AutodiffError> {
     if refs
         .iter()
@@ -1108,13 +1109,21 @@ mod tests {
             let out = lse_out(x);
             // 係数の照合（第 1 軸）単独。
             assert!(lcse_stage_bounds(x, g, &out).is_err(), "係数の照合 {x:?}");
-            // ホストの 1 階の照合単独（ホストの 1 階は f64 の prefix の差から係数を作るので誤る）。
+            // ホストの 1 階は #3965 で正しくなったので照合を受理し、旧実装相当の誤った値
+            // （共通オフセットで係数が 1 に潰れた値）を直接渡した場合は拒否する。
             let layout = cumulative_layout(&[n], 0).unwrap();
             let host = logcumsumexp_vjp_host(x, g, &layout).unwrap();
             let r = lcse_ref_lane(x, g);
+            let refs = lcse_vjp_ref(&r.coef.0, &r.coef.1, &r.g);
             assert!(
-                host_ref_check(&lcse_vjp_ref(&r.coef.0, &r.coef.1, &r.g), &host, "t").is_err(),
+                host_ref_check(&refs, &host, "t").is_ok(),
                 "ホストの 1 階の照合 {x:?}"
+            );
+            let mut bad = host.clone();
+            bad[0] += 1.0;
+            assert!(
+                host_ref_check(&refs, &bad, "t").is_err(),
+                "誤ったホスト値の拒否 {x:?}"
             );
             // 二階の要素の判定単独（ホストの照合を通さずに judge_lane だけを回す）。
             let c32: Vec<f32> = (0..n)
@@ -1308,13 +1317,13 @@ mod tests {
         }
     }
 
-    /// ホストの 1 階の照合の規則: 誤ったホスト値は拒否、`g` の相殺で `d_x ≈ 0`・`M` の大きい良性の
+    /// ホストの 1 階の照合の規則: 誤ったホスト値（`[1e30, 1e30]` の旧実装値 `[1, 1]`）は拒否、`g` の相殺で `d_x ≈ 0`・`M` の大きい良性の
     /// 入力（ホストは f64 で正しい値を返す）は受理、NaN は伝播。
     #[test]
     fn host_ref_check_rules() {
         let layout = cumulative_layout(&[2], 0).unwrap();
         let cases: [(&[f32], &[f32], bool); 4] = [
-            (&[1e30, 1e30], &[0.0, 1.0], false),
+            (&[1e30, 1e30], &[0.0, 1.0], true),
             (&[0.0, 0.0], &[1e4, -2e4], true),
             (&[0.0, 0.0], &[1e4, -1e4], true),
             (&[1.0, f32::NAN], &[1.0, 1.0], true),
@@ -1324,6 +1333,12 @@ mod tests {
             let r = lcse_ref_lane(x, g);
             let res = host_ref_check(&lcse_vjp_ref(&r.coef.0, &r.coef.1, &r.g), &host, "t");
             assert_eq!(res.is_ok(), ok, "{x:?} {g:?}: host={host:?}");
+        }
+        // 旧実装（#3965 以前）が返していた誤値 `[1, 1]` は拒否される。
+        {
+            let r = lcse_ref_lane(&[1e30, 1e30], &[0.0, 1.0]);
+            let refs = lcse_vjp_ref(&r.coef.0, &r.coef.1, &r.g);
+            assert!(host_ref_check(&refs, &[1.0, 1.0], "t").is_err());
         }
         // Cumprod（ホストは除算を使わない f64 の 2 パスで、参照と同じ分解）。上流の相殺が f64 の参照でも
         // 保証できないほど大きい入力（指摘 1 の `g = [1e10, 1e10, -1e10, 1]`。`M = 2e10`）はこの照合でも
