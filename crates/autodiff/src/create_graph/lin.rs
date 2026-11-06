@@ -152,13 +152,48 @@ pub(super) const LIN_U: f64 = 1.0 / 16_777_216.0;
 const LIN_TINY: f64 = 7.006_492_321_624_085e-46;
 /// [`Lin`] を使うグループの幅の上限（事象の数が幅に比例して増え、係数の列が長くなるため）。
 pub(super) const LIN_REST_MAX: usize = 8;
-/// [`Lin`] で判定するグループ 1 つの走査量の見積り（幅 8 で約 4e5 反復相当の実測。幅の 2 乗に比例）。
+/// [`Lin`] で判定するグループ 1 つの走査量の見積り（幅 8 で約 4e5 反復相当、幅の 2 乗に比例とした見積り）。
+/// 計測は `tests::lin_judge_cost_profile`（`#[ignore]`）、実測との照合は決定記録 §80.2（イシュー #4076）。
+/// 値は据え置き（見直しは #4082）。
 pub(super) fn lin_group_cost(rest: usize) -> usize {
     6000 * rest * rest
 }
 /// [`Lin`] を使う判定の走査量の上限。超える（グループ数が多い）テンソルは全グループを従来の `norm_reparam.rs` の `Rf` で判定する
 /// （グループの位置で判定方式が変わらないよう、テンソル単位で選ぶ）。
 pub(super) const LIN_BUDGET: usize = 1 << 26;
+
+// 計測用の計数器（`#[cfg(test)]` 限定。非テストビルドには存在せず、生成コードを変えない）。
+// イシュー #4076 の計測テスト（`tests::lin_judge_cost_profile`）が判定時間の内訳を読む。#4077（確保・clone の削減）・
+// #4078（疎化）が同じ計数で改善量を測るため残す。バイト数は要素数 × `size_of::<(u32, f64)>()` で換算する
+// （`Vec` のヘッダ・容量の余りは含まない）。添字は `PROF_*` 定数。
+#[cfg(test)]
+thread_local! {
+    static LIN_PROF: std::cell::Cell<[u64; 5]> = const { std::cell::Cell::new([0; 5]) };
+}
+/// 係数列の新規確保の回数。
+#[cfg(test)]
+const PROF_ALLOCS: usize = 0;
+/// 新規確保した係数列の要素数（予約量）。
+#[cfg(test)]
+const PROF_ALLOC_ENTRIES: usize = 1;
+/// 係数列の clone の回数。
+#[cfg(test)]
+const PROF_CLONES: usize = 2;
+/// clone した係数列の要素数。
+#[cfg(test)]
+const PROF_CLONE_ENTRIES: usize = 3;
+/// [`Lin::make`]（領域へ積まれる値）の回数。
+#[cfg(test)]
+const PROF_MAKES: usize = 4;
+
+#[cfg(test)]
+fn prof_add(idx: usize, n: usize) {
+    LIN_PROF.with(|c| {
+        let mut a = c.get();
+        a[idx] += n as u64;
+        c.set(a);
+    });
+}
 
 /// 領域を空にする（グループの判定の先頭で呼ぶ）。
 pub(super) fn lin_reset() {
@@ -189,6 +224,11 @@ pub(super) fn lin_events() -> usize {
 /// 2 つの一次式の線形結合 `ka·a + kb·b`（事象の番号の昇順の併合）。
 fn lin_comb(a: &[(u32, f64)], ka: f64, b: &[(u32, f64)], kb: f64) -> LinTerms {
     let mut out = Vec::with_capacity(a.len() + b.len());
+    #[cfg(test)]
+    {
+        prof_add(PROF_ALLOCS, 1);
+        prof_add(PROF_ALLOC_ENTRIES, a.len() + b.len());
+    }
     let (mut i, mut j) = (0, 0);
     while i < a.len() || j < b.len() {
         if j == b.len() || (i < a.len() && a[i].0 < b[j].0) {
@@ -208,10 +248,18 @@ fn lin_comb(a: &[(u32, f64)], ka: f64, b: &[(u32, f64)], kb: f64) -> LinTerms {
 
 impl Lin {
     fn terms_of(self) -> LinTerms {
-        LIN_ARENA.with(|a| a.borrow().terms[self.id].clone())
+        let t = LIN_ARENA.with(|a| a.borrow().terms[self.id].clone());
+        #[cfg(test)]
+        {
+            prof_add(PROF_CLONES, 1);
+            prof_add(PROF_CLONE_ENTRIES, t.len());
+        }
+        t
     }
 
     fn make(v: f64, terms: LinTerms, t: bool) -> Self {
+        #[cfg(test)]
+        prof_add(PROF_MAKES, 1);
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
             a.terms.push(terms);
@@ -699,5 +747,288 @@ mod tests {
         for use_lin in [true, false] {
             assert!(wn_group_judge(&v, &up, 0.5, 1.0, wn_coeff(4), use_lin).is_ok());
         }
+    }
+    // ---- 判定時間の計測（イシュー #4076。`#[ignore]`・手動実行専用。記録は決定記録 §80.2） ----
+
+    use super::super::norm_reparam::wn_judge_cost;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    /// 計測の入力 `(v, up, g, s)`。
+    type BenchInput = (Vec<f32>, Vec<f32>, f32, f64);
+
+    /// 決定的な LCG（[0, 1)）。入力生成用。
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as f64) / f64::from(1u32 << 31)
+        }
+    }
+
+    /// 計測用の入力。`v` は振幅 1・全ゼロにならない。`s` は `v` の最大絶対値以上の 2 のべき乗。
+    fn gen_input(rng: &mut Lcg, rest: usize) -> BenchInput {
+        loop {
+            let v: Vec<f32> = (0..rest)
+                .map(|_| ((rng.next() * 2.0 - 1.0) * 2.0) as f32)
+                .collect();
+            let up: Vec<f32> = (0..rest)
+                .map(|_| ((rng.next() * 2.0 - 1.0) * 3.0) as f32)
+                .collect();
+            let g = (0.05 + rng.next() * 2.0) as f32;
+            if v.iter().all(|&x| x == 0.0) {
+                continue;
+            }
+            let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            return (v, up, g, f64::from(pow2(pow2_ceil_exponent(mx))));
+        }
+    }
+
+    fn bench_reject(_: &str) -> AutodiffError {
+        AutodiffError::Backward(String::new())
+    }
+
+    /// 全走査の結果（`n_dv`／`n_dg` は seed 種別ごとの検査時点の事象数 `N` の最大）。
+    #[derive(Default, Clone, Copy)]
+    struct Scan {
+        n_dv: usize,
+        n_dg: usize,
+        accepted: usize,
+        rejected: usize,
+    }
+
+    /// `wn_group_judge_with::<Lin>` の判定ループを、最初の拒否で打ち切らず全要素を検査する版。本番は拒否で
+    /// 短絡するため、拒否される入力でも時間が途中で切れないようにする計測専用の再実装。forward の NaN 位置の
+    /// 照合（`same_nan`）は走査の主要コストでないため省く。
+    fn scan_lin(v: &[f32], up: &[f32], g: f32, s: f64) -> Scan {
+        let rest = v.len();
+        lin_reset();
+        let (Some(fl), Some(fs)) = (wn_fwd::<Lin>(v, up, g, s), wn_fwd::<f32>(v, up, g, s)) else {
+            return Scan::default();
+        };
+        let mark = lin_mark();
+        let mut out = Scan::default();
+        let (mut hv_s, mut hu_s) = (vec![0f32; rest], vec![0f32; rest]);
+        for seed in (0..rest).map(WnSeed::Dv).chain(std::iter::once(WnSeed::Dg)) {
+            lin_truncate(mark);
+            let (mut hv_l, mut hu_l) = (vec![Lin::k(0.0); rest], vec![Lin::k(0.0); rest]);
+            let gs = wn_rev(&fs, seed, &mut hv_s, &mut hu_s);
+            let gl = wn_rev(&fl, seed, &mut hv_l, &mut hu_l);
+            let n = lin_events();
+            match seed {
+                WnSeed::Dg => out.n_dg = out.n_dg.max(n),
+                WnSeed::Dv(_) => out.n_dv = out.n_dv.max(n),
+            }
+            let mut tally = |r: Result<(), AutodiffError>| {
+                if black_box(r).is_ok() {
+                    out.accepted += 1;
+                } else {
+                    out.rejected += 1;
+                }
+            };
+            if let (Some(gs), Some(gl)) = (gs, gl) {
+                tally(entry_check_lin(gl, gs, "p", bench_reject));
+            }
+            for i in 0..rest {
+                tally(entry_check_lin(hv_l[i], hv_s[i], "p", bench_reject));
+                tally(entry_check_lin(hu_l[i], hu_s[i], "p", bench_reject));
+            }
+        }
+        out
+    }
+
+    fn middle_value(mut xs: Vec<f64>) -> f64 {
+        xs.sort_by(|a, b| a.total_cmp(b));
+        xs[xs.len() / 2]
+    }
+
+    /// 入力を全走査で判定する時間。1 グループ当たりの ns を返す。
+    fn time_scan_lin(inputs: &[BenchInput]) -> f64 {
+        let t0 = Instant::now();
+        for (v, up, g, s) in inputs {
+            black_box(scan_lin(v, up, *g, *s));
+        }
+        t0.elapsed().as_nanos() as f64 / inputs.len() as f64
+    }
+
+    /// 5 回計測の中央値（ウォームアップ 1 回つき）と各回の値。1 回が重いとき（>6 s）は回数を 3 回へ落とす。
+    fn measure_lin(inputs: &[BenchInput]) -> (f64, Vec<f64>) {
+        let first = time_scan_lin(inputs);
+        let reps = if first * inputs.len() as f64 > 6e9 {
+            3
+        } else {
+            5
+        };
+        let xs: Vec<f64> = (0..reps).map(|_| time_scan_lin(inputs)).collect();
+        (middle_value(xs.clone()), xs)
+    }
+
+    /// 事象数 `N` の最大を、検査を省いて 3 つの seed（`Dg`・先頭と末尾の `Dv`）の逆伝播だけで数える
+    /// （上限幅の探索用。全走査 [`scan_lin`] は幅の 3 乗超で重いため。`lin_judge_cost_profile` が小さい幅で
+    /// 全走査の `N` と一致することを確かめる）。
+    fn n_probe(v: &[f32], up: &[f32], g: f32, s: f64) -> usize {
+        let rest = v.len();
+        lin_reset();
+        let Some(fl) = wn_fwd::<Lin>(v, up, g, s) else {
+            return 0;
+        };
+        let mark = lin_mark();
+        let mut n = 0;
+        for seed in [WnSeed::Dg, WnSeed::Dv(0), WnSeed::Dv(rest - 1)] {
+            lin_truncate(mark);
+            let (mut hv, mut hu) = (vec![Lin::k(0.0); rest], vec![Lin::k(0.0); rest]);
+            let _ = wn_rev(&fl, seed, &mut hv, &mut hu);
+            n = n.max(lin_events());
+        }
+        n
+    }
+
+    fn n_max_of(rest: usize, rng: &mut Lcg) -> usize {
+        let (v, up, g, s) = gen_input(rng, rest);
+        n_probe(&v, &up, g, s)
+    }
+
+    /// `16·N·u < 0.01`（[`entry_check_lin`] の slack 条件）。
+    fn slack_ok(n: usize) -> bool {
+        16.0 * n as f64 * LIN_U < 0.01
+    }
+
+    /// `Lin` の判定時間の計測（イシュー #4076）。幅 2〜64 の 1 グループ当たりの時間（release・5 回中央値）、
+    /// グループ数の影響、確保・clone の内訳、従来の `Rf` 経路との換算（反復相当）、`16·N·u < 0.01` で決まる
+    /// 幅の上限を stderr に `LINPROF` 行で出す。判定・定数は変えない（値の変更は #4082）。
+    ///
+    /// 実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture --test-threads=1 lin_judge_cost_profile`
+    /// 記録先: `docs/autodiff-higher-order-grad-decision.md` §80.2。
+    #[test]
+    #[ignore = "手動実行専用の計測（stderr 出力のみ。#4076・§80.2）"]
+    fn lin_judge_cost_profile() {
+        let bytes = std::mem::size_of::<(u32, f64)>();
+        let mut rng = Lcg(0x2545_F491_4F6C_DD1D);
+        let widths = [2usize, 4, 8, 16, 32, 64];
+        let mut prev: Option<(usize, f64)> = None;
+        // 1. 幅の軸と 3. 内訳（本番判定は `wn_group_judge(use_lin = true)` の結果）。
+        for &rest in &widths {
+            let groups = match rest {
+                0..=8 => 32,
+                9..=16 => 8,
+                17..=32 => 2,
+                _ => 1,
+            };
+            let inputs: Vec<_> = (0..groups).map(|_| gen_input(&mut rng, rest)).collect();
+            let (med, raw) = measure_lin(&inputs);
+            let exp = prev.map_or(f64::NAN, |(pr, pt)| {
+                (med / pt).ln() / (rest as f64 / pr as f64).ln()
+            });
+            prev = Some((rest, med));
+            let (v, up, g, s) = &inputs[0];
+            LIN_PROF.with(|c| c.set([0; 5]));
+            let sc = scan_lin(v, up, *g, *s);
+            let p = LIN_PROF.with(|c| c.get());
+            let n = sc.n_dv.max(sc.n_dg);
+            let probe_matches = n_probe(v, up, *g, *s) == n;
+            let verdict = wn_group_judge(v, up, *g, *s, wn_coeff(rest), true).is_ok();
+            eprintln!(
+                "LINPROF kind=width rest={rest} groups={groups} reps={} median_ns_per_group={med:.0} exp_vs_prev={exp:.2} \
+                 N_dv={} N_dg={} slack={:.5} allocs={} alloc_entries={} alloc_bytes={} clones={} clone_entries={} clone_bytes={} \
+                 makes={} entries_accepted={} entries_rejected={} probe_matches_scan={} prod_verdict={} raw_ns={:?}",
+                raw.len(),
+                sc.n_dv,
+                sc.n_dg,
+                16.0 * n as f64 * LIN_U,
+                p[PROF_ALLOCS],
+                p[PROF_ALLOC_ENTRIES],
+                p[PROF_ALLOC_ENTRIES] as usize * bytes,
+                p[PROF_CLONES],
+                p[PROF_CLONE_ENTRIES],
+                p[PROF_CLONE_ENTRIES] as usize * bytes,
+                p[PROF_MAKES],
+                sc.accepted,
+                sc.rejected,
+                probe_matches,
+                if verdict { "accept" } else { "reject" },
+                raw.iter().map(|x| *x as u64).collect::<Vec<_>>(),
+            );
+        }
+        // 2. グループ数の軸（グループごとに領域を戻すので、1 グループ当たりの時間は数に依らないはず）。
+        for &rest in &[8usize, 32] {
+            for &groups in &[1usize, 16, 128] {
+                if rest * groups > 2048 {
+                    eprintln!("LINPROF kind=groups rest={rest} groups={groups} skipped=too-long");
+                    continue;
+                }
+                let inputs: Vec<_> = (0..groups).map(|_| gen_input(&mut rng, rest)).collect();
+                let (med, _) = measure_lin(&inputs);
+                eprintln!(
+                    "LINPROF kind=groups rest={rest} groups={groups} median_ns_per_group={med:.0}"
+                );
+            }
+        }
+        // 4. 反復相当: `Rf` 経路（受理される入力でのみ採用）の 1 反復当たり時間で `Lin` の時間を割る。
+        for &rest in &widths {
+            let mut tries = 0usize;
+            let mut found = None;
+            while tries < 2000 {
+                tries += 1;
+                let inp = gen_input(&mut rng, rest);
+                if wn_group_judge(&inp.0, &inp.1, inp.2, inp.3, wn_coeff(rest), false).is_ok() {
+                    found = Some(inp);
+                    break;
+                }
+            }
+            let Some((v, up, g, s)) = found else {
+                eprintln!(
+                    "LINPROF kind=equiv rest={rest} rf_unmeasured=no-accepted-input tries={tries}"
+                );
+                continue;
+            };
+            let reps_inner = (2_000_000 / wn_judge_cost(1, rest)).max(1);
+            let one = |lin: bool| -> f64 {
+                let t0 = Instant::now();
+                for _ in 0..reps_inner {
+                    black_box(wn_group_judge(&v, &up, g, s, wn_coeff(rest), lin).is_ok());
+                }
+                t0.elapsed().as_nanos() as f64 / reps_inner as f64
+            };
+            let _ = one(false);
+            let rf_ns = middle_value((0..5).map(|_| one(false)).collect());
+            let ns_per_iter = rf_ns / wn_judge_cost(1, rest) as f64;
+            let lin_ns = middle_value((0..5).map(|_| one(true)).collect());
+            eprintln!(
+                "LINPROF kind=equiv rest={rest} tries={tries} rf_ns_per_group={rf_ns:.0} ns_per_iter={ns_per_iter:.3} \
+                 lin_prod_ns_per_group={lin_ns:.0} lin_equiv_iters={:.0} lin_group_cost={}",
+                lin_ns / ns_per_iter,
+                lin_group_cost(rest),
+            );
+        }
+        // 5. 幅の上限: slack 条件を満たす最大の幅。倍々で探索してから二分探索（N は幅に対し単調と仮定）。
+        let mut lo = 2usize;
+        let mut hi = 4usize;
+        while hi <= 512 && slack_ok(n_max_of(hi, &mut rng)) {
+            lo = hi;
+            hi *= 2;
+        }
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if slack_ok(n_max_of(mid, &mut rng)) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let (n_lo, n_hi) = (n_max_of(lo, &mut rng), n_max_of(hi, &mut rng));
+        let same_n =
+            (0..5).all(|_| n_max_of(lo, &mut rng) == n_lo && n_max_of(hi, &mut rng) == n_hi);
+        let (v, up, g, s) = gen_input(&mut rng, hi);
+        let hi_rejected = wn_group_judge(&v, &up, g, s, wn_coeff(hi), true).is_err();
+        eprintln!(
+            "LINPROF kind=limit rest_max={lo} N_at_max={n_lo} slack_at_max={:.5} rest_max_plus1={hi} N_at_plus1={n_hi} \
+             slack_at_plus1={:.5} n_input_independent={same_n} plus1_rejected_by_prod={hi_rejected}",
+            16.0 * n_lo as f64 * LIN_U,
+            16.0 * n_hi as f64 * LIN_U,
+        );
+        assert!(slack_ok(n_lo) && !slack_ok(n_hi) && hi_rejected);
     }
 }
