@@ -5918,6 +5918,79 @@ tolerance 定数（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 
 - #4082（適用範囲）: 本節の表が疎モードの基準値。幅 16 で 168 µs、幅 32 で 344 µs と、`lin_group_cost`（`6000·rest²`）は引き続き大幅に過大。幅 8 超を本番で受理させる場合は、`16·N·u` の `N`（疎モードで約 1.7 倍）、§79.2 入力と同じ余裕の確認（`θ` の境界）、幅 8 超の受理テストを併せて見る。SpectralNorm への疎モードの適用は本イシューでは行っていない（必要なら #4073 系で別途扱う）。
 
+### 80.5 #4082: WeightNorm の `Lin`（疎モード）の適用範囲を幅 8 超へ広げる
+
+- 位置づけ: #4074 の起票の範囲内の内部判定の見直し。新たな承認は主張しない。判定を緩めるのではなく、過大だった走査量の見積り（`lin_group_cost`）と幅の上限（`LIN_REST_MAX`）を実測から決め直し、幅 8 超でも従来の `Rf` + `coeff·M` より厳密な `Lin`（疎モード）で判定する。#4076（§80.2）・#4077（§80.3）・#4078（§80.4）の計測・実装が前提。
+- 計測テスト: `crates/autodiff/src/create_graph/lin.rs` の `tests::lin_wide_apply_profile`（`#[ignore]`。疎モードの全走査時間・事象数 `N`・同じ実行内の `Rf` 1 反復時間による反復相当を `WIDEPROF` 行で出す）、`norm_reparam.rs` の `tests::wn_wide_rejection_breakdown_measurement`（`#[ignore]`。`Rf`／`Lin` の判定の差を `WIDEFLIP` 行で出す）。実行環境は §80.2 と同じ（i7-13700K・Linux・rustc 1.98.1・`--release`・1 スレッド）。
+
+#### 疎モードの実測（幅 2〜256・1 グループ）
+
+同じ実行内で測った `Rf` の 1 反復は 3.45 ns（§80.3 のとおり実行をまたぐと揺れるため、同じ実行で割る）。
+
+| 幅 | 1 グループ | 反復相当 | 旧 `6000·rest²` | 新 `150·rest²+4000·rest` | 新／実測 | `N`（最大） | `16·N·u` |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 12.8 µs | 3.7e3 | 2.4e4 | 8.6e3 | 2.3 | 82 | 0.00008 |
+| 4 | 47.1 µs | 1.37e4 | 9.6e4 | 1.84e4 | 1.35 | 152 | 0.00014 |
+| 8 | 104 µs | 3.02e4 | 3.84e5 | 4.16e4 | 1.38 | 284 | 0.00027 |
+| 16 | 204 µs | 5.92e4 | 1.54e6 | 1.02e5 | 1.73 | 416 | 0.00040 |
+| 32 | 347 µs | 1.01e5 | 6.14e6 | 2.82e5 | 2.8 | 1121 | 0.00107 |
+| 64 | 1.42 ms | 4.12e5 | 2.46e7 | 8.70e5 | 2.1 | 2209 | 0.00211 |
+| 128 | 6.21 ms | 1.80e6 | 9.83e7 | 2.97e6 | 1.65 | 4385 | 0.00418 |
+| 192 | 15.7 ms | 4.56e6 | 2.21e8 | 6.3e6 | 1.38 | 6561 | 0.00626 |
+| 256 | 31.2 ms | 9.05e6 | 3.93e8 | 1.09e7 | 1.2 | 8736 | 0.00833 |
+
+（幅 12・24・48・96 も測った。新見積りはすべて実測を上回る。）旧見積りは幅 128 で実測の約 55 倍と大幅に過大だった。疎モードの `N` は厳密モードの `18·rest+17` の約 2 倍（約 `34·rest+12`。残余事象が 1 回のまとめごとに 1 つ増えるため）。
+
+#### 定数の決め方
+
+- `lin_group_cost(rest) = 150·rest² + 4000·rest`: 上表の全点（幅 2〜256）を覆う（見積り／実測は 1.2 倍以上）。2 次の項だけでは小さい幅の定数項（確保など）を覆えないため線形項を足した。測っていない幅へは外挿しない。
+- `LIN_REST_MAX = 128`: 測った最大幅は 256 だが、幅 192 以上は見積りの余裕が 1.4 倍以下に薄くなる。幅 128 では `16·wn_lin_events_max(128)·u` が約 0.0049 で `0.01` を下回る（幅 256 は約 0.0098 で余裕がない）。
+- `wn_lin_events_max(rest) = 40·rest + 40`: 実測の最大（約 `34·rest+12`）に余裕を乗せた上界。`wn_use_lin` は `16·wn_lin_events_max(rest)·u < 0.01` を条件に足し、`Lin` を選んで全要素が余裕係数の上限で拒否される状況を避ける（`sn_use_lin` と同じ方針）。
+- `LIN_BUDGET = 2^26`: 据え置き（`sn_use_lin` も読むため SpectralNorm の拒否範囲を動かさない）。`Rf` の 1 反復 3.45 ns で約 0.23 秒の判定上限に当たる。
+- 新しい条件: `wn_use_lin(groups, rest) = rest ≤ 128 && groups·lin_group_cost(rest) ≤ LIN_BUDGET && 16·wn_lin_events_max(rest)·u < 0.01`。テンソル単位の選択は変えない。幅 8 以下でもグループ数の上限が 175 から約 1600 グループ（幅 8）へ緩む（見積りが実測に近づいたため）。
+
+#### 拒否範囲の変化
+
+幅 9〜128 の決定的な入力（振幅 1e-3／1／1e3・乱数と `[0.2, 1.0)` の正の入力・`g`・上流を振る）を、グループ判定で `Rf`（`use_lin = false`）と `Lin`（疎）の両方で判定した（各幅 60 入力）。
+
+| 幅 | 両方受理 | 両方拒否 | `Rf` 受理→`Lin` 拒否 | `Rf` 拒否→`Lin` 受理 |
+|---:|---:|---:|---:|---:|
+| 9 | 49 | 4 | 0 | 7 |
+| 12 | 47 | 2 | 0 | 11 |
+| 16 | 40 | 12 | 0 | 8 |
+| 24 | 37 | 17 | 0 | 6 |
+| 32 | 36 | 19 | 0 | 5 |
+| 48 | 36 | 20 | 0 | 4 |
+| 64 | 35 | 20 | 0 | 5 |
+| 96 | 34 | 20 | 0 | 6 |
+| 128 | 31 | 20 | 0 | 9 |
+
+- 受理→拒否の反転は全幅で 0 件。旧見積りとの `min` は取らない（§81.9.1 の先例どおり。旧見積りに相殺の健全性の根拠が無い）。
+- 受け入れ条件 1: `sq_tanh_loss`（`(Σ tanh(weight_norm(v, g)))²`）の幅 12（g0=1.0）・16（g0=1.5）の入力は、変更前は拒否され、変更後は受理されて Hessian の全要素が f64 の二階中央差分参照と REQ-2 統一複合判定で一致する（`tests/create_graph_norm_reparam.rs::weight_norm_wide_cancelling_hessian_is_accepted_and_matches_f64`。`LIN_REST_MAX = 8` に戻すと失敗することを確認）。同様の探索で幅 32 の入力も受理に変わった。
+- `shadow_check`（`rounding_coeff(rest+4)·m`）の置き換えは行わなかった: 上の受理される入力は `shadow_check` を通過しており、受理を妨げることを示す入力が見つからなかった。なお、残る拒否のうち `entry_check` と `shadow_check` のどちらによるものかの切り分けは行っていない（必要なら #4081 と同じ置き換えを WeightNorm へ別途適用する）。
+
+#### テスト
+
+- `norm_reparam.rs::tests::wn_lin_events_stay_within_bound`（`N ≤ wn_lin_events_max`。幅 2〜128・振幅 3 通り）、`wn_use_lin_boundaries`（幅の上限とその +1・`LIN_BUDGET` 境界のグループ数）。
+- 既存の soundness（`lin_bound_covers_f32_deviation_for_weight_norm_wide_sweep`）と疎の非後退（`sparse_lin_never_looser_than_exact_for_weight_norm_sweep`）の幅の集合へ 48・64 を追加した。
+- 既存の拒否プローブ（`*_is_rejected*` 群）・正のプローブ・掃引は無変更で通る（autodiff 全体 2151 件、facade の `weight_norm` 系も通る）。
+
+#### 変異確認（一時的な変更。コミットしない）
+
+| 変異 | 失敗したテスト |
+|---|---|
+| `Lin::bound` を 0 にする | `lin_bound_covers_f32_deviation_for_weight_norm_wide_sweep` ほか soundness 系 5 件 |
+| `wn_lin_events_max` を `10·rest+10` に縮める | `wn_lin_events_stay_within_bound` |
+| `LIN_REST_MAX` を 8 に戻す | `weight_norm_wide_cancelling_hessian_is_accepted_and_matches_f64` |
+
+#### 変えていないもの
+
+tolerance 定数（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・SpectralNorm の判定・`shadow_check`・依存・公開 API・`docs/spec`。GPU 実機 parity は未実測のまま（`#[ignore]`。Linux の値を GPU の代わりにしない）。
+
+#### 後続
+
+- `JUDGE_BUDGET`（`wn_judge_cost`）の見直しは #4072。幅 192 以上への拡大は、見積りの余裕と slack（幅 256 で 0.0083）の再確認が要る。
+
 ## 81. 計測・設計記録（イシュー #4079・親 #4073。SpectralNorm の create_graph の拒否の内訳と係数 `N+4` の由来）
 
 ### 81.0 位置づけ

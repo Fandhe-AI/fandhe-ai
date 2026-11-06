@@ -1295,3 +1295,45 @@ fn weight_norm_ordinary_cancelling_hessian_is_accepted_and_matches_f64() {
         }
     }
 }
+/// 幅 8 超の WeightNorm の入力（決定的な LCG。`v` は `[0.2, 1.0)`、`g = [g0, 0.8·g0]`）。
+fn wn_wide_input(rest: usize, g0: f32, seed: u64) -> Vec<f32> {
+    let mut st = seed;
+    let mut x0: Vec<f32> = (0..2 * rest)
+        .map(|_| {
+            st = st
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (0.2 + 0.8 * ((st >> 33) as f64) / f64::from(1u32 << 31)) as f32
+        })
+        .collect();
+    x0.push(g0);
+    x0.push(g0 * 0.8);
+    x0
+}
+
+/// 正のプローブ（#4082）: 幅 8 超（12・16）の普通の WeightNorm が受理され、二階が f64 参照と REQ-2 統一複合判定で
+/// 一致する。変更前（総括判定の `Lin` が幅 8 以下だけだったとき）は従来の `Rf` + `coeff·M` で拒否されていた入力
+/// （`v` は `[0.2, 1.0)` の乱数・g≈1〜1.5。決定記録 §80.5）。tolerance は変えない。
+#[test]
+fn weight_norm_wide_cancelling_hessian_is_accepted_and_matches_f64() {
+    let cases: [(&str, usize, f32, u64); 2] = [
+        ("幅 12・g0=1.0", 12, 1.0, 12345 + 12),
+        ("幅 16・g0=1.5", 16, 1.5, 12345 + 16),
+    ];
+    for (ctx, rest, g0, seed) in cases {
+        let x0 = wn_wide_input(rest, g0, seed);
+        let n = x0.len();
+        let got = analytic_hessian(&|tape, x| sq_tanh_loss(tape, x, rest), &x0, &[n]);
+        let want = wn_sq_tanh_hessian_f64(&x0, rest);
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    common::req2_close(got[i][j], want[i][j]),
+                    "{ctx}: H[{i}][{j}] = {:e}（f64 参照 {:e}）",
+                    got[i][j],
+                    want[i][j]
+                );
+            }
+        }
+    }
+}

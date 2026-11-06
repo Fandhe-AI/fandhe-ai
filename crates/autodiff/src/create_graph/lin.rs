@@ -256,13 +256,17 @@ const fn fold_frac() -> f64 {
     LIN_FOLD_FRAC
 }
 
-/// [`Lin`] を使うグループの幅の上限（事象の数が幅に比例して増え、係数の列が長くなるため）。
-pub(super) const LIN_REST_MAX: usize = 8;
-/// [`Lin`] で判定するグループ 1 つの走査量の見積り（幅 8 で約 4e5 反復相当、幅の 2 乗に比例とした見積り）。
-/// 計測は `tests::lin_judge_cost_profile`（`#[ignore]`）、実測との照合は決定記録 §80.2（イシュー #4076）・§80.3（#4077）。
-/// 値は据え置き（見直しは #4082）。
+/// [`Lin`] を使うグループの幅の上限。事象の数 `N` が幅に比例して増え、`entry_check_lin` の余裕係数の条件
+/// （`16·N·u < 0.01`。`norm_reparam.rs::wn_use_lin`）と判定時間で決まる。#4082 で 8 から 128 へ広げた
+/// （疎モードの `N` は幅 128 で約 4400、slack 0.0042。測った最大幅は 256 だが、`lin_group_cost` の余裕が
+/// 薄くなるため 128 で止める。実測は決定記録 §80.5）。
+pub(super) const LIN_REST_MAX: usize = 128;
+/// [`Lin`] で判定するグループ 1 つの走査量の見積り（`Rf` の 1 反復相当。`150·rest² + 4000·rest`）。
+/// 疎モードの本番判定を幅 2〜256 で実測した反復相当（`tests::lin_wide_apply_profile`。同じ実行内の `Rf` の
+/// 1 反復時間で換算）の全点を覆い、見積り／実測は幅 2〜256 で 1.2 倍以上。測っていない幅へは外挿しない
+/// （[`LIN_REST_MAX`] が上限）。実測と各点の比は決定記録 §80.5（イシュー #4082）。
 pub(super) fn lin_group_cost(rest: usize) -> usize {
-    6000 * rest * rest
+    150 * rest * rest + 4000 * rest
 }
 /// [`Lin`] を使う判定の走査量の上限。超える（グループ数が多い）テンソルは全グループを従来の `norm_reparam.rs` の `Rf` で判定する
 /// （グループの位置で判定方式が変わらないよう、テンソル単位で選ぶ）。
@@ -1556,9 +1560,12 @@ mod tests {
         Some((outs, events))
     }
 
-    /// 幅・振幅・乱数を振った WeightNorm の入力（幅 2〜8 を中心に 12・16・24・32 を混ぜる）。
+    /// 幅・振幅・乱数を振った WeightNorm の入力（幅 2〜8 を中心に 12・16・24・32 と、#4082 で広げた範囲の
+    /// 代表幅 48・64 を混ぜる）。
     fn wn_sweep_input(case: usize, next: &mut impl FnMut() -> f64) -> BenchInput {
         let rest = match case {
+            c if c % 100 == 99 => 64,
+            c if c % 100 == 74 => 48,
             c if c % 50 == 49 => 32,
             c if c % 25 == 24 => 24,
             c if c % 12 == 11 => 16,
@@ -1629,7 +1636,7 @@ mod tests {
         assert!(folded > 0, "まとめが一度も起きていない");
     }
 
-    /// 受け入れ条件 2: 幅 2〜32 の soundness（疎モード）。f32 の再現と和の順序を変えた再現の実測の誤差が、疎モードの
+    /// 受け入れ条件 2: 幅 2〜64（#4082 で 32 から拡大）の soundness（疎モード）。f32 の再現と和の順序を変えた再現の実測の誤差が、疎モードの
     /// 上界 × 余裕を超えない。`Lin::bound` を 0 にすると失敗する（変異確認は §80.4）。
     #[test]
     fn lin_bound_covers_f32_deviation_for_weight_norm_wide_sweep() {
@@ -2146,5 +2153,74 @@ mod tests {
         }
         PROFILE_SPARSE.with(|c| c.set(false));
         FOLD_FRAC_OVERRIDE.with(|c| c.set(None));
+    }
+
+    /// 幅 8 超への適用範囲拡大のための計測（イシュー #4082）。疎モード（本番と同じ）で幅ごとに 1 グループの
+    /// 全走査時間（5 回中央値）・事象数 `N`（乱数入力と振幅違いの最大）・slack を出し、同じ実行内で測った
+    /// `Rf` 経路の 1 反復当たり時間で反復相当へ換算する。判定・定数は変えない。
+    ///
+    /// 実行: `cargo test -p fandhe-ai-autodiff --release --lib -- --ignored --nocapture --test-threads=1 lin_wide_apply_profile`
+    /// 記録先: `docs/autodiff-higher-order-grad-decision.md` §80.5。
+    #[test]
+    #[ignore = "手動実行専用の計測（stderr 出力のみ。#4082・§80.5）"]
+    fn lin_wide_apply_profile() {
+        PROFILE_SPARSE.with(|c| c.set(true));
+        let mut rng = Lcg(0x2545_F491_4F6C_DD1D);
+        // 同じ実行内の Rf 1 反復当たり時間（幅 8 の受理入力で測る）。
+        let ns_per_iter = {
+            let rest = 8usize;
+            let inp = (0..5000)
+                .map(|_| gen_input(&mut rng, rest))
+                .find(|i| wn_group_judge(&i.0, &i.1, i.2, i.3, wn_coeff(rest), false).is_ok())
+                .expect("幅 8 の Rf 受理入力");
+            let reps = (2_000_000 / wn_judge_cost(1, rest)).max(1);
+            let one = || -> f64 {
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    black_box(
+                        wn_group_judge(&inp.0, &inp.1, inp.2, inp.3, wn_coeff(rest), false).is_ok(),
+                    );
+                }
+                t0.elapsed().as_nanos() as f64 / reps as f64
+            };
+            let _ = one();
+            middle_value((0..5).map(|_| one()).collect()) / wn_judge_cost(1, rest) as f64
+        };
+        eprintln!("WIDEPROF rf_ns_per_iter={ns_per_iter:.3}");
+        for &rest in &[2usize, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256] {
+            let groups = match rest {
+                0..=8 => 32,
+                9..=16 => 8,
+                17..=32 => 2,
+                _ => 1,
+            };
+            let inputs: Vec<_> = (0..groups).map(|_| gen_input(&mut rng, rest)).collect();
+            let (med, _) = measure_lin(&inputs);
+            let mut n_max = 0usize;
+            for amp in [1e-3f32, 1.0, 1e3] {
+                for _ in 0..4 {
+                    let (mut v, up, g, _) = gen_input(&mut rng, rest);
+                    v.iter_mut().for_each(|x| *x *= amp);
+                    let mx = v.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+                    let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+                    n_max = n_max.max(n_probe(&v, &up, g, s));
+                }
+            }
+            let (v, up, g, s) = &inputs[0];
+            let sc = scan_lin(v, up, *g, *s);
+            let equiv = med / ns_per_iter;
+            eprintln!(
+                "WIDEPROF rest={rest} groups={groups} median_ns_per_group={med:.0} equiv_iters={equiv:.0} \
+                 lin_group_cost_old={} ratio_old_over_meas={:.2} N_probe_max={n_max} N_scan_dv={} N_scan_dg={} \
+                 slack={:.5} 18r+17={}",
+                lin_group_cost(rest),
+                lin_group_cost(rest) as f64 / equiv,
+                sc.n_dv,
+                sc.n_dg,
+                16.0 * n_max as f64 * LIN_U,
+                18 * rest + 17,
+            );
+        }
+        PROFILE_SPARSE.with(|c| c.set(false));
     }
 }
