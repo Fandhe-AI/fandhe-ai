@@ -7,7 +7,8 @@
 //!
 //! 呼び出し元: `norm_reparam.rs` の WeightNorm の総括判定（`wn_group_judge`）と SpectralNorm の総括判定
 //! （`sn_judge`。#4080。全要素に依存する値の係数列は [`Num::settle`] で束ねる）、同ファイルの
-//! `T: Num` 総称関数群。LRN（#4073）や損失のクラス軸系（#4071）が流用する予定のため、
+//! `T: Num` 総称関数群、`loss_class.rs` の Cosine の相殺判定（#4090。forward を `f32`・`f64` の総称関数にし、
+//! test では `Lin` の上界を並行計算する。判定への配線は #4091）。LRN（#4073）や損失のクラス軸系（#4071）が流用する予定のため、
 //! norm 専用ではない共通モジュールとして切り出した（挙動不変の移動）。norm 専用の `Rf`・`Dm` は
 //! `norm_reparam.rs` に残す。
 //!
@@ -20,7 +21,7 @@ use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLER
 use super::judge::Reject;
 use crate::error::AutodiffError;
 
-/// 構造の演算列を再現する数値型。`f32` は構造そのもの（`V_str`）、`norm_reparam.rs` の `Rf` は f64 の参照（`V`・`M`）。
+/// 構造の演算列を再現する数値型。`f32` は構造そのもの（`V_str`）、`norm_reparam.rs` の `Rf` と素の `f64`（`loss_class.rs` の Cosine。#4090）は f64 の参照（`V`・`M`）。
 pub(super) trait Num: Copy {
     /// 定数（ホストが f64 で作り、構造は `as f32` で載せる値）。
     fn k(x: f64) -> Self;
@@ -87,6 +88,58 @@ impl Num for f32 {
     }
     fn pow_grad(self, e: f64) -> Self {
         let e = e as f32;
+        if e == 0.0 {
+            0.0
+        } else {
+            e * self.powf(e - 1.0)
+        }
+    }
+    fn root_grad(self) -> Self {
+        0.5 / self
+    }
+    fn no_inf(self) -> bool {
+        !self.is_infinite()
+    }
+    fn nan(self) -> bool {
+        self.is_nan()
+    }
+    fn generated_nan(self) -> bool {
+        false
+    }
+}
+
+/// f64 の素の演算（参照値側）。`loss_class.rs::cos_fwd` が f64 の参照値と f32 の構造の再現を同じ総称関数で
+/// 組むための実装で、各演算は f64 の演算そのもの（丸めの追跡はしない）。`total` は従来の参照実装が使っていた
+/// `Iterator::sum::<f64>()` と同じ演算列にするため、既定の逐次和ではなく `sum` で上書きする（イシュー #4090）。
+impl Num for f64 {
+    fn k(x: f64) -> Self {
+        x
+    }
+    fn plus(self, o: Self) -> Self {
+        self + o
+    }
+    fn minus(self, o: Self) -> Self {
+        self - o
+    }
+    fn times(self, o: Self) -> Self {
+        self * o
+    }
+    fn over(self, o: Self) -> Self {
+        self / o
+    }
+    fn negate(self) -> Self {
+        -self
+    }
+    fn root(self) -> Self {
+        f64::sqrt(self)
+    }
+    fn total(terms: &[Self]) -> Self {
+        terms.iter().copied().sum::<f64>()
+    }
+    fn powe(self, e: f64) -> Self {
+        self.powf(e)
+    }
+    fn pow_grad(self, e: f64) -> Self {
         if e == 0.0 {
             0.0
         } else {

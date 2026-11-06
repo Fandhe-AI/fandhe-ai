@@ -572,6 +572,23 @@ struct CosCase {
     exp: i32,
 }
 
+/// `cosine_cgrad` の ε（`loss_ops` の Cosine の定数）。手組みと `Lin` の並行計算が同じ値を使う。
+const COS_EPSILON: f64 = 1e-12;
+
+/// Cosine の行スケール `(inv, eps)`（`cosine_cgrad` と同じ式。`inv = 1/s`・`eps = ε/s²`、`s` は 2 のべき乗）。
+fn cos_scales(a: &[f32], b: &[f32]) -> ((f64, f64), (f64, f64)) {
+    let sqrt_eps = COS_EPSILON.sqrt();
+    let amax = |v: &[f32]| v.iter().fold(0f64, |m, x| m.max(f64::from(*x).abs()));
+    let (s1, s2) = (
+        pow2_ceil(amax(a).max(sqrt_eps)),
+        pow2_ceil(amax(b).max(sqrt_eps)),
+    );
+    (
+        (1.0 / s1, 1.0 / s2),
+        (COS_EPSILON / (s1 * s1), COS_EPSILON / (s2 * s2)),
+    )
+}
+
 /// Cosine の手組みの seed ごとの二階: `[side][wrt]`（side 0 = dx1、1 = dx2。wrt は `[a, b, g]`）。
 type CosRows = Vec<(usize, [Vec<Vec<f32>>; 2])>;
 
@@ -610,10 +627,15 @@ impl CosCase {
 
     /// `cosine_cgrad` の構造（`[1, d]`・Sum・全要素 active）を同じ演算順で子テープへ組み、seed ごとの二階を返す。
     fn hand_rows(&self, seed_list: &[usize]) -> CosRows {
-        const EPSILON: f64 = 1e-12;
+        let (a, b) = self.ab();
+        self.hand_rows_with(a, b, seed_list)
+    }
+
+    /// [`CosCase::hand_rows`] を明示的な行 `(a, b)`（長さ `self.d`）で呼ぶ形（`y`・`exp` は `self` のまま。#4090）。
+    fn hand_rows_with(&self, a: Vec<f32>, b: Vec<f32>, seed_list: &[usize]) -> CosRows {
+        const EPSILON: f64 = COS_EPSILON;
         let d = self.d;
         let shape = [1usize, d];
-        let (a, b) = self.ab();
         let child = Tape::new_with_ops(test_ops());
         let a_m = child.var(&tt(a.clone(), &shape));
         let b_m = child.var(&tt(b.clone(), &shape));
@@ -1576,4 +1598,230 @@ fn classify_check_splits_the_two_terms() {
     );
     assert_eq!(classify_check([0.0, 1e-3, 1.0, 1.0, 1e-4]).0, "両方");
     assert_eq!(classify_check([0.0, 8e-6, 0.08, 1.0, 1e-4]).0, "合算でのみ");
+}
+// =====================================================================================
+// #4090: Cosine の forward の総称化（判定不変）と `Lin` の上界の soundness
+// =====================================================================================
+
+/// 乱数の入力用の決定的な xorshift（`[0, 1)` の f64）。
+struct Rng(u64);
+
+impl Rng {
+    fn unit(&mut self) -> f64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn signed(&mut self) -> f32 {
+        (self.unit() * 2.0 - 1.0) as f32
+    }
+}
+
+/// NaN を 1 つの bit 列へ正規化した f64 の bit 列（NaN の payload の違いを同一視）。
+fn f64_bits(v: f64) -> u64 {
+    if v.is_nan() { u64::MAX } else { v.to_bits() }
+}
+
+fn f32_bits(v: f32) -> u32 {
+    if v.is_nan() { u32::MAX } else { v.to_bits() }
+}
+
+/// 総称化の前に `cosine_cancel_check` が書いていた f64 の参照と f32 の再現の式（逐語のコピー。前例: #4077 の
+/// `LinRef`）。`cos_fwd` が全中間値で bit 一致することが、判定を変えていない主な回帰の錠になる。
+/// 戻り値は `([m1, m2, s1, s2, den, dot, cos] の f64, 同 f32, ap ++ bp の f64, 同 f32)`。
+#[allow(clippy::type_complexity)]
+fn cos_fwd_previous(
+    a32: &[f32],
+    b32: &[f32],
+    inv: (f64, f64),
+    eps: (f64, f64),
+) -> ([f64; 7], [f32; 7], Vec<f64>, Vec<f32>) {
+    let ap: Vec<f64> = a32.iter().map(|&v| f64::from(v) * inv.0).collect();
+    let bp: Vec<f64> = b32.iter().map(|&v| f64::from(v) * inv.1).collect();
+    let m1: f64 = ap.iter().map(|v| v * v).sum::<f64>() + eps.0;
+    let m2: f64 = bp.iter().map(|v| v * v).sum::<f64>() + eps.1;
+    let (s1, s2) = (m1.sqrt(), m2.sqrt());
+    let den = s1 * s2;
+    let dot: f64 = ap.iter().zip(&bp).map(|(a, b)| a * b).sum();
+    let cos = dot / den;
+    let (r1f, r2f, e1f, e2f) = (inv.0 as f32, inv.1 as f32, eps.0 as f32, eps.1 as f32);
+    let ap32: Vec<f32> = a32.iter().map(|&v| v * r1f).collect();
+    let bp32: Vec<f32> = b32.iter().map(|&v| v * r2f).collect();
+    let sum32 = |it: &mut dyn Iterator<Item = f32>| it.fold(0f32, |a, x| a + x);
+    let m1_32 = sum32(&mut ap32.iter().map(|&v| v * v)) + e1f;
+    let m2_32 = sum32(&mut bp32.iter().map(|&v| v * v)) + e2f;
+    let (s1_32, s2_32) = (m1_32.sqrt(), m2_32.sqrt());
+    let den32 = s1_32 * s2_32;
+    let dot32 = sum32(&mut ap32.iter().zip(&bp32).map(|(&a, &b)| a * b));
+    let cos32 = dot32 / den32;
+    (
+        [m1, m2, s1, s2, den, dot, cos],
+        [m1_32, m2_32, s1_32, s2_32, den32, dot32, cos32],
+        ap.into_iter().chain(bp).collect(),
+        ap32.into_iter().chain(bp32).collect(),
+    )
+}
+
+#[test]
+fn cosine_fwd_generic_matches_previous_formulas() {
+    let mut inputs: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
+    for c in cos_cases() {
+        if c.d <= 512 && c.exp == 0 && c.y > 0.0 {
+            inputs.push(c.ab());
+        }
+    }
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    for d in [1usize, 2, 3, 7, 16, 33] {
+        for amp in [1e-30f32, 1e-8, 1e-3, 1.0, 1e3, 1e30] {
+            let a: Vec<f32> = (0..d).map(|_| amp * rng.signed()).collect();
+            let b: Vec<f32> = a.iter().map(|&x| x + 1e-3 * amp * rng.signed()).collect();
+            // NaN・0 の行も通す。
+            let mut an = a.clone();
+            an[0] = f32::NAN;
+            inputs.push((an, a.clone()));
+            inputs.push((vec![0.0; d], a.clone()));
+            inputs.push((a, b));
+        }
+    }
+    for (a, b) in &inputs {
+        let (inv, eps) = cos_scales(a, b);
+        let (r64, r32, v64, v32) = cos_fwd_previous(a, b, inv, eps);
+        let f64f = cos_fwd::<f64>(a, b, inv, eps);
+        let f32f = cos_fwd::<f32>(a, b, inv, eps);
+        let got64 = [
+            f64f.m1, f64f.m2, f64f.s1, f64f.s2, f64f.den, f64f.dot, f64f.cos,
+        ];
+        let got32 = [
+            f32f.m1, f32f.m2, f32f.s1, f32f.s2, f32f.den, f32f.dot, f32f.cos,
+        ];
+        for k in 0..7 {
+            assert_eq!(f64_bits(got64[k]), f64_bits(r64[k]), "f64 中間値 {k}");
+            assert_eq!(f32_bits(got32[k]), f32_bits(r32[k]), "f32 中間値 {k}");
+        }
+        let g64: Vec<u64> = f64f
+            .ap
+            .iter()
+            .chain(&f64f.bp)
+            .map(|&v| f64_bits(v))
+            .collect();
+        let g32: Vec<u32> = f32f
+            .ap
+            .iter()
+            .chain(&f32f.bp)
+            .map(|&v| f32_bits(v))
+            .collect();
+        assert_eq!(g64, v64.iter().map(|&v| f64_bits(v)).collect::<Vec<_>>());
+        assert_eq!(g32, v32.iter().map(|&v| f32_bits(v)).collect::<Vec<_>>());
+    }
+    assert!(inputs.len() > 100, "入力が少なすぎる: {}", inputs.len());
+}
+
+#[test]
+fn cosine_f32_model_stays_close_to_hand_built_structure() {
+    // 受理される小さな入力では、`cos_rev::<f32>` の写しが手組みの構造（実際の eager 逆伝播）と REQ-2 の範囲で
+    // 一致する。縮約の順序の違いで bit 一致しない要素は許す（bit 一致は求めない。soundness は別テストが正）。
+    let mut worst = 0f64;
+    for (delta, y, exp) in [(1e-2f32, 1.0f32, 0), (1.0, -1.0, 7), (1e-4, 1.0, 3)] {
+        let c = CosCase {
+            d: 8,
+            delta,
+            y,
+            exp,
+        };
+        let (a, b) = c.ab();
+        let (inv, eps) = cos_scales(&a, &b);
+        let sd: Vec<usize> = (0..c.d).collect();
+        let hand = c.hand_rows(&sd);
+        let g = f64::from(pow2(exp));
+        for (j, rows) in &hand {
+            let model = cosine_model_rows_f32((&a, &b), inv, eps, g, c.cf(), *j);
+            for side in 0..2 {
+                let (oi, ti) = if side == 0 { (0, 1) } else { (1, 0) };
+                for i in 0..c.d {
+                    for (h, m) in [
+                        (rows[side][oi][i], model[side].own[i]),
+                        (rows[side][ti][i], model[side].other[i]),
+                    ] {
+                        worst = worst.max(req2_ratio(f64::from(m), f64::from(h)));
+                    }
+                }
+            }
+        }
+    }
+    assert!(worst < 1.0, "f32 の写しが手組みから外れすぎ: {worst}");
+}
+
+#[test]
+fn lin_bound_covers_f32_deviation_for_cosine_sweep() {
+    use super::super::lin::LIN_U;
+    let mut rng = Rng(0x0123_4567_89ab_cdef);
+    let (mut checked, mut tight, mut nonzero) = (0usize, 0usize, 0usize);
+    let mut worst = 0f64;
+    for d in [1usize, 2, 3, 8, 16, 32] {
+        for amp in [1e-3f32, 1.0, 1e3] {
+            for delta in [0.0f32, 1e-6, 1e-4, 1e-2, 1.0] {
+                for y in [1.0f32, -1.0] {
+                    for exp in [0i32, 13, 20] {
+                        let c = CosCase { d, delta, y, exp };
+                        let a: Vec<f32> = (0..d).map(|_| amp * rng.signed()).collect();
+                        let b: Vec<f32> =
+                            a.iter().map(|&x| x + delta * amp * rng.signed()).collect();
+                        let (inv, eps) = cos_scales(&a, &b);
+                        let sd = seeds(d, &[]);
+                        let hand = c.hand_rows_with(a.clone(), b.clone(), &sd);
+                        let g = f64::from(pow2(exp));
+                        let lin = cosine_lin_rows((&a, &b), inv, eps, g, c.cf(), &sd);
+                        for (k, (j, rows)) in hand.iter().enumerate() {
+                            let model = cosine_model_rows_f32((&a, &b), inv, eps, g, c.cf(), *j);
+                            for side in 0..2 {
+                                let l = &lin[k][side];
+                                let slack = 1.0 + 16.0 * l.events as f64 * LIN_U;
+                                let (oi, ti) = if side == 0 { (0, 1) } else { (1, 0) };
+                                let mut check = |actual: f32, lv: (f64, f64)| {
+                                    let actual = f64::from(actual);
+                                    if !actual.is_finite() || !lv.0.is_finite() || !lv.1.is_finite()
+                                    {
+                                        return;
+                                    }
+                                    let dev = (actual - lv.0).abs();
+                                    assert!(
+                                        dev <= lv.1 * slack,
+                                        "{c:?} d={d} amp={amp} side={side} seed={j}: dev={dev:e} bound={:e}",
+                                        lv.1
+                                    );
+                                    checked += 1;
+                                    if dev > 0.0 {
+                                        nonzero += 1;
+                                    }
+                                    if lv.1 > 0.0 {
+                                        worst = worst.max(dev / lv.1);
+                                        if dev > 0.1 * lv.1 {
+                                            tight += 1;
+                                        }
+                                    }
+                                };
+                                for i in 0..d {
+                                    check(rows[side][oi][i], l.own[i]);
+                                    check(model[side].own[i], l.own[i]);
+                                    check(rows[side][ti][i], l.other[i]);
+                                    check(model[side].other[i], l.other[i]);
+                                }
+                                check(rows[side][2][0], l.g);
+                                check(model[side].g, l.g);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 1000, "検査した要素が少なすぎる: {checked}");
+    assert!(
+        nonzero > 0,
+        "実測の誤差が全て 0 では soundness を確かめていない"
+    );
+    assert!(tight > 0, "上界が緩すぎて空振り: tight={tight}");
+    eprintln!("LINCOS checked={checked} nonzero={nonzero} tight={tight} worst={worst:.4}");
 }
