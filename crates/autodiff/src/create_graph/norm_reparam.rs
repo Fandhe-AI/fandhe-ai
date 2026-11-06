@@ -3243,4 +3243,633 @@ mod tests {
             assert!(wn_group_judge(&v, &up, 0.5, 1.0, wn_coeff(4), use_lin).is_ok());
         }
     }
+
+    // --- イシュー #4079: SpectralNorm の拒否の内訳の計測（docs/autodiff-higher-order-grad-decision.md §81） ---
+    //
+    // 計測の対象は本番の `spectral_norm_cgrad` の 2 段の保守的判定（構造を積む前の `sn_judge`・積んだ後の
+    // `shadow_check`）と、その手前の走査量の上限・段検査。本番コードは一切変えず、(1) 公開経路
+    // （`backward_create_graph`）の拒否を文面で分類し（計測用の分類であり、本番が文面に依存する意味ではない）、
+    // (2) 各判定の「余裕」（`err / 閾値`。1 以上で拒否）を同じ式で再計算し、(3) 1 階・二階を f64 の閉じた式と
+    // 突き合わせる。後続の #4080／#4081 が「受理に変える入力」として再利用する入力は
+    // [`sn_followup_candidates`] に定義する。
+
+    /// 上流の形。
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum SnUp {
+        /// `pattern(N, 3.0)` に `scale` を掛けた一般形（`P` に平行でない）。
+        General,
+        /// `scale·P`（f32）。`sp = scale` で `t = up − sp·P` が相殺する対照。
+        ParallelP,
+    }
+
+    /// 計測・後続用の 1 入力の定義。再構成の手順は §81.5。
+    #[derive(Clone, Debug)]
+    struct SnCase {
+        shape: Vec<usize>,
+        dim: usize,
+        /// 重みの振幅。`w = amp·pattern(N, 1.0) + alpha·amp·P`。
+        amp: f32,
+        /// `P = u vᵀ` 成分の強さ（0 は σ が相殺しうる）。
+        alpha: f32,
+        up: SnUp,
+        scale: f32,
+    }
+
+    struct SnInputs {
+        w: Vec<f32>,
+        up: Vec<f32>,
+        p: Vec<f32>,
+        p_exact: Vec<f64>,
+        u: Vec<f32>,
+        v: Vec<f32>,
+    }
+
+    /// `P[i, j] = u_i·v_j` を W と同じ並びに置く（`spectral_norm_cgrad` と同じ式）。
+    fn sn_p(shape: &[usize], dim: usize, u: &[f32], v: &[f32]) -> (Vec<f32>, Vec<f64>) {
+        let layout = wr::spectral_norm_layout(shape, dim).unwrap();
+        let (h, cols) = (layout.rows(), layout.cols());
+        let inner: usize = shape[dim + 1..].iter().product();
+        let n: usize = shape.iter().product();
+        let (mut p, mut pe) = (vec![0.0f32; n], vec![0.0f64; n]);
+        for (i, &ui) in u.iter().enumerate().take(h) {
+            for (j, &vj) in v.iter().enumerate().take(cols) {
+                let at = (j / inner * h + i) * inner + j % inner;
+                p[at] = ui * vj;
+                pe[at] = f64::from(ui) * f64::from(vj);
+            }
+        }
+        (p, pe)
+    }
+
+    fn sn_state(c: &SnCase) -> SpectralNormState {
+        let layout = wr::spectral_norm_layout(&c.shape, c.dim).unwrap();
+        SpectralNormState::from_vectors(
+            &c.shape,
+            c.dim,
+            &pattern(layout.rows(), 2.0),
+            &pattern(layout.cols(), 6.0),
+            1,
+            1e-12,
+        )
+        .unwrap()
+    }
+
+    fn sn_inputs(c: &SnCase) -> SnInputs {
+        let st = sn_state(c);
+        let (u, v) = (st.u().to_vec(), st.v().to_vec());
+        let (p, p_exact) = sn_p(&c.shape, c.dim, &u, &v);
+        let n: usize = c.shape.iter().product();
+        let base = pattern(n, 1.0);
+        let w: Vec<f32> = (0..n)
+            .map(|k| c.amp * base[k] + c.alpha * c.amp * p[k])
+            .collect();
+        let up: Vec<f32> = match c.up {
+            SnUp::General => pattern(n, 3.0).iter().map(|x| c.scale * x).collect(),
+            SnUp::ParallelP => p.iter().map(|x| c.scale * x).collect(),
+        };
+        SnInputs {
+            w,
+            up,
+            p,
+            p_exact,
+            u,
+            v,
+        }
+    }
+
+    /// 1 階の f64 の閉じた式 `dW = (up − (Σ up·W/σ)·P)/σ`（`σ = Σ W·P`。`s` は約分される）。
+    fn sn_dw64(w: &[f32], p: &[f64], up: &[f32]) -> Vec<f64> {
+        let sigma: f64 = w.iter().zip(p).map(|(&a, &b)| f64::from(a) * b).sum();
+        let a: f64 = up
+            .iter()
+            .zip(w)
+            .map(|(&x, &y)| f64::from(x) * f64::from(y))
+            .sum();
+        up.iter()
+            .zip(p)
+            .map(|(&x, &pi)| (f64::from(x) - a / sigma * pi) / sigma)
+            .collect()
+    }
+
+    /// 二階の f64 の閉じた式。戻り値は（`∂dW_j/∂W_i` の行 j、`∂dW_j/∂up_i` の行 j）。
+    fn sn_hess64(w: &[f32], p: &[f64], up: &[f32], j: usize) -> (Vec<f64>, Vec<f64>) {
+        let sigma: f64 = w.iter().zip(p).map(|(&a, &b)| f64::from(a) * b).sum();
+        let a: f64 = up
+            .iter()
+            .zip(w)
+            .map(|(&x, &y)| f64::from(x) * f64::from(y))
+            .sum();
+        let n = w.len();
+        let hw = (0..n)
+            .map(|i| {
+                -f64::from(up[j]) * p[i] / (sigma * sigma)
+                    - (f64::from(up[i]) / (sigma * sigma) - 2.0 * a * p[i] / sigma.powi(3)) * p[j]
+            })
+            .collect();
+        let hu = (0..n)
+            .map(|i| {
+                let d = if i == j { 1.0 / sigma } else { 0.0 };
+                d - f64::from(w[i]) * p[j] / (sigma * sigma)
+            })
+            .collect();
+        (hw, hu)
+    }
+
+    /// REQ-2 の統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）に対する `|差|` の比。1 未満なら合格。
+    /// 分母は絶対 1e-5 と相対 1e-3·|真値| の大きい方。
+    fn req2_ratio(actual: f64, truth: f64) -> f64 {
+        let d = (actual - truth).abs();
+        d / ABSOLUTE_RESCUE_THRESHOLD.max(RELATIVE_TOLERANCE * truth.abs())
+    }
+
+    /// 判定の最悪要素の余裕（`err / 閾値`。判定は [`entry_check`]・`struct_check_unscaled` と同じ式）。
+    #[derive(Clone, Copy, Default, Debug)]
+    struct Worst {
+        ratio: f64,
+        diff: f64,
+        est: f64,
+        v: f64,
+        m: f64,
+        set: bool,
+    }
+
+    impl Worst {
+        fn take(&mut self, v: f64, v_str: f64, m: f64, coeff: f64) {
+            let diff = (v_str - v).abs();
+            let err = diff + coeff * m;
+            let thr = ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * v.abs());
+            let ratio = if err.is_finite() {
+                err / thr
+            } else {
+                f64::INFINITY
+            };
+            if !self.set || ratio > self.ratio {
+                *self = Worst {
+                    ratio,
+                    diff,
+                    est: coeff * m,
+                    v,
+                    m,
+                    set: true,
+                };
+            }
+        }
+    }
+
+    /// `sn_judge` と同じループで最悪の余裕を求める。戻り値の `bool` は `entry_check` が全要素で通すか。
+    /// `sn_fwd` が非有限で `None` のときは `None`。
+    fn sn_judge_margins(
+        w: &[f32],
+        p: &[f64],
+        up: &[f32],
+        s: f64,
+        coeff: f64,
+    ) -> Option<(Worst, bool)> {
+        let (fs, fr) = (sn_fwd::<f32>(w, p, up, s)?, sn_fwd::<Rf>(w, p, up, s)?);
+        let n = w.len();
+        let (mut hw_s, mut hu_s) = (vec![0f32; n], vec![0f32; n]);
+        let (mut hw_r, mut hu_r) = (vec![Rf::k(0.0); n], vec![Rf::k(0.0); n]);
+        let (mut worst, mut all_ok) = (Worst::default(), true);
+        for j in 0..n {
+            sn_rev(&fs, j, &mut hw_s, &mut hu_s);
+            sn_rev(&fr, j, &mut hw_r, &mut hu_r);
+            for i in 0..n {
+                for (r, sv) in [(hw_r[i], hw_s[i]), (hu_r[i], hu_s[i])] {
+                    all_ok &= entry_check(r, sv, coeff, "m").is_ok();
+                    if !(sv.is_nan() && r.input_nan()) {
+                        worst.take(r.v, f64::from(sv), r.m, coeff);
+                    }
+                }
+            }
+        }
+        Some((worst, all_ok))
+    }
+
+    /// 子テープに `spectral_norm_cgrad` の構造を同じ演算順で組み、`composed`（1 階）を返す。
+    fn sn_build<'c>(
+        child: &'c Tape,
+        w_m: &Var<'c>,
+        up: &Var<'c>,
+        p: &[f32],
+        s: f32,
+        shape: &[usize],
+    ) -> Var<'c> {
+        let s_c = scalar_const(child, s).unwrap();
+        let p_t = tensor_const(child, p.to_vec(), shape).unwrap();
+        let w_s = w_m.div(&s_c).unwrap();
+        let sigma_s = w_s
+            .mul(&p_t)
+            .unwrap()
+            .sum(None)
+            .unwrap()
+            .reshape(&[1])
+            .unwrap();
+        let w_hat = w_s.div(&sigma_s).unwrap();
+        let sp = up
+            .mul(&w_hat)
+            .unwrap()
+            .sum(None)
+            .unwrap()
+            .reshape(&[1])
+            .unwrap();
+        let t = up.sub(&sp.mul(&p_t).unwrap()).unwrap();
+        t.div(&sigma_s).unwrap().div(&s_c).unwrap()
+    }
+
+    /// 本番と同じ `m_abs`（1 階の項の絶対値和）。`σ_s` が 0／非有限なら `None`。
+    fn sn_m_abs(inp: &SnInputs, s: f32) -> Option<Vec<f64>> {
+        let ws: Vec<f32> = inp.w.iter().map(|&x| x / s).collect();
+        let sigma_s: f64 = ws
+            .iter()
+            .zip(&inp.p)
+            .map(|(&a, &b)| f64::from(a) * f64::from(b))
+            .sum();
+        if sigma_s == 0.0 || !sigma_s.is_finite() {
+            return None;
+        }
+        let sa = sigma_s.abs();
+        let sp_val: f64 = inp
+            .up
+            .iter()
+            .zip(&ws)
+            .map(|(&x, &w)| f64::from(x) * f64::from(w) / sigma_s)
+            .sum();
+        Some(
+            (0..inp.w.len())
+                .map(|i| {
+                    (f64::from(inp.up[i]).abs() + sp_val.abs() * f64::from(inp.p[i]).abs())
+                        / (sa * f64::from(s))
+                })
+                .collect(),
+        )
+    }
+
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    enum SnVerdict {
+        Accepted,
+        Budget,
+        Stage,
+        SnJudge,
+        Shadow,
+        Other,
+    }
+
+    fn sn_verdict(msg: &str) -> SnVerdict {
+        if msg.contains("走査量") {
+            SnVerdict::Budget
+        } else if msg.contains("構造段の上界判定") {
+            SnVerdict::Stage
+        } else if msg.contains("SpectralNorm の二階: ") {
+            SnVerdict::SnJudge
+        } else if msg.contains("SpectralNorm: f32 構造の丸め・相殺・underflow") {
+            SnVerdict::Shadow
+        } else {
+            SnVerdict::Other
+        }
+    }
+
+    struct SnReport {
+        verdict: SnVerdict,
+        cost: usize,
+        sn: Option<(Worst, bool)>,
+        sh: Option<(Worst, bool)>,
+        host_err: f64,
+        str_err: f64,
+        str_req2: f64,
+        flag: bool,
+    }
+
+    /// 1 入力の計測。公開経路の判定・`sn_judge`／`shadow_check` の余裕・f64 参照との実誤差を求める。
+    fn sn_measure(c: &SnCase) -> SnReport {
+        let inp = sn_inputs(c);
+        let n = inp.w.len();
+        // 公開経路。
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let mut st = sn_state(c);
+        let w = tape.var(&tt(inp.w.clone(), &c.shape));
+        let wc = tape.var(&tt(inp.up.clone(), &c.shape));
+        let y = w.spectral_norm(&mut st, false).unwrap();
+        let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+        let verdict = match tape.backward_create_graph(&loss, &child) {
+            Ok(_) => SnVerdict::Accepted,
+            Err(e) => {
+                assert!(child.is_empty(), "拒否なのに子テープが空でない");
+                sn_verdict(&e.to_string())
+            }
+        };
+        let cost = sn_judge_cost(n);
+        let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = pow2(pow2_ceil_exponent(mx));
+        let m_abs = sn_m_abs(&inp, s);
+        // sn_judge の余裕（走査量の上限内で σ_s が有限・非零のときだけ）。
+        let sn = if cost <= JUDGE_BUDGET && m_abs.is_some() {
+            sn_judge_margins(&inp.w, &inp.p_exact, &inp.up, f64::from(s), sn_coeff(n))
+        } else {
+            None
+        };
+        if let Some((_, ok)) = sn {
+            match verdict {
+                SnVerdict::SnJudge => assert!(!ok, "本番は sn_judge 拒否だが再計算は全要素通過"),
+                SnVerdict::Accepted | SnVerdict::Shadow => {
+                    assert!(ok, "本番は sn_judge を通過したが再計算は拒否")
+                }
+                _ => {}
+            }
+        }
+        // shadow_check の余裕と f64 参照との実誤差。
+        let layout = wr::spectral_norm_layout(&c.shape, c.dim).unwrap();
+        let host = wr::spectral_norm_vjp_host(&inp.w, &inp.up, &layout, &inp.u, &inp.v).unwrap();
+        let (mut sh, mut host_err, mut str_err, mut str_req2, mut flag) =
+            (None, f64::NAN, f64::NAN, f64::NAN, false);
+        if let Some(m_abs) = m_abs {
+            let ch = Tape::new_with_ops(test_ops());
+            let w_m = ch.var(&tt(inp.w.clone(), &c.shape));
+            let up_v = ch.var(&tt(inp.up.clone(), &c.shape));
+            let composed = sn_build(&ch, &w_m, &up_v, &inp.p, s, &c.shape);
+            let comp = dense_vec(&child_value(&ch, &composed).unwrap());
+            let coeff = rounding_coeff(n + 4);
+            let res = shadow_check(&ch, &composed, &host, &m_abs, coeff, "SpectralNorm");
+            let mut worst = Worst::default();
+            let mut all_ok = true;
+            for i in 0..n {
+                let (v, vs) = (f64::from(host[i]), f64::from(comp[i]));
+                if v.is_nan() {
+                    continue;
+                }
+                let err = (vs - v).abs() + coeff * m_abs[i];
+                all_ok &=
+                    err < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * v.abs();
+                worst.take(v, vs, m_abs[i], coeff);
+            }
+            assert_eq!(res.is_ok(), all_ok, "shadow_check の再計算が本番と不一致");
+            match verdict {
+                SnVerdict::Accepted => assert!(res.is_ok()),
+                SnVerdict::Shadow => assert!(res.is_err()),
+                _ => {}
+            }
+            sh = Some((worst, all_ok));
+            let t64 = sn_dw64(&inp.w, &inp.p_exact, &inp.up);
+            host_err = (0..n)
+                .map(|i| (f64::from(host[i]) - t64[i]).abs())
+                .fold(0.0, f64::max);
+            str_err = (0..n)
+                .map(|i| (f64::from(comp[i]) - t64[i]).abs())
+                .fold(0.0, f64::max);
+            str_req2 = (0..n)
+                .map(|i| req2_ratio(f64::from(comp[i]), t64[i]))
+                .fold(0.0, f64::max);
+            // 構造の 1 階が f64 参照から REQ-2 を外れるのに shadow_check が通す（要注意）。
+            flag = all_ok && str_req2 >= 1.0;
+        }
+        SnReport {
+            verdict,
+            cost,
+            sn,
+            sh,
+            host_err,
+            str_err,
+            str_req2,
+            flag,
+        }
+    }
+
+    fn sn_case(shape: &[usize], amp: f32, alpha: f32, up: SnUp, scale: f32) -> SnCase {
+        SnCase {
+            shape: shape.to_vec(),
+            dim: 0,
+            amp,
+            alpha,
+            up,
+            scale,
+        }
+    }
+
+    fn sn_measure_cases() -> Vec<SnCase> {
+        let mut out = Vec::new();
+        for sh in [[2usize, 3], [4, 4], [8, 8], [16, 16]] {
+            for amp in [1e-3f32, 1.0, 1e3] {
+                for alpha in [0.0f32, 2.0] {
+                    for up in [SnUp::General, SnUp::ParallelP] {
+                        for scale in [1.0f32, 1e3] {
+                            out.push(sn_case(&sh, amp, alpha, up, scale));
+                        }
+                    }
+                }
+            }
+        }
+        for sh in [[32usize, 32], [64, 64], [64, 96]] {
+            for alpha in [0.0f32, 2.0] {
+                for up in [SnUp::General, SnUp::ParallelP] {
+                    out.push(sn_case(&sh, 1.0, alpha, up, 1.0));
+                }
+            }
+        }
+        for alpha in [0.0f32, 2.0] {
+            for scale in [1.0f32, 1e3] {
+                out.push(sn_case(&[4, 4, 4], 1.0, alpha, SnUp::General, scale));
+            }
+        }
+        out
+    }
+
+    /// 計測（`#[ignore]`）。出力は §81.2 の表の素データ。
+    /// `cargo test -p fandhe-ai-autodiff --release --lib spectral_norm_rejection_breakdown_measurement -- --ignored --nocapture`
+    #[test]
+    #[ignore = "計測（O(N^2) の再計算を含む）。--release で実行する"]
+    fn spectral_norm_rejection_breakdown_measurement() {
+        eprintln!(
+            "SNROW shape|amp|alpha|up|scale|verdict|cost/budget|sn_ratio(diff,est,|V|,kappa)|sh_ratio(diff,est,|V|)|host_err|str_err|str_req2|flag"
+        );
+        for c in sn_measure_cases() {
+            let r = sn_measure(&c);
+            let sn = r.sn.map_or("-".to_string(), |(w, _)| {
+                format!(
+                    "{:.3e}({:.1e},{:.1e},{:.1e},{:.1e})",
+                    w.ratio,
+                    w.diff,
+                    w.est,
+                    w.v.abs(),
+                    w.m / w.v.abs().max(f64::MIN_POSITIVE)
+                )
+            });
+            let sh = r.sh.map_or("-".to_string(), |(w, _)| {
+                format!(
+                    "{:.3e}({:.1e},{:.1e},{:.1e})",
+                    w.ratio,
+                    w.diff,
+                    w.est,
+                    w.v.abs()
+                )
+            });
+            eprintln!(
+                "SNROW {:?}|{:e}|{}|{:?}|{:e}|{:?}|{:.3}|{}|{}|{:.2e}|{:.2e}|{:.2e}|{}",
+                c.shape,
+                c.amp,
+                c.alpha,
+                c.up,
+                c.scale,
+                r.verdict,
+                r.cost as f64 / JUDGE_BUDGET as f64,
+                sn,
+                sh,
+                r.host_err,
+                r.str_err,
+                r.str_req2,
+                if r.flag { "要注意" } else { "" }
+            );
+        }
+    }
+
+    /// 後続（#4080 `sn_judge` を `Lin` で追う・#4081 `shadow_check` を `Lin` の上界で置き換える）が
+    /// 「受理に変える入力」として再利用する入力（§81.5）。選定基準は §81.5 の (a)〜(e)。
+    /// 各要素は（入力, 現在の拒否の種別）。重みの振幅が大きい（`amp = 1e3`・2 のべき乗 `s = 1024`）形が、
+    /// `shadow_check` だけが拒否する入力として現れる。
+    fn sn_followup_candidates() -> Vec<(SnCase, SnVerdict)> {
+        vec![
+            (
+                sn_case(&[8, 8], 1e3, 0.0, SnUp::General, 1e3),
+                SnVerdict::Shadow,
+            ),
+            (
+                sn_case(&[16, 16], 1e3, 2.0, SnUp::General, 1e3),
+                SnVerdict::Shadow,
+            ),
+            (
+                sn_case(&[4, 4], 1.0, 2.0, SnUp::General, 1.0),
+                SnVerdict::SnJudge,
+            ),
+            (
+                sn_case(&[16, 16], 1e3, 0.0, SnUp::General, 1.0),
+                SnVerdict::SnJudge,
+            ),
+        ]
+    }
+
+    /// 手組みの構造の 1 階・二階（行ごと）と、f64 の閉じた式との REQ-2 比の最大値。
+    fn sn_structure_vs_f64(c: &SnCase) -> (f64, f64) {
+        let inp = sn_inputs(c);
+        let n = inp.w.len();
+        let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = pow2(pow2_ceil_exponent(mx));
+        let ch = Tape::new_with_ops(test_ops());
+        let w_m = ch.var(&tt(inp.w.clone(), &c.shape));
+        let up_v = ch.var(&tt(inp.up.clone(), &c.shape));
+        let composed = sn_build(&ch, &w_m, &up_v, &inp.p, s, &c.shape);
+        let comp = dense_vec(&child_value(&ch, &composed).unwrap());
+        let t64 = sn_dw64(&inp.w, &inp.p_exact, &inp.up);
+        let first = (0..n)
+            .map(|i| req2_ratio(f64::from(comp[i]), t64[i]))
+            .fold(0.0, f64::max);
+        let mut second = 0.0f64;
+        for j in 0..n {
+            let (hw64, hu64) = sn_hess64(&inp.w, &inp.p_exact, &inp.up, j);
+            let rw = child_row(&ch, &composed, j, &w_m);
+            let ru = child_row(&ch, &composed, j, &up_v);
+            for i in 0..n {
+                second = second.max(req2_ratio(f64::from(rw[i]), hw64[i]));
+                second = second.max(req2_ratio(f64::from(ru[i]), hu64[i]));
+            }
+        }
+        (first, second)
+    }
+
+    /// 後続の入力が、現在は想定どおりの判定で拒否され（`sn_judge` のみ／`shadow_check` のみ）、実際の f32 の
+    /// 1 階・二階は独立な f64 の閉じた式から REQ-2 の閾値の 1/4 以内に収まること（受理に変えても REQ-2 の
+    /// 範囲内）。tolerance は変えない。`--nocapture` で実測値を出す。
+    #[test]
+    fn spectral_norm_followup_candidates_are_req2_within_f64() {
+        for (c, want) in sn_followup_candidates() {
+            let r = sn_measure(&c);
+            assert_eq!(r.verdict, want, "{c:?}: 現在の拒否の種別");
+            let (sn, sh) = (r.sn.unwrap().0.ratio, r.sh.unwrap().0.ratio);
+            match want {
+                SnVerdict::Shadow => assert!(sn < 1.0 && sh >= 1.0, "{c:?}: sn={sn} sh={sh}"),
+                _ => assert!(sn >= 1.0 && sh < 1.0, "{c:?}: sn={sn} sh={sh}"),
+            }
+            let (first, second) = sn_structure_vs_f64(&c);
+            eprintln!(
+                "SNCAND {c:?} sn={sn:.3e} sh={sh:.3e} req2_first={first:.3e} req2_second={second:.3e}"
+            );
+            assert!(first < 0.25, "{c:?}: 1 階の REQ-2 比 {first}");
+            assert!(second < 0.25, "{c:?}: 二階の REQ-2 比 {second}");
+        }
+    }
+
+    /// f64 の閉じた式（1 階・二階）が f64 の中央差分と一致すること（計測の真値の検算）。
+    #[test]
+    fn spectral_norm_closed_form_matches_f64_central_difference() {
+        let c = sn_case(&[2, 3], 1.0, 1.0, SnUp::General, 1.0);
+        let inp = sn_inputs(&c);
+        let (w, up, p) = (&inp.w, &inp.up, &inp.p_exact);
+        let n = w.len();
+        let dw = |w: &[f64], up: &[f64], j: usize| -> f64 {
+            let sigma: f64 = w.iter().zip(p).map(|(a, b)| a * b).sum();
+            let a: f64 = up.iter().zip(w).map(|(x, y)| x * y).sum();
+            (up[j] - a / sigma * p[j]) / sigma
+        };
+        let (w64, up64): (Vec<f64>, Vec<f64>) = (
+            w.iter().map(|&x| f64::from(x)).collect(),
+            up.iter().map(|&x| f64::from(x)).collect(),
+        );
+        let t64 = sn_dw64(w, p, up);
+        let h = 1e-6;
+        for (j, &tj) in t64.iter().enumerate() {
+            assert!((dw(&w64, &up64, j) - tj).abs() < 1e-12);
+            let (hw, hu) = sn_hess64(w, p, up, j);
+            for i in 0..n {
+                let (mut wp, mut wm) = (w64.clone(), w64.clone());
+                wp[i] += h;
+                wm[i] -= h;
+                let fd_w = (dw(&wp, &up64, j) - dw(&wm, &up64, j)) / (2.0 * h);
+                assert!(
+                    (fd_w - hw[i]).abs() < 1e-6 * (1.0 + hw[i].abs()),
+                    "W j={j} i={i}"
+                );
+                let (mut upp, mut upm) = (up64.clone(), up64.clone());
+                upp[i] += h;
+                upm[i] -= h;
+                let fd_u = (dw(&w64, &upp, j) - dw(&w64, &upm, j)) / (2.0 * h);
+                assert!(
+                    (fd_u - hu[i]).abs() < 1e-6 * (1.0 + hu[i].abs()),
+                    "up j={j} i={i}"
+                );
+            }
+        }
+    }
+
+    /// 手組みの構造（計測の前提）が公開経路の二階と bit 一致すること（受理される入力で）。
+    #[test]
+    fn spectral_norm_hand_built_structure_matches_public_path() {
+        let c = sn_case(&[2, 3], 1.0, 2.0, SnUp::General, 1.0);
+        let inp = sn_inputs(&c);
+        let n = inp.w.len();
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let mut st = sn_state(&c);
+        let w = tape.var(&tt(inp.w.clone(), &c.shape));
+        let wc = tape.var(&tt(inp.up.clone(), &c.shape));
+        let y = w.spectral_norm(&mut st, false).unwrap();
+        let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let gw = cg.grad(&w).unwrap().unwrap();
+        let cw = cg.child_var(&w).unwrap().unwrap();
+        let cwc = cg.child_var(&wc).unwrap().unwrap();
+        let mx = inp.w.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        let s = pow2(pow2_ceil_exponent(mx));
+        let ch = Tape::new_with_ops(test_ops());
+        let w_m = ch.var(&tt(inp.w.clone(), &c.shape));
+        let up_v = ch.var(&tt(inp.up.clone(), &c.shape));
+        let composed = sn_build(&ch, &w_m, &up_v, &inp.p, s, &c.shape);
+        for j in 0..n {
+            assert_eq!(
+                child_row(&child, &gw, j, &cw),
+                child_row(&ch, &composed, j, &w_m)
+            );
+            assert_eq!(
+                child_row(&child, &gw, j, &cwc),
+                child_row(&ch, &composed, j, &up_v)
+            );
+        }
+    }
 }
