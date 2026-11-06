@@ -3,7 +3,9 @@
 //! 共通補助関数（イシュー #3955・設計記録 `docs/autodiff-higher-order-grad-decision.md` §77）。
 //!
 //! 呼び出し元: `loss_class.rs`（§40・§55）・`loss_regression.rs`（§39・§53）・
-//! `loss_binary_margin.rs`（§39・§54）・`norm_reparam.rs`（§36・§57）。各モジュールは族名と節番号を
+//! `loss_binary_margin.rs`（§39・§54）・`norm_reparam.rs`（§36・§57）・`cumulative_b.rs`（§64）・
+//! `scatter_reduce_prod.rs`（§74。`cumulative_b` 経由）。計算量の上限 [`JUDGE_BUDGET`] と
+//! [`judge_budget`] もここに 1 つだけ定義する（イシュー #4086・§83.2）。各モジュールは族名と節番号を
 //! 含むエラー文面を持つため、ここの関数は `reject: fn(&str) -> AutodiffError`（各モジュールの `invalid`）
 //! を受け取って文面を呼び出し元に委ねる。許容誤差（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）と
 //! `STAGE_BOUND_GUARD` は変更しない。
@@ -23,6 +25,33 @@ use crate::var::Reduction;
 
 /// 拒否時の文面を作る関数（各モジュールの `invalid`）。
 pub(super) type Reject = fn(&str) -> AutodiffError;
+
+/// 総括判定の走査量の上限（計算量の fail-closed の唯一の定義。イシュー #4086・§83.2）。単位は
+/// f32 の再現 1 系統が回す内側ループの反復回数（参照の `Rf` も同じ回数を回す）。超える入力は拒否する
+/// （保守的。上限内の入力だけに保証を限る）。族ごとの数え方は各モジュールの `*_judge_cost` が持つ。
+/// 呼び出し元: `cumulative_b.rs`（再エクスポート）・`norm_reparam.rs`。
+pub(super) const JUDGE_BUDGET: usize = 1 << 27;
+
+// エラー文面の「2^27」と値を結び付ける（値を見直す #4087 で文面の直し忘れを防ぐ）。
+const _: () = assert!(JUDGE_BUDGET == 1 << 27);
+
+/// 走査量 `cost` が [`JUDGE_BUDGET`] 以内なら `Ok`、超えたら `reject` で作る型付き `Err(Backward)`。
+/// `note` は族ごとの文面の差（cumulative 系は `。§64 参照`、norm 系は空）。呼び出し元は
+/// `cumulative_b.rs`・`norm_reparam.rs` の薄い `judge_budget`（文面・判定は不変）。
+pub(super) fn judge_budget(
+    cost: usize,
+    what: &str,
+    note: &str,
+    reject: Reject,
+) -> Result<(), AutodiffError> {
+    if cost <= JUDGE_BUDGET {
+        Ok(())
+    } else {
+        Err(reject(&format!(
+            "{what}: 二階の総括判定の走査量 {cost} が上限 2^27 を超えるため拒否（保守的な fail-closed{note}）"
+        )))
+    }
+}
 
 /// loss 系の 1 段の上界 `v`（f64）を検査する。NaN は素通し、非有限または `STAGE_BOUND_GUARD` 以上は拒否。
 pub(super) fn stage(v: f64, reject: Reject) -> Result<(), AutodiffError> {

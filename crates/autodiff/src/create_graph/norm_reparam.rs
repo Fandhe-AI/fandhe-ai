@@ -87,6 +87,8 @@ use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLER
 use fandhe_ai_tensor_core::weight_reparam::{self as wr};
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
+#[cfg(test)]
+use super::judge::JUDGE_BUDGET;
 use super::lin::{
     LIN_BUDGET, LIN_REST_MAX, LIN_U, Lin, Num, entry_check_lin, lin_events, lin_group_cost,
     lin_mark, lin_reset, lin_reset_sparse, lin_truncate,
@@ -198,10 +200,9 @@ fn shadow_check(
 // 参照の両方に同じ演算で伝播させ（forward で位置が一致することを [`same_nan`] で確かめる）、両方が NaN の
 // 要素だけを判定から外す（[`entry_check`]）。
 
-/// 総括判定の走査量の上限。走査量は f32 の再現（`V_str`）1 系統が回す内側ループの反復回数で数え
-/// （[`lrn_judge_cost`]・[`wn_judge_cost`]・[`sn_judge_cost`]。参照の [`Rf`] も同じ回数を回す）、
-/// 超える入力は計算量の fail-closed として拒否する（保守的。上限内の入力だけに保証を限る）。
-const JUDGE_BUDGET: usize = 1 << 27;
+// 総括判定の走査量の上限 `JUDGE_BUDGET` は `judge.rs` に集約した（#4086・§83.2）。走査量は f32 の再現
+// （`V_str`）1 系統が回す内側ループの反復回数で数え（[`lrn_judge_cost`]・[`wn_judge_cost`]・
+// [`sn_judge_cost`]。参照の [`Rf`] も同じ回数を回す）、超える入力は計算量の fail-closed として拒否する。
 
 /// LRN の総括判定の走査量（[`lrn_col_fwd`]・[`lrn_col_rev`]・[`lrn_col_judge`] の反復回数の上界）。
 /// 列（`ncols` 本・長さ `c`）ごとに、forward が窓和 `d`・`sz` の `c·(nf + nr)`（[`win_sum`] は範囲外も
@@ -284,16 +285,10 @@ fn sn_use_lin(n: usize) -> bool {
     sn_lin_cost(n) <= LIN_BUDGET && 16.0 * sn_lin_events_max(n) as f64 * LIN_U < 0.01
 }
 
+/// `judge.rs::judge_budget` への委譲（norm 系は注記なし）。
 fn judge_budget(entries: usize, what: &str) -> Result<(), AutodiffError> {
-    if entries <= JUDGE_BUDGET {
-        Ok(())
-    } else {
-        Err(invalid(&format!(
-            "{what}: 二階の総括判定の走査量 {entries} が上限 2^27 を超えるため拒否（保守的な fail-closed）"
-        )))
-    }
+    judge::judge_budget(entries, what, "", invalid)
 }
-
 /// f64 の参照値 `v` と、同じ式を各項の絶対値で評価した大きさ `m`（`m ≥ |v|`。相殺が無ければ `|v|`）。
 /// 和・差は `m` を足し、積は `m` を掛ける。商・平方根・累乗は分母・底に**値** `|v|` を使い、分母・底の
 /// 相殺は増幅率 `κ = m/|v|` として掛ける（`m` を分母に使うと相殺で判定が緩むため）。累乗 `x^e` が底の
