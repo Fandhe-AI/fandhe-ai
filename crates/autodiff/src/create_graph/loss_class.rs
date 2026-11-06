@@ -46,6 +46,9 @@
 //! g 経路、MultiMargin・MultiLabelMargin・MultiLabelSoft の定数と g 経路、MultiLabelSoft の σ の
 //! 曲率である。保証はこの判定を通った入力に限る。
 //!
+//! Cosine は、この見積りが拒否した要素に限り `Lin`（丸めの一次伝播）の上界で再評価して救う（#4091・設計 §82.8）。
+//! 救済は片方の見積りが通れば受理する形なので拒否範囲は従来以下で、走査量が大きいテンソルは従来のまま。
+//!
 //! 既定オプションの `CrossEntropyLoss` も同じ CEWO の相殺判定を `A = 1`・`B = onehot`・`W = n` で通す
 //! （[`ce_cancel_check`]。#3954・設計 §77）。
 //!
@@ -53,7 +56,9 @@
 
 use fandhe_ai_tensor_core::Tensor;
 
-use super::lin::Num;
+use super::lin::{
+    LIN_BUDGET, LIN_U, Lin, LinMark, Num, entry_check_lin, lin_mark, lin_reset, lin_truncate,
+};
 use super::{child_value, judge, push_v3, reduce_dim_bcast};
 use crate::error::AutodiffError;
 use crate::loss_ops::{CrossEntropyOptions, TripletMarginOptions};
@@ -129,6 +134,9 @@ pub(super) mod probe {
     thread_local! {
         pub(in crate::create_graph) static LOG: RefCell<Option<Vec<Event>>> =
             const { RefCell::new(None) };
+        /// `true` の間は Cosine の判定が `Lin` の上界を使わない（旧判定との比較・変異確認用。#4091）。
+        pub(in crate::create_graph) static FORCE_OLD: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
     }
 
     pub(super) fn check(what: &str, vals: [f64; 5], ok: bool) {
@@ -1111,6 +1119,14 @@ pub(super) fn cosine_cgrad<'c>(
     let rho = sb_ratio(upstream_scale32(&g_value, reduction, n), sb);
     let dim = shape.len() - 1;
     let numel = n * d;
+    // `Lin` の上界で相殺判定を救うか（テンソル単位。#4091・設計 §82.8）。`g` は子テープ上の f32 の値。
+    let use_lin = cos_use_lin(n, d);
+    let g_f32 = f64::from(
+        crate::eval::dense_vec(&g_value)
+            .first()
+            .copied()
+            .unwrap_or(0.0),
+    );
 
     let sqrt_eps = EPSILON.sqrt();
     let mut r1 = vec![1f32; numel];
@@ -1200,6 +1216,11 @@ pub(super) fn cosine_cgrad<'c>(
             (inv1, inv2),
             (eps1, eps2),
             (sb, gs, rho),
+            use_lin.then_some(CosLinCtx {
+                g: g_f32,
+                mean_n: matches!(reduction, Reduction::Mean).then_some(n),
+                cf,
+            }),
         )?;
         gsum += inv1 * b1 + inv2 * b2;
     }
@@ -1235,10 +1256,11 @@ pub(super) fn cosine_cgrad<'c>(
 }
 
 /// Cosine の forward の中間値（`a' = a·(1/s₁)`・`m = Σa'² + ε'`・`s = √m`・`den = s₁s₂`・`dot = Σa'b'`・`cos = dot/den`）。
-/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（test の上界の並行計算。#4090）のいずれか。
+/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（丸めの一次伝播の上界。#4090・#4091）のいずれか。
 ///
-/// 呼び出し元: [`cosine_cancel_check`]（`f64` と `f32`）と、test の `cosine_lin_rows`（`Lin`）。演算の順序は子テープの
-/// forward（`loss_scale_bcast` 以外の `ap`・`bp`・`m1p`・`m2p`・`den`・`cos`）と同じで、和は [`Num::total`]。
+/// 呼び出し元: [`cosine_cancel_check`]（`f64` と `f32` の再現、および相殺判定を救う `Lin` の上界 [`CosLinState`]）。
+/// 演算の順序は子テープの forward（`loss_scale_bcast` 以外の `ap`・`bp`・`m1p`・`m2p`・`den`・`cos`）と同じで、
+/// 和は [`Num::total`]。
 struct CosFwd<T> {
     ap: Vec<T>,
     bp: Vec<T>,
@@ -1247,13 +1269,17 @@ struct CosFwd<T> {
     s1: T,
     s2: T,
     den: T,
-    /// 内積（`cos` の分子）。逆伝播のモデル [`cos_rev`] だけが読むので test 限定。
-    #[cfg(test)]
+    /// 内積（`cos` の分子）。逆伝播のモデル [`cos_rev_seed`] が読む。
     dot: T,
     cos: T,
 }
 
 /// [`CosFwd`] を `T` の演算で組む。`inv`＝行スケールの逆数 `(1/s₁, 1/s₂)`（2 のべき乗）、`eps`＝`(ε/s₁², ε/s₂²)`。
+///
+/// 行全体の縮約（`Σa'²`・`Σb'²`・`Σa'b'`）の直後に [`Num::settle`] を掛け、`Lin` の係数列を独立な事象 1 つへ束ねる
+/// （#4091・設計 §82.8。`f64`・`f32` では恒等）。束ねないと `m1`・`den`・`cos` が全要素の事象を係数列に持ち、
+/// 下流の二階の各要素の演算が O(d) になって判定の走査量が O(d³) に伸びる。束ねた事象は三角不等式で上界が
+/// 広がる側にしか動かないので判定は緩まず、失うのは「要素ごとの事象と、それを直接使う値」の相関だけである。
 fn cos_fwd<T: Num>(a32: &[f32], b32: &[f32], inv: (f64, f64), eps: (f64, f64)) -> CosFwd<T> {
     let scale = |v: &[f32], r: f64| -> Vec<T> {
         v.iter()
@@ -1263,16 +1289,14 @@ fn cos_fwd<T: Num>(a32: &[f32], b32: &[f32], inv: (f64, f64), eps: (f64, f64)) -
     let (ap, bp) = (scale(a32, inv.0), scale(b32, inv.1));
     let sq = |v: &[T], e: f64| -> T {
         let terms: Vec<T> = v.iter().map(|&x| x.times(x)).collect();
-        T::total(&terms).plus(T::k(e))
+        T::total(&terms).settle(&[]).plus(T::k(e))
     };
     let (m1, m2) = (sq(&ap, eps.0), sq(&bp, eps.1));
     let (s1, s2) = (m1.root(), m2.root());
     let den = s1.times(s2);
     let prods: Vec<T> = ap.iter().zip(&bp).map(|(&a, &b)| a.times(b)).collect();
-    let dot = T::total(&prods);
+    let dot = T::total(&prods).settle(&[]);
     let cos = dot.over(den);
-    #[cfg(not(test))]
-    let _ = dot;
     CosFwd {
         ap,
         bp,
@@ -1281,7 +1305,6 @@ fn cos_fwd<T: Num>(a32: &[f32], b32: &[f32], inv: (f64, f64), eps: (f64, f64)) -
         s1,
         s2,
         den,
-        #[cfg(test)]
         dot,
         cos,
     }
@@ -1289,7 +1312,6 @@ fn cos_fwd<T: Num>(a32: &[f32], b32: &[f32], inv: (f64, f64), eps: (f64, f64)) -
 
 impl<T: Copy> CosFwd<T> {
     /// own と other を入れ替えた見え方（dx2 の逆伝播は dx1 の a と b を入れ替えた形）。
-    #[cfg(test)]
     fn swapped(&self) -> CosFwd<T> {
         CosFwd {
             ap: self.bp.clone(),
@@ -1305,37 +1327,49 @@ impl<T: Copy> CosFwd<T> {
     }
 }
 
-/// [`cos_rev`] の結果: seed 要素 `j` の `dx_own[j]` を 1 要素のスカラーに畳んで逆伝播したときの、
-/// own 側（`a`／`b`）・other 側・`g` への二階。
-#[cfg(test)]
-pub(super) struct CosRow<T> {
-    pub(super) own: Vec<T>,
-    pub(super) other: Vec<T>,
-    pub(super) g: T,
+/// seed 要素 `j` の二階の逆伝播のうち、要素 `i` に依らないスカラーの cotangent（[`cos_rev_seed`] が作る）。
+/// 要素ごとの値（[`cos_rev_own`]・[`cos_rev_other`]）はこれと forward から組む。
+#[derive(Clone, Copy)]
+struct CosSeed<T> {
+    j: usize,
+    d_m1: T,
+    d_m2: T,
+    d_dot: T,
+    d_apj_c: T,
+    d_bpj_x: T,
+    d_g: T,
 }
 
-/// Cosine の二階の逆伝播（子テープの eager 逆伝播 `grad.rs::vjp` の演算）を `T` の演算で写す（test 限定。#4090）。
+/// Cosine の二階の逆伝播（子テープの eager 逆伝播 `grad.rs::vjp` の演算）を `T` の演算で写す。seed 要素 `j` の
+/// スカラー cotangent を作る段（#4090 で test 限定に導入、#4091 で判定へ配線）。
 ///
-/// 構造は `dx_own = ((g·cf)·r_own)·inner`、`inner = bp/den − (cos·ap)/m_own`（`loss_class_tests.rs::CosCase::hand_rows`）。
+/// 構造は `dx_own = ((s_b·cf)·r_own)·inner`、`inner = bp/den − (cos·ap)/m_own`（`loss_class_tests.rs::CosCase::hand_rows`）。
 /// 写し方（`grad.rs`・`eval/scalar.rs` の実装に合わせた丸めの位置）:
 /// - `Mul` の VJP は `上流·相手の値`（丸め 1 回）。`Div` は係数 `1/b` と `−(a/b)/b` を f32 で作ってから上流を掛ける。
 ///   `Sub` の係数 ±1 は厳密。`Sqrt` の係数は `0.5/y`。
 /// - 複数回使われる値（`ap`・`bp`・`m`・`den`）への寄与の合算と、`[1,1] → [1,d]` の broadcast の縮約は [`Num::total`]
 ///   （順序に依らない上界）。seed の行以外の上流は 0 なので縮約は 1 項と同じ。
 /// - `where`・`reshape`・`narrow`・`contiguous`・`Sum` の VJP は値を変えない。
+/// - `s_b` は子テープの `loss_scale_bcast` と同じく Sum は `g`、Mean（`mean_n = Some(n)`）は f32 の `g / n`。
+///   `g` への二階は Mean で `Div` の係数 `1/n` を f32 で作ってから掛ける。
 ///
-/// `f` は own 側から見た [`CosFwd`]（dx2 は [`CosFwd::swapped`]）、`r` は `(r_own, r_other)`、`cf ∈ {−1, +1}`。
-/// 判定への配線（`Lin` の上界の利用・走査量の上限・`Num::settle`）は #4091 が行う。ここでは判定に使わない。
-#[cfg(test)]
-fn cos_rev<T: Num>(f: &CosFwd<T>, j: usize, g: f64, cf: f64, r: (f64, f64)) -> CosRow<T> {
+/// `f` は own 側から見た [`CosFwd`]（dx2 は [`CosFwd::swapped`]）、`r_own` は own 側の行スケールの逆数、`cf ∈ {−1, +1}`。
+fn cos_rev_seed<T: Num>(
+    f: &CosFwd<T>,
+    j: usize,
+    g: f64,
+    mean_n: Option<usize>,
+    cf: f64,
+    r_own: f64,
+) -> CosSeed<T> {
     let one = T::k(1.0);
     let (apj, bpj) = (f.ap[j], f.bp[j]);
-    let sc = if cf < 0.0 {
-        T::input(g).negate()
-    } else {
-        T::input(g)
+    let sb = match mean_n {
+        Some(n) => T::input(g).over(T::k(n as f64)),
+        None => T::input(g),
     };
-    let q = sc.times(T::k(r.0));
+    let sc = if cf < 0.0 { sb.negate() } else { sb };
+    let q = sc.times(T::k(r_own));
     let x = bpj.over(f.den);
     let cj = f.cos.times(apj);
     let y = cj.over(f.m1);
@@ -1343,8 +1377,12 @@ fn cos_rev<T: Num>(f: &CosFwd<T>, j: usize, g: f64, cf: f64, r: (f64, f64)) -> C
     // dx_own[j] = q·inner を seed 1 で逆伝播する。
     let d_q = inner;
     let d_inner = q;
-    let d_sc = d_q.times(T::k(r.0));
-    let d_g = if cf < 0.0 { d_sc.negate() } else { d_sc };
+    let d_sc = d_q.times(T::k(r_own));
+    let d_sb = if cf < 0.0 { d_sc.negate() } else { d_sc };
+    let d_g = match mean_n {
+        Some(n) => d_sb.times(one.over(T::k(n as f64))),
+        None => d_sb,
+    };
     let (d_x, d_y) = (d_inner, d_inner.negate());
     // X = bp_j / den
     let d_bpj_x = d_x.times(one.over(f.den));
@@ -1364,24 +1402,58 @@ fn cos_rev<T: Num>(f: &CosFwd<T>, j: usize, g: f64, cf: f64, r: (f64, f64)) -> C
     let d_s2 = d_den.times(f.s1);
     let d_m1 = T::total(&[d_m1_y, d_s1.times(f.s1.root_grad())]);
     let d_m2 = d_s2.times(f.s2.root_grad());
-    let d = f.ap.len();
-    let (mut own, mut other) = (Vec::with_capacity(d), Vec::with_capacity(d));
-    for i in 0..d {
-        // `m = Σ ap²` の `ap·ap` は同じ丸めの値を 2 回足す。
-        let t1 = d_m1.times(f.ap[i]);
-        let mut o = vec![t1, t1, d_dot.times(f.bp[i])];
-        if i == j {
-            o.push(d_apj_c);
-        }
-        own.push(T::total(&o).times(T::k(r.0)));
-        let t2 = d_m2.times(f.bp[i]);
-        let mut h = vec![t2, t2, d_dot.times(f.ap[i])];
-        if i == j {
-            h.push(d_bpj_x);
-        }
-        other.push(T::total(&h).times(T::k(r.1)));
+    CosSeed {
+        j,
+        d_m1,
+        d_m2,
+        d_dot,
+        d_apj_c,
+        d_bpj_x,
+        d_g,
     }
-    CosRow { own, other, g: d_g }
+}
+
+/// seed `sd` の own 側（`a`／`b`）要素 `i` への二階。`m = Σ ap²` の `ap·ap` は同じ丸めの値を 2 回足す。
+fn cos_rev_own<T: Num>(f: &CosFwd<T>, sd: &CosSeed<T>, i: usize, r_own: f64) -> T {
+    let t1 = sd.d_m1.times(f.ap[i]);
+    let o = [t1, t1, sd.d_dot.times(f.bp[i]), sd.d_apj_c];
+    let n = if i == sd.j { 4 } else { 3 };
+    T::total(&o[..n]).times(T::k(r_own))
+}
+
+/// seed `sd` の other 側要素 `i` への二階（[`cos_rev_own`] と対称）。
+fn cos_rev_other<T: Num>(f: &CosFwd<T>, sd: &CosSeed<T>, i: usize, r_other: f64) -> T {
+    let t2 = sd.d_m2.times(f.bp[i]);
+    let h = [t2, t2, sd.d_dot.times(f.ap[i]), sd.d_bpj_x];
+    let n = if i == sd.j { 4 } else { 3 };
+    T::total(&h[..n]).times(T::k(r_other))
+}
+
+/// [`cos_rev_seed`]・[`cos_rev_own`]・[`cos_rev_other`] の結果: seed 要素 `j` の `dx_own[j]` を 1 要素のスカラーに畳んで
+/// 逆伝播したときの、own 側（`a`／`b`）・other 側・`g` への二階。
+#[cfg(test)]
+pub(super) struct CosRow<T> {
+    pub(super) own: Vec<T>,
+    pub(super) other: Vec<T>,
+    pub(super) g: T,
+}
+
+/// 全要素分の [`CosRow`] を作る合成（test 限定。判定は要素ごとに [`cos_rev_own`] 等を直接呼ぶ）。`r` は `(r_own, r_other)`。
+#[cfg(test)]
+fn cos_rev<T: Num>(
+    f: &CosFwd<T>,
+    j: usize,
+    up: (f64, Option<usize>),
+    cf: f64,
+    r: (f64, f64),
+) -> CosRow<T> {
+    let sd = cos_rev_seed(f, j, up.0, up.1, cf, r.0);
+    let d = f.ap.len();
+    CosRow {
+        own: (0..d).map(|i| cos_rev_own(f, &sd, i, r.0)).collect(),
+        other: (0..d).map(|i| cos_rev_other(f, &sd, i, r.1)).collect(),
+        g: sd.d_g,
+    }
 }
 
 /// [`cos_rev`] を `f32` で評価した二階（`[side]`。side 0 = dx1〈own = a〉、1 = dx2〈own = b〉）。`f32` の演算は
@@ -1391,14 +1463,14 @@ pub(super) fn cosine_model_rows_f32(
     rows: (&[f32], &[f32]),
     inv: (f64, f64),
     eps: (f64, f64),
-    g: f64,
+    up: (f64, Option<usize>),
     cf: f64,
     j: usize,
 ) -> [CosRow<f32>; 2] {
     let f = cos_fwd::<f32>(rows.0, rows.1, inv, eps);
     [
-        cos_rev(&f, j, g, cf, inv),
-        cos_rev(&f.swapped(), j, g, cf, (inv.1, inv.0)),
+        cos_rev(&f, j, up, cf, inv),
+        cos_rev(&f.swapped(), j, up, cf, (inv.1, inv.0)),
     ]
 }
 
@@ -1413,13 +1485,14 @@ pub(super) struct LinRow {
 
 /// `Lin` で forward と seed ごとの逆伝播を評価し、各要素の値と上界を返す（`[seed][side]`。test 限定。#4090）。
 /// 厳密モード（[`lin_reset`]）で forward を 1 回作り、seed ごとに [`lin_mark`]／[`lin_truncate`] で領域を戻す。
-/// 本番の判定（[`cosine_cancel_check`]）は呼ばない。走査量の上限と `Num::settle` は #4091 で判定へ配線するときに入れる。
+/// 判定本体（[`cosine_cancel_check`]）は要素ごとに領域を戻して N を下げる。ここは seed 全体の上界（soundness の
+/// 掃引と事象数の計測）を取るための全要素版で、seed 内の事象数 `events` は判定より大きい。
 #[cfg(test)]
 pub(super) fn cosine_lin_rows(
     rows: (&[f32], &[f32]),
     inv: (f64, f64),
     eps: (f64, f64),
-    g: f64,
+    up: (f64, Option<usize>),
     cf: f64,
     seeds: &[usize],
 ) -> Vec<[LinRow; 2]> {
@@ -1434,16 +1507,18 @@ pub(super) fn cosine_lin_rows(
         g: (r.g.v, r.g.bound()),
         events: lin_events(),
     };
-    seeds
+    let out = seeds
         .iter()
         .map(|&j| {
-            let a = pack(cos_rev(&f, j, g, cf, inv));
+            let a = pack(cos_rev(&f, j, up, cf, inv));
             lin_truncate(mark);
-            let b = pack(cos_rev(&fs, j, g, cf, (inv.1, inv.0)));
+            let b = pack(cos_rev(&fs, j, up, cf, (inv.1, inv.0)));
             lin_truncate(mark);
             [a, b]
         })
-        .collect()
+        .collect();
+    lin_reset();
+    out
 }
 
 /// Cosine の 1 側（dx1 なら own = a'・other = b'）の二階の展開に使う値。f64 の参照と、構造が f32 で
@@ -1485,6 +1560,156 @@ impl CosSide {
     }
 }
 
+/// Cosine の `Lin` 判定の入力（行に依らない量）。`g` は子テープ上の上流（f32 の値）、`mean_n` は Mean の分母、
+/// `cf ∈ {−1, +1}` は損失の係数（`cf == 0` の行は判定に来ない）。
+#[derive(Clone, Copy)]
+struct CosLinCtx {
+    g: f64,
+    mean_n: Option<usize>,
+    cf: f64,
+}
+
+/// [`CosLinState::ok`] が見る二階の種別（`G` は `g` への二階、`Own`・`Cross` は x への同じ側・相手側）。
+#[derive(Clone, Copy)]
+enum LinKind {
+    G,
+    Own,
+    Cross,
+}
+
+/// 事象の総数の上界（forward の分と、seed 1 回分のスカラーの分、要素 1 つ分）。forward は `ap`・`bp` の積・
+/// 二乗・内積の各 `d` 個の丸めが主で約 `5d`。実測と固定は `loss_class_tests.rs::cos_lin_events_stay_within_bound`
+/// （設計 §82.8）。
+fn cos_lin_events_max(d: usize) -> usize {
+    5usize
+        .saturating_mul(d)
+        .saturating_add(COS_LIN_EVENTS_FIXED)
+}
+
+/// [`cos_lin_events_max`] の定数分（行のスカラー〈`m`・`s`・`den`・`cos`・`ε'`〉と seed のスカラー、`Mean` の `n`）。
+const COS_LIN_EVENTS_FIXED: usize = 80;
+
+/// 1 行を [`Lin`] で判定する走査量の見積り（`Rf` の 1 反復相当。`LIN_BUDGET` と同じ単位）。要素ごとの検査が
+/// 2 側 × （同じ側・相手側）× `d²` 回で、実測は設計 §82.8 の表。
+fn cos_lin_cost(d: usize) -> usize {
+    COS_LIN_COST_PER_ELEM.saturating_mul(d).saturating_mul(d)
+}
+
+const COS_LIN_COST_PER_ELEM: usize = 1000;
+
+/// Cosine の総括判定で [`Lin`] の上界を使うか（テンソル単位。`wn_use_lin`・`sn_use_lin` と同じ方針）。
+/// 事象の総数が余裕係数の上限（`16·事象数·u < 0.01`）に収まり、かつ走査量が [`LIN_BUDGET`] 以内のときだけ。
+/// 満たさないテンソルは従来の見積りだけで判定する（`Lin` を選んで全要素が余裕係数で拒否される、
+/// あるいは判定時間が伸びる、という不利を避ける。受理集合は従来と同じ）。
+fn cos_use_lin(n: usize, d: usize) -> bool {
+    #[cfg(test)]
+    if probe::FORCE_OLD.with(|c| c.get()) {
+        return false;
+    }
+    16.0 * cos_lin_events_max(d) as f64 * LIN_U < 0.01
+        && n.saturating_mul(cos_lin_cost(d)) <= LIN_BUDGET
+}
+
+/// 従来の見積り（[`judge::struct_check`]）を先に評価し、拒否した要素だけ `rescue`（`Lin` の上界）で救う。
+/// どちらの見積りも f32 構造の誤差の上界として独立に健全なので、片方が閾値内なら REQ-2 の判定は成り立つ。
+/// 従来の受理を拒否へ反転させることは構造的に起きない（拒否範囲は従来以下。tolerance 定数は不変）。
+/// 最終的に拒否するときだけ計測の記録を積む（`vals = [v, v_str, m, scale, coeff]`）。
+fn cos_elem(
+    vals: [f64; 5],
+    what: &str,
+    rescue: impl FnOnce() -> bool,
+) -> Result<(), AutodiffError> {
+    let [v, v_str, m, scale, coeff] = vals;
+    match judge::struct_check(v, v_str, m, scale, coeff, what, invalid) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if rescue() {
+                return Ok(());
+            }
+            #[cfg(test)]
+            probe::check(what, vals, false);
+            Err(e)
+        }
+    }
+}
+
+/// [`CosLinState`] が持つ seed `(side, j)` のスカラー（`Lin` 版と f32 版）と、その直後の領域の印。
+type CosLinSeed = (usize, usize, LinMark, CosSeed<Lin>, CosSeed<f32>);
+
+/// Cosine の 1 行の [`Lin`] 判定の状態。forward は行で最初に必要になったとき 1 回だけ作り、seed のスカラーは
+/// `(side, j)` が変わるたびに作り直し、要素ごとの値は作ってすぐ [`lin_truncate`] で戻す（判定時の事象数を
+/// forward ＋ seed のスカラー ＋ 要素 1 つ分に抑え、`entry_check_lin` の余裕係数の条件を満たしやすくする）。
+/// `Drop` で thread-local の領域を解放する。
+struct CosLinState {
+    lin: [CosFwd<Lin>; 2],
+    f32m: [CosFwd<f32>; 2],
+    /// side ごとの `(r_own, r_other)`。
+    r: [(f64, f64); 2],
+    ctx: CosLinCtx,
+    fwd_mark: LinMark,
+    cur: Option<CosLinSeed>,
+}
+
+impl CosLinState {
+    fn new(rows: (&[f32], &[f32]), inv: (f64, f64), eps: (f64, f64), ctx: CosLinCtx) -> Self {
+        lin_reset();
+        let f = cos_fwd::<Lin>(rows.0, rows.1, inv, eps);
+        let fs = f.swapped();
+        let m = cos_fwd::<f32>(rows.0, rows.1, inv, eps);
+        let ms = m.swapped();
+        CosLinState {
+            lin: [f, fs],
+            f32m: [m, ms],
+            r: [(inv.0, inv.1), (inv.1, inv.0)],
+            ctx,
+            fwd_mark: lin_mark(),
+            cur: None,
+        }
+    }
+
+    fn seed(&mut self, side: usize, j: usize) -> (LinMark, CosSeed<Lin>, CosSeed<f32>) {
+        if let Some((s, jj, m, a, b)) = self.cur
+            && s == side
+            && jj == j
+        {
+            return (m, a, b);
+        }
+        lin_truncate(self.fwd_mark);
+        let (c, r) = (self.ctx, self.r[side].0);
+        let a = cos_rev_seed(&self.lin[side], j, c.g, c.mean_n, c.cf, r);
+        let b = cos_rev_seed(&self.f32m[side], j, c.g, c.mean_n, c.cf, r);
+        let m = lin_mark();
+        self.cur = Some((side, j, m, a, b));
+        (m, a, b)
+    }
+
+    /// seed `(side, j)` の二階の要素（`kind`・`i`）が [`entry_check_lin`] を通るか。
+    fn ok(&mut self, kind: LinKind, side: usize, j: usize, i: usize, what: &str) -> bool {
+        let (mark, a, b) = self.seed(side, j);
+        let (r_own, r_other) = self.r[side];
+        let ok = match kind {
+            LinKind::G => entry_check_lin(a.d_g, b.d_g, what, invalid).is_ok(),
+            LinKind::Own => {
+                let l = cos_rev_own(&self.lin[side], &a, i, r_own);
+                let s = cos_rev_own(&self.f32m[side], &b, i, r_own);
+                entry_check_lin(l, s, what, invalid).is_ok()
+            }
+            LinKind::Cross => {
+                let l = cos_rev_other(&self.lin[side], &a, i, r_other);
+                let s = cos_rev_other(&self.f32m[side], &b, i, r_other);
+                entry_check_lin(l, s, what, invalid).is_ok()
+            }
+        };
+        lin_truncate(mark);
+        ok
+    }
+}
+
+impl Drop for CosLinState {
+    fn drop(&mut self) {
+        lin_reset();
+    }
+}
 /// Cosine の 1 行の総括判定（設計 §55.2。相殺・ε の吸収・f32 の underflow）。
 ///
 /// 構造 `inner1 = b'/den − cos·a'/m1'`（`dx2` は a と b を入れ替えた形）を、seed が 1 要素
@@ -1505,13 +1730,19 @@ impl CosSide {
 /// 係数は行の幅 `d` から [`rounding_coeff`]。f32 の再現値がどれも `coeff` 以内で一致し、かつ上界
 /// `coeff·M·scale` が O(d) の速い経路で絶対判定を満たす行は、要素ごとの O(d²) の走査を省く。
 ///
-/// forward の f64 参照と f32 再現は総称関数 [`cos_fwd`] で組む（#4090。判定は不変）。丸めの一次伝播 `Lin` の上界は
-/// test 限定の `cosine_lin_rows` が並行計算するだけで、この判定には使わない（判定への切り替えは #4091）。
+/// forward の f64 参照と f32 再現は総称関数 [`cos_fwd`] で組む（#4090）。
+///
+/// **`Lin` の上界による救済（#4091・設計 §82.8）**: 上の見積り（`coeff·M`）が拒否した要素だけ、丸めの一次伝播
+/// [`Lin`] の上界（[`CosLinState`]）で評価し直し、閾値内なら受理する（[`cos_elem`]）。どちらの見積りも独立に健全
+/// なので片方が通れば REQ-2 の判定は成り立ち、従来の受理を拒否へ変えることは構造的に起きない（判定は緩めず、
+/// 過剰な拒否を減らす向きだけ）。`lin = Some` はテンソル単位の条件 [`cos_use_lin`]（走査量と事象数の上限）を
+/// 満たすときだけで、満たさないテンソルは従来の見積りのまま。`fast_ok` の速い経路・`flag` の行は変えていない。
 fn cosine_cancel_check(
     rows: (&[f32], &[f32]),
     inv: (f64, f64),
     eps: (f64, f64),
     scales: (f64, f64, f64),
+    lin: Option<CosLinCtx>,
 ) -> Result<(), AutodiffError> {
     let (a32, b32) = rows;
     let d = a32.len();
@@ -1585,7 +1816,17 @@ fn cosine_cancel_check(
         ),
     ];
     let amax = |v: &[f64]| v.iter().fold(0f64, |m, x| m.max(x.abs()));
-    for (rf, st, r_own, r_other) in &sides {
+    // `Lin` の上界の状態（従来の見積りが最初に拒否した要素で 1 回だけ作る。`Drop` で領域を解放する）。
+    let mut lin_state: Option<CosLinState> = None;
+    let mut rescue = |kind: LinKind, side: usize, j: usize, i: usize, what: &str| -> bool {
+        let Some(ctx) = lin else {
+            return false;
+        };
+        lin_state
+            .get_or_insert_with(|| CosLinState::new(rows, inv, eps, ctx))
+            .ok(kind, side, j, i, what)
+    };
+    for (side_idx, (rf, st, r_own, r_other)) in sides.iter().enumerate() {
         let (own, other, m_own, s_own, s_other) =
             (&rf.own, &rf.other, rf.m_own, rf.s_own, rf.s_other);
         let (omax, tmax) = (amax(own), amax(other));
@@ -1611,13 +1852,17 @@ fn cosine_cancel_check(
             let [cot_d_m, cot_mo_m, cot_mt_m] = *mg;
             // g への二階（`inner_j`）。g 経路は `s_b` を通らないので `rho` は掛けない。
             let gv = rf.g_entry(j);
-            struct_check(
-                gv,
-                if flag { st.g_entry(j) } else { gv },
-                other[j].abs() / den + cos_m * own[j].abs() / m_own,
-                gs * r_own,
-                coeff,
-                "Cosine: g への二階（b'/den − cos·a'/m' の差し引き）",
+            const G_WHAT: &str = "Cosine: g への二階（b'/den − cos·a'/m' の差し引き）";
+            cos_elem(
+                [
+                    gv,
+                    if flag { st.g_entry(j) } else { gv },
+                    other[j].abs() / den + cos_m * own[j].abs() / m_own,
+                    gs * r_own,
+                    coeff,
+                ],
+                G_WHAT,
+                || rescue(LinKind::G, side_idx, j, 0, G_WHAT),
             )?;
             if !(need_own || need_cross) {
                 continue;
@@ -1627,34 +1872,44 @@ fn cosine_cancel_check(
                 let delta = if i == j { 1.0 } else { 0.0 };
                 if need_own {
                     let v = rf.own_entry(cr, i, j);
-                    struct_check(
-                        v,
-                        if flag {
-                            rho * st.own_entry(cs, i, j)
-                        } else {
-                            v
-                        },
-                        delta * cos_m / m_own
-                            + other[i].abs() * cot_d_m
-                            + 2.0 * own[i].abs() * cot_mo_m,
-                        s_own_blk,
-                        coeff,
-                        "Cosine: 同じ側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）",
+                    const OWN_WHAT: &str =
+                        "Cosine: 同じ側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）";
+                    cos_elem(
+                        [
+                            v,
+                            if flag {
+                                rho * st.own_entry(cs, i, j)
+                            } else {
+                                v
+                            },
+                            delta * cos_m / m_own
+                                + other[i].abs() * cot_d_m
+                                + 2.0 * own[i].abs() * cot_mo_m,
+                            s_own_blk,
+                            coeff,
+                        ],
+                        OWN_WHAT,
+                        || rescue(LinKind::Own, side_idx, j, i, OWN_WHAT),
                     )?;
                 }
                 if need_cross {
                     let v = rf.cross_entry(cr, i, j);
-                    struct_check(
-                        v,
-                        if flag {
-                            rho * st.cross_entry(cs, i, j)
-                        } else {
-                            v
-                        },
-                        delta / den + own[i].abs() * cot_d_m + 2.0 * other[i].abs() * cot_mt_m,
-                        s_cross_blk,
-                        coeff,
-                        "Cosine: 相手側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）",
+                    const CROSS_WHAT: &str =
+                        "Cosine: 相手側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）";
+                    cos_elem(
+                        [
+                            v,
+                            if flag {
+                                rho * st.cross_entry(cs, i, j)
+                            } else {
+                                v
+                            },
+                            delta / den + own[i].abs() * cot_d_m + 2.0 * other[i].abs() * cot_mt_m,
+                            s_cross_blk,
+                            coeff,
+                        ],
+                        CROSS_WHAT,
+                        || rescue(LinKind::Cross, side_idx, j, i, CROSS_WHAT),
                     )?;
                 }
             }

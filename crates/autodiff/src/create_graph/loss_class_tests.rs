@@ -633,6 +633,18 @@ impl CosCase {
 
     /// [`CosCase::hand_rows`] を明示的な行 `(a, b)`（長さ `self.d`）で呼ぶ形（`y`・`exp` は `self` のまま。#4090）。
     fn hand_rows_with(&self, a: Vec<f32>, b: Vec<f32>, seed_list: &[usize]) -> CosRows {
+        self.hand_rows_red(a, b, seed_list, None)
+    }
+
+    /// [`CosCase::hand_rows_with`] の Mean 版（`mean_n = Some(n)` は `s_b = g / n`。#4091）。行数は 1 のまま `n` を
+    /// 分母に使うだけなので、Mean の `s_b` の丸めと `g` への `Div` の VJP を単体で検証できる。
+    fn hand_rows_red(
+        &self,
+        a: Vec<f32>,
+        b: Vec<f32>,
+        seed_list: &[usize],
+        mean_n: Option<usize>,
+    ) -> CosRows {
         const EPSILON: f64 = COS_EPSILON;
         let d = self.d;
         let shape = [1usize, d];
@@ -649,8 +661,11 @@ impl CosCase {
         );
         let (inv1, inv2) = (1.0 / s1, 1.0 / s2);
         let (eps1, eps2) = (EPSILON / (s1 * s1), EPSILON / (s2 * s2));
-        let s_b =
-            super::super::loss_scale_bcast(&child, &g, Reduction::Sum, false, 1, &shape).unwrap();
+        let (red, red_n) = match mean_n {
+            Some(n) => (Reduction::Mean, n),
+            None => (Reduction::Sum, 1),
+        };
+        let s_b = super::super::loss_scale_bcast(&child, &g, red, false, red_n, &shape).unwrap();
         let cv = |v: f32| const_vec(&child, vec![v; d], &shape).unwrap();
         let (r1_c, r2_c) = (cv(inv1 as f32), cv(inv2 as f32));
         let (e1_c, e2_c) = (cv(eps1 as f32), cv(eps2 as f32));
@@ -1736,7 +1751,7 @@ fn cosine_f32_model_stays_close_to_hand_built_structure() {
         let hand = c.hand_rows(&sd);
         let g = f64::from(pow2(exp));
         for (j, rows) in &hand {
-            let model = cosine_model_rows_f32((&a, &b), inv, eps, g, c.cf(), *j);
+            let model = cosine_model_rows_f32((&a, &b), inv, eps, (g, None), c.cf(), *j);
             for side in 0..2 {
                 let (oi, ti) = if side == 0 { (0, 1) } else { (1, 0) };
                 for i in 0..c.d {
@@ -1753,12 +1768,69 @@ fn cosine_f32_model_stays_close_to_hand_built_structure() {
     assert!(worst < 1.0, "f32 の写しが手組みから外れすぎ: {worst}");
 }
 
+/// 掃引の統計（空振りでないことの確認用）。
+#[derive(Debug, Default)]
+struct SweepStats {
+    checked: usize,
+    nonzero: usize,
+    tight: usize,
+    worst: f64,
+}
+
+/// 1 行 `(a, b)` について、手組みの構造の f32 の二階（実際の eager 逆伝播）と `cos_rev::<f32>` の双方が
+/// `|実測 − Lin.v| ≤ Lin.bound()·(1 + 16·N·u)` を満たすことを確かめる（非有限の要素は除く）。`mean_n` は Mean の分母。
+fn lin_sweep_row(c: &CosCase, a: &[f32], b: &[f32], mean_n: Option<usize>, st: &mut SweepStats) {
+    use super::super::lin::LIN_U;
+    let d = c.d;
+    let (inv, eps) = cos_scales(a, b);
+    let sd = seeds(d, &[]);
+    let hand = c.hand_rows_red(a.to_vec(), b.to_vec(), &sd, mean_n);
+    let up = (f64::from(pow2(c.exp)), mean_n);
+    let lin = cosine_lin_rows((a, b), inv, eps, up, c.cf(), &sd);
+    for (k, (j, rows)) in hand.iter().enumerate() {
+        let model = cosine_model_rows_f32((a, b), inv, eps, up, c.cf(), *j);
+        for side in 0..2 {
+            let l = &lin[k][side];
+            let slack = 1.0 + 16.0 * l.events as f64 * LIN_U;
+            let (oi, ti) = if side == 0 { (0, 1) } else { (1, 0) };
+            let mut check = |actual: f32, lv: (f64, f64)| {
+                let actual = f64::from(actual);
+                if !actual.is_finite() || !lv.0.is_finite() || !lv.1.is_finite() {
+                    return;
+                }
+                let dev = (actual - lv.0).abs();
+                assert!(
+                    dev <= lv.1 * slack,
+                    "{c:?} mean={mean_n:?} side={side} seed={j}: dev={dev:e} bound={:e}",
+                    lv.1
+                );
+                st.checked += 1;
+                if dev > 0.0 {
+                    st.nonzero += 1;
+                }
+                if lv.1 > 0.0 {
+                    st.worst = st.worst.max(dev / lv.1);
+                    if dev > 0.1 * lv.1 {
+                        st.tight += 1;
+                    }
+                }
+            };
+            for i in 0..d {
+                check(rows[side][oi][i], l.own[i]);
+                check(model[side].own[i], l.own[i]);
+                check(rows[side][ti][i], l.other[i]);
+                check(model[side].other[i], l.other[i]);
+            }
+            check(rows[side][2][0], l.g);
+            check(model[side].g, l.g);
+        }
+    }
+}
+
 #[test]
 fn lin_bound_covers_f32_deviation_for_cosine_sweep() {
-    use super::super::lin::LIN_U;
     let mut rng = Rng(0x0123_4567_89ab_cdef);
-    let (mut checked, mut tight, mut nonzero) = (0usize, 0usize, 0usize);
-    let mut worst = 0f64;
+    let mut st = SweepStats::default();
     for d in [1usize, 2, 3, 8, 16, 32] {
         for amp in [1e-3f32, 1.0, 1e3] {
             for delta in [0.0f32, 1e-6, 1e-4, 1e-2, 1.0] {
@@ -1768,60 +1840,335 @@ fn lin_bound_covers_f32_deviation_for_cosine_sweep() {
                         let a: Vec<f32> = (0..d).map(|_| amp * rng.signed()).collect();
                         let b: Vec<f32> =
                             a.iter().map(|&x| x + delta * amp * rng.signed()).collect();
-                        let (inv, eps) = cos_scales(&a, &b);
-                        let sd = seeds(d, &[]);
-                        let hand = c.hand_rows_with(a.clone(), b.clone(), &sd);
-                        let g = f64::from(pow2(exp));
-                        let lin = cosine_lin_rows((&a, &b), inv, eps, g, c.cf(), &sd);
-                        for (k, (j, rows)) in hand.iter().enumerate() {
-                            let model = cosine_model_rows_f32((&a, &b), inv, eps, g, c.cf(), *j);
-                            for side in 0..2 {
-                                let l = &lin[k][side];
-                                let slack = 1.0 + 16.0 * l.events as f64 * LIN_U;
-                                let (oi, ti) = if side == 0 { (0, 1) } else { (1, 0) };
-                                let mut check = |actual: f32, lv: (f64, f64)| {
-                                    let actual = f64::from(actual);
-                                    if !actual.is_finite() || !lv.0.is_finite() || !lv.1.is_finite()
-                                    {
-                                        return;
-                                    }
-                                    let dev = (actual - lv.0).abs();
-                                    assert!(
-                                        dev <= lv.1 * slack,
-                                        "{c:?} d={d} amp={amp} side={side} seed={j}: dev={dev:e} bound={:e}",
-                                        lv.1
-                                    );
-                                    checked += 1;
-                                    if dev > 0.0 {
-                                        nonzero += 1;
-                                    }
-                                    if lv.1 > 0.0 {
-                                        worst = worst.max(dev / lv.1);
-                                        if dev > 0.1 * lv.1 {
-                                            tight += 1;
-                                        }
-                                    }
-                                };
-                                for i in 0..d {
-                                    check(rows[side][oi][i], l.own[i]);
-                                    check(model[side].own[i], l.own[i]);
-                                    check(rows[side][ti][i], l.other[i]);
-                                    check(model[side].other[i], l.other[i]);
-                                }
-                                check(rows[side][2][0], l.g);
-                                check(model[side].g, l.g);
-                            }
+                        // Sum と、Mean（分母 3・7。`s_b = g/n` の丸めと `g` への Div の VJP を含む）。
+                        lin_sweep_row(&c, &a, &b, None, &mut st);
+                        if exp == 13 {
+                            lin_sweep_row(&c, &a, &b, Some(3), &mut st);
+                            lin_sweep_row(&c, &a, &b, Some(7), &mut st);
                         }
                     }
                 }
             }
         }
     }
-    assert!(checked > 1000, "検査した要素が少なすぎる: {checked}");
     assert!(
-        nonzero > 0,
+        st.checked > 1000,
+        "検査した要素が少なすぎる: {}",
+        st.checked
+    );
+    assert!(
+        st.nonzero > 0,
         "実測の誤差が全て 0 では soundness を確かめていない"
     );
-    assert!(tight > 0, "上界が緩すぎて空振り: tight={tight}");
-    eprintln!("LINCOS checked={checked} nonzero={nonzero} tight={tight} worst={worst:.4}");
+    assert!(st.tight > 0, "上界が緩すぎて空振り: tight={}", st.tight);
+    eprintln!(
+        "LINCOS checked={} nonzero={} tight={} worst={:.4}",
+        st.checked, st.nonzero, st.tight, st.worst
+    );
+}
+
+/// 微小成分が行スケールで非正規数・0 へ落ちる行（`flag` が立つ行）の soundness。`a = [1, 微小…]`、`b` は平行に近い。
+#[test]
+fn lin_bound_covers_f32_deviation_for_cosine_underflow_rows() {
+    let mut st = SweepStats::default();
+    for d in [2usize, 4, 8] {
+        for tiny in [1e-20f32, 1e-30, 1e-38, 1e-42] {
+            for y in [1.0f32, -1.0] {
+                let c = CosCase {
+                    d,
+                    delta: 0.0,
+                    y,
+                    exp: 13,
+                };
+                let a: Vec<f32> = (0..d).map(|i| if i == 0 { 1.0 } else { tiny }).collect();
+                let b: Vec<f32> = a.iter().map(|&x| x * 1.0000001).collect();
+                lin_sweep_row(&c, &a, &b, None, &mut st);
+                lin_sweep_row(&c, &a, &b, Some(3), &mut st);
+            }
+        }
+    }
+    assert!(st.checked > 100, "検査した要素が少なすぎる: {}", st.checked);
+}
+
+// =====================================================================================
+// #4091: Cosine の判定を `Lin` の上界へ切り替える（実測と固定）
+// =====================================================================================
+
+/// 行 `(a, b)` を `Lin` の判定（[`CosLinState`]）で全 seed 走査したときの要約。
+#[derive(Debug, Default)]
+struct LinScan {
+    /// 走査した要素数（g・同じ側・相手側の合計）。
+    checked: usize,
+    /// `entry_check_lin` が拒否する要素数。
+    rejected: usize,
+    /// 判定時の事象数の最大。
+    max_events: usize,
+    /// forward だけの事象数。
+    fwd_events: usize,
+    /// 最大の `err / 閾値`（1 以上で拒否）。
+    max_margin: f64,
+    /// 走査にかかった秒数。
+    secs: f64,
+}
+
+/// `seed_list` の seed について、`Lin` の判定を全要素（g・同じ側・相手側）で評価する（計測用。判定と同じ
+/// [`CosLinState`] を使い、`entry_check_lin` と同じ式で `err/閾値` も出す）。
+fn lin_scan(
+    c: &CosCase,
+    rows: (&[f32], &[f32]),
+    mean_n: Option<usize>,
+    seed_list: &[usize],
+) -> LinScan {
+    use super::super::lin::{LIN_U, lin_events, lin_truncate};
+    let (inv, eps) = cos_scales(rows.0, rows.1);
+    let ctx = CosLinCtx {
+        g: f64::from(pow2(c.exp)),
+        mean_n,
+        cf: c.cf(),
+    };
+    let t0 = std::time::Instant::now();
+    let mut st = CosLinState::new(rows, inv, eps, ctx);
+    let mut out = LinScan {
+        fwd_events: lin_events(),
+        ..LinScan::default()
+    };
+    for &j in seed_list {
+        for side in 0..2 {
+            let (mark, sa, sb) = st.seed(side, j);
+            let (r_own, r_other) = st.r[side];
+            let mut visit = |l: Lin, s: f32, tag: &str, ii: usize| {
+                let slack = 16.0 * lin_events() as f64 * LIN_U;
+                let err = (f64::from(s) - l.v).abs() + l.bound() * (1.0 + slack);
+                let thr = ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * l.v.abs());
+                out.checked += 1;
+                out.max_events = out.max_events.max(lin_events());
+                let m = err / thr;
+                out.max_margin = out.max_margin.max(m);
+                if slack >= 0.01 || m >= 1.0 {
+                    out.rejected += 1;
+                    if std::env::var("LINCOS_VERBOSE").is_ok() && out.rejected <= 12 {
+                        eprintln!(
+                            "LINCOSREJ side={side} j={j} i={ii} {tag} v={:e} s={:e} bound={:e} thr={thr:e} margin={m:.3}",
+                            l.v,
+                            s,
+                            l.bound()
+                        );
+                    }
+                }
+            };
+            visit(sa.d_g, sb.d_g, "g", 0);
+            for i in 0..c.d {
+                let l = cos_rev_own(&st.lin[side], &sa, i, r_own);
+                let s = cos_rev_own(&st.f32m[side], &sb, i, r_own);
+                visit(l, s, "own", i);
+                lin_truncate(mark);
+                let l = cos_rev_other(&st.lin[side], &sa, i, r_other);
+                let s = cos_rev_other(&st.f32m[side], &sb, i, r_other);
+                visit(l, s, "oth", i);
+                lin_truncate(mark);
+            }
+        }
+    }
+    out.secs = t0.elapsed().as_secs_f64();
+    out
+}
+
+/// `LINCOSM`: 候補と d の掃引で、`Lin` の判定の事象数・全要素の余裕・1 行の判定時間（全 seed に換算）を出す。
+/// `cargo test -p fandhe-ai-autodiff --release --lib cosine_lin_candidates_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn cosine_lin_candidates_measurement() {
+    let mut cases = cosine_followup_candidates();
+    for d in [64usize, 256, 512, 1024, 1536, 2048] {
+        cases.push(CosCase {
+            d,
+            delta: 1e-2,
+            y: 1.0,
+            exp: 0,
+        });
+    }
+    for c in cases {
+        let (a, b) = c.ab();
+        let sd = seeds(c.d, &[c.d / 2]);
+        let r = lin_scan(&c, (&a, &b), None, &sd);
+        let per_seed = r.secs / sd.len() as f64;
+        eprintln!(
+            "LINCOSM d={} delta={} y={} exp={} fwd_events={} max_events={} 16Nu={:.4} rejected={}/{} max_margin={:.3e} secs_per_seed={:.4e} row_secs_est={:.3} cost_units_est={:.3e}",
+            c.d,
+            c.delta,
+            c.y,
+            c.exp,
+            r.fwd_events,
+            r.max_events,
+            16.0 * r.max_events as f64 / 16_777_216.0,
+            r.rejected,
+            r.checked,
+            r.max_margin,
+            per_seed,
+            per_seed * c.d as f64,
+            per_seed * c.d as f64 / 3.45e-9
+        );
+    }
+}
+/// 旧判定（`Lin` を使わない）の公開経路の verdict。
+fn public_old(c: &CosCase) -> Verdict {
+    probe::FORCE_OLD.with(|f| f.set(true));
+    let v = c.public().0;
+    probe::FORCE_OLD.with(|f| f.set(false));
+    v
+}
+
+/// §82.2 の 168 行に `d ∈ {128, 256}` を足した行列。
+fn cos_switch_cases() -> Vec<CosCase> {
+    let mut v = cos_cases();
+    for d in [128usize, 256] {
+        for delta in [0.0f32, 1e-2, 1e-4, 1e-6] {
+            for y in [1.0f32, -1.0] {
+                for exp in [0i32, 13, 20] {
+                    v.push(CosCase { d, delta, y, exp });
+                }
+            }
+        }
+    }
+    v
+}
+
+/// `LINCOSSW`: 旧判定と新判定の受理・拒否を並べる。「旧受理 → 新拒否」は 0 件（either 受理の構造的な保証）、
+/// 「旧拒否 → 新受理」の行は REQ-2 比 < 1 であることを assert する。
+/// `cargo test -p fandhe-ai-autodiff --release --lib cosine_lin_switch_rejection_delta_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn cosine_lin_switch_rejection_delta_measurement() {
+    let (mut total, mut old_rej, mut new_rej, mut flipped_to_accept) =
+        (0usize, 0usize, 0usize, 0usize);
+    for c in cos_switch_cases() {
+        let old = public_old(&c);
+        let new = c.public().0;
+        total += 1;
+        let (o, n) = (
+            matches!(old, Verdict::Accept),
+            matches!(new, Verdict::Accept),
+        );
+        old_rej += usize::from(!o);
+        new_rej += usize::from(!n);
+        assert!(!(o && !n), "旧受理 → 新拒否が出た: {c:?}");
+        if !o && n {
+            flipped_to_accept += 1;
+            let m = c.measure();
+            let (x, g) = (m.x.expect("x"), m.g.expect("g"));
+            eprintln!(
+                "LINCOSSW 旧拒否→新受理 d={} delta={} y={} exp={} REQ2比 x={:.3e} g={:.3e} 参照不確かさ x={:.1e}",
+                c.d, c.delta, c.y, c.exp, x.ratio, g.ratio, x.unc
+            );
+            assert!(
+                x.ratio < 1.0 && g.ratio < 1.0,
+                "新たに受理した行が REQ-2 を外す: {c:?}"
+            );
+        }
+    }
+    eprintln!(
+        "LINCOSSW total={total} old_rejected={old_rej} new_rejected={new_rej} flipped_to_accept={flipped_to_accept}"
+    );
+}
+/// 判定時の事象数が `cos_lin_events_max(d)` に収まる（Sum・Mean、候補に近い入力と平行な行）。`cos_use_lin` の
+/// 余裕係数の条件（`16·事象数·u < 0.01`）がこの上界に依るので、実測が上界を超えたらここで落ちる。
+#[test]
+fn cos_lin_events_stay_within_bound() {
+    let mut worst_fixed = 0usize;
+    for d in [1usize, 2, 8, 64, 256] {
+        for (delta, amp) in [(1e-2f32, 1.0f32), (0.0, 1.0), (1.0, 1e3), (1e-4, 1e-3)] {
+            for mean_n in [None, Some(5)] {
+                let c = CosCase {
+                    d,
+                    delta,
+                    y: 1.0,
+                    exp: 7,
+                };
+                let a: Vec<f32> = pattern(d, 0.0).iter().map(|x| x * amp).collect();
+                let q = pattern(d, 3.0);
+                let b: Vec<f32> = a.iter().zip(&q).map(|(a, q)| a + delta * amp * q).collect();
+                let sd = seeds(d, &[d / 2]);
+                let r = lin_scan(&c, (&a, &b), mean_n, &sd);
+                assert!(
+                    r.max_events <= cos_lin_events_max(d),
+                    "d={d} delta={delta} mean={mean_n:?}: 事象数 {} が上界 {} 超",
+                    r.max_events,
+                    cos_lin_events_max(d)
+                );
+                worst_fixed = worst_fixed.max(r.max_events.saturating_sub(5 * d));
+            }
+        }
+    }
+    assert!(
+        worst_fixed <= COS_LIN_EVENTS_FIXED,
+        "定数分 {worst_fixed} が COS_LIN_EVENTS_FIXED を超える"
+    );
+}
+
+/// `cos_use_lin` の境界: 走査量の上限（`LIN_BUDGET`）と、余裕係数の上限（`16·事象数·u < 0.01`）の両方。
+#[test]
+fn cos_use_lin_boundaries() {
+    use super::super::lin::{LIN_BUDGET, LIN_U};
+    // 行数 1 で走査量が収まる最大の d。
+    let dmax = (1..2000usize)
+        .take_while(|&d| cos_lin_cost(d) <= LIN_BUDGET)
+        .last()
+        .unwrap();
+    assert!(cos_use_lin(1, dmax) && !cos_use_lin(1, dmax + 1));
+    // 行数が増えると走査量が増える（テンソル単位で選ぶ）。
+    assert!(cos_use_lin(1, 128) && !cos_use_lin(10_000, 128));
+    // 走査量の上限が事象数の上限より先に効く（d ≤ dmax なら余裕係数は常に満たす）。
+    assert!(16.0 * cos_lin_events_max(dmax) as f64 * LIN_U < 0.01);
+    // 余裕係数を満たさない d は走査量が足りていても選ばない（独立の条件であること）。
+    let d_slack = (1..100_000usize)
+        .find(|&d| 16.0 * cos_lin_events_max(d) as f64 * LIN_U >= 0.01)
+        .unwrap();
+    assert!(d_slack > dmax);
+}
+
+/// 従来の見積りが `coeff·m` の項だけで拒否していた行を、`Lin` の上界が受理に変える（d=128・上流 `2^20`）。
+/// 受理に変えた行の二階が f64 の閉じた式と REQ-2 で一致すること（REQ-2 比 < 1。参照の不確かさ < 5%）。
+#[test]
+fn cosine_lin_accepts_rows_rejected_by_coeff_bound_and_matches_f64() {
+    for y in [1.0f32, -1.0] {
+        let c = CosCase {
+            d: 128,
+            delta: 1e-2,
+            y,
+            exp: 20,
+        };
+        match public_old(&c) {
+            Verdict::Cancel { cls, .. } => assert_eq!(cls, "coeff·m のみ"),
+            v => panic!("{c:?}: 旧判定は coeff·m で拒否するはず: {v:?}"),
+        }
+        let m = c.measure();
+        assert_eq!(
+            m.verdict,
+            Verdict::Accept,
+            "{c:?}: Lin の上界で受理に変わるはず"
+        );
+        for (label, acc) in [("x", m.x), ("g", m.g)] {
+            let a = acc.expect("計測");
+            assert!(a.ratio < 1.0, "{c:?}: {label} の REQ-2 比 {:e}", a.ratio);
+            assert!(a.unc < 0.05, "{c:?}: {label} の参照の不確かさ {:e}", a.unc);
+        }
+    }
+}
+
+/// 候補（`cosine_followup_candidates()`）を `Lin` で全要素走査すると、`Lin` の上界が閾値を超える要素が残る
+/// （d=512 は走査量の上限でも本番では `Lin` を使わない）。受理に変えられない理由を固定する（設計 §82.8）。
+/// `cargo test -p fandhe-ai-autodiff --release --lib cosine_followup_candidates_exceed_lin_bound -- --ignored`
+#[test]
+#[ignore = "d=2048・4096 の全要素走査は重い。--release で実行する"]
+fn cosine_followup_candidates_exceed_lin_bound() {
+    for c in cosine_followup_candidates() {
+        let (a, b) = c.ab();
+        let sd = seeds(c.d, &[c.d / 2]);
+        let r = lin_scan(&c, (&a, &b), None, &sd);
+        assert!(
+            r.rejected > 0 && r.max_margin >= 1.0,
+            "{c:?}: Lin の上界でも拒否されるはず: {r:?}"
+        );
+        assert!(!cos_use_lin(1, c.d), "{c:?}: 走査量の上限で Lin を使わない");
+    }
 }
