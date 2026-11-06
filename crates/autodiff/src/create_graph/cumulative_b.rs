@@ -25,7 +25,7 @@
 //! 親の rollback により `child` は空に戻る。
 //! - 入口規則（§33.14 論点 3）: `g` の非有限と `x` の `±inf` は拒否、`x` の NaN は伝播。
 //!   `max|g|·axis_len` が `STAGE_BOUND_GUARD`（`2^125`）以上も拒否。計算量の上限（[`judge_cost`]
-//!   が [`JUDGE_BUDGET`] を超える入力）も、lane の走査より前に拒否する。
+//!   が [`JUDGE_BUDGET`](super::judge::JUDGE_BUDGET) を超える入力）も、lane の走査より前に拒否する。
 //! - 第 1 軸（overflow）: 構造の各段と、二階の逆伝播の「cotangent × 微分係数」の上界（seed の
 //!   各要素の絶対値 1 以下）が非有限または `2^125` 以上なら拒否（[`cumprod_stage_bounds`]・
 //!   [`lcse_stage_bounds`]）。NaN を含む lane は NaN を 0 に置き換えた lane で上界を取る
@@ -66,7 +66,7 @@ use super::scan::{
     Num, Rf, ScanHist, linear_scan, scan_backward, scan_cotangent_bound, scan_forward,
     scan_lane_host, scan_steps,
 };
-use super::{child_value, push_v3};
+use super::{child_value, judge, push_v3};
 use crate::create_graph_norm::STAGE_BOUND_GUARD;
 use crate::error::AutodiffError;
 use crate::grad::cumprod_vjp_along;
@@ -171,12 +171,14 @@ fn nan_to_zero(v: &[f32]) -> Vec<f32> {
 
 // ---------------------------------------------------------------------
 // 第 2 軸（二階の要素ごとの判定）と計算量の上限。`loss_class.rs::struct_check`・
-// `norm_reparam.rs::entry_check` と同じ形（ヘルパーは共有しない。独立にマージするため）
+// `norm_reparam.rs::entry_check` と同じ形。計算量の上限 `JUDGE_BUDGET`・`judge_budget` だけは
+// `judge.rs` に集約した（#4086・§83.2）。第 2 軸の `entry_check` などは族ごとに持つ
 // ---------------------------------------------------------------------
 
-/// 第 2 軸の走査量の上限（`norm_reparam.rs` と同じ値）。走査量は [`judge_cost`] で数え、超える入力は
-/// 計算量の fail-closed として拒否する（保守的。上限内の入力だけに保証を限る）。
-pub(super) const JUDGE_BUDGET: usize = 1 << 27;
+/// 第 2 軸の走査量の上限。定義は `judge.rs` の 1 か所（再エクスポート。`scatter_reduce_prod.rs` の
+/// テストも本パス経由で参照するため `cfg(test)` の再エクスポート）。走査量は [`judge_cost`] で数える。
+#[cfg(test)]
+pub(super) use super::judge::JUDGE_BUDGET;
 
 /// 判定 1 lane の forward 側の走査量の係数（`n` 1 要素あたり。`steps = ⌈log2 n⌉`）。
 const FWD_PER_STEP: usize = 22;
@@ -206,16 +208,10 @@ fn judge_cost(lanes: usize, n: usize) -> usize {
     lanes.saturating_mul(fwd.saturating_add(n.saturating_mul(per_seed)))
 }
 
+/// `judge.rs::judge_budget` への委譲（`。§64 参照` の注記を渡す。scatter Prod からも使われる）。
 pub(super) fn judge_budget(cost: usize, what: &str) -> Result<(), AutodiffError> {
-    if cost <= JUDGE_BUDGET {
-        Ok(())
-    } else {
-        Err(invalid(format!(
-            "{what}: 二階の総括判定の走査量 {cost} が上限 2^27 を超えるため拒否（保守的な fail-closed。§64 参照）"
-        )))
-    }
+    judge::judge_budget(cost, what, "。§64 参照", |m| invalid(m.to_owned()))
 }
-
 /// 第 2 軸の余裕の係数 `coeff = 2^-23`（`2u`・`u = 2^-24`。f32 の丸め 2 回分）。再現は子テープの
 /// CPU の演算と値で一致する（`backward.rs` の逆順処理と `accumulate` の加算順・同じ `f32::exp`・同じ
 /// 写しの VJP を使う。単体テスト `emulation_reproduces_child_tape_second_order` が代表入力で固定する）
