@@ -6150,3 +6150,174 @@ CPU・`spectral_norm_shadow_bound_breakdown_measurement`（`#[ignore]`）。余�
 
 - WeightNorm へは `shadow_check(…, bound, 1.0, …)` に「`Lin` の上界 + ホスト側の上界」を渡す同じ形で使えるが、WN 用のホスト側の上界は未実装で、適用の判断は #4074。
 - `B_str` の `γ_{N−1}Σ|·|` は最悪ケースの上界で、N が大きいと `[16,16]` のような入力が閾値を超える。さらに狭めるには和の順序を固定する等の前提が要る（本イシューの範囲外。#4072・#4077・#4078・#4088 とも別）。
+
+
+## 82. 計測・設計記録（イシュー #4089・親 #4071。損失のクラス軸系の create_graph の拒否の内訳と後続で受理に変える入力）
+
+### 82.0 位置づけ
+
+- 範囲は計測と記録だけ。判定（`struct_check`・`cewo_cancel_check`・`cosine_cancel_check`・`triplet_cancel_check`・`pair_info`・`rounding_coeff`）、本番経路、tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline、`STAGE_BOUND_GUARD`、`JUDGE_BUDGET`、依存、`docs/spec`、公開 API は変えていない。既存の拒否プローブ（統合テスト `create_graph_loss_class.rs`）も変えていない（27 件が無変更で通る）。
+- 親 #4071 は、損失のクラス軸系の相殺の総括判定（§55.2・§77）が、`(|V_str − V| + coeff·M)·scale` の保守的な見積りで REQ-2 の範囲内の入力まで拒否している、という仮説に立つ（§77.3・§79.6）。本節はその仮説を族ごと（Cosine・CE〈既定 CE と CEWO〉・Triplet）に実測で確かめ、後続（#4090／#4091 Cosine、#4092 `Lin` の exp、#4093／#4094 CE・CEWO、#4095／#4096 Triplet）が受理に変える入力を定義する。承認は #4071 の起票に書かれた範囲だけで、本節は上乗せしていない。
+- 追加したのはテストの記録フックだけで、`#[cfg(test)]` 限定（`loss_class.rs::probe`）。`struct_check` は `judge::struct_check` の戻り値をそのまま返し（記録は戻り値を変えない・迂回や続行のモードは無い）、非 test ビルドの本体は変わらない。フックは拒否した呼び出しの入力 `(v, v_str, m, scale, coeff)` と、行の `flag`（`deviates` が真で f32 再現値の経路に入ったか）を、計測テストが開く記録にだけ積む。
+- 節番号は親ごとに割り当て済みの §82（§81 は #4073 の記録）。
+
+### 82.1 拒否の段の並び
+
+先に当たった段が拒否の理由になる。
+
+- Cosine（`cosine_cgrad`）: `checked_shape` → y の長さ → `reject_inf`（入力の ±inf）→ `upstream_scale`（`g` の有限・段）→ 行ごとに `stage(…)` 群 → `cosine_cancel_check` → `check_g_cotangent`。
+- 既定 CE（`create_graph.rs` の `Op::CrossEntropyLoss` 腕）: `ce_cancel_check`（内部で `cewo_cancel_check` を `A=1`・`B=onehot`・`W=n` で呼ぶ）。非有限の `g` は新たに拒否しない（§77.2）。構造は `softmax(x) − onehot` に `s_b` を掛けるだけ。
+- CEWO（`cewo_cgrad`）: 形状・`class_weight` 長の契約 → 早期ゼロ → `reject_inf` → `upstream_abs` → 重み和の段検査 → サンプルごとに `stage(…)` と `cewo_cancel_check`。
+- Triplet（`triplet_cgrad`）: `reject_inf` → `upstream_scale` → `stage(p)`・`stage(sb·p²)` → `pair_info`（`1<p<2` の 0 レーン・f32 再構成の桁落ち・スケール下限・`|u|^p` の和の下限／上限・大きな p の norm 丸め・各段）→ `p≠1` の行ごとに `triplet_cancel_check`（`coeff = rounding_coeff(d) + 2((p−1)+1)(κ+1)·2^-23`）→ `check_g_cotangent`。
+
+相殺判定の中の `struct_check` は、拒否の判断が `err = |V_str − V| + coeff·M` と、閾値 `err·scale < 1e-5` または `err ≤ (1e-3/2)·|V|` で決まる（`judge::struct_check`）。Cosine の `flag` が偽の行は `V_str = V` なので、必ず `coeff·M` の項だけで決まる。`flag` が真のときだけ `|V_str − V|` が効きうる。
+
+### 82.2 拒否の内訳（実測）
+
+- 測定条件: CPU（x86_64 Linux）・rustc 1.98.1・`--release`。入力は決定的（固定の `pattern` と明示的な定数。乱数なし）。2 回実行して全 660 行が一致した。GPU は未実測。
+- 実行: `cargo test -p fandhe-ai-autodiff --release --lib loss_class_rejection_breakdown_measurement -- --ignored --nocapture`（約 0.6 秒。`#[ignore]` で通常の CI は回さない）。出力は `LCROW` 行。
+- テスト `loss_class_tests.rs::loss_class_rejection_breakdown_measurement`（`#[ignore]`）が、公開経路（`backward_create_graph`）の拒否を文面とフックの記録で分類し（計測用の分類。本番が文面に依存するわけではない）、拒否された入力でも本番と同じ演算順の構造を子テープに手で組んで実際の f32 の二階を測り、独立な f64 の閉じた式と REQ-2 で比べる（判定は迂回しない）。計測の健全性 assert（相殺判定で拒否したのに不合格の記録が無い・受理なのに不合格の記録がある・拒否後に `child` が空でない）が 1 件も落ちなかった。
+- 入力はいずれも 1 サンプル（Cosine は 1 行 `[1,d]`、CE は `[1,C]`、Triplet は `[1,d]`）で、上流は 2 のべき乗 `2^0`・`2^13`・`2^20`（Triplet は `2^0`・`2^20`）。Sum（CEWO の weight だけ Mean で `W = w_t`）。REQ-2 比は seed の部分集合（先頭 4・末尾 4・target 等）の全入力要素で測り、判定は全要素。`REQ-2 比` は `|f32 の二階 − f64 の閉じた式| / max(1e-5, 1e-3·|真値|)`（1 未満で合格）で、x への二階と `g` への二階の大きい方。
+- 入力の軸:
+  - CE: 種別 `{既定 CE, CEWO-weight（class_weight・Mean）, CEWO-smooth（label_smoothing=0.1・Sum）}`、`C ∈ {2, 10, 100, 1000, 2000, 2100, 4000}`、target の logit に足す余裕 `{5, 10, 20, 40}`、上流 `{2^0, 2^13, 2^20}`（各 84 行）。1 サンプルでは 3 種別の x への二階が一致するため、3 種別は同じ値になる（複数サンプル・ignore_index は未測定）。
+  - Cosine: `d ∈ {1, 2, 8, 64, 512, 2048, 4096}`、平行からのずれ `b = a + δ·pattern` の `δ ∈ {0, 1e-2, 1e-4, 1e-6}`、`y ∈ {+1, −1}`、上流 `{2^0, 2^13, 2^20}`（168 行）。
+  - Triplet: 支配成分 1 に対する他成分の比 `r ∈ {1e-1, 1e-3, 1e-6}`、`d ∈ {2, 8, 64, 512}`、`p ∈ {2, 1.5, 3, 10, 50}`、swap `{off, on}`、上流 `{2^0, 2^20}`（240 行。margin は十分大きく常に active、eps = 0）。
+
+#### 結果の要約
+
+「過剰」は REQ-2 比が 1/4 未満、「中間」は 1/4 以上 1 未満、「真に外れる」は 1 以上（拒否のままであるべき）。「受理なのに REQ-2 を外す」行はどの族にも 0 件だった。
+
+| 族 | 行数 | 受理 | 段検査 | pair_info | 相殺判定 | うち `coeff·m` のみ | うち両方 | V_str−V の項のみ／合算でのみ | 過剰 | 中間 | 真に外れる |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 既定 CE | 84 | 18 | 0 | - | 66 | 50 | 16 | 0 | 47 | 3 | 16 |
+| CEWO-weight | 84 | 18 | 0 | - | 66 | 50 | 16 | 0 | 47 | 3 | 16 |
+| CEWO-smooth | 84 | 18 | 0 | - | 66 | 50 | 16 | 0 | 47 | 3 | 16 |
+| Cosine | 168 | 96 | 0 | - | 72 | 72 | 0 | 0 | 50 | 6 | 16 |
+| Triplet | 240 | 26 | 0 | 4 | 210 | 170（`flag` 経路 72・非 `flag` 98） | 40 | 0 | 113 | 34 | 63 |
+
+- **拒否は相殺判定の `coeff·m` の項で決まる**: 相殺判定の拒否 480 行（族別の行数の合計）はすべて `coeff·m` の項が閾値を超えていて、`|V_str − V|` の項だけで超えた行は 0 件。両方が超えたのは CE 系 3 族の 48 行（16 行ずつ）と Triplet の 40 行で、いずれも `coeff·m` の項が単独でも超える。`flag` 経路（f32 再現値で組む経路）で拒否されたのは Triplet の 72 行（`p = 10`・`p = 50`）だけで、Cosine と CE は 0 件。
+- **REQ-2 内なのに拒否される行が多い**: 相殺判定の拒否 480 行のうち 304 行（既定 CE 47・CEWO-weight 47・CEWO-smooth 47・Cosine 50・Triplet 113）は、実際の f32 の二階が f64 の閉じた式と REQ-2 の閾値の 1/4 未満で一致している。この 304 行の見積りの余裕 `err/閾値` は 1.001〜3.6e8（中央値 15.5）で、余裕の大きさだけでは「過剰」と「真に外れる」を区別できない（余裕が 1e3 を超える拒否 192 行のうち、REQ-2 内は CE 系 3 族の 14 行ずつ＋Triplet 26 行の 68 行、中間は Triplet 8 行、真に外れるのは 116 行）。
+- **真に外れる行は拒否のままであるべき**: CE の「両方」16 行（確信度の高い行 `margin ≥ 20` ＋大きな上流）、Cosine の `d = 1` の平行な行 16 行、Triplet の `p = 50`・上流 `2^20` などで REQ-2 比は 1 を超え、判定は正しい。
+- `pair_info` で拒否したのは Triplet の 4 行（`d = 64, 512`・`r = 1e-6`・`p = 1.5`・swap on。どの理由かは未分類）で、この 4 行は手組みの構造を作れないため REQ-2 比は未測定。
+- 受理 176 行（CE 系 3 族 × 18 + Cosine 96 + Triplet 26）はすべて REQ-2 比が 1 未満（最大 1.35e-2）で、「判定を通ったのに REQ-2 を外す」行は 0 件（soundness の観察）。
+
+#### 入力の軸ごとの判定の現れ方（`A` 受理・`o` 過剰・`m` 中間・`T` 真に外れる・`f` `flag` 経路で過剰・`M*`/`T*` `flag` 経路で中間／真に外れる・`P` pair_info）
+
+既定 CE（1 サンプル。列は余裕 5・10・20・40 × 上流 `2^0`・`2^13`・`2^20`。CEWO は同じ）:
+
+| C \ 余裕, 上流 | 5 | 5 | 5 | 10 | 10 | 10 | 20 | 20 | 20 | 40 | 40 | 40 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2 | A | A | A | A | T | T | A | T | T | A | o | o |
+| 10 | A | A | A | A | o | o | A | T | T | A | o | o |
+| 100 | A | A | A | o | o | o | o | T | T | o | o | o |
+| 1000 | A | A | A | o | o | o | o | T | T | o | o | o |
+| 2000 | o | o | o | o | o | o | m | T | T | o | o | o |
+| 2100 | o | o | o | o | o | o | m | T | T | o | o | o |
+| 4000 | o | o | o | o | o | o | m | T | T | o | o | o |
+
+- 軸長 `C` が 1000 以下だと余裕 5 は受理され、2000 以上では余裕 5 でも上流 `2^0` から拒否される（余裕 5・`C = 2000` で `err/閾値` = 1.106、`2100` で 1.154、`4000` で 2.06。実際の REQ-2 比は 4.6e-4〜2.4e-3）。拒否は対角の曲率 `Softmax の対角の曲率`（`1 − y_j` の相殺）で決まり、`rounding_coeff(C)` が `C` に比例して増える（`C = 2000` で 4.8e-4、`4000` で 9.5e-4）ことで相対の閾値 `5e-4` に近づく。親が書く「`C` が約 2000 を境に非対角が相対判定に収まらなくなる」境界は、この入力の範囲では対角の曲率が先に拒否するため非対角の判定としては観測できていない（`C ≥ 2096` で `rounding_coeff(C) > 5e-4` になること自体は式のとおり）。
+- 余裕 10 以上では `C = 100` から、REQ-2 比 2〜6e-2 の入力が上流 `2^0` でも拒否される（余裕 10・`C = 100`・`2^0` の `err/閾値` は 4.86、実際の REQ-2 比 2.5e-2）。
+
+Cosine（`d × (δ, y, 上流)`。24 列を `δ ∈ {0, 1e-2, 1e-4, 1e-6}`・`y ∈ {+1, −1}`・上流 `{2^0, 2^13, 2^20}` の順に並べた 1 行の文字列）:
+
+| d | 判定の並び |
+|---|---|
+| 1 | `oTToTTmTTmTTmTTmTTmTTmTT`（d = 1 は平行そのもので ε の吸収により真に外れる行が 16 行） |
+| 2, 8, 64 | すべて `A`（72 行） |
+| 512, 2048, 4096 | `A`（上流 `2^0`）と `o`（`2^13`・`2^20`）の繰り返し（上流が大きいと `coeff·m` の項が閾値を超え、実際の REQ-2 比は 6.8e-4〜8.2e-3） |
+
+Triplet（上流 `2^0`。`r × d` の行、`p` ごとに swap off・on の 2 列）:
+
+| (r, d) | p=2 | p=1.5 | p=3 | p=10 | p=50 |
+|---|---|---|---|---|---|
+| 1e-1, 2 | A A | A A | o o | o o | M* M* |
+| 1e-1, 8 | A A | A A | o o | o o | M* M* |
+| 1e-1, 64 | A A | o o | o o | o o | M* M* |
+| 1e-1, 512 | o o | o o | o o | o o | M* M* |
+| 1e-3, 64 | o o | o o | o o | o f | M* M* |
+| 1e-3, 512 | m m | o o | o o | o f | M* M* |
+| 1e-6, 64 | o o | o P | o o | f f | M* M* |
+| 1e-6, 512 | o o | o P | o o | f f | M* M* |
+
+- Triplet の `p = 50` は `flag` 経路（f32 の `|u|^p`・norm 再現の丸め）で拒否され、REQ-2 比は 0.38（中間）。上流 `2^20` では `T*` になる。`p = 10` で支配成分が 1 でほかが 1e-6 の行は、真値自体が `1e-43` 台で f32 の二階が 0 でも REQ-2 内（`f`）。
+
+#### 代表行
+
+余裕は `err/閾値`（1 以上で拒否）。`REQ-2 比` は f32 の二階を f64 の閉じた式と比べた最大値（x への二階／`g` への二階）。
+
+| 族 | 入力 | 上流 | 公開経路 | 余裕 | 経路 | REQ-2 比 x／g |
+|---|---|---|---|---|---|---|
+| CE | `C=100`・余裕 10 | 2^0 | 相殺判定 `coeff·m` のみ | 4.86 | 非 flag | 2.5e-2／2.5e-2 |
+| CE | `C=2100`・余裕 10 | 2^0 | 相殺判定 `coeff·m` のみ | 23.3 | 非 flag | 2.1e-2／2.3e-2 |
+| CE | `C=2`・余裕 20 | 2^13 | 相殺判定 両方 | 1.56e3 | 非 flag | 1.59（真に外れる）／1.9e-4 |
+| CEWO-weight | `C=100`・余裕 10 | 2^0 | 相殺判定 `coeff·m` のみ | 4.86 | 非 flag | 2.5e-2／2.6e-2 |
+| CEWO-smooth | `C=1000`・余裕 10 | 2^0 | 相殺判定 `coeff·m` のみ | 22.8 | 非 flag | 1.9e-2／1.4e-2 |
+| Cosine | `d=512`・`δ=1e-2`・`y=+1` | 2^20 | 相殺判定 `coeff·m` のみ | 1.32 | 非 flag | 6.1e-3／1.1e-4 |
+| Cosine | `d=2048`・`δ=0`・`y=−1` | 2^13 | 相殺判定 `coeff·m` のみ | 2.11 | 非 flag | 1.7e-3／1.2e-5 |
+| Cosine | `d=4096`・`δ=1e-4`・`y=+1` | 2^13 | 相殺判定 `coeff·m` のみ | 1.95 | 非 flag | 2.6e-3／1.2e-4 |
+| Cosine | `d=1`・`δ=0`（`x1=x2` の平行） | 2^20 | 相殺判定 `coeff·m` のみ | 1.1e7 | 非 flag | 2.0e5（真に外れる）／1.3e-5 |
+| Triplet | `d=64`・`r=1e-1`・`p=3`・swap off | 2^0 | 相殺判定 `coeff·m` のみ | 7.04 | 非 flag | 2.4e-2／1.6e-4 |
+| Triplet | 同・swap on | 2^0 | 相殺判定 `coeff·m` のみ | 7.04 | 非 flag | 2.4e-2／1.6e-4 |
+| Triplet | `d=512`・`r=1e-1`・`p=2` | 2^0 | 相殺判定 `coeff·m` のみ（g への二階） | 1.00 | 非 flag | 7.4e-4／8.0e-4 |
+| Triplet | `d=64`・`r=1e-3`・`p=1.5` | 2^0 | 相殺判定 `coeff·m` のみ | 2.48 | 非 flag | 2.0e-2／5.1e-4 |
+| Triplet | `d=64`・`r=1e-6`・`p=10` | 2^0 | 相殺判定 `coeff·m` のみ | 55.4 | flag | 6e-43／7e-50 |
+| Triplet | `d=8`・`r=1e-1`・`p=50` | 2^0 | 相殺判定 `coeff·m` のみ | 386 | flag | 0.38（中間）／5e-47 |
+| Triplet | `d=2`・`r=1e-1`・`p=3` | 2^20 | 相殺判定 `coeff·m` のみ | 35.6 | 非 flag | 0.55（中間）／1.3e-4 |
+
+### 82.3 誤差の構成の観察
+
+観察した範囲の事実だけを書く（一般化はしない）。
+
+- 見積りの `coeff` は CE では軸長 `C`、Cosine・Triplet では行の幅 `d` に比例する（`(2d+4)·2^-23`。Triplet はさらに `p` と差分の条件数 `κ` に比例する項が加わる）。受理と拒否の境は、同じ入力でも `d`・`C` と上流の大きさで動く（Cosine は `d = 64` まで受理、`d = 512` 以上は上流 `2^13` 以上で拒否。拒否された `d ≥ 512` の実際の REQ-2 比は 6.8e-4〜8.2e-3）。
+- 実際の f32 の二階の REQ-2 比は、Cosine の拒否された `d = 512〜4096` で 6.8e-4〜8.2e-3 に収まり、`d` に比例しては増えない（`coeff` は `d` に比例して増える）。保守的な `coeff·m` の増え方と実際の誤差の増え方が揃っていない。
+- Triplet の `m`（絶対値和）に `p` が効く: `p = 3` は `p = 2`・`p = 1.5` より小さい `d` から拒否される（`d = 2` から）。`p = 50` は `d` に依らず `flag` 経路で、f32 の `|u|^p` が丸め誤差の見積りを超えてずれる。
+- 余裕の大きさでは「過剰」と「真に外れる」を分けられない: 過剰の拒否の余裕は 1.001〜3.6e8、真に外れる拒否の余裕は 3.3〜2.3e9 に及ぶ（CE の余裕 40 に上流 `2^20` を掛けた行は、余裕 2e5〜2e8 でも REQ-2 比 4e-7〜1.7e-3）。後続が受理に変える範囲を決めるには、余裕ではなく `Lin` による精密な上界（#4090 以降）が要る。
+
+### 82.4 後続で受理に変える入力
+
+選定基準: (a) 現在、相殺判定の `coeff·m` の項だけで拒否される（段検査・`pair_info`・非有限での拒否は除く）、(b) 実際の f32 の二階（x と `g`）が、独立な f64 の閉じた式と REQ-2 の閾値の 1/4 以内で一致、(c) 参照の f64 の丸めの不確かさ（項の絶対値和 × `4·2^-52` を同じ閾値で割った比）が 5% 未満、(d) 既存の拒否プローブの入力と重ならない、(e) 決定的に再構成できる、(f) 族ごとに少なくとも 1 件（Triplet は `flag` 経路を含める）。Cosine には `flag` 経路で拒否される入力が計測の範囲に無く、候補は非 `flag` のみ（82.5）。
+
+候補（テストの関数名で再利用できる）:
+
+| 族 | 関数 | 入力 | 現在の拒否 | 余裕 | REQ-2 比 x／g |
+|---|---|---|---|---|---|
+| 既定 CE | `ce_followup_candidates()` | `C=100`・余裕 10・`2^0` | 相殺判定 `coeff·m` のみ・非 flag | 4.86 | 2.5e-2／2.5e-2 |
+| 既定 CE | 同 | `C=2100`・余裕 10・`2^0` | 同 | 23.3 | 2.1e-2／2.3e-2 |
+| CEWO-weight | 同 | `C=100`・余裕 10・`2^0`（Mean・`W=w_t`） | 同 | 4.86 | 2.5e-2／2.6e-2 |
+| CEWO-smooth | 同 | `C=1000`・余裕 10・`2^0` | 同 | 22.8 | 1.9e-2／1.4e-2 |
+| Cosine | `cosine_followup_candidates()` | `d=512`・`δ=1e-2`・`y=+1`・`2^20` | 同 | 1.32 | 6.1e-3／1.1e-4 |
+| Cosine | 同 | `d=2048`・`δ=0`・`y=−1`・`2^13` | 同 | 2.11 | 1.7e-3／1.2e-5 |
+| Cosine | 同 | `d=4096`・`δ=1e-4`・`y=+1`・`2^13` | 同 | 1.95 | 2.6e-3／1.2e-4 |
+| Triplet | `triplet_followup_candidates()` | `d=64`・`r=1e-1`・`p=3`・swap off・`2^0` | 同 | 7.04 | 2.4e-2／1.6e-4 |
+| Triplet | 同 | 同・swap on | 同 | 7.04 | 2.4e-2／1.6e-4 |
+| Triplet | 同 | `d=512`・`r=1e-1`・`p=2`・swap off（`g` 経路） | 同 | 1.00 | 7.4e-4／8.0e-4 |
+| Triplet | 同 | `d=64`・`r=1e-3`・`p=1.5`・swap off | 同 | 2.48 | 2.0e-2／5.1e-4 |
+| Triplet | 同 | `d=64`・`r=1e-6`・`p=10`・swap off（`flag` 経路） | 同・flag | 55.4 | 6e-43／7e-50 |
+
+入力の再構成（いずれも `loss_class_tests.rs` の定義）:
+
+- `pattern(n, phase)[i] = sin((i+phase)·0.731)·0.9 + 0.2`。
+- CE: logits は `0.1·pattern(C, 0)` の target（添字 1）に余裕を足す。`CEWO-weight` の重みは `0.5 + 0.4·sin(i·0.731)`（Mean）、`CEWO-smooth` は `label_smoothing = 0.1`（Sum）。上流は損失に 2 のべき乗を掛けて作る。
+- Cosine: `a = pattern(d, 0)`、`b = a + δ·pattern(d, 3)`、margin 0。
+- Triplet: `a = pattern(d, 0)`、`a − p = [1, r·(0.5+0.4 sin(0.731k))…]`、`a − n = [−2, r·(0.7+0.2 cos(0.5k))…]`、margin 1000、eps 0。
+
+f64 の参照は閉じた式（判定の `v` は使わない）:
+
+- CE: `∂dx_j/∂x_i = s·A·y_j·(δ_ij − y_i)`（対角の `1 − y_j` は他クラスの和で作る）、`g` への二階 `(A·y_j − B_j)/W`。
+- Cosine: `m1 = |a|²+ε`、`m2 = |b|²+ε`、`den = √(m1·m2)`、`c = a·b/den` として `H_aa = −(b aᵀ + a bᵀ)/(den·m1) + 3c·a aᵀ/m1² − c·I/m1`、`H_ab = I/den − b bᵀ/(den·m2) − a g_bᵀ/m1`（`g_b = a/den − c b/m2`）。`dx2` は a と b を入れ替える。`g` への二階は `cf·g_a`。
+- Triplet: `‖v‖_p` のヘッセ行列 `(1/‖v‖)·(diag((p−1)q^(p−2)) − (p−1)(s⊙e)(s⊙e)ᵀ)`（`q = |v|/‖v‖_p`、`e = q^(p−1)`、対角は `(p−1)q^(p−2)(1 − q^p)` で `1 − q^p` は他成分の和）を 3 ペア（ap・an・pn）の係数で組み合わせる。
+
+小さな O(1) の入力では、閉じた式を f64 の勾配の中央差分と突き合わせた（`ce_closed_form_matches_f64_central_difference`・`cosine_closed_form_matches_f64_central_difference`・`triplet_closed_form_matches_f64_central_difference`）。手組みの構造が本番と一致することは、受理される入力で公開経路の二階と bit 一致（符号付きゼロは同一視）で確かめた（`ce_hand_built_structure_matches_public_path`・`cosine_hand_built_structure_matches_public_path`・`triplet_hand_built_structure_matches_public_path`）。
+
+回帰テスト `loss_class_followup_candidates_are_req2_within_f64`（通常の単体テスト。モジュール全体で約 0.3 秒、debug）が、上の候補について (1) 現在の拒否の分類（相殺判定の `coeff·m` のみ・`flag` 経路の別）、(2) x と `g` の REQ-2 比 < 0.25 と参照の不確かさ < 5% を固定する。後続が候補を受理に変えたら `verdict` の assert を受理へ更新し、REQ-2 比の assert は残す。`existing_rejection_probes_stay_rejected_and_truly_fail_req2` が、既存の拒否プローブに近い入力（CE の確信度の高い行・Cosine の平行な行）が拒否のままで REQ-2 を外すことを固定する。
+
+### 82.5 GPU・スコープ外・変えていないもの・未測定
+
+- GPU 実機 parity は未実測のまま。CPU の値で代替しない（Phase 10 の #3857・#3859）。
+- 未測定（本イシューの範囲で測っていない）: 複数サンプルの行・`ignore_index`・Triplet の eps ≠ 0・Mean の Cosine／Triplet・`an_coeff` が 0.5 の swap の同点・`pair_info` で拒否した Triplet 4 行の REQ-2 比。`flag` 経路で拒否される Cosine の入力は、この軸の範囲では見つからなかった（非 `flag` のみ）。
+- スコープ外: MultiMargin・MultiLabelMargin・MultiLabelSoft（#4071 の対象外）、`Lin` の exp 規則（#4092）、`JUDGE_BUDGET`（#4072）。
+- 変えていないもの: 判定・本番経路・tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・依存・`docs/spec`・公開 API・既存の拒否プローブ。
+
+### 82.6 後続の追記先
+
+- #4090／#4091（Cosine）、#4093／#4094（CE・CEWO。#4092 に依存）、#4095／#4096（Triplet）が、それぞれの結果を 82.6 以降へ追記する。82.4 の入力を使い、受理に変えたときの余裕を同じ表の形で記録する。

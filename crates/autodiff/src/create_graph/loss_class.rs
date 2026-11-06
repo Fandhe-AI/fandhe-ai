@@ -98,7 +98,61 @@ fn struct_check(
     coeff: f64,
     what: &str,
 ) -> Result<(), AutodiffError> {
-    judge::struct_check(v, v_str, m, scale, coeff, what, invalid)
+    let r = judge::struct_check(v, v_str, m, scale, coeff, what, invalid);
+    // 計測用の記録（`#[cfg(test)]` 限定。判定の戻り値は変えず、そのまま返す）。
+    #[cfg(test)]
+    probe::check(what, [v, v_str, m, scale, coeff], r.is_ok());
+    r
+}
+
+/// 拒否の内訳の計測（イシュー #4089・設計 §82）用の記録フック。`#[cfg(test)]` のみでコンパイルされ、
+/// 本番ビルドには一切含まれない。[`struct_check`] の各呼び出しの入力と合否、および `deviates` が
+/// 真になった行（`flag`。f32 再現値で組む経路）を、テストが開始した記録（`loss_class_tests.rs` の
+/// `Probe`）にだけ積む。記録の有無で判定・戻り値・エラー文面は変わらない（迂回経路ではない）。
+#[cfg(test)]
+pub(super) mod probe {
+    use std::cell::RefCell;
+
+    /// 記録 1 件。`Check` は `struct_check` の 1 呼び出し、`Flag` は行の `flag`（族名つき）。
+    #[derive(Clone, Debug)]
+    pub(in crate::create_graph) enum Event {
+        Check {
+            what: String,
+            /// `[v, v_str, m, scale, coeff]`
+            vals: [f64; 5],
+            ok: bool,
+        },
+        Flag(&'static str, bool),
+    }
+
+    thread_local! {
+        pub(in crate::create_graph) static LOG: RefCell<Option<Vec<Event>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(super) fn check(what: &str, vals: [f64; 5], ok: bool) {
+        // 合格の呼び出しは数が膨大（O(d^2)・O(C^2)）なので積まず、拒否した呼び出しだけを積む。
+        if ok {
+            return;
+        }
+        LOG.with(|l| {
+            if let Some(log) = l.borrow_mut().as_mut() {
+                log.push(Event::Check {
+                    what: what.to_string(),
+                    vals,
+                    ok,
+                });
+            }
+        });
+    }
+
+    pub(super) fn flag(family: &'static str, f: bool) {
+        LOG.with(|l| {
+            if let Some(log) = l.borrow_mut().as_mut() {
+                log.push(Event::Flag(family, f));
+            }
+        });
+    }
 }
 
 /// f32 で再現した値 `v_str` が構造と f64 で同じ（`v_str == v`）とみなせる要素の [`struct_check`]。
@@ -540,6 +594,8 @@ fn cewo_cancel_check(
         let y = ys[j];
         let ys32 = y32[j];
         flag |= deviates(y, ys32, y, coeff);
+        #[cfg(test)]
+        probe::flag("CrossEntropy", flag);
         // `1 − y_j` は他クラスの和で求める（`y_j` が 1 に近い行で f64 の差も桁落ちさせない）。
         let rest = if 2.0 * e[j] > total {
             e.iter()
@@ -578,6 +634,8 @@ fn cewo_cancel_check(
             top2 = y;
         }
     }
+    #[cfg(test)]
+    probe::flag("CrossEntropy", flag);
     if flag {
         // f32 の再現値が丸め誤差の見積りを超えてずれる行（確率の underflow 等）は、非対角
         // `−s_b·A·y_i·y_j` も要素ごとに f32 の再現値で組んだ値と参照を比べる。
@@ -1277,6 +1335,8 @@ fn cosine_cancel_check(
         || deviates(m2, f64::from(m2_32), m2, coeff)
         || deviates(den, f64::from(den32), den, coeff)
         || deviates(cos, f64::from(cos32), cos_m, coeff);
+    #[cfg(test)]
+    probe::flag("Cosine", flag);
     let side = |own: &[f64], other: &[f64], m_own, s_own, s_other, den, cos| CosSide {
         own: own.to_vec(),
         other: other.to_vec(),
@@ -1658,6 +1718,8 @@ fn triplet_cancel_check(
             .collect()
     };
     let flag = deviates(1.0, rho, 1.0, coeff) || pr.iter().flatten().any(|(_, _, f)| *f);
+    #[cfg(test)]
+    probe::flag("Triplet", flag);
     for terms in &outputs {
         let ts = live(terms);
         for j in 0..d {
@@ -1943,3 +2005,7 @@ pub(super) fn triplet_cgrad<'c>(
         push_v3(child, &wrap(&dn)?, hn)?,
     ))
 }
+
+#[cfg(test)]
+#[path = "loss_class_tests.rs"]
+mod tests;
