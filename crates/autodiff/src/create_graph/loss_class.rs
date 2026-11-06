@@ -53,8 +53,7 @@
 
 use fandhe_ai_tensor_core::Tensor;
 
-use super::{child_value, push_v3, reduce_dim_bcast};
-use crate::create_graph_norm::STAGE_BOUND_GUARD;
+use super::{child_value, judge, push_v3, reduce_dim_bcast};
 use crate::error::AutodiffError;
 use crate::loss_ops::{CrossEntropyOptions, TripletMarginOptions};
 use crate::tape::{NodeId, Tape, TapeNode, materialize_fallible};
@@ -69,20 +68,14 @@ fn invalid(msg: &str) -> AutodiffError {
 /// 1 段の上界 `v`（f64）を検査する。NaN のレーンは伝播させるため素通し、非有限または
 /// `STAGE_BOUND_GUARD` 以上は拒否する。
 fn stage(v: f64) -> Result<(), AutodiffError> {
-    if v.is_nan() {
-        return Ok(());
-    }
-    if !v.is_finite() || v.abs() >= STAGE_BOUND_GUARD {
-        return Err(invalid("構造の中間値が f32 範囲を超えうる入力のため拒否"));
-    }
-    Ok(())
+    judge::stage(v, invalid)
 }
 
 /// 相殺（桁落ち）検査の丸め誤差係数 `(2·terms + 4)·2^-23`（`linalg_fft.rs::rounding_ok` と同じ形）。
 /// `terms` は構造の最長の縮約長（Cosine・Triplet は行の幅 `d`、CEWO は Softmax の軸長 `C` 等）。
 /// 縮約が f32 の逐次和でも成り立つ最悪値として長さに比例させる。
 fn rounding_coeff(terms: usize) -> f64 {
-    (2.0 * terms as f64 + 4.0) * (-23f64).exp2()
+    judge::rounding_coeff(terms)
 }
 
 /// f32 構造の 1 要素が REQ-2 の統一複合判定で f64 の参照に一致するかの保守的検査（設計 §55.2 の
@@ -105,20 +98,7 @@ fn struct_check(
     coeff: f64,
     what: &str,
 ) -> Result<(), AutodiffError> {
-    use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
-    if v.is_nan() || m.is_nan() || scale.is_nan() {
-        return Ok(());
-    }
-    let err = (v_str - v).abs() + coeff * m;
-    let bound = err * scale;
-    if bound.is_finite()
-        && (bound < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * v.abs())
-    {
-        return Ok(());
-    }
-    Err(invalid(&format!(
-        "{what}: f32 構造の丸め・相殺・underflow で二階が REQ-2 の判定を外れうるため拒否"
-    )))
+    judge::struct_check(v, v_str, m, scale, coeff, what, invalid)
 }
 
 /// f32 で再現した値 `v_str` が構造と f64 で同じ（`v_str == v`）とみなせる要素の [`struct_check`]。
@@ -163,16 +143,7 @@ fn g_scale(reduction: Reduction, n: usize) -> f64 {
 
 /// 上流 `g`（スカラー）の絶対値を返す（有限・単一要素を要求し、段検査も通す）。
 fn upstream_abs(g_value: &Tensor<f32>) -> Result<f64, AutodiffError> {
-    let data = crate::eval::dense_vec(g_value);
-    let Some(&gv) = data.first() else {
-        return Err(invalid("上流勾配が空"));
-    };
-    if data.len() != 1 || !gv.is_finite() {
-        return Err(invalid("上流勾配が非有限（または非スカラ）のため拒否"));
-    }
-    let gv = f64::from(gv).abs();
-    stage(gv)?;
-    Ok(gv)
+    judge::upstream_abs(g_value, invalid)
 }
 
 /// reduction 後の scale 上界 `|g|/n`（Mean）／`|g|`（Sum）。
@@ -181,47 +152,25 @@ fn upstream_scale(
     reduction: Reduction,
     n: usize,
 ) -> Result<f64, AutodiffError> {
-    let gv = upstream_abs(g_value)?;
-    Ok(match reduction {
-        Reduction::Mean => gv / n as f64,
-        Reduction::Sum => gv,
-    })
+    judge::upstream_scale(g_value, reduction, n, invalid)
 }
 
 /// 子テープの `loss_scale_bcast` が f32 で作る `s_b`（Mean は `g / (n as f32)`、Sum は `g`）の再現。
 fn upstream_scale32(g_value: &Tensor<f32>, reduction: Reduction, n: usize) -> f32 {
-    let g = crate::eval::dense_vec(g_value)
-        .first()
-        .copied()
-        .unwrap_or(0.0);
-    match reduction {
-        Reduction::Mean => g / n as f32,
-        Reduction::Sum => g,
-    }
+    judge::upstream_scale32(g_value, reduction, n)
 }
 
 /// `g` への cotangent 上界（要素寄与の絶対値和 × 要素あたりの係数 `1/n`／`1`）を検査する。
 fn check_g_cotangent(sum_abs: f64, reduction: Reduction, n: usize) -> Result<(), AutodiffError> {
-    let v = match reduction {
-        Reduction::Mean => sum_abs / n as f64,
-        Reduction::Sum => sum_abs,
-    };
-    stage(v)
+    judge::check_g_cotangent(sum_abs, reduction, n, invalid)
 }
 
 fn dense(parent: &Tape, parent_nodes: &[TapeNode], id: NodeId) -> Result<Vec<f32>, AutodiffError> {
-    Ok(crate::eval::dense_vec(materialize_fallible(
-        parent_nodes,
-        parent.ops(),
-        id,
-    )?))
+    judge::dense(parent, parent_nodes, id)
 }
 
 fn reject_inf(values: &[&[f32]]) -> Result<(), AutodiffError> {
-    if values.iter().any(|v| v.iter().any(|x| x.is_infinite())) {
-        return Err(invalid("入力に ±inf を含むため拒否"));
-    }
-    Ok(())
+    judge::reject_inf(values, invalid)
 }
 
 fn zeros_like<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffError> {

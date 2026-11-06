@@ -85,8 +85,8 @@ use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLER
 use fandhe_ai_tensor_core::weight_reparam::{self as wr};
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
-use super::{child_value, push_v3};
-use crate::create_graph_norm::{STAGE_BOUND_GUARD, pow2_ceil_exponent};
+use super::{child_value, judge, push_v3};
+use crate::create_graph_norm::pow2_ceil_exponent;
 use crate::error::AutodiffError;
 use crate::eval::dense_vec;
 use crate::tape::{NodeId, Op, Tape, TapeNode, materialize_fallible};
@@ -101,7 +101,7 @@ fn invalid(msg: &str) -> AutodiffError {
 
 /// 構造の 1 段の上界 `v`（f64）を判定する。非有限または `2^125` 以上なら型付きエラー。
 fn stage(v: f64, what: &str) -> Result<(), AutodiffError> {
-    if v.is_finite() && v.abs() < STAGE_BOUND_GUARD {
+    if judge::stage_strict_ok(v) {
         Ok(())
     } else {
         Err(invalid(&format!(
@@ -139,25 +139,14 @@ fn tensor_const<'c>(
 
 /// 丸め誤差係数 `(2·terms + 4)·2^-23`。`terms` は構造の最長の縮約長。
 fn rounding_coeff(terms: usize) -> f64 {
-    (2.0 * terms as f64 + 4.0) * (-23f64).exp2()
+    judge::rounding_coeff(terms)
 }
 
 /// 1 要素の構造値 `v_str`（f32）が参照値 `v` に REQ-2 の統一複合判定で一致するかの保守的検査。
 /// `m` は同じ式を各項の絶対値の和で評価した大きさ。NaN の参照値（ホストの 1 階が NaN の要素）は伝播の
 /// 契約に従い素通しにする。参照値が有限なら `m` が NaN でも拒否する（有限の要素を検査なしで通さない）。
 fn struct_check(v: f64, v_str: f64, m: f64, coeff: f64, what: &str) -> Result<(), AutodiffError> {
-    if v.is_nan() {
-        return Ok(());
-    }
-    let err = (v_str - v).abs() + coeff * m;
-    if err.is_finite()
-        && (err < ABSOLUTE_RESCUE_THRESHOLD || err <= (RELATIVE_TOLERANCE / 2.0) * v.abs())
-    {
-        return Ok(());
-    }
-    Err(invalid(&format!(
-        "{what}: f32 構造の丸め・相殺・underflow で二階が REQ-2 の判定を外れうるため拒否"
-    )))
+    judge::struct_check_unscaled(v, v_str, m, coeff, what, invalid)
 }
 
 /// 子テープ上の構造 `composed` の実値を 1 階のホスト値 `host` と要素ごとに突き合わせる（構造を積んだ後の
@@ -2125,6 +2114,7 @@ pub(super) fn spectral_norm_cgrad<'c>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::create_graph_norm::STAGE_BOUND_GUARD;
 
     #[test]
     fn stage_rejects_large_or_nonfinite() {
