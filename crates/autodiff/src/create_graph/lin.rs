@@ -247,6 +247,10 @@ struct LinArena {
     residual: Vec<bool>,
     /// 疎モード（[`lin_reset_sparse`]）か。`false`（既定・[`lin_reset`]）なら演算の結果を一切まとめない。
     sparse: bool,
+    /// 事象ごとの `μ` の種別別の内訳（`mus` と同じ長さ。計測用の `#[cfg(test)]` 限定。添字は `BD_*`。
+    /// 合計は `mus` と等しい。`settle`・疎モードの残余事象は、まとめた事象の内訳の和を持つ）。
+    #[cfg(test)]
+    comps: Vec<[f64; BD_KINDS]>,
 }
 
 /// [`lin_mark`] が返す領域の印（値の数・係数の長さ・事象の数）。
@@ -316,6 +320,100 @@ pub(super) fn lin_group_cost(rest: usize) -> usize {
 /// [`Lin`] を使う判定の走査量の上限。超える（グループ数が多い）テンソルは全グループを従来の `norm_reparam.rs` の `Rf` で判定する
 /// （グループの位置で判定方式が変わらないよう、テンソル単位で選ぶ）。
 pub(super) const LIN_BUDGET: usize = 1 << 26;
+
+// 上界の内訳の計測用（`#[cfg(test)]` 限定。非テストビルドには存在せず、本番の挙動・生成コードを変えない。イシュー #4132・
+// 決定記録 §82.15）。事象に種別（`BD_*`）を付け、(1) 種別ごとの上界への寄与を分けて読む（[`lin_breakdown`]）、
+// (2) ある種別の `μ` を 0 にして forward から計算し直す（アブレーション。[`BdAblate`]）。
+/// 事象の種別: 演算（加減乗除・平方根）の結果の丸め。
+#[cfg(test)]
+pub(super) const BD_ROUND: u8 = 0;
+/// 事象の種別: 定数を f32 へ丸めた誤差（`Lin::k`）。
+#[cfg(test)]
+pub(super) const BD_CONST: u8 = 1;
+/// 事象の種別: 多項の和の最悪値 `γ_{n−1}·Σ|v|`（[`Num::total`]）。
+#[cfg(test)]
+pub(super) const BD_TOTAL: u8 = 2;
+/// 事象の種別: libm（`exp`・`powf`）の事象のうち ulp の項（`LIBM_F32_MAX_ULP` ぶんと非正規化数の絶対項）。
+#[cfg(test)]
+pub(super) const BD_LIBM_ULP: u8 = 3;
+/// 事象の種別: libm の事象のうち二次の剰余・指数の差の項（`rems` に持つ分）。
+#[cfg(test)]
+pub(super) const BD_LIBM_REM: u8 = 4;
+/// 事象の種別: 上記以外（上界なしの NaN・残余事象・`settle`）。
+#[cfg(test)]
+pub(super) const BD_OTHER: u8 = 5;
+/// 種別の数。
+#[cfg(test)]
+pub(super) const BD_KINDS: usize = 6;
+
+#[cfg(test)]
+thread_local! {
+    /// 0 にする種別の集合（ビット `1 << BD_*`）。`0` なら通常の挙動。
+    static ABLATE_MASK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// 種別 `kind` が 0 にする対象なら 0、そうでなければ `mu`。
+#[cfg(test)]
+fn abl(kind: u8, mu: f64) -> f64 {
+    if ABLATE_MASK.with(|m| m.get()) & (1 << kind) != 0 {
+        0.0
+    } else {
+        mu
+    }
+}
+
+/// スコープの間だけ種別の集合を 0 にする（drop で元に戻す）。
+#[cfg(test)]
+pub(super) struct BdAblate(u32);
+
+#[cfg(test)]
+impl BdAblate {
+    pub(super) fn new(kinds: &[u8]) -> Self {
+        let mask = kinds.iter().fold(0u32, |m, k| m | (1 << k));
+        BdAblate(ABLATE_MASK.with(|c| c.replace(mask)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for BdAblate {
+    fn drop(&mut self) {
+        ABLATE_MASK.with(|c| c.set(self.0));
+    }
+}
+
+/// `r` の上界 `Σ|c|·μ` を種別ごとに分けた値（添字は `BD_*`）。合計は [`Lin::bound`] と同じ（総和の順序の差を除く）。
+#[cfg(test)]
+pub(super) fn lin_breakdown(r: Lin) -> [f64; BD_KINDS] {
+    LIN_ARENA.with(|a| {
+        let a = a.borrow();
+        let (s, l) = a.spans[r.id];
+        let mut out = [0.0; BD_KINDS];
+        for &(k, c) in &a.coefs[s..s + l] {
+            for (o, x) in out.iter_mut().zip(&a.comps[k as usize]) {
+                *o += c.abs() * x;
+            }
+        }
+        out
+    })
+}
+
+#[cfg(test)]
+impl LinArena {
+    /// 事象 `ev` の内訳を、種別 `kind` が `mu` だけ（ほかは 0）にする。
+    fn set_comp(&mut self, ev: u32, kind: u8, mu: f64) {
+        let mut comp = [0.0; BD_KINDS];
+        comp[kind as usize] = mu;
+        self.comps[ev as usize] = comp;
+    }
+
+    /// libm の事象 `ev` の内訳を、剰余項 `rem` と ulp 項（`μ − rem`）に分ける。
+    fn set_libm_comp(&mut self, ev: u32, rem: f64) {
+        let mut comp = [0.0; BD_KINDS];
+        comp[BD_LIBM_ULP as usize] = self.mus[ev as usize] - rem;
+        comp[BD_LIBM_REM as usize] = rem;
+        self.comps[ev as usize] = comp;
+    }
+}
 
 // 計測用の計数器（`#[cfg(test)]` 限定。非テストビルドには存在せず、生成コードを変えない）。
 // イシュー #4076 の計測テスト（`tests::lin_judge_cost_profile`）が判定時間の内訳を読む。#4078（疎化）が
@@ -407,6 +505,8 @@ pub(super) fn lin_truncate(mark: LinMark) {
         a.coefs.truncate(mark.coefs);
         a.mus.truncate(mark.mus);
         a.residual.truncate(mark.mus);
+        #[cfg(test)]
+        a.comps.truncate(mark.mus);
     });
 }
 
@@ -465,6 +565,12 @@ impl LinArena {
     fn push_event(&mut self, mu: f64) -> u32 {
         self.mus.push(mu);
         self.residual.push(false);
+        #[cfg(test)]
+        {
+            let mut comp = [0.0; BD_KINDS];
+            comp[BD_ROUND as usize] = mu;
+            self.comps.push(comp);
+        }
         (self.mus.len() - 1) as u32
     }
 
@@ -496,6 +602,8 @@ impl LinArena {
         }
         let thr = fold_frac() * bound / len as f64;
         let (mut drops, mut dropped) = (0usize, 0.0f64);
+        #[cfg(test)]
+        let mut dcomp = [0.0f64; BD_KINDS];
         for &(k, c) in &self.coefs[start..] {
             let w = c.abs() * mus[k as usize];
             if self.residual[k as usize] || w < thr {
@@ -503,6 +611,10 @@ impl LinArena {
                     drops += 1;
                 }
                 dropped += w;
+                #[cfg(test)]
+                for (d, x) in dcomp.iter_mut().zip(&self.comps[k as usize]) {
+                    *d += c.abs() * x;
+                }
             }
         }
         if drops < 2 {
@@ -525,6 +637,11 @@ impl LinArena {
         self.coefs.truncate(w);
         let ev = self.push_event(dropped + 2.0 * len as f64 * f64::EPSILON * bound);
         self.residual[ev as usize] = true;
+        #[cfg(test)]
+        {
+            dcomp[BD_OTHER as usize] += 2.0 * len as f64 * f64::EPSILON * bound;
+            self.comps[ev as usize] = dcomp;
+        }
         self.coefs.push((ev, 1.0));
         // まとめた時点の性質(受け入れ条件 1)を、疎モードで走る全テストの全まとめ箇所で検査する。
         #[cfg(test)]
@@ -602,6 +719,8 @@ impl Lin {
     /// `borrow_mut` 1 回の中で行い、途中に別の値を作らない。
     fn binary(self, o: Self, v: f64, ka: f64, kb: f64) -> Self {
         let mu = LIN_U * v.abs() + LIN_TINY;
+        #[cfg(test)]
+        let mu = abl(BD_ROUND, mu);
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
             let start = a.comb(self.id, ka, o.id, kb);
@@ -643,9 +762,14 @@ impl Num for Lin {
         } else {
             0.0
         };
+        #[cfg(test)]
+        let err = abl(BD_CONST, err);
         let term = (err > 0.0).then(|| {
             LIN_ARENA.with(|a| {
-                let ev = a.borrow_mut().push_event(err);
+                let mut a = a.borrow_mut();
+                let ev = a.push_event(err);
+                #[cfg(test)]
+                a.set_comp(ev, BD_CONST, err);
                 (ev, 1.0)
             })
         });
@@ -679,6 +803,8 @@ impl Num for Lin {
     fn root(self) -> Self {
         let r = self.v.sqrt();
         let mu = LIN_U * r.abs() + LIN_TINY;
+        #[cfg(test)]
+        let mu = abl(BD_ROUND, mu);
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
             let start = a.map_copy(self.id, |c| c / (2.0 * r));
@@ -730,10 +856,18 @@ impl Num for Lin {
         if !mu.is_finite() {
             return reject();
         }
+        #[cfg(test)]
+        let (mu, rem) = {
+            let raw = ya * (ade * l + z * z + ae * rho * rho + 2.0 * ade * rho);
+            let rem = abl(BD_LIBM_REM, raw);
+            (abl(BD_LIBM_ULP, mu - raw) + rem, rem)
+        };
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
             let start = a.map_copy(self.id, |c| c * k);
             let ev = a.push_event(mu);
+            #[cfg(test)]
+            a.set_libm_comp(ev, rem);
             a.coefs.push((ev, 1.0));
             a.pool_small_terms(start);
             a.finish(start)
@@ -767,10 +901,18 @@ impl Num for Lin {
         if !mu.is_finite() {
             return reject();
         }
+        #[cfg(test)]
+        let (mu, rem) = {
+            let raw = ya * b * b;
+            let rem = abl(BD_LIBM_REM, raw);
+            (abl(BD_LIBM_ULP, mu - raw) + rem, rem)
+        };
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
             let start = a.map_copy(self.id, |c| c * y);
             let ev = a.push_event(mu);
+            #[cfg(test)]
+            a.set_libm_comp(ev, rem);
             a.coefs.push((ev, 1.0));
             a.pool_small_terms(start);
             a.finish(start)
@@ -805,6 +947,8 @@ impl Num for Lin {
         let abs: f64 = terms.iter().map(|x| x.v.abs()).sum();
         let k = n.saturating_sub(1) as f64 * LIN_U;
         let mu = k / (1.0 - k) * abs + n as f64 * LIN_TINY;
+        #[cfg(test)]
+        let mu = abl(BD_TOTAL, mu);
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
             let a = &mut *a;
@@ -836,6 +980,8 @@ impl Num for Lin {
             a.reserve_coefs(a.scratch.len() + 1);
             a.coefs.extend_from_slice(&a.scratch);
             let ev = a.push_event(mu);
+            #[cfg(test)]
+            a.set_comp(ev, BD_TOTAL, mu);
             a.coefs.push((ev, 1.0));
             a.pool_small_terms(start);
             a.finish(start)
@@ -860,16 +1006,26 @@ impl Num for Lin {
             let start = a.coefs.len();
             a.reserve_coefs(l + 1);
             let mut mu = 0.0f64;
+            #[cfg(test)]
+            let mut dcomp = [0.0f64; BD_KINDS];
             for i in s..s + l {
                 let (k, c) = a.coefs[i];
                 if keep.binary_search(&k).is_ok() {
                     a.coefs.push((k, c));
                 } else {
                     mu += c.abs() * a.mus[k as usize];
+                    #[cfg(test)]
+                    for (d, x) in dcomp.iter_mut().zip(&a.comps[k as usize]) {
+                        *d += c.abs() * x;
+                    }
                 }
             }
             if mu != 0.0 {
                 let ev = a.push_event(mu);
+                #[cfg(test)]
+                {
+                    a.comps[ev as usize] = dcomp;
+                }
                 a.coefs.push((ev, 1.0));
             }
             a.finish(start)
@@ -899,7 +1055,13 @@ fn le(a: f64, b: f64) -> bool {
 impl Lin {
     /// 上界を持たない値（常に拒否される）。係数の NaN で表す。
     fn unbounded(v: f64, t: bool) -> Self {
-        let ev = LIN_ARENA.with(|a| a.borrow_mut().push_event(f64::NAN));
+        let ev = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            let ev = a.push_event(f64::NAN);
+            #[cfg(test)]
+            a.set_comp(ev, BD_OTHER, f64::NAN);
+            ev
+        });
         Lin::make(v, Some((ev, 1.0)), t)
     }
 }
