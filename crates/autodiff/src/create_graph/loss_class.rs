@@ -48,8 +48,8 @@
 //! g 経路、MultiMargin・MultiLabelMargin・MultiLabelSoft の定数と g 経路、MultiLabelSoft の σ の
 //! 曲率である。保証はこの判定を通った入力に限る。
 //!
-//! Cosine と CE・CEWO は、この見積りが拒否した要素に限り `Lin`（丸めの一次伝播）の上界で再評価して救う
-//! （Cosine は #4091・設計 §82.8、CE・CEWO は #4094・設計 §82.11）。
+//! Cosine・CE・CEWO・Triplet は、この見積りが拒否した要素に限り `Lin`（丸めの一次伝播）の上界で再評価して救う
+//! （Cosine は #4091・設計 §82.8、CE・CEWO は #4094・設計 §82.11、Triplet は #4096・設計 §82.13）。
 //! 救済は片方の見積りが通れば受理する形なので拒否範囲は従来以下で、走査量が大きいテンソルは従来のまま。
 //!
 //! 既定オプションの `CrossEntropyLoss` も同じ CEWO の相殺判定を `A = 1`・`B = onehot`・`W = n` で通す
@@ -2415,7 +2415,7 @@ struct PairRow {
 /// 符号 `s`（`sign0` の結果。`+1`／`-1`／`0`）を掛けた値。`s > 0` は恒等、`s < 0` は符号反転、`s == 0` は定数 0。
 /// `Num` に `abs` が無いため、`|x|`（符号が分かっている `x` の絶対値）と、ホスト定数の符号 `sign_c` の乗算の
 /// 両方をこれで書く（`f32` の積は符号に対称に丸めるので `x·s` と bit 一致する。underflow した `±0` も `|x|` と同じ `+0` になる）。
-/// 呼び出し元: [`tri_fwd`]・test 限定の [`tri_rev_pair`]（#4095）。
+/// 呼び出し元: [`tri_fwd`]・[`tri_pair_seed`]・[`tri_pair_lane`]（#4095 で導入、#4096 で本番の判定が使う）。
 fn by_sign<T: Num>(x: T, s: f64) -> T {
     if s > 0.0 {
         x
@@ -2427,28 +2427,25 @@ fn by_sign<T: Num>(x: T, s: f64) -> T {
 }
 
 /// Triplet の 1 ペア・1 行の forward の中間値（`u = v·inv`・`ssum`・`N`・`q = |u|/N`・`e = q^(p−1)`・`dg = (p−1)·q^(p−2)`）。
-/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（丸めの一次伝播の上界。#4095。test 限定で使う）。
+/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（丸めの一次伝播の上界。#4095 で導入、#4096 で [`TriLinState`] が判定に使う）。
 struct TriFwd<T> {
     u: Vec<T>,
-    /// `|u|`（[`by_sign`] で作る）。二階の逆伝播のモデル（test 限定）が読む。
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// `|u|`（[`by_sign`] で作る）。二階の逆伝播のモデル（[`tri_pair_seed`]・[`tri_pair_lane`]）が読む。
     au: Vec<T>,
-    /// p=2 は `Σu²`、一般の p は `Σ|u|^p`（構造の `ssum`）。二階の逆伝播のモデル（test 限定）が読む。
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// p=2 は `Σu²`、一般の p は `Σ|u|^p`（構造の `ssum`）。二階の逆伝播のモデルが読む。
     ssum: T,
     norm: T,
-    #[cfg_attr(not(test), expect(dead_code))]
     q: Vec<T>,
     e: Vec<T>,
     dg: Vec<T>,
 }
 
 /// [`TriFwd`] を `T` の演算で組む。`v`＝差分 `(x−y)+eps`（`T` ごとの値。本番は `f64` が `triplet_distance_stats` の差分、
-/// `f32` が `row32` の再構成、test の `Lin` が [`tri_v`] で `minus`／`plus` の丸めの事象つきに作る）、`signs`＝各レーンの
+/// `f32` が `row32` の再構成、`Lin` が [`tri_v`] で `minus`／`plus` の丸めの事象つきに作る）、`signs`＝各レーンの
 /// 差分の符号（`|u|` の組み立てに使う。`f64` は `sign0(h)`、`f32`・`Lin` は `sign0(rec)`）、`inv32`＝行スケールの逆数
 /// （f32 で厳密）、`p`＝`(p64, p32)`。
 ///
-/// 呼び出し元: [`triplet_pair_row`]（`f64` の参照と `f32` の再現。本番）と test の `Lin` 並行計算（`triplet_lin_rows`）。
+/// 呼び出し元: [`triplet_pair_row`]（`f64` の参照と `f32` の再現）と [`TriLinState`]（`Lin` と `f32` の並行計算。#4096）。
 /// 演算順は従来の `triplet_pair_row` の逐語の式と同じ（bit 一致は test の `triplet_pair_row_generic_matches_previous_formulas` が錠）。
 /// 指数は `e as f32` に頼らず `p32` から f32 で作った値（`1.0/p32`・`p32-1.0`・`p32-2.0`）を明示して渡す。
 fn tri_fwd<T: Num>(v: &[T], signs: &[f64], inv32: f32, p: (f64, f32)) -> TriFwd<T> {
@@ -2565,12 +2562,12 @@ fn triplet_pair_row(
 }
 
 // ---------------------------------------------------------------------------------
-// Triplet の二階の逆伝播のモデル（test 限定。#4095・設計 §82.12）
+// Triplet の二階の逆伝播のモデル（#4095 で test 限定として導入、#4096 で本番の判定が使う。設計 §82.12・§82.13）
 // ---------------------------------------------------------------------------------
 
 /// Triplet の 1 ケース（`[1, d]` の 1 行・全要素 active）の入力と、本番の前段（`pair_info`）が作る離散量。
-/// `tri_rev` のモデルが読む。拒否される入力・全要素 0 の行・NaN の行は作れない（[`triplet_setup`] が `None`）。
-#[cfg(test)]
+/// 二階の逆伝播のモデル（[`tri_seed`]・[`tri_x`]）が読む。全要素 0 の行・符号が食い違う行は作れない
+/// （[`tri_setup_row`] が `None`）。
 pub(super) struct TriSetup {
     /// ペア `ap`・`an`・`pn` の `(x, y)`（差分 `v = (x − y) + eps`。`pn` は swap のときだけ使う）。
     pub(super) rows: [(Vec<f32>, Vec<f32>); 3],
@@ -2590,9 +2587,91 @@ pub(super) struct TriSetup {
     an_kind: u8,
 }
 
-/// [`TriSetup`] を作る（`triplet_cgrad` の前段と同じ `triplet_distance_stats`・`pair_info`）。
-/// `sign0(rec) ≠ sign0(h)` のレーンがある入力も `None`（`|u|` の一次の写しが健全でなくなるため。本番ではその食い違いを
-/// `flag`〈`sa` の不一致〉が検出する）。
+impl TriSetup {
+    /// `Lin` の救済に使ってよい行か。一般の p では二階の逆伝播が f32 の `u = rec·inv` の符号（`Abs` の VJP の `sa`）で
+    /// 分岐する。微小成分が `u` で 0 へ underflow すると `sa = 0` になり、モデルは離散量ごと「その成分の曲率が 0」の
+    /// 値を作る（`Lin.v` も 0 になって f32 の値と一致してしまう）。真の曲率は f64 の符号 `sg` の側で非ゼロなので、
+    /// `Lin` の上界は実際のずれを覆えない。そのため `sa ≠ sg` のレーンがある行は救済しない（従来の判定が残る。
+    /// p=2 の構造は `sa` を使わず `u/N` が連続なので対象外。設計 §82.13.1）。
+    fn rescuable(&self) -> bool {
+        self.p == 2.0 || (0..if self.swap { 3 } else { 2 }).all(|k| self.sa[k] == self.sg[k])
+    }
+}
+
+/// `an_coeff`（swap でなければ 1）の分類（[`TriSetup`] の `an_kind`）。
+fn an_kind_of(c_an: f64) -> u8 {
+    if c_an >= 1.0 {
+        0
+    } else if c_an <= 0.0 {
+        1
+    } else {
+        2
+    }
+}
+
+/// 行の入力と `pair_info` の結果から [`TriSetup`] を作る（本番の判定〈[`TriLinState`]〉とテストの `triplet_setup` が共有）。
+/// `rows = (a, p, n)` は幅 `d` の行、`infos[k]` はペア `k`（0 = ap、1 = an、2 = pn。pn は swap のときだけ）の `pair_info` の
+/// 結果を `base` から読む。次の行は `None`（`Lin` の救済をしない。従来の判定がそのまま残る。設計 §82.13.1。
+/// `u` の underflow による符号の食い違いは [`TriSetup::rescuable`] が別に見る）:
+/// - 生きているペアの `info.zero`（全要素 0。従来はそのペアの寄与を除外する）
+/// - 差分の f32 再構成の符号が f64 の差分の符号と食い違うレーンがある（`|u|` の一次の写しが健全でなくなるため。
+///   本番ではその食い違いを `flag`〈`sa` の不一致〉が検出する）
+fn tri_setup_row(
+    rows: (&[f32], &[f32], &[f32]),
+    opts: (f32, f32, bool),
+    up: (f64, Option<usize>),
+    infos: [Option<&PairInfo>; 3],
+    base: usize,
+    an_kind: u8,
+) -> Option<TriSetup> {
+    let (eps, p, swap) = opts;
+    let d = rows.0.len();
+    let pairs: [(&[f32], &[f32]); 3] = [(rows.0, rows.1), (rows.0, rows.2), (rows.1, rows.2)];
+    let mut inv32 = [1f32; 3];
+    let mut sg: [Vec<f64>; 3] = Default::default();
+    let mut s_abs: [Vec<f64>; 3] = Default::default();
+    let mut sa: [Vec<f64>; 3] = Default::default();
+    for k in 0..if swap { 3 } else { 2 } {
+        let info = infos[k]?;
+        if info.zero[base] {
+            return None;
+        }
+        let (x, y) = pairs[k];
+        let rec: Vec<f32> = (0..d).map(|i| (x[i] - y[i]) + eps).collect();
+        s_abs[k] = rec.iter().map(|&c| sign0(f64::from(c))).collect();
+        sg[k] = info.sign[base..base + d]
+            .iter()
+            .map(|&s| f64::from(s))
+            .collect();
+        if s_abs[k] != sg[k] {
+            return None;
+        }
+        inv32[k] = info.inv_mx[base];
+        sa[k] = rec
+            .iter()
+            .map(|&c| sign0(f64::from(c * info.inv_mx[base])))
+            .collect();
+    }
+    Some(TriSetup {
+        rows: [
+            (rows.0.to_vec(), rows.1.to_vec()),
+            (rows.0.to_vec(), rows.2.to_vec()),
+            (rows.1.to_vec(), rows.2.to_vec()),
+        ],
+        eps,
+        p,
+        swap,
+        up,
+        inv32,
+        sg,
+        s_abs,
+        sa,
+        an_kind,
+    })
+}
+
+/// [`TriSetup`] を作る（`triplet_cgrad` の前段と同じ `triplet_distance_stats`・`pair_info`。test 限定）。
+/// 前段で拒否される入力・全要素 0 の行・NaN の行・符号が食い違う行は `None`。
 #[cfg(test)]
 pub(super) fn triplet_setup(
     rows: (&[f32], &[f32], &[f32]),
@@ -2618,65 +2697,36 @@ pub(super) fn triplet_setup(
         crate::eval::triplet_distance_stats(&a64, &p64v, &n64, 0, d, &params);
     let pairs: [(&[f32], &[f32]); 3] = [(rows.0, rows.1), (rows.0, rows.2), (rows.1, rows.2)];
     let diffs = [diff_ap, diff_an, diff_pn];
-    let mut inv32 = [1f32; 3];
-    let mut sg: [Vec<f64>; 3] = Default::default();
-    let mut s_abs: [Vec<f64>; 3] = Default::default();
-    let mut sa: [Vec<f64>; 3] = Default::default();
+    let mut infos: [Option<PairInfo>; 3] = [None, None, None];
     for k in 0..if swap { 3 } else { 2 } {
         let (x, y) = pairs[k];
         let rec: Vec<f32> = (0..d).map(|i| (x[i] - y[i]) + eps).collect();
         if diffs[k].iter().any(|v| v.is_nan()) {
             return None;
         }
-        let info = pair_info(
-            std::slice::from_ref(&diffs[k]),
-            std::slice::from_ref(&rec),
-            d,
-            p64,
-            sb,
-        )
-        .ok()?;
-        if info.zero[0] {
-            return None;
-        }
-        s_abs[k] = rec.iter().map(|&c| sign0(f64::from(c))).collect();
-        if s_abs[k] != diffs[k].iter().map(|&h| sign0(h)).collect::<Vec<_>>() {
-            return None;
-        }
-        inv32[k] = info.inv_mx[0];
-        sg[k] = info.sign.iter().map(|&s| f64::from(s)).collect();
-        sa[k] = rec
-            .iter()
-            .map(|&c| sign0(f64::from(c * info.inv_mx[0])))
-            .collect();
+        infos[k] = Some(
+            pair_info(
+                std::slice::from_ref(&diffs[k]),
+                std::slice::from_ref(&rec),
+                d,
+                p64,
+                sb,
+            )
+            .ok()?,
+        );
     }
-    let an_kind = if stats.an_coeff >= 1.0 {
-        0
-    } else if stats.an_coeff <= 0.0 {
-        1
-    } else {
-        2
-    };
-    Some(TriSetup {
-        rows: [
-            (rows.0.to_vec(), rows.1.to_vec()),
-            (rows.0.to_vec(), rows.2.to_vec()),
-            (rows.1.to_vec(), rows.2.to_vec()),
-        ],
-        eps,
-        p,
-        swap,
+    let refs = [infos[0].as_ref(), infos[1].as_ref(), infos[2].as_ref()];
+    tri_setup_row(
+        rows,
+        (eps, p, swap),
         up,
-        inv32,
-        sg,
-        s_abs,
-        sa,
-        an_kind,
-    })
+        refs,
+        0,
+        an_kind_of(stats.an_coeff),
+    )
 }
 
 /// 差分 `v = (x − y) + eps` を `T` の演算で作る（`Lin` は `Sub`・`Add` の丸めの事象として差分の桁落ち〈条件数 κ〉を運ぶ）。
-#[cfg(test)]
 fn tri_v<T: Num>(x: &[f32], y: &[f32], eps: f32) -> Vec<T> {
     x.iter()
         .zip(y)
@@ -2688,8 +2738,21 @@ fn tri_v<T: Num>(x: &[f32], y: &[f32], eps: f32) -> Vec<T> {
         .collect()
 }
 
+/// 1 ペアの p ノルム勾配 `core = pair_grad(v)` の二階の逆伝播のうち、seed 要素 `j` で決まりレーン `k` に依らない部分
+/// （p=2 は `d_u_div = up/N`・`d_ssum`、一般の p は `d_au_div`・`d_ssum`）。[`tri_pair_lane`] がレーンごとの値を作る。
+#[derive(Clone, Copy)]
+struct TriPairSeed<T> {
+    d_div: T,
+    d_ssum: T,
+}
+
+/// `PowScalar` の係数 `e·x^(e−1)`（実カーネルは指数も f32 で `e_str − 1.0`）。
+fn tri_pgrad<T: Num>(x: T, e: f64, e_str: f32) -> T {
+    T::k(e).times(x.powf_bounded(e - 1.0, e_str - 1.0))
+}
+
 /// 1 ペアの p ノルム勾配 `core = pair_grad(v)` の二階の逆伝播を `T` の演算で写す（`grad.rs::vjp` の eager VJP の丸めの位置に
-/// 合わせる）。出力要素 `j` に上流 `up` を置いたときの、差分 `v` の各レーンへの cotangent を返す。
+/// 合わせる）。出力要素 `j` に上流 `up` を置いたときの seed 部（レーンに依らない量）を返す。
 ///
 /// 写し方（`eval/scalar.rs::binary_partials`・`unary_grad_factor`）: `Mul` の VJP は `上流·相手の値`、`Div` の係数は
 /// `1/b` と `−(a/b)/b` を先に作ってから上流を掛ける、`PowScalar` の係数は f32 の `e·x^(e−1)`（指数は `e_str` を明示。
@@ -2699,57 +2762,67 @@ fn tri_v<T: Num>(x: &[f32], y: &[f32], eps: f32) -> Vec<T> {
 ///
 /// 注意: 実カーネルの `PowScalar` の係数は `e·x^((p−1)−1)`（`e_str − 1.0`）で、本番の再現 `dg`〈`p32 − 2.0`〉とは指数の
 /// f32 の丸めが違いうる。本関数はカーネルどおりに写す（本番の式は判定不変のため変えない。設計 §82.12）。
-#[cfg(test)]
-fn tri_rev_pair<T: Num>(
+fn tri_pair_seed<T: Num>(
     f: &TriFwd<T>,
-    signs: (&[f64], &[f64]),
-    inv32: f32,
+    sg: &[f64],
     p: (f64, f32),
     j: usize,
     up: T,
-) -> Vec<T> {
-    let (sg, sa) = signs;
+) -> TriPairSeed<T> {
     let (p64, p32) = p;
-    let d = f.u.len();
-    let inv = T::k(f64::from(inv32));
     let one = T::k(1.0);
-    let pgrad = |x: T, e: f64, e_str: f32| T::k(e).times(x.powf_bounded(e - 1.0, e_str - 1.0));
     if p64 == 2.0 {
         let d_u_div = up.times(one.over(f.norm));
         let d_s = up.times(f.u[j].over(f.norm).negate().over(f.norm));
         let d_ssum = d_s.times(f.norm.root_grad());
-        return (0..d)
-            .map(|k| {
-                let t = d_ssum.times(f.u[k]);
-                let dv = if k == j {
-                    T::total(&[t, t, d_u_div])
-                } else {
-                    T::total(&[t, t])
-                };
-                dv.times(inv)
-            })
-            .collect();
+        return TriPairSeed {
+            d_div: d_u_div,
+            d_ssum,
+        };
     }
     let d_e = by_sign(up, sg[j]);
-    let d_q = d_e.times(pgrad(f.q[j], p64 - 1.0, p32 - 1.0));
+    let d_q = d_e.times(tri_pgrad(f.q[j], p64 - 1.0, p32 - 1.0));
     let d_au_div = d_q.times(one.over(f.norm));
     let d_norm = d_q.times(f.q[j].negate().over(f.norm));
-    let d_ssum = d_norm.times(pgrad(f.ssum, 1.0 / p64, 1.0 / p32));
-    (0..d)
-        .map(|k| {
-            let pow_term = d_ssum.times(pgrad(f.au[k], p64, p32));
-            let d_au = if k == j {
-                T::total(&[d_au_div, pow_term])
-            } else {
-                pow_term
-            };
-            by_sign(d_au, sa[k]).times(inv)
-        })
-        .collect()
+    let d_ssum = d_norm.times(tri_pgrad(f.ssum, 1.0 / p64, 1.0 / p32));
+    TriPairSeed {
+        d_div: d_au_div,
+        d_ssum,
+    }
+}
+
+/// [`tri_pair_seed`] の seed `j` に対する、差分 `v` のレーン `k` への cotangent（レーン部）。`sa`＝`Abs` の VJP の符号。
+/// `jk = (j, k)`。
+fn tri_pair_lane<T: Num>(
+    f: &TriFwd<T>,
+    sd: &TriPairSeed<T>,
+    sa: &[f64],
+    inv32: f32,
+    p: (f64, f32),
+    jk: (usize, usize),
+) -> T {
+    let (p64, p32) = p;
+    let (j, k) = jk;
+    let inv = T::k(f64::from(inv32));
+    if p64 == 2.0 {
+        let t = sd.d_ssum.times(f.u[k]);
+        let dv = if k == j {
+            T::total(&[t, t, sd.d_div])
+        } else {
+            T::total(&[t, t])
+        };
+        return dv.times(inv);
+    }
+    let pow_term = sd.d_ssum.times(tri_pgrad(f.au[k], p64, p32));
+    let d_au = if k == j {
+        T::total(&[sd.d_div, pow_term])
+    } else {
+        pow_term
+    };
+    by_sign(d_au, sa[k]).times(inv)
 }
 
 /// [`TriSetup`] の forward を `T` で組む（ペアごとの [`TriFwd`]。swap でなければ 2 本）。
-#[cfg(test)]
 fn tri_setup_fwds<T: Num>(st: &TriSetup) -> Vec<TriFwd<T>> {
     let p = (f64::from(st.p), st.p);
     (0..if st.swap { 3 } else { 2 })
@@ -2761,7 +2834,6 @@ fn tri_setup_fwds<T: Num>(st: &TriSetup) -> Vec<TriFwd<T>> {
 }
 
 /// ペア `k` の勾配 `core_j`（`pair_grad` の出力。p=2 は `u_j/N`、一般の p は `sign_c_j·e_j`）。
-#[cfg(test)]
 fn tri_core<T: Num>(st: &TriSetup, f: &TriFwd<T>, k: usize, j: usize) -> T {
     if st.p == 2.0 {
         f.u[j].over(f.norm)
@@ -2770,14 +2842,19 @@ fn tri_core<T: Num>(st: &TriSetup, f: &TriFwd<T>, k: usize, j: usize) -> T {
     }
 }
 
-/// 出力 `o`（0 = da、1 = dp、2 = dn）の要素 `j` を seed にした二階（`triplet_cgrad` の構造の eager 逆伝播の写し）。
-/// 戻り値は `[wrt(a, p, n, g)]` の行（g は 1 要素）。上流 `s_b`（Sum は `g`、Mean は f32 の `g/n`）、`g` への二階は
-/// `W_o[j]`（Mean は `Div` の係数 `1/n` を f32 で先に作って掛ける）。`swap` では `ean`・`epn` の mask
-/// （`m_one`／`m_half`〈`half` の `Mul`〉／`m_zero`）を通る。
-#[cfg(test)]
-fn tri_rev<T: Num>(st: &TriSetup, f: &[TriFwd<T>], o: usize, j: usize) -> Vec<Vec<T>> {
+/// 出力 `o`（0 = da、1 = dp、2 = dn）の要素 `j` を seed にした二階の seed 部。
+#[derive(Clone, Copy)]
+struct TriSeed<T> {
+    /// ペア別の seed 部（`None` は勾配が流れない、または swap でないときの pn）。
+    pairs: [Option<TriPairSeed<T>>; 3],
+    /// `g` への二階 `W_o[j]`（Mean は `Div` の係数 `1/n` を f32 で先に作って掛ける）。
+    g: T,
+}
+
+/// 出力 `o` の要素 `j` を seed にした二階の seed 部（`triplet_cgrad` の構造の eager 逆伝播の写し）。上流 `s_b`（Sum は `g`、
+/// Mean は f32 の `g/n`）、`swap` では `ean`・`epn` の mask（`m_one`／`m_half`〈`half` の `Mul`〉／`m_zero`）を通る。
+fn tri_seed<T: Num>(st: &TriSetup, f: &[TriFwd<T>], o: usize, j: usize) -> TriSeed<T> {
     let p = (f64::from(st.p), st.p);
-    let d = f[0].u.len();
     let s = match st.up.1 {
         Some(n) => T::input(st.up.0).over(T::k(n as f64)),
         None => T::input(st.up.0),
@@ -2834,40 +2911,60 @@ fn tri_rev<T: Num>(st: &TriSetup, f: &[TriFwd<T>], o: usize, j: usize) -> Vec<Ve
             w,
         )
     };
-    let dv: Vec<Option<Vec<T>>> = (0..3)
-        .map(|k| {
-            if k >= f.len() {
-                return None;
-            }
-            ups[k].map(|up| tri_rev_pair(&f[k], (&st.sg[k], &st.sa[k]), st.inv32[k], p, j, up))
-        })
-        .collect();
-    let pick = |k: usize, i: usize, neg: bool| -> Option<T> {
-        dv[k]
-            .as_ref()
-            .map(|v| if neg { v[i].negate() } else { v[i] })
-    };
-    let leaf = |terms: &dyn Fn(usize) -> [Option<T>; 2]| -> Vec<T> {
-        (0..d)
-            .map(|i| {
-                let t: Vec<T> = terms(i).into_iter().flatten().collect();
-                match t.len() {
-                    0 => T::k(0.0),
-                    1 => t[0],
-                    _ => T::total(&t),
-                }
-            })
-            .collect()
-    };
-    // a は ap・an の `+`、p は ap の `−` と pn の `+`、n は an・pn の `−`。
-    let ga = leaf(&|i| [pick(0, i, false), pick(1, i, false)]);
-    let gp = leaf(&|i| [pick(0, i, true), pick(2, i, false)]);
-    let gn = leaf(&|i| [pick(1, i, true), pick(2, i, true)]);
+    let pairs = [0, 1, 2].map(|k| {
+        if k >= f.len() {
+            return None;
+        }
+        ups[k].map(|up| tri_pair_seed(&f[k], &st.sg[k], p, j, up))
+    });
     let g = match st.up.1 {
         Some(n) => w.times(T::k(1.0).over(T::k(n as f64))),
         None => w,
     };
-    vec![ga, gp, gn, vec![g]]
+    TriSeed { pairs, g }
+}
+
+/// seed `(o, j)` の入力 `wrt`（0 = a、1 = p、2 = n）のレーン `i` への二階 1 要素（レーン部。`ij = (i, j)`）。a は ap・an の `+`、
+/// p は ap の `−` と pn の `+`、n は an・pn の `−`。寄与が 2 つ以上なら [`Num::total`]、なければ 0。
+fn tri_x<T: Num>(
+    st: &TriSetup,
+    f: &[TriFwd<T>],
+    sd: &TriSeed<T>,
+    wrt: usize,
+    ij: (usize, usize),
+) -> T {
+    let p = (f64::from(st.p), st.p);
+    let (i, j) = ij;
+    let pick = |k: usize, neg: bool| -> Option<T> {
+        sd.pairs[k].map(|s| {
+            let v = tri_pair_lane(&f[k], &s, &st.sa[k], st.inv32[k], p, (j, i));
+            if neg { v.negate() } else { v }
+        })
+    };
+    let terms: [Option<T>; 2] = match wrt {
+        0 => [pick(0, false), pick(1, false)],
+        1 => [pick(0, true), pick(2, false)],
+        _ => [pick(1, true), pick(2, true)],
+    };
+    let t: Vec<T> = terms.into_iter().flatten().collect();
+    match t.len() {
+        0 => T::k(0.0),
+        1 => t[0],
+        _ => T::total(&t),
+    }
+}
+
+/// 出力 `o` の要素 `j` を seed にした二階の全要素（test 限定。[`tri_seed`]・[`tri_x`] の合成）。戻り値は
+/// `[wrt(a, p, n, g)]` の行（g は 1 要素）。#4095 の soundness 掃引と bit 一致の錠が使う。
+#[cfg(test)]
+fn tri_rev<T: Num>(st: &TriSetup, f: &[TriFwd<T>], o: usize, j: usize) -> Vec<Vec<T>> {
+    let d = f[0].u.len();
+    let sd = tri_seed(st, f, o, j);
+    let mut out: Vec<Vec<T>> = (0..3)
+        .map(|wrt| (0..d).map(|i| tri_x(st, f, &sd, wrt, (i, j))).collect())
+        .collect();
+    out.push(vec![sd.g]);
+    out
 }
 
 /// [`tri_rev`] を `f32` で評価した二階（`[o][wrt(a, p, n, g)]`。seed 要素 `j`）。構造の演算の写しで、手組みの構造の実測と並べて
@@ -2885,12 +2982,12 @@ pub(super) struct TriLinRows {
     pub(super) events: usize,
 }
 
-/// `Lin` で forward と seed ごとの逆伝播を評価し、各要素の値と上界を返す（`[seed]`。test 限定。#4095）。厳密モード
-/// （[`lin_reset`]）で forward を 1 回作り、seed ごとに [`lin_mark`]／[`lin_truncate`] で領域を戻す。`Num::settle` と走査量の
-/// 上限は入れない（判定への配線は #4096）。
+/// `Lin` で forward と seed ごとの逆伝播を評価し、各要素の値と上界を返す（`[seed]`。test 限定。#4095 の soundness 掃引・計測用）。
+/// 厳密モード（[`lin_reset`]）で forward を 1 回作り、seed ごとに [`lin_mark`]／[`lin_truncate`] で領域を戻す。`Num::settle` と走査量の
+/// 上限は入れない（本番の判定は [`TriLinState`]。#4096）。
 #[cfg(test)]
 pub(super) fn triplet_lin_rows(st: &TriSetup, seeds: &[usize]) -> Vec<TriLinRows> {
-    use super::lin::{Lin, lin_events, lin_mark, lin_reset, lin_truncate};
+    use super::lin::lin_events;
     lin_reset();
     let f = tri_setup_fwds::<Lin>(st);
     let mark = lin_mark();
@@ -2915,6 +3012,169 @@ pub(super) fn triplet_lin_rows(st: &TriSetup, seeds: &[usize]) -> Vec<TriLinRows
     out
 }
 
+/// Triplet の `Lin` 判定の入力（行に依らない量）。`g` は子テープ上の上流（符号つきの f32 の値）、`mean_n` は Mean の分母、
+/// `x` は 9 ブロックの要素の救済走査（O(9·d³)）を許すか（[`tri_lin_ctx`] が走査量の上限で決める。`g` への二階の救済は
+/// `Some` なら常に許す）。
+#[derive(Clone, Copy)]
+struct TriLinCtx {
+    g: f64,
+    mean_n: Option<usize>,
+    x: bool,
+}
+
+/// 事象の総数の上界（forward のペアごとの丸めと seed のスカラー、要素 1 つ分）。実測と固定は
+/// `loss_class_tests.rs::triplet_lin_events_stay_within_bound`（設計 §82.13）。
+fn tri_lin_events_max(d: usize, swap: bool) -> usize {
+    let pairs = if swap { 3 } else { 2 };
+    TRI_LIN_EVENTS_PER_PAIR_LANE
+        .saturating_mul(pairs)
+        .saturating_mul(d)
+        .saturating_add(TRI_LIN_EVENTS_FIXED)
+}
+
+/// [`tri_lin_events_max`] のペア 1 本・レーン 1 つあたりの事象数（差分・`u`・`|u|^p`・`q`・`e`・`dg` の丸め）。
+const TRI_LIN_EVENTS_PER_PAIR_LANE: usize = 8;
+/// [`tri_lin_events_max`] の定数分（`ssum`・`norm`、seed のスカラー、`Mean` の `n`、要素 1 つ分、swap の mask）。
+const TRI_LIN_EVENTS_FIXED: usize = 120;
+
+/// 1 行の `g` への二階（forward ＋ 全 `(o, j)` の `g` の要素）の走査量の見積り（`Rf` の 1 反復相当。`LIN_BUDGET` と同じ単位）。
+/// forward のハブ値（`ssum`・`norm`）の係数列が O(d) なので forward は O(pairs·d²)、`g` の要素は 3d 個で、seed のスカラー
+/// （ハブ値に依る演算）がそれぞれ O(pairs·d)。実測は設計 §82.13.2。
+fn tri_lin_cost_g(d: usize, swap: bool) -> usize {
+    let pairs = if swap { 3 } else { 2 };
+    TRI_LIN_COST_FWD
+        .saturating_add(TRI_LIN_COST_G.saturating_mul(3))
+        .saturating_mul(pairs)
+        .saturating_mul(d)
+        .saturating_mul(d)
+        .saturating_add(TRI_LIN_COST_ROW)
+}
+
+/// 9 ブロックの全 `9d²` 要素の救済走査の走査量の見積り。要素あたりの `Lin` 演算が O(d)（ハブ値の係数列を引く）。
+fn tri_lin_cost_x(d: usize) -> usize {
+    TRI_LIN_COST_X
+        .saturating_mul(9)
+        .saturating_mul(d)
+        .saturating_mul(d)
+        .saturating_mul(d)
+        .saturating_add(TRI_LIN_COST_ROW)
+}
+
+/// forward のペア 1 本・`d²` あたり。
+const TRI_LIN_COST_FWD: usize = 30;
+/// `g` の要素 1 つ（seed のスカラー）のペア 1 本・`d` あたり。
+const TRI_LIN_COST_G: usize = 18;
+/// 9 ブロックの要素 1 つの `d` あたり。
+const TRI_LIN_COST_X: usize = 10;
+/// 行ごとの固定分（小さい `d` の下駄）。
+const TRI_LIN_COST_ROW: usize = 3000;
+
+/// Triplet の総括判定で [`Lin`] の上界を使うか、使うなら 9 ブロックの要素の救済走査まで許すか（テンソル単位。
+/// `ce_lin_ctx` と同じ 2 段階）。事象の総数が余裕係数の上限（`16·事象数·u < 0.01`）に収まり、かつ `g` の走査量が
+/// [`LIN_BUDGET`] 以内のときだけ `Some`。要素まで含めた走査量も収まるときだけ `x = true`。満たさないテンソルは従来の
+/// 見積りだけで判定する（受理集合は従来と同じ。走査量の上限を超えたら `Lin` を使わない形で守る。設計 §82.13）。
+/// `n_rows` は判定する活性な行の数。
+fn tri_lin_ctx(
+    g: f64,
+    mean_n: Option<usize>,
+    n_rows: usize,
+    d: usize,
+    swap: bool,
+) -> Option<TriLinCtx> {
+    #[cfg(test)]
+    if probe::FORCE_OLD.with(|f| f.get()) {
+        return None;
+    }
+    if 16.0 * tri_lin_events_max(d, swap) as f64 * LIN_U >= 0.01 {
+        return None;
+    }
+    let cg = n_rows.saturating_mul(tri_lin_cost_g(d, swap));
+    if cg > LIN_BUDGET {
+        return None;
+    }
+    let x = cg.saturating_add(n_rows.saturating_mul(tri_lin_cost_x(d))) <= LIN_BUDGET;
+    Some(TriLinCtx { g, mean_n, x })
+}
+
+/// [`TriLinState`] が持つ seed `(o, j)` のスカラー（`Lin` 版と f32 版）と、その直後の領域の印。
+type TriLinSeed = (usize, usize, LinMark, TriSeed<Lin>, TriSeed<f32>);
+
+/// Triplet の 1 行の [`Lin`] 判定の状態。forward は行で最初に必要になったとき 1 回だけ作り、seed のスカラーは
+/// `(o, j)` が変わるたびに作り直し、要素ごとの値は作ってすぐ [`lin_truncate`] で戻す（判定時の事象数を forward ＋ seed の
+/// スカラー ＋ 要素 1 つ分に抑え、`entry_check_lin` の余裕係数の条件を満たしやすくする。`entry_check_lin` は判定時点の
+/// 全体の事象数を余裕に使うので、要素ごとの truncate は必須）。`Drop` で thread-local の領域を解放する。
+/// `f32` 側はカーネルどおりに写したモデル（`dg32` の `p32 − 2.0` は使わない）なので `Lin` の健全性は指数の食い違いに依らない。
+struct TriLinState {
+    st: TriSetup,
+    lin: Vec<TriFwd<Lin>>,
+    f32m: Vec<TriFwd<f32>>,
+    fwd_mark: LinMark,
+    cur: Option<TriLinSeed>,
+}
+
+impl TriLinState {
+    fn new(st: TriSetup) -> Self {
+        lin_reset();
+        let lin = tri_setup_fwds::<Lin>(&st);
+        let f32m = tri_setup_fwds::<f32>(&st);
+        TriLinState {
+            st,
+            lin,
+            f32m,
+            fwd_mark: lin_mark(),
+            cur: None,
+        }
+    }
+
+    fn seed(&mut self, o: usize, j: usize) -> (LinMark, TriSeed<Lin>, TriSeed<f32>) {
+        if let Some((oo, jj, m, a, b)) = self.cur
+            && oo == o
+            && jj == j
+        {
+            return (m, a, b);
+        }
+        lin_truncate(self.fwd_mark);
+        let a = tri_seed(&self.st, &self.lin, o, j);
+        let b = tri_seed(&self.st, &self.f32m, o, j);
+        let m = lin_mark();
+        self.cur = Some((o, j, m, a, b));
+        (m, a, b)
+    }
+
+    /// seed `(o, j)` の二階の要素（`wrt = None` は `g`、`Some(w)` は入力 `w` のレーン `i`。`ji = (j, i)`）が
+    /// [`entry_check_lin`] を通るか。
+    fn ok(&mut self, o: usize, wrt: Option<usize>, ji: (usize, usize), what: &str) -> bool {
+        let (j, i) = ji;
+        let (mark, a, b) = self.seed(o, j);
+        let ok = match wrt {
+            None => entry_check_lin(a.g, b.g, what, invalid).is_ok(),
+            Some(w) => {
+                let l = tri_x(&self.st, &self.lin, &a, w, (i, j));
+                let s = tri_x(&self.st, &self.f32m, &b, w, (i, j));
+                entry_check_lin(l, s, what, invalid).is_ok()
+            }
+        };
+        lin_truncate(mark);
+        ok
+    }
+}
+
+impl Drop for TriLinState {
+    fn drop(&mut self) {
+        lin_reset();
+    }
+}
+
+/// [`TriLinState`] を作るのに要る 1 行の入力（[`triplet_cancel_check`] が最初に拒否した要素で遅延して作る）。
+struct TriRowInput<'a> {
+    rows: (&'a [f32], &'a [f32], &'a [f32]),
+    /// `(eps, p, swap)`。
+    opts: (f32, f32, bool),
+    infos: [Option<&'a PairInfo>; 3],
+    base: usize,
+    an_kind: u8,
+}
+
 /// Triplet の 1 行の総括判定（設計 §55.2。相殺・f32 の underflow）。
 ///
 /// 1 ペアの p ノルム勾配 `core_j = sign(u_j)·(|u_j|/N)^(p−1)` の二階は、v のレーン i へ
@@ -2927,12 +3187,21 @@ pub(super) fn triplet_lin_rows(st: &TriSetup, seeds: &[usize]) -> Vec<TriLinRows
 /// `V_str` との差で拒否される。`coeff` は幅 `d` と `p`、差分の再構成の条件数 `κ`
 /// （`(|x − y| + |eps|)/|v|`）から呼び出し元が作る。f32 の再現値がどれも `coeff` 以内で一致し、かつ
 /// O(d) の速い経路で絶対判定を満たすブロックは O(d²) の走査を省く。
+///
+/// **`Lin` の上界による救済（#4096・設計 §82.13）**: 上の見積り（`coeff·m`）が拒否した要素だけ、丸めの一次伝播
+/// [`Lin`] の上界（[`TriLinState`]）で評価し直し、閾値内なら受理する（[`lin_elem`]）。どちらの見積りも独立に健全
+/// なので片方が通れば REQ-2 の判定は成り立ち、従来の受理を拒否へ変えることは構造的に起きない（判定は緩めず、
+/// 過剰な拒否を減らす向きだけ）。`lin = Some` はテンソル単位の条件 [`tri_lin_ctx`]（走査量と事象数の上限。9 ブロックの
+/// 要素の救済は `ctx.x` のときだけ）を満たすときだけで、満たさないテンソルは従来の見積りのまま。全要素 0 のペア・
+/// 差分の符号が食い違う行・上界を持たない要素（巨大な p・非正規数域等）は救済せず従来の判定が残る。
+/// `fast_ok` の速い経路・`flag` の式・`coeff` の式は変えていない。
 fn triplet_cancel_check(
     pr: &[Option<(PairRow, PairRow, bool)>; 3],
     coefs: (f64, f64),
     d: usize,
     scales: (f64, f64, f64),
     coeff: f64,
+    lin: Option<(TriLinCtx, TriRowInput<'_>)>,
 ) -> Result<(), AutodiffError> {
     let (c_an, c_pn) = coefs;
     let (sb, gs, rho) = scales;
@@ -2963,23 +3232,45 @@ fn triplet_cancel_check(
     let flag = deviates(1.0, rho, 1.0, coeff) || pr.iter().flatten().any(|(_, _, f)| *f);
     #[cfg(test)]
     probe::flag("Triplet", flag);
-    for terms in &outputs {
+    // `Lin` の上界の状態（従来の見積りが最初に拒否した要素で 1 回だけ作る。`Drop` で領域を解放する）。外側の `Option` は
+    // 未作成、内側の `None` は救済しない行（[`tri_setup_row`] が `None`）。
+    let mut lin_state: Option<Option<TriLinState>> = None;
+    // `wrt = None` は `g` への二階、`Some(w)` は入力 `w`。`o` は出力、`(j, i)` は seed とレーン。
+    let mut rescue = |o: usize, wrt: Option<usize>, ji: (usize, usize), what: &str| -> bool {
+        let Some((ctx, inp)) = lin.as_ref() else {
+            return false;
+        };
+        if wrt.is_some() && !ctx.x {
+            return false;
+        }
+        let ctx = *ctx;
+        let slot = lin_state.get_or_insert_with(|| {
+            tri_setup_row(
+                inp.rows,
+                inp.opts,
+                (ctx.g, ctx.mean_n),
+                inp.infos,
+                inp.base,
+                inp.an_kind,
+            )
+            .filter(TriSetup::rescuable)
+            .map(TriLinState::new)
+        });
+        slot.as_mut().is_some_and(|s| s.ok(o, wrt, ji, what))
+    };
+    for (o, terms) in outputs.iter().enumerate() {
         let ts = live(terms);
         for j in 0..d {
             let v: f64 = ts.iter().map(|(r, _, w)| w * r.sg[j] * r.e[j]).sum();
             let v_str: f64 = ts.iter().map(|(_, st, w)| w * st.sg[j] * st.e[j]).sum();
             let m: f64 = ts.iter().map(|(r, _, w)| w.abs() * r.e[j]).sum();
-            struct_check(
-                v,
-                v_str,
-                m,
-                gs,
-                coeff,
-                "Triplet: g への二階（ペア勾配の差し引き・f32 の underflow）",
-            )?;
+            const G_WHAT: &str = "Triplet: g への二階（ペア勾配の差し引き・f32 の underflow）";
+            lin_elem([v, v_str, m, gs, coeff], G_WHAT, || {
+                rescue(o, None, (j, 0), G_WHAT)
+            })?;
         }
     }
-    for terms in &blocks {
+    for (b, terms) in blocks.iter().enumerate() {
         let ts = live(terms);
         if ts.is_empty() {
             continue;
@@ -3007,14 +3298,11 @@ fn triplet_cancel_check(
                     let off_s = st.pm1 * st.sa[i] * st.sg[j] * st.e[i] * st.e[j];
                     v_str += w * st.fac * (delta * st.dsg[j] * st.dg[j] - off_s);
                 }
-                struct_check(
-                    v,
-                    rho * v_str,
-                    m,
-                    sb,
-                    coeff,
-                    "Triplet: 二階（支配的な成分・2 ペアの差の相殺・f32 の underflow）",
-                )?;
+                const X_WHAT: &str =
+                    "Triplet: 二階（支配的な成分・2 ペアの差の相殺・f32 の underflow）";
+                lin_elem([v, rho * v_str, m, sb, coeff], X_WHAT, || {
+                    rescue(b / 3, Some(b % 3), (j, i), X_WHAT)
+                })?;
             }
         }
     }
@@ -3164,6 +3452,21 @@ pub(super) fn triplet_cgrad<'c>(
     if p64 != 1.0 {
         let gs = g_scale(reduction, n);
         let rho = sb_ratio(upstream_scale32(&g_value, reduction, n), sb);
+        // `Lin` の上界で相殺判定を救うか（テンソル単位。#4096・設計 §82.13）。`g` は子テープ上の f32 の値、判定する行は活性な行。
+        let n_rows = act_rows.iter().filter(|&&a| a).count();
+        let g_f32 = f64::from(
+            crate::eval::dense_vec(&g_value)
+                .first()
+                .copied()
+                .unwrap_or(0.0),
+        );
+        let lin_ctx = tri_lin_ctx(
+            g_f32,
+            matches!(reduction, Reduction::Mean).then_some(n),
+            n_rows,
+            d,
+            swap,
+        );
         for i in 0..n {
             if !act_rows[i] {
                 continue;
@@ -3189,7 +3492,24 @@ pub(super) fn triplet_cgrad<'c>(
             if nan {
                 continue;
             }
-            triplet_cancel_check(&pr, (c_an, c_pn), d, (sb, gs, rho), coeff)?;
+            let base = i * d;
+            let lin_row = lin_ctx.map(|ctx| {
+                (
+                    ctx,
+                    TriRowInput {
+                        rows: (
+                            &a_s[base..base + d],
+                            &p_s[base..base + d],
+                            &n_s[base..base + d],
+                        ),
+                        opts: (eps32, p, swap),
+                        infos: [Some(&info_ap), Some(&info_an), info_pn.as_ref()],
+                        base,
+                        an_kind: an_kind_of(c_an),
+                    },
+                )
+            });
+            triplet_cancel_check(&pr, (c_an, c_pn), d, (sb, gs, rho), coeff, lin_row)?;
         }
     }
     // 各勾配ベクトルの成分は |u|/norm' ≤ 1。3 本の寄与を足した上界で `g` への cotangent を押さえる。
