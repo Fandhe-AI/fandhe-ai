@@ -13,7 +13,9 @@
 //! norm 専用ではない共通モジュールとして切り出した（挙動不変の移動）。norm 専用の `Rf`・`Dm` は
 //! `norm_reparam.rs` に残す。
 //!
-//! 契約: IEEE 754 の正しい丸めを仮定する（GPU の実機は未実測）。拒否時の文面は `judge.rs` と同じく
+//! 契約: IEEE 754 の正しい丸めを仮定する（GPU の実機は未実測）。ただし [`Num::powf_bounded`] だけは libm の `powf` が
+//! 正しい丸めではないため、所有者決定 #4083 の仮定（[`LIBM_F32_MAX_ULP`]・正規化数の範囲で 2 ulp 以内。設計値で実測値ではない。
+//! GPU・aarch64 Linux・macOS は未実測で、この判定は GPU の値を保証しない）を追加で使う（#4084・設計記録 §81.10）。拒否時の文面は `judge.rs` と同じく
 //! `reject: fn(&str) -> AutodiffError`（[`super::judge::Reject`]）で呼び出し元へ委ね、tolerance 定数
 //! （`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）は変更しない。
 
@@ -51,6 +53,26 @@ pub(super) trait Num: Copy {
     fn powe(self, e: f64) -> Self;
     /// `PowScalar` の VJP 係数 `e·x^(e−1)`（`e == 0` は 0。`eval/scalar.rs::unary_grad_factor`）。
     fn pow_grad(self, e: f64) -> Self;
+    /// 上界つきの `powf`（イシュー #4084・設計記録 §81.10）。`e` は参照の指数、`e_str` は構造の f32 が実際に使う指数
+    /// （Triplet の `1.0 / p32`・`p32 - 1.0` のように `e as f32` と一致しない場合がある）。既定は [`Num::powe`] へ委ねる
+    /// （`f64`・`norm_reparam.rs` の `Rf`・`Dm` は参照値・依存の追跡で `e_str` を使わない。`Dm` は `powe` 内で
+    /// `e as f32 == 0` を見るため、`e_str != e as f32` の呼び出しでは食い違いうる。配線側〈#4088〉で確認すること）。
+    /// `f32` は `powf(e_str)`、[`Lin`] だけが libm の精度の仮定（[`LIBM_F32_MAX_ULP`]）を使った上界を持つ。
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "#4088・#4095 が配線するまで本番から呼ばれない")
+    )]
+    fn powf_bounded(self, e: f64, _e_str: f32) -> Self {
+        self.powe(e)
+    }
+    /// 上界つきの `PowScalar` の VJP 係数 `e·x^(e−1)`（[`Num::pow_grad`] の上界つき版。`e == 0` は 0）。
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "#4088・#4095 が配線するまで本番から呼ばれない")
+    )]
+    fn pow_grad_bounded(self, e: f64) -> Self {
+        self.pow_grad(e)
+    }
     /// `Sqrt` の VJP 係数 `0.5 / y`（`self` は forward の出力 `y`）。
     fn root_grad(self) -> Self;
     /// ±inf を含まない（NaN は入力の NaN の伝播として通す。`norm_reparam.rs` の `no_inf` 参照）。
@@ -94,6 +116,9 @@ impl Num for f32 {
         } else {
             e * self.powf(e - 1.0)
         }
+    }
+    fn powf_bounded(self, _e: f64, e_str: f32) -> Self {
+        self.powf(e_str)
     }
     fn root_grad(self) -> Self {
         0.5 / self
@@ -180,6 +205,7 @@ impl Num for f64 {
 /// 係数の列は thread-local の領域（[`LIN_ARENA`]）に置き、`Lin` 自体は `Copy` にする。事象の数に比例する
 /// 長さの列を値ごとに持つので、WeightNorm はグループの幅が [`LIN_REST_MAX`] 以下のときだけ、SpectralNorm は `sn_use_lin` の条件内（係数列を束ねて走査量を `O(N²)` に抑える）のときだけ使う。
 /// `PowScalar`（`powe`・`pow_grad`）は WeightNorm が使わないので、上界を持たない NaN の値にする（常に拒否）。
+/// 上界が要る呼び出しは `powf_bounded`・`pow_grad_bounded` を使う（#4084。`powe`・`pow_grad` は常に拒否のまま）。
 ///
 /// **疎モード**（[`lin_reset_sparse`]。WeightNorm の総括判定だけが使う。イシュー #4078・決定記録 §80.4）:
 /// グループの幅が広いと `n_s` などのハブ値が全要素の事象を持ち、下流の係数列がほぼ密になって併合の書き込み量が幅の
@@ -230,6 +256,15 @@ thread_local! {
     static LIN_ARENA: std::cell::RefCell<LinArena> = std::cell::RefCell::new(LinArena::default());
 }
 
+/// CPU の `f32::powf`（libm）が、結果が正規化数の範囲で `|f32 − 厳密値| ≤ 2 ulp` に収まるという仮定の `ulp` 数
+/// （所有者決定 #4083・2026-11-07。**設計値であって実測値ではない**。実測が超えたら値を上げず所有者へ報告する。
+/// GPU・aarch64 Linux・macOS は未実測）。`exp` の規則（#4092）も共有できるよう `powf` 専用の名前にしない。
+pub(super) const LIBM_F32_MAX_ULP: f64 = 2.0;
+/// 非正規化数の間隔 `2^-149`（libm の絶対誤差の項は [`LIBM_F32_MAX_ULP`] 倍）。
+pub(super) const LIN_ULP_SUBNORMAL: f64 = f32::from_bits(1) as f64;
+/// [`Num::powf_bounded`] が受理する指数の増幅 `Z` の上限（本計画の設計値 `2^-10`。#4083 に値の記載はなく、
+/// 拒否する側にだけ働く。二次の剰余を `Z` の二乗で覆うための一次近似の妥当域）。
+pub(super) const LIN_POWF_Z_MAX: f64 = 1.0 / 1024.0;
 /// f32 の丸め単位 `u = 2^-24`。
 pub(super) const LIN_U: f64 = 1.0 / 16_777_216.0;
 /// 非正規数の領域の絶対丸め誤差の上界 `2^-150`。
@@ -658,6 +693,59 @@ impl Num for Lin {
         }
         Lin::unbounded(e * self.v.powf(e - 1.0), self.t)
     }
+    /// `x^e` の上界つき版（設計記録 §81.10）。底の誤差 `|δ| ≤ ρ = 2·bound/x`、指数の差 `Δe = e_str − e` を、
+    /// 底の事象への係数 `e·y/x`（共有した丸めの打ち消しを保つ）と、二次の剰余・libm の誤差・指数の差を覆う
+    /// 独立な事象 1 つへ畳む。底が 0 以下・非有限、`ρ > 1/2`、`Z` が [`LIN_POWF_Z_MAX`] 超、結果が f32 の overflow に
+    /// 近い入力は上界なし（拒否）。libm の精度は [`LIBM_F32_MAX_ULP`] の仮定による。
+    fn powf_bounded(self, e: f64, e_str: f32) -> Self {
+        let (x, de) = (self.v, f64::from(e_str) - e);
+        let y = x.powf(e);
+        let reject = || Lin::unbounded(y, self.t);
+        if !(0.0 < x && le(x, f64::from(f32::MAX)) && e.is_finite() && e_str.is_finite()) {
+            return reject();
+        }
+        let rho = 2.0 * self.bound() / x;
+        if !le(rho, 0.5) {
+            return reject();
+        }
+        let (ae, ade, l, ya) = (e.abs(), de.abs(), x.ln().abs(), y.abs());
+        let z = 2.0 * (ae + ade) * rho + ade * l;
+        let top = ya * (1.0 + 2.0 * z) * (1.0 + 4.0 * LIN_U);
+        if !le(z, LIN_POWF_Z_MAX) || !le(top, f64::from(f32::MAX)) || top == f64::from(f32::MAX) {
+            return reject();
+        }
+        let k = e * y / x;
+        let mu = LIBM_F32_MAX_ULP * 2.0 * LIN_U * ya * (1.0 + 2.0 * z)
+            + LIBM_F32_MAX_ULP * LIN_ULP_SUBNORMAL
+            + ya * (ade * l + z * z + ae * rho * rho + 2.0 * ade * rho);
+        if !mu.is_finite() {
+            return reject();
+        }
+        let id = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            let start = a.map_copy(self.id, |c| c * k);
+            let ev = a.push_event(mu);
+            a.coefs.push((ev, 1.0));
+            a.pool_small_terms(start);
+            a.finish(start)
+        });
+        Lin {
+            v: y,
+            id,
+            t: self.t,
+        }
+    }
+    /// `e·x^(e−1)` の上界つき版。f32 の `e * x.powf(e - 1.0)` と同じ演算列（定数 `e` を `Lin::k`、冪を [`Lin::powf_bounded`]）。
+    fn pow_grad_bounded(self, e: f64) -> Self {
+        if e == 0.0 {
+            return Lin::make(0.0, None, false);
+        }
+        let es = e as f32;
+        if es == 0.0 {
+            return Lin::unbounded(e * self.v.powf(e - 1.0), self.t);
+        }
+        Lin::k(e).times(self.powf_bounded(e - 1.0, es - 1.0))
+    }
     fn root_grad(self) -> Self {
         Lin::k(0.5).over(self)
     }
@@ -757,6 +845,11 @@ impl Num for Lin {
     }
 }
 
+/// `a <= b`（NaN は偽）。拒否条件を否定形で書くための補助（NaN を必ず拒否側へ倒す）。
+fn le(a: f64, b: f64) -> bool {
+    a <= b
+}
+
 impl Lin {
     /// 上界を持たない値（常に拒否される）。係数の NaN で表す。
     fn unbounded(v: f64, t: bool) -> Self {
@@ -791,6 +884,10 @@ pub(super) fn entry_check_lin(
 }
 
 #[cfg(test)]
+#[path = "lin_libm_tests.rs"]
+mod libm_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::norm_reparam::{
         WnSeed, pow2, sn_fwd, sn_rev, wn_coeff, wn_fwd, wn_group_judge, wn_rev,
@@ -801,7 +898,7 @@ mod tests {
     /// 和の順序だけが [`f32`] と違う再現（多項の和を末尾から足す）。実カーネルの和の順序が違っても
     /// [`Lin`] の上界が覆うこと（[`Num::total`] の順序非依存）を確かめるために使う。
     #[derive(Clone, Copy)]
-    struct F32Rev(f32);
+    pub(super) struct F32Rev(pub(super) f32);
 
     impl Num for F32Rev {
         fn k(x: f64) -> Self {
@@ -833,6 +930,9 @@ mod tests {
         }
         fn pow_grad(self, e: f64) -> Self {
             F32Rev(self.0.pow_grad(e))
+        }
+        fn powf_bounded(self, _e: f64, e_str: f32) -> Self {
+            F32Rev(self.0.powf(e_str))
         }
         fn root_grad(self) -> Self {
             F32Rev(0.5 / self.0)
