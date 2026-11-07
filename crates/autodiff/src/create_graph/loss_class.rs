@@ -14,6 +14,8 @@
 //! - `CrossEntropyLossWithOptions`（V3 + V1）: `dx = where(valid, s_b⊙(A⊙softmax(x) − B), 0)`。
 //!   `A`・`B`・`valid` は class_weight・label_smoothing・ignore_index からホストが f64 で作る定数。
 //!   Mean の分母は非 ignore サンプルの重み和 `W`（`g / const(W)`）。
+//!   CE・CEWO の相殺判定の forward は総称関数 `cewo_fwd` で組み、`Lin` の上界は test 限定で並行計算する
+//!   （#4093。判定は従来どおり。切り替えは #4094）。
 //! - `MultiMarginLoss`: p=1 は区分定数（`K` をホスト定数化）、p=2 は `H = where(M, 2Z, 0)` を構造に積む。
 //! - `MultiLabelMarginLoss`: x について区分定数（`K` をホスト定数化）。
 //! - `MultiLabelSoftMarginLoss`: `dx = s_b⊙(const(w_c/C)⊙(σ(x) − t))`（σ は符号別の安定形）。
@@ -560,6 +562,127 @@ pub(super) fn ce_cancel_check(
     Ok(())
 }
 
+/// CE・CEWO の 1 サンプル（class 軸 1 行）の Softmax の forward の中間値（`e = exp(x − max)`・`total = Σe`・`y = e/total`）。
+/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（丸めの一次伝播の上界。#4093・判定への配線は #4094）。
+///
+/// 呼び出し元: [`cewo_cancel_check`]（`f64` と `f32`）、test 限定の [`cewo_lin_rows`]（`Lin`）。
+/// 最大値は構造と同じく f32 の fold max（f64 の fold max と同じ値）。和は [`Num::total`]（f32 は 0 からの逐次和で
+/// 従来の `sum32` と bit 一致、f64 は `Iterator::sum` と同じ順序）。
+/// `total` には [`Num::settle`] を掛けない: `y_j = e_j/total` で分子と分母が同じ `e_j` の事象を共有し、確信度の高い行の
+/// 打ち消し `1 − y_j` を保つため。`y` は `settle` で事象 1 つへ束ね、二階の各要素の演算が O(C) に伸びるのを抑える。
+struct CewoFwd<T> {
+    e: Vec<T>,
+    total: T,
+    y: Vec<T>,
+}
+
+fn cewo_fwd<T: Num>(row32: &[f32]) -> CewoFwd<T> {
+    let mx32 = row32.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
+    let mx = T::input(f64::from(mx32));
+    let e: Vec<T> = row32
+        .iter()
+        .map(|&v| T::input(f64::from(v)).minus(mx).exp_bounded())
+        .collect();
+    let total = T::total(&e);
+    let y = e.iter().map(|&v| v.over(total).settle(&[])).collect();
+    CewoFwd { e, total, y }
+}
+
+/// [`cewo_rev`] の結果: seed 要素 `j` の `dx[j]` を 1 要素のスカラーに畳んで逆伝播したときの、logits `x` と `g` への二階。
+#[cfg(test)]
+pub(super) struct CewoRow<T> {
+    pub(super) x: Vec<T>,
+    pub(super) g: T,
+}
+
+/// CE・CEWO の構造 `s_b⊙(A⊙softmax(x) − B)` の seed 要素 `j` の二階を `T` の演算で写す（test 限定。#4093）。
+///
+/// `coef = (A, B_j)`・`up = (g, Mean の分母 W)`。既定 CE は `A = 1`・`B = onehot`・`W = n` で同じ写しを共有する
+/// （実際の構造には `·A` の乗算が無いが `A = 1` で f32 の値は同じ。`Lin` の余分な事象は過大評価で健全）。
+/// 丸めの位置は `grad.rs` と `eval/scalar.rs::binary_partials` に合わせる。Softmax の VJP は実際のカーネルが
+/// 差と積を f64 で計算して 1 回だけ f32 へ落とす混合精度だが、ここでは f32 の丸め事象として写す（健全な過大評価。
+/// f64→f32 の二重丸めの余分は相対 2^-29 以下で `entry_check_lin` の余裕 `(1 + 16·N·u)` に収まる）。
+#[cfg(test)]
+fn cewo_rev<T: Num>(
+    f: &CewoFwd<T>,
+    j: usize,
+    coef: (f64, f64),
+    up: (f64, Option<f64>),
+) -> CewoRow<T> {
+    let (a_s, b_j) = coef;
+    let s_b = match up.1 {
+        Some(w) => T::input(up.0).over(T::k(w)),
+        None => T::input(up.0),
+    };
+    let c = s_b.times(T::k(a_s));
+    let term = c.times(f.y[j]);
+    let x = (0..f.y.len())
+        .map(|i| {
+            if i == j {
+                f.y[j].times(c.minus(term))
+            } else {
+                f.y[i].times(term.negate())
+            }
+        })
+        .collect();
+    let q = T::k(a_s).times(f.y[j]).minus(T::k(b_j));
+    let g = match up.1 {
+        Some(w) => q.times(T::k(1.0).over(T::k(w))),
+        None => q,
+    };
+    CewoRow { x, g }
+}
+
+/// [`cewo_rev`] を `f32` で評価した二階。手組みの構造の実測と並べて soundness の「実測」側に使う（test 限定）。
+#[cfg(test)]
+pub(super) fn cewo_model_rows_f32(
+    row32: &[f32],
+    coef: (f64, &[f64]),
+    up: (f64, Option<f64>),
+    j: usize,
+) -> CewoRow<f32> {
+    let f = cewo_fwd::<f32>(row32);
+    cewo_rev(&f, j, (coef.0, coef.1[j]), up)
+}
+
+/// [`cewo_rev`] の `Lin` 版の結果: 各要素の `(参照値 v, 一次の上界 bound)` と、そのときの事象の総数。
+#[cfg(test)]
+pub(super) struct LinRowCe {
+    pub(super) x: Vec<(f64, f64)>,
+    pub(super) g: (f64, f64),
+    pub(super) events: usize,
+}
+
+/// `Lin` で forward と seed ごとの逆伝播を評価し、各要素の値と上界を返す（test 限定。#4093。判定への配線は #4094）。
+/// 厳密モード（[`lin_reset`]）で forward を 1 回作り、seed ごとに [`lin_mark`]／[`lin_truncate`] で領域を戻す。
+#[cfg(test)]
+pub(super) fn cewo_lin_rows(
+    row32: &[f32],
+    coef: (f64, &[f64]),
+    up: (f64, Option<f64>),
+    seeds: &[usize],
+) -> Vec<LinRowCe> {
+    use super::lin::lin_events;
+    lin_reset();
+    let f = cewo_fwd::<Lin>(row32);
+    let mark = lin_mark();
+    let out = seeds
+        .iter()
+        .map(|&j| {
+            let r = cewo_rev(&f, j, (coef.0, coef.1[j]), up);
+            let row = LinRowCe {
+                x: r.x.iter().map(|l| (l.v, l.bound())).collect(),
+                g: (r.g.v, r.g.bound()),
+                events: lin_events(),
+            };
+            lin_truncate(mark);
+            row
+        })
+        .collect();
+    lin_reset();
+    out
+}
+
 /// CEWO の 1 サンプル（`(o, i)` の class 軸）の相殺検査（設計 §55.2 の相殺の総括判定）。
 ///
 /// 構造 `s_b⊙(A⊙softmax(x) − B)` の二階は、x 経路が Softmax の VJP `s_b·A·y_i(δ_ij − y_j)`。対角の
@@ -580,16 +703,13 @@ fn cewo_cancel_check(
     if row32.iter().any(|v| v.is_nan()) {
         return Ok(());
     }
-    let row: Vec<f64> = row32.iter().map(|&v| f64::from(v)).collect();
-    let mx = row.iter().fold(f64::NEG_INFINITY, |m, &v| m.max(v));
-    let e: Vec<f64> = row.iter().map(|&v| (v - mx).exp()).collect();
-    let total: f64 = e.iter().sum();
-    // 構造の f32 の Softmax（`eval::softmax_along` と同じ `exp(x − max)` の逐次和と除算）の再現。
-    // 小さな確率は f32 で 0 や非正規数へ underflow し、その曲率が消える。
-    let mx32 = row32.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
-    let e32: Vec<f32> = row32.iter().map(|&v| (v - mx32).exp()).collect();
-    let total32 = sum32(e32.iter().copied());
-    let y32: Vec<f64> = e32.iter().map(|&v| f64::from(v / total32)).collect();
+    // f64 の参照と、構造の f32 の Softmax（`eval::softmax_along` と同じ `exp(x − max)` の逐次和と除算）の再現は
+    // 同じ総称関数 [`cewo_fwd`] で組む（#4093。従来は同じ式を 2 回書いていた）。小さな確率は f32 で 0 や
+    // 非正規数へ underflow し、その曲率が消える。
+    let ref64 = cewo_fwd::<f64>(&row32);
+    let (e, total) = (ref64.e, ref64.total);
+    let f32f = cewo_fwd::<f32>(&row32);
+    let y32: Vec<f64> = f32f.y.iter().map(|&v| f64::from(v)).collect();
     let total_w: f64 = weights.iter().sum();
     let smooth = eps / c as f64;
     let coeff = rounding_coeff(c);
@@ -597,7 +717,7 @@ fn cewo_cancel_check(
     let a32 = f64::from(a_s as f32);
     let sba_str = rho * sb * a32;
     let mut flag = deviates(1.0, rho, 1.0, coeff) || deviates(a_s, a32, a_s.abs(), coeff);
-    let ys: Vec<f64> = e.iter().map(|v| v / total).collect();
+    let ys: Vec<f64> = ref64.y;
     let (mut top1, mut top2) = (0f64, 0f64);
     for j in 0..c {
         let y = ys[j];

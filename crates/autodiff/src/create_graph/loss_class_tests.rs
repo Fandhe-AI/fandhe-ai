@@ -2172,3 +2172,343 @@ fn cosine_followup_candidates_exceed_lin_bound() {
         assert!(!cos_use_lin(1, c.d), "{c:?}: 走査量の上限で Lin を使わない");
     }
 }
+// =====================================================================================
+// #4093: CE・CEWO の相殺判定の上界を `Lin` で並行計算する（判定は変えない）
+// =====================================================================================
+
+/// 総称化の前に `cewo_cancel_check` が書いていた forward の式（逐語のコピー。前例: `cos_fwd_previous`）。
+/// 戻り値は `(f64 の e, total, ys, f32 の e32, total32, y32)`。`cewo_fwd` が全中間値で bit 一致することが、
+/// 判定を変えていない主な回帰の錠になる。
+#[allow(clippy::type_complexity)]
+fn cewo_fwd_previous(row32: &[f32]) -> (Vec<f64>, f64, Vec<f64>, Vec<f32>, f32, Vec<f64>) {
+    let row: Vec<f64> = row32.iter().map(|&v| f64::from(v)).collect();
+    let mx = row.iter().fold(f64::NEG_INFINITY, |m, &v| m.max(v));
+    let e: Vec<f64> = row.iter().map(|&v| (v - mx).exp()).collect();
+    let total: f64 = e.iter().sum();
+    let mx32 = row32.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
+    let e32: Vec<f32> = row32.iter().map(|&v| (v - mx32).exp()).collect();
+    let total32 = sum32(e32.iter().copied());
+    let y32: Vec<f64> = e32.iter().map(|&v| f64::from(v / total32)).collect();
+    let ys: Vec<f64> = e.iter().map(|v| v / total).collect();
+    (e, total, ys, e32, total32, y32)
+}
+
+#[test]
+fn cewo_fwd_generic_matches_previous_formulas() {
+    let mut inputs: Vec<Vec<f32>> = ce_cases().iter().map(CeCase::logits).collect();
+    let mut rng = Rng(0x1357_9bdf_2468_ace0);
+    for c in [1usize, 2, 3, 7, 16, 33] {
+        for amp in [1e-30f32, 1e-3, 1.0, 30.0, 1e3] {
+            let x: Vec<f32> = (0..c).map(|_| amp * rng.signed()).collect();
+            inputs.push(x.clone());
+            inputs.push(vec![amp; c]);
+            // 余裕 0/20/40/90/120（f32 の exp が非正規数や 0 へ underflow する）。
+            for margin in [0.0f32, 20.0, 40.0, 90.0, 120.0] {
+                let mut y = x.clone();
+                y[0] += margin;
+                inputs.push(y);
+            }
+            // ±inf（既定 CE は `reject_inf` を通らない）を含む行。NaN の行は判定前に return するが関数は通す。
+            for special in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+                let mut y = x.clone();
+                y[c - 1] = special;
+                inputs.push(y);
+            }
+        }
+    }
+    for row in &inputs {
+        let (e, total, ys, e32, total32, y32) = cewo_fwd_previous(row);
+        let f64f = cewo_fwd::<f64>(row);
+        let f32f = cewo_fwd::<f32>(row);
+        assert_eq!(f64_bits(f64f.total), f64_bits(total), "f64 total {row:?}");
+        assert_eq!(f32_bits(f32f.total), f32_bits(total32), "f32 total {row:?}");
+        for k in 0..row.len() {
+            assert_eq!(f64_bits(f64f.e[k]), f64_bits(e[k]), "f64 e[{k}] {row:?}");
+            assert_eq!(f64_bits(f64f.y[k]), f64_bits(ys[k]), "f64 y[{k}] {row:?}");
+            assert_eq!(f32_bits(f32f.e[k]), f32_bits(e32[k]), "f32 e[{k}] {row:?}");
+            assert_eq!(
+                f64_bits(f64::from(f32f.y[k])),
+                f64_bits(y32[k]),
+                "f32 y[{k}] {row:?}"
+            );
+        }
+    }
+    assert!(inputs.len() > 200, "入力が少なすぎる: {}", inputs.len());
+}
+
+/// 任意の `A`・`B`・`W`・上流で、本番と同じ演算順の構造（既定 CE は `create_graph.rs` の腕、CEWO は `cewo_cgrad`）を
+/// 子テープへ組み、seed ごとの `(x への二階の行, g への二階)` を返す（`CeCase::hand_rows` の一般化。既存は変えない）。
+fn ce_hand_general(
+    logits: &[f32],
+    default: bool,
+    coef: (f64, &[f64]),
+    up: (Reduction, Option<f64>, i32),
+    seed_list: &[usize],
+) -> Vec<(usize, Vec<f32>, f32)> {
+    let c = logits.len();
+    let shape = [1usize, c];
+    let (red, w, exp) = up;
+    let child = Tape::new_with_ops(test_ops());
+    let x_m = child.var(&tt(logits.to_vec(), &shape));
+    let g = child.var(&Tensor::scalar(pow2(exp)));
+    let dx = if default {
+        let s_b = super::super::loss_scale_bcast(&child, &g, red, false, 1, &shape).unwrap();
+        let mut oh = vec![0f32; c];
+        for (o, b) in oh.iter_mut().zip(coef.1) {
+            *o = *b as f32;
+        }
+        let onehot = child.var_no_grad(&tt(oh, &shape));
+        x_m.softmax(1)
+            .unwrap()
+            .sub(&onehot)
+            .unwrap()
+            .mul(&s_b)
+            .unwrap()
+    } else {
+        let s_b = match red {
+            Reduction::Mean => g
+                .div(&scalar(&child, w.unwrap() as f32))
+                .unwrap()
+                .broadcast_to(&shape)
+                .unwrap(),
+            Reduction::Sum => g.broadcast_to(&shape).unwrap(),
+        };
+        let a_c = const_vec(&child, vec![coef.0 as f32; c], &shape).unwrap();
+        let b_c = const_vec(&child, coef.1.iter().map(|&b| b as f32).collect(), &shape).unwrap();
+        let valid = mask(vec![true; c], &shape).unwrap();
+        let zeros = zeros_like(&child, &shape).unwrap();
+        let x_safe = Var::where_cond(&valid, &x_m, &zeros).unwrap();
+        let sm = x_safe.softmax(1).unwrap();
+        let scaled = s_b.mul(&a_c.mul(&sm).unwrap().sub(&b_c).unwrap()).unwrap();
+        Var::where_cond(&valid, &scaled, &zeros).unwrap()
+    };
+    seed_list
+        .iter()
+        .map(|&j| {
+            let r = child_rows(&child, &dx, j, &[&x_m, &g])
+                .unwrap_or_else(|| panic!("CE: seed {j} の子テープの逆伝播が失敗"));
+            (j, r[0].clone(), r[1][0])
+        })
+        .collect()
+}
+
+/// 1 行について、手組みの構造の f32 の二階（実際の eager 逆伝播）と `cewo_rev::<f32>` の双方が
+/// `|実測 − Lin.v| ≤ Lin.bound()·(1 + 16·N·u)` を満たすことを確かめる（非有限の要素は除く）。
+fn ce_sweep_row(
+    logits: &[f32],
+    default: bool,
+    coef: (f64, &[f64]),
+    up: (Reduction, Option<f64>, i32),
+    st: &mut SweepStats,
+) {
+    use super::super::lin::LIN_U;
+    let c = logits.len();
+    let sd = seeds(c, &[CE_TARGET, CE_TARGET + 1, c / 2]);
+    let hand = ce_hand_general(logits, default, coef, up, &sd);
+    let upv = (
+        f64::from(pow2(up.2)),
+        if up.0 == Reduction::Mean { up.1 } else { None },
+    );
+    let lin = cewo_lin_rows(logits, coef, upv, &sd);
+    for (k, (j, row, gj)) in hand.iter().enumerate() {
+        let model = cewo_model_rows_f32(logits, coef, upv, *j);
+        let l = &lin[k];
+        let slack = 1.0 + 16.0 * l.events as f64 * LIN_U;
+        let mut check = |actual: f32, lv: (f64, f64)| {
+            let actual = f64::from(actual);
+            if !actual.is_finite() || !lv.0.is_finite() || !lv.1.is_finite() {
+                return;
+            }
+            let dev = (actual - lv.0).abs();
+            assert!(
+                dev <= lv.1 * slack,
+                "c={c} default={default} red={:?} w={:?} seed={j}: dev={dev:e} bound={:e}",
+                up.0,
+                up.1,
+                lv.1
+            );
+            st.checked += 1;
+            if dev > 0.0 {
+                st.nonzero += 1;
+            }
+            if lv.1 > 0.0 {
+                st.worst = st.worst.max(dev / lv.1);
+                if dev > 0.1 * lv.1 {
+                    st.tight += 1;
+                }
+            }
+        };
+        for i in 0..c {
+            check(row[i], l.x[i]);
+            check(model.x[i], l.x[i]);
+        }
+        check(*gj, l.g);
+        check(model.g, l.g);
+    }
+}
+
+/// 掃引の 1 入力ぶん: 既定 CE（`A = 1`・`B = onehot`）と、乱数の `A`・`B` の CEWO を Sum／Mean で通す。
+fn ce_sweep_input(logits: &[f32], exp: i32, rng: &mut Rng, st: &mut SweepStats) {
+    let c = logits.len();
+    let mut onehot = vec![0f64; c];
+    onehot[CE_TARGET] = 1.0;
+    let a_s = 0.3 + rng.unit();
+    let b: Vec<f64> = (0..c)
+        .map(|j| {
+            let h = if j == CE_TARGET { 0.9 } else { 0.0 };
+            h + 0.1 * rng.unit() / c as f64
+        })
+        .collect();
+    let sum = (Reduction::Sum, None, exp);
+    ce_sweep_row(logits, true, (1.0, &onehot), sum, st);
+    ce_sweep_row(logits, false, (a_s, &b), sum, st);
+    if exp == 13 {
+        let mean1 = (Reduction::Mean, Some(1.0), exp);
+        ce_sweep_row(logits, true, (1.0, &onehot), mean1, st);
+        for w in [1.0f64, 3.0, 7.0, 0.37] {
+            let mean = (Reduction::Mean, Some(w), exp);
+            ce_sweep_row(logits, false, (a_s, &b), mean, st);
+        }
+    }
+}
+
+#[test]
+fn lin_bound_covers_f32_deviation_for_ce_sweep() {
+    let mut rng = Rng(0x2468_ace0_1357_9bdf);
+    let mut st = SweepStats::default();
+    for c in [2usize, 3, 10, 33, 64] {
+        for amp in [1e-3f32, 1.0, 30.0] {
+            for margin in [0.0f32, 5.0, 10.0, 20.0, 40.0] {
+                for exp in [0i32, 13, 20] {
+                    let mut x: Vec<f32> = (0..c).map(|_| amp * rng.signed()).collect();
+                    x[CE_TARGET] += margin;
+                    ce_sweep_input(&x, exp, &mut rng, &mut st);
+                }
+            }
+        }
+    }
+    assert!(
+        st.checked > 1000,
+        "検査した要素が少なすぎる: {}",
+        st.checked
+    );
+    assert!(
+        st.nonzero > 0,
+        "実測の誤差が全て 0 では soundness を確かめていない"
+    );
+    assert!(st.tight > 0, "上界が緩すぎて空振り: tight={}", st.tight);
+    eprintln!(
+        "LINCE checked={} nonzero={} tight={} worst={:.4}",
+        st.checked, st.nonzero, st.tight, st.worst
+    );
+}
+
+/// 小さな確率が f32 の非正規数・0 へ落ちる行（`flag` が立つ行）の soundness。余裕 80〜120。
+#[test]
+fn lin_bound_covers_f32_deviation_for_ce_underflow_rows() {
+    let mut rng = Rng(0x0f0f_1234_5678_9abc);
+    let mut st = SweepStats::default();
+    for c in [2usize, 5, 16] {
+        for margin in [80.0f32, 90.0, 100.0, 110.0, 120.0] {
+            let mut x: Vec<f32> = (0..c).map(|_| rng.signed()).collect();
+            x[CE_TARGET] += margin;
+            ce_sweep_input(&x, 13, &mut rng, &mut st);
+        }
+    }
+    assert!(st.checked > 100, "検査した要素が少なすぎる: {}", st.checked);
+}
+
+#[test]
+fn ce_f32_model_stays_close_to_hand_built_structure() {
+    // 受理される小さな入力で、`cewo_rev::<f32>` の写し（Softmax の VJP の混合精度は f32 の丸めで近似）が
+    // 手組みの構造と REQ-2 の範囲で一致する。bit 一致は求めない（soundness は別テストが正）。
+    let mut worst = 0f64;
+    for kind in [CeKind::Default, CeKind::Weighted, CeKind::Smooth] {
+        for exp in [0, 7] {
+            let c = CeCase {
+                kind,
+                c: 10,
+                margin: 5.0,
+                exp,
+            };
+            let default = kind == CeKind::Default;
+            let (a_s, b) = if default {
+                let mut oh = vec![0f64; c.c];
+                oh[CE_TARGET] = 1.0;
+                (1.0, oh)
+            } else {
+                c.ab()
+            };
+            let w = f64::from(c.weights()[CE_TARGET]);
+            let (red, wv) = if default {
+                (Reduction::Sum, None)
+            } else {
+                (
+                    c.reduction(),
+                    (c.reduction() == Reduction::Mean).then_some(w),
+                )
+            };
+            let sd: Vec<usize> = (0..c.c).collect();
+            let hand = ce_hand_general(&c.logits(), default, (a_s, &b), (red, wv, exp), &sd);
+            let up = (f64::from(pow2(exp)), wv);
+            for (j, row, gj) in &hand {
+                let m = cewo_model_rows_f32(&c.logits(), (a_s, &b), up, *j);
+                for i in 0..c.c {
+                    worst = worst.max(req2_ratio(f64::from(m.x[i]), f64::from(row[i])));
+                }
+                worst = worst.max(req2_ratio(f64::from(m.g), f64::from(*gj)));
+            }
+        }
+    }
+    assert!(worst < 1.0, "f32 の写しが手組みから外れすぎ: {worst}");
+}
+
+/// `LINCEM`: 候補の CE の入力で、`Lin` の上界から見た事象数・`16·N·u`・最大の上界・1 seed の時間を出す。
+/// `cargo test -p fandhe-ai-autodiff --release --lib ce_lin_candidates_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn ce_lin_candidates_measurement() {
+    use super::super::lin::LIN_U;
+    let mut cases = ce_followup_candidates();
+    cases.push(CeCase {
+        kind: CeKind::Default,
+        c: 33,
+        margin: 10.0,
+        exp: 0,
+    });
+    for c in cases {
+        let logits = c.logits();
+        let (a_s, b) = if c.kind == CeKind::Default {
+            let mut oh = vec![0f64; c.c];
+            oh[CE_TARGET] = 1.0;
+            (1.0, oh)
+        } else {
+            c.ab()
+        };
+        let sd = seeds(c.c, &[CE_TARGET, c.c / 2]);
+        let up = (f64::from(pow2(c.exp)), None);
+        let t = std::time::Instant::now();
+        let lin = cewo_lin_rows(&logits, (a_s, &b), up, &sd);
+        let secs = t.elapsed().as_secs_f64() / sd.len() as f64;
+        let n = lin.iter().map(|l| l.events).max().unwrap_or(0);
+        let finite = lin
+            .iter()
+            .all(|l| l.g.1.is_finite() && l.x.iter().all(|v| v.1.is_finite()));
+        let max_bound = lin
+            .iter()
+            .flat_map(|l| l.x.iter().map(|v| v.1).chain([l.g.1]))
+            .fold(0f64, f64::max);
+        eprintln!(
+            "LINCEM {} c={} margin={} exp={} N={} 16Nu={:.4} bounds_finite={} max_bound={:.3e} secs_per_seed={:.4e}",
+            c.name(),
+            c.c,
+            c.margin,
+            c.exp,
+            n,
+            16.0 * n as f64 * LIN_U,
+            finite,
+            max_bound,
+            secs
+        );
+    }
+}
