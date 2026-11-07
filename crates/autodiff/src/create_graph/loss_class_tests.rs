@@ -1496,8 +1496,8 @@ fn triplet_closed_form_matches_f64_central_difference() {
 // 後続（#4090〜#4096）が受理に変える入力（設計 §82.4）
 // =====================================================================================
 
-/// 後続の既定 CE・CEWO の切り替え（#4093・#4094）で受理に変える入力。現在は「相殺判定の `coeff·m` の項だけ」
-/// で拒否されるが、実際の f32 の二階は f64 の閉じた式と REQ-2 の閾値の 1/4 以内で一致する。
+/// 後続の既定 CE・CEWO の切り替え（#4093・#4094）で受理に変える入力（#4094 で C=100 の 2 件が受理に変わった。
+/// C=1000・2100 は拒否のまま）。旧判定では「相殺判定の `coeff·m` の項だけ」で拒否されるが、実際の f32 の二階は f64 の閉じた式と REQ-2 の閾値の 1/4 以内で一致する。
 fn ce_followup_candidates() -> Vec<CeCase> {
     let mk = |kind, c, margin, exp| CeCase {
         kind,
@@ -1547,6 +1547,13 @@ fn triplet_followup_candidates() -> Vec<TriCase> {
 /// REQ-2 比の assert は残す（受理に変えても二階が REQ-2 内であることを守る）。
 #[test]
 fn loss_class_followup_candidates_are_req2_within_f64() {
+    let req2 = |name: &str, m: Meas| {
+        for (label, acc) in [("x", m.x), ("g", m.g)] {
+            let a = acc.unwrap_or_else(|| panic!("{name}: {label} が未測定"));
+            assert!(a.ratio < 0.25, "{name}: {label} の REQ-2 比 {:e}", a.ratio);
+            assert!(a.unc < 0.05, "{name}: {label} の参照の不確かさ {:e}", a.unc);
+        }
+    };
     let check = |name: &str, m: Meas, want_flag: bool| {
         match &m.verdict {
             Verdict::Cancel { cls, flag, .. } => {
@@ -1555,14 +1562,19 @@ fn loss_class_followup_candidates_are_req2_within_f64() {
             }
             v => panic!("{name}: 現在は相殺判定で拒否されるはず: {v:?}"),
         }
-        for (label, acc) in [("x", m.x), ("g", m.g)] {
-            let a = acc.unwrap_or_else(|| panic!("{name}: {label} が未測定"));
-            assert!(a.ratio < 0.25, "{name}: {label} の REQ-2 比 {:e}", a.ratio);
-            assert!(a.unc < 0.05, "{name}: {label} の参照の不確かさ {:e}", a.unc);
-        }
+        req2(name, m);
     };
+    // CE・CEWO（#4094）: C=100 の 2 件は `Lin` の上界で受理に変わった。C=1000・2100 は `Lin` の和の上界
+    // （`γ_{C−1}·Σ|e|` が対角の `1 − y_j` の打ち消しへ乗る）でも閾値を超えるため拒否のまま（設計 §82.11）。
     for c in ce_followup_candidates() {
-        check(&format!("{c:?}"), c.measure(), false);
+        let name = format!("{c:?}");
+        let m = c.measure();
+        if c.c == 100 {
+            assert_eq!(m.verdict, Verdict::Accept, "{name}: Lin の上界で受理");
+            req2(&name, m);
+        } else {
+            check(&name, m, false);
+        }
     }
     for c in cosine_followup_candidates() {
         check(&format!("{c:?}"), c.measure(), false);
@@ -2511,4 +2523,565 @@ fn ce_lin_candidates_measurement() {
             secs
         );
     }
+}
+// =====================================================================================
+// #4094: CE・CEWO の判定を `Lin` の上界へ切り替える（either 受理。設計 §82.11）
+// =====================================================================================
+
+/// `CeCase` の `(A, B)`（既定 CE は `A = 1`・`B = onehot`）と、`Lin` 判定の入力（上流は `2^exp`、Mean の分母は `w_t`）。
+fn ce_lin_inputs(c: &CeCase) -> (Vec<f32>, f64, Vec<f64>, CeLinCtx) {
+    let (a_s, b) = if c.kind == CeKind::Default {
+        let mut oh = vec![0f64; c.c];
+        oh[CE_TARGET] = 1.0;
+        (1.0, oh)
+    } else {
+        c.ab()
+    };
+    let w = (c.reduction() == Reduction::Mean).then(|| f64::from(c.weights()[CE_TARGET]));
+    let ctx = CeLinCtx {
+        g: f64::from(pow2(c.exp)),
+        w,
+        off: true,
+    };
+    (c.logits(), a_s, b, ctx)
+}
+
+/// `seed_list` の seed について、`Lin` の判定を `g` と x への二階（`off_pairs` なら全 `i`、そうでなければ対角のみ）で
+/// 評価する（計測用。判定と同じ [`CeLinState`] を使い、`entry_check_lin` と同じ式で `err/閾値` も出す）。
+fn ce_lin_scan(c: &CeCase, seed_list: &[usize], off_pairs: bool) -> LinScan {
+    ce_lin_scan_timed(c, seed_list, off_pairs, false).0
+}
+
+/// [`ce_lin_scan`] と、そのうち forward（`CeLinState::new`）にかかった秒数。
+fn ce_lin_scan_timed(
+    c: &CeCase,
+    seed_list: &[usize],
+    off_pairs: bool,
+    off_only: bool,
+) -> (LinScan, f64) {
+    use super::super::lin::{LIN_U, lin_events, lin_truncate};
+    let (logits, a_s, b, ctx) = ce_lin_inputs(c);
+    let t0 = std::time::Instant::now();
+    let mut st = CeLinState::new(&logits, a_s, ctx);
+    let fwd_secs = t0.elapsed().as_secs_f64();
+    let mut out = LinScan {
+        fwd_events: lin_events(),
+        ..LinScan::default()
+    };
+    for &j in seed_list {
+        let (mark, sa, sb) = st.seed(j, b[j]);
+        let mut visit = |l: Lin, s: f32| {
+            let slack = 16.0 * lin_events() as f64 * LIN_U;
+            let err = (f64::from(s) - l.v).abs() + l.bound() * (1.0 + slack);
+            let thr = ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * l.v.abs());
+            out.checked += 1;
+            out.max_events = out.max_events.max(lin_events());
+            let m = err / thr;
+            out.max_margin = out.max_margin.max(m);
+            if slack >= 0.01 || m >= 1.0 {
+                out.rejected += 1;
+            }
+        };
+        if !off_only {
+            visit(sa.g, sb.g);
+        }
+        let idx: Vec<usize> = if off_only {
+            (0..c.c).filter(|&i| i != j).collect()
+        } else if off_pairs {
+            (0..c.c).collect()
+        } else {
+            vec![j]
+        };
+        for i in idx {
+            let l = cewo_x(&st.lin, &sa, i, j);
+            let s = cewo_x(&st.f32m, &sb, i, j);
+            visit(l, s);
+            lin_truncate(mark);
+        }
+    }
+    out.secs = t0.elapsed().as_secs_f64();
+    (out, fwd_secs)
+}
+
+/// 旧判定（`Lin` を使わない）の公開経路の verdict。
+fn public_old_ce(c: &CeCase) -> Verdict {
+    probe::FORCE_OLD.with(|f| f.set(true));
+    let v = c.public().0;
+    probe::FORCE_OLD.with(|f| f.set(false));
+    v
+}
+
+/// `LINCECOST`: 見積り定数を決める計測。種別 × C で forward の事象数・時間、対角と `g` の要素あたりの時間、
+/// 非対角の要素あたりの時間を `Rf` の 1 反復（3.45 ns。§80.5）相当に直して出す。
+/// `cargo test -p fandhe-ai-autodiff --release --lib ce_lin_cost_profile -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn ce_lin_cost_profile() {
+    const RF: f64 = 3.45e-9;
+    for kind in [CeKind::Default, CeKind::Weighted, CeKind::Smooth] {
+        for c in [2usize, 33, 100, 256, 512, 1000, 2100] {
+            let case = CeCase {
+                kind,
+                c,
+                margin: 10.0,
+                exp: 0,
+            };
+            let sd: Vec<usize> = (0..16).map(|k| (k * c / 16 + CE_TARGET) % c).collect();
+            let mut best = [f64::MAX; 3];
+            let mut maxev = 0;
+            for _ in 0..3 {
+                let (d, f) = ce_lin_scan_timed(&case, &sd, false, false);
+                let (o, f2) = ce_lin_scan_timed(&case, &sd, false, true);
+                best[0] = best[0].min(f.min(f2));
+                best[1] = best[1].min((d.secs - f) / sd.len() as f64);
+                best[2] = best[2].min((o.secs - f2) / sd.len() as f64);
+                maxev = maxev.max(d.max_events).max(o.max_events);
+            }
+            let (fwd_secs, per_diag, per_off) = (best[0], best[1], best[2]);
+            let both = LinScan {
+                max_events: maxev,
+                ..LinScan::default()
+            };
+            let diag = LinScan {
+                fwd_events: ce_lin_events_max(c),
+                ..LinScan::default()
+            };
+            let fwd_it = fwd_secs / RF;
+            let diag_it = per_diag * c as f64 / RF;
+            let off_it = per_off * c as f64 / RF;
+            eprintln!(
+                "LINCECOST {} c={c} fwd_events={} max_events={} 16Nu={:.4} fwd_iter={fwd_it:.3e} diag_iter(all seeds)={diag_it:.3e} off_iter(all seeds)={off_it:.3e} est_diag={} est_off={} ratio_diag={:.2} ratio_off={:.2}",
+                case.name(),
+                diag.fwd_events,
+                both.max_events,
+                16.0 * both.max_events as f64 / 16_777_216.0,
+                ce_lin_cost_diag(c),
+                ce_lin_cost_off(c),
+                ce_lin_cost_diag(c) as f64 / (fwd_it + diag_it),
+                ce_lin_cost_off(c) as f64 / off_it.max(1.0),
+            );
+        }
+    }
+}
+
+/// 判定時の事象数が `ce_lin_events_max(c)` に収まる（Sum・Mean、確信度の高い行・低い行）。`ce_lin_ctx` の余裕係数の
+/// 条件（`16·事象数·u < 0.01`）がこの上界に依るので、実測が上界を超えたらここで落ちる。
+#[test]
+fn ce_lin_events_stay_within_bound() {
+    let mut worst_fixed = 0usize;
+    let mut worst_per = 0f64;
+    for kind in [CeKind::Default, CeKind::Weighted, CeKind::Smooth] {
+        for c in [2usize, 3, 10, 33, 100, 256] {
+            for margin in [0.0f32, 10.0, 40.0] {
+                let case = CeCase {
+                    kind,
+                    c,
+                    margin,
+                    exp: 7,
+                };
+                let sd = seeds(c, &[CE_TARGET, c / 2]);
+                let r = ce_lin_scan(&case, &sd, true);
+                assert!(
+                    r.max_events <= ce_lin_events_max(c),
+                    "{case:?}: 事象数 {} が上界 {} 超",
+                    r.max_events,
+                    ce_lin_events_max(c)
+                );
+                worst_fixed = worst_fixed.max(
+                    r.max_events
+                        .saturating_sub(CE_LIN_EVENTS_PER_CLASS.saturating_mul(c)),
+                );
+                worst_per = worst_per.max(r.max_events as f64 / c as f64);
+            }
+        }
+    }
+    assert!(
+        worst_fixed <= CE_LIN_EVENTS_FIXED,
+        "定数分 {worst_fixed} が CE_LIN_EVENTS_FIXED を超える"
+    );
+    eprintln!("LINCEEV worst_fixed={worst_fixed} worst_per_class={worst_per:.3}");
+}
+
+/// `ce_lin_ctx` の境界: 余裕係数の上限（`16·事象数·u < 0.01`）、対角・`g` の走査量の上限、非対角まで許す走査量の上限、
+/// テンソル単位の選択（行数が増えると偽）。
+#[test]
+fn ce_use_lin_boundaries() {
+    use super::super::lin::{LIN_BUDGET, LIN_U};
+    let some = |n: usize, c: usize| ce_lin_ctx(1.0, None, n, c);
+    let slack_ok = |c: usize| 16.0 * ce_lin_events_max(c) as f64 * LIN_U < 0.01;
+    // 行数 1 で対角・g の走査量が収まる最大の C。
+    let cmax = (1..100_000usize)
+        .take_while(|&c| ce_lin_cost_diag(c) <= LIN_BUDGET && slack_ok(c))
+        .last()
+        .unwrap();
+    assert!(some(1, cmax).is_some() && some(1, cmax + 1).is_none());
+    // 非対角まで許す最大の C は対角・g だけの最大以下（別々の条件）。
+    let omax = (1..=cmax)
+        .take_while(|&c| ce_lin_cost_diag(c) + ce_lin_cost_off(c) <= LIN_BUDGET)
+        .last()
+        .unwrap();
+    assert!(some(1, omax).is_some_and(|l| l.off));
+    if omax < cmax {
+        assert!(some(1, omax + 1).is_some_and(|l| !l.off));
+    }
+    // 行数が増えると走査量が増える（テンソル単位で選ぶ）。
+    assert!(some(1, 100).is_some() && some(1_000_000, 100).is_none());
+    // 余裕係数を満たさない C は走査量が足りていても選ばない（独立の条件であること）。
+    let c_slack = (1..1_000_000usize).find(|&c| !slack_ok(c)).unwrap();
+    assert!(some(1, c_slack).is_none());
+    // 旧判定の強制（変異確認・比較用）。
+    probe::FORCE_OLD.with(|f| f.set(true));
+    assert!(some(1, 10).is_none());
+    probe::FORCE_OLD.with(|f| f.set(false));
+}
+
+/// 従来の見積りが `coeff·m` の項だけで拒否していた行を、`Lin` の上界が受理に変える（C=100 の既定 CE と CEWO-weight）。
+/// 受理に変えた行の二階が f64 の閉じた式と REQ-2 で一致すること（REQ-2 比 < 1。参照の不確かさ < 5%）。
+#[test]
+fn ce_lin_accepts_rows_rejected_by_coeff_bound_and_matches_f64() {
+    for kind in [CeKind::Default, CeKind::Weighted] {
+        let c = CeCase {
+            kind,
+            c: 100,
+            margin: 10.0,
+            exp: 0,
+        };
+        match public_old_ce(&c) {
+            Verdict::Cancel { cls, .. } => assert_eq!(cls, "coeff·m のみ"),
+            v => panic!("{c:?}: 旧判定は coeff·m で拒否するはず: {v:?}"),
+        }
+        let m = c.measure();
+        assert_eq!(
+            m.verdict,
+            Verdict::Accept,
+            "{c:?}: Lin の上界で受理に変わるはず"
+        );
+        for (label, acc) in [("x", m.x), ("g", m.g)] {
+            let a = acc.expect("計測");
+            assert!(a.ratio < 1.0, "{c:?}: {label} の REQ-2 比 {:e}", a.ratio);
+            assert!(a.unc < 0.05, "{c:?}: {label} の参照の不確かさ {:e}", a.unc);
+        }
+    }
+}
+/// §82.2 の 252 行に `C ∈ {33, 64, 256, 512}` を足した行列。
+fn ce_switch_cases() -> Vec<CeCase> {
+    let mut v = ce_cases();
+    for kind in [CeKind::Default, CeKind::Weighted, CeKind::Smooth] {
+        for c in [33usize, 64, 256, 512] {
+            for margin in [5.0f32, 10.0, 20.0, 40.0] {
+                for exp in [0i32, 13, 20] {
+                    v.push(CeCase {
+                        kind,
+                        c,
+                        margin,
+                        exp,
+                    });
+                }
+            }
+        }
+    }
+    v
+}
+
+/// `LINCESW`: 旧判定と新判定の受理・拒否を並べる。「旧受理 → 新拒否」は 0 件（either 受理の構造的な保証）、
+/// 「旧拒否 → 新受理」の行は REQ-2 比 < 1 であることを assert する。
+/// `cargo test -p fandhe-ai-autodiff --release --lib ce_lin_switch_rejection_delta_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn ce_lin_switch_rejection_delta_measurement() {
+    let (mut total, mut old_rej, mut new_rej, mut flipped_to_accept) =
+        (0usize, 0usize, 0usize, 0usize);
+    for c in ce_switch_cases() {
+        let old = public_old_ce(&c);
+        let new = c.public().0;
+        total += 1;
+        let (o, n) = (
+            matches!(old, Verdict::Accept),
+            matches!(new, Verdict::Accept),
+        );
+        old_rej += usize::from(!o);
+        new_rej += usize::from(!n);
+        assert!(!(o && !n), "旧受理 → 新拒否が出た: {c:?}");
+        if !o && n {
+            flipped_to_accept += 1;
+            let m = c.measure();
+            let (x, g) = (m.x.expect("x"), m.g.expect("g"));
+            eprintln!(
+                "LINCESW 旧拒否→新受理 {} c={} margin={} exp={} REQ2比 x={:.3e} g={:.3e} 参照不確かさ x={:.1e}",
+                c.name(),
+                c.c,
+                c.margin,
+                c.exp,
+                x.ratio,
+                g.ratio,
+                x.unc
+            );
+            assert!(
+                x.ratio < 1.0 && g.ratio < 1.0,
+                "新たに受理した行が REQ-2 を外す: {c:?}"
+            );
+        }
+    }
+    eprintln!(
+        "LINCESW total={total} old_rejected={old_rej} new_rejected={new_rej} flipped_to_accept={flipped_to_accept}"
+    );
+}
+
+/// 4 サンプル・Mean の CEWO の損失（上流の係数は 1）。
+fn multi_build<'t>(
+    tape: &'t Tape,
+    z: &Var<'t>,
+    c: usize,
+    opts: &CrossEntropyOptions,
+) -> Result<Var<'t>, AutodiffError> {
+    let tgt = Tensor::<i32>::new(vec![0, 1, 2, 3], &[4]).unwrap();
+    let l = z
+        .reshape(&[4, c])?
+        .cross_entropy_loss_with(&tgt, 1, Reduction::Mean, opts)?;
+    l.mul(&tape.var_no_grad(&Tensor::scalar(1.0f32)))?.sum(None)
+}
+
+/// 複数サンプル（n > 1・Mean）と `ignore_index` を含む行で、旧受理 → 新拒否が出ない（either 受理）。
+/// 行ごとに確信度が違う 4 サンプルの CEWO（class_weight あり・Mean）を、ignore の有無で通す。
+#[test]
+fn ce_lin_multi_sample_and_ignore_never_flip_accept_to_reject() {
+    let c = 100usize;
+    let weights: Vec<f32> = (0..c)
+        .map(|i| 0.5 + 0.4 * ((i as f32) * 0.731).sin())
+        .collect();
+    for ignore in [None, Some(2i32)] {
+        for margins in [[10.0f32, 10.0, 10.0, 10.0], [0.0, 5.0, 10.0, 20.0]] {
+            let mut z0 = Vec::new();
+            for (r, m) in margins.iter().enumerate() {
+                let mut row: Vec<f32> = pattern(c, r as f32).iter().map(|v| 0.1 * v).collect();
+                row[r] += m;
+                z0.extend(row);
+            }
+            let mut opts = CrossEntropyOptions::default().class_weight(tt(weights.clone(), &[c]));
+            if let Some(i) = ignore {
+                opts = opts.ignore_index(i);
+            }
+            probe::FORCE_OLD.with(|f| f.set(true));
+            let old = run_public(z0.clone(), |tape, z| multi_build(tape, z, c, &opts)).0;
+            probe::FORCE_OLD.with(|f| f.set(false));
+            let new = run_public(z0, |tape, z| multi_build(tape, z, c, &opts)).0;
+            assert!(
+                !(old == Verdict::Accept && new != Verdict::Accept),
+                "ignore={ignore:?} margins={margins:?}: 旧受理 → 新拒否 old={old:?} new={new:?}"
+            );
+            eprintln!("LINCEMULTI ignore={ignore:?} margins={margins:?} old={old:?} new={new:?}");
+        }
+    }
+}
+
+/// 候補（`ce_followup_candidates()`）ごとの旧の余裕・`Lin` の最大 `err/閾値`・本番の判定を出す。
+/// `cargo test -p fandhe-ai-autodiff --release --lib ce_followup_verdict_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn ce_followup_verdict_measurement() {
+    for c in ce_followup_candidates() {
+        let old = public_old_ce(&c);
+        let new = c.public().0;
+        let sd = seeds(c.c, &[CE_TARGET, c.c / 2]);
+        let scan = ce_lin_scan(&c, &sd, c.c <= 1000);
+        let old_margin = match &old {
+            Verdict::Cancel { margin, .. } => *margin,
+            _ => f64::NAN,
+        };
+        eprintln!(
+            "LINCECAND {} c={} old_margin={old_margin:.3e} lin_max_err_over_thr={:.3e} lin_rejected={}/{} N={} new={new:?}",
+            c.name(),
+            c.c,
+            scan.max_margin,
+            scan.rejected,
+            scan.checked,
+            scan.max_events
+        );
+    }
+}
+
+/// 受理に変わらなかった候補（C=1000 の CEWO-smooth・C=2100 の既定 CE）は、`Lin` で対角と `g` を全 seed 走査しても
+/// 上界が閾値を超える要素が残る（判定を緩めていないことと、受理に変えられない理由の固定。設計 §82.11）。
+/// 実際の f32 の二階は REQ-2 内（`loss_class_followup_candidates_are_req2_within_f64`）なので、`Lin` の和の上界
+/// `γ_{C−1}·Σ|e|` が実カーネルの和の順序に依らない最悪値であることによる過剰な拒否。
+#[test]
+#[ignore = "C=2100 の全 seed 走査は重い。--release で実行する"]
+fn ce_followup_candidates_exceed_lin_bound() {
+    for c in ce_followup_candidates().into_iter().filter(|c| c.c > 100) {
+        let sd: Vec<usize> = (0..c.c).collect();
+        let r = ce_lin_scan(&c, &sd, false);
+        assert!(
+            r.rejected > 0 && r.max_margin >= 1.0,
+            "{c:?}: Lin の上界でも拒否されるはず: {r:?}"
+        );
+        assert!(
+            matches!(c.public().0, Verdict::Cancel { .. }),
+            "{c:?}: 本番の判定も拒否のまま"
+        );
+    }
+}
+/// `LINCETIME`: 本番経路（`Lin` を使う最大の C と、走査量の上限ぎりぎりの行数）の判定時間。
+/// `cargo test -p fandhe-ai-autodiff --release --lib ce_lin_public_judge_time -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn ce_lin_public_judge_time() {
+    for (n, c, margin) in [
+        (1usize, 100usize, 10.0f32),
+        (1, 2000, 5.0),
+        (1, 2100, 10.0),
+        (150, 256, 5.0),
+        (1500, 33, 5.0),
+    ] {
+        let mut z0 = Vec::new();
+        for r in 0..n {
+            let mut row: Vec<f32> = pattern(c, r as f32).iter().map(|v| 0.1 * v).collect();
+            row[r % c] += margin;
+            z0.extend(row);
+        }
+        let tgt: Vec<i32> = (0..n).map(|r| (r % c) as i32).collect();
+        let opts = CrossEntropyOptions::default().label_smoothing(0.1);
+        let t = std::time::Instant::now();
+        let v = run_public(z0, |_tape, z| {
+            let t = Tensor::<i32>::new(tgt.clone(), &[n]).unwrap();
+            z.reshape(&[n, c])?
+                .cross_entropy_loss_with(&t, 1, Reduction::Sum, &opts)
+        })
+        .0;
+        eprintln!(
+            "LINCETIME n={n} c={c} margin={margin} lin={} secs={:.3} verdict={}",
+            ce_lin_ctx(1.0, None, n, c).is_some(),
+            t.elapsed().as_secs_f64(),
+            if v == Verdict::Accept {
+                "受理"
+            } else {
+                "拒否"
+            }
+        );
+    }
+}
+/// `-inf` のロジット（既定 CE は `reject_inf` を通らない）と `|x − max| > 2^23` のロジットは `exp_bounded` が上界を持たず、
+/// `Lin` の救済は常に偽になる。新たな拒否も受理も生まない（旧判定と同じ verdict。設計 §82.11）。
+#[test]
+fn ce_lin_non_finite_and_huge_gap_logits_keep_previous_verdict() {
+    let rows: Vec<Vec<f32>> = vec![
+        vec![0.0, f32::NEG_INFINITY, 0.5, -0.5],
+        vec![10.0, f32::NEG_INFINITY, 0.0, 1.0],
+        vec![0.0, -1.0e9, 0.5, -0.5],
+        vec![30.0, 0.0, -2.0e7, 1.0],
+        vec![f32::NAN, 0.0, 1.0, 2.0],
+    ];
+    for row in rows {
+        let c = row.len();
+        let run = || {
+            run_public(row.clone(), |_tape, z| {
+                let t = Tensor::<i32>::new(vec![1], &[1]).unwrap();
+                z.reshape(&[1, c])?
+                    .cross_entropy_loss(&t, 1, Reduction::Sum)
+            })
+            .0
+        };
+        probe::FORCE_OLD.with(|f| f.set(true));
+        let old = run();
+        probe::FORCE_OLD.with(|f| f.set(false));
+        let new = run();
+        assert_eq!(old, new, "{row:?}: 旧判定と新判定の verdict が違う");
+    }
+}
+/// 非対角の全要素の救済走査（`CeLinCtx::off`）は、本番では走査量の上限（`ce_lin_ctx`）のため `coeff` が相対の半分を
+/// 超える C ≥ 2096 では到達しない。判定の関数を直接呼んで、走査の分岐（上位 2 クラスの積が拒否される行を全非対角で
+/// 評価し直す）が either 受理として働くこと（`off = false` や `lin = None` より受理が増える）を確かめる。
+#[test]
+fn ce_lin_off_diagonal_scan_is_either_accept_when_forced() {
+    let c = 2200usize;
+    // 上位 2 クラスが同じ大きさ（y ≈ 0.5 ずつ）の行。上流 1 でも上位 2 クラスの積が大きく、`coeff·|v|` が拒否する。
+    let mut row = vec![0.0f32; c];
+    row[0] = 30.0;
+    row[1] = 30.0;
+    let weights = vec![1.0f64; c];
+    let g = 1.0f64;
+    let call = |lin: Option<CeLinCtx>| {
+        cewo_cancel_check(
+            &row,
+            (0, 0, 1, c),
+            (1.0, &weights, 1, 0.0),
+            (g, 1.0, 1.0),
+            lin,
+        )
+    };
+    let none = call(None);
+    let no_off = call(Some(CeLinCtx {
+        g,
+        w: None,
+        off: false,
+    }));
+    let off = call(Some(CeLinCtx {
+        g,
+        w: None,
+        off: true,
+    }));
+    eprintln!(
+        "LINCEOFF none={} no_off={} off={}",
+        none.is_ok(),
+        no_off.is_ok(),
+        off.is_ok()
+    );
+    assert!(none.is_err(), "従来の見積りはこの行を拒否するはず");
+    // 対角と `g` は `Lin` が救い、上位 2 クラスの積だけが `off = false` では拒否のまま。全非対角の走査が受理に変える。
+    assert!(
+        no_off.is_err() && off.is_ok(),
+        "no_off={no_off:?} off={off:?}"
+    );
+}
+/// `flag` の行（確率が f32 で underflow する行）の非対角の `Lin` 救済も `CeLinCtx::off` で止まること（レビュー指摘。
+/// 設計 §82.11.1 の `LIN_BUDGET`）。`off = false` では救済を呼ばず従来の見積りだけで判定するので拒否のまま、
+/// `off = true` のときだけ O(C²) の救済で受理に変わる。
+#[test]
+fn ce_lin_flag_row_off_diagonal_rescue_respects_off() {
+    let c = 2200usize;
+    // 上位 2 クラスが同じ大きさ（y ≈ 0.5 ずつ）、残りは f32 の exp が非正規数へ underflow する（`flag` が立つ）。
+    let mut row = vec![-70.0f32; c];
+    row[0] = 30.0;
+    row[1] = 30.0;
+    let weights = vec![1.0f64; c];
+    let g = 1.0f64;
+    let call = |lin: Option<CeLinCtx>| {
+        cewo_cancel_check(
+            &row,
+            (0, 0, 1, c),
+            (1.0, &weights, 1, 0.0),
+            (g, 1.0, 1.0),
+            lin,
+        )
+    };
+    let none = call(None);
+    let no_off = call(Some(CeLinCtx {
+        g,
+        w: None,
+        off: false,
+    }));
+    probe::LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+    let off = call(Some(CeLinCtx {
+        g,
+        w: None,
+        off: true,
+    }));
+    let log = probe::LOG.with(|l| l.borrow_mut().take()).unwrap();
+    // 対角は `Lin` が救うので、この行は最後に `flag` が立つ（flag 分岐に入る）。
+    assert!(
+        log.iter()
+            .any(|e| matches!(e, probe::Event::Flag("CrossEntropy", true))),
+        "この行は flag が立つはず"
+    );
+    eprintln!(
+        "LINCEFLAGOFF none={} no_off={} off={}",
+        none.is_ok(),
+        no_off.is_ok(),
+        off.is_ok()
+    );
+    assert!(none.is_err(), "従来の見積りはこの行を拒否するはず");
+    assert!(
+        no_off.is_err(),
+        "off = false では flag 行の非対角を救済しない: {no_off:?}"
+    );
+    assert!(off.is_ok(), "off = true では救済で受理: {off:?}");
 }

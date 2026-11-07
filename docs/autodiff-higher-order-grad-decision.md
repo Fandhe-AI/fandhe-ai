@@ -6959,6 +6959,76 @@ tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 - 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。Linux x86_64 の値で代替しない。
 - 不変: tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_EXP_DELTA_MAX`・`entry_check_lin`・`rounding_coeff`・判定・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ。
 
+### 82.11 #4094: CE・CEWO の判定を `Lin` の上界へ切り替える
+
+親 #4071 の CE・CEWO 系の 2 段目。承認は #4071 の起票の範囲に限り、上乗せしない。実際に得ていない承認は主張しない。
+
+**結論（先に）**: 判定は、従来の見積りが拒否した要素だけ `Lin` の上界で救う形に配線した（Cosine の §82.8 と同型の either 受理）。#4089 が選んだ 4 候補（§82.4）のうち、**C=100 の 2 件（既定 CE・CEWO-weight）は受理に変わった**。C=1000（CEWO-smooth）と C=2100（既定 CE）は、`Lin` の契約（和の誤差を実カーネルの順序に依らない最悪値 `γ_{n−1}·Σ|vᵢ|` で追う）のままでは受理に変えられない。AC1（4 候補の受理）は一部未達で、理由を下に実測で書く。判定を緩めて通すことはしていない。
+
+#### 82.11.1 実装（`crates/autodiff/src/create_graph/loss_class.rs`）
+
+- **二階の写しの分割**: #4093 の test 限定 `cewo_rev` を、seed のスカラー部 `cewo_seed`（`CewoSeed { c, term, g }`）と要素部 `cewo_x` に分けて本番から呼べる形にした。演算の順序は #4093 と同じで、`cewo_rev`・`cewo_model_rows_f32`・`cewo_lin_rows` は test 限定の合成として残る（#4093 の soundness 掃引・bit 一致の錠は無変更で通る）。
+- **either 受理**: 要素ごとに従来の見積り（`judge::struct_check`）を先に評価し、拒否した要素だけ `Lin` の判定（`entry_check_lin`）を評価する（Cosine の `cos_elem` を `lin_elem` と改名して共用）。どちらも独立に健全な上界なので、片方が閾値内なら REQ-2 は成り立つ。拒否するときのエラー文面は従来と同じで、計測フックには最終的に拒否した要素だけを積む。対象は (a) Softmax の対角の曲率、(b) `g` への二階、(c) `flag` 行の非対角の要素ごとの判定、(d) 非 `flag` 行の非対角。
+- **`CeLinState`**: 従来の見積りが行で最初に拒否した要素で forward を 1 回だけ作る（速い経路や受理される行では `Lin` を一切作らない）。seed のスカラーは `j` が変わるたびに作り直し、要素ごとの値は作ってすぐ `lin_truncate` で戻す（`entry_check_lin` は判定時点の全体の事象数を余裕係数に使うため、要素ごとの truncate は必須）。`Drop` で thread-local の領域を解放する。入力は符号つきの実際の `g` と、Mean の分母 `W`（f32 へ丸める前の f64。構造は `g / W` を f32 で作るので `rho` のずれも自然に含まれる）。
+- **非対角（上位 2 クラスの近似）の扱い**: 近似を消すのではなく、**速い経路として残す**。上位 2 クラスの積が従来の見積りで通れば全非対角が通る（単項の積は大きさに対して単調）ので、そのまま受理（従来の受理は変わらない）。通らないときだけ、`Lin` を使えるテンソル（`CeLinCtx::off`）で全非対角 `(i, j)` を要素ごとに「従来の見積り → `Lin`」の順で評価し直し、1 要素でも両方で拒否なら従来の上位 2 クラスのエラーを返す。受理は全要素を確かめた場合に限るので、旧受理 → 新拒否は構造的に 0 件。
+- **適用条件 `ce_lin_ctx(g, w, n_rows, c)`**（テンソル単位）: `16·ce_lin_events_max(c)·u < 0.01`（`entry_check_lin` の余裕係数の上限）かつ `n_rows·ce_lin_cost_diag(c) ≤ LIN_BUDGET` のとき `Some`（対角・`g` の救済）。さらに `n_rows·(ce_lin_cost_diag + ce_lin_cost_off) ≤ LIN_BUDGET` のときだけ `off = true`（非対角の全要素の救済）。`n_rows` は判定する有効な行（ignore と範囲外を除く）の数。`ce_lin_events_max(c) = 4c + 40`、`ce_lin_cost_diag(c) = 6c² + 200c`、`ce_lin_cost_off(c) = 24c²`。`LIN_BUDGET`（`2^26`）・`JUDGE_BUDGET` の値は変えていない。
+- **予算超過の扱い**: 「`judge_budget` で守る」は、走査量の上限を超えたら **`Lin` を使わない**形で満たした（従来の判定の結果がそのまま残り、O(C²) の救済を走らせない）。`judge::judge_budget` で新たに `Err` を返す形は採らない: 従来受理していた入力（大きな C の `flag` 行など）を拒否に変え、受理 → 拒否の反転と既存プローブの文面の変化を生みうるため。
+- **非有限・巨大差のロジット**: 既定 CE は `reject_inf` を通らない。`-inf` と `|x − max| > 2^23` のロジットでは `Num::exp_bounded` が上界なし（NaN 係数）になり `entry_check_lin` が拒否する。救済は常に偽になり、従来の判定が残る（新しい拒否も受理も生まない。`ce_lin_non_finite_and_huge_gap_logits_keep_previous_verdict`）。NaN の行は従来どおり早期 return。#4093 §82.10.5 の申し送りを閉じる。
+
+#### 82.11.2 実測（CPU・x86_64 Linux・glibc 2.43・rustc 1.98.1・`--release`。1 `Rf` 反復 = 3.45 ns〈§80.5〉で換算。`ce_lin_cost_profile`）
+
+値は 5 回の実行にわたる範囲（±10〜30% の揺れ）。seed を 16 本取り、対角と `g`（seed ごとに 1 要素）と非対角（seed ごとに C−1 要素）の時間を別々に測って全 seed に換算した。事象数と時間は 3 種別（既定 CE・CEWO-weight・CEWO-smooth）でほぼ同じ。
+
+| C | forward の事象数 | 判定時の最大事象数 | `16·N·u` | forward（反復相当） | 対角・`g`（全 seed） | 非対角（全 seed） |
+|---|---|---|---|---|---|---|
+| 33 | 133 | 139〜142 | 0.0001 | 約 3.5e3〜5.1e3 | 約 1.2e3〜2.0e3 | 約 0.8e4〜1.9e4 |
+| 100 | 401 | 407〜410 | 0.0004 | 約 2.4e4〜3.0e4 | 約 3.7e3〜5.5e3 | 約 1.0e5〜1.1e5 |
+| 256 | 1025 | 1031〜1034 | 0.0010 | 約 1.4e5〜1.7e5 | 約 1.0e4〜1.3e4 | 約 6.6e5〜7.1e5 |
+| 1000 | 4001 | 4007〜4010 | 0.0038 | 約 4.6e6〜5.2e6 | 約 1.0e5〜2.1e5 | 約 1.05e7〜1.2e7 |
+| 2100 | 8401 | 8407〜8410 | 0.0080 | 約 1.9e7〜2.0e7 | 約 3.0e5〜3.5e5 | 約 5.0e7〜5.3e7 |
+
+- 事象数は forward が `4C + 1`、判定時の最大が `4C + 10`（定数分の最大 10）。`16·N·u < 0.01` は `C ≤ 2611` で成り立つ。`ce_lin_events_max = 4C + 40` は測った全点を覆う。
+- 見積り／実測は、対角・`g`（forward 込み）が 1.29〜2.92 倍、非対角が 1.61〜2.39 倍（C = 2〜2100 の 3 種別全点）。forward は `C²` に比例（約 `4.3C²`）、対角・`g` は約 `140C`、非対角は約 `11.5C²`。
+- 本番で `off = true` になるのは `n_rows = 1` で C ≤ 約 1490。ただし非対角の救済走査に入るのは上位 2 クラスの積が拒否されるとき、すなわち `coeff` が相対の半分（5e-4）を超える C ≥ 2096 に限る。その C では `off` の走査量が上限を超えるため、**非対角の全要素走査は現行の `LIN_BUDGET` では本番に到達しない**（分岐は `ce_lin_off_diagonal_scan_is_either_accept_when_forced` が判定関数を直接呼んで固定する。`LIN_BUDGET` を上げる、または要素あたりの `Lin` の演算を減らす最適化をすれば到達する）。
+- 公開経路の判定時間（`ce_lin_public_judge_time`）: `n=1, C=2000`（受理）0.063 秒、`n=1, C=2100`（拒否）0.069 秒、`n=150, C=256` 0.003 秒、`n=1500, C=33` 0.004 秒。§83.1 の水準（0.5 秒未満）に収まる。
+
+#### 82.11.3 拒否範囲の変化
+
+| 候補（§82.4） | 旧の余裕 | `Lin` の最大 `err/閾値` | 本番の判定 |
+|---|---|---|---|
+| 既定 CE・C=100・余裕 10・上流 `2^0` | 4.86 | 0.625 | **受理に変更**（REQ-2 比 x 2.5e-2・g 2.5e-2） |
+| CEWO-weight・C=100・余裕 10・`2^0` | 4.86 | 0.627 | **受理に変更**（REQ-2 比 x 2.5e-2・g 2.6e-2） |
+| CEWO-smooth・C=1000・余裕 10・`2^0` | 22.8 | 2.72（標本 9 seed の 9009 要素のうち 2 要素が拒否） | 拒否のまま（`coeff·m` のみ） |
+| 既定 CE・C=2100・余裕 10・`2^0` | 23.3 | 2.86（標本 9 seed の `g`・対角 18 要素のうち 2 要素が拒否） | 拒否のまま（`coeff·m` のみ） |
+
+- 理由（拒否のまま 2 件）: 実際の f32 の二階は REQ-2 の閾値の 1/4 以内で一致している（`loss_class_followup_candidates_are_req2_within_f64`）。拒否される要素は確信度の高い対角（`y_j ≈ 1`）で、`Lin::total` の和の誤差 `γ_{C−1}·Σ|e|`（C=1000 で相対 約 6e-5、C=2100 で 約 1.3e-4）が `1 − y_j` の打ち消しにそのまま乗る。これは実カーネルの和の順序に依らない最悪値という `Lin` の契約の帰結で、本イシューで契約は変えない。`ce_followup_candidates_exceed_lin_bound`（`#[ignore]`・`--release`）が、全 seed の対角と `g` を `Lin` で走査しても上界が閾値を超える要素が残り、本番の判定も拒否のままであることを固定する。
+- 旧判定／新判定の公開経路の比較（`ce_lin_switch_rejection_delta_measurement`。§82.2 の 252 行に C ∈ {33, 64, 256, 512} の 144 行を足した 396 行）: 旧拒否 306 行 → 新拒否 267 行。**「旧受理 → 新拒否」は 0 件**。「旧拒否 → 新受理」は 39 行（既定 CE・CEWO-weight・CEWO-smooth それぞれ C=33・64・100 の余裕 10・20・40 〈上流 `2^0`〉と、C=2000 の余裕 5〈上流 `2^0`・`2^13`・`2^20`〉・C=2100 の余裕 5〈上流 `2^0`〉）で、全件の REQ-2 比は x・g とも 3e-2 以下（C=100・余裕 10 が最大の 2.9e-2。参照の不確かさは x で 1.8e-10 以下）。旧判定が拒否していたこれらの行は、`coeff·m` のみが理由だった。
+- 複数サンプル（n = 4・Mean・class_weight）と `ignore_index` を含む行（`ce_lin_multi_sample_and_ignore_never_flip_accept_to_reject`）: 4 通りすべて旧拒否 → 新受理で、旧受理 → 新拒否は 0 件（§82.2 では未測定だった範囲）。
+- Cosine の比較（`cosine_lin_switch_rejection_delta_measurement`）は `FORCE_OLD` を共有しても変わらない（旧拒否 76 → 新拒否 74、受理への反転 2 件で §82.8 と同じ）。
+
+#### 82.11.4 テスト・変異確認
+
+- 更新: `loss_class_followup_candidates_are_req2_within_f64`（C=100 の 2 件は受理、C=1000・2100 は拒否のまま。REQ-2 比 < 0.25・参照の不確かさ < 5% は全件で維持）。
+- 追加: `ce_lin_accepts_rows_rejected_by_coeff_bound_and_matches_f64`（旧判定が `coeff·m` で拒否する C=100 が受理に変わり、REQ-2 比 < 1）、`ce_lin_events_stay_within_bound`（事象数 ≤ `ce_lin_events_max`）、`ce_use_lin_boundaries`（余裕係数・対角と非対角の走査量の上限が独立・行数が増えると偽・`FORCE_OLD`）、`ce_lin_multi_sample_and_ignore_never_flip_accept_to_reject`、`ce_lin_non_finite_and_huge_gap_logits_keep_previous_verdict`、`ce_lin_off_diagonal_scan_is_either_accept_when_forced`、計測 `ce_lin_cost_profile`・`ce_lin_switch_rejection_delta_measurement`・`ce_followup_verdict_measurement`・`ce_lin_public_judge_time`・`ce_followup_candidates_exceed_lin_bound`（`#[ignore]`・`--release`）。
+- 無変更で通る: `cewo_fwd_generic_matches_previous_formulas`（bit 一致）、`lin_bound_covers_f32_deviation_for_ce_sweep`・`..._ce_underflow_rows`、`ce_f32_model_stays_close_to_hand_built_structure`、`existing_rejection_probes_stay_rejected_and_truly_fail_req2`、`ce_hand_built_structure_matches_public_path`、統合テスト `create_graph_loss_class.rs` の全件（`ce_default_confident_row_softmax_curvature_is_rejected_or_exact`・`cewo_confident_row_softmax_curvature_is_rejected_or_exact`・`ce_default_moderate_logits_still_accepted` を含む）。
+- 変異確認（手動・コミットなし。いずれも元に戻して全テストが通ることを確かめた）:
+
+| 変異 | 失敗したテスト |
+|---|---|
+| `Lin::bound` を常に 0 | `lin_bound_covers_f32_deviation_for_ce_sweep`・`..._ce_underflow_rows`（soundness。Cosine の 2 件も）、`loss_class_followup_candidates_are_req2_within_f64`（C=1000・2100 が受理に変わる）、`ce_followup_candidates_exceed_lin_bound`、統合テスト `cosine_epsilon_absorption_second_order_is_rejected_or_exact`。**統合テストの CE の確信度の高い行のプローブ（`[0, 20]`・C=2）は失敗しなかった**: この行は `|V_str − V|` の項（f32 の `y(1−y)` が 0 に潰れる）で拒否されるため、`Lin` の上界の項を落としても拒否のまま。上界の項への感度は soundness 掃引と候補の固定テストが担う |
+| 救済（`CeLinState::ok`）を常に真 | `existing_rejection_probes_stay_rejected_and_truly_fail_req2`、`loss_class_followup_candidates_are_req2_within_f64`、統合テスト `ce_default_confident_row_softmax_curvature_is_rejected_or_exact`・`cewo_confident_row_softmax_curvature_is_rejected_or_exact`（either 受理の救済側が判定に効いており、拒否すべき行を通していない） |
+
+#### 82.11.5 後続候補（Issue は未起票。起票は所有者承認後）
+
+- 残る 2 候補（C=1000・2100）を受理に変えるには、和の誤差の上界を現行の最悪値から精密化する `Lin` の契約の変更が要る（例: 実カーネルの縮約順序〈pairwise など〉を仮定した `total` の上界、`16·N·u` の余裕係数を値ごとの依存事象数で数える精密化）。契約の変更は所有者承認の対象。Cosine の §82.8 と同じ後続候補。
+- 非対角の全要素走査を本番で使えるようにするには、`LIN_BUDGET` の見直しか要素あたりの `Lin` の演算の削減が要る。ただし C ≥ 2096 では事象数の上限（`16·N·u < 0.01`、C ≤ 2611）にも近く、得られる受理の増加は小さい見込み。
+- 既存の `flag` 行の O(C²) の走査（f64）には走査量の上限が無い（本イシューでは変えない。導入すると受理 → 拒否になりうるため所有者判断）。
+
+#### 82.11.6 未実測・変えていないもの
+
+- 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。Linux x86_64 の値で代替しない。
+- 不変: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_EXP_DELTA_MAX`・`entry_check_lin` と `Lin` の意味論・`rounding_coeff`・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ・Cosine と Triplet の判定。
+
 ## 83. 計測・設計記録（親 #4072。create_graph の総括判定の走査量の上限 `JUDGE_BUDGET` の見直し）
 
 ### 83.0 位置づけ
