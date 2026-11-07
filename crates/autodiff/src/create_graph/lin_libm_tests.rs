@@ -85,7 +85,7 @@ fn near_one(rng: &mut Rng, kmax: u64) -> f32 {
     }
 }
 
-fn sign(rng: &mut Rng) -> f64 {
+fn ref_sign(rng: &mut Rng) -> f64 {
     if rng.next() & 1 == 0 { 1.0 } else { -1.0 }
 }
 
@@ -93,7 +93,7 @@ fn sign(rng: &mut Rng) -> f64 {
 fn gen_case(s: usize, rng: &mut Rng) -> (f32, f32) {
     const FIXED_E: [f32; 9] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, -0.75, -1.75, 1.0 / 3.0];
     let wide_base = |rng: &mut Rng| {
-        let lx = rng.range(0.01, 40.0) * sign(rng);
+        let lx = rng.range(0.01, 40.0) * ref_sign(rng);
         (lx.exp() as f32).max(f32::MIN_POSITIVE)
     };
     match s {
@@ -115,7 +115,7 @@ fn gen_case(s: usize, rng: &mut Rng) -> (f32, f32) {
         }
         4 => {
             let x = near_one(rng, 8);
-            let t = rng.range(20.0, 128.0) * sign(rng);
+            let t = rng.range(20.0, 128.0) * ref_sign(rng);
             aim(x, t)
         }
         _ => {
