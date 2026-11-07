@@ -7029,6 +7029,58 @@ tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 - 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。Linux x86_64 の値で代替しない。
 - 不変: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_EXP_DELTA_MAX`・`entry_check_lin` と `Lin` の意味論・`rounding_coeff`・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ・Cosine と Triplet の判定。
 
+### 82.12 #4095: Triplet の相殺判定の上界を `Lin` で並行計算する（判定は変えない）
+
+#### 82.12.0 位置づけ
+
+- 親 #4071 の Triplet 系の 1 段目。Triplet の二階の逆伝播を `Lin` で評価できるようにするだけで、**判定には使わない**。判定の切り替えは #4096（Cosine の #4090・CE の #4093 と同じ立ち位置）。承認は #4071 の起票の範囲に限り、上乗せしない。
+
+#### 82.12.1 変更範囲
+
+- `loss_class.rs`: `triplet_pair_row` の forward を総称関数 `tri_fwd<T: Num>`（`TriFwd<T> { u, au, ssum, norm, q, e, dg }`）へまとめ、f64 の参照と f32 の再現を同じ関数で組む。`pair_info`・`triplet_cancel_check`・`coeff` の式・`flag` の式・エラー文面・`triplet_cgrad` の流れは変えていない。`|u|` と `sign_c` の乗算は補助関数 `by_sign`（`s>0` 恒等・`s<0` 符号反転・`s==0` で定数 0）で書く（`Num` に `abs` が無く、trait は変えない）。
+- 計画からの差分: `tri_fwd` は生の行 `(x, y)` ではなく差分 `v` を受ける。本番は f64 が `triplet_distance_stats` の差分 `h`、f32 が `row32` の再構成 `rec` をそのまま渡すので、差分の bit 一致は構造上保たれる。`Lin` 用の差分は test 限定の `tri_v` が `minus`・`plus` の丸めの事象つきで作り、差分の桁落ち（条件数 κ）はその事象が運ぶ（従来の `(κ+1)` の係数の代わり）。符号は f64 が `sign0(h)`、f32・`Lin` が `sign0(rec)`。`TriCase` には `eps` を足さず、`hand_rows_with(rows, eps, mean_n, seeds)` の引数で渡す（既存テストの初期化子を変えないため）。
+- test 限定: `TriSetup`／`triplet_setup`（本番の前段と同じ `triplet_distance_stats`・`pair_info`）、`tri_rev_pair`／`tri_rev`（二階の写し）、`triplet_model_rows_f32`、`triplet_lin_rows`。
+
+#### 82.12.2 写し方
+
+- 閉じた式のヘッセ行列ではなく、子テープの eager VJP を写す（`grad.rs::vjp`・`eval/scalar.rs::binary_partials`／`unary_grad_factor`）。`Mul` は `上流·相手の値`、`Div` は係数 `1/b` と `−(a/b)/b` を先に作ってから上流を掛ける、`PowScalar` は f32 の `e·x^(e−1)`、`Abs` は f32 の `u` の符号、`Sqrt` は `0.5/y`。`norm`・`ssum` は broadcast だが上流が lane `j` だけなので 1 項。
+- 指数は `e as f32` に頼らず `e_str`（`p32-1.0`・`1.0/p32`・`p32-2.0`）を明示して渡す（`powf_bounded`）。
+- `sign0(rec) ≠ sign0(h)` のレーンがある入力は `triplet_setup` が除外する（`|v̂| − |v| = s·(v̂ − v)` が成り立つ範囲に限るため。本番ではその食い違いを `flag`〈`sa` の不一致〉が検出する）。
+- swap の `ean`・`epn` は `m_one`／`m_half`〈`half` の `Mul` を丸めの事象として写す〉／`m_zero` を通す。`g` への二階は `W_o[j]`（Mean は `1/n` を f32 で先に作って掛ける）。
+- `Num::settle` と走査量の上限は入れていない（#4096 の担当）。本番の経路では `Lin` を計算しない。
+
+#### 82.12.3 テスト
+
+- `triplet_pair_row_generic_matches_previous_formulas`: 従来の `triplet_pair_row` の逐語コピー `triplet_pair_row_previous` と、`PairRow` の全フィールドと `flag` が bit 一致（NaN の行・全要素 0 の行・符号付きゼロ・eps ≠ 0・p ∈ {1.5, 2, 3, 10, 50, 1e3}・`[1e10, 1e10, 1e-40]` 型の underflow 行・乱数の行）。判定不変の主な錠。
+- `lin_bound_covers_f32_deviation_for_triplet_sweep`: `d ∈ {2,3,8,16,32,64}`・`p ∈ {2,1.5,3,10}`・`ratio ∈ {1e-1,1e-3,1e-6}`・`eps ∈ {0,1e-4}`・swap off/on・上流 `2^{0,13,20}`（`exp = 13` で Mean 3・7 も）で、手組みの構造（実際の eager 逆伝播）と `tri_rev::<f32>` の双方が `|実測 − v| ≤ bound·(1 + 16Nu)`。実測（debug）: checked=4200960・nonzero=3249810・tight(dev > 0.1·bound)=279842・最大 dev/bound=0.8844（864 ケース中 860 が前段を通過）。
+- `lin_bound_covers_f32_deviation_for_triplet_underflow_rows`（微小成分 1e-20〜1e-42、p ∈ {3,10,50}）、`triplet_f32_model_stays_close_to_hand_built_structure`（REQ-2 比 1 未満）。underflow 行で手組みの構造の要素のうち上界が有限だった数は、tiny ∈ {1e-20, 1e-30, 1e-38} では全要素（d=2: 42、d=4: 156、d=8: 600）、`1e-42`（非正規数域）では d=2: 8/42、d=4: 32/156、d=8: 128/600。
+- 既存のテスト（`loss_class_followup_candidates_are_req2_within_f64`・`existing_rejection_probes_stay_rejected_and_truly_fail_req2`・統合テスト `create_graph_loss_class.rs` の Triplet の拒否プローブ）は無変更で通る。
+- 変異確認: `tri_rev_pair` の `d_norm` の符号（`negate`）を外すと soundness 2 テストが失敗（dev=1.6e4 > bound=1.1e-1 など）。変異は戻した。
+
+#### 82.12.4 計測（`--release`、Linux x86_64・glibc・rustc 1.98.1。`triplet_lin_candidates_measurement`）
+
+| 入力 | N | 16Nu | 最大 bound | 閾値超の要素 | 1 seed の時間 |
+|---|---|---|---|---|---|
+| d=64 ratio=0.1 p=3 | 2165 | 0.0021 | 1.6e-5 | 1/5211 | 1.2e-3 s |
+| d=64 ratio=0.1 p=3 swap | 2681 | 0.0026 | 2.6e-5 | 0/5211 | 1.2e-3 s |
+| d=512 ratio=0.1 p=2 | 11813 | 0.0113 | 2.2e-5 | 0/41499 | 9.3e-2 s |
+| d=64 ratio=1e-3 p=1.5 | 2165 | 0.0021 | 1.5e-4 | 0/5211 | 9.2e-4 s |
+| d=64 ratio=1e-6 p=10 | 2165 | 0.0021 | 7.3e-5 | 7/5211 | 9.4e-4 s |
+
+上界はすべて有限。「閾値超」は `bound·(1+16Nu) ≥ max(1e-5, RELATIVE_TOLERANCE/2·|v|)` の要素数。受理に変えてよいかは #4096 で判断する（本イシューでは判定を変えない）。
+
+#### 82.12.5 #4096 への申し送り
+
+- `settle` を掛けていない。`ssum`・`norm` は全要素の事象を持つハブ値で、`q` を作る `over` が 1 要素 O(d)、forward 全体は O(d²)。d=512 で N=11813 となり `16Nu = 0.0113 ≥ 0.01`（`entry_check_lin` が拒否する域）。走査量の上限と `settle` の位置は #4096 で決める。
+- 実カーネルの `PowScalar` の VJP 係数は `e·x^((p−1)−1)` だが、本番の再現 `dg32` は `x.powf(p32−2.0)` で、巨大な p では f32 の指数の丸めが食い違いうる。本イシューは判定不変のため本番の式を変えず、`tri_rev` はカーネルどおりに写した。是正は判定が変わるため #4096 以降で所有者判断。
+- Mean は `s_b = g/n` の f32 の丸めと `g` への `Div` の VJP を写した。`rho`（`sb_ratio`）との対応は #4096 で確認する。
+- 上界を持たない行（`|x|` の指数規則の域外・`sign0(rec) ≠ sign0(h)` など）の扱い（常に拒否の扱いにするか従来判定へ戻すか）は #4096 で決める。
+
+#### 82.12.6 未実測・変えていないもの
+
+- 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。Linux x86_64 の値で代替しない。
+- 不変: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_POWF_Z_MAX`・`entry_check_lin` と `Lin` の意味論・`Num` の trait・`rounding_coeff`・判定・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ・Cosine と CE の判定。
+
 ## 83. 計測・設計記録（親 #4072。create_graph の総括判定の走査量の上限 `JUDGE_BUDGET` の見直し）
 
 ### 83.0 位置づけ

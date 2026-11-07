@@ -181,6 +181,8 @@ fn deviates(r: f64, s: f64, mag: f64, coeff: f64) -> bool {
 }
 
 /// f32 の逐次和（構造の `Sum` の再現。和の順序の違いは `coeff` の長さ比例項が覆う）。
+/// 本番の判定は総称関数（`Num::total`）へ移ったため、残る呼び出しは test の旧式との照合だけ。
+#[cfg(test)]
 fn sum32(it: impl Iterator<Item = f32>) -> f32 {
     it.fold(0f32, |a, x| a + x)
 }
@@ -2410,10 +2412,87 @@ struct PairRow {
     dsg: Vec<f64>,
 }
 
+/// 符号 `s`（`sign0` の結果。`+1`／`-1`／`0`）を掛けた値。`s > 0` は恒等、`s < 0` は符号反転、`s == 0` は定数 0。
+/// `Num` に `abs` が無いため、`|x|`（符号が分かっている `x` の絶対値）と、ホスト定数の符号 `sign_c` の乗算の
+/// 両方をこれで書く（`f32` の積は符号に対称に丸めるので `x·s` と bit 一致する。underflow した `±0` も `|x|` と同じ `+0` になる）。
+/// 呼び出し元: [`tri_fwd`]・test 限定の [`tri_rev_pair`]（#4095）。
+fn by_sign<T: Num>(x: T, s: f64) -> T {
+    if s > 0.0 {
+        x
+    } else if s < 0.0 {
+        x.negate()
+    } else {
+        T::k(0.0)
+    }
+}
+
+/// Triplet の 1 ペア・1 行の forward の中間値（`u = v·inv`・`ssum`・`N`・`q = |u|/N`・`e = q^(p−1)`・`dg = (p−1)·q^(p−2)`）。
+/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（丸めの一次伝播の上界。#4095。test 限定で使う）。
+struct TriFwd<T> {
+    u: Vec<T>,
+    /// `|u|`（[`by_sign`] で作る）。二階の逆伝播のモデル（test 限定）が読む。
+    #[cfg_attr(not(test), expect(dead_code))]
+    au: Vec<T>,
+    /// p=2 は `Σu²`、一般の p は `Σ|u|^p`（構造の `ssum`）。二階の逆伝播のモデル（test 限定）が読む。
+    #[cfg_attr(not(test), expect(dead_code))]
+    ssum: T,
+    norm: T,
+    #[cfg_attr(not(test), expect(dead_code))]
+    q: Vec<T>,
+    e: Vec<T>,
+    dg: Vec<T>,
+}
+
+/// [`TriFwd`] を `T` の演算で組む。`v`＝差分 `(x−y)+eps`（`T` ごとの値。本番は `f64` が `triplet_distance_stats` の差分、
+/// `f32` が `row32` の再構成、test の `Lin` が [`tri_v`] で `minus`／`plus` の丸めの事象つきに作る）、`signs`＝各レーンの
+/// 差分の符号（`|u|` の組み立てに使う。`f64` は `sign0(h)`、`f32`・`Lin` は `sign0(rec)`）、`inv32`＝行スケールの逆数
+/// （f32 で厳密）、`p`＝`(p64, p32)`。
+///
+/// 呼び出し元: [`triplet_pair_row`]（`f64` の参照と `f32` の再現。本番）と test の `Lin` 並行計算（`triplet_lin_rows`）。
+/// 演算順は従来の `triplet_pair_row` の逐語の式と同じ（bit 一致は test の `triplet_pair_row_generic_matches_previous_formulas` が錠）。
+/// 指数は `e as f32` に頼らず `p32` から f32 で作った値（`1.0/p32`・`p32-1.0`・`p32-2.0`）を明示して渡す。
+fn tri_fwd<T: Num>(v: &[T], signs: &[f64], inv32: f32, p: (f64, f32)) -> TriFwd<T> {
+    let (p64, p32) = p;
+    let inv = T::k(f64::from(inv32));
+    let u: Vec<T> = v.iter().map(|&x| x.times(inv)).collect();
+    let au: Vec<T> = u.iter().zip(signs).map(|(&x, &s)| by_sign(x, s)).collect();
+    let (ssum, norm) = if p64 == 2.0 {
+        let sq: Vec<T> = u.iter().map(|&x| x.times(x)).collect();
+        let ssum = T::total(&sq);
+        (ssum, ssum.root())
+    } else {
+        let pw: Vec<T> = au.iter().map(|&x| x.powf_bounded(p64, p32)).collect();
+        let ssum = T::total(&pw);
+        (ssum, ssum.powf_bounded(1.0 / p64, 1.0 / p32))
+    };
+    let q: Vec<T> = au.iter().map(|&x| x.over(norm)).collect();
+    let (e, dg) = if p64 == 2.0 {
+        (q.clone(), vec![T::k(1.0); q.len()])
+    } else {
+        (
+            q.iter()
+                .map(|&x| x.powf_bounded(p64 - 1.0, p32 - 1.0))
+                .collect(),
+            q.iter()
+                .map(|&x| T::k(p64 - 1.0).times(x.powf_bounded(p64 - 2.0, p32 - 2.0)))
+                .collect(),
+        )
+    };
+    TriFwd {
+        u,
+        au,
+        ssum,
+        norm,
+        q,
+        e,
+        dg,
+    }
+}
+
 /// 1 ペア・1 行の f64 の参照値と、構造が f32 で計算する値（差分の再構成 `rec`・`v·(1/mx)`・`|u|^p` の
 /// 逐次和・`ssum^(1/p)`・`|u|/N`・`PowScalar` とその微分係数）の再現を作る。3 つ目は f32 の再現値が
 /// 丸め誤差の見積り `coeff` を超えてずれる（スケーリング後の微小成分の 0 化・非正規数化等）か。
-/// 全要素 0 の行（構造は定数 0）・NaN の行は `None`。
+/// 全要素 0 の行（構造は定数 0）・NaN の行は `None`。forward は総称関数 [`tri_fwd`] で組む（#4095。判定は不変）。
 fn triplet_pair_row(
     h: &[f64],
     rec: &[f32],
@@ -2427,52 +2506,32 @@ fn triplet_pair_row(
     }
     let inv32 = info.inv_mx[base];
     let inv = f64::from(inv32);
-    let u: Vec<f64> = h.iter().map(|v| v * inv).collect();
-    let norm = if p == 2.0 {
-        u.iter().map(|x| x * x).sum::<f64>().sqrt()
-    } else {
-        u.iter().map(|x| x.abs().powf(p)).sum::<f64>().powf(1.0 / p)
-    };
+    let p32 = p as f32;
+    let signs64: Vec<f64> = h.iter().map(|&x| sign0(x)).collect();
+    let f64f = tri_fwd::<f64>(h, &signs64, inv32, (p, p32));
+    let norm = f64f.norm;
     if norm.is_nan() || norm <= 0.0 {
         return None;
     }
-    let q: Vec<f64> = u.iter().map(|x| x.abs() / norm).collect();
     let sg: Vec<f64> = (0..h.len())
         .map(|k| f64::from(info.sign[base + k]))
         .collect();
     let reference = PairRow {
         fac: inv / norm,
         pm1: p - 1.0,
-        dg: q.iter().map(|&x| (p - 1.0) * x.powf(p - 2.0)).collect(),
-        e: q.iter().map(|&x| x.powf(p - 1.0)).collect(),
+        dg: f64f.dg.clone(),
+        e: f64f.e.clone(),
         sg: sg.clone(),
         sa: sg.clone(),
         dsg: vec![1.0; h.len()],
     };
     // 構造の f32 の再現（`pair_grad`: `u = v·const(1/mx)`、p=2 は `u/sqrt(Σu²)`、一般の p は
     // `(|u|/ssum^(1/p))^(p−1)`）。
-    let p32 = p as f32;
-    let u32v: Vec<f32> = rec.iter().map(|&c| c * inv32).collect();
-    let au: Vec<f32> = u32v.iter().map(|x| x.abs()).collect();
-    let norm32 = if p == 2.0 {
-        sum32(u32v.iter().map(|&x| x * x)).sqrt()
-    } else {
-        sum32(au.iter().map(|&x| x.powf(p32))).powf(1.0 / p32)
-    };
-    let q32: Vec<f32> = au.iter().map(|&x| x / norm32).collect();
-    let (e32, dg32): (Vec<f64>, Vec<f64>) = if p == 2.0 {
-        (
-            q32.iter().map(|&x| f64::from(x)).collect(),
-            vec![1.0; h.len()],
-        )
-    } else {
-        (
-            q32.iter().map(|&x| f64::from(x.powf(p32 - 1.0))).collect(),
-            q32.iter()
-                .map(|&x| f64::from((p32 - 1.0) * x.powf(p32 - 2.0)))
-                .collect(),
-        )
-    };
+    let signs32: Vec<f64> = rec.iter().map(|&x| sign0(f64::from(x))).collect();
+    let f32f = tri_fwd::<f32>(rec, &signs32, inv32, (p, p32));
+    let (u, u32v, norm32) = (&f64f.u, &f32f.u, f32f.norm);
+    let e32: Vec<f64> = f32f.e.iter().map(|&x| f64::from(x)).collect();
+    let dg32: Vec<f64> = f32f.dg.iter().map(|&x| f64::from(x)).collect();
     // 構造が f32 の `u` から決める符号（離散量もホストの値を共有せず、構造の実際の経路から取る）。
     let s32: Vec<f64> = u32v.iter().map(|&x| sign0(f64::from(x))).collect();
     let (sg_s, dsg_s) = if p == 2.0 {
@@ -2503,6 +2562,357 @@ fn triplet_pair_row(
                 || structural.sa[k] != reference.sa[k]
         });
     Some((reference, structural, flag))
+}
+
+// ---------------------------------------------------------------------------------
+// Triplet の二階の逆伝播のモデル（test 限定。#4095・設計 §82.12）
+// ---------------------------------------------------------------------------------
+
+/// Triplet の 1 ケース（`[1, d]` の 1 行・全要素 active）の入力と、本番の前段（`pair_info`）が作る離散量。
+/// `tri_rev` のモデルが読む。拒否される入力・全要素 0 の行・NaN の行は作れない（[`triplet_setup`] が `None`）。
+#[cfg(test)]
+pub(super) struct TriSetup {
+    /// ペア `ap`・`an`・`pn` の `(x, y)`（差分 `v = (x − y) + eps`。`pn` は swap のときだけ使う）。
+    pub(super) rows: [(Vec<f32>, Vec<f32>); 3],
+    pub(super) eps: f32,
+    pub(super) p: f32,
+    pub(super) swap: bool,
+    /// 上流 `(g, Mean の分母)`。
+    pub(super) up: (f64, Option<usize>),
+    inv32: [f32; 3],
+    /// ホスト定数 `sign_c`（f64 の差分の符号）。
+    sg: [Vec<f64>; 3],
+    /// f32 の差分 `rec` の符号（`|u|` の組み立てに使う）。
+    s_abs: [Vec<f64>; 3],
+    /// f32 の `u = rec·inv` の符号（`Abs` の VJP が掛ける符号）。
+    sa: [Vec<f64>; 3],
+    /// `an_coeff` の分類: 0 = 1（`m_one`）、1 = 0（`m_zero`）、2 = 中間（`m_half`）。
+    an_kind: u8,
+}
+
+/// [`TriSetup`] を作る（`triplet_cgrad` の前段と同じ `triplet_distance_stats`・`pair_info`）。
+/// `sign0(rec) ≠ sign0(h)` のレーンがある入力も `None`（`|u|` の一次の写しが健全でなくなるため。本番ではその食い違いを
+/// `flag`〈`sa` の不一致〉が検出する）。
+#[cfg(test)]
+pub(super) fn triplet_setup(
+    rows: (&[f32], &[f32], &[f32]),
+    eps: f32,
+    p: f32,
+    swap: bool,
+    up: (f64, Option<usize>),
+) -> Option<TriSetup> {
+    let d = rows.0.len();
+    let to = |s: &[f32]| -> Vec<f64> { s.iter().map(|&v| f64::from(v)).collect() };
+    let (a64, p64v, n64) = (to(rows.0), to(rows.1), to(rows.2));
+    let p64 = f64::from(p);
+    let sb = match up.1 {
+        Some(n) => up.0.abs() / n as f64,
+        None => up.0.abs(),
+    };
+    let params = crate::eval::TripletDistanceParams {
+        p: p64,
+        eps: f64::from(eps),
+        swap,
+    };
+    let (stats, diff_ap, diff_an, diff_pn) =
+        crate::eval::triplet_distance_stats(&a64, &p64v, &n64, 0, d, &params);
+    let pairs: [(&[f32], &[f32]); 3] = [(rows.0, rows.1), (rows.0, rows.2), (rows.1, rows.2)];
+    let diffs = [diff_ap, diff_an, diff_pn];
+    let mut inv32 = [1f32; 3];
+    let mut sg: [Vec<f64>; 3] = Default::default();
+    let mut s_abs: [Vec<f64>; 3] = Default::default();
+    let mut sa: [Vec<f64>; 3] = Default::default();
+    for k in 0..if swap { 3 } else { 2 } {
+        let (x, y) = pairs[k];
+        let rec: Vec<f32> = (0..d).map(|i| (x[i] - y[i]) + eps).collect();
+        if diffs[k].iter().any(|v| v.is_nan()) {
+            return None;
+        }
+        let info = pair_info(
+            std::slice::from_ref(&diffs[k]),
+            std::slice::from_ref(&rec),
+            d,
+            p64,
+            sb,
+        )
+        .ok()?;
+        if info.zero[0] {
+            return None;
+        }
+        s_abs[k] = rec.iter().map(|&c| sign0(f64::from(c))).collect();
+        if s_abs[k] != diffs[k].iter().map(|&h| sign0(h)).collect::<Vec<_>>() {
+            return None;
+        }
+        inv32[k] = info.inv_mx[0];
+        sg[k] = info.sign.iter().map(|&s| f64::from(s)).collect();
+        sa[k] = rec
+            .iter()
+            .map(|&c| sign0(f64::from(c * info.inv_mx[0])))
+            .collect();
+    }
+    let an_kind = if stats.an_coeff >= 1.0 {
+        0
+    } else if stats.an_coeff <= 0.0 {
+        1
+    } else {
+        2
+    };
+    Some(TriSetup {
+        rows: [
+            (rows.0.to_vec(), rows.1.to_vec()),
+            (rows.0.to_vec(), rows.2.to_vec()),
+            (rows.1.to_vec(), rows.2.to_vec()),
+        ],
+        eps,
+        p,
+        swap,
+        up,
+        inv32,
+        sg,
+        s_abs,
+        sa,
+        an_kind,
+    })
+}
+
+/// 差分 `v = (x − y) + eps` を `T` の演算で作る（`Lin` は `Sub`・`Add` の丸めの事象として差分の桁落ち〈条件数 κ〉を運ぶ）。
+#[cfg(test)]
+fn tri_v<T: Num>(x: &[f32], y: &[f32], eps: f32) -> Vec<T> {
+    x.iter()
+        .zip(y)
+        .map(|(&a, &b)| {
+            T::input(f64::from(a))
+                .minus(T::input(f64::from(b)))
+                .plus(T::k(f64::from(eps)))
+        })
+        .collect()
+}
+
+/// 1 ペアの p ノルム勾配 `core = pair_grad(v)` の二階の逆伝播を `T` の演算で写す（`grad.rs::vjp` の eager VJP の丸めの位置に
+/// 合わせる）。出力要素 `j` に上流 `up` を置いたときの、差分 `v` の各レーンへの cotangent を返す。
+///
+/// 写し方（`eval/scalar.rs::binary_partials`・`unary_grad_factor`）: `Mul` の VJP は `上流·相手の値`、`Div` の係数は
+/// `1/b` と `−(a/b)/b` を先に作ってから上流を掛ける、`PowScalar` の係数は f32 の `e·x^(e−1)`（指数は `e_str` を明示。
+/// `e − 1` も f32 で `e_str − 1.0`）、`Abs` の VJP は f32 の `u` の符号、`Sqrt` の係数は `0.5/y`。`norm`（`ssum`）は
+/// broadcast された値で、VJP は lane の総和だが上流は lane `j` だけなので 1 項。ホスト定数 `sign_c` との積・`Abs` の符号は
+/// [`by_sign`]。`u = v·inv` の VJP は `times(inv)`、`v = (x−y)+eps` の VJP は ±1 で厳密。
+///
+/// 注意: 実カーネルの `PowScalar` の係数は `e·x^((p−1)−1)`（`e_str − 1.0`）で、本番の再現 `dg`〈`p32 − 2.0`〉とは指数の
+/// f32 の丸めが違いうる。本関数はカーネルどおりに写す（本番の式は判定不変のため変えない。設計 §82.12）。
+#[cfg(test)]
+fn tri_rev_pair<T: Num>(
+    f: &TriFwd<T>,
+    signs: (&[f64], &[f64]),
+    inv32: f32,
+    p: (f64, f32),
+    j: usize,
+    up: T,
+) -> Vec<T> {
+    let (sg, sa) = signs;
+    let (p64, p32) = p;
+    let d = f.u.len();
+    let inv = T::k(f64::from(inv32));
+    let one = T::k(1.0);
+    let pgrad = |x: T, e: f64, e_str: f32| T::k(e).times(x.powf_bounded(e - 1.0, e_str - 1.0));
+    if p64 == 2.0 {
+        let d_u_div = up.times(one.over(f.norm));
+        let d_s = up.times(f.u[j].over(f.norm).negate().over(f.norm));
+        let d_ssum = d_s.times(f.norm.root_grad());
+        return (0..d)
+            .map(|k| {
+                let t = d_ssum.times(f.u[k]);
+                let dv = if k == j {
+                    T::total(&[t, t, d_u_div])
+                } else {
+                    T::total(&[t, t])
+                };
+                dv.times(inv)
+            })
+            .collect();
+    }
+    let d_e = by_sign(up, sg[j]);
+    let d_q = d_e.times(pgrad(f.q[j], p64 - 1.0, p32 - 1.0));
+    let d_au_div = d_q.times(one.over(f.norm));
+    let d_norm = d_q.times(f.q[j].negate().over(f.norm));
+    let d_ssum = d_norm.times(pgrad(f.ssum, 1.0 / p64, 1.0 / p32));
+    (0..d)
+        .map(|k| {
+            let pow_term = d_ssum.times(pgrad(f.au[k], p64, p32));
+            let d_au = if k == j {
+                T::total(&[d_au_div, pow_term])
+            } else {
+                pow_term
+            };
+            by_sign(d_au, sa[k]).times(inv)
+        })
+        .collect()
+}
+
+/// [`TriSetup`] の forward を `T` で組む（ペアごとの [`TriFwd`]。swap でなければ 2 本）。
+#[cfg(test)]
+fn tri_setup_fwds<T: Num>(st: &TriSetup) -> Vec<TriFwd<T>> {
+    let p = (f64::from(st.p), st.p);
+    (0..if st.swap { 3 } else { 2 })
+        .map(|k| {
+            let (x, y) = &st.rows[k];
+            tri_fwd(&tri_v::<T>(x, y, st.eps), &st.s_abs[k], st.inv32[k], p)
+        })
+        .collect()
+}
+
+/// ペア `k` の勾配 `core_j`（`pair_grad` の出力。p=2 は `u_j/N`、一般の p は `sign_c_j·e_j`）。
+#[cfg(test)]
+fn tri_core<T: Num>(st: &TriSetup, f: &TriFwd<T>, k: usize, j: usize) -> T {
+    if st.p == 2.0 {
+        f.u[j].over(f.norm)
+    } else {
+        by_sign(f.e[j], st.sg[k][j])
+    }
+}
+
+/// 出力 `o`（0 = da、1 = dp、2 = dn）の要素 `j` を seed にした二階（`triplet_cgrad` の構造の eager 逆伝播の写し）。
+/// 戻り値は `[wrt(a, p, n, g)]` の行（g は 1 要素）。上流 `s_b`（Sum は `g`、Mean は f32 の `g/n`）、`g` への二階は
+/// `W_o[j]`（Mean は `Div` の係数 `1/n` を f32 で先に作って掛ける）。`swap` では `ean`・`epn` の mask
+/// （`m_one`／`m_half`〈`half` の `Mul`〉／`m_zero`）を通る。
+#[cfg(test)]
+fn tri_rev<T: Num>(st: &TriSetup, f: &[TriFwd<T>], o: usize, j: usize) -> Vec<Vec<T>> {
+    let p = (f64::from(st.p), st.p);
+    let d = f[0].u.len();
+    let s = match st.up.1 {
+        Some(n) => T::input(st.up.0).over(T::k(n as f64)),
+        None => T::input(st.up.0),
+    };
+    let sn = s.negate();
+    let half = T::k(0.5);
+    let core = |k: usize| tri_core(st, &f[k], k, j);
+    // ペア別の上流（`None` は勾配が流れない）と、forward の `W_o[j]`。
+    let (ups, w): ([Option<T>; 3], T) = if !st.swap {
+        match o {
+            0 => ([Some(s), Some(sn), None], core(0).minus(core(1))),
+            1 => ([Some(sn), None, None], core(0).negate()),
+            _ => ([None, Some(s), None], core(1)),
+        }
+    } else {
+        // 出力 → (g_ap, ean, epn) の上流。
+        let (u_ap, u_ean, u_epn) = match o {
+            0 => (Some(s), Some(sn), None),
+            1 => (Some(sn), None, Some(sn)),
+            _ => (None, Some(s), Some(s)),
+        };
+        let gate = |u: Option<T>, active: bool, mid: bool| -> Option<T> {
+            if active {
+                u
+            } else if mid {
+                u.map(|x| x.times(half))
+            } else {
+                None
+            }
+        };
+        let (one_k, zero_k, half_k) = (st.an_kind == 0, st.an_kind == 1, st.an_kind == 2);
+        let fwd_gate = |g: T, active: bool, mid: bool| -> T {
+            if active {
+                g
+            } else if mid {
+                g.times(half)
+            } else {
+                T::k(0.0)
+            }
+        };
+        let ean = fwd_gate(core(1), one_k, half_k);
+        let epn = fwd_gate(core(2), zero_k, half_k);
+        let w = match o {
+            0 => core(0).minus(ean),
+            1 => core(0).negate().minus(epn),
+            _ => ean.plus(epn),
+        };
+        (
+            [
+                u_ap,
+                gate(u_ean, one_k, half_k),
+                gate(u_epn, zero_k, half_k),
+            ],
+            w,
+        )
+    };
+    let dv: Vec<Option<Vec<T>>> = (0..3)
+        .map(|k| {
+            if k >= f.len() {
+                return None;
+            }
+            ups[k].map(|up| tri_rev_pair(&f[k], (&st.sg[k], &st.sa[k]), st.inv32[k], p, j, up))
+        })
+        .collect();
+    let pick = |k: usize, i: usize, neg: bool| -> Option<T> {
+        dv[k]
+            .as_ref()
+            .map(|v| if neg { v[i].negate() } else { v[i] })
+    };
+    let leaf = |terms: &dyn Fn(usize) -> [Option<T>; 2]| -> Vec<T> {
+        (0..d)
+            .map(|i| {
+                let t: Vec<T> = terms(i).into_iter().flatten().collect();
+                match t.len() {
+                    0 => T::k(0.0),
+                    1 => t[0],
+                    _ => T::total(&t),
+                }
+            })
+            .collect()
+    };
+    // a は ap・an の `+`、p は ap の `−` と pn の `+`、n は an・pn の `−`。
+    let ga = leaf(&|i| [pick(0, i, false), pick(1, i, false)]);
+    let gp = leaf(&|i| [pick(0, i, true), pick(2, i, false)]);
+    let gn = leaf(&|i| [pick(1, i, true), pick(2, i, true)]);
+    let g = match st.up.1 {
+        Some(n) => w.times(T::k(1.0).over(T::k(n as f64))),
+        None => w,
+    };
+    vec![ga, gp, gn, vec![g]]
+}
+
+/// [`tri_rev`] を `f32` で評価した二階（`[o][wrt(a, p, n, g)]`。seed 要素 `j`）。構造の演算の写しで、手組みの構造の実測と並べて
+/// soundness の「実測」側に使う（test 限定）。
+#[cfg(test)]
+pub(super) fn triplet_model_rows_f32(st: &TriSetup, j: usize) -> [Vec<Vec<f32>>; 3] {
+    let f = tri_setup_fwds::<f32>(st);
+    [0, 1, 2].map(|o| tri_rev(st, &f, o, j))
+}
+
+/// [`tri_rev`] の `Lin` 版の結果: `[o][wrt]` の各要素の `(参照値 v, 一次の上界 bound)` と、そのときの事象の総数。
+#[cfg(test)]
+pub(super) struct TriLinRows {
+    pub(super) rows: [Vec<Vec<(f64, f64)>>; 3],
+    pub(super) events: usize,
+}
+
+/// `Lin` で forward と seed ごとの逆伝播を評価し、各要素の値と上界を返す（`[seed]`。test 限定。#4095）。厳密モード
+/// （[`lin_reset`]）で forward を 1 回作り、seed ごとに [`lin_mark`]／[`lin_truncate`] で領域を戻す。`Num::settle` と走査量の
+/// 上限は入れない（判定への配線は #4096）。
+#[cfg(test)]
+pub(super) fn triplet_lin_rows(st: &TriSetup, seeds: &[usize]) -> Vec<TriLinRows> {
+    use super::lin::{Lin, lin_events, lin_mark, lin_reset, lin_truncate};
+    lin_reset();
+    let f = tri_setup_fwds::<Lin>(st);
+    let mark = lin_mark();
+    let out = seeds
+        .iter()
+        .map(|&j| {
+            let rows = [0, 1, 2].map(|o| {
+                tri_rev(st, &f, o, j)
+                    .iter()
+                    .map(|r| r.iter().map(|l| (l.v, l.bound())).collect())
+                    .collect()
+            });
+            let r = TriLinRows {
+                rows,
+                events: lin_events(),
+            };
+            lin_truncate(mark);
+            r
+        })
+        .collect();
+    lin_reset();
+    out
 }
 
 /// Triplet の 1 行の総括判定（設計 §55.2。相殺・f32 の underflow）。

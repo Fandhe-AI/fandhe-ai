@@ -961,21 +961,37 @@ impl TriCase {
     /// `triplet_cgrad` の構造（`[1, d]`・Sum・eps 0・全要素 active）を同じ演算順で子テープへ組む。
     /// `pair_info` が拒否する入力は組めない（`None`）。
     fn hand_rows(&self, seed_list: &[usize]) -> Option<TriRows> {
+        self.hand_rows_with(self.inputs(), 0.0, None, seed_list)
+    }
+
+    /// [`TriCase::hand_rows`] を明示的な行 `(a, p, n)`（長さ `self.d`）・`eps`・Mean の分母で呼ぶ形（#4095。`p`・`swap`・
+    /// `exp` は `self` のまま）。`mean_n = Some(n)` は `s_b = g / n`（行数は 1 のまま `n` を分母に使うだけ）。
+    fn hand_rows_with(
+        &self,
+        rows: (Vec<f32>, Vec<f32>, Vec<f32>),
+        eps: f32,
+        mean_n: Option<usize>,
+        seed_list: &[usize],
+    ) -> Option<TriRows> {
         let d = self.d;
         let shape = [1usize, d];
-        let (a32, p32, n32) = self.inputs();
-        let (a64, p64v, n64) = self.f64_inputs();
+        let (a32, p32, n32) = rows;
+        let to = |s: &[f32]| -> Vec<f64> { s.iter().map(|&v| f64::from(v)).collect() };
+        let (a64, p64v, n64) = (to(&a32), to(&p32), to(&n32));
         let p64 = f64::from(self.p);
-        let sb = f64::from(pow2(self.exp));
+        let sb = match mean_n {
+            Some(n) => f64::from(pow2(self.exp)) / n as f64,
+            None => f64::from(pow2(self.exp)),
+        };
         let params = crate::eval::TripletDistanceParams {
             p: p64,
-            eps: 0.0,
+            eps: f64::from(eps),
             swap: self.swap,
         };
         let (stats, diff_ap, diff_an, diff_pn) =
             crate::eval::triplet_distance_stats(&a64, &p64v, &n64, 0, d, &params);
         let row32 =
-            |x: &[f32], y: &[f32]| -> Vec<f32> { (0..d).map(|k| (x[k] - y[k]) + 0.0f32).collect() };
+            |x: &[f32], y: &[f32]| -> Vec<f32> { (0..d).map(|k| (x[k] - y[k]) + eps).collect() };
         let (rec_ap, rec_an, rec_pn) = (row32(&a32, &p32), row32(&a32, &n32), row32(&p32, &n32));
         let info_ap = pair_info(&[diff_ap], &[rec_ap], d, p64, sb).ok()?;
         let info_an = pair_info(&[diff_an], &[rec_an], d, p64, sb).ok()?;
@@ -989,9 +1005,12 @@ impl TriCase {
         let p_m = child.var(&tt(p32, &shape));
         let n_m = child.var(&tt(n32, &shape));
         let g = child.var(&Tensor::scalar(pow2(self.exp)));
-        let s_b =
-            super::super::loss_scale_bcast(&child, &g, Reduction::Sum, false, 1, &shape).ok()?;
-        let eps_c = scalar(&child, 0.0);
+        let (red, red_n) = match mean_n {
+            Some(n) => (Reduction::Mean, n),
+            None => (Reduction::Sum, 1),
+        };
+        let s_b = super::super::loss_scale_bcast(&child, &g, red, false, red_n, &shape).ok()?;
+        let eps_c = scalar(&child, eps);
         let zeros = zeros_like(&child, &shape).ok()?;
         let v_ap = a_m.sub(&p_m).ok()?.add(&eps_c).ok()?;
         let v_an = a_m.sub(&n_m).ok()?.add(&eps_c).ok()?;
@@ -3084,4 +3103,474 @@ fn ce_lin_flag_row_off_diagonal_rescue_respects_off() {
         "off = false では flag 行の非対角を救済しない: {no_off:?}"
     );
     assert!(off.is_ok(), "off = true では救済で受理: {off:?}");
+}
+
+// =====================================================================================
+// #4095: Triplet の forward の総称化（判定不変）と `Lin` の上界の soundness
+// =====================================================================================
+
+/// 総称化の前に `triplet_pair_row` が書いていた f64 の参照と f32 の再現の式（逐語のコピー。前例: #4090 の
+/// `cos_fwd_previous`）。`triplet_pair_row` が全フィールドで bit 一致することが、判定を変えていない主な回帰の錠になる。
+fn triplet_pair_row_previous(
+    h: &[f64],
+    rec: &[f32],
+    info: &PairInfo,
+    base: usize,
+    p: f64,
+    coeff: f64,
+) -> Option<(PairRow, PairRow, bool)> {
+    if info.zero[base] || h.iter().any(|v| v.is_nan()) {
+        return None;
+    }
+    let inv32 = info.inv_mx[base];
+    let inv = f64::from(inv32);
+    let u: Vec<f64> = h.iter().map(|v| v * inv).collect();
+    let norm = if p == 2.0 {
+        u.iter().map(|x| x * x).sum::<f64>().sqrt()
+    } else {
+        u.iter().map(|x| x.abs().powf(p)).sum::<f64>().powf(1.0 / p)
+    };
+    if norm.is_nan() || norm <= 0.0 {
+        return None;
+    }
+    let q: Vec<f64> = u.iter().map(|x| x.abs() / norm).collect();
+    let sg: Vec<f64> = (0..h.len())
+        .map(|k| f64::from(info.sign[base + k]))
+        .collect();
+    let reference = PairRow {
+        fac: inv / norm,
+        pm1: p - 1.0,
+        dg: q.iter().map(|&x| (p - 1.0) * x.powf(p - 2.0)).collect(),
+        e: q.iter().map(|&x| x.powf(p - 1.0)).collect(),
+        sg: sg.clone(),
+        sa: sg.clone(),
+        dsg: vec![1.0; h.len()],
+    };
+    // 構造の f32 の再現（`pair_grad`: `u = v·const(1/mx)`、p=2 は `u/sqrt(Σu²)`、一般の p は
+    // `(|u|/ssum^(1/p))^(p−1)`）。
+    let p32 = p as f32;
+    let u32v: Vec<f32> = rec.iter().map(|&c| c * inv32).collect();
+    let au: Vec<f32> = u32v.iter().map(|x| x.abs()).collect();
+    let norm32 = if p == 2.0 {
+        sum32(u32v.iter().map(|&x| x * x)).sqrt()
+    } else {
+        sum32(au.iter().map(|&x| x.powf(p32))).powf(1.0 / p32)
+    };
+    let q32: Vec<f32> = au.iter().map(|&x| x / norm32).collect();
+    let (e32, dg32): (Vec<f64>, Vec<f64>) = if p == 2.0 {
+        (
+            q32.iter().map(|&x| f64::from(x)).collect(),
+            vec![1.0; h.len()],
+        )
+    } else {
+        (
+            q32.iter().map(|&x| f64::from(x.powf(p32 - 1.0))).collect(),
+            q32.iter()
+                .map(|&x| f64::from((p32 - 1.0) * x.powf(p32 - 2.0)))
+                .collect(),
+        )
+    };
+    // 構造が f32 の `u` から決める符号（離散量もホストの値を共有せず、構造の実際の経路から取る）。
+    let s32: Vec<f64> = u32v.iter().map(|&x| sign0(f64::from(x))).collect();
+    let (sg_s, dsg_s) = if p == 2.0 {
+        (s32.clone(), vec![1.0; h.len()])
+    } else {
+        let d: Vec<f64> = sg.iter().zip(&s32).map(|(a, b)| a * b).collect();
+        (sg.clone(), d)
+    };
+    let structural = PairRow {
+        fac: inv / f64::from(norm32),
+        pm1: f64::from(p32) - 1.0,
+        dg: dg32,
+        e: e32,
+        sg: sg_s,
+        sa: s32,
+        dsg: dsg_s,
+    };
+    let flag = deviates(norm, f64::from(norm32), norm, coeff)
+        || (0..h.len()).any(|k| {
+            deviates(u[k], f64::from(u32v[k]), u[k].abs(), coeff)
+                || deviates(reference.e[k], structural.e[k], reference.e[k], coeff)
+                || deviates(
+                    reference.dg[k],
+                    structural.dg[k],
+                    reference.dg[k].abs(),
+                    coeff,
+                )
+                || structural.sa[k] != reference.sa[k]
+        });
+    Some((reference, structural, flag))
+}
+/// `PairRow` の全フィールドを bit 列へ（NaN は 1 つの bit 列へ正規化）。
+fn pair_row_bits(r: &PairRow) -> Vec<u64> {
+    let mut v = vec![f64_bits(r.fac), f64_bits(r.pm1)];
+    for s in [&r.dg, &r.e, &r.sg, &r.sa, &r.dsg] {
+        v.push(s.len() as u64);
+        v.extend(s.iter().map(|&x| f64_bits(x)));
+    }
+    v
+}
+
+/// 差分行 `(x, y, eps)` から `triplet_pair_row` の入力 `(h, rec, info)` を作る（`pair_info` の拒否は通さず、
+/// 離散量だけを同じ規則で作る。underflow・符号付きゼロ・NaN の行も錠にかけるため）。
+fn tri_pair_inputs(x: &[f32], y: &[f32], eps: f32) -> (Vec<f64>, Vec<f32>, PairInfo) {
+    let d = x.len();
+    let h: Vec<f64> = (0..d)
+        .map(|k| (f64::from(x[k]) - f64::from(y[k])) + f64::from(eps))
+        .collect();
+    let rec: Vec<f32> = (0..d).map(|k| (x[k] - y[k]) + eps).collect();
+    let mx = h.iter().fold(0f64, |m, v| m.max(v.abs()));
+    let inv = if mx > 0.0 { (1.0 / mx) as f32 } else { 1.0 };
+    let info = PairInfo {
+        inv_mx: vec![inv; d],
+        sign: h.iter().map(|&v| sign0(v) as f32).collect(),
+        zero: vec![mx == 0.0; d],
+    };
+    (h, rec, info)
+}
+
+#[test]
+fn triplet_pair_row_generic_matches_previous_formulas() {
+    let mut rows: Vec<(Vec<f32>, Vec<f32>, f32)> = Vec::new();
+    // TriCase のパターン。
+    for c in [
+        TriCase {
+            d: 8,
+            ratio: 0.3,
+            p: 3.0,
+            swap: false,
+            exp: 0,
+        },
+        TriCase {
+            d: 64,
+            ratio: 1e-3,
+            p: 1.5,
+            swap: true,
+            exp: 0,
+        },
+        TriCase {
+            d: 64,
+            ratio: 1e-6,
+            p: 10.0,
+            swap: false,
+            exp: 0,
+        },
+    ] {
+        let (a, p, n) = c.inputs();
+        rows.push((a.clone(), p.clone(), 0.0));
+        rows.push((a, n, 1e-3));
+    }
+    // underflow する微小成分・符号付きゼロ・全要素 0・NaN。
+    rows.push((vec![1e10, 1e10, 1e-40], vec![0.0, 0.0, 0.0], 0.0));
+    rows.push((vec![1.0, 1e-42, -1e-42], vec![0.0, 0.0, 0.0], 0.0));
+    rows.push((vec![0.0, -0.0, 0.0], vec![0.0, 0.0, -0.0], 0.0));
+    rows.push((vec![2.0, 2.0], vec![2.0, 2.0], 0.0));
+    rows.push((vec![f32::NAN, 1.0], vec![0.0, 0.0], 0.0));
+    let mut rng = Rng(0x1357_9bdf_2468_ace0);
+    for d in [1usize, 2, 3, 7, 16, 33] {
+        for amp in [1e-30f32, 1e-8, 1e-3, 1.0, 1e3, 1e30] {
+            for eps in [0.0f32, 1e-6] {
+                let x: Vec<f32> = (0..d).map(|_| amp * rng.signed()).collect();
+                let y: Vec<f32> = (0..d).map(|_| amp * rng.signed()).collect();
+                rows.push((x, y, eps));
+            }
+        }
+    }
+    let mut compared = 0usize;
+    let mut some = 0usize;
+    for (x, y, eps) in &rows {
+        let zeros = vec![0f32; x.len()];
+        let y = if y.len() == x.len() { y } else { &zeros };
+        let (h, rec, info) = tri_pair_inputs(x, y, *eps);
+        for p in [1.5f64, 2.0, 3.0, 10.0, 50.0, 1e3] {
+            for coeff in [1e-6f64, 1e-2] {
+                let new = triplet_pair_row(&h, &rec, &info, 0, p, coeff);
+                let old = triplet_pair_row_previous(&h, &rec, &info, 0, p, coeff);
+                compared += 1;
+                match (new, old) {
+                    (None, None) => {}
+                    (Some((r, s, f)), Some((r0, s0, f0))) => {
+                        some += 1;
+                        assert_eq!(pair_row_bits(&r), pair_row_bits(&r0), "参照 p={p}");
+                        assert_eq!(pair_row_bits(&s), pair_row_bits(&s0), "構造 p={p}");
+                        assert_eq!(f, f0, "flag p={p}");
+                    }
+                    (n, o) => panic!(
+                        "None/Some が食い違う p={p}: new={} old={}",
+                        n.is_some(),
+                        o.is_some()
+                    ),
+                }
+            }
+        }
+    }
+    assert!(compared > 500, "入力が少なすぎる: {compared}");
+    assert!(some > 200, "Some の入力が少なすぎる: {some}");
+}
+
+/// 掃引の入力: `a − p = [1, r·…]`、`a − n = [−2, r·…]`（swap は `p − n = [0.5, r·…]`）の乱数版（[`TriCase::inputs`] と同型）。
+fn tri_random_rows(
+    d: usize,
+    ratio: f32,
+    swap: bool,
+    amp: f32,
+    rng: &mut Rng,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let small = |rng: &mut Rng| {
+        ratio * (0.3 + 0.7 * rng.signed().abs()) * if rng.signed() < 0.0 { -1.0 } else { 1.0 }
+    };
+    let a: Vec<f32> = (0..d).map(|_| amp * rng.signed()).collect();
+    let vap: Vec<f32> = (0..d)
+        .map(|k| if k == 0 { amp } else { amp * small(rng) })
+        .collect();
+    let p: Vec<f32> = a.iter().zip(&vap).map(|(a, v)| a - v).collect();
+    let n: Vec<f32> = if swap {
+        let vpn: Vec<f32> = (0..d)
+            .map(|k| if k == 0 { 0.5 * amp } else { amp * small(rng) })
+            .collect();
+        p.iter().zip(&vpn).map(|(p, v)| p - v).collect()
+    } else {
+        let van: Vec<f32> = (0..d)
+            .map(|k| if k == 0 { -2.0 * amp } else { amp * small(rng) })
+            .collect();
+        a.iter().zip(&van).map(|(a, v)| a - v).collect()
+    };
+    (a, p, n)
+}
+
+/// 1 ケース（`rows`・`eps`・`c.p`・`c.swap`・`c.exp`・`mean_n`）について、手組みの構造の f32 の二階（実際の eager 逆伝播）と
+/// `tri_rev::<f32>` の双方が `|実測 − Lin.v| ≤ Lin.bound()·(1 + 16·N·u)` を満たすことを確かめる（非有限の要素は除く）。
+/// 戻り値は上界が有限だった要素数（`pair_info` などの前段で拒否された入力は `None`＝除外）。
+fn lin_sweep_tri_row(
+    c: &TriCase,
+    rows: &(Vec<f32>, Vec<f32>, Vec<f32>),
+    eps: f32,
+    mean_n: Option<usize>,
+    st: &mut SweepStats,
+) -> Option<usize> {
+    use super::super::lin::LIN_U;
+    let up = (f64::from(pow2(c.exp)), mean_n);
+    let setup = triplet_setup((&rows.0, &rows.1, &rows.2), eps, c.p, c.swap, up)?;
+    let sd = seeds(c.d, &[]);
+    let hand = c.hand_rows_with(rows.clone(), eps, mean_n, &sd)?;
+    let lin = triplet_lin_rows(&setup, &sd);
+    let mut finite = 0usize;
+    for (k, (j, per_out)) in hand.iter().enumerate() {
+        let model = triplet_model_rows_f32(&setup, *j);
+        let slack = 1.0 + 16.0 * lin[k].events as f64 * LIN_U;
+        for o in 0..3 {
+            for w in 0..4 {
+                for (i, lv) in lin[k].rows[o][w].iter().enumerate() {
+                    for (label, actual) in [("hand", per_out[o][w][i]), ("model", model[o][w][i])] {
+                        let actual = f64::from(actual);
+                        if !actual.is_finite() || !lv.0.is_finite() || !lv.1.is_finite() {
+                            continue;
+                        }
+                        let dev = (actual - lv.0).abs();
+                        assert!(
+                            dev <= lv.1 * slack,
+                            "{c:?} eps={eps} mean={mean_n:?} {label} o={o} w={w} seed={j} i={i}: dev={dev:e} bound={:e}",
+                            lv.1
+                        );
+                        st.checked += 1;
+                        if label == "hand" {
+                            finite += 1;
+                        }
+                        if dev > 0.0 {
+                            st.nonzero += 1;
+                        }
+                        if lv.1 > 0.0 {
+                            st.worst = st.worst.max(dev / lv.1);
+                            if dev > 0.1 * lv.1 {
+                                st.tight += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(finite)
+}
+
+#[test]
+fn lin_bound_covers_f32_deviation_for_triplet_sweep() {
+    let mut rng = Rng(0x2468_ace0_1357_9bdf);
+    let mut st = SweepStats::default();
+    let mut tried = 0usize;
+    let mut used = 0usize;
+    for d in [2usize, 3, 8, 16, 32, 64] {
+        for p in [2.0f32, 1.5, 3.0, 10.0] {
+            for ratio in [1e-1f32, 1e-3, 1e-6] {
+                for eps in [0.0f32, 1e-4] {
+                    for swap in [false, true] {
+                        for exp in [0i32, 13, 20] {
+                            let c = TriCase {
+                                d,
+                                ratio,
+                                p,
+                                swap,
+                                exp,
+                            };
+                            let rows = tri_random_rows(d, ratio, swap, 1.0, &mut rng);
+                            tried += 1;
+                            let mut ok = lin_sweep_tri_row(&c, &rows, eps, None, &mut st).is_some();
+                            if exp == 13 {
+                                ok |= lin_sweep_tri_row(&c, &rows, eps, Some(3), &mut st).is_some();
+                                ok |= lin_sweep_tri_row(&c, &rows, eps, Some(7), &mut st).is_some();
+                            }
+                            used += usize::from(ok);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        st.checked > 1000,
+        "検査した要素が少なすぎる: {} (used {used}/{tried})",
+        st.checked
+    );
+    assert!(
+        st.nonzero > 0,
+        "実測の誤差が全て 0 では soundness を確かめていない"
+    );
+    assert!(st.tight > 0, "上界が緩すぎて空振り: tight={}", st.tight);
+    eprintln!(
+        "LINTRI checked={} nonzero={} tight={} worst={:.4} used={used}/{tried}",
+        st.checked, st.nonzero, st.tight, st.worst
+    );
+}
+
+/// 微小成分が行スケールで非正規数・0 へ落ちる行の soundness。`a = 0`、`a − p = [1, 微小…]`、`a − n = [−2, 微小…]`。
+/// 上界が有限だった要素数も出す（ρ > 1/2 で上界なしになる範囲を #4096 へ伝えるため）。
+#[test]
+fn lin_bound_covers_f32_deviation_for_triplet_underflow_rows() {
+    let mut st = SweepStats::default();
+    let mut finite_total = 0usize;
+    for d in [2usize, 4, 8] {
+        for tiny in [1e-20f32, 1e-30, 1e-38, 1e-42] {
+            for p in [3.0f32, 10.0, 50.0] {
+                let c = TriCase {
+                    d,
+                    ratio: tiny,
+                    p,
+                    swap: false,
+                    exp: 13,
+                };
+                let a = vec![0.0f32; d];
+                let vap: Vec<f32> = (0..d).map(|k| if k == 0 { 1.0 } else { tiny }).collect();
+                let van: Vec<f32> = (0..d).map(|k| if k == 0 { -2.0 } else { tiny }).collect();
+                let pp: Vec<f32> = vap.iter().map(|v| -v).collect();
+                let nn: Vec<f32> = van.iter().map(|v| -v).collect();
+                let rows = (a, pp, nn);
+                let f = lin_sweep_tri_row(&c, &rows, 0.0, None, &mut st).unwrap_or(0);
+                finite_total += f;
+                eprintln!("LINTRIU d={d} tiny={tiny:e} p={p} finite_hand_elems={f}");
+            }
+        }
+    }
+    assert!(st.checked > 100, "検査した要素が少なすぎる: {}", st.checked);
+    eprintln!("LINTRIU total finite={finite_total} checked={}", st.checked);
+}
+
+#[test]
+fn triplet_f32_model_stays_close_to_hand_built_structure() {
+    // 受理される小さな入力では、`tri_rev::<f32>` の写しが手組みの構造（実際の eager 逆伝播）と REQ-2 の範囲で一致する。
+    // 縮約の順序の違いで bit 一致しない要素は許す（soundness は別テストが正）。
+    let mut worst = 0f64;
+    let mut n = 0usize;
+    for (p, swap, exp) in [
+        (2.0f32, false, 0),
+        (3.0, false, 3),
+        (2.0, true, 0),
+        (3.0, true, 7),
+        (1.5, false, 0),
+    ] {
+        let c = TriCase {
+            d: 6,
+            ratio: 0.3,
+            p,
+            swap,
+            exp,
+        };
+        let rows = c.inputs();
+        let up = (f64::from(pow2(exp)), None);
+        let setup =
+            triplet_setup((&rows.0, &rows.1, &rows.2), 0.0, p, swap, up).expect("pair_info を通る");
+        let sd: Vec<usize> = (0..c.d).collect();
+        let hand = c.hand_rows(&sd).expect("pair_info を通る");
+        for (j, per_out) in &hand {
+            let model = triplet_model_rows_f32(&setup, *j);
+            for o in 0..3 {
+                for w in 0..4 {
+                    for (h, m) in per_out[o][w].iter().zip(&model[o][w]) {
+                        worst = worst.max(req2_ratio(f64::from(*m), f64::from(*h)));
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(n > 500, "比較した要素が少なすぎる: {n}");
+    assert!(worst < 1.0, "f32 の写しが手組みから外れすぎ: {worst}");
+}
+
+/// `LINTRIM`: §82.4 の Triplet の候補（`triplet_followup_candidates`）について、`Lin` の事象数 N・`16Nu`・上界の最大・
+/// 閾値を超える要素の数・1 seed あたりの時間を出す。受理に変えてよいかは判断しない（#4096 の担当）。
+/// `cargo test -p fandhe-ai-autodiff --release --lib triplet_lin_candidates_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn triplet_lin_candidates_measurement() {
+    use super::super::lin::LIN_U;
+    for c in triplet_followup_candidates() {
+        let rows = c.inputs();
+        let up = (f64::from(pow2(c.exp)), None);
+        let Some(setup) = triplet_setup((&rows.0, &rows.1, &rows.2), 0.0, c.p, c.swap, up) else {
+            eprintln!(
+                "LINTRIM d={} ratio={} p={} swap={} setup 不可（前段で拒否）",
+                c.d, c.ratio, c.p, c.swap
+            );
+            continue;
+        };
+        let sd = seeds(c.d, &[c.d / 2]);
+        let t0 = std::time::Instant::now();
+        let lin = triplet_lin_rows(&setup, &sd);
+        let per_seed = t0.elapsed().as_secs_f64() / sd.len() as f64;
+        let n = lin.iter().map(|r| r.events).max().unwrap_or(0);
+        let (mut maxb, mut over, mut total, mut nonfinite) = (0f64, 0usize, 0usize, 0usize);
+        for r in &lin {
+            for o in 0..3 {
+                for w in 0..4 {
+                    for (v, b) in &r.rows[o][w] {
+                        total += 1;
+                        if !b.is_finite() || !v.is_finite() {
+                            nonfinite += 1;
+                            continue;
+                        }
+                        maxb = maxb.max(*b);
+                        let thr =
+                            ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * v.abs());
+                        if *b * (1.0 + 16.0 * n as f64 * LIN_U) >= thr {
+                            over += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "LINTRIM d={} ratio={} p={} swap={} N={} 16Nu={:.4} max_bound={:e} over_thr={}/{} nonfinite={} secs_per_seed={:.4e}",
+            c.d,
+            c.ratio,
+            c.p,
+            c.swap,
+            n,
+            16.0 * n as f64 * LIN_U,
+            maxb,
+            over,
+            total,
+            nonfinite,
+            per_seed
+        );
+    }
 }
