@@ -4576,9 +4576,7 @@ fn tri_bd_rows(c: &TriCase, seed_list: &[usize]) -> Vec<BdRow> {
 /// 1 候補の内訳を出す。`collect` を「通常」と「ある種別の `μ` を 0 にして forward から計算し直した」run で呼び、
 /// 通常の run で拒否された要素ごとに `err/閾値` の変化を 1 行（`LINBD`）、候補ごとの要約を `LINBDSUM` に出す。
 fn lin_bound_breakdown_report(tag: &str, collect: impl Fn() -> Vec<BdRow>) {
-    use super::super::lin::{
-        BD_CONST, BD_LIBM_REM, BD_LIBM_ULP, BD_OTHER, BD_ROUND, BD_TOTAL, BdAblate,
-    };
+    use super::super::lin::{BD_CONST, BD_LIBM_REM, BD_LIBM_ULP, BD_ROUND, BD_TOTAL, BdAblate};
     // (名前, 0 にする種別, `|s−v|` を残すか, 余裕係数を残すか)
     let scenarios: [(&str, &[u8], bool, bool); 10] = [
         ("base", &[], true, true),
@@ -4597,7 +4595,6 @@ fn lin_bound_breakdown_report(tag: &str, collect: impl Fn() -> Vec<BdRow>) {
             false,
         ),
     ];
-    let _ = BD_OTHER;
     let runs: Vec<Vec<BdRow>> = scenarios
         .iter()
         .map(|&(_, kinds, _, _)| {
