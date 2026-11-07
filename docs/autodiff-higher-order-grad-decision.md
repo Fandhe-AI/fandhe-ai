@@ -7175,6 +7175,52 @@ d ∈ {2, 8, 32, 64, 128, 256, 512} × p ∈ {2, 1.5, 3, 10} × swap の 56 点�
 - 不変: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_POWF_Z_MAX`・`entry_check_lin` と `Lin` の意味論・`Num` の trait・`rounding_coeff`・`coeff` の式・`dg32`・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ・Cosine と CE の判定。
 - §82.12.5 の申し送り 4 点の決着: (1) `settle` と走査量の上限 → `settle` は採らず、`tri_lin_ctx` の 2 段の予算で守る（82.13.1）。(2) `dg32` → 変えない（`f32` 側はカーネルどおりのモデル。82.13.5）。(3) Mean の `rho` → 掛けない（モデルが `g/n` の丸めを運ぶ。`triplet_lin_mean_eps_multi_row_never_flip_accept_to_reject` で反転 0 件）。(4) 上界を持たない行 → 従来判定へ戻す（82.13.1）。
 
+### 82.14 #4133: CE・Triplet の `Lin` 救済の通常テストの穴を埋める（テストと決定記録のみ）
+
+#### 82.14.0 位置づけ
+
+#4129（§82.11）・#4131（§82.13）の監査で見つかった 2 つの穴をテストで埋める。**判定のコード（`loss_class.rs` の本番経路・`lin.rs` の規則）は変えていない**。変えたのは `loss_class_tests.rs`（テスト限定）だけで、既存のテストと拒否プローブは無変更で通る。§82.13 の本文は書き換えず、同節の「swap の `an_coeff` が中間になる入力は専用の行を足していない」をここで閉じる。
+
+- 穴 1（Triplet）: swap で `an_coeff` が中間（`d_an == d_pn` の厳密な同値で 0.5。`Lin` 側は `m_half` を通る）になる入力が、soundness 掃引にも受理へ反転した行の f64 照合にも入っていなかった。既存の掃引の swap 行は `d_pn < d_an`（`an_coeff = 0`）の配置である。
+- 穴 2（CE・CEWO）: 「旧受理 → 新拒否 0 件」と反転行の REQ-2 比の assert は `#[ignore]` の計測にしか無く、通常テスト `ce_lin_multi_sample_and_ignore_never_flip_accept_to_reject` は旧受理 → 新受理しか見なかった。
+
+#### 82.14.1 追加したテスト（通常テスト・`#[ignore]` なし）
+
+| テスト | 固定する内容 |
+|---|---|
+| `lin_bound_covers_f32_deviation_for_triplet_an_coeff_half_rows` | `a − n = u`・`a − p = 2u`（`p − n = −u`）で `d_an == d_pn` となる swap 行（`tri_tie_rows`。`a` は 2^-6 の格子、`u` は 10 bit の仮数で f32 の差分を厳密にする）で、実際の f32 の子テープ（hand）とモデルの二階が `Lin` の値 ± 上界（`1 + 16·N·u` の余裕係数）に収まる。`tri_is_tie` と `TriSetup::an_kind == 2` で入力が中間であることも固定。d ∈ {3, 8, 16, 32, 64} × p ∈ {2, 1.5, 3, 10} × ratio ∈ {1e-1, 1e-3, 1e-6} × 上流 ∈ {2^0, 2^13}（2^13 は Mean の分母 3・7 も）。eps は 0 のみ（eps ≠ 0 では差分が `±u + eps` になり同値が崩れる） |
+| `triplet_lin_an_coeff_half_rows_flip_only_to_accept_and_match_f64` | 同じ型の行（d ∈ {8, 16, 32, 64} × p ∈ {2, 1.5, 3} × ratio × 上流）で旧受理 → 新拒否が 0 件、旧拒否 → 新受理の行の二階（`x` 9 ブロックと `g`）が f64 の閉じた式（`TriCase::reference_with`。`c_an = 0.5` の係数）と REQ-2 比 < 1・参照の不確かさ < 5% で一致 |
+| `ce_lin_multi_sample_flipped_rows_match_f64` | 4 サンプル・Mean（`denom_w`）・`class_weight`・`ignore_index`（なし・2・0）・確信度 3 通りの CEWO で、旧受理 → 新拒否 0 件、受理された行（旧拒否 → 新受理を含む）の公開経路の二階を f64 の参照（`multi_ce_reference`。有効サンプルの `w_t/denom_w` で重み付けした softmax のヤコビアン）と全要素 REQ-2 比 < 1 で照合 |
+| `ce_lin_switch_rows_up_to_c1000_never_flip_to_reject_and_flipped_match_f64` | `ce_switch_cases` のうち C ≤ 1000 の行で旧受理 → 新拒否 0 件、旧拒否 → 新受理の行の x・g の REQ-2 比 < 1・参照の不確かさ < 5%。全 396 行は `#[ignore]` の `ce_lin_switch_rejection_delta_measurement` に残す（debug で約 18 秒かかるため C ≤ 1000 に絞った） |
+
+テスト側の補助として `TriCase` に `f64_of`・`coefs_with`・`reference_with`・`measure_rows` を足した（既存の `f64_inputs`・`coefs`・`reference` はそれぞれの `_with` へ委譲する。挙動は不変）。
+
+#### 82.14.2 実測（x86_64 Linux・rustc 1.98.1・debug。実行した出力のみ）
+
+| 項目 | 実測 |
+|---|---|
+| Triplet 中間 soundness 掃引 | 120 通り中 101 通りで setup が作れた（`an_kind == 2`）。検査した要素 706620（誤差が非ゼロの要素 538874）。誤差 / 上界の最大 0.6619。違反 0 件。所要約 3.7 秒 |
+| Triplet 中間の公開経路 | 56 行（72 通りのうち同値が成立した行）。旧受理 0 行・**旧拒否 → 新受理 16 行**・旧受理 → 新拒否 0 件。反転 16 行の x・g の最大 REQ-2 比 5.170e-2。所要約 0.25 秒 |
+| CE 複数サンプル | 18 通りすべて受理、うち**旧拒否 → 新受理 15 通り**・旧受理 → 新拒否 0 件。全要素の最大 REQ-2 比 2.335e-2（反転行に限っても同値）。所要約 0.09 秒 |
+| CE 単一サンプル（C ≤ 1000） | 288 行。旧受理 90・**旧拒否 → 新受理 27 行**・旧受理 → 新拒否 0 件。反転行の最大 REQ-2 比 2.628e-2。所要約 1.8 秒 |
+| 参考（C ≤ 4000 の全 396 行を一時的に通常テストで実行） | 旧受理 90・旧拒否 → 新受理 39 行・旧受理 → 新拒否 0 件・最大 REQ-2 比 2.628e-2、所要約 18.5 秒（コミットしていない） |
+
+- Triplet の中間の行では旧受理が 0 行なので、「旧受理 → 新拒否 0 件」はこの入力型では自明に成り立つ（反転方向は旧拒否 → 新受理だけが観測された）。受理の正しさは f64 照合と soundness 掃引が担う。
+- CE の複数サンプルの行は、救済を常に真にしても（下の変異 A）REQ-2 を満たす入力のため通る。このテストは救済の可否ではなく `denom_w`・ignore・`class_weight` の配線ずれ（二階の値が変わる）を検出する錠である。
+
+#### 82.14.3 変異確認（手動・コミットなし。元に戻して全テストが通ることを確かめた）
+
+| 変異 | 新しいテストの結果 |
+|---|---|
+| A: `CeLinState::ok` を常に真 | `ce_lin_switch_rows_up_to_c1000_never_flip_to_reject_and_flipped_match_f64` が失敗（受理に反転した行が REQ-2 を外す）。他の 3 本は通る |
+| B: Triplet の救済（`TriLinState::ok`）を常に真 | `triplet_lin_an_coeff_half_rows_flip_only_to_accept_and_match_f64` が失敗。他の 3 本は通る |
+| C: `Lin::bound` を常に 0 | `lin_bound_covers_f32_deviation_for_triplet_an_coeff_half_rows` が失敗（上界 0 では実測の偏差を覆えない）。他の 3 本は通る |
+
+#### 82.14.4 未実測・変えていないもの
+
+- 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。x86_64 Linux の値で代替しない。同値の行は `d_an == d_pn` の厳密な一致を要するため、格子に載せた入力だけを扱う（一般の中間入力の網羅ではない）。
+- 不変: 判定のコード（`loss_class.rs`・`lin.rs`）・tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・既存のテストと拒否プローブ・依存・公開 API・`docs/spec`。
+
 ## 83. 計測・設計記録（親 #4072。create_graph の総括判定の走査量の上限 `JUDGE_BUDGET` の見直し）
 
 ### 83.0 位置づけ

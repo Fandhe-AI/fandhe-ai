@@ -940,14 +940,23 @@ impl TriCase {
     }
 
     fn f64_inputs(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let (a, p, n) = self.inputs();
+        Self::f64_of(&self.inputs())
+    }
+
+    /// 明示的な行 `(a, p, n)` の f64 化（#4133: 既定の [`TriCase::inputs`] 以外の行を f64 参照へ渡す）。
+    fn f64_of(rows: &(Vec<f32>, Vec<f32>, Vec<f32>)) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let to = |s: &[f32]| -> Vec<f64> { s.iter().map(|&v| f64::from(v)).collect() };
-        (to(&a), to(&p), to(&n))
+        (to(&rows.0), to(&rows.1), to(&rows.2))
     }
 
     /// `(c_an, c_pn)`（`triplet_cgrad` と同じく swap でなければ `(1, 0)`）。
     fn coefs(&self) -> (f64, f64) {
-        let (a, p, n) = self.f64_inputs();
+        self.coefs_with(&self.inputs())
+    }
+
+    /// [`TriCase::coefs`] を明示的な行で呼ぶ形（#4133）。
+    fn coefs_with(&self, rows: &(Vec<f32>, Vec<f32>, Vec<f32>)) -> (f64, f64) {
+        let (a, p, n) = Self::f64_of(rows);
         let params = crate::eval::TripletDistanceParams {
             p: f64::from(self.p),
             eps: 0.0,
@@ -1073,12 +1082,17 @@ impl TriCase {
 
     /// f64 の閉じた式。`x[out][wrt]` は `(truth の行, 各項の絶対値和の行)`、`g[out]` は `(truth, 絶対値和)`。
     fn reference(&self, j: usize) -> TriRef {
-        let (a, p, n) = self.f64_inputs();
+        self.reference_with(&self.inputs(), j)
+    }
+
+    /// [`TriCase::reference`] を明示的な行で呼ぶ形（#4133。`p`・`swap`・`exp` は `self`、`eps = 0`・Sum）。
+    fn reference_with(&self, rows: &(Vec<f32>, Vec<f32>, Vec<f32>), j: usize) -> TriRef {
+        let (a, p, n) = Self::f64_of(rows);
         let sub =
             |x: &[f64], y: &[f64]| -> Vec<f64> { x.iter().zip(y).map(|(a, b)| a - b).collect() };
         let (vap, van, vpn) = (sub(&a, &p), sub(&a, &n), sub(&p, &n));
         let pe = f64::from(self.p);
-        let (c_an, c_pn) = self.coefs();
+        let (c_an, c_pn) = self.coefs_with(rows);
         let up = f64::from(pow2(self.exp));
         // (out, wrt) の [H_ap, H_an, H_pn] の係数。
         let table: [[[f64; 3]; 3]; 3] = [
@@ -4125,4 +4139,349 @@ fn triplet_lin_flipped_rows_match_f64() {
     }
     assert!(total >= 150, "{total}");
     assert!(flipped >= 10, "受理に変わった行が少なすぎる: {flipped}");
+}
+
+// =====================================================================================
+// #4133: Lin 救済の通常テストの穴（Triplet の `an_coeff` 中間・CE の複数サンプル／Mean／ignore_index／class_weight）。
+// 判定のコードは変えず、`Lin` の上界と受理に変わった行の f64 照合を通常テストで固定する（設計 §82.14）
+// =====================================================================================
+
+/// 仮数の下位 13 bit を落とす（10 bit の仮数）。差分の f32 演算を厳密にして同値の同値性を保つ。
+fn trim_mantissa(v: f32) -> f32 {
+    f32::from_bits(v.to_bits() & !0x1FFF)
+}
+
+/// swap で `d_an == d_pn` が厳密に成り立つ行（`an_coeff = 0.5`）。`a − n = u`、`a − p = 2u`（`p − n = −u`）。
+/// `u = [0.5, ratio·…]`。`a` は 2^-6 の格子、`u` は 10 bit の仮数にして f32 の `n = a − u`・`p = a − 2u` を厳密にする。
+/// 既存の掃引〔`tri_random_rows`〕の swap 行は `d_pn < d_an`（`an_coeff = 0`）で、この同値の行は含まれない。
+fn tri_tie_rows(d: usize, ratio: f32, rng: &mut Rng) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let a: Vec<f32> = (0..d)
+        .map(|_| (rng.signed() * 64.0).round() / 64.0)
+        .collect();
+    let u: Vec<f32> = (0..d)
+        .map(|k| {
+            if k == 0 {
+                0.5
+            } else {
+                let s = if rng.signed() < 0.0 { -1.0 } else { 1.0 };
+                trim_mantissa(s * ratio * (0.3 + 0.7 * rng.signed().abs()))
+            }
+        })
+        .collect();
+    let n: Vec<f32> = a.iter().zip(&u).map(|(a, u)| a - u).collect();
+    let p: Vec<f32> = a.iter().zip(&u).map(|(a, u)| a - 2.0 * u).collect();
+    (a, p, n)
+}
+
+/// `an_coeff` が中間（0 でも 1 でもない）になる行か（f64 の統計で判定。本番と同じ `triplet_distance_stats`）。
+fn tri_is_tie(rows: &(Vec<f32>, Vec<f32>, Vec<f32>), p: f32) -> bool {
+    let (a, pp, n) = TriCase::f64_of(rows);
+    let params = crate::eval::TripletDistanceParams {
+        p: f64::from(p),
+        eps: 0.0,
+        swap: true,
+    };
+    let (stats, ..) = crate::eval::triplet_distance_stats(&a, &pp, &n, 0, rows.0.len(), &params);
+    stats.an_coeff > 0.0 && stats.an_coeff < 1.0
+}
+
+impl TriCase {
+    /// [`TriCase::measure`] を明示的な行（Sum・eps 0）で呼ぶ形。公開経路の verdict は `tri_multi_verdict` の 1 行。
+    fn measure_rows(&self, rows: &(Vec<f32>, Vec<f32>, Vec<f32>)) -> Meas {
+        let verdict = tri_multi_verdict(
+            std::slice::from_ref(rows),
+            self.d,
+            (0.0, self.p, self.swap),
+            Reduction::Sum,
+            self.exp,
+            false,
+        );
+        let sd = seeds(self.d, &[0, 1]);
+        let Some(hand) = self.hand_rows_with(rows.clone(), 0.0, None, &sd) else {
+            return Meas {
+                verdict,
+                x: None,
+                g: None,
+            };
+        };
+        let (mut x, mut g) = (Acc::default(), Acc::default());
+        for (j, per_out) in hand {
+            let r = self.reference_with(rows, j);
+            for o in 0..3 {
+                for w in 0..3 {
+                    for i in 0..self.d {
+                        x.add(per_out[o][w][i], r.x[o][w].0[i], r.x[o][w].1[i]);
+                    }
+                }
+                g.add(per_out[o][3][0], r.g[o].0, r.g[o].1);
+            }
+        }
+        Meas {
+            verdict,
+            x: Some(x),
+            g: Some(g),
+        }
+    }
+}
+
+/// swap で `an_coeff` が中間（`m_half` を通る）になる入力でも、`Lin` の上界が実際の f32 の二階を覆う（実際の子テープ〔hand〕と
+/// f32 のモデルの双方。`lin_bound_covers_f32_deviation_for_triplet_sweep` と同じ式）。掃引の入力が本当に中間の入力であることを
+/// `tri_is_tie` と `TriSetup::an_kind == 2` で固定する（既存の掃引は `an_coeff = 0` の swap 行しか通らない）。
+#[test]
+fn lin_bound_covers_f32_deviation_for_triplet_an_coeff_half_rows() {
+    let mut rng = Rng(0x7e57_4133_a11c_0de5);
+    let mut st = SweepStats::default();
+    let (mut tried, mut used) = (0usize, 0usize);
+    for d in [3usize, 8, 16, 32, 64] {
+        for p in [2.0f32, 1.5, 3.0, 10.0] {
+            for ratio in [1e-1f32, 1e-3, 1e-6] {
+                for exp in [0i32, 13] {
+                    let c = TriCase {
+                        d,
+                        ratio,
+                        p,
+                        swap: true,
+                        exp,
+                    };
+                    let rows = tri_tie_rows(d, ratio, &mut rng);
+                    tried += 1;
+                    if !tri_is_tie(&rows, p) {
+                        continue;
+                    }
+                    let up = (f64::from(pow2(exp)), None);
+                    let setup = triplet_setup((&rows.0, &rows.1, &rows.2), 0.0, p, true, up);
+                    if let Some(s) = &setup {
+                        assert_eq!(s.an_kind, 2, "{c:?}: an_coeff は中間のはず");
+                    }
+                    let mut ok = lin_sweep_tri_row(&c, &rows, 0.0, None, &mut st).is_some();
+                    if exp == 13 {
+                        ok |= lin_sweep_tri_row(&c, &rows, 0.0, Some(3), &mut st).is_some();
+                        ok |= lin_sweep_tri_row(&c, &rows, 0.0, Some(7), &mut st).is_some();
+                    }
+                    used += usize::from(ok);
+                }
+            }
+        }
+    }
+    assert!(
+        used >= 60,
+        "an_coeff が中間で setup できた行が少なすぎる: {used}/{tried}"
+    );
+    assert!(
+        st.checked > 1000,
+        "検査した要素が少なすぎる: {}",
+        st.checked
+    );
+    assert!(
+        st.nonzero > 0,
+        "実測の誤差が全て 0 では soundness を確かめていない"
+    );
+    eprintln!(
+        "LINTRIHALF checked={} nonzero={} tight={} worst={:.4} used={used}/{tried}",
+        st.checked, st.nonzero, st.tight, st.worst
+    );
+}
+
+/// swap で `an_coeff` が中間になる行について、(1) 旧受理 → 新拒否は 0 件、(2) 旧拒否 → 新受理に変わった行の二階が f64 の
+/// 閉じた式と REQ-2 で一致する（REQ-2 比 < 1・参照の不確かさ < 5%）。
+#[test]
+fn triplet_lin_an_coeff_half_rows_flip_only_to_accept_and_match_f64() {
+    let mut rng = Rng(0x4133_c0ff_ee57_a11e);
+    let (mut total, mut old_acc, mut flipped, mut max_ratio) = (0usize, 0usize, 0usize, 0f64);
+    for d in [8usize, 16, 32, 64] {
+        for p in [2.0f32, 1.5, 3.0] {
+            for ratio in [1e-1f32, 1e-3, 1e-6] {
+                for exp in [0i32, 13] {
+                    let c = TriCase {
+                        d,
+                        ratio,
+                        p,
+                        swap: true,
+                        exp,
+                    };
+                    let rows = tri_tie_rows(d, ratio, &mut rng);
+                    if !tri_is_tie(&rows, p) {
+                        continue;
+                    }
+                    let one = std::slice::from_ref(&rows);
+                    let opts = (0.0, p, true);
+                    let old = tri_multi_verdict(one, d, opts, Reduction::Sum, exp, true);
+                    let new = tri_multi_verdict(one, d, opts, Reduction::Sum, exp, false);
+                    total += 1;
+                    let (o, n) = (old == Verdict::Accept, new == Verdict::Accept);
+                    assert!(!(o && !n), "旧受理 → 新拒否 {c:?}: {new:?}");
+                    old_acc += usize::from(o);
+                    if !o && n {
+                        flipped += 1;
+                        let m = c.measure_rows(&rows);
+                        for (label, acc) in [("x", m.x), ("g", m.g)] {
+                            let a = acc.expect("計測");
+                            assert!(a.ratio < 1.0, "{c:?}: {label} の REQ-2 比 {:e}", a.ratio);
+                            assert!(a.unc < 0.05, "{c:?}: {label} の参照の不確かさ {:e}", a.unc);
+                            max_ratio = max_ratio.max(a.ratio);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "LINTRIHALFFLIP total={total} old_accept={old_acc} flipped_to_accept={flipped} max_req2_ratio={max_ratio:.3e}"
+    );
+    assert!(total >= 50, "{total}");
+    assert!(flipped >= 1, "受理に変わった行が無い: {flipped}");
+}
+
+/// 4 サンプル（ターゲット `0..4`）・Mean・`class_weight`・`ignore_index` の CEWO の x への二階の f64 参照。
+/// 有効なサンプル `r` のブロックは `H[j][i] = (w_{t_r}/denom_w)·y_j(δ_ji − y_i)`、`denom_w` は有効サンプルの
+/// `w_t` の和（ignore したサンプルは 0 行）。対角は `1 − y_j` を他クラスの和で作って桁落ちを避ける。上流は 1。
+fn multi_ce_reference(
+    z0: &[f32],
+    c: usize,
+    weights: &[f32],
+    ignore: Option<i32>,
+    j: usize,
+) -> Vec<f64> {
+    let valid = |r: usize| ignore != Some(r as i32);
+    let denom_w: f64 = (0..4)
+        .filter(|&r| valid(r))
+        .map(|r| f64::from(weights[r]))
+        .sum();
+    let mut out = vec![0f64; z0.len()];
+    let r = j / c;
+    if !valid(r) {
+        return out;
+    }
+    let x: Vec<f64> = z0[r * c..(r + 1) * c]
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect();
+    let mx = x.iter().fold(f64::NEG_INFINITY, |m, &v| m.max(v));
+    let e: Vec<f64> = x.iter().map(|&v| (v - mx).exp()).collect();
+    let total: f64 = e.iter().sum();
+    let y: Vec<f64> = e.iter().map(|v| v / total).collect();
+    let jj = j % c;
+    let rest_j = (total - e[jj]) / total;
+    let rest_j = if 2.0 * e[jj] > total {
+        e.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != jj)
+            .map(|(_, v)| *v)
+            .sum::<f64>()
+            / total
+    } else {
+        rest_j
+    };
+    let s = f64::from(weights[r]) / denom_w;
+    for i in 0..c {
+        out[r * c + i] = if i == jj {
+            s * y[jj] * rest_j
+        } else {
+            -s * y[jj] * y[i]
+        };
+    }
+    out
+}
+
+/// 複数サンプル（n = 4）・Mean（`denom_w`）・`ignore_index`・`class_weight` の行で、旧拒否 → 新受理に変わった行の二階が
+/// f64 参照と REQ-2 で一致する（REQ-2 比 < 1）。旧受理 → 新拒否は 0 件。`denom_w`・ignore・重みの配線が受理を増やす方向に
+/// ずれても（値が変わるため）通常 CI で検出できる。受理された行はすべて照合し、旧拒否 → 新受理の件数と最大比も出す。
+#[test]
+fn ce_lin_multi_sample_flipped_rows_match_f64() {
+    let (mut total, mut accepted, mut flipped) = (0usize, 0usize, 0usize);
+    let (mut max_ratio, mut max_ratio_flipped) = (0f64, 0f64);
+    for c in [64usize, 100] {
+        let weights: Vec<f32> = (0..c)
+            .map(|i| 0.5 + 0.4 * ((i as f32) * 0.731).sin())
+            .collect();
+        for ignore in [None, Some(2i32), Some(0)] {
+            for margins in [
+                [10.0f32, 10.0, 10.0, 10.0],
+                [0.0, 5.0, 10.0, 20.0],
+                [8.0, 12.0, 10.0, 14.0],
+            ] {
+                let mut z0 = Vec::new();
+                for (r, m) in margins.iter().enumerate() {
+                    let mut row: Vec<f32> = pattern(c, r as f32).iter().map(|v| 0.1 * v).collect();
+                    row[r] += m;
+                    z0.extend(row);
+                }
+                let mut opts =
+                    CrossEntropyOptions::default().class_weight(tt(weights.clone(), &[c]));
+                if let Some(i) = ignore {
+                    opts = opts.ignore_index(i);
+                }
+                probe::FORCE_OLD.with(|f| f.set(true));
+                let old = run_public(z0.clone(), |tape, z| multi_build(tape, z, c, &opts)).0;
+                probe::FORCE_OLD.with(|f| f.set(false));
+                let new = run_public(z0.clone(), |tape, z| multi_build(tape, z, c, &opts)).0;
+                total += 1;
+                let (o, n) = (old == Verdict::Accept, new == Verdict::Accept);
+                assert!(
+                    !(o && !n),
+                    "c={c} ignore={ignore:?} margins={margins:?}: 旧受理 → 新拒否 new={new:?}"
+                );
+                if !n {
+                    continue;
+                }
+                accepted += 1;
+                flipped += usize::from(!o);
+                // 各サンプルのターゲット・隣・中央・末尾を seed にする。
+                let idx: Vec<usize> = (0..4)
+                    .flat_map(|r| [r * c + r, r * c + (r + 1) % c, r * c + c / 2, r * c + c - 1])
+                    .collect();
+                let rows = public_rows(z0.clone(), &idx, |tape, z| multi_build(tape, z, c, &opts));
+                for (k, &j) in idx.iter().enumerate() {
+                    let truth = multi_ce_reference(&z0, c, &weights, ignore, j);
+                    for (i, &t) in truth.iter().enumerate() {
+                        let ratio = req2_ratio(f64::from(rows[k][i]), t);
+                        assert!(
+                            ratio < 1.0,
+                            "c={c} ignore={ignore:?} margins={margins:?} seed={j} i={i}: 実測 {} 真値 {t:e} 比 {ratio:e}",
+                            rows[k][i]
+                        );
+                        max_ratio = max_ratio.max(ratio);
+                        if !o {
+                            max_ratio_flipped = max_ratio_flipped.max(ratio);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "LINCEMULTIF total={total} accepted={accepted} flipped_to_accept={flipped} max_req2_ratio={max_ratio:.3e} max_req2_ratio_flipped={max_ratio_flipped:.3e}"
+    );
+    assert!(flipped >= 6, "受理に変わった行が少なすぎる: {flipped}");
+}
+
+/// 単一サンプルの CE・CEWO の行列（`ce_switch_cases` のうち `C ≤ 1000`）で、旧受理 → 新拒否は 0 件、旧拒否 → 新受理に変わった
+/// 行は REQ-2 比 < 1 かつ参照の不確かさ < 5%。`ce_lin_switch_rejection_delta_measurement`（`--release`・全 396 行）の
+/// 通常テスト版（`triplet_lin_flipped_rows_match_f64` と同型）。
+#[test]
+fn ce_lin_switch_rows_up_to_c1000_never_flip_to_reject_and_flipped_match_f64() {
+    let (mut total, mut old_acc, mut flipped, mut max_ratio) = (0usize, 0usize, 0usize, 0f64);
+    for c in ce_switch_cases().into_iter().filter(|c| c.c <= 1000) {
+        let old = public_old_ce(&c);
+        let new = c.public().0;
+        total += 1;
+        let (o, n) = (old == Verdict::Accept, new == Verdict::Accept);
+        assert!(!(o && !n), "旧受理 → 新拒否 {c:?}: {new:?}");
+        old_acc += usize::from(o);
+        if !o && n {
+            flipped += 1;
+            let m = c.measure();
+            let (x, g) = (m.x.expect("x"), m.g.expect("g"));
+            for (label, a) in [("x", x), ("g", g)] {
+                assert!(a.ratio < 1.0, "{c:?}: {label} の REQ-2 比 {:e}", a.ratio);
+                assert!(a.unc < 0.05, "{c:?}: {label} の参照の不確かさ {:e}", a.unc);
+                max_ratio = max_ratio.max(a.ratio);
+            }
+        }
+    }
+    eprintln!(
+        "LINCESWN total={total} old_accept={old_acc} flipped_to_accept={flipped} max_req2_ratio={max_ratio:.3e}"
+    );
+    assert!(total >= 250, "{total}");
+    assert!(flipped >= 20, "受理に変わった行が少なすぎる: {flipped}");
 }
