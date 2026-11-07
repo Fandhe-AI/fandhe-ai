@@ -14,8 +14,8 @@
 //! - `CrossEntropyLossWithOptions`（V3 + V1）: `dx = where(valid, s_b⊙(A⊙softmax(x) − B), 0)`。
 //!   `A`・`B`・`valid` は class_weight・label_smoothing・ignore_index からホストが f64 で作る定数。
 //!   Mean の分母は非 ignore サンプルの重み和 `W`（`g / const(W)`）。
-//!   CE・CEWO の相殺判定の forward は総称関数 `cewo_fwd` で組み、`Lin` の上界は test 限定で並行計算する
-//!   （#4093。判定は従来どおり。切り替えは #4094）。
+//!   CE・CEWO の相殺判定の forward は総称関数 `cewo_fwd` で組み、従来の見積りが拒否した要素だけ `Lin` の
+//!   上界で救う（#4093 で並行計算、#4094 で切り替え。設計 §82.10・§82.11）。
 //! - `MultiMarginLoss`: p=1 は区分定数（`K` をホスト定数化）、p=2 は `H = where(M, 2Z, 0)` を構造に積む。
 //! - `MultiLabelMarginLoss`: x について区分定数（`K` をホスト定数化）。
 //! - `MultiLabelSoftMarginLoss`: `dx = s_b⊙(const(w_c/C)⊙(σ(x) − t))`（σ は符号別の安定形）。
@@ -48,7 +48,8 @@
 //! g 経路、MultiMargin・MultiLabelMargin・MultiLabelSoft の定数と g 経路、MultiLabelSoft の σ の
 //! 曲率である。保証はこの判定を通った入力に限る。
 //!
-//! Cosine は、この見積りが拒否した要素に限り `Lin`（丸めの一次伝播）の上界で再評価して救う（#4091・設計 §82.8）。
+//! Cosine と CE・CEWO は、この見積りが拒否した要素に限り `Lin`（丸めの一次伝播）の上界で再評価して救う
+//! （Cosine は #4091・設計 §82.8、CE・CEWO は #4094・設計 §82.11）。
 //! 救済は片方の見積りが通れば受理する形なので拒否範囲は従来以下で、走査量が大きいテンソルは従来のまま。
 //!
 //! 既定オプションの `CrossEntropyLoss` も同じ CEWO の相殺判定を `A = 1`・`B = onehot`・`W = n` で通す
@@ -136,7 +137,7 @@ pub(super) mod probe {
     thread_local! {
         pub(in crate::create_graph) static LOG: RefCell<Option<Vec<Event>>> =
             const { RefCell::new(None) };
-        /// `true` の間は Cosine の判定が `Lin` の上界を使わない（旧判定との比較・変異確認用。#4091）。
+        /// `true` の間は Cosine・CE・CEWO の判定が `Lin` の上界を使わない（旧判定との比較・変異確認用。#4091・#4094）。
         pub(in crate::create_graph) static FORCE_OLD: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
     }
@@ -380,12 +381,15 @@ pub(super) fn cewo_cgrad<'c>(
     let total_all: f64 = weights.iter().sum();
     let in_range = |t: i32| t >= 0 && (t as usize) < axis_len;
     let mut denom_w = 0f64;
+    // 判定する有効な行（ignore と範囲外を除く）の数。`Lin` の走査量の上限（`ce_lin_ctx`）に使う。
+    let mut n_rows = 0usize;
     for &t in &target_data {
         if ignore_index == Some(t) {
             continue;
         }
         if in_range(t) {
             denom_w += weights[t as usize];
+            n_rows += 1;
         }
     }
     // 1 階 `cross_entropy_loss_with_options_vjp` の早期 return 2 種。logits が NaN でも 0 を返す
@@ -435,6 +439,17 @@ pub(super) fn cewo_cgrad<'c>(
         sb,
     );
 
+    // `Lin` の上界で救済する判定の入力（符号つきの実際の `g` と Mean の分母 `W`。構造の `s_b = g / W` を f32 で再現する）。
+    let g_signed = crate::eval::dense_vec(&g_value)
+        .first()
+        .map_or(0.0, |&v| f64::from(v));
+    let lin_ctx = ce_lin_ctx(
+        g_signed,
+        (reduction == Reduction::Mean).then_some(denom_w),
+        n_rows,
+        axis_len,
+    );
+
     let numel: usize = shape.iter().product();
     let mut a_data = vec![0f32; numel];
     let mut b_data = vec![0f32; numel];
@@ -469,6 +484,7 @@ pub(super) fn cewo_cgrad<'c>(
                 (o, i, inner, axis_len),
                 (a_s, &weights, t as usize, eps),
                 (sb, gscale_ce, rho_ce),
+                lin_ctx,
             )?;
         }
     }
@@ -545,6 +561,20 @@ pub(super) fn ce_cancel_check(
     let rho = sb_ratio(upstream_scale32(g_value, reduction, n), sb);
     let gscale = g_scale(reduction, n);
     let weights = vec![1.0f64; axis_len];
+    // 判定する有効な行（範囲外の target を除く）の数と、`Lin` の上界で救済する判定の入力。
+    let n_rows = target_data
+        .iter()
+        .filter(|&&t| t >= 0 && (t as usize) < axis_len)
+        .count();
+    let g_signed = crate::eval::dense_vec(g_value)
+        .first()
+        .map_or(0.0, |&v| f64::from(v));
+    let lin_ctx = ce_lin_ctx(
+        g_signed,
+        (reduction == Reduction::Mean).then_some(n as f64),
+        n_rows,
+        axis_len,
+    );
     for o in 0..outer {
         for i in 0..inner {
             let t = target_data[o * inner + i];
@@ -556,6 +586,7 @@ pub(super) fn ce_cancel_check(
                 (o, i, inner, axis_len),
                 (1.0, &weights, t as usize, 0.0),
                 (sb, gscale, rho),
+                lin_ctx,
             )?;
         }
     }
@@ -563,9 +594,9 @@ pub(super) fn ce_cancel_check(
 }
 
 /// CE・CEWO の 1 サンプル（class 軸 1 行）の Softmax の forward の中間値（`e = exp(x − max)`・`total = Σe`・`y = e/total`）。
-/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（丸めの一次伝播の上界。#4093・判定への配線は #4094）。
+/// `T` は `f64`（参照）・`f32`（子テープの構造の再現）・[`Lin`]（丸めの一次伝播の上界。#4093 で導入、#4094 で判定へ配線）。
 ///
-/// 呼び出し元: [`cewo_cancel_check`]（`f64` と `f32`）、test 限定の [`cewo_lin_rows`]（`Lin`）。
+/// 呼び出し元: [`cewo_cancel_check`]（`f64` と `f32`）、[`CeLinState`]（`Lin` と `f32`）、test 限定の [`cewo_lin_rows`]。
 /// 最大値は構造と同じく f32 の fold max（f64 の fold max と同じ値）。和は [`Num::total`]（f32 は 0 からの逐次和で
 /// 従来の `sum32` と bit 一致、f64 は `Iterator::sum` と同じ順序）。
 /// `total` には [`Num::settle`] を掛けない: `y_j = e_j/total` で分子と分母が同じ `e_j` の事象を共有し、確信度の高い行の
@@ -588,27 +619,31 @@ fn cewo_fwd<T: Num>(row32: &[f32]) -> CewoFwd<T> {
     CewoFwd { e, total, y }
 }
 
-/// [`cewo_rev`] の結果: seed 要素 `j` の `dx[j]` を 1 要素のスカラーに畳んで逆伝播したときの、logits `x` と `g` への二階。
-#[cfg(test)]
-pub(super) struct CewoRow<T> {
-    pub(super) x: Vec<T>,
-    pub(super) g: T,
+/// seed 要素 `j` の二階のうち、要素 `i` に依らないスカラー部（`s_b`・`c = s_b·A`・`term = c·y_j`、`g` への二階）。
+/// [`cewo_x`] が `x` への二階の 1 要素を作るときに使い回す。判定（[`CeLinState`]）は seed ごとに 1 回作り、
+/// 要素ごとの値だけを作り直す（要素 1 つ分ずつ [`lin_truncate`] で戻し、判定時の事象数を抑える）。
+#[derive(Clone, Copy)]
+struct CewoSeed<T> {
+    c: T,
+    term: T,
+    /// `g` への二階 `(A·y_j − B_j)·(1/W)`（Sum は `1/W` なし）。
+    g: T,
 }
 
-/// CE・CEWO の構造 `s_b⊙(A⊙softmax(x) − B)` の seed 要素 `j` の二階を `T` の演算で写す（test 限定。#4093）。
+/// CE・CEWO の構造 `s_b⊙(A⊙softmax(x) − B)` の seed 要素 `j` のスカラー部を `T` の演算で写す（#4093 で test 限定として
+/// 導入、#4094 で本番の判定が使う）。
 ///
 /// `coef = (A, B_j)`・`up = (g, Mean の分母 W)`。既定 CE は `A = 1`・`B = onehot`・`W = n` で同じ写しを共有する
 /// （実際の構造には `·A` の乗算が無いが `A = 1` で f32 の値は同じ。`Lin` の余分な事象は過大評価で健全）。
 /// 丸めの位置は `grad.rs` と `eval/scalar.rs::binary_partials` に合わせる。Softmax の VJP は実際のカーネルが
 /// 差と積を f64 で計算して 1 回だけ f32 へ落とす混合精度だが、ここでは f32 の丸め事象として写す（健全な過大評価。
 /// f64→f32 の二重丸めの余分は相対 2^-29 以下で `entry_check_lin` の余裕 `(1 + 16·N·u)` に収まる）。
-#[cfg(test)]
-fn cewo_rev<T: Num>(
+fn cewo_seed<T: Num>(
     f: &CewoFwd<T>,
     j: usize,
     coef: (f64, f64),
     up: (f64, Option<f64>),
-) -> CewoRow<T> {
+) -> CewoSeed<T> {
     let (a_s, b_j) = coef;
     let s_b = match up.1 {
         Some(w) => T::input(up.0).over(T::k(w)),
@@ -616,21 +651,41 @@ fn cewo_rev<T: Num>(
     };
     let c = s_b.times(T::k(a_s));
     let term = c.times(f.y[j]);
-    let x = (0..f.y.len())
-        .map(|i| {
-            if i == j {
-                f.y[j].times(c.minus(term))
-            } else {
-                f.y[i].times(term.negate())
-            }
-        })
-        .collect();
     let q = T::k(a_s).times(f.y[j]).minus(T::k(b_j));
     let g = match up.1 {
         Some(w) => q.times(T::k(1.0).over(T::k(w))),
         None => q,
     };
-    CewoRow { x, g }
+    CewoSeed { c, term, g }
+}
+
+/// seed `j` の `x` への二階の要素 `i`（対角は `y_j·(c − term)`、非対角は `y_i·(−term)`）。
+fn cewo_x<T: Num>(f: &CewoFwd<T>, sd: &CewoSeed<T>, i: usize, j: usize) -> T {
+    if i == j {
+        f.y[j].times(sd.c.minus(sd.term))
+    } else {
+        f.y[i].times(sd.term.negate())
+    }
+}
+
+/// [`cewo_rev`] の結果: seed 要素 `j` の `dx[j]` を 1 要素のスカラーに畳んで逆伝播したときの、logits `x` と `g` への二階。
+#[cfg(test)]
+pub(super) struct CewoRow<T> {
+    pub(super) x: Vec<T>,
+    pub(super) g: T,
+}
+
+/// [`cewo_seed`]・[`cewo_x`] の合成で seed `j` の二階の全要素を写す（test 限定。#4093 の soundness 掃引と bit 一致の錠が使う）。
+#[cfg(test)]
+fn cewo_rev<T: Num>(
+    f: &CewoFwd<T>,
+    j: usize,
+    coef: (f64, f64),
+    up: (f64, Option<f64>),
+) -> CewoRow<T> {
+    let sd = cewo_seed(f, j, coef, up);
+    let x = (0..f.y.len()).map(|i| cewo_x(f, &sd, i, j)).collect();
+    CewoRow { x, g: sd.g }
 }
 
 /// [`cewo_rev`] を `f32` で評価した二階。手組みの構造の実測と並べて soundness の「実測」側に使う（test 限定）。
@@ -653,7 +708,7 @@ pub(super) struct LinRowCe {
     pub(super) events: usize,
 }
 
-/// `Lin` で forward と seed ごとの逆伝播を評価し、各要素の値と上界を返す（test 限定。#4093。判定への配線は #4094）。
+/// `Lin` で forward と seed ごとの逆伝播を評価し、各要素の値と上界を返す（test 限定。#4093 の soundness 掃引・計測用）。
 /// 厳密モード（[`lin_reset`]）で forward を 1 回作り、seed ごとに [`lin_mark`]／[`lin_truncate`] で領域を戻す。
 #[cfg(test)]
 pub(super) fn cewo_lin_rows(
@@ -683,6 +738,141 @@ pub(super) fn cewo_lin_rows(
     out
 }
 
+/// CE・CEWO の `Lin` 判定の入力（行に依らない量）。`g` は子テープ上の上流（符号つきの f32 の値）、`w` は Mean の分母
+/// （f32 へ丸める前の f64。構造は `g / W` を f32 で作る）、`off` は非対角の全要素の救済走査（O(C²)）を許すか
+/// （[`ce_lin_ctx`] が走査量の上限で決める）。
+#[derive(Clone, Copy)]
+struct CeLinCtx {
+    g: f64,
+    w: Option<f64>,
+    off: bool,
+}
+
+/// [`CeLinState::ok`] が見る二階の種別（`G` は `g` への二階、`X` は x への二階の要素〈対角・非対角〉）。
+#[derive(Clone, Copy)]
+enum CeLinKind {
+    G,
+    X,
+}
+
+/// 事象の総数の上界（forward の `exp`・`total`・`y` と seed のスカラー、要素 1 つ分）。実測と固定は
+/// `loss_class_tests.rs::ce_lin_events_stay_within_bound`（設計 §82.11）。
+fn ce_lin_events_max(c: usize) -> usize {
+    CE_LIN_EVENTS_PER_CLASS
+        .saturating_mul(c)
+        .saturating_add(CE_LIN_EVENTS_FIXED)
+}
+
+/// [`ce_lin_events_max`] のクラス 1 つあたりの事象数（`exp` の丸め・`y` の束ね）。
+const CE_LIN_EVENTS_PER_CLASS: usize = 4;
+/// [`ce_lin_events_max`] の定数分（`total` の丸め、seed のスカラー、`Mean` の `W`、要素 1 つ分）。
+const CE_LIN_EVENTS_FIXED: usize = 40;
+
+/// 1 行の `g` への二階と対角の曲率の判定（forward ＋ 全 seed の O(C) の要素）の走査量の見積り
+/// （`Rf` の 1 反復相当。`LIN_BUDGET` と同じ単位）。forward の `total` が O(C²)、seed ごとの要素が O(C)。実測は設計 §82.11。
+fn ce_lin_cost_diag(c: usize) -> usize {
+    CE_LIN_COST_FWD
+        .saturating_mul(c)
+        .saturating_mul(c)
+        .saturating_add(CE_LIN_COST_DIAG.saturating_mul(c))
+}
+
+/// 非対角の救済走査（全 `C(C−1)` 要素）の走査量の見積り。
+fn ce_lin_cost_off(c: usize) -> usize {
+    CE_LIN_COST_OFF.saturating_mul(c).saturating_mul(c)
+}
+
+const CE_LIN_COST_FWD: usize = 6;
+const CE_LIN_COST_DIAG: usize = 200;
+const CE_LIN_COST_OFF: usize = 24;
+
+/// CE・CEWO の総括判定で [`Lin`] の上界を使うか、使うなら非対角の救済走査まで許すか（テンソル単位。
+/// `cos_use_lin` と同じ方針）。事象の総数が余裕係数の上限（`16·事象数·u < 0.01`）に収まり、かつ対角・`g` の走査量が
+/// [`LIN_BUDGET`] 以内のときだけ `Some`。非対角まで含めた走査量も収まるときだけ `off = true`。満たさないテンソルは
+/// 従来の見積りだけで判定する（受理集合は従来と同じ。走査量の上限を超えたら `Lin` を使わない形で
+/// `judge_budget` の代わりに守る。設計 §82.11）。`n_rows` は判定する有効な行の数。
+fn ce_lin_ctx(g: f64, w: Option<f64>, n_rows: usize, c: usize) -> Option<CeLinCtx> {
+    #[cfg(test)]
+    if probe::FORCE_OLD.with(|f| f.get()) {
+        return None;
+    }
+    if 16.0 * ce_lin_events_max(c) as f64 * LIN_U >= 0.01 {
+        return None;
+    }
+    let diag = n_rows.saturating_mul(ce_lin_cost_diag(c));
+    if diag > LIN_BUDGET {
+        return None;
+    }
+    let off = diag.saturating_add(n_rows.saturating_mul(ce_lin_cost_off(c))) <= LIN_BUDGET;
+    Some(CeLinCtx { g, w, off })
+}
+
+/// [`CeLinState`] が持つ seed `j` のスカラー（`Lin` 版と f32 版）と、その直後の領域の印。
+type CeLinSeed = (usize, LinMark, CewoSeed<Lin>, CewoSeed<f32>);
+
+/// CE・CEWO の 1 行の [`Lin`] 判定の状態。forward は行で最初に必要になったとき 1 回だけ作り、seed のスカラーは
+/// `j` が変わるたびに作り直し、要素ごとの値は作ってすぐ [`lin_truncate`] で戻す（判定時の事象数を forward ＋ seed の
+/// スカラー ＋ 要素 1 つ分に抑え、`entry_check_lin` の余裕係数の条件を満たしやすくする。`entry_check_lin` は判定時点の
+/// 全体の事象数を余裕に使うので、要素ごとの truncate は必須）。`Drop` で thread-local の領域を解放する。
+struct CeLinState {
+    lin: CewoFwd<Lin>,
+    f32m: CewoFwd<f32>,
+    a_s: f64,
+    up: (f64, Option<f64>),
+    fwd_mark: LinMark,
+    cur: Option<CeLinSeed>,
+}
+
+impl CeLinState {
+    fn new(row32: &[f32], a_s: f64, ctx: CeLinCtx) -> Self {
+        lin_reset();
+        let lin = cewo_fwd::<Lin>(row32);
+        let f32m = cewo_fwd::<f32>(row32);
+        CeLinState {
+            lin,
+            f32m,
+            a_s,
+            up: (ctx.g, ctx.w),
+            fwd_mark: lin_mark(),
+            cur: None,
+        }
+    }
+
+    fn seed(&mut self, j: usize, b_j: f64) -> (LinMark, CewoSeed<Lin>, CewoSeed<f32>) {
+        if let Some((jj, m, a, b)) = self.cur
+            && jj == j
+        {
+            return (m, a, b);
+        }
+        lin_truncate(self.fwd_mark);
+        let a = cewo_seed(&self.lin, j, (self.a_s, b_j), self.up);
+        let b = cewo_seed(&self.f32m, j, (self.a_s, b_j), self.up);
+        let m = lin_mark();
+        self.cur = Some((j, m, a, b));
+        (m, a, b)
+    }
+
+    /// seed `j` の二階の要素（`kind`・`i`）が [`entry_check_lin`] を通るか。
+    fn ok(&mut self, kind: CeLinKind, i: usize, j: usize, b_j: f64, what: &str) -> bool {
+        let (mark, a, b) = self.seed(j, b_j);
+        let ok = match kind {
+            CeLinKind::G => entry_check_lin(a.g, b.g, what, invalid).is_ok(),
+            CeLinKind::X => {
+                let l = cewo_x(&self.lin, &a, i, j);
+                let s = cewo_x(&self.f32m, &b, i, j);
+                entry_check_lin(l, s, what, invalid).is_ok()
+            }
+        };
+        lin_truncate(mark);
+        ok
+    }
+}
+
+impl Drop for CeLinState {
+    fn drop(&mut self) {
+        lin_reset();
+    }
+}
 /// CEWO の 1 サンプル（`(o, i)` の class 軸）の相殺検査（設計 §55.2 の相殺の総括判定）。
 ///
 /// 構造 `s_b⊙(A⊙softmax(x) − B)` の二階は、x 経路が Softmax の VJP `s_b·A·y_i(δ_ij − y_j)`。対角の
@@ -690,11 +880,18 @@ pub(super) fn cewo_lin_rows(
 /// （真値は他クラスの確率の和）。非対角は単項の積で相殺しない。g 経路（`∂dx/∂g`）は `A·y_c − B_c`
 /// で、target の `A·y_t ≈ B_t` が同じく相殺する。参照値は f64 の softmax で、`1 − y_j` は他クラスの
 /// 和から桁落ちなく作る。NaN の行は伝播させるため検査しない。
+///
+/// **`Lin` の上界による救済（#4094・設計 §82.11）**: 対角・`g`・`flag` 行の非対角は、従来の見積り
+/// （`coeff·m`）が拒否した要素だけ [`CeLinState`] で評価し直し、閾値内なら受理する（[`lin_elem`]）。非 `flag` 行の
+/// 非対角は、従来の上位 2 クラスの積の近似が通れば受理（速い経路）、通らなければ `lin.off` のときだけ全非対角を
+/// 要素ごとに評価し直す。`lin = None`（走査量・事象数の上限を超えるテンソル、`-inf` や `|x − max| > 2^23` のロジットで
+/// `exp_bounded` が上界を持たない行を含む）は従来の見積りのまま。どちらも独立に健全な上界なので拒否範囲は従来以下。
 fn cewo_cancel_check(
     xs: &[f32],
     pos: (usize, usize, usize, usize),
     coef: (f64, &[f64], usize, f64),
     scales: (f64, f64, f64),
+    lin: Option<CeLinCtx>,
 ) -> Result<(), AutodiffError> {
     let (o, i, inner, c) = pos;
     let (a_s, weights, t, eps) = coef;
@@ -719,6 +916,20 @@ fn cewo_cancel_check(
     let mut flag = deviates(1.0, rho, 1.0, coeff) || deviates(a_s, a32, a_s.abs(), coeff);
     let ys: Vec<f64> = ref64.y;
     let (mut top1, mut top2) = (0f64, 0f64);
+    // 構造の `B_j`（f64）。g への二階と `Lin` の seed が使う。
+    let b_at = |j: usize| -> f64 {
+        (1.0 - eps) * weights[t] * if j == t { 1.0 } else { 0.0 } + smooth * weights[j]
+    };
+    // `Lin` の上界の状態（従来の見積りが最初に拒否した要素で 1 回だけ作る。`Drop` で領域を解放する）。
+    let mut lin_state: Option<CeLinState> = None;
+    let mut rescue = |kind: CeLinKind, i: usize, j: usize, what: &str| -> bool {
+        let Some(ctx) = lin else {
+            return false;
+        };
+        lin_state
+            .get_or_insert_with(|| CeLinState::new(&row32, a_s, ctx))
+            .ok(kind, i, j, b_at(j), what)
+    };
     for j in 0..c {
         let y = ys[j];
         let ys32 = y32[j];
@@ -735,26 +946,34 @@ fn cewo_cancel_check(
         } else {
             total - e[j]
         } / total;
-        struct_check(
-            sba * y * rest,
-            sba_str * ys32 * (1.0 - ys32),
-            sba * y * (1.0 + y),
-            1.0,
-            coeff,
-            "CrossEntropy: Softmax の対角の曲率",
+        const DIAG_WHAT: &str = "CrossEntropy: Softmax の対角の曲率";
+        lin_elem(
+            [
+                sba * y * rest,
+                sba_str * ys32 * (1.0 - ys32),
+                sba * y * (1.0 + y),
+                1.0,
+                coeff,
+            ],
+            DIAG_WHAT,
+            || rescue(CeLinKind::X, j, j, DIAG_WHAT),
         )?;
         // `A·y_j − B_j = (1−ε)·w_t·(y_j − δ_jt) + (ε/C)·(Σw·y_j − w_j)`（`y_t − 1 = −rest_t`）。
         let hard = if j == t { -rest } else { y };
         let v = (1.0 - eps) * weights[t] * hard + smooth * (total_w * y - weights[j]);
-        let b = (1.0 - eps) * weights[t] * if j == t { 1.0 } else { 0.0 } + smooth * weights[j];
+        let b = b_at(j);
         let (a_f, b_f, y_f) = (a_s as f32, b as f32, ys32 as f32);
-        struct_check(
-            v,
-            f64::from(a_f * y_f - b_f),
-            a_s * y + b.abs(),
-            gscale,
-            coeff,
-            "CrossEntropy: g への二階（A·softmax − B）",
+        const G_WHAT: &str = "CrossEntropy: g への二階（A·softmax − B）";
+        lin_elem(
+            [
+                v,
+                f64::from(a_f * y_f - b_f),
+                a_s * y + b.abs(),
+                gscale,
+                coeff,
+            ],
+            G_WHAT,
+            || rescue(CeLinKind::G, j, j, G_WHAT),
         )?;
         if y > top1 {
             top2 = top1;
@@ -774,27 +993,49 @@ fn cewo_cancel_check(
                     continue;
                 }
                 let v = sba * ys[ii] * ys[jj];
-                struct_check(
-                    v,
-                    sba_str * y32[ii] * y32[jj],
-                    v.abs(),
-                    1.0,
-                    coeff,
-                    "CrossEntropy: Softmax の非対角の曲率（f32 の underflow）",
+                const FLAG_WHAT: &str = "CrossEntropy: Softmax の非対角の曲率（f32 の underflow）";
+                lin_elem(
+                    [v, sba_str * y32[ii] * y32[jj], v.abs(), 1.0, coeff],
+                    FLAG_WHAT,
+                    || rescue(CeLinKind::X, ii, jj, FLAG_WHAT),
                 )?;
             }
         }
         return Ok(());
     }
     // 非対角 `−s_b·A·y_i·y_j` は単項で `m == |v|`。`coeff` が相対の半分を超える長い軸のときだけ
-    // 絶対判定に落ちるので、最大の積（上位 2 クラス）で確かめる。
-    cancel_check(
-        sba * top1 * top2,
-        sba * top1 * top2,
-        1.0,
-        coeff,
-        "CrossEntropy: Softmax の非対角の曲率",
-    )
+    // 絶対判定に落ちるので、最大の積（上位 2 クラス）で確かめる。単項の積は大きさに対して単調なので、最大の積が
+    // 通れば全要素が通る（従来の速い経路。受理は変えない）。
+    const OFF_WHAT: &str = "CrossEntropy: Softmax の非対角の曲率";
+    let top_v = sba * top1 * top2;
+    if judge::struct_check(top_v, top_v, top_v, 1.0, coeff, OFF_WHAT, invalid).is_ok() {
+        return Ok(());
+    }
+    // 最大の積が拒否された。`Lin` を使えるテンソルでは、上位 2 クラスの近似ではなく全非対角を要素ごとに評価し直し
+    // （従来の見積り → 通らなければ `Lin` の上界）、1 要素でも両方で拒否されれば従来のエラーを返す。受理は全要素を
+    // 確かめた場合に限るので、従来の受理が拒否へ反転することはない（設計 §82.11）。
+    if lin.is_some_and(|l| l.off) {
+        let mut all_ok = true;
+        'scan: for jj in 0..c {
+            for ii in 0..c {
+                if ii == jj {
+                    continue;
+                }
+                let v = sba * ys[ii] * ys[jj];
+                if judge::struct_check(v, v, v, 1.0, coeff, OFF_WHAT, invalid).is_ok() {
+                    continue;
+                }
+                if !rescue(CeLinKind::X, ii, jj, OFF_WHAT) {
+                    all_ok = false;
+                    break 'scan;
+                }
+            }
+        }
+        if all_ok {
+            return Ok(());
+        }
+    }
+    cancel_check(top_v, top_v, 1.0, coeff, OFF_WHAT)
 }
 
 // ---------------------------------------------------------------------------------
@@ -1734,7 +1975,7 @@ fn cos_use_lin(n: usize, d: usize) -> bool {
 /// どちらの見積りも f32 構造の誤差の上界として独立に健全なので、片方が閾値内なら REQ-2 の判定は成り立つ。
 /// 従来の受理を拒否へ反転させることは構造的に起きない（拒否範囲は従来以下。tolerance 定数は不変）。
 /// 最終的に拒否するときだけ計測の記録を積む（`vals = [v, v_str, m, scale, coeff]`）。
-fn cos_elem(
+fn lin_elem(
     vals: [f64; 5],
     what: &str,
     rescue: impl FnOnce() -> bool,
@@ -1853,7 +2094,7 @@ impl Drop for CosLinState {
 /// forward の f64 参照と f32 再現は総称関数 [`cos_fwd`] で組む（#4090）。
 ///
 /// **`Lin` の上界による救済（#4091・設計 §82.8）**: 上の見積り（`coeff·M`）が拒否した要素だけ、丸めの一次伝播
-/// [`Lin`] の上界（[`CosLinState`]）で評価し直し、閾値内なら受理する（[`cos_elem`]）。どちらの見積りも独立に健全
+/// [`Lin`] の上界（[`CosLinState`]）で評価し直し、閾値内なら受理する（[`lin_elem`]）。どちらの見積りも独立に健全
 /// なので片方が通れば REQ-2 の判定は成り立ち、従来の受理を拒否へ変えることは構造的に起きない（判定は緩めず、
 /// 過剰な拒否を減らす向きだけ）。`lin = Some` はテンソル単位の条件 [`cos_use_lin`]（走査量と事象数の上限）を
 /// 満たすときだけで、満たさないテンソルは従来の見積りのまま。`fast_ok` の速い経路・`flag` の行は変えていない。
@@ -1973,7 +2214,7 @@ fn cosine_cancel_check(
             // g への二階（`inner_j`）。g 経路は `s_b` を通らないので `rho` は掛けない。
             let gv = rf.g_entry(j);
             const G_WHAT: &str = "Cosine: g への二階（b'/den − cos·a'/m' の差し引き）";
-            cos_elem(
+            lin_elem(
                 [
                     gv,
                     if flag { st.g_entry(j) } else { gv },
@@ -1994,7 +2235,7 @@ fn cosine_cancel_check(
                     let v = rf.own_entry(cr, i, j);
                     const OWN_WHAT: &str =
                         "Cosine: 同じ側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）";
-                    cos_elem(
+                    lin_elem(
                         [
                             v,
                             if flag {
@@ -2016,7 +2257,7 @@ fn cosine_cancel_check(
                     let v = rf.cross_entry(cr, i, j);
                     const CROSS_WHAT: &str =
                         "Cosine: 相手側の二階（ε の吸収・平行に近い行の相殺・f32 の underflow）";
-                    cos_elem(
+                    lin_elem(
                         [
                             v,
                             if flag {
