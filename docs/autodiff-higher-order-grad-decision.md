@@ -7081,6 +7081,100 @@ tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 - 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。Linux x86_64 の値で代替しない。
 - 不変: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_POWF_Z_MAX`・`entry_check_lin` と `Lin` の意味論・`Num` の trait・`rounding_coeff`・判定・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ・Cosine と CE の判定。
 
+### 82.13 #4096: Triplet の判定を `Lin` の上界へ切り替える
+
+#### 82.13.0 位置づけ
+
+親 #4071 の Triplet 系の 2 段目（Cosine の §82.8、CE・CEWO の §82.11 と同型）。承認は #4071 の起票の範囲に限り、上乗せしない。実際に得ていない承認は主張しない。
+
+**結論（先に）**: 判定は、従来の見積りが拒否した要素だけ `Lin` の上界で救う形に配線した（either 受理）。#4089 が選んだ 5 候補（§82.4）のうち、**d=64 の swap あり p=3 と p=1.5 の 2 件は受理に変わった**。残る 3 件は拒否のままで、理由は 82.13.3 に実測で書く。AC1（5 候補の受理）は一部未達で、判定を緩めて通すことはしていない。旧受理 → 新拒否は構造上 0 件で、計測でも 0 件だった。
+
+#### 82.13.1 実装（`crates/autodiff/src/create_graph/loss_class.rs`）
+
+- **写しの分割**: #4095 の test 限定 `tri_rev_pair`／`tri_rev` を、seed 部（`tri_pair_seed`・`tri_seed`。ペア別の上流・swap の mask・`g` への二階 `W_o[j]`）とレーン部（`tri_pair_lane`・`tri_x`。要素 1 つ分）に分け、本番から呼べる形にした。`TriSetup`・`tri_v`・`tri_setup_fwds`・`tri_core` の `#[cfg(test)]` を外し、`TriFwd` の `expect(dead_code)` を除いた。演算の順序は #4095 と同じで、`tri_rev`・`triplet_model_rows_f32`・`triplet_lin_rows` は seed 部とレーン部の合成として test 限定で残る（#4095 の soundness 掃引 2 件・bit 一致の錠は無変更で通る）。`TriSetup` の構築は `tri_setup_row`（`pair_info` の結果を読む）に寄せ、test の `triplet_setup` はそれを包むだけにした。
+- **either 受理**: `triplet_cancel_check` の `g` への二階と 9 ブロックの要素の `struct_check` を、`lin_elem`（Cosine・CE と共用）に置き換えた。従来の見積りを先に評価し、拒否した要素だけ `TriLinState` の `entry_check_lin` を評価する。`fast_ok` の速い経路・`flag` の式・`pair_info`・`coeff` の式・`triplet_pair_row`（`dg32` の `p32 − 2.0` を含む）・エラー文面・`triplet_cgrad` の子テープの構造は変えていない。従来の受理は救済を通らないので、旧受理 → 新拒否は構造的に 0 件。
+- **`TriLinState`**: forward（ペアごとに `tri_fwd::<Lin>` と `tri_fwd::<f32>`）は行で最初に従来の見積りが拒否した要素で 1 回だけ作る。seed のスカラーは `(o, j)` が変わるたびに作り直し、要素ごとの値は作ってすぐ `lin_truncate` で戻す（`entry_check_lin` は判定時点の全体の事象数を余裕係数に使うため）。`Drop` で領域を解放する。`f32` 側はカーネルどおりに写したモデルで、本番の `dg32`（`p32 − 2.0`）は使わないため、`Lin` の健全性は指数の食い違いに依らない。`rho` は掛けない（Mean の `g/n` の丸めはモデルの `input(g).over(k(n))` が運ぶ）。
+- **適用条件 `tri_lin_ctx(g, mean_n, n_rows, d, swap)`**（テンソル単位・2 段階）: `16·tri_lin_events_max·u < 0.01` かつ `n_rows·tri_lin_cost_g ≤ LIN_BUDGET` のとき `Some`（`g` の救済）。さらに `n_rows·(cost_g + cost_x) ≤ LIN_BUDGET` のときだけ `x = true`（9 ブロックの要素の救済）。`tri_lin_events_max = 8·pairs·d + 120`、`tri_lin_cost_g = (30 + 3·18)·pairs·d² + 3000`、`tri_lin_cost_x = 90·d³ + 3000`（pairs は swap で 3、なしで 2）。`n_rows` は活性な行の数。`LIN_BUDGET`・`JUDGE_BUDGET` の値は変えていない。
+- **予算超過の扱い**: §82.11 と同じく、上限を超えたら **`Lin` を使わない**形で守る（従来の判定がそのまま残る）。`judge_budget` で新たに `Err` を返す形は採らない（従来の受理を拒否に変えうるため）。
+- **`settle` は採らなかった**: `settle` は係数列を短くするが、事象を 1 つ足すので事象数を減らす手段にならない。ハブ値（`ssum`・`norm`）に掛けると `1 − q^p` の打ち消しの相関を失って上界が広がるおそれがある。`settle` なしでも、候補の d=512 は `g` の救済の予算内に収まる（`cost_g` 4.4e7 ≤ 2^26）ため不要と判断した。
+- **救済しない行**（従来の判定が残る。§82.12.5 の「上界を持たない行は常に拒否か従来判定へ戻すか」は **従来判定へ戻す**に決めた）:
+  - 生きているペアの `info.zero`、差分の f32 再構成の符号が f64 の差分の符号と食い違うレーン（`tri_setup_row` が `None`）。
+  - **`u = rec·inv` が 0 へ underflow して `sa ≠ sg` になるレーンがある行（一般の p。`TriSetup::rescuable`）**。実装中に統合テスト `triplet_scaled_component_underflow_is_rejected_or_exact`（差分 `[1e10, 1e10, 1e-40]`・p=2.1・上流 `1e12`）が、`rescuable` なしの版で「拒否されるべき入力が受理された」と落ちて見つかった。モデルは `sa` を f32 の値から取るため、離散量ごと「その成分の曲率が 0」の値を作り、`Lin.v` も 0 になって f32 の値と一致してしまう。真の曲率は f64 の符号 `sg` の側で非ゼロ（約 7.65e-4）で、`Lin` の上界はそのずれを覆えない。#4095 の soundness 掃引は `Lin.v` と f32 の値の差だけを見るため、この型を検出できなかった。`sa ≠ sg` の行は救済しないことで閉じた。p=2 の構造は `sa` を使わず `u/N` が連続なので対象外。
+  - 上界を持たない `Lin`（`powf_bounded` の域外・非正規数域・巨大な p）は NaN の係数になり `entry_check_lin` が拒否する。救済は偽になり従来の判定が残る。
+  - NaN の行は従来どおり判定の前に `continue` する。
+  - どれも新しい受理も新しい拒否も生まない。
+
+#### 82.13.2 実測（CPU・x86_64 Linux・rustc 1.98.1・`--release`。1 `Rf` 反復 = 3.45 ns〈§80.5〉で換算。`triplet_lin_cost_profile`）
+
+d ∈ {2, 8, 32, 64, 128, 256, 512} × p ∈ {2, 1.5, 3, 10} × swap の 56 点。seed を 8 本取り、`g`（seed×出力ごとに 1 要素）と 9 ブロックの要素（seed×出力×入力×レーンごと）の時間を別々に測って全体に換算した（3 回の最小）。
+
+| 項目 | 実測 | 見積り式 |
+|---|---|---|
+| forward の事象数 | p≠2 で `8·pairs·d + 4〜6`、p=2 で `5·pairs·d + 4〜6`（d=512: noswap 8196〈p≠2〉・5124〈p=2〉、swap 12294・7686） | `8·pairs·d + 120`（判定時の最大は forward + 最大 43） |
+| forward の時間 | d=64 で 約 4e4〜1.7e5、d=512 で 約 4.7e6〜2.2e7 | `30·pairs·d²` |
+| `g` の全要素（forward 込み） | d=64 で 約 3e5〜4.4e5、d=512 で 約 2.4e7〜4.5e7 | `(30+54)·pairs·d² + 3000` が全点を覆う |
+| 9 ブロックの全要素 | d=8 で 約 4.2e4〜4.7e4、d=64 で 約 1.0e7〜1.5e7、d=512 で 約 4.7e9〜7.5e9 | `90·d³ + 3000` が全点を覆う |
+
+- `16·N·u < 0.01` は事象数の上界で `pairs·d` が約 1300 まで。実際に効く上限は `g` の走査量で、行数 1 の noswap で d ≤ 631、`x` まで許すのは d ≤ 約 89。`tri_use_lin_boundaries` が 2 段の独立性と境界を固定する。
+- 公開経路の判定時間（`triplet_lin_public_judge_time`・5 回の最小）: 候補 d=64 の 4 件は 0.0003〜0.0007 秒（旧判定は 0.0000 秒）、d=512 は 0.019 秒（旧 0.0002 秒）。§83.1 の水準（0.5 秒未満）に収まる。
+- 実測値は 3 回の最小で揺れがある（±10〜30%）。見積り式は測った全点を覆う向きにしてあるが、再計測で境界の点が動きうる。
+
+#### 82.13.3 拒否範囲の変化
+
+| 候補（§82.4） | 旧の余裕 | `Lin` の最大 `err/閾値`（全 seed・`g` と 9 ブロック） | 本番の判定 |
+|---|---|---|---|
+| d=64・r=1e-1・p=3・swap なし | 7.04 | 1.12（37056 要素のうち 1 要素が拒否） | 拒否のまま（`coeff·m` のみ） |
+| d=64・r=1e-1・p=3・swap あり | 4.22 | 0.66 | **受理に変更**（REQ-2 比 x 1.7e-3・g 2.4e-4） |
+| d=512・r=1e-1・p=2・swap なし | 1.00（`g` への二階） | 0.146（標本 16 seed） | 拒否のまま（`g` は救済できるが、9 ブロックの要素の救済走査が走査量の上限を超える。拒否は 9 ブロック側に移り余裕 1.57） |
+| d=64・r=1e-3・p=1.5・swap なし | 2.48 | 0.42 | **受理に変更**（REQ-2 比 x 2.0e-2・g 5.1e-4） |
+| d=64・r=1e-6・p=10・swap なし（`flag` 経路） | 55.4 | 7.27（7 要素が拒否） | 拒否のまま（`coeff·m` のみ・`flag`） |
+
+- 理由（拒否のまま 3 件）: いずれも実際の f32 の二階は REQ-2 の閾値の 1/4 以内で一致している（`loss_class_followup_candidates_are_req2_within_f64`）。(1) 1 件目は 37056 要素のうち 1 要素だけ `Lin` の上界が閾値をわずかに超える（最大 `err/閾値` 1.12。どの項が支配的かは未解析）。(2) 3 件目は、d=512 の 9 ブロックの全要素の `Lin` 走査が約 5e9 反復で `LIN_BUDGET`（2^26）の 70 倍超になるため行わない。`LIN_BUDGET` の見直しか要素あたりの演算の削減が要る。(3) 5 件目は、p=10 で微小成分の `|u|^p` が f32 の下限付近まで小さくなる行で、`Lin` の上界が閾値を超える要素が 7 つ残る。`triplet_followup_candidates_exceed_lin_bound` が 1・5 件目の全 seed 走査と 3 件目の予算の段を固定する。
+- 旧判定／新判定の公開経路の比較（`triplet_lin_switch_rejection_delta_measurement`。§82.2 の 240 行）: 旧拒否 215 行 → 新拒否 192 行。**「旧受理 → 新拒否」は 0 件**。「旧拒否 → 新受理」は 23 行（d=2・8・64 の p=2・3・1.5 の余裕 0.1・0.001・1e-6 の一部）で、全件の REQ-2 比は x・g とも 1 未満（通常テスト版 `triplet_lin_flipped_rows_match_f64` が d ≤ 64 の行で固定する）。
+- 複数行・Mean・eps ≠ 0・swap（`triplet_lin_mean_eps_multi_row_never_flip_accept_to_reject`。n=3 の 576 通り）: 旧受理 89 → 新拒否 0。旧拒否 → 新受理は 80 通り（この範囲は閉じた式との突合ができないため、受理の正しさは soundness 掃引と単一行の突合に依る）。swap の `an_coeff` が中間になる入力は専用の行を足していない。
+- Cosine・CE の比較は `FORCE_OLD` を共有しても変わらない（各テストが無変更で通る）。
+
+#### 82.13.4 テスト・変異確認
+
+- 更新: `loss_class_followup_candidates_are_req2_within_f64`（2 件は受理、3 件は拒否のまま。REQ-2 比 < 0.25・参照の不確かさ < 5% は全件で維持）。
+- 追加: `triplet_lin_accepts_rows_rejected_by_coeff_bound_and_matches_f64`、`triplet_lin_events_stay_within_bound`、`tri_use_lin_boundaries`、`triplet_lin_mean_eps_multi_row_never_flip_accept_to_reject`、`triplet_lin_sign_mismatch_and_zero_rows_are_not_rescued`、`triplet_lin_underflowed_sign_rows_are_not_rescuable`、`triplet_lin_unbounded_rows_keep_previous_verdict`、`triplet_followup_candidates_exceed_lin_bound`、`triplet_lin_flipped_rows_match_f64`、計測 `triplet_lin_cost_profile`・`triplet_lin_followup_measurement`・`triplet_lin_switch_rejection_delta_measurement`・`triplet_lin_public_judge_time`（`#[ignore]`・`--release`）。
+- 無変更で通る: #4095 の錠（`lin_bound_covers_f32_deviation_for_triplet_sweep`・`..._underflow_rows`・`triplet_f32_model_stays_close_to_hand_built_structure`・`triplet_pair_row_generic_matches_previous_formulas`）、`existing_rejection_probes_stay_rejected_and_truly_fail_req2`、`triplet_hand_built_structure_matches_public_path`、`triplet_closed_form_matches_f64_central_difference`、Cosine・CE の全テスト、統合テスト `create_graph_loss_class.rs` の全件。
+- 変異確認（手動・コミットなし。いずれも元に戻して全テストが通ることを確かめた）:
+
+| 変異 | 失敗したテスト |
+|---|---|
+| `Lin::bound` を常に 0 | soundness 掃引（Triplet の 2 件・Cosine の 2 件・CE の 2 件）、`triplet_followup_candidates_exceed_lin_bound`、`triplet_lin_unbounded_rows_keep_previous_verdict`、`loss_class_followup_candidates_are_req2_within_f64`、統合テスト `cosine_epsilon_absorption_second_order_is_rejected_or_exact`。**統合テストの Triplet のプローブは失敗しなかった**（下の表のとおり前段で拒否されるか、相殺判定の段でも `|V_str − V|` の項で拒否されるため）。上界の項への感度は soundness 掃引と候補の固定テストが担う |
+| 救済（`TriLinState::ok`）を常に真 | `triplet_followup_candidates_exceed_lin_bound`、`triplet_lin_flipped_rows_match_f64`、`triplet_lin_unbounded_rows_keep_previous_verdict`、`loss_class_followup_candidates_are_req2_within_f64`、統合テスト `triplet_dominant_component_curvature_is_rejected_or_exact` |
+| `TriSetup::rescuable` を常に真 | `triplet_lin_underflowed_sign_rows_are_not_rescuable`、統合テスト `triplet_scaled_component_underflow_is_rejected_or_exact` |
+
+- AC2 の既存の拒否プローブ 9 件（統合テスト）が拒否される段。相殺判定に届く 2 件は `lin_elem` の最終拒否の記録で確認し、残る 7 件は `lin_elem` に届かない（最終拒否の記録なし）ことを確認した。前段の内訳（`pair_info`・`stage`）は各テストの doc コメントと拒否文面に依る:
+
+| プローブ | 拒否される段 |
+|---|---|
+| `triplet_cancellation_in_f32_reconstruction_is_rejected`・`triplet_f32_reconstruction_never_flips_sign_and_collapse_is_rejected` | `pair_info`（再構成の桁落ち・符号。相殺判定の前） |
+| `triplet_p_between_1_and_2_tiny_component_is_rejected` | `pair_info`（1<p<2 で差分 0 のレーン） |
+| `triplet_huge_p_norm_collapse_is_rejected`・`triplet_large_p_f32_rounding_underflow_is_rejected` | `pair_info`（`|u|^p` の和の下限・norm の f32 丸め） |
+| `triplet_inverse_scale_second_order_overflow_is_rejected`・`triplet_large_p_f32_pow_overflow_is_rejected` | `stage`（f32 範囲を超える段） |
+| `triplet_dominant_component_curvature_is_rejected_or_exact` | 相殺判定（`二階` の要素。`Lin` の救済でも通らず拒否、受理されるスケールは閉形式と一致） |
+| `triplet_scaled_component_underflow_is_rejected_or_exact` | 相殺判定（`二階` の要素。`u` の underflow で `rescuable` が偽になり救済されない） |
+
+- 前段（`pair_info`・`stage`）で拒否されるプローブは救済の変異に反応しない。受理に変わる側に動いたテストの assert は緩めていない。
+
+#### 82.13.5 後続候補（Issue は未起票。起票は所有者承認後）
+
+- `dg32` の指数の食い違い（`p32 − 2.0` と `(p32 − 1) − 1`）の是正。判定が変わるため所有者判断。本イシューは `f32` 側をカーネルどおりのモデルで取り、`Lin` の健全性が依らない形にした。
+- `Lin::total` の和・累乗の上界の精密化（契約の変更）。拒否のまま残る 1 件目（上界の項がわずかに超える）の受理に変える手段になりうる。
+- `LIN_BUDGET` の見直しか要素あたりの `Lin` 演算の削減（d=512 の 9 ブロックの要素の救済走査を本番に到達させる）。
+- 既存の `flag` 行の O(d²) の走査（f64）への走査量の上限の導入（受理 → 拒否になりうるため所有者判断）。
+- `settle` によるハブ値の走査量の削減（本イシューでは採らなかった。採るときは soundness 掃引が `settle` を含む本番の経路を覆うこと）。
+- `rescuable` の対象の見直し（`sa ≠ sg` の行でも、`Lin` が離散量の切り替えを事象として運ぶ形にできれば救済できる。`Lin` の意味論の変更を伴う）。
+
+#### 82.13.6 未実測・変えていないもの
+
+- 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。Linux x86_64 の値で代替しない。
+- 不変: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_POWF_Z_MAX`・`entry_check_lin` と `Lin` の意味論・`Num` の trait・`rounding_coeff`・`coeff` の式・`dg32`・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ・Cosine と CE の判定。
+- §82.12.5 の申し送り 4 点の決着: (1) `settle` と走査量の上限 → `settle` は採らず、`tri_lin_ctx` の 2 段の予算で守る（82.13.1）。(2) `dg32` → 変えない（`f32` 側はカーネルどおりのモデル。82.13.5）。(3) Mean の `rho` → 掛けない（モデルが `g/n` の丸めを運ぶ。`triplet_lin_mean_eps_multi_row_never_flip_accept_to_reject` で反転 0 件）。(4) 上界を持たない行 → 従来判定へ戻す（82.13.1）。
+
 ## 83. 計測・設計記録（親 #4072。create_graph の総括判定の走査量の上限 `JUDGE_BUDGET` の見直し）
 
 ### 83.0 位置づけ

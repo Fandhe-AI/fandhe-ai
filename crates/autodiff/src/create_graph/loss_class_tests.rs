@@ -1542,8 +1542,8 @@ fn cosine_followup_candidates() -> Vec<CosCase> {
     ]
 }
 
-/// 後続の Triplet の切り替え（#4095・#4096）で受理に変える入力。最後の 1 件は `flag` 経路（f32 再現値で
-/// 組む経路）で拒否される入力。
+/// 後続の Triplet の切り替え（#4095・#4096）で受理に変える入力（#4096 で k=1・k=3 の 2 件が受理に変わった。残る 3 件は
+/// 拒否のまま。最後の 1 件は `flag` 経路〈f32 再現値で組む経路〉で拒否される入力）。
 fn triplet_followup_candidates() -> Vec<TriCase> {
     let mk = |d, ratio, p, swap, exp| TriCase {
         d,
@@ -1598,9 +1598,19 @@ fn loss_class_followup_candidates_are_req2_within_f64() {
     for c in cosine_followup_candidates() {
         check(&format!("{c:?}"), c.measure(), false);
     }
+    // Triplet（#4096）: d=64 の swap あり p=3 と p=1.5 の 2 件は `Lin` の上界で受理に変わった。残る 3 件は拒否のまま
+    // （k=0 は 1 要素だけ上界が閾値を超える、k=2 は 9 ブロックの要素の救済走査が走査量の上限を超える、k=4 は `flag` 行で
+    // 上界が閾値を超える要素が複数残る。設計 §82.13.3）。
     for (k, c) in triplet_followup_candidates().into_iter().enumerate() {
         assert_eq!(c.coefs().1 == 1.0, c.swap, "{c:?}: swap ありは c_pn を通す");
-        check(&format!("{c:?}"), c.measure(), k == 4);
+        let name = format!("{c:?}");
+        let m = c.measure();
+        if k == 1 || k == 3 {
+            assert_eq!(m.verdict, Verdict::Accept, "{name}: Lin の上界で受理");
+            req2(&name, m);
+        } else {
+            check(&name, m, k == 4);
+        }
     }
 }
 
@@ -3573,4 +3583,546 @@ fn triplet_lin_candidates_measurement() {
             per_seed
         );
     }
+}
+// =====================================================================================
+// #4096: Triplet の判定を `Lin` の上界へ切り替える（either 受理。設計 §82.13）
+// =====================================================================================
+
+/// `TriCase` の行を `Lin` の判定（[`TriLinState`]）で走査する（計測用。判定と同じ状態を使い、`entry_check_lin` と同じ式で
+/// `err/閾値` も出す）。`with_x` なら 9 ブロックの全レーン（`seed_list` の各 `j` で `3×3×d` 要素）も評価する。`g` は
+/// 出力 3 つ × `seed_list`。戻り値は走査結果と forward にかかった秒数。前段で拒否される入力・救済しない行は `None`。
+fn tri_lin_scan_timed(
+    c: &TriCase,
+    mean_n: Option<usize>,
+    seed_list: &[usize],
+    with_x: bool,
+) -> Option<(LinScan, f64)> {
+    use super::super::lin::{LIN_U, lin_events, lin_truncate};
+    let rows = c.inputs();
+    let up = (f64::from(pow2(c.exp)), mean_n);
+    let setup = triplet_setup((&rows.0, &rows.1, &rows.2), 0.0, c.p, c.swap, up)?;
+    let t0 = std::time::Instant::now();
+    let mut st = TriLinState::new(setup);
+    let fwd_secs = t0.elapsed().as_secs_f64();
+    let mut out = LinScan {
+        fwd_events: lin_events(),
+        ..LinScan::default()
+    };
+    for &j in seed_list {
+        for o in 0..3 {
+            let (mark, sa, sb) = st.seed(o, j);
+            let mut visit = |l: Lin, s: f32| {
+                let slack = 16.0 * lin_events() as f64 * LIN_U;
+                let err = (f64::from(s) - l.v).abs() + l.bound() * (1.0 + slack);
+                let thr = ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * l.v.abs());
+                out.checked += 1;
+                out.max_events = out.max_events.max(lin_events());
+                let m = err / thr;
+                // 非有限の上界（`Lin` の契約の外）は拒否として数える。
+                if !m.is_finite() || m >= 1.0 || slack >= 0.01 {
+                    out.rejected += 1;
+                }
+                if m.is_finite() {
+                    out.max_margin = out.max_margin.max(m);
+                }
+            };
+            visit(sa.g, sb.g);
+            if with_x {
+                for wrt in 0..3 {
+                    for i in 0..c.d {
+                        let l = tri_x(&st.st, &st.lin, &sa, wrt, (i, j));
+                        let s = tri_x(&st.st, &st.f32m, &sb, wrt, (i, j));
+                        visit(l, s);
+                        lin_truncate(mark);
+                    }
+                }
+            }
+        }
+    }
+    out.secs = t0.elapsed().as_secs_f64();
+    Some((out, fwd_secs))
+}
+
+/// 旧判定（`Lin` を使わない）の公開経路の verdict。
+fn public_old_tri(c: &TriCase) -> Verdict {
+    probe::FORCE_OLD.with(|f| f.set(true));
+    let v = c.public().0;
+    probe::FORCE_OLD.with(|f| f.set(false));
+    v
+}
+
+/// `LINTRICAND`: §82.4 の候補について旧判定・新判定の verdict と、`Lin` の全 seed 走査（`g` と 9 ブロック）の最大
+/// `err/閾値`・拒否要素数を出す（d=512 は seed を間引く）。
+/// `cargo test -p fandhe-ai-autodiff --release --lib triplet_lin_followup_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn triplet_lin_followup_measurement() {
+    for c in triplet_followup_candidates() {
+        let old = public_old_tri(&c);
+        let m = c.measure();
+        let sd: Vec<usize> = if c.d > 100 {
+            (0..c.d).step_by(c.d / 16).collect()
+        } else {
+            (0..c.d).collect()
+        };
+        let scan = tri_lin_scan_timed(&c, None, &sd, true).map(|(s, _)| s);
+        eprintln!(
+            "LINTRICAND {c:?} old={old:?} new={:?} x={:?} g={:?} scan={scan:?}",
+            m.verdict, m.x, m.g
+        );
+    }
+}
+
+/// `LINTRICOST`: 見積り定数を決める計測。d × p × swap で forward の事象数・時間、`g` の要素あたりの時間、9 ブロックの
+/// 要素あたりの時間を `Rf` の 1 反復（3.45 ns。§80.5）相当に直して出す。
+/// `cargo test -p fandhe-ai-autodiff --release --lib triplet_lin_cost_profile -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn triplet_lin_cost_profile() {
+    const RF: f64 = 3.45e-9;
+    for swap in [false, true] {
+        for p in [2.0f32, 1.5, 3.0, 10.0] {
+            for d in [2usize, 8, 32, 64, 128, 256, 512] {
+                let case = TriCase {
+                    d,
+                    ratio: 0.1,
+                    p,
+                    swap,
+                    exp: 0,
+                };
+                let sd: Vec<usize> = (0..8).map(|k| k * d / 8).collect();
+                let mut best = [f64::MAX; 3];
+                let mut maxev = 0;
+                let mut fwd_ev = 0;
+                let mut ok = true;
+                for _ in 0..3 {
+                    let Some((g, f)) = tri_lin_scan_timed(&case, None, &sd, false) else {
+                        ok = false;
+                        break;
+                    };
+                    let Some((x, _)) = tri_lin_scan_timed(&case, None, &sd, true) else {
+                        ok = false;
+                        break;
+                    };
+                    best[0] = best[0].min(f);
+                    best[1] = best[1].min((g.secs - f) / (sd.len() * 3) as f64);
+                    best[2] = best[2].min((x.secs - g.secs) / (sd.len() * 3 * 3 * d) as f64);
+                    maxev = maxev.max(x.max_events).max(g.max_events);
+                    fwd_ev = g.fwd_events;
+                }
+                if !ok {
+                    eprintln!("LINTRICOST d={d} p={p} swap={swap} setup 不可");
+                    continue;
+                }
+                let (fwd_it, g_it, x_it) = (best[0] / RF, best[1] / RF, best[2] / RF);
+                eprintln!(
+                    "LINTRICOST d={d} p={p} swap={swap} fwd_events={fwd_ev} max_events={maxev} bound_events={} fwd_iter={fwd_it:.3e} g_iter/elem={g_it:.3e} x_iter/elem={x_it:.3e} est_g_total={:.3e} _={:.1} est_x_total={:.3e} meas_g_total={:.3e} meas_x_total={:.3e}",
+                    tri_lin_events_max(d, swap),
+                    tri_lin_cost_g(d, swap) as f64,
+                    0.0,
+                    tri_lin_cost_x(d) as f64,
+                    fwd_it + g_it * (3 * d) as f64,
+                    x_it * (9 * d * d) as f64,
+                );
+            }
+        }
+    }
+}
+/// 判定時の事象数が `tri_lin_events_max(d, swap)` に収まる（Sum・Mean、p ∈ {2, 1.5, 3, 10}、swap の有無）。`tri_lin_ctx` の
+/// 余裕係数の条件（`16·事象数·u < 0.01`）がこの上界に依るので、実測が上界を超えたらここで落ちる。
+#[test]
+fn triplet_lin_events_stay_within_bound() {
+    let mut worst_fixed = 0usize;
+    let mut checked = 0usize;
+    for swap in [false, true] {
+        let pairs = if swap { 3 } else { 2 };
+        for p in [2.0f32, 1.5, 3.0, 10.0] {
+            for d in [2usize, 3, 8, 33, 64] {
+                for ratio in [1e-1f32, 1e-3] {
+                    for mean_n in [None, Some(3usize)] {
+                        let case = TriCase {
+                            d,
+                            ratio,
+                            p,
+                            swap,
+                            exp: 7,
+                        };
+                        let sd = seeds(d, &[d / 2]);
+                        let Some((r, _)) = tri_lin_scan_timed(&case, mean_n, &sd, true) else {
+                            continue;
+                        };
+                        checked += 1;
+                        assert!(
+                            r.max_events <= tri_lin_events_max(d, swap),
+                            "{case:?} mean={mean_n:?}: 事象数 {} が上界 {} 超",
+                            r.max_events,
+                            tri_lin_events_max(d, swap)
+                        );
+                        worst_fixed = worst_fixed.max(
+                            r.max_events
+                                .saturating_sub(TRI_LIN_EVENTS_PER_PAIR_LANE * pairs * d),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 40, "検査した入力が少なすぎる: {checked}");
+    assert!(
+        worst_fixed <= TRI_LIN_EVENTS_FIXED,
+        "定数分 {worst_fixed} が TRI_LIN_EVENTS_FIXED を超える"
+    );
+    eprintln!("LINTRIEV checked={checked} worst_fixed={worst_fixed}");
+}
+
+/// `tri_lin_ctx` の境界: 余裕係数の上限（`16·事象数·u < 0.01`）、`g` の走査量の上限、9 ブロックの要素まで許す走査量の上限
+/// （2 段が独立であること）、テンソル単位の選択（行数が増えると偽）、swap で事象数と走査量が増えること、旧判定の強制。
+#[test]
+fn tri_use_lin_boundaries() {
+    use super::super::lin::{LIN_BUDGET, LIN_U};
+    let some = |n: usize, d: usize, swap: bool| tri_lin_ctx(1.0, None, n, d, swap);
+    let slack_ok = |d: usize, swap: bool| 16.0 * tri_lin_events_max(d, swap) as f64 * LIN_U < 0.01;
+    // 行数 1 で `g` の走査量と余裕係数が収まる最大の d。
+    let dmax = (1..100_000usize)
+        .take_while(|&d| tri_lin_cost_g(d, false) <= LIN_BUDGET && slack_ok(d, false))
+        .last()
+        .unwrap();
+    assert!(some(1, dmax, false).is_some() && some(1, dmax + 1, false).is_none());
+    // 9 ブロックの要素まで許す最大の d は `g` だけの最大以下（別々の条件）。
+    let xmax = (1..=dmax)
+        .take_while(|&d| tri_lin_cost_g(d, false) + tri_lin_cost_x(d) <= LIN_BUDGET)
+        .last()
+        .unwrap();
+    assert!(some(1, xmax, false).is_some_and(|l| l.x));
+    assert!(xmax < dmax, "x の上限は g の上限より小さいはず");
+    assert!(some(1, xmax + 1, false).is_some_and(|l| !l.x));
+    // 行数が増えると走査量が増える（テンソル単位で選ぶ）。
+    assert!(some(1, 64, false).is_some() && some(1_000_000, 64, false).is_none());
+    // 余裕係数を満たさない d は走査量が足りていても選ばない（独立の条件であること）。
+    let d_slack = (1..1_000_000usize).find(|&d| !slack_ok(d, false)).unwrap();
+    assert!(some(1, d_slack, false).is_none());
+    // swap は事象数・走査量が増える。
+    assert!(tri_lin_events_max(64, true) > tri_lin_events_max(64, false));
+    assert!(tri_lin_cost_g(64, true) > tri_lin_cost_g(64, false));
+    // 旧判定の強制（変異確認・比較用）。
+    probe::FORCE_OLD.with(|f| f.set(true));
+    assert!(some(1, 8, false).is_none());
+    probe::FORCE_OLD.with(|f| f.set(false));
+}
+
+/// §82.4 の候補のうち、従来の見積りが `coeff·m` の項だけで拒否していた行を `Lin` の上界が受理に変える（d=64 の
+/// swap あり p=3 と p=1.5）。受理に変えた行の二階が f64 の閉じた式と REQ-2 で一致すること（REQ-2 比 < 1。参照の不確かさ < 5%）。
+#[test]
+fn triplet_lin_accepts_rows_rejected_by_coeff_bound_and_matches_f64() {
+    let mut accepted = 0usize;
+    for (k, c) in triplet_followup_candidates().into_iter().enumerate() {
+        if k != 1 && k != 3 {
+            continue;
+        }
+        match public_old_tri(&c) {
+            Verdict::Cancel { cls, .. } => assert_eq!(cls, "coeff·m のみ", "{c:?}"),
+            v => panic!("{c:?}: 旧判定は coeff·m で拒否するはず: {v:?}"),
+        }
+        let m = c.measure();
+        assert_eq!(
+            m.verdict,
+            Verdict::Accept,
+            "{c:?}: Lin の上界で受理に変わるはず"
+        );
+        for (label, acc) in [("x", m.x), ("g", m.g)] {
+            let a = acc.expect("計測");
+            assert!(a.ratio < 1.0, "{c:?}: {label} の REQ-2 比 {:e}", a.ratio);
+            assert!(a.unc < 0.05, "{c:?}: {label} の参照の不確かさ {:e}", a.unc);
+        }
+        accepted += 1;
+    }
+    assert_eq!(accepted, 2);
+}
+
+/// 拒否のまま残る候補の理由を固定する（設計 §82.13.3）。上界を 0 にする変異では k=0・k=4 が受理に変わり落ちる。
+/// - k=0（d=64・p=3・swap なし）: 全 seed を `Lin` で走査すると 1 要素だけ上界が閾値を超える（実際の二階は REQ-2 内）。
+/// - k=4（d=64・r=1e-6・p=10・`flag` 行）: 閾値を超える要素が複数残る。
+/// - k=2（d=512・p=2）: `g` への二階は救済できるが、9 ブロックの要素の救済走査は走査量の上限を超えるため行わない。
+#[test]
+fn triplet_followup_candidates_exceed_lin_bound() {
+    let cs = triplet_followup_candidates();
+    for k in [0usize, 4] {
+        let c = cs[k];
+        let m = c.measure();
+        assert!(
+            matches!(m.verdict, Verdict::Cancel { .. }),
+            "{c:?}: 拒否のまま: {:?}",
+            m.verdict
+        );
+        let sd: Vec<usize> = (0..c.d).collect();
+        let (scan, _) = tri_lin_scan_timed(&c, None, &sd, true).expect("setup");
+        assert!(
+            scan.rejected >= 1,
+            "{c:?}: Lin の上界が閾値を超える要素が残る: {scan:?}"
+        );
+        assert!(scan.max_margin >= 1.0 || scan.rejected > 0, "{c:?}");
+        // 実際の二階は REQ-2 内（上界の項だけで拒否している）。
+        let x = m.x.expect("計測");
+        assert!(x.ratio < 0.25, "{c:?}: x の REQ-2 比 {:e}", x.ratio);
+    }
+    let c = cs[2];
+    let ctx = tri_lin_ctx(1.0, None, 1, c.d, c.swap).expect("g の救済は走査量内");
+    assert!(
+        !ctx.x,
+        "{c:?}: 9 ブロックの要素の救済は走査量の上限を超える"
+    );
+    assert!(matches!(c.measure().verdict, Verdict::Cancel { .. }));
+}
+
+/// 複数行・Mean・eps ≠ 0 の公開経路（`[n, d]` の 3 つ組）の verdict。`force_old` なら `Lin` を使わない旧判定。
+#[allow(clippy::too_many_arguments)]
+fn tri_multi_verdict(
+    rows: &[(Vec<f32>, Vec<f32>, Vec<f32>)],
+    d: usize,
+    opts: (f32, f32, bool),
+    reduction: Reduction,
+    exp: i32,
+    force_old: bool,
+) -> Verdict {
+    let (eps, p, swap) = opts;
+    let n = rows.len();
+    let mut z0: Vec<f32> = rows.iter().flat_map(|r| r.0.clone()).collect();
+    z0.extend(rows.iter().flat_map(|r| r.1.clone()));
+    z0.extend(rows.iter().flat_map(|r| r.2.clone()));
+    let options = TripletMarginOptions::default()
+        .margin(1000.0)
+        .eps(eps)
+        .p(p)
+        .swap(swap);
+    probe::FORCE_OLD.with(|f| f.set(force_old));
+    let v = run_public(z0, move |tape, zv| {
+        let x = |k: usize| zv.narrow(0, k * n * d, n * d)?.reshape(&[n, d]);
+        let l = x(0)?.triplet_margin_loss(&x(1)?, &x(2)?, &options, reduction)?;
+        l.mul(&tape.var_no_grad(&Tensor::scalar(pow2(exp))))?
+            .sum(None)
+    })
+    .0;
+    probe::FORCE_OLD.with(|f| f.set(false));
+    v
+}
+
+/// Mean・eps ≠ 0・複数行・swap を通しても、旧受理 → 新拒否は 0 件（either 受理の構造的な保証の確認）。
+/// 旧拒否 → 新受理に変わる件数も出す。
+#[test]
+fn triplet_lin_mean_eps_multi_row_never_flip_accept_to_reject() {
+    let mut rng = Rng(0x1357_9bdf_2468_ace0);
+    let (mut total, mut flipped_to_accept, mut old_accept) = (0usize, 0usize, 0usize);
+    for d in [4usize, 16, 64] {
+        for p in [2.0f32, 1.5, 3.0, 10.0] {
+            for swap in [false, true] {
+                for eps in [0.0f32, 1e-4] {
+                    for reduction in [Reduction::Sum, Reduction::Mean] {
+                        for ratio in [1e-1f32, 1e-3, 1e-6] {
+                            for exp in [0i32, 13] {
+                                let rows: Vec<_> = (0..3)
+                                    .map(|_| tri_random_rows(d, ratio, swap, 1.0, &mut rng))
+                                    .collect();
+                                let opts = (eps, p, swap);
+                                let old = tri_multi_verdict(&rows, d, opts, reduction, exp, true);
+                                let new = tri_multi_verdict(&rows, d, opts, reduction, exp, false);
+                                total += 1;
+                                match (
+                                    matches!(old, Verdict::Accept),
+                                    matches!(new, Verdict::Accept),
+                                ) {
+                                    (true, false) => panic!(
+                                        "旧受理 → 新拒否 d={d} p={p} swap={swap} eps={eps} {reduction:?} ratio={ratio} exp={exp}: {new:?}"
+                                    ),
+                                    (true, true) => old_accept += 1,
+                                    (false, true) => flipped_to_accept += 1,
+                                    (false, false) => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(total >= 500, "{total}");
+    assert!(old_accept > 0, "旧受理の入力が無い: {old_accept}");
+    eprintln!(
+        "LINTRIMULTI total={total} old_accept={old_accept} flipped_to_accept={flipped_to_accept}"
+    );
+}
+
+/// 救済しない行（符号が食い違う・全要素 0 のペア）では [`tri_setup_row`] が `None` を返し、従来の判定が残る。
+#[test]
+fn triplet_lin_sign_mismatch_and_zero_rows_are_not_rescued() {
+    let d = 3;
+    let (a, p, n) = (
+        vec![0.0f32; d],
+        vec![-1.0f32, 0.5, 0.25],
+        vec![2.0f32, -0.5, 0.75],
+    );
+    let info = |sign: Vec<f32>, zero: bool| PairInfo {
+        inv_mx: vec![1.0; d],
+        sign,
+        zero: vec![zero; d],
+    };
+    // ap の差分 `a − p = [1, −0.5, −0.25]`、an の差分 `a − n = [−2, 0.5, −0.75]`。
+    let good_ap = info(vec![1.0, -1.0, -1.0], false);
+    let good_an = info(vec![-1.0, 1.0, -1.0], false);
+    let mk = |ap: &PairInfo, an: &PairInfo| {
+        tri_setup_row(
+            (&a, &p, &n),
+            (0.0, 3.0, false),
+            (1.0, None),
+            [Some(ap), Some(an), None],
+            0,
+            0,
+        )
+    };
+    assert!(mk(&good_ap, &good_an).is_some(), "正のプローブ: 救済できる");
+    let flipped = info(vec![1.0, 1.0, -1.0], false);
+    assert!(mk(&flipped, &good_an).is_none(), "符号の食い違い");
+    let zeroed = info(vec![1.0, -1.0, -1.0], true);
+    assert!(mk(&good_ap, &zeroed).is_none(), "全要素 0 のペア");
+    assert!(
+        tri_setup_row(
+            (&a, &p, &n),
+            (0.0, 3.0, true),
+            (1.0, None),
+            [Some(&good_ap), Some(&good_an), None],
+            0,
+            0,
+        )
+        .is_none(),
+        "swap で pn の pair_info が無い"
+    );
+}
+
+/// 上界を持たない `Lin`（巨大な p・非正規数域）の行では、救済が働かず新判定が旧判定と一致する。
+#[test]
+fn triplet_lin_unbounded_rows_keep_previous_verdict() {
+    let mut compared = 0usize;
+    for d in [2usize, 8] {
+        for p in [10.0f32, 50.0] {
+            for ratio in [1e-6f32, 1e-20, 1e-30] {
+                for swap in [false, true] {
+                    let c = TriCase {
+                        d,
+                        ratio,
+                        p,
+                        swap,
+                        exp: 0,
+                    };
+                    let old = public_old_tri(&c);
+                    let new = c.public().0;
+                    if matches!(old, Verdict::Accept) {
+                        assert_eq!(new, Verdict::Accept, "{c:?}");
+                    }
+                    compared += 1;
+                    if p == 50.0 && !matches!(old, Verdict::Accept) {
+                        assert_eq!(new, old, "{c:?}: 上界を持たない行は旧判定のまま");
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared >= 24);
+}
+
+/// `LINTRISW`: §82.2 の Triplet の行（`tri_cases`）について旧判定と新判定の受理・拒否を並べる。「旧受理 → 新拒否」は 0 件
+/// （either 受理の構造的な保証）、「旧拒否 → 新受理」の行は REQ-2 比 < 1 であることを assert する。
+/// `cargo test -p fandhe-ai-autodiff --release --lib triplet_lin_switch_rejection_delta_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn triplet_lin_switch_rejection_delta_measurement() {
+    let (mut total, mut old_rej, mut new_rej, mut flipped) = (0usize, 0usize, 0usize, 0usize);
+    let t0 = std::time::Instant::now();
+    for c in tri_cases() {
+        let old = public_old_tri(&c);
+        let new = c.public().0;
+        total += 1;
+        let (o, n) = (
+            matches!(old, Verdict::Accept),
+            matches!(new, Verdict::Accept),
+        );
+        old_rej += usize::from(!o);
+        new_rej += usize::from(!n);
+        assert!(!(o && !n), "旧受理 → 新拒否 {c:?}: {new:?}");
+        if !o && n {
+            flipped += 1;
+            let m = c.measure();
+            for (label, acc) in [("x", m.x), ("g", m.g)] {
+                let a = acc.expect("計測");
+                assert!(a.ratio < 1.0, "{c:?}: {label} の REQ-2 比 {:e}", a.ratio);
+            }
+            eprintln!("LINTRISW flip {c:?}");
+        }
+    }
+    eprintln!(
+        "LINTRISW total={total} old_reject={old_rej} new_reject={new_rej} flipped_to_accept={flipped} secs={:.1}",
+        t0.elapsed().as_secs_f64()
+    );
+}
+
+/// `LINTRITIME`: 公開経路（`backward_create_graph`）の判定時間。§83.1 の水準（0.5 秒未満）と比べる。
+/// `cargo test -p fandhe-ai-autodiff --release --lib triplet_lin_public_judge_time -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn triplet_lin_public_judge_time() {
+    for c in triplet_followup_candidates() {
+        let mut best = f64::MAX;
+        let mut best_old = f64::MAX;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let _ = c.public();
+            best = best.min(t.elapsed().as_secs_f64());
+            let t = std::time::Instant::now();
+            let _ = public_old_tri(&c);
+            best_old = best_old.min(t.elapsed().as_secs_f64());
+        }
+        eprintln!("LINTRITIME {c:?} new={best:.4}s old={best_old:.4}s");
+    }
+}
+/// `u = rec·inv` が 0 へ underflow して `sa = 0`（f64 の符号 `sg` は非ゼロ）になる行は救済しない（[`TriSetup::rescuable`]）。
+/// モデルは離散量ごと「曲率が 0」の値を作って f32 の値と一致してしまい、真の曲率とのずれを `Lin` の上界が覆えないため。
+/// 統合テスト `triplet_scaled_component_underflow_is_rejected_or_exact` の入力（上流 1e12 倍は拒否）が正本。
+#[test]
+fn triplet_lin_underflowed_sign_rows_are_not_rescuable() {
+    let a = vec![0.0f32; 3];
+    let p = vec![-1e10f32, -1e10, -1e-40];
+    let n = vec![-2e10f32, -1e10, -2e-40];
+    let st = triplet_setup((&a, &p, &n), 0.0, 2.1, false, (1e12, None)).expect("setup は作れる");
+    assert!(!st.rescuable(), "u が 0 へ underflow した行は救済しない");
+    // 正のプローブ: 微小成分が無い同型の行は救済できる。
+    let p2 = vec![-1e10f32, -1e10, -1e4];
+    let n2 = vec![-2e10f32, -1e10, -2e4];
+    let ok = triplet_setup((&a, &p2, &n2), 0.0, 2.1, false, (1.0, None)).expect("setup");
+    assert!(ok.rescuable());
+}
+/// §82.2 の行のうち d ≤ 64 で、旧判定が拒否し新判定が受理に変えた行（旧受理 → 新拒否は 0 件）の二階が f64 の閉じた式と
+/// REQ-2 で一致すること（REQ-2 比 < 1）。`triplet_lin_switch_rejection_delta_measurement`（`--release`・d=512 を含む）の
+/// 通常テスト版。
+#[test]
+fn triplet_lin_flipped_rows_match_f64() {
+    let (mut total, mut flipped) = (0usize, 0usize);
+    for c in tri_cases().into_iter().filter(|c| c.d <= 64) {
+        let old = public_old_tri(&c);
+        let new = c.public().0;
+        total += 1;
+        let (o, n) = (
+            matches!(old, Verdict::Accept),
+            matches!(new, Verdict::Accept),
+        );
+        assert!(!(o && !n), "旧受理 → 新拒否 {c:?}: {new:?}");
+        if !o && n {
+            flipped += 1;
+            let m = c.measure();
+            for (label, acc) in [("x", m.x), ("g", m.g)] {
+                let a = acc.expect("計測");
+                assert!(a.ratio < 1.0, "{c:?}: {label} の REQ-2 比 {:e}", a.ratio);
+                assert!(a.unc < 0.05, "{c:?}: {label} の参照の不確かさ {:e}", a.unc);
+            }
+        }
+    }
+    assert!(total >= 150, "{total}");
+    assert!(flipped >= 10, "受理に変わった行が少なすぎる: {flipped}");
 }
