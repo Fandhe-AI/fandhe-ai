@@ -6778,6 +6778,74 @@ f64 の参照は閉じた式（判定の `v` は使わない）:
 
 tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET` の値・`entry_check_lin` と `Lin` の意味論・`rounding_coeff`・CE／CEWO／Triplet の判定（#4093〜#4096 の担当）・依存・`docs/spec`・公開 API・既存の拒否プローブ。GPU 実機 parity は未実測のまま（CPU の値で代替しない）。
 
+### 82.9 #4092: `Lin` に `exp` の誤差規則を足す
+
+#### 82.9.0 位置づけ
+
+- 親 #4071。損失のクラス軸系（CE・CEWO。`loss_class.rs::cewo_cancel_check`）の softmax は f32 の `exp(x − max)` を使う（`eval.rs::softmax_along`）。後続の #4093・#4094 が CE・CEWO の判定を `Lin` へ移すために、libm の `f32::exp` の誤差の上界を `Lin` で表す規則（`Num::exp_bounded`）を足した。#4084（§81.10）の `powf_bounded` と同じ形である。
+- 仮定は所有者決定 #4083（2026-11-07）をそのまま使い、上乗せしない。CPU の `f32::exp` は結果が正規化数の範囲で 2 ulp 以内（`LIBM_F32_MAX_ULP`。設計値であって実測値ではない）、非正規化数の結果には絶対誤差の項を足す。GPU・aarch64 Linux・macOS は未実測。
+- **本番は未配線**で、既存の判定は 1 件も変わらない（`loss_class.rs`・`judge.rs`・`eval.rs`・統合テストは無変更）。
+- 変えていないもの: tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parity baseline・`STAGE_BOUND_GUARD`・依存（`Cargo.toml`／`Cargo.lock`）・公開 API・`docs/spec`。
+
+#### 82.9.1 規則と根拠
+
+記号: `x = self.v`、`b = self.bound()`（x の誤差の**絶対**上界。`d/dx exp = exp` なので powf の相対誤差ではなく絶対誤差で扱う）、`y = exp(x)`（f64）、`u = 2^-24`。
+
+- **拒否**（上界 NaN の値。NaN の taint は保つ）: x が非有限（`-inf` は f32 で厳密に 0 だが、安全側で拒否する）・`b > LIN_EXP_DELTA_MAX`（NaN も拒否側へ倒す否定形）・`top = |y|·(1+2b)·(1+4u)` が `f32::MAX` 以上・`μ` が非有限。
+- **受理**: x の既存事象への係数は `y`（共有した丸めの打ち消しを保つため余裕は掛けない。`exp(a)/exp(a)` の上界は `≤ 2u` に収まる）。新しい独立事象を 1 つ足す: `μ = LIBM_F32_MAX_ULP·2u·|y|·(1+2b) + LIBM_F32_MAX_ULP·2^-149 + |y|·b²`。
+- **根拠**: `x̂ = x + δ`（`|δ| ≤ b`）なら `exp(x̂) = y·e^δ`。`|δ| ≤ 1` で `|e^δ − 1| ≤ 2|δ|`・`|e^δ − 1 − δ| ≤ δ²`（`(e^z − 1 − z)/z²` は単調増加で z=1 のとき 0.718）。一次の項 `y·δ` は係数 `y`、二次の剰余は `y·b²` で覆う。libm の誤差は f32 の入力 `x̂` に対する厳密値 `exp(x̂)` からのずれで `≤ 2 ulp`。正規化数では `1 ulp ≤ 2u·|w|`、`|w| ≤ y(1+2b)`。非正規化数は `2·2^-149` で覆う。参照の `f64::exp` の誤差（約 `2^-52·y`）は `entry_check_lin` の余裕 `(1+16Nu)` に収まる。
+- **`LIN_EXP_DELTA_MAX = 1/2`** は #4083 に記載のない本イシューの設計値で、**拒否する側にだけ働く**（受理を増やす方向には使わない）。1 ではなく 1/2 にしたのは、真の δ が一次の上界 b を余裕 `(1+16Nu)` の分だけ超えうるためで、`δ²` の剰余の不等式は `|δ| ≤ 1/2` なら約 0.82 倍の余裕がある。`LIN_POWF_Z_MAX = 2^-10` は意味が違う（指数の増幅 Z）ので流用しない。所有者の追認が望ましい。
+- 他の型: `f32`・`f64`・テスト用 `F32Rev` は `exp()`、`LinRef` は上界なし、norm の `Rf` は安全側で上界なし（`m = inf`で `no_inf` が偽になり判定が必ず拒否する。norm は `exp` を使わない）、`Dm` は依存を保つ。VJP の係数は出力 `y` そのものなので勾配用の新メソッドは足していない。
+
+#### 82.9.2 一次資料の確認結果
+
+- glibc 2.42 の配布 tarball（`ftp.gnu.org/gnu/glibc`）の `sysdeps/ieee754/flt-32/e_expf.c` の冒頭コメントは次のとおり（逐語）: 「ULP error: 0.502 (nearest rounding.)」「Wrong count: 170635 (all nearest rounding wrong results with fma.)」「Non-nearest ULP error: 1 (rounded ULP error)」。2 ulp の仮定は、この記載に対して十分に安全側である。
+- `libm-test-ulps` の `exp` の行は**未確認**（取得した tarball の該当パスで見つけられなかった）。実測の環境の glibc は 2.43 で、確認した 2.42 とは版が異なる（`e_expf.c` の記載が 2.43 でも同じかは未確認）。
+
+#### 82.9.3 計測
+
+- 実行環境: x86_64 Linux（glibc 2.43）・rustc 1.98.1・`--release`・CPU は FMA を持つ（x86_64 の glibc は CPU に応じて FMA 版／非 FMA 版の `expf` を選ぶ。この環境は FMA 版側と考えられるが、どちらの実装が選ばれたかは直接確認していない）。ホスト名・パスは記録しない。
+- 総当たり（`exp_ulp_measurement`。`cargo test -p fandhe-ai-autodiff --release --lib exp_ulp_measurement -- --ignored --nocapture`。約 10 秒）: f32 の全 2^32 入力。NaN のビット列 16,777,214 件は結果が NaN であることを確認、`±0 → 1`・`+inf → inf`・`-inf → 0` は厳密に一致。残りの有限 4,278,190,078 件で**最大 0.5016 ulp**（入力 x = -0.0070555876）。参照は `f64::exp`（これも libm 依存で厳密値ではない。f32 の ulp の約 2^-29 の誤差）。
+- 層ごと（件数・最大 ulp・その入力）:
+
+| 層 | 件数 | 最大 ulp | 入力 x |
+|---|---|---|---|
+| 全域（有限・非零） | 4,278,190,078 | 0.5016 | -0.0070555876 |
+| 非正規化数の結果（x ∈ [-103.98, -87.33]） | 2,182,350 | 0.5006 | -87.369 |
+| オーバーフロー近傍（x ≥ 88） | 1,020,264,448 | 0.5013 | 88.542564 |
+| 0 の近く（\|x\| < 2^-10） | 1,962,934,270 | 0.5001 | -0.00096471934 |
+| softmax 実用域（[-30, 0]） | 124,780,545 | 0.5016 | -0.0070555876 |
+| 正の中域（[0, 87)） | 137,232,384 | 0.5016 | 63.069492 |
+
+  overflow（結果が inf）は 25,165,824 件で、すべて x ≥ 88 の層に含まれる。0 への underflow（x < -103.98）は「全域」にだけ含まれる（上表のどの層にも属さない入力は全域のみ）。2 ulp の仮定（実測の約 4 倍の余裕）を超えた入力はなかった。
+- 乱数掃引（`lin_exp_ulp_within_assumption`・各層 2^17 件）は証明ではない。総当たりは「この環境の libm に限った」全数確認である。
+
+#### 82.9.4 未実測
+
+- GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS の `exp` の ulp は**未実測**で、Linux x86_64 の値で代替しない。macOS の libm の精度は仮定のまま。`exp_ulp_measurement` は cfg で絞っていないので、各環境で `--ignored` 実行すれば計測できる。
+- この判定は GPU の値を保証しない。
+
+#### 82.9.5 テスト・変異確認
+
+- テスト（`lin_libm_tests.rs`）: 総当たり計測（`#[ignore]`）・乱数掃引・soundness（`lin_exp_bound_covers_f32_deviation_strata`。6 層 × 2^17 件、偶数件は厳密な入力・奇数件は丸めを伴う入力 `x + d`。受理は 123,343〜131,072 件/層〔全域 130,889〕、**最大比 `dev/bound` = 0.933**、下限 `EXP_RATIO_FLOOR = 0.3`）・合成プログラム（`lin_exp_bound_covers_composed_programs`。softmax の行・CEWO の曲率の形・`exp(a·b)·z`〈受理 9000/9000〉と、相殺で b を上限近くへ広げた入力〈受理 891/1000〉）・決定的なテスト（定義域外の拒否・NaN の taint・`x = 0`・非正規化数の絶対項・`b > LIN_EXP_DELTA_MAX` の拒否と内側の受理・オーバーフロー近傍の拒否・`exp(a)/exp(a)` の打ち消し）。x86_64 Linux glibc 以外では乱数掃引系は既定で `ignore`。
+- 変異確認（手動・コミットなし）:
+
+| 変異 | 失敗したテスト |
+|---|---|
+| 上界を 0（`μ = 0` かつ係数 0） | soundness・合成プログラム・非正規化数・`x = 0`（受入基準 4） |
+| 係数 `y` を 0 | soundness・合成プログラム |
+| `LIBM_F32_MAX_ULP = 0` | exp の掃引・soundness・合成プログラム（powf の同名テストも失敗） |
+| 非正規化数の絶対項を消す | 非正規化数・soundness・合成プログラム |
+| `b²` の項を消す | **失敗なし**（二次の剰余は数式上の余裕で、掃引では実測の偏差に現れない。#4084 と同じく数式上の余裕として残す） |
+
+- 既存の create_graph のテスト・`create_graph_loss_class.rs` の拒否プローブ・`lin_matches_reference_for_random_op_programs`・powf のテストは無変更で通る（`cargo test -p fandhe-ai-autodiff` 全通過）。
+
+#### 82.9.6 後続・申し送り（#4093・#4094）
+
+- 配線した時点で `Num::exp_bounded` の `expect(dead_code)` が `unfulfilled_lint_expectations` になるので外す。
+- マスク付きロジットなどで `-inf` 入力が要るかは配線側の判断（本規則は `-inf` を拒否する）。
+- `lin_group_cost`・`LIN_BUDGET`、事象数 N の増加による `1+16Nu` の余裕（`16Nu ≥ 0.01` の拒否）を、クラス数の大きい softmax で確認する。
+
 ## 83. 計測・設計記録（親 #4072。create_graph の総括判定の走査量の上限 `JUDGE_BUDGET` の見直し）
 
 ### 83.0 位置づけ

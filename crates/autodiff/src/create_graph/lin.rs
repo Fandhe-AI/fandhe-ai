@@ -13,9 +13,9 @@
 //! norm 専用ではない共通モジュールとして切り出した（挙動不変の移動）。norm 専用の `Rf`・`Dm` は
 //! `norm_reparam.rs` に残す。
 //!
-//! 契約: IEEE 754 の正しい丸めを仮定する（GPU の実機は未実測）。ただし [`Num::powf_bounded`] だけは libm の `powf` が
+//! 契約: IEEE 754 の正しい丸めを仮定する（GPU の実機は未実測）。ただし [`Num::powf_bounded`]・[`Num::exp_bounded`] だけは libm の `powf`・`exp` が
 //! 正しい丸めではないため、所有者決定 #4083 の仮定（[`LIBM_F32_MAX_ULP`]・正規化数の範囲で 2 ulp 以内。設計値で実測値ではない。
-//! GPU・aarch64 Linux・macOS は未実測で、この判定は GPU の値を保証しない）を追加で使う（#4084・設計記録 §81.10）。拒否時の文面は `judge.rs` と同じく
+//! GPU・aarch64 Linux・macOS は未実測で、この判定は GPU の値を保証しない）を追加で使う（#4084・#4092・設計記録 §81.10・§82.9）。拒否時の文面は `judge.rs` と同じく
 //! `reject: fn(&str) -> AutodiffError`（[`super::judge::Reject`]）で呼び出し元へ委ね、tolerance 定数
 //! （`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）は変更しない。
 
@@ -73,6 +73,14 @@ pub(super) trait Num: Copy {
     fn pow_grad_bounded(self, e: f64) -> Self {
         self.pow_grad(e)
     }
+    /// 上界つきの `exp`（イシュー #4092・設計記録 §82.9）。`f32`・`f64` は `exp()`、[`Lin`] だけが libm の精度の仮定
+    /// （[`LIBM_F32_MAX_ULP`]）を使った上界を持つ。`norm_reparam.rs` の `Rf` は上界なし（常に拒否）、`Dm` は依存を保つ。
+    /// VJP の係数は出力 `y` そのものなので専用の勾配メソッドはない。
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "#4093・#4094 が配線するまで本番から呼ばれない")
+    )]
+    fn exp_bounded(self) -> Self;
     /// `Sqrt` の VJP 係数 `0.5 / y`（`self` は forward の出力 `y`）。
     fn root_grad(self) -> Self;
     /// ±inf を含まない（NaN は入力の NaN の伝播として通す。`norm_reparam.rs` の `no_inf` 参照）。
@@ -119,6 +127,9 @@ impl Num for f32 {
     }
     fn powf_bounded(self, _e: f64, e_str: f32) -> Self {
         self.powf(e_str)
+    }
+    fn exp_bounded(self) -> Self {
+        self.exp()
     }
     fn root_grad(self) -> Self {
         0.5 / self
@@ -172,6 +183,9 @@ impl Num for f64 {
             e * self.powf(e - 1.0)
         }
     }
+    fn exp_bounded(self) -> Self {
+        self.exp()
+    }
     fn root_grad(self) -> Self {
         0.5 / self
     }
@@ -206,6 +220,7 @@ impl Num for f64 {
 /// 長さの列を値ごとに持つので、WeightNorm はグループの幅が [`LIN_REST_MAX`] 以下のときだけ、SpectralNorm は `sn_use_lin` の条件内（係数列を束ねて走査量を `O(N²)` に抑える）のときだけ使う。
 /// `PowScalar`（`powe`・`pow_grad`）は WeightNorm が使わないので、上界を持たない NaN の値にする（常に拒否）。
 /// 上界が要る呼び出しは `powf_bounded`・`pow_grad_bounded` を使う（#4084。`powe`・`pow_grad` は常に拒否のまま）。
+/// `exp` は [`Num::exp_bounded`] が libm の精度の仮定つきで上界を持つ（#4092・設計記録 §82.9）。
 ///
 /// **疎モード**（[`lin_reset_sparse`]。WeightNorm の総括判定だけが使う。イシュー #4078・決定記録 §80.4）:
 /// グループの幅が広いと `n_s` などのハブ値が全要素の事象を持ち、下流の係数列がほぼ密になって併合の書き込み量が幅の
@@ -265,6 +280,10 @@ pub(super) const LIN_ULP_SUBNORMAL: f64 = f32::from_bits(1) as f64;
 /// [`Num::powf_bounded`] が受理する指数の増幅 `Z` の上限（本計画の設計値 `2^-10`。#4083 に値の記載はなく、
 /// 拒否する側にだけ働く。二次の剰余を `Z` の二乗で覆うための一次近似の妥当域）。
 pub(super) const LIN_POWF_Z_MAX: f64 = 1.0 / 1024.0;
+/// [`Num::exp_bounded`] が受理する入力の誤差の絶対上界 `b` の上限（本計画の設計値 `1/2`。#4083 に値の記載はなく、
+/// 拒否する側にだけ働く。`|δ| ≤ 1/2` なら `|e^δ − 1 − δ| ≤ δ²` に余裕があり、一次の上界を余裕 `(1+16Nu)` の分だけ
+/// 超える真の `δ` も覆える。設計記録 §82.9）。
+pub(super) const LIN_EXP_DELTA_MAX: f64 = 0.5;
 /// f32 の丸め単位 `u = 2^-24`。
 pub(super) const LIN_U: f64 = 1.0 / 16_777_216.0;
 /// 非正規数の領域の絶対丸め誤差の上界 `2^-150`。
@@ -735,6 +754,43 @@ impl Num for Lin {
             t: self.t,
         }
     }
+    /// `exp(x)` の上界つき版（設計記録 §82.9）。入力の誤差の絶対上界 `b` に対し、`x̂ = x + δ`（`|δ| ≤ b`）なら
+    /// `exp(x̂) = y·e^δ`。一次の項 `y·δ` は x の既存事象への係数 `y`（共有した丸めの打ち消しを保つ）、二次の剰余 `y·b²`・
+    /// libm の誤差（[`LIBM_F32_MAX_ULP`] ulp）・非正規化数の絶対項は独立な事象 1 つへ畳む。x が非有限、`b` が
+    /// [`LIN_EXP_DELTA_MAX`] 超、結果が f32 の overflow に近い入力は上界なし（拒否。`-inf` も安全側で拒否）。
+    fn exp_bounded(self) -> Self {
+        let y = self.v.exp();
+        let reject = || Lin::unbounded(y, self.t);
+        if !self.v.is_finite() {
+            return reject();
+        }
+        let b = self.bound();
+        let ya = y.abs();
+        let top = ya * (1.0 + 2.0 * b) * (1.0 + 4.0 * LIN_U);
+        if !le(b, LIN_EXP_DELTA_MAX) || !le(top, f64::from(f32::MAX)) || top == f64::from(f32::MAX)
+        {
+            return reject();
+        }
+        let mu = LIBM_F32_MAX_ULP * 2.0 * LIN_U * ya * (1.0 + 2.0 * b)
+            + LIBM_F32_MAX_ULP * LIN_ULP_SUBNORMAL
+            + ya * b * b;
+        if !mu.is_finite() {
+            return reject();
+        }
+        let id = LIN_ARENA.with(|a| {
+            let mut a = a.borrow_mut();
+            let start = a.map_copy(self.id, |c| c * y);
+            let ev = a.push_event(mu);
+            a.coefs.push((ev, 1.0));
+            a.pool_small_terms(start);
+            a.finish(start)
+        });
+        Lin {
+            v: y,
+            id,
+            t: self.t,
+        }
+    }
     /// `e·x^(e−1)` の上界つき版。f32 の `e * x.powf(e - 1.0)` と同じ演算列（定数 `e` を `Lin::k`、冪を [`Lin::powf_bounded`]）。
     fn pow_grad_bounded(self, e: f64) -> Self {
         if e == 0.0 {
@@ -934,6 +990,9 @@ mod tests {
         fn powf_bounded(self, _e: f64, e_str: f32) -> Self {
             F32Rev(self.0.powf(e_str))
         }
+        fn exp_bounded(self) -> Self {
+            F32Rev(self.0.exp())
+        }
         fn root_grad(self) -> Self {
             F32Rev(0.5 / self.0)
         }
@@ -1114,6 +1173,9 @@ mod tests {
                 return LinRef::make(0.0, vec![], false);
             }
             LinRef::make(e * self.v.powf(e - 1.0), vec![], self.t).unbounded()
+        }
+        fn exp_bounded(self) -> Self {
+            LinRef::make(self.v.exp(), vec![], self.t).unbounded()
         }
         fn root_grad(self) -> Self {
             LinRef::k(0.5).over(self)

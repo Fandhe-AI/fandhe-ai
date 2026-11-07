@@ -1,10 +1,10 @@
-//! `Lin::powf_bounded`・`Lin::pow_grad_bounded` の誤差規則のテスト（イシュー #4084・設計記録
-//! `docs/autodiff-higher-order-grad-decision.md` §81.10）。`lin.rs` の `#[path]` で読み込む子モジュール。
+//! `Lin::powf_bounded`・`Lin::pow_grad_bounded`・`Lin::exp_bounded` の誤差規則のテスト（イシュー #4084・#4092・設計記録
+//! `docs/autodiff-higher-order-grad-decision.md` §81.10・§82.9）。`lin.rs` の `#[path]` で読み込む子モジュール。
 //!
-//! 役割: libm の `powf` が結果の正規化数の範囲で 2 ulp 以内（[`LIBM_F32_MAX_ULP`]。所有者決定 #4083 の設計値）に
+//! 役割: libm の `powf`・`exp` が結果の正規化数の範囲で 2 ulp 以内（[`LIBM_F32_MAX_ULP`]。所有者決定 #4083 の設計値）に
 //! 収まるという仮定の下で、規則の上界が f32 構造の実測の偏差を覆うことを確かめる。**乱数掃引は証明ではない**。
 //! 仮定を確かめた環境（x86_64 Linux glibc）以外では既定で `ignore` にし、計測テスト [`powf_ulp_measurement`]
-//! （`--ignored`）を aarch64 Linux・macOS でも実行できる形にしてある（それらの値は未実測）。
+//! （`--ignored`。exp は [`exp_ulp_measurement`] で f32 の全 2^32 入力の総当たり）を aarch64 Linux・macOS でも実行できる形にしてある（それらの値は未実測）。
 //! 2 ulp を超える実測が出たら定数を上げず、`ignore` も足さず、失敗のまま報告する（#4083）。
 
 use std::hint::black_box;
@@ -36,6 +36,11 @@ impl Rng {
 fn powf_ulp_err(x: f32, e: f32) -> (f64, bool) {
     let reference = f64::from(x).powf(f64::from(e));
     let actual = black_box(x).powf(black_box(e));
+    ulp_err(reference, actual)
+}
+
+/// 参照値（f64）に対する f32 結果の誤差を ulp で返す共通部（powf・exp 共有）。
+fn ulp_err(reference: f64, actual: f32) -> (f64, bool) {
     if !reference.is_finite() || reference <= 0.0 {
         return (0.0, false);
     }
@@ -470,5 +475,348 @@ assumption_env_test! {
             }
         }
         assert!(near_z > 100, "Z 近傍の受理 {near_z}");
+    }
+}
+
+// ================= exp（イシュー #4092・設計記録 §82.9） =================
+
+const EXP_STRATA: [&str; 6] = [
+    "全域",
+    "非正規化数",
+    "オーバーフロー近傍",
+    "0の近く",
+    "softmax実用域",
+    "正の中域",
+];
+
+/// 層 `s` の入力 x を 1 件作る。
+fn gen_exp_case(s: usize, rng: &mut Rng) -> f32 {
+    let x = match s {
+        0 => rng.range(-110.0, 89.0),
+        1 => rng.range(-103.97, -87.33),
+        2 => rng.range(87.5, 88.8),
+        3 => rng.range(-1.0 / 1024.0, 1.0 / 1024.0),
+        4 => rng.range(-30.0, 0.0),
+        _ => rng.range(0.0, 87.0),
+    };
+    x as f32
+}
+
+/// 総当たり用の層。`x` が属する最初の層（どの層にも属さない場合は 0。全域 0 は全件の集計で、層 0 と重ねて数えない）。
+fn exp_stratum(x: f32) -> usize {
+    if x.abs() < 1.0 / 1024.0 {
+        3
+    } else if (-103.98..=-87.33).contains(&x) {
+        1
+    } else if x >= 88.0 {
+        2
+    } else if (-30.0..=0.0).contains(&x) {
+        4
+    } else if (0.0..87.0).contains(&x) {
+        5
+    } else {
+        0
+    }
+}
+
+fn exp_ulp_err(x: f32) -> (f64, bool) {
+    ulp_err(f64::from(x).exp(), black_box(x).exp())
+}
+
+fn empty_stat() -> Stat {
+    Stat {
+        count: 0,
+        max_ulp: 0.0,
+        max_at: (0.0, 0.0),
+        overflow: 0,
+    }
+}
+
+fn exp_ulp_sweep(n: u64, seed: u64) -> Vec<Stat> {
+    (0..EXP_STRATA.len())
+        .map(|s| {
+            let mut rng = Rng(seed ^ ((s as u64 + 1) << 56));
+            let mut st = empty_stat();
+            for _ in 0..n {
+                let x = gen_exp_case(s, &mut rng);
+                let (u, ov) = exp_ulp_err(x);
+                st.count += 1;
+                st.overflow += u64::from(ov);
+                if u > st.max_ulp {
+                    st.max_ulp = u;
+                    st.max_at = (x, 0.0);
+                }
+            }
+            st
+        })
+        .collect()
+}
+
+assumption_env_test! {
+    /// 通常の掃引で、全層の最大誤差が仮定 [`LIBM_F32_MAX_ULP`] 以内。
+    fn lin_exp_ulp_within_assumption() {
+        for (name, st) in EXP_STRATA.iter().zip(exp_ulp_sweep(SWEEP_N, 0x4092)) {
+            assert_eq!(st.count, SWEEP_N, "{name}");
+            assert!(
+                st.max_ulp <= LIBM_F32_MAX_ULP,
+                "{name}: 最大 {} ulp が仮定 {LIBM_F32_MAX_ULP} を超えた x={:?}",
+                st.max_ulp,
+                st.max_at
+            );
+        }
+    }
+}
+
+/// 総当たり計測（f32 の全 2^32 入力。全環境で `--ignored` 実行可能。`--release` で実行する）。層ごとの統計を
+/// `EXP_ULP` 行で出し、2 ulp 以内を assert する。2 ulp を超えたら定数を上げず、層・件数・最大 ulp・入力・環境を
+/// #4092 へ報告する（失敗のまま残す）。
+#[test]
+#[ignore = "計測。cargo test --release --lib exp_ulp_measurement -- --ignored --nocapture"]
+fn exp_ulp_measurement() {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
+    let total = 1u64 << 32;
+    let each = total.div_ceil(threads);
+    let parts: Vec<(Vec<Stat>, u64)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..threads)
+            .map(|t| {
+                sc.spawn(move || {
+                    let mut st = vec![empty_stat(); EXP_STRATA.len()];
+                    let mut nans = 0u64;
+                    let (lo, hi) = (t * each, ((t + 1) * each).min(total));
+                    for bits in lo..hi {
+                        let x = f32::from_bits(bits as u32);
+                        let y = black_box(x).exp();
+                        if x.is_nan() {
+                            assert!(y.is_nan(), "NaN 入力の結果が NaN でない bits={bits:#x}");
+                            nans += 1;
+                            continue;
+                        }
+                        if x.is_infinite() {
+                            let want = if x > 0.0 { f32::INFINITY } else { 0.0 };
+                            assert_eq!(y, want, "x={x}");
+                            continue;
+                        }
+                        if x == 0.0 {
+                            assert_eq!(y, 1.0, "±0 の exp は 1");
+                            continue;
+                        }
+                        let (u, ov) = ulp_err(f64::from(x).exp(), y);
+                        let layer = exp_stratum(x);
+                        for s in if layer == 0 { vec![0] } else { vec![0, layer] } {
+                            let e = &mut st[s];
+                            e.count += 1;
+                            e.overflow += u64::from(ov);
+                            if u > e.max_ulp {
+                                e.max_ulp = u;
+                                e.max_at = (x, 0.0);
+                            }
+                        }
+                    }
+                    (st, nans)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let env = format!(
+        "os={} arch={} env={}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        if cfg!(target_env = "gnu") {
+            "gnu"
+        } else if cfg!(target_env = "musl") {
+            "musl"
+        } else {
+            "other"
+        }
+    );
+    let nans: u64 = parts.iter().map(|p| p.1).sum();
+    println!("EXP_ULP {env} NaN件数={nans}");
+    let mut worst = 0.0f64;
+    for (s, name) in EXP_STRATA.iter().enumerate() {
+        let (mut count, mut ov, mut mx, mut at) = (0, 0, 0.0f64, 0.0f32);
+        for (p, _) in &parts {
+            count += p[s].count;
+            ov += p[s].overflow;
+            if p[s].max_ulp > mx {
+                mx = p[s].max_ulp;
+                at = p[s].max_at.0;
+            }
+        }
+        if s == 0 {
+            worst = mx;
+        }
+        println!("EXP_ULP {env} 層={name} 件数={count} 最大ulp={mx:.4} overflow={ov} 入力x={at:?}");
+    }
+    assert!(
+        worst <= LIBM_F32_MAX_ULP,
+        "最大 {worst} ulp が仮定 {LIBM_F32_MAX_ULP} を超えた（定数を上げず #4092 へ報告する。{env}）"
+    );
+}
+
+// ---- exp の環境に依らない決定的なテスト ----
+
+#[test]
+fn exp_bounded_rejects_out_of_domain() {
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(is_rejected(plain(x).exp_bounded()), "x={x}");
+    }
+    // オーバーフロー近傍（top >= f32::MAX）。
+    assert!(is_rejected(plain(88.7229).exp_bounded()));
+    assert!(is_rejected(plain(200.0).exp_bounded()));
+}
+
+#[test]
+fn exp_bounded_nan_keeps_taint() {
+    lin_reset();
+    let l = Lin::k(f64::NAN).exp_bounded();
+    assert!(l.input_nan());
+    assert!(entry_check_lin(l, f32::NAN, "nan", rej).is_ok());
+}
+
+#[test]
+fn exp_bounded_zero_has_only_libm_terms() {
+    let l = plain(0.0).exp_bounded();
+    assert_eq!(l.v, 1.0);
+    let want = LIBM_F32_MAX_ULP * 2.0 * LIN_U + LIBM_F32_MAX_ULP * LIN_ULP_SUBNORMAL;
+    assert!(
+        (l.bound() - want).abs() <= want * 1e-12,
+        "bound={:e}",
+        l.bound()
+    );
+}
+
+#[test]
+fn exp_bounded_subnormal_result_gets_absolute_term() {
+    let l = plain(-100.0).exp_bounded();
+    let floor = LIBM_F32_MAX_ULP * LIN_ULP_SUBNORMAL;
+    assert!(l.bound() >= floor, "bound={:e}", l.bound());
+    let s = black_box(-100.0f32).exp();
+    assert!(entry_check_lin(l, s, "sub", rej).is_ok());
+}
+
+#[test]
+fn exp_bounded_rejects_large_input_error() {
+    // 相殺で入力の絶対誤差 b を LIN_EXP_DELTA_MAX 超にした入力は拒否する。
+    lin_reset();
+    let big = Lin::k(1.0e7).plus(Lin::k(0.3)).minus(Lin::k(1.0e7));
+    assert!(big.bound() > LIN_EXP_DELTA_MAX);
+    assert!(is_rejected(big.exp_bounded()));
+    // 上限の内側は受理する。
+    lin_reset();
+    let ok = Lin::k(4.0e6).plus(Lin::k(0.3)).minus(Lin::k(4.0e6));
+    assert!(ok.bound() <= LIN_EXP_DELTA_MAX, "b={}", ok.bound());
+    assert!(!is_rejected(ok.exp_bounded()));
+}
+
+#[test]
+fn exp_bounded_shared_event_cancels() {
+    // exp(a) / exp(a) は共有した事象の打ち消しで、自身の除算の丸めだけが残る。
+    lin_reset();
+    let a = Lin::k(1.7).times(Lin::k(2.3));
+    let y = a.exp_bounded();
+    let q = y.over(y);
+    assert!(q.bound() <= 2.0 * LIN_U, "bound={:e}", q.bound());
+}
+
+// ---- exp の soundness ----
+
+/// 最大比 `dev/bound` の下限（上界が実測の偏差に比べて極端に膨らまないことの確認。実測を見て決めた値）。
+const EXP_RATIO_FLOOR: f64 = 0.3;
+
+/// 相殺で入力の誤差 `b` を LIN_EXP_DELTA_MAX 近くまで広げた入力の exp。
+fn prog_exp_cancel<T: Num>(big: f64, x0: f64) -> T {
+    T::k(big).plus(T::k(x0)).minus(T::k(big)).exp_bounded()
+}
+fn prog_exp_prod<T: Num>(a: f64, b: f64, z: f64) -> T {
+    T::k(a).times(T::k(b)).exp_bounded().times(T::k(z))
+}
+/// softmax の行 `exp(x_j − m) / Σ exp(x_i − m)`。
+fn prog_softmax<T: Num>(xs: &[f64], j: usize) -> T {
+    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let es: Vec<T> = xs
+        .iter()
+        .map(|&x| T::k(x).minus(T::k(m)).exp_bounded())
+        .collect();
+    es[j].over(T::total(&es))
+}
+/// CEWO の曲率の形 `y_j·(1 − y_j)`（対角）と `y_i·y_j`（非対角）。
+fn prog_softmax_curv<T: Num>(xs: &[f64], i: usize, j: usize) -> T {
+    let y = |k: usize| prog_softmax::<T>(xs, k);
+    if i == j {
+        y(j).times(T::k(1.0).minus(y(j)))
+    } else {
+        y(i).times(y(j))
+    }
+}
+
+assumption_env_test! {
+    /// 層ごとの入力を `Lin::exp_bounded` に通し、受理された全件で `|f32 − v| ≤ bound·(1 + 16·N·u)`。
+    /// 偶数件は厳密な入力、奇数件は丸めを伴う入力 `x + d`。上界の過大な膨張を検出するため最大比の下限も課す。
+    fn lin_exp_bound_covers_f32_deviation_strata() {
+        let mut rng = Rng(0x4092_0001);
+        let mut ratio_max = 0.0f64;
+        for (s, name) in EXP_STRATA.iter().enumerate() {
+            let mut acc_s = 0u64;
+            for i in 0..SWEEP_N {
+                let x = gen_exp_case(s, &mut rng);
+                lin_reset();
+                let (l, f) = if i % 2 == 0 {
+                    (Lin::k(f64::from(x)).exp_bounded(), black_box(x).exp())
+                } else {
+                    let d = rng.range(-0.05, 0.05) as f32;
+                    (
+                        Lin::k(f64::from(x)).plus(Lin::k(f64::from(d))).exp_bounded(),
+                        (black_box(x) + black_box(d)).exp(),
+                    )
+                };
+                if is_rejected(l) {
+                    continue;
+                }
+                let dev = (f64::from(f) - l.v).abs();
+                let b = l.bound() * slack();
+                assert!(dev <= b, "層={name} x={x} f32={f} dev={dev:e} bound={b:e}");
+                acc_s += 1;
+                if b > 0.0 {
+                    ratio_max = ratio_max.max(dev / b);
+                }
+            }
+            assert!(acc_s > 100, "層={name} 受理が少なすぎる {acc_s}");
+            println!("EXP_SOUND 層={name} 受理={acc_s}");
+        }
+        println!("EXP_SOUND 最大比={ratio_max}");
+        assert!(
+            ratio_max >= EXP_RATIO_FLOOR,
+            "最大比 {ratio_max} が下限 {EXP_RATIO_FLOOR} 未満（上界が過大）"
+        );
+    }
+}
+
+assumption_env_test! {
+    /// 合成プログラム（softmax・曲率の形・積・相殺で b を上限近くへ広げた入力）で、f32 構造と逆順和が `Lin` の上界に収まる。
+    fn lin_exp_bound_covers_composed_programs() {
+        let mut rng = Rng(0x4092_0002);
+        let (mut acc, mut tried) = (0u32, 0u32);
+        for _ in 0..3000 {
+            let c = 1 + (rng.next() % 16) as usize;
+            let wide = if rng.next().is_multiple_of(4) { 120.0 } else { 12.0 };
+            let xs: Vec<f64> = (0..c).map(|_| rng.range(-wide, wide)).collect();
+            let (i, j) = ((rng.next() as usize) % c, (rng.next() as usize) % c);
+            let (a, b, z) = (rng.range(-8.0, 8.0), rng.range(-8.0, 8.0), rng.range(-3.0, 3.0));
+            tried += 3;
+            acc += u32::from(run3!("softmax", prog_softmax(&xs, j)));
+            acc += u32::from(run3!("curv", prog_softmax_curv(&xs, i, j)));
+            acc += u32::from(run3!("prod", prog_exp_prod(a, b, z)));
+        }
+        println!("EXP_PROG 受理={acc}/{tried}");
+        assert!(acc > tried * 6 / 10, "受理 {acc}/{tried}");
+        let mut near = 0;
+        for _ in 0..1000 {
+            let big = rng.range(1.0e5, 5.0e6);
+            let x0 = rng.range(-5.0, 3.0);
+            near += u32::from(run3!("cancel", prog_exp_cancel(big, x0)));
+        }
+        println!("EXP_PROG 上限近傍受理={near}/1000");
+        assert!(near > 100, "上限近傍の受理 {near}");
     }
 }

@@ -357,6 +357,11 @@ impl Num for Rf {
         let v = e * self.v.powf(e - 1.0);
         Rf::of(v, v.abs() * self.kappa(), self.t)
     }
+    /// norm は `exp` を使わない（#4092。`Lin` の規則を足しただけで未配線）。上界を持たず `no_inf` が偽になる値にして
+    /// 万一呼ばれても判定が必ず拒否する安全側の実装にする。
+    fn exp_bounded(self) -> Self {
+        Rf::of(self.v.exp(), f64::INFINITY, self.t)
+    }
     fn root_grad(self) -> Self {
         let v = 0.5 / self.v;
         Rf::of(v, v.abs() * self.kappa(), self.t)
@@ -439,6 +444,10 @@ impl Num for Dm {
         } else {
             self
         }
+    }
+    /// `exp` は NaN の依存を消さない（#4092）。
+    fn exp_bounded(self) -> Self {
+        self
     }
     fn root_grad(self) -> Self {
         self
