@@ -6846,6 +6846,55 @@ tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・parit
 - マスク付きロジットなどで `-inf` 入力が要るかは配線側の判断（本規則は `-inf` を拒否する）。
 - `lin_group_cost`・`LIN_BUDGET`、事象数 N の増加による `1+16Nu` の余裕（`16Nu ≥ 0.01` の拒否）を、クラス数の大きい softmax で確認する。
 
+### 82.10 #4093: CE・CEWO の相殺判定の上界を `Lin` で並行計算する（判定は変えない）
+
+#### 82.10.0 位置づけ
+
+- 親 #4071 の CE・CEWO 系の 1 段目。`cewo_cancel_check` の 3 つの値（Softmax の対角の曲率・非対角の曲率・`g` への二階 `A·y − B`）を `Lin` で評価できるようにするだけで、**判定には使わない**。判定の切り替えは #4094（Cosine の #4090 と同じ立ち位置）。承認は #4071 の起票の範囲に限り、上乗せしない。
+
+#### 82.10.1 変更範囲
+
+- `loss_class.rs`: forward を総称関数 `cewo_fwd<T: Num>`（`CewoFwd<T> { e, total, y }`）へまとめ、`cewo_cancel_check` の f64 参照と f32 再現を同じ関数で組む（従来は同じ式を 2 回書いていた）。`rest` 以降の分岐・`struct_check`／`cancel_check` の引数・エラー文面は一字一句変えていない。
+- `lin.rs`: `Num::exp_bounded` が本番の f64／f32 から呼ばれるようになったため `expect(dead_code)` を外した（§82.9.6 の申し送りの履行）。規則の中身は不変。`powf_bounded`・`pow_grad_bounded` の `expect` は #4088／#4095 の担当なので残す。
+- test 限定: `cewo_rev`（二階の写し）・`cewo_model_rows_f32`・`cewo_lin_rows`。
+
+#### 82.10.2 写し方
+
+- `total` には `settle` を掛けない。`y_j = e_j/total` で分子と分母が同じ `e_j` の事象を共有し、確信度の高い行の打ち消し `1 − y_j` を保つため。`y` は `settle` で事象 1 つへ束ね、二階の各要素の演算が O(C) に伸びるのを抑える。
+- Softmax の VJP は実際のカーネルが差と積を f64 で計算して 1 回だけ f32 へ落とす混合精度だが、f32 の丸め事象として写す（健全な過大評価。二重丸めの余分は相対 2^-29 以下で `entry_check_lin` の余裕 `1 + 16Nu` に収まる）。`Num` の trait は変えていない。
+- Mean の `s_b` は `g / T::k(W)`（f32 の `W` の丸めが `rho` の出どころ）、`g` への Div の VJP は `1/W` を f32 で先に作る。既定 CE は `A = 1`・`B = onehot`・`W = n` で同じ写しを共有する（実際の構造に `·A` は無いが A = 1 で値は同じ。余分な事象は過大評価で健全）。
+
+#### 82.10.3 テスト
+
+- `cewo_fwd_generic_matches_previous_formulas`: 従来の式の逐語コピーと f64／f32 の全中間値が bit 一致（C=1、全要素等しい、余裕 0〜120 の underflow、±inf・NaN を含む行）。判定不変の主な錠。
+- `lin_bound_covers_f32_deviation_for_ce_sweep`: 既定 CE と CEWO の Sum／Mean（W = 1, 3, 7, 0.37）、C ∈ {2, 3, 10, 33, 64}、振幅 {1e-3, 1, 30}、余裕 {0, 5, 10, 20, 40}、上流 `2^{0,13,20}` で、手組みの構造（実際の eager 逆伝播）と `cewo_rev::<f32>` の双方が `|実測 − v| ≤ bound·(1 + 16Nu)`。実測（debug）: checked=332640・nonzero=332310・tight(dev > 0.1·bound)=104160・最大 dev/bound=0.9966。
+- `lin_bound_covers_f32_deviation_for_ce_underflow_rows`（余裕 80〜120）、`ce_f32_model_stays_close_to_hand_built_structure`（REQ-2 比 1 未満）。
+- 既存のテスト（`loss_class_followup_candidates_are_req2_within_f64`・`existing_rejection_probes_stay_rejected_and_truly_fail_req2`・`ce_hand_built_structure_matches_public_path`・統合テスト `create_graph_loss_class.rs` の拒否プローブ）は無変更で通る（`cargo test -p fandhe-ai-autodiff` 全通過）。
+- 変異確認: `Lin::bound` を 0 にすると soundness 2 テストが失敗（dev=5.9e-10 > bound=0）。`total` に `settle` を掛けても健全のまま通る（上界が広がる側にしか動かないため。相関を失う影響は下の計測で見る対象）。変異は戻した。
+
+#### 82.10.4 計測（`--release`、Linux x86_64・glibc 2.43・rustc 1.98.1。`ce_lin_candidates_measurement`）
+
+| 入力 | N | 16Nu | 最大 bound | 1 seed の時間 |
+|---|---|---|---|---|
+| CE C=33 | 171 | 0.0002 | 2.0e-6 | 3.3e-6 s |
+| CE C=100 | 506 | 0.0005 | 6.0e-6 | 4.8e-5 s |
+| CEWO-weight C=100 | 506 | 0.0005 | 4.6e-6 | 2.0e-5 s |
+| CEWO-smooth C=1000 | 5007 | 0.0048 | 5.7e-5 | 1.9e-3 s |
+| CE C=2100 | 10506 | 0.0100 | 1.2e-4 | 8.3e-3 s |
+
+上界はすべて有限。受理に変えてよいかは #4094 で判断する（本イシューでは判定を変えない）。
+
+#### 82.10.5 #4094 への申し送り
+
+- `total` はすべての `e` の事象を持つハブ値で、`y` を作る `over` は 1 要素 O(C)、forward 全体で O(C²)。`16Nu ≥ 0.01` になる C は 2100 付近。`LIN_BUDGET` との関係を #4094 で確認する。
+- `Lin::total` の和の誤差 `γ_{C−1}·Σ|e|` が確信度の高い行で支配的になりうる（Cosine の §82.8 と同型の契約による制約）。
+- `exp_bounded` は `|x − max| > 2^23` と `-inf` のロジットで上界を持たない（安全側の拒否）。掃引では非有限の上界の要素を除外した。既定 CE は `reject_inf` を通らないので、配線時に扱いを決める。
+
+#### 82.10.6 未実測・変えていないもの
+
+- 未実測: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS。Linux x86_64 の値で代替しない。
+- 不変: tolerance 定数・parity baseline・`STAGE_BOUND_GUARD`・`JUDGE_BUDGET`・`LIN_BUDGET`・`LIBM_F32_MAX_ULP`・`LIN_EXP_DELTA_MAX`・`entry_check_lin`・`rounding_coeff`・判定・エラー文面・依存・公開 API・`docs/spec`・既存の拒否プローブ。
+
 ## 83. 計測・設計記録（親 #4072。create_graph の総括判定の走査量の上限 `JUDGE_BUDGET` の見直し）
 
 ### 83.0 位置づけ
