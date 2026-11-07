@@ -6483,6 +6483,56 @@ CPU・`spectral_norm_shadow_bound_breakdown_measurement`（`#[ignore]`）。余�
 - `B_str` の `γ_{N−1}Σ|·|` は最悪ケースの上界で、N が大きいと `[16,16]` のような入力が閾値を超える。さらに狭めるには和の順序を固定する等の前提が要る（本イシューの範囲外。#4072・#4077・#4078・#4088 とも別）。
 
 
+### 81.10 #4084: `Lin` に `powf` の誤差規則を足す
+
+#### 81.10.0 位置づけ
+
+- #4084 の実装記録（親 #4071）。仮定の決定は #4083（2026-11-07 所有者決定）で、本節は上乗せしない。仮定: CPU の `f32::powf` は結果が正規化数の範囲で 2 ulp 以内（名前付き定数 `LIBM_F32_MAX_ULP = 2.0`。**設計値であって実測値ではない**）。底が 0 以下は拒否のまま、結果が非正規化数なら絶対誤差の項を足し、足せなければ拒否する。GPU・aarch64 Linux・macOS は未実測。
+- 範囲は規則の追加だけ。`Num::powe`・`Num::pow_grad`（常に拒否）、WeightNorm・SpectralNorm の判定結果、tolerance 定数、parity baseline、`STAGE_BOUND_GUARD`、依存、公開 API、`docs/spec` は変えていない。新メソッド `Num::powf_bounded`・`Num::pow_grad_bounded` は本番から呼ばれず（配線は #4088〈LRN〉・#4095・#4096〈Triplet〉。`exp` の #4092 は定数を共有）、受理も拒否も変わらない。未配線の間は `#[cfg_attr(not(test), expect(dead_code))]` で clippy を通す（配線した時点で `unfulfilled_lint_expectations` になるので外すこと）。
+
+#### 81.10.1 規則
+
+記号: `x = self.v`、`y = x.powf(e)`（参照の指数 `e`）、`Δe = e_str − e`（構造の f32 が実際に使う指数 `e_str`。Triplet の `1.0/p32`・`p32−1.0` は `e as f32` と一致しない）、`L = |ln x|`、`ρ = 2·bound(self)/x`。
+
+- 拒否（上界 NaN。NaN の底の taint は保つ）: `x` が NaN・0 以下・`f32::MAX` 超、`e`・`e_str` が非有限、`ρ > 1/2`、`Z = 2(|e|+|Δe|)ρ + |Δe|L` が `LIN_POWF_Z_MAX`（`2^-10`。本計画の設計値で #4083 に記載なし。拒否する側にだけ働く）超、`|y|(1+2Z)(1+4u)` が `f32::MAX` 以上（構造が `inf` になりうる）。
+- 受理: 底の事象への係数 `k = e·y/x`（共有した丸めの打ち消しを保つため余裕は掛けない）と、新しい独立な事象 1 つ `μ = 2·LIBM_F32_MAX_ULP·u·|y|(1+2Z) + LIBM_F32_MAX_ULP·2^-149 + |y|(|Δe|L + Z² + |e|ρ² + 2|Δe|ρ)`。1 ulp ≤ `2u|y|`。
+- 根拠: `x̂ = x(1+δ)`（`|δ| ≤ ρ`）とすると `x̂^(e+Δe) = y·exp(z)`、`z = (e+Δe)ln(1+δ) + Δe·ln x`。`|ln(1+δ)| ≤ 2|δ|`・`|ln(1+δ) − δ| ≤ δ²` から `|z| ≤ Z`、`|z − (eδ + Δe ln x)| ≤ |e|ρ² + 2|Δe|ρ`。`|z| ≤ 1` で `|exp z − 1 − z| ≤ z²`・`|exp z − 1| ≤ 2|z|`。libm の誤差は `|y·exp z|·4u + 2^-148 ≤ 4u|y|(1+2Z) + 2^-148` で覆う。
+- `pow_grad_bounded(e)`: `e == 0` は定数 0、`e as f32 == 0`（`e ≠ 0`）は拒否、それ以外は `Lin::k(e).times(powf_bounded(e−1, e_f32−1))`（f32 の `e * x.powf(e - 1.0)` と同じ演算列）。
+
+#### 81.10.2 一次資料の確認
+
+- glibc 2.42 の配布ソース（`ftp.gnu.org/gnu/glibc`）の `sysdeps/ieee754/flt-32/e_powf.c` の冒頭コメントは `ULP error: 0.82`（`relerr` 1.27·2^-26）。マニュアル（`manual/math.texi`）は「テストスイートは 9 ulp 超だけを誤りとする」と述べ、`powf` の ulp の表は持たない。
+- `libm-test-ulps`（x86_64）は配布物の該当パスで見つからず**未確認**（#4083 の「`powf` は 1 ulp」は確認できていない）。sourceware の gitweb は自動取得を拒否されたので回避していない。2 ulp は設計値のまま。
+
+#### 81.10.3 計測
+
+x86_64 Linux・glibc 2.43（Ubuntu）・rustc 1.98.1・`--release`、`powf_ulp_measurement`（`--ignored`。参照は `f64::powf`。これも libm 依存で厳密値ではなく、誤差は f32 の ulp の約 `2^-29`）。各層 268,435,460 件（`2^28` を 8 スレッドで分割）。**乱数掃引であって証明ではない**。
+
+| 層 | 最大 ulp | 最大の入力 `(x, e)` | overflow 件数 |
+|---|---|---|---|
+| 全域（結果 `2^-150..2^128`） | 0.7761 | (1.0225841, 3938.4214) | 2 |
+| 非正規化数（結果 `2^-152..2^-125`） | 0.7567 | (1.0219586, -3991.4292) | 0 |
+| オーバーフロー近傍（結果 `2^127..2^128.05`） | 0.8106 | (1.0233419, 3844.779) | 12,782,857 |
+| 底が 1 の近く | 0.5251 | (0.9997633, 366043.38) | 0 |
+| 大きい指数（`|e| ≥ 2^20` 近傍） | 0.5130 | (0.9999999, 715244800.0) | 0 |
+| 実用域 | 0.5025 | (0.004238969, 7.617456) | 22,255,437 |
+
+全層で 2 ulp 以内（glibc の注記 0.82 とも整合）。通常テスト `lin_powf_ulp_within_assumption` は各層 `2^17` 件を x86_64 Linux glibc でだけ既定実行し、他の環境は `ignore`（`powf_ulp_measurement` が全環境で実行可能）。
+
+#### 81.10.4 未実測
+
+GPU（CUDA・Metal・ROCm）、aarch64 Linux、macOS は未実測で、Linux x86_64 の値で代替しない。macOS の libm の精度は仮定のまま。この判定は GPU の値を保証しない。
+
+#### 81.10.5 テスト・変異確認
+
+- `lin_powf_bound_covers_f32_deviation_strata`（6 層 × `2^17` 件で受理全件 `|f32 − v| ≤ bound·(1+16Nu)`。受理 769,081 件・最大比 `dev/bound` 0.2868 を実測し、下限を 0.1 とした）、`lin_powf_bound_covers_composed_programs`（`(x+y)^e`・`(xy)^e z`・Triplet 形・LRN 形と `pow_grad_bounded`・`Z` が上限近傍の入力を、f32・和を逆順にした f32・`Lin` で突合）、決定的な拒否・受理のテスト（NaN の底、非正規化数の絶対項、`Δe ≠ 0`、`y/y` の打ち消し、`e == 0`）。既存の create_graph のテストと拒否プローブは無変更で通る。
+- 変異確認（手動・コミットしない。戻して通ることを確認）: 上界を 0 にする → `lin_powf_bound_covers_composed_programs`・`lin_powf_bound_covers_f32_deviation_strata`・`powf_bounded_exponent_mismatch_widens_bound`・`powf_bounded_subnormal_result_gets_absolute_term` が失敗。`LIBM_F32_MAX_ULP = 0` → 掃引 2 本と `lin_powf_ulp_within_assumption` が失敗。絶対項を消す → strata と `powf_bounded_subnormal_result_gets_absolute_term` が失敗。`k = 0` だけ → 合成プログラムが失敗。`|Δe|·L` を消す → 合成プログラム（Triplet 形）が失敗。**二次の剰余（`Z² + |e|ρ² + 2|Δe|ρ`）を消す変異は、どのテストも失敗しなかった**（健全性の必要条件ではなく、数式上の余裕として残している）。
+
+#### 81.10.6 後続・変えていないもの
+
+- 配線側（#4088・#4095・#4096）への申し送り: `expect(dead_code)` を外す。`Dm` は `powe` 内で `e as f32 == 0` を見るので `e_str != e as f32` の呼び出しでは食い違いうる。`self.bound()` の走査が `lin_group_cost`・`LIN_BUDGET` に与える影響と、事象数 `N` の増加による `1 + 16·N·u` を確かめる。
+- 変えていないもの: 上記 81.10.0 のとおり。
+
 ## 82. 計測・設計記録（イシュー #4089・親 #4071。損失のクラス軸系の create_graph の拒否の内訳と後続で受理に変える入力）
 
 ### 82.0 位置づけ
