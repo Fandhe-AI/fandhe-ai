@@ -1397,3 +1397,117 @@ fn weight_norm_wide_flip_hessian_matches_f64_up_to_width_128() {
     }
     eprintln!("WNFLIP-ALL max_rel={max_rel:e} max_abs={max_abs:e}");
 }
+// --- 6. LRN の総括判定を Lin で追う（イシュー #4088・決定記録 §81.11）----------------------------
+
+/// LRN の損失 `Σ w_i·y_i` の f64 の値（`y = x / (k + α/size·Σ_{窓} x²)^β`。窓は `[c − size/2, c + (size−1)/2]`
+/// を `[0, C)` に打ち切る。`tensor-core` の `column_denominators` と同じ定義を独立に書いたもの）。
+fn lrn_loss_f64(x: &[f64], w: &[f64], size: usize, alpha: f64, beta: f64, k: f64) -> f64 {
+    let c = x.len();
+    (0..c)
+        .map(|i| {
+            let lo = i.saturating_sub(size / 2);
+            let hi = (i + (size - 1) / 2).min(c - 1);
+            let sum: f64 = x[lo..=hi].iter().map(|v| v * v).sum();
+            w[i] * x[i] / (k + alpha / size as f64 * sum).powf(beta)
+        })
+        .sum()
+}
+
+/// f64 の損失の Hessian（二階中央差分。刻み 1e-4 で誤差は絶対 1e-7 程度）。
+fn lrn_hessian_f64(
+    x0: &[f32],
+    w: &[f32],
+    size: usize,
+    alpha: f32,
+    beta: f32,
+    k: f32,
+) -> Vec<Vec<f64>> {
+    let n = x0.len();
+    let h = 1e-4;
+    let wd: Vec<f64> = w.iter().map(|&v| f64::from(v)).collect();
+    let f = |d: &[(usize, f64)]| {
+        let mut x: Vec<f64> = x0.iter().map(|&a| f64::from(a)).collect();
+        for &(i, s) in d {
+            x[i] += s;
+        }
+        lrn_loss_f64(
+            &x,
+            &wd,
+            size,
+            f64::from(alpha),
+            f64::from(beta),
+            f64::from(k),
+        )
+    };
+    let mut out = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            out[i][j] = (f(&[(i, h), (j, h)]) - f(&[(i, h), (j, -h)]) - f(&[(i, -h), (j, h)])
+                + f(&[(i, -h), (j, -h)]))
+                / (4.0 * h * h);
+        }
+    }
+    out
+}
+
+/// 正のプローブ（#4088）: 従来の `Rf` の総括判定が拒否していた REQ-2 内の LRN（`norm_reparam.rs` の
+/// `LRN_LIN_ACCEPTED` と同じ入力。相殺の大きい二階の要素がある）が、丸めの一次伝播 `Lin` の上界で受理され、
+/// 二階が f64 の参照（損失の Hessian の二階中央差分）と REQ-2 統一複合判定で一致する。tolerance は変えない。
+#[test]
+fn lrn_newly_accepted_by_lin_match_f64_second_order() {
+    type Case = ([f32; 4], [f32; 4], usize, f32, f32, f32);
+    let cases: [Case; 3] = [
+        (
+            [0.9, -0.6, 0.4, 1.1],
+            [1.0, 1.0, 1.0, 1.0],
+            3,
+            1.0,
+            2.0,
+            1e-3,
+        ),
+        (
+            [0.9, -0.6, 0.4, 1.1],
+            [1.0, 0.5, -0.8, 0.3],
+            2,
+            1.0,
+            0.5,
+            1e-3,
+        ),
+        (
+            [1.2, -0.4, 0.6, -0.9],
+            [1.0, 0.5, -0.8, 0.3],
+            5,
+            1.0,
+            2.0,
+            1e-3,
+        ),
+    ];
+    for (x0, w, size, alpha, beta, k) in cases {
+        let ctx = format!("size{size}/alpha{alpha}/beta{beta}/k{k}");
+        let shape = [1usize, 4, 1];
+        let got = analytic_hessian(
+            &|tape, x| {
+                let y = x.local_response_norm(size, alpha, beta, k)?;
+                let wc = tape.var_no_grad(&t(w.to_vec(), &shape));
+                y.mul(&wc)?.sum(None)
+            },
+            &x0,
+            &shape,
+        );
+        let want = lrn_hessian_f64(&x0, &w, size, alpha, beta, k);
+        let mut worst = 0.0f64;
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    common::req2_close(got[i][j], want[i][j]),
+                    "{ctx}: H[{i}][{j}] = {:e}（f64 参照 {:e}）",
+                    got[i][j],
+                    want[i][j]
+                );
+                let d = (got[i][j] - want[i][j]).abs();
+                worst = worst.max((d / 1e-5).min(d / (1e-3 * want[i][j].abs())));
+            }
+        }
+        eprintln!("LRNLIN {ctx} req2_ratio_max={worst:e}");
+    }
+}
