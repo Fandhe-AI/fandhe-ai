@@ -6533,6 +6533,70 @@ GPU（CUDA・Metal・ROCm）、aarch64 Linux、macOS は未実測で、Linux x86
 - 配線側（#4088・#4095・#4096）への申し送り: `expect(dead_code)` を外す。`Dm` は `powe` 内で `e as f32 == 0` を見るので `e_str != e as f32` の呼び出しでは食い違いうる。`self.bound()` の走査が `lin_group_cost`・`LIN_BUDGET` に与える影響と、事象数 `N` の増加による `1 + 16·N·u` を確かめる。
 - 変えていないもの: 上記 81.10.0 のとおり。
 
+### 81.11 #4088: LRN の総括判定を `Lin` で追う
+
+#### 81.11.0 位置づけ
+
+- #4088 の実装記録（親 #4073。依存 #4084〈`powf` の規則〉・#4086〈`JUDGE_BUDGET` の集約〉はクローズ済み）。LRN の `create_graph` の総括判定（第 2 軸。`lrn_col_judge`）は、`Rf`（f64 の参照と各項の絶対値の和 `M`）と係数 `lrn_coeff(nt_f, nt_r, nchunks, β)·M` で判定していた。これは丸めを最終的な絶対値和に一律に掛ける最悪見積りで、相殺の大きい二階の要素を、実際の誤差が小さくても拒否する。WeightNorm（§79・§80）・SpectralNorm（§81.8）・Cosine（§82.8）と同じく、丸めの一次伝播 `Lin` で見積りを精密にする。LRN は `d^{-β}`・`d^{-β-1}`（`PowScalar`）を含むので、#4084 の `powf_bounded`・`pow_grad_bounded` を配線する。
+- 守ったもの: 判定は緩めない。tolerance 定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline、`STAGE_BOUND_GUARD`、`JUDGE_BUDGET`、`LIN_BUDGET`、`LIBM_F32_MAX_ULP`、依存、公開 API、`docs/spec` は変えていない。既存の拒否プローブ（統合テスト 4 件）は無変更で拒否のまま通る。
+- 仮定は #4083（2026-11-07 所有者決定）の「`f32::powf` は結果が正規化数の範囲で 2 ulp 以内」と、IEEE 754 の正しい丸め（除算・平方根。§80.1）。**どちらも CPU（x86_64 Linux・glibc）の値であって、GPU・aarch64 Linux・macOS は未実測**。この判定は GPU の値を保証しない。
+
+#### 81.11.1 実装
+
+- **either 受理**（要素ごと）。まず従来の `Rf`（`entry_check`）で判定し、拒否した要素だけを `Lin`（`entry_check_lin`）で判定し直して、どちらかが受理すれば受理する。どちらの見積りも f32 構造の誤差の上界として独立に健全なので、片方が閾値内なら REQ-2 は成り立つ（§82.8 と同じ論拠）。**`Rf` で受理していた要素が拒否に変わることは構造上起きない**。WeightNorm・SpectralNorm のようにテンソル単位で `Rf` を `Lin` に置き換えない理由: NaN を含む列で `β = 0`（または `β = −1` の `b`）のとき、f32 の `NaN.powf(0) = 1` は厳密で `Rf` は受理するが、`Lin::powf_bounded` は NaN の底を「上界なし」にするので、置き換えると受理していた要素が拒否に変わる。
+- `Lin` は遅延して作る（`LrnLinState`）。`Rf` がその列で最初に拒否した要素のときだけ forward を 1 回作り、seed ごとに `lin_truncate` で forward の直後へ戻してから逆伝播を 1 回だけ回す。`Drop` で領域を解放する（エラーで抜ける経路を含む）。`Rf` で全部受理する速い経路は `Lin` を一切作らない。`Lin` の forward が ±inf、または f32 と NaN の位置が一致しない場合は救済せず `Rf` の拒否を返す。厳密モード（`lin_reset`）を使い、疎モード・`settle` は使わない（LRN の係数列は窓の幅で上限が決まり、全要素に依存するハブ値が無い）。
+- **冪の配線**: `lrn_col_fwd` の `d.powe(−β)`・`d.powe(−β−1)` を `powf_bounded(e, e as f32)` に、`pow_grad(e)` を `pow_grad_bounded(e)` に替えた。構造が使う指数は `(−β) as f32`・`(−β − 1.0) as f32` で `e_str == e as f32`。f32・`Rf`・`Dm` の値は変わらない（`Rf`・`Dm` は既定実装で `powe`／`pow_grad` へ委ねる）。**§81.10.6 の申し送りへの回答**: `Dm` は `powe` 内で `e as f32 == 0` を見るが、LRN は `e_str == e as f32` なので構造と食い違わない。`Num::powf_bounded`・`pow_grad_bounded` の `expect(dead_code)` は外した（Triplet〈#4095・#4096〉は配線側で確認する）。
+- **縮約の順序**: 子テープが勾配を足す順序は再現（`lrn_col_rev`）の順序と一致する保証がない。複数の寄与を足す箇所（`sq[l]` への窓の蓄積、`xs[l]` への寄与〈t2・`z` の経路・`sq` の 2 回〉、`d[j]`・`up[j]` への 2 経路）を `Num::total` に替え、`Lin` の上界を順序に依らないものにした。f32・`Rf`・`Dm` の `total` は 0 から順に足す fold で値は変わらない（既存のエミュレーションのテストが無変更で通る）。
+- **適用条件** `lrn_use_lin`（テンソル単位）: `16·lrn_lin_events_max·u < 0.01` かつ `判定する列数·lrn_lin_cost ≤ LIN_BUDGET`。満たさないテンソルは `Rf` だけで判定する（受理の集合は従来と同じ）。`lrn_lin_events_max(c, win, nchunks) = c·(20 + 2·W) + 2·nchunks·c + 100`、`lrn_lin_cost(c, win) = c·(300 + 3·W³) + 2000`（`W = nf + nr`）。
+- **`α = 0` の分岐**: 第 2 軸は `entry_check(Rf::k(f), …, rounding_coeff(4))` を `entry_check_lin(Lin::k(f), f as f32, …)` に置き換えた（この要素の f32 の値は `f as f32` そのもので、誤差は f32 への丸め 1 回。従来の `12·2^-23·f` は約 24 倍の余裕だった。`Lin::k` の上界は厳密に計算した丸め誤差で、`Rf` が受理する入力は `Lin` も受理する）。1 階の照合 `shadow_check` は `lrn_alpha0_shadow_bound` の要素ごとの上界 `B_str·(1 + 16·E·u) + B_host` を係数 1 で渡す。`B_str` は `Lin::k(g)·Lin::k(f)` の上界、`B_host = 2^-53·|g·f| + u(1+2u)|host| + 2^-150`。根拠: `α = 0` のとき `column_denominators` は `f64(k) + 0·Σx²`（入口で ±inf を拒否済みなので有限）で `d = k` を厳密に返し、ホストの `dx = f64(g)·d^{-β} − 0·x·acc` は呼び出し元の `f = k.powf(−β)` と同じ `f64::powf` の呼び出しなので同じ値になる。ホストが NaN の要素は上界を使わず、上界が非有限なら `None` で従来の `rounding_coeff(4)·m` に戻す。実効の変化はほぼ無い（従来の係数も実質的に拒否していない）。
+
+#### 81.11.2 実測
+
+測定条件: x86_64 Linux・rustc 1.98.1・`--release`・CPU。ホスト名・個人のパスは記録しない。
+
+- 費用・事象数（`lrn_lin_judge_cost_measurement`。`--ignored`。`c` = 4〜256・`size` = 1〜17・β = 0.75／2／−1・全 seed の `Lin` 逆伝播を回す最悪の場合。`Rf` の 1 反復時間で換算）: 事象数の最大は `c·(16 + 1.03·W)` 程度（小さい `c` は定数項が大きく `c = 4`・`size = 17` で 173、`c = 256`・`size = 17` で 13047）で、`lrn_lin_events_max` が全点を覆う。走査量（`Rf` の 1 反復相当）は `c` あたり `W = 2` で約 200、4 で約 380、6 で約 720、10 で約 1950、18 で約 8000、34 で約 76000 で、`lrn_lin_cost` が全点を覆う（超過 0 件）。測っていない範囲（`c > 256`・`size > 17`）へは外挿しない。`LIN_BUDGET`（`2^26`）いっぱいの最悪時間は、1 列あたりの実測時間（`c = 64`・`size = 5` で約 0.5 ms、`size = 17` で約 12 ms、`c = 256`・`size = 9` で約 7.7 ms）× 許される列数から約 0.1〜0.2 秒と算出した（直接計測ではない）。
+- 拒否範囲の変化（`lrn_rejection_breakdown_measurement`。`--ignored`。`c ∈ {4, 16, 64}`・`size ∈ {1, 2, 3, 5}`・β ∈ {0.75, 2, −1, 0.5}・(α, k) ∈ {(1e-4, 2), (1, 1), (1, 1e-3), (10, 1e-6)}・振幅 {1e-3, 1, 1e3}・上流 {1, 1e3} の 1152 列。値は決定的な `pattern`）:
+
+| 区分 | 件数 |
+|---|---|
+| 判定した列 | 1152 |
+| 従来の `Rf` が拒否 | 134 |
+| `Rf` が拒否し either 受理で受理に変わった | 98 |
+| 受理に変わったうち公開経路も受理 | 77 |
+| 受理に変わったが公開経路の `shadow_check` が拒否 | 21 |
+| **`Rf` で受理 → 拒否に変わった** | **0** |
+
+  受理に変わった 98 件の f64 参照との REQ-2 比（`min(絶対/1e-5, 相対/1e-3)` の最大。1 未満で一致）は最大 0.032。
+
+#### 81.11.3 受理に変わった入力（AC1）
+
+`Rf` だけなら拒否し、公開経路も受理し、f64 の参照と REQ-2 で一致する入力（`C = 4`。損失は `Σ w·y`。f64 の参照は損失の Hessian の二階中央差分）:
+
+| x | w（上流） | size | α | β | k | REQ-2 比（最大） |
+|---|---|---|---|---|---|---|
+| [0.9, −0.6, 0.4, 1.1] | [1, 1, 1, 1] | 3 | 1 | 2 | 1e-3 | 8.0e-3 |
+| [0.9, −0.6, 0.4, 1.1] | [1, 0.5, −0.8, 0.3] | 2 | 1 | 0.5 | 1e-3 | 2.1e-3 |
+| [1.2, −0.4, 0.6, −0.9] | [1, 0.5, −0.8, 0.3] | 5 | 1 | 2 | 1e-3 | 7.0e-3 |
+
+（`lrn_col_judge_lin_accepts_what_rf_rejected` が `Rf` 単独の拒否・either の受理・REQ-2 比 < 1/4 を、統合テスト `lrn_newly_accepted_by_lin_match_f64_second_order` が公開経路の受理と f64 参照との REQ-2 一致を確かめる。）
+
+#### 81.11.4 テスト・変異確認
+
+- soundness: `lin_bound_covers_f32_deviation_for_lrn_sweep`（乱数 240 通り。f32 の再現と和の順序を逆にした再現の誤差を `Lin` の上界が全 seed・全要素で押さえる。`tight > 0` も課す）、`lrn_lin_bound_covers_child_tape_second_order`（子テープが実際に出す二階の値が `Lin` の値 ± 上界に収まる。足し順の違いの実測）、`lrn_lin_events_stay_within_bound`（事象数の上界）、`lrn_alpha_zero_shadow_bound_covers_structure_vs_host`（構造とホストの差を `α = 0` の上界が覆い、従来の `rounding_coeff(4)·|g·f|` の半分未満）。
+- 拒否: `lrn_col_judge_lin_still_rejects_probes`（相殺〈`x = 2^-33`・`k = 1e-28`〉・スケール復元の underflow〈`x = 2^-80`・`α = 1e36`〉・pow 係数の overflow、および実際の誤差〈REQ-2 比 約 0.02〉は小さいが `Lin` の上界が閾値を超える入力）。統合テストの 4 プローブ（`lrn_pow_scalar_coefficient_f32_overflow_is_rejected_child_empty`・`lrn_zero_upstream_with_cancelling_diagonal_is_rejected`・`lrn_scale_restoration_cotangent_underflow_is_rejected_or_exact`・`lrn_all_nan_window_column_with_finite_second_order_path_is_rejected`）は無変更で通る。
+- 変異確認（手動・コミットしない。戻して通ることを確認）: `Lin::bound` を 0 にすると `lin_bound_covers_f32_deviation_for_lrn_sweep`・`lrn_lin_bound_covers_child_tape_second_order`・`lrn_alpha_zero_shadow_bound_covers_structure_vs_host`・`lrn_col_judge_lin_still_rejects_probes`（上界だけが拒否の根拠の入力）が失敗する（ほかの `Lin` の soundness テストも失敗する）。**統合テストの既存プローブ 4 件は `Lin::bound` を 0 にしても拒否のまま**で、拒否の理由は上界の項ではなく `|V_str − V|`（相殺・underflow）と forward の f32 の ±inf・NaN の検査である（§81.8.5 の SpectralNorm と同じ）。`α = 0` の `B_host` を 0 にすると `lrn_alpha_zero_shadow_bound_covers_structure_vs_host` が失敗する。
+
+#### 81.11.5 一般の分岐の `shadow_check`（据え置き）
+
+- `B_str` は作れる（forward に縮約が無いので `lrn_col_fwd::<Lin>` の `dx` の上界で足りる）が、`B_host` にはホストの `local_response_norm_vjp_host` が使う f64 の `d.powf(−β)`・`d.powf(−β−1)` の精度の仮定が要る。#4083 の決定は CPU の f32 の `powf`／`exp` に限られ、f64 の `powf` の精度は決まっていない。新しい仮定を自分で置かないため、一般の分岐の照合は `rounding_coeff(nt_f + nt_r + 4)·m_abs` のままにした。
+- 影響: 上の表の「受理に変わったが公開経路の `shadow_check` が拒否」21 件（受理に変わった 98 件の約 2 割）。f64 の `powf` の精度の仮定を決めれば、これらも受理に変えられる見込み。
+
+#### 81.11.6 後続・スコープ外・変えていないもの
+
+- 後続候補（Issue は起票していない。起票は所有者承認が要る）: 一般の分岐の `shadow_check` の置き換え（ホストの f64 `powf` の精度の仮定の決定が要る）。
+- スコープ外: GPU（CUDA・Metal・ROCm）・aarch64 Linux・macOS の実測。`lrn_lin_cost`・`lrn_lin_events_max` の測っていない範囲（`c > 256`・`size > 17`）への外挿。
+- 変えていないもの: 上記 81.11.0 のとおり。WeightNorm・SpectralNorm・Cosine の結果は変わらない。
+
 ## 82. 計測・設計記録（イシュー #4089・親 #4071。損失のクラス軸系の create_graph の拒否の内訳と後続で受理に変える入力）
 
 ### 82.0 位置づけ
