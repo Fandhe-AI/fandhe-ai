@@ -4485,3 +4485,216 @@ fn ce_lin_switch_rows_up_to_c1000_never_flip_to_reject_and_flipped_match_f64() {
     assert!(total >= 250, "{total}");
     assert!(flipped >= 20, "受理に変わった行が少なすぎる: {flipped}");
 }
+
+// =====================================================================================
+// #4132: 拒否のまま残った 4 候補の `Lin` の上界を項ごとに分解する計測（設計 §82.15）
+// =====================================================================================
+
+/// 上界の内訳の計測の 1 要素分の記録（`entry_check_lin` と同じ式の入力）。
+struct BdRow {
+    /// 要素の識別（`g,j` / `x,j,i` / `g,o,j` / `x,wrt,i,j`）。run 間で添字を揃えて突き合わせる。
+    key: String,
+    v: f64,
+    s: f32,
+    bound: f64,
+    /// 種別ごとの上界（添字は `lin::BD_*`）。
+    bd: [f64; super::super::lin::BD_KINDS],
+    /// 判定時点の余裕係数の `slack = 16·N·u`。
+    slack: f64,
+    /// 判定時点の事象数 `N`（アブレーションの run 間で一致することを検査する）。
+    events: usize,
+}
+
+impl BdRow {
+    fn new(key: String, l: Lin, s: f32) -> Self {
+        use super::super::lin::{LIN_U, lin_breakdown, lin_events, lin_is_sparse};
+        // 計測は厳密モード前提（疎モードの `pool_small_terms` は μ に依存して畳む項を選び、N を変えうるため）。
+        assert!(!lin_is_sparse(), "計測は厳密モードで行う");
+        BdRow {
+            key,
+            v: l.v,
+            s,
+            bound: l.bound(),
+            bd: lin_breakdown(l),
+            slack: 16.0 * lin_events() as f64 * LIN_U,
+            events: lin_events(),
+        }
+    }
+    /// 閾値（`entry_check_lin` と同じ。絶対救済と相対の半分の大きい方）。
+    fn thr(&self) -> f64 {
+        ABSOLUTE_RESCUE_THRESHOLD.max((RELATIVE_TOLERANCE / 2.0) * self.v.abs())
+    }
+    /// `err/閾値`。`sv`・`slack` が偽ならその項を 0 にする。
+    fn margin(&self, sv: bool, slack: bool) -> f64 {
+        let d = if sv {
+            (f64::from(self.s) - self.v).abs()
+        } else {
+            0.0
+        };
+        let k = if slack { self.slack } else { 0.0 };
+        (d + self.bound * (1.0 + k)) / self.thr()
+    }
+}
+
+/// CE の `g` と対角（`seed_list` の各 seed）を `Lin` で走査して記録する（`ce_lin_scan_timed` と同じ演算）。
+fn ce_bd_rows(c: &CeCase, seed_list: &[usize]) -> Vec<BdRow> {
+    use super::super::lin::lin_truncate;
+    let (logits, a_s, b, ctx) = ce_lin_inputs(c);
+    let mut st = CeLinState::new(&logits, a_s, ctx);
+    let mut out = Vec::new();
+    for &j in seed_list {
+        let (mark, sa, sb) = st.seed(j, b[j]);
+        out.push(BdRow::new(format!("g,{j}"), sa.g, sb.g));
+        let l = cewo_x(&st.lin, &sa, j, j);
+        let s = cewo_x(&st.f32m, &sb, j, j);
+        out.push(BdRow::new(format!("x,{j},{j}"), l, s));
+        lin_truncate(mark);
+    }
+    out
+}
+
+/// Triplet の `g` と 9 ブロックの全レーンを `Lin` で走査して記録する（`tri_lin_scan_timed` と同じ演算）。
+fn tri_bd_rows(c: &TriCase, seed_list: &[usize]) -> Vec<BdRow> {
+    use super::super::lin::lin_truncate;
+    let rows = c.inputs();
+    let up = (f64::from(pow2(c.exp)), None);
+    let setup = triplet_setup((&rows.0, &rows.1, &rows.2), 0.0, c.p, c.swap, up).expect("setup");
+    let mut st = TriLinState::new(setup);
+    let mut out = Vec::new();
+    for &j in seed_list {
+        for o in 0..3 {
+            let (mark, sa, sb) = st.seed(o, j);
+            out.push(BdRow::new(format!("g,{o},{j}"), sa.g, sb.g));
+            for wrt in 0..3 {
+                for i in 0..c.d {
+                    let l = tri_x(&st.st, &st.lin, &sa, wrt, (i, j));
+                    let s = tri_x(&st.st, &st.f32m, &sb, wrt, (i, j));
+                    out.push(BdRow::new(format!("x,{o},{wrt},{i},{j}"), l, s));
+                    lin_truncate(mark);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 1 候補の内訳を出す。`collect` を「通常」と「ある種別の `μ` を 0 にして forward から計算し直した」run で呼び、
+/// 通常の run で拒否された要素ごとに `err/閾値` の変化を 1 行（`LINBD`）、候補ごとの要約を `LINBDSUM` に出す。
+fn lin_bound_breakdown_report(tag: &str, collect: impl Fn() -> Vec<BdRow>) {
+    use super::super::lin::{BD_CONST, BD_LIBM_REM, BD_LIBM_ULP, BD_ROUND, BD_TOTAL, BdAblate};
+    // (名前, 0 にする種別, `|s−v|` を残すか, 余裕係数を残すか)
+    let scenarios: [(&str, &[u8], bool, bool); 10] = [
+        ("base", &[], true, true),
+        ("no_total", &[BD_TOTAL], true, true),
+        ("no_round", &[BD_ROUND], true, true),
+        ("no_const", &[BD_CONST], true, true),
+        ("no_libm_ulp", &[BD_LIBM_ULP], true, true),
+        ("no_libm_rem", &[BD_LIBM_REM], true, true),
+        ("no_libm", &[BD_LIBM_ULP, BD_LIBM_REM], true, true),
+        ("no_slack", &[], true, false),
+        ("no_sv", &[], false, true),
+        (
+            "only_total",
+            &[BD_ROUND, BD_CONST, BD_LIBM_ULP, BD_LIBM_REM],
+            false,
+            false,
+        ),
+    ];
+    let runs: Vec<Vec<BdRow>> = scenarios
+        .iter()
+        .map(|&(_, kinds, _, _)| {
+            let _g = BdAblate::new(kinds);
+            collect()
+        })
+        .collect();
+    let base = &runs[0];
+    for r in &runs {
+        assert_eq!(r.len(), base.len(), "{tag}: run 間で要素数が違う");
+        // 計測契約（§82.15.1）: 事象は 0 の μ のまま数えるので、どのアブレーションでも N は base と一致する。
+        for (i, (x, b)) in r.iter().zip(base).enumerate() {
+            assert_eq!(x.key, b.key, "{tag}: 要素の対応がずれた i={i}");
+            assert_eq!(
+                x.events, b.events,
+                "{tag}: アブレーションで事象数 N が変わった elem={}",
+                b.key
+            );
+        }
+    }
+    let margin = |si: usize, i: usize| {
+        let (_, _, sv, sl) = scenarios[si];
+        runs[si][i].margin(sv, sl)
+    };
+    let is_rej = |si: usize, i: usize| {
+        let m = margin(si, i);
+        !m.is_finite() || m >= 1.0 || runs[si][i].slack >= 0.01
+    };
+    let names = ["round", "const", "total", "libm_ulp", "libm_rem", "other"];
+    for i in 0..base.len() {
+        if !is_rej(0, i) {
+            continue;
+        }
+        let r = &base[i];
+        let thr = r.thr();
+        let mut line = format!(
+            "LINBD cand={tag} elem={} v={:e} s={:e} thr={thr:e} margin={:.4} sv={:.4} slack_part={:.4} bound={:e}",
+            r.key,
+            r.v,
+            r.s,
+            margin(0, i),
+            (f64::from(r.s) - r.v).abs() / thr,
+            r.bound * r.slack / thr,
+            r.bound,
+        );
+        for (k, n) in names.iter().enumerate() {
+            line += &format!(
+                " bd_{n}={:.4} frac_{n}={:.4}",
+                r.bd[k] / thr,
+                r.bd[k] / r.bound
+            );
+        }
+        for si in 1..scenarios.len() {
+            line += &format!(" {}={:.4}", scenarios[si].0, margin(si, i));
+        }
+        eprintln!("{line}");
+    }
+    for (si, (name, ..)) in scenarios.iter().enumerate() {
+        let (mut mx, mut rej) = (0f64, 0usize);
+        // 通常の run で拒否された要素の中での最大（その要素を救えたかが分かる）と、全要素での最大・拒否数。
+        let mut mx_rej_set = 0f64;
+        for i in 0..base.len() {
+            let m = margin(si, i);
+            if m.is_finite() {
+                mx = mx.max(m);
+                if is_rej(0, i) {
+                    mx_rej_set = mx_rej_set.max(m);
+                }
+            }
+            if is_rej(si, i) {
+                rej += 1;
+            }
+        }
+        eprintln!(
+            "LINBDSUM cand={tag} scenario={name} checked={} rejected={rej} max_margin_all={mx:.4} max_margin_base_rejected_set={mx_rej_set:.4}",
+            base.len()
+        );
+    }
+}
+
+/// `LINBD`: 拒否のまま残った 4 候補（CE の C=1000 CEWO-smooth・C=2100 既定 CE、Triplet の d=64・p=3・swap なしと
+/// d=64・r=1e-6・p=10・swap なし）の `Lin` の上界を項ごとに分解する（設計 §82.15・イシュー #4132）。判定は変えず、
+/// `#[cfg(test)]` の事象の種別と、種別ごとに `μ` を 0 にして計算し直す切り替え（`lin::BdAblate`）で測る。
+/// `cargo test -p fandhe-ai-autodiff --release --lib lin_bound_breakdown_for_followup_candidates_measurement -- --ignored --nocapture`
+#[test]
+#[ignore = "計測。--release で実行する"]
+fn lin_bound_breakdown_for_followup_candidates_measurement() {
+    for c in ce_followup_candidates().into_iter().filter(|c| c.c > 100) {
+        let sd: Vec<usize> = (0..c.c).collect();
+        lin_bound_breakdown_report(&format!("{c:?}").replace(' ', ""), || ce_bd_rows(&c, &sd));
+    }
+    let cs = triplet_followup_candidates();
+    for k in [0usize, 4] {
+        let c = cs[k];
+        let sd: Vec<usize> = (0..c.d).collect();
+        lin_bound_breakdown_report(&format!("{c:?}").replace(' ', ""), || tri_bd_rows(&c, &sd));
+    }
+}
