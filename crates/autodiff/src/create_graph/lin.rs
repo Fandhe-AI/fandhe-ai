@@ -1703,6 +1703,11 @@ mod tests {
     /// 上限 `LIN_REST_MAX` ちょうどの 128 を必ず含める。
     const WIDE_RESTS: [usize; 8] = [65, 72, 81, 96, 100, 113, 127, 128];
 
+    /// 幅 65〜128 の掃引で、幅ごとの「実測の誤差 / 上界×slack」の最大比に課す下限。目的は上界が緩む回帰の
+    /// 検出（soundness の検査ではない）。根拠は §80.8: §80.6 の実測の最大比は 0.0629〜0.0857 で、0.01 は
+    /// その最小値の約 6 分の 1。テスト専用で、`Lin` の判定には使わない。
+    const WN_WIDE_MAX_RATIO_FLOOR: f64 = 0.01;
+
     /// 幅 65〜128 用の入力生成。`variant` 0〜5 は 振幅 {1e-3, 1, 1e3} × 符号パターン
     /// {符号付き一様, 正のみ `[0.2, 1.0)·amp`}。`up`・`g`・`s` の作り方は [`wn_sweep_input`] と同じ。
     fn wn_sweep_input_at(
@@ -1734,6 +1739,7 @@ mod tests {
     /// 照合の本体は [`lin_bound_covers_f32_deviation_for_weight_norm_wide_sweep`] と同じ（幅 2〜64 の入力列と
     /// 乱数の消費順を変えないため別テストにし、本体は複製した）。`Lin::bound` を 0 にすると失敗する（変異確認は §80.6）。
     /// 上界の緩さ（tight > 0）は幅 65〜128 では成立しないため合否にしない（§80.6）。
+    /// 緩さの回帰は幅ごとの最大比の下限 [`WN_WIDE_MAX_RATIO_FLOOR`] で検査する（`Lin::bound` を 100 倍にすると失敗する。§80.8）。
     /// 幅ごとの被覆も fail-closed に検査する（`wn_fwd` が `None` で幅が黙って消えるのを防ぐ）。
     #[test]
     fn lin_bound_covers_f32_deviation_for_weight_norm_sweep_65_to_128() {
@@ -1802,13 +1808,17 @@ mod tests {
             );
             assert!(w_cases >= 2, "rest {rest}: 照合できたケースが {w_cases}");
             assert!(w_checked > 0, "rest {rest}: 検査した要素が無い");
+            assert!(
+                max_ratio >= WN_WIDE_MAX_RATIO_FLOOR,
+                "rest {rest}: 実測の誤差 / 上界の最大比 {max_ratio:e} が下限 {WN_WIDE_MAX_RATIO_FLOOR:e} を下回った（上界が緩む回帰。§80.8）"
+            );
             checked += w_checked;
             tight += w_tight;
         }
         lin_reset();
         assert!(checked > 1000, "検査した要素数 {checked}");
         // 幅 65〜128 では tight（dev > 0.1·bound）が 0 になる（上界が緩い側。§80.6）。0.1 の係数は緩めず、
-        // soundness（dev <= bound）だけを合否にし、緩さは最大比の出力（上の eprintln）で記録する。
+        // tight はログ出力のままにし、soundness（dev <= bound）と幅ごとの最大比の下限（§80.8）を合否にする。
         eprintln!("[4117] total checked {checked} tight {tight}");
     }
 
