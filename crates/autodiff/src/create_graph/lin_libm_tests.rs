@@ -168,18 +168,19 @@ const SWEEP_N: u64 = 1 << 17;
 
 /// `cargo test` で既定実行するのは、#4083 の仮定を確かめた環境（x86_64 Linux glibc）だけ。
 macro_rules! assumption_env_test {
-    ($(#[$m:meta])* fn $name:ident() $body:block) => {
+    ($reason:literal; $(#[$m:meta])* fn $name:ident() $body:block) => {
         $(#[$m])*
         #[test]
         #[cfg_attr(
             not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
-            ignore = "未実測の環境。計測は powf_ulp_measurement"
+            ignore = $reason
         )]
         fn $name() $body
     };
 }
 
 assumption_env_test! {
+    "未実測の環境。計測は powf_ulp_measurement";
     /// 通常の掃引で、全層の最大誤差が仮定 [`LIBM_F32_MAX_ULP`] 以内。
     fn lin_powf_ulp_within_assumption() {
         for (name, st) in STRATA.iter().zip(powf_ulp_sweep(SWEEP_N, 0x4084)) {
@@ -352,6 +353,7 @@ fn slack() -> f64 {
 const POWF_RATIO_FLOOR: f64 = 0.1;
 
 assumption_env_test! {
+    "未実測の環境。計測は powf_ulp_measurement";
     /// 層ごとの入力を直接 `Lin::powf_bounded` に通し、受理された全件で `|f32 − v| ≤ bound·(1 + 16·N·u)`。
     /// 上界の過大な膨張を検出するため、最大比 `dev/bound` の下限も課す。
     fn lin_powf_bound_covers_f32_deviation_strata() {
@@ -444,6 +446,7 @@ macro_rules! run3 {
 }
 
 assumption_env_test! {
+    "未実測の環境。計測は powf_ulp_measurement";
     /// 合成プログラム（相殺・Triplet 形・LRN 形・Z が上限に近い入力）で、f32 構造と逆順和が `Lin` の上界に収まる。
     fn lin_powf_bound_covers_composed_programs() {
         let mut rng = Rng(0x4084_0002);
@@ -553,6 +556,7 @@ fn exp_ulp_sweep(n: u64, seed: u64) -> Vec<Stat> {
 }
 
 assumption_env_test! {
+    "未実測の環境。計測は exp_ulp_measurement";
     /// 通常の掃引で、全層の最大誤差が仮定 [`LIBM_F32_MAX_ULP`] 以内。
     fn lin_exp_ulp_within_assumption() {
         for (name, st) in EXP_STRATA.iter().zip(exp_ulp_sweep(SWEEP_N, 0x4092)) {
@@ -751,6 +755,7 @@ fn prog_softmax_curv<T: Num>(xs: &[f64], i: usize, j: usize) -> T {
 }
 
 assumption_env_test! {
+    "未実測の環境。計測は exp_ulp_measurement";
     /// 層ごとの入力を `Lin::exp_bounded` に通し、受理された全件で `|f32 − v| ≤ bound·(1 + 16·N·u)`。
     /// 偶数件は厳密な入力、奇数件は丸めを伴う入力 `x + d`。上界の過大な膨張を検出するため最大比の下限も課す。
     fn lin_exp_bound_covers_f32_deviation_strata() {
@@ -793,6 +798,7 @@ assumption_env_test! {
 }
 
 assumption_env_test! {
+    "未実測の環境。計測は exp_ulp_measurement";
     /// 合成プログラム（softmax・曲率の形・積・相殺で b を上限近くへ広げた入力）で、f32 構造と逆順和が `Lin` の上界に収まる。
     fn lin_exp_bound_covers_composed_programs() {
         let mut rng = Rng(0x4092_0002);

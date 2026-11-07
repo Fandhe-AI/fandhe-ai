@@ -57,7 +57,7 @@ pub(super) trait Num: Copy {
     /// （Triplet の `1.0 / p32`・`p32 - 1.0` のように `e as f32` と一致しない場合がある）。既定は [`Num::powe`] へ委ねる
     /// （`f64`・`norm_reparam.rs` の `Rf`・`Dm` は参照値・依存の追跡で `e_str` を使わない。`Dm` は `powe` 内で
     /// `e as f32 == 0` を見るため、`e_str != e as f32` の呼び出しでは食い違いうる。LRN〈#4088〉の呼び出しは
-    /// `e_str == e as f32` なので食い違わない。Triplet〈#4095〉は配線側で確認すること）。
+    /// `e_str == e as f32` なので食い違わない。Triplet の配線〈#4095・#4096〉は `e_str` を渡して配線済み）。
     /// `f32` は `powf(e_str)`、[`Lin`] だけが libm の精度の仮定（[`LIBM_F32_MAX_ULP`]）を使った上界を持つ。
     fn powf_bounded(self, e: f64, _e_str: f32) -> Self {
         self.powe(e)
@@ -69,7 +69,7 @@ pub(super) trait Num: Copy {
     /// 上界つきの `exp`（イシュー #4092・設計記録 §82.9）。`f32`・`f64` は `exp()`、[`Lin`] だけが libm の精度の仮定
     /// （[`LIBM_F32_MAX_ULP`]）を使った上界を持つ。`norm_reparam.rs` の `Rf` は上界なし（常に拒否）、`Dm` は依存を保つ。
     /// VJP の係数は出力 `y` そのものなので専用の勾配メソッドはない。
-    /// CE・CEWO の forward の総称化（`loss_class.rs::cewo_fwd`。#4093）で本番の `f64`／`f32` から呼ぶ。`Lin` の判定への配線は #4094。
+    /// CE・CEWO の forward の総称化（`loss_class.rs::cewo_fwd`。#4093）で本番の `f64`／`f32` から呼ぶ。`Lin` の判定への配線は #4094 で済み。
     fn exp_bounded(self) -> Self;
     /// `Sqrt` の VJP 係数 `0.5 / y`（`self` は forward の出力 `y`）。
     fn root_grad(self) -> Self;
