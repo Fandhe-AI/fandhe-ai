@@ -1337,3 +1337,63 @@ fn weight_norm_wide_cancelling_hessian_is_accepted_and_matches_f64() {
         }
     }
 }
+/// `Rf` 拒否から `Lin` 受理に変わった入力 `(幅, g0, シード)`（#4118。決定記録 §80.7）。
+/// `src/create_graph/norm_reparam.rs` の `tests::WN_FLIP_CASES` と同一に保つこと（そちらが「`Rf` 拒否・`Lin` 受理・
+/// 全体受理」を assert し、本テストは受理後の二階を f64 参照と照合する。統合テストからクレート内は見えないため複製）。
+const WN_FLIP_CASES: [(usize, f32, u64); 18] = [
+    (24, 0.1, 12369),
+    (24, 0.1, 15369),
+    (24, 0.2, 13369),
+    (32, 0.1, 12377),
+    (32, 0.1, 13377),
+    (32, 0.2, 12377),
+    (48, 0.1, 12393),
+    (48, 0.1, 13393),
+    (48, 0.2, 12393),
+    (64, 0.05, 12409),
+    (64, 0.1, 12409),
+    (64, 0.2, 12409),
+    (96, 0.05, 12441),
+    (96, 0.1, 12441),
+    (96, 0.1, 13441),
+    (128, 0.05, 12473),
+    (128, 0.1, 12473),
+    (128, 0.1, 15473),
+];
+
+/// 正のプローブ（#4118）: 幅 24〜128 で従来の `Rf` + `coeff·M` が拒否していた入力（`Lin` の適用範囲を広げて受理に
+/// 変わったもの。拒否・受理の確認は `norm_reparam.rs` の `wn_sq_tanh_flip_inputs_reject_rf_accept_lin`）の二階が、
+/// f64 参照と REQ-2 統一複合判定で全要素一致する（行の部分集合には絞らない。debug で約 7 秒）。tolerance は変えない。
+/// 最大誤差（相対は絶対誤差 1e-5 以上の要素のみ）は決定記録 §80.7 の記録用に stderr へ出す（合否は REQ-2 判定だけ）。
+#[test]
+fn weight_norm_wide_flip_hessian_matches_f64_up_to_width_128() {
+    let (mut max_rel, mut max_abs) = (0.0f64, 0.0f64);
+    for (rest, g0, seed) in WN_FLIP_CASES {
+        let ctx = format!("幅 {rest}・g0={g0}・seed={seed}");
+        let x0 = wn_wide_input(rest, g0, seed);
+        let n = x0.len();
+        let got = analytic_hessian(&|tape, x| sq_tanh_loss(tape, x, rest), &x0, &[n]);
+        let want = wn_sq_tanh_hessian_f64(&x0, rest);
+        let (mut c_rel, mut c_abs) = (0.0f64, 0.0f64);
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    common::req2_close(got[i][j], want[i][j]),
+                    "{ctx}: H[{i}][{j}] = {:e}（f64 参照 {:e}）",
+                    got[i][j],
+                    want[i][j]
+                );
+                let d = (got[i][j] - want[i][j]).abs();
+                c_abs = c_abs.max(d);
+                // 絶対誤差 1e-5 未満の要素は絶対側で受理されるので、相対誤差は絶対側で救われない要素だけ集計する。
+                if d >= 1e-5 {
+                    c_rel = c_rel.max(d / want[i][j].abs());
+                }
+            }
+        }
+        eprintln!("WNFLIP {ctx} max_rel={c_rel:e} max_abs={c_abs:e}");
+        max_rel = max_rel.max(c_rel);
+        max_abs = max_abs.max(c_abs);
+    }
+    eprintln!("WNFLIP-ALL max_rel={max_rel:e} max_abs={max_abs:e}");
+}

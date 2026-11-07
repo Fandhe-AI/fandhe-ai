@@ -3751,6 +3751,130 @@ mod tests {
         }
     }
 
+    /// 幅 8 超の WeightNorm の入力（決定的な LCG。`v` は `[0.2, 1.0)`、`g = [g0, 0.8·g0]`）。
+    /// `tests/create_graph_norm_reparam.rs::wn_wide_input` と同一に保つこと（#4118。クレート内テストと統合
+    /// テストは互いに参照できないため逐語で複製している）。
+    fn wn_flip_input(rest: usize, g0: f32, seed: u64) -> Vec<f32> {
+        let mut st = seed;
+        let mut x0: Vec<f32> = (0..2 * rest)
+            .map(|_| {
+                st = st
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (0.2 + 0.8 * ((st >> 33) as f64) / f64::from(1u32 << 31)) as f32
+            })
+            .collect();
+        x0.push(g0);
+        x0.push(g0 * 0.8);
+        x0
+    }
+
+    /// `tests/create_graph_norm_reparam.rs::sq_tanh_loss`（`(Σ tanh(weight_norm(v, g)))²`）と同じグラフを組み、
+    /// 本番が `wn_group_judge` に渡す `up`（`weight_norm` 出力の cotangent）で 2 グループを判定する。
+    /// 戻り値は `(Rf で全グループ受理, Lin で全グループ受理, backward_create_graph が受理)`（#4118）。
+    fn wn_flip_probe(rest: usize, g0: f32, seed: u64) -> (bool, bool, bool) {
+        let x0 = wn_flip_input(rest, g0, seed);
+        let n = x0.len();
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let x = tape.var(&tt(x0.clone(), &[n]));
+        let v = x
+            .narrow(0, 0, 2 * rest)
+            .unwrap()
+            .reshape(&[2, rest])
+            .unwrap();
+        let g = x.narrow(0, 2 * rest, 2).unwrap().reshape(&[2, 1]).unwrap();
+        let y = v.weight_norm(&g, Some(0)).unwrap();
+        let l = y.tanh().sum(None).unwrap();
+        let loss = l.mul(&l).unwrap();
+        let full = tape.backward_create_graph(&loss, &child).is_ok();
+        let grads = tape.backward(&loss).unwrap();
+        let up = dense_vec(grads.get(&y).unwrap().expect("y は loss に到達する"));
+        let (mut rf, mut lin) = (true, true);
+        for k in 0..2 {
+            let vk = &x0[k * rest..(k + 1) * rest];
+            let uk = &up[k * rest..(k + 1) * rest];
+            let mx = vk.iter().fold(0.0f64, |m, &a| m.max(f64::from(a).abs()));
+            let s = f64::from(pow2(pow2_ceil_exponent(mx)));
+            let gk = x0[2 * rest + k];
+            rf &= wn_group_judge(vk, uk, gk, s, wn_coeff(rest), false).is_ok();
+            lin &= wn_group_judge(vk, uk, gk, s, wn_coeff(rest), true).is_ok();
+        }
+        lin_reset();
+        (rf, lin, full)
+    }
+
+    /// `Rf` 拒否・`Lin` 受理に変わった入力 `(幅, g0, シード)`（#4118。決定記録 §80.7）。
+    /// `tests/create_graph_norm_reparam.rs::WN_FLIP_CASES` と同一に保つこと（f64 照合はそちらが行う）。
+    /// 探索は `wn_sq_tanh_flip_search_measurement`（`--ignored`）。
+    const WN_FLIP_CASES: [(usize, f32, u64); 18] = [
+        (24, 0.1, 12369),
+        (24, 0.1, 15369),
+        (24, 0.2, 13369),
+        (32, 0.1, 12377),
+        (32, 0.1, 13377),
+        (32, 0.2, 12377),
+        (48, 0.1, 12393),
+        (48, 0.1, 13393),
+        (48, 0.2, 12393),
+        (64, 0.05, 12409),
+        (64, 0.1, 12409),
+        (64, 0.2, 12409),
+        (96, 0.05, 12441),
+        (96, 0.1, 12441),
+        (96, 0.1, 13441),
+        (128, 0.05, 12473),
+        (128, 0.1, 12473),
+        (128, 0.1, 15473),
+    ];
+
+    /// 回帰（#4118）: `WN_FLIP_CASES` の各入力で、2 グループとも `Lin` は受理・少なくとも 1 グループは従来の `Rf` + `coeff·M` が
+    /// 拒否し、本番の `backward_create_graph` が受理する（f64 照合の対象が「`Rf` 拒否から `Lin` 受理に変わった入力」であることの根拠）。
+    /// 判定・定数は変えず、本番の判定関数を呼ぶだけ。`up` は `test_ops` の逆伝播から取る（f64 照合側は `naive_ops`。
+    /// 独立実装なので `up` の bit がずれれば判定が変わりうる。その場合は本テストが先に失敗する）。
+    #[test]
+    fn wn_sq_tanh_flip_inputs_reject_rf_accept_lin() {
+        for (rest, g0, seed) in WN_FLIP_CASES {
+            assert!(wn_use_lin(2, rest), "幅 {rest}: 本番が Lin を選ばない");
+            let (rf, lin, full) = wn_flip_probe(rest, g0, seed);
+            assert!(
+                !rf,
+                "幅 {rest}・g0={g0}・seed={seed}: Rf も受理する（拒否から受理に変わった入力でない）"
+            );
+            assert!(lin, "幅 {rest}・g0={g0}・seed={seed}: Lin が拒否する");
+            assert!(
+                full,
+                "幅 {rest}・g0={g0}・seed={seed}: backward_create_graph が拒否する"
+            );
+        }
+    }
+
+    /// 計測（`#[ignore]`・#4118）: 幅ごとに g0 とシードを振り、`Rf` 拒否・`Lin` 受理（かつ全体受理）の入力を
+    /// `FLIPSEARCH` 行で出す。シードは `12345 + 幅 + 1000·k`。
+    /// `cargo test -p fandhe-ai-autodiff --release --lib wn_sq_tanh_flip_search_measurement -- --ignored --nocapture`
+    #[test]
+    #[ignore = "計測。--release で実行する（決定記録 §80.7）"]
+    fn wn_sq_tanh_flip_search_measurement() {
+        for rest in [24usize, 32, 48, 64, 96, 128] {
+            for g0 in [0.05f32, 0.1, 0.2] {
+                let (mut tried, mut flips, mut shown) = (0, 0, 0);
+                for k in 0..40u64 {
+                    let seed = 12345 + rest as u64 + 1000 * k;
+                    let (rf, lin, full) = wn_flip_probe(rest, g0, seed);
+                    tried += 1;
+                    if !rf && lin && full {
+                        flips += 1;
+                        if shown < 3 {
+                            shown += 1;
+                            eprintln!("FLIPSEARCH rest={rest} g0={g0} seed={seed}");
+                        }
+                    }
+                }
+                eprintln!("FLIPSEARCH-SUM rest={rest} g0={g0} tried={tried} flips_full={flips}");
+            }
+        }
+    }
+
     /// [`wn_use_lin`] の境界: 幅 [`LIN_REST_MAX`] とその +1、走査量 [`LIN_BUDGET`] の境界のグループ数、余裕係数の条件。
     #[test]
     fn wn_use_lin_boundaries() {
