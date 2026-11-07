@@ -56,20 +56,13 @@ pub(super) trait Num: Copy {
     /// 上界つきの `powf`（イシュー #4084・設計記録 §81.10）。`e` は参照の指数、`e_str` は構造の f32 が実際に使う指数
     /// （Triplet の `1.0 / p32`・`p32 - 1.0` のように `e as f32` と一致しない場合がある）。既定は [`Num::powe`] へ委ねる
     /// （`f64`・`norm_reparam.rs` の `Rf`・`Dm` は参照値・依存の追跡で `e_str` を使わない。`Dm` は `powe` 内で
-    /// `e as f32 == 0` を見るため、`e_str != e as f32` の呼び出しでは食い違いうる。配線側〈#4088〉で確認すること）。
+    /// `e as f32 == 0` を見るため、`e_str != e as f32` の呼び出しでは食い違いうる。LRN〈#4088〉の呼び出しは
+    /// `e_str == e as f32` なので食い違わない。Triplet〈#4095〉は配線側で確認すること）。
     /// `f32` は `powf(e_str)`、[`Lin`] だけが libm の精度の仮定（[`LIBM_F32_MAX_ULP`]）を使った上界を持つ。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#4088・#4095 が配線するまで本番から呼ばれない")
-    )]
     fn powf_bounded(self, e: f64, _e_str: f32) -> Self {
         self.powe(e)
     }
     /// 上界つきの `PowScalar` の VJP 係数 `e·x^(e−1)`（[`Num::pow_grad`] の上界つき版。`e == 0` は 0）。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#4088・#4095 が配線するまで本番から呼ばれない")
-    )]
     fn pow_grad_bounded(self, e: f64) -> Self {
         self.pow_grad(e)
     }
@@ -941,7 +934,7 @@ pub(super) fn entry_check_lin(
 mod libm_tests;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::norm_reparam::{
         WnSeed, pow2, sn_fwd, sn_rev, wn_coeff, wn_fwd, wn_group_judge, wn_rev,
     };
@@ -951,7 +944,7 @@ mod tests {
     /// 和の順序だけが [`f32`] と違う再現（多項の和を末尾から足す）。実カーネルの和の順序が違っても
     /// [`Lin`] の上界が覆うこと（[`Num::total`] の順序非依存）を確かめるために使う。
     #[derive(Clone, Copy)]
-    pub(super) struct F32Rev(pub(super) f32);
+    pub(in crate::create_graph) struct F32Rev(pub(in crate::create_graph) f32);
 
     impl Num for F32Rev {
         fn k(x: f64) -> Self {

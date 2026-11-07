@@ -69,6 +69,11 @@
 //!   後の 1 階の値の照合（[`shadow_check`]）も残す。
 //!   SpectralNorm の照合の見積りは `Lin` の上界 + ホスト側の丸めの上界（[`sn_shadow_bound`]）で、出せない
 //!   ときだけ従来の `rounding_coeff(N+4)·m_abs`（#4081。docs の決定記録 §81.9）。
+//!   LRN の総括判定（第 2 軸）は、[`Rf`] の見積りが拒否した要素だけを [`Lin`] の上界で評価し直し、どちらかが閾値内なら
+//!   受理する（either 受理。[`lrn_col_judge`]。条件内のテンソルだけ［[`lrn_use_lin`]］。冪は `Lin` の `powf` の規則
+//!   〔#4084〕、複数の寄与の蓄積は順序に依らない [`Num::total`]。#4088・§81.11）。`α = 0` の分岐は `f` を f32 へ丸めた
+//!   誤差の定数の事象（[`Lin::k`]）と [`lrn_alpha0_shadow_bound`] で見積もる。一般の分岐の照合は、ホストの f64 の
+//!   `powf` の精度の仮定が要るため従来の `rounding_coeff(nt_f + nt_r + 4)·m_abs` のまま据え置く（§81.11.5）。
 //! - 拒否は `AutodiffError::Backward`。`backward_create_graph` のロールバックで `child` は空へ戻り、
 //!   安全な入力で再試行できる。
 //!
@@ -90,8 +95,8 @@ use fandhe_ai_tensor_core::{BackendOps, Tensor};
 #[cfg(test)]
 use super::judge::JUDGE_BUDGET;
 use super::lin::{
-    LIN_BUDGET, LIN_REST_MAX, LIN_U, Lin, Num, entry_check_lin, lin_events, lin_group_cost,
-    lin_mark, lin_reset, lin_reset_sparse, lin_truncate,
+    LIN_BUDGET, LIN_REST_MAX, LIN_U, Lin, LinMark, Num, entry_check_lin, lin_events,
+    lin_group_cost, lin_mark, lin_reset, lin_reset_sparse, lin_truncate,
 };
 use super::{child_value, judge, push_v3};
 use crate::create_graph_norm::pow2_ceil_exponent;
@@ -283,6 +288,38 @@ fn wn_use_lin(groups: usize, rest: usize) -> bool {
 /// [`Rf`] のままにする（`Lin` を選んで全要素が余裕係数の上限で拒否される、という拒否範囲の拡大を避ける）。
 fn sn_use_lin(n: usize) -> bool {
     sn_lin_cost(n) <= LIN_BUDGET && 16.0 * sn_lin_events_max(n) as f64 * LIN_U < 0.01
+}
+
+/// LRN の [`Lin`] 判定の事象の総数 `N`（forward の分と、seed 1 回分の逆伝播の分）の上界。窓の幅の和を
+/// `W = nf + nr` として `c·(20 + 2·W) + 2·nchunks·c + 100`。実測（`--release`・x86_64 Linux・
+/// `lrn_lin_judge_cost_measurement`。`c` = 4〜256・`size` = 1〜17・β = 0.75／2／−1）の最大は約
+/// `c·(16 + 1.03·W)`（小さい `c` では定数項が大きく `c = 4`・`size = 17` で 173）で、全点を覆う。テスト
+/// `lrn_lin_events_stay_within_bound` が固定する（決定記録 §81.11）。
+fn lrn_lin_events_max(c: usize, w: LrnWin, nchunks: usize) -> usize {
+    let wsum = w.bf + w.ff + w.br + w.fr + 2;
+    c.saturating_mul(20usize.saturating_add(wsum.saturating_mul(2)))
+        .saturating_add(c.saturating_mul(nchunks.saturating_mul(2)))
+        .saturating_add(100)
+}
+
+/// LRN の [`Lin`] 判定 1 列の走査量の見積り（[`Rf`] の 1 反復相当。全 seed の逆伝播を回す最悪の場合）。
+/// `W = nf + nr` として `c·(300 + 3·W³) + 2000`。実測（`lrn_lin_judge_cost_measurement`。同じ実行内の
+/// `Rf` の 1 反復時間で換算）は `c` あたり `W = 2` で約 200、4 で約 380、6 で約 720、10 で約 1950、18 で約
+/// 8000、34 で約 76000（`c` = 16〜256）で、全点を 1.3 倍以上で覆う。測っていない範囲（`c > 256`・`size > 17`）へは
+/// 外挿しない（`lrn_use_lin` が事象数と走査量の上限で絞る）。
+fn lrn_lin_cost(c: usize, w: LrnWin) -> usize {
+    let wsum = w.bf + w.ff + w.br + w.fr + 2;
+    let w3 = wsum.saturating_mul(wsum).saturating_mul(wsum);
+    c.saturating_mul(w3.saturating_mul(3).saturating_add(300))
+        .saturating_add(2000)
+}
+
+/// LRN の総括判定で [`Lin`] による救済を使うか（テンソル単位）。事象の総数が余裕係数の上限
+/// （`16·事象数·u < 0.01`）に収まり、かつ走査量が [`LIN_BUDGET`] 以内のときだけ。満たさないテンソルは従来の
+/// [`Rf`] だけで判定する（受理の集合は従来と同じ。`sn_use_lin` と同じ方針。#4088・§81.11）。
+fn lrn_use_lin(ncols_judged: usize, c: usize, w: LrnWin, nchunks: usize) -> bool {
+    16.0 * lrn_lin_events_max(c, w, nchunks) as f64 * LIN_U < 0.01
+        && ncols_judged.saturating_mul(lrn_lin_cost(c, w)) <= LIN_BUDGET
 }
 
 /// `judge.rs::judge_budget` への委譲（norm 系は注記なし）。
@@ -856,10 +893,13 @@ fn lrn_col_fwd<T: Num>(
     let d: Vec<T> = (0..c)
         .map(|i| win_sum(&sq, i, w.bf, w.ff).times(rho).plus(kk))
         .collect();
-    let a: Vec<T> = d.iter().map(|v| v.powe(-k.beta)).collect();
-    let b: Vec<T> = d.iter().map(|v| v.powe(-k.beta - 1.0)).collect();
-    let fa: Vec<T> = d.iter().map(|v| v.pow_grad(-k.beta)).collect();
-    let fb: Vec<T> = d.iter().map(|v| v.pow_grad(-k.beta - 1.0)).collect();
+    // 構造の `pow_scalar` が使う指数は `(-β) as f32`・`(-β − 1) as f32` なので `e_str == e as f32`（上界つきの
+    // 規則 [`Num::powf_bounded`] の前提。#4088・§81.11）。
+    let (ea, eb) = (-k.beta, -k.beta - 1.0);
+    let a: Vec<T> = d.iter().map(|v| v.powf_bounded(ea, ea as f32)).collect();
+    let b: Vec<T> = d.iter().map(|v| v.powf_bounded(eb, eb as f32)).collect();
+    let fa: Vec<T> = d.iter().map(|v| v.pow_grad_bounded(ea)).collect();
+    let fb: Vec<T> = d.iter().map(|v| v.pow_grad_bounded(eb)).collect();
     let ux: Vec<T> = up.iter().zip(&xs).map(|(&u, &v)| u.times(v)).collect();
     let z: Vec<T> = ux.iter().zip(&b).map(|(&u, &v)| u.times(v)).collect();
     let sz: Vec<T> = (0..c).map(|i| win_sum(&z, i, w.br, w.fr)).collect();
@@ -908,12 +948,18 @@ fn lrn_col_fwd<T: Num>(
     })
 }
 
-/// LRN の逆伝播の作業領域（列長。seed ごとに触る範囲だけ 0 へ戻す）。
+/// LRN の逆伝播の作業領域（列長。seed ごとに触る範囲だけ書き直す）。
 struct LrnScratch<T> {
+    /// `x` への二階の出力。途中は `z` の経路の項 `cot_ux·up`。
     xs: Vec<T>,
+    /// `d` への cotangent。
     d: Vec<T>,
+    /// `x_s²` への cotangent（窓の蓄積）。
     sq: Vec<T>,
+    /// `up` への二階の出力。
     up: Vec<T>,
+    /// `sw` への cotangent `d·ρ`。
+    cw: Vec<T>,
 }
 
 impl<T: Num> LrnScratch<T> {
@@ -923,62 +969,157 @@ impl<T: Num> LrnScratch<T> {
             d: vec![T::k(0.0); c],
             sq: vec![T::k(0.0); c],
             up: vec![T::k(0.0); c],
+            cw: vec![T::k(0.0); c],
         }
     }
 }
 
 /// seed `e_j`（`dx_j` に 1）の二階の逆伝播を構造の演算順で再現する。`x` への要素は `[xlo, xhi]`、
 /// `up` への要素は `[ulo, uhi]` に入り（それ以外は 0）、`sc.xs`（`x` への値に変換済み）・`sc.up` に残る。
+///
+/// 子テープが勾配を足す順序は、ここで書く順序と一致する保証がない（`eval` の蓄積順は実装依存）。複数の
+/// 寄与を足す箇所は [`Num::total`] に集め、[`Lin`] の上界を順序に依らないものにする
+/// （f32・[`Rf`]・[`Dm`] の `total` は 0 から順に足す fold で、逐次に `plus` した値と同じ。#4088・§81.11）。
 fn lrn_col_rev<T: Num>(f: &LrnColFwd<T>, w: LrnWin, j: usize, sc: &mut LrnScratch<T>) {
     let c = f.xs.len();
     let (ulo, uhi) = (j.saturating_sub(w.br), (j + w.fr).min(c - 1));
     let (xlo, xhi) = (ulo.saturating_sub(w.bf), (uhi + w.ff).min(c - 1));
-    for l in xlo..=xhi {
-        sc.xs[l] = T::k(0.0);
-        sc.d[l] = T::k(0.0);
-        sc.sq[l] = T::k(0.0);
-        sc.up[l] = T::k(0.0);
-    }
     // dx = term1 − term2（Sub の係数 1・−1 は厳密）。term2 = (x_s·sz)·c2。
     let cot_t1 = f.ci;
     let cot_t2a = f.ci.negate().times(f.c2);
-    sc.xs[j] = sc.xs[j].plus(cot_t2a.times(f.sz[j]));
+    let t2_xs = cot_t2a.times(f.sz[j]);
     let cot_sz = cot_t2a.times(f.xs[j]);
-    // sz_j = Σ_{m ∈ W'(j)} z_m、z = (up·x_s)·b。
+    // sz_j = Σ_{m ∈ W'(j)} z_m、z = (up·x_s)·b。各 `m` の寄与を置く（`up`・`d` には j の分が後で足される）。
     for m in ulo..=uhi {
         let cot_ux = cot_sz.times(f.b[m]);
         let cot_b = cot_sz.times(f.ux[m]);
-        sc.up[m] = sc.up[m].plus(cot_ux.times(f.xs[m]));
-        sc.xs[m] = sc.xs[m].plus(cot_ux.times(f.up[m]));
-        sc.d[m] = sc.d[m].plus(cot_b.times(f.fb[m]));
+        sc.up[m] = cot_ux.times(f.xs[m]);
+        sc.xs[m] = cot_ux.times(f.up[m]);
+        sc.d[m] = cot_b.times(f.fb[m]);
     }
-    // term1 = up·a、a = d^{-β}。
-    sc.up[j] = sc.up[j].plus(cot_t1.times(f.a[j]));
+    // term1 = up·a、a = d^{-β}。`up`・`d` の j への寄与は z の経路との 2 項。
+    sc.up[j] = T::total(&[sc.up[j], cot_t1.times(f.a[j])]);
     let cot_a = cot_t1.times(f.up[j]);
-    sc.d[j] = sc.d[j].plus(cot_a.times(f.fa[j]));
-    // d = sw·ρ + kk、sw_m = Σ_{l ∈ W(m)} x_s,l²。
+    sc.d[j] = T::total(&[sc.d[j], cot_a.times(f.fa[j])]);
+    // d = sw·ρ + kk、sw_m = Σ_{l ∈ W(m)} x_s,l²。`sq[l]` へは l を窓に含む m（`[l − ff, l + bf]`）の分が入る。
     for m in ulo..=uhi {
-        let cot_sw = sc.d[m].times(f.rho);
-        let lo = m.saturating_sub(w.bf);
-        let hi = (m + w.ff).min(c - 1);
-        for l in lo..=hi {
-            sc.sq[l] = sc.sq[l].plus(cot_sw);
-        }
+        sc.cw[m] = sc.d[m].times(f.rho);
     }
-    // sq = x_s·x_s（同じ入力へ 2 回）、x_s = x/s。
+    for l in xlo..=xhi {
+        let (mlo, mhi) = (ulo.max(l.saturating_sub(w.ff)), uhi.min(l + w.bf));
+        sc.sq[l] = if mlo <= mhi {
+            T::total(&sc.cw[mlo..=mhi])
+        } else {
+            T::k(0.0)
+        };
+    }
+    // sq = x_s·x_s（同じ入力へ 2 回）、x_s = x/s。`x_s` への寄与は t2（l == j）・z の経路・`sq` の 2 回。
     for l in xlo..=xhi {
         let g = sc.sq[l].times(f.xs[l]);
-        sc.xs[l] = sc.xs[l].plus(g).plus(g).times(f.inv_s);
+        let mut terms = [g; 4];
+        let mut n = 0;
+        if l == j {
+            terms[n] = t2_xs;
+            n += 1;
+        }
+        if (ulo..=uhi).contains(&l) {
+            terms[n] = sc.xs[l];
+            n += 1;
+        }
+        terms[n] = g;
+        terms[n + 1] = g;
+        sc.xs[l] = T::total(&terms[..n + 2]).times(f.inv_s);
+    }
+}
+
+/// 構造の f32 の再現 `fs` と別の数値型の再現 `fo` で、forward の値・VJP 係数の NaN の位置が一致し、どの NaN も
+/// 入力の NaN が届いたものであること（[`same_nan`]）。
+fn lrn_fwd_nan_ok<A: Num, B: Num>(fs: &LrnColFwd<A>, fo: &LrnColFwd<B>) -> bool {
+    [
+        (&fs.xs, &fo.xs),
+        (&fs.up, &fo.up),
+        (&fs.a, &fo.a),
+        (&fs.fa, &fo.fa),
+        (&fs.fb, &fo.fb),
+        (&fs.b, &fo.b),
+        (&fs.ux, &fo.ux),
+        (&fs.sz, &fo.sz),
+    ]
+    .iter()
+    .all(|(a, b)| same_nan(a, b))
+        && same_nan(
+            &[fs.inv_s, fs.rho, fs.c2, fs.ci],
+            &[fo.inv_s, fo.rho, fo.c2, fo.ci],
+        )
+}
+
+/// LRN の 1 列の [`Lin`] 判定の状態（#4088・§81.11）。[`Rf`] が拒否した要素が最初に出たときに初めて作り、
+/// forward は 1 回、seed の逆伝播は seed ごとに 1 回だけ回す（[`lin_truncate`] で forward の直後へ戻してから）。
+/// 厳密モード（[`lin_reset`]）を使い、`Drop` で thread-local の領域を解放する（エラーで抜ける経路を含む）。
+struct LrnLinState {
+    fwd: LrnColFwd<Lin>,
+    sc: LrnScratch<Lin>,
+    fwd_mark: LinMark,
+    /// 逆伝播を済ませた seed。
+    seed: Option<usize>,
+}
+
+impl LrnLinState {
+    /// `fs`（f32 の forward）と NaN の位置が一致する [`Lin`] の forward を作る。±inf・NaN の不一致なら `None`
+    /// （救済しない。呼び出し側は [`Rf`] の拒否をそのまま返す）。
+    fn new(
+        x: &[f32],
+        up: &[f32],
+        k: &LrnColConst<'_>,
+        w: LrnWin,
+        fs: &LrnColFwd<f32>,
+    ) -> Option<Self> {
+        lin_reset();
+        let st = lrn_col_fwd::<Lin>(x, up, k, w).and_then(|fwd| {
+            lrn_fwd_nan_ok(fs, &fwd).then(|| LrnLinState {
+                sc: LrnScratch::new(x.len()),
+                fwd,
+                fwd_mark: lin_mark(),
+                seed: None,
+            })
+        });
+        if st.is_none() {
+            lin_reset();
+        }
+        st
+    }
+
+    /// seed `j` の逆伝播が済んだ作業領域。
+    fn rev(&mut self, w: LrnWin, j: usize) -> &LrnScratch<Lin> {
+        if self.seed != Some(j) {
+            lin_truncate(self.fwd_mark);
+            lrn_col_rev(&self.fwd, w, j, &mut self.sc);
+            self.seed = Some(j);
+        }
+        &self.sc
+    }
+}
+
+impl Drop for LrnLinState {
+    fn drop(&mut self) {
+        lin_reset();
     }
 }
 
 /// LRN の 1 列の総括判定。seed が 1 要素のときの二階（`x` と `up` への要素）を [`entry_check`] に掛ける。
+///
+/// `use_lin`（テンソル単位の条件 [`lrn_use_lin`]）が真のときは、[`Rf`] の見積りが拒否した要素だけを丸めの一次伝播
+/// [`Lin`] の上界（[`LrnLinState`]）で評価し直し、閾値内なら受理する（Cosine の `cos_elem` と同じ either 受理。
+/// #4088・§81.11）。どちらの見積りも f32 構造の誤差の上界として独立に健全なので、片方が通れば REQ-2 の判定は成り立ち、
+/// [`Rf`] で受理していた要素を拒否へ変えることは構造上起きない。`Lin` の forward が ±inf・NaN の位置の不一致を
+/// 持つ、または [`Lin`] が上界を作れない要素（`powf_bounded` の拒否条件等）は救済せず、[`Rf`] の拒否を返す。
 fn lrn_col_judge(
     x: &[f32],
     up: &[f32],
     k: &LrnColConst<'_>,
     w: LrnWin,
     coeff: f64,
+    use_lin: bool,
 ) -> Result<(), AutodiffError> {
     const WHAT: &str = "LocalResponseNorm の二階";
     let (Some(fs), Some(fr)) = (
@@ -987,37 +1128,41 @@ fn lrn_col_judge(
     ) else {
         return Err(nonfinite_struct(WHAT));
     };
-    let nan_ok = [
-        (&fs.xs, &fr.xs),
-        (&fs.up, &fr.up),
-        (&fs.a, &fr.a),
-        (&fs.fa, &fr.fa),
-        (&fs.fb, &fr.fb),
-        (&fs.b, &fr.b),
-        (&fs.ux, &fr.ux),
-        (&fs.sz, &fr.sz),
-    ]
-    .iter()
-    .all(|(a, b)| same_nan(a, b))
-        && same_nan(
-            &[fs.inv_s, fs.rho, fs.c2, fs.ci],
-            &[fr.inv_s, fr.rho, fr.c2, fr.ci],
-        );
-    if !nan_ok {
+    if !lrn_fwd_nan_ok(&fs, &fr) {
         return Err(nan_mismatch(WHAT));
     }
     let c = x.len();
     let (mut ss, mut sr) = (LrnScratch::<f32>::new(c), LrnScratch::<Rf>::new(c));
+    // 最初の [`Rf`] の拒否で初めて作る。`Some(None)` は作れなかった（救済しない）。
+    let mut lin: Option<Option<LrnLinState>> = None;
     for j in 0..c {
         lrn_col_rev(&fs, w, j, &mut ss);
         lrn_col_rev(&fr, w, j, &mut sr);
         let (ulo, uhi) = (j.saturating_sub(w.br), (j + w.fr).min(c - 1));
         let (xlo, xhi) = (ulo.saturating_sub(w.bf), (uhi + w.ff).min(c - 1));
         for l in xlo..=xhi {
-            entry_check(sr.xs[l], ss.xs[l], coeff, WHAT)?;
+            if let Err(e) = entry_check(sr.xs[l], ss.xs[l], coeff, WHAT) {
+                if !use_lin {
+                    return Err(e);
+                }
+                let st = lin.get_or_insert_with(|| LrnLinState::new(x, up, k, w, &fs));
+                let Some(st) = st else { return Err(e) };
+                if entry_check_lin(st.rev(w, j).xs[l], ss.xs[l], WHAT, invalid).is_err() {
+                    return Err(e);
+                }
+            }
         }
         for m in ulo..=uhi {
-            entry_check(sr.up[m], ss.up[m], coeff, WHAT)?;
+            if let Err(e) = entry_check(sr.up[m], ss.up[m], coeff, WHAT) {
+                if !use_lin {
+                    return Err(e);
+                }
+                let st = lin.get_or_insert_with(|| LrnLinState::new(x, up, k, w, &fs));
+                let Some(st) = st else { return Err(e) };
+                if entry_check_lin(st.rev(w, j).up[m], ss.up[m], WHAT, invalid).is_err() {
+                    return Err(e);
+                }
+            }
         }
     }
     Ok(())
@@ -1066,6 +1211,44 @@ fn lrn_col_scan(x: &[f32], up: &[f32], w: LrnWin, beta: f64) -> (bool, f64) {
     (fin, mx)
 }
 
+/// `α = 0` の LRN の 1 階の照合（[`shadow_check`]）の見積り `B_str·(1 + 16·E·u) + B_host`（要素ごと。係数 1 で
+/// 渡す）。構造は `g·f32(f)`（`f = k^{-β}`）で、`B_str` は [`Lin`] による `f32(g)·f32(f)` の丸めの上界
+/// （`f` を f32 へ丸めた誤差と積の丸め）。ホストは `α = 0` で `d = f64(k)`（`column_denominators` は
+/// `k + 0·Σx²`。入口で ±inf を拒否済みなので `Σx²` は有限）、`dx = f64(g)·d^{-β} − 0·x·acc` を f64 で作って
+/// 1 回 `as f32` する。`d^{-β}` は本関数の呼び出し元の `f` と同じ `f64::powf` の呼び出しなので同じ値で、
+/// `B_host` は f64 の積の丸め `2^-53·|g·f|` と最後の `as f32` の `u(1+2u)|host| + 2^-150`。ホストが NaN の要素
+/// （入力の NaN が届く位置。到達範囲は呼び出し前に検査済み）は照合で素通しなので上界は使わない。上界が非有限の
+/// 要素があれば `None`（呼び出し側が従来の `rounding_coeff(4)·m` へ戻す）。
+fn lrn_alpha0_shadow_bound(up: &[f32], f: f64, host: &[f32]) -> Option<Vec<f64>> {
+    const D: f64 = 1.0 / 9_007_199_254_740_992.0; // 2^-53
+    const TINY: f64 = 7.006_492_321_624_085e-46; // 2^-150
+    if up.len() != host.len() {
+        return None;
+    }
+    lin_reset();
+    let fk = Lin::k(f);
+    let mark = lin_mark();
+    let out: Vec<f64> = up
+        .iter()
+        .zip(host)
+        .map(|(&u, &h)| {
+            lin_truncate(mark);
+            let p = Lin::k(f64::from(u)).times(fk);
+            let slack = 16.0 * lin_events() as f64 * LIN_U;
+            let b_str = p.bound() * (1.0 + slack);
+            let b_host = D * (f64::from(u) * f).abs()
+                + LIN_U * (1.0 + 2.0 * LIN_U) * f64::from(h).abs()
+                + TINY;
+            b_str + b_host
+        })
+        .collect();
+    lin_reset();
+    out.iter()
+        .zip(host)
+        .all(|(b, h)| b.is_finite() || h.is_nan())
+        .then_some(out)
+}
+
 /// `LocalResponseNorm` ノード（入力 `input`）の d_input を子テープへ記録する。
 pub(super) fn lrn_cgrad<'c>(
     parent: &Tape,
@@ -1110,24 +1293,43 @@ pub(super) fn lrn_cgrad<'c>(
         let f = k.powf(-beta);
         stage(f, "LRN(α=0) の k^{-β}")?;
         stage(f * u_max, "LRN(α=0) の g·k^{-β}")?;
-        // 総括判定（第 2 軸）: 二階は up への対角 `k^{-β}` だけで、構造は f32 定数として載せる。
-        entry_check(
-            Rf::k(f),
+        // 総括判定（第 2 軸）: 二階は up への対角 `k^{-β}` だけで、構造は f32 定数として載せる。この要素の f32 の
+        // 値は `f as f32` そのもので、誤差は f32 への丸めだけ。丸めの誤差を厳密に計算した定数の事象（[`Lin::k`]）
+        // で見積もる（従来の `rounding_coeff(4)·f` は、この 1 回の丸めに対して約 24 倍の余裕を取っていた。#4088）。
+        lin_reset();
+        let diag = entry_check_lin(
+            Lin::k(f),
             f as f32,
-            rounding_coeff(4),
             "LocalResponseNorm(α=0) の二階",
-        )?;
+            invalid,
+        );
+        lin_reset();
+        diag?;
         let composed = up.mul(&scalar_const(child, f as f32)?)?;
         // 構造の 1 階をホスト値と照合する（ほかの分岐と同じ。ホストが NaN の要素は上で到達範囲を確認済み）。
-        let m: Vec<f64> = up_data.iter().map(|&u| f64::from(u).abs() * f).collect();
-        shadow_check(
-            child,
-            &composed,
-            &host_vec,
-            &m,
-            rounding_coeff(4),
-            "LocalResponseNorm(α=0)",
-        )?;
+        // 見積りは `Lin` の上界 + ホスト側の丸めの上界（[`lrn_alpha0_shadow_bound`]）。出せないときだけ従来の
+        // `rounding_coeff(4)·|g|·f`。
+        match lrn_alpha0_shadow_bound(&up_data, f, &host_vec) {
+            Some(b) => shadow_check(
+                child,
+                &composed,
+                &host_vec,
+                &b,
+                1.0,
+                "LocalResponseNorm(α=0)",
+            )?,
+            None => {
+                let m: Vec<f64> = up_data.iter().map(|&u| f64::from(u).abs() * f).collect();
+                shadow_check(
+                    child,
+                    &composed,
+                    &host_vec,
+                    &m,
+                    rounding_coeff(4),
+                    "LocalResponseNorm(α=0)",
+                )?;
+            }
+        }
         return push_v3(child, &composed, host);
     }
 
@@ -1202,6 +1404,7 @@ pub(super) fn lrn_cgrad<'c>(
         scan_cost.saturating_add(lrn_judge_cost(ncols_judged, c, win, chunks.len())),
         "LocalResponseNorm",
     )?;
+    let use_lin = lrn_use_lin(ncols_judged, c, win, chunks.len());
 
     // ホスト側の f64 参照（構造の各段を再現）と第 1 軸の判定、第 2 軸の m の計算。
     let xs: Vec<f32> = (0..x_data.len())
@@ -1299,6 +1502,7 @@ pub(super) fn lrn_cgrad<'c>(
                 },
                 win,
                 coeff_judge,
+                use_lin,
             )?;
             // 第 2 軸の m（各項の絶対値の和）。
             for (ci, &i) in col_idx.iter().enumerate() {
@@ -4751,7 +4955,7 @@ mod tests {
         let run = || {
             for col in 0..ncols {
                 let (x, up) = &cols[col % n_unique];
-                lrn_col_judge(x, up, &kc, win, coeff)?;
+                lrn_col_judge(x, up, &kc, win, coeff, false)?;
             }
             Ok::<(), AutodiffError>(())
         };
@@ -4968,5 +5172,589 @@ mod tests {
             );
         }
         lin_reset();
+    }
+
+    // --- LRN の総括判定を Lin で追う（#4088・決定記録 §81.11）----------------------------------
+
+    /// 本番（`lrn_cgrad`）と同じ組み立てで作った LRN の 1 列の判定入力。
+    struct LrnProdCol {
+        x: Vec<f32>,
+        up: Vec<f32>,
+        s: f64,
+        kk: f64,
+        rho: f64,
+        beta: f64,
+        chunks: Vec<f64>,
+        win: LrnWin,
+        coeff: f64,
+    }
+
+    impl LrnProdCol {
+        fn new(x: &[f32], up: &[f32], size: usize, alpha: f32, beta: f32, k: f32) -> Self {
+            let c = x.len();
+            let (alpha, beta, k) = (f64::from(alpha), f64::from(beta), f64::from(k));
+            let rho = alpha / size as f64;
+            let floor = (k.abs() * size as f64 / alpha.abs()).sqrt();
+            let mx = x.iter().fold(0.0f64, |m, &v| m.max(f64::from(v).abs()));
+            let e = pow2_ceil_exponent(mx.max(floor));
+            let chunks: Vec<f64> = chunk_factors(&[-2.0 * beta * f64::from(e)])
+                .iter()
+                .map(|ch| ch[0])
+                .collect();
+            let win = lrn_win(c, size);
+            let (nt_f, nt_r) = (
+                window_terms(c, win.bf, win.ff),
+                window_terms(c, win.br, win.fr),
+            );
+            LrnProdCol {
+                x: x.to_vec(),
+                up: up.to_vec(),
+                s: f64::from(pow2(e)),
+                kk: k / 2f64.powi(2 * e),
+                rho,
+                beta,
+                coeff: lrn_coeff(nt_f, nt_r, chunks.len(), beta),
+                chunks,
+                win,
+            }
+        }
+
+        fn kc(&self) -> LrnColConst<'_> {
+            LrnColConst {
+                s: self.s,
+                kk: self.kk,
+                rho: self.rho,
+                beta: self.beta,
+                chunks: &self.chunks,
+            }
+        }
+
+        /// `(Rf だけの判定, Rf と Lin の either 判定)`。
+        fn verdicts(&self) -> (bool, bool) {
+            let kc = self.kc();
+            let rf = lrn_col_judge(&self.x, &self.up, &kc, self.win, self.coeff, false).is_ok();
+            let both = lrn_col_judge(&self.x, &self.up, &kc, self.win, self.coeff, true).is_ok();
+            (rf, both)
+        }
+
+        /// f32 の再現と f64 の参照の二階の REQ-2 比 `min(絶対/1e-5, 相対/1e-3)` の最大（1 未満で一致）。
+        /// 再現が作れない（±inf）ときは `None`。
+        fn req2_ratio(&self) -> Option<f64> {
+            let kc = self.kc();
+            let fs = lrn_col_fwd::<f32>(&self.x, &self.up, &kc, self.win)?;
+            let fr = lrn_col_fwd::<f64>(&self.x, &self.up, &kc, self.win)?;
+            let c = self.x.len();
+            let (mut ss, mut sr) = (LrnScratch::<f32>::new(c), LrnScratch::<f64>::new(c));
+            let mut worst = 0.0f64;
+            let mut note = |s: f32, r: f64| {
+                let d = (f64::from(s) - r).abs();
+                let ratio = (d / 1e-5).min(d / (1e-3 * r.abs()));
+                worst = worst.max(if ratio.is_nan() { f64::INFINITY } else { ratio });
+            };
+            for j in 0..c {
+                lrn_col_rev(&fs, self.win, j, &mut ss);
+                lrn_col_rev(&fr, self.win, j, &mut sr);
+                let (ulo, uhi) = (j.saturating_sub(self.win.br), (j + self.win.fr).min(c - 1));
+                let (xlo, xhi) = (
+                    ulo.saturating_sub(self.win.bf),
+                    (uhi + self.win.ff).min(c - 1),
+                );
+                (xlo..=xhi).for_each(|l| note(ss.xs[l], sr.xs[l]));
+                (ulo..=uhi).for_each(|m| note(ss.up[m], sr.up[m]));
+            }
+            Some(worst)
+        }
+    }
+
+    /// 公開経路（`backward_create_graph`）が受理するか。損失は `Σ y·w`（`w` は追跡する重み。`up = w`）。
+    fn lrn_public_accepts(
+        x: &[f32],
+        w: &[f32],
+        size: usize,
+        alpha: f32,
+        beta: f32,
+        k: f32,
+    ) -> bool {
+        lrn_public_verdict(x, w, size, alpha, beta, k).is_ok()
+    }
+
+    /// 公開経路の判定。拒否ならエラーの文面（1 階の照合 [`shadow_check`] は「で二階が REQ-2」を含む）。
+    fn lrn_public_verdict(
+        x: &[f32],
+        w: &[f32],
+        size: usize,
+        alpha: f32,
+        beta: f32,
+        k: f32,
+    ) -> Result<(), String> {
+        let shape = [1usize, x.len(), 1];
+        let tape = Tape::new_with_ops(test_ops());
+        let child = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&tt(x.to_vec(), &shape));
+        let wc = tape.var(&tt(w.to_vec(), &shape));
+        let y = xv.local_response_norm(size, alpha, beta, k).unwrap();
+        let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+        tape.backward_create_graph(&loss, &child)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// 計測用の決定的な列（`pattern` を振幅 `amp` で拡大）。
+    fn lrn_meas_col(c: usize, amp: f32, upv: f32) -> (Vec<f32>, Vec<f32>) {
+        (
+            pattern(c, 1.0).iter().map(|v| v * amp).collect(),
+            pattern(c, 4.0).iter().map(|v| v * upv).collect(),
+        )
+    }
+
+    /// 計測（`--ignored`・`--release`）: Rf の拒否と either 受理の件数、受理に変わった入力と REQ-2 比。AC1 の入力を選ぶ元。
+    #[test]
+    #[ignore = "計測。cargo test -p fandhe-ai-autodiff --release --lib lrn_rejection_breakdown_measurement -- --ignored --nocapture"]
+    fn lrn_rejection_breakdown_measurement() {
+        let (mut total, mut rf_rej, mut flipped, mut regress, mut public_ok, mut shadow_only) =
+            (0, 0, 0, 0, 0, 0);
+        for c in [4usize, 16, 64] {
+            for size in [1usize, 2, 3, 5] {
+                for beta in [0.75f32, 2.0, -1.0, 0.5] {
+                    for (alpha, k) in [(1e-4f32, 2.0f32), (1.0, 1.0), (1.0, 1e-3), (10.0, 1e-6)] {
+                        for amp in [1e-3f32, 1.0, 1e3] {
+                            for upv in [1.0f32, 1e3] {
+                                let (x, up) = lrn_meas_col(c, amp, upv);
+                                let col = LrnProdCol::new(&x, &up, size, alpha, beta, k);
+                                let (rf, both) = col.verdicts();
+                                total += 1;
+                                rf_rej += usize::from(!rf);
+                                regress += usize::from(rf && !both);
+                                if !rf && both {
+                                    flipped += 1;
+                                    let verdict = lrn_public_verdict(&x, &up, size, alpha, beta, k);
+                                    let public = verdict.is_ok();
+                                    public_ok += usize::from(public);
+                                    shadow_only += usize::from(
+                                        verdict
+                                            .as_ref()
+                                            .is_err_and(|m| m.contains("で二階が REQ-2")),
+                                    );
+                                    eprintln!(
+                                        "LRNFLIP c={c} size={size} beta={beta} alpha={alpha} k={k} amp={amp} up={upv} public={public} req2_ratio={:?}",
+                                        col.req2_ratio()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "LRNBREAKDOWN total={total} rf_rejected={rf_rej} newly_accepted={flipped} newly_accepted_and_public_accepts={public_ok} public_rejected_by_shadow_check={shadow_only} newly_rejected={regress}"
+        );
+    }
+
+    /// 全 seed の [`Lin`] 逆伝播を回し、事象数（forward ＋ seed 1 回分）の最大を返す。
+    fn lrn_lin_events_measure(col: &LrnProdCol) -> Option<usize> {
+        let kc = col.kc();
+        lin_reset();
+        let fwd = lrn_col_fwd::<Lin>(&col.x, &col.up, &kc, col.win)?;
+        let c = col.x.len();
+        let mut sc = LrnScratch::<Lin>::new(c);
+        let mark = lin_mark();
+        let mut worst = 0;
+        for j in 0..c {
+            lin_truncate(mark);
+            lrn_col_rev(&fwd, col.win, j, &mut sc);
+            worst = worst.max(lin_events());
+        }
+        lin_reset();
+        Some(worst)
+    }
+
+    #[test]
+    #[ignore = "計測。cargo test -p fandhe-ai-autodiff --release --lib lrn_lin_judge_cost_measurement -- --ignored --nocapture"]
+    fn lrn_lin_judge_cost_measurement() {
+        for c in [4usize, 16, 32, 64, 128, 256] {
+            for size in [1usize, 2, 3, 5, 9, 17] {
+                for (beta, amp) in [(0.75f32, 1.0f32), (2.0, 1e3), (-1.0, 1e-3)] {
+                    let (x, up) = lrn_meas_col(c, amp, 1.0);
+                    let col = LrnProdCol::new(&x, &up, size, 1.0, beta, 1.0);
+                    let nch = col.chunks.len();
+                    let t = std::time::Instant::now();
+                    let ev = lrn_lin_events_measure(&col);
+                    let lin_ns = t.elapsed().as_nanos() as f64;
+                    let t = std::time::Instant::now();
+                    for _ in 0..3 {
+                        let _ = std::hint::black_box(col.verdicts().0);
+                    }
+                    let rf_ns = t.elapsed().as_nanos() as f64 / 3.0;
+                    let units = lrn_judge_cost(1, c, col.win, nch);
+                    let rf_iter = rf_ns / units as f64;
+                    eprintln!(
+                        "LRNLINCOST c={c} size={size} beta={beta} nchunks={nch} events={ev:?} est_events={} lin_ns={lin_ns:.0} rf_ns_per_iter={rf_iter:.2} lin_units={:.0} est_cost={}",
+                        lrn_lin_events_max(c, col.win, nch),
+                        lin_ns / rf_iter,
+                        lrn_lin_cost(c, col.win),
+                    );
+                }
+            }
+        }
+    }
+
+    /// 事象の総数が [`lrn_lin_events_max`] を超えないこと（窓の幅・列長・チャンク数・振幅の掃引。
+    /// 余裕係数の条件 [`lrn_use_lin`] の前提）。
+    #[test]
+    fn lrn_lin_events_stay_within_bound() {
+        let mut checked = 0;
+        // 通常のテストなので、窓が広い組（`W` の 3 乗で時間が伸びる）は列長を短くする。
+        let shapes: [(usize, usize); 17] = [
+            (1, 1),
+            (1, 5),
+            (2, 3),
+            (4, 1),
+            (4, 2),
+            (4, 5),
+            (4, 17),
+            (8, 129),
+            (16, 1),
+            (16, 3),
+            (16, 9),
+            (16, 17),
+            (32, 5),
+            (64, 1),
+            (64, 2),
+            (64, 3),
+            (64, 5),
+        ];
+        for (c, size) in shapes {
+            {
+                for beta in [0.75f32, 2.0, -1.0, 0.5, 0.0] {
+                    for (alpha, k, amp) in [
+                        (1.0f32, 1.0f32, 1.0f32),
+                        (1.0, 1e-3, 1e-3),
+                        (10.0, 1e-6, 1e3),
+                        (1.0, 1.0, 1e12),
+                        (1e-4, 2.0, 1e3),
+                    ] {
+                        let (x, up) = lrn_meas_col(c, amp, 1.0);
+                        let col = LrnProdCol::new(&x, &up, size, alpha, beta, k);
+                        let Some(ev) = lrn_lin_events_measure(&col) else {
+                            continue;
+                        };
+                        let max = lrn_lin_events_max(c, col.win, col.chunks.len());
+                        assert!(
+                            ev <= max,
+                            "c={c} size={size} beta={beta} amp={amp}: 事象数 {ev} が上界 {max} 超過"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 250, "比べた件数が少ない: {checked}");
+    }
+
+    /// LRN の判定入力 `(x, up, size, alpha, beta, k)`。
+    type LrnLinCase = ([f32; 4], [f32; 4], usize, f32, f32, f32);
+
+    /// `Rf` だけなら拒否し、Lin の救済で受理される REQ-2 内の入力（実測で選んだ。`lrn_rejection_breakdown_measurement`
+    /// の格子を `docs` の決定記録 §81.11 の表にまとめた）。`create_graph_norm_reparam.rs` の
+    /// `lrn_newly_accepted_by_lin_match_f64_second_order` も同じ入力を公開経路で確かめる。
+    /// `(x, up, size, alpha, beta, k)`、`C = 4`。
+    pub(super) const LRN_LIN_ACCEPTED: [LrnLinCase; 3] = [
+        (
+            [0.9, -0.6, 0.4, 1.1],
+            [1.0, 1.0, 1.0, 1.0],
+            3,
+            1.0,
+            2.0,
+            1e-3,
+        ),
+        (
+            [0.9, -0.6, 0.4, 1.1],
+            [1.0, 0.5, -0.8, 0.3],
+            2,
+            1.0,
+            0.5,
+            1e-3,
+        ),
+        (
+            [1.2, -0.4, 0.6, -0.9],
+            [1.0, 0.5, -0.8, 0.3],
+            5,
+            1.0,
+            2.0,
+            1e-3,
+        ),
+    ];
+
+    /// 受理に変わる入力: `Rf` だけなら拒否、`Lin` の救済込みなら受理で、f64 の参照との REQ-2 比が十分小さい。
+    /// 適用条件 [`lrn_use_lin`] の内側であること、`use_lin = false` なら従来どおり拒否のままであることも固定する。
+    #[test]
+    fn lrn_col_judge_lin_accepts_what_rf_rejected() {
+        for (x, up, size, alpha, beta, k) in LRN_LIN_ACCEPTED {
+            let col = LrnProdCol::new(&x, &up, size, alpha, beta, k);
+            let nch = col.chunks.len();
+            assert!(
+                lrn_use_lin(1, x.len(), col.win, nch),
+                "{x:?}: Lin を選ぶ条件内"
+            );
+            let (rf, both) = col.verdicts();
+            assert!(!rf, "{x:?} size{size} beta{beta}: Rf だけなら拒否");
+            assert!(both, "{x:?} size{size} beta{beta}: Lin の救済込みなら受理");
+            assert!(
+                lrn_public_accepts(&x, &up, size, alpha, beta, k),
+                "{x:?} size{size} beta{beta}: 公開経路（総括判定と 1 階の照合）も受理"
+            );
+            let ratio = col.req2_ratio().expect("f32 の再現が作れる");
+            assert!(ratio < 0.25, "{x:?}: REQ-2 比 {ratio} が 1/4 以内");
+        }
+    }
+
+    /// 既存の拒否プローブのうち列の判定まで届く入力は、Lin の救済込みでも拒否のまま。
+    /// `Lin` の上界を 0 に壊すと失敗する（変異確認: `Lin::bound` を 0 にして実測。決定記録 §81.11）。
+    #[test]
+    fn lrn_col_judge_lin_still_rejects_probes() {
+        // 相殺（PR #3950 の対角係数。x = 2^-33・k = 1e-28・up = 0）。
+        let col = LrnProdCol::new(&[(-33f32).exp2()], &[0.0], 1, 1.0, 0.5, 1e-28);
+        assert_eq!(col.verdicts(), (false, false), "相殺の入力は拒否のまま");
+        // スケール復元の cotangent の underflow（x = 2^-80・β = −1・k = 0・α = 1e36）。
+        let col = LrnProdCol::new(&[(-80f32).exp2()], &[1.0], 1, 1e36, -1.0, 0.0);
+        assert_eq!(
+            col.verdicts(),
+            (false, false),
+            "underflow の入力は拒否のまま"
+        );
+        // 実際の誤差（REQ-2 比 約 0.02）は小さいが、`Lin` の上界が閾値を超える入力。上界だけが拒否の根拠なので、
+        // `Lin::bound` を 0 に壊すとこの assert が失敗する（変異確認）。
+        let (x, up) = lrn_meas_col(4, 1.0, 1e3);
+        let col = LrnProdCol::new(&x, &up, 2, 10.0, 0.5, 1e-6);
+        assert!(col.req2_ratio().expect("再現が作れる") < 0.5);
+        assert_eq!(
+            col.verdicts(),
+            (false, false),
+            "上界が閾値を超える入力は拒否"
+        );
+        // pow 係数の f32 overflow は forward の ±inf として判定の入口で拒否される。
+        let col = LrnProdCol::new(&[1e20], &[1.0], 1, 1e-30, -0.5, 0.0);
+        assert_eq!(col.verdicts(), (false, false), "pow 係数の overflow は拒否");
+    }
+
+    /// 適用条件 [`lrn_use_lin`] の境界: 事象数の余裕係数の条件、走査量 [`LIN_BUDGET`] の境界の列数、テンソル単位。
+    #[test]
+    fn lrn_use_lin_boundaries() {
+        let w = lrn_win(64, 5);
+        assert!(lrn_use_lin(1, 64, w, 1));
+        // 走査量: 列数が LIN_BUDGET / cost を超えると使わない。
+        let per = lrn_lin_cost(64, w);
+        assert!(lrn_use_lin(LIN_BUDGET / per, 64, w, 1));
+        assert!(!lrn_use_lin(LIN_BUDGET / per + 1, 64, w, 1));
+        // 事象数: 16·N·u < 0.01 を満たさない長い列は使わない。
+        let long = 1usize << 16;
+        assert!(16.0 * lrn_lin_events_max(long, lrn_win(long, 1), 1) as f64 * LIN_U >= 0.01);
+        assert!(!lrn_use_lin(1, long, lrn_win(long, 1), 1));
+        // 事象数の上限の内側で、窓の幅に応じて単調に増える。
+        assert!(
+            lrn_lin_events_max(64, lrn_win(64, 9), 1) > lrn_lin_events_max(64, lrn_win(64, 3), 1)
+        );
+    }
+
+    /// 乱数の LRN 入力で、f32 の再現と縮約の順序を変えた再現（`F32Rev`）の実測の誤差が [`Lin`] の上界を seed 全部・
+    /// 全要素で上から押さえる。上界が桁違いに緩くない（実測の 1 割を超える要素がある）ことも課す。
+    #[test]
+    fn lin_bound_covers_f32_deviation_for_lrn_sweep() {
+        use super::super::lin::tests::F32Rev;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f64) / f64::from(1u32 << 31)
+        };
+        let (mut checked, mut tight, mut unbounded) = (0usize, 0usize, 0usize);
+        for case in 0..240usize {
+            let c = 2 + case % 7;
+            let size = [1usize, 2, 3, 5, 8][case % 5];
+            let amp = [1e-3f32, 1.0, 1e3][case % 3];
+            let beta = [0.75f32, 2.0, -1.0, 0.5, 1.0][(case / 3) % 5];
+            let alpha = [1.0f32, 10.0, 0.01][(case / 5) % 3];
+            let k = [1.0f32, 1e-3, 1e-6][(case / 7) % 3];
+            let x: Vec<f32> = (0..c)
+                .map(|_| ((next() * 2.0 - 1.0) * f64::from(amp)) as f32)
+                .collect();
+            let up: Vec<f32> = (0..c)
+                .map(|_| ((next() * 2.0 - 1.0) * 3.0) as f32)
+                .collect();
+            let col = LrnProdCol::new(&x, &up, size, alpha, beta, k);
+            let kc = col.kc();
+            lin_reset();
+            let (Some(fl), Some(fs), Some(fa)) = (
+                lrn_col_fwd::<Lin>(&x, &up, &kc, col.win),
+                lrn_col_fwd::<f32>(&x, &up, &kc, col.win),
+                lrn_col_fwd::<F32Rev>(&x, &up, &kc, col.win),
+            ) else {
+                continue;
+            };
+            let (mut sl, mut ss, mut sa) = (
+                LrnScratch::<Lin>::new(c),
+                LrnScratch::<f32>::new(c),
+                LrnScratch::<F32Rev>::new(c),
+            );
+            let mark = lin_mark();
+            for j in 0..c {
+                lin_truncate(mark);
+                lrn_col_rev(&fl, col.win, j, &mut sl);
+                lrn_col_rev(&fs, col.win, j, &mut ss);
+                lrn_col_rev(&fa, col.win, j, &mut sa);
+                let slack = 1.0 + 16.0 * lin_events() as f64 * LIN_U;
+                let (ulo, uhi) = (j.saturating_sub(col.win.br), (j + col.win.fr).min(c - 1));
+                let (xlo, xhi) = (
+                    ulo.saturating_sub(col.win.bf),
+                    (uhi + col.win.ff).min(c - 1),
+                );
+                let pairs: Vec<(Lin, f32, f32)> = (xlo..=xhi)
+                    .map(|l| (sl.xs[l], ss.xs[l], sa.xs[l].0))
+                    .chain((ulo..=uhi).map(|m| (sl.up[m], ss.up[m], sa.up[m].0)))
+                    .collect();
+                for (l, f, a) in pairs {
+                    if !l.v.is_finite() || !f.is_finite() || !a.is_finite() {
+                        continue;
+                    }
+                    let bound = l.bound() * slack;
+                    if !bound.is_finite() {
+                        unbounded += 1;
+                        continue;
+                    }
+                    for actual in [f, a] {
+                        let dev = (f64::from(actual) - l.v).abs();
+                        assert!(
+                            dev <= bound,
+                            "case {case} c {c} size {size} beta {beta}: 実測の誤差 {dev:e} が上界 {bound:e} を超えた（V = {:e}）",
+                            l.v
+                        );
+                        checked += 1;
+                        if dev > 0.1 * bound {
+                            tight += 1;
+                        }
+                    }
+                }
+            }
+        }
+        lin_reset();
+        assert!(checked > 1000, "検査した要素数 {checked}");
+        assert!(tight > 0, "上界が実測より桁違いに大きい");
+        assert!(
+            unbounded < checked,
+            "上界が作れない要素が多すぎる: {unbounded}"
+        );
+    }
+
+    type LrnVecCase = (Vec<f32>, Vec<f32>, usize, f32, f32, f32);
+
+    /// 子テープが実際に出す二階の値が、[`Lin`] の値 ± 上界（余裕係数込み）に収まる。子テープの勾配の足し順は
+    /// 再現（`lrn_col_rev`）の順と一致する保証がなく、順序に依らない `total` の上界がそれを覆うことの実測。
+    /// 受理に変わる入力（[`LRN_LIN_ACCEPTED`]）と、従来から受理の入力を含む。
+    #[test]
+    #[allow(clippy::needless_range_loop)] // 同じ添字で複数の配列（子テープの行・Lin）を引く
+    fn lrn_lin_bound_covers_child_tape_second_order() {
+        let mut cases: Vec<LrnVecCase> = LRN_LIN_ACCEPTED
+            .iter()
+            .map(|(x, u, s, a, b, k)| (x.to_vec(), u.to_vec(), *s, *a, *b, *k))
+            .collect();
+        for (size, beta) in [(1usize, 0.75f32), (2, 2.0), (3, -1.0), (5, 0.75)] {
+            cases.push((pattern(4, 1.0), pattern(4, 4.0), size, 0.5, beta, 1.0));
+        }
+        let mut compared = 0usize;
+        for (x0, w, size, alpha, beta, k) in cases {
+            let c = 4usize;
+            let shape = [1usize, c, 1];
+            let tape = Tape::new_with_ops(test_ops());
+            let child = Tape::new_with_ops(test_ops());
+            let x = tape.var(&tt(x0.clone(), &shape));
+            let wc = tape.var(&tt(w.clone(), &shape));
+            let y = x.local_response_norm(size, alpha, beta, k).unwrap();
+            let loss = y.mul(&wc).unwrap().sum(None).unwrap();
+            let cg = tape
+                .backward_create_graph(&loss, &child)
+                .unwrap_or_else(|e| panic!("size{size} beta{beta}: 受理されるはずが拒否: {e:?}"));
+            let gx = cg.grad(&x).unwrap().unwrap();
+            let cx = cg.child_var(&x).unwrap().unwrap();
+            let cwc = cg.child_var(&wc).unwrap().unwrap();
+            let col = LrnProdCol::new(&x0, &w, size, alpha, beta, k);
+            let kc = col.kc();
+            lin_reset();
+            let fl = lrn_col_fwd::<Lin>(&x0, &w, &kc, col.win).expect("Lin の forward");
+            let mut sl = LrnScratch::<Lin>::new(c);
+            let mark = lin_mark();
+            for j in 0..c {
+                lin_truncate(mark);
+                lrn_col_rev(&fl, col.win, j, &mut sl);
+                let slack = 1.0 + 16.0 * lin_events() as f64 * LIN_U;
+                let row = child_row(&child, &gx, j, &cx);
+                let row_up = child_row(&child, &gx, j, &cwc);
+                let (ulo, uhi) = (j.saturating_sub(col.win.br), (j + col.win.fr).min(c - 1));
+                let (xlo, xhi) = (
+                    ulo.saturating_sub(col.win.bf),
+                    (uhi + col.win.ff).min(c - 1),
+                );
+                for l in xlo..=xhi {
+                    let bound = sl.xs[l].bound() * slack;
+                    let dev = (f64::from(row[l]) - sl.xs[l].v).abs();
+                    assert!(
+                        dev <= bound,
+                        "size{size} beta{beta} j{j} l{l}: 子テープ {} と Lin {:e} の差 {dev:e} が上界 {bound:e} を超える",
+                        row[l],
+                        sl.xs[l].v
+                    );
+                    compared += 1;
+                }
+                for m in ulo..=uhi {
+                    let bound = sl.up[m].bound() * slack;
+                    let dev = (f64::from(row_up[m]) - sl.up[m].v).abs();
+                    assert!(
+                        dev <= bound,
+                        "size{size} beta{beta} j{j} m{m}: 子テープ {} と Lin {:e} の差 {dev:e} が上界 {bound:e} を超える",
+                        row_up[m],
+                        sl.up[m].v
+                    );
+                    compared += 1;
+                }
+            }
+            lin_reset();
+        }
+        assert!(compared > 100, "比べた要素数 {compared}");
+    }
+
+    /// `α = 0` の LRN の 1 階の照合の見積り: 構造 `g·f32(f)`（f32 の積）とホスト（f64 の積 → f32）の差を覆い、
+    /// 従来の `rounding_coeff(4)·|g·f|` より小さい。NaN のホスト値の要素は上界を使わない。
+    #[test]
+    fn lrn_alpha_zero_shadow_bound_covers_structure_vs_host() {
+        let layout = lrn::lrn_layout(&[1, 4, 3]).unwrap();
+        let mut worst_ratio = 0.0f64;
+        for (beta, k) in [(0.75f32, 2.0f32), (2.0, 0.3), (-1.0, 1e-3), (0.5, 7.0)] {
+            let params = LrnParams::new(3, 0.0, beta, k).unwrap();
+            let x = pattern(12, 2.0);
+            let up: Vec<f32> = pattern(12, 5.0).iter().map(|v| v * 3.0).collect();
+            let host = lrn::local_response_norm_vjp_host(&x, &up, &layout, &params).unwrap();
+            let f = f64::from(k).powf(-f64::from(beta));
+            let b = lrn_alpha0_shadow_bound(&up, f, &host).expect("上界を作れる");
+            for ((&u, &h), &bi) in up.iter().zip(&host).zip(&b) {
+                let composed = f64::from(u * (f as f32));
+                let dev = (composed - f64::from(h)).abs();
+                assert!(
+                    dev <= bi,
+                    "beta {beta}: 構造とホストの差 {dev:e} が上界 {bi:e} を超える"
+                );
+                let old = rounding_coeff(4) * f64::from(u).abs() * f;
+                assert!(
+                    bi < old,
+                    "beta {beta}: 上界 {bi:e} が従来 {old:e} より小さい"
+                );
+                worst_ratio = worst_ratio.max(bi / old);
+            }
+        }
+        assert!(worst_ratio < 0.5, "従来の約半分以下のはず: {worst_ratio}");
+        // ホストが NaN の要素は上界が NaN でも許す。長さの不一致は None。
+        assert!(lrn_alpha0_shadow_bound(&[1.0, 2.0], 0.5, &[f32::NAN, 1.0]).is_some());
+        assert!(lrn_alpha0_shadow_bound(&[1.0], 0.5, &[1.0, 2.0]).is_none());
+        assert!(lrn_alpha0_shadow_bound(&[1.0], f64::INFINITY, &[1.0]).is_none());
     }
 }
