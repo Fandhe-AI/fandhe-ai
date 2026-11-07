@@ -986,7 +986,8 @@ fn cewo_cancel_check(
     probe::flag("CrossEntropy", flag);
     if flag {
         // f32 の再現値が丸め誤差の見積りを超えてずれる行（確率の underflow 等）は、非対角
-        // `−s_b·A·y_i·y_j` も要素ごとに f32 の再現値で組んだ値と参照を比べる。
+        // `−s_b·A·y_i·y_j` も要素ごとに f32 の再現値で組んだ値と参照を比べる。非対角の `Lin` 救済は
+        // O(C²) なので `lin.off`（走査量が `LIN_BUDGET` 以内）のときだけ呼ぶ（設計 §82.11.1）。
         for jj in 0..c {
             for ii in 0..c {
                 if ii == jj {
@@ -997,7 +998,7 @@ fn cewo_cancel_check(
                 lin_elem(
                     [v, sba_str * y32[ii] * y32[jj], v.abs(), 1.0, coeff],
                     FLAG_WHAT,
-                    || rescue(CeLinKind::X, ii, jj, FLAG_WHAT),
+                    || lin.is_some_and(|l| l.off) && rescue(CeLinKind::X, ii, jj, FLAG_WHAT),
                 )?;
             }
         }

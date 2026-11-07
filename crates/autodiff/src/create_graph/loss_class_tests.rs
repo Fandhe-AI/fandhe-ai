@@ -3032,3 +3032,56 @@ fn ce_lin_off_diagonal_scan_is_either_accept_when_forced() {
         "no_off={no_off:?} off={off:?}"
     );
 }
+/// `flag` の行（確率が f32 で underflow する行）の非対角の `Lin` 救済も `CeLinCtx::off` で止まること（レビュー指摘。
+/// 設計 §82.11.1 の `LIN_BUDGET`）。`off = false` では救済を呼ばず従来の見積りだけで判定するので拒否のまま、
+/// `off = true` のときだけ O(C²) の救済で受理に変わる。
+#[test]
+fn ce_lin_flag_row_off_diagonal_rescue_respects_off() {
+    let c = 2200usize;
+    // 上位 2 クラスが同じ大きさ（y ≈ 0.5 ずつ）、残りは f32 の exp が非正規数へ underflow する（`flag` が立つ）。
+    let mut row = vec![-70.0f32; c];
+    row[0] = 30.0;
+    row[1] = 30.0;
+    let weights = vec![1.0f64; c];
+    let g = 1.0f64;
+    let call = |lin: Option<CeLinCtx>| {
+        cewo_cancel_check(
+            &row,
+            (0, 0, 1, c),
+            (1.0, &weights, 1, 0.0),
+            (g, 1.0, 1.0),
+            lin,
+        )
+    };
+    let none = call(None);
+    let no_off = call(Some(CeLinCtx {
+        g,
+        w: None,
+        off: false,
+    }));
+    probe::LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+    let off = call(Some(CeLinCtx {
+        g,
+        w: None,
+        off: true,
+    }));
+    let log = probe::LOG.with(|l| l.borrow_mut().take()).unwrap();
+    // 対角は `Lin` が救うので、この行は最後に `flag` が立つ（flag 分岐に入る）。
+    assert!(
+        log.iter()
+            .any(|e| matches!(e, probe::Event::Flag("CrossEntropy", true))),
+        "この行は flag が立つはず"
+    );
+    eprintln!(
+        "LINCEFLAGOFF none={} no_off={} off={}",
+        none.is_ok(),
+        no_off.is_ok(),
+        off.is_ok()
+    );
+    assert!(none.is_err(), "従来の見積りはこの行を拒否するはず");
+    assert!(
+        no_off.is_err(),
+        "off = false では flag 行の非対角を救済しない: {no_off:?}"
+    );
+    assert!(off.is_ok(), "off = true では救済で受理: {off:?}");
+}
