@@ -69,10 +69,7 @@ pub(super) trait Num: Copy {
     /// 上界つきの `exp`（イシュー #4092・設計記録 §82.9）。`f32`・`f64` は `exp()`、[`Lin`] だけが libm の精度の仮定
     /// （[`LIBM_F32_MAX_ULP`]）を使った上界を持つ。`norm_reparam.rs` の `Rf` は上界なし（常に拒否）、`Dm` は依存を保つ。
     /// VJP の係数は出力 `y` そのものなので専用の勾配メソッドはない。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#4093・#4094 が配線するまで本番から呼ばれない")
-    )]
+    /// CE・CEWO の forward の総称化（`loss_class.rs::cewo_fwd`。#4093）で本番の `f64`／`f32` から呼ぶ。`Lin` の判定への配線は #4094。
     fn exp_bounded(self) -> Self;
     /// `Sqrt` の VJP 係数 `0.5 / y`（`self` は forward の出力 `y`）。
     fn root_grad(self) -> Self;
