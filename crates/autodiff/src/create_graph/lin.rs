@@ -362,6 +362,19 @@ fn abl(kind: u8, mu: f64) -> f64 {
     }
 }
 
+/// libm の事象の `μ` を、ulp の項（`mu − raw`）と剰余 `raw` に分けて種別ごとに 0 にする。
+/// どちらの種別も 0 にしないときは `mu` をそのまま返す（`(mu − raw) + raw` は浮動小数点で `mu` と一致するとは限らず、
+/// 切り替えなしのテストのビルドが本番と異なる上界を検証することになるため）。返り値は `(μ, 剰余)`。
+#[cfg(test)]
+fn abl_libm(mu: f64, raw: f64) -> (f64, f64) {
+    let mask = ABLATE_MASK.with(|m| m.get());
+    if mask & ((1 << BD_LIBM_ULP) | (1 << BD_LIBM_REM)) == 0 {
+        return (mu, raw);
+    }
+    let rem = abl(BD_LIBM_REM, raw);
+    (abl(BD_LIBM_ULP, mu - raw) + rem, rem)
+}
+
 /// スコープの間だけ種別の集合を 0 にする（drop で元に戻す）。
 #[cfg(test)]
 pub(super) struct BdAblate(u32);
@@ -859,8 +872,7 @@ impl Num for Lin {
         #[cfg(test)]
         let (mu, rem) = {
             let raw = ya * (ade * l + z * z + ae * rho * rho + 2.0 * ade * rho);
-            let rem = abl(BD_LIBM_REM, raw);
-            (abl(BD_LIBM_ULP, mu - raw) + rem, rem)
+            abl_libm(mu, raw)
         };
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
@@ -904,8 +916,7 @@ impl Num for Lin {
         #[cfg(test)]
         let (mu, rem) = {
             let raw = ya * b * b;
-            let rem = abl(BD_LIBM_REM, raw);
-            (abl(BD_LIBM_ULP, mu - raw) + rem, rem)
+            abl_libm(mu, raw)
         };
         let id = LIN_ARENA.with(|a| {
             let mut a = a.borrow_mut();
