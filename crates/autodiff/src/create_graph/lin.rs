@@ -523,6 +523,12 @@ pub(super) fn lin_truncate(mark: LinMark) {
     });
 }
 
+/// 疎モードか（テスト用。計測の前提確認に使う）。
+#[cfg(test)]
+pub(super) fn lin_is_sparse() -> bool {
+    LIN_ARENA.with(|a| a.borrow().sparse)
+}
+
 /// 事象の総数（二次項の余裕係数の入力）。
 pub(super) fn lin_events() -> usize {
     LIN_ARENA.with(|a| a.borrow().mus.len())
@@ -775,14 +781,18 @@ impl Num for Lin {
         } else {
             0.0
         };
-        #[cfg(test)]
-        let err = abl(BD_CONST, err);
+        // 事象を作るかはアブレーション前の誤差で決める（計測契約: 0 にした種別でも事象数 N は変わらない。§82.15.1）。
+        // 作った事象の μ だけをアブレーション後の値にする。マスク 0 のときは `abl` が恒等なので本番と同じ挙動。
         let term = (err > 0.0).then(|| {
+            #[cfg(test)]
+            let mu = abl(BD_CONST, err);
+            #[cfg(not(test))]
+            let mu = err;
             LIN_ARENA.with(|a| {
                 let mut a = a.borrow_mut();
-                let ev = a.push_event(err);
+                let ev = a.push_event(mu);
                 #[cfg(test)]
-                a.set_comp(ev, BD_CONST, err);
+                a.set_comp(ev, BD_CONST, mu);
                 (ev, 1.0)
             })
         });

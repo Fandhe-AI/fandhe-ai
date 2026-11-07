@@ -4501,11 +4501,15 @@ struct BdRow {
     bd: [f64; super::super::lin::BD_KINDS],
     /// 判定時点の余裕係数の `slack = 16·N·u`。
     slack: f64,
+    /// 判定時点の事象数 `N`（アブレーションの run 間で一致することを検査する）。
+    events: usize,
 }
 
 impl BdRow {
     fn new(key: String, l: Lin, s: f32) -> Self {
-        use super::super::lin::{LIN_U, lin_breakdown, lin_events};
+        use super::super::lin::{LIN_U, lin_breakdown, lin_events, lin_is_sparse};
+        // 計測は厳密モード前提（疎モードの `pool_small_terms` は μ に依存して畳む項を選び、N を変えうるため）。
+        assert!(!lin_is_sparse(), "計測は厳密モードで行う");
         BdRow {
             key,
             v: l.v,
@@ -4513,6 +4517,7 @@ impl BdRow {
             bound: l.bound(),
             bd: lin_breakdown(l),
             slack: 16.0 * lin_events() as f64 * LIN_U,
+            events: lin_events(),
         }
     }
     /// 閾値（`entry_check_lin` と同じ。絶対救済と相対の半分の大きい方）。
@@ -4605,6 +4610,15 @@ fn lin_bound_breakdown_report(tag: &str, collect: impl Fn() -> Vec<BdRow>) {
     let base = &runs[0];
     for r in &runs {
         assert_eq!(r.len(), base.len(), "{tag}: run 間で要素数が違う");
+        // 計測契約（§82.15.1）: 事象は 0 の μ のまま数えるので、どのアブレーションでも N は base と一致する。
+        for (i, (x, b)) in r.iter().zip(base).enumerate() {
+            assert_eq!(x.key, b.key, "{tag}: 要素の対応がずれた i={i}");
+            assert_eq!(
+                x.events, b.events,
+                "{tag}: アブレーションで事象数 N が変わった elem={}",
+                b.key
+            );
+        }
     }
     let margin = |si: usize, i: usize| {
         let (_, _, sv, sl) = scenarios[si];
