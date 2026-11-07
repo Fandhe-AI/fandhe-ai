@@ -4236,6 +4236,7 @@ mod tests {
             violations.len()
         );
     }
+
     /// [`wn_use_lin`] の境界: 幅 [`LIN_REST_MAX`] とその +1、走査量 [`LIN_BUDGET`] の境界のグループ数、余裕係数の条件。
     #[test]
     fn wn_use_lin_boundaries() {
