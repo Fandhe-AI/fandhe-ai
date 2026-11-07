@@ -3773,6 +3773,21 @@ mod tests {
     /// 本番が `wn_group_judge` に渡す `up`（`weight_norm` 出力の cotangent）で 2 グループを判定する。
     /// 戻り値は `(Rf で全グループ受理, Lin で全グループ受理, backward_create_graph が受理)`（#4118）。
     fn wn_flip_probe(rest: usize, g0: f32, seed: u64) -> (bool, bool, bool) {
+        let d = wn_flip_detail(rest, g0, seed);
+        (d.rf, d.lin, d.verdict.is_ok())
+    }
+
+    /// [`wn_flip_probe`] の本体。入力・`up`・各判定に加え、`backward_create_graph` の結果（拒否なら本番のエラー
+    /// 文面）を返す（#4122。`wn_shadow_rejection_breakdown_measurement` が文面で拒否の段を分類する）。
+    struct WnFlipDetail {
+        x0: Vec<f32>,
+        up: Vec<f32>,
+        rf: bool,
+        lin: bool,
+        verdict: Result<(), String>,
+    }
+
+    fn wn_flip_detail(rest: usize, g0: f32, seed: u64) -> WnFlipDetail {
         let x0 = wn_flip_input(rest, g0, seed);
         let n = x0.len();
         let tape = Tape::new_with_ops(test_ops());
@@ -3787,7 +3802,13 @@ mod tests {
         let y = v.weight_norm(&g, Some(0)).unwrap();
         let l = y.tanh().sum(None).unwrap();
         let loss = l.mul(&l).unwrap();
-        let full = tape.backward_create_graph(&loss, &child).is_ok();
+        let verdict = match tape.backward_create_graph(&loss, &child) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                assert!(child.is_empty(), "拒否なのに子テープが空でない");
+                Err(e.to_string())
+            }
+        };
         let grads = tape.backward(&loss).unwrap();
         let up = dense_vec(grads.get(&y).unwrap().expect("y は loss に到達する"));
         let (mut rf, mut lin) = (true, true);
@@ -3801,7 +3822,13 @@ mod tests {
             lin &= wn_group_judge(vk, uk, gk, s, wn_coeff(rest), true).is_ok();
         }
         lin_reset();
-        (rf, lin, full)
+        WnFlipDetail {
+            x0,
+            up,
+            rf,
+            lin,
+            verdict,
+        }
     }
 
     /// `Rf` 拒否・`Lin` 受理に変わった入力 `(幅, g0, シード)`（#4118。決定記録 §80.7）。
@@ -3875,6 +3902,340 @@ mod tests {
         }
     }
 
+    /// `backward_create_graph` の拒否文面の分類（#4122。計測用。本番が文面で分岐するわけではない）。
+    /// `host_nonfinite_check` の文面も `WeightNorm の dv: ` で始まるので、`f32 構造の丸め` まで含めて照合する。
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    enum WnVerdict {
+        ShadowDv,
+        ShadowDg,
+        Judge,
+        OtherKnown,
+        Unknown,
+    }
+
+    fn wn_verdict(msg: &str) -> WnVerdict {
+        if msg.contains("WeightNorm の dv: f32 構造の丸め") {
+            WnVerdict::ShadowDv
+        } else if msg.contains("WeightNorm の dg: f32 構造の丸め") {
+            WnVerdict::ShadowDg
+        } else if msg.contains("WeightNorm の二階: 二階の要素が") {
+            WnVerdict::Judge
+        } else if msg.contains("WeightNorm の二階: 構造の f32")
+            || msg.contains("ホストの 1 階")
+            || msg.contains("構造段の上界判定")
+            || msg.contains("走査量")
+        {
+            WnVerdict::OtherKnown
+        } else {
+            WnVerdict::Unknown
+        }
+    }
+
+    /// 1 グループの 1 階の f64 参照（閉じた式。`up` は f32 の値をそのまま使う）。`(dv, dg)`。
+    fn wn_first_order64(v: &[f32], up: &[f32], g: f32) -> (Vec<f64>, f64) {
+        let n = v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt();
+        let dg = v
+            .iter()
+            .zip(up)
+            .map(|(&x, &u)| f64::from(u) * f64::from(x) / n)
+            .sum::<f64>();
+        let dv = v
+            .iter()
+            .zip(up)
+            .map(|(&x, &u)| f64::from(g) / n * (f64::from(u) - dg * f64::from(x) / n))
+            .collect();
+        (dv, dg)
+    }
+
+    /// `weight_norm_cgrads` の `m_dv`・`m_dg`（1 階の項の絶対値和）を本番と同じ式で求める。
+    /// 本番と同一に保つこと（ずれは `wn_shadow_rejection_breakdown_measurement` の矛盾検出で捕まる）。
+    fn wn_m_abs(
+        v_gm: &[f32],
+        up_gm: &[f32],
+        g: &[f32],
+        scales: &[f32],
+        rest: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let groups = g.len();
+        let mut m_dv = vec![0.0f64; v_gm.len()];
+        let mut m_dg = vec![0.0f64; groups];
+        for k in 0..groups {
+            let lo = k * rest;
+            let vs: Vec<f32> = v_gm[lo..lo + rest].iter().map(|&x| x / scales[k]).collect();
+            let n_s = vs.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt();
+            let s = f64::from(scales[k]);
+            let gk = f64::from(g[k]).abs();
+            let upk = &up_gm[lo..lo + rest];
+            let vhat: Vec<f64> = vs.iter().map(|&x| f64::from(x) / n_s).collect();
+            let dgb: f64 = upk
+                .iter()
+                .zip(&vhat)
+                .map(|(&x, &h)| f64::from(x).abs() * h.abs())
+                .sum();
+            let coef = gk / n_s / s;
+            let dg_val = upk
+                .iter()
+                .zip(&vhat)
+                .map(|(&x, &h)| f64::from(x) * h)
+                .sum::<f64>();
+            for (j, (&x, &h)) in upk.iter().zip(&vhat).enumerate() {
+                m_dv[lo + j] = coef * (f64::from(x).abs() + dg_val.abs() * h.abs());
+            }
+            m_dg[k] = dgb;
+        }
+        (m_dv, m_dg)
+    }
+
+    /// `weight_norm_cgrads` の構造（`v_s` 〜 `dv2`・`dg2`）を子テープへ同じ演算順で積む。
+    /// 本番と同一に保つこと。戻り値は `(dv2, dg2)`（どちらもグループ主形）。
+    fn wn_build<'c>(
+        child: &'c Tape,
+        gm: &GroupMap,
+        v_m: &Var<'c>,
+        up: &Var<'c>,
+        g_m: &Var<'c>,
+        scales: Vec<f32>,
+    ) -> (Var<'c>, Var<'c>) {
+        let groups = gm.groups;
+        let v2 = gm.to_form(v_m).unwrap();
+        let up2 = gm.to_form(up).unwrap();
+        let g2 = g_m.contiguous().unwrap().reshape(&[groups, 1]).unwrap();
+        let s_t = tensor_const(child, scales, &[groups, 1]).unwrap();
+        let v_s = v2.div(&s_t).unwrap();
+        let n_s = v_s
+            .mul(&v_s)
+            .unwrap()
+            .sum(Some(1))
+            .unwrap()
+            .unsqueeze(1)
+            .unwrap()
+            .sqrt()
+            .unwrap();
+        let vhat = v_s.div(&n_s).unwrap();
+        let dg2 = up2
+            .mul(&vhat)
+            .unwrap()
+            .sum(Some(1))
+            .unwrap()
+            .unsqueeze(1)
+            .unwrap();
+        let t = up2.sub(&dg2.mul(&vhat).unwrap()).unwrap();
+        let coef = g2.div(&n_s).unwrap().div(&s_t).unwrap();
+        let dv2 = coef.mul(&t).unwrap();
+        (dv2, dg2)
+    }
+
+    /// `shadow_check` 呼び直しの結果（#4122）。
+    struct WnShadow {
+        dv_ok: bool,
+        dg_ok: bool,
+        dv_w: Worst,
+        dg_w: Worst,
+        host_err: f64,
+        str_err: f64,
+        str_req2: f64,
+        /// 全要素で `|構造 − f64 参照| ≤ coeff·m`（見積りが実測の誤差を覆う）。
+        est_cover: bool,
+    }
+
+    /// 本番の `weight_norm_cgrads` 後半（`m` の計算・構造・`shadow_check`）を新しい子テープで再現し、合否・余裕・
+    /// f64 参照との実誤差を測る。`x0` は `[v(2·rest), g(2)]`、`up` は `weight_norm` 出力の cotangent。
+    fn wn_shadow_measure(rest: usize, x0: &[f32], up: &[f32]) -> WnShadow {
+        let shape = [2usize, rest];
+        let (v, g) = x0.split_at(2 * rest);
+        let layout = wr::weight_norm_layout(&shape, &[2, 1], Some(0)).unwrap();
+        let (dv_host, dg_host) = wr::weight_norm_vjp_host(v, g, up, &layout).unwrap();
+        let gm = GroupMap::new(&shape, Some(0)).unwrap();
+        let (v_gm, up_gm, dv_gm) = (
+            gm.to_group_major(v),
+            gm.to_group_major(up),
+            gm.to_group_major(&dv_host),
+        );
+        let scales: Vec<f32> = v_gm
+            .chunks(rest)
+            .map(|grp| {
+                pow2(pow2_ceil_exponent(
+                    grp.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs())),
+                ))
+            })
+            .collect();
+        let (m_dv, m_dg) = wn_m_abs(&v_gm, &up_gm, g, &scales, rest);
+        let child = Tape::new_with_ops(test_ops());
+        let v_m = child.var(&tt(v.to_vec(), &shape));
+        let up_v = child.var(&tt(up.to_vec(), &shape));
+        let g_m = child.var(&tt(g.to_vec(), &[2, 1]));
+        let (dv2, dg2) = wn_build(&child, &gm, &v_m, &up_v, &g_m, scales);
+        let dg_flat = dg2.contiguous().unwrap().reshape(&[2]).unwrap();
+        let coeff = rounding_coeff(rest + 4);
+        let dv_ok = shadow_check(&child, &dv2, &dv_gm, &m_dv, coeff, "WeightNorm の dv").is_ok();
+        let dg_ok =
+            shadow_check(&child, &dg_flat, &dg_host, &m_dg, coeff, "WeightNorm の dg").is_ok();
+        let dv_str = dense_vec(&child_value(&child, &dv2).unwrap());
+        let dg_str = dense_vec(&child_value(&child, &dg_flat).unwrap());
+        let (mut dv_w, mut dg_w) = (Worst::default(), Worst::default());
+        let (mut host_err, mut str_err, mut str_req2) = (0.0f64, 0.0f64, 0.0f64);
+        let mut est_cover = true;
+        let mut refs_dv = Vec::new();
+        let mut refs_dg = Vec::new();
+        for k in 0..2 {
+            let (d, dg) = wn_first_order64(
+                &v[k * rest..(k + 1) * rest],
+                &up[k * rest..(k + 1) * rest],
+                g[k],
+            );
+            refs_dv.extend(d);
+            refs_dg.push(dg);
+        }
+        for i in 0..2 * rest {
+            let (h, s, r) = (f64::from(dv_gm[i]), f64::from(dv_str[i]), refs_dv[i]);
+            dv_w.take(h, s, m_dv[i], coeff);
+            host_err = host_err.max((h - r).abs());
+            str_err = str_err.max((s - r).abs());
+            str_req2 = str_req2.max(req2_ratio(s, r));
+            est_cover &= (s - r).abs() <= coeff * m_dv[i];
+        }
+        for k in 0..2 {
+            let (h, s, r) = (f64::from(dg_host[k]), f64::from(dg_str[k]), refs_dg[k]);
+            dg_w.take(h, s, m_dg[k], coeff);
+            host_err = host_err.max((h - r).abs());
+            str_err = str_err.max((s - r).abs());
+            str_req2 = str_req2.max(req2_ratio(s, r));
+            est_cover &= (s - r).abs() <= coeff * m_dg[k];
+        }
+        WnShadow {
+            dv_ok,
+            dg_ok,
+            dv_w,
+            dg_w,
+            host_err,
+            str_err,
+            str_req2,
+            est_cover,
+        }
+    }
+
+    /// 計測（`#[ignore]`・#4122）: `Lin` の総括判定が受理するのに `shadow_check`（`Rf` 由来の
+    /// `rounding_coeff(rest + 4)·m`）だけが拒否する入力を、幅 24〜128 × g0 6 値 × 40 シードで数える。
+    /// 拒否の段は本番のエラー文面と判定関数の呼び直しだけで決め、`shadow_check` だけが拒否した入力では構造と
+    /// ホストの 1 階を f64 参照と突き合わせる（REQ-2 を外れれば「拒否が正しい」、収まれば「過大の可能性」）。
+    /// 判定・定数は変えない。`WNSHADOW-SUM`（組ごと）と `WNSHADOW-DETAIL`（幅ごとの先頭 5 件）を出す（決定記録 §80.9）。
+    /// `cargo test -p fandhe-ai-autodiff --release --lib wn_shadow_rejection_breakdown_measurement -- --ignored --nocapture --test-threads=1`
+    #[test]
+    #[ignore = "計測。--release で実行する（決定記録 §80.9）"]
+    fn wn_shadow_rejection_breakdown_measurement() {
+        let mut violations: Vec<String> = Vec::new();
+        for rest in [24usize, 32, 48, 64, 96, 128] {
+            assert!(wn_use_lin(2, rest), "幅 {rest}: 本番が Lin を選ばない");
+            let mut shown = 0;
+            for g0 in [0.02f32, 0.05, 0.1, 0.2, 0.5, 1.0] {
+                let (mut tried, mut rf_all, mut lin_all, mut full, mut flips_full) =
+                    (0, 0, 0, 0, 0);
+                let (mut lsr, mut dv_n, mut dg_n) = (0, 0, 0);
+                let (mut other, mut other_judge, mut judge_and_shadow, mut unknown, mut incons) =
+                    (0, 0, 0, 0, 0);
+                let (mut true_rej, mut over_rej) = (0, 0);
+                let (mut mg_min, mut mg_max, mut req2_max) = (f64::INFINITY, 0.0f64, 0.0f64);
+                for k in 0..40u64 {
+                    let seed = 12345 + rest as u64 + 1000 * k;
+                    let d = wn_flip_detail(rest, g0, seed);
+                    let sh = wn_shadow_measure(rest, &d.x0, &d.up);
+                    tried += 1;
+                    rf_all += usize::from(d.rf);
+                    lin_all += usize::from(d.lin);
+                    let sh_ok = sh.dv_ok && sh.dg_ok;
+                    if sh_ok && sh.str_req2 >= 1.0 {
+                        violations.push(format!(
+                            "shadow 通過なのに REQ-2 外: 幅 {rest} g0={g0} seed={seed} str_req2={}",
+                            sh.str_req2
+                        ));
+                    }
+                    if !sh.est_cover {
+                        violations.push(format!(
+                            "見積りが実誤差を覆わない: 幅 {rest} g0={g0} seed={seed} str_err={}",
+                            sh.str_err
+                        ));
+                    }
+                    match &d.verdict {
+                        Ok(()) => {
+                            full += 1;
+                            flips_full += usize::from(!d.rf && d.lin);
+                            incons += usize::from(!(d.lin && sh_ok));
+                        }
+                        Err(msg) => {
+                            let vd = wn_verdict(msg);
+                            let side = match vd {
+                                WnVerdict::ShadowDv if d.lin && !sh.dv_ok => Some(("dv", sh.dv_w)),
+                                WnVerdict::ShadowDg if d.lin && sh.dv_ok && !sh.dg_ok => {
+                                    Some(("dg", sh.dg_w))
+                                }
+                                _ => None,
+                            };
+                            if let Some((name, w)) = side {
+                                lsr += 1;
+                                if name == "dv" {
+                                    dv_n += 1;
+                                } else {
+                                    dg_n += 1;
+                                }
+                                if sh.str_req2 >= 1.0 {
+                                    true_rej += 1;
+                                } else {
+                                    over_rej += 1;
+                                }
+                                mg_min = mg_min.min(w.ratio);
+                                mg_max = mg_max.max(w.ratio);
+                                req2_max = req2_max.max(sh.str_req2);
+                                if shown < 5 {
+                                    shown += 1;
+                                    eprintln!(
+                                        "WNSHADOW-DETAIL rest={rest} g0={g0} seed={seed} side={name} \
+                                         ratio={:.4} diff={:.3e} est={:.3e} v={:.3e} m={:.3e} \
+                                         host_err={:.3e} str_err={:.3e} str_req2={:.4}",
+                                        w.ratio,
+                                        w.diff,
+                                        w.est,
+                                        w.v,
+                                        w.m,
+                                        sh.host_err,
+                                        sh.str_err,
+                                        sh.str_req2
+                                    );
+                                }
+                            } else if vd == WnVerdict::Judge && !d.lin {
+                                other += 1;
+                                other_judge += 1;
+                                judge_and_shadow += usize::from(!sh_ok);
+                            } else if vd == WnVerdict::OtherKnown {
+                                other += 1;
+                            } else {
+                                unknown += 1;
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    full + lsr + other + unknown,
+                    tried,
+                    "幅 {rest} g0={g0}: 分類の合計が試行数と一致しない"
+                );
+                eprintln!(
+                    "WNSHADOW-SUM rest={rest} g0={g0} tried={tried} rf_all={rf_all} lin_all={lin_all} \
+                     full={full} flips_full={flips_full} lin_shadow_reject={lsr} dv={dv_n} dg={dg_n} \
+                     other_reject={other} other_judge={other_judge} judge_and_shadow={judge_and_shadow} \
+                     unknown={unknown} inconsistent_accept={incons} true_reject={true_rej} \
+                     over_reject={over_rej} margin_min={:.4} margin_max={:.4} str_req2_max={:.4}",
+                    if lsr > 0 { mg_min } else { f64::NAN },
+                    if lsr > 0 { mg_max } else { f64::NAN },
+                    req2_max
+                );
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "soundness 違反（{} 件）: {violations:#?}",
+            violations.len()
+        );
+    }
     /// [`wn_use_lin`] の境界: 幅 [`LIN_REST_MAX`] とその +1、走査量 [`LIN_BUDGET`] の境界のグループ数、余裕係数の条件。
     #[test]
     fn wn_use_lin_boundaries() {
