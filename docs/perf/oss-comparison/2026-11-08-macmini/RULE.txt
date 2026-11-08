@@ -1,0 +1,34 @@
+RULE fixed-at-utc 2026-11-08T10:02:35Z
+（計測前に固定してコミットする。計測後に変更しない）
+
+目的: スコアボード 0.14.0（docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/）の
+「エンジン単体の対照」節に残る M4 Max（開発機）の 2 カードを、計測専用の Mac mini（Apple M4・10 コア・16 GB）で測り直す
+（2026-10-11 所有者指示・2026-11-08 所有者依頼「MacBook Pro ではなく Mac mini を利用して計測」）。
+  (A) CPU GEMM vs gemm crate／matrixmultiply（旧: M4 Max 2026-09-03）
+  (B) Metal GEMM vs MLX f32／PyTorch MPS f32（旧: M4 Max 2026-08-23）
+  (C) candle 比ゲートのカードは測らない（正式ゲートの Mac mini 系列は新規 issue と事前登録が要るため。文言は据え置き）
+
+対象ツリー: タグ v0.14.0（b6ae8170168c768c1fca152dae4173975b0a53d1）の git archive。.rev-stamp に sha・dirty=0。
+  crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイル SHA-256 一覧の SHA-256 =
+  b80eadc99b1d553b1315acfcd66a9121d952eb62bae09de481c7e1cb9ff7eb4f（送信側とノード側で一致を確認済み）。
+  対象のハーネス・example・Python スクリプト・backend-cpu・backend-metal は v0.14.0 と main（bc8d3a2f3）で差分なし。
+  oss-gemm-compare は fandhe-ai-backend-cpu を path 依存で参照するため、v0.14.0 のソースを測る。
+  CPU の本番経路は TwoDDynamic（#1313・TWO_D_DYNAMIC_PRODUCTION_ENABLED = true）、SME は既定 OFF。旧カードの「本番既定 RowPanel」は 2026-09-03 時点の記述。
+実機ロック: ~/work/.fandhe-hw-lock owner = "#4066 engine-0140-macmini 2026-11-08T09:59:50Z"。target は新規の 2 つ（target-oss・target-metal）で、成果物の更新時刻がロック取得より後であることを env/env_info_prepare.txt で確認済み。
+Python: uv の CPython 3.12.15。venv-mlx = mlx 0.32.4・numpy 2.5.4、venv-torch = torch 2.14.0（スコアボードの PyTorch と同版）・numpy 2.5.4。pip freeze は env/。
+
+手順（scripts/orchestrate.sh series。5 ラウンド）:
+  各ラウンドの前に load1 < 3.0 を最大 30 分（60 秒間隔）待つゲート（0.14.0 の Mac mini 系列 B と同じ閾値）。
+  ラウンド内は oss-gemm-compare（引数なし: N=512/1024/2048/4096）→ metal_gemm_bench（examples/gemm_bench.rs・転送込み）
+  → gemm_f32_prepared_bench（prepared）→ gemm_bench_mlx_f32.py → gemm_bench_torch_mps_f32.py の順に、それぞれ独立プロセスで 1 回。
+  各ハーネスの中は warmup 20・計測 20・中央値（既存の定義のまま）。計測中に同じノードで別のビルド・計測を走らせない。
+
+集計（scripts/aggregate.py。過去データで baseline.md の値を再現する --self-test を計測前に通過済み）:
+  値は 5 ラウンドの run 間中央値（CPU は GFLOP/s、Metal は TFLOPS）。比は同一ラウンド内の比の run 間中央値。
+  カードの「対 gemm crate」の範囲は旧カードと同じく中央値同士の比（med_ratio）で書き、同一ラウンド比の中央値も記録に併記する。
+  Metal の比は baseline.md §3 の比較可能ペア（転送込み÷MLX 転送込み・転送込み÷MPS、prepared÷MLX device は参考値）。
+  oss-gemm-compare の output_match=false は記録のみで計測失敗にしない（旧計測と同じ。matrixmultiply は K≥1024 で不一致・参照除外）。
+  oss の非 0 終了（不一致による）も同様に記録のみ。他のハーネスの非 0 終了・欠損行はそのラウンドを無効とし報告する。
+採否: 5/5 ラウンドがゲート通過かつ全ハーネスが完走なら正式値としてカードへ載せる。部分通過は参考値として載せ、その旨をカードに書く。
+  M4 Max の旧値とは機体が違うため比較しない（旧値は baseline.md に残し上書きしない）。
+  tolerance・判定規則・閾値・依存（本体 workspace）は変更しない。
