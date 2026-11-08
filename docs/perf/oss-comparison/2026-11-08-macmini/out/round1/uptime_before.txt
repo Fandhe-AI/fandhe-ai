@@ -1,0 +1,6 @@
+19:04  up 28 days, 18:37, 1 user, load averages: 2.59 4.41 2.91
+  2.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  1.6 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+  1.4 bash
+  1.4 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN
+  1.1 /usr/sbin/bluetoothd

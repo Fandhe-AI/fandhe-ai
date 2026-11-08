@@ -1,0 +1,6 @@
+19:15  up 28 days, 18:48, 1 user, load averages: 1.19 1.96 2.34
+  3.3 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  0.5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  0.4 /usr/libexec/sharingd
+  0.3 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN
+  0.3 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
