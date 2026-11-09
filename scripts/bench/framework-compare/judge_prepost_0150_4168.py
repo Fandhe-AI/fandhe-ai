@@ -102,11 +102,11 @@ def paired_ratio(runs, task, device, size):
         me = d.get(('fandhe-ai', task, device, size, 'reuse'))
         if me is None:
             raise SystemExit(f'run{i}: fandhe-ai reuse 欠損 {task} {device} N={size}')
-        if me.get('parity_fail_count', 0) > 0:
+        if (me.get('parity_fail_count') or 0) > 0:
             raise SystemExit(f'run{i}: fandhe-ai reuse の要素検証が不合格 {task} {device} N={size}')
         comp = [r['median_s'] for fw in FW_ORDER
                 for r in [d.get((fw, task, device, size, 'fresh'))]
-                if r is not None and r.get('parity_fail_count', 0) == 0]
+                if r is not None and (r.get('parity_fail_count') or 0) == 0]
         if not comp:
             raise SystemExit(f'run{i}: 有効な比較相手がない {task} {device} N={size}')
         rs.append(min(comp) / me['median_s'])
@@ -122,14 +122,14 @@ def judge(data, task, device, size, runs):
     assert me is not None, (task, device, size)
     # 判定側（fandhe-ai）の要素検証が不合格なら順位を出さない。判定不能行を集計
     # （判定対象 = 勝ち＋僅差＋負け）へ黙って混ぜないよう、生成自体を止める（fail-closed）
-    me_fail = me.get('parity_fail_count', 0)
+    me_fail = me.get('parity_fail_count') or 0
     if me_fail > 0:
         raise SystemExit(f'fandhe-ai reuse の要素検証が不合格（{me_fail} 要素）: {task} {device} N={size}。判定不能のため勝敗を出さない')
     mine = metric(me, task)
     comp = []
     for fw in FW_ORDER:
         r = data.get((fw, task, device, size, 'fresh'))
-        if r is None or r.get('parity_fail_count', 0) > 0:
+        if r is None or (r.get('parity_fail_count') or 0) > 0:
             continue
         comp.append((fw, metric(r, task)))
     if not comp:
