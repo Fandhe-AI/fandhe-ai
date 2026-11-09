@@ -7,7 +7,10 @@
 閾値は RULE の AUX（kernel_share_threshold・perturbation_max・cross_check_max）が唯一の正。実測値は含まない。
 
 入力（<dir> 配下）: RULE.txt・round{1..N}/{gate.txt, values.tsv, aux.tsv}（to_values_4153.py の出力）。
-出力: attrib.tsv（round 別と中央値）と標準出力の要約。厳格パース（欠損・重複・非有限は AttribError で停止）。
+出力: attrib.tsv（round 別と中央値）と標準出力の要約。厳格パース（欠損・重複・非有限・未知の AUX キーは AttribError で停止）。
+AUX の xctrace と PARAMS の cell 行 formulas の対応（available ⇔ F1,F2・unavailable ⇔ F2）を検査する
+（aggregate_diag.py は AUX を読まないため）。unavailable では trace 専用キーを要求せず、帰属は判定不能・
+摂動と照合は unavailable とし、F2 だけで分類したことを fallback_note に出す。
 標準ライブラリのみ。`python3 -I` で実行すること。
 
 使い方:
@@ -28,6 +31,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 AUX_NUM = ["perturbation_max", "cross_check_max", "kernel_share_threshold"]
 DIFF_KEY = "backend_metal_diff_vs_v0_14_0"
 AUX_SHA = {"to_values_sha256": "to_values_4153.py", "attrib_sha256": "attrib_4153.py", "run_round_sha256": "run_round.sh"}
+# trace を読む経路（xctrace=available）だけが使う AUX キー。to_values_4153.py の TRACE_KEYS と同じ集合に保つ。
+TRACE_KEYS = ["xctrace_schema", "xctrace_start_col", "xctrace_dur_col", "xctrace_proc_col",
+              "xctrace_time_unit_ns", "gemm_interval_min_ms"]
+# RULE の AUX に書いてよいキーの全集合（to_values_4153.py の AUX_ALLOWED と同じ集合に保つ）
+AUX_ALLOWED = {"xctrace", *TRACE_KEYS, *AUX_NUM, DIFF_KEY, *AUX_SHA}
+FORMULAS_BY_MODE = {"available": ["F1", "F2"], "unavailable": ["F2"]}
+# xctrace=unavailable の要約注記。aggregate_diag.py は F2 だけで分類し、分類保留の理由は固定文言
+# 「どれも届かない」になるが、F1 は測っていないため「自分たちの制約／ハードの上限」は判定していない（RULE 項 5）。
+FALLBACK_NOTE = ("xctrace unavailable: F1 未計測。aggregate の分類は F2 だけで決まる（F2 が届けば計測窓の定義、"
+                 "届かなければ分類保留。その理由「どれも届かない」は F2 が届かないことだけを表し、"
+                 "自分たちの制約／ハードの上限は判定していない）")
 
 
 class AttribError(Exception):
@@ -71,8 +85,28 @@ def parse_aux(text):
         k = k.strip()
         if k in kv:
             raise AttribError(f"AUX: duplicate key {k!r}")
+        if k not in AUX_ALLOWED:
+            raise AttribError(f"AUX: unknown key {k!r}")
         kv[k] = v.strip()
     return kv
+
+
+def xctrace_mode(text, aux):
+    """AUX の xctrace（available|unavailable）を返し、PARAMS の cell 行 formulas との対応を検査する。"""
+    mode = aux.get("xctrace")
+    if mode not in FORMULAS_BY_MODE:
+        raise AttribError("AUX: xctrace must be available|unavailable")
+    hits = re.findall(rf"^cell:\s*{CELL}\s*\|(.*)$", text.split("## PARAMS", 1)[-1], re.M)
+    if len(hits) != 1:
+        raise AttribError(f"PARAMS: cell {CELL} expected once, got {len(hits)}")
+    fs = [f.split("=", 1)[1].strip() for f in hits[0].split("|") if f.strip().startswith("formulas=")]
+    if len(fs) != 1:
+        raise AttribError(f"PARAMS: cell {CELL}: formulas expected once")
+    got = [x.strip() for x in fs[0].split(",")]
+    if got != FORMULAS_BY_MODE[mode]:
+        raise AttribError(f"AUX xctrace={mode} requires formulas={','.join(FORMULAS_BY_MODE[mode])}, "
+                          f"PARAMS has formulas={','.join(got)}")
+    return mode
 
 
 def parse_rounds(text):
@@ -102,8 +136,14 @@ def diff_flag(aux, required):
 def check_rule(path, base=HERE):
     text = read(path)
     aux = parse_aux(text)
+    mode = xctrace_mode(text, aux)
+    # unavailable では trace 専用キーを読まないので、<…> のまま・未記載を許す（to_values_4153.py と同じ扱い）
+    skip = set(TRACE_KEYS) if mode == "unavailable" else set()
+    for k in (TRACE_KEYS if mode == "available" else []):
+        if k not in aux:
+            raise AttribError(f"AUX: missing {k}")
     for k, v in aux.items():
-        if re.search(r"<[^<>]*>", v):
+        if k not in skip and re.search(r"<[^<>]*>", v):
             raise AttribError(f"AUX: unreplaced placeholder in {k}")
     for k in AUX_NUM:
         if k not in aux:
@@ -138,7 +178,7 @@ def read_tsv(path, header, keycols):
     return out
 
 
-def round_metrics(rd, thr):
+def round_metrics(rd, thr, mode):
     vals = {k[1]: (finite(f[2], "value"), f[3]) for k, f in read_tsv(
         os.path.join(rd, "values.tsv"), ["cell", "quantity", "value", "clock"], 2).items() if k[0] == CELL}
     aux = {k[0]: finite(f[1], "aux") for k, f in read_tsv(os.path.join(rd, "aux.tsv"), ["quantity", "value"], 1).items()}
@@ -150,15 +190,18 @@ def round_metrics(rd, thr):
             raise AttribError(f"{rd}: missing aux {q}")
     fw, ow = vals["fandhe_window"][0], vals["opp_window"][0]
     m = {"delta_w": fw - ow}
-    # trace 下の窓は xctrace=available のときだけ取る。unavailable（F2 のみ）では摂動を unavailable とし、値を作らない
-    traced = [q in aux for q in ("opp_transfer_excl_traced", "fandhe_window_traced")]
-    if any(traced) and not all(traced):
-        raise AttribError(f"{rd}: aux traced values must be both present or both absent")
-    if all(traced):
+    # trace 下の窓・純カーネルの有無は AUX の xctrace で決まる（available は全部ある／unavailable は全部ない。
+    # unavailable では摂動・照合を unavailable とし値を作らない）。一部だけある・mode と食い違う round は、
+    # 変換と RULE の取り違えとして止める
+    present = [q in aux for q in ("opp_transfer_excl_traced", "fandhe_window_traced")] + \
+        [q in vals for q in ("fandhe_pure_kernel", "opp_pure_kernel")]
+    want = mode == "available"
+    if any(x != want for x in present):
+        raise AttribError(f"{rd}: traced windows / pure_kernel must be all {'present' if want else 'absent'} for xctrace={mode}")
+    if want:
         m["perturbation_fandhe"] = abs(aux["fandhe_window_traced"] / fw - 1.0)
         m["perturbation_opp"] = abs(aux["opp_transfer_excl_traced"] / aux["opp_transfer_excl"] - 1.0)
         m["perturbation"] = max(m["perturbation_fandhe"], m["perturbation_opp"])
-    if "fandhe_pure_kernel" in vals and "opp_pure_kernel" in vals:
         fk, ok = vals["fandhe_pure_kernel"][0], vals["opp_pure_kernel"][0]
         if vals["fandhe_pure_kernel"][1] != vals["opp_pure_kernel"][1]:
             raise AttribError(f"{rd}: pure_kernel clock tags differ")
@@ -185,6 +228,7 @@ def attribute(dirp, rule_name="RULE.txt", verify=True, base=HERE):
             raise AttribError(f"AUX: missing {k}")
     thr, pmax, cmax = (finite(aux[k], k) for k in ("kernel_share_threshold", "perturbation_max", "cross_check_max"))
     bdiff = diff_flag(aux, verify)
+    mode = xctrace_mode(text, aux)
     n = parse_rounds(text)
     rows, per = [], []
     for i in range(1, n + 1):
@@ -195,7 +239,7 @@ def attribute(dirp, rule_name="RULE.txt", verify=True, base=HERE):
         if g[0] != "PASS":
             rows.append((i, "gate", g[0]))
             continue
-        m = round_metrics(rd, thr)
+        m = round_metrics(rd, thr, mode)
         per.append(m)
         for k, v in m.items():
             rows.append((i, k, v if isinstance(v, str) else f"{v:.6f}"))
@@ -221,7 +265,9 @@ def attribute(dirp, rule_name="RULE.txt", verify=True, base=HERE):
                ("summary", "side", side), ("summary", "confidence", conf),
                ("summary", "confidence_reasons", "; ".join(low) or "-"),
                ("summary", "backend_metal_diff_vs_v0_14_0", bdiff),
-               ("summary", "version_note", "版差あり（照合は異なる backend-metal 実装版）" if bdiff == "あり" else "-")]
+               ("summary", "version_note", "版差あり（照合は異なる backend-metal 実装版）" if bdiff == "あり" else "-"),
+               ("summary", "xctrace", mode),
+               ("summary", "fallback_note", FALLBACK_NOTE if mode == "unavailable" else "-")]
     return rows, summary
 
 
@@ -237,10 +283,15 @@ def run(dirp, rule_name, out):
 
 
 # ---------------------------------------------------------------- self-test（合成データ。数値は架空）
-def _mk(d, n, rows_by_round, aux_extra=""):
+def _cell(mode):
+    return (f"cell: {CELL} | machine=macmini | scoreboard_ratio=0.88 | formulas={','.join(FORMULAS_BY_MODE[mode])} | "
+            "kernel_owner=constraint | opp=candle | prev_class=x\n")
+
+
+def _mk(d, n, rows_by_round, aux_extra="", mode="available"):
     open(os.path.join(d, "RULE.txt"), "w").write(
-        "RULE fixed-at-utc 2000-01-01T00:00:00Z\n## AUX\nkernel_share_threshold: 0.5\nperturbation_max: 0.10\n"
-        f"cross_check_max: 0.10\n{aux_extra}## PARAMS\nrounds: {n}\n")
+        f"RULE fixed-at-utc 2000-01-01T00:00:00Z\n## AUX\nxctrace: {mode}\nkernel_share_threshold: 0.5\nperturbation_max: 0.10\n"
+        f"cross_check_max: 0.10\n{aux_extra}## PARAMS\nrounds: {n}\n{_cell(mode)}")
     for i, (gate, vals, aux) in enumerate(rows_by_round, 1):
         rd = os.path.join(d, f"round{i}")
         os.makedirs(rd)
@@ -271,11 +322,53 @@ def _expect(fn, label, needle):
     raise AssertionError(f"{label}: expected AttribError")
 
 
+def _load(name):
+    """同じディレクトリのスクリプトを読み込む（`python3 -I` では sys.path にスクリプトのディレクトリが入らないため）。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, f"{name}.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _self_test_fallback_e2e():
+    """フォールバック（xctrace unavailable・formulas=F2）を to_values → aggregate_diag → attrib の順に通し、
+    RULE 項 5 の記載（F2 だけで分類・F1 の時計不一致には倒れない・attrib は判定不能＋fallback_note）と一致することを確かめる。"""
+    tv, ag = _load("to_values_4153"), _load("aggregate_diag")
+    # 2 スクリプトで別々に持つキー集合・対応表が食い違っていないこと（片方だけ直すドリフトの検出）
+    assert (tv.TRACE_KEYS, tv.AUX_ALLOWED, tv.FORMULAS_BY_MODE) == (TRACE_KEYS, AUX_ALLOWED, FORMULAS_BY_MODE)
+    for thr, want_cls, want_why in (("0.75", ag.CLASS_WINDOW, "F2 が届く"), ("1.00", ag.CLASS_HOLD, "どれも届かない")):
+        with tempfile.TemporaryDirectory() as t:
+            rule = tv.RULE_FB_PLACEHOLDER.split("## PARAMS")[0] + (
+                "perturbation_max: 0.10\ncross_check_max: 0.10\nkernel_share_threshold: 0.5\n"
+                "backend_metal_diff_vs_v0_14_0: なし\n"
+                "## PARAMS\nfixed-at-utc: 2000-01-01T00:00:00Z\nissue: 4153\nrounds: 5\n"
+                f"tree_sha: {'0' * 40}\ntree_fingerprint: {'0' * 64}\naggregate_script_sha256: {ag.self_sha256()}\n"
+                f"reach_threshold: {thr}\nnoise_band: NB-RANGE5\n" + _cell("unavailable"))
+            open(os.path.join(t, "RULE.txt"), "w", encoding="utf-8").write(rule)
+            for i in range(1, 6):
+                rd = os.path.join(t, f"round{i}")
+                tv._build(rd, xc="unavailable")  # 架空値: fandhe_fresh 70・candle 56 → F2 = 0.8
+                vt, at = tv.convert(rd, rule)
+                for fn, body in (("values.tsv", vt), ("aux.tsv", at), ("gate.txt", "PASS\n")):
+                    open(os.path.join(rd, fn), "w", encoding="utf-8").write(body)
+            _, tsv = ag.aggregate(t)
+            row = tsv.splitlines()[1].split("\t")
+            assert row[0] == CELL and row[1] == "-" and row[2] == "0.8000", row  # F1 は出ない
+            assert row[3] == want_cls and row[4] == "高" and want_why in row[5], row  # 全 PASS・全 run 同じ側
+            assert "時計不一致" not in row[5], row
+            _, s = attribute(t, verify=False)
+            sm = {k: v for _, k, v in s}
+            assert sm["xctrace"] == "unavailable" and sm["fallback_note"] == FALLBACK_NOTE, sm
+            assert sm["side"] == "判定不能(純カーネル unavailable)" and sm["confidence"] == "低", sm
+            assert sm["perturbation"] == "unavailable" and sm["kernel_share"] == "", sm
+
+
 def self_test():
-    def sc(case):
+    def sc(case, mode="available"):
         with tempfile.TemporaryDirectory() as t:
             n, rounds = case
-            _mk(t, n, rounds)
+            _mk(t, n, rounds, mode=mode)
             return attribute(t, verify=False)
 
     # 正常: ΔW=8, ΔK=6 → share 0.75 → カーネル側・確度高
@@ -298,9 +391,30 @@ def self_test():
     assert sm["confidence"] == "低" and "cross_check" in sm["confidence_reasons"]
     # フォールバック（純カーネルなし・trace 下の窓なし＝F2 のみ）
     a = {k: v for k, v in _aux().items() if "traced" not in k}
-    _, s = sc((1, [("PASS", _vals(pk=False), a)]))
+    _, s = sc((1, [("PASS", _vals(pk=False), a)]), mode="unavailable")
     sm = {k: v for _, k, v in s}
-    assert "unavailable" in sm["side"] and sm["median_perturbation" if False else "perturbation"] == "unavailable", sm
+    assert "unavailable" in sm["side"] and sm["perturbation"] == "unavailable", sm
+    assert sm["fallback_note"] == FALLBACK_NOTE and sm["xctrace"] == "unavailable", sm
+    _, s = sc((1, [("PASS", _vals(), _aux())]))
+    assert {k: v for _, k, v in s}["fallback_note"] == "-"
+    # round の中身と AUX xctrace の食い違いは止める（一部欠け・unavailable なのに純カーネルあり）
+    _expect(lambda: sc((1, [("PASS", _vals(pk=False), _aux())])), "available missing pure_kernel", "all present")
+    _expect(lambda: sc((1, [("PASS", _vals(), a)])), "available missing traced", "all present")
+    _expect(lambda: sc((1, [("PASS", _vals(), a)]), mode="unavailable"), "unavailable with pure_kernel", "all absent")
+    _expect(lambda: sc((1, [("PASS", _vals(pk=False), _aux())]), mode="unavailable"), "unavailable with traced", "all absent")
+    # AUX xctrace と formulas の食い違い・未知の AUX キー・xctrace 欠落は止める
+    with tempfile.TemporaryDirectory() as t:
+        _mk(t, 1, [("PASS", _vals(), _aux())])
+        rp = os.path.join(t, "RULE.txt")
+        good = read(rp)
+        for bad, needle in ((good.replace("formulas=F1,F2", "formulas=F2"), "requires formulas=F1,F2"),
+                            (good.replace("xctrace: available", "xctrace: unavailable"), "requires formulas=F2"),
+                            (good.replace("xctrace: available\n", ""), "available|unavailable"),
+                            (good.replace("## PARAMS", "xctrace_expected_extra: 1\n## PARAMS"), "unknown key"),
+                            (good.split(_cell("available"))[0], "expected once")):
+            open(rp, "w").write(bad)
+            _expect(lambda: attribute(t, verify=False), f"rule mismatch {needle}", needle)
+    _self_test_fallback_e2e()
     # round 間で割れる → 低
     _, s = sc((2, [("PASS", _vals(), _aux()), ("PASS", _vals(fk=56.0), _aux())]))
     sm = {k: v for _, k, v in s}
@@ -332,13 +446,29 @@ def self_test():
         for fn in AUX_SHA.values():
             open(os.path.join(t, fn), "w").write(fn)
         shas = {k: hashlib.sha256(fn.encode()).hexdigest() for k, fn in AUX_SHA.items()}
-        good = ("RULE fixed-at-utc 2000-01-01T00:00:00Z\n## AUX\nkernel_share_threshold: 0.5\nperturbation_max: 0.10\n"
-                "cross_check_max: 0.10\nbackend_metal_diff_vs_v0_14_0: なし\n" + "".join(f"{k}: {v}\n" for k, v in shas.items()) + "## PARAMS\nrounds: 5\n")
+        trace_real = "".join(f"{k}: v\n" for k in TRACE_KEYS)
+        trace_ph = "".join(f"{k}: <未確定>\n" for k in TRACE_KEYS)
+        good = ("RULE fixed-at-utc 2000-01-01T00:00:00Z\n## AUX\nxctrace: available\n" + trace_real +
+                "kernel_share_threshold: 0.5\nperturbation_max: 0.10\n"
+                "cross_check_max: 0.10\nbackend_metal_diff_vs_v0_14_0: なし\n" + "".join(f"{k}: {v}\n" for k, v in shas.items()) +
+                "## PARAMS\nrounds: 5\n" + _cell("available"))
+        fb = good.replace("xctrace: available", "xctrace: unavailable").replace(_cell("available"), _cell("unavailable"))
         rp = os.path.join(t, "RULE.txt")
         open(rp, "w").write(good)
         check_rule(rp, base=t)
         open(rp, "w").write(good.replace("perturbation_max: 0.10", "perturbation_max: <x>"))
         _expect(lambda: check_rule(rp, base=t), "placeholder", "placeholder")
+        # available: trace 専用キーの <…> 残り・未記載は止める（通常経路は厳格なまま）
+        open(rp, "w").write(good.replace(trace_real, trace_ph))
+        _expect(lambda: check_rule(rp, base=t), "available trace placeholder", "placeholder")
+        open(rp, "w").write(good.replace(trace_real, ""))
+        _expect(lambda: check_rule(rp, base=t), "available trace missing", "missing")
+        # unavailable: trace 専用キーは <…> のまま・未記載のどちらも通す（指摘 2）。それ以外の <…> は従来どおり止める
+        for body in (fb.replace(trace_real, trace_ph), fb.replace(trace_real, "")):
+            open(rp, "w").write(body)
+            check_rule(rp, base=t)
+        open(rp, "w").write(fb.replace(trace_real, trace_ph).replace("cross_check_max: 0.10", "cross_check_max: <x>"))
+        _expect(lambda: check_rule(rp, base=t), "unavailable non-trace placeholder", "placeholder")
         open(os.path.join(t, "run_round.sh"), "w").write("changed")
         open(rp, "w").write(good)
         _expect(lambda: check_rule(rp, base=t), "sha", "mismatch")
