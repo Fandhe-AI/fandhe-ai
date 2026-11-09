@@ -272,7 +272,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 ## 11. N≥1024 限定の T0U-LU-FB opt-in と現行表との A/B（イシュー #4160）
 
-状態: **機構・計測基盤を追加済み（PR-1）。Mac mini の実測は未実施**（§11.5 の記入欄は空）。
+状態: **機構・計測基盤を追加済み（PR-1）。Mac mini の実測は未実施**（§11.5 の記入欄は空）。**既定経路への結線は #4166 で保留中（#4160 の判定待ち。§11.7）。**
 
 ### 11.1 背景
 
@@ -313,3 +313,25 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 - Mac mini: 規則の固定（単独コミット）→ 5 run 計測 → 判定記入 → `loss-attribution-matrix.md` の M-MTL-G1024／G2048 行更新 → `Closes #4160`。
 - `STEEL_LARGE_N_ENABLED` の既定反転は Phase 4（#4166）・所有者承認事項。M4 Max での確認も結線前に要る。
+
+### 11.7 Phase 4 結線（#4166）の状態と手順
+
+**現在の状態: 結線は保留（#4160 の判定待ち）。** #4160 の A/B は未実測で（§11.5 は空、`logs/metal-steel-large-n-ab-macmini-4160/` に `RULE.txt`・`aggregate.md` がない）、ADOPT とも REJECT とも決まっていない。#4160 は道具立ての PR #4197 の `Closes` で自動的にクローズされたが、判定の記録はない。このため `tile::STEEL_LARGE_N_ENABLED` は `false` のまま据え置く。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
+
+**結線の前提条件（すべて満たしたときだけ結線する）**
+
+1. Mac mini（`<metal-node>`）で事前登録（`RULE.txt` を単独コミット）→ 5 run 実測 → 判定まで終え、ADOPT になる。「1 位に変わった」と書けるのは `docs/perf/noise-band-decision.md`（#4142）の NB-SEP が成立したときだけ。NB の定義は所有者承認待ち。
+2. 既定の反転について所有者の承認がある（#4164）。
+3. M4 Max での非後退を確認する。`select_steel_large_n` は M4Max では常に `None` なので、確認内容は「経路が変わらないこと」と「ignored の parity テストが通ること」。
+
+**結線の手順（ADOPT と承認がそろった後の機械的な作業）**
+
+- `crates/backend-metal/src/tile.rs` の `STEEL_LARGE_N_ENABLED` を `true` にする。
+- ロックテスト `steel_large_n_enabled_is_false_by_default` を `true` 固定へ反転し、名前も変える。
+- `STEEL_LARGE_N_ENABLED` の doc コメント（「構築入口は `#[cfg(test)]` のみ」「既定挙動は不変」）と §11.2 の「既定 OFF」の記述を直す。
+- `MetalGemm::new` 系の初期化経路で本定数が本番へ届くことを確かめる。
+- 範囲は #4197 の絞り込みを引き継ぐ。M4Base かつ正方 1024／2048／4096 との完全一致だけ。「N≥1024」へ広げるには追加実測と別の判断が要る。
+
+**前後比較の取り方**: `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`・`orchestrate_macmini.sh`・`aggregate.py` を使い、5 ラウンドの中央値で §11.5 に記録する。`loss-attribution-matrix.md` の M-MTL-G1024／G2048 行と両機体の 14 セルの付け直しは #4168 の担当。
+
+**REQ-8・数値**: `shaders/gemm.metal` は変えず、既存の function constant の組み合わせだけを使う。シェーダ側の境界チェックとゼロ埋めは両 variant で同じ。単一の連続 K ループなので REQ-2 の統一複合判定（tolerance は不変）をそのまま適用する。
