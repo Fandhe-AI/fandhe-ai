@@ -161,5 +161,74 @@ class T(unittest.TestCase):
         self.assertEqual(judge(gate=dict(threshold="5.0", rule="5.0"), machines=("macmini",))[0], 2)
 
 
+def make4158(treated_ratio=0.9, other_ratio=0.99, checksum=1.0, drop=None, extra_tag=None):
+    """4158 のセル集合（診断経路セルを含む）を書き出した (before, after) を返す。"""
+    d = tempfile.mkdtemp()
+    bp, ap = os.path.join(d, "b.jsonl"), os.path.join(d, "a.jsonl")
+    with open(bp, "w") as bf, open(ap, "w") as af:
+        for rnd in range(5):
+            for (t, s, m, diag) in J.expected_cells_4158():
+                if drop == (t, s, m, diag) and rnd == 4:
+                    continue
+                tr = t == "gemm" and m == "reuse" and s in J.TREATED_SIZES and diag != ""
+                ratio = treated_ratio if tr else other_ratio
+                base = {"framework": "fandhe-ai", "device": "cpu", "task": t, "mode": m,
+                        "size": s, "warmup": 3, "iters": 10, "checksum": checksum}
+                if diag:
+                    base["diag"] = extra_tag or diag
+                bf.write(json.dumps({**base, "median_s": 1.0}) + "\n")
+                af.write(json.dumps({**base, "median_s": ratio}) + "\n")
+    return bp, ap
+
+
+def make_gate4158(procs="0"):
+    path = make_gate(machine="gb10")
+    lines = open(path).read().splitlines()
+    out = [lines[0]] + [ln + f" compute_procs={procs}" for ln in lines[1:]]
+    open(path, "w").write("\n".join(out) + "\n")
+    return path
+
+
+def judge4158(gate=None, **kw):
+    b, a = make4158(**kw)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = J.main(["--rule-set", "4158", "--gb10-before", b, "--gb10-after", a,
+                     "--gb10-gate-log", gate or make_gate4158()])
+    return rc, out.getvalue()
+
+
+class T4158(unittest.TestCase):
+    def test_adopt_single_machine(self):
+        self.assertEqual(judge4158()[0], 0)
+
+    def test_boundary_and_reject(self):
+        self.assertEqual(judge4158(treated_ratio=0.95)[0], 0)
+        self.assertEqual(judge4158(treated_ratio=0.96)[0], 2)
+        self.assertEqual(judge4158(treated_ratio=1.01)[0], 1)
+
+    def test_guard_cell_regression(self):
+        self.assertEqual(judge4158(other_ratio=1.01)[0], 1)
+
+    def test_checksum_and_missing_cell(self):
+        self.assertEqual(judge4158(drop=("gemm", 4096, "reuse", J.DIAG_TAG))[0], 2)
+
+    def test_unknown_diag_tag_fail_closed(self):
+        self.assertEqual(judge4158(extra_tag="other")[0], 2)
+
+    def test_requires_zero_compute_procs(self):
+        rc, out = judge4158(gate=make_gate4158(procs="1"))
+        self.assertEqual(rc, 2)
+        self.assertIn("compute", out)
+        # compute_procs 欠落（3226 形式のログ）も不受理。
+        self.assertEqual(judge4158(gate=make_gate(machine="gb10"))[0], 2)
+
+    def test_3226_rejects_diag_rows(self):
+        b, a = make4158()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = J.main(["--gb10-before", b, "--gb10-after", a, "--gb10-gate-log", make_gate(machine="gb10")])
+        self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

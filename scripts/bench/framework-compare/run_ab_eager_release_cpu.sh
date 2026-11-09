@@ -13,6 +13,12 @@
 # macOS 標準の bash 3.2 で動くこと（変数は ${VAR} 形式・mapfile／連想配列を使わない・jq に依存しない）。
 # 実行手順: `docs/perf/logs/cpu-gemm-reuse-release-3226/README.md`。
 #
+# イシュー #4158（サイズゲート付き eager release の GB10 A/B）: `AB_ISSUE=4158` で RULE・ファイル名
+# 接頭辞・セル構成を切り替える（既定 3226 の動作は不変）。4158 は gb10 限定で、診断経路
+# （`--diag-legacy-tape-reuse`。eager release の機構が届く旧条件）のセルを足し、round ごとに
+# GPU compute プロセス 0 件（`nvidia-smi --query-compute-apps`）を専有ゲートに加える。
+# 手順: `docs/perf/logs/cpu-gemm-reuse-release-sizegate-4158/README.md`。
+#
 # 呼び出し例（専有ゲートは機体ごとの規則閾値）:
 #   AB_PROFILE=gb10 \
 #   AB_BEFORE_FACADE_PATH=/path/to/before/crates/facade \
@@ -24,6 +30,16 @@ cd "$(dirname "$0")" || exit 1
 source ./bench_fandhe_lock_restore.sh
 
 LABEL=${1:-}
+# 対象イシュー（allowlist）。RULE・ファイル名接頭辞・セル構成を決める。
+TAG=${AB_ISSUE:-3226}
+case "$TAG" in
+  3226) RULE_DIR=cpu-gemm-reuse-release-3226 ;;
+  4158) RULE_DIR=cpu-gemm-reuse-release-sizegate-4158 ;;
+  *)
+    echo "error: AB_ISSUE must be 3226|4158 (got: ${TAG})" >&2
+    exit 1
+    ;;
+esac
 # RULE.txt は「5 round 中央値・5/5 round 一貫性」を事前登録しており、
 # compare_gemm_ab.py も各セルちょうど 5 件を要求する。round 数は 5 固定とし、
 # AB_ROUNDS で 5 以外が指定された場合は fail-closed で拒否する。
@@ -59,12 +75,23 @@ case "$PROFILE" in
     exit 1
     ;;
 esac
+if [[ "$TAG" == 4158 ]]; then
+  if [[ "$PROFILE" != gb10 ]]; then
+    echo "error: AB_ISSUE=4158 は AB_PROFILE=gb10 限定です（Mac mini は #4159）" >&2
+    exit 1
+  fi
+  TASK_FILES="gemm train infer gemmdiag traindiag"
+fi
 GATE_RS="crates/autodiff/src/eager_release.rs"
 GATE_CONST="EAGER_MATMUL_RELEASE_DEFAULT_ENABLED"
 PRECHECK_TEST="eager_release_report"
 PRECHECK_ENV="EXPECT_EAGER_RELEASE_ACTIVE"
 PRECHECK_LINE="eager_release_report enabled="
-RULE_FILE="../../../docs/perf/logs/cpu-gemm-reuse-release-3226/RULE.txt"
+RULE_FILE="../../../docs/perf/logs/${RULE_DIR}/RULE.txt"
+# 4158 のサイズゲート閾値（`eager_release.rs::EAGER_MATMUL_RELEASE_MAX_BYTES`。RULE 事前登録値）。
+SIZE_GATE_BYTES=33554432
+# 結果ファイルの種別。4158 は診断経路の gemm／train を別ファイル（gemmdiag／traindiag）へ記録する。
+TASK_FILES="gemm train infer"
 if [[ ! -f "$RULE_FILE" ]]; then
   echo "error: RULE.txt not found (${RULE_FILE})" >&2
   exit 1
@@ -252,14 +279,14 @@ esac
 
 OUT="results/raw"
 mkdir -p "$OUT"
-SKIP="$OUT/skipped-3226-${DEVICE}-${LABEL}.log"
+SKIP="$OUT/skipped-${TAG}-${DEVICE}-${LABEL}.log"
 ANY_FAILED=0
 
 # 同じ LABEL の既存系列は消去しない（RULE.txt: run の差し替え・追加起動はしない）。
 # 既存 JSONL を検出したら書き込み前に終了し、再実行は別ラベルで行わせる
 # （#2102 と同じ fail-closed）。
 for _reset_arm in before after; do
-  for _reset_suffix in gemm train infer; do
+  for _reset_suffix in $TASK_FILES; do
     _existing="$OUT/results-${_reset_arm}-${LABEL}-${DEVICE}-${_reset_suffix}.jsonl"
     if [[ -e "$_existing" ]]; then
       echo "error: 既存の計測記録 $_existing があります。差し替え禁止のため別の LABEL で実行してください" >&2
@@ -273,7 +300,7 @@ if [[ -e "$SKIP" ]]; then
 fi
 : >"$SKIP"
 for _reset_arm in before after; do
-  for _reset_suffix in gemm train infer; do
+  for _reset_suffix in $TASK_FILES; do
     : >"$OUT/results-${_reset_arm}-${LABEL}-${DEVICE}-${_reset_suffix}.jsonl"
   done
 done
@@ -287,7 +314,7 @@ bench_fandhe_setup_lock_restore_trap
 run_gate_precheck() { # run_gate_precheck <arm> <facade_path> <expect 0|1>
   local arm=$1 root out
   root="$(git -C "$2" rev-parse --show-toplevel)" || exit 1
-  out="${OUT}/eager-release-report-3226-${arm}-${LABEL}.txt"
+  out="${OUT}/eager-release-report-${TAG}-${arm}-${LABEL}.txt"
   local -a envs=()
   [[ "$PRECHECK" == assert ]] && envs=("${PRECHECK_ENV}=$3")
   if ! (cd "$root" && env ${envs[@]+"${envs[@]}"} cargo test -p fandhe-ai-autodiff --lib --release --locked \
@@ -302,6 +329,13 @@ run_gate_precheck() { # run_gate_precheck <arm> <facade_path> <expect 0|1>
     exit 1
   fi
   echo "precheck(${arm},mode=${PRECHECK}): $(grep "^${PRECHECK_LINE}" "$out" | head -n1)"
+  # 4158: 両腕のサイズゲート閾値が RULE の値と一致することを assert する（閾値だけ違う偽の A/B を遮断）。
+  if [[ "$TAG" == 4158 && "$PRECHECK" == assert ]]; then
+    if ! grep -q "^eager_release_report size_gate_max_bytes=${SIZE_GATE_BYTES}\$" "$out"; then
+      echo "error: precheck (${arm}) の size_gate_max_bytes が ${SIZE_GATE_BYTES} ではありません" >&2
+      exit 1
+    fi
+  fi
 }
 echo "== precheck (profile=${PROFILE}, mode=${PRECHECK}) =="
 run_gate_precheck before "$BEFORE_FACADE" 0
@@ -326,7 +360,7 @@ run_gate_precheck after "$AFTER_FACADE" 1
   echo "hw.memsize=$(sysctl -n hw.memsize 2>/dev/null || echo NA)"
   echo "rayon_num_threads=${RAYON_NUM_THREADS:-unset}"
   echo "precheck=${PRECHECK}"
-} 2>&1 | sed -e "s#${HOME}#<home>#g" -e "s#$(hostname 2>/dev/null || echo __nohost__)#masked#g" >"${OUT}/env_info-3226-${LABEL}.txt"
+} 2>&1 | sed -e "s#${HOME}#<home>#g" -e "s#$(hostname 2>/dev/null || echo __nohost__)#masked#g" >"${OUT}/env_info-${TAG}-${LABEL}.txt"
 
 build_arm() { # build_arm <arm> <facade_path> <target_dir>
   local arm=$1 facade=$2 tdir=$3 patch_config exe msg
@@ -357,7 +391,7 @@ print(last)
     echo "error: build $arm: exe not found" >&2
     exit 1
   fi
-  cp "$exe" "$OUT/bench-fandhe-3226-${arm}-${LABEL}"
+  cp "$exe" "$OUT/bench-fandhe-${TAG}-${arm}-${LABEL}"
   local tree_output
   tree_output="$(cargo tree -p bench-fandhe --depth 1 --config "$patch_config" 2>&1)"
   if ! echo "$tree_output" | grep -qE 'fandhe-ai v[0-9.]+ \(.*crates/facade\)'; then
@@ -365,22 +399,22 @@ print(last)
     echo "$tree_output" >&2
     exit 1
   fi
-  echo "$tree_output" >"$OUT/tree-3226-${arm}-${LABEL}.txt"
+  echo "$tree_output" >"$OUT/tree-${TAG}-${arm}-${LABEL}.txt"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$OUT/bench-fandhe-3226-${arm}-${LABEL}" >"$OUT/sha-3226-${arm}-${LABEL}.txt"
+    sha256sum "$OUT/bench-fandhe-${TAG}-${arm}-${LABEL}" >"$OUT/sha-${TAG}-${arm}-${LABEL}.txt"
   else
-    shasum -a 256 "$OUT/bench-fandhe-3226-${arm}-${LABEL}" >"$OUT/sha-3226-${arm}-${LABEL}.txt"
+    shasum -a 256 "$OUT/bench-fandhe-${TAG}-${arm}-${LABEL}" >"$OUT/sha-${TAG}-${arm}-${LABEL}.txt"
   fi
 }
 
 echo "== build before ==(facade=$BEFORE_FACADE)"
-build_arm before "$BEFORE_FACADE" "target-ab-3226-${LABEL}-before"
+build_arm before "$BEFORE_FACADE" "target-ab-${TAG}-${LABEL}-before"
 echo "== build after  ==(facade=$AFTER_FACADE)"
-build_arm after "$AFTER_FACADE" "target-ab-3226-${LABEL}-after"
-cat "$OUT"/tree-3226-*-"${LABEL}".txt
+build_arm after "$AFTER_FACADE" "target-ab-${TAG}-${LABEL}-after"
+cat "$OUT"/tree-"${TAG}"-*-"${LABEL}".txt
 
-BIN_BEFORE="$OUT/bench-fandhe-3226-before-${LABEL}"
-BIN_AFTER="$OUT/bench-fandhe-3226-after-${LABEL}"
+BIN_BEFORE="$OUT/bench-fandhe-${TAG}-before-${LABEL}"
+BIN_AFTER="$OUT/bench-fandhe-${TAG}-after-${LABEL}"
 
 # セル（arm × task × mode）の JSONL 行数を数える。読み取り不能は空文字（呼び出し側が
 # 不足扱いにする）。round 対応（各 round で各セル +1 行）の検証と、比較前の
@@ -405,20 +439,21 @@ print(n)
 ' "$f" "$3" "$sz" 2>/dev/null || true
 }
 
-run_cell() { # run_cell <arm> <task> <mode> [size]
-  local arm=$1 task=$2 mode=$3 size=${4:-64} bin before_n after_n
+run_cell() { # run_cell <arm> <task> <mode> [size] [diag]
+  local arm=$1 task=$2 mode=$3 size=${4:-64} diag=${5:-} bin before_n after_n file_task
+  file_task="${task}${diag:+diag}"
   if [[ "$arm" == "before" ]]; then bin="$BIN_BEFORE"; else bin="$BIN_AFTER"; fi
   echo "== $task $DEVICE size=$size mode=$mode arm=$arm =="
-  before_n="$(count_cell_rows "$arm" "$task" "$mode" "$size")"
-  if ! "$bin" --task "$task" --size "$size" --device "$DEVICE" --mode "$mode" \
-    --out "$OUT/results-${arm}-${LABEL}-${DEVICE}-${task}.jsonl" 2>"$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp"; then
+  before_n="$(count_cell_rows "$arm" "$file_task" "$mode" "$size")"
+  if ! "$bin" --task "$task" --size "$size" --device "$DEVICE" --mode "$mode" ${diag:+--diag-legacy-tape-reuse} \
+    --out "$OUT/results-${arm}-${LABEL}-${DEVICE}-${file_task}.jsonl" 2>"$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp"; then
     echo "arm=$arm task=$task size=$size mode=$mode : $(cat "$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp")" >>"$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
     ANY_FAILED=$((ANY_FAILED + 1))
   else
     # 成功終了でも当該 round のセルが JSONL へ ちょうど 1 行追加されたことを確認する
     # （追記漏れ・二重追記は round 対応が崩れるため fail-closed）。
-    after_n="$(count_cell_rows "$arm" "$task" "$mode" "$size")"
+    after_n="$(count_cell_rows "$arm" "$file_task" "$mode" "$size")"
     if [[ ! "$before_n" =~ ^[0-9]+$ || ! "$after_n" =~ ^[0-9]+$ || "$after_n" -ne $((before_n + 1)) ]]; then
       echo "arm=$arm task=$task size=$size mode=$mode : round の記録行数が不正（before=${before_n:-NA} after=${after_n:-NA}。+1 行を期待）" >>"$SKIP"
       echo "  -> ROW COUNT MISMATCH (recorded in $SKIP)"
@@ -459,11 +494,11 @@ if [[ "$PRECHECK" == report-only ]]; then
   GATE_SERIES=smoke
 fi
 GATE_NOT_OK=0
-GATE_LOG="$OUT/load_gate-3226-${DEVICE}-${LABEL}.log"
+GATE_LOG="$OUT/load_gate-${TAG}-${DEVICE}-${LABEL}.log"
 : >"$GATE_LOG"
 echo "threshold=${LOAD_GATE} rule_threshold=${RULE_LOAD_GATE} series=${GATE_SERIES} precheck=${PRECHECK}$([[ "$PRECHECK" == report-only ]] && echo " series_note=smoke（正式系列として扱わない）")" >>"$GATE_LOG"
 wait_load_gate() { # wait_load_gate <round>
-  local waited=0 status=timeout l1 ok
+  local waited=0 status=timeout l1 ok procs=NA
   while ((waited < 1800)); do
     l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
     [[ -z "$l1" && -r /proc/loadavg ]] && l1=$(awk '{print $1}' /proc/loadavg)
@@ -475,6 +510,16 @@ wait_load_gate() { # wait_load_gate <round>
       break
     fi
     ok=$(awk -v a="$l1" -v t="$LOAD_GATE" 'BEGIN{print (a<t)?1:0}')
+    # 4158: GPU compute プロセス 0 件も専有の条件にする（取得不能は unavailable＝正式系列にしない）。
+    if [[ "$TAG" == 4158 ]]; then
+      procs=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c . || true)
+      if ! command -v nvidia-smi >/dev/null 2>&1 || [[ ! "$procs" =~ ^[0-9]+$ ]]; then
+        status=unavailable
+        procs=NA
+        break
+      fi
+      [[ "$procs" != "0" ]] && ok=0
+    fi
     if [[ "$ok" == "1" ]]; then
       status=pass
       break
@@ -491,12 +536,12 @@ wait_load_gate() { # wait_load_gate <round>
   # 専有ゲート不成立 round を集約する（smoke は正式判定の対象外のため数えない）。
   # 1 件でも不成立なら比較結果が非後退でも判定不能として非ゼロ終了する（末尾参照）。
   if [[ "$gate_ok" != 1 && "$GATE_SERIES" != smoke ]]; then GATE_NOT_OK=$((GATE_NOT_OK + 1)); fi
-  echo "round${1} gate=${status} gate_ok=${gate_ok} threshold=${LOAD_GATE} load1=${l1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GATE_LOG"
+  echo "round${1} gate=${status} gate_ok=${gate_ok} threshold=${LOAD_GATE} load1=${l1}$([[ "$TAG" == 4158 ]] && echo " compute_procs=${procs}") waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GATE_LOG"
 }
 
 
-: >"$OUT/uptime-3226-${DEVICE}-${LABEL}.log"
-uptime | sed 's/.*load/load/' >>"$OUT/uptime-3226-${DEVICE}-${LABEL}.log"
+: >"$OUT/uptime-${TAG}-${DEVICE}-${LABEL}.log"
+uptime | sed 's/.*load/load/' >>"$OUT/uptime-${TAG}-${DEVICE}-${LABEL}.log"
 
 for run_i in $(seq 1 "$ROUNDS"); do
   wait_load_gate "$run_i"
@@ -510,7 +555,13 @@ for run_i in $(seq 1 "$ROUNDS"); do
       run_pair "$run_i" "$task" "$mode"
     done
   done
-  echo "round $run_i: $(uptime | sed 's/.*load/load/')" | tee -a "$OUT/uptime-3226-${DEVICE}-${LABEL}.log"
+  if [[ "$TAG" == 4158 ]]; then
+    for size in $GEMM_SIZES; do
+      run_pair "$run_i" gemm reuse "$size" diag
+    done
+    run_pair "$run_i" train reuse 64 diag
+  fi
+  echo "round $run_i: $(uptime | sed 's/.*load/load/')" | tee -a "$OUT/uptime-${TAG}-${DEVICE}-${LABEL}.log"
 done
 
 
@@ -520,19 +571,22 @@ done
 # 比較前に全セル（arm × task × mode）がちょうど ROUNDS 件であることを検証する。
 # 不足・過剰があれば当該 task は判定不能として比較へ進まず非ゼロ終了する
 # （少標本の中央値で非後退判定が出るのを防ぐ。PR #2448 codex P1 指摘）。
-for task in gemm train infer; do
+for task in $TASK_FILES; do
   CELLS_OK=1
+  rtask="${task%diag}"
+  MODES="fresh reuse"
+  [[ "$task" != "$rtask" ]] && MODES="reuse"
   for arm in before after; do
-    for mode in fresh reuse; do
+    for mode in $MODES; do
       # gemm は機体プロファイルの各 N セル、train／infer は単一形状（size 不問）を検証する。
-      for cell_size in $([[ "$task" == gemm ]] && echo "$GEMM_SIZES" || echo ""); do
+      for cell_size in $([[ "$rtask" == gemm ]] && echo "$GEMM_SIZES" || echo ""); do
         n="$(count_cell_rows "$arm" "$task" "$mode" "$cell_size")"
         if [[ ! "$n" =~ ^[0-9]+$ || "$n" -ne "$ROUNDS" ]]; then
           echo "compare task=$task: 判定不能（arm=$arm mode=$mode size=${cell_size:-NA} の記録は ${n:-NA} 件。${ROUNDS} 件を要求）" >>"$SKIP"
           CELLS_OK=0
         fi
       done
-      if [[ "$task" != gemm ]]; then
+      if [[ "$rtask" != gemm ]]; then
         n="$(count_cell_rows "$arm" "$task" "$mode")"
         if [[ ! "$n" =~ ^[0-9]+$ || "$n" -ne "$ROUNDS" ]]; then
           echo "compare task=$task: 判定不能（arm=$arm mode=$mode の記録は ${n:-NA} 件。${ROUNDS} 件を要求）" >>"$SKIP"
@@ -542,7 +596,7 @@ for task in gemm train infer; do
     done
   done
   if [[ "$CELLS_OK" != "1" ]]; then
-    echo "compare task=$task exit=NA (判定不能: 標本数不足)" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+    echo "compare task=$task exit=NA (判定不能: 標本数不足)" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
     ANY_FAILED=$((ANY_FAILED + 1))
     continue
   fi
@@ -582,22 +636,24 @@ print("mismatch:" + ", ".join(mismatch))
   if [[ "$CK_RC" -ne 0 || -n "$CK_INVALID" ]]; then
     # 入力欠損・解析不能・非数値・非有限は REJECT ではなく判定不能（停止）。
     echo "compare task=$task: FAIL（checksum の確認に失敗: ${CK_INVALID:-検査不能 python exit=${CK_RC}}。入力欠損・解析不能のため ADOPT／REJECT に数えず停止）" >>"$SKIP"
-    echo "compare task=$task exit=NA (FAIL: checksum 検査不能。性能判定へ進まない)" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+    echo "compare task=$task exit=NA (FAIL: checksum 検査不能。性能判定へ進まない)" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
     ANY_FAILED=$((ANY_FAILED + 1))
     continue
   fi
   if [[ -n "$CK_MISMATCH" ]]; then
     # 有効な数値の checksum 不一致は RULE.txt どおり REJECT。性能比較は省き、judge が REJECT を出す。
     echo "compare task=$task: REJECT（RULE.txt: checksum 不一致 1 件で REJECT。対象: ${CK_MISMATCH}）" >>"$SKIP"
-    echo "compare task=$task exit=NA (REJECT: checksum 不一致。RULE.txt どおり)" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+    echo "compare task=$task exit=NA (REJECT: checksum 不一致。RULE.txt どおり)" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
     continue
   fi
+  # 診断経路のセルは ratio を judge が計算する（compare_gemm_ab.py は既定経路のセル専用）。
+  [[ "$task" != "$rtask" ]] && continue
   SIZES_ARGS=()
   [[ "$task" == gemm ]] && SIZES_ARGS=(--sizes "$COMPARE_SIZES")
   python3 compare_gemm_ab.py --device "$DEVICE" --task "$task" --threshold 1.00 --per-run \
     --require-checksum-exact ${SIZES_ARGS[@]+"${SIZES_ARGS[@]}"} \
     "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" \
-    >"compare-${task}-3226-${DEVICE}-${LABEL}.md" 2>"compare-${task}-3226-${DEVICE}-${LABEL}.err"
+    >"compare-${task}-${TAG}-${DEVICE}-${LABEL}.md" 2>"compare-${task}-${TAG}-${DEVICE}-${LABEL}.err"
   COMPARE_EXIT=$?
   # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 「後退セルあり」または「判定不能セルあり」
   # （evaluate_cell の status != ok・欠測セル・per-run 比の算出不能はいずれも 3 に畳まれる）。
@@ -606,18 +662,18 @@ print("mismatch:" + ", ".join(mismatch))
   # 「判定不能」行があれば性能判定とは独立に undetermined として記録し非ゼロ終了へ伝播する
   # （PR #2464 codex P1 指摘）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
   # 比較処理自体の失敗であり、判定結果と区別して非ゼロ終了へ伝播する。
-  echo "compare task=$task exit=$COMPARE_EXIT" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+  echo "compare task=$task exit=$COMPARE_EXIT" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
   case "$COMPARE_EXIT" in
     0) ;;
     3)
-      if grep -q '判定不能' "compare-${task}-3226-${DEVICE}-${LABEL}.md"; then
-        echo "compare task=$task: undetermined（判定不能セルあり。REJECT ではない。詳細は compare-${task}-3226-${DEVICE}-${LABEL}.md の「判定不能」行）" >>"$SKIP"
-        echo "compare task=$task undetermined=1 (判定不能セルあり。性能判定 REJECT とは区別)" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+      if grep -q '判定不能' "compare-${task}-${TAG}-${DEVICE}-${LABEL}.md"; then
+        echo "compare task=$task: undetermined（判定不能セルあり。REJECT ではない。詳細は compare-${task}-${TAG}-${DEVICE}-${LABEL}.md の「判定不能」行）" >>"$SKIP"
+        echo "compare task=$task undetermined=1 (判定不能セルあり。性能判定 REJECT とは区別)" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
         ANY_FAILED=$((ANY_FAILED + 1))
       fi
       ;;
     *)
-      echo "compare task=$task: 比較不能（exit=${COMPARE_EXIT}）。$(tail -3 "compare-${task}-3226-${DEVICE}-${LABEL}.err" | tr '\n' ' ')" >>"$SKIP"
+      echo "compare task=$task: 比較不能（exit=${COMPARE_EXIT}）。$(tail -3 "compare-${task}-${TAG}-${DEVICE}-${LABEL}.err" | tr '\n' ' ')" >>"$SKIP"
       ANY_FAILED=$((ANY_FAILED + 1))
       ;;
   esac
@@ -630,15 +686,23 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   JUDGE_ARGS=("--${PROFILE}-before" "$OUT/results-before-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-infer.jsonl"
     "--${PROFILE}-after" "$OUT/results-after-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-infer.jsonl"
     "--${PROFILE}-gate-log" "$GATE_LOG")
+  if [[ "$TAG" == 4158 ]]; then
+    JUDGE_ARGS=(--rule-set 4158
+      "--${PROFILE}-before" "$OUT/results-before-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-infer.jsonl"
+      "$OUT/results-before-${LABEL}-${DEVICE}-gemmdiag.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-traindiag.jsonl"
+      "--${PROFILE}-after" "$OUT/results-after-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-infer.jsonl"
+      "$OUT/results-after-${LABEL}-${DEVICE}-gemmdiag.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-traindiag.jsonl"
+      "--${PROFILE}-gate-log" "$GATE_LOG")
+  fi
   if [[ "$GATE_NOT_OK" -gt 0 || "$GATE_SERIES" != official ]]; then JUDGE_ARGS+=(--record-only); fi
-  python3 -I judge_eager_release_ab.py "${JUDGE_ARGS[@]}" >"judge-3226-${LABEL}.md" 2>&1
+  python3 -I judge_eager_release_ab.py "${JUDGE_ARGS[@]}" >"judge-${TAG}-${LABEL}.md" 2>&1
   JUDGE_EXIT=$?
-  echo "judge exit=${JUDGE_EXIT} (0=ADOPT 1=REJECT 2=undetermined) -> judge-3226-${LABEL}.md" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+  echo "judge exit=${JUDGE_EXIT} (0=ADOPT 1=REJECT 2=undetermined) -> judge-${TAG}-${LABEL}.md" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
   case "$JUDGE_EXIT" in
     0 | 1 | 2) ;;
     *)
       # 0/1/2 以外は判定結果ではなく実行エラー（python 起動失敗・未捕捉例外等）。失敗として伝播する。
-      echo "judge: 実行エラー（exit=${JUDGE_EXIT}。判定結果ではない。詳細は judge-3226-${LABEL}.md）" >>"$SKIP"
+      echo "judge: 実行エラー（exit=${JUDGE_EXIT}。判定結果ではない。詳細は judge-${TAG}-${LABEL}.md）" >>"$SKIP"
       ANY_FAILED=$((ANY_FAILED + 1))
       ;;
   esac

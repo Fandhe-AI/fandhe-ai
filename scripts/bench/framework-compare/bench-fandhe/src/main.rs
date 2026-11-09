@@ -641,7 +641,9 @@ fn release_gemm_reuse_iteration(tape: &mut Tape) -> Result<(), Box<dyn std::erro
 /// `--tf32`／`--device-checksum` はホスト入力・Tape 経路
 /// （[`run_gemm_reuse_host_input`]）へ振り分ける。経路は計測前に決まる。
 fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if gemm_reuse_uses_resident_input(cli) {
+    // #4158: 診断フラグ時は #3566 より前の条件（ホスト入力・Tape 経路で結果ノードを
+    // 溜め続ける）を再現する。eager release の機構が届くのはこの経路だけ。
+    if gemm_reuse_uses_resident_input(cli) && !diag_legacy_tape_reuse() {
         run_gemm_reuse_resident(cli)
     } else {
         run_gemm_reuse_host_input(cli)
@@ -744,7 +746,11 @@ fn run_gemm_reuse_host_input(cli: &Cli) -> Result<(), Box<dyn std::error::Error>
         (checksum, init_s, reference.verify_strict(&out0)?)
     };
     // #3265: init の結果ノードも解放し、計測反復と同じ状態（葉 2 個のみ）から始める。
-    release_gemm_reuse_iteration(&mut tape)?;
+    // #4158 診断（旧条件）では解放せず、結果ノードを Tape に溜め続ける。
+    let legacy = diag_legacy_tape_reuse();
+    if !legacy {
+        release_gemm_reuse_iteration(&mut tape)?;
+    }
 
     // 残り warmup（1 回は init 計測内で消費済み）+ 計測本体。同一 tape・同一
     // 葉（反復ごとに `tape.leaf(i)` で再取得）を使い回し、matmul のみを繰り返す。
@@ -765,7 +771,9 @@ fn run_gemm_reuse_host_input(cli: &Cli) -> Result<(), Box<dyn std::error::Error>
             drop(out);
             elapsed
         };
-        release_gemm_reuse_iteration(tape)?;
+        if !legacy {
+            release_gemm_reuse_iteration(tape)?;
+        }
         Ok(elapsed)
     };
     for _ in 0..WARMUP_ITERS.saturating_sub(1) {
@@ -804,7 +812,10 @@ fn run_gemm_reuse_host_input(cli: &Cli) -> Result<(), Box<dyn std::error::Error>
         metal_split_k: cli.metal_split_k.as_deref(),
         pinned_h2d: cli.pinned_h2d,
     }
-    .emit(&cli.out)?;
+    .emit_with_diag(
+        &cli.out,
+        diag_legacy_tape_reuse().then_some("legacy_tape_reuse"),
+    )?;
     Ok(())
 }
 
@@ -1270,6 +1281,50 @@ fn check_diag_verify_after_loop(cli: &Cli, args: &[String]) -> Result<(), String
     Ok(())
 }
 
+/// `--diag-legacy-tape-reuse`（値なしフラグ。イシュー #4158）。診断専用で、
+/// `--device cpu --mode reuse` の gemm／train を #3566・#3635 より前の条件
+/// （ホスト入力・Tape 経路で結果ノードを `Tape` に溜め続ける）へ戻す。eager release
+/// （`autodiff::eager_release`）は `Var::matmul` からしか呼ばれず、現行の常駐経路では
+/// 機構が届かないため、サイズゲートの A/B にはこの腕が要る。`bench-common::Cli` は
+/// 触らず `std::env::args()` から読む。既定の経路判定関数は変えない。
+fn diag_legacy_tape_reuse_from_args(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--diag-legacy-tape-reuse")
+}
+
+/// 実プロセスの引数から [`diag_legacy_tape_reuse_from_args`] を読む。
+fn diag_legacy_tape_reuse() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    diag_legacy_tape_reuse_from_args(&args)
+}
+
+/// `--diag-legacy-tape-reuse` の受理条件（`run()` から呼ぶ fail-closed 検査）。
+/// `--device cpu --mode reuse` かつ `--task gemm|train`、既定でない `--out` の明示を要求する
+/// （診断行が既定の結果ファイルへ混ざるのを防ぐ）。gemm の `--tf32`／`--device-checksum`
+/// と train の `--graph` は対象外。エラー文に引数の値は含めない。
+fn check_diag_legacy_tape_reuse(cli: &Cli, args: &[String]) -> Result<(), String> {
+    if !diag_legacy_tape_reuse_from_args(args) {
+        return Ok(());
+    }
+    let out_explicit = args
+        .iter()
+        .enumerate()
+        .any(|(i, a)| a == "--out" && args.get(i + 1).is_some_and(|v| !v.starts_with("--")));
+    let out_is_default = cli.out == "results/raw/results.jsonl";
+    let task_ok = match cli.task.as_str() {
+        "gemm" => !cli.tf32 && !cli.device_checksum,
+        "train" => cli.graph.is_none(),
+        _ => false,
+    };
+    if !task_ok || cli.mode != "reuse" || cli.device != "cpu" || !out_explicit || out_is_default {
+        return Err(
+            "MEASURE_ERROR: --diag-legacy-tape-reuse requires --device cpu --mode reuse with \
+             --task gemm or train and an explicit non-default --out (issue #4158, diagnostic only)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// 診断腕で各反復の checksum bits が init（`out0`）の checksum bits と一致することの確認。
 /// 反復内の `verify_strict` を外した代わりの、途中反復の整合検査（不一致は MEASURE_ERROR）。
 fn check_checksum_bits_stable(init_bits: u64, iter_bits: &[u64]) -> Result<(), String> {
@@ -1422,7 +1477,8 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// 学習ステップ入口の常駐経路（[`run_train_reuse_chain`]）。経路は
 /// [`train_reuse_uses_resident_chain`] で計測前に決まる。
 fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if train_reuse_uses_resident_chain(cli) {
+    // #4158: 診断フラグ時は #3226 当時の既定経路（ホスト入力・Tape）を使う。
+    if train_reuse_uses_resident_chain(cli) && !diag_legacy_tape_reuse() {
         run_train_reuse_chain(cli)
     } else {
         run_train_reuse_host_input(cli)
@@ -1731,7 +1787,10 @@ fn run_train_reuse_host_input(cli: &Cli) -> Result<(), Box<dyn std::error::Error
         #[cfg(not(feature = "graph-step"))]
         graph_stats: None,
     }
-    .emit(&cli.out)?;
+    .emit_with_diag(
+        &cli.out,
+        diag_legacy_tape_reuse().then_some("legacy_tape_reuse"),
+    )?;
     Ok(())
 }
 
@@ -2401,6 +2460,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     // イシュー #3680: 診断専用フラグは受理条件を外れたら fail-closed 拒否する。
     check_diag_verify_after_loop(&cli, &args)?;
+    // イシュー #4158: 旧条件（Tape に結果を溜める）診断フラグも同様に fail-closed。
+    check_diag_legacy_tape_reuse(&cli, &args)?;
+    if diag_legacy_tape_reuse_from_args(&args) {
+        eprintln!(
+            "DIAG: --diag-legacy-tape-reuse ON (host-input Tape path, no per-iter reset; issue #4158)"
+        );
+    }
     if diag_verify_after_loop_from_args(&args) {
         eprintln!(
             "DIAG: --diag-verify-after-loop ON (verify_strict moved after the loop; issue #3680)"
@@ -4957,6 +5023,55 @@ mod tests {
         ];
         for (c, args) in cases {
             let err = check_diag_verify_after_loop(&c, &args).unwrap_err();
+            assert!(err.starts_with("MEASURE_ERROR"), "{err}");
+            assert!(!err.contains("--out x"), "{err}");
+        }
+    }
+
+    #[test]
+    fn diag_legacy_tape_reuse_acceptance_is_fail_closed() {
+        let out = temp_out_path("diag-legacy");
+        let ok = args_of(&["bin", "--diag-legacy-tape-reuse", "--out", "x"]);
+        assert!(!diag_legacy_tape_reuse_from_args(&args_of(&["bin"])));
+        assert!(diag_legacy_tape_reuse_from_args(&ok));
+        let gemm = make_cli("gemm", "reuse", out.path());
+        let train = make_cli("train", "reuse", out.path());
+        assert!(check_diag_legacy_tape_reuse(&gemm, &ok).is_ok());
+        assert!(check_diag_legacy_tape_reuse(&train, &ok).is_ok());
+        // フラグなしは素通り、既定の経路判定は不変。
+        assert!(check_diag_legacy_tape_reuse(&gemm, &args_of(&["bin"])).is_ok());
+        assert!(gemm_reuse_uses_resident_input(&gemm));
+        assert!(train_reuse_uses_resident_chain(&train));
+        let mut cuda = make_cli("gemm", "reuse", out.path());
+        cuda.device = "cuda".to_string();
+        let mut tf32 = make_cli("gemm", "reuse", out.path());
+        tf32.tf32 = true;
+        let default_out = make_cli("gemm", "reuse", "results/raw/results.jsonl".as_ref());
+        let cases: Vec<(Cli, Vec<String>)> = vec![
+            (make_cli("gemm", "fresh", out.path()), ok.clone()),
+            (make_cli("infer", "reuse", out.path()), ok.clone()),
+            (cuda, ok.clone()),
+            (tf32, ok.clone()),
+            (
+                default_out,
+                args_of(&[
+                    "bin",
+                    "--diag-legacy-tape-reuse",
+                    "--out",
+                    "results/raw/results.jsonl",
+                ]),
+            ),
+            (
+                make_cli("gemm", "reuse", out.path()),
+                args_of(&["bin", "--diag-legacy-tape-reuse"]),
+            ),
+            (
+                make_cli("gemm", "reuse", out.path()),
+                args_of(&["bin", "--diag-legacy-tape-reuse", "--out", "--size", "256"]),
+            ),
+        ];
+        for (c, args) in cases {
+            let err = check_diag_legacy_tape_reuse(&c, &args).unwrap_err();
             assert!(err.starts_with("MEASURE_ERROR"), "{err}");
             assert!(!err.contains("--out x"), "{err}");
         }

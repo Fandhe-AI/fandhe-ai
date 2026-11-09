@@ -1,0 +1,10 @@
+--- a/crates/autodiff/src/eager_release.rs
++++ b/crates/autodiff/src/eager_release.rs
+@@ -37,6 +37,6 @@
+ /// 自動解放の既定有効フラグ。**既定 OFF**。A/B（`docs/perf/logs/cpu-gemm-reuse-release-3226/
+ /// RULE.txt`）が ADOPT となった後の #3227 でのみ `true` にする。after 腕はこの 1 行だけを反転する。
+-pub(crate) const EAGER_MATMUL_RELEASE_DEFAULT_ENABLED: bool = false;
++pub(crate) const EAGER_MATMUL_RELEASE_DEFAULT_ENABLED: bool = true;
+
+ thread_local! {
+     static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
