@@ -11,8 +11,13 @@
 #           XCTRACE_SCHEMA=RULE.txt の AUX xctrace_schema（XCTRACE_MODE=available のとき必須）
 #           HW_LOCK_OWNER_FILE=実機ロックの owner ファイル（空でないこと）  HW_LOCK_HELD=1（実機ロック取得済みの宣言）
 # 引数: $1=round 番号（1 始まり）$2=記録先 round ディレクトリ（絶対パス。round{i}）
+# マスク: raw/ を作った後は成功・ゲート不通過・腕の失敗・シグナルのどの経路でも EXIT trap（finish）が
+#   trace バンドルを消し、`to_values_4153.py --mask-dir` で round ディレクトリ（gate.txt・raw/）の全ファイルを置換する
+#   （対象と限界は同スクリプト冒頭）。マスクに失敗（識別子が残る等）したら非 0 で終わる。
 # bash 3.2／5 互換。run の差し替え・上書きは禁止。外部入力をシェル文字列へ展開しない（変数は常に引用符つきで引数として渡す）。
 set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || exit 2
+TV="${HERE}/to_values_4153.py"
 validate_abs() { # $1=変数名 $2=値。絶対パスのみ。引用符・バックスラッシュ・改行を拒否（A03）
   case "$2" in /*) ;; *) echo "$1 は絶対パスのみ: $2"; exit 2;; esac
   case "$2" in *\"*|*\'*|*\\*|*$'\n'*) echo "$1 に禁止文字を含む"; exit 2;; esac
@@ -40,7 +45,18 @@ for b in "${BF}" "${BC}" "${DIAG_BIN}"; do [ -x "${b}" ] || { echo "ビルド済
 if [ "${XMODE}" = "available" ]; then
   xcrun xctrace version > /dev/null 2>&1 || { echo "xctrace が使えない"; exit 1; }
 fi
+# 計測の後でマスクが動かないと分かるのを避けるため、ゲートの前に確かめる
+python3 -I "${TV}" --mask-ready > /dev/null || { echo "マスクの準備に失敗（to_values_4153.py --mask-ready）"; exit 1; }
 mkdir -p "${RD}/raw" || exit 1
+finish() {
+  local rc=$?
+  trap - EXIT
+  rm -rf "${RD}/raw/"*.trace  # 未マスクのバイナリ（パスを含む）。失敗経路でも raw/ に残さない
+  python3 -I "${TV}" --mask-dir "${RD}" || { echo "マスク失敗（round を公開しない）"; rc=3; }
+  exit "${rc}"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM HUP
 
 # ---- ゲート: load1 < 3.0 を 30 秒間隔で最大 30 分（hw-lock は上で確認済み）。
 gate() {
@@ -90,13 +106,5 @@ if [ $((RN % 2)) -eq 1 ]; then arm_f; arm_c; else arm_c; arm_f; fi
 sleep 30
 "${DIAG_BIN}" gemm_reuse_phase_diag_production_batch --ignored --test-threads=1 --nocapture > "${RAW}/diag.txt" 2> "${RAW}/diag.err" || { echo "phase diag 失敗"; exit 1; }
 
-# 回収時のマスク（ユーザー名・ホスト名・ホームパスを公開面へ出さない）
-for f in "${RAW}"/*; do
-  [ -f "${f}" ] || continue
-  # .xml は '<' が属性値で XML を壊す（to_values_4153.py のパース失敗）ため &lt;…&gt; でエスケープして置換する。
-  case "${f}" in
-    *.xml) sed -i.bak -e "s#${HOME}#\&lt;home\&gt;#g" -e "s#$(hostname)#\&lt;metal-node\&gt;#g" "${f}" && rm -f "${f}.bak" ;;
-    *) sed -i.bak -e "s#${HOME}#<home>#g" -e "s#$(hostname)#<metal-node>#g" "${f}" && rm -f "${f}.bak" ;;
-  esac
-done
+# マスク（ユーザー名・ホスト名・ホームパスを公開面へ出さない）は finish（EXIT trap）が全経路で行う
 echo "round ${RN} done $(date -u +%FT%TZ)"

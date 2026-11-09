@@ -74,7 +74,10 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
 
 7. 運用
-  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパスを書かない。Mac mini は <metal-node> と書く。
+  公開面（README・RULE・集計出力・保存物・コミット）に実機ホスト名・絶対ホームパスを書かない。Mac mini は <metal-node> と書く。
+  run_round.sh・xctrace_probe_4153.sh は終了経路（成功・失敗・unavailable・シグナル）によらず trace バンドルを消し、
+  to_values_4153.py --mask-dir で保存物のホームパス→<home>、ホスト名→<metal-node>、パス上のユーザー名→<user> を置換する
+  （対象と検出できないものは README の「マスク」。置換後に残れば非 0 で終わる）。
   集計は同梱の aggregate_diag.py・to_values_4153.py・attrib_4153.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
   xctrace の XML は非信頼データとして扱う（DOCTYPE・ENTITY 宣言とサイズ上限超えは拒否）。
   本ファイル固定後に各スクリプトを変更すると sha256 が不一致になり集計は止まる。

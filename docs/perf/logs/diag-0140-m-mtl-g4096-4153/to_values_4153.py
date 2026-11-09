@@ -17,15 +17,33 @@ xctrace=unavailable（F2 だけのフォールバック）では trace を読ま
 要求しない（`<…>` のまま・未記載でよい）。available では従来どおりすべて実値を要求する。
 xctrace の XML は非信頼データ（XXE・巨大入力を拒否）。標準ライブラリのみ。`python3 -I` で実行すること。
 
+マスク（--mask-dir）: run_round.sh・xctrace_probe_4153.sh が成功・失敗・unavailable・早期終了のどの経路でも
+終了時に呼び、保存する成果物（round{i}/・env/ 配下の通常ファイル）から実機の識別子を置換する（RULE 項 7）。
+置換・検出の対象は次の文字列に限る（大文字小文字は区別しない）:
+  ホームパス（環境変数 HOME と passwd のホーム。英数字が隣接する部分一致は対象外）→ <home>
+  ホスト名（gethostname とその短縮形、macOS の scutil ComputerName／LocalHostName／HostName。3 文字以上。
+    英数字が隣接する部分一致は対象外。XML の実体参照 &apos; 等に置き換わった形を含む）→ <metal-node>
+  ユーザー名（USER・LOGNAME・getpass・passwd の名前。3 文字以上）がパスの 1 要素（"/名前" の直後が英数字・. _ - 以外）
+    として現れたもの → <user>。パス以外に現れたユーザー名は置換しない（"bench-fandhe" のような正当なデータを壊さないため）
+これ以外（他人のユーザー名・ホストの別名・パス以外に現れたユーザー名・識別子を加工した文字列）は検出できない。
+.xml はテキストと引用符つき属性値だけを &lt;…&gt; で置換し（XML を壊さない）、CDATA 内は素の <…> で置換する。
+タグ名・属性名に現れた場合は置換せず、置換後の再走査で残りを検出して停止する（非 0 終了）。値そのものは出力しない。
+
 使い方:
   python3 -I to_values_4153.py --round-dir <round{i}> --rule <RULE.txt>
+  python3 -I to_values_4153.py --mask-dir <dir>     # 終了時のマスク（run_round.sh・xctrace_probe_4153.sh が呼ぶ）
+  python3 -I to_values_4153.py --mask-ready         # マスクの識別子が集まるかだけを確かめる（計測前の precheck）
   python3 -I to_values_4153.py --self-test
 """
+import getpass
 import json
 import math
 import os
 import re
+import shutil
+import socket
 import statistics
+import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -307,6 +325,112 @@ def convert(round_dir, rule_text):
     return vt, at
 
 
+# ---------------------------------------------------------------- マスク（RULE 項 7。公開面へ実機の識別子を出さない）
+MASK_MIN_NAME = 3
+# 置換名ごとの境界: home・metal-node は英数字が隣接しないこと、user はパスの 1 要素であること
+_BOUND = {"home": (r"(?<![A-Za-z0-9])", r"(?![A-Za-z0-9])"), "metal-node": (r"(?<![A-Za-z0-9])", r"(?![A-Za-z0-9])"),
+          "user": (r"(?<=/)", r"(?![A-Za-z0-9._-])")}
+
+
+def mask_identities():
+    """置換する (文字列, 置換名) の一覧。HOME が "/" など短すぎる場合はファイル全体を壊すため停止する。"""
+    homes, hosts, users = set(), set(), set()
+    try:
+        import pwd
+        pw = pwd.getpwuid(os.getuid())
+        homes.add(pw.pw_dir)
+        users.add(pw.pw_name)
+    except (ImportError, KeyError):
+        pass
+    if os.environ.get("HOME"):
+        homes.add(os.environ["HOME"])
+    for v in (os.environ.get("USER"), os.environ.get("LOGNAME")):
+        if v:
+            users.add(v)
+    try:
+        users.add(getpass.getuser())
+    except Exception:  # getpass は環境により OSError 以外も投げる
+        pass
+    h = socket.gethostname()
+    hosts.update([h, h.split(".")[0]])
+    if shutil.which("scutil"):  # macOS のみ（xctrace record のログには ComputerName が出る）
+        for k in ("ComputerName", "LocalHostName", "HostName"):
+            try:
+                r = subprocess.run(["scutil", "--get", k], capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if r.returncode == 0 and r.stdout.strip():
+                hosts.add(r.stdout.strip())
+                hosts.add(r.stdout.strip().split(".")[0])
+    out = []
+    for hm in homes:
+        hm = hm.rstrip("/")
+        if not hm.startswith("/") or len(hm) < 2:
+            raise ConvError("mask: HOME is not a usable absolute path (refusing to mask '/')")
+        out.append((hm, "home"))
+    out += [(x, "metal-node") for x in hosts if len(x) >= MASK_MIN_NAME]
+    out += [(x, "user") for x in users if x and len(x) >= MASK_MIN_NAME]
+    # XML・ログで実体参照に置き換わった形（例: ComputerName の ' → &apos;）も同じ置換名で拾う
+    ents = {"&": ["&amp;"], "<": ["&lt;"], ">": ["&gt;"], '"': ["&quot;", "&#34;"], "'": ["&apos;", "&#39;", "&#x27;"]}
+    for x, k in list(out):
+        for ch, reps in ents.items():
+            if ch in x:
+                out += [(x.replace("&", "&amp;").replace(ch, r) if ch != "&" else x.replace("&", r), k) for r in reps]
+    if not any(k == "home" for _, k in out) or not any(k == "metal-node" for _, k in out):
+        raise ConvError("mask: could not determine HOME and hostname")
+    return out
+
+
+def _mask_regex(idents):
+    # 1 回の交替で置換する（置換後の <home> 等を再置換しない）。長い文字列を先に試す
+    alts = sorted(set(idents), key=lambda a: len(a[0]), reverse=True)
+    return re.compile("|".join(f"(?:{_BOUND[k][0]}{re.escape(x)}{_BOUND[k][1]})" for x, k in alts), re.I)
+
+
+def mask_text(text, idents, xml=False):
+    rx = _mask_regex(idents)
+    kind = {}
+    for x, k in idents:  # 同じ文字列がホスト名とユーザー名の両方に当たる場合は先に登録した名前で置換する（どちらでも伏せられる）
+        kind.setdefault(x.lower(), k)
+    sub = lambda t, esc: rx.sub(lambda m: (f"&lt;{kind[m.group(0).lower()]}&gt;" if esc else f"<{kind[m.group(0).lower()]}>"), t)
+    if not xml:
+        return sub(text, False)
+    parts = re.split(r"(<!\[CDATA\[.*?\]\]>|<!--.*?-->|<[^>]*>)", text, flags=re.S)
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:  # テキスト
+            out.append(sub(part, True))
+        elif part.startswith("<![CDATA["):  # CDATA 内は '<' をそのまま書ける
+            out.append("<![CDATA[" + sub(part[9:-3], False) + "]]>")
+        elif part.startswith("<!--"):
+            out.append(sub(part, True))
+        else:  # タグ: 引用符つき属性値の中だけ置換する（タグ名・属性名は触らない）
+            out.append(re.sub(r"(\"[^\"]*\"|'[^']*')", lambda m: m.group(0)[0] + sub(m.group(0)[1:-1], True) + m.group(0)[-1], part))
+    return "".join(out)
+
+
+def mask_dir(root, idents=None):
+    """root 配下（再帰）の通常ファイルをその場でマスクする。シンボリックリンクはたどらない。残りがあれば停止。"""
+    idents = mask_identities() if idents is None else idents
+    rx = _mask_regex(idents)
+    left = []
+    for dp, dns, fns in os.walk(root, followlinks=False):
+        for fn in fns:
+            path = os.path.join(dp, fn)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            with open(path, "rb") as f:
+                text = f.read().decode("utf-8", "surrogateescape")
+            new = mask_text(text, idents, xml=fn.endswith(".xml"))
+            if new != text:
+                with open(path, "wb") as f:
+                    f.write(new.encode("utf-8", "surrogateescape"))
+            if rx.search(new):
+                left.append(os.path.relpath(path, root))  # 値そのものは出さない
+    if left:
+        raise ConvError(f"mask: identifiers remain (in tag/attribute names?) in: {', '.join(sorted(left))}")
+
+
 def write_new(path, text):
     if os.path.exists(path):
         raise ConvError(f"{path} already exists (no overwrite)")
@@ -399,6 +523,204 @@ def _expect(fn, label, needle=None):
             raise AssertionError(f"{label}: wrong error: {e}")
         return
     raise AssertionError(f"{label}: expected ConvError")
+
+
+# ---------------------------------------------------------------- self-test: マスク（単体と、bash 2 本の stub 通し）
+def _self_test_mask_unit(t):
+    ids = [("/Users/alice", "home"), ("Alices-Mac-mini", "metal-node"), ("Alice's Mac mini", "metal-node"), ("alice", "user")]
+    ids += [("Alice&apos;s Mac mini", "metal-node")]
+    txt = mask_text("a=/Users/alice/x b=/Users/alice2 c=ALICES-MAC-MINI.local d=bench-alice e=/data/alice/y f=/data/alice-ai", ids)
+    assert txt == "a=<home>/x b=/Users/alice2 c=<metal-node>.local d=bench-alice e=/data/<user>/y f=/data/alice-ai", txt
+    # 置換後の <home> 等は再置換しない（1 回の交替）
+    assert mask_text("/Users/alice", ids + [("home", "user")]) == "<home>"
+    x = mask_text('<?xml version="1.0"?><r a="/Users/alice/p" b=\'Alices-Mac-mini\'><!-- /Users/alice -->'
+                  '<c>Alice&apos;s Mac mini</c><![CDATA[/Users/alice]]></r>', ids, xml=True)
+    root = ET.fromstring(x)  # XML のまま読めること
+    assert root.get("a") == "<home>/p" and root.get("b") == "<metal-node>" and root.find("c").text == "<metal-node>", x
+    assert "<![CDATA[<home>]]>" in x and "&lt;home&gt;" in x, x
+    d = os.path.join(t, "maskdir")
+    os.makedirs(os.path.join(d, "sub"))
+    open(os.path.join(d, "sub", "a.log"), "w").write("at /Users/alice/x on Alices-Mac-mini\n")
+    open(os.path.join(d, "bin.dat"), "wb").write(b"\xff\xfe /Users/alice \x00")
+    outside = os.path.join(t, "outside.txt")
+    open(outside, "w").write("/Users/alice\n")
+    os.symlink(outside, os.path.join(d, "link.txt"))
+    mask_dir(d, ids)
+    assert open(os.path.join(d, "sub", "a.log")).read() == "at <home>/x on <metal-node>\n"
+    assert open(os.path.join(d, "bin.dat"), "rb").read() == b"\xff\xfe <home> \x00"  # 非 UTF-8 のバイトは保つ
+    assert open(outside).read() == "/Users/alice\n"  # シンボリックリンクはたどらない
+    # タグ名に現れた識別子は置換できないので停止する。エラー文に値そのものを出さない
+    open(os.path.join(d, "bad.xml"), "w").write("<Alices-Mac-mini/>")
+    try:
+        mask_dir(d, ids)
+        raise AssertionError("tag-name identifier: expected ConvError")
+    except ConvError as e:
+        assert "bad.xml" in str(e) and "alice" not in str(e).lower(), e
+    # HOME が "/" ならファイル全体を壊すので停止する
+    saved = os.environ.get("HOME")
+    os.environ["HOME"] = "/"
+    try:
+        _expect(mask_identities, "HOME=/", "HOME")
+    finally:
+        os.environ["HOME"] = saved
+    mask_identities()  # 実環境で識別子が集まること（--mask-ready と同じ）
+
+
+_STUB_HEAD = "#!/usr/bin/env python3\nimport os, subprocess, sys\nHOME, HOST, USER = {ids!r}\n" \
+    "LEAK = f'{{HOME}}/Library on {{HOST}} at /Users/{{USER}}/x'\n"
+_STUB_XCRUN = _STUB_HEAD + r'''
+a = sys.argv[1:]
+assert a[0] == "xctrace", a
+cmd = a[1]
+if cmd == "version":
+    print("xctrace version 16.0 " + LEAK); sys.exit(0)
+if cmd == "record" and "--help" in a:
+    print("usage " + LEAK); sys.exit(0)
+if cmd == "record":
+    out, ts = a[a.index("--output") + 1], a[a.index("--target-stdout") + 1]
+    os.makedirs(out)
+    open(os.path.join(out, "blob"), "w").write(LEAK)
+    print(f"Starting recording. Targeting device: {HOST}. Output: {out}")
+    if os.environ.get("STUB_FAIL_RECORD"):
+        print("record failed " + LEAK, file=sys.stderr); sys.exit(1)
+    with open(ts, "w") as f:
+        sys.exit(subprocess.run(a[a.index("--") + 1:], stdout=f).returncode)
+if cmd == "export":
+    inp, out = a[a.index("--input") + 1], a[a.index("--output") + 1]
+    if "--toc" in a:
+        open(out, "w").write(f'<?xml version="1.0"?><trace-toc><run number="1"><data>'
+                             f'<table schema="metal-gpu-intervals" path="{HOME}/t"/></data></run></trace-toc>')
+        sys.exit(0)
+    stem = os.path.basename(inp)
+    proc, durs = ("bench-fandhe", [60, 61, 62, 63, 64]) if stem.startswith("fandhe") else \
+        ("bench-candle", [100, 101, 102, 103, 104, 50, 51, 52, 53, 54, 77])
+    rows, t = [], 10 ** 6
+    for i, d in enumerate(durs):
+        rows.append(f'<row><start-time id="s{i}">{t}</start-time><duration id="d{i}" fmt="{d} ms">{d * 10 ** 6}</duration>'
+                    f'<process id="p{i}" fmt="{proc} (1) {HOME}/bin"/><path id="q{i}">{HOME}/x on {HOST}</path></row>')
+        t += d * 10 ** 6 + 10 ** 6
+    head = "".join(f"<col><mnemonic>{c}</mnemonic></col>" for c in ("start", "dur", "proc", "path"))
+    open(out, "w").write(f'<?xml version="1.0"?><trace-query-result><node><schema name="metal-gpu-intervals">{head}</schema>'
+                         + "".join(rows) + "</node></trace-query-result>")
+    sys.exit(0)
+sys.exit(2)
+'''
+_STUB_BENCH = _STUB_HEAD + r'''
+import json
+a = sys.argv[1:]
+name = os.path.basename(sys.argv[0])
+print("starting " + LEAK, file=sys.stderr)
+if os.environ.get("STUB_FAIL_BENCH") == name:
+    print("panicked at " + LEAK, file=sys.stderr); sys.exit(1)
+task = a[a.index("--task") + 1]
+mode = a[a.index("--mode") + 1] if "--mode" in a else "fresh"
+open(a[a.index("--out") + 1], "a").write(LEAK + "\n")
+rec = lambda task, med: json.dumps({"task": task, "device": "metal", "size": 4096, "median_s": med / 1e3,
+                                    "warmup": 2, "iters": 3, "mode": mode, "note": LEAK})
+med = {"bench-fandhe": {"reuse": 64.0, "fresh": 70.0}}.get(name, {}).get(mode, 56.0)
+if task == "gemm-transfer-split":
+    print(rec("gemm_transfer_incl", 90.0)); print(rec("gemm_transfer_excl", 42.0))
+else:
+    print(rec(task, med))
+'''
+_STUB_DIAG = _STUB_HEAD + r'''
+print("running " + LEAK)
+if sys.argv[1] == "gemm_window_route_precheck":
+    print("ROUTE_ACTUAL N=4096 route=Classic\nDIAG_BITEQ N=4096 equal=true")
+else:
+    print("  [label] N=4096 requested_tile=T\n    commit_wait.kernel_gpu: median=60.0000 ms  q1=0 ms  q3=0 ms")
+'''
+
+
+def _no_identity_left(root, home, host, user):
+    """保存物に一時 HOME・実ホスト名・パス上の実ユーザー名が残っていないこと（mask_dir とは独立の素朴な検査）。"""
+    for dp, _, fns in os.walk(root):
+        for fn in fns:
+            body = open(os.path.join(dp, fn), "rb").read().decode("utf-8", "surrogateescape")
+            low = body.lower()
+            assert home.lower() not in low, (fn, "home")
+            assert not re.search(rf"(?<![A-Za-z0-9]){re.escape(host)}(?![A-Za-z0-9])", body, re.I), (fn, "host")
+            assert f"/{user}/".lower() not in low, (fn, "user")
+            assert not fn.endswith(".trace") and not dp.endswith(".trace"), (dp, fn)
+            if fn.endswith(".xml"):
+                ET.fromstring(body)  # マスク後も XML として読める
+
+
+def _self_test_shell(t):
+    """xctrace_probe_4153.sh と run_round.sh を stub（xcrun・sysctl・sleep・bench・診断テスト）で走らせ、
+    成功・失敗の両経路で保存物がマスクされ trace バンドルが残らないこと、マスク後の raw/ がそのまま変換できることを確かめる。"""
+    if not shutil.which("bash"):
+        raise AssertionError("bash is required for the shell self-test")
+    here = os.path.dirname(os.path.abspath(__file__))
+    host, user = socket.gethostname().split(".")[0], getpass.getuser()
+    home = os.path.join(t, "fakehome")
+    root = os.path.join(home, "root")
+    rel = os.path.join(root, "scripts", "bench", "framework-compare", "target", "release")
+    stub = os.path.join(t, "stubbin")
+    for dd in (rel, stub):
+        os.makedirs(dd)
+    ids = (home, host, user)
+
+    def put(path, body):
+        open(path, "w").write(body)
+        os.chmod(path, 0o755)
+    put(os.path.join(stub, "xcrun"), _STUB_HEAD.format(ids=ids) + _STUB_XCRUN[len(_STUB_HEAD):])
+    for b in ("bench-fandhe", "bench-candle"):
+        put(os.path.join(rel, b), _STUB_HEAD.format(ids=ids) + _STUB_BENCH[len(_STUB_HEAD):])
+    put(os.path.join(root, "diag-bin"), _STUB_HEAD.format(ids=ids) + _STUB_DIAG[len(_STUB_HEAD):])
+    put(os.path.join(stub, "sysctl"), '#!/bin/sh\ncase "$2" in machdep.cpu.brand_string) echo "Apple M4";; '
+        'vm.loadavg) echo "{ ${STUB_LOAD:-1.00} 1.10 1.20 }";; *) exit 1;; esac\n')
+    put(os.path.join(stub, "sleep"), "#!/bin/sh\nexit 0\n")
+    open(os.path.join(root, ".rev-stamp"), "w").write("abc123\n")
+    lock = os.path.join(home, "lock")
+    open(lock, "w").write("owner\n")
+    env = dict(os.environ, HOME=home, PATH=stub + os.pathsep + os.environ.get("PATH", ""), ROOT=root)
+    env.pop("STUB_FAIL_RECORD", None)
+    env.pop("STUB_FAIL_BENCH", None)
+    env.pop("STUB_LOAD", None)
+    sh = lambda script, args, extra: subprocess.run(["bash", os.path.join(here, script)] + args, env=dict(env, **extra),
+                                                     capture_output=True, text=True, timeout=300)
+    # probe: 成功（保存する文言は OUT からの相対名で書く。マスク頼みにしない）
+    out = os.path.join(home, "rec", "env")
+    r = sh("xctrace_probe_4153.sh", [], {"OUT": out})
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    msg = open(os.path.join(out, "xctrace_probe.txt")).read()
+    assert msg.startswith("available") and out not in msg and "<home>" not in msg and "env/table_*.xml" in msg, msg
+    assert os.path.exists(os.path.join(out, "table_metal-gpu-intervals.xml")) and not os.path.exists(os.path.join(out, "probe.trace"))
+    _no_identity_left(out, home, host, user)
+    # probe: xctrace record 失敗（unavailable で早期終了。bundle とログもマスク・削除される）
+    out2 = os.path.join(home, "rec", "env2")
+    r = sh("xctrace_probe_4153.sh", [], {"OUT": out2, "STUB_FAIL_RECORD": "1"})
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    msg = open(os.path.join(out2, "xctrace_probe.txt")).read()
+    assert msg.startswith("unavailable") and out2 not in msg and "<home>" not in msg and "env/xctrace_record.log" in msg, msg
+    assert not os.path.exists(os.path.join(out2, "probe.trace"))
+    _no_identity_left(out2, home, host, user)
+    # run_round: available の成功 → マスク後の raw/ がそのまま変換できる（XML が壊れず、bench-fandhe も残る）
+    base = {"EXPECT_SHA": "abc123", "DIAG_BIN": os.path.join(root, "diag-bin"), "XCTRACE_MODE": "available",
+            "XCTRACE_SCHEMA": "metal-gpu-intervals", "HW_LOCK_OWNER_FILE": lock, "HW_LOCK_HELD": "1"}
+    rd = os.path.join(home, "rec", "round1")
+    r = sh("run_round.sh", ["1", rd], base)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    _no_identity_left(rd, home, host, user)
+    assert "bench-fandhe" in open(os.path.join(rd, "raw", "fandhe_reuse.trace.xml")).read()
+    rule = RULE_FIX.format(xc="available", fs="F1,F2").replace("xctrace_schema: S", "xctrace_schema: metal-gpu-intervals")
+    vt, _ = convert(rd, rule)
+    assert f"{CELL}\tfandhe_pure_kernel\t63.000000\t{CLOCK}" in vt and f"{CELL}\topp_pure_kernel\t53.000000\t{CLOCK}" in vt, vt
+    # run_round: ゲート不通過・腕の失敗（candle が落ちる）・xctrace record の失敗（bundle が残る経路）・unavailable の成功
+    rdg = os.path.join(home, "rec", "round-gate")
+    r = sh("run_round.sh", ["1", rdg], dict(base, STUB_LOAD="9.00"))
+    assert r.returncode == 1 and open(os.path.join(rdg, "gate.txt")).read().startswith("TIMEOUT"), (r.stdout, r.stderr)
+    _no_identity_left(rdg, home, host, user)
+    for lab, extra, rc in (("benchfail", {"STUB_FAIL_BENCH": "bench-candle"}, 1),
+                           ("recordfail", {"STUB_FAIL_RECORD": "1"}, 1),
+                           ("unavail", {"XCTRACE_MODE": "unavailable", "XCTRACE_SCHEMA": ""}, 0)):
+        rdx = os.path.join(home, "rec", f"round-{lab}")
+        r = sh("run_round.sh", ["1", rdx], dict(base, **extra))
+        assert r.returncode == rc, (lab, r.returncode, r.stdout, r.stderr)
+        assert os.listdir(os.path.join(rdx, "raw")), lab
+        _no_identity_left(rdx, home, host, user)
+    convert(os.path.join(home, "rec", "round-unavail"), RULE_FIX.format(xc="unavailable", fs="F2"))
 
 
 def self_test():
@@ -500,12 +822,23 @@ def self_test():
         pth = os.path.join(t, "x.tsv")
         write_new(pth, "a")
         _expect(lambda: write_new(pth, "b"), "overwrite", "exists")
+        _self_test_mask_unit(t)
+        _self_test_shell(t)
     print("self-test ok")
 
 
 def main(argv):
     if "--self-test" in argv:
         self_test()
+        return 0
+    if argv == ["--mask-ready"]:
+        mask_identities()
+        print("mask ready")
+        return 0
+    if len(argv) == 2 and argv[0] == "--mask-dir":
+        if not os.path.isdir(argv[1]):
+            raise ConvError("mask: --mask-dir needs an existing directory")
+        mask_dir(argv[1])
         return 0
     args = dict(zip(argv[0::2], argv[1::2]))
     if set(args) != {"--round-dir", "--rule"}:

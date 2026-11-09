@@ -43,9 +43,9 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 |---|---|
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_diag.py --check-template` で検査）。`## AUX` が補助 PARAMS（`aggregate_diag.py` は読まない） |
 | `aggregate_diag.py` | 雛形（`diag-0140-template/`）の無改変コピー。sha256 を RULE に固定 |
-| `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換（`--self-test`）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否 |
+| `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換（`--self-test`。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクも確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」） |
 | `attrib_4153.py` | `kernel_share`・摂動・照合の補助集計（`--dir`・`--check-rule`・`--self-test`）。sha256 を RULE に固定 |
-| `run_round.sh` | 1 round の起動（precheck → ゲート → 窓 → xctrace → 診断テスト。ゲート後に cargo を呼ばない） |
+| `run_round.sh` | 1 round の起動（precheck → ゲート → 窓 → xctrace → 診断テスト。ゲート後に cargo を呼ばない）。終了時に必ず round ディレクトリをマスクする |
 | `xctrace_probe_4153.sh` | PR-2 の前に 1 回だけ。N=256 のスモークで `xctrace export --toc` を保存し schema 名・列名を確定する（計測ではない） |
 
 ## 手順
@@ -56,7 +56,14 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 3. （PR-3・<metal-node>）hw-lock を取り、ツリー指紋を RULE と照合して、`ROOT=… EXPECT_SHA=… DIAG_BIN=… XCTRACE_MODE=<RULE の AUX xctrace> XCTRACE_SCHEMA=…（unavailable なら省略可・trace の腕は取らない） HW_LOCK_OWNER_FILE=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
 4. 各 round で `python3 -I to_values_4153.py --round-dir <記録先>/round<i> --rule <記録先>/RULE.txt`。
 5. `python3 -I aggregate_diag.py --dir <記録先>` と `python3 -I attrib_4153.py --dir <記録先>` で集計する。
-6. 結果欄と `docs/perf/loss-attribution-matrix.md` の M-MTL-G4096 行（§10.3.1 の「candle の純カーネル時間は未測定」を含む）を実測値＋タグで更新する（未測定は未測定のまま）。`Closes #4153`。回収時にパス上のユーザー名・ホスト名をマスクする（`<home>`・`<metal-node>`）。
+6. 結果欄と `docs/perf/loss-attribution-matrix.md` の M-MTL-G4096 行（§10.3.1 の「candle の純カーネル時間は未測定」を含む）を実測値＋タグで更新する（未測定は未測定のまま）。`Closes #4153`。保存物のマスクは下の「マスク」のとおり自動で行われるが、対象外の識別子が残っていないかは回収時に目で確かめる。
+
+## マスク（RULE 項 7）
+
+- `run_round.sh`・`xctrace_probe_4153.sh` は記録先を作った後、成功・ゲート不通過・腕の失敗・xctrace unavailable・シグナルのどの経路で終わっても EXIT trap で trace バンドル（`*.trace`。未マスクのバイナリ）を消し、`python3 -I to_values_4153.py --mask-dir` で記録先（`round{i}/`・`env/`）の全通常ファイルを置換する。マスクが使えない環境は記録前の `--mask-ready` で止まり、置換後に識別子が残れば非 0 で終わる（値そのものは出力しない）。
+- 置換するのはホームパス（`HOME` と passwd のホーム）→ `<home>`、ホスト名（gethostname とその短縮形、`scutil` の ComputerName／LocalHostName／HostName。xctrace のログは ComputerName を出す）→ `<metal-node>`、パスの 1 要素として現れたユーザー名 → `<user>`。`.xml` はテキストと属性値を `&lt;…&gt;` で置換して XML を壊さない（CDATA 内は素の `<…>`）。
+- **検出できないもの**: パス以外に現れたユーザー名（`bench-fandhe` のような正当なデータを壊さないため置換しない）、3 文字未満の名前、他人のユーザー名・ホストの別名、識別子を加工した文字列。
+- スクリプトが端末へ出すエラー文（絶対パスを含みうる）と、`to_values_4153.py`・`attrib_4153.py`・`aggregate_diag.py` のエラー文はファイルへ保存しない。これらが書く `values.tsv`・`aux.tsv`・`attrib.tsv`・`aggregate.*` はパスを含まない。
 
 ## 結果
 
