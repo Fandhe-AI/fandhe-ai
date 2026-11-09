@@ -57,7 +57,7 @@ for b in 64 1024 4096; do
   for mode in off on; do
     gate_run "$OUT/r2-${mode}-${b}-${LABEL}.log" "$mode" "${CT[@]}" -p fandhe-ai --test predict_device_chain_cuda_graph_bit_identity -- --ignored --exact --nocapture "predict_resident_bit_dump_cuda_graph_batch_${b}"
     rc=$?; [[ $rc -eq 0 ]] || note_fail "r2-${mode}-${b}" $rc
-    grep '^out\[' "$OUT/r2-${mode}-${b}-${LABEL}.log" >"$OUT/r2-dump-${mode}-${b}-${LABEL}.txt" || true
+    sed -nE 's/^(test [^ ]+ \.\.\. )?(out\[[0-9]+\]\.bits=0x[0-9a-fA-F]+)[[:space:]]*$/\2/p' "$OUT/r2-${mode}-${b}-${LABEL}.log" >"$OUT/r2-dump-${mode}-${b}-${LABEL}.txt" || true
   done
 done
 

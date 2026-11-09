@@ -244,8 +244,12 @@ def eval_gates(d, label, assumptions):
             rc, t = log_rc(p(f"r2-{mode}-{b}"))
             if rc is None:
                 undet.append(f"r2-{mode}-{b} 未実行"); break
-            lines = re.findall(r"^out\[.*$", t, re.M)
-            if rc != 0 or len(lines) != b * 10:
+            # --nocapture では最初の println! が libtest の "test <name> ... " と同一行に出るため、
+            # 接頭辞を除去してから添字・値の形式を厳格に照合する（先頭要素の欠落防止）
+            lines = [m.group(1) for m in re.finditer(
+                r"^(?:test \S+ \.\.\. )?(out\[\d+\]\.bits=0x[0-9a-fA-F]+)[ \t]*$", t, re.M)]
+            idx_ok = [re.match(r"out\[(\d+)\]", x).group(1) for x in lines] == [str(k) for k in range(len(lines))]
+            if rc != 0 or len(lines) != b * 10 or not idx_ok:
                 undet.append(f"r2-{mode}-{b}: rc={rc} 行数={len(lines)}（期待 {b * 10}）"); break
             dumps[mode] = lines
         if len(dumps) == 2:
@@ -475,6 +479,7 @@ def make_fixture(d, label="t", ratios=None, **opt):
     for b in BATCHES:
         for m in ("off", "on"):
             body = "".join(f"out[{j}].bits=0x{j:08x}\n" for j in range(b * 10))
+            body = "test predict_resident_bit_dump ... " + body  # libtest 接頭辞が先頭行に付く実出力を再現
             if opt.get("r2_diff") and b == 64 and m == "on":
                 body = body.replace("out[3].bits=0x00000003", "out[3].bits=0x00000004")
             _w(os.path.join(d, f"r2-{m}-{b}-{label}.log"), body + "rc=0\n")
