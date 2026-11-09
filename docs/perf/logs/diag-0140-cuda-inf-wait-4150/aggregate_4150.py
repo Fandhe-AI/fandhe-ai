@@ -346,8 +346,9 @@ PAIRS_REF = (("seq3189", "host_issue_sum", "issue"), ("seq3189", "download", "re
 
 SERIES_NOTE = {
     "seq3189": "区間: E_sum（l1_iso＋l2_iso）は into 経路の融合カーネル幅で出力のゼロ初期化を含まない。"
-               "chain_gpu・l1_issue／l2_issue は層ごとの出力確保＋ゼロ初期化（#3189 の呼び出し列）と入力 H2D・drop を含むため、"
-               "その分は gpu_gap・share_wait 側に入る（RULE 項 4・5）",
+               "chain_gpu・l1_issue／l2_issue は upload 後に計時し、層ごとの出力確保＋ゼロ初期化（#3189 の呼び出し列）と drop を含むため、"
+               "その分は gpu_gap・share_wait 側に入る。入力 H2D は h2d_upload・up_gpu の別項目で、"
+               "H2D を含むのはチェーン全体の total のみ（RULE 項 4・5）",
     "prod0140": "区間: 区間内に確保・ゼロ初期化・H2D・drop を含まない（常駐入力・事前確保した層出力への into 経路）。"
                 "gpu_gap は発行待ちによる GPU の空きだけで、層出力のゼロ初期化を含まない（RULE 項 4・5）",
 }
@@ -590,6 +591,7 @@ def self_test():
     mixed = [derive(parse_chain(_synth_chain(n, e_sum_each=x), 1, 1, n)[0]) for x in (10.0, 30.0, 30.0)]
     side, conf, why = classify(summarize(mixed)["seq3189"])
     assert conf == "低"
+    assert any("割れた" in w or "またぐ" in w for w in why)
     # 2 系列の分類は独立（#4188）: seq3189 は GPU 実行支配（share 0.5）、prod0140 は待ち支配（kwd=200 で share 0.25）。
     two = summarize([derive(parse_chain(_synth_chain(n, prod_kwd=200.0, prod_dl=200.0, prod_e_dl=200.0), 1, 1, n)[0])
                      for _ in range(3)])
@@ -607,7 +609,7 @@ def self_test():
     _expect_error(lambda: parse_chain(_synth_chain(n).replace(
         "arm=ER iter=0 l1_span_us=15.000 l2_span_us=10.000", "arm=ER iter=0 l2_span_us=10.000 l1_span_us=15.000", 1),
         1, 1, n), "ER key order")
-    _expect_error(lambda: parse_chain(_synth_chain(n, arms=("P", "E", "ER", "I", "F")), 1, 1, n), "missing PR") and any("割れた" in w or "またぐ" in w for w in why)
+    _expect_error(lambda: parse_chain(_synth_chain(n, arms=("P", "E", "ER", "I", "F")), 1, 1, n), "missing PR")
     # 異常系。
     _expect_error(lambda: parse_chain(_synth_chain(n, drop_key="total_us"), 1, 1, n), "missing key")
     _expect_error(lambda: parse_chain(_synth_chain(n, dup=True), 1, 1, n), "duplicate iter")
