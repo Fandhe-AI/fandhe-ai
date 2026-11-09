@@ -1,0 +1,2 @@
+c5ea0bfd3037f93d8b20889bcea2b192ab9c9327ad0fd15c564b58c5ba0dd115  diag_timing.patch
+c387e3ec647e36b545ae348ff123dd232542f92ead9c00a0ae908afa27ab1a78  on-arm.patch
