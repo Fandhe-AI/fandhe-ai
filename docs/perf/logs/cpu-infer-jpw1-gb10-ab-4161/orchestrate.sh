@@ -47,6 +47,10 @@ diff -r -x target -x .git -x .rev-stamp "${VER}" "${BASE}" > /dev/null || { rm -
 rm -rf "${VER}"
 [ -f "${PATCH}" ] || { echo "patch が無い"; exit 1; }
 [ ! -e "${WORK}/trees" ] || { echo "${WORK}/trees が既にある（上書き禁止）"; exit 1; }
+# 既存の出力は最初の書き込み（mkdir・ログ・tree 記録）より前に全件検査し、1 件でもあれば何も書かずに停止する（RULE 項10: 上書き・差し替え禁止）。
+for f in "${LOGDIR}/prereq" "${LOGDIR}/tree_verify.txt" "${LOGDIR}/patch_sha256.txt" "${LOGDIR}"/tree-*.txt "${LOGDIR}"/round*; do
+  [ ! -e "${f}" ] && [ ! -L "${f}" ] || { echo "${f} が既にある（上書き・差し替え禁止。何も書かずに停止）"; exit 2; }
+done
 nvidia-smi --query-gpu=name --format=csv,noheader | grep -q 'GB10' || { echo "機体が GB10 ではない"; exit 1; }
 [ -s "${LOCKF}" ] || { echo "実機ロックの owner が空"; exit 1; }
 python3 -I "${LOGDIR}/aggregate.py" --self-test || { echo "aggregate.py の self-test 失敗"; exit 1; }
