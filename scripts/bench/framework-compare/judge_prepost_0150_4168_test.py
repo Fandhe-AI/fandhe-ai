@@ -45,7 +45,7 @@ def write(path, rows):
     Path(path).write_text(''.join(json.dumps(r) + '\n' for r in rows))
 
 
-def make_series(root, before_sec=1.0, after_sec=0.5, mutate=None, runs=5, extra_dir=None):
+def make_series(root, before_sec=1.0, after_sec=0.5, mutate=None, runs=5, extra_dir=None, pymutate=None):
     """全セルに fandhe（before/after 別の median_s）と candle・pytorch（2.0・3.0 秒）を置いた系列を作る。"""
     d = Path(root) / 'series'
     for i in range(1, runs + 1):
@@ -53,18 +53,22 @@ def make_series(root, before_sec=1.0, after_sec=0.5, mutate=None, runs=5, extra_
         rd.mkdir(parents=True)
         arms = {'before': [], 'after': []}
         opp = []
+        py = []
         for task, dev, size in J.CELLS[PROFILE]:
             for arm, sec in (('before', before_sec), ('after', after_sec)):
                 for mode in ('reuse', 'fresh'):
                     arms[arm].append(fandhe_row(task, dev, size, mode, sec))
-            opp.append(opp_row('candle', task, dev, size, 2.0))
-            opp.append(opp_row('pytorch', task, dev, size, 3.0))
+            for fw in sorted(J.required_opponents(PROFILE, task, dev, size)):
+                sec = {'candle': 2.0, 'pytorch': 3.0}.get(fw, 9.0)
+                (opp if fw in ('candle', 'burn') else py).append(opp_row(fw, task, dev, size, sec))
         if mutate:
             mutate(i, arms, opp)
+        if pymutate:
+            pymutate(i, py)
         write(rd / 'results-before.jsonl', arms['before'])
         write(rd / 'results-after.jsonl', arms['after'])
         write(rd / 'results-opp.jsonl', opp)
-        write(rd / 'results-py.jsonl', [])
+        write(rd / 'results-py.jsonl', py)
     if extra_dir:
         (d / extra_dir).mkdir()
     return d
@@ -211,6 +215,31 @@ class JudgeTest(unittest.TestCase):
             rule, env, g = make_meta(t)
             code, out = run_main(t, s, rule, env, g)
             self.assertEqual(code, 2, out)
+
+    def test_empty_python_opponents_is_undetermined(self):
+        code, out = self.go(pymutate=lambda i, py: py.clear())
+        self.assertEqual(code, 2, out)
+        self.assertIn('必須の比較相手が欠損', out)
+
+    def test_known_burn_metal_gap_is_tolerated(self):
+        def mut(i, arms, opp):
+            opp[:] = [r for r in opp if not (r['framework'] == 'burn' and r['task'] == 'gemm' and r['device'] == 'metal' and r['size'] >= 512)]
+        code, out = self.go(mutate=mut)
+        self.assertEqual(code, 0, out)
+
+    def test_invalid_median_s(self):
+        for bad in (0, -1.0, None, True, float('nan')):
+            def mut(i, arms, opp, bad=bad):
+                if i == 1:
+                    arms['after'][0]['median_s'] = bad
+            code, out = self.go(mutate=mut)
+            self.assertEqual(code, 2, (bad, out))
+            self.assertIn('median_s', out)
+        def mut2(i, arms, opp):
+            if i == 1:
+                del opp[0]['median_s']
+        code, out = self.go(mutate=mut2)
+        self.assertEqual(code, 2, out)
 
     def test_fill_draft_only_ratio_column(self):
         with tempfile.TemporaryDirectory() as t:

@@ -18,6 +18,7 @@ import argparse
 import ast
 import hashlib
 import json
+import math
 import re
 import statistics
 import sys
@@ -185,8 +186,40 @@ def strict_load(path):
             raise Undetermined(f'size が整数でない（{sz!r}） {p}:{i}')
         if any(k.startswith('diag') for k in r):
             raise Undetermined(f'diag マーカー付きの行（--diag-* は計測に使わない） {p}:{i}')
+        if r['task'] not in ('train_phases', 'infer_phases'):
+            ms = r.get('median_s')
+            if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not math.isfinite(ms) or ms <= 0:
+                raise Undetermined(f'median_s が欠落または正の有限数でない（{ms!r}） {p}:{i}')
         rows.append(r)
     return rows
+
+
+# 既知の欠測（RULE の想定内）: macmini の burn Metal gemm 512〜4096 は checksum 縮退で計測不能（ランナーの期待行数 22 と一致）。
+KNOWN_MISSING = frozenset({('burn', 'gemm', 'metal', n) for n in (512, 1024, 2048, 4096)})
+
+
+def required_opponents(profile, task, device, size):
+    """ランナー（run_ab_prepost_0150_4168.sh の opp_cell・py_cell）が必ず出す比較相手 fresh 行の集合。"""
+    need = {'candle', 'burn'}
+    if profile == 'macmini':
+        need |= {'pytorch', 'tensorflow'}
+        if device == 'cpu':
+            need.add('scipy')
+    elif device == 'cpu':
+        need |= {'pytorch', 'tensorflow', 'scipy'}
+    else:
+        need.add('pytorch')
+    return {fw for fw in need if (fw, task, device, size) not in KNOWN_MISSING}
+
+
+def missing_opponents(profile, runs, task, device, size):
+    """必須の比較相手が欠けた run を列挙する（空なら揃っている）。欠損は undetermined（RULE の欠損時契約）。"""
+    out = []
+    for i, d in enumerate(runs, 1):
+        for fw in sorted(required_opponents(profile, task, device, size)):
+            if (fw, task, device, size, 'fresh') not in d:
+                out.append(f'run{i}:{fw}')
+    return out
 
 
 def strict_index(rows, what):
@@ -359,6 +392,11 @@ def evaluate(profile, series_dir):
         for a in ('before', 'after'):
             mism, miss, base = hard_check(own[a], task, device, size)
             c['hard_' + a] = (mism, miss, base)
+            lacking = missing_opponents(profile, per_arm[a], task, device, size)
+            if lacking:
+                c[a] = None
+                c['err'] = f'{a}: 必須の比較相手が欠損 ' + ','.join(lacking)
+                continue
             try:
                 c[a] = arm_cell(data[a], per_arm[a], task, device, size)
             except Undetermined as e:

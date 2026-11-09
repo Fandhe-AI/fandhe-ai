@@ -131,8 +131,15 @@ PATCH_CONFIG="patch.crates-io.fandhe-ai.path=\"${FACADE_PATH}\""
 LOCK_CLEAN_REL="$FC_REL/Cargo.lock"
 LOCK_COPY="$(mktemp)"
 cp "$BASE_ROOT/$LOCK_CLEAN_REL" "$LOCK_COPY" || { echo "error: Cargo.lock の退避に失敗" >&2; exit 1; }
-restore_lock() { cp "$LOCK_COPY" "$BASE_ROOT/$LOCK_CLEAN_REL" 2>/dev/null; rm -f "$LOCK_COPY"; }
-trap 'restore_lock; if [[ "$DRY" == "1" ]]; then rm -rf "$OUT"; fi' EXIT
+# 復元に失敗したら退避ファイルを残して保存先とエラーを示し非 0 を返す（成功時のみ trap が退避を削除する）。
+restore_lock() {
+  cp "$LOCK_COPY" "$BASE_ROOT/$LOCK_CLEAN_REL" || { echo "error: Cargo.lock の復元に失敗。退避ファイルを残した: $LOCK_COPY（手動で $BASE_ROOT/$LOCK_CLEAN_REL へ戻す）" >&2; return 1; }
+}
+cleanup_exit() {
+  if restore_lock; then rm -f "$LOCK_COPY"; fi
+  if [[ "$DRY" == "1" ]]; then rm -rf "$OUT"; fi
+}
+trap cleanup_exit EXIT
 FC_DIR="$BASE_ROOT/$FC_REL"
 
 tree_checks() { # before/after の fandhe-ai 解決を検査
@@ -151,6 +158,8 @@ tree_checks() { # before/after の fandhe-ai 解決を検査
   return 0
 }
 tc=0; tree_checks || tc=$?
+# after 側の cargo tree（--locked なし）は Cargo.lock を patched グラフへ書き換える。before ビルド（--locked）の前に必ず戻す。
+restore_lock || exit 1
 if [[ "$tc" -ne 0 ]]; then
   if [[ "$DRY" == "1" ]]; then echo "dry-run: cargo tree を実行できない環境（rc=$tc）。腕の解決確認は未検証"; else precheck_fail "cargo tree の実行に失敗"; fi
 else
@@ -333,6 +342,6 @@ for R in 1 2 3 4 5; do
   if [[ "$unexpected" != "0" ]]; then echo "SERIES-ABORTED completed=$((R - 1))/5 (想定外の失敗)"; exit 1; fi
 done
 rm -f "$OUT/err.tmp"
-restore_lock
+restore_lock || exit 1
 if ! git -C "$BASE_ROOT" diff --quiet -- "$LOCK_CLEAN_REL"; then echo "error: Cargo.lock に差分が残った" >&2; exit 1; fi
 echo "ALL-DONE completed=5/5"
