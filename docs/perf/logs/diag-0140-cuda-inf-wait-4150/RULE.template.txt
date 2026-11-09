@@ -25,30 +25,40 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   到達不能な量（nsys 不通など）は unavailable と記録し、推定値で埋めない。
 
 4. 腕と区間の定義（単位 µs）
-  チェーン: 常駐 w・bias を upload、入力 H2D、L1 = 784→256＋bias＋ReLU 融合、L2 = 256→10＋bias、download。L1 発行直後に入力を、L2 発行直後に中間を drop（本番どおり）。
+  チェーン（P・E）: 常駐 w・bias を upload、入力 H2D、L1 = 784→256＋bias＋ReLU 融合、L2 = 256→10＋bias、download。L1 発行直後に入力を、L2 発行直後に中間を drop。
+    呼び出し列は #3189 と同じ（層ごとに確保経路 linear_forward_device）。0.14.0 の本番 predict_device_chain は 2 回目以降に層出力を
+    into 経路で再利用する（#3205）ため、層ごとの出力確保・ゼロ初期化・drop を含む点で本番と異なる。
   P: host Instant のみ（h2d_upload・l1_issue・l2_issue・download・download_again・kernel_wait_derived = download − download_again・total）。
+    h2d_upload は入力の device 確保＋H2D。l1_issue／l2_issue は検査・出力の確保＋ゼロ初期化（alloc_zeroed）の発行・カーネル発行・前段の drop。
+    download／download_again は D2H＋同期（host 側 Tensor の確保を含む）。
   E: P と同じチェーンに event 4 本（e0=upload 前、e1=upload 後、e2=L1 発行直後、e3=L2 発行直後）。up_gpu=e0→e1、l1_span=e1→e2、l2_span=e2→e3、chain_gpu=e1→e3。
-  I: drain 後に event 対で実物の linear_forward_device を層ごとに 1 回挟む（l1_iso・l2_iso）。H2D・確保・event 生成は区間外。
+    GPU 側の幅は、層出力のゼロ初期化と、host が確保・発行している間の GPU の空きを含む。
+  I: drain 後に event 対で、P・E と同じ融合カーネルを into 経路（linear_forward_device_into_tracked。区間外で事前確保した出力へ書く）で
+    層ごとに 1 回挟む（l1_iso・l2_iso）。出力の確保・ゼロ初期化・入力の H2D・event 生成は区間外。l1_host／l2_host は同じ呼び出しの host 時間。
   F: sync_idle・launch_floor_1x1・tiny_roundtrip・event_record_pair。各区間の前に drain（synchronize）してキューを空にする。
+    1x1 カーネルは I と同じく事前確保した出力への into 経路で、区間内に device 側の確保・ゼロ初期化を含まない。
     #4149 の cuda_fixed と区間定義が同じもの: sync_idle（アイドルでの synchronize）、tiny_roundtrip（1 要素 kernel〈1x1 linear〉の発行＋
-    1 要素 D2H＋同期を 1 区間で計る。出力の解放は区間外）、event_record_pair（event 記録 2 本だけの host 時間）。
-    異なるもの: launch_floor_1x1 は 1x1 linear_forward_device 1 回の発行時間（出力確保込み）で、#4149 の launch_floor_add
+    1 要素 D2H＋同期を 1 区間で計る。D2H は host 側 Tensor の確保を含む）、event_record_pair（event 記録 2 本だけの host 時間）。
+    異なるもの: launch_floor_1x1 は 1x1 into 1 回の発行時間で、#4149 の launch_floor_add
     （1 要素 add を 100 回 enqueue した 1 回あたり）とは演算も回数も違う。対応表では参考として並べるだけにする。
   stream は internal-diagnostics 下の Legacy（NULL）stream であることを example が前提検査する。
 
 5. 導出式（内訳であり合否判定ではない。round ごとに腕別反復中央値から計算し、round 間の中央値と最小〜最大を出す）
-  E_sum = l1_iso + l2_iso（実測。起動立ち上がりを含む GPU 実行幅）。chain_gpu（実測）。gpu_gap = chain_gpu − E_sum（実測の差。負値もありうる）。
+  E_sum = l1_iso + l2_iso（実測。起動立ち上がりを含む融合カーネルの GPU 実行幅。出力のゼロ初期化を含まない）。chain_gpu（実測。層出力のゼロ初期化を含む）。
+  gpu_gap = chain_gpu − E_sum（実測の差。負値もありうる。層出力のゼロ初期化 2 回分・host の確保／発行待ちによる GPU の空きを含む）。
   host_issue_sum = P の l1_issue + l2_issue。gpu_tail = max(0, chain_gpu − host_issue_sum)（推定）。
   wait_resid = kernel_wait_derived − gpu_tail（推定。起動遅延・同期復帰・event tracking 等。tiny_roundtrip と並べて読む）。
-  share_exec = E_sum / kernel_wait_derived（推定）。share_wait = 1 − share_exec。event_perturbation = E 腕 download / P 腕 download − 1（実測）。
+  share_exec = E_sum / kernel_wait_derived（推定。融合カーネル本体の割合で、ゼロ初期化は share_wait 側に入る）。share_wait = 1 − share_exec。
+  event_perturbation = E 腕 download / P 腕 download − 1（実測）。
   分類（優先順に固定し事後に動かさない）:
     1. event_perturbation > 0.10 なら確度を必ず「低」にし理由を書く。
-    2. share_exec ≥ 0.5 なら「GPU 実行が支配」。
+    2. share_exec ≥ 0.5 なら「GPU 実行が支配」（GPU 実行は融合カーネル本体を指し、層出力のゼロ初期化を含まない）。
     3. それ以外は「待ち（起動遅延・間隙・同期復帰）が支配」。
     4. 確度「高」は、全 round が 0.5 の同じ側かつ NB-RANGE5 帯が 0.5 をまたがない場合のみ。それ以外は「低」。
   副次: l1_iso・l2_iso を docs/perf/infer-chain-fixed-cost-reduction-3205.md §3 の「占有率」推定と突き合わせ、推定のまま残すか実測で置き換えるかを結果欄に書く。
   相手側（#4149 実測）が入手できる場合のみ aggregate_4150.py --opp-tsv で対応表を出す。無ければ unavailable（推定で埋めない）。
-  非対称: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの実物、PyTorch の mm_event は純 GEMM。
+  非対称: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの同じカーネル（into 経路）、PyTorch の mm_event は純 GEMM。
+    fandhe の chain_gpu は層出力のゼロ初期化を含む（PyTorch の caching allocator は層ごとのゼロ初期化をしない）。
 
 6. ノイズ帯
   NB-RANGE5（docs/perf/noise-band-decision.md。round 別値の最小〜最大を帯とする）。

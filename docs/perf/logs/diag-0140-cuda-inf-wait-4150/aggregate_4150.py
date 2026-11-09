@@ -337,7 +337,10 @@ def render(rule, statuses, rows, opp):
           f"- status: {status}",
           f"- round 状態: {' '.join(statuses)}（PASS {n_ok} 件を使用）",
           cls,
-          "- 値の単位は µs。round 別中央値の中央値と NB-RANGE5（最小〜最大）。タグ: 実測／推定", "",
+          "- 値の単位は µs。round 別中央値の中央値と NB-RANGE5（最小〜最大）。タグ: 実測／推定",
+          "- 区間: E_sum（l1_iso＋l2_iso）は into 経路の融合カーネル幅で出力のゼロ初期化を含まない。"
+          "chain_gpu・l1_issue／l2_issue は層ごとの出力確保＋ゼロ初期化（#3189 の呼び出し列）を含むため、"
+          "その分は gpu_gap・share_wait 側に入る（RULE 項 4・5）", "",
           "| 量 | タグ | 中央値 | 最小 | 最大 |", "|---|---|---|---|---|"]
     tsv = ["item\ttag\tmedian\tmin\tmax", f"status\t{status}\t\t\t"]
     for k, r in rows.items():
@@ -357,7 +360,8 @@ def render(rule, statuses, rows, opp):
             else:
                 md.append(f"| {mine} | {theirs} | {fnum(rows[mine]['median'])} | unavailable | unavailable |")
         md += ["", "非対称: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。"
-               "fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの実物、PyTorch の mm_event は純 GEMM。"
+               "fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの同じカーネル（into 経路）、PyTorch の mm_event は純 GEMM。"
+               "fandhe の chain_gpu は層出力のゼロ初期化を含む（PyTorch の caching allocator は層ごとのゼロ初期化をしない）。"
                "launch_floor_1x1（1x1 linear の単発発行）と launch_floor_add（1 要素 add 100 回の 1 回あたり）は"
                "区間定義が異なる参考の並びで、差を内訳として読まない。"]
     return "\n".join(md) + "\n", "\n".join(tsv) + "\n"
@@ -566,6 +570,8 @@ def self_test():
     assert "- status: partial" in md_p
     md_c, tsv_c = render(rule_stub, ["PASS"], one, None)
     assert md_c.startswith("# #4150 集計") and "確度: 高" in md_c and "status\tcomplete\t" in tsv_c
+    # 区間の注記（I 腕は into 経路でゼロ初期化を含まず、chain_gpu は含む）を complete・partial の両方に出す。
+    assert all("出力のゼロ初期化を含まない" in x and "gpu_gap・share_wait 側に入る" in x for x in (md_c, md_p))
     _expect_error(lambda: load_opp_text("item\tmedian_us\nissue\tabc\n"), "opp not a number")
     _expect_error(lambda: derive(parse_chain(_synth_chain(n, kwd=0.0), 1, 1, n)[0]), "kwd zero")
     # example 出力キーとの突き合わせ（Rust 側の format_line 呼び出しと同一であること）。

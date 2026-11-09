@@ -19,18 +19,18 @@ chain 95.9 µs のうち download 69.2 µs、導出 `kernel_wait`（= download �
 
 | 腕 | 内容 |
 |---|---|
-| P | 3189 と同じ。host `Instant` のみ（`kernel_wait_derived` の再現） |
-| E | P と同じチェーンに CUDA event 4 本。GPU 側の幅（`up_gpu`・`l1_span`・`l2_span`・`chain_gpu`） |
-| I | drain 後に event 対で実物の `linear_forward_device` を層ごとに 1 回挟む（`l1_iso`・`l2_iso`） |
-| F | 固定費（`sync_idle`・`launch_floor_1x1`・`tiny_roundtrip`・`event_record_pair`）。`sync_idle`・`tiny_roundtrip`（1 要素 kernel の発行＋D2H＋同期を 1 区間）・`event_record_pair` は #4149 の `cuda_fixed` と区間定義が同じ。`launch_floor_1x1`（1x1 linear の単発発行）は #4149 の `launch_floor_add`（1 要素 add 100 回の 1 回あたり）と異なる |
+| P | 3189 と同じ呼び出し列。host `Instant` のみ（`kernel_wait_derived` の再現）。層ごとに出力の確保＋ゼロ初期化・drop を含み、層出力を再利用する 0.14.0 の本番 `predict_device_chain`（#3205）とはこの点で異なる |
+| E | P と同じチェーンに CUDA event 4 本。GPU 側の幅（`up_gpu`・`l1_span`・`l2_span`・`chain_gpu`。層出力のゼロ初期化を含む） |
+| I | drain 後に event 対で、同じ融合カーネルを into 経路（`linear_forward_device_into_tracked`・事前確保した出力）で層ごとに 1 回挟む（`l1_iso`・`l2_iso`。確保・ゼロ初期化・H2D は区間外） |
+| F | 固定費（`sync_idle`・`launch_floor_1x1`・`tiny_roundtrip`・`event_record_pair`）。`sync_idle`・`tiny_roundtrip`（1 要素 kernel の発行＋D2H＋同期を 1 区間）・`event_record_pair` は #4149 の `cuda_fixed` と区間定義が同じ。1x1 カーネルは into 経路（区間内に device 側の確保なし）。`launch_floor_1x1`（1x1 linear の単発発行）は #4149 の `launch_floor_add`（1 要素 add 100 回の 1 回あたり）と異なる |
 
 ## 読み方の注意
 
 - TIMEOUT／INVALID の round を含む系列は `status=partial`・表題「参考」で、確度を出さない（RULE 項 3）。
 - 分類と確度は RULE 項 5 の規則で機械的に出す（`event_perturbation > 0.10` なら確度は必ず低、`share_exec ≥ 0.5` は GPU 実行支配）。事後に動かさない。
-- `E_sum`（`l1_iso + l2_iso`）は起動立ち上がりを含む GPU 実行幅の実測。`gpu_tail`・`wait_resid`・`share_*` は**推定**で、タグを付けて読む。
+- `E_sum`（`l1_iso + l2_iso`）は起動立ち上がりを含む融合カーネルの GPU 実行幅の実測で、出力のゼロ初期化を含まない。`chain_gpu` は層出力のゼロ初期化を含むため、その分は `gpu_gap` と `share_wait` 側に入る。`gpu_tail`・`wait_resid`・`share_*` は**推定**で、タグを付けて読む。
 - 相手側（#4149 の PyTorch CUDA）との比較は、#4149 の実測が済んでいる場合だけ `--opp-tsv` で出す。無ければ unavailable。#4149 の実測が済んでいなければ、本イシューを閉じる前提条件が未充足。
-- 非対称: fandhe の窓は H2D を含み、PyTorch 側は X が device 上で H2D を含まない。fandhe の `l1_iso`／`l2_iso` は bias＋ReLU 融合込みの実物、PyTorch の `mm_event` は純 GEMM。
+- 非対称: fandhe の窓は H2D を含み、PyTorch 側は X が device 上で H2D を含まない。fandhe の `l1_iso`／`l2_iso` は bias＋ReLU 融合込みの同じカーネル（into 経路）、PyTorch の `mm_event` は純 GEMM。fandhe の `chain_gpu` は層出力のゼロ初期化を含む。
 - `internal-diagnostics` 有効時、`CudaDevice` は常に Legacy（NULL）stream を使うため、example が得た stream に event を記録すると本番チェーンと同じ stream に差し込める。example は冒頭で NULL stream を前提検査する。
 - event 記録自体が計測を摂動する。P 腕と E 腕の `download` の差で見積もり、集計が `event_perturbation` として出す。
 - nsys は時間を汚すため補助（record_only）に限り、判定に使わない。
