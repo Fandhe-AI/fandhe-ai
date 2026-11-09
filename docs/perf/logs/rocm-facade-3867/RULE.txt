@@ -1,0 +1,87 @@
+# RULE.txt — ROCm を facade 経由（Device::Rocm）で MI300X で測る（事前登録。イシュー #3867・依存 #3159）
+#
+# docs/real-hardware-verification-env.md §9.5 と docs/backend-rocm-device-exposure-decision.md §10.4・§10.5 の条件を固定する。
+# 実測値を推測で埋めない。ホスト名・ユーザー名・ホームのパスは書かない。<rocm-node>／<user>／<home> で表す。
+
+declared_at_utc: 2026-11-09T20:43Z（実機での実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+issue: 3867
+reregistered: #4171。旧 target_commit 22f6c0a2f（608659a02 で登録・実測は未実施）から crates/・Cargo.toml などで 50 ファイルの差分が出たため登録し直した。
+  判定・腕・テスト・run 数・tolerance は変えていない。変えたのは target_commit・source_fingerprint・deploy の rsync 除外・build_freshness（#4044 の §4.11）・
+  prerequisite の順序明記だけ。旧ブランチ test/3159-3867-rocm-parity は本登録に置き換える
+machine: <rocm-node>（MI300X・gfx942・CDNA3・wave64）。他の機材の結果は参考扱い。parity 測定で時間計測ではないため専有条件は課さない
+target_commit: ebf1d4e4ab0d7059af832074637571785ba8861e（origin/main。#4171 で登録し直した時点。crates/facade/tests/rocm_facade_real_device.rs は旧 target と同一）
+  条件: 実行時の HEAD で `git diff --quiet ebf1d4e4ab0d7059af832074637571785ba8861e <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml`
+  が成功し、送信元に未コミット差分が無いこと（git status --porcelain が空）。成立しなければ実行せず再登録する
+  実測に使う HEAD: この RULE を含み、上の条件を満たす push 済みコミット（PR head でも main 上のマージコミットでもよい）。
+  この RULE のコミットは docs/ だけを変えるので、そのコミット上では条件が成り立つ。squash merge 後も条件が成り立つのは、
+  その間に crates/・Cargo.toml・Cargo.lock・rust-toolchain.toml を変える PR が main に入らなかった場合だけ。測る人は実測の直前に条件を確かめる
+source_fingerprint: 458e0c5aecb5900772a2f0c84317e0f70e228582cf07599b14eb99f4a0a20485
+  crates/・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの SHA-256 を名前順に並べた一覧の SHA-256。上の target_commit の git archive から計算した。
+  再現方法: git archive <commit> crates Cargo.toml Cargo.lock rust-toolchain.toml を空のディレクトリへ展開し、
+  find crates Cargo.toml Cargo.lock rust-toolchain.toml -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum | sha256sum
+  （macOS では sha256sum を shasum -a 256 にする。出力の形式は同じ）
+  照合: 送信側で転送前に、ノード側で起動前に、それぞれ展開ツリーから同じ式で計算し、一致しなければ実行しない（undetermined）
+rev_stamp: 展開先の .rev-stamp は 40 桁の小文字 16 進数 1 行（#3159 の run_rocm_parity.sh と同じ形）。#3159 と同じ転送ツリーを使う
+deploy: #3159 と同じインスタンス・同じ展開ツリー（<home>/work/rust-ai-library-run）。CARGO_TARGET_DIR は <home>/work/target-fandhe-ai。
+  #3159 の run1・run2 が終わってから始める（計測を並走させない）
+  転送: docs/real-hardware-verification-env.md §3 の rsync に --exclude '.git'（末尾スラッシュなし）を足す。worktree の .git は
+  ローカルのパスを含むファイルで、§3 の .git/ は directory にしか当たらない。.env*・*.local.md・.claude/settings.local.json・.codex/・.venv*/ は従来どおり除外する
+prerequisite: facade は deps-policy 第 11 区分の ureq（vendored OpenSSL）に依存するため、ノードに perl と make が要る。
+  ノードの起動直後、ビルドより前に導入する。不足して導入できなければビルド不能として undetermined
+script: 同ディレクトリの run_rocm_facade.sh（コミット済みのものをそのまま送る）。ノード上で setsid nohup により切り離して起動する
+build_freshness: #4044 の §4.11（共有 target の成果物の再利用防止）を最小形で満たす。
+  ビルドの前に cargo metadata --no-deps --format-version 1 の全 workspace メンバーへ cargo clean -p を行う（debug プロファイル。--release は付けない）。
+  CARGO_TARGET_DIR が <home>/work/target-fandhe-ai でなければ止める（exit 2）。テストのビルドの前に cargo build --workspace --lib で全メンバーの lib を明示的にビルドする（clean 後はテストの依存グラフ外のメンバーが再生成されず、検査が必ず MISSING になるため）。
+  ビルド後に、テストバイナリと全メンバーの lib 成果物
+  （target/debug/deps/lib<lib 名>-*.rlib と同 *.rmeta の両方。lib 名は cargo metadata の lib ターゲット名）の更新時刻がスクリプト開始時刻より
+  秒単位で厳密に後であることを確かめ、build_artifacts.txt に保存する。開始時刻と同じ秒は不合格、必須 lib の .rlib・.rmeta の欠落とテストバイナリの欠落も不合格。
+  1 つでも満たさなければテストを実行せず undetermined（各テストの exit_code に build_freshness_failed）。
+  簡略形の理由: MI300X は使い捨てインスタンスで .fandhe-hw-lock の運用がなく、CUDA 雛形の hw_lock・tree_check は持ち込まない
+tolerance_and_baseline: 変更しない。REQ-2 統一複合判定（fandhe_ai_backend_cpu::compare。相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+  定数は fandhe_ai_tensor_core::tolerance が正本。baseline は追加しない
+
+# ---- 腕 ----
+arms:
+  A（被検腕）: fandhe_ai::tape_for(Device::Rocm(0)) 上の Var 演算
+  B（参照腕）: fandhe_ai::tape()（CPU tape）上の同じ演算
+  tape_for が Err なら expect("tape_for") の panic で fail（列挙された Rocm(0) が使えない＝被検対象の不成立）
+
+# ---- 対象（対象コミットの crates/facade/tests/rocm_facade_real_device.rs。広げない・変えない）----
+tests:
+  1. rocm_available_devices_lists_rocm0_and_tape_for_ok: available_devices() に Rocm(0) がちょうど 1 件あり、tape_for(Rocm(0)) が Ok
+  2. rocm_facade_matmul_parity_vs_cpu: matmul (m,k,n)=(33,47,29)。テスト内の決定的擬似データ data(n, salt)
+  3. rocm_facade_mlp_train_step_parity_vs_cpu: (batch,d_in,hidden,d_out)=(8,16,24,4) の matmul→relu→matmul→MSE(Mean) 1 ステップ。
+     loss・grad_w1・grad_w2 を別々に判定
+  4. rocm_tape_for_out_of_range_ordinal_is_err: tape_for(Rocm(1))・tape_for(Rocm(usize::MAX)) が Err(DeviceUnavailable)
+
+# ---- 判定（事前宣言）----
+judgment: 各比較は compare(...).passes()（fail_count=0）。テストの assert のとおり
+pass: コマンドが exit 0 で、出力に「running 1 test」と「test result: ok. 1 passed; 0 failed」があること
+fail: 上記以外の非 0 終了のうち undetermined に当たらないもの（「REQ-2 統一複合判定に失敗」、列挙の assert、expect の panic を含む）
+undetermined: ノードに届かない、ビルドできない、timeout、build_freshness の不成立、--list の不一致（": test" で終わる行がちょうど 1 件でない）。pass として扱わない
+completion: 4 本すべて pass で #3867 の完了とする。1 本でも fail・undetermined なら Closes にせず Refs にとどめ、未実測・fail の理由を書く
+
+# ---- run 数 ----
+runs: 各テスト 1 回（Phase 10 の他の issue〈#3856〜#3866〉と同じ。facade の結線確認で、カーネル parity は #3159 が担う）。
+  時間の計測ではないので中央値は取らない。fail の後に再実行して pass に置き換えない
+
+# ---- 事前ビルドと実行 ----
+build_then_run:
+  1) 先に cargo test -p fandhe-ai --test rocm_facade_real_device --no-run でビルドを終える。計測中は他の cargo・ビルドを走らせない
+  2) 各テストの前に cargo test -p fandhe-ai --test rocm_facade_real_device -- --ignored --exact --list <テスト名> の出力で、
+     ": test" で終わる行がちょうど 1 件であることを確かめる
+  3) 1 本ずつ別プロセスで実行する（--release は付けない。Phase 10 の他の issue と同じ）:
+     timeout 1800 cargo test -p fandhe-ai --test rocm_facade_real_device -- --ignored --exact --nocapture --test-threads=1 <テスト名>
+     を tests の 1〜4 の順に
+external_timeout: timeout 1800。ハングを pass にしない。timeout は undetermined
+
+# ---- 記録 ----
+record: 各テストのログ全文（--nocapture）と終了コードを保存する。比較ごとの「<context>: fail_count=… max_abs_diff=… max_rel_err=…」行を README へ転記する。
+  fail のときは panic メッセージをそのまま引用する
+masking: ホスト名・ユーザー名・ホームのパス・インスタンス識別子・GPU の UUID・PCI バス ID を収録しない。収録する場合は <rocm-node>／<user>／<home> へ置換。
+  スクリプトのマスクに加え、回収後に docs/real-hardware-verification-env.md §9.4 手順 4 の手動検査を当てる。漏れたら記録を捨てる
+abort: 単価は #3159 と同じインスタンスの残り時間で測る。追加の起動はしない（費用の正は docs/rocm-cloud-amd-procurement-decision.md §2・§7）
+
+# ---- fail の扱い ----
+fail_handling: fail が出ても tolerance・判定方式・入力・テストコード・カーネルを変えない。fail_count・max_abs_diff・max_rel_err を
+  そのまま引用して記録し、README と PR に「要対応」と書く。原因を推測で結論づけない。起票と baseline 化は所有者の承認を得てから行う
