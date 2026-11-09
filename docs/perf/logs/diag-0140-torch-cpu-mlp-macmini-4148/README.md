@@ -19,7 +19,7 @@ PyTorch CPU（Apple M4・Accelerate）の窓を、判定ではなく内訳とし
 
 - 時間は **計時腕**（`measure`）の値だけ。`profile` 腕（`torch.profiler`）は計測を摂動するため、op 数と `aten::mm` が子 op を持つか
   （BLAS 呼び出しの直下か）だけを使い、時間値は混ぜない。
-- 純カーネルは `torch.mm` を 10 回まとめた 1 回あたり（dispatch を償却した値）。単発の `mm_pure` は上限側の参考として別に出す。
+- 純カーネル相当は `torch.mm(out=)` を 10 回まとめた 1 回あたり。出力は再利用し（Accelerate 直呼びと同条件）、dispatch 費用は含む「dispatch 込みの torch.mm 時間」で、純カーネル時間そのものではない。そのため残差（推定）は下限側に読む。単発の `mm_pure` は上限側の参考として別に出す。
 - 学習の GEMM は l1_fwd・l2_fwd・l2_dw・l2_dx・l1_dw の 5 形状（l1_dx は PyTorch が計算しない）。推論は l1_fwd・l2_fwd。
 - 残差（推定）には autograd エンジン・Python 解釈・メモリ確保・backward の要素演算が混ざる。`dispatch_floor_est` は区間と重複するため和に入れない。
 - BLAS 経路が Accelerate でなくても宣言は動かさず、実測時に `env/`（`torch.__config__.show()`・`otool -L`）の事実をここへ注記する。

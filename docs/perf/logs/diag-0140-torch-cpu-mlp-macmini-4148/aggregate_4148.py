@@ -165,6 +165,15 @@ def load_rows(path, section, run, rule):
     return vals
 
 
+def _check_provenance(path, d, rule):
+    """profile／env 用: 版（torch_version）と両ハッシュを RULE と照合する（load_rows と同じ契約。RULE §7）。"""
+    for k in ("bench_py_sha256", "diag_script_sha256"):
+        if d.get(k) != rule[k]:
+            raise AggError(f"{path}: {k} differs from RULE")
+    if not str(d.get("torch_version", "")).startswith(rule["torch_version"]):
+        raise AggError(f"{path}: torch_version differs from RULE")
+
+
 def load_profile(path, section, run, rule):
     try:
         d = json.loads(read(path))
@@ -172,6 +181,7 @@ def load_profile(path, section, run, rule):
         raise AggError(f"{path}: invalid JSON: {e}")
     if d.get("issue") != ISSUE or d.get("section") != section or d.get("run") != run:
         raise AggError(f"{path}: issue/section/run mismatch")
+    _check_provenance(path, d, rule)
     if d.get("steps") != int(rule["profile_steps"]):
         raise AggError(f"{path}: steps differs from RULE profile_steps")
     for k in ("n_ops_aten_total", "n_ops_aten_toplevel"):
@@ -183,8 +193,9 @@ def load_profile(path, section, run, rule):
 def load_round(rdir, run, rule):
     raw = os.path.join(rdir, "raw")
     env = json.loads(read(os.path.join(raw, "env.json")))
-    if not str(env.get("torch_version", "")).startswith(rule["torch_version"]):
-        raise AggError(f"{raw}/env.json: torch_version differs from RULE")
+    if env.get("issue") != ISSUE:
+        raise AggError(f"{raw}/env.json: issue mismatch")
+    _check_provenance(f"{raw}/env.json", env, rule)
     out = {"env": env, "vals": {}, "prof": {}}
     for s in SECTION_ITEMS:
         out["vals"][s] = load_rows(os.path.join(raw, f"measure_{s}.jsonl"), s, run, rule)
@@ -408,7 +419,8 @@ def _synth_round(root, i, rule, ok=True, missing=False):
         return
     base = {"issue": ISSUE, "run": i, "bench_py_sha256": rule["bench_py_sha256"],
             "diag_script_sha256": rule["diag_script_sha256"], "torch_version": rule["torch_version"]}
-    json.dump({"torch_version": rule["torch_version"]}, open(os.path.join(raw, "env.json"), "w"))
+    json.dump({k: base[k] for k in ("issue", "bench_py_sha256", "diag_script_sha256", "torch_version")},
+              open(os.path.join(raw, "env.json"), "w"))
     for s, items in SECTION_ITEMS.items():
         with open(os.path.join(raw, f"measure_{s}.jsonl"), "w") as f:
             for k, it in enumerate(items):
@@ -468,6 +480,22 @@ def self_test():
                 pass
             else:
                 raise AssertionError(f"{why} not rejected")
+        # profile／env の版・ハッシュ不一致は例外（RULE §7）
+        for tag, fname in (("prof", "profile_train.json"), ("env", "env.json")):
+            d5 = os.path.join(root, "prov_" + tag)
+            os.makedirs(d5)
+            for i in (1, 2, 3):
+                _synth_round(d5, i, rule)
+            fp = os.path.join(d5, "round2", "raw", fname)
+            obj = json.load(open(fp))
+            obj["diag_script_sha256"] = "f" * 64
+            json.dump(obj, open(fp, "w"))
+            try:
+                run_dir(d5, rp, os.path.join(d5, "a.md"), os.path.join(d5, "a.tsv"))
+            except AggError:
+                pass
+            else:
+                raise AssertionError(f"{fname} hash mismatch not rejected")
         # PASS 0 本は例外
         d4 = os.path.join(root, "none")
         os.makedirs(d4)

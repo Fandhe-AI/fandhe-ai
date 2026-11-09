@@ -22,14 +22,15 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
 
 4. 区間の定義（単位 s。窓は bench_py.py と同じ区間）
   train 窓: 1 step（forward・autograd.grad・SGD 更新・loss.item()）。infer 窓: forward_to_host ＋ checksum。gemm256 窓: matmul_to_host ＋ checksum。
-  純カーネル: torch.mm を 10 回まとめて計った 1 回あたり（batch10。dispatch を償却）。train は l1_fwd・l2_fwd・l2_dw・l2_dx・l1_dw の 5 形状
+  純カーネル相当: torch.mm(out=) を 10 回まとめて計った 1 回あたり（batch10。出力は 1 つを再利用し Accelerate 直呼びと条件を揃える。
+  Python→ATen の dispatch 費用は含む＝「dispatch 込みの torch.mm 時間」であり、純カーネル時間そのものではない。確保は含まない）。train は l1_fwd・l2_fwd・l2_dw・l2_dx・l1_dw の 5 形状
   （l1_dx は PyTorch が計算しないため含めない）、infer は l1_fwd・l2_fwd。
   非 GEMM: ew_fwd（bias 加算・relu・MSE を実データで個別計測）・update（SGD 4 パラメータ）・loss_item・readout・checksum。
   dispatch 床: 計算量ゼロの op（1 要素 add・1×1 mm）の中央値。
 
 5. 導出式（判定ではなく内訳。run ごとに計算し run 間の中央値と最小〜最大を出す）
-  residual（推定）= 窓 − (gemm_kernel_batch10 ＋ ew_fwd ＋ update ＋ loss_item)（infer は ＋ readout ＋ checksum）。
-      autograd エンジン・Python 解釈・メモリ確保・backward の要素演算が混ざる。実測ではないので「推定」と明記する。
+  residual（推定）= 窓 − (gemm_kernel_batch10（dispatch 込み） ＋ ew_fwd ＋ update ＋ loss_item)（infer は ＋ readout ＋ checksum）。
+      autograd エンジン・Python 解釈・メモリ確保・backward の要素演算が混ざる。gemm_kernel_batch10 に dispatch が含まれる分、residual は真の残差より小さく出る（下限側）。実測ではないので「推定」と明記する。
   fwd_nongemm（推定）= fwd − Σ gemm_batch10(forward)、bwd_nongemm（推定）= grad − Σ gemm_batch10(backward)。
   dispatch_floor_est（推定）= profile 腕の step あたり最上位 aten op 数 × dispatch_floor_add。区間に含まれる分と重複するため和に入れない。
   torch_wrapper_cost（実測の差）= mm_pure_batch10 − Accelerate cblas_sgemm 直呼びの batch10（gemm256 と MLP 各形状。直呼びが

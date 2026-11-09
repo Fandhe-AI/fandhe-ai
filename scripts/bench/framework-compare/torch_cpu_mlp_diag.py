@@ -356,6 +356,20 @@ def build_infer(bp, torch, np):
             "checksum": lambda: bp.checksum(host), "ew_fwd": ew}
 
 
+def batch10_out(torch, a, b):
+    """torch.mm(a, b, out=o) を 10 回呼ぶ関数。出力は 1 つを再利用する（Accelerate 直呼びと同じ条件。10 個保持しない）。
+
+    この値は dispatch（Python→ATen の呼び出し費用）を含み、出力確保は含まない。純カーネル時間そのものではなく
+    「dispatch 込みの torch.mm 時間 / 回」であり、RULE §4・§5 でもそう扱う（過小評価でなく下限側の内訳として読む）。
+    """
+    o = torch.empty(a.shape[0], b.shape[1], dtype=a.dtype)
+
+    def run():
+        for _ in range(10):
+            torch.mm(a, b, out=o)
+    return run
+
+
 def build_gemm(bp, torch, np):
     n = GEMM_N
     a_np = np.ascontiguousarray(bp.fill_vec(bp.SEED_A, n * n).reshape(n, n))
@@ -364,7 +378,7 @@ def build_gemm(bp, torch, np):
     mm = lambda: torch.mm(a, b)
     c0 = mm()
     host = c0.cpu().numpy()
-    return {"a_np": a_np, "b_np": b_np, "ref": host, "mm": mm,
+    return {"a_np": a_np, "b_np": b_np, "ref": host, "mm": mm, "mm_batch10": batch10_out(torch, a, b),
             "window": lambda: bp.checksum((a @ b).cpu().numpy()),
             "readout": lambda: c0.cpu().numpy(), "checksum": lambda: bp.checksum(host)}
 
@@ -403,7 +417,7 @@ def cmd_measure(args):
         c = build_gemm(bp, torch, np)
         add("window", sample(c["window"], W, I))
         add("mm_pure", sample(c["mm"], W, I))
-        add("mm_pure_batch10", per_call(sample(lambda: [c["mm"]() for _ in range(10)], W, I), 10))
+        add("mm_pure_batch10", per_call(sample(c["mm_batch10"], W, I), 10))
         add("readout", sample(c["readout"], W, I))
         add("checksum", sample(c["checksum"], W, I))
         fn = load_accelerate()
@@ -422,7 +436,7 @@ def cmd_measure(args):
             mm = lambda: torch.mm(a, b)
             ref = mm().numpy()
             add(f"mm_pure_{sid}", sample(mm, W, I))
-            add(f"mm_batch10_{sid}", per_call(sample(lambda: [mm() for _ in range(10)], W, I), 10))
+            add(f"mm_batch10_{sid}", per_call(sample(batch10_out(torch, a, b), W, I), 10))
             if fn is None:
                 add(f"accel_batch10_{sid}", None, reason="Accelerate／cblas_sgemm をロードできない")
             else:
@@ -433,8 +447,10 @@ def cmd_measure(args):
                     add(f"accel_batch10_{sid}", st)
     else:
         raise SystemExit(f"不明な section: {sec}")
-    if sec in ("train", "infer", "gemm256"):
+    # dispatch_floor_add は SECTION_ITEMS（train／infer）にだけ定義がある。gemm256 に足すと validate_row が落ちる。
+    if sec in ("train", "infer"):
         add("dispatch_floor_add", fl["dispatch_floor_add"], tag="実測", warmup=20, iters=20)
+    if sec in ("train", "infer", "gemm256"):
         add("dispatch_floor_mm", fl["dispatch_floor_mm"], tag="実測", warmup=20, iters=20)
     got = {r["item"] for r in rows}
     if got != set(SECTION_ITEMS[sec]):
