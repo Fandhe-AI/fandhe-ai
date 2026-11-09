@@ -60,7 +60,7 @@ SME OFF（0.14.0 の本番構成）と ON の両方で、N=256 の 1 回の呼�
 | n_calls | マイクロカーネルの呼び出し回数（ir×jr のタイル数）。集計が手計算の下限と突き合わせる |
 
 導出量（`aggregate_4151.py` が計算）: `kernel_ideal = Σkernel ÷ P_used`・`kernel_crit = max_worker Σkernel`・
-`imbalance`・`F_drv = G − kernel_ideal`・`perturbation`。診断式 F1・F2・F1_drv と判定規則は `RULE.template.txt` 項 6。
+`imbalance`・`F_drv = G − kernel_ideal`・`perturbation`。`kernel_ideal`・`imbalance`・区間和の整合性検査用の値は、P_used が呼び出しごとに変わりうるため診断パッチが region ごとに計算してから中央値に集約する（中央値同士の比は使わない）。診断式 F1・F2・F1_drv と判定規則は `RULE.template.txt` 項 6。
 
 SME の `smstart`／`smstop` は、マイクロカーネルが 1 つの `asm!` の中で対にしているため、新しい `asm!`
 を足さずに単独では計れない（`docs/perf/cpu-sme-thread-scaling-macmini.md` §7）。既存の `#[ignore]` 診断

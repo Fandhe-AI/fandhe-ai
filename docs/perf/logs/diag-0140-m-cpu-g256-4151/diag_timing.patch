@@ -22,7 +22,7 @@ diff --git a/crates/backend-cpu/src/gemm_blis/diag_fixed_cost_timer.rs b/crates/
 new file mode 100644
 --- /dev/null
 +++ b/crates/backend-cpu/src/gemm_blis/diag_fixed_cost_timer.rs
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,286 @@
 +//! イシュー #4151 診断専用: 2D 動的分配の GEMM 1 回を、固定費の区間（pre・fork_wake・stage・alloc・pack・
 +//! kernel・join）に分けて積算する。
 +//!
@@ -86,6 +86,10 @@ new file mode 100644
 +    kernel: u64,
 +    stage_out: u64,
 +    kernel_crit: u64,
++    // region ごとに計算した導出量（P_used が呼び出しごとに変わっても中央値の比にならないよう、割り算は region 内で行う）
++    kernel_ideal: u64,
++    imbalance: u64,
++    parts_ideal: u64,
 +    calls: u64,
 +}
 +
@@ -243,6 +247,10 @@ new file mode 100644
 +        r.stage_out += j.acc.stage_out;
 +        r.calls += j.acc.calls;
 +    }
++    let p = r.p_used.max(1);
++    r.kernel_ideal = r.kernel / p;
++    r.imbalance = r.kernel_crit.saturating_sub(r.kernel_ideal);
++    r.parts_ideal = (r.stage_in + r.alloc + r.pack_b + r.pack_a + r.kernel + r.stage_out) / p;
 +    if let Ok(mut g) = REGIONS.lock() {
 +        g.push(r);
 +    }
@@ -273,7 +281,8 @@ new file mode 100644
 +        " d_regions={} d_mr={} d_nr={} d_jobs={} d_p_used={} d_n_calls={} d_call_ns={} d_pre_ns={} \
 +d_grid_ns={} d_split_ns={} d_fork_wake_min_ns={} d_fork_wake_max_ns={} d_stage_in_ns={} \
 +d_alloc_ns={} d_pack_b_ns={} d_pack_a_ns={} d_kernel_ns={} d_stage_out_ns={} \
-+d_kernel_crit_ns={} d_join_ns={} d_region_wall_ns={}",
++d_kernel_crit_ns={} d_join_ns={} d_region_wall_ns={} d_kernel_ideal_ns={} d_imbalance_ns={} \
++d_parts_ideal_ns={}",
 +        regions.len(),
 +        TILE_MR.load(Ordering::Relaxed),
 +        TILE_NR.load(Ordering::Relaxed),
@@ -295,6 +304,9 @@ new file mode 100644
 +        m(|r| r.kernel_crit),
 +        m(|r| r.join),
 +        m(|r| r.wall),
++        m(|r| r.kernel_ideal),
++        m(|r| r.imbalance),
++        m(|r| r.parts_ideal),
 +    )
 +}
 diff --git a/crates/backend-cpu/src/gemm_blis/mod.rs b/crates/backend-cpu/src/gemm_blis/mod.rs

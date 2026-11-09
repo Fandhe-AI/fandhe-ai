@@ -43,7 +43,8 @@ OPTIONAL_QUANTITIES = ["c_sme_kc0_ns", "c_sme_intercept_ns"]
 QUANTITIES = REQUIRED_QUANTITIES + OPTIONAL_QUANTITIES
 D_KEYS = ["d_regions", "d_mr", "d_nr", "d_jobs", "d_p_used", "d_n_calls", "d_call_ns", "d_pre_ns", "d_grid_ns",
           "d_split_ns", "d_fork_wake_min_ns", "d_fork_wake_max_ns", "d_stage_in_ns", "d_alloc_ns", "d_pack_b_ns",
-          "d_pack_a_ns", "d_kernel_ns", "d_stage_out_ns", "d_kernel_crit_ns", "d_join_ns", "d_region_wall_ns"]
+          "d_pack_a_ns", "d_kernel_ns", "d_stage_out_ns", "d_kernel_crit_ns", "d_join_ns", "d_region_wall_ns",
+          "d_kernel_ideal_ns", "d_imbalance_ns", "d_parts_ideal_ns"]
 ROW_BASE_KEYS = ["arm", "series", "m", "n", "k", "rayon_threads", "calls", "median_ns", "mean_ns", "bits_hash"]
 ENV_KEYS = ["arm", "rayon_threads", "sme_os_flag", "sme_svl_bytes", "sme_kernel_enabled", "thread_limit_effective",
             "thread_limit_env_override", "small_shape_cap_eligible", "timer_tick_ns", "timer_pair_ns", "gap_us"]
@@ -217,8 +218,9 @@ def parse_example(text, arm, rule, where):
         raise AggError(f"{where}: arm label {env['arm']!r} != {arm!r}")
     if int(env["gap_us"]) != rule["gap_us"]:
         raise AggError(f"{where}: gap_us differs from RULE")
-    if arm.startswith("on-") and env["sme_kernel_enabled"] != "true":
-        raise AggError(f"{where}: SME ON arm requires sme_kernel_enabled=true")
+    want_sme = "true" if arm.startswith("on-") else "false"
+    if env["sme_kernel_enabled"] != want_sme:
+        raise AggError(f"{where}: arm {arm} requires sme_kernel_enabled={want_sme}（ON/OFF ビルドの取り違え防止）")
     if env["thread_limit_env_override"] != "false":
         raise AggError(f"{where}: RAYON_NUM_THREADS must not be set")
     if sorted(rows) != sorted(SERIES):
@@ -260,11 +262,10 @@ def check_timed(d, calls, rule, where):
     lo = math.ceil(rule["dim"] / d["d_mr"]) * math.ceil(rule["dim"] / d["d_nr"]) * math.ceil(rule["dim"] / rule["kc"])
     if d["d_n_calls"] < lo:
         raise AggError(f"{where}: d_n_calls {d['d_n_calls']} below hand-computed lower bound {lo}")
-    parts = (d["d_stage_in_ns"] + d["d_alloc_ns"] + d["d_pack_b_ns"] + d["d_pack_a_ns"] + d["d_kernel_ns"]
-             + d["d_stage_out_ns"])
-    if parts / p > d["d_region_wall_ns"] * (1 + rule["sum_tol"]):
+    # region ごとに計算済みの値（patch 側で region 内割り算→中央値）を使う。中央値同士の比は使わない
+    if d["d_parts_ideal_ns"] > d["d_region_wall_ns"] * (1 + rule["sum_tol"]):
         raise AggError(f"{where}: interval sum exceeds region_wall beyond tolerance")
-    if d["d_kernel_crit_ns"] * (1 + 1e-9) < d["d_kernel_ns"] / p:
+    if d["d_kernel_crit_ns"] * (1 + 1e-9) < d["d_kernel_ideal_ns"]:
         raise AggError(f"{where}: kernel_crit below kernel_ideal")
 
 
@@ -298,11 +299,11 @@ def round_metrics(rule, ex, vals):
     for a, w, wf in (("off", vals["W_off"], vals["Wf_off"]), ("on", vals["W_on"], vals["Wf_on"])):
         g = ms(ex[a + "-base"]["rows"]["hot"]["median"])
         d = ex[a + "-timed"]["rows"]["hot"]["d"]
-        ki = ms(d["d_kernel_ns"] / d["d_p_used"])
+        ki = ms(d["d_kernel_ideal_ns"])
         kc = ms(d["d_kernel_crit_ns"])
         fdrv = g - ki
         out[a] = {
-            "G": g, "kernel_ideal": ki, "kernel_crit": kc, "imbalance": kc - ki, "F_drv": fdrv,
+            "G": g, "kernel_ideal": ki, "kernel_crit": kc, "imbalance": ms(d["d_imbalance_ns"]), "F_drv": fdrv,
             "perturbation": (ex[a + "-timed"]["rows"]["hot"]["median"] - ex[a + "-base"]["rows"]["hot"]["median"])
             / ex[a + "-base"]["rows"]["hot"]["median"],
             "F2": vals["O"] / wf,
@@ -561,7 +562,10 @@ def _example(arm, hot_ns=200000, kernel_total=1_000_000, bits="0x" + "1" * 16, m
                        "d_stage_in_ns": 20000, "d_alloc_ns": 40000, "d_pack_b_ns": 60000, "d_pack_a_ns": 80000,
                        "d_kernel_ns": kernel_total, "d_stage_out_ns": 30000,
                        "d_kernel_crit_ns": kernel_total // 10 + 5000, "d_join_ns": 16000,
-                       "d_region_wall_ns": hot_ns - 5000})
+                       "d_region_wall_ns": hot_ns - 5000,
+                       "d_kernel_ideal_ns": kernel_total // 10,
+                       "d_imbalance_ns": 5000,
+                       "d_parts_ideal_ns": (20000 + 40000 + 60000 + 80000 + kernel_total + 30000) // 10})
         if mutate:
             mutate(arm, s, kv)
         lines.append("ROW4151 " + " ".join(f"{k}={v}" for k, v in kv.items()))
@@ -648,8 +652,8 @@ def self_test():
     _expect(lambda: _run(ex=lambda a: _example(a, mutate=low_calls)), "n_calls", "lower bound")
 
     def big_sum(arm, s, kv):
-        if "d_pack_a_ns" in kv:
-            kv["d_pack_a_ns"] = 10**9
+        if "d_parts_ideal_ns" in kv:
+            kv["d_parts_ideal_ns"] = 10**9
 
     _expect(lambda: _run(ex=lambda a: _example(a, mutate=big_sum)), "sum", "interval sum")
 
@@ -663,6 +667,8 @@ def self_test():
 
     _expect(lambda: _run(ex=lambda a: _example(a).replace("sme_kernel_enabled=true", "sme_kernel_enabled=false")),
             "sme not enabled", "sme_kernel_enabled")
+    _expect(lambda: _run(ex=lambda a: _example(a).replace("sme_kernel_enabled=false", "sme_kernel_enabled=true")),
+            "off arm built with sme", "sme_kernel_enabled")
     with tempfile.TemporaryDirectory() as d:
         _build(d)
         os.rename(os.path.join(d, "round2"), os.path.join(d, "round9"))
