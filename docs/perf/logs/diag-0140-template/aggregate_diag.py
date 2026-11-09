@@ -269,7 +269,9 @@ def classify(cell, ms, thr, formal):
         cls, used, why = CLASS_WINDOW, [f2], "F2 が届く（fresh 窓で相手に届く）"
     elif f1 is not None and med(f1) >= thr:
         cls = CLASS_HW if cell["kernel_owner"] == "hardware" else CLASS_OWN
-        used, why = [f1], "F1 が届く（相手の純カーネルに置換すると届く）"
+        # 優先される F2 が「届かない」と全 run 安定して言えなければ確度に反映する（RULE §5・NB-RANGE5）
+        used = [f1] + ([f2] if f2 is not None else [])
+        why = "F1 が届く（相手の純カーネルに置換すると届く）"
     else:
         cls = CLASS_HOLD
         used = [v for v in (f2, f1) if v is not None]
@@ -289,7 +291,7 @@ def fnum(x):
 def aggregate(dirp, rule_name="RULE.txt"):
     rule = parse_rule(read(os.path.join(dirp, rule_name)))
     thr, n = rule["thr"], rule["rounds"]
-    gates, vals = [], []
+    gates, vals, rnos = [], [], []
     for i in range(1, n + 1):
         rd = os.path.join(dirp, f"round{i}")
         if not os.path.isdir(rd):
@@ -297,6 +299,7 @@ def aggregate(dirp, rule_name="RULE.txt"):
         g = parse_gate(os.path.join(rd, "gate.txt"))
         gates.append(g)
         if g == "PASS":
+            rnos.append(i)  # 元のラウンド番号（部分通過でも round{i}/ と表の run を対応させる）
             vals.append(parse_values(read(os.path.join(rd, "values.tsv")), rule["cells"], f"round{i}/values.tsv"))
     if not vals:
         raise AggError("no PASS round")
@@ -312,7 +315,7 @@ def aggregate(dirp, rule_name="RULE.txt"):
         cls, why, high, f1, f2 = classify(c, ms, thr, formal)
         md += [f"## {c['id']}（{c['machine']}・相手 {c['opp']}・kernel_owner={c['kernel_owner']}）", "",
                "| run | F1 | F2 | 観測比 |", "|---|---|---|---|"]
-        for i, m in enumerate(ms, 1):
+        for i, m in zip(rnos, ms):
             md.append(f"| {i} | {fnum(m['F1'])} | {fnum(m['F2'])} | {fnum(m['obs'])} |")
         mf1 = statistics.median(f1) if f1 else None
         mf2 = statistics.median(f2) if f2 else None
@@ -490,6 +493,13 @@ def self_test():
     md3, t3 = _run(c1, pr, ["PASS", "PASS", "TIMEOUT", "PASS", "PASS"])
     assert "status: partial" in md3 and "（参考）" in md3
     assert t3.splitlines()[1].split("\t")[4] == "低" and "部分通過" in t3
+    # 部分通過でも表の run は元のラウンド番号（round3 が TIMEOUT なら 1,2,4,5）
+    assert [l.split("|")[1].strip() for l in md3.splitlines() if l.startswith("| ") and l.split("|")[1].strip().isdigit()] == ["1", "2", "4", "5"], md3
+    # F1 で分類しても F2 が閾値をまたぐなら確度低（F2 = .98 .99 .99 1.01 1.02、F1 は全 run 1.1）
+    c5 = [_cell_line("X-TST-G1", forms="F1,F2", sr=1.0)]
+    pr = [_rows("X-TST-G1", fw=100, fresh=100, ow=o, fk=50, ok=40 + (o - 100)) for o in (98, 99, 99, 101, 102)]
+    r = _run(c5, pr, ["PASS"] * 5)[1].splitlines()[1].split("\t")
+    assert r[3] == CLASS_HW and r[4] == "低", r
 
     # 拒否ケース
     c2 = [_cell_line("X-TST-A1", forms="F1,F2", sr=0.84)]
