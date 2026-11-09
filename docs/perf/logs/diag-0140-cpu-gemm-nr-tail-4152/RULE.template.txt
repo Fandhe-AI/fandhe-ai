@@ -1,0 +1,75 @@
+RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
+（計測前に単独コミットして固定する。計測後に緩めない。派生元: docs/perf/logs/diag-0140-torch-cpu-mlp-macmini-4148/RULE.template.txt・#4144）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_4152.py は止まる。PARAMS のうち <…> にするのは SHA・日時・ハッシュだけで、閾値は数値を直接書いてあり固定後に変えない）
+
+1. 目的
+  #4152: <metal-node>（Apple M4・単スレッド）の GEMM で、L2 の細い形状（n=10）が 29〜40 GFLOPS しか出ない
+  （正方 512 は 117.5。MM-177 `docs/perf/cpu-gemm-m64-jobgrid-diagnosis.md` §3）原因が、NR=12 のタイルの端数
+  （n=10 は 12 レーンのうち 2 レーンがゼロ詰め）の無駄かどうかを判定する。対象の MLP は 784→256→10・batch 64。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・unreached_0140.tsv（分類の反映は #4168）。
+  事前の予想（判定には使わない）: 端数が無駄にする分は kernel 時間の 2/12 が上限で、窓全体では 6〜7% 程度。3〜4 倍の差は端数だけでは説明できない見込み。
+
+2. 対象 tree
+  【記入: タグまたは SHA】の git archive。PARAMS の tree_sha に完全な SHA を書く（example は本 PR-1 で初めて入るため、PR-1 マージ後の main SHA）。
+  tree_fingerprint は `python3 -I aggregate_4152.py --fingerprint <tree-dir>` の値（diag-0140-template の aggregate_diag.py と同一ロジック）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。本成果物ディレクトリは指紋の対象外。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（5）。各ラウンドの前に hw-lock を取得し、load1 < 3.0 を 30 秒間隔で最大 30 分待つ。
+  不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・表題は「参考」・確度は書かない）。
+  1 round の順序は run_round.sh のとおり: gate → t1 → native。奇数 round は n を昇順、偶数 round は降順で計る。
+  計測中にビルド・集計・転送を並走させない（ビルドは round の前に済ませる）。run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし旧系列を残す。
+  example は cpu_gemm_nr_tail_4152（crates/backend-cpu/examples）。ソースの sha256 を PARAMS の example_sha256 に固定する。
+
+4. 形状と系列
+  判定対象（t1 系列のみ）: l2_fwd（Nn・m=64・k=256）と l2_dw（Tn・m=256・k=64）の n=10・12・24。NR=12 なので n_hi=12、n_hi+NR=24。
+  record_only: n=8・11・13、l1_fwd（Nn・m=64・k=784）の n=256・264・276（256 mod 12 = 4。#4151 と重なるため判定しない）、
+  ref_square_512（GFLOPS の参照点。g の分母に使う）、native 系列（既定プール。n で job grid の列帯数が変わり交絡するので判定に使わない）。
+  t1 は RAYON_NUM_THREADS=1・MeasurementConfig::default()・bench_harness::run の median_secs（cpu_jobgrid_bench と同じ計時）。
+  isa は Neon、nr は 12 でなければならない（不一致は集計が停止する）。
+
+5. 導出式（round ごと・ファミリごと。t(n) は t1 の median_secs）
+  P = t(24) − t(12)                          （NR 1 列パネル分の限界費用）
+  t_ideal(10) = t(12) − P·(12 − 10)/12       （端数がなかった場合に n=10 にかかるはずの時間）
+  waste = t(10) − t_ideal(10)、w = waste / t(10)
+  r10_12 = t(10) / t(12)                     （参考。1.0 以上なら仕事が少ないのに時間が同じか長い）
+  t_peak(10) = 2·m·10·k / (同 round の ref_square_512 の t1 GFLOPS × 1e9)
+  g = waste / (t(10) − t_peak(10))           （分母が 0 以下なら未定義）
+  分類（5 round の値で。この順に判定）:
+    1. いずれかの round で P ≤ 0 → 判定不能（限界費用 P が 0 以下の round あり）
+    2. 全 round で g が定義され min g ≥ g_main → 主因
+    3. min w ≥ w_small → 寄与あり（min w ≥ w_large なら寄与あり（大））
+    4. max w < w_small → 無視できる
+    5. それ以外（帯が w_small をまたぐ） → 判定不能（揺れの中）
+  健全性: n=10 の t1 GFLOPS 中央値が MM-177 §3 の値（PARAMS）の sanity_lo〜sanity_hi 倍の外なら、環境差の可能性を注記し確度を「低」にする（判定は止めない）。
+  kernel 腕（1 タイル単体の計時）は実施しない（#3614 で区間の分解能不足と判定済み）。
+
+6. ノイズ帯
+  NB-RANGE5（docs/perf/noise-band-decision.md。run 別値の最小〜最大を帯とする）。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+  閾値（w_small・w_large・g_main・sanity_lo・sanity_hi）は RULE 固定後に変えない。変えるときは RULE.v2.txt を別ファイルで置く。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパス・ユーザー名を書かない（<metal-node> と書く）。
+  集計は同梱の aggregate_4152.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  同じ (series, family, n) の bits_hash は全 round で一致しなければならない（不一致は集計が停止する）。異なる n 同士は比べない。
+  計測前に `aggregate_4152.py --check-tree` が計測ツリーの example ソース sha256 と tree_fingerprint を照合する（run_round.sh が毎 round 実行。不一致は計測しない）。
+  本ファイル固定後に aggregate_4152.py または example を変更すると sha256 が不一致になり集計は止まる。
+
+## PARAMS
+fixed-at-utc: <YYYY-MM-DDThh:mm:ssZ>
+issue: 4152
+rounds: 5
+tree_sha: <40 桁 hex>
+tree_fingerprint: <64 桁 hex>
+example_sha256: <64 桁 hex。cpu_gemm_nr_tail_4152.rs>
+aggregate_script_sha256: <64 桁 hex>
+nr_expected: 12
+isa_expected: Neon
+w_small: 0.03
+w_large: 0.10
+g_main: 0.50
+sanity_lo: 0.5
+sanity_hi: 2.0
+mm177_l2_fwd_gflops: 32.5
+mm177_l2_dw_gflops: 28.8
