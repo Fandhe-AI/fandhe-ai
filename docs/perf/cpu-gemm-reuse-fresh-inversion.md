@@ -1116,8 +1116,38 @@ gemm reuse（CPU）は `tape.matmul_resident`、train／infer reuse は常駐チ
 
 ### 18.5 限界・対象外
 
-- Mac mini の非後退は #4159
+- Mac mini の非後退は #4159（§19）
 - 常駐経路への解放・プール機構は別判断。常駐経路 N=256 の reuse／fresh 逆転の原因は未特定（§9）
 - #3226 の train reuse 1.042 の原因は未特定
 - 既定の反転（#3227）は両機体の判定のあとに別途判断する
 - 16〜64 MiB の間の閾値スイープはしていない
+
+## 19. #4159: サイズゲートの Mac mini 非後退 A/B
+
+状態: **部品のみ・未実測**。判定器・run スクリプトの 4159 モードと手順書を入れた。Mac mini の事前登録 A/B はまだ実施していない（`RULE.txt` は計測前に単独コミットで固定する）。
+
+### 19.1 内容
+
+- 腕は §18 と同じ。before = main（`EAGER_MATMUL_RELEASE_DEFAULT_ENABLED=false`）、after = 同一コミットでその 1 行だけ `true`（`logs/cpu-gemm-reuse-release-sizegate-4158/on-arm.patch` を共用）。サイズゲート閾値は両腕で共通
+- セルは 17: 既定経路 12（gemm N=256／512／1024／2048 × fresh／reuse、train／infer × fresh／reuse）＋診断経路 5（gemm reuse N=256〜2048・train reuse）
+- N=4096 は入れない。出力 64 MiB は after でもゲートで解放されず、構造上 before と同じ。本 A/B は Mac mini でゲートそのものを試すものではなく、ゲートの下で解放が残るサイズ（N=2048 の 16 MiB まで）の非後退を確かめる
+- 区分は 2 つ。判定セル = 診断経路の 5（機構が実際に働く）、A/A 参照セル = 既定経路の 12（後退の判定に数えない）
+
+### 19.2 到達性（コード読解で、実測ではない）
+
+§18.2 のとおり既定経路には eager release が届かないため、既定経路の 12 セルは構造上 A/A になる。ここに #3226 の判定形（全セル中央値 <= 1.00）を当てると、ほぼ常に undetermined になり、偽の REJECT も約 30%（1−(31/32)^12）出る。そこで判定を診断経路の 5 セルに限り、A/A 参照セルは 5/5 round 後退が出たときだけ「計測系の系統差か到達性の読解誤り」として undetermined に倒す（REGRESS にはしない）。この区分は自動運転下の設計判断で、所有者の確認は未了。
+
+### 19.3 計測部品
+
+- `run_ab_eager_release_cpu.sh`: `AB_ISSUE=4159`（macmini 限定）で RULE のパスと接頭辞を切り替え、診断経路のセルを足し、precheck で両腕の `size_gate_max_bytes` を assert する。nvidia-smi の専有ゲートは 4158 限定のままで適用しない。`AB_ISSUE` 未指定（3226）と 4158 の動作は変えていない
+- `judge_eager_release_ab.py --rule-set 4159`: macmini 単独。REGRESS（判定セルが 5/5 後退・checksum 不一致）／NONREGRESS（判定セル 5 つの中央値 <= 1.00・A/A 参照に 5/5 後退なし）／それ以外 undetermined。終了コードは 0／1／2。ADOPT は出さない。round 比の最小〜最大を参考列に出す（NB-RANGE5。案・所有者承認待ちのため判定には使わない）
+- `logs/cpu-gemm-reuse-release-sizegate-macmini-4159/session-scripts/session-4159-macmini.sh`: 実機ロック付きのセッション
+
+### 19.4 結果
+
+未実測。記録は `logs/cpu-gemm-reuse-release-sizegate-macmini-4159/` に置く予定（実測後に本節を更新する）。事前の仮説: #3226 の Mac mini で gemm reuse N=256 は 1.067（round 別 0.996〜1.128）だったため、N=256 は undetermined か REGRESS になりうる。
+
+### 19.5 限界・対象外
+
+- GB10 の判定は #4158（本節と合わせて #3227 が既定の反転を判断する）
+- N=4096 の Mac mini セル・16〜64 MiB の閾値スイープ・常駐経路への解放／プール機構は対象外

@@ -28,6 +28,14 @@ ratio = after / before。セルごとの before・after は各ちょうど 5 件
 # ガード = それ以外の 16 セル（診断経路の N=4096 と train reuse を含む）。ADOPT／REJECT の形は
 # 3226 と同一（0.95・5/5・中央値 <= 1.00）で緩めない。GB10 単独で判定する（--require-both 不要）。
 # 負荷ゲートログは round ごとに `compute_procs=0` も要求する（GB10 専有の証跡）。
+# `--rule-set 4159`（イシュー #4159・`docs/perf/logs/cpu-gemm-reuse-release-sizegate-macmini-4159/RULE.txt`）:
+# 同じサイズゲートの Mac mini 非後退判定（macmini 単独）。判定セル = 診断経路の 5 セル（gemm reuse
+# N=256/512/1024/2048 と train reuse。機構が実際に働く）、A/A 参照セル = 既定経路の 12 セル（常駐経路に
+# eager release は届かず構造上 A/A。後退の判定には数えない）。N=4096 は構造上 A/A のため含めない。
+#   REGRESS      : 判定セルのどれかが 5/5 round で ratio > 1.00、または checksum 不一致（17 セル）
+#   NONREGRESS   : 判定セル 5 つすべての中央値 ratio <= 1.00 かつ A/A 参照セルに 5/5 後退がなく checksum 全一致
+#   undetermined : 上記以外。A/A 参照セルの 5/5 後退は計測系の系統差の疑い（REGRESS にせず undetermined）
+# ADOPT は出さない（既定の反転は両機体の判定を見て #3227 で判断する）。NB-RANGE5 は参考列で判定に使わない。
 import argparse
 import json
 import math
@@ -41,7 +49,7 @@ PROFILES = {
     "macmini": {"gemm_sizes": [256, 512, 1024, 2048]},
 }
 TREATED_SIZES = (256, 512, 1024, 2048)
-RULE_SETS = ("3226", "4158")
+RULE_SETS = ("3226", "4158", "4159")
 DIAG_TAG = "legacy_tape_reuse"
 # 機体ごとの専有ゲート規則値（RULE.txt の load1 閾値。run_ab_eager_release_cpu.sh の RULE_LOAD_GATE と同値）。
 RULE_LOAD_THRESHOLD = {"gb10": 1.0, "macmini": 3.0}
@@ -66,6 +74,20 @@ def expected_cells_4158():
     """4158 のセル集合。キーは (task, size, mode, diag)。diag は '' か DIAG_TAG。"""
     cells = []
     for s in (256, 512, 1024, 2048, 4096):
+        for m in ("fresh", "reuse"):
+            cells.append(("gemm", s, m, ""))
+        cells.append(("gemm", s, "reuse", DIAG_TAG))
+    for t in ("train", "infer"):
+        for m in ("fresh", "reuse"):
+            cells.append((t, 64, m, ""))
+    cells.append(("train", 64, "reuse", DIAG_TAG))
+    return cells
+
+
+def expected_cells_4159():
+    """4159 のセル集合（17 セル）。キーは (task, size, mode, diag)。N=4096 は含めない。"""
+    cells = []
+    for s in (256, 512, 1024, 2048):
         for m in ("fresh", "reuse"):
             cells.append(("gemm", s, m, ""))
         cells.append(("gemm", s, "reuse", DIAG_TAG))
@@ -167,9 +189,11 @@ def check_gate_log(profile, path, require_excl=False):
 
 
 def analyse(profile, before_paths, after_paths, rule_set="3226"):
+    r4159 = rule_set == "4159"
     r4158 = rule_set == "4158"
-    before, after = load(before_paths, r4158), load(after_paths, r4158)
-    want = set(expected_cells_4158() if r4158 else expected_cells(profile))
+    with_diag = r4158 or r4159
+    before, after = load(before_paths, with_diag), load(after_paths, with_diag)
+    want = set(expected_cells_4159() if r4159 else expected_cells_4158() if r4158 else expected_cells(profile))
     for label, d in (("before", before), ("after", after)):
         if set(d) != want:
             raise Undetermined(
@@ -195,8 +219,11 @@ def analyse(profile, before_paths, after_paths, rule_set="3226"):
             "all_lt1": all(r < 1.0 for r in ratios),
             "all_gt1": all(r > 1.0 for r in ratios),
             "checksum_exact": all(c == sums[0] for c in sums),
-            "treated": profile == "gb10" and k[0] == "gemm" and k[2] == "reuse" and k[1] in TREATED_SIZES
-            and (not r4158 or k[3] == DIAG_TAG),
+            "treated": (not r4159) and profile == "gb10" and k[0] == "gemm" and k[2] == "reuse"
+            and k[1] in TREATED_SIZES and (not r4158 or k[3] == DIAG_TAG),
+            # 4159: 判定セル = 診断経路。それ以外は A/A 参照（後退の判定に数えない）。
+            "judged": r4159 and k[3] == DIAG_TAG,
+            "rmin": min(ratios), "rmax": max(ratios),
         })
     return out
 
@@ -234,7 +261,65 @@ def verdict(rows, machines, record_only=False, single_machine=False):
     return ("ADOPT", reasons) if ok else ("undetermined", reasons)
 
 
-def render(rows, v, reasons):
+def verdict_4159(rows, machines, record_only=False):
+    """4159 の判定（macmini 単独・ADOPT なし）。判定セルと A/A 参照セルの区分は analyse の judged。"""
+    reasons = []
+    regress = False
+    aa_anomaly = False
+    judged_fail = False
+    for r in rows:
+        if not r["checksum_exact"]:
+            regress = True
+            reasons.append(f"{r['machine']} {r['cell']}: checksum 不一致")
+        if r["judged"]:
+            if r["all_gt1"]:
+                regress = True
+                reasons.append(f"{r['machine']} {r['cell']}: 判定セルが全 round 後退")
+            elif r["ratio"] > 1.0:
+                judged_fail = True
+                reasons.append(f"{r['machine']} {r['cell']}: 判定セルの中央値 ratio > 1.00（5/5 ではない）")
+        elif r["all_gt1"]:
+            aa_anomaly = True
+            reasons.append(f"{r['machine']} {r['cell']}: A/A 参照セルが全 round 後退（計測系の系統差か到達性の読解誤り）")
+    if regress:
+        if record_only:
+            return "undetermined", ["参考（record_only のため REGRESS に数えない）: " + x for x in reasons]
+        return "REGRESS", reasons
+    if record_only:
+        reasons.append("record_only のため NONREGRESS 不可")
+        return "undetermined", reasons
+    if "macmini" not in machines:
+        reasons.append("macmini の入力が欠落")
+        return "undetermined", reasons
+    if judged_fail or aa_anomaly:
+        return "undetermined", reasons
+    return "NONREGRESS", reasons
+
+
+def render(rows, v, reasons, rule_set="3226"):
+    r4159 = rule_set == "4159"
+    if r4159:
+        lines = ["| 機体 | task | size | mode | 区分 | before 中央値 s | after 中央値 s | ratio | round 別 ratio | round 比 min〜max（NB-RANGE5・記録のみ） | 後退 |",
+                 "|---|---|---|---|---|---|---|---|---|---|---|"]
+        for r in rows:
+            t, s, m = r["cell"][:3]
+            if r["cell"][3]:
+                t = f"{t}[{r['cell'][3]}]"
+            reg = "5/5 後退" if r["all_gt1"] else ("中央値後退" if r["ratio"] > 1.0 else "-")
+            lines.append(
+                f"| {r['machine']} | {t} | {s} | {m} | {'判定' if r['judged'] else 'A/A 参照'} | "
+                f"{r['before']:.6g} | {r['after']:.6g} | {r['ratio']:.3f} | "
+                f"{' '.join(f'{x:.3f}' for x in r['rounds'])} | {r['rmin']:.3f}〜{r['rmax']:.3f} | {reg} |")
+        lines.append("")
+        sec = {(r["cell"][1], r["cell"][2]): r for r in rows if r["cell"][0] == "gemm" and not r["cell"][3]}
+        for s in (256, 512, 1024, 2048):
+            if (s, "reuse") in sec and (s, "fresh") in sec:
+                f, u = sec[(s, "fresh")], sec[(s, "reuse")]
+                lines.append(f"- 副次（判定外）macmini gemm N={s}: reuse/fresh before={u['before']/f['before']:.3f} "
+                             f"after={u['after']/f['after']:.3f}")
+        lines.append(f"\nverdict: {v}")
+        lines += [f"- {x}" for x in reasons]
+        return "\n".join(lines)
     lines = ["| 機体 | task | size | mode | 区分 | before 中央値 s | after 中央値 s | ratio | round 別 ratio | 後退 |",
              "|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
@@ -268,15 +353,18 @@ def main(argv=None):
         ap.add_argument(f"--{m}-gate-log", default=None)
     ap.add_argument("--record-only", action="store_true")
     ap.add_argument("--rule-set", choices=RULE_SETS, default="3226",
-                    help="3226（既定・両機体）か 4158（GB10 単独・診断経路セルを含む）")
+                    help="3226（既定・両機体）／4158（GB10 単独・診断経路セルを含む）／4159（macmini 単独・診断経路セルを含む）")
     ap.add_argument("--require-both", action="store_true",
                     help="（--combine 相当）片方の機体が欠けたら判定不能")
     a = ap.parse_args(argv)
     rows, machines = [], []
     r4158 = a.rule_set == "4158"
+    r4159 = a.rule_set == "4159"
     try:
         if r4158 and (a.macmini_before is not None or a.macmini_after is not None):
             raise Undetermined("4158 は GB10 単独の判定。macmini 入力は受理しない")
+        if r4159 and (a.gb10_before is not None or a.gb10_after is not None):
+            raise Undetermined("4159 は macmini 単独の判定。gb10 入力は受理しない")
         for m in PROFILES:
             b, af = getattr(a, f"{m}_before"), getattr(a, f"{m}_after")
             if (b is None) != (af is None):
@@ -287,14 +375,17 @@ def main(argv=None):
                 machines.append(m)
         if not machines:
             raise Undetermined("入力なし")
-        v, reasons = verdict(rows, machines, a.record_only, single_machine=r4158)
+        if r4159:
+            v, reasons = verdict_4159(rows, machines, a.record_only)
+        else:
+            v, reasons = verdict(rows, machines, a.record_only, single_machine=r4158)
         if a.require_both and len(machines) < 2:
             v = "undetermined"
     except Undetermined as e:
         print(f"verdict: undetermined\n- {e}")
         return 2
-    print(render(rows, v, reasons))
-    return {"ADOPT": 0, "REJECT": 1}.get(v, 2)
+    print(render(rows, v, reasons, a.rule_set))
+    return {"ADOPT": 0, "REJECT": 1, "NONREGRESS": 0, "REGRESS": 1}.get(v, 2)
 
 
 if __name__ == "__main__":
