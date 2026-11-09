@@ -1043,3 +1043,22 @@ N=5・単一機体。帰無確率は概算。`train 64 fresh` の実差の可能
 - P-RT は ON 腕で `sme_production_disabled_after_gb10_reject`（定数 true では作りの上で必ず落ちる）だけを計測前に固定して除外する。OFF 腕は除外なし。
 - P-BIT は Mac mini でも取る（ON/OFF の bit 同一、すなわち SME と NEON の bit 同一の実証になる）。
 - 6 フレームワークのスコアボードでの 1 位化は Phase 6 で確定する。本 A/B の PyTorch 比は記録のみ。
+
+### 5.18 N=256 の SME スレッド数と分配の事前登録 A/B（イシュー #4162）
+
+Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 12% 足りない。N=256 の SME 経路はグローバルプール（10 スレッド）と `jobs_per_worker=2` で動く。小形状ではワーカー起床・fork-join の固定費と job の粒度が効いている可能性があるため、スレッド数（専用プール）と分配（jpw）を事前登録で測る。
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | **PR-1（道具立て）時点は実測なし**。判定は PR-3 で記録する。`Refs #4162`（部品だけの PR のためイシューは閉じない） |
+| 機構 | `crates/backend-cpu/src/gemm_blis/sme_small_sched.rs`。aarch64 版 `dispatch_two_d_dynamic` の SME 分岐の中だけで、対象帯（SME 適格かつ m,n,k ≤ 256 = 実質 m=n=256）の専用プールのスレッド数と jpw を差し替える。`ENABLED=false`・`THREADS=0`・`JPW=0` が main の既定（OFF）。新しい `unsafe`・`asm!` なし |
+| bit 一致 | スレッド数と jpw は job の大きさと並列度を決めるだけで、各 C 要素は 1 job の中で同じ FMA 連鎖で計算される（2D 設計 §3 条件 6）。Linux の lib テストで専用プール T=4 と jpw ∈ {1,2,4} の出力が既定と bit 完全一致であることを固定した |
+| 腕（7） | base（SME ON）・aa（base と同一バイナリ）・t4・t6・jpw1・jpw4・t4-jpw1。根拠は #3175 の実測（`cpu-sme-thread-scaling-macmini.md` §2・§3: (256,256,128) は T=4 が最大、T=10 は 0.90 倍）。#4151 の区間別内訳は未実測のため腕の選定に使っていない |
+| セル | 判定: gemm 256 fresh／reuse。ガード: gemm 512 fresh／reuse・train size=64 fresh／reuse |
+| 判定 | 候補は判定 2 セルとも 5 round 中央値 ≤ 1.00 かつ 5/5 round で ≤ 1.00、ガードに 5/5 後退なし、checksum・P-BIT 一致で ADOPT 適格。適格のうち幾何平均が最小のものを選ぶ（差 0.005 未満なら変更パラメータの少ない腕、なお並べば jpw だけの腕） |
+| 部品 | `docs/perf/logs/sme-n256-sched-ab-4162/`（`RULE.template.txt`・`on-arm.patch`・`arm-*.patch`・`orchestrate_macmini.sh`・`aggregate.py`・`README.md`） |
+| 結果 | 未実測 |
+| 不変 | 既定 OFF のまま。本番に効くのは #4156 で SME 既定 ON が ADOPT された場合だけ。既定の切り替えは #4165 と所有者承認、SME の unsafe 独立監査は #4157。NB-RANGE5・NB-SEP は #4142 が所有者承認待ちのため記録だけ |
+
+- 限界: 候補 5 つの多重比較。専用プールとグローバルプールの spin の干渉はガードセルが帯の外で検出できない。macOS に pinning の手段がなく T=4 が P コアだけで動く保証はない。
+- GB10 は対象外（SME 非搭載で機構に到達しない）。

@@ -1,0 +1,23 @@
+diff --git a/crates/backend-cpu/src/gemm_blis/sme_small_sched.rs b/crates/backend-cpu/src/gemm_blis/sme_small_sched.rs
+index c0386daec..598fe3d7d 100644
+--- a/crates/backend-cpu/src/gemm_blis/sme_small_sched.rs
++++ b/crates/backend-cpu/src/gemm_blis/sme_small_sched.rs
+@@ -34,15 +34,15 @@ const BAND_MIN: (usize, usize, usize) = (256, 256, 64);
+ 
+ /// 本機構の単一ゲート（既定 OFF。ロールバックは `false` に戻す 1 行）。
+ #[cfg(any(target_arch = "aarch64", test))]
+-pub(super) const SME_SMALL_SCHED_ENABLED: bool = false;
++pub(super) const SME_SMALL_SCHED_ENABLED: bool = true;
+ 
+ /// 専用プールのスレッド数。0 は「今のプールのまま」。
+ #[cfg(any(target_arch = "aarch64", test))]
+-pub(super) const SME_SMALL_SCHED_THREADS: usize = 0;
++pub(super) const SME_SMALL_SCHED_THREADS: usize = 4;
+ 
+ /// 差し替える `jobs_per_worker`。0 は「渡された値のまま」。
+ #[cfg(any(target_arch = "aarch64", test))]
+-pub(super) const SME_SMALL_SCHED_JPW: usize = 0;
++pub(super) const SME_SMALL_SCHED_JPW: usize = 1;
+ 
+ /// 対象帯の上限（m・n・k のすべてがこれ以下）。SME 適格（m≥256・n≥256・k≥64）と合わせて
+ /// 実質 m=n=256・k∈[64,256] になる。
