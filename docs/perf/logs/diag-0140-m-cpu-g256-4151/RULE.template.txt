@@ -11,7 +11,9 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
 2. 対象 tree
   【記入: PR-1 マージ後の main の完全 SHA】の git archive。PARAMS の tree_sha に書く。
   前提ゲート: git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src' の一覧を記録し、
-  crates/backend-cpu/src と crates/facade/src の差が 0 であること。1 件でも差があれば停止する。
+  差が許されるのは、数値・実行経路を変えない診断 API の追加だけ（#4192 の crates/backend-cpu/src/gemm_blis/mod.rs の
+  sme_production_enabled() 追加と crates/backend-cpu/src/lib.rs の再エクスポート）。この 2 ファイル以外に差が 1 件でもあれば停止する。
+  2 ファイルの差分は目視で「診断 API の追加のみ」と確認し、差分全文を記録する（数値・分岐を変える変更が混じれば停止）。
   tree_fingerprint は `python3 -I aggregate_4151.py --fingerprint <tree-dir>` の値
   （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を
   C ロケール順に並べた全体の SHA-256。target/ と .git は除外。シンボリックリンクは対象文字列をハッシュ）。
@@ -25,7 +27,7 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
     off-timed = off-base + diag_timing.patch
     on-timed  = off-base + on-arm.patch + diag_timing.patch
   patch の sha256 は patch_sha256.txt と一致すること。ツリー間で中身が違うファイルが patch の対象ファイルだけであること（P-TREE）。
-  4 腕すべてで example の bits_hash が一致すること（不一致は FAIL で停止）。on 腕は sme_report().kernel_enabled == true（違えば中止）。
+  4 腕すべてで example の bits_hash が一致すること（不一致は FAIL で停止）。on 腕（on-base／on-timed）は sme_production_enabled == true かつ sme_kernel_enabled == true（どちらか違えば集計を拒否・中止）。
   ON ツリーでは cargo test --lib を走らせない（ドリフト検出テストが作りの上で落ちる）。timed ツリーは determinism_inventory が通らない（main へ入れない理由）。
 
 4. 計測手順

@@ -71,8 +71,9 @@ SME の `smstart`／`smstop` は、マイクロカーネルが 1 つの `asm!` �
 
 1. PR-1 マージ後の main の SHA で `RULE.template.txt` を埋める。`tree_sha`・`tree_fingerprint`
    （`python3 -I aggregate_4151.py --fingerprint <tree-dir>`）・`aggregate_script_sha256`・patch の sha256 を入れ、
-   `git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src'` の一覧を記録して `crates/backend-cpu/src`・
-   `crates/facade/src` の差が 0 であることを確かめ、**測る前に単独コミット**（PR-2）。
+   `git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src'` の一覧を記録して、差が
+   `crates/backend-cpu/src/gemm_blis/mod.rs`・`crates/backend-cpu/src/lib.rs` の 2 ファイル（数値・実行経路を変えない診断 API
+   `sme_production_enabled()` の追加と再エクスポート）だけであることを確かめ、**測る前に単独コミット**（PR-2）。
 2. ビルド（ゲートの前に済ませる。計測中に並走させない）: 4 腕のツリーを作り、ツリーごとに別の target dir で
    `env -u CARGO_TARGET_DIR -u RAYON_NUM_THREADS cargo build --release -p fandhe-ai-backend-cpu --example cpu_gemm_n256_fixed_cost_4151`。
    off-base ツリーでは `cargo test --release -p fandhe-ai-backend-cpu --lib --no-run` も済ませる。

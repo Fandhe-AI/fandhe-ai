@@ -221,12 +221,15 @@ def parse_example(text, arm, rule, where):
     if int(env["gap_us"]) != rule["gap_us"]:
         raise AggError(f"{where}: gap_us differs from RULE")
     want_sme = "true" if arm.startswith("on-") else "false"
-    # arm 整合はビルドの本番有効フラグ（SME_PRODUCTION_ENABLED）で検証する。sme_kernel_enabled は
-    # OS／SVL のハード能力で arm と無関係のため記録のみ（#4192 レビュー指摘）
+    # arm 整合はビルドの本番有効フラグ（SME_PRODUCTION_ENABLED）で検証する。ON 腕はさらに
+    # ハード能力 sme_kernel_enabled=true も必須（false だと try_new が None で NEON にフォールバックし、
+    # ON 腕として SME を測っていないため。RULE 項 3 の停止条件と一致させる。#4192 レビュー指摘）
     if env["sme_production_enabled"] != want_sme:
         raise AggError(f"{where}: arm {arm} requires sme_production_enabled={want_sme}（ON/OFF ビルドの取り違え防止）")
     if env["sme_kernel_enabled"] not in ("true", "false"):
         raise AggError(f"{where}: sme_kernel_enabled must be true/false")
+    if arm.startswith("on-") and env["sme_kernel_enabled"] != "true":
+        raise AggError(f"{where}: arm {arm} requires sme_kernel_enabled=true（SME 非対応ホストでは NEON を測ってしまう）")
     if env["thread_limit_env_override"] != "false":
         raise AggError(f"{where}: RAYON_NUM_THREADS must not be set")
     if sorted(rows) != sorted(SERIES):
