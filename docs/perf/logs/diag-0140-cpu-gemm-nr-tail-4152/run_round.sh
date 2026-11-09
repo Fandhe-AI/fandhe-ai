@@ -29,6 +29,10 @@ mkdir -p "${RD}/raw" || exit 2
 [ "$(sysctl -n machdep.cpu.brand_string)" = "Apple M4" ] || { echo "機体が Apple M4 ではない"; exit 1; }
 [ "$(cat "${ROOT}/.rev-stamp")" = "${SHA}" ] || { echo ".rev-stamp が RULE と不一致"; exit 1; }
 [ -x "${BIN}" ] || { echo "example が未ビルド: ${BIN}"; exit 1; }
+# RULE 項7: 計測対象ツリーの example ソース sha256・ツリー指紋・集計スクリプトを RULE の固定値と照合する（不一致は計測しない）
+HERE="$(cd "$(dirname "$0")" && pwd)"
+validate_abs HERE "${HERE}"
+python3 -I "${HERE}/aggregate_4152.py" --check-tree "${ROOT}" --rule "${RD}/../RULE.txt" || { echo "ツリーが RULE と不一致（example_sha256／tree_fingerprint）"; exit 1; }
 
 # ---- ゲート: load1 < 3.0 を 30 秒間隔で最大 30 分（hw-lock は上で宣言確認）
 gate() {

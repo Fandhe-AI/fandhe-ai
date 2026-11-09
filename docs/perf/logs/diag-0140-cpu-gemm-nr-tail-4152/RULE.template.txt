@@ -53,6 +53,7 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパス・ユーザー名を書かない（<metal-node> と書く）。
   集計は同梱の aggregate_4152.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
   同じ (series, family, n) の bits_hash は全 round で一致しなければならない（不一致は集計が停止する）。異なる n 同士は比べない。
+  計測前に `aggregate_4152.py --check-tree` が計測ツリーの example ソース sha256 と tree_fingerprint を照合する（run_round.sh が毎 round 実行。不一致は計測しない）。
   本ファイル固定後に aggregate_4152.py または example を変更すると sha256 が不一致になり集計は止まる。
 
 ## PARAMS

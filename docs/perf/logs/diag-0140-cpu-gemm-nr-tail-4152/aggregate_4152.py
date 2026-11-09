@@ -21,6 +21,7 @@ RULE 固定後の本ファイル改変は aggregate_script_sha256 の不一致�
   python3 -I aggregate_4152.py --self-test
   python3 -I aggregate_4152.py --check-template [RULE.template.txt]
   python3 -I aggregate_4152.py --check-rule <RULE.txt>   # 固定済み RULE の検証（--check-template は雛形専用）
+  python3 -I aggregate_4152.py --check-tree <tree-dir> --rule <RULE.txt>   # example_sha256・tree_fingerprint の照合（計測前必須）
   python3 -I aggregate_4152.py --fingerprint <tree-dir>
 """
 import hashlib
@@ -149,8 +150,11 @@ def parse_rule(path):
     return rule
 
 
-def parse_raw(path, rule):
-    """1 系列の raw を厳格に読み {(family, n): (secs, gflops, hash)} を返す。"""
+def parse_raw(path, rule, series):
+    """1 系列の raw を厳格に読み {(family, n): (secs, gflops, hash)} を返す。
+
+    series は読むファイルの期待系列（t1／native）。全行の series 一致を要求し、t1 は rayon_threads=1 を要求する
+    （native.txt を t1.txt に誤コピーしても受理しない）。"""
     rows = {}
     for ln in read(path).splitlines():
         if not ln.strip():
@@ -168,7 +172,9 @@ def parse_raw(path, rule):
             raise AggError(f"{path}: unexpected shape in line: {ln!r}")
         if int(d["nr"]) != rule["nr"] or d["isa"] != rule["isa"]:
             raise AggError(f"{path}: isa/nr mismatch (got {d['isa']}/{d['nr']}, RULE {rule['isa']}/{rule['nr']})")
-        if d["series"] == "t1" and int(d["threads"]) != 1:
+        if d["series"] != series:
+            raise AggError(f"{path}: series mismatch (line has {d['series']}, file expects {series})")
+        if series == "t1" and int(d["threads"]) != 1:
             raise AggError(f"{path}: t1 series with rayon_threads != 1")
         try:
             secs, gf = float(d["secs"]), float(d["gflops"])
@@ -232,7 +238,7 @@ def load(d, rule):
             raise AggError(f"{rd}/gate.txt: unknown gate word {word!r}")
         gates.append((i, word))
         if word == "PASS":
-            per_round.append((i, {s: parse_raw(os.path.join(rd, "raw", f"{s}.txt"), rule) for s in SERIES}))
+            per_round.append((i, {s: parse_raw(os.path.join(rd, "raw", f"{s}.txt"), rule, s) for s in SERIES}))
     if not per_round:
         raise AggError("no PASS round")
     # 同じキーの bits_hash は round 間・系列間で一致しなければならない（異なる n 同士は比べない）。
@@ -250,12 +256,13 @@ def run_dir(d, rule_path, out_md, out_tsv):
     gates, per_round = load(d, rule)
     partial = len(per_round) != rule["rounds"]
     tsv = ["section\tfamily\tn\tmetric\tvalues_by_round\tmedian\tmin\tmax"]
-    md = [f"# NR={rule['nr']} 端数の診断 集計（#{ISSUE}）", "",
+    md = [f"# NR={rule['nr']} 端数の診断 集計（#{ISSUE}）" + ("（参考）" if partial else ""), "",
           f"- status: {'partial（参考。確度は書かない）' if partial else 'complete'}  gates: "
           + " ".join(f"round{i}={w}" for i, w in gates),
           f"- tree_sha: {rule['kv']['tree_sha']}  isa: {rule['isa']}  nr: {rule['nr']}  系列: t1 が判定、native は record_only", ""]
     md += ["## 判定（t1・n=10 の端数）", "",
-           "| family | w 中央値 [最小〜最大] | g 中央値 [最小〜最大] | r10_12 中央値 [最小〜最大] | P 中央値 [s] | 分類 | 確度 |", "|---|---|---|---|---|---|---|"]
+           "| family | w 中央値 [最小〜最大] | g 中央値 [最小〜最大] | r10_12 中央値 [最小〜最大] | P 中央値 [s] | 分類 |"
+           + ("" if partial else " 確度 |"), "|---|---|---|---|---|---|" + ("" if partial else "---|")]
     notes = []
     for fam in JUDGED:
         vals = [judged_round({**by_s["t1"]}, fam, rule) for _, by_s in per_round]
@@ -280,11 +287,11 @@ def run_dir(d, rule_path, out_md, out_tsv):
         sane = rule["sanity_lo"] <= gmed / ref <= rule["sanity_hi"]
         if not sane:
             notes.append(f"{fam}: n=10 の t1 GFLOPS 中央値 {gmed:.2f} が MM-177 §3 の {ref} の "
-                         f"{rule['sanity_lo']}〜{rule['sanity_hi']} 倍の外（環境差の可能性。確度は低）")
-        conf = "低" if (partial or not sane) else "通常"
+                         f"{rule['sanity_lo']}〜{rule['sanity_hi']} 倍の外（環境差の可能性" + ("" if partial else "。確度は低") + "）")
+        conf = "低" if not sane else "通常"
         md.append(f"| {fam} | " + " | ".join(
             f"{fmt(row[k][0])} [{fmt(row[k][1])}〜{fmt(row[k][2])}]" for k in ("w", "g", "r")) +
-            f" | {fmt(row['p'][0], 9)} | {cls} | {conf} |")
+            f" | {fmt(row['p'][0], 9)} | {cls} |" + ("" if partial else f" {conf} |"))
     md += ["", "判定式と閾値は RULE.txt の PARAMS が正（w_small=%s, w_large=%s, g_main=%s）。" % (
         rule["w_small"], rule["w_large"], rule["g_main"])]
     if partial:
@@ -341,6 +348,25 @@ def fingerprint(tree):
     files.sort(key=lambda t: t[0].encode())
     listing = "".join(f"{h}  {rel}\n" for rel, h in files)
     return hashlib.sha256(listing.encode()).hexdigest(), len(files), listing
+
+
+EXAMPLE_REL = os.path.join("crates", "backend-cpu", "examples", "cpu_gemm_nr_tail_4152.rs")
+
+
+def check_tree(tree, rule_path):
+    """計測対象ツリーが RULE の example_sha256・tree_fingerprint と一致することを検証する（RULE 項7。計測前の必須検査）。"""
+    rule = parse_rule(rule_path)
+    full = os.path.join(os.path.abspath(tree), EXAMPLE_REL)
+    try:
+        with open(full, "rb") as f:
+            got = hashlib.sha256(f.read()).hexdigest()
+    except OSError as e:
+        raise AggError(f"cannot read example source {full}: {e}")
+    if got != rule["kv"]["example_sha256"]:
+        raise AggError(f"example_sha256 mismatch (tree {got}, RULE {rule['kv']['example_sha256']})")
+    fp, _, _ = fingerprint(tree)
+    if fp != rule["kv"]["tree_fingerprint"]:
+        raise AggError(f"tree_fingerprint mismatch (tree {fp}, RULE {rule['kv']['tree_fingerprint']})")
 
 
 def check_template(path):
@@ -462,6 +488,10 @@ def self_test():
     run_err("zero secs", "non-finite or non-positive", mutate=lambda i, s, ls: [ls[0].replace("median_secs=", "median_secs=-", 1)] + ls[1:])
     run_err("t1 threads", "rayon_threads != 1",
             mutate=lambda i, s, ls: [ln.replace("rayon_threads=1", "rayon_threads=4") for ln in ls] if s == "t1" else ls)
+    run_err("native copied as t1", "series mismatch",
+            mutate=lambda i, s, ls: [ln.replace("series=native", "series=t1") for ln in ls] if s == "native" else ls)
+    run_err("series=native in t1.txt", "series mismatch",
+            mutate=lambda i, s, ls: [ln.replace("series=t1", "series=native") for ln in ls] if s == "t1" else ls)
     run_err("missing round", "round directory missing", rounds=4)
     run_err("no PASS", "no PASS round", gate=lambda i: "TIMEOUT")
     run_err("bad rule sha", "aggregate_script_sha256 mismatch", rule_kw={"aggregate_script_sha256": "d" * 64})
@@ -475,7 +505,28 @@ def self_test():
         rp = _write_rule(d)
         _synth(d, rp, gate=lambda i: "TIMEOUT" if i == 2 else "PASS")
         run_dir(d, rp, os.path.join(d, "o.md"), os.path.join(d, "o.tsv"))
-        assert "partial" in read(os.path.join(d, "o.md"))
+        md_ = read(os.path.join(d, "o.md"))
+        assert "partial" in md_ and "（参考）" in md_ and "確度" not in md_.replace("確度は書かない", "")
+    with tempfile.TemporaryDirectory() as d:  # complete は確度欄を出す
+        rp = _write_rule(d)
+        _synth(d, rp)
+        run_dir(d, rp, os.path.join(d, "o.md"), os.path.join(d, "o.tsv"))
+        assert "| 確度 |" in read(os.path.join(d, "o.md"))
+    with tempfile.TemporaryDirectory() as d:  # check-tree: example／指紋の照合
+        tree = os.path.join(d, "tree")
+        os.makedirs(os.path.join(tree, "crates", "backend-cpu", "examples"))
+        ex = os.path.join(tree, EXAMPLE_REL)
+        with open(ex, "w") as f:
+            f.write("fn main(){}\n")
+        fp, _, _ = fingerprint(tree)
+        exh = hashlib.sha256(open(ex, "rb").read()).hexdigest()
+        rp = _write_rule(d, example_sha256=exh, tree_fingerprint=fp)
+        check_tree(tree, rp)
+        rp2 = _write_rule(d, example_sha256="e" * 64, tree_fingerprint=fp)
+        _expect_error("example mismatch", lambda: check_tree(tree, rp2), "example_sha256 mismatch")
+        with open(ex, "w") as f:
+            f.write("fn main(){1;}\n")
+        _expect_error("tree changed", lambda: check_tree(tree, rp), "example_sha256 mismatch")
     # 健全性範囲外の注記（n=10 の GFLOPS が MM-177 の値から外れる）
     with tempfile.TemporaryDirectory() as d:
         rp = _write_rule(d, mm177_l2_fwd_gflops="1000")
@@ -510,6 +561,13 @@ def main(argv):
                 raise AggError("--check-rule needs a RULE.txt path")
             parse_rule(p)
             print("rule OK")
+        elif "--check-tree" in argv:
+            t = opt("--check-tree")
+            r = opt("--rule")
+            if not t or not r:
+                raise AggError("--check-tree <tree-dir> --rule <RULE.txt> が必要")
+            check_tree(t, r)
+            print("tree OK")
         elif "--fingerprint" in argv:
             fp, n, _ = fingerprint(opt("--fingerprint"))
             print(f"{fp}  files={n}")

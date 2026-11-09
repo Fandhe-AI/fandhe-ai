@@ -49,7 +49,7 @@ n を掃引した時間から次の式で判定する（式と閾値の正は `R
 1. （PR-2）PR-1 のマージ後の main SHA の git archive を展開し、`python3 -I aggregate_4152.py --fingerprint <tree-dir>` で
    `tree_fingerprint` を得る。`tree_sha`・`example_sha256`・`aggregate_script_sha256`・`fixed-at-utc` を埋めて
    `python3 -I aggregate_4152.py --check-rule RULE.txt` で確認し、`RULE.txt` を**測る前に単独コミット**する。
-2. （PR-3・<metal-node>）hw-lock を取り、ツリー指紋を RULE と照合する。`cargo build --release -p fandhe-ai-backend-cpu --example cpu_gemm_nr_tail_4152` を済ませ、
+2. （PR-3・<metal-node>）hw-lock を取り、`python3 -I aggregate_4152.py --check-tree <tree-dir> --rule RULE.txt` で example_sha256・tree_fingerprint を RULE と照合する（`run_round.sh` も `<記録先>/RULE.txt` で同じ照合を毎 round 行い、不一致なら計測しない）。`cargo build --release -p fandhe-ai-backend-cpu --example cpu_gemm_nr_tail_4152` を済ませ、
    `ROOT=… EXPECT_SHA=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
 3. 回収時にパス上のユーザー名・ホスト名をマスクする。
 4. `python3 -I aggregate_4152.py --dir <記録先>` で `aggregate.md`・`aggregate.tsv` を生成し、下の結果欄へ判定を転記して `Closes #4152` とする。
