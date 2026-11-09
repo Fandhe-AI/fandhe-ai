@@ -29,7 +29,7 @@ if [ "$#" -eq 1 ]; then
     exit 2
   fi
   echo "dry-run: 以下を実行する（ログは作らない）"
-  echo "  前提: .rev-stamp 必須・OUT の既存ログは上書き禁止"
+  echo "  前提: .rev-stamp・RULE.txt（記入済み）必須・OUT の既存ログは上書き禁止"
   echo "  ビルド: backend-metal テスト（release）・bench-candle"
   echo "  前提ゲート: tile:: 単体・${PREREQ_MOD} 全件・${MOD}::steel_large_n_bit_identity・steel_large_n_prereq_parity"
   echo "  5 run x {trace(${MOD}::steel_large_n_reach_trace), kern(${MOD}::steel_large_n_kernel_gpu)} と candle excl（N=256 512 1024 2048 4096）"
@@ -44,10 +44,16 @@ export CARGO_TARGET_DIR
 FC_TARGET="${CARGO_TARGET_DIR}-fc"
 
 [ -f "${ROOT}/.rev-stamp" ] || { echo ".rev-stamp が無い（腕の同定不能）" >&2; exit 1; }
+# 事前登録規則 RULE.txt（雛形を埋めて単独コミットで固定したもの）が無い・未記入のまま計測しない。
+# aggregate.py は OUT/RULE.txt を要求するため、計測開始前に確認して OUT へコピーする。
+[ -f "${HERE}/RULE.txt" ] || { echo "RULE.txt が無い（RULE.template.txt を埋めて固定してから計測する）" >&2; exit 1; }
+if grep -E '^[[:space:]]*(fixed-at-utc|tree_sha|tree_fingerprint|aggregate_script_sha256)[[:space:]]*[:=].*<[^<>]*>' "${HERE}/RULE.txt" > /dev/null; then
+  echo "RULE.txt に未記入欄（<...>）が残っている" >&2; exit 1
+fi
 mkdir -p "${OUT}" || exit 1
 # 相対指定の OUT は以降の cd で別基準になりログ上書き禁止検査を迂回しうるため、絶対パスへ正規化する。
 OUT=$(cd "${OUT}" && pwd) || exit 1
-for f in prereq_tile.log prereq_steel.log bitident.log parity.log load_gate.log rev-stamp.txt env_info.txt build_tests.log build_candle.log; do
+for f in prereq_tile.log prereq_steel.log bitident.log parity.log load_gate.log RULE.txt rev-stamp.txt env_info.txt build_tests.log build_candle.log; do
   if [ -e "${OUT}/${f}" ]; then
     echo "${f} が既に存在する（差し替え禁止。再実行は別の OUT で行う）" >&2
     exit 1
@@ -61,6 +67,7 @@ for i in 1 2 3 4 5; do
     fi
   done
 done
+cp "${HERE}/RULE.txt" "${OUT}/RULE.txt"
 cp "${ROOT}/.rev-stamp" "${OUT}/rev-stamp.txt"
 {
   echo "host_kind=macmini"

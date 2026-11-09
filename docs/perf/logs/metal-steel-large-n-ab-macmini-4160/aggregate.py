@@ -406,8 +406,12 @@ def overall(statuses, ab, nreg, noop_ok):
 
 
 def aggregate(d, expect_rev=None):
-    check_rule(os.path.join(d, "RULE.txt"))
+    rule = check_rule(os.path.join(d, "RULE.txt"))
     rev = read_text(os.path.join(d, "rev-stamp.txt")).strip()
+    # 事前登録した tree_sha と実測リビジョン（.rev-stamp の 1 行目）が一致しない系列は拒否する（腕の取り違え防止）。
+    rev_first = rev.splitlines()[0].strip() if rev else ""
+    if rule["tree_sha"] != rev_first:
+        fail("RULE.txt の tree_sha と rev-stamp が不一致: %r != %r" % (rule["tree_sha"], rev_first))
     if expect_rev is not None and rev != expect_rev:
         fail("rev-stamp 不一致: %r != %r" % (rev, expect_rev))
     tile_ok, _ = check_test_ok(os.path.join(d, "prereq_tile.log"), "tile 単体")
@@ -572,10 +576,12 @@ def _fixture(d, ratio=0.9, official=True, drop_run=None, nonfinite=False, hash_m
         with open(os.path.join(d, name), "w") as f:
             f.write(text)
 
-    keys = {"fixed-at-utc": "2026-11-09T00:00:00Z", "tree_sha": "a" * 40, "tree_fingerprint": "b" * 64,
+    keys = {"fixed-at-utc": "2026-11-09T00:00:00Z", "tree_sha": "deadbeef", "tree_fingerprint": "b" * 64,
             "aggregate_script_sha256": self_sha256()}
     if rule == "placeholder":
         keys["tree_sha"] = "<git rev-parse HEAD>"
+    if rule == "treemismatch":
+        keys["tree_sha"] = "a" * 40
     if rule == "badsha":
         keys["aggregate_script_sha256"] = "0" * 64
     if rule != "none":
@@ -695,6 +701,7 @@ def self_test():
     rejects("RULE.txt の記入欄が未記入", rule="placeholder")
     rejects("RULE.txt の集計器 sha256 不一致", rule="badsha")
     rejects("RULE.txt が無い", rule="none")
+    rejects("RULE.txt の tree_sha と rev-stamp の不一致", rule="treemismatch")
     with tempfile.TemporaryDirectory() as d:
         _fixture(d)
         try:
