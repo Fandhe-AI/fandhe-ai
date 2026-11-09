@@ -40,7 +40,13 @@ fi
 # P-OWNER: RULE.txt §9 に所有者決定が転記されているかを読むだけで検査する（ソースは実行しない）。
 # 値はアンカー付き正規表現で取り出し、列挙値と URL の形式に完全一致しなければ不成立（fail-closed）。
 OWNER_URL_RE='^https://github\.com/Fandhe-AI/fandhe-ai/(issues|pull)/[0-9]+#issuecomment-[0-9]+$'
-owner_field() { sed -n "s/^$1: *\(.*[^ ]\) *\$/\1/p" "$2" | head -n1; }
+# 各キーはちょうど 1 行だけを要求する（重複・欠落は空を返して不成立にする。aggregate.py の read_owner と同じ契約）。
+owner_field() {
+    local n
+    n="$(grep -c "^$1: *" "$2")"
+    if [ "${n}" != "1" ]; then echo "P-OWNER 不成立: $1 が ${n} 件（1 件ちょうどを要求）" >&2; return 0; fi
+    sed -n "s/^$1: *\(.*[^ ]\) *\$/\1/p" "$2"
+}
 check_owner() { # check_owner <RULE.txt> -> 0=成立 1=不成立（理由は stderr）
     local rule=$1 mode nb und murl nurl uurl u rc=0
     mode="$(owner_field GB10-MODE "${rule}")"

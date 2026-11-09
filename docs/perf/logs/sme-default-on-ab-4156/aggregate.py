@@ -32,6 +32,7 @@ KNOWN_TASKS = ("gemm", "train", "infer")
 MACMINI_NONREACH = {"infer"}
 # P-RT で ON 腕から除外するテスト名（計測前に固定。定数 true では作りの上で必ず落ちるドリフト検出）
 RT_SKIP_TEST = "sme_production_disabled_after_gb10_reject"
+EXPECTED_BITDUMP_LINES = 6726847  # RULE §4 P-BIT の期待行数
 GATE_FILE = "crates/backend-cpu/src/gemm_blis/mod.rs"
 # 参考: #3231 の M4 Max bitdump（記録のみ）
 M4MAX_BITDUMP_LINES = 6726847
@@ -340,27 +341,39 @@ def evaluate(base, host):
             gf.append("P-GATE: 外側ゲート（load1 < 1.0・GPU 0%・compute プロセス 0）の通過記録がない")
     # P-BIT（両機体）
     res["bitdump_mismatch"] = False
-    bd = re.search(r"^bitdump exit=(\d+) cmp_exit=(\d+)$", lg or "", re.M)
+    bds = re.findall(r"^bitdump exit=(\d+) cmp_exit=(\d+)$", lg or "", re.M)
     summ = rd(os.path.join(base, "bitdump", "summary.txt"))
-    if not bd:
+    # 比較可能（実行成功・cmp が 0/1・行数が期待どおり）と確認できたときだけ不一致を FAIL にする。
+    # それ以外（実行失敗・cmp エラー・記録欠落/重複/矛盾）は比較不能として undetermined（RULE §4）
+    comparable = False
+    if len(bds) != 1:
         if lg is not None:
-            gf.append("P-BIT: 実行記録がない")
+            gf.append("P-BIT: 実行記録が %d 件（1 件ちょうどを要求）" % len(bds))
     else:
-        res["bitdump_cmp_exit"] = int(bd.group(2))
-        if bd.group(1) != "0":
+        bd = bds[0]
+        res["bitdump_cmp_exit"] = int(bd[1])
+        if bd[0] != "0":
             gf.append("P-BIT: 行数が期待と一致しない・実行失敗（比較不能）")
-        elif bd.group(2) == "1":
-            res["bitdump_mismatch"] = True
-        elif bd.group(2) != "0":
-            gf.append("P-BIT: cmp が実行エラー（exit=%s・比較不能）" % bd.group(2))
+        elif bd[1] not in ("0", "1"):
+            gf.append("P-BIT: cmp が実行エラー（exit=%s・比較不能）" % bd[1])
+        else:
+            comparable = True
     if summ is not None:
         res["bitdump_summary"] = summ.strip()
-        so = re.search(r"^off_sha256=([0-9a-f]{64})$", summ, re.M)
-        sn = re.search(r"^on_sha256=([0-9a-f]{64})$", summ, re.M)
-        if not so or not sn:
+        lines = re.findall(r"^off_lines=(\d+) on_lines=(\d+) expected=(\d+)$", summ, re.M)
+        if len(lines) != 1 or lines[0] != (str(EXPECTED_BITDUMP_LINES),) * 3:
+            gf.append("P-BIT: 行数記録が欠落・重複・不一致（期待 %d 行）" % EXPECTED_BITDUMP_LINES)
+            comparable = False
+        so = re.findall(r"^off_sha256=([0-9a-f]{64})$", summ, re.M)
+        sn = re.findall(r"^on_sha256=([0-9a-f]{64})$", summ, re.M)
+        if len(so) != 1 or len(sn) != 1:
             gf.append("P-BIT: summary の sha256 が読めない")
-        elif so.group(1) != sn.group(1):
-            res["bitdump_mismatch"] = True
+            comparable = False
+        if comparable:
+            if bds[0][1] == "1" or so[0] != sn[0]:
+                res["bitdump_mismatch"] = True
+    elif bds:
+        gf.append("P-BIT: summary.txt がない")
     # PyTorch 相手比（記録のみ。torch median_s / fandhe median_s の round 別比）
     torch, torch_note = load_torch(ab)
     res["torch"] = None
