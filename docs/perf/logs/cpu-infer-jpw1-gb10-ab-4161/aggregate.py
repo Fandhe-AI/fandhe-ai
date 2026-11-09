@@ -184,25 +184,86 @@ def judge(med, cks, gates, prereq, n):
 
 
 def noise_band(per):
-    """NB-RANGE5（記録のみ）: 5 ラウンドの run 別比の (max-min)/median。"""
+    """NB-RANGE5（記録のみ）: noise-band-decision.md §4 の定義どおり、5 ラウンドの run 別比の (最小, 最大) 区間。
+
+    相対レンジ幅 (max-min)/median は別名 NB-WIDTH5 として noise_width で記録する。
+    """
+    if not per:
+        return (float("nan"), float("nan"))
+    return (min(per), max(per))
+
+
+def noise_width(per):
+    """NB-WIDTH5（記録のみ）: 区間の相対幅 (max-min)/median。NB-RANGE5 とは別物。"""
     if not per:
         return float("nan")
     m = statistics.median(per)
     return (max(per) - min(per)) / m if m else float("nan")
 
 
-def render(params, verdict, ratios, checksum_ok, formal, premise, logdir):
+def read_pytorch_infer(logdir, n):
+    """round{i}/raw/pytorch-infer-fresh.jsonl の median_s を返す。欠損・不正は None（記録専用のため止めない）。"""
+    out = {}
+    for i in range(1, n + 1):
+        p = os.path.join(logdir, f"round{i}", "raw", "pytorch-infer-fresh.jsonl")
+        try:
+            with open(p, encoding="utf-8") as f:
+                rows = [json.loads(x) for x in f if x.strip()]
+        except (OSError, ValueError):
+            return None
+        hit = [r for r in rows if isinstance(r, dict) and r.get("task") == "infer"]
+        if len(hit) != 1:
+            return None
+        m = hit[0].get("median_s")
+        if isinstance(m, bool) or not isinstance(m, (int, float)) or not math.isfinite(m) or m <= 0:
+            return None
+        out[i] = float(m)
+    return out
+
+
+def nb_sep(med, pt, n):
+    """NB-SEP（記録のみ・採否判定とは独立）: 推論各セルについて対 PyTorch 比（pytorch/fandhe、>1.0 で fandhe 優位）で、
+    変更後 inf-jpw1 の全 5 比 > 1.0 かつ 変更後の最小 > 変更前 off の最大。同一ラウンドの PyTorch を使う。"""
+    res = {}
+    for cell in INFER_CELLS:
+        if pt is None:
+            res[cell] = None
+            continue
+        try:
+            before = [pt[i] / med[(i, "off") + cell] for i in range(1, n + 1)]
+            after = [pt[i] / med[(i, "inf-jpw1") + cell] for i in range(1, n + 1)]
+        except KeyError:
+            res[cell] = None
+            continue
+        ok = len(after) == 5 and all(r > 1.0 for r in after) and min(after) > max(before)
+        res[cell] = (ok, before, after)
+    return res
+
+
+def render(params, verdict, ratios, checksum_ok, formal, premise, logdir, sep=None):
     lines = ["# #4161 aggregate", "", f"verdict: {verdict}", f"checksum_ok: {checksum_ok}",
              f"formal_series(gate {params['rounds_int']}/{params['rounds_int']}): {formal}",
-             f"premise_ok: {premise}", "", "| cell | median ratio | per-round | wins | NB-RANGE5 |",
-             "|---|---|---|---|---|"]
-    tsv = ["task\tmode\tmedian_ratio\tper_round\twins\tnb_range5"]
+             f"premise_ok: {premise}", "",
+             "| cell | median ratio | per-round | wins | NB-RANGE5 (min~max) | NB-WIDTH5 |",
+             "|---|---|---|---|---|---|"]
+    tsv = ["task\tmode\tmedian_ratio\tper_round\twins\tnb_range5_min\tnb_range5_max\tnb_width5"]
     for cell, (mr, per) in ratios.items():
         wins = sum(1 for r in per if r < 1.0)
-        nb = noise_band(per)
+        lo, hi = noise_band(per)
+        w = noise_width(per)
         pr = ",".join(f"{r:.4f}" for r in per)
-        lines.append(f"| {cell[0]} {cell[1]} | {mr:.4f} | {pr} | {wins}/{len(per)} | {nb:.4f} |")
-        tsv.append(f"{cell[0]}\t{cell[1]}\t{mr:.6f}\t{pr}\t{wins}\t{nb:.6f}")
+        lines.append(f"| {cell[0]} {cell[1]} | {mr:.4f} | {pr} | {wins}/{len(per)} | {lo:.4f}~{hi:.4f} | {w:.4f} |")
+        tsv.append(f"{cell[0]}\t{cell[1]}\t{mr:.6f}\t{pr}\t{wins}\t{lo:.6f}\t{hi:.6f}\t{w:.6f}")
+    lines += ["", "## NB-SEP（記録のみ。採否 verdict とは独立。比 = pytorch/fandhe、>1.0 で fandhe 優位）", ""]
+    for cell in INFER_CELLS:
+        r = (sep or {}).get(cell)
+        if r is None:
+            lines.append(f"- {cell[0]} {cell[1]}: n/a（PyTorch または腕の raw が欠損・不正）")
+            continue
+        ok, before, after = r
+        f4 = lambda v: ",".join(f"{x:.4f}" for x in v)
+        lines.append(f"- {cell[0]} {cell[1]}: NB-SEP={'成立' if ok else '不成立'} / 変更前 [{f4(before)}] "
+                     f"/ 変更後 [{f4(after)}] / 変更後最小 {min(after):.4f} vs 変更前最大 {max(before):.4f}")
     with open(os.path.join(logdir, "aggregate.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     with open(os.path.join(logdir, "aggregate.tsv"), "w", encoding="utf-8") as f:
@@ -218,7 +279,8 @@ def run(logdir):
     params = parse_params(os.path.join(logdir, "RULE.txt"), self_sha())
     med, cks, gates, prereq = aggregate(logdir, params)
     v, ratios, cok, formal, premise = judge(med, cks, gates, prereq, params["rounds_int"])
-    render(params, v, ratios, cok, formal, premise, logdir)
+    sep = nb_sep(med, read_pytorch_infer(logdir, params["rounds_int"]), params["rounds_int"])
+    render(params, v, ratios, cok, formal, premise, logdir, sep)
     print(v)
     return v
 
@@ -303,6 +365,20 @@ def self_test():
             pass
         else:
             raise AssertionError("プレースホルダを拒否しなかった")
+    # NB-RANGE5 は (最小, 最大) の区間、NB-SEP は変更後全 > 1.0 かつ 変更後最小 > 変更前最大
+    assert noise_band([0.9, 1.1, 1.0]) == (0.9, 1.1)
+    assert abs(noise_width([0.9, 1.1, 1.0]) - 0.2) < 1e-9
+    cell = ("infer", "fresh")
+    pt = {i: 2.0 for i in range(1, 6)}
+    med = {}
+    for i in range(1, 6):
+        for c in INFER_CELLS:
+            med[(i, "off") + c] = 1.9 + 0.01 * i
+            med[(i, "inf-jpw1") + c] = 1.5
+    assert nb_sep(med, pt, 5)[cell][0] is True
+    med[(3, "inf-jpw1") + cell] = 1.95  # 変更後最小(2/1.95=1.026) < 変更前最大(2/1.91=1.047)
+    assert nb_sep(med, pt, 5)[cell][0] is False
+    assert nb_sep(med, None, 5)[cell] is None
     print("self-test OK")
 
 
