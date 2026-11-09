@@ -36,7 +36,7 @@ fandhe 側の内訳は #3612 で実測済み（`docs/compat-resident-train-step-
 |---|---|
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_4154.py --check-template` で検査）。項 8 が判定式 |
 | `aggregate_4154.py` | 厳格パースの集計・判定（`--dir`・`--write-values`・`--self-test`・`--check-template`・`--check-rule`）。sha256 を RULE に固定 |
-| `aggregate_diag.py` | 雛形 `diag-0140-template/aggregate_diag.py` の逐語コピー（F1 の分類・`--fingerprint`）。sha256 を RULE の PARAMS に固定 |
+| `aggregate_diag.py` | 雛形 `diag-0140-template/aggregate_diag.py` のコピーに、時計不一致のセルを窓超過で異常終了させず分類保留にする修正（#4190 のレビュー指摘）とその self-test を加えたもの（F1 の分類・`--fingerprint`）。雛形とは一致しない。sha256 を RULE の PARAMS に固定 |
 | `prebuild.sh` | round 1 の前に 1 回: bench-fandhe（release）と backend-metal lib テストバイナリのビルド・パス記録 |
 | `run_round.sh` | 1 round の起動（ゲート → env → 腕。奇数・偶数 round で順序を交互にする） |
 | `scripts/bench/framework-compare/torch_mps_train_diag.py` | PyTorch 側の計測本体（`env`／`measure --arm split\|event\|floor`・`--self-test`）。sha256 を RULE に固定 |

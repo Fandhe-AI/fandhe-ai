@@ -3,7 +3,7 @@
 
 役割: scripts/bench/framework-compare/torch_mps_train_diag.py と fandhe 側ハーネスが書いた raw/ を、RULE.txt の項 8
 （`### DECIDE-4154` ブロック）で測る前に固定した式どおりに集計する。区間は発行 I・待ち S・残差 R（すべて wall）。
-RULE の `## PARAMS` は同梱の aggregate_diag.py（雛形 diag-0140-template の逐語コピー）の形式で、F1（純カーネル置換）の
+RULE の `## PARAMS` は同梱の aggregate_diag.py（雛形 diag-0140-template のコピーに時計不一致時の分類保留の修正を加えたもの）の形式で、F1（純カーネル置換）の
 集計は `--write-values` で作る values.tsv を aggregate_diag.py に渡して行う（時計が揃わなければ分類保留になる）。
 実測値は含まない。
 
