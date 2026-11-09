@@ -53,7 +53,7 @@ validate_abs() { # validate_abs <名前> <値>
 
 if [ "${DRY}" = "1" ]; then
     echo "# dry-run: 実行計画（副作用なし）"
-    echo "0. RULE.txt: プレースホルダ（<未記入>）が残っていないこと、fixed-at-utc が現在より前、各 sha256（patch 6 本・aggregate.py）が実ファイルと一致"
+    echo "0. RULE.txt: プレースホルダ（<未記入>）が残っていないこと、fixed-at-utc が現在より前、各 sha256（patch 6 本・aggregate.py・実行中の本スクリプト自身）が実ファイルと一致"
     echo "1. P-LOCK: mkdir ${LOCK_DIR}（60 秒おきに再試行）。取得・解放時刻を hwlock.log へ"
     echo "2. P-TREE: BASE を ${TREES} の 6 ツリーへ clone。on-arm.patch（全ツリー）と arm-<腕>.patch（候補のみ）を git apply --check のうえ適用。差分ファイルが ${GATE_FILE} と ${SCHED_FILE} の期待どおりか。BASE と tree_sha の間で crates/・scripts/bench/・Cargo.*・rust-toolchain.toml に差分がないか。cargo tree で fandhe-ai が path patch の facade に解決するか"
     echo "3. P-R0: 全ツリーで sme_report().kernel_enabled == true（定数 SME_PRODUCTION_ENABLED == true は P-TREE が確認）"
@@ -62,7 +62,7 @@ if [ "${DRY}" = "1" ]; then
     echo "6. P-BIT: 各ツリーで ${BIT_TEST} を実行（SKIP 出力なら undetermined）"
     echo "7. ビルド（逐次・計測前）: 各ツリーの bench-fandhe を path patch の facade で release ビルド"
     echo "8. A/B: ${ROUNDS} round。round ごとに ${ARMS} の起動順をローテーション。load1 < 3.0（30 秒間隔・最大 30 分）。セルは gemm 256/512 x fresh/reuse と train 64 x fresh/reuse。各 round 後に PyTorch（記録のみ）"
-    echo "9. 収録: gates.txt を作り、マスクして ${REPO_LOG}/macmini へ複製。ホスト名等の grep が 0 件でなければ停止。ロックを解放"
+    echo "9. 収録: gates.txt を作り、マスクして ${REPO_LOG}/macmini へ複製。ホスト名等の grep が 0 件でなければ停止。ロックを解放（解放時刻は複製前に hwlock.log へ記録）"
     exit 0
 fi
 
@@ -103,6 +103,10 @@ check_sha() { # check_sha <ファイル名>
     got="$(sha "${D}/$1" | awk '{print $1}')"
     [ -n "${want}" ] && [ "${want}" = "${got}" ] || { echo "error: $1 の sha256 が RULE 記載と不一致 -> P-TREE 不成立" >&2; return 1; }
 }
+# 実行中のスクリプト自身も RULE 登録値と照合する（実行順・計測条件の事後変更を P-TREE で検出する）
+want_self="$(sed -n 's/^orchestrate_macmini.sh sha256: \([0-9a-f]\{64\}\)$/\1/p' "${RULE}" | head -n1)"
+got_self="$(sha "$0" | awk '{print $1}')"
+[ -n "${want_self}" ] && [ "${want_self}" = "${got_self}" ] || { echo "error: orchestrate_macmini.sh 自身の sha256 が RULE 記載と不一致 -> P-TREE 不成立" >&2; exit 1; }
 for f in on-arm.patch aggregate.py arm-t4.patch arm-t6.patch arm-jpw1.patch arm-jpw4.patch arm-t4-jpw1.patch; do
     check_sha "${f}" || exit 1
 done
@@ -123,7 +127,10 @@ until mkdir "${LOCK_DIR}" 2>/dev/null; do sleep 60; done
 echo "#4162 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${LOCK_DIR}/owner"
 ACQUIRED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "acquired at=${ACQUIRED_AT}" >> "${OUT}/hwlock.log"
-release_lock() {
+LOCK_RELEASED=0
+release_lock() { # 冪等。収録先へ複製する前に呼び、解放時刻を収録物へ残す
+    [ "${LOCK_RELEASED}" = "0" ] || return 0
+    LOCK_RELEASED=1
     echo "released at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/hwlock.log"
     rm -rf "${LOCK_DIR}"
 }
@@ -301,8 +308,9 @@ if grep -rEq "${LEAK_RE}" "${OUT}"; then
     collect_rc=1
 fi
 if [ "${collect_rc}" = "0" ]; then gate P-COLLECT all ok; else gate P-COLLECT all fail; fi
-echo "released-pending at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/hwlock.log"
 gate P-LOCK all ok
+# 解放時刻を OUT/hwlock.log へ追記してから収録先へ複製する（RULE §4 P-LOCK）。EXIT trap は冪等で二重追記しない
+release_lock
 if [ "${collect_rc}" = "0" ]; then
     cp -R "${OUT}" "${FINAL}" || die "収録先への複製に失敗: ${FINAL}"
 fi
