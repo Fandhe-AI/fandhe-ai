@@ -286,6 +286,7 @@ const RAYON_MARKER_FILE_ALLOWLIST: &[&str] = &[
     "gemm_blis/jobgrid_probe.rs",
     "gemm_blis/mod.rs",
     "gemm_blis/partition.rs",
+    "gemm_blis/sme_small_sched.rs",
     "gemm_prefetch_bandwidth_diag_tests.rs",
     "huber.rs",
     "kl_div.rs",
