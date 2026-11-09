@@ -153,7 +153,11 @@ done
 # マスクしてから収録し、残っていれば fail-closed で止める（残った場合は該当ファイルを削除する）。
 HN=$(hostname)
 mask() { # mask <raw> <final>
-  sed -e "s|$HN|<rocm-node>|g" -e "s|$HOME|<home>|g" -e "s|${USER:-__nouser__}|<user>|g" "$1" >"$2"
+  # ユーザー名は識別子文字（英数・_）に挟まれない位置だけ置換する。短い名前（例 rocm）でテスト名 rocm_*・fail_count 等の比較指標を壊さないため。
+  # 連続出現を拾うため同じ式を 2 回適用する。
+  UE=$(printf '%s' "${USER:-__nouser__}" | sed -e 's/[][\\.*^$+?(){}|#]/\\&/g')
+  UX="s#(^|[^A-Za-z0-9_])${UE}([^A-Za-z0-9_]|\$)#\\1<user>\\2#g"
+  sed -E -e "s|$HN|<rocm-node>|g" -e "s|$HOME|<home>|g" -e "$UX" -e "$UX" "$1" >"$2"
   rm -f "$1"
   for s in "$HN" "$HOME"; do
     if [ -n "$s" ] && grep -Fq -- "$s" "$2"; then
