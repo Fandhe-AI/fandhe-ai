@@ -49,7 +49,9 @@ step "run_ab rc=${rc}"
 A=${O}/artifacts
 F=${T}/scripts/bench/framework-compare
 mkdir -p "${A}/raw"
-cp -p "${F}/results/raw/"*"4159-${label}"* "${A}/raw/" 2>>"${LOG}"
+# 部分一致 glob は run スクリプトが同居させる bench-fandhe-* バイナリや同接頭辞の長いラベルまで拾うため、
+# JSONL（results-<arm>-…-<label>-…jsonl）と末尾がラベルで終わる .log／.txt に限る
+cp -p "${F}/results/raw/"results-*"-4159-${label}-"*.jsonl "${F}/results/raw/"*"-4159-${label}".log "${F}/results/raw/"*"-4159-${label}".txt "${A}/raw/" 2>>"${LOG}"
 cp -p "${F}"/compare-*"4159-${label}"* "${F}"/judge-*"4159-${label}"* "${A}/" 2>>"${LOG}"
 step "artifacts collected: $(ls "${A}/raw" 2>/dev/null | wc -l) raw files"
 echo "done. rc=${rc}" >>"${LOG}"
