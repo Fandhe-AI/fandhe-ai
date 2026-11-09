@@ -238,8 +238,14 @@ pub use elementwise::{
 };
 pub use fused_elementwise::run_fused_elementwise;
 pub use gb10_affinity::{Gb10AffinityReport, gb10_affinity_report};
+// イシュー #4161: 推論スコープ内 jpw1 の opt-in（既定 OFF。facade では再公開しない）。
 pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
+};
+#[doc(hidden)]
+pub use gemm_blis::infer_scope::{
+    InferScopeJpw1Report, enter_inference_scope, infer_scope_jpw1_report,
+    override_infer_scope_jpw1_for_scope,
 };
 pub use gemm_blis::{
     gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt,

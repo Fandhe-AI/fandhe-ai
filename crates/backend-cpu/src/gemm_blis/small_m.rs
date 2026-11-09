@@ -18,7 +18,7 @@
 //! bit 完全一致する。設計・採否・A/B の扱いは
 //! `docs/cpu-gemm-small-m-job-merge-prepack-decision.md` を正とする。
 
-use super::{NR_CLAMP, TWO_D_JOBS_PER_WORKER};
+use super::{NR_CLAMP, TWO_D_JOBS_PER_WORKER, infer_scope};
 
 /// job 統合の本番ゲート（既定 OFF。#3201 の A/B 後に #3227 が反転を判断する）。
 pub(super) const SMALL_M_JOB_MERGE_ENABLED: bool = false;
@@ -52,8 +52,22 @@ pub(super) fn select_jobs_per_worker(
 }
 
 /// 本番入口が `dispatch_two_d_dynamic` へ渡す `jobs_per_worker` を決める。
+///
+/// 呼び出し元スレッドで評価すること（推論スコープは thread-local。affinity／cap のプールの
+/// クロージャ内で読むとスコープを見失う。#4161）。
 pub(super) fn jobs_per_worker_for(m: usize, n: usize, k: usize) -> usize {
-    select_jobs_per_worker(SMALL_M_JOB_MERGE_ENABLED, m, n, k, TWO_D_JOBS_PER_WORKER)
+    // G1（job 統合）が有効ならそちらを優先し、従来の挙動を変えない。
+    let merged = select_jobs_per_worker(SMALL_M_JOB_MERGE_ENABLED, m, n, k, TWO_D_JOBS_PER_WORKER);
+    if merged != TWO_D_JOBS_PER_WORKER {
+        return merged;
+    }
+    // 推論スコープ内だけの jpw1（#4161。既定 OFF。A 共有は含めない）。
+    let on = infer_scope::in_inference_scope() && infer_scope::infer_jpw1_effective();
+    let jpw = select_jobs_per_worker(on, m, n, k, TWO_D_JOBS_PER_WORKER);
+    if jpw != TWO_D_JOBS_PER_WORKER {
+        infer_scope::note_applied();
+    }
+    jpw
 }
 
 /// A 共有バッファの上限語数（1 MiB。`align_up(m, mr) * k <= これ` を適格とする。仕事量の境界が
@@ -119,6 +133,43 @@ mod tests {
             assert_eq!(jobs_per_worker_for(m, n, k), TWO_D_JOBS_PER_WORKER);
         }
         assert_eq!(jobs_per_worker_for(512, 512, 512), TWO_D_JOBS_PER_WORKER);
+    }
+
+    #[test]
+    fn infer_scope_jpw1_applies_only_inside_scope_and_when_on() {
+        use super::super::infer_scope::{
+            enter_inference_scope, infer_scope_jpw1_report, override_infer_scope_jpw1_for_scope,
+        };
+        let d = TWO_D_JOBS_PER_WORKER;
+        // スコープ外では override ON でも既定
+        {
+            let _o = override_infer_scope_jpw1_for_scope(true);
+            for &(m, n, k, _) in &SHAPES {
+                assert_eq!(jobs_per_worker_for(m, n, k), d);
+            }
+        }
+        // スコープ内でも override なし（定数 OFF）は既定
+        {
+            let _s = enter_inference_scope();
+            for &(m, n, k, _) in &SHAPES {
+                assert_eq!(jobs_per_worker_for(m, n, k), d);
+            }
+        }
+        // スコープ内 + override ON で適格形状は 1、境界外・m<2・大形状は既定
+        let before = infer_scope_jpw1_report().applied;
+        {
+            let _o = override_infer_scope_jpw1_for_scope(true);
+            let _s = enter_inference_scope();
+            for &(m, n, k, _) in &SHAPES {
+                assert_eq!(jobs_per_worker_for(m, n, k), 1, "{m}x{n}x{k}");
+            }
+            assert_eq!(infer_scope_jpw1_report().applied, before + 6);
+            assert_eq!(jobs_per_worker_for(256, 256, 256), d);
+            assert_eq!(jobs_per_worker_for(512, 512, 512), d);
+            assert_eq!(jobs_per_worker_for(1, 256, 784), d);
+            // 既定のままの形状では applied は増えない
+            assert_eq!(infer_scope_jpw1_report().applied, before + 6);
+        }
     }
 
     #[test]
