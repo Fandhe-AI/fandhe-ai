@@ -357,8 +357,9 @@ def load_ab(abdir):
                       and c == allck[0] for c in allck)
             # parity_fail_count は全記録で int 0 必須。warmup／iters／version は欠損・不正・
             # before／after 間不一致を比較条件の欠落として undetermined にする。
-            if not all(type(x.get("parity_fail_count")) is int and x["parity_fail_count"] == 0
-                       for x in b + a):
+            pf_ok = all(type(x.get("parity_fail_count")) is int and x["parity_fail_count"] == 0
+                        for x in b + a)
+            if not pf_ok:
                 official = False
                 notes.append("N=%d mode=%s: parity_fail_count が 0 でない／欠損" % (n, mode))
             for fld, okf in (("warmup", lambda v: type(v) is int and v >= 0),
@@ -370,6 +371,7 @@ def load_ab(abdir):
                     notes.append("N=%d mode=%s: %s が欠損・不正・不一致" % (n, mode, fld))
             cells[(n, mode)] = {
                 "ratios": ratios, "ratio_med": median(ratios), "checksum_exact": cks,
+                "parity_ok": pf_ok,
                 "over5": sum(1 for r in ratios if r > 1 + BAND),
                 "before_ms": median([x["median_s"] for x in b]) * 1e3,
                 "after_ms": median([x["median_s"] for x in a]) * 1e3,
@@ -391,22 +393,26 @@ def load_ab(abdir):
         pf = [x.get("parity_fail_count") for x in c]
         cc[n] = {"ms": [x["median_s"] * 1e3 for x in c],
                  "valid": all(type(p) is int and p == 0 for p in pf)}
-    return {"status": status, "cells": cells, "candle": cc, "notes": notes, "label": label}
+    return {"status": status, "cells": cells, "candle": cc, "notes": notes, "label": label,
+            "official": official}
 
 
 def scoreboard(ab, n):
     """RULE 項 10。round 別の比 = candle の gemm 窓（fresh）÷ fandhe-ai の reuse 窓（同じ round）。
 
     NB-RANGE5 = 両腕の最小〜最大。NB-SEP = after の 5/5 round で比 > 1.0 かつ after の最小 > before の最大。
-    戻り値: dict（unavailable なら None）。
+    比較の有効性（fandhe-ai 側の parity・checksum 完全一致・正式系列＝load1 ゲート／完了記録）が
+    成立しない系列は比を参考表示しても sep=None（判定不能）とし、NB-SEP 成立と書かない。
+    戻り値: dict（candle 側が unavailable なら None）。
     """
     if not ab["cells"] or not ab["candle"][n]["valid"]:
         return None
     cd = ab["candle"][n]["ms"]
     cell = ab["cells"][(n, "reuse")]
+    valid = bool(ab.get("official")) and cell["parity_ok"] and cell["checksum_exact"]
     rb = [c / y for c, y in zip(cd, cell["before_runs"])]
     ra = [c / y for c, y in zip(cd, cell["after_runs"])]
-    sep = all(r > 1.0 for r in ra) and min(ra) > max(rb)
+    sep = (all(r > 1.0 for r in ra) and min(ra) > max(rb)) if valid else None
     return {"before": rb, "after": ra, "sep": sep,
             "range_before": (min(rb), max(rb)), "range_after": (min(ra), max(ra))}
 
@@ -574,7 +580,8 @@ def aggregate(d, expect_rev=None):
             w("| %d | %s | unavailable | unavailable | 判定不能 |" % (n, tag))
             continue
         w("| %d | %s | %.3f〜%.3f | %.3f〜%.3f | %s |" % (
-            n, tag, *sb["range_before"], *sb["range_after"], "成立" if sb["sep"] else "不成立"))
+            n, tag, *sb["range_before"], *sb["range_after"], "判定不能（fandhe 側 parity／checksum／負荷ゲートのいずれかが不成立）" if sb["sep"] is None
+            else ("成立" if sb["sep"] else "不成立")))
 
     w("\n## candle excl（record_only。5 run 中央値 ms）と達成 TFLOPS\n")
     w("| N | candle excl ms | run 別 | cur kernel_gpu | sl kernel_gpu | sl TFLOPS（実測。推定上限 %.1f〜%.1f に対し推定 %s） |" % (
@@ -734,6 +741,22 @@ def self_test():
     check("セル A/B が無ければ undetermined", T + "undetermined" in run(ab_mode="none"))
     check("セル A/B の 5/5 round 後退は ADOPT にならない", T + "REJECT" in run(ab_mode="regress"))
     check("NB-SEP は before=after のとき不成立", "| 不成立 |" in run())
+    # 無効系列（fandhe 側 parity 不成立・負荷ゲート未通過）では candle 比が 1 超でも NB-SEP を成立と出さない
+    t = run(ab_mode="pfail")
+    rows = [l for l in t.splitlines() if l.startswith("| 1024 | 判定対象 |") or l.startswith("| 2048 | 判定対象 |")]
+    check("無効系列（parity 不成立）の NB-SEP は成立と出ない",
+          len(rows) == 2 and all("| 成立 |" not in l for l in rows)
+          and any("判定不能（fandhe" in l for l in rows))
+    # scoreboard 単体: candle が速く比が条件を満たす系列でも、無効（負荷ゲート未通過・checksum 不一致）なら sep=None
+    def _ab(official, parity_ok, cks):
+        cell = {"parity_ok": parity_ok, "checksum_exact": cks,
+                "before_runs": [2.0] * 5, "after_runs": [1.0] * 5}
+        return {"cells": {(1024, "reuse"): cell}, "official": official,
+                "candle": {1024: {"valid": True, "ms": [3.0] * 5}}}
+    check("有効系列は NB-SEP 成立", scoreboard(_ab(True, True, True), 1024)["sep"] is True)
+    for nm, ab_ in (("負荷ゲート未通過", _ab(False, True, True)), ("parity 不成立", _ab(True, False, True)),
+                    ("checksum 不一致", _ab(True, True, False))):
+        check("無効系列（%s）は sep=None" % nm, scoreboard(ab_, 1024)["sep"] is None)
     rejects("run 数不足", drop_run=4)
     rejects("非有限値", nonfinite=True)
     rejects("hash の run 間不一致", hash_mismatch=True)
