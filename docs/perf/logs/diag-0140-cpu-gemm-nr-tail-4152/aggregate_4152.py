@@ -150,11 +150,12 @@ def parse_rule(path):
     return rule
 
 
-def parse_raw(path, rule, series):
+def parse_raw(path, rule, series, arm):
     """1 系列の raw を厳格に読み {(family, n): (secs, gflops, hash)} を返す。
 
     series は読むファイルの期待系列（t1／native）。全行の series 一致を要求し、t1 は rayon_threads=1 を要求する
-    （native.txt を t1.txt に誤コピーしても受理しない）。"""
+    （native.txt を t1.txt に誤コピーしても受理しない）。arm は期待ラウンド（run_round.sh が記録する r{i}）で、
+    全行の arm 一致を要求する（別ラウンドの raw を誤コピーしても独立 5 回計測として受理しない）。"""
     rows = {}
     for ln in read(path).splitlines():
         if not ln.strip():
@@ -172,6 +173,8 @@ def parse_raw(path, rule, series):
             raise AggError(f"{path}: unexpected shape in line: {ln!r}")
         if int(d["nr"]) != rule["nr"] or d["isa"] != rule["isa"]:
             raise AggError(f"{path}: isa/nr mismatch (got {d['isa']}/{d['nr']}, RULE {rule['isa']}/{rule['nr']})")
+        if d["arm"] != arm:
+            raise AggError(f"{path}: arm mismatch (line has {d['arm']}, round expects {arm})")
         if d["series"] != series:
             raise AggError(f"{path}: series mismatch (line has {d['series']}, file expects {series})")
         if series == "t1" and int(d["threads"]) != 1:
@@ -238,7 +241,7 @@ def load(d, rule):
             raise AggError(f"{rd}/gate.txt: unknown gate word {word!r}")
         gates.append((i, word))
         if word == "PASS":
-            per_round.append((i, {s: parse_raw(os.path.join(rd, "raw", f"{s}.txt"), rule, s) for s in SERIES}))
+            per_round.append((i, {s: parse_raw(os.path.join(rd, "raw", f"{s}.txt"), rule, s, f"r{i}") for s in SERIES}))
     if not per_round:
         raise AggError("no PASS round")
     # 同じキーの bits_hash は round 間・系列間で一致しなければならない（異なる n 同士は比べない）。
@@ -392,9 +395,9 @@ def check_template(path):
 
 
 # ---------------------------------------------------------------- self-test
-def _row(series, fam, n, secs, gf, nr=12, isa="Neon", h="0x0123456789abcdef", threads=1):
+def _row(series, fam, n, secs, gf, nr=12, isa="Neon", h="0x0123456789abcdef", threads=1, arm="t"):
     trans, m, k, _ = FAMILY_SPEC[fam]
-    return (f"arm=t series={series} family={fam} trans={trans} m={m} n={n} k={k} isa={isa} mr=8 nr={nr} "
+    return (f"arm={arm} series={series} family={fam} trans={trans} m={m} n={n} k={k} isa={isa} mr=8 nr={nr} "
             f"rayon_threads={threads} median_secs={secs:.9f} gflops={gf:.3f} bits_hash={h}")
 
 
@@ -419,7 +422,7 @@ def _synth(root, rule_path, rounds=5, t10=lambda r: 10e-6, t12=lambda r: 10e-6, 
                         secs = base
                     gf = 2.0 * m * n * k / secs / 1e9
                     h = "0x%016x" % (hash((fam, n)) & 0xFFFFFFFFFFFFFFFF)
-                    lines.append(_row(s, fam, n, secs, gf, h=h))
+                    lines.append(_row(s, fam, n, secs, gf, h=h, arm=f"r{i}"))
             if mutate:
                 lines = mutate(i, s, lines)
             with open(os.path.join(rd, "raw", f"{s}.txt"), "w") as f:
@@ -492,6 +495,8 @@ def self_test():
             mutate=lambda i, s, ls: [ln.replace("series=native", "series=t1") for ln in ls] if s == "native" else ls)
     run_err("series=native in t1.txt", "series mismatch",
             mutate=lambda i, s, ls: [ln.replace("series=t1", "series=native") for ln in ls] if s == "t1" else ls)
+    run_err("raw copied from another round", "arm mismatch",
+            mutate=lambda i, s, ls: [ln.replace("arm=r2 ", "arm=r1 ") for ln in ls] if i == 2 and s == "t1" else ls)
     run_err("missing round", "round directory missing", rounds=4)
     run_err("no PASS", "no PASS round", gate=lambda i: "TIMEOUT")
     run_err("bad rule sha", "aggregate_script_sha256 mismatch", rule_kw={"aggregate_script_sha256": "d" * 64})
