@@ -1,0 +1,70 @@
+RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
+（計測前に単独コミットして固定する。計測後に緩めない。雛形: docs/perf/logs/diag-0140-template/RULE.template.txt・#4144）
+（【記入】で始まる箇所と PARAMS の <…> をすべて置換する。残っていると aggregate_diag.py は止まる）
+
+1. 目的・対象セル
+  【記入: issue 番号】で、スコアボード 0.14.0 の 1 位でないセルの診断 (3)（相手の構成を再現した場合に届く比）を測る。
+  対象セル: 【記入: セル ID と機体】。現分類は docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/unreached_0140.tsv の値（PARAMS の prev_class に転記）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・unreached_0140.tsv（分類の反映は別途）。
+
+2. 対象 tree
+  【記入: タグまたは SHA】の git archive。PARAMS の tree_sha に完全な SHA を書く。
+  tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値
+  （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を
+  C ロケール順に並べた全体の SHA-256。target/ と .git は除外。シンボリックリンクは対象文字列をハッシュ）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。
+  cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す。
+    Mac mini: hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。
+    GB10: compute プロセス 0 の専有を 30 秒間隔で最大 30 分待つ。
+  ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  ラウンド内の腕の順序: 【記入: 腕と順序】。計測中にビルド・集計・転送を並走させない。
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない。式が計測できないなら RULE を改訂して式を外す）。
+  保存物: round{i}/{gate.txt, values.tsv, raw/}・env/。ハーネス固有の出力から values.tsv への変換は計測する issue が行い、変換手順を README に残す。
+
+4. 診断式（docs/perf/loss-attribution-matrix.md §10.1 から転記。単位は ms）
+  入力量: fandhe_window・fandhe_fresh_window・opp_window・fandhe_pure_kernel・opp_pure_kernel
+  F1 = opp_window ÷ (fandhe_window − fandhe_pure_kernel + opp_pure_kernel)
+       純カーネルの時計タグ（clock 列）を両側で揃える。揃わなければ F1 は比較不能とし、境界を併記する。
+  F2 = opp_window ÷ fandhe_fresh_window
+  観測比 = opp_window ÷ fandhe_window（スコアボードの比との整合確認用）
+  1 以上は「相手の構成を再現すれば届く」を意味する。診断であり目標値ではない。
+
+5. 判定の分類先と規則（優先順位つき。aggregate_diag.py の classify と同一）
+  分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
+  (1) formulas に F2 があり、F2 の run 間中央値が reach_threshold 以上なら「計測窓の定義」。
+  (2) そうでなく F1 があり、時計が揃っていて、F1 の run 間中央値が reach_threshold 以上なら、
+      kernel_owner=hardware は「ハードの上限」、kernel_owner=constraint は「自分たちの制約」。
+      kernel_owner は測る前に宣言する（hardware: 閉源ライブラリ・OS・ハードが決める。
+      constraint: REQ-1・REQ-8・既定精度が決める。matrix §10.5 の定義）。事後に動かさない。
+  (3) それ以外は「分類保留」。理由欄に「どれも届かない（残差は固定費など別区間。別診断へ）」または「F1 の時計不一致」を書く。
+  確度:
+    高: 全ラウンドがゲート PASS（status=formal）かつ、判定に使った式の run 別値がすべて閾値の同じ側
+        （最小 > 閾値、または最大 < 閾値。境界ちょうどはまたぐ扱い）かつ時計が揃っている。
+    低: 上記以外。理由欄の先頭に「確度低」を付ける。
+  ドリフト: 観測比の中央値が PARAMS の scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。
+
+6. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md。run 別比の最小〜最大を帯とし、閾値を含めば確度低）。
+  A/B 用の確定条件 NB-SEP は診断 (3) では使わない（Phase 3 の A/B 用）。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパスを書かない。
+  Mac mini は <metal-node>、GB10 は <cuda-node> と書く。
+  集計は同梱の aggregate_diag.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_diag.py を変更すると aggregate_script_sha256 が不一致になり集計は止まる。
+
+## PARAMS
+fixed-at-utc: <YYYY-MM-DDThh:mm:ssZ>
+issue: <issue 番号>
+rounds: <ラウンド数。既定 5>
+tree_sha: <40 桁 hex>
+tree_fingerprint: <64 桁 hex>
+aggregate_script_sha256: <64 桁 hex>
+reach_threshold: <1.00>
+noise_band: <NB-RANGE5>
+cell: <CELL-ID> | machine=<macmini|gb10> | scoreboard_ratio=<float> | formulas=<F1,F2 の部分集合> | kernel_owner=<hardware|constraint> | opp=<相手名> | prev_class=<現分類>
