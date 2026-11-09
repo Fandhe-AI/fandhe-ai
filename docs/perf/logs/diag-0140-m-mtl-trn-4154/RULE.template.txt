@@ -1,0 +1,94 @@
+RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
+（計測前に単独コミットして固定する。計測後に緩めない。派生元: docs/perf/logs/diag-0140-template/RULE.template.txt・#4144）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS・DECIDE-4154 の <…> をすべて置換する。残っていると aggregate_4154.py は止まる）
+
+1. 目的・対象セル
+  #4154: スコアボード 0.14.0 の M-MTL-TRN（Mac mini・<metal-node>・train Metal・相手 PyTorch MPS。観測比 0.96×）について、
+  相手（PyTorch MPS eager）の 1 step を wall の 3 区間（発行 I・待ち S・残差 R）に分け、fandhe 側（#3612 の B1）と同じ定義で比べる。
+  そのうえで NB-RANGE5 を当て、改善の A/B を立てるかを判定する。現分類は unreached_0140.tsv の「分類保留」（PARAMS の prev_class）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・bench_py.py・相手側ベンチ・unreached_0140.tsv（分類の反映は #4168）。
+  kernel_owner=hardware は測る前の宣言（相手の MPS／Metal の GPU 実行は閉源ライブラリとハードが決める）。事後に動かさない。
+
+2. 対象 tree
+  【記入: タグまたは SHA】の git archive。PARAMS の tree_sha に完全な SHA を書く。
+  tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値（diag-0140-template と同一ロジック）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。本成果物ディレクトリは指紋の対象外。
+  【記入: git diff --stat v0.14.0 <tree_sha> -- crates/backend-metal crates/facade の結果（空であること）】
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（5）。各ラウンドの前に hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。
+  不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・表題は「参考」・確度は低）。
+  ビルドは round 1 の前に prebuild.sh で 1 回だけ行う（bench-fandhe の release と backend-metal の lib テストバイナリ）。計測中はビルド・集計・転送を並走させない。
+  腕（すべて別プロセス。size=64・TF32 なし）:
+    A0 fandhe: bench-fandhe --task train --device metal --size 64 --mode reuse（スコアボードと同じ窓。W_f）
+    B0 fandhe: resident_chain_breakdown_3612_train_b0（本番の同期位置。wait_max=1・command_buffers_max=1 を hard 条件とする）
+    B1 fandhe: resident_chain_breakdown_3612_train_b1（prep・encode・commit_wait・gpu_busy・host_fixed・readout・total）
+    TW torch : bench_py.py --framework pytorch --task train --device metal（無改変。W_t と checksum）
+    TS torch : torch_mps_train_diag.py measure --arm split（I_t = step 本体を出し終えるまでの wall、S_t = その後 torch.mps.synchronize() が返るまでの wall。loss.item() は計時外）
+    TE torch : measure --arm event（torch.mps.Event の GPU span G_t。時計 mps_event。区間の終端は e1.record() 後のデバイス全体の
+               torch.mps.synchronize()〈SGD 更新と e1 を含む〉で、elapsed_time・loss.item() はその後に読む。event_step_wall は t0 から
+               その synchronize が返るまでの wall。Event.synchronize() は使わない。イベントが区切りを変えうるので TS・TW と値を混ぜない）
+    TF torch : measure --arm floor（空の synchronize と 1 要素 add + item の往復。同期の固定費の下限）
+  順序（日内ドリフトの偏りを打ち消すため交互。事前固定）:
+    奇数 round: A0 → B0 → B1 → TW → TS → TE → TF
+    偶数 round: TW → TS → TE → TF → A0 → B0 → B1
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（判定は G_t に依存しない）。TE が unavailable になるのは、学習ステップを含まない
+  プローブで torch.mps.Event が無い・使えない（生成・record・elapsed_time の呼び出しが AttributeError・TypeError・NotImplementedError・RuntimeError、
+  または elapsed_time が非有限・負）と分かった場合だけで、両 item が揃う。
+  本計測中の失敗（学習ステップ・同期・item・elapsed_time の例外、span が非有限か非正）は unavailable に読み替えず TE を失敗させ、その round は失敗する。
+  hard 条件（不成立なら集計が停止）: 機体が Apple M4 と完全一致・.rev-stamp が tree_sha と一致・bench_py.py と診断スクリプトの sha256 一致・
+  torch が 2.14.0 系・B0／B1 の wait_max と command_buffers_max が 1・値がすべて有限で正。
+  記録だけ（確度を下げる）: TW の checksum と TS の最終 loss の一致（REQ-2 統一複合判定と同じ値で比較。MPS の決定性は保証されないため hard にしない）、B1 と B0 の観測負荷。
+
+4. 診断式（単位 µs/step。各腕の中央値。round ごとに計算）
+  fandhe: I_f = prep + encode（B1）、S_f = commit_wait（B1）、R_f = W_f − I_f − S_f
+  torch : I_t、S_t（TS）、R_t = W_t − I_t − S_t
+  観測比 = W_t ÷ W_f、Δ = W_f − W_t、ΔI = I_f − I_t、ΔS = S_f − S_t、ΔR = R_f − R_t（ΔI + ΔS + ΔR = Δ は恒等式）
+  F2（fresh 窓の再現）は使わない: torch も parameter を常駐させて更新しており、fandhe の fresh 窓は相手の構成の再現にならない。formulas は F1 のみ。
+  F1 の純カーネルは fandhe=gpu_busy（時計 gpu_timestamp）・相手=G_t（時計 mps_event）で時計が揃わない。aggregate_diag.py の分類は
+  「分類保留・F1 の時計不一致」になる見込みで、事後に時計を読み替えない（values.tsv は aggregate_4154.py --write-values が作る）。
+  判定の主軸は時計が揃う wall の 3 区間（項 8）。G_t・gpu_busy・F_roundtrip・host_fixed は推定タグ付きで並べるだけ。
+
+5. 判定の分類先と規則
+  項 8 のとおり（aggregate_4154.py の decide と同一）。aggregate_diag.py の出力（aggregate.md／aggregate.tsv）は参考として並べて置く。
+
+6. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md。PASS round の観測比の最小〜最大を帯とする）。NB-SEP は使わない。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパス・ユーザー名を書かない（<metal-node> と書く）。
+  集計は同梱の aggregate_4154.py と aggregate_diag.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後にこれらのスクリプトや torch_mps_train_diag.py を変更すると sha256 が不一致になり集計は止まる。
+  A/B を立てると判定した場合も、追加起票は所有者の承認後に行う（本診断は提案まで）。
+
+8. 判定式（事前登録。PASS の round だけを使う。優先順位つき）
+  1. N（A/B を立てない）: 観測比の帯 [min, max] が 1.0 を含む（境界ちょうどを含む）。
+  2. W（このセッションでは 1 位。A/B を立てない）: 帯の全体が 1.0 より上。
+  3. 帯の全体が 1.0 より下（全 round で Δ > 0）のとき、区間 X ∈ {S（待ち）, I（発行）, R（窓の外側＝facade・bench の固定費）} について
+     全 round で ΔX ≥ share_threshold × Δ を満たすものを数える。
+     1 つだけ満たす: A-S／A-I／A-R（その側の A/B 候補。追加起票を所有者に提案する）。
+     2 つ以上満たす（符号相殺）、または 0: H（分類保留・記録のみ。A/B を立てない）。
+  確度: 全 round が PASS で、全 round で TW の checksum と TS の最終 loss が一致なら「高」。それ以外は「低」とし理由欄の先頭に「確度低」を付ける。
+  A-S の補助: G_t と gpu_busy、F_roundtrip と host_fixed を推定タグ付きで並べるだけ。GPU 実行と同期固定費のどちらが主かは時計が揃わず確定させない。
+  ドリフト: 観測比の中央値が scoreboard_ratio から 10% を超えて離れたら記録する（判定は変えない）。
+
+### DECIDE-4154
+share_threshold: 0.50
+bench_py_sha256: <64 桁 hex。9fd2c08f…409b の全桁>
+torch_version: <2.14.0>
+diag_script_sha256: <64 桁 hex。torch_mps_train_diag.py>
+aggregate_4154_sha256: <64 桁 hex。aggregate_4154.py>
+### END-DECIDE-4154
+
+## PARAMS
+fixed-at-utc: <YYYY-MM-DDThh:mm:ssZ>
+issue: <4154>
+rounds: <ラウンド数。5>
+tree_sha: <40 桁 hex>
+tree_fingerprint: <64 桁 hex>
+aggregate_script_sha256: <64 桁 hex。aggregate_diag.py>
+reach_threshold: <1.00>
+noise_band: <NB-RANGE5>
+cell: M-MTL-TRN | machine=macmini | scoreboard_ratio=<0.96> | formulas=F1 | kernel_owner=hardware | opp=pytorch | prev_class=分類保留
