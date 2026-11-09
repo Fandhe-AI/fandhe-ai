@@ -622,6 +622,20 @@ pub struct MetalGemm {
     /// テスト専用 `new_with_frag_interleave` だけが上書きする。f16／hfrag／te／
     /// split-K パス 1 は常に `false`（no-op 契約）。
     frag_interleave_enabled: bool,
+    /// N≥1024 限定の steel 候補 T0U-LU-FB opt-in（イシュー #4160。`tile::
+    /// STEEL_LARGE_N_ENABLED`）。`MetalGemm::new` を含む全構築経路は本番既定
+    /// （`false`）で初期化し、テスト専用 `new_with_steel_large_n` と A/B 計測用の
+    /// 「定数 1 行差分」だけが `true` にする。`true` かつ [`tile::select_steel_large_n`]
+    /// が `Some` の形状だけ、classic 経路が [`GateProfile::SteelLargeN`] で
+    /// パイプラインを解決する（他の形状・経路は不変）。
+    steel_large_n_enabled: bool,
+    /// [`GateProfile::SteelLargeN`] 専用のパイプラインキャッシュ。ゲート（FB・unroll）が
+    /// 違うのに同じ `(TileConfig, TransposePattern, TileClass)` キーの `tiled_cache` を
+    /// 共有すると、`CANDIDATES[0]` を選ぶ別形状へゲート違いのパイプラインを返して
+    /// しまう（またはその逆）ため構造的に分離する（`tiled_splitk_cache` と同じ設計判断）。
+    steel_large_n_cache: Mutex<
+        HashMap<(TileConfig, TransposePattern, tile::TileClass), objc2::rc::Retained<MtlPipeline>>,
+    >,
     /// タイルクラス分割（イシュー #1327・E6 試作）をこのインスタンスの
     /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]・
     /// [`Self::encode_tiled_by_class`]）で有効化するかどうか。
@@ -686,6 +700,20 @@ pub struct MetalGemm {
     /// 実行中のプロセスから一時的に無効化する手段は実行時トグル側が
     /// 担う）。
     split_k_auto_enabled: bool,
+}
+
+/// classic 経路のパイプライン解決時に適用するゲート組（イシュー #4160）。
+///
+/// - `Instance`: インスタンスが保持するゲート（従来どおり。`tiled_cache` 等を使う）
+/// - `SteelLargeN`: T0U-LU-FB 固定（acc unroll・load unroll・細粒度バリアすべて ON。
+///   他ゲートはインスタンス値）。専用の `steel_large_n_cache` を使う
+///
+/// 呼び出し元は `MetalGemm::classic_plan`（形状から決める）と、既存入口の薄い
+/// ラッパー（常に `Instance`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GateProfile {
+    Instance,
+    SteelLargeN,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -1014,6 +1042,48 @@ impl MetalGemm {
         enabled: bool,
     ) -> Result<Self, MetalError> {
         Ok(Self::new(ctx)?.with_frag_interleave(enabled))
+    }
+
+    /// テスト専用: [`Self::new`] と同じ構築で、N≥1024 限定 steel 候補 opt-in（イシュー
+    /// #4160。`tile::STEEL_LARGE_N_ENABLED`）だけを `enabled` に指定する。呼び出し元は
+    /// `gemm_steel_large_n_diag_tests` のみ。`#[cfg(test)] pub(crate)` に留めるのは
+    /// 公開面を増やさないため。専用キャッシュは別なので構築後いつ上書きしても安全。
+    #[cfg(test)]
+    pub(crate) fn new_with_steel_large_n(
+        ctx: &MetalContext,
+        enabled: bool,
+    ) -> Result<Self, MetalError> {
+        let mut g = Self::new(ctx)?;
+        g.steel_large_n_enabled = enabled;
+        Ok(g)
+    }
+
+    /// テスト専用: steel 候補 opt-in フラグ（#4160）。
+    #[cfg(test)]
+    pub(crate) fn steel_large_n_enabled(&self) -> bool {
+        self.steel_large_n_enabled
+    }
+
+    /// テスト専用: 到達追跡用。`dispatch_auto` classic 経路が解決する `(要求 cfg,
+    /// ゲート組, 実際に使われる解決 cfg)` を返す（#4160）。`resolved != requested` は
+    /// フォールバック発生を示す。
+    #[cfg(test)]
+    pub(crate) fn diag_classic_plan_resolved(
+        &self,
+        ctx: &MetalContext,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(TileConfig, GateProfile, TileConfig), MetalError> {
+        let (cfg, profile) = self.classic_plan(ctx, m, n, k);
+        let (_, resolved) = self.pipeline_for_tile_with_profile(
+            ctx,
+            cfg,
+            TransposePattern::Nn,
+            tile::TileClass::Legacy,
+            profile,
+        )?;
+        Ok((cfg, profile, resolved))
     }
 
     /// テスト専用: 構築済みインスタンスの交互配置ゲート（#3211）を上書きする。
@@ -1433,6 +1503,8 @@ impl MetalGemm {
             smem_swizzle,
             unroll_load_enabled,
             frag_interleave_enabled: tile::FRAG_INTERLEAVE_ENABLED,
+            steel_large_n_enabled: tile::STEEL_LARGE_N_ENABLED,
+            steel_large_n_cache: Mutex::new(HashMap::new()),
             tile_class_mode,
             tiled_splitk_cache: Mutex::new(HashMap::new()),
             pipeline_splitk_reduce,
@@ -1476,12 +1548,27 @@ impl MetalGemm {
     /// （`dispatch_variant`・`dispatch_tiled_prepared`）は常に
     /// `TransposePattern::Nn` を渡すため、キャッシュキー・検証結果は
     /// 本イシュー以前と変わらない。
+    #[cfg(test)]
     fn pipeline_for_tile(
         &self,
         ctx: &MetalContext,
         cfg: TileConfig,
         pattern: TransposePattern,
         tile_class: tile::TileClass,
+    ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
+        self.pipeline_for_tile_with_profile(ctx, cfg, pattern, tile_class, GateProfile::Instance)
+    }
+
+    /// [`Self::pipeline_for_tile`] のゲート組指定版（イシュー #4160）。`Instance` は
+    /// 従来と完全に同一（キャッシュ・ゲートとも不変）。`SteelLargeN` は専用キャッシュと
+    /// T0U-LU-FB 固定ゲートで解決する。
+    fn pipeline_for_tile_with_profile(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+        pattern: TransposePattern,
+        tile_class: tile::TileClass,
+        profile: GateProfile,
     ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
         let mut last_err: Option<MetalError> = None;
 
@@ -1493,11 +1580,14 @@ impl MetalGemm {
         // （`unroll_acc_loops_for`）・事後検証（`maxTotalThreadsPerThreadgroup`）
         // は両経路で完全に同一の式を使う（base/head を同条件で比較する
         // ための不変条件。計画「設計」節）。
-        let cache = if self.source_specialized {
+        let cache = if profile == GateProfile::SteelLargeN {
+            &self.steel_large_n_cache
+        } else if self.source_specialized {
             &self.tiled_spec_cache
         } else {
             &self.tiled_cache
         };
+        let steel = profile == GateProfile::SteelLargeN;
 
         for candidate in tile::fallback_chain(cfg) {
             // イシュー #1693: `thread_elements()` 方式候補カーネル
@@ -1559,8 +1649,13 @@ impl MetalGemm {
             // `crate::tile::unroll_acc_loops_for` doc comment 参照）。
             let gates = pipeline::GemmGateConstants {
                 swizzle_enabled: self.swizzle_enabled,
-                fine_barrier_enabled: self.fine_barrier_enabled,
-                unroll_acc_enabled: tile::unroll_acc_loops_for(candidate, self.unroll_acc_enabled),
+                // イシュー #4160: SteelLargeN は T0U-LU-FB（FB・acc unroll・load unroll）固定。
+                // REQ-8: これらはバリア挿入／ループ展開のみで境界判定・0 埋めは変えない。
+                fine_barrier_enabled: steel || self.fine_barrier_enabled,
+                unroll_acc_enabled: tile::unroll_acc_loops_for(
+                    candidate,
+                    steel || self.unroll_acc_enabled,
+                ),
                 frag_load_device_hoisted: self.frag_load.device_hoisted,
                 frag_load_ksteps: self.frag_load.ksteps.as_u32(),
                 tgp_pad_elems,
@@ -1576,7 +1671,7 @@ impl MetalGemm {
                 // そのまま渡す（`coop_load_layout` と同じ instance ゲート
                 // 方式）。
                 coop_smem_swizzle: self.smem_swizzle.as_u32(),
-                unroll_load_enabled: self.unroll_load_enabled,
+                unroll_load_enabled: steel || self.unroll_load_enabled,
                 frag_interleave_enabled: self.frag_interleave_enabled,
             };
             // イシュー #1693: `mma_frag_load` に応じてカーネル関数名を
@@ -1774,6 +1869,7 @@ impl MetalGemm {
     /// 直前）で加算していたが、`plan_tiled_by_class` は常に直後に
     /// [`Self::encode_tiled_plan`] へ渡されて即座に消費される（呼び出し元
     /// が計画だけ作って握り潰すことはない）ため、可観測な回数は不変。
+    #[cfg(test)]
     fn plan_tiled_by_class(
         &self,
         ctx: &MetalContext,
@@ -1781,9 +1877,26 @@ impl MetalGemm {
         dims: Dims,
         pattern: TransposePattern,
     ) -> Result<TiledClassPlan, MetalError> {
+        self.plan_tiled_by_class_with_profile(ctx, cfg, dims, pattern, GateProfile::Instance)
+    }
+
+    /// [`Self::plan_tiled_by_class`] のゲート組指定版（イシュー #4160）。
+    fn plan_tiled_by_class_with_profile(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+        dims: Dims,
+        pattern: TransposePattern,
+        profile: GateProfile,
+    ) -> Result<TiledClassPlan, MetalError> {
         if self.tile_class_mode == tile::TileClassMode::Legacy {
-            let (pipeline, resolved_cfg) =
-                self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Legacy)?;
+            let (pipeline, resolved_cfg) = self.pipeline_for_tile_with_profile(
+                ctx,
+                cfg,
+                pattern,
+                tile::TileClass::Legacy,
+                profile,
+            )?;
             let tiles_m = (dims.m as usize).div_ceil(resolved_cfg.bm as usize) as u32;
             let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
             let region = TileClassRegion::full_grid(tiles_m, tiles_n);
@@ -1803,9 +1916,14 @@ impl MetalGemm {
         // `TileClassMode::Split`: Edge クラスを先に解決し、その解決構成を
         // 起点に Interior クラスを要求する。
         let (edge_pipeline, edge_cfg) =
-            self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Edge)?;
-        let (interior_pipeline, interior_cfg) =
-            self.pipeline_for_tile(ctx, edge_cfg, pattern, tile::TileClass::Interior)?;
+            self.pipeline_for_tile_with_profile(ctx, cfg, pattern, tile::TileClass::Edge, profile)?;
+        let (interior_pipeline, interior_cfg) = self.pipeline_for_tile_with_profile(
+            ctx,
+            edge_cfg,
+            pattern,
+            tile::TileClass::Interior,
+            profile,
+        )?;
 
         if interior_cfg != edge_cfg {
             // 解決構成が食い違う場合は Legacy 単一 dispatch へ
@@ -1814,8 +1932,13 @@ impl MetalGemm {
             // 上限〉に影響しないため——だが、将来の拡張余地として明示的に
             // 扱う）。
             TILE_CLASS_SPLIT_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
-            let (pipeline, resolved_cfg) =
-                self.pipeline_for_tile(ctx, cfg, pattern, tile::TileClass::Legacy)?;
+            let (pipeline, resolved_cfg) = self.pipeline_for_tile_with_profile(
+                ctx,
+                cfg,
+                pattern,
+                tile::TileClass::Legacy,
+                profile,
+            )?;
             let tiles_m = (dims.m as usize).div_ceil(resolved_cfg.bm as usize) as u32;
             let tiles_n = (dims.n as usize).div_ceil(resolved_cfg.bn as usize) as u32;
             let region = TileClassRegion::full_grid(tiles_m, tiles_n);
@@ -1939,7 +2062,38 @@ impl MetalGemm {
         strides: GemmStrides,
         pattern: TransposePattern,
     ) -> Result<TileConfig, MetalError> {
-        let plan = self.plan_tiled_by_class(ctx, cfg, dims, pattern)?;
+        self.encode_tiled_by_class_with_profile(
+            ctx,
+            a_buf,
+            a_offset,
+            b_buf,
+            b_offset,
+            c_buf,
+            dims,
+            cfg,
+            strides,
+            pattern,
+            GateProfile::Instance,
+        )
+    }
+
+    /// [`Self::encode_tiled_by_class`] のゲート組指定版（イシュー #4160）。
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tiled_by_class_with_profile(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        c_buf: &MetalBuffer,
+        dims: Dims,
+        cfg: TileConfig,
+        strides: GemmStrides,
+        pattern: TransposePattern,
+        profile: GateProfile,
+    ) -> Result<TileConfig, MetalError> {
+        let plan = self.plan_tiled_by_class_with_profile(ctx, cfg, dims, pattern, profile)?;
         let resolved_cfg = plan.resolved_cfg;
         let swizzle_enabled = self.swizzle_enabled;
         ctx.dispatch_sync(|encoder| {
@@ -2487,8 +2641,8 @@ impl MetalGemm {
                 return Ok(true);
             }
         }
-        let cfg = tile::select_for_verified_device(m, n, k, ctx.verified_tile_table_device());
-        self.encode_tiled_by_class(
+        let (cfg, profile) = self.classic_plan(ctx, m, n, k);
+        self.encode_tiled_by_class_with_profile(
             ctx,
             a_buf,
             0,
@@ -2499,8 +2653,32 @@ impl MetalGemm {
             cfg,
             GemmStrides::nn(dims.k, dims.n),
             TransposePattern::Nn,
+            profile,
         )?;
         Ok(true)
+    }
+
+    /// classic 経路のタイル構成とゲート組を決める（イシュー #4160）。fresh（
+    /// `dispatch_auto_with_route_impl`）と reuse（`dispatch_auto_resident`）が同じ式を
+    /// 共有する。`steel_large_n_enabled` が `false`（本番既定）なら常に従来の
+    /// `select_for_verified_device` + `Instance`。split-K の classic フォールバック内の
+    /// 選択は対象外（スコープ 3 点は split-K に入らず、パス 1 では load unroll が no-op の
+    /// 既存契約と揃える）。
+    fn classic_plan(
+        &self,
+        ctx: &MetalContext,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> (TileConfig, GateProfile) {
+        let device = ctx.verified_tile_table_device();
+        match tile::select_steel_large_n(m, n, k, device, self.steel_large_n_enabled) {
+            Some(p) => (p.cfg, GateProfile::SteelLargeN),
+            None => (
+                tile::select_for_verified_device(m, n, k, device),
+                GateProfile::Instance,
+            ),
+        }
     }
 
     /// [`Self::dispatch_auto`] と同じ結線判断を行うが、実際に採用した
@@ -2600,8 +2778,17 @@ impl MetalGemm {
                 return Ok((out, route));
             }
         }
-        let cfg = tile::select_for_verified_device(m, n, k, ctx.verified_tile_table_device());
-        let out = self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)?;
+        let (cfg, profile) = self.classic_plan(ctx, m, n, k);
+        let out = self.dispatch_variant_with_profile(
+            ctx,
+            GemmVariant::SimdgroupTiled(cfg),
+            a,
+            b,
+            m,
+            n,
+            k,
+            profile,
+        )?;
         Ok((out, tile::GemmRoute::Classic(cfg)))
     }
 
@@ -2922,10 +3109,41 @@ impl MetalGemm {
         k_eff: usize,
         cfg: TileConfig,
     ) -> Result<TileConfig, MetalError> {
+        self.encode_tiled_nn_recorded_with_profile(
+            ctx,
+            label,
+            a_buf,
+            b_buf,
+            c_buf,
+            m_eff,
+            n_eff,
+            k_eff,
+            cfg,
+            GateProfile::Instance,
+        )
+    }
+
+    /// [`Self::encode_tiled_nn_recorded`] のゲート組指定版（イシュー #4160）。
+    #[cfg(any(test, feature = "internal-diagnostics"))]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tiled_nn_recorded_with_profile(
+        &self,
+        ctx: &MetalContext,
+        label: &'static str,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+        profile: GateProfile,
+    ) -> Result<TileConfig, MetalError> {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
         validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
-        let plan = self.plan_tiled_by_class(ctx, cfg, dims, TransposePattern::Nn)?;
+        let plan =
+            self.plan_tiled_by_class_with_profile(ctx, cfg, dims, TransposePattern::Nn, profile)?;
         let resolved_cfg = plan.resolved_cfg;
         let swizzle_enabled = self.swizzle_enabled;
         ctx.encode(
@@ -2982,6 +3200,35 @@ impl MetalGemm {
             k_eff,
             cfg,
         )
+    }
+
+    /// 本番 `dispatch_auto`（reuse 経路 `dispatch_auto_resident`）と同じ classic 計画
+    /// （[`Self::classic_plan`]）で正方 NN を encode だけ行う診断専用入口（イシュー #4160。
+    /// ラベルは `"diag_encode_tiled_nn"` 固定）。`steel_large_n_enabled` と形状に応じて
+    /// `cur`／`sl` 腕の双方を本番と同じ解決で測れる。戻りは `(解決 cfg, ゲート組)`。
+    #[cfg(test)]
+    pub(crate) fn diag_encode_classic_auto_nn(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        n: usize,
+    ) -> Result<(TileConfig, GateProfile), MetalError> {
+        let (cfg, profile) = self.classic_plan(ctx, n, n, n);
+        let resolved = self.encode_tiled_nn_recorded_with_profile(
+            ctx,
+            "diag_encode_tiled_nn",
+            a_buf,
+            b_buf,
+            c_buf,
+            n,
+            n,
+            n,
+            cfg,
+            profile,
+        )?;
+        Ok((resolved, profile))
     }
 
     /// [`Self::dispatch_strided_tiled_prepared`] と同じ前検証・同じ dispatch
@@ -4525,6 +4772,23 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
+        self.dispatch_variant_with_profile(ctx, variant, a, b, m, n, k, GateProfile::Instance)
+    }
+
+    /// [`Self::dispatch_variant`] のゲート組指定版（イシュー #4160）。`profile` は
+    /// `SimdgroupTiled` の classic 解決にだけ効き、他 variant では無視する。
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_variant_with_profile(
+        &self,
+        ctx: &MetalContext,
+        variant: GemmVariant,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        profile: GateProfile,
+    ) -> Result<Vec<f32>, MetalError> {
         // 戻り値の `Dims`（パディング前の実効次元）は使わず検証のためだけに
         // 呼ぶ。実際に後段で使うのはパディング後の `validate_effective_dims`
         // が返す `Dims`（`dims`）であるため意図的に破棄する。
@@ -4562,7 +4826,7 @@ impl MetalGemm {
                 // イシュー #1327: タイルクラス分割（`self.tile_class_mode`）
                 // を適用した共通ヘルパーへ委譲する
                 // （`dispatch_tiled_prepared` と同じ設計判断）。
-                self.encode_tiled_by_class(
+                self.encode_tiled_by_class_with_profile(
                     ctx,
                     &a_buf,
                     0,
@@ -4573,6 +4837,7 @@ impl MetalGemm {
                     cfg,
                     GemmStrides::nn(dims.k, dims.n),
                     TransposePattern::Nn,
+                    profile,
                 )?;
             }
             fixed_variant => {

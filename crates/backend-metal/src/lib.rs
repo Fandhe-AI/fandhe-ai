@@ -413,6 +413,13 @@ mod gemm_frag_interleave_diag_tests;
 // `docs/perf/logs/metal-frag-interleave-ab-macmini-3212/orchestrate_macmini.sh`。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_frag_interleave_ab_diag_tests;
+// イシュー #4160: N≥1024 限定の steel 候補 T0U-LU-FB opt-in（`tile::STEEL_LARGE_N_ENABLED`）の
+// Mac mini 純カーネル A/B（到達追跡・bit 一致・CPU 参照 parity・`kernel_gpu` 計測）。
+// 全件 `#[ignore]`・診断専用。`pub(crate)` の `new_with_steel_large_n` 面へ届くため
+// クレートルートの兄弟として置く。呼び出し元は
+// `docs/perf/logs/metal-steel-large-n-ab-macmini-4160/orchestrate_macmini.sh`。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_steel_large_n_diag_tests;
 // E6 タイルクラス分割（`tile::TileClassMode`。イシュー #1327・PR #1388で
 // opt-in 機構を追加・bit 一致を自己検証済み）の N=1024/2048/4096 純カー
 // ネル時間（GPU タイムスタンプ）を候補 0/4/5/8（`tile::CANDIDATES`）で
