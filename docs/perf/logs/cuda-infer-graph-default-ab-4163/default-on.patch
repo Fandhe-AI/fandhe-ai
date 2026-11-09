@@ -1,0 +1,22 @@
+diff --git a/crates/backend-cuda/src/graph.rs b/crates/backend-cuda/src/graph.rs
+index d09def007..5ec9310c8 100644
+--- a/crates/backend-cuda/src/graph.rs
++++ b/crates/backend-cuda/src/graph.rs
+@@ -667,7 +667,7 @@ pub(crate) fn run_captured_sgd_step_segment(
+ /// 既定反転（別 PR）で反転する単一ゲート。反転すると `device.rs` の
+ /// created stream 選択にも波及する（全 CUDA 利用者の既定ストリームが
+ /// created に変わる）ため、反転は GB10 での ADOPT 判定後に限る。
+-pub(crate) const INFER_GRAPH_DEFAULT_ENABLED: bool = false;
++pub(crate) const INFER_GRAPH_DEFAULT_ENABLED: bool = true;
+ 
+ /// 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` の値と既定値から opt-in を決める
+ /// 純粋関数（`std::env` を読まないため並列テストで安全）。許容値は
+@@ -2007,7 +2007,7 @@ mod tests {
+     /// 既定は OFF（受け入れ基準 1。反転は ADOPT 判定後の別 PR）。
+     #[test]
+     fn infer_graph_default_is_off() {
+-        const { assert!(!INFER_GRAPH_DEFAULT_ENABLED) };
++        const { assert!(INFER_GRAPH_DEFAULT_ENABLED) };
+     }
+ 
+     /// override は現スレッド限定で、ガード drop で直前の値へ戻る。

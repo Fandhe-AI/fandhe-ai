@@ -1325,6 +1325,55 @@ fn check_diag_legacy_tape_reuse(cli: &Cli, args: &[String]) -> Result<(), String
     Ok(())
 }
 
+/// `--diag-host-input-reuse`（値なしフラグ。イシュー #4163）。診断専用で、
+/// `--task infer --mode reuse --device cuda` の窓内を、常駐入力の
+/// `predict_resident_input`（スコアボード G-CUDA-INF reuse の本番経路）から
+/// ホスト入力の `Sequential::predict_resident` へ差し替える。推論チェーンの
+/// Graph capture は `ChainInput::Host` でしか発火しないため、常駐入力の本番経路では
+/// 「推論 Graph 既定化」の効果は created stream 化だけになる。capture まで含めた
+/// 効果を測る腕がこれ。`bench-common::Cli` は触らず `std::env::args()` から読む。
+fn diag_host_input_reuse_from_args(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--diag-host-input-reuse")
+}
+
+/// 実プロセスの引数から [`diag_host_input_reuse_from_args`] を読む。
+fn diag_host_input_reuse() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    diag_host_input_reuse_from_args(&args)
+}
+
+/// `--diag-host-input-reuse` の受理条件（`run()` から呼ぶ fail-closed 検査）。
+/// `--task infer --mode reuse --device cuda`（`--phases`・`--graph`・`--tf32` なし）と
+/// 既定でない `--out` の明示を要求する（診断行が通常の reuse 行へ混ざるのを防ぐ）。
+/// エラー文に引数の値は含めない。
+fn check_diag_host_input_reuse(cli: &Cli, args: &[String]) -> Result<(), String> {
+    if !diag_host_input_reuse_from_args(args) {
+        return Ok(());
+    }
+    let out_explicit = args
+        .iter()
+        .enumerate()
+        .any(|(i, a)| a == "--out" && args.get(i + 1).is_some_and(|v| !v.starts_with("--")));
+    let out_is_default = cli.out == "results/raw/results.jsonl";
+    if cli.task != "infer"
+        || cli.mode != "reuse"
+        || cli.device != "cuda"
+        || cli.phases
+        || cli.tf32
+        || cli.graph.is_some()
+        || !out_explicit
+        || out_is_default
+    {
+        return Err(
+            "MEASURE_ERROR: --diag-host-input-reuse requires --task infer --mode reuse \
+             --device cuda without --phases/--graph/--tf32 and an explicit non-default --out \
+             (issue #4163, diagnostic only)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// 診断腕で各反復の checksum bits が init（`out0`）の checksum bits と一致することの確認。
 /// 反復内の `verify_strict` を外した代わりの、途中反復の整合検査（不一致は MEASURE_ERROR）。
 fn check_checksum_bits_stable(init_bits: u64, iter_bits: &[u64]) -> Result<(), String> {
@@ -2148,10 +2197,17 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // #3272: x は init で 1 回だけ upload し（比較相手が X を窓の外で置くのと
     // 揃える。#3264 §7.1 (4)）、完了は D2H なしの `wait_device_param_store`
     // （P7）で保証する。窓の中は `predict_resident_input` + checksum だけ。
+    // イシュー #4163: 診断腕（`--diag-host-input-reuse`）は x を常駐 upload せず、
+    // 窓内でホスト入力の `predict_resident` を呼ぶ（capture が届く経路）。
+    let host_input = diag_host_input_reuse();
     let init_start = Instant::now();
     let init_tape = make_tape(&cli.device)?;
     let store = model.init_device_param_store(&init_tape)?;
-    let rx = init_tape.upload_resident(&store, &x_data)?;
+    let rx = if host_input {
+        None
+    } else {
+        Some(init_tape.upload_resident(&store, &x_data)?)
+    };
     init_tape.wait_device_param_store(&store)?;
     drop(init_tape);
     let init_s = init_start.elapsed().as_secs_f64();
@@ -2159,7 +2215,10 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut checksum = 0.0;
     let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
-        let out = model.predict_resident_input(&store, &rx)?;
+        let out = match &rx {
+            Some(rx) => model.predict_resident_input(&store, rx)?,
+            None => model.predict_resident(&store, &x_data)?,
+        };
         *sync_checksum = checksum_tensor(&out, cli.readout.as_deref())?;
         Ok(start.elapsed())
     };
@@ -2208,7 +2267,10 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         metal_split_k: cli.metal_split_k.as_deref(),
         pinned_h2d: cli.pinned_h2d,
     }
-    .emit(&cli.out)?;
+    .emit_with_diag(
+        &cli.out,
+        diag_host_input_reuse().then_some("host_input_reuse"),
+    )?;
     Ok(())
 }
 
@@ -2465,6 +2527,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if diag_legacy_tape_reuse_from_args(&args) {
         eprintln!(
             "DIAG: --diag-legacy-tape-reuse ON (host-input Tape path, no per-iter reset; issue #4158)"
+        );
+    }
+    // イシュー #4163: ホスト入力 reuse 診断腕も同様に fail-closed。
+    check_diag_host_input_reuse(&cli, &args)?;
+    if diag_host_input_reuse_from_args(&args) {
+        eprintln!(
+            "DIAG: --diag-host-input-reuse ON (host-input predict_resident, chain capture reachable; issue #4163)"
         );
     }
     if diag_verify_after_loop_from_args(&args) {
@@ -5072,6 +5141,63 @@ mod tests {
         ];
         for (c, args) in cases {
             let err = check_diag_legacy_tape_reuse(&c, &args).unwrap_err();
+            assert!(err.starts_with("MEASURE_ERROR"), "{err}");
+            assert!(!err.contains("--out x"), "{err}");
+        }
+    }
+
+    #[test]
+    fn diag_host_input_reuse_acceptance_is_fail_closed() {
+        let out = temp_out_path("diag-host-input");
+        let ok = args_of(&["bin", "--diag-host-input-reuse", "--out", "x"]);
+        assert!(!diag_host_input_reuse_from_args(&args_of(&["bin"])));
+        assert!(diag_host_input_reuse_from_args(&ok));
+        let mk = |task: &str, mode: &str, device: &str| {
+            let mut c = make_cli(task, mode, out.path());
+            c.device = device.to_string();
+            c
+        };
+        assert!(check_diag_host_input_reuse(&mk("infer", "reuse", "cuda"), &ok).is_ok());
+        // フラグなしは素通り。
+        assert!(
+            check_diag_host_input_reuse(&mk("gemm", "fresh", "cpu"), &args_of(&["bin"])).is_ok()
+        );
+        let mut phases = mk("infer", "reuse", "cuda");
+        phases.phases = true;
+        let mut tf32 = mk("infer", "reuse", "cuda");
+        tf32.tf32 = true;
+        let mut graph = mk("infer", "reuse", "cuda");
+        graph.graph = Some("step".to_string());
+        let mut default_out = mk("infer", "reuse", "cuda");
+        default_out.out = "results/raw/results.jsonl".to_string();
+        let cases: Vec<(Cli, Vec<String>)> = vec![
+            (mk("infer", "fresh", "cuda"), ok.clone()),
+            (mk("infer", "reuse", "cpu"), ok.clone()),
+            (mk("train", "reuse", "cuda"), ok.clone()),
+            (mk("gemm", "reuse", "cuda"), ok.clone()),
+            (phases, ok.clone()),
+            (tf32, ok.clone()),
+            (graph, ok.clone()),
+            (
+                default_out,
+                args_of(&[
+                    "bin",
+                    "--diag-host-input-reuse",
+                    "--out",
+                    "results/raw/results.jsonl",
+                ]),
+            ),
+            (
+                mk("infer", "reuse", "cuda"),
+                args_of(&["bin", "--diag-host-input-reuse"]),
+            ),
+            (
+                mk("infer", "reuse", "cuda"),
+                args_of(&["bin", "--diag-host-input-reuse", "--out", "--size", "256"]),
+            ),
+        ];
+        for (c, args) in cases {
+            let err = check_diag_host_input_reuse(&c, &args).unwrap_err();
             assert!(err.starts_with("MEASURE_ERROR"), "{err}");
             assert!(!err.contains("--out x"), "{err}");
         }
