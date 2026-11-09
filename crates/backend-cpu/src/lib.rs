@@ -243,7 +243,7 @@ pub use gemm::{
 };
 pub use gemm_blis::{
     gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt,
-    gemm_blis_parallel_tn,
+    gemm_blis_parallel_tn, sme_production_enabled,
 };
 pub use layer_norm::{LayerNormError, run_layer_norm_f32};
 pub use linalg::LinalgError;
