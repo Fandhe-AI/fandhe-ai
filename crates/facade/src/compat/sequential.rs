@@ -4443,7 +4443,7 @@ impl Sequential {
         // ガード。
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::predict_resident:Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                "Sequential::predict_resident: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
                  含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
                     .to_string(),
             )));
@@ -4490,7 +4490,7 @@ impl Sequential {
         let _infer_scope = fandhe_ai_backend_cpu::enter_inference_scope();
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::predict_resident_input:Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                "Sequential::predict_resident_input: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
                  含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
                     .to_string(),
             )));
