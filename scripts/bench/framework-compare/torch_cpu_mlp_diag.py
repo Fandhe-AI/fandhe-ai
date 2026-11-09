@@ -249,12 +249,24 @@ def accel_gemm_fn(fn, a_np, b_np, m, n, k, trans):
     return call, c
 
 
+def composite_close_np(np, a, b):
+    """checksum_contract.checksums_match と同一の要素ごと複合判定（厳密 '<'・分母 max(|a|,|b|,1e-12)）。"""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("checksum_contract", os.path.join(here, "checksum_contract.py"))
+    cc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cc)
+    diff = np.abs(a.astype(np.float64) - b.astype(np.float64))
+    denom = np.maximum(np.maximum(np.abs(a), np.abs(b)).astype(np.float64), 1e-12)
+    return (diff < cc.CHECKSUM_ABS_TOL) | (diff / denom < cc.CHECKSUM_REL_TOL)
+
+
 def accel_batch10(fn, a_np, b_np, m, n, k, trans, ref, warmup, iters):
     """Accelerate 直呼びの 10 回償却値。torch.mm の結果 ref と一致しなければ None（unavailable）。"""
     import numpy as np
     call, c = accel_gemm_fn(fn, a_np, b_np, m, n, k, trans)
     call()
-    ok = np.all((np.abs(c - ref) <= 1e-5) | (np.abs(c - ref) <= 1e-3 * np.abs(ref)))
+    ok = bool(np.all(composite_close_np(np, c, ref)))
 
     def batch():
         for _ in range(10):

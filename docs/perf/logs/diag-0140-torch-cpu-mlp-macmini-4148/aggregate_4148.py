@@ -284,7 +284,7 @@ def summarize(per_round):
         vals = [pr[idx][2] for pr in per_round]
         wins = [next(x[2] for x in pr if x[0] == s and x[1] == "window") for pr in per_round]
         if any(x is None for x in vals):
-            rows.append((s, q, tag, None, None, None, None, None, None))
+            rows.append((s, q, "未測定", None, None, None, None, None, None))
             continue
         sh = [a / w for a, w in zip(vals, wins)]
         rows.append((s, q, tag, statistics.median(vals), min(vals), max(vals),
