@@ -131,14 +131,19 @@ def round_metrics(rd, thr):
     for q in ("fandhe_window", "opp_window"):
         if q not in vals:
             raise AttribError(f"{rd}: missing {q}")
-    for q in ("fandhe_kernel_gpu_ts", "opp_transfer_excl", "opp_transfer_excl_traced", "fandhe_window_traced"):
+    for q in ("fandhe_kernel_gpu_ts", "opp_transfer_excl"):
         if q not in aux:
             raise AttribError(f"{rd}: missing aux {q}")
     fw, ow = vals["fandhe_window"][0], vals["opp_window"][0]
-    m = {"delta_w": fw - ow,
-         "perturbation_fandhe": abs(aux["fandhe_window_traced"] / fw - 1.0),
-         "perturbation_opp": abs(aux["opp_transfer_excl_traced"] / aux["opp_transfer_excl"] - 1.0)}
-    m["perturbation"] = max(m["perturbation_fandhe"], m["perturbation_opp"])
+    m = {"delta_w": fw - ow}
+    # trace 下の窓は xctrace=available のときだけ取る。unavailable（F2 のみ）では摂動を unavailable とし、値を作らない
+    traced = [q in aux for q in ("opp_transfer_excl_traced", "fandhe_window_traced")]
+    if any(traced) and not all(traced):
+        raise AttribError(f"{rd}: aux traced values must be both present or both absent")
+    if all(traced):
+        m["perturbation_fandhe"] = abs(aux["fandhe_window_traced"] / fw - 1.0)
+        m["perturbation_opp"] = abs(aux["opp_transfer_excl_traced"] / aux["opp_transfer_excl"] - 1.0)
+        m["perturbation"] = max(m["perturbation_fandhe"], m["perturbation_opp"])
     if "fandhe_pure_kernel" in vals and "opp_pure_kernel" in vals:
         fk, ok = vals["fandhe_pure_kernel"][0], vals["opp_pure_kernel"][0]
         if vals["fandhe_pure_kernel"][1] != vals["opp_pure_kernel"][1]:
@@ -155,7 +160,10 @@ def round_metrics(rd, thr):
     return m
 
 
-def attribute(dirp, rule_name="RULE.txt"):
+def attribute(dirp, rule_name="RULE.txt", verify=True, base=HERE):
+    """verify=True（既定）では集計の前に check_rule（プレースホルダ 0 件・補助スクリプトの sha256 一致）を必ず通す。"""
+    if verify:
+        check_rule(os.path.join(dirp, rule_name), base=base)
     text = read(os.path.join(dirp, rule_name))
     aux = parse_aux(text)
     for k in AUX_NUM:
@@ -186,7 +194,7 @@ def attribute(dirp, rule_name="RULE.txt"):
         low.append("PASS 以外の round を含む")
     if len(sides) != 1 or next(iter(sides)).startswith("判定不能"):
         low.append("round 間で帰属が割れる、または判定不能")
-    if any(m["perturbation"] > pmax for m in per):
+    if any(m.get("perturbation", 0) > pmax for m in per):
         low.append(f"trace_perturbation が {pmax} 超")
     if any(m.get("cross_check_rel", 0) > cmax for m in per):
         low.append(f"cross_check_rel が {cmax} 超")
@@ -194,14 +202,14 @@ def attribute(dirp, rule_name="RULE.txt"):
     conf = "高" if not low else "低"
     summary = [("median", "kernel_share", "" if med("kernel_share") is None else f"{med('kernel_share'):.6f}"),
                ("median", "delta_w", f"{med('delta_w'):.6f}"),
-               ("median", "perturbation", f"{med('perturbation'):.6f}"),
+               ("median", "perturbation", "unavailable" if med("perturbation") is None else f"{med('perturbation'):.6f}"),
                ("summary", "side", side), ("summary", "confidence", conf),
                ("summary", "confidence_reasons", "; ".join(low) or "-")]
     return rows, summary
 
 
 def run(dirp, rule_name, out):
-    rows, summary = attribute(dirp, rule_name)
+    rows, summary = attribute(dirp, rule_name)  # 既定で check_rule（sha256 照合）を通す
     if os.path.exists(out):
         raise AttribError(f"{out} already exists (no overwrite)")
     body = "round\tmetric\tvalue\n" + "".join(f"{r}\t{k}\t{v}\n" for r, k, v in rows + summary)
@@ -251,7 +259,7 @@ def self_test():
         with tempfile.TemporaryDirectory() as t:
             n, rounds = case
             _mk(t, n, rounds)
-            return attribute(t)
+            return attribute(t, verify=False)
 
     # 正常: ΔW=8, ΔK=6 → share 0.75 → カーネル側・確度高
     _, s = sc((2, [("PASS", _vals(), _aux())] * 2))
@@ -271,9 +279,11 @@ def self_test():
     _, s = sc((1, [("PASS", _vals(), _aux(kg=40.0))]))
     sm = {k: v for _, k, v in s}
     assert sm["confidence"] == "低" and "cross_check" in sm["confidence_reasons"]
-    # フォールバック（純カーネルなし）
-    _, s = sc((1, [("PASS", _vals(pk=False), _aux())]))
-    assert "unavailable" in {k: v for _, k, v in s}["side"]
+    # フォールバック（純カーネルなし・trace 下の窓なし＝F2 のみ）
+    a = {k: v for k, v in _aux().items() if "traced" not in k}
+    _, s = sc((1, [("PASS", _vals(pk=False), a)]))
+    sm = {k: v for _, k, v in s}
+    assert "unavailable" in sm["side"] and sm["median_perturbation" if False else "perturbation"] == "unavailable", sm
     # round 間で割れる → 低
     _, s = sc((2, [("PASS", _vals(), _aux()), ("PASS", _vals(fk=56.0), _aux())]))
     sm = {k: v for _, k, v in s}
@@ -291,7 +301,7 @@ def self_test():
         v = _vals()
         v[-1] = ("opp_pure_kernel", 54.0, "wall")
         _mk(t, 1, [("PASS", v, _aux())])
-        _expect(lambda: attribute(t), "clock mismatch", "clock")
+        _expect(lambda: attribute(t, verify=False), "clock mismatch", "clock")
     with tempfile.TemporaryDirectory() as t:  # check_rule: プレースホルダ・sha 不一致
         for fn in AUX_SHA.values():
             open(os.path.join(t, fn), "w").write(fn)
@@ -306,6 +316,8 @@ def self_test():
         open(os.path.join(t, "run_round.sh"), "w").write("changed")
         open(rp, "w").write(good)
         _expect(lambda: check_rule(rp, base=t), "sha", "mismatch")
+        # 通常の --dir 集計経路も sha256 を検証する（verify 既定 True）
+        _expect(lambda: attribute(t, base=t), "attribute verifies sha", "mismatch")
     print("self-test ok")
 
 

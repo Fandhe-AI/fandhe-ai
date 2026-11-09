@@ -21,7 +21,7 @@ xcrun xctrace version > "${OUT}/xctrace_version.txt" 2>&1 || unavailable "xctrac
 xcrun xctrace record --help > "${OUT}/xctrace_record_help.txt" 2>&1
 [ -x "${BC}" ] || unavailable "bench-candle がない"
 xcrun xctrace record --template 'Metal System Trace' --output "${OUT}/probe.trace" \
-  --target-stdout "${OUT}/probe_stdout.txt" --launch -- "${BC}" --task gemm-transfer-split --device metal --size 256 \
+  --target-stdout "${OUT}/probe_stdout.txt" --launch -- "${BC}" --task gemm-transfer-split --device metal --size 256 --out "${OUT}/probe_results.jsonl" \
   > "${OUT}/xctrace_record.log" 2>&1 || unavailable "xctrace record 失敗（${OUT}/xctrace_record.log）"
 xcrun xctrace export --input "${OUT}/probe.trace" --toc --output "${OUT}/xctrace_toc.xml" || unavailable "xctrace export --toc 失敗"
 grep -q 'schema=' "${OUT}/xctrace_toc.xml" || unavailable "toc に表がない"

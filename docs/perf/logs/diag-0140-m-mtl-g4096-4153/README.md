@@ -21,7 +21,7 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
   本 issue は依存・`bench-candle` を変えない。承認が得られた場合の代替（`objc2-metal` を直接依存にした GPUStart/EndTime 計測）は本スコープ外の選択肢。
 - **採用する方式**: 外部計器 `xcrun xctrace record --template 'Metal System Trace'` で両プロセスの GPU 実行区間を取る（時計タグ `gpu_trace` が両側で一致し、雛形 F1 の条件を構成上満たす）。
   candle は既存の `gemm-transfer-split`（device 常駐入力で matmul＋synchronize）、fandhe は registry 0.14.0 の `bench-fandhe --task gemm --mode reuse`。
-- **GEMM 区間の抽出**: 対象プロセスの GPU 区間のうち継続時間 ≥ 5 ms を GEMM とみなす（N=4096 の GEMM は M4 10 コアの公称上限でも 20 ms 超、ほかは 1 ms 未満）。本数が warmup＋測定反復数（＋AUX の想定外分）と一致しなければ INVALID。warmup 分を捨てた中央値を `*_pure_kernel` にする。
+- **GEMM 区間の抽出**: 対象プロセスの GPU 区間のうち継続時間 ≥ 5 ms を GEMM とみなす（N=4096 の GEMM は M4 10 コアの公称上限でも 20 ms 超、ほかは 1 ms 未満）。本数が warmup＋測定反復数（＋AUX の想定外分）と一致しなければ INVALID。candle の `gemm-transfer-split` は転送込み(warmup+iters)→転送除外(warmup+iters)→checksum 検証 1 回の順に同一プロセスで GEMM を走らせる（JSON の task は `gemm_transfer_incl`／`gemm_transfer_excl`）ため、本数は 2×(warmup+iters)＋1（＋想定外分）を要求し、転送除外の測定反復だけを切り出す。warmup 分を捨てた中央値を `*_pure_kernel` にする。
 - **照合**: 同 round 内で診断テスト `gemm_reuse_phase_diag_production_batch`（`kernel_gpu`＝GPUEnd−GPUStart）も取り、xctrace の fandhe 値との相対差が 10% 以内かを見る（超えたら確度低）。診断テストは `tree_sha` の path ソース、窓と xctrace は registry 0.14.0 のため、RULE に `git diff v0.14.0 <tree_sha> -- crates/backend-metal/src` の有無を記し、差分ありなら「版差あり」を付ける。`gemm_window_route_precheck` で `ROUTE_ACTUAL=Classic` と bit 一致を確認し、不一致なら INVALID。
 - **摂動検査**: 同じ round で trace あり／なしの窓を両方取り、`trace_perturbation` が 0.10 を超えたら確度低（#4150 の `event_perturbation` と同型）。
 - **窓の差の帰属**: ΔW＝fandhe_window − opp_window、ΔK＝fandhe_pure_kernel − opp_pure_kernel、`kernel_share`＝ΔK÷ΔW。≥ 0.5 でカーネル側が主、未満は窓側が主、ΔW ≤ 0 は判定不能。全 PASS round で同じ側なら確度高、それ以外は低。
@@ -52,7 +52,7 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 1. （PR-2・<metal-node>）PR-1 マージ後の main SHA を git archive で展開してビルドし、`ROOT=… OUT=<記録先>/env bash xctrace_probe_4153.sh` を実行する。`xctrace_toc.xml` から GPU 実行区間の表の schema 名・列名を確定し、AUX に書く。unavailable なら AUX の `xctrace: unavailable` と `formulas=F2` で固定する。
 2. `tree_sha`・`tree_fingerprint`・各 sha256（`aggregate_diag.py`・`to_values_4153.py`・`attrib_4153.py`・`run_round.sh`）を埋め、`git diff v0.14.0 <tree_sha> -- crates/backend-metal/src` の有無を AUX に記す。
    山括弧を外すだけの欄（issue・rounds・reach_threshold・noise_band・cell 行の prev_class）も置換する。`python3 -I aggregate_diag.py --check-template RULE.template.txt`、`python3 -I attrib_4153.py --check-rule RULE.txt` を通し、`RULE.txt` を**単独コミット**する。
-3. （PR-3・<metal-node>）hw-lock を取り、ツリー指紋を RULE と照合して、`ROOT=… EXPECT_SHA=… DIAG_BIN=… XCTRACE_SCHEMA=… HW_LOCK_OWNER_FILE=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
+3. （PR-3・<metal-node>）hw-lock を取り、ツリー指紋を RULE と照合して、`ROOT=… EXPECT_SHA=… DIAG_BIN=… XCTRACE_MODE=<RULE の AUX xctrace> XCTRACE_SCHEMA=…（unavailable なら省略可・trace の腕は取らない） HW_LOCK_OWNER_FILE=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
 4. 各 round で `python3 -I to_values_4153.py --round-dir <記録先>/round<i> --rule <記録先>/RULE.txt`。
 5. `python3 -I aggregate_diag.py --dir <記録先>` と `python3 -I attrib_4153.py --dir <記録先>` で集計する。
 6. 結果欄と `docs/perf/loss-attribution-matrix.md` の M-MTL-G4096 行（§10.3.1 の「candle の純カーネル時間は未測定」を含む）を実測値＋タグで更新する（未測定は未測定のまま）。`Closes #4153`。回収時にパス上のユーザー名・ホスト名をマスクする（`<home>`・`<metal-node>`）。

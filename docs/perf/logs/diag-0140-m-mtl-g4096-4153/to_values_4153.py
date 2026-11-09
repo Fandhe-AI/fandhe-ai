@@ -124,12 +124,12 @@ def _elem_text(el):
 def gemm_intervals(xml_path, aux, proc_match):
     """xctrace export から対象プロセスの GEMM 区間 (start, dur_ms) を開始順で返す。"""
     try:
-        size = os.path.getsize(xml_path)
         with open(xml_path, "rb") as f:
-            data = f.read()
+            # 上限 + 1 バイトまでしか読まない（巨大ファイルを全量メモリへ載せる前に拒否する）
+            data = f.read(XML_MAX_BYTES + 1)
     except OSError as e:
         raise ConvError(f"cannot read {xml_path}: {e}")
-    if size > XML_MAX_BYTES:
+    if len(data) > XML_MAX_BYTES:
         raise ConvError(f"{xml_path}: too large")
     if b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
         raise ConvError(f"{xml_path}: DOCTYPE/ENTITY is rejected")
@@ -188,15 +188,21 @@ def gemm_intervals(xml_path, aux, proc_match):
     return out
 
 
-def pure_kernel(xml_path, aux, proc_match, warmup, iters):
+def pure_kernel(xml_path, aux, proc_match, warmup, iters, lead=0, trail=0):
+    """開始順の区間列から測定反復 iters 本だけを切り出して中央値(ms)を返す。
+
+    lead＝測定の前に同一プロセスで走る GEMM の本数、trail＝後ろに走る本数（いずれも除外する）。
+    candle の gemm-transfer-split は転送込み(warmup+iters)→転送除外(warmup+iters)→checksum 検証 1 回の順で
+    実行するため、転送除外の測定反復は lead=warmup+iters・trail=1 で切り出す。本数の総数が合わなければ INVALID。
+    """
     iv = gemm_intervals(xml_path, aux, proc_match)
-    expected = warmup + iters + int(finite(aux["xctrace_expected_extra"], "xctrace_expected_extra"))
+    expected = lead + warmup + iters + trail + int(finite(aux["xctrace_expected_extra"], "xctrace_expected_extra"))
     if len(iv) != expected:
         raise ConvError(f"{xml_path}: GEMM interval count {len(iv)} != expected {expected} (INVALID)")
-    rest = [d for _, d in iv[warmup:]]
-    if not rest:
+    measured = [d for _, d in iv[lead + warmup:lead + warmup + iters]]
+    if iters < 1 or len(measured) != iters:
         raise ConvError(f"{xml_path}: no measured intervals after warmup")
-    return statistics.median(rest)
+    return statistics.median(measured)
 
 
 def parse_diag(route_text, diag_text):
@@ -228,17 +234,24 @@ def convert(round_dir, rule_text):
     fw, _, _ = load_record(p("fandhe_reuse.jsonl"), "gemm", "reuse")
     ffw, _, _ = load_record(p("fandhe_fresh.jsonl"), "gemm", "fresh")
     ow, _, _ = load_record(p("candle_gemm.jsonl"), "gemm")
-    osp, _, _ = load_record(p("candle_split.jsonl"), "gemm-transfer-split")
-    fw_t, f_warm, f_iters = load_record(p("fandhe_reuse_traced.jsonl"), "gemm", "reuse")
-    osp_t, o_warm, o_iters = load_record(p("candle_split_traced.jsonl"), "gemm-transfer-split")
+    # bench-candle gemm-transfer-split の JSON task 名は gemm_transfer_incl／gemm_transfer_excl（転送除外側を使う）
+    osp, o_warm, o_iters = load_record(p("candle_split.jsonl"), "gemm_transfer_excl")
+    avail = aux["xctrace"] == "available"
+    if avail:
+        fw_t, f_warm, f_iters = load_record(p("fandhe_reuse_traced.jsonl"), "gemm", "reuse")
+        osp_t, o_warm_t, o_iters_t = load_record(p("candle_split_traced.jsonl"), "gemm_transfer_excl")
+        if (o_warm_t, o_iters_t) != (o_warm, o_iters):
+            raise ConvError("candle_split(_traced): warmup/iters differ between traced and untraced runs")
     kgpu = parse_diag(read_text(p("route.txt")), read_text(p("diag.txt")))
     values = [("fandhe_window", fw, "-"), ("fandhe_fresh_window", ffw, "-"), ("opp_window", ow, "-")]
-    if aux["xctrace"] == "available":
+    aux_rows = [("fandhe_kernel_gpu_ts", kgpu), ("opp_transfer_excl", osp)]
+    if avail:
         fk = pure_kernel(p("fandhe_reuse.trace.xml"), aux, "bench-fandhe", f_warm, f_iters)
-        ok = pure_kernel(p("candle_split.trace.xml"), aux, "bench-candle", o_warm, o_iters)
+        ok = pure_kernel(p("candle_split.trace.xml"), aux, "bench-candle", o_warm, o_iters,
+                         lead=o_warm + o_iters, trail=1)
         values += [("fandhe_pure_kernel", fk, CLOCK), ("opp_pure_kernel", ok, CLOCK)]
-    aux_rows = [("fandhe_kernel_gpu_ts", kgpu), ("opp_transfer_excl", osp),
-                ("opp_transfer_excl_traced", osp_t), ("fandhe_window_traced", fw_t)]
+        aux_rows += [("opp_transfer_excl_traced", osp_t), ("fandhe_window_traced", fw_t)]
+    # xctrace unavailable（F2 のみ）では trace 下の窓・純カーネルを取らず、これらの行を出さない（attrib は unavailable 扱い）
     vt = "cell\tquantity\tvalue\tclock\n" + "".join(f"{CELL}\t{q}\t{v:.6f}\t{c}\n" for q, v, c in values)
     at = "quantity\tvalue\n" + "".join(f"{q}\t{v:.6f}\n" for q, v in aux_rows)
     return vt, at
@@ -293,7 +306,7 @@ DIAG = (f"  [label] N=1024 requested_tile=T\n    commit_wait.kernel_gpu: median=
         f"  [label] N={SIZE} requested_tile=T\n    commit_wait.kernel_gpu: median=60.0000 ms  q1=0 ms  q3=0 ms\n")
 
 
-def _build(d, xc="available", f_durs=(60, 61, 62, 63, 64), o_durs=(50, 51, 52, 53, 54), diag=DIAG, route=ROUTE,
+def _build(d, xc="available", f_durs=(60, 61, 62, 63, 64), o_durs=(100, 101, 102, 103, 104, 50, 51, 52, 53, 54, 77), diag=DIAG, route=ROUTE,
            f_doctype="", ref_bad=False, dup_fandhe=False):
     raw = os.path.join(d, "raw")
     os.makedirs(raw)
@@ -301,9 +314,9 @@ def _build(d, xc="available", f_durs=(60, 61, 62, 63, 64), o_durs=(50, 51, 52, 5
     w("fandhe_reuse.jsonl", _rec("gemm", "reuse", 64.0) * (2 if dup_fandhe else 1))
     w("fandhe_fresh.jsonl", _rec("gemm", "fresh", 70.0))
     w("candle_gemm.jsonl", _rec("gemm", "fresh", 56.0))
-    w("candle_split.jsonl", _rec("gemm-transfer-split", "fresh", 42.0))
+    w("candle_split.jsonl", _rec("gemm_transfer_incl", "fresh", 90.0) + _rec("gemm_transfer_excl", "fresh", 42.0))
     w("fandhe_reuse_traced.jsonl", "noise line\n" + _rec("gemm", "reuse", 65.0))
-    w("candle_split_traced.jsonl", _rec("gemm-transfer-split", "fresh", 43.0))
+    w("candle_split_traced.jsonl", _rec("gemm_transfer_incl", "fresh", 91.0) + _rec("gemm_transfer_excl", "fresh", 43.0))
     extra = [("kernel_task", 9.0), ("bench-fandhe", 0.5)]
     w("fandhe_reuse.trace.xml", _xml("bench-fandhe", f_durs, extra, f_doctype, ref_bad))
     w("candle_split.trace.xml", _xml("bench-candle", o_durs))
@@ -330,12 +343,34 @@ def self_test():
         assert v["fandhe_window"][2] == "64.000000" and v["opp_window"][2] == "56.000000"
         # fandhe: 5 区間（warmup 2 を捨てて 62,63,64 の中央値 63）。別プロセス・短区間は除外される
         assert v["fandhe_pure_kernel"][2:] == ["63.000000", CLOCK], v["fandhe_pure_kernel"]
+        # candle: 転送込み 5 本・転送除外 5 本・checksum 1 本。転送除外の測定反復(warmup 2 を捨てた 52,53,54)の中央値 53
         assert v["opp_pure_kernel"][2] == "53.000000"
         assert "fandhe_kernel_gpu_ts\t60.000000" in at and "fandhe_window_traced\t65.000000" in at
         # フォールバック: xctrace unavailable なら純カーネル行を出さない
         d2, rule2 = _build(os.path.join(t, "fb"), xc="unavailable")
         vt2, _ = convert(d2, rule2)
         assert "pure_kernel" not in vt2
+        _, at2 = convert(d2, rule2)
+        assert "traced" not in at2 and "opp_transfer_excl\t42.000000" in at2
+        # xctrace unavailable では trace 関連ファイルが無くても変換できる
+        for n in ("fandhe_reuse_traced.jsonl", "candle_split_traced.jsonl", "fandhe_reuse.trace.xml", "candle_split.trace.xml"):
+            os.remove(os.path.join(d2, "raw", n))
+        convert(d2, rule2)
+        # 旧 task 名（実出力に存在しない）は拒否される
+        d2b, r2b = _build(os.path.join(t, "oldname"))
+        open(os.path.join(d2b, "raw", "candle_split.jsonl"), "w").write(_rec("gemm-transfer-split", "fresh", 42.0))
+        _expect(lambda: convert(d2b, r2b), "old task name", "exactly 1")
+        # 区間本数が測定のみ(5)の場合は INVALID（incl/checksum を含む全本数を要求する）
+        d2c, r2c = _build(os.path.join(t, "candle5"), o_durs=(50, 51, 52, 53, 54))
+        _expect(lambda: convert(d2c, r2c), "candle count", "count")
+        # XML サイズ上限は全量読み込み前に効く
+        global XML_MAX_BYTES
+        saved, XML_MAX_BYTES = XML_MAX_BYTES, 10
+        try:
+            d2d, r2d = _build(os.path.join(t, "big"))
+            _expect(lambda: convert(d2d, r2d), "xml too large", "too large")
+        finally:
+            XML_MAX_BYTES = saved
         # 異常系（すべて停止すること）
         d3, r3 = _build(os.path.join(t, "cnt"), f_durs=(60, 61, 62, 63))
         _expect(lambda: convert(d3, r3), "interval count mismatch", "count")
