@@ -241,6 +241,14 @@ name = "cuda_mlp_event_bench_4147"
 test = true
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #4150: G-CUDA-INF の kernel_wait（導出値）を GPU 実行の幅と待ちに分ける診断 example。
+# `cuda_mlp_event_bench_4147` と同じ理由で `internal-diagnostics` を要求する（依存の追加・変更ではない）。
+# 純関数の単体テストを CI で実行するため `test = true` を明示する。
+name = "cuda_infer_chain_event_diag_4150"
+test = true
+required-features = ["internal-diagnostics"]
+
 [[test]]
 # イシュー #1033・PR #1071 codex-review P1 指摘の是正: `cpu_cuda_tiled_
 # pipeline_parity` は `CudaGemm::compile_tiled_pipeline_variant`・

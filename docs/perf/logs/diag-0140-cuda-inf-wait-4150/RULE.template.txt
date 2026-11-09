@@ -1,0 +1,67 @@
+RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
+（計測前に単独コミットして固定する。計測後に緩めない。派生元: diag-0140-torch-gb10-mlp-4149/RULE.template.txt・#4150）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_4150.py は止まる）
+
+1. 目的
+  #4150: G-CUDA-INF（<cuda-node> = DGX GB10・推論 batch 64）の導出値 kernel_wait（0.11.0 で約 63.2 µs。docs/perf/infer-reuse-phase-breakdown.md §12）を、
+  GPU 実行の幅と待ち（起動遅延・間隙・同期復帰）に分けて記録する（判定・分類ではなく内訳。record_only）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・NVRTC カーネル・unreached_0140.tsv（分類の反映は #4168）。
+  Graph 腕は追加しない（推論 Graph は R1(b) 失敗で undetermined、学習 Graph #3258 は ADOPT・既定 OFF のまま。結果はその読みの材料として記録するのみ）。
+
+2. 対象 tree
+  【記入: タグまたは SHA】の git archive。PARAMS の tree_sha に完全な SHA を書く。
+  tree_fingerprint は `python3 -I aggregate_4150.py --fingerprint <tree-dir>` の値。送信側 tree とノード側 tree で一致を計測前に確認し、
+  1 件でも差があれば fail-closed で停止する。本成果物ディレクトリは指紋の対象外。
+  【記入: `git diff v0.14.0 <tree_sha> -- crates/backend-cuda/src` の差分有無と、あればその要約】
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（5）。各ラウンドの前に実機ロックを取得し、compute プロセス 0 件・GPU 使用率 0 が 3 サンプル連続・
+  load1 < 1.0 を 30 秒間隔で最大 30 分待つ。不通過は gate.txt に TIMEOUT／INVALID と記録し、そのラウンドを正式系列から外す
+  （status=partial・表題は「参考」・確度は書かない）。同じ GB10 を #4147・#4149 の実測も使うため、実機ロックで直列化し並走させない。
+  1 round = 1 プロセス（example の warmup と計測反復は PARAMS の warmup・iters）。反復ごとに P・E・I の順を巡回させ、F は各反復の末尾に測る。
+  nsys 補助（nsys_aux_4150.sh）は全 round の後に 1 回、record_only。時間値は判定に使わない。
+  計測中にビルド・集計・転送を並走させない。run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし旧系列を残す。
+  全反復で出力 bit 一致（example が assert）。checksum は round 間で一致しなければ集計が止まる。
+  到達不能な量（nsys 不通など）は unavailable と記録し、推定値で埋めない。
+
+4. 腕と区間の定義（単位 µs）
+  チェーン: 常駐 w・bias を upload、入力 H2D、L1 = 784→256＋bias＋ReLU 融合、L2 = 256→10＋bias、download。L1 発行直後に入力を、L2 発行直後に中間を drop（本番どおり）。
+  P: host Instant のみ（h2d_upload・l1_issue・l2_issue・download・download_again・kernel_wait_derived = download − download_again・total）。
+  E: P と同じチェーンに event 4 本（e0=upload 前、e1=upload 後、e2=L1 発行直後、e3=L2 発行直後）。up_gpu=e0→e1、l1_span=e1→e2、l2_span=e2→e3、chain_gpu=e1→e3。
+  I: drain 後に event 対で実物の linear_forward_device を層ごとに 1 回挟む（l1_iso・l2_iso）。H2D・確保・event 生成は区間外。
+  F: sync_idle・launch_floor_1x1・tiny_roundtrip・event_record_pair（#4149 の cuda_fixed と定義を揃える）。
+  stream は internal-diagnostics 下の Legacy（NULL）stream であることを example が前提検査する。
+
+5. 導出式（内訳であり合否判定ではない。round ごとに腕別反復中央値から計算し、round 間の中央値と最小〜最大を出す）
+  E_sum = l1_iso + l2_iso（実測。起動立ち上がりを含む GPU 実行幅）。chain_gpu（実測）。gpu_gap = chain_gpu − E_sum（実測の差。負値もありうる）。
+  host_issue_sum = P の l1_issue + l2_issue。gpu_tail = max(0, chain_gpu − host_issue_sum)（推定）。
+  wait_resid = kernel_wait_derived − gpu_tail（推定。起動遅延・同期復帰・event tracking 等。tiny_roundtrip と並べて読む）。
+  share_exec = E_sum / kernel_wait_derived（推定）。share_wait = 1 − share_exec。event_perturbation = E 腕 download / P 腕 download − 1（実測）。
+  分類（優先順に固定し事後に動かさない）:
+    1. event_perturbation > 0.10 なら確度を必ず「低」にし理由を書く。
+    2. share_exec ≥ 0.5 なら「GPU 実行が支配」。
+    3. それ以外は「待ち（起動遅延・間隙・同期復帰）が支配」。
+    4. 確度「高」は、全 round が 0.5 の同じ側かつ NB-RANGE5 帯が 0.5 をまたがない場合のみ。それ以外は「低」。
+  副次: l1_iso・l2_iso を docs/perf/infer-chain-fixed-cost-reduction-3205.md §3 の「占有率」推定と突き合わせ、推定のまま残すか実測で置き換えるかを結果欄に書く。
+  相手側（#4149 実測）が入手できる場合のみ aggregate_4150.py --opp-tsv で対応表を出す。無ければ unavailable（推定で埋めない）。
+  非対称: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの実物、PyTorch の mm_event は純 GEMM。
+
+6. ノイズ帯
+  NB-RANGE5（docs/perf/noise-band-decision.md。round 別値の最小〜最大を帯とする）。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパス・ユーザー名を書かない（<cuda-node>・<home> と書く）。
+  集計は同梱の aggregate_4150.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_4150.py・cuda_infer_chain_event_diag_4150.rs を変更すると sha256 が不一致になり集計・run_round.sh は止まる。
+
+## PARAMS
+fixed-at-utc: <YYYY-MM-DDThh:mm:ssZ>
+issue: 4150
+rounds: <ラウンド数。5>
+tree_sha: <40 桁 hex>
+tree_fingerprint: <64 桁 hex>
+example_sha256: <64 桁 hex。crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs>
+aggregate_script_sha256: <64 桁 hex>
+warmup: <50>
+iters: <200>
