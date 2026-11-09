@@ -30,6 +30,10 @@ CELLS = (
     + [f"infer-host-{b}" for b in BATCHES]
     + ["train-fresh", "train-reuse"]
 )
+# bench-fandhe の計測プロトコル所定値（bench-common の WARMUP_ITERS／MEASURE_ITERS = 20／20、train は
+# TRAIN_WARMUP = 20・計測 80 step）。off／on 両腕でこの値に揃っていない計測は比較不能として止める。
+EXPECTED_FRAMEWORK = "fandhe-ai"
+EXPECTED_PROTOCOL = {"infer": (20, 20), "train": (20, 80)}
 ATTRIBUTION = {
     "fresh": "stream 変更のみ（capture に届かない）",
     "reuse": "stream 変更のみ（常駐入力の本番経路は capture に届かない）",
@@ -148,6 +152,11 @@ def load_cell(d, label, arm, cell):
         recs.append(o)
     if len({(r["warmup"], r["iters"], r["framework"]) for r in recs}) != 1:
         raise Bad(f"{path}: warmup/iters/framework が run 間で不一致")
+    want = EXPECTED_PROTOCOL[exp_task]
+    got = (recs[0]["warmup"], recs[0]["iters"])
+    if recs[0]["framework"] != EXPECTED_FRAMEWORK or got != want:
+        raise Bad(f"{path}: framework/warmup/iters が事前登録値と不一致"
+                  f"（期待 {EXPECTED_FRAMEWORK}/{want[0]}/{want[1]}、実 {recs[0]['framework']}/{got[0]}/{got[1]}）")
     return recs
 
 
@@ -405,6 +414,8 @@ def judge(d, rule_path, label):
     ratio_fail, rounds_ok_host = [], False
     for cell in CELLS:
         off, on = data[cell]["off"], data[cell]["on"]
+        if (off[0]["framework"], off[0]["warmup"], off[0]["iters"]) != (on[0]["framework"], on[0]["warmup"], on[0]["iters"]):
+            raise Bad(f"{cell}: off／on で framework/warmup/iters が不一致（比較不能）")
         sums = {r["checksum"] for r in off + on}
         csum_ok = len(sums) == 1
         if not csum_ok:
@@ -496,7 +507,11 @@ def make_fixture(d, label="t", ratios=None, **opt):
                 if opt.get("csum_bad") == c and a == "on" and r == 2:
                     cs = 1.6
                 o = {"framework": "fandhe-ai", "version": "0.14.0", "task": task, "device": "cuda", "size": size,
-                     "median_s": med, "checksum": cs, "warmup": 3, "iters": 10, "mode": mode}
+                     "median_s": med, "checksum": cs, "warmup": 20, "iters": 80 if task == "train" else 20, "mode": mode}
+                if opt.get("proto_skew") == c and a == "on":
+                    o["iters"] = 1
+                if opt.get("fw_skew") == c and a == "on":
+                    o["framework"] = "other"
                 if c.startswith("infer-host"):
                     o["diag"] = "host_input_reuse"
                 lines.append(json.dumps(o))
@@ -644,7 +659,8 @@ def self_test():
     for kw in ({"r3_trunc": True}, {"r3_rc": True}, {"r3_status": True}):
         v, u, rj = run(**kw)
         assert v == "UNDETERMINED", (kw, v, u, rj)
-    for kw in ({"dup": "train-reuse"}, {"missing": "infer-reuse-64"}, {"order_swap": True}):
+    for kw in ({"dup": "train-reuse"}, {"missing": "infer-reuse-64"}, {"order_swap": True},
+               {"proto_skew": "infer-fresh-64"}, {"fw_skew": "train-reuse"}):
         try:
             run(**kw)
         except Bad:

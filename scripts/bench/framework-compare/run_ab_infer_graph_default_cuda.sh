@@ -16,6 +16,8 @@
 #     bash run_ab_infer_graph_default_cuda.sh 4163-gb10
 # bash 3.2 互換（mapfile・連想配列・eval 不使用）。jq 不使用。失敗は捏造せず skipped へ記録し非 0 終了。
 set -u
+# cd 後は $0 が相対パスのままだと自身を指さなくなるため、cd 前に自身の絶対パスを固定する（runner_sha256 の照合・記録で共用）。
+SELF_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")" || exit 1
 # shellcheck source=./bench_fandhe_lock_restore.sh
 source ./bench_fandhe_lock_restore.sh
@@ -84,7 +86,7 @@ rule_pinned() { # <key> <file>
   want="$(sed -n "s/^  $1: \\([0-9a-f]\\{64\\}\\)\$/\\1/p" "$RULE_FILE" | head -n1)"
   [[ -n "$want" && "$want" == "$(sha256_of "$2")" ]]
 }
-for pair in "runner_sha256:$0" "gates_sha256:$GATES_SH" "patch_sha256:$LOGDIR/default-on.patch" \
+for pair in "runner_sha256:$SELF_PATH" "gates_sha256:$GATES_SH" "patch_sha256:$LOGDIR/default-on.patch" \
             "assumption_list_sha256:$LOGDIR/default-off-assumption-tests.txt" \
             "aggregate_sha256:$LOGDIR/aggregate_4163.py" "bench_main_sha256:bench-fandhe/src/main.rs"; do
   rule_pinned "${pair%%:*}" "${pair#*:}" || { echo "error: RULE.txt の ${pair%%:*} と実ファイルの sha256 が一致しない" >&2; exit 1; }
@@ -154,7 +156,7 @@ echo "${BIN_SHA}  bench-fandhe-${LABEL}" >"$OUT/sha-fandhe-${LABEL}.txt"
   echo "nvidia_driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)"
   echo "rustc=$(rustc --version 2>/dev/null)"
   echo "rule_sha256=${RULE_SHA}"
-  echo "runner_sha256=$(sha256_of "$0")"
+  echo "runner_sha256=$(sha256_of "$SELF_PATH")"
   echo "gates_sha256=$(sha256_of "$GATES_SH")"
   echo "patch_sha256=$(sha256_of "$LOGDIR/default-on.patch")"
   echo "assumption_list_sha256=$(sha256_of "$LOGDIR/default-off-assumption-tests.txt")"
