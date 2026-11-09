@@ -372,3 +372,92 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - **状態**: 案・所有者回答待ち。承認欄は未取得で、回答コメントのリンクは回答後に §5.16 と本節へ追記する。
 - 本節は `unsafe`・定数・コード・FMA 契約・tolerance・baseline を変更しない。§12.13 の所有者判断（既定 OFF のまま。ON に戻すのは新しい事前登録 A/B に合格したときだけ）も変更しない。
 
+
+## 14. 2026-11-09 現行 main 基準の再監査（イシュー #4157）
+
+本節は **監査結果の記録であり、`SME_PRODUCTION_ENABLED` を `true` にする承認ではない**。既定 ON への反転は #4165 の別手順（事前登録 A/B〈#4156〉と所有者承認）に従う。§1〜§13 は当時の記録として変更しない。
+
+### 14.1 状態
+
+| 項目 | 内容 |
+|------|------|
+| 監査対象 | origin/main `8aedf2be6`（以降の行番号はこの sha 基準） |
+| `SME_PRODUCTION_ENABLED` | `false` のまま（`crates/backend-cpu/src/gemm_blis/mod.rs:3555`）。`SME_THIN_M64_ENABLED` も `false`（同 3619） |
+| 監査方法 | **自己点検（独立 security-auditor subagent は未実施）**。本作業の実行環境から subagent を起動できなかったため、実装担当が全 `asm!` と呼び出し側を読み直した。したがって依頼の「独立監査」は**未達**で、閉じる条件 1 は満たしていない（§14.9） |
+| 実行環境 | x86_64 Linux。SME 実機での再実行なし（クロス型検査のみ） |
+| 変更範囲 | `.md` のみ（`.rs`・`Cargo.toml`・`Cargo.lock`・tolerance・baseline は不変） |
+
+### 14.2 前回監査からの差分
+
+再現: `git diff --stat <基準> 8aedf2be6 -- crates/backend-cpu/src/{gemm_blis/microkernel/sme.rs,sme_detect.rs,gemm_blis/microkernel/sme_thin_m64.rs,gemm_blis/mod.rs,gemm_blis/microkernel.rs}`
+
+| ファイル | 基準 | 差分 | 判定 |
+|----------|------|------|------|
+| `gemm_blis/microkernel/sme.rs` | `53d70a83b`（§12.11） | 4 行（コメントのみ。発見 a・b の是正） | `asm!` 本体・オペランド・options は不変 |
+| `sme_detect.rs` | `53d70a83b` | 12 行（コメントのみ。発見 c・d の是正） | 同上 |
+| `gemm_blis/microkernel/sme_thin_m64.rs` | `bdfe6a624`（§13.6） | **差分なし** | §13.6 を引き継ぐ |
+| `gemm_blis/mod.rs` | `bdfe6a624` | +42／-26 | 既定値を `false` へ戻す変更、ドリフト検出テストの改名、`sme_production_enabled()` の新設（下記 R1） |
+| `gemm_blis/microkernel.rs` | `bdfe6a624` | 差分なし | `debug_assert!(res.is_ok())`（890 付近）は §12.11 の P2 対応として既存 |
+
+注: `53d70a83b` 比で `sme_thin_m64.rs` は新規 449 行だが、それは §13 で監査済みの #3235 の追加分である。
+
+### 14.3 機械的インベントリ
+
+再現: `grep -n 'asm!\|unsafe fn\|unsafe {' crates/backend-cpu/src/gemm_blis/microkernel/{sme,sme_thin_m64}.rs crates/backend-cpu/src/sme_detect.rs`
+
+- 本番の `asm!` は 4 か所で §12.3・§13.2 の合算と一致する: `sme.rs:127`（`has_pending_lazy_za_save`）・`sme.rs:201`（`compute`）・`sme_detect.rs:162`（`rdsvl_bytes`）・`sme_thin_m64.rs:129`（`compute_thin_m64`）。
+- テスト専用の `asm!` は 3 か所（`sme.rs:911・1005・1107`）で件数一致。
+- 本番の `unsafe fn` は 7（`has_pending_lazy_za_save`・`compute`・`kernel_unchecked_with_ldc`・`kernel_unchecked`・`rdsvl_bytes`・`compute_thin_m64`・thin の `kernel_unchecked`）で一致。
+
+### 14.4 項目別の再突合
+
+| ID | 結果 | 根拠（`file:line`） |
+|----|------|---------------------|
+| M1 長さ・境界検査 | 維持 | `sme.rs:301-302` の `check_panel_lengths`／`check_c_tile_bounds`（`checked_mul`／`checked_add`）が asm の手前にある。thin は `check_bounds`（`sme_thin_m64.rs:236`） |
+| M2 lazy ZA save の保護 | 維持 | `sme.rs:311` で `TPIDR2_EL0` を確認し、非ゼロなら `scalar_fallback` へ。thin も同様（`sme_thin_m64.rs:240`）。`microkernel.rs:828` の `current_thread_capable` も実行スレッド自身で確認 |
+| M3 SVL・OS 判定の順序 | 維持 | `sme_detect.rs:204-212` は OS フラグが偽なら `rdsvl` を実行せず、実行スレッド自身で SVL を読み直す |
+| M4 clobber 宣言 | 維持 | `sme.rs:201` 以降で `v0`〜`v31`・`p0`〜`p15`・`ffr`・`w12` を列挙。`preserves_flags` は付けていない |
+| M5 `smstart`／`smstop` の対 | 維持 | 1 つの `asm!` 内で対にして閉じる |
+| L1〜L3 | 変更なし | L3 は §12.11 で所有者が受け入れ済み。新しい所見なし |
+| P1 `debug_assert!` | 維持 | `microkernel.rs:890` |
+| R1 公開面 | **新規確認** | `sme_production_enabled()`（`mod.rs:3602`）は `#[doc(hidden)] pub` の読み取り専用関数で、`backend-cpu/src/lib.rs:246` から再エクスポートされる。`crates/facade` には参照がなく（`grep -rn sme_production_enabled crates/facade` は 0 件）、サポート対象の公開面ではない。値を変える口ではなく、環境変数・実行時設定で経路を切り替える仕組みも無い。**指摘にはしない** |
+| G1 ゲート式 | 維持 | `mod.rs:3590` の `SME_PRODUCTION_ENABLED && sme_shape_eligible(..)` は `false` の短絡で `try_new` に到達しない。ドリフト検出は `mod.rs:5848-5858` |
+| D1 依存 | 変更なし | `Cargo.toml`／`Cargo.lock` は不変 |
+
+補足（指摘にしない）: #4156 の ON 腕パッチは定数だけを反転しドリフト検出テストは反転しない。ON 腕ビルドで `sme_production_disabled_after_gb10_reject` が失敗するのは A/B ハーネス側の想定どおりで、監査の欠陥ではない。
+
+### 14.5 独立 security-auditor 監査の要約
+
+**未実施**（§14.1）。本節には転記する要約が無い。独立監査の依頼は、`.claude/agents/quality/security-auditor.md` を起動できる環境で、基準 sha `8aedf2be6`・§14.2 の範囲表・§14.4 の観点 ID・§12.11 の受理条件・§13.6 の P2 を渡して行う。
+
+### 14.6 lint の再実行（x86_64 Linux からのクロス型検査）
+
+- `cargo clippy -p fandhe-ai-backend-cpu --lib --tests --locked --target aarch64-apple-darwin -- -D warnings`: 成功。
+- 同 `--target aarch64-unknown-linux-gnu`: 成功。
+- `--lib` に `-W clippy::undocumented_unsafe_blocks -W clippy::missing_safety_doc` を付けた報告専用実行: 警告は `neon.rs:236`・`softmax.rs:235`・`softmax.rs:243` の 3 件のみ（§12.5・§13.5 の基準と同じ既存分）。SME の 3 ファイルは 0 件。
+- **SME 実機テストは本ホストで未実施**。直近の実機結果は §12.5（`sme.rs` 11 件）と §13.5（thin 4 件）。`sme.rs`・`sme_detect.rs` は基準からコメントのみ、`sme_thin_m64.rs` は差分なしのため、その結果は現行 main にも当てはまると判断するが、再実行はしていない。クロス型検査はテスト PASS の代わりにならない。
+
+### 14.7 発見事項と引き継ぎ
+
+- §12.6 の a〜d: 14.2 の差分で是正済みを確認（閉じる）。e と L3 は従前どおり引き継ぎ（L3 は所有者受け入れ済み）。
+- §13.6 の P2 #1（thin のゲートが `SME_PRODUCTION_ENABLED` に従属しない）と P2 #2（thin 側に lazy-ZA の回帰テストが無い）: 既定 OFF のため未対応のまま引き継ぐ。thin を有効化する前に対応が要る。
+- 新しい所見: なし（自己点検の範囲）。
+
+### 14.8 OWASP Top 10
+
+- A03: asm 手前の長さ・境界検査が残っている。macOS の `sysctl` は固定パス `/usr/sbin/sysctl`・固定引数・`env_clear()` で、外部入力からコマンドを組み立てない（`thread_limit.rs:325-327`）。
+- A04／A05: 既定 OFF で、環境変数・実行時設定による切り替えは無い。
+- A06: 依存の追加・更新なし。
+- A08: すべての `unsafe` に SAFETY コメントがある。既定反転は #4156 と所有者承認の後に限る。
+- 秘密情報: 混入なし。
+
+### 14.9 是正 issue の提案と閉じる条件
+
+- 是正 issue は起票しない（所有者承認後）。候補は §13.6 の P2 #1・#2 のみで、既存の追跡 issue は未確認。
+- イシュー #4157 の閉じる条件 1（独立監査の記録）は**未達**。本節は自己点検の記録であり、独立監査の完了後に §14.5 を埋める必要がある。
+
+### 14.10 再開条件との関係
+
+- 条件 3（`unsafe asm!` の監査）: 自己点検の結果は「新しい欠陥なし」だが、独立監査が未実施のため充足とは扱わない。
+- 条件 1・2: #4156 は CLOSED だが、PR #4194 は道具立てのみで A/B の実測結果は無く、未判定。
+- 既定 ON の判断は #4165 と所有者承認による。D-C（#3018 コメント 6111643437）は条件付き承認のまま。
