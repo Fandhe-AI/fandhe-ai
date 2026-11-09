@@ -1,0 +1,7 @@
+# イシュー #4163: 「推論 Graph 既定 OFF」を前提とするテストの事前リスト（測る前に固定）。
+# R3（既定 ON の波及）で腕 A（default-on.patch 適用）にだけ現れる失敗のうち、ここに載るものは
+# 「既定 OFF 前提（反転 PR で更新が要る）」、載らないものは「阻害」に分類する。
+# 形式: <テストバイナリ>::<テスト名>（バイナリは lib か tests/ 配下のファイル名〈拡張子なし〉）。
+# 走査手順は README.md「既定 OFF 前提テストの走査」を正とする。
+lib::graph::tests::infer_graph_default_is_off
+graph_capture_real_device_optin_off::opt_in_off_keeps_legacy_stream_and_returns_none

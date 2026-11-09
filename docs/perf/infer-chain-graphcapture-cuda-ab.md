@@ -89,3 +89,28 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 - facade 公開 API（`set_cuda_graph_infer_enabled` 相当）の要否判断（#3115 で公開を決定し、#3116 で公開済み。効果の実測は Phase 8）
 - `cuGraphExecUpdate`（`unsafe`・承認要）による batch 可変対応
 - Metal への同等機構
+
+## 6. 既定化の影響評価（イシュー #4163。部品のみ・未実測）
+
+推論 Graph（`FANDHE_AI_CUDA_GRAPH_INFER`）を既定にした場合の影響を、事前登録した A/B で評価する。**本節の時点（PR-1）は計測部品の追加だけで、GB10 の実測はまだない。** 記録先は `logs/cuda-infer-graph-default-ab-4163/`（手順は同 `README.md`）。`INFER_GRAPH_DEFAULT_ENABLED` の反転は本イシューでは行わない（所有者承認・結線は #4167）。
+
+### 6.1 計画の前提を変える所見（コード確認）
+
+- **0.14.0 の本番経路（スコアボード G-CUDA-INF reuse）は capture に届かない。** bench の `run_infer_reuse` は #3272 以降、常駐入力の `predict_resident_input` → `DeviceParamStore::predict_device_chain_resident` を通る。`predict_device_chain_once` が `linear_chain_forward_captured` を呼ぶのは `ChainInput::Host` のときだけ（`crates/autodiff/src/optim/device_store.rs`）。したがって本番 reuse セルでの既定 ON の効果は created stream 化（event tracking の無効化）だけになる。§3 の 0.861 はホスト入力だった旧 bench の値で、同じ式で本番セルへ当てはめない。
+- そのため capture が届くホスト入力経路を窓内で呼ぶ診断腕 `--diag-host-input-reuse`（`bench-fandhe`。`--task infer --mode reuse --device cuda`、既定でない `--out` の明示が必須。出力行に `diag":"host_input_reuse"`）を追加した。常駐入力経路の capture 対応は製品の挙動の変更になるため実装せず、#4167 への所見とする。
+- **R1(b) の原因 2 は #3637 で是正されている可能性がある**（チェーン外の操作を待機・再試行させる。結果は予測しない）。現ツリーで事前登録どおり（`--test-threads` 指定なし）に再実行し、合否と失敗箇所を記録する。
+- **既定 ON は学習にも効く。** `CudaDevice::new` の stream 種別は `step_graph_mode || infer_graph_stream_requested || train_graph_stream_requested` の OR で、推論の既定 ON は全 CUDA 利用者の既定 stream を created に変える。train の fresh／reuse を非後退セルに含める。
+
+### 6.2 設計
+
+- 腕: off = 3 変数未設定、on = `FANDHE_AI_CUDA_GRAPH_INFER=1`（同一バイナリ。env=1 と const `true` は同じ `resolve_infer_requested` を通り同値）。const 反転ビルド（`default-on.patch`）は正しさの R3（既定 ON の波及テスト）にだけ使う。
+- セル（11）: infer fresh／reuse（常駐入力）／reuse-host × batch {64, 1024, 4096}、train fresh／reuse × 64。5 round。
+- 前提ゲート: R0（非後退）・R1(a)（capture 実機）・R1(b)（並列推論 5 回）・R2（off／on のダンプ一致）・R3（既定 ON の全実機テスト差分）。判定規則は `RULE.template.txt`（PR-2 で `RULE.txt` として測る前に単独コミット）。
+
+### 6.3 状態
+
+| 項目 | 状態 |
+|---|---|
+| 計測部品（bench 診断腕・ランナー・ゲート・集計・雛形） | 追加済み（PR-1）。GB10 での動作は未検証 |
+| RULE.txt の固定 | 未（PR-2） |
+| GB10 実測・判定 | 未（PR-3） |
