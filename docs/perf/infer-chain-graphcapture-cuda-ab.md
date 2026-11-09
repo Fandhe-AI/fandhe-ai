@@ -114,3 +114,41 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 | 計測部品（bench 診断腕・ランナー・ゲート・集計・雛形） | 追加済み（PR-1）。GB10 での動作は未検証 |
 | RULE.txt の固定 | 未（PR-2） |
 | GB10 実測・判定 | 未（PR-3） |
+| #4167 の判断 | 結線見送り（ADOPT 入力なし。§7） |
+
+## 7. #4167 既定経路への結線の判断（見送り）
+
+### 7.1 判断
+
+結線は見送る。`INFER_GRAPH_DEFAULT_ENABLED = false`・`TRAIN_GRAPH_DEFAULT_ENABLED = false` を維持し、コードは変更しない。これは自動運転セッションでの安全側の判断であり、所有者が見送りを承認したものではない。所有者はいつでも見直せる。
+
+### 7.2 理由（入力の棚卸し）
+
+- 推論 Graph の既定化（#4163）: PR #4199 は計測部品（PR-1）のみ。RULE.txt の固定・GB10 実測・`judge-4163.md` がなく、ADOPT 判定が存在しない。旧 A/B（§3。#3205 の再判定を含む）も verdict は `undetermined`。
+- 学習 Graph の既定化: `docs/backend-cuda-graph-step-capture-design.md` §8.12 で見送り確定。Phase 3 の A/B 対象にも入っていない。
+- その他の CUDA 項目（#4150 ほか）: 診断のみで、ADOPT 候補ではない。
+- 既定反転の前提となる所有者承認も得ていない。
+
+Phase 3 由来の CUDA 系 ADOPT は 0 件で、結線する入力がない。
+
+### 7.3 前後比較
+
+結線がないため「変更なし（0.14.0 の既定経路のまま）」と記録する。#4168 の CUDA セル（G-CUDA-INF ほか）は結線による変化なしとして引き継ぐ。
+
+### 7.4 再開条件（すべて満たしたときだけ、新しい結線イシューで行う）
+
+1. #4163 の PR-2（RULE.txt を測る前に単独コミット）と PR-3（GB10〈`<cuda-node>`〉実測・`judge-4163.md`）が完了し、判定が ADOPT であること（R1(b)・R3 を含む）。
+2. 所有者が既定反転を承認し、結線イシューを起票すること。
+3. 反転 PR で次を行う。
+   - const を反転する。
+   - `default-off-assumption-tests.txt` の 2 件（`lib::graph::tests::infer_graph_default_is_off`・`graph_capture_real_device_optin_off::opt_in_off_keeps_legacy_stream_and_returns_none`）を既定 ON 前提へ更新する。
+   - R3 相当（既定 ON での `#[ignore]` 実機テスト全件の差分）を行う。
+   - 推論・学習の両方で前後比較を記録する（既定 ON は `requires_created_stream` を通じて全 CUDA 利用者の stream を created に変える）。
+
+### 7.5 所見（結線で得られる効果の上限）
+
+§6.1 のとおり、本番の G-CUDA-INF reuse セル（常駐入力 `predict_device_chain_resident`）は capture に届かない。ADOPT 後に反転しても本番セルでの効果は created stream 化だけになる。常駐入力経路の capture 対応は製品の挙動の変更で、別の A/B と所有者承認が要る。
+
+### 7.6 注意
+
+#4163 は部品のみの PR #4199 で閉じられている。reopen するかは所有者または main セッションの判断に委ね、本記録では扱わない。

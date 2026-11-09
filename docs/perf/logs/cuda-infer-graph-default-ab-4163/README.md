@@ -2,6 +2,8 @@
 
 **状態: PR-1 時点。計測部品のみで実測なし。GB10 上の動作はすべて未検証。** 記録 doc は `docs/perf/infer-chain-graphcapture-cuda-ab.md` §6。
 
+#4167 は ADOPT 入力がないため既定経路への結線を見送った（記録は doc §7）。PR-2・PR-3 は未着。
+
 ## 目的
 
 推論チェーンの Graph capture（opt-in の `FANDHE_AI_CUDA_GRAPH_INFER`）を既定にしたら、推論・学習の双方にどう効くかを事前登録の A/B で測る。結果は #4167（既定化の結線または見送り。所有者承認）の判断材料にする。`INFER_GRAPH_DEFAULT_ENABLED` は本イシューでは変えない。
