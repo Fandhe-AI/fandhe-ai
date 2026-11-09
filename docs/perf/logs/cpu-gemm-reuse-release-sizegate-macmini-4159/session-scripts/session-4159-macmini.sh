@@ -49,10 +49,30 @@ step "run_ab rc=${rc}"
 A=${O}/artifacts
 F=${T}/scripts/bench/framework-compare
 mkdir -p "${A}/raw"
-# 部分一致 glob は run スクリプトが同居させる bench-fandhe-* バイナリや同接頭辞の長いラベルまで拾うため、
-# JSONL（results-<arm>-…-<label>-…jsonl）と末尾がラベルで終わる .log／.txt に限る
-cp -p "${F}/results/raw/"results-*"-4159-${label}-"*.jsonl "${F}/results/raw/"*"-4159-${label}".log "${F}/results/raw/"*"-4159-${label}".txt "${A}/raw/" 2>>"${LOG}"
-cp -p "${F}"/compare-*"4159-${label}"* "${F}"/judge-*"4159-${label}"* "${A}/" 2>>"${LOG}"
+# 部分一致 glob は label=trial と trial-long のような前方一致するラベルの別系列まで拾うため使わない。
+# arm・device・task・拡張子を既知の集合から列挙し、ファイル名全体が一致するものだけを回収する（存在するものだけ）
+L="4159-${label}"
+collect() { [ -e "$1" ] && cp -p "$1" "$2" 2>>"${LOG}"; return 0; }
+for arm in before after; do
+  for task in gemm train infer gemmdiag traindiag; do
+    collect "${F}/results/raw/results-${arm}-${L}-cpu-${task}.jsonl" "${A}/raw/"
+  done
+done
+for stem in skipped load_gate uptime compare-exit; do
+  collect "${F}/results/raw/${stem}-4159-cpu-${L}.log" "${A}/raw/"
+done
+for arm in before after; do
+  collect "${F}/results/raw/tree-4159-${arm}-${L}.txt" "${A}/raw/"
+  collect "${F}/results/raw/sha-4159-${arm}-${L}.txt" "${A}/raw/"
+  collect "${F}/results/raw/eager-release-report-4159-${arm}-${L}.txt" "${A}/raw/"
+done
+collect "${F}/results/raw/env_info-4159-${L}.txt" "${A}/raw/"
+for task in gemm train infer gemmdiag traindiag; do
+  for ext in md err; do
+    collect "${F}/compare-${task}-4159-cpu-${L}.${ext}" "${A}/"
+  done
+done
+collect "${F}/judge-4159-${L}.md" "${A}/"
 step "artifacts collected: $(ls "${A}/raw" 2>/dev/null | wc -l) raw files"
 echo "done. rc=${rc}" >>"${LOG}"
 exit "${rc}"
