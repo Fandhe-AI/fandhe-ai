@@ -39,7 +39,7 @@ BENCH_PY_SHA256="9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409
 PT="${D}/venv-torch/bin/python"
 BP="${D}/py/bench_py.py"
 EXN="target/release/examples/cpu_gemm_n256_fixed_cost_4151"
-PROBE_FILTER="sme_microcall_fixed_cost_probe"
+PROBE_FILTER="gemm_blis::tests::sme_microcall_fixed_cost_probe"
 
 if [ "${DRY}" = "1" ]; then
   echo "[dry-run] round ${RN} -> ${RD}"
@@ -104,9 +104,15 @@ rust_arm() {
     "${BENCH_FANDHE_ON}" --task gemm --device cpu --size 256 --mode "${m}" --out "${RD}/raw/rust-on.jsonl" 2>> "${RD}/raw/rust-on.err" \
       || { echo "bench-fandhe on ${m} 失敗"; return 1; }
   done
+}
+# 1 呼び出し固定費の上限の参照用 probe。cargo test 起動が CPU 負荷になるため、GEMM・PyTorch の計測窓が両方終わった後に走らせる
+# （分類に使う O・K_opp を汚さない）。失敗は非致命（c_sme を values.tsv に書かず、ON の上限欄は unavailable）。
+sme_probe() {
   # 1 呼び出し固定費の上限（off-base ツリーでだけ。ON ツリーの --lib はドリフト検出テストが落ちる）
   ( cd "${ROOT_OFF_BASE}" && cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored "${PROBE_FILTER}" --exact --nocapture --test-threads=1 ) \
-    > "${RD}/raw/sme-probe.txt" 2> "${RD}/raw/sme-probe.err" || echo "sme probe 失敗（c_sme が欠損。ON の上限欄は unavailable）"
+    > "${RD}/raw/sme-probe.txt" 2> "${RD}/raw/sme-probe.err" \
+    && grep -q "probe=microcall" "${RD}/raw/sme-probe.txt" \
+    || echo "sme probe 失敗またはレコード未出力（c_sme が欠損。ON の上限欄は unavailable）"
 }
 py_arm() {
   : > "${RD}/raw/py.jsonl"
@@ -116,6 +122,7 @@ py_arm() {
     || { echo "torch_cpu_mlp_diag 失敗"; return 1; }
 }
 if [ $((RN % 2)) -eq 1 ]; then rust_arm && py_arm; else py_arm && rust_arm; fi || { echo "round ${RN} FAILED"; exit 1; }
+sme_probe
 
 # 生出力のホスト名・ホームの絶対パスをマスクする（公開面。RULE 項 8）
 for f in "${RD}"/raw/*; do

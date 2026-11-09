@@ -37,7 +37,10 @@ import tempfile
 ARMS = ["off-base", "on-base", "off-timed", "on-timed"]
 SERIES = ["cold_first_call", "hot", "gap", "serial_t1", "forkjoin_floor_hot", "forkjoin_floor_gap"]
 TIMED_SERIES = ["hot", "gap"]
-QUANTITIES = ["W_off", "W_on", "Wf_off", "Wf_on", "O", "K_opp", "c_sme_kc0_ns", "c_sme_intercept_ns"]
+REQUIRED_QUANTITIES = ["W_off", "W_on", "Wf_off", "Wf_on", "O", "K_opp"]
+# probe 由来の上限参照用の量。OFF 腕の分類に不要で、取得不能なら values.tsv に書かない（欠損時は SME 上限欄のみ unavailable）
+OPTIONAL_QUANTITIES = ["c_sme_kc0_ns", "c_sme_intercept_ns"]
+QUANTITIES = REQUIRED_QUANTITIES + OPTIONAL_QUANTITIES
 D_KEYS = ["d_regions", "d_mr", "d_nr", "d_jobs", "d_p_used", "d_n_calls", "d_call_ns", "d_pre_ns", "d_grid_ns",
           "d_split_ns", "d_fork_wake_min_ns", "d_fork_wake_max_ns", "d_stage_in_ns", "d_alloc_ns", "d_pack_b_ns",
           "d_pack_a_ns", "d_kernel_ns", "d_stage_out_ns", "d_kernel_crit_ns", "d_join_ns", "d_region_wall_ns"]
@@ -279,7 +282,7 @@ def parse_values(text, where):
         if p[0] in vals:
             raise AggError(f"{where}: duplicate quantity {p[0]!r}")
         vals[p[0]] = ppos(p[1], f"{where}:{p[0]}")
-    miss = [q for q in QUANTITIES if q not in vals]
+    miss = [q for q in REQUIRED_QUANTITIES if q not in vals]
     if miss:
         raise AggError(f"{where}: missing quantities {miss}")
     return vals
@@ -309,8 +312,9 @@ def round_metrics(rule, ex, vals):
         }
         if a == "on":
             nc, pu = d["d_n_calls"], d["d_p_used"]
-            out[a]["sme_fixed_ub_kc0"] = ms(nc * vals["c_sme_kc0_ns"] / pu)
-            out[a]["sme_fixed_ub_icpt"] = ms(nc * vals["c_sme_intercept_ns"] / pu)
+            for key, q in (("sme_fixed_ub_kc0", "c_sme_kc0_ns"), ("sme_fixed_ub_icpt", "c_sme_intercept_ns")):
+                if q in vals:
+                    out[a][key] = ms(nc * vals[q] / pu)
     return out
 
 
@@ -338,7 +342,7 @@ def classify(rule, per_round, formal):
     if med["F2"] >= thr:
         cls, used, reason = CLASS_WINDOW, ["F2"], "fresh 窓の再現で届く"
     elif med["F1"] >= thr:
-        used = ["F1", "F1_drv"]
+        used = ["F2", "F1", "F1_drv"]  # F2 が閾値未満という判定にも依存する（RULE 項 6）
         if med["F1_drv"] >= thr:
             cls = CLASS_OWN
             reason = "GEMM 駆動部の固定費（区間別の数字は表）。「ハードの上限」は成り立たない"
@@ -436,12 +440,18 @@ def render(res):
     for s in SERIES:
         c = [fnum(ms(statistics.median(e[a]["rows"][s]["median"] for e in res["rows"]))) for a in ("off-base", "on-base")]
         md.append(f"| {s}{'（記録のみ）' if s == 'cold_first_call' else ''} | {c[0]} | {c[1]} |")
+    def sme_ub(key):
+        # 全ラウンドに値があるときだけ中央値を出す。欠損ラウンドがあれば推定で埋めず unavailable
+        if all(key in x["on"] for x in pr):
+            return fnum(statistics.median(x["on"][key] for x in pr))
+        return "unavailable"
+
     md += ["", "## SME ON の場合（記録のみ。分類は動かさない）", "",
            f"- F2 {fnum(statistics.median(x['on']['F2'] for x in pr))}・F1 {fnum(statistics.median(x['on']['F1'] for x in pr))}"
            f"・F1_drv {fnum(statistics.median(x['on']['F1_drv'] for x in pr))}",
            f"- smstart／smstop を含む 1 呼び出し固定費の上限 × 呼び出し回数 ÷ P_used（ms・上限であり実測ではない）: "
-           f"kc=0 直接計時 {fnum(statistics.median(x['on']['sme_fixed_ub_kc0'] for x in pr))}・"
-           f"切片 {fnum(statistics.median(x['on']['sme_fixed_ub_icpt'] for x in pr))}（kernel の内側。F_drv には足さない）", ""]
+           f"kc=0 直接計時 {sme_ub('sme_fixed_ub_kc0')}・"
+           f"切片 {sme_ub('sme_fixed_ub_icpt')}（kernel の内側。F_drv には足さない）", ""]
     tsv = ["key\tvalue", f"class\t{res['cls']}", f"confidence\t{'high' if res['high'] else 'low'}",
            f"status\t{'formal' if res['formal'] else 'partial'}", f"obs_ratio\t{res['obs']:.6f}",
            f"drift\t{res['drift']:.6f}"]
