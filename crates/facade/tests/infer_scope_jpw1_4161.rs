@@ -145,7 +145,6 @@ fn report_infer_jpw1_probe() {
     let tape = tape_for(Device::Cpu).unwrap();
     let store = m.init_device_param_store(&tape).unwrap();
     let rx = tape.upload_resident(&store, &x).unwrap();
-    let ry = tape.upload_resident(&store, &y).unwrap();
 
     let probe = |path: &str, f: &mut dyn FnMut()| {
         let a0 = applied();
@@ -169,9 +168,12 @@ fn report_infer_jpw1_probe() {
     });
     let config = SgdConfig::new(0.01);
     let mut store2 = m.init_device_param_store(&tape).unwrap();
+    // store_id が store に束縛された rx/ry は store2 では使えないため専用ハンドルを作る。
+    let rx2 = tape.upload_resident(&store2, &x).unwrap();
+    let ry2 = tape.upload_resident(&store2, &y).unwrap();
     probe("train_reuse", &mut || {
         let l = m
-            .train_step_resident(&mut store2, &rx, &ry, &config)
+            .train_step_resident(&mut store2, &rx2, &ry2, &config)
             .unwrap();
         let _ = l.read(&mut store2).unwrap();
     });

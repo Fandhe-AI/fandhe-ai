@@ -41,7 +41,7 @@ def parse_params(rule_path, self_sha=None):
                         break
                     in_params = False
                     continue
-                m = re.match(r"^  ([A-Za-z0-9_]+):\s*(.*?)\s*$", line)
+                m = re.match(r"^  ([A-Za-z0-9_-]+):\s*(.*?)\s*$", line)
                 if m:
                     params[m.group(1)] = m.group(2)
     need = ("fixed-at-utc", "tree_sha", "tree_fingerprint", "aggregate_script_sha256", "rounds", "arms")
@@ -139,11 +139,19 @@ def aggregate(logdir, params):
     gates = []
     for i in range(1, n + 1):
         rd = os.path.join(logdir, f"round{i}")
-        gates.append(read_gate(os.path.join(rd, "gate.txt")))
+        passed = read_gate(os.path.join(rd, "gate.txt"))
+        gates.append(passed)
         for arm in ARMS:
             for task, mode in CELLS:
                 p = os.path.join(rd, "raw", f"{arm}-{task}-{mode}.jsonl")
-                m, c = read_cell(p, arm, task, mode)
+                try:
+                    m, c = read_cell(p, arm, task, mode)
+                except AggError:
+                    # ゲート不通過ラウンドは未計測でよい（正式系列から外れ undetermined になる）。
+                    # 通過ラウンドの欠損・不正は従来どおり fail-closed で止める。
+                    if passed:
+                        raise
+                    continue
                 med[(i, arm, task, mode)] = m
                 cks[(i, arm, task, mode)] = c
     prereq = {arm: read_prereq(os.path.join(logdir, "prereq", f"{arm}.log"), arm) for arm in ARMS}
@@ -153,14 +161,16 @@ def aggregate(logdir, params):
 def judge(med, cks, gates, prereq, n):
     ratios = {}
     for cell in CELLS:
-        per = [med[(i, "inf-jpw1") + cell] / med[(i, "off") + cell] for i in range(1, n + 1)]
-        ratios[cell] = (statistics.median(per), per)
+        per = [med[(i, "inf-jpw1") + cell] / med[(i, "off") + cell] for i in range(1, n + 1)
+               if (i, "inf-jpw1") + cell in med and (i, "off") + cell in med]
+        ratios[cell] = (statistics.median(per) if per else float("nan"), per)
     checksum_ok = True
     for cell in CELLS:
-        vals = {cks[(i, arm) + cell] for i in range(1, n + 1) for arm in ARMS}
-        if len(vals) != 1:
+        vals = {cks[(i, arm) + cell] for i in range(1, n + 1) for arm in ARMS if (i, arm) + cell in cks}
+        if len(vals) > 1:
             checksum_ok = False
-    formal = all(gates) and len(gates) == n
+    complete = all((i, arm) + cell in med for i in range(1, n + 1) for arm in ARMS for cell in CELLS)
+    formal = all(gates) and len(gates) == n and complete
     premise = all(prereq.values())
     if not checksum_ok:
         verdict = "FAIL"
@@ -175,6 +185,8 @@ def judge(med, cks, gates, prereq, n):
 
 def noise_band(per):
     """NB-RANGE5（記録のみ）: 5 ラウンドの run 別比の (max-min)/median。"""
+    if not per:
+        return float("nan")
     m = statistics.median(per)
     return (max(per) - min(per)) / m if m else float("nan")
 
@@ -263,6 +275,24 @@ def self_test():
             pass
         else:
             raise AssertionError("例外が出なかった")
+    # ゲート不通過ラウンドの raw 欠損は例外でなく undetermined（ADOPT 不可）
+    n = 5
+    with tempfile.TemporaryDirectory() as d:
+        base = {c: 1.0 for c in CELLS}
+        on = {("infer", "fresh"): 0.9, ("infer", "reuse"): 0.9, ("train", "fresh"): 1.0, ("train", "reuse"): 1.0}
+        _write_fixture(d, n, base, on, gates=[True, True, True, True, False])
+        for f in os.listdir(os.path.join(d, "round5", "raw")):
+            os.remove(os.path.join(d, "round5", "raw", f))
+        med, cks, gates, prereq = aggregate(d, {"rounds_int": n})
+        assert judge(med, cks, gates, prereq, n)[0] == "undetermined"
+    # 正常系: ハイフン付きキー（fixed-at-utc）を読める
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "RULE.txt")
+        with open(p, "w") as f:
+            f.write("PARAMS\n  fixed-at-utc: 2026-11-09T00:00:00Z\n  tree_sha: abc\n  tree_fingerprint: def\n"
+                    "  aggregate_script_sha256: 123\n  rounds: 5\n  arms: off,inf-jpw1\n  machine: x\n")
+        pr = parse_params(p)
+        assert pr["fixed-at-utc"] == "2026-11-09T00:00:00Z" and pr["rounds_int"] == 5
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "RULE.txt")
         with open(p, "w") as f:

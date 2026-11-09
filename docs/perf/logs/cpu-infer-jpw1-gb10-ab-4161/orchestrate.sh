@@ -8,6 +8,7 @@
 # 環境変数: BASE=計測対象 tree の展開先（.rev-stamp に完全 SHA。ログとは別の絶対パス）
 #           LOGDIR=記録先（RULE.txt と aggregate.py を置いた docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161 の複製）
 #           WORK=腕ツリーとビルド成果物の置き場（絶対パス。空のディレクトリ）
+#           ARCHIVE=tree_fingerprint を作った git archive 本体（tar。絶対パス）
 #           PY=torch 入りの python  BP=bench_py.py の絶対パス
 #           HW_LOCK_OWNER_FILE=実機ロックの owner ファイル  HW_LOCK_HELD=1（取得済みの宣言）
 # 計測中はビルド・集計・転送を並走させない。run の差し替え・上書きは禁止（既存ファイルがあれば停止）。
@@ -19,8 +20,8 @@ validate_abs() { # $1=変数名 $2=値。絶対パスのみ。引用符・バッ
 }
 export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 BASE="${BASE:?計測対象 tree}"; LOGDIR="${LOGDIR:?記録先}"; WORK="${WORK:?作業ディレクトリ}"
-PY="${PY:?torch 入り python}"; BP="${BP:?bench_py.py}"; LOCKF="${HW_LOCK_OWNER_FILE:?実機ロックの owner ファイル}"
-for v in BASE LOGDIR WORK PY BP LOCKF; do validate_abs "${v}" "${!v}"; done
+ARCHIVE="${ARCHIVE:?git archive の tar}"; PY="${PY:?torch 入り python}"; BP="${BP:?bench_py.py}"; LOCKF="${HW_LOCK_OWNER_FILE:?実機ロックの owner ファイル}"
+for v in BASE ARCHIVE LOGDIR WORK PY BP LOCKF; do validate_abs "${v}" "${!v}"; done
 [ "${HW_LOCK_HELD:-}" = "1" ] || { echo "実機ロック未取得（HW_LOCK_HELD=1 が必要）"; exit 2; }
 [ -z "${RAYON_NUM_THREADS:-}" ] || { echo "RAYON_NUM_THREADS が設定されている（拒否）"; exit 2; }
 [ -z "${GEMM_GATE_PATCH_FACADE_PATH:-}" ] || { echo "GEMM_GATE_PATCH_FACADE_PATH が非空（拒否）"; exit 2; }
@@ -38,6 +39,12 @@ SHA="$(sed -n 's/^  tree_sha: *//p' "${RULE}" | head -n1)"
 FP="$(sed -n 's/^  tree_fingerprint: *//p' "${RULE}" | head -n1)"
 [ -n "${SHA}" ] && [ -n "${FP}" ] || { echo "RULE.txt の tree_sha / tree_fingerprint が空"; exit 1; }
 [ "$(cat "${BASE}/.rev-stamp")" = "${SHA}" ] || { echo ".rev-stamp が RULE と不一致"; exit 1; }
+# fingerprint = アーカイブ本体の sha256。さらに展開内容が BASE と一致することを複製・ビルド前に確かめる。
+[ "$(sha256sum "${ARCHIVE}" | awk '{print $1}')" = "${FP}" ] || { echo "ARCHIVE の sha256 が tree_fingerprint と不一致"; exit 1; }
+VER="$(mktemp -d)" || exit 1
+tar -C "${VER}" -xf "${ARCHIVE}" || { rm -rf "${VER}"; echo "ARCHIVE の展開失敗"; exit 1; }
+diff -r -x target -x .git -x .rev-stamp "${VER}" "${BASE}" > /dev/null || { rm -rf "${VER}"; echo "BASE の内容が ARCHIVE と不一致"; exit 1; }
+rm -rf "${VER}"
 [ -f "${PATCH}" ] || { echo "patch が無い"; exit 1; }
 [ ! -e "${WORK}/trees" ] || { echo "${WORK}/trees が既にある（上書き禁止）"; exit 1; }
 nvidia-smi --query-gpu=name --format=csv,noheader | grep -q 'GB10' || { echo "機体が GB10 ではない"; exit 1; }
@@ -64,12 +71,18 @@ done
 FCLOCK="${WORK}/Cargo.lock.fc.orig"
 restore_lock() { [ -f "${FCLOCK}" ] && cp "${FCLOCK}" "${BASE}/${FCREL}/Cargo.lock" 2>/dev/null; true; }
 trap restore_lock EXIT
+# checksum を持つ（= registry 由来の）パッケージの name/version/checksum 一覧。path 由来は含まれない。
+lock_pins() { awk '/^\[\[package\]\]/{n="";v=""} /^name = /{n=$3} /^version = /{v=$3} /^checksum = /{print n, v, $3}' "$1" | sort; }
 cp "${BASE}/${FCREL}/Cargo.lock" "${FCLOCK}" || { echo "Cargo.lock の退避失敗"; exit 1; }
 for arm in "${ARMS[@]}"; do
   T="${WORK}/trees/${arm}"
-  (cd "${T}/${FCREL}" && cargo build --release --locked -p bench-fandhe \
-      --config "patch.crates-io.fandhe-ai.path=\"${T}/crates/facade\"" \
-      > "${LOGDIR}/prereq/build-${arm}.log" 2>&1) || { echo "bench-fandhe ビルド失敗 ${arm}"; exit 1; }
+  PATCHCFG="patch.crates-io.fandhe-ai.path=\"${T}/crates/facade\""
+  # 複製元の Cargo.lock は fandhe-ai を registry 固定にしており、path patch と --locked は衝突する。
+  # 先に patch 反映の lockfile を（--locked なしで）生成し、registry 由来の固定が動いていないことを確かめてから固定ビルドする。
+  (cd "${T}/${FCREL}" && cargo metadata --format-version 1 --config "${PATCHCFG}" > /dev/null 2> "${LOGDIR}/prereq/lock-${arm}.log") || { echo "lockfile 生成失敗 ${arm}"; exit 1; }
+  [ "$(lock_pins "${FCLOCK}")" = "$(lock_pins "${T}/${FCREL}/Cargo.lock")" ] || { echo "lockfile の registry 固定が変化した ${arm}"; exit 1; }
+  (cd "${T}/${FCREL}" && cargo build --release --locked -p bench-fandhe --config "${PATCHCFG}" \
+      >"${LOGDIR}/prereq/build-${arm}.log" 2>&1) || { echo "bench-fandhe ビルド失敗 ${arm}"; exit 1; }
   cp "${T}/${FCREL}/target/release/bench-fandhe" "${WORK}/bench-fandhe-${arm}" || exit 1
   (cd "${T}/${FCREL}" && cargo tree -p bench-fandhe --depth 1 > "${LOGDIR}/tree-${arm}.txt" 2>&1)
   # 機構発火の前提 report（腕ごとに 1 件だけ --exact。全件実行はしない）

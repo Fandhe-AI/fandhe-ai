@@ -7,7 +7,7 @@
 //! 背景は #3177 の単体 A/B（GB10 で jpw1 が一部形状を 0.82〜0.94 に縮める一方、正方 512 は悪化）と、
 //! 全経路適用が train セルの後退で REJECT された #3201。
 //!
-//! ゲート [`INFER_SCOPE_JPW1_ENABLED`] は既定 OFF。OFF のとき挙動は現行と同一（常に既定の
+//! ゲート `INFER_SCOPE_JPW1_ENABLED` は既定 OFF。OFF のとき挙動は現行と同一（常に既定の
 //! `TWO_D_JOBS_PER_WORKER`）。既定の反転は A/B が ADOPT となった後の #4165 でのみ行う。
 //!
 //! bit 一致の根拠は `small_m.rs` と同じ。jpw は job の大きさだけを決め、各 C 要素の FMA 連鎖は
