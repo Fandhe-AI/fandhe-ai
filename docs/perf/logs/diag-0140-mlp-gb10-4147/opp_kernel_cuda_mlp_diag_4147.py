@@ -66,7 +66,9 @@ def cmd_measure(args):
     for sid, m, n, k in SHAPES:
         a = torch.from_numpy(bp.fill_vec(SEED_A, m * k).reshape(m, k)).to("cuda")
         b = torch.from_numpy(bp.fill_vec(SEED_B, k * n).reshape(k, n)).to("cuda")
-        mm = lambda: torch.mm(a, b)  # noqa: E731
+        # 出力は形状ごとに事前確保し out= で渡す（呼び出しごとの確保を event 区間に入れない。fandhe 側と同じ境界）
+        c = torch.empty((m, n), dtype=a.dtype, device="cuda")
+        mm = lambda: torch.mm(a, b, out=c)  # noqa: E731
         med, q1, q3 = cuda.event_sample(torch, mm, bp, reps=1)
         rows.append(validate_row({
             "issue": ISSUE, "device": "cuda", "shape_id": sid, "phase": "mm_event", "median_s": med,
