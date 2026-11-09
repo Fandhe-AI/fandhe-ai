@@ -80,6 +80,9 @@ for n in "${PKGS[@]}"; do
   cargo clean -p "$n"
 done
 START_EPOCH=$(date +%s)
+# 鮮度検査は全メンバーの lib 成果物を要求する。clean 後はテストの依存グラフ外のメンバー（hf-hub・backend-metal 等）が
+# 再生成されず MISSING になるため、検査の前に全メンバーの lib を明示的にビルドする（RULE.txt build_freshness）。
+cargo build --workspace --lib
 # ビルドを先に終え、計測中にコンパイルを並走させない（RULE.txt build_then_run 1）。
 cargo test -p fandhe-ai --test rocm_facade_real_device --no-run --message-format=json >"$OUT/build.json.raw"
 FRESH_OK=1

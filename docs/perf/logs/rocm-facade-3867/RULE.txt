@@ -31,7 +31,8 @@ prerequisite: facade は deps-policy 第 11 区分の ureq（vendored OpenSSL）
 script: 同ディレクトリの run_rocm_facade.sh（コミット済みのものをそのまま送る）。ノード上で setsid nohup により切り離して起動する
 build_freshness: #4044 の §4.11（共有 target の成果物の再利用防止）を最小形で満たす。
   ビルドの前に cargo metadata --no-deps --format-version 1 の全 workspace メンバーへ cargo clean -p を行う（debug プロファイル。--release は付けない）。
-  CARGO_TARGET_DIR が <home>/work/target-fandhe-ai でなければ止める（exit 2）。ビルド後に、テストバイナリと全メンバーの lib 成果物
+  CARGO_TARGET_DIR が <home>/work/target-fandhe-ai でなければ止める（exit 2）。テストのビルドの前に cargo build --workspace --lib で全メンバーの lib を明示的にビルドする（clean 後はテストの依存グラフ外のメンバーが再生成されず、検査が必ず MISSING になるため）。
+  ビルド後に、テストバイナリと全メンバーの lib 成果物
   （target/debug/deps/lib<lib 名>-*.rlib と同 *.rmeta の両方。lib 名は cargo metadata の lib ターゲット名）の更新時刻がスクリプト開始時刻より
   秒単位で厳密に後であることを確かめ、build_artifacts.txt に保存する。開始時刻と同じ秒は不合格、必須 lib の .rlib・.rmeta の欠落とテストバイナリの欠落も不合格。
   1 つでも満たさなければテストを実行せず undetermined（各テストの exit_code に build_freshness_failed）。
