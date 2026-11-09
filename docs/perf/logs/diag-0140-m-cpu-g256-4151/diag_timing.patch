@@ -1,0 +1,433 @@
+diff --git a/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs b/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs
+--- a/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs
++++ b/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs
+@@ -99,6 +99,7 @@
+         f();
+     }
+     // DIAG_RESET_HOOK（診断パッチが warmup 後の積算リセットを差し込む）
++    fandhe_ai_backend_cpu::gemm_blis::diag_fixed_cost_timer::reset();
+     let mut samples = Vec::with_capacity(N_MEASURE);
+     for _ in 0..N_MEASURE {
+         if let Some(g) = gap {
+@@ -109,7 +110,7 @@
+         samples.push(t.elapsed().as_nanos());
+     }
+     // 診断パッチがこの行を内訳文字列の生成へ置き換える。base 腕では空。
+-    let diag_suffix = String::new(); // DIAG_READ_HOOK
++    let diag_suffix = fandhe_ai_backend_cpu::gemm_blis::diag_fixed_cost_timer::suffix();
+     samples.sort_unstable();
+     println!(
+         "ROW4151 arm={arm} series={series} m={DIM} n={DIM} k={DIM} rayon_threads={rayon_threads} \
+diff --git a/crates/backend-cpu/src/gemm_blis/diag_fixed_cost_timer.rs b/crates/backend-cpu/src/gemm_blis/diag_fixed_cost_timer.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/backend-cpu/src/gemm_blis/diag_fixed_cost_timer.rs
+@@ -0,0 +1,274 @@
++//! イシュー #4151 診断専用: 2D 動的分配の GEMM 1 回を、固定費の区間（pre・fork_wake・stage・alloc・pack・
++//! kernel・join）に分けて積算する。
++//!
++//! 本ファイルは `docs/perf/logs/diag-0140-m-cpu-g256-4151/diag_timing.patch` が計測用の複製ツリーにだけ
++//! 追加するもので、main にはコミットしない（`determinism_inventory` が atomic・rayon 使用箇所を
++//! allowlist で固定しているため、本番ツリーに計時フックを置かない）。
++//!
++//! 呼び出し元: `gemm_blis_parallel_with_transpose`（`enter`）、`gemm_blis_two_d_dynamic_region`
++//! （`mark_grid`／`mark_split`／`par_begin`／`par_end`）、`run_two_d_job`（job 内の `job_*`）、
++//! `gemm_blis_ic_loop`（`add_a`／`add_k`／`add_calls`）。時計は `Instant`（macOS の分解能は約 41.7 ns の
++//! ため、マイクロカーネル 1 回ごとには計らずループ単位で計る）。job の記録は `par_end` が回収して
++//! 1 回の GEMM 呼び出し（region）の要約にし、`suffix` が全 region の中央値を `key=value` で書き出す。
++//! `ARMED` は `reset` から `suffix` までの間だけ真（warmup と対象外の系列を数えない）。
++
++use std::cell::{Cell, RefCell};
++use std::sync::Mutex;
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++use std::time::Instant;
++
++static ARMED: AtomicBool = AtomicBool::new(false);
++static TILE_MR: AtomicUsize = AtomicUsize::new(0);
++static TILE_NR: AtomicUsize = AtomicUsize::new(0);
++static JOBS: Mutex<Vec<JobRec>> = Mutex::new(Vec::new());
++static REGIONS: Mutex<Vec<Region>> = Mutex::new(Vec::new());
++
++#[derive(Clone, Copy, Default)]
++struct JobAcc {
++    stage_in: u64,
++    alloc: u64,
++    pack_b: u64,
++    pack_a: u64,
++    kernel: u64,
++    stage_out: u64,
++    calls: u64,
++}
++
++#[derive(Clone, Copy)]
++struct JobRec {
++    worker: usize,
++    start: Instant,
++    end: Instant,
++    acc: JobAcc,
++}
++
++#[derive(Clone, Copy, Default)]
++struct Region {
++    call: u64,
++    pre: u64,
++    grid: u64,
++    split: u64,
++    fork_wake_min: u64,
++    fork_wake_max: u64,
++    join: u64,
++    wall: u64,
++    jobs: u64,
++    p_used: u64,
++    stage_in: u64,
++    alloc: u64,
++    pack_b: u64,
++    pack_a: u64,
++    kernel: u64,
++    stage_out: u64,
++    kernel_crit: u64,
++    calls: u64,
++}
++
++thread_local! {
++    static ENTER: Cell<Option<Instant>> = const { Cell::new(None) };
++    static MARKS: Cell<[Option<Instant>; 3]> = const { Cell::new([None; 3]) };
++    static ACC: RefCell<JobAcc> = RefCell::new(JobAcc::default());
++}
++
++fn ns(from: Instant, to: Instant) -> u64 {
++    u64::try_from(to.saturating_duration_since(from).as_nanos()).unwrap_or(u64::MAX)
++}
++
++/// GEMM 入口で呼ぶ。pre 区間の起点。
++pub fn enter() {
++    ENTER.with(|c| c.set(Some(Instant::now())));
++    MARKS.with(|c| c.set([None; 3]));
++}
++
++/// `job_grid` 直後に呼ぶ。
++pub fn mark_grid() {
++    MARKS.with(|c| {
++        let mut m = c.get();
++        m[0] = Some(Instant::now());
++        c.set(m);
++    });
++}
++
++/// `split_c_into_jobs` 直後に呼ぶ。
++pub fn mark_split() {
++    MARKS.with(|c| {
++        let mut m = c.get();
++        m[1] = Some(Instant::now());
++        c.set(m);
++    });
++}
++
++/// `par_iter_mut` の直前に呼ぶ。
++pub fn par_begin() {
++    MARKS.with(|c| {
++        let mut m = c.get();
++        m[2] = Some(Instant::now());
++        c.set(m);
++    });
++    if let Ok(mut g) = JOBS.lock() {
++        g.clear();
++    }
++}
++
++fn with_acc(f: impl FnOnce(&mut JobAcc)) {
++    ACC.with(|c| f(&mut c.borrow_mut()));
++}
++
++/// job の先頭で呼ぶ（thread_local の積算を空にする）。
++pub fn job_begin() {
++    ACC.with(|c| *c.borrow_mut() = JobAcc::default());
++}
++
++pub fn job_stage_in(a: Instant, b: Instant) {
++    with_acc(|t| t.stage_in += ns(a, b));
++}
++
++pub fn job_alloc(a: Instant, b: Instant) {
++    with_acc(|t| t.alloc += ns(a, b));
++}
++
++pub fn add_b(a: Instant, b: Instant) {
++    with_acc(|t| t.pack_b += ns(a, b));
++}
++
++pub fn add_a(a: Instant, b: Instant) {
++    with_acc(|t| t.pack_a += ns(a, b));
++}
++
++pub fn add_k(a: Instant, b: Instant) {
++    with_acc(|t| t.kernel += ns(a, b));
++}
++
++/// マイクロカーネルの呼び出し回数（ir×jr ループの反復数 = タイル数）と、そのタイルの MR・NR。
++pub fn add_calls(n: usize, mr: usize, nr: usize) {
++    TILE_MR.store(mr, Ordering::Relaxed);
++    TILE_NR.store(nr, Ordering::Relaxed);
++    with_acc(|t| t.calls += n as u64);
++}
++
++pub fn job_stage_out(a: Instant, b: Instant) {
++    with_acc(|t| t.stage_out += ns(a, b));
++}
++
++/// job の末尾で 1 回だけ呼ぶ。記録を共有の `JOBS` へ積む。
++pub fn job_end(start: Instant, end: Instant) {
++    if !ARMED.load(Ordering::Relaxed) {
++        return;
++    }
++    let acc = ACC.with(|c| *c.borrow());
++    let rec = JobRec {
++        worker: rayon::current_thread_index().unwrap_or(usize::MAX),
++        start,
++        end,
++        acc,
++    };
++    if let Ok(mut g) = JOBS.lock() {
++        g.push(rec);
++    }
++}
++
++/// `par_iter_mut` から戻った直後に呼ぶ。job 記録を回収して region の要約を作る。
++pub fn par_end() {
++    let t_end = Instant::now();
++    if !ARMED.load(Ordering::Relaxed) {
++        return;
++    }
++    let (Some(t_enter), marks) = (ENTER.with(Cell::get), MARKS.with(Cell::get)) else {
++        return;
++    };
++    let (Some(t_grid), Some(t_split), Some(t_par)) = (marks[0], marks[1], marks[2]) else {
++        return;
++    };
++    let jobs: Vec<JobRec> = JOBS.lock().map(|g| g.clone()).unwrap_or_default();
++    if jobs.is_empty() {
++        return;
++    }
++    let first = jobs.iter().map(|j| j.start).min().unwrap_or(t_par);
++    let last = jobs.iter().map(|j| j.end).max().unwrap_or(t_end);
++    // worker ごとの最初の job の開始（fork_wake の min・max 用）と kernel の worker 別合計。
++    let mut workers: Vec<(usize, Instant, u64)> = Vec::new();
++    for j in &jobs {
++        if let Some(w) = workers.iter_mut().find(|w| w.0 == j.worker) {
++            w.1 = w.1.min(j.start);
++            w.2 += j.acc.kernel;
++        } else {
++            workers.push((j.worker, j.start, j.acc.kernel));
++        }
++    }
++    let mut r = Region {
++        call: ns(t_enter, t_end),
++        pre: ns(t_enter, t_par),
++        grid: ns(t_enter, t_grid),
++        split: ns(t_grid, t_split),
++        fork_wake_min: ns(t_par, first),
++        fork_wake_max: workers.iter().map(|w| ns(t_par, w.1)).max().unwrap_or(0),
++        join: ns(last, t_end),
++        wall: ns(t_par, t_end),
++        jobs: jobs.len() as u64,
++        p_used: workers.len() as u64,
++        kernel_crit: workers.iter().map(|w| w.2).max().unwrap_or(0),
++        ..Region::default()
++    };
++    for j in &jobs {
++        r.stage_in += j.acc.stage_in;
++        r.alloc += j.acc.alloc;
++        r.pack_b += j.acc.pack_b;
++        r.pack_a += j.acc.pack_a;
++        r.kernel += j.acc.kernel;
++        r.stage_out += j.acc.stage_out;
++        r.calls += j.acc.calls;
++    }
++    if let Ok(mut g) = REGIONS.lock() {
++        g.push(r);
++    }
++}
++
++/// 系列の warmup 後に呼ぶ。積算を空にして計数を始める。
++pub fn reset() {
++    if let Ok(mut g) = REGIONS.lock() {
++        g.clear();
++    }
++    ARMED.store(true, Ordering::Relaxed);
++}
++
++fn median(mut v: Vec<u64>) -> u64 {
++    v.sort_unstable();
++    v.get(v.len() / 2).copied().unwrap_or(0)
++}
++
++/// 系列の測定後に呼ぶ。計数を止め、全 region の中央値を ` key=value` 形式で返す（region が 0 件なら空）。
++pub fn suffix() -> String {
++    ARMED.store(false, Ordering::Relaxed);
++    let regions: Vec<Region> = REGIONS.lock().map(|g| g.clone()).unwrap_or_default();
++    if regions.is_empty() {
++        return String::new();
++    }
++    let m = |f: fn(&Region) -> u64| median(regions.iter().map(f).collect());
++    format!(
++        " d_regions={} d_mr={} d_nr={} d_jobs={} d_p_used={} d_n_calls={} d_call_ns={} d_pre_ns={} \
++d_grid_ns={} d_split_ns={} d_fork_wake_min_ns={} d_fork_wake_max_ns={} d_stage_in_ns={} \
++d_alloc_ns={} d_pack_b_ns={} d_pack_a_ns={} d_kernel_ns={} d_stage_out_ns={} \
++d_kernel_crit_ns={} d_join_ns={} d_region_wall_ns={}",
++        regions.len(),
++        TILE_MR.load(Ordering::Relaxed),
++        TILE_NR.load(Ordering::Relaxed),
++        m(|r| r.jobs),
++        m(|r| r.p_used),
++        m(|r| r.calls),
++        m(|r| r.call),
++        m(|r| r.pre),
++        m(|r| r.grid),
++        m(|r| r.split),
++        m(|r| r.fork_wake_min),
++        m(|r| r.fork_wake_max),
++        m(|r| r.stage_in),
++        m(|r| r.alloc),
++        m(|r| r.pack_b),
++        m(|r| r.pack_a),
++        m(|r| r.kernel),
++        m(|r| r.stage_out),
++        m(|r| r.kernel_crit),
++        m(|r| r.join),
++        m(|r| r.wall),
++    )
++}
+diff --git a/crates/backend-cpu/src/gemm_blis/mod.rs b/crates/backend-cpu/src/gemm_blis/mod.rs
+--- a/crates/backend-cpu/src/gemm_blis/mod.rs
++++ b/crates/backend-cpu/src/gemm_blis/mod.rs
+@@ -68,6 +68,9 @@
+ // `cfg(test)` 限定プローブ（本番ビルドには含まれない）。
+ #[cfg(test)]
+ mod jobgrid_probe;
++// イシュー #4151 診断専用（診断パッチでのみ追加される区間計時）。
++#[doc(hidden)]
++pub mod diag_fixed_cost_timer;
+ // イシュー #1313 で本番結線（`gemm_blis_parallel_with_transpose`／
+ // `gemm_blis_bias_act_parallel` からの [`dispatch_two_d_dynamic`] 呼び出し）
+ // を追加したため、`partition::job_grid` が本番経路から到達可能になり
+@@ -509,6 +512,7 @@
+     k: usize,
+     transpose: GemmTranspose,
+ ) -> Result<(), GemmError> {
++    diag_fixed_cost_timer::enter();
+     validate_dims(a, b, c, m, n, k)?;
+ 
+     // n == 0 は shape として合法だが par_chunks_mut(panel_rows * n) は
+@@ -1380,6 +1384,8 @@
+         // `pack.rs` モジュールドキュメント参照）。
+         let mr_blocks = mc_len.div_ceil(mr);
+         let a_panel = &mut a_panel[..mr_blocks * kc_len * mr];
++        diag_fixed_cost_timer::add_calls(mr_blocks * nr_blocks, mr, nr);
++        let diag_t_a0 = std::time::Instant::now();
+         for ir_block in 0..mr_blocks {
+             let ir = ir_block * mr;
+             let mr_eff = mr.min(mc_len - ir);
+@@ -1415,6 +1421,8 @@
+                 ),
+             }
+         }
++        let diag_t_a1 = std::time::Instant::now();
++        diag_fixed_cost_timer::add_a(diag_t_a0, diag_t_a1);
+ 
+         for jr_block in 0..nr_blocks {
+             let jr = jr_block * nr;
+@@ -1492,6 +1500,7 @@
+                 }
+             }
+         }
++        diag_fixed_cost_timer::add_k(diag_t_a1, std::time::Instant::now());
+ 
+         ic += blocks.mc;
+     }
+@@ -2786,6 +2795,8 @@
+     #[cfg(test)]
+     let _probe_scope = jobgrid_probe::on_job(b.as_ptr() as usize, mc_len, nc_len_job);
+ 
++    diag_fixed_cost_timer::job_begin();
++    let diag_t_job = std::time::Instant::now();
+     let c_local_len = mc_len
+         .checked_mul(nc_len_job)
+         .ok_or(GemmError::DimProductOverflow)?;
+@@ -2793,6 +2804,8 @@
+     for (i, row) in job.c_rows.iter().enumerate() {
+         c_local[i * nc_len_job..(i + 1) * nc_len_job].copy_from_slice(row);
+     }
++    let diag_t_in = std::time::Instant::now();
++    diag_fixed_cost_timer::job_stage_in(diag_t_job, diag_t_in);
+ 
+     // `gemm_blis_region`（`mod.rs:1064` 付近）と同じ Nn/Nt/Tn 分岐
+     // （#1213）。`Tn` は絶対行位置解決のため `region_row_offset +
+@@ -2807,6 +2820,7 @@
+     };
+ 
+     let mut bufs = PanelBuffers::new::<K>(nc_len_job, k_dim, mc_len, blocks);
++    diag_fixed_cost_timer::job_alloc(diag_t_in, std::time::Instant::now());
+ 
+     for jc in (0..nc_len_job).step_by(blocks.nc) {
+         let nc_len = blocks.nc.min(nc_len_job - jc);
+@@ -2819,6 +2833,7 @@
+                 pb.slice(nr, pc, kc_len, (job.cols.start + jc) / nr, nr_blocks)
+             } else {
+                 let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
++                let diag_t_b0 = std::time::Instant::now();
+                 for jr_block in 0..nr_blocks {
+                     let jr = jr_block * nr;
+                     let nr_eff = nr.min(nc_len - jr);
+@@ -2858,6 +2873,7 @@
+                         ),
+                     }
+                 }
++                diag_fixed_cost_timer::add_b(diag_t_b0, std::time::Instant::now());
+                 b_panel
+             };
+ 
+@@ -2889,9 +2905,13 @@
+         }
+     }
+ 
++    let diag_t_out0 = std::time::Instant::now();
+     for (i, row) in job.c_rows.iter_mut().enumerate() {
+         row.copy_from_slice(&c_local[i * nc_len_job..(i + 1) * nc_len_job]);
+     }
++    let diag_t_end = std::time::Instant::now();
++    diag_fixed_cost_timer::job_stage_out(diag_t_out0, diag_t_end);
++    diag_fixed_cost_timer::job_end(diag_t_job, diag_t_end);
+ 
+     Ok(())
+ }
+@@ -2950,6 +2970,7 @@
+ 
+     let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+     let grid = partition::job_grid(mc_total, n, mr, nr, &blocks, num_threads, jobs_per_worker)?;
++    diag_fixed_cost_timer::mark_grid();
+     // #3177 診断専用: grid 確定値の記録と split 確保計数の開始／終了
+     // （非テストビルドでは消える）。
+     #[cfg(test)]
+@@ -3016,8 +3037,10 @@
+     let mut jobs = split_c_into_jobs(c_region, n, &grid);
+     #[cfg(test)]
+     jobgrid_probe::on_region_split_done();
++    diag_fixed_cost_timer::mark_split();
+ 
+-    jobs.par_iter_mut().try_for_each(|job| {
++    diag_fixed_cost_timer::par_begin();
++    let diag_r = jobs.par_iter_mut().try_for_each(|job| {
+         run_two_d_job(
+             kernel,
+             a_for_region,
+@@ -3030,7 +3053,9 @@
+             row_start,
+             prepacked,
+         )
+-    })
++    });
++    diag_fixed_cost_timer::par_end();
++    diag_r
+ }
+ 
+ /// 共有 A バッファ 1 行帯ぶんを pack する（[`gemm_blis_two_d_shared_a`] の pack 段）。
