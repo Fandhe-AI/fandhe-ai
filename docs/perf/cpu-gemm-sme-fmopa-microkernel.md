@@ -1044,6 +1044,8 @@ N=5・単一機体。帰無確率は概算。`train 64 fresh` の実差の可能
 - P-BIT は Mac mini でも取る（ON/OFF の bit 同一、すなわち SME と NEON の bit 同一の実証になる）。
 - 6 フレームワークのスコアボードでの 1 位化は Phase 6 で確定する。本 A/B の PyTorch 比は記録のみ。
 
+- #4165: 判定未取得のため結線していない（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
+
 ### 5.18 N=256 の SME スレッド数と分配の事前登録 A/B（イシュー #4162）
 
 Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 12% 足りない。N=256 の SME 経路はグローバルプール（10 スレッド）と `jobs_per_worker=2` で動く。小形状ではワーカー起床・fork-join の固定費と job の粒度が効いている可能性があるため、スレッド数（専用プール）と分配（jpw）を事前登録で測る。
@@ -1062,3 +1064,5 @@ Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 
 
 - 限界: 候補 5 つの多重比較。専用プールとグローバルプールの spin の干渉はガードセルが帯の外で検出できない。macOS に pinning の手段がなく T=4 が P コアだけで動く保証はない。
 - GB10 は対象外（SME 非搭載で機構に到達しない）。
+
+- #4165: 判定未取得のため結線していない（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。

@@ -139,3 +139,5 @@ bit 一致テスト 24 件 pass のもとで、**G1（merge）・G2（merge+prep
 - 制約: rayon ワーカー上から呼ばれる GEMM はスコープを継がず既定の jpw になる（安全側）。`GB10_AFFINITY_ENABLED` は false のまま。
 - bit 一致: jpw は job の大きさだけを決め、各 C 要素の FMA 連鎖は変わらない（§3 と同じ根拠）。tolerance・FMA 契約は不変。出力の bit 一致は `crates/facade/tests/infer_scope_jpw1_4161.rs` で確かめる。
 - A/B キット: [`docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/`](perf/logs/cpu-infer-jpw1-gb10-ab-4161/)（事前登録規則の下書き・腕 patch・`orchestrate.sh`・`aggregate.py`）。**この時点で実測はない**。RULE.txt はマージ後に単独コミットで固定してから GB10 で測る。
+
+- #4165: 判定未取得のため結線していない（[`perf/cpu-adopt-wiring-4165.md`](perf/cpu-adopt-wiring-4165.md)）。
