@@ -93,6 +93,10 @@ sleep 30
 # 回収時のマスク（ユーザー名・ホスト名・ホームパスを公開面へ出さない）
 for f in "${RAW}"/*; do
   [ -f "${f}" ] || continue
-  sed -i.bak -e "s#${HOME}#<home>#g" -e "s#$(hostname)#<metal-node>#g" "${f}" && rm -f "${f}.bak"
+  # .xml は '<' が属性値で XML を壊す（to_values_4153.py のパース失敗）ため &lt;…&gt; でエスケープして置換する。
+  case "${f}" in
+    *.xml) sed -i.bak -e "s#${HOME}#\&lt;home\&gt;#g" -e "s#$(hostname)#\&lt;metal-node\&gt;#g" "${f}" && rm -f "${f}.bak" ;;
+    *) sed -i.bak -e "s#${HOME}#<home>#g" -e "s#$(hostname)#<metal-node>#g" "${f}" && rm -f "${f}.bak" ;;
+  esac
 done
 echo "round ${RN} done $(date -u +%FT%TZ)"

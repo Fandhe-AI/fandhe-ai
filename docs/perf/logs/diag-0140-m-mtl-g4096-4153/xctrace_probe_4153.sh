@@ -25,7 +25,19 @@ xcrun xctrace record --template 'Metal System Trace' --output "${OUT}/probe.trac
   > "${OUT}/xctrace_record.log" 2>&1 || unavailable "xctrace record 失敗（${OUT}/xctrace_record.log）"
 xcrun xctrace export --input "${OUT}/probe.trace" --toc --output "${OUT}/xctrace_toc.xml" || unavailable "xctrace export --toc 失敗"
 grep -q 'schema=' "${OUT}/xctrace_toc.xml" || unavailable "toc に表がない"
+# toc は目次のみで列の mnemonic・単位・区間の中身を含まない。GPU／Metal 系の表を --xpath で個別に export して保存し、
+# 列定義と GPU 実行区間を人間が確認できる成果物にしてから trace を削除する（取得に失敗した表があれば unavailable）。
+schemas=$(grep -o 'schema="[^"]*"' "${OUT}/xctrace_toc.xml" | sed -e 's/^schema="//' -e 's/"$//' | grep -Ei 'metal|gpu' | sort -u)
+[ -n "${schemas}" ] || unavailable "toc に metal/gpu 系の表がない"
+for sc in ${schemas}; do
+  case "${sc}" in *[!A-Za-z0-9_-]*|'') continue;; esac
+  xcrun xctrace export --input "${OUT}/probe.trace" \
+    --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"${sc}\"]" --output "${OUT}/table_${sc}.xml" \
+    || unavailable "xctrace export 失敗: ${sc}"
+done
 rm -rf "${OUT}/probe.trace"
-sed -i.bak -e "s#${HOME}#<home>#g" -e "s#$(hostname)#<metal-node>#g" "${OUT}"/*.txt "${OUT}"/*.log "${OUT}"/*.xml && rm -f "${OUT}"/*.bak
-echo "available: toc 保存済み。GPU 実行区間の表の schema 名・列名を ${OUT}/xctrace_toc.xml から確定して RULE の AUX へ書く" > "${OUT}/xctrace_probe.txt"
+# マスク。.xml は '<' を属性値へ入れると XML が壊れるため &lt;…&gt; でエスケープして置換する。
+sed -i.bak -e "s#${HOME}#<home>#g" -e "s#$(hostname)#<metal-node>#g" "${OUT}"/*.txt "${OUT}"/*.log && rm -f "${OUT}"/*.bak
+sed -i.bak -e "s#${HOME}#\&lt;home\&gt;#g" -e "s#$(hostname)#\&lt;metal-node\&gt;#g" "${OUT}"/*.xml && rm -f "${OUT}"/*.bak
+echo "available: toc と GPU／Metal 系の表（table_*.xml）を保存済み。列定義・GPU 実行区間を ${OUT}/table_*.xml から確定して RULE の AUX へ書く" > "${OUT}/xctrace_probe.txt"
 cat "${OUT}/xctrace_probe.txt"
