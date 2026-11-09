@@ -15,8 +15,10 @@
 //! 出力は 1 行 1 レコード、`key=value` を空白区切りで並べる。
 //! `ROW4151 arm= series= m= n= k= rayon_threads= calls= median_ns= mean_ns= bits_hash=0x..` に、
 //! timed 腕では区間の内訳（`diag_fixed_cost_timer`）が後ろに続く。
-//! `bits_hash` はゼロ初期化した C へ 1 回だけ呼んだ結果の全要素 `to_bits()` を FNV-1a 64 で畳んだ値
-//! （計時の外で計算。腕間の一致で、計時フックと SME の有無が数値を変えないことを確かめる）。
+//! `bits_hash` は全要素 `to_bits()` を FNV-1a 64 で畳んだ値。GEMM 系列（hot・gap・serial_t1）は、
+//! 計測ループの最後の 1 回の前に C をゼロへ戻し（計時の外）、その呼び出し（計時フック有効のまま）の
+//! 出力を計測窓の後で畳む。cold_first_call と forkjoin 系（GEMM 出力なし）は起動直後の 1 回の出力の値。
+//! 腕・系列間の一致で、計時フックと SME の有無が数値を変えないことを確かめる。
 //!
 //! 公開入口 `gemm_blis_parallel`／`gemm_blis` と公開の診断 API だけを呼ぶ。`unsafe`・`asm!`・依存の追加はない。
 
@@ -25,6 +27,7 @@ use fandhe_ai_backend_cpu::{
     gemm_blis, gemm_blis_parallel, small_shape_cap_report, sme_report, thread_limit_report,
 };
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 const SEED: u64 = 0xC0FFEE;
@@ -91,7 +94,8 @@ fn run_series(
     arm: &str,
     series: &str,
     rayon_threads: usize,
-    bits_hash: u64,
+    fallback_hash: u64,
+    out: Option<&RefCell<Vec<f32>>>,
     gap: Option<Duration>,
     f: &mut dyn FnMut(),
 ) {
@@ -100,14 +104,20 @@ fn run_series(
     }
     // DIAG_RESET_HOOK（診断パッチが warmup 後の積算リセットを差し込む）
     let mut samples = Vec::with_capacity(N_MEASURE);
-    for _ in 0..N_MEASURE {
+    for i in 0..N_MEASURE {
         if let Some(g) = gap {
             spin_for(g);
+        }
+        if let (true, Some(o)) = (i + 1 == N_MEASURE, out) {
+            // 最後の 1 回だけ C をゼロへ戻す（計時の外）。出力をゼロ初期化 C 起点の値にそろえる。
+            o.borrow_mut().fill(0.0);
         }
         let t = Instant::now();
         f();
         samples.push(t.elapsed().as_nanos());
     }
+    // 計時有効のまま走った最後の 1 回の実出力（GEMM 出力のない系列は起動直後の値）。
+    let bits_hash = out.map_or(fallback_hash, |o| fnv1a_bits(&o.borrow()));
     // 診断パッチがこの行を内訳文字列の生成へ置き換える。base 腕では空。
     let diag_suffix = String::new(); // DIAG_READ_HOOK
     samples.sort_unstable();
@@ -161,18 +171,27 @@ small_shape_cap_eligible={} timer_tick_ns={tick} timer_pair_ns={pair:.2} gap_us=
 calls=1 median_ns={cold_ns} mean_ns={cold_ns}.0 bits_hash=0x{bits_hash:016x}"
     );
 
-    let mut c = vec![0.0f32; DIM * DIM];
-    run_series(arm, "hot", rayon_threads, bits_hash, None, &mut || {
-        gemm_blis_parallel(&a, &b, &mut c, DIM, DIM, DIM).expect("gemm");
-    });
+    let c = RefCell::new(vec![0.0f32; DIM * DIM]);
+    run_series(
+        arm,
+        "hot",
+        rayon_threads,
+        bits_hash,
+        Some(&c),
+        None,
+        &mut || {
+            gemm_blis_parallel(&a, &b, &mut c.borrow_mut(), DIM, DIM, DIM).expect("gemm");
+        },
+    );
     run_series(
         arm,
         "gap",
         rayon_threads,
         bits_hash,
+        Some(&c),
         Some(Duration::from_micros(GAP_US)),
         &mut || {
-            gemm_blis_parallel(&a, &b, &mut c, DIM, DIM, DIM).expect("gemm");
+            gemm_blis_parallel(&a, &b, &mut c.borrow_mut(), DIM, DIM, DIM).expect("gemm");
         },
     );
     run_series(
@@ -180,9 +199,10 @@ calls=1 median_ns={cold_ns} mean_ns={cold_ns}.0 bits_hash=0x{bits_hash:016x}"
         "serial_t1",
         rayon_threads,
         bits_hash,
+        Some(&c),
         None,
         &mut || {
-            gemm_blis(&a, &b, &mut c, DIM, DIM, DIM).expect("gemm");
+            gemm_blis(&a, &b, &mut c.borrow_mut(), DIM, DIM, DIM).expect("gemm");
         },
     );
 
@@ -195,6 +215,7 @@ calls=1 median_ns={cold_ns} mean_ns={cold_ns}.0 bits_hash=0x{bits_hash:016x}"
         rayon_threads,
         bits_hash,
         None,
+        None,
         &mut || forkjoin_once(&mut slots),
     );
     run_series(
@@ -202,6 +223,7 @@ calls=1 median_ns={cold_ns} mean_ns={cold_ns}.0 bits_hash=0x{bits_hash:016x}"
         "forkjoin_floor_gap",
         rayon_threads,
         bits_hash,
+        None,
         Some(Duration::from_micros(GAP_US)),
         &mut || forkjoin_once(&mut slots),
     );

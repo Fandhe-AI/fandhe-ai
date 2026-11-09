@@ -39,7 +39,7 @@ SME OFF（0.14.0 の本番構成）と ON の両方で、N=256 の 1 回の呼�
 | off-timed | off-base + `diag_timing.patch` |
 | on-timed | off-base + `on-arm.patch` + `diag_timing.patch` |
 
-`bits_hash`（ゼロ初期化した C へ 1 回呼んだ結果の `to_bits()` の FNV-1a 64）が 4 腕で一致することを確かめる。
+`bits_hash`（GEMM 系列は、計時フック有効のまま走る計測ループ最後の 1 回〈直前に C をゼロへ戻す〉の出力の `to_bits()` の FNV-1a 64。GEMM 出力のない系列は起動直後の 1 回の値）が 4 腕・全系列で一致することを確かめる。
 計時フックと SME の有無が数値を変えないことの検査で、不一致は FAIL。ON ツリーでは `cargo test --lib` を走らせない
 （ドリフト検出テスト `sme_production_disabled_after_gb10_reject` が作りの上で落ちる）。
 

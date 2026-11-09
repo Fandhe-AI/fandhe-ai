@@ -1,17 +1,17 @@
 diff --git a/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs b/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs
 --- a/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs
 +++ b/crates/backend-cpu/examples/cpu_gemm_n256_fixed_cost_4151.rs
-@@ -99,6 +99,7 @@
+@@ -103,6 +103,7 @@
          f();
      }
      // DIAG_RESET_HOOK（診断パッチが warmup 後の積算リセットを差し込む）
 +    fandhe_ai_backend_cpu::gemm_blis::diag_fixed_cost_timer::reset();
      let mut samples = Vec::with_capacity(N_MEASURE);
-     for _ in 0..N_MEASURE {
+     for i in 0..N_MEASURE {
          if let Some(g) = gap {
-@@ -109,7 +110,7 @@
-         samples.push(t.elapsed().as_nanos());
-     }
+@@ -119,7 +120,7 @@
+     // 計時有効のまま走った最後の 1 回の実出力（GEMM 出力のない系列は起動直後の値）。
+     let bits_hash = out.map_or(fallback_hash, |o| fnv1a_bits(&o.borrow()));
      // 診断パッチがこの行を内訳文字列の生成へ置き換える。base 腕では空。
 -    let diag_suffix = String::new(); // DIAG_READ_HOOK
 +    let diag_suffix = fandhe_ai_backend_cpu::gemm_blis::diag_fixed_cost_timer::suffix();
