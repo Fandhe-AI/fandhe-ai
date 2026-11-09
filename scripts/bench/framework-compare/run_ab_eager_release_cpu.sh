@@ -75,6 +75,9 @@ case "$PROFILE" in
     exit 1
     ;;
 esac
+# 結果ファイルの種別（既定）。4158 は診断経路の gemm／train を別ファイル（gemmdiag／traindiag）へ
+# 記録するため下で上書きする。既定値の代入は TAG 分岐より前に置く（後ろだと 4158 用が潰れる）。
+TASK_FILES="gemm train infer"
 if [[ "$TAG" == 4158 ]]; then
   if [[ "$PROFILE" != gb10 ]]; then
     echo "error: AB_ISSUE=4158 は AB_PROFILE=gb10 限定です（Mac mini は #4159）" >&2
@@ -90,8 +93,6 @@ PRECHECK_LINE="eager_release_report enabled="
 RULE_FILE="../../../docs/perf/logs/${RULE_DIR}/RULE.txt"
 # 4158 のサイズゲート閾値（`eager_release.rs::EAGER_MATMUL_RELEASE_MAX_BYTES`。RULE 事前登録値）。
 SIZE_GATE_BYTES=33554432
-# 結果ファイルの種別。4158 は診断経路の gemm／train を別ファイル（gemmdiag／traindiag）へ記録する。
-TASK_FILES="gemm train infer"
 if [[ ! -f "$RULE_FILE" ]]; then
   echo "error: RULE.txt not found (${RULE_FILE})" >&2
   exit 1
@@ -512,8 +513,20 @@ wait_load_gate() { # wait_load_gate <round>
     ok=$(awk -v a="$l1" -v t="$LOAD_GATE" 'BEGIN{print (a<t)?1:0}')
     # 4158: GPU compute プロセス 0 件も専有の条件にする（取得不能は unavailable＝正式系列にしない）。
     if [[ "$TAG" == 4158 ]]; then
-      procs=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c . || true)
-      if ! command -v nvidia-smi >/dev/null 2>&1 || [[ ! "$procs" =~ ^[0-9]+$ ]]; then
+      # nvidia-smi の終了状態を先に検査する（失敗で stdout が空のとき grep -c が 0 を返し
+      # 「プロセス 0 件」に化けるのを防ぐ。成功した出力だけを数える）。
+      smi_out=""
+      smi_ok=0
+      if command -v nvidia-smi >/dev/null 2>&1 && smi_out=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); then
+        smi_ok=1
+      fi
+      if [[ "$smi_ok" != 1 ]]; then
+        status=unavailable
+        procs=NA
+        break
+      fi
+      procs=$(printf '%s\n' "$smi_out" | grep -c '[^[:space:]]' || true)
+      if [[ ! "$procs" =~ ^[0-9]+$ ]]; then
         status=unavailable
         procs=NA
         break

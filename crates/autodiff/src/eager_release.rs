@@ -32,7 +32,7 @@
 //!
 //! #3226 の GB10 A/B では出力 16 MiB 帯は改善、N=4096（出力 64 MiB）は毎反復の再確保で
 //! 1.106 倍に後退した（`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §8.4）。そこで
-//! 出力が [`EAGER_MATMUL_RELEASE_MAX_BYTES`] を超える候補は解放しない。16〜64 MiB の間は
+//! 出力が `EAGER_MATMUL_RELEASE_MAX_BYTES` を超える候補は解放しない。16〜64 MiB の間は
 //! 未実測で、32 MiB は事前登録した仮置きの値（計測後に変えない）。親の有効フラグが OFF の
 //! 既定では本ゲートも到達しない。
 

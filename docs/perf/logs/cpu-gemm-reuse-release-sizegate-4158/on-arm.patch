@@ -1,10 +1,11 @@
 --- a/crates/autodiff/src/eager_release.rs
 +++ b/crates/autodiff/src/eager_release.rs
-@@ -37,6 +37,6 @@
+@@ -45,7 +45,7 @@ use crate::tape::{NodeId, Tape};
+
  /// 自動解放の既定有効フラグ。**既定 OFF**。A/B（`docs/perf/logs/cpu-gemm-reuse-release-3226/
  /// RULE.txt`）が ADOPT となった後の #3227 でのみ `true` にする。after 腕はこの 1 行だけを反転する。
 -pub(crate) const EAGER_MATMUL_RELEASE_DEFAULT_ENABLED: bool = false;
 +pub(crate) const EAGER_MATMUL_RELEASE_DEFAULT_ENABLED: bool = true;
 
- thread_local! {
-     static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+ /// 解放の対象にする結果の出力サイズ上限（バイト）。これを超える結果は解放しない（#4158）。
+ pub(crate) const EAGER_MATMUL_RELEASE_MAX_BYTES: usize = 32 * 1024 * 1024;
