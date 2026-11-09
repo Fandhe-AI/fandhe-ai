@@ -242,6 +242,8 @@ def round_metrics(cell, vals):
         m["F2"] = ow / g("fandhe_fresh_window")
     if "F1" in cell["formulas"]:
         fk, ok = g("fandhe_pure_kernel"), g("opp_pure_kernel")
+        # 時計不一致時に両側の計測境界を併記できるよう、純カーネル値と時計タグを保持する（RULE §4・matrix §10.1）
+        m["bound"] = (fk, vals[(cid, "fandhe_pure_kernel")][1], ok, vals[(cid, "opp_pure_kernel")][1])
         if fk > fw or ok > ow:
             raise AggError(f"{cid}: pure_kernel exceeds window")
         if vals[(cid, "fandhe_pure_kernel")][1] != vals[(cid, "opp_pure_kernel")][1]:
@@ -320,6 +322,10 @@ def aggregate(dirp, rule_name="RULE.txt"):
         mf1 = statistics.median(f1) if f1 else None
         mf2 = statistics.median(f2) if f2 else None
         mobs = statistics.median([m["obs"] for m in ms])
+        for i, m in zip(rnos, ms):
+            if not m["clock_ok"]:
+                fk, fc, ok, oc = m["bound"]
+                md.append(f"| {i} 時計不一致 | fandhe 純カーネル {fk:.4f} ms（{fc}） | 相手 純カーネル {ok:.4f} ms（{oc}） | |")
         md.append(f"| 中央値 | {fnum(mf1)} | {fnum(mf2)} | {fnum(mobs)} |")
         for name, v in (("F1", f1), ("F2", f2)):
             if v:
@@ -477,6 +483,8 @@ def self_test():
     assert rows["X-TST-C1"][3:5] == [CLASS_HOLD, "高"], rows["X-TST-C1"]
     assert rows["X-TST-E1"][3] == CLASS_HOLD and rows["X-TST-E1"][4] == "低"
     assert "時計不一致" in rows["X-TST-E1"][5] and rows["X-TST-E1"][1] == "-"
+    # 時計不一致の run は両側の純カーネル値と時計タグを集計表に併記する（RULE §4）
+    assert "50.0000 ms（gpu_timestamp）" in md and "30.0000 ms（wall）" in md, md
     assert "ドリフト" in rows["X-TST-F1"][5] and "ドリフト" not in rows["X-TST-A1"][5]
     assert md == _run(cells, [dict(base) for _ in range(5)], ["PASS"] * 5)[0], "non-deterministic"
     # 5 本が閾値をまたぐ（F2 = .98 1.02 1.0 1.04 .96、中央値 1.0 → 窓だが確度低）
@@ -558,7 +566,9 @@ def self_test():
 
     # 同梱雛形は --check-template を通り、非雛形は拒否される
     here = os.path.dirname(os.path.abspath(__file__))
-    check_template(os.path.join(here, "RULE.template.txt"))
+    tpl = os.path.join(here, "RULE.template.txt")
+    if os.path.exists(tpl):  # スクリプトだけをコピーした配置では雛形が無い（README 手順 1 は両方置くが依存はしない）
+        check_template(tpl)
     with tempfile.TemporaryDirectory() as t:
         p = os.path.join(t, "bad.txt")
         with open(p, "w") as f:
