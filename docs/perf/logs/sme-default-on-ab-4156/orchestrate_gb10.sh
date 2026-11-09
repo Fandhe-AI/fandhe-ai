@@ -94,6 +94,11 @@ PREREG="${BASE}/${REPO_LOG}/prereg_append.txt"
 [ -f "${PREREG}" ] || { echo "prereg_append.txt が無い -> P-OWNER 不成立" >&2; exit 1; }
 [ "$(sed -n 's/^rule_sha256=\([0-9a-f]\{64\}\)$/\1/p' "${PREREG}" | head -n1)" = "$(sha "${RULE}" | awk '{print $1}')" ] \
     || { echo "prereg_append.txt の rule_sha256 が現在の RULE.txt と不一致 -> P-OWNER 不成立" >&2; exit 1; }
+# prepared_at の形式検証（ロック取得より前。欠落・形式不正・未来時刻は計測を始めない。RULE §4）
+PREPARED_AT="$(sed -n 's/^prepared_at=\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z\)$/\1/p' "${PREREG}" | head -n1)"
+[ -n "${PREPARED_AT}" ] || { echo "prereg_append.txt の prepared_at が欠落または形式不正 (YYYY-MM-DDTHH:MM:SSZ) -> P-OWNER 不成立" >&2; exit 1; }
+NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+[ "${PREPARED_AT}" \< "${NOW_UTC}" ] || { echo "prereg_append.txt の prepared_at (${PREPARED_AT}) が現在時刻 (${NOW_UTC}) 以降 -> P-OWNER 不成立" >&2; exit 1; }
 
 OUT="${WORK}/${HOST}"
 FINAL="${BASE}/${REPO_LOG}/${HOST}"
@@ -109,12 +114,15 @@ mask() { sed -e "s#${HOME}#<home>#g" -e "s#${WORK}#<work>#g" -e "s#${BASE}#<base
 # 実機ロック（P-LOCK）。解放は trap で必ず行う
 until mkdir "${LOCK_DIR}" 2>/dev/null; do sleep 60; done
 echo "#4156 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${LOCK_DIR}/owner"
-echo "acquired at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/hwlock.log"
+ACQUIRED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "acquired at=${ACQUIRED_AT}" >> "${OUT}/hwlock.log"
 release_lock() {
     echo "released at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/hwlock.log"
     rm -rf "${LOCK_DIR}"
 }
 trap release_lock EXIT
+# 取得直後の順序検証（prepared_at < acquired でなければ後続へ進まない。RULE §4）
+[ "${PREPARED_AT}" \< "${ACQUIRED_AT}" ] || { echo "prepared_at (${PREPARED_AT}) が hwlock 取得時刻 (${ACQUIRED_AT}) より前でない -> P-OWNER 不成立" >&2; exit 1; }
 cp "${PREREG}" "${OUT}/prereg_append.txt"
 
 # 外側専有ゲート（記録）: load1 < 1.0・GPU 使用率 0%・compute プロセス 0 件（最大 20 回・30 秒間隔）

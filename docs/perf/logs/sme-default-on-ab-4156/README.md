@@ -35,7 +35,7 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 
 ## 手順（実機セッション。Linux の自動運転では実行しない）
 
-1. 所有者の回答を `RULE.txt` §9 へ転記してコミット・push し、追記後の `RULE.txt` の sha256 と UTC 時刻を `prereg_append.txt`（`rule_sha256=` と `prepared_at=`）に記録する。時刻は hwlock の取得時刻より前でなければならない。
+1. 所有者の回答を `RULE.txt` §9 へ転記してコミット・push し、追記後の `RULE.txt` の sha256 と UTC 時刻を `prereg_append.txt`（`rule_sha256=` と `prepared_at=`）に記録する。時刻は hwlock の取得時刻より前でなければならない。`prereg_append.txt` も同じ要領でコミット・push する（未追跡のまま残すと A/B 本体の `verify_no_untracked_build_inputs` が BASE 内の未追跡ファイルを検出して停止する）。`prepared_at` は `YYYY-MM-DDTHH:MM:SSZ` 形式で、形式不正・未来時刻ならロック取得前に停止し、取得直後にも `prepared_at < acquired` を再確認する。
 2. 開発機で `git bundle` を作って実機へ転送し、クリーンな clone を BASE とする。登録基準 SHA と BASE の間で `crates/`・`scripts/bench/`・`Cargo.*`・`rust-toolchain.toml` に差分がないことを確認する（#3613 §8 の教訓）。
 3. `RAYON_NUM_THREADS` を unset し、他の cargo・bench・python が動いていないことを確かめる。計測中はビルドを並走させない。
 4. GB10 を先に: `BASE=<clone> WORK=<作業> [TORCH_PY=<python>] bash docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh`（`PATH` に `${HOME}/.cargo/bin`。専有できる機体を選ぶ。compute プロセスが常駐する機体では外側ゲートを通らない）。
