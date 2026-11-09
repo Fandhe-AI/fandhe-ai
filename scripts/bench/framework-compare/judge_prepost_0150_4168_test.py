@@ -241,6 +241,19 @@ class JudgeTest(unittest.TestCase):
         code, out = self.go(mutate=mut2)
         self.assertEqual(code, 2, out)
 
+    def test_missing_or_invalid_parity_fail_count(self):
+        for bad in ('missing', None, True, -1, 1.5, '0'):
+            def mut(i, arms, opp, bad=bad):
+                if i == 1:
+                    row = next(r for r in opp if r['task'] == 'gemm')
+                    if bad == 'missing':
+                        del row['parity_fail_count']
+                    else:
+                        row['parity_fail_count'] = bad
+            code, out = self.go(mutate=mut)
+            self.assertEqual(code, 2, (bad, out))
+            self.assertIn('parity_fail_count', out)
+
     def test_fill_draft_only_ratio_column(self):
         with tempfile.TemporaryDirectory() as t:
             tsv = Path(t) / 'r.tsv'

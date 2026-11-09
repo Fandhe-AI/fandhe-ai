@@ -102,11 +102,11 @@ def paired_ratio(runs, task, device, size):
         me = d.get(('fandhe-ai', task, device, size, 'reuse'))
         if me is None:
             raise SystemExit(f'run{i}: fandhe-ai reuse 欠損 {task} {device} N={size}')
-        if (me.get('parity_fail_count') or 0) > 0:
+        if me.get('parity_fail_count', 0) > 0:
             raise SystemExit(f'run{i}: fandhe-ai reuse の要素検証が不合格 {task} {device} N={size}')
         comp = [r['median_s'] for fw in FW_ORDER
                 for r in [d.get((fw, task, device, size, 'fresh'))]
-                if r is not None and (r.get('parity_fail_count') or 0) == 0]
+                if r is not None and r.get('parity_fail_count', 0) == 0]
         if not comp:
             raise SystemExit(f'run{i}: 有効な比較相手がない {task} {device} N={size}')
         rs.append(min(comp) / me['median_s'])
@@ -122,14 +122,14 @@ def judge(data, task, device, size, runs):
     assert me is not None, (task, device, size)
     # 判定側（fandhe-ai）の要素検証が不合格なら順位を出さない。判定不能行を集計
     # （判定対象 = 勝ち＋僅差＋負け）へ黙って混ぜないよう、生成自体を止める（fail-closed）
-    me_fail = me.get('parity_fail_count') or 0
+    me_fail = me.get('parity_fail_count', 0)
     if me_fail > 0:
         raise SystemExit(f'fandhe-ai reuse の要素検証が不合格（{me_fail} 要素）: {task} {device} N={size}。判定不能のため勝敗を出さない')
     mine = metric(me, task)
     comp = []
     for fw in FW_ORDER:
         r = data.get((fw, task, device, size, 'fresh'))
-        if r is None or (r.get('parity_fail_count') or 0) > 0:
+        if r is None or r.get('parity_fail_count', 0) > 0:
             continue
         comp.append((fw, metric(r, task)))
     if not comp:
@@ -190,6 +190,11 @@ def strict_load(path):
             ms = r.get('median_s')
             if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not math.isfinite(ms) or ms <= 0:
                 raise Undetermined(f'median_s が欠落または正の有限数でない（{ms!r}） {p}:{i}')
+        # parity_fail_count: GEMM 行は必須、他の行も存在するなら検証する（欠落を「検証成功」扱いにしない）
+        if r['task'] == 'gemm' or 'parity_fail_count' in r:
+            pf = r.get('parity_fail_count')
+            if isinstance(pf, bool) or not isinstance(pf, int) or pf < 0:
+                raise Undetermined(f'parity_fail_count が欠落または非負整数でない（{pf!r}） {p}:{i}')
         rows.append(r)
     return rows
 
@@ -281,7 +286,7 @@ def scan_parity_stop(own):
     for a, runs in own.items():
         for i, d in enumerate(runs, 1):
             for k, r in d.items():
-                pf = r.get('parity_fail_count') or 0
+                pf = r.get('parity_fail_count', 0)
                 if isinstance(pf, (int, float)) and pf > 0:
                     raise ParityStop(f'{a} run{i}: fandhe-ai の parity_fail_count={pf} {k}')
 
