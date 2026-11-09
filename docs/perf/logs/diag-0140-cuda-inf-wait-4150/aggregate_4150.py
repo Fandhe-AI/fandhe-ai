@@ -8,6 +8,10 @@
   TIMEOUT／INVALID を 1 件でも含む系列は status=partial・表題「参考」とし、確度を出さない（RULE 項 3）。
   派生元: diag-0140-torch-gb10-mlp-4149/aggregate_4149.py（RULE 解析・指紋・テンプレート検査の作法）。
 
+2 系列（#4188）: P・E 腕は #3189 の呼び出し列（系列 seq3189。層ごとに確保＋ゼロ初期化・入力 H2D あり）、
+  PR・ER 腕は 0.14.0 本番の predict_device_chain_resident 2 回目以降相当（系列 prod0140。常駐入力・層出力を
+  into 経路で再利用）。I 腕（E_sum）と F 腕は両系列で共通（common）。分類は系列ごとに独立に行う。
+
 使い方（python3 -I で実行する）:
   aggregate_4150.py --self-test
   aggregate_4150.py --check-template [RULE.template.txt]
@@ -42,8 +46,16 @@ ARM_KEYS = {
     "P": ("h2d_upload_us", "l1_issue_us", "l2_issue_us", "download_us", "download_again_us",
           "kernel_wait_derived_us", "total_us"),
     "E": ("up_gpu_us", "l1_span_us", "l2_span_us", "chain_gpu_us", "download_us", "l1_issue_us", "l2_issue_us"),
+    "PR": ("l1_issue_us", "l2_issue_us", "download_us", "download_again_us", "kernel_wait_derived_us", "total_us"),
+    "ER": ("l1_span_us", "l2_span_us", "chain_gpu_us", "download_us", "l1_issue_us", "l2_issue_us"),
     "I": ("l1_iso_us", "l2_iso_us", "l1_host_us", "l2_host_us"),
     "F": ("sync_idle_us", "launch_floor_1x1_us", "tiny_roundtrip_us", "event_record_pair_us", "event_pair_gpu_us"),
+}
+# 系列 ID → (P 系の腕, E 系の腕)。表示名は SERIES_LABEL。
+SERIES = {"seq3189": ("P", "E"), "prod0140": ("PR", "ER")}
+SERIES_LABEL = {
+    "seq3189": "#3189 列（層ごとに確保＋ゼロ初期化・入力 H2D あり。§12 の分解の再現）",
+    "prod0140": "本番列（0.14.0 の predict_device_chain_resident 2 回目以降相当。常駐入力・層出力を into 経路で再利用）",
 }
 # 分類規則（RULE 項 5 と同一。事後に動かさない）。
 PERTURBATION_LIMIT = 0.10
@@ -52,7 +64,7 @@ SHARE_EXEC_THRESHOLD = 0.5
 OPP_ITEMS = ("issue", "readout_sync", "gpu_span_event", "mm_event_l1_fwd", "mm_event_l2_fwd",
              "sync_idle", "tiny_roundtrip", "launch_floor_add", "event_record_pair")
 POSINT = r"(?:0|[1-9]\d*)"
-LINE_RE = re.compile(r"^CHAIN4150 arm=([PEIF]) iter=(" + POSINT + r")((?: [a-z0-9_]+=-?\d+\.\d{3})+)$")
+LINE_RE = re.compile(r"^CHAIN4150 arm=(PR|ER|P|E|I|F) iter=(" + POSINT + r")((?: [a-z0-9_]+=-?\d+\.\d{3})+)$")
 # example の DEVICE4150 行（println! の書式と同一。接頭辞だけでは受理しない）。
 DEVICE_RE = re.compile(r"^DEVICE4150 compute_capability=(\d+)\.(\d+) round=(" + POSINT + r") warmup=(" + POSINT
                        + r") iters=(" + POSINT + r")$")
@@ -209,54 +221,66 @@ def med(xs):
 
 
 def derive(chain):
-    """round 1 件分の腕別中央値と導出量（RULE 項 5）。各量に証拠タグを付ける。"""
+    """round 1 件分の腕別中央値と導出量（RULE 項 5）。各量に証拠タグを付け、系列別（seq3189・prod0140）と共通（common）に分ける。"""
     m = {a: {k: med(v) for k, v in kv.items()} for a, kv in chain.items()}
-    P, E, I, F = m["P"], m["E"], m["I"], m["F"]
-    kwd = P["kernel_wait_derived_us"]
-    if kwd <= 0:
-        raise AggError("kernel_wait_derived の中央値が 0 以下（share が定義できない）")
-    # event_perturbation の分母。除算より前に検査する（ZeroDivisionError ではなく AggError で止める）。
-    if P["download_us"] <= 0:
-        raise AggError("P 腕 download の中央値が 0 以下")
+    I, F = m["I"], m["F"]
     e_sum = I["l1_iso_us"] + I["l2_iso_us"]
-    host_issue = P["l1_issue_us"] + P["l2_issue_us"]
-    gpu_tail = max(0.0, E["chain_gpu_us"] - host_issue)
-    d = {
-        "kernel_wait_derived": (kwd, "実測"),
+    out = {"common": {
         "E_sum": (e_sum, "実測"),
-        "chain_gpu": (E["chain_gpu_us"], "実測"),
-        "gpu_gap": (E["chain_gpu_us"] - e_sum, "実測"),
-        "host_issue_sum": (host_issue, "実測"),
-        "gpu_tail": (gpu_tail, "推定"),
-        "wait_resid": (kwd - gpu_tail, "推定"),
-        "share_exec": (e_sum / kwd, "推定"),
-        "share_wait": (1.0 - e_sum / kwd, "推定"),
-        "event_perturbation": ((E["download_us"] - P["download_us"]) / P["download_us"], "実測"),
         "l1_iso": (I["l1_iso_us"], "実測"),
         "l2_iso": (I["l2_iso_us"], "実測"),
-        "l1_span": (E["l1_span_us"], "実測"),
-        "l2_span": (E["l2_span_us"], "実測"),
-        "up_gpu": (E["up_gpu_us"], "実測"),
-        "download": (P["download_us"], "実測"),
-        "download_again": (P["download_again_us"], "実測"),
-        "h2d_upload": (P["h2d_upload_us"], "実測"),
-        "l1_issue": (P["l1_issue_us"], "実測"),
-        "l2_issue": (P["l2_issue_us"], "実測"),
-        "total": (P["total_us"], "実測"),
         "sync_idle": (F["sync_idle_us"], "実測"),
         "tiny_roundtrip": (F["tiny_roundtrip_us"], "実測"),
         "launch_floor_1x1": (F["launch_floor_1x1_us"], "実測"),
         "event_record_pair": (F["event_record_pair_us"], "実測"),
-    }
-    return d
+    }}
+    for sid, (pa, ea) in SERIES.items():
+        P, E = m[pa], m[ea]
+        kwd = P["kernel_wait_derived_us"]
+        if kwd <= 0:
+            raise AggError(f"{sid}: kernel_wait_derived の中央値が 0 以下（share が定義できない）")
+        # event_perturbation の分母。除算より前に検査する（ZeroDivisionError ではなく AggError で止める）。
+        if P["download_us"] <= 0:
+            raise AggError(f"{sid}: {pa} 腕 download の中央値が 0 以下")
+        host_issue = P["l1_issue_us"] + P["l2_issue_us"]
+        gpu_tail = max(0.0, E["chain_gpu_us"] - host_issue)
+        d = {
+            "kernel_wait_derived": (kwd, "実測"),
+            "chain_gpu": (E["chain_gpu_us"], "実測"),
+            "gpu_gap": (E["chain_gpu_us"] - e_sum, "実測"),
+            "host_issue_sum": (host_issue, "実測"),
+            "gpu_tail": (gpu_tail, "推定"),
+            "wait_resid": (kwd - gpu_tail, "推定"),
+            "share_exec": (e_sum / kwd, "推定"),
+            "share_wait": (1.0 - e_sum / kwd, "推定"),
+            "event_perturbation": ((E["download_us"] - P["download_us"]) / P["download_us"], "実測"),
+            "l1_span": (E["l1_span_us"], "実測"),
+            "l2_span": (E["l2_span_us"], "実測"),
+            "download": (P["download_us"], "実測"),
+            "download_again": (P["download_again_us"], "実測"),
+            "l1_issue": (P["l1_issue_us"], "実測"),
+            "l2_issue": (P["l2_issue_us"], "実測"),
+            "total": (P["total_us"], "実測"),
+        }
+        if sid == "seq3189":
+            # 入力 H2D は #3189 列だけにある（本番列は常駐入力で区間外）。
+            d["up_gpu"] = (E["up_gpu_us"], "実測")
+            d["h2d_upload"] = (P["h2d_upload_us"], "実測")
+        out[sid] = d
+    return out
 
 
 def summarize(per_round):
-    rows = {}
-    for k in per_round[0]:
-        vals = [r[k][0] for r in per_round]
-        rows[k] = {"tag": per_round[0][k][1], "median": med(vals), "min": min(vals), "max": max(vals), "vals": vals}
-    return rows
+    """節（common・seq3189・prod0140）ごとに {量: {tag, median, min, max, vals}} を作る。"""
+    secs = {}
+    for sec in per_round[0]:
+        rows = {}
+        for k in per_round[0][sec]:
+            vals = [r[sec][k][0] for r in per_round]
+            rows[k] = {"tag": per_round[0][sec][k][1], "median": med(vals), "min": min(vals), "max": max(vals),
+                       "vals": vals}
+        secs[sec] = rows
+    return secs
 
 
 def classify(rows):
@@ -310,11 +334,24 @@ def fnum(x, nd=3):
     return f"{x:.{nd}f}"
 
 
-# 対応表（fandhe 側の量, #4149 側の item）。非対称は README／md に併記する。
-PAIRS = (("host_issue_sum", "issue"), ("download", "readout_sync"), ("chain_gpu", "gpu_span_event"),
-         ("l1_iso", "mm_event_l1_fwd"), ("l2_iso", "mm_event_l2_fwd"), ("sync_idle", "sync_idle"),
-         ("tiny_roundtrip", "tiny_roundtrip"), ("launch_floor_1x1", "launch_floor_add"),
-         ("event_record_pair", "event_record_pair"))
+# 対応表（節, fandhe 側の量, #4149 側の item）。#4149 の X は device 上で H2D を含まないため、
+# issue・readout_sync・gpu_span_event の相手は本番列（H2D なし）と組む。#3189 列は参考表（PAIRS_REF）に並べる。
+PAIRS = (("prod0140", "host_issue_sum", "issue"), ("prod0140", "download", "readout_sync"),
+         ("prod0140", "chain_gpu", "gpu_span_event"),
+         ("common", "l1_iso", "mm_event_l1_fwd"), ("common", "l2_iso", "mm_event_l2_fwd"),
+         ("common", "sync_idle", "sync_idle"), ("common", "tiny_roundtrip", "tiny_roundtrip"),
+         ("common", "launch_floor_1x1", "launch_floor_add"), ("common", "event_record_pair", "event_record_pair"))
+PAIRS_REF = (("seq3189", "host_issue_sum", "issue"), ("seq3189", "download", "readout_sync"),
+             ("seq3189", "chain_gpu", "gpu_span_event"))
+
+SERIES_NOTE = {
+    "seq3189": "区間: E_sum（l1_iso＋l2_iso）は into 経路の融合カーネル幅で出力のゼロ初期化を含まない。"
+               "chain_gpu・l1_issue／l2_issue は upload 後に計時し、層ごとの出力確保＋ゼロ初期化（#3189 の呼び出し列）と drop を含むため、"
+               "その分は gpu_gap・share_wait 側に入る。入力 H2D は h2d_upload・up_gpu の別項目で、"
+               "H2D を含むのはチェーン全体の total のみ（RULE 項 4・5）",
+    "prod0140": "区間: 区間内に確保・ゼロ初期化・H2D・drop を含まない（常駐入力・事前確保した層出力への into 経路）。"
+                "gpu_gap は発行待ちによる GPU の空きだけで、層出力のゼロ初期化を含まない（RULE 項 4・5）",
+}
 
 
 def series_status(statuses):
@@ -322,48 +359,68 @@ def series_status(statuses):
     return "complete" if statuses and all(s == "PASS" for s in statuses) else "partial"
 
 
-def render(rule, statuses, rows, opp):
-    side, conf, reasons = classify(rows)
+def _row_cells(k, r):
+    nd = 4 if k.startswith("share") or k == "event_perturbation" else 3
+    return fnum(r["median"], nd), fnum(r["min"], nd), fnum(r["max"], nd)
+
+
+def _pair_table(md, pairs, secs, opp):
+    md += ["| fandhe の量 | 節 | 相手の item | fandhe | 相手 | 差（実測の差） |", "|---|---|---|---|---|---|"]
+    for sec, mine, theirs in pairs:
+        a = secs[sec][mine]["median"]
+        if theirs in opp:
+            md.append(f"| {mine} | {sec} | {theirs} | {fnum(a)} | {fnum(opp[theirs])} | {fnum(a - opp[theirs])} |")
+        else:
+            md.append(f"| {mine} | {sec} | {theirs} | {fnum(a)} | unavailable | unavailable |")
+
+
+def render(rule, statuses, secs, opp):
     status = series_status(statuses)
-    n_ok = len(rows["share_exec"]["vals"])
+    n_ok = len(secs["common"]["E_sum"]["vals"])
     if status == "complete":
-        title = f"# #4150 集計（record_only の内訳。tree_sha={rule['tree_sha']}）"
-        cls = f"- 分類: **{side}**（確度: {conf}" + (f"。理由: {'、'.join(reasons)}" if reasons else "") + "）"
+        title = f"# #4150 集計（record_only の内訳。2 系列。tree_sha={rule['tree_sha']}）"
     else:
         # RULE 項 3: 不完全な系列は「参考」。確度（と確度の理由）は書かない。
-        title = f"# 参考: #4150 集計（status=partial・正式系列ではない。tree_sha={rule['tree_sha']}）"
-        cls = f"- 分類（参考）: {side}（status=partial のため確度は出さない）"
+        title = f"# 参考: #4150 集計（status=partial・正式系列ではない。2 系列。tree_sha={rule['tree_sha']}）"
     md = [title, "",
           f"- status: {status}",
           f"- round 状態: {' '.join(statuses)}（PASS {n_ok} 件を使用）",
-          cls,
           "- 値の単位は µs。round 別中央値の中央値と NB-RANGE5（最小〜最大）。タグ: 実測／推定",
-          "- 区間: E_sum（l1_iso＋l2_iso）は into 経路の融合カーネル幅で出力のゼロ初期化を含まない。"
-          "chain_gpu・l1_issue／l2_issue は層ごとの出力確保＋ゼロ初期化（#3189 の呼び出し列）を含むため、"
-          "その分は gpu_gap・share_wait 側に入る（RULE 項 4・5）", "",
-          "| 量 | タグ | 中央値 | 最小 | 最大 |", "|---|---|---|---|---|"]
-    tsv = ["item\ttag\tmedian\tmin\tmax", f"status\t{status}\t\t\t"]
-    for k, r in rows.items():
-        nd = 4 if k.startswith("share") or k == "event_perturbation" else 3
-        md.append(f"| {k} | {r['tag']} | {fnum(r['median'], nd)} | {fnum(r['min'], nd)} | {fnum(r['max'], nd)} |")
-        tsv.append(f"{k}\t{r['tag']}\t{fnum(r['median'], nd)}\t{fnum(r['min'], nd)}\t{fnum(r['max'], nd)}")
-    md += ["", "## 相手側（#4149 PyTorch CUDA）との対応", ""]
+          "- 2 系列（#4188）: seq3189 は P・E 腕（#3189 列）、prod0140 は PR・ER 腕（0.14.0 本番の経路）。"
+          "分類は系列ごとに独立。E_sum と F 腕は共通"]
+    tsv = ["series\titem\ttag\tmedian\tmin\tmax", f"-\tstatus\t{status}\t\t\t"]
+    for sid in SERIES:
+        rows = secs[sid]
+        side, conf, reasons = classify(rows)
+        md += ["", f"## 系列 {sid}: {SERIES_LABEL[sid]}", ""]
+        if status == "complete":
+            md.append(f"- 分類: **{side}**（確度: {conf}" + (f"。理由: {'、'.join(reasons)}" if reasons else "") + "）")
+        else:
+            md.append(f"- 分類（参考）: {side}（status=partial のため確度は出さない）")
+        md += [f"- {SERIES_NOTE[sid]}", "", "| 量 | タグ | 中央値 | 最小 | 最大 |", "|---|---|---|---|---|"]
+        for k, r in rows.items():
+            c = _row_cells(k, r)
+            md.append(f"| {k} | {r['tag']} | {c[0]} | {c[1]} | {c[2]} |")
+            tsv.append(f"{sid}\t{k}\t{r['tag']}\t{c[0]}\t{c[1]}\t{c[2]}")
+    md += ["", "## 共通量（I 腕・F 腕。両系列で共通）", "", "| 量 | タグ | 中央値 | 最小 | 最大 |", "|---|---|---|---|---|"]
+    for k, r in secs["common"].items():
+        c = _row_cells(k, r)
+        md.append(f"| {k} | {r['tag']} | {c[0]} | {c[1]} | {c[2]} |")
+        tsv.append(f"common\t{k}\t{r['tag']}\t{c[0]}\t{c[1]}\t{c[2]}")
+    md += ["", "## 本番列と #4149（PyTorch CUDA）の対応", ""]
     if opp is None:
         md.append("相手側の実測は未入力（--opp-tsv なし）: **unavailable**。推定値では埋めない。")
-        tsv.append("opp\tunavailable\t\t\t")
+        tsv.append("-\topp\tunavailable\t\t\t")
     else:
-        md += ["| fandhe の量 | 相手の item | fandhe | 相手 | 差（実測の差） |", "|---|---|---|---|---|"]
-        for mine, theirs in PAIRS:
-            if theirs in opp:
-                a = rows[mine]["median"]
-                md.append(f"| {mine} | {theirs} | {fnum(a)} | {fnum(opp[theirs])} | {fnum(a - opp[theirs])} |")
-            else:
-                md.append(f"| {mine} | {theirs} | {fnum(rows[mine]['median'])} | unavailable | unavailable |")
-        md += ["", "非対称: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。"
-               "fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの同じカーネル（into 経路）、PyTorch の mm_event は純 GEMM。"
-               "fandhe の chain_gpu は層出力のゼロ初期化を含む（PyTorch の caching allocator は層ごとのゼロ初期化をしない）。"
+        _pair_table(md, PAIRS, secs, opp)
+        md += ["", "参考（#3189 列と #4149 の対応。#3189 列は入力 H2D と層出力のゼロ初期化を含むため差を内訳として読まない）", ""]
+        _pair_table(md, PAIRS_REF, secs, opp)
+        md += ["", "非対称（本番列）: fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの同じカーネル（into 経路）、"
+               "PyTorch の mm_event は純 GEMM。fandhe の窓は facade 上位の固定費を含まない。"
                "launch_floor_1x1（1x1 linear の単発発行）と launch_floor_add（1 要素 add 100 回の 1 回あたり）は"
-               "区間定義が異なる参考の並びで、差を内訳として読まない。"]
+               "区間定義が異なる参考の並びで、差を内訳として読まない。",
+               "非対称（#3189 列のみ）: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。"
+               "fandhe の chain_gpu は層出力のゼロ初期化を含む（PyTorch の caching allocator は層ごとのゼロ初期化をしない）。"]
     return "\n".join(md) + "\n", "\n".join(tsv) + "\n"
 
 
@@ -473,18 +530,25 @@ def check_rule(path):
 
 
 # ---------------------------------------------------------------- self-test
+ALL_ARMS = ("P", "E", "PR", "ER", "I", "F")
+
+
 def _synth_chain(iters, e_sum_each=25.0, kwd=100.0, p_dl=100.0, e_dl=100.0, drop_key=None, dup=False, arms=None,
-                 round_no=1, warmup=1):
+                 round_no=1, warmup=1, prod_kwd=100.0, prod_dl=100.0, prod_e_dl=100.0):
     lines = ["DEVICE4150 compute_capability=12.1 round=%d warmup=%d iters=%d" % (round_no, warmup, iters)]
     vals = {
         "P": dict(h2d_upload_us=10, l1_issue_us=20, l2_issue_us=20, download_us=p_dl, download_again_us=p_dl - kwd,
                   kernel_wait_derived_us=kwd, total_us=150),
         "E": dict(up_gpu_us=10, l1_span_us=30, l2_span_us=20, chain_gpu_us=60, download_us=e_dl, l1_issue_us=20,
                   l2_issue_us=20),
+        "PR": dict(l1_issue_us=8, l2_issue_us=8, download_us=prod_dl, download_again_us=prod_dl - prod_kwd,
+                   kernel_wait_derived_us=prod_kwd, total_us=16 + prod_dl),
+        "ER": dict(l1_span_us=15, l2_span_us=10, chain_gpu_us=25, download_us=prod_e_dl, l1_issue_us=8,
+                   l2_issue_us=8),
         "I": dict(l1_iso_us=e_sum_each, l2_iso_us=e_sum_each, l1_host_us=20, l2_host_us=20),
         "F": dict(sync_idle_us=5, launch_floor_1x1_us=3, tiny_roundtrip_us=30, event_record_pair_us=1, event_pair_gpu_us=2),
     }
-    for arm in (arms or "PEIF"):
+    for arm in (arms or ALL_ARMS):
         for i in range(iters):
             kv = dict(vals[arm])
             if drop_key and arm == "P":
@@ -507,27 +571,49 @@ def _expect_error(fn, label):
 def self_test():
     n = 5
     ok, _ = parse_chain(_synth_chain(n), 1, 1, n)
-    d = derive(ok)
+    d = derive(ok)["seq3189"]
     assert d["share_exec"][0] == 0.5 and d["kernel_wait_derived"][0] == 100.0
     assert d["gpu_gap"][0] == 60 - 50 and d["gpu_tail"][0] == 20 and d["wait_resid"][0] == 80
+    dp = derive(ok)["prod0140"]
+    assert dp["gpu_gap"][0] == 25 - 50 and dp["gpu_tail"][0] == 9 and dp["share_exec"][0] == 0.5
+    assert "h2d_upload" in d and "up_gpu" in d and "h2d_upload" not in dp and "up_gpu" not in dp
     # 境界: share_exec ちょうど 0.5 は GPU 実行側、摂動ちょうど 0.10 は確度を落とさない。
-    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=110.0), 1, 1, n)[0]) for _ in range(3)])
+    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=110.0), 1, 1, n)[0]) for _ in range(3)])["seq3189"]
     assert rows["event_perturbation"]["median"] == 0.1
     side, conf, why = classify(rows)
     assert side.startswith("GPU 実行") and conf == "高" and not why, (side, conf, why)
-    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=111.0), 1, 1, n)[0]) for _ in range(3)])
+    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=111.0), 1, 1, n)[0]) for _ in range(3)])["seq3189"]
     assert classify(rows)[1] == "低"
     # 待ち支配（share < 0.5）。
-    rows = summarize([derive(parse_chain(_synth_chain(n, e_sum_each=10.0), 1, 1, n)[0]) for _ in range(3)])
+    rows = summarize([derive(parse_chain(_synth_chain(n, e_sum_each=10.0), 1, 1, n)[0]) for _ in range(3)])["seq3189"]
     assert classify(rows)[0].startswith("待ち") and classify(rows)[1] == "高"
     # round 間で側が割れる → 低。
     mixed = [derive(parse_chain(_synth_chain(n, e_sum_each=x), 1, 1, n)[0]) for x in (10.0, 30.0, 30.0)]
-    side, conf, why = classify(summarize(mixed))
-    assert conf == "低" and any("割れた" in w or "またぐ" in w for w in why)
+    side, conf, why = classify(summarize(mixed)["seq3189"])
+    assert conf == "低"
+    assert any("割れた" in w or "またぐ" in w for w in why)
+    # 2 系列の分類は独立（#4188）: seq3189 は GPU 実行支配（share 0.5）、prod0140 は待ち支配（kwd=200 で share 0.25）。
+    two = summarize([derive(parse_chain(_synth_chain(n, prod_kwd=200.0, prod_dl=200.0, prod_e_dl=200.0), 1, 1, n)[0])
+                     for _ in range(3)])
+    s_side, s_conf, _ = classify(two["seq3189"])
+    p_side, p_conf, _ = classify(two["prod0140"])
+    assert s_side.startswith("GPU 実行") and p_side.startswith("待ち") and s_conf == "高" and p_conf == "高"
+    # 摂動を超えた系列（prod: 120/100-1=0.2）だけ確度が低になる。
+    pert = summarize([derive(parse_chain(_synth_chain(n, prod_e_dl=120.0), 1, 1, n)[0]) for _ in range(3)])
+    assert classify(pert["seq3189"])[1] == "高" and classify(pert["prod0140"])[1] == "低"
+    # 系列別の 0 以下の分母は AggError。
+    _expect_error(lambda: derive(parse_chain(_synth_chain(n, prod_kwd=0.0), 1, 1, n)[0]), "prod kwd zero")
+    # 腕名・キー順・欠落の厳格さ。
+    _expect_error(lambda: parse_chain(_synth_chain(n).replace("arm=PR iter=0 ", "arm=PRX iter=0 ", 1), 1, 1, n),
+                  "bad arm name")
+    _expect_error(lambda: parse_chain(_synth_chain(n).replace(
+        "arm=ER iter=0 l1_span_us=15.000 l2_span_us=10.000", "arm=ER iter=0 l2_span_us=10.000 l1_span_us=15.000", 1),
+        1, 1, n), "ER key order")
+    _expect_error(lambda: parse_chain(_synth_chain(n, arms=("P", "E", "ER", "I", "F")), 1, 1, n), "missing PR")
     # 異常系。
     _expect_error(lambda: parse_chain(_synth_chain(n, drop_key="total_us"), 1, 1, n), "missing key")
     _expect_error(lambda: parse_chain(_synth_chain(n, dup=True), 1, 1, n), "duplicate iter")
-    _expect_error(lambda: parse_chain(_synth_chain(n, arms="PEI"), 1, 1, n), "missing arm")
+    _expect_error(lambda: parse_chain(_synth_chain(n, arms=("P", "E", "PR", "ER", "I")), 1, 1, n), "missing arm")
     _expect_error(lambda: parse_chain(_synth_chain(n), 1, 1, n + 1), "iters mismatch")
     _expect_error(lambda: parse_chain(_synth_chain(n) + "garbage\n", 1, 1, n), "unparsable")
     _expect_error(lambda: parse_chain(_synth_chain(n).replace("done4150\n", ""), 1, 1, n), "no done")
@@ -566,22 +652,52 @@ def self_test():
     rule_stub = {"tree_sha": "a" * 40}
     md_p, tsv_p = render(rule_stub, ["PASS", "TIMEOUT", "TIMEOUT", "TIMEOUT", "TIMEOUT"], one, None)
     assert md_p.startswith("# 参考: ") and "確度:" not in md_p and "確度: 高" not in md_p and "理由:" not in md_p
-    assert "status=partial のため確度は出さない" in md_p and "status\tpartial\t" in tsv_p
+    assert "status=partial のため確度は出さない" in md_p and "-\tstatus\tpartial\t" in tsv_p
+    assert md_p.count("status=partial のため確度は出さない") == 2  # 両系列とも確度を出さない
     assert "- status: partial" in md_p
     md_c, tsv_c = render(rule_stub, ["PASS"], one, None)
-    assert md_c.startswith("# #4150 集計") and "確度: 高" in md_c and "status\tcomplete\t" in tsv_c
+    assert md_c.startswith("# #4150 集計") and md_c.count("確度: 高") == 2 and "-\tstatus\tcomplete\t" in tsv_c
+    # 2 系列の節見出しと TSV の系列列（表題・TSV・分類で区別される）。
+    for x in (md_c, md_p):
+        assert "## 系列 seq3189: " in x and "## 系列 prod0140: " in x and "## 共通量" in x
+    for pre in ("seq3189\t", "prod0140\t", "common\t"):
+        assert any(ln.startswith(pre) for ln in tsv_c.splitlines()), pre
+    assert tsv_c.startswith("series\titem\ttag\tmedian\tmin\tmax\n")
+    assert "seq3189\th2d_upload\t" in tsv_c and "prod0140\th2d_upload\t" not in tsv_c
     # 区間の注記（I 腕は into 経路でゼロ初期化を含まず、chain_gpu は含む）を complete・partial の両方に出す。
     assert all("出力のゼロ初期化を含まない" in x and "gpu_gap・share_wait 側に入る" in x for x in (md_c, md_p))
+    assert all("区間内に確保・ゼロ初期化・H2D・drop を含まない" in x for x in (md_c, md_p))
+    # 相手側の対応表は本番列と組む（参考として #3189 列も並べる）。
+    md_o, _ = render(rule_stub, ["PASS"], one, {"issue": 10.0, "mm_event_l1_fwd": 5.0})
+    assert "| host_issue_sum | prod0140 | issue |" in md_o and "| host_issue_sum | seq3189 | issue |" in md_o
+    assert "非対称（本番列）" in md_o and "非対称（#3189 列のみ）" in md_o
     _expect_error(lambda: load_opp_text("item\tmedian_us\nissue\tabc\n"), "opp not a number")
     _expect_error(lambda: derive(parse_chain(_synth_chain(n, kwd=0.0), 1, 1, n)[0]), "kwd zero")
     # example 出力キーとの突き合わせ（Rust 側の format_line 呼び出しと同一であること）。
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "crates", "backend-cuda",
-                       "examples", "cuda_infer_chain_event_diag_4150.rs")
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, "..", "..", "..", "..", "crates", "backend-cuda", "examples",
+                       "cuda_infer_chain_event_diag_4150.rs")
     if os.path.exists(src):
         text = read(src)
         for arm, keys in ARM_KEYS.items():
+            assert f'"{arm}"' in text, f"example に腕名 {arm} がない"
             for k in keys:
                 assert f'"{k}"' in text, f"example に出力キー {k}（arm {arm}）がない"
+    # RULE 雛形の項 4 に PR・ER の定義行と出力キー名があること（区間定義と RULE の一致）。
+    tpl = os.path.join(here, "RULE.template.txt")
+    if os.path.exists(tpl):
+        tl = read(tpl).splitlines()
+        for arm in ("PR", "ER"):
+            at = [i for i, ln in enumerate(tl) if ln.startswith(f"  {arm}:")]
+            assert len(at) == 1, f"雛形に {arm} の定義行が 1 つでない"
+            block = [tl[at[0]]]
+            for ln in tl[at[0] + 1:]:
+                if re.match(r"^  \S", ln) or not ln.strip():
+                    break
+                block.append(ln)
+            btxt = "\n".join(block)
+            for k in ARM_KEYS[arm]:
+                assert k[:-3] in btxt, f"雛形の {arm} 定義に {k} がない"
     # RULE／テンプレート／end-to-end。
     with tempfile.TemporaryDirectory() as t:
         rule = os.path.join(t, "RULE.txt")
@@ -595,7 +711,7 @@ def self_test():
             open(os.path.join(t, f"round{i}", "raw", "chain.txt"), "w").write(_synth_chain(n, round_no=i))
         run_dir(t, rule, os.path.join(t, "a.md"), os.path.join(t, "a.tsv"))
         assert "unavailable" in read(os.path.join(t, "a.md"))
-        assert "status\tcomplete\t" in read(os.path.join(t, "a.tsv")) and "確度: " in read(os.path.join(t, "a.md"))
+        assert "-\tstatus\tcomplete\t" in read(os.path.join(t, "a.tsv")) and "確度: " in read(os.path.join(t, "a.md"))
         # round2 の chain に round1 のヘッダ（取り違え）→ 拒否。
         open(os.path.join(t, "round2", "raw", "chain.txt"), "w").write(_synth_chain(n, round_no=1))
         _expect_error(lambda: run_dir(t, rule, os.path.join(t, "x.md"), os.path.join(t, "x.tsv")), "e2e round mismatch")
@@ -607,7 +723,7 @@ def self_test():
         open(os.path.join(t, "round2", "gate.txt"), "w").write("TIMEOUT load1=2.0 x\n")
         run_dir(t, rule, os.path.join(t, "p.md"), os.path.join(t, "p.tsv"))
         pmd = read(os.path.join(t, "p.md"))
-        assert pmd.startswith("# 参考: ") and "確度: " not in pmd and "status\tpartial\t" in read(os.path.join(t, "p.tsv"))
+        assert pmd.startswith("# 参考: ") and "確度: " not in pmd and "-\tstatus\tpartial\t" in read(os.path.join(t, "p.tsv"))
         open(os.path.join(t, "round2", "gate.txt"), "w").write("PASS x\n")
         # 余分な round ディレクトリ（run の追加）→ 拒否。
         os.makedirs(os.path.join(t, "round3"))
@@ -616,7 +732,7 @@ def self_test():
         opp = os.path.join(t, "opp.tsv")
         open(opp, "w").write("item\tmedian_us\nissue\t10.0\n")
         run_dir(t, rule, os.path.join(t, "b.md"), os.path.join(t, "b.tsv"), opp)
-        assert "| host_issue_sum | issue |" in read(os.path.join(t, "b.md"))
+        assert "| host_issue_sum | prod0140 | issue |" in read(os.path.join(t, "b.md"))
         open(opp, "w").write("item\tmedian_us\nissue\t10.0\nissue\t11.0\n")
         _expect_error(lambda: load_opp(opp), "dup opp")
         # 欠損 round／checksum 不一致／プレースホルダ残存／sha 不一致。
