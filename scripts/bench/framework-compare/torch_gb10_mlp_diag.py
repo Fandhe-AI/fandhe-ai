@@ -312,11 +312,21 @@ def cuda_fixed_stats(torch, bp):
     return out
 
 
+def pin_fp32_no_tf32(torch):
+    """CUDA matmul を fp32（TF32 無効）に固定する（姉妹キット opp_kernel_cuda_diag.py と同じく明示設定。
+    allow_tf32 の PyTorch 既定は True のため、既定値の要求ではなく設定して読み戻す）。env／measure／profile の各プロセスから呼ぶ。"""
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
+    if bool(torch.backends.cuda.matmul.allow_tf32) or torch.get_float32_matmul_precision() != "highest":
+        raise SystemExit("fp32 matmul 精度の固定（TF32 無効）を読み戻せない")
+
+
 def cmd_measure(args):
     h = cpu_diag()
     bp = h.load_bench_py(args.bench_py)
     import numpy as np
     import torch
+    pin_fp32_no_tf32(torch)
     out = Path(args.out)
     if out.exists():
         raise SystemExit(f"出力が既にある（上書きしない）: {out}")
@@ -403,6 +413,7 @@ def cmd_env(args):
         raise SystemExit(f"出力が既にある（上書きしない）: {out}")
     if not torch.cuda.is_available():
         raise SystemExit("torch の CUDA が利用できない")
+    pin_fp32_no_tf32(torch)  # 既定 True を要求せず False を設定し、設定後の値を記録する
     m = torch.backends.cuda.matmul
     d = {"issue": ISSUE, "torch_version": torch.__version__, "numpy_version": np.__version__,
          "torch_threads": torch.get_num_threads(),
@@ -418,7 +429,7 @@ def cmd_env(args):
          "helper_cpu_diag_sha256": h.sha256_file(HERE / "torch_cpu_mlp_diag.py"),
          "helper_cuda_diag_sha256": h.sha256_file(HERE / "opp_kernel_cuda_diag.py")}
     validate_env(d)
-    # bench_py は精度設定を変えない。既定（highest／TF32 無効）以外は想定外として停止する（#3179 RULE の読み戻しの作法）。
+    # 設定後の読み戻し（highest／TF32 無効）を RULE の作法として再確認する。
     if d["fp32_matmul_precision"] != "highest" or d["allow_tf32"]:
         raise SystemExit(f"fp32 matmul 精度が既定と違う: {d['fp32_matmul_precision']} allow_tf32={d['allow_tf32']}")
     with open(out, "x") as f:
@@ -446,6 +457,7 @@ def cmd_profile(args):
     import numpy as np
     import torch
     from torch.profiler import ProfilerActivity, profile
+    pin_fp32_no_tf32(torch)
     out = Path(args.out)
     if out.exists():
         raise SystemExit(f"出力が既にある（上書きしない）: {out}")

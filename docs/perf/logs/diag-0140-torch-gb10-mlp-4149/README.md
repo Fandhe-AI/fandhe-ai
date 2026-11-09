@@ -49,7 +49,7 @@ GB10 の 3 セル（G-CPU-TRN・G-CPU-INF・G-CUDA-INF）の相手（PyTorch）�
    `python3 -I aggregate_4149.py --check-rule RULE.txt` でプレースホルダ 0・sha 一致を確認して `RULE.txt` を**単独コミット**する。
 2. （PR-3・<cuda-node>）実機ロックを取り、ツリー指紋を RULE と照合する。
    `ROOT=… PY=… BP=… EXPECT_SHA=… HW_LOCK_OWNER_FILE=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
-3. 全 round の後に `PY=… bash probe/run_probe.sh <記録先>/env/probe.txt` を 1 回実行する（計時外）。
+3. 全 round の後に `PY=… bash probe/run_probe.sh <記録先>/env/probe.txt <RULE.txt>` を 1 回（RULE の probe_shim_sha256 と照合してから shim をビルドする）実行する（計時外）。
 4. 回収時にパス上のユーザー名・ホスト名をマスクし（`<home>`・`<cuda-node>`）、`env/` にツリー指紋・`.rev-stamp`・`torch.__config__.show()`・`nvidia-smi` 概要を置く。
 5. `python3 -I aggregate_4149.py --dir <記録先>` で `aggregate.md`・`aggregate.tsv` を生成し、下の結果欄と
    `docs/perf/loss-attribution-matrix.md` の G-CPU-TRN・G-CPU-INF・G-CUDA-INF の相手欄を実測値＋タグで更新する（未測定は未測定のまま）。

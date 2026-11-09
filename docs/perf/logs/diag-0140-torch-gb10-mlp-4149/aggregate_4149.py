@@ -353,12 +353,9 @@ def _prof_cuda_lines(profs):
     ok = [p["cuda"] for p in profs if p.get("cuda") is not None]
     if ok:
         lines.append(f"- cudaGraphLaunch の有無（いずれかの round で観測）: {'あり' if any(c['graph_launch'] for c in ok) else 'なし（eager）'}")
-        api, kern = {}, {}
-        for c in ok:
-            for k, n in c["api"].items():
-                api.setdefault(k, []).append(n)
-            for k, n in c["kernels"].items():
-                kern.setdefault(k, []).append(n)
+        # 取得できた全 round で名前の和集合を作り、その round に出なかった名前は 0 回として中央値に入れる
+        api = {k: [c["api"].get(k, 0) for c in ok] for k in sorted({k for c in ok for k in c["api"]})}
+        kern = {k: [c["kernels"].get(k, 0) for c in ok] for k in sorted({k for c in ok for k in c["kernels"]})}
         lines.append("- CUDA API 回数 / step（run 間の中央値）: " +
                      (", ".join(f"{k}={statistics.median(n):.2f}" for k, n in sorted(api.items())) or "なし"))
         lines += ["", "| kernel 名 | 回数 / step（run 間の中央値） |", "|---|---|"]

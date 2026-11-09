@@ -13,6 +13,7 @@
 
 enum { C_SGEMM_, C_CBLAS, C_CUBLAS_SGEMM, C_CUBLAS_GEMMEX, C_CUBLASLT, C_N };
 static unsigned long counts[C_N];
+static unsigned long seen[C_N]; /* 先頭スロット用。reset で 0 に戻す（counts は累積のまま） */
 static int first_m[C_N][4], first_n[C_N][4], first_k[C_N][4];
 static const char *next_lib[C_N] = {"unresolved", "unresolved", "unresolved", "unresolved", "unresolved"};
 
@@ -36,6 +37,15 @@ static void *find_next(const char *const *sonames, const char *sym) {
   }
   return dlsym(RTLD_NEXT, sym);
 }
+/* 転送先を解決できなければ観測不能として明示終了する（NULL 呼び出しでのクラッシュを避ける。推定で続行しない）。 */
+static void *must_resolve(const char *const *sonames, const char *sym) {
+  void *p = find_next(sonames, sym);
+  if (!p) {
+    fprintf(stderr, "probe_shim_4149: 転送先 %s を解決できない（観測不能）\n", sym);
+    _exit(97);
+  }
+  return p;
+}
 static const char *const NVPL[] = {"libnvpl_blas_lp64_gomp.so.0", 0};
 static const char *const CUBLAS[] = {"libcublas.so.13", "libcublas.so.12", 0};
 static const char *const CUBLASLT[] = {"libcublasLt.so.13", "libcublasLt.so.12", 0};
@@ -46,14 +56,15 @@ static const char *lib_of(void *sym) {
   return "unresolved";
 }
 static void note(int id, int m, int n, int k) {
-  unsigned long c = counts[id]++;
+  counts[id]++;
+  unsigned long c = seen[id]++;
   if (c < 4) { first_m[id][c] = m; first_n[id][c] = n; first_k[id][c] = k; }
 }
 
 void sgemm_(const char *ta, const char *tb, const int *m, const int *n, const int *k, const float *alpha, const float *a,
             const int *lda, const float *b, const int *ldb, const float *beta, float *c, const int *ldc) {
   static sgemm_fn next;
-  if (!next) { next = (sgemm_fn)find_next(NVPL, "sgemm_"); next_lib[C_SGEMM_] = lib_of((void *)next); }
+  if (!next) { next = (sgemm_fn)must_resolve(NVPL, "sgemm_"); next_lib[C_SGEMM_] = lib_of((void *)next); }
   note(C_SGEMM_, *m, *n, *k);
   next(ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
 }
@@ -61,7 +72,7 @@ void sgemm_(const char *ta, const char *tb, const int *m, const int *n, const in
 void cblas_sgemm(int layout, int ta, int tb, int m, int n, int k, float alpha, const float *a, int lda, const float *b,
                  int ldb, float beta, float *c, int ldc) {
   static cblas_sgemm_fn next;
-  if (!next) { next = (cblas_sgemm_fn)find_next(NVPL, "cblas_sgemm"); next_lib[C_CBLAS] = lib_of((void *)next); }
+  if (!next) { next = (cblas_sgemm_fn)must_resolve(NVPL, "cblas_sgemm"); next_lib[C_CBLAS] = lib_of((void *)next); }
   note(C_CBLAS, m, n, k);
   next(layout, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
 }
@@ -69,7 +80,7 @@ void cblas_sgemm(int layout, int ta, int tb, int m, int n, int k, float alpha, c
 int cublasSgemm_v2(void *h, int ta, int tb, int m, int n, int k, const float *alpha, const float *a, int lda, const float *b,
                    int ldb, const float *beta, float *c, int ldc) {
   static cublas_sgemm_fn next;
-  if (!next) { next = (cublas_sgemm_fn)find_next(CUBLAS, "cublasSgemm_v2"); next_lib[C_CUBLAS_SGEMM] = lib_of((void *)next); }
+  if (!next) { next = (cublas_sgemm_fn)must_resolve(CUBLAS, "cublasSgemm_v2"); next_lib[C_CUBLAS_SGEMM] = lib_of((void *)next); }
   note(C_CUBLAS_SGEMM, m, n, k);
   return next(h, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
 }
@@ -77,7 +88,7 @@ int cublasSgemm_v2(void *h, int ta, int tb, int m, int n, int k, const float *al
 int cublasGemmEx(void *h, int ta, int tb, int m, int n, int k, const void *alpha, const void *a, int at, int lda, const void *b,
                  int bt, int ldb, const void *beta, void *c, int ct, int ldc, int compute, int algo) {
   static cublas_gemmex_fn next;
-  if (!next) { next = (cublas_gemmex_fn)find_next(CUBLAS, "cublasGemmEx"); next_lib[C_CUBLAS_GEMMEX] = lib_of((void *)next); }
+  if (!next) { next = (cublas_gemmex_fn)must_resolve(CUBLAS, "cublasGemmEx"); next_lib[C_CUBLAS_GEMMEX] = lib_of((void *)next); }
   note(C_CUBLAS_GEMMEX, m, n, k);
   return next(h, ta, tb, m, n, k, alpha, a, at, lda, b, bt, ldb, beta, c, ct, ldc, compute, algo);
 }
@@ -86,12 +97,19 @@ int cublasLtMatmul(void *lt, void *desc, const void *alpha, const void *a, void 
                    const void *beta, const void *c, void *cdesc, void *d, void *ddesc, const void *algo, void *ws,
                    size_t wssize, void *stream) {
   static cublaslt_matmul_fn next;
-  if (!next) { next = (cublaslt_matmul_fn)find_next(CUBLASLT, "cublasLtMatmul"); next_lib[C_CUBLASLT] = lib_of((void *)next); }
+  if (!next) { next = (cublaslt_matmul_fn)must_resolve(CUBLASLT, "cublasLtMatmul"); next_lib[C_CUBLASLT] = lib_of((void *)next); }
   note(C_CUBLASLT, 0, 0, 0);
   return next(lt, desc, alpha, a, adesc, b, bdesc, beta, c, cdesc, d, ddesc, algo, ws, wssize, stream);
 }
 
 /* Python（ctypes）から step 前後の差分を読むための入口。 */
+/* 計測 step の直前に先頭 (m,n,k) スロットを空にする（cuBLAS 初期化・warmup の GEMM を first_mnk に混ぜない）。 */
+void fandhe_probe_reset_first(void) {
+  for (int i = 0; i < C_N; i++) {
+    seen[i] = 0;
+    for (int j = 0; j < 4; j++) first_m[i][j] = first_n[i][j] = first_k[i][j] = 0;
+  }
+}
 unsigned long fandhe_probe_count(int id) { return (id >= 0 && id < C_N) ? counts[id] : 0; }
 const char *fandhe_probe_next_lib(int id) { return (id >= 0 && id < C_N) ? next_lib[id] : "invalid"; }
 int fandhe_probe_first(int id, int idx, int which) {

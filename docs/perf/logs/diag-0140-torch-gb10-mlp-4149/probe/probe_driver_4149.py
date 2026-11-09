@@ -32,6 +32,8 @@ def main():
         shim.fandhe_probe_next_lib.argtypes = [ctypes.c_int]
         shim.fandhe_probe_first.restype = ctypes.c_int
         shim.fandhe_probe_first.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        shim.fandhe_probe_reset_first.restype = None
+        shim.fandhe_probe_reset_first.argtypes = []
 
     def counts():
         return [int(shim.fandhe_probe_count(i)) for i in range(len(NAMES))] if shim else None
@@ -64,6 +66,8 @@ def main():
     run()  # 初回の遅延初期化（cuBLAS ハンドル生成・ライブラリ解決）を計数の外へ出す
     if dev.type == "cuda":
         torch.cuda.synchronize()
+    if shim:
+        shim.fandhe_probe_reset_first()  # first_mnk を計測 step の GEMM だけにする
     before = counts()
     out["checksum"] = run()
     if dev.type == "cuda":
