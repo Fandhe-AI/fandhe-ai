@@ -22,6 +22,12 @@ ratio = after / before。セルごとの before・after は各ちょうど 5 件
   この検査は ADOPT・REJECT のどちらを出す経路よりも前に必ず通す。
 - それ以外は undetermined。`--record-only` 指定（負荷ゲート不通過の系列）は ADOPT も REJECT も出さず undetermined とし、後退は参考情報として残す。
 """
+# `--rule-set 4158`（イシュー #4158・`docs/perf/logs/cpu-gemm-reuse-release-sizegate-4158/RULE.txt`）:
+# サイズゲート付き eager release の GB10 単独判定。診断経路（`--diag-legacy-tape-reuse`。JSONL の
+# `diag` タグ）と既定経路のセルを別セルとして扱い、処置 = 診断経路の gemm reuse N=256/512/1024/2048、
+# ガード = それ以外の 16 セル（診断経路の N=4096 と train reuse を含む）。ADOPT／REJECT の形は
+# 3226 と同一（0.95・5/5・中央値 <= 1.00）で緩めない。GB10 単独で判定する（--require-both 不要）。
+# 負荷ゲートログは round ごとに `compute_procs=0` も要求する（GB10 専有の証跡）。
 import argparse
 import json
 import math
@@ -35,6 +41,8 @@ PROFILES = {
     "macmini": {"gemm_sizes": [256, 512, 1024, 2048]},
 }
 TREATED_SIZES = (256, 512, 1024, 2048)
+RULE_SETS = ("3226", "4158")
+DIAG_TAG = "legacy_tape_reuse"
 # 機体ごとの専有ゲート規則値（RULE.txt の load1 閾値。run_ab_eager_release_cpu.sh の RULE_LOAD_GATE と同値）。
 RULE_LOAD_THRESHOLD = {"gb10": 1.0, "macmini": 3.0}
 
@@ -54,8 +62,23 @@ def expected_cells(profile):
     return cells
 
 
-def load(paths):
-    """JSONL 群を (task,size,mode) -> 行リスト（出現順）へ。1 行でも不正なら Undetermined。"""
+def expected_cells_4158():
+    """4158 のセル集合。キーは (task, size, mode, diag)。diag は '' か DIAG_TAG。"""
+    cells = []
+    for s in (256, 512, 1024, 2048, 4096):
+        for m in ("fresh", "reuse"):
+            cells.append(("gemm", s, m, ""))
+        cells.append(("gemm", s, "reuse", DIAG_TAG))
+    for t in ("train", "infer"):
+        for m in ("fresh", "reuse"):
+            cells.append((t, 64, m, ""))
+    cells.append(("train", 64, "reuse", DIAG_TAG))
+    return cells
+
+
+def load(paths, with_diag=False):
+    """JSONL 群を (task,size,mode) -> 行リスト（出現順）へ。1 行でも不正なら Undetermined。
+    with_diag（4158）ではキーに diag タグを足す。3226 では diag 行を受理しない。"""
     cells = {}
     meta = {}
     for p in paths:
@@ -86,11 +109,20 @@ def load(paths):
                 c = o.get("checksum")
                 if isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c):
                     raise Undetermined(f"{p}:{n}: checksum が欠落または非有限 ({c!r})")
-                cells.setdefault((o["task"], o["size"], o["mode"]), []).append(o)
+                diag = o.get("diag", "")
+                if with_diag:
+                    if diag not in ("", DIAG_TAG):
+                        raise Undetermined(f"{p}:{n}: 未知の diag タグ")
+                    key = (o["task"], o["size"], o["mode"], diag)
+                else:
+                    if diag != "":
+                        raise Undetermined(f"{p}:{n}: 診断行（diag）は 3226 の判定に混ぜられない")
+                    key = (o["task"], o["size"], o["mode"])
+                cells.setdefault(key, []).append(o)
     return cells
 
 
-def check_gate_log(profile, path):
+def check_gate_log(profile, path, require_excl=False):
     """負荷ゲートログが「正式系列・5/5 round が gate_ok=1・precheck=assert」を示すか検証する。"""
     if path is None:
         raise Undetermined(f"{profile}: 負荷ゲートログ（--{profile}-gate-log）が未指定")
@@ -127,14 +159,17 @@ def check_gate_log(profile, path):
         raise Undetermined(f"{profile}: round 行が round1〜{ROUNDS} と一致しない ({names})")
     for n, ln in zip(names, round_lines):
         r = kv(ln)
+        if require_excl and r.get("compute_procs") != "0":
+            raise Undetermined(f"{profile} {n}: GPU compute プロセスが 0 件でない (compute_procs={r.get('compute_procs')!r})")
         if r.get("gate") != "pass" or r.get("gate_ok") != "1" or r.get("threshold") != head.get("threshold"):
             raise Undetermined(
                 f"{profile} {n}: 負荷ゲート不通過または閾値不一致 (gate={r.get('gate')!r} gate_ok={r.get('gate_ok')!r})")
 
 
-def analyse(profile, before_paths, after_paths):
-    before, after = load(before_paths), load(after_paths)
-    want = set(expected_cells(profile))
+def analyse(profile, before_paths, after_paths, rule_set="3226"):
+    r4158 = rule_set == "4158"
+    before, after = load(before_paths, r4158), load(after_paths, r4158)
+    want = set(expected_cells_4158() if r4158 else expected_cells(profile))
     for label, d in (("before", before), ("after", after)):
         if set(d) != want:
             raise Undetermined(
@@ -160,12 +195,13 @@ def analyse(profile, before_paths, after_paths):
             "all_lt1": all(r < 1.0 for r in ratios),
             "all_gt1": all(r > 1.0 for r in ratios),
             "checksum_exact": all(c == sums[0] for c in sums),
-            "treated": profile == "gb10" and k[0] == "gemm" and k[2] == "reuse" and k[1] in TREATED_SIZES,
+            "treated": profile == "gb10" and k[0] == "gemm" and k[2] == "reuse" and k[1] in TREATED_SIZES
+            and (not r4158 or k[3] == DIAG_TAG),
         })
     return out
 
 
-def verdict(rows, machines, record_only=False):
+def verdict(rows, machines, record_only=False, single_machine=False):
     """rows は analyse の結果の連結。machines は取り込めた機体集合。"""
     reasons = []
     reject = False
@@ -185,7 +221,7 @@ def verdict(rows, machines, record_only=False):
             # 観測された後退は参考情報として reasons に残す。
             return "undetermined", ["参考（record_only のため REJECT に数えない）: " + x for x in reasons]
         return "REJECT", reasons
-    ok = {"gb10", "macmini"} <= set(machines) and not record_only
+    ok = ({"gb10"} <= set(machines) if single_machine else {"gb10", "macmini"} <= set(machines)) and not record_only
     if not ok:
         reasons.append("片方の機体が欠落、または record_only のため ADOPT 不可")
     for r in rows:
@@ -202,7 +238,9 @@ def render(rows, v, reasons):
     lines = ["| 機体 | task | size | mode | 区分 | before 中央値 s | after 中央値 s | ratio | round 別 ratio | 後退 |",
              "|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
-        t, s, m = r["cell"]
+        t, s, m = r["cell"][:3]
+        if len(r["cell"]) > 3 and r["cell"][3]:
+            t = f"{t}[{r['cell'][3]}]"
         reg = "5/5 後退" if r["all_gt1"] else ("中央値後退" if r["ratio"] > 1.0 else "-")
         lines.append(
             f"| {r['machine']} | {t} | {s} | {m} | {'処置' if r['treated'] else '非処置'} | "
@@ -210,7 +248,8 @@ def render(rows, v, reasons):
             f"{' '.join(f'{x:.3f}' for x in r['rounds'])} | {reg} |")
     lines.append("")
     # 副次（判定外）: 解放後の reuse/fresh 比（GB10 gemm）
-    sec = {(r["cell"][1], r["cell"][2]): r for r in rows if r["machine"] == "gb10" and r["cell"][0] == "gemm"}
+    sec = {(r["cell"][1], r["cell"][2]): r for r in rows
+           if r["machine"] == "gb10" and r["cell"][0] == "gemm" and (len(r["cell"]) < 4 or not r["cell"][3])}
     for s in TREATED_SIZES:
         if (s, "reuse") in sec and (s, "fresh") in sec:
             f, u = sec[(s, "fresh")], sec[(s, "reuse")]
@@ -228,22 +267,27 @@ def main(argv=None):
         ap.add_argument(f"--{m}-after", nargs="+", default=None)
         ap.add_argument(f"--{m}-gate-log", default=None)
     ap.add_argument("--record-only", action="store_true")
+    ap.add_argument("--rule-set", choices=RULE_SETS, default="3226",
+                    help="3226（既定・両機体）か 4158（GB10 単独・診断経路セルを含む）")
     ap.add_argument("--require-both", action="store_true",
                     help="（--combine 相当）片方の機体が欠けたら判定不能")
     a = ap.parse_args(argv)
     rows, machines = [], []
+    r4158 = a.rule_set == "4158"
     try:
+        if r4158 and (a.macmini_before is not None or a.macmini_after is not None):
+            raise Undetermined("4158 は GB10 単独の判定。macmini 入力は受理しない")
         for m in PROFILES:
             b, af = getattr(a, f"{m}_before"), getattr(a, f"{m}_after")
             if (b is None) != (af is None):
                 raise Undetermined(f"{m}: before/after の片方だけが指定された")
             if b is not None:
-                check_gate_log(m, getattr(a, f"{m}_gate_log"))
-                rows += analyse(m, b, af)
+                check_gate_log(m, getattr(a, f"{m}_gate_log"), require_excl=r4158)
+                rows += analyse(m, b, af, a.rule_set)
                 machines.append(m)
         if not machines:
             raise Undetermined("入力なし")
-        v, reasons = verdict(rows, machines, a.record_only)
+        v, reasons = verdict(rows, machines, a.record_only, single_machine=r4158)
         if a.require_both and len(machines) < 2:
             v = "undetermined"
     except Undetermined as e:

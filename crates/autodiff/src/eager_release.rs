@@ -27,6 +27,14 @@
 //! （push 後）を呼ぶ。`matmul_fp32_strict`・`matmul_low_precision`・その他 op は候補を
 //! 更新しない。`Tape::reset`・`rollback_to` が候補を消す。GPU（CPU 以外の device）は
 //! 対象外。ゲート定数の反転は ADOPT 後の #3227 でのみ行う。
+//!
+//! # 出力サイズゲート（イシュー #4158）
+//!
+//! #3226 の GB10 A/B では出力 16 MiB 帯は改善、N=4096（出力 64 MiB）は毎反復の再確保で
+//! 1.106 倍に後退した（`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §8.4）。そこで
+//! 出力が `EAGER_MATMUL_RELEASE_MAX_BYTES` を超える候補は解放しない。16〜64 MiB の間は
+//! 未実測で、32 MiB は事前登録した仮置きの値（計測後に変えない）。親の有効フラグが OFF の
+//! 既定では本ゲートも到達しない。
 
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -38,6 +46,15 @@ use crate::tape::{NodeId, Tape};
 /// 自動解放の既定有効フラグ。**既定 OFF**。A/B（`docs/perf/logs/cpu-gemm-reuse-release-3226/
 /// RULE.txt`）が ADOPT となった後の #3227 でのみ `true` にする。after 腕はこの 1 行だけを反転する。
 pub(crate) const EAGER_MATMUL_RELEASE_DEFAULT_ENABLED: bool = false;
+
+/// 解放の対象にする結果の出力サイズ上限（バイト）。これを超える結果は解放しない（#4158）。
+pub(crate) const EAGER_MATMUL_RELEASE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// 出力要素数 `numel`（f32）が解放対象のサイズ内なら true。
+/// 乗算を避け、オーバーフローしない比較にする（`resident_input::use_owned_download` と同型）。
+pub(crate) fn release_size_allowed(numel: usize) -> bool {
+    numel <= EAGER_MATMUL_RELEASE_MAX_BYTES / std::mem::size_of::<f32>()
+}
 
 thread_local! {
     static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -103,6 +120,12 @@ pub(crate) fn release_before_matmul(tape: &Tape, lhs: NodeId, rhs: NodeId) {
             || node.fp32_strict
             || node.low_precision
             || !node.op.is_checkpoint_eligible()
+        {
+            return;
+        }
+        // 出力が大きい結果は解放しない（再確保の first-touch が解放の利得を上回る。#4158）。
+        if let Some(v) = node.value.get()
+            && !release_size_allowed(v.numel())
         {
             return;
         }
@@ -234,12 +257,34 @@ mod tests {
         let enabled = is_enabled();
         let released = !has_value && recompute;
         println!("eager_release_report enabled={enabled} released={released}");
+        println!("eager_release_report size_gate_max_bytes={EAGER_MATMUL_RELEASE_MAX_BYTES}");
         match std::env::var("EXPECT_EAGER_RELEASE_ACTIVE").as_deref() {
             Ok("0") => assert!(!enabled && !released, "before 腕は OFF のはず"),
             Ok("1") => assert!(enabled && released, "after 腕は ON で解放されるはず"),
             Ok(other) => panic!("EXPECT_EAGER_RELEASE_ACTIVE は 0 か 1: {other}"),
             Err(_) => {}
         }
+    }
+
+    #[test]
+    fn size_gate_boundaries() {
+        let max = EAGER_MATMUL_RELEASE_MAX_BYTES / std::mem::size_of::<f32>();
+        assert!(release_size_allowed(0));
+        assert!(release_size_allowed(max));
+        assert!(!release_size_allowed(max + 1));
+        assert!(!release_size_allowed(usize::MAX));
+    }
+
+    #[test]
+    fn small_output_released_under_gate() {
+        // 閾値以下（2x4 = 8 要素）は従来どおり解放される。
+        let _g = override_enabled_for_scope(true);
+        let (a, b) = mats();
+        let tape = Tape::new_with_ops(test_ops());
+        let (va, vb) = (tape.var(&a), tape.var(&b));
+        let c1 = va.matmul(&vb).unwrap();
+        let _c2 = va.matmul(&vb).unwrap();
+        assert_eq!(state(&tape, c1.node_id()), (false, true));
     }
 
     #[test]
