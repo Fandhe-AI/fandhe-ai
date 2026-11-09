@@ -80,6 +80,8 @@ mod partition;
 // `docs/cpu-gemm-small-m-job-merge-prepack-decision.md`）。
 pub(crate) mod prepack;
 mod small_m;
+// イシュー #4162: SME 小形状（N=256 級）のスレッド数・分配の A/B 機構（既定 OFF）。
+mod sme_small_sched;
 // イシュー #4161: 推論スコープ内だけ jpw1 を効かせる opt-in（既定 OFF）。
 pub mod infer_scope;
 
@@ -3448,20 +3450,13 @@ fn dispatch_two_d_dynamic(
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
     if let Some(kernel) = sme_kernel_for_shape(rows.end - rows.start, n, k) {
-        return gemm_blis_two_d_dynamic_region(
-            kernel,
-            a,
-            b,
-            c,
-            n,
-            k,
-            rows,
-            blocks,
-            transpose,
-            jobs_per_worker,
-            share_a,
-            prepack,
-        );
+        // #4162: 既定 OFF。ON の計測ツリーだけ、小形状でスレッド数・jpw を差し替える。
+        let plan = sme_small_sched::plan_for(rows.end - rows.start, n, k, jobs_per_worker);
+        return sme_small_sched::run_in_plan(plan, move || {
+            gemm_blis_two_d_dynamic_region(
+                kernel, a, b, c, n, k, rows, blocks, transpose, plan.jpw, share_a, prepack,
+            )
+        });
     }
     gemm_blis_two_d_dynamic_region(
         microkernel::NeonKernel,
