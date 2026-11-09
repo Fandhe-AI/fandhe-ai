@@ -193,6 +193,14 @@ def failed_detail(text):
     return names, locs, variant
 
 
+def _load_assumptions(rule_path):
+    assumptions = set()
+    alist = os.path.join(os.path.dirname(os.path.abspath(rule_path)), "default-off-assumption-tests.txt")
+    if os.path.exists(alist):
+        assumptions = {ln.strip() for ln in read_text(alist).splitlines() if ln.strip() and not ln.startswith("#")}
+    return assumptions
+
+
 def eval_gates(d, label, assumptions):
     """R0〜R3 を評価。(undet 理由, reject 理由, 表の行, R1b 詳細, R3 差分) を返す。"""
     undet, reject, rows, r1b_detail, r3_rows = [], [], [], [], []
@@ -285,9 +293,24 @@ def eval_gates(d, label, assumptions):
             if n == 0:
                 undet.append(f"r3 腕{arm} {crate}: テスト結果が 0 件"); continue
             # 完了記録: Running／Doc-tests の節数と "test result:" 行数、各件数の合計が TSV と一致すること。
-            heads = len(re.findall(r"^\s*(?:Running|Doc-tests) ", t, re.M))
+            # harness=false のバイナリ（例: device_param_store_resident_no_flat_grad_alloc）は libtest の結果行を出さない。
+            # 結果行の無い節は、cargo が失敗対象として報告していない場合に限り完了とみなす（異常終了は失敗対象に載る）。
+            parts = re.split(r"^\s*(?:Running|Doc-tests) ", t, flags=re.M)[1:]
+            heads = len(parts)
             sums = re.findall(r"^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored", t, re.M)
-            if heads == 0 or heads != len(sums):
+            failed_targets = " ".join(re.findall(r"^(?:error: test failed.*|\s+`.*`)$", t, re.M))
+            bare = []
+            for part in parts:
+                if re.search(r"^test result: ", part, re.M):
+                    continue
+                m = re.match(r"unittests\s+\S+|(\S+)", part)
+                name = re.sub(r"\.rs$", "", os.path.basename(m.group(1) or "lib")) if m else ""
+                bare.append(name)
+            crashed = [b for b in bare if b in ("", "lib") or re.search(r"--(?:test|bin)\s+" + re.escape(b) + r"(?:[`\s]|$)", failed_targets)]
+            if crashed:
+                undet.append(f"r3 腕{arm} {crate}: 結果行の無いテストバイナリが失敗対象として報告されている／特定できない（{crashed}）")
+                continue
+            if heads == 0 or heads != len(sums) + len(bare):
                 undet.append(f"r3 腕{arm} {crate}: 完了していないテストバイナリがある（節 {heads} に対し結果行 {len(sums)}）")
                 continue
             tot = [sum(int(x[i]) for x in sums) for i in range(3)]
@@ -330,13 +353,16 @@ def eval_gates(d, label, assumptions):
 
 # ---------------------------------------------------------------- 判定
 def judge(d, rule_path, label):
-    # 前提ゲート不合格で停止した計測は order／load_gate／results を作らずに終わる。RULE が UNDETERMINED と定めるため、
-    # 未生成の計測データを要求する前に pregate-stop を評価して UNDETERMINED とゲート詳細を返す。
+    # 前提ゲート不合格で停止した計測は order／load_gate／results を作らずに終わる。未生成の計測データを要求する前に
+    # ゲートログ（eval_gates）だけを分類する。R1・R2・R3 の bit 不一致は RULE が REJECT と定めるため REJECT、
+    # エラー型の失敗・未実行などは UNDETERMINED。停止そのものは数値不一致の結果であり、REJECT を覆す要因にしない。
     stop = os.path.join(d, f"pregate-stop-{label}.txt")
     if os.path.exists(stop):
         detail = [ln.strip() for ln in read_text(stop).splitlines() if ln.strip()]
-        undet = ["前提ゲート不合格で停止した記録（pregate-stop）がある"] + [f"pregate-stop: {x}" for x in detail[:20]]
-        return "UNDETERMINED", undet, [], [], [("pregate-stop", "不合格（計測前に停止）")], [], []
+        g_undet, g_reject, g_rows, r1b_detail, r3_rows, _ = eval_gates(d, label, _load_assumptions(rule_path))
+        undet = g_undet + [f"pregate-stop: {x}" for x in detail[:20]]
+        verdict = "REJECT" if g_reject else "UNDETERMINED"
+        return verdict, undet, g_reject, [], [("pregate-stop", "不合格（計測前に停止）")] + g_rows, r1b_detail, r3_rows
     rule_text = read_text(rule_path)
     pins = rule_pins(rule_text)
     env = {}
@@ -361,6 +387,11 @@ def judge(d, rule_path, label):
     gl = [x for x in gl if x.startswith("round")]
     if len(gl) != ROUNDS or any("gate=pass" not in x for x in gl):
         undet.append("専有ゲートが全 round で通過していない")
+    if any("gate=fail" in x for x in gl):
+        # ランナーは専有ゲート不通過で order／results を書き切らずに終了する。RULE は UNDETERMINED と定めるため、
+        # 欠けた計測データを要求せず（Bad にせず）、前提ゲートの分類だけを添えて UNDETERMINED を返す。
+        g_undet, g_reject, g_rows, r1b_detail, r3_rows, _ = eval_gates(d, label, _load_assumptions(rule_path))
+        return "UNDETERMINED", undet + g_undet, g_reject, [], g_rows, r1b_detail, r3_rows
     parse_order(d, label)
 
     data = {}
@@ -388,10 +419,7 @@ def judge(d, rule_path, label):
     if ratio_fail:
         reject.append("ratio > 1.00: " + ", ".join(ratio_fail))
 
-    assumptions = set()
-    alist = os.path.join(os.path.dirname(os.path.abspath(rule_path)), "default-off-assumption-tests.txt")
-    if os.path.exists(alist):
-        assumptions = {ln.strip() for ln in read_text(alist).splitlines() if ln.strip() and not ln.startswith("#")}
+    assumptions = _load_assumptions(rule_path)
     g_undet, g_reject, g_rows, r1b_detail, r3_rows, nblock = eval_gates(d, label, assumptions)
     undet += g_undet
     reject += g_reject
@@ -503,6 +531,17 @@ def make_fixture(d, label="t", ratios=None, **opt):
             body = "     Running unittests src/lib.rs (x)\n" + "".join(f"test {r[1]} ... {r[2]}\n" for r in rows)
             body += f"test result: {'FAILED' if nfail else 'ok'}. {len(rows) - nfail} passed; {nfail} failed; 0 ignored\n"
             _w(os.path.join(d, f"r3-{arm}-{crate}-{label}.log"), body + f"rc={101 if nfail else 0}\n")
+    # harness=false バイナリ（結果行なし）を腕 C／A の fandhe-ai ログへ追加する
+    if opt.get("harnessless") or opt.get("harnessless_crash"):
+        for arm in ("C", "A"):
+            lp = os.path.join(d, f"r3-{arm}-fandhe-ai-{label}.log")
+            body = open(lp, encoding="utf-8").read().replace("rc=0\n", "").replace("rc=101\n", "")
+            body += "     Running tests/no_flat.rs (target/x)\nok\n"
+            rc = 0
+            if opt.get("harnessless_crash") and arm == "C":
+                body += "error: test failed, to rerun pass `-p fandhe-ai --test no_flat`\n"
+                rc = 101
+            _w(lp, body + f"rc={rc}\n")
     # 異常注入（R3 完了性・起動順）
     cl = os.path.join(d, f"r3-C-fandhe-ai-{label}.log")
     if opt.get("r3_trunc"):
@@ -546,6 +585,38 @@ def self_test():
         res = judge(d, rp, "t")
         assert res[0] == "UNDETERMINED" and any("r0 fail" in x for x in res[1]), res
         render(*res, "t")
+    # pregate-stop でも bit 不一致は REJECT、エラー型の失敗は UNDETERMINED（ゲートログを分類する）
+    def run_stop(**kw):
+        with tempfile.TemporaryDirectory() as d:
+            r = make_fixture(d, **kw)
+            _w(os.path.join(d, "pregate-stop-t.txt"), "gate r1b-run1 FAILED rc=101\n")
+            res = judge(d, r, "t")
+            render(*res, "t")
+            return res
+    bitlog = "test x ... FAILED\nthread panicked at crates/a.rs:10:5\n出力が bit 一致しない\nrc=101\n"
+    with tempfile.TemporaryDirectory() as d:
+        r = make_fixture(d)
+        _w(os.path.join(d, "r1b-run1-t.log"), bitlog)
+        _w(os.path.join(d, "pregate-stop-t.txt"), "gate r1b-run1 FAILED rc=101\n")
+        res = judge(d, r, "t")
+        assert res[0] == "REJECT" and res[5] and any("r1b-run1" in x for x in res[2]), res
+    res = run_stop(r1b_err=True)
+    assert res[0] == "UNDETERMINED" and res[5], res
+    res = run_stop(r2_diff=True)
+    assert res[0] == "REJECT", res
+    # 専有ゲート不通過で order／results が未完でも INPUT ERROR にせず UNDETERMINED
+    with tempfile.TemporaryDirectory() as d:
+        r = make_fixture(d, gate_fail=True)
+        os.remove(os.path.join(d, "order-t.txt"))
+        _w(os.path.join(d, "results-off-t-infer-fresh-64.jsonl"), "")
+        res = judge(d, r, "t")
+        assert res[0] == "UNDETERMINED", res
+        render(*res, "t")
+    # harness=false バイナリ（結果行なし）は正常、失敗対象に載れば UNDETERMINED
+    v, u, rj = run(harnessless=True)
+    assert v == "ADOPT", (v, u, rj)
+    v, u, rj = run(harnessless_crash=True)
+    assert v == "UNDETERMINED", (v, u, rj)
     # 実テストの assertion 文言「bit 一致しない」を数値不一致として分類する
     assert BIT_MISMATCH_RE.search("出力が bit 一致しない") and not BIT_MISMATCH_RE.search("DeviceContextCaptureInProgress")
     v, u, rj = run(no_r1a=True)
