@@ -63,7 +63,7 @@ done
 
 # ---- R3: 既定 ON の波及。tree を別ディレクトリへ展開し、腕 A/B にだけパッチを当てる（ROOT の作業ツリーは触らない） ----
 r3_arm() { # <arm: C|A|B> <env_mode>
-  local arm=$1 mode=$2 dir crate log
+  local arm=$1 mode=$2 dir crate log rc
   dir="$(mktemp -d "${TMPDIR:-/tmp}/r3-${arm}.XXXXXX")" || { note_fail "r3-${arm}-mktemp" 1; return; }
   if ! git -C "$ROOT" archive HEAD | tar -x -C "$dir"; then
     rm -rf "$dir"; note_fail "r3-${arm}-archive" 1; return
@@ -75,11 +75,25 @@ r3_arm() { # <arm: C|A|B> <env_mode>
   fi
   for crate in fandhe-ai-backend-cuda fandhe-ai; do
     log="$OUT/r3-${arm}-${crate}-${LABEL}.log"
+    # --nocapture は付けない: 付けるとテスト自身の出力が "test <name> ... " の行に混ざり、結果行の抽出が壊れる。
+    # 通過テストの出力は libtest が捕捉し、"test <name> ... ok|FAILED|ignored" が 1 行で出る（失敗時の出力は末尾の failures 節）。
     gate_run "$log" "$mode" cargo test --manifest-path "$dir/Cargo.toml" --locked --release --target-dir "${TDIR}-r3-${arm}" \
-      -p "$crate" --no-fail-fast -- --include-ignored --test-threads=1 --nocapture
-    # テスト単位の結果を bin<TAB>name<TAB>status へ機械抽出する（"Running unittests ..." は lib、"Running tests/x.rs" は x）。
+      -p "$crate" --no-fail-fast -- --include-ignored --test-threads=1
+    rc=$?
+    # 腕 C／A の rc は 0（全通過）か 101（テスト失敗）以外を異常終了として前提ゲートの不合格にする
+    # （101 の中身は aggregate_4163.py が FAILED 件数・集計行と照合する。腕 B は判定外）。
+    if [[ "$arm" != "B" && $rc -ne 0 && $rc -ne 101 ]]; then note_fail "r3-${arm}-${crate}" "$rc"; fi
+    # テスト単位の結果を bin<TAB>name<TAB>status へ機械抽出する。bin は "Running unittests ..." が lib、
+    # "Running tests/x.rs" が x、"Doc-tests <crate>" が doctest。名前は "test " の後から最初の " ... " の前までの全体
+    # （doctest は "src/file.rs - item (line N)" で先頭トークンだけでは衝突する）。status は ok／FAILED／ignored（理由付きは ignored へ正規化）。
+    # 許可集合の外のステータスは抽出せず素通しし、aggregate_4163.py が未知ステータスとして UNDETERMINED にする。
     awk '/^ *Running /{ if ($2 == "unittests") { b = "lib" } else { b = $2; sub(/.*\//, "", b); sub(/\.rs$/, "", b) } next }
-         /^test .* \.\.\. /{ print b "\t" $2 "\t" $NF }' "$log" >"$OUT/r3-${arm}-${crate}-${LABEL}.tsv"
+         /^ *Doc-tests /{ b = "doctest"; next }
+         /^test .* \.\.\. [^ ]/{
+           line = substr($0, 6); k = index(line, " ... ")
+           name = substr(line, 1, k - 1); st = substr(line, k + 5)
+           if (st ~ /^ignored/) { st = "ignored" }
+           print b "\t" name "\t" st }' "$log" >"$OUT/r3-${arm}-${crate}-${LABEL}.tsv"
   done
   rm -rf "$dir"
 }

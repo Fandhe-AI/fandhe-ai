@@ -25,7 +25,7 @@
 
 ## 手順
 
-1. PR-2: PR-1 マージ後の main で `RULE.template.txt` から `RULE.txt` を作り（`fixed-at-utc`・`tree_sha`・各 sha256 を埋める）、`python3 -I aggregate_4163.py --check-rule RULE.txt` を通して単独コミットする。
+1. PR-2: PR-1 マージ後の main で `RULE.template.txt` から `RULE.txt` を作り（`fixed-at-utc`・`source_commit`・各 sha256 を埋める）、`python3 -I aggregate_4163.py --check-rule RULE.txt` を通して単独コミットする。
 2. PR-3: GB10（`<cuda-node>`）で実機ロックを取り、compute プロセス 0 を確認し、`HW_LOCK_HELD=1 HW_LOCK_OWNER_FILE=<abs> AB_FACADE_PATH=<abs>/crates/facade bash run_ab_infer_graph_default_cuda.sh <label>`。
 3. `python3 -I aggregate_4163.py --dir scripts/bench/framework-compare/results/raw --rule RULE.txt --label <label>` で `judge-4163.md` を作る。ホスト名・パスをマスクして記録する。
 

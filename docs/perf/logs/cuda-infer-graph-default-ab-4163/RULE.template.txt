@@ -6,14 +6,14 @@
 #         （専有ゲート・ADOPT／REJECT／undetermined の骨格）。
 #
 # [対象 tree と固定値]（行頭 2 スペースの `key: value` だけが機械可読。ランナーと aggregate が突合する）
-  tree_sha: <PLACEHOLDER: PR-1 マージ後の main のフル SHA 40 桁>
+  source_commit: <PLACEHOLDER: 計測対象ソースのコミット（PR-1 マージ後の main）のフル SHA 40 桁。RULE.txt の単独コミットは HEAD を進めるため HEAD 完全一致は要求せず、source_commit が HEAD の祖先で RULE.txt 以外の差分が 0 であることをランナーが検証する>
   runner_sha256: <PLACEHOLDER>
   gates_sha256: <PLACEHOLDER>
   patch_sha256: <PLACEHOLDER>
   assumption_list_sha256: <PLACEHOLDER>
   aggregate_sha256: <PLACEHOLDER>
   bench_main_sha256: <PLACEHOLDER>
-# 対象差分: `git diff v0.14.0 <tree_sha> -- crates/backend-cuda/src crates/autodiff/src/optim/device_store.rs` の
+# 対象差分: `git diff v0.14.0 <source_commit> -- crates/backend-cuda/src crates/autodiff/src/optim/device_store.rs` の
 #   有無と要旨を RULE.txt へ追記する（<PLACEHOLDER: 差分の有無>）。
 #
 # [判定機・ビルド]

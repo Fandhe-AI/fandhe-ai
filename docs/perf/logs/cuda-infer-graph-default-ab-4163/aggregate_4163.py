@@ -86,7 +86,7 @@ def rule_pins(text):
 def check_template(path):
     t = read_text(path)
     pins = rule_pins(t)
-    miss = [k for k in ("fixed-at-utc", "tree_sha") + PINNED_KEYS if k not in pins and f"{k}:" not in t]
+    miss = [k for k in ("fixed-at-utc", "source_commit") + PINNED_KEYS if k not in pins and f"{k}:" not in t]
     if "RULE fixed-at-utc:" not in t:
         miss.append("RULE fixed-at-utc")
     if miss:
@@ -101,8 +101,8 @@ def check_rule(path, root):
     if "<PLACEHOLDER" in t:
         raise Bad("RULE にプレースホルダが残っている")
     pins = rule_pins(t)
-    if not re.fullmatch(r"[0-9a-f]{40}", pins.get("tree_sha", "")):
-        raise Bad("tree_sha がフル SHA でない")
+    if not re.fullmatch(r"[0-9a-f]{40}", pins.get("source_commit", "")):
+        raise Bad("source_commit がフル SHA でない")
     for key, rel in PINNED_FILES.items():
         want = pins.get(key, "")
         if not re.fullmatch(r"[0-9a-f]{64}", want):
@@ -151,24 +151,29 @@ def load_cell(d, label, arm, cell):
     return recs
 
 
+def expected_order():
+    """ランナーと同じ規則の期待起動順（round 1..5。基準セル列を 3*(r-1) mod n だけ巡回し、奇数 round は off→on、偶数 round は on→off）。"""
+    n = len(CELLS)
+    out = []
+    for r in range(1, ROUNDS + 1):
+        start = (3 * (r - 1)) % n
+        first, second = ("off", "on") if r % 2 == 1 else ("on", "off")
+        for k in range(n):
+            cell = CELLS[(start + k) % n]
+            out.append(f"round={r} cell={cell} arm={first}")
+            out.append(f"round={r} cell={cell} arm={second}")
+    return out
+
+
 def parse_order(d, label):
-    """order-<label>.txt を検査する（各 round に 22 run。round 順は行順）。"""
+    """order-<label>.txt を期待起動順（expected_order）と行ごとに完全照合する。"""
     txt = read_text(os.path.join(d, f"order-{label}.txt")).splitlines()
-    if len(txt) != ROUNDS * len(CELLS) * 2:
-        raise Bad(f"order-{label}.txt: 行数 {len(txt)} が期待値 {ROUNDS * len(CELLS) * 2} と不一致")
-    seen = set()
-    last_r = 0
-    for ln in txt:
-        m = re.fullmatch(r"round=(\d) cell=(\S+) arm=(off|on)", ln)
-        if not m or m.group(2) not in CELLS:
-            raise Bad(f"order: 形式不正 {ln!r}")
-        r, cell, arm = int(m.group(1)), m.group(2), m.group(3)
-        if r < last_r or r > ROUNDS:
-            raise Bad("order: round が単調でない")
-        last_r = r
-        if (r, cell, arm) in seen:
-            raise Bad(f"order: 重複 {ln!r}")
-        seen.add((r, cell, arm))
+    exp = expected_order()
+    if len(txt) != len(exp):
+        raise Bad(f"order-{label}.txt: 行数 {len(txt)} が期待値 {len(exp)} と不一致")
+    for i, (got, want) in enumerate(zip(txt, exp), 1):
+        if got != want:
+            raise Bad(f"order-{label}.txt:{i}: 起動順が登録済みの規則と不一致（期待 {want!r}、実際 {got!r}）")
 
 
 # ---------------------------------------------------------------- ゲートログ
@@ -208,7 +213,8 @@ def eval_gates(d, label, assumptions):
     if rc is None:
         undet.append("r1a 未実行"); rows.append(("r1a", "未実行"))
     else:
-        passes = len(re.findall(r"^INFER_CAPTURE_R1: PASS", t, re.M))
+        # --nocapture では "test <name> ... INFER_CAPTURE_R1: PASS" のように libtest 接頭辞付きで出るため行頭に限定しない。
+        passes = len(re.findall(r"INFER_CAPTURE_R1: PASS", t))
         skips = len(re.findall(r"INFER_CAPTURE_R1: SKIP", t))
         m = re.search(r"^test result: ok\. (\d+) passed", t, re.M)
         ok = rc == 0 and skips == 0 and m is not None and int(m.group(1)) == passes and passes > 0
@@ -254,10 +260,11 @@ def eval_gates(d, label, assumptions):
     for arm in ("C", "A"):
         res = {}
         for crate in ("fandhe-ai-backend-cuda", "fandhe-ai"):
-            rc, _ = log_rc(os.path.join(d, f"r3-{arm}-{crate}-{label}.log"))
+            rc, t = log_rc(os.path.join(d, f"r3-{arm}-{crate}-{label}.log"))
             tsv = os.path.join(d, f"r3-{arm}-{crate}-{label}.tsv")
             if rc is None or not os.path.exists(tsv):
                 undet.append(f"r3 腕{arm} {crate} 未実行"); continue
+            cnt = {"ok": 0, "FAILED": 0, "ignored": 0}
             n = 0
             for ln in read_text(tsv).splitlines():
                 f = ln.split("\t")
@@ -265,10 +272,29 @@ def eval_gates(d, label, assumptions):
                     raise Bad(f"{tsv}: 形式不正")
                 if (crate, f[0], f[1]) in res:
                     raise Bad(f"{tsv}: 重複 {f[1]}")
+                if f[2] not in cnt:
+                    undet.append(f"r3 腕{arm} {crate}: 未知のステータス {f[2]!r}（{f[1]}）")
+                else:
+                    cnt[f[2]] += 1
                 res[(crate, f[0], f[1])] = f[2]
                 n += 1
             if n == 0:
-                undet.append(f"r3 腕{arm} {crate}: テスト結果が 0 件")
+                undet.append(f"r3 腕{arm} {crate}: テスト結果が 0 件"); continue
+            # 完了記録: Running／Doc-tests の節数と "test result:" 行数、各件数の合計が TSV と一致すること。
+            heads = len(re.findall(r"^\s*(?:Running|Doc-tests) ", t, re.M))
+            sums = re.findall(r"^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored", t, re.M)
+            if heads == 0 or heads != len(sums):
+                undet.append(f"r3 腕{arm} {crate}: 完了していないテストバイナリがある（節 {heads} に対し結果行 {len(sums)}）")
+                continue
+            tot = [sum(int(x[i]) for x in sums) for i in range(3)]
+            if tot != [cnt["ok"], cnt["FAILED"], cnt["ignored"]]:
+                undet.append(f"r3 腕{arm} {crate}: 抽出結果 {[cnt['ok'], cnt['FAILED'], cnt['ignored']]} が集計行 {tot} と不一致")
+                continue
+            # 非ゼロ終了は「テスト失敗（rc=101 かつ FAILED > 0）」でしか説明を認めない。
+            if rc != 0 and not (rc == 101 and cnt["FAILED"] > 0):
+                undet.append(f"r3 腕{arm} {crate}: 説明できない非ゼロ終了（rc={rc} FAILED={cnt['FAILED']}）")
+            elif rc == 0 and cnt["FAILED"] > 0:
+                undet.append(f"r3 腕{arm} {crate}: rc=0 だが FAILED がある")
         sets[arm] = res
     blockers, expected = [], []
     if sets.get("C") and sets.get("A"):
@@ -282,6 +308,9 @@ def eval_gates(d, label, assumptions):
             if key not in sets["A"]:
                 blockers.append(key)
                 r3_rows.append((key[0], f"{key[1]}::{key[2]}", sets["C"][key], "欠落", "阻害"))
+        for key in sets["A"]:
+            if key not in sets["C"]:
+                undet.append(f"r3: 腕 A にだけあるテスト {key[1]}::{key[2]}（テスト集合が腕間で一致しない）")
     rows.append(("r3", f"阻害 {len(blockers)} 件・既定OFF前提 {len(expected)} 件"))
     if blockers:
         bit = False
@@ -310,8 +339,10 @@ def judge(d, rule_path, label):
     for k in PINNED_KEYS:
         if pins.get(k) is None or env.get(k) != pins.get(k):
             undet.append(f"{k} が RULE と env_info で不一致")
-    if env.get("rev_stamp_head_runner") != pins.get("tree_sha"):
-        undet.append("tree_sha が計測 HEAD と不一致")
+    # 計測対象ソースは RULE の source_commit。RULE.txt を単独コミットすると HEAD は変わるため HEAD 完全一致は要求せず、
+    # ランナーが「source_commit が HEAD の祖先で、RULE.txt 以外の差分が 0」を検証した記録（source_diff_clean=1）を突合する。
+    if env.get("source_commit") != pins.get("source_commit") or env.get("source_diff_clean") != "1":
+        undet.append("計測対象ソースが source_commit と同一であることの記録がない（source_commit／source_diff_clean）")
     if "GB10" not in env.get("gpu", "") or not env.get("uname", "").endswith("aarch64"):
         undet.append("GB10（aarch64）の計測でない")
     # 専有ゲート
@@ -397,20 +428,16 @@ def make_fixture(d, label="t", ratios=None, **opt):
     ratios = ratios or {}
     pins = {k: (str(i) * 64)[:64] for i, k in enumerate(PINNED_KEYS)}
     tree = "a" * 40
-    rule = "RULE fixed-at-utc: 2026-01-01T00:00:00Z\n" + f"  tree_sha: {tree}\n" + "".join(f"  {k}: {v}\n" for k, v in pins.items())
+    rule = "RULE fixed-at-utc: 2026-01-01T00:00:00Z\n" + f"  source_commit: {tree}\n" + "".join(f"  {k}: {v}\n" for k, v in pins.items())
     rpath = os.path.join(d, "RULE.txt")
     _w(rpath, rule)
     _w(os.path.join(d, "default-off-assumption-tests.txt"), "lib::graph::tests::infer_graph_default_is_off\n")
-    env = {"rule_sha256": hashlib.sha256(rule.encode()).hexdigest(), "rev_stamp_head_runner": tree, "gpu": "NVIDIA GB10", "uname": "Linux 6 aarch64"}
+    env = {"rule_sha256": hashlib.sha256(rule.encode()).hexdigest(), "source_commit": tree, "source_diff_clean": "1", "gpu": "NVIDIA GB10", "uname": "Linux 6 aarch64"}
     env.update(pins)
     _w(os.path.join(d, f"env_info-{label}.txt"), "".join(f"{k}={v}\n" for k, v in env.items()))
     _w(os.path.join(d, f"load_gate-{label}-cuda.log"), "series=official\n" + "".join(
         f"round{r} dev=cuda gate={'fail' if opt.get('gate_fail') and r == 3 else 'pass'}\n" for r in range(1, 6)))
-    order = []
-    for r in range(1, 6):
-        for c in CELLS:
-            for a in ("off", "on"):
-                order.append(f"round={r} cell={c} arm={a}")
+    order = expected_order()
     _w(os.path.join(d, f"order-{label}.txt"), "\n".join(order) + "\n")
     for c in CELLS:
         task = "train" if c.startswith("train") else "infer"
@@ -460,8 +487,24 @@ def make_fixture(d, label="t", ratios=None, **opt):
                 if opt.get("r3_block"):
                     rows[1] = ("t", "other", "FAILED")
             _w(os.path.join(d, f"r3-{arm}-{crate}-{label}.tsv"), "".join("\t".join(r) + "\n" for r in rows))
-            _w(os.path.join(d, f"r3-{arm}-{crate}-{label}.log"), "rc=0\n")
-    # 列挙名は "<bin>::<name>" なので lib の名前を合わせる
+            nfail = sum(1 for r in rows if r[2] == "FAILED")
+            body = "     Running unittests src/lib.rs (x)\n" + "".join(f"test {r[1]} ... {r[2]}\n" for r in rows)
+            body += f"test result: {'FAILED' if nfail else 'ok'}. {len(rows) - nfail} passed; {nfail} failed; 0 ignored\n"
+            _w(os.path.join(d, f"r3-{arm}-{crate}-{label}.log"), body + f"rc={101 if nfail else 0}\n")
+    # 異常注入（R3 完了性・起動順）
+    cl = os.path.join(d, f"r3-C-fandhe-ai-{label}.log")
+    if opt.get("r3_trunc"):
+        _w(cl, "     Running unittests src/lib.rs (x)\ntest graph::tests::infer_graph_default_is_off ... ok\nrc=101\n")
+    if opt.get("r3_rc"):
+        _w(cl, open(cl, encoding="utf-8").read().replace("rc=0", "rc=137"))
+    if opt.get("r3_status"):
+        tp = os.path.join(d, f"r3-C-fandhe-ai-{label}.tsv")
+        _w(tp, open(tp, encoding="utf-8").read().replace("\tok\n", "\tweird\n", 1))
+    if opt.get("order_swap"):
+        op = os.path.join(d, f"order-{label}.txt")
+        ls = open(op, encoding="utf-8").read().splitlines()
+        ls[0], ls[1] = ls[1], ls[0]
+        _w(op, "\n".join(ls) + "\n")
     return rpath
 
 
@@ -492,7 +535,11 @@ def self_test():
     # host 腕が 5/5 で改善しない -> ADOPT 条件不足で UNDETERMINED
     v, u, rj = run(ratios={f"infer-host-{b}": 1.0 for b in BATCHES})
     assert v == "UNDETERMINED", (v, u, rj)
-    for kw in ({"dup": "train-reuse"}, {"missing": "infer-reuse-64"}):
+    # R3 の完了性: 集計行が足りない（途中で異常終了）・説明できない rc・未知ステータスは UNDETERMINED
+    for kw in ({"r3_trunc": True}, {"r3_rc": True}, {"r3_status": True}):
+        v, u, rj = run(**kw)
+        assert v == "UNDETERMINED", (kw, v, u, rj)
+    for kw in ({"dup": "train-reuse"}, {"missing": "infer-reuse-64"}, {"order_swap": True}):
         try:
             run(**kw)
         except Bad:

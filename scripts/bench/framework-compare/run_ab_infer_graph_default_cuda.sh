@@ -109,10 +109,18 @@ REAL_HEAD="$(git -C "$RUNNER_ROOT" rev-parse HEAD 2>/dev/null || true)"
 if [[ -z "$STAMP_RUNNER" || "$STAMP_RUNNER" != "$REAL_HEAD" || "$STAMP_DIRTY" != "dirty=0" ]]; then
   echo "error: .rev-stamp が無い・HEAD と不一致・dirty=0 でない（stamp=${STAMP_RUNNER:-none} head=${REAL_HEAD:-none}）" >&2; exit 1
 fi
-# RULE.txt の tree_sha（フル SHA）と HEAD の一致。
-RULE_TREE="$(sed -n 's/^  tree_sha: \([0-9a-f]\{40\}\)$/\1/p' "$RULE_FILE" | head -n1)"
-if [[ -z "$RULE_TREE" || "$RULE_TREE" != "$REAL_HEAD" ]]; then
-  echo "error: RULE.txt の tree_sha が runner の HEAD と一致しない" >&2; exit 1
+# 計測対象ソースの同一性。RULE.txt は計測前に単独コミットされ HEAD が source_commit から進むため、HEAD 完全一致は要求しない。
+# 代わりに「source_commit（フル SHA）が HEAD の祖先で、RULE.txt 以外の差分が 0」を検証する
+# （ソース・ランナー・ゲート・パッチ・集計器のいずれが変わっても停止する）。
+RULE_SRC="$(sed -n 's/^  source_commit: \([0-9a-f]\{40\}\)$/\1/p' "$RULE_FILE" | head -n1)"
+if [[ -z "$RULE_SRC" ]] || ! git -C "$RUNNER_ROOT" cat-file -e "${RULE_SRC}^{commit}" 2>/dev/null; then
+  echo "error: RULE.txt の source_commit が無い・リポジトリに存在しない" >&2; exit 1
+fi
+if ! git -C "$RUNNER_ROOT" merge-base --is-ancestor "$RULE_SRC" "$REAL_HEAD"; then
+  echo "error: source_commit が runner の HEAD の祖先でない" >&2; exit 1
+fi
+if ! git -C "$RUNNER_ROOT" diff --quiet "$RULE_SRC" "$REAL_HEAD" -- . ':(exclude)docs/perf/logs/cuda-infer-graph-default-ab-4163/RULE.txt'; then
+  echo "error: source_commit から HEAD までに RULE.txt 以外の差分がある（計測対象ソースが変わっている）" >&2; exit 1
 fi
 # 作業ツリーは無変更（パッチは当てない。診断腕はコミット済みの main.rs に入っている）。
 if [[ -n "$(git -C "$RUNNER_ROOT" status --porcelain | grep -v '^??' || true)" ]]; then
@@ -153,6 +161,8 @@ echo "${BIN_SHA}  bench-fandhe-${LABEL}" >"$OUT/sha-fandhe-${LABEL}.txt"
   echo "aggregate_sha256=$(sha256_of "$LOGDIR/aggregate_4163.py")"
   echo "bench_main_sha256=$(sha256_of bench-fandhe/src/main.rs)"
   echo "rev_stamp_head_runner=${STAMP_RUNNER}"
+  echo "source_commit=${RULE_SRC}"
+  echo "source_diff_clean=1"
   echo "bin_sha256=${BIN_SHA}"
   echo "arms=same_binary_env_toggle"
   echo "rounds=${ROUNDS}"
