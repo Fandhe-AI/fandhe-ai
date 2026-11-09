@@ -39,6 +39,63 @@ const N_MEASURE: usize = 500;
 const GAP_US: u64 = 50;
 /// 本番の `TWO_D_JOBS_PER_WORKER`（`gemm_blis/mod.rs`）。forkjoin の床の job 数を揃えるため。
 const JOBS_PER_WORKER: usize = 2;
+/// 本番マイクロカーネルの MR／NR（`microkernel/neon.rs`・`microkernel/sme.rs`）と NC（`gemm.rs`）。
+/// `mirror_job_count` 用の写し。
+const NEON_MR: usize = 8;
+const NEON_NR: usize = 12;
+const SME_MR: usize = 16;
+const SME_NR: usize = 16;
+const BLOCK_NC: usize = 512;
+
+fn align_up(x: usize, a: usize) -> usize {
+    x.div_ceil(a) * a
+}
+
+/// `partition::job_grid` の job 数（`row_bands * col_bands`）を同じ探索で再計算する写し
+/// （同関数は crate 非公開で、本 example は公開 API しか呼べない）。
+/// `num_threads <= 1` は 1 job。目標は `JOBS_PER_WORKER * num_threads`（`max_jobs` で頭打ち）。
+fn mirror_job_count(m: usize, n: usize, mr: usize, nr: usize, num_threads: usize) -> usize {
+    if m == 0 || n == 0 || num_threads <= 1 {
+        return 1;
+    }
+    let cap = m.div_ceil(mr);
+    let max_col = n.div_ceil(nr);
+    let bound = (JOBS_PER_WORKER * num_threads).min(cap * max_col);
+    let real_rb = |rb: usize| m.div_ceil(align_up(m.div_ceil(rb.max(1)), mr));
+    // (cost, nc_job, row_bands, col_bands)
+    let mut best: Option<(u128, usize, usize, usize)> = None;
+    for cb in 1..=max_col {
+        let nc_job = align_up(n.div_ceil(cb), nr);
+        let real_cb = n.div_ceil(nc_job);
+        let t = bound.div_ceil(real_cb);
+        if real_rb(cap) < t {
+            continue;
+        }
+        let (mut lo, mut hi) = (1usize, cap);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if real_rb(mid) >= t {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        let mc_job = align_up(m.div_ceil(lo), mr);
+        let rows = m.div_ceil(mc_job);
+        let eff = real_cb * nc_job.div_ceil(BLOCK_NC);
+        let cost = (eff as u128) * (m as u128) + (rows as u128) * (n as u128);
+        let cand = (cost, nc_job, rows, real_cb);
+        best = Some(match best {
+            None => cand,
+            Some(cur) if cand.0 < cur.0 || (cand.0 == cur.0 && cand.1 > cur.1) => cand,
+            Some(cur) => cur,
+        });
+    }
+    match best {
+        Some((_, _, rows, cols)) => rows * cols,
+        None => cap * max_col,
+    }
+}
 
 fn fnv1a_bits(c: &[f32]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -209,7 +266,15 @@ calls=1 median_ns={cold_ns} mean_ns={cold_ns}.0 bits_hash=0x{bits_hash:016x}"
     );
 
     // fork-join の床: 本番と同じ job 数の「ほぼ空」の job を `par_iter_mut().try_for_each` で配る。
-    let jobs_n = JOBS_PER_WORKER * rayon_threads;
+    // 本番の job 数は `partition::job_grid`（crate 非公開）が MR／NR 整列後に決めるため、腕ごとの
+    // MR／NR（SME 経路 16×16、NEON 8×12）で同じ探索を写した `mirror_job_count` から得る。
+    let (mr, nr) = if sme_production_enabled() && sme.kernel_enabled {
+        (SME_MR, SME_NR)
+    } else {
+        (NEON_MR, NEON_NR)
+    };
+    let eff_threads = thread_limit_report().effective;
+    let jobs_n = mirror_job_count(DIM, DIM, mr, nr, eff_threads);
     let mut slots = vec![0u64; jobs_n];
     run_series(
         arm,
@@ -249,6 +314,13 @@ mod tests {
         assert_ne!(fnv1a_bits(&[1.0, 2.0]), fnv1a_bits(&[2.0, 1.0]));
         assert_ne!(fnv1a_bits(&[0.0]), fnv1a_bits(&[-0.0]));
         assert_eq!(fnv1a_bits(&[]), 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn mirror_job_count_exceeds_target_after_alignment() {
+        // 10 スレッド・N=256・SME（16×16）は目標 20 を整列後に上回り 24 jobs（#4192 レビュー）。
+        assert_eq!(mirror_job_count(256, 256, SME_MR, SME_NR, 10), 24);
+        assert_eq!(mirror_job_count(256, 256, SME_MR, SME_NR, 1), 1);
     }
 
     #[test]

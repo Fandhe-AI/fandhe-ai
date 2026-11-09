@@ -78,7 +78,7 @@ SME の `smstart`／`smstop` は、マイクロカーネルが 1 つの `asm!` �
    `env -u CARGO_TARGET_DIR -u RAYON_NUM_THREADS cargo build --release -p fandhe-ai-backend-cpu --example cpu_gemm_n256_fixed_cost_4151`。
    off-base ツリーでは `cargo test --release -p fandhe-ai-backend-cpu --lib --no-run` も済ませる。
    bench-fandhe は `scripts/bench/framework-compare/run_ab_sme_default_on_cpu.sh` と同じ要領で、
-   `cargo build -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path="<tree>/crates/facade"'` を off-base と on-base に向けて作り、
+   `cargo build --release -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path="<tree>/crates/facade"'` を off-base と on-base に向けて腕ごとに別の `--target-dir` で作り（生成物は `<target-dir>/release/bench-fandhe`。dev プロファイルのバイナリは未最適化で、release の example の G と混ぜると診断式を誤るため `--release` 必須）、
    `cargo tree` で path patch が効いたことを確かめる。
 3. 5 ラウンド: `run_round.sh <i> <round-dir>`（環境変数はファイル冒頭）。ホスト名・ホームの絶対パスは raw をマスクする。
 4. `values.tsv`（quantity／value の 2 列）を raw から作り、変換手順をここに残す。W・Wf は bench-fandhe の reuse／fresh の
