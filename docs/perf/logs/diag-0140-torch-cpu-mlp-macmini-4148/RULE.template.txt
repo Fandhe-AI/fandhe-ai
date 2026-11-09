@@ -1,0 +1,60 @@
+RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
+（計測前に単独コミットして固定する。計測後に緩めない。派生元: docs/perf/logs/diag-0140-mlp-macmini-4146/RULE.template.txt・#4144）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_4148.py は止まる）
+
+1. 目的
+  #4148: Mac mini（<metal-node>・Apple M4）の PyTorch CPU について、MLP train（batch 64・784→256→10）・MLP infer・
+  GEMM N=256 の 1 窓を区間に分けて記録する（判定・分類ではなく内訳の記録。record_only。閾値は置かない）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・bench_py.py・相手側ベンチ・unreached_0140.tsv（分類の反映は #4168）。
+
+2. 対象 tree
+  【記入: タグまたは SHA】の git archive。PARAMS の tree_sha に完全な SHA を書く。
+  tree_fingerprint は `python3 -I aggregate_4148.py --fingerprint <tree-dir>` の値（diag-0140-template の aggregate_diag.py と同一ロジック）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。本成果物ディレクトリは指紋の対象外。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（5）。各ラウンドの前に hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。
+  不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・表題は「参考」・確度は書かない）。
+  1 round の順序は run_round.sh のとおり: env → measure（train・infer・gemm256・shapes）→ profile（別腕・最後）。
+  計測中にビルド・集計・転送を並走させない。run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし旧系列を残す。
+  到達不能な量（Accelerate 直呼びのロード不可・結果不一致など）は unavailable と記録し、推定値で埋めない。
+  bench_py.py は sha256（PARAMS の bench_py_sha256）一致のものだけ使い、torch は PARAMS の torch_version（2.14.0）でなければ停止する。
+
+4. 区間の定義（単位 s。窓は bench_py.py と同じ区間）
+  train 窓: 1 step（forward・autograd.grad・SGD 更新・loss.item()）。infer 窓: forward_to_host ＋ checksum。gemm256 窓: matmul_to_host ＋ checksum。
+  純カーネル: torch.mm を 10 回まとめて計った 1 回あたり（batch10。dispatch を償却）。train は l1_fwd・l2_fwd・l2_dw・l2_dx・l1_dw の 5 形状
+  （l1_dx は PyTorch が計算しないため含めない）、infer は l1_fwd・l2_fwd。
+  非 GEMM: ew_fwd（bias 加算・relu・MSE を実データで個別計測）・update（SGD 4 パラメータ）・loss_item・readout・checksum。
+  dispatch 床: 計算量ゼロの op（1 要素 add・1×1 mm）の中央値。
+
+5. 導出式（判定ではなく内訳。run ごとに計算し run 間の中央値と最小〜最大を出す）
+  residual（推定）= 窓 − (gemm_kernel_batch10 ＋ ew_fwd ＋ update ＋ loss_item)（infer は ＋ readout ＋ checksum）。
+      autograd エンジン・Python 解釈・メモリ確保・backward の要素演算が混ざる。実測ではないので「推定」と明記する。
+  fwd_nongemm（推定）= fwd − Σ gemm_batch10(forward)、bwd_nongemm（推定）= grad − Σ gemm_batch10(backward)。
+  dispatch_floor_est（推定）= profile 腕の step あたり最上位 aten op 数 × dispatch_floor_add。区間に含まれる分と重複するため和に入れない。
+  torch_wrapper_cost（実測の差）= mm_pure_batch10 − Accelerate cblas_sgemm 直呼びの batch10（gemm256 と MLP 各形状。直呼びが
+      unavailable なら空欄）。
+  比 = 量 ÷ 窓（run ごと）の中央値。小さな差は run 別の最小〜最大を併記して読む（NB-RANGE5）。
+  profiler 腕は op 数と aten::mm が子 op を持つかだけを使う。時間値は使わない（profiler は計測を摂動する）。
+
+6. ノイズ帯
+  NB-RANGE5（docs/perf/noise-band-decision.md。run 別値の最小〜最大を帯とする）。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+  BLAS 経路が Accelerate でなくても宣言は動かさず、env/ の torch.__config__.show() と otool 出力を README に注記する。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパス・ユーザー名を書かない（<metal-node> と書く）。
+  集計は同梱の aggregate_4148.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_4148.py または torch_cpu_mlp_diag.py を変更すると sha256 が不一致になり集計は止まる。
+
+## PARAMS
+fixed-at-utc: <YYYY-MM-DDThh:mm:ssZ>
+issue: 4148
+rounds: <ラウンド数。5>
+tree_sha: <40 桁 hex>
+tree_fingerprint: <64 桁 hex>
+bench_py_sha256: <64 桁 hex。9fd2c08f…409b の全桁>
+torch_version: <2.14.0>
+diag_script_sha256: <64 桁 hex。torch_cpu_mlp_diag.py>
+aggregate_script_sha256: <64 桁 hex>
+profile_steps: <50>
