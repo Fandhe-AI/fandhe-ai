@@ -364,3 +364,11 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - 本節は `unsafe`・FMA 契約・tolerance・baseline・REQ-8 の手動境界検査を変更しない。Rust コード（`crates/`）の変更はない。パッチは計測ツリー専用で main には入れない。
 - **所有者判断（2026-10-28 訂正。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3613#issuecomment-6446047066。原文は同コメントを正とする）**: `SME_PRODUCTION_ENABLED` は #3580 の既定 OFF（`false`。`crates/backend-cpu/src/gemm_blis/mod.rs:3555`）のまま据え置く。#3232 の REJECT は事前登録規則の結論で、条件の異なる非再現（#3635 による reuse 経路変更という交絡あり）では覆さず、既定 ON へ戻すのは新しい事前登録 A/B で合格したときに限る。2 セルの後退は非再現（ノイズ帯・判定不能、`kernel_enabled` は 3 腕とも false）として記録し、是正・再 A/B は行わない。`RULE.txt` §8 追記（計測ツリー `e2660eba0`）は事後承認済み。併記セル train 64 fresh の 5/5 後退は記録のみ。
 - 本判断の記録は `unsafe`・定数・コードを変更しない。§12.8 の受理条件・§12.11 の所見も変更しない。
+
+### 12.14 新しい A/B での GB10 の数え方の確認（イシュー #4143。2026-11-09 追記）
+
+新しい事前登録 A/B（#4156）で SME 非搭載の GB10 を ADOPT 判定へどう入れるかの選択肢 (a)(b)(c) と推奨は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16 にまとめた。
+
+- **状態**: 案・所有者回答待ち。承認欄は未取得で、回答コメントのリンクは回答後に §5.16 と本節へ追記する。
+- 本節は `unsafe`・定数・コード・FMA 契約・tolerance・baseline を変更しない。§12.13 の所有者判断（既定 OFF のまま。ON に戻すのは新しい事前登録 A/B に合格したときだけ）も変更しない。
+
