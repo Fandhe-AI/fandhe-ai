@@ -16,7 +16,11 @@
 //! - P: host `Instant` のみ（3189 と同じ。`kernel_wait_derived = download - download_again` の再現）。
 //! - E: P と同じチェーンに CUDA event を 4 本差す（GPU 側の幅。host 時計も同時に取る）。
 //! - I: drain 後に event 対で `linear_forward_device` 1 回を層ごとに挟む（単体の GPU 実行幅）。
-//! - F: 固定費（idle sync・1x1 往復・1x1 発行・event 対の床）。
+//! - F: 固定費（idle sync・1x1 往復・1x1 発行・event 対の床）。#4149 の `cuda_fixed` と区間定義が
+//!   同じなのは `sync_idle`（drain 後の synchronize）・`tiny_roundtrip`（drain 後に 1 要素 kernel の発行＋
+//!   1 要素 D2H＋同期を 1 区間で計る。出力の解放は区間外）・`event_record_pair`（drain 後の event 記録 2 本）。
+//!   `launch_floor_1x1` は 1x1 `linear_forward_device` 1 回の発行（drain 後・出力確保込み）で、#4149 の
+//!   `launch_floor_add`（1 要素 add を 100 回 enqueue した 1 回あたり）とは演算も回数も異なる（対応表では参考）。
 //!
 //! 反復ごとに P/E/I の実行順を巡回させて位置バイアスを均す。
 //!
@@ -396,14 +400,20 @@ fn main() {
                 }
             }
         }
-        // F: 固定費（#4149 の cuda_fixed と定義を揃える）。
+        // F: 固定費。sync_idle・tiny_roundtrip・event_record_pair は #4149 の cuda_fixed と区間定義を揃える
+        // （launch_floor_1x1 は単発の 1x1 発行で、#4149 の launch_floor_add とは異なる。モジュール doc 参照）。
         stream.synchronize().expect("drain");
         let (_, sync_idle) = timed(|| stream.synchronize().expect("sync"));
         let (y, launch_floor) = timed(|| tiny(&ops, &a11, &w11));
         stream.synchronize().expect("sync");
         drop(y);
-        let y2 = tiny(&ops, &a11, &w11);
-        let (_t, tiny_rt) = timed(|| mem.download(&y2).expect("D2H"));
+        // tiny_roundtrip: #4149 の `(x + x).cpu()` と同じく、kernel の発行から D2H＋同期の完了までを 1 区間で計る。
+        // 直前の synchronize でキューは空。出力バッファの解放は区間外（drop は計時の後）。
+        let ((y2, _t), tiny_rt) = timed(|| {
+            let y2 = tiny(&ops, &a11, &w11);
+            let t = mem.download(&y2).expect("D2H");
+            (y2, t)
+        });
         drop(y2);
         stream.synchronize().expect("drain");
         let (_, pair_host) = timed(|| {

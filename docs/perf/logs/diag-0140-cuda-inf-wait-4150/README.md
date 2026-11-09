@@ -22,10 +22,11 @@ chain 95.9 µs のうち download 69.2 µs、導出 `kernel_wait`（= download �
 | P | 3189 と同じ。host `Instant` のみ（`kernel_wait_derived` の再現） |
 | E | P と同じチェーンに CUDA event 4 本。GPU 側の幅（`up_gpu`・`l1_span`・`l2_span`・`chain_gpu`） |
 | I | drain 後に event 対で実物の `linear_forward_device` を層ごとに 1 回挟む（`l1_iso`・`l2_iso`） |
-| F | 固定費（`sync_idle`・`launch_floor_1x1`・`tiny_roundtrip`・`event_record_pair`。#4149 の `cuda_fixed` と定義を揃える） |
+| F | 固定費（`sync_idle`・`launch_floor_1x1`・`tiny_roundtrip`・`event_record_pair`）。`sync_idle`・`tiny_roundtrip`（1 要素 kernel の発行＋D2H＋同期を 1 区間）・`event_record_pair` は #4149 の `cuda_fixed` と区間定義が同じ。`launch_floor_1x1`（1x1 linear の単発発行）は #4149 の `launch_floor_add`（1 要素 add 100 回の 1 回あたり）と異なる |
 
 ## 読み方の注意
 
+- TIMEOUT／INVALID の round を含む系列は `status=partial`・表題「参考」で、確度を出さない（RULE 項 3）。
 - 分類と確度は RULE 項 5 の規則で機械的に出す（`event_perturbation > 0.10` なら確度は必ず低、`share_exec ≥ 0.5` は GPU 実行支配）。事後に動かさない。
 - `E_sum`（`l1_iso + l2_iso`）は起動立ち上がりを含む GPU 実行幅の実測。`gpu_tail`・`wait_resid`・`share_*` は**推定**で、タグを付けて読む。
 - 相手側（#4149 の PyTorch CUDA）との比較は、#4149 の実測が済んでいる場合だけ `--opp-tsv` で出す。無ければ unavailable。#4149 の実測が済んでいなければ、本イシューを閉じる前提条件が未充足。
@@ -42,7 +43,7 @@ chain 95.9 µs のうち download 69.2 µs、導出 `kernel_wait`（= download �
 |---|---|
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_4150.py --check-template` で検査） |
 | `aggregate_4150.py` | 厳格パースの集計（`--dir`・`--self-test`・`--check-template`・`--check-rule`・`--fingerprint`・`--opp-tsv`）。sha256 を RULE に固定 |
-| `run_round.sh` | 1 round の起動（precheck → ビルド → ゲート → example 実行） |
+| `run_round.sh` | 1 round の起動（precheck → ビルド → ゲート → ビルド済みバイナリの直接実行。ゲート後に cargo を呼ばない） |
 | `nsys_aux_4150.sh` | 全 round の後に 1 回の nsys 補助（record_only。不通は unavailable） |
 | `crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs` | 計測本体（P／E／I／F 腕）。sha256 を RULE に固定 |
 

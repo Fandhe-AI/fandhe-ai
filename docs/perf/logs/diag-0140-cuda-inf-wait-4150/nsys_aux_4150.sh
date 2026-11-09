@@ -3,7 +3,7 @@
 # 役割: 5 round とは別の 1 回、example を nsys 配下で実行し、cuda_gpu_trace から L1 終了〜L2 開始の間隙と
 #   起動〜開始の遅延を抽出する。nsys は時間を汚すため、時間値は判定に使わない（RULE 項 3）。
 #   nsys 不在・不通・CPU サンプリング不可の警告（#2109 の前例）は unavailable＋理由として残す。
-# 環境変数: ROOT=計測ツリー（run_round.sh でビルド済み）  HW_LOCK_HELD=1  OUT=出力ディレクトリの絶対パス（新規）
+# 環境変数: ROOT=計測ツリー（run_round.sh が ROOT/target に固定してビルド済み。BIN は run_round.sh と同じ）  HW_LOCK_HELD=1  OUT=出力ディレクトリの絶対パス（新規）
 # 引数なし。外部入力をシェル文字列へ展開しない。
 set -uo pipefail
 ROOT="${ROOT:?計測ツリー}"; OUT="${OUT:?出力ディレクトリ}"

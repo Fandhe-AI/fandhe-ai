@@ -17,7 +17,7 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
 3. 計測手順
   ラウンド数は PARAMS の rounds（5）。各ラウンドの前に実機ロックを取得し、compute プロセス 0 件・GPU 使用率 0 が 3 サンプル連続・
   load1 < 1.0 を 30 秒間隔で最大 30 分待つ。不通過は gate.txt に TIMEOUT／INVALID と記録し、そのラウンドを正式系列から外す
-  （status=partial・表題は「参考」・確度は書かない）。同じ GB10 を #4147・#4149 の実測も使うため、実機ロックで直列化し並走させない。
+  （TIMEOUT／INVALID を 1 件でも含む系列は status=partial・表題は「参考」・確度は書かない。全 round PASS のときだけ status=complete）。同じ GB10 を #4147・#4149 の実測も使うため、実機ロックで直列化し並走させない。
   1 round = 1 プロセス（example の warmup と計測反復は PARAMS の warmup・iters）。反復ごとに P・E・I の順を巡回させ、F は各反復の末尾に測る。
   nsys 補助（nsys_aux_4150.sh）は全 round の後に 1 回、record_only。時間値は判定に使わない。
   計測中にビルド・集計・転送を並走させない。run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし旧系列を残す。
@@ -29,7 +29,11 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   P: host Instant のみ（h2d_upload・l1_issue・l2_issue・download・download_again・kernel_wait_derived = download − download_again・total）。
   E: P と同じチェーンに event 4 本（e0=upload 前、e1=upload 後、e2=L1 発行直後、e3=L2 発行直後）。up_gpu=e0→e1、l1_span=e1→e2、l2_span=e2→e3、chain_gpu=e1→e3。
   I: drain 後に event 対で実物の linear_forward_device を層ごとに 1 回挟む（l1_iso・l2_iso）。H2D・確保・event 生成は区間外。
-  F: sync_idle・launch_floor_1x1・tiny_roundtrip・event_record_pair（#4149 の cuda_fixed と定義を揃える）。
+  F: sync_idle・launch_floor_1x1・tiny_roundtrip・event_record_pair。各区間の前に drain（synchronize）してキューを空にする。
+    #4149 の cuda_fixed と区間定義が同じもの: sync_idle（アイドルでの synchronize）、tiny_roundtrip（1 要素 kernel〈1x1 linear〉の発行＋
+    1 要素 D2H＋同期を 1 区間で計る。出力の解放は区間外）、event_record_pair（event 記録 2 本だけの host 時間）。
+    異なるもの: launch_floor_1x1 は 1x1 linear_forward_device 1 回の発行時間（出力確保込み）で、#4149 の launch_floor_add
+    （1 要素 add を 100 回 enqueue した 1 回あたり）とは演算も回数も違う。対応表では参考として並べるだけにする。
   stream は internal-diagnostics 下の Legacy（NULL）stream であることを example が前提検査する。
 
 5. 導出式（内訳であり合否判定ではない。round ごとに腕別反復中央値から計算し、round 間の中央値と最小〜最大を出す）

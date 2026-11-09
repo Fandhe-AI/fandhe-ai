@@ -2,6 +2,8 @@
 # #4150 の 1 round（<cuda-node> = DGX GB10。計測キット。PR-1 時点では未実行）。
 # 役割: RULE.txt 項 3 の手順を 1 round 分実行し、round{i}/{gate.txt, raw/chain.txt} を作る。
 #   順序は precheck → ビルド → gate → example 実行（1 プロセス・P/E/I/F 腕）。ビルドはゲートの前に済ませ、計測中に並走させない。
+#   ゲート通過後は cargo を呼ばず（fingerprint 検査等のホスト負荷を避ける）、ビルド済みバイナリを直接起動する（nsys_aux_4150.sh と同じ BIN）。
+#   target dir は ROOT/target に固定する（利用者の CARGO_TARGET_DIR で別の場所に出て古いバイナリを起動するのを防ぐ）。
 # 派生元: diag-0140-torch-gb10-mlp-4149/run_round.sh（GB10 のゲート・実機ロックの作法）。
 # 環境変数: ROOT=計測ツリー（tree_sha の git archive 展開先。.rev-stamp に完全 SHA）
 #           EXPECT_SHA=RULE.txt の tree_sha  EXPECT_EXAMPLE_SHA=RULE.txt の example_sha256
@@ -23,6 +25,7 @@ case "${ESHA}" in *[!0-9a-f]*|'') echo "EXPECT_EXAMPLE_SHA は hex のみ"; exit
 [ "${HW_LOCK_HELD:-}" = "1" ] || { echo "実機ロック未取得（HW_LOCK_HELD=1 が必要）"; exit 2; }
 [ -z "${LD_PRELOAD:-}" ] || { echo "LD_PRELOAD が非空（計時腕では拒否）"; exit 2; }
 EX="${ROOT}/crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs"
+BIN="${ROOT}/target/release/examples/cuda_infer_chain_event_diag_4150"
 [ ! -e "${RD}/raw" ] || { echo "${RD}/raw が既にある（上書き禁止）"; exit 2; }
 
 # ---- precheck（fail-closed）
@@ -32,8 +35,10 @@ nvidia-smi --query-gpu=name --format=csv,noheader | grep -q 'GB10' || { echo "�
 echo "${ESHA}  ${EX}" | sha256sum -c - > /dev/null || { echo "example の sha256 不一致"; exit 1; }
 mkdir -p "${RD}/raw"
 # ビルドはゲートの前（計測中のビルド並走を避ける）。
-( cd "${ROOT}" && cargo build --release --locked -p fandhe-ai-backend-cuda --features internal-diagnostics \
-    --example cuda_infer_chain_event_diag_4150 ) 2> "${RD}/raw/build.err" || { echo "build 失敗"; exit 1; }
+( cd "${ROOT}" && CARGO_TARGET_DIR="${ROOT}/target" cargo build --release --locked -p fandhe-ai-backend-cuda \
+    --features internal-diagnostics --example cuda_infer_chain_event_diag_4150 ) 2> "${RD}/raw/build.err" \
+  || { echo "build 失敗"; exit 1; }
+[ -x "${BIN}" ] || { echo "ビルド済みバイナリがない: ${BIN}"; exit 1; }
 
 # ---- ゲート: compute プロセス 0 件・GPU 使用率 0 が 3 サンプル連続・load1 < 1.0 を 30 秒間隔で最大 30 分（#4147・#4149 と同一）。
 gate() {
@@ -55,7 +60,8 @@ gate() {
 }
 gate || { echo "ゲート不通過: $(cat "${RD}/gate.txt")"; exit 1; }
 
-( cd "${ROOT}" && cargo run --release --locked -p fandhe-ai-backend-cuda --features internal-diagnostics \
-    --example cuda_infer_chain_event_diag_4150 -- --round "${RN}" ) > "${RD}/raw/chain.txt" 2> "${RD}/raw/chain.err" \
+# ゲート後はビルド済みバイナリを直接起動する（cargo run の fingerprint 処理をゲート通過後に走らせない）。
+[ -x "${BIN}" ] || { echo "ビルド済みバイナリがない: ${BIN}"; exit 1; }
+( cd "${ROOT}" && "${BIN}" --round "${RN}" ) > "${RD}/raw/chain.txt" 2> "${RD}/raw/chain.err" \
   || { echo "example 失敗"; exit 1; }
 echo "round ${RN} done $(date -u +%FT%TZ)"

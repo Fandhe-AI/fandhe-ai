@@ -4,6 +4,8 @@
 役割: run_round.sh が作る round{i}/{gate.txt, raw/chain.txt} と固定済み RULE.txt を厳格にパースし、
   内訳（実測／推定タグ付き）・分類・確度を aggregate.md / aggregate.tsv に出す。record_only（合否判定ではない）。
   欠損・重複・未知キー・腕不足・反復数不一致・RULE のプレースホルダ残存・sha 不一致は AggError で止まる。
+  DEVICE4150 ヘッダは厳密に解析し、round を round{i} の i と、warmup・iters を RULE と照合する（重複は拒否）。
+  TIMEOUT／INVALID を 1 件でも含む系列は status=partial・表題「参考」とし、確度を出さない（RULE 項 3）。
   派生元: diag-0140-torch-gb10-mlp-4149/aggregate_4149.py（RULE 解析・指紋・テンプレート検査の作法）。
 
 使い方（python3 -I で実行する）:
@@ -49,7 +51,14 @@ SHARE_EXEC_THRESHOLD = 0.5
 # #4149 の cuda_infer／cuda_fixed／cuda_shapes の item 名。
 OPP_ITEMS = ("issue", "readout_sync", "gpu_span_event", "mm_event_l1_fwd", "mm_event_l2_fwd",
              "sync_idle", "tiny_roundtrip", "launch_floor_add", "event_record_pair")
-LINE_RE = re.compile(r"^CHAIN4150 arm=([PEIF]) iter=(\d+)((?: [a-z0-9_]+=-?\d+\.\d{3})+)$")
+POSINT = r"(?:0|[1-9]\d*)"
+LINE_RE = re.compile(r"^CHAIN4150 arm=([PEIF]) iter=(" + POSINT + r")((?: [a-z0-9_]+=-?\d+\.\d{3})+)$")
+# example の DEVICE4150 行（println! の書式と同一。接頭辞だけでは受理しない）。
+DEVICE_RE = re.compile(r"^DEVICE4150 compute_capability=(\d+)\.(\d+) round=(" + POSINT + r") warmup=(" + POSINT
+                       + r") iters=(" + POSINT + r")$")
+CHECKSUM_RE = re.compile(r"^CHECKSUM4150 value=(\d+)$")
+GATE_TOKENS = ("PASS", "TIMEOUT", "INVALID")
+ROUND_DIR_RE = re.compile(r"^round(\d+)$")
 
 
 class AggError(Exception):
@@ -121,22 +130,48 @@ def parse_rule(path):
     return kv
 
 
-def parse_chain(text, iters):
-    """chain.txt（example の標準出力）を厳格にパースし {arm: {key: [値…]}} を返す。"""
+def parse_device(ln, round_no, warmup, iters):
+    """DEVICE4150 行を厳密に解析し、round・warmup・iters を期待値（run_dir の i と RULE）と照合する。"""
+    m = DEVICE_RE.match(ln)
+    if not m:
+        raise AggError(f"chain: malformed DEVICE4150 header: {ln!r}")
+    got = {"round": int(m.group(3)), "warmup": int(m.group(4)), "iters": int(m.group(5))}
+    want = {"round": round_no, "warmup": warmup, "iters": iters}
+    for k in ("round", "warmup", "iters"):
+        if got[k] != want[k]:
+            raise AggError(f"chain: DEVICE4150 {k}={got[k]} does not match expected {want[k]}")
+
+
+def parse_chain(text, round_no, warmup, iters):
+    """chain.txt（example の標準出力）を厳格にパースし {arm: {key: [値…]}} を返す。
+
+    round_no は round{i} の i、warmup・iters は RULE の値。DEVICE4150 ヘッダはちょうど 1 行で先頭に置かれ、
+    done4150 は最終行（重複・後続行は拒否）。いずれも fail-closed（AggError）。
+    """
     seen = {a: {} for a in ARM_KEYS}
     checksum = None
     device = done = False
     for ln in text.splitlines():
-        if ln.startswith("DEVICE4150 "):
+        if done:
+            raise AggError(f"chain: line after done4150: {ln!r}")
+        if ln.startswith("DEVICE4150"):
+            if device:
+                raise AggError("chain: duplicate DEVICE4150 header")
+            parse_device(ln, round_no, warmup, iters)
             device = True
             continue
+        if not device and not ln.startswith("ERROR4150"):
+            raise AggError(f"chain: record before DEVICE4150 header: {ln!r}")
         if ln == "done4150":
             done = True
             continue
-        if ln.startswith("CHECKSUM4150 value="):
+        if ln.startswith("CHECKSUM4150"):
             if checksum is not None:
                 raise AggError("chain: duplicate CHECKSUM4150")
-            checksum = ln.split("=", 1)[1]
+            cm = CHECKSUM_RE.match(ln)
+            if not cm:
+                raise AggError(f"chain: malformed CHECKSUM4150: {ln!r}")
+            checksum = cm.group(1)
             continue
         if ln.startswith("ERROR4150"):
             raise AggError(f"chain: example reported error: {ln}")
@@ -180,6 +215,9 @@ def derive(chain):
     kwd = P["kernel_wait_derived_us"]
     if kwd <= 0:
         raise AggError("kernel_wait_derived の中央値が 0 以下（share が定義できない）")
+    # event_perturbation の分母。除算より前に検査する（ZeroDivisionError ではなく AggError で止める）。
+    if P["download_us"] <= 0:
+        raise AggError("P 腕 download の中央値が 0 以下")
     e_sum = I["l1_iso_us"] + I["l2_iso_us"]
     host_issue = P["l1_issue_us"] + P["l2_issue_us"]
     gpu_tail = max(0.0, E["chain_gpu_us"] - host_issue)
@@ -210,8 +248,6 @@ def derive(chain):
         "launch_floor_1x1": (F["launch_floor_1x1_us"], "実測"),
         "event_record_pair": (F["event_record_pair_us"], "実測"),
     }
-    if P["download_us"] <= 0:
-        raise AggError("P 腕 download の中央値が 0 以下")
     return d
 
 
@@ -246,7 +282,11 @@ def classify(rows):
 def load_opp(path):
     if path is None:
         return None
-    lines = read(path).splitlines()
+    return load_opp_text(read(path))
+
+
+def load_opp_text(text):
+    lines = text.splitlines()
     if not lines or lines[0] != "item\tmedian_us":
         raise AggError("opp-tsv: header must be 'item\\tmedian_us'")
     out = {}
@@ -256,7 +296,10 @@ def load_opp(path):
         parts = ln.split("\t")
         if len(parts) != 2 or parts[0] not in OPP_ITEMS or parts[0] in out:
             raise AggError(f"opp-tsv: bad or duplicate row: {ln!r}")
-        v = float(parts[1])
+        try:
+            v = float(parts[1])
+        except ValueError:
+            raise AggError(f"opp-tsv: not a number: {ln!r}")
         if not math.isfinite(v):
             raise AggError(f"opp-tsv: non-finite: {ln!r}")
         out[parts[0]] = v
@@ -274,15 +317,29 @@ PAIRS = (("host_issue_sum", "issue"), ("download", "readout_sync"), ("chain_gpu"
          ("event_record_pair", "event_record_pair"))
 
 
+def series_status(statuses):
+    """全 round が PASS なら complete、TIMEOUT／INVALID を 1 件でも含めば partial（RULE 項 3）。"""
+    return "complete" if statuses and all(s == "PASS" for s in statuses) else "partial"
+
+
 def render(rule, statuses, rows, opp):
     side, conf, reasons = classify(rows)
+    status = series_status(statuses)
     n_ok = len(rows["share_exec"]["vals"])
-    md = [f"# #4150 集計（record_only の内訳。tree_sha={rule['tree_sha']}）", "",
+    if status == "complete":
+        title = f"# #4150 集計（record_only の内訳。tree_sha={rule['tree_sha']}）"
+        cls = f"- 分類: **{side}**（確度: {conf}" + (f"。理由: {'、'.join(reasons)}" if reasons else "") + "）"
+    else:
+        # RULE 項 3: 不完全な系列は「参考」。確度（と確度の理由）は書かない。
+        title = f"# 参考: #4150 集計（status=partial・正式系列ではない。tree_sha={rule['tree_sha']}）"
+        cls = f"- 分類（参考）: {side}（status=partial のため確度は出さない）"
+    md = [title, "",
+          f"- status: {status}",
           f"- round 状態: {' '.join(statuses)}（PASS {n_ok} 件を使用）",
-          f"- 分類: **{side}**（確度: {conf}" + (f"。理由: {'、'.join(reasons)}" if reasons else "") + "）",
+          cls,
           "- 値の単位は µs。round 別中央値の中央値と NB-RANGE5（最小〜最大）。タグ: 実測／推定", "",
           "| 量 | タグ | 中央値 | 最小 | 最大 |", "|---|---|---|---|---|"]
-    tsv = ["item\ttag\tmedian\tmin\tmax"]
+    tsv = ["item\ttag\tmedian\tmin\tmax", f"status\t{status}\t\t\t"]
     for k, r in rows.items():
         nd = 4 if k.startswith("share") or k == "event_perturbation" else 3
         md.append(f"| {k} | {r['tag']} | {fnum(r['median'], nd)} | {fnum(r['min'], nd)} | {fnum(r['max'], nd)} |")
@@ -300,22 +357,41 @@ def render(rule, statuses, rows, opp):
             else:
                 md.append(f"| {mine} | {theirs} | {fnum(rows[mine]['median'])} | unavailable | unavailable |")
         md += ["", "非対称: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。"
-               "fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの実物、PyTorch の mm_event は純 GEMM。"]
+               "fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの実物、PyTorch の mm_event は純 GEMM。"
+               "launch_floor_1x1（1x1 linear の単発発行）と launch_floor_add（1 要素 add 100 回の 1 回あたり）は"
+               "区間定義が異なる参考の並びで、差を内訳として読まない。"]
     return "\n".join(md) + "\n", "\n".join(tsv) + "\n"
+
+
+def parse_gate(text, i):
+    """gate.txt はちょうど 1 行（run_round.sh の gate() が書く）。先頭トークンが PASS／TIMEOUT／INVALID。"""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) != 1:
+        raise AggError(f"round{i}/gate.txt: expected exactly one line, got {len(lines)}")
+    tok = lines[0].split()[0]
+    if tok not in GATE_TOKENS:
+        raise AggError(f"round{i}/gate.txt: unparsable")
+    return tok
 
 
 def run_dir(d, rule_path, out_md, out_tsv, opp_path=None):
     rule = parse_rule(rule_path)
     n, iters = int(rule["rounds"]), int(rule["iters"])
+    warmup = int(rule["warmup"])
+    # RULE 項 3: run の追加・除外は禁止。round{k} ディレクトリの集合が round1..round{rounds} と一致すること。
+    try:
+        found = {int(m.group(1)) for e in os.listdir(d) for m in [ROUND_DIR_RE.match(e)] if m}
+    except OSError as e:
+        raise AggError(f"cannot list {d}: {e}")
+    if found != set(range(1, n + 1)):
+        raise AggError(f"round dirs mismatch: expected round1..round{n}, found {sorted(found)}")
     statuses, per_round, sums = [], [], set()
     for i in range(1, n + 1):
         rd = os.path.join(d, f"round{i}")
-        gate = read(os.path.join(rd, "gate.txt")).split()
-        if not gate or gate[0] not in ("PASS", "TIMEOUT", "INVALID"):
-            raise AggError(f"round{i}/gate.txt: unparsable")
-        statuses.append(gate[0])
-        if gate[0] == "PASS":
-            chain, cks = parse_chain(read(os.path.join(rd, "raw", "chain.txt")), iters)
+        gate = parse_gate(read(os.path.join(rd, "gate.txt")), i)
+        statuses.append(gate)
+        if gate == "PASS":
+            chain, cks = parse_chain(read(os.path.join(rd, "raw", "chain.txt")), i, warmup, iters)
             sums.add(cks)
             per_round.append(derive(chain))
     if not per_round:
@@ -393,8 +469,9 @@ def check_rule(path):
 
 
 # ---------------------------------------------------------------- self-test
-def _synth_chain(iters, e_sum_each=25.0, kwd=100.0, p_dl=100.0, e_dl=100.0, drop_key=None, dup=False, arms=None):
-    lines = ["DEVICE4150 compute_capability=0.0 round=1 warmup=1 iters=%d" % iters]
+def _synth_chain(iters, e_sum_each=25.0, kwd=100.0, p_dl=100.0, e_dl=100.0, drop_key=None, dup=False, arms=None,
+                 round_no=1, warmup=1):
+    lines = ["DEVICE4150 compute_capability=12.1 round=%d warmup=%d iters=%d" % (round_no, warmup, iters)]
     vals = {
         "P": dict(h2d_upload_us=10, l1_issue_us=20, l2_issue_us=20, download_us=p_dl, download_again_us=p_dl - kwd,
                   kernel_wait_derived_us=kwd, total_us=150),
@@ -425,32 +502,72 @@ def _expect_error(fn, label):
 
 def self_test():
     n = 5
-    ok, _ = parse_chain(_synth_chain(n), n)
+    ok, _ = parse_chain(_synth_chain(n), 1, 1, n)
     d = derive(ok)
     assert d["share_exec"][0] == 0.5 and d["kernel_wait_derived"][0] == 100.0
     assert d["gpu_gap"][0] == 60 - 50 and d["gpu_tail"][0] == 20 and d["wait_resid"][0] == 80
     # 境界: share_exec ちょうど 0.5 は GPU 実行側、摂動ちょうど 0.10 は確度を落とさない。
-    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=110.0), n)[0]) for _ in range(3)])
+    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=110.0), 1, 1, n)[0]) for _ in range(3)])
     assert rows["event_perturbation"]["median"] == 0.1
     side, conf, why = classify(rows)
     assert side.startswith("GPU 実行") and conf == "高" and not why, (side, conf, why)
-    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=111.0), n)[0]) for _ in range(3)])
+    rows = summarize([derive(parse_chain(_synth_chain(n, e_dl=111.0), 1, 1, n)[0]) for _ in range(3)])
     assert classify(rows)[1] == "低"
     # 待ち支配（share < 0.5）。
-    rows = summarize([derive(parse_chain(_synth_chain(n, e_sum_each=10.0), n)[0]) for _ in range(3)])
+    rows = summarize([derive(parse_chain(_synth_chain(n, e_sum_each=10.0), 1, 1, n)[0]) for _ in range(3)])
     assert classify(rows)[0].startswith("待ち") and classify(rows)[1] == "高"
     # round 間で側が割れる → 低。
-    mixed = [derive(parse_chain(_synth_chain(n, e_sum_each=x), n)[0]) for x in (10.0, 30.0, 30.0)]
+    mixed = [derive(parse_chain(_synth_chain(n, e_sum_each=x), 1, 1, n)[0]) for x in (10.0, 30.0, 30.0)]
     side, conf, why = classify(summarize(mixed))
     assert conf == "低" and any("割れた" in w or "またぐ" in w for w in why)
     # 異常系。
-    _expect_error(lambda: parse_chain(_synth_chain(n, drop_key="total_us"), n), "missing key")
-    _expect_error(lambda: parse_chain(_synth_chain(n, dup=True), n), "duplicate iter")
-    _expect_error(lambda: parse_chain(_synth_chain(n, arms="PEI"), n), "missing arm")
-    _expect_error(lambda: parse_chain(_synth_chain(n), n + 1), "iters mismatch")
-    _expect_error(lambda: parse_chain(_synth_chain(n) + "garbage\n", n), "unparsable")
-    _expect_error(lambda: parse_chain(_synth_chain(n).replace("done4150\n", ""), n), "no done")
-    _expect_error(lambda: derive(parse_chain(_synth_chain(n, kwd=0.0), n)[0]), "kwd zero")
+    _expect_error(lambda: parse_chain(_synth_chain(n, drop_key="total_us"), 1, 1, n), "missing key")
+    _expect_error(lambda: parse_chain(_synth_chain(n, dup=True), 1, 1, n), "duplicate iter")
+    _expect_error(lambda: parse_chain(_synth_chain(n, arms="PEI"), 1, 1, n), "missing arm")
+    _expect_error(lambda: parse_chain(_synth_chain(n), 1, 1, n + 1), "iters mismatch")
+    _expect_error(lambda: parse_chain(_synth_chain(n) + "garbage\n", 1, 1, n), "unparsable")
+    _expect_error(lambda: parse_chain(_synth_chain(n).replace("done4150\n", ""), 1, 1, n), "no done")
+    # DEVICE4150 ヘッダの厳密解析（指摘: 接頭辞だけで受理していた）。
+    _expect_error(lambda: parse_chain(_synth_chain(n, round_no=2), 1, 1, n), "header round mismatch")
+    _expect_error(lambda: parse_chain(_synth_chain(n, warmup=50), 1, 1, n), "header warmup mismatch")
+    hdr_iters = _synth_chain(n).replace(f"iters={n}\n", f"iters={n + 1}\n", 1)
+    _expect_error(lambda: parse_chain(hdr_iters, 1, 1, n), "header iters mismatch")
+    syn = _synth_chain(n)
+    first = syn.splitlines()[0]
+    _expect_error(lambda: parse_chain(syn.replace(first + "\n", first + "\n" + first + "\n", 1), 1, 1, n),
+                  "duplicate header")
+    _expect_error(lambda: parse_chain(syn.replace(first, "DEVICE4150 garbage", 1), 1, 1, n), "malformed header")
+    _expect_error(lambda: parse_chain(syn.replace(first, first + " extra=1", 1), 1, 1, n), "header trailing token")
+    _expect_error(lambda: parse_chain(syn.replace(first, "DEVICE4150x" + first[len("DEVICE4150"):], 1), 1, 1, n),
+                  "header prefix only")
+    _expect_error(lambda: parse_chain(syn.replace(first + "\n", "", 1), 1, 1, n), "no header")
+    _expect_error(lambda: parse_chain(syn.replace(first + "\n", "", 1).replace("done4150\n", first + "\ndone4150\n"),
+                                      1, 1, n), "header not first")
+    # CHECKSUM4150・done4150 の厳密化。
+    _expect_error(lambda: parse_chain(syn.replace("value=1", "value=abc"), 1, 1, n), "checksum not digits")
+    _expect_error(lambda: parse_chain(syn + "done4150\n", 1, 1, n), "duplicate done")
+    _expect_error(lambda: parse_chain(syn + "CHECKSUM4150 value=1\n", 1, 1, n), "line after done")
+    _expect_error(lambda: parse_chain(syn.replace("iter=0 ", "iter=00 ", 1), 1, 1, n), "leading zero iter")
+    assert parse_chain(_synth_chain(n, round_no=3, warmup=50), 3, 50, n)[1] == "1"
+    # gate.txt の厳密化。
+    assert parse_gate("PASS load1=0.1\n", 1) == "PASS"
+    _expect_error(lambda: parse_gate("PASS x\nTIMEOUT y\n", 1), "gate two lines")
+    _expect_error(lambda: parse_gate("PASSED x\n", 1), "gate bad token")
+    _expect_error(lambda: parse_gate("", 1), "gate empty")
+    # series_status と partial の描画（指摘: 状態によらず同じ表題・確度を出していた）。
+    assert series_status(["PASS"] * 5) == "complete"
+    assert series_status(["PASS", "TIMEOUT", "TIMEOUT", "TIMEOUT", "TIMEOUT"]) == "partial"
+    assert series_status(["PASS", "PASS", "INVALID", "PASS", "PASS"]) == "partial"
+    one = summarize([derive(parse_chain(_synth_chain(n), 1, 1, n)[0])])
+    rule_stub = {"tree_sha": "a" * 40}
+    md_p, tsv_p = render(rule_stub, ["PASS", "TIMEOUT", "TIMEOUT", "TIMEOUT", "TIMEOUT"], one, None)
+    assert md_p.startswith("# 参考: ") and "確度:" not in md_p and "確度: 高" not in md_p and "理由:" not in md_p
+    assert "status=partial のため確度は出さない" in md_p and "status\tpartial\t" in tsv_p
+    assert "- status: partial" in md_p
+    md_c, tsv_c = render(rule_stub, ["PASS"], one, None)
+    assert md_c.startswith("# #4150 集計") and "確度: 高" in md_c and "status\tcomplete\t" in tsv_c
+    _expect_error(lambda: load_opp_text("item\tmedian_us\nissue\tabc\n"), "opp not a number")
+    _expect_error(lambda: derive(parse_chain(_synth_chain(n, kwd=0.0), 1, 1, n)[0]), "kwd zero")
     # example 出力キーとの突き合わせ（Rust 側の format_line 呼び出しと同一であること）。
     src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "crates", "backend-cuda",
                        "examples", "cuda_infer_chain_event_diag_4150.rs")
@@ -469,9 +586,27 @@ def self_test():
         for i in (1, 2):
             os.makedirs(os.path.join(t, f"round{i}", "raw"))
             open(os.path.join(t, f"round{i}", "gate.txt"), "w").write("PASS x\n")
-            open(os.path.join(t, f"round{i}", "raw", "chain.txt"), "w").write(_synth_chain(n))
+            open(os.path.join(t, f"round{i}", "raw", "chain.txt"), "w").write(_synth_chain(n, round_no=i))
         run_dir(t, rule, os.path.join(t, "a.md"), os.path.join(t, "a.tsv"))
         assert "unavailable" in read(os.path.join(t, "a.md"))
+        assert "status\tcomplete\t" in read(os.path.join(t, "a.tsv")) and "確度: " in read(os.path.join(t, "a.md"))
+        # round2 の chain に round1 のヘッダ（取り違え）→ 拒否。
+        open(os.path.join(t, "round2", "raw", "chain.txt"), "w").write(_synth_chain(n, round_no=1))
+        _expect_error(lambda: run_dir(t, rule, os.path.join(t, "x.md"), os.path.join(t, "x.tsv")), "e2e round mismatch")
+        # warmup が RULE（1）と不一致 → 拒否。
+        open(os.path.join(t, "round2", "raw", "chain.txt"), "w").write(_synth_chain(n, round_no=2, warmup=50))
+        _expect_error(lambda: run_dir(t, rule, os.path.join(t, "x.md"), os.path.join(t, "x.tsv")), "e2e warmup mismatch")
+        open(os.path.join(t, "round2", "raw", "chain.txt"), "w").write(_synth_chain(n, round_no=2))
+        # PASS が一部だけ（round2 が TIMEOUT）→ partial・参考・確度なし。
+        open(os.path.join(t, "round2", "gate.txt"), "w").write("TIMEOUT load1=2.0 x\n")
+        run_dir(t, rule, os.path.join(t, "p.md"), os.path.join(t, "p.tsv"))
+        pmd = read(os.path.join(t, "p.md"))
+        assert pmd.startswith("# 参考: ") and "確度: " not in pmd and "status\tpartial\t" in read(os.path.join(t, "p.tsv"))
+        open(os.path.join(t, "round2", "gate.txt"), "w").write("PASS x\n")
+        # 余分な round ディレクトリ（run の追加）→ 拒否。
+        os.makedirs(os.path.join(t, "round3"))
+        _expect_error(lambda: run_dir(t, rule, os.path.join(t, "x.md"), os.path.join(t, "x.tsv")), "extra round dir")
+        os.rmdir(os.path.join(t, "round3"))
         opp = os.path.join(t, "opp.tsv")
         open(opp, "w").write("item\tmedian_us\nissue\t10.0\n")
         run_dir(t, rule, os.path.join(t, "b.md"), os.path.join(t, "b.tsv"), opp)
@@ -479,7 +614,8 @@ def self_test():
         open(opp, "w").write("item\tmedian_us\nissue\t10.0\nissue\t11.0\n")
         _expect_error(lambda: load_opp(opp), "dup opp")
         # 欠損 round／checksum 不一致／プレースホルダ残存／sha 不一致。
-        open(os.path.join(t, "round2", "raw", "chain.txt"), "w").write(_synth_chain(n).replace("value=1", "value=2"))
+        open(os.path.join(t, "round2", "raw", "chain.txt"), "w").write(
+            _synth_chain(n, round_no=2).replace("value=1", "value=2"))
         _expect_error(lambda: run_dir(t, rule, os.path.join(t, "c.md"), os.path.join(t, "c.tsv")), "checksum")
         os.remove(os.path.join(t, "round2", "gate.txt"))
         _expect_error(lambda: run_dir(t, rule, os.path.join(t, "c.md"), os.path.join(t, "c.tsv")), "missing gate")
