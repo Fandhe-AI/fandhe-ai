@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # #4153 の PR-2 の前に 1 回だけ使う xctrace の schema 検出（<metal-node> = Mac mini M4。PR-1 時点では未実行）。
-# 役割: N=256 の小さな GEMM を Metal System Trace で記録し、`xctrace export --toc` を env/xctrace_toc.xml に保存する。
+# 役割: N=256 の小さな GEMM を Metal System Trace で記録し、`xctrace export --toc` を env/xctrace_toc.xml に、
+#   GPU／Metal 系の表を env/table_<schema>.xml に保存する。
 #   GPU 実行区間の表の schema 名・列名（RULE の AUX xctrace_schema／xctrace_*_col）を人間が確定するための材料で、
 #   計測ではなく、ここで得た値は判定に使わない。xctrace が無い・失敗した場合は env/xctrace_probe.txt に unavailable と書いて非 0 で終わる
 #   （RULE は formulas=F2 だけで固定する。README 参照）。
 # 環境変数: ROOT=計測ツリー（framework-compare をビルド済みの git archive 展開先）  OUT=記録先 env ディレクトリ（絶対パス。未存在）
-# マスク: OUT を作った後は成功・unavailable・失敗・シグナルのどの経路でも EXIT trap（finish）が
+# マスク: OUT を作った後は成功・unavailable・失敗・シグナル（INT・TERM・HUP）のどの経路でも EXIT trap（finish）が
 #   trace バンドルを消し、`to_values_4153.py --mask-dir` で env/ の全ファイルを置換する（対象と限界は同スクリプト冒頭）。
 #   マスクに失敗（識別子が残る等）したら非 0 で終わる。保存するメッセージには OUT の絶対パスを書かない（OUT からの相対名）。
 # bash 3.2／5 互換。外部入力をシェル文字列へ展開しない。

@@ -12,12 +12,17 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   fandhe-ai の腕（窓・xctrace）は registry fandhe-ai =0.14.0（framework-compare の bench-fandhe）。照合の診断テストは PR-1 マージ後の main SHA の git archive（PARAMS の tree_sha）。
   tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値
   （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を C ロケール順に並べた全体の SHA-256。target/ と .git は除外）。
-  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば計測しない（手作業の確認。run_round.sh が検査するのは .rev-stamp と tree_sha の一致だけ）。cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
   版差の記録: `git diff v0.14.0 <tree_sha> -- crates/backend-metal/src` の差分の有無を AUX の backend_metal_diff_vs_v0_14_0 に書く。差分ありなら照合の結論に「版差あり」を付ける。
 
 3. 計測手順
   ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す: hw-lock を取得し、load1 < 3.0 を 30 秒間隔で最大 30 分待つ。計測中にビルド・集計・転送を並走させない（ゲート通過後に cargo を呼ばない）。
   ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  round の状態は gate.txt の 1 語目（PASS／TIMEOUT／INVALID）だけで伝え、PASS 以外は正式系列から外して系列は partial で集計を続ける:
+    INVALID にするもの: load1 が数値でない（ゲート）、ゲート通過後に run_round.sh が非 0 で終わった（腕・診断テスト・マスクの失敗、INT・TERM・HUP）、
+    変換で検出した GEMM 区間の本数不一致・区間の重なり・ROUTE_ACTUAL≠Classic・DIAG_BITEQ≠true（to_values_4153.py）。
+    INVALID の記録に限り gate.txt の 1 行目を書き換え、元の行は「# was: 」付きで残す。INVALID の round は values.tsv を作らない。
+    それ以外の不整合（RULE・AUX・sha256・入力の欠落・重複・解釈不能など。README の「round の状態」）は hard で、系列全体の集計を止める。
   ラウンド内の順序: 段は (a) → (b) → (c) の順に固定し、(a) をすべて終えてから (b)、(b) をすべて終えてから (c) に進む
   （framework ごとに段をまたいでまとめない。trace 下と trace なしの窓で熱状態をそろえるため）。奇偶の入れ替えは (a)・(b) の各段の中の
   framework の順だけで、奇数 round は fandhe → candle、偶数 round は candle → fandhe。framework 内の順と (c) の順は入れ替えない。
@@ -81,9 +86,11 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   run_round.sh・xctrace_probe_4153.sh は終了経路（成功・失敗・unavailable・シグナル）によらず trace バンドルを消し、
   to_values_4153.py --mask-dir で保存物のホームパス→<home>、ホスト名→<metal-node>、パス上のユーザー名→<user> を置換する
   （対象と検出できないものは README の「マスク」。置換後に残れば非 0 で終わる）。
-  集計は同梱の aggregate_diag.py・to_values_4153.py・attrib_4153.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  集計は同梱の aggregate_diag.py・to_values_4153.py・attrib_4153.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる（hard）。
+  項 3 の INVALID は止まらず round の状態として gate.txt に記録される。
   xctrace の XML は非信頼データとして扱う（DOCTYPE・ENTITY 宣言とサイズ上限超えは拒否）。
-  本ファイル固定後に各スクリプトを変更すると sha256 が不一致になり集計は止まる。
+  本ファイル固定後に各スクリプトを変更すると sha256 が不一致になり集計は止まる（aggregate_diag.py は自身の sha256、attrib_4153.py は
+  to_values_4153.py・attrib_4153.py・run_round.sh の sha256 を照合する。to_values_4153.py・run_round.sh は実行時に自身を照合しない）。
   kernel_owner の変更は PR-2 の RULE コミット時点までなら所有者が可能。以後は RULE.v2.txt。
 
 ## AUX

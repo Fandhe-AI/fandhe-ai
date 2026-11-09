@@ -6,13 +6,17 @@
 attrib_4153.py が読む補助 aux.tsv へ変換する。docs/perf/logs/diag-0140-template/README.md の
 「ハーネス固有の出力から values.tsv への変換は各 issue の責務」に対応する。実測値は含まない。
 
-入力（<round-dir>/raw/）:
+入力（<round-dir>/gate.txt と <round-dir>/raw/）:
   fandhe_reuse.jsonl  fandhe_fresh.jsonl  candle_gemm.jsonl  candle_split.jsonl   trace なしの窓
   fandhe_reuse_traced.jsonl  candle_split_traced.jsonl                               trace 下の窓（摂動検査用）
   fandhe_reuse.trace.xml  candle_split.trace.xml                                     xctrace export（AUX の xctrace=available のとき）
   route.txt  diag.txt                                                                診断テストの出力
-欠損・重複・非有限・区間本数の不一致・区間の重なり・DOCTYPE／ENTITY・解決できない ref・未知の AUX キー・
-AUX の xctrace と cell 行の formulas の食い違いはすべて ConvError で停止する。
+round の状態（--round-dir。round_convert）: gate.txt が PASS 以外なら変換しない。RULE の INVALID 条件（GEMM 区間の本数不一致・
+区間の重なり・ROUTE_ACTUAL≠Classic・DIAG_BITEQ≠true）は RoundInvalid として集め、gate.txt を INVALID に書き換えて
+（元の行は "# was: " で残す）values.tsv・aux.tsv を作らずに終了コード 0 で終わる。系列は aggregate_diag.py が partial で集計する。
+それ以外（欠損・重複・非有限・DOCTYPE／ENTITY・解決できない ref・対象プロセスの行が無い・未知の AUX キー・
+AUX の xctrace と cell 行の formulas の食い違いなど）は hard の ConvError で停止する（終了コード 1。gate.txt は変えない）。
+hard は INVALID より優先する（INVALID を集めながら最後まで読み、hard があればそちらで止まる）。
 xctrace=unavailable（F2 だけのフォールバック）では trace を読まないため、trace 専用の AUX キー（TRACE_KEYS）は
 要求しない（`<…>` のまま・未記載でよい）。available では従来どおりすべて実値を要求する。
 xctrace の XML は非信頼データ（XXE・巨大入力を拒否）。標準ライブラリのみ。`python3 -I` で実行すること。
@@ -64,6 +68,12 @@ FORMULAS_BY_MODE = {"available": ["F1", "F2"], "unavailable": ["F2"]}
 
 
 class ConvError(Exception):
+    """解釈不能・RULE と入力の食い違い（hard）。系列全体を止める（直すか RULE.v2 で定め直す）。"""
+    pass
+
+
+class RoundInvalid(ConvError):
+    """round の測定が RULE の有効条件を満たさない（INVALID）。round_convert が gate.txt に記録し、系列は partial で続く。"""
     pass
 
 
@@ -167,7 +177,7 @@ def _elem_text(el):
     return t
 
 
-def gemm_intervals(xml_path, aux, proc_match):
+def gemm_intervals(xml_path, aux, proc_match, inv):
     """xctrace export から対象プロセスの GEMM 区間 (start_ms, dur_ms) を開始順で返す。
 
     開始時刻と継続時間は同じ単位（AUX xctrace_time_unit_ns）として ms へ直す。同一プロセスの GEMM 区間が
@@ -223,7 +233,7 @@ def gemm_intervals(xml_path, aux, proc_match):
         raise ConvError("AUX: xctrace_time_unit_ns must be an integer >= 1")
     unit = int(unit_f)
     min_ms = finite(aux["gemm_interval_min_ms"], "gemm_interval_min_ms")
-    out = []
+    out, proc_rows = [], 0
     for row in root.iter("row"):
         kids = list(row)
         if len(kids) != len(cols):
@@ -232,20 +242,24 @@ def gemm_intervals(xml_path, aux, proc_match):
         proc = _elem_text(resolve(cell[aux["xctrace_proc_col"]]))
         if proc_match not in proc:
             continue
+        proc_rows += 1
         start = finite((resolve(cell[aux["xctrace_start_col"]]).text or "").strip(), f"{xml_path}: start") * unit / 1e6
         # fmt は表示用（"6.2 ms" 等）のため、数値は要素本体のテキストを使う
         dur = finite((resolve(cell[aux["xctrace_dur_col"]]).text or "").strip(), f"{xml_path}: duration")
         dur_ms = dur * unit / 1e6
         if dur_ms >= min_ms:
             out.append((start, dur_ms))
+    if proc_rows == 0:  # 対象プロセスの行が 1 つもないのは測定ではなく AUX（列・プロセス名）や export の取り違え
+        raise ConvError(f"{xml_path}: no row for process {proc_match!r} (check AUX columns / export)")
     out.sort()
     for (s0, d0), (s1, _) in zip(out, out[1:]):
         if s1 < s0 + d0:
-            raise ConvError(f"{xml_path}: GEMM intervals overlap at start {s1} ms (not one row per GPU interval; INVALID)")
+            inv.append(f"{os.path.basename(xml_path)}: GEMM intervals overlap (not one row per GPU interval)")
+            break
     return out
 
 
-def pure_kernel(xml_path, aux, proc_match, warmup, iters, lead=0, trail=0):
+def pure_kernel(xml_path, aux, proc_match, warmup, iters, inv, lead=0, trail=0):
     """開始順の区間列から測定反復 iters 本だけを切り出して中央値(ms)を返す。
 
     lead＝測定の前に同一プロセスで走る GEMM の本数、trail＝後ろに走る本数（いずれも除外する）。
@@ -255,23 +269,33 @@ def pure_kernel(xml_path, aux, proc_match, warmup, iters, lead=0, trail=0):
     余分な ≥ 閾値の区間が先頭・途中・末尾のどこにあるかを特定できず、許容すると測定スライスが黙ってずれるため、
     1 本でも多い／少ない round は INVALID とする（扱いを変えるなら RULE.v2 で抽出規則ごと定め直す）。
     件数の一致は並びの正しさを保証しない（GEMM の欠落と余分な区間が同数なら検出できない）。
+    INVALID（本数不一致・区間の重なり）は inv に理由を足して None を返す（hard エラーは従来どおり ConvError）。
     """
-    iv = gemm_intervals(xml_path, aux, proc_match)
+    if iters < 1:
+        raise ConvError(f"{xml_path}: iters must be >= 1")
+    n0 = len(inv)
+    iv = gemm_intervals(xml_path, aux, proc_match, inv)
     expected = lead + warmup + iters + trail
     if len(iv) != expected:
-        raise ConvError(f"{xml_path}: GEMM interval count {len(iv)} != expected {expected} (INVALID)")
+        inv.append(f"{os.path.basename(xml_path)}: GEMM interval count {len(iv)} != expected {expected}")
+    if len(inv) != n0:
+        return None
     measured = [d for _, d in iv[lead + warmup:lead + warmup + iters]]
-    if iters < 1 or len(measured) != iters:
+    if len(measured) != iters:
         raise ConvError(f"{xml_path}: no measured intervals after warmup")
     return statistics.median(measured)
 
 
-def parse_diag(route_text, diag_text):
-    """route.txt の経路確認と diag.txt の N=4096 ブロックの kernel_gpu 中央値(ms)を返す。"""
-    if not re.search(rf"^ROUTE_ACTUAL N={SIZE} route=Classic\b", route_text, re.M):
-        raise ConvError(f"route.txt: ROUTE_ACTUAL N={SIZE} route=Classic not found (INVALID)")
-    if not re.search(rf"^DIAG_BITEQ N={SIZE} equal=true\b", route_text, re.M):
-        raise ConvError(f"route.txt: DIAG_BITEQ N={SIZE} equal=true not found (INVALID)")
+def parse_diag(route_text, diag_text, inv):
+    """route.txt の経路確認と diag.txt の N=4096 ブロックの kernel_gpu 中央値(ms)を返す。
+
+    行が 1 本あって値が違う（route≠Classic・equal≠true）は INVALID（inv に足す）。行が無い・複数は解釈不能（hard）。"""
+    for key, field, want in (("ROUTE_ACTUAL", "route", "Classic"), ("DIAG_BITEQ", "equal", "true")):
+        got = re.findall(rf"^{key} N={SIZE} {field}=(\S+)", route_text, re.M)
+        if len(got) != 1:
+            raise ConvError(f"route.txt: {key} N={SIZE} expected once, got {len(got)}")
+        if got[0] != want:
+            inv.append(f"route.txt: {key} N={SIZE} {field}={got[0]} (want {want})")
     lines = diag_text.splitlines()
     starts = [i for i, l in enumerate(lines) if re.search(rf"\] N={SIZE} requested_tile", l)]
     if len(starts) != 1:
@@ -289,6 +313,9 @@ def parse_diag(route_text, diag_text):
 
 
 def convert(round_dir, rule_text):
+    """raw/ から (values.tsv, aux.tsv) の本文を返す。hard エラーを先にすべて出し切ってから、INVALID があれば
+    RoundInvalid（理由を ; で連結）を投げる（INVALID が hard エラーを隠さない）。"""
+    inv = []
     aux = parse_aux(rule_text)
     raw = os.path.join(round_dir, "raw")
     p = lambda n: os.path.join(raw, n)
@@ -310,15 +337,17 @@ def convert(round_dir, rule_text):
             raise ConvError("candle_split(_traced): warmup/iters differ between traced and untraced runs")
         # 先行する転送込みの本数は転送込みレコード自身の warmup/iters から取る（転送除外と同じと仮定しない）
         _, i_warm_t, i_iters_t = load_record(p("candle_split_traced.jsonl"), "gemm_transfer_incl")
-    kgpu = parse_diag(read_text(p("route.txt")), read_text(p("diag.txt")))
+    kgpu = parse_diag(read_text(p("route.txt")), read_text(p("diag.txt")), inv)
     values = [("fandhe_window", fw, "-"), ("fandhe_fresh_window", ffw, "-"), ("opp_window", ow, "-")]
     aux_rows = [("fandhe_kernel_gpu_ts", kgpu), ("opp_transfer_excl", osp)]
     if avail:
-        fk = pure_kernel(p("fandhe_reuse.trace.xml"), aux, "bench-fandhe", f_warm, f_iters)
-        ok = pure_kernel(p("candle_split.trace.xml"), aux, "bench-candle", o_warm_t, o_iters_t,
+        fk = pure_kernel(p("fandhe_reuse.trace.xml"), aux, "bench-fandhe", f_warm, f_iters, inv)
+        ok = pure_kernel(p("candle_split.trace.xml"), aux, "bench-candle", o_warm_t, o_iters_t, inv,
                          lead=i_warm_t + i_iters_t, trail=1)
         values += [("fandhe_pure_kernel", fk, CLOCK), ("opp_pure_kernel", ok, CLOCK)]
         aux_rows += [("opp_transfer_excl_traced", osp_t), ("fandhe_window_traced", fw_t)]
+    if inv:
+        raise RoundInvalid("; ".join(inv))
     # xctrace unavailable（F2 のみ）では trace 下の窓・純カーネルを取らず、これらの行を出さない（attrib は unavailable 扱い）
     vt = "cell\tquantity\tvalue\tclock\n" + "".join(f"{CELL}\t{q}\t{v:.6f}\t{c}\n" for q, v, c in values)
     at = "quantity\tvalue\n" + "".join(f"{q}\t{v:.6f}\n" for q, v in aux_rows)
@@ -431,6 +460,50 @@ def mask_dir(root, idents=None):
         raise ConvError(f"mask: identifiers remain (in tag/attribute names?) in: {', '.join(sorted(left))}")
 
 
+GATE_WORDS = ("PASS", "TIMEOUT", "INVALID")
+
+
+def round_gate(round_dir):
+    """gate.txt の 1 語目（PASS|TIMEOUT|INVALID）と本文。無い・解釈不能は hard。"""
+    text = read_text(os.path.join(round_dir, "gate.txt"))
+    w = text.split()
+    if not w or w[0] not in GATE_WORDS:
+        raise ConvError("gate.txt: first word must be PASS|TIMEOUT|INVALID")
+    return w[0], text
+
+
+def mark_invalid(round_dir, reason):
+    """gate.txt の 1 行目を `INVALID convert: <理由>` にし、元の行を `# was: ` 付きで残す（aggregate_diag.py・
+    attrib_4153.py は 1 語目だけを読み、PASS 以外の round を正式系列から外して status=partial にする）。"""
+    _, old = round_gate(round_dir)
+    body = f"INVALID convert: {' '.join(reason.split())}\n" + "".join(f"# was: {l}\n" for l in old.splitlines())
+    tmp = os.path.join(round_dir, ".gate.txt.tmp")
+    with open(tmp, "x", encoding="utf-8") as f:
+        f.write(body)
+    os.replace(tmp, os.path.join(round_dir, "gate.txt"))
+
+
+def round_convert(round_dir, rule_text):
+    """1 round を変換する入口（--round-dir）。戻り値は ("ok"|"skip"|"invalid", 説明)。
+
+    gate.txt が PASS 以外（TIMEOUT・INVALID）の round は変換しない（aggregate_diag.py は values.tsv を読まない）。
+    PASS で INVALID を検出したら gate.txt を INVALID に書き換え、values.tsv・aux.tsv を作らない。hard は ConvError で止まる。"""
+    word, _ = round_gate(round_dir)
+    if word != "PASS":
+        return "skip", f"gate={word}"
+    for n in ("values.tsv", "aux.tsv"):
+        if os.path.exists(os.path.join(round_dir, n)):
+            raise ConvError(f"{n} already exists (no overwrite)")
+    try:
+        vt, at = convert(round_dir, rule_text)
+    except RoundInvalid as e:
+        mark_invalid(round_dir, str(e))
+        return "invalid", str(e)
+    write_new(os.path.join(round_dir, "values.tsv"), vt)
+    write_new(os.path.join(round_dir, "aux.tsv"), at)
+    return "ok", "values.tsv and aux.tsv written"
+
+
 def write_new(path, text):
     if os.path.exists(path):
         raise ConvError(f"{path} already exists (no overwrite)")
@@ -515,12 +588,15 @@ def _build(d, xc="available", f_durs=(60, 61, 62, 63, 64), o_durs=(100, 101, 102
     return d, RULE_FIX.format(xc=xc, fs=",".join(FORMULAS_BY_MODE[xc]))
 
 
-def _expect(fn, label, needle=None):
+def _expect(fn, label, needle=None, invalid=False):
+    """invalid=False は hard（RoundInvalid ではない ConvError）、invalid=True は RoundInvalid を要求する。"""
     try:
         fn()
     except ConvError as e:
         if needle and needle not in str(e):
             raise AssertionError(f"{label}: wrong error: {e}")
+        if isinstance(e, RoundInvalid) != invalid:
+            raise AssertionError(f"{label}: expected {'INVALID' if invalid else 'hard'} error, got {type(e).__name__}: {e}")
         return
     raise AssertionError(f"{label}: expected ConvError")
 
@@ -596,6 +672,8 @@ if cmd == "export":
     stem = os.path.basename(inp)
     proc, durs = ("bench-fandhe", [60, 61, 62, 63, 64]) if stem.startswith("fandhe") else \
         ("bench-candle", [100, 101, 102, 103, 104, 50, 51, 52, 53, 54, 77])
+    if os.environ.get("STUB_EXTRA_INTERVAL") and proc == "bench-fandhe":
+        durs = [99] + durs  # 先頭に余分な >= 5 ms の区間（to_values が INVALID にする）
     rows, t = [], 10 ** 6
     for i, d in enumerate(durs):
         rows.append(f'<row><start-time id="s{i}">{t}</start-time><duration id="d{i}" fmt="{d} ms">{d * 10 ** 6}</duration>'
@@ -760,6 +838,56 @@ def _self_test_shell(t):
         assert os.listdir(os.path.join(rdx, "raw")), lab
         _no_identity_left(rdx, home, host, user)
     convert(os.path.join(home, "rec", "round-unavail"), RULE_FIX.format(xc="unavailable", fs="F2"))
+    _self_test_series(home, sh, base, here)
+
+
+def _load_sibling(here, name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, os.path.join(here, f"{name}.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _self_test_series(home, sh, base, here):
+    """INVALID round を含む 5 round の系列を run_round.sh → to_values（CLI）→ aggregate_diag.py → attrib_4153.py の順に通す。
+    round 1・2 は正常、3 は余分な GEMM 区間（to_values が INVALID を記録）、4 は腕の失敗（run_round が INVALID を記録）、
+    5 はゲート TIMEOUT。系列は止まらず status=partial・表題「参考」・確度低で、正常な round 1・2 だけが集計に残ること。"""
+    ag, at = _load_sibling(here, "aggregate_diag"), _load_sibling(here, "attrib_4153")
+    sd = os.path.join(home, "series")
+    os.makedirs(sd)
+    rule = RULE_FIX.format(xc="available", fs="F1,F2").replace("xctrace_schema: S", "xctrace_schema: metal-gpu-intervals")
+    rule = rule.split("## PARAMS")[0] + (
+        "perturbation_max: 0.10\ncross_check_max: 0.10\nkernel_share_threshold: 0.5\nbackend_metal_diff_vs_v0_14_0: なし\n"
+        "## PARAMS\nfixed-at-utc: 2000-01-01T00:00:00Z\nissue: 4153\nrounds: 5\n"
+        f"tree_sha: {'0' * 40}\ntree_fingerprint: {'0' * 64}\naggregate_script_sha256: {ag.self_sha256()}\n"
+        "reach_threshold: 1.00\nnoise_band: NB-RANGE5\n"
+        "cell: M-MTL-G4096 | machine=macmini | scoreboard_ratio=0.88 | formulas=F1,F2 | kernel_owner=constraint | opp=candle | prev_class=x\n")
+    rp = os.path.join(sd, "RULE.txt")
+    open(rp, "w", encoding="utf-8").write(rule)
+    plan = {1: ({}, 0), 2: ({}, 0), 3: ({"STUB_EXTRA_INTERVAL": "1"}, 0), 4: ({"STUB_FAIL_BENCH": "bench-candle"}, 1),
+            5: ({"STUB_LOAD": "9.00"}, 1)}
+    for i, (extra, rc) in plan.items():
+        r = sh("run_round.sh", [str(i), os.path.join(sd, f"round{i}")], dict(base, **extra))
+        assert r.returncode == rc, (i, r.returncode, r.stdout, r.stderr)
+        c = subprocess.run([sys.executable, "-I", os.path.join(here, "to_values_4153.py"), "--round-dir",
+                            os.path.join(sd, f"round{i}"), "--rule", rp], capture_output=True, text=True, timeout=120)
+        assert c.returncode == 0, (i, c.stdout, c.stderr)  # INVALID・TIMEOUT の round でも変換は止まらない
+    gate = lambda i: open(os.path.join(sd, f"round{i}", "gate.txt")).read().splitlines()
+    assert [gate(i)[0].split()[0] for i in plan] == ["PASS", "PASS", "INVALID", "INVALID", "TIMEOUT"]
+    assert gate(3)[0].startswith("INVALID convert: fandhe_reuse.trace.xml: GEMM interval count 6") and gate(3)[1].startswith("# was: PASS")
+    assert gate(4)[0] == "INVALID run_round-exit=1 last-step=candle_gemm" and gate(4)[1].startswith("# was: PASS"), gate(4)
+    for i in (3, 4, 5):
+        assert not os.path.exists(os.path.join(sd, f"round{i}", "values.tsv")), i
+    md, tsv = ag.aggregate(sd)
+    assert "（参考）" in md.splitlines()[0] and "status: partial（ゲート: PASS PASS INVALID INVALID TIMEOUT）" in md, md
+    runs = [l.split("|")[1].strip() for l in md.splitlines() if re.match(r"^\| \d+ \|", l)]
+    assert runs == ["1", "2"], runs  # 正常な round だけが残り、元の round 番号で並ぶ
+    row = tsv.splitlines()[1].split("\t")
+    assert row[4] == "低" and "（部分通過）" in row[5], row
+    _, summ = at.attribute(sd, verify=False)
+    sm = {k: v for _, k, v in summ}
+    assert sm["confidence"] == "低" and "PASS 以外の round を含む" in sm["confidence_reasons"], sm
 
 
 def self_test():
@@ -805,12 +933,12 @@ def self_test():
         # 余分な ≥ 5 ms の区間は位置（先頭・途中・末尾）によらず INVALID（指摘 3。位置を仮定して切り出さない）
         for lab, fd in (("head", (99, 60, 61, 62, 63, 64)), ("mid", (60, 61, 99, 62, 63, 64)), ("tail", (60, 61, 62, 63, 64, 99))):
             dx, rx = _build(os.path.join(t, f"extra-{lab}"), f_durs=fd)
-            _expect(lambda: convert(dx, rx), f"extra interval {lab}", "count")
+            _expect(lambda: convert(dx, rx), f"extra interval {lab}", "count", invalid=True)
         dxc, rxc = _build(os.path.join(t, "extra-candle-mid"), o_durs=(100, 101, 102, 103, 104, 99, 50, 51, 52, 53, 54, 77))
-        _expect(lambda: convert(dxc, rxc), "extra candle interval between incl and excl", "count")
+        _expect(lambda: convert(dxc, rxc), "extra candle interval between incl and excl", "count", invalid=True)
         # 同一プロセスの GEMM 区間が重なる表は 1 行＝1 実行区間ではないので停止する
         dov, rov = _build(os.path.join(t, "overlap"), f_overlap=True)
-        _expect(lambda: convert(dov, rov), "overlap", "overlap")
+        _expect(lambda: convert(dov, rov), "overlap", "overlap", invalid=True)
         # 時刻単位は 1 以上の整数
         _expect(lambda: convert(d2a, r2a.replace("xctrace_time_unit_ns: 1", "xctrace_time_unit_ns: 0.5")), "unit", "integer")
         # candle の先行本数は転送込みレコード自身の warmup/iters から取る（incl 1+2 本・excl 2+3 本・checksum 1 本）
@@ -826,7 +954,7 @@ def self_test():
         _expect(lambda: convert(d2b, r2b), "old task name", "exactly 1")
         # 区間本数が測定のみ(5)の場合は INVALID（incl/checksum を含む全本数を要求する）
         d2c, r2c = _build(os.path.join(t, "candle5"), o_durs=(50, 51, 52, 53, 54))
-        _expect(lambda: convert(d2c, r2c), "candle count", "count")
+        _expect(lambda: convert(d2c, r2c), "candle count", "count", invalid=True)
         # XML サイズ上限は全量読み込み前に効く
         global XML_MAX_BYTES
         saved, XML_MAX_BYTES = XML_MAX_BYTES, 10
@@ -837,15 +965,52 @@ def self_test():
             XML_MAX_BYTES = saved
         # 異常系（すべて停止すること）
         d3, r3 = _build(os.path.join(t, "cnt"), f_durs=(60, 61, 62, 63))
-        _expect(lambda: convert(d3, r3), "interval count mismatch", "count")
+        _expect(lambda: convert(d3, r3), "interval count mismatch", "count", invalid=True)
         d4, r4 = _build(os.path.join(t, "dup"), dup_fandhe=True)
         _expect(lambda: convert(d4, r4), "duplicate record", "exactly 1")
         d5, r5 = _build(os.path.join(t, "ref"), ref_bad=True)
         _expect(lambda: convert(d5, r5), "unresolved ref", "unresolved")
         d6, r6 = _build(os.path.join(t, "doctype"), f_doctype='<!DOCTYPE a [<!ENTITY e "x">]>')
         _expect(lambda: convert(d6, r6), "doctype", "DOCTYPE")
-        d7, r7 = _build(os.path.join(t, "route"), route="ROUTE_ACTUAL N=4096 route=Other\n")
-        _expect(lambda: convert(d7, r7), "route not classic", "route")
+        # route.txt: 行が 1 本あって値が違うのは INVALID、行が無い・重複は解釈不能（hard）
+        for lab, rt, needle, invalid in (
+                ("route other", "ROUTE_ACTUAL N=4096 route=Other\nDIAG_BITEQ N=4096 equal=true\n", "route=Other", True),
+                ("biteq false", "ROUTE_ACTUAL N=4096 route=Classic\nDIAG_BITEQ N=4096 equal=false\n", "equal=false", True),
+                ("route missing", "DIAG_BITEQ N=4096 equal=true\n", "ROUTE_ACTUAL", False),
+                ("route dup", ROUTE + "ROUTE_ACTUAL N=4096 route=Classic\n", "got 2", False)):
+            d7, r7 = _build(os.path.join(t, "route-" + lab.replace(" ", "-")), route=rt)
+            _expect(lambda: convert(d7, r7), lab, needle, invalid=invalid)
+        # INVALID は hard エラーを隠さない（本数不一致があっても diag.txt の解釈不能は hard で止まる）
+        d7b, r7b = _build(os.path.join(t, "inv-and-hard"), f_durs=(60, 61, 62, 63), diag="no block\n")
+        _expect(lambda: convert(d7b, r7b), "invalid then hard", "block")
+        # 対象プロセスの行が 1 つもないのは AUX・export の取り違え（hard）
+        d7c, r7c = _build(os.path.join(t, "noproc"))
+        open(os.path.join(d7c, "raw", "fandhe_reuse.trace.xml"), "w").write(_xml("other-proc", (60, 61, 62, 63, 64)))
+        _expect(lambda: convert(d7c, r7c), "no process rows", "no row for process")
+        # 複数の INVALID は理由をまとめて返す
+        d7d, r7d = _build(os.path.join(t, "inv2"), f_durs=(60, 61, 62, 63),
+                          route="ROUTE_ACTUAL N=4096 route=Other\nDIAG_BITEQ N=4096 equal=true\n")
+        _expect(lambda: convert(d7d, r7d), "two invalid", "count 4", invalid=True)
+        try:
+            convert(d7d, r7d)
+        except RoundInvalid as e:
+            assert "route=Other" in str(e) and "; " in str(e) and t not in str(e), e  # 理由に絶対パスを入れない
+        # round_convert: INVALID は gate.txt に記録して values を作らない／PASS 以外は変換しない／PASS で hard は止まる
+        open(os.path.join(d7d, "gate.txt"), "w").write("PASS load1=1.0 hw-lock=held\n")
+        assert round_convert(d7d, r7d)[0] == "invalid"
+        g = open(os.path.join(d7d, "gate.txt")).read().splitlines()
+        assert g[0].startswith("INVALID convert: ") and g[1] == "# was: PASS load1=1.0 hw-lock=held", g
+        assert not os.path.exists(os.path.join(d7d, "values.tsv")) and not os.path.exists(os.path.join(d7d, "aux.tsv"))
+        assert round_convert(d7d, r7d) == ("skip", "gate=INVALID")
+        open(os.path.join(d7b, "gate.txt"), "w").write("PASS\n")
+        _expect(lambda: round_convert(d7b, r7b), "round_convert hard", "block")
+        assert open(os.path.join(d7b, "gate.txt")).read() == "PASS\n"  # hard では gate.txt を書き換えない
+        open(os.path.join(d7b, "gate.txt"), "w").write("TIMEOUT load1=9\n")
+        assert round_convert(d7b, r7b) == ("skip", "gate=TIMEOUT")
+        open(os.path.join(d7b, "gate.txt"), "w").write("MAYBE\n")
+        _expect(lambda: round_convert(d7b, r7b), "bad gate", "first word")
+        os.remove(os.path.join(d7b, "gate.txt"))
+        _expect(lambda: round_convert(d7b, r7b), "missing gate", "cannot read")
         d8, r8 = _build(os.path.join(t, "diag"), diag="no block\n")
         _expect(lambda: convert(d8, r8), "missing diag block", "block")
         d9, r9 = _build(os.path.join(t, "ph"))
@@ -883,11 +1048,9 @@ def main(argv):
     if set(args) != {"--round-dir", "--rule"}:
         print(__doc__)
         return 2
-    rd = args["--round-dir"]
-    vt, at = convert(rd, read_text(args["--rule"]))
-    write_new(os.path.join(rd, "values.tsv"), vt)
-    write_new(os.path.join(rd, "aux.tsv"), at)
-    print(f"wrote {rd}/values.tsv and aux.tsv")
+    st, msg = round_convert(args["--round-dir"], read_text(args["--rule"]))
+    # INVALID は round の状態として gate.txt に記録済みで、系列の集計は続けられるため 0 で終わる（hard は 1）
+    print(f"{st}: {msg}" if st != "invalid" else f"INVALID recorded in gate.txt: {msg}")
     return 0
 
 

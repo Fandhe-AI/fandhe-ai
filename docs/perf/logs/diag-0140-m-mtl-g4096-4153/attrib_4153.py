@@ -6,7 +6,8 @@
   trace_perturbation（xctrace 下と trace なしの窓の差）、cross_check_rel（xctrace と診断テストの kernel_gpu の差）
 閾値は RULE の AUX（kernel_share_threshold・perturbation_max・cross_check_max）が唯一の正。実測値は含まない。
 
-入力（<dir> 配下）: RULE.txt・round{1..N}/{gate.txt, values.tsv, aux.tsv}（to_values_4153.py の出力）。
+入力（<dir> 配下）: RULE.txt・round{1..N}/{gate.txt, values.tsv, aux.tsv}（to_values_4153.py の出力）。gate.txt の 1 語目が
+PASS 以外（TIMEOUT・INVALID）の round は values を読まずに外し、確度を低にする（aggregate_diag.py と同じ扱い）。
 出力: attrib.tsv（round 別と中央値）と標準出力の要約。厳格パース（欠損・重複・非有限・未知の AUX キーは AttribError で停止）。
 AUX の xctrace と PARAMS の cell 行 formulas の対応（available ⇔ F1,F2・unavailable ⇔ F2）を検査する
 （aggregate_diag.py は AUX を読まないため）。unavailable では trace 専用キーを要求せず、帰属は判定不能・

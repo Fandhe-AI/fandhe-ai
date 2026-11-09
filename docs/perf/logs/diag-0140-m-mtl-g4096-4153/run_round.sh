@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # #4153 の 1 round（<metal-node> = Mac mini M4。計測キット。PR-1 時点では未実行・Linux では動かない）。
 # 役割: RULE.txt 項 3 の手順を 1 round 分実行し、round{i}/{gate.txt, raw/*} を作る。
+#   非 0 で終わった round（ゲート通過後の失敗・ゲート前の中断）は EXIT trap が gate.txt の 1 語目を INVALID にする
+#   （元の行は "# was: " で残す。TIMEOUT・ゲート自身の INVALID はそのまま）。precheck で止まった場合は何も作らない。
 #   順序は precheck → gate → (a) trace なしの窓（4 本すべて）→ (b) xctrace の腕（2 本）→ (c) 診断テスト（route → diag）。
 #   奇偶の入れ替えは (a)・(b) の各段の中の framework の順だけ（奇数 round は fandhe → candle、偶数は candle → fandhe）。
 #   段をまたいで framework ごとにまとめない（trace 下と trace なしの窓の熱状態をそろえるため）。(c) は入れ替えない。
@@ -14,7 +16,7 @@
 #           XCTRACE_SCHEMA=RULE.txt の AUX xctrace_schema（XCTRACE_MODE=available のとき必須）
 #           HW_LOCK_OWNER_FILE=実機ロックの owner ファイル（空でないこと）  HW_LOCK_HELD=1（実機ロック取得済みの宣言）
 # 引数: $1=round 番号（1 始まり）$2=記録先 round ディレクトリ（絶対パス。round{i}）
-# マスク: raw/ を作った後は成功・ゲート不通過・腕の失敗・シグナルのどの経路でも EXIT trap（finish）が
+# マスク: raw/ を作った後は成功・ゲート不通過・腕の失敗・シグナル（INT・TERM・HUP）のどの経路でも EXIT trap（finish）が
 #   trace バンドルを消し、`to_values_4153.py --mask-dir` で round ディレクトリ（gate.txt・raw/）の全ファイルを置換する
 #   （対象と限界は同スクリプト冒頭）。マスクに失敗（識別子が残る等）したら非 0 で終わる。
 # bash 3.2／5 互換。run の差し替え・上書きは禁止。外部入力をシェル文字列へ展開しない（変数は常に引用符つきで引数として渡す）。
@@ -51,11 +53,27 @@ fi
 # 計測の後でマスクが動かないと分かるのを避けるため、ゲートの前に確かめる
 python3 -I "${TV}" --mask-ready > /dev/null || { echo "マスクの準備に失敗（to_values_4153.py --mask-ready）"; exit 1; }
 mkdir -p "${RD}/raw" || exit 1
+RAW="${RD}/raw"
 finish() {
-  local rc=$?
+  local rc=$? first="" last=""
   trap - EXIT
   rm -rf "${RD}/raw/"*.trace  # 未マスクのバイナリ（パスを含む）。失敗経路でも raw/ に残さない
   python3 -I "${TV}" --mask-dir "${RD}" || { echo "マスク失敗（round を公開しない）"; rc=3; }
+  # 非 0 で終わった round の状態を gate.txt の 1 語目に残す（aggregate_diag.py・attrib_4153.py は PASS 以外を
+  # 正式系列から外して status=partial にする。to_values_4153.py は PASS 以外を変換しない）。
+  # TIMEOUT・INVALID（ゲート自身が書いたもの）はそのまま。PASS のまま途中で止まった round と、ゲート前の中断を INVALID にする。
+  if [ "${rc}" -ne 0 ]; then
+    [ -f "${RAW}/order.txt" ] && last=$(tail -n 1 "${RAW}/order.txt" | awk '{print $1}')
+    if [ ! -f "${RD}/gate.txt" ]; then
+      echo "INVALID run_round-exit=${rc} before-gate" > "${RD}/gate.txt"
+    else
+      first=$(awk 'NR==1{print $1}' "${RD}/gate.txt")
+      if [ "${first}" = "PASS" ]; then
+        { echo "INVALID run_round-exit=${rc} last-step=${last:-none}"; sed 's/^/# was: /' "${RD}/gate.txt"; } > "${RD}/.gate.txt.tmp" \
+          && mv "${RD}/.gate.txt.tmp" "${RD}/gate.txt"
+      fi
+    fi
+  fi
   exit "${rc}"
 }
 trap finish EXIT
@@ -76,7 +94,6 @@ gate() {
 }
 gate || { echo "ゲート不通過: $(cat "${RD}/gate.txt")"; exit 1; }
 
-RAW="${RD}/raw"
 # --out は CWD 依存の既定パス（results/raw/results.jsonl）へ追記させないため、書き込み可能な raw 内を必ず明示する。
 run_f()  { "${BF}" --task gemm --device metal --size 4096 --mode "$1" --out "${RAW}/$2.out" > "${RAW}/$2" 2> "${RAW}/$2.err" || { echo "bench-fandhe 失敗: $1"; exit 1; }; }
 run_cg() { "${BC}" --task gemm --device metal --size 4096 --out "${RAW}/candle_gemm.out" > "${RAW}/candle_gemm.jsonl" 2> "${RAW}/candle_gemm.err" || { echo "bench-candle gemm 失敗"; exit 1; }; }
