@@ -16,10 +16,18 @@
 //! - P: host `Instant` のみ（3189 と同じ呼び出し列。`kernel_wait_derived = download - download_again` の再現）。
 //!   層ごとに `linear_forward_device`（確保経路）を呼ぶため、`l1_issue`／`l2_issue` は出力の確保＋ゼロ初期化
 //!   （`alloc_zeroed`）の発行・カーネル発行・前段バッファの drop を含む。`h2d_upload` は入力の device 確保＋H2D。
-//!   0.14.0 の本番 `predict_device_chain` は 2 回目以降、層出力を into 経路で再利用する（#3205）ため、
-//!   この点で本番と異なる（#3189 の再現を優先し呼び出し列は変えない）。
+//!   0.14.0 の本番は 2 回目以降、層出力を into 経路で再利用する（#3205）ため、この点で本番と異なる
+//!   （#3189 の再現を優先し呼び出し列は変えない）。本番相当の列は PR・ER 腕（系列 `prod0140`）。
 //! - E: P と同じチェーンに CUDA event を 4 本差す（GPU 側の幅。host 時計も同時に取る）。GPU 側の幅は
 //!   層出力のゼロ初期化と、host が確保している間の GPU の空きを含む。
+//! - PR: 0.14.0 本番の `DeviceParamStore::predict_device_chain_resident` の 2 回目以降（R は reuse）を
+//!   BackendOps 層で再現する。入力は区間外で 1 回だけ upload した常駐入力、層出力 h・y は区間外で 1 回だけ
+//!   確保して全反復で使い回し、区間内は L1 into 発行・L2 into 発行・download だけ（確保・ゼロ初期化・
+//!   H2D・drop を含まない）。0.14.0 G-CUDA-INF reuse の窓（`run_infer_reuse`＝常駐入力）に対応する。
+//!   store 層の try_lock・key 照合・poison 検査、facade の tape・snapshot・steps は含まない。
+//!   ホスト入力版 `predict_device_chain` は本番列に入力の確保＋H2D＋L1 後の drop が加わった形で、未計測。
+//! - ER: PR と同じ列に CUDA event を 3 本差す（e0=L1 発行前・e1=L1 発行直後・e2=L2 発行直後。
+//!   `chain_gpu` は e0→e2）。
 //! - I: drain 後に event 対で、層ごとに 1 回、同じ融合カーネルの `linear_forward_device_into_tracked`
 //!   （事前確保した出力へ書く into 経路）を挟む。出力の確保・ゼロ初期化・入力の H2D・event 生成は区間外。
 //! - F: 固定費（idle sync・1x1 往復・1x1 発行・event 対の床）。1x1 カーネルは I 腕と同じく事前確保した
@@ -29,7 +37,7 @@
 //!   event 記録 2 本）。`launch_floor_1x1` は 1x1 into 1 回の発行（drain 後）で、#4149 の `launch_floor_add`
 //!   （1 要素 add を 100 回 enqueue した 1 回あたり）とは演算も回数も異なる（対応表では参考）。
 //!
-//! 反復ごとに P/E/I の実行順を巡回させて位置バイアスを均す。
+//! 反復ごとに P/E/PR/ER/I の実行順を巡回させて位置バイアスを均す。
 //!
 //! # 意図的な逸脱
 //!
@@ -67,8 +75,9 @@ const B1S: [usize; 1] = [D_HIDDEN];
 const W2S: [usize; 2] = [D_HIDDEN, D_OUT];
 const B2S: [usize; 1] = [D_OUT];
 const W11S: [usize; 2] = [1, 1];
-/// 腕の個数（P・E・I。F は各反復の末尾に固定順で測る）。
-const ARMS: usize = 3;
+/// 腕の個数（P・E・PR・ER・I。F は各反復の末尾に固定順で測る）。添字は 0=P, 1=E, 2=PR, 3=ER, 4=I。
+/// `ITERS`（200）は 5 で割り切れるため、各腕は巡回の各位置にちょうど 40 回ずつ入る。
+const ARMS: usize = 5;
 
 /// 中央値（偶数個は中央 2 要素の平均）。単体テストと将来の host 側要約用。
 #[cfg(test)]
@@ -106,7 +115,7 @@ fn parse_args(args: &[String]) -> Result<u32, String> {
 }
 
 /// 集計が厳格パースする 1 行を作る。値は µs（小数 3 桁）。
-fn format_line(arm: char, iter: usize, kv: &[(&str, f64)]) -> String {
+fn format_line(arm: &str, iter: usize, kv: &[(&str, f64)]) -> String {
     let mut s = format!("CHAIN4150 arm={arm} iter={iter}");
     for (k, v) in kv {
         s.push_str(&format!(" {k}={v:.3}"));
@@ -316,6 +325,69 @@ fn chain(
     }
 }
 
+/// ER 腕で差す event（L1 発行前・L1 発行直後・L2 発行直後）。
+struct ProbeProd<'a> {
+    e0: &'a Event,
+    after_l1: &'a Event,
+    after_l2: &'a Event,
+}
+
+/// PR・ER 腕の区間外バッファ（常駐入力と、使い回す層出力）。
+struct ProdScratch {
+    x_res: DeviceBuffer<f32>,
+    h: DeviceBuffer<f32>,
+    y: DeviceBuffer<f32>,
+}
+
+struct ProdOut {
+    out: Tensor<f32>,
+    l1_issue: f64,
+    l2_issue: f64,
+    download: f64,
+    download_again: f64,
+}
+
+/// `DeviceParamStore::predict_device_chain_resident` の 2 回目以降（scratch 再利用・常駐入力）を
+/// BackendOps 層で再現する（PR・ER 腕。系列 `prod0140`）。入力 `x_res`・層出力 `h`・`y` は区間外で
+/// 確保済みで、区間内は L1 into 発行・L2 into 発行・download だけを含み、drop はしない。
+/// store 層の try_lock・key 照合・`checked_resident_buffer`・poison 検査、facade の tape・snapshot・steps は含まない。
+/// event の記録は `chain()` と同じく各発行の直後（`timed` の内側）に置く。
+fn chain_prod(
+    ops: &CudaBackendOps,
+    stream: &cudarc::driver::CudaStream,
+    p: &Params,
+    sc: &mut ProdScratch,
+    token: &DispatchFailureCell,
+    probe: Option<&ProbeProd<'_>>,
+) -> ProdOut {
+    let ProdScratch { x_res, h, y } = sc;
+    let mem = ops.memory_ops().expect("CUDA MemoryOps");
+    if let Some(pr) = probe {
+        pr.e0.record(stream).expect("rec");
+    }
+    let ((), l1_issue) = timed(|| {
+        l1_into(ops, p, x_res, h, token);
+        if let Some(pr) = probe {
+            pr.after_l1.record(stream).expect("rec");
+        }
+    });
+    let ((), l2_issue) = timed(|| {
+        l2_into(ops, p, h, y, token);
+        if let Some(pr) = probe {
+            pr.after_l2.record(stream).expect("rec");
+        }
+    });
+    let (out, download) = timed(|| mem.download(y).expect("D2H"));
+    let (_again, download_again) = timed(|| mem.download(y).expect("D2H（2 回目）"));
+    ProdOut {
+        out,
+        l1_issue,
+        l2_issue,
+        download,
+        download_again,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let round = match parse_args(&args) {
@@ -365,6 +437,12 @@ fn main() {
     let mut h_iso = mem.alloc_zeroed(&[BATCH, D_HIDDEN]).expect("I 腕 h");
     let mut y_iso = mem.alloc_zeroed(&[BATCH, D_OUT]).expect("I 腕 y");
     let mut o11 = mem.alloc_zeroed(&W11S).expect("1x1 out");
+    // PR・ER 腕（本番の常駐入力・scratch 再利用相当）。区間外で 1 回だけ確保し、PR と ER で共有する。
+    let mut prod = ProdScratch {
+        x_res: mem.upload(&input).expect("PR 常駐入力"),
+        h: mem.alloc_zeroed(&[BATCH, D_HIDDEN]).expect("PR h"),
+        y: mem.alloc_zeroed(&[BATCH, D_OUT]).expect("PR y"),
+    };
     let token = DispatchFailureCell::new();
 
     // 参照出力と warmup。以降の全反復が bit 一致することを hard assert する。
@@ -376,6 +454,8 @@ fn main() {
         l1_into(&ops, &params, &a_pre, &mut h_iso, &token);
         l2_into(&ops, &params, &h_iso, &mut y_iso, &token);
         tiny_into(&ops, &a11, &w11, &mut o11, &token);
+        let c = chain_prod(&ops, &stream, &params, &mut prod, &token, None);
+        assert_eq!(bits(&c.out), ref_bits, "warmup の PR で出力が bit 不一致");
     }
     stream.synchronize().expect("sync");
 
@@ -391,7 +471,7 @@ fn main() {
                     println!(
                         "{}",
                         format_line(
-                            'P',
+                            "P",
                             i,
                             &[
                                 ("h2d_upload_us", us(c.h2d_upload)),
@@ -417,13 +497,58 @@ fn main() {
                     println!(
                         "{}",
                         format_line(
-                            'E',
+                            "E",
                             i,
                             &[
                                 ("up_gpu_us", ms_us(&e0, &e1)),
                                 ("l1_span_us", ms_us(&e1, &e2)),
                                 ("l2_span_us", ms_us(&e2, &e3)),
                                 ("chain_gpu_us", ms_us(&e1, &e3)),
+                                ("download_us", us(c.download)),
+                                ("l1_issue_us", us(c.l1_issue)),
+                                ("l2_issue_us", us(c.l2_issue)),
+                            ]
+                        )
+                    );
+                }
+                2 => {
+                    let c = chain_prod(&ops, &stream, &params, &mut prod, &token, None);
+                    assert_eq!(bits(&c.out), ref_bits, "PR 腕で出力が bit 不一致");
+                    let kw = (c.download - c.download_again).max(0.0);
+                    let total = c.l1_issue + c.l2_issue + c.download;
+                    println!(
+                        "{}",
+                        format_line(
+                            "PR",
+                            i,
+                            &[
+                                ("l1_issue_us", us(c.l1_issue)),
+                                ("l2_issue_us", us(c.l2_issue)),
+                                ("download_us", us(c.download)),
+                                ("download_again_us", us(c.download_again)),
+                                ("kernel_wait_derived_us", us(kw)),
+                                ("total_us", us(total)),
+                            ]
+                        )
+                    );
+                }
+                3 => {
+                    let pr = ProbeProd {
+                        e0: &e0,
+                        after_l1: &e1,
+                        after_l2: &e2,
+                    };
+                    let c = chain_prod(&ops, &stream, &params, &mut prod, &token, Some(&pr));
+                    assert_eq!(bits(&c.out), ref_bits, "ER 腕で出力が bit 不一致");
+                    println!(
+                        "{}",
+                        format_line(
+                            "ER",
+                            i,
+                            &[
+                                ("l1_span_us", ms_us(&e0, &e1)),
+                                ("l2_span_us", ms_us(&e1, &e2)),
+                                ("chain_gpu_us", ms_us(&e0, &e2)),
                                 ("download_us", us(c.download)),
                                 ("l1_issue_us", us(c.l1_issue)),
                                 ("l2_issue_us", us(c.l2_issue)),
@@ -451,7 +576,7 @@ fn main() {
                     println!(
                         "{}",
                         format_line(
-                            'I',
+                            "I",
                             i,
                             &[
                                 ("l1_iso_us", l1_iso),
@@ -487,7 +612,7 @@ fn main() {
         println!(
             "{}",
             format_line(
-                'F',
+                "F",
                 i,
                 &[
                     ("sync_idle_us", us(sync_idle)),
@@ -523,9 +648,9 @@ mod tests {
         for i in 0..6 {
             let mut o = rotated_order(ARMS, i);
             o.sort_unstable();
-            assert_eq!(o, vec![0, 1, 2]);
+            assert_eq!(o, vec![0, 1, 2, 3, 4]);
         }
-        assert_eq!(rotated_order(3, 1), vec![1, 2, 0]);
+        assert_eq!(rotated_order(5, 1), vec![1, 2, 3, 4, 0]);
     }
 
     #[test]
@@ -542,8 +667,12 @@ mod tests {
     #[test]
     fn line_format_is_stable() {
         assert_eq!(
-            format_line('E', 3, &[("a_us", 1.5), ("b_us", 2.0)]),
+            format_line("E", 3, &[("a_us", 1.5), ("b_us", 2.0)]),
             "CHAIN4150 arm=E iter=3 a_us=1.500 b_us=2.000"
+        );
+        assert_eq!(
+            format_line("PR", 0, &[("a_us", 1.0)]),
+            "CHAIN4150 arm=PR iter=0 a_us=1.000"
         );
     }
 

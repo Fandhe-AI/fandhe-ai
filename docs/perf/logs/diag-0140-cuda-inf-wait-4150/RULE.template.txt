@@ -6,6 +6,8 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   #4150: G-CUDA-INF（<cuda-node> = DGX GB10・推論 batch 64）の導出値 kernel_wait（0.11.0 で約 63.2 µs。docs/perf/infer-reuse-phase-breakdown.md §12）を、
   GPU 実行の幅と待ち（起動遅延・間隙・同期復帰）に分けて記録する（判定・分類ではなく内訳。record_only）。
   変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・NVRTC カーネル・unreached_0140.tsv（分類の反映は #4168）。
+  2 系列（#4188）: #3189 列（P・E 腕。層ごとに確保＋ゼロ初期化・入力 H2D あり。§12 の分解の再現）と本番列（PR・ER 腕。0.14.0 の
+  DeviceParamStore::predict_device_chain_resident の 2 回目以降相当で、0.14.0 G-CUDA-INF reuse の経路に対応する）を区別して記録する。
   Graph 腕は追加しない（推論 Graph は R1(b) 失敗で undetermined、学習 Graph #3258 は ADOPT・既定 OFF のまま。結果はその読みの材料として記録するのみ）。
 
 2. 対象 tree
@@ -18,7 +20,7 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   ラウンド数は PARAMS の rounds（5）。各ラウンドの前に実機ロックを取得し、compute プロセス 0 件・GPU 使用率 0 が 3 サンプル連続・
   load1 < 1.0 を 30 秒間隔で最大 30 分待つ。不通過は gate.txt に TIMEOUT／INVALID と記録し、そのラウンドを正式系列から外す
   （TIMEOUT／INVALID を 1 件でも含む系列は status=partial・表題は「参考」・確度は書かない。全 round PASS のときだけ status=complete）。同じ GB10 を #4147・#4149 の実測も使うため、実機ロックで直列化し並走させない。
-  1 round = 1 プロセス（example の warmup と計測反復は PARAMS の warmup・iters）。反復ごとに P・E・I の順を巡回させ、F は各反復の末尾に測る。
+  1 round = 1 プロセス（example の warmup と計測反復は PARAMS の warmup・iters）。反復ごとに P・E・PR・ER・I の順を巡回させ、F は各反復の末尾に測る。
   nsys 補助（nsys_aux_4150.sh）は全 round の後に 1 回、record_only。時間値は判定に使わない。
   計測中にビルド・集計・転送を並走させない。run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし旧系列を残す。
   全反復で出力 bit 一致（example が assert）。checksum は round 間で一致しなければ集計が止まる。
@@ -28,9 +30,18 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   チェーン（P・E）: 常駐 w・bias を upload、入力 H2D、L1 = 784→256＋bias＋ReLU 融合、L2 = 256→10＋bias、download。L1 発行直後に入力を、L2 発行直後に中間を drop。
     呼び出し列は #3189 と同じ（層ごとに確保経路 linear_forward_device）。0.14.0 の本番 predict_device_chain は 2 回目以降に層出力を
     into 経路で再利用する（#3205）ため、層ごとの出力確保・ゼロ初期化・drop を含む点で本番と異なる。
+  本番列（PR・ER）: 入力は区間外で 1 回だけ upload した常駐入力（ResidentInput 相当。drop しない）、層出力 h・y は区間外で 1 回だけ
+    確保＋ゼロ初期化して全反復で使い回す（ChainScratch の 2 回目以降相当。PR と ER で共有）。区間内は L1 into 発行・L2 into 発行・download のみ
+    （区間内に確保・ゼロ初期化・H2D・drop を含まない）。L1／L2 は I 腕と同じ融合カーネルの into 経路（linear_forward_device_into_tracked）。
+    本番からの省略: store 層の try_lock・key 照合・checked_resident_buffer・poison 検査、facade の tape・snapshot・steps の解決、初回呼び出しのプローブ、
+    Graph capture 経路（常駐入力では通らない）。ホスト入力版 predict_device_chain は本番列に入力の確保＋H2D と L1 発行後の入力 drop が加わった形で、未計測。
   P: host Instant のみ（h2d_upload・l1_issue・l2_issue・download・download_again・kernel_wait_derived = download − download_again・total）。
     h2d_upload は入力の device 確保＋H2D。l1_issue／l2_issue は検査・出力の確保＋ゼロ初期化（alloc_zeroed）の発行・カーネル発行・前段の drop。
     download／download_again は D2H＋同期（host 側 Tensor の確保を含む）。
+  PR: host Instant のみ（l1_issue・l2_issue・download・download_again・kernel_wait_derived = download − download_again・total = l1_issue + l2_issue + download）。
+    download／download_again は D2H＋同期（host 側 Tensor の確保を含む）。
+  ER: PR と同じ列に event 3 本（e0=L1 発行前、e1=L1 発行直後、e2=L2 発行直後）。l1_span=e0→e1、l2_span=e1→e2、chain_gpu=e0→e2、
+    download と l1_issue／l2_issue は host 時間。GPU 側の幅は層出力のゼロ初期化を含まず、host の発行待ちによる GPU の空きだけを含む。
   E: P と同じチェーンに event 4 本（e0=upload 前、e1=upload 後、e2=L1 発行直後、e3=L2 発行直後）。up_gpu=e0→e1、l1_span=e1→e2、l2_span=e2→e3、chain_gpu=e1→e3。
     GPU 側の幅は、層出力のゼロ初期化と、host が確保・発行している間の GPU の空きを含む。
   I: drain 後に event 対で、P・E と同じ融合カーネルを into 経路（linear_forward_device_into_tracked。区間外で事前確保した出力へ書く）で
@@ -44,6 +55,8 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   stream は internal-diagnostics 下の Legacy（NULL）stream であることを example が前提検査する。
 
 5. 導出式（内訳であり合否判定ではない。round ごとに腕別反復中央値から計算し、round 間の中央値と最小〜最大を出す）
+  以下の量は系列ごと（seq3189＝P・E、prod0140＝PR・ER）に計算する。E_sum と F 腕は共通（common）。分類も系列ごとに同じ優先順・同じ閾値で独立に出す。
+  本番列の gpu_gap は層出力のゼロ初期化を含まず、host の発行待ちによる GPU の空きだけになる（#3189 列は確保＋ゼロ初期化 2 回分を含む）。
   E_sum = l1_iso + l2_iso（実測。起動立ち上がりを含む融合カーネルの GPU 実行幅。出力のゼロ初期化を含まない）。chain_gpu（実測。層出力のゼロ初期化を含む）。
   gpu_gap = chain_gpu − E_sum（実測の差。負値もありうる。層出力のゼロ初期化 2 回分・host の確保／発行待ちによる GPU の空きを含む）。
   host_issue_sum = P の l1_issue + l2_issue。gpu_tail = max(0, chain_gpu − host_issue_sum)（推定）。
@@ -57,7 +70,9 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
     4. 確度「高」は、全 round が 0.5 の同じ側かつ NB-RANGE5 帯が 0.5 をまたがない場合のみ。それ以外は「低」。
   副次: l1_iso・l2_iso を docs/perf/infer-chain-fixed-cost-reduction-3205.md §3 の「占有率」推定と突き合わせ、推定のまま残すか実測で置き換えるかを結果欄に書く。
   相手側（#4149 実測）が入手できる場合のみ aggregate_4150.py --opp-tsv で対応表を出す。無ければ unavailable（推定で埋めない）。
-  非対称: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの同じカーネル（into 経路）、PyTorch の mm_event は純 GEMM。
+  対応は本番列と取る（#4149 の X は device 上で H2D を含まず、本番列も H2D を含まない）。#3189 列は参考として並べる。
+  非対称（本番列）: fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの同じカーネル（into 経路）、PyTorch の mm_event は純 GEMM。fandhe の窓は facade 上位の固定費を含まない。
+  非対称（#3189 列のみ）: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。
     fandhe の chain_gpu は層出力のゼロ初期化を含む（PyTorch の caching allocator は層ごとのゼロ初期化をしない）。
 
 6. ノイズ帯
