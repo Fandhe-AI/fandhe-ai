@@ -1,0 +1,78 @@
+RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
+（計測前に単独コミットして固定する。計測後に緩めない。派生元: docs/perf/logs/diag-0140-torch-cpu-mlp-macmini-4148/RULE.template.txt・#4148）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_4149.py は止まる）
+
+1. 目的
+  #4149: <cuda-node>（DGX GB10）の PyTorch CPU（MLP train・infer）と PyTorch CUDA（MLP infer）の 1 窓を区間に分けて記録する
+  （判定・分類ではなく内訳の記録。record_only。閾値は置かない）。CPU は BLAS 実体と窓の区間、CUDA は cuBLAS 呼び出しの種類と回数・
+  CUDA Graph の有無・同期の固定費・窓の区間を扱う。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・bench_py.py・相手側ベンチ・unreached_0140.tsv（分類の反映は #4168）。
+  fandhe 側との比較・帰属は #4150・#4151 の担当で本 RULE では行わない。
+
+2. 対象 tree
+  【記入: タグまたは SHA】の git archive。PARAMS の tree_sha に完全な SHA を書く。
+  tree_fingerprint は `python3 -I aggregate_4149.py --fingerprint <tree-dir>` の値（diag-0140-template の aggregate_diag.py と同一ロジック）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。本成果物ディレクトリは指紋の対象外。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（5）。各ラウンドの前に実機ロックを取得し、compute プロセス 0 件・GPU 使用率 0 が 3 サンプル連続・
+  load1 < 1.0 を 30 秒間隔で最大 30 分待つ。不通過は gate.txt に TIMEOUT／INVALID と記録し、そのラウンドを正式系列から外す
+  （status=partial・表題は「参考」・確度は書かない）。同じ GB10 を #4147 の実測も使うため、実機ロックで直列化し並走させない。
+  1 round の順序は run_round.sh のとおり: gate → env → CPU measure（cpu_train・cpu_infer・cpu_shapes）→ CUDA measure
+  （cuda_infer・cuda_fixed・cuda_shapes）→ profile（cpu_train・cpu_infer・cuda_infer。別腕・最後）。
+  計時腕は profiler・LD_PRELOAD を有効にしない（run_round.sh が LD_PRELOAD 未設定を検査する）。
+  観測専用 shim（probe/）は全 round の後に 1 回、計時外で実行し、時間値は生成しない。
+  計測中にビルド・集計・転送を並走させない。run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし旧系列を残す。
+  到達不能な量（NVPL 直呼びの未ロード・結果不一致・CUPTI 不通・CUDAGraph capture 失敗など）は unavailable と記録し、推定値で埋めない。
+  bench_py.py は sha256（PARAMS の bench_py_sha256）一致のものだけ使い、torch は PARAMS の torch_version（2.14.0）でなければ停止する。
+  fp32 matmul 精度は既定（highest・TF32 無効）でなければ env で停止する。
+
+4. 区間の定義（単位 s。窓は bench_py.py と同じ区間）
+  CPU 窓: train は 1 step（forward・autograd.grad・SGD 更新・loss.item()）、infer は forward_to_host ＋ checksum。
+  CPU 純カーネル相当: torch.mm(out=) を 10 回まとめて計った 1 回あたり（batch10。dispatch を含む「dispatch 込みの torch.mm 時間」で
+  純カーネル時間そのものではない）。train は l1_fwd・l2_fwd・l2_dw・l2_dx・l1_dw の 5 形状（l1_dx は PyTorch が計算しない）、infer は l1_fwd・l2_fwd。
+  CPU 直呼び: 固定 soname libnvpl_blas_lp64_gomp.so.0 の cblas_sgemm を ctypes で呼ぶ batch10（import torch 後に RTLD_NOLOAD で既ロード分のみ）。
+  CPU 非 GEMM: ew_fwd・update・loss_item・readout・checksum。dispatch 床: 1 要素 add・1×1 mm の中央値。
+  CUDA 窓: forward_to_host(X) ＋ checksum（size=64）。X は事前に device 上にあり、窓は H2D を含まない（fandhe 側は窓に H2D を含む非対称）。
+  CUDA 区間: issue（forward を enqueue するまでの CPU 時間・同期なし）、readout_sync（計算済み出力の .cpu()＝D2H＋同期）、checksum、
+  gpu_span_event（同期後に event 対で forward 全体を挟む GPU 側の幅）、mm_event_<形状>（cuBLAS 呼び出し 1 回を event 対で挟む）。
+  CUDA 固定費（cuda_fixed）: sync_idle（アイドルでの synchronize）、tiny_roundtrip（1 要素 kernel＋1 要素 D2H＋同期）、
+  launch_floor_add（1 要素 add の enqueue 時間）、event_record_pair（event 記録だけの床）。
+  参考腕 graph_replay_ref: forward を CUDAGraph に capture して replay＋D2H。窓は eager のため窓の値としては使わない。
+
+5. 導出式（判定ではなく内訳。run ごとに計算し run 間の中央値と最小〜最大を出す）
+  CPU residual（推定）= 窓 − (gemm_kernel_batch10 ＋ ew_fwd ＋ update ＋ loss_item)（infer は ＋ readout ＋ checksum）。下限側に読む。
+  fwd_nongemm／bwd_nongemm（推定）= fwd／grad − Σ gemm_batch10。dispatch_floor_est（推定）= profile の最上位 aten op 数 × dispatch_floor_add（和に入れない）。
+  torch_vs_direct_gap（実測の差。ctypes の引数変換費を含み torch ラッパー費としては帰属させない。負値もありうる）= gemm_kernel_batch10 − NVPL 直呼び batch10。
+  CUDA residual（推定）= 窓 − (issue ＋ readout_sync ＋ checksum)。enqueue と並行する GPU 実行待ちが混ざる。
+  issue_minus_gpu_span（実測の差）= issue − gpu_span_event。readout_sync_minus_tiny_roundtrip（実測の差）= readout_sync − tiny_roundtrip。
+  gemm_event_sum（実測）= mm_event_l1_fwd ＋ mm_event_l2_fwd。
+  比 = 量 ÷ 窓（run ごと）の中央値。窓のない section（cuda_fixed・cuda_shapes）は比を出さない。小さな差は run 別の最小〜最大を併記して読む（NB-RANGE5）。
+  profile 腕は op 数・kernel 名と回数・CUDA API 回数（cudaGraphLaunch の有無を含む）だけを使う。時間値は使わない。
+  cuBLAS／sgemm_ の呼び出し回数は probe/ の shim 腕で決定的に数え、BLAS 実体（NVPL／oneDNN／別）を事実として記録する。
+  宣言（NVPL 推定）と食い違っても宣言は動かさず、env/ の torch.__config__.show() と shim の出力を README に注記する。
+
+6. ノイズ帯
+  NB-RANGE5（docs/perf/noise-band-decision.md。run 別値の最小〜最大を帯とする）。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパス・ユーザー名を書かない（<cuda-node>・<home> と書く）。
+  集計は同梱の aggregate_4149.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_4149.py・torch_gb10_mlp_diag.py・再利用ヘルパー（torch_cpu_mlp_diag.py・opp_kernel_cuda_diag.py）・
+  probe_shim_4149.c を変更すると sha256 が不一致になり集計は止まる（ヘルパーの sha256 は env.json に記録して照合する）。
+
+## PARAMS
+fixed-at-utc: <YYYY-MM-DDThh:mm:ssZ>
+issue: 4149
+rounds: <ラウンド数。5>
+tree_sha: <40 桁 hex>
+tree_fingerprint: <64 桁 hex>
+bench_py_sha256: <64 桁 hex。9fd2c08f…409b の全桁>
+torch_version: <2.14.0>
+diag_script_sha256: <64 桁 hex。torch_gb10_mlp_diag.py>
+helper_cpu_diag_sha256: <64 桁 hex。torch_cpu_mlp_diag.py>
+helper_cuda_diag_sha256: <64 桁 hex。opp_kernel_cuda_diag.py>
+aggregate_script_sha256: <64 桁 hex>
+probe_shim_sha256: <64 桁 hex。probe/probe_shim_4149.c>
+profile_steps: <50>
