@@ -1,0 +1,95 @@
+RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
+（計測前に単独コミットして固定する。計測後に緩めない。雛形: docs/perf/logs/diag-0140-template/RULE.template.txt・#4144 を #4153 向けに記入したもの）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS・AUX の <…> をすべて置換する。値を決め済みの欄〈issue・rounds・reach_threshold・noise_band・cell 行の prev_class〉は山括弧を外すだけでよい。残っていると aggregate_diag.py／attrib_4153.py は止まる）
+
+1. 目的・対象セル
+  #4153 で、スコアボード 0.14.0 の 1 位でないセルの診断 (3)（相手の構成を再現した場合に届く比）を測る。あわせて窓の差（fandhe − candle）がカーネル側か窓側かを分ける。
+  対象セル: M-MTL-G4096（Mac mini・Metal GEMM N=4096・相手 candle）。現分類は docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/unreached_0140.tsv の値（PARAMS の prev_class に転記）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・unreached_0140.tsv（分類の反映は #4168）。
+
+2. 対象 tree
+  fandhe-ai の腕（窓・xctrace）は registry fandhe-ai =0.14.0（framework-compare の bench-fandhe）。照合の診断テストは PR-1 マージ後の main SHA の git archive（PARAMS の tree_sha）。
+  tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値
+  （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を C ロケール順に並べた全体の SHA-256。target/ と .git は除外）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+  版差の記録: `git diff v0.14.0 <tree_sha> -- crates/backend-metal/src` の差分の有無を AUX の backend_metal_diff_vs_v0_14_0 に書く。差分ありなら照合の結論に「版差あり」を付ける。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す: hw-lock を取得し、load1 < 3.0 を 30 秒間隔で最大 30 分待つ。計測中にビルド・集計・転送を並走させない（ゲート通過後に cargo を呼ばない）。
+  ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  ラウンド内の腕の順序: 奇数 round は fandhe → candle、偶数 round は candle → fandhe。各 round 内で
+    (a) trace なしの窓: fandhe reuse・fandhe fresh・candle gemm（fresh。スコアボードの相手値と同じ）・candle gemm-transfer-split（transfer_excl）
+    (b) xctrace（Metal System Trace）の腕: fandhe reuse・candle gemm-transfer-split。GPU 実行区間の表を export する
+    (c) 診断テスト: gemm_window_route_precheck（ROUTE_ACTUAL=Classic と bit 一致の確認）と gemm_reuse_phase_diag_production_batch（kernel_gpu＝GPUEnd−GPUStart）
+  腕の間に 30 秒の待ちを入れる。candle の純カーネル時間は Rust 側から GPU タイムスタンプを取れない（objc2-metal の直接依存追加には所有者承認が要る）ため、外部計器 xctrace で取る。
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない）。
+  保存物: round{i}/{gate.txt, values.tsv, aux.tsv, raw/}・env/。変換手順は README と to_values_4153.py。
+
+4. 診断式（docs/perf/loss-attribution-matrix.md §10.1 から転記。単位は ms）
+  入力量: fandhe_window・fandhe_fresh_window・opp_window・fandhe_pure_kernel・opp_pure_kernel
+  F1 = opp_window ÷ (fandhe_window − fandhe_pure_kernel + opp_pure_kernel)
+       純カーネルの時計タグ（clock 列）を両側で揃える（本診断は両側とも gpu_trace）。揃わなければ F1 は比較不能とし、境界を併記する。
+  F2 = opp_window ÷ fandhe_fresh_window
+  観測比 = opp_window ÷ fandhe_window（スコアボードの比との整合確認用）
+  補助（attrib_4153.py。aggregate_diag.py の判定には使わない）:
+    ΔW = fandhe_window − opp_window、ΔK = fandhe_pure_kernel − opp_pure_kernel、kernel_share = ΔK ÷ ΔW
+    kernel_share ≥ kernel_share_threshold なら「カーネル側が主」、未満なら「窓側が主」。ΔW ≤ 0 は差なし（判定不能）。
+    trace_perturbation = |traced ÷ untraced − 1|（fandhe の reuse 窓と candle の transfer_excl の両方）。最大が perturbation_max を超えたら確度低。
+    cross_check_rel = |fandhe_pure_kernel(xctrace) − kernel_gpu(診断テスト)| ÷ kernel_gpu。cross_check_max を超えたら確度低。
+    全 PASS ラウンドで同じ側に入れば確度高、それ以外は低。
+
+5. 判定の分類先と規則（優先順位つき。aggregate_diag.py の classify と同一）
+  分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
+  (1) formulas に F2 があり、F2 の run 間中央値が reach_threshold 以上なら「計測窓の定義」。
+  (2) そうでなく F1 があり、時計が揃っていて、F1 の run 間中央値が reach_threshold 以上なら、
+      kernel_owner=hardware は「ハードの上限」、kernel_owner=constraint は「自分たちの制約」。
+      kernel_owner は測る前に宣言する。本セルは constraint（根拠: 相手は閉源 MPS ではなく candle の公開 steel シェーダ。candle は function constant align_M/N/K で境界検査なしのロードを使う〈docs/analysis/candle-metal-01.md 204〜210 行・245 行〉が、fandhe は REQ-8〈coding-rust.md「カーネル実装の境界検査」〉により手動境界検査を保つ）。事後に動かさない。
+  (3) それ以外は「分類保留」。理由欄に「どれも届かない（残差は固定費など別区間。別診断へ）」または「F1 の時計不一致」を書く。
+  フォールバック（fail-closed）: xctrace が使えない、または GPU 区間が 0 行だった場合は AUX の xctrace を unavailable とし、formulas=F2 だけで固定する。
+    F1 は計測せず、規則 (3) に従い分類保留（理由は F1 の時計不一致）に倒す。壁時計境界の F1(b)（candle transfer_excl 対 fandhe encode＋commit_wait。§12.6(b) と同じ境界）は README に参考として併記するだけで values.tsv には混ぜない。
+  確度:
+    高: 全ラウンドがゲート PASS（status=formal）かつ、判定に使った式の run 別値がすべて閾値の同じ側
+        （最小 > 閾値、または最大 < 閾値。境界ちょうどはまたぐ扱い）かつ時計が揃っている。
+    低: 上記以外。理由欄の先頭に「確度低」を付ける。
+  ドリフト: 観測比の中央値が PARAMS の scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。scoreboard_ratio=0.88 は unreached_0140.tsv の転記で、窓の中央値同士の比 0.871（64.379 対 56.103）との差は README に注記する。
+
+6. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md。run 別比の最小〜最大を帯とし、閾値を含めば確度低）。A/B 用の NB-SEP は使わない。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパスを書かない。Mac mini は <metal-node> と書く。
+  集計は同梱の aggregate_diag.py・to_values_4153.py・attrib_4153.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  xctrace の XML は非信頼データとして扱う（DOCTYPE・ENTITY 宣言とサイズ上限超えは拒否）。
+  本ファイル固定後に各スクリプトを変更すると sha256 が不一致になり集計は止まる。
+  kernel_owner の変更は PR-2 の RULE コミット時点までなら所有者が可能。以後は RULE.v2.txt。
+
+## AUX
+（aggregate_diag.py は読まない。to_values_4153.py・attrib_4153.py が読む補助 PARAMS。PARAMS より前に置く）
+xctrace: <available|unavailable>
+xctrace_schema: <表の schema 名>
+xctrace_start_col: <開始時刻の列 mnemonic>
+xctrace_dur_col: <継続時間の列 mnemonic>
+xctrace_proc_col: <プロセス名の列 mnemonic>
+xctrace_dur_unit_ns: <継続時間 1 単位が何 ns か。整数>
+xctrace_expected_extra: <warmup＋iters に加える想定外の区間数。整数>
+gemm_interval_min_ms: 5.0
+perturbation_max: 0.10
+cross_check_max: 0.10
+kernel_share_threshold: 0.5
+backend_metal_diff_vs_v0_14_0: <なし|あり>
+to_values_sha256: <64 桁 hex>
+attrib_sha256: <64 桁 hex>
+run_round_sha256: <64 桁 hex>
+
+## PARAMS
+fixed-at-utc: <YYYY-MM-DDThh:mm:ssZ>
+issue: <4153>
+rounds: <5>
+tree_sha: <40 桁 hex>
+tree_fingerprint: <64 桁 hex>
+aggregate_script_sha256: <64 桁 hex>
+reach_threshold: <1.00>
+noise_band: <NB-RANGE5>
+cell: M-MTL-G4096 | machine=macmini | scoreboard_ratio=0.88 | formulas=F1,F2 | kernel_owner=constraint | opp=candle | prev_class=<自分たちの制約>
