@@ -26,6 +26,7 @@ import tempfile
 CELL = "M-MTL-G4096"
 HERE = os.path.dirname(os.path.abspath(__file__))
 AUX_NUM = ["perturbation_max", "cross_check_max", "kernel_share_threshold"]
+DIFF_KEY = "backend_metal_diff_vs_v0_14_0"
 AUX_SHA = {"to_values_sha256": "to_values_4153.py", "attrib_sha256": "attrib_4153.py", "run_round_sha256": "run_round.sh"}
 
 
@@ -86,6 +87,18 @@ def sha256_file(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def diff_flag(aux, required):
+    """版差の記録（RULE 項 2）。なし|あり のみ許す。あり は照合の結論に「版差あり」を付ける根拠になる。"""
+    v = aux.get(DIFF_KEY)
+    if v is None:
+        if required:
+            raise AttribError(f"AUX: missing {DIFF_KEY}")
+        return "未記録"
+    if v not in ("なし", "あり"):
+        raise AttribError(f"AUX: {DIFF_KEY} must be なし|あり: {v!r}")
+    return v
+
+
 def check_rule(path, base=HERE):
     text = read(path)
     aux = parse_aux(text)
@@ -96,6 +109,7 @@ def check_rule(path, base=HERE):
         if k not in aux:
             raise AttribError(f"AUX: missing {k}")
         finite(aux[k], k)
+    diff_flag(aux, True)
     for k, fn in AUX_SHA.items():
         if not re.fullmatch(r"[0-9a-f]{64}", aux.get(k, "")):
             raise AttribError(f"AUX: {k} must be 64 hex")
@@ -170,6 +184,7 @@ def attribute(dirp, rule_name="RULE.txt", verify=True, base=HERE):
         if k not in aux:
             raise AttribError(f"AUX: missing {k}")
     thr, pmax, cmax = (finite(aux[k], k) for k in ("kernel_share_threshold", "perturbation_max", "cross_check_max"))
+    bdiff = diff_flag(aux, verify)
     n = parse_rounds(text)
     rows, per = [], []
     for i in range(1, n + 1):
@@ -204,7 +219,9 @@ def attribute(dirp, rule_name="RULE.txt", verify=True, base=HERE):
                ("median", "delta_w", f"{med('delta_w'):.6f}"),
                ("median", "perturbation", "unavailable" if med("perturbation") is None else f"{med('perturbation'):.6f}"),
                ("summary", "side", side), ("summary", "confidence", conf),
-               ("summary", "confidence_reasons", "; ".join(low) or "-")]
+               ("summary", "confidence_reasons", "; ".join(low) or "-"),
+               ("summary", "backend_metal_diff_vs_v0_14_0", bdiff),
+               ("summary", "version_note", "版差あり（照合は異なる backend-metal 実装版）" if bdiff == "あり" else "-")]
     return rows, summary
 
 
@@ -291,6 +308,15 @@ def self_test():
     # TIMEOUT を含む → 低（partial）
     _, s = sc((2, [("PASS", _vals(), _aux()), ("TIMEOUT x", _vals(), _aux())]))
     assert {k: v for _, k, v in s}["confidence"] == "低"
+    # 版差の記録: あり → 注記が出る。不正値は停止
+    with tempfile.TemporaryDirectory() as t:
+        _mk(t, 1, [("PASS", _vals(), _aux())], "backend_metal_diff_vs_v0_14_0: あり\n")
+        _, s = attribute(t, verify=False)
+        sm = {k: v for _, k, v in s}
+        assert sm["backend_metal_diff_vs_v0_14_0"] == "あり" and "版差あり" in sm["version_note"], sm
+    with tempfile.TemporaryDirectory() as t:
+        _mk(t, 1, [("PASS", _vals(), _aux())], "backend_metal_diff_vs_v0_14_0: maybe\n")
+        _expect(lambda: attribute(t, verify=False), "bad diff", "なし|あり")
     # 異常系
     _expect(lambda: sc((1, [("TIMEOUT", _vals(), _aux())])), "no PASS", "no PASS")
     _expect(lambda: sc((1, [("PASS", _vals() + [("opp_window", 1, "-")], _aux())])), "dup", "duplicate")
@@ -307,7 +333,7 @@ def self_test():
             open(os.path.join(t, fn), "w").write(fn)
         shas = {k: hashlib.sha256(fn.encode()).hexdigest() for k, fn in AUX_SHA.items()}
         good = ("RULE fixed-at-utc 2000-01-01T00:00:00Z\n## AUX\nkernel_share_threshold: 0.5\nperturbation_max: 0.10\n"
-                "cross_check_max: 0.10\n" + "".join(f"{k}: {v}\n" for k, v in shas.items()) + "## PARAMS\nrounds: 5\n")
+                "cross_check_max: 0.10\nbackend_metal_diff_vs_v0_14_0: なし\n" + "".join(f"{k}: {v}\n" for k, v in shas.items()) + "## PARAMS\nrounds: 5\n")
         rp = os.path.join(t, "RULE.txt")
         open(rp, "w").write(good)
         check_rule(rp, base=t)
