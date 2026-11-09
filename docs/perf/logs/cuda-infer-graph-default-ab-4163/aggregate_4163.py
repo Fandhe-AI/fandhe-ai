@@ -257,6 +257,10 @@ def eval_gates(d, label, assumptions):
             lines = [m.group(1) for m in re.finditer(
                 r"^(?:test \S+ \.\.\. )?(out\[\d+\]\.bits=0x[0-9a-fA-F]+)[ \t]*$", t, re.M)]
             idx_ok = [re.match(r"out\[(\d+)\]", x).group(1) for x in lines] == [str(k) for k in range(len(lines))]
+            if rc != 0 and BIT_MISMATCH_RE.search(t):
+                # dump() は初回出力と replay 出力が不一致なら assertion で終了する（rc≠0・ダンプ 0 行）。
+                # RULE は R2 の bit 不一致を REJECT と定めるため判定不能にしない
+                reject.append(f"r2-{mode}-{b}: 初回出力と replay 出力の bit 不一致（rc={rc}）"); break
             if rc != 0 or len(lines) != b * 10 or not idx_ok:
                 undet.append(f"r2-{mode}-{b}: rc={rc} 行数={len(lines)}（期待 {b * 10}）"); break
             dumps[mode] = lines
@@ -517,6 +521,10 @@ def make_fixture(d, label="t", ratios=None, **opt):
             body = "test predict_resident_bit_dump ... " + body  # libtest 接頭辞が先頭行に付く実出力を再現
             if opt.get("r2_diff") and b == 64 and m == "on":
                 body = body.replace("out[3].bits=0x00000003", "out[3].bits=0x00000004")
+            if opt.get("r2_bitfail") and b == 64 and m == "on":
+                _w(os.path.join(d, f"r2-{m}-{b}-{label}.log"), "test x ... FAILED\nthread panicked at a.rs:1:1\n出力が bit 一致しない\nrc=101\n"); continue
+            if opt.get("r2_err") and b == 64 and m == "on":
+                _w(os.path.join(d, f"r2-{m}-{b}-{label}.log"), "thread panicked at a.rs:1:1\nDeviceContextCaptureInProgress\nrc=101\n"); continue
             _w(os.path.join(d, f"r2-{m}-{b}-{label}.log"), body + "rc=0\n")
     for arm in ("C", "A", "B"):
         for crate in ("fandhe-ai-backend-cuda", "fandhe-ai"):
@@ -575,6 +583,10 @@ def self_test():
     assert v == "REJECT", (v, u, rj)
     v, u, rj = run(r2_diff=True)
     assert v == "REJECT", (v, u, rj)
+    v, u, rj = run(r2_bitfail=True)
+    assert v == "REJECT" and any("r2-on-64" in x for x in rj), (v, u, rj)
+    v, u, rj = run(r2_err=True)
+    assert v == "UNDETERMINED" and not rj, (v, u, rj)
     v, u, rj = run(gate_fail=True)
     assert v == "UNDETERMINED", (v, u, rj)
     # 前提ゲートで停止（計測データ無し）でも Bad で落ちず UNDETERMINED を出す
