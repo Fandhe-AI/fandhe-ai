@@ -126,3 +126,16 @@ bit 一致テスト 24 件 pass のもとで、**G1（merge）・G2（merge+prep
 （Mac mini 1.153・1.982、GB10 1.300・1.613）と、train／infer セルの悪化。GB10 affinity との組み合わせ 3 腕も train 系セルが 1.00 を超え REJECT。
 既存の節（§1〜§12）は変更しない。本件は既定を反転しない（反転の要否は #3227）。数値・判定表・PyTorch 比・#3227 への引き継ぎ表は
 [`docs/perf/cpu-gemm-small-m-partition-ab.md`](perf/cpu-gemm-small-m-partition-ab.md) を正とする。
+
+
+## 14. 推論限定 jpw1 の opt-in（#4161）
+
+§13 の REJECT は G1 を全経路へ効かせた結果である。#3177 の単体 A/B では GB10 で jpw=1 が L1 の 3 形状と L2 dX を 0.82〜0.94 に縮めたため、**推論経路の中だけ**に限る別ゲートを追加した。既存の節（§1〜§13）は変更しない。
+
+- ゲート: `crates/backend-cpu/src/gemm_blis/infer_scope.rs::INFER_SCOPE_JPW1_ENABLED`（**既定 OFF**。OFF のとき `jobs_per_worker_for` は従来どおり常に `TWO_D_JOBS_PER_WORKER` を返し、挙動は現行と同一）。既定の反転は A/B が ADOPT となった後の #4165 でのみ行う。
+- スコープの入口: `facade` の `Sequential::predict_recorded`（`predict`・`predict_batches` を覆う）・`predict_resident`・`predict_resident_input` が先頭で `enter_inference_scope()` を呼ぶ（`!Send` の RAII ガード・thread-local）。学習（tape の forward／backward・`train_step_resident`）はスコープの外で、機構が効かない。
+- jpw の決定位置: thread-local のため、`gemm_blis_parallel_with_transpose`・`gemm_blis_bias_act_parallel_prepacked` は affinity／cap のプールのクロージャに入る**前**の呼び出し元スレッドで `small_m::jobs_per_worker_for` を評価し、値をクロージャへ渡す（`ThreadPool::install` はワーカー上で実行するためスコープを見失う）。
+- G1 との関係: G1（`SMALL_M_JOB_MERGE_ENABLED`）が有効ならそちらを優先する。A の pack 共有（`select_shared_a`）は含めず、`share_a` は従来どおり G1 のゲートに従う。#3201 の merge 腕（jpw1 と A 共有）とは別物。
+- 制約: rayon ワーカー上から呼ばれる GEMM はスコープを継がず既定の jpw になる（安全側）。`GB10_AFFINITY_ENABLED` は false のまま。
+- bit 一致: jpw は job の大きさだけを決め、各 C 要素の FMA 連鎖は変わらない（§3 と同じ根拠）。tolerance・FMA 契約は不変。出力の bit 一致は `crates/facade/tests/infer_scope_jpw1_4161.rs` で確かめる。
+- A/B キット: [`docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/`](perf/logs/cpu-infer-jpw1-gb10-ab-4161/)（事前登録規則の下書き・腕 patch・`orchestrate.sh`・`aggregate.py`）。**この時点で実測はない**。RULE.txt はマージ後に単独コミットで固定してから GB10 で測る。

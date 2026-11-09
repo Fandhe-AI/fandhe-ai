@@ -3174,6 +3174,10 @@ impl Sequential {
         input: &Tensor<f32>,
         rec: &mut R,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        // イシュー #4161: 推論スコープに入る（CPU の小形状 GEMM の jpw1 opt-in。既定 OFF で
+        // 挙動不変。学習経路は対象外。`predict`・`predict_batches` はここを通る。rayon
+        // ワーカー上の GEMM はスコープを継がず既定の jpw になる＝安全側）。
+        let _infer_scope = fandhe_ai_backend_cpu::enter_inference_scope();
         // イシュー #1760・Cursor Bugbot 指摘是正: tape 不要経路
         // （`predict_tape_free`）は層を先頭から順に `forward_host`
         // していくため、`Embedding`／`MultiheadAttention`（`forward_host`
@@ -4433,11 +4437,13 @@ impl Sequential {
         store: &DeviceParamStore,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        // イシュー #4161: 推論スコープ（`predict_recorded` と同じ理由。既定 OFF で挙動不変）。
+        let _infer_scope = fandhe_ai_backend_cpu::enter_inference_scope();
         // イシュー #1770・#1760・#1957: `Self::forward_resident` と同じ
         // ガード。
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::predict_resident: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                "Sequential::predict_resident:Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
                  含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
                     .to_string(),
             )));
@@ -4480,9 +4486,11 @@ impl Sequential {
         store: &DeviceParamStore,
         input: &ResidentTensor,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        // イシュー #4161: 推論スコープ（`predict_recorded` と同じ理由。既定 OFF で挙動不変）。
+        let _infer_scope = fandhe_ai_backend_cpu::enter_inference_scope();
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::predict_resident_input: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                "Sequential::predict_resident_input:Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
                  含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
                     .to_string(),
             )));

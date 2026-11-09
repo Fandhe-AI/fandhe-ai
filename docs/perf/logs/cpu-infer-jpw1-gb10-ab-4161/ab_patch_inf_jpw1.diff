@@ -1,0 +1,12 @@
+diff --git a/crates/backend-cpu/src/gemm_blis/infer_scope.rs b/crates/backend-cpu/src/gemm_blis/infer_scope.rs
+--- a/crates/backend-cpu/src/gemm_blis/infer_scope.rs
++++ b/crates/backend-cpu/src/gemm_blis/infer_scope.rs
+@@ -21,7 +21,7 @@
+ use std::marker::PhantomData;
+
+ /// 推論スコープ内 jpw1 の既定有効フラグ。**既定 OFF**。after 腕はこの 1 行だけを反転する。
+-pub(super) const INFER_SCOPE_JPW1_ENABLED: bool = false;
++pub(super) const INFER_SCOPE_JPW1_ENABLED: bool = true;
+
+ thread_local! {
+     static SCOPE_DEPTH: Cell<u32> = const { Cell::new(0) };

@@ -80,6 +80,8 @@ mod partition;
 // `docs/cpu-gemm-small-m-job-merge-prepack-decision.md`）。
 pub(crate) mod prepack;
 mod small_m;
+// イシュー #4161: 推論スコープ内だけ jpw1 を効かせる opt-in（既定 OFF）。
+pub mod infer_scope;
 
 use std::ops::Range;
 // `IcDynamic`（イシュー #1366）専用: 行パネルの動的配布に使う
@@ -603,6 +605,9 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
     // 適用される場合、内側の `run_capped` は `rayon::current_num_threads()`
     // を専用プールのスレッド数として観測するため、両機構は無改変で
     // 積み重ねて動作する。
+    // 推論スコープ内 jpw1（#4161）は thread-local のため、プールへ入る前の呼び出し元
+    // スレッドで決めてクロージャへ渡す。
+    let jobs_per_worker = small_m::jobs_per_worker_for(m, n, k);
     crate::gb10_affinity::with_gb10_affinity_if_applicable(m, n, k, || {
         if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
             // 小形状 GEMM の仕事量ベース rayon 並列度上限（イシュー #1575・
@@ -622,7 +627,7 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
                     0..m,
                     blocks,
                     transpose,
-                    small_m::jobs_per_worker_for(m, n, k),
+                    jobs_per_worker,
                     small_m::SMALL_M_JOB_MERGE_ENABLED,
                     None,
                 )
@@ -822,6 +827,9 @@ pub(crate) fn gemm_blis_bias_act_parallel_prepacked(
     // `crate::gb10_affinity` モジュール doc「適用範囲」節参照）。M4 Max
     // 側の仕事量ベース並列度上限（イシュー #1575・
     // [`crate::small_shape_thread_cap`]）とは自機判定で排他する別機構。
+    // 推論スコープ内 jpw1（#4161）は thread-local のため、プールへ入る前の呼び出し元
+    // スレッドで決めてクロージャへ渡す。
+    let jobs_per_worker = small_m::jobs_per_worker_for(m, n, k);
     crate::gb10_affinity::with_gb10_affinity_if_applicable(m, n, k, || {
         if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
             // 小形状 GEMM の仕事量ベース rayon 並列度上限（イシュー #1575。
@@ -838,7 +846,7 @@ pub(crate) fn gemm_blis_bias_act_parallel_prepacked(
                     0..m,
                     blocks,
                     GemmTranspose::Nn,
-                    small_m::jobs_per_worker_for(m, n, k),
+                    jobs_per_worker,
                     small_m::SMALL_M_JOB_MERGE_ENABLED,
                     prepack,
                 )
