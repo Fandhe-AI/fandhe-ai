@@ -954,3 +954,74 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
   - 計測ツリーを `e2660eba0` に変えた `RULE.txt` §8 追記は事後承認する。
   - 併記セル train 64 fresh の 5/5 後退（pair0・pair2）は本節への記録のみとし、別 issue は起票しない。
   - 計測値・規則・閾値・tolerance・baseline は不変。
+
+### 5.16 SME 既定 ON の新しい A/B での GB10 の数え方（イシュー #4143）
+
+新しい事前登録 A/B（#4156）の RULE を書く前に、SME 非搭載の GB10 を ADOPT 判定へどう入れるかを決める必要がある。本節は所有者へ確認するための**案の整理**であり、決定ではない。
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | **案・所有者回答待ち**（`owner:human`） |
+| 承認欄 | **未取得**。回答コメントのリンクは回答後にここへ追記する（空欄のまま「承認済み」と読まないこと） |
+| 依存 | #4142（`docs/perf/noise-band-decision.md` の NB-RANGE5・NB-SEP。同書も「案・所有者承認待ち」） |
+| 後続の参照元 | #4156 の RULE.txt が、所有者の選んだ語（下記 RULE 文面案）を名前で参照する |
+| 不変 | `SME_PRODUCTION_ENABLED` は既定 OFF のまま。ON に戻すのは新しい事前登録 A/B に合格したときだけ（2026-10-28 所有者判断。`docs/cpu-gemm-sme-unsafe-audit.md` §12.13）。unsafe・FMA 契約・tolerance・baseline は変えない |
+
+#### 背景
+
+- #3232 の A/B（`docs/perf/logs/sme-default-on-ab-3232/RULE.txt` §4）は、GB10 の `gemm 256 fresh`・`gemm 2048 reuse` が 5/5 一貫で後退して総合 REJECT になった。ADOPT は「Mac mini 条件 かつ GB10 が非後退」の結合だった。Mac mini は到達 10 セルすべてで ON が速かった。
+- GB10 は SME 非搭載で `kernel_enabled=false` のため、ON/OFF とも同じ NEON 経路を通る。bitdump も bit 同一（6,726,847 行・sha256 一致）。
+- #3613 の 3 腕 A/B（§5.15）では 2 セルの後退は非再現（ノイズ帯・判定不能）だった。
+
+#### 実測根拠（既存データのみ。追加の実機計測はしていない）
+
+1. **GB10 では before/prime が実質 A/A 対照になる**（§5.15「構造上の注意」）。同一コードの組でも round 別比は大きく揺れる。次は `aggregate-gb10.md`（#3613）の pair1（prime/before。比 > 1.00 = 後退）の転記で、算出は表の round 別比からの機械的な min・max・中央値・件数である。
+
+| セル | 最小 | 最大 | 中央値 | 比 > 1.00 の round 数 |
+|---|---|---|---|---|
+| gemm 256 fresh | 0.855 | 1.134 | 0.876 | 1/5 |
+| gemm 256 reuse | 0.934 | 1.027 | 0.969 | 1/5 |
+| gemm 512 fresh | 0.820 | 1.086 | 1.020 | 3/5 |
+| gemm 512 reuse | 0.973 | 1.254 | 1.104 | 3/5 |
+| gemm 1024 fresh | 0.863 | 1.168 | 0.905 | 1/5 |
+| gemm 1024 reuse | 0.992 | 1.073 | 1.021 | 4/5 |
+| gemm 2048 fresh | 0.915 | 0.987 | 0.967 | 0/5 |
+| gemm 2048 reuse | 0.826 | 1.013 | 0.944 | 1/5 |
+| train 64 fresh | 0.949 | 1.049 | 1.003 | 3/5 |
+| train 64 reuse | 0.969 | 1.013 | 0.973 | 2/5 |
+| infer 64 fresh | 0.947 | 1.053 | 1.016 | 3/5 |
+| infer 64 reuse | 0.817 | 1.013 | 1.006 | 3/5 |
+
+2. したがって「どれかのセルが 5/5 で 1.00 超」という #3232 の GB10 判定は、実行コードが同一でも偶然に満たされうる。帰無仮説（各 round 独立・1.00 の上下が半々）での**概算**は、1 セルあたり約 1/32、12 セルのどれかで約 1−(31/32)^12 ≒ 32%。セル間の相関・非対称性は無視した概算である。実際の A/A（上表）では 5/5 後退は 0 セル、#3232 では 2 セルだった（ただし `gemm 1024 reuse` は A/A でも 4/5）。
+3. 一方で ON/OFF の実差が皆無とも言い切れない。#3613 の併記セル `train 64 fresh` は pair0（after/before）・pair2（after/prime）で 5/5 後退（中央値 1.062・1.067）だが、A/A の pair1 は 1.003 だった。`try_new()` の呼び出し有無やコード配置による小さな実差の可能性がある。判定外のセルで、事実のみ記録する。
+
+#### 選択肢
+
+- **(a) GB10 は記録のみ（性能判定に入れない）**: 同一コードへの偽 REJECT を防ぐ。配置の副作用による実差は見逃す。
+- **(b) GB10 にも #4142 の方法で非後退を要求する**: ON 腕の 5 round すべてで比 > 1.00 かつ ON 腕の最小が OFF 腕の最大を超えるときだけ後退と言う。偽 REJECT は減るが、#4142 の承認まで RULE から参照できない。NB-SEP は腕間の系統差（バイナリ配置）を分離できない（`noise-band-decision.md` §5）。
+- **(c) 推奨: 正しさ・構造は fail-closed、性能は記録＋分離した後退のみフラグ**:
+  - fail-closed にするもの: P-R0（両腕 `kernel_enabled=false`）・P-BIT（bitdump の行数と sha256 が ON/OFF で一致）・checksum 全セル一致・P-RT（ON ツリーで `cargo test -p fandhe-ai-backend-cpu --release` 全件 pass）・P-CELLS・P-LOCK・P-GATE。
+  - 性能セルは中央値と round 別比を全記録し、5/5 一貫の 1 セルだけでは ADOPT の可否を決めない。
+  - 分離した後退（5 round すべて ON/OFF > 1.00 かつ ON 腕最小 > OFF 腕最大）がある場合は自動 ADOPT せず undetermined とし、#3613 型の 3 腕（A/A 対照つき）切り分けを再実施する。
+  - Mac mini の ADOPT 条件（到達 10 セル 5/5 かつ中央値 ≤ 1.00）と checksum 条件は変えない。
+
+推奨は (c)。採否は所有者が決める。(b) を採る場合は #4142 の承認に連動する。
+
+#### RULE への貼り付け文面案（所有者が選んだ語だけを #4156 の RULE に採用する）
+
+```
+GB10-RECORD := GB10 は P-R0・P-BIT・checksum 一致のみ検査し、性能セルは記録のみで ADOPT に入れない（案 (a)）
+GB10-NBSEP := GB10 の各判定セルに NB-SEP を要求し、後退と言えるセルが 1 つでもあれば REJECT（案 (b)。#4142 承認が前提）
+GB10-GATE-ONLY-STRUCTURAL := GB10 は構造ゲート（P-R0・P-BIT・checksum・P-RT・P-CELLS・P-LOCK・P-GATE）を fail-closed とし、
+  性能は全記録。NB-SEP 条件の後退があれば undetermined（自動 ADOPT しない）として 3 腕＋A/A を再実施する（案 (c)）
+```
+
+#### 所有者への確認事項
+
+1. (a)(b)(c) のどれで GB10 を数えるか。
+2. (c) で undetermined になったとき、3 腕＋A/A の再測を自動で足すか、所有者へ戻すか。
+3. #4142（NB-RANGE5・NB-SEP）の採否に依存する旨の了承（(b)(c) は #4142 の承認後に確定）。
+
+#### 限界
+
+N=5・単一機体。帰無確率は概算。`train 64 fresh` の実差の可能性は本データでは切り分けられない。本節は追加計測を伴わない。
