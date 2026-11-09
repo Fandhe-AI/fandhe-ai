@@ -27,10 +27,17 @@ sha256 と一致したものだけを importlib で読み、`mlp_init`／`Torch`
 
 - `split`: step 本体（forward・`autograd.grad`・SGD 更新）を出し終えた時刻 t1 と、`torch.mps.synchronize()` が返った時刻 t2 を
   wall で取る。I = t1 - t0、S = t2 - t1。`loss.item()` は計時の外（窓の `.item()` は同期後なので読み出しだけ）。
-- `event`: step の前後で `torch.mps.Event(enable_timing=True)` を record し GPU の span を取る。**イベントの record がコマンド
-  バッファの区切りを変えうる**ため、この腕の値は split・bench_py の窓と混ぜない。時計は `mps_event`（共有イベントを
+- `event`: step の前後で `torch.mps.Event(enable_timing=True)` を record し GPU の span を取る。区間の終端は `e1.record()` の
+  後のデバイス全体の `torch.mps.synchronize()`（SGD 更新と `e1` を含む全 GPU 作業の完了待ち）で、`elapsed_time` はその後に読む。
+  `loss.item()` は forward の結果だけを待つので完了待ちには使わず、同期後の読み出しだけにする（計時の外）。
+  `Event.synchronize()` は使わない（デッドロックが報告されている経路）。event_step_wall = t0 から synchronize が返るまでの wall。
+  **イベントの record がコマンドバッファの区切りを変えうる**ため、この腕の値は split・bench_py の窓と混ぜない。時計は `mps_event`（共有イベントを
   host が観測した時刻の差と推定。GPU タイムスタンプとは別の時計。fandhe の gpu_busy〈gpu_timestamp〉と揃わない）。
-- `floor`: 何も積まない同期と、1 要素 add + `.item()` の往復（同期の固定費の下限）。
+  unavailable にするのは、学習ステップを含まないプローブで Event API が無い・使えないと分かった場合だけ。本計測中の
+  失敗（学習ステップ・同期・item・elapsed_time・span が非有限か非正）は捕捉せずこの腕を失敗させる（run_round.sh の round が失敗する）。
+  プローブは呼び出し順と完了待ちを確かめるだけで、MPS の elapsed_time の値の正しさは保証しない。
+- `floor`: 何も積まない同期と、1 要素 add + `.item()` の往復（同期の固定費の下限）。往復の `.item()` は直前に出した add
+  （その時点で積まれている唯一の作業）の結果を待つので、待ちが区間内の GPU 作業をすべて覆う。
 
 ## 安全面
 
@@ -204,52 +211,105 @@ def setup(bp):
     return torch, be, be.upload(x), be.upload(y)
 
 
-def run_split(bp, args):
-    torch, be, X, Y = setup(bp)
-    ctx = make_ctx(torch, args.bench_py)
+def split_loop(torch, step, steps, warmup, clock=time.perf_counter):
+    """split 腕の計時ループ。step() は step 本体を出して loss を返す（実機は step_body、self-test はモック）。
+
+    区間の終端はデバイス全体の torch.mps.synchronize()（SGD 更新を含む全作業の完了待ち）。loss.item() は同期後の読み出しだけ。
+    戻り値 (issue, sync, total, last_loss)。warmup 分は捨てる。例外は捕捉しない（腕を失敗させる）。
+    """
     iss, syn, tot, last = [], [], [], None
-    for s in range(bp.TRAIN_STEPS):
-        t0 = time.perf_counter()
-        loss = step_body(bp, be, X, Y)
-        t1 = time.perf_counter()
+    for s in range(steps):
+        t0 = clock()
+        loss = step()
+        t1 = clock()
         torch.mps.synchronize()
-        t2 = time.perf_counter()
+        t2 = clock()
         last = float(loss.item())  # 計時の外（同期後なので読み出しだけ）
-        if s >= bp.TRAIN_WARMUP:
+        if s >= warmup:
             iss.append(t1 - t0)
             syn.append(t2 - t1)
             tot.append(t2 - t0)
-    if not math.isfinite(last):
+    if last is None or not math.isfinite(last):
         raise SystemExit("loss が非有限")
+    return iss, syn, tot, last
+
+
+def run_split(bp, args):
+    torch, be, X, Y = setup(bp)
+    ctx = make_ctx(torch, args.bench_py)
+    iss, syn, tot, last = split_loop(torch, lambda: step_body(bp, be, X, Y), bp.TRAIN_STEPS, bp.TRAIN_WARMUP)
     w, n = bp.TRAIN_WARMUP, bp.TRAIN_STEPS - bp.TRAIN_WARMUP
     return [make_row(ctx, "split", name, stats_of(v), "実測", w, n, args.run, checksum=last)
             for name, v in (("issue_wall", iss), ("sync_wall", syn), ("step_wall", tot))]
+
+
+# Event API が無い・未対応のときに出うる例外（プローブの Event 呼び出しだけを囲む。学習ステップと同期は囲まない）。
+EVENT_API_ERRORS = (AttributeError, TypeError, NotImplementedError, RuntimeError)
+
+
+def probe_event_api(torch):
+    """学習ステップを含まない Event API のプローブ。使えれば None、使えなければ unavailable の理由（str）を返す。
+
+    捕捉するのは Event の生成・record・elapsed_time の呼び出しだけで、間の torch.mps.synchronize() は囲まない
+    （同期の失敗は API の有無ではないので腕を失敗させる）。プローブは setup() の upload も同期で確定させる。
+    呼べることを確かめるだけで、本計測の elapsed_time の値の正しさは保証しない。
+    """
+    Event = getattr(getattr(torch, "mps", None), "Event", None)
+    if Event is None:
+        return "torch.mps.Event が無い"
+    try:
+        p0, p1 = Event(enable_timing=True), Event(enable_timing=True)
+        p0.record()
+        p1.record()
+    except EVENT_API_ERRORS as e:
+        return f"torch.mps.Event の生成・record が使えない: {type(e).__name__}"
+    torch.mps.synchronize()
+    try:
+        ms = p0.elapsed_time(p1)
+    except EVENT_API_ERRORS as e:
+        return f"torch.mps.Event.elapsed_time が使えない: {type(e).__name__}"
+    if not _finite_num(ms) or ms < 0:  # 間に作業が無いので 0 は正常
+        return "torch.mps.Event.elapsed_time が非有限または負（プローブ）"
+    return None
+
+
+def event_loop(torch, step, steps, warmup, clock=time.perf_counter):
+    """event 腕の計時ループ（プローブ通過後に呼ぶ）。戻り値 (spans_s, walls_s, last_loss)。例外は捕捉しない。
+
+    1 step: e0.record → step 本体（forward・grad・SGD 更新）→ e1.record → torch.mps.synchronize()（デバイス全体の
+    完了待ち。SGD と e1 を含む）→ wall の終端 → loss.item()（読み出しだけ）→ elapsed_time。Event.synchronize() は使わない。
+    """
+    Event = torch.mps.Event
+    spans, walls, last = [], [], None
+    for s in range(steps):
+        e0, e1 = Event(enable_timing=True), Event(enable_timing=True)
+        t0 = clock()
+        e0.record()
+        loss = step()
+        e1.record()
+        torch.mps.synchronize()
+        dt = clock() - t0
+        last = float(loss.item())  # 計時の外（同期後なので読み出しだけ）
+        ms = e0.elapsed_time(e1)
+        if s >= warmup:
+            if not _finite_num(ms) or ms <= 0:
+                raise SystemExit(f"elapsed_time が非有限または非正: {ms!r}（step {s}）")
+            spans.append(float(ms) / 1000.0)
+            walls.append(dt)
+    if last is None or not math.isfinite(last):
+        raise SystemExit("loss が非有限")
+    return spans, walls, last
 
 
 def run_event(bp, args):
     torch, be, X, Y = setup(bp)
     ctx = make_ctx(torch, args.bench_py)
     w, n = bp.TRAIN_WARMUP, bp.TRAIN_STEPS - bp.TRAIN_WARMUP
-    try:
-        Event = torch.mps.Event
-        spans, walls, last = [], [], None
-        for s in range(bp.TRAIN_STEPS):
-            e0, e1 = Event(enable_timing=True), Event(enable_timing=True)
-            t0 = time.perf_counter()
-            e0.record()
-            loss = step_body(bp, be, X, Y)
-            e1.record()
-            last = float(loss.item())  # 同期。elapsed_time は完了後に読む
-            dt = time.perf_counter() - t0
-            ms = e0.elapsed_time(e1)
-            if s >= bp.TRAIN_WARMUP:
-                spans.append(float(ms) / 1000.0)
-                walls.append(dt)
-        if not all(math.isfinite(v) and v > 0 for v in spans):
-            raise RuntimeError("elapsed_time が非有限または非正")
-    except Exception as e:  # noqa: BLE001 - 到達不能は推定値で埋めず unavailable として記録する
-        why = f"torch.mps.Event の計測に失敗: {type(e).__name__}"
+    why = probe_event_api(torch)
+    if why is not None:
+        # 到達不能は推定値で埋めず unavailable として記録する（両 item とも）。
         return [make_row(ctx, "event", it, None, "実測", w, n, args.run, reason=why) for it in ARM_ITEMS["event"]]
+    spans, walls, last = event_loop(torch, lambda: step_body(bp, be, X, Y), bp.TRAIN_STEPS, bp.TRAIN_WARMUP)
     return [make_row(ctx, "event", "gpu_span", stats_of(spans), "実測", w, n, args.run, checksum=last),
             make_row(ctx, "event", "event_step_wall", stats_of(walls), "実測", w, n, args.run, checksum=last)]
 
@@ -309,8 +369,169 @@ def cmd_env(args):
     print(f"wrote env -> {out}")
 
 
+# ---- self-test 用の torch 代替（torch／MPS 不在の Linux でループの呼び出し順と完了待ちを検査する） -------------
+# MPS の非同期キューを「出した順に積み、完了位置まで進む」だけで模す。テンソルの .item() はそのテンソルを作った
+# 作業までしか完了させない（forward の loss では後続の SGD・e1 を待たない）。synchronize() は全作業を完了させる。
+# 未完了のイベントで elapsed_time を読むと AssertionError、Event.synchronize() を呼ぶと AssertionError。
+# 実機の MPS の挙動（elapsed_time の値・Event の対応状況）を再現するものではない。
+class _FakeQueue:
+    def __init__(self):
+        self.ops, self.done, self.log = [], 0, []
+
+    def push(self, name):
+        self.ops.append(name)
+        self.log.append(name)
+        return len(self.ops)  # この作業が完了したとみなせる位置
+
+    def complete_to(self, pos):
+        self.done = max(self.done, pos)
+
+
+class _FakeLoss:
+    def __init__(self, q, pos, value):
+        self.q, self.pos, self.value = q, pos, value
+
+    def item(self):
+        self.q.log.append("item")
+        self.q.complete_to(self.pos)
+        return self.value
+
+
+class _FakeEvent:
+    def __init__(self, q, ms, enable_timing=False):
+        self.q, self.ms, self.pos = q, ms, None
+
+    def record(self):
+        self.pos = self.q.push("record")
+
+    def elapsed_time(self, other):
+        self.q.log.append("elapsed_time")
+        for e in (self, other):
+            if e.pos is None or self.q.done < e.pos:
+                raise AssertionError("未完了のイベントで elapsed_time を読んだ")
+        return self.ms()
+
+    def synchronize(self):
+        self.q.log.append("event_synchronize")
+        raise AssertionError("Event.synchronize() は使わない")
+
+
+class _FakeMps:
+    def __init__(self, q, ms, event=True):
+        self.q = q
+        if event:
+            self.Event = lambda enable_timing=False: _FakeEvent(q, ms, enable_timing)
+
+    def synchronize(self):
+        self.q.log.append("synchronize")
+        self.q.complete_to(len(self.q.ops))
+
+
+class _FakeTorch:
+    """torch の代替。ms は elapsed_time が返す値の関数、event=False で torch.mps.Event を持たない。"""
+
+    def __init__(self, ms=lambda: 0.2, event=True):
+        self.q = _FakeQueue()
+        self.mps = _FakeMps(self.q, ms, event)
+
+    def step(self, loss=0.5):
+        """forward（loss を作る）→ SGD 更新を積み、loss を返す step 本体の代替。"""
+        pos = self.q.push("forward")
+        self.q.push("sgd")
+        return _FakeLoss(self.q, pos, loss)
+
+
+def _fake_clock():
+    t = [0.0]
+
+    def clock():
+        t[0] += 1e-4
+        return t[0]
+    return clock
+
+
+def _expect_exit(fn, what):
+    try:
+        fn()
+    except SystemExit:
+        return
+    raise AssertionError(f"SystemExit にならなかった: {what}")
+
+
+def self_test_loops():
+    """計時ループの呼び出し順・完了待ち・失敗の扱いをモックで検査する（torch 不要）。"""
+    # event 腕: 各 step で record → forward → sgd → record → synchronize → item → elapsed_time。未完了読みなし。
+    ft = _FakeTorch()
+    assert probe_event_api(ft) is None
+    ft.q.log.clear()
+    spans, walls, last = event_loop(ft, ft.step, 3, 1, clock=_fake_clock())
+    per = ["record", "forward", "sgd", "record", "synchronize", "item", "elapsed_time"]
+    assert ft.q.log == per * 3, ft.q.log
+    assert len(spans) == 2 and len(walls) == 2 and last == 0.5 and all(abs(v - 2e-4) < 1e-15 for v in spans)
+    # 旧実装（e1 の後を loss.item() で待つ）はこのモックで未完了読みとして止まる（回帰の確認）。
+    ft = _FakeTorch()
+    e0, e1 = ft.mps.Event(enable_timing=True), ft.mps.Event(enable_timing=True)
+    e0.record()
+    loss = ft.step()
+    e1.record()
+    loss.item()
+    try:
+        e0.elapsed_time(e1)
+        raise RuntimeError("未完了読みを検出できない")
+    except AssertionError:
+        pass
+    # 本計測中の失敗は unavailable に読み替えず腕を失敗させる（例外がそのまま出る・SystemExit）。
+    ft = _FakeTorch()
+
+    def broken_step():
+        raise RuntimeError("step 失敗")
+    try:
+        event_loop(ft, broken_step, 3, 1, clock=_fake_clock())
+        raise AssertionError("学習ステップの失敗が握りつぶされた")
+    except RuntimeError as e:
+        assert str(e) == "step 失敗"
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        ft = _FakeTorch(ms=lambda bad=bad: bad)
+        _expect_exit(lambda ft=ft: event_loop(ft, ft.step, 3, 1, clock=_fake_clock()), f"span={bad}")
+    ft = _FakeTorch()
+    _expect_exit(lambda: event_loop(ft, lambda: ft.step(float("nan")), 3, 1, clock=_fake_clock()), "loss=nan")
+    # プローブ: Event が無い／生成・elapsed_time が API 例外 → 理由つき unavailable。プローブの同期の失敗は捕捉しない。
+    assert probe_event_api(_FakeTorch(event=False)) == "torch.mps.Event が無い"
+
+    def raise_rt():
+        raise RuntimeError("timing unsupported")
+    assert "elapsed_time" in probe_event_api(_FakeTorch(ms=raise_rt))
+    assert "非有限" in probe_event_api(_FakeTorch(ms=lambda: float("nan")))
+    assert probe_event_api(_FakeTorch(ms=lambda: 0.0)) is None  # 作業なしの 0 は正常
+    ft = _FakeTorch()
+    ft.mps.Event = lambda **kw: (_ for _ in ()).throw(TypeError("enable_timing"))
+    assert "生成" in probe_event_api(ft)
+    ft = _FakeTorch()
+
+    def sync_fail():
+        raise RuntimeError("sync 失敗")
+    ft.mps.synchronize = sync_fail
+    try:
+        probe_event_api(ft)
+        raise AssertionError("プローブの同期失敗が unavailable に読み替えられた")
+    except RuntimeError as e:
+        assert str(e) == "sync 失敗"
+    # split 腕: forward → sgd → synchronize → item（同期が SGD を覆い、item は同期後）。失敗は捕捉しない。
+    ft = _FakeTorch()
+    iss, syn, tot, last = split_loop(ft, ft.step, 3, 1, clock=_fake_clock())
+    assert ft.q.log == ["forward", "sgd", "synchronize", "item"] * 3, ft.q.log
+    assert len(iss) == len(syn) == len(tot) == 2 and last == 0.5
+    ft = _FakeTorch()
+    _expect_exit(lambda: split_loop(ft, lambda: ft.step(float("inf")), 3, 1, clock=_fake_clock()), "split loss=inf")
+    try:
+        split_loop(_FakeTorch(), broken_step, 3, 1, clock=_fake_clock())
+        raise AssertionError("split の学習ステップの失敗が握りつぶされた")
+    except RuntimeError:
+        pass
+
+
 def self_test():
-    """torch／numpy 不要の検査（検証関数・統計・腕と item の定義）。"""
+    """torch／numpy 不要の検査（検証関数・統計・腕と item の定義・計時ループの呼び出し順）。"""
     ctx = {"torch_version": "2.14.0", "bench_sha": "s", "self_sha": "d"}
     r = make_row(ctx, "split", "issue_wall", (1e-3, 9e-4, 1.1e-3), "実測", 20, 80, 1, checksum=0.5)
     assert r["status"] == "ok" and r["clock"] == "wall"
@@ -332,6 +553,7 @@ def self_test():
         pass
     assert stats_of([1.0, 2.0, 3.0, 4.0, 5.0]) == (3.0, 2.0, 4.0)
     assert {a: len(i) for a, i in ARM_ITEMS.items()} == {"split": 3, "event": 2, "floor": 2}
+    self_test_loops()
     print("self-test OK")
 
 

@@ -206,6 +206,8 @@ def load_diag_arm(path, arm, run, decide):
         elif r["status"] == "unavailable":
             if r["median_s"] is not None or r["tag"] != "未測定":
                 raise AggError(f"{path}: unavailable row must be null/未測定")
+            if not isinstance(r.get("reason"), str) or not r["reason"]:
+                raise AggError(f"{path}: unavailable row needs a reason")
             out[it] = None
         else:
             raise AggError(f"{path}: bad status")
@@ -217,6 +219,10 @@ def load_diag_arm(path, arm, run, decide):
         raise AggError(f"{path}: item set incomplete")
     if arm != "event" and any(v is None for v in out.values()):
         raise AggError(f"{path}: unavailable not allowed in arm {arm}")
+    # event 腕の unavailable は「プローブで Event API が無い・使えない」場合だけで、両 item が揃って unavailable になる
+    # （torch_mps_train_diag.py の run_event）。本計測中の失敗は腕ごと失敗し行を書かない。片方だけの unavailable は止める。
+    if arm == "event" and len({v is None for v in out.values()}) > 1:
+        raise AggError(f"{path}: event arm must be all ok or all unavailable")
     return out, (next(iter(cks)) if cks else None)
 
 
@@ -469,6 +475,31 @@ def self_test():
             raise AssertionError("wait_max!=1 を通した")
         except AggError:
             pass
+    # event 腕: 両 item unavailable（理由つき）は読めて G_t=None、片方だけ・理由なしは止まる。G_t なしの values.tsv は止まる。
+    una = lambda it, reason="torch.mps.Event が無い": dict(_drow("event", it, None), status="unavailable", tag="未測定",
+                                                       q1_s=None, q3_s=None, checksum=None, reason=reason)
+    for rows, ok in (([una("gpu_span"), una("event_step_wall")], True),
+                     ([una("gpu_span"), _drow("event", "event_step_wall", 4e-4)], False),
+                     ([_drow("event", "gpu_span", 2e-4), una("event_step_wall")], False),
+                     ([una("gpu_span", ""), una("event_step_wall", "")], False),
+                     ([dict(una("gpu_span"), reason=None), una("event_step_wall")], False)):
+        with tempfile.TemporaryDirectory() as t:
+            _synth_round(t)
+            with open(os.path.join(t, "raw", "te.jsonl"), "w") as f:
+                f.write("".join(json.dumps(r) + "\n" for r in rows))
+            try:
+                m = load_round(t, 1, rule)
+            except AggError:
+                assert not ok, f"正しい event 行を止めた: {rows}"
+                continue
+            assert ok, f"不正な event 行を通した: {rows}"
+            assert m["G_t"] is None
+            try:
+                write_values(t)
+                raise AssertionError("G_t unavailable の values.tsv を作った")
+            except AggError:
+                pass
+            assert not os.path.exists(os.path.join(t, "values.tsv"))
     print("self-test OK")
 
 

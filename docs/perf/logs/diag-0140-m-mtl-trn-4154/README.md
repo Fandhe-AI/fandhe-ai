@@ -22,7 +22,8 @@ fandhe 側の内訳は #3612 で実測済み（`docs/compat-resident-train-step-
 - 主軸は時計が揃う **wall の区間**。`torch.mps.Event` の GPU span `G_t` は時計 `mps_event`（共有イベントを host が観測した時刻の差と推定）で、
   fandhe の `gpu_busy`（`gpu_timestamp`）とは別の時計。aggregate_diag.py の F1 は「時計不一致・分類保留」になる見込みで、事後に読み替えない。
 - イベントの record がコマンドバッファの区切りを変えうるため、event 腕の値は split 腕・bench_py の窓と混ぜない（別プロセス・別の値）。
-- 判定は `G_t` に依存しない。`G_t` が取れなければ unavailable のまま残す（推定で埋めない）。
+- 判定は `G_t` に依存しない。`G_t` が unavailable になるのは、学習ステップを含まないプローブで `torch.mps.Event` が無い・使えないと分かった場合だけ（推定で埋めない）。本計測中の失敗（学習ステップ・同期・`item()`・`elapsed_time`）は unavailable に読み替えず event 腕と round を失敗させる。
+- event 腕の span の終端は `e1.record()` の後のデバイス全体の `torch.mps.synchronize()`（SGD 更新と `e1` を含む）。`loss.item()` は forward の結果しか待たないので完了待ちに使わない。モックの self-test が検査するのは呼び出し順と完了待ちだけで、MPS の `elapsed_time` の値の正しさは検査できない。
 - B1（明示同期）は B0（本番の同期位置）に対し観測負荷を持つ。fandhe 側 I_f・S_f は B1 の値で、負荷は B0 total との比較で記録する。
 - F2（fresh 窓の再現）は使わない: torch も parameter を常駐させて更新しており、fandhe の fresh 窓は相手の構成の再現にならない。
 - 同じ <metal-node> を他の診断も使いうる。hw-lock で直列化し、並走させない。ビルドは `prebuild.sh` で round 1 の前に 1 回だけ。
