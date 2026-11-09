@@ -234,6 +234,13 @@ name = "gemm_candidate_event_ab_3215"
 test = true
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #4147: MLP 推論 2 形状（l1_fwd・l2_fwd）の GEMM 純カーネル時間を cudaEvent で計測する
+# 診断 example。`gemm_candidate_event_ab_3215`（上記）と同じ理由で `internal-diagnostics` を要求する。
+name = "cuda_mlp_event_bench_4147"
+test = true
+required-features = ["internal-diagnostics"]
+
 [[test]]
 # イシュー #1033・PR #1071 codex-review P1 指摘の是正: `cpu_cuda_tiled_
 # pipeline_parity` は `CudaGemm::compile_tiled_pipeline_variant`・
