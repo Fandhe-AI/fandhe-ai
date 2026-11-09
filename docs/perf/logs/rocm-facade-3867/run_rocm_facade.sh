@@ -154,10 +154,12 @@ done
 HN=$(hostname)
 mask() { # mask <raw> <final>
   # ユーザー名は識別子文字（英数・_）に挟まれない位置だけ置換する。短い名前（例 rocm）でテスト名 rocm_*・fail_count 等の比較指標を壊さないため。
-  # 連続出現を拾うため同じ式を 2 回適用する。
+  # 連続出現を拾うため同じ式を 2 回適用する。1 回目の出力を 2 回目が再マッチしないよう、
+  # 途中の置換先は識別子文字を含まない番兵 <SOH> にし、最後に <user> へ戻す（USER=user で <<user>> になるのを防ぐ）。
+  SOH=$(printf '\001')
   UE=$(printf '%s' "${USER:-__nouser__}" | sed -e 's/[][\\.*^$+?(){}|#]/\\&/g')
-  UX="s#(^|[^A-Za-z0-9_])${UE}([^A-Za-z0-9_]|\$)#\\1<user>\\2#g"
-  sed -E -e "s|$HN|<rocm-node>|g" -e "s|$HOME|<home>|g" -e "$UX" -e "$UX" "$1" >"$2"
+  UX="s#(^|[^A-Za-z0-9_])${UE}([^A-Za-z0-9_]|\$)#\\1<${SOH}>\\2#g"
+  sed -E -e "s|$HN|<rocm-node>|g" -e "s|$HOME|<home>|g" -e "$UX" -e "$UX" -e "s#<${SOH}>#<user>#g" "$1" >"$2"
   rm -f "$1"
   for s in "$HN" "$HOME"; do
     if [ -n "$s" ] && grep -Fq -- "$s" "$2"; then
