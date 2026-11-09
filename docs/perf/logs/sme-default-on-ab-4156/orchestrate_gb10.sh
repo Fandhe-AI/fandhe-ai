@@ -131,12 +131,17 @@ outer_gate() {
     while [ "${i}" -le 20 ]; do
         l1="$(cut -d' ' -f1 /proc/loadavg)"
         gu="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
-        np="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c . || true)"
+        # クエリ失敗（非ゼロ終了）を 0 行と取り違えないよう終了コードを確認する。失敗時は np を空にして awk 側で不成立にする
+        if np_raw="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null)"; then
+            np="$(printf '%s' "${np_raw}" | grep -c . || true)"
+        else
+            np=""
+        fi
         if awk -v l="${l1}" -v g="${gu:-x}" -v n="${np:-x}" 'BEGIN{exit !(l < 1.0 && g == 0 && n == 0)}'; then
             echo "start attempt=${i} load1=${l1} gpu_util=${gu} compute_apps=${np} pass" >> "${OUT}/load_gate_outer.log"
             return 0
         fi
-        echo "start attempt=${i} load1=${l1} gpu_util=${gu:-NA} compute_apps=${np:-NA} wait" >> "${OUT}/load_gate_outer.log"
+        echo "start attempt=${i} load1=${l1} gpu_util=${gu:-NA} compute_apps=${np:-NA(query-failed)} wait" >> "${OUT}/load_gate_outer.log"
         sleep 30
         i=$((i + 1))
     done
