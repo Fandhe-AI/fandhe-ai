@@ -53,7 +53,7 @@ PINNED_FILES = {
     "aggregate_sha256": "docs/perf/logs/cuda-infer-graph-default-ab-4163/aggregate_4163.py",
     "bench_main_sha256": "scripts/bench/framework-compare/bench-fandhe/src/main.rs",
 }
-BIT_MISMATCH_RE = re.compile(r"bit.{0,12}(不一致|mismatch)|not bit-identical|bits? differ", re.I | re.S)
+BIT_MISMATCH_RE = re.compile(r"bit.{0,12}(不一致|一致しない|mismatch)|not bit-identical|bits? differ", re.I | re.S)
 
 
 class Bad(Exception):
@@ -330,6 +330,13 @@ def eval_gates(d, label, assumptions):
 
 # ---------------------------------------------------------------- 判定
 def judge(d, rule_path, label):
+    # 前提ゲート不合格で停止した計測は order／load_gate／results を作らずに終わる。RULE が UNDETERMINED と定めるため、
+    # 未生成の計測データを要求する前に pregate-stop を評価して UNDETERMINED とゲート詳細を返す。
+    stop = os.path.join(d, f"pregate-stop-{label}.txt")
+    if os.path.exists(stop):
+        detail = [ln.strip() for ln in read_text(stop).splitlines() if ln.strip()]
+        undet = ["前提ゲート不合格で停止した記録（pregate-stop）がある"] + [f"pregate-stop: {x}" for x in detail[:20]]
+        return "UNDETERMINED", undet, [], [], [("pregate-stop", "不合格（計測前に停止）")], [], []
     rule_text = read_text(rule_path)
     pins = rule_pins(rule_text)
     env = {}
@@ -531,6 +538,16 @@ def self_test():
     assert v == "REJECT", (v, u, rj)
     v, u, rj = run(gate_fail=True)
     assert v == "UNDETERMINED", (v, u, rj)
+    # 前提ゲートで停止（計測データ無し）でも Bad で落ちず UNDETERMINED を出す
+    with tempfile.TemporaryDirectory() as d:
+        rp = os.path.join(d, "RULE.txt")
+        _w(rp, "RULE\n")
+        _w(os.path.join(d, "pregate-stop-t.txt"), "r0 fail\n")
+        res = judge(d, rp, "t")
+        assert res[0] == "UNDETERMINED" and any("r0 fail" in x for x in res[1]), res
+        render(*res, "t")
+    # 実テストの assertion 文言「bit 一致しない」を数値不一致として分類する
+    assert BIT_MISMATCH_RE.search("出力が bit 一致しない") and not BIT_MISMATCH_RE.search("DeviceContextCaptureInProgress")
     v, u, rj = run(no_r1a=True)
     assert v == "UNDETERMINED", (v, u, rj)
     v, u, rj = run(r1b_err=True)
