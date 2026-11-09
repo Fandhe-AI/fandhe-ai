@@ -24,7 +24,7 @@ Phase 2 の各 issue（#4146・#4147・#4154 ほか）が同じ規則で測る�
 
 1. 記録先を作り、`RULE.template.txt` を `RULE.txt` に、`aggregate_diag.py` をそのままコピーする。
 2. `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値と `sha256sum aggregate_diag.py` を PARAMS に埋め、
-   `【記入…】` と `<…>` をすべて置換する（`cell:` 行はセルごとに 1 行。`scoreboard_ratio`・`prev_class` は `unreached_0140.tsv` から転記し、`kernel_owner` は測る前に宣言する）。
+   `【記入…】` と `<…>` をすべて置換する（雛形 3 行目の注記は印の文字列を含まないのでそのまま残してよい）（`cell:` 行はセルごとに 1 行。`scoreboard_ratio`・`prev_class` は `unreached_0140.tsv` から転記し、`kernel_owner` は測る前に宣言する）。
 3. 雛形側で `--check-template`、スクリプト側で `--self-test` を通す。
 4. `RULE.txt` を**測る前に単独コミット**して push する。
 5. 計測し、`round{i}/` に `gate.txt`・`values.tsv`・`raw/` を置く。

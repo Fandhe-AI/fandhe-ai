@@ -1,6 +1,6 @@
 RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
 （計測前に単独コミットして固定する。計測後に緩めない。雛形: docs/perf/logs/diag-0140-template/RULE.template.txt・#4144）
-（【記入】で始まる箇所と PARAMS の <…> をすべて置換する。残っていると aggregate_diag.py は止まる）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_diag.py は止まる）
 
 1. 目的・対象セル
   【記入: issue 番号】で、スコアボード 0.14.0 の 1 位でないセルの診断 (3)（相手の構成を再現した場合に届く比）を測る。
