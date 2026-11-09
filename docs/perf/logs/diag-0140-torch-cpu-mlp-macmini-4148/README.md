@@ -40,7 +40,7 @@ PyTorch CPU（Apple M4・Accelerate）の窓を、判定ではなく内訳とし
 ## 手順
 
 1. （PR-2）PR-1 のマージ後の main SHA の git archive で `tree_sha`・`tree_fingerprint`・各 sha256 を埋め、
-   `aggregate_4148.py --check-template` でプレースホルダ 0 を確認して `RULE.txt` を**単独コミット**する。
+   `python3 -I aggregate_4148.py --check-rule RULE.txt`（`parse_rule`。プレースホルダ 0・sha 一致を検査。`--check-template` は雛形専用でプレースホルダ必須のため固定済みには使えない）で確認して `RULE.txt` を**単独コミット**する。
 2. （PR-3・<metal-node>）hw-lock を取り、ツリー指紋を RULE と照合する。
    `ROOT=… D=… EXPECT_SHA=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
 3. 回収時にパス上のユーザー名・ホスト名をマスクし、`env/` にツリー指紋・`.rev-stamp` を置く。

@@ -19,6 +19,7 @@ profiler 腕の時間値は計時腕と混ぜない（op 数だけを使う）�
   python3 -I aggregate_4148.py --dir <記録先> [--rule RULE.txt] [--out aggregate.md] [--tsv aggregate.tsv]
   python3 -I aggregate_4148.py --self-test
   python3 -I aggregate_4148.py --check-template [RULE.template.txt]
+  python3 -I aggregate_4148.py --check-rule <RULE.txt>   # 固定済み RULE の検証（雛形用の --check-template とは別）
   python3 -I aggregate_4148.py --fingerprint <tree-dir>
 """
 import hashlib
@@ -39,6 +40,10 @@ TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 FP_ROOTS = ["crates", "scripts/bench", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 FP_SKIP = {"target", ".git"}
 PLACEHOLDER_MARK = "【記入"
+# torch_cpu_mlp_diag.py の REQUIRED_KEYS・TAGS と同一（計測側 validate_row と同等の検証を集計側にも課す）。
+ROW_REQUIRED_KEYS = ("issue", "section", "item", "status", "tag", "median_s", "q1_s", "q3_s", "warmup", "iters", "run",
+                     "torch_threads", "torch_version", "numpy_version", "bench_py_sha256", "diag_script_sha256")
+ROW_TAGS = ("実測", "推定", "未測定")
 # torch_cpu_mlp_diag.py の SECTION_ITEMS と同一（テストで突き合わせる）。
 SHAPE_IDS = ("l1_fwd", "l1_dw", "l1_dx", "l2_fwd", "l2_dw", "l2_dx")
 SECTION_ITEMS = {
@@ -137,8 +142,15 @@ def load_rows(path, section, run, rule):
             r = json.loads(ln)
         except ValueError as e:
             raise AggError(f"{path}: invalid JSON: {e}")
+        if not isinstance(r, dict):
+            raise AggError(f"{path}: row is not an object")
+        missing = [k for k in ROW_REQUIRED_KEYS if k not in r]
+        if missing:
+            raise AggError(f"{path}: missing keys {missing} in row {r.get('item')!r}")
         if r.get("issue") != ISSUE or r.get("section") != section or r.get("run") != run:
             raise AggError(f"{path}: issue/section/run mismatch: {r.get('item')}")
+        if r["tag"] not in ROW_TAGS:
+            raise AggError(f"{path}: unknown tag {r['tag']!r} for {r.get('item')}")
         if r.get("bench_py_sha256") != rule["bench_py_sha256"]:
             raise AggError(f"{path}: bench_py_sha256 differs from RULE")
         if r.get("diag_script_sha256") != rule["diag_script_sha256"]:
@@ -151,12 +163,21 @@ def load_rows(path, section, run, rule):
         if item in vals:
             raise AggError(f"{path}: duplicate item {item}")
         if r.get("status") == "ok":
-            if not (finite(r.get("median_s")) and r["median_s"] > 0):
+            for k in ("median_s", "q1_s", "q3_s"):
+                if not finite(r.get(k)):
+                    raise AggError(f"{path}: non-finite {k} for {item}")
+            if r["median_s"] <= 0:
                 raise AggError(f"{path}: non-finite/non-positive median for {item}")
+            if r["tag"] == "未測定":
+                raise AggError(f"{path}: status=ok with tag=未測定 for {item}")
             vals[item] = r["median_s"]
         elif r.get("status") == "unavailable":
-            if r.get("median_s") is not None:
+            if any(r.get(k) is not None for k in ("median_s", "q1_s", "q3_s")):
                 raise AggError(f"{path}: unavailable row carries a value: {item}")
+            if r["tag"] != "未測定":
+                raise AggError(f"{path}: unavailable row must have tag=未測定: {item}")
+            if not isinstance(r.get("reason"), str) or not r["reason"]:
+                raise AggError(f"{path}: unavailable row needs reason: {item}")
             vals[item] = None
         else:
             raise AggError(f"{path}: unknown status for {item}")
@@ -409,6 +430,11 @@ def check_template(path):
         raise AggError("template: no 【記入 marker found")
 
 
+def check_rule(path):
+    """固定済み RULE.txt を parse_rule で検証する（プレースホルダ残存・sha 不一致・キー過不足は AggError）。"""
+    parse_rule(path)
+
+
 def _synth_round(root, i, rule, ok=True, missing=False):
     rd = os.path.join(root, f"round{i}")
     raw = os.path.join(rd, "raw")
@@ -427,14 +453,14 @@ def _synth_round(root, i, rule, ok=True, missing=False):
                 if missing and s == "train" and it == "update":
                     continue
                 unavail = it.startswith("accel") and it.endswith("l1_dx")
-                r = dict(base, section=s, item=it, status="unavailable" if unavail else "ok",
-                         median_s=None if unavail else 1e-4 * (k + 1) * (1 + 0.01 * i))
-                if s == "train" and it == "window":
-                    r["median_s"] = 5e-3
-                if s == "infer" and it == "window":
-                    r["median_s"] = 2e-3
-                if s == "gemm256" and it == "window":
-                    r["median_s"] = 3e-3
+                med = None if unavail else 1e-4 * (k + 1) * (1 + 0.01 * i)
+                r = dict(base, section=s, item=it, status="unavailable" if unavail else "ok", median_s=med,
+                         q1_s=None if unavail else med * 0.9, q3_s=None if unavail else med * 1.1,
+                         tag="未測定" if unavail else "実測", warmup=1, iters=1, torch_threads=1, numpy_version="0",
+                         **({"reason": "synthetic"} if unavail else {}))
+                for sec, w in (("train", 5e-3), ("infer", 2e-3), ("gemm256", 3e-3)):
+                    if s == sec and it == "window":
+                        r["median_s"], r["q1_s"], r["q3_s"] = w, w * 0.9, w * 1.1
                 f.write(json.dumps(r) + "\n")
     for s in PROFILE_SECTIONS:
         json.dump(dict(base, section=s, steps=int(rule["profile_steps"]), n_ops_aten_total=30,
@@ -460,6 +486,31 @@ def self_test():
         assert "train\twindow\t実測\t5.00000" in tsv, tsv
         # l1_dx の accel が unavailable でも、窓に使う 5 形状・2 形状は計算できる
         assert "train\ttorch_wrapper_cost\t実測\t" in tsv
+        # 固定済み RULE は --check-rule で受理される（--check-template は拒否される）
+        check_rule(rp)
+        try:
+            check_template(rp)
+            raise SystemExit("check_template accepted a fixed RULE")
+        except AggError:
+            pass
+        # 行の不正（tag 欠損・未測定の ok・q1_s NaN・unavailable の reason 欠損）は集計側でも停止する
+        mp = os.path.join(d, "round1", "raw", "measure_train.jsonl")
+        orig = open(mp).read()
+        first = json.loads(orig.splitlines()[0])
+        tails = "\n".join(orig.splitlines()[1:]) + "\n"
+        for mut in ({"tag": None}, {"tag": "未測定"}, {"q1_s": float("nan")}, {"status": "unavailable", "median_s": None}):
+            row = dict(first)
+            if mut.get("tag") is None and "tag" in mut:
+                del row["tag"]
+            else:
+                row.update(mut)
+            open(mp, "w").write(json.dumps(row) + "\n" + tails)
+            try:
+                load_rows(mp, "train", 1, rule)
+                raise SystemExit(f"load_rows accepted invalid row: {mut}")
+            except AggError:
+                pass
+        open(mp, "w").write(orig)
         # ゲート不通過 round を含む場合は「参考」
         d2 = os.path.join(root, "partial")
         os.makedirs(d2)
@@ -542,6 +593,12 @@ def main(argv):
             p = opt("--check-template") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "RULE.template.txt")
             check_template(p)
             print("template OK")
+        elif "--check-rule" in argv:
+            p = opt("--check-rule")
+            if not p:
+                raise AggError("--check-rule needs a RULE.txt path")
+            check_rule(p)
+            print("rule OK")
         elif "--fingerprint" in argv:
             fp, n, listing = fingerprint(opt("--fingerprint"))
             print(f"{fp}  files={n}")
