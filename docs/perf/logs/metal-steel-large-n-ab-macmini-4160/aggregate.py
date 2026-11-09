@@ -17,7 +17,8 @@ load-gate-4160-metal-<label>.log・skipped-4160-metal-<label>.log。無ければ
   成立しない N は「前提不成立」として undetermined（推定で埋めない）
 - load_gate.log に全 gate 行が重複なく揃わない・gate=pass 以外・FAILED を含む・series done が無い系列は
   「正式系列でない」（判定は undetermined）
-- `--expect-rev` 指定時は rev-stamp.txt と不一致なら拒否する
+- RULE.txt の tree_sha は「規則固定コミットの親（計測対象ツリー）」の SHA。rev-stamp.txt の 2 行目 `parent=<SHA>` と
+  一致しない・行が無い系列は拒否する。`--expect-rev` 指定時は rev-stamp.txt の 1 行目（アーカイブしたコミット）と不一致なら拒否する
 `--self-test` は一時ディレクトリへ生成した fixture で上記を検証する。
 
 総合は FAIL（セル A/B の checksum 不一致）> undetermined > ADOPT／REJECT の順
@@ -335,7 +336,11 @@ def load_ab(abdir):
         official = False
         notes.append("ab の load1 ゲートが全 round pass でない")
     skip = os.path.join(abdir, "skipped-4160-metal-%s.log" % label)
-    if os.path.isfile(skip) and read_text(skip).strip():
+    if not os.path.isfile(skip):
+        # 完了記録・失敗記録が欠けた系列は正式系列と見なさない（compare_gemm_ab.py の fail-closed と同方針）。
+        official = False
+        notes.append("skipped ログが無い")
+    elif read_text(skip).strip():
         official = False
         notes.append("skipped ログに記録あり")
     cells, status = {}, "ok"
@@ -345,8 +350,24 @@ def load_ab(abdir):
             if len(b) != 5 or len(a) != 5:
                 fail("ab のセル行数が 5 でない N=%d mode=%s (before=%d after=%d)" % (n, mode, len(b), len(a)))
             ratios = [x["median_s"] / y["median_s"] for x, y in zip(a, b)]
-            cks = all(x.get("checksum") == y.get("checksum") and x.get("checksum") is not None
-                      for x, y in zip(a, b))
+            # compare_gemm_ab.py と同条件: before／after 全 10 記録の checksum が数値かつ完全一致
+            # （round ごとに値が違う系列は一致と見なさない）。
+            allck = [x.get("checksum") for x in b + a]
+            cks = all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+                      and c == allck[0] for c in allck)
+            # parity_fail_count は全記録で int 0 必須。warmup／iters／version は欠損・不正・
+            # before／after 間不一致を比較条件の欠落として undetermined にする。
+            if not all(type(x.get("parity_fail_count")) is int and x["parity_fail_count"] == 0
+                       for x in b + a):
+                official = False
+                notes.append("N=%d mode=%s: parity_fail_count が 0 でない／欠損" % (n, mode))
+            for fld, okf in (("warmup", lambda v: type(v) is int and v >= 0),
+                             ("iters", lambda v: type(v) is int and v >= 1),
+                             ("version", lambda v: isinstance(v, str) and v != "")):
+                vals = [x.get(fld) for x in b + a]
+                if not all(okf(v) for v in vals) or len(set(vals)) != 1:
+                    official = False
+                    notes.append("N=%d mode=%s: %s が欠損・不正・不一致" % (n, mode, fld))
             cells[(n, mode)] = {
                 "ratios": ratios, "ratio_med": median(ratios), "checksum_exact": cks,
                 "over5": sum(1 for r in ratios if r > 1 + BAND),
@@ -369,7 +390,7 @@ def load_ab(abdir):
             fail("ab の candle 行数が 5 でない N=%d (%d)" % (n, len(c)))
         pf = [x.get("parity_fail_count") for x in c]
         cc[n] = {"ms": [x["median_s"] * 1e3 for x in c],
-                 "valid": all(isinstance(p, int) and not isinstance(p, bool) and p == 0 for p in pf)}
+                 "valid": all(type(p) is int and p == 0 for p in pf)}
     return {"status": status, "cells": cells, "candle": cc, "notes": notes, "label": label}
 
 
@@ -408,12 +429,19 @@ def overall(statuses, ab, nreg, noop_ok):
 def aggregate(d, expect_rev=None):
     rule = check_rule(os.path.join(d, "RULE.txt"))
     rev = read_text(os.path.join(d, "rev-stamp.txt")).strip()
-    # 事前登録した tree_sha と実測リビジョン（.rev-stamp の 1 行目）が一致しない系列は拒否する（腕の取り違え防止）。
-    rev_first = rev.splitlines()[0].strip() if rev else ""
-    if rule["tree_sha"] != rev_first:
-        fail("RULE.txt の tree_sha と rev-stamp が不一致: %r != %r" % (rule["tree_sha"], rev_first))
-    if expect_rev is not None and rev != expect_rev:
-        fail("rev-stamp 不一致: %r != %r" % (rev, expect_rev))
+    # tree_sha は「規則固定コミットの親（計測対象ツリー）」の SHA と定義する。規則固定コミット自身の SHA は
+    # RULE.txt をその中に含むため RULE.txt には書けない（自己参照）。.rev-stamp は 1 行目が実際に
+    # アーカイブした規則固定コミット、2 行目が `parent=<その親の SHA>`。後者を tree_sha と突合する。
+    # 規則固定コミットは RULE.txt のみを足す単独コミットであること（README 手順 1）が前提。
+    rev_lines = [x.strip() for x in rev.splitlines() if x.strip()]
+    rev_first = rev_lines[0] if rev_lines else ""
+    parents = [x[len("parent="):] for x in rev_lines[1:] if x.startswith("parent=")]
+    if len(parents) != 1 or not parents[0]:
+        fail("rev-stamp に `parent=<規則固定コミットの親 SHA>` の行が 1 つだけ無い: %r" % rev)
+    if rule["tree_sha"] != parents[0]:
+        fail("RULE.txt の tree_sha と rev-stamp の parent が不一致: %r != %r" % (rule["tree_sha"], parents[0]))
+    if expect_rev is not None and rev_first != expect_rev:
+        fail("rev-stamp 不一致: %r != %r" % (rev_first, expect_rev))
     tile_ok, _ = check_test_ok(os.path.join(d, "prereq_tile.log"), "tile 単体")
     steel_ok, _ = check_test_ok(os.path.join(d, "prereq_steel.log"), "既存 steel 診断")
     bitident, bit_run_ok = parse_bitident(os.path.join(d, "bitident.log"))
@@ -586,7 +614,8 @@ def _fixture(d, ratio=0.9, official=True, drop_run=None, nonfinite=False, hash_m
         keys["aggregate_script_sha256"] = "0" * 64
     if rule != "none":
         wr("RULE.txt", "".join("%s: %s\n" % kv for kv in keys.items()))
-    wr("rev-stamp.txt", "deadbeef\n")
+    wr("rev-stamp.txt", {"noparent": "cafe0001\n", "selfref": "deadbeef\n"}.get(
+        rule, "cafe0001\nparent=deadbeef\n"))
     wr("env_info.txt", ("host_kind=macmini\n" if host_kind else "") + "Apple M4\n")
     wr("prereq_tile.log", "test result: ok. 3 passed; 0 failed\n")
     wr("prereq_steel.log", "test result: ok. 6 passed; 0 failed\n")
@@ -645,16 +674,25 @@ def _fixture(d, ratio=0.9, official=True, drop_run=None, nonfinite=False, hash_m
                     for mode in (MODES if arm != "candle" else ["fresh"]):
                         med = 0.001 * (n / 256.0) * (1.05 if (arm == "after" and ab_mode == "regress") else 1.0)
                         ck = 3.5 + (0.1 if (arm == "after" and ab_mode == "ckfail") else 0.0)
-                        lines.append(json.dumps({"task": "gemm", "device": "metal", "size": n, "mode": mode,
-                                                 "median_s": med, "checksum": ck, "parity_fail_count": 0}))
+                        if ab_mode == "ckround":
+                            ck += 0.1 * r  # before／after で同じ round 値。round 間では不一致
+                        row = {"task": "gemm", "device": "metal", "size": n, "mode": mode,
+                               "median_s": med, "checksum": ck, "parity_fail_count": 0,
+                               "warmup": 3, "iters": 10, "version": "0.14.0"}
+                        if ab_mode == "pfail" and arm == "after" and r == 1 and n == 1024:
+                            row["parity_fail_count"] = 1
+                        if ab_mode == "nowarm" and arm == "after":
+                            del row["warmup"]
+                        lines.append(json.dumps(row))
             with open(os.path.join(ab, "results-%s-4160-metal-gemm.jsonl" % arm), "w") as f:
                 f.write("\n".join(lines) + "\n")
         with open(os.path.join(ab, "load-gate-4160-metal-4160.log"), "w") as f:
             f.write("threshold=3.0 rule_threshold=3.0 series=official\n")
             for r in RUNS:
                 f.write("round%d gate=pass threshold=3.0 load1=0.5 waited_s=0\n" % r)
-        with open(os.path.join(ab, "skipped-4160-metal-4160.log"), "w") as f:
-            f.write("")
+        if ab_mode != "noskip":
+            with open(os.path.join(ab, "skipped-4160-metal-4160.log"), "w") as f:
+                f.write("")
 
 
 def self_test():
@@ -668,7 +706,7 @@ def self_test():
     def run(**kw):
         with tempfile.TemporaryDirectory() as d:
             _fixture(d, **kw)
-            return aggregate(d, "deadbeef")
+            return aggregate(d, "cafe0001")
 
     def rejects(name, **kw):
         try:
@@ -690,6 +728,9 @@ def self_test():
     check("N=512 の no-op 崩れは undetermined", T + "undetermined**" in run(noop_break=True))
     check("機体不一致（M4 Max）は参考系列で ADOPT にならない", T + "ADOPT**" not in run(soc="Apple M4 Max"))
     check("セル A/B の checksum 不一致は FAIL", T + "FAIL" in run(ab_mode="ckfail"))
+    for m in ("pfail", "nowarm", "noskip"):
+        check("セル A/B %s は ADOPT／REJECT にならず undetermined" % m, T + "undetermined" in run(ab_mode=m))
+    check("セル A/B の round 間 checksum 不一致は FAIL", T + "FAIL" in run(ab_mode="ckround"))
     check("セル A/B が無ければ undetermined", T + "undetermined" in run(ab_mode="none"))
     check("セル A/B の 5/5 round 後退は ADOPT にならない", T + "REJECT" in run(ab_mode="regress"))
     check("NB-SEP は before=after のとき不成立", "| 不成立 |" in run())
@@ -701,7 +742,11 @@ def self_test():
     rejects("RULE.txt の記入欄が未記入", rule="placeholder")
     rejects("RULE.txt の集計器 sha256 不一致", rule="badsha")
     rejects("RULE.txt が無い", rule="none")
-    rejects("RULE.txt の tree_sha と rev-stamp の不一致", rule="treemismatch")
+    rejects("RULE.txt の tree_sha と rev-stamp の parent の不一致", rule="treemismatch")
+    rejects("rev-stamp に parent 行が無い", rule="noparent")
+    rejects("tree_sha を規則固定コミット自身にした旧形式", rule="selfref")
+    # 正のプローブ: 実際の流れ（RULE.txt を足した子コミットを stamp して集計）が通る
+    check("規則固定コミットの親を tree_sha にした正常系が通る", "ADOPT" in run() or "REJECT" in run())
     with tempfile.TemporaryDirectory() as d:
         _fixture(d)
         try:
@@ -711,7 +756,7 @@ def self_test():
             check("fail-closed: rev 不一致", True)
         os.remove(os.path.join(d, "parity.log"))
         try:
-            aggregate(d, "deadbeef")
+            aggregate(d, "cafe0001")
             check("parity 欠損が拒否されなかった", False)
         except AggregateError:
             check("fail-closed: parity.log 欠損", True)
@@ -719,7 +764,7 @@ def self_test():
         _fixture(d)
         with open(os.path.join(d, "load_gate.log"), "w") as f:
             f.write("build-done x\nprereq-tile gate=pass load1=0.5\nseries done\n")
-        md = aggregate(d, "deadbeef")
+        md = aggregate(d, "cafe0001")
         check("一部のみの load_gate.log は正式系列でない", "いいえ（参考系列）" in md and T + "undetermined" in md)
     return 0 if ok else 1
 

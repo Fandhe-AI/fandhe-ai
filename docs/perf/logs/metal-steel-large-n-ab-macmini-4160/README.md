@@ -20,7 +20,7 @@
 
 ## 再現（Mac mini 上。`docs/real-hardware-verification-env.md`）
 
-1. 規則を固定したコミットを `git archive` して `.rev-stamp` を置き、rsync で転送する。ツリー指紋を両側で突合する。
+1. 規則を固定したコミット（RULE.txt のみを足す単独コミット）を `git archive` し、`.rev-stamp` を 2 行（1 行目 = そのコミットの SHA、2 行目 = `parent=<その親の SHA>`。親が RULE の `tree_sha`）で置き、rsync で転送する。ツリー指紋を両側で突合する。
 2. セル A/B 用に before／after の 2 clone を作り、after は `crates/backend-metal/src/tile.rs` の `STEEL_LARGE_N_ENABLED` を false→true の 1 行だけ書き換える（コミットしない）。
 3. 純カーネル計測: `CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai OUT=<出力ディレクトリ> sh orchestrate_macmini.sh`
 4. セル A/B（3 を終えてから。同時に走らせない）:

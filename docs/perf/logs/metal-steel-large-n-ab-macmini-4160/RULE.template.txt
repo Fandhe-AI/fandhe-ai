@@ -3,7 +3,7 @@
   記入欄が `<...>` のままだと aggregate.py は停止する。固定後は本文を変更しない。変更が要るなら RULE.v2.txt で改訂する）
 
 fixed-at-utc: <規則を固定した UTC 時刻>
-tree_sha: <計測対象ツリーの git rev-parse HEAD>
+tree_sha: <計測対象ツリー = 本ファイル（RULE.txt）を足す規則固定コミットの親の SHA>
 tree_fingerprint: <.rev-stamp・.git を除く全ファイルの sha256 を整列して再ハッシュした値>
 aggregate_script_sha256: <固定時点の aggregate.py の sha256>
 
