@@ -268,7 +268,7 @@ def derive(rd):
     add("train", "bwd_nongemm", _sub(t["grad"], gb), "推定")
     add("train", "parts_minus_window", _sub(t["fwd"] + t["grad"] + t["update"] + t["loss_item"], t["window"]), "実測")
     add("train", "dispatch_floor_est", prof["train"]["n_ops_aten_toplevel"] * t["dispatch_floor_add"], "推定")
-    add("train", "torch_wrapper_cost", _sub(gk, ga), "実測")
+    add("train", "torch_vs_ctypes_gap", _sub(gk, ga), "実測")
     # infer
     i = v["infer"]
     gk = _sum(v, "shapes", INFER_G, "mm_batch10")
@@ -282,7 +282,7 @@ def derive(rd):
     add("infer", "checksum", i["checksum"], "実測")
     add("infer", "residual", _sub(i["window"], gk, i["ew_fwd"], i["readout"], i["checksum"]), "推定")
     add("infer", "dispatch_floor_est", prof["infer"]["n_ops_aten_toplevel"] * i["dispatch_floor_add"], "推定")
-    add("infer", "torch_wrapper_cost", _sub(gk, ga), "実測")
+    add("infer", "torch_vs_ctypes_gap", _sub(gk, ga), "実測")
     # gemm256
     g = v["gemm256"]
     add("gemm256", "window", g["window"], "実測")
@@ -293,7 +293,7 @@ def derive(rd):
     add("gemm256", "residual_python_dispatch", _sub(g["window"], g["mm_pure_batch10"], g["readout"], g["checksum"]), "推定")
     add("gemm256", "dispatch_floor_mm", g["dispatch_floor_mm"], "実測")
     add("gemm256", "accelerate_batch10", g["accelerate_batch10"], "実測")
-    add("gemm256", "torch_wrapper_cost", _sub(g["mm_pure_batch10"], g["accelerate_batch10"]), "実測")
+    add("gemm256", "torch_vs_ctypes_gap", _sub(g["mm_pure_batch10"], g["accelerate_batch10"]), "実測")
     return out
 
 
@@ -485,7 +485,7 @@ def self_test():
         tsv = open(os.path.join(d, "a.tsv")).read()
         assert "train\twindow\t実測\t5.00000" in tsv, tsv
         # l1_dx の accel が unavailable でも、窓に使う 5 形状・2 形状は計算できる
-        assert "train\ttorch_wrapper_cost\t実測\t" in tsv
+        assert "train\ttorch_vs_ctypes_gap\t実測\t" in tsv
         # 固定済み RULE は --check-rule で受理される（--check-template は拒否される）
         check_rule(rp)
         try:

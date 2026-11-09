@@ -33,7 +33,7 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
       autograd エンジン・Python 解釈・メモリ確保・backward の要素演算が混ざる。gemm_kernel_batch10 に dispatch が含まれる分、residual は真の残差より小さく出る（下限側）。実測ではないので「推定」と明記する。
   fwd_nongemm（推定）= fwd − Σ gemm_batch10(forward)、bwd_nongemm（推定）= grad − Σ gemm_batch10(backward)。
   dispatch_floor_est（推定）= profile 腕の step あたり最上位 aten op 数 × dispatch_floor_add。区間に含まれる分と重複するため和に入れない。
-  torch_wrapper_cost（実測の差）= mm_pure_batch10 − Accelerate cblas_sgemm 直呼びの batch10（gemm256 と MLP 各形状。直呼びが
+  torch_vs_ctypes_gap（実測の差。torch.mm 経路と ctypes 経路の時間差であり、ctypes の呼び出し費を含むため torch ラッパー費としては帰属させない。負値もありうる）= mm_pure_batch10 − Accelerate cblas_sgemm 直呼びの batch10（gemm256 と MLP 各形状。直呼びが
       unavailable なら空欄）。
   比 = 量 ÷ 窓（run ごと）の中央値。小さな差は run 別の最小〜最大を併記して読む（NB-RANGE5）。
   profiler 腕は op 数と aten::mm が子 op を持つかだけを使う。時間値は使わない（profiler は計測を摂動する）。

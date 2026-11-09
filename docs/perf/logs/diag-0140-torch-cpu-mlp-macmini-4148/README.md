@@ -12,7 +12,7 @@ PyTorch CPU（Apple M4・Accelerate）の窓を、判定ではなく内訳とし
 
 1. MLP train（batch 64）・MLP infer の 1 窓を「純カーネル（BLAS）／非 GEMM の要素演算／残差（dispatch・autograd・Python 固定費）」に分ける。
 2. GEMM N=256 の窓（相手の純 mm 0.024 ms が窓の 7.5%）を「純 mm／readout／checksum／残差」に分け、torch の mm と
-   Accelerate `cblas_sgemm` 直呼びの差（torch ラッパー費）を出す。
+   Accelerate `cblas_sgemm` 直呼びの差（`torch_vs_ctypes_gap`）を出す。Accelerate 側は毎回 Python から ctypes で呼ぶため、差には ctypes の引数変換費（14 引数）が含まれ、torch ラッパー費としては帰属させない（負値もありうる）。
 3. 各値に証拠タグ（実測／推定／未測定）を付ける。残差は「推定」。到達不能な量は unavailable のまま空欄にする。
 
 ## 読み方の注意
