@@ -19,6 +19,13 @@
 # GPU compute プロセス 0 件（`nvidia-smi --query-compute-apps`）を専有ゲートに加える。
 # 手順: `docs/perf/logs/cpu-gemm-reuse-release-sizegate-4158/README.md`。
 #
+# イシュー #4159（同じサイズゲートの Mac mini 非後退 A/B）: `AB_ISSUE=4159` は macmini 限定で、
+# 4158 と同じ腕（before=main／after=同一コミットで `EAGER_MATMUL_RELEASE_DEFAULT_ENABLED` 1 行のみ true）
+# に診断経路セルを足す。N=4096 は Mac mini のプロファイルに無い（32 MiB 超は after でも解放されず
+# 構造上 A/A のため）。nvidia-smi の専有ゲートは適用しない（Mac mini に無い）。
+# 判定は judge の `--rule-set 4159`（終了コード 0=NONREGRESS 1=REGRESS 2=undetermined）。
+# 手順: `docs/perf/logs/cpu-gemm-reuse-release-sizegate-macmini-4159/README.md`。
+#
 # 呼び出し例（専有ゲートは機体ごとの規則閾値）:
 #   AB_PROFILE=gb10 \
 #   AB_BEFORE_FACADE_PATH=/path/to/before/crates/facade \
@@ -35,8 +42,9 @@ TAG=${AB_ISSUE:-3226}
 case "$TAG" in
   3226) RULE_DIR=cpu-gemm-reuse-release-3226 ;;
   4158) RULE_DIR=cpu-gemm-reuse-release-sizegate-4158 ;;
+  4159) RULE_DIR=cpu-gemm-reuse-release-sizegate-macmini-4159 ;;
   *)
-    echo "error: AB_ISSUE must be 3226|4158 (got: ${TAG})" >&2
+    echo "error: AB_ISSUE must be 3226|4158|4159 (got: ${TAG})" >&2
     exit 1
     ;;
 esac
@@ -81,6 +89,13 @@ TASK_FILES="gemm train infer"
 if [[ "$TAG" == 4158 ]]; then
   if [[ "$PROFILE" != gb10 ]]; then
     echo "error: AB_ISSUE=4158 は AB_PROFILE=gb10 限定です（Mac mini は #4159）" >&2
+    exit 1
+  fi
+  TASK_FILES="gemm train infer gemmdiag traindiag"
+fi
+if [[ "$TAG" == 4159 ]]; then
+  if [[ "$PROFILE" != macmini ]]; then
+    echo "error: AB_ISSUE=4159 は AB_PROFILE=macmini 限定です（GB10 は #4158）" >&2
     exit 1
   fi
   TASK_FILES="gemm train infer gemmdiag traindiag"
@@ -331,7 +346,7 @@ run_gate_precheck() { # run_gate_precheck <arm> <facade_path> <expect 0|1>
   fi
   echo "precheck(${arm},mode=${PRECHECK}): $(grep "^${PRECHECK_LINE}" "$out" | head -n1)"
   # 4158: 両腕のサイズゲート閾値が RULE の値と一致することを assert する（閾値だけ違う偽の A/B を遮断）。
-  if [[ "$TAG" == 4158 && "$PRECHECK" == assert ]]; then
+  if [[ ( "$TAG" == 4158 || "$TAG" == 4159 ) && "$PRECHECK" == assert ]]; then
     if ! grep -q "^eager_release_report size_gate_max_bytes=${SIZE_GATE_BYTES}\$" "$out"; then
       echo "error: precheck (${arm}) の size_gate_max_bytes が ${SIZE_GATE_BYTES} ではありません" >&2
       exit 1
@@ -568,7 +583,7 @@ for run_i in $(seq 1 "$ROUNDS"); do
       run_pair "$run_i" "$task" "$mode"
     done
   done
-  if [[ "$TAG" == 4158 ]]; then
+  if [[ "$TAG" == 4158 || "$TAG" == 4159 ]]; then
     for size in $GEMM_SIZES; do
       run_pair "$run_i" gemm reuse "$size" diag
     done
@@ -699,8 +714,8 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   JUDGE_ARGS=("--${PROFILE}-before" "$OUT/results-before-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-infer.jsonl"
     "--${PROFILE}-after" "$OUT/results-after-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-infer.jsonl"
     "--${PROFILE}-gate-log" "$GATE_LOG")
-  if [[ "$TAG" == 4158 ]]; then
-    JUDGE_ARGS=(--rule-set 4158
+  if [[ "$TAG" == 4158 || "$TAG" == 4159 ]]; then
+    JUDGE_ARGS=(--rule-set "$TAG"
       "--${PROFILE}-before" "$OUT/results-before-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-infer.jsonl"
       "$OUT/results-before-${LABEL}-${DEVICE}-gemmdiag.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-traindiag.jsonl"
       "--${PROFILE}-after" "$OUT/results-after-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-infer.jsonl"
@@ -710,7 +725,7 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   if [[ "$GATE_NOT_OK" -gt 0 || "$GATE_SERIES" != official ]]; then JUDGE_ARGS+=(--record-only); fi
   python3 -I judge_eager_release_ab.py "${JUDGE_ARGS[@]}" >"judge-${TAG}-${LABEL}.md" 2>&1
   JUDGE_EXIT=$?
-  echo "judge exit=${JUDGE_EXIT} (0=ADOPT 1=REJECT 2=undetermined) -> judge-${TAG}-${LABEL}.md" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
+  echo "judge exit=${JUDGE_EXIT} (0=ADOPT|NONREGRESS 1=REJECT|REGRESS 2=undetermined) -> judge-${TAG}-${LABEL}.md" | tee -a "$OUT/compare-exit-${TAG}-${DEVICE}-${LABEL}.log"
   case "$JUDGE_EXIT" in
     0 | 1 | 2) ;;
     *)
