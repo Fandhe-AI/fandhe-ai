@@ -1778,6 +1778,63 @@ pub(crate) const UNROLL_LOAD_ENABLED: bool = false;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const FRAG_INTERLEAVE_ENABLED: bool = false;
 
+/// N≥1024 の正方 3 点に限って steel 候補 T0U-LU-FB（`CANDIDATES[0]` + UNROLL_ACC +
+/// UNROLL_LOAD + FINE_BARRIER）を選ぶ opt-in の既定値（イシュー #4160）。
+///
+/// 出典: #2110（steel 差分候補の機構）・#3184 G6（`docs/perf/logs/optin-ab-macmini-3184/
+/// steel-r2/aggregate.md`。T0U-LU-FB は N≥1024 で純カーネルが速い一方 N=512 が一貫せず
+/// UNDETERMINED。ただし base 腕は M4Base 表導入前の汎用選択で、現行表に対する効果は未測）。
+/// [`crate::gemm::MetalGemm::new`] 系は常に本定数（`false`）で初期化するため既定挙動は不変。
+/// 構築入口は `#[cfg(test)]` の `MetalGemm::new_with_steel_large_n` のみ。本定数を `true` に
+/// する結線は Mac mini 実測（`docs/perf/metal-gemm-steel-candidates.md` §11）後の別判断
+/// （#4166）で、既定値変更はユーザー承認事項。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`UNROLL_ACC_ENABLED`] と同じ。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const STEEL_LARGE_N_ENABLED: bool = false;
+
+/// [`select_steel_large_n`] が返す、形状限定 steel 候補の構成（イシュー #4160）。
+/// `cfg` は `CANDIDATES[0]`、ゲート 3 軸（acc unroll の instance 側・load unroll・細粒度
+/// バリア）は常に `true`。呼び出し元は `crate::gemm::MetalGemm` の classic 経路のみ。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SteelLargeNProfile {
+    pub(crate) cfg: TileConfig,
+    pub(crate) unroll_acc: bool,
+    pub(crate) unroll_load: bool,
+    pub(crate) fine_barrier: bool,
+}
+
+/// 形状限定 steel 候補を適用するか判定する（イシュー #4160）。`enabled` かつ M4Base（Mac mini
+/// 実測機種）かつ `(m, n, k)` が実測 3 点（正方 1024／2048／4096）と**完全一致**のときだけ
+/// `Some`。「実測範囲外へ無根拠に拡張しない」方針（§8.3）に従い、N=512 以下・非正方・
+/// 8192 以上・M4Max・未検証機種は常に `None`（既存の表選択のまま）。
+/// 3 点はいずれも split-K に入らない（単体テストで固定）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn select_steel_large_n(
+    m: usize,
+    n: usize,
+    k: usize,
+    device: Option<VerifiedTileTableDevice>,
+    enabled: bool,
+) -> Option<SteelLargeNProfile> {
+    if !enabled || !matches!(device, Some(VerifiedTileTableDevice::M4Base(_))) {
+        return None;
+    }
+    if !matches!(
+        (m, n, k),
+        (1024, 1024, 1024) | (2048, 2048, 2048) | (4096, 4096, 4096)
+    ) {
+        return None;
+    }
+    Some(SteelLargeNProfile {
+        cfg: CANDIDATES[0],
+        unroll_acc: true,
+        unroll_load: true,
+        fine_barrier: true,
+    })
+}
+
 /// `shaders/gemm.metal` の `FRAG_INTERLEAVE_ACTIVE` の Rust 側モデル（テスト専用）。
 /// 実効条件: ゲート ON・Legacy タイルクラス・staged・K=1 段ロード・実効 unroll_acc
 /// なし・split-K なし。外れる構成はシェーダ側で現行コードを通る（no-op 契約）。
@@ -5087,6 +5144,61 @@ mod tests {
             "UNROLL_LOAD_ENABLED が true のままコミットされている疑いがあります。\
              本番既定は false です（イシュー #2110・tile.rs UNROLL_LOAD_ENABLED doc）。"
         );
+    }
+
+    /// `STEEL_LARGE_N_ENABLED` のコミット状態既定値が `false` であることをロックする（#4160）。
+    #[test]
+    fn steel_large_n_enabled_is_false_by_default() {
+        assert!(
+            !std::hint::black_box(STEEL_LARGE_N_ENABLED),
+            "STEEL_LARGE_N_ENABLED が true のままコミットされている疑いがあります。\
+             本番既定は false です（イシュー #4160・tile.rs STEEL_LARGE_N_ENABLED doc）。"
+        );
+    }
+
+    fn m4_base_for_test() -> Option<VerifiedTileTableDevice> {
+        verify_m4_base(Some(M4_BASE_GPU_CORE_COUNT), Some(M4_BASE_SOC_BRAND))
+            .map(VerifiedTileTableDevice::M4Base)
+    }
+
+    /// 実測 3 点（M4Base・enabled）だけが `CANDIDATES[0]` + 3 ゲート ON を返す（#4160）。
+    #[test]
+    fn steel_large_n_selects_measured_points_only() {
+        let dev = m4_base_for_test();
+        assert!(dev.is_some());
+        for n in [1024usize, 2048, 4096] {
+            let p = select_steel_large_n(n, n, n, dev, true).expect("実測点は Some");
+            assert_eq!(p.cfg, CANDIDATES[0]);
+            assert!(p.unroll_acc && p.unroll_load && p.fine_barrier);
+            assert!(
+                p.cfg.unroll_acc_loops(),
+                "acc 積閾値を満たし unroll が実効化すること"
+            );
+            // split-K に入らない（classic 経路のみが対象）。
+            assert!(matches!(
+                select_route_for_verified_device(n, n, n, dev),
+                GemmRoute::Classic(_)
+            ));
+        }
+        for n in [8usize, 256, 512, 768, 3072, 8192] {
+            assert!(select_steel_large_n(n, n, n, dev, true).is_none(), "n={n}");
+        }
+        for (m, n, k) in [(1024, 1024, 2048), (1024, 2048, 1024), (2048, 1024, 1024)] {
+            assert!(select_steel_large_n(m, n, k, dev, true).is_none());
+        }
+    }
+
+    /// `enabled=false`・M4Max・未検証機種では全形状で `None`（既存選択のまま。#4160）。
+    #[test]
+    fn steel_large_n_is_none_when_disabled_or_wrong_device() {
+        let base = m4_base_for_test();
+        let max = verified_m4_max_for_test().map(VerifiedTileTableDevice::M4Max);
+        assert!(max.is_some());
+        for n in [256usize, 512, 1024, 2048, 4096] {
+            assert!(select_steel_large_n(n, n, n, base, false).is_none());
+            assert!(select_steel_large_n(n, n, n, max, true).is_none());
+            assert!(select_steel_large_n(n, n, n, None, true).is_none());
+        }
     }
 
     /// `FRAG_INTERLEAVE_ENABLED` の**コミット状態既定値**が `false` に固定されて

@@ -107,6 +107,8 @@ M4 Max の `MTLDevice.architecture.name` 確認・MLX Ultra 分岐／NAX split-K
 
 ### 8.3 `T0U`／`T0U-LU`／`T0U-LU-FB` が ADOPT_CANDIDATE の場合（別設計 PR が必要）
 
+（N≥1024 限定の opt-in 機構と現行表との A/B 基盤は §11〔#4160〕。）
+
 - `select_candle_equivalent` と `STEEL_ARMS` は `#[cfg(test)]` 限定で、`UNROLL_ACC_ENABLED` はグローバル定数（acc 積 16 以上の候補すべてに効く）。無条件 unroll は `metal-gemm-n4096-kernel-gap.md` §7.6a で N=512〜2048 が 15〜35% 後退し撤回済みのため、定数の切替では結線できない。
 - 形状スコープ付きの選択機構（計測済み正方 N のみ対象・CANDIDATES[0] 選択時だけ unroll_acc を実効化）が必要で、設計判断となる。ユーザー承認と別イシュー／別 PR で扱う（`select_for_device` の本番化・`unroll_acc_loops_for` との整合・既存タイル選択テストの改修を含む）。
 - **N=512 は結線対象から外す（保留）**。RULE.txt 9. の candle デバイス区分仮定に依存するため、`env_info.txt` の `mtl_architecture_name` で M4 Max の区分が確認されるまで結線しない。N>=1024 は区分に依らない。
@@ -267,3 +269,47 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 - 結線（既定の反転）はしない。仮に行う場合は別 PR・所有者判断で、M4 Max での確認が先に要る。
 - 本 issue で扱っていない候補: kk full unroll、`UNROLL_ACC` との併用、蛇行発行順、f16 への適用（§10.6）。
+
+## 11. N≥1024 限定の T0U-LU-FB opt-in と現行表との A/B（イシュー #4160）
+
+状態: **機構・計測基盤を追加済み（PR-1）。Mac mini の実測は未実施**（§11.5 の記入欄は空）。
+
+### 11.1 背景
+
+- #3184 G6（`docs/perf/logs/optin-ab-macmini-3184/steel-r2/aggregate.md`）で T0U-LU-FB は N=1024／2048／4096 の純カーネルが速く、N=512 が一貫せず UNDETERMINED だった。
+- ただし G6 の `base` 腕は M4Base 表導入前の汎用選択（`CANDIDATES[3]`）で、現行本番（#3206 の M4Base 表。N=1024 が `[1]`、N=2048／4096 が `[2]`）に対する効果は**未測**。本節はその現行表を変更前の腕として測り直す。
+- 本 Issue 本文にある換算値（N=2048 の窓 約 9.43 ms 対 candle 9.52 ms）は本 doc 内に出典が見つからなかったため採用せず、再実測で置き換える。
+
+### 11.2 機構（既定 OFF）
+
+- `tile::STEEL_LARGE_N_ENABLED`（`false`）と `tile::select_steel_large_n(m, n, k, device, enabled)`。次を**すべて**満たすときだけ `CANDIDATES[0]` + UNROLL_ACC + UNROLL_LOAD + FINE_BARRIER を選ぶ。
+  - `enabled`、デバイスが `M4Base`、`(m, n, k)` が正方 1024／2048／4096 のいずれかと完全一致。
+- スコープ判断（安全側）: Issue は「N≥1024」だが、§8.3 と既存表の方針（実測範囲外へ無根拠に拡張しない）に従い、実測した 3 点との完全一致に絞った。N=512 以下・非正方・8192 以上・M4Max・未検証機種は既存の表選択のまま。
+- `MetalGemm` は classic 経路（fresh の `dispatch_auto_with_route_impl` と reuse の `dispatch_auto_resident`）で `classic_plan` を共有し、該当形状だけ `GateProfile::SteelLargeN` でパイプラインを解決する。**専用の `steel_large_n_cache`** を持ち、ゲート違いのパイプラインが `tiled_cache` 経由で別形状へ返る取り違えを構造的に防ぐ。split-K の classic フォールバック内の選択は対象外（3 点は split-K に入らない。単体テストで固定）。
+- `shaders/gemm.metal` は変更しない（既存 function constant の組み合わせのみ）。
+
+### 11.3 REQ-8・数値
+
+- UNROLL_LOAD の unroll 版は `*_group_in_bounds` 判定とスカラー 0 埋めを両 variant で同じに保ち、FINE_BARRIER はバリア挿入のみ（§3）。境界検査は外していない（`tests/shader_source_evidence.rs` で固定）。
+- 対象 3 点では ON でタイルが変わるため、現行出力との bit 一致は契約の対象外。K ループは単一の連続ループで split-K は使わないため、REQ-2 の統一複合判定をそのまま適用する（tolerance は不変）。
+
+### 11.4 事前登録と計測
+
+- 規則の雛形: `docs/perf/logs/metal-steel-large-n-ab-macmini-4160/RULE.template.txt`。記入欄を埋めた `RULE.txt` を**測る前に単独コミット**で固定する。
+- 診断テスト: `crates/backend-metal/src/gemm_steel_large_n_diag_tests.rs`（腕は `cur`／`sl`／`ref`／`cur_aa`）。起動は `orchestrate_macmini.sh`、集計は `aggregate.py`、セル A/B は `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`。
+- 「1 位に変わった」と書けるのは NB-SEP 成立時のみ。NB-RANGE5／NB-SEP は `docs/perf/noise-band-decision.md`（#4142。記録時点で所有者承認待ちの案）を名前で参照する。
+
+### 11.5 実測記入欄（未実測）
+
+| N | cur kernel_gpu ms | sl kernel_gpu ms | sl/cur | 判定 |
+|---|---|---|---|---|
+| 1024 | 未実測 | 未実測 | - | - |
+| 2048 | 未実測 | 未実測 | - | - |
+| 4096 | 未実測 | 未実測 | - | - |
+
+セル A/B・スコアボード比・総合判定も未実測。
+
+### 11.6 申し送り
+
+- Mac mini: 規則の固定（単独コミット）→ 5 run 計測 → 判定記入 → `loss-attribution-matrix.md` の M-MTL-G1024／G2048 行更新 → `Closes #4160`。
+- `STEEL_LARGE_N_ENABLED` の既定反転は Phase 4（#4166）・所有者承認事項。M4 Max での確認も結線前に要る。
