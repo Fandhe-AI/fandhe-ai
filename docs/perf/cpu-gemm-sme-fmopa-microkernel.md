@@ -1025,3 +1025,21 @@ GB10-GATE-ONLY-STRUCTURAL := GB10 は構造ゲート（P-R0・P-BIT・checksum�
 #### 限界
 
 N=5・単一機体。帰無確率は概算。`train 64 fresh` の実差の可能性は本データでは切り分けられない。本節は追加計測を伴わない。
+
+### 5.17 SME 既定 ON の新しい事前登録 A/B（イシュー #4156）
+
+2026-10-28 の所有者判断（§5.15）のとおり、`SME_PRODUCTION_ENABLED` を `true` に戻すのは新しい事前登録 A/B に合格したときだけである。本節はその A/B（Mac mini と GB10）の記録。
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | **事前登録・未実測**。計測部品と規則（`RULE.txt`）を固定した段階。実測は実機セッションで行う |
+| 計測の前提 | **P-OWNER 不成立のため計測は始まらない**。RULE §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING に、所有者の回答コメント URL つきで決定を転記する必要がある。#4143（§5.16）・#4142（`noise-band-decision.md`）はともに「案・所有者承認待ち／承認欄 未取得」のまま。承認済みとは書かない |
+| 規則・部品 | `docs/perf/logs/sme-default-on-ab-4156/`（`RULE.txt`・`on-arm.patch`・`orchestrate_macmini.sh`・`orchestrate_gb10.sh`・`aggregate.py`）、A/B 本体 `scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` |
+| 腕 | before = OFF（main・定数 false）、after = ON（`on-arm.patch` を当てた計測専用ツリー。main へコミットしない）。#3232 と逆の組み立て。比 = ON / OFF |
+| 結果 | 未実測（ADOPT／REJECT／FAIL／undetermined のいずれも未確定） |
+| 不変 | 既定 OFF のまま。定数・ドリフト検出テスト・unsafe・FMA 契約・tolerance・baseline は変えない。SME の unsafe 独立監査は #4157、既定の切り替えは #4165 と所有者承認 |
+
+- 交絡: #3635 以降 `reuse` は常駐入力経路で、#3232 の値とは条件が違う。旧値と並べて比べない。
+- P-RT は ON 腕で `sme_production_disabled_after_gb10_reject`（定数 true では作りの上で必ず落ちる）だけを計測前に固定して除外する。OFF 腕は除外なし。
+- P-BIT は Mac mini でも取る（ON/OFF の bit 同一、すなわち SME と NEON の bit 同一の実証になる）。
+- 6 フレームワークのスコアボードでの 1 位化は Phase 6 で確定する。本 A/B の PyTorch 比は記録のみ。
