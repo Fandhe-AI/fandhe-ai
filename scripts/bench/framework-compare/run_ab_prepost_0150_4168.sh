@@ -109,6 +109,11 @@ if git -C "$BASE_ROOT" cat-file -e "$BASELINE_COMMIT^{commit}" 2>/dev/null; then
   consts_of "$BASELINE_COMMIT" >"$OUT/consts-baseline.txt"
   consts_of WORKTREE >"$OUT/consts.txt"
   [[ -s "$OUT/consts.txt" && -s "$OUT/consts-baseline.txt" ]] || precheck_fail "ゲート定数を抽出できない"
+  # baseline 側の定数が現在側で削除・抽出対象外化されても見逃さない（baseline の全キーが現在側に在ることを先に検査）
+  while IFS= read -r bline; do
+    bname=${bline%%=*}
+    grep -qF "$bname=" "$OUT/consts.txt" || precheck_fail "baseline のゲート定数が現在側に無い（削除・抽出対象外化）: $bname"
+  done <"$OUT/consts-baseline.txt"
   while IFS= read -r line; do
     name=${line%%=*}; val=${line#*=}
     base_val="$(grep -F "$name=" "$OUT/consts-baseline.txt" | head -n1 | sed 's/.*=//')"
