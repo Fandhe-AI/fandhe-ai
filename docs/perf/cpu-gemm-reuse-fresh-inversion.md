@@ -1122,6 +1122,8 @@ gemm reuse（CPU）は `tape.matmul_resident`、train／infer reuse は常駐チ
 - 既定の反転（#3227）は両機体の判定のあとに別途判断する
 - 16〜64 MiB の間の閾値スイープはしていない
 
+- #4165: 判定未取得のため結線していない（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
+
 ## 19. #4159: サイズゲートの Mac mini 非後退 A/B
 
 状態: **部品のみ・未実測**。判定器・run スクリプトの 4159 モードと手順書を入れた。Mac mini の事前登録 A/B はまだ実施していない（`RULE.txt` は計測前に単独コミットで固定する）。
@@ -1151,3 +1153,5 @@ gemm reuse（CPU）は `tape.matmul_resident`、train／infer reuse は常駐チ
 
 - GB10 の判定は #4158（本節と合わせて #3227 が既定の反転を判断する）
 - N=4096 の Mac mini セル・16〜64 MiB の閾値スイープ・常駐経路への解放／プール機構は対象外
+
+- #4165: 判定未取得のため結線していない（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
