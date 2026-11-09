@@ -70,7 +70,7 @@ for p in json.load(sys.stdin)["packages"]:
 mapfile -t LIBS < <(printf '%s' "$META" | python3 -c 'import json,sys
 for p in json.load(sys.stdin)["packages"]:
     for t in p["targets"]:
-        if "lib" in t["kind"] or "rlib" in t["kind"] or "proc-macro" in t["kind"]:
+        if "lib" in t["kind"] or "rlib" in t["kind"]:
             print(t["name"].replace("-", "_"))')
 [ "${#PKGS[@]}" -gt 0 ] || { echo "workspace メンバーが取れない" >&2; exit 2; }
 for n in "${PKGS[@]}" "${LIBS[@]}"; do
@@ -95,15 +95,28 @@ for l in open(sys.argv[1]):
         print(m["executable"])' "$OUT/build.json.raw" | tail -n 1)
   FILES=()
   [ -n "$EXE" ] && FILES+=("$EXE")
+  # 必須 lib（lib ターゲットを持つ全メンバー）ごとに .rlib と .rmeta の両方を要求する。glob 不一致は欠落として不合格にする（§4.11）。
+  [ "${#LIBS[@]}" -gt 0 ] || FRESH_OK=0
   for l in "${LIBS[@]}"; do
-    for f in "$CARGO_TARGET_DIR"/debug/deps/lib"$l"-*.rlib; do
-      [ -e "$f" ] && FILES+=("$f")
+    for ext in rlib rmeta; do
+      FOUND=0
+      for f in "$CARGO_TARGET_DIR"/debug/deps/lib"$l"-*."$ext"; do
+        if [ -e "$f" ]; then
+          FILES+=("$f")
+          FOUND=1
+        fi
+      done
+      if [ "$FOUND" = 0 ]; then
+        echo "MISSING lib${l}-*.${ext}"
+        FRESH_OK=0
+      fi
     done
   done
   [ -n "$EXE" ] || FRESH_OK=0
   for f in "${FILES[@]}"; do
     M=$(stat -c %Y "$f")
-    if [ "$M" -gt "$START_EPOCH" ] || [ "$M" -eq "$START_EPOCH" ]; then R=fresh; else R=STALE; FRESH_OK=0; fi
+    # 開始時刻と同じ秒は不合格（厳密に後であること。§4.11）。
+    if [ "$M" -gt "$START_EPOCH" ]; then R=fresh; else R=STALE; FRESH_OK=0; fi
     echo "$R $M $(basename "$f")"
   done
   echo "freshness_ok: $FRESH_OK"
