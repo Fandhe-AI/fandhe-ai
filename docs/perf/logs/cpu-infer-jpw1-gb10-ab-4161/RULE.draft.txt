@@ -1,0 +1,60 @@
+RULE（下書き。#4161 GB10 推論限定 jpw1 の事前登録 A/B）
+=====================================================
+状態: 下書き。マージ後に main の SHA を tree_sha として RULE.txt にコピー・記入し、
+      測る前に単独コミットで固定する。固定後は閾値を動かさない。変更は RULE.v2.txt で行う。
+
+PARAMS（aggregate.py が読む。<...> が残っていると実行を拒否する）
+  fixed-at-utc: <YYYY-MM-DDTHH:MM:SSZ>
+  tree_sha: <main の完全 SHA>
+  tree_fingerprint: <git archive の sha256>
+  aggregate_script_sha256: <aggregate.py の sha256>
+  rounds: 5
+  arms: off,inf-jpw1
+  machine: <cuda-node>
+
+1. 解釈
+  jpw1 = jobs_per_worker=1。A の pack 共有（#3199 の G1）は含めない。
+  GB10_AFFINITY_ENABLED は false のまま。affinity の再判定はしない。
+
+2. 腕
+  off      : 対象 tree そのまま（INFER_SCOPE_JPW1_ENABLED=false）
+  inf-jpw1 : ab_patch_inf_jpw1.diff を当てた複製ツリー（定数を true にする 1 行）
+  GB10 のみ。main にはコミットしない。
+
+3. セル（判定対象）: bench-fandhe size=64 device=cpu の
+  train×fresh, train×reuse, infer×fresh, infer×reuse の 4 セル。
+  値は bench-fandhe の median_s。比は「inf-jpw1 / off」。
+  単体 6 形状（cpu_jobgrid_bench）と gemm タスクは推論スコープに入らず機構が構造上発火しない
+  ため、セルに置かない。
+  同じラウンド内で PyTorch CPU の train／infer を測る（記録のみ）。
+
+4. 反復: 5 ラウンド。腕の起動順はラウンドごとにローテーション。腕ごとに独立プロセス。
+  比は 5 ラウンドの中央値。
+
+5. ゲート（GB10 専有）: compute プロセス 0 件・GPU 使用率 0 が 3 サンプル連続・load1 < 1.0。
+  30 秒間隔で最大 30 分。不通過は gate.txt に TIMEOUT と書き、そのラウンドは正式系列から外す。
+  5/5 通過した系列だけを正式系列とする。RAYON_NUM_THREADS が設定されていれば実行を拒否する。
+
+6. 機構発火の前提（fail-closed）: prereq/<arm>.log の probe 行で確かめる。
+  inf-jpw1: infer_fresh・infer_reuse で applied>0、train_fresh・train_reuse で applied==0。
+  off      : すべて applied==0。
+  両腕: gb10_affinity enabled=false。
+
+7. checksum: 各セルで全腕・全ラウンドが完全一致しなければ FAIL。
+
+8. 判定（4 値）
+  ADOPT        : 正式系列で、前提が成立し、checksum が一致し、
+                 infer fresh と infer reuse の中央値比がともに < 1.00、
+                 かつ train fresh と train reuse の中央値比がともに <= 1.00。
+  REJECT       : train セルのどれかが > 1.00、または infer セルのどれかが >= 1.00。
+  undetermined : ゲート不成立・前提不成立・標本不足・未到達。
+  FAIL         : checksum 不一致。
+  優先順位: FAIL > undetermined > REJECT > ADOPT。
+
+9. 記録のみ（判定に使わない）: NB-RANGE5 と NB-SEP（docs/perf/noise-band-decision.md。同 doc は案で
+  所有者の承認待ち）。同一ラウンドの PyTorch と比べて G-CPU-INF が 1 位に変わったかを NB-SEP で記録する。
+  定義が変わったら RULE.v2.txt で反映する。
+
+10. 運用: 計測中はビルド・集計・転送を並走させない。ログの上書き・run の差し替えはしない。
+  未到達は unavailable と書く。$HOME は <home>、ホスト名は <cuda-node> に置換して収録する。
+  ADOPT でも既定の反転は #4165 で行う（本 A/B は反転しない）。
