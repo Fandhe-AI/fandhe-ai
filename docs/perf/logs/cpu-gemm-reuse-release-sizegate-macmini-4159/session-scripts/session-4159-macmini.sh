@@ -4,7 +4,9 @@
 # ビルドは run スクリプトが round より前に直列で行うため、計測中のビルド並走は無い。
 # 使い方: session-4159-macmini.sh <label>   （label は ^[A-Za-z0-9._-]+$）
 # 配置: $HOME/work/r4159/{runner,before,after}
-#   runner = 部品を入れたコミットの git archive 展開木、before = main、after = 同一コミットに 4158 の on-arm.patch を当てた木
+#   runner・before・after = 同一コミットの Git クローン（run スクリプトが rev-parse --show-toplevel と HEAD 一致を要求するため
+#   アーカイブ展開木は不可。各ツリーに .rev-stamp を置く）。after だけ 4158 の on-arm.patch を当てる
+#   回収: 終了時に runner の results/raw と compare・judge の成果物（ラベル一致分）を out-<label>/artifacts/ へ集約する
 # 終了コードは run スクリプトの rc を反映する（終端行 `done. rc=` を steps.log に書く）。
 # パスは固定定数のみで組み立て、外部入力（label を除く）を展開しない。ホスト名・ユーザー名は書かない。
 export PATH=$HOME/.cargo/bin:$PATH
@@ -43,5 +45,12 @@ AB_ISSUE=4159 AB_PROFILE=macmini \
   bash run_ab_eager_release_cpu.sh "4159-${label}" >>"${O}/run.log" 2>&1
 rc=$?
 step "run_ab rc=${rc}"
+# JSONL・負荷ゲートログ・compare・judge は run スクリプトの cwd 配下に出るため、再判定用の証跡として out-<label>/ へ集約する
+A=${O}/artifacts
+F=${T}/scripts/bench/framework-compare
+mkdir -p "${A}/raw"
+cp -p "${F}/results/raw/"*"4159-${label}"* "${A}/raw/" 2>>"${LOG}"
+cp -p "${F}"/compare-*"4159-${label}"* "${F}"/judge-*"4159-${label}"* "${A}/" 2>>"${LOG}"
+step "artifacts collected: $(ls "${A}/raw" 2>/dev/null | wc -l) raw files"
 echo "done. rc=${rc}" >>"${LOG}"
 exit "${rc}"

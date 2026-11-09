@@ -38,10 +38,10 @@ after 腕の 1 行差分は #4158 の `../cpu-gemm-reuse-release-sizegate-4158/o
 ホスト名は公開面で `<metal-node>`（実名は Git 管理外の `docs/real-hardware-verification-env.local.md`）。
 手順 1〜2 は #3226 の `../cpu-gemm-reuse-release-3226/README.md` と同じ（bundle 配布・`.rev-stamp`）。
 
-1. 部品を入れたコミットの `git archive` を `$HOME/work/r4159/runner` へ展開し、`.rev-stamp` を置く
-2. `before` と `after` を同一コミットの 2 クローンとして置く。`after` だけ `git apply <sizegate-4158>/on-arm.patch`
+1. 部品を入れたコミットの Git クローンを `$HOME/work/r4159/runner` に作り、`.rev-stamp` を置く（アーカイブ展開木は不可。run スクリプトが `git rev-parse --show-toplevel` と HEAD 一致を要求し、ハードウェアロック取得直後に失敗する）
+2. `before` と `after` を runner と同一コミットのクローンとして置く（各 `.rev-stamp` 付き）。`after` だけ `git apply <sizegate-4158>/on-arm.patch`
 3. `zsh -lc` 経由の nohup で `bash session-scripts/session-4159-macmini.sh <label>` を起動する（計測中に別のビルドを並走させない）
-4. 回収: `out-<label>/` を `macmini/` へ。マスク規則はホスト名 → `masked`、`$HOME` → `<home>`、ユーザー名 → `<user>`。マスク後に `spark`・`mac-mini`・`/home/`・`/Users/` が 0 件であることを grep で確認する
+4. 回収: `out-<label>/`（`steps.log`・`run.log` に加え、終了時に JSONL・負荷ゲートログ・compare・judge をラベル一致分だけ `artifacts/` へ集約済み）を `macmini/` へ。マスク規則はホスト名 → `masked`、`$HOME` → `<home>`、ユーザー名 → `<user>`。マスク後に `spark`・`mac-mini`・`/home/`・`/Users/` が 0 件であることを grep で確認する
 5. `judge-4159.md`（`python3 -I judge_eager_release_ab.py --rule-set 4159 ...` の出力）と `rev-stamp-verification-4159.md` を置き、`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §19.4 を更新する
 
 - 開発機の疎通確認は `AB_PRECHECK=report-only`（正式系列にならない）
