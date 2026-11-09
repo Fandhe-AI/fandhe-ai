@@ -1,0 +1,89 @@
+イシュー #4156 事前登録規則 (SME 既定 ON の新しい事前登録 A/B を Mac mini と GB10 で実測する)
+fixed-at-utc: 2026-11-09T14:30:00Z (この規則は計測前に単独コミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る。§9 の所有者決定の転記だけは計測前に追記してよい)
+登録基準: origin/main の d551b31403f825c458723f80ee266af1926e1378 (計測部品のコミット) + 本規則 1 ファイルだけを足したコミット。squash 後は SHA が変わるため、P-TREE は SHA ではなく内容で検査する (下記 §1)
+on-arm.patch sha256: 226e73d0e78936bff508b1a746966c65641aed8ce1b0ae50b0a9b2d20132b964
+
+0. 位置づけ
+  - 2026-10-28 の所有者判断 (docs/perf/cpu-gemm-sme-fmopa-microkernel.md §5.15: SME 既定は OFF のまま、ON に戻すのは新しい事前登録 A/B に合格したときだけ) に基づく A/B。
+    前例: docs/perf/logs/sme-default-on-ab-3232/RULE.txt (#3232)・docs/perf/logs/sme-gb10-attribution-3613/RULE.txt (#3613)。語彙 (FAIL / REJECT / ADOPT / undetermined) と 5 round・5/5 一貫性・checksum 完全一致を継承する。
+  - 既定の切り替え (SME_PRODUCTION_ENABLED を true にすること)・tolerance・baseline・FMA 契約・REQ-8 の手動境界検査・unsafe・依存は変えない。結果を見てから規則を緩めたり調整したりしない。
+  - GB10 の数え方は perf doc §5.16 (#4143)、僅差のノイズ帯の方法は docs/perf/noise-band-decision.md (#4142) の名前 (GB10-RECORD・GB10-NBSEP・GB10-GATE-ONLY-STRUCTURAL・NB-RANGE5・NB-SEP) で参照する。
+    2 つの記録は本規則の固定時点でいずれも「案・所有者承認待ち」で承認欄は未取得である。承認済みとは書かない。所有者の決定は §9 に回答コメント URL つきで転記され、P-OWNER が成立するまで計測を始めない。
+
+1. 腕 (向きに注意: compare_gemm_ab.py の「after/before > 1.00 = 後退」をそのまま使う。#3232 と組み立てが逆)
+  - before = OFF: 計測コミットのクリーンな clone (SME_PRODUCTION_ENABLED = false)。
+  - after  = ON : before の clone に on-arm.patch (crates/backend-cpu/src/gemm_blis/mod.rs の false -> true、1 行) を当てた計測専用ツリー。main へコミットしない。
+  - 比 = ON / OFF。1.00 以下なら ON が速い。
+  - A/B 本体は scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh (#3232 の run_ab_sme_default_on_cpu.sh の派生。元は凍結して変更しない)。
+  - 対象 tree: 計測コミット (BASE) は、登録基準の計測部品コミットと crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml に差分がないこと。差分があれば undetermined (#3613 §8 の教訓: 固定版と workspace 版の食い違いで path patch が不成立になりうる)。
+
+2. セルの分類 (数値を見る前に固定)
+  - 12 セル (#3232 と同じ): gemm N=256/512/1024/2048 x fresh/reuse (8)、train size=64 x fresh/reuse (2)、infer size=64 x fresh/reuse (2)。
+  - Mac mini (SME あり): 到達 10 (gemm 全 8 と train size=64)、非到達 2 (infer size=64)。GB10 (SME なし): 全 12 セルが非到達のガード。
+  - 交絡: #3635 以降 reuse は常駐入力経路で、#3232 の reuse の値とは条件が違う。旧値と並べて比べない。
+
+3. ラウンド数・実行順
+  - 5 round 固定。round 内の before/after の起動順は #3232 の A/B 本体の方式を継承する (交互)。
+
+4. 前提ゲート (1 つでも不成立なら undetermined。理由はすべて併記。FAIL は常に先)
+  - P-OWNER  : §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING が列挙値で記入され、各々に所有者の回答コメント URL があること。
+               prereg_append.txt の rule_sha256 が現在の RULE.txt と一致し、prepared_at が hwlock の acquired より前であること。
+               未決 (<未決>)・列挙外・URL 欠落・順序不成立は不成立。orchestrate はロック取得の前に止まる。
+  - P-TREE   : 両ツリーで内容が異なるファイルが gemm_blis/mod.rs の 1 件だけ、OFF が `const SME_PRODUCTION_ENABLED: bool = false;`・ON が true、
+               on-arm.patch の sha256 が上記と一致し git apply --check が通る、未追跡のビルド入力がない、
+               cargo tree -p bench-fandhe で fandhe-ai が path patch の facade に解決する。
+  - P-R0     : 両腕で sme_report() の kernel_enabled を記録。期待値は macmini = 両腕 true、gb10 = 両腕 false。外れたら計測を中止して記録だけ残す。
+  - P-RT     : 両機体・両腕。ON 腕は cargo test -p fandhe-ai-backend-cpu --release -- --skip sme_production_disabled_after_gb10_reject が全件 pass
+               (除外するテスト名は計測前に固定。定数 true では作りの上で必ず落ちるドリフト検出テスト 1 件だけ)。OFF 腕は除外なしの同コマンドが全件 pass。
+               落ちたテストは直さず名前を記録し「後退あり相当 (要調査)」とする。
+  - P-BIT    : 両機体で cpu_sme_gate_bit_dump の ^out[ 行を ON/OFF で取り、行数 6726847・sha256 一致・cmp 差分 0。
+               Mac mini での一致は SME と NEON が bit 同一であることの実証になる。不一致は FAIL。実行失敗・cmp 実行エラーは undetermined。
+  - checksum : 全セルで完全一致。不一致は FAIL (性能判定へ進まない)。
+  - P-CELLS  : 12 セル x 両腕 x 5 行ちょうど。重複・欠損・非有限値は不成立。
+  - P-RUNAB / P-COLLECT: A/B スクリプトと収録が exit 0。収録前のマスク漏れ検査 (ホスト名・/Users/・/home/・ユーザー名・IP) が 0 件。
+  - P-LOCK   : 実機ロック (~/work/.fandhe-hw-lock) を保持したまま計測し、取得・解放の時刻を hwlock.log に残した。
+  - P-GATE   : macmini は 5/5 round が load1 < 3.0 (30 秒間隔・最大 30 分待ち) を通過。
+               gb10 は外側ゲート (load1 < 1.0・GPU 使用率 0%・nvidia-smi --query-compute-apps が 0 行) を最大 20 回・30 秒間隔で待って通過し、内側 8.0 の 5/5 round 通過。
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する。計測中は両機でビルドを並走させない。
+
+5. 判定 (評価順 FAIL > undetermined (前提ゲート不成立) > REJECT > ADOPT > undetermined。緩めない)
+  - Mac mini 側条件: 到達 10 セルがすべて「5 round 中央値 <= 1.00 かつ 5/5 round <= 1.00」、どのセルにも全 5 round で ON/OFF > 1.00 の一貫した後退がなく、checksum と P-BIT が一致。
+    いずれかのセルに全 5 round の後退があれば REJECT。
+  - GB10 側は §9 の GB10-MODE で選ばれた 1 方式だけを拘束力ありとして採る。3 方式 (perf doc §5.16 の文面案と同じ語) の定義:
+      GB10-RECORD := GB10 は P-R0・P-BIT・checksum 一致のみ検査し、性能セルは記録のみで ADOPT に入れない
+      GB10-NBSEP := GB10 の各判定セルに NB-SEP を要求し、後退と言えるセルが 1 つでもあれば REJECT
+      GB10-GATE-ONLY-STRUCTURAL := GB10 は構造ゲート (P-R0・P-BIT・checksum・P-RT・P-CELLS・P-LOCK・P-GATE) を fail-closed とし、性能は全記録。NB-SEP 条件の後退があれば undetermined (自動 ADOPT しない)
+    後退の定義 (NB-SEP 形): 判定セルで 5 round すべてに ON/OFF > 1.00 かつ ON 腕の round 別 median_s の最小 > OFF 腕の最大。
+    aggregate.py は 3 方式すべての判定を併記し、拘束力があるのは選ばれた 1 方式だけと明示する。
+  - 総合 ADOPT = Mac mini 側条件を満たし、かつ GB10 が選ばれた方式で pass (REJECT・undetermined でない)。
+  - GB10-GATE-ONLY-STRUCTURAL で undetermined になったときの扱いは §9 の UNDETERMINED-HANDLING (auto-reremeasure = 3 腕+A/A の再測を自動で足す／return-to-owner = 所有者へ戻す) に従う。
+  - 上のどれでもない場合は undetermined。
+
+6. 1 位化の記録 (判定 5 とは独立。ADOPT の可否には使わない)
+  - 同じ round の PyTorch (bench_py.py。torch 2.14.0・numpy 2.5.4 の venv) の比 = torch median_s / fandhe median_s を OFF・ON の両腕について出す。fresh と reuse の両方。
+    対象は M-CPU-G512/G1024/G2048 (gemm 512/1024/2048)。比 > 1.00 が fandhe の優位。
+  - §9 の NOISE-BAND が adopted なら NB-RANGE5 (ON 腕の round 別比の最小〜最大) と NB-SEP (ON 腕の 5 round すべてで比 > 1.0 かつ ON 腕の最小 > OFF 腕の最大) を記録し、
+    NB-SEP を満たさないものは「改善傾向・確定せず」と書く。not-adopted なら生の 5 round の比だけを記録する。
+  - GB10 は torch の venv がなければ「未計測」。6 フレームワークのスコアボードでの 1 位化は Phase 6 で確定する (本 run は PyTorch だけの比較)。
+
+7. checksum の範囲
+  - framework-compare の checksum は小数点以下 6 桁に丸めた和で、bit 同一の証明にはならない。bit 同一は P-BIT (両機体) で補う。M4 Max の 6726847 行との行数の突き合わせは記録だけで判定しない。
+
+8. 処置
+  - ADOPT / REJECT / FAIL / undetermined のどれでも、本イシューでは定数を変えない。
+  - ADOPT なら Phase 4 (#4165) の入力として記録する。SME の unsafe 独立監査 (#4157) も既定 ON の前提として併記する。
+  - 再計測するときは末尾に RULE-reopen を追記してから新しいラベルで測る。既存の系列は差し替えない。
+
+9. 所有者決定の転記 (計測前の追記欄。初期値は <未決>。所有者の回答コメントの URL を併記する。推定・代筆しない)
+  - 追記後の RULE.txt の sha256 と時刻を prereg_append.txt (rule_sha256= / prepared_at=) に記録し、hwlock の取得時刻より前であること (P-OWNER)。
+  - 列挙値: GB10-MODE = GB10-RECORD | GB10-NBSEP | GB10-GATE-ONLY-STRUCTURAL、NOISE-BAND = adopted | not-adopted、UNDETERMINED-HANDLING = auto-reremeasure | return-to-owner。
+GB10-MODE: <未決>
+GB10-MODE-URL: <未決>
+NOISE-BAND: <未決>
+NOISE-BAND-URL: <未決>
+UNDETERMINED-HANDLING: <未決>
+UNDETERMINED-HANDLING-URL: <未決>
+
+10. マスク規則
+  - 収録するログのホスト名は masked (公開文書では <metal-node>・<cuda-node>)、$HOME は <home>、ユーザー名と絶対パス・IP は除去する。実機のホスト名・接続情報はリポに書かない。
+  - rev-stamp (OFF は git rev-parse HEAD、ON は <sha>+on-arm.patch) とツリー指紋を成果物に含める。
