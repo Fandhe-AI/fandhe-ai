@@ -567,7 +567,8 @@ def _self_test_mask_unit(t):
 
 
 _STUB_HEAD = "#!/usr/bin/env python3\nimport os, subprocess, sys\nHOME, HOST, USER = {ids!r}\n" \
-    "LEAK = f'{{HOME}}/Library on {{HOST}} at /Users/{{USER}}/x'\n"
+    "LEAK = f'{{HOME}}/Library on {{HOST}} at /Users/{{USER}}/x'\n" \
+    "def log(x):\n    if os.environ.get('STUB_LOG'):\n        open(os.environ['STUB_LOG'], 'a').write(x + '\\n')\n"
 _STUB_XCRUN = _STUB_HEAD + r'''
 a = sys.argv[1:]
 assert a[0] == "xctrace", a
@@ -578,6 +579,7 @@ if cmd == "record" and "--help" in a:
     print("usage " + LEAK); sys.exit(0)
 if cmd == "record":
     out, ts = a[a.index("--output") + 1], a[a.index("--target-stdout") + 1]
+    log("record:" + os.path.basename(a[a.index("--") + 1]))
     os.makedirs(out)
     open(os.path.join(out, "blob"), "w").write(LEAK)
     print(f"Starting recording. Targeting device: {HOST}. Output: {out}")
@@ -614,6 +616,7 @@ if os.environ.get("STUB_FAIL_BENCH") == name:
     print("panicked at " + LEAK, file=sys.stderr); sys.exit(1)
 task = a[a.index("--task") + 1]
 mode = a[a.index("--mode") + 1] if "--mode" in a else "fresh"
+log(f"{name}:{task}:{mode}")
 open(a[a.index("--out") + 1], "a").write(LEAK + "\n")
 rec = lambda task, med: json.dumps({"task": task, "device": "metal", "size": 4096, "median_s": med / 1e3,
                                     "warmup": 2, "iters": 3, "mode": mode, "note": LEAK})
@@ -625,6 +628,7 @@ else:
 '''
 _STUB_DIAG = _STUB_HEAD + r'''
 print("running " + LEAK)
+log("diag:" + sys.argv[1])
 if sys.argv[1] == "gemm_window_route_precheck":
     print("ROUTE_ACTUAL N=4096 route=Classic\nDIAG_BITEQ N=4096 equal=true")
 else:
@@ -644,6 +648,33 @@ def _no_identity_left(root, home, host, user):
             assert not fn.endswith(".trace") and not dp.endswith(".trace"), (dp, fn)
             if fn.endswith(".xml"):
                 ET.fromstring(body)  # マスク後も XML として読める
+
+
+def _expected_order(rn, avail):
+    """RULE 項 3 の 1 round の実行順（stub が記録する呼び出し列）。(a) trace なしの窓 4 本 → (b) xctrace の腕 2 本
+    （unavailable は無し）→ (c) route → diag。奇偶は (a)・(b) の中の framework の順だけを入れ替える。各ステップ間に sleep 30。"""
+    fa = [["bench-fandhe:gemm:reuse"], ["bench-fandhe:gemm:fresh"]]
+    ca = [["bench-candle:gemm:fresh"], ["bench-candle:gemm-transfer-split:fresh"]]
+    fb = [["record:bench-fandhe", "bench-fandhe:gemm:reuse"]]
+    cb = [["record:bench-candle", "bench-candle:gemm-transfer-split:fresh"]]
+    odd = rn % 2 == 1
+    steps = (fa + ca if odd else ca + fa) + ((fb + cb if odd else cb + fb) if avail else []) + \
+        [["diag:gemm_window_route_precheck"], ["diag:gemm_reuse_phase_diag_production_batch"]]
+    names = (["fandhe_reuse", "fandhe_fresh", "candle_gemm", "candle_split"] if odd else
+             ["candle_gemm", "candle_split", "fandhe_reuse", "fandhe_fresh"]) + \
+        ((["trace_fandhe", "trace_candle"] if odd else ["trace_candle", "trace_fandhe"]) if avail else []) + ["route", "diag"]
+    seq = []
+    for i, st in enumerate(steps):
+        seq += (["sleep"] if i else []) + st
+    return seq, names
+
+
+def _check_order(rd, log, rn, avail):
+    seq, names = _expected_order(rn, avail)
+    got = open(log).read().split()
+    assert got == seq, (rn, avail, got)
+    rec = [l.split()[0] for l in open(os.path.join(rd, "raw", "order.txt")).read().splitlines()]
+    assert rec == names, (rn, avail, rec)
 
 
 def _self_test_shell(t):
@@ -670,7 +701,7 @@ def _self_test_shell(t):
     put(os.path.join(root, "diag-bin"), _STUB_HEAD.format(ids=ids) + _STUB_DIAG[len(_STUB_HEAD):])
     put(os.path.join(stub, "sysctl"), '#!/bin/sh\ncase "$2" in machdep.cpu.brand_string) echo "Apple M4";; '
         'vm.loadavg) echo "{ ${STUB_LOAD:-1.00} 1.10 1.20 }";; *) exit 1;; esac\n')
-    put(os.path.join(stub, "sleep"), "#!/bin/sh\nexit 0\n")
+    put(os.path.join(stub, "sleep"), '#!/bin/sh\n[ -z "${STUB_LOG:-}" ] || echo sleep >> "${STUB_LOG}"\nexit 0\n')
     open(os.path.join(root, ".rev-stamp"), "w").write("abc123\n")
     lock = os.path.join(home, "lock")
     open(lock, "w").write("owner\n")
@@ -700,8 +731,16 @@ def _self_test_shell(t):
     base = {"EXPECT_SHA": "abc123", "DIAG_BIN": os.path.join(root, "diag-bin"), "XCTRACE_MODE": "available",
             "XCTRACE_SCHEMA": "metal-gpu-intervals", "HW_LOCK_OWNER_FILE": lock, "HW_LOCK_HELD": "1"}
     rd = os.path.join(home, "rec", "round1")
-    r = sh("run_round.sh", ["1", rd], base)
+    r = sh("run_round.sh", ["1", rd], dict(base, STUB_LOG=os.path.join(t, "order-1.log")))
     assert r.returncode == 0, (r.stdout, r.stderr)
+    _check_order(rd, os.path.join(t, "order-1.log"), 1, True)
+    # 実行順（RULE 項 3）: 偶数 round は (a)・(b) の中で candle が先。unavailable は (b) を飛ばす
+    for rn, extra in ((2, {}), (3, {"XCTRACE_MODE": "unavailable", "XCTRACE_SCHEMA": ""}),
+                      (4, {"XCTRACE_MODE": "unavailable", "XCTRACE_SCHEMA": ""})):
+        rdo, lg = os.path.join(home, "rec", f"round-order{rn}"), os.path.join(t, f"order-{rn}.log")
+        r = sh("run_round.sh", [str(rn), rdo], dict(base, STUB_LOG=lg, **extra))
+        assert r.returncode == 0, (rn, r.stdout, r.stderr)
+        _check_order(rdo, lg, rn, not extra)
     _no_identity_left(rd, home, host, user)
     assert "bench-fandhe" in open(os.path.join(rd, "raw", "fandhe_reuse.trace.xml")).read()
     rule = RULE_FIX.format(xc="available", fs="F1,F2").replace("xctrace_schema: S", "xctrace_schema: metal-gpu-intervals")

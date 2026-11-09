@@ -43,9 +43,9 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 |---|---|
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_diag.py --check-template` で検査）。`## AUX` が補助 PARAMS（`aggregate_diag.py` は読まない） |
 | `aggregate_diag.py` | 雛形（`diag-0140-template/`）の無改変コピー。sha256 を RULE に固定 |
-| `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換（`--self-test`。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクも確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」） |
+| `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換（`--self-test`。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクと RULE 項 3 の実行順も確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」） |
 | `attrib_4153.py` | `kernel_share`・摂動・照合の補助集計（`--dir`・`--check-rule`・`--self-test`）。sha256 を RULE に固定 |
-| `run_round.sh` | 1 round の起動（precheck → ゲート → 窓 → xctrace → 診断テスト。ゲート後に cargo を呼ばない）。終了時に必ず round ディレクトリをマスクする |
+| `run_round.sh` | 1 round の起動（precheck → ゲート → trace なしの窓 4 本 → xctrace の腕 2 本 → 診断テスト。奇偶は各段の中の framework の順だけを入れ替える。実行順は `raw/order.txt`。ゲート後に cargo を呼ばない）。終了時に必ず round ディレクトリをマスクする |
 | `xctrace_probe_4153.sh` | PR-2 の前に 1 回だけ。N=256 のスモークで `xctrace export --toc` を保存し schema 名・列名を確定する（計測ではない） |
 
 ## 手順

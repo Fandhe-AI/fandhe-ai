@@ -18,7 +18,9 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
 3. 計測手順
   ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す: hw-lock を取得し、load1 < 3.0 を 30 秒間隔で最大 30 分待つ。計測中にビルド・集計・転送を並走させない（ゲート通過後に cargo を呼ばない）。
   ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
-  ラウンド内の腕の順序: 奇数 round は fandhe → candle、偶数 round は candle → fandhe。各 round 内で
+  ラウンド内の順序: 段は (a) → (b) → (c) の順に固定し、(a) をすべて終えてから (b)、(b) をすべて終えてから (c) に進む
+  （framework ごとに段をまたいでまとめない。trace 下と trace なしの窓で熱状態をそろえるため）。奇偶の入れ替えは (a)・(b) の各段の中の
+  framework の順だけで、奇数 round は fandhe → candle、偶数 round は candle → fandhe。framework 内の順と (c) の順は入れ替えない。
     (a) trace なしの窓: fandhe reuse・fandhe fresh・candle gemm（fresh。スコアボードの相手値と同じ）・candle gemm-transfer-split（transfer_excl）
     (b) xctrace（Metal System Trace）の腕: fandhe reuse・candle gemm-transfer-split。GPU 実行区間の表を export する（AUX の xctrace が unavailable なら取らない）
         GEMM 区間は対象プロセスの継続時間 ≥ gemm_interval_min_ms の区間とし、本数が「先行分＋warmup＋iters＋後続分」と完全一致しなければ INVALID
@@ -27,10 +29,11 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
         余分な区間が出て INVALID になった場合の扱いは RULE.v2.txt で抽出規則ごと定め直す。同一プロセスの区間が重なる表も INVALID。
         件数の一致は並びの正しさまでは保証しない（GEMM の欠落と余分な区間が同数なら検出できない）
     (c) 診断テスト: gemm_window_route_precheck（ROUTE_ACTUAL=Classic と bit 一致の確認）と gemm_reuse_phase_diag_production_batch（kernel_gpu＝GPUEnd−GPUStart）
-  腕の間に 30 秒の待ちを入れる。candle の純カーネル時間は Rust 側から GPU タイムスタンプを取れない（objc2-metal の直接依存追加には所有者承認が要る）ため、外部計器 xctrace で取る。
+  各ステップ（(a) の 4 本・(b) の 2 本・(c) の 2 本）の間に 30 秒の待ちを入れる（最初の前と最後の後には入れない）。
+  実行したステップ名と開始時刻を raw/order.txt に残す。candle の純カーネル時間は Rust 側から GPU タイムスタンプを取れない（objc2-metal の直接依存追加には所有者承認が要る）ため、外部計器 xctrace で取る。
   run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
   到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない）。
-  保存物: round{i}/{gate.txt, values.tsv, aux.tsv, raw/}・env/。変換手順は README と to_values_4153.py。
+  保存物: round{i}/{gate.txt, values.tsv, aux.tsv, raw/（order.txt を含む）}・env/。変換手順は README と to_values_4153.py。
 
 4. 診断式（docs/perf/loss-attribution-matrix.md §10.1 から転記。単位は ms）
   入力量: fandhe_window・fandhe_fresh_window・opp_window・fandhe_pure_kernel・opp_pure_kernel
