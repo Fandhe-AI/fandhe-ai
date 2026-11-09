@@ -45,8 +45,10 @@ D_KEYS = ["d_regions", "d_mr", "d_nr", "d_jobs", "d_p_used", "d_n_calls", "d_cal
           "d_split_ns", "d_fork_wake_min_ns", "d_fork_wake_max_ns", "d_stage_in_ns", "d_alloc_ns", "d_pack_b_ns",
           "d_pack_a_ns", "d_kernel_ns", "d_stage_out_ns", "d_kernel_crit_ns", "d_join_ns", "d_region_wall_ns",
           "d_kernel_ideal_ns", "d_imbalance_ns", "d_parts_ideal_ns"]
+MEASURE_CALLS = 500  # RULE 項4 が固定する測定回数
 ROW_BASE_KEYS = ["arm", "series", "m", "n", "k", "rayon_threads", "calls", "median_ns", "mean_ns", "bits_hash"]
-ENV_KEYS = ["arm", "rayon_threads", "sme_os_flag", "sme_svl_bytes", "sme_kernel_enabled", "thread_limit_effective",
+ENV_KEYS = ["arm", "rayon_threads", "sme_os_flag", "sme_svl_bytes", "sme_kernel_enabled", "sme_production_enabled",
+            "thread_limit_effective",
             "thread_limit_env_override", "small_shape_cap_eligible", "timer_tick_ns", "timer_pair_ns", "gap_us"]
 PARAM_KEYS = ["fixed-at-utc", "issue", "rounds", "tree_sha", "tree_fingerprint", "aggregate_script_sha256",
               "reach_threshold", "noise_band", "cell", "scoreboard_ratio", "prev_class", "kernel_owner", "gap_us",
@@ -219,8 +221,12 @@ def parse_example(text, arm, rule, where):
     if int(env["gap_us"]) != rule["gap_us"]:
         raise AggError(f"{where}: gap_us differs from RULE")
     want_sme = "true" if arm.startswith("on-") else "false"
-    if env["sme_kernel_enabled"] != want_sme:
-        raise AggError(f"{where}: arm {arm} requires sme_kernel_enabled={want_sme}（ON/OFF ビルドの取り違え防止）")
+    # arm 整合はビルドの本番有効フラグ（SME_PRODUCTION_ENABLED）で検証する。sme_kernel_enabled は
+    # OS／SVL のハード能力で arm と無関係のため記録のみ（#4192 レビュー指摘）
+    if env["sme_production_enabled"] != want_sme:
+        raise AggError(f"{where}: arm {arm} requires sme_production_enabled={want_sme}（ON/OFF ビルドの取り違え防止）")
+    if env["sme_kernel_enabled"] not in ("true", "false"):
+        raise AggError(f"{where}: sme_kernel_enabled must be true/false")
     if env["thread_limit_env_override"] != "false":
         raise AggError(f"{where}: RAYON_NUM_THREADS must not be set")
     if sorted(rows) != sorted(SERIES):
@@ -240,6 +246,10 @@ def parse_example(text, arm, rule, where):
             raise AggError(f"{where}: rayon_threads differs between ENV and ROW")
         if not re.match(r"^0x[0-9a-f]{16}$", kv["bits_hash"]):
             raise AggError(f"{where}: bad bits_hash")
+        # RULE 項4 の事前登録回数: cold_first_call は 1 回、それ以外の系列は測定 500 回
+        want_calls = 1 if s == "cold_first_call" else MEASURE_CALLS
+        if int(kv["calls"]) != want_calls:
+            raise AggError(f"{where}: series {s} calls {kv['calls']} != {want_calls}（RULE 項4）")
         row = {"bits_hash": kv["bits_hash"], "median": ppos(kv["median_ns"], f"{where}:{s}:median_ns"),
                "mean": ppos(kv["mean_ns"], f"{where}:{s}:mean_ns"), "calls": int(kv["calls"])}
         if timed and s in TIMED_SERIES:
@@ -547,7 +557,8 @@ def _example(arm, hot_ns=200000, kernel_total=1_000_000, bits="0x" + "1" * 16, m
     timed = arm.endswith("-timed")
     on = arm.startswith("on-")
     env = {"arm": arm, "rayon_threads": 10, "sme_os_flag": "true", "sme_svl_bytes": 64,
-           "sme_kernel_enabled": "true" if on else "false", "thread_limit_effective": 10,
+           "sme_kernel_enabled": "true",  # ハード能力（M4 は arm 非依存で true）
+           "sme_production_enabled": "true" if on else "false", "thread_limit_effective": 10,
            "thread_limit_env_override": "false", "small_shape_cap_eligible": "false", "timer_tick_ns": 41,
            "timer_pair_ns": "80.00", "gap_us": 50}
     lines = ["ENV4151 " + " ".join(f"{k}={v}" for k, v in env.items())]
@@ -662,13 +673,17 @@ def self_test():
 
     _expect(lambda: _run(ex=lambda a: _example(a, mutate=extra_key)), "extra key", "keys mismatch")
 
-    def sme_off(arm, s, kv):
-        pass
+    _expect(lambda: _run(ex=lambda a: _example(a).replace("sme_production_enabled=true", "sme_production_enabled=false")),
+            "sme not enabled", "sme_production_enabled")
+    _expect(lambda: _run(ex=lambda a: _example(a).replace("sme_production_enabled=false", "sme_production_enabled=true")),
+            "off arm built with sme", "sme_production_enabled")
 
-    _expect(lambda: _run(ex=lambda a: _example(a).replace("sme_kernel_enabled=true", "sme_kernel_enabled=false")),
-            "sme not enabled", "sme_kernel_enabled")
-    _expect(lambda: _run(ex=lambda a: _example(a).replace("sme_kernel_enabled=false", "sme_kernel_enabled=true")),
-            "off arm built with sme", "sme_kernel_enabled")
+    def short_calls(arm, s, kv):
+        if s != "cold_first_call" and "d_regions" in kv:
+            kv["calls"] = 1
+            kv["d_regions"] = 1
+
+    _expect(lambda: _run(ex=lambda a: _example(a, mutate=short_calls)), "short calls", "RULE 項4")
     with tempfile.TemporaryDirectory() as d:
         _build(d)
         os.rename(os.path.join(d, "round2"), os.path.join(d, "round9"))

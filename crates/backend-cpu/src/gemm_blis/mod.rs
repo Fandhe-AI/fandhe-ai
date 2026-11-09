@@ -3594,6 +3594,22 @@ fn sme_kernel_for_shape(m_total: usize, n: usize, k: usize) -> Option<microkerne
     }
 }
 
+/// 本番 SME ゲート [`SME_PRODUCTION_ENABLED`] の現在値を返す診断用の読み出し口（イシュー #4151）。
+/// `sme_report().kernel_enabled` は OS／SVL によるハード能力であり本番有効フラグではないため、
+/// 計測 example（`cpu_gemm_n256_fixed_cost_4151`）が OFF／ON 腕のビルド取り違えを検証する用途に分ける。
+/// 非 aarch64 では SME 経路が存在しないため常に `false`。
+#[doc(hidden)]
+pub fn sme_production_enabled() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        SME_PRODUCTION_ENABLED
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
 /// m=64 専用 4 タイル SME カーネル（イシュー #3235）の本番ゲート。**既定 OFF**。
 ///
 /// 設計の正は `docs/perf/cpu-gemm-sme-thin-m64-decision.md`（#3234 判定 (A)）。既定 ON への反転は

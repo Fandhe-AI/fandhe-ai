@@ -24,7 +24,8 @@
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::{
-    gemm_blis, gemm_blis_parallel, small_shape_cap_report, sme_report, thread_limit_report,
+    gemm_blis, gemm_blis_parallel, small_shape_cap_report, sme_production_enabled, sme_report,
+    thread_limit_report,
 };
 use rayon::prelude::*;
 use std::cell::RefCell;
@@ -157,11 +158,12 @@ fn main() {
     let sme = sme_report();
     println!(
         "ENV4151 arm={arm} rayon_threads={rayon_threads} sme_os_flag={} sme_svl_bytes={} \
-sme_kernel_enabled={} thread_limit_effective={} thread_limit_env_override={} \
+sme_kernel_enabled={} sme_production_enabled={} thread_limit_effective={} thread_limit_env_override={} \
 small_shape_cap_eligible={} timer_tick_ns={tick} timer_pair_ns={pair:.2} gap_us={GAP_US}",
         sme.os_flag,
         sme.svl_bytes.unwrap_or(0),
         sme.kernel_enabled,
+        sme_production_enabled(),
         thread_limit_report().effective,
         thread_limit_report().env_override,
         small_shape_cap_report().eligible,
