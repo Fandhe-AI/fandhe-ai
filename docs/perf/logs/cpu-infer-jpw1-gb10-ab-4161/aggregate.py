@@ -58,8 +58,8 @@ def parse_params(rule_path, self_sha=None):
         params["rounds_int"] = int(params["rounds"])
     except ValueError as e:
         raise AggError("rounds が整数でない") from e
-    if params["rounds_int"] < 1:
-        raise AggError("rounds < 1")
+    if params["rounds_int"] != 5:
+        raise AggError("rounds != 5（AGENTS.md と本キットの規則は 5 回計測・5/5 通過を要求する）")
     return params
 
 

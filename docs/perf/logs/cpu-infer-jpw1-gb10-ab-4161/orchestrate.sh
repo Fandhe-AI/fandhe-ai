@@ -71,8 +71,13 @@ done
 FCLOCK="${WORK}/Cargo.lock.fc.orig"
 restore_lock() { [ -f "${FCLOCK}" ] && cp "${FCLOCK}" "${BASE}/${FCREL}/Cargo.lock" 2>/dev/null; true; }
 trap restore_lock EXIT
-# checksum を持つ（= registry 由来の）パッケージの name/version/checksum 一覧。path 由来は含まれない。
-lock_pins() { awk '/^\[\[package\]\]/{n="";v=""} /^name = /{n=$3} /^version = /{v=$3} /^checksum = /{print n, v, $3}' "$1" | sort; }
+# 固定依存の比較は 2 つに分ける。path patch で registry 由来から path 由来へ置換される自作クレート（fandhe-ai 系）は
+# 置換で source/checksum が消えるのが正常。(1) 自作クレート以外は name/version/checksum がビルド前後で完全一致、
+# (2) 自作クレートは置換後に source/checksum を持たない（= path 由来）ことだけを検証する。
+lock_pins() { awk '/^\[\[package\]\]/{n="";v=""} /^name = /{n=$3} /^version = /{v=$3} /^checksum = /{ if (n !~ /^"fandhe-ai(-|"$)/) print n, v, $3}' "$1" | sort; }
+own_pkgs_not_path() { # 置換後 lock で source/checksum を持つ fandhe-ai 系パッケージ名（空なら全て path 由来）
+  awk '/^\[\[package\]\]/{if(n ~ /^"fandhe-ai(-|"$)/ && bad) print n; n="";bad=0} /^name = /{n=$3} /^(source|checksum) = /{bad=1} END{if(n ~ /^"fandhe-ai(-|"$)/ && bad) print n}' "$1"
+}
 cp "${BASE}/${FCREL}/Cargo.lock" "${FCLOCK}" || { echo "Cargo.lock の退避失敗"; exit 1; }
 for arm in "${ARMS[@]}"; do
   T="${WORK}/trees/${arm}"
@@ -81,10 +86,12 @@ for arm in "${ARMS[@]}"; do
   # 先に patch 反映の lockfile を（--locked なしで）生成し、registry 由来の固定が動いていないことを確かめてから固定ビルドする。
   (cd "${T}/${FCREL}" && cargo metadata --format-version 1 --config "${PATCHCFG}" > /dev/null 2> "${LOGDIR}/prereq/lock-${arm}.log") || { echo "lockfile 生成失敗 ${arm}"; exit 1; }
   [ "$(lock_pins "${FCLOCK}")" = "$(lock_pins "${T}/${FCREL}/Cargo.lock")" ] || { echo "lockfile の registry 固定が変化した ${arm}"; exit 1; }
+  [ -z "$(own_pkgs_not_path "${T}/${FCREL}/Cargo.lock")" ] || { echo "自作クレートが path 置換されていない ${arm}"; exit 1; }
+  grep -q '^name = "fandhe-ai"$' "${T}/${FCREL}/Cargo.lock" || { echo "fandhe-ai が lock に無い ${arm}"; exit 1; }
   (cd "${T}/${FCREL}" && cargo build --release --locked -p bench-fandhe --config "${PATCHCFG}" \
       >"${LOGDIR}/prereq/build-${arm}.log" 2>&1) || { echo "bench-fandhe ビルド失敗 ${arm}"; exit 1; }
   cp "${T}/${FCREL}/target/release/bench-fandhe" "${WORK}/bench-fandhe-${arm}" || exit 1
-  (cd "${T}/${FCREL}" && cargo tree -p bench-fandhe --depth 1 > "${LOGDIR}/tree-${arm}.txt" 2>&1)
+  (cd "${T}/${FCREL}" && cargo tree --locked --config "${PATCHCFG}" -p bench-fandhe --depth 1 > "${LOGDIR}/tree-${arm}.txt" 2>&1)
   # 機構発火の前提 report（腕ごとに 1 件だけ --exact。全件実行はしない）
   (cd "${T}" && cargo test --release -p fandhe-ai --test infer_scope_jpw1_4161 -- --ignored --exact --nocapture report_infer_jpw1_probe \
       > "${LOGDIR}/prereq/${arm}.log" 2>&1) || { echo "前提 report 失敗 ${arm}"; exit 1; }
