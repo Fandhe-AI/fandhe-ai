@@ -98,23 +98,27 @@ round 状態は PASS 5 件（`round{i}/gate.txt`。load1 0.24〜0.74）。checks
 | prod0140（本番列・PR／ER） | 62.328（62.223〜62.760） | 71.152 | 71.040 | 1.137 | -0.0015 | GPU 実行が支配 | 高 |
 
 - 両系列とも share_exec が全 round で 0.5 を大きく上回り（1.11〜1.14）、NB-RANGE5 帯も 0.5 をまたがないため確度は「高」。event の摂動は ±0.2% 以内。
-- share_exec が 1 を超えるのは、分母の kernel_wait_derived（= download − download_again）が download の計時開始後だけを数え、
-  発行中（l1_issue＋l2_issue、本番列で 5.7 µs）に GPU 上で既に走っている分を含まないため（RULE 項 5 の式どおり。share_wait・wait_resid の負値も同じ理由。いずれも推定タグ）。
-- 本番列の内訳: 融合カーネル本体 E_sum 71.0 µs（L1 `l1_iso` 50.6・L2 `l2_iso` 20.4）に対し、chain_gpu 71.2 µs で gpu_gap は 0.1 µs（−0.2〜0.4）。
-  本番列では GPU 上の間隙・起動遅延はほぼ 0 で、チェーンの GPU 時間はほぼすべて 2 つの融合カーネルの実行。
+- 分類の根拠 share_exec・share_wait は推定タグ（RULE 項 5）。share_exec が 1 を超える（share_wait が負になる）のは、分母の kernel_wait_derived（= download − download_again）が
+  download の計時開始後だけを数え、発行中（l1_issue＋l2_issue、本番列で 5.7 µs）に GPU 上で既に走っている分を含まないため（式どおり）。
+- 本番列の wait_resid の負値（−3.0。推定）は理由が別で、gpu_tail（= chain_gpu − host_issue_sum）は発行分をすでに引いている。
+  カーネル終了後に download に残る D2H＋同期は download − gpu_tail ≈ 3.1 µs だが、kernel_wait_derived は download_again（6.0 µs）を引くため、その差だけ引きすぎになる（推定）。
+- 本番列の内訳: 融合カーネル E_sum 71.0 µs（L1 `l1_iso` 50.6・L2 `l2_iso` 20.4。いずれも実測）に対し、chain_gpu 71.2 µs で gpu_gap は 0.1 µs（−0.2〜0.4。実測）。
+  本番列では GPU 上の層間の間隙はほぼ 0。E_sum は起動の立ち上がりを含む（RULE 項 5）ため、起動遅延とカーネル本体の計算は本診断では分けていない。
 - #3189 列は chain_gpu 74.4 µs・gpu_gap 3.5 µs（層出力の確保＋ゼロ初期化 2 回分と host 発行待ちの空き）。
 - 固定費（F 腕）: sync_idle 0.29・tiny_roundtrip 9.98・launch_floor_1x1 2.88・event_record_pair 2.75。
 
 ### nsys 補助（record_only・判定に使わない）
 
 `nsys/`（`nsys.txt` = ok。`cuda_gpu_trace.csv.gz` は gzip した stats 出力。`trace.nsys-rep`・`trace.sqlite` はサイズのため収録しない）。
-CPU サンプリング不可の警告 2 件（`nsys.err`。#2109 と同じ）。nsys 下の時間は汚れるため値は参考で、読み取ったのは起動形状だけ:
-`gemm_tiled_bias_act_f32` は grid 4×1（L1。nsys 下の中央値 46.2 µs）と grid 1×1（L2。17.4 µs）で起動している。
+CPU サンプリング不可の警告 2 件（`nsys.err`。#2109 と同じ）。nsys 下の時間は汚れるため時間値は読まず、読み取ったのは起動形状だけ:
+`gemm_tiled_bias_act_f32` は grid 4×1（1151 件。L1）と grid 1×1（1601 件）で起動している。grid 1×1 には L2 と F 腕の 1x1 linear（同じカーネル名）が
+混ざっているため件数が L1 と一致しない（差 450 件）。block はどちらも 16×16。
 
 ### 副次: `infer-chain-fixed-cost-reduction-3205.md` §3 の「占有率」推定との突き合わせ
 
 §3 の「L1 が 4 ブロック・L2 が 1 ブロックしか起動しない」は nsys の grid（4×1・1×1）で実測に置き換えた。
-「kernel_wait は融合カーネル本体の GPU 実行が支配する」も本診断で実測（l1_iso 50.6・l2_iso 20.4 µs、本番列の gpu_gap 0.1 µs）。
+融合カーネルの GPU 実行幅（l1_iso 50.6・l2_iso 20.4 µs）と本番列の gpu_gap 0.1 µs は実測。これに基づく分類「GPU 実行が支配」（確度 高）は、
+根拠の share_exec が推定タグである点に注意して読む。
 「K ループが逐次に効いている」という原因の部分は本診断の量では分けられないため推定のまま残す（§3 に追記）。
 
 ### 相手側（#4149）との対応
