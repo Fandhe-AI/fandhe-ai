@@ -1,0 +1,1 @@
+PASS load1=0.63 compute-apps=0 gpu-util=0x3 hw-lock=held 2026-11-10T05:11:41Z

@@ -2,10 +2,9 @@
 
 ## 状態
 
-**PR-1 時点: 実測なし。** 本ディレクトリは測る前に固定する部品（RULE 雛形・集計スクリプト・1 round の起動キット・観測専用 shim）だけを置く。
-`RULE.txt`（PR-2・単独コミット）、`round{i}/`・`env/`・`aggregate.md`・`aggregate.tsv`（PR-3・<cuda-node> での実測）は後続で追加する。
-実測値・内訳・分類・確度は、実測するまで書かない（推定値で埋めない）。#4149 は実測と記録の PR-3 で閉じる（部品の PR は `Refs #4149`）。
-PR-1 は GB10 に到達できないため `--self-test`・単体テスト・構文検査までしか行っていない（GB10 での `env`／1 round の dry run は未検証）。
+**実測済み（PR-3・2026-11-10）。** `RULE.txt`（#4221 で単独コミット）に従い <cuda-node> で 5 round を実測し、`aggregate.md`・`aggregate.tsv` を集計した（表題は「正式」）。
+round 状態は **PASS ×5**（INVALID・TIMEOUT なし。差し替え・除外・上書きなし）。record_only のため判定・閾値はない。
+計測ツリーは `faf0f6bce` の git archive（ノード上に git なし）。計測前のツリー指紋は RULE と一致した（`env/tree_fingerprint.txt`）。
 
 ## 目的
 
@@ -56,4 +55,34 @@ GB10 の 3 セル（G-CPU-TRN・G-CPU-INF・G-CUDA-INF）の相手（PyTorch）�
 
 ## 結果
 
-（実測後に追記。PR-1 時点は空。）
+出典は `aggregate.md`（値は run 間の中央値。比は run ごとの 量÷窓 の中央値）。タグは集計スクリプトの出力そのまま。
+
+### 計測条件
+
+- 期間: 2026-11-10T05:06:24Z〜05:15:47Z。hw-lock 取得下で round ごとにゲート（compute プロセス 0・GPU util 0 を 3 回連続・load1<1.0）を通した。
+  各 round の load1 は 0.29〜0.63（`round{i}/gate.txt`・`env/drive.log`）。
+- torch 2.14.0+cu130・numpy 2.5.4・torch threads 20・`allow_tf32=False`・`fp32_matmul_precision=highest`（`round{i}/raw/env.json`）。
+- 計測後のツリー指紋は実行時キャッシュ（`__pycache__`・`bench_py.py` の入力 `.npy`）を含むため RULE と一致しない。キャッシュを除く 20944 ファイルの内容は送信側と一致した（`env/tree_fingerprint.txt`）。
+
+### BLAS・cuBLAS の経路（probe。計時外・実測）
+
+- CPU: GEMM 入口は `sgemm_` だけで、転送先は torch 同梱の `libnvpl_blas_lp64_gomp.so.0`（NVPL）。1 step あたり train 4 回・infer 2 回。`cblas_sgemm` は 0 回。
+- CUDA: `cublasSgemm_v2` が 1 step あたり 2 回（`libcublas.so.13`）。`cublasGemmEx`・`cublasLtMatmul` は 0 回。profiler 腕で `cudaGraphLaunch` は観測されない（eager）。
+- shim ありでも checksum は shim なしと一致した（`env/probe.txt`）。
+
+### 区間内訳（µs。中央値）
+
+| セル | 窓 | 主な区間（実測） | 残差（推定） |
+|---|---|---|---|
+| G-CPU-TRN（cpu_train） | 367.5 | GEMM 純カーネル（`torch.mm` 10 回まとめの 1 回あたり）246.4（窓の 67.9%）・要素演算 fwd 9.4・update 20.9・loss_item 0.2 | 88.2（窓の 24.0%）。dispatch 下限の推定 18.7 |
+| G-CPU-INF（cpu_infer） | 132.3 | GEMM 純カーネル 111.7（窓の 78.3%）・要素演算 fwd 4.9・readout 0.8・checksum 3.0 | 23.5（窓の 15.8%）。dispatch 下限の推定 5.4 |
+| G-CUDA-INF（cuda_infer） | 40.7 | 発行（enqueue）27.9（窓の 68.5%）・readout_sync 7.4・checksum 3.0。GPU 側の幅（event）33.2・うち GEMM event 合計 27.1 | 2.1（窓の 5.2%） |
+
+- CPU の torch 経由 mm と NVPL 直呼びの差（`torch_vs_direct_gap`）は train 66.3 µs・infer 2.1 µs（実測。ctypes の引数変換費を含むため torch ラッパー費としては帰属させない）。
+- CUDA の `issue_minus_gpu_span` は −5.3 µs（GPU 側の幅が発行より長い）。`readout_sync_minus_tiny_roundtrip` は −2.8 µs。
+- CUDA の固定費（実測）: sync_idle 2.5・tiny_roundtrip 10.2・launch_floor_add 3.2・event_record_pair 8.5 µs。
+- CUDA の層別 GEMM（event・実測）: L1 fwd 14.7・L2 fwd 12.5 µs（backward の形状 dw／dx は 12.2〜16.4 µs）。
+- 参考腕 `graph_replay_ref`（Graph の床。窓の値ではない）は 23.5 µs。
+- profiler 腕（op 数のみ）: aten op／step は train 99（最上位 34）・cpu infer 19（同 10）・cuda infer 16（同 10）。CUDA の kernel は cutlass SIMT sgemm 2 本・cublasLt splitKreduce 2 本・要素演算 3 本・D2H memcpy 1 回／step。
+- 未測定のまま: CPU の autograd・Python 解釈・確保・dispatch の個別分離（残差に混ざる）、cuBLAS kernel の内部（閉源）。
+- 帰属の比較（fandhe 側との並べ方）は #4150 の担当でここでは行わない。#4150 の相手側入力は `opp_from_4149.py` で `aggregate.tsv` から作る。
