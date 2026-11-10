@@ -2,7 +2,9 @@
 
 ## 状態
 
-**実測済み（2026-11-10・<metal-node>・RULE.v2 で変換）。結果は下の「結果」。** 以下の 3 段落は PR-1 時点の記述を残している。
+**分類は保留（測り直し待ち）。** 2026-11-10 の系列（下の「結果」・RULE.v2 で変換）は round 2〜5 が他ジョブ（hw-lock を取らない wgpu の GPU GEMM・CPU 100%。所有者の別セッションのジョブで 03:37:56Z に起動。03:38:00〜03:41:02Z は N=2048、03:41:02〜04:00:14Z は N=4096 の GEMM を実行していた）と重なったため、系列ごと**参考**に下げた
+（所有者判断（#4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」）。round 1 だけを採る選び方はしない）。旧系列の数値は消さずに残す。測り直しは他ジョブのゲートを足した RULE.v3 で、旧系列と別のラベルの系列で行う。
+以下の 3 段落は PR-1 時点の記述を残している。
 本ディレクトリは測る前に固定する部品（RULE 雛形・集計・変換・補助集計・1 round の起動キット・xctrace の schema 検出）だけを置く。
 `RULE.txt` と `env/xctrace_*`（PR-2・単独コミット）、`round{i}/`・`aggregate.md`・`aggregate.tsv`・`attrib.tsv`・結果欄（PR-3・<metal-node> での実測）は後続で追加する。
 実測値・帰属・分類・確度は、実測するまで書かない（推定値で埋めない）。#4153 は実測と記録の PR-3 で閉じる（部品の PR は `Refs #4153`）。
@@ -96,6 +98,11 @@ round の状態は `gate.txt` の 1 語目（`PASS`／`TIMEOUT`／`INVALID`）�
 
 ## 結果
 
+> **他ジョブ（hw-lock を取らない wgpu の GPU GEMM・CPU 100%）と重なった系列・参考（分類は保留・測り直し待ち）。** round 1（03:34:04〜03:37:07Z）は他ジョブの起動（03:37:56Z）より前に終わったが、
+> round 2（03:37:07〜03:40:07Z。03:37:56Z 以降が重なる）・round 3（〜03:43:39Z）・round 4（〜03:46:40Z）・round 5（〜03:50:42Z）は
+> 他ジョブの N=2048（03:38:00〜03:41:02Z）・N=4096（03:41:02〜04:00:14Z）の GEMM と重なった。load1 のゲート（3.0 未満）は通ったが、
+> このゲートでは重なりを検出できない。下の分類・確度・帰属は旧系列のもので、測り直すまで使わない（所有者判断（#4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」））。
+
 計測: 2026-11-10T03:34:04Z〜03:50:42Z（<metal-node>・Apple M4）。xctrace が無い（`env/xctrace_*`）ため AUX `xctrace: unavailable`・`formulas=F2` のフォールバック構成。
 5 round とも PASS（load1 1.21〜2.75。`round{i}/gate.txt`・`drive.status`）。INVALID・TIMEOUT なし、差し替え・除外・再計測なし。
 計測前に tree（`tree_sha` の git archive）のツリー指紋が RULE の値（`838481a8…`・files=2691）と一致することを確かめた。
@@ -103,7 +110,7 @@ round の状態は `gate.txt` の 1 語目（`PASS`／`TIMEOUT`／`INVALID`）�
 RULE.v2 項 8 (d) の一覧とすべて一致することを確かめ（`gate.txt` は 5 round とも PASS のままで、`--restore-gate` は使っていない）、
 変換・集計の後にもう一度照合して一致したままであることを確かめた。集計は `aggregate.md`／`aggregate.tsv`、補助は `attrib.tsv`、round 別は `round{i}/values.tsv`・`aux.tsv`。
 
-**分類: 分類保留／確度: 高**（前分類「自分たちの制約」から変更）。F2 が 5 run とも閾値 1.00 未満（帯 0.7669〜0.8309）。
+**旧系列の分類（参考・保留）: 分類保留／確度: 高**（前分類「自分たちの制約」は測り直すまで据え置く）。F2 が 5 run とも閾値 1.00 未満（帯 0.7669〜0.8309）。
 F1 は測っていない（xctrace unavailable）ので、「自分たちの制約／ハードの上限」は判定していない（RULE 項 5 のフォールバック）。
 
 | run | fandhe_window | fandhe_fresh_window | opp_window | F2 | 観測比 |
@@ -128,4 +135,4 @@ F1 は測っていない（xctrace unavailable）ので、「自分たちの制�
   encode＋commit_wait ＋ transfer_excl））は 1.5745（run 別 1.4572〜1.6613）になるが、bn32 の encode＋commit_wait（67.9 ms）を bn64 の窓（63.1 ms）から引いており
   **構成差のため解釈しない**。本番 tile の境界揃えは #4219（診断テストの tile 選択を本番に揃える）の後でないと取れない。
 - candle の純カーネル時間は引き続き**未測定**（xctrace が無い。`objc2-metal` を `bench-candle` に足す代替は依存追加で所有者承認が要り、本 issue の対象外）。
-- 閉じる条件: RULE（v2）どおりに 5 round を測り、分類・確度を記録した。`docs/perf/loss-attribution-matrix.md` §10.3.1 に追記した。`unreached_0140.tsv` への反映は #4168。
+- 閉じる条件（旧系列の時点の記述）: RULE（v2）どおりに 5 round を測り、分類・確度を記録した。**他ジョブとの重なりで #4153 は reopen され、測り直しの記録で閉じる。**`docs/perf/loss-attribution-matrix.md` §10.3.1 に追記した。`unreached_0140.tsv` への反映は #4168。
