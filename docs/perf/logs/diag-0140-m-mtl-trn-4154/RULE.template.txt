@@ -13,7 +13,11 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   【記入: タグまたは SHA】の git archive。PARAMS の tree_sha に完全な SHA を書く。
   tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値（diag-0140-template と同一ロジック）。
   送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。本成果物ディレクトリは指紋の対象外。
-  【記入: git diff --stat v0.14.0 <tree_sha> -- crates/backend-metal crates/facade の結果（空であること）】
+  前提ゲート: git diff --stat v0.14.0 <tree_sha> -- crates/backend-metal crates/facade ':(exclude)crates/facade/tests' が空であること。
+  空でなければ停止する。crates/facade/tests の差（git diff --stat v0.14.0 <tree_sha> -- crates/facade/tests）は一覧を記録するだけで停止しない
+  （#4070 で create_graph 系のテスト 2 ファイルに差がある。計測の腕はこれらのテストを実行しない）。
+  （旧雛形は crates/facade 全体が空であることを求めていたが、PR-1〈#4190〉のマージコミットでもテストの差で空にならない。#4154 の Mac mini セッションで修正）
+  【記入: 上の 2 つの git diff --stat の結果】
 
 3. 計測手順
   ラウンド数は PARAMS の rounds（5）。各ラウンドの前に hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。

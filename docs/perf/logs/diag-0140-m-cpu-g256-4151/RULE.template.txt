@@ -9,11 +9,15 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   変えないもの: tolerance・閾値・依存・本体コード・unreached_0140.tsv・loss-attribution-matrix.md（分類の反映は Phase 6）。
 
 2. 対象 tree
-  【記入: PR-1 マージ後の main の完全 SHA】の git archive。PARAMS の tree_sha に書く。
-  前提ゲート: git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src' の一覧を記録し、
+  【記入: PR-1（#4192）のマージコミットの完全 SHA】の git archive。PARAMS の tree_sha に書く。
+  前提ゲート: git diff --name-only v0.14.0 <tree_sha> -- crates/backend-cpu/src の一覧を記録し、
   差が許されるのは、数値・実行経路を変えない診断 API の追加だけ（#4192 の crates/backend-cpu/src/gemm_blis/mod.rs の
   sme_production_enabled() 追加と crates/backend-cpu/src/lib.rs の再エクスポート）。この 2 ファイル以外に差が 1 件でもあれば停止する。
   2 ファイルの差分は目視で「診断 API の追加のみ」と確認し、差分全文を記録する（数値・分岐を変える変更が混じれば停止）。
+  backend-cpu 以外の差（git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src/*' のうち crates/backend-cpu/src 以外）は
+  一覧を記録するだけで停止しない。#4192 の時点で autodiff と tensor-core の create_graph 系などに差があり、どれも CPU GEMM の実装ファイルではない。
+  【記入: 上の 2 つの一覧（backend-cpu の差分全文を含む）】
+  （旧雛形の 'crates/*/src' は git の pathspec では何にも一致せず常に空になるため、ゲートとして機能していなかった。#4151 の Mac mini セッションで修正）
   tree_fingerprint は `python3 -I aggregate_4151.py --fingerprint <tree-dir>` の値
   （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を
   C ロケール順に並べた全体の SHA-256。target/ と .git は除外。シンボリックリンクは対象文字列をハッシュ）。
