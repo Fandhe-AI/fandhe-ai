@@ -1,0 +1,277 @@
+RULE fixed-at-utc 2026-11-10T16:05:16Z
+（計測前に単独コミットして固定する。計測後に緩めない。雛形: 本ファイル・#4151。親の雛形は docs/perf/logs/diag-0140-template/RULE.template.txt）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_4151.py は止まる）
+
+1. 目的・対象セル
+  #4151 で、スコアボード 0.14.0 の M-CPU-G256（<metal-node>・Mac mini・CPU gemm N=256）の固定費を区間に分けて測り、
+  現分類「ハードの上限」が成り立つかを判定する。SME は OFF（0.14.0 の本番構成）と ON（計測専用ツリー）の両方を測る。
+  現分類は docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/unreached_0140.tsv の値（PARAMS の prev_class に転記）。
+  変えないもの: tolerance・閾値・依存・本体コード・unreached_0140.tsv・loss-attribution-matrix.md（分類の反映は Phase 6）。
+
+2. 対象 tree
+  7e0d01debd99a2ec9afe00f305123cf05f94b8e0（PR-1 #4192 のマージコミット）の git archive。PARAMS の tree_sha に書く。
+  前提ゲート: git diff --name-only v0.14.0 <tree_sha> -- crates/backend-cpu/src の一覧を記録し、
+  差が許されるのは、数値・実行経路を変えない診断 API の追加だけ（#4192 の crates/backend-cpu/src/gemm_blis/mod.rs の
+  sme_production_enabled() 追加と crates/backend-cpu/src/lib.rs の再エクスポート）。この 2 ファイル以外に差が 1 件でもあれば停止する。
+  2 ファイルの差分は目視で「診断 API の追加のみ」と確認し、差分全文を記録する（数値・分岐を変える変更が混じれば停止）。
+  backend-cpu 以外の差（git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src/*' のうち crates/backend-cpu/src 以外）は
+  一覧を記録するだけで停止しない。#4192 の時点で autodiff と tensor-core の create_graph 系などに差があり、どれも CPU GEMM の実装ファイルではない。
+  記録（2026-11-10・所有者判断「雛形を直してから固定」〈#4210〉に従い、上の前提ゲートで確認した）:
+  (a) git diff --name-only v0.14.0 <tree_sha> -- crates/backend-cpu/src の一覧（許される 2 ファイルだけ。ゲート通過）:
+    crates/backend-cpu/src/gemm_blis/mod.rs
+    crates/backend-cpu/src/lib.rs
+  差分全文（目視で「診断 API sme_production_enabled() の追加と再エクスポートのみ。数値・分岐の変更なし」と確認）:
+    diff --git a/crates/backend-cpu/src/gemm_blis/mod.rs b/crates/backend-cpu/src/gemm_blis/mod.rs
+    index 5a766882e..cca0b353d 100644
+    --- a/crates/backend-cpu/src/gemm_blis/mod.rs
+    +++ b/crates/backend-cpu/src/gemm_blis/mod.rs
+    @@ -3594,6 +3594,22 @@ fn sme_kernel_for_shape(m_total: usize, n: usize, k: usize) -> Option<microkerne
+         }
+     }
+     
+    +/// 本番 SME ゲート [`SME_PRODUCTION_ENABLED`] の現在値を返す診断用の読み出し口（イシュー #4151）。
+    +/// `sme_report().kernel_enabled` は OS／SVL によるハード能力であり本番有効フラグではないため、
+    +/// 計測 example（`cpu_gemm_n256_fixed_cost_4151`）が OFF／ON 腕のビルド取り違えを検証する用途に分ける。
+    +/// 非 aarch64 では SME 経路が存在しないため常に `false`。
+    +#[doc(hidden)]
+    +pub fn sme_production_enabled() -> bool {
+    +    #[cfg(target_arch = "aarch64")]
+    +    {
+    +        SME_PRODUCTION_ENABLED
+    +    }
+    +    #[cfg(not(target_arch = "aarch64"))]
+    +    {
+    +        false
+    +    }
+    +}
+    +
+     /// m=64 専用 4 タイル SME カーネル（イシュー #3235）の本番ゲート。**既定 OFF**。
+     ///
+     /// 設計の正は `docs/perf/cpu-gemm-sme-thin-m64-decision.md`（#3234 判定 (A)）。既定 ON への反転は
+    diff --git a/crates/backend-cpu/src/lib.rs b/crates/backend-cpu/src/lib.rs
+    index 17200c2b4..b1dbfbf09 100644
+    --- a/crates/backend-cpu/src/lib.rs
+    +++ b/crates/backend-cpu/src/lib.rs
+    @@ -243,7 +243,7 @@ pub use gemm::{
+     };
+     pub use gemm_blis::{
+         gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt,
+    -    gemm_blis_parallel_tn,
+    +    gemm_blis_parallel_tn, sme_production_enabled,
+     };
+     pub use layer_norm::{LayerNormError, run_layer_norm_f32};
+     pub use linalg::LinalgError;
+  (b) backend-cpu 以外の差（記録のみ・停止しない。いずれも CPU GEMM の実装ファイルではない）:
+    crates/autodiff/src/create_graph.rs
+    crates/autodiff/src/create_graph/cumulative_b.rs
+    crates/autodiff/src/create_graph/judge.rs
+    crates/autodiff/src/create_graph/lin.rs
+    crates/autodiff/src/create_graph/lin_libm_tests.rs
+    crates/autodiff/src/create_graph/loss_binary_margin.rs
+    crates/autodiff/src/create_graph/loss_class.rs
+    crates/autodiff/src/create_graph/loss_class_tests.rs
+    crates/autodiff/src/create_graph/loss_regression.rs
+    crates/autodiff/src/create_graph/norm_reparam.rs
+    crates/autodiff/src/create_graph/scatter_reduce_prod.rs
+    crates/tensor-core/src/cumulative.rs
+    crates/tensor-core/src/weight_reparam.rs
+  P-TREE: 4 腕を送信側で作り diff -rq で比べた。off-base との差は on-base が gemm_blis/mod.rs、off-timed／on-timed が
+  gemm_blis/mod.rs・gemm_blis/diag_fixed_cost_timer.rs（新規）・examples/cpu_gemm_n256_fixed_cost_4151.rs だけ（patch の対象ファイルのみ）。
+  diag_timing.patch の example への 2 hunk は 58 行のオフセットで当たる（fuzz なし。BSD patch が残す .orig は削除してから指紋を取った）。
+  腕ごとの指紋（記録用。PARAMS の tree_fingerprint は off-base）: off-base 3a86261b98520d8f242dd88f59324dd7519beb21a312d466e781ebcbc2aba3e8
+    on-base a9f40b9b9a32b07bf9381c5df944f8e2bb8265daa6210ebf137cbccd3a416fe8
+    off-timed d4f6c8ec29af25a5d1927aac0642a48a4cba3c086db1925242f1342aa0c9b9cc
+    on-timed 6fe1b9439ead279be2de7306f6a35d9c4270fefa0b996161f2815e600f93076a
+  4 腕とも送信側とノード側で一致し、ノード側のビルド（example・off-base の --lib --no-run・bench-fandhe off／on）の後も変わらない。
+  （旧雛形の 'crates/*/src' は git の pathspec では何にも一致せず常に空になるため、ゲートとして機能していなかった。#4151 の Mac mini セッションで修正）
+  tree_fingerprint は `python3 -I aggregate_4151.py --fingerprint <tree-dir>` の値
+  （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を
+  C ロケール順に並べた全体の SHA-256。target/ と .git は除外。シンボリックリンクは対象文字列をハッシュ）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。
+  cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+
+3. 腕と tree ゲート
+  4 腕（example cpu_gemm_n256_fixed_cost_4151 のラベル）:
+    off-base  = clean archive（SME は const false = 0.14.0 の本番構成）
+    on-base   = off-base + on-arm.patch（SME_PRODUCTION_ENABLED を true にする 1 行）
+    off-timed = off-base + diag_timing.patch
+    on-timed  = off-base + on-arm.patch + diag_timing.patch
+  patch の sha256 は patch_sha256.txt と一致すること。ツリー間で中身が違うファイルが patch の対象ファイルだけであること（P-TREE）。
+  4 腕すべてで example の bits_hash が一致すること（不一致は FAIL で停止）。on 腕（on-base／on-timed）は sme_production_enabled == true かつ sme_kernel_enabled == true（どちらか違えば集計を拒否・中止）。
+  ON ツリーでは cargo test --lib を走らせない（ドリフト検出テストが作りの上で落ちる）。timed ツリーは determinism_inventory が通らない（main へ入れない理由）。
+
+4. 計測手順
+  ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す。
+    Mac mini: hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。ビルドはゲートの前に済ませ、計測中に並走させない。
+  ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  腕の順序は奇数ラウンドと偶数ラウンドで入れ替える（run_round.sh）。RAYON_NUM_THREADS は設定しない。
+  系列（example）: hot（連続）・gap（各呼び出しの前に gap_us だけスピン待ち。worker が寝た状態からの起床を含める）・
+  serial_t1（参照）・forkjoin_floor_hot／gap（fork-join の床。job 数は 2×スレッド数）・cold_first_call（記録のみ。計測窓の外）。
+  warmup 50・測定 500。bench-fandhe gemm 256 の fresh と reuse（スコアボードと同じ窓）、PyTorch の bench_py.py gemm 256 fresh と
+  torch_cpu_mlp_diag.py の mm_pure を同じラウンドで取る。sme_microcall_fixed_cost_probe は off-base ツリーだけで実行する。
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない。式が計測できないなら RULE を改訂して式を外す）。
+  保存物: round{i}/{gate.txt, values.tsv, raw/}・env/。values.tsv は quantity／value の 2 列（W_off W_on Wf_off Wf_on O K_opp は ms、
+  c_sme_kc0_ns c_sme_intercept_ns は ns）。変換手順は計測する issue が README に残す。
+
+5. 区間の操作的定義（時計はすべて wall。diag_timing.patch が計る）
+  pre        gemm_blis_parallel_with_transpose の入口から par_iter_mut の直前まで（grid は入口から job_grid 直後まで、split は grid から split_c_into_jobs 直後まで）
+  fork_wake  par_iter_mut の呼び出しから各 worker の最初の job が始まるまで（min・max）
+  stage_in／stage_out  c_local の確保と copy-in／copy-out（job 合計）
+  alloc      PanelBuffers::new（job 合計）
+  pack_b／pack_a  B pack ループ／A pack ループ（job 合計）
+  kernel     jr／ir ループ全体（端タイルのコピーを含む。job 合計）
+  join       最後の job が終わってから par_iter_mut が戻るまで
+  region_wall par_iter_mut の呼び出しから戻りまで
+  導出: kernel_ideal = Σkernel ÷ P_used・kernel_crit = max_worker Σkernel・imbalance = kernel_crit − kernel_ideal・
+        F_drv = G − kernel_ideal（G は base 腕の hot 中央値）・perturbation = (timed の G − base の G) ÷ base の G。
+  smstart／smstop は新しい asm! なしでは切り出せない。n_calls × c_sme ÷ P_used の上限として別欄に出す（kernel の内側。F_drv には足さない）。
+
+6. 診断式と判定規則（単位 ms。比はラウンド別の値の中央値。判定は OFF 腕で行い、ON 腕は同じ式の値を記録するだけで分類を動かさない）
+  W = bench-fandhe gemm 256 の reuse 窓、Wf = 同 fresh 窓、O = PyTorch fresh 窓、K_opp = PyTorch の mm_pure。
+  F2     = O ÷ Wf
+  F1     = O ÷ (W − G + K_opp)
+  F1_drv = O ÷ (W − F_drv)
+  分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
+  (1) F2 が reach_threshold 以上 → 「計測窓の定義」。
+  (2) そうでなく F1 が reach_threshold 以上なら GEMM 呼び出しの中を分ける。
+      F1_drv が reach_threshold 以上 → 「ハードの上限」は成り立たない。「自分たちの制約」とし、理由は「GEMM 駆動部の固定費（区間別の数字）」。
+        根拠: 完全自作コア（REQ-1）で自前の駆動部を持つことによる固定費であり、閉源ライブラリやハードが決める部分ではない。
+      そうでなければ → kernel_owner の宣言どおり（hardware なら「ハードの上限」。閉源 Accelerate 相当のカーネル速度で決まる）。
+      この解釈は測る前に宣言し、事後に動かさない。
+  (3) それ以外 → 「分類保留」。理由は「GEMM の外の区間が主因。別の診断へ」。
+  確度: 高 = 全ラウンド PASS（status=formal）かつ判定に使った式のラウンド別の値がすべて閾値の同じ側（境界ちょうどはまたぐ扱い）かつ
+        |perturbation| が perturbation_max 以下。低 = それ以外（理由欄の先頭に「確度低」）。
+  ドリフト: 観測比 O ÷ W の中央値が scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。
+  停止条件: 区間の和（job 合計 ÷ P_used）が region_wall を sum_tolerance 超えて超える・d_n_calls が手計算の下限
+  （ceil(dim/MR)×ceil(dim/NR)×ceil(dim/kc)）を下回る・d_regions が calls と一致しない。
+
+7. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md）。注意: 上記決定記録は #4142 で「案・所有者承認待ち」。
+  承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映し、旧版も残す。
+  （固定時点: #4142 は 2026-11-10 に案 A〈NB-RANGE5 を定義を変えずに採用〉で承認済み。#4209）
+
+8. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパスを書かない。Mac mini は <metal-node> と書く。
+  集計は同梱の aggregate_4151.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_4151.py を変更すると aggregate_script_sha256 が不一致になり集計は止まる。
+
+9. 限界
+  plain GEMM の入口で、bias_act 融合経路ではない。kernel は端タイルのコピーを含む。E コアと P コアは分けられない
+  （macOS に正式な pinning の手段がない。#3175 §5）。smstart／smstop は上限値。gap_us が実ベンチ窓の直列区間の起床コストを
+  再現できているかは未検証。
+
+10. RULE.v2 の改訂（2026-11-10T16:05:16Z。所有者判断: #4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」）
+  本ファイルは RULE.txt（fixed-at-utc 2026-11-10T03:11:11Z・#4214）の改訂版で、他ジョブの前提ゲートを足して測り直すために置く。
+  旧 RULE.txt と旧系列（本ディレクトリ直下の round1〜5・env/・aggregate.*）は消さずに残す。
+  項 1〜9 と PARAMS は、1 行目と PARAMS の fixed-at-utc（本改訂の固定時刻）を除き RULE.txt の逐語コピー。
+  tree_sha・tree_fingerprint（4 腕の指紋を含む）・aggregate_script_sha256・patch の sha256・腕・計測の条件・閾値・診断式・判定規則・確度の規則は変えない
+  （同じ tree を新しい展開先に置き直して測る。重なり以外の条件を旧系列とそろえ、旧系列と並べて読めるようにするため）。
+  (a) 改訂の理由: 旧系列は全 5 ラウンド（03:50:42〜03:52:39Z）が、hw-lock を取らない他ジョブ（wgpu の GPU GEMM・CPU 100%・caffeinate 付き。
+      03:37:56Z 起動。03:41:02〜04:00:14Z は N=4096）と重なった。load1 < 3.0 のゲートは通ったが、このゲートでは重なりを検出できない。
+      旧系列は「他ジョブと重なった系列・参考」とし、判定は新系列で決める。
+  (b) 他ジョブの前提ゲート（ゲートを厳しくする方向だけの追加。load1 のゲート・閾値・診断式・判定規則・確度の規則は変えない）:
+      部品: docs/perf/logs/macmini-foreign-job-gate/（PR #4227 のマージコミット 903782084807e0ecb82143b1302ed3346dbae577 の git archive から取り、tree の外の展開先 kit/ に置く）。
+        d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04  foreign_job_gate.py
+        90db28516de7246212dab265bc5de71ea6dd1a2579241919dc5918f8267b5954  round_with_foreign_gate.sh
+        e708c6e1f2ab3ecc3d99500adb7215342c45b9a8c2168cd88f2c0542dbe381b6  drive_series.sh
+        e255ccc6d730124b52c01676354f48c0b9c3195f2220a86cc0e4c044a67e8bc8  test_round_with_foreign_gate.sh
+      系列を始める前にノード側で上の 4 行を `shasum -a 256 -c` で照合し（1 件でも違えば測らない）、`python3 -I foreign_job_gate.py --self-test` と
+      `/bin/bash test_round_with_foreign_gate.sh` を通す。結果は展開先の kit-verify.txt に書き、回収のときに <系列>/env/kit-verify.txt へ写す
+      （ドライバは既存の系列ディレクトリを拒否するため、系列の前には系列ディレクトリを作らない）。
+      各 round は kit/round_with_foreign_gate.sh が前後から挟む（呼ぶのは下の (c) のドライバ。run_round.sh への環境変数は従来どおり）。
+      他ジョブとみなす基準（foreign_job_gate.py。どれか 1 つで FOREIGN）:
+        G1 実行ファイルの basename が caffeinate のプロセスがある（ユーザーを問わない）
+        G2 %CPU（ps -A -o pid=,ppid=,uid=,pcpu=,comm= の pcpu）が 25.0 以上のプロセスがある（ユーザーを問わない）
+        G3 basename（小文字化）が wgpu・python・cargo・rustc・xctrace・torch・bench・caffeinate のどれかを含む（ユーザー・%CPU を問わない）
+        G4 ioreg -r -d 1 -w 0 -c IOAccelerator の "Device Utilization %" を 1 秒間隔で 5 回読み、10 以上の回が 2 回以上
+        除外: ゲート自身・その祖先（ラッパー・ドライバ）・その子孫（ps・ioreg）と pid 0・1。名前では除外しない。
+      開始前（run_round.sh を呼ぶ前）: CLEAN かつ load1 < 3.0（項 4 の load1 ゲートと同じ閾値・同じ読み方）なら始める。どちらかがそろわなければ
+        30 秒間隔で最大 60 回待ち（各回の load1 は r<i>-before-a<k>.txt の末尾に wrapper_load1 で残す）、60 回ともそろわなければ run_round.sh を呼ばず
+        gate.txt を「TIMEOUT foreign-job before <UTC>」（最後の回が FOREIGN）か「TIMEOUT load1 before <UTC>」にする（項 4 の TIMEOUT と同じ扱い。
+        正式系列から外し partial・確度低）。load1 の読み方は run_round.sh と同じで、sysctl の失敗・数値でない値は待たずに
+        「INVALID load1-sysctl-failed before <UTC>」／「INVALID load1-not-numeric before <UTC>」にして系列を止める（fail-closed）。
+        両方を同じループで待つのは、run_round.sh の中の load1 の待ちの間に他ジョブが始まって終わる隙間を作らないため。
+      隙間の検査（終了後に行う）: run_round.sh の gate.txt が PASS なら、その行の末尾の UTC と開始前の確認の時刻の差を見て、60 秒を超えて後・
+        1 秒を超えて前・読めない場合は「INVALID foreign-gap <理由> <UTC>」にする（下の終了後の FOREIGN と同じ扱い）。
+        run_round.sh は load1 のゲートの前に precheck（.rev-stamp・bench_py.py の sha256・torch の版の確認で venv の python を起動する）を行うので、
+        隙間にはこの precheck の時間が入る（下の (e) の試走で実測）。
+      終了後（run_round.sh が返った直後）: FOREIGN（または隙間）なら、run_round.sh が 0 で終わり gate.txt の 1 語目が PASS の round を「INVALID foreign-after <UTC>」
+        （隙間は foreign-gap）に書き換え（元の行は「# was: 」で残す。ラッパーは exit 4）、ドライバは記録したまま次の round へ進む
+        （次の round は開始前の確認で待つ。所有者判断「後で見つかったら、その round は INVALID」）。run_round.sh が非 0・gate.txt が無い場合は
+        INVALID にして系列を止める（exit 5）。ゲート自身の失敗は fail-closed（開始前は INVALID foreign-gate-error before で exit 1、
+        終了後は INVALID foreign-gate-error after で exit 5・系列を止める）。
+      記録: <系列>/env/foreign-gate/r<i>-before-a<k>.txt・r<i>-after.txt（マスク済み。ユーザー名・$HOME・ホスト名を置換、自分以外の uid は数値、
+        プロセス名は basename の「:」より前だけ）。
+      限界: ゲートは round の前後だけを確かめるので、round の途中で始まって終わるジョブは検出できない。
+        ps の %CPU は減衰平均で起動直後のジョブは低く出る（G3・G4 で補う）。GPU 使用率は機体全体の値で、どのプロセスかは分からない。
+        run_round.sh 自身が起動する python（bench_py.py・torch_cpu_mlp_diag.py）と cargo（sme_microcall_fixed_cost_probe）は G3 に当たる名前だが、
+        どれも run_round.sh が返る前に終わり、終了後の確認はその後に行う（ゲートが除外するのはゲート自身の祖先と子孫だけで、run_round.sh の子は含まない。残っていれば G3 で FOREIGN になる。名前では除外しない）。
+      G2 の 25.0 の根拠は RULE.v3（#4153）項 8 (c) と同じ平常時の確認（docs/perf/logs/macmini-foreign-job-gate/idle-check-20261110/。
+        除外対象を除いた %CPU の最大 4.3%。稼働中の他ジョブは 99.3%）。
+  (c) 系列: series=remeasure-1。記録先は本ディレクトリの series-remeasure-1/（round1〜5・round<i>.log・env/・RULE.v2.txt の写し・drive.status）。
+      展開先は旧系列と別の新しいディレクトリで、名前を `.noindex` で終わらせる（Spotlight が索引しない場所。ビルド・計測・記録のファイルはすべてこの中に書く。
+      理由は下の (e) の試走 1 と事実確認: <metal-node> の作業ディレクトリは Spotlight の索引対象で、そこにファイルを書くと Spotlight の埋め込み生成
+      〈spotlightknowledged〉が mediaanalysisd を %CPU 約 120 で数秒走らせ、計測と重なる。所有者判断（下の (e) の事実確認の後・2026-11-10「展開先を .noindex に作り直す」）。
+      Spotlight の設定・デーモン・ゲートの基準は変えない）。展開先では、tree_sha の git archive（.rev-stamp に完全 SHA）から項 3 の 4 腕を作る（patch は patch_sha256.txt と照合。
+      BSD patch が残す .orig は削除）。指紋は送信側と、ノード側のビルドの前と後で、4 腕とも項 2 の値と一致することを確かめる（1 件でも差があれば測らない）。
+      ビルドは旧系列と同じ（README の手順 2: 4 腕の example・off-base の --lib --no-run・bench-fandhe off／on を腕ごとの target dir で。
+      CARGO_TARGET_DIR と RAYON_NUM_THREADS を外す。bench-fandhe の path patch は cargo tree で確かめる）。py/bench_py.py は sha256 を照合し、
+      venv-torch は旧系列の展開先のものを写したもので torch 2.14.0（run_round.sh の precheck で照合）。
+      ドライバは kit/drive_series.sh（`drive_series.sh 4151 <系列ディレクトリ> 5 <off-base ツリーの run_round.sh> ROOT_OFF_BASE=… ROOT_ON_BASE=… ROOT_OFF_TIMED=…
+      ROOT_ON_TIMED=… BENCH_FANDHE_OFF=… BENCH_FANDHE_ON=… D=… FC_PY=<off-base>/scripts/bench/framework-compare EXPECT_SHA=<tree_sha>`。
+      nohup で切り離して起動）。hw-lock を取り、round 1〜5 を順に回す。ラッパーが非 0 で終わり gate.txt の 1 語目が TIMEOUT 以外なら以降の round を回さず
+      止めて報告する。ただし、ラッパーが 1 で gate.txt の 1 語目が TIMEOUT の round と、ラッパーが 4 で gate.txt の 1 行目が「INVALID foreign-after」か
+      「INVALID foreign-gap」の round は、記録したまま次の round へ進む。
+      ドライバが中断（SIGTERM・SIGINT・SIGHUP）されたら、実行中の round の子孫を止めてからその round を「INVALID interrupted-<信号>」にしてロックを外す。
+      子孫が 60 秒以内に止まらなければロックを外さずに止める（LOCK-KEPT）。gate.txt を INVALID に書き換えられないときも系列を止める。
+      差し替え・追加・除外・再実行はしない。系列の実行中は、計測と同じ機体で ssh・python・cargo を動かさない（終了後ゲートに自分の操作が当たらないように、
+      終わるまで待ってから 1 回だけ見る）。
+      変換・集計は旧系列と同じ手順（README の手順 4・5）で、集計に --rule RULE.v2.txt を付ける（to_values_4151.py・aggregate_4151.py は本リポジトリの版。
+      aggregate_4151.py の sha256 は PARAMS）。to_values_4151.py は gate.txt が PASS 以外の round を変換しない。
+      aggregate_4151.py は INVALID の round を含む系列を集計せずに止まる（本改訂で変えない）。このため INVALID（foreign-after・foreign-gap・
+      interrupted を含む）の round が 1 つでもあれば、新系列は集計せず、round の状態とゲートの記録だけを報告する（値は見ない。所有者判断を仰ぐ）。
+      TIMEOUT の round は項 4 のとおり正式系列から外し、status=partial・確度低で集計する。
+  (d) 系列の始め方: 前の負荷が load1 から抜けるのを待つ（round ごとの load1 < 3.0 のゲートは変えない）。drive_series.sh がロックを取ってから
+      load1 を 30 秒ごとに読み、1.5 未満になったら round 1 を始める（最大 40 回＝20 分。届かなければそのまま始め、届かなかったことを記録する）。
+      1.5 は平常時の load1（0.92〜1.35）の少し上。待った秒数・各回の load1・開始時の load1 を <系列>/env/series-start.txt に残す。
+  (e) 固定前の試走（捨てる前提。値は見ない）:
+      どれも本 RULE の tree（4 腕の指紋が項 2 と一致）・5 round で回し、値は見ずにゲートの記録だけを読んで捨てた（リポジトリには入れない）。部品は (b) の 4 ファイル（sha256 一致・self-test 通過）。
+      試走 1（2026-11-10T12:14:59〜12:24:40Z。展開先は名前に .noindex の付かない通常のディレクトリ）: 系列の始めは 480 秒待って load1 1.48。
+      5 round とも開始前のゲートは CLEAN（load1 1.52〜2.60。round 5 は load1 3.01 で 1 回待った）、隙間は 0〜1 秒だったが、終了後のゲートが 5 round とも
+      G2 で mediaanalysisd（自分の uid・%CPU 119.6〜123.4。GPU は 0）を検出し、5 round とも「INVALID foreign-after」になった（ラッパー exit 4・系列は完走）。
+      開始前の mediaanalysisd は %CPU 0〜3.4。
+      事実確認（捨てる前提・値は読まない・hw-lock 下。記録はリポジトリに入れない）:
+        (1) 2026-11-10T12:27:21〜12:29:25Z: 何もしない 60 秒・run_round.sh 1 回・何もしない 60 秒を 1 秒ごとに採取。mediaanalysisd は何もしない区間で 0
+            （起動直後の 1 サンプルだけ 54.7）。round の最初の段（example）の途中で 92.7 に上がり、round の残りとその後約 7 秒は 116〜125、その後 0。
+        (2) 2026-11-10T15:34:38〜15:41:51Z: 段ごと（起動のみ・CPU 1／10 スレッド・example・bench-fandhe・python・書き込み）に分けようとしたが、
+            mediaanalysisd が最初から最後まで約 120 で走り続けていて分けられなかった。システムログでは、依頼元は spotlightknowledged
+            （Spotlight の Document Embedding Generation）で、mediaanalysisd の MADServiceTextProcessingTask を毎秒 2 件前後、何時間も続けて依頼していた
+            （どの文書かはログで伏せられている）。作業ディレクトリは Spotlight の索引対象（mdutil は Indexing enabled。展開先の .rs 7655 件中 7639 件が索引済み）。
+        (3) 2026-11-10T15:46:38〜15:50:10Z（mediaanalysisd が止まっている間）: example を出力 /dev/null で実行 → 上がらない。小さな文字ファイルを 8 個書く → 123 に約 4 秒。
+            example の出力をファイルに書く → 91.9 に約 2 秒。
+        (4) 2026-11-10T15:50:53〜15:54:38Z: 名前が .noindex で終わるディレクトリに同じ 8 個を書く → 2 回とも上がらない。通常のディレクトリ（対照）→ 122〜124 に約 3 秒。
+      以上から展開先を .noindex に作り直した（(c)）。
+      試走 2（2026-11-10T15:59:38〜16:04:14Z。展開先は .noindex。ビルドの前後で 4 腕の指紋が項 2 と一致・bench-fandhe の path patch は cargo tree で確認）:
+      系列の始めは 210 秒待って load1 1.47。5 round とも開始前のゲートは 1 回目で CLEAN（load1 1.22〜1.44）、隙間は 0〜1 秒（run_round.sh の PASS 時刻と
+      開始前の確認の差）、終了後のゲートは CLEAN（除外対象を除いた %CPU の最大 1.2〜3.0・GPU は 5 回とも 0）で、rc=0・PASS で完走した。
+  (f) 記録: 結果欄では旧系列（参考）と新系列を並べて書き、判定・分類は新系列で決める。
+
+## PARAMS
+fixed-at-utc: 2026-11-10T16:05:16Z
+issue: 4151
+rounds: 5
+tree_sha: 7e0d01debd99a2ec9afe00f305123cf05f94b8e0
+tree_fingerprint: 3a86261b98520d8f242dd88f59324dd7519beb21a312d466e781ebcbc2aba3e8
+aggregate_script_sha256: 717f8f0d9413fa97593397a81414423743acfc5120adc740e854cf7a842b30f8
+reach_threshold: 1.00
+noise_band: NB-RANGE5
+cell: M-CPU-G256
+scoreboard_ratio: 0.69
+prev_class: ハードの上限
+kernel_owner: hardware
+gap_us: 50
+kc: 256
+perturbation_max: 0.10
+sum_tolerance: 0.15
+dim: 256
