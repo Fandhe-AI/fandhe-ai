@@ -6,8 +6,9 @@
 #   VAR=VAL は run_round.sh へ渡す環境変数（HW_LOCK_HELD=1・HW_LOCK_OWNER_FILE は自動）。
 # 系列の始め方: ロック取得後、load1 を 30 秒ごとに読み、1.5 未満になったら始める（最大 40 回＝20 分。届かなければ記録して始める。
 #   round ごとの load1 < 3.0 のゲートは run_round.sh 側で従来どおり）。待った秒数・各回の load1 を env/series-start.txt に残す。
-# 停止規則: ラッパーが非 0 で終わり gate.txt の 1 語目が TIMEOUT 以外 → 以降の round を回さず停止（想定外として報告）。
-#   TIMEOUT → そのまま記録して次の round へ。差し替え・再実行はしない。
+# 進め方: ラッパーが 0 → 次の round へ。gate.txt の 1 語目が TIMEOUT（開始前の他ジョブ・load1）→ そのまま記録して次の round へ。
+#   ラッパーが 4 かつ gate.txt の 1 行目が「INVALID foreign-after」（round 本体は正常終了・終了後に他ジョブ）→ その round は INVALID のまま次の round へ。
+#   それ以外の非 0（round 本体の失敗・ゲート自身の失敗など）→ 以降の round を回さず停止（想定外として報告）。差し替え・再実行はしない。
 # 経路の self-test は test_round_with_foreign_gate.sh（ロックは HOME 配下なので、テストは一時 HOME で動かす）。bash 3.2／5 互換。
 set -u
 [ "$#" -ge 4 ] || { echo "使い方: drive_series.sh <issue 番号> <系列ディレクトリ> <rounds> <run_round.sh> [VAR=VAL ...]"; exit 2; }
@@ -50,9 +51,14 @@ while [ "${i}" -le "${N}" ]; do
   env -u RAYON_NUM_THREADS -u CARGO_TARGET_DIR HW_LOCK_HELD=1 HW_LOCK_OWNER_FILE="${LOCK}/owner" "$@" \
     bash "${KIT}/round_with_foreign_gate.sh" "${RR}" "${i}" "${SER}/round${i}" "${SER}/env" > "${SER}/round${i}.log" 2>&1
   rc=$?
-  g=$(head -c 200 "${SER}/round${i}/gate.txt" 2>/dev/null | awk '{print $1}')
+  l=$(head -n 1 "${SER}/round${i}/gate.txt" 2>/dev/null | head -c 200)
+  g=$(printf '%s\n' "${l}" | awk '{print $1}')
   echo "round ${i} rc=${rc} gate=${g:-none} $(utc)" >> "${ST}"
-  if [ "${rc}" -ne 0 ] && [ "${g}" != "TIMEOUT" ]; then echo "STOP round ${i}" >> "${ST}"; exit 1; fi
+  cont=no
+  [ "${rc}" -eq 0 ] && cont=yes
+  [ "${g}" = "TIMEOUT" ] && cont=yes
+  case "${l}" in "INVALID foreign-after "*) [ "${rc}" -eq 4 ] && cont=yes ;; esac
+  if [ "${cont}" != "yes" ]; then echo "STOP round ${i}" >> "${ST}"; exit 1; fi
   i=$((i + 1))
 done
 echo "all done $(utc)" >> "${ST}"

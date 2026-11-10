@@ -44,7 +44,7 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
 | 時点 | CLEAN | FOREIGN | ゲート自身の失敗 |
 |---|---|---|---|
 | 開始前 | run_round.sh を始める | 30 秒間隔で最大 60 回（30 分）待つ。60 回とも FOREIGN なら run_round.sh を呼ばず `gate.txt` を `TIMEOUT foreign-job before <UTC>`（exit 1） | `gate.txt` を `INVALID foreign-gate-error before`（exit 1） |
-| 終了後 | run_round.sh の終了コードを返す | `gate.txt` の 1 語目が PASS なら `INVALID foreign-after <UTC>` に書き換え（元の行は `# was: ` で残す）、exit 4 で系列を止める | FOREIGN と同じ（`INVALID foreign-gate-error after`・exit 4） |
+| 終了後 | run_round.sh の終了コードを返す | round 本体が 0 で終わり `gate.txt` の 1 語目が PASS なら、`INVALID foreign-after <UTC>` に書き換え（元の行は `# was: ` で残す）、exit 4。その round だけを INVALID にして系列は次の round へ進む（次の round は開始前ゲートで他ジョブが去るのを待つ）。round 本体が非 0・`gate.txt` が無い場合は INVALID にして exit 5（系列を止める） | `INVALID foreign-gate-error after`・exit 5（系列を止める） |
 
 - `gate.txt` の 1 語目は既存の PASS／TIMEOUT／INVALID だけを使う。集計（`aggregate_diag.py`・`aggregate_4151.py`・`aggregate_4154.py` 等）は
   既存のとおり PASS 以外の round を正式系列から外す。差し替え・再実行・除外はしない。
@@ -59,8 +59,12 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
 - **系列の始め方**: ロックを取ってから load1 を 30 秒ごとに読み、1.5 未満になったら round 1 を始める（最大 40 回＝20 分。届かなければそのまま始める）。
   前の系列の負荷が load1 から抜けるのを待つためで、round ごとの load1 < 3.0 のゲートは各 run_round.sh で従来どおり。
   1.5 は平常時の load1（0.92〜1.35。上の「平常時の確認」）の少し上。待った秒数・各回の load1 を `<系列>/env/series-start.txt` に残す。
-- **止め方**: ラッパーが非 0 で終わり `gate.txt` の 1 語目が TIMEOUT 以外なら、以降の round を回さずに止める（`drive.status` に `STOP round <i>`）。
-  TIMEOUT はそのまま記録して次の round へ進む。差し替え・再実行はしない。
+- **進め方と止め方**: 次の 3 つは記録したまま次の round へ進む。それ以外の非 0（round 本体の失敗・ゲート自身の失敗など）は、以降の round を回さずに止める
+  （`drive.status` に `STOP round <i>`。想定外として報告し、止まった系列は集計しない）。差し替え・再実行はしない。
+  - ラッパーが 0
+  - `gate.txt` の 1 語目が TIMEOUT（開始前の他ジョブ・load1）
+  - ラッパーが 4 で、`gate.txt` の 1 行目が `INVALID foreign-after`（round 本体は正常に終わり、終了後に他ジョブ。所有者判断「後で見つかったら、その round は INVALID」）
+  - INVALID・TIMEOUT の round は集計で正式系列から外れ、系列は partial・確度低になる（既存の扱い）。
 
 ## ファイル
 
@@ -68,8 +72,8 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
 |---|---|
 | `foreign_job_gate.py` | 判定（1 回）。`--phase before|after --out <file>`・`--self-test`（合成 fixture。境界値・除外・GPU の回数・解釈の失敗） |
 | `round_with_foreign_gate.sh` | 1 round を前後のゲートで挟む。`<run_round.sh> <round 番号> <round ディレクトリ> <env ディレクトリ>` |
-| `drive_series.sh` | 系列ドライバ（ロック・系列の始め方・各 round をラッパーで挟む・止め方。上の「系列の回し方」） |
-| `test_round_with_foreign_gate.sh` | ラッパーとドライバの経路の self-test（スタブのゲートで CLEAN・待ち・TIMEOUT・終了後 FOREIGN・ゲート失敗・round 失敗。ドライバは一時 HOME と sysctl のスタブで完走・停止・TIMEOUT の次・load1 の待ち・ロック使用中・引数の拒否） |
+| `drive_series.sh` | 系列ドライバ（ロック・系列の始め方・各 round をラッパーで挟む・進め方と止め方。上の「系列の回し方」） |
+| `test_round_with_foreign_gate.sh` | ラッパーとドライバの経路の self-test（スタブのゲートで CLEAN・待ち・TIMEOUT・終了後 FOREIGN・ゲート失敗・round 失敗。ドライバは一時 HOME と sysctl のスタブで完走・終了後 FOREIGN の次・ゲート失敗と round 失敗での停止・TIMEOUT の次・load1 の待ち・ロック使用中・引数の拒否） |
 | `idle-check-20261110/` | 平常時の確認の記録（10 回分のゲート出力と時刻・load1。上の「平常時の確認」） |
 
 ## 確認

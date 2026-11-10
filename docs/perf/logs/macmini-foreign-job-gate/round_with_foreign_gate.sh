@@ -12,9 +12,10 @@
 #   `TIMEOUT foreign-job before <UTC>` にして exit 1（load1 ゲートの TIMEOUT と同じ扱い。差し替え・再実行はしない）。
 # 終了後（after）: run_round.sh が返った直後に 1 回確かめ、<env>/foreign-gate/r<i>-after.txt に残す。FOREIGN なら
 #   gate.txt の 1 語目が PASS の round を `INVALID foreign-after ...` に書き換え（元の行は "# was: " で残す。#4153 の
-#   run_round.sh の EXIT trap と同じ形）、exit 4 で系列を止める（ドライバは TIMEOUT 以外の非 0 で止まる）。
+#   run_round.sh の EXIT trap と同じ形）。round 本体が 0 で終わり PASS だった round なら exit 4（その round だけ INVALID。
+#   drive_series.sh は次の round へ進む）。round 本体が非 0・gate.txt が無い場合は INVALID にして exit 5（系列を止める）。
 # ゲート自身の失敗（exit 2）は fail-closed: 開始前なら gate.txt を `INVALID foreign-gate-error before` にして exit 1、
-#   終了後なら FOREIGN と同じく INVALID にして exit 4。
+#   終了後なら PASS の round を `INVALID foreign-gate-error after` にして exit 5（系列を止める）。
 # 集計（aggregate_diag.py・aggregate_4151.py・aggregate_4154.py 等）は gate.txt の 1 語目 PASS／TIMEOUT／INVALID を
 #   既存のとおり読み、PASS 以外を正式系列から外す。本ラッパーは新しい 1 語目を作らない。
 set -uo pipefail
@@ -68,14 +69,19 @@ if [ "${g}" -eq 0 ]; then
   exit "${rc}"
 fi
 why="foreign-after"; [ "${g}" -ne 1 ] && why="foreign-gate-error after rc=${g}"
+first=""; [ -f "${RD}/gate.txt" ] && first=$(awk 'NR==1{print $1}' "${RD}/gate.txt")
 if [ ! -f "${RD}/gate.txt" ]; then
   mkdir -p "${RD}" && echo "INVALID ${why} $(utc)" > "${RD}/gate.txt"
-else
-  first=$(awk 'NR==1{print $1}' "${RD}/gate.txt")
-  if [ "${first}" = "PASS" ]; then
-    { echo "INVALID ${why} $(utc)"; sed 's/^/# was: /' "${RD}/gate.txt"; } > "${RD}/.gate.txt.tmp" \
-      && mv "${RD}/.gate.txt.tmp" "${RD}/gate.txt"
-  fi
+elif [ "${first}" = "PASS" ]; then
+  { echo "INVALID ${why} $(utc)"; sed 's/^/# was: /' "${RD}/gate.txt"; } > "${RD}/.gate.txt.tmp" \
+    && mv "${RD}/.gate.txt.tmp" "${RD}/gate.txt"
 fi
-echo "foreign-gate after ${why}（round ${RN} は INVALID・系列を止める）"
-exit 4
+# 続けてよいのは「round 本体が 0 で終わり PASS だった round に、終了後ゲートが FOREIGN を返した」場合だけ（exit 4）。
+# その round だけを INVALID にし、次の round は開始前ゲートで他ジョブが去るのを待つ（所有者判断「後で見つかったら、その round は INVALID」）。
+# round 本体の失敗・gate.txt が無い（precheck で止まった）・ゲート自身の失敗は exit 5 で系列を止める（想定外として報告）。
+if [ "${g}" -eq 1 ] && [ "${rc}" -eq 0 ] && [ "${first}" = "PASS" ]; then
+  echo "foreign-gate after ${why}（round ${RN} は INVALID・次の round へ）"
+  exit 4
+fi
+echo "foreign-gate after ${why}（round ${RN} は INVALID・round の終了コード ${rc}・系列を止める）"
+exit 5
