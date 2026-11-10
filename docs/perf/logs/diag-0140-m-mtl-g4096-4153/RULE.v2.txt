@@ -1,0 +1,254 @@
+RULE fixed-at-utc 2026-11-10T04:18:57Z
+（計測前に単独コミットして固定する。計測後に緩めない。雛形: docs/perf/logs/diag-0140-template/RULE.template.txt・#4144 を #4153 向けに記入したもの）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS・AUX の <…> をすべて置換する。値を決め済みの欄〈issue・rounds・reach_threshold・noise_band・cell 行の prev_class〉は山括弧を外すだけでよい。残っていると aggregate_diag.py／attrib_4153.py は止まる。
+ 例外: AUX の xctrace を unavailable にした場合、trace 専用キー〈xctrace_schema・xctrace_start_col・xctrace_dur_col・xctrace_proc_col・xctrace_time_unit_ns・gemm_interval_min_ms〉は読まないため <…> のまま・行ごと削除のどちらでもよい〈to_values_4153.py・attrib_4153.py は要求しない〉）
+
+1. 目的・対象セル
+  #4153 で、スコアボード 0.14.0 の 1 位でないセルの診断 (3)（相手の構成を再現した場合に届く比）を測る。あわせて窓の差（fandhe − candle）がカーネル側か窓側かを分ける。
+  対象セル: M-MTL-G4096（Mac mini・Metal GEMM N=4096・相手 candle）。現分類は docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/unreached_0140.tsv の値（PARAMS の prev_class に転記）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・unreached_0140.tsv（分類の反映は #4168）。
+
+2. 対象 tree
+  fandhe-ai の腕（窓・xctrace）は registry fandhe-ai =0.14.0（framework-compare の bench-fandhe）。照合の診断テストは PR-1 マージ後の main SHA の git archive（PARAMS の tree_sha）。
+  tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値
+  （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を C ロケール順に並べた全体の SHA-256。target/ と .git は除外）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば計測しない（手作業の確認。run_round.sh が検査するのは .rev-stamp と tree_sha の一致だけ）。cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+  版差の記録: `git diff v0.14.0 <tree_sha> -- crates/backend-metal/src` の差分の有無を AUX の backend_metal_diff_vs_v0_14_0 に書く。差分ありなら照合の結論に「版差あり」を付ける。
+  記録（2026-11-10）: tree_sha は PR-1 のマージコミット。送信側とノード側の tree_fingerprint は一致（files=2691）し、ノード側のビルド
+  （framework-compare の bench-fandhe・bench-candle と backend-metal のテストバイナリ。いずれも --release --locked・in-tree target）の後も変わらない。
+  crates/backend-metal/src の v0.14.0 との差分はなし（AUX に記録）。
+  xctrace: <metal-node> には xctrace が無い（Command Line Tools のみ）。xctrace_probe_4153.sh の結果は unavailable
+  （env/xctrace_probe.txt・env/xctrace_version.txt を本 RULE と同じコミットに置く）。項 5 のフォールバックに従い AUX を xctrace: unavailable、
+  cell 行を formulas=F2 で固定する。trace 専用キー（xctrace_schema〜xctrace_time_unit_ns）は AUX から削除した。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す: hw-lock を取得し、load1 < 3.0 を 30 秒間隔で最大 30 分待つ。計測中にビルド・集計・転送を並走させない（ゲート通過後に cargo を呼ばない）。
+  ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  round の状態は gate.txt の 1 語目（PASS／TIMEOUT／INVALID）だけで伝え、PASS 以外は正式系列から外して系列は partial で集計を続ける:
+    INVALID にするもの: load1 が数値でない（ゲート）、ゲート通過後に run_round.sh が非 0 で終わった（腕・診断テスト・マスクの失敗、INT・TERM・HUP）、
+    変換で検出した GEMM 区間の本数不一致・区間の重なり・ROUTE_ACTUAL≠Classic・DIAG_BITEQ≠true（to_values_4153.py）。
+    INVALID の記録に限り gate.txt の 1 行目を書き換え、元の行は「# was: 」付きで残す。INVALID の round は values.tsv を作らない。
+    それ以外の不整合（RULE・AUX・sha256・入力の欠落・重複・解釈不能など。README の「round の状態」）は hard で、系列全体の集計を止める。
+  ラウンド内の順序: 段は (a) → (b) → (c) の順に固定し、(a) をすべて終えてから (b)、(b) をすべて終えてから (c) に進む
+  （framework ごとに段をまたいでまとめない。trace 下と trace なしの窓で熱状態をそろえるため）。奇偶の入れ替えは (a)・(b) の各段の中の
+  framework の順だけで、奇数 round は fandhe → candle、偶数 round は candle → fandhe。framework 内の順と (c) の順は入れ替えない。
+    (a) trace なしの窓: fandhe reuse・fandhe fresh・candle gemm（fresh。スコアボードの相手値と同じ）・candle gemm-transfer-split（transfer_excl）
+    (b) xctrace（Metal System Trace）の腕: fandhe reuse・candle gemm-transfer-split。GPU 実行区間の表を export する（AUX の xctrace が unavailable なら取らない）
+        GEMM 区間は対象プロセスの継続時間 ≥ gemm_interval_min_ms の区間とし、本数が「先行分＋warmup＋iters＋後続分」と完全一致しなければ INVALID
+        （fandhe は先行・後続 0。candle は先行＝転送込みの warmup＋iters、後続＝checksum 検証 1）。余分な区間の許容枠は設けない:
+        継続時間だけでは余分な区間が先頭・途中・末尾のどこにあるかを特定できず、許容すると測定スライスが黙ってずれるため。
+        余分な区間が出て INVALID になった場合の扱いは RULE.v2.txt で抽出規則ごと定め直す。同一プロセスの区間が重なる表も INVALID。
+        件数の一致は並びの正しさまでは保証しない（GEMM の欠落と余分な区間が同数なら検出できない）
+    (c) 診断テスト: gemm_window_route_precheck（ROUTE_ACTUAL=Classic と bit 一致の確認）と gemm_reuse_phase_diag_production_batch（kernel_gpu＝GPUEnd−GPUStart）
+  各ステップ（(a) の 4 本・(b) の 2 本・(c) の 2 本）の間に 30 秒の待ちを入れる（最初の前と最後の後には入れない）。
+  実行したステップ名と開始時刻を raw/order.txt に残す。candle の純カーネル時間は Rust 側から GPU タイムスタンプを取れない（objc2-metal の直接依存追加には所有者承認が要る）ため、外部計器 xctrace で取る。
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない）。
+  保存物: round{i}/{gate.txt, values.tsv, aux.tsv, raw/（order.txt を含む）}・env/。変換手順は README と to_values_4153.py。
+
+4. 診断式（docs/perf/loss-attribution-matrix.md §10.1 から転記。単位は ms）
+  入力量: fandhe_window・fandhe_fresh_window・opp_window・fandhe_pure_kernel・opp_pure_kernel
+  F1 = opp_window ÷ (fandhe_window − fandhe_pure_kernel + opp_pure_kernel)
+       純カーネルの時計タグ（clock 列）を両側で揃える（本診断は両側とも gpu_trace）。揃わなければ F1 は比較不能とし、境界を併記する。
+  F2 = opp_window ÷ fandhe_fresh_window
+  観測比 = opp_window ÷ fandhe_window（スコアボードの比との整合確認用）
+  補助（attrib_4153.py。aggregate_diag.py の判定には使わない）:
+    ΔW = fandhe_window − opp_window、ΔK = fandhe_pure_kernel − opp_pure_kernel、kernel_share = ΔK ÷ ΔW
+    kernel_share ≥ kernel_share_threshold なら「カーネル側が主」、未満なら「窓側が主」。ΔW ≤ 0 は差なし（判定不能）。
+    trace_perturbation = |traced ÷ untraced − 1|（fandhe の reuse 窓と candle の transfer_excl の両方）。最大が perturbation_max を超えたら確度低。
+    cross_check_rel = |fandhe_pure_kernel(xctrace) − kernel_gpu(診断テスト)| ÷ kernel_gpu。cross_check_max を超えたら確度低。
+    全ラウンドがゲート PASS で、全ラウンドで同じ側に入り、摂動・照合がいずれも上限以内なら確度高、それ以外は低。
+    xctrace unavailable では純カーネルを取らないため、帰属は「判定不能(純カーネル unavailable)」（確度低）、摂動・照合は unavailable とし、
+    attrib.tsv の fallback_note に「F1 未計測・F2 だけで分類した」旨を出す。
+
+5. 判定の分類先と規則（優先順位つき。aggregate_diag.py の classify と同一）
+  分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
+  (1) formulas に F2 があり、F2 の run 間中央値が reach_threshold 以上なら「計測窓の定義」。
+  (2) そうでなく F1 があり、時計が揃っていて、F1 の run 間中央値が reach_threshold 以上なら、
+      kernel_owner=hardware は「ハードの上限」、kernel_owner=constraint は「自分たちの制約」。
+      kernel_owner は測る前に宣言する。本セルは constraint（根拠: 相手は閉源 MPS ではなく candle の公開 steel シェーダ。candle は function constant align_M/N/K で境界検査なしのロードを使う〈docs/analysis/candle-metal-01.md 204〜210 行・245 行〉が、fandhe は REQ-8〈coding-rust.md「カーネル実装の境界検査」〉により手動境界検査を保つ）。事後に動かさない。
+  (3) それ以外は「分類保留」。理由欄に「どれも届かない（残差は固定費など別区間。別診断へ）」または「F1 の時計不一致」を書く。
+  フォールバック: xctrace が使えない、または GPU 区間が 0 行だった場合は AUX の xctrace を unavailable とし、PARAMS の cell 行を formulas=F2 だけで固定する。
+    aggregate_diag.py は AUX を読まないため、xctrace と formulas の組は to_values_4153.py・attrib_4153.py が検査する
+    （available ⇔ formulas=F1,F2、unavailable ⇔ formulas=F2。食い違えば止まる）。
+    F1 は計測しない。分類は上の規則を F2 だけで適用する: F2 の run 間中央値が reach_threshold 以上なら規則 (1) で「計測窓の定義」、
+    未満なら規則 (3) で「分類保留」。後者の理由欄は aggregate_diag.py の固定文言「どれも届かない（残差は固定費など別区間。別診断へ）」になるが、
+    F1 を測っていないため「自分たちの制約／ハードの上限」は判定していない（F2 が届かないことだけを表す。attrib.tsv の fallback_note に明記される）。
+    F1 を宣言しないので「F1 の時計不一致」の理由にはならない。確度は下の規則どおり。
+    壁時計境界の F1(b)（candle transfer_excl 対 fandhe encode＋commit_wait。§12.6(b) と同じ境界）は README に参考として併記するだけで values.tsv には混ぜない。
+  確度:
+    高: 全ラウンドがゲート PASS（status=formal）かつ、判定に使った式の run 別値がすべて閾値の同じ側
+        （最小 > 閾値、または最大 < 閾値。境界ちょうどはまたぐ扱い）かつ、formulas に F1 を宣言した場合は時計が揃っている
+        （F1 を宣言しないフォールバックでは時計の条件は課さない。分類保留でも F2 の run 別値がすべて閾値未満なら確度は高になる）。
+    低: 上記以外。理由欄の先頭に「確度低」を付ける。
+  ドリフト: 観測比の中央値が PARAMS の scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。scoreboard_ratio=0.88 は unreached_0140.tsv の転記で、窓の中央値同士の比 0.871（64.379 対 56.103）との差は README に注記する。
+
+6. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md。run 別比の最小〜最大を帯とし、閾値を含めば確度低）。A/B 用の NB-SEP は使わない。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+  （固定時点: #4142 は 2026-11-10 に案 A〈NB-RANGE5 を定義を変えずに採用〉で承認済み。#4209）
+
+7. 運用
+  公開面（README・RULE・集計出力・保存物・コミット）に実機ホスト名・絶対ホームパスを書かない。Mac mini は <metal-node> と書く。
+  run_round.sh・xctrace_probe_4153.sh は終了経路（成功・失敗・unavailable・シグナル）によらず trace バンドルを消し、
+  to_values_4153.py --mask-dir で保存物のホームパス→<home>、ホスト名→<metal-node>、パス上のユーザー名→<user> を置換する
+  （対象と検出できないものは README の「マスク」。置換後に残れば非 0 で終わる）。
+  集計は同梱の aggregate_diag.py・to_values_4153.py・attrib_4153.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる（hard）。
+  項 3 の INVALID は止まらず round の状態として gate.txt に記録される。
+  xctrace の XML は非信頼データとして扱う（DOCTYPE・ENTITY 宣言とサイズ上限超えは拒否）。
+  本ファイル固定後に各スクリプトを変更すると sha256 が不一致になり集計は止まる（aggregate_diag.py は自身の sha256、attrib_4153.py は
+  to_values_4153.py・attrib_4153.py・run_round.sh の sha256 を照合する。to_values_4153.py・run_round.sh は実行時に自身を照合しない）。
+  kernel_owner の変更は PR-2 の RULE コミット時点までなら所有者が可能。以後は RULE.v2.txt。
+
+8. RULE.v2 の改訂（2026-11-10T04:18:57Z。所有者判断: #4153 のコメント 6758729708・2026-11-10）
+  本ファイルは RULE.txt（fixed-at-utc 2026-11-10T03:12:47Z・計測前に単独コミット済み・#4215）の改訂版で、変換スクリプトだけを直して
+  同じ raw を変換し直すために置く。再計測はしない。旧 RULE.txt は消さずに残す。項 1〜7 と AUX・PARAMS は、次の 2 点を除き RULE.txt の逐語コピー:
+  1 行目と PARAMS の fixed-at-utc（本改訂の固定時刻）と、AUX の to_values_sha256（直した to_values_4153.py の sha256）。
+  tree_sha・tree_fingerprint・aggregate_script_sha256・計測の条件・閾値・分類式・確度の規則・cell 行は計測時の RULE.txt のまま変えない。
+  attrib_4153.py・run_round.sh・aggregate_diag.py は変えていない（sha256 は RULE.txt と同じ）。
+  (a) 変えたもの: to_values_4153.py の parse_diag。旧 sha256 8f64458f21aafd9d93b1e41f67a82afea2ac898e90f461aa56357a0946130014、新 sha256 a9950fee2b39f20d0a21785dd4bf99c492e5cbd22006c77cb27728ee2ca9e120。
+      変更の理由: 旧版は ROUTE_ACTUAL の値を (\S+) で取り、文字列 Classic との完全一致で判定していた。テスト側（gemm_window_route_precheck）は
+      Rust の Debug 形式で `route=Classic(TileConfig { bm: 32, bn: 64, … })` と出力するため、計測した 5 round がすべて
+      「INVALID convert: route.txt: ROUTE_ACTUAL N=4096 route=Classic(TileConfig (want Classic)」になった（INVALID の理由は 5 round ともこの 1 件だけ。
+      DIAG_BITEQ は 5 round とも equal=true、ゲートは 5 round とも PASS）。新版は取った値の最初の `(` より前（`(` が無ければ値全体）を
+      variant 名として取り出し、Classic と完全一致で比べる。DIAG_BITEQ の判定は変えない。self-test に raw の実際の 3 行（ROUTE・ROUTE_ACTUAL・
+      DIAG_BITEQ）を逐語で足し、SplitK(…)・Classic を接頭辞に持つ別名・variant 名が空のものが INVALID になる例を足した。
+      あわせて --restore-gate（下の (c)）を足した。ほかの変換・判定のロジックは変えていない。
+  (b) 照合の注記（照合値を見る前に書く）: 診断テストと precheck は tile を M4 Max 限定の verified_m4_max_gpu_core_count() で選び
+      （crates/backend-metal/src/gemm_reuse_phase_diag_tests.rs の 409・552・587 行）、本番の dispatch_auto（窓と xctrace の腕・registry 0.14.0 にもある）は
+      verified_tile_table_device()（#3206）で M4 無印の表を選ぶ。このため Mac mini では診断が bn32、本番が bn64 になる（raw の ROUTE と ROUTE_ACTUAL の
+      N=4096 の行がこの差を示す）。照合（cross_check_rel＝診断テストの kernel_gpu と xctrace の fandhe 値の相対差）は構成の違うもの同士の比較になるため、
+      既存の「版差あり」と同じ扱いで、照合の結論に「構成差あり（診断 bn32・本番 bn64）」と注記して記録だけする。閾値（cross_check_max）・
+      分類式・確度の規則は変えない。本計測は xctrace unavailable のため照合は unavailable で、注記は記録の読み方として残す。
+      診断テストの tile 選択の修正は #4219。
+  (c) gate.txt の戻し方: 旧版の変換で gate.txt が「INVALID convert: …」に書き換わっている round は、v2 の変換の前に
+      `python3 -I to_values_4153.py --restore-gate <round{i}>` で戻す。戻すのは 1 行目が「INVALID convert: 」で始まり、2 行目以降がすべて
+      「# was: 」で始まる gate.txt だけで、「# was: 」を外した行をそのまま書き戻す。run_round.sh やゲートが付けた INVALID・TIMEOUT・PASS は戻さない
+      （スクリプトが止まる）。手で書き換えない。戻した gate.txt は下の (d) の sha256 と一致しなければならない。
+      記録（2026-11-10）: 計測時の raw を回収した保存物（下の (d)）の gate.txt は 5 round とも PASS のままで、書き換わっていない
+      （旧版の変換は保存物のコピーで行い、そのコピーは捨てた）。
+  (d) raw の固定: v2 で変換するのは、計測後に <metal-node> から回収してマスクした次の 99 ファイル（記録先からの相対パス）。変換・集計の前に
+      sha256 がすべて一致することを確かめ、1 件でも違えば止める。values.tsv・aux.tsv・attrib.tsv・aggregate.* は変換・集計で新たに作るため一覧に無い。
+      6e2a7a832866be79502a1eb035df83b541439a693ccaed971a410db3202d2493  RULE.txt
+      f8fec955f18911642873b1e3a9aecabb0fd21947a1a2cc00407b4a69d531d640  drive.status
+      d79e38735779a5cb82804b3108a32ec445d2d90f106be8bab4fd8c609b545908  env/xctrace_probe.txt
+      23c42bddfd94f738953d39c324e06c30fc4878b47e8ca86b43944361bdc865d2  env/xctrace_version.txt
+      fb3396467f7fb25b70ea602acafed643a1018d471127f133682e6aab8ae22970  round1.log
+      455162640a8e3a158def333e6c1bbe4ad4a594eafc995e34d2237b13f0413e77  round1/gate.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round1/raw/candle_gemm.err
+      04102e11d9ba4907047f6694cd83dfbd1ea8d7bf6d72d60da8e8ae4dc6610ae5  round1/raw/candle_gemm.jsonl
+      04102e11d9ba4907047f6694cd83dfbd1ea8d7bf6d72d60da8e8ae4dc6610ae5  round1/raw/candle_gemm.out
+      ff9b35b6d6f36ccb4f161024689647cb7f17e5575169820c353ba9c85e7dd3dd  round1/raw/candle_split.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round1/raw/candle_split.jsonl.err
+      ff9b35b6d6f36ccb4f161024689647cb7f17e5575169820c353ba9c85e7dd3dd  round1/raw/candle_split.jsonl.out
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round1/raw/diag.err
+      51a01bbb42221281aef2b9849e3addeac17e25170e3b5c5cc5a4cf118ee52dce  round1/raw/diag.txt
+      7c58a3b683a232f1337060efa184f545c205e971e58a121dce4c5f5eb34c453d  round1/raw/fandhe_fresh.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round1/raw/fandhe_fresh.jsonl.err
+      7c58a3b683a232f1337060efa184f545c205e971e58a121dce4c5f5eb34c453d  round1/raw/fandhe_fresh.jsonl.out
+      7a23103fb57adec97d7b86d8d71a494cd0a407233552ed47221506a1fef60335  round1/raw/fandhe_reuse.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round1/raw/fandhe_reuse.jsonl.err
+      7a23103fb57adec97d7b86d8d71a494cd0a407233552ed47221506a1fef60335  round1/raw/fandhe_reuse.jsonl.out
+      40c2c3f5b76dbaf6ffdf48201d488358d0b8a85faa444bf76c66ed13e279f72c  round1/raw/order.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round1/raw/route.err
+      d7cc48a2a80cd488fb243662ecb82c173e7b9235f12a5ccd7d109ba234d431a1  round1/raw/route.txt
+      84a50c199385a0d4fb0124047872642c96bbd7f72a82c7b177051ec5168acde7  round2.log
+      fc9330741bdc223179a0aa563d089d57833cc9b9056a7a774279df97135690d6  round2/gate.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round2/raw/candle_gemm.err
+      c61e96064b4d4f2af42ca7ef76c2a884d2a437c5e56de0cb1b2a7fe41b1d1f2b  round2/raw/candle_gemm.jsonl
+      c61e96064b4d4f2af42ca7ef76c2a884d2a437c5e56de0cb1b2a7fe41b1d1f2b  round2/raw/candle_gemm.out
+      91a6727db57bb1937c75200874d03d23a5af371a8d6470fe3f480dfca8e5b495  round2/raw/candle_split.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round2/raw/candle_split.jsonl.err
+      91a6727db57bb1937c75200874d03d23a5af371a8d6470fe3f480dfca8e5b495  round2/raw/candle_split.jsonl.out
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round2/raw/diag.err
+      f1355e6054bb4949cd2b23c8a8a08ce6118329f10d642c88a0097ffd22f1dd97  round2/raw/diag.txt
+      113808be62ad04045c666eb0b7d42a25a89bff8c0351b70f4810ad986ad35958  round2/raw/fandhe_fresh.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round2/raw/fandhe_fresh.jsonl.err
+      113808be62ad04045c666eb0b7d42a25a89bff8c0351b70f4810ad986ad35958  round2/raw/fandhe_fresh.jsonl.out
+      dd55857afd951001565bcb44be998df3e2ab2563372a52f0331ffb4667aed456  round2/raw/fandhe_reuse.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round2/raw/fandhe_reuse.jsonl.err
+      dd55857afd951001565bcb44be998df3e2ab2563372a52f0331ffb4667aed456  round2/raw/fandhe_reuse.jsonl.out
+      1f09c494b5a0a673ef625bbe9d5088b17de91a83091384f67353609d58f33a44  round2/raw/order.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round2/raw/route.err
+      7af913c65a5c27376e999758e165df83a4d011938dea3e9d6fa6c2328f61e516  round2/raw/route.txt
+      3e6364290d685114d8c7a8318349d511e86cd1c7c2246297db9e3d4349d4842d  round3.log
+      afaa0e0082ac2436d13e88563778b70007c24de3c361ea5c45c8f4f805464ff2  round3/gate.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round3/raw/candle_gemm.err
+      9e8900c1dc80afb8b437eab9efaa309cb868f6e55f304474f6100373249b88e5  round3/raw/candle_gemm.jsonl
+      9e8900c1dc80afb8b437eab9efaa309cb868f6e55f304474f6100373249b88e5  round3/raw/candle_gemm.out
+      b63aca32be44aca9fdc3dc83410ecfbac5b44122b601ec4da19b2730171a6002  round3/raw/candle_split.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round3/raw/candle_split.jsonl.err
+      b63aca32be44aca9fdc3dc83410ecfbac5b44122b601ec4da19b2730171a6002  round3/raw/candle_split.jsonl.out
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round3/raw/diag.err
+      10cae72424aafa0d06ec6ba60ee70bde1c63b904f51ac07169a6d41b2b193f13  round3/raw/diag.txt
+      a60d5a9688f60dbacc9973dcaaa2345a84deb0e2b3657d8d543430ece191d0a0  round3/raw/fandhe_fresh.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round3/raw/fandhe_fresh.jsonl.err
+      a60d5a9688f60dbacc9973dcaaa2345a84deb0e2b3657d8d543430ece191d0a0  round3/raw/fandhe_fresh.jsonl.out
+      ccaeaa837671fd2491adc1cde937b84570f28795dbe7a90aa33af4fde6d09b71  round3/raw/fandhe_reuse.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round3/raw/fandhe_reuse.jsonl.err
+      ccaeaa837671fd2491adc1cde937b84570f28795dbe7a90aa33af4fde6d09b71  round3/raw/fandhe_reuse.jsonl.out
+      58f42a59cae1c5d715ebd7d68b4eb5d74b580ae21addfb768dd4c65dbec5a4cb  round3/raw/order.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round3/raw/route.err
+      92f446e272d294723332656ab5111dfa7dcdb3fe0dd2d2724ecbf9715f11aa59  round3/raw/route.txt
+      0420442248aa70cdfc19af660d7e5cc330e92d567c1a235c9e8a6305292dfe39  round4.log
+      4c658308ddc1f839b4f7d2d94996ef0d40660db5fe713ef7822d3a3be25d7870  round4/gate.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round4/raw/candle_gemm.err
+      98468deba9da2d678a226d07196c3284e5bec4e740d9169707a86296800e55b1  round4/raw/candle_gemm.jsonl
+      98468deba9da2d678a226d07196c3284e5bec4e740d9169707a86296800e55b1  round4/raw/candle_gemm.out
+      ad7df9f2da1d093c544b3e9e7d799767a0ba464f6a1bacdfc74b7b106dd63eca  round4/raw/candle_split.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round4/raw/candle_split.jsonl.err
+      ad7df9f2da1d093c544b3e9e7d799767a0ba464f6a1bacdfc74b7b106dd63eca  round4/raw/candle_split.jsonl.out
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round4/raw/diag.err
+      dd004f02d5e5808608ae8390fe71defb3626d1462dff3dfa51e572b3ca7b615c  round4/raw/diag.txt
+      3c62254903ba250b3a8d120d4aa03ab4e5236d13a4c899a8840a5bf4d542a4df  round4/raw/fandhe_fresh.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round4/raw/fandhe_fresh.jsonl.err
+      3c62254903ba250b3a8d120d4aa03ab4e5236d13a4c899a8840a5bf4d542a4df  round4/raw/fandhe_fresh.jsonl.out
+      3570100eaea0244ae3e3779b74cfce6112517c98fe9061cd80b24f454aa40131  round4/raw/fandhe_reuse.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round4/raw/fandhe_reuse.jsonl.err
+      3570100eaea0244ae3e3779b74cfce6112517c98fe9061cd80b24f454aa40131  round4/raw/fandhe_reuse.jsonl.out
+      eac6c49db6b1fde20011aa80107422f564f5b496b217d5cabefd6f9032e2a8a8  round4/raw/order.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round4/raw/route.err
+      7af913c65a5c27376e999758e165df83a4d011938dea3e9d6fa6c2328f61e516  round4/raw/route.txt
+      43794dd30a308140b1681891df8a387520ff95b6ad7880cb2a27013f8e01bf53  round5.log
+      9b1614d0f6e2dbb1cfaf2c04094a11325ed81f2983e2e6cc81f433ee48a779cd  round5/gate.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round5/raw/candle_gemm.err
+      77cc8716a84359894fa34f0ba52217d28fc09a73c24f7319f54d251be3fb2750  round5/raw/candle_gemm.jsonl
+      77cc8716a84359894fa34f0ba52217d28fc09a73c24f7319f54d251be3fb2750  round5/raw/candle_gemm.out
+      e335e4acadbed66bd6e67bc30035c4e9b34722bc4a3afd6b63fb84e13c0af3ec  round5/raw/candle_split.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round5/raw/candle_split.jsonl.err
+      e335e4acadbed66bd6e67bc30035c4e9b34722bc4a3afd6b63fb84e13c0af3ec  round5/raw/candle_split.jsonl.out
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round5/raw/diag.err
+      ea5cc4ca49c8567559ccfe601045e96449621ec14aee7a7690cb54329b63649e  round5/raw/diag.txt
+      9e0c42915cec71aed69def65d690e49c25aa9463e295277479984e7add0fd466  round5/raw/fandhe_fresh.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round5/raw/fandhe_fresh.jsonl.err
+      9e0c42915cec71aed69def65d690e49c25aa9463e295277479984e7add0fd466  round5/raw/fandhe_fresh.jsonl.out
+      79ee398b0b7eef8c0dd8168ce55f25624d8b288201735c56d5fe9f6e12361c90  round5/raw/fandhe_reuse.jsonl
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round5/raw/fandhe_reuse.jsonl.err
+      79ee398b0b7eef8c0dd8168ce55f25624d8b288201735c56d5fe9f6e12361c90  round5/raw/fandhe_reuse.jsonl.out
+      f052e0a1e347c15f2eacb9a0624d6d187d5d2ad3994c28d0a8a4be38b3084d88  round5/raw/order.txt
+      e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  round5/raw/route.err
+      92f446e272d294723332656ab5111dfa7dcdb3fe0dd2d2724ecbf9715f11aa59  round5/raw/route.txt
+
+## AUX
+（aggregate_diag.py は読まない。to_values_4153.py・attrib_4153.py が読む補助 PARAMS。PARAMS より前に置く。ここに無いキーを書くと両スクリプトは止まる）
+（xctrace_schema〜gemm_interval_min_ms は trace 専用。xctrace=unavailable なら <…> のまま・削除のどちらでもよい）
+xctrace: unavailable
+gemm_interval_min_ms: 5.0
+perturbation_max: 0.10
+cross_check_max: 0.10
+kernel_share_threshold: 0.5
+backend_metal_diff_vs_v0_14_0: なし
+to_values_sha256: a9950fee2b39f20d0a21785dd4bf99c492e5cbd22006c77cb27728ee2ca9e120
+attrib_sha256: 67c2c1a9f3a54ff0ea6ddc9cff2ed2e80a4c231c12d43a5fd05ff299517d59df
+run_round_sha256: 0236a7ae72a157ed6a8024b7d58fe7350be3c97c721c1b5facca6c2e1c72e0a2
+
+## PARAMS
+fixed-at-utc: 2026-11-10T04:18:57Z
+issue: 4153
+rounds: 5
+tree_sha: 33b9851a382bc588b07fc561b7b4765de4cd9ed5
+tree_fingerprint: 838481a85e5002f779213d67de032a391f48746291da21ab5e1c350f3335b46f
+aggregate_script_sha256: 2877b967e6a4be8157c5ae4f657dee82fd7443ca98f619e24294fa2152c4789d
+reach_threshold: 1.00
+noise_band: NB-RANGE5
+cell: M-MTL-G4096 | machine=macmini | scoreboard_ratio=0.88 | formulas=F2 | kernel_owner=constraint | opp=candle | prev_class=自分たちの制約
