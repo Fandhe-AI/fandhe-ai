@@ -69,11 +69,12 @@ SME の `smstart`／`smstop` は、マイクロカーネルが 1 つの `asm!` �
 
 ## 手順（Mac mini のセッション）
 
-1. PR-1 マージ後の main の SHA で `RULE.template.txt` を埋める。`tree_sha`・`tree_fingerprint`
+1. PR-1（#4192）のマージコミットの SHA で `RULE.template.txt` を埋める。`tree_sha`・`tree_fingerprint`
    （`python3 -I aggregate_4151.py --fingerprint <tree-dir>`）・`aggregate_script_sha256`・patch の sha256 を入れ、
-   `git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src'` の一覧を記録して、差が
+   `git diff --name-only v0.14.0 <tree_sha> -- crates/backend-cpu/src` の一覧を記録して、差が
    `crates/backend-cpu/src/gemm_blis/mod.rs`・`crates/backend-cpu/src/lib.rs` の 2 ファイル（数値・実行経路を変えない診断 API
-   `sme_production_enabled()` の追加と再エクスポート）だけであることを確かめ、**測る前に単独コミット**（PR-2）。
+   `sme_production_enabled()` の追加と再エクスポート）だけであることを確かめる。backend-cpu 以外の `crates/*/src/*` の差は
+   一覧を記録するだけで止めない（RULE 項 2）。そのうえで**測る前に単独コミット**（PR-2）。
 2. ビルド（ゲートの前に済ませる。計測中に並走させない）: 4 腕のツリーを作り、ツリーごとに別の target dir で
    `env -u CARGO_TARGET_DIR -u RAYON_NUM_THREADS cargo build --release -p fandhe-ai-backend-cpu --example cpu_gemm_n256_fixed_cost_4151`。
    off-base ツリーでは `cargo test --release -p fandhe-ai-backend-cpu --lib --no-run` も済ませる。

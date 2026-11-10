@@ -44,9 +44,10 @@ fandhe 側の内訳は #3612 で実測済み（`docs/compat-resident-train-step-
 
 ## 手順
 
-1. （PR-2）PR-1 のマージ後の main SHA の git archive で `tree_sha`・`tree_fingerprint`（`aggregate_diag.py --fingerprint`）・各 sha256 を埋め、
+1. （PR-2）PR-1（#4190）のマージコミットの git archive で `tree_sha`・`tree_fingerprint`（`aggregate_diag.py --fingerprint`）・各 sha256 を埋め、
    `python3 -I aggregate_4154.py --check-rule RULE.txt` で確認して `RULE.txt` を**単独コミット**する。
-   項 2 に `git diff --stat v0.14.0 <tree_sha> -- crates/backend-metal crates/facade` が空であることを事実として書く。
+   項 2 に `git diff --stat v0.14.0 <tree_sha> -- crates/backend-metal crates/facade ':(exclude)crates/facade/tests'` が空であることを事実として書き、
+   `crates/facade/tests` の差は一覧を記録する（空でなくても止めない）。
 2. （PR-3・<metal-node>）hw-lock を取り、ツリー指紋を RULE と照合する（不一致なら停止）。`ROOT=… OUT=… prebuild.sh` を 1 回、
    続いて `ROOT=… D=… EXPECT_SHA=… TESTBIN=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
 3. 回収時にパス上のユーザー名・ホスト名をマスクし、`env/` にツリー指紋・`.rev-stamp`・`build-sha256.txt` を置く。
