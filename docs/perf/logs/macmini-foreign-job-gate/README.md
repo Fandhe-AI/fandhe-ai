@@ -72,7 +72,8 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
 - **進め方と止め方**: 次の 3 つは記録したまま次の round へ進む。それ以外の非 0（round 本体の失敗・ゲート自身の失敗など）は、以降の round を回さずに止める
   （`drive.status` に `STOP round <i>`。想定外として報告し、止まった系列は集計しない）。差し替え・再実行はしない。
   - ラッパーが 0
-  - `gate.txt` の 1 語目が TIMEOUT（開始前の他ジョブ・load1）
+  - ラッパーが 1 で、`gate.txt` の 1 語目が TIMEOUT（開始前の他ジョブ・load1、run_round.sh の load1）。TIMEOUT でもラッパーが 5 なら
+    終了後ゲートの失敗・FOREIGN なので止める（Codex の P1）
   - ラッパーが 4 で、`gate.txt` の 1 行目が `INVALID foreign-after`（round 本体は正常に終わり、終了後に他ジョブ。所有者判断「後で見つかったら、その round は INVALID」）か
     `INVALID foreign-gap`（下の隙間の検査）
   - INVALID・TIMEOUT の round は集計で正式系列から外れ、系列は partial・確度低になる（既存の扱い）。

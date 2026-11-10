@@ -149,6 +149,14 @@ FAKE_RC=1 dcase roundfail "0 1 0 0" "1.00" 2 1
 FAKE_RC=4 FAKE_GATE="INVALID run_round-exit=4 last-step=x" dcase rr4 "0 0 0 0" "1.00" 2 1
 [ ! -e "${T}/h-rr4/ser/round2" ] || { echo "NG drive rr4: round 本体の終了コード 4 を他ジョブと取り違えた"; fail=1; }
 dcase timeout "$(printf '1 %.0s' $(seq 1 60))0 0" "1.00" 2 0
+FAKE_RC=1 FAKE_GATE="TIMEOUT load1=4.00 2026-01-01T00:00:00Z" dcase rrtimeout "0 0 0 0" "1.00" 2 0
+grep -q '^all done' "${T}/h-rrtimeout/ser/drive.status" || { echo "NG drive rrtimeout: run_round.sh の TIMEOUT で次へ進まない"; fail=1; }
+FAKE_RC=1 FAKE_GATE="TIMEOUT load1=4.00 2026-01-01T00:00:00Z" dcase timeouterr "0 2 0 0" "1.00" 2 1
+if [ -e "${T}/h-timeouterr/ser/round2" ] || ! grep -q '^STOP round 1' "${T}/h-timeouterr/ser/drive.status"; then
+  echo "NG drive timeouterr: TIMEOUT の round で終了後ゲートが失敗しても止まらない"; fail=1
+fi
+FAKE_RC=1 FAKE_GATE="TIMEOUT load1=4.00 2026-01-01T00:00:00Z" dcase timeoutforeign "0 1 0 0" "1.00" 2 1
+grep -q '^STOP round 1' "${T}/h-timeoutforeign/ser/drive.status" || { echo "NG drive timeoutforeign: TIMEOUT の round で終了後 FOREIGN でも止まらない"; fail=1; }
 if [ "$(dfirst timeout 1)" != "TIMEOUT" ] || [ "$(dfirst timeout 2)" != "PASS" ]; then echo "NG drive timeout: TIMEOUT の次へ進まない"; fail=1; fi
 dcase noreach "0 0" "2.00" 1 0
 if [ "$(grep -c '^sample ' "${T}/h-noreach/ser/env/series-start.txt")" != "40" ] \

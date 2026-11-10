@@ -6,7 +6,8 @@
 #   VAR=VAL は run_round.sh へ渡す環境変数（HW_LOCK_HELD=1・HW_LOCK_OWNER_FILE は自動）。
 # 系列の始め方: ロック取得後、load1 を 30 秒ごとに読み、1.5 未満になったら始める（最大 40 回＝20 分。届かなければ記録して始める。
 #   round ごとの load1 < 3.0 のゲートは run_round.sh 側で従来どおり）。待った秒数・各回の load1 を env/series-start.txt に残す。
-# 進め方: ラッパーが 0 → 次の round へ。gate.txt の 1 語目が TIMEOUT（開始前の他ジョブ・load1）→ そのまま記録して次の round へ。
+# 進め方: ラッパーが 0 → 次の round へ。ラッパーが 1 かつ gate.txt の 1 語目が TIMEOUT（開始前の他ジョブ・load1、run_round.sh の load1）→
+#   そのまま記録して次の round へ（TIMEOUT でもラッパーが 5 なら終了後ゲートの失敗・FOREIGN なので止める）。
 #   ラッパーが 4 かつ gate.txt の 1 行目が「INVALID foreign-after」か「INVALID foreign-gap」（round 本体は正常終了・終了後に他ジョブ、
 #   または開始前の確認と計測の開始の間に隙間）→ その round は INVALID のまま次の round へ。
 #   それ以外の非 0（round 本体の失敗・ゲート自身の失敗など）→ 以降の round を回さず停止（想定外として報告）。差し替え・再実行はしない。
@@ -55,7 +56,8 @@ while [ "${i}" -le "${N}" ]; do
   echo "round ${i} rc=${rc} gate=${g:-none} $(utc)" >> "${ST}"
   cont=no
   [ "${rc}" -eq 0 ] && cont=yes
-  [ "${g}" = "TIMEOUT" ] && cont=yes
+  # TIMEOUT はラッパーが 1 で終わったときだけ続ける（終了後ゲートの失敗・FOREIGN は gate.txt が TIMEOUT のままでも exit 5 で止める）
+  [ "${g}" = "TIMEOUT" ] && [ "${rc}" -eq 1 ] && cont=yes
   case "${l}" in "INVALID foreign-after "*|"INVALID foreign-gap "*) [ "${rc}" -eq 4 ] && cont=yes ;; esac
   if [ "${cont}" != "yes" ]; then echo "STOP round ${i}" >> "${ST}"; exit 1; fi
   i=$((i + 1))
