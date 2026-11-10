@@ -1,8 +1,7 @@
 # #4151 M-CPU-G256（<metal-node>・Mac mini・CPU gemm N=256）の固定費の診断
 
-状態: **PR-1 時点は実測なし**。本 PR は計測の部品（example・patch 2 本・起動キット・集計スクリプト・RULE 雛形）だけを置く。
-RULE の固定（PR-2）・5 ラウンドの実測と判定（PR-3）は Mac mini のセッションが行い、PR-3 が #4151 を閉じる。
-結果欄は実測後に追記する。
+状態: **実測済み（2026-11-10・<metal-node>・5 ラウンドとも PASS）**。部品は PR-1（#4190）、RULE の固定は PR-2（#4214。
+雛形の修正は #4210）、実測と判定は PR-3。判定は「自分たちの制約」（確度低）で、結果は下の「結果」欄。
 
 ## 目的
 
@@ -85,26 +84,57 @@ SME の `smstart`／`smstop` は、マイクロカーネルが 1 つの `asm!` �
 4. `values.tsv`（quantity／value の 2 列）を raw から作り、変換手順をここに残す。W・Wf は bench-fandhe の reuse／fresh の
    median（ms。off／on）、O は bench_py.py の fresh、K_opp は `torch_cpu_mlp_diag.py` の `mm_pure`、`c_sme_*` は probe の値（ns）。
    gemm 256 の bench-fandhe に `--phases` は無いため、窓の内訳の record_only は取れない（unavailable）。
+   変換は同梱の `to_values_4151.py`（PR-3 で追加。RULE 固定後に書いたもので、RULE の sha256 固定の対象外）で行う:
+   `python3 -I to_values_4151.py <記録先>/round1 … round5`。W_off／Wf_off は `raw/rust.jsonl`、W_on／Wf_on は `raw/rust-on.jsonl` の
+   mode=reuse／fresh の `median_s`×1000、O は `raw/py.jsonl` の fresh、K_opp は `raw/measure_gemm256.jsonl` の item=mm_pure。
+   `c_sme_kc0_ns` は probe の SME kc=0 の値、`c_sme_intercept_ns` は SME kc≥1（1〜256）の値を kc に対して**無重みの最小二乗**で
+   当てた切片（#3175 の `aggregate.py` の `lsq_line` と同じ方法。この選び方は PR-3 の判断）。`c_sme_*` は「SME ON の場合」の
+   上限欄にだけ使い、分類を動かさない。欠損・重複・非有限・0／負・parity fail は例外で止まり、既存の values.tsv は上書きしない。
 5. `python3 -I aggregate_4151.py --dir <記録先>` で `aggregate.md`／`aggregate.tsv` を作る。
 
 ## 結果
 
-（PR-3 で追記）
+計測: 2026-11-10T03:50:46Z〜03:52:39Z（<metal-node>・Apple M4・RAYON_NUM_THREADS 未設定）。5 ラウンドとも PASS（load1 2.36〜2.94。
+直前に同じ機体で #4153 の計測が走っていたため、ゲートの閾値 3.0 に近い）。集計は `aggregate.md`／`aggregate.tsv`、
+ラウンド別の窓の値は `round{i}/values.tsv`、計測環境（ビルドログ・`cargo tree` で path patch を確かめた記録・4 腕の指紋）は `env/`。
 
-## Phase 6 への申し送り（PR-3 で埋める）
+**判定: 自分たちの制約（確度低）**（前分類「ハードの上限」から変わる）
+
+| 式（OFF 腕＝0.14.0 の本番構成） | 中央値 | ラウンド別 | 閾値 1.0 に対して |
+|---|---|---|---|
+| F2 | 0.6338 | 0.6338・0.6565・0.6224・0.6455・0.6283 | 下 |
+| F1 | 2.1531 | 2.0360・2.1531・1.7651・2.1573・2.4679 | 上 |
+| F1_drv | 1.3671 | 1.3223・1.4251・1.1433・1.3671・1.4769 | 上 |
+
+- 観測比 O÷W_off の中央値は 0.6822（スコアボード 0.69 から 1.1%）。
+- 理由（`aggregate_4151.py` の出力）: GEMM 駆動部の固定費。「ハードの上限」は成り立たない（F1・F1_drv が全ラウンドで 1.0 を超える）。
+- 内訳（timed 腕・hot 系列・ラウンド中央値・ms）: OFF は G 0.1944 のうち kernel_ideal（Σkernel÷P_used）0.0704、
+  F_drv（G − kernel_ideal）0.1240。ON は G 0.1299・kernel_ideal 0.0306・F_drv 0.0972。区間別の ns は `aggregate.md` の表。
+  OFF の job 合計で大きいのは kernel 573 µs・pack_b 116 µs・alloc 101 µs・pack_a 81 µs（P_used 8・jobs 20・呼び出し 704 回）。
+- **確度低の理由**: on 腕の計時の摂動（timed÷base−1）が上限 0.10 を超えたラウンドがある（round 1 は +0.213、round 2 は −0.190。
+  on-base の hot 中央値が 105.8〜131.0 µs の間で揺れた）。OFF 腕の摂動は全ラウンドで 0.10 以内（中央値 −0.021）。
+- SME ON の場合（記録のみ。分類は動かさない）: F2 0.8392・F1 1.9870・F1_drv 1.8816。`smstart`／`smstop` を含む 1 呼び出し固定費の
+  上限 × 呼び出し回数 ÷ P_used は kc=0 直接計時で 0.0013 ms、切片で 0.0026 ms（kernel の内側。F_drv には足さない）。
+- probe の SME kc=0 は round 1 だけ 142.5 ns（ほかは 42.6〜45.4 ns）。差し替えずにそのまま記録した。切片は 88.2〜92.0 ns。
+- 計測後の off-base ツリーには `scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-312.pyc` が 1 件増えた
+  （round 1 の `torch_cpu_mlp_diag.py` 実行で生成）。これを除いた指紋は RULE の `tree_fingerprint` と一致する（`env/trees.txt`）。
+  計測前の照合は 4 腕とも一致していた。
+
+## Phase 6 への申し送り
 
 本 issue はスコアボード・`unreached_0140.tsv`・`loss-attribution-matrix.md` を書き換えない。Phase 6（#4173 配下）の
-スコアボード issue が行う書き換えのために、PR-3 で次を残す。
+スコアボード issue が行う書き換えのために、次の文案を残す（採否は Phase 6 が決める）。
 
-- `unreached_0140.tsv` の M-CPU-G256 行と `loss-attribution-matrix.md` §10.3.2 にある「SME は対象外で未測定」を、
-  #3232 の実測（ON 0.888・0.184 ms）と本診断の結果に置き換える文案。
-- 分類が変わる場合の新しい分類と理由欄の文案。
+- 「SME は対象外で未測定」の置き換え文案: 「SME ON は #3232 で N=256 fresh 0.888 倍（fandhe ON 0.184 ms）。#4151 の診断（2026-11-10・
+  Mac mini・5 ラウンド）では ON の F2 0.84・F1 1.99（記録のみ）」。
+- 分類の文案: **自分たちの制約（確度低）**。理由欄「GEMM 駆動部の固定費（#4151: OFF の F1 2.15・F1_drv 1.37 が全ラウンドで 1.0 超、
+  F_drv 0.124 ms／G 0.194 ms）。確度低は on 腕の計時摂動が上限超過のため」。
 
 ## 限界
 
 - plain GEMM の入口で、`bias_act` 融合経路ではない。`kernel` は端タイルのコピーを含む。
 - E コアと P コアは分けられない（macOS に正式な pinning の手段がない。#3175 §5）。
 - `gap_us`（既定 50 µs のスピン待ち）が実ベンチ窓の直列区間の起床コストを再現できているかは未検証。
-- Linux での確認はビルド・単体テスト・`--self-test`・`--dry-run` まで。Mac mini での実行、SME 側の `n_calls`・`c_sme`、
-  ノード側の `tree_fingerprint` 一致、torch 経路は未検証。
-- ノイズ帯 NB-RANGE5 は #4142 で所有者の承認待ち。定義が変われば `RULE.v2.txt` で改訂し、旧版も残す。
+- PR-1 時点の確認は Linux でのビルド・単体テスト・`--self-test`・`--dry-run` まで。Mac mini での実行・SME 側の `n_calls`・`c_sme`・
+  ノード側の `tree_fingerprint` 一致・torch 経路は PR-3 の実測で通った。
+- ノイズ帯 NB-RANGE5 は #4142 で定義を変えずに承認済み（#4209）。
