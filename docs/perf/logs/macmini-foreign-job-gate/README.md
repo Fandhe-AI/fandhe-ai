@@ -51,13 +51,25 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
 - 各回の結果は `<env>/foreign-gate/r<i>-before-a<k>.txt`・`r<i>-after.txt`（マスク済み: ユーザー名・$HOME・ホスト名を置換し、
   自分以外の uid は数値のまま。プロセスは basename だけでパスは書かない）。
 
+## 系列の回し方（`drive_series.sh`）
+
+- `drive_series.sh <issue 番号> <系列ディレクトリ> <rounds> <run_round.sh> [VAR=VAL ...]` を nohup で切り離して起動する（すべて絶対パス）。
+  hw-lock を取り、各 round を `round_with_foreign_gate.sh` で挟んで 1..N の順に回し、最後にロックを返す。
+  VAR=VAL は run_round.sh へ渡す環境変数で、`HW_LOCK_HELD=1`・`HW_LOCK_OWNER_FILE` はドライバが付ける。系列ディレクトリが既にあれば始めない。
+- **系列の始め方**: ロックを取ってから load1 を 30 秒ごとに読み、1.5 未満になったら round 1 を始める（最大 40 回＝20 分。届かなければそのまま始める）。
+  前の系列の負荷が load1 から抜けるのを待つためで、round ごとの load1 < 3.0 のゲートは各 run_round.sh で従来どおり。
+  1.5 は平常時の load1（0.92〜1.35。上の「平常時の確認」）の少し上。待った秒数・各回の load1 を `<系列>/env/series-start.txt` に残す。
+- **止め方**: ラッパーが非 0 で終わり `gate.txt` の 1 語目が TIMEOUT 以外なら、以降の round を回さずに止める（`drive.status` に `STOP round <i>`）。
+  TIMEOUT はそのまま記録して次の round へ進む。差し替え・再実行はしない。
+
 ## ファイル
 
 | ファイル | 役割 |
 |---|---|
 | `foreign_job_gate.py` | 判定（1 回）。`--phase before|after --out <file>`・`--self-test`（合成 fixture。境界値・除外・GPU の回数・解釈の失敗） |
 | `round_with_foreign_gate.sh` | 1 round を前後のゲートで挟む。`<run_round.sh> <round 番号> <round ディレクトリ> <env ディレクトリ>` |
-| `test_round_with_foreign_gate.sh` | ラッパーの経路の self-test（スタブのゲートで CLEAN・待ち・TIMEOUT・終了後 FOREIGN・ゲート失敗・round 失敗） |
+| `drive_series.sh` | 系列ドライバ（ロック・系列の始め方・各 round をラッパーで挟む・止め方。上の「系列の回し方」） |
+| `test_round_with_foreign_gate.sh` | ラッパーとドライバの経路の self-test（スタブのゲートで CLEAN・待ち・TIMEOUT・終了後 FOREIGN・ゲート失敗・round 失敗。ドライバは一時 HOME と sysctl のスタブで完走・停止・TIMEOUT の次・load1 の待ち・ロック使用中・引数の拒否） |
 | `idle-check-20261110/` | 平常時の確認の記録（10 回分のゲート出力と時刻・load1。上の「平常時の確認」） |
 
 ## 確認
