@@ -3,16 +3,20 @@
 イシュー #4158（eager release にサイズゲートを付けて GB10 で A/B する）の記録置き場。
 設計・結果の本文は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §18。
 
-状態: **部品のみ・未実測**。`RULE.txt` は部品 PR のマージ後、計測より前に単独コミットで固定する。
-GB10 の実測と判定は未実施（このディレクトリに `gb10/` と `judge-4158.md` はまだ無い）。
+状態: **実測済み・判定 REJECT（2026-11-10）**。`RULE.txt`（#4224 で単独コミット）に従い <cuda-node> で 5 round を実測した（全 round ゲート通過）。
+処置 4 セルはすべて ADOPT 側の条件を満たした（中央値 0.505〜0.798・5/5 round で < 1.00）が、ガードの既定経路 gemm N=4096 reuse
+（構造上 A/A）が 5/5 round で後退（1.004〜1.011・中央値 1.007）したため、RULE の判定式どおり REJECT。既定は OFF のまま。
+詳細は `judge-4158.md`・`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §18.4。
 
 ## 収録物
 
 | パス | 内容 |
 |---|---|
 | `on-arm.patch` | after 腕の 1 行差分（`EAGER_MATMUL_RELEASE_DEFAULT_ENABLED` を `true` へ）。サイズゲート閾値は両腕で共通 |
-| `RULE.txt` | 事前登録規則（計測前に別コミットで固定。後から追加） |
-| `gb10/`・`judge-4158.md`・`rev-stamp-verification-4158.md` | 実測後に追加 |
+| `RULE.txt` | 事前登録規則（#4224 で計測前に単独コミット） |
+| `gb10/` | 実測の生データ（ラベル `4158-gb10`。JSONL・ゲートログ・env_info・precheck・ビルドログ・バイナリ sha256。ELF は収録しない。ホーム・ホスト名・ユーザー名はマスク済み） |
+| `judge-4158.md` | `judge_eager_release_ab.py --rule-set 4158` の出力（逐語） |
+| `rev-stamp-verification-4158.md` | `.rev-stamp`・ツリー指紋・RULE の sha256 の突合 |
 
 ## 実行手順
 
