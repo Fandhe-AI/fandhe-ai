@@ -37,7 +37,7 @@
 | ファイル | 役割 |
 |---|---|
 | `RULE.txt` | 測る前に固定する規則（道具立てのマージ後に単独コミットで追加） |
-| `RULE.template.txt`・`aggregate_diag.py` | 雛形の無改変コピー（sha256 を RULE の PARAMS に固定） |
+| `RULE.template.txt`・`aggregate_diag.py` | 雛形の無改変コピー（sha256 を RULE の PARAMS に固定）。`aggregate_diag.py` は #4208 で時計不一致のセルを分類保留にする修正後の雛形に合わせた（RULE は未固定のため再登録は不要） |
 | `to_values_4147.py` | `raw/` → `values.tsv` の変換（厳格パース・`--self-test`） |
 | `run_round.sh` | 1 round の起動（ゲート → 計測 → `gate.txt`・`raw/`） |
 | `opp_kernel_cuda_mlp_diag_4147.py` | PyTorch(cuBLAS) の MLP 推論 2 形状を CUDA event で測る（`--self-test`） |

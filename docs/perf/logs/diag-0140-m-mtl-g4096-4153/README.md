@@ -42,7 +42,7 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 | ファイル | 役割 |
 |---|---|
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_diag.py --check-template` で検査）。`## AUX` が補助 PARAMS（`aggregate_diag.py` は読まない） |
-| `aggregate_diag.py` | 雛形（`diag-0140-template/`）の無改変コピー。sha256 を RULE に固定 |
+| `aggregate_diag.py` | 雛形（`diag-0140-template/`）の無改変コピー。sha256 を RULE に固定。#4208 で時計不一致のセルを分類保留にする修正後の雛形に合わせた（RULE は未固定のため再登録は不要） |
 | `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換。INVALID を検出したら `gate.txt` に記録して values を作らない（下の「round の状態」）（`--self-test`。INVALID round を含む系列の通し集計も確かめる。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクと RULE 項 3 の実行順も確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」） |
 | `attrib_4153.py` | `kernel_share`・摂動・照合の補助集計（`--dir`・`--check-rule`・`--self-test`）。sha256 を RULE に固定 |
 | `run_round.sh` | 1 round の起動（precheck → ゲート → trace なしの窓 4 本 → xctrace の腕 2 本 → 診断テスト。奇偶は各段の中の framework の順だけを入れ替える。実行順は `raw/order.txt`。ゲート後に cargo を呼ばない）。終了時に round ディレクトリをマスクし、非 0 で終わった round は `gate.txt` を INVALID にする |
