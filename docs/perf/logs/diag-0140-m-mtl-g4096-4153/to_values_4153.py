@@ -37,6 +37,7 @@ xctrace の XML は非信頼データ（XXE・巨大入力を拒否）。標準�
   python3 -I to_values_4153.py --round-dir <round{i}> --rule <RULE.txt>
   python3 -I to_values_4153.py --mask-dir <dir>     # 終了時のマスク（run_round.sh・xctrace_probe_4153.sh が呼ぶ）
   python3 -I to_values_4153.py --mask-ready         # マスクの識別子が集まるかだけを確かめる（計測前の precheck）
+  python3 -I to_values_4153.py --restore-gate <round{i}>  # 変換が付けた `INVALID convert:` を `# was:` の行から戻す（RULE.v2.txt 項 8）
   python3 -I to_values_4153.py --self-test
 """
 import getpass
@@ -289,12 +290,16 @@ def pure_kernel(xml_path, aux, proc_match, warmup, iters, inv, lead=0, trail=0):
 def parse_diag(route_text, diag_text, inv):
     """route.txt の経路確認と diag.txt の N=4096 ブロックの kernel_gpu 中央値(ms)を返す。
 
-    行が 1 本あって値が違う（route≠Classic・equal≠true）は INVALID（inv に足す）。行が無い・複数は解釈不能（hard）。"""
+    行が 1 本あって値が違う（route の variant≠Classic・equal≠true）は INVALID（inv に足す）。行が無い・複数は解釈不能（hard）。
+    ROUTE_ACTUAL はテスト側が Rust の Debug 形式（`Classic(TileConfig { … })`）で出すため、最初の `(` より前（`(` が
+    無ければ値全体）を variant 名として取り出し、`Classic` と完全一致で比べる（RULE.v2.txt。旧版は値全体を比べ、
+    実機の 5 round がすべて INVALID になった。#4153 の所有者判断 2026-11-10）。DIAG_BITEQ は値全体を比べる（不変）。"""
     for key, field, want in (("ROUTE_ACTUAL", "route", "Classic"), ("DIAG_BITEQ", "equal", "true")):
         got = re.findall(rf"^{key} N={SIZE} {field}=(\S+)", route_text, re.M)
         if len(got) != 1:
             raise ConvError(f"route.txt: {key} N={SIZE} expected once, got {len(got)}")
-        if got[0] != want:
+        val = got[0].split("(", 1)[0] if key == "ROUTE_ACTUAL" else got[0]
+        if val != want:
             inv.append(f"route.txt: {key} N={SIZE} {field}={got[0]} (want {want})")
     lines = diag_text.splitlines()
     starts = [i for i, l in enumerate(lines) if re.search(rf"\] N={SIZE} requested_tile", l)]
@@ -481,6 +486,33 @@ def mark_invalid(round_dir, reason):
     with open(tmp, "x", encoding="utf-8") as f:
         f.write(body)
     os.replace(tmp, os.path.join(round_dir, "gate.txt"))
+
+
+def restore_gate(round_dir):
+    """`mark_invalid` が書き換えた gate.txt を元に戻す（--restore-gate。RULE.v2.txt 項 8 の戻し方）。
+
+    1 行目が `INVALID convert: ` で始まり、2 行目以降が 1 行以上ありすべて `# was: ` で始まる場合だけ、`# was: ` を外した
+    行を gate.txt に書き戻す。run_round.sh が付けた INVALID（`INVALID run_round-exit=…`）・ゲート自身の INVALID・PASS・
+    TIMEOUT は戻さず hard で止まる（計測の失敗を変換の誤りとして消さないため）。values.tsv・aux.tsv が既にある round も止まる。"""
+    path = os.path.join(round_dir, "gate.txt")
+    lines = read_text(path).splitlines()
+    if not lines or not lines[0].startswith("INVALID convert: "):
+        raise ConvError("restore-gate: gate.txt is not 'INVALID convert: …' (nothing to restore)")
+    was = lines[1:]
+    if not was or any(not l.startswith("# was: ") for l in was):
+        raise ConvError("restore-gate: lines after the first must all start with '# was: '")
+    for n in ("values.tsv", "aux.tsv"):
+        if os.path.exists(os.path.join(round_dir, n)):
+            raise ConvError(f"restore-gate: {n} exists")
+    body = "".join(l[len("# was: "):] + "\n" for l in was)
+    w = body.split()
+    if not w or w[0] not in GATE_WORDS:
+        raise ConvError("restore-gate: restored first word must be PASS|TIMEOUT|INVALID")
+    tmp = os.path.join(round_dir, ".gate.txt.tmp")
+    with open(tmp, "x", encoding="utf-8") as f:
+        f.write(body)
+    os.replace(tmp, path)
+    return w[0]
 
 
 def round_convert(round_dir, rule_text):
@@ -980,6 +1012,45 @@ def self_test():
                 ("route dup", ROUTE + "ROUTE_ACTUAL N=4096 route=Classic\n", "got 2", False)):
             d7, r7 = _build(os.path.join(t, "route-" + lab.replace(" ", "-")), route=rt)
             _expect(lambda: convert(d7, r7), lab, needle, invalid=invalid)
+        # RULE.v2: テストの実際の出力（Rust の Debug 形式。#4153 の <metal-node> の raw/route.txt の N=4096 の 3 行を逐語で写す）は
+        # variant 名 Classic として通る。variant 名が Classic 以外（SplitK 等・Classic を接頭辞に持つ別名）は INVALID
+        real = ("ROUTE N=4096 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) "
+                "resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }\n"
+                "ROUTE_ACTUAL N=4096 route=Classic(TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true })\n"
+                "DIAG_BITEQ N=4096 equal=true\n")
+        d7r, r7r = _build(os.path.join(t, "route-real-debug"), route=real)
+        vt_r, at_r = convert(d7r, r7r)
+        assert "fandhe_kernel_gpu_ts" in at_r and "fandhe_window" in vt_r, (vt_r, at_r)
+        for lab, rv, needle in (
+                ("route splitk", "SplitK(SplitKConfig { splits: 4 })", "route=SplitK(SplitKConfig"),
+                ("route classic prefix", "ClassicX(TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true })",
+                 "route=ClassicX(TileConfig"),
+                ("route empty variant", "(TileConfig { bm: 32 })", "route=(TileConfig")):
+            rt = f"ROUTE_ACTUAL N=4096 route={rv}\nDIAG_BITEQ N=4096 equal=true\n"
+            d7, r7 = _build(os.path.join(t, "route-" + lab.replace(" ", "-")), route=rt)
+            _expect(lambda: convert(d7, r7), lab, needle, invalid=True)
+        # RULE.v2: --restore-gate は mark_invalid の書き換えだけを元に戻す（逐語一致）。それ以外は hard で止まる
+        rg = os.path.join(t, "restore-gate")
+        os.makedirs(rg)
+        orig = "PASS load1=1.21 hw-lock=held 2026-11-10T03:34:04Z\n"
+        open(os.path.join(rg, "gate.txt"), "w").write(orig)
+        mark_invalid(rg, "route.txt: ROUTE_ACTUAL N=4096 route=Classic(TileConfig (want Classic)")
+        assert open(os.path.join(rg, "gate.txt")).read().startswith("INVALID convert: ")
+        assert restore_gate(rg) == "PASS" and open(os.path.join(rg, "gate.txt")).read() == orig
+        assert not os.path.exists(os.path.join(rg, ".gate.txt.tmp"))
+        for lab, body, needle in (
+                ("restore pass", orig, "nothing to restore"),
+                ("restore run_round invalid", "INVALID run_round-exit=1 last-step=candle_gemm\n# was: PASS load1=1.0\n",
+                 "nothing to restore"),
+                ("restore no was", "INVALID convert: x\n", "'# was: '"),
+                ("restore stray line", "INVALID convert: x\n# was: PASS load1=1.0\nextra\n", "'# was: '"),
+                ("restore bad word", "INVALID convert: x\n# was: MAYBE\n", "first word")):
+            open(os.path.join(rg, "gate.txt"), "w").write(body)
+            _expect(lambda: restore_gate(rg), lab, needle)
+            assert open(os.path.join(rg, "gate.txt")).read() == body, lab  # 止まったときは書き換えない
+        open(os.path.join(rg, "gate.txt"), "w").write("INVALID convert: x\n# was: PASS load1=1.0\n")
+        open(os.path.join(rg, "values.tsv"), "w").write("x\n")
+        _expect(lambda: restore_gate(rg), "restore with values", "values.tsv exists")
         # INVALID は hard エラーを隠さない（本数不一致があっても diag.txt の解釈不能は hard で止まる）
         d7b, r7b = _build(os.path.join(t, "inv-and-hard"), f_durs=(60, 61, 62, 63), diag="no block\n")
         _expect(lambda: convert(d7b, r7b), "invalid then hard", "block")
@@ -1043,6 +1114,9 @@ def main(argv):
         if not os.path.isdir(argv[1]):
             raise ConvError("mask: --mask-dir needs an existing directory")
         mask_dir(argv[1])
+        return 0
+    if len(argv) == 2 and argv[0] == "--restore-gate":
+        print(f"restored: gate={restore_gate(argv[1])}")
         return 0
     args = dict(zip(argv[0::2], argv[1::2]))
     if set(args) != {"--round-dir", "--rule"}:

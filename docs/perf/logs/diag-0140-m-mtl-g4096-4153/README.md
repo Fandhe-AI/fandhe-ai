@@ -5,6 +5,10 @@
 **PR-1 時点: 実測なし。** 本ディレクトリは測る前に固定する部品（RULE 雛形・集計・変換・補助集計・1 round の起動キット・xctrace の schema 検出）だけを置く。
 `RULE.txt` と `env/xctrace_*`（PR-2・単独コミット）、`round{i}/`・`aggregate.md`・`aggregate.tsv`・`attrib.tsv`・結果欄（PR-3・<metal-node> での実測）は後続で追加する。
 実測値・帰属・分類・確度は、実測するまで書かない（推定値で埋めない）。#4153 は実測と記録の PR-3 で閉じる（部品の PR は `Refs #4153`）。
+**RULE.v2（2026-11-10）**: 2026-11-10 に 5 round を実測した（ゲートは全 round PASS）が、旧版の `to_values_4153.py` が `ROUTE_ACTUAL` の Debug 形式
+（`Classic(TileConfig { … })`）を Classic と認めず、5 round とも変換で INVALID になった。所有者判断（#4153 のコメント 6758729708）で、
+変換スクリプトだけを直した `RULE.v2.txt` を値を見る前に固定し、**同じ raw を変換し直す（再計測しない）**。旧 `RULE.txt` は残す。改訂の中身と
+raw 99 ファイルの sha256 一覧は `RULE.v2.txt` 項 8。
 PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--self-test`・構文検査までしか行っていない。**未検証**: xctrace の有無、System Trace の表 schema・列名、GEMM 区間の抽出（本数一致・余分な ≥ 5 ms 区間の有無・開始時刻と継続時間の列が同じ単位か）、
 `--target-stdout` の挙動、trace の摂動量、診断テスト出力と変換の整合、ツリー指紋の一致。
 
@@ -33,7 +37,12 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 
 - TIMEOUT／INVALID の round を含む系列は `status=partial`・表題「参考」で、確度は常に低（`aggregate_diag.py`・`attrib_4153.py` とも「低」を出し、理由に部分通過を付ける）。round の状態の決まり方は下の「round の状態」。
 - `scoreboard_ratio=0.88` は `unreached_0140.tsv` の転記。窓の中央値同士の比は 64.379 対 56.103 で 0.871 と、丸めで差がある。ドリフト検査は雛形どおり 10%。
-- 窓の腕は registry 0.14.0、xctrace の腕も同じバイナリ。タイル（Mac mini の fandhe は `bm32 bn32 bk16 wm2 wn2 staged`）は記録だけにする（タイルの A/B は #4160）。
+- 窓の腕は registry 0.14.0、xctrace の腕も同じバイナリ。タイルは記録だけにする（タイルの A/B は #4160）。Mac mini の**本番**（`dispatch_auto`。窓と xctrace の腕）は
+  `verified_tile_table_device()`（#3206。0.14.0 にもある）が M4 無印の表を選び、N=4096 で `bm32 bn64 bk16 wm2 wn2 staged`。**診断テストと precheck** は
+  M4 Max 限定の `verified_m4_max_gpu_core_count()` で選ぶため `bm32 bn32 bk16 wm2 wn2 staged` になる（`gemm_reuse_phase_diag_tests.rs` の 409・552・587 行。
+  raw の `ROUTE`〈bn32〉と `ROUTE_ACTUAL`〈bn64〉の行が示す）。旧版の本欄の「Mac mini の fandhe は bn32」は誤りだった。診断テストの tile 選択の修正は #4219。
+- **照合の注記（RULE.v2 項 8 (b)）**: 照合（診断テストの `kernel_gpu` と xctrace の fandhe 値の相対差）は上の構成差のため、構成の違うもの同士の比較になる。
+  「版差あり」と同じ扱いで、照合の結論に「構成差あり（診断 bn32・本番 bn64）」と注記して記録だけする。閾値・分類式・確度の規則は変えない。
 - ノイズ帯 NB-RANGE5 は `docs/perf/noise-band-decision.md`（案・所有者承認待ち。#4142）。承認後に定義が変われば `RULE.v2.txt` で反映する。
 - 同じ Mac mini を #4146 ほかの実測も使う。hw-lock で直列化し、計測中にビルドを並走させない。
 
@@ -41,9 +50,11 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 
 | ファイル | 役割 |
 |---|---|
+| `RULE.txt` | 計測前に固定した規則（PR-2・#4215）。消さずに残す |
+| `RULE.v2.txt` | 変換スクリプトを直した改訂版（項 8 に変更点・照合の注記・`gate.txt` の戻し方・raw の sha256 一覧）。変換・集計はこちらを `--rule` に渡す |
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_diag.py --check-template` で検査）。`## AUX` が補助 PARAMS（`aggregate_diag.py` は読まない） |
 | `aggregate_diag.py` | 雛形（`diag-0140-template/`）の無改変コピー。sha256 を RULE に固定。#4208 で時計不一致のセルを分類保留にする修正後の雛形に合わせた（RULE は未固定のため再登録は不要） |
-| `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換。INVALID を検出したら `gate.txt` に記録して values を作らない（下の「round の状態」）（`--self-test`。INVALID round を含む系列の通し集計も確かめる。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクと RULE 項 3 の実行順も確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」） |
+| `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換。INVALID を検出したら `gate.txt` に記録して values を作らない（下の「round の状態」）（`--self-test`。INVALID round を含む系列の通し集計も確かめる。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクと RULE 項 3 の実行順も確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」）。`--restore-gate` は旧版の変換が付けた `INVALID convert:` を `# was:` の行から戻す（RULE.v2 項 8 (c)）。RULE.v2 で `ROUTE_ACTUAL` を variant 名で比べるよう直した |
 | `attrib_4153.py` | `kernel_share`・摂動・照合の補助集計（`--dir`・`--check-rule`・`--self-test`）。sha256 を RULE に固定 |
 | `run_round.sh` | 1 round の起動（precheck → ゲート → trace なしの窓 4 本 → xctrace の腕 2 本 → 診断テスト。奇偶は各段の中の framework の順だけを入れ替える。実行順は `raw/order.txt`。ゲート後に cargo を呼ばない）。終了時に round ディレクトリをマスクし、非 0 で終わった round は `gate.txt` を INVALID にする |
 | `xctrace_probe_4153.sh` | PR-2 の前に 1 回だけ。N=256 のスモークで toc（`xctrace_toc.xml`）と GPU／Metal 系の表（`table_*.xml`）を保存し、人が schema 名・列名を確定する材料にする（計測ではない） |
@@ -54,8 +65,11 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 2. `tree_sha`・`tree_fingerprint`・各 sha256（`aggregate_diag.py`・`to_values_4153.py`・`attrib_4153.py`・`run_round.sh`）を埋め、`git diff v0.14.0 <tree_sha> -- crates/backend-metal/src` の有無を AUX に記す。
    山括弧を外すだけの欄（issue・rounds・reach_threshold・noise_band・cell 行の prev_class）も置換する。`python3 -I aggregate_diag.py --check-template RULE.template.txt`、`python3 -I attrib_4153.py --check-rule RULE.txt` を通し、`RULE.txt` を**単独コミット**する。
 3. （PR-3・<metal-node>）hw-lock を取り、ツリー指紋を RULE と照合して（手作業。`run_round.sh` が検査するのは `.rev-stamp` と `EXPECT_SHA` の一致だけ）、`ROOT=… EXPECT_SHA=… DIAG_BIN=… XCTRACE_MODE=<RULE の AUX xctrace> XCTRACE_SCHEMA=…（unavailable なら省略可・trace の腕は取らない） HW_LOCK_OWNER_FILE=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
-4. 各 round で `python3 -I to_values_4153.py --round-dir <記録先>/round<i> --rule <記録先>/RULE.txt`。PASS 以外の round は変換しない（`skip`）。INVALID を検出した round は `gate.txt` に記録して終了コード 0、hard（下記）は 1 で止まる。
-5. `python3 -I aggregate_diag.py --dir <記録先>` と `python3 -I attrib_4153.py --dir <記録先>` で集計する。
+4. 各 round で `python3 -I to_values_4153.py --round-dir <記録先>/round<i> --rule <記録先>/RULE.txt`（RULE.v2 で変換し直す場合は下の 4'）。PASS 以外の round は変換しない（`skip`）。INVALID を検出した round は `gate.txt` に記録して終了コード 0、hard（下記）は 1 で止まる。
+   4'. （RULE.v2）まず raw が計測時のものであることを確かめる: `grep -E '^ {6}[0-9a-f]{64}  ' RULE.v2.txt | sed 's/^ *//' | shasum -a 256 -c --quiet`
+   （記録先で実行。1 件でも違えば止める）。`gate.txt` が `INVALID convert:` に書き換わっている round は `python3 -I to_values_4153.py --restore-gate <記録先>/round<i>`
+   で戻す（手で書き換えない。対象外の gate.txt ならスクリプトが止まる）。そのうえで各 round を `--rule <記録先>/RULE.v2.txt` で変換する。
+5. `python3 -I aggregate_diag.py --dir <記録先>` と `python3 -I attrib_4153.py --dir <記録先>` で集計する（RULE.v2 では両方に `--rule RULE.v2.txt` を付ける）。
 6. 結果欄と `docs/perf/loss-attribution-matrix.md` の M-MTL-G4096 行（§10.3.1 の「candle の純カーネル時間は未測定」を含む）を実測値＋タグで更新する（未測定は未測定のまま）。`Closes #4153`。保存物のマスクは下の「マスク」のとおり自動で行われるが、対象外の識別子が残っていないかは回収時に目で確かめる。
 
 ## round の状態（RULE 項 3）
