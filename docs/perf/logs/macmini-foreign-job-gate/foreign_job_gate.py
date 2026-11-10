@@ -152,7 +152,7 @@ class Masker:
         return s
 
 
-def render(phase, when, foreign, hits, gpu_samples, rows, self_uid, mask):
+def render(phase, when, foreign, hits, gpu_samples, rows, self_uid, mask, excl=frozenset()):
     def who(uid):
         return "<user>" if uid == self_uid else f"uid={uid}"
     out = [f"{'FOREIGN' if foreign else 'CLEAN'} {phase} {when}"]
@@ -165,7 +165,10 @@ def render(phase, when, foreign, hits, gpu_samples, rows, self_uid, mask):
             out.append(f"hit {rule} samples_at_or_above={int(pcpu)}")
         else:
             out.append(f"hit {rule} pid={pid} {who(uid)} pcpu={pcpu:.1f} name={b}")
-    top = sorted(rows, key=lambda r: (-r[3], r[0]))[:5]
+    # 上位と最大値は除外対象（自分の系譜・pid 0/1）を外して数える（G2 の基準の根拠に使う値）
+    others = [r for r in rows if r[0] not in excl]
+    out.append(f"max_pcpu_non_excluded {max((r[3] for r in others), default=0.0):.1f}")
+    top = sorted(others, key=lambda r: (-r[3], r[0]))[:5]
     for pid, _pp, uid, pcpu, comm in top:
         out.append(f"top pid={pid} {who(uid)} pcpu={pcpu:.1f} name={display_name(comm)}")
     return mask("\n".join(out) + "\n")
@@ -191,7 +194,8 @@ def live(phase, out_path):
     pw = pwd.getpwuid(os.getuid())
     hosts = sorted({socket.gethostname(), socket.gethostname().split(".")[0]}, key=len, reverse=True)
     text = render(phase, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), foreign, hits, gpu, rows,
-                  os.getuid(), Masker(pw.pw_name, os.path.expanduser("~"), hosts))
+                  os.getuid(), Masker(pw.pw_name, os.path.expanduser("~"), hosts),
+                  lineage(rows, os.getpid()) | set(SYSTEM_PIDS))
     tmp = out_path + ".tmp"
     with open(tmp, "x", encoding="utf-8") as f:
         f.write(text)
@@ -280,6 +284,11 @@ def self_test():
     assert "hit G3-name pid=903 uid=502 pcpu=0.0 name=Fake-WGPU-gate" in lines
     assert "hit G3-name pid=904 <user> pcpu=0.1 name=python3" in lines
     assert "gpu_device_utilization 0 1 2 3 4" in lines
+    # 除外対象を渡すと、上位と最大値から自分の系譜（pid 500 の 99.0%・510 の 50.0%）と pid 0/1 が外れる
+    tx = render("before", "2026-01-01T00:00:00Z", False, [], [0] * 5, rows, 501, Masker("alice", "/h/alice", []),
+                lineage(rows, 500) | set(SYSTEM_PIDS)).splitlines()
+    assert "max_pcpu_non_excluded 15.9" in tx, tx
+    assert [l for l in tx if l.startswith("top ")][0] == "top pid=700 <user> pcpu=15.9 name=some-backend", tx
     # プロセスタイトルの他ユーザー名（someone）は `:` 以降を落として書かない
     f, h, _ = j("  950     1     0 30.0 sshd-session: someone [priv]\n")
     assert [x[4] for x in h] == ["sshd-session"], h
