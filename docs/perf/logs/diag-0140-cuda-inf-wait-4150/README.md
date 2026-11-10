@@ -65,6 +65,7 @@ Issue #4188 の文言は `predict_device_chain`（ホスト入力版）を挙げ
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_4150.py --check-template` で検査） |
 | `aggregate_4150.py` | 厳格パースの集計（`--dir`・`--self-test`・`--check-template`・`--check-rule`・`--fingerprint`・`--opp-tsv`）。sha256 を RULE に固定 |
 | `run_round.sh` | 1 round の起動（precheck → ビルド → ゲート → ビルド済みバイナリの直接実行。ゲート後に cargo を呼ばない） |
+| `opp_from_4149.py` | #4149 の `aggregate.tsv`（ms）から `--opp-tsv` の入力（`item\tmedian_us`・µs）を作る変換（`--src`・`--out`・`--self-test`）。未測定は出さず、#4149 が参考集計なら止まる |
 | `nsys_aux_4150.sh` | 全 round の後に 1 回の nsys 補助（record_only。不通は unavailable） |
 | `crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs` | 計測本体（P／E／PR／ER／I／F 腕）。sha256 を RULE に固定 |
 
@@ -77,7 +78,9 @@ Issue #4188 の文言は `predict_device_chain`（ホスト入力版）を挙げ
    `ROOT=… EXPECT_SHA=… EXPECT_EXAMPLE_SHA=… HW_LOCK_OWNER_FILE=… HW_LOCK_HELD=1 bash run_round.sh <i> <記録先>/round<i>` を 1〜5 で回す。run の差し替え・除外・上書きは禁止。
 3. 全 round の後に `ROOT=… OUT=<記録先>/nsys HW_LOCK_HELD=1 bash nsys_aux_4150.sh` を 1 回実行する（計時外）。
 4. 回収時にパス上のユーザー名・ホスト名をマスクする（`<home>`・`<cuda-node>`）。
-5. `python3 -I aggregate_4150.py --dir <記録先> [--opp-tsv <#4149 の相手値>]` で `aggregate.md`・`aggregate.tsv` を生成し、下の結果欄と
+5. 相手側の値は main に入った #4149 の記録先から作る: `python3 -I opp_from_4149.py --src docs/perf/logs/diag-0140-torch-gb10-mlp-4149 --out <記録先>/opp_4149.tsv`。
+   標準エラーに出る入力 `aggregate.tsv` の sha256 を結果欄に記録する。#4149 の集計が参考（ゲート不通過 round あり）なら変換は止まり、相手欄は unavailable のまま（推定値で埋めない）。
+   `python3 -I aggregate_4150.py --dir <記録先> --opp-tsv <記録先>/opp_4149.tsv` で `aggregate.md`・`aggregate.tsv` を生成し、下の結果欄と
    `docs/perf/loss-attribution-matrix.md` の G-CUDA-INF 行、`docs/perf/infer-chain-fixed-cost-reduction-3205.md` §3 の「推定」を実測値＋タグで更新する（未測定は未測定のまま）。
 
 ## 結果
