@@ -1,0 +1,9 @@
+# 4 腕のツリー（計測後に回収。.rev-stamp と aggregate_4151.py --fingerprint の値）
+# 送信側とノード側のビルドの前と後（env/build/fp-before-build.txt・fp-after-build.txt）は 4 腕とも RULE 項 2 の指紋と一致。
+# 計測後の off-base は scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-312.pyc の 1 件だけ増えた。
+# 生成時刻は 2026-11-10T16:03:18Z で、本系列（16:28:09Z 開始）の前の試走 2（RULE.v2 項 10 (e)・round 1 の torch_cpu_mlp_diag.py 実行）。
+# __pycache__ を除いた写しの指紋は 3a86261b98520d8f242dd88f59324dd7519beb21a312d466e781ebcbc2aba3e8 files=2689（RULE の tree_fingerprint と一致）。
+off-base rev-stamp=7e0d01debd99a2ec9afe00f305123cf05f94b8e0 785ffcf82c6db9cce18aa317e360ed3564afe169f96d3379be6052e947623fa7 
+on-base rev-stamp=7e0d01debd99a2ec9afe00f305123cf05f94b8e0 a9f40b9b9a32b07bf9381c5df944f8e2bb8265daa6210ebf137cbccd3a416fe8 
+off-timed rev-stamp=7e0d01debd99a2ec9afe00f305123cf05f94b8e0 d4f6c8ec29af25a5d1927aac0642a48a4cba3c086db1925242f1342aa0c9b9cc 
+on-timed rev-stamp=7e0d01debd99a2ec9afe00f305123cf05f94b8e0 6fe1b9439ead279be2de7306f6a35d9c4270fefa0b996161f2815e600f93076a 
