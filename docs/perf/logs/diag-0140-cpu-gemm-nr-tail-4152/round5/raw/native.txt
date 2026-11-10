@@ -1,0 +1,16 @@
+arm=r5 series=native family=ref_square_512 trans=nn m=512 n=512 k=512 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000797958 gflops=336.403 bits_hash=0xc3d521c64199a3bf
+arm=r5 series=native family=l2_fwd trans=nn m=64 n=8 k=256 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000022250 gflops=11.782 bits_hash=0x1d51e6f95afdfb08
+arm=r5 series=native family=l2_fwd trans=nn m=64 n=10 k=256 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000023292 gflops=14.068 bits_hash=0xe8b880c3a1a6e241
+arm=r5 series=native family=l2_fwd trans=nn m=64 n=11 k=256 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000021500 gflops=16.765 bits_hash=0x3a8b1b300c01c04b
+arm=r5 series=native family=l2_fwd trans=nn m=64 n=12 k=256 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000020917 gflops=18.799 bits_hash=0x32a15c997b32b464
+arm=r5 series=native family=l2_fwd trans=nn m=64 n=13 k=256 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000032750 gflops=13.007 bits_hash=0xf85174ee2f362858
+arm=r5 series=native family=l2_fwd trans=nn m=64 n=24 k=256 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000031375 gflops=25.066 bits_hash=0xfa600c28b7ef6264
+arm=r5 series=native family=l2_dw trans=tn m=256 n=8 k=64 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000034000 gflops=7.710 bits_hash=0x11cddfb78406dca6
+arm=r5 series=native family=l2_dw trans=tn m=256 n=10 k=64 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000032917 gflops=9.955 bits_hash=0xac87f57cf5ba4207
+arm=r5 series=native family=l2_dw trans=tn m=256 n=11 k=64 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000031250 gflops=11.534 bits_hash=0x42f2cdb05719f0eb
+arm=r5 series=native family=l2_dw trans=tn m=256 n=12 k=64 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000033458 gflops=11.753 bits_hash=0x5bb889842f1d1ca1
+arm=r5 series=native family=l2_dw trans=tn m=256 n=13 k=64 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000035125 gflops=12.128 bits_hash=0x090f7167e1086096
+arm=r5 series=native family=l2_dw trans=tn m=256 n=24 k=64 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000033250 gflops=23.652 bits_hash=0xbf78255e68142a85
+arm=r5 series=native family=l1_fwd trans=nn m=64 n=256 k=784 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000157375 gflops=163.241 bits_hash=0x98a8f9023485d94c
+arm=r5 series=native family=l1_fwd trans=nn m=64 n=264 k=784 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000163333 gflops=162.202 bits_hash=0x1fe5612ce6f0dceb
+arm=r5 series=native family=l1_fwd trans=nn m=64 n=276 k=784 isa=Neon mr=8 nr=12 rayon_threads=10 median_secs=0.000146250 gflops=189.382 bits_hash=0x41233a718ac314ad

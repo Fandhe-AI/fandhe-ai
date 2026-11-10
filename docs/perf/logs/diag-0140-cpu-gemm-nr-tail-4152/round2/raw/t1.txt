@@ -1,0 +1,16 @@
+arm=r2 series=t1 family=ref_square_512 trans=nn m=512 n=512 k=512 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.002311875 gflops=116.112 bits_hash=0xc3d521c64199a3bf
+arm=r2 series=t1 family=l2_fwd trans=nn m=64 n=24 k=256 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000014584 gflops=53.924 bits_hash=0xfa600c28b7ef6264
+arm=r2 series=t1 family=l2_fwd trans=nn m=64 n=13 k=256 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000014958 gflops=28.479 bits_hash=0xf85174ee2f362858
+arm=r2 series=t1 family=l2_fwd trans=nn m=64 n=12 k=256 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000010583 gflops=37.155 bits_hash=0x32a15c997b32b464
+arm=r2 series=t1 family=l2_fwd trans=nn m=64 n=11 k=256 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000011250 gflops=32.040 bits_hash=0x3a8b1b300c01c04b
+arm=r2 series=t1 family=l2_fwd trans=nn m=64 n=10 k=256 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000010917 gflops=30.016 bits_hash=0xe8b880c3a1a6e241
+arm=r2 series=t1 family=l2_fwd trans=nn m=64 n=8 k=256 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000010959 gflops=23.920 bits_hash=0x1d51e6f95afdfb08
+arm=r2 series=t1 family=l2_dw trans=tn m=256 n=24 k=64 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000014750 gflops=53.317 bits_hash=0xbf78255e68142a85
+arm=r2 series=t1 family=l2_dw trans=tn m=256 n=13 k=64 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000017042 gflops=24.996 bits_hash=0x090f7167e1086096
+arm=r2 series=t1 family=l2_dw trans=tn m=256 n=12 k=64 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000011292 gflops=34.823 bits_hash=0x5bb889842f1d1ca1
+arm=r2 series=t1 family=l2_dw trans=tn m=256 n=11 k=64 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000013375 gflops=26.949 bits_hash=0x42f2cdb05719f0eb
+arm=r2 series=t1 family=l2_dw trans=tn m=256 n=10 k=64 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000012666 gflops=25.871 bits_hash=0xac87f57cf5ba4207
+arm=r2 series=t1 family=l2_dw trans=tn m=256 n=8 k=64 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000012458 gflops=21.042 bits_hash=0x11cddfb78406dca6
+arm=r2 series=t1 family=l1_fwd trans=nn m=64 n=276 k=784 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000291666 gflops=94.962 bits_hash=0x41233a718ac314ad
+arm=r2 series=t1 family=l1_fwd trans=nn m=64 n=264 k=784 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000279084 gflops=94.928 bits_hash=0x1fe5612ce6f0dceb
+arm=r2 series=t1 family=l1_fwd trans=nn m=64 n=256 k=784 isa=Neon mr=8 nr=12 rayon_threads=1 median_secs=0.000279792 gflops=91.819 bits_hash=0x98a8f9023485d94c
