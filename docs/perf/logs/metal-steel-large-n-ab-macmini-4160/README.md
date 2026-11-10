@@ -32,4 +32,4 @@
 - PR-2（Mac mini）: 雛形を埋めた `RULE.txt` を単独コミットで main に固定する。
 - PR-3（Mac mini）: 5 run の系列・`aggregate.md`・§11 の記入欄・`loss-attribution-matrix.md` の M-MTL-G1024／G2048 行の更新（`Closes #4160`）。
 - `STEEL_LARGE_N_ENABLED` の既定を true にする結線は Phase 4（#4166）の担当で、所有者の承認が要る。
-- NB-RANGE5／NB-SEP の定義（#4142 `docs/perf/noise-band-decision.md`）は記録時点で所有者承認待ち。
+- NB-RANGE5／NB-SEP の定義（#4142 `docs/perf/noise-band-decision.md`）は #4142 で所有者承認済み（2026-11-10。https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 ）。NB-RANGE5 は腕ごとの round 別比の最小〜最大（`aggregate.py` は `range_before`／`range_after` を別々に出す）。

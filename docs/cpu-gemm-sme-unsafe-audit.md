@@ -369,7 +369,7 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 
 新しい事前登録 A/B（#4156）で SME 非搭載の GB10 を ADOPT 判定へどう入れるかの選択肢 (a)(b)(c) と推奨は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16 にまとめた。
 
-- **状態**: 案・所有者回答待ち。承認欄は未取得で、回答コメントのリンクは回答後に §5.16 と本節へ追記する。
+- **状態**: 所有者承認済み（2026-11-10）。採用は (c) GB10-GATE-ONLY-STRUCTURAL（構造ゲートは fail-closed・性能は全記録。5 round すべて ON/OFF > 1.00 かつ ON 腕最小 > OFF 腕最大の後退は undetermined として 3 腕＋A/A で再測）、UNDETERMINED-HANDLING は return-to-owner、#4142 への依存も了承。承認コメント: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 （#4142 は https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 ）。詳細は §5.16。Mac mini の ADOPT 条件と既定 OFF の方針は不変。
 - 本節は `unsafe`・定数・コード・FMA 契約・tolerance・baseline を変更しない。§12.13 の所有者判断（既定 OFF のまま。ON に戻すのは新しい事前登録 A/B に合格したときだけ）も変更しない。
 
 

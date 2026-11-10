@@ -957,13 +957,13 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
 
 ### 5.16 SME 既定 ON の新しい A/B での GB10 の数え方（イシュー #4143）
 
-新しい事前登録 A/B（#4156）の RULE を書く前に、SME 非搭載の GB10 を ADOPT 判定へどう入れるかを決める必要がある。本節は所有者へ確認するための**案の整理**であり、決定ではない。
+新しい事前登録 A/B（#4156）の RULE を書く前に、SME 非搭載の GB10 を ADOPT 判定へどう入れるかを決める必要がある。本節は所有者へ確認するための**案の整理**として書き、2026-11-10 に所有者が (c) を承認した（下記「所有者の決定」）。
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | **案・所有者回答待ち**（`owner:human`） |
-| 承認欄 | **未取得**。回答コメントのリンクは回答後にここへ追記する（空欄のまま「承認済み」と読まないこと） |
-| 依存 | #4142（`docs/perf/noise-band-decision.md` の NB-RANGE5・NB-SEP。同書も「案・所有者承認待ち」） |
+| 状態 | **承認済み**（`owner:human`。2026-11-10。採用: (c) GB10-GATE-ONLY-STRUCTURAL） |
+| 承認欄 | 採用案 (c)・UNDETERMINED-HANDLING = return-to-owner。承認コメント: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 |
+| 依存 | #4142（`docs/perf/noise-band-decision.md` の NB-RANGE5・NB-SEP。2026-11-10 承認済み: https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 ）。依存の了承も同コメントで得た |
 | 後続の参照元 | #4156 の RULE.txt が、所有者の選んだ語（下記 RULE 文面案）を名前で参照する |
 | 不変 | `SME_PRODUCTION_ENABLED` は既定 OFF のまま。ON に戻すのは新しい事前登録 A/B に合格したときだけ（2026-10-28 所有者判断。`docs/cpu-gemm-sme-unsafe-audit.md` §12.13）。unsafe・FMA 契約・tolerance・baseline は変えない |
 
@@ -1016,11 +1016,15 @@ GB10-GATE-ONLY-STRUCTURAL := GB10 は構造ゲート（P-R0・P-BIT・checksum�
   性能は全記録。NB-SEP 条件の後退があれば undetermined（自動 ADOPT しない）として 3 腕＋A/A を再実施する（案 (c)）
 ```
 
-#### 所有者への確認事項
+#### 所有者への確認事項と決定（2026-11-10 承認済み）
 
-1. (a)(b)(c) のどれで GB10 を数えるか。
-2. (c) で undetermined になったとき、3 腕＋A/A の再測を自動で足すか、所有者へ戻すか。
-3. #4142（NB-RANGE5・NB-SEP）の採否に依存する旨の了承（(b)(c) は #4142 の承認後に確定）。
+承認コメント: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148
+
+1. (a)(b)(c) のどれで GB10 を数えるか。**決定: (c) GB10-GATE-ONLY-STRUCTURAL**。構造ゲート（P-R0・P-BIT・checksum・P-RT・P-CELLS・P-LOCK・P-GATE）は fail-closed、性能は全記録。5 round すべて ON/OFF > 1.00 かつ ON 腕の最小 > OFF 腕の最大の後退は undetermined として、3 腕＋A/A で再測する。
+2. (c) で undetermined になったとき、3 腕＋A/A の再測を自動で足すか、所有者へ戻すか。**決定: UNDETERMINED-HANDLING = return-to-owner**（所有者へ戻す）。
+3. #4142（NB-RANGE5・NB-SEP）の採否に依存する旨の了承。**了承済み**（#4142 は 2026-11-10 に承認済み）。
+
+Mac mini の ADOPT 条件（到達 10 セル 5/5 かつ中央値 ≤ 1.00）と checksum 条件、既定 OFF の方針は変えない。RULE.txt への転記は §5.17 の手順（実測者が測る前に行う）に従う。
 
 #### 限界
 
@@ -1033,7 +1037,7 @@ N=5・単一機体。帰無確率は概算。`train 64 fresh` の実差の可能
 | 項目 | 内容 |
 |------|------|
 | 状態 | **事前登録・未実測**。計測部品と規則（`RULE.txt`）を固定した段階。実測は実機セッションで行う |
-| 計測の前提 | **P-OWNER 不成立のため計測は始まらない**。RULE §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING に、所有者の回答コメント URL つきで決定を転記する必要がある。#4143（§5.16）・#4142（`noise-band-decision.md`）はともに「案・所有者承認待ち／承認欄 未取得」のまま。承認済みとは書かない |
+| 計測の前提 | #4143（§5.16）・#4142（`noise-band-decision.md`）は 2026-11-10 に所有者が承認済み。ただし RULE §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING は固定時点では `<未決>` のままで、実測者が測る前に回答コメント URL つきで転記するまで P-OWNER は不成立（計測は始まらない） |
 | 規則・部品 | `docs/perf/logs/sme-default-on-ab-4156/`（`RULE.txt`・`on-arm.patch`・`orchestrate_macmini.sh`・`orchestrate_gb10.sh`・`aggregate.py`）、A/B 本体 `scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` |
 | 腕 | before = OFF（main・定数 false）、after = ON（`on-arm.patch` を当てた計測専用ツリー。main へコミットしない）。#3232 と逆の組み立て。比 = ON / OFF |
 | 結果 | 未実測（ADOPT／REJECT／FAIL／undetermined のいずれも未確定） |
@@ -1060,7 +1064,7 @@ Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 
 | 判定 | 候補は判定 2 セルとも 5 round 中央値 ≤ 1.00 かつ 5/5 round で ≤ 1.00、ガードに 5/5 後退なし、checksum・P-BIT 一致で ADOPT 適格。適格のうち幾何平均が最小のものを選ぶ（差 0.005 未満なら変更パラメータの少ない腕、なお並べば jpw だけの腕） |
 | 部品 | `docs/perf/logs/sme-n256-sched-ab-4162/`（`RULE.template.txt`・`on-arm.patch`・`arm-*.patch`・`orchestrate_macmini.sh`・`aggregate.py`・`README.md`） |
 | 結果 | 未実測 |
-| 不変 | 既定 OFF のまま。本番に効くのは #4156 で SME 既定 ON が ADOPT された場合だけ。既定の切り替えは #4165 と所有者承認、SME の unsafe 独立監査は #4157。NB-RANGE5・NB-SEP は #4142 が所有者承認待ちのため記録だけ |
+| 不変 | 既定 OFF のまま。本番に効くのは #4156 で SME 既定 ON が ADOPT された場合だけ。既定の切り替えは #4165 と所有者承認、SME の unsafe 独立監査は #4157。NB-RANGE5・NB-SEP は #4142 が 2026-11-10 に承認済み（判定への適用は各 RULE の定めによる） |
 
 - 限界: 候補 5 つの多重比較。専用プールとグローバルプールの spin の干渉はガードセルが帯の外で検出できない。macOS に pinning の手段がなく T=4 が P コアだけで動く保証はない。
 - GB10 は対象外（SME 非搭載で機構に到達しない）。

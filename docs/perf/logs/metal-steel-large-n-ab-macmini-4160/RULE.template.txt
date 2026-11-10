@@ -66,12 +66,13 @@ aggregate_script_sha256: <固定時点の aggregate.py の sha256>
 
 10. スコアボード比と「1 位」の判定（M-MTL-G1024・M-MTL-G2048 だけ。G4096 は記録のみ）
    - round 別の比 = candle の gemm 窓（fresh）÷ fandhe-ai の reuse 窓（同じ round）。
-   - ノイズ帯 = NB-RANGE5（両腕の最小〜最大）。
+   - ノイズ帯 = NB-RANGE5（各腕の round 別比の最小〜最大。腕ごとに算出する）。
    - 「1 位に変わった」と書けるのは NB-SEP が成立したときだけ: after の 5/5 round で比 > 1.0、かつ after の最小 > before の最大
      （before は同じセッションで測る）。成立しなければ「改善傾向・確定せず」または「変化なし／後退」と書く。
    - 相手は candle だけを測る。スコアボードの他の相手は対象外。
-   - NB-RANGE5／NB-SEP は docs/perf/noise-band-decision.md（#4142）の定義を名前で参照する。同 doc は記録時点で所有者承認待ちの案であり、
-     承認後に定義や名前が変わったら RULE.v2.txt で改訂する。
+   - NB-RANGE5／NB-SEP は docs/perf/noise-band-decision.md（#4142）の定義を名前で参照する。同 doc は #4142 で所有者承認済み
+     （2026-11-10。https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 ）。
+     定義や名前が変わったら RULE.v2.txt で改訂する。
 
 11. 総合判定
    - UNDETERMINED: 必要なセルが 1 件でも undetermined なら最優先。

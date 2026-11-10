@@ -400,7 +400,7 @@ def load_ab(abdir):
 def scoreboard(ab, n):
     """RULE 項 10。round 別の比 = candle の gemm 窓（fresh）÷ fandhe-ai の reuse 窓（同じ round）。
 
-    NB-RANGE5 = 両腕の最小〜最大。NB-SEP = after の 5/5 round で比 > 1.0 かつ after の最小 > before の最大。
+    NB-RANGE5 = 各腕の round 別比の最小〜最大（腕ごとに算出）。NB-SEP = after の 5/5 round で比 > 1.0 かつ after の最小 > before の最大。
     比較の有効性（fandhe-ai 側の parity・checksum 完全一致・正式系列＝load1 ゲート／完了記録）が
     成立しない系列は比を参考表示しても sep=None（判定不能）とし、NB-SEP 成立と書かない。
     戻り値: dict（candle 側が unavailable なら None）。
@@ -568,9 +568,9 @@ def aggregate(d, expect_rev=None):
 
     w("\n## スコアボード比（RULE 項 10。相手は candle だけ。M-MTL-G1024／G2048。G4096 は記録のみ）\n")
     w("- 比 = candle の gemm 窓（fresh）÷ fandhe-ai の reuse 窓（同じ round）。1 超で fandhe-ai が速い。")
-    w("- NB-RANGE5 = 両腕の最小〜最大。NB-SEP = after の 5/5 round で比 > 1.0 かつ after の最小 > before の最大。")
+    w("- NB-RANGE5 = 各腕の round 別比の最小〜最大（腕ごとに算出）。NB-SEP = after の 5/5 round で比 > 1.0 かつ after の最小 > before の最大。")
     w("- NB-SEP が成立しない場合、「1 位に変わった」とは書かない（改善傾向・確定せず、または変化なし／後退）。")
-    w("- NB-RANGE5／NB-SEP は docs/perf/noise-band-decision.md（#4142。記録時点で所有者承認待ちの案）の定義を名前で参照する。\n")
+    w("- NB-RANGE5／NB-SEP は docs/perf/noise-band-decision.md（#4142。2026-11-10 に所有者承認済み）の定義を名前で参照する。\n")
     w("| N | 対象 | before の比（範囲） | after の比（範囲） | NB-SEP |")
     w("|---|---|---|---|---|")
     for n in (1024, 2048, 4096):

@@ -6,11 +6,11 @@
 
 **計測はまだ始められない**。`RULE.txt` §9（所有者決定の転記欄）が `<未決>` で、P-OWNER が不成立になるため。根拠:
 
-- #4143 の記録（`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16、`docs/cpu-gemm-sme-unsafe-audit.md` §12.14）は「案・所有者回答待ち／承認欄 未取得」。
-- #4142 の記録（`docs/perf/noise-band-decision.md`）も「案・所有者承認待ち／所有者承認 未取得」。
-- 両イシューは回答のないまま CLOSED になっている。決定を推定・代筆しない。
+- #4143 は 2026-11-10 に所有者が承認済み（案 (c) GB10-GATE-ONLY-STRUCTURAL・UNDETERMINED-HANDLING = return-to-owner・#4142 依存の了承）: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 。記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16、`docs/cpu-gemm-sme-unsafe-audit.md` §12.14。
+- #4142 も 2026-11-10 に所有者が承認済み（案 A: NB-RANGE5・NB-SEP を採用）: https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 。記録は `docs/perf/noise-band-decision.md`。
+- ただし `RULE.txt` §9 は事前登録時点で `<未決>` のまま固定している。決定を推定・代筆せず、§9 への転記は実測者が測る前に行う（下記）。
 
-所有者の回答コメントが得られたら、`RULE.txt` §9 へ列挙値と回答コメント URL を転記し（計測前に限る追記）、`prereg_append.txt` を作ってから実機で測る。
+#4142・#4143 は承認済み。実測者は上記の回答コメント URL とともに `RULE.txt` §9 へ列挙値を転記し（計測前に限る追記）、`prereg_append.txt` を作ってから実機で測る。
 
 ## 目的
 
