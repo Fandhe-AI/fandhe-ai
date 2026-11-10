@@ -244,11 +244,14 @@ def round_metrics(cell, vals):
         fk, ok = g("fandhe_pure_kernel"), g("opp_pure_kernel")
         # 時計不一致時に両側の計測境界を併記できるよう、純カーネル値と時計タグを保持する（RULE §4・matrix §10.1）
         m["bound"] = (fk, vals[(cid, "fandhe_pure_kernel")][1], ok, vals[(cid, "opp_pure_kernel")][1])
-        if fk > fw or ok > ow:
-            raise AggError(f"{cid}: pure_kernel exceeds window")
+        # 時計が違う純カーネル値は窓との大小を同じ尺で比べられない（別プロセスの値を混ぜた約 0.49 ms 級の
+        # セルでは揺れだけで超過しうる）。不一致は先に分類保留として記録し、窓超過の fail-closed は
+        # 時計が揃った場合に限る（#4190 レビュー指摘）。
         if vals[(cid, "fandhe_pure_kernel")][1] != vals[(cid, "opp_pure_kernel")][1]:
             m["clock_ok"] = False
         else:
+            if fk > fw or ok > ow:
+                raise AggError(f"{cid}: pure_kernel exceeds window")
             den = fw - fk + ok
             if den <= 0:
                 raise AggError(f"{cid}: F1 denominator <= 0")
@@ -483,6 +486,11 @@ def self_test():
     assert rows["X-TST-C1"][3:5] == [CLASS_HOLD, "高"], rows["X-TST-C1"]
     assert rows["X-TST-E1"][3] == CLASS_HOLD and rows["X-TST-E1"][4] == "低"
     assert "時計不一致" in rows["X-TST-E1"][5] and rows["X-TST-E1"][1] == "-"
+    # 時計不一致かつ純カーネルが窓を超える入力は異常終了せず分類保留になる（同一時計の超過は従来どおり異常終了）
+    ce = [_cell_line("X-TST-E2", forms="F1", sr=1.0)]
+    re_ = _run(ce, [_rows("X-TST-E2", fw=100, ow=100, fk=120, ok=30, ck=("gpu_timestamp", "mps_event"))] * 5, ["PASS"] * 5)[1]
+    assert CLASS_HOLD in re_ and "-" == re_.splitlines()[1].split("\t")[1], re_
+    _expect_err(lambda: _run(ce, [_rows("X-TST-E2", fw=100, ow=100, fk=120, ok=30)] * 5, ["PASS"] * 5), "same-clock kernel > window")
     # 時計不一致の run は両側の純カーネル値と時計タグを集計表に併記する（RULE §4）
     assert "50.0000 ms（gpu_timestamp）" in md and "30.0000 ms（wall）" in md, md
     assert "ドリフト" in rows["X-TST-F1"][5] and "ドリフト" not in rows["X-TST-A1"][5]
