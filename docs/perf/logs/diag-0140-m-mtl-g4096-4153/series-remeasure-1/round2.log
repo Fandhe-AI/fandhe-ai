@@ -1,0 +1,15 @@
+foreign-gate before wait foreign-job load1=2.50 attempt=1 2026-11-10T11:35:31Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.50 attempt=2 2026-11-10T11:36:05Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.80 attempt=3 2026-11-10T11:36:39Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.75 attempt=4 2026-11-10T11:37:14Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.68 attempt=5 2026-11-10T11:37:48Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.44 attempt=6 2026-11-10T11:38:22Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.31 attempt=7 2026-11-10T11:38:57Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.16 attempt=8 2026-11-10T11:39:31Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.74 attempt=9 2026-11-10T11:40:06Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.54 attempt=10 2026-11-10T11:40:40Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.44 attempt=11 2026-11-10T11:41:14Z（30 秒後に再確認）
+foreign-gate before wait foreign-job load1=2.51 attempt=12 2026-11-10T11:41:49Z（30 秒後に再確認）
+foreign-gate before CLEAN load1=2.37 attempt=13 2026-11-10T11:42:23Z
+round 2 done 2026-11-10T11:45:22Z
+foreign-gate after CLEAN 2026-11-10T11:45:27Z
