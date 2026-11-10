@@ -6,7 +6,8 @@
 #   gate.txt の 1 語目とラッパーの終了コードを確かめる（sysctl もスタブにして load1 を順に返す）。drive_series.sh は一時 HOME（ロックの場所）と
 #   sysctl のスタブ（load1 を順に返す）で、全 round 完走・終了後 FOREIGN は INVALID のまま次の round へ・ゲート失敗と round 失敗で停止・
 #   開始前 TIMEOUT は次の round へ・ロック使用中・
-#   引数の拒否・load1 が 1.5 未満に届かない場合の記録を確かめる。判定基準そのものの self-test は
+#   引数の拒否・load1 が 1.5 未満に届かない場合の記録・中断（SIGTERM）で子孫を止めて round を INVALID にしロックを外すこと・
+#   子孫が止まらないときはロックを外さないこと・gate.txt を INVALID に書き換えられないときに止まることを確かめる。判定基準そのものの self-test は
 #   `python3 -I foreign_job_gate.py --self-test`。
 # 使い方: bash test_round_with_foreign_gate.sh   （成功で "self-test ok"・exit 0）
 set -uo pipefail
@@ -44,6 +45,7 @@ cat > "${T}/run_round.sh" <<'EOF'
 [ "${FAKE_NOGATE:-0}" = "1" ] && exit "${FAKE_RC:-1}"
 ts=$(python3 -I -c 'import sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + int(sys.argv[1]))))' "${FAKE_PASS_SHIFT:-0}")
 mkdir -p "$2" && echo "PASS load1=1.00 hw-lock=held ${FAKE_PASS_TS:-${ts}}" > "$2/gate.txt"
+[ "${FAKE_RO:-0}" = "1" ] && chmod a-w "$2"   # gate.txt の書き換え（一時ファイルの作成）を失敗させる
 exit "${FAKE_RC:-0}"
 EOF
 fail=0
@@ -68,6 +70,9 @@ case_ after-foreign "0 1"  0 4 INVALID 1
 case_ after-error  "0 2"   0 5 INVALID 1
 case_ fail-and-foreign "0 1" 1 5 INVALID 1
 FAKE_NOGATE=1 case_ nogate-foreign "0 1" 1 5 INVALID 0
+FAKE_RO=1 case_ record-failed "0 1" 0 5 PASS 0
+chmod u+w "${T}/s-record-failed/round1"
+grep -q 'RECORD-FAILED' "${T}/log-record-failed" || { echo "NG record-failed: 書き換えの失敗を記録しない"; fail=1; }
 FAKE_NOGATE=1 case_ nogate-clean "0 0" 1 1 none 0
 CASE_LOADS="3.50 1.00" case_ load-wait "0 0 0" 0 0 PASS 0
 CASE_LOADS="x 1.00" case_ load-nonnum "0 0 0" 0 1 INVALID 0
@@ -174,5 +179,37 @@ dcase badarg "0 0" "1.00" 1 2 notakv
 dcase badname "0 0" "1.00" 1 2 lower=1
 mkdir -p "${T}/h-exists/ser"
 dcase exists "0 0" "1.00" 1 2
+# 中断: 偽の run_round.sh が PASS を書いたあと子プロセス（/bin/sleep）を待つ。ドライバへ SIGTERM を送る
+cat > "${T}/run_round_b.sh" <<'STUB'
+mkdir -p "$2" && echo "PASS load1=1.00 hw-lock=held $(date -u +%FT%TZ)" > "$2/gate.txt"
+[ "${FAKE_STUBBORN:-0}" = "1" ] && trap '' TERM   # 子にも無視が引き継がれる
+echo $$ > "$2/rr.pid"
+/bin/sleep 300 &
+echo $! > "$2/child.pid"
+wait
+STUB
+sigcase() {  # sigcase <名前> <DRIVE_KILL_WAIT_S> <FAKE_STUBBORN> <期待 exit>
+  local name="$1" h="${T}/h-$1" n=0
+  mkdir -p "${h}/work"; printf '0\n0\n0\n0\n' > "${T}/dcodes-${name}"; echo 1.00 > "${T}/loads-${name}"
+  HOME="${h}" PATH="${T}/bin:${PATH}" STUB_CODES="${T}/dcodes-${name}" LOADS="${T}/loads-${name}" \
+    DRIVE_KILL_WAIT_S="$2" FAKE_STUBBORN="$3" \
+    bash "${T}/kit/drive_series.sh" 4153 "${h}/ser" 2 "${T}/run_round_b.sh" > "${T}/dlog-${name}" 2>&1 &
+  local dp=$!
+  until [ -s "${h}/ser/round1/child.pid" ] || [ "${n}" -ge 300 ]; do /bin/sleep 0.1; n=$((n + 1)); done
+  kill -TERM "${dp}"; wait "${dp}"; local got=$?
+  [ "${got}" = "$4" ] || { echo "NG sig ${name}: exit=${got}（期待 $4）"; sed 's/^/  | /' "${T}/dlog-${name}" "${h}/ser/drive.status"; fail=1; }
+}
+sigcase sig 30 0 1   # 待ち（30 秒）は子の sleep 300 より十分短い（SIGTERM を送らない誤りを自然終了で見逃さない）
+cp="$(cat "${T}/h-sig/ser/round1/child.pid" 2>/dev/null)"
+if [ -z "${cp}" ] || kill -0 "${cp}" 2>/dev/null; then echo "NG sig: 子プロセスが残った"; fail=1; fi
+[ ! -e "${T}/h-sig/work/.fandhe-hw-lock" ] || { echo "NG sig: ロックが残った"; fail=1; }
+[ "$(awk 'NR==1{print $1, $2}' "${T}/h-sig/ser/round1/gate.txt")" = "INVALID interrupted-TERM" ] || { echo "NG sig: round を INVALID にしない"; fail=1; }
+grep -q '^# was: PASS' "${T}/h-sig/ser/round1/gate.txt" || { echo "NG sig: 元の PASS の行を残さない"; fail=1; }
+grep -q '^STOP round 1 signal=TERM' "${T}/h-sig/ser/drive.status" || { echo "NG sig: STOP を記録しない"; fail=1; }
+[ ! -e "${T}/h-sig/ser/round2" ] || { echo "NG sig: 次の round へ進んだ"; fail=1; }
+sigcase stubborn 3 1 6
+[ -d "${T}/h-stubborn/work/.fandhe-hw-lock" ] || { echo "NG stubborn: 子孫が生きているのにロックを外した"; fail=1; }
+grep -q '^LOCK-KEPT' "${T}/h-stubborn/ser/drive.status" || { echo "NG stubborn: LOCK-KEPT を記録しない"; fail=1; }
+for f in rr.pid child.pid; do p="$(cat "${T}/h-stubborn/ser/round1/${f}" 2>/dev/null)"; [ -n "${p}" ] && kill -KILL "${p}" 2>/dev/null; done
 [ "${fail}" -eq 0 ] && echo "self-test ok"
 exit "${fail}"

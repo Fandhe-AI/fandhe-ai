@@ -77,6 +77,11 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
   - ラッパーが 4 で、`gate.txt` の 1 行目が `INVALID foreign-after`（round 本体は正常に終わり、終了後に他ジョブ。所有者判断「後で見つかったら、その round は INVALID」）か
     `INVALID foreign-gap`（下の隙間の検査）
   - INVALID・TIMEOUT の round は集計で正式系列から外れ、系列は partial・確度低になる（既存の扱い）。
+- **中断（SIGTERM・SIGINT・SIGHUP）**: 実行中の round の子孫（ラッパー・run_round.sh・計測プロセス）へ SIGTERM を送り、全部が終わるのを最大 60 秒待つ。
+  終わったら、その round の `gate.txt` を `INVALID interrupted-<信号>`（PASS の元の行は `# was: ` で残す）にし、`STOP round <i> signal=<信号>` を書いてロックを外す。
+  終わらない子孫が残ったら、計測が生きている間は専有を保つため**ロックを外さず** `LOCK-KEPT` を書いて exit 6（後始末は人が子孫の終了を確かめてから。Codex の P1）。
+- **記録の書き換えの失敗**: ラッパーが `gate.txt` を INVALID に書き換えられないとき（一時ファイルが作れない・mv できない）は、
+  PASS が残ったまま次へ進まないよう `RECORD-FAILED` をログに出して exit 5 で系列を止める（Codex の P2）。
 
 ## ファイル
 

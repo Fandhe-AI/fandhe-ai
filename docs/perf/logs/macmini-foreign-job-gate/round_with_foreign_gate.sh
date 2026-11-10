@@ -108,11 +108,21 @@ if [ -z "${why}" ]; then
   echo "foreign-gate after CLEAN $(utc)"
   exit "${rc}"
 fi
+# 書き換えに失敗したら（一時ファイルが作れない・mv できない等）、PASS が残ったまま次へ進まないよう exit 5 で止める
 if [ ! -f "${RD}/gate.txt" ]; then
-  mkdir -p "${RD}" && echo "INVALID ${why} $(utc)" > "${RD}/gate.txt"
+  if ! { mkdir -p "${RD}" && echo "INVALID ${why} $(utc)" > "${RD}/gate.txt"; }; then
+    echo "foreign-gate after RECORD-FAILED（gate.txt を書けない・系列を止める）"; exit 5
+  fi
 elif [ "${first}" = "PASS" ]; then
-  { echo "INVALID ${why} $(utc)"; sed 's/^/# was: /' "${RD}/gate.txt"; } > "${RD}/.gate.txt.tmp" \
-    && mv "${RD}/.gate.txt.tmp" "${RD}/gate.txt"
+  tmp=$(mktemp "${RD}/.gate.txt.XXXXXX" 2>/dev/null) \
+    && { echo "INVALID ${why} $(utc)"; sed 's/^/# was: /' "${RD}/gate.txt"; } > "${tmp}" \
+    && mv -f "${tmp}" "${RD}/gate.txt" \
+    && [ "$(awk 'NR==1{print $1}' "${RD}/gate.txt")" = "INVALID" ]
+  wr=$?
+  if [ "${wr}" -ne 0 ]; then
+    [ -n "${tmp:-}" ] && rm -f "${tmp}"
+    echo "foreign-gate after RECORD-FAILED（gate.txt を INVALID にできない・PASS のまま・系列を止める）"; exit 5
+  fi
 fi
 # 続けてよいのは「round 本体が 0 で終わり PASS だった round に、終了後ゲートが FOREIGN を返した、または隙間が見つかった」場合だけ（exit 4）。
 # その round だけを INVALID にし、次の round は開始前ゲートで他ジョブが去るのを待つ（所有者判断「後で見つかったら、その round は INVALID」）。
