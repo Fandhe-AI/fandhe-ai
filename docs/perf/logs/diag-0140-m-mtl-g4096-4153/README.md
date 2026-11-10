@@ -4,6 +4,9 @@
 
 **分類は保留（測り直し待ち）。** 2026-11-10 の系列（下の「結果」・RULE.v2 で変換）は round 2〜5 が他ジョブ（hw-lock を取らない wgpu の GPU GEMM・CPU 100%。所有者の別セッションのジョブで 03:37:56Z に起動。03:38:00〜03:41:02Z は N=2048、03:41:02〜04:00:14Z は N=4096 の GEMM を実行していた）と重なったため、系列ごと**参考**に下げた
 （所有者判断（#4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」）。round 1 だけを採る選び方はしない）。旧系列の数値は消さずに残す。測り直しは他ジョブのゲートを足した RULE.v3 で、旧系列と別のラベルの系列で行う。
+**RULE.v3（2026-11-10T10:20:40Z）**: `RULE.v3.txt` を測り直しの前に固定した。項 1〜7・AUX・PARAMS（fixed-at-utc を除く）と RULE.v2 項 8 の (a)・(b) は逐語で引き継ぎ、
+tree・計測の条件・閾値・分類式・確度の規則は変えない。足したのは項 8 (c) 他ジョブの前提ゲート（`docs/perf/logs/macmini-foreign-job-gate/`・PR #4227 の部品で各 round を前後から挟む）と、
+(d) 系列 `series=remeasure-1`（記録先 `series-remeasure-1/`）・(e) 系列の始め方・(f) 固定前の試走の記録・(g) 旧系列（参考）と新系列を並べる記録の書き方。
 以下の 3 段落は PR-1 時点の記述を残している。
 本ディレクトリは測る前に固定する部品（RULE 雛形・集計・変換・補助集計・1 round の起動キット・xctrace の schema 検出）だけを置く。
 `RULE.txt` と `env/xctrace_*`（PR-2・単独コミット）、`round{i}/`・`aggregate.md`・`aggregate.tsv`・`attrib.tsv`・結果欄（PR-3・<metal-node> での実測）は後続で追加する。
@@ -54,7 +57,8 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 | ファイル | 役割 |
 |---|---|
 | `RULE.txt` | 計測前に固定した規則（PR-2・#4215）。消さずに残す |
-| `RULE.v2.txt` | 変換スクリプトを直した改訂版（項 8 に変更点・照合の注記・`gate.txt` の戻し方・raw の sha256 一覧）。変換・集計はこちらを `--rule` に渡す |
+| `RULE.v2.txt` | 変換スクリプトを直した改訂版（項 8 に変更点・照合の注記・`gate.txt` の戻し方・raw の sha256 一覧）。旧系列の変換・集計はこちらを `--rule` に渡す |
+| `RULE.v3.txt` | 他ジョブの前提ゲートを足して測り直すための改訂版（項 8 に部品の sha256・系列の回し方・試走の記録）。新系列 `series-remeasure-1/` の変換・集計はこちらを `--rule` に渡す |
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_diag.py --check-template` で検査）。`## AUX` が補助 PARAMS（`aggregate_diag.py` は読まない） |
 | `aggregate_diag.py` | 雛形（`diag-0140-template/`）の無改変コピー。sha256 を RULE に固定。#4208 で時計不一致のセルを分類保留にする修正後の雛形に合わせた（RULE は未固定のため再登録は不要） |
 | `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換。INVALID を検出したら `gate.txt` に記録して values を作らない（下の「round の状態」）（`--self-test`。INVALID round を含む系列の通し集計も確かめる。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクと RULE 項 3 の実行順も確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」）。`--restore-gate` は旧版の変換が付けた `INVALID convert:` を `# was:` の行から戻す（RULE.v2 項 8 (c)）。RULE.v2 で `ROUTE_ACTUAL` を variant 名で比べるよう直した |
