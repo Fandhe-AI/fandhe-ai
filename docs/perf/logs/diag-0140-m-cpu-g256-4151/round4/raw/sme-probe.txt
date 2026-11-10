@@ -1,0 +1,26 @@
+
+running 1 test
+test gemm_blis::tests::sme_microcall_fixed_cost_probe ... probe=microcall kernel=SME kc=0 reps=32768 median_ns_per_call=45.419
+probe=microcall kernel=NEON kc=0 reps=262144 median_ns_per_call=7.108
+probe=microcall kernel=SME kc=1 reps=16384 median_ns_per_call=86.634
+probe=microcall kernel=NEON kc=1 reps=131072 median_ns_per_call=12.478
+probe=microcall kernel=SME kc=2 reps=16384 median_ns_per_call=93.305
+probe=microcall kernel=NEON kc=2 reps=131072 median_ns_per_call=13.797
+probe=microcall kernel=SME kc=4 reps=16384 median_ns_per_call=98.900
+probe=microcall kernel=NEON kc=4 reps=131072 median_ns_per_call=11.655
+probe=microcall kernel=SME kc=8 reps=16384 median_ns_per_call=101.819
+probe=microcall kernel=NEON kc=8 reps=65536 median_ns_per_call=16.598
+probe=microcall kernel=SME kc=16 reps=16384 median_ns_per_call=110.013
+probe=microcall kernel=NEON kc=16 reps=65536 median_ns_per_call=27.565
+probe=microcall kernel=SME kc=32 reps=16384 median_ns_per_call=115.496
+probe=microcall kernel=NEON kc=32 reps=32768 median_ns_per_call=53.397
+probe=microcall kernel=SME kc=64 reps=8192 median_ns_per_call=149.302
+probe=microcall kernel=NEON kc=64 reps=16384 median_ns_per_call=101.407
+probe=microcall kernel=SME kc=128 reps=8192 median_ns_per_call=214.620
+probe=microcall kernel=NEON kc=128 reps=8192 median_ns_per_call=199.824
+probe=microcall kernel=SME kc=256 reps=4096 median_ns_per_call=346.517
+probe=microcall kernel=NEON kc=256 reps=4096 median_ns_per_call=397.451
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 787 filtered out; finished in 0.74s
+

@@ -1,0 +1,8 @@
+ENV4151 arm=off-base rayon_threads=10 sme_os_flag=true sme_svl_bytes=64 sme_kernel_enabled=true sme_production_enabled=false thread_limit_effective=10 thread_limit_env_override=false small_shape_cap_eligible=false timer_tick_ns=41 timer_pair_ns=33.29 gap_us=50
+ROW4151 arm=off-base series=cold_first_call m=256 n=256 k=256 rayon_threads=10 calls=1 median_ns=2231250 mean_ns=2231250.0 bits_hash=0x9bc403c2047395ad
+ROW4151 arm=off-base series=hot m=256 n=256 k=256 rayon_threads=10 calls=500 median_ns=188583 mean_ns=190554.7 bits_hash=0x9bc403c2047395ad
+ROW4151 arm=off-base series=gap m=256 n=256 k=256 rayon_threads=10 calls=500 median_ns=197459 mean_ns=199482.8 bits_hash=0x9bc403c2047395ad
+ROW4151 arm=off-base series=serial_t1 m=256 n=256 k=256 rayon_threads=10 calls=500 median_ns=320875 mean_ns=321837.3 bits_hash=0x9bc403c2047395ad
+ROW4151 arm=off-base series=forkjoin_floor_hot m=256 n=256 k=256 rayon_threads=10 calls=500 median_ns=10041 mean_ns=11328.9 bits_hash=0x9bc403c2047395ad
+ROW4151 arm=off-base series=forkjoin_floor_gap m=256 n=256 k=256 rayon_threads=10 calls=500 median_ns=37791 mean_ns=35595.9 bits_hash=0x9bc403c2047395ad
+END4151 arm=off-base forkjoin_jobs=20
