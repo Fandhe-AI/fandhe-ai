@@ -2,11 +2,13 @@
 
 ## 状態
 
-**PR-1 時点: 実測なし。** 本ディレクトリは測る前に固定する部品（RULE 雛形・集計スクリプト・1 round の起動キット・nsys 補助）だけを置く。
+**実測済み（2026-11-10・<cuda-node>・5/5 round PASS・status=complete）。相手側（#4149）との対応表は未入力。**
+`RULE.txt` は #4229 で単独コミット（fixed-at 2026-11-10T06:55:10Z・tree_sha `d50251b38`）。計測は tree_sha の git archive（`.rev-stamp` 1 行）を
+rsync し、ツリー指紋をノード上で RULE と照合（計測前後とも `f18e2a5c…0d17`・2701 files）してから、実機ロック（owner `#4150 measure 2026-11-10T07:14:32Z`）を保持して
+`run_round.sh` を 1〜5 で回し、全 round の後に `nsys_aux_4150.sh` を 1 回実行した（07:14:36Z〜07:21:02Z）。差し替え・除外・上書きはない。
+相手側の値は README 手順 5 のとおり main に入った #4149 の記録先から作る。#4149 の計測 PR（#4225）が main に入るまで対応表は unavailable のままで、
+#4150 はその追記で閉じる（推定値で埋めない）。
 診断 example は `crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs`。
-`RULE.txt`（PR-2・単独コミット）、`round{i}/`・`aggregate.md`・`aggregate.tsv`・結果欄（PR-3・<cuda-node> での実測）は後続で追加する。
-実測値・内訳・分類・確度は、実測するまで書かない（推定値で埋めない）。#4150 は実測と記録の PR-3 で閉じる（部品の PR は `Refs #4150`）。
-PR-1 の担当環境は GB10 に到達できないため、単体テスト・`--self-test`・構文検査までしか行っていない。GB10 での動作（NULL stream 前提、event の摂動量、`nsys` の可用性）は未検証。
 
 ## 目的
 
@@ -85,4 +87,37 @@ Issue #4188 の文言は `predict_device_chain`（ホスト入力版）を挙げ
 
 ## 結果
 
-（実測後に追記。PR-1 時点は空。）
+出典: `aggregate.md`・`aggregate.tsv`（`python3 -I aggregate_4150.py --dir .`・RULE の sha 照合つき）。値は µs、round 別中央値の中央値（NB-RANGE5 の最小〜最大）。
+round 状態は PASS 5 件（`round{i}/gate.txt`。load1 0.24〜0.74）。checksum は round 間で一致（集計が検査）。
+
+### 系列ごとの分類（RULE 項 5 の規則を機械適用）
+
+| 系列 | kernel_wait_derived | chain_gpu | E_sum | share_exec（推定） | event_perturbation | 分類 | 確度 |
+|---|---|---|---|---|---|---|---|
+| seq3189（#3189 列・P／E） | 63.672（63.343〜63.824） | 74.368 | 71.040 | 1.118 | -0.0009 | GPU 実行が支配 | 高 |
+| prod0140（本番列・PR／ER） | 62.328（62.223〜62.760） | 71.152 | 71.040 | 1.137 | -0.0015 | GPU 実行が支配 | 高 |
+
+- 両系列とも share_exec が全 round で 0.5 を大きく上回り（1.11〜1.14）、NB-RANGE5 帯も 0.5 をまたがないため確度は「高」。event の摂動は ±0.2% 以内。
+- share_exec が 1 を超えるのは、分母の kernel_wait_derived（= download − download_again）が download の計時開始後だけを数え、
+  発行中（l1_issue＋l2_issue、本番列で 5.7 µs）に GPU 上で既に走っている分を含まないため（RULE 項 5 の式どおり。share_wait・wait_resid の負値も同じ理由。いずれも推定タグ）。
+- 本番列の内訳: 融合カーネル本体 E_sum 71.0 µs（L1 `l1_iso` 50.6・L2 `l2_iso` 20.4）に対し、chain_gpu 71.2 µs で gpu_gap は 0.1 µs（−0.2〜0.4）。
+  本番列では GPU 上の間隙・起動遅延はほぼ 0 で、チェーンの GPU 時間はほぼすべて 2 つの融合カーネルの実行。
+- #3189 列は chain_gpu 74.4 µs・gpu_gap 3.5 µs（層出力の確保＋ゼロ初期化 2 回分と host 発行待ちの空き）。
+- 固定費（F 腕）: sync_idle 0.29・tiny_roundtrip 9.98・launch_floor_1x1 2.88・event_record_pair 2.75。
+
+### nsys 補助（record_only・判定に使わない）
+
+`nsys/`（`nsys.txt` = ok。`cuda_gpu_trace.csv.gz` は gzip した stats 出力。`trace.nsys-rep`・`trace.sqlite` はサイズのため収録しない）。
+CPU サンプリング不可の警告 2 件（`nsys.err`。#2109 と同じ）。nsys 下の時間は汚れるため値は参考で、読み取ったのは起動形状だけ:
+`gemm_tiled_bias_act_f32` は grid 4×1（L1。nsys 下の中央値 46.2 µs）と grid 1×1（L2。17.4 µs）で起動している。
+
+### 副次: `infer-chain-fixed-cost-reduction-3205.md` §3 の「占有率」推定との突き合わせ
+
+§3 の「L1 が 4 ブロック・L2 が 1 ブロックしか起動しない」は nsys の grid（4×1・1×1）で実測に置き換えた。
+「kernel_wait は融合カーネル本体の GPU 実行が支配する」も本診断で実測（l1_iso 50.6・l2_iso 20.4 µs、本番列の gpu_gap 0.1 µs）。
+「K ループが逐次に効いている」という原因の部分は本診断の量では分けられないため推定のまま残す（§3 に追記）。
+
+### 相手側（#4149）との対応
+
+未入力（unavailable）。#4149 の計測 PR（#4225）が main に入ったあと、手順 5 で `opp_4149.tsv` を作って `aggregate.md`・`aggregate.tsv` を作り直し、
+`docs/perf/loss-attribution-matrix.md` の G-CUDA-INF 行もそのとき更新する（同じ行を #4225 も書き換えるため）。

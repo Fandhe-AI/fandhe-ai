@@ -1,0 +1,20 @@
+start 2026-11-10T07:14:36Z
+rule OK
+fingerprint rule=f18e2a5c088e6e9d6b331024da34d51d46a951f5be20bdcfa786fe47609c0d17 node=f18e2a5c088e6e9d6b331024da34d51d46a951f5be20bdcfa786fe47609c0d17
+round 1 start 2026-11-10T07:14:36Z
+round 1 done 2026-11-10T07:16:54Z
+round 1 rc=0
+round 2 start 2026-11-10T07:16:54Z
+round 2 done 2026-11-10T07:17:55Z
+round 2 rc=0
+round 3 start 2026-11-10T07:17:55Z
+round 3 done 2026-11-10T07:18:56Z
+round 3 rc=0
+round 4 start 2026-11-10T07:18:56Z
+round 4 done 2026-11-10T07:19:57Z
+round 4 rc=0
+round 5 start 2026-11-10T07:19:57Z
+round 5 done 2026-11-10T07:20:58Z
+round 5 rc=0
+nsys rc=0 ok: cuda_gpu_trace.csv（時間値は判定に使わない。間隙・起動遅延は手で読む）
+done. rc=0 2026-11-10T07:21:02Z
