@@ -1,0 +1,68 @@
+RULE fixed-at-utc: 2026-11-10T05:06:52Z (実機 A/B 計測より前にコミットして固定。事後に緩めない)
+issue: #4158 eager matmul 結果の自動解放にサイズゲート（出力 32 MiB 超は解放しない）を付けた状態の GB10 A/B
+        （crates/autodiff/src/eager_release.rs の EAGER_MATMUL_RELEASE_MAX_BYTES・既定 OFF のゲート）
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §18（派生元: docs/perf/logs/cpu-gemm-reuse-release-3226/RULE.txt）
+
+[対象]
+- source_commit: 00ce065462130995cb35d44fd216efa6f279a9ea（部品 PR #4195 を含む main。crates/・scripts/bench/framework-compare/ の版の基準）
+- 計測コミット: 本 RULE.txt を単独で追加した PR のマージ後の main の HEAD（sha は env_info・rev-stamp-verification-4158.md に記録）。
+  計測前に `git diff --quiet <source_commit> <計測コミット> -- crates scripts/bench/framework-compare` が成り立つことを確かめ、
+  成り立たなければ計測しない（本体・計測部品が source_commit から動いていないこと）。
+- before: 計測コミットそのまま（EAGER_MATMUL_RELEASE_DEFAULT_ENABLED = false）
+- after : 同じ計測コミットに docs/perf/logs/cpu-gemm-reuse-release-sizegate-4158/on-arm.patch
+          （sha256 efb25b5fb70947dcf268518232debfc83f8e7e951b3d8a5f88bfa0e650f33978）だけを git apply した計測専用 checkout
+          （EAGER_MATMUL_RELEASE_DEFAULT_ENABLED の 1 行だけを true。main へはコミットしない。
+          runner が同一コミットかつ 1 ファイル 1 行差分であることを検証する）
+- サイズゲート閾値 EAGER_MATMUL_RELEASE_MAX_BYTES = 33554432（32 MiB）は両腕で共通。precheck で両腕の
+  size_gate_max_bytes=33554432 を assert する。計測後にこの値を変えない。
+
+[セル]（GB10 単独・20 セル。judge_eager_release_ab.py --rule-set 4158 の expected_cells_4158 と同一）
+- 既定経路 14: gemm N=256／512／1024／2048／4096 x fresh／reuse、train／infer（size=64）x fresh／reuse
+- 診断経路 6（bench-fandhe --diag-legacy-tape-reuse。eager release が届く旧条件。JSONL の diag タグ legacy_tape_reuse）:
+  gemm reuse N=256／512／1024／2048／4096、train reuse（size=64）
+- 処置セル = 診断経路の gemm reuse N=256／512／1024／2048 の 4 セル。それ以外の 16 セル（診断経路の N=4096・train reuse を含む）はガードセル。
+- 到達性（コード読解・§18.2）: 既定経路には eager release が届かないため既定経路 14 セルは構造上 A/A。
+  本 A/B が ADOPT になっても常駐経路の値である G-CPU-G256 は動かない。
+
+[手順]
+- ツール: scripts/bench/framework-compare/run_ab_eager_release_cpu.sh（AB_ISSUE=4158・AB_PROFILE=gb10・AB_PRECHECK=assert）。
+- ノードへは計測コミットの git bundle を送り、runner・before・after の 3 クローンを作る（ノード上で GitHub への fetch はしない）。
+  各ツリーに .rev-stamp（1 行目 = HEAD の完全な sha・2 行目 dirty=0）を置き .git/info/exclude に追記する。after のみ on-arm.patch を git apply する。
+- 実機ロック（~/work/.fandhe-hw-lock。owner ファイル非空）を取得してから runner を起動し、precheck・ビルド・全 round が終わるまで保持する。
+  RAYON_NUM_THREADS は unset。計測中に同じ機体でビルド・他の計測・転送を並走させない。
+- 5 round。プロセスは独立に起動し、round ごとに before／after の起動順を反転する（奇数 round は before 先行）。
+- run の差し替え・追加起動・セル除外はしない。同じラベルの既存 JSONL があれば停止する。再実行は別ラベルとし旧系列を残す。
+- 5 回計測の中央値を採用する。checksum の完全一致は hard 条件。
+
+[判定]（judge_eager_release_ab.py --rule-set 4158 が機械的に適用する。GB10 単独）
+- ratio = after / before（5 round の中央値）。round 比は round i の after / before。
+- ADOPT:
+    処置セル 4 つすべてで中央値 ratio <= 0.95 かつ 5/5 round で ratio < 1.00、
+    さらにガード 16 セルすべてで中央値 ratio <= 1.00、checksum 全一致。
+- REJECT（いずれか 1 つでも該当）:
+    5/5 round で後退（全 round で ratio > 1.00）したセルがある／処置セルの中央値 ratio > 1.00／checksum が 1 件でも不一致。
+- undetermined: 上記のどちらでもない。負荷ゲートの不通過 round・precheck 不成立・データ不正を含む系列も undetermined。
+- REJECT・undetermined も正当な結果で、既定は OFF のまま。既定の反転は #4159（Mac mini）の判定とあわせて #3227 で判断する。
+- 判定の閾値（0.95・1.00・5/5）は #3226 と同一で緩めない。NB-RANGE5（docs/perf/noise-band-decision.md。#4142 で採用）は
+  round 比の最小〜最大を参考として記録するだけで、判定には使わない。
+
+[負荷ゲート]（round ごと。run_ab_eager_release_cpu.sh が load_gate-4158-cpu-<label>.log に記録）
+- load1 < 1.0 かつ GPU compute プロセス 0 件（nvidia-smi --query-compute-apps）を 30 秒間隔・最大 30 分待つ。
+- nvidia-smi・load1 の取得不能は unavailable（通過扱いにしない）。不通過・unavailable の round を含む系列は record_only とし、
+  judge は --record-only で ADOPT も REJECT も出さない。
+
+[副次（判定外・記録のみ）]
+- 診断経路の gemm reuse N=4096（64 MiB。after でもゲートで解放されない）の ratio が 1.00 付近に留まるか。
+- 診断経路の reuse 値と既定経路の fresh の比（解放後に reuse／fresh の逆転が縮むか）。
+- 既定経路 14 セル（構造上 A/A）の round 比の幅。
+
+[ドリフトガード]
+- env_info に rule_sha256・rev_stamp_head（before・after・runner）を記録する。3 ツリーの HEAD と .rev-stamp 1 行目の一致は runner が検査する。
+- 計測コミットと source_commit の crates・scripts/bench/framework-compare の差分が空であることを rev-stamp-verification-4158.md に記録する。
+
+[マスク]
+- 収録前にホスト名を <cuda-node>（env_info は runner が masked に置換済み）、$HOME を <home>、ユーザー名を <user> に置換し、
+  実ホスト名・ユーザー名・/home/ が 0 件であることを grep で確かめる。ELF・target* は収録しない。
+
+[対象外（再実験しない）]
+- 16〜64 MiB の閾値スイープ、常駐経路への解放・プール機構、Mac mini（#4159）、#3226 の train reuse 1.042 の原因調査。
