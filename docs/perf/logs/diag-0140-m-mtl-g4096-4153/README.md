@@ -2,7 +2,9 @@
 
 ## 状態
 
-**分類は保留（測り直し待ち）。** 2026-11-10 の系列（下の「結果」・RULE.v2 で変換）は round 2〜5 が他ジョブ（hw-lock を取らない wgpu の GPU GEMM・CPU 100%。所有者の別セッションのジョブで 03:37:56Z に起動。03:38:00〜03:41:02Z は N=2048、03:41:02〜04:00:14Z は N=4096 の GEMM を実行していた）と重なったため、系列ごと**参考**に下げた
+**新系列（`series-remeasure-1/`・RULE.v3）で測り直した: 分類保留／確度 低（partial）。** round 1 は開始前の他ジョブのゲートで TIMEOUT（macOS の `mediaanalysisd`）、round 2〜5 は PASS（下の「結果」）。
+判定・分類は新系列で決める（RULE.v3 項 8 (g)）。以下は旧系列を参考に下げたときの記述で、旧系列の数値は消さずに残す。
+**旧系列は参考（他ジョブと重なった）。** 2026-11-10 の系列（下の「結果」・RULE.v2 で変換）は round 2〜5 が他ジョブ（hw-lock を取らない wgpu の GPU GEMM・CPU 100%。所有者の別セッションのジョブで 03:37:56Z に起動。03:38:00〜03:41:02Z は N=2048、03:41:02〜04:00:14Z は N=4096 の GEMM を実行していた）と重なったため、系列ごと**参考**に下げた
 （所有者判断（#4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」）。round 1 だけを採る選び方はしない）。旧系列の数値は消さずに残す。測り直しは他ジョブのゲートを足した RULE.v3 で、旧系列と別のラベルの系列で行う。
 **RULE.v3（2026-11-10T10:20:40Z）**: `RULE.v3.txt` を測り直しの前に固定した。項 1〜7・AUX・PARAMS（fixed-at-utc を除く）と RULE.v2 項 8 の (a)・(b) は逐語で引き継ぎ、
 tree・計測の条件・閾値・分類式・確度の規則は変えない。足したのは項 8 (c) 他ジョブの前提ゲート（`docs/perf/logs/macmini-foreign-job-gate/`・PR #4227 の部品で各 round を前後から挟む）と、
@@ -59,6 +61,7 @@ PR-1 の担当環境（Linux）は Mac mini に到達できないため、`--sel
 | `RULE.txt` | 計測前に固定した規則（PR-2・#4215）。消さずに残す |
 | `RULE.v2.txt` | 変換スクリプトを直した改訂版（項 8 に変更点・照合の注記・`gate.txt` の戻し方・raw の sha256 一覧）。旧系列の変換・集計はこちらを `--rule` に渡す |
 | `RULE.v3.txt` | 他ジョブの前提ゲートを足して測り直すための改訂版（項 8 に部品の sha256・系列の回し方・試走の記録）。新系列 `series-remeasure-1/` の変換・集計はこちらを `--rule` に渡す |
+| `series-remeasure-1/` | 新系列（RULE.v3。判定はこちら）。`round{i}/`・`round{i}.log`・`drive.status`・`env/`（`series-start.txt`・`foreign-gate/`・`kit-verify.txt`）・`RULE.v3.txt` の写し・`aggregate.*`・`attrib.tsv`。変換・集計は記録先で `--rule RULE.v3.txt` |
 | `RULE.template.txt` | 測る前に固定する規則の雛形（`aggregate_diag.py --check-template` で検査）。`## AUX` が補助 PARAMS（`aggregate_diag.py` は読まない） |
 | `aggregate_diag.py` | 雛形（`diag-0140-template/`）の無改変コピー。sha256 を RULE に固定。#4208 で時計不一致のセルを分類保留にする修正後の雛形に合わせた（RULE は未固定のため再登録は不要） |
 | `to_values_4153.py` | `round{i}/raw/` から `values.tsv`・`aux.tsv` を作る厳格変換。INVALID を検出したら `gate.txt` に記録して values を作らない（下の「round の状態」）（`--self-test`。INVALID round を含む系列の通し集計も確かめる。stub の xcrun・bench で `run_round.sh`・`xctrace_probe_4153.sh` の成功・失敗経路のマスクと RULE 項 3 の実行順も確かめる）。xctrace の XML は DOCTYPE／ENTITY・巨大入力を拒否。`--mask-dir` は保存物の識別子のマスク（下の「マスク」）。`--restore-gate` は旧版の変換が付けた `INVALID convert:` を `# was:` の行から戻す（RULE.v2 項 8 (c)）。RULE.v2 で `ROUTE_ACTUAL` を variant 名で比べるよう直した |
@@ -102,10 +105,60 @@ round の状態は `gate.txt` の 1 語目（`PASS`／`TIMEOUT`／`INVALID`）�
 
 ## 結果
 
-> **他ジョブ（hw-lock を取らない wgpu の GPU GEMM・CPU 100%）と重なった系列・参考（分類は保留・測り直し待ち）。** round 1（03:34:04〜03:37:07Z）は他ジョブの起動（03:37:56Z）より前に終わったが、
+### 新系列 `series-remeasure-1/`（RULE.v3。判定はこちら）
+
+計測: 2026-11-10T10:42:03Z〜11:54:51Z（<metal-node>・Apple M4）。旧系列と同じ tree（`tree_sha`・ツリー指紋 `838481a8…`・files=2691 をビルドの前後と系列の前に照合）・同じビルド・xctrace unavailable（`formulas=F2`）。
+各 round を他ジョブの前提ゲート（`docs/perf/logs/macmini-foreign-job-gate/`・PR #4227 のマージコミット 903782084。4 ファイルの sha256 を RULE.v3 項 8 (c) と照合し self-test を通した記録は `series-remeasure-1/env/kit-verify.txt`）で前後から挟み、`drive_series.sh` で回した。
+
+- **系列の始め方**: load1 は 20 分（40 回）のあいだ 1.5 未満に届かず（1.67〜3.19。`env/series-start.txt`）、記録したまま 11:01:35Z に round 1 へ進んだ。
+- **round 1: `TIMEOUT foreign-job before`（11:35:26Z）。** 開始前のゲートが 60 回（30 分）とも他ジョブを検出し、run_round.sh を呼ばなかった（計測なし）。当たったのは G2（%CPU 25.0 以上）で、
+  macOS のメディア解析 `mediaanalysisd`（自分の uid・%CPU 約 117。GPU 使用率は 0。`env/foreign-gate/r1-before-a*.txt`）。RULE どおり正式系列から外し、差し替え・再実行はしていない。
+- **round 2〜5: PASS。** round 2 は同じ `mediaanalysisd` で 12 回待ってから 11:42:23Z に始まった（load1 2.37）。round 3〜5 は待ちなし（load1 1.63・1.38・1.29）。
+  4 round とも終了後のゲートは CLEAN、開始前の確認と計測の開始の隙間の検査も通った（`gate.txt` は PASS のまま）。`ROUTE_ACTUAL` N=4096 は 4 round とも `Classic`・bn64、`DIAG_BITEQ` は equal=true。
+- **計測中の自分の操作（RULE.v3 項 8 (d) からの逸脱の記録）**: 系列の実行中に状態を読む ssh を 3 回した（11:03Z・11:23Z・11:24Z ごろ）。3 回とも round 1 の開始前の待ちのあいだで、run_round.sh は動いていない。
+- 限界: ゲートは round の前後だけを確かめるので、round の途中で始まって終わるジョブは検出できない（README の「限界」）。
+
+**新系列の分類: 分類保留／確度: 低**（`aggregate.md` の status partial。理由「どれも届かない（残差は固定費など別区間。別診断へ）（部分通過）」）。F2 は 4 run とも閾値 1.00 未満（帯 0.7579〜0.7859）。
+確度が低なのは PASS 以外の round（round 1 の TIMEOUT）を含むため。F1 は測っていない（xctrace unavailable）ので、「自分たちの制約／ハードの上限」は判定していない。
+
+| run | fandhe_window | fandhe_fresh_window | opp_window | F2 | 観測比 |
+|---|---|---|---|---|---|
+| 1 | -（TIMEOUT） | - | - | - | - |
+| 2 | 62.2541 | 72.7466 | 55.2396 | 0.7593 | 0.8873 |
+| 3 | 62.7948 | 72.6728 | 57.1163 | 0.7859 | 0.9096 |
+| 4 | 63.9693 | 72.7559 | 55.4501 | 0.7621 | 0.8668 |
+| 5 | 63.3690 | 72.7690 | 55.1551 | 0.7579 | 0.8704 |
+| 中央値 | 63.0819 | 72.7513 | 55.3448 | 0.7607 | 0.8789 |
+
+（単位 ms。値は `series-remeasure-1/round{i}/values.tsv`、F2・観測比の中央値は `series-remeasure-1/aggregate.md`。窓の中央値は 4 run の中央値）
+
+- 観測比の中央値 0.8789 はスコアボードの 0.88 から 0.1%。
+- 帰属（`series-remeasure-1/attrib.tsv`）: 純カーネルを取っていないため **判定不能(純カーネル unavailable)・確度低**。ΔW の中央値は 7.6142 ms（run 別 5.68〜8.52）。摂動・照合は unavailable。
+- 照合の注記（RULE.v2 項 8 (b)・RULE.v3 で引き継ぎ）: 構成差あり（診断 bn32・本番 bn64）。診断テストの `kernel_gpu`（`aux.tsv` の `fandhe_kernel_gpu_ts`）は中央値 64.8924 ms（run 別 64.8790〜64.8950）で、
+  診断の tile（bn32）の値。本番 tile のカーネル時間ではないので窓の内訳に使わない。candle の `transfer_excl` は中央値 42.3079 ms。F1(b) の置換式は旧系列と同じく構成差のため計算・解釈しない。
+- candle の純カーネル時間は引き続き**未測定**。
+
+**旧系列（参考）との並び**（旧系列は round 2〜5 が他ジョブと重なった。値は下の「旧系列」）:
+
+| | 旧系列（参考・5 run） | 新系列（4 run） |
+|---|---|---|
+| fandhe reuse 窓 中央値 | 63.0829 | 63.0819 |
+| fandhe fresh 窓 中央値 | 72.3960 | 72.7513 |
+| candle 窓 中央値 | 59.5166 | 55.3448 |
+| F2 中央値（帯） | 0.8198（0.7669〜0.8309） | 0.7607（0.7579〜0.7859） |
+| 観測比 中央値 | 0.9436 | 0.8789 |
+| ΔW 中央値 | 3.5663 | 7.6142 |
+| 分類／確度 | 分類保留／高（参考） | 分類保留／低（partial） |
+
+- 分類のラベル（分類保留）は変わらない。確度は round 1 の TIMEOUT で低になった。
+- fandhe の窓はほぼ同じで、candle の窓が新系列で約 4.2 ms 短い（旧系列で重なっていない round 1 の candle 窓 59.0668 ms と比べても短い）。このため F2・観測比は新系列が低い。違いの理由は調べていない。
+
+### 旧系列（参考）
+
+> **他ジョブ（hw-lock を取らない wgpu の GPU GEMM・CPU 100%）と重なった系列・参考（判定は上の新系列）。** round 1（03:34:04〜03:37:07Z）は他ジョブの起動（03:37:56Z）より前に終わったが、
 > round 2（03:37:07〜03:40:07Z。03:37:56Z 以降が重なる）・round 3（〜03:43:39Z）・round 4（〜03:46:40Z）・round 5（〜03:50:42Z）は
 > 他ジョブの N=2048（03:38:00〜03:41:02Z）・N=4096（03:41:02〜04:00:14Z）の GEMM と重なった。load1 のゲート（3.0 未満）は通ったが、
-> このゲートでは重なりを検出できない。下の分類・確度・帰属は旧系列のもので、測り直すまで使わない。ここでの「保留（測り直し待ち）」は記録の状態で、判定ラベルの「分類保留」とは別。（所有者判断（#4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」））。
+> このゲートでは重なりを検出できない。下の分類・確度・帰属は旧系列のもので、判定には使わない。（所有者判断（#4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」））。
 
 計測: 2026-11-10T03:34:04Z〜03:50:42Z（<metal-node>・Apple M4）。xctrace が無い（`env/xctrace_*`）ため AUX `xctrace: unavailable`・`formulas=F2` のフォールバック構成。
 5 round とも PASS（load1 1.21〜2.75。`round{i}/gate.txt`・`drive.status`）。INVALID・TIMEOUT なし、差し替え・除外・再計測なし。

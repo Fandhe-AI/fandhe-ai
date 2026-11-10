@@ -1,0 +1,10 @@
+kit-verify 2026-11-10T10:41:45Z source=903782084807e0ecb82143b1302ed3346dbae577
+foreign_job_gate.py: OK
+round_with_foreign_gate.sh: OK
+drive_series.sh: OK
+test_round_with_foreign_gate.sh: OK
+sha-rc=0
+self-test ok
+gate-selftest-rc=0
+self-test ok
+wrap-selftest-rc=0

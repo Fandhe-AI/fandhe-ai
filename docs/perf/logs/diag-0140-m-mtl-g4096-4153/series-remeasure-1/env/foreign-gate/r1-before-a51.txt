@@ -1,0 +1,12 @@
+FOREIGN before 2026-11-10T11:30:17Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 0 0 0 0 0
+processes_scanned 839
+hit G2-cpu pid=1236 <user> pcpu=116.2 name=mediaanalysisd
+max_pcpu_non_excluded 116.2
+top pid=1236 <user> pcpu=116.2 name=mediaanalysisd
+top pid=596 uid=0 pcpu=5.0 name=bluetoothd
+top pid=606 uid=0 pcpu=3.3 name=cfprefsd
+top pid=17778 uid=282 pcpu=3.3 name=trustd
+top pid=710 uid=0 pcpu=3.1 name=backgroundtaskmanagementd
+wrapper_load1 2.42

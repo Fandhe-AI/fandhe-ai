@@ -1,0 +1,12 @@
+FOREIGN before 2026-11-10T11:28:34Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 0 0 0 0 0
+processes_scanned 837
+hit G2-cpu pid=1236 <user> pcpu=120.4 name=mediaanalysisd
+max_pcpu_non_excluded 120.4
+top pid=1236 <user> pcpu=120.4 name=mediaanalysisd
+top pid=596 uid=0 pcpu=2.7 name=bluetoothd
+top pid=88326 uid=502 pcpu=2.6 name=com.apple.Virtualization.VirtualMachine
+top pid=958 <user> pcpu=2.0 name=rapportd
+top pid=1013 <user> pcpu=2.0 name=sharingd
+wrapper_load1 2.04
