@@ -1,0 +1,21 @@
+
+running 1 test
+test gemm_reuse_phase_diag_tests::gemm_window_route_precheck ... ROUTE N=256 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=256 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=256 equal=true
+ROUTE N=512 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=512 route=Classic(TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=512 equal=true
+ROUTE N=1024 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=1024 route=Classic(TileConfig { bm: 64, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=1024 equal=true
+ROUTE N=2048 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=2048 route=Classic(TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=2048 equal=true
+ROUTE N=4096 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=4096 route=Classic(TileConfig { bm: 32, bn: 64, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=4096 equal=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 865 filtered out; finished in 0.30s
+
