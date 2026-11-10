@@ -1,0 +1,2 @@
+cell	F1	F2	class	confidence	reason
+M-MTL-G4096	-	0.8198	分類保留	高	どれも届かない（残差は固定費など別区間。別診断へ）

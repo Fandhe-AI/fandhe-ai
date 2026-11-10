@@ -2,7 +2,8 @@
 
 ## 状態
 
-**PR-1 時点: 実測なし。** 本ディレクトリは測る前に固定する部品（RULE 雛形・集計・変換・補助集計・1 round の起動キット・xctrace の schema 検出）だけを置く。
+**実測済み（2026-11-10・<metal-node>・RULE.v2 で変換）。結果は下の「結果」。** 以下の 3 段落は PR-1 時点の記述を残している。
+本ディレクトリは測る前に固定する部品（RULE 雛形・集計・変換・補助集計・1 round の起動キット・xctrace の schema 検出）だけを置く。
 `RULE.txt` と `env/xctrace_*`（PR-2・単独コミット）、`round{i}/`・`aggregate.md`・`aggregate.tsv`・`attrib.tsv`・結果欄（PR-3・<metal-node> での実測）は後続で追加する。
 実測値・帰属・分類・確度は、実測するまで書かない（推定値で埋めない）。#4153 は実測と記録の PR-3 で閉じる（部品の PR は `Refs #4153`）。
 **RULE.v2（2026-11-10）**: 2026-11-10 に 5 round を実測した（ゲートは全 round PASS）が、旧版の `to_values_4153.py` が `ROUTE_ACTUAL` の Debug 形式
@@ -95,4 +96,36 @@ round の状態は `gate.txt` の 1 語目（`PASS`／`TIMEOUT`／`INVALID`）�
 
 ## 結果
 
-（実測後に追記。PR-1 時点は空。）
+計測: 2026-11-10T03:34:04Z〜03:50:42Z（<metal-node>・Apple M4）。xctrace が無い（`env/xctrace_*`）ため AUX `xctrace: unavailable`・`formulas=F2` のフォールバック構成。
+5 round とも PASS（load1 1.21〜2.75。`round{i}/gate.txt`・`drive.status`）。INVALID・TIMEOUT なし、差し替え・除外・再計測なし。
+計測前に tree（`tree_sha` の git archive）のツリー指紋が RULE の値（`838481a8…`・files=2691）と一致することを確かめた。
+変換は **RULE.v2.txt**（旧版の変換が Debug 形式の `ROUTE_ACTUAL` を INVALID にしたため。「状態」参照）で行った。変換の前に raw 99 ファイルの sha256 が
+RULE.v2 項 8 (d) の一覧とすべて一致することを確かめ（`gate.txt` は 5 round とも PASS のままで、`--restore-gate` は使っていない）、
+変換・集計の後にもう一度照合して一致したままであることを確かめた。集計は `aggregate.md`／`aggregate.tsv`、補助は `attrib.tsv`、round 別は `round{i}/values.tsv`・`aux.tsv`。
+
+**分類: 分類保留／確度: 高**（前分類「自分たちの制約」から変更）。F2 が 5 run とも閾値 1.00 未満（帯 0.7669〜0.8309）。
+F1 は測っていない（xctrace unavailable）ので、「自分たちの制約／ハードの上限」は判定していない（RULE 項 5 のフォールバック）。
+
+| run | fandhe_window | fandhe_fresh_window | opp_window | F2 | 観測比 |
+|---|---|---|---|---|---|
+| 1 | 62.3963 | 72.3875 | 59.0668 | 0.8160 | 0.9466 |
+| 2 | 63.0667 | 72.5160 | 55.6142 | 0.7669 | 0.8818 |
+| 3 | 63.0829 | 72.5988 | 59.5166 | 0.8198 | 0.9435 |
+| 4 | 63.5449 | 72.1619 | 59.9617 | 0.8309 | 0.9436 |
+| 5 | 63.5294 | 72.3960 | 60.0814 | 0.8299 | 0.9457 |
+| 中央値 | 63.0829 | 72.3960 | 59.5166 | 0.8198 | 0.9436 |
+
+（単位 ms。窓は registry 0.14.0 の `bench-fandhe`（reuse／fresh）と candle の `gemm`（fresh）。F2＝opp_window÷fandhe_fresh_window、観測比＝opp_window÷fandhe_window）
+
+- 観測比の中央値 0.9436 はスコアボードの 0.88 から 7.2% 離れた（10% 以内なのでドリフトの記録なし）。fandhe の reuse 窓は fresh 窓より約 9.3 ms 短く、F2 は観測比より低い。
+- 帰属（`attrib.tsv`）: 純カーネルを取っていないため **判定不能(純カーネル unavailable)・確度低**。ΔW（fandhe_window − opp_window）の中央値は 3.5663 ms（run 別 3.33〜7.45）。摂動・照合は unavailable。
+- **照合の注記（RULE.v2 項 8 (b)）: 構成差あり（診断 bn32・本番 bn64）。** 照合は xctrace unavailable のため unavailable。記録として、診断テスト
+  `gemm_reuse_phase_diag_production_batch` の `kernel_gpu`（`aux.tsv` の `fandhe_kernel_gpu_ts`）は中央値 65.6178 ms（run 別 64.6470〜65.9133）。
+  これは診断の tile（bn32）の値で、本番（bn64）の窓 63.0829 ms より長い。本番 tile のカーネル時間ではないので、窓の内訳に使わない。
+  `backend_metal_diff_vs_v0_14_0` は「なし」（版差なし）。`route.txt` の `ROUTE_ACTUAL`（本番経路）は 5 round とも `Classic`・bn64、`DIAG_BITEQ` は equal=true。
+- 参考（RULE 項 5。`values.tsv` には混ぜない・判定に使わない）: 壁時計境界の F1(b)。candle の `transfer_excl`（`aux.tsv` の `opp_transfer_excl`）は中央値 42.6909 ms、
+  診断テストの fandhe `encode＋commit_wait` は中央値 67.9172 ms で、その比は 0.6286（run 別 0.6105〜0.6299）。F1(b) の置換式（opp_window ÷（fandhe_window −
+  encode＋commit_wait ＋ transfer_excl））は 1.5745（run 別 1.4572〜1.6613）になるが、bn32 の encode＋commit_wait（67.9 ms）を bn64 の窓（63.1 ms）から引いており
+  **構成差のため解釈しない**。本番 tile の境界揃えは #4219（診断テストの tile 選択を本番に揃える）の後でないと取れない。
+- candle の純カーネル時間は引き続き**未測定**（xctrace が無い。`objc2-metal` を `bench-candle` に足す代替は依存追加で所有者承認が要り、本 issue の対象外）。
+- 閉じる条件: RULE（v2）どおりに 5 round を測り、分類・確度を記録した。`docs/perf/loss-attribution-matrix.md` §10.3.1 に追記した。`unreached_0140.tsv` への反映は #4168。
