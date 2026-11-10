@@ -2,7 +2,8 @@
 # round_with_foreign_gate.sh と drive_series.sh の経路の self-test（実機・ロック不要。macOS／Linux の bash で動く）。
 # 役割: 一時ディレクトリへラッパーを複製し、foreign_job_gate.py をスタブ（終了コードを順に返す）に、sleep を即時終了の
 #   スタブに差し替えて、開始前 CLEAN・開始前 TIMEOUT・開始前のゲート失敗・終了後 FOREIGN・終了後のゲート失敗・
-#   round 本体の失敗の各経路で、gate.txt の 1 語目とラッパーの終了コードを確かめる。drive_series.sh は一時 HOME（ロックの場所）と
+#   round 本体の失敗・開始前の load1 の待ちと TIMEOUT・開始前の確認と計測の開始の隙間（foreign-gap）の各経路で、
+#   gate.txt の 1 語目とラッパーの終了コードを確かめる（sysctl もスタブにして load1 を順に返す）。drive_series.sh は一時 HOME（ロックの場所）と
 #   sysctl のスタブ（load1 を順に返す）で、全 round 完走・終了後 FOREIGN は INVALID のまま次の round へ・ゲート失敗と round 失敗で停止・
 #   開始前 TIMEOUT は次の round へ・ロック使用中・
 #   引数の拒否・load1 が 1.5 未満に届かない場合の記録を確かめる。判定基準そのものの self-test は
@@ -29,17 +30,27 @@ with open(out, "x") as f:
 sys.exit(rc)
 EOF
 printf '#!/bin/sh\nexit 0\n' > "${T}/bin/sleep"; chmod +x "${T}/bin/sleep"
+# sysctl のスタブ: ${LOADS} の先頭行を load1 として返す（最後の 1 行は繰り返す）
+cat > "${T}/bin/sysctl" <<'STUB'
+#!/bin/sh
+v=$(head -n 1 "${LOADS}")
+if [ "$(wc -l < "${LOADS}")" -gt 1 ]; then tail -n +2 "${LOADS}" > "${LOADS}.n" && mv "${LOADS}.n" "${LOADS}"; fi
+echo "{ ${v} ${v} ${v} }"
+STUB
+chmod +x "${T}/bin/sysctl"
 # 偽の run_round.sh: gate.txt に PASS を書き、FAKE_RC で終わる（FAKE_NOGATE=1 なら gate.txt を書かずに終わる＝precheck で止まった形）
 cat > "${T}/run_round.sh" <<'EOF'
 [ "${FAKE_NOGATE:-0}" = "1" ] && exit "${FAKE_RC:-1}"
-mkdir -p "$2" && echo "PASS load1=1.00 hw-lock=held 2026-01-01T00:00:00Z" > "$2/gate.txt"
+ts=$(python3 -I -c 'import sys, time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + int(sys.argv[1]))))' "${FAKE_PASS_SHIFT:-0}")
+mkdir -p "$2" && echo "PASS load1=1.00 hw-lock=held ${FAKE_PASS_TS:-${ts}}" > "$2/gate.txt"
 exit "${FAKE_RC:-0}"
 EOF
 fail=0
 case_() {  # case_ <名前> <スタブの終了コード列> <FAKE_RC> <期待 exit> <期待 gate 1 語目> <期待 "# was:" 行数>
   local name="$1" codes="$2" frc="$3" wexit="$4" wfirst="$5" wwas="$6" rd="${T}/s-$1/round1" env="${T}/s-$1/env"
   printf '%s' "${codes}" | tr -s ' ' '\n' > "${T}/codes-${name}"
-  PATH="${T}/bin:${PATH}" STUB_CODES="${T}/codes-${name}" FAKE_RC="${frc}" FAKE_NOGATE="${FAKE_NOGATE:-0}" \
+  printf '%s\n' "${CASE_LOADS:-1.00}" | tr -s ' ' '\n' > "${T}/cloads-${name}"
+  PATH="${T}/bin:${PATH}" STUB_CODES="${T}/codes-${name}" FAKE_RC="${frc}" FAKE_NOGATE="${FAKE_NOGATE:-0}" LOADS="${T}/cloads-${name}" \
     bash "${T}/kit/round_with_foreign_gate.sh" "${T}/run_round.sh" 1 "${rd}" "${env}" > "${T}/log-${name}" 2>&1
   local got=$? first was
   first=$(awk 'NR==1{print $1}' "${rd}/gate.txt" 2>/dev/null)
@@ -57,8 +68,21 @@ case_ after-error  "0 2"   0 5 INVALID 1
 case_ fail-and-foreign "0 1" 1 5 INVALID 1
 FAKE_NOGATE=1 case_ nogate-foreign "0 1" 1 5 INVALID 0
 FAKE_NOGATE=1 case_ nogate-clean "0 0" 1 1 none 0
+CASE_LOADS="3.50 1.00" case_ load-wait "0 0 0" 0 0 PASS 0
+CASE_LOADS="x 1.00" case_ load-nonnum "0 0 0" 0 0 PASS 0
+CASE_LOADS="3.50" case_ load-timeout "$(printf '0 %.0s' $(seq 1 60))" 0 1 TIMEOUT 0
+FAKE_PASS_SHIFT=120 case_ gap-late "0 0" 0 4 INVALID 1
+FAKE_PASS_SHIFT=-120 case_ gap-early "0 0" 0 4 INVALID 1
+FAKE_PASS_SHIFT=30 case_ gap-within "0 0" 0 0 PASS 0
+FAKE_PASS_TS=garbage case_ gap-unreadable "0 0" 0 4 INVALID 1
+gl() { head -n 1 "${T}/s-$1/round1/gate.txt" | awk '{print $1, $2}'; }
+[ "$(gl load-timeout)" = "TIMEOUT load1" ] || { echo "NG load-timeout: TIMEOUT の理由が load1 でない"; fail=1; }
+[ "$(gl gap-late)" = "INVALID foreign-gap" ] || { echo "NG gap-late: foreign-gap でない"; fail=1; }
+[ "$(find "${T}/s-load-wait/env/foreign-gate" -name 'r1-before-a*' | wc -l | tr -d ' ')" = "2" ] || { echo "NG load-wait: 待った回の記録が 2 件でない"; fail=1; }
+grep -q '^wrapper_load1 3.50$' "${T}/s-load-wait/env/foreign-gate/r1-before-a1.txt" || { echo "NG load-wait: load1 を記録していない"; fail=1; }
 case_ before-error "2"     0 1 INVALID 0
 case_ before-timeout "$(printf '1 %.0s' $(seq 1 60))" 0 1 TIMEOUT 0
+[ "$(gl before-timeout)" = "TIMEOUT foreign-job" ] || { echo "NG before-timeout: TIMEOUT の理由が foreign-job でない"; fail=1; }
 # 開始前の待ちは各回のファイルを残す（wait-then-ok は a1〜a3）
 [ "$(find "${T}/s-wait-then-ok/env/foreign-gate" -name 'r1-before-a*' | wc -l | tr -d ' ')" = "3" ] || { echo "NG before の記録が 3 件でない"; fail=1; }
 [ -f "${T}/s-wait-then-ok/env/foreign-gate/r1-after.txt" ] || { echo "NG after の記録がない"; fail=1; }
@@ -74,17 +98,9 @@ STUB_CODES="${T}/codes-dup" bash "${T}/kit/round_with_foreign_gate.sh" "${T}/run
 STUB_CODES="${T}/codes-dup" bash "${T}/kit/round_with_foreign_gate.sh" run_round.sh 1 "${T}/x/round1" "${T}/x/env" > /dev/null 2>&1
 [ $? -eq 2 ] || { echo "NG 相対パスを拒否しない"; fail=1; }
 # ---- drive_series.sh
-# sysctl のスタブ: ${LOADS} の先頭行を load1 として返す（最後の 1 行は繰り返す）
-cat > "${T}/bin/sysctl" <<'STUB'
-#!/bin/sh
-v=$(head -n 1 "${LOADS}")
-if [ "$(wc -l < "${LOADS}")" -gt 1 ]; then tail -n +2 "${LOADS}" > "${LOADS}.n" && mv "${LOADS}.n" "${LOADS}"; fi
-echo "{ ${v} ${v} ${v} }"
-STUB
-chmod +x "${T}/bin/sysctl"
 # 偽の run_round.sh（ドライバ用）: 受け取った環境変数を残し、gate.txt に FAKE_GATE（既定 PASS の行）を書いて FAKE_RC で終わる
 cat > "${T}/run_round_d.sh" <<'STUB'
-mkdir -p "$2" && echo "${FAKE_GATE:-PASS load1=1.00 hw-lock=held 2026-01-01T00:00:00Z}" > "$2/gate.txt"
+mkdir -p "$2" && echo "${FAKE_GATE:-PASS load1=1.00 hw-lock=held $(date -u +%FT%TZ)}" > "$2/gate.txt"
 echo "${HW_LOCK_HELD:-} ${PASSVAR:-} $([ -s "${HW_LOCK_OWNER_FILE:-/nonexistent}" ] && echo owner-ok)" > "$2/env.seen"
 exit "${FAKE_RC:-0}"
 STUB
@@ -112,6 +128,10 @@ fi
 dcase aftererror "0 2 0 0" "1.00" 2 1
 if [ "$(dfirst aftererror 1)" != "INVALID" ] || [ -e "${T}/h-aftererror/ser/round2" ] || ! grep -q '^STOP round 1' "${T}/h-aftererror/ser/drive.status"; then
   echo "NG drive aftererror: 終了後ゲートの失敗で止まらない"; fail=1
+fi
+FAKE_GATE="PASS load1=1.00 hw-lock=held 2000-01-01T00:00:00Z" dcase gap "0 0 0 0" "1.00" 2 0
+if [ "$(dfirst gap 1)" != "INVALID" ] || ! grep -q '^all done' "${T}/h-gap/ser/drive.status"; then
+  echo "NG drive gap: foreign-gap の round を INVALID にして次へ進まない"; fail=1
 fi
 FAKE_RC=1 dcase roundfail "0 1 0 0" "1.00" 2 1
 [ ! -e "${T}/h-roundfail/ser/round2" ] || { echo "NG drive roundfail: round 本体の失敗＋終了後 FOREIGN で止まらない"; fail=1; }

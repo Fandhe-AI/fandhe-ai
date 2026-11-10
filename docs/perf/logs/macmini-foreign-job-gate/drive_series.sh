@@ -7,7 +7,8 @@
 # 系列の始め方: ロック取得後、load1 を 30 秒ごとに読み、1.5 未満になったら始める（最大 40 回＝20 分。届かなければ記録して始める。
 #   round ごとの load1 < 3.0 のゲートは run_round.sh 側で従来どおり）。待った秒数・各回の load1 を env/series-start.txt に残す。
 # 進め方: ラッパーが 0 → 次の round へ。gate.txt の 1 語目が TIMEOUT（開始前の他ジョブ・load1）→ そのまま記録して次の round へ。
-#   ラッパーが 4 かつ gate.txt の 1 行目が「INVALID foreign-after」（round 本体は正常終了・終了後に他ジョブ）→ その round は INVALID のまま次の round へ。
+#   ラッパーが 4 かつ gate.txt の 1 行目が「INVALID foreign-after」か「INVALID foreign-gap」（round 本体は正常終了・終了後に他ジョブ、
+#   または開始前の確認と計測の開始の間に隙間）→ その round は INVALID のまま次の round へ。
 #   それ以外の非 0（round 本体の失敗・ゲート自身の失敗など）→ 以降の round を回さず停止（想定外として報告）。差し替え・再実行はしない。
 # 経路の self-test は test_round_with_foreign_gate.sh（ロックは HOME 配下なので、テストは一時 HOME で動かす）。bash 3.2／5 互換。
 set -u
@@ -57,7 +58,7 @@ while [ "${i}" -le "${N}" ]; do
   cont=no
   [ "${rc}" -eq 0 ] && cont=yes
   [ "${g}" = "TIMEOUT" ] && cont=yes
-  case "${l}" in "INVALID foreign-after "*) [ "${rc}" -eq 4 ] && cont=yes ;; esac
+  case "${l}" in "INVALID foreign-after "*|"INVALID foreign-gap "*) [ "${rc}" -eq 4 ] && cont=yes ;; esac
   if [ "${cont}" != "yes" ]; then echo "STOP round ${i}" >> "${ST}"; exit 1; fi
   i=$((i + 1))
 done

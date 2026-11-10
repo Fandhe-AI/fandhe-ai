@@ -43,11 +43,21 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
 
 | 時点 | CLEAN | FOREIGN | ゲート自身の失敗 |
 |---|---|---|---|
-| 開始前 | run_round.sh を始める | 30 秒間隔で最大 60 回（30 分）待つ。60 回とも FOREIGN なら run_round.sh を呼ばず `gate.txt` を `TIMEOUT foreign-job before <UTC>`（exit 1） | `gate.txt` を `INVALID foreign-gate-error before`（exit 1） |
-| 終了後 | run_round.sh の終了コードを返す | round 本体が 0 で終わり `gate.txt` の 1 語目が PASS なら、`INVALID foreign-after <UTC>` に書き換え（元の行は `# was: ` で残す）、exit 4。その round だけを INVALID にして系列は次の round へ進む（次の round は開始前ゲートで他ジョブが去るのを待つ）。round 本体が非 0・`gate.txt` が無い場合は INVALID にして exit 5（系列を止める） | `INVALID foreign-gate-error after`・exit 5（系列を止める） |
+| 開始前 | load1 < 3.0 なら run_round.sh を始める | 30 秒間隔で最大 60 回（30 分）待つ。CLEAN でも load1 が 3.0 以上（run_round.sh の load1 ゲートと同じ閾値）なら同じく待つ。60 回とも条件がそろわなければ run_round.sh を呼ばず `gate.txt` を `TIMEOUT foreign-job before <UTC>`（最後の回が FOREIGN）か `TIMEOUT load1 before <UTC>`（exit 1） | `gate.txt` を `INVALID foreign-gate-error before`（exit 1） |
+| 終了後 | 下の隙間の検査を通れば run_round.sh の終了コードを返す | round 本体が 0 で終わり `gate.txt` の 1 語目が PASS なら、`INVALID foreign-after <UTC>` に書き換え（元の行は `# was: ` で残す）、exit 4。その round だけを INVALID にして系列は次の round へ進む（次の round は開始前ゲートで他ジョブが去るのを待つ）。round 本体が非 0・`gate.txt` が無い場合は INVALID にして exit 5（系列を止める） | `INVALID foreign-gate-error after`・exit 5（系列を止める） |
 
-- `gate.txt` の 1 語目は既存の PASS／TIMEOUT／INVALID だけを使う。集計（`aggregate_diag.py`・`aggregate_4151.py`・`aggregate_4154.py` 等）は
-  既存のとおり PASS 以外の round を正式系列から外す。差し替え・再実行・除外はしない。
+- **他ジョブと load1 を同じループで待つ理由**: 各 run_round.sh は中で load1 < 3.0 を最大 30 分待つ。開始前の確認を通ったあとにこの待ちが入ると、
+  その間に他ジョブが始まって終われば、開始前にも終了後にも見えない（PR #4227 の Codex の指摘）。ラッパーが先に load1 もそろえて待つので、
+  run_round.sh の load1 ゲートはふつう 1 回目で通る。
+- **隙間の検査**: run_round.sh の `gate.txt` が PASS なら、その行の末尾の UTC（load1 ゲートを通った時刻）と開始前の確認の時刻を比べる。
+  60 秒を超えて後・1 秒を超えて前・時刻が読めない場合は、開始前の確認と計測の開始の間に隙間があったとみなし、`INVALID foreign-gap` にする
+  （round 本体が 0 で終わっていれば exit 4 で次の round へ）。2026-11-10 の #4153 の試走では 5 round とも差 0 秒。
+- `gate.txt` の 1 語目は既存の PASS／TIMEOUT／INVALID だけを使う。差し替え・再実行・除外はしない。集計の扱いは各 issue の既存のまま:
+  - #4153（`aggregate_diag.py`・`attrib_4153.py`）・#4154（`aggregate_4154.py`・`aggregate_diag.py`）は、TIMEOUT・INVALID の round を正式系列から外して partial で集計する。
+  - #4151（`aggregate_4151.py`）は、TIMEOUT は partial で集計するが、INVALID の round があると hard で止まる（旧 RULE のまま。`aggregate_4151.py` の self-test もこの形）。
+    #4151 で INVALID の round が出たら、集計せずに所有者へ報告する。
+  - 2026-11-10 に旧系列のコピーと #4153 の試走で、round 3 を `INVALID foreign-after`・round 2 を `TIMEOUT foreign-job before`（`gate.txt` だけ）にした形を、
+    各 issue の変換・集計に通して確かめた（rc と stderr だけを見た）。
 - 各回の結果は `<env>/foreign-gate/r<i>-before-a<k>.txt`・`r<i>-after.txt`（マスク済み: ユーザー名・$HOME・ホスト名を置換し、
   自分以外の uid は数値のまま。プロセスは basename だけでパスは書かない）。
 
@@ -63,7 +73,8 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
   （`drive.status` に `STOP round <i>`。想定外として報告し、止まった系列は集計しない）。差し替え・再実行はしない。
   - ラッパーが 0
   - `gate.txt` の 1 語目が TIMEOUT（開始前の他ジョブ・load1）
-  - ラッパーが 4 で、`gate.txt` の 1 行目が `INVALID foreign-after`（round 本体は正常に終わり、終了後に他ジョブ。所有者判断「後で見つかったら、その round は INVALID」）
+  - ラッパーが 4 で、`gate.txt` の 1 行目が `INVALID foreign-after`（round 本体は正常に終わり、終了後に他ジョブ。所有者判断「後で見つかったら、その round は INVALID」）か
+    `INVALID foreign-gap`（下の隙間の検査）
   - INVALID・TIMEOUT の round は集計で正式系列から外れ、系列は partial・確度低になる（既存の扱い）。
 
 ## ファイル

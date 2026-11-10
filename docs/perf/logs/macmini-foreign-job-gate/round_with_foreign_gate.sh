@@ -7,9 +7,15 @@
 # 呼び出し元: 計測ドライバ（hw-lock を取った側）が round ごとに
 #   bash round_with_foreign_gate.sh <run_round.sh> <round 番号> <round ディレクトリ> <env ディレクトリ>
 #   と呼ぶ。run_round.sh へ渡す環境変数（HW_LOCK_HELD=1・EXPECT_SHA 等）はそのまま引き継ぐ。
-# 開始前（before）: 30 秒間隔で最大 60 回（30 分）確かめ、CLEAN になったら run_round.sh を始める。各回の結果を
-#   <env>/foreign-gate/r<i>-before-a<k>.txt に残す。60 回とも FOREIGN なら run_round.sh を呼ばず、gate.txt を
-#   `TIMEOUT foreign-job before <UTC>` にして exit 1（load1 ゲートの TIMEOUT と同じ扱い。差し替え・再実行はしない）。
+# 開始前（before）: 30 秒間隔で最大 60 回（30 分）確かめ、他ジョブが CLEAN かつ load1 < 3.0（run_round.sh の load1 ゲートと
+#   同じ閾値・同じ読み方）になったら run_round.sh を始める。両方を同じループで待つのは、run_round.sh の中の load1 の待ち
+#   （最大 30 分）の間に他ジョブが始まって終わる隙間を作らないため。各回の結果を <env>/foreign-gate/r<i>-before-a<k>.txt に残し、
+#   その回の load1 を同じファイルの末尾に `wrapper_load1 <値>` で足す。60 回とも条件がそろわなければ run_round.sh を呼ばず、
+#   gate.txt を `TIMEOUT foreign-job before <UTC>`（最後の回が FOREIGN）か `TIMEOUT load1 before <UTC>`（最後の回が CLEAN で
+#   load1 が 3.0 以上・数値でない）にして exit 1（load1 ゲートの TIMEOUT と同じ扱い。差し替え・再実行はしない）。
+# 隙間の検査: run_round.sh の gate.txt が PASS なら、その末尾の UTC（load1 ゲートを通った時刻）と開始前の確認の時刻の差を見る。
+#   差が 60 秒を超える・負（1 秒の丸めを超えて前）・時刻が読めない場合は、開始前の確認と計測の開始の間に隙間があったとみなし、
+#   終了後の FOREIGN と同じく `INVALID foreign-gap` にする（2026-11-10 の #4153 の試走では 5 round とも差 0 秒）。
 # 終了後（after）: run_round.sh が返った直後に 1 回確かめ、<env>/foreign-gate/r<i>-after.txt に残す。FOREIGN なら
 #   gate.txt の 1 語目が PASS の round を `INVALID foreign-after ...` に書き換え（元の行は "# was: " で残す。#4153 の
 #   run_round.sh の EXIT trap と同じ形）。round 本体が 0 で終わり PASS だった round なら exit 4（その round だけ INVALID。
@@ -35,24 +41,34 @@ FG="${ENVD}/foreign-gate"
 mkdir -p "${FG}" || exit 2
 utc() { date -u +%FT%TZ; }
 
-# ---- 開始前
+load1_ok() {  # $1=load1。数値で 3.0 未満なら真（run_round.sh の load1 ゲートと同じ閾値）
+  case "$1" in ''|*[!0-9.]*) return 1;; esac
+  awk -v x="$1" 'BEGIN{exit !(x < 3.0)}'
+}
+
+# ---- 開始前（他ジョブと load1 を同じループで待つ）
 k=1
 while :; do
-  python3 -I "${GATE}" --phase before --out "${FG}/r${RN}-before-a${k}.txt"
+  f="${FG}/r${RN}-before-a${k}.txt"
+  python3 -I "${GATE}" --phase before --out "${f}"
   g=$?
-  if [ "${g}" -eq 0 ]; then
-    echo "foreign-gate before CLEAN attempt=${k} $(utc)"
-    break
-  fi
-  if [ "${g}" -ne 1 ]; then
+  if [ "${g}" -ne 0 ] && [ "${g}" -ne 1 ]; then
     mkdir -p "${RD}" && echo "INVALID foreign-gate-error before rc=${g} $(utc)" > "${RD}/gate.txt"
     echo "foreign-gate before ERROR rc=${g}"; exit 1
   fi
-  if [ "${k}" -ge 60 ]; then
-    mkdir -p "${RD}" && echo "TIMEOUT foreign-job before $(utc)" > "${RD}/gate.txt"
-    echo "foreign-gate before TIMEOUT attempts=${k}"; exit 1
+  l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
+  echo "wrapper_load1 ${l1:-none}" >> "${f}"
+  if [ "${g}" -eq 0 ] && load1_ok "${l1}"; then
+    t_clean=$(date +%s)
+    echo "foreign-gate before CLEAN load1=${l1} attempt=${k} $(utc)"
+    break
   fi
-  echo "foreign-gate before FOREIGN attempt=${k} $(utc)（30 秒後に再確認）"
+  why="foreign-job"; [ "${g}" -eq 0 ] && why="load1"
+  if [ "${k}" -ge 60 ]; then
+    mkdir -p "${RD}" && echo "TIMEOUT ${why} before $(utc)" > "${RD}/gate.txt"
+    echo "foreign-gate before TIMEOUT ${why} attempts=${k}"; exit 1
+  fi
+  echo "foreign-gate before wait ${why} load1=${l1:-none} attempt=${k} $(utc)（30 秒後に再確認）"
   k=$((k + 1))
   sleep 30
 done
@@ -64,22 +80,33 @@ rc=$?
 # ---- 終了後
 python3 -I "${GATE}" --phase after --out "${FG}/r${RN}-after.txt"
 g=$?
-if [ "${g}" -eq 0 ]; then
+first=""; [ -f "${RD}/gate.txt" ] && first=$(awk 'NR==1{print $1}' "${RD}/gate.txt")
+why=""
+if [ "${g}" -eq 1 ]; then why="foreign-after"
+elif [ "${g}" -ne 0 ]; then why="foreign-gate-error after rc=${g}"
+elif [ "${first}" = "PASS" ]; then
+  # 隙間の検査: PASS の行の末尾の UTC と開始前の確認の時刻の差（秒）
+  ts=$(awk 'NR==1{print $NF}' "${RD}/gate.txt")
+  t_pass=$(python3 -I -c 'import calendar, sys, time; print(calendar.timegm(time.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")))' "${ts}" 2>/dev/null)
+  case "${t_pass}" in
+    ''|*[!0-9]*) why="foreign-gap pass-time-unreadable" ;;
+    *) d=$((t_pass - t_clean)); { [ "${d}" -gt 60 ] || [ "${d}" -lt -1 ]; } && why="foreign-gap ${d}s" ;;
+  esac
+fi
+if [ -z "${why}" ]; then
   echo "foreign-gate after CLEAN $(utc)"
   exit "${rc}"
 fi
-why="foreign-after"; [ "${g}" -ne 1 ] && why="foreign-gate-error after rc=${g}"
-first=""; [ -f "${RD}/gate.txt" ] && first=$(awk 'NR==1{print $1}' "${RD}/gate.txt")
 if [ ! -f "${RD}/gate.txt" ]; then
   mkdir -p "${RD}" && echo "INVALID ${why} $(utc)" > "${RD}/gate.txt"
 elif [ "${first}" = "PASS" ]; then
   { echo "INVALID ${why} $(utc)"; sed 's/^/# was: /' "${RD}/gate.txt"; } > "${RD}/.gate.txt.tmp" \
     && mv "${RD}/.gate.txt.tmp" "${RD}/gate.txt"
 fi
-# 続けてよいのは「round 本体が 0 で終わり PASS だった round に、終了後ゲートが FOREIGN を返した」場合だけ（exit 4）。
+# 続けてよいのは「round 本体が 0 で終わり PASS だった round に、終了後ゲートが FOREIGN を返した、または隙間が見つかった」場合だけ（exit 4）。
 # その round だけを INVALID にし、次の round は開始前ゲートで他ジョブが去るのを待つ（所有者判断「後で見つかったら、その round は INVALID」）。
 # round 本体の失敗・gate.txt が無い（precheck で止まった）・ゲート自身の失敗は exit 5 で系列を止める（想定外として報告）。
-if [ "${g}" -eq 1 ] && [ "${rc}" -eq 0 ] && [ "${first}" = "PASS" ]; then
+if [ "${g}" -le 1 ] && [ "${rc}" -eq 0 ] && [ "${first}" = "PASS" ]; then
   echo "foreign-gate after ${why}（round ${RN} は INVALID・次の round へ）"
   exit 4
 fi
