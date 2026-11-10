@@ -1,0 +1,181 @@
+RULE fixed-at-utc 2026-11-10T03:11:11Z
+（計測前に単独コミットして固定する。計測後に緩めない。雛形: 本ファイル・#4151。親の雛形は docs/perf/logs/diag-0140-template/RULE.template.txt）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_4151.py は止まる）
+
+1. 目的・対象セル
+  #4151 で、スコアボード 0.14.0 の M-CPU-G256（<metal-node>・Mac mini・CPU gemm N=256）の固定費を区間に分けて測り、
+  現分類「ハードの上限」が成り立つかを判定する。SME は OFF（0.14.0 の本番構成）と ON（計測専用ツリー）の両方を測る。
+  現分類は docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/unreached_0140.tsv の値（PARAMS の prev_class に転記）。
+  変えないもの: tolerance・閾値・依存・本体コード・unreached_0140.tsv・loss-attribution-matrix.md（分類の反映は Phase 6）。
+
+2. 対象 tree
+  7e0d01debd99a2ec9afe00f305123cf05f94b8e0（PR-1 #4192 のマージコミット）の git archive。PARAMS の tree_sha に書く。
+  前提ゲート: git diff --name-only v0.14.0 <tree_sha> -- crates/backend-cpu/src の一覧を記録し、
+  差が許されるのは、数値・実行経路を変えない診断 API の追加だけ（#4192 の crates/backend-cpu/src/gemm_blis/mod.rs の
+  sme_production_enabled() 追加と crates/backend-cpu/src/lib.rs の再エクスポート）。この 2 ファイル以外に差が 1 件でもあれば停止する。
+  2 ファイルの差分は目視で「診断 API の追加のみ」と確認し、差分全文を記録する（数値・分岐を変える変更が混じれば停止）。
+  backend-cpu 以外の差（git diff --name-only v0.14.0 <tree_sha> -- 'crates/*/src/*' のうち crates/backend-cpu/src 以外）は
+  一覧を記録するだけで停止しない。#4192 の時点で autodiff と tensor-core の create_graph 系などに差があり、どれも CPU GEMM の実装ファイルではない。
+  記録（2026-11-10・所有者判断「雛形を直してから固定」〈#4210〉に従い、上の前提ゲートで確認した）:
+  (a) git diff --name-only v0.14.0 <tree_sha> -- crates/backend-cpu/src の一覧（許される 2 ファイルだけ。ゲート通過）:
+    crates/backend-cpu/src/gemm_blis/mod.rs
+    crates/backend-cpu/src/lib.rs
+  差分全文（目視で「診断 API sme_production_enabled() の追加と再エクスポートのみ。数値・分岐の変更なし」と確認）:
+    diff --git a/crates/backend-cpu/src/gemm_blis/mod.rs b/crates/backend-cpu/src/gemm_blis/mod.rs
+    index 5a766882e..cca0b353d 100644
+    --- a/crates/backend-cpu/src/gemm_blis/mod.rs
+    +++ b/crates/backend-cpu/src/gemm_blis/mod.rs
+    @@ -3594,6 +3594,22 @@ fn sme_kernel_for_shape(m_total: usize, n: usize, k: usize) -> Option<microkerne
+         }
+     }
+     
+    +/// 本番 SME ゲート [`SME_PRODUCTION_ENABLED`] の現在値を返す診断用の読み出し口（イシュー #4151）。
+    +/// `sme_report().kernel_enabled` は OS／SVL によるハード能力であり本番有効フラグではないため、
+    +/// 計測 example（`cpu_gemm_n256_fixed_cost_4151`）が OFF／ON 腕のビルド取り違えを検証する用途に分ける。
+    +/// 非 aarch64 では SME 経路が存在しないため常に `false`。
+    +#[doc(hidden)]
+    +pub fn sme_production_enabled() -> bool {
+    +    #[cfg(target_arch = "aarch64")]
+    +    {
+    +        SME_PRODUCTION_ENABLED
+    +    }
+    +    #[cfg(not(target_arch = "aarch64"))]
+    +    {
+    +        false
+    +    }
+    +}
+    +
+     /// m=64 専用 4 タイル SME カーネル（イシュー #3235）の本番ゲート。**既定 OFF**。
+     ///
+     /// 設計の正は `docs/perf/cpu-gemm-sme-thin-m64-decision.md`（#3234 判定 (A)）。既定 ON への反転は
+    diff --git a/crates/backend-cpu/src/lib.rs b/crates/backend-cpu/src/lib.rs
+    index 17200c2b4..b1dbfbf09 100644
+    --- a/crates/backend-cpu/src/lib.rs
+    +++ b/crates/backend-cpu/src/lib.rs
+    @@ -243,7 +243,7 @@ pub use gemm::{
+     };
+     pub use gemm_blis::{
+         gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt,
+    -    gemm_blis_parallel_tn,
+    +    gemm_blis_parallel_tn, sme_production_enabled,
+     };
+     pub use layer_norm::{LayerNormError, run_layer_norm_f32};
+     pub use linalg::LinalgError;
+  (b) backend-cpu 以外の差（記録のみ・停止しない。いずれも CPU GEMM の実装ファイルではない）:
+    crates/autodiff/src/create_graph.rs
+    crates/autodiff/src/create_graph/cumulative_b.rs
+    crates/autodiff/src/create_graph/judge.rs
+    crates/autodiff/src/create_graph/lin.rs
+    crates/autodiff/src/create_graph/lin_libm_tests.rs
+    crates/autodiff/src/create_graph/loss_binary_margin.rs
+    crates/autodiff/src/create_graph/loss_class.rs
+    crates/autodiff/src/create_graph/loss_class_tests.rs
+    crates/autodiff/src/create_graph/loss_regression.rs
+    crates/autodiff/src/create_graph/norm_reparam.rs
+    crates/autodiff/src/create_graph/scatter_reduce_prod.rs
+    crates/tensor-core/src/cumulative.rs
+    crates/tensor-core/src/weight_reparam.rs
+  P-TREE: 4 腕を送信側で作り diff -rq で比べた。off-base との差は on-base が gemm_blis/mod.rs、off-timed／on-timed が
+  gemm_blis/mod.rs・gemm_blis/diag_fixed_cost_timer.rs（新規）・examples/cpu_gemm_n256_fixed_cost_4151.rs だけ（patch の対象ファイルのみ）。
+  diag_timing.patch の example への 2 hunk は 58 行のオフセットで当たる（fuzz なし。BSD patch が残す .orig は削除してから指紋を取った）。
+  腕ごとの指紋（記録用。PARAMS の tree_fingerprint は off-base）: off-base 3a86261b98520d8f242dd88f59324dd7519beb21a312d466e781ebcbc2aba3e8
+    on-base a9f40b9b9a32b07bf9381c5df944f8e2bb8265daa6210ebf137cbccd3a416fe8
+    off-timed d4f6c8ec29af25a5d1927aac0642a48a4cba3c086db1925242f1342aa0c9b9cc
+    on-timed 6fe1b9439ead279be2de7306f6a35d9c4270fefa0b996161f2815e600f93076a
+  4 腕とも送信側とノード側で一致し、ノード側のビルド（example・off-base の --lib --no-run・bench-fandhe off／on）の後も変わらない。
+  （旧雛形の 'crates/*/src' は git の pathspec では何にも一致せず常に空になるため、ゲートとして機能していなかった。#4151 の Mac mini セッションで修正）
+  tree_fingerprint は `python3 -I aggregate_4151.py --fingerprint <tree-dir>` の値
+  （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を
+  C ロケール順に並べた全体の SHA-256。target/ と .git は除外。シンボリックリンクは対象文字列をハッシュ）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。
+  cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+
+3. 腕と tree ゲート
+  4 腕（example cpu_gemm_n256_fixed_cost_4151 のラベル）:
+    off-base  = clean archive（SME は const false = 0.14.0 の本番構成）
+    on-base   = off-base + on-arm.patch（SME_PRODUCTION_ENABLED を true にする 1 行）
+    off-timed = off-base + diag_timing.patch
+    on-timed  = off-base + on-arm.patch + diag_timing.patch
+  patch の sha256 は patch_sha256.txt と一致すること。ツリー間で中身が違うファイルが patch の対象ファイルだけであること（P-TREE）。
+  4 腕すべてで example の bits_hash が一致すること（不一致は FAIL で停止）。on 腕（on-base／on-timed）は sme_production_enabled == true かつ sme_kernel_enabled == true（どちらか違えば集計を拒否・中止）。
+  ON ツリーでは cargo test --lib を走らせない（ドリフト検出テストが作りの上で落ちる）。timed ツリーは determinism_inventory が通らない（main へ入れない理由）。
+
+4. 計測手順
+  ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す。
+    Mac mini: hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。ビルドはゲートの前に済ませ、計測中に並走させない。
+  ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  腕の順序は奇数ラウンドと偶数ラウンドで入れ替える（run_round.sh）。RAYON_NUM_THREADS は設定しない。
+  系列（example）: hot（連続）・gap（各呼び出しの前に gap_us だけスピン待ち。worker が寝た状態からの起床を含める）・
+  serial_t1（参照）・forkjoin_floor_hot／gap（fork-join の床。job 数は 2×スレッド数）・cold_first_call（記録のみ。計測窓の外）。
+  warmup 50・測定 500。bench-fandhe gemm 256 の fresh と reuse（スコアボードと同じ窓）、PyTorch の bench_py.py gemm 256 fresh と
+  torch_cpu_mlp_diag.py の mm_pure を同じラウンドで取る。sme_microcall_fixed_cost_probe は off-base ツリーだけで実行する。
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない。式が計測できないなら RULE を改訂して式を外す）。
+  保存物: round{i}/{gate.txt, values.tsv, raw/}・env/。values.tsv は quantity／value の 2 列（W_off W_on Wf_off Wf_on O K_opp は ms、
+  c_sme_kc0_ns c_sme_intercept_ns は ns）。変換手順は計測する issue が README に残す。
+
+5. 区間の操作的定義（時計はすべて wall。diag_timing.patch が計る）
+  pre        gemm_blis_parallel_with_transpose の入口から par_iter_mut の直前まで（grid は入口から job_grid 直後まで、split は grid から split_c_into_jobs 直後まで）
+  fork_wake  par_iter_mut の呼び出しから各 worker の最初の job が始まるまで（min・max）
+  stage_in／stage_out  c_local の確保と copy-in／copy-out（job 合計）
+  alloc      PanelBuffers::new（job 合計）
+  pack_b／pack_a  B pack ループ／A pack ループ（job 合計）
+  kernel     jr／ir ループ全体（端タイルのコピーを含む。job 合計）
+  join       最後の job が終わってから par_iter_mut が戻るまで
+  region_wall par_iter_mut の呼び出しから戻りまで
+  導出: kernel_ideal = Σkernel ÷ P_used・kernel_crit = max_worker Σkernel・imbalance = kernel_crit − kernel_ideal・
+        F_drv = G − kernel_ideal（G は base 腕の hot 中央値）・perturbation = (timed の G − base の G) ÷ base の G。
+  smstart／smstop は新しい asm! なしでは切り出せない。n_calls × c_sme ÷ P_used の上限として別欄に出す（kernel の内側。F_drv には足さない）。
+
+6. 診断式と判定規則（単位 ms。比はラウンド別の値の中央値。判定は OFF 腕で行い、ON 腕は同じ式の値を記録するだけで分類を動かさない）
+  W = bench-fandhe gemm 256 の reuse 窓、Wf = 同 fresh 窓、O = PyTorch fresh 窓、K_opp = PyTorch の mm_pure。
+  F2     = O ÷ Wf
+  F1     = O ÷ (W − G + K_opp)
+  F1_drv = O ÷ (W − F_drv)
+  分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
+  (1) F2 が reach_threshold 以上 → 「計測窓の定義」。
+  (2) そうでなく F1 が reach_threshold 以上なら GEMM 呼び出しの中を分ける。
+      F1_drv が reach_threshold 以上 → 「ハードの上限」は成り立たない。「自分たちの制約」とし、理由は「GEMM 駆動部の固定費（区間別の数字）」。
+        根拠: 完全自作コア（REQ-1）で自前の駆動部を持つことによる固定費であり、閉源ライブラリやハードが決める部分ではない。
+      そうでなければ → kernel_owner の宣言どおり（hardware なら「ハードの上限」。閉源 Accelerate 相当のカーネル速度で決まる）。
+      この解釈は測る前に宣言し、事後に動かさない。
+  (3) それ以外 → 「分類保留」。理由は「GEMM の外の区間が主因。別の診断へ」。
+  確度: 高 = 全ラウンド PASS（status=formal）かつ判定に使った式のラウンド別の値がすべて閾値の同じ側（境界ちょうどはまたぐ扱い）かつ
+        |perturbation| が perturbation_max 以下。低 = それ以外（理由欄の先頭に「確度低」）。
+  ドリフト: 観測比 O ÷ W の中央値が scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。
+  停止条件: 区間の和（job 合計 ÷ P_used）が region_wall を sum_tolerance 超えて超える・d_n_calls が手計算の下限
+  （ceil(dim/MR)×ceil(dim/NR)×ceil(dim/kc)）を下回る・d_regions が calls と一致しない。
+
+7. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md）。注意: 上記決定記録は #4142 で「案・所有者承認待ち」。
+  承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映し、旧版も残す。
+  （固定時点: #4142 は 2026-11-10 に案 A〈NB-RANGE5 を定義を変えずに採用〉で承認済み。#4209）
+
+8. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパスを書かない。Mac mini は <metal-node> と書く。
+  集計は同梱の aggregate_4151.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_4151.py を変更すると aggregate_script_sha256 が不一致になり集計は止まる。
+
+9. 限界
+  plain GEMM の入口で、bias_act 融合経路ではない。kernel は端タイルのコピーを含む。E コアと P コアは分けられない
+  （macOS に正式な pinning の手段がない。#3175 §5）。smstart／smstop は上限値。gap_us が実ベンチ窓の直列区間の起床コストを
+  再現できているかは未検証。
+
+## PARAMS
+fixed-at-utc: 2026-11-10T03:11:11Z
+issue: 4151
+rounds: 5
+tree_sha: 7e0d01debd99a2ec9afe00f305123cf05f94b8e0
+tree_fingerprint: 3a86261b98520d8f242dd88f59324dd7519beb21a312d466e781ebcbc2aba3e8
+aggregate_script_sha256: 717f8f0d9413fa97593397a81414423743acfc5120adc740e854cf7a842b30f8
+reach_threshold: 1.00
+noise_band: NB-RANGE5
+cell: M-CPU-G256
+scoreboard_ratio: 0.69
+prev_class: ハードの上限
+kernel_owner: hardware
+gap_us: 50
+kc: 256
+perturbation_max: 0.10
+sum_tolerance: 0.15
+dim: 256
