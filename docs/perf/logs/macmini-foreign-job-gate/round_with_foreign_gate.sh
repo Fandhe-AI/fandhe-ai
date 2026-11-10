@@ -12,7 +12,9 @@
 #   （最大 30 分）の間に他ジョブが始まって終わる隙間を作らないため。各回の結果を <env>/foreign-gate/r<i>-before-a<k>.txt に残し、
 #   その回の load1 を同じファイルの末尾に `wrapper_load1 <値>` で足す。60 回とも条件がそろわなければ run_round.sh を呼ばず、
 #   gate.txt を `TIMEOUT foreign-job before <UTC>`（最後の回が FOREIGN）か `TIMEOUT load1 before <UTC>`（最後の回が CLEAN で
-#   load1 が 3.0 以上・数値でない）にして exit 1（load1 ゲートの TIMEOUT と同じ扱い。差し替え・再実行はしない）。
+#   load1 が 3.0 以上）にして exit 1（load1 ゲートの TIMEOUT と同じ扱い。差し替え・再実行はしない）。load1 の読み方は run_round.sh と同じで、
+#   sysctl の失敗・数値でない値は待たずに `INVALID load1-sysctl-failed before`／`INVALID load1-not-numeric before` にして exit 1
+#   （run_round.sh の INVALID sysctl-failed／load1-not-numeric と同じく系列を止める）。
 # 隙間の検査: run_round.sh の gate.txt が PASS なら、その末尾の UTC（load1 ゲートを通った時刻）と開始前の確認の時刻の差を見る。
 #   差が 60 秒を超える・負（1 秒の丸めを超えて前）・時刻が読めない場合は、開始前の確認と計測の開始の間に隙間があったとみなし、
 #   終了後の FOREIGN と同じく `INVALID foreign-gap` にする（2026-11-10 の #4153 の試走では 5 round とも差 0 秒）。
@@ -41,9 +43,14 @@ FG="${ENVD}/foreign-gate"
 mkdir -p "${FG}" || exit 2
 utc() { date -u +%FT%TZ; }
 
-load1_ok() {  # $1=load1。数値で 3.0 未満なら真（run_round.sh の load1 ゲートと同じ閾値）
-  case "$1" in ''|*[!0-9.]*) return 1;; esac
-  awk -v x="$1" 'BEGIN{exit !(x < 3.0)}'
+# load1 の読み方は #4151・#4154 の run_round.sh の gate() と同じ（#4153 は awk '{print $2}' で同じ値を読む）。
+# sysctl の失敗・数値でない値は待たずに INVALID で止める（run_round.sh の INVALID sysctl-failed／load1-not-numeric と同じ fail-closed）。
+read_load1() {  # 成功なら l1 に load1 を入れて 0。失敗なら why_bad に理由を入れて 1
+  local raw
+  if ! raw=$(sysctl -n vm.loadavg); then l1=""; why_bad="load1-sysctl-failed"; return 1; fi
+  l1=$(printf '%s' "${raw}" | tr -d '{}' | awk '{print $1}')
+  if ! printf '%s' "${l1}" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then why_bad="load1-not-numeric"; return 1; fi
+  return 0
 }
 
 # ---- 開始前（他ジョブと load1 を同じループで待つ）
@@ -56,9 +63,13 @@ while :; do
     mkdir -p "${RD}" && echo "INVALID foreign-gate-error before rc=${g} $(utc)" > "${RD}/gate.txt"
     echo "foreign-gate before ERROR rc=${g}"; exit 1
   fi
-  l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
-  echo "wrapper_load1 ${l1:-none}" >> "${f}"
-  if [ "${g}" -eq 0 ] && load1_ok "${l1}"; then
+  if ! read_load1; then
+    echo "wrapper_load1 ${why_bad}" >> "${f}"
+    mkdir -p "${RD}" && echo "INVALID ${why_bad} before $(utc)" > "${RD}/gate.txt"
+    echo "foreign-gate before ${why_bad}（系列を止める）"; exit 1
+  fi
+  echo "wrapper_load1 ${l1}" >> "${f}"
+  if [ "${g}" -eq 0 ] && awk -v x="${l1}" 'BEGIN{exit !(x < 3.0)}'; then
     t_clean=$(date +%s)
     echo "foreign-gate before CLEAN load1=${l1} attempt=${k} $(utc)"
     break

@@ -38,12 +38,10 @@ SS="${SER}/env/series-start.txt"
 t0=$(date +%s); echo "lock-acquired $(utc)" > "${SS}"
 k=1; reached=no
 while [ "${k}" -le 40 ]; do
-  l1=$(sysctl -n vm.loadavg | awk '{print $2}')
+  # 読み方は #4151・#4154 の run_round.sh の gate() と同じ（#4153 は awk '{print $2}' で同じ値）。取れない・数値でなければ届いたとみなさない（round ごとのラッパーが INVALID にして止める）
+  l1=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1}')
   echo "sample ${k} $(utc) load1=${l1}" >> "${SS}"
-  case "${l1}" in  # 数値でなければ届いたとみなさない（round ごとのゲートが INVALID にする）
-    ''|*[!0-9.]*) ;;
-    *) if awk -v v="${l1}" 'BEGIN{exit !(v+0 < 1.5)}'; then reached=yes; break; fi ;;
-  esac
+  if printf '%s' "${l1}" | grep -Eq '^[0-9]+(\.[0-9]+)?$' && awk -v v="${l1}" 'BEGIN{exit !(v < 1.5)}'; then reached=yes; break; fi
   k=$((k + 1)); [ "${k}" -le 40 ] && sleep 30
 done
 echo "series-start $(utc) waited_s=$(( $(date +%s) - t0 )) load1=${l1} reached_below_1.5=${reached}" >> "${SS}"

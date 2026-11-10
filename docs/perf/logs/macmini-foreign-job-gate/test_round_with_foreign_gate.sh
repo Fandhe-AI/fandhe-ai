@@ -34,6 +34,7 @@ printf '#!/bin/sh\nexit 0\n' > "${T}/bin/sleep"; chmod +x "${T}/bin/sleep"
 cat > "${T}/bin/sysctl" <<'STUB'
 #!/bin/sh
 v=$(head -n 1 "${LOADS}")
+[ "${v}" = "FAIL" ] && exit 1
 if [ "$(wc -l < "${LOADS}")" -gt 1 ]; then tail -n +2 "${LOADS}" > "${LOADS}.n" && mv "${LOADS}.n" "${LOADS}"; fi
 echo "{ ${v} ${v} ${v} }"
 STUB
@@ -69,7 +70,10 @@ case_ fail-and-foreign "0 1" 1 5 INVALID 1
 FAKE_NOGATE=1 case_ nogate-foreign "0 1" 1 5 INVALID 0
 FAKE_NOGATE=1 case_ nogate-clean "0 0" 1 1 none 0
 CASE_LOADS="3.50 1.00" case_ load-wait "0 0 0" 0 0 PASS 0
-CASE_LOADS="x 1.00" case_ load-nonnum "0 0 0" 0 0 PASS 0
+CASE_LOADS="x 1.00" case_ load-nonnum "0 0 0" 0 1 INVALID 0
+CASE_LOADS=". 1.00" case_ load-dot "0 0 0" 0 1 INVALID 0
+CASE_LOADS="1.2.3 1.00" case_ load-twodots "0 0 0" 0 1 INVALID 0
+CASE_LOADS="FAIL 1.00" case_ load-sysfail "0 0 0" 0 1 INVALID 0
 CASE_LOADS="3.50" case_ load-timeout "$(printf '0 %.0s' $(seq 1 60))" 0 1 TIMEOUT 0
 FAKE_PASS_SHIFT=120 case_ gap-late "0 0" 0 4 INVALID 1
 FAKE_PASS_SHIFT=-120 case_ gap-early "0 0" 0 4 INVALID 1
@@ -77,6 +81,8 @@ FAKE_PASS_SHIFT=30 case_ gap-within "0 0" 0 0 PASS 0
 FAKE_PASS_TS=garbage case_ gap-unreadable "0 0" 0 4 INVALID 1
 gl() { head -n 1 "${T}/s-$1/round1/gate.txt" | awk '{print $1, $2}'; }
 [ "$(gl load-timeout)" = "TIMEOUT load1" ] || { echo "NG load-timeout: TIMEOUT の理由が load1 でない"; fail=1; }
+[ "$(gl load-nonnum)" = "INVALID load1-not-numeric" ] || { echo "NG load-nonnum: 理由が load1-not-numeric でない"; fail=1; }
+[ "$(gl load-sysfail)" = "INVALID load1-sysctl-failed" ] || { echo "NG load-sysfail: 理由が load1-sysctl-failed でない"; fail=1; }
 [ "$(gl gap-late)" = "INVALID foreign-gap" ] || { echo "NG gap-late: foreign-gap でない"; fail=1; }
 [ "$(find "${T}/s-load-wait/env/foreign-gate" -name 'r1-before-a*' | wc -l | tr -d ' ')" = "2" ] || { echo "NG load-wait: 待った回の記録が 2 件でない"; fail=1; }
 grep -q '^wrapper_load1 3.50$' "${T}/s-load-wait/env/foreign-gate/r1-before-a1.txt" || { echo "NG load-wait: load1 を記録していない"; fail=1; }
@@ -125,6 +131,11 @@ dcase afterforeign "0 1 0 0" "1.00" 2 0
 if [ "$(dfirst afterforeign 1)" != "INVALID" ] || [ "$(dfirst afterforeign 2)" != "PASS" ] || ! grep -q '^all done' "${T}/h-afterforeign/ser/drive.status"; then
   echo "NG drive afterforeign: 終了後 FOREIGN の round を INVALID にして次へ進まない"; fail=1
 fi
+dcase loadbad "0 0" "1.00 x" 2 1
+if [ "$(head -n 1 "${T}/h-loadbad/ser/round1/gate.txt" 2>/dev/null | awk '{print $1, $2}')" != "INVALID load1-not-numeric" ] \
+   || [ -e "${T}/h-loadbad/ser/round2" ] || ! grep -q '^STOP round 1' "${T}/h-loadbad/ser/drive.status"; then
+  echo "NG drive loadbad: 数値でない load1 で系列を止めない"; fail=1
+fi
 dcase aftererror "0 2 0 0" "1.00" 2 1
 if [ "$(dfirst aftererror 1)" != "INVALID" ] || [ -e "${T}/h-aftererror/ser/round2" ] || ! grep -q '^STOP round 1' "${T}/h-aftererror/ser/drive.status"; then
   echo "NG drive aftererror: 終了後ゲートの失敗で止まらない"; fail=1
@@ -145,6 +156,8 @@ if [ "$(grep -c '^sample ' "${T}/h-noreach/ser/env/series-start.txt")" != "40" ]
   echo "NG drive noreach: 40 回で始めない"; fail=1
 fi
 dcase nonnum "0 0" "x 1.00" 1 0
+dcase dot "0 0" ". 1.00" 1 0
+grep -q 'load1=1.00 reached_below_1.5=yes' "${T}/h-dot/ser/env/series-start.txt" || { echo "NG drive dot: 「.」を届いたとみなした"; fail=1; }
 grep -q 'load1=1.00 reached_below_1.5=yes' "${T}/h-nonnum/ser/env/series-start.txt" || { echo "NG drive nonnum: 数値でない load1 を届いたとみなした"; fail=1; }
 mkdir -p "${T}/h-busy/work/.fandhe-hw-lock"
 dcase busy "0 0" "1.00" 1 3

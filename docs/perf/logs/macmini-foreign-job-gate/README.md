@@ -43,12 +43,12 @@ ps（`ps -A -o pid=,ppid=,uid=,pcpu=,comm=`）と GPU 使用率（`ioreg -r -d 1
 
 | 時点 | CLEAN | FOREIGN | ゲート自身の失敗 |
 |---|---|---|---|
-| 開始前 | load1 < 3.0 なら run_round.sh を始める | 30 秒間隔で最大 60 回（30 分）待つ。CLEAN でも load1 が 3.0 以上（run_round.sh の load1 ゲートと同じ閾値）なら同じく待つ。60 回とも条件がそろわなければ run_round.sh を呼ばず `gate.txt` を `TIMEOUT foreign-job before <UTC>`（最後の回が FOREIGN）か `TIMEOUT load1 before <UTC>`（exit 1） | `gate.txt` を `INVALID foreign-gate-error before`（exit 1） |
+| 開始前 | load1 < 3.0 なら run_round.sh を始める | 30 秒間隔で最大 60 回（30 分）待つ。CLEAN でも load1 が 3.0 以上（run_round.sh の load1 ゲートと同じ閾値）なら同じく待つ。60 回とも条件がそろわなければ run_round.sh を呼ばず `gate.txt` を `TIMEOUT foreign-job before <UTC>`（最後の回が FOREIGN）か `TIMEOUT load1 before <UTC>`（exit 1） | `gate.txt` を `INVALID foreign-gate-error before`（exit 1）。load1 が読めない（sysctl の失敗・数値でない）ときは待たずに `INVALID load1-sysctl-failed before`／`INVALID load1-not-numeric before`（exit 1・系列を止める。run_round.sh の同名の INVALID と同じ） |
 | 終了後 | 下の隙間の検査を通れば run_round.sh の終了コードを返す | round 本体が 0 で終わり `gate.txt` の 1 語目が PASS なら、`INVALID foreign-after <UTC>` に書き換え（元の行は `# was: ` で残す）、exit 4。その round だけを INVALID にして系列は次の round へ進む（次の round は開始前ゲートで他ジョブが去るのを待つ）。round 本体が非 0・`gate.txt` が無い場合は INVALID にして exit 5（系列を止める） | `INVALID foreign-gate-error after`・exit 5（系列を止める） |
 
 - **他ジョブと load1 を同じループで待つ理由**: 各 run_round.sh は中で load1 < 3.0 を最大 30 分待つ。開始前の確認を通ったあとにこの待ちが入ると、
   その間に他ジョブが始まって終われば、開始前にも終了後にも見えない（PR #4227 の Codex の指摘）。ラッパーが先に load1 もそろえて待つので、
-  run_round.sh の load1 ゲートはふつう 1 回目で通る。
+  run_round.sh の load1 ゲートはふつう 1 回目で通る。load1 の読み方（`sysctl -n vm.loadavg` を `tr -d '{}'` して 1 語目・`^[0-9]+(\.[0-9]+)?$`）も #4151・#4154 の run_round.sh と同じにする（#4153 は `awk '{print $2}'` で同じ値を読む）。
 - **隙間の検査**: run_round.sh の `gate.txt` が PASS なら、その行の末尾の UTC（load1 ゲートを通った時刻）と開始前の確認の時刻を比べる。
   60 秒を超えて後・1 秒を超えて前・時刻が読めない場合は、開始前の確認と計測の開始の間に隙間があったとみなし、`INVALID foreign-gap` にする
   （round 本体が 0 で終わっていれば exit 4 で次の round へ）。2026-11-10 の #4153 の試走では 5 round とも差 0 秒。
