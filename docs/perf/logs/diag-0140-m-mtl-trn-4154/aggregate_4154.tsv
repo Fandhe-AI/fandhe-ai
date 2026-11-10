@@ -1,0 +1,2 @@
+cell	code	confidence	obs_median	reason
+M-MTL-TRN	N	高	1.0398	ノイズ帯 NB-RANGE5 が 1.0 を含む（A/B を立てない）

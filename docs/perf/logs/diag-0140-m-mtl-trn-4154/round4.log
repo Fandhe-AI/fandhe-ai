@@ -1,0 +1,6 @@
+wrote env -> <home>/work/diag-4154/out/round4/raw/env.json
+wrote 3 rows -> <home>/work/diag-4154/out/round4/raw/ts.jsonl
+wrote 2 rows -> <home>/work/diag-4154/out/round4/raw/te.jsonl
+wrote 2 rows -> <home>/work/diag-4154/out/round4/raw/tf.jsonl
+{"framework":"fandhe-ai","version":"0.14.0","task":"train","device":"metal","size":64,"median_s":0.000474791,"q1_s":0.000472917,"q3_s":0.000476646,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.012069917}
+round 4 done 2026-11-10T03:54:26Z

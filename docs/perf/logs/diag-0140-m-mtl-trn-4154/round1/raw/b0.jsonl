@@ -1,0 +1,1 @@
+{"task":"train","arm":"b0","n":100,"prep_us":0.334,"encode_us":10.750,"commit_wait_us":0.000,"gpu_busy_us":0.000,"host_fixed_us":0.000,"readout_us":669.542,"total_us":680.917,"wait_max":1,"command_buffers_max":1,"encode_calls_max":10,"loss_last":0.573888123}

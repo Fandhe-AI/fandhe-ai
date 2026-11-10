@@ -1,0 +1,7 @@
+
+running 1 test
+test resident_chain_breakdown_diag_tests_3612::resident_chain_breakdown_3612_train_b1 ... {"task":"train","arm":"b1","n":100,"prep_us":0.333,"encode_us":10.584,"commit_wait_us":438.750,"gpu_busy_us":234.000,"host_fixed_us":204.709,"readout_us":0.292,"total_us":450.167,"wait_max":1,"command_buffers_max":1,"encode_calls_max":10,"loss_last":0.573888123}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 865 filtered out; finished in 0.07s
+

@@ -1,0 +1,5 @@
+cell	quantity	value	clock
+M-MTL-TRN	fandhe_window	0.472958	-
+M-MTL-TRN	opp_window	0.500813	-
+M-MTL-TRN	fandhe_pure_kernel	0.234333	gpu_timestamp
+M-MTL-TRN	opp_pure_kernel	0.423354	mps_event

@@ -1,0 +1,2 @@
+cell	F1	F2	class	confidence	reason
+M-MTL-TRN	-	-	分類保留	低	確度低: F1 の時計不一致（比較不能。境界を併記）
