@@ -4,6 +4,8 @@
 - 計測コミット: `d50251b385a32f0383c4f2b60a287b84cf0f95d8`（RULE.txt を単独で追加した #4224 のマージ後の main）
 - 以下の表と verdict は runner が出力した `judge-4158-4158-gb10.md` を逐語で写したもの。手元で `gb10/` の JSONL とゲートログを
   同じ引数で `judge_eager_release_ab.py --rule-set 4158` に渡し直した出力とも完全に一致した（終了コード 1 = REJECT）。
+- 注意: 末尾の「副次（判定外）… reuse/fresh」行は判定器の出力どおり**既定経路 reuse／既定経路 fresh** の比で、RULE の副次項目
+  （診断経路 reuse／既定経路 fresh）とは分子が違う。RULE どおりの比は `docs/perf/cpu-gemm-reuse-fresh-inversion.md` §18.4 に JSONL から再計算して載せた。
 
 | 機体 | task | size | mode | 区分 | before 中央値 s | after 中央値 s | ratio | round 別 ratio | 後退 |
 |---|---|---|---|---|---|---|---|---|---|
