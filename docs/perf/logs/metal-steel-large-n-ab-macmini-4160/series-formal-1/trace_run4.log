@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running unittests src/lib.rs (<home>/work/rm1-4160.noindex/target/release/deps/fandhe_ai_backend_metal-acb8e7e391b92611)
+
+running 1 test
+test gemm_steel_large_n_diag_tests::steel_large_n_reach_trace ... DEVICE gpu_cores=10 soc="Apple M4" verified_tile_table=Some(M4Base(VerifiedM4BaseGpuCoreCount(10))) split_k_enabled=true
+TRACE n=256 arm=cur cfg=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue profile=table route=Classic fallback=false
+TRACE n=256 arm=sl cfg=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue profile=table route=Classic fallback=false
+TRACE n=512 arm=cur cfg=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue profile=table route=Classic fallback=false
+TRACE n=512 arm=sl cfg=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue profile=table route=Classic fallback=false
+TRACE n=1024 arm=cur cfg=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue profile=table route=Classic fallback=false
+TRACE n=1024 arm=sl cfg=C0:bm64xbn64xbk16_wm2xwn2_stagedtrue profile=steel_large_n route=Classic fallback=false
+TRACE n=2048 arm=cur cfg=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue profile=table route=Classic fallback=false
+TRACE n=2048 arm=sl cfg=C0:bm64xbn64xbk16_wm2xwn2_stagedtrue profile=steel_large_n route=Classic fallback=false
+TRACE n=4096 arm=cur cfg=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue profile=table route=Classic fallback=false
+TRACE n=4096 arm=sl cfg=C0:bm64xbn64xbk16_wm2xwn2_stagedtrue profile=steel_large_n route=Classic fallback=false
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 873 filtered out; finished in 0.02s
+

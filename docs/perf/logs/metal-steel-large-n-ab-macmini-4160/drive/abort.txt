@@ -1,0 +1,14 @@
+系列 3 の停止の記録（RULE 項 14 (d) からの逸脱。所有者判断 2026-11-11「系列 3 を止めて記録」）
+
+- 06:46:45Z: Mac mini で同じアカウントの Python プロセス（/tmp/listen9000.py。TCP 9000 で待ち受け。%CPU 0.0。親は launchd）が起動した。
+  本計測が起動したものではない。ゲートの名前の条件（G3: python）に当たる。
+- 06:46:48Z〜07:20:37Z: A/B の round4 の candle-N1024-fresh の前のゲートが 60 回続けて FOREIGN（G3）。
+  07:21:07Z に `round4 gate=timeout reason=foreign-job` を記録して計測し、直後も foreign-after（07:21:12Z）。
+- 07:21:16Z〜07:26:26Z: 次のセル（after-N2048-fresh）の前も 10 回 FOREIGN（G3）。07:27:00Z の 11 回目は CLEAN。
+  listener はこの間に終わっていた（停止を決めた時点では動いていた）。
+- 07:29:32Z: round5 開始。07:30:12Z に、所有者判断に従い formal4160.sh（駆動）と run_ab_steel_large_n_gemm_metal.sh を TERM で止めた
+  （ab rc=143）。listener には触れていない。run4160.sh のトラップが hw-lock を外した（lock released 07:30:12Z）。
+  A/B runner のトラップが Cargo.lock を書き戻した（before 腕と同一内容）。
+- formal.drive.log に系列 3 の verdict 行は無い（駆動を止めたため）。系列 3 は全ゲート通過になりえない（timeout と foreign-after を含む）。
+- 停止後の照合（post-abort-check.txt）: A/B の出力を除くツリー指紋が配置時と一致、配置時の全ファイル sha256 一覧の照合 rc=0。
+- 停止を確かめる際に formal-3/ab.out の末尾を表示し、A/B の N=256 の値 2 行（判定対象外）を見た。
