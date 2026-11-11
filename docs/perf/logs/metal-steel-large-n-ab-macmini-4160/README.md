@@ -2,7 +2,33 @@
 
 結論の記入先は `docs/perf/metal-gemm-steel-candidates.md` §11。本ディレクトリは事前登録規則の雛形・計測基盤・（将来の）実測ログ。
 
-## 状態: 実測済み・総合 UNDETERMINED（3 系列とも全ゲート通過にならず。2026-11-11・Mac mini `<metal-node>`）
+## 状態: 実測済み・総合 ADOPT（RULE.v2 の系列 `formal-v2-2`。2026-11-11・Mac mini `<metal-node>` 単機）
+
+- 規則: `RULE.v2.txt`（PR #4252 で固定）。旧 `RULE.txt` の 3 系列がすべて UNDETERMINED だったことを受けた所有者判断（2026-11-11「準備だけ整えて測り直す」）による改訂で、変えたのは各系列の前の準備だけ（ゲート・判定式・閾値・ラウンド数・対象ツリー・`aggregate.py` は同じ）。
+- 結果: `formal-v2-2` が全ゲート通過（純カーネル 39/39・セル A/B 5/5・両スクリプト rc=0）。RULE.v2 項 3 によりここで止め、この系列で判定した。`aggregate.py`（sha256 `e8ae78af…`・`--expect-rev afbfeafba…`）の総合は **ADOPT**。
+  - ADOPT の意味は「Phase 4（#4166）で所有者が結線を判断する価値がある」に限る（RULE 項 1）。`tile::STEEL_LARGE_N_ENABLED` は `false` のままで、結線・M4 Max での確認・既定反転の承認は #4166 の担当。
+  - 純カーネル（kernel_gpu の 5 run 中央値）: sl/cur は N=1024 で -7.0%、N=2048 で -10.3%、N=4096 で -9.5%（各 5/5 run で速い・bit 一致 sl=ref・parity pass・到達成立）。N=256／512 の no-op は成立（解決タイル同一・bit 一致）。
+  - セル A/B（非後退ゲート）: 状態 ok。5/5 round 一貫して 2% を超えて後退するセルはない。checksum は全セルで完全一致。
+  - スコアボード比（candle 相手）: N=2048 は NB-SEP 成立（after の比 1.005〜1.014、before 0.936〜0.946）。N=1024 は不成立（after 0.900〜1.080）。G4096 は記録のみ（不成立）。「1 位に変わった」と書けるのは opt-in を ON にした状態の G2048 だけで、main の既定は変わっていない。
+
+| 系列 | 時刻（UTC） | 純カーネル（ゲート） | セル A/B（ゲート） | 当たったゲート | aggregate.py |
+|---|---|---|---|---|---|
+| `series-formal-v2-1`（LABEL fv2-1） | 08:44:52〜09:18:53 | 39/39 pass | 5/6 pass | round2 `after-N4096-fresh` 直後に foreign-after（`secd` %CPU 33.3。G2） | rc=0・総合 undetermined（参考系列） |
+| `formal-v2-2` 試み 1 | 09:31:39〜09:35:48 | — | — | 起動前のツリー照合で不一致（下記）。計測プロセスは起動していない（RULE.v2 項 4 (c)。系列に数えない） | — |
+| `series-formal-v2-2`（LABEL fv2-2） | 09:43:41〜10:16:25 | 39/39 pass | 5/5 pass | なし | rc=0・**総合 ADOPT**（判定に使う系列） |
+
+- 系列の前の準備（RULE.v2 項 4）: 各系列の前に所有者が GUI アプリと別作業を止めて連絡した。`formal-v2-2` の前には、所有者の選択で Magnet・node の待ち受け（ループバックのみ）を止め、Siri AI も止めたが macOS が直ちに再起動した。別アカウントの colima（%CPU 0.0）は権限がなく止めていない（所有者了承のうえ開始）。確認の記録は各系列の `env/series-start.txt`（試み 1 は `drive-v2/prestart-v2-2-1.txt`）。
+- 逸脱の記録: `formal-v2-2` 試み 1 は、ツリー照合で `scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-315.pyc` が 1 件増えていたため始めなかった（`formal-v2-1` の A/B の比較スクリプトが 09:18Z に作った Python のキャッシュ。ソースは不変で manifest 照合は一致。旧系列 1〜3 の後には作られておらず、理由は未確認）。所有者判断でこの 1 件だけを消し、指紋が配置時の値に戻ったことを確かめてから試み 2 として起動した（`drive-v2/pyc-removal-v2-2.txt`）。試み 2 の後には作られていない。
+- 固定前の確認の通し（RULE.v2 項 6）: `drive-v2/precheck-dry-1.txt`（計測は起動していない）。
+- 開示: RULE.v2 項 0 のとおり（参考値を見た後の判断・試走 1 の判定表 3 行・旧系列 3 の N=256 の 2 行）。v2 の各系列の値は、`formal-v2-2` が全ゲート通過と決まった後に集計して開いた。
+
+### v2 で収録した出力
+
+- `series-formal-v2-<k>/`: 旧系列と同じ構成（純カーネルの出力・`ab/`・`env/`・`foreign-gate.tar.gz`／`foreign-gate-summary.tsv`・`aggregate.md`）。`env/series-start.txt` が RULE.v2 項 4 (b) の確認の記録。
+- `drive-v2/`: 駆動ログ（`formal-v2.drive.log`・各 `*.drive.out`）・系列 1 本の起動スクリプト（`run4160v2.sh`）・固定前の確認の通し・試み 1 の記録・pyc の削除記録。
+
+## 旧 `RULE.txt` の 3 系列（参考。総合 UNDETERMINED。2026-11-11）
+
 
 - 規則: `RULE.txt`（PR #4248 で固定。固定コミット `afbfeafba`、対象ツリー `19eca6fa3`）。所有者判断「別ラベルで最大 3 系列」（RULE 項 14 (d)）に従い、全ゲート通過の系列が出るまで回した。
 - 結果: 3 系列とも、セル A/B の他ジョブの前提ゲートに当たり、全ゲート通過にならなかった。RULE 項 14 (d) により **3 系列とも参考系列・総合 UNDETERMINED**。`tile::STEEL_LARGE_N_ENABLED` は `false` のまま据え置く（結線は #4166 で保留のまま）。
@@ -63,6 +89,7 @@ Mac mini では hw-lock を取らない他ジョブや `mediaanalysisd` が計�
 
 - PR-2（Mac mini）: 雛形を埋めた `RULE.txt` を単独コミットで main に固定する。
 - PR-3（Mac mini）: 5 run の系列・`aggregate.md`・§11 の記入欄・`loss-attribution-matrix.md` の M-MTL-G1024／G2048 行の更新（`Closes #4160`）。
-  - 実施状況（2026-11-11）: 系列・`aggregate.md`・§11.5 は記録した。総合 UNDETERMINED のため `loss-attribution-matrix.md` は変えていない。なお同表の `M-MTL-G1024／G2048` は M4 Max の行で、Mac mini の行は `MM-MTL-G1024／G2048`。行の付け直しは §11.7 のとおり #4168 の担当。#4160 を閉じるかは所有者の判断待ち。
+  - 実施状況（2026-11-11）: 旧 `RULE.txt` の 3 系列は総合 UNDETERMINED（PR #4249）。RULE.v2（PR #4252）の `formal-v2-2` で総合 ADOPT となり、系列・`aggregate.md`・§11.5・§11.7 を記録した（本記録 PR で #4160 を閉じる）。
+  - `loss-attribution-matrix.md` は変えていない。ADOPT は opt-in を ON にした状態の判定で、main の既定（`STEEL_LARGE_N_ENABLED=false`）とスコアボードの値は変わっていないため。同表の `M-MTL-G1024／G2048` は M4 Max の行で、Mac mini の行は `MM-MTL-G1024／G2048`。結線後の行の付け直しは §11.7 のとおり #4168 の担当。
 - `STEEL_LARGE_N_ENABLED` の既定を true にする結線は Phase 4（#4166）の担当で、所有者の承認が要る。
 - NB-RANGE5／NB-SEP の定義（#4142 `docs/perf/noise-band-decision.md`）は #4142 で所有者承認済み（2026-11-10。https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 ）。NB-RANGE5 は腕ごとの round 別比の最小〜最大（`aggregate.py` は `range_before`／`range_after` を別々に出す）。

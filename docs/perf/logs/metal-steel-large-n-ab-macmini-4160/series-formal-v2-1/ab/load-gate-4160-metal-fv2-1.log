@@ -1,0 +1,7 @@
+threshold=3.0 rule_threshold=3.0 series=official
+round1 gate=pass threshold=3.0 load1=2.98 waited_s=90 at=2026-11-11T08:56:51Z
+round2 gate=pass threshold=3.0 load1=1.55 waited_s=0 at=2026-11-11T09:01:03Z
+round2 gate=invalid reason=foreign-after phase=after cell=after-N4096-fresh at=2026-11-11T09:04:16Z
+round3 gate=pass threshold=3.0 load1=2.13 waited_s=0 at=2026-11-11T09:06:23Z
+round4 gate=pass threshold=3.0 load1=1.62 waited_s=0 at=2026-11-11T09:10:35Z
+round5 gate=pass threshold=3.0 load1=2.40 waited_s=0 at=2026-11-11T09:14:46Z

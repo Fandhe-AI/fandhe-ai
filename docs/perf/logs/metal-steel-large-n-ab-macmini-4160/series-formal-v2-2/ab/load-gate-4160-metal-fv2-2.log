@@ -1,0 +1,6 @@
+threshold=3.0 rule_threshold=3.0 series=official
+round1 gate=pass threshold=3.0 load1=2.73 waited_s=90 at=2026-11-11T09:55:11Z
+round2 gate=pass threshold=3.0 load1=1.95 waited_s=0 at=2026-11-11T09:59:27Z
+round3 gate=pass threshold=3.0 load1=2.12 waited_s=0 at=2026-11-11T10:03:43Z
+round4 gate=pass threshold=3.0 load1=2.65 waited_s=0 at=2026-11-11T10:07:58Z
+round5 gate=pass threshold=3.0 load1=1.75 waited_s=0 at=2026-11-11T10:12:13Z
