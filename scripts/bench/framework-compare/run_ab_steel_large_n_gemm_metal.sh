@@ -191,15 +191,15 @@ if [[ -e "${SKIP}" ]]; then
   echo "error: 既存の失敗記録 ${SKIP} があります。差し替え禁止のため別の LABEL で実行してください" >&2
   exit 1
 fi
+# 他ジョブの前提ゲートの出力先（LABEL 入り。既存は差し替え禁止で拒否）。パスの検査もここで行う。
+# 系列の記録（SKIP・JSONL）を作る前に検査し、ゲートのパスの誤りで LABEL を使い切らないようにする（PR #4238 の Bugbot 指摘）。
+FG_OUT="${OUT}/foreign-gate/4160-${DEVICE}-${LABEL}"
+fg_require "${FOREIGN_GATE}" "${FG_OUT}" || exit 1
+fg_sha256 "${FOREIGN_GATE}" >"${FG_OUT}/foreign_job_gate.sha256"
 : >"${SKIP}"
 for arm in before after candle; do
   : >"${OUT}/results-${arm}-${LABEL}-${DEVICE}-gemm.jsonl"
 done
-
-# 他ジョブの前提ゲートの出力先（LABEL 入り。既存は差し替え禁止で拒否）。パスの検査もここで行う。
-FG_OUT="${OUT}/foreign-gate/4160-${DEVICE}-${LABEL}"
-fg_require "${FOREIGN_GATE}" "${FG_OUT}" || exit 1
-fg_sha256 "${FOREIGN_GATE}" >"${FG_OUT}/foreign_job_gate.sha256"
 
 bench_fandhe_setup_lock_restore_trap
 
