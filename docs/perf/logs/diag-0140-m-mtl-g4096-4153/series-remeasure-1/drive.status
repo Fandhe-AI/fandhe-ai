@@ -1,0 +1,8 @@
+start 2026-11-10T10:42:03Z owner=#4153 measure series-remeasure-1 2026-11-10T10:42:03Z
+round 1 rc=1 gate=TIMEOUT 2026-11-10T11:35:26Z
+round 2 rc=0 gate=PASS 2026-11-10T11:45:27Z
+round 3 rc=0 gate=PASS 2026-11-10T11:48:35Z
+round 4 rc=0 gate=PASS 2026-11-10T11:51:43Z
+round 5 rc=0 gate=PASS 2026-11-10T11:54:51Z
+all done 2026-11-10T11:54:51Z
+lock released 2026-11-10T11:54:51Z

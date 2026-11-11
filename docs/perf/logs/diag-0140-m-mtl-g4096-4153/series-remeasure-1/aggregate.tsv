@@ -1,0 +1,2 @@
+cell	F1	F2	class	confidence	reason
+M-MTL-G4096	-	0.7607	分類保留	低	確度低: どれも届かない（残差は固定費など別区間。別診断へ）（部分通過）

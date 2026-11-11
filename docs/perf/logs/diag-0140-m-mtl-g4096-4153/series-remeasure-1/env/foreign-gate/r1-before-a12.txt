@@ -1,0 +1,12 @@
+FOREIGN before 2026-11-10T11:07:57Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 0 0 0 0 0
+processes_scanned 837
+hit G2-cpu pid=1236 <user> pcpu=114.9 name=mediaanalysisd
+max_pcpu_non_excluded 114.9
+top pid=1236 <user> pcpu=114.9 name=mediaanalysisd
+top pid=606 uid=0 pcpu=7.7 name=cfprefsd
+top pid=596 uid=0 pcpu=7.2 name=bluetoothd
+top pid=3921 <user> pcpu=4.2 name=mdworker_shared
+top pid=741 uid=270 pcpu=2.8 name=com.apple.DriverKit-AppleBCMWLAN
+wrapper_load1 2.89
