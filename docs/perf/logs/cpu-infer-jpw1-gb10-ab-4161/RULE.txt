@@ -1,0 +1,86 @@
+RULE（#4161 GB10 推論限定 jpw1 の事前登録 A/B）
+=====================================================
+状態: 固定（RULE.draft.txt をコピーして記入し、測る前に単独コミットで固定した。下の項 11）。
+      固定後は閾値を動かさない。変更は RULE.v2.txt で行う。
+
+PARAMS（aggregate.py が読む。<...> が残っていると実行を拒否する）
+  fixed-at-utc: 2026-11-11T02:57:58Z
+  tree_sha: 136705650ca8d6d8f007a34b42e0ec683094c32c
+  tree_fingerprint: e675bbd61b29622056f21f9a7015b4ef7ab14125f7fbb6a3f3aa738474d5383e
+  aggregate_script_sha256: 7c10993af7419188771f02c83ba6b2b37501ec6bf6722276d19ca4a73b7c768e
+  rounds: 5
+  arms: off,inf-jpw1
+  machine: gb10
+
+1. 解釈
+  jpw1 = jobs_per_worker=1。A の pack 共有（#3199 の G1）は含めない。
+  GB10_AFFINITY_ENABLED は false のまま。affinity の再判定はしない。
+
+2. 腕
+  off      : 対象 tree そのまま（INFER_SCOPE_JPW1_ENABLED=false）
+  inf-jpw1 : ab_patch_inf_jpw1.diff を当てた複製ツリー（定数を true にする 1 行）
+  GB10 のみ。main にはコミットしない。
+
+3. セル（判定対象）: bench-fandhe size=64 device=cpu の
+  train×fresh, train×reuse, infer×fresh, infer×reuse の 4 セル。
+  値は bench-fandhe の median_s。比は「inf-jpw1 / off」。
+  単体 6 形状（cpu_jobgrid_bench）と gemm タスクは推論スコープに入らず機構が構造上発火しない
+  ため、セルに置かない。
+  同じラウンド内で PyTorch CPU の train／infer を測る（記録のみ）。
+
+4. 反復: 5 ラウンド。腕の起動順はラウンドごとにローテーション。腕ごとに独立プロセス。
+  比は 5 ラウンドの中央値。
+
+5. ゲート（GB10 専有）: compute プロセス 0 件・GPU 使用率 0 が 3 サンプル連続・load1 < 1.0。
+  30 秒間隔で最大 30 分。不通過は gate.txt に TIMEOUT と書き、そのラウンドは正式系列から外す。
+  5/5 通過した系列だけを正式系列とする。RAYON_NUM_THREADS が設定されていれば実行を拒否する。
+
+6. 機構発火の前提（fail-closed）: prereq/<arm>.log の probe 行で確かめる。
+  inf-jpw1: infer_fresh・infer_reuse で applied>0、train_fresh・train_reuse で applied==0。
+  off      : すべて applied==0。
+  両腕: gb10_affinity enabled=false。
+
+7. checksum: 各セルで全腕・全ラウンドが完全一致しなければ FAIL。
+
+8. 判定（4 値）
+  ADOPT        : 正式系列で、前提が成立し、checksum が一致し、
+                 infer fresh と infer reuse の中央値比がともに < 1.00、
+                 かつ train fresh と train reuse の中央値比がともに <= 1.00。
+  REJECT       : train セルのどれかが > 1.00、または infer セルのどれかが >= 1.00。
+  undetermined : ゲート不成立・前提不成立・標本不足・未到達。
+  FAIL         : checksum 不一致。
+  優先順位: FAIL > undetermined > REJECT > ADOPT。
+
+9. 記録のみ（判定に使わない）: NB-RANGE5 と NB-SEP（docs/perf/noise-band-decision.md。同 doc は案で
+  所有者の承認待ち）。同一ラウンドの PyTorch と比べて G-CPU-INF が 1 位に変わったかを NB-SEP で記録する。
+  定義が変わったら RULE.v2.txt で反映する。
+
+10. 運用: 計測中はビルド・集計・転送を並走させない。ログの上書き・run の差し替えはしない。
+  未到達は unavailable と書く。$HOME は <home>、ホスト名は <cuda-node> に置換して収録する。
+  ADOPT でも既定の反転は #4165 で行う（本 A/B は反転しない）。
+
+11. 固定時の補足（項 1〜10 の条件・閾値・判定式は下書きのまま変えない）
+  (a) tree: tree_sha は道具立て PR #4196（3a8797f52）より後の main で、RULE 固定前の試走の時点の main（#4243 のマージコミット）。固定時点の main
+      （2b8c63497c72417e696f348039277e276563ec19）とは、本ディレクトリ・crates/backend-cpu・crates/facade・scripts/bench に差がない。
+      tree_fingerprint は送信側で `git archive --format=tar 136705650ca8d6d8f007a34b42e0ec683094c32c` で作った tar 本体の sha256。
+      試走と本計測は同じ tar を使い、ノード上で展開した BASE に .rev-stamp（完全 SHA）を置く（orchestrate.sh の前提検査が
+      tar の sha256 と展開内容の一致を確かめる）。ノード上で clone・fetch はしない。patch は orchestrate.sh が当てる
+      （当たるかを git apply --check、だめなら patch --dry-run で確かめ、適用は patch -p1）。
+  (b) machine: 下書きの値（<cuda-node>）は orchestrate.sh のプレースホルダ検査（`^  key: …<…>`）に当たり実行が止まるため、
+      ホスト名ではない機体名 gb10 を書いた。aggregate.py は machine を読まない。
+  (c) 実機ロック: `~/work/.fandhe-hw-lock` を手で取り（owner は「#4161 measure <UTC>」）、HW_LOCK_HELD=1 と
+      HW_LOCK_OWNER_FILE を渡して orchestrate.sh を起動し、終了後（失敗時も）に外す。WORK と LOGDIR は新しいディレクトリにし
+      （orchestrate.sh は既存の出力があると止まる）、LOGDIR には本 RULE.txt・aggregate.py・ab_patch_inf_jpw1.diff を本リポジトリの版で置く。
+      系列の途中は値を見ない（見るのは終了コードと gate.txt だけ）。
+  (d) 項 9 の注記: docs/perf/noise-band-decision.md は 2026-11-10 に #4142 で案 A（NB-RANGE5 を定義を変えずに採用）として承認済み（#4209）。
+      記録のみで判定に使わない点は変わらない。
+  (e) 収録: README の手順 4 のとおり集計し、`git diff v0.14.0 <tree_sha> -- crates/` の一覧と .rev-stamp を env/ に置く。
+      ホスト名は <cuda-node>、$HOME は <home>、ユーザー名は <user> に置換し、漏れがないことを確かめてから収録する。
+  (f) 固定前の捨て試走（2026-11-11T02:46:59〜02:56:54Z。上の (a)〜(c) と同じ手順・同じ tar。PARAMS の fixed-at-utc だけが違う RULE の写し）:
+      orchestrate.sh は rc=0（2 腕のビルド・前提 report・5 ラウンド）。ゲートは 5/5 PASS。
+      前提の probe（prereq/<arm>.log の probe 行を全部見た）は、inf-jpw1 が infer_fresh・infer_reuse で gate=true applied>0、
+      train_fresh・train_reuse で gate=true applied=0、off が 4 パスとも gate=false applied=0、両腕とも gb10_affinity enabled=false
+      （項 6 の前提が成立する形）。aggregate.py は rc=0、checksum_ok は True。
+      値の扱い: 比の値は開いていない。ただし判定語の書式を確かめるときに、試走の判定語（REJECT）を見た。判定式・閾値・
+      tree・tar・aggregate.py は試走の前に決まっていた下書き（PR #4196 でマージ済み）と試走時の値のまま変えていない。
+      この露出は所有者が問題とすれば試走の扱いを含めて差し戻せる。試走の記録はリポジトリに入れない。
