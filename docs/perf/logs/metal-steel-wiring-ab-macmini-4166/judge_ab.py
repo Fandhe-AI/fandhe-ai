@@ -27,6 +27,7 @@ import glob
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -118,12 +119,63 @@ def judge(series, agg):
     return verdict, ab, gates_ok, reasons, boards
 
 
+def _checksum_ok(vals):
+    """load_ab と同じ checksum の条件: 全記録の checksum が有限の数値で、すべて等しい。"""
+    return all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+               and c == vals[0] for c in vals)
+
+
+def partial_checksum_mismatch(abdir):
+    """途中で止まった系列の部分記録から、すでに確認できる checksum 不一致を探す（RULE.txt 項 6）。
+
+    load_ab は全セル 5 行と candle 5 行が揃わないと例外を出すので、その場合に限って使う。条件は load_ab の
+    checksum の条件（セルごとに before／after の全記録の checksum が有限の数値で完全一致）を、記録済みの行だけに当てる。
+    戻り値: True = 不一致あり・False = 記録済みの行には不一致なし・None = ラベルを 1 つに決められない／before・after の行が無い。
+    """
+    labels = set()
+    for arm in ("before", "after"):
+        for p in glob.glob(os.path.join(abdir, "results-%s-*-metal-gemm.jsonl" % arm)):
+            m = re.match(r"results-%s-(.+)-metal-gemm\.jsonl$" % arm, os.path.basename(p))
+            if m:
+                labels.add(m.group(1))
+    if len(labels) != 1:
+        return None
+    label = labels.pop()
+    cells, seen = {}, 0
+    for arm in ("before", "after"):
+        path = os.path.join(abdir, "results-%s-%s-metal-gemm.jsonl" % (arm, label))
+        if not os.path.isfile(path):
+            continue
+        for line in read(path).splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue  # 書きかけの行は数えない（不一致の根拠にも一致の根拠にもしない）
+            if not isinstance(r, dict) or r.get("task") != "gemm" or r.get("device") != "metal":
+                continue
+            cells.setdefault((r.get("size"), r.get("mode") or "fresh"), []).append(r.get("checksum"))
+            seen += 1
+    if not seen:
+        return None
+    return any(not _checksum_ok(v) for v in cells.values())
+
+
 def checksum_only(series, agg):
-    """全ゲート通過でない系列の checksum 不一致だけを確かめる（RULE.txt 項 6）。値は返さない。"""
+    """全ゲート通過でない系列の checksum 不一致だけを確かめる（RULE.txt 項 6）。値は返さない。
+
+    記録が揃っていれば load_ab の status で決める。揃っていなければ（load_ab が例外）、部分記録に不一致があれば fail、
+    なければ unknown（揃っていないので not-fail とは言えない）。
+    """
+    abdir = os.path.join(series, "ab")
     try:
-        ab = agg.load_ab(os.path.join(series, "ab"))
+        ab = agg.load_ab(abdir)
     except (agg.AggregateError, JudgeError):
-        return "unknown"
+        try:
+            return "fail" if partial_checksum_mismatch(abdir) else "unknown"
+        except JudgeError:
+            return "unknown"
     if ab["status"] == "fail":
         return "fail"
     return "not-fail" if ab["cells"] else "unknown"
@@ -353,6 +405,24 @@ def self_test():
         with open(os.path.join(tmp, "short", "ab", os.path.basename(src)), "w", encoding="utf-8") as f:
             f.write(read(src).splitlines()[0] + "\n")
         check("--checksum-only: 途中で止まった系列は unknown", checksum_only(os.path.join(tmp, "short"), agg) == "unknown")
+        # 途中で止まった系列（candle が欠け load_ab が例外）でも、記録済みの checksum 不一致は fail。
+        d2 = _copy_series(tmp, "partck")
+        for c in glob.glob(os.path.join(d2, "ab", "results-candle-*-metal-gemm.jsonl")):
+            os.remove(c)
+        check("--checksum-only: candle が欠けて不一致なしなら unknown", checksum_only(d2, agg) == "unknown")
+        p = glob.glob(os.path.join(d2, "ab", "results-before-*-metal-gemm.jsonl"))[0]
+        rows = read(p).splitlines()
+        r = json.loads(rows[-1]); r["checksum"] = (r.get("checksum") or 0) + 1.0; rows[-1] = json.dumps(r)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
+        check("--checksum-only: 途中で止まった系列の記録済みの不一致は fail", checksum_only(d2, agg) == "fail")
+        d3 = _copy_series(tmp, "partck2")
+        p = glob.glob(os.path.join(d3, "ab", "results-after-*-metal-gemm.jsonl"))[0]
+        rows = [ln for ln in read(p).splitlines() if ln.strip()]
+        r = json.loads(rows[0]); r["checksum"] = None; rows[0] = json.dumps(r)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(rows[:3]) + "\n{\"task\": \"gem")  # 途中で止まり、最後の行は書きかけ
+        check("--checksum-only: 部分記録の checksum 欠損は fail（load_ab と同じ条件）", checksum_only(d3, agg) == "fail")
         import io
         import contextlib
         buf = io.StringIO()

@@ -1,6 +1,6 @@
 イシュー #4166: steel 候補 T0U-LU-FB の結線（tile::STEEL_LARGE_N_ENABLED = true。PR #4255）の Mac mini 前後比較 — 事前登録規則（計測前に固定。以後、本文は変更しない。変更が要るなら RULE.v2.txt で改訂する）
 
-fixed-at-utc: 2026-11-11T15:15:20Z
+fixed-at-utc: 2026-11-11T15:32:14Z
 target_sha: 9eba21749767147d100399962e3d41e54c8365df
 tree_fingerprint: 908b5d934f23e05b23b0472817fc740df7a9700870c45af3a0698b2c7ccbeeac files=22279
 tree_fingerprint_ab_excluded: 08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006
@@ -38,7 +38,7 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
       fp.sh             0bbdd18c20b1f7fdebac4bb40c6b031c42a51d005f2ae5b211a17f939dc73aae
       prereq_tests.sh   5abca88139a44962f2e77bfc7113a29a587d9656110e65f6e4c59beb89b31626
       drive_series.sh   5ec9fb2c4870cd79cf75ac88432380b41d639f70bc8a74332aa5429032efe1eb
-      judge_ab.py       364f443909eaf8ab4b7b572f56c1982448e306790bc3f598a183499d4276e3d4
+      judge_ab.py       28cf71ad6d4dd4dc6f58a3faa8d42951b6cf55da72b34a4e5a4e52becfa5b0d6
       展開先 W は名前が `.noindex` で終わる新しいディレクトリ（#4151 の RULE.v2.txt 項 10 (e)）。ビルド・計測・記録のファイルはすべて W の中に書く。
 
 2. 計測と判定（#4160 の RULE.txt を参照し、書き写して変えない）
@@ -110,7 +110,9 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
    - 全ゲート通過の系列が出たら、そこで止めてその系列で判定する。そうでなければ次の k を回す（項 4 の準備から）。
    - 全ゲート通過でない系列（runner が非 0 で終わったものを含む）は、終わった後、次の k の前に、その系列のラベルの記録を ab/ へ写して
      `judge_ab.py --checksum-only` を流す。出るのは checksum=fail／not-fail／unknown の 1 行だけで、値は出さない。checksum=fail なら
-     そこで止め、その系列を判定して FAIL とする（項 2）。not-fail・unknown（途中で止まり判定できる記録がない）なら次の k へ進む。
+     そこで止め、その系列を判定して FAIL とする（項 2）。not-fail・unknown なら次の k へ進む。
+     記録が揃わず load_ab が例外を出す系列（途中で止まったもの）は、記録済みの before／after の行だけに load_ab と同じ checksum の条件
+     （セルごとに全記録の checksum が有限の数値で完全一致）を当て、不一致があれば fail、なければ unknown とする。
    - 3 系列とも通らなければ、3 系列とも参考系列として記録し、判定は UNDETERMINED として所有者へ戻す。
    - 回した系列はすべて残す。差し替え・追加・除外・上書きはしない（#4160 の RULE.txt 項 12）。
    - 系列の途中で値を見ない。見るのは状態ファイル・ゲートの行・drive.log の判定行だけ。results-*・compare-* は判定する系列が決まるまで開かない。
