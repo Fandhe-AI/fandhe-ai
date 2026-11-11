@@ -1,0 +1,127 @@
+イシュー #4166: steel 候補 T0U-LU-FB の結線（tile::STEEL_LARGE_N_ENABLED = true。PR #4255）の Mac mini 前後比較 — 事前登録規則（計測前に固定。以後、本文は変更しない。変更が要るなら RULE.v2.txt で改訂する）
+
+fixed-at-utc: 2026-11-11T14:42:06Z
+target_sha: 9eba21749767147d100399962e3d41e54c8365df
+tree_fingerprint: 908b5d934f23e05b23b0472817fc740df7a9700870c45af3a0698b2c7ccbeeac files=22279
+tree_fingerprint_ab_excluded: 08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006
+ref_rule_4160: docs/perf/logs/metal-steel-large-n-ab-macmini-4160/RULE.txt（blob 2877c6aa2ad5de1fc033bf04db0272da6d5a11a5。target_sha と main で同じ）
+ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a468dc3bc06307
+
+0. 目的と判定の意味
+   結線後の既定（定数 true）が、結線前の既定（定数 false）に対して Mac mini（<metal-node>）の gemm Metal セルで後退していないことを確かめる。
+   判定は PASS（非後退）／FAIL／UNDETERMINED の 3 つ。改善の証拠にはしない（#4160 の RULE.txt 項 0・項 9 と同じ）。
+   純カーネル計測（#4160 の RULE.txt 項 3〜8）は行わない。結線の採否は #4160 の RULE.v2 の formal-v2-2（総合 ADOPT）と所有者判断
+   （#4166 コメント 6797216551）で決まっており、本規則はその後の非後退の確認だけを扱う。M4 Max は対象外（§11.7 前提 3 の代替のまま）。
+
+1. 対象・腕・展開
+  (a) 対象はマージコミット target_sha（PR #4255）。runner・他ジョブのゲート・比較スクリプトも target_sha のものを使う:
+      scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh  c14b0d36982052a86161223dfb3d9be3269a9b6ea2b3a3e52d2c84f1d51f72db
+      scripts/bench/framework-compare/ab_foreign_gate.sh                   b7ae69bc4b32fa63887867822b97e1eeb9e900ed1a51a81053b231e8ff10f975
+      scripts/bench/framework-compare/compare_gemm_ab.py                   908429afee9429e2a707ada8588a2cc3980b3cc0ea0d5e65df941dd0df4d573b
+      scripts/bench/framework-compare/checksum_contract.py                 6d48de29ec3293172d9b902356aebd8b34456d7a3bf3549d59387731ae7f3e5b
+      docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py          d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04
+      （ゲートと ab_foreign_gate.sh は #4160 の RULE.txt 項 14 (b) と同じ値。runner は #4255 で AB_DIRECTION を足したため値が違う）
+  (b) 腕（同じ HEAD から 2 つの checkout。#3212／#4160 と同じ作り方）:
+      - after : target_sha の git archive を git init で 1 コミットにした checkout。clean のまま（定数 true）。
+      - before: after の clone に、crates/backend-metal/src/tile.rs の
+                `pub(crate) const STEEL_LARGE_N_ENABLED: bool = true;` を false にする未コミットの 1 行だけを当てたもの。
+      - 起動は runner に AB_DIRECTION=post-wiring を付ける。runner は「同じ HEAD・tile.rs の定数 1 行だけの差分・ほかに未コミット差分なし・
+        gitignore 済みのビルド影響ファイルなし」を計測前に fail-closed で確かめ、before と after のバイナリ sha256 が同じなら停止する。
+      - 腕の意味（before = 定数 false・after = 定数 true）は #4160 と同じで、比 after/before の向きも同じ。
+  (c) ツリー指紋と manifest（#4160 の RULE.txt 項 14 (a) と同じ形）: 展開ツリー（target_sha の git archive + .rev-stamp）で、.git 以下と .rev-stamp を除く
+      全ファイルの相対パスを LC_ALL=C で整列し、各ファイルの `shasum -a 256` の出力を順に連結した全体の sha256（fp.sh）。上の値は送信側で求めた。
+      本規則の RULE.txt は展開ツリーに入らないので、自己参照の除外はない。ノード側の配置時に同じ値にならなければ測らない（deploy.sh が止まる）。
+      系列ごとに起動の直前に取り直す。runner が書く scripts/bench/framework-compare/results/ と target-ab-4160-*（runner は名前に 4160 を固定で使う）を
+      除いた値（tree_fingerprint_ab_excluded）と、配置時の manifest（manifest-deploy.txt。shasum -c）の両方が一致したときだけ始める。
+  (d) 道具（本ディレクトリ。本規則を固定したコミットのものを使い、ノード側で下の sha256 と照合する）:
+      deploy.sh         493a69c932c46afe27243647401a467fc11a048c95fb86b62ee1b4c949a1569c
+      fp.sh             0bbdd18c20b1f7fdebac4bb40c6b031c42a51d005f2ae5b211a17f939dc73aae
+      prereq_tests.sh   5abca88139a44962f2e77bfc7113a29a587d9656110e65f6e4c59beb89b31626
+      drive_series.sh   9d14c1b8ca8001325f11b383b7c9f899d3dbf7da96eaf064f0fad25cd448d0d2
+      judge_ab.py       8ac93791beaf7d55a5f9d310d7ead31ba97ab5587ba8f2725418432875b0c11f
+      展開先 W は名前が `.noindex` で終わる新しいディレクトリ（#4151 の RULE.v2.txt 項 10 (e)）。ビルド・計測・記録のファイルはすべて W の中に書く。
+
+2. 計測と判定（#4160 の RULE.txt を参照し、書き写して変えない）
+   - セル A/B: #4160 の RULE.txt 項 9（セル・5 round・round ごとの起動順の反転・compare_gemm_ab.py の引数・checksum 不一致は FAIL・同じ round の
+     bench-candle）。
+   - 非後退の判定式・閾値: #4160 の RULE.txt 項 11 のうちセル A/B にかかわる条件（checksum 不一致は FAIL、5/5 round 一貫して 2% を超えて後退する
+     セルがない）。2% は同項 7・11 の値。
+   - スコアボード比と NB-RANGE5／NB-SEP: #4160 の RULE.txt 項 10。G1024・G2048 が対象、G4096 は記録のみ。「1 位」と書けるのは NB-SEP の成立時だけ。
+     PASS／FAIL には使わない（記録のみ）。
+   - ゲート: #4160 の RULE.txt 項 6 のうちセル A/B にかかわる部分（round 先頭と各セルの実行の前後の他ジョブゲート・load1 < 3.0）。
+   - 集計: judge_ab.py が ref_aggregate_4160_sha256 の aggregate.py を読み込み、その load_ab と scoreboard だけを呼ぶ（aggregate.py の main は
+     純カーネルの出力を要求するので使わない）。写像は次のとおり:
+       FAIL         = load_ab の status が fail（checksum 不一致）または anomaly（5/5 round で 2% を超えて遅いセルがある）
+       UNDETERMINED = 全ゲート通過（項 6）でない、または status が undetermined／unavailable
+       PASS         = 上のいずれでもない（status が ok）
+   - 判定に使う値は、全ゲートを通った系列（項 6）のものだけ。
+
+3. 前提の確認（formal-1 の前に 1 回。hw-lock の下で。pass／fail だけを記録する）
+   prereq_tests.sh を W/after（clean。定数 true）で流す。すべて --release --all-features で、--test-threads=1。
+   - lib: gemm_steel_large_n_diag_tests::steel_large_n_default_is_on と ::steel_large_n_reach_trace（--exact。2 件が数えられること）。
+     到達のトレースは N≥1024 の sl が profile=steel_large_n・cfg=CANDIDATES[0]・route=Classic・fallback なし、ほかが profile=table であることを
+     assert するので、pass はその成立を意味する。
+   - lib: gemm_tile_macmini_table_diag_tests:: の ignored 全件。
+   - backend-metal の tests/ のうち名前に parity を含む 59 本のテストターゲットの ignored 全件（一覧は prereq_tests.sh）。
+   単位ごとに `--ignored --list` の件数と本実行の passed が一致し、failed 0・終了コード 0 であること（件数 0 の単位は「ignored テスト 0 件」と記録）。
+   1 件でも落ちたら測らず、所有者に報告する。記録 PR には summary.tsv と result.txt だけを収める。
+
+4. 他ジョブのゲートと系列の前の準備（#4160 の RULE.v2.txt 項 4 と同じ。drive_series.sh）
+  (a) 計測セッションが所有者へ「準備をお願いします」と伝え、所有者の返事を受けてから (b) を始める。返事がなければ始めない。
+  (b) 次の順に確かめ、W/formal-<k>/series-start.txt（始めなかった試みは W/prestart-<k>-<n>.txt）に残す:
+      1. 他ジョブの前提ゲート G1〜G4: 展開ツリーの foreign_job_gate.py --phase before が CLEAN（終了コード 0）であること。加えて、basename が
+         ちょうど `Safari` のプロセスがないこと（Safari の補助プロセスは条件にしない。#4160 の RULE.v2.txt 項 4 (b) 1）。
+         #4160 の RULE.v2.txt 項 4 (b) 1 は G1・G3 の当たりだけを見ていた。本規則は指示の「foreign gate G1〜G4」に合わせ、G2・G4 を含む全基準の
+         CLEAN を求める（厳しくする方向だけの違い）。
+      2. mediaanalysisd: 2 分間隔で 3 回続けて %CPU 5 未満（basename の完全一致。複数あれば最大値。プロセスがなければ通過。ps の失敗・
+         出力が空・非数値は不成立）。spotlightknowledged の「Submitting text processing」の直近 10 分の件数も残す。
+      3. hw-lock を取り、load1 を 30 秒ごとに読む。1.5 未満で進む。最大 40 回で、届かなければそのまま進んで記録する。
+      4. 1. と同じ確認を、起動の直前（hw-lock の下）にもう一度行う。
+      5. ツリーの照合（項 1 (c)）。
+  (c) どれかが成り立たなければ、その系列は始めない。hw-lock を外し、計測プロセスは 1 本も起動せず、所有者に報告する。始めなかった試みは
+      系列に数えず、ラベル formal-<k> は使わない（出力ディレクトリは作らない）。prestart-<k>-<n>.txt は記録 PR に収める。
+      再試行は所有者の再度の連絡を受けてから行う。
+  (d) 系列を起動した後に所有者の別作業が始まったと分かった場合も、計測セッションはそのプロセスを止めない。ゲートの行で判定し、報告する。
+
+5. #4160 で事後の逸脱になった 2 点（先に決めておく）
+  (a) __pycache__: runner は PYTHONDONTWRITEBYTECODE=1 を付けて起動する。ただし runner と比較スクリプトは `python3 -I` で起動しており、-I は -E を
+      含むためこの環境変数は効かない。compare_gemm_ab.py は checksum_contract.py を importlib で読み込み、
+      scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-<版>.pyc を作る（target_sha の写しで 2026-11-11 に確かめた。-B を付けると
+      作られない）。このため、前の系列の後にツリー照合が合わなくなることがある（#4160 では formal-v2-1 の後に 1 回あり、ほかの系列の後には
+      なかった。理由は未確認）。そのときは:
+      - その試みは始めない（項 4 (c)）。prestart-<k>-<n>.txt に __pycache__ 以下のファイルの一覧が残る。
+      - 所有者の了承を得て、一覧の __pycache__ 以下のファイルとその空ディレクトリだけを消す。ほかのファイルは消さない。
+      - 消したもの・時刻・所有者の返事を W/pyc-removal-<k>.txt に残し、記録 PR に収める。
+      - 照合が配置時の値に戻ったことを次の試みの項 4 (b) 5 で確かめてから始める。了承の返事を項 4 (c) の「再度の連絡」として扱う。
+  (b) プロセスの停止: 系列の前に GUI アプリや別作業を止めるのは所有者。計測セッションが止めてよいのは、所有者が対象を名指しで指示した
+      ものだけで、止めたプロセスと時刻を series-start.txt（または prestart）に記録する。名指しがなければ何も止めない。
+      ほかのジョブ（hw-lock を取らずに GPU を使う別プロジェクトを含む）を見つけたら、止めずに報告する。
+
+6. 系列の数え方
+   - 別ラベル formal-1〜formal-3 で最大 3 系列（runner のラベルも formal-<k>）。1 系列は hw-lock を取ったまま 5 round のセル A/B を回すもの。
+   - 全ゲート通過 = W/drive.log の verdict=pass。すなわち runner の終了コードが 0、ゲートのログ（load-gate-4160-metal-formal-<k>.log）の
+     gate= を含む行がすべて gate=pass、skipped-4160-metal-formal-<k>.log が空。judge_ab.py はこれに加えて load_ab の正式系列の条件も確かめる。
+   - 全ゲート通過の系列が出たら、そこで止めてその系列で判定する。そうでなければ次の k を回す（項 4 の準備から）。
+   - 3 系列とも通らなければ、3 系列とも参考系列として記録し、判定は UNDETERMINED として所有者へ戻す。
+   - 回した系列はすべて残す。差し替え・追加・除外・上書きはしない（#4160 の RULE.txt 項 12）。
+   - 系列の途中で値を見ない。見るのは状態ファイル・ゲートの行・drive.log の判定行だけ。results-*・compare-* は判定する系列が決まるまで開かない。
+
+7. 結果の扱い
+   - PASS: 記録 PR を `Closes #4166` で出す。docs/perf/metal-gemm-steel-candidates.md §11.5・§11.7 に前後比較を記録する。
+   - FAIL または UNDETERMINED: #4166 は閉じない（記録 PR は Refs のみ）。所有者へ戻し、revert するかを含めて判断してもらう。
+   - docs/perf/loss-attribution-matrix.md は #4168 の担当なので触らない。
+
+8. 運用
+   - nohup のサブシェルで切り離して起動し、生存を確かめる（macOS に setsid はない）。1 系列は約 30 分の見込み。
+   - 前提の確認・各系列は hw-lock の下で行い、ほかの hw-lock の計測と重ねない。
+   - 回収時にマスクする: ホスト名 → <metal-node>、$HOME → <home>、ユーザー名 → <user>。収める前に漏れを検査する。
+   - 判定する系列の ab/ には、runner の results/raw のうちその系列のラベルの記録だけを写す（judge_ab.py はラベルが混ざると止まる）。
+     他ジョブのゲートの出力（results/raw/foreign-gate/）は #4160 と同じく系列ごとに tar.gz と要約 TSV にする。
+   - 機体に届かない・完走できない場合は、数値を埋めず unavailable／undetermined と記録する。推定値・M4 Max の値で埋めない。
+
+9. 開示
+   - 本規則を書いた計測セッションは、#4160 の値（formal-v2-2 の aggregate.md のセル A/B 表・スコアボード比・純カーネルの判定表を含む）を
+     見た後に本規則を書いた。judge_ab.py の self-test は formal-v2-2 の記録を見本に使い、その値を再現する。
+   - 結線後（target_sha）の Mac mini の値は、固定の時点で 1 つも取っていない（前後比較・前提テストとも未実行）。
+   - 固定前に手元（M4 Max の開発機。計測ではない）で、target_sha の archive への deploy.sh の通しと、偽の cargo で runner をビルドの手前まで
+     動かし、post-wiring の checkout 検査が通ること（pre-wiring では止まること）を確かめた。

@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""#4166（steel 候補 T0U-LU-FB の結線）の Mac mini 前後比較の判定。セル A/B だけの系列を判定する。
+
+役割: #4160 の aggregate.py（sha256 で固定）を読み込み、セル A/B の部分（RULE.txt 項 9〜11 のうちセル A/B に
+かかわる部分）の関数 load_ab・scoreboard をそのまま呼ぶ。判定式・閾値・NB-RANGE5／NB-SEP をここで書き直さない。
+aggregate.py の main は純カーネル計測（kern）の出力を要求するので、セル A/B だけの本系列には使えない。
+
+呼び出し: python3 -I -B judge_ab.py <系列ディレクトリ> [--aggregate <aggregate.py>]
+  系列ディレクトリ: ab/（runner の results/raw から本系列のラベルの記録だけを写したもの）と
+  status.txt（drive_series.sh が書く `ab rc=<N>` の行を含む状態ファイル）を持つ。
+  結果の Markdown を標準出力へ出す。終了コード: 0 = 判定を出した（PASS／FAIL／UNDETERMINED のいずれでも）・
+  2 = 入力が壊れている（判定を出さない）。
+python3 -I -B judge_ab.py --self-test: #4160 の formal-v2-2 の記録で再現を確かめ、変異で各分岐を確かめる。
+
+判定（RULE.txt 項 2 が #4160 の RULE.txt 項 9・11 を参照する形。ここでは写像だけを行う）:
+  - FAIL: load_ab の status が fail（checksum 不一致）または anomaly（5/5 round で 2% を超えて遅いセルがある）。
+  - UNDETERMINED: 全ゲート通過でない（status.txt の `ab rc=0` が無い・ゲートの行に gate=pass 以外がある・
+    load_ab の status が undetermined／unavailable）。
+  - PASS: 上のいずれでもない（load_ab の status が ok）。
+"""
+import glob
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+
+# #4160 の RULE.txt の aggregate_script_sha256 と同じ値（9eba21749・main のどちらでも同じ内容）。
+AGGREGATE_SHA256 = "e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a468dc3bc06307"
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_AGGREGATE = os.path.join(HERE, "..", "metal-steel-large-n-ab-macmini-4160", "aggregate.py")
+
+
+class JudgeError(Exception):
+    pass
+
+
+def load_aggregate(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    got = hashlib.sha256(data).hexdigest()
+    if got != AGGREGATE_SHA256:
+        raise JudgeError("aggregate.py の sha256 が固定値と違う: %s" % got)
+    sys.dont_write_bytecode = True  # 展開ツリーや記録ディレクトリに __pycache__ を作らない
+    spec = importlib.util.spec_from_file_location("aggregate4160", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        raise JudgeError("読めない: %s (%s)" % (path, e))
+
+
+def series_gates(series):
+    """全ゲート通過の判定（RULE.txt 項 6。drive_series.sh の判定と同じ定義）。戻り値: (ok, 理由のリスト)。"""
+    reasons = []
+    st = read(os.path.join(series, "status.txt"))
+    if len(re.findall(r"^ab rc=0 ", st, re.MULTILINE)) != 1:
+        reasons.append("status.txt に `ab rc=0` の行がちょうど 1 つ無い")
+    logs = glob.glob(os.path.join(series, "ab", "load-gate-4160-metal-*.log"))
+    if len(logs) != 1:
+        raise JudgeError("ゲートのログがちょうど 1 つ無い: %d" % len(logs))
+    gate_lines = [ln for ln in read(logs[0]).splitlines() if "gate=" in ln]
+    if not gate_lines:
+        reasons.append("ゲートの行が無い")
+    bad = [ln for ln in gate_lines if not re.search(r"(^|\s)gate=pass(\s|$)", ln)]
+    if bad:
+        reasons.append("gate=pass 以外の行が %d 件" % len(bad))
+    return (not reasons), reasons
+
+
+def judge(series, agg):
+    try:
+        ab = agg.load_ab(os.path.join(series, "ab"))
+    except agg.AggregateError as e:
+        raise JudgeError("load_ab が入力を拒否した: %s" % e)
+    gates_ok, reasons = series_gates(series)
+    if ab["status"] == "fail":
+        verdict = "FAIL"
+    elif not gates_ok or ab["status"] in ("undetermined", "unavailable"):
+        verdict = "UNDETERMINED"
+    elif ab["status"] == "anomaly":
+        verdict = "FAIL"
+    elif ab["status"] == "ok":
+        verdict = "PASS"
+    else:
+        raise JudgeError("想定外の status: %r" % ab["status"])
+    boards = {n: agg.scoreboard(ab, n) for n in agg.SCOPE}
+    return verdict, ab, gates_ok, reasons, boards
+
+
+def render(series, verdict, ab, gates_ok, reasons, boards, agg):
+    out = []
+    w = out.append
+    w("# #4166 結線の前後比較（Mac mini・セル A/B）の判定")
+    w("")
+    w("- 系列: `%s`（runner のラベル `%s`）" % (os.path.basename(os.path.normpath(series)), ab.get("label", "?")))
+    w("- 腕: before = 定数 false（未コミットの 1 行差分）、after = 定数 true（clean な 9eba21749）。比は after/before で、1 未満が after の速さ。")
+    w("- 全ゲート通過: **%s**%s" % ("はい" if gates_ok else "いいえ", "" if gates_ok else "（" + "・".join(reasons) + "）"))
+    w("- load_ab の状態: **%s**" % ab["status"])
+    for n in ab.get("notes", []):
+        w("  - %s" % n)
+    w("- **判定: %s**" % verdict)
+    w("")
+    if ab["cells"]:
+        w("| N | mode | before ms | after ms | 比 after/before（round 別） | 中央値比 | 2% 超の round | checksum |")
+        w("|---|---|---|---|---|---|---|---|")
+        for n in agg.SIZES:
+            for mode in agg.MODES:
+                c = ab["cells"][(n, mode)]
+                w("| %d | %s | %.4f | %.4f | %s | %.3f | %d/5 | %s |" % (
+                    n, mode, c["before_ms"], c["after_ms"], " ".join("%.3f" % r for r in c["ratios"]),
+                    c["ratio_med"], c["over5"], "完全一致" if c["checksum_exact"] else "不一致"))
+        w("")
+    w("## スコアボード比（#4160 の RULE.txt 項 10。相手は candle だけ。G4096 は記録のみ）")
+    w("")
+    w("| N | 対象 | before の比（範囲） | after の比（範囲） | NB-SEP |")
+    w("|---|---|---|---|---|")
+    for n in agg.SCOPE:
+        b = boards[n]
+        role = "判定対象" if n in agg.G_SIZES else "記録のみ"
+        if b is None:
+            w("| %d | %s | unavailable | unavailable | 判定不能 |" % (n, role))
+            continue
+        sep = {True: "成立", False: "不成立", None: "判定不能"}[b["sep"]]
+        w("| %d | %s | %.3f〜%.3f | %.3f〜%.3f | %s |" % (
+            n, role, b["range_before"][0], b["range_before"][1], b["range_after"][0], b["range_after"][1], sep))
+    w("")
+    return "\n".join(out) + "\n"
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[1] == "--self-test":
+        return self_test()
+    args = argv[1:]
+    agg_path = DEFAULT_AGGREGATE
+    if len(args) == 3 and args[1] == "--aggregate":
+        agg_path = args[2]
+        args = args[:1]
+    if len(args) != 1:
+        print("usage: judge_ab.py <系列ディレクトリ> [--aggregate <aggregate.py>] | --self-test", file=sys.stderr)
+        return 2
+    try:
+        agg = load_aggregate(agg_path)
+        res = judge(args[0], agg)
+    except JudgeError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 2
+    sys.stdout.write(render(args[0], *res, agg))
+    return 0
+
+
+# ---------------------------------------------------------------- self-test
+SAMPLE = os.path.join(HERE, "..", "metal-steel-large-n-ab-macmini-4160", "series-formal-v2-2", "ab")
+
+
+def _copy_series(tmp, name, status="ab rc=0 2026-11-11T00:00:00Z\n"):
+    d = os.path.join(tmp, name)
+    shutil.copytree(SAMPLE, os.path.join(d, "ab"))
+    with open(os.path.join(d, "status.txt"), "w", encoding="utf-8") as f:
+        f.write("start x\n")
+        f.write(status)
+    return d
+
+
+def _edit(path, fn):
+    with open(path, encoding="utf-8") as f:
+        s = f.read()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(fn(s))
+
+
+def _scale_after(d, n, mode, k):
+    p = glob.glob(os.path.join(d, "ab", "results-after-*-metal-gemm.jsonl"))[0]
+    lines = []
+    for ln in read(p).splitlines():
+        if ln.strip():
+            r = json.loads(ln)
+            if r.get("size") == n and (r.get("mode") or "fresh") == mode:
+                r["median_s"] = r["median_s"] * k
+            ln = json.dumps(r)
+        lines.append(ln)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def self_test():
+    fails = []
+
+    def check(name, cond):
+        print("%s %s" % ("ok  " if cond else "FAIL", name))
+        if not cond:
+            fails.append(name)
+
+    if not os.path.isdir(SAMPLE):
+        print("error: 見本の記録が無い: %s" % SAMPLE, file=sys.stderr)
+        return 2
+    agg = load_aggregate(DEFAULT_AGGREGATE)
+    tmp = tempfile.mkdtemp(prefix="judge4166-")
+    try:
+        # 1. #4160 formal-v2-2 の再現（aggregate.md: 状態 ok・NB-SEP は 2048 だけ成立）。
+        d = _copy_series(tmp, "base")
+        v, ab, gok, _, b = judge(d, agg)
+        check("見本は PASS", v == "PASS")
+        check("見本の状態は ok", ab["status"] == "ok")
+        check("見本は全ゲート通過", gok)
+        check("NB-SEP 1024 不成立", b[1024]["sep"] is False)
+        check("NB-SEP 2048 成立", b[2048]["sep"] is True)
+        check("NB-SEP 4096 不成立", b[4096]["sep"] is False)
+        check("N=2048 reuse の中央値比 0.933",
+              abs(ab["cells"][(2048, "reuse")]["ratio_med"] - 0.933) < 5e-4)
+        md = render(d, v, ab, gok, [], b, agg)
+        check("表に 10 セル", md.count("| fresh |") + md.count("| reuse |") == 10)
+        # 2. 5/5 round で 2% を超えて遅いセル → FAIL（anomaly）。
+        d = _copy_series(tmp, "slow")
+        _scale_after(d, 512, "fresh", 1.10)
+        v, ab, _, _, _ = judge(d, agg)
+        check("5/5 round 後退は FAIL", v == "FAIL" and ab["status"] == "anomaly")
+        # 3. 4/5 round だけ遅い → PASS のまま（閾値は 5/5）。
+        d = _copy_series(tmp, "slow4")
+        p = glob.glob(os.path.join(d, "ab", "results-after-*-metal-gemm.jsonl"))[0]
+        rows, seen = [], 0
+        for ln in read(p).splitlines():
+            if ln.strip():
+                r = json.loads(ln)
+                if r.get("size") == 256 and (r.get("mode") or "fresh") == "reuse":
+                    seen += 1
+                    if seen <= 4:
+                        r["median_s"] *= 1.10
+                ln = json.dumps(r)
+            rows.append(ln)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
+        v, ab, _, _, _ = judge(d, agg)
+        check("4/5 round 後退は PASS", v == "PASS" and ab["cells"][(256, "reuse")]["over5"] == 4)
+        # 4. checksum 不一致 → FAIL。
+        d = _copy_series(tmp, "ck")
+        p = glob.glob(os.path.join(d, "ab", "results-after-*-metal-gemm.jsonl"))[0]
+        rows = []
+        done = False
+        for ln in read(p).splitlines():
+            if ln.strip() and not done:
+                r = json.loads(ln)
+                r["checksum"] = (r.get("checksum") or 0) + 1.0
+                ln = json.dumps(r)
+                done = True
+            rows.append(ln)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
+        v, ab, _, _, _ = judge(d, agg)
+        check("checksum 不一致は FAIL", v == "FAIL" and ab["status"] == "fail")
+        # 5. ゲート: 各 round 内のセルの行（gate=invalid ... cell=）→ UNDETERMINED。
+        d = _copy_series(tmp, "cellgate")
+        g = glob.glob(os.path.join(d, "ab", "load-gate-4160-metal-*.log"))[0]
+        _edit(g, lambda s: s + "round3 gate=invalid reason=foreign-after phase=after cell=candle-N4096-fresh at=x\n")
+        v, _, gok, _, _ = judge(d, agg)
+        check("セルの foreign-after は UNDETERMINED", v == "UNDETERMINED" and not gok)
+        # 6. round 先頭のゲートが timeout → UNDETERMINED。
+        d = _copy_series(tmp, "tmo")
+        g = glob.glob(os.path.join(d, "ab", "load-gate-4160-metal-*.log"))[0]
+        _edit(g, lambda s: s.replace("round2 gate=pass", "round2 gate=timeout", 1))
+        v, _, _, _, _ = judge(d, agg)
+        check("round 先頭の timeout は UNDETERMINED", v == "UNDETERMINED")
+        # 6b. pass に似た別の状態（緩和閾値の系列の gate=pass-reference 等）は pass と数えない。
+        d = _copy_series(tmp, "passref")
+        g = glob.glob(os.path.join(d, "ab", "load-gate-4160-metal-*.log"))[0]
+        _edit(g, lambda s: s + "round3 gate=pass-reference reason=x cell=after-N256-fresh at=x\n")
+        v, _, gok, _, _ = judge(d, agg)
+        check("gate=pass-reference は UNDETERMINED", v == "UNDETERMINED" and not gok)
+        # 7. ab rc が 0 でない → UNDETERMINED。
+        d = _copy_series(tmp, "rc", status="ab rc=1 x\n")
+        v, _, gok, _, _ = judge(d, agg)
+        check("ab rc=1 は UNDETERMINED", v == "UNDETERMINED" and not gok)
+        # 8. skipped ログに記録 → UNDETERMINED（load_ab が正式系列から外す）。
+        d = _copy_series(tmp, "skip")
+        s = glob.glob(os.path.join(d, "ab", "skipped-4160-metal-*.log"))[0]
+        _edit(s, lambda x: x + "something failed\n")
+        v, ab, _, _, _ = judge(d, agg)
+        check("skipped に記録は UNDETERMINED", v == "UNDETERMINED" and ab["status"] == "undetermined")
+        # 9. 判定不能な系列では NB-SEP を出さない。
+        check("UNDETERMINED の系列は NB-SEP 判定不能", judge(d, agg)[4][2048]["sep"] is None)
+        # 10. 遅いセルがあってもゲート不通過なら UNDETERMINED（後退と書かない）。
+        d = _copy_series(tmp, "slowgate", status="ab rc=1 x\n")
+        _scale_after(d, 512, "fresh", 1.10)
+        v, _, _, _, _ = judge(d, agg)
+        check("ゲート不通過の後退は UNDETERMINED", v == "UNDETERMINED")
+        # 11. aggregate.py の sha256 が違えば読み込まない。
+        bad = os.path.join(tmp, "aggregate.py")
+        shutil.copy(DEFAULT_AGGREGATE, bad)
+        with open(bad, "a", encoding="utf-8") as f:
+            f.write("\n# changed\n")
+        try:
+            load_aggregate(bad)
+            check("sha256 不一致を拒否", False)
+        except JudgeError:
+            check("sha256 不一致を拒否", True)
+        # 12. ラベルが 2 つ混ざった ab/ は入力不正（判定を出さない）。
+        d = _copy_series(tmp, "two")
+        src = glob.glob(os.path.join(d, "ab", "results-before-*-metal-gemm.jsonl"))[0]
+        shutil.copy(src, src.replace("results-before-", "results-before-x"))
+        try:
+            judge(d, agg)
+            check("ラベル混在を拒否", False)
+        except JudgeError:
+            check("ラベル混在を拒否", True)
+        # 13. CLI: 正常系は rc 0、壊れた入力は rc 2。
+        check("CLI 正常 rc 0", main(["judge_ab.py", os.path.join(tmp, "base")]) == 0)
+        check("CLI 入力不正 rc 2", main(["judge_ab.py", os.path.join(tmp, "nope")]) == 2)
+    finally:
+        shutil.rmtree(tmp)
+    check("見本の記録ディレクトリに __pycache__ を作らない",
+          not os.path.exists(os.path.join(os.path.dirname(DEFAULT_AGGREGATE), "__pycache__", "aggregate4160.cpython-%d%d.pyc" % sys.version_info[:2])))
+    if fails:
+        print("self-test FAILED: %d" % len(fails))
+        return 1
+    print("self-test ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
