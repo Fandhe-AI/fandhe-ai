@@ -1,0 +1,118 @@
+RULE fixed-at-utc 2026-11-11T02:14:03Z
+（計測前に単独コミットして固定する。計測後に緩めない。雛形: docs/perf/logs/diag-0140-template/RULE.template.txt・#4144）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_diag.py は止まる）
+
+1. 目的・対象セル
+  #4147で、スコアボード 0.14.0 の 1 位でないセルの診断 (3)（相手の構成を再現した場合に届く比）を測る。
+  対象セル: G-CPU-TRN・G-CPU-INF・G-CUDA-INF（machine=gb10。<cuda-node>）。現分類は docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/unreached_0140.tsv の値（PARAMS の prev_class に転記）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・unreached_0140.tsv（分類の反映は別途）。
+
+2. 対象 tree
+  #4147 の道具立て PR（#4184）のマージコミット 41aae869ed00b8a1f744f871881cb7e578626008 の git archive。PARAMS の tree_sha に完全な SHA を書く。
+  tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値
+  （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を
+  C ロケール順に並べた全体の SHA-256。target/ と .git は除外。シンボリックリンクは対象文字列をハッシュ）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。
+  cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す。
+    Mac mini: hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。
+    GB10: compute プロセス 0 の専有を 30 秒間隔で最大 30 分待つ。
+  ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  ラウンド内の腕の順序: 奇数 round は Rust 腕（bench-fandhe の CPU train／infer × fresh／reuse の 4 本 → cpu_jobgrid_bench threads → bench-fandhe の CUDA infer × fresh／reuse の 2 本 → cuda_mlp_event_bench_4147）→ Python 腕（bench_py.py pytorch の CPU train／infer → opp_kernel_torch_diag measure --shapes mlp --arm base --device cpu → bench_py.py pytorch の CUDA infer → opp_kernel_cuda_mlp_diag_4147.py measure）、偶数 round は Python 腕 → Rust 腕。bench_py.py の sha256 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b を照合し、torch は 0.14.0 計測と同じ 2.14.0（違えば停止）。record_only として bench-fandhe の CPU train／infer と CUDA infer の --phases --mode reuse を取る（分類には使わない）。起動は run_round.sh、変換は to_values_4147.py。計測中にビルド・集計・転送を並走させない。
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない。式が計測できないなら RULE を改訂して式を外す）。
+  保存物: round{i}/{gate.txt, values.tsv, raw/}・env/。ハーネス固有の出力から values.tsv への変換は計測する issue が行い、変換手順を README に残す。
+
+4. 診断式（docs/perf/loss-attribution-matrix.md §10.1 から転記。単位は ms）
+  入力量: fandhe_window・fandhe_fresh_window・opp_window・fandhe_pure_kernel・opp_pure_kernel
+  F1 = opp_window ÷ (fandhe_window − fandhe_pure_kernel + opp_pure_kernel)
+       純カーネルの時計タグ（clock 列）を両側で揃える。揃わなければ F1 は比較不能とし、境界を併記する。
+       時計が揃っていても純カーネルが窓を上回るラウンド（fandhe 側・opp 側のどちらでも）があれば、
+       止めずにそのラウンドの F1 を計算せず「窓超過」と印を付け、そのセルの F1 は比較不能とする（時計不一致と同じ扱い。
+       単発 GEMM の和は step 内の状態と一致しないため揺れで超過しうる）。分母 0 以下の検査は変えない。
+  F2 = opp_window ÷ fandhe_fresh_window
+  観測比 = opp_window ÷ fandhe_window（スコアボードの比との整合確認用）
+  1 以上は「相手の構成を再現すれば届く」を意味する。診断であり目標値ではない。
+  純カーネルの境界（#4147 で追記。README の「注意」と同じ）: GEMM のみ。ReLU・MSE・SGD・readout・bias は両側とも含まない。
+    学習は l1_fwd・l2_fwd・l2_dw・l2_dx・l1_dw の 5 形状（l1_dx は含めない。fandhe-ai の常駐チェーンも PyTorch〈入力に勾配を求めない〉も実行しないため）。推論は l1_fwd・l2_fwd。
+    CPU 2 セルの時計タグは両側 wall（fandhe-ai は cpu_jobgrid_bench の median_secs、PyTorch は opp_kernel_torch_diag の mm_pure。単発 GEMM を温めた状態で測った値の和で、step 内の状態とは一致しない）。
+    G-CUDA-INF の時計タグは両側 cuda_event（event 対で 1 launch を挟む。H2D・出力確保・event 生成は区間外）。fandhe-ai は cuda_mlp_event_bench_4147（CudaGemm::launch_tiled_f32＝本番と同じ select_tiled_f32_kernel の選択。epilogue 融合は含まない）、PyTorch は opp_kernel_cuda_mlp_diag_4147.py（cuBLAS）。
+    fandhe_window は reuse（scoreboard の窓。train は常駐チェーンで第 1 層の dX を計算しない）、fandhe_fresh_window は fresh（train は L1 の dX を計算する）。
+    kernel_owner=hardware の根拠（README の「注意」の宣言を転記）: 相手の GEMM は閉源ベンダーライブラリ（CPU は NVPL、CUDA は cuBLAS）で、REQ-1 により fandhe-ai は使わない。
+    測る前の宣言で、事後に動かさない。docs/perf/logs/cpu-gemm-resident-reuse-3646/ は G-CPU-INF を「自分たちの制約（条件つき）」と記録しており
+    ラベルが食い違うが、kernel_owner は F1 が閾値以上のときの表示ラベルだけを決め、F1・F2 の値は常に記録されるため、所有者が読み替えても再計測は不要。
+
+5. 判定の分類先と規則（優先順位つき。aggregate_diag.py の classify と同一）
+  分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
+  (1) formulas に F2 があり、F2 の run 間中央値が reach_threshold 以上なら「計測窓の定義」。
+  (2) そうでなく F1 があり、時計が揃い窓超過がなく、F1 の run 間中央値が reach_threshold 以上なら、
+      kernel_owner=hardware は「ハードの上限」、kernel_owner=constraint は「自分たちの制約」。
+      kernel_owner は測る前に宣言する（hardware: 閉源ライブラリ・OS・ハードが決める。
+      constraint: REQ-1・REQ-8・既定精度が決める。matrix §10.5 の定義）。事後に動かさない。
+  (3) それ以外は「分類保留」。理由欄に「どれも届かない（残差は固定費など別区間。別診断へ）」「F1 の時計不一致」「F1 の窓超過（純カーネル > 窓。round N fandhe／opp）」のいずれかを書く（F1 が比較不能で (1) も当てはまらないとき）。
+  確度:
+    高: 全ラウンドがゲート PASS（status=formal）かつ、判定に使った式の run 別値がすべて閾値の同じ側
+        （最小 > 閾値、または最大 < 閾値。境界ちょうどはまたぐ扱い）かつ時計が揃っていて窓超過がない。
+    低: 上記以外。理由欄の先頭に「確度低」を付ける。
+  ドリフト: 観測比の中央値が PARAMS の scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。
+
+6. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md。run 別比の最小〜最大を帯とし、閾値を含めば確度低）。
+  A/B 用の確定条件 NB-SEP は診断 (3) では使わない（Phase 3 の A/B 用）。
+  注記: 上記決定記録は #4142 で 2026-11-10 に案 A（NB-RANGE5 を定義を変えずに採用）で承認済み（#4209）。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパスを書かない。
+  Mac mini は <metal-node>、GB10 は <cuda-node> と書く。
+  集計は同梱の aggregate_diag.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_diag.py を変更すると aggregate_script_sha256 が不一致になり集計は止まる。
+
+8. #4147 の補足（固定時に追記。項 1〜7 の条件・閾値・式は変えない）
+  (a) tree_sha を現在の main ではなく道具立て PR のマージコミットにする理由:
+      README の「注意」は `git diff v0.14.0 <tree_sha> -- crates/backend-cpu/src crates/backend-cuda/src` が 0 件であることを求める
+      （bench-fandhe は crates.io 版 fandhe-ai =0.14.0 を使うため、workspace の cpu_jobgrid_bench・cuda_mlp_event_bench_4147 と同一のカーネルコードを測る前提）。
+      41aae869e では 0 件。固定時点の main（3c4d1cf3cb54d3ea4abd3e6e9e0c089338f68b79）は #4192・#4196・#4201 の道具立てで crates/backend-cpu/src が 5 ファイル違い、前提を満たさない。
+      run_round.sh・to_values_4147.py・opp_kernel_cuda_mlp_diag_4147.py は 41aae869e と固定時点の main で byte 一致（下の sha256）。
+      集計は本リポジトリの aggregate_diag.py（PARAMS の sha256。PR #4241 で雛形〈PR #4237〉と byte 一致にした版）で行う。
+  (b) 窓超過の扱い（項 4・5）は所有者判断 2026-11-11（#4237「超過は F1 を比較不能に」）による雛形の版。#4147 の 2026-11-10 の捨て試走（1 round）は、
+      旧版の aggregate_diag.py で「pure_kernel exceeds window」により集計が止まっていた（PR #4241 の本文）。閾値・F1／F2 の式・ノイズ帯は変えない。
+  (c) 補助ファイルの sha256（集計スクリプトは照合しない。計測前にノード側で照合し、1 件でも違えば測らない）:
+    c14dccbcf9ed6604c8644f7c3bcbdfb0d15483c59296e5b9a14c6fcfd4f8a392  run_round.sh
+    8662e09c1134018d44c63e76d97db162b51e98bfff56c5f2c7d65843334eff90  to_values_4147.py
+    9c84fab1a6be0bebd1f7bdfee92b1ebc6641428e7086d0310355c0441c01a700  opp_kernel_cuda_mlp_diag_4147.py
+  (d) 展開・ビルド: tree_sha の git archive（.rev-stamp に完全 SHA）を rsync で新しい展開先に置き（docs/real-hardware-verification-env.md §3。ノード上で git は使わない）、
+      送信側とノード側のビルド前・ビルド後で tree_fingerprint が PARAMS の値と一致することを確かめる（1 件でも差があれば測らない）。
+      同 §4.11 を適用し、展開先は毎回新しくし、ビルドは実機ロックを取ってから in-tree target で行う（CARGO_TARGET_DIR と RAYON_NUM_THREADS を外す）。
+      成果物の mtime がロックの owner ファイルより後であることを env/ に記録する。
+      ビルドは README の手順 2 の 3 本（framework-compare で `cargo build --release --locked -p bench-fandhe`、tree の workspace ルートで
+      `cargo build --release --locked -p fandhe-ai-backend-cpu --example cpu_jobgrid_bench` と
+      `cargo build --release --locked -p fandhe-ai-backend-cuda --features internal-diagnostics --example cuda_mlp_event_bench_4147`）。
+      ロックの owner は「#4147 measure <UTC>」。round 1〜5 を順に回し、各 round の後に to_values_4147.py を実行する（README の手順 3・4）。
+      round が非 0 で終わり gate.txt の 1 語目が TIMEOUT 以外なら以降の round を回さず止めて報告する（TIMEOUT の round は記録したまま次の round へ進む）。
+      系列の途中で値を見ない（見るのは終了コードと gate.txt だけ）。
+  (e) 固定前の捨て試走（値は見ない。記録はリポジトリに入れない）:
+      試走 2（2026-11-11T01:54:03〜01:59:40Z。展開先は新しいディレクトリ。上の (d) と同じ手順で、ラウンド数だけ 2。ロックの owner は「#4147 trial <UTC>」）:
+        ビルド 3 本は成功し、ビルド後の tree_fingerprint は PARAMS の値と一致した。round 1・2 とも run_round.sh は rc=0・gate.txt は PASS、
+        to_values_4147.py は 2 ラウンドとも rc=0。rounds を 2 にした本 RULE の写しで、PARAMS の sha256 の aggregate_diag.py を実行すると rc=0
+        （標準出力は捨て、aggregate.md・aggregate.tsv は値を開かず、窓超過の印の有無とセル・round・側だけを確かめた）。
+        G-CPU-INF は 2 ラウンドとも opp 側（PyTorch CPU の l1_fwd＋l2_fwd の単発 GEMM の和）が窓を上回り、F1 は窓超過で比較不能になった。
+        G-CPU-TRN・G-CUDA-INF は窓超過なし。時計不一致はなし。
+        所有者判断（2026-11-11。チャット）: G-CPU-INF は formulas=F1,F2 のまま固定する（F1 は項 4・5 の窓超過の扱いで比較不能・理由と境界を併記し、
+        分類は F2 の規則 (1) か分類保留、確度は低）。超過の事実はデータとして残す。
+      試走 1（2026-11-10。1 ラウンド・旧版の aggregate_diag.py）は上の (b) のとおり集計が止まった。
+  (f) 記録: 結果欄に 3 セルの分類と確度を書く（README の手順 5〜7）。G-CUDA-INF の相手側の区間分解は #4149、fandhe 側の待ちの内訳は #4150 の担当。
+
+## PARAMS
+fixed-at-utc: 2026-11-11T02:14:03Z
+issue: 4147
+rounds: 5
+tree_sha: 41aae869ed00b8a1f744f871881cb7e578626008
+tree_fingerprint: b74e30202247731a10b6262e8e036d302b4da53677e24d684b1175d13ac7c20a
+aggregate_script_sha256: 4b445129f04dee83ebffd56ba2adc2cc9222fdb762a6f6c546fa41e7163d807c
+reach_threshold: 1.00
+noise_band: NB-RANGE5
+cell: G-CPU-TRN | machine=gb10 | scoreboard_ratio=0.51 | formulas=F1,F2 | kernel_owner=hardware | opp=PyTorch | prev_class=自分たちの制約
+cell: G-CPU-INF | machine=gb10 | scoreboard_ratio=0.75 | formulas=F1,F2 | kernel_owner=hardware | opp=PyTorch | prev_class=分類保留
+cell: G-CUDA-INF | machine=gb10 | scoreboard_ratio=0.51 | formulas=F1,F2 | kernel_owner=hardware | opp=PyTorch | prev_class=自分たちの制約
