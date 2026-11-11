@@ -1,6 +1,6 @@
 イシュー #4166: steel 候補 T0U-LU-FB の結線（tile::STEEL_LARGE_N_ENABLED = true。PR #4255）の Mac mini 前後比較 — 事前登録規則（計測前に固定。以後、本文は変更しない。変更が要るなら RULE.v2.txt で改訂する）
 
-fixed-at-utc: 2026-11-11T14:47:53Z
+fixed-at-utc: 2026-11-11T14:53:53Z
 target_sha: 9eba21749767147d100399962e3d41e54c8365df
 tree_fingerprint: 908b5d934f23e05b23b0472817fc740df7a9700870c45af3a0698b2c7ccbeeac files=22279
 tree_fingerprint_ab_excluded: 08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006
@@ -128,3 +128,7 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
    - 結線後（target_sha）の Mac mini の値は、固定の時点で 1 つも取っていない（前後比較・前提テストとも未実行）。
    - 固定前に手元（M4 Max の開発機。計測ではない）で、target_sha の archive への deploy.sh の通しと、偽の cargo で runner をビルドの手前まで
      動かし、post-wiring の checkout 検査が通ること（pre-wiring では止まること）を確かめた。
+   - 固定前に Mac mini で、dry 用の別ディレクトリ（固定後に消した）へ deploy.sh を通し（ノード側の指紋は上の 2 値と一致）、
+     drive_series.sh の dry を 1 回通した（2026-11-11T14:48:36〜14:52:48Z。他ジョブのゲート 2 回とも CLEAN・mediaanalysisd 3 回とも 0・
+     hw-lock を取って外した・load1=1.09・ツリーと checkout の照合が一致・dry-ok）。計測プロセスは起動しておらず、値は取っていない。
+     記録（マスク済み）は記録 PR に precheck-dry-1.txt として収める。

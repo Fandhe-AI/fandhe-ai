@@ -34,3 +34,4 @@
 - `bash test_drive_series.sh`: 始めない分岐（ゲート FOREIGN／失敗・Safari・mediaanalysisd の境界 5.0／最大値／非数値／部分一致の名前・hw-lock 使用中・2 回目の確認・`__pycache__` によるツリー不一致・after の未追跡・before の余分な差分／差分なし／HEAD 違い・cargo が見つからない）、全ゲート通過の判定、runner へ渡す環境変数、`prereq_tests.sh` の件数照合。12 個の変異を入れ、どれも self-test が落ちることを確かめた。`/bin/bash`（3.2）でも通る。
 - 手元（開発機。計測ではない）で `9eba21749` の archive に `deploy.sh` を通し、偽の cargo で runner をビルドの手前まで動かした。post-wiring の checkout 検査は通り、pre-wiring では止まった。
 - 手元で本物の cargo に `--ignored --list` だけをさせ（GPU では流していない）、`--exact` の 2 件・Mac mini 表の 3 件・`gemm_splitk_parity` の 1 件が数えられ、`linalg_parity_inputs_guard` が 0 件になること、一覧のビルドの後も after が clean のままであることを確かめた。
+- Mac mini で dry 用の別ディレクトリへ `deploy.sh` を通し（ノード側の指紋は RULE の値と一致）、`drive_series.sh` の dry を 1 回通した（全段 dry-ok。計測は起動していない。dry 用ディレクトリは消した）。
