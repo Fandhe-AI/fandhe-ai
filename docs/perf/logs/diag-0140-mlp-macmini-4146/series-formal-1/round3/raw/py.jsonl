@@ -1,0 +1,2 @@
+{"framework": "pytorch", "version": "2.14.0", "task": "train", "device": "cpu", "size": 64, "median_s": 0.00012093759141862392, "q1_s": 0.00011919823009520769, "q3_s": 0.0001228128094226122, "checksum": 0.11754957586526871, "warmup": 20, "iters": 80, "mode": "fresh"}
+{"framework": "pytorch", "version": "2.14.0", "task": "infer", "device": "cpu", "size": 64, "median_s": 3.1687552109360695e-05, "q1_s": 3.0167284421622753e-05, "q3_s": 3.334414213895798e-05, "throughput_per_s": 31558.133507718758, "checksum": 1381.7087828349322, "warmup": 20, "iters": 20, "mode": "fresh"}
