@@ -233,29 +233,35 @@ def parse_values(text, cells, where):
 
 
 def round_metrics(cell, vals):
-    """1 ラウンド分の F1・F2・観測比（相手の窓 ÷ fandhe-ai の窓）。時計が違えば F1 は None。"""
+    """1 ラウンド分の F1・F2・観測比（相手の窓 ÷ fandhe-ai の窓）。時計が違う・窓超過なら F1 は None。"""
     cid = cell["id"]
     g = lambda q: vals[(cid, q)][0]
     fw, ow = g("fandhe_window"), g("opp_window")
-    m = {"obs": ow / fw, "F1": None, "F2": None, "clock_ok": True}
+    m = {"obs": ow / fw, "F1": None, "F2": None, "clock_ok": True, "over": []}
     if "F2" in cell["formulas"]:
         m["F2"] = ow / g("fandhe_fresh_window")
     if "F1" in cell["formulas"]:
         fk, ok = g("fandhe_pure_kernel"), g("opp_pure_kernel")
         # 時計不一致時に両側の計測境界を併記できるよう、純カーネル値と時計タグを保持する（RULE §4・matrix §10.1）
         m["bound"] = (fk, vals[(cid, "fandhe_pure_kernel")][1], ok, vals[(cid, "opp_pure_kernel")][1])
+        m["win"] = (fw, ow)
         # 時計が違う純カーネル値は窓との大小を同じ尺で比べられない（別プロセスの値を混ぜた約 0.49 ms 級の
-        # セルでは揺れだけで超過しうる）。不一致は先に分類保留として記録し、窓超過の fail-closed は
-        # 時計が揃った場合に限る（#4190 レビュー指摘）。
+        # セルでは揺れだけで超過しうる）。不一致は先に分類保留として記録する（#4190 レビュー指摘）。
+        # 時計が揃っていても純カーネル（単発 GEMM の和）は step 内の状態と一致せず窓を上回りうる
+        # （#4146 の試走。所有者承認 2026-11-11）。窓超過のラウンドは例外にせず F1 を計算せず印を付け、
+        # 時計不一致と同じ道筋（F1 比較不能・境界併記）で扱う。
         if vals[(cid, "fandhe_pure_kernel")][1] != vals[(cid, "opp_pure_kernel")][1]:
             m["clock_ok"] = False
         else:
-            if fk > fw or ok > ow:
-                raise AggError(f"{cid}: pure_kernel exceeds window")
-            den = fw - fk + ok
-            if den <= 0:
-                raise AggError(f"{cid}: F1 denominator <= 0")
-            m["F1"] = ow / den
+            if fk > fw:
+                m["over"].append("fandhe")
+            if ok > ow:
+                m["over"].append("opp")
+            if not m["over"]:
+                den = fw - fk + ok
+                if den <= 0:
+                    raise AggError(f"{cid}: F1 denominator <= 0")
+                m["F1"] = ow / den
     return m
 
 
@@ -264,11 +270,13 @@ def side(vals, thr):
     return min(vals) > thr or max(vals) < thr
 
 
-def classify(cell, ms, thr, formal):
-    """RULE §5 の優先順位つき規則。F2 → F1（owner で振り分け）→ 保留。"""
+def classify(cell, ms, thr, formal, rnos):
+    """RULE §5 の優先順位つき規則。F2 → F1（owner で振り分け）→ 保留。rnos は ms の元のラウンド番号。"""
     f2 = [m["F2"] for m in ms] if "F2" in cell["formulas"] else None
     clock_ok = all(m["clock_ok"] for m in ms)
-    f1 = [m["F1"] for m in ms] if "F1" in cell["formulas"] and clock_ok else None
+    # 時計不一致または窓超過のラウンドが 1 つでもあれば、そのセルの F1 は比較不能
+    f1_ok = clock_ok and not any(m["over"] for m in ms)
+    f1 = [m["F1"] for m in ms] if "F1" in cell["formulas"] and f1_ok else None
     med = statistics.median
     if f2 is not None and med(f2) >= thr:
         cls, used, why = CLASS_WINDOW, [f2], "F2 が届く（fresh 窓で相手に届く）"
@@ -280,12 +288,18 @@ def classify(cell, ms, thr, formal):
     else:
         cls = CLASS_HOLD
         used = [v for v in (f2, f1) if v is not None]
-        if "F1" in cell["formulas"] and not clock_ok:
-            why = "F1 の時計不一致（比較不能。境界を併記）"
+        if "F1" in cell["formulas"] and not f1_ok:
+            parts = []
+            if not clock_ok:
+                parts.append("F1 の時計不一致")
+            if any(m["over"] for m in ms):
+                ov = "／".join(f"round {i} {'・'.join(m['over'])}" for i, m in zip(rnos, ms) if m["over"])
+                parts.append(f"F1 の窓超過（純カーネル > 窓。{ov}）")
+            why = "、".join(parts) + "（比較不能。境界を併記）"
         else:
             why = "どれも届かない（残差は固定費など別区間。別診断へ）"
     high = formal and bool(used) and all(side(v, thr) for v in used) and \
-        ("F1" not in cell["formulas"] or clock_ok)
+        ("F1" not in cell["formulas"] or f1_ok)
     return cls, why, high, f1, f2
 
 
@@ -317,7 +331,7 @@ def aggregate(dirp, rule_name="RULE.txt"):
     tsv = ["cell\tF1\tF2\tclass\tconfidence\treason"]
     for c in rule["cells"]:
         ms = [round_metrics(c, v) for v in vals]
-        cls, why, high, f1, f2 = classify(c, ms, thr, formal)
+        cls, why, high, f1, f2 = classify(c, ms, thr, formal, rnos)
         md += [f"## {c['id']}（{c['machine']}・相手 {c['opp']}・kernel_owner={c['kernel_owner']}）", "",
                "| run | F1 | F2 | 観測比 |", "|---|---|---|---|"]
         for i, m in zip(rnos, ms):
@@ -329,6 +343,11 @@ def aggregate(dirp, rule_name="RULE.txt"):
             if not m["clock_ok"]:
                 fk, fc, ok, oc = m["bound"]
                 md.append(f"| {i} 時計不一致 | fandhe 純カーネル {fk:.4f} ms（{fc}） | 相手 純カーネル {ok:.4f} ms（{oc}） | |")
+            elif m["over"]:
+                fk, fc, ok, oc = m["bound"]
+                fw, ow = m["win"]
+                md.append(f"| {i} 窓超過（{'・'.join(m['over'])}） | fandhe 純カーネル {fk:.4f} ms（{fc}）／窓 {fw:.4f} ms | "
+                          f"相手 純カーネル {ok:.4f} ms（{oc}）／窓 {ow:.4f} ms | |")
         md.append(f"| 中央値 | {fnum(mf1)} | {fnum(mf2)} | {fnum(mobs)} |")
         for name, v in (("F1", f1), ("F2", f2)):
             if v:
@@ -490,7 +509,44 @@ def self_test():
     ce = [_cell_line("X-TST-E2", forms="F1", sr=1.0)]
     re_ = _run(ce, [_rows("X-TST-E2", fw=100, ow=100, fk=120, ok=30, ck=("gpu_timestamp", "mps_event"))] * 5, ["PASS"] * 5)[1]
     assert CLASS_HOLD in re_ and "-" == re_.splitlines()[1].split("\t")[1], re_
-    _expect_err(lambda: _run(ce, [_rows("X-TST-E2", fw=100, ow=100, fk=120, ok=30)] * 5, ["PASS"] * 5), "same-clock kernel > window")
+    # 時計が揃った窓超過は例外にせず F1 比較不能として扱う（#4146 の試走。所有者承認 2026-11-11）。
+    # round 3 だけ超過・他は通常（F1 = 100/(100-50+30) = 1.25）
+    def over_rounds(over_row, forms="F1,F2", fresh=None):
+        good = _rows("X-TST-W1", fw=100, fresh=fresh, ow=100, fk=50, ok=30)
+        return [over_row if i == 2 else good for i in range(5)]
+    cw = [_cell_line("X-TST-W1", forms="F1,F2", sr=1.0)]
+    # (a) fandhe 側だけ 1 ラウンド超過・F2 = 100/80 = 1.25 が閾値以上 → F1 比較不能でも「計測窓の定義」
+    ra = _run(cw, over_rounds(_rows("X-TST-W1", fw=100, fresh=80, ow=100, fk=120, ok=30), fresh=80), ["PASS"] * 5)
+    la = ra[1].splitlines()[1].split("\t")
+    assert la[1] == "-" and la[3] == CLASS_WINDOW, la
+    assert "3 窓超過（fandhe）" in ra[0] and "120.0000 ms（cuda_event）／窓 100.0000 ms" in ra[0], ra[0]
+    # (b) F2 = 100/120 < 閾値 → 「分類保留」・確度低・理由に窓超過と元のラウンド番号と側
+    rb = _run(cw, over_rounds(_rows("X-TST-W1", fw=100, fresh=120, ow=100, fk=120, ok=30), fresh=120), ["PASS"] * 5)
+    lb = rb[1].splitlines()[1].split("\t")
+    assert lb[1] == "-" and lb[3:5] == [CLASS_HOLD, "低"], lb
+    assert "F1 の窓超過（純カーネル > 窓。round 3 fandhe）" in lb[5] and "時計不一致" not in lb[5], lb
+    # (c) opp 側の超過（F1 のみ宣言）
+    cc = [_cell_line("X-TST-W2", forms="F1", sr=1.0)]
+    good_c = _rows("X-TST-W2", fw=100, ow=100, fk=50, ok=30)
+    pc = [_rows("X-TST-W2", fw=100, ow=100, fk=50, ok=130) if i == 0 else good_c for i in range(5)]
+    rc = _run(cc, pc, ["PASS"] * 5)
+    lc = rc[1].splitlines()[1].split("\t")
+    assert lc[3:5] == [CLASS_HOLD, "低"] and "round 1 opp" in lc[5], lc
+    assert "1 窓超過（opp）" in rc[0], rc[0]
+    # 超過が両側・複数ラウンドでも元の番号で併記し、時計不一致のラウンドと共存できる
+    pe = [_rows("X-TST-W2", fw=100, ow=100, fk=150, ok=130) if i == 3 else good_c for i in range(5)]
+    pe[1] = _rows("X-TST-W2", fw=100, ow=100, fk=50, ok=30, ck=("wall", "gpu_timestamp"))
+    le = _run(cc, pe, ["PASS"] * 5)[1].splitlines()[1].split("\t")
+    assert "F1 の時計不一致" in le[5] and "round 4 fandhe・opp" in le[5], le
+    # 部分通過（round2 が TIMEOUT）では超過ラウンドの元番号（round 3）を使う
+    pp = [_rows("X-TST-W2", fw=100, ow=100, fk=150, ok=30) if i == 2 else good_c for i in range(5)]
+    lp = _run(cc, pp, ["PASS", "TIMEOUT", "PASS", "PASS", "PASS"])[1].splitlines()[1].split("\t")
+    assert "round 3 fandhe" in lp[5], lp
+    assert ra == _run(cw, over_rounds(_rows("X-TST-W1", fw=100, fresh=80, ow=100, fk=120, ok=30), fresh=80), ["PASS"] * 5), "non-deterministic"
+    # (d) 超過が無ければ従来どおり（F1 = 1.25 で「ハードの上限」・確度高）
+    rd = _run([_cell_line("X-TST-W3", forms="F1")], [_rows("X-TST-W3", fw=100, ow=100, fk=50, ok=30)] * 5, ["PASS"] * 5)
+    ld = rd[1].splitlines()[1].split("\t")
+    assert ld[1] == "1.2500" and ld[3:5] == [CLASS_HW, "高"] and "窓超過" not in rd[0], ld
     # 時計不一致の run は両側の純カーネル値と時計タグを集計表に併記する（RULE §4）
     assert "50.0000 ms（gpu_timestamp）" in md and "30.0000 ms（wall）" in md, md
     assert "ドリフト" in rows["X-TST-F1"][5] and "ドリフト" not in rows["X-TST-A1"][5]
@@ -535,7 +591,7 @@ def self_test():
     _expect_err(mut(lambda p: p[1].update({(A, "opp_window"): (-1, "-")})), "negative")
     _expect_err(mut(lambda p: p[1].update({(A, "opp_window"): (float("inf"), "-")})), "inf")
     _expect_err(mut(lambda p: p[1].update({(A, "opp_window"): (float("nan"), "-")})), "nan")
-    _expect_err(mut(lambda p: p[1].update({(A, "fandhe_pure_kernel"): (200, "cuda_event")})), "kernel > window")
+    mut(lambda p: p[1].update({(A, "fandhe_pure_kernel"): (200, "cuda_event")}))()  # 窓超過は例外にならない（上の (a)〜(d)）
     _expect_err(mut(lambda p: p[1].update({(A, "opp_pure_kernel"): (0, "cuda_event")})), "zero kernel")
     _expect_err(mut(lambda p: p[1].update({(A, "opp_pure_kernel"): (40, "-")})), "kernel without clock")
     _expect_err(mut(lambda p: p[1].update({(A, "opp_window"): (84, "wall")})), "clock on window")

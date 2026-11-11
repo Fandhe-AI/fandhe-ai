@@ -1,0 +1,10 @@
+CLEAN after 2026-11-10T16:29:12Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 0 0 0 0 0
+processes_scanned 833
+max_pcpu_non_excluded 4.0
+top pid=606 uid=0 pcpu=4.0 name=cfprefsd
+top pid=596 uid=0 pcpu=3.5 name=bluetoothd
+top pid=1009 <user> pcpu=0.7 name=ContinuityCaptureAgent
+top pid=1013 <user> pcpu=0.6 name=sharingd
+top pid=603 uid=88 pcpu=0.5 name=WindowServer

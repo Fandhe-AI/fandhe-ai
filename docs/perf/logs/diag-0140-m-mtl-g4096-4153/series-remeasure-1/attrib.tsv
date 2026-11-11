@@ -1,0 +1,20 @@
+round	metric	value
+1	gate	TIMEOUT
+2	delta_w	7.014541
+2	side	判定不能(純カーネル unavailable)
+3	delta_w	5.678479
+3	side	判定不能(純カーネル unavailable)
+4	delta_w	8.519188
+4	side	判定不能(純カーネル unavailable)
+5	delta_w	8.213916
+5	side	判定不能(純カーネル unavailable)
+median	kernel_share	
+median	delta_w	7.614228
+median	perturbation	unavailable
+summary	side	判定不能(純カーネル unavailable)
+summary	confidence	低
+summary	confidence_reasons	PASS 以外の round を含む; round 間で帰属が割れる、または判定不能
+summary	backend_metal_diff_vs_v0_14_0	なし
+summary	version_note	-
+summary	xctrace	unavailable
+summary	fallback_note	xctrace unavailable: F1 未計測。aggregate の分類は F2 だけで決まる（F2 が届けば計測窓の定義、届かなければ分類保留。その理由「どれも届かない」は F2 が届かないことだけを表し、自分たちの制約／ハードの上限は判定していない）

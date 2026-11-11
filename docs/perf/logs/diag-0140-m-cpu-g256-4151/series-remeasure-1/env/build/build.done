@@ -1,0 +1,8 @@
+example off-base rc=0
+example on-base rc=0
+example off-timed rc=0
+example on-timed rc=0
+lib off-base rc=0
+bench-fandhe off rc=0
+bench-fandhe on rc=0
+done.

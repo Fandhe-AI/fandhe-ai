@@ -1,0 +1,39 @@
+
+running 1 test
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_production_batch ...   [production] N=1024 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.4875 ms  q1=0.4457 ms  q3=0.5302 ms
+    upload_b: median=0.4758 ms  q1=0.4065 ms  q3=0.5043 ms
+    alloc_c: median=0.0002 ms  q1=0.0001 ms  q3=0.0002 ms
+    encode: median=0.0056 ms  q1=0.0040 ms  q3=0.0058 ms
+    commit_wait: median=2.8105 ms  q1=2.3528 ms  q3=2.8650 ms
+    commit_wait.kernel_gpu: median=1.8205 ms  q1=1.6322 ms  q3=1.8366 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.9621 ms
+    readback: median=0.1408 ms  q1=0.1361 ms  q3=0.1432 ms
+    host_copy: median=0.4477 ms  q1=0.3882 ms  q3=0.4860 ms
+    sum of medians: 4.3680 ms
+  [production] N=2048 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.9067 ms  q1=0.8821 ms  q3=0.9220 ms
+    upload_b: median=0.8798 ms  q1=0.8614 ms  q3=0.8909 ms
+    alloc_c: median=0.0001 ms  q1=0.0000 ms  q3=0.0001 ms
+    encode: median=0.0043 ms  q1=0.0042 ms  q3=0.0044 ms
+    commit_wait: median=8.7335 ms  q1=8.6952 ms  q3=8.7612 ms
+    commit_wait.kernel_gpu: median=7.9528 ms  q1=7.9417 ms  q3=7.9742 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.7875 ms
+    readback: median=0.3730 ms  q1=0.3679 ms  q3=0.3752 ms
+    host_copy: median=0.8741 ms  q1=0.8543 ms  q3=0.8937 ms
+    sum of medians: 11.7715 ms
+  [production] N=4096 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.6098 ms  q1=3.4934 ms  q3=3.6294 ms
+    upload_b: median=3.5458 ms  q1=3.4695 ms  q3=3.7359 ms
+    alloc_c: median=0.0003 ms  q1=0.0000 ms  q3=0.0005 ms
+    encode: median=0.0112 ms  q1=0.0102 ms  q3=0.0132 ms
+    commit_wait: median=67.1340 ms  q1=66.8983 ms  q3=67.1971 ms
+    commit_wait.kernel_gpu: median=64.8932 ms  q1=64.7432 ms  q3=64.9767 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=2.1966 ms
+    readback: median=1.4518 ms  q1=1.4485 ms  q3=1.4571 ms
+    host_copy: median=3.6230 ms  q1=3.5691 ms  q3=3.7244 ms
+    sum of medians: 79.3760 ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 865 filtered out; finished in 4.19s
+
