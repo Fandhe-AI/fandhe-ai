@@ -6,6 +6,8 @@
 //! 追加前後の A/B 時間（AC4。記録のみ）を出す。
 //! すべて Metal 実機依存の `#[ignore]` テストで CI では実行しない。型検査は
 //! `make check-cross-metal-tests` が担う。tolerance・baseline は不変。
+//! #4166 で steel 候補が M4Base の正方 1024／2048／4096 へ結線されたため、表そのものを検証する
+//! 本ファイルの `MetalGemm` は `new_with_steel_large_n(ctx, false)`（結線前の表経路）で作る。
 //! 対象機体（10 コア・"Apple M4"）でなければ `SKIP not-m4-base` を出して return する
 //! （実行側は `MINI_TABLE_ACTIVE` 行の存在を必須にして偽 pass を防ぐ）。
 
@@ -89,7 +91,7 @@ fn m4_base_table_selected_on_macmini() {
     if !active(&ctx) {
         return;
     }
-    let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
     for n in SIZES {
         let (a, b) = gen_square_ab(0x3206_a000 ^ (n as u64), n);
         let (_out, route) = gemm
@@ -116,7 +118,7 @@ fn m4_base_table_bit_match_and_parity() {
     if !active(&ctx) {
         return;
     }
-    let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
     for n in SIZES {
         let (a, b) = gen_square_ab(0x3206_a000 ^ (n as u64), n);
         let (after, _) = gemm
@@ -147,7 +149,7 @@ fn m4_base_table_ab_timing() {
     if !active(&ctx) {
         return;
     }
-    let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
     for n in SIZES {
         let (a, b) = gen_square_ab(0x3206_a000 ^ (n as u64), n);
         let arms = [CANDIDATES[3], CANDIDATES[expected_idx(n)]]; // 0=before 1=after

@@ -25,9 +25,9 @@ fn bits_of(values: &[f32]) -> Vec<u32> {
     values.iter().map(|v| v.to_bits()).collect()
 }
 
-/// OFF（`MetalGemm::new`）と ON の 2 インスタンス。ゲート値も確認する。
+/// OFF（`new_with_frag_interleave(ctx, false)`。steel_large_n は false 固定）と ON の 2 インスタンス。ゲート値も確認する。
 fn pair(ctx: &MetalContext) -> (MetalGemm, MetalGemm) {
-    let off = MetalGemm::new(ctx).expect("OFF GEMM の構築に失敗した");
+    let off = MetalGemm::new_with_frag_interleave(ctx, false).expect("OFF GEMM の構築に失敗した");
     let on = MetalGemm::new_with_frag_interleave(ctx, true).expect("ON GEMM の構築に失敗した");
     assert!(!off.frag_interleave_enabled());
     assert!(on.frag_interleave_enabled());

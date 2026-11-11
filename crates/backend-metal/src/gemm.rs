@@ -622,10 +622,10 @@ pub struct MetalGemm {
     /// テスト専用 `new_with_frag_interleave` だけが上書きする。f16／hfrag／te／
     /// split-K パス 1 は常に `false`（no-op 契約）。
     frag_interleave_enabled: bool,
-    /// N≥1024 限定の steel 候補 T0U-LU-FB opt-in（イシュー #4160。`tile::
+    /// N≥1024 限定の steel 候補 T0U-LU-FB のゲート（イシュー #4160・#4166。`tile::
     /// STEEL_LARGE_N_ENABLED`）。`MetalGemm::new` を含む全構築経路は本番既定
-    /// （`false`）で初期化し、テスト専用 `new_with_steel_large_n` と A/B 計測用の
-    /// 「定数 1 行差分」だけが `true` にする。`true` かつ [`tile::select_steel_large_n`]
+    /// （結線後は `true`）で初期化し、テスト専用 `new_with_steel_large_n` と A/B 計測用の
+    /// 「定数 1 行差分」だけが上書きする。`true` かつ [`tile::select_steel_large_n`]
     /// が `Some` の形状だけ、classic 経路が [`GateProfile::SteelLargeN`] で
     /// パイプラインを解決する（他の形状・経路は不変）。
     steel_large_n_enabled: bool,
@@ -1008,6 +1008,11 @@ impl MetalGemm {
     /// parity・kernel_gpu 5 run ハーネス）のみ。`#[cfg(test)] pub(crate)` に
     /// 留める理由は、`fandhe-ai-backend-metal` が crates.io 公開クレートで
     /// あり候補機構で公開面を増やさないため（性能実測・結線判断は #2111）。
+    ///
+    /// 形状限定 steel のゲート（`steel_large_n_enabled`）は `false` に固定する（#4166）。
+    /// 本入口の用途は steel 以外の軸（unroll・バリア）の単独比較・強制 cfg の腕で、結線後も
+    /// M4Base の正方 1024／2048／4096 で `GateProfile::SteelLargeN` に入って軸が自明化しない
+    /// ようにするため（結線前と同じ経路で比べ続ける）。
     #[cfg(test)]
     pub(crate) fn new_with_steel_candidate(
         ctx: &MetalContext,
@@ -1015,7 +1020,7 @@ impl MetalGemm {
         unroll_load: bool,
         fine_barrier: bool,
     ) -> Result<Self, MetalError> {
-        Self::new_with_gates(
+        let mut g = Self::new_with_gates(
             ctx,
             tile::SWIZZLE_ENABLED,
             fine_barrier,
@@ -1028,7 +1033,9 @@ impl MetalGemm {
             tile::MMA_FRAG_LOAD,
             tile::SMEM_SWIZZLE,
             unroll_load,
-        )
+        )?;
+        g.steel_large_n_enabled = false;
+        Ok(g)
     }
 
     /// テスト専用: [`Self::new`] と同じ構築で simdgroup 交互配置ゲート
@@ -1036,16 +1043,21 @@ impl MetalGemm {
     /// 呼び出し元は `gemm_frag_interleave_diag_tests` のみ。`#[cfg(test)] pub(crate)`
     /// に留めるのは公開面を増やさないため。パイプラインキャッシュはインスタンス
     /// 単位で、構築直後（パイプライン未構築）に上書きするためキー変更は不要。
+    /// 形状限定 steel のゲートは `false` に固定する（#4166。交互配置の ON／OFF を結線前と
+    /// 同じ表経路で比べ続けるため。OFF 腕は `new_with_frag_interleave(ctx, false)` で作る）。
     #[cfg(test)]
     pub(crate) fn new_with_frag_interleave(
         ctx: &MetalContext,
         enabled: bool,
     ) -> Result<Self, MetalError> {
-        Ok(Self::new(ctx)?.with_frag_interleave(enabled))
+        let mut g = Self::new(ctx)?.with_frag_interleave(enabled);
+        g.steel_large_n_enabled = false;
+        Ok(g)
     }
 
-    /// テスト専用: [`Self::new`] と同じ構築で、N≥1024 限定 steel 候補 opt-in（イシュー
-    /// #4160。`tile::STEEL_LARGE_N_ENABLED`）だけを `enabled` に指定する。呼び出し元は
+    /// テスト専用: [`Self::new`] と同じ構築で、N≥1024 限定 steel 候補のゲート（イシュー
+    /// #4160。`tile::STEEL_LARGE_N_ENABLED`）だけを `enabled` に指定する（`false` は結線前の
+    /// 表経路の腕）。呼び出し元は
     /// `gemm_steel_large_n_diag_tests` のみ。`#[cfg(test)] pub(crate)` に留めるのは
     /// 公開面を増やさないため。専用キャッシュは別なので構築後いつ上書きしても安全。
     #[cfg(test)]
@@ -1058,7 +1070,7 @@ impl MetalGemm {
         Ok(g)
     }
 
-    /// テスト専用: steel 候補 opt-in フラグ（#4160）。
+    /// テスト専用: steel 候補のゲート値（#4160・#4166）。
     #[cfg(test)]
     pub(crate) fn steel_large_n_enabled(&self) -> bool {
         self.steel_large_n_enabled
@@ -2660,9 +2672,12 @@ impl MetalGemm {
 
     /// classic 経路のタイル構成とゲート組を決める（イシュー #4160）。fresh（
     /// `dispatch_auto_with_route_impl`）と reuse（`dispatch_auto_resident`）が同じ式を
-    /// 共有する。`steel_large_n_enabled` が `false`（本番既定）なら常に従来の
-    /// `select_for_verified_device` + `Instance`。split-K の classic フォールバック内の
-    /// 選択は対象外（スコープ 3 点は split-K に入らず、パス 1 では load unroll が no-op の
+    /// 共有する。`steel_large_n_enabled` が `false`、または `select_steel_large_n` が `None`
+    /// （M4Base の正方 1024／2048／4096 以外・M4Max・非検証機）なら従来の
+    /// `select_for_verified_device` + `Instance`（結線後の本番既定は `true`。#4166）。
+    /// steel の解決（`pipeline_for_tile` の全候補のパイプライン生成）に失敗した場合は表経路へ
+    /// 落とさず `Err` を返す（Mac mini 実測で到達・fallback なしを確認済み。#4160）。
+    /// split-K の classic フォールバック内の選択は対象外（スコープ 3 点は split-K に入らず、パス 1 では load unroll が no-op の
     /// 既存契約と揃える）。
     fn classic_plan(
         &self,

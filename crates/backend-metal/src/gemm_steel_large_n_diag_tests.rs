@@ -1,5 +1,6 @@
-//! N≥1024 限定の steel 候補 T0U-LU-FB opt-in（`tile::STEEL_LARGE_N_ENABLED`・
-//! `MetalGemm::new_with_steel_large_n`。イシュー #4160）の Mac mini 純カーネル A/B 計測
+//! N≥1024 限定の steel 候補 T0U-LU-FB（`tile::STEEL_LARGE_N_ENABLED`・
+//! `MetalGemm::new_with_steel_large_n`。イシュー #4160。#4166 で本番既定 ON へ結線）の
+//! Mac mini 純カーネル A/B 計測
 //! （診断専用・本番コード不変）。すべて Metal 実機（Apple Silicon）依存の `#[ignore]`
 //! テストで CI では実行しない。型検査だけは `make check-cross-metal-tests` が担う。
 //!
@@ -16,11 +17,12 @@
 //!
 //! # 腕
 //!
-//! - `cur`: `MetalGemm::new`（現行 M4Base 表。判定の基準）
-//! - `sl`: `MetalGemm::new_with_steel_large_n(ctx, true)`（判定の対象）
+//! - `cur`: `MetalGemm::new_with_steel_large_n(ctx, false)`（結線前の表経路 = 現行 M4Base 表。
+//!   判定の基準。結線後は `MetalGemm::new` が `sl` と同じになるため明示的に OFF で作る）
+//! - `sl`: `MetalGemm::new_with_steel_large_n(ctx, true)`（判定の対象。結線後の本番既定と同じ）
 //! - `ref`: `new_with_steel_candidate(ctx, true, true, true)` で `CANDIDATES[0]` を強制
 //!   （bit 一致の照合専用。時間は記録のみ）
-//! - `cur_aa`: `cur` と同構成の 2 本目（A/A 対照。記録のみ。判定に使わない）
+//! - `cur_aa`: `cur` と同構成（OFF）の 2 本目（A/A 対照。記録のみ。判定に使わない）
 //!
 //! `cur`／`sl`／`cur_aa` は本番 reuse 経路（`dispatch_auto_resident`）と同じ classic 計画を
 //! `diag_encode_classic_auto_nn` で encode する。
@@ -90,11 +92,11 @@ struct Gemms {
 }
 
 fn build(ctx: &MetalContext) -> Gemms {
-    let cur = MetalGemm::new(ctx).expect("cur の構築に失敗した");
+    let cur = MetalGemm::new_with_steel_large_n(ctx, false).expect("cur の構築に失敗した");
     let sl = MetalGemm::new_with_steel_large_n(ctx, true).expect("sl の構築に失敗した");
     let r =
         MetalGemm::new_with_steel_candidate(ctx, true, true, true).expect("ref の構築に失敗した");
-    let cur_aa = MetalGemm::new(ctx).expect("cur_aa の構築に失敗した");
+    let cur_aa = MetalGemm::new_with_steel_large_n(ctx, false).expect("cur_aa の構築に失敗した");
     assert!(!cur.steel_large_n_enabled() && !cur_aa.steel_large_n_enabled());
     assert!(sl.steel_large_n_enabled());
     Gemms {
@@ -249,13 +251,13 @@ fn print_device(ctx: &MetalContext) {
     );
 }
 
-/// 本番既定が OFF であること（実機側のドリフト検査。Linux の `tile::` 単体テストと対）。
+/// 本番既定が ON であること（結線後の実機側ドリフト検査。Linux の `tile::` 単体テストと対）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
-fn steel_large_n_default_is_off() {
+fn steel_large_n_default_is_on() {
     let ctx = MetalContext::new().expect("Metal 初期化に失敗した");
     let g = MetalGemm::new(&ctx).expect("構築に失敗した");
-    assert!(!g.steel_large_n_enabled());
+    assert!(g.steel_large_n_enabled());
 }
 
 /// 到達追跡。N ごとの解決構成・ゲート組・経路・フォールバック有無を決定的に残す。

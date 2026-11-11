@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# イシュー #4160: N≥1024 限定の steel 候補 T0U-LU-FB opt-in のゲート（`crates/backend-metal/src/tile.rs` の
-# `STEEL_LARGE_N_ENABLED`。main は false）の framework-compare gemm Metal セル A/B
+# イシュー #4160・#4166: N≥1024 限定の steel 候補 T0U-LU-FB のゲート（`crates/backend-metal/src/tile.rs` の
+# `STEEL_LARGE_N_ENABLED`。結線前の main は false、#4166 の結線後は true）の framework-compare gemm Metal セル A/B
 # （Mac mini 用）。`run_ab_m64_thin_tile_metal.sh`（#3209）の派生で、ラベル allowlist・
 # `validate_facade_path`・同一コミット＋定数 1 行差分の検証・未追跡ビルド入力の検出・
 # `bench_fandhe_lock_restore.sh`・`ab_round_cooldown.sh`・ROUNDS=5 固定・before／after バイナリの
 # sha256 不一致チェックは継承する。
 #
-# before = main の `crates/facade`、after = 同一コミットで上記定数だけを `true` にした計測専用
-# checkout の `crates/facade` を、それぞれ `[patch.crates-io.fandhe-ai]` path patch した 2 本の
+# 向き（環境変数 AB_DIRECTION。既定 pre-wiring。どちらも before=定数 false・after=定数 true）:
+#   pre-wiring（従来。定数が false の main が対象）: before = clean な HEAD、after = 同一コミットに
+#     未コミットの false→true 1 行だけを足した計測専用 checkout。
+#   post-wiring（結線後。定数が true の main が対象。#4166）: before = 同一コミットに未コミットの
+#     true→false 1 行だけを足した計測専用 checkout、after = clean な HEAD。
+# どちらの向きも「同じ HEAD・tile.rs の定数 1 行だけの差分・ほかに未コミット差分なし・gitignore 済みの
+# ビルド影響ファイルなし」を計測前に fail-closed で確かめる。差分を持つ側は計測専用でコミットしない。
+#
+# 以下 `crates/facade` を、それぞれ `[patch.crates-io.fandhe-ai]` path patch した 2 本の
 # `bench-fandhe` としてビルドし、5 round・round 単位で起動順を反転しながら交互実行する。
 # セルは metal × gemm × N {256,512,1024,2048,4096} × {fresh, reuse}（10 セル）。同じ round で
 # candle（`bench-candle --task gemm --device metal`。fresh のみ。record_only）も測り、candle 比
@@ -25,10 +32,10 @@
 # 負荷ゲートのログへ `round<N> gate=timeout|invalid reason=... cell=...` を足し（終了後の FOREIGN は `reason=foreign-after`）、
 # `aggregate.py` が正式系列から外す（部分系列で続ける新経路は作らない）。各回の出力は `results/raw/foreign-gate/` 以下。
 # 加えて、before／after のバイナリ sha256 が同一なら定数の反転が
-# 効いていないため fail-closed で停止する。after は計測専用でありコミットしない。
+# 効いていないため fail-closed で停止する。
 #
-# 呼び出し例（Mac mini 上。bash 3.2 互換。変数は ${VAR} 形式）:
-#   FOREIGN_GATE=/abs/foreign_job_gate.py AB_BEFORE_FACADE_PATH=/abs/before/crates/facade \
+# 呼び出し例（Mac mini 上。bash 3.2 互換。変数は ${VAR} 形式。結線後は AB_DIRECTION=post-wiring を足す）:
+#   AB_DIRECTION=post-wiring FOREIGN_GATE=/abs/foreign_job_gate.py AB_BEFORE_FACADE_PATH=/abs/before/crates/facade \
 #   AB_AFTER_FACADE_PATH=/abs/after/crates/facade \
 #     bash run_ab_steel_large_n_gemm_metal.sh 4160
 set -u
@@ -83,13 +90,32 @@ if [[ -z "${FOREIGN_GATE:-}" ]]; then
   echo "error: FOREIGN_GATE（foreign_job_gate.py の絶対パス）が必須です（他ジョブの前提ゲート。#4160）" >&2
   exit 1
 fi
+AB_DIRECTION="${AB_DIRECTION:-pre-wiring}"
+case "${AB_DIRECTION}" in
+  pre-wiring)
+    # 差分を持つ側 = after（false→true）。clean 側 = before。
+    DIRTY_ARM=after
+    DIFF_FROM=false
+    DIFF_TO=true
+    ;;
+  post-wiring)
+    # 差分を持つ側 = before（true→false）。clean 側 = after。
+    DIRTY_ARM=before
+    DIFF_FROM=true
+    DIFF_TO=false
+    ;;
+  *)
+    echo "error: AB_DIRECTION must be pre-wiring or post-wiring (got: ${AB_DIRECTION})" >&2
+    exit 1
+    ;;
+esac
 validate_facade_path AB_BEFORE_FACADE_PATH "${AB_BEFORE_FACADE_PATH:-}"
 validate_facade_path AB_AFTER_FACADE_PATH "${AB_AFTER_FACADE_PATH:-}"
 BEFORE_FACADE="${AB_BEFORE_FACADE_PATH}"
 AFTER_FACADE="${AB_AFTER_FACADE_PATH}"
 
 # A/B 両 checkout の `STEEL_LARGE_N_ENABLED` を計測前に検証する（fail-closed）。
-# before=false・after=true 以外（同一 checkout・反転漏れ・取得不能）はビルド前に停止する。
+# どちらの向きでも before=false・after=true 以外（同一 checkout・反転漏れ・取得不能）はビルド前に停止する。
 # 宣言は `pub(crate) const STEEL_LARGE_N_ENABLED: bool = <bool>;`（直前行に #[cfg] 属性）。
 read_flag_default() { # read_flag_default <facade_path> -> true|false|(空)
   local tile="$1/../backend-metal/src/tile.rs"
@@ -143,22 +169,36 @@ verify_same_commit_and_diff() {
     echo "error: before/after checkout の HEAD コミットが一致しません (before=${bh} after=${ah})" >&2
     exit 1
   fi
-  if [[ -n "$(git -C "${before_root}" status --porcelain --untracked-files=no)" ]]; then
-    echo "error: before checkout に未コミット変更があります" >&2
+  local clean_arm clean_root dirty_root
+  if [[ "${DIRTY_ARM}" == "after" ]]; then
+    clean_arm=before
+    clean_root="${before_root}"
+    dirty_root="${after_root}"
+  else
+    clean_arm=after
+    clean_root="${after_root}"
+    dirty_root="${before_root}"
+  fi
+  if [[ "${before_root}" == "${after_root}" ]]; then
+    echo "error: before と after が同一の checkout です" >&2
+    exit 1
+  fi
+  if [[ -n "$(git -C "${clean_root}" status --porcelain --untracked-files=no)" ]]; then
+    echo "error: ${clean_arm} checkout（AB_DIRECTION=${AB_DIRECTION} では clean 側）に未コミット変更があります" >&2
     exit 1
   fi
   verify_no_untracked_build_inputs "before" "${before_root}"
   verify_no_untracked_build_inputs "after" "${after_root}"
-  names="$(git -C "${after_root}" diff --name-only HEAD)"
+  names="$(git -C "${dirty_root}" diff --name-only HEAD)"
   if [[ "${names}" != "crates/backend-metal/src/tile.rs" ]]; then
-    echo "error: after checkout の差分が tile.rs のみではありません: ${names:-(空)}" >&2
+    echo "error: ${DIRTY_ARM} checkout の差分が tile.rs のみではありません: ${names:-(空)}" >&2
     exit 1
   fi
-  changed="$(git -C "${after_root}" diff -U0 HEAD -- crates/backend-metal/src/tile.rs | grep -E '^[-+][^-+]' || true)"
+  changed="$(git -C "${dirty_root}" diff -U0 HEAD -- crates/backend-metal/src/tile.rs | grep -E '^[-+][^-+]' || true)"
   if [[ "$(printf '%s\n' "${changed}" | wc -l | tr -d ' ')" != "2" ]] ||
-    ! printf '%s\n' "${changed}" | grep -qE '^-.*STEEL_LARGE_N_ENABLED.*= false;' ||
-    ! printf '%s\n' "${changed}" | grep -qE '^\+.*STEEL_LARGE_N_ENABLED.*= true;'; then
-    echo "error: after checkout の差分が STEEL_LARGE_N_ENABLED の false→true 1 行のみではありません" >&2
+    ! printf '%s\n' "${changed}" | grep -qE "^-.*STEEL_LARGE_N_ENABLED.*= ${DIFF_FROM};" ||
+    ! printf '%s\n' "${changed}" | grep -qE "^\+.*STEEL_LARGE_N_ENABLED.*= ${DIFF_TO};"; then
+    echo "error: ${DIRTY_ARM} checkout の差分が STEEL_LARGE_N_ENABLED の ${DIFF_FROM}→${DIFF_TO} 1 行のみではありません" >&2
     exit 1
   fi
 }

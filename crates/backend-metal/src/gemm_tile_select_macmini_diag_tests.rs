@@ -2,6 +2,8 @@
 //! （イシュー #3181。診断専用・本番コード不変）。
 //! すべて Metal 実機（Apple Silicon）依存の `#[ignore]` テストで、CI では実行しない。
 //! 型検査だけは `make check-cross-metal-tests` が担う。
+//! #4166 の結線後も、表選択を追跡する本ファイルの `MetalGemm` は `new_with_steel_large_n(ctx, false)`
+//! （結線前の表経路）で作り、TRACE の select と実際の route を一致させる。
 //!
 //! # 位置づけ
 //!
@@ -111,7 +113,7 @@ fn run_tiled(
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn tile_select_trace_square_sizes() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
-    let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
     let verified = ctx.verified_m4_max_gpu_core_count();
     println!(
         "DEVICE gpu_cores={} soc=\"{}\" verified_m4_max={} split_k_enabled={}",
@@ -157,7 +159,7 @@ fn tile_candidates_match_cpu_reference() {
     use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
 
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
-    let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
     for n in SIZES {
         let (a, b) = gen_square_ab(0x3181_a000 ^ (n as u64), n);
         let mut expected = vec![0.0f32; n * n];
@@ -195,7 +197,7 @@ fn tile_candidates_match_cpu_reference() {
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn tile_candidates_kernel_gpu_square_sizes() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
-    let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
     let verified = ctx.verified_m4_max_gpu_core_count();
     let num = tile::CANDIDATES.len();
 
