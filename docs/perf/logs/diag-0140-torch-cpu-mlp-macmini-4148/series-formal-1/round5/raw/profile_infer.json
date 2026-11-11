@@ -1,0 +1,69 @@
+{
+ "issue": 4148,
+ "section": "infer",
+ "run": 5,
+ "steps": 50,
+ "torch_version": "2.14.0",
+ "n_ops_aten_total": 19,
+ "n_ops_aten_toplevel": 10,
+ "mm_has_child_ops": true,
+ "ops": [
+  {
+   "name": "aten::add",
+   "count": 100,
+   "self_cpu_s": 0.0001471400000000007,
+   "cpu_total_s": 0.0001471400000000007
+  },
+  {
+   "name": "aten::clamp_min",
+   "count": 50,
+   "self_cpu_s": 0.0001015540000000011,
+   "cpu_total_s": 0.0001015540000000011
+  },
+  {
+   "name": "aten::detach",
+   "count": 50,
+   "self_cpu_s": 8.955999999999699e-06,
+   "cpu_total_s": 1.8704999999999893e-05
+  },
+  {
+   "name": "aten::matmul",
+   "count": 100,
+   "self_cpu_s": 1.3833999999999878e-05,
+   "cpu_total_s": 0.0011537149999999996
+  },
+  {
+   "name": "aten::mm",
+   "count": 100,
+   "self_cpu_s": 0.0011334679999999986,
+   "cpu_total_s": 0.0011398809999999995
+  },
+  {
+   "name": "aten::relu",
+   "count": 50,
+   "self_cpu_s": 1.1664999999998568e-05,
+   "cpu_total_s": 0.00011321899999999969
+  },
+  {
+   "name": "aten::resolve_conj",
+   "count": 350,
+   "self_cpu_s": 7.743000000000539e-06,
+   "cpu_total_s": 7.743000000000539e-06
+  },
+  {
+   "name": "aten::resolve_neg",
+   "count": 50,
+   "self_cpu_s": 1.3720000000004406e-06,
+   "cpu_total_s": 1.3720000000004406e-06
+  },
+  {
+   "name": "aten::to",
+   "count": 100,
+   "self_cpu_s": 6.0799999999997775e-06,
+   "cpu_total_s": 6.0799999999997775e-06
+  }
+ ],
+ "note": "profiler 下の値。時間は計時腕の値と混ぜない（op 数と構成比だけを内訳計算に使う）",
+ "bench_py_sha256": "9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b",
+ "diag_script_sha256": "3775b01ba7f9e31c30a017421ba273c5cd5fe3d4dd6692fe37a499fea6db9ef4"
+}

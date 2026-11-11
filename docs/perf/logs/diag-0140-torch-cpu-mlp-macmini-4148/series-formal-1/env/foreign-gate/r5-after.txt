@@ -1,0 +1,10 @@
+CLEAN after 2026-11-11T01:44:47Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 0 0 0 0 0
+processes_scanned 835
+max_pcpu_non_excluded 0.9
+top pid=828 uid=0 pcpu=0.9 name=Karabiner-Core-Service
+top pid=596 uid=0 pcpu=0.7 name=bluetoothd
+top pid=1013 <user> pcpu=0.7 name=sharingd
+top pid=958 <user> pcpu=0.4 name=rapportd
+top pid=603 uid=88 pcpu=0.3 name=WindowServer

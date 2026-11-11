@@ -1,0 +1,51 @@
+{
+ "issue": 4148,
+ "section": "gemm256",
+ "run": 4,
+ "steps": 50,
+ "torch_version": "2.14.0",
+ "n_ops_aten_total": 10,
+ "n_ops_aten_toplevel": 6,
+ "mm_has_child_ops": true,
+ "ops": [
+  {
+   "name": "aten::detach",
+   "count": 50,
+   "self_cpu_s": 7.4999999999969585e-06,
+   "cpu_total_s": 1.6583000000000556e-05
+  },
+  {
+   "name": "aten::matmul",
+   "count": 50,
+   "self_cpu_s": 8.501000000001522e-06,
+   "cpu_total_s": 0.0012386550000000017
+  },
+  {
+   "name": "aten::mm",
+   "count": 50,
+   "self_cpu_s": 0.001227531000000004,
+   "cpu_total_s": 0.0012301540000000004
+  },
+  {
+   "name": "aten::resolve_conj",
+   "count": 200,
+   "self_cpu_s": 3.957000000000109e-06,
+   "cpu_total_s": 3.957000000000109e-06
+  },
+  {
+   "name": "aten::resolve_neg",
+   "count": 50,
+   "self_cpu_s": 1.6670000000020186e-06,
+   "cpu_total_s": 1.6670000000020186e-06
+  },
+  {
+   "name": "aten::to",
+   "count": 100,
+   "self_cpu_s": 5.705000000003e-06,
+   "cpu_total_s": 5.705000000003e-06
+  }
+ ],
+ "note": "profiler 下の値。時間は計時腕の値と混ぜない（op 数と構成比だけを内訳計算に使う）",
+ "bench_py_sha256": "9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b",
+ "diag_script_sha256": "3775b01ba7f9e31c30a017421ba273c5cd5fe3d4dd6692fe37a499fea6db9ef4"
+}
