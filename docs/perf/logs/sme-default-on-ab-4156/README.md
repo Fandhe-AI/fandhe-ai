@@ -9,7 +9,7 @@
   - §9 に所有者決定を転記した（GB10-GATE-ONLY-STRUCTURAL・NOISE-BAND = adopted・UNDETERMINED-HANDLING = return-to-owner）。根拠は #4143 の https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 と #4142 の https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 。記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16、`docs/cpu-gemm-sme-unsafe-audit.md` §12.14、`docs/perf/noise-band-decision.md`。
   - §11 に道具の sha256、§12 に Mac mini 腕の準備、§13 に露出の申告を足した。
 - `prereg_append.txt`（`RULE.v2.txt` の sha256 と準備時刻）も v2 の PR でコミットした。
-- **Mac mini 腕はまだ始められない**。`RULE.v2.txt` §12 (c)（他ジョブのゲートに当たったときの系列数の上限）が空欄で、所有者が決める。記入すると `RULE.v2.txt` の sha256 が変わるため、`prereg_append.txt` を取り直してから両機体を測る（`aggregate.py` は両機体の `prereg_append.txt` を現在の `RULE.v2.txt` と照合する）。
+- **計測はまだ始めない（GB10 腕・Mac mini 腕とも）**。`RULE.v2.txt` §12 (c)（Mac mini 腕で他ジョブのゲートに当たったときの系列数の上限）が空欄で、所有者が決める。記入すると `RULE.v2.txt` の sha256 が変わるため、`prereg_append.txt` を取り直してから両機体を測る（`aggregate.py` は両機体の `prereg_append.txt` を現在の `RULE.v2.txt` と照合する）。
 
 ## 目的
 
@@ -90,7 +90,8 @@ Mac mini 腕の準備（`__pycache__` の扱い・系列の前に誰がプロセ
     - mediaanalysisd を 5 以下で通す
     - mediaanalysisd を部分一致で拾う
   - <metal-node> で `foreign_job_gate.py` を 1 回だけ動かした。出力 10 行は漏れ検査（`leak_re`）に 0 件で当たった（計測ではない）。
-- **未検証**: 実機での A/B・P-RT・P-BIT・マスク収録（Mac mini と GB10 が必要）。
+- v2 の固定前に、`<cuda-node>` で v2 の道具の捨て試走を 1 回流した（2026-11-11）。全段が exit 0 で、マスク収録まで通った。見たのは終了コードの行だけで、出力は開かずに消した（`RULE.v2.txt` §13）。
+- **未検証**: 正式系列での実機の A/B・P-RT・P-BIT・マスク収録と、マスク後の収録物に対する `aggregate.py` の実行（Mac mini と GB10 が必要）。
 
 ## スコープ外
 
