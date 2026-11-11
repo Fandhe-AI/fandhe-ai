@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running tests/cpu_sme_gate_bit_dump.rs (<home>/work/ab-4163-m/runner/target-ab-infer-graph-default-4163-gates-r3-C/release/deps/cpu_sme_gate_bit_dump-30189880082be3ee)
+
+running 1 test
+test dump_cpu_sme_gate_bits ... out[gemm512][0].bits=0xc0886ca4
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+dump_lines_dropped=6726846
+rc=0

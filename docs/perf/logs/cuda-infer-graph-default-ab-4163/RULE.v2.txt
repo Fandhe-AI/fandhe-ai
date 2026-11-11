@@ -1,0 +1,147 @@
+# RULE fixed-at-utc: 2026-11-11T15:01:01Z
+# RULE.v2（#4163）。RULE.txt（v1・PR #4257・マージコミット 737b9b5d7・N=5）は固定済みの記録として残し、計測には使わない。
+# [v2 で変えた点と理由]
+#   判定に関わる変更は R3 の反復回数 N だけ（r3_repeats: 5 → 3）。理由は所要時間: N=5 では系列全体が約 2.4 時間の見込み
+#   （R3 だけで約 131 分）。所有者判断（#4163 コメント 6798581780・2026-11-11T14:31:49Z）。判定方式は同じで回数を 3/3 にする:
+#   腕 A で 3/3 回失敗し、腕 C で 3/3 回成功したテストだけを「阻害」とし、結果が混ざったテストは「不安定」として記録して判定に使わない。
+#   N=3 の見込みは R3 が約 86 分、系列全体で約 1.6 時間。
+#   v1 と違う行（付随する変更を含む全部）: fixed-at-utc、本ブロック、source_commit（v1 のマージ後の main）、runner_sha256・gates_sha256
+#   （ランナーとゲートが読む RULE の名前を RULE.v2.txt にし、ランナーの差分検査の除外を v2 の構成に合わせた。同じ PR）、r3_repeats、
+#   [固定時の補足] の (a)（N の出典）・(c)（差分検査の除外）・(f)（集計コマンドの RULE 名）・(g) の末尾 2 行（本変更の経緯）。
+#   ゲート・判定式・閾値・セル・round・対象差分の記述・露出の申告（(g)）は v1 のまま。patch・事前リスト・集計器・bench のピンも v1 と同じ値。
+#   v1 のピンは 5e8bfd8ea 時点のランナー・ゲートを指すため、この変更の後は v1 に --check-rule を当てると不一致になる（v1 は使わない）。
+#   この判断は計測の前に行った。v1 の N=5 の系列は起動していない（ノードにロック・計測ディレクトリ・ランナーのプロセスが無いことを確かめた）。
+#   v1 の固定後に見たのはノードの状態（ロック・プロセス数・ディスク）だけで、判定に使う値は見ていない。
+#
+# イシュー #4163（親 #4155・ルート #4140）: CUDA Graph（推論チェーン capture）を既定にした場合の影響の事前登録規則。
+# 本ファイルは雛形。PR-2 で RULE.txt として埋めて単独コミットし、その後に測る（事後に緩めない。
+# 変更が要る場合は別名 RULE.v2.txt を計測前に再登録する）。--check-rule でプレースホルダ 0・sha256 一致を確認する。
+# 継承元: cuda-infer-chain-graphcapture-2115/RULE.txt・infer-chain-graphcapture-rejudge-3205/RULE.txt
+#         （専有ゲート・ADOPT／REJECT／undetermined の骨格）。
+#
+# [対象 tree と固定値]（行頭 2 スペースの `key: value` だけが機械可読。ランナーと aggregate が突合する）
+  source_commit: 737b9b5d7906f01826564b38dbf461d49cb1c8be
+  runner_sha256: 48d5442c0d56119a0cc2249af71abf53ade84b8577cd186ccd76cd79d7ad09b6
+  gates_sha256: 669c8f966ffd5fa167e8cbc8cc69274934c21efc4dc659efff081a567e421eda
+  patch_sha256: dc278c8d6809ff81c7617ff0434cc04e5c429ffb15d50288ab869450b300f546
+  assumption_list_sha256: 317b0714649062a7b900119a6f9ca9334a25526db06022cb7eca529b726b51c1
+  aggregate_sha256: 5a23d9a2cb6e56b32264c6114028a271123ab34ba96b7b049e66710e475c4191
+  bench_main_sha256: 41de255182211212dac18aba2ef7a8125c6263e42cd1447ba95b9978354bf4f1
+  r3_repeats: 3
+# 対象差分: `git diff v0.14.0 <source_commit> -- crates/backend-cuda/src crates/autodiff/src/optim/device_store.rs` の
+#   有無と要旨を RULE.txt へ追記する（差分あり（テストのみ）。要旨は末尾の [固定時の補足] (b)）。
+#
+# [判定機・ビルド]
+#   DGX Spark GB10（aarch64）専有。既定 feature・--release（internal-diagnostics は Legacy stream に固定されるため使わない）。
+#   1 ツリー・1 ビルド・1 バイナリ。ビルドを全部先に済ませ、計測中はビルドを並走させない。
+#   実機ロック保持（HW_LOCK_HELD=1 と owner ファイル）。公開面に実機のホスト名・パスを書かない（<cuda-node>）。
+#
+# [腕と同値性]
+#   off = FANDHE_AI_CUDA_GRAPH_INFER 未設定（STEP・TRAIN も未設定）、on = FANDHE_AI_CUDA_GRAPH_INFER=1 のみ。腕ごとに別プロセス。
+#   env=1 は既定 ON と同値: infer_graph_stream_requested と capture 判定は同じ resolve_infer_requested(None, env,
+#   INFER_GRAPH_DEFAULT_ENABLED) を通り、env "1" と const true はどちらも true を返す。性能 A/B は配置差
+#   （#3596 で ±0.6% 程度）を避けるため同一バイナリの env 切替。const 反転ビルド（default-on.patch）は R3 にだけ使う。
+#
+# [セル（11）と事前帰属]
+#   infer fresh × batch {64, 1024, 4096}     : stream 変更（event tracking の無効化）のみ。capture に届かない
+#   infer reuse（常駐入力）× 同               : stream 変更のみ。0.14.0 の本番経路（スコアボード G-CUDA-INF reuse）は
+#                                              predict_resident_input を通り capture に届かない（ChainInput::Host のみ capture）
+#   infer reuse-host（--diag-host-input-reuse）× 同: stream 変更 + capture の合算（診断腕。本番経路ではない）
+#   train fresh・train reuse × size 64        : stream 変更のみ。既定 ON は全 CUDA 利用者の既定 stream を created に変えるため非後退セルに含める
+#
+# [専有ゲート（round ごと）]
+#   compute プロセス 0・GPU 使用率 0%・load1 < 1.0 が 30 秒間隔で 3 サンプル連続。最大 30 分。不通過は undetermined（逃げ道なし）。
+# [round と起動順]
+#   5 round 固定。基準セル列（上記の順）を round r で 3*(r-1) mod 11 だけ巡回し、各セルは off／on を連続起動。
+#   先後は奇数 round が off→on、偶数 round が on→off。起動順はランナーが order-<label>.txt に記録し aggregate が検査する。
+#
+# [前提ゲート（計測と同じ HEAD・GB10・既定 feature・--release。SKIP・未実行は不合格。各ログに rc= 行）]
+#   R0   : env なしで linear_forward_device_real_device・graph_capture_real_device が green
+#   R1(a): env=1 で infer_graph_capture_real_device の全テストが INFER_CAPTURE_R1: PASS（SKIP は不合格）
+#   R1(b): env=1 で facade の predict_device_chain_cuda_bit_identity を --test-threads 指定なし（既定の並列）で 5 回実行し 5/5 合格。
+#          失敗時は失敗テスト名・panic 位置・エラー variant を記録（DeviceContextCaptureInProgress と bit 不一致を分ける）。
+#          仮説（判定に使わない）: #3637 のチェーン外待機で原因 2 は解消している。--test-threads=1 への切替は採らない（所有者の選択肢）。
+#   R2   : off／on の 2 プロセスで predict_device_chain_cuda_graph_bit_identity の batch 64／1024／4096 のダンプ（行数 batch*10）が全行一致
+#   R3   : 既定 ON の波及。腕 C（tree、env なし）と腕 A（tree + default-on.patch、env なし）で backend-cuda・facade の
+#          #[ignore] 含む全テストを r3_repeats（N）回ずつ実行し、テスト単位の pass／fail を回ごとに突き合わせる。
+#          腕 A で N 回とも失敗し、腕 C で N 回とも成功したテストのうち、default-off-assumption-tests.txt に載るものは
+#          「既定 OFF 前提」、載らないものは「阻害」。どちらかの腕で回ごとに結果が混ざったテストは「不安定」として
+#          記録し、判定には使わない（#4163 所有者判断 2026-11-11 (d)。試走で失敗名を見た後の事前リストでの除外は採らない）。
+#          facade の tests/cpu_sme_gate_bit_dump.rs::dump_cpu_sme_gate_bits は標準出力へ直接書くため（意図した作り）、
+#          本体の実行から --exact --skip で外し、同じ回の中で --exact で単独に流して、その結果も R3 の集合に含める。
+#          edition 2024 の merged doctests は 1 つの Doc-tests 節に結果行を複数出すため、集計はそれを完了とみなす。
+#          補助（判定外）: 腕 B（パッチ + FANDHE_AI_CUDA_GRAPH_INFER=0）で opt-out が効くことを 1 回記録。
+#
+# [hard 条件]
+#   各セルで off／on 全 run の checksum が完全一致（train は最終 loss）。不一致は REJECT。
+#   （checksum 一致は bit 同一性の証明ではない。R2 で補う。）
+# [比]
+#   ratio = median(on 5 run の median_s) / median(off 5 run の median_s)。ratio_r = on_r / off_r（round 順）。
+#
+# [判定]（「既定反転を所有者へ推奨できるか」。ADOPT でも INFER_GRAPH_DEFAULT_ENABLED は変えない）
+#   優先順: 入力不正 → undetermined 要因 → hard 条件・bit 不一致（REJECT）→ 比
+#   ADOPT（すべて）: 全 round でゲート通過／R0・R1(a)・R1(b) 5/5・R2 合格／R3 の「阻害」0 件／hard 条件／
+#                    全 11 セルの ratio <= 1.00／reuse-host の少なくとも 1 セルで 5/5 round の ratio_r < 1.00
+#   REJECT（いずれか）: いずれかのセル（train を含む）の ratio > 1.00／checksum 不一致／R1・R2・R3 の bit 不一致
+#   undetermined（いずれか）: ゲート不通過／run 数不足・欠測／R0〜R3 の未実行／GB10 以外／sha 不一致／
+#                    R1(b) または R3「阻害」がエラー型の失敗／ADOPT・REJECT のどちらにも当たらない
+#
+# [ノイズ帯]
+#   docs/perf/noise-band-decision.md の NB-RANGE5 を名前で参照し、ratio_r の幅を記録するだけ（判定外）。
+#   #4142 が承認待ちのため、承認後に定義が変われば RULE.v2.txt で反映する。
+# [限界]
+#   bench から InferGraphStats は見えない。reuse-host で capture が発火したことは R1・R2 で示すが、形状は bench と完全には一致しない。
+#   単一機体・batch 3 種・1 スレッド。
+# [判定後]
+#   ADOPT／REJECT／undetermined のいずれも正当な結果として記録する。const 反転の結線か見送りかは #4167（所有者承認）。
+#   tolerance・baseline・依存ピンは変えない。
+# [対象外]
+#   常駐入力経路の capture 対応・cuGraphExecUpdate（新規 unsafe・未承認）・train chain セル・学習 Graph の既定反転（#3594 で見送り）・Metal・CPU。
+#
+# [固定時の補足]（上の条件・閾値・判定式は雛形〈PR #4254 版〉のまま変えない。雛形から変えたのはプレースホルダの穴埋めと本節の追加だけ。
+#   冒頭 3〜4 行目の「本ファイルは雛形」は雛形の文のまま残している）
+#   (a) r3_repeats: 3 は所有者判断（#4163 コメント 6798581780・2026-11-11。v1 の 5〈コメント 6797929512〉を所要時間で改訂）。
+#       腕 A で 3/3 回失敗し、腕 C で 3/3 回成功したテストだけを「阻害」とする。結果が混ざったテストは「不安定」として記録し、判定には使わない（R3 の定義どおり）。
+#   (b) 対象差分: `git diff v0.14.0 <source_commit> -- crates/backend-cuda/src crates/autodiff/src/optim/device_store.rs` は
+#       差分あり（テストのみ）。crates/backend-cuda/src/jit_cache_regression_tests.rs の 1 ファイル（+21／−4。PR #4254）で、
+#       multiprocess_concurrent_store_absorbs_rename_race が起動する子プロセスの stdout・stderr を pipe で捕捉し、失敗時だけ
+#       assert のメッセージに載せる。テストの判定（子の終了コード）と製品コードは変えていない。device_store.rs は差分なし。
+#   (c) tree と送り方: 計測する HEAD は、本 RULE.v2.txt を載せた PR の main へのマージコミット（main の先頭ではなくこのコミットに固定）。
+#       マージ後、送る前に送信側で `git diff --quiet <source_commit> <HEAD> -- . ':(exclude)docs/perf/logs/cuda-infer-graph-default-ab-4163/RULE.v2.txt'
+#       ':(exclude)scripts/bench/framework-compare/run_ab_infer_graph_default_cuda.sh' ':(exclude)docs/perf/logs/cuda-infer-graph-default-ab-4163/run_gates_4163.sh'`
+#       を流す（ランナーの検査と同じ。除外の 2 本は runner_sha256・gates_sha256 で中身を固定している）。非 0（source_commit から
+#       マージまでに別の変更が main に入った）なら測らず、止めて所有者へ報告する。bundle は HEAD までの履歴で作る。
+#       ノードへは git bundle（全履歴。ランナーが source_commit を HEAD の祖先として検査するため）で送り、新しいディレクトリへ clone して
+#       HEAD を detach で checkout し、.rev-stamp（1 行目に完全 SHA、2 行目に dirty=0）を置いて .git/info/exclude に足す。
+#       ノード上で GitHub への fetch はしない。
+#       ツリー指紋: 送信側とノードで `git archive --format=tar <HEAD>` の sha256 と `<HEAD>^{tree}` が一致することを起動前に確かめる
+#       （固定前に、試走の clone で git の版が違っても両方とも一致することを確かめた）。値はマージ後に決まるため計測 PR に記録する。
+#   (d) 実機ロック: `~/work/.fandhe-hw-lock` を手で取り（owner は「#4163 measure <UTC>」）、HW_LOCK_HELD=1 と HW_LOCK_OWNER_FILE を渡して
+#       ランナーを nohup で起動し、終了後（失敗時も）に外す。起動前に compute プロセス 0 と他ジョブが無いことを確かめ、
+#       他ジョブを見つけたら止めずに報告する。系列の途中は値を見ない。見るのは run.log の `^done\. rc=` 行と専有ゲートのログ
+#       （load_gate-<label>-cuda.log）だけで、run.log の末尾は表示しない（試走では末尾に本体の JSONL が 1 行あった。(g)）。
+#   (e) [ノイズ帯] の注記: docs/perf/noise-band-decision.md は 2026-11-10 に #4142 で案 A（NB-RANGE5 を定義を変えずに採用）として
+#       承認済み（#4209）。記録のみで判定に使わない点は変わらない。
+#   (f) 収録: `python3 -I aggregate_4163.py --dir scripts/bench/framework-compare/results/raw --rule RULE.v2.txt --label <label>` で集計する
+#       （README の手順 3 と同じ形で、--rule だけ RULE.v2.txt にする。README は差分検査の対象なので本 PR では直さず、記録 PR で直す）。
+#       ホスト名は <cuda-node>、$HOME は <home>、ユーザー名は <user>（語境界つきで置換）に
+#       置き換え、漏れがないことを確かめてから収録する。`git diff v0.14.0 <source_commit> -- crates/` の一覧と .rev-stamp も収録する。
+#   (g) 固定前の捨て試走（2026-11-10T05:52:23〜06:42:33Z。tree は当時の main d50251b38 に試走用 RULE の写しを載せたもの。
+#       R3 は #4254 より前の版で 1 回）: ランナーは rc=0、専有ゲートは 5/5 round 通過。集計は R3 の重複で入力不正（rc=2）で止まり、
+#       判定は出ていない。
+#       見たもの:
+#         ・run.log の末尾 4 行（終了の確認）。本体 A/B の JSONL 1 行（infer の 1 セル・1 run の median_s・checksum を含む）があった。
+#         ・専有ゲートのログ（round ごとの通過・待ち時間・load1）。
+#         ・R3 の backend-cuda: 腕 C・A の lib の集計行、失敗のある他のバイナリの集計行（件数）、腕 C・A の失敗テスト名の先頭 5 件、
+#           腕 C・A・B の失敗テストの件数、C と A の共通・C のみ・A のみ、B と C の差の名前。
+#         ・R3 の facade（fandhe-ai）: 腕 C・A の失敗テスト名の先頭 5 件。各腕の Running／Doc-tests 節ごとの結果行の本数。
+#         ・重複を除いて集計を流し直したときの、R3 の構造上の理由の行（節数と結果行数・未知のステータス）。
+#       見ていないもの: 本体 A/B の比（計算していない）、R0〜R2 の結果、判定語。
+#       PR #4254 の検証（試走ログを組み直して集計が止まらないことの確認）では、構造の検査結果（行数・理由の件数）だけを見て出力は捨てた。
+#       試走の後に変えたこと: R3 の作り方（子プロセス出力の捕捉・ダンプテストの単独実行・merged doctests の扱い・N 回反復と「不安定」）。
+#       いずれも所有者判断（#4163 コメント 6790955730・6797929512）による。「不安定」の扱いは、試走で失敗名を見た後に決まった。
+#       変えていないこと: 判定式・閾値、default-off-assumption-tests.txt と default-on.patch（どちらも #4199 で入ったまま。
+#       試走で A のみの失敗名を見た後も変えていない）、本体 A/B のセル・round・起動順。
+#       この露出は所有者が問題とすれば試走の扱いを含めて差し戻せる。試走の記録はリポジトリに入れない。
+#       v2 への改訂（N=5→3）は所要時間だけを理由に計測の前に行い、v1 の固定から v2 の固定までに判定に使う値は見ていない
+#       （冒頭の [v2 で変えた点と理由]）。
