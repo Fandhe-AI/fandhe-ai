@@ -2,9 +2,8 @@
 
 ## 状態
 
-**PR-1 時点: 実測なし。** 本ディレクトリは測る前に固定する部品（RULE 雛形・集計スクリプト・1 round の起動キット）だけを置く。
-`RULE.txt`（PR-2・単独コミット）、`round{i}/`・`env/`・`aggregate.md`・`aggregate.tsv`（PR-3・<metal-node> での実測）は後続で追加する。
-実測値・内訳は、実測するまで書かない（推定値で埋めない）。#4148 は実測と記録の PR-3 で閉じる（部品の PR は `Refs #4148`）。
+**PR-3（2026-11-11 実測）: 実測済み。** 本系列は `series-formal-1/`（5 round・全 PASS・正式）。規則は `RULE.txt`（2026-11-11T01:18:14Z 固定・PR #4239）。
+部品の PR は `Refs #4148`、本 PR で #4148 を閉じる。値と内訳は下の「結果」と `series-formal-1/aggregate.md`。
 
 ## 目的
 
@@ -49,4 +48,32 @@ PyTorch CPU（Apple M4・Accelerate）の窓を、判定ではなく内訳とし
 
 ## 結果
 
-（実測後に追記。PR-1 時点は空。）
+記録先は `series-formal-1/`（`aggregate.md`・`aggregate.tsv`・`round1〜5/`・`round<i>.log`・`drive.status`・`env/`・`RULE.txt` の写し）。
+集計は `python3 -I aggregate_4148.py --dir series-formal-1`（rc=0）。record_only のため分類・判定はしない。
+
+### 系列
+
+- 系列の開始: 2026-11-11T01:43:35Z、終了: 01:44:47Z。round 1〜5 とも開始前・終了後の他ジョブのゲートが CLEAN で、`gate.txt` は PASS（`drive.status`）。
+- 系列の前の確認（`env/preflight.txt`）: `mediaanalysisd` は 2 分間隔で 3 回とも %CPU 0.0、spotlightknowledged の「Submitting text processing」は直近 10 分で 0 件。
+- 系列の始め方（`env/series-start.txt`）と kit の照合（`env/kit-verify.txt`。sha-rc=0・gate-selftest-rc=0・wrap-selftest-rc=0）。
+- torch 2.14.0。BLAS 経路は `BLAS_INFO=accelerate`（各 round の `raw/env.json` の `torch_config`）で、宣言どおり Accelerate。
+- 系列の途中で値は見ていない（見たのは `drive.status` と `gate.txt` だけ）。
+
+### 区間内訳（5 round の中央値。ms。比は窓に対する比の run 間の中央値）
+
+| section | 窓 | 純 `mm`（10 回まとめ・1 回あたりの和） | 非 GEMM の要素演算・更新など（実測） | 残差（推定） |
+|---|---|---|---|---|
+| train | 0.13677（最小〜最大 0.11654〜0.13758） | 0.04235（0.310） | ew_fwd 0.00833（0.061）・update 0.04152（0.302）・loss_item 0.00012 | 0.04419（0.325） |
+| infer | 0.03169（0.03165〜0.03325） | 0.02089（0.659） | ew_fwd 0.00485（0.151）・readout 0.00058・checksum 0.00229（0.072） | 0.00304（0.096） |
+| gemm256 | 0.16440（0.16427〜0.16502） | 0.02311（0.141） | readout 0.00046・checksum 0.13204（0.803） | 0.00879（0.053） |
+
+- train の窓は run 間で 0.11654〜0.13758 ms に広がる（実測のまま。除外・説明はしない）。
+- gemm256 の窓の 80% は Python の checksum で、純 `mm` は 14%。Accelerate `cblas_sgemm` の ctypes 直呼び（10 回まとめ）は 0.02339 ms で、`torch_vs_ctypes_gap` は −0.00028 ms（ctypes の引数変換費を含むため torch のラッパー費には帰属させない）。
+- profiler 腕（op 数のみ）: step あたりの aten op は train 99（最上位 34）・infer 19（10）・gemm256 10（6）。`aten::mm` は 3 section とも子 op を持つ。
+- `dispatch_floor_est` は区間と重なるため和に入れていない（train 0.01152・infer 0.00334 ms・推定）。
+
+### ツリーの指紋（開示）
+
+- 試走 1 の前に、送信側とノード側の `tree_fingerprint` が RULE の値と一致することを確かめた（RULE 項 8 (d)）。本系列の直前には取り直していない。
+- 計測後のツリーには `scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-312.pyc` が 1 件増えていた（files=2702）。
+  生成は 2026-11-11T01:02:48Z で、試走 1 の round 1 のとき（本系列の前）。`__pycache__` を除いた写しの指紋は RULE の値と一致し、`.rev-stamp` も `tree_sha` と一致する（`series-formal-1/env/trees.txt`）。#4151 の測り直しと同じ扱い。

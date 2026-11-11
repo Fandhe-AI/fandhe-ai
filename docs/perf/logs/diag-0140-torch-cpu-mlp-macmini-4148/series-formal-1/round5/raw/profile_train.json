@@ -1,0 +1,195 @@
+{
+ "issue": 4148,
+ "section": "train",
+ "run": 5,
+ "steps": 50,
+ "torch_version": "2.14.0",
+ "n_ops_aten_total": 99,
+ "n_ops_aten_toplevel": 34,
+ "mm_has_child_ops": true,
+ "ops": [
+  {
+   "name": "aten::_local_scalar_dense",
+   "count": 50,
+   "self_cpu_s": 5.958999999999832e-06,
+   "cpu_total_s": 5.958999999999832e-06
+  },
+  {
+   "name": "aten::_to_copy",
+   "count": 350,
+   "self_cpu_s": 0.0001094389999999924,
+   "cpu_total_s": 0.00025398599999999457
+  },
+  {
+   "name": "aten::add",
+   "count": 100,
+   "self_cpu_s": 0.00020517899999999997,
+   "cpu_total_s": 0.00020517899999999997
+  },
+  {
+   "name": "aten::as_strided",
+   "count": 250,
+   "self_cpu_s": 3.263100000000087e-05,
+   "cpu_total_s": 3.263100000000087e-05
+  },
+  {
+   "name": "aten::clamp_min",
+   "count": 50,
+   "self_cpu_s": 0.00011944900000000435,
+   "cpu_total_s": 0.00011944900000000435
+  },
+  {
+   "name": "aten::copy_",
+   "count": 400,
+   "self_cpu_s": 0.00011087200000000219,
+   "cpu_total_s": 0.00011087200000000219
+  },
+  {
+   "name": "aten::div",
+   "count": 50,
+   "self_cpu_s": 7.782699999999977e-05,
+   "cpu_total_s": 0.0001238230000000019
+  },
+  {
+   "name": "aten::div_",
+   "count": 50,
+   "self_cpu_s": 5.275899999999474e-05,
+   "cpu_total_s": 0.00010276799999999884
+  },
+  {
+   "name": "aten::empty_like",
+   "count": 50,
+   "self_cpu_s": 9.420000000000191e-06,
+   "cpu_total_s": 2.0793999999999862e-05
+  },
+  {
+   "name": "aten::empty_strided",
+   "count": 400,
+   "self_cpu_s": 6.275500000000036e-05,
+   "cpu_total_s": 6.275500000000036e-05
+  },
+  {
+   "name": "aten::expand",
+   "count": 50,
+   "self_cpu_s": 2.4828000000002372e-05,
+   "cpu_total_s": 3.324500000000087e-05
+  },
+  {
+   "name": "aten::fill_",
+   "count": 200,
+   "self_cpu_s": 2.5931999999997064e-05,
+   "cpu_total_s": 2.5931999999997064e-05
+  },
+  {
+   "name": "aten::item",
+   "count": 50,
+   "self_cpu_s": 1.0392999999997754e-05,
+   "cpu_total_s": 1.635199999999758e-05
+  },
+  {
+   "name": "aten::matmul",
+   "count": 100,
+   "self_cpu_s": 1.6328999999992352e-05,
+   "cpu_total_s": 0.0012325760000000017
+  },
+  {
+   "name": "aten::mean",
+   "count": 50,
+   "self_cpu_s": 5.744900000000395e-05,
+   "cpu_total_s": 0.00022835400000000103
+  },
+  {
+   "name": "aten::mm",
+   "count": 250,
+   "self_cpu_s": 0.0022514350000000143,
+   "cpu_total_s": 0.0022639570000000104
+  },
+  {
+   "name": "aten::mul",
+   "count": 300,
+   "self_cpu_s": 0.0011160970000000092,
+   "cpu_total_s": 0.0013280140000000032
+  },
+  {
+   "name": "aten::ones_like",
+   "count": 50,
+   "self_cpu_s": 1.654000000000451e-05,
+   "cpu_total_s": 4.02870000000015e-05
+  },
+  {
+   "name": "aten::pow",
+   "count": 100,
+   "self_cpu_s": 0.00010431299999999525,
+   "cpu_total_s": 0.00013403300000000172
+  },
+  {
+   "name": "aten::relu",
+   "count": 50,
+   "self_cpu_s": 3.598700000000048e-05,
+   "cpu_total_s": 0.00015543600000000483
+  },
+  {
+   "name": "aten::resolve_conj",
+   "count": 600,
+   "self_cpu_s": 1.2521999999995365e-05,
+   "cpu_total_s": 1.2521999999995365e-05
+  },
+  {
+   "name": "aten::result_type",
+   "count": 100,
+   "self_cpu_s": 7.174000000000944e-06,
+   "cpu_total_s": 7.174000000000944e-06
+  },
+  {
+   "name": "aten::sub",
+   "count": 50,
+   "self_cpu_s": 3.764400000000269e-05,
+   "cpu_total_s": 3.764400000000269e-05
+  },
+  {
+   "name": "aten::sub_",
+   "count": 200,
+   "self_cpu_s": 0.0010968810000000035,
+   "cpu_total_s": 0.0010968810000000035
+  },
+  {
+   "name": "aten::sum",
+   "count": 150,
+   "self_cpu_s": 0.0001820299999999957,
+   "cpu_total_s": 0.00021338499999999858
+  },
+  {
+   "name": "aten::t",
+   "count": 150,
+   "self_cpu_s": 4.233799999999676e-05,
+   "cpu_total_s": 8.408599999999754e-05
+  },
+  {
+   "name": "aten::threshold_backward",
+   "count": 50,
+   "self_cpu_s": 0.00014459999999999896,
+   "cpu_total_s": 0.00014459999999999896
+  },
+  {
+   "name": "aten::to",
+   "count": 450,
+   "self_cpu_s": 5.877600000001101e-05,
+   "cpu_total_s": 0.00031276200000000505
+  },
+  {
+   "name": "aten::transpose",
+   "count": 150,
+   "self_cpu_s": 2.5910000000001373e-05,
+   "cpu_total_s": 4.17480000000007e-05
+  },
+  {
+   "name": "aten::view",
+   "count": 100,
+   "self_cpu_s": 2.8934999999998736e-05,
+   "cpu_total_s": 2.8934999999998736e-05
+  }
+ ],
+ "note": "profiler 下の値。時間は計時腕の値と混ぜない（op 数と構成比だけを内訳計算に使う）",
+ "bench_py_sha256": "9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b",
+ "diag_script_sha256": "3775b01ba7f9e31c30a017421ba273c5cd5fe3d4dd6692fe37a499fea6db9ef4"
+}
