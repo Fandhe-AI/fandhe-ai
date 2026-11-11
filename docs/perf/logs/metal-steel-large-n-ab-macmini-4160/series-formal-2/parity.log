@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<home>/work/rm1-4160.noindex/target/release/deps/fandhe_ai_backend_metal-acb8e7e391b92611)
+
+running 1 test
+test gemm_steel_large_n_diag_tests::steel_large_n_prereq_parity ... PARITY n=256 arm=cur ok=true
+PARITY n=256 arm=sl ok=true
+PARITY n=512 arm=cur ok=true
+PARITY n=512 arm=sl ok=true
+PARITY n=1024 arm=cur ok=true
+PARITY n=1024 arm=sl ok=true
+PARITY n=2048 arm=cur ok=true
+PARITY n=2048 arm=sl ok=true
+PARITY n=4096 arm=cur ok=true
+PARITY n=4096 arm=sl ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 873 filtered out; finished in 5.50s
+

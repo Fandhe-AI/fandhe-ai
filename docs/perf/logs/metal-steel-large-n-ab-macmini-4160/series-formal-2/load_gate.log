@@ -1,0 +1,46 @@
+build-done 2026-11-11T05:40:35Z
+prereq-tile gate=pass load1=1.35 waited_s=0 at=2026-11-11T05:40:40Z
+prereq-steel gate=pass load1=1.33 waited_s=0 at=2026-11-11T05:40:44Z
+prereq-bitident gate=pass load1=1.13 waited_s=0 at=2026-11-11T05:41:42Z
+prereq-parity gate=pass load1=1.12 waited_s=0 at=2026-11-11T05:41:47Z
+run1-trace gate=pass load1=1.02 waited_s=0 at=2026-11-11T05:41:57Z
+run1-kern gate=pass load1=1.02 waited_s=0 at=2026-11-11T05:42:05Z
+run1-candle-N256 gate=pass load1=1.01 waited_s=0 at=2026-11-11T05:42:24Z
+run1-candle-N512 gate=pass load1=1.01 waited_s=0 at=2026-11-11T05:42:34Z
+run1-candle-N1024 gate=pass load1=1.32 waited_s=0 at=2026-11-11T05:42:42Z
+run1-candle-N2048 gate=pass load1=1.27 waited_s=0 at=2026-11-11T05:42:51Z
+run1-candle-N4096 gate=pass load1=1.23 waited_s=0 at=2026-11-11T05:43:01Z
+run1 end_load1=1.27
+run2-candle-N256 gate=pass load1=1.25 waited_s=0 at=2026-11-11T05:43:19Z
+run2-candle-N512 gate=pass load1=1.14 waited_s=0 at=2026-11-11T05:43:28Z
+run2-candle-N1024 gate=pass load1=1.04 waited_s=0 at=2026-11-11T05:43:37Z
+run2-candle-N2048 gate=pass load1=1.18 waited_s=0 at=2026-11-11T05:43:46Z
+run2-candle-N4096 gate=pass load1=1.15 waited_s=0 at=2026-11-11T05:43:56Z
+run2-trace gate=pass load1=1.13 waited_s=0 at=2026-11-11T05:44:13Z
+run2-kern gate=pass load1=1.03 waited_s=0 at=2026-11-11T05:44:22Z
+run2 end_load1=0.95
+run3-trace gate=pass load1=0.95 waited_s=0 at=2026-11-11T05:44:41Z
+run3-kern gate=pass load1=0.96 waited_s=0 at=2026-11-11T05:44:50Z
+run3-candle-N256 gate=pass load1=0.97 waited_s=0 at=2026-11-11T05:45:09Z
+run3-candle-N512 gate=pass load1=1.12 waited_s=0 at=2026-11-11T05:45:17Z
+run3-candle-N1024 gate=pass load1=1.19 waited_s=0 at=2026-11-11T05:45:26Z
+run3-candle-N2048 gate=pass load1=1.40 waited_s=0 at=2026-11-11T05:45:35Z
+run3-candle-N4096 gate=pass load1=1.42 waited_s=0 at=2026-11-11T05:45:45Z
+run3 end_load1=2.28
+run4-candle-N256 gate=pass load1=2.18 waited_s=0 at=2026-11-11T05:46:03Z
+run4-candle-N512 gate=pass load1=2.08 waited_s=0 at=2026-11-11T05:46:11Z
+run4-candle-N1024 gate=pass load1=1.92 waited_s=0 at=2026-11-11T05:46:20Z
+run4-candle-N2048 gate=pass load1=1.94 waited_s=0 at=2026-11-11T05:46:29Z
+run4-candle-N4096 gate=pass load1=1.79 waited_s=0 at=2026-11-11T05:46:39Z
+run4-trace gate=pass load1=1.62 waited_s=0 at=2026-11-11T05:46:57Z
+run4-kern gate=pass load1=1.52 waited_s=0 at=2026-11-11T05:47:06Z
+run4 end_load1=1.34
+run5-trace gate=pass load1=1.39 waited_s=0 at=2026-11-11T05:47:25Z
+run5-kern gate=pass load1=1.36 waited_s=0 at=2026-11-11T05:47:33Z
+run5-candle-N256 gate=pass load1=1.39 waited_s=0 at=2026-11-11T05:47:52Z
+run5-candle-N512 gate=pass load1=1.41 waited_s=0 at=2026-11-11T05:48:01Z
+run5-candle-N1024 gate=pass load1=1.58 waited_s=0 at=2026-11-11T05:48:10Z
+run5-candle-N2048 gate=pass load1=1.54 waited_s=0 at=2026-11-11T05:48:19Z
+run5-candle-N4096 gate=pass load1=2.26 waited_s=0 at=2026-11-11T05:48:29Z
+run5 end_load1=1.98
+series done

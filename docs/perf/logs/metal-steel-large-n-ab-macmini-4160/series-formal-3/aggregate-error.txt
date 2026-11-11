@@ -1,0 +1,4 @@
+# 系列 3 の aggregate.py の結果（2026-11-11T07:34:38Z に記録）
+# コマンド: python3 -I docs/perf/logs/metal-steel-large-n-ab-macmini-4160/aggregate.py series-formal-3 --expect-rev afbfeafbaa0c29b2105d17d58b2173952c5bf223
+# 終了コード: 1（系列 3 は A/B の round5 の途中で止めたため、セル行が 5 に満たない）
+AGGREGATE ERROR: ab のセル行数が 5 でない N=512 mode=fresh (before=4 after=4)

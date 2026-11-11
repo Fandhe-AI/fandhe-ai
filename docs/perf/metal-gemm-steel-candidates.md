@@ -299,15 +299,21 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 - 診断テスト: `crates/backend-metal/src/gemm_steel_large_n_diag_tests.rs`（腕は `cur`／`sl`／`ref`／`cur_aa`）。起動は `orchestrate_macmini.sh`、集計は `aggregate.py`、セル A/B は `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`。
 - 「1 位に変わった」と書けるのは NB-SEP 成立時のみ。NB-RANGE5／NB-SEP は `docs/perf/noise-band-decision.md`（#4142。記録時点で所有者承認待ちの案）を名前で参照する。
 
-### 11.5 実測記入欄（未実測）
+### 11.5 実測記入欄（2026-11-11・Mac mini `<metal-node>`。総合 UNDETERMINED）
 
-| N | cur kernel_gpu ms | sl kernel_gpu ms | sl/cur | 判定 |
+規則は `logs/metal-steel-large-n-ab-macmini-4160/RULE.txt`（PR #4248）。所有者判断「別ラベルで最大 3 系列」（RULE 項 14 (d)）に従って 3 系列回したが、3 系列ともセル A/B で他ジョブの前提ゲートに当たり、全ゲート通過の系列はなかった。このため **3 系列とも参考系列で、総合は UNDETERMINED**。当たったのは macOS のデーモン（`com.apple.Safari.SafeBrowsing.Service`・`runningboardd` ほか）と、系列 3 では 06:46:45Z に起動した他プロセス。系列 3 は所有者判断で途中で止めた。経緯と系列ごとの状態は同ディレクトリの README・`drive/abort.txt`。
+
+純カーネル（参考。各系列の `aggregate.md` の純カーネル部分。系列 3 は `aggregate-kern-only.md`）:
+
+| N | cur kernel_gpu ms（系列 1／2） | sl kernel_gpu ms（系列 1／2） | sl/cur（系列 1／2／3） | aggregate.py の純カーネル部分の表示 |
 |---|---|---|---|---|
-| 1024 | 未実測 | 未実測 | - | - |
-| 2048 | 未実測 | 未実測 | - | - |
-| 4096 | 未実測 | 未実測 | - | - |
+| 1024 | 0.8026／0.8006 | 0.7475／0.7458 | -6.9%／-6.8%／-6.7% | ADOPT_CANDIDATE（3 系列とも 5/5 run で速い・bit 一致 sl=ref・parity pass） |
+| 2048 | 6.5042／6.5193 | 5.8269／5.8265 | -10.4%／-10.6%／-10.5% | 同上 |
+| 4096 | 51.5205／51.5973 | 46.5383／46.5591 | -9.7%／-9.8%／-9.5% | 同上 |
 
-セル A/B・スコアボード比・総合判定も未実測。
+- 上の「ADOPT_CANDIDATE」は純カーネル部分だけの表示で、総合判定ではない。ADOPT は導かない（RULE 項 11・14 (d)）。
+- セル A/B（参考。系列 1／2）の after/before の中央値比: N=1024 fresh 0.969／0.999・reuse 0.969／0.970、N=2048 fresh 0.940／0.945・reuse 0.932／0.931、N=4096 fresh 0.905／0.907・reuse 0.913／0.917。checksum は全セルで完全一致。
+- スコアボード比（candle 相手）の NB-SEP は、負荷ゲート不成立のため判定不能。「1 位に変わった」とは書かない。
 
 ### 11.6 申し送り
 
@@ -316,7 +322,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 ### 11.7 Phase 4 結線（#4166）の状態と手順
 
-**現在の状態: 結線は保留（#4160 の判定待ち）。** #4160 の A/B は未実測で（§11.5 は空、`logs/metal-steel-large-n-ab-macmini-4160/` に `RULE.txt`・`aggregate.md` がない）、ADOPT とも REJECT とも決まっていない。#4160 は道具立ての PR #4197 の `Closes` で自動的にクローズされたが、判定の記録はない。このため `tile::STEEL_LARGE_N_ENABLED` は `false` のまま据え置く。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
+**現在の状態: 結線は保留（#4160 は実測済みで総合 UNDETERMINED）。** #4160 の A/B は 2026-11-11 に Mac mini で 3 系列測ったが、3 系列とも全ゲート通過にならず、総合は UNDETERMINED（§11.5）。ADOPT とも REJECT とも決まっていない。#4160 は道具立ての PR #4197 の `Closes` で自動的にクローズされたが、判定の記録はない。このため `tile::STEEL_LARGE_N_ENABLED` は `false` のまま据え置く。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
 
 **結線の前提条件（すべて満たしたときだけ結線する）**
 

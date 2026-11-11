@@ -1,0 +1,6 @@
+preflight 2026-11-11T05:36:03Z
+check1 2026-11-11T05:36:03Z mediaanalysisd_pcpu=0.0
+check2 2026-11-11T05:38:04Z mediaanalysisd_pcpu=0.0
+check3 2026-11-11T05:40:04Z mediaanalysisd_pcpu=0.0
+spotlightknowledged_submitting_last10m=0
+idle_ok=1

@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/rm1-4160.noindex/target/release/deps/fandhe_ai_backend_metal-acb8e7e391b92611)
+
+running 1 test
+test gemm_steel_large_n_diag_tests::steel_large_n_bit_identity ... BITIDENT n=256 pair=sl_vs_cur ok=true
+BITIDENT n=512 pair=sl_vs_cur ok=true
+BITIDENT n=1024 pair=sl_vs_ref ok=true
+BITIDENT n=2048 pair=sl_vs_ref ok=true
+BITIDENT n=4096 pair=sl_vs_ref ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 873 filtered out; finished in 0.25s
+

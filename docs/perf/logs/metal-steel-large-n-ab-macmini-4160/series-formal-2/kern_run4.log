@@ -1,0 +1,28 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<home>/work/rm1-4160.noindex/target/release/deps/fandhe_ai_backend_metal-acb8e7e391b92611)
+
+running 1 test
+test gemm_steel_large_n_diag_tests::steel_large_n_kernel_gpu ... MEAS n=256 arm=cur role=judge kernel_gpu_ms=0.0382 encode_ms=0.0020 commit_wait_ms=0.2563 alloc_c_ms=0.0063 wall_sum_ms=0.2645 hash=b4c4d223b619e4ac
+MEAS n=256 arm=sl role=judge kernel_gpu_ms=0.0380 encode_ms=0.0020 commit_wait_ms=0.2558 alloc_c_ms=0.0064 wall_sum_ms=0.2642 hash=b4c4d223b619e4ac
+MEAS n=256 arm=ref role=record_only kernel_gpu_ms=0.0595 encode_ms=0.0020 commit_wait_ms=0.2773 alloc_c_ms=0.0064 wall_sum_ms=0.2856 hash=b4c4d223b619e4ac
+MEAS n=256 arm=cur_aa role=record_only kernel_gpu_ms=0.0381 encode_ms=0.0020 commit_wait_ms=0.2568 alloc_c_ms=0.0065 wall_sum_ms=0.2651 hash=b4c4d223b619e4ac
+MEAS n=512 arm=cur role=judge kernel_gpu_ms=0.2169 encode_ms=0.0025 commit_wait_ms=0.5225 alloc_c_ms=0.0075 wall_sum_ms=0.5331 hash=92bed22c80e59095
+MEAS n=512 arm=sl role=judge kernel_gpu_ms=0.2166 encode_ms=0.0025 commit_wait_ms=0.4827 alloc_c_ms=0.0076 wall_sum_ms=0.4938 hash=92bed22c80e59095
+MEAS n=512 arm=ref role=record_only kernel_gpu_ms=0.2328 encode_ms=0.0025 commit_wait_ms=0.5213 alloc_c_ms=0.0080 wall_sum_ms=0.5303 hash=92bed22c80e59095
+MEAS n=512 arm=cur_aa role=record_only kernel_gpu_ms=0.2169 encode_ms=0.0025 commit_wait_ms=0.5290 alloc_c_ms=0.0079 wall_sum_ms=0.5392 hash=92bed22c80e59095
+MEAS n=1024 arm=cur role=judge kernel_gpu_ms=0.8004 encode_ms=0.0096 commit_wait_ms=1.1425 alloc_c_ms=0.0172 wall_sum_ms=1.1661 hash=cdeacf9b66fc9b5e
+MEAS n=1024 arm=sl role=judge kernel_gpu_ms=0.7458 encode_ms=0.0095 commit_wait_ms=1.0740 alloc_c_ms=0.0173 wall_sum_ms=1.0981 hash=cdeacf9b66fc9b5e
+MEAS n=1024 arm=ref role=record_only kernel_gpu_ms=0.7480 encode_ms=0.0094 commit_wait_ms=1.0813 alloc_c_ms=0.0174 wall_sum_ms=1.1093 hash=cdeacf9b66fc9b5e
+MEAS n=1024 arm=cur_aa role=record_only kernel_gpu_ms=0.8027 encode_ms=0.0095 commit_wait_ms=1.1954 alloc_c_ms=0.0173 wall_sum_ms=1.2052 hash=cdeacf9b66fc9b5e
+MEAS n=2048 arm=cur role=judge kernel_gpu_ms=6.5268 encode_ms=0.0105 commit_wait_ms=7.0952 alloc_c_ms=0.0216 wall_sum_ms=7.1268 hash=cbef7ab691d48e24
+MEAS n=2048 arm=sl role=judge kernel_gpu_ms=5.8389 encode_ms=0.0097 commit_wait_ms=6.4013 alloc_c_ms=0.0218 wall_sum_ms=6.4330 hash=cbef7ab691d48e24
+MEAS n=2048 arm=ref role=record_only kernel_gpu_ms=5.8333 encode_ms=0.0098 commit_wait_ms=6.4015 alloc_c_ms=0.0218 wall_sum_ms=6.4333 hash=cbef7ab691d48e24
+MEAS n=2048 arm=cur_aa role=record_only kernel_gpu_ms=6.5245 encode_ms=0.0097 commit_wait_ms=7.0903 alloc_c_ms=0.0215 wall_sum_ms=7.1207 hash=cbef7ab691d48e24
+MEAS n=4096 arm=cur role=judge kernel_gpu_ms=51.8256 encode_ms=0.0100 commit_wait_ms=53.2846 alloc_c_ms=0.0275 wall_sum_ms=53.3276 hash=f843428a54a4dab6
+MEAS n=4096 arm=sl role=judge kernel_gpu_ms=46.6040 encode_ms=0.0101 commit_wait_ms=48.0816 alloc_c_ms=0.0278 wall_sum_ms=48.1191 hash=f843428a54a4dab6
+MEAS n=4096 arm=ref role=record_only kernel_gpu_ms=46.5420 encode_ms=0.0100 commit_wait_ms=48.0162 alloc_c_ms=0.0288 wall_sum_ms=48.0554 hash=f843428a54a4dab6
+MEAS n=4096 arm=cur_aa role=record_only kernel_gpu_ms=51.7770 encode_ms=0.0103 commit_wait_ms=53.2883 alloc_c_ms=0.0292 wall_sum_ms=53.3273 hash=f843428a54a4dab6
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 873 filtered out; finished in 10.23s
+

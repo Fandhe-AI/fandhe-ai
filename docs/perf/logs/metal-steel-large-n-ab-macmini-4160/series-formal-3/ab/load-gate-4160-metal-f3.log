@@ -1,0 +1,8 @@
+threshold=3.0 rule_threshold=3.0 series=official
+round1 gate=pass threshold=3.0 load1=2.07 waited_s=120 at=2026-11-11T06:31:18Z
+round2 gate=pass threshold=3.0 load1=1.98 waited_s=0 at=2026-11-11T06:35:34Z
+round3 gate=pass threshold=3.0 load1=1.60 waited_s=0 at=2026-11-11T06:40:24Z
+round4 gate=pass threshold=3.0 load1=2.29 waited_s=0 at=2026-11-11T06:44:39Z
+round4 gate=timeout reason=foreign-job cell=candle-N1024-fresh load1=1.39 waited_s=1800 at=2026-11-11T07:21:07Z
+round4 gate=invalid reason=foreign-after phase=after cell=candle-N1024-fresh at=2026-11-11T07:21:12Z
+round5 gate=pass threshold=3.0 load1=2.05 waited_s=0 at=2026-11-11T07:29:32Z

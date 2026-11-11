@@ -1,0 +1,291 @@
+file	verdict	phase	at	gpu_device_utilization	max_pcpu_non_excluded	hits
+foreign_job_gate.sha256	(sha256)			d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04		
+round1-after-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:33:05Z	27 0 0 0 0	4.7	
+round1-after-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:33:00Z	0 0 0 0 0	3.3	
+round1-after-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:33:23Z	31 0 0 0 0	2.2	
+round1-after-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:33:18Z	0 0 0 0 0	3.0	
+round1-after-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:33:52Z	37 0 0 0 0	2.1	
+round1-after-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:33:46Z	0 0 0 0 0	1.2	
+round1-after-N2048-reuse-after.txt	CLEAN	after	2026-11-11T06:34:11Z	41 0 0 0 0	13.4	
+round1-after-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:34:06Z	0 0 0 0 0	5.5	
+round1-after-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:31:36Z	0 0 0 0 0	1.1	
+round1-after-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:31:31Z	0 0 0 0 0	4.3	
+round1-after-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:31:54Z	0 0 0 0 0	2.1	
+round1-after-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:31:49Z	0 0 0 0 0	1.0	
+round1-after-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:34:48Z	85 0 0 0 0	0.7	
+round1-after-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:34:39Z	0 0 0 0 0	3.9	
+round1-after-N4096-reuse-after.txt	CLEAN	after	2026-11-11T06:35:16Z	86 0 0 0 0	1.7	
+round1-after-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:35:07Z	0 0 0 0 0	1.9	
+round1-after-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:32:21Z	0 0 0 0 0	3.1	
+round1-after-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:32:16Z	0 0 0 0 0	2.0	
+round1-after-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:32:38Z	0 0 0 0 0	4.5	
+round1-after-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:32:34Z	0 0 0 0 0	2.2	
+round1-before-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:32:56Z	25 0 0 0 0	7.0	
+round1-before-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:32:51Z	0 0 0 0 0	2.6	
+round1-before-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:33:14Z	31 0 0 0 0	4.3	
+round1-before-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:33:09Z	0 0 0 0 0	5.1	
+round1-before-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:33:42Z	40 0 0 0 0	2.9	
+round1-before-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:33:37Z	0 0 0 0 0	1.1	
+round1-before-N2048-reuse-after.txt	CLEAN	after	2026-11-11T06:34:01Z	42 0 0 0 0	2.1	
+round1-before-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:33:56Z	0 0 0 0 0	2.2	
+round1-before-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:31:27Z	0 0 0 0 0	1.9	
+round1-before-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:31:22Z	0 0 0 0 0	3.8	
+round1-before-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:31:45Z	0 0 0 0 0	10.1	
+round1-before-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:31:40Z	0 0 0 0 0	2.5	
+round1-before-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:34:35Z	87 0 0 0 0	1.9	
+round1-before-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:34:25Z	0 0 0 0 0	1.2	
+round1-before-N4096-reuse-after.txt	CLEAN	after	2026-11-11T06:35:02Z	87 0 0 0 0	1.3	
+round1-before-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:34:53Z	0 0 0 0 0	8.2	
+round1-before-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:32:12Z	0 0 0 0 0	2.2	
+round1-before-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:32:07Z	0 0 0 0 0	1.3	
+round1-before-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:32:29Z	0 0 0 0 0	6.9	
+round1-before-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:32:25Z	0 0 0 0 0	9.2	
+round1-candle-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:33:32Z	25 0 0 0 0	0.9	
+round1-candle-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:33:27Z	0 0 0 0 0	1.2	
+round1-candle-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:34:20Z	33 0 0 0 0	1.8	
+round1-candle-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:34:15Z	0 0 0 0 0	1.4	
+round1-candle-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:32:03Z	0 0 0 0 0	7.5	
+round1-candle-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:31:58Z	0 0 0 0 0	3.5	
+round1-candle-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:35:30Z	84 0 0 0 0	3.8	
+round1-candle-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:35:20Z	0 0 0 0 0	5.3	
+round1-candle-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:32:47Z	0 0 0 0 0	1.5	
+round1-candle-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:32:43Z	0 0 0 0 0	4.6	
+round1-start-before-a1.txt	CLEAN	before	2026-11-11T06:29:00Z	0 0 0 0 0	2.2	
+round1-start-before-a2.txt	CLEAN	before	2026-11-11T06:29:35Z	0 0 0 0 0	1.8	
+round1-start-before-a3.txt	CLEAN	before	2026-11-11T06:30:09Z	0 0 0 0 0	3.1	
+round1-start-before-a4.txt	CLEAN	before	2026-11-11T06:30:43Z	0 0 0 0 0	1.2	
+round1-start-before-a5.txt	CLEAN	before	2026-11-11T06:31:18Z	0 0 0 0 0	8.5	
+round2-after-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:37:11Z	24 0 0 0 0	1.6	
+round2-after-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:37:07Z	0 0 0 0 0	1.7	
+round2-after-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:37:30Z	31 0 0 0 0	3.9	
+round2-after-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:37:25Z	0 0 0 0 0	1.3	
+round2-after-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:37:57Z	37 0 0 0 0	1.3	
+round2-after-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:37:52Z	0 0 0 0 0	1.1	
+round2-after-N2048-reuse-after.txt	CLEAN	after	2026-11-11T06:38:17Z	41 0 0 0 0	1.8	
+round2-after-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:38:11Z	0 0 0 0 0	24.1	
+round2-after-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:35:43Z	0 0 0 0 0	2.2	
+round2-after-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:35:39Z	0 0 0 0 0	0.5	
+round2-after-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:36:01Z	0 0 0 0 0	2.0	
+round2-after-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:35:56Z	0 0 0 0 0	1.2	
+round2-after-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:38:50Z	85 0 0 0 0	2.2	
+round2-after-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:38:40Z	0 0 0 0 0	1.2	
+round2-after-N4096-reuse-after.txt	CLEAN	after	2026-11-11T06:39:17Z	86 0 0 0 0	13.9	
+round2-after-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:39:08Z	0 0 0 0 0	0.9	
+round2-after-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:36:27Z	0 0 0 0 0	1.9	
+round2-after-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:36:23Z	0 0 0 0 0	6.1	
+round2-after-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:36:45Z	0 0 0 0 0	6.4	
+round2-after-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:36:40Z	0 0 0 0 0	3.1	
+round2-before-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:37:20Z	27 0 0 0 0	0.8	
+round2-before-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:37:16Z	0 0 0 0 0	3.4	
+round2-before-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:37:39Z	27 0 0 0 0	3.8	
+round2-before-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:37:34Z	0 0 0 0 0	1.8	
+round2-before-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:38:07Z	39 0 0 0 0	4.0	
+round2-before-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:38:02Z	0 0 0 0 0	5.1	
+round2-before-N2048-reuse-after.txt	CLEAN	after	2026-11-11T06:38:26Z	43 0 0 0 0	2.3	
+round2-before-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:38:21Z	0 0 0 0 0	2.2	
+round2-before-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:35:52Z	0 0 0 0 0	4.2	
+round2-before-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:35:47Z	0 0 0 0 0	0.7	
+round2-before-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:36:09Z	0 0 0 0 0	4.7	
+round2-before-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:36:05Z	0 0 0 0 0	0.8	
+round2-before-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:39:04Z	87 0 0 0 0	1.9	
+round2-before-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:38:54Z	0 0 0 0 0	4.0	
+round2-before-N4096-reuse-after.txt	CLEAN	after	2026-11-11T06:39:31Z	87 0 0 0 0	2.3	
+round2-before-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:39:22Z	0 0 0 0 0	0.7	
+round2-before-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:36:36Z	0 0 0 0 0	4.1	
+round2-before-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:36:31Z	0 0 0 0 0	1.2	
+round2-before-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:36:54Z	0 0 0 0 0	2.0	
+round2-before-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:36:49Z	0 0 0 0 0	1.9	
+round2-candle-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:37:48Z	25 0 0 0 0	2.4	
+round2-candle-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:37:43Z	0 0 0 0 0	3.1	
+round2-candle-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:38:36Z	32 0 0 0 0	1.3	
+round2-candle-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:38:30Z	0 0 0 0 0	0.9	
+round2-candle-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:36:18Z	0 0 0 0 0	2.3	
+round2-candle-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:36:14Z	0 0 0 0 0	3.7	
+round2-candle-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:40:19Z	84 0 0 0 0	3.0	
+round2-candle-N4096-fresh-before-a1.txt	FOREIGN	before	2026-11-11T06:39:35Z	0 0 0 0 0	39.4	G2-cpu pid=1120 <user> pcpu=39.4 name=duetexpertd
+round2-candle-N4096-fresh-before-a2.txt	CLEAN	before	2026-11-11T06:40:10Z	0 0 0 0 0	2.1	
+round2-candle-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:37:02Z	0 0 0 0 0	0.8	
+round2-candle-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:36:58Z	0 0 0 0 0	2.8	
+round2-start-before-a1.txt	CLEAN	before	2026-11-11T06:35:34Z	0 0 0 0 0	2.5	
+round3-after-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:42:10Z	25 0 0 0 0	7.8	
+round3-after-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:42:05Z	0 0 0 0 0	3.5	
+round3-after-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:42:28Z	27 0 0 0 0	2.9	
+round3-after-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:42:23Z	0 0 0 0 0	1.7	
+round3-after-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:42:56Z	36 0 0 0 0	1.5	
+round3-after-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:42:51Z	0 0 0 0 0	1.6	
+round3-after-N2048-reuse-after.txt	CLEAN	after	2026-11-11T06:43:16Z	41 0 0 0 0	2.4	
+round3-after-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:43:10Z	0 0 0 0 0	2.0	
+round3-after-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:40:41Z	0 0 0 0 0	1.6	
+round3-after-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:40:37Z	0 0 0 0 0	3.2	
+round3-after-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:40:59Z	0 0 0 0 0	2.0	
+round3-after-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:40:54Z	0 0 0 0 0	1.0	
+round3-after-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:43:53Z	85 0 0 0 0	3.7	
+round3-after-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:43:44Z	0 0 0 0 0	1.1	
+round3-after-N4096-reuse-after.txt	CLEAN	after	2026-11-11T06:44:21Z	86 0 0 0 0	7.6	
+round3-after-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:44:11Z	0 0 0 0 0	1.9	
+round3-after-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:41:25Z	0 0 0 0 0	1.5	
+round3-after-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:41:21Z	0 0 0 0 0	3.1	
+round3-after-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:41:43Z	0 0 0 0 0	5.1	
+round3-after-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:41:39Z	0 0 0 0 0	0.6	
+round3-before-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:42:01Z	25 0 0 0 0	1.8	
+round3-before-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:41:56Z	0 0 0 0 0	4.0	
+round3-before-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:42:19Z	31 0 0 0 0	2.0	
+round3-before-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:42:14Z	0 0 0 0 0	1.0	
+round3-before-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:42:47Z	37 0 0 0 0	3.9	
+round3-before-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:42:41Z	0 0 0 0 0	2.4	
+round3-before-N2048-reuse-after.txt	CLEAN	after	2026-11-11T06:43:06Z	43 0 0 0 0	9.2	
+round3-before-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:43:01Z	0 0 0 0 0	2.0	
+round3-before-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:40:32Z	0 0 0 0 0	3.6	
+round3-before-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:40:28Z	0 0 0 0 0	3.1	
+round3-before-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:40:50Z	0 0 0 0 0	6.6	
+round3-before-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:40:46Z	0 0 0 0 0	1.8	
+round3-before-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:43:39Z	87 0 0 0 0	0.7	
+round3-before-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:43:30Z	0 0 0 0 0	3.1	
+round3-before-N4096-reuse-after.txt	CLEAN	after	2026-11-11T06:44:07Z	87 0 0 0 0	2.1	
+round3-before-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:43:58Z	0 0 0 0 0	2.0	
+round3-before-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:41:17Z	0 0 0 0 0	7.3	
+round3-before-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:41:12Z	0 0 0 0 0	6.6	
+round3-before-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:41:34Z	0 0 0 0 0	2.2	
+round3-before-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:41:30Z	0 0 0 0 0	3.2	
+round3-candle-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:42:37Z	25 0 0 0 0	2.6	
+round3-candle-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:42:32Z	0 0 0 0 0	2.5	
+round3-candle-N2048-fresh-after.txt	CLEAN	after	2026-11-11T06:43:25Z	33 0 0 0 0	0.9	
+round3-candle-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:43:20Z	0 0 0 0 0	1.9	
+round3-candle-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:41:08Z	0 0 0 0 0	1.3	
+round3-candle-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:41:03Z	0 0 0 0 0	1.6	
+round3-candle-N4096-fresh-after.txt	CLEAN	after	2026-11-11T06:44:35Z	84 0 0 0 0	1.6	
+round3-candle-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:44:25Z	0 0 0 0 0	4.0	
+round3-candle-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:41:52Z	0 0 0 0 0	1.6	
+round3-candle-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:41:47Z	0 0 0 0 0	14.9	
+round3-start-before-a1.txt	CLEAN	before	2026-11-11T06:40:24Z	0 0 0 0 0	4.8	
+round4-after-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:46:16Z	26 0 0 0 0	1.0	
+round4-after-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:46:11Z	0 0 0 0 0	1.0	
+round4-after-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:46:34Z	31 0 0 0 0	9.1	
+round4-after-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:46:30Z	0 0 0 0 0	5.9	
+round4-after-N2048-fresh-after.txt	CLEAN	after	2026-11-11T07:27:06Z	38 0 0 0 0	15.6	
+round4-after-N2048-fresh-before-a1.txt	FOREIGN	before	2026-11-11T07:21:16Z	0 0 0 0 0	5.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a10.txt	FOREIGN	before	2026-11-11T07:26:26Z	0 0 0 0 0	1.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a11.txt	CLEAN	before	2026-11-11T07:27:00Z	0 0 0 0 0	1.2	
+round4-after-N2048-fresh-before-a2.txt	FOREIGN	before	2026-11-11T07:21:51Z	0 0 0 0 0	1.3	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a3.txt	FOREIGN	before	2026-11-11T07:22:25Z	0 0 0 0 0	2.3	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a4.txt	FOREIGN	before	2026-11-11T07:23:00Z	0 0 0 0 0	2.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a5.txt	FOREIGN	before	2026-11-11T07:23:34Z	0 0 0 0 0	1.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a6.txt	FOREIGN	before	2026-11-11T07:24:08Z	0 0 0 0 0	1.9	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a7.txt	FOREIGN	before	2026-11-11T07:24:43Z	0 0 0 0 0	2.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a8.txt	FOREIGN	before	2026-11-11T07:25:17Z	0 0 0 0 0	3.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-fresh-before-a9.txt	FOREIGN	before	2026-11-11T07:25:52Z	0 0 0 0 0	3.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-after-N2048-reuse-after.txt	CLEAN	after	2026-11-11T07:27:25Z	41 0 0 0 0	2.3	
+round4-after-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T07:27:20Z	0 0 0 0 0	2.1	
+round4-after-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:44:48Z	0 0 0 0 0	2.2	
+round4-after-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:44:43Z	0 0 0 0 0	2.9	
+round4-after-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:45:05Z	0 0 0 0 0	1.6	
+round4-after-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:45:01Z	0 0 0 0 0	3.8	
+round4-after-N4096-fresh-after.txt	CLEAN	after	2026-11-11T07:27:58Z	85 0 0 0 0	2.0	
+round4-after-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T07:27:49Z	0 0 0 0 0	2.5	
+round4-after-N4096-reuse-after.txt	CLEAN	after	2026-11-11T07:29:00Z	86 0 0 0 0	2.5	
+round4-after-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T07:28:51Z	0 0 0 0 0	4.0	
+round4-after-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:45:32Z	0 0 0 0 0	2.0	
+round4-after-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:45:27Z	0 0 0 0 0	5.9	
+round4-after-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:45:49Z	0 0 0 0 0	1.7	
+round4-after-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:45:45Z	0 0 0 0 0	0.9	
+round4-before-N1024-fresh-after.txt	CLEAN	after	2026-11-11T06:46:25Z	27 0 0 0 0	2.6	
+round4-before-N1024-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:46:21Z	0 0 0 0 0	2.5	
+round4-before-N1024-reuse-after.txt	CLEAN	after	2026-11-11T06:46:43Z	31 0 0 0 0	3.9	
+round4-before-N1024-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:46:39Z	0 0 0 0 0	4.0	
+round4-before-N2048-fresh-after.txt	CLEAN	after	2026-11-11T07:27:15Z	39 0 0 0 0	2.6	
+round4-before-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T07:27:10Z	0 0 0 0 0	2.6	
+round4-before-N2048-reuse-after.txt	CLEAN	after	2026-11-11T07:27:35Z	43 0 0 0 0	2.8	
+round4-before-N2048-reuse-before-a1.txt	CLEAN	before	2026-11-11T07:27:29Z	0 0 0 0 0	2.1	
+round4-before-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:44:56Z	0 0 0 0 0	2.2	
+round4-before-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:44:52Z	0 0 0 0 0	1.8	
+round4-before-N256-reuse-after.txt	CLEAN	after	2026-11-11T06:45:14Z	0 0 0 0 0	3.0	
+round4-before-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:45:10Z	0 0 0 0 0	3.6	
+round4-before-N4096-fresh-after.txt	CLEAN	after	2026-11-11T07:28:47Z	87 0 0 0 0	2.2	
+round4-before-N4096-fresh-before-a1.txt	FOREIGN	before	2026-11-11T07:28:02Z	0 0 0 0 0	63.1	G2-cpu pid=608 uid=0 pcpu=63.1 name=runningboardd | G2-cpu pid=69217 uid=0 pcpu=54.8 name=PerfPowerServices
+round4-before-N4096-fresh-before-a2.txt	CLEAN	before	2026-11-11T07:28:37Z	0 0 0 0 0	11.7	
+round4-before-N4096-reuse-after.txt	CLEAN	after	2026-11-11T07:29:14Z	87 0 0 0 0	1.7	
+round4-before-N4096-reuse-before-a1.txt	CLEAN	before	2026-11-11T07:29:04Z	0 0 0 0 0	1.4	
+round4-before-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:45:41Z	0 0 0 0 0	2.4	
+round4-before-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:45:36Z	0 0 0 0 0	7.7	
+round4-before-N512-reuse-after.txt	CLEAN	after	2026-11-11T06:45:58Z	0 0 0 0 0	3.8	
+round4-before-N512-reuse-before-a1.txt	CLEAN	before	2026-11-11T06:45:54Z	0 0 0 0 0	2.0	
+round4-candle-N1024-fresh-after.txt	FOREIGN	after	2026-11-11T07:21:12Z	26 0 0 0 0	1.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a1.txt	FOREIGN	before	2026-11-11T06:46:48Z	0 0 0 0 0	1.7	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a10.txt	FOREIGN	before	2026-11-11T06:51:57Z	0 0 0 0 0	11.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a11.txt	FOREIGN	before	2026-11-11T06:52:32Z	0 0 0 0 0	1.6	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a12.txt	FOREIGN	before	2026-11-11T06:53:06Z	0 0 0 0 0	4.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a13.txt	FOREIGN	before	2026-11-11T06:53:40Z	0 0 0 0 0	3.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a14.txt	FOREIGN	before	2026-11-11T06:54:15Z	0 0 0 0 0	1.6	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a15.txt	FOREIGN	before	2026-11-11T06:54:49Z	0 0 0 0 0	1.8	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a16.txt	FOREIGN	before	2026-11-11T06:55:24Z	0 0 0 0 0	2.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a17.txt	FOREIGN	before	2026-11-11T06:55:58Z	0 0 0 0 0	2.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a18.txt	FOREIGN	before	2026-11-11T06:56:32Z	0 0 0 0 0	1.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a19.txt	FOREIGN	before	2026-11-11T06:57:07Z	0 0 0 0 0	2.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a2.txt	FOREIGN	before	2026-11-11T06:47:22Z	0 0 0 0 0	1.8	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a20.txt	FOREIGN	before	2026-11-11T06:57:41Z	0 0 0 0 0	0.7	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a21.txt	FOREIGN	before	2026-11-11T06:58:16Z	0 0 0 0 0	2.5	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a22.txt	FOREIGN	before	2026-11-11T06:58:50Z	0 0 0 0 0	0.8	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a23.txt	FOREIGN	before	2026-11-11T06:59:24Z	0 0 0 0 0	1.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a24.txt	FOREIGN	before	2026-11-11T06:59:59Z	0 0 0 0 0	1.3	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a25.txt	FOREIGN	before	2026-11-11T07:00:33Z	0 0 0 0 0	2.6	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a26.txt	FOREIGN	before	2026-11-11T07:01:08Z	0 0 0 0 0	2.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a27.txt	FOREIGN	before	2026-11-11T07:01:42Z	0 0 0 0 0	3.8	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a28.txt	FOREIGN	before	2026-11-11T07:02:16Z	0 0 0 0 0	1.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a29.txt	FOREIGN	before	2026-11-11T07:02:51Z	0 0 0 0 0	1.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a3.txt	FOREIGN	before	2026-11-11T06:47:56Z	0 0 0 0 0	11.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a30.txt	FOREIGN	before	2026-11-11T07:03:25Z	0 0 0 0 0	12.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a31.txt	FOREIGN	before	2026-11-11T07:04:00Z	0 0 0 0 0	3.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a32.txt	FOREIGN	before	2026-11-11T07:04:34Z	0 0 0 0 0	4.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a33.txt	FOREIGN	before	2026-11-11T07:05:08Z	0 0 0 0 0	2.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a34.txt	FOREIGN	before	2026-11-11T07:05:43Z	0 0 0 0 0	2.8	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a35.txt	FOREIGN	before	2026-11-11T07:06:17Z	0 0 0 0 0	0.9	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a36.txt	FOREIGN	before	2026-11-11T07:06:52Z	0 0 0 0 0	3.5	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a37.txt	FOREIGN	before	2026-11-11T07:07:26Z	0 0 0 0 0	4.8	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a38.txt	FOREIGN	before	2026-11-11T07:08:00Z	0 0 0 0 0	2.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a39.txt	FOREIGN	before	2026-11-11T07:08:35Z	0 0 0 0 0	1.7	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a4.txt	FOREIGN	before	2026-11-11T06:48:31Z	0 0 0 0 0	1.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a40.txt	FOREIGN	before	2026-11-11T07:09:09Z	0 0 0 0 0	2.6	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a41.txt	FOREIGN	before	2026-11-11T07:09:44Z	0 0 0 0 0	2.6	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a42.txt	FOREIGN	before	2026-11-11T07:10:18Z	0 0 0 0 0	4.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a43.txt	FOREIGN	before	2026-11-11T07:10:52Z	0 0 0 0 0	30.4	G2-cpu pid=1500 <user> pcpu=30.4 name=com.apple.Safari.SafeBrowsing.Service | G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a44.txt	FOREIGN	before	2026-11-11T07:11:27Z	0 0 0 0 0	1.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a45.txt	FOREIGN	before	2026-11-11T07:12:01Z	0 0 0 0 0	1.9	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a46.txt	FOREIGN	before	2026-11-11T07:12:36Z	0 0 0 0 0	3.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a47.txt	FOREIGN	before	2026-11-11T07:13:10Z	0 0 0 0 0	3.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a48.txt	FOREIGN	before	2026-11-11T07:13:44Z	0 0 0 0 0	3.8	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a49.txt	FOREIGN	before	2026-11-11T07:14:19Z	0 0 0 0 0	1.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a5.txt	FOREIGN	before	2026-11-11T06:49:05Z	0 0 0 0 0	1.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a50.txt	FOREIGN	before	2026-11-11T07:14:53Z	0 0 0 0 0	5.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a51.txt	FOREIGN	before	2026-11-11T07:15:28Z	0 0 0 0 0	4.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a52.txt	FOREIGN	before	2026-11-11T07:16:02Z	0 0 0 0 0	1.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a53.txt	FOREIGN	before	2026-11-11T07:16:36Z	0 0 0 0 0	1.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a54.txt	FOREIGN	before	2026-11-11T07:17:11Z	0 0 0 0 0	1.0	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a55.txt	FOREIGN	before	2026-11-11T07:17:45Z	0 0 0 0 0	3.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a56.txt	FOREIGN	before	2026-11-11T07:18:20Z	0 0 0 0 0	2.2	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a57.txt	FOREIGN	before	2026-11-11T07:18:54Z	0 0 0 0 0	6.6	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a58.txt	FOREIGN	before	2026-11-11T07:19:28Z	0 0 0 0 0	3.1	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a59.txt	FOREIGN	before	2026-11-11T07:20:03Z	0 0 0 0 0	1.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a6.txt	FOREIGN	before	2026-11-11T06:49:40Z	0 0 0 0 0	1.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a60.txt	FOREIGN	before	2026-11-11T07:20:37Z	0 0 0 0 0	3.4	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a7.txt	FOREIGN	before	2026-11-11T06:50:14Z	0 0 0 0 0	1.3	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a8.txt	FOREIGN	before	2026-11-11T06:50:48Z	0 0 0 0 0	0.7	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N1024-fresh-before-a9.txt	FOREIGN	before	2026-11-11T06:51:23Z	0 0 0 0 0	1.9	G3-name pid=47521 <user> pcpu=0.0 name=Python
+round4-candle-N2048-fresh-after.txt	CLEAN	after	2026-11-11T07:27:44Z	32 0 0 0 0	2.3	
+round4-candle-N2048-fresh-before-a1.txt	CLEAN	before	2026-11-11T07:27:39Z	0 0 0 0 0	4.8	
+round4-candle-N256-fresh-after.txt	CLEAN	after	2026-11-11T06:45:23Z	0 0 0 0 0	3.2	
+round4-candle-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:45:18Z	0 0 0 0 0	1.5	
+round4-candle-N4096-fresh-after.txt	CLEAN	after	2026-11-11T07:29:28Z	84 0 0 0 0	2.4	
+round4-candle-N4096-fresh-before-a1.txt	CLEAN	before	2026-11-11T07:29:18Z	0 0 0 0 0	0.6	
+round4-candle-N512-fresh-after.txt	CLEAN	after	2026-11-11T06:46:07Z	0 0 0 0 0	1.9	
+round4-candle-N512-fresh-before-a1.txt	CLEAN	before	2026-11-11T06:46:03Z	0 0 0 0 0	4.9	
+round4-start-before-a1.txt	CLEAN	before	2026-11-11T06:44:39Z	0 0 0 0 0	19.0	
+round5-after-N256-fresh-after.txt	CLEAN	after	2026-11-11T07:29:50Z	0 0 0 0 0	2.1	
+round5-after-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T07:29:45Z	0 0 0 0 0	13.7	
+round5-after-N256-reuse-after.txt	CLEAN	after	2026-11-11T07:30:07Z	0 0 0 0 0	2.9	
+round5-after-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T07:30:03Z	0 0 0 0 0	1.9	
+round5-before-N256-fresh-after.txt	CLEAN	after	2026-11-11T07:29:41Z	0 0 0 0 0	2.0	
+round5-before-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T07:29:36Z	0 0 0 0 0	0.6	
+round5-before-N256-reuse-after.txt	CLEAN	after	2026-11-11T07:29:59Z	0 0 0 0 0	1.5	
+round5-before-N256-reuse-before-a1.txt	CLEAN	before	2026-11-11T07:29:54Z	0 0 0 0 0	2.3	
+round5-candle-N256-fresh-before-a1.txt	CLEAN	before	2026-11-11T07:30:12Z	0 0 0 0 0	2.2	
+round5-start-before-a1.txt	CLEAN	before	2026-11-11T07:29:32Z	0 0 0 0 0	1.6	
