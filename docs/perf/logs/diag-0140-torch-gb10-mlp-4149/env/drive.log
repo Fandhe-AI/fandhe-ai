@@ -1,0 +1,70 @@
+drive start 2026-11-10T05:06:24Z owner=#4149 measure 2026-11-10T05:06:24Z
+round 1 start 2026-11-10T05:06:24Z
+wrote env -> <home>/work/out-4149/round1/raw/env.json
+wrote 8 rows -> <home>/work/out-4149/round1/raw/measure_cpu_train.jsonl
+wrote 7 rows -> <home>/work/out-4149/round1/raw/measure_cpu_infer.jsonl
+wrote 18 rows -> <home>/work/out-4149/round1/raw/measure_cpu_shapes.jsonl
+wrote 6 rows -> <home>/work/out-4149/round1/raw/measure_cuda_infer.jsonl
+wrote 4 rows -> <home>/work/out-4149/round1/raw/measure_cuda_fixed.jsonl
+wrote 6 rows -> <home>/work/out-4149/round1/raw/measure_cuda_shapes.jsonl
+wrote profile -> <home>/work/out-4149/round1/raw/profile_cpu_train.json
+wrote profile -> <home>/work/out-4149/round1/raw/profile_cpu_infer.json
+wrote profile -> <home>/work/out-4149/round1/raw/profile_cuda_infer.json
+round 1 done 2026-11-10T05:09:40Z
+round 1 rc=0 gate=PASS load1=0.36 compute-apps=0 gpu-util=0x3 hw-lock=held 2026-11-10T05:09:26Z 2026-11-10T05:09:40Z
+round 2 start 2026-11-10T05:09:40Z
+wrote env -> <home>/work/out-4149/round2/raw/env.json
+wrote 8 rows -> <home>/work/out-4149/round2/raw/measure_cpu_train.jsonl
+wrote 7 rows -> <home>/work/out-4149/round2/raw/measure_cpu_infer.jsonl
+wrote 18 rows -> <home>/work/out-4149/round2/raw/measure_cpu_shapes.jsonl
+wrote 6 rows -> <home>/work/out-4149/round2/raw/measure_cuda_infer.jsonl
+wrote 4 rows -> <home>/work/out-4149/round2/raw/measure_cuda_fixed.jsonl
+wrote 6 rows -> <home>/work/out-4149/round2/raw/measure_cuda_shapes.jsonl
+wrote profile -> <home>/work/out-4149/round2/raw/profile_cpu_train.json
+wrote profile -> <home>/work/out-4149/round2/raw/profile_cpu_infer.json
+wrote profile -> <home>/work/out-4149/round2/raw/profile_cuda_infer.json
+round 2 done 2026-11-10T05:11:55Z
+round 2 rc=0 gate=PASS load1=0.63 compute-apps=0 gpu-util=0x3 hw-lock=held 2026-11-10T05:11:41Z 2026-11-10T05:11:55Z
+round 3 start 2026-11-10T05:11:55Z
+wrote env -> <home>/work/out-4149/round3/raw/env.json
+wrote 8 rows -> <home>/work/out-4149/round3/raw/measure_cpu_train.jsonl
+wrote 7 rows -> <home>/work/out-4149/round3/raw/measure_cpu_infer.jsonl
+wrote 18 rows -> <home>/work/out-4149/round3/raw/measure_cpu_shapes.jsonl
+wrote 6 rows -> <home>/work/out-4149/round3/raw/measure_cuda_infer.jsonl
+wrote 4 rows -> <home>/work/out-4149/round3/raw/measure_cuda_fixed.jsonl
+wrote 6 rows -> <home>/work/out-4149/round3/raw/measure_cuda_shapes.jsonl
+wrote profile -> <home>/work/out-4149/round3/raw/profile_cpu_train.json
+wrote profile -> <home>/work/out-4149/round3/raw/profile_cpu_infer.json
+wrote profile -> <home>/work/out-4149/round3/raw/profile_cuda_infer.json
+round 3 done 2026-11-10T05:13:10Z
+round 3 rc=0 gate=PASS load1=0.29 compute-apps=0 gpu-util=0x3 hw-lock=held 2026-11-10T05:12:56Z 2026-11-10T05:13:10Z
+round 4 start 2026-11-10T05:13:10Z
+wrote env -> <home>/work/out-4149/round4/raw/env.json
+wrote 8 rows -> <home>/work/out-4149/round4/raw/measure_cpu_train.jsonl
+wrote 7 rows -> <home>/work/out-4149/round4/raw/measure_cpu_infer.jsonl
+wrote 18 rows -> <home>/work/out-4149/round4/raw/measure_cpu_shapes.jsonl
+wrote 6 rows -> <home>/work/out-4149/round4/raw/measure_cuda_infer.jsonl
+wrote 4 rows -> <home>/work/out-4149/round4/raw/measure_cuda_fixed.jsonl
+wrote 6 rows -> <home>/work/out-4149/round4/raw/measure_cuda_shapes.jsonl
+wrote profile -> <home>/work/out-4149/round4/raw/profile_cpu_train.json
+wrote profile -> <home>/work/out-4149/round4/raw/profile_cpu_infer.json
+wrote profile -> <home>/work/out-4149/round4/raw/profile_cuda_infer.json
+round 4 done 2026-11-10T05:14:25Z
+round 4 rc=0 gate=PASS load1=0.45 compute-apps=0 gpu-util=0x3 hw-lock=held 2026-11-10T05:14:11Z 2026-11-10T05:14:25Z
+round 5 start 2026-11-10T05:14:25Z
+wrote env -> <home>/work/out-4149/round5/raw/env.json
+wrote 8 rows -> <home>/work/out-4149/round5/raw/measure_cpu_train.jsonl
+wrote 7 rows -> <home>/work/out-4149/round5/raw/measure_cpu_infer.jsonl
+wrote 18 rows -> <home>/work/out-4149/round5/raw/measure_cpu_shapes.jsonl
+wrote 6 rows -> <home>/work/out-4149/round5/raw/measure_cuda_infer.jsonl
+wrote 4 rows -> <home>/work/out-4149/round5/raw/measure_cuda_fixed.jsonl
+wrote 6 rows -> <home>/work/out-4149/round5/raw/measure_cuda_shapes.jsonl
+wrote profile -> <home>/work/out-4149/round5/raw/profile_cpu_train.json
+wrote profile -> <home>/work/out-4149/round5/raw/profile_cpu_infer.json
+wrote profile -> <home>/work/out-4149/round5/raw/profile_cuda_infer.json
+round 5 done 2026-11-10T05:15:39Z
+round 5 rc=0 gate=PASS load1=0.29 compute-apps=0 gpu-util=0x3 hw-lock=held 2026-11-10T05:15:26Z 2026-11-10T05:15:39Z
+wrote <home>/work/out-4149/env/probe.txt
+probe rc=0
+49f556359bd385d94cfdfbd92f6e7fdb6fc8bcee96e85791fb379879cb255b17  files=2705
+done. rc=0 2026-11-10T05:15:47Z

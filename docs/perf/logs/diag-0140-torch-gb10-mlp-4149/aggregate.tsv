@@ -1,0 +1,42 @@
+section	quantity	tag	median_ms	min_ms	max_ms	share_median	share_min	share_max
+cpu_train	window	実測	0.36748	0.32915	0.38693	1.0000	1.0000	1.0000
+cpu_train	gemm_kernel_batch10	実測	0.24635	0.20495	0.26225	0.6790	0.5297	0.7853
+cpu_train	gemm_mm_pure_sum	実測	0.25152	0.23664	0.76798	0.7521	0.6322	1.9848
+cpu_train	ew_fwd	実測	0.00941	0.00927	0.00942	0.0252	0.0243	0.0284
+cpu_train	update	実測	0.02091	0.02023	0.02289	0.0610	0.0540	0.0695
+cpu_train	loss_item	実測	0.00021	0.00021	0.00022	0.0006	0.0006	0.0006
+cpu_train	residual	推定	0.08824	0.04154	0.15144	0.2401	0.1244	0.3914
+cpu_train	fwd_nongemm	推定	0.00777	-0.02157	0.03845	0.0212	-0.0646	0.1027
+cpu_train	bwd_nongemm	推定	0.00998	-0.00754	0.05194	0.0272	-0.0226	0.1342
+cpu_train	parts_minus_window	実測	-0.07976	-0.08710	-0.05114	-0.2170	-0.2398	-0.1554
+cpu_train	dispatch_floor_est	推定	0.01871	0.01831	0.01909	0.0510	0.0483	0.0565
+cpu_train	torch_vs_direct_gap	実測	0.06632	0.02453	0.07463	0.1772	0.0634	0.2235
+cpu_infer	window	実測	0.13226	0.12379	0.14942	1.0000	1.0000	1.0000
+cpu_infer	gemm_kernel_batch10	実測	0.11168	0.10001	0.11696	0.7828	0.7562	0.9021
+cpu_infer	gemm_mm_pure_sum	実測	0.11455	0.10352	0.13334	0.8747	0.7725	0.9796
+cpu_infer	ew_fwd	実測	0.00494	0.00486	0.00506	0.0375	0.0338	0.0399
+cpu_infer	readout	実測	0.00077	0.00077	0.00078	0.0058	0.0052	0.0062
+cpu_infer	checksum	実測	0.00299	0.00293	0.00300	0.0226	0.0200	0.0242
+cpu_infer	residual	推定	0.02348	0.00341	0.02422	0.1581	0.0275	0.1775
+cpu_infer	dispatch_floor_est	推定	0.00542	0.00538	0.00552	0.0411	0.0363	0.0435
+cpu_infer	torch_vs_direct_gap	実測	0.00213	-0.01170	0.01601	0.0172	-0.0842	0.1222
+cuda_infer	window	実測	0.04067	0.03973	0.04118	1.0000	1.0000	1.0000
+cuda_infer	issue	実測	0.02794	0.02746	0.02809	0.6854	0.6821	0.6965
+cuda_infer	readout_sync	実測	0.00736	0.00730	0.00765	0.1832	0.1806	0.1880
+cuda_infer	checksum	実測	0.00304	0.00301	0.00325	0.0759	0.0731	0.0810
+cuda_infer	gpu_span_event	実測	0.03318	0.03293	0.03336	0.8141	0.8102	0.8381
+cuda_infer	gemm_event_sum	実測	0.02709	0.02618	0.02813	0.6685	0.6436	0.6907
+cuda_infer	residual	推定	0.00208	0.00174	0.00254	0.0519	0.0439	0.0616
+cuda_infer	issue_minus_gpu_span	実測	-0.00527	-0.00562	-0.00511	-0.1288	-0.1416	-0.1257
+cuda_infer	readout_sync_minus_tiny_roundtrip	実測	-0.00284	-0.00290	-0.00223	-0.0699	-0.0731	-0.0549
+cuda_infer	graph_replay_ref	実測	0.02346	0.02328	0.02349	0.5769	0.5654	0.5912
+cuda_fixed	sync_idle	実測	0.00249	0.00245	0.00251			
+cuda_fixed	tiny_roundtrip	実測	0.01020	0.00988	0.01034			
+cuda_fixed	launch_floor_add	実測	0.00324	0.00321	0.00331			
+cuda_fixed	event_record_pair	実測	0.00851	0.00841	0.00870			
+cuda_shapes	mm_event_l1_fwd	実測	0.01470	0.01358	0.01568			
+cuda_shapes	mm_event_l1_dw	実測	0.01216	0.01216	0.01227			
+cuda_shapes	mm_event_l1_dx	実測	0.01637	0.01627	0.01706			
+cuda_shapes	mm_event_l2_fwd	実測	0.01245	0.01234	0.01259			
+cuda_shapes	mm_event_l2_dw	実測	0.01238	0.01219	0.01256			
+cuda_shapes	mm_event_l2_dx	実測	0.01243	0.01213	0.01259			

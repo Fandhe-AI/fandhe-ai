@@ -1,0 +1,1 @@
+{"framework": "pytorch", "version": "2.14.0+cu130", "task": "train", "device": "cpu", "size": 64, "median_s": 0.00035929586738348007, "q1_s": 0.00035425531677901745, "q3_s": 0.00036238040775060654, "checksum": 0.11754961311817169, "warmup": 20, "iters": 80, "mode": "fresh"}

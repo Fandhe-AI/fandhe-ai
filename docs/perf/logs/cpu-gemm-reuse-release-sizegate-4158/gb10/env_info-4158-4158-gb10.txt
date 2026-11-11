@@ -1,0 +1,16 @@
+profile=gb10
+rule_sha256=ede20e07961403c18a0d09010f0f039aee91cee92144662d80842bb9ff015f4d
+rev_stamp_head=d50251b385a32f0383c4f2b60a287b84cf0f95d8
+rev_stamp_head_after=d50251b385a32f0383c4f2b60a287b84cf0f95d8
+rev_stamp_head_runner=d50251b385a32f0383c4f2b60a287b84cf0f95d8
+sw_vers=
+uname_m=aarch64
+rustc=rustc 1.97.1 (8bab26f4f 2026-07-14)
+head=d50251b385a32f0383c4f2b60a287b84cf0f95d8
+cpu_brand=NA
+hw.logicalcpu=NA
+hw.perflevel0.logicalcpu=NA
+hw.perflevel1.logicalcpu=NA
+hw.memsize=NA
+rayon_num_threads=unset
+precheck=assert

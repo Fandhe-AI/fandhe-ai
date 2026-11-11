@@ -2,10 +2,8 @@
 
 ## 状態
 
-**道具立ての時点: 実測なし。** 本ディレクトリは測る前に固定する部品（変換スクリプト・起動キット・CUDA 純カーネル計測）だけを置く。
-`RULE.txt` は道具立てのマージ後、その main の SHA を `tree_sha` にして**単独コミット**で固定する（計測より前）。
-`round{i}/`・`env/`・`aggregate.md`・`aggregate.tsv` は <cuda-node> での実測で追加する。
-実測値・分類・確度は、実測するまで書かない（推定値で埋めない）。**<cuda-node> に到達できる環境でのみ実測し、`Closes #4147` は実測と判定を含む最後の PR だけに付ける。**
+**2026-11-11 に実測済み（5/5 PASS・status=formal）。** `RULE.txt`（fixed-at-utc 2026-11-11T02:14:03Z・PR #4243）で固定した規則どおりに <cuda-node> で 5 round を測り、`round{1..5}/`・`env/`・`aggregate.md`・`aggregate.tsv` を追加した。
+3 セルとも F1・F2 が閾値 1.00 に届かず「分類保留」（確度 高）。分類の反映（`unreached_0140.tsv`）はこの issue では行わない（#4168）。
 
 雛形と規則の一般論は `docs/perf/logs/diag-0140-template/README.md`、式の定義は `docs/perf/loss-attribution-matrix.md` §10.1。
 派生元は `docs/perf/logs/diag-0140-mlp-macmini-4146/`（Mac mini の CPU 2 セル）。
@@ -37,7 +35,7 @@
 | ファイル | 役割 |
 |---|---|
 | `RULE.txt` | 測る前に固定する規則（道具立てのマージ後に単独コミットで追加） |
-| `RULE.template.txt`・`aggregate_diag.py` | 雛形の無改変コピー（sha256 を RULE の PARAMS に固定）。`aggregate_diag.py` は #4208 で時計不一致のセルを分類保留にする修正後の雛形に合わせた（RULE は未固定のため再登録は不要） |
+| `RULE.template.txt`・`aggregate_diag.py` | 雛形の無改変コピー（sha256 を RULE の PARAMS に固定）。`aggregate_diag.py` は #4208 で時計不一致のセルを分類保留にする修正後の雛形に合わせ、#4237 で時計が揃っていても純カーネルが窓を上回るラウンドを止めずに F1 を比較不能とする修正後の雛形（所有者判断 2026-11-11）に合わせた（雛形と byte 一致。RULE は未固定のため再登録は不要） |
 | `to_values_4147.py` | `raw/` → `values.tsv` の変換（厳格パース・`--self-test`） |
 | `run_round.sh` | 1 round の起動（ゲート → 計測 → `gate.txt`・`raw/`） |
 | `opp_kernel_cuda_mlp_diag_4147.py` | PyTorch(cuBLAS) の MLP 推論 2 形状を CUDA event で測る（`--self-test`） |
@@ -55,4 +53,29 @@
 
 ## 結果
 
-（実測後に追記。道具立て時点は空。）
+### 計測の条件（実測）
+
+- 計測ツリー: `41aae869e`（RULE の tree_sha）の git archive。`.rev-stamp`（`env/rev-stamp.txt`）と tree_fingerprint `b74e3020…` を、送信側・ノード側のビルド前（`env/fp-before-build.txt`）・ビルド後（`env/fp-after-build.txt`）で一致確認した。補助ファイル 3 本の sha256（RULE 項 8 (c)）もノード側で照合した（3 件 OK）。
+- 実機ロック: owner は `#4147 measure 2026-11-11T02:32:57Z`（`env/lock-owner.txt`）。ビルドはロック取得後に新しい展開先の in-tree target で行い、成果物 3 本の mtime はロックの owner ファイルより後（`env/artifact-mtime.txt`。+25〜48 秒）。系列開始前の compute プロセスは 0 件（`env/compute-apps-before.txt`）。
+- 系列: 2026-11-11T02:33:47Z〜02:44:07Z。round 1〜5 とも `run_round.sh` は rc=0、ゲートは PASS（`round{i}/gate.txt`）、`to_values_4147.py` は rc=0（`env/run/`）。
+- bench-fandhe の fandhe-ai は crates.io の 0.14.0（`env/cargo-tree-fandhe-ai.txt`）。torch は 2.14.0+cu130（`env/torch-config.txt`）。
+- BLAS 経路（計測外で `blas_probe/run_probe.sh` を実行。`env/blas_probe.txt`）: PyTorch CPU の mm 2 回（l1_fwd 形・l2_fwd 形）は `sgemm_` 2 呼び出しで、転送先は NVPL（`libnvpl_blas_lp64_gomp`）。`cblas_sgemm` は 0 回。kernel_owner=hardware の宣言（閉源ベンダーライブラリ）の前提と一致する。
+
+### 集計（`aggregate.md`・`aggregate.tsv`）
+
+| セル | F1 中央値（run 別の範囲） | F2 中央値（範囲） | 観測比の中央値 | scoreboard の比 | 分類 | 確度 |
+|---|---|---|---|---|---|---|
+| G-CPU-TRN | 0.5635（0.5382〜0.6211） | 0.3246（0.3000〜0.3337） | 0.4812 | 0.51 | 分類保留（前: 自分たちの制約） | 高 |
+| G-CPU-INF | 0.8804（0.7706〜0.9568） | 0.7857（0.6544〜0.8522） | 0.8086 | 0.75 | 分類保留（前: 分類保留） | 高 |
+| G-CUDA-INF | 0.7639（0.7592〜0.7837） | 0.2603（0.2531〜0.2724） | 0.5153 | 0.51 | 分類保留（前: 自分たちの制約） | 高 |
+
+- 理由（3 セル共通。集計の出力）: どれも届かない（残差は固定費など別区間。別診断へ）。F1・F2 とも全 run が閾値 1.00 の下側（NB-RANGE5 の帯が閾値をまたがない）で、時計不一致・窓超過はない。
+- ドリフト: 観測比の中央値と scoreboard の比の乖離は G-CPU-TRN −5.6%・G-CPU-INF +7.8%・G-CUDA-INF +1.0% で、いずれも 10% 以内。
+- 読み方（実測の範囲）: F1 は fandhe 側の純カーネル（GEMM のみ）を相手の純カーネルに置き換えた比で、これが 1 に届かないことは、GEMM を相手と同じにしても、fandhe 側の GEMM 以外の区間（窓 − 純カーネル）が長く、相手の窓に届かないことを示す。どの区間かはこの診断では分けない（G-CUDA-INF の fandhe 側の内訳は #4150、相手側は #4149）。
+- 前分類との異同: G-CPU-TRN・G-CUDA-INF は「自分たちの制約（確度低）」から「分類保留（確度高）」に変わる。反映は #4168。
+
+### 試走との違い（G-CPU-INF の窓超過）
+
+- 固定前の捨て試走 2（2 round。RULE 項 8 (e)）では、G-CPU-INF の相手側の純カーネルが 2 round とも窓を上回り、F1 が窓超過で比較不能になった。これを受けて所有者判断（2026-11-11）で formulas=F1,F2 のまま固定した。
+- 本系列の 5 round では窓超過は 1 回も起きず、F1 は 5 run とも計算された。相手側の純カーネル ÷ 窓は 0.85〜0.99（round 4 が 0.99。`round{i}/values.tsv` から算出）で、境界のすぐ下にある。試走の超過は、この境界付近の揺れが試走の 2 round では上側に出たものと読める（推定。試走の値は記録していない）。
+- 窓超過が起きていれば F1 は比較不能になり、分類は F2（中央値 0.7857 < 1.00）から「分類保留」になっていた。F1 の有無によらず、本系列の分類は変わらない。

@@ -1,0 +1,137 @@
+イシュー #4160: steel 候補 T0U-LU-FB を N>=1024 の正方 3 点に限って選ぶ opt-in（tile::STEEL_LARGE_N_ENABLED）の Mac mini A/B — 事前登録規則（計測前に固定。以後、本文は変更しない。変更が要るなら RULE.v2.txt で改訂する）
+
+fixed-at-utc: 2026-11-11T04:32:10Z
+tree_sha: 19eca6fa3dd1d315e3ee7557374c688a1c6a94e1
+tree_fingerprint: befe4844cc363f3e905673dd8ee2322219c6739d4e410d26ac3d793df5317086
+aggregate_script_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a468dc3bc06307
+
+0. 判定の根拠
+   ADOPT／REJECT の根拠は純カーネル時間（kernel_gpu = GPUEnd−GPUStart）に限る。gemm Metal セルの A/B は
+   非後退ゲートであり、改善の証拠にしない。
+
+1. 不変事項
+   - main の STEEL_LARGE_N_ENABLED（false）・M4Base 表・シェーダ・tolerance（RELATIVE_TOLERANCE／
+     ABSOLUTE_RESCUE_THRESHOLD）・parity baseline・FMA 契約・framework-compare の依存は変えない。
+   - after 腕は計測専用の checkout とし、main へはコミットしない（tile.rs の定数 1 行だけ false→true）。
+   - #2111／#3184／#3206／#3212 の既存規則は 1 字も変えない。
+   - ADOPT の意味は「Phase 4（#4166）で所有者が結線を判断する価値がある」に限る。結線は別 PR かつ所有者判断。
+
+2. 機体と記録項目
+   Mac mini（<metal-node>。Apple M4・GPU 10 コア）。記録: DEVICE 行（verified_tile_table が M4Base を期待）・
+   host_kind=macmini・split_k_enabled・macOS・rustc・.rev-stamp・ツリー指紋。
+   ホスト名・ユーザー名・$HOME はマスクする（公開面には <metal-node> と書く）。
+
+3. 形状と腕
+   正方 NN の N ∈ {256, 512, 1024, 2048, 4096}。入力は決定的シードの有限値。
+   - cur: MetalGemm::new（現行 #3206 の M4Base 表）。判定の基準。
+   - sl : MetalGemm::new_with_steel_large_n(ctx, true)。判定の対象。
+   - ref: new_with_steel_candidate(ctx, true, true, true) で CANDIDATES[0] を強制。bit 一致の照合専用（時間は記録のみ）。
+   - cur_aa: cur と同構成の 2 本目。A/A 対照（記録のみ。判定に使わない）。
+   スコープは (1024,1024,1024)・(2048,2048,2048)・(4096,4096,4096) の 3 点との完全一致。M4Base 以外・N<=512・非正方・
+   8192 以上は対象外（既存の表選択のまま）。
+
+4. 到達追跡（決定的・閾値なし。5 run の全一致を整合検査とし、不一致は fail-closed）
+   - N>=1024 の sl が profile=steel_large_n・cfg=CANDIDATES[0]・route=Classic・fallback=false。
+   - N<=512 の sl が profile=table で cur と同一タイル・fallback=false。
+   成立しない N は「前提不成立」として undetermined（推定で埋めない）。
+
+5. 前提ゲート（性能 run の前に 1 回。1 件でも落ちたら系列を開始しない）
+   tile:: 単体テスト、既存 gemm_steel_candidate_diag_tests 全件、steel_large_n_bit_identity、steel_large_n_prereq_parity
+   （matmul_reference_fma を参照とした REQ-2 統一複合判定。tolerance は不変）。不一致の N は NOT_ADOPTABLE。
+
+6. 回数と負荷
+   5 プロセス（5 run）。値は run 内中央値（warmup 20 + 計測 20、trial ごとに腕の順序を巡回）の 5 run 中央値とし、
+   run 別の値も表に出す。各プロセスの前に hw-lock と load1 < 3.0 を 30 秒間隔・最大 30 分待つ
+   （GATE-TIMEOUT／GATE-INVALID を記録）。全プロセスが通過した系列だけを正式系列とする。
+   ビルド・集計・転送はゲート付き区間の外で行う。
+   他ジョブの前提ゲート（docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py。基準 G1〜G4 は同 README。load1 の閾値・
+   分類式・確度の規則は変えず、厳しくする方向だけの追加）: 各プロセス（純カーネル計測の trace・kern・candle、セル A/B の
+   round 先頭と各セルの実行）の前は「他ジョブ CLEAN かつ load1 < 3.0」を 30 秒間隔・最大 60 回（30 分）同じループで待ち、
+   後に 1 回確かめる。開始前に揃わなければ GATE-TIMEOUT（reason=foreign-job|load1）、ゲート自身の失敗・出力の解釈失敗は
+   GATE-INVALID（reason=foreign-gate-error）、終了後に FOREIGN なら GATE-INVALID（reason=foreign-after）を同じ label の行として
+   記録する。いずれも既存と同じく記録して続行し、そうした行を含む系列は正式系列にしない（部分系列は作らない・差し替えない）。
+   FOREIGN_GATE（ゲートの絶対パス）は必須で、未指定なら起動しない。各回のゲート出力は出力ディレクトリの foreign-gate/ 以下。
+   ゲートのスクリプトと ab_foreign_gate.sh の sha256 は RULE.txt 固定時に併記する（固定時点のものを使う）。
+
+7. 純カーネルの判定（N=1024／2048／4096。指標は kernel_gpu）
+   - ADOPT_CANDIDATE: sl/cur の 5 run 中央値で 2% を超えて速い、かつ 5/5 run で速い、かつ parity pass・ref との bit 一致・
+     fallback なし・到達が成立。
+   - REJECT_CELL: 上記以外。2% を超えて遅く、かつ 5/5 run で遅いものは「後退」として区別して記録する。
+   - NOT_ADOPTABLE: bit 不一致・parity fail・fallback。
+   - undetermined: 正式系列でない・欠損・非有限値・到達の前提不成立。
+
+8. N=256／512 の no-op
+   ON と OFF で解決タイルが同じで、出力が bit 一致することを assert する。崩れたら性能の所見ではなく**欠陥**として系列を無効にする。
+
+9. gemm Metal セルの A/B（非後退ゲート。改善の根拠にしない）
+   - before は main の facade、after は定数 1 行だけを true にした checkout。いずれも [patch.crates-io.fandhe-ai] の path patch でビルド。
+     before と after のバイナリ sha256 が同じなら fail-closed で停止する。
+   - セルは metal × gemm × N {256,512,1024,2048,4096} × {fresh, reuse}。5 round で、round ごとに起動順を反転する。
+   - 比較は compare_gemm_ab.py --sizes metal-square5 --threshold 1.00 --per-run --require-checksum-exact。checksum 不一致は FAIL。
+   - 同じ round で bench-candle --task gemm --device metal も測る（record_only）。
+
+10. スコアボード比と「1 位」の判定（M-MTL-G1024・M-MTL-G2048 だけ。G4096 は記録のみ）
+   - round 別の比 = candle の gemm 窓（fresh）÷ fandhe-ai の reuse 窓（同じ round）。
+   - ノイズ帯 = NB-RANGE5（各腕の round 別比の最小〜最大。腕ごとに算出する）。
+   - 「1 位に変わった」と書けるのは NB-SEP が成立したときだけ: after の 5/5 round で比 > 1.0、かつ after の最小 > before の最大
+     （before は同じセッションで測る）。成立しなければ「改善傾向・確定せず」または「変化なし／後退」と書く。
+   - 相手は candle だけを測る。スコアボードの他の相手は対象外。
+   - NB-RANGE5／NB-SEP は docs/perf/noise-band-decision.md（#4142）の定義を名前で参照する。同 doc は #4142 で所有者承認済み
+     （2026-11-10。https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 ）。
+     定義や名前が変わったら RULE.v2.txt で改訂する。
+
+11. 総合判定
+   - UNDETERMINED: 必要なセルが 1 件でも undetermined なら最優先。
+   - ADOPT: 1024／2048 の少なくとも 1 つが ADOPT_CANDIDATE、スコープ内に NOT_ADOPTABLE と「後退」がなく、N<=512 の no-op が成立し、
+     セル A/B で 5/5 round 一貫して 2% を超えて後退するセルがない。
+   - REJECT: 上記以外。
+   - スコープ（3 点）を事後に絞って ADOPT を作ることは禁止する。判定は Mac mini 単機のもの（M4 Max での確認は結線前に別途必要）。
+
+12. 運用
+   - run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルで行い、旧系列も残す。
+   - nohup で切り離して起動し、生存を確認する。2 時間を超えるならセッションを分ける。
+   - 純カーネルの計測とセル A/B を同時に走らせない。
+   - aggregate.py は固定時点のものを使う（aggregate_script_sha256 で照合）。
+
+13. 到達不能時
+   機体に届かない、または完走できない場合は、数値を埋めず unavailable／undetermined と記録する。推定値・M4 Max の値・代替機の値で埋めない。
+
+14. 固定時の記入（雛形の項 0〜13 は変えていない。以下は固定時に足した運用の決まり）
+  (a) ツリー指紋の求め方: 展開ツリーで、.git 以下・.rev-stamp・本ファイル（docs/perf/logs/metal-steel-large-n-ab-macmini-4160/RULE.txt。
+      自己参照のため）を除く全ファイルの相対パスを LC_ALL=C で整列し、各ファイルの `shasum -a 256` の出力を順に連結した全体の sha256。
+      上の値は tree_sha の git archive で求めた（files=21568）。ノード側では規則固定コミットの git archive を展開したツリーで同じ手順で求め、
+      送信側と一致しなければ測らない。系列ごとに、起動の直前にも取り直して一致を確かめる（A/B の runner は展開ツリーの
+      scripts/bench/framework-compare/ の下に results/ と target-ab-4160-<LABEL>-* を書くため、系列 1 の後の照合では
+      これら 2 種類を除いて求める。除いたことは記録に書く）。
+  (b) 固定時点の sha256（項 6 の「ゲートのスクリプトと ab_foreign_gate.sh の sha256 は固定時に併記する」）:
+      docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py  d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04
+      scripts/bench/framework-compare/ab_foreign_gate.sh            b7ae69bc4b32fa63887867822b97e1eeb9e900ed1a51a81053b231e8ff10f975
+      scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh  ebe1887e7428cd1f87d2afb113072d44b23c1174cfeff92e9fd635bd2c3921bb
+      docs/perf/logs/metal-steel-large-n-ab-macmini-4160/orchestrate_macmini.sh  2e8bec2aa1f5323a98359c4a370fecadac555c7340d955ab230bbffc30768342
+      いずれも tree_sha の版（展開ツリーのものを使う。FOREIGN_GATE には展開ツリーの foreign_job_gate.py の絶対パスを渡す）。
+  (c) 展開先と腕: 展開先は名前が `.noindex` で終わる新しいディレクトリ（Spotlight が索引しない場所。#4151 の RULE.v2.txt 項 10 (e)）。
+      ビルド・計測・記録のファイルはすべてこの中に書く（CARGO_TARGET_DIR も展開先の中）。tree には規則固定コミットの git archive と
+      .rev-stamp（README 手順 1 の 2 行）を置く。セル A/B の before は同じ archive を git init で 1 コミットにした checkout、after はその clone で
+      crates/backend-metal/src/tile.rs の STEEL_LARGE_N_ENABLED を false→true の 1 行だけ書き換えたもの（#3212 と同じ作り方。runner が検証する）。
+  (d) 系列の回し方（所有者判断 2026-11-11「別ラベルで最大 3 系列」）: 1 系列 = hw-lock を取ったまま、純カーネル計測（orchestrate_macmini.sh。
+      OUT=<展開先>/formal-<k>/kern）→ セル A/B（LABEL=f<k>）を続けて回すもの（同時には走らせない）。ビルドは各スクリプトの冒頭で、
+      計測区間の外・hw-lock の下で行う。系列 k が「全ゲート通過」（kern/load_gate.log の gate= 行がすべて gate=pass で FAILED がなく series done があり、
+      A/B の load-gate-4160-metal-f<k>.log の gate= 行がすべて gate=pass、両スクリプトの終了コードが 0）なら、そこで止めて系列 k で判定する。
+      そうでなければ k+1 を回す（最大 k=3）。全ゲート通過かどうかはゲートの行と終了コードだけで決め、値は見ない。
+      3 系列とも通らなければ、3 系列とも参考系列として記録し、総合は UNDETERMINED とする。回した系列はすべて残し、差し替え・除外しない。
+      経緯: 試走 1 で、計測直後のゲートが macOS のデーモン（logd・triald）の %CPU 9 割台を 37 分の系列で 2 回検出した（下の (g)）。
+      ゲートの基準は変えない（デーモンも計測と重なる CPU 負荷であり、除外しない）。
+  (e) 系列の前の確認: 各系列の前に mediaanalysisd が止まっていることを確かめる（2 分間隔で 3 回続けて %CPU 5 未満。#4146 の RULE.v2.txt 項 8 (c)）。
+      止まっていなければその系列を始めず、見送って報告する（所有者判断 2026-11-10「mediaanalysisd が止まっていれば回し、動いていれば同じく見送る」）。
+      読みと spotlightknowledged の「Submitting text processing」の直近 10 分の件数を formal-<k>/preflight.txt に残す。hw-lock を取ってから load1 を
+      30 秒ごとに読み、1.5 未満になったら始める（最大 40 回。届かなければそのまま始めて記録する）。記録は formal-<k>/series-start.txt。
+  (f) 系列の途中で値を見ない（見るのは系列ごとの状態ファイルと、全ゲート通過の判定に使うゲートの行だけ。kern/*.log・candle_*.jsonl・
+      A/B の results-*・compare-* は判定する系列が決まるまで開かない）。回収時にパス上のユーザー名・ホスト名・ホームをマスクする。
+  (g) 固定前の試走（捨てる前提。リポジトリに入れない）: 試走 1（2026-11-11T02:52:24〜03:29:08Z。tree は 2b8c63497c72417e696f348039277e276563ec19
+      〈tree_sha の 1 つ前の main。差分は #4161 の RULE.txt 1 件だけ〉。上の (a)〜(e) と同じ作り方・同じスクリプト、LABEL=t1）:
+      ツリー指紋は送信側とノード側で一致。mediaanalysisd は 3 回とも %CPU 0.0、系列の開始時 load1=1.18。
+      純カーネル計測は rc=0・40 行のゲートのうち 1 行が `run5-candle-N4096 gate=invalid reason=foreign-after`（logd の %CPU 96.8。G2）。
+      セル A/B は rc=0・round4 の `candle-N4096-fresh` の直後が foreign-after（triald の %CPU 94.5。G2）。ほかのゲートはすべて pass。
+      G4（GPU 使用率）は、計測直後の 1 回目の読みが最大 96 になるが、5 回中 2 回以上に届いた回はなく、誤検出はなかった。
+      集計の通し: 試走の出力に ab/ を加えた写しで aggregate.py が rc=0（参考系列・undetermined）。このとき状態の行を抜き出す grep の絞り込みが甘く、
+      純カーネルの判定表の 3 行（N=1024／2048／4096 の sl/cur の差の %）を見た。試走の値で判定には使わない。

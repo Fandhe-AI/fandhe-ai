@@ -1,0 +1,106 @@
+{
+ "issue": 4149,
+ "section": "cuda_infer",
+ "run": 4,
+ "steps": 50,
+ "torch_version": "2.14.0+cu130",
+ "n_ops_aten_total": 16,
+ "n_ops_aten_toplevel": 10,
+ "mm_has_child_ops": true,
+ "ops": [
+  {
+   "name": "aten::_to_copy",
+   "count": 50,
+   "self_cpu_s": 5.014400000000093e-05,
+   "cpu_total_s": 0.0005309270000000016
+  },
+  {
+   "name": "aten::add",
+   "count": 100,
+   "self_cpu_s": 0.0002807679999999995,
+   "cpu_total_s": 0.0005738539999999997
+  },
+  {
+   "name": "aten::clamp_min",
+   "count": 50,
+   "self_cpu_s": 0.00011644800000000056,
+   "cpu_total_s": 0.0002544780000000003
+  },
+  {
+   "name": "aten::copy_",
+   "count": 50,
+   "self_cpu_s": 8.927999999999927e-05,
+   "cpu_total_s": 0.0004630550000000004
+  },
+  {
+   "name": "aten::detach",
+   "count": 50,
+   "self_cpu_s": 2.0464000000001083e-05,
+   "cpu_total_s": 3.3327999999999516e-05
+  },
+  {
+   "name": "aten::empty_strided",
+   "count": 50,
+   "self_cpu_s": 1.7728000000000292e-05,
+   "cpu_total_s": 1.7728000000000292e-05
+  },
+  {
+   "name": "aten::matmul",
+   "count": 100,
+   "self_cpu_s": 4.495999999999735e-05,
+   "cpu_total_s": 0.002041660000000003
+  },
+  {
+   "name": "aten::mm",
+   "count": 100,
+   "self_cpu_s": 0.0005754870000000048,
+   "cpu_total_s": 0.0019967000000000058
+  },
+  {
+   "name": "aten::relu",
+   "count": 50,
+   "self_cpu_s": 4.6816000000000685e-05,
+   "cpu_total_s": 0.00030129400000000094
+  },
+  {
+   "name": "aten::resolve_conj",
+   "count": 50,
+   "self_cpu_s": 1.9199999999984815e-06,
+   "cpu_total_s": 1.9199999999984815e-06
+  },
+  {
+   "name": "aten::resolve_neg",
+   "count": 50,
+   "self_cpu_s": 1.2800000000004267e-06,
+   "cpu_total_s": 1.2800000000004267e-06
+  },
+  {
+   "name": "aten::to",
+   "count": 100,
+   "self_cpu_s": 2.2079999999997183e-05,
+   "cpu_total_s": 0.0005530069999999986
+  }
+ ],
+ "cuda": {
+  "kernels": {
+   "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(cutlass_80_simt_sgemm_128x32_8x5_nn_align1::Params)": 1.0,
+   "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)": 2.0,
+   "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1})": 2.0,
+   "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, false>(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)": 1.0,
+   "void cutlass::Kernel2<cutlass_80_simt_sgemm_32x128_8x5_nn_align1>(cutlass_80_simt_sgemm_32x128_8x5_nn_align1::Params)": 1.0,
+   "Memcpy DtoH (Device -> Pageable)": 1.0
+  },
+  "api": {
+   "cuLaunchKernel": 2.0,
+   "cudaLaunchKernel": 3.0,
+   "cudaMemcpyAsync": 1.0,
+   "cudaStreamSynchronize": 1.0,
+   "cudaDeviceSynchronize": 0.04
+  },
+  "graph_launch": false
+ },
+ "cuda_unavailable_reason": null,
+ "note": "profiler 下の値。時間は計時腕の値と混ぜない（op 数・kernel／API の回数だけを内訳に使う）",
+ "bench_py_sha256": "9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b",
+ "diag_script_sha256": "847567fbde8ff0230cc73f1a19f3ab560283012b5cb1a6223398c98010465b7e"
+}

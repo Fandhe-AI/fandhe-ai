@@ -1,0 +1,71 @@
+{
+ "issue": 4149,
+ "section": "cpu_infer",
+ "run": 4,
+ "steps": 50,
+ "torch_version": "2.14.0+cu130",
+ "n_ops_aten_total": 19,
+ "n_ops_aten_toplevel": 10,
+ "mm_has_child_ops": true,
+ "ops": [
+  {
+   "name": "aten::add",
+   "count": 100,
+   "self_cpu_s": 0.0001926879999999996,
+   "cpu_total_s": 0.0001926879999999996
+  },
+  {
+   "name": "aten::clamp_min",
+   "count": 50,
+   "self_cpu_s": 5.676800000000006e-05,
+   "cpu_total_s": 5.676800000000006e-05
+  },
+  {
+   "name": "aten::detach",
+   "count": 50,
+   "self_cpu_s": 9.168000000002734e-06,
+   "cpu_total_s": 1.9600000000001503e-05
+  },
+  {
+   "name": "aten::matmul",
+   "count": 100,
+   "self_cpu_s": 2.0383999999997405e-05,
+   "cpu_total_s": 0.005450721999999997
+  },
+  {
+   "name": "aten::mm",
+   "count": 100,
+   "self_cpu_s": 0.005421762,
+   "cpu_total_s": 0.005430338
+  },
+  {
+   "name": "aten::relu",
+   "count": 50,
+   "self_cpu_s": 1.2511999999997333e-05,
+   "cpu_total_s": 6.92799999999974e-05
+  },
+  {
+   "name": "aten::resolve_conj",
+   "count": 350,
+   "self_cpu_s": 9.471999999999434e-06,
+   "cpu_total_s": 9.471999999999434e-06
+  },
+  {
+   "name": "aten::resolve_neg",
+   "count": 50,
+   "self_cpu_s": 1.1040000000018609e-06,
+   "cpu_total_s": 1.1040000000018609e-06
+  },
+  {
+   "name": "aten::to",
+   "count": 100,
+   "self_cpu_s": 6.799999999997807e-06,
+   "cpu_total_s": 6.799999999997807e-06
+  }
+ ],
+ "cuda": null,
+ "cuda_unavailable_reason": null,
+ "note": "profiler 下の値。時間は計時腕の値と混ぜない（op 数・kernel／API の回数だけを内訳に使う）",
+ "bench_py_sha256": "9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b",
+ "diag_script_sha256": "847567fbde8ff0230cc73f1a19f3ab560283012b5cb1a6223398c98010465b7e"
+}

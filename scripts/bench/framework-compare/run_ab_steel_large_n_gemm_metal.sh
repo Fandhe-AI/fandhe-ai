@@ -19,11 +19,16 @@
 # --sizes metal-square5 --threshold 1.00 --per-run --require-checksum-exact` の出力と終了コードを
 # 記録し、checksum 不一致・判定不能は FAIL として非ゼロ終了にする（純粋な速度後退は記録のみ。
 # round 別の比は `aggregate.py` が JSONL から直接計算する）。
-# 負荷ゲートは RULE 項 6 の load1 < 3.0。before／after のバイナリ sha256 が同一なら定数の反転が
+# 負荷ゲートは RULE 項 6 の load1 < 3.0 に、他ジョブの前提ゲート（FOREIGN_GATE=`foreign_job_gate.py` の絶対パス。必須。
+# `ab_foreign_gate.sh`。docs/perf/logs/macmini-foreign-job-gate/）を足す: 各 round の先頭と各計測プロセス（run_cell）の前は
+# 「他ジョブ CLEAN かつ load1 < 閾値」を 30 秒間隔・最大 60 回待ち、各プロセスの後に 1 回確かめる。通過以外は
+# 負荷ゲートのログへ `round<N> gate=timeout|invalid reason=... cell=...` を足し（終了後の FOREIGN は `reason=foreign-after`）、
+# `aggregate.py` が正式系列から外す（部分系列で続ける新経路は作らない）。各回の出力は `results/raw/foreign-gate/` 以下。
+# 加えて、before／after のバイナリ sha256 が同一なら定数の反転が
 # 効いていないため fail-closed で停止する。after は計測専用でありコミットしない。
 #
 # 呼び出し例（Mac mini 上。bash 3.2 互換。変数は ${VAR} 形式）:
-#   AB_BEFORE_FACADE_PATH=/abs/before/crates/facade \
+#   FOREIGN_GATE=/abs/foreign_job_gate.py AB_BEFORE_FACADE_PATH=/abs/before/crates/facade \
 #   AB_AFTER_FACADE_PATH=/abs/after/crates/facade \
 #     bash run_ab_steel_large_n_gemm_metal.sh 4160
 set -u
@@ -32,6 +37,8 @@ cd "$(dirname "$0")" || exit 1
 source ./bench_fandhe_lock_restore.sh
 # shellcheck source=./ab_round_cooldown.sh
 source ./ab_round_cooldown.sh
+# shellcheck source=./ab_foreign_gate.sh
+source ./ab_foreign_gate.sh
 
 LABEL=${1:-}
 ROUNDS=5
@@ -72,6 +79,10 @@ validate_facade_path() {
     exit 1
   fi
 }
+if [[ -z "${FOREIGN_GATE:-}" ]]; then
+  echo "error: FOREIGN_GATE（foreign_job_gate.py の絶対パス）が必須です（他ジョブの前提ゲート。#4160）" >&2
+  exit 1
+fi
 validate_facade_path AB_BEFORE_FACADE_PATH "${AB_BEFORE_FACADE_PATH:-}"
 validate_facade_path AB_AFTER_FACADE_PATH "${AB_AFTER_FACADE_PATH:-}"
 BEFORE_FACADE="${AB_BEFORE_FACADE_PATH}"
@@ -163,6 +174,7 @@ OUT="results/raw"
 mkdir -p "${OUT}"
 SKIP="${OUT}/skipped-4160-${DEVICE}-${LABEL}.log"
 ANY_FAILED=0
+CUR_ROUND=0
 record_failure() {
   ANY_FAILED=$((ANY_FAILED + 1))
 }
@@ -179,6 +191,11 @@ if [[ -e "${SKIP}" ]]; then
   echo "error: 既存の失敗記録 ${SKIP} があります。差し替え禁止のため別の LABEL で実行してください" >&2
   exit 1
 fi
+# 他ジョブの前提ゲートの出力先（LABEL 入り。既存は差し替え禁止で拒否）。パスの検査もここで行う。
+# 系列の記録（SKIP・JSONL）を作る前に検査し、ゲートのパスの誤りで LABEL を使い切らないようにする（PR #4238 の Bugbot 指摘）。
+FG_OUT="${OUT}/foreign-gate/4160-${DEVICE}-${LABEL}"
+fg_require "${FOREIGN_GATE}" "${FG_OUT}" || exit 1
+fg_sha256 "${FOREIGN_GATE}" >"${FG_OUT}/foreign_job_gate.sha256"
 : >"${SKIP}"
 for arm in before after candle; do
   : >"${OUT}/results-${arm}-${LABEL}-${DEVICE}-gemm.jsonl"
@@ -266,6 +283,23 @@ print(n)
 ' "${f}" "$2" "$3" 2>/dev/null || true
 }
 
+# 各計測プロセスの前後の他ジョブの前提ゲート。CUR_ROUND は round ループが設定する。
+# 通過は記録しない（round 先頭の `round<N> gate=pass` 行を増やさず、aggregate.py の「5 行・全 pass」を保つ）。
+cell_gate_before() { # cell_gate_before <cell>
+  fg_wait_before "round${CUR_ROUND}-$1" "${LOAD_GATE}"
+  [[ "${FG_STATUS}" == pass ]] && return 0
+  local st=${FG_STATUS}
+  [[ "${FG_REASON}" == load1-unavailable ]] && st=unavailable
+  local ph=""
+  [[ "${FG_REASON}" == foreign-gate-error ]] && ph=" phase=before"
+  echo "round${CUR_ROUND} gate=${st} reason=${FG_REASON}${ph} cell=$1 load1=${FG_L1} waited_s=${FG_WAITED} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${GATE_LOG}"
+}
+cell_gate_after() { # cell_gate_after <cell>
+  fg_after "round${CUR_ROUND}-$1"
+  [[ "${FG_RC}" -eq 0 ]] && return 0
+  echo "round${CUR_ROUND} gate=invalid reason=$(fg_after_reason) phase=after cell=$1 at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${GATE_LOG}"
+}
+
 run_cell() { # run_cell <arm> <size> <mode>
   local arm=$1 size=$2 mode=$3 bin before_n after_n
   case "${arm}" in
@@ -275,6 +309,8 @@ run_cell() { # run_cell <arm> <size> <mode>
     *) echo "error: unknown arm" >&2; exit 1 ;;
   esac
   echo "== gemm ${DEVICE} size=${size} mode=${mode} arm=${arm} =="
+  cell="${arm}-N${size}-${mode}"
+  cell_gate_before "${cell}"
   before_n="$(count_cell_rows "${arm}" "${size}" "${mode}")"
   if ! "${bin}" --task gemm --size "${size}" --device "${DEVICE}" --mode "${mode}" \
     --out "${OUT}/results-${arm}-${LABEL}-${DEVICE}-gemm.jsonl" 2>"${OUT}/err-${arm}-${LABEL}-${DEVICE}.tmp"; then
@@ -290,6 +326,7 @@ run_cell() { # run_cell <arm> <size> <mode>
     fi
   fi
   rm -f "${OUT}/err-${arm}-${LABEL}-${DEVICE}.tmp"
+  cell_gate_after "${cell}"
 }
 
 run_pair() { # run_pair <round> <size> <mode>
@@ -316,25 +353,14 @@ fi
 GATE_LOG="${OUT}/load-gate-4160-${DEVICE}-${LABEL}.log"
 : >"${GATE_LOG}"
 echo "threshold=${LOAD_GATE} rule_threshold=${RULE_LOAD_GATE} series=${GATE_SERIES}" >>"${GATE_LOG}"
-wait_load_gate() { # wait_load_gate <round>
-  local waited=0 status=timeout l1 ok
-  while ((waited < 1800)); do
-    l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
-    if [[ -z "${l1}" || "${l1}" =~ [^0-9.] ]]; then
-      status=unavailable
-      l1=NA
-      break
-    fi
-    ok=$(awk -v a="${l1}" -v t="${LOAD_GATE}" 'BEGIN{print (a<t)?1:0}')
-    if [[ "${ok}" == "1" ]]; then
-      status=pass
-      break
-    fi
-    sleep 30
-    waited=$((waited + 30))
-  done
+wait_load_gate() { # wait_load_gate <round>（他ジョブ CLEAN かつ load1 < 閾値。30 秒間隔・最大 60 回）
+  fg_wait_before "round${1}-start" "${LOAD_GATE}"
+  local status=${FG_STATUS} extra=""
+  [[ "${FG_REASON}" == load1-unavailable ]] && status=unavailable
   if [[ "${status}" == pass && "${GATE_SERIES}" == reference ]]; then status=pass-reference; fi
-  echo "round${1} gate=${status} threshold=${LOAD_GATE} load1=${l1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${GATE_LOG}"
+  [[ "${FG_STATUS}" != pass ]] && extra=" reason=${FG_REASON}"
+  [[ "${FG_REASON}" == foreign-gate-error ]] && extra="${extra} phase=before"
+  echo "round${1} gate=${status} threshold=${LOAD_GATE} load1=${FG_L1} waited_s=${FG_WAITED}${extra} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${GATE_LOG}"
 }
 
 : >"${OUT}/uptime-4160-${DEVICE}-${LABEL}.log"
@@ -343,6 +369,7 @@ uptime | sed 's/.*load/load/' >>"${OUT}/uptime-4160-${DEVICE}-${LABEL}.log"
 ab_round_cooldown_init "${OUT}/cooldown-4160-${DEVICE}-${LABEL}.log"
 for run_i in $(seq 1 "${ROUNDS}"); do
   ab_round_cooldown "${run_i}"
+  CUR_ROUND=${run_i}
   wait_load_gate "${run_i}"
   for size in ${SIZES}; do
     for mode in ${MODES}; do

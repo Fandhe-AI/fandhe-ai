@@ -1,0 +1,21 @@
+fc-ok
+jg-ok
+ev-ok
+fingerprint=b74e30202247731a10b6262e8e036d302b4da53677e24d684b1175d13ac7c20a files=2682
+fingerprint=b74e30202247731a10b6262e8e036d302b4da53677e24d684b1175d13ac7c20a files=2682
+series-start 2026-11-11T02:33:47Z
+round1 rc=0 gate=PASS
+tv1 rc=0
+round2 rc=0 gate=PASS
+tv2 rc=0
+round3 rc=0 gate=PASS
+tv3 rc=0
+round4 rc=0 gate=PASS
+tv4 rc=0
+round5 rc=0 gate=PASS
+tv5 rc=0
+series-end 2026-11-11T02:44:07Z
+blas-probe rc=0
+cargo-tree rc=0
+all-done 2026-11-11T02:44:10Z
+lock-released 2026-11-11T02:44:10Z
