@@ -13,6 +13,7 @@
   assumption_list_sha256: <PLACEHOLDER>
   aggregate_sha256: <PLACEHOLDER>
   bench_main_sha256: <PLACEHOLDER>
+  r3_repeats: <PLACEHOLDER: R3 の反復回数 N（正の整数）。所有者が決める（#4163 所有者判断 2026-11-11）。決まるまで RULE を固定しない>
 # 対象差分: `git diff v0.14.0 <source_commit> -- crates/backend-cuda/src crates/autodiff/src/optim/device_store.rs` の
 #   有無と要旨を RULE.txt へ追記する（<PLACEHOLDER: 差分の有無>）。
 #
@@ -48,8 +49,13 @@
 #          仮説（判定に使わない）: #3637 のチェーン外待機で原因 2 は解消している。--test-threads=1 への切替は採らない（所有者の選択肢）。
 #   R2   : off／on の 2 プロセスで predict_device_chain_cuda_graph_bit_identity の batch 64／1024／4096 のダンプ（行数 batch*10）が全行一致
 #   R3   : 既定 ON の波及。腕 C（tree、env なし）と腕 A（tree + default-on.patch、env なし）で backend-cuda・facade の
-#          #[ignore] 含む全テストを実行し、テスト単位の pass／fail 集合を突き合わせる。A でだけ失敗するテストのうち
-#          default-off-assumption-tests.txt に載るものは「既定 OFF 前提」、載らないものは「阻害」。
+#          #[ignore] 含む全テストを r3_repeats（N）回ずつ実行し、テスト単位の pass／fail を回ごとに突き合わせる。
+#          腕 A で N 回とも失敗し、腕 C で N 回とも成功したテストのうち、default-off-assumption-tests.txt に載るものは
+#          「既定 OFF 前提」、載らないものは「阻害」。どちらかの腕で回ごとに結果が混ざったテストは「不安定」として
+#          記録し、判定には使わない（#4163 所有者判断 2026-11-11 (d)。試走で失敗名を見た後の事前リストでの除外は採らない）。
+#          facade の tests/cpu_sme_gate_bit_dump.rs::dump_cpu_sme_gate_bits は標準出力へ直接書くため（意図した作り）、
+#          本体の実行から --exact --skip で外し、同じ回の中で --exact で単独に流して、その結果も R3 の集合に含める。
+#          edition 2024 の merged doctests は 1 つの Doc-tests 節に結果行を複数出すため、集計はそれを完了とみなす。
 #          補助（判定外）: 腕 B（パッチ + FANDHE_AI_CUDA_GRAPH_INFER=0）で opt-out が効くことを 1 回記録。
 #
 # [hard 条件]

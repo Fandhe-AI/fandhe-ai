@@ -57,6 +57,9 @@ PINNED_FILES = {
     "aggregate_sha256": "docs/perf/logs/cuda-infer-graph-default-ab-4163/aggregate_4163.py",
     "bench_main_sha256": "scripts/bench/framework-compare/bench-fandhe/src/main.rs",
 }
+# R3 の 1 回あたりのログ単位（ファイル名の単位名, 集合のキーに使う crate 名）。smedump は facade の
+# tests/cpu_sme_gate_bit_dump.rs::dump_cpu_sme_gate_bits を本体の実行から外して単独に流したログ（run_gates_4163.sh）。
+R3_UNITS = (("fandhe-ai-backend-cuda", "fandhe-ai-backend-cuda"), ("fandhe-ai", "fandhe-ai"), ("smedump", "fandhe-ai"))
 BIT_MISMATCH_RE = re.compile(r"bit.{0,12}(不一致|一致しない|mismatch)|not bit-identical|bits? differ", re.I | re.S)
 
 
@@ -90,7 +93,7 @@ def rule_pins(text):
 def check_template(path):
     t = read_text(path)
     pins = rule_pins(t)
-    miss = [k for k in ("fixed-at-utc", "source_commit") + PINNED_KEYS if k not in pins and f"{k}:" not in t]
+    miss = [k for k in ("fixed-at-utc", "source_commit", "r3_repeats") + PINNED_KEYS if k not in pins and f"{k}:" not in t]
     if "RULE fixed-at-utc:" not in t:
         miss.append("RULE fixed-at-utc")
     if miss:
@@ -107,6 +110,8 @@ def check_rule(path, root):
     pins = rule_pins(t)
     if not re.fullmatch(r"[0-9a-f]{40}", pins.get("source_commit", "")):
         raise Bad("source_commit がフル SHA でない")
+    if not re.fullmatch(r"[1-9]\d*", pins.get("r3_repeats", "")):
+        raise Bad("r3_repeats が正の整数でない")
     for key, rel in PINNED_FILES.items():
         want = pins.get(key, "")
         if not re.fullmatch(r"[0-9a-f]{64}", want):
@@ -210,7 +215,13 @@ def _load_assumptions(rule_path):
     return assumptions
 
 
-def eval_gates(d, label, assumptions):
+def _load_reps(rule_path):
+    """RULE の `  r3_repeats: <正の整数>`。無い・形式不正は None（R3 を評価せず UNDETERMINED）。"""
+    v = rule_pins(read_text(rule_path)).get("r3_repeats", "")
+    return int(v) if re.fullmatch(r"[1-9]\d*", v) else None
+
+
+def eval_gates(d, label, assumptions, reps):
     """R0〜R3 を評価。(undet 理由, reject 理由, 表の行, R1b 詳細, R3 差分) を返す。"""
     undet, reject, rows, r1b_detail, r3_rows = [], [], [], [], []
     p = lambda n: os.path.join(d, f"{n}-{label}.log")
@@ -280,88 +291,132 @@ def eval_gates(d, label, assumptions):
                 reject.append(f"r2-{b}: off／on のダンプが不一致")
         else:
             rows.append((f"r2-{b}", "未完"))
-    # R3
-    sets = {}
+    # R3（N 回反復。#4163 所有者判断 2026-11-11）
+    if reps is None:
+        undet.append("r3: RULE に r3_repeats（正の整数）が無い -> R3 を評価しない")
+        rows.append(("r3", "未評価（r3_repeats なし）"))
+        return undet, reject, rows, r1b_detail, r3_rows, 0
+    runs = {"C": [], "A": []}  # 腕 -> 回ごとの {(crate, bin, name): status}
     for arm in ("C", "A"):
-        res = {}
-        for crate in ("fandhe-ai-backend-cuda", "fandhe-ai"):
-            rc, t = log_rc(os.path.join(d, f"r3-{arm}-{crate}-{label}.log"))
-            tsv = os.path.join(d, f"r3-{arm}-{crate}-{label}.tsv")
-            if rc is None or not os.path.exists(tsv):
-                undet.append(f"r3 腕{arm} {crate} 未実行"); continue
-            cnt = {"ok": 0, "FAILED": 0, "ignored": 0}
-            n = 0
-            for ln in read_text(tsv).splitlines():
-                f = ln.split("\t")
-                if len(f) != 3:
-                    raise Bad(f"{tsv}: 形式不正")
-                if (crate, f[0], f[1]) in res:
-                    raise Bad(f"{tsv}: 重複 {f[1]}")
-                if f[2] not in cnt:
-                    undet.append(f"r3 腕{arm} {crate}: 未知のステータス {f[2]!r}（{f[1]}）")
-                else:
-                    cnt[f[2]] += 1
-                res[(crate, f[0], f[1])] = f[2]
-                n += 1
-            if n == 0:
-                undet.append(f"r3 腕{arm} {crate}: テスト結果が 0 件"); continue
-            # 完了記録: Running／Doc-tests の節数と "test result:" 行数、各件数の合計が TSV と一致すること。
-            # harness=false のバイナリ（例: device_param_store_resident_no_flat_grad_alloc）は libtest の結果行を出さない。
-            # 結果行の無い節は、cargo が失敗対象として報告していない場合に限り完了とみなす（異常終了は失敗対象に載る）。
-            parts = re.split(r"^\s*(?:Running|Doc-tests) ", t, flags=re.M)[1:]
-            heads = len(parts)
-            sums = re.findall(r"^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored", t, re.M)
-            failed_targets = " ".join(re.findall(r"^(?:error: test failed.*|\s+`.*`)$", t, re.M))
-            bare = []
-            for part in parts:
-                if re.search(r"^test result: ", part, re.M):
-                    continue
-                m = re.match(r"unittests\s+\S+|(\S+)", part)
-                name = re.sub(r"\.rs$", "", os.path.basename(m.group(1) or "lib")) if m else ""
-                bare.append(name)
-            crashed = [b for b in bare if b in ("", "lib") or re.search(r"--(?:test|bin)\s+" + re.escape(b) + r"(?:[`\s]|$)", failed_targets)]
-            if crashed:
-                undet.append(f"r3 腕{arm} {crate}: 結果行の無いテストバイナリが失敗対象として報告されている／特定できない（{crashed}）")
-                continue
-            if heads == 0 or heads != len(sums) + len(bare):
-                undet.append(f"r3 腕{arm} {crate}: 完了していないテストバイナリがある（節 {heads} に対し結果行 {len(sums)}）")
-                continue
-            tot = [sum(int(x[i]) for x in sums) for i in range(3)]
-            if tot != [cnt["ok"], cnt["FAILED"], cnt["ignored"]]:
-                undet.append(f"r3 腕{arm} {crate}: 抽出結果 {[cnt['ok'], cnt['FAILED'], cnt['ignored']]} が集計行 {tot} と不一致")
-                continue
-            # 非ゼロ終了は「テスト失敗（rc=101 かつ FAILED > 0）」でしか説明を認めない。
-            if rc != 0 and not (rc == 101 and cnt["FAILED"] > 0):
-                undet.append(f"r3 腕{arm} {crate}: 説明できない非ゼロ終了（rc={rc} FAILED={cnt['FAILED']}）")
-            elif rc == 0 and cnt["FAILED"] > 0:
-                undet.append(f"r3 腕{arm} {crate}: rc=0 だが FAILED がある")
-        sets[arm] = res
-    blockers, expected = [], []
-    if sets.get("C") and sets.get("A"):
-        for key, st in sorted(sets["A"].items()):
-            c = sets["C"].get(key)
-            if st == "FAILED" and c != "FAILED":
+        for k in range(1, reps + 1):
+            res, complete = {}, True
+            for unit, crate in R3_UNITS:
+                rc, t = log_rc(os.path.join(d, f"r3-{arm}-{unit}-rep{k}-{label}.log"))
+                tsv = os.path.join(d, f"r3-{arm}-{unit}-rep{k}-{label}.tsv")
+                if rc is None or not os.path.exists(tsv):
+                    undet.append(f"r3 腕{arm} {unit} rep{k} 未実行"); complete = False; continue
+                if not _r3_unit(undet, arm, unit, k, rc, t, tsv, crate, res):
+                    complete = False
+            if complete:
+                runs[arm].append(res)
+    blockers, expected, unstable = [], [], []
+    if len(runs["C"]) == reps and len(runs["A"]) == reps:
+        keysets = {arm: [frozenset(r) for r in runs[arm]] for arm in runs}
+        if any(ks != keysets[arm][0] for arm in keysets for ks in keysets[arm]):
+            undet.append("r3: テスト集合が回の間で一致しない")
+        else:
+            kc, ka = keysets["C"][0], keysets["A"][0]
+            for key in sorted(kc | ka):
                 tag = f"{key[1]}::{key[2]}"
-                (expected if tag in assumptions else blockers).append(key)
-                r3_rows.append((key[0], tag, c or "-", st, "既定OFF前提" if tag in assumptions else "阻害"))
-        for key in sets["C"]:
-            if key not in sets["A"]:
-                blockers.append(key)
-                r3_rows.append((key[0], f"{key[1]}::{key[2]}", sets["C"][key], "欠落", "阻害"))
-        for key in sets["A"]:
-            if key not in sets["C"]:
-                undet.append(f"r3: 腕 A にだけあるテスト {key[1]}::{key[2]}（テスト集合が腕間で一致しない）")
-    rows.append(("r3", f"阻害 {len(blockers)} 件・既定OFF前提 {len(expected)} 件"))
+                sc = [r[key] for r in runs["C"]] if key in kc else None
+                sa = [r[key] for r in runs["A"]] if key in ka else None
+                if sa is None:
+                    blockers.append(key)
+                    r3_rows.append((key[0], tag, _r3_summary(sc), "欠落", "阻害"))
+                    continue
+                if sc is None:
+                    undet.append(f"r3: 腕 A にだけあるテスト {tag}（テスト集合が腕間で一致しない）")
+                    continue
+                if len(set(sc)) > 1 or len(set(sa)) > 1:
+                    if "FAILED" in sc + sa:
+                        unstable.append(key)
+                        r3_rows.append((key[0], tag, _r3_summary(sc), _r3_summary(sa), "不安定（判定外）"))
+                    continue
+                if sa[0] == "FAILED" and sc[0] == "ok":
+                    (expected if tag in assumptions else blockers).append(key)
+                    r3_rows.append((key[0], tag, _r3_summary(sc), _r3_summary(sa), "既定OFF前提" if tag in assumptions else "阻害"))
+                elif sa[0] == "FAILED" and sc[0] != "FAILED":
+                    # 腕 C で毎回成功していないため阻害に数えない（RULE: 阻害は「A で毎回失敗・C で毎回成功」だけ）
+                    r3_rows.append((key[0], tag, _r3_summary(sc), _r3_summary(sa), "判定外（腕 C で成功していない）"))
+    rows.append(("r3", f"N={reps}・阻害 {len(blockers)} 件・既定OFF前提 {len(expected)} 件・不安定 {len(unstable)} 件"))
     if blockers:
         bit = False
-        for crate in ("fandhe-ai-backend-cuda", "fandhe-ai"):
-            _, t = log_rc(os.path.join(d, f"r3-A-{crate}-{label}.log"))
-            if BIT_MISMATCH_RE.search(t):
-                bit = True
+        for k in range(1, reps + 1):
+            for unit, _ in R3_UNITS:
+                _, t = log_rc(os.path.join(d, f"r3-A-{unit}-rep{k}-{label}.log"))
+                if BIT_MISMATCH_RE.search(t):
+                    bit = True
         (reject if bit else undet).append(f"r3: 阻害 {len(blockers)} 件")
-    rcb, _ = log_rc(os.path.join(d, f"r3-B-fandhe-ai-backend-cuda-{label}.log"))
+    rcb, _ = log_rc(os.path.join(d, f"r3-B-fandhe-ai-backend-cuda-rep1-{label}.log"))
     rows.append(("r3-B（補助・判定外）", "未実行" if rcb is None else f"rc={rcb}"))
     return undet, reject, rows, r1b_detail, r3_rows, len(blockers)
+
+
+def _r3_summary(sts):
+    """回ごとの status 列を「ok×3」「ok×2/FAILED×1」の形へ（出現順）。"""
+    out = []
+    for st in dict.fromkeys(sts):
+        out.append(f"{st}×{sts.count(st)}")
+    return "/".join(out)
+
+
+def _r3_unit(undet, arm, unit, k, rc, t, tsv, crate, res):
+    """R3 の 1 ログ（1 回・1 単位）の TSV を res へ取り込み、完了性を検査する。完了なら True。"""
+    cnt = {"ok": 0, "FAILED": 0, "ignored": 0}
+    n, ok = 0, True
+    where = f"r3 腕{arm} {unit} rep{k}"
+    for ln in read_text(tsv).splitlines():
+        f = ln.split("\t")
+        if len(f) != 3:
+            raise Bad(f"{tsv}: 形式不正")
+        if (crate, f[0], f[1]) in res:
+            raise Bad(f"{tsv}: 重複 {f[1]}")
+        if f[2] not in cnt:
+            undet.append(f"{where}: 未知のステータス {f[2]!r}（{f[1]}）"); ok = False
+        else:
+            cnt[f[2]] += 1
+        res[(crate, f[0], f[1])] = f[2]
+        n += 1
+    if n == 0:
+        undet.append(f"{where}: テスト結果が 0 件"); return False
+    # 完了記録: Running／Doc-tests の各節に "test result:" 行があり、各件数の合計が TSV と一致すること。
+    # Running 節の結果行はちょうど 1 本。Doc-tests 節は edition 2024 の merged doctests が merged と standalone の
+    # 2 本を出すため、1 本以上を認める（所有者判断 2026-11-11 (b)）。
+    # harness=false のバイナリ（例: device_param_store_resident_no_flat_grad_alloc）は libtest の結果行を出さない。
+    # 結果行の無い節は、cargo が失敗対象として報告していない場合に限り完了とみなす（異常終了は失敗対象に載る）。
+    pieces = re.split(r"^\s*(Running|Doc-tests) ", t, flags=re.M)[1:]
+    sections = list(zip(pieces[0::2], pieces[1::2]))
+    sums = re.findall(r"^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored", t, re.M)
+    failed_targets = " ".join(re.findall(r"^(?:error: test failed.*|\s+`.*`)$", t, re.M))
+    bare, multi, nres = [], [], 0
+    for kind, part in sections:
+        c = len(re.findall(r"^test result: ", part, re.M))
+        nres += c
+        if c == 0:
+            m = re.match(r"unittests\s+\S+|(\S+)", part)
+            bare.append(re.sub(r"\.rs$", "", os.path.basename(m.group(1) or "lib")) if m else "")
+        elif c > 1 and kind != "Doc-tests":
+            multi.append(part.split("\n", 1)[0].strip())
+    crashed = [b for b in bare if b in ("", "lib") or re.search(r"--(?:test|bin)\s+" + re.escape(b) + r"(?:[`\s]|$)", failed_targets)]
+    if crashed:
+        undet.append(f"{where}: 結果行の無いテストバイナリが失敗対象として報告されている／特定できない（{crashed}）")
+        return False
+    if multi:
+        undet.append(f"{where}: 結果行が複数あるテストバイナリ（Doc-tests 以外。出力の混入）: {multi}")
+        return False
+    if not sections or nres != len(sums):
+        undet.append(f"{where}: 完了していないテストバイナリがある（節 {len(sections)}・結果行 {len(sums)}）")
+        return False
+    tot = [sum(int(x[i]) for x in sums) for i in range(3)]
+    if tot != [cnt["ok"], cnt["FAILED"], cnt["ignored"]]:
+        undet.append(f"{where}: 抽出結果 {[cnt['ok'], cnt['FAILED'], cnt['ignored']]} が集計行 {tot} と不一致")
+        return False
+    # 非ゼロ終了は「テスト失敗（rc=101 かつ FAILED > 0）」でしか説明を認めない。
+    if rc != 0 and not (rc == 101 and cnt["FAILED"] > 0):
+        undet.append(f"{where}: 説明できない非ゼロ終了（rc={rc} FAILED={cnt['FAILED']}）"); return False
+    if rc == 0 and cnt["FAILED"] > 0:
+        undet.append(f"{where}: rc=0 だが FAILED がある"); return False
+    return ok
 
 
 # ---------------------------------------------------------------- 判定
@@ -372,7 +427,7 @@ def judge(d, rule_path, label):
     stop = os.path.join(d, f"pregate-stop-{label}.txt")
     if os.path.exists(stop):
         detail = [ln.strip() for ln in read_text(stop).splitlines() if ln.strip()]
-        g_undet, g_reject, g_rows, r1b_detail, r3_rows, _ = eval_gates(d, label, _load_assumptions(rule_path))
+        g_undet, g_reject, g_rows, r1b_detail, r3_rows, _ = eval_gates(d, label, _load_assumptions(rule_path), _load_reps(rule_path))
         undet = g_undet + [f"pregate-stop: {x}" for x in detail[:20]]
         verdict = "REJECT" if g_reject else "UNDETERMINED"
         return verdict, undet, g_reject, [], [("pregate-stop", "不合格（計測前に停止）")] + g_rows, r1b_detail, r3_rows
@@ -403,7 +458,7 @@ def judge(d, rule_path, label):
     if any("gate=fail" in x for x in gl):
         # ランナーは専有ゲート不通過で order／results を書き切らずに終了する。RULE は UNDETERMINED と定めるため、
         # 欠けた計測データを要求せず（Bad にせず）、前提ゲートの分類だけを添えて UNDETERMINED を返す。
-        g_undet, g_reject, g_rows, r1b_detail, r3_rows, _ = eval_gates(d, label, _load_assumptions(rule_path))
+        g_undet, g_reject, g_rows, r1b_detail, r3_rows, _ = eval_gates(d, label, _load_assumptions(rule_path), _load_reps(rule_path))
         return "UNDETERMINED", undet + g_undet, g_reject, [], g_rows, r1b_detail, r3_rows
     parse_order(d, label)
 
@@ -435,7 +490,7 @@ def judge(d, rule_path, label):
         reject.append("ratio > 1.00: " + ", ".join(ratio_fail))
 
     assumptions = _load_assumptions(rule_path)
-    g_undet, g_reject, g_rows, r1b_detail, r3_rows, nblock = eval_gates(d, label, assumptions)
+    g_undet, g_reject, g_rows, r1b_detail, r3_rows, nblock = eval_gates(d, label, assumptions, _load_reps(rule_path))
     undet += g_undet
     reject += g_reject
     if undet:
@@ -466,7 +521,8 @@ def render(verdict, undet, reject, cells_out, g_rows, r1b_detail, r3_rows, label
     md += ["", "## 前提ゲート", "", "| ゲート | 結果 |", "|---|---|"] + [f"| {n} | {r} |" for n, r in g_rows]
     md += ["", "## R1(b) の失敗詳細"]
     md += [f"- run{i}: テスト={names} 位置={locs} variant={var or '-'}" for i, names, locs, var in r1b_detail] or ["- 失敗なし"]
-    md += ["", "## R3 の差分（腕 A でだけ失敗）", "", "| crate | テスト | 腕C | 腕A | 分類 |", "|---|---|---|---|---|"]
+    md += ["", "## R3 の分類（各腕 N 回。阻害 = 腕 A で毎回失敗・腕 C で毎回成功。不安定は記録のみで判定に使わない）", "",
+           "| crate | テスト | 腕C（回ごとの結果） | 腕A（回ごとの結果） | 分類 |", "|---|---|---|---|---|"]
     md += [f"| {a} | {b} | {c} | {dd} | {e} |" for a, b, c, dd, e in r3_rows] or ["| - | - | - | - | 差分なし |"]
     return "\n".join(md) + "\n", "\n".join(tsv) + "\n"
 
@@ -483,6 +539,8 @@ def make_fixture(d, label="t", ratios=None, **opt):
     pins = {k: (str(i) * 64)[:64] for i, k in enumerate(PINNED_KEYS)}
     tree = "a" * 40
     rule = "RULE fixed-at-utc: 2026-01-01T00:00:00Z\n" + f"  source_commit: {tree}\n" + "".join(f"  {k}: {v}\n" for k, v in pins.items())
+    if not opt.get("no_reps"):
+        rule += f"  r3_repeats: {opt.get('reps', 3)}\n"
     rpath = os.path.join(d, "RULE.txt")
     _w(rpath, rule)
     _w(os.path.join(d, "default-off-assumption-tests.txt"), "lib::graph::tests::infer_graph_default_is_off\n")
@@ -541,38 +599,55 @@ def make_fixture(d, label="t", ratios=None, **opt):
             if opt.get("r2_err") and b == 64 and m == "on":
                 _w(os.path.join(d, f"r2-{m}-{b}-{label}.log"), "thread panicked at a.rs:1:1\nDeviceContextCaptureInProgress\nrc=101\n"); continue
             _w(os.path.join(d, f"r2-{m}-{b}-{label}.log"), body + "rc=0\n")
+    reps = opt.get("reps", 3)
     for arm in ("C", "A", "B"):
-        for crate in ("fandhe-ai-backend-cuda", "fandhe-ai"):
-            rows = [("lib", "graph::tests::infer_graph_default_is_off", "ok"), ("t", "other", "ok")]
-            if arm == "A" and crate == "fandhe-ai-backend-cuda":
-                rows[0] = ("lib", "graph::tests::infer_graph_default_is_off", "FAILED") if not opt.get("r3_listed_only") else rows[0]
-                rows[0] = ("lib", "graph::tests::infer_graph_default_is_off", "FAILED")
-                if opt.get("r3_block"):
-                    rows[1] = ("t", "other", "FAILED")
-            _w(os.path.join(d, f"r3-{arm}-{crate}-{label}.tsv"), "".join("\t".join(r) + "\n" for r in rows))
-            nfail = sum(1 for r in rows if r[2] == "FAILED")
-            body = "     Running unittests src/lib.rs (x)\n" + "".join(f"test {r[1]} ... {r[2]}\n" for r in rows)
-            body += f"test result: {'FAILED' if nfail else 'ok'}. {len(rows) - nfail} passed; {nfail} failed; 0 ignored\n"
-            _w(os.path.join(d, f"r3-{arm}-{crate}-{label}.log"), body + f"rc={101 if nfail else 0}\n")
-    # harness=false バイナリ（結果行なし）を腕 C／A の fandhe-ai ログへ追加する
+        for k in range(1, (1 if arm == "B" else reps) + 1):
+            for unit, _ in R3_UNITS:
+                if unit == "smedump":
+                    if arm == "B" or (opt.get("smedump_missing") and arm == "A" and k == 2):
+                        continue
+                    rows = [("cpu_sme_gate_bit_dump", "dump_cpu_sme_gate_bits", "ok")]
+                    head = "     Running tests/cpu_sme_gate_bit_dump.rs (x)\n"
+                else:
+                    rows = [("lib", "graph::tests::infer_graph_default_is_off", "ok"), ("t", "other", "ok")]
+                    head = "     Running unittests src/lib.rs (x)\n"
+                    if arm == "A" and unit == "fandhe-ai-backend-cuda":
+                        rows[0] = ("lib", "graph::tests::infer_graph_default_is_off", "FAILED")
+                        if opt.get("r3_block") or (opt.get("r3_flaky") and k == 2):
+                            rows[1] = ("t", "other", "FAILED")
+                    if opt.get("r3_c_flaky") and arm == "C" and unit == "fandhe-ai-backend-cuda" and k == 1:
+                        rows[1] = ("t", "other", "FAILED")
+                _w(os.path.join(d, f"r3-{arm}-{unit}-rep{k}-{label}.tsv"), "".join("\t".join(r) + "\n" for r in rows))
+                nfail = sum(1 for r in rows if r[2] == "FAILED")
+                body = head + "".join(f"test {r[1]} ... {r[2]}\n" for r in rows)
+                body += f"test result: {'FAILED' if nfail else 'ok'}. {len(rows) - nfail} passed; {nfail} failed; 0 ignored\n"
+                if unit == "fandhe-ai" and opt.get("doctest_multi"):
+                    # edition 2024 の merged doctests: 1 つの Doc-tests 節に結果行が 2 本（merged と standalone）
+                    body += ("   Doc-tests fandhe_ai\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n"
+                             "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n")
+                if unit == "fandhe-ai-backend-cuda" and opt.get("running_multi") and arm == "C" and k == 1:
+                    body += "test result: ok. 0 passed; 0 failed; 0 ignored\n"
+                _w(os.path.join(d, f"r3-{arm}-{unit}-rep{k}-{label}.log"), body + f"rc={101 if nfail else 0}\n")
+    # harness=false バイナリ（結果行なし）を腕 C／A の fandhe-ai ログへ追加する（全回）
     if opt.get("harnessless") or opt.get("harnessless_crash"):
         for arm in ("C", "A"):
-            lp = os.path.join(d, f"r3-{arm}-fandhe-ai-{label}.log")
-            body = open(lp, encoding="utf-8").read().replace("rc=0\n", "").replace("rc=101\n", "")
-            body += "     Running tests/no_flat.rs (target/x)\nok\n"
-            rc = 0
-            if opt.get("harnessless_crash") and arm == "C":
-                body += "error: test failed, to rerun pass `-p fandhe-ai --test no_flat`\n"
-                rc = 101
-            _w(lp, body + f"rc={rc}\n")
+            for k in range(1, reps + 1):
+                lp = os.path.join(d, f"r3-{arm}-fandhe-ai-rep{k}-{label}.log")
+                body = open(lp, encoding="utf-8").read().replace("rc=0\n", "").replace("rc=101\n", "")
+                body += "     Running tests/no_flat.rs (target/x)\nok\n"
+                rc = 0
+                if opt.get("harnessless_crash") and arm == "C" and k == 1:
+                    body += "error: test failed, to rerun pass `-p fandhe-ai --test no_flat`\n"
+                    rc = 101
+                _w(lp, body + f"rc={rc}\n")
     # 異常注入（R3 完了性・起動順）
-    cl = os.path.join(d, f"r3-C-fandhe-ai-{label}.log")
+    cl = os.path.join(d, f"r3-C-fandhe-ai-rep1-{label}.log")
     if opt.get("r3_trunc"):
         _w(cl, "     Running unittests src/lib.rs (x)\ntest graph::tests::infer_graph_default_is_off ... ok\nrc=101\n")
     if opt.get("r3_rc"):
         _w(cl, open(cl, encoding="utf-8").read().replace("rc=0", "rc=137"))
     if opt.get("r3_status"):
-        tp = os.path.join(d, f"r3-C-fandhe-ai-{label}.tsv")
+        tp = os.path.join(d, f"r3-C-fandhe-ai-rep1-{label}.tsv")
         _w(tp, open(tp, encoding="utf-8").read().replace("\tok\n", "\tweird\n", 1))
     if opt.get("order_swap"):
         op = os.path.join(d, f"order-{label}.txt")
@@ -652,6 +727,29 @@ def self_test():
     assert v == "UNDETERMINED" and any("DeviceContextCaptureInProgress" in x for x in u), (v, u, rj)
     v, u, rj = run(r3_block=True)
     assert v == "UNDETERMINED", (v, u, rj)
+    # R3 の N 回反復（所有者判断 2026-11-11 (d)）: 混ざったテストは不安定として記録し判定に使わない
+    for kw in ({"r3_flaky": True}, {"r3_c_flaky": True}):
+        with tempfile.TemporaryDirectory() as d:
+            r = make_fixture(d, **kw)
+            res = judge(d, r, "t")
+            assert res[0] == "ADOPT", (kw, res[0:3])
+            assert any(row[4] == "不安定（判定外）" and row[1] == "t::other" for row in res[6]), (kw, res[6])
+            md, _ = render(*res, "t")
+            assert "不安定（判定外）" in md
+    v, u, rj = run(reps=1)
+    assert v == "ADOPT", (v, u, rj)
+    v, u, rj = run(reps=1, r3_block=True)
+    assert v == "UNDETERMINED" and any("阻害" in x for x in u), (v, u, rj)
+    # N が RULE に無い・1 回分のログが欠けている（ダンプ単独実行の欠落を含む）は UNDETERMINED
+    v, u, rj = run(no_reps=True)
+    assert v == "UNDETERMINED" and any("r3_repeats" in x for x in u), (v, u, rj)
+    v, u, rj = run(smedump_missing=True)
+    assert v == "UNDETERMINED" and any("smedump rep2 未実行" in x for x in u), (v, u, rj)
+    # merged doctests（1 節に結果行 2 本）は完了扱い。Running 節の結果行が複数（出力の混入）は UNDETERMINED
+    v, u, rj = run(doctest_multi=True)
+    assert v == "ADOPT", (v, u, rj)
+    v, u, rj = run(running_multi=True)
+    assert v == "UNDETERMINED" and any("結果行が複数" in x for x in u), (v, u, rj)
     # host 腕が 5/5 で改善しない -> ADOPT 条件不足で UNDETERMINED
     v, u, rj = run(ratios={f"infer-host-{b}": 1.0 for b in BATCHES})
     assert v == "UNDETERMINED", (v, u, rj)

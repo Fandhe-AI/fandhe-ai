@@ -712,6 +712,14 @@ fn multiprocess_concurrent_store_absorbs_rename_race() {
             .arg("--test-threads=1")
             .env(MP_CHILD_ROOT_ENV, &root)
             .env(MP_CHILD_INDEX_ENV, i.to_string())
+            // 子の libtest 出力（`running 1 test`・`test ... ok`・`test result:`）を
+            // 親の標準出力へ流さず捕捉する。継承すると親のテストログに子の行が
+            // バイト単位で混ざり、ログを行単位で抽出する前提ゲート（#4163 の R3・
+            // `docs/perf/logs/cuda-infer-graph-default-ab-4163/run_gates_4163.sh`）で
+            // テスト名の重複・親の結果欠落が起きる。捕捉した出力は失敗時の
+            // メッセージにだけ載せる（テストの判定は従来どおり終了コード）。
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("must spawn child test process");
         children.push(child);
@@ -719,12 +727,21 @@ fn multiprocess_concurrent_store_absorbs_rename_race() {
 
     // 全 N 子プロセスが ready マーカーを立てる（= cold cache 確認直前まで
     // 進んだ）ことを確認してから go シグナルを送り、store 開始を同時刻へ
-    // 揃える（barrier。上記コメント参照）。
+    // 揃える（barrier。上記コメント参照）。子の出力は数行でパイプの容量に
+    // 収まるため、barrier 待ちの間に子が書き込みで止まることはない。
     mp_sync::parent_release_when_all_ready(&root, N);
 
-    for (i, mut child) in children.into_iter().enumerate() {
-        let status = child.wait().expect("must wait for child process");
-        assert!(status.success(), "child process {i} must exit 0");
+    for (i, child) in children.into_iter().enumerate() {
+        let output = child
+            .wait_with_output()
+            .expect("must wait for child process");
+        assert!(
+            output.status.success(),
+            "child process {i} must exit 0 (status {:?})\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let key = sample_key();
