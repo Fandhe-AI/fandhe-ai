@@ -90,9 +90,9 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 - `cuGraphExecUpdate`（`unsafe`・承認要）による batch 可変対応
 - Metal への同等機構
 
-## 6. 既定化の影響評価（イシュー #4163。部品のみ・未実測）
+## 6. 既定化の影響評価（イシュー #4163。実測済み・判定 UNDETERMINED）
 
-推論 Graph（`FANDHE_AI_CUDA_GRAPH_INFER`）を既定にした場合の影響を、事前登録した A/B で評価する。**本節の時点（PR-1）は計測部品の追加だけで、GB10 の実測はまだない。** 記録先は `logs/cuda-infer-graph-default-ab-4163/`（手順は同 `README.md`）。`INFER_GRAPH_DEFAULT_ENABLED` の反転は本イシューでは行わない（所有者承認・結線は #4167）。
+推論 Graph（`FANDHE_AI_CUDA_GRAPH_INFER`）を既定にした場合の影響を、事前登録した A/B で評価する。PR-1 で計測部品を追加し、2026-11-11 に GB10 で実測した（判定 UNDETERMINED。§6.3）。記録先は `logs/cuda-infer-graph-default-ab-4163/`（手順は同 `README.md`）。`INFER_GRAPH_DEFAULT_ENABLED` の反転は本イシューでは行わない（所有者承認・結線は #4167）。
 
 ### 6.1 計画の前提を変える所見（コード確認）
 
@@ -105,15 +105,15 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 
 - 腕: off = 3 変数未設定、on = `FANDHE_AI_CUDA_GRAPH_INFER=1`（同一バイナリ。env=1 と const `true` は同じ `resolve_infer_requested` を通り同値）。const 反転ビルド（`default-on.patch`）は正しさの R3（既定 ON の波及テスト）にだけ使う。
 - セル（11）: infer fresh／reuse（常駐入力）／reuse-host × batch {64, 1024, 4096}、train fresh／reuse × 64。5 round。
-- 前提ゲート: R0（非後退）・R1(a)（capture 実機）・R1(b)（並列推論 5 回）・R2（off／on のダンプ一致）・R3（既定 ON の全実機テスト差分）。判定規則は `RULE.template.txt`（PR-2 で `RULE.txt` として測る前に単独コミット）。
+- 前提ゲート: R0（非後退）・R1(a)（capture 実機）・R1(b)（並列推論 5 回）・R2（off／on のダンプ一致）・R3（既定 ON の全実機テスト差分）。判定規則は `RULE.template.txt` から作り、測る前に単独コミットした（`RULE.txt`〈N=5・PR #4257〉を所有者判断で `RULE.v2.txt`〈R3 は N=3・PR #4259〉に置き換えて計測）。
 
 ### 6.3 状態
 
 | 項目 | 状態 |
 |---|---|
-| 計測部品（bench 診断腕・ランナー・ゲート・集計・雛形） | 追加済み（PR-1）。GB10 での動作は未検証 |
-| RULE.txt の固定 | 未（PR-2） |
-| GB10 実測・判定 | 未（PR-3） |
+| 計測部品（bench 診断腕・ランナー・ゲート・集計・雛形） | 追加済み（PR-1） |
+| 規則の固定 | `RULE.v2.txt`（R3 は N=3。PR #4259。v1 の `RULE.txt` は使っていない） |
+| GB10 実測・判定 | 実測済み（2026-11-11・`8482bcb19`）。**verdict: UNDETERMINED**（undetermined 要因 `r3: 阻害 3 件`・reject 要因 `ratio > 1.00: infer-fresh-1024`）。R0〜R2 は合格。詳細は `logs/cuda-infer-graph-default-ab-4163/README.md`「結果」と `judge-4163.md` |
 | #4167 の判断 | 結線見送り（ADOPT 入力なし。§7） |
 
 ## 7. #4167 既定経路への結線の判断（見送り）
@@ -152,3 +152,5 @@ Phase 3 由来の CUDA 系 ADOPT は 0 件で、結線する入力がない。
 ### 7.6 注意
 
 #4163 は部品のみの PR #4199 で閉じられている。reopen するかは所有者または main セッションの判断に委ね、本記録では扱わない。
+
+（追記・2026-11-11）#4163 はその後に再開され、GB10 で実測した。判定は UNDETERMINED で ADOPT ではないため、§7.4 の 1. は満たされていない（§6.3）。
