@@ -1,0 +1,11 @@
+foreign-gate before CLEAN load1=1.55 attempt=1 2026-11-11T01:43:40Z
+wrote env -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/env.json
+wrote 8 rows -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/measure_train.jsonl
+wrote 7 rows -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/measure_infer.jsonl
+wrote 7 rows -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/measure_gemm256.jsonl
+wrote 18 rows -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/measure_shapes.jsonl
+wrote profile -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/profile_train.json
+wrote profile -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/profile_infer.json
+wrote profile -> <home>/work/rm1-4148.noindex/series-formal-1/round1/raw/profile_gemm256.json
+round 1 done 2026-11-11T01:43:45Z
+foreign-gate after CLEAN 2026-11-11T01:43:50Z

@@ -2,9 +2,8 @@
 
 ## 状態
 
-**PR-1 時点: 実測なし。** 本ディレクトリは測る前に固定する部品（RULE・変換スクリプト・起動キット）だけを置く。
-`round{i}/`・`env/`・`aggregate.md`・`aggregate.tsv` は <metal-node> での実測（PR-2）で追加する。
-実測値・分類・確度は、実測するまで書かない（推定値で埋めない）。#4146 は PR-2 で閉じる。
+**PR-2（2026-11-11 実測）: 実測済み。** 本系列は `series-formal-1/`（5 round・全 PASS・正式）。規則は `RULE.v2.txt`（2026-11-11T01:20:17Z 固定・PR #4240）。
+`RULE.txt` では計測していない（残置）。分類・確度は下の「結果」と `series-formal-1/aggregate.md`。分類の scoreboard への反映はこの issue では行わない（#4168）。
 
 雛形と規則の一般論は `docs/perf/logs/diag-0140-template/README.md`、式の定義は `docs/perf/loss-attribution-matrix.md` §10.1。
 
@@ -51,4 +50,38 @@
 
 ## 結果
 
-（実測後に追記。PR-1 時点は空。）
+記録先は `series-formal-1/`（`aggregate.md`・`aggregate.tsv`・`round1〜5/`（`values.tsv` は手順 3 の変換）・`round<i>.log`・`drive.status`・`env/`・`RULE.v2.txt` の写し）。
+集計は `python3 -I aggregate_diag.py --dir series-formal-1 --rule RULE.v2.txt`（rc=0）。
+
+### 系列
+
+- 系列の開始: 2026-11-11T01:48:51Z、終了: 01:49:47Z。round 1〜5 とも開始前・終了後の他ジョブのゲートが CLEAN で、`gate.txt` は PASS（`drive.status`）。
+- 系列の前の確認（`env/preflight.txt`）: `mediaanalysisd` は 2 分間隔で 3 回とも %CPU 0.0、spotlightknowledged の「Submitting text processing」は直近 10 分で 0 件。
+- ビルドの前と後のツリーの指紋は RULE.v2 の値と一致し（`env/build/`）、計測後も一致した（`env/trees.txt`。`__pycache__` は 0 件）。bench-fandhe の fandhe-ai は crates.io の 0.14.0（`env/build/tree-fandhe-ai.txt`）。
+- torch の BLAS 経路は `BLAS_INFO=accelerate`（`env/torch-config.txt`。系列の前に取得）で、`kernel_owner=hardware` の宣言どおり Accelerate。
+- 系列の途中で値は見ていない（見たのは `drive.status` と `gate.txt` だけ）。固定前の試走で値を見たこと・ビルドを hw-lock なしで行ったことは `RULE.v2.txt` 項 8 (e) に記録した。
+- 本系列では、純カーネルが窓を上回る round（窓超過）はなかった（`aggregate.md` に窓超過の行なし）。
+
+### 分類（`aggregate.md` から転記）
+
+| セル | F1 中央値（NB-RANGE5） | F2 中央値（NB-RANGE5） | 観測比 中央値 | 分類／確度 | 前分類との異同 |
+|---|---|---|---|---|---|
+| M-CPU-TRN | 0.9162（0.8573〜1.0316・閾値をまたぐ） | 0.1765（0.1717〜0.1976・またがない） | 0.2453 | 分類保留／低（どれも届かない。残差は固定費など別区間。別診断へ） | 変更（自分たちの制約 → 分類保留） |
+| M-CPU-INF | 1.1559（0.9806〜1.2750・閾値をまたぐ） | 0.1530（0.1460〜0.1559・またがない） | 0.1550 | ハードの上限／低（F1 が届く。相手の純カーネルに置換すると届く） | 変更（自分たちの制約 → ハードの上限） |
+
+量ごとの 5 round の中央値（ms。`round<i>/values.tsv`）:
+
+| セル | fandhe の窓（reuse） | fandhe の fresh 窓 | 相手の窓 | fandhe の純カーネル | 相手の純カーネル |
+|---|---|---|---|---|---|
+| M-CPU-TRN | 0.4999（0.4975〜0.5084） | 0.7010 | 0.1220 | 0.4092 | 0.0430 |
+| M-CPU-INF | 0.2045（0.2015〜0.2080） | 0.2069 | 0.0317 | 0.1972 | 0.0212 |
+
+- 純カーネル（GEMM のみ・時計は両側 wall）は fandhe が相手の約 9.5 倍（TRN）・9.3 倍（INF）。F1 は GEMM を相手の水準へ置換した仮想上限で、Accelerate（閉源）の再現ではない。
+- TRN は GEMM を置換しても F1 が 1.0 に届かない run がある（中央値 0.92）。窓の残り（約 0.09 ms）は GEMM 以外の区間。
+
+### #3244 の確認（手順 6）
+
+- train reuse の窓は 5 round で 0.4975〜0.5084 ms で、#3247 の after（約 0.50 ms）と整合し、before（約 0.67 ms）ではない。
+- record_only の `train --phases --mode reuse` の backward は 5 round で 256.2〜264.2 µs で、0.11.0 の 451.5 µs より小さい（`round<i>/raw/phases-train.jsonl`）。
+  step_total は 492.9〜504.3 µs、forward_resident 205.8〜210.9 µs、device_update 29.5〜31.0 µs。
+- 以上から #3244（入力勾配 dX の省略）は本系列のツリーで効いている。

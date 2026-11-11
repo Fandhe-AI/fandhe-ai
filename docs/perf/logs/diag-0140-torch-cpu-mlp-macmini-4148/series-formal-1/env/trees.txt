@@ -1,0 +1,9 @@
+# 展開ツリー（計測後に回収。.rev-stamp と aggregate_4148.py --fingerprint の値）
+# 試走 1 の前に、送信側とノード側の tree_fingerprint が RULE の値（f18e2a5c…・files=2701）と一致することを確かめた（RULE 項 8 (d)）。
+# 本系列（2026-11-11T01:43:35Z 開始）の直前には指紋を取り直していない（RULE 項 8 (b) の照合は試走 1 の前の 1 回だけ）。
+# 計測後のツリーには scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-312.pyc の 1 件が増えていた（files=2702）。
+# 生成時刻は 2026-11-11T01:02:48Z で、試走 1 の round 1（01:01:41〜01:02:56Z）の torch_cpu_mlp_diag.py の実行による。本系列の前から在った。
+# __pycache__ を除いた写しの指紋は RULE の tree_fingerprint と一致する（下）。#4151 の series-remeasure-1/env/trees.txt と同じ扱い。
+rev-stamp=4ca15763d83f003f45fe4845157095f963d3bb3c
+after-series fingerprint=b3db2cfa8c2ed308734c93e06fc52b3a13090e2d9fe72018244ac2f560ae29a2 files=2702
+after-series fingerprint-without-__pycache__=f18e2a5c088e6e9d6b331024da34d51d46a951f5be20bdcfa786fe47609c0d17 files=2701

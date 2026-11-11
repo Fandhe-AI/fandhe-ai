@@ -1,0 +1,177 @@
+RULE fixed-at-utc 2026-11-11T01:20:17Z
+（計測前に単独コミットして固定する。計測後に緩めない。雛形: docs/perf/logs/diag-0140-template/RULE.template.txt・#4144）
+（記入欄（角括弧で始まる「記入」の印）と PARAMS の <…> をすべて置換する。残っていると aggregate_diag.py は止まる）
+
+1. 目的・対象セル
+  #4146で、スコアボード 0.14.0 の 1 位でないセルの診断 (3)（相手の構成を再現した場合に届く比）を測る。
+  対象セル: M-CPU-TRN・M-CPU-INF（machine=macmini。<metal-node>）。現分類は docs/perf/logs/framework-compare-0.14.0-remeasure/scoreboard/unreached_0140.tsv の値（PARAMS の prev_class に転記）。
+  変えないもの: tolerance・判定規則・ゲート閾値・依存・本体コード・unreached_0140.tsv（分類の反映は別途）。
+
+2. 対象 tree
+  0.14.0 計測腕の SHA 18a7f4b87fe61029a179cb1922cc82928440f2c9（backend-cpu は v0.14.0 と差 0 件）の git archive。PARAMS の tree_sha に完全な SHA を書く。
+  tree_fingerprint は `python3 -I aggregate_diag.py --fingerprint <tree-dir>` の値
+  （crates・scripts/bench・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイルの「SHA-256  相対パス」一覧を
+  C ロケール順に並べた全体の SHA-256。target/ と .git は除外。シンボリックリンクは対象文字列をハッシュ）。
+  送信側 tree とノード側 tree で一致を計測前に確認し、1 件でも差があれば fail-closed で停止する。
+  cargo が Cargo.lock を書き換える場合は、書き換え前に指紋を取る。本成果物ディレクトリは指紋の対象外。
+
+3. 計測手順
+  ラウンド数は PARAMS の rounds（既定 5）。各ラウンドの前にゲートを通す。
+    Mac mini: hw-lock を取得し、load1 < 3.0 を最大 30 分待つ。
+    GB10: compute プロセス 0 の専有を 30 秒間隔で最大 30 分待つ。
+  ゲート不通過は gate.txt に TIMEOUT と記録し、そのラウンドを正式系列から外す（status=partial・確度は常に低・表題は「参考」）。
+  ラウンド内の腕の順序: 奇数 round は Rust 腕（bench-fandhe の train／infer × fresh／reuse の 4 本 → cpu_jobgrid_bench threads）→ Python 腕（bench_py.py pytorch の train／infer → opp_kernel_torch_diag measure --shapes mlp --arm base --device cpu）、偶数 round は Python 腕 → Rust 腕。bench_py.py の sha256 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b を照合し、torch は 0.14.0 計測と同じ 2.14.0（違えば停止）。record_only として bench-fandhe train --phases --mode reuse・infer --phases を取る（分類には使わない）。起動は run_round.sh、変換は to_values_4146.py。計測中にビルド・集計・転送を並走させない。
+  run の差し替え・追加・除外・上書きは禁止。再実行は別ラベルとし、旧系列を残す。
+  到達不能な量は unavailable と記録し、推定値で埋めない（values.tsv にも書かない。式が計測できないなら RULE を改訂して式を外す）。
+  保存物: round{i}/{gate.txt, values.tsv, raw/}・env/。ハーネス固有の出力から values.tsv への変換は計測する issue が行い、変換手順を README に残す。
+
+4. 診断式（docs/perf/loss-attribution-matrix.md §10.1 から転記。単位は ms）
+  入力量: fandhe_window・fandhe_fresh_window・opp_window・fandhe_pure_kernel・opp_pure_kernel
+  F1 = opp_window ÷ (fandhe_window − fandhe_pure_kernel + opp_pure_kernel)
+       純カーネルの時計タグ（clock 列）を両側で揃える。揃わなければ F1 は比較不能とし、境界を併記する。
+  F2 = opp_window ÷ fandhe_fresh_window
+  観測比 = opp_window ÷ fandhe_window（スコアボードの比との整合確認用）
+  1 以上は「相手の構成を再現すれば届く」を意味する。診断であり目標値ではない。
+  純カーネルの境界（#4146 で追記）: GEMM のみ。ReLU・MSE・SGD・readout は両側とも含まない。
+    学習は l1_fwd・l2_fwd・l2_dw・l2_dx・l1_dw の 5 形状（l1_dx は含めない。fandhe-ai の常駐チェーンも PyTorch〈入力に勾配を求めない〉も実行しないため）。推論は l1_fwd・l2_fwd。
+    時計タグは両側 wall（fandhe-ai は cpu_jobgrid_bench の median_secs、PyTorch は opp_kernel_torch_diag の mm_pure。単発 GEMM を温めた状態で測った値の和で、step 内の状態とは一致しない。F1 の注意）。
+    fandhe_window は reuse（常駐チェーン。第 1 層の dX を計算しない）、fandhe_fresh_window は fresh（run_train。L1 の dX を計算する）。
+    kernel_owner=hardware の根拠: PyTorch CPU の GEMM は閉源の Accelerate で、REQ-1 により fandhe-ai は使わない（unreached_0140.tsv の M-CPU-G256 を「ハードの上限」とする先例に揃える）。測る前の宣言で、BLAS 経路が違っても動かさない。
+    PyTorch CPU の MLP 経路の精密な切り分けは #4148 の担当。値が食い違えば RULE.v2.txt で改訂する。
+
+5. 判定の分類先と規則（優先順位つき。aggregate_diag.py の classify と同一）
+  分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
+  (1) formulas に F2 があり、F2 の run 間中央値が reach_threshold 以上なら「計測窓の定義」。
+  (2) そうでなく F1 があり、時計が揃っていて、F1 の run 間中央値が reach_threshold 以上なら、
+      kernel_owner=hardware は「ハードの上限」、kernel_owner=constraint は「自分たちの制約」。
+      kernel_owner は測る前に宣言する（hardware: 閉源ライブラリ・OS・ハードが決める。
+      constraint: REQ-1・REQ-8・既定精度が決める。matrix §10.5 の定義）。事後に動かさない。
+  (3) それ以外は「分類保留」。理由欄に「どれも届かない（残差は固定費など別区間。別診断へ）」または「F1 の時計不一致」を書く。
+  確度:
+    高: 全ラウンドがゲート PASS（status=formal）かつ、判定に使った式の run 別値がすべて閾値の同じ側
+        （最小 > 閾値、または最大 < 閾値。境界ちょうどはまたぐ扱い）かつ時計が揃っている。
+    低: 上記以外。理由欄の先頭に「確度低」を付ける。
+  ドリフト: 観測比の中央値が PARAMS の scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。
+
+6. ノイズ帯・確定条件
+  ノイズ帯は NB-RANGE5（docs/perf/noise-band-decision.md。run 別比の最小〜最大を帯とし、閾値を含めば確度低）。
+  A/B 用の確定条件 NB-SEP は診断 (3) では使わない（Phase 3 の A/B 用）。
+  注意: 上記決定記録は #4142 で「案・所有者承認待ち」。承認後に名前や定義が変わったら本 RULE（改訂は RULE.v2.txt）へ反映する。
+
+7. 運用
+  公開面（README・RULE・集計出力・コミット）に実機ホスト名・絶対ホームパスを書かない。
+  Mac mini は <metal-node>、GB10 は <cuda-node> と書く。
+  集計は同梱の aggregate_diag.py のみで行う（`python3 -I`）。欠損・重複・解釈不能は例外で止まる。
+  本ファイル固定後に aggregate_diag.py を変更すると aggregate_script_sha256 が不一致になり集計は止まる。
+
+8. RULE.v2 の改訂（2026-11-11T01:20:17Z。所有者判断: #4151・#4153・#4154 の 2026-11-10 のコメント「他ジョブと重なった系列は測り直す」と、以降の Mac mini の計測で各 round を他ジョブの前提ゲートで前後から挟む指示）
+  本ファイルは RULE.txt（fixed-at-utc 2026-11-09T02:32:07Z・#4183）の改訂版。RULE.txt は消さずに残す（本ディレクトリでは RULE.txt で計測していない）。
+  項 1〜7 と PARAMS は、1 行目・PARAMS の fixed-at-utc（本改訂の固定時刻）と PARAMS の aggregate_script_sha256 を除き RULE.txt の逐語コピー。
+  tree_sha・tree_fingerprint・計測の条件・閾値・分類式・cell 行は変えない。分類と確度の規則は、下の (a)(4) の窓超過の扱いを足したほかは変えない。
+  (a) 改訂の理由:
+    (1) aggregate_script_sha256: RULE.txt の d55f295de692f1d026b788f0cd46e22078a985788bd1b52de2ca8d5a469d52a2 は、時計不一致の F1 セルを窓超過で
+        異常終了させていた旧版の aggregate_diag.py の値。#4208（PR #4211）で雛形を直し、本ディレクトリのコピーも合わせた（README の「注意」で予告済み）。
+        さらに下の (4) の扱いを PR #4237 で雛形とコピーに入れたため、
+        4b445129f04dee83ebffd56ba2adc2cc9222fdb762a6f6c546fa41e7163d807c（現在の aggregate_diag.py。雛形と同じ）に入れ直す。
+    (2) 他ジョブの前提ゲートを足す（下の (b)）。2026-11-10 に、hw-lock を取らない他ジョブ（wgpu の GPU GEMM・CPU 100%）が Mac mini の計測と
+        重なり、load1 < 3.0 のゲートでは検出できなかった（#4151・#4153・#4154）。
+    (3) 項 6 の注記: #4142 は 2026-11-10 に案 A（NB-RANGE5 を定義を変えずに採用）で承認済み（#4209）。定義は変わらないため項 6 は変えない。
+    (4) 窓超過の扱い（所有者判断 2026-11-11「超過は F1 を比較不能に」。下の (e) の試走 1 を受けて。集計スクリプトは PR #4237 の版）:
+        時計が揃ったセルで純カーネルが窓を上回るラウンドがあれば、集計を止めずに、そのセルの F1 を比較不能とし、理由
+        （「F1 の窓超過（純カーネル > 窓。round N fandhe／opp）」）と境界を併記する。分類は F2 の規則 (1) が当てはまればそれ、当てはまらなければ
+        「分類保留」。F1 を宣言したセルの確度は低（時計不一致と同じ）。項 4 の「揃わなければ F1 は比較不能」と、項 5 の (2)・(3)・確度の規則は
+        この扱いで読み替える（項 5 は「aggregate_diag.py の classify と同一」とあり、その classify は本項の扱いを含む版）。閾値・F1／F2 の式・ノイズ帯は変えない。
+  補助ファイルの sha256（集計スクリプトは照合しない。計測前にノード側で照合し、1 件でも違えば測らない）:
+    e60aa39ff23cd906839c38fe49ffdb702c54dcd78209a0b424e7fc4f03c7db77  run_round.sh
+    bb274e5fc9388b59f167d6a5b97785a5df99ac912957cba5d7c4a87cf74d13bc  to_values_4146.py
+  (b) 他ジョブの前提ゲート（ゲートを厳しくする方向だけの追加。load1 のゲート・閾値・分類式・確度の規則は変えない）:
+      部品: docs/perf/logs/macmini-foreign-job-gate/（PR #4227 のマージコミット 903782084807e0ecb82143b1302ed3346dbae577 の git archive から取り、tree の外の展開先 kit/ に置く）。
+        d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04  foreign_job_gate.py
+        90db28516de7246212dab265bc5de71ea6dd1a2579241919dc5918f8267b5954  round_with_foreign_gate.sh
+        e708c6e1f2ab3ecc3d99500adb7215342c45b9a8c2168cd88f2c0542dbe381b6  drive_series.sh
+        e255ccc6d730124b52c01676354f48c0b9c3195f2220a86cc0e4c044a67e8bc8  test_round_with_foreign_gate.sh
+      系列を始める前にノード側で上の 4 行を `shasum -a 256 -c` で照合し（1 件でも違えば測らない）、`python3 -I foreign_job_gate.py --self-test` と
+      `/bin/bash test_round_with_foreign_gate.sh` を通す。結果は展開先の kit-verify.txt に書き、回収のときに <系列>/env/kit-verify.txt へ写す
+      （ドライバは既存の系列ディレクトリを拒否するため、系列の前には系列ディレクトリを作らない）。
+      各 round は kit/round_with_foreign_gate.sh が前後から挟む（呼ぶのは下の (c) のドライバ。run_round.sh への環境変数は従来どおり）。
+      他ジョブとみなす基準（foreign_job_gate.py。どれか 1 つで FOREIGN）:
+        G1 実行ファイルの basename が caffeinate のプロセスがある（ユーザーを問わない）
+        G2 %CPU（ps -A -o pid=,ppid=,uid=,pcpu=,comm= の pcpu）が 25.0 以上のプロセスがある（ユーザーを問わない）
+        G3 basename（小文字化）が wgpu・python・cargo・rustc・xctrace・torch・bench・caffeinate のどれかを含む（ユーザー・%CPU を問わない）
+        G4 ioreg -r -d 1 -w 0 -c IOAccelerator の "Device Utilization %" を 1 秒間隔で 5 回読み、10 以上の回が 2 回以上
+        除外: ゲート自身・その祖先（ラッパー・ドライバ）・その子孫（ps・ioreg）と pid 0・1。名前では除外しない。
+      開始前（run_round.sh を呼ぶ前）: CLEAN かつ load1 < 3.0（項 3 の load1 ゲートと同じ閾値・同じ読み方）なら始める。どちらかがそろわなければ
+        30 秒間隔で最大 60 回待ち（各回の load1 は r<i>-before-a<k>.txt の末尾に wrapper_load1 で残す）、60 回ともそろわなければ run_round.sh を呼ばず
+        gate.txt を「TIMEOUT foreign-job before <UTC>」（最後の回が FOREIGN）か「TIMEOUT load1 before <UTC>」にする（項 3 の TIMEOUT と同じ扱い。
+        正式系列から外し partial・確度低）。load1 の読み方は項 3 の run_round.sh と同じで、sysctl の失敗・数値でない値は待たずに
+        「INVALID load1-sysctl-failed before <UTC>」／「INVALID load1-not-numeric before <UTC>」にして系列を止める（fail-closed）。両方を同じループで待つのは、run_round.sh の中の load1 の待ちの間に他ジョブが始まって終わる隙間を作らないため。
+      隙間の検査（終了後に行う）: run_round.sh の gate.txt が PASS なら、その行の末尾の UTC と開始前の確認の時刻の差を見て、60 秒を超えて後・
+        1 秒を超えて前・読めない場合は「INVALID foreign-gap <理由> <UTC>」にする（下の終了後の FOREIGN と同じ扱い）。
+      終了後（run_round.sh が返った直後）: FOREIGN（または隙間）なら、run_round.sh が 0 で終わり gate.txt の 1 語目が PASS の round を「INVALID foreign-after <UTC>」（隙間は foreign-gap）に
+        書き換え（元の行は「# was: 」で残す。ラッパーは exit 4）、その round だけを正式系列から外して次の round へ進む（次の round は開始前の確認で待つ。
+        所有者判断「後で見つかったら、その round は INVALID」）。run_round.sh が非 0・gate.txt が無い場合は INVALID にして系列を止める（exit 5）。
+        ゲート自身の失敗は fail-closed（開始前は INVALID foreign-gate-error before で exit 1、終了後は INVALID foreign-gate-error after で exit 5・系列を止める）。
+      記録: <系列>/env/foreign-gate/r<i>-before-a<k>.txt・r<i>-after.txt（マスク済み。ユーザー名・$HOME・ホスト名を置換、自分以外の uid は数値、
+        プロセス名は basename の「:」より前だけ）。
+      限界: ゲートは round の前後だけを確かめるので、round の途中で始まって終わるジョブは検出できない。
+        ps の %CPU は減衰平均で起動直後のジョブは低く出る（G3・G4 で補う）。GPU 使用率は機体全体の値で、どのプロセスかは分からない。
+      G2 の 25.0 は本改訂で新しく置いた基準。根拠は平常時の確認（他ジョブの終了後・2026-11-10T06:52:49〜06:57:59Z に 30 秒間隔で 10 回、
+        Claude Code を計測中と同じく待機させた状態。10 回とも CLEAN）の、除外対象を除いた %CPU の最大 4.3%。稼働中の他ジョブは 99.3%。
+        記録は docs/perf/logs/macmini-foreign-job-gate/idle-check-20261110/。
+  (c) 系列: series=formal-1。記録先は本ディレクトリの series-formal-1/（round1〜5・round<i>.log・env/・RULE.v2.txt の写し・drive.status）。
+      展開先は名前が `.noindex` で終わる新しいディレクトリにする（Spotlight が索引しない場所。ビルド・計測・記録のファイルはすべてこの中に書く。
+      理由は #4151 の RULE.v2.txt 項 10 (e): <metal-node> の作業ディレクトリは Spotlight の索引対象で、そこにファイルを書くと Spotlight の埋め込み生成
+      〈spotlightknowledged〉が mediaanalysisd を %CPU 約 120 で数秒走らせ、計測と重なる）。展開先に tree_sha の git archive（.rev-stamp に完全 SHA）を置き、
+      送信側と、ノード側のビルドの前と後で tree_fingerprint が PARAMS の値と一致することを確かめる（1 件でも差があれば測らない）。
+      ビルドは README の手順 1（framework-compare で `cargo build --release --locked -p bench-fandhe`、tree の workspace ルートで
+      `cargo build --release --locked -p fandhe-ai-backend-cpu --example cpu_jobgrid_bench`。いずれも in-tree target・CARGO_TARGET_DIR と RAYON_NUM_THREADS を外す）。
+      py/bench_py.py は sha256 を照合し、venv-torch は torch 2.14.0（run_round.sh の precheck で照合）。run_round.sh は本リポジトリの版（上の sha256）を展開先に置く。
+      ドライバは kit/drive_series.sh（`drive_series.sh 4146 <系列ディレクトリ> 5 <展開先の run_round.sh> ROOT=<tree> D=<展開先> EXPECT_SHA=<tree_sha>`。
+      nohup で切り離して起動）。hw-lock を取り、round 1〜5 を順に回す。ラッパーが非 0 で終わり gate.txt の 1 語目が TIMEOUT 以外なら以降の round を回さず
+      止めて報告する。ただし、ラッパーが 1 で gate.txt の 1 語目が TIMEOUT の round と、ラッパーが 4 で gate.txt の 1 行目が「INVALID foreign-after」か
+      「INVALID foreign-gap」の round は、記録したまま次の round へ進む。
+      ドライバが中断（SIGTERM・SIGINT・SIGHUP）されたら、実行中の round の子孫を止めてからその round を「INVALID interrupted-<信号>」にしてロックを外す。
+      子孫が 60 秒以内に止まらなければロックを外さずに止める（LOCK-KEPT）。gate.txt を INVALID に書き換えられないときも系列を止める。
+      止まった系列は集計せず報告する。INVALID・TIMEOUT の round を含む系列は、項 3 のとおり partial・確度低で集計する（aggregate_diag.py は PASS の round だけを読む）。
+      差し替え・追加・除外・再実行はしない。系列の実行中は、計測と同じ機体で ssh・python・cargo を動かさない（終了後ゲートに自分の操作が当たらないように、
+      終わるまで待ってから 1 回だけ見る）。
+      系列の途中で値を見ない（round<i>.log は bench-fandhe の標準出力を含むので、round<i>.log・raw/ は系列の後まで開かない。見るのは drive.status と gate.txt だけ）。
+      系列を始める前に、mediaanalysisd が止まっていることを確かめる（2 分間隔で 3 回続けて %CPU 5 未満）。Spotlight の埋め込み生成のバックログ
+      （2026-10-11 開始）の処理は展開先では避けられず、走っている間は前後のゲートに当たるため（#4154 の README「状態」）。これはゲートの基準を変えない。
+      止まっていなければ系列を始めず、見送って報告する（所有者判断 2026-11-10「mediaanalysisd が止まっていれば回し、動いていれば同じく見送る」）。
+      始める直前にも ps で %CPU を 1 回読み、spotlightknowledged の「Submitting text processing」の直近 10 分の件数を数えて env/series-start.txt の前に
+      展開先の preflight.txt へ残す（回収のときに <系列>/env/ へ写す）。
+      env/ には ビルド前後の指紋（fp-before-build.txt・fp-after-build.txt）・bench-fandhe の cargo tree（fandhe-ai は crates.io の 0.14.0）・
+      torch.__config__.show() の出力（README の注意。系列の前に取る）・.rev-stamp を置く。
+      変換・集計は README の手順 3・5 で、集計に --rule RULE.v2.txt を付ける（to_values_4146.py・aggregate_diag.py は本リポジトリの版）。
+  (d) 系列の始め方: 前の負荷が load1 から抜けるのを待つ（round ごとの load1 < 3.0 のゲートは変えない）。drive_series.sh がロックを取ってから
+      load1 を 30 秒ごとに読み、1.5 未満になったら round 1 を始める（最大 40 回＝20 分。届かなければそのまま始め、届かなかったことを記録する）。
+      1.5 は平常時の load1（0.92〜1.35）の少し上。待った秒数・各回の load1・開始時の load1 を <系列>/env/series-start.txt に残す。
+  (e) 固定前の試走（捨てる前提。値は見ない）:
+      試走 1（2026-11-10T17:53:32〜17:55:25Z。展開先は .noindex の新しいディレクトリ。上の (b)〜(d) と同じ手順で、ラウンド数だけ 2）:
+        ビルドの前と後の tree_fingerprint が PARAMS の値と一致し、bench-fandhe の fandhe-ai は crates.io の 0.14.0（cargo tree）。kit の照合は
+        sha-rc=0・gate-selftest-rc=0・wrap-selftest-rc=0。ビルドは hw-lock を取らずに行った（README の手順 1 はロックを取ってから。本番系列の前の
+        ビルドは試走と同じ展開先のものを使い、やり直さない）。系列の開始は load1 が 1.5 未満に届いて始まった（waited_s=90・load1=1.46）。
+        round 1・2 とも開始前・終了後のゲートが CLEAN（attempt=1）で、gate.txt は PASS。
+        値の扱い: round<i>.log には bench-fandhe の標準出力（窓の median_s などの行）がそのまま入る。状態の確認でこのログを開いたため、試走の
+        bench-fandhe の値を見た（PyTorch 側・純カーネル・F1／F2 は見ていない）。本番系列では、系列が終わるまで drive.status と gate.txt だけを見る。
+        変換・集計の通し: to_values_4146.py は 2 ラウンドとも rc=0。rounds を 2 にした RULE の写しで aggregate_diag.py（RULE.txt が固定していた旧版の
+        次の版 2877b967…）を実行すると「M-CPU-TRN: pure_kernel exceeds window」で止まった。値を出さずに真偽だけを調べると、round 1 だけ、
+        M-CPU-TRN・M-CPU-INF の両方で fandhe 側の純カーネル（cpu_jobgrid_bench の GEMM の和。時計は両側 wall）が窓を上回り、round 2 は上回らなかった。
+        opp 側は両ラウンドとも上回らなかった。1 ラウンドでもこれが起きると系列全体が集計できないため、所有者判断（2026-11-11「超過は F1 を比較不能に」:
+        時計が揃わないときと同じ扱いにし、窓を超えたラウンドがあればそのセルの F1 は比較不能として理由と境界を書き、分類は F2 と残りの規則で決める。
+        閾値と F2 の式は変えない）に従い、集計スクリプトを直した（PR #4237。下の (a)(4)）。直した版で同じ写しの集計を 実行し rc=0（aggregate.md・aggregate.tsv が出た。出力は開かず、aggregate.md に「窓超過」の語が出ることだけを件数で確かめた）。
+        試走の記録はリポジトリに入れない。mediaanalysisd は試走の前に %CPU 0.0。
+  (f) 記録: 結果欄に 2 セルの分類と確度を書く（README の手順 6・7）。
+
+## PARAMS
+fixed-at-utc: 2026-11-11T01:20:17Z
+issue: 4146
+rounds: 5
+tree_sha: 18a7f4b87fe61029a179cb1922cc82928440f2c9
+tree_fingerprint: 728575c0a3570bc9882f3fc53a973222ae80a18772186fcb3e6ea14a5b6e9a52
+aggregate_script_sha256: 4b445129f04dee83ebffd56ba2adc2cc9222fdb762a6f6c546fa41e7163d807c
+reach_threshold: 1.00
+noise_band: NB-RANGE5
+cell: M-CPU-TRN | machine=macmini | scoreboard_ratio=0.24 | formulas=F1,F2 | kernel_owner=hardware | opp=PyTorch | prev_class=自分たちの制約
+cell: M-CPU-INF | machine=macmini | scoreboard_ratio=0.15 | formulas=F1,F2 | kernel_owner=hardware | opp=PyTorch | prev_class=自分たちの制約

@@ -1,0 +1,3 @@
+lock-acquired 2026-11-11T01:43:35Z
+sample 1 2026-11-11T01:43:35Z load1=1.42
+series-start 2026-11-11T01:43:35Z waited_s=0 load1=1.42 reached_below_1.5=yes

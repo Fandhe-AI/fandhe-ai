@@ -7,7 +7,9 @@
 # （scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh）で、本スクリプトと同時に走らせない
 # （RULE 項 12）。ビルドはすべて最初に済ませ、負荷ゲート付きの計測区間の外で行う（RULE 項 6）。
 # 使い方（Mac mini 上。展開ツリーの docs/perf/logs/metal-steel-large-n-ab-macmini-4160/ から）:
-#   CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai OUT=<出力ディレクトリ> sh orchestrate_macmini.sh
+#   FOREIGN_GATE=<foreign_job_gate.py の絶対パス> CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+#     OUT=<出力ディレクトリ> sh orchestrate_macmini.sh
+#   FOREIGN_GATE は必須（他ジョブの前提ゲート。docs/perf/logs/macmini-foreign-job-gate/。未指定なら起動しない）。
 #   sh orchestrate_macmini.sh --dry-run   # 何も作らず計画だけ表示する
 # bash 3.2／sh 互換のため変数は必ず ${VAR} で参照する。外部入力を eval・展開しない（テスト名・N は固定）。
 # ホスト名（uname -n）・ユーザー名・$HOME は出力しない（RULE 項 2 のマスク方針）。
@@ -15,6 +17,9 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "${HERE}/../../../.." && pwd)
 FC="${ROOT}/scripts/bench/framework-compare"
+# 他ジョブの前提ゲートの関数群（run_ab_steel_large_n_gemm_metal.sh と共用。記録の文法はそちらの冒頭コメントが正）
+# shellcheck source=../../../../scripts/bench/framework-compare/ab_foreign_gate.sh
+. "${FC}/ab_foreign_gate.sh" || exit 1
 GATE_LOAD=3.0
 MOD="gemm_steel_large_n_diag_tests"
 PREREQ_MOD="gemm_steel_candidate_diag_tests"
@@ -34,12 +39,14 @@ if [ "$#" -eq 1 ]; then
   echo "  前提ゲート: tile:: 単体・${PREREQ_MOD} 全件・${MOD}::steel_large_n_bit_identity・steel_large_n_prereq_parity"
   echo "  5 run x {trace(${MOD}::steel_large_n_reach_trace), kern(${MOD}::steel_large_n_kernel_gpu)} と candle excl（N=256 512 1024 2048 4096）"
   echo "  奇数 run は fandhe -> candle、偶数 run は candle -> fandhe。各プロセス前に hw-lock と load1<${GATE_LOAD}"
+  echo "  他ジョブの前提ゲート: FOREIGN_GATE 必須。各プロセスの前は他ジョブ CLEAN かつ load1<${GATE_LOAD} を同じループで待ち（30 秒間隔・最大 60 回）、後に 1 回確認（FOREIGN は gate=invalid reason=foreign-after）"
   exit 0
 fi
 
 : "${OUT:?OUT（出力ディレクトリ）が未指定}"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR が未指定（target は 1 つに保つ）}"
 export CARGO_TARGET_DIR
+: "${FOREIGN_GATE:?FOREIGN_GATE（foreign_job_gate.py の絶対パス）が未指定}"
 # framework-compare は独自の [workspace]・Cargo.lock を持つため target を分ける
 FC_TARGET="${CARGO_TARGET_DIR}-fc"
 
@@ -53,6 +60,10 @@ fi
 mkdir -p "${OUT}" || exit 1
 # 相対指定の OUT は以降の cd で別基準になりログ上書き禁止検査を迂回しうるため、絶対パスへ正規化する。
 OUT=$(cd "${OUT}" && pwd) || exit 1
+if [ -e "${OUT}/foreign-gate" ]; then
+  echo "foreign-gate が既に存在する（差し替え禁止。再実行は別の OUT で行う）" >&2
+  exit 1
+fi
 for f in prereq_tile.log prereq_steel.log bitident.log parity.log load_gate.log RULE.txt rev-stamp.txt env_info.txt build_tests.log build_candle.log; do
   if [ -e "${OUT}/${f}" ]; then
     echo "${f} が既に存在する（差し替え禁止。再実行は別の OUT で行う）" >&2
@@ -67,6 +78,7 @@ for i in 1 2 3 4 5; do
     fi
   done
 done
+fg_require "${FOREIGN_GATE}" "${OUT}/foreign-gate" || exit 1
 cp "${HERE}/RULE.txt" "${OUT}/RULE.txt"
 cp "${ROOT}/.rev-stamp" "${OUT}/rev-stamp.txt"
 {
@@ -77,6 +89,7 @@ cp "${ROOT}/.rev-stamp" "${OUT}/rev-stamp.txt"
   sysctl hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu hw.memsize
   rustc --version
   uptime
+  echo "foreign_job_gate_sha256=$(fg_sha256 "${FOREIGN_GATE}")"
 } > "${OUT}/env_info.txt" 2>&1
 
 # ---- ビルド（計測より前に全て終える。失敗なら即中止） ----
@@ -97,23 +110,27 @@ CANDLE="${FC_TARGET}/release/bench-candle"
 cd "${ROOT}" || exit 1
 echo "build-done $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/load_gate.log"
 
-# ---- ゲート（hw-lock の保持確認と load1 < 3.0。30 秒間隔・最大 30 分。$1 = ラベル） ----
-# 通過以外（GATE-TIMEOUT／GATE-INVALID）は gate= に記録し、aggregate.py が正式系列から外す。
+# ---- ゲート（hw-lock の保持確認と、他ジョブ CLEAN かつ load1 < 3.0。30 秒間隔・最大 30 分＝60 回。$1 = ラベル） ----
+# 通過以外（GATE-TIMEOUT／GATE-INVALID）は gate= に記録し（理由は reason=foreign-job|load1|foreign-gate-error|load1-unavailable）、
+# aggregate.py が正式系列から外す。通過の行の書式は従来のまま。各回のゲート出力は ${OUT}/foreign-gate/ に残る。
 # hw-lock は docs/real-hardware-verification-env.md の運用に従い、呼び出し側が保持してから起動する。
 gate() {
-  waited=0
-  status="timeout"
-  while [ "${waited}" -lt 1800 ]; do
-    l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
-    case "${l1}" in
-      ''|*[!0-9.]*) status="invalid"; l1="NA"; break ;;
-    esac
-    ok=$(awk -v a="${l1}" -v t="${GATE_LOAD}" 'BEGIN{print (a<t)?1:0}')
-    if [ "${ok}" = "1" ]; then status="pass"; break; fi
-    sleep 30
-    waited=$((waited + 30))
-  done
-  echo "$1 gate=${status} load1=${l1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/load_gate.log"
+  fg_wait_before "$1" "${GATE_LOAD}"
+  extra=""
+  if [ "${FG_STATUS}" != "pass" ]; then
+    extra=" reason=${FG_REASON}"
+    [ "${FG_REASON}" = "foreign-gate-error" ] && extra="${extra} phase=before"
+  fi
+  echo "$1 gate=${FG_STATUS} load1=${FG_L1} waited_s=${FG_WAITED}${extra} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/load_gate.log"
+}
+
+# 計測プロセスの直後に他ジョブを 1 回確かめる（$1 = gate() と同じラベル）。FOREIGN／ゲート失敗は同じラベルの
+# gate=invalid を足す（aggregate.py は重複・非 pass として正式系列から外す。続行は既存の GATE-INVALID と同じ）。
+gate_after() {
+  fg_after "$1"
+  if [ "${FG_RC}" -ne 0 ]; then
+    echo "$1 gate=invalid reason=$(fg_after_reason) phase=after at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/load_gate.log"
+  fi
 }
 
 run_diag() { # $1 = モジュール、$2 = テスト名（空なら全件）、$3 = 出力ファイル
@@ -131,9 +148,11 @@ run_fandhe() { # $1 = run 番号
   gate "run${i}-trace"
   run_diag "${MOD}" steel_large_n_reach_trace "${OUT}/trace_run${i}.log" \
     || echo "run${i} FAILED trace" >> "${OUT}/load_gate.log"
+  gate_after "run${i}-trace"
   gate "run${i}-kern"
   run_diag "${MOD}" steel_large_n_kernel_gpu "${OUT}/kern_run${i}.log" \
     || echo "run${i} FAILED kern" >> "${OUT}/load_gate.log"
+  gate_after "run${i}-kern"
 }
 
 run_candle() { # $1 = run 番号
@@ -143,6 +162,7 @@ run_candle() { # $1 = run 番号
     "${CANDLE}" --task gemm-transfer-split --device metal --size "${n}" \
       --out "${OUT}/candle_run${i}.jsonl" 2>> "${OUT}/candle_run${i}.err" > /dev/null \
       || echo "run${i} FAILED candle N=${n}" >> "${OUT}/load_gate.log"
+    gate_after "run${i}-candle-N${n}"
   done
 }
 
