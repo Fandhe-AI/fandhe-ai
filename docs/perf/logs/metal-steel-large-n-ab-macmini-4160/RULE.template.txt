@@ -46,6 +46,14 @@ aggregate_script_sha256: <固定時点の aggregate.py の sha256>
    run 別の値も表に出す。各プロセスの前に hw-lock と load1 < 3.0 を 30 秒間隔・最大 30 分待つ
    （GATE-TIMEOUT／GATE-INVALID を記録）。全プロセスが通過した系列だけを正式系列とする。
    ビルド・集計・転送はゲート付き区間の外で行う。
+   他ジョブの前提ゲート（docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py。基準 G1〜G4 は同 README。load1 の閾値・
+   分類式・確度の規則は変えず、厳しくする方向だけの追加）: 各プロセス（純カーネル計測の trace・kern・candle、セル A/B の
+   round 先頭と各セルの実行）の前は「他ジョブ CLEAN かつ load1 < 3.0」を 30 秒間隔・最大 60 回（30 分）同じループで待ち、
+   後に 1 回確かめる。開始前に揃わなければ GATE-TIMEOUT（reason=foreign-job|load1）、ゲート自身の失敗・出力の解釈失敗は
+   GATE-INVALID（reason=foreign-gate-error）、終了後に FOREIGN なら GATE-INVALID（reason=foreign-after）を同じ label の行として
+   記録する。いずれも既存と同じく記録して続行し、そうした行を含む系列は正式系列にしない（部分系列は作らない・差し替えない）。
+   FOREIGN_GATE（ゲートの絶対パス）は必須で、未指定なら起動しない。各回のゲート出力は出力ディレクトリの foreign-gate/ 以下。
+   ゲートのスクリプトと ab_foreign_gate.sh の sha256 は RULE.txt 固定時に併記する（固定時点のものを使う）。
 
 7. 純カーネルの判定（N=1024／2048／4096。指標は kernel_gpu）
    - ADOPT_CANDIDATE: sl/cur の 5 run 中央値で 2% を超えて速い、かつ 5/5 run で速い、かつ parity pass・ref との bit 一致・
