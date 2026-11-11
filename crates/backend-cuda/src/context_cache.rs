@@ -2852,16 +2852,17 @@ mod tests {
     #[test]
     #[ignore = "実 CUDA デバイスが必要（CI では実行しない）"]
     fn cached_allocator_keeps_distinct_contexts_on_same_ordinal_separate() {
-        // `cached_device` を経由せず直接 `CudaDevice::new` を呼ぶことで、
-        // 同一 ordinal（0）に対して独立した 2 つの `CudaContext` を作る
-        // （公開 API の誤用パターンの再現）。
-        let device_a =
-            CudaDevice::new(0).expect("CUDA device 0 must be available on the ignored runner");
-        let device_b =
-            CudaDevice::new(0).expect("CUDA device 0 must be available on the ignored runner");
+        // `cached_device` を経由せず `new_isolated_for_test` で、同一 ordinal（0）に
+        // 対して独立した 2 つの `CudaContext` を作る（公開 API の誤用パターンの再現）。
+        // `CudaDevice::new` は推論 Graph 既定 ON だと同 ordinal で ctx を共有する
+        // ため使わない（#4262。既定の ON/OFF に依らず前提を成立させる）。
+        let device_a = CudaDevice::new_isolated_for_test(0)
+            .expect("CUDA device 0 must be available on the ignored runner");
+        let device_b = CudaDevice::new_isolated_for_test(0)
+            .expect("CUDA device 0 must be available on the ignored runner");
         assert!(
             !Arc::ptr_eq(device_a.context(), device_b.context()),
-            "CudaDevice::new を 2 回直接呼べば別 CudaContext になるはず（前提の確認）"
+            "new_isolated_for_test を 2 回呼べば別 CudaContext になるはず（前提の確認）"
         );
 
         let allocator_a =

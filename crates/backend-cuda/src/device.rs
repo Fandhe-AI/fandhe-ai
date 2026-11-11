@@ -420,6 +420,17 @@ impl CudaDevice {
                 // イシュー #3260: 学習 step 全体 capture の opt-in も created stream を要求する。
                 || crate::graph::train_graph_stream_requested(),
         )?;
+        Self::from_parts(ctx, stream, ordinal, stream_kind)
+    }
+
+    /// `(ctx, stream, stream_kind)` 確定後のメタデータ照会と組み立て。
+    /// [`Self::new`] と（テスト限定の）`new_isolated_for_test` が共有する。
+    fn from_parts(
+        ctx: Arc<CudaContext>,
+        stream: Arc<CudaStream>,
+        ordinal: usize,
+        stream_kind: StreamKind,
+    ) -> Result<Self, CudaError> {
         let name = ctx.name()?;
         let compute_capability = ctx.compute_capability()?;
         // nvrtc の --gpu-architecture は仮想アーキテクチャ（compute_XY）を
@@ -451,6 +462,30 @@ impl CudaDevice {
             stream_kind,
             managed_memory_supported,
         })
+    }
+
+    /// テスト専用: 呼ぶたびに独立した `CudaContext` と legacy ストリームで
+    /// `CudaDevice` を構築する（イシュー #4262）。
+    ///
+    /// 推論 Graph 既定 ON（`INFER_GRAPH_DEFAULT_ENABLED`。#4163）では
+    /// [`Self::new`] が `STREAM_KIND_CACHE` 経由で同一 ordinal の `ctx` を
+    /// 共有するため、「別 `CudaDevice` なら別 ctx」を前提にするテスト
+    /// （ctx 別キャッシュの分離検証・LRU の hit/miss 計数）は既定の ON/OFF に
+    /// 依存して落ちる。そうしたテストは本関数で ctx を分け、既定に依らず
+    /// 成立させる。`STREAM_KIND_CACHE` は読み書きしない（他テストの判定を
+    /// 変えない）。本番経路では使わない。
+    #[cfg(test)]
+    pub(crate) fn new_isolated_for_test(ordinal: usize) -> Result<Self, CudaError> {
+        if !Self::is_available() {
+            return Err(CudaError::DriverUnavailable {
+                detail: "libcuda dynamic library not found (dlopen failed); \
+                         CUDA driver is not installed or not on the library search path"
+                    .to_string(),
+            });
+        }
+        let ctx = CudaContext::new(ordinal)?;
+        let stream = ctx.default_stream();
+        Self::from_parts(ctx, stream, ordinal, StreamKind::Legacy)
     }
 
     /// システムに存在する CUDA デバイス数を返す。

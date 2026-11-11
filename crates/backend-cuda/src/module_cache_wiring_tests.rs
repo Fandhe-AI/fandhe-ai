@@ -45,6 +45,7 @@
 //! ```
 
 use crate::context_cache;
+use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::{CudaGemm, kernel_specs};
 use crate::module_cache::KernelModuleCache;
@@ -154,7 +155,7 @@ fn unavailable_optional_kernel_count(gemm: &CudaGemm) -> u64 {
     (total_optional - available_count) + swizzle_repeated_miss
 }
 
-/// (a) 同一 `context_cache::cached_device` 上で `CudaGemm::new` を 2 回
+/// (a) 同一 `CudaDevice` 上で `CudaGemm::new` を 2 回
 /// 構築すると、2 回目は `KernelModuleCache` の `hit_count` が
 /// [`compiled_kernel_count`]（実際にコンパイル・ロードへ成功したカーネル
 /// 数。TF32 WMMA 系が fail-soft する環境では [`kernel_specs`] の要素数
@@ -162,22 +163,24 @@ fn unavailable_optional_kernel_count(gemm: &CudaGemm) -> u64 {
 /// `miss_count` は増加しない（1 回目のコンパイル・insert で埋まった LRU
 /// を 2 回目が再利用する）。
 ///
-/// `context_cache::cached_device(0)` を使う理由: `Arc<CudaContext>` の
-/// ポインタ同一性（`module_cache.rs::KernelModuleCache` キーの `ctx_id`）
-/// を 2 回の `CudaGemm::new` 呼び出し間で一致させるため。素朴に
-/// `CudaDevice::new(0)` を 2 回呼ぶと別 `Arc<CudaContext>` になり
-/// LRU が意図的にヒットしない（本モジュール冒頭ドキュメンテーション
-/// コメント「ABA 耐性」節と同じ、ctx 単位のキー分離）。
+/// `CudaDevice::new_isolated_for_test(0)` で device を 1 つ作り 2 回の
+/// `CudaGemm::new` で使い回す理由（#4262）: `Arc<CudaContext>` のポインタ
+/// 同一性（`module_cache.rs::KernelModuleCache` キーの `ctx_id`）を 2 回の
+/// 呼び出し間で一致させつつ、他テストと ctx を共有しないため。
+/// `context_cache::cached_device(0)` は推論 Graph 既定 ON だと他テストと同じ
+/// ctx を返し、1 回目の構築が既に LRU に載っていて miss が増えない。専用 ctx
+/// なので冒頭の並列テストによる LRU 汚染の注記の対象からも外れる（ctx 単位の
+/// キー分離。ABA 回避のためテスト終了まで device を保持する）。
 #[test]
 #[ignore = "実機（DGX Spark GB10 等の CUDA 搭載環境）専用。libnvrtc 必須"]
 fn cuda_gemm_new_second_construction_reuses_module_cache() {
-    let device = match context_cache::cached_device(0) {
+    let device = match CudaDevice::new_isolated_for_test(0) {
         Ok(dev) => dev,
         Err(e) if is_environment_unavailable_error(&e) => {
             eprintln!("CUDA/NVRTC 非搭載環境のためスキップ: {e}");
             return;
         }
-        Err(e) => panic!("unexpected CudaError from context_cache::cached_device: {e}"),
+        Err(e) => panic!("unexpected CudaError from CudaDevice::new_isolated_for_test: {e}"),
     };
 
     let cache = KernelModuleCache::global().expect("module cache must be constructible");
