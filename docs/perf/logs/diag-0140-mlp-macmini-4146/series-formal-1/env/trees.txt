@@ -1,0 +1,5 @@
+# 展開ツリー（計測後に回収。.rev-stamp と aggregate_diag.py --fingerprint の値）
+# ビルドの前と後（env/build/fp-before-build.txt・fp-after-build.txt）は RULE.v2 の tree_fingerprint と一致。
+# 計測後もツリーの指紋は RULE.v2 の値と一致し、__pycache__（*.pyc）は 0 件。
+rev-stamp=18a7f4b87fe61029a179cb1922cc82928440f2c9
+after-series fingerprint=728575c0a3570bc9882f3fc53a973222ae80a18772186fcb3e6ea14a5b6e9a52 files=2677
