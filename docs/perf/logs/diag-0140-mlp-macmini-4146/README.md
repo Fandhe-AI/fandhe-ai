@@ -34,7 +34,7 @@
 |---|---|
 | `RULE.txt` | #4208 より前に固定した規則。修正前の `aggregate_diag.py`（sha256 `d55f295d…`）を固定しているため使わない（残置。上の注意） |
 | `RULE.v2.txt` | 実測の前に単独コミットで固定する規則（未作成。測る直前に <metal-node> 側で作る） |
-| `RULE.template.txt`・`aggregate_diag.py` | 雛形のコピー（`aggregate_diag.py` は無改変。#4208 の修正後の雛形と一致。sha256 を `RULE.v2.txt` の PARAMS に固定） |
+| `RULE.template.txt`・`aggregate_diag.py` | 雛形のコピー。#4146 の試走を受けて窓超過を比較不能にした版（雛形と同一。`aggregate_diag.py` は無改変で雛形と byte 一致。sha256 を `RULE.v2.txt` の PARAMS に固定） |
 | `to_values_4146.py` | `raw/` → `values.tsv` の変換（厳格パース・`--self-test`） |
 | `run_round.sh` | 1 round の起動（ゲート → 計測 → `gate.txt`・`raw/`） |
 

@@ -29,6 +29,9 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
   入力量: fandhe_window・fandhe_fresh_window・opp_window・fandhe_pure_kernel・opp_pure_kernel
   F1 = opp_window ÷ (fandhe_window − fandhe_pure_kernel + opp_pure_kernel)
        純カーネルの時計タグ（clock 列）を両側で揃える。揃わなければ F1 は比較不能とし、境界を併記する。
+       時計が揃っていても純カーネルが窓を上回るラウンド（fandhe 側・opp 側のどちらでも）があれば、
+       止めずにそのラウンドの F1 を計算せず「窓超過」と印を付け、そのセルの F1 は比較不能とする（時計不一致と同じ扱い。
+       単発 GEMM の和は step 内の状態と一致しないため揺れで超過しうる）。分母 0 以下の検査は変えない。
   F2 = opp_window ÷ fandhe_fresh_window
   観測比 = opp_window ÷ fandhe_window（スコアボードの比との整合確認用）
   1 以上は「相手の構成を再現すれば届く」を意味する。診断であり目標値ではない。
@@ -36,14 +39,14 @@ RULE fixed-at-utc <YYYY-MM-DDThh:mm:ssZ>
 5. 判定の分類先と規則（優先順位つき。aggregate_diag.py の classify と同一）
   分類先: 自分たちの制約／ハードの上限／計測窓の定義／分類保留
   (1) formulas に F2 があり、F2 の run 間中央値が reach_threshold 以上なら「計測窓の定義」。
-  (2) そうでなく F1 があり、時計が揃っていて、F1 の run 間中央値が reach_threshold 以上なら、
+  (2) そうでなく F1 があり、時計が揃い窓超過がなく、F1 の run 間中央値が reach_threshold 以上なら、
       kernel_owner=hardware は「ハードの上限」、kernel_owner=constraint は「自分たちの制約」。
       kernel_owner は測る前に宣言する（hardware: 閉源ライブラリ・OS・ハードが決める。
       constraint: REQ-1・REQ-8・既定精度が決める。matrix §10.5 の定義）。事後に動かさない。
-  (3) それ以外は「分類保留」。理由欄に「どれも届かない（残差は固定費など別区間。別診断へ）」または「F1 の時計不一致」を書く。
+  (3) それ以外は「分類保留」。理由欄に「どれも届かない（残差は固定費など別区間。別診断へ）」「F1 の時計不一致」「F1 の窓超過（純カーネル > 窓。round N fandhe／opp）」のいずれかを書く（F1 が比較不能で (1) も当てはまらないとき）。
   確度:
     高: 全ラウンドがゲート PASS（status=formal）かつ、判定に使った式の run 別値がすべて閾値の同じ側
-        （最小 > 閾値、または最大 < 閾値。境界ちょうどはまたぐ扱い）かつ時計が揃っている。
+        （最小 > 閾値、または最大 < 閾値。境界ちょうどはまたぐ扱い）かつ時計が揃っていて窓超過がない。
     低: 上記以外。理由欄の先頭に「確度低」を付ける。
   ドリフト: 観測比の中央値が PARAMS の scoreboard_ratio から 10% を超えて乖離したら記録する（判定は変えない）。
 
