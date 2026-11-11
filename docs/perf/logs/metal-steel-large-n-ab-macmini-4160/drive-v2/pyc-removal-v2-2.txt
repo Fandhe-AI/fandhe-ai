@@ -1,0 +1,4 @@
+pyc-removal 2026-11-11T09:37:58Z owner-approved (formal-v2-2 attempt1 tree-mismatch)
+6fa6db1bb3ac7157652b1460f9cf3d853c7fcd25dc2fdb847986b874f161c8b7  checksum_contract.cpython-315.pyc
+mtime=2026-11-11T18:18:53+0900
+fingerprint=18dbb526126ec246876f6f654b0ec6f785e8d6c6e7b6d933223ca81c8e08fc70 files=21295

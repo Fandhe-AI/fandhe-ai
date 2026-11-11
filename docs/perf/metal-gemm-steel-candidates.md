@@ -272,7 +272,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 ## 11. N≥1024 限定の T0U-LU-FB opt-in と現行表との A/B（イシュー #4160）
 
-状態: **機構・計測基盤を追加済み（PR-1）。Mac mini の実測は未実施**（§11.5 の記入欄は空）。**既定経路への結線は #4166 で保留中（#4160 の判定待ち。§11.7）。**
+状態: **Mac mini で実測済み・総合 ADOPT**（RULE.v2 の系列 `formal-v2-2`。2026-11-11。§11.5）。**既定経路への結線は #4166 の担当で未結線**（`STEEL_LARGE_N_ENABLED` は `false` のまま。所有者承認と M4 Max での確認が残る。§11.7）。
 
 ### 11.1 背景
 
@@ -299,7 +299,23 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 - 診断テスト: `crates/backend-metal/src/gemm_steel_large_n_diag_tests.rs`（腕は `cur`／`sl`／`ref`／`cur_aa`）。起動は `orchestrate_macmini.sh`、集計は `aggregate.py`、セル A/B は `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`。
 - 「1 位に変わった」と書けるのは NB-SEP 成立時のみ。NB-RANGE5／NB-SEP は `docs/perf/noise-band-decision.md`（#4142。所有者承認済み〈#4142 コメント 6757497844・#4209〉）を名前で参照する。
 
-### 11.5 実測記入欄（2026-11-11・Mac mini `<metal-node>`。総合 UNDETERMINED）
+### 11.5 実測記入欄（2026-11-11・Mac mini `<metal-node>`。総合 ADOPT）
+
+**判定（RULE.v2 の `formal-v2-2`）**: 規則は `logs/metal-steel-large-n-ab-macmini-4160/RULE.v2.txt`（PR #4252。旧 `RULE.txt` の項 0〜13 をそのまま使い、各系列の前の準備だけを足した改訂）。`formal-v2-1` はセル A/B の直後のゲートが macOS の `secd`（%CPU 33.3。G2）に当たって参考系列となり、`formal-v2-2` が全ゲート通過（純カーネル 39/39・セル A/B 5/5・rc=0）した。RULE.v2 項 3 によりこの系列で判定し、`aggregate.py` の総合は **ADOPT**（`series-formal-v2-2/aggregate.md`）。Mac mini 単機の判定で、意味は「#4166 で所有者が結線を判断する価値がある」に限る。
+
+| N | cur kernel_gpu ms | sl kernel_gpu ms | sl/cur | 速い run | N 別の判定（RULE 項 7。総合ではない） | bit 一致（sl=ref） | parity |
+|---|---|---|---|---|---|---|---|
+| 1024 | 0.8028 | 0.7466 | -7.0% | 5/5 | ADOPT_CANDIDATE | 一致 | pass |
+| 2048 | 6.4891 | 5.8195 | -10.3% | 5/5 | ADOPT_CANDIDATE | 一致 | pass |
+| 4096 | 51.2805 | 46.4040 | -9.5% | 5/5 | ADOPT_CANDIDATE | 一致 | pass |
+
+- 到達はスコープ内 3 点で `profile=steel_large_n`・`CANDIDATES[0]`・Classic・fallback なし。N=256／512 は no-op 成立（解決タイル同一・bit 一致）。A/A 対照 cur_aa/cur は ±0.2% 以内。
+- セル A/B（非後退ゲート）: 状態 ok（5/5 round 一貫して 2% を超えて後退するセルはない）。after/before の中央値比は N=1024 fresh 0.944・reuse 0.984、N=2048 fresh 0.942・reuse 0.933、N=4096 fresh 0.907・reuse 0.919。N=512 reuse は 1.032（2% 超の round 3/5。5/5 ではないため後退には当たらない）。checksum は全セルで完全一致。
+- スコアボード比（candle の gemm 窓 fresh ÷ fandhe-ai の reuse 窓）: **N=2048 は NB-SEP 成立**（before 0.936〜0.946 → after 1.005〜1.014）。N=1024 は不成立（before 0.885〜0.965、after 0.900〜1.080）。G4096 は記録のみ（不成立）。「1 位に変わった」と書けるのは、opt-in を ON にした状態の M-MTL-G2048 相当（Mac mini）だけ。main の既定は変わっていないため、スコアボードと `loss-attribution-matrix.md` は変えない（結線後の付け直しは #4168）。
+- 根拠にするのは RULE 項 11 の総合 ADOPT だけ（上の表の N 別判定は総合ではない）。
+- 逸脱 2 件（所有者の指示で計測セッションが `formal-v2-2` の前に常駐プロセスを止めたこと、試み 1 の不開始の原因になった Python のキャッシュ 1 件を所有者判断で消して試み 2 として起動したこと）・系列の前の準備・開示は、同ディレクトリの README を正とする。
+
+#### 旧 `RULE.txt` の 3 系列（参考。総合 UNDETERMINED。PR #4249）
 
 規則は `logs/metal-steel-large-n-ab-macmini-4160/RULE.txt`（PR #4248）。所有者判断「別ラベルで最大 3 系列」（RULE 項 14 (d)）に従って 3 系列回したが、3 系列ともセル A/B で他ジョブの前提ゲートに当たり、全ゲート通過の系列はなかった。このため **3 系列とも参考系列で、総合は UNDETERMINED**。当たったのは macOS のデーモン（`com.apple.Safari.SafeBrowsing.Service`・`runningboardd` ほか）と、系列 3 では 06:46:45Z に起動した他プロセス。系列 3 は所有者判断で途中で止めた。経緯と系列ごとの状態は同ディレクトリの README・`drive/abort.txt`。
 
@@ -317,16 +333,18 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 ### 11.6 申し送り
 
-- Mac mini: 規則の固定（単独コミット）→ 5 run 計測 → 判定記入 → `loss-attribution-matrix.md` の M-MTL-G1024／G2048 行更新 → `Closes #4160`。
+- Mac mini: 規則の固定 → 実測 → 判定記入は済んだ（旧 `RULE.txt`〈PR #4248・#4249〉で UNDETERMINED、RULE.v2〈PR #4252〉の `formal-v2-2` で ADOPT）。`loss-attribution-matrix.md` は main の既定が変わるまで変えない（§11.5）。
 - `STEEL_LARGE_N_ENABLED` の既定反転は Phase 4（#4166）・所有者承認事項。M4 Max での確認も結線前に要る。
 
 ### 11.7 Phase 4 結線（#4166）の状態と手順
 
-**現在の状態: 結線は保留（#4160 は実測済みで総合 UNDETERMINED）。** #4160 の A/B は 2026-11-11 に Mac mini で 3 系列測ったが、3 系列とも全ゲート通過にならず、総合は UNDETERMINED（§11.5）。ADOPT とも REJECT とも決まっていない。#4160 は道具立ての PR #4197 の `Closes` で自動的にクローズされたが、判定の記録はない。このため `tile::STEEL_LARGE_N_ENABLED` は `false` のまま据え置く。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
+**現在の状態: #4160 は ADOPT（Mac mini 単機）。結線は未実施で、#4166 で所有者が判断する。** #4160 の A/B は 2026-11-11 に Mac mini で測った。旧 `RULE.txt` の 3 系列は全ゲート通過にならず UNDETERMINED、改訂 RULE.v2 の `formal-v2-2` が全ゲート通過して総合 ADOPT になった（§11.5）。`tile::STEEL_LARGE_N_ENABLED` は `false` のまま。結線の根拠にできるのは `formal-v2-2` の総合判定だけで、旧系列の参考値や `aggregate.md` の純カーネル部分の「ADOPT_CANDIDATE」の表示は根拠にしない（RULE.v2 項 5）。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
+
+経緯: #4160 は、道具立ての PR #4197 のマージ（2026-11-09T15:54:30Z）の際に本文の閉じるキーワードで自動的にクローズされた。判定前だったため、2026-11-10T02:30:00Z に再オープンした（#4160 のコメント）。判定の記録は本節と §11.5 で、記録 PR のマージで #4160 を閉じる。
 
 **結線の前提条件（すべて満たしたときだけ結線する）**
 
-1. Mac mini（`<metal-node>`）で事前登録（`RULE.txt` を単独コミット）→ 5 run 実測 → 判定まで終え、ADOPT になる。「1 位に変わった」と書けるのは `docs/perf/noise-band-decision.md`（#4142）の NB-SEP が成立したときだけ。NB の定義は #4142 で所有者承認済み。
+1. Mac mini（`<metal-node>`）で事前登録 → 実測 → 判定まで終え、ADOPT になる。**満たした**（RULE.v2 の `formal-v2-2`。§11.5）。「1 位に変わった」と書けるのは `docs/perf/noise-band-decision.md`（#4142）の NB-SEP が成立したときだけで、成立したのは N=2048 だけ。
 2. 既定の反転について所有者の承認がある（#4164）。
 3. M4 Max での非後退を確認する。`select_steel_large_n` は M4Max では常に `None` なので、確認内容は「経路が変わらないこと」と「ignored の parity テストが通ること」。
 

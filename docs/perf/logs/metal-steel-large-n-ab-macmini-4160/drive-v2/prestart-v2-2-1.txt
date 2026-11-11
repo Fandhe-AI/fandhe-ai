@@ -1,0 +1,49 @@
+formal-v2-2 attempt=1 mode=run begin 2026-11-11T09:31:35Z
+proc-check1 2026-11-11T09:31:39Z safari_app=0 gate_rc=0 g1g3_hits=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-11T09:31:39Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 1 0 0 0 0
+    processes_scanned 818
+    max_pcpu_non_excluded 1.7
+    top pid=596 uid=0 pcpu=1.7 name=bluetoothd
+    top pid=1013 <user> pcpu=1.6 name=sharingd
+    top pid=958 <user> pcpu=0.9 name=rapportd
+    top pid=1035 uid=268 pcpu=0.9 name=nearbyd
+    top pid=796 uid=0 pcpu=0.6 name=wifip2pd
+mediaanalysisd check1 2026-11-11T09:31:39Z pcpu=0.0
+mediaanalysisd check2 2026-11-11T09:33:39Z pcpu=0.0
+mediaanalysisd check3 2026-11-11T09:35:40Z pcpu=0.0
+spotlightknowledged_submitting_last10m=0 idle_ok=1
+lock-acquired 2026-11-11T09:35:41Z owner=#4160 measure formal-v2-2-run 2026-11-11T09:35:41Z
+load1 sample 1 2026-11-11T09:35:41Z load1=1.30
+load1-wait done waited_s=0 load1=1.30 reached_below_1.5=yes
+proc-check2 2026-11-11T09:35:45Z safari_app=0 gate_rc=0 g1g3_hits=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-11T09:35:45Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 0 0 0 0 0
+    processes_scanned 814
+    max_pcpu_non_excluded 2.0
+    top pid=1013 <user> pcpu=2.0 name=sharingd
+    top pid=596 uid=0 pcpu=1.9 name=bluetoothd
+    top pid=828 uid=0 pcpu=1.6 name=Karabiner-Core-Service
+    top pid=958 <user> pcpu=0.9 name=rapportd
+    top pid=603 uid=88 pcpu=0.7 name=WindowServer
+tree-check 2026-11-11T09:35:48Z fingerprint_ab_excluded: fingerprint=372c2072c106a2f2f0e4663cbded417dd26fef32cf2886970df746fe2492c2eb files=21296 expected: fingerprint=18dbb526126ec246876f6f654b0ec6f785e8d6c6e7b6d933223ca81c8e08fc70 files=21295 manifest_check_rc=0
+result=not-started reason=tree-mismatch 2026-11-11T09:35:48Z
+lock released 2026-11-11T09:35:48Z

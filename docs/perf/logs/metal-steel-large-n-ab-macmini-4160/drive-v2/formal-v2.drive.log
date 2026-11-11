@@ -1,0 +1,5 @@
+formal-v2-1 begin 2026-11-11T08:44:52Z
+formal-v2-1 verdict=notpass orchestrate_rc0=1 ab_rc0=1 kern_gate=39/39 kern_failed=0 kern_series_done=1 ab_gate=5/6 2026-11-11T09:18:53Z
+formal-v2-2 attempt 1 NOT-STARTED reason=tree-mismatch 2026-11-11T09:35:48Z
+formal-v2-2 begin 2026-11-11T09:43:41Z
+formal-v2-2 verdict=pass orchestrate_rc0=1 ab_rc0=1 kern_gate=39/39 kern_failed=0 kern_series_done=1 ab_gate=5/5 2026-11-11T10:16:25Z

@@ -1,0 +1,52 @@
+formal-v2-2 attempt=2 mode=run begin 2026-11-11T09:37:59Z
+proc-check1 2026-11-11T09:38:03Z safari_app=0 gate_rc=0 g1g3_hits=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-11T09:38:03Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 0 0 0 0 0
+    processes_scanned 814
+    max_pcpu_non_excluded 1.2
+    top pid=596 uid=0 pcpu=1.2 name=bluetoothd
+    top pid=1009 <user> pcpu=1.2 name=ContinuityCaptureAgent
+    top pid=1013 <user> pcpu=1.2 name=sharingd
+    top pid=828 uid=0 pcpu=0.9 name=Karabiner-Core-Service
+    top pid=600 uid=0 pcpu=0.7 name=com.apple.cmio.registerassistantservice
+mediaanalysisd check1 2026-11-11T09:38:03Z pcpu=0.0
+mediaanalysisd check2 2026-11-11T09:40:04Z pcpu=0.0
+mediaanalysisd check3 2026-11-11T09:42:04Z pcpu=0.0
+spotlightknowledged_submitting_last10m=0 idle_ok=1
+lock-acquired 2026-11-11T09:42:04Z owner=#4160 measure formal-v2-2-run 2026-11-11T09:42:04Z
+load1 sample 1 2026-11-11T09:42:04Z load1=1.62
+load1 sample 2 2026-11-11T09:42:34Z load1=1.63
+load1 sample 3 2026-11-11T09:43:04Z load1=1.53
+load1 sample 4 2026-11-11T09:43:35Z load1=1.25
+load1-wait done waited_s=91 load1=1.25 reached_below_1.5=yes
+proc-check2 2026-11-11T09:43:39Z safari_app=0 gate_rc=0 g1g3_hits=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-11T09:43:39Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 0 0 0 0 0
+    processes_scanned 813
+    max_pcpu_non_excluded 0.9
+    top pid=710 uid=0 pcpu=0.9 name=backgroundtaskmanagementd
+    top pid=534 uid=0 pcpu=0.7 name=smd
+    top pid=603 uid=88 pcpu=0.7 name=WindowServer
+    top pid=17778 uid=282 pcpu=0.7 name=trustd
+    top pid=596 uid=0 pcpu=0.6 name=bluetoothd
+tree-check 2026-11-11T09:43:41Z fingerprint_ab_excluded: fingerprint=18dbb526126ec246876f6f654b0ec6f785e8d6c6e7b6d933223ca81c8e08fc70 files=21295 expected: fingerprint=18dbb526126ec246876f6f654b0ec6f785e8d6c6e7b6d933223ca81c8e08fc70 files=21295 manifest_check_rc=0
+series-start 2026-11-11T09:43:41Z
+lock released 2026-11-11T10:16:25Z
