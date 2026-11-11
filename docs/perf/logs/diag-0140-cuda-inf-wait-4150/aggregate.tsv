@@ -41,4 +41,3 @@ common	sync_idle	実測	0.288	0.288	0.304
 common	tiny_roundtrip	実測	9.976	9.912	10.112
 common	launch_floor_1x1	実測	2.880	2.848	2.912
 common	event_record_pair	実測	2.752	2.736	2.800
--	opp	unavailable			

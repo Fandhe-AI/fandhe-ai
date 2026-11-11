@@ -1,0 +1,10 @@
+item	median_us
+issue	27.940
+readout_sync	7.360
+gpu_span_event	33.180
+mm_event_l1_fwd	14.700
+mm_event_l2_fwd	12.450
+sync_idle	2.490
+tiny_roundtrip	10.200
+launch_floor_add	3.240
+event_record_pair	8.510

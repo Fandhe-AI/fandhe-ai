@@ -2,12 +2,11 @@
 
 ## 状態
 
-**実測済み（2026-11-10・<cuda-node>・5/5 round PASS・status=complete）。相手側（#4149）との対応表は未入力。**
+**実測済み（2026-11-10・<cuda-node>・5/5 round PASS・status=complete）。相手側（#4149）との対応表は #4149 のマージ後（2026-11-11）に追記済み。**
 `RULE.txt` は #4229 で単独コミット（fixed-at 2026-11-10T06:55:10Z・tree_sha `d50251b38`）。計測は tree_sha の git archive（`.rev-stamp` 1 行）を
 rsync し、ツリー指紋をノード上で RULE と照合（計測前後とも `f18e2a5c…0d17`・2701 files）してから、実機ロック（owner `#4150 measure 2026-11-10T07:14:32Z`）を保持して
 `run_round.sh` を 1〜5 で回し、全 round の後に `nsys_aux_4150.sh` を 1 回実行した（07:14:36Z〜07:21:02Z）。差し替え・除外・上書きはない。
-相手側の値は README 手順 5 のとおり main に入った #4149 の記録先から作る。#4149 の計測 PR（#4225）が main に入るまで対応表は unavailable のままで、
-#4150 はその追記で閉じる（推定値で埋めない）。
+相手側の値は README 手順 5 のとおり main に入った #4149 の記録先（#4225・マージコミット `5af4ea0c4`）から `opp_4149.tsv` を作り、`--opp-tsv` つきで集計し直した（下の「相手側（#4149）との対応」）。
 診断 example は `crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs`。
 
 ## 目的
@@ -68,6 +67,7 @@ Issue #4188 の文言は `predict_device_chain`（ホスト入力版）を挙げ
 | `aggregate_4150.py` | 厳格パースの集計（`--dir`・`--self-test`・`--check-template`・`--check-rule`・`--fingerprint`・`--opp-tsv`）。sha256 を RULE に固定 |
 | `run_round.sh` | 1 round の起動（precheck → ビルド → ゲート → ビルド済みバイナリの直接実行。ゲート後に cargo を呼ばない） |
 | `opp_from_4149.py` | #4149 の `aggregate.tsv`（ms）から `--opp-tsv` の入力（`item\tmedian_us`・µs）を作る変換（`--src`・`--out`・`--self-test`）。未測定は出さず、#4149 が参考集計なら止まる |
+| `opp_4149.tsv` | `opp_from_4149.py` の出力（#4149 の相手側実測を µs に変換したもの。2026-11-11 生成）。`aggregate_4150.py --opp-tsv` の入力 |
 | `nsys_aux_4150.sh` | 全 round の後に 1 回の nsys 補助（record_only。不通は unavailable） |
 | `crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs` | 計測本体（P／E／PR／ER／I／F 腕）。sha256 を RULE に固定 |
 
@@ -123,5 +123,29 @@ CPU サンプリング不可の警告 2 件（`nsys.err`。#2109 と同じ）。
 
 ### 相手側（#4149）との対応
 
-未入力（unavailable）。#4149 の計測 PR（#4225）が main に入ったあと、手順 5 で `opp_4149.tsv` を作って `aggregate.md`・`aggregate.tsv` を作り直し、
-`docs/perf/loss-attribution-matrix.md` の G-CUDA-INF 行もそのとき更新する（同じ行を #4225 も書き換えるため）。
+#4149 の計測 PR（#4225）のマージ後（2026-11-11）に手順 5 を実行した。
+
+- 変換: `python3 -I opp_from_4149.py --src docs/perf/logs/diag-0140-torch-gb10-mlp-4149 --out opp_4149.tsv`（rc=0）。
+  入力 `diag-0140-torch-gb10-mlp-4149/aggregate.tsv` の sha256 は `db160c64723872d9d3da07d2d8c61401dd12fad20d6fb1eb4cf75cc2d08b9067`（標準エラーの出力）。
+- 集計: `python3 -I aggregate_4150.py --dir . --opp-tsv opp_4149.tsv`（rc=0）。fandhe 側の値・分類は変わらず、`aggregate.md` に対応表が加わった。
+  `aggregate.tsv` は相手欄を持たない形式で、`opp unavailable` の行が消えただけ。
+
+本番列（prod0140）と #4149 の対応（µs・いずれも実測。差は fandhe − 相手）:
+
+| fandhe の量 | 相手の item | fandhe | 相手 | 差 |
+|---|---|---|---|---|
+| host_issue_sum | issue | 5.744 | 27.940 | −22.196 |
+| download | readout_sync | 68.399 | 7.360 | +61.039 |
+| chain_gpu | gpu_span_event | 71.152 | 33.180 | +37.972 |
+| l1_iso | mm_event_l1_fwd | 50.624 | 14.700 | +35.924 |
+| l2_iso | mm_event_l2_fwd | 20.400 | 12.450 | +7.950 |
+| sync_idle | sync_idle | 0.288 | 2.490 | −2.202 |
+| tiny_roundtrip | tiny_roundtrip | 9.976 | 10.200 | −0.224 |
+| launch_floor_1x1 | launch_floor_add | 2.880 | 3.240 | −0.360（区間定義が違う参考） |
+| event_record_pair | event_record_pair | 2.752 | 8.510 | −5.758 |
+
+- GPU 上の幅の差 +38.0 µs のうち、L1 の差 +35.9 µs が大半で、L2 は +8.0 µs。発行（host）は fandhe が 22.2 µs 短い。
+  fandhe は発行が短いぶん、GPU の実行を download の中で待つ（download が長い）。
+- 非対称: fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みのカーネル、PyTorch の mm_event は純 GEMM（cuBLAS）。
+  よって L1 の差 35.9 µs をそのまま「GEMM カーネルの差」とは読まない（融合 epilogue の分を含む）。fandhe の窓は facade 上位の固定費を含まない。
+  #3189 列の対応（参考）と非対称の全文は `aggregate.md`。

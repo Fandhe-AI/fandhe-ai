@@ -69,4 +69,25 @@
 
 ## 本番列と #4149（PyTorch CUDA）の対応
 
-相手側の実測は未入力（--opp-tsv なし）: **unavailable**。推定値では埋めない。
+| fandhe の量 | 節 | 相手の item | fandhe | 相手 | 差（実測の差） |
+|---|---|---|---|---|---|
+| host_issue_sum | prod0140 | issue | 5.744 | 27.940 | -22.196 |
+| download | prod0140 | readout_sync | 68.399 | 7.360 | 61.039 |
+| chain_gpu | prod0140 | gpu_span_event | 71.152 | 33.180 | 37.972 |
+| l1_iso | common | mm_event_l1_fwd | 50.624 | 14.700 | 35.924 |
+| l2_iso | common | mm_event_l2_fwd | 20.400 | 12.450 | 7.950 |
+| sync_idle | common | sync_idle | 0.288 | 2.490 | -2.202 |
+| tiny_roundtrip | common | tiny_roundtrip | 9.976 | 10.200 | -0.224 |
+| launch_floor_1x1 | common | launch_floor_add | 2.880 | 3.240 | -0.360 |
+| event_record_pair | common | event_record_pair | 2.752 | 8.510 | -5.758 |
+
+参考（#3189 列と #4149 の対応。#3189 列は入力 H2D と層出力のゼロ初期化を含むため差を内訳として読まない）
+
+| fandhe の量 | 節 | 相手の item | fandhe | 相手 | 差（実測の差） |
+|---|---|---|---|---|---|
+| host_issue_sum | seq3189 | issue | 13.775 | 27.940 | -14.165 |
+| download | seq3189 | readout_sync | 69.375 | 7.360 | 62.015 |
+| chain_gpu | seq3189 | gpu_span_event | 74.368 | 33.180 | 41.188 |
+
+非対称（本番列）: fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みの同じカーネル（into 経路）、PyTorch の mm_event は純 GEMM。fandhe の窓は facade 上位の固定費を含まない。launch_floor_1x1（1x1 linear の単発発行）と launch_floor_add（1 要素 add 100 回の 1 回あたり）は区間定義が異なる参考の並びで、差を内訳として読まない。
+非対称（#3189 列のみ）: fandhe の窓は H2D を含み PyTorch 側は X が device 上で H2D を含まない。fandhe の chain_gpu は層出力のゼロ初期化を含む（PyTorch の caching allocator は層ごとのゼロ初期化をしない）。
