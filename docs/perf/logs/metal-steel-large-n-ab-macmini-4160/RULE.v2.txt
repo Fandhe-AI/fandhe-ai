@@ -1,0 +1,76 @@
+イシュー #4160: steel 候補 T0U-LU-FB の Mac mini A/B — 事前登録規則の改訂 v2（計測前に単独コミットで固定。以後、本文は変更しない）
+
+fixed-at-utc: 2026-11-11T08:18:22Z
+base_rule: docs/perf/logs/metal-steel-large-n-ab-macmini-4160/RULE.txt（sha256 3216aaeab26eb07c0f5b14de5f586200bad18eb20a163a467e5f691a5f5575d8。PR #4248 で固定）
+tree_sha: 19eca6fa3dd1d315e3ee7557374c688a1c6a94e1（RULE.txt と同じ）
+tree_fingerprint: befe4844cc363f3e905673dd8ee2322219c6739d4e410d26ac3d793df5317086（RULE.txt と同じ。files=21568）
+aggregate_script_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a468dc3bc06307（RULE.txt と同じ）
+
+0. 開示（所有者判断 2026-11-11 の指示により冒頭に書く）
+   - 本改訂は、PR #4249 の報告で所有者と統合セッションが参考値（純カーネルの sl/cur、セル A/B の after/before）を見た後に決めた。
+     判断の記録: https://github.com/Fandhe-AI/fandhe-ai/issues/4160 の 2026-11-11T07:59:49Z のコメント。
+   - 計測セッションは、固定前の試走 1 で純カーネルの判定表の 3 行（RULE.txt 項 14 (g)）を、系列 3 の停止確認で A/B の N=256 の値 2 行
+     （判定対象外のサイズ）を見た。
+   - 系列 1〜3 の値は PR #4249 で記録済み（series-formal-1〜3）。本改訂で変えるのは各系列の前の準備だけで、判定に関わる項は変えない。
+
+1. 位置づけ
+   - RULE.txt の項 0〜13 と項 14 (a)〜(c)・(e)・(f) は、本改訂で書き換えた部分を除き、そのまま適用する（再掲しない。正は RULE.txt の本文）。
+     変えないもの: 他ジョブのゲート（G1〜G4・閾値・foreign_job_gate.py の版）、判定式・閾値・NB-RANGE5／NB-SEP、ラウンド数・セル構成・
+     対象ツリー、集計器（aggregate.py。上の sha256）。特定のデーモンを名前でゲートから外すこともしない。
+   - 旧 RULE.txt と series-formal-1〜3 は残す。差し替え・除外・つなぎ合わせ（系列 1〜3 の通過分と v2 の系列を合わせて判定すること）はしない。
+   - aggregate.py と orchestrate_macmini.sh が読むのは展開ツリーの RULE.txt（OUT へ写したもの）のままで、本ファイルは読まない。
+     両スクリプトの照合（記入欄・tree_sha と rev-stamp の parent・集計器の sha256）は RULE.txt に対して従来どおり行う。
+
+2. 対象ツリー（RULE.txt 項 14 (a)・(c) の読み替え）
+   - 新たに展開しない。Mac mini の既存の展開先（名前が .noindex で終わる、系列 1〜3 で使ったもの）をそのまま使う。
+     その tree は RULE.txt の固定コミット afbfeafbaa0c29b2105d17d58b2173952c5bf223 の git archive で、.rev-stamp の 1 行目はこの SHA、
+     2 行目は parent=19eca6fa3dd1d315e3ee7557374c688a1c6a94e1。aggregate.py の --expect-rev も afbfeafbaa0c29b2105d17d58b2173952c5bf223 のまま。
+     本改訂のコミット（RULE.v2.txt を足すだけ）は展開しない。項 14 (a)・(c) の「規則固定コミット」は、本改訂でも上の afbfeafba を指す。
+   - セル A/B の before／after の checkout も、系列 1〜3 で使ったものをそのまま使う（after の 1 行差分は runner が毎回検証する）。
+   - 系列ごとの照合: 起動の直前に、項 14 (a) の手順から scripts/bench/framework-compare/ の results/ と target-ab-4160-* を除いた指紋が
+     配置時の値（fingerprint=18dbb526126ec246876f6f654b0ec6f785e8d6c6e7b6d933223ca81c8e08fc70 files=21295。PR #4249 の drive/fp-deploy-ab.txt）と
+     一致し、かつ配置時の全ファイルの sha256 一覧（manifest-deploy.txt）の `shasum -a 256 -c` が rc=0 であることを確かめる。
+     除かない形の指紋は、系列 1〜3 が results/ と target-ab-4160-* を書いたため befe4844… と一致しない。そのため v2 では全系列で上の 2 つで照合する。
+     一致しなければ測らない。
+
+3. 系列のラベルと止め方（RULE.txt 項 14 (d) の読み替え）
+   - 系列名は formal-v2-1〜formal-v2-3（最大 3 系列）。純カーネル計測の OUT は <展開先>/formal-v2-<k>/kern、セル A/B の LABEL は fv2-<k>。
+   - 「全ゲート通過」の定義と止め方は項 14 (d) と同じ（kern/load_gate.log の gate= 行がすべて gate=pass で FAILED がなく series done があり、
+     A/B の load-gate-4160-metal-fv2-<k>.log の gate= 行がすべて gate=pass、両スクリプトの終了コードが 0）。全ゲート通過の系列が出たら
+     そこで止め、その系列で判定する。決めるのはゲートの行と終了コードだけで、値は見ない。
+   - 系列 1 本は、項 4 の準備がそろってから 1 回ずつ起動する（系列 1〜3 のような自動の連続起動はしない）。
+
+4. 系列の前の準備（本改訂で足すもの）
+  (a) 所有者の準備: 所有者が Safari などの GUI アプリを終了し、所有者の別作業（Python の待ち受けなど）を止め、そのことを計測セッションに伝える。
+      計測セッションは、その連絡を受けてから (b) を始める。連絡がなければ始めない。
+  (b) 確認（すべて計測セッションが Mac mini 上で行い、formal-v2-<k>/series-start.txt に残す。順に行う）:
+      1. プロセスの確認（1 回目）: 次の両方が成り立つこと。
+         - 実行ファイルの basename がちょうど `Safari` のプロセス（Safari アプリ本体）がない。
+         - 展開ツリーの foreign_job_gate.py を 1 回実行し（--phase before）、`hit G1-` と `hit G3-` の行が 0 件（caffeinate がなく、basename に
+           python・wgpu・cargo・rustc・xctrace・torch・bench を含むプロセスがない。照合はゲートと同じで、ユーザーを問わない）。
+         記録: 上の判定、ゲートの出力（マスク済み）、名前に Safari を含むプロセスの一覧（basename と %CPU）。
+         Safari の補助プロセス（com.apple.Safari.SafeBrowsing.Service・SafariBookmarksSyncAgent・SafariLaunchAgent・Safari の拡張など）は、
+         Safari アプリが起動していなくても常駐している（2026-11-11 08:10Z 頃に Mac mini で確認。いずれも %CPU 0.0）。
+         これらは開始の条件にしない（止めない・名前で除外もしない）。計測中に %CPU が上がれば、従来どおり G2 が当てる。
+      2. mediaanalysisd の確認: 項 14 (e) と同じ（2 分間隔で 3 回続けて %CPU 5 未満。spotlightknowledged の直近 10 分の依頼数も残す）。
+      3. hw-lock を取り、load1 を待つ: 項 14 (e) と同じ（30 秒ごとに読み、1.5 未満で進む。最大 40 回で、届かなければそのまま進んで記録する）。
+      4. プロセスの確認（2 回目）: 1. と同じ確認を、起動の直前（hw-lock の下）にもう一度行う。
+      5. 2. の照合（項 2 の指紋と manifest）。
+  (c) どれかが成り立たなければ、その系列は始めない。hw-lock を取っていれば外し、計測プロセスは 1 本も起動せず、所有者に報告する。
+      始めなかった試みは系列に数えず、ラベル formal-v2-<k> は使わない（出力ディレクトリは作らない）。記録は展開先の
+      prestart-v2-<k>-<試みの番号>.txt に残し、記録 PR に収める。再試行は所有者の再度の連絡を受けてから行う。
+      ほかのプロセスを計測セッションが止めることはしない。
+  (d) 系列を起動した後に所有者の別作業が始まったことが分かった場合も、計測セッションはそのプロセスを止めない。ゲートの行で判定し、報告する。
+
+5. 打ち切りと記録
+   - formal-v2-1〜3 のいずれも全ゲート通過にならなければ、3 系列とも参考系列として記録し、総合は UNDETERMINED とする。
+     この場合、記録 PR で #4160 を UNDETERMINED のまま閉じ、それ以上は測り直さない（所有者判断 2026-11-11）。
+   - 全ゲート通過の系列が出たら、その系列の aggregate.py の総合判定（ADOPT／REJECT／UNDETERMINED）を記録し、記録 PR で #4160 を閉じる。
+   - aggregate.md の「ADOPT_CANDIDATE」は純カーネル部分だけの表示であり、総合判定ではない。これと系列 1〜3 の参考値は、判定や
+     #4166（結線）の根拠に書かない。
+   - 記録 PR で docs/perf/metal-gemm-steel-candidates.md §11.5・§11.7 の状態を更新する。PR #4197 のマージ時に本文の閉じるキーワードで
+     #4160 が自動で閉じ、2026-11-10 に再オープンした経緯は、事実のとおりに書く。
+
+6. 試走
+   本改訂のために計測の試走はしていない（ツリー・スクリプト・ゲートは系列 1〜3 と同じ）。項 4 (b) の確認の手順だけを、固定前に
+   計測用でない名前の出力先へ 1 回通して動作を確かめる（ラベルは使わない。結果は記録 PR の drive/ に収める）。
