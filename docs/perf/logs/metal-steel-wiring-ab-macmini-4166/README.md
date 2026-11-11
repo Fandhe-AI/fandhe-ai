@@ -25,12 +25,12 @@
 1. 送信側で `git archive --format=tar 9eba21749 > tree.tar` と、規則を固定したコミットの `git archive --format=tar <commit> docs/perf/logs/metal-steel-wiring-ab-macmini-4166 > rule.tar` を作り、Mac mini へ送る。
 2. `bash deploy.sh <W> tree.tar rule.tar <RULE の tree_fingerprint>`。`<W>` は名前が `.noindex` で終わる新しいディレクトリ。`W/rule/` の各ファイルの sha256 を RULE 項 1 (d) と照合する。
 3. `bash W/rule/prereq_tests.sh <W>`（hw-lock を取る）。`W/prereq/result.txt` が `all-pass` でなければ測らずに報告する。
-4. 系列 k（1〜3）ごとに: 所有者へ「準備をお願いします」と伝える → 返事を受けたら `nohup bash W/rule/drive_series.sh <W> <k> <試みの番号> run > W/formal-<k>-<試み>.drive.out 2>&1 &`（サブシェルで切り離す）→ `W/drive.log` の最後の行で判定を見る。始めなかった試みは `W/prestart-<k>-<n>.txt`。
-5. 全ゲート通過（`verdict=pass`）の系列が出たら止める。その系列の `results/raw` のうちラベル `formal-<k>` の記録を `<系列>/ab/` へ、`W/formal-<k>.status` を `<系列>/status.txt` へ写し、マスクしてから `python3 -I -B judge_ab.py <系列>` で判定する。
+4. 系列 k（1〜3）ごとに: 所有者へ「準備をお願いします」と伝える → 返事を受けたら `nohup bash W/rule/drive_series.sh <W> <k> <試みの番号> run > W/formal-<k>-<試み>.drive.out 2>&1 &`（サブシェルで切り離す）→ `W/drive.log` の最後の行で判定を見る。始めなかった試みは `W/prestart-<k>-<n>.txt`。`verdict=notpass` の系列は、その系列のラベルの記録を `<系列>/ab/` へ写し `python3 -I -B W/rule/judge_ab.py --checksum-only <系列>` を流す（値は出ない）。`checksum=fail` なら止めてその系列を FAIL と判定する（RULE 項 6）。
+5. 全ゲート通過（`verdict=pass`）の系列が出たら止める。その系列の `results/raw` のうちラベル `formal-<k>` の記録を `<系列>/ab/` へ、`W/formal-<k>.status` を `<系列>/status.txt` へ写し、マスクしてから `python3 -I -B judge_ab.py <系列>` で判定する。`aggregate.py` は、リポジトリでは隣の `metal-steel-large-n-ab-macmini-4160/`、Mac mini の展開では `W/tree/docs/perf/logs/metal-steel-large-n-ab-macmini-4160/` から読む（どちらも sha256 を照合する）。
 
 ## 検証状況（固定前）
 
-- `python3 -I -B judge_ab.py --self-test`: #4160 の `series-formal-v2-2/ab` を見本に、同系列の `aggregate.md` のセル A/B 表とスコアボード比（NB-SEP は 2048 だけ成立）を再現した。変異（5/5 round の後退・4/5 round の後退・checksum 不一致・セルのゲート・round 先頭の timeout・rc=1・skipped・`gate=pass-reference`・ラベル混在・sha256 不一致）で各分岐を確かめた。コードへの 4 個の変異（anomaly を PASS に・ゲート不通過を無視・`gate=pass` の部分一致・sha256 照合の無効化）は、どれも self-test で落ちた。
+- `python3 -I -B judge_ab.py --self-test`: #4160 の `series-formal-v2-2/ab` を見本に、同系列の `aggregate.md` のセル A/B 表とスコアボード比（NB-SEP は 2048 だけ成立）を再現した。変異（5/5 round の後退・4/5 round の後退・checksum 不一致（ゲート不通過の系列を含む）・`--checksum-only` の 4 状態・ゲート不通過の系列の NB-SEP・展開の配置での `aggregate.py` の探索・セルのゲート・round 先頭の timeout・rc=1・skipped・`gate=pass-reference`・ラベル混在・sha256 不一致）で各分岐を確かめた。コードへの 8 個の変異（anomaly を PASS に・ゲート不通過を無視・`gate=pass` の部分一致・sha256 照合の無効化・NB-SEP の無効化・`--checksum-only` の fail／unknown の取りこぼし・展開の配置の探索の削除）は、どれも self-test で落ちた。
 - `bash test_drive_series.sh`: 始めない分岐（ゲート FOREIGN／失敗・Safari・mediaanalysisd の境界 5.0／最大値／非数値／部分一致の名前・hw-lock 使用中・2 回目の確認・`__pycache__` によるツリー不一致・after の未追跡・before の余分な差分／差分なし／HEAD 違い・cargo が見つからない）、全ゲート通過の判定、runner へ渡す環境変数、`prereq_tests.sh` の件数照合。12 個の変異を入れ、どれも self-test が落ちることを確かめた。`/bin/bash`（3.2）でも通る。
 - 手元（開発機。計測ではない）で `9eba21749` の archive に `deploy.sh` を通し、偽の cargo で runner をビルドの手前まで動かした。post-wiring の checkout 検査は通り、pre-wiring では止まった。
 - 手元で本物の cargo に `--ignored --list` だけをさせ（GPU では流していない）、`--exact` の 2 件・Mac mini 表の 3 件・`gemm_splitk_parity` の 1 件が数えられ、`linalg_parity_inputs_guard` が 0 件になること、一覧のビルドの後も after が clean のままであることを確かめた。

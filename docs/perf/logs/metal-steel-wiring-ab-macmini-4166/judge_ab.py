@@ -6,6 +6,10 @@
 aggregate.py の main は純カーネル計測（kern）の出力を要求するので、セル A/B だけの本系列には使えない。
 
 呼び出し: python3 -I -B judge_ab.py <系列ディレクトリ> [--aggregate <aggregate.py>]
+         python3 -I -B judge_ab.py --checksum-only <系列ディレクトリ> [--aggregate <aggregate.py>]
+  --checksum-only は全ゲート通過でない系列に使う（RULE.txt 項 6）。値を出さず `checksum=fail|not-fail|unknown` の 1 行だけを出す。
+  aggregate.py の既定の場所: リポジトリでは本ディレクトリの隣の metal-steel-large-n-ab-macmini-4160/、Mac mini の展開（deploy.sh）では
+  W/rule/ から見た W/tree/docs/perf/logs/metal-steel-large-n-ab-macmini-4160/。先に見つかった方を使う（どちらでも sha256 を照合する）。
   系列ディレクトリ: ab/（runner の results/raw から本系列のラベルの記録だけを写したもの）と
   status.txt（drive_series.sh が書く `ab rc=<N>` の行を含む状態ファイル）を持つ。
   結果の Markdown を標準出力へ出す。終了コード: 0 = 判定を出した（PASS／FAIL／UNDETERMINED のいずれでも）・
@@ -14,6 +18,7 @@ python3 -I -B judge_ab.py --self-test: #4160 の formal-v2-2 の記録で再現�
 
 判定（RULE.txt 項 2 が #4160 の RULE.txt 項 9・11 を参照する形。ここでは写像だけを行う）:
   - FAIL: load_ab の status が fail（checksum 不一致）または anomaly（5/5 round で 2% を超えて遅いセルがある）。
+  - checksum 不一致の FAIL はゲートの通過に依らない（checksum は正しさの検査。#4160 の RULE.txt 項 11「checksum 不一致は FAIL として停止」）。
   - UNDETERMINED: 全ゲート通過でない（status.txt の `ab rc=0` が無い・ゲートの行に gate=pass 以外がある・
     load_ab の status が undetermined／unavailable）。
   - PASS: 上のいずれでもない（load_ab の status が ok）。
@@ -31,7 +36,20 @@ import tempfile
 # #4160 の RULE.txt の aggregate_script_sha256 と同じ値（9eba21749・main のどちらでも同じ内容）。
 AGGREGATE_SHA256 = "e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a468dc3bc06307"
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_AGGREGATE = os.path.join(HERE, "..", "metal-steel-large-n-ab-macmini-4160", "aggregate.py")
+REF_DIR = "metal-steel-large-n-ab-macmini-4160"
+
+
+def ref_dir(here):
+    """#4160 の記録ディレクトリ。リポジトリの配置（隣のディレクトリ）と deploy.sh の配置（W/rule → W/tree）の順に探す。"""
+    cands = [os.path.join(here, "..", REF_DIR),
+             os.path.join(here, "..", "tree", "docs", "perf", "logs", REF_DIR)]
+    for c in cands:
+        if os.path.isfile(os.path.join(c, "aggregate.py")):
+            return os.path.normpath(c)
+    return os.path.normpath(cands[0])
+
+
+DEFAULT_AGGREGATE = os.path.join(ref_dir(HERE), "aggregate.py")
 
 
 class JudgeError(Exception):
@@ -94,7 +112,21 @@ def judge(series, agg):
     else:
         raise JudgeError("想定外の status: %r" % ab["status"])
     boards = {n: agg.scoreboard(ab, n) for n in agg.SCOPE}
+    if not gates_ok:
+        # scoreboard は load_ab の正式系列の条件しか見ない。全ゲート通過でない系列の NB-SEP は出さない（RULE.txt 項 2）。
+        boards = {n: (None if b is None else dict(b, sep=None)) for n, b in boards.items()}
     return verdict, ab, gates_ok, reasons, boards
+
+
+def checksum_only(series, agg):
+    """全ゲート通過でない系列の checksum 不一致だけを確かめる（RULE.txt 項 6）。値は返さない。"""
+    try:
+        ab = agg.load_ab(os.path.join(series, "ab"))
+    except (agg.AggregateError, JudgeError):
+        return "unknown"
+    if ab["status"] == "fail":
+        return "fail"
+    return "not-fail" if ab["cells"] else "unknown"
 
 
 def render(series, verdict, ab, gates_ok, reasons, boards, agg):
@@ -141,15 +173,21 @@ def main(argv):
     if len(argv) >= 2 and argv[1] == "--self-test":
         return self_test()
     args = argv[1:]
+    ck_only = bool(args) and args[0] == "--checksum-only"
+    if ck_only:
+        args = args[1:]
     agg_path = DEFAULT_AGGREGATE
     if len(args) == 3 and args[1] == "--aggregate":
         agg_path = args[2]
         args = args[:1]
     if len(args) != 1:
-        print("usage: judge_ab.py <系列ディレクトリ> [--aggregate <aggregate.py>] | --self-test", file=sys.stderr)
+        print("usage: judge_ab.py [--checksum-only] <系列ディレクトリ> [--aggregate <aggregate.py>] | --self-test", file=sys.stderr)
         return 2
     try:
         agg = load_aggregate(agg_path)
+        if ck_only:
+            print("checksum=%s" % checksum_only(args[0], agg))
+            return 0
         res = judge(args[0], agg)
     except JudgeError as e:
         print("error: %s" % e, file=sys.stderr)
@@ -159,7 +197,7 @@ def main(argv):
 
 
 # ---------------------------------------------------------------- self-test
-SAMPLE = os.path.join(HERE, "..", "metal-steel-large-n-ab-macmini-4160", "series-formal-v2-2", "ab")
+SAMPLE = os.path.join(ref_dir(HERE), "series-formal-v2-2", "ab")
 
 
 def _copy_series(tmp, name, status="ab rc=0 2026-11-11T00:00:00Z\n"):
@@ -279,6 +317,8 @@ def self_test():
         d = _copy_series(tmp, "rc", status="ab rc=1 x\n")
         v, _, gok, _, _ = judge(d, agg)
         check("ab rc=1 は UNDETERMINED", v == "UNDETERMINED" and not gok)
+        check("全ゲート通過でない系列は NB-SEP 判定不能（見本では 2048 が成立）", judge(d, agg)[4][2048]["sep"] is None)
+        check("全ゲート通過でない系列も範囲は残す", judge(d, agg)[4][2048]["range_after"] is not None)
         # 8. skipped ログに記録 → UNDETERMINED（load_ab が正式系列から外す）。
         d = _copy_series(tmp, "skip")
         s = glob.glob(os.path.join(d, "ab", "skipped-4160-metal-*.log"))[0]
@@ -292,6 +332,41 @@ def self_test():
         _scale_after(d, 512, "fresh", 1.10)
         v, _, _, _, _ = judge(d, agg)
         check("ゲート不通過の後退は UNDETERMINED", v == "UNDETERMINED")
+        # 10b. checksum 不一致はゲートの通過に依らず FAIL（ゲート不通過でも）。--checksum-only は値を出さない。
+        d = _copy_series(tmp, "ckgate", status="ab rc=1 x\n")
+        p = glob.glob(os.path.join(d, "ab", "results-after-*-metal-gemm.jsonl"))[0]
+        rows = read(p).splitlines()
+        r = json.loads(rows[0]); r["checksum"] = (r.get("checksum") or 0) + 1.0; rows[0] = json.dumps(r)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
+        g = glob.glob(os.path.join(d, "ab", "load-gate-4160-metal-*.log"))[0]
+        _edit(g, lambda s: s.replace("round2 gate=pass", "round2 gate=timeout", 1))
+        v, _, gok, _, _ = judge(d, agg)
+        check("ゲート不通過でも checksum 不一致は FAIL", v == "FAIL" and not gok)
+        check("--checksum-only: 不一致は fail", checksum_only(d, agg) == "fail")
+        check("--checksum-only: 見本は not-fail", checksum_only(os.path.join(tmp, "base"), agg) == "not-fail")
+        check("--checksum-only: ゲート不通過だけなら not-fail", checksum_only(os.path.join(tmp, "rc"), agg) == "not-fail")
+        check("--checksum-only: 記録が無ければ unknown", checksum_only(os.path.join(tmp, "nope"), agg) == "unknown")
+        os.makedirs(os.path.join(tmp, "short", "ab"))
+        shutil.copy(glob.glob(os.path.join(SAMPLE, "load-gate-4160-metal-*.log"))[0], os.path.join(tmp, "short", "ab"))
+        src = glob.glob(os.path.join(SAMPLE, "results-before-*-metal-gemm.jsonl"))[0]
+        with open(os.path.join(tmp, "short", "ab", os.path.basename(src)), "w", encoding="utf-8") as f:
+            f.write(read(src).splitlines()[0] + "\n")
+        check("--checksum-only: 途中で止まった系列は unknown", checksum_only(os.path.join(tmp, "short"), agg) == "unknown")
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["judge_ab.py", "--checksum-only", d])
+        check("--checksum-only の CLI は 1 行だけ（値なし）", rc == 0 and buf.getvalue() == "checksum=fail\n")
+        # 10c. aggregate.py の既定の場所: deploy.sh の配置（W/rule → W/tree/...）でも見つける。
+        nw = os.path.join(tmp, "W")
+        os.makedirs(os.path.join(nw, "rule"))
+        os.makedirs(os.path.join(nw, "tree", "docs", "perf", "logs", REF_DIR))
+        shutil.copy(DEFAULT_AGGREGATE, os.path.join(nw, "tree", "docs", "perf", "logs", REF_DIR, "aggregate.py"))
+        check("deploy.sh の配置で aggregate.py を見つける",
+              ref_dir(os.path.join(nw, "rule")) == os.path.join(nw, "tree", "docs", "perf", "logs", REF_DIR))
+        check("リポジトリの配置を先に使う", ref_dir(HERE) == os.path.normpath(os.path.join(HERE, "..", REF_DIR)))
         # 11. aggregate.py の sha256 が違えば読み込まない。
         bad = os.path.join(tmp, "aggregate.py")
         shutil.copy(DEFAULT_AGGREGATE, bad)
