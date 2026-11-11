@@ -1789,6 +1789,8 @@ pub(crate) const FRAG_INTERLEAVE_ENABLED: bool = false;
 /// （従来の表経路。`gemm.rs` の `classic_plan`）。[`crate::gemm::MetalGemm::new`] 系は本定数で
 /// 初期化する。結線前の表経路の腕は `#[cfg(test)]` の `MetalGemm::new_with_steel_large_n(ctx,
 /// false)` で作る。前後比較は `docs/perf/metal-gemm-steel-candidates.md` §11.7。
+/// steel の解決（`pipeline_for_tile` の全候補のパイプライン生成）に失敗した場合は表経路へ
+/// 落とさず `Err` を返す（Mac mini 実測で到達・fallback なしを確認済み。#4160）。
 ///
 /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`UNROLL_ACC_ENABLED`] と同じ。
 #[cfg(any(test, target_os = "macos"))]
