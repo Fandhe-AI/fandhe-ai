@@ -622,10 +622,10 @@ pub struct MetalGemm {
     /// テスト専用 `new_with_frag_interleave` だけが上書きする。f16／hfrag／te／
     /// split-K パス 1 は常に `false`（no-op 契約）。
     frag_interleave_enabled: bool,
-    /// N≥1024 限定の steel 候補 T0U-LU-FB opt-in（イシュー #4160。`tile::
+    /// N≥1024 限定の steel 候補 T0U-LU-FB のゲート（イシュー #4160・#4166。`tile::
     /// STEEL_LARGE_N_ENABLED`）。`MetalGemm::new` を含む全構築経路は本番既定
-    /// （`false`）で初期化し、テスト専用 `new_with_steel_large_n` と A/B 計測用の
-    /// 「定数 1 行差分」だけが `true` にする。`true` かつ [`tile::select_steel_large_n`]
+    /// （結線後は `true`）で初期化し、テスト専用 `new_with_steel_large_n` と A/B 計測用の
+    /// 「定数 1 行差分」だけが上書きする。`true` かつ [`tile::select_steel_large_n`]
     /// が `Some` の形状だけ、classic 経路が [`GateProfile::SteelLargeN`] で
     /// パイプラインを解決する（他の形状・経路は不変）。
     steel_large_n_enabled: bool,
@@ -1044,8 +1044,9 @@ impl MetalGemm {
         Ok(Self::new(ctx)?.with_frag_interleave(enabled))
     }
 
-    /// テスト専用: [`Self::new`] と同じ構築で、N≥1024 限定 steel 候補 opt-in（イシュー
-    /// #4160。`tile::STEEL_LARGE_N_ENABLED`）だけを `enabled` に指定する。呼び出し元は
+    /// テスト専用: [`Self::new`] と同じ構築で、N≥1024 限定 steel 候補のゲート（イシュー
+    /// #4160。`tile::STEEL_LARGE_N_ENABLED`）だけを `enabled` に指定する（`false` は結線前の
+    /// 表経路の腕）。呼び出し元は
     /// `gemm_steel_large_n_diag_tests` のみ。`#[cfg(test)] pub(crate)` に留めるのは
     /// 公開面を増やさないため。専用キャッシュは別なので構築後いつ上書きしても安全。
     #[cfg(test)]
@@ -2660,8 +2661,9 @@ impl MetalGemm {
 
     /// classic 経路のタイル構成とゲート組を決める（イシュー #4160）。fresh（
     /// `dispatch_auto_with_route_impl`）と reuse（`dispatch_auto_resident`）が同じ式を
-    /// 共有する。`steel_large_n_enabled` が `false`（本番既定）なら常に従来の
-    /// `select_for_verified_device` + `Instance`。split-K の classic フォールバック内の
+    /// 共有する。`steel_large_n_enabled` が `false`、または `select_steel_large_n` が `None`
+    /// （M4Base の正方 1024／2048／4096 以外・M4Max・非検証機）なら従来の
+    /// `select_for_verified_device` + `Instance`（結線後の本番既定は `true`。#4166）。split-K の classic フォールバック内の
     /// 選択は対象外（スコープ 3 点は split-K に入らず、パス 1 では load unroll が no-op の
     /// 既存契約と揃える）。
     fn classic_plan(

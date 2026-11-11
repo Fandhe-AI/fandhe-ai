@@ -272,7 +272,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 ## 11. N≥1024 限定の T0U-LU-FB opt-in と現行表との A/B（イシュー #4160）
 
-状態: **Mac mini で実測済み・総合 ADOPT**（RULE.v2 の系列 `formal-v2-2`。2026-11-11。§11.5）。**既定経路への結線は #4166 の担当で未結線**（`STEEL_LARGE_N_ENABLED` は `false` のまま。所有者承認と M4 Max での確認が残る。§11.7）。
+状態: **Mac mini で実測済み・総合 ADOPT**（RULE.v2 の系列 `formal-v2-2`。2026-11-11。§11.5）。**既定経路への結線は #4166 の PR-A で実施済み**（`STEEL_LARGE_N_ENABLED` は `true`。所有者承認済み。M4 Max での確認は Linux 単体テストとコードレビューで代える。結線後の前後比較は Mac mini で未実施。§11.7）。
 
 ### 11.1 背景
 
@@ -280,9 +280,9 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 - ただし G6 の `base` 腕は M4Base 表導入前の汎用選択（`CANDIDATES[3]`）で、現行本番（#3206 の M4Base 表。N=1024 が `[1]`、N=2048／4096 が `[2]`）に対する効果は**未測**。本節はその現行表を変更前の腕として測り直す。
 - 本 Issue 本文にある換算値（N=2048 の窓 約 9.43 ms 対 candle 9.52 ms）は本 doc 内に出典が見つからなかったため採用せず、再実測で置き換える。
 
-### 11.2 機構（既定 OFF）
+### 11.2 機構（#4166 で既定 ON へ結線。範囲は M4Base の正方 3 点だけ）
 
-- `tile::STEEL_LARGE_N_ENABLED`（`false`）と `tile::select_steel_large_n(m, n, k, device, enabled)`。次を**すべて**満たすときだけ `CANDIDATES[0]` + UNROLL_ACC + UNROLL_LOAD + FINE_BARRIER を選ぶ。
+- `tile::STEEL_LARGE_N_ENABLED`（結線後は `true`。#4160 時点は `false`）と `tile::select_steel_large_n(m, n, k, device, enabled)`。次を**すべて**満たすときだけ `CANDIDATES[0]` + UNROLL_ACC + UNROLL_LOAD + FINE_BARRIER を選ぶ。
   - `enabled`、デバイスが `M4Base`、`(m, n, k)` が正方 1024／2048／4096 のいずれかと完全一致。
 - スコープ判断（安全側）: Issue は「N≥1024」だが、§8.3 と既存表の方針（実測範囲外へ無根拠に拡張しない）に従い、実測した 3 点との完全一致に絞った。N=512 以下・非正方・8192 以上・M4Max・未検証機種は既存の表選択のまま。
 - `MetalGemm` は classic 経路（fresh の `dispatch_auto_with_route_impl` と reuse の `dispatch_auto_resident`）で `classic_plan` を共有し、該当形状だけ `GateProfile::SteelLargeN` でパイプラインを解決する。**専用の `steel_large_n_cache`** を持ち、ゲート違いのパイプラインが `tiled_cache` 経由で別形状へ返る取り違えを構造的に防ぐ。split-K の classic フォールバック内の選択は対象外（3 点は split-K に入らない。単体テストで固定）。
@@ -311,7 +311,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 - 到達はスコープ内 3 点で `profile=steel_large_n`・`CANDIDATES[0]`・Classic・fallback なし。N=256／512 は no-op 成立（解決タイル同一・bit 一致）。A/A 対照 cur_aa/cur は ±0.2% 以内。
 - セル A/B（非後退ゲート）: 状態 ok（5/5 round 一貫して 2% を超えて後退するセルはない）。after/before の中央値比は N=1024 fresh 0.944・reuse 0.984、N=2048 fresh 0.942・reuse 0.933、N=4096 fresh 0.907・reuse 0.919。N=512 reuse は 1.032（2% 超の round 3/5。5/5 ではないため後退には当たらない）。checksum は全セルで完全一致。
-- スコアボード比（candle の gemm 窓 fresh ÷ fandhe-ai の reuse 窓）: **N=2048 は NB-SEP 成立**（before 0.936〜0.946 → after 1.005〜1.014）。N=1024 は不成立（before 0.885〜0.965、after 0.900〜1.080）。G4096 は記録のみ（不成立）。「1 位に変わった」と書けるのは、opt-in を ON にした状態の M-MTL-G2048 相当（Mac mini）だけ。main の既定は変わっていないため、スコアボードと `loss-attribution-matrix.md` は変えない（結線後の付け直しは #4168）。
+- スコアボード比（candle の gemm 窓 fresh ÷ fandhe-ai の reuse 窓）: **N=2048 は NB-SEP 成立**（before 0.936〜0.946 → after 1.005〜1.014）。N=1024 は不成立（before 0.885〜0.965、after 0.900〜1.080）。G4096 は記録のみ（不成立）。「1 位に変わった」と書けるのは、opt-in を ON にした状態の M-MTL-G2048 相当（Mac mini）だけ。当時は main の既定が変わっていなかったため、スコアボードと `loss-attribution-matrix.md` は変えない（結線後の付け直しは #4168）。※ 2026-11-11 以降は #4166 の PR-A で main の既定が `true` に変わったが、結線後の前後比較は未実施のため、スコアボードの付け直しは #4168 が結線後の実測を受けて行う。
 - 根拠にするのは RULE 項 11 の総合 ADOPT だけ（上の表の N 別判定は総合ではない）。
 - 逸脱 2 件（所有者の指示で計測セッションが `formal-v2-2` の前に常駐プロセスを止めたこと、試み 1 の不開始の原因になった Python のキャッシュ 1 件を所有者判断で消して試み 2 として起動したこと）・系列の前の準備・開示は、同ディレクトリの README を正とする。
 
@@ -334,28 +334,28 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 ### 11.6 申し送り
 
 - Mac mini: 規則の固定 → 実測 → 判定記入は済んだ（旧 `RULE.txt`〈PR #4248・#4249〉で UNDETERMINED、RULE.v2〈PR #4252〉の `formal-v2-2` で ADOPT）。`loss-attribution-matrix.md` は main の既定が変わるまで変えない（§11.5）。
-- `STEEL_LARGE_N_ENABLED` の既定反転は Phase 4（#4166）・所有者承認事項。M4 Max での確認も結線前に要る。
+- `STEEL_LARGE_N_ENABLED` の既定反転は #4166 の PR-A で行った（所有者承認済み。コメント 6797216551）。結線後の前後比較は Mac mini で行う（§11.7）。
 
 ### 11.7 Phase 4 結線（#4166）の状態と手順
 
-**現在の状態: #4160 は ADOPT（Mac mini 単機）。結線は未実施で、#4166 で所有者が判断する。** #4160 の A/B は 2026-11-11 に Mac mini で測った。旧 `RULE.txt` の 3 系列は全ゲート通過にならず UNDETERMINED、改訂 RULE.v2 の `formal-v2-2` が全ゲート通過して総合 ADOPT になった（§11.5）。`tile::STEEL_LARGE_N_ENABLED` は `false` のまま。結線の根拠にできるのは `formal-v2-2` の総合判定だけで、旧系列の参考値や `aggregate.md` の純カーネル部分の「ADOPT_CANDIDATE」の表示は根拠にしない（RULE.v2 項 5）。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
+**現在の状態: #4160 は ADOPT（Mac mini 単機）。結線は #4166 の PR-A で実施済み（`STEEL_LARGE_N_ENABLED` を `true`。前提 2 は所有者が #4166 コメント 6797216551 で承認、前提 3 は下記の代替）。結線後の前後比較は未実施（Mac mini で行う）。** #4160 の A/B は 2026-11-11 に Mac mini で測った。旧 `RULE.txt` の 3 系列は全ゲート通過にならず UNDETERMINED、改訂 RULE.v2 の `formal-v2-2` が全ゲート通過して総合 ADOPT になった（§11.5）。`tile::STEEL_LARGE_N_ENABLED` は #4160 時点では `false` で、PR-A で `true` にした。結線の根拠にできるのは `formal-v2-2` の総合判定だけで、旧系列の参考値や `aggregate.md` の純カーネル部分の「ADOPT_CANDIDATE」の表示は根拠にしない（RULE.v2 項 5）。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
 
 経緯: #4160 は、道具立ての PR #4197 のマージ（2026-11-09T15:54:30Z）の際に本文の閉じるキーワードで自動的にクローズされた。判定前だったため、2026-11-10T02:30:00Z に再オープンした（#4160 のコメント）。判定の記録は本節と §11.5 で、記録 PR のマージで #4160 を閉じる。
 
 **結線の前提条件（すべて満たしたときだけ結線する）**
 
 1. Mac mini（`<metal-node>`）で事前登録 → 実測 → 判定まで終え、ADOPT になる。**満たした**（RULE.v2 の `formal-v2-2`。§11.5）。「1 位に変わった」と書けるのは `docs/perf/noise-band-decision.md`（#4142）の NB-SEP が成立したときだけで、成立したのは N=2048 だけ。
-2. 既定の反転について所有者の承認がある（#4164）。
-3. M4 Max での非後退を確認する。`select_steel_large_n` は M4Max では常に `None` なので、確認内容は「経路が変わらないこと」と「ignored の parity テストが通ること」。
+2. 既定の反転について所有者の承認がある（#4164・#4166）。**満たした**（#4166 コメント 6797216551）。
+3. M4 Max での非後退を確認する。`select_steel_large_n` は M4Max では常に `None` なので、確認内容は「経路が変わらないこと」と「ignored の parity テストが通ること」。**代替で満たす**: M4 Max は Metal の計測・実機 parity の記録に使わない（`docs/real-hardware-verification-env.md` の 2026-10-11 所有者指示・#4166 コメント）ため実機では流さず、Linux 単体テスト `tile.rs` の `steel_large_n_is_none_when_disabled_or_wrong_device`（M4Max・`None` では常に `None`）と、`classic_plan` が `None` のとき従来の `select_for_verified_device` + `Instance` へ落ちることのコードレビューで代える。
 
-**結線の手順（ADOPT と承認がそろった後の機械的な作業）**
+**結線の手順（ADOPT と承認がそろった後の機械的な作業。PR-A で実施済み）**
 
 - `crates/backend-metal/src/tile.rs` の `STEEL_LARGE_N_ENABLED` を `true` にする。
-- ロックテスト `steel_large_n_enabled_is_false_by_default` を `true` 固定へ反転し、名前も変える。
+- ロックテスト `steel_large_n_enabled_is_false_by_default` を `steel_large_n_enabled_is_true_by_default`（`true` 固定）へ反転した。
 - `STEEL_LARGE_N_ENABLED` の doc コメント（「構築入口は `#[cfg(test)]` のみ」「既定挙動は不変」）と §11.2 の「既定 OFF」の記述を直す。
 - `MetalGemm::new` 系の初期化経路で本定数が本番へ届くことを確かめる。
 - 範囲は #4197 の絞り込みを引き継ぐ。M4Base かつ正方 1024／2048／4096 との完全一致だけ。「N≥1024」へ広げるには追加実測と別の判断が要る。
 
-**前後比較の取り方**: `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`・`orchestrate_macmini.sh`・`aggregate.py` を使い、5 ラウンドの中央値で §11.5 に記録する。`loss-attribution-matrix.md` の M-MTL-G1024／G2048 行と両機体の 14 セルの付け直しは #4168 の担当。
+**前後比較の取り方**: `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`・`orchestrate_macmini.sh`・`aggregate.py` を使い、5 ラウンドの中央値で §11.5 に記録する。結線後の main（定数 `true`）に対しては、スクリプトに `AB_DIRECTION=post-wiring` を指定する（before = 同じ HEAD に未コミットの `true`→`false` 1 行、after = そのまま clean な HEAD。既定の `pre-wiring` は従来の向き）。どちらの向きも「同じ HEAD・tile.rs の定数 1 行だけの差分・ほかに未コミット差分なし」を計測前に fail-closed で確かめる。診断テストの `cur`／`cur_aa` 腕は `new_with_steel_large_n(ctx, false)`（結線前の表経路）で作る。`loss-attribution-matrix.md` の M-MTL-G1024／G2048 行と両機体の 14 セルの付け直しは #4168 の担当。
 
 **REQ-8・数値**: `shaders/gemm.metal` は変えず、既存の function constant の組み合わせだけを使う。シェーダ側の境界チェックとゼロ埋めは両 variant で同じ。単一の連続 K ループなので REQ-2 の統一複合判定（tolerance は不変）をそのまま適用する。

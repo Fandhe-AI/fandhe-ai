@@ -413,7 +413,7 @@ mod gemm_frag_interleave_diag_tests;
 // `docs/perf/logs/metal-frag-interleave-ab-macmini-3212/orchestrate_macmini.sh`。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_frag_interleave_ab_diag_tests;
-// イシュー #4160: N≥1024 限定の steel 候補 T0U-LU-FB opt-in（`tile::STEEL_LARGE_N_ENABLED`）の
+// イシュー #4160: N≥1024 限定の steel 候補 T0U-LU-FB（`tile::STEEL_LARGE_N_ENABLED`。#4166 で既定 ON）の
 // Mac mini 純カーネル A/B（到達追跡・bit 一致・CPU 参照 parity・`kernel_gpu` 計測）。
 // 全件 `#[ignore]`・診断専用。`pub(crate)` の `new_with_steel_large_n` 面へ届くため
 // クレートルートの兄弟として置く。呼び出し元は

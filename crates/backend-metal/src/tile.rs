@@ -1779,19 +1779,20 @@ pub(crate) const UNROLL_LOAD_ENABLED: bool = false;
 pub(crate) const FRAG_INTERLEAVE_ENABLED: bool = false;
 
 /// N≥1024 の正方 3 点に限って steel 候補 T0U-LU-FB（`CANDIDATES[0]` + UNROLL_ACC +
-/// UNROLL_LOAD + FINE_BARRIER）を選ぶ opt-in の既定値（イシュー #4160）。
+/// UNROLL_LOAD + FINE_BARRIER）を選ぶ既定値（イシュー #4160。#4166 で `true` へ結線）。
 ///
 /// 出典: #2110（steel 差分候補の機構）・#3184 G6（`docs/perf/logs/optin-ab-macmini-3184/
-/// steel-r2/aggregate.md`。T0U-LU-FB は N≥1024 で純カーネルが速い一方 N=512 が一貫せず
-/// UNDETERMINED。ただし base 腕は M4Base 表導入前の汎用選択で、現行表に対する効果は未測）。
-/// [`crate::gemm::MetalGemm::new`] 系は常に本定数（`false`）で初期化するため既定挙動は不変。
-/// 構築入口は `#[cfg(test)]` の `MetalGemm::new_with_steel_large_n` のみ。本定数を `true` に
-/// する結線は Mac mini 実測（`docs/perf/metal-gemm-steel-candidates.md` §11）後の別判断
-/// （#4166）で、既定値変更はユーザー承認事項。
+/// steel-r2/aggregate.md`）。現行 M4Base 表に対する効果は #4160 の RULE.v2 `formal-v2-2`
+/// （Mac mini 単機）が総合 ADOPT で、#4166 の所有者承認（コメント 6797216551）を経て結線した。
+/// [`select_steel_large_n`] が `Some` を返すのは [`VerifiedTileTableDevice::M4Base`] かつ
+/// 正方 1024／2048／4096 の完全一致のときだけで、M4Max・`None`（非検証機）では常に `None`
+/// （従来の表経路。`gemm.rs` の `classic_plan`）。[`crate::gemm::MetalGemm::new`] 系は本定数で
+/// 初期化する。結線前の表経路の腕は `#[cfg(test)]` の `MetalGemm::new_with_steel_large_n(ctx,
+/// false)` で作る。前後比較は `docs/perf/metal-gemm-steel-candidates.md` §11.7。
 ///
 /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`UNROLL_ACC_ENABLED`] と同じ。
 #[cfg(any(test, target_os = "macos"))]
-pub(crate) const STEEL_LARGE_N_ENABLED: bool = false;
+pub(crate) const STEEL_LARGE_N_ENABLED: bool = true;
 
 /// [`select_steel_large_n`] が返す、形状限定 steel 候補の構成（イシュー #4160）。
 /// `cfg` は `CANDIDATES[0]`、ゲート 3 軸（acc unroll の instance 側・load unroll・細粒度
@@ -5146,13 +5147,13 @@ mod tests {
         );
     }
 
-    /// `STEEL_LARGE_N_ENABLED` のコミット状態既定値が `false` であることをロックする（#4160）。
+    /// `STEEL_LARGE_N_ENABLED` のコミット状態既定値が `true`（結線済み）であることをロックする（#4166）。
     #[test]
-    fn steel_large_n_enabled_is_false_by_default() {
+    fn steel_large_n_enabled_is_true_by_default() {
         assert!(
-            !std::hint::black_box(STEEL_LARGE_N_ENABLED),
-            "STEEL_LARGE_N_ENABLED が true のままコミットされている疑いがあります。\
-             本番既定は false です（イシュー #4160・tile.rs STEEL_LARGE_N_ENABLED doc）。"
+            std::hint::black_box(STEEL_LARGE_N_ENABLED),
+            "STEEL_LARGE_N_ENABLED が false でコミットされている疑いがあります。\
+             結線後の本番既定は true です（イシュー #4166・tile.rs STEEL_LARGE_N_ENABLED doc）。"
         );
     }
 
