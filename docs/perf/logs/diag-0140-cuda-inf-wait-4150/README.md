@@ -2,11 +2,12 @@
 
 ## 状態
 
-**PR-1 時点: 実測なし。** 本ディレクトリは測る前に固定する部品（RULE 雛形・集計スクリプト・1 round の起動キット・nsys 補助）だけを置く。
+**実測済み（2026-11-10・<cuda-node>・5/5 round PASS・status=complete）。相手側（#4149）との対応表は #4149 のマージ後（2026-11-11）に追記済み。**
+`RULE.txt` は #4229 で単独コミット（fixed-at 2026-11-10T06:55:10Z・tree_sha `d50251b38`）。計測は tree_sha の git archive（`.rev-stamp` 1 行）を
+rsync し、ツリー指紋をノード上で RULE と照合（計測前後とも `f18e2a5c…0d17`・2701 files）してから、実機ロック（owner `#4150 measure 2026-11-10T07:14:32Z`）を保持して
+`run_round.sh` を 1〜5 で回し、全 round の後に `nsys_aux_4150.sh` を 1 回実行した（07:14:36Z〜07:21:02Z）。差し替え・除外・上書きはない。
+相手側の値は README 手順 5 のとおり main に入った #4149 の記録先（#4225・マージコミット `5af4ea0c4`）から `opp_4149.tsv` を作り、`--opp-tsv` つきで集計し直した（下の「相手側（#4149）との対応」）。
 診断 example は `crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs`。
-`RULE.txt`（PR-2・単独コミット）、`round{i}/`・`aggregate.md`・`aggregate.tsv`・結果欄（PR-3・<cuda-node> での実測）は後続で追加する。
-実測値・内訳・分類・確度は、実測するまで書かない（推定値で埋めない）。#4150 は実測と記録の PR-3 で閉じる（部品の PR は `Refs #4150`）。
-PR-1 の担当環境は GB10 に到達できないため、単体テスト・`--self-test`・構文検査までしか行っていない。GB10 での動作（NULL stream 前提、event の摂動量、`nsys` の可用性）は未検証。
 
 ## 目的
 
@@ -66,6 +67,7 @@ Issue #4188 の文言は `predict_device_chain`（ホスト入力版）を挙げ
 | `aggregate_4150.py` | 厳格パースの集計（`--dir`・`--self-test`・`--check-template`・`--check-rule`・`--fingerprint`・`--opp-tsv`）。sha256 を RULE に固定 |
 | `run_round.sh` | 1 round の起動（precheck → ビルド → ゲート → ビルド済みバイナリの直接実行。ゲート後に cargo を呼ばない） |
 | `opp_from_4149.py` | #4149 の `aggregate.tsv`（ms）から `--opp-tsv` の入力（`item\tmedian_us`・µs）を作る変換（`--src`・`--out`・`--self-test`）。未測定は出さず、#4149 が参考集計なら止まる |
+| `opp_4149.tsv` | `opp_from_4149.py` の出力（#4149 の相手側実測を µs に変換したもの。2026-11-11 生成）。`aggregate_4150.py --opp-tsv` の入力 |
 | `nsys_aux_4150.sh` | 全 round の後に 1 回の nsys 補助（record_only。不通は unavailable） |
 | `crates/backend-cuda/examples/cuda_infer_chain_event_diag_4150.rs` | 計測本体（P／E／PR／ER／I／F 腕）。sha256 を RULE に固定 |
 
@@ -85,4 +87,65 @@ Issue #4188 の文言は `predict_device_chain`（ホスト入力版）を挙げ
 
 ## 結果
 
-（実測後に追記。PR-1 時点は空。）
+出典: `aggregate.md`・`aggregate.tsv`（`python3 -I aggregate_4150.py --dir .`・RULE の sha 照合つき）。値は µs、round 別中央値の中央値（NB-RANGE5 の最小〜最大）。
+round 状態は PASS 5 件（`round{i}/gate.txt`。load1 0.24〜0.74）。checksum は round 間で一致（集計が検査）。
+
+### 系列ごとの分類（RULE 項 5 の規則を機械適用）
+
+| 系列 | kernel_wait_derived | chain_gpu | E_sum | share_exec（推定） | event_perturbation | 分類 | 確度 |
+|---|---|---|---|---|---|---|---|
+| seq3189（#3189 列・P／E） | 63.672（63.343〜63.824） | 74.368 | 71.040 | 1.118 | -0.0009 | GPU 実行が支配 | 高 |
+| prod0140（本番列・PR／ER） | 62.328（62.223〜62.760） | 71.152 | 71.040 | 1.137 | -0.0015 | GPU 実行が支配 | 高 |
+
+- 両系列とも share_exec が全 round で 0.5 を大きく上回り（1.11〜1.14）、NB-RANGE5 帯も 0.5 をまたがないため確度は「高」。event の摂動は ±0.2% 以内。
+- 分類の根拠 share_exec・share_wait は推定タグ（RULE 項 5）。share_exec が 1 を超える（share_wait が負になる）のは、分母の kernel_wait_derived（= download − download_again）が
+  download の計時開始後だけを数え、発行中（l1_issue＋l2_issue、本番列で 5.7 µs）に GPU 上で既に走っている分を含まないため（式どおり）。
+- 本番列の wait_resid の負値（−3.0。推定）は理由が別で、gpu_tail（= chain_gpu − host_issue_sum）は発行分をすでに引いている。
+  カーネル終了後に download に残る D2H＋同期は download − gpu_tail ≈ 3.1 µs だが、kernel_wait_derived は download_again（6.0 µs）を引くため、その差だけ引きすぎになる（推定）。
+- 本番列の内訳: 融合カーネル E_sum 71.0 µs（L1 `l1_iso` 50.6・L2 `l2_iso` 20.4。いずれも実測）に対し、chain_gpu 71.2 µs で gpu_gap は 0.1 µs（−0.2〜0.4。実測）。
+  本番列では GPU 上の層間の間隙はほぼ 0。E_sum は起動の立ち上がりを含む（RULE 項 5）ため、起動遅延とカーネル本体の計算は本診断では分けていない。
+- #3189 列は chain_gpu 74.4 µs・gpu_gap 3.5 µs（層出力の確保＋ゼロ初期化 2 回分と host 発行待ちの空き）。
+- 固定費（F 腕）: sync_idle 0.29・tiny_roundtrip 9.98・launch_floor_1x1 2.88・event_record_pair 2.75。
+
+### nsys 補助（record_only・判定に使わない）
+
+`nsys/`（`nsys.txt` = ok。`cuda_gpu_trace.csv.gz` は gzip した stats 出力。`trace.nsys-rep`・`trace.sqlite` はサイズのため収録しない）。
+CPU サンプリング不可の警告 2 件（`nsys.err`。#2109 と同じ）。nsys 下の時間は汚れるため時間値は読まず、読み取ったのは起動形状だけ:
+`gemm_tiled_bias_act_f32` は grid 4×1（1151 件。L1）と grid 1×1（1601 件）で起動している。grid 1×1 には L2 と F 腕の 1x1 linear（同じカーネル名）が
+混ざっているため件数が L1 と一致しない（差 450 件）。block はどちらも 16×16。
+
+### 副次: `infer-chain-fixed-cost-reduction-3205.md` §3 の「占有率」推定との突き合わせ
+
+§3 の「L1 が 4 ブロック・L2 が 1 ブロックしか起動しない」は nsys の grid（4×1・1×1）で実測に置き換えた。
+融合カーネルの GPU 実行幅（l1_iso 50.6・l2_iso 20.4 µs）と本番列の gpu_gap 0.1 µs は実測。これに基づく分類「GPU 実行が支配」（確度 高）は、
+根拠の share_exec が推定タグである点に注意して読む。
+「K ループが逐次に効いている」という原因の部分は本診断の量では分けられないため推定のまま残す（§3 に追記）。
+
+### 相手側（#4149）との対応
+
+#4149 の計測 PR（#4225）のマージ後（2026-11-11）に手順 5 を実行した。
+
+- 変換: `python3 -I opp_from_4149.py --src docs/perf/logs/diag-0140-torch-gb10-mlp-4149 --out opp_4149.tsv`（rc=0）。
+  入力 `diag-0140-torch-gb10-mlp-4149/aggregate.tsv` の sha256 は `db160c64723872d9d3da07d2d8c61401dd12fad20d6fb1eb4cf75cc2d08b9067`（標準エラーの出力）。
+- 集計: `python3 -I aggregate_4150.py --dir . --opp-tsv opp_4149.tsv`（rc=0）。fandhe 側の値・分類は変わらず、`aggregate.md` に対応表が加わった。
+  `aggregate.tsv` は相手欄を持たない形式で、`opp unavailable` の行が消えただけ。
+
+本番列（prod0140）と #4149 の対応（µs・いずれも実測。差は fandhe − 相手）:
+
+| fandhe の量 | 相手の item | fandhe | 相手 | 差 |
+|---|---|---|---|---|
+| host_issue_sum | issue | 5.744 | 27.940 | −22.196 |
+| download | readout_sync | 68.399 | 7.360 | +61.039 |
+| chain_gpu | gpu_span_event | 71.152 | 33.180 | +37.972 |
+| l1_iso | mm_event_l1_fwd | 50.624 | 14.700 | +35.924 |
+| l2_iso | mm_event_l2_fwd | 20.400 | 12.450 | +7.950 |
+| sync_idle | sync_idle | 0.288 | 2.490 | −2.202 |
+| tiny_roundtrip | tiny_roundtrip | 9.976 | 10.200 | −0.224 |
+| launch_floor_1x1 | launch_floor_add | 2.880 | 3.240 | −0.360（区間定義が違う参考） |
+| event_record_pair | event_record_pair | 2.752 | 8.510 | −5.758 |
+
+- GPU 上の幅の差 +38.0 µs のうち、L1 の差 +35.9 µs が大半で、L2 は +8.0 µs。発行（host）は fandhe が 22.2 µs 短い。
+  fandhe は発行が短いぶん、GPU の実行を download の中で待つ（download が長い）。
+- 非対称: fandhe の l1_iso／l2_iso は bias＋ReLU 融合込みのカーネル、PyTorch の mm_event は純 GEMM（cuBLAS）。
+  よって L1 の差 35.9 µs をそのまま「GEMM カーネルの差」とは読まない（融合 epilogue の分を含む）。fandhe の窓は facade 上位の固定費を含まない。
+  #3189 列の対応（参考）と非対称の全文は `aggregate.md`。

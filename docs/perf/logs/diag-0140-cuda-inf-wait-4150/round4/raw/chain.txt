@@ -1,0 +1,1203 @@
+DEVICE4150 compute_capability=12.1 round=4 warmup=50 iters=200
+CHAIN4150 arm=P iter=0 h2d_upload_us=10.944 l1_issue_us=7.584 l2_issue_us=6.912 download_us=69.680 download_again_us=6.944 kernel_wait_derived_us=62.736 total_us=95.120
+CHAIN4150 arm=E iter=0 up_gpu_us=12.448 l1_span_us=56.544 l2_span_us=20.288 chain_gpu_us=76.832 download_us=69.232 l1_issue_us=10.288 l2_issue_us=8.880
+CHAIN4150 arm=PR iter=0 l1_issue_us=3.184 l2_issue_us=2.848 download_us=68.255 download_again_us=6.512 kernel_wait_derived_us=61.743 total_us=74.287
+CHAIN4150 arm=ER iter=0 l1_span_us=51.104 l2_span_us=20.320 chain_gpu_us=71.424 download_us=69.279 l1_issue_us=4.864 l2_issue_us=4.448
+CHAIN4150 arm=I iter=0 l1_iso_us=50.592 l2_iso_us=20.992 l1_host_us=3.088 l2_host_us=2.976
+CHAIN4150 arm=F iter=0 sync_idle_us=0.288 launch_floor_1x1_us=3.120 tiny_roundtrip_us=10.159 event_record_pair_us=2.976 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=1 up_gpu_us=11.840 l1_span_us=53.376 l2_span_us=20.160 chain_gpu_us=73.536 download_us=61.504 l1_issue_us=9.520 l2_issue_us=8.464
+CHAIN4150 arm=PR iter=1 l1_issue_us=3.088 l2_issue_us=3.040 download_us=68.591 download_again_us=6.064 kernel_wait_derived_us=62.527 total_us=74.719
+CHAIN4150 arm=ER iter=1 l1_span_us=51.136 l2_span_us=20.288 chain_gpu_us=71.424 download_us=68.255 l1_issue_us=4.720 l2_issue_us=4.736
+CHAIN4150 arm=I iter=1 l1_iso_us=50.528 l2_iso_us=21.536 l1_host_us=3.120 l2_host_us=3.296
+CHAIN4150 arm=P iter=1 h2d_upload_us=10.927 l1_issue_us=7.792 l2_issue_us=7.024 download_us=69.792 download_again_us=5.872 kernel_wait_derived_us=63.920 total_us=95.535
+CHAIN4150 arm=F iter=1 sync_idle_us=0.304 launch_floor_1x1_us=3.008 tiny_roundtrip_us=9.888 event_record_pair_us=3.040 event_pair_gpu_us=0.960
+CHAIN4150 arm=PR iter=2 l1_issue_us=3.088 l2_issue_us=2.960 download_us=69.231 download_again_us=6.272 kernel_wait_derived_us=62.959 total_us=75.279
+CHAIN4150 arm=ER iter=2 l1_span_us=51.040 l2_span_us=20.320 chain_gpu_us=71.360 download_us=68.719 l1_issue_us=4.560 l2_issue_us=4.400
+CHAIN4150 arm=I iter=2 l1_iso_us=49.440 l2_iso_us=21.216 l1_host_us=3.040 l2_host_us=3.024
+CHAIN4150 arm=P iter=2 h2d_upload_us=11.103 l1_issue_us=7.584 l2_issue_us=6.880 download_us=69.296 download_again_us=6.096 kernel_wait_derived_us=63.200 total_us=94.863
+CHAIN4150 arm=E iter=2 up_gpu_us=12.320 l1_span_us=54.528 l2_span_us=20.288 chain_gpu_us=74.816 download_us=69.167 l1_issue_us=9.680 l2_issue_us=8.128
+CHAIN4150 arm=F iter=2 sync_idle_us=0.304 launch_floor_1x1_us=2.976 tiny_roundtrip_us=9.776 event_record_pair_us=2.912 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=3 l1_span_us=50.752 l2_span_us=20.320 chain_gpu_us=71.072 download_us=67.711 l1_issue_us=4.976 l2_issue_us=4.400
+CHAIN4150 arm=I iter=3 l1_iso_us=50.624 l2_iso_us=20.224 l1_host_us=3.152 l2_host_us=2.976
+CHAIN4150 arm=P iter=3 h2d_upload_us=11.072 l1_issue_us=7.776 l2_issue_us=6.976 download_us=70.032 download_again_us=5.712 kernel_wait_derived_us=64.320 total_us=95.856
+CHAIN4150 arm=E iter=3 up_gpu_us=12.320 l1_span_us=54.112 l2_span_us=20.064 chain_gpu_us=74.176 download_us=69.520 l1_issue_us=9.519 l2_issue_us=8.272
+CHAIN4150 arm=PR iter=3 l1_issue_us=3.088 l2_issue_us=3.328 download_us=68.991 download_again_us=6.224 kernel_wait_derived_us=62.767 total_us=75.407
+CHAIN4150 arm=F iter=3 sync_idle_us=0.272 launch_floor_1x1_us=2.960 tiny_roundtrip_us=8.752 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=4 l1_iso_us=49.344 l2_iso_us=21.984 l1_host_us=2.976 l2_host_us=2.896
+CHAIN4150 arm=P iter=4 h2d_upload_us=11.056 l1_issue_us=7.472 l2_issue_us=6.832 download_us=69.536 download_again_us=5.872 kernel_wait_derived_us=63.664 total_us=94.896
+CHAIN4150 arm=E iter=4 up_gpu_us=11.040 l1_span_us=54.592 l2_span_us=20.320 chain_gpu_us=74.912 download_us=69.040 l1_issue_us=9.952 l2_issue_us=8.160
+CHAIN4150 arm=PR iter=4 l1_issue_us=3.104 l2_issue_us=3.088 download_us=68.847 download_again_us=6.208 kernel_wait_derived_us=62.639 total_us=75.039
+CHAIN4150 arm=ER iter=4 l1_span_us=51.296 l2_span_us=20.288 chain_gpu_us=71.584 download_us=68.399 l1_issue_us=5.088 l2_issue_us=4.304
+CHAIN4150 arm=F iter=4 sync_idle_us=0.272 launch_floor_1x1_us=3.168 tiny_roundtrip_us=8.720 event_record_pair_us=2.912 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=5 h2d_upload_us=11.040 l1_issue_us=7.584 l2_issue_us=11.328 download_us=61.807 download_again_us=6.016 kernel_wait_derived_us=55.791 total_us=91.759
+CHAIN4150 arm=E iter=5 up_gpu_us=11.680 l1_span_us=54.400 l2_span_us=20.032 chain_gpu_us=74.432 download_us=69.840 l1_issue_us=9.712 l2_issue_us=8.128
+CHAIN4150 arm=PR iter=5 l1_issue_us=3.040 l2_issue_us=3.008 download_us=68.080 download_again_us=6.272 kernel_wait_derived_us=61.808 total_us=74.128
+CHAIN4150 arm=ER iter=5 l1_span_us=49.728 l2_span_us=20.288 chain_gpu_us=70.016 download_us=68.879 l1_issue_us=5.152 l2_issue_us=4.336
+CHAIN4150 arm=I iter=5 l1_iso_us=51.008 l2_iso_us=20.448 l1_host_us=3.008 l2_host_us=3.024
+CHAIN4150 arm=F iter=5 sync_idle_us=0.288 launch_floor_1x1_us=2.975 tiny_roundtrip_us=10.816 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=6 up_gpu_us=11.872 l1_span_us=54.496 l2_span_us=20.288 chain_gpu_us=74.784 download_us=70.064 l1_issue_us=9.824 l2_issue_us=8.080
+CHAIN4150 arm=PR iter=6 l1_issue_us=3.168 l2_issue_us=3.168 download_us=68.784 download_again_us=6.560 kernel_wait_derived_us=62.224 total_us=75.120
+CHAIN4150 arm=ER iter=6 l1_span_us=50.432 l2_span_us=20.320 chain_gpu_us=70.752 download_us=68.559 l1_issue_us=4.832 l2_issue_us=4.656
+CHAIN4150 arm=I iter=6 l1_iso_us=49.440 l2_iso_us=20.224 l1_host_us=3.024 l2_host_us=2.944
+CHAIN4150 arm=P iter=6 h2d_upload_us=11.152 l1_issue_us=7.488 l2_issue_us=6.880 download_us=69.184 download_again_us=5.952 kernel_wait_derived_us=63.232 total_us=94.704
+CHAIN4150 arm=F iter=6 sync_idle_us=0.304 launch_floor_1x1_us=3.088 tiny_roundtrip_us=9.808 event_record_pair_us=3.040 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=7 l1_issue_us=3.024 l2_issue_us=2.959 download_us=68.752 download_again_us=6.208 kernel_wait_derived_us=62.544 total_us=74.735
+CHAIN4150 arm=ER iter=7 l1_span_us=51.424 l2_span_us=20.320 chain_gpu_us=71.744 download_us=68.319 l1_issue_us=4.944 l2_issue_us=4.816
+CHAIN4150 arm=I iter=7 l1_iso_us=50.752 l2_iso_us=20.256 l1_host_us=3.040 l2_host_us=2.896
+CHAIN4150 arm=P iter=7 h2d_upload_us=10.799 l1_issue_us=7.440 l2_issue_us=6.928 download_us=69.504 download_again_us=5.728 kernel_wait_derived_us=63.776 total_us=94.671
+CHAIN4150 arm=E iter=7 up_gpu_us=12.256 l1_span_us=54.336 l2_span_us=20.128 chain_gpu_us=74.464 download_us=69.695 l1_issue_us=9.680 l2_issue_us=8.272
+CHAIN4150 arm=F iter=7 sync_idle_us=0.272 launch_floor_1x1_us=3.104 tiny_roundtrip_us=10.016 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=8 l1_span_us=51.008 l2_span_us=20.320 chain_gpu_us=71.328 download_us=67.967 l1_issue_us=5.040 l2_issue_us=4.480
+CHAIN4150 arm=I iter=8 l1_iso_us=50.656 l2_iso_us=20.384 l1_host_us=2.976 l2_host_us=2.912
+CHAIN4150 arm=P iter=8 h2d_upload_us=10.928 l1_issue_us=7.552 l2_issue_us=6.928 download_us=69.968 download_again_us=5.728 kernel_wait_derived_us=64.240 total_us=95.376
+CHAIN4150 arm=E iter=8 up_gpu_us=12.416 l1_span_us=54.464 l2_span_us=20.288 chain_gpu_us=74.752 download_us=69.904 l1_issue_us=9.583 l2_issue_us=8.544
+CHAIN4150 arm=PR iter=8 l1_issue_us=2.944 l2_issue_us=2.960 download_us=68.751 download_again_us=5.872 kernel_wait_derived_us=62.879 total_us=74.655
+CHAIN4150 arm=F iter=8 sync_idle_us=0.304 launch_floor_1x1_us=2.832 tiny_roundtrip_us=10.832 event_record_pair_us=3.008 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=9 l1_iso_us=50.784 l2_iso_us=20.352 l1_host_us=2.960 l2_host_us=2.911
+CHAIN4150 arm=P iter=9 h2d_upload_us=10.976 l1_issue_us=7.472 l2_issue_us=6.816 download_us=69.664 download_again_us=5.824 kernel_wait_derived_us=63.840 total_us=94.928
+CHAIN4150 arm=E iter=9 up_gpu_us=11.776 l1_span_us=55.136 l2_span_us=20.320 chain_gpu_us=75.456 download_us=69.648 l1_issue_us=9.856 l2_issue_us=8.256
+CHAIN4150 arm=PR iter=9 l1_issue_us=3.200 l2_issue_us=3.088 download_us=67.951 download_again_us=7.424 kernel_wait_derived_us=60.527 total_us=74.239
+CHAIN4150 arm=ER iter=9 l1_span_us=51.200 l2_span_us=20.288 chain_gpu_us=71.488 download_us=68.207 l1_issue_us=4.992 l2_issue_us=4.512
+CHAIN4150 arm=F iter=9 sync_idle_us=0.272 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.000 event_record_pair_us=2.896 event_pair_gpu_us=0.768
+CHAIN4150 arm=P iter=10 h2d_upload_us=11.040 l1_issue_us=7.776 l2_issue_us=7.056 download_us=69.519 download_again_us=5.824 kernel_wait_derived_us=63.695 total_us=95.391
+CHAIN4150 arm=E iter=10 up_gpu_us=13.024 l1_span_us=55.392 l2_span_us=20.288 chain_gpu_us=75.680 download_us=69.920 l1_issue_us=10.112 l2_issue_us=8.000
+CHAIN4150 arm=PR iter=10 l1_issue_us=3.088 l2_issue_us=3.040 download_us=68.176 download_again_us=6.240 kernel_wait_derived_us=61.936 total_us=74.304
+CHAIN4150 arm=ER iter=10 l1_span_us=49.536 l2_span_us=20.128 chain_gpu_us=69.664 download_us=68.255 l1_issue_us=4.944 l2_issue_us=4.592
+CHAIN4150 arm=I iter=10 l1_iso_us=50.784 l2_iso_us=20.384 l1_host_us=2.976 l2_host_us=2.880
+CHAIN4150 arm=F iter=10 sync_idle_us=0.272 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.672 event_record_pair_us=3.040 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=11 up_gpu_us=11.360 l1_span_us=54.272 l2_span_us=20.320 chain_gpu_us=74.592 download_us=69.296 l1_issue_us=9.472 l2_issue_us=8.128
+CHAIN4150 arm=PR iter=11 l1_issue_us=3.056 l2_issue_us=3.056 download_us=68.656 download_again_us=6.480 kernel_wait_derived_us=62.176 total_us=74.768
+CHAIN4150 arm=ER iter=11 l1_span_us=51.136 l2_span_us=20.256 chain_gpu_us=71.392 download_us=68.015 l1_issue_us=5.008 l2_issue_us=4.656
+CHAIN4150 arm=I iter=11 l1_iso_us=49.312 l2_iso_us=20.416 l1_host_us=3.056 l2_host_us=3.152
+CHAIN4150 arm=P iter=11 h2d_upload_us=11.088 l1_issue_us=7.648 l2_issue_us=6.784 download_us=69.120 download_again_us=6.080 kernel_wait_derived_us=63.040 total_us=94.640
+CHAIN4150 arm=F iter=11 sync_idle_us=0.288 launch_floor_1x1_us=3.088 tiny_roundtrip_us=9.408 event_record_pair_us=3.008 event_pair_gpu_us=0.768
+CHAIN4150 arm=PR iter=12 l1_issue_us=3.008 l2_issue_us=2.864 download_us=68.240 download_again_us=6.064 kernel_wait_derived_us=62.176 total_us=74.112
+CHAIN4150 arm=ER iter=12 l1_span_us=52.352 l2_span_us=20.320 chain_gpu_us=72.672 download_us=68.431 l1_issue_us=4.992 l2_issue_us=4.592
+CHAIN4150 arm=I iter=12 l1_iso_us=50.816 l2_iso_us=22.368 l1_host_us=3.056 l2_host_us=3.232
+CHAIN4150 arm=P iter=12 h2d_upload_us=11.120 l1_issue_us=7.696 l2_issue_us=6.928 download_us=69.040 download_again_us=5.840 kernel_wait_derived_us=63.200 total_us=94.784
+CHAIN4150 arm=E iter=12 up_gpu_us=12.448 l1_span_us=54.816 l2_span_us=20.288 chain_gpu_us=75.104 download_us=69.504 l1_issue_us=9.760 l2_issue_us=8.175
+CHAIN4150 arm=F iter=12 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.112 event_record_pair_us=2.720 event_pair_gpu_us=0.832
+CHAIN4150 arm=ER iter=13 l1_span_us=51.008 l2_span_us=20.288 chain_gpu_us=71.296 download_us=68.223 l1_issue_us=5.040 l2_issue_us=4.368
+CHAIN4150 arm=I iter=13 l1_iso_us=49.344 l2_iso_us=22.304 l1_host_us=3.040 l2_host_us=3.136
+CHAIN4150 arm=P iter=13 h2d_upload_us=11.152 l1_issue_us=7.552 l2_issue_us=6.960 download_us=69.376 download_again_us=5.904 kernel_wait_derived_us=63.472 total_us=95.040
+CHAIN4150 arm=E iter=13 up_gpu_us=12.352 l1_span_us=55.104 l2_span_us=20.288 chain_gpu_us=75.392 download_us=70.192 l1_issue_us=9.536 l2_issue_us=8.032
+CHAIN4150 arm=PR iter=13 l1_issue_us=3.072 l2_issue_us=2.784 download_us=68.175 download_again_us=6.240 kernel_wait_derived_us=61.935 total_us=74.031
+CHAIN4150 arm=F iter=13 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.448 event_record_pair_us=2.880 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=14 l1_iso_us=51.296 l2_iso_us=23.264 l1_host_us=3.024 l2_host_us=3.088
+CHAIN4150 arm=P iter=14 h2d_upload_us=10.976 l1_issue_us=7.632 l2_issue_us=6.832 download_us=69.823 download_again_us=5.856 kernel_wait_derived_us=63.967 total_us=95.263
+CHAIN4150 arm=E iter=14 up_gpu_us=12.512 l1_span_us=54.752 l2_span_us=20.288 chain_gpu_us=75.040 download_us=70.256 l1_issue_us=9.696 l2_issue_us=8.368
+CHAIN4150 arm=PR iter=14 l1_issue_us=3.151 l2_issue_us=2.944 download_us=68.864 download_again_us=6.256 kernel_wait_derived_us=62.608 total_us=74.959
+CHAIN4150 arm=ER iter=14 l1_span_us=51.296 l2_span_us=20.288 chain_gpu_us=71.584 download_us=68.431 l1_issue_us=5.040 l2_issue_us=4.416
+CHAIN4150 arm=F iter=14 sync_idle_us=0.272 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.048 event_record_pair_us=3.136 event_pair_gpu_us=0.768
+CHAIN4150 arm=P iter=15 h2d_upload_us=10.800 l1_issue_us=7.456 l2_issue_us=6.832 download_us=69.871 download_again_us=5.856 kernel_wait_derived_us=64.015 total_us=94.959
+CHAIN4150 arm=E iter=15 up_gpu_us=12.096 l1_span_us=54.656 l2_span_us=20.320 chain_gpu_us=74.976 download_us=69.119 l1_issue_us=9.600 l2_issue_us=8.304
+CHAIN4150 arm=PR iter=15 l1_issue_us=2.992 l2_issue_us=3.248 download_us=69.040 download_again_us=6.096 kernel_wait_derived_us=62.944 total_us=75.280
+CHAIN4150 arm=ER iter=15 l1_span_us=49.472 l2_span_us=20.224 chain_gpu_us=69.696 download_us=68.815 l1_issue_us=4.928 l2_issue_us=4.288
+CHAIN4150 arm=I iter=15 l1_iso_us=50.560 l2_iso_us=22.208 l1_host_us=3.040 l2_host_us=3.120
+CHAIN4150 arm=F iter=15 sync_idle_us=0.288 launch_floor_1x1_us=3.056 tiny_roundtrip_us=8.624 event_record_pair_us=2.928 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=16 up_gpu_us=11.328 l1_span_us=54.176 l2_span_us=20.192 chain_gpu_us=74.368 download_us=61.392 l1_issue_us=9.616 l2_issue_us=9.472
+CHAIN4150 arm=PR iter=16 l1_issue_us=3.040 l2_issue_us=2.912 download_us=68.688 download_again_us=6.464 kernel_wait_derived_us=62.224 total_us=74.640
+CHAIN4150 arm=ER iter=16 l1_span_us=50.976 l2_span_us=20.416 chain_gpu_us=71.392 download_us=68.175 l1_issue_us=4.704 l2_issue_us=5.792
+CHAIN4150 arm=I iter=16 l1_iso_us=49.280 l2_iso_us=22.048 l1_host_us=3.056 l2_host_us=2.912
+CHAIN4150 arm=P iter=16 h2d_upload_us=11.040 l1_issue_us=7.600 l2_issue_us=6.976 download_us=68.672 download_again_us=6.000 kernel_wait_derived_us=62.672 total_us=94.288
+CHAIN4150 arm=F iter=16 sync_idle_us=0.304 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.512 event_record_pair_us=2.752 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=17 l1_issue_us=2.960 l2_issue_us=3.024 download_us=68.496 download_again_us=6.096 kernel_wait_derived_us=62.400 total_us=74.480
+CHAIN4150 arm=ER iter=17 l1_span_us=51.104 l2_span_us=20.320 chain_gpu_us=71.424 download_us=68.111 l1_issue_us=4.832 l2_issue_us=4.656
+CHAIN4150 arm=I iter=17 l1_iso_us=50.816 l2_iso_us=22.976 l1_host_us=3.120 l2_host_us=2.912
+CHAIN4150 arm=P iter=17 h2d_upload_us=10.911 l1_issue_us=7.536 l2_issue_us=7.040 download_us=69.824 download_again_us=5.200 kernel_wait_derived_us=64.624 total_us=95.311
+CHAIN4150 arm=E iter=17 up_gpu_us=10.944 l1_span_us=55.104 l2_span_us=20.288 chain_gpu_us=75.392 download_us=69.823 l1_issue_us=9.568 l2_issue_us=8.096
+CHAIN4150 arm=F iter=17 sync_idle_us=0.304 launch_floor_1x1_us=3.056 tiny_roundtrip_us=8.752 event_record_pair_us=2.896 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=18 l1_span_us=50.976 l2_span_us=20.320 chain_gpu_us=71.296 download_us=67.903 l1_issue_us=4.928 l2_issue_us=5.584
+CHAIN4150 arm=I iter=18 l1_iso_us=50.592 l2_iso_us=21.984 l1_host_us=3.056 l2_host_us=3.040
+CHAIN4150 arm=P iter=18 h2d_upload_us=11.184 l1_issue_us=7.776 l2_issue_us=7.008 download_us=68.592 download_again_us=4.864 kernel_wait_derived_us=63.728 total_us=94.560
+CHAIN4150 arm=E iter=18 up_gpu_us=10.432 l1_span_us=55.744 l2_span_us=20.320 chain_gpu_us=76.064 download_us=68.352 l1_issue_us=9.760 l2_issue_us=7.968
+CHAIN4150 arm=PR iter=18 l1_issue_us=3.088 l2_issue_us=2.768 download_us=67.951 download_again_us=6.208 kernel_wait_derived_us=61.743 total_us=73.807
+CHAIN4150 arm=F iter=18 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=11.072 event_record_pair_us=2.896 event_pair_gpu_us=1.216
+CHAIN4150 arm=I iter=19 l1_iso_us=50.880 l2_iso_us=21.312 l1_host_us=3.104 l2_host_us=3.152
+CHAIN4150 arm=P iter=19 h2d_upload_us=10.976 l1_issue_us=7.744 l2_issue_us=6.976 download_us=69.232 download_again_us=5.840 kernel_wait_derived_us=63.392 total_us=94.928
+CHAIN4150 arm=E iter=19 up_gpu_us=10.336 l1_span_us=55.968 l2_span_us=20.288 chain_gpu_us=76.256 download_us=69.568 l1_issue_us=9.808 l2_issue_us=8.256
+CHAIN4150 arm=PR iter=19 l1_issue_us=3.040 l2_issue_us=2.912 download_us=68.367 download_again_us=6.240 kernel_wait_derived_us=62.127 total_us=74.319
+CHAIN4150 arm=ER iter=19 l1_span_us=51.520 l2_span_us=20.288 chain_gpu_us=71.808 download_us=68.047 l1_issue_us=4.944 l2_issue_us=4.448
+CHAIN4150 arm=F iter=19 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=9.888 event_record_pair_us=2.848 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=20 h2d_upload_us=10.800 l1_issue_us=7.472 l2_issue_us=6.816 download_us=69.327 download_again_us=5.744 kernel_wait_derived_us=63.583 total_us=94.415
+CHAIN4150 arm=E iter=20 up_gpu_us=11.200 l1_span_us=55.968 l2_span_us=20.320 chain_gpu_us=76.288 download_us=69.408 l1_issue_us=9.568 l2_issue_us=8.176
+CHAIN4150 arm=PR iter=20 l1_issue_us=3.023 l2_issue_us=2.928 download_us=68.192 download_again_us=6.224 kernel_wait_derived_us=61.968 total_us=74.143
+CHAIN4150 arm=ER iter=20 l1_span_us=49.408 l2_span_us=20.288 chain_gpu_us=69.696 download_us=68.367 l1_issue_us=4.832 l2_issue_us=4.656
+CHAIN4150 arm=I iter=20 l1_iso_us=50.816 l2_iso_us=20.352 l1_host_us=2.960 l2_host_us=2.816
+CHAIN4150 arm=F iter=20 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.960 event_record_pair_us=2.848 event_pair_gpu_us=1.024
+CHAIN4150 arm=E iter=21 up_gpu_us=11.392 l1_span_us=54.368 l2_span_us=20.288 chain_gpu_us=74.656 download_us=68.288 l1_issue_us=9.680 l2_issue_us=8.064
+CHAIN4150 arm=PR iter=21 l1_issue_us=3.136 l2_issue_us=2.848 download_us=67.696 download_again_us=5.776 kernel_wait_derived_us=61.920 total_us=73.680
+CHAIN4150 arm=ER iter=21 l1_span_us=51.584 l2_span_us=20.288 chain_gpu_us=71.872 download_us=67.775 l1_issue_us=4.800 l2_issue_us=4.624
+CHAIN4150 arm=I iter=21 l1_iso_us=50.144 l2_iso_us=21.056 l1_host_us=3.056 l2_host_us=2.976
+CHAIN4150 arm=P iter=21 h2d_upload_us=10.191 l1_issue_us=7.712 l2_issue_us=6.752 download_us=68.624 download_again_us=5.360 kernel_wait_derived_us=63.264 total_us=93.279
+CHAIN4150 arm=F iter=21 sync_idle_us=0.304 launch_floor_1x1_us=4.064 tiny_roundtrip_us=8.528 event_record_pair_us=2.864 event_pair_gpu_us=0.992
+CHAIN4150 arm=PR iter=22 l1_issue_us=2.912 l2_issue_us=3.072 download_us=67.135 download_again_us=5.680 kernel_wait_derived_us=61.455 total_us=73.119
+CHAIN4150 arm=ER iter=22 l1_span_us=51.872 l2_span_us=20.320 chain_gpu_us=72.192 download_us=67.855 l1_issue_us=4.816 l2_issue_us=4.720
+CHAIN4150 arm=I iter=22 l1_iso_us=51.744 l2_iso_us=21.120 l1_host_us=3.104 l2_host_us=2.880
+CHAIN4150 arm=P iter=22 h2d_upload_us=10.080 l1_issue_us=7.408 l2_issue_us=6.719 download_us=68.624 download_again_us=5.136 kernel_wait_derived_us=63.488 total_us=92.831
+CHAIN4150 arm=E iter=22 up_gpu_us=11.040 l1_span_us=54.976 l2_span_us=20.320 chain_gpu_us=75.296 download_us=69.039 l1_issue_us=9.600 l2_issue_us=8.032
+CHAIN4150 arm=F iter=22 sync_idle_us=0.272 launch_floor_1x1_us=2.944 tiny_roundtrip_us=8.608 event_record_pair_us=2.880 event_pair_gpu_us=1.344
+CHAIN4150 arm=ER iter=23 l1_span_us=50.240 l2_span_us=20.320 chain_gpu_us=70.560 download_us=68.047 l1_issue_us=4.736 l2_issue_us=4.464
+CHAIN4150 arm=I iter=23 l1_iso_us=49.920 l2_iso_us=21.088 l1_host_us=2.960 l2_host_us=3.008
+CHAIN4150 arm=P iter=23 h2d_upload_us=10.287 l1_issue_us=7.616 l2_issue_us=7.008 download_us=68.176 download_again_us=4.928 kernel_wait_derived_us=63.248 total_us=93.087
+CHAIN4150 arm=E iter=23 up_gpu_us=11.392 l1_span_us=55.936 l2_span_us=20.320 chain_gpu_us=76.256 download_us=68.015 l1_issue_us=9.952 l2_issue_us=8.368
+CHAIN4150 arm=PR iter=23 l1_issue_us=3.056 l2_issue_us=3.040 download_us=68.511 download_again_us=5.632 kernel_wait_derived_us=62.879 total_us=74.607
+CHAIN4150 arm=F iter=23 sync_idle_us=0.304 launch_floor_1x1_us=3.040 tiny_roundtrip_us=9.216 event_record_pair_us=2.752 event_pair_gpu_us=1.216
+CHAIN4150 arm=I iter=24 l1_iso_us=51.936 l2_iso_us=20.928 l1_host_us=3.184 l2_host_us=2.912
+CHAIN4150 arm=P iter=24 h2d_upload_us=10.111 l1_issue_us=7.648 l2_issue_us=6.928 download_us=68.720 download_again_us=4.816 kernel_wait_derived_us=63.904 total_us=93.407
+CHAIN4150 arm=E iter=24 up_gpu_us=10.912 l1_span_us=55.424 l2_span_us=20.320 chain_gpu_us=75.744 download_us=68.367 l1_issue_us=9.664 l2_issue_us=8.000
+CHAIN4150 arm=PR iter=24 l1_issue_us=3.088 l2_issue_us=3.104 download_us=67.919 download_again_us=5.360 kernel_wait_derived_us=62.559 total_us=74.111
+CHAIN4150 arm=ER iter=24 l1_span_us=50.304 l2_span_us=20.096 chain_gpu_us=70.400 download_us=67.376 l1_issue_us=5.072 l2_issue_us=4.336
+CHAIN4150 arm=F iter=24 sync_idle_us=0.304 launch_floor_1x1_us=3.056 tiny_roundtrip_us=8.544 event_record_pair_us=2.832 event_pair_gpu_us=1.152
+CHAIN4150 arm=P iter=25 h2d_upload_us=10.048 l1_issue_us=7.296 l2_issue_us=7.168 download_us=69.216 download_again_us=4.768 kernel_wait_derived_us=64.448 total_us=93.728
+CHAIN4150 arm=E iter=25 up_gpu_us=11.072 l1_span_us=56.000 l2_span_us=20.288 chain_gpu_us=76.288 download_us=68.192 l1_issue_us=10.048 l2_issue_us=8.031
+CHAIN4150 arm=PR iter=25 l1_issue_us=3.184 l2_issue_us=3.104 download_us=67.935 download_again_us=5.088 kernel_wait_derived_us=62.847 total_us=74.223
+CHAIN4150 arm=ER iter=25 l1_span_us=50.208 l2_span_us=20.000 chain_gpu_us=70.208 download_us=67.648 l1_issue_us=4.624 l2_issue_us=4.608
+CHAIN4150 arm=I iter=25 l1_iso_us=51.648 l2_iso_us=20.960 l1_host_us=2.944 l2_host_us=3.136
+CHAIN4150 arm=F iter=25 sync_idle_us=0.288 launch_floor_1x1_us=3.008 tiny_roundtrip_us=8.672 event_record_pair_us=2.880 event_pair_gpu_us=1.280
+CHAIN4150 arm=E iter=26 up_gpu_us=11.392 l1_span_us=55.840 l2_span_us=20.320 chain_gpu_us=76.160 download_us=67.871 l1_issue_us=10.160 l2_issue_us=8.160
+CHAIN4150 arm=PR iter=26 l1_issue_us=2.960 l2_issue_us=3.424 download_us=67.487 download_again_us=5.552 kernel_wait_derived_us=61.935 total_us=73.871
+CHAIN4150 arm=ER iter=26 l1_span_us=51.648 l2_span_us=20.288 chain_gpu_us=71.936 download_us=68.016 l1_issue_us=4.784 l2_issue_us=4.656
+CHAIN4150 arm=I iter=26 l1_iso_us=50.528 l2_iso_us=21.248 l1_host_us=3.056 l2_host_us=3.392
+CHAIN4150 arm=P iter=26 h2d_upload_us=11.264 l1_issue_us=7.632 l2_issue_us=6.688 download_us=70.319 download_again_us=6.240 kernel_wait_derived_us=64.079 total_us=95.903
+CHAIN4150 arm=F iter=26 sync_idle_us=0.304 launch_floor_1x1_us=3.104 tiny_roundtrip_us=10.720 event_record_pair_us=2.736 event_pair_gpu_us=0.992
+CHAIN4150 arm=PR iter=27 l1_issue_us=3.040 l2_issue_us=2.912 download_us=68.319 download_again_us=6.080 kernel_wait_derived_us=62.239 total_us=74.271
+CHAIN4150 arm=ER iter=27 l1_span_us=49.856 l2_span_us=20.032 chain_gpu_us=69.888 download_us=68.864 l1_issue_us=4.800 l2_issue_us=4.544
+CHAIN4150 arm=I iter=27 l1_iso_us=50.496 l2_iso_us=22.240 l1_host_us=3.120 l2_host_us=3.216
+CHAIN4150 arm=P iter=27 h2d_upload_us=11.120 l1_issue_us=7.344 l2_issue_us=6.864 download_us=70.031 download_again_us=5.808 kernel_wait_derived_us=64.223 total_us=95.359
+CHAIN4150 arm=E iter=27 up_gpu_us=12.160 l1_span_us=55.168 l2_span_us=20.288 chain_gpu_us=75.456 download_us=69.887 l1_issue_us=9.568 l2_issue_us=8.224
+CHAIN4150 arm=F iter=27 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=10.400 event_record_pair_us=2.880 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=28 l1_span_us=50.720 l2_span_us=20.320 chain_gpu_us=71.040 download_us=68.672 l1_issue_us=4.464 l2_issue_us=4.576
+CHAIN4150 arm=I iter=28 l1_iso_us=63.776 l2_iso_us=53.216 l1_host_us=3.040 l2_host_us=2.944
+CHAIN4150 arm=P iter=28 h2d_upload_us=10.880 l1_issue_us=7.600 l2_issue_us=6.816 download_us=69.664 download_again_us=5.744 kernel_wait_derived_us=63.920 total_us=94.960
+CHAIN4150 arm=E iter=28 up_gpu_us=11.840 l1_span_us=56.096 l2_span_us=22.784 chain_gpu_us=78.880 download_us=69.680 l1_issue_us=9.488 l2_issue_us=8.015
+CHAIN4150 arm=PR iter=28 l1_issue_us=3.232 l2_issue_us=3.184 download_us=70.367 download_again_us=6.640 kernel_wait_derived_us=63.727 total_us=76.783
+CHAIN4150 arm=F iter=28 sync_idle_us=0.288 launch_floor_1x1_us=2.848 tiny_roundtrip_us=10.016 event_record_pair_us=2.896 event_pair_gpu_us=0.768
+CHAIN4150 arm=I iter=29 l1_iso_us=60.800 l2_iso_us=37.760 l1_host_us=2.928 l2_host_us=2.960
+CHAIN4150 arm=P iter=29 h2d_upload_us=12.656 l1_issue_us=7.664 l2_issue_us=6.608 download_us=96.175 download_again_us=9.296 kernel_wait_derived_us=86.879 total_us=123.103
+CHAIN4150 arm=E iter=29 up_gpu_us=51.008 l1_span_us=59.680 l2_span_us=22.432 chain_gpu_us=82.112 download_us=99.359 l1_issue_us=8.944 l2_issue_us=8.128
+CHAIN4150 arm=PR iter=29 l1_issue_us=3.232 l2_issue_us=2.976 download_us=109.391 download_again_us=16.192 kernel_wait_derived_us=93.199 total_us=115.599
+CHAIN4150 arm=ER iter=29 l1_span_us=62.176 l2_span_us=62.880 chain_gpu_us=125.056 download_us=131.183 l1_issue_us=4.400 l2_issue_us=4.544
+CHAIN4150 arm=F iter=29 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.688 event_record_pair_us=2.863 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=30 h2d_upload_us=11.072 l1_issue_us=7.536 l2_issue_us=6.928 download_us=69.200 download_again_us=5.824 kernel_wait_derived_us=63.376 total_us=94.736
+CHAIN4150 arm=E iter=30 up_gpu_us=10.848 l1_span_us=54.272 l2_span_us=20.416 chain_gpu_us=74.688 download_us=69.088 l1_issue_us=9.487 l2_issue_us=8.288
+CHAIN4150 arm=PR iter=30 l1_issue_us=2.992 l2_issue_us=3.040 download_us=69.151 download_again_us=6.112 kernel_wait_derived_us=63.039 total_us=75.183
+CHAIN4150 arm=ER iter=30 l1_span_us=54.400 l2_span_us=20.640 chain_gpu_us=75.040 download_us=80.367 l1_issue_us=4.480 l2_issue_us=4.464
+CHAIN4150 arm=I iter=30 l1_iso_us=51.168 l2_iso_us=22.368 l1_host_us=3.152 l2_host_us=2.912
+CHAIN4150 arm=F iter=30 sync_idle_us=0.288 launch_floor_1x1_us=3.040 tiny_roundtrip_us=9.008 event_record_pair_us=2.944 event_pair_gpu_us=1.024
+CHAIN4150 arm=E iter=31 up_gpu_us=11.456 l1_span_us=54.304 l2_span_us=20.384 chain_gpu_us=74.688 download_us=69.216 l1_issue_us=9.376 l2_issue_us=8.368
+CHAIN4150 arm=PR iter=31 l1_issue_us=4.288 l2_issue_us=3.184 download_us=68.783 download_again_us=6.320 kernel_wait_derived_us=62.463 total_us=76.255
+CHAIN4150 arm=ER iter=31 l1_span_us=50.688 l2_span_us=20.416 chain_gpu_us=71.104 download_us=68.239 l1_issue_us=4.560 l2_issue_us=4.528
+CHAIN4150 arm=I iter=31 l1_iso_us=50.688 l2_iso_us=20.160 l1_host_us=2.992 l2_host_us=2.928
+CHAIN4150 arm=P iter=31 h2d_upload_us=14.800 l1_issue_us=7.408 l2_issue_us=6.783 download_us=108.368 download_again_us=30.063 kernel_wait_derived_us=78.305 total_us=137.359
+CHAIN4150 arm=F iter=31 sync_idle_us=0.288 launch_floor_1x1_us=3.152 tiny_roundtrip_us=35.808 event_record_pair_us=2.704 event_pair_gpu_us=4.000
+CHAIN4150 arm=PR iter=32 l1_issue_us=2.976 l2_issue_us=2.928 download_us=121.103 download_again_us=6.704 kernel_wait_derived_us=114.399 total_us=127.007
+CHAIN4150 arm=ER iter=32 l1_span_us=53.088 l2_span_us=20.224 chain_gpu_us=73.312 download_us=70.287 l1_issue_us=5.040 l2_issue_us=4.432
+CHAIN4150 arm=I iter=32 l1_iso_us=52.544 l2_iso_us=22.208 l1_host_us=3.024 l2_host_us=2.880
+CHAIN4150 arm=P iter=32 h2d_upload_us=10.848 l1_issue_us=7.648 l2_issue_us=6.928 download_us=69.936 download_again_us=6.256 kernel_wait_derived_us=63.680 total_us=95.360
+CHAIN4150 arm=E iter=32 up_gpu_us=11.776 l1_span_us=56.928 l2_span_us=22.240 chain_gpu_us=79.168 download_us=69.680 l1_issue_us=9.536 l2_issue_us=8.063
+CHAIN4150 arm=F iter=32 sync_idle_us=0.304 launch_floor_1x1_us=3.120 tiny_roundtrip_us=8.944 event_record_pair_us=2.752 event_pair_gpu_us=1.152
+CHAIN4150 arm=ER iter=33 l1_span_us=56.768 l2_span_us=20.384 chain_gpu_us=77.152 download_us=83.279 l1_issue_us=4.640 l2_issue_us=4.688
+CHAIN4150 arm=I iter=33 l1_iso_us=59.968 l2_iso_us=19.872 l1_host_us=3.136 l2_host_us=2.720
+CHAIN4150 arm=P iter=33 h2d_upload_us=10.336 l1_issue_us=7.760 l2_issue_us=6.928 download_us=82.847 download_again_us=6.080 kernel_wait_derived_us=76.767 total_us=107.871
+CHAIN4150 arm=E iter=33 up_gpu_us=11.872 l1_span_us=55.104 l2_span_us=20.288 chain_gpu_us=75.392 download_us=69.903 l1_issue_us=9.680 l2_issue_us=8.032
+CHAIN4150 arm=PR iter=33 l1_issue_us=3.088 l2_issue_us=2.944 download_us=74.320 download_again_us=6.208 kernel_wait_derived_us=68.112 total_us=80.352
+CHAIN4150 arm=F iter=33 sync_idle_us=0.272 launch_floor_1x1_us=2.960 tiny_roundtrip_us=10.560 event_record_pair_us=3.008 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=34 l1_iso_us=49.568 l2_iso_us=20.352 l1_host_us=3.007 l2_host_us=2.912
+CHAIN4150 arm=P iter=34 h2d_upload_us=10.992 l1_issue_us=7.488 l2_issue_us=6.912 download_us=68.879 download_again_us=5.872 kernel_wait_derived_us=63.007 total_us=94.271
+CHAIN4150 arm=E iter=34 up_gpu_us=12.320 l1_span_us=54.624 l2_span_us=20.288 chain_gpu_us=74.912 download_us=69.711 l1_issue_us=9.424 l2_issue_us=8.000
+CHAIN4150 arm=PR iter=34 l1_issue_us=2.992 l2_issue_us=2.912 download_us=68.384 download_again_us=6.256 kernel_wait_derived_us=62.128 total_us=74.288
+CHAIN4150 arm=ER iter=34 l1_span_us=50.720 l2_span_us=20.288 chain_gpu_us=71.008 download_us=68.735 l1_issue_us=4.864 l2_issue_us=4.608
+CHAIN4150 arm=F iter=34 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.672 event_record_pair_us=3.120 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=35 h2d_upload_us=10.928 l1_issue_us=7.584 l2_issue_us=6.800 download_us=70.367 download_again_us=5.760 kernel_wait_derived_us=64.607 total_us=95.679
+CHAIN4150 arm=E iter=35 up_gpu_us=11.936 l1_span_us=55.232 l2_span_us=20.288 chain_gpu_us=75.520 download_us=68.879 l1_issue_us=9.760 l2_issue_us=8.048
+CHAIN4150 arm=PR iter=35 l1_issue_us=2.992 l2_issue_us=3.184 download_us=69.216 download_again_us=6.463 kernel_wait_derived_us=62.753 total_us=75.392
+CHAIN4150 arm=ER iter=35 l1_span_us=50.656 l2_span_us=20.288 chain_gpu_us=70.944 download_us=68.800 l1_issue_us=4.928 l2_issue_us=4.464
+CHAIN4150 arm=I iter=35 l1_iso_us=50.816 l2_iso_us=20.448 l1_host_us=3.008 l2_host_us=2.880
+CHAIN4150 arm=F iter=35 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=11.088 event_record_pair_us=3.040 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=36 up_gpu_us=21.280 l1_span_us=54.560 l2_span_us=20.288 chain_gpu_us=74.848 download_us=69.423 l1_issue_us=9.600 l2_issue_us=8.112
+CHAIN4150 arm=PR iter=36 l1_issue_us=3.088 l2_issue_us=3.008 download_us=68.223 download_again_us=6.864 kernel_wait_derived_us=61.359 total_us=74.319
+CHAIN4150 arm=ER iter=36 l1_span_us=50.784 l2_span_us=20.288 chain_gpu_us=71.072 download_us=68.752 l1_issue_us=4.992 l2_issue_us=4.640
+CHAIN4150 arm=I iter=36 l1_iso_us=49.536 l2_iso_us=20.416 l1_host_us=3.056 l2_host_us=3.008
+CHAIN4150 arm=P iter=36 h2d_upload_us=10.864 l1_issue_us=7.600 l2_issue_us=7.072 download_us=69.615 download_again_us=6.016 kernel_wait_derived_us=63.599 total_us=95.151
+CHAIN4150 arm=F iter=36 sync_idle_us=0.288 launch_floor_1x1_us=3.072 tiny_roundtrip_us=10.288 event_record_pair_us=2.992 event_pair_gpu_us=0.992
+CHAIN4150 arm=PR iter=37 l1_issue_us=2.992 l2_issue_us=2.976 download_us=68.304 download_again_us=6.223 kernel_wait_derived_us=62.081 total_us=74.272
+CHAIN4150 arm=ER iter=37 l1_span_us=51.072 l2_span_us=20.320 chain_gpu_us=71.392 download_us=68.304 l1_issue_us=4.672 l2_issue_us=4.496
+CHAIN4150 arm=I iter=37 l1_iso_us=50.976 l2_iso_us=20.288 l1_host_us=2.992 l2_host_us=2.880
+CHAIN4150 arm=P iter=37 h2d_upload_us=10.928 l1_issue_us=7.360 l2_issue_us=6.960 download_us=69.359 download_again_us=5.808 kernel_wait_derived_us=63.551 total_us=94.607
+CHAIN4150 arm=E iter=37 up_gpu_us=10.816 l1_span_us=54.592 l2_span_us=20.320 chain_gpu_us=74.912 download_us=69.536 l1_issue_us=9.584 l2_issue_us=8.000
+CHAIN4150 arm=F iter=37 sync_idle_us=0.288 launch_floor_1x1_us=3.104 tiny_roundtrip_us=10.192 event_record_pair_us=4.016 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=38 l1_span_us=49.568 l2_span_us=20.320 chain_gpu_us=69.888 download_us=69.104 l1_issue_us=4.976 l2_issue_us=4.400
+CHAIN4150 arm=I iter=38 l1_iso_us=49.216 l2_iso_us=20.192 l1_host_us=2.960 l2_host_us=2.912
+CHAIN4150 arm=P iter=38 h2d_upload_us=11.056 l1_issue_us=7.488 l2_issue_us=6.944 download_us=69.551 download_again_us=6.032 kernel_wait_derived_us=63.519 total_us=95.039
+CHAIN4150 arm=E iter=38 up_gpu_us=11.808 l1_span_us=54.752 l2_span_us=20.320 chain_gpu_us=75.072 download_us=69.167 l1_issue_us=9.568 l2_issue_us=8.160
+CHAIN4150 arm=PR iter=38 l1_issue_us=3.040 l2_issue_us=2.928 download_us=68.848 download_again_us=6.192 kernel_wait_derived_us=62.656 total_us=74.816
+CHAIN4150 arm=F iter=38 sync_idle_us=0.288 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.320 event_record_pair_us=2.864 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=39 l1_iso_us=50.656 l2_iso_us=21.568 l1_host_us=3.024 l2_host_us=2.880
+CHAIN4150 arm=P iter=39 h2d_upload_us=10.560 l1_issue_us=7.488 l2_issue_us=8.144 download_us=61.343 download_again_us=5.824 kernel_wait_derived_us=55.519 total_us=87.535
+CHAIN4150 arm=E iter=39 up_gpu_us=10.880 l1_span_us=53.152 l2_span_us=20.288 chain_gpu_us=73.440 download_us=69.455 l1_issue_us=9.344 l2_issue_us=7.968
+CHAIN4150 arm=PR iter=39 l1_issue_us=3.088 l2_issue_us=3.072 download_us=67.904 download_again_us=6.448 kernel_wait_derived_us=61.456 total_us=74.064
+CHAIN4150 arm=ER iter=39 l1_span_us=49.760 l2_span_us=20.320 chain_gpu_us=70.080 download_us=68.896 l1_issue_us=5.024 l2_issue_us=4.447
+CHAIN4150 arm=F iter=39 sync_idle_us=0.288 launch_floor_1x1_us=3.008 tiny_roundtrip_us=9.808 event_record_pair_us=2.912 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=40 h2d_upload_us=11.072 l1_issue_us=7.472 l2_issue_us=7.088 download_us=70.319 download_again_us=5.696 kernel_wait_derived_us=64.623 total_us=95.951
+CHAIN4150 arm=E iter=40 up_gpu_us=11.072 l1_span_us=54.208 l2_span_us=20.096 chain_gpu_us=74.304 download_us=69.567 l1_issue_us=9.616 l2_issue_us=8.320
+CHAIN4150 arm=PR iter=40 l1_issue_us=3.024 l2_issue_us=3.072 download_us=68.911 download_again_us=6.080 kernel_wait_derived_us=62.831 total_us=75.007
+CHAIN4150 arm=ER iter=40 l1_span_us=50.848 l2_span_us=20.320 chain_gpu_us=71.168 download_us=68.128 l1_issue_us=4.784 l2_issue_us=4.496
+CHAIN4150 arm=I iter=40 l1_iso_us=50.976 l2_iso_us=20.320 l1_host_us=3.008 l2_host_us=2.896
+CHAIN4150 arm=F iter=40 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=9.296 event_record_pair_us=2.944 event_pair_gpu_us=1.024
+CHAIN4150 arm=E iter=41 up_gpu_us=11.328 l1_span_us=52.896 l2_span_us=20.128 chain_gpu_us=73.024 download_us=61.775 l1_issue_us=9.360 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=41 l1_issue_us=3.104 l2_issue_us=2.864 download_us=68.224 download_again_us=6.592 kernel_wait_derived_us=61.632 total_us=74.192
+CHAIN4150 arm=ER iter=41 l1_span_us=50.976 l2_span_us=20.320 chain_gpu_us=71.296 download_us=68.272 l1_issue_us=4.704 l2_issue_us=4.512
+CHAIN4150 arm=I iter=41 l1_iso_us=50.528 l2_iso_us=22.464 l1_host_us=3.040 l2_host_us=3.312
+CHAIN4150 arm=P iter=41 h2d_upload_us=11.136 l1_issue_us=7.616 l2_issue_us=6.736 download_us=69.407 download_again_us=6.064 kernel_wait_derived_us=63.343 total_us=94.895
+CHAIN4150 arm=F iter=41 sync_idle_us=0.304 launch_floor_1x1_us=3.072 tiny_roundtrip_us=9.024 event_record_pair_us=2.880 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=42 l1_issue_us=2.960 l2_issue_us=2.912 download_us=68.560 download_again_us=6.208 kernel_wait_derived_us=62.352 total_us=74.432
+CHAIN4150 arm=ER iter=42 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.048 l1_issue_us=4.959 l2_issue_us=4.624
+CHAIN4150 arm=I iter=42 l1_iso_us=50.560 l2_iso_us=21.376 l1_host_us=2.992 l2_host_us=3.168
+CHAIN4150 arm=P iter=42 h2d_upload_us=10.880 l1_issue_us=7.472 l2_issue_us=6.944 download_us=69.071 download_again_us=5.744 kernel_wait_derived_us=63.327 total_us=94.367
+CHAIN4150 arm=E iter=42 up_gpu_us=12.192 l1_span_us=54.240 l2_span_us=20.224 chain_gpu_us=74.464 download_us=69.856 l1_issue_us=9.552 l2_issue_us=8.352
+CHAIN4150 arm=F iter=42 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.095 event_record_pair_us=2.848 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=43 l1_span_us=50.720 l2_span_us=20.320 chain_gpu_us=71.040 download_us=69.040 l1_issue_us=4.896 l2_issue_us=4.496
+CHAIN4150 arm=I iter=43 l1_iso_us=51.232 l2_iso_us=20.416 l1_host_us=3.120 l2_host_us=2.864
+CHAIN4150 arm=P iter=43 h2d_upload_us=11.088 l1_issue_us=7.584 l2_issue_us=6.992 download_us=69.167 download_again_us=5.696 kernel_wait_derived_us=63.471 total_us=94.831
+CHAIN4150 arm=E iter=43 up_gpu_us=11.008 l1_span_us=54.528 l2_span_us=20.320 chain_gpu_us=74.848 download_us=69.519 l1_issue_us=9.568 l2_issue_us=8.048
+CHAIN4150 arm=PR iter=43 l1_issue_us=3.152 l2_issue_us=2.912 download_us=68.208 download_again_us=6.272 kernel_wait_derived_us=61.936 total_us=74.272
+CHAIN4150 arm=F iter=43 sync_idle_us=0.272 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.624 event_record_pair_us=2.864 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=44 l1_iso_us=50.432 l2_iso_us=20.352 l1_host_us=2.992 l2_host_us=2.864
+CHAIN4150 arm=P iter=44 h2d_upload_us=10.912 l1_issue_us=7.504 l2_issue_us=6.768 download_us=70.031 download_again_us=5.744 kernel_wait_derived_us=64.287 total_us=95.215
+CHAIN4150 arm=E iter=44 up_gpu_us=11.680 l1_span_us=54.624 l2_span_us=20.288 chain_gpu_us=74.912 download_us=69.567 l1_issue_us=9.616 l2_issue_us=8.080
+CHAIN4150 arm=PR iter=44 l1_issue_us=3.248 l2_issue_us=2.912 download_us=68.608 download_again_us=6.112 kernel_wait_derived_us=62.496 total_us=74.768
+CHAIN4150 arm=ER iter=44 l1_span_us=51.072 l2_span_us=20.288 chain_gpu_us=71.360 download_us=69.151 l1_issue_us=5.152 l2_issue_us=4.432
+CHAIN4150 arm=F iter=44 sync_idle_us=0.272 launch_floor_1x1_us=2.960 tiny_roundtrip_us=9.936 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=45 h2d_upload_us=10.976 l1_issue_us=7.472 l2_issue_us=6.928 download_us=69.407 download_again_us=5.696 kernel_wait_derived_us=63.711 total_us=94.783
+CHAIN4150 arm=E iter=45 up_gpu_us=12.128 l1_span_us=54.336 l2_span_us=20.288 chain_gpu_us=74.624 download_us=70.031 l1_issue_us=9.552 l2_issue_us=8.256
+CHAIN4150 arm=PR iter=45 l1_issue_us=3.168 l2_issue_us=3.024 download_us=69.072 download_again_us=6.176 kernel_wait_derived_us=62.896 total_us=75.264
+CHAIN4150 arm=ER iter=45 l1_span_us=51.360 l2_span_us=20.288 chain_gpu_us=71.648 download_us=68.400 l1_issue_us=4.943 l2_issue_us=4.544
+CHAIN4150 arm=I iter=45 l1_iso_us=50.720 l2_iso_us=20.192 l1_host_us=3.216 l2_host_us=2.816
+CHAIN4150 arm=F iter=45 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.160 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=46 up_gpu_us=11.264 l1_span_us=54.656 l2_span_us=20.288 chain_gpu_us=74.944 download_us=69.135 l1_issue_us=9.648 l2_issue_us=8.368
+CHAIN4150 arm=PR iter=46 l1_issue_us=3.120 l2_issue_us=3.232 download_us=68.848 download_again_us=6.448 kernel_wait_derived_us=62.400 total_us=75.200
+CHAIN4150 arm=ER iter=46 l1_span_us=51.456 l2_span_us=20.288 chain_gpu_us=71.744 download_us=68.448 l1_issue_us=4.991 l2_issue_us=4.592
+CHAIN4150 arm=I iter=46 l1_iso_us=51.232 l2_iso_us=22.336 l1_host_us=3.152 l2_host_us=3.136
+CHAIN4150 arm=P iter=46 h2d_upload_us=11.040 l1_issue_us=7.616 l2_issue_us=6.896 download_us=70.287 download_again_us=5.952 kernel_wait_derived_us=64.335 total_us=95.839
+CHAIN4150 arm=F iter=46 sync_idle_us=0.288 launch_floor_1x1_us=3.040 tiny_roundtrip_us=10.400 event_record_pair_us=2.880 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=47 l1_issue_us=2.944 l2_issue_us=3.008 download_us=68.848 download_again_us=6.096 kernel_wait_derived_us=62.752 total_us=74.800
+CHAIN4150 arm=ER iter=47 l1_span_us=49.760 l2_span_us=20.032 chain_gpu_us=69.792 download_us=68.816 l1_issue_us=4.816 l2_issue_us=4.655
+CHAIN4150 arm=I iter=47 l1_iso_us=49.376 l2_iso_us=22.304 l1_host_us=2.992 l2_host_us=3.216
+CHAIN4150 arm=P iter=47 h2d_upload_us=11.072 l1_issue_us=7.520 l2_issue_us=6.848 download_us=69.488 download_again_us=5.919 kernel_wait_derived_us=63.569 total_us=94.928
+CHAIN4150 arm=E iter=47 up_gpu_us=11.680 l1_span_us=54.528 l2_span_us=20.288 chain_gpu_us=74.816 download_us=70.224 l1_issue_us=9.536 l2_issue_us=8.304
+CHAIN4150 arm=F iter=47 sync_idle_us=0.304 launch_floor_1x1_us=3.088 tiny_roundtrip_us=9.951 event_record_pair_us=2.720 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=48 l1_span_us=50.944 l2_span_us=20.288 chain_gpu_us=71.232 download_us=68.048 l1_issue_us=4.912 l2_issue_us=4.432
+CHAIN4150 arm=I iter=48 l1_iso_us=50.592 l2_iso_us=20.384 l1_host_us=3.008 l2_host_us=2.880
+CHAIN4150 arm=P iter=48 h2d_upload_us=10.768 l1_issue_us=7.616 l2_issue_us=6.672 download_us=69.807 download_again_us=5.952 kernel_wait_derived_us=63.855 total_us=94.863
+CHAIN4150 arm=E iter=48 up_gpu_us=11.232 l1_span_us=53.280 l2_span_us=20.320 chain_gpu_us=73.600 download_us=69.232 l1_issue_us=9.584 l2_issue_us=8.016
+CHAIN4150 arm=PR iter=48 l1_issue_us=3.072 l2_issue_us=3.024 download_us=68.096 download_again_us=6.160 kernel_wait_derived_us=61.936 total_us=74.192
+CHAIN4150 arm=F iter=48 sync_idle_us=0.272 launch_floor_1x1_us=2.848 tiny_roundtrip_us=9.824 event_record_pair_us=2.832 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=49 l1_iso_us=50.656 l2_iso_us=20.128 l1_host_us=2.992 l2_host_us=2.896
+CHAIN4150 arm=P iter=49 h2d_upload_us=10.992 l1_issue_us=7.424 l2_issue_us=6.912 download_us=69.183 download_again_us=5.824 kernel_wait_derived_us=63.359 total_us=94.511
+CHAIN4150 arm=E iter=49 up_gpu_us=10.848 l1_span_us=54.592 l2_span_us=20.288 chain_gpu_us=74.880 download_us=69.167 l1_issue_us=9.632 l2_issue_us=8.288
+CHAIN4150 arm=PR iter=49 l1_issue_us=3.040 l2_issue_us=2.928 download_us=68.016 download_again_us=6.064 kernel_wait_derived_us=61.952 total_us=73.984
+CHAIN4150 arm=ER iter=49 l1_span_us=51.744 l2_span_us=20.320 chain_gpu_us=72.064 download_us=68.815 l1_issue_us=4.960 l2_issue_us=4.560
+CHAIN4150 arm=F iter=49 sync_idle_us=0.288 launch_floor_1x1_us=3.088 tiny_roundtrip_us=10.736 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=50 h2d_upload_us=10.704 l1_issue_us=7.456 l2_issue_us=6.800 download_us=70.047 download_again_us=5.744 kernel_wait_derived_us=64.303 total_us=95.007
+CHAIN4150 arm=E iter=50 up_gpu_us=11.808 l1_span_us=54.304 l2_span_us=20.320 chain_gpu_us=74.624 download_us=69.183 l1_issue_us=9.616 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=50 l1_issue_us=3.072 l2_issue_us=3.024 download_us=68.016 download_again_us=6.128 kernel_wait_derived_us=61.888 total_us=74.112
+CHAIN4150 arm=ER iter=50 l1_span_us=51.328 l2_span_us=20.288 chain_gpu_us=71.616 download_us=68.480 l1_issue_us=5.072 l2_issue_us=4.400
+CHAIN4150 arm=I iter=50 l1_iso_us=50.752 l2_iso_us=20.288 l1_host_us=3.168 l2_host_us=3.120
+CHAIN4150 arm=F iter=50 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=9.600 event_record_pair_us=2.880 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=51 up_gpu_us=12.000 l1_span_us=55.072 l2_span_us=20.288 chain_gpu_us=75.360 download_us=69.823 l1_issue_us=9.648 l2_issue_us=8.208
+CHAIN4150 arm=PR iter=51 l1_issue_us=3.104 l2_issue_us=3.168 download_us=68.976 download_again_us=6.496 kernel_wait_derived_us=62.480 total_us=75.248
+CHAIN4150 arm=ER iter=51 l1_span_us=51.104 l2_span_us=20.320 chain_gpu_us=71.424 download_us=68.528 l1_issue_us=4.704 l2_issue_us=4.608
+CHAIN4150 arm=I iter=51 l1_iso_us=49.440 l2_iso_us=21.056 l1_host_us=2.976 l2_host_us=3.184
+CHAIN4150 arm=P iter=51 h2d_upload_us=11.072 l1_issue_us=7.456 l2_issue_us=6.912 download_us=69.167 download_again_us=5.984 kernel_wait_derived_us=63.183 total_us=94.607
+CHAIN4150 arm=F iter=51 sync_idle_us=0.304 launch_floor_1x1_us=3.072 tiny_roundtrip_us=10.384 event_record_pair_us=2.896 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=52 l1_issue_us=2.992 l2_issue_us=2.928 download_us=68.992 download_again_us=6.208 kernel_wait_derived_us=62.784 total_us=74.912
+CHAIN4150 arm=ER iter=52 l1_span_us=49.568 l2_span_us=20.032 chain_gpu_us=69.600 download_us=68.640 l1_issue_us=4.976 l2_issue_us=4.479
+CHAIN4150 arm=I iter=52 l1_iso_us=49.344 l2_iso_us=20.224 l1_host_us=3.024 l2_host_us=2.944
+CHAIN4150 arm=P iter=52 h2d_upload_us=10.848 l1_issue_us=7.584 l2_issue_us=6.864 download_us=69.568 download_again_us=5.743 kernel_wait_derived_us=63.825 total_us=94.864
+CHAIN4150 arm=E iter=52 up_gpu_us=10.944 l1_span_us=54.272 l2_span_us=20.032 chain_gpu_us=74.304 download_us=69.632 l1_issue_us=9.600 l2_issue_us=8.416
+CHAIN4150 arm=F iter=52 sync_idle_us=0.288 launch_floor_1x1_us=3.104 tiny_roundtrip_us=9.759 event_record_pair_us=2.816 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=53 l1_span_us=50.720 l2_span_us=20.288 chain_gpu_us=71.008 download_us=68.608 l1_issue_us=4.880 l2_issue_us=4.768
+CHAIN4150 arm=I iter=53 l1_iso_us=50.592 l2_iso_us=20.320 l1_host_us=2.912 l2_host_us=2.912
+CHAIN4150 arm=P iter=53 h2d_upload_us=11.024 l1_issue_us=7.520 l2_issue_us=6.800 download_us=69.455 download_again_us=5.856 kernel_wait_derived_us=63.599 total_us=94.799
+CHAIN4150 arm=E iter=53 up_gpu_us=11.488 l1_span_us=54.144 l2_span_us=20.288 chain_gpu_us=74.432 download_us=69.936 l1_issue_us=9.392 l2_issue_us=8.400
+CHAIN4150 arm=PR iter=53 l1_issue_us=2.976 l2_issue_us=2.912 download_us=68.432 download_again_us=6.128 kernel_wait_derived_us=62.304 total_us=74.320
+CHAIN4150 arm=F iter=53 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=9.712 event_record_pair_us=2.768 event_pair_gpu_us=1.024
+CHAIN4150 arm=I iter=54 l1_iso_us=50.880 l2_iso_us=22.016 l1_host_us=3.008 l2_host_us=2.896
+CHAIN4150 arm=P iter=54 h2d_upload_us=10.800 l1_issue_us=7.568 l2_issue_us=6.896 download_us=67.567 download_again_us=5.776 kernel_wait_derived_us=61.791 total_us=92.831
+CHAIN4150 arm=E iter=54 up_gpu_us=10.752 l1_span_us=53.536 l2_span_us=20.160 chain_gpu_us=73.696 download_us=69.023 l1_issue_us=9.872 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=54 l1_issue_us=3.056 l2_issue_us=3.088 download_us=68.000 download_again_us=6.080 kernel_wait_derived_us=61.920 total_us=74.144
+CHAIN4150 arm=ER iter=54 l1_span_us=51.200 l2_span_us=20.000 chain_gpu_us=71.200 download_us=68.735 l1_issue_us=4.384 l2_issue_us=4.512
+CHAIN4150 arm=F iter=54 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.368 event_record_pair_us=2.832 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=55 h2d_upload_us=10.944 l1_issue_us=7.664 l2_issue_us=6.752 download_us=69.423 download_again_us=4.848 kernel_wait_derived_us=64.575 total_us=94.783
+CHAIN4150 arm=E iter=55 up_gpu_us=10.080 l1_span_us=54.272 l2_span_us=20.032 chain_gpu_us=74.304 download_us=61.327 l1_issue_us=9.792 l2_issue_us=8.256
+CHAIN4150 arm=PR iter=55 l1_issue_us=3.024 l2_issue_us=3.120 download_us=68.976 download_again_us=6.096 kernel_wait_derived_us=62.880 total_us=75.120
+CHAIN4150 arm=ER iter=55 l1_span_us=51.424 l2_span_us=20.288 chain_gpu_us=71.712 download_us=68.847 l1_issue_us=4.816 l2_issue_us=4.432
+CHAIN4150 arm=I iter=55 l1_iso_us=51.040 l2_iso_us=22.432 l1_host_us=3.072 l2_host_us=3.328
+CHAIN4150 arm=F iter=55 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=9.968 event_record_pair_us=2.880 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=56 up_gpu_us=11.968 l1_span_us=54.976 l2_span_us=20.320 chain_gpu_us=75.296 download_us=69.487 l1_issue_us=9.712 l2_issue_us=8.272
+CHAIN4150 arm=PR iter=56 l1_issue_us=2.976 l2_issue_us=2.880 download_us=68.544 download_again_us=6.288 kernel_wait_derived_us=62.256 total_us=74.400
+CHAIN4150 arm=ER iter=56 l1_span_us=49.568 l2_span_us=20.224 chain_gpu_us=69.792 download_us=68.847 l1_issue_us=4.848 l2_issue_us=4.528
+CHAIN4150 arm=I iter=56 l1_iso_us=50.656 l2_iso_us=20.384 l1_host_us=3.088 l2_host_us=3.136
+CHAIN4150 arm=P iter=56 h2d_upload_us=10.720 l1_issue_us=7.504 l2_issue_us=6.896 download_us=69.376 download_again_us=5.888 kernel_wait_derived_us=63.488 total_us=94.496
+CHAIN4150 arm=F iter=56 sync_idle_us=0.272 launch_floor_1x1_us=2.976 tiny_roundtrip_us=10.496 event_record_pair_us=2.800 event_pair_gpu_us=1.024
+CHAIN4150 arm=PR iter=57 l1_issue_us=2.944 l2_issue_us=2.912 download_us=68.880 download_again_us=6.192 kernel_wait_derived_us=62.688 total_us=74.736
+CHAIN4150 arm=ER iter=57 l1_span_us=49.600 l2_span_us=20.224 chain_gpu_us=69.824 download_us=68.959 l1_issue_us=4.912 l2_issue_us=4.352
+CHAIN4150 arm=I iter=57 l1_iso_us=50.720 l2_iso_us=21.600 l1_host_us=3.024 l2_host_us=3.264
+CHAIN4150 arm=P iter=57 h2d_upload_us=10.672 l1_issue_us=7.568 l2_issue_us=6.912 download_us=69.488 download_again_us=5.712 kernel_wait_derived_us=63.776 total_us=94.640
+CHAIN4150 arm=E iter=57 up_gpu_us=11.552 l1_span_us=54.688 l2_span_us=20.320 chain_gpu_us=75.008 download_us=69.712 l1_issue_us=9.599 l2_issue_us=8.000
+CHAIN4150 arm=F iter=57 sync_idle_us=0.288 launch_floor_1x1_us=3.040 tiny_roundtrip_us=10.224 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=58 l1_span_us=50.848 l2_span_us=20.288 chain_gpu_us=71.136 download_us=68.720 l1_issue_us=4.928 l2_issue_us=4.751
+CHAIN4150 arm=I iter=58 l1_iso_us=49.312 l2_iso_us=20.256 l1_host_us=3.088 l2_host_us=2.832
+CHAIN4150 arm=P iter=58 h2d_upload_us=11.024 l1_issue_us=7.456 l2_issue_us=6.896 download_us=69.071 download_again_us=5.744 kernel_wait_derived_us=63.327 total_us=94.447
+CHAIN4150 arm=E iter=58 up_gpu_us=10.944 l1_span_us=54.624 l2_span_us=20.320 chain_gpu_us=74.944 download_us=69.343 l1_issue_us=9.552 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=58 l1_issue_us=3.056 l2_issue_us=2.928 download_us=68.672 download_again_us=6.175 kernel_wait_derived_us=62.497 total_us=74.656
+CHAIN4150 arm=F iter=58 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.336 event_record_pair_us=2.752 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=59 l1_iso_us=50.848 l2_iso_us=20.224 l1_host_us=3.216 l2_host_us=2.944
+CHAIN4150 arm=P iter=59 h2d_upload_us=10.944 l1_issue_us=7.695 l2_issue_us=6.880 download_us=68.528 download_again_us=5.872 kernel_wait_derived_us=62.656 total_us=94.047
+CHAIN4150 arm=E iter=59 up_gpu_us=11.680 l1_span_us=54.528 l2_span_us=20.288 chain_gpu_us=74.816 download_us=69.839 l1_issue_us=9.904 l2_issue_us=8.304
+CHAIN4150 arm=PR iter=59 l1_issue_us=3.088 l2_issue_us=2.992 download_us=68.799 download_again_us=6.128 kernel_wait_derived_us=62.671 total_us=74.879
+CHAIN4150 arm=ER iter=59 l1_span_us=51.392 l2_span_us=20.288 chain_gpu_us=71.680 download_us=68.400 l1_issue_us=5.088 l2_issue_us=4.432
+CHAIN4150 arm=F iter=59 sync_idle_us=0.272 launch_floor_1x1_us=2.960 tiny_roundtrip_us=9.791 event_record_pair_us=2.880 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=60 h2d_upload_us=10.912 l1_issue_us=7.488 l2_issue_us=6.784 download_us=70.000 download_again_us=5.712 kernel_wait_derived_us=64.288 total_us=95.184
+CHAIN4150 arm=E iter=60 up_gpu_us=10.944 l1_span_us=53.024 l2_span_us=20.288 chain_gpu_us=73.312 download_us=61.904 l1_issue_us=9.455 l2_issue_us=8.192
+CHAIN4150 arm=PR iter=60 l1_issue_us=2.944 l2_issue_us=3.200 download_us=67.615 download_again_us=6.064 kernel_wait_derived_us=61.551 total_us=73.759
+CHAIN4150 arm=ER iter=60 l1_span_us=49.376 l2_span_us=20.320 chain_gpu_us=69.696 download_us=68.720 l1_issue_us=4.800 l2_issue_us=4.480
+CHAIN4150 arm=I iter=60 l1_iso_us=50.688 l2_iso_us=19.904 l1_host_us=2.960 l2_host_us=2.896
+CHAIN4150 arm=F iter=60 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.768 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=61 up_gpu_us=11.456 l1_span_us=54.784 l2_span_us=20.288 chain_gpu_us=75.072 download_us=69.792 l1_issue_us=9.904 l2_issue_us=7.999
+CHAIN4150 arm=PR iter=61 l1_issue_us=3.184 l2_issue_us=2.960 download_us=68.479 download_again_us=6.288 kernel_wait_derived_us=62.191 total_us=74.623
+CHAIN4150 arm=ER iter=61 l1_span_us=51.072 l2_span_us=20.320 chain_gpu_us=71.392 download_us=68.160 l1_issue_us=4.784 l2_issue_us=4.688
+CHAIN4150 arm=I iter=61 l1_iso_us=50.720 l2_iso_us=22.336 l1_host_us=3.040 l2_host_us=3.136
+CHAIN4150 arm=P iter=61 h2d_upload_us=10.832 l1_issue_us=7.712 l2_issue_us=6.992 download_us=69.407 download_again_us=6.144 kernel_wait_derived_us=63.263 total_us=94.943
+CHAIN4150 arm=F iter=61 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=10.944 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=62 l1_issue_us=2.928 l2_issue_us=2.976 download_us=68.223 download_again_us=6.112 kernel_wait_derived_us=62.111 total_us=74.127
+CHAIN4150 arm=ER iter=62 l1_span_us=49.568 l2_span_us=20.064 chain_gpu_us=69.632 download_us=68.928 l1_issue_us=4.576 l2_issue_us=4.656
+CHAIN4150 arm=I iter=62 l1_iso_us=50.400 l2_iso_us=20.288 l1_host_us=2.960 l2_host_us=2.848
+CHAIN4150 arm=P iter=62 h2d_upload_us=10.720 l1_issue_us=7.168 l2_issue_us=6.608 download_us=69.471 download_again_us=5.760 kernel_wait_derived_us=63.711 total_us=93.967
+CHAIN4150 arm=E iter=62 up_gpu_us=11.360 l1_span_us=52.896 l2_span_us=20.224 chain_gpu_us=73.120 download_us=69.199 l1_issue_us=9.232 l2_issue_us=7.952
+CHAIN4150 arm=F iter=62 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.128 event_record_pair_us=2.864 event_pair_gpu_us=0.768
+CHAIN4150 arm=ER iter=63 l1_span_us=50.912 l2_span_us=20.288 chain_gpu_us=71.200 download_us=68.512 l1_issue_us=4.848 l2_issue_us=4.288
+CHAIN4150 arm=I iter=63 l1_iso_us=50.816 l2_iso_us=20.352 l1_host_us=2.976 l2_host_us=2.944
+CHAIN4150 arm=P iter=63 h2d_upload_us=10.944 l1_issue_us=7.488 l2_issue_us=6.672 download_us=69.935 download_again_us=5.792 kernel_wait_derived_us=64.143 total_us=95.039
+CHAIN4150 arm=E iter=63 up_gpu_us=10.752 l1_span_us=54.048 l2_span_us=20.288 chain_gpu_us=74.336 download_us=69.391 l1_issue_us=9.216 l2_issue_us=7.920
+CHAIN4150 arm=PR iter=63 l1_issue_us=2.864 l2_issue_us=2.768 download_us=68.576 download_again_us=6.112 kernel_wait_derived_us=62.464 total_us=74.208
+CHAIN4150 arm=F iter=63 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=10.720 event_record_pair_us=2.784 event_pair_gpu_us=0.768
+CHAIN4150 arm=I iter=64 l1_iso_us=50.432 l2_iso_us=20.288 l1_host_us=2.784 l2_host_us=3.136
+CHAIN4150 arm=P iter=64 h2d_upload_us=11.040 l1_issue_us=7.328 l2_issue_us=6.736 download_us=68.847 download_again_us=5.824 kernel_wait_derived_us=63.023 total_us=93.951
+CHAIN4150 arm=E iter=64 up_gpu_us=10.976 l1_span_us=54.272 l2_span_us=20.320 chain_gpu_us=74.592 download_us=69.791 l1_issue_us=9.344 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=64 l1_issue_us=2.976 l2_issue_us=2.816 download_us=68.464 download_again_us=6.159 kernel_wait_derived_us=62.305 total_us=74.256
+CHAIN4150 arm=ER iter=64 l1_span_us=51.136 l2_span_us=20.288 chain_gpu_us=71.424 download_us=68.816 l1_issue_us=4.752 l2_issue_us=4.400
+CHAIN4150 arm=F iter=64 sync_idle_us=0.304 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.648 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=65 h2d_upload_us=10.704 l1_issue_us=7.343 l2_issue_us=6.768 download_us=69.312 download_again_us=5.696 kernel_wait_derived_us=63.616 total_us=94.127
+CHAIN4150 arm=E iter=65 up_gpu_us=10.880 l1_span_us=54.496 l2_span_us=20.288 chain_gpu_us=74.784 download_us=69.871 l1_issue_us=9.216 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=65 l1_issue_us=2.880 l2_issue_us=2.736 download_us=68.335 download_again_us=6.288 kernel_wait_derived_us=62.047 total_us=73.951
+CHAIN4150 arm=ER iter=65 l1_span_us=49.504 l2_span_us=20.096 chain_gpu_us=69.600 download_us=68.944 l1_issue_us=4.864 l2_issue_us=4.256
+CHAIN4150 arm=I iter=65 l1_iso_us=50.464 l2_iso_us=23.456 l1_host_us=2.912 l2_host_us=4.608
+CHAIN4150 arm=F iter=65 sync_idle_us=0.272 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.704 event_record_pair_us=2.768 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=66 up_gpu_us=11.232 l1_span_us=52.768 l2_span_us=20.224 chain_gpu_us=72.992 download_us=62.015 l1_issue_us=9.104 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=66 l1_issue_us=2.976 l2_issue_us=2.896 download_us=68.479 download_again_us=6.352 kernel_wait_derived_us=62.127 total_us=74.351
+CHAIN4150 arm=ER iter=66 l1_span_us=51.360 l2_span_us=20.288 chain_gpu_us=71.648 download_us=68.704 l1_issue_us=4.896 l2_issue_us=4.352
+CHAIN4150 arm=I iter=66 l1_iso_us=50.752 l2_iso_us=20.064 l1_host_us=3.072 l2_host_us=2.784
+CHAIN4150 arm=P iter=66 h2d_upload_us=11.040 l1_issue_us=7.328 l2_issue_us=6.688 download_us=69.839 download_again_us=6.048 kernel_wait_derived_us=63.791 total_us=94.895
+CHAIN4150 arm=F iter=66 sync_idle_us=0.304 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.352 event_record_pair_us=2.832 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=67 l1_issue_us=2.864 l2_issue_us=2.880 download_us=68.384 download_again_us=6.112 kernel_wait_derived_us=62.272 total_us=74.128
+CHAIN4150 arm=ER iter=67 l1_span_us=49.568 l2_span_us=20.096 chain_gpu_us=69.664 download_us=68.944 l1_issue_us=4.784 l2_issue_us=4.336
+CHAIN4150 arm=I iter=67 l1_iso_us=50.656 l2_iso_us=21.344 l1_host_us=2.896 l2_host_us=3.168
+CHAIN4150 arm=P iter=67 h2d_upload_us=10.928 l1_issue_us=7.344 l2_issue_us=6.720 download_us=69.999 download_again_us=5.776 kernel_wait_derived_us=64.223 total_us=94.991
+CHAIN4150 arm=E iter=67 up_gpu_us=11.680 l1_span_us=54.464 l2_span_us=20.320 chain_gpu_us=74.784 download_us=70.208 l1_issue_us=9.120 l2_issue_us=7.808
+CHAIN4150 arm=F iter=67 sync_idle_us=0.288 launch_floor_1x1_us=2.927 tiny_roundtrip_us=9.728 event_record_pair_us=2.832 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=68 l1_span_us=50.976 l2_span_us=20.224 chain_gpu_us=71.200 download_us=68.512 l1_issue_us=4.560 l2_issue_us=4.464
+CHAIN4150 arm=I iter=68 l1_iso_us=50.496 l2_iso_us=20.352 l1_host_us=2.976 l2_host_us=2.736
+CHAIN4150 arm=P iter=68 h2d_upload_us=10.720 l1_issue_us=7.280 l2_issue_us=6.624 download_us=69.775 download_again_us=5.792 kernel_wait_derived_us=63.983 total_us=94.399
+CHAIN4150 arm=E iter=68 up_gpu_us=10.944 l1_span_us=52.704 l2_span_us=20.288 chain_gpu_us=72.992 download_us=69.119 l1_issue_us=9.328 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=68 l1_issue_us=2.960 l2_issue_us=2.720 download_us=68.176 download_again_us=5.968 kernel_wait_derived_us=62.208 total_us=73.856
+CHAIN4150 arm=F iter=68 sync_idle_us=0.272 launch_floor_1x1_us=2.768 tiny_roundtrip_us=9.904 event_record_pair_us=2.912 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=69 l1_iso_us=50.592 l2_iso_us=20.192 l1_host_us=2.976 l2_host_us=2.688
+CHAIN4150 arm=P iter=69 h2d_upload_us=10.736 l1_issue_us=7.344 l2_issue_us=6.736 download_us=69.951 download_again_us=5.808 kernel_wait_derived_us=64.143 total_us=94.767
+CHAIN4150 arm=E iter=69 up_gpu_us=11.040 l1_span_us=53.056 l2_span_us=20.192 chain_gpu_us=73.248 download_us=69.295 l1_issue_us=9.408 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=69 l1_issue_us=2.976 l2_issue_us=2.784 download_us=68.096 download_again_us=6.128 kernel_wait_derived_us=61.968 total_us=73.856
+CHAIN4150 arm=ER iter=69 l1_span_us=49.472 l2_span_us=20.160 chain_gpu_us=69.632 download_us=68.976 l1_issue_us=4.896 l2_issue_us=4.207
+CHAIN4150 arm=F iter=69 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.288 event_record_pair_us=2.832 event_pair_gpu_us=0.768
+CHAIN4150 arm=P iter=70 h2d_upload_us=10.832 l1_issue_us=7.392 l2_issue_us=6.720 download_us=68.944 download_again_us=5.888 kernel_wait_derived_us=63.056 total_us=93.888
+CHAIN4150 arm=E iter=70 up_gpu_us=12.160 l1_span_us=53.056 l2_span_us=20.288 chain_gpu_us=73.344 download_us=69.375 l1_issue_us=9.408 l2_issue_us=7.920
+CHAIN4150 arm=PR iter=70 l1_issue_us=2.928 l2_issue_us=2.784 download_us=68.048 download_again_us=6.127 kernel_wait_derived_us=61.921 total_us=73.760
+CHAIN4150 arm=ER iter=70 l1_span_us=50.432 l2_span_us=20.320 chain_gpu_us=70.752 download_us=68.112 l1_issue_us=4.464 l2_issue_us=4.416
+CHAIN4150 arm=I iter=70 l1_iso_us=49.120 l2_iso_us=20.256 l1_host_us=2.832 l2_host_us=2.960
+CHAIN4150 arm=F iter=70 sync_idle_us=0.288 launch_floor_1x1_us=2.800 tiny_roundtrip_us=10.208 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=71 up_gpu_us=11.232 l1_span_us=52.896 l2_span_us=20.256 chain_gpu_us=73.152 download_us=61.855 l1_issue_us=9.456 l2_issue_us=7.936
+CHAIN4150 arm=PR iter=71 l1_issue_us=2.976 l2_issue_us=2.912 download_us=68.224 download_again_us=6.496 kernel_wait_derived_us=61.728 total_us=74.112
+CHAIN4150 arm=ER iter=71 l1_span_us=50.752 l2_span_us=20.288 chain_gpu_us=71.040 download_us=68.448 l1_issue_us=4.608 l2_issue_us=4.351
+CHAIN4150 arm=I iter=71 l1_iso_us=50.688 l2_iso_us=20.288 l1_host_us=2.896 l2_host_us=3.024
+CHAIN4150 arm=P iter=71 h2d_upload_us=10.816 l1_issue_us=7.312 l2_issue_us=6.752 download_us=70.096 download_again_us=5.967 kernel_wait_derived_us=64.129 total_us=94.976
+CHAIN4150 arm=F iter=71 sync_idle_us=0.304 launch_floor_1x1_us=2.944 tiny_roundtrip_us=9.760 event_record_pair_us=2.784 event_pair_gpu_us=1.024
+CHAIN4150 arm=PR iter=72 l1_issue_us=2.896 l2_issue_us=2.784 download_us=68.480 download_again_us=6.096 kernel_wait_derived_us=62.384 total_us=74.160
+CHAIN4150 arm=ER iter=72 l1_span_us=49.440 l2_span_us=20.320 chain_gpu_us=69.760 download_us=68.991 l1_issue_us=4.816 l2_issue_us=4.432
+CHAIN4150 arm=I iter=72 l1_iso_us=50.624 l2_iso_us=21.344 l1_host_us=2.912 l2_host_us=3.167
+CHAIN4150 arm=P iter=72 h2d_upload_us=10.720 l1_issue_us=7.280 l2_issue_us=6.768 download_us=69.760 download_again_us=5.648 kernel_wait_derived_us=64.112 total_us=94.528
+CHAIN4150 arm=E iter=72 up_gpu_us=12.384 l1_span_us=54.080 l2_span_us=20.288 chain_gpu_us=74.368 download_us=69.520 l1_issue_us=9.136 l2_issue_us=7.920
+CHAIN4150 arm=F iter=72 sync_idle_us=0.288 launch_floor_1x1_us=2.960 tiny_roundtrip_us=9.919 event_record_pair_us=2.752 event_pair_gpu_us=0.768
+CHAIN4150 arm=ER iter=73 l1_span_us=51.104 l2_span_us=20.288 chain_gpu_us=71.392 download_us=68.144 l1_issue_us=5.024 l2_issue_us=4.496
+CHAIN4150 arm=I iter=73 l1_iso_us=50.784 l2_iso_us=20.416 l1_host_us=2.912 l2_host_us=2.912
+CHAIN4150 arm=P iter=73 h2d_upload_us=10.880 l1_issue_us=7.296 l2_issue_us=6.848 download_us=69.791 download_again_us=5.776 kernel_wait_derived_us=64.015 total_us=94.815
+CHAIN4150 arm=E iter=73 up_gpu_us=10.880 l1_span_us=54.496 l2_span_us=20.288 chain_gpu_us=74.784 download_us=69.328 l1_issue_us=9.408 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=73 l1_issue_us=2.976 l2_issue_us=2.720 download_us=69.216 download_again_us=6.208 kernel_wait_derived_us=63.008 total_us=74.912
+CHAIN4150 arm=F iter=73 sync_idle_us=0.272 launch_floor_1x1_us=2.736 tiny_roundtrip_us=10.480 event_record_pair_us=2.720 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=74 l1_iso_us=50.944 l2_iso_us=20.224 l1_host_us=2.848 l2_host_us=2.768
+CHAIN4150 arm=P iter=74 h2d_upload_us=11.104 l1_issue_us=7.392 l2_issue_us=6.672 download_us=69.807 download_again_us=5.696 kernel_wait_derived_us=64.111 total_us=94.975
+CHAIN4150 arm=E iter=74 up_gpu_us=11.200 l1_span_us=52.832 l2_span_us=20.320 chain_gpu_us=73.152 download_us=69.343 l1_issue_us=9.136 l2_issue_us=7.920
+CHAIN4150 arm=PR iter=74 l1_issue_us=2.864 l2_issue_us=2.976 download_us=68.080 download_again_us=6.144 kernel_wait_derived_us=61.936 total_us=73.920
+CHAIN4150 arm=ER iter=74 l1_span_us=49.568 l2_span_us=20.192 chain_gpu_us=69.760 download_us=69.071 l1_issue_us=4.912 l2_issue_us=4.288
+CHAIN4150 arm=F iter=74 sync_idle_us=0.272 launch_floor_1x1_us=2.928 tiny_roundtrip_us=9.728 event_record_pair_us=2.992 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=75 h2d_upload_us=10.928 l1_issue_us=7.296 l2_issue_us=6.688 download_us=68.975 download_again_us=5.760 kernel_wait_derived_us=63.215 total_us=93.887
+CHAIN4150 arm=E iter=75 up_gpu_us=10.976 l1_span_us=53.280 l2_span_us=20.320 chain_gpu_us=73.600 download_us=69.279 l1_issue_us=9.408 l2_issue_us=8.160
+CHAIN4150 arm=PR iter=75 l1_issue_us=2.848 l2_issue_us=2.864 download_us=67.968 download_again_us=6.240 kernel_wait_derived_us=61.728 total_us=73.680
+CHAIN4150 arm=ER iter=75 l1_span_us=49.280 l2_span_us=20.160 chain_gpu_us=69.440 download_us=68.879 l1_issue_us=4.768 l2_issue_us=4.336
+CHAIN4150 arm=I iter=75 l1_iso_us=50.944 l2_iso_us=20.352 l1_host_us=2.864 l2_host_us=2.800
+CHAIN4150 arm=F iter=75 sync_idle_us=0.272 launch_floor_1x1_us=2.832 tiny_roundtrip_us=9.776 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=76 up_gpu_us=11.168 l1_span_us=54.080 l2_span_us=20.288 chain_gpu_us=74.368 download_us=69.071 l1_issue_us=9.424 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=76 l1_issue_us=3.024 l2_issue_us=2.736 download_us=68.704 download_again_us=6.240 kernel_wait_derived_us=62.464 total_us=74.464
+CHAIN4150 arm=ER iter=76 l1_span_us=51.264 l2_span_us=20.288 chain_gpu_us=71.552 download_us=68.671 l1_issue_us=4.640 l2_issue_us=4.464
+CHAIN4150 arm=I iter=76 l1_iso_us=50.816 l2_iso_us=20.352 l1_host_us=2.928 l2_host_us=2.720
+CHAIN4150 arm=P iter=76 h2d_upload_us=11.008 l1_issue_us=7.456 l2_issue_us=6.768 download_us=69.568 download_again_us=6.144 kernel_wait_derived_us=63.424 total_us=94.800
+CHAIN4150 arm=F iter=76 sync_idle_us=0.320 launch_floor_1x1_us=3.056 tiny_roundtrip_us=10.544 event_record_pair_us=2.992 event_pair_gpu_us=0.992
+CHAIN4150 arm=PR iter=77 l1_issue_us=2.832 l2_issue_us=2.800 download_us=68.976 download_again_us=6.048 kernel_wait_derived_us=62.928 total_us=74.608
+CHAIN4150 arm=ER iter=77 l1_span_us=51.264 l2_span_us=20.320 chain_gpu_us=71.584 download_us=68.943 l1_issue_us=4.544 l2_issue_us=4.448
+CHAIN4150 arm=I iter=77 l1_iso_us=49.376 l2_iso_us=20.352 l1_host_us=3.104 l2_host_us=3.072
+CHAIN4150 arm=P iter=77 h2d_upload_us=11.152 l1_issue_us=7.200 l2_issue_us=6.688 download_us=69.344 download_again_us=5.920 kernel_wait_derived_us=63.424 total_us=94.384
+CHAIN4150 arm=E iter=77 up_gpu_us=11.488 l1_span_us=52.640 l2_span_us=20.352 chain_gpu_us=72.992 download_us=60.480 l1_issue_us=9.088 l2_issue_us=9.488
+CHAIN4150 arm=F iter=77 sync_idle_us=0.288 launch_floor_1x1_us=2.880 tiny_roundtrip_us=10.240 event_record_pair_us=2.672 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=78 l1_span_us=50.944 l2_span_us=20.320 chain_gpu_us=71.264 download_us=68.511 l1_issue_us=4.496 l2_issue_us=4.288
+CHAIN4150 arm=I iter=78 l1_iso_us=49.184 l2_iso_us=21.408 l1_host_us=2.928 l2_host_us=2.735
+CHAIN4150 arm=P iter=78 h2d_upload_us=10.768 l1_issue_us=7.440 l2_issue_us=6.768 download_us=69.648 download_again_us=5.823 kernel_wait_derived_us=63.825 total_us=94.624
+CHAIN4150 arm=E iter=78 up_gpu_us=11.648 l1_span_us=53.856 l2_span_us=20.288 chain_gpu_us=74.144 download_us=69.344 l1_issue_us=9.136 l2_issue_us=7.920
+CHAIN4150 arm=PR iter=78 l1_issue_us=2.896 l2_issue_us=2.768 download_us=68.895 download_again_us=5.952 kernel_wait_derived_us=62.943 total_us=74.559
+CHAIN4150 arm=F iter=78 sync_idle_us=0.272 launch_floor_1x1_us=2.752 tiny_roundtrip_us=10.192 event_record_pair_us=2.784 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=79 l1_iso_us=49.472 l2_iso_us=20.320 l1_host_us=2.944 l2_host_us=2.864
+CHAIN4150 arm=P iter=79 h2d_upload_us=10.848 l1_issue_us=7.376 l2_issue_us=6.832 download_us=69.583 download_again_us=5.968 kernel_wait_derived_us=63.615 total_us=94.639
+CHAIN4150 arm=E iter=79 up_gpu_us=11.072 l1_span_us=54.048 l2_span_us=20.320 chain_gpu_us=74.368 download_us=69.536 l1_issue_us=9.200 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=79 l1_issue_us=2.912 l2_issue_us=2.736 download_us=68.544 download_again_us=6.208 kernel_wait_derived_us=62.336 total_us=74.192
+CHAIN4150 arm=ER iter=79 l1_span_us=50.688 l2_span_us=20.320 chain_gpu_us=71.008 download_us=68.591 l1_issue_us=4.496 l2_issue_us=4.352
+CHAIN4150 arm=F iter=79 sync_idle_us=0.272 launch_floor_1x1_us=2.912 tiny_roundtrip_us=9.760 event_record_pair_us=2.832 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=80 h2d_upload_us=10.928 l1_issue_us=7.280 l2_issue_us=6.720 download_us=69.775 download_again_us=5.792 kernel_wait_derived_us=63.983 total_us=94.703
+CHAIN4150 arm=E iter=80 up_gpu_us=11.744 l1_span_us=54.560 l2_span_us=20.320 chain_gpu_us=74.880 download_us=68.927 l1_issue_us=9.120 l2_issue_us=7.712
+CHAIN4150 arm=PR iter=80 l1_issue_us=2.848 l2_issue_us=2.864 download_us=68.480 download_again_us=6.224 kernel_wait_derived_us=62.256 total_us=74.192
+CHAIN4150 arm=ER iter=80 l1_span_us=49.344 l2_span_us=20.256 chain_gpu_us=69.600 download_us=69.007 l1_issue_us=4.752 l2_issue_us=4.224
+CHAIN4150 arm=I iter=80 l1_iso_us=50.560 l2_iso_us=20.416 l1_host_us=2.912 l2_host_us=2.784
+CHAIN4150 arm=F iter=80 sync_idle_us=0.272 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.920 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=81 up_gpu_us=11.936 l1_span_us=54.272 l2_span_us=20.288 chain_gpu_us=74.560 download_us=69.743 l1_issue_us=9.104 l2_issue_us=7.968
+CHAIN4150 arm=PR iter=81 l1_issue_us=2.976 l2_issue_us=2.800 download_us=68.624 download_again_us=6.384 kernel_wait_derived_us=62.240 total_us=74.400
+CHAIN4150 arm=ER iter=81 l1_span_us=50.848 l2_span_us=20.288 chain_gpu_us=71.136 download_us=68.127 l1_issue_us=4.880 l2_issue_us=4.480
+CHAIN4150 arm=I iter=81 l1_iso_us=49.504 l2_iso_us=20.288 l1_host_us=3.088 l2_host_us=2.880
+CHAIN4150 arm=P iter=81 h2d_upload_us=10.912 l1_issue_us=7.344 l2_issue_us=6.752 download_us=69.520 download_again_us=5.904 kernel_wait_derived_us=63.616 total_us=94.528
+CHAIN4150 arm=F iter=81 sync_idle_us=0.304 launch_floor_1x1_us=2.912 tiny_roundtrip_us=9.920 event_record_pair_us=2.752 event_pair_gpu_us=0.992
+CHAIN4150 arm=PR iter=82 l1_issue_us=2.896 l2_issue_us=2.976 download_us=68.688 download_again_us=6.176 kernel_wait_derived_us=62.512 total_us=74.560
+CHAIN4150 arm=ER iter=82 l1_span_us=50.560 l2_span_us=20.288 chain_gpu_us=70.848 download_us=68.447 l1_issue_us=4.560 l2_issue_us=4.176
+CHAIN4150 arm=I iter=82 l1_iso_us=50.688 l2_iso_us=20.320 l1_host_us=2.864 l2_host_us=2.912
+CHAIN4150 arm=P iter=82 h2d_upload_us=10.639 l1_issue_us=7.248 l2_issue_us=6.576 download_us=69.600 download_again_us=5.872 kernel_wait_derived_us=63.728 total_us=94.063
+CHAIN4150 arm=E iter=82 up_gpu_us=10.816 l1_span_us=54.368 l2_span_us=20.288 chain_gpu_us=74.656 download_us=69.855 l1_issue_us=9.280 l2_issue_us=7.808
+CHAIN4150 arm=F iter=82 sync_idle_us=0.272 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.128 event_record_pair_us=2.704 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=83 l1_span_us=51.040 l2_span_us=20.320 chain_gpu_us=71.360 download_us=68.207 l1_issue_us=5.056 l2_issue_us=4.272
+CHAIN4150 arm=I iter=83 l1_iso_us=50.944 l2_iso_us=20.480 l1_host_us=2.880 l2_host_us=2.752
+CHAIN4150 arm=P iter=83 h2d_upload_us=10.944 l1_issue_us=7.344 l2_issue_us=6.784 download_us=69.504 download_again_us=5.728 kernel_wait_derived_us=63.776 total_us=94.576
+CHAIN4150 arm=E iter=83 up_gpu_us=15.424 l1_span_us=54.368 l2_span_us=20.288 chain_gpu_us=74.656 download_us=69.328 l1_issue_us=9.616 l2_issue_us=7.936
+CHAIN4150 arm=PR iter=83 l1_issue_us=2.912 l2_issue_us=2.752 download_us=67.951 download_again_us=6.112 kernel_wait_derived_us=61.839 total_us=73.615
+CHAIN4150 arm=F iter=83 sync_idle_us=0.256 launch_floor_1x1_us=2.784 tiny_roundtrip_us=10.128 event_record_pair_us=2.800 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=84 l1_iso_us=50.592 l2_iso_us=20.256 l1_host_us=3.008 l2_host_us=2.896
+CHAIN4150 arm=P iter=84 h2d_upload_us=10.784 l1_issue_us=7.440 l2_issue_us=6.736 download_us=70.016 download_again_us=5.712 kernel_wait_derived_us=64.304 total_us=94.976
+CHAIN4150 arm=E iter=84 up_gpu_us=11.040 l1_span_us=54.144 l2_span_us=20.288 chain_gpu_us=74.432 download_us=69.824 l1_issue_us=9.168 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=84 l1_issue_us=2.992 l2_issue_us=2.800 download_us=68.319 download_again_us=6.192 kernel_wait_derived_us=62.127 total_us=74.111
+CHAIN4150 arm=ER iter=84 l1_span_us=49.408 l2_span_us=20.224 chain_gpu_us=69.632 download_us=69.023 l1_issue_us=4.720 l2_issue_us=4.448
+CHAIN4150 arm=F iter=84 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=9.744 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=85 h2d_upload_us=11.008 l1_issue_us=7.424 l2_issue_us=6.768 download_us=69.887 download_again_us=5.712 kernel_wait_derived_us=64.175 total_us=95.087
+CHAIN4150 arm=E iter=85 up_gpu_us=11.008 l1_span_us=54.624 l2_span_us=20.288 chain_gpu_us=74.912 download_us=69.904 l1_issue_us=9.360 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=85 l1_issue_us=2.864 l2_issue_us=2.831 download_us=68.368 download_again_us=6.288 kernel_wait_derived_us=62.080 total_us=74.063
+CHAIN4150 arm=ER iter=85 l1_span_us=50.720 l2_span_us=20.288 chain_gpu_us=71.008 download_us=68.079 l1_issue_us=4.928 l2_issue_us=4.304
+CHAIN4150 arm=I iter=85 l1_iso_us=50.944 l2_iso_us=20.416 l1_host_us=3.088 l2_host_us=2.912
+CHAIN4150 arm=F iter=85 sync_idle_us=0.272 launch_floor_1x1_us=2.880 tiny_roundtrip_us=9.759 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=86 up_gpu_us=11.744 l1_span_us=54.624 l2_span_us=20.288 chain_gpu_us=74.912 download_us=69.648 l1_issue_us=9.472 l2_issue_us=8.160
+CHAIN4150 arm=PR iter=86 l1_issue_us=2.944 l2_issue_us=2.800 download_us=68.575 download_again_us=6.400 kernel_wait_derived_us=62.175 total_us=74.319
+CHAIN4150 arm=ER iter=86 l1_span_us=49.536 l2_span_us=20.128 chain_gpu_us=69.664 download_us=68.879 l1_issue_us=4.784 l2_issue_us=4.432
+CHAIN4150 arm=I iter=86 l1_iso_us=50.720 l2_iso_us=22.176 l1_host_us=2.912 l2_host_us=3.024
+CHAIN4150 arm=P iter=86 h2d_upload_us=10.864 l1_issue_us=7.407 l2_issue_us=11.040 download_us=59.008 download_again_us=6.000 kernel_wait_derived_us=53.008 total_us=88.319
+CHAIN4150 arm=F iter=86 sync_idle_us=0.304 launch_floor_1x1_us=2.960 tiny_roundtrip_us=10.240 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=87 l1_issue_us=2.864 l2_issue_us=2.784 download_us=68.191 download_again_us=6.064 kernel_wait_derived_us=62.127 total_us=73.839
+CHAIN4150 arm=ER iter=87 l1_span_us=49.600 l2_span_us=20.160 chain_gpu_us=69.760 download_us=68.783 l1_issue_us=4.928 l2_issue_us=4.512
+CHAIN4150 arm=I iter=87 l1_iso_us=49.152 l2_iso_us=21.216 l1_host_us=2.912 l2_host_us=3.184
+CHAIN4150 arm=P iter=87 h2d_upload_us=10.720 l1_issue_us=7.248 l2_issue_us=6.672 download_us=69.759 download_again_us=5.744 kernel_wait_derived_us=64.015 total_us=94.399
+CHAIN4150 arm=E iter=87 up_gpu_us=11.072 l1_span_us=54.208 l2_span_us=20.288 chain_gpu_us=74.496 download_us=69.967 l1_issue_us=9.120 l2_issue_us=7.760
+CHAIN4150 arm=F iter=87 sync_idle_us=0.288 launch_floor_1x1_us=2.832 tiny_roundtrip_us=10.224 event_record_pair_us=2.736 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=88 l1_span_us=50.976 l2_span_us=20.320 chain_gpu_us=71.296 download_us=68.415 l1_issue_us=4.480 l2_issue_us=4.656
+CHAIN4150 arm=I iter=88 l1_iso_us=49.088 l2_iso_us=20.416 l1_host_us=2.816 l2_host_us=2.720
+CHAIN4150 arm=P iter=88 h2d_upload_us=10.719 l1_issue_us=7.328 l2_issue_us=6.752 download_us=69.024 download_again_us=5.760 kernel_wait_derived_us=63.264 total_us=93.823
+CHAIN4150 arm=E iter=88 up_gpu_us=11.008 l1_span_us=54.272 l2_span_us=20.320 chain_gpu_us=74.592 download_us=69.567 l1_issue_us=9.344 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=88 l1_issue_us=2.960 l2_issue_us=2.784 download_us=68.591 download_again_us=5.920 kernel_wait_derived_us=62.671 total_us=74.335
+CHAIN4150 arm=F iter=88 sync_idle_us=0.288 launch_floor_1x1_us=2.800 tiny_roundtrip_us=9.776 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=89 l1_iso_us=50.720 l2_iso_us=20.224 l1_host_us=3.008 l2_host_us=2.928
+CHAIN4150 arm=P iter=89 h2d_upload_us=10.992 l1_issue_us=7.616 l2_issue_us=6.816 download_us=69.248 download_again_us=5.728 kernel_wait_derived_us=63.520 total_us=94.672
+CHAIN4150 arm=E iter=89 up_gpu_us=11.008 l1_span_us=53.216 l2_span_us=20.288 chain_gpu_us=73.504 download_us=69.392 l1_issue_us=9.360 l2_issue_us=7.824
+CHAIN4150 arm=PR iter=89 l1_issue_us=2.944 l2_issue_us=2.704 download_us=67.951 download_again_us=6.096 kernel_wait_derived_us=61.855 total_us=73.599
+CHAIN4150 arm=ER iter=89 l1_span_us=50.688 l2_span_us=20.320 chain_gpu_us=71.008 download_us=67.888 l1_issue_us=4.816 l2_issue_us=4.448
+CHAIN4150 arm=F iter=89 sync_idle_us=0.272 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.696 event_record_pair_us=2.736 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=90 h2d_upload_us=10.768 l1_issue_us=7.328 l2_issue_us=6.752 download_us=69.376 download_again_us=5.728 kernel_wait_derived_us=63.648 total_us=94.224
+CHAIN4150 arm=E iter=90 up_gpu_us=11.616 l1_span_us=54.432 l2_span_us=20.288 chain_gpu_us=74.720 download_us=69.664 l1_issue_us=9.168 l2_issue_us=8.128
+CHAIN4150 arm=PR iter=90 l1_issue_us=2.864 l2_issue_us=2.944 download_us=68.415 download_again_us=6.064 kernel_wait_derived_us=62.351 total_us=74.223
+CHAIN4150 arm=ER iter=90 l1_span_us=49.376 l2_span_us=20.288 chain_gpu_us=69.664 download_us=68.959 l1_issue_us=4.832 l2_issue_us=4.288
+CHAIN4150 arm=I iter=90 l1_iso_us=50.720 l2_iso_us=20.352 l1_host_us=2.912 l2_host_us=2.944
+CHAIN4150 arm=F iter=90 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=10.064 event_record_pair_us=2.784 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=91 up_gpu_us=11.008 l1_span_us=54.144 l2_span_us=20.384 chain_gpu_us=74.528 download_us=69.328 l1_issue_us=9.344 l2_issue_us=7.968
+CHAIN4150 arm=PR iter=91 l1_issue_us=2.960 l2_issue_us=2.800 download_us=68.623 download_again_us=6.320 kernel_wait_derived_us=62.303 total_us=74.383
+CHAIN4150 arm=ER iter=91 l1_span_us=49.536 l2_span_us=20.064 chain_gpu_us=69.600 download_us=68.927 l1_issue_us=4.592 l2_issue_us=4.512
+CHAIN4150 arm=I iter=91 l1_iso_us=49.184 l2_iso_us=20.192 l1_host_us=2.928 l2_host_us=2.816
+CHAIN4150 arm=P iter=91 h2d_upload_us=11.120 l1_issue_us=7.536 l2_issue_us=6.640 download_us=69.439 download_again_us=6.208 kernel_wait_derived_us=63.231 total_us=94.735
+CHAIN4150 arm=F iter=91 sync_idle_us=0.272 launch_floor_1x1_us=2.912 tiny_roundtrip_us=9.968 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=92 l1_issue_us=2.960 l2_issue_us=2.768 download_us=69.071 download_again_us=6.256 kernel_wait_derived_us=62.815 total_us=74.799
+CHAIN4150 arm=ER iter=92 l1_span_us=50.848 l2_span_us=20.288 chain_gpu_us=71.136 download_us=68.960 l1_issue_us=5.008 l2_issue_us=4.496
+CHAIN4150 arm=I iter=92 l1_iso_us=50.656 l2_iso_us=20.256 l1_host_us=2.928 l2_host_us=2.880
+CHAIN4150 arm=P iter=92 h2d_upload_us=10.736 l1_issue_us=7.328 l2_issue_us=6.784 download_us=69.807 download_again_us=5.696 kernel_wait_derived_us=64.111 total_us=94.655
+CHAIN4150 arm=E iter=92 up_gpu_us=10.592 l1_span_us=54.464 l2_span_us=20.416 chain_gpu_us=74.880 download_us=69.759 l1_issue_us=9.200 l2_issue_us=7.888
+CHAIN4150 arm=F iter=92 sync_idle_us=0.288 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.400 event_record_pair_us=2.800 event_pair_gpu_us=0.832
+CHAIN4150 arm=ER iter=93 l1_span_us=50.848 l2_span_us=20.288 chain_gpu_us=71.136 download_us=68.415 l1_issue_us=4.848 l2_issue_us=4.304
+CHAIN4150 arm=I iter=93 l1_iso_us=50.720 l2_iso_us=20.320 l1_host_us=3.008 l2_host_us=2.704
+CHAIN4150 arm=P iter=93 h2d_upload_us=11.088 l1_issue_us=7.456 l2_issue_us=6.719 download_us=69.520 download_again_us=5.744 kernel_wait_derived_us=63.776 total_us=94.783
+CHAIN4150 arm=E iter=93 up_gpu_us=11.168 l1_span_us=53.952 l2_span_us=20.288 chain_gpu_us=74.240 download_us=69.599 l1_issue_us=8.976 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=93 l1_issue_us=2.896 l2_issue_us=2.752 download_us=69.183 download_again_us=6.256 kernel_wait_derived_us=62.927 total_us=74.831
+CHAIN4150 arm=F iter=93 sync_idle_us=0.272 launch_floor_1x1_us=2.720 tiny_roundtrip_us=9.504 event_record_pair_us=2.736 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=94 l1_iso_us=50.464 l2_iso_us=20.288 l1_host_us=2.816 l2_host_us=2.832
+CHAIN4150 arm=P iter=94 h2d_upload_us=10.639 l1_issue_us=7.456 l2_issue_us=6.736 download_us=69.584 download_again_us=4.848 kernel_wait_derived_us=64.736 total_us=94.415
+CHAIN4150 arm=E iter=94 up_gpu_us=12.416 l1_span_us=52.736 l2_span_us=20.256 chain_gpu_us=72.992 download_us=69.087 l1_issue_us=9.056 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=94 l1_issue_us=2.896 l2_issue_us=2.736 download_us=68.015 download_again_us=5.968 kernel_wait_derived_us=62.047 total_us=73.647
+CHAIN4150 arm=ER iter=94 l1_span_us=51.616 l2_span_us=20.512 chain_gpu_us=72.128 download_us=68.256 l1_issue_us=4.608 l2_issue_us=4.560
+CHAIN4150 arm=F iter=94 sync_idle_us=0.288 launch_floor_1x1_us=2.880 tiny_roundtrip_us=7.904 event_record_pair_us=3.008 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=95 h2d_upload_us=9.903 l1_issue_us=7.232 l2_issue_us=6.816 download_us=69.376 download_again_us=4.912 kernel_wait_derived_us=64.464 total_us=93.327
+CHAIN4150 arm=E iter=95 up_gpu_us=11.808 l1_span_us=55.360 l2_span_us=20.288 chain_gpu_us=75.648 download_us=68.719 l1_issue_us=9.472 l2_issue_us=8.176
+CHAIN4150 arm=PR iter=95 l1_issue_us=2.912 l2_issue_us=2.992 download_us=67.855 download_again_us=5.296 kernel_wait_derived_us=62.559 total_us=73.759
+CHAIN4150 arm=ER iter=95 l1_span_us=51.616 l2_span_us=20.288 chain_gpu_us=71.904 download_us=68.192 l1_issue_us=4.544 l2_issue_us=4.384
+CHAIN4150 arm=I iter=95 l1_iso_us=50.208 l2_iso_us=20.128 l1_host_us=3.072 l2_host_us=2.720
+CHAIN4150 arm=F iter=95 sync_idle_us=0.272 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.176 event_record_pair_us=2.720 event_pair_gpu_us=1.216
+CHAIN4150 arm=E iter=96 up_gpu_us=11.776 l1_span_us=54.208 l2_span_us=20.320 chain_gpu_us=74.528 download_us=68.783 l1_issue_us=9.632 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=96 l1_issue_us=2.960 l2_issue_us=2.912 download_us=69.199 download_again_us=5.440 kernel_wait_derived_us=63.759 total_us=75.071
+CHAIN4150 arm=ER iter=96 l1_span_us=51.168 l2_span_us=20.160 chain_gpu_us=71.328 download_us=67.904 l1_issue_us=4.608 l2_issue_us=4.352
+CHAIN4150 arm=I iter=96 l1_iso_us=51.360 l2_iso_us=22.112 l1_host_us=2.912 l2_host_us=2.768
+CHAIN4150 arm=P iter=96 h2d_upload_us=9.760 l1_issue_us=7.408 l2_issue_us=6.816 download_us=69.791 download_again_us=6.000 kernel_wait_derived_us=63.791 total_us=93.775
+CHAIN4150 arm=F iter=96 sync_idle_us=0.304 launch_floor_1x1_us=2.992 tiny_roundtrip_us=9.984 event_record_pair_us=2.784 event_pair_gpu_us=1.024
+CHAIN4150 arm=PR iter=97 l1_issue_us=2.880 l2_issue_us=2.960 download_us=68.928 download_again_us=6.047 kernel_wait_derived_us=62.881 total_us=74.768
+CHAIN4150 arm=ER iter=97 l1_span_us=49.696 l2_span_us=20.256 chain_gpu_us=69.952 download_us=67.904 l1_issue_us=4.976 l2_issue_us=4.416
+CHAIN4150 arm=I iter=97 l1_iso_us=49.120 l2_iso_us=22.016 l1_host_us=2.880 l2_host_us=2.832
+CHAIN4150 arm=P iter=97 h2d_upload_us=10.496 l1_issue_us=7.264 l2_issue_us=6.720 download_us=69.007 download_again_us=5.328 kernel_wait_derived_us=63.679 total_us=93.487
+CHAIN4150 arm=E iter=97 up_gpu_us=10.816 l1_span_us=53.984 l2_span_us=20.320 chain_gpu_us=74.304 download_us=69.648 l1_issue_us=8.672 l2_issue_us=7.904
+CHAIN4150 arm=F iter=97 sync_idle_us=0.304 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.304 event_record_pair_us=2.752 event_pair_gpu_us=1.024
+CHAIN4150 arm=ER iter=98 l1_span_us=50.848 l2_span_us=20.352 chain_gpu_us=71.200 download_us=69.376 l1_issue_us=4.624 l2_issue_us=4.336
+CHAIN4150 arm=I iter=98 l1_iso_us=50.976 l2_iso_us=20.352 l1_host_us=2.896 l2_host_us=2.672
+CHAIN4150 arm=P iter=98 h2d_upload_us=10.816 l1_issue_us=7.248 l2_issue_us=6.960 download_us=69.727 download_again_us=5.152 kernel_wait_derived_us=64.575 total_us=94.751
+CHAIN4150 arm=E iter=98 up_gpu_us=10.784 l1_span_us=55.584 l2_span_us=20.288 chain_gpu_us=75.872 download_us=68.015 l1_issue_us=9.952 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=98 l1_issue_us=2.960 l2_issue_us=2.752 download_us=67.616 download_again_us=5.184 kernel_wait_derived_us=62.432 total_us=73.328
+CHAIN4150 arm=F iter=98 sync_idle_us=0.272 launch_floor_1x1_us=2.832 tiny_roundtrip_us=8.464 event_record_pair_us=2.736 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=99 l1_iso_us=51.200 l2_iso_us=21.024 l1_host_us=2.879 l2_host_us=2.768
+CHAIN4150 arm=P iter=99 h2d_upload_us=10.160 l1_issue_us=7.312 l2_issue_us=6.768 download_us=68.239 download_again_us=4.896 kernel_wait_derived_us=63.343 total_us=92.479
+CHAIN4150 arm=E iter=99 up_gpu_us=11.264 l1_span_us=55.328 l2_span_us=20.288 chain_gpu_us=75.616 download_us=68.207 l1_issue_us=9.552 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=99 l1_issue_us=2.960 l2_issue_us=2.992 download_us=67.216 download_again_us=5.200 kernel_wait_derived_us=62.016 total_us=73.168
+CHAIN4150 arm=ER iter=99 l1_span_us=51.520 l2_span_us=20.320 chain_gpu_us=71.840 download_us=67.983 l1_issue_us=4.768 l2_issue_us=4.208
+CHAIN4150 arm=F iter=99 sync_idle_us=0.272 launch_floor_1x1_us=2.800 tiny_roundtrip_us=8.016 event_record_pair_us=2.832 event_pair_gpu_us=1.312
+CHAIN4150 arm=P iter=100 h2d_upload_us=9.856 l1_issue_us=7.568 l2_issue_us=6.704 download_us=67.775 download_again_us=5.184 kernel_wait_derived_us=62.591 total_us=91.903
+CHAIN4150 arm=E iter=100 up_gpu_us=10.848 l1_span_us=55.520 l2_span_us=20.288 chain_gpu_us=75.808 download_us=68.367 l1_issue_us=9.328 l2_issue_us=8.000
+CHAIN4150 arm=PR iter=100 l1_issue_us=2.832 l2_issue_us=3.072 download_us=67.712 download_again_us=4.896 kernel_wait_derived_us=62.816 total_us=73.616
+CHAIN4150 arm=ER iter=100 l1_span_us=50.304 l2_span_us=20.032 chain_gpu_us=70.336 download_us=67.663 l1_issue_us=4.512 l2_issue_us=4.512
+CHAIN4150 arm=I iter=100 l1_iso_us=52.160 l2_iso_us=20.832 l1_host_us=2.976 l2_host_us=3.120
+CHAIN4150 arm=F iter=100 sync_idle_us=0.272 launch_floor_1x1_us=2.896 tiny_roundtrip_us=8.304 event_record_pair_us=2.752 event_pair_gpu_us=1.280
+CHAIN4150 arm=E iter=101 up_gpu_us=11.712 l1_span_us=55.872 l2_span_us=20.288 chain_gpu_us=76.160 download_us=68.079 l1_issue_us=10.080 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=101 l1_issue_us=3.008 l2_issue_us=2.896 download_us=68.112 download_again_us=5.440 kernel_wait_derived_us=62.672 total_us=74.016
+CHAIN4150 arm=ER iter=101 l1_span_us=51.648 l2_span_us=20.320 chain_gpu_us=71.968 download_us=68.079 l1_issue_us=4.592 l2_issue_us=4.416
+CHAIN4150 arm=I iter=101 l1_iso_us=51.840 l2_iso_us=20.960 l1_host_us=2.944 l2_host_us=3.040
+CHAIN4150 arm=P iter=101 h2d_upload_us=10.032 l1_issue_us=7.232 l2_issue_us=6.672 download_us=67.952 download_again_us=5.616 kernel_wait_derived_us=62.336 total_us=91.888
+CHAIN4150 arm=F iter=101 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=7.904 event_record_pair_us=2.847 event_pair_gpu_us=1.184
+CHAIN4150 arm=PR iter=102 l1_issue_us=2.864 l2_issue_us=2.736 download_us=68.480 download_again_us=5.552 kernel_wait_derived_us=62.928 total_us=74.080
+CHAIN4150 arm=ER iter=102 l1_span_us=51.744 l2_span_us=20.288 chain_gpu_us=72.032 download_us=67.535 l1_issue_us=4.496 l2_issue_us=4.432
+CHAIN4150 arm=I iter=102 l1_iso_us=50.112 l2_iso_us=23.264 l1_host_us=2.880 l2_host_us=3.056
+CHAIN4150 arm=P iter=102 h2d_upload_us=9.599 l1_issue_us=7.152 l2_issue_us=6.560 download_us=68.832 download_again_us=5.216 kernel_wait_derived_us=63.616 total_us=92.143
+CHAIN4150 arm=E iter=102 up_gpu_us=10.816 l1_span_us=54.816 l2_span_us=20.288 chain_gpu_us=75.104 download_us=68.943 l1_issue_us=9.520 l2_issue_us=7.920
+CHAIN4150 arm=F iter=102 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=8.176 event_record_pair_us=2.800 event_pair_gpu_us=1.696
+CHAIN4150 arm=ER iter=103 l1_span_us=51.488 l2_span_us=20.288 chain_gpu_us=71.776 download_us=68.159 l1_issue_us=4.688 l2_issue_us=4.432
+CHAIN4150 arm=I iter=103 l1_iso_us=51.200 l2_iso_us=21.216 l1_host_us=2.944 l2_host_us=2.736
+CHAIN4150 arm=P iter=103 h2d_upload_us=10.928 l1_issue_us=7.200 l2_issue_us=6.768 download_us=68.480 download_again_us=5.184 kernel_wait_derived_us=63.296 total_us=93.376
+CHAIN4150 arm=E iter=103 up_gpu_us=11.008 l1_span_us=53.408 l2_span_us=20.224 chain_gpu_us=73.632 download_us=68.096 l1_issue_us=9.232 l2_issue_us=7.823
+CHAIN4150 arm=PR iter=103 l1_issue_us=2.944 l2_issue_us=2.896 download_us=68.175 download_again_us=6.112 kernel_wait_derived_us=62.063 total_us=74.015
+CHAIN4150 arm=F iter=103 sync_idle_us=0.272 launch_floor_1x1_us=2.832 tiny_roundtrip_us=9.728 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=104 l1_iso_us=50.656 l2_iso_us=20.224 l1_host_us=2.848 l2_host_us=2.912
+CHAIN4150 arm=P iter=104 h2d_upload_us=10.704 l1_issue_us=7.280 l2_issue_us=6.704 download_us=70.048 download_again_us=5.760 kernel_wait_derived_us=64.288 total_us=94.736
+CHAIN4150 arm=E iter=104 up_gpu_us=11.136 l1_span_us=54.240 l2_span_us=20.288 chain_gpu_us=74.528 download_us=69.600 l1_issue_us=9.151 l2_issue_us=8.016
+CHAIN4150 arm=PR iter=104 l1_issue_us=2.976 l2_issue_us=2.768 download_us=68.335 download_again_us=6.064 kernel_wait_derived_us=62.271 total_us=74.079
+CHAIN4150 arm=ER iter=104 l1_span_us=49.472 l2_span_us=20.288 chain_gpu_us=69.760 download_us=69.024 l1_issue_us=4.912 l2_issue_us=4.272
+CHAIN4150 arm=F iter=104 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=9.920 event_record_pair_us=2.832 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=105 h2d_upload_us=10.752 l1_issue_us=7.328 l2_issue_us=6.768 download_us=70.000 download_again_us=5.760 kernel_wait_derived_us=64.240 total_us=94.848
+CHAIN4150 arm=E iter=105 up_gpu_us=11.616 l1_span_us=54.624 l2_span_us=20.288 chain_gpu_us=74.912 download_us=69.408 l1_issue_us=9.664 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=105 l1_issue_us=2.816 l2_issue_us=2.800 download_us=68.255 download_again_us=6.048 kernel_wait_derived_us=62.207 total_us=73.871
+CHAIN4150 arm=ER iter=105 l1_span_us=73.952 l2_span_us=50.848 chain_gpu_us=124.800 download_us=122.463 l1_issue_us=4.416 l2_issue_us=4.416
+CHAIN4150 arm=I iter=105 l1_iso_us=53.216 l2_iso_us=23.712 l1_host_us=2.816 l2_host_us=2.736
+CHAIN4150 arm=F iter=105 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=8.704 event_record_pair_us=2.832 event_pair_gpu_us=1.568
+CHAIN4150 arm=E iter=106 up_gpu_us=11.488 l1_span_us=53.792 l2_span_us=22.752 chain_gpu_us=76.544 download_us=68.975 l1_issue_us=9.232 l2_issue_us=7.840
+CHAIN4150 arm=PR iter=106 l1_issue_us=2.976 l2_issue_us=2.768 download_us=70.784 download_again_us=6.704 kernel_wait_derived_us=64.080 total_us=76.528
+CHAIN4150 arm=ER iter=106 l1_span_us=70.368 l2_span_us=21.696 chain_gpu_us=92.064 download_us=118.127 l1_issue_us=4.608 l2_issue_us=4.176
+CHAIN4150 arm=I iter=106 l1_iso_us=67.232 l2_iso_us=56.192 l1_host_us=2.927 l2_host_us=2.752
+CHAIN4150 arm=P iter=106 h2d_upload_us=13.680 l1_issue_us=7.344 l2_issue_us=6.656 download_us=69.056 download_again_us=6.176 kernel_wait_derived_us=62.880 total_us=96.736
+CHAIN4150 arm=F iter=106 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.751 event_record_pair_us=2.752 event_pair_gpu_us=4.512
+CHAIN4150 arm=PR iter=107 l1_issue_us=2.864 l2_issue_us=2.736 download_us=114.143 download_again_us=10.512 kernel_wait_derived_us=103.631 total_us=119.743
+CHAIN4150 arm=ER iter=107 l1_span_us=92.160 l2_span_us=20.352 chain_gpu_us=112.512 download_us=118.511 l1_issue_us=4.352 l2_issue_us=4.128
+CHAIN4150 arm=I iter=107 l1_iso_us=50.816 l2_iso_us=20.320 l1_host_us=2.864 l2_host_us=2.768
+CHAIN4150 arm=P iter=107 h2d_upload_us=10.464 l1_issue_us=7.296 l2_issue_us=6.719 download_us=69.312 download_again_us=5.728 kernel_wait_derived_us=63.584 total_us=93.791
+CHAIN4150 arm=E iter=107 up_gpu_us=11.104 l1_span_us=54.368 l2_span_us=20.416 chain_gpu_us=74.784 download_us=69.887 l1_issue_us=8.976 l2_issue_us=7.888
+CHAIN4150 arm=F iter=107 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.336 event_record_pair_us=2.736 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=108 l1_span_us=49.504 l2_span_us=20.288 chain_gpu_us=69.792 download_us=68.079 l1_issue_us=4.496 l2_issue_us=4.592
+CHAIN4150 arm=I iter=108 l1_iso_us=50.528 l2_iso_us=20.480 l1_host_us=2.912 l2_host_us=2.656
+CHAIN4150 arm=P iter=108 h2d_upload_us=11.008 l1_issue_us=7.488 l2_issue_us=6.736 download_us=69.024 download_again_us=5.776 kernel_wait_derived_us=63.248 total_us=94.256
+CHAIN4150 arm=E iter=108 up_gpu_us=10.912 l1_span_us=53.344 l2_span_us=20.096 chain_gpu_us=73.440 download_us=69.968 l1_issue_us=8.864 l2_issue_us=8.031
+CHAIN4150 arm=PR iter=108 l1_issue_us=2.944 l2_issue_us=2.688 download_us=69.935 download_again_us=6.064 kernel_wait_derived_us=63.871 total_us=75.567
+CHAIN4150 arm=F iter=108 sync_idle_us=0.304 launch_floor_1x1_us=2.720 tiny_roundtrip_us=9.840 event_record_pair_us=2.720 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=109 l1_iso_us=55.008 l2_iso_us=25.088 l1_host_us=2.848 l2_host_us=2.896
+CHAIN4150 arm=P iter=109 h2d_upload_us=28.288 l1_issue_us=7.120 l2_issue_us=6.864 download_us=127.087 download_again_us=11.136 kernel_wait_derived_us=115.951 total_us=169.359
+CHAIN4150 arm=E iter=109 up_gpu_us=56.352 l1_span_us=54.432 l2_span_us=22.560 chain_gpu_us=76.992 download_us=69.248 l1_issue_us=9.104 l2_issue_us=7.760
+CHAIN4150 arm=PR iter=109 l1_issue_us=2.912 l2_issue_us=2.832 download_us=70.783 download_again_us=5.216 kernel_wait_derived_us=65.567 total_us=76.527
+CHAIN4150 arm=ER iter=109 l1_span_us=52.992 l2_span_us=20.352 chain_gpu_us=73.344 download_us=70.911 l1_issue_us=4.864 l2_issue_us=4.192
+CHAIN4150 arm=F iter=109 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.408 event_record_pair_us=2.752 event_pair_gpu_us=1.440
+CHAIN4150 arm=P iter=110 h2d_upload_us=10.992 l1_issue_us=7.360 l2_issue_us=6.800 download_us=69.199 download_again_us=5.712 kernel_wait_derived_us=63.487 total_us=94.351
+CHAIN4150 arm=E iter=110 up_gpu_us=11.552 l1_span_us=54.784 l2_span_us=30.304 chain_gpu_us=85.088 download_us=83.600 l1_issue_us=9.248 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=110 l1_issue_us=2.848 l2_issue_us=2.768 download_us=95.328 download_again_us=6.384 kernel_wait_derived_us=88.944 total_us=100.944
+CHAIN4150 arm=ER iter=110 l1_span_us=52.224 l2_span_us=24.960 chain_gpu_us=77.184 download_us=80.463 l1_issue_us=4.528 l2_issue_us=4.416
+CHAIN4150 arm=I iter=110 l1_iso_us=67.712 l2_iso_us=20.320 l1_host_us=2.880 l2_host_us=2.736
+CHAIN4150 arm=F iter=110 sync_idle_us=0.272 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.968 event_record_pair_us=2.880 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=111 up_gpu_us=12.032 l1_span_us=54.080 l2_span_us=22.336 chain_gpu_us=76.416 download_us=69.535 l1_issue_us=9.136 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=111 l1_issue_us=3.008 l2_issue_us=2.688 download_us=69.007 download_again_us=6.352 kernel_wait_derived_us=62.655 total_us=74.703
+CHAIN4150 arm=ER iter=111 l1_span_us=51.168 l2_span_us=20.288 chain_gpu_us=71.456 download_us=68.624 l1_issue_us=4.752 l2_issue_us=4.432
+CHAIN4150 arm=I iter=111 l1_iso_us=49.216 l2_iso_us=20.160 l1_host_us=2.912 l2_host_us=2.928
+CHAIN4150 arm=P iter=111 h2d_upload_us=10.704 l1_issue_us=7.328 l2_issue_us=6.784 download_us=70.095 download_again_us=6.016 kernel_wait_derived_us=64.079 total_us=94.911
+CHAIN4150 arm=F iter=111 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=10.432 event_record_pair_us=2.832 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=112 l1_issue_us=2.816 l2_issue_us=2.896 download_us=68.895 download_again_us=6.128 kernel_wait_derived_us=62.767 total_us=74.607
+CHAIN4150 arm=ER iter=112 l1_span_us=50.624 l2_span_us=20.288 chain_gpu_us=70.912 download_us=68.432 l1_issue_us=4.528 l2_issue_us=5.248
+CHAIN4150 arm=I iter=112 l1_iso_us=49.312 l2_iso_us=20.288 l1_host_us=2.912 l2_host_us=2.768
+CHAIN4150 arm=P iter=112 h2d_upload_us=10.976 l1_issue_us=7.328 l2_issue_us=6.688 download_us=70.031 download_again_us=5.760 kernel_wait_derived_us=64.271 total_us=95.023
+CHAIN4150 arm=E iter=112 up_gpu_us=11.008 l1_span_us=54.240 l2_span_us=20.288 chain_gpu_us=74.528 download_us=69.840 l1_issue_us=9.104 l2_issue_us=7.840
+CHAIN4150 arm=F iter=112 sync_idle_us=0.304 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.384 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=113 l1_span_us=51.008 l2_span_us=20.288 chain_gpu_us=71.296 download_us=68.256 l1_issue_us=4.880 l2_issue_us=4.320
+CHAIN4150 arm=I iter=113 l1_iso_us=50.688 l2_iso_us=20.320 l1_host_us=2.848 l2_host_us=2.928
+CHAIN4150 arm=P iter=113 h2d_upload_us=10.688 l1_issue_us=7.200 l2_issue_us=6.560 download_us=69.471 download_again_us=5.712 kernel_wait_derived_us=63.759 total_us=93.919
+CHAIN4150 arm=E iter=113 up_gpu_us=11.584 l1_span_us=52.928 l2_span_us=20.320 chain_gpu_us=73.248 download_us=68.911 l1_issue_us=9.568 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=113 l1_issue_us=2.992 l2_issue_us=2.816 download_us=68.464 download_again_us=6.064 kernel_wait_derived_us=62.400 total_us=74.272
+CHAIN4150 arm=F iter=113 sync_idle_us=0.272 launch_floor_1x1_us=2.752 tiny_roundtrip_us=9.872 event_record_pair_us=2.784 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=114 l1_iso_us=50.496 l2_iso_us=20.192 l1_host_us=2.864 l2_host_us=2.896
+CHAIN4150 arm=P iter=114 h2d_upload_us=11.088 l1_issue_us=7.232 l2_issue_us=6.656 download_us=69.583 download_again_us=5.888 kernel_wait_derived_us=63.695 total_us=94.559
+CHAIN4150 arm=E iter=114 up_gpu_us=11.072 l1_span_us=54.272 l2_span_us=20.288 chain_gpu_us=74.560 download_us=69.999 l1_issue_us=9.120 l2_issue_us=7.776
+CHAIN4150 arm=PR iter=114 l1_issue_us=2.864 l2_issue_us=2.656 download_us=68.608 download_again_us=6.096 kernel_wait_derived_us=62.512 total_us=74.128
+CHAIN4150 arm=ER iter=114 l1_span_us=49.280 l2_span_us=20.320 chain_gpu_us=69.600 download_us=67.855 l1_issue_us=4.464 l2_issue_us=4.464
+CHAIN4150 arm=F iter=114 sync_idle_us=0.272 launch_floor_1x1_us=2.880 tiny_roundtrip_us=10.256 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=115 h2d_upload_us=10.896 l1_issue_us=7.648 l2_issue_us=6.816 download_us=69.759 download_again_us=5.872 kernel_wait_derived_us=63.887 total_us=95.119
+CHAIN4150 arm=E iter=115 up_gpu_us=12.192 l1_span_us=54.048 l2_span_us=20.288 chain_gpu_us=74.336 download_us=69.647 l1_issue_us=9.104 l2_issue_us=7.824
+CHAIN4150 arm=PR iter=115 l1_issue_us=2.752 l2_issue_us=2.784 download_us=68.176 download_again_us=6.192 kernel_wait_derived_us=61.984 total_us=73.712
+CHAIN4150 arm=ER iter=115 l1_span_us=49.440 l2_span_us=20.288 chain_gpu_us=69.728 download_us=69.168 l1_issue_us=4.832 l2_issue_us=4.192
+CHAIN4150 arm=I iter=115 l1_iso_us=50.624 l2_iso_us=20.320 l1_host_us=3.088 l2_host_us=2.832
+CHAIN4150 arm=F iter=115 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.824 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=116 up_gpu_us=11.968 l1_span_us=54.368 l2_span_us=20.320 chain_gpu_us=74.688 download_us=69.519 l1_issue_us=9.360 l2_issue_us=7.936
+CHAIN4150 arm=PR iter=116 l1_issue_us=3.600 l2_issue_us=2.832 download_us=68.032 download_again_us=6.288 kernel_wait_derived_us=61.744 total_us=74.464
+CHAIN4150 arm=ER iter=116 l1_span_us=50.656 l2_span_us=20.352 chain_gpu_us=71.008 download_us=67.888 l1_issue_us=4.800 l2_issue_us=4.480
+CHAIN4150 arm=I iter=116 l1_iso_us=50.464 l2_iso_us=20.448 l1_host_us=2.880 l2_host_us=2.928
+CHAIN4150 arm=P iter=116 h2d_upload_us=10.752 l1_issue_us=7.168 l2_issue_us=6.688 download_us=69.343 download_again_us=5.984 kernel_wait_derived_us=63.359 total_us=93.951
+CHAIN4150 arm=F iter=116 sync_idle_us=0.304 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.352 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=117 l1_issue_us=2.832 l2_issue_us=2.800 download_us=69.104 download_again_us=6.288 kernel_wait_derived_us=62.816 total_us=74.736
+CHAIN4150 arm=ER iter=117 l1_span_us=49.472 l2_span_us=20.000 chain_gpu_us=69.472 download_us=68.960 l1_issue_us=4.560 l2_issue_us=4.464
+CHAIN4150 arm=I iter=117 l1_iso_us=50.720 l2_iso_us=22.432 l1_host_us=2.832 l2_host_us=3.184
+CHAIN4150 arm=P iter=117 h2d_upload_us=11.072 l1_issue_us=7.312 l2_issue_us=6.800 download_us=69.871 download_again_us=5.744 kernel_wait_derived_us=64.127 total_us=95.055
+CHAIN4150 arm=E iter=117 up_gpu_us=10.912 l1_span_us=54.464 l2_span_us=20.320 chain_gpu_us=74.784 download_us=69.856 l1_issue_us=9.136 l2_issue_us=8.016
+CHAIN4150 arm=F iter=117 sync_idle_us=0.304 launch_floor_1x1_us=2.976 tiny_roundtrip_us=9.488 event_record_pair_us=2.832 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=118 l1_span_us=50.944 l2_span_us=20.288 chain_gpu_us=71.232 download_us=68.304 l1_issue_us=4.800 l2_issue_us=4.528
+CHAIN4150 arm=I iter=118 l1_iso_us=51.200 l2_iso_us=20.224 l1_host_us=3.008 l2_host_us=2.704
+CHAIN4150 arm=P iter=118 h2d_upload_us=10.864 l1_issue_us=7.328 l2_issue_us=6.720 download_us=69.071 download_again_us=5.808 kernel_wait_derived_us=63.263 total_us=93.983
+CHAIN4150 arm=E iter=118 up_gpu_us=11.200 l1_span_us=53.952 l2_span_us=20.288 chain_gpu_us=74.240 download_us=69.263 l1_issue_us=9.040 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=118 l1_issue_us=2.928 l2_issue_us=2.688 download_us=68.816 download_again_us=6.064 kernel_wait_derived_us=62.752 total_us=74.432
+CHAIN4150 arm=F iter=118 sync_idle_us=0.288 launch_floor_1x1_us=2.752 tiny_roundtrip_us=10.544 event_record_pair_us=2.832 event_pair_gpu_us=0.768
+CHAIN4150 arm=I iter=119 l1_iso_us=50.784 l2_iso_us=20.320 l1_host_us=2.863 l2_host_us=2.656
+CHAIN4150 arm=P iter=119 h2d_upload_us=10.944 l1_issue_us=7.264 l2_issue_us=6.736 download_us=69.919 download_again_us=5.712 kernel_wait_derived_us=64.207 total_us=94.863
+CHAIN4150 arm=E iter=119 up_gpu_us=10.784 l1_span_us=54.240 l2_span_us=20.320 chain_gpu_us=74.560 download_us=69.759 l1_issue_us=9.216 l2_issue_us=7.840
+CHAIN4150 arm=PR iter=119 l1_issue_us=2.912 l2_issue_us=2.864 download_us=68.368 download_again_us=6.128 kernel_wait_derived_us=62.240 total_us=74.144
+CHAIN4150 arm=ER iter=119 l1_span_us=50.560 l2_span_us=20.288 chain_gpu_us=70.848 download_us=69.023 l1_issue_us=4.672 l2_issue_us=4.432
+CHAIN4150 arm=F iter=119 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=10.144 event_record_pair_us=2.816 event_pair_gpu_us=0.768
+CHAIN4150 arm=P iter=120 h2d_upload_us=10.944 l1_issue_us=7.200 l2_issue_us=7.920 download_us=69.935 download_again_us=5.808 kernel_wait_derived_us=64.127 total_us=95.999
+CHAIN4150 arm=E iter=120 up_gpu_us=11.136 l1_span_us=54.496 l2_span_us=20.288 chain_gpu_us=74.784 download_us=69.695 l1_issue_us=9.328 l2_issue_us=8.128
+CHAIN4150 arm=PR iter=120 l1_issue_us=2.784 l2_issue_us=2.800 download_us=68.448 download_again_us=6.080 kernel_wait_derived_us=62.368 total_us=74.032
+CHAIN4150 arm=ER iter=120 l1_span_us=50.432 l2_span_us=20.288 chain_gpu_us=70.720 download_us=69.232 l1_issue_us=4.415 l2_issue_us=4.448
+CHAIN4150 arm=I iter=120 l1_iso_us=50.592 l2_iso_us=20.352 l1_host_us=2.864 l2_host_us=2.768
+CHAIN4150 arm=F iter=120 sync_idle_us=0.272 launch_floor_1x1_us=2.880 tiny_roundtrip_us=10.272 event_record_pair_us=2.992 event_pair_gpu_us=1.024
+CHAIN4150 arm=E iter=121 up_gpu_us=11.168 l1_span_us=52.768 l2_span_us=20.288 chain_gpu_us=73.056 download_us=69.103 l1_issue_us=9.264 l2_issue_us=8.000
+CHAIN4150 arm=PR iter=121 l1_issue_us=3.040 l2_issue_us=2.768 download_us=68.912 download_again_us=6.464 kernel_wait_derived_us=62.448 total_us=74.720
+CHAIN4150 arm=ER iter=121 l1_span_us=49.568 l2_span_us=20.032 chain_gpu_us=69.600 download_us=68.832 l1_issue_us=4.607 l2_issue_us=4.512
+CHAIN4150 arm=I iter=121 l1_iso_us=50.784 l2_iso_us=20.320 l1_host_us=2.992 l2_host_us=2.928
+CHAIN4150 arm=P iter=121 h2d_upload_us=10.976 l1_issue_us=7.136 l2_issue_us=6.736 download_us=69.583 download_again_us=6.272 kernel_wait_derived_us=63.311 total_us=94.431
+CHAIN4150 arm=F iter=121 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.920 event_record_pair_us=2.720 event_pair_gpu_us=0.992
+CHAIN4150 arm=PR iter=122 l1_issue_us=2.864 l2_issue_us=2.608 download_us=68.944 download_again_us=6.000 kernel_wait_derived_us=62.944 total_us=74.416
+CHAIN4150 arm=ER iter=122 l1_span_us=50.592 l2_span_us=20.288 chain_gpu_us=70.880 download_us=67.936 l1_issue_us=4.784 l2_issue_us=4.463
+CHAIN4150 arm=I iter=122 l1_iso_us=50.752 l2_iso_us=20.288 l1_host_us=2.976 l2_host_us=2.832
+CHAIN4150 arm=P iter=122 h2d_upload_us=10.720 l1_issue_us=7.168 l2_issue_us=6.640 download_us=70.400 download_again_us=5.776 kernel_wait_derived_us=64.624 total_us=94.928
+CHAIN4150 arm=E iter=122 up_gpu_us=10.848 l1_span_us=53.184 l2_span_us=20.320 chain_gpu_us=73.504 download_us=69.424 l1_issue_us=9.488 l2_issue_us=7.952
+CHAIN4150 arm=F iter=122 sync_idle_us=0.288 launch_floor_1x1_us=2.896 tiny_roundtrip_us=9.392 event_record_pair_us=2.719 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=123 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.352 l1_issue_us=4.768 l2_issue_us=4.400
+CHAIN4150 arm=I iter=123 l1_iso_us=50.880 l2_iso_us=20.320 l1_host_us=2.944 l2_host_us=2.672
+CHAIN4150 arm=P iter=123 h2d_upload_us=11.024 l1_issue_us=7.376 l2_issue_us=6.704 download_us=69.791 download_again_us=5.744 kernel_wait_derived_us=64.047 total_us=94.895
+CHAIN4150 arm=E iter=123 up_gpu_us=12.288 l1_span_us=53.120 l2_span_us=20.320 chain_gpu_us=73.440 download_us=69.456 l1_issue_us=9.360 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=123 l1_issue_us=2.896 l2_issue_us=2.720 download_us=68.560 download_again_us=6.336 kernel_wait_derived_us=62.224 total_us=74.176
+CHAIN4150 arm=F iter=123 sync_idle_us=0.272 launch_floor_1x1_us=2.720 tiny_roundtrip_us=10.288 event_record_pair_us=2.720 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=124 l1_iso_us=49.248 l2_iso_us=20.384 l1_host_us=2.880 l2_host_us=2.832
+CHAIN4150 arm=P iter=124 h2d_upload_us=10.752 l1_issue_us=7.200 l2_issue_us=6.768 download_us=69.135 download_again_us=5.696 kernel_wait_derived_us=63.439 total_us=93.855
+CHAIN4150 arm=E iter=124 up_gpu_us=11.680 l1_span_us=54.464 l2_span_us=20.288 chain_gpu_us=74.752 download_us=68.768 l1_issue_us=9.072 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=124 l1_issue_us=2.944 l2_issue_us=2.752 download_us=67.856 download_again_us=6.160 kernel_wait_derived_us=61.696 total_us=73.552
+CHAIN4150 arm=ER iter=124 l1_span_us=50.592 l2_span_us=20.320 chain_gpu_us=70.912 download_us=68.287 l1_issue_us=4.832 l2_issue_us=4.224
+CHAIN4150 arm=F iter=124 sync_idle_us=0.272 launch_floor_1x1_us=2.848 tiny_roundtrip_us=9.920 event_record_pair_us=2.704 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=125 h2d_upload_us=10.816 l1_issue_us=7.216 l2_issue_us=6.640 download_us=69.391 download_again_us=5.664 kernel_wait_derived_us=63.727 total_us=94.063
+CHAIN4150 arm=E iter=125 up_gpu_us=11.168 l1_span_us=54.368 l2_span_us=20.288 chain_gpu_us=74.656 download_us=69.935 l1_issue_us=9.120 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=125 l1_issue_us=2.800 l2_issue_us=3.008 download_us=68.176 download_again_us=6.304 kernel_wait_derived_us=61.872 total_us=73.984
+CHAIN4150 arm=ER iter=125 l1_span_us=49.440 l2_span_us=20.032 chain_gpu_us=69.472 download_us=68.719 l1_issue_us=4.912 l2_issue_us=4.240
+CHAIN4150 arm=I iter=125 l1_iso_us=50.592 l2_iso_us=20.384 l1_host_us=2.992 l2_host_us=2.720
+CHAIN4150 arm=F iter=125 sync_idle_us=0.288 launch_floor_1x1_us=2.880 tiny_roundtrip_us=9.504 event_record_pair_us=2.720 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=126 up_gpu_us=11.232 l1_span_us=52.480 l2_span_us=20.096 chain_gpu_us=72.576 download_us=61.711 l1_issue_us=8.928 l2_issue_us=8.032
+CHAIN4150 arm=PR iter=126 l1_issue_us=2.896 l2_issue_us=2.960 download_us=68.688 download_again_us=6.400 kernel_wait_derived_us=62.288 total_us=74.544
+CHAIN4150 arm=ER iter=126 l1_span_us=51.104 l2_span_us=20.288 chain_gpu_us=71.392 download_us=68.383 l1_issue_us=4.640 l2_issue_us=4.544
+CHAIN4150 arm=I iter=126 l1_iso_us=50.688 l2_iso_us=20.352 l1_host_us=2.912 l2_host_us=2.768
+CHAIN4150 arm=P iter=126 h2d_upload_us=10.896 l1_issue_us=7.328 l2_issue_us=6.656 download_us=69.168 download_again_us=5.984 kernel_wait_derived_us=63.184 total_us=94.048
+CHAIN4150 arm=F iter=126 sync_idle_us=0.304 launch_floor_1x1_us=2.848 tiny_roundtrip_us=9.519 event_record_pair_us=2.784 event_pair_gpu_us=0.768
+CHAIN4150 arm=PR iter=127 l1_issue_us=2.832 l2_issue_us=2.928 download_us=68.736 download_again_us=6.208 kernel_wait_derived_us=62.528 total_us=74.496
+CHAIN4150 arm=ER iter=127 l1_span_us=51.200 l2_span_us=20.288 chain_gpu_us=71.488 download_us=68.719 l1_issue_us=4.576 l2_issue_us=4.496
+CHAIN4150 arm=I iter=127 l1_iso_us=51.040 l2_iso_us=20.224 l1_host_us=3.024 l2_host_us=2.864
+CHAIN4150 arm=P iter=127 h2d_upload_us=10.720 l1_issue_us=7.248 l2_issue_us=6.656 download_us=69.280 download_again_us=5.792 kernel_wait_derived_us=63.488 total_us=93.904
+CHAIN4150 arm=E iter=127 up_gpu_us=11.808 l1_span_us=52.800 l2_span_us=20.064 chain_gpu_us=72.864 download_us=61.808 l1_issue_us=9.167 l2_issue_us=7.920
+CHAIN4150 arm=F iter=127 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.064 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=128 l1_span_us=50.880 l2_span_us=20.320 chain_gpu_us=71.200 download_us=68.271 l1_issue_us=4.688 l2_issue_us=4.512
+CHAIN4150 arm=I iter=128 l1_iso_us=50.976 l2_iso_us=20.224 l1_host_us=2.976 l2_host_us=2.720
+CHAIN4150 arm=P iter=128 h2d_upload_us=10.736 l1_issue_us=7.280 l2_issue_us=6.608 download_us=69.184 download_again_us=5.680 kernel_wait_derived_us=63.504 total_us=93.808
+CHAIN4150 arm=E iter=128 up_gpu_us=11.040 l1_span_us=54.304 l2_span_us=20.320 chain_gpu_us=74.624 download_us=69.776 l1_issue_us=9.264 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=128 l1_issue_us=2.960 l2_issue_us=2.928 download_us=68.239 download_again_us=6.096 kernel_wait_derived_us=62.143 total_us=74.127
+CHAIN4150 arm=F iter=128 sync_idle_us=0.272 launch_floor_1x1_us=2.784 tiny_roundtrip_us=9.744 event_record_pair_us=2.688 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=129 l1_iso_us=50.752 l2_iso_us=20.352 l1_host_us=2.800 l2_host_us=2.656
+CHAIN4150 arm=P iter=129 h2d_upload_us=10.704 l1_issue_us=7.232 l2_issue_us=6.768 download_us=69.120 download_again_us=5.728 kernel_wait_derived_us=63.392 total_us=93.824
+CHAIN4150 arm=E iter=129 up_gpu_us=11.008 l1_span_us=54.464 l2_span_us=20.288 chain_gpu_us=74.752 download_us=68.960 l1_issue_us=9.024 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=129 l1_issue_us=2.912 l2_issue_us=2.736 download_us=69.023 download_again_us=6.096 kernel_wait_derived_us=62.927 total_us=74.671
+CHAIN4150 arm=ER iter=129 l1_span_us=50.592 l2_span_us=20.320 chain_gpu_us=70.912 download_us=68.127 l1_issue_us=4.848 l2_issue_us=4.256
+CHAIN4150 arm=F iter=129 sync_idle_us=0.288 launch_floor_1x1_us=2.832 tiny_roundtrip_us=9.824 event_record_pair_us=3.088 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=130 h2d_upload_us=10.496 l1_issue_us=7.360 l2_issue_us=6.736 download_us=69.679 download_again_us=5.696 kernel_wait_derived_us=63.983 total_us=94.271
+CHAIN4150 arm=E iter=130 up_gpu_us=11.008 l1_span_us=54.336 l2_span_us=20.320 chain_gpu_us=74.656 download_us=69.872 l1_issue_us=9.040 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=130 l1_issue_us=2.784 l2_issue_us=2.880 download_us=68.639 download_again_us=6.080 kernel_wait_derived_us=62.559 total_us=74.303
+CHAIN4150 arm=ER iter=130 l1_span_us=49.504 l2_span_us=20.032 chain_gpu_us=69.536 download_us=67.999 l1_issue_us=4.512 l2_issue_us=4.384
+CHAIN4150 arm=I iter=130 l1_iso_us=49.152 l2_iso_us=20.096 l1_host_us=2.864 l2_host_us=2.896
+CHAIN4150 arm=F iter=130 sync_idle_us=0.272 launch_floor_1x1_us=2.880 tiny_roundtrip_us=7.856 event_record_pair_us=2.783 event_pair_gpu_us=1.024
+CHAIN4150 arm=E iter=131 up_gpu_us=10.240 l1_span_us=54.976 l2_span_us=20.288 chain_gpu_us=75.264 download_us=69.696 l1_issue_us=9.152 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=131 l1_issue_us=2.960 l2_issue_us=2.768 download_us=67.167 download_again_us=5.408 kernel_wait_derived_us=61.759 total_us=72.895
+CHAIN4150 arm=ER iter=131 l1_span_us=50.496 l2_span_us=20.320 chain_gpu_us=70.816 download_us=67.999 l1_issue_us=4.592 l2_issue_us=4.448
+CHAIN4150 arm=I iter=131 l1_iso_us=50.784 l2_iso_us=20.224 l1_host_us=3.024 l2_host_us=2.848
+CHAIN4150 arm=P iter=131 h2d_upload_us=11.136 l1_issue_us=7.136 l2_issue_us=6.672 download_us=68.991 download_again_us=6.000 kernel_wait_derived_us=62.991 total_us=93.935
+CHAIN4150 arm=F iter=131 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=9.360 event_record_pair_us=2.816 event_pair_gpu_us=1.024
+CHAIN4150 arm=PR iter=132 l1_issue_us=2.832 l2_issue_us=2.736 download_us=68.991 download_again_us=6.080 kernel_wait_derived_us=62.911 total_us=74.559
+CHAIN4150 arm=ER iter=132 l1_span_us=51.168 l2_span_us=20.512 chain_gpu_us=71.680 download_us=68.208 l1_issue_us=4.560 l2_issue_us=4.336
+CHAIN4150 arm=I iter=132 l1_iso_us=50.976 l2_iso_us=20.288 l1_host_us=2.864 l2_host_us=3.040
+CHAIN4150 arm=P iter=132 h2d_upload_us=10.592 l1_issue_us=7.248 l2_issue_us=6.704 download_us=68.223 download_again_us=5.712 kernel_wait_derived_us=62.511 total_us=92.767
+CHAIN4150 arm=E iter=132 up_gpu_us=10.816 l1_span_us=52.704 l2_span_us=20.256 chain_gpu_us=72.960 download_us=69.215 l1_issue_us=9.040 l2_issue_us=7.920
+CHAIN4150 arm=F iter=132 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.256 event_record_pair_us=2.768 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=133 l1_span_us=50.880 l2_span_us=20.320 chain_gpu_us=71.200 download_us=68.111 l1_issue_us=4.688 l2_issue_us=4.592
+CHAIN4150 arm=I iter=133 l1_iso_us=51.008 l2_iso_us=20.192 l1_host_us=3.040 l2_host_us=2.688
+CHAIN4150 arm=P iter=133 h2d_upload_us=10.784 l1_issue_us=7.248 l2_issue_us=6.703 download_us=69.984 download_again_us=5.792 kernel_wait_derived_us=64.192 total_us=94.719
+CHAIN4150 arm=E iter=133 up_gpu_us=12.160 l1_span_us=54.240 l2_span_us=20.384 chain_gpu_us=74.624 download_us=69.631 l1_issue_us=9.104 l2_issue_us=7.936
+CHAIN4150 arm=PR iter=133 l1_issue_us=2.960 l2_issue_us=2.752 download_us=68.112 download_again_us=5.951 kernel_wait_derived_us=62.161 total_us=73.824
+CHAIN4150 arm=F iter=133 sync_idle_us=0.288 launch_floor_1x1_us=2.704 tiny_roundtrip_us=9.616 event_record_pair_us=2.704 event_pair_gpu_us=0.992
+CHAIN4150 arm=I iter=134 l1_iso_us=50.816 l2_iso_us=20.256 l1_host_us=2.848 l2_host_us=2.704
+CHAIN4150 arm=P iter=134 h2d_upload_us=11.071 l1_issue_us=7.184 l2_issue_us=6.720 download_us=69.808 download_again_us=5.744 kernel_wait_derived_us=64.064 total_us=94.783
+CHAIN4150 arm=E iter=134 up_gpu_us=11.488 l1_span_us=54.048 l2_span_us=20.288 chain_gpu_us=74.336 download_us=69.087 l1_issue_us=9.088 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=134 l1_issue_us=2.848 l2_issue_us=2.688 download_us=68.207 download_again_us=6.080 kernel_wait_derived_us=62.127 total_us=73.743
+CHAIN4150 arm=ER iter=134 l1_span_us=50.784 l2_span_us=20.288 chain_gpu_us=71.072 download_us=67.888 l1_issue_us=4.848 l2_issue_us=4.512
+CHAIN4150 arm=F iter=134 sync_idle_us=0.272 launch_floor_1x1_us=2.848 tiny_roundtrip_us=9.568 event_record_pair_us=2.672 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=135 h2d_upload_us=10.607 l1_issue_us=7.296 l2_issue_us=6.768 download_us=69.312 download_again_us=4.880 kernel_wait_derived_us=64.432 total_us=93.983
+CHAIN4150 arm=E iter=135 up_gpu_us=10.688 l1_span_us=55.552 l2_span_us=20.320 chain_gpu_us=75.872 download_us=69.455 l1_issue_us=9.280 l2_issue_us=8.144
+CHAIN4150 arm=PR iter=135 l1_issue_us=2.816 l2_issue_us=2.864 download_us=68.319 download_again_us=6.144 kernel_wait_derived_us=62.175 total_us=73.999
+CHAIN4150 arm=ER iter=135 l1_span_us=51.296 l2_span_us=20.224 chain_gpu_us=71.520 download_us=69.120 l1_issue_us=4.400 l2_issue_us=4.432
+CHAIN4150 arm=I iter=135 l1_iso_us=50.624 l2_iso_us=21.600 l1_host_us=3.056 l2_host_us=2.736
+CHAIN4150 arm=F iter=135 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=11.776 event_record_pair_us=3.632 event_pair_gpu_us=2.912
+CHAIN4150 arm=E iter=136 up_gpu_us=12.160 l1_span_us=81.504 l2_span_us=20.544 chain_gpu_us=102.048 download_us=91.648 l1_issue_us=9.024 l2_issue_us=8.080
+CHAIN4150 arm=PR iter=136 l1_issue_us=3.024 l2_issue_us=2.752 download_us=70.799 download_again_us=5.104 kernel_wait_derived_us=65.695 total_us=76.575
+CHAIN4150 arm=ER iter=136 l1_span_us=52.704 l2_span_us=20.128 chain_gpu_us=72.832 download_us=70.207 l1_issue_us=4.512 l2_issue_us=4.256
+CHAIN4150 arm=I iter=136 l1_iso_us=53.184 l2_iso_us=24.096 l1_host_us=2.880 l2_host_us=2.768
+CHAIN4150 arm=P iter=136 h2d_upload_us=14.624 l1_issue_us=7.104 l2_issue_us=6.560 download_us=96.128 download_again_us=11.983 kernel_wait_derived_us=84.145 total_us=124.416
+CHAIN4150 arm=F iter=136 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=20.976 event_record_pair_us=2.752 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=137 l1_issue_us=2.816 l2_issue_us=2.768 download_us=68.784 download_again_us=6.144 kernel_wait_derived_us=62.640 total_us=74.368
+CHAIN4150 arm=ER iter=137 l1_span_us=49.632 l2_span_us=19.968 chain_gpu_us=69.600 download_us=68.864 l1_issue_us=4.560 l2_issue_us=4.464
+CHAIN4150 arm=I iter=137 l1_iso_us=49.344 l2_iso_us=20.416 l1_host_us=2.880 l2_host_us=3.040
+CHAIN4150 arm=P iter=137 h2d_upload_us=11.088 l1_issue_us=7.264 l2_issue_us=6.688 download_us=70.031 download_again_us=5.744 kernel_wait_derived_us=64.287 total_us=95.071
+CHAIN4150 arm=E iter=137 up_gpu_us=20.672 l1_span_us=52.256 l2_span_us=20.032 chain_gpu_us=72.288 download_us=71.088 l1_issue_us=8.576 l2_issue_us=8.432
+CHAIN4150 arm=F iter=137 sync_idle_us=0.272 launch_floor_1x1_us=2.816 tiny_roundtrip_us=9.872 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=138 l1_span_us=50.912 l2_span_us=20.320 chain_gpu_us=71.232 download_us=68.336 l1_issue_us=4.864 l2_issue_us=4.240
+CHAIN4150 arm=I iter=138 l1_iso_us=50.848 l2_iso_us=20.352 l1_host_us=2.880 l2_host_us=2.704
+CHAIN4150 arm=P iter=138 h2d_upload_us=10.832 l1_issue_us=7.392 l2_issue_us=6.736 download_us=69.471 download_again_us=5.728 kernel_wait_derived_us=63.743 total_us=94.431
+CHAIN4150 arm=E iter=138 up_gpu_us=11.744 l1_span_us=53.824 l2_span_us=28.480 chain_gpu_us=82.304 download_us=71.487 l1_issue_us=9.040 l2_issue_us=7.792
+CHAIN4150 arm=PR iter=138 l1_issue_us=2.864 l2_issue_us=2.688 download_us=68.304 download_again_us=6.144 kernel_wait_derived_us=62.160 total_us=73.856
+CHAIN4150 arm=F iter=138 sync_idle_us=0.256 launch_floor_1x1_us=2.720 tiny_roundtrip_us=9.696 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=139 l1_iso_us=50.848 l2_iso_us=20.288 l1_host_us=2.992 l2_host_us=2.832
+CHAIN4150 arm=P iter=139 h2d_upload_us=11.072 l1_issue_us=7.248 l2_issue_us=6.752 download_us=69.615 download_again_us=5.792 kernel_wait_derived_us=63.823 total_us=94.687
+CHAIN4150 arm=E iter=139 up_gpu_us=11.008 l1_span_us=54.272 l2_span_us=20.320 chain_gpu_us=74.592 download_us=69.839 l1_issue_us=9.168 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=139 l1_issue_us=2.928 l2_issue_us=2.720 download_us=68.832 download_again_us=6.192 kernel_wait_derived_us=62.640 total_us=74.480
+CHAIN4150 arm=ER iter=139 l1_span_us=50.944 l2_span_us=20.288 chain_gpu_us=71.232 download_us=68.543 l1_issue_us=4.688 l2_issue_us=4.496
+CHAIN4150 arm=F iter=139 sync_idle_us=0.288 launch_floor_1x1_us=2.896 tiny_roundtrip_us=9.872 event_record_pair_us=2.800 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=140 h2d_upload_us=10.784 l1_issue_us=7.312 l2_issue_us=6.720 download_us=68.991 download_again_us=5.776 kernel_wait_derived_us=63.215 total_us=93.807
+CHAIN4150 arm=E iter=140 up_gpu_us=11.712 l1_span_us=54.400 l2_span_us=20.288 chain_gpu_us=74.688 download_us=70.015 l1_issue_us=9.216 l2_issue_us=7.744
+CHAIN4150 arm=PR iter=140 l1_issue_us=2.816 l2_issue_us=2.928 download_us=68.112 download_again_us=6.304 kernel_wait_derived_us=61.808 total_us=73.856
+CHAIN4150 arm=ER iter=140 l1_span_us=50.336 l2_span_us=20.320 chain_gpu_us=70.656 download_us=68.000 l1_issue_us=4.447 l2_issue_us=4.432
+CHAIN4150 arm=I iter=140 l1_iso_us=49.376 l2_iso_us=20.352 l1_host_us=2.976 l2_host_us=2.624
+CHAIN4150 arm=F iter=140 sync_idle_us=0.288 launch_floor_1x1_us=2.848 tiny_roundtrip_us=9.792 event_record_pair_us=2.752 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=141 up_gpu_us=12.000 l1_span_us=54.432 l2_span_us=20.288 chain_gpu_us=74.720 download_us=69.903 l1_issue_us=9.104 l2_issue_us=7.968
+CHAIN4150 arm=PR iter=141 l1_issue_us=2.928 l2_issue_us=2.944 download_us=68.560 download_again_us=6.336 kernel_wait_derived_us=62.224 total_us=74.432
+CHAIN4150 arm=ER iter=141 l1_span_us=50.976 l2_span_us=20.288 chain_gpu_us=71.264 download_us=68.608 l1_issue_us=4.656 l2_issue_us=4.463
+CHAIN4150 arm=I iter=141 l1_iso_us=50.624 l2_iso_us=20.320 l1_host_us=3.088 l2_host_us=2.896
+CHAIN4150 arm=P iter=141 h2d_upload_us=10.976 l1_issue_us=7.264 l2_issue_us=6.608 download_us=69.904 download_again_us=5.967 kernel_wait_derived_us=63.937 total_us=94.752
+CHAIN4150 arm=F iter=141 sync_idle_us=0.304 launch_floor_1x1_us=2.880 tiny_roundtrip_us=10.432 event_record_pair_us=2.736 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=142 l1_issue_us=2.848 l2_issue_us=2.944 download_us=68.112 download_again_us=6.160 kernel_wait_derived_us=61.952 total_us=73.904
+CHAIN4150 arm=ER iter=142 l1_span_us=49.728 l2_span_us=20.000 chain_gpu_us=69.728 download_us=68.767 l1_issue_us=4.944 l2_issue_us=4.384
+CHAIN4150 arm=I iter=142 l1_iso_us=50.848 l2_iso_us=20.320 l1_host_us=3.056 l2_host_us=2.752
+CHAIN4150 arm=P iter=142 h2d_upload_us=10.688 l1_issue_us=7.248 l2_issue_us=6.656 download_us=69.120 download_again_us=5.728 kernel_wait_derived_us=63.392 total_us=93.712
+CHAIN4150 arm=E iter=142 up_gpu_us=12.160 l1_span_us=54.400 l2_span_us=20.288 chain_gpu_us=74.688 download_us=70.160 l1_issue_us=9.008 l2_issue_us=7.744
+CHAIN4150 arm=F iter=142 sync_idle_us=0.304 launch_floor_1x1_us=2.912 tiny_roundtrip_us=9.920 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=143 l1_span_us=50.912 l2_span_us=20.320 chain_gpu_us=71.232 download_us=68.304 l1_issue_us=4.720 l2_issue_us=4.400
+CHAIN4150 arm=I iter=143 l1_iso_us=50.464 l2_iso_us=21.408 l1_host_us=2.880 l2_host_us=2.672
+CHAIN4150 arm=P iter=143 h2d_upload_us=10.928 l1_issue_us=7.248 l2_issue_us=6.608 download_us=69.023 download_again_us=5.744 kernel_wait_derived_us=63.279 total_us=93.807
+CHAIN4150 arm=E iter=143 up_gpu_us=12.224 l1_span_us=53.120 l2_span_us=20.288 chain_gpu_us=73.408 download_us=69.424 l1_issue_us=9.536 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=143 l1_issue_us=2.864 l2_issue_us=2.768 download_us=69.248 download_again_us=6.112 kernel_wait_derived_us=63.136 total_us=74.880
+CHAIN4150 arm=F iter=143 sync_idle_us=0.272 launch_floor_1x1_us=2.736 tiny_roundtrip_us=9.648 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=144 l1_iso_us=50.784 l2_iso_us=20.288 l1_host_us=3.008 l2_host_us=2.624
+CHAIN4150 arm=P iter=144 h2d_upload_us=10.992 l1_issue_us=7.248 l2_issue_us=6.688 download_us=70.111 download_again_us=5.728 kernel_wait_derived_us=64.383 total_us=95.039
+CHAIN4150 arm=E iter=144 up_gpu_us=12.288 l1_span_us=53.920 l2_span_us=20.288 chain_gpu_us=74.208 download_us=69.551 l1_issue_us=9.008 l2_issue_us=7.824
+CHAIN4150 arm=PR iter=144 l1_issue_us=2.752 l2_issue_us=2.736 download_us=68.752 download_again_us=6.288 kernel_wait_derived_us=62.464 total_us=74.240
+CHAIN4150 arm=ER iter=144 l1_span_us=51.040 l2_span_us=20.320 chain_gpu_us=71.360 download_us=68.767 l1_issue_us=4.432 l2_issue_us=4.384
+CHAIN4150 arm=F iter=144 sync_idle_us=0.288 launch_floor_1x1_us=2.720 tiny_roundtrip_us=9.872 event_record_pair_us=2.832 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=145 h2d_upload_us=10.912 l1_issue_us=7.232 l2_issue_us=6.704 download_us=69.327 download_again_us=5.712 kernel_wait_derived_us=63.615 total_us=94.175
+CHAIN4150 arm=E iter=145 up_gpu_us=10.816 l1_span_us=54.016 l2_span_us=20.320 chain_gpu_us=74.336 download_us=69.871 l1_issue_us=8.944 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=145 l1_issue_us=3.856 l2_issue_us=2.832 download_us=68.304 download_again_us=6.192 kernel_wait_derived_us=62.112 total_us=74.992
+CHAIN4150 arm=ER iter=145 l1_span_us=50.816 l2_span_us=20.288 chain_gpu_us=71.104 download_us=68.079 l1_issue_us=4.992 l2_issue_us=4.208
+CHAIN4150 arm=I iter=145 l1_iso_us=50.976 l2_iso_us=20.320 l1_host_us=3.024 l2_host_us=2.896
+CHAIN4150 arm=F iter=145 sync_idle_us=0.304 launch_floor_1x1_us=2.816 tiny_roundtrip_us=10.032 event_record_pair_us=2.720 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=146 up_gpu_us=11.328 l1_span_us=54.080 l2_span_us=20.288 chain_gpu_us=74.368 download_us=69.487 l1_issue_us=9.008 l2_issue_us=7.840
+CHAIN4150 arm=PR iter=146 l1_issue_us=2.960 l2_issue_us=2.752 download_us=68.464 download_again_us=6.352 kernel_wait_derived_us=62.112 total_us=74.176
+CHAIN4150 arm=ER iter=146 l1_span_us=51.168 l2_span_us=20.320 chain_gpu_us=71.488 download_us=68.351 l1_issue_us=4.880 l2_issue_us=4.416
+CHAIN4150 arm=I iter=146 l1_iso_us=49.408 l2_iso_us=21.984 l1_host_us=3.040 l2_host_us=2.992
+CHAIN4150 arm=P iter=146 h2d_upload_us=10.880 l1_issue_us=7.376 l2_issue_us=6.816 download_us=69.920 download_again_us=5.904 kernel_wait_derived_us=64.016 total_us=94.992
+CHAIN4150 arm=F iter=146 sync_idle_us=0.304 launch_floor_1x1_us=2.848 tiny_roundtrip_us=8.640 event_record_pair_us=2.752 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=147 l1_issue_us=2.864 l2_issue_us=2.816 download_us=68.704 download_again_us=6.144 kernel_wait_derived_us=62.560 total_us=74.384
+CHAIN4150 arm=ER iter=147 l1_span_us=49.600 l2_span_us=20.128 chain_gpu_us=69.728 download_us=69.071 l1_issue_us=4.576 l2_issue_us=4.432
+CHAIN4150 arm=I iter=147 l1_iso_us=50.688 l2_iso_us=22.240 l1_host_us=2.880 l2_host_us=3.248
+CHAIN4150 arm=P iter=147 h2d_upload_us=10.816 l1_issue_us=7.232 l2_issue_us=6.688 download_us=69.392 download_again_us=5.744 kernel_wait_derived_us=63.648 total_us=94.128
+CHAIN4150 arm=E iter=147 up_gpu_us=11.008 l1_span_us=54.112 l2_span_us=20.288 chain_gpu_us=74.400 download_us=69.696 l1_issue_us=9.056 l2_issue_us=7.904
+CHAIN4150 arm=F iter=147 sync_idle_us=0.304 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.416 event_record_pair_us=2.784 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=148 l1_span_us=50.784 l2_span_us=20.320 chain_gpu_us=71.104 download_us=68.160 l1_issue_us=4.608 l2_issue_us=4.560
+CHAIN4150 arm=I iter=148 l1_iso_us=50.784 l2_iso_us=20.352 l1_host_us=3.008 l2_host_us=2.704
+CHAIN4150 arm=P iter=148 h2d_upload_us=10.880 l1_issue_us=7.312 l2_issue_us=6.800 download_us=69.887 download_again_us=5.696 kernel_wait_derived_us=64.191 total_us=94.879
+CHAIN4150 arm=E iter=148 up_gpu_us=11.616 l1_span_us=52.928 l2_span_us=20.032 chain_gpu_us=72.960 download_us=69.328 l1_issue_us=9.104 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=148 l1_issue_us=2.896 l2_issue_us=2.768 download_us=68.511 download_again_us=6.208 kernel_wait_derived_us=62.303 total_us=74.175
+CHAIN4150 arm=F iter=148 sync_idle_us=0.304 launch_floor_1x1_us=2.720 tiny_roundtrip_us=9.840 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=149 l1_iso_us=50.816 l2_iso_us=20.320 l1_host_us=3.040 l2_host_us=2.752
+CHAIN4150 arm=P iter=149 h2d_upload_us=10.928 l1_issue_us=7.296 l2_issue_us=6.704 download_us=69.855 download_again_us=5.744 kernel_wait_derived_us=64.111 total_us=94.783
+CHAIN4150 arm=E iter=149 up_gpu_us=12.224 l1_span_us=53.792 l2_span_us=20.288 chain_gpu_us=74.080 download_us=69.984 l1_issue_us=9.056 l2_issue_us=8.352
+CHAIN4150 arm=PR iter=149 l1_issue_us=2.832 l2_issue_us=2.720 download_us=68.560 download_again_us=6.096 kernel_wait_derived_us=62.464 total_us=74.112
+CHAIN4150 arm=ER iter=149 l1_span_us=49.536 l2_span_us=20.160 chain_gpu_us=69.696 download_us=67.967 l1_issue_us=4.544 l2_issue_us=4.416
+CHAIN4150 arm=F iter=149 sync_idle_us=0.272 launch_floor_1x1_us=2.784 tiny_roundtrip_us=10.112 event_record_pair_us=2.720 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=150 h2d_upload_us=10.624 l1_issue_us=7.184 l2_issue_us=6.832 download_us=69.951 download_again_us=5.744 kernel_wait_derived_us=64.207 total_us=94.591
+CHAIN4150 arm=E iter=150 up_gpu_us=10.976 l1_span_us=53.856 l2_span_us=20.320 chain_gpu_us=74.176 download_us=69.279 l1_issue_us=9.200 l2_issue_us=8.080
+CHAIN4150 arm=PR iter=150 l1_issue_us=2.832 l2_issue_us=2.736 download_us=68.416 download_again_us=6.111 kernel_wait_derived_us=62.305 total_us=73.984
+CHAIN4150 arm=ER iter=150 l1_span_us=49.312 l2_span_us=20.160 chain_gpu_us=69.472 download_us=68.768 l1_issue_us=4.672 l2_issue_us=4.480
+CHAIN4150 arm=I iter=150 l1_iso_us=50.528 l2_iso_us=20.320 l1_host_us=2.928 l2_host_us=2.880
+CHAIN4150 arm=F iter=150 sync_idle_us=0.272 launch_floor_1x1_us=2.720 tiny_roundtrip_us=9.920 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=151 up_gpu_us=12.032 l1_span_us=54.208 l2_span_us=20.288 chain_gpu_us=74.496 download_us=69.599 l1_issue_us=9.280 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=151 l1_issue_us=2.912 l2_issue_us=2.768 download_us=68.192 download_again_us=6.895 kernel_wait_derived_us=61.297 total_us=73.872
+CHAIN4150 arm=ER iter=151 l1_span_us=51.488 l2_span_us=20.288 chain_gpu_us=71.776 download_us=68.736 l1_issue_us=4.736 l2_issue_us=4.528
+CHAIN4150 arm=I iter=151 l1_iso_us=50.720 l2_iso_us=20.352 l1_host_us=2.784 l2_host_us=2.928
+CHAIN4150 arm=P iter=151 h2d_upload_us=10.800 l1_issue_us=7.200 l2_issue_us=6.816 download_us=68.863 download_again_us=6.160 kernel_wait_derived_us=62.703 total_us=93.679
+CHAIN4150 arm=F iter=151 sync_idle_us=0.288 launch_floor_1x1_us=2.880 tiny_roundtrip_us=10.064 event_record_pair_us=2.816 event_pair_gpu_us=0.992
+CHAIN4150 arm=PR iter=152 l1_issue_us=2.720 l2_issue_us=2.672 download_us=68.288 download_again_us=6.080 kernel_wait_derived_us=62.208 total_us=73.680
+CHAIN4150 arm=ER iter=152 l1_span_us=50.496 l2_span_us=20.320 chain_gpu_us=70.816 download_us=68.064 l1_issue_us=4.512 l2_issue_us=4.527
+CHAIN4150 arm=I iter=152 l1_iso_us=49.440 l2_iso_us=20.224 l1_host_us=3.056 l2_host_us=2.864
+CHAIN4150 arm=P iter=152 h2d_upload_us=10.960 l1_issue_us=7.200 l2_issue_us=6.720 download_us=70.048 download_again_us=5.791 kernel_wait_derived_us=64.257 total_us=94.928
+CHAIN4150 arm=E iter=152 up_gpu_us=10.880 l1_span_us=54.432 l2_span_us=20.288 chain_gpu_us=74.720 download_us=69.408 l1_issue_us=9.472 l2_issue_us=8.048
+CHAIN4150 arm=F iter=152 sync_idle_us=0.288 launch_floor_1x1_us=2.960 tiny_roundtrip_us=10.431 event_record_pair_us=2.832 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=153 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.368 l1_issue_us=4.880 l2_issue_us=4.272
+CHAIN4150 arm=I iter=153 l1_iso_us=50.912 l2_iso_us=20.288 l1_host_us=2.896 l2_host_us=2.768
+CHAIN4150 arm=P iter=153 h2d_upload_us=11.136 l1_issue_us=7.488 l2_issue_us=6.768 download_us=69.167 download_again_us=5.712 kernel_wait_derived_us=63.455 total_us=94.559
+CHAIN4150 arm=E iter=153 up_gpu_us=12.224 l1_span_us=53.536 l2_span_us=20.288 chain_gpu_us=73.824 download_us=68.528 l1_issue_us=9.440 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=153 l1_issue_us=2.912 l2_issue_us=2.704 download_us=68.752 download_again_us=6.160 kernel_wait_derived_us=62.592 total_us=74.368
+CHAIN4150 arm=F iter=153 sync_idle_us=0.288 launch_floor_1x1_us=2.752 tiny_roundtrip_us=9.536 event_record_pair_us=2.752 event_pair_gpu_us=1.024
+CHAIN4150 arm=I iter=154 l1_iso_us=50.656 l2_iso_us=20.288 l1_host_us=2.912 l2_host_us=3.168
+CHAIN4150 arm=P iter=154 h2d_upload_us=10.960 l1_issue_us=7.312 l2_issue_us=6.704 download_us=68.879 download_again_us=5.920 kernel_wait_derived_us=62.959 total_us=93.855
+CHAIN4150 arm=E iter=154 up_gpu_us=10.880 l1_span_us=52.736 l2_span_us=20.032 chain_gpu_us=72.768 download_us=61.824 l1_issue_us=9.072 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=154 l1_issue_us=3.024 l2_issue_us=2.960 download_us=69.008 download_again_us=6.112 kernel_wait_derived_us=62.896 total_us=74.992
+CHAIN4150 arm=ER iter=154 l1_span_us=49.536 l2_span_us=20.160 chain_gpu_us=69.696 download_us=69.071 l1_issue_us=4.784 l2_issue_us=4.432
+CHAIN4150 arm=F iter=154 sync_idle_us=0.272 launch_floor_1x1_us=2.944 tiny_roundtrip_us=9.696 event_record_pair_us=2.816 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=155 h2d_upload_us=10.608 l1_issue_us=7.312 l2_issue_us=6.832 download_us=70.111 download_again_us=6.144 kernel_wait_derived_us=63.967 total_us=94.863
+CHAIN4150 arm=E iter=155 up_gpu_us=11.072 l1_span_us=54.496 l2_span_us=20.320 chain_gpu_us=74.816 download_us=68.463 l1_issue_us=9.184 l2_issue_us=8.064
+CHAIN4150 arm=PR iter=155 l1_issue_us=2.848 l2_issue_us=2.912 download_us=68.512 download_again_us=6.080 kernel_wait_derived_us=62.432 total_us=74.272
+CHAIN4150 arm=ER iter=155 l1_span_us=49.792 l2_span_us=20.320 chain_gpu_us=70.112 download_us=67.887 l1_issue_us=5.024 l2_issue_us=4.256
+CHAIN4150 arm=I iter=155 l1_iso_us=50.752 l2_iso_us=21.472 l1_host_us=2.928 l2_host_us=2.688
+CHAIN4150 arm=F iter=155 sync_idle_us=0.288 launch_floor_1x1_us=2.832 tiny_roundtrip_us=10.208 event_record_pair_us=2.672 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=156 up_gpu_us=11.296 l1_span_us=53.888 l2_span_us=20.320 chain_gpu_us=74.208 download_us=69.311 l1_issue_us=8.976 l2_issue_us=7.840
+CHAIN4150 arm=PR iter=156 l1_issue_us=2.976 l2_issue_us=2.736 download_us=68.688 download_again_us=6.304 kernel_wait_derived_us=62.384 total_us=74.400
+CHAIN4150 arm=ER iter=156 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.303 l1_issue_us=4.672 l2_issue_us=4.528
+CHAIN4150 arm=I iter=156 l1_iso_us=50.624 l2_iso_us=20.352 l1_host_us=3.024 l2_host_us=2.960
+CHAIN4150 arm=P iter=156 h2d_upload_us=10.736 l1_issue_us=7.232 l2_issue_us=6.752 download_us=70.016 download_again_us=5.984 kernel_wait_derived_us=64.032 total_us=94.736
+CHAIN4150 arm=F iter=156 sync_idle_us=0.304 launch_floor_1x1_us=2.879 tiny_roundtrip_us=10.384 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=157 l1_issue_us=2.832 l2_issue_us=2.880 download_us=68.976 download_again_us=6.064 kernel_wait_derived_us=62.912 total_us=74.688
+CHAIN4150 arm=ER iter=157 l1_span_us=50.880 l2_span_us=20.288 chain_gpu_us=71.168 download_us=68.127 l1_issue_us=4.928 l2_issue_us=4.416
+CHAIN4150 arm=I iter=157 l1_iso_us=50.656 l2_iso_us=20.224 l1_host_us=3.072 l2_host_us=2.768
+CHAIN4150 arm=P iter=157 h2d_upload_us=10.880 l1_issue_us=7.200 l2_issue_us=6.688 download_us=68.992 download_again_us=5.648 kernel_wait_derived_us=63.344 total_us=93.760
+CHAIN4150 arm=E iter=157 up_gpu_us=10.944 l1_span_us=52.864 l2_span_us=20.160 chain_gpu_us=73.024 download_us=68.688 l1_issue_us=9.264 l2_issue_us=8.016
+CHAIN4150 arm=F iter=157 sync_idle_us=0.272 launch_floor_1x1_us=2.928 tiny_roundtrip_us=9.792 event_record_pair_us=2.736 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=158 l1_span_us=51.072 l2_span_us=20.288 chain_gpu_us=71.360 download_us=68.224 l1_issue_us=4.944 l2_issue_us=4.335
+CHAIN4150 arm=I iter=158 l1_iso_us=50.944 l2_iso_us=20.352 l1_host_us=3.072 l2_host_us=2.736
+CHAIN4150 arm=P iter=158 h2d_upload_us=10.896 l1_issue_us=7.312 l2_issue_us=6.816 download_us=70.064 download_again_us=5.743 kernel_wait_derived_us=64.321 total_us=95.088
+CHAIN4150 arm=E iter=158 up_gpu_us=11.648 l1_span_us=54.592 l2_span_us=20.288 chain_gpu_us=74.880 download_us=69.664 l1_issue_us=9.536 l2_issue_us=8.032
+CHAIN4150 arm=PR iter=158 l1_issue_us=2.976 l2_issue_us=2.752 download_us=68.431 download_again_us=6.304 kernel_wait_derived_us=62.127 total_us=74.159
+CHAIN4150 arm=F iter=158 sync_idle_us=0.288 launch_floor_1x1_us=2.784 tiny_roundtrip_us=10.272 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=159 l1_iso_us=50.816 l2_iso_us=20.160 l1_host_us=3.040 l2_host_us=2.784
+CHAIN4150 arm=P iter=159 h2d_upload_us=10.768 l1_issue_us=7.392 l2_issue_us=6.704 download_us=69.743 download_again_us=5.744 kernel_wait_derived_us=63.999 total_us=94.607
+CHAIN4150 arm=E iter=159 up_gpu_us=12.192 l1_span_us=53.088 l2_span_us=20.288 chain_gpu_us=73.376 download_us=69.216 l1_issue_us=9.408 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=159 l1_issue_us=2.928 l2_issue_us=2.768 download_us=68.480 download_again_us=6.080 kernel_wait_derived_us=62.400 total_us=74.176
+CHAIN4150 arm=ER iter=159 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.527 l1_issue_us=4.864 l2_issue_us=4.288
+CHAIN4150 arm=F iter=159 sync_idle_us=0.272 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.528 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=160 h2d_upload_us=10.832 l1_issue_us=7.488 l2_issue_us=6.720 download_us=69.935 download_again_us=5.728 kernel_wait_derived_us=64.207 total_us=94.975
+CHAIN4150 arm=E iter=160 up_gpu_us=11.680 l1_span_us=52.960 l2_span_us=20.416 chain_gpu_us=73.376 download_us=69.327 l1_issue_us=9.296 l2_issue_us=7.936
+CHAIN4150 arm=PR iter=160 l1_issue_us=2.816 l2_issue_us=2.736 download_us=68.448 download_again_us=6.128 kernel_wait_derived_us=62.320 total_us=74.000
+CHAIN4150 arm=ER iter=160 l1_span_us=51.296 l2_span_us=20.288 chain_gpu_us=71.584 download_us=68.911 l1_issue_us=4.480 l2_issue_us=4.480
+CHAIN4150 arm=I iter=160 l1_iso_us=50.944 l2_iso_us=20.288 l1_host_us=2.880 l2_host_us=3.104
+CHAIN4150 arm=F iter=160 sync_idle_us=0.304 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.776 event_record_pair_us=2.736 event_pair_gpu_us=0.768
+CHAIN4150 arm=E iter=161 up_gpu_us=11.040 l1_span_us=54.304 l2_span_us=20.288 chain_gpu_us=74.592 download_us=69.856 l1_issue_us=9.184 l2_issue_us=7.920
+CHAIN4150 arm=PR iter=161 l1_issue_us=3.056 l2_issue_us=2.848 download_us=68.656 download_again_us=6.288 kernel_wait_derived_us=62.368 total_us=74.560
+CHAIN4150 arm=ER iter=161 l1_span_us=51.296 l2_span_us=20.288 chain_gpu_us=71.584 download_us=68.943 l1_issue_us=4.544 l2_issue_us=4.464
+CHAIN4150 arm=I iter=161 l1_iso_us=50.912 l2_iso_us=22.240 l1_host_us=3.056 l2_host_us=2.992
+CHAIN4150 arm=P iter=161 h2d_upload_us=10.736 l1_issue_us=7.392 l2_issue_us=6.656 download_us=70.016 download_again_us=6.016 kernel_wait_derived_us=64.000 total_us=94.800
+CHAIN4150 arm=F iter=161 sync_idle_us=0.304 launch_floor_1x1_us=2.960 tiny_roundtrip_us=10.016 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=162 l1_issue_us=2.864 l2_issue_us=2.784 download_us=68.016 download_again_us=6.016 kernel_wait_derived_us=62.000 total_us=73.664
+CHAIN4150 arm=ER iter=162 l1_span_us=50.528 l2_span_us=20.320 chain_gpu_us=70.848 download_us=68.287 l1_issue_us=4.464 l2_issue_us=4.320
+CHAIN4150 arm=I iter=162 l1_iso_us=50.944 l2_iso_us=20.320 l1_host_us=2.928 l2_host_us=3.008
+CHAIN4150 arm=P iter=162 h2d_upload_us=10.719 l1_issue_us=7.216 l2_issue_us=6.800 download_us=69.408 download_again_us=5.952 kernel_wait_derived_us=63.456 total_us=94.143
+CHAIN4150 arm=E iter=162 up_gpu_us=11.040 l1_span_us=52.928 l2_span_us=20.320 chain_gpu_us=73.248 download_us=69.407 l1_issue_us=9.216 l2_issue_us=7.968
+CHAIN4150 arm=F iter=162 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.432 event_record_pair_us=2.784 event_pair_gpu_us=0.832
+CHAIN4150 arm=ER iter=163 l1_span_us=51.072 l2_span_us=20.288 chain_gpu_us=71.360 download_us=68.319 l1_issue_us=4.848 l2_issue_us=4.576
+CHAIN4150 arm=I iter=163 l1_iso_us=49.504 l2_iso_us=20.128 l1_host_us=3.088 l2_host_us=2.704
+CHAIN4150 arm=P iter=163 h2d_upload_us=10.912 l1_issue_us=7.184 l2_issue_us=6.816 download_us=69.840 download_again_us=5.792 kernel_wait_derived_us=64.048 total_us=94.752
+CHAIN4150 arm=E iter=163 up_gpu_us=10.976 l1_span_us=54.560 l2_span_us=20.288 chain_gpu_us=74.848 download_us=69.808 l1_issue_us=9.327 l2_issue_us=8.048
+CHAIN4150 arm=PR iter=163 l1_issue_us=2.832 l2_issue_us=2.784 download_us=69.151 download_again_us=6.176 kernel_wait_derived_us=62.975 total_us=74.767
+CHAIN4150 arm=F iter=163 sync_idle_us=0.272 launch_floor_1x1_us=2.736 tiny_roundtrip_us=9.440 event_record_pair_us=2.800 event_pair_gpu_us=0.960
+CHAIN4150 arm=I iter=164 l1_iso_us=50.720 l2_iso_us=20.384 l1_host_us=2.944 l2_host_us=2.752
+CHAIN4150 arm=P iter=164 h2d_upload_us=10.768 l1_issue_us=7.328 l2_issue_us=6.688 download_us=69.216 download_again_us=5.712 kernel_wait_derived_us=63.504 total_us=94.000
+CHAIN4150 arm=E iter=164 up_gpu_us=11.648 l1_span_us=52.800 l2_span_us=20.192 chain_gpu_us=72.992 download_us=61.840 l1_issue_us=9.248 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=164 l1_issue_us=2.992 l2_issue_us=2.704 download_us=68.751 download_again_us=6.064 kernel_wait_derived_us=62.687 total_us=74.447
+CHAIN4150 arm=ER iter=164 l1_span_us=50.432 l2_span_us=20.288 chain_gpu_us=70.720 download_us=68.080 l1_issue_us=4.448 l2_issue_us=4.528
+CHAIN4150 arm=F iter=164 sync_idle_us=0.272 launch_floor_1x1_us=2.880 tiny_roundtrip_us=10.352 event_record_pair_us=2.736 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=165 h2d_upload_us=10.992 l1_issue_us=8.368 l2_issue_us=6.800 download_us=69.680 download_again_us=5.759 kernel_wait_derived_us=63.921 total_us=95.840
+CHAIN4150 arm=E iter=165 up_gpu_us=11.168 l1_span_us=52.768 l2_span_us=20.160 chain_gpu_us=72.928 download_us=69.104 l1_issue_us=9.136 l2_issue_us=8.064
+CHAIN4150 arm=PR iter=165 l1_issue_us=2.848 l2_issue_us=2.944 download_us=67.935 download_again_us=6.000 kernel_wait_derived_us=61.935 total_us=73.727
+CHAIN4150 arm=ER iter=165 l1_span_us=50.688 l2_span_us=20.288 chain_gpu_us=70.976 download_us=68.031 l1_issue_us=4.672 l2_issue_us=4.416
+CHAIN4150 arm=I iter=165 l1_iso_us=50.848 l2_iso_us=20.256 l1_host_us=2.896 l2_host_us=2.736
+CHAIN4150 arm=F iter=165 sync_idle_us=0.288 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.111 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=166 up_gpu_us=11.360 l1_span_us=52.832 l2_span_us=20.224 chain_gpu_us=73.056 download_us=61.696 l1_issue_us=9.552 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=166 l1_issue_us=3.008 l2_issue_us=2.768 download_us=68.703 download_again_us=6.416 kernel_wait_derived_us=62.287 total_us=74.479
+CHAIN4150 arm=ER iter=166 l1_span_us=51.232 l2_span_us=20.320 chain_gpu_us=71.552 download_us=68.847 l1_issue_us=4.608 l2_issue_us=4.352
+CHAIN4150 arm=I iter=166 l1_iso_us=50.688 l2_iso_us=20.352 l1_host_us=2.928 l2_host_us=2.768
+CHAIN4150 arm=P iter=166 h2d_upload_us=10.848 l1_issue_us=7.344 l2_issue_us=6.671 download_us=69.872 download_again_us=6.208 kernel_wait_derived_us=63.664 total_us=94.735
+CHAIN4150 arm=F iter=166 sync_idle_us=0.304 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.240 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=167 l1_issue_us=2.864 l2_issue_us=4.064 download_us=69.055 download_again_us=6.064 kernel_wait_derived_us=62.991 total_us=75.983
+CHAIN4150 arm=ER iter=167 l1_span_us=51.296 l2_span_us=20.288 chain_gpu_us=71.584 download_us=68.799 l1_issue_us=4.576 l2_issue_us=4.432
+CHAIN4150 arm=I iter=167 l1_iso_us=50.848 l2_iso_us=20.320 l1_host_us=3.056 l2_host_us=2.784
+CHAIN4150 arm=P iter=167 h2d_upload_us=10.944 l1_issue_us=7.296 l2_issue_us=6.752 download_us=69.055 download_again_us=5.760 kernel_wait_derived_us=63.295 total_us=94.047
+CHAIN4150 arm=E iter=167 up_gpu_us=10.944 l1_span_us=53.184 l2_span_us=20.288 chain_gpu_us=73.472 download_us=69.663 l1_issue_us=9.376 l2_issue_us=7.840
+CHAIN4150 arm=F iter=167 sync_idle_us=0.288 launch_floor_1x1_us=3.040 tiny_roundtrip_us=10.304 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=168 l1_span_us=50.912 l2_span_us=20.288 chain_gpu_us=71.200 download_us=68.207 l1_issue_us=4.944 l2_issue_us=4.240
+CHAIN4150 arm=I iter=168 l1_iso_us=50.624 l2_iso_us=20.224 l1_host_us=2.928 l2_host_us=3.024
+CHAIN4150 arm=P iter=168 h2d_upload_us=10.863 l1_issue_us=7.344 l2_issue_us=6.720 download_us=69.888 download_again_us=5.744 kernel_wait_derived_us=64.144 total_us=94.815
+CHAIN4150 arm=E iter=168 up_gpu_us=12.224 l1_span_us=54.400 l2_span_us=20.320 chain_gpu_us=74.720 download_us=69.615 l1_issue_us=9.344 l2_issue_us=7.936
+CHAIN4150 arm=PR iter=168 l1_issue_us=2.928 l2_issue_us=2.848 download_us=68.527 download_again_us=6.112 kernel_wait_derived_us=62.415 total_us=74.303
+CHAIN4150 arm=F iter=168 sync_idle_us=0.272 launch_floor_1x1_us=2.752 tiny_roundtrip_us=10.096 event_record_pair_us=2.816 event_pair_gpu_us=0.768
+CHAIN4150 arm=I iter=169 l1_iso_us=49.216 l2_iso_us=20.352 l1_host_us=2.896 l2_host_us=2.832
+CHAIN4150 arm=P iter=169 h2d_upload_us=10.848 l1_issue_us=7.232 l2_issue_us=6.800 download_us=69.104 download_again_us=5.744 kernel_wait_derived_us=63.360 total_us=93.984
+CHAIN4150 arm=E iter=169 up_gpu_us=11.136 l1_span_us=54.624 l2_span_us=20.288 chain_gpu_us=74.912 download_us=70.000 l1_issue_us=9.312 l2_issue_us=7.887
+CHAIN4150 arm=PR iter=169 l1_issue_us=2.928 l2_issue_us=2.720 download_us=68.031 download_again_us=6.144 kernel_wait_derived_us=61.887 total_us=73.679
+CHAIN4150 arm=ER iter=169 l1_span_us=49.536 l2_span_us=20.160 chain_gpu_us=69.696 download_us=69.184 l1_issue_us=4.752 l2_issue_us=4.448
+CHAIN4150 arm=F iter=169 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.463 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=170 h2d_upload_us=10.912 l1_issue_us=7.216 l2_issue_us=6.672 download_us=69.088 download_again_us=4.848 kernel_wait_derived_us=64.240 total_us=93.888
+CHAIN4150 arm=E iter=170 up_gpu_us=10.848 l1_span_us=52.800 l2_span_us=20.160 chain_gpu_us=72.960 download_us=68.784 l1_issue_us=9.183 l2_issue_us=8.032
+CHAIN4150 arm=PR iter=170 l1_issue_us=2.864 l2_issue_us=2.928 download_us=67.343 download_again_us=6.240 kernel_wait_derived_us=61.103 total_us=73.135
+CHAIN4150 arm=ER iter=170 l1_span_us=49.408 l2_span_us=20.256 chain_gpu_us=69.664 download_us=67.920 l1_issue_us=4.768 l2_issue_us=4.256
+CHAIN4150 arm=I iter=170 l1_iso_us=50.720 l2_iso_us=20.512 l1_host_us=2.880 l2_host_us=2.656
+CHAIN4150 arm=F iter=170 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=10.320 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=171 up_gpu_us=13.216 l1_span_us=53.184 l2_span_us=20.128 chain_gpu_us=73.312 download_us=69.392 l1_issue_us=9.215 l2_issue_us=7.920
+CHAIN4150 arm=PR iter=171 l1_issue_us=3.040 l2_issue_us=2.944 download_us=68.703 download_again_us=5.712 kernel_wait_derived_us=62.991 total_us=74.687
+CHAIN4150 arm=ER iter=171 l1_span_us=50.688 l2_span_us=20.288 chain_gpu_us=70.976 download_us=67.840 l1_issue_us=4.768 l2_issue_us=4.480
+CHAIN4150 arm=I iter=171 l1_iso_us=49.184 l2_iso_us=20.256 l1_host_us=2.895 l2_host_us=2.768
+CHAIN4150 arm=P iter=171 h2d_upload_us=10.688 l1_issue_us=7.328 l2_issue_us=6.704 download_us=69.247 download_again_us=5.024 kernel_wait_derived_us=64.223 total_us=93.967
+CHAIN4150 arm=F iter=171 sync_idle_us=0.288 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.352 event_record_pair_us=2.832 event_pair_gpu_us=1.312
+CHAIN4150 arm=PR iter=172 l1_issue_us=2.928 l2_issue_us=2.896 download_us=68.335 download_again_us=6.064 kernel_wait_derived_us=62.271 total_us=74.159
+CHAIN4150 arm=ER iter=172 l1_span_us=51.168 l2_span_us=20.224 chain_gpu_us=71.392 download_us=67.872 l1_issue_us=4.432 l2_issue_us=4.464
+CHAIN4150 arm=I iter=172 l1_iso_us=49.280 l2_iso_us=20.320 l1_host_us=2.896 l2_host_us=2.864
+CHAIN4150 arm=P iter=172 h2d_upload_us=10.832 l1_issue_us=7.248 l2_issue_us=6.672 download_us=69.183 download_again_us=5.728 kernel_wait_derived_us=63.455 total_us=93.935
+CHAIN4150 arm=E iter=172 up_gpu_us=10.944 l1_span_us=52.896 l2_span_us=20.128 chain_gpu_us=73.024 download_us=61.888 l1_issue_us=9.216 l2_issue_us=7.936
+CHAIN4150 arm=F iter=172 sync_idle_us=0.288 launch_floor_1x1_us=2.992 tiny_roundtrip_us=10.336 event_record_pair_us=2.672 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=173 l1_span_us=50.976 l2_span_us=20.320 chain_gpu_us=71.296 download_us=68.080 l1_issue_us=4.320 l2_issue_us=4.272
+CHAIN4150 arm=I iter=173 l1_iso_us=50.752 l2_iso_us=20.224 l1_host_us=3.024 l2_host_us=2.704
+CHAIN4150 arm=P iter=173 h2d_upload_us=10.832 l1_issue_us=7.184 l2_issue_us=6.752 download_us=68.975 download_again_us=5.808 kernel_wait_derived_us=63.167 total_us=93.743
+CHAIN4150 arm=E iter=173 up_gpu_us=10.848 l1_span_us=54.784 l2_span_us=20.288 chain_gpu_us=75.072 download_us=69.551 l1_issue_us=9.568 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=173 l1_issue_us=2.896 l2_issue_us=2.688 download_us=68.640 download_again_us=6.176 kernel_wait_derived_us=62.464 total_us=74.224
+CHAIN4150 arm=F iter=173 sync_idle_us=0.272 launch_floor_1x1_us=2.736 tiny_roundtrip_us=9.600 event_record_pair_us=2.864 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=174 l1_iso_us=50.944 l2_iso_us=20.160 l1_host_us=2.896 l2_host_us=2.720
+CHAIN4150 arm=P iter=174 h2d_upload_us=10.880 l1_issue_us=7.296 l2_issue_us=6.784 download_us=69.471 download_again_us=5.728 kernel_wait_derived_us=63.743 total_us=94.431
+CHAIN4150 arm=E iter=174 up_gpu_us=12.160 l1_span_us=53.184 l2_span_us=20.320 chain_gpu_us=73.504 download_us=69.471 l1_issue_us=9.376 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=174 l1_issue_us=2.976 l2_issue_us=2.688 download_us=68.848 download_again_us=6.288 kernel_wait_derived_us=62.560 total_us=74.512
+CHAIN4150 arm=ER iter=174 l1_span_us=50.848 l2_span_us=20.288 chain_gpu_us=71.136 download_us=68.112 l1_issue_us=4.912 l2_issue_us=4.223
+CHAIN4150 arm=F iter=174 sync_idle_us=0.304 launch_floor_1x1_us=2.848 tiny_roundtrip_us=10.000 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=175 h2d_upload_us=10.512 l1_issue_us=7.408 l2_issue_us=6.752 download_us=69.215 download_again_us=5.680 kernel_wait_derived_us=63.535 total_us=93.887
+CHAIN4150 arm=E iter=175 up_gpu_us=12.096 l1_span_us=53.024 l2_span_us=20.320 chain_gpu_us=73.344 download_us=69.007 l1_issue_us=9.536 l2_issue_us=7.792
+CHAIN4150 arm=PR iter=175 l1_issue_us=2.896 l2_issue_us=2.848 download_us=67.760 download_again_us=6.031 kernel_wait_derived_us=61.729 total_us=73.504
+CHAIN4150 arm=ER iter=175 l1_span_us=50.784 l2_span_us=20.320 chain_gpu_us=71.104 download_us=68.256 l1_issue_us=4.688 l2_issue_us=4.304
+CHAIN4150 arm=I iter=175 l1_iso_us=49.312 l2_iso_us=20.032 l1_host_us=2.832 l2_host_us=2.960
+CHAIN4150 arm=F iter=175 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.192 event_record_pair_us=2.720 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=176 up_gpu_us=11.328 l1_span_us=54.112 l2_span_us=20.288 chain_gpu_us=74.400 download_us=69.647 l1_issue_us=9.120 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=176 l1_issue_us=3.040 l2_issue_us=2.816 download_us=68.624 download_again_us=6.351 kernel_wait_derived_us=62.273 total_us=74.480
+CHAIN4150 arm=ER iter=176 l1_span_us=49.568 l2_span_us=20.000 chain_gpu_us=69.568 download_us=69.136 l1_issue_us=4.464 l2_issue_us=4.448
+CHAIN4150 arm=I iter=176 l1_iso_us=50.688 l2_iso_us=20.320 l1_host_us=2.976 l2_host_us=3.024
+CHAIN4150 arm=P iter=176 h2d_upload_us=10.720 l1_issue_us=7.200 l2_issue_us=6.752 download_us=69.071 download_again_us=5.904 kernel_wait_derived_us=63.167 total_us=93.743
+CHAIN4150 arm=F iter=176 sync_idle_us=0.304 launch_floor_1x1_us=2.880 tiny_roundtrip_us=9.760 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=177 l1_issue_us=2.928 l2_issue_us=2.784 download_us=69.008 download_again_us=6.127 kernel_wait_derived_us=62.881 total_us=74.720
+CHAIN4150 arm=ER iter=177 l1_span_us=49.536 l2_span_us=20.064 chain_gpu_us=69.600 download_us=68.000 l1_issue_us=4.528 l2_issue_us=4.480
+CHAIN4150 arm=I iter=177 l1_iso_us=50.784 l2_iso_us=21.632 l1_host_us=2.928 l2_host_us=3.120
+CHAIN4150 arm=P iter=177 h2d_upload_us=10.784 l1_issue_us=7.200 l2_issue_us=6.656 download_us=68.703 download_again_us=5.792 kernel_wait_derived_us=62.911 total_us=93.343
+CHAIN4150 arm=E iter=177 up_gpu_us=11.744 l1_span_us=54.176 l2_span_us=20.288 chain_gpu_us=74.464 download_us=69.520 l1_issue_us=9.152 l2_issue_us=7.984
+CHAIN4150 arm=F iter=177 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.320 event_record_pair_us=2.736 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=178 l1_span_us=50.880 l2_span_us=20.288 chain_gpu_us=71.168 download_us=68.176 l1_issue_us=4.896 l2_issue_us=4.432
+CHAIN4150 arm=I iter=178 l1_iso_us=50.784 l2_iso_us=20.256 l1_host_us=2.896 l2_host_us=3.024
+CHAIN4150 arm=P iter=178 h2d_upload_us=10.640 l1_issue_us=7.376 l2_issue_us=6.800 download_us=69.231 download_again_us=5.696 kernel_wait_derived_us=63.535 total_us=94.047
+CHAIN4150 arm=E iter=178 up_gpu_us=11.616 l1_span_us=53.984 l2_span_us=20.320 chain_gpu_us=74.304 download_us=69.663 l1_issue_us=9.040 l2_issue_us=7.808
+CHAIN4150 arm=PR iter=178 l1_issue_us=2.944 l2_issue_us=2.704 download_us=68.784 download_again_us=6.160 kernel_wait_derived_us=62.624 total_us=74.432
+CHAIN4150 arm=F iter=178 sync_idle_us=0.288 launch_floor_1x1_us=2.768 tiny_roundtrip_us=9.952 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=179 l1_iso_us=49.312 l2_iso_us=20.224 l1_host_us=2.928 l2_host_us=2.768
+CHAIN4150 arm=P iter=179 h2d_upload_us=10.704 l1_issue_us=7.056 l2_issue_us=6.768 download_us=69.647 download_again_us=5.680 kernel_wait_derived_us=63.967 total_us=94.175
+CHAIN4150 arm=E iter=179 up_gpu_us=12.192 l1_span_us=53.856 l2_span_us=20.320 chain_gpu_us=74.176 download_us=69.359 l1_issue_us=9.120 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=179 l1_issue_us=2.880 l2_issue_us=2.704 download_us=68.368 download_again_us=6.096 kernel_wait_derived_us=62.272 total_us=73.952
+CHAIN4150 arm=ER iter=179 l1_span_us=51.232 l2_span_us=20.288 chain_gpu_us=71.520 download_us=68.527 l1_issue_us=4.912 l2_issue_us=4.224
+CHAIN4150 arm=F iter=179 sync_idle_us=0.272 launch_floor_1x1_us=2.912 tiny_roundtrip_us=10.208 event_record_pair_us=2.800 event_pair_gpu_us=0.800
+CHAIN4150 arm=P iter=180 h2d_upload_us=10.816 l1_issue_us=7.312 l2_issue_us=6.752 download_us=69.199 download_again_us=5.664 kernel_wait_derived_us=63.535 total_us=94.079
+CHAIN4150 arm=E iter=180 up_gpu_us=11.712 l1_span_us=54.432 l2_span_us=20.288 chain_gpu_us=74.720 download_us=69.711 l1_issue_us=9.184 l2_issue_us=8.112
+CHAIN4150 arm=PR iter=180 l1_issue_us=2.864 l2_issue_us=2.848 download_us=68.464 download_again_us=6.112 kernel_wait_derived_us=62.352 total_us=74.176
+CHAIN4150 arm=ER iter=180 l1_span_us=49.408 l2_span_us=20.192 chain_gpu_us=69.600 download_us=67.967 l1_issue_us=4.736 l2_issue_us=4.432
+CHAIN4150 arm=I iter=180 l1_iso_us=49.344 l2_iso_us=20.224 l1_host_us=2.896 l2_host_us=2.655
+CHAIN4150 arm=F iter=180 sync_idle_us=0.304 launch_floor_1x1_us=2.896 tiny_roundtrip_us=10.448 event_record_pair_us=2.848 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=181 up_gpu_us=12.128 l1_span_us=54.048 l2_span_us=20.288 chain_gpu_us=74.336 download_us=69.279 l1_issue_us=9.408 l2_issue_us=7.984
+CHAIN4150 arm=PR iter=181 l1_issue_us=3.072 l2_issue_us=2.848 download_us=68.112 download_again_us=6.368 kernel_wait_derived_us=61.744 total_us=74.032
+CHAIN4150 arm=ER iter=181 l1_span_us=49.536 l2_span_us=20.256 chain_gpu_us=69.792 download_us=68.687 l1_issue_us=4.848 l2_issue_us=4.608
+CHAIN4150 arm=I iter=181 l1_iso_us=50.720 l2_iso_us=20.288 l1_host_us=2.992 l2_host_us=2.879
+CHAIN4150 arm=P iter=181 h2d_upload_us=11.072 l1_issue_us=7.328 l2_issue_us=6.688 download_us=69.456 download_again_us=6.096 kernel_wait_derived_us=63.360 total_us=94.544
+CHAIN4150 arm=F iter=181 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.064 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=182 l1_issue_us=2.848 l2_issue_us=2.752 download_us=68.048 download_again_us=6.128 kernel_wait_derived_us=61.920 total_us=73.648
+CHAIN4150 arm=ER iter=182 l1_span_us=49.472 l2_span_us=20.256 chain_gpu_us=69.728 download_us=68.079 l1_issue_us=4.656 l2_issue_us=4.448
+CHAIN4150 arm=I iter=182 l1_iso_us=50.592 l2_iso_us=20.256 l1_host_us=2.896 l2_host_us=2.912
+CHAIN4150 arm=P iter=182 h2d_upload_us=10.976 l1_issue_us=7.328 l2_issue_us=6.624 download_us=70.016 download_again_us=5.712 kernel_wait_derived_us=64.304 total_us=94.944
+CHAIN4150 arm=E iter=182 up_gpu_us=12.384 l1_span_us=52.768 l2_span_us=20.320 chain_gpu_us=73.088 download_us=61.072 l1_issue_us=9.184 l2_issue_us=8.976
+CHAIN4150 arm=F iter=182 sync_idle_us=0.288 launch_floor_1x1_us=2.896 tiny_roundtrip_us=9.456 event_record_pair_us=2.848 event_pair_gpu_us=0.992
+CHAIN4150 arm=ER iter=183 l1_span_us=50.848 l2_span_us=20.288 chain_gpu_us=71.136 download_us=68.271 l1_issue_us=4.896 l2_issue_us=4.352
+CHAIN4150 arm=I iter=183 l1_iso_us=51.200 l2_iso_us=20.192 l1_host_us=2.992 l2_host_us=2.944
+CHAIN4150 arm=P iter=183 h2d_upload_us=10.816 l1_issue_us=7.408 l2_issue_us=6.672 download_us=70.224 download_again_us=5.728 kernel_wait_derived_us=64.496 total_us=95.120
+CHAIN4150 arm=E iter=183 up_gpu_us=11.584 l1_span_us=52.704 l2_span_us=20.288 chain_gpu_us=72.992 download_us=69.376 l1_issue_us=9.104 l2_issue_us=7.968
+CHAIN4150 arm=PR iter=183 l1_issue_us=2.896 l2_issue_us=2.736 download_us=67.999 download_again_us=5.968 kernel_wait_derived_us=62.031 total_us=73.631
+CHAIN4150 arm=F iter=183 sync_idle_us=0.288 launch_floor_1x1_us=2.752 tiny_roundtrip_us=9.408 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=184 l1_iso_us=50.784 l2_iso_us=20.320 l1_host_us=3.008 l2_host_us=2.944
+CHAIN4150 arm=P iter=184 h2d_upload_us=10.864 l1_issue_us=7.344 l2_issue_us=6.800 download_us=69.887 download_again_us=5.680 kernel_wait_derived_us=64.207 total_us=94.895
+CHAIN4150 arm=E iter=184 up_gpu_us=11.168 l1_span_us=54.432 l2_span_us=20.288 chain_gpu_us=74.720 download_us=68.832 l1_issue_us=9.136 l2_issue_us=7.808
+CHAIN4150 arm=PR iter=184 l1_issue_us=2.880 l2_issue_us=2.768 download_us=68.975 download_again_us=7.152 kernel_wait_derived_us=61.823 total_us=74.623
+CHAIN4150 arm=ER iter=184 l1_span_us=50.752 l2_span_us=20.288 chain_gpu_us=71.040 download_us=68.335 l1_issue_us=4.736 l2_issue_us=4.432
+CHAIN4150 arm=F iter=184 sync_idle_us=0.288 launch_floor_1x1_us=2.880 tiny_roundtrip_us=9.808 event_record_pair_us=2.816 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=185 h2d_upload_us=10.960 l1_issue_us=7.248 l2_issue_us=6.880 download_us=69.583 download_again_us=5.776 kernel_wait_derived_us=63.807 total_us=94.671
+CHAIN4150 arm=E iter=185 up_gpu_us=10.912 l1_span_us=52.704 l2_span_us=20.192 chain_gpu_us=72.896 download_us=68.816 l1_issue_us=9.184 l2_issue_us=7.856
+CHAIN4150 arm=PR iter=185 l1_issue_us=2.832 l2_issue_us=2.944 download_us=68.320 download_again_us=6.304 kernel_wait_derived_us=62.016 total_us=74.096
+CHAIN4150 arm=ER iter=185 l1_span_us=50.560 l2_span_us=20.320 chain_gpu_us=70.880 download_us=67.999 l1_issue_us=4.880 l2_issue_us=4.320
+CHAIN4150 arm=I iter=185 l1_iso_us=50.720 l2_iso_us=20.384 l1_host_us=2.912 l2_host_us=2.896
+CHAIN4150 arm=F iter=185 sync_idle_us=0.304 launch_floor_1x1_us=2.880 tiny_roundtrip_us=9.872 event_record_pair_us=2.800 event_pair_gpu_us=0.992
+CHAIN4150 arm=E iter=186 up_gpu_us=11.232 l1_span_us=52.928 l2_span_us=20.192 chain_gpu_us=73.120 download_us=61.808 l1_issue_us=9.360 l2_issue_us=8.048
+CHAIN4150 arm=PR iter=186 l1_issue_us=3.024 l2_issue_us=2.816 download_us=68.832 download_again_us=6.352 kernel_wait_derived_us=62.480 total_us=74.672
+CHAIN4150 arm=ER iter=186 l1_span_us=50.848 l2_span_us=20.320 chain_gpu_us=71.168 download_us=68.175 l1_issue_us=4.848 l2_issue_us=4.560
+CHAIN4150 arm=I iter=186 l1_iso_us=50.528 l2_iso_us=20.288 l1_host_us=2.912 l2_host_us=2.864
+CHAIN4150 arm=P iter=186 h2d_upload_us=10.928 l1_issue_us=7.456 l2_issue_us=6.672 download_us=69.952 download_again_us=5.952 kernel_wait_derived_us=64.000 total_us=95.008
+CHAIN4150 arm=F iter=186 sync_idle_us=0.304 launch_floor_1x1_us=2.976 tiny_roundtrip_us=10.192 event_record_pair_us=2.784 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=187 l1_issue_us=2.896 l2_issue_us=2.992 download_us=68.784 download_again_us=6.128 kernel_wait_derived_us=62.656 total_us=74.672
+CHAIN4150 arm=ER iter=187 l1_span_us=49.600 l2_span_us=20.160 chain_gpu_us=69.760 download_us=68.063 l1_issue_us=4.672 l2_issue_us=4.384
+CHAIN4150 arm=I iter=187 l1_iso_us=50.464 l2_iso_us=20.288 l1_host_us=2.976 l2_host_us=2.864
+CHAIN4150 arm=P iter=187 h2d_upload_us=11.071 l1_issue_us=7.264 l2_issue_us=6.640 download_us=69.776 download_again_us=5.728 kernel_wait_derived_us=64.048 total_us=94.751
+CHAIN4150 arm=E iter=187 up_gpu_us=11.072 l1_span_us=54.592 l2_span_us=20.288 chain_gpu_us=74.880 download_us=69.807 l1_issue_us=9.408 l2_issue_us=7.952
+CHAIN4150 arm=F iter=187 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=9.920 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=188 l1_span_us=50.880 l2_span_us=20.288 chain_gpu_us=71.168 download_us=68.271 l1_issue_us=4.880 l2_issue_us=4.288
+CHAIN4150 arm=I iter=188 l1_iso_us=50.720 l2_iso_us=20.384 l1_host_us=3.088 l2_host_us=2.816
+CHAIN4150 arm=P iter=188 h2d_upload_us=10.752 l1_issue_us=7.328 l2_issue_us=6.672 download_us=70.288 download_again_us=5.792 kernel_wait_derived_us=64.496 total_us=95.040
+CHAIN4150 arm=E iter=188 up_gpu_us=11.712 l1_span_us=52.768 l2_span_us=20.128 chain_gpu_us=72.896 download_us=61.968 l1_issue_us=9.344 l2_issue_us=7.888
+CHAIN4150 arm=PR iter=188 l1_issue_us=2.960 l2_issue_us=2.768 download_us=68.511 download_again_us=6.112 kernel_wait_derived_us=62.399 total_us=74.239
+CHAIN4150 arm=F iter=188 sync_idle_us=0.288 launch_floor_1x1_us=2.768 tiny_roundtrip_us=9.728 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=189 l1_iso_us=50.848 l2_iso_us=20.352 l1_host_us=3.040 l2_host_us=2.752
+CHAIN4150 arm=P iter=189 h2d_upload_us=10.656 l1_issue_us=7.280 l2_issue_us=6.672 download_us=69.168 download_again_us=5.872 kernel_wait_derived_us=63.296 total_us=93.776
+CHAIN4150 arm=E iter=189 up_gpu_us=10.912 l1_span_us=52.864 l2_span_us=20.160 chain_gpu_us=73.024 download_us=61.824 l1_issue_us=9.248 l2_issue_us=8.000
+CHAIN4150 arm=PR iter=189 l1_issue_us=2.944 l2_issue_us=2.720 download_us=68.479 download_again_us=6.224 kernel_wait_derived_us=62.255 total_us=74.143
+CHAIN4150 arm=ER iter=189 l1_span_us=49.504 l2_span_us=20.000 chain_gpu_us=69.504 download_us=69.072 l1_issue_us=4.544 l2_issue_us=4.432
+CHAIN4150 arm=F iter=189 sync_idle_us=0.288 launch_floor_1x1_us=2.816 tiny_roundtrip_us=9.616 event_record_pair_us=2.784 event_pair_gpu_us=0.992
+CHAIN4150 arm=P iter=190 h2d_upload_us=10.832 l1_issue_us=7.488 l2_issue_us=6.656 download_us=68.976 download_again_us=5.712 kernel_wait_derived_us=63.264 total_us=93.952
+CHAIN4150 arm=E iter=190 up_gpu_us=11.072 l1_span_us=54.560 l2_span_us=20.288 chain_gpu_us=74.848 download_us=69.712 l1_issue_us=9.424 l2_issue_us=7.904
+CHAIN4150 arm=PR iter=190 l1_issue_us=2.848 l2_issue_us=2.928 download_us=68.319 download_again_us=6.112 kernel_wait_derived_us=62.207 total_us=74.095
+CHAIN4150 arm=ER iter=190 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.383 l1_issue_us=4.704 l2_issue_us=4.528
+CHAIN4150 arm=I iter=190 l1_iso_us=51.168 l2_iso_us=20.320 l1_host_us=2.960 l2_host_us=3.088
+CHAIN4150 arm=F iter=190 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=9.840 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=191 up_gpu_us=11.136 l1_span_us=54.176 l2_span_us=20.288 chain_gpu_us=74.464 download_us=69.536 l1_issue_us=9.200 l2_issue_us=7.936
+CHAIN4150 arm=PR iter=191 l1_issue_us=3.056 l2_issue_us=2.736 download_us=68.559 download_again_us=6.336 kernel_wait_derived_us=62.223 total_us=74.351
+CHAIN4150 arm=ER iter=191 l1_span_us=51.104 l2_span_us=20.288 chain_gpu_us=71.392 download_us=68.447 l1_issue_us=4.832 l2_issue_us=4.448
+CHAIN4150 arm=I iter=191 l1_iso_us=50.624 l2_iso_us=20.256 l1_host_us=3.088 l2_host_us=2.912
+CHAIN4150 arm=P iter=191 h2d_upload_us=11.152 l1_issue_us=7.296 l2_issue_us=6.800 download_us=69.775 download_again_us=5.952 kernel_wait_derived_us=63.823 total_us=95.023
+CHAIN4150 arm=F iter=191 sync_idle_us=0.304 launch_floor_1x1_us=2.864 tiny_roundtrip_us=10.144 event_record_pair_us=2.704 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=192 l1_issue_us=2.768 l2_issue_us=2.800 download_us=68.303 download_again_us=6.064 kernel_wait_derived_us=62.239 total_us=73.871
+CHAIN4150 arm=ER iter=192 l1_span_us=49.440 l2_span_us=20.160 chain_gpu_us=69.600 download_us=68.848 l1_issue_us=4.704 l2_issue_us=4.464
+CHAIN4150 arm=I iter=192 l1_iso_us=50.720 l2_iso_us=22.272 l1_host_us=2.912 l2_host_us=3.200
+CHAIN4150 arm=P iter=192 h2d_upload_us=10.976 l1_issue_us=7.344 l2_issue_us=6.656 download_us=70.031 download_again_us=5.712 kernel_wait_derived_us=64.319 total_us=95.007
+CHAIN4150 arm=E iter=192 up_gpu_us=10.944 l1_span_us=52.832 l2_span_us=20.224 chain_gpu_us=73.056 download_us=69.167 l1_issue_us=9.200 l2_issue_us=7.952
+CHAIN4150 arm=F iter=192 sync_idle_us=0.288 launch_floor_1x1_us=2.832 tiny_roundtrip_us=10.080 event_record_pair_us=2.848 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=193 l1_span_us=50.752 l2_span_us=20.288 chain_gpu_us=71.040 download_us=67.919 l1_issue_us=4.512 l2_issue_us=4.720
+CHAIN4150 arm=I iter=193 l1_iso_us=50.752 l2_iso_us=20.096 l1_host_us=2.816 l2_host_us=2.704
+CHAIN4150 arm=P iter=193 h2d_upload_us=10.912 l1_issue_us=7.344 l2_issue_us=6.623 download_us=69.984 download_again_us=5.712 kernel_wait_derived_us=64.272 total_us=94.863
+CHAIN4150 arm=E iter=193 up_gpu_us=10.784 l1_span_us=52.960 l2_span_us=20.256 chain_gpu_us=73.216 download_us=62.143 l1_issue_us=9.376 l2_issue_us=7.872
+CHAIN4150 arm=PR iter=193 l1_issue_us=2.976 l2_issue_us=3.280 download_us=69.088 download_again_us=6.079 kernel_wait_derived_us=63.009 total_us=75.344
+CHAIN4150 arm=F iter=193 sync_idle_us=0.256 launch_floor_1x1_us=2.784 tiny_roundtrip_us=9.840 event_record_pair_us=2.832 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=194 l1_iso_us=50.880 l2_iso_us=20.320 l1_host_us=2.864 l2_host_us=2.752
+CHAIN4150 arm=P iter=194 h2d_upload_us=11.008 l1_issue_us=7.327 l2_issue_us=6.720 download_us=69.424 download_again_us=5.712 kernel_wait_derived_us=63.712 total_us=94.479
+CHAIN4150 arm=E iter=194 up_gpu_us=11.776 l1_span_us=52.832 l2_span_us=20.256 chain_gpu_us=73.088 download_us=69.391 l1_issue_us=9.120 l2_issue_us=7.952
+CHAIN4150 arm=PR iter=194 l1_issue_us=2.928 l2_issue_us=2.688 download_us=68.239 download_again_us=5.936 kernel_wait_derived_us=62.303 total_us=73.855
+CHAIN4150 arm=ER iter=194 l1_span_us=49.344 l2_span_us=20.224 chain_gpu_us=69.568 download_us=67.856 l1_issue_us=4.448 l2_issue_us=4.336
+CHAIN4150 arm=F iter=194 sync_idle_us=0.288 launch_floor_1x1_us=2.864 tiny_roundtrip_us=10.192 event_record_pair_us=2.736 event_pair_gpu_us=1.024
+CHAIN4150 arm=P iter=195 h2d_upload_us=10.752 l1_issue_us=7.152 l2_issue_us=6.672 download_us=69.152 download_again_us=5.600 kernel_wait_derived_us=63.552 total_us=93.728
+CHAIN4150 arm=E iter=195 up_gpu_us=10.976 l1_span_us=52.608 l2_span_us=20.352 chain_gpu_us=72.960 download_us=60.720 l1_issue_us=9.024 l2_issue_us=9.215
+CHAIN4150 arm=PR iter=195 l1_issue_us=3.136 l2_issue_us=3.040 download_us=68.751 download_again_us=6.112 kernel_wait_derived_us=62.639 total_us=74.927
+CHAIN4150 arm=ER iter=195 l1_span_us=49.600 l2_span_us=20.160 chain_gpu_us=69.760 download_us=68.656 l1_issue_us=5.056 l2_issue_us=4.448
+CHAIN4150 arm=I iter=195 l1_iso_us=50.688 l2_iso_us=22.400 l1_host_us=3.120 l2_host_us=3.168
+CHAIN4150 arm=F iter=195 sync_idle_us=0.288 launch_floor_1x1_us=2.976 tiny_roundtrip_us=9.856 event_record_pair_us=2.976 event_pair_gpu_us=0.800
+CHAIN4150 arm=E iter=196 up_gpu_us=11.264 l1_span_us=54.144 l2_span_us=20.032 chain_gpu_us=74.176 download_us=69.504 l1_issue_us=9.776 l2_issue_us=8.095
+CHAIN4150 arm=PR iter=196 l1_issue_us=3.168 l2_issue_us=2.880 download_us=68.111 download_again_us=6.368 kernel_wait_derived_us=61.743 total_us=74.159
+CHAIN4150 arm=ER iter=196 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.112 l1_issue_us=4.800 l2_issue_us=4.672
+CHAIN4150 arm=I iter=196 l1_iso_us=49.440 l2_iso_us=20.224 l1_host_us=2.992 l2_host_us=2.896
+CHAIN4150 arm=P iter=196 h2d_upload_us=11.008 l1_issue_us=7.504 l2_issue_us=6.880 download_us=69.935 download_again_us=6.288 kernel_wait_derived_us=63.647 total_us=95.327
+CHAIN4150 arm=F iter=196 sync_idle_us=0.304 launch_floor_1x1_us=3.056 tiny_roundtrip_us=9.936 event_record_pair_us=2.816 event_pair_gpu_us=0.800
+CHAIN4150 arm=PR iter=197 l1_issue_us=2.960 l2_issue_us=3.120 download_us=68.383 download_again_us=6.080 kernel_wait_derived_us=62.303 total_us=74.463
+CHAIN4150 arm=ER iter=197 l1_span_us=50.752 l2_span_us=20.320 chain_gpu_us=71.072 download_us=67.808 l1_issue_us=4.816 l2_issue_us=4.656
+CHAIN4150 arm=I iter=197 l1_iso_us=50.656 l2_iso_us=20.416 l1_host_us=2.976 l2_host_us=2.928
+CHAIN4150 arm=P iter=197 h2d_upload_us=10.928 l1_issue_us=7.616 l2_issue_us=6.848 download_us=69.551 download_again_us=5.792 kernel_wait_derived_us=63.759 total_us=94.943
+CHAIN4150 arm=E iter=197 up_gpu_us=10.976 l1_span_us=54.976 l2_span_us=20.288 chain_gpu_us=75.264 download_us=69.951 l1_issue_us=9.632 l2_issue_us=7.920
+CHAIN4150 arm=F iter=197 sync_idle_us=0.288 launch_floor_1x1_us=2.912 tiny_roundtrip_us=9.712 event_record_pair_us=2.704 event_pair_gpu_us=0.800
+CHAIN4150 arm=ER iter=198 l1_span_us=51.040 l2_span_us=20.288 chain_gpu_us=71.328 download_us=68.352 l1_issue_us=4.624 l2_issue_us=4.720
+CHAIN4150 arm=I iter=198 l1_iso_us=49.280 l2_iso_us=21.184 l1_host_us=3.040 l2_host_us=3.168
+CHAIN4150 arm=P iter=198 h2d_upload_us=10.928 l1_issue_us=7.520 l2_issue_us=6.928 download_us=69.535 download_again_us=5.792 kernel_wait_derived_us=63.743 total_us=94.911
+CHAIN4150 arm=E iter=198 up_gpu_us=11.744 l1_span_us=54.560 l2_span_us=20.288 chain_gpu_us=74.848 download_us=69.503 l1_issue_us=9.504 l2_issue_us=8.208
+CHAIN4150 arm=PR iter=198 l1_issue_us=3.120 l2_issue_us=2.992 download_us=68.528 download_again_us=6.112 kernel_wait_derived_us=62.416 total_us=74.640
+CHAIN4150 arm=F iter=198 sync_idle_us=0.288 launch_floor_1x1_us=2.928 tiny_roundtrip_us=9.648 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHAIN4150 arm=I iter=199 l1_iso_us=50.976 l2_iso_us=22.336 l1_host_us=3.168 l2_host_us=3.312
+CHAIN4150 arm=P iter=199 h2d_upload_us=10.928 l1_issue_us=7.504 l2_issue_us=6.863 download_us=69.360 download_again_us=5.712 kernel_wait_derived_us=63.648 total_us=94.655
+CHAIN4150 arm=E iter=199 up_gpu_us=10.784 l1_span_us=55.680 l2_span_us=20.320 chain_gpu_us=76.000 download_us=69.807 l1_issue_us=9.296 l2_issue_us=8.080
+CHAIN4150 arm=PR iter=199 l1_issue_us=3.136 l2_issue_us=2.864 download_us=68.528 download_again_us=6.095 kernel_wait_derived_us=62.433 total_us=74.528
+CHAIN4150 arm=ER iter=199 l1_span_us=51.392 l2_span_us=20.288 chain_gpu_us=71.680 download_us=68.816 l1_issue_us=4.672 l2_issue_us=4.544
+CHAIN4150 arm=F iter=199 sync_idle_us=0.288 launch_floor_1x1_us=2.944 tiny_roundtrip_us=10.016 event_record_pair_us=2.768 event_pair_gpu_us=0.800
+CHECKSUM4150 value=5494912908153880973
+done4150
