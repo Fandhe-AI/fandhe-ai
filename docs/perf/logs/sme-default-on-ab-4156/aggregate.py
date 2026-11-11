@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """イシュー #4156: SME 既定 ON の新しい事前登録 A/B（Mac mini・GB10）の厳密集計。
 
-役割: RULE.txt（同ディレクトリ・計測前に固定）の判定を、実測ログから機械的に出力する。
+役割: RULE.v2.txt（同ディレクトリ・計測前に固定。v1 の RULE.txt は経緯として残し読まない）の判定を、実測ログから機械的に出力する。
 `docs/perf/logs/sme-default-on-ab-3232/aggregate.py` の派生だが、GB10 の扱いは固定せず RULE §9 に転記された
 所有者決定（GB10-MODE・NOISE-BAND）を読んで分岐する。決定が未転記なら P-OWNER 不成立で undetermined（推定・代筆しない）。
 標準ライブラリのみ。`python3 -I` で起動すること。結果の Markdown は手で直さない。
@@ -33,6 +33,8 @@ MACMINI_NONREACH = {"infer"}
 # P-RT で ON 腕から除外するテスト名（計測前に固定。定数 true では作りの上で必ず落ちるドリフト検出）
 RT_SKIP_TEST = "sme_production_disabled_after_gb10_reject"
 EXPECTED_BITDUMP_LINES = 6726847  # RULE §4 P-BIT の期待行数
+# 判定に使う RULE のファイル名（#4156 RULE.v2 で RULE.txt から切り替え。v1 は経緯として残し、道具は読まない）。
+RULE_NAME = "RULE.v2.txt"
 GATE_FILE = "crates/backend-cpu/src/gemm_blis/mod.rs"
 # 参考: #3231 の M4 Max bitdump（記録のみ）
 M4MAX_BITDUMP_LINES = 6726847
@@ -43,11 +45,11 @@ class AggError(Exception):
 
 
 def rule_sha():
-    for line in open(os.path.join(HERE, "RULE.txt"), encoding="utf-8"):
+    for line in open(os.path.join(HERE, RULE_NAME), encoding="utf-8"):
         m = re.match(r"^on-arm\.patch sha256: ([0-9a-f]{64})$", line.rstrip("\n"))
         if m:
             return m.group(1)
-    raise AggError("RULE.txt から patch の sha256 を取得できない")
+    raise AggError("%s から patch の sha256 を取得できない" % RULE_NAME)
 
 
 def read_text(path):
@@ -188,16 +190,16 @@ TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 def rule_bytes_sha():
     import hashlib
-    with open(os.path.join(HERE, "RULE.txt"), "rb") as f:
+    with open(os.path.join(HERE, RULE_NAME), "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
 
 def read_owner():
-    """RULE.txt の所有者決定欄を読み (値の dict, 不成立理由の list) を返す。
+    """RULE.v2.txt の所有者決定欄を読み (値の dict, 不成立理由の list) を返す。
 
     各キーはちょうど 1 回だけ行頭に現れ、列挙値と回答コメント URL の形式に完全一致しなければ不成立（fail-closed）。
     所有者の決定を推定・補完しない（`<未決>` は列挙外として不成立になる）。"""
-    text = read_text(os.path.join(HERE, "RULE.txt"))
+    text = read_text(os.path.join(HERE, RULE_NAME))
     vals, probs = {}, []
     for key, allowed in OWNER_ENUMS:
         hits = re.findall(r"^%s: *(.*?) *$" % re.escape(key), text, re.M)
@@ -273,7 +275,7 @@ def evaluate(base, host):
     if pre is not None:
         m = re.search(r"^rule_sha256=([0-9a-f]{64})$", pre, re.M)
         if not m or m.group(1) != rule_bytes_sha():
-            gf.append("P-OWNER: prereg_append.txt の rule_sha256 が現在の RULE.txt と不一致")
+            gf.append("P-OWNER: prereg_append.txt の rule_sha256 が現在の %s と不一致" % RULE_NAME)
         m = re.search(r"^prepared_at=(\S+)$", pre, re.M)
         if m and TS_RE.match(m.group(1)):
             prepared = m.group(1)
@@ -552,7 +554,7 @@ def _mk_rule(d, mode="GB10-GATE-ONLY-STRUCTURAL", nb="adopted", und="return-to-o
             mode, URL, nb, URL, und, URL)
     else:
         body += "GB10-MODE: <未決>\nNOISE-BAND: <未決>\nUNDETERMINED-HANDLING: <未決>\n"
-    _write(os.path.join(d, "RULE.txt"), body)
+    _write(os.path.join(d, RULE_NAME), body)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -625,7 +627,7 @@ def _fixture(root, host, rule_sha_hex, on_ratio=0.9, ck_bad=False, drop_row=Fals
 
 
 def _res(host, mode="GB10-GATE-ONLY-STRUCTURAL", nb="adopted", owner_ok=True, **kw):
-    """RULE を別ディレクトリへ合成して HERE を差し替え、1 機の評価結果を返す（実物の RULE.txt は読まない）。"""
+    """RULE を別ディレクトリへ合成して HERE を差し替え、1 機の評価結果を返す（実物の RULE.v2.txt は読まない）。"""
     global HERE
     saved = HERE
     with tempfile.TemporaryDirectory() as hd, tempfile.TemporaryDirectory() as td:

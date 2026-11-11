@@ -1,7 +1,7 @@
 #!/bin/bash
 # GB10（DGX Spark・SME 非搭載）での SME 既定 ON の A/B（構造ガード）（イシュー #4156）。
 # 役割: SME `fmopa` カーネル既定 ON の「新しい事前登録 A/B」を GB10で測るオーケストレーション。
-# 判定規則は同ディレクトリ RULE.txt（計測前に単独コミット済み）。#3232 の orchestrate_gb10.sh を派生元とし、
+# 判定規則は同ディレクトリ RULE.v2.txt（計測前に単独コミット済み。v1 の RULE.txt は経緯として残し、本スクリプトは読まない）。#3232 の orchestrate_gb10.sh を派生元とし、
 # 腕の組み立てを逆にした: OFF = 本スクリプトを置いたツリー（BASE。main の clone・クリーン・定数 false）、
 # ON = BASE を clone して on-arm.patch（定数 true の 1 行）を当てた計測専用ツリー。main へコミットしない。
 # 追加ゲート: P-OWNER（所有者決定が RULE §9 に転記済みか。未決なら計測を始めない）・
@@ -37,7 +37,7 @@ else
     sha() { shasum -a 256 "$@"; }
 fi
 
-# P-OWNER: RULE.txt §9 に所有者決定が転記されているかを読むだけで検査する（ソースは実行しない）。
+# P-OWNER: RULE.v2.txt §9 に所有者決定が転記されているかを読むだけで検査する（ソースは実行しない）。
 # 値はアンカー付き正規表現で取り出し、列挙値と URL の形式に完全一致しなければ不成立（fail-closed）。
 OWNER_URL_RE='^https://github\.com/Fandhe-AI/fandhe-ai/(issues|pull)/[0-9]+#issuecomment-[0-9]+$'
 # 各キーはちょうど 1 行だけを要求する（重複・欠落は空を返して不成立にする。aggregate.py の read_owner と同じ契約）。
@@ -47,7 +47,7 @@ owner_field() {
     if [ "${n}" != "1" ]; then echo "P-OWNER 不成立: $1 が ${n} 件（1 件ちょうどを要求）" >&2; return 0; fi
     sed -n "s/^$1: *\(.*[^ ]\) *\$/\1/p" "$2"
 }
-check_owner() { # check_owner <RULE.txt> -> 0=成立 1=不成立（理由は stderr）
+check_owner() { # check_owner <RULE.v2.txt> -> 0=成立 1=不成立（理由は stderr）
     local rule=$1 mode nb und murl nurl uurl u rc=0
     mode="$(owner_field GB10-MODE "${rule}")"
     nb="$(owner_field NOISE-BAND "${rule}")"
@@ -110,13 +110,13 @@ fi
 
 if [ "${DRY}" = "1" ]; then
     echo "# dry-run: 実行計画（副作用なし）"
-    echo "0. P-OWNER: ${REPO_LOG}/RULE.txt §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING と各回答コメント URL が記入済みであること（未決ならロック取得前に停止）。prereg_append.txt の rule_sha256 が RULE.txt と一致すること"
-    if [ -n "${BASE:-}" ] && [ -f "${BASE}/${REPO_LOG}/RULE.txt" ]; then
-        if check_owner "${BASE}/${REPO_LOG}/RULE.txt"; then echo "   (現在の RULE.txt: P-OWNER 成立)"; else echo "   (現在の RULE.txt: P-OWNER 不成立。実行モードは計測を始めない)"; fi
+    echo "0. P-OWNER: ${REPO_LOG}/RULE.v2.txt §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING と各回答コメント URL が記入済みであること（未決ならロック取得前に停止）。prereg_append.txt の rule_sha256 が RULE.v2.txt と一致すること"
+    if [ -n "${BASE:-}" ] && [ -f "${BASE}/${REPO_LOG}/RULE.v2.txt" ]; then
+        if check_owner "${BASE}/${REPO_LOG}/RULE.v2.txt"; then echo "   (現在の RULE.v2.txt: P-OWNER 成立)"; else echo "   (現在の RULE.v2.txt: P-OWNER 不成立。実行モードは計測を始めない)"; fi
     fi
     echo "1. ロック: mkdir ${LOCK_DIR}（60 秒おきに再試行）。owner に '#4156 <UTC>' を書き hwlock.log へ取得・解放時刻を残す"
     echo "1b. 外側ゲート: load1 < 1.0・GPU 使用率 0%・nvidia-smi --query-compute-apps が 0 行（最大 20 回・30 秒間隔。内側ゲートは 8.0）"
-    echo "2. P-TREE: BASE を clone して on-arm.patch を適用（sha256 は RULE.txt の値と照合・git apply --check が先）。差分が ${GATE_FILE} の 1 件だけで OFF=false・ON=true"
+    echo "2. P-TREE: BASE を clone して on-arm.patch を適用（sha256 は RULE.v2.txt の値と照合・git apply --check が先）。差分が ${GATE_FILE} の 1 件だけで OFF=false・ON=true"
     echo "3. P-R0: 両腕の sme_report() が kernel_enabled: ${EXPECT_KERNEL} であること（外れたら中止）"
     echo "4. P-RT: ON は cargo test -p fandhe-ai-backend-cpu --release -- --skip ${RT_SKIP_TEST}、OFF はスキップなしの同コマンド"
     echo "5. A/B: scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh ${LABEL}（AB_HOST=${HOST}・5 round）"
@@ -137,13 +137,13 @@ if [ -n "${RAYON_NUM_THREADS:-}" ]; then
     exit 1
 fi
 TORCH_PY="${TORCH_PY:-}"
-RULE="${BASE}/${REPO_LOG}/RULE.txt"
+RULE="${BASE}/${REPO_LOG}/RULE.v2.txt"
 # P-OWNER（ロック取得より前。未決なら何も始めない）
-check_owner "${RULE}" || { echo "P-OWNER 不成立 -> 計測を始めない（undetermined）。RULE.txt §9 へ所有者決定を転記してから再実行すること" >&2; exit 1; }
+check_owner "${RULE}" || { echo "P-OWNER 不成立 -> 計測を始めない（undetermined）。RULE.v2.txt §9 へ所有者決定を転記してから再実行すること" >&2; exit 1; }
 PREREG="${BASE}/${REPO_LOG}/prereg_append.txt"
 [ -f "${PREREG}" ] || { echo "prereg_append.txt が無い -> P-OWNER 不成立" >&2; exit 1; }
 [ "$(sed -n 's/^rule_sha256=\([0-9a-f]\{64\}\)$/\1/p' "${PREREG}" | head -n1)" = "$(sha "${RULE}" | awk '{print $1}')" ] \
-    || { echo "prereg_append.txt の rule_sha256 が現在の RULE.txt と不一致 -> P-OWNER 不成立" >&2; exit 1; }
+    || { echo "prereg_append.txt の rule_sha256 が現在の RULE.v2.txt と不一致 -> P-OWNER 不成立" >&2; exit 1; }
 # prepared_at の形式検証（ロック取得より前。欠落・形式不正・未来時刻は計測を始めない。RULE §4）
 PREPARED_AT="$(sed -n 's/^prepared_at=\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z\)$/\1/p' "${PREREG}" | head -n1)"
 [ -n "${PREPARED_AT}" ] || { echo "prereg_append.txt の prepared_at が欠落または形式不正 (YYYY-MM-DDTHH:MM:SSZ) -> P-OWNER 不成立" >&2; exit 1; }
@@ -206,7 +206,7 @@ PATCH="${BASE}/${REPO_LOG}/on-arm.patch"
 EXPECTED="$(sed -n 's/^on-arm\.patch sha256: \([0-9a-f]\{64\}\)$/\1/p' "${RULE}" | head -n1)"
 case "${EXPECTED}" in
     ????????????????????????????????????????????????????????????????) ;;
-    *) echo "RULE.txt から patch の sha256 を取得できない -> P-TREE 不成立" >&2; exit 1 ;;
+    *) echo "RULE.v2.txt から patch の sha256 を取得できない -> P-TREE 不成立" >&2; exit 1 ;;
 esac
 sha "${PATCH}" | awk '{print $1}' > "${OUT}/patch_sha256.txt" || exit 1
 [ "$(cat "${OUT}/patch_sha256.txt")" = "${EXPECTED}" ] || { echo "patch の sha256 が RULE 記載と不一致 -> P-TREE 不成立" >&2; exit 1; }

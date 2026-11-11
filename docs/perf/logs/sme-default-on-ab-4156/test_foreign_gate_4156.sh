@@ -256,7 +256,9 @@ mda m_empty ''
 
 # ---- orchestrate_macmini.sh の起動時の検査（HOME を一時ディレクトリに差し替え、実物の hw-lock に触れない）
 mkdir -p "${T}/home/work" "${T}/base/docs/perf/logs/sme-default-on-ab-4156"
-cp "${HERE}/RULE.txt" "${T}/base/docs/perf/logs/sme-default-on-ab-4156/RULE.txt"
+# 実物の RULE.v2.txt の §9 は記入済みのため、GB10-MODE だけを未決に戻した写しを置く（P-OWNER で止まることを確かめる）
+sed 's/^GB10-MODE: .*/GB10-MODE: <未決>/' "${HERE}/RULE.v2.txt" > "${T}/base/docs/perf/logs/sme-default-on-ab-4156/RULE.v2.txt"
+grep -q '^GB10-MODE: <未決>$' "${T}/base/docs/perf/logs/sme-default-on-ab-4156/RULE.v2.txt" || ng "orch: 未決の RULE.v2.txt の写しを作れない"
 orch() { # orch <名前> <FOREIGN_GATE> -> 終了コード
   HOME="${T}/home" BASE="${T}/base" WORK="${T}/work-$1" TORCH_PY="/usr/bin/true" FOREIGN_GATE="$2" \
     bash "${ORCH}" > "${T}/orch-$1.log" 2>&1
@@ -267,7 +269,7 @@ for c in "nogate|" "rel|fake_gate.py" "missing|${T}/none.py"; do
   grep -q 'FOREIGN_GATE' "${T}/orch-${name}.log" || ng "orch ${name}: FOREIGN_GATE の理由が出ない"
   [ ! -e "${T}/home/work/.fandhe-hw-lock" ] || ng "orch ${name}: ロックを取った"
 done
-# 正しいパスなら FOREIGN_GATE の検査を通り、次の P-OWNER（RULE.txt §9 が未決）で止まる。ロックはまだ取らない
+# 正しいパスなら FOREIGN_GATE の検査を通り、次の P-OWNER（写しの RULE.v2.txt §9 が未決）で止まる。ロックはまだ取らない
 orch okgate "${T}/fake_gate.py" && ng "orch okgate: P-OWNER 未決のまま起動した"
 grep -q 'P-OWNER 不成立' "${T}/orch-okgate.log" || ng "orch okgate: P-OWNER まで進まない"
 [ ! -e "${T}/home/work/.fandhe-hw-lock" ] || ng "orch okgate: ロックを取った"

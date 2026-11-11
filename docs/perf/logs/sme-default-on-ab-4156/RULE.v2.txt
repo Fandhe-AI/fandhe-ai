@@ -1,0 +1,156 @@
+イシュー #4156 事前登録規則 v2 (SME 既定 ON の新しい事前登録 A/B を Mac mini と GB10 で実測する)
+fixed-at-utc: 2026-11-11T18:53:02Z (この規則は計測前に単独 PR でコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る。計測前の追記は §12 (c) の記入だけを認め、そのときは prereg_append.txt を取り直す)
+登録基準: origin/main の 18938d84cf72081716e5a3e42bcdb4f5e3f78749 (#4258 のマージコミット) + 本規則 v2 を足した PR のマージコミット。squash 後は SHA が変わるため、P-TREE は SHA ではなく内容で検査する (下記 §1)
+on-arm.patch sha256: 226e73d0e78936bff508b1a746966c65641aed8ce1b0ae50b0a9b2d20132b964
+
+v1 (同ディレクトリ RULE.txt。fixed-at-utc 2026-11-09T14:30:00Z) から変えた点と理由
+  - 判定式・閾値・5 round・5/5 一貫性・checksum 完全一致・後退の定義・評価順・処置 (定数は変えない) は v1 のまま変えていない。
+  - (a) 登録基準を d551b31403f825c458723f80ee266af1926e1378 から 18938d84cf72081716e5a3e42bcdb4f5e3f78749 へ移した。
+        理由: v1 の固定後に道具の PR が 2 本入ったため。#4256 は収録前のマスク漏れ検査で、ユーザー名の項を語境界つきにした。
+        #4258 は Mac mini 腕に他ジョブの前提ゲートと mediaanalysisd の確認を足し、run_ab_sme_default_on_4156_cpu.sh を変えている
+        (変更は AB_HOST=macmini の経路だけ。AB_HOST=gb10 の経路が変わっていないことは統合セッションが確かめた)。
+        v1 の「BASE は d551b31 + RULE」とする指示は取り下げられた。§1 の差分検査もこの基準で行う。
+  - (b) §9 に所有者決定 3 項目を回答コメント URL つきで転記した (v1 では未決)。
+  - (c) 道具が読む規則ファイルを RULE.v2.txt に切り替えた (orchestrate_gb10.sh・orchestrate_macmini.sh・aggregate.py は読むファイル名だけ、
+        test_foreign_gate_4156.sh は P-OWNER 未決の写しの作り方だけの変更)。v1 の RULE.txt は経緯として残し、道具は読まない。
+        prereg_append.txt の rule_sha256 は本ファイル (RULE.v2.txt) の sha256。
+  - (d) §4 に #4256・#4258 で入ったゲート (マスク漏れ検査のユーザー名の項・Mac mini の他ジョブの前提ゲート・mediaanalysisd の確認) を書き足した。どれもゲートを厳しくする方向。
+  - (e) §11 に道具の sha256 (ピン) を足した。v1 のピンは on-arm.patch だけで、その値は変わっていない。
+  - (f) §12 に Mac mini 腕の準備 (__pycache__ の扱い・系列の前に誰がプロセスを止めるか・他ジョブのゲートに当たったときの系列数の上限) を足した。
+        #4160 では事後の逸脱として記録した 2 点を、事前に決めておくため (#4160 の所有者判断記録 https://github.com/Fandhe-AI/fandhe-ai/issues/4160#issuecomment-6795455525)。
+  - (g) §13 に露出の申告を足した。
+
+0. 位置づけ
+  - 2026-10-28 の所有者判断 (docs/perf/cpu-gemm-sme-fmopa-microkernel.md §5.15: SME 既定は OFF のまま、ON に戻すのは新しい事前登録 A/B に合格したときだけ) に基づく A/B。
+    前例: docs/perf/logs/sme-default-on-ab-3232/RULE.txt (#3232)・docs/perf/logs/sme-gb10-attribution-3613/RULE.txt (#3613)。語彙 (FAIL / REJECT / ADOPT / undetermined) と 5 round・5/5 一貫性・checksum 完全一致を継承する。
+  - 既定の切り替え (SME_PRODUCTION_ENABLED を true にすること)・tolerance・baseline・FMA 契約・REQ-8 の手動境界検査・unsafe・依存は変えない。結果を見てから規則を緩めたり調整したりしない。
+  - GB10 の数え方は perf doc §5.16 (#4143)、僅差のノイズ帯の方法は docs/perf/noise-band-decision.md (#4142) の名前 (GB10-RECORD・GB10-NBSEP・GB10-GATE-ONLY-STRUCTURAL・NB-RANGE5・NB-SEP) で参照する。
+    所有者の決定は §9 に回答コメント URL つきで転記した。P-OWNER が成立するまで計測を始めない。
+
+1. 腕 (向きに注意: compare_gemm_ab.py の「after/before > 1.00 = 後退」をそのまま使う。#3232 と組み立てが逆)
+  - before = OFF: 計測コミットのクリーンな clone (SME_PRODUCTION_ENABLED = false)。
+  - after  = ON : before の clone に on-arm.patch (crates/backend-cpu/src/gemm_blis/mod.rs の false -> true、1 行) を当てた計測専用ツリー。main へコミットしない。
+  - 比 = ON / OFF。1.00 以下なら ON が速い。
+  - A/B 本体は scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh (#4258 の版。#3232 の run_ab_sme_default_on_cpu.sh の派生。元は凍結して変更しない)。
+  - 対象 tree: 計測コミット (BASE) は、本規則 v2 と prereg_append.txt を含む main のコミットで、
+    登録基準 18938d84cf72081716e5a3e42bcdb4f5e3f78749 と crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml に差分がないこと。
+    差分があれば undetermined (#3613 §8 の教訓: 固定版と workspace 版の食い違いで path patch が不成立になりうる)。
+    あわせて §11 のピンが BASE で一致すること。
+
+2. セルの分類 (数値を見る前に固定。v1 と同じ)
+  - 12 セル (#3232 と同じ): gemm N=256/512/1024/2048 x fresh/reuse (8)、train size=64 x fresh/reuse (2)、infer size=64 x fresh/reuse (2)。
+  - Mac mini (SME あり): 到達 10 (gemm 全 8 と train size=64)、非到達 2 (infer size=64)。GB10 (SME なし): 全 12 セルが非到達のガード。
+  - 交絡: #3635 以降 reuse は常駐入力経路で、#3232 の reuse の値とは条件が違う。旧値と並べて比べない。
+
+3. ラウンド数・実行順 (v1 と同じ)
+  - 5 round 固定。round 内の before/after の起動順は #3232 の A/B 本体の方式を継承する (交互)。
+
+4. 前提ゲート (1 つでも不成立なら undetermined。理由はすべて併記。FAIL は常に先)
+  - P-OWNER  : §9 の 3 項目が列挙値で記入され、各々に所有者の回答コメント URL があること。
+               prereg_append.txt の rule_sha256 が現在の RULE.v2.txt と一致し、prepared_at が hwlock の acquired より前であること。
+               未決 (<未決>)・列挙外・URL 欠落・順序不成立は不成立。orchestrate はロック取得の前に止まる。
+  - P-TREE   : 両ツリーで内容が異なるファイルが gemm_blis/mod.rs の 1 件だけ、OFF が `const SME_PRODUCTION_ENABLED: bool = false;`・ON が true、
+               on-arm.patch の sha256 が上記と一致し git apply --check が通る、未追跡のビルド入力がない、
+               cargo tree -p bench-fandhe で fandhe-ai が path patch の facade に解決する。
+  - P-R0     : 両腕で sme_report() の kernel_enabled を記録。期待値は macmini = 両腕 true、gb10 = 両腕 false。外れたら計測を中止して記録だけ残す。
+  - P-RT     : 両機体・両腕。ON 腕は cargo test -p fandhe-ai-backend-cpu --release -- --skip sme_production_disabled_after_gb10_reject が全件 pass
+               (除外するテスト名は計測前に固定。定数 true では作りの上で必ず落ちるドリフト検出テスト 1 件だけ)。OFF 腕は除外なしの同コマンドが全件 pass。
+               落ちたテストは直さず名前を記録し「後退あり相当 (要調査)」とする。
+  - P-BIT    : 両機体で cpu_sme_gate_bit_dump の ^out[ 行を ON/OFF で取り、行数 6726847・sha256 一致・cmp 差分 0。
+               Mac mini での一致は SME と NEON が bit 同一であることの実証になる。不一致は FAIL。実行失敗・cmp 実行エラーは undetermined。
+  - checksum : 全セルで完全一致。不一致は FAIL (性能判定へ進まない)。
+  - P-CELLS  : 12 セル x 両腕 x 5 行ちょうど。重複・欠損・非有限値は不成立。
+  - P-RUNAB / P-COLLECT: A/B スクリプトと収録が exit 0。収録前のマスク漏れ検査 (ホスト名・/Users/・/home/・ユーザー名・IP) が 0 件。
+               ユーザー名の項は語境界つきで照合する (#4256。境界の文字は英数字・下線・ハイフン)。ほかの項は v1 のまま。
+  - P-LOCK   : 実機ロック (~/work/.fandhe-hw-lock) を保持したまま計測し、取得・解放の時刻を hwlock.log に残した。ロックは orchestrate が取る (計測セッションは先に取らない)。
+  - P-GATE   : macmini は 5/5 round が load1 < 3.0 (30 秒間隔・最大 30 分待ち) を通過。
+               あわせて各 round の前後に他ジョブの前提ゲート (#4258。foreign_job_gate.py を ab_foreign_gate.sh 経由で呼ぶ) を通す。
+               round の前は「他ジョブ CLEAN かつ load1 < 3.0」を同じループで待ち、round の後は 1 回確かめる。
+               round の前の不通過は P-GATE の不成立になる。round の後の FOREIGN・ゲートの失敗は A/B 本体が非 0 で終わり、P-RUNAB の不成立になる
+               (P-GATE は通過の行だけを読むため)。どちらの場合も系列は正式にならない。
+               さらに A/B の直前に mediaanalysisd の確認 (#4258。2 分間隔で 3 回、%CPU が 5 未満。プロセスがなければ通過。ps の失敗は不成立) を通す。
+               不成立なら A/B を始めずに止める (系列は始まっていない)。
+               gb10 は外側ゲート (load1 < 1.0・GPU 使用率 0%・nvidia-smi --query-compute-apps が 0 行) を最大 20 回・30 秒間隔で待って通過し、内側 8.0 の 5/5 round 通過。
+               gb10 の経路には他ジョブの前提ゲートと mediaanalysisd の確認はない (v1 と同じ)。
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する。計測中は両機でビルドを並走させない。
+
+5. 判定 (評価順 FAIL > undetermined (前提ゲート不成立) > REJECT > ADOPT > undetermined。緩めない。v1 と同じ)
+  - Mac mini 側条件: 到達 10 セルがすべて「5 round 中央値 <= 1.00 かつ 5/5 round <= 1.00」、どのセルにも全 5 round で ON/OFF > 1.00 の一貫した後退がなく、checksum と P-BIT が一致。
+    いずれかのセルに全 5 round の後退があれば REJECT。
+  - GB10 側は §9 の GB10-MODE で選ばれた 1 方式だけを拘束力ありとして採る。3 方式 (perf doc §5.16 の文面案と同じ語) の定義:
+      GB10-RECORD := GB10 は P-R0・P-BIT・checksum 一致のみ検査し、性能セルは記録のみで ADOPT に入れない
+      GB10-NBSEP := GB10 の各判定セルに NB-SEP を要求し、後退と言えるセルが 1 つでもあれば REJECT
+      GB10-GATE-ONLY-STRUCTURAL := GB10 は構造ゲート (P-R0・P-BIT・checksum・P-RT・P-CELLS・P-LOCK・P-GATE) を fail-closed とし、性能は全記録。NB-SEP 条件の後退があれば undetermined (自動 ADOPT しない)
+    後退の定義 (NB-SEP 形): 判定セルで 5 round すべてに ON/OFF > 1.00 かつ ON 腕の round 別 median_s の最小 > OFF 腕の最大。
+    aggregate.py は 3 方式すべての判定を併記し、拘束力があるのは選ばれた 1 方式だけと明示する。
+  - 総合 ADOPT = Mac mini 側条件を満たし、かつ GB10 が選ばれた方式で pass (REJECT・undetermined でない)。
+  - GB10-GATE-ONLY-STRUCTURAL で undetermined になったときの扱いは §9 の UNDETERMINED-HANDLING (auto-reremeasure = 3 腕+A/A の再測を自動で足す／return-to-owner = 所有者へ戻す) に従う。
+  - 上のどれでもない場合は undetermined。
+
+6. 1 位化の記録 (判定 5 とは独立。ADOPT の可否には使わない。v1 と同じ)
+  - 同じ round の PyTorch (bench_py.py。torch 2.14.0・numpy 2.5.4 の venv) の比 = torch median_s / fandhe median_s を OFF・ON の両腕について出す。fresh と reuse の両方。
+    対象は M-CPU-G512/G1024/G2048 (gemm 512/1024/2048)。比 > 1.00 が fandhe の優位。
+  - §9 の NOISE-BAND が adopted なら NB-RANGE5 (ON 腕の round 別比の最小〜最大) と NB-SEP (ON 腕の 5 round すべてで比 > 1.0 かつ ON 腕の最小 > OFF 腕の最大) を記録し、
+    NB-SEP を満たさないものは「改善傾向・確定せず」と書く。not-adopted なら生の 5 round の比だけを記録する。
+  - GB10 は torch の venv がなければ「未計測」。6 フレームワークのスコアボードでの 1 位化は Phase 6 で確定する (本 run は PyTorch だけの比較)。
+
+7. checksum の範囲 (v1 と同じ)
+  - framework-compare の checksum は小数点以下 6 桁に丸めた和で、bit 同一の証明にはならない。bit 同一は P-BIT (両機体) で補う。M4 Max の 6726847 行との行数の突き合わせは記録だけで判定しない。
+
+8. 処置 (v1 と同じ)
+  - ADOPT / REJECT / FAIL / undetermined のどれでも、本イシューでは定数を変えない。
+  - ADOPT なら Phase 4 (#4165) の入力として記録する。SME の unsafe 独立監査 (#4157) も既定 ON の前提として併記する。
+  - 再計測するときは末尾に RULE-reopen を追記してから新しいラベルで測る。既存の系列は差し替えない。
+
+9. 所有者決定の転記 (所有者の回答コメントの URL を併記する。推定・代筆しない)
+  - 本ファイルの sha256 と準備時刻を prereg_append.txt (rule_sha256= / prepared_at=) に記録し、hwlock の取得時刻より前であること (P-OWNER)。
+  - 列挙値: GB10-MODE = GB10-RECORD | GB10-NBSEP | GB10-GATE-ONLY-STRUCTURAL、NOISE-BAND = adopted | not-adopted、UNDETERMINED-HANDLING = auto-reremeasure | return-to-owner。
+GB10-MODE: GB10-GATE-ONLY-STRUCTURAL
+GB10-MODE-URL: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148
+NOISE-BAND: adopted
+NOISE-BAND-URL: https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844
+UNDETERMINED-HANDLING: return-to-owner
+UNDETERMINED-HANDLING-URL: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148
+
+10. マスク規則 (v1 と同じ)
+  - 収録するログのホスト名は masked (公開文書では <metal-node>・<cuda-node>)、$HOME は <home>、ユーザー名と絶対パス・IP は除去する。実機のホスト名・接続情報はリポに書かない。
+  - rev-stamp (OFF は git rev-parse HEAD、ON は <sha>+on-arm.patch) とツリー指紋を成果物に含める。
+
+11. 道具のピン (sha256。v2 の PR の内容。計測セッションは送る前に BASE でこの値と一致することを確かめて記録する。不一致なら計測しない)
+  - scripts/bench/ の下の 2 本は §1 の差分検査の範囲でもある。docs/perf/logs/ の下の道具は §1 の範囲外のため、ここで固定する。
+  - README.md・prereg_append.txt はピンに入れない (prereg は本ファイルの sha256 を持つため循環する)。
+  pin 163ca70a993ba81ef997dfc2a27c4b10faab9f1826540a20c152522d85fc4779 docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh
+  pin 0fd5799e7319033efe36c227b49f3187d0216495b70e99f17e511f85681cbff9 docs/perf/logs/sme-default-on-ab-4156/orchestrate_macmini.sh
+  pin 85c8791c2d6a512e287cb29c09a4ea334f4a5bb31d353d867eabf0fede0fd3d0 docs/perf/logs/sme-default-on-ab-4156/aggregate.py
+  pin 0df2b619c4f7c9116fc7142decd79eafcb5af22d88b6a7e7c59f3ea746cdf86b docs/perf/logs/sme-default-on-ab-4156/test_foreign_gate_4156.sh
+  pin 226e73d0e78936bff508b1a746966c65641aed8ce1b0ae50b0a9b2d20132b964 docs/perf/logs/sme-default-on-ab-4156/on-arm.patch
+  pin d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04 docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py
+  pin 2942fe7bbca67b80564157bd563007b2fa953e1d673a56f4070684b7b41ae098 scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh
+  pin b7ae69bc4b32fa63887867822b97e1eeb9e900ed1a51a81053b231e8ff10f975 scripts/bench/framework-compare/ab_foreign_gate.sh
+
+12. Mac mini 腕の準備 (系列の前に決めておく。#4160 の所有者判断記録の「次回以降」の 2 点と、系列数の上限)
+  - (a) __pycache__ の扱い: ツリー照合の対象外とする。道具のツリー照合 (rev-stamp・tree_fingerprint = git ls-files の追跡ファイルの指紋・
+        P-TREE の未追跡ファイル検査) は追跡ファイルと gitignore の規則で決まり、__pycache__/ は .gitignore の対象のため照合に入らない。
+        計測セッションが配置時・系列前に別の手段でツリーを照合するときも、__pycache__/ の下と *.pyc を除いて照合する。
+        系列の途中や前後に Python が __pycache__ を作っても、照合の不一致・逸脱として扱わない。計測セッションは __pycache__ を消さない。
+  - (b) 系列の前にほかのプロセスを止めるのは所有者が決める。計測セッションが止めてよいのは、所有者が名指ししたものだけ。
+        名指しのないプロセスは止めず、見つけたら止まって所有者へ報告する。止めたものは名前と時刻を記録し、計測記録に書く。
+        GB10 腕も同じ (計測セッションは他のジョブを止めない)。
+  - (c) 他ジョブのゲートに当たったときの系列数の上限 (別ラベルで何系列まで): ＿＿＿ (空欄。所有者が決めて記入する)
+        この欄の記入で本ファイルの sha256 が変わるため、記入したら prereg_append.txt を取り直す。
+        aggregate.py は両機体の prereg_append.txt を現在の本ファイルと照合するため、記入は両機体の計測より前に行う。
+
+13. 露出の申告 (GB10 セッション分。Mac mini セッション分は統合セッションが追記する)
+  - 2026-11-10 の GB10 試走 (ツリーは d551b31 に v1 RULE と §9 の仮転記を足したもの。crates/ は 18938d84c と差分があり、本規則の計測ツリーとは異なる) で、
+    収録 (collect) がマスク漏れ検査で止まった後、原因を調べるために次を表示した。判定はこの表示を見る前に固定した v1 から変えていない。
+      - run_ab.log の先頭 30 行 (1 行 200 字で切り詰め): 最初の round の gemm 256 fresh/reuse・512 fresh/reuse・1024 fresh の両腕と、
+        1024 reuse の OFF 腕の JSONL (median_s・q1_s・q3_s・gflops・checksum)。
+      - P-BIT の要約 (行数と両腕の sha256)。P-RT の test result 行の件数と、ok の行 3 行。
+      - compare_gemm_ab.py の終了コード (gemm・train・infer の 3 本)。
+      - aggregate.py の出力の一部: §6 の PyTorch 比の表のうち GB10 の gemm 512/1024/2048 x fresh/reuse の 6 行 (両腕の比・NB-RANGE5・NB-SEP の成否・注記)、
+        P-RUNAB/P-COLLECT の不成立理由、GB10 の総合 verdict の語 (収録失敗による前提ゲート不成立)。3 方式の判定の行は表示していない (見出しだけ)。
+  - 2026-11-11 のマスク漏れ検査の確認では、ファイル数と一致件数だけを見た。
+  - 2026-11-11 に本規則 v2 の固定前の捨て試走を GB10 で 1 回流した (ツリーは本規則の固定前の版。§9 転記済み・仮の prepared_at。crates/ は 18938d84c と同じ)。
+    見たのは各段の終了コードの行 (P-TREE・P-R0 の通過、rt_on・rt_off・run_ab・bitdump/cmp・collect の exit) と全体の終了コードだけで、
+    判定に使う値・集計・verdict の語は見ていない。aggregate.py は試走の出力に対して実行していない。ロックは orchestrate が取って解放し、終了後にプロセス 0 を確かめた。
+  - 両試走 (2026-11-10・2026-11-11) の出力は、2026-11-11 に GB10 から開かずに消した。公開していない。
