@@ -303,7 +303,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 **判定（RULE.v2 の `formal-v2-2`）**: 規則は `logs/metal-steel-large-n-ab-macmini-4160/RULE.v2.txt`（PR #4252。旧 `RULE.txt` の項 0〜13 をそのまま使い、各系列の前の準備だけを足した改訂）。`formal-v2-1` はセル A/B の直後のゲートが macOS の `secd`（%CPU 33.3。G2）に当たって参考系列となり、`formal-v2-2` が全ゲート通過（純カーネル 39/39・セル A/B 5/5・rc=0）した。RULE.v2 項 3 によりこの系列で判定し、`aggregate.py` の総合は **ADOPT**（`series-formal-v2-2/aggregate.md`）。Mac mini 単機の判定で、意味は「#4166 で所有者が結線を判断する価値がある」に限る。
 
-| N | cur kernel_gpu ms | sl kernel_gpu ms | sl/cur | 速い run | 判定 | bit 一致（sl=ref） | parity |
+| N | cur kernel_gpu ms | sl kernel_gpu ms | sl/cur | 速い run | N 別の判定（RULE 項 7。総合ではない） | bit 一致（sl=ref） | parity |
 |---|---|---|---|---|---|---|---|
 | 1024 | 0.8028 | 0.7466 | -7.0% | 5/5 | ADOPT_CANDIDATE | 一致 | pass |
 | 2048 | 6.4891 | 5.8195 | -10.3% | 5/5 | ADOPT_CANDIDATE | 一致 | pass |
@@ -312,7 +312,8 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 - 到達はスコープ内 3 点で `profile=steel_large_n`・`CANDIDATES[0]`・Classic・fallback なし。N=256／512 は no-op 成立（解決タイル同一・bit 一致）。A/A 対照 cur_aa/cur は ±0.2% 以内。
 - セル A/B（非後退ゲート）: 状態 ok（5/5 round 一貫して 2% を超えて後退するセルはない）。after/before の中央値比は N=1024 fresh 0.944・reuse 0.984、N=2048 fresh 0.942・reuse 0.933、N=4096 fresh 0.907・reuse 0.919。N=512 reuse は 1.032（2% 超の round 3/5。5/5 ではないため後退には当たらない）。checksum は全セルで完全一致。
 - スコアボード比（candle の gemm 窓 fresh ÷ fandhe-ai の reuse 窓）: **N=2048 は NB-SEP 成立**（before 0.936〜0.946 → after 1.005〜1.014）。N=1024 は不成立（before 0.885〜0.965、after 0.900〜1.080）。G4096 は記録のみ（不成立）。「1 位に変わった」と書けるのは、opt-in を ON にした状態の M-MTL-G2048 相当（Mac mini）だけ。main の既定は変わっていないため、スコアボードと `loss-attribution-matrix.md` は変えない（結線後の付け直しは #4168）。
-- 系列の前の準備・試み 1 の不開始（Python のキャッシュ 1 件によるツリー照合の不一致。所有者判断で消して試み 2 として起動）・開示は、同ディレクトリの README を正とする。
+- 根拠にするのは RULE 項 11 の総合 ADOPT だけ（上の表の N 別判定は総合ではない）。
+- 逸脱 2 件（所有者の指示で計測セッションが `formal-v2-2` の前に常駐プロセスを止めたこと、試み 1 の不開始の原因になった Python のキャッシュ 1 件を所有者判断で消して試み 2 として起動したこと）・系列の前の準備・開示は、同ディレクトリの README を正とする。
 
 #### 旧 `RULE.txt` の 3 系列（参考。総合 UNDETERMINED。PR #4249）
 
