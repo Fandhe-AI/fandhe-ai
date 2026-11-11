@@ -62,8 +62,46 @@ for b in 64 1024 4096; do
 done
 
 # ---- R3: 既定 ON の波及。tree を別ディレクトリへ展開し、腕 A/B にだけパッチを当てる（ROOT の作業ツリーは触らない） ----
-r3_arm() { # <arm: C|A|B> <env_mode>
-  local arm=$1 mode=$2 dir crate log rc
+# 反復回数 N は RULE.txt の `  r3_repeats: <正の整数>`（所有者が決める。#4163 所有者判断 2026-11-11）。腕 C・A を N 回ずつ流し、
+# aggregate_4163.py が「腕 A で毎回失敗・腕 C で毎回成功」だけを阻害、結果が回ごとに混ざったテストを不安定（判定外）に分ける。
+R3_REPEATS="$(sed -n 's/^  r3_repeats: \([1-9][0-9]*\)$/\1/p' "$HERE/RULE.txt" 2>/dev/null | head -n1)"
+if [[ -z "$R3_REPEATS" ]]; then
+  echo "error: RULE.txt に r3_repeats（正の整数）が無い -> R3 を実行しない" >&2
+  note_fail r3-repeats 1
+fi
+# 標準出力へ直接書くダンプテスト（facade の tests/cpu_sme_gate_bit_dump.rs。高速化のための意図した作りでテストは変えない）は
+# libtest の捕捉を通らず "test <name> ... out[...]" の 1 行になって結果行の抽出を壊す。本体の実行から --exact --skip で外し、
+# 同じ回の中で --exact で単独に流す。そのログの結果も R3 の集合に含める（R3 の対象は狭まらない）。
+SME_DUMP_TEST=dump_cpu_sme_gate_bits
+# テスト単位の結果を bin<TAB>name<TAB>status へ機械抽出する。bin は "Running unittests ..." が lib、
+# "Running tests/x.rs" が x、"Doc-tests <crate>" が doctest。名前は "test " の後から最初の " ... " の前までの全体
+# （doctest は "src/file.rs - item (line N)" で先頭トークンだけでは衝突する）。status は ok／FAILED／ignored（理由付きは ignored へ正規化）。
+# 許可集合の外のステータスは抽出せず素通しし、aggregate_4163.py が未知ステータスとして UNDETERMINED にする。
+extract_tsv() { # <log>
+  awk '/^ *Running /{ if ($2 == "unittests") { b = "lib" } else { b = $2; sub(/.*\//, "", b); sub(/\.rs$/, "", b) } next }
+       /^ *Doc-tests /{ b = "doctest"; next }
+       /^test .* \.\.\. [^ ]/{
+         line = substr($0, 6); k = index(line, " ... ")
+         name = substr(line, 1, k - 1); st = substr(line, k + 5)
+         if (st ~ /^ignored/) { st = "ignored" }
+         print b "\t" name "\t" st }' "$1"
+}
+# ダンプ単独実行のログからダンプ本体（行頭の out[...] 行）を落とし、落とした行数を 1 行残す（gate_run の rc= 行は呼び出し側で末尾に付け直す）。
+drop_dump_lines() { # <raw log>
+  grep -v '^rc=[0-9]*$' "$1" | grep -Ev '^out\[[^]]*\]\[[0-9]+\]\.bits=0x[0-9a-fA-F]+$'
+  echo "dump_lines_dropped=$(grep -cE '^out\[[^]]*\]\[[0-9]+\]\.bits=0x[0-9a-fA-F]+$' "$1")"
+}
+# ダンプ単独実行の結果を 1 行の TSV にする。status は集計行（ちょうど 1 件実行・ignored 0）から取り、
+# それ以外の形（集計行が無い・複数・件数が違う）は何も出さない（aggregate_4163.py が「テスト結果が 0 件」で UNDETERMINED にする）。
+extract_smedump_tsv() { # <log>
+  awk -v n="$SME_DUMP_TEST" '
+    /^test result: ok\. 1 passed; 0 failed; 0 ignored/ { st = "ok"; c++ }
+    /^test result: FAILED\. 0 passed; 1 failed; 0 ignored/ { st = "FAILED"; c++ }
+    /^test result: / { all++ }
+    END { if (c == 1 && all == 1) print "cpu_sme_gate_bit_dump\t" n "\t" st }' "$1"
+}
+r3_arm() { # <arm: C|A|B> <env_mode> <reps>
+  local arm=$1 mode=$2 reps=$3 dir crate log rc k raw
   dir="$(mktemp -d "${TMPDIR:-/tmp}/r3-${arm}.XXXXXX")" || { note_fail "r3-${arm}-mktemp" 1; return; }
   if ! git -C "$ROOT" archive HEAD | tar -x -C "$dir"; then
     rm -rf "$dir"; note_fail "r3-${arm}-archive" 1; return
@@ -73,34 +111,45 @@ r3_arm() { # <arm: C|A|B> <env_mode>
       rm -rf "$dir"; note_fail "r3-${arm}-patch" 1; return
     fi
   fi
-  for crate in fandhe-ai-backend-cuda fandhe-ai; do
-    log="$OUT/r3-${arm}-${crate}-${LABEL}.log"
-    # --nocapture は付けない: 付けるとテスト自身の出力が "test <name> ... " の行に混ざり、結果行の抽出が壊れる。
-    # 通過テストの出力は libtest が捕捉し、"test <name> ... ok|FAILED|ignored" が 1 行で出る（失敗時の出力は末尾の failures 節）。
-    gate_run "$log" "$mode" cargo test --manifest-path "$dir/Cargo.toml" --locked --release --target-dir "${TDIR}-r3-${arm}" \
-      -p "$crate" --no-fail-fast -- --include-ignored --test-threads=1
-    rc=$?
-    # 腕 C／A の rc は 0（全通過）か 101（テスト失敗）以外を異常終了として前提ゲートの不合格にする
-    # （101 の中身は aggregate_4163.py が FAILED 件数・集計行と照合する。腕 B は判定外）。
-    if [[ "$arm" != "B" && $rc -ne 0 && $rc -ne 101 ]]; then note_fail "r3-${arm}-${crate}" "$rc"; fi
-    # テスト単位の結果を bin<TAB>name<TAB>status へ機械抽出する。bin は "Running unittests ..." が lib、
-    # "Running tests/x.rs" が x、"Doc-tests <crate>" が doctest。名前は "test " の後から最初の " ... " の前までの全体
-    # （doctest は "src/file.rs - item (line N)" で先頭トークンだけでは衝突する）。status は ok／FAILED／ignored（理由付きは ignored へ正規化）。
-    # 許可集合の外のステータスは抽出せず素通しし、aggregate_4163.py が未知ステータスとして UNDETERMINED にする。
-    awk '/^ *Running /{ if ($2 == "unittests") { b = "lib" } else { b = $2; sub(/.*\//, "", b); sub(/\.rs$/, "", b) } next }
-         /^ *Doc-tests /{ b = "doctest"; next }
-         /^test .* \.\.\. [^ ]/{
-           line = substr($0, 6); k = index(line, " ... ")
-           name = substr(line, 1, k - 1); st = substr(line, k + 5)
-           if (st ~ /^ignored/) { st = "ignored" }
-           print b "\t" name "\t" st }' "$log" >"$OUT/r3-${arm}-${crate}-${LABEL}.tsv"
+  k=1
+  while [[ $k -le $reps ]]; do
+    for crate in fandhe-ai-backend-cuda fandhe-ai; do
+      log="$OUT/r3-${arm}-${crate}-rep${k}-${LABEL}.log"
+      # --nocapture は付けない: 付けるとテスト自身の出力が "test <name> ... " の行に混ざり、結果行の抽出が壊れる。
+      # 通過テストの出力は libtest が捕捉し、"test <name> ... ok|FAILED|ignored" が 1 行で出る（失敗時の出力は末尾の failures 節）。
+      # 1 回目でビルドし、2 回目以降は同じ target-dir のバイナリを再実行する（ソースは回の間で変えない）。
+      gate_run "$log" "$mode" cargo test --manifest-path "$dir/Cargo.toml" --locked --release --target-dir "${TDIR}-r3-${arm}" \
+        -p "$crate" --no-fail-fast -- --include-ignored --test-threads=1 --exact --skip "$SME_DUMP_TEST"
+      rc=$?
+      # 腕 C／A の rc は 0（全通過）か 101（テスト失敗）以外を異常終了として前提ゲートの不合格にする
+      # （101 の中身は aggregate_4163.py が FAILED 件数・集計行と照合する。腕 B は判定外）。
+      if [[ "$arm" != "B" && $rc -ne 0 && $rc -ne 101 ]]; then note_fail "r3-${arm}-${crate}-rep${k}" "$rc"; fi
+      extract_tsv "$log" >"$OUT/r3-${arm}-${crate}-rep${k}-${LABEL}.tsv"
+    done
+    if [[ "$arm" != "B" ]]; then
+      # ダンプテストの単独実行。ダンプ本体（^out[ 行。約 670 万行）はログに残さず件数だけ記録する。
+      # 先頭のダンプ行は libtest の "test <name> ... " に続いて同じ行に出るため、status は行ではなく
+      # 当該バイナリの集計行（1 件だけ実行）から取る。集計行が 1 件実行の形でなければ TSV を空にし、aggregate が未完として扱う。
+      log="$OUT/r3-${arm}-smedump-rep${k}-${LABEL}.log"
+      raw="$log.raw"
+      gate_run "$raw" "$mode" cargo test --manifest-path "$dir/Cargo.toml" --locked --release --target-dir "${TDIR}-r3-${arm}" \
+        -p fandhe-ai --test cpu_sme_gate_bit_dump -- --include-ignored --exact "$SME_DUMP_TEST" --test-threads=1
+      rc=$?
+      { drop_dump_lines "$raw"; echo "rc=${rc}"; } >"$log"
+      rm -f "$raw"
+      if [[ $rc -ne 0 && $rc -ne 101 ]]; then note_fail "r3-${arm}-smedump-rep${k}" "$rc"; fi
+      extract_smedump_tsv "$log" >"$OUT/r3-${arm}-smedump-rep${k}-${LABEL}.tsv"
+    fi
+    k=$((k + 1))
   done
   rm -rf "$dir"
 }
-r3_arm C off
-r3_arm A off
-# 補助（判定外）: パッチ適用ビルドで opt-out が効くこと。
-r3_arm B optout
+if [[ -n "$R3_REPEATS" ]]; then
+  r3_arm C off "$R3_REPEATS"
+  r3_arm A off "$R3_REPEATS"
+  # 補助（判定外）: パッチ適用ビルドで opt-out が効くこと。1 回だけ。
+  r3_arm B optout 1
+fi
 
 echo "gates done failed=${FAILED}"
 [[ "$FAILED" -eq 0 ]]
