@@ -297,7 +297,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 - 規則の雛形: `docs/perf/logs/metal-steel-large-n-ab-macmini-4160/RULE.template.txt`。記入欄を埋めた `RULE.txt` を**測る前に単独コミット**で固定する。
 - 診断テスト: `crates/backend-metal/src/gemm_steel_large_n_diag_tests.rs`（腕は `cur`／`sl`／`ref`／`cur_aa`）。起動は `orchestrate_macmini.sh`、集計は `aggregate.py`、セル A/B は `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`。
-- 「1 位に変わった」と書けるのは NB-SEP 成立時のみ。NB-RANGE5／NB-SEP は `docs/perf/noise-band-decision.md`（#4142。記録時点で所有者承認待ちの案）を名前で参照する。
+- 「1 位に変わった」と書けるのは NB-SEP 成立時のみ。NB-RANGE5／NB-SEP は `docs/perf/noise-band-decision.md`（#4142。所有者承認済み〈#4142 コメント 6757497844・#4209〉）を名前で参照する。
 
 ### 11.5 実測記入欄（2026-11-11・Mac mini `<metal-node>`。総合 UNDETERMINED）
 
@@ -326,7 +326,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 **結線の前提条件（すべて満たしたときだけ結線する）**
 
-1. Mac mini（`<metal-node>`）で事前登録（`RULE.txt` を単独コミット）→ 5 run 実測 → 判定まで終え、ADOPT になる。「1 位に変わった」と書けるのは `docs/perf/noise-band-decision.md`（#4142）の NB-SEP が成立したときだけ。NB の定義は所有者承認待ち。
+1. Mac mini（`<metal-node>`）で事前登録（`RULE.txt` を単独コミット）→ 5 run 実測 → 判定まで終え、ADOPT になる。「1 位に変わった」と書けるのは `docs/perf/noise-band-decision.md`（#4142）の NB-SEP が成立したときだけ。NB の定義は #4142 で所有者承認済み。
 2. 既定の反転について所有者の承認がある（#4164）。
 3. M4 Max での非後退を確認する。`select_steel_large_n` は M4Max では常に `None` なので、確認内容は「経路が変わらないこと」と「ignored の parity テストが通ること」。
 
