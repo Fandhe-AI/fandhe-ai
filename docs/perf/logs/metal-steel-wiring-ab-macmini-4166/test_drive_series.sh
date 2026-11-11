@@ -62,6 +62,11 @@ printf '%s' "${FAKE_SKIP:-}" > "results/raw/skipped-4160-metal-${L}.log"
 exit "${FAKE_AB_RC:-0}"
 EOF
   echo 'x' > "${w}/tree/scripts/bench/framework-compare/compare_gemm_ab.py"
+  mkdir -p "${w}/after/crates/backend-metal/src"
+  echo 'pub(crate) const STEEL_LARGE_N_ENABLED: bool = true;' > "${w}/after/crates/backend-metal/src/tile.rs"
+  ( cd "${w}/after" && git init -q && git add -A && git -c user.name=t -c user.email=t@invalid -c commit.gpgsign=false commit -q -m t )
+  rm -rf "${w}/before"; git clone -q "${w}/after" "${w}/before"
+  echo 'pub(crate) const STEEL_LARGE_N_ENABLED: bool = false;' > "${w}/before/crates/backend-metal/src/tile.rs"
   cp "${HERE}/fp.sh" "${HERE}/drive_series.sh" "${w}/rule/"
   bash "${w}/rule/fp.sh" "${w}/tree" ab > "${w}/fp-deploy-ab.txt"
   ( cd "${w}/tree" && find . -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 shasum -a 256 ) > "${w}/manifest-deploy.txt"
@@ -77,7 +82,8 @@ check "dry: rc 0" '[ "${rc}" = 0 ]'
 check "dry: dry-ok" 'grep -q "^result=dry-ok" "${W}/precheck-dry-1.txt"'
 check "dry: 計測を起動しない" '[ ! -d "${W}/formal-1" ] && [ ! -d "${W}/tree/scripts/bench/framework-compare/results" ]'
 check "dry: hw-lock を残さない" '[ ! -e "${LOCK}" ]'
-check "dry: 確認の順序" '[ "$(grep -oE "^(proc-check1|mediaanalysisd check1|lock-acquired|proc-check2|tree-check)" "${W}/precheck-dry-1.txt" | tr "\n" ,)" = "proc-check1,mediaanalysisd check1,lock-acquired,proc-check2,tree-check," ]'
+check "dry: 確認の順序" '[ "$(grep -oE "^(proc-check1|mediaanalysisd check1|lock-acquired|proc-check2|tree-check|checkout-check)" "${W}/precheck-dry-1.txt" | tr "\n" ,)" = "proc-check1,mediaanalysisd check1,lock-acquired,proc-check2,tree-check,checkout-check," ]'
+check "dry: checkout の確認が通る" 'grep -q "^checkout-check .* after_status_lines=0 .* head_equal=yes tools=ok$" "${W}/precheck-dry-1.txt"'
 
 # --- 始めない分岐（run モード）
 notstart_case() { # notstart_case <名前> <期待する reason>  （環境変数は呼び出し側で設定）
@@ -124,6 +130,18 @@ cat > "${BIN}/ps" <<'EOF'
 printf '%b' "${PS_OUT:-  0.0 /usr/sbin/cfprefsd\n}"
 EOF
 chmod +x "${BIN}/ps"
+
+W=$(mkw adirty); echo junk > "${W}/after/untracked.txt"; drive "${W}" 1 1 run; rc=$?
+check "adirty: after に未追跡があれば始めない" '[ "${rc}" = 5 ] && grep -q "reason=checkout-mismatch" "${W}/prestart-1-1.txt" && [ ! -e "${W}/formal-1" ]'
+W=$(mkw bextra); echo y > "${W}/before/extra.txt"; drive "${W}" 1 1 run; rc=$?
+check "bextra: before に余分なファイルがあれば始めない" '[ "${rc}" = 5 ] && grep -q "reason=checkout-mismatch" "${W}/prestart-1-1.txt"'
+W=$(mkw bclean); git -C "${W}/before" checkout -q -- .; drive "${W}" 1 1 run; rc=$?
+check "bclean: before に差分がなければ始めない" '[ "${rc}" = 5 ] && grep -q "reason=checkout-mismatch" "${W}/prestart-1-1.txt"'
+W=$(mkw bhead); ( cd "${W}/before" && git -c user.name=t -c user.email=t@invalid -c commit.gpgsign=false commit -q -am x && echo 'pub(crate) const STEEL_LARGE_N_ENABLED: bool = true;' > crates/backend-metal/src/tile.rs ); drive "${W}" 1 1 run; rc=$?
+check "bhead: HEAD が違えば始めない" '[ "${rc}" = 5 ] && grep -q "reason=checkout-mismatch" "${W}/prestart-1-1.txt"'
+W=$(mkw notools); PATH_SAVE=${PATH}; mkdir -p "${T}/nocargo"; for t in ps sysctl sleep log sw_vers rustc; do ln -sf "${BIN}/${t}" "${T}/nocargo/${t}"; done
+PATH="${T}/nocargo:/usr/bin:/bin" drive "${W}" 1 1 run; rc=$?; PATH=${PATH_SAVE}
+check "notools: cargo が無ければ始めない" '[ "${rc}" = 5 ] && grep -q "reason=missing-cargo" "${W}/prestart-1-1.txt"'
 
 # --- 起動する系列と全ゲート通過の判定
 W=$(mkw run1); drive "${W}" 1 1 run; rc=$?

@@ -1,6 +1,6 @@
 イシュー #4166: steel 候補 T0U-LU-FB の結線（tile::STEEL_LARGE_N_ENABLED = true。PR #4255）の Mac mini 前後比較 — 事前登録規則（計測前に固定。以後、本文は変更しない。変更が要るなら RULE.v2.txt で改訂する）
 
-fixed-at-utc: 2026-11-11T14:42:06Z
+fixed-at-utc: 2026-11-11T14:47:53Z
 target_sha: 9eba21749767147d100399962e3d41e54c8365df
 tree_fingerprint: 908b5d934f23e05b23b0472817fc740df7a9700870c45af3a0698b2c7ccbeeac files=22279
 tree_fingerprint_ab_excluded: 08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006
@@ -37,7 +37,7 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
       deploy.sh         493a69c932c46afe27243647401a467fc11a048c95fb86b62ee1b4c949a1569c
       fp.sh             0bbdd18c20b1f7fdebac4bb40c6b031c42a51d005f2ae5b211a17f939dc73aae
       prereq_tests.sh   5abca88139a44962f2e77bfc7113a29a587d9656110e65f6e4c59beb89b31626
-      drive_series.sh   9d14c1b8ca8001325f11b383b7c9f899d3dbf7da96eaf064f0fad25cd448d0d2
+      drive_series.sh   5ec9fb2c4870cd79cf75ac88432380b41d639f70bc8a74332aa5429032efe1eb
       judge_ab.py       8ac93791beaf7d55a5f9d310d7ead31ba97ab5587ba8f2725418432875b0c11f
       展開先 W は名前が `.noindex` で終わる新しいディレクトリ（#4151 の RULE.v2.txt 項 10 (e)）。ビルド・計測・記録のファイルはすべて W の中に書く。
 
@@ -78,6 +78,9 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
       3. hw-lock を取り、load1 を 30 秒ごとに読む。1.5 未満で進む。最大 40 回で、届かなければそのまま進んで記録する。
       4. 1. と同じ確認を、起動の直前（hw-lock の下）にもう一度行う。
       5. ツリーの照合（項 1 (c)）。
+      6. 腕の checkout と道具: after が clean（未追跡を含め git status が空）、before の差分が tile.rs の定数 1 行だけ（未追跡なし）、両者の
+         HEAD が同じ、cargo・rustc・python3・git が PATH で見つかること。runner も同じ checkout 検査をするが、ここで落とせば系列のラベルを
+         使わずに済む。#4160 の RULE.v2.txt 項 4 (b) にはない、厳しくする方向だけの追加（前提の確認〈項 3〉が W/after でビルドするため）。
   (c) どれかが成り立たなければ、その系列は始めない。hw-lock を外し、計測プロセスは 1 本も起動せず、所有者に報告する。始めなかった試みは
       系列に数えず、ラベル formal-<k> は使わない（出力ディレクトリは作らない）。prestart-<k>-<n>.txt は記録 PR に収める。
       再試行は所有者の再度の連絡を受けてから行う。

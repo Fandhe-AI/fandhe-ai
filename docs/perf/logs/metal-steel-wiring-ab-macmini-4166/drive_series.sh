@@ -7,6 +7,9 @@
 #   3. hw-lock を取り、load1 を 30 秒ごとに読む（1.5 未満で進む。最大 40 回で、届かなければそのまま進んで記録する）
 #   4. 1. と同じ確認を、起動の直前（hw-lock の下）にもう一度
 #   5. ツリーの照合（runner が書く results/ と target-ab-4160-* を除いた指紋と、配置時の manifest）
+#   6. 腕の checkout と道具（RULE.txt 項 4 (b) 6）: after が clean（未追跡を含め git status が空）、before の差分が tile.rs の
+#      1 行だけ（未追跡なし）、両者の HEAD が同じ、cargo・rustc・python3・git が PATH で見つかる。runner も同じ検査をするが、
+#      ここで落とせば系列のラベルを使わずに済む（厳しくする方向だけの追加）。
 # 通れば、セル A/B を 1 系列（5 round）回し、全ゲート通過かどうかをゲートの行と終了コードだけで決める（値は見ない）。
 # 使い方: drive_series.sh <W> <k> <試みの番号 n> <run|dry>
 #   dry は 1〜5 だけを通す（hw-lock は取って外す。計測は起動しない。出力は W/precheck-dry-<n>.txt）。
@@ -94,6 +97,15 @@ if [ "${fpab}" != "${EXP_AB}" ] || [ "${mrc}" != 0 ]; then
   say "  __pycache__ in tree:"; ( cd "${W}/tree" && find . -path '*/__pycache__/*' -type f | LC_ALL=C sort | sed 's/^/    /' ) >> "${A}"
   notstart tree-mismatch
 fi
+# 6. 腕の checkout と道具
+TILE=crates/backend-metal/src/tile.rs
+ast=$(git -C "${W}/after" status --porcelain 2>&1); ahead=$(git -C "${W}/after" rev-parse HEAD 2>&1)
+bst=$(git -C "${W}/before" status --porcelain 2>&1); bhead=$(git -C "${W}/before" rev-parse HEAD 2>&1)
+bnum=$(git -C "${W}/before" diff --numstat HEAD 2>&1 | tr '\t' ' ')
+tools=ok; for t in cargo rustc python3 git; do command -v "${t}" > /dev/null 2>&1 || tools="missing-${t}"; done
+say "checkout-check $(utc) after_status_lines=$(printf '%s' "${ast}" | grep -c .) before_status=[$(printf '%s' "${bst}" | tr '\n' ';')] before_numstat=[${bnum}] head_equal=$([ "${ahead}" = "${bhead}" ] && echo yes || echo no) tools=${tools}"
+if [ -n "${ast}" ] || [ "${bst}" != " M ${TILE}" ] || [ "${bnum}" != "1 1 ${TILE}" ] || [ "${ahead}" != "${bhead}" ]; then notstart checkout-mismatch; fi
+[ "${tools}" = ok ] || notstart "${tools}"
 if [ "${MODE}" = dry ]; then say "result=dry-ok (no measurement started) $(utc)"; exit 0; fi
 # 起動
 mkdir "${W}/${SER}" || notstart outdir-exists
