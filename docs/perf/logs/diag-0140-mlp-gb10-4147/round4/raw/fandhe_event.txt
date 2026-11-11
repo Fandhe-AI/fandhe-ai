@@ -1,0 +1,4 @@
+DEVICE4147 compute_capability=12.1
+MLPEVENT4147 shape=l1_fwd m=64 n=256 k=784 kern_event_ms=0.033472002 samples=20
+MLPEVENT4147 shape=l2_fwd m=64 n=10 k=256 kern_event_ms=0.019152001 samples=20
+done4147

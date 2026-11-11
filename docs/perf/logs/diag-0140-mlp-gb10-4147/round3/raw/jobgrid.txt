@@ -1,0 +1,7 @@
+arm=r3 series=threads shape=l1_fwd trans=nn m=64 n=256 k=784 rayon_threads=20 median_secs=0.000105888 gflops=242.616 checksum=0x40b128afdd627000
+arm=r3 series=threads shape=l1_dw trans=tn m=784 n=256 k=64 rayon_threads=20 median_secs=0.000124512 gflops=206.326 checksum=0x40a3c0856c6c1b80
+arm=r3 series=threads shape=l1_dx trans=nt m=64 n=784 k=256 rayon_threads=20 median_secs=0.000111808 gflops=229.770 checksum=0xc0d7791b1a023f00
+arm=r3 series=threads shape=l2_fwd trans=nn m=64 n=10 k=256 rayon_threads=20 median_secs=0.000040224 gflops=8.146 checksum=0xc0b7bdb5992a8000
+arm=r3 series=threads shape=l2_dw trans=tn m=256 n=10 k=64 rayon_threads=20 median_secs=0.000024304 gflops=13.483 checksum=0xc0b08c929e2dc000
+arm=r3 series=threads shape=l2_dx trans=nt m=64 n=256 k=10 rayon_threads=20 median_secs=0.000034256 gflops=9.566 checksum=0x40b26cd56e507d00
+arm=r3 series=threads shape=ref_square_512 trans=nn m=512 n=512 k=512 rayon_threads=20 median_secs=0.000880066 gflops=305.017 checksum=0xc0e9b13f0ea78000
