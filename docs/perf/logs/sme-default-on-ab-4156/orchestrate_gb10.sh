@@ -64,6 +64,50 @@ check_owner() { # check_owner <RULE.txt> -> 0=成立 1=不成立（理由は std
     return ${rc}
 }
 
+# 収録前のマスク漏れ検査の正規表現（#4156 所有者判断 2026-11-11）。
+# ユーザー名の項だけを語境界つきにする。語の文字は英数字・下線・ハイフンとし、前後がそのどれでもないときだけ一致する
+# （ハイフンでつながった識別子の一部は別の語として扱う）。ほかの項（/Users/・/home/・
+# ホスト名・IPv4）は従来どおり。境界は GNU grep・macOS の grep の両方で動く ERE の文字クラスで書く（\b は使わない）。
+# --self-test-leak で、植えた値（ユーザー名・ホーム・ホスト名・IP・絶対パス）が変更後も検出されることを確かめる。
+leak_re() { # leak_re <hostname> <username>
+    printf '%s' "/Users/|/home/|$1|(^|[^A-Za-z0-9_-])$2([^A-Za-z0-9_-]|\$)|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"
+}
+self_test_leak() { # 値は表示しない（件数と PASS/FAIL だけ）
+    local d re n=0 bad=0 host user f
+    d="$(mktemp -d "${TMPDIR:-/tmp}/leak-selftest.XXXXXX")" || return 1
+    # 組 1 は合成値、組 2 は実行環境の実値（ファイルは一時ディレクトリにだけ置き、終わったら消す）
+    for pair in "thost-01.example tuser9" "$(hostname 2>/dev/null || echo __nohost__) $(id -un 2>/dev/null || echo __nouser__)"; do
+        host="${pair% *}"; user="${pair#* }"
+        re="$(leak_re "${host}" "${user}")"
+        # 検出されるべき行（1 ファイル 1 行）
+        i=0
+        for line in "run by ${user} at 00:00" "${user}" "${user}: done" "owner=${user}" "path ${user}/x" \
+            "home /home/someone/work" "home /Users/someone/work" "on ${host} now" "addr 10.1.2.3" "file /Users/x/y.log"; do
+            i=$((i + 1)); f="${d}/pos-${i}"; printf '%s\n' "${line}" > "${f}"
+            n=$((n + 1)); grep -Eq "${re}" "${f}" || { bad=$((bad + 1)); echo "self-test-leak FAIL: 検出されるべき行 ${i}（通し ${n} 件目）" >&2; }
+        done
+        # ディレクトリ再帰（本番と同じ grep -rEq）でも検出されること
+        n=$((n + 1)); grep -rEq "${re}" "${d}" || { bad=$((bad + 1)); echo "self-test-leak FAIL: grep -r で検出されない" >&2; }
+        rm -f "${d}"/pos-*
+        # 検出されないべき行: ユーザー名が英数字・下線・ハイフンに隣接し、別の語の一部になっている
+        i=0
+        for line in "x${user}y" "${user}_z" "z_${user}" "${user}9q" "${user}-z" "z-${user}"; do
+            i=$((i + 1)); f="${d}/neg-${i}"; printf '%s\n' "${line}" > "${f}"
+            n=$((n + 1)); if grep -Eq "${re}" "${f}"; then
+                # 実値の組では、ホスト名の項など別の項が当たることがある。合成値の組だけを判定に使う
+                if [ "${host}" = "thost-01.example" ]; then bad=$((bad + 1)); echo "self-test-leak FAIL: 検出されないべき行 ${i}" >&2; fi
+            fi
+        done
+        rm -f "${d}"/neg-*
+    done
+    rm -rf "${d}"
+    if [ "${bad}" = "0" ]; then echo "self-test-leak ok (${n} 件)"; return 0; fi
+    echo "self-test-leak NG (${bad}/${n} 件)" >&2; return 1
+}
+if [ "${1:-}" = "--self-test-leak" ]; then
+    self_test_leak; exit $?
+fi
+
 if [ "${DRY}" = "1" ]; then
     echo "# dry-run: 実行計画（副作用なし）"
     echo "0. P-OWNER: ${REPO_LOG}/RULE.txt §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING と各回答コメント URL が記入済みであること（未決ならロック取得前に停止）。prereg_append.txt の rule_sha256 が RULE.txt と一致すること"
@@ -258,7 +302,7 @@ for f in "${BASE}"/scripts/bench/framework-compare/compare-*4156*; do
     [ -e "${f}" ] && { mask < "${f}" > "${OUT}/ab/$(basename "${f}")" || collect_rc=1; }
 done
 # 実ホスト名・ユーザー名・IP・絶対ホームの残りを収録前に検査する（0 件でなければ fail-closed）
-LEAK_RE="/Users/|/home/|$(hostname 2>/dev/null || echo __nohost__)|$(id -un 2>/dev/null || echo __nouser__)|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"
+LEAK_RE="$(leak_re "$(hostname 2>/dev/null || echo __nohost__)" "$(id -un 2>/dev/null || echo __nouser__)")"
 if grep -rEq "${LEAK_RE}" "${OUT}"; then
     echo "マスク漏れの疑い（ホスト名・ユーザー名・絶対パス・IP）-> 収録を中止" >&2
     grep -rEl "${LEAK_RE}" "${OUT}" | mask >&2
