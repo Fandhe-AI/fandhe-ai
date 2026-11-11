@@ -1,0 +1,2 @@
+fandhe-ai v0.14.0
+└── bench-fandhe v0.1.0 (<home>/work/run-4147-m/scripts/bench/framework-compare/bench-fandhe)
