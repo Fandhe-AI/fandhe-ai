@@ -1,0 +1,9 @@
+     Locking 8 packages to latest compatible versions
+      Adding fandhe-ai v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/facade)
+      Adding fandhe-ai-autodiff v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/autodiff)
+      Adding fandhe-ai-backend-cpu v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/backend-cpu)
+      Adding fandhe-ai-backend-cuda v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/backend-cuda)
+      Adding fandhe-ai-backend-metal v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/backend-metal)
+      Adding fandhe-ai-backend-rocm v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/backend-rocm)
+      Adding fandhe-ai-onnx-interop v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/onnx-interop)
+      Adding fandhe-ai-tensor-core v0.14.0 (<home>/work/jpw1-4161-m/work/trees/off/crates/tensor-core)

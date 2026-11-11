@@ -138,6 +138,7 @@ bit 一致テスト 24 件 pass のもとで、**G1（merge）・G2（merge+prep
 - G1 との関係: G1（`SMALL_M_JOB_MERGE_ENABLED`）が有効ならそちらを優先する。A の pack 共有（`select_shared_a`）は含めず、`share_a` は従来どおり G1 のゲートに従う。#3201 の merge 腕（jpw1 と A 共有）とは別物。
 - 制約: rayon ワーカー上から呼ばれる GEMM はスコープを継がず既定の jpw になる（安全側）。`GB10_AFFINITY_ENABLED` は false のまま。
 - bit 一致: jpw は job の大きさだけを決め、各 C 要素の FMA 連鎖は変わらない（§3 と同じ根拠）。tolerance・FMA 契約は不変。出力の bit 一致は `crates/facade/tests/infer_scope_jpw1_4161.rs` で確かめる。
-- A/B キット: [`docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/`](perf/logs/cpu-infer-jpw1-gb10-ab-4161/)（事前登録規則の下書き・腕 patch・`orchestrate.sh`・`aggregate.py`）。**この時点で実測はない**。RULE.txt はマージ後に単独コミットで固定してから GB10 で測る。
+- A/B キット: [`docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/`](perf/logs/cpu-infer-jpw1-gb10-ab-4161/)（事前登録規則・腕 patch・`orchestrate.sh`・`aggregate.py`）。RULE.txt は PR #4246 で固定した。
+- GB10 実測（2026-11-11）: **REJECT**。inf-jpw1 / off の中央値比は infer fresh 0.8977・infer reuse 0.8636（いずれも 5/5 で inf-jpw1 が速い）、train fresh 0.9816・train reuse 1.0056。train reuse が上限 1.00 を超えたため REJECT になった。train の 2 パスは機構が発火していない（probe は applied=0）。ゲートは既定 OFF のまま。記録は同ディレクトリの README「結果」。
 
 - #4165: 判定未取得のため結線していない（[`perf/cpu-adopt-wiring-4165.md`](perf/cpu-adopt-wiring-4165.md)）。

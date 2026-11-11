@@ -1,6 +1,6 @@
 # #4161 GB10 の推論だけに jpw1 を効かせる A/B
 
-状態: **道具立ての時点。実測なし**（未検証）。実測と判定の記録を含む最後の PR にだけ `Closes #4161` を付ける。
+状態: **2026-11-11 に実測済み。判定は REJECT**（正式系列 5/5・前提成立・checksum 一致）。RULE は `RULE.txt`（PR #4246 で固定）。結果は下の「結果」。
 
 ## 解釈
 
@@ -32,8 +32,34 @@
 
 ## 対象 tree の差分確認
 
-`git diff v0.14.0 <tree_sha> -- crates/` の一覧と `.rev-stamp` を収録する（実測時に記入）。
+- tree_sha は `136705650`（RULE 項 11 (a)）。送ったリビジョンはノード上の `.rev-stamp`（`env/rev-stamp.txt`）で確かめた。
+- `git diff --name-status v0.14.0 136705650 -- crates/` は 37 ファイル（`env/diff-v0.14.0-crates.txt`）。機構に関わるのは `crates/backend-cpu/src/gemm_blis/infer_scope.rs`（新規）・`small_m.rs`・`mod.rs` と、bit 一致テスト `crates/facade/tests/infer_scope_jpw1_4161.rs`。
+- 腕ツリーの定数は `tree_verify.txt` で確かめた（off は `false`、inf-jpw1 は `true`）。patch の sha256 は `patch_sha256.txt`。
 
 ## 結果
 
-未実測。
+### 計測の条件（実測）
+
+- 系列: 2026-11-11T03:18:58Z〜03:28:53Z（`env/status.log`）。`orchestrate.sh` は rc=0（2 腕のビルド → 前提 report → 5 ラウンド。`env/orch.log`）。
+- 実機ロック: owner は `#4161 measure 2026-11-11T03:18:58Z`（`env/lock-owner.txt`）。ビルドはロック取得後に、新しい展開先で行った。系列中はほかの計測・ビルド・転送を並走させていない。
+- ゲート: 5/5 PASS（`round{1..5}/gate.txt`）。前提（RULE 項 6）: inf-jpw1 は infer_fresh・infer_reuse で applied>0、train の 2 パスで applied=0。off は 4 パスとも applied=0。両腕とも `gb10_affinity enabled=false`（`prereq/`）。
+- 計測に使った bench-fandhe の fandhe-ai は、腕ツリーの `crates/facade` を path で参照している（`tree-off.txt`・`tree-inf-jpw1.txt`）。torch は 2.14.0+cu130（`env/torch-version.txt`）。
+- マスク: `$HOME` は `<home>`、ホスト名は `<cuda-node>` に置換し、漏れがないことを確かめた。
+
+### 集計（`aggregate.md`・`aggregate.tsv`。比 = inf-jpw1 / off、< 1.00 で inf-jpw1 が速い）
+
+| セル | 中央値比 | ラウンド別 | inf-jpw1 の勝ち | NB-RANGE5（記録のみ） |
+|---|---|---|---|---|
+| train fresh | 0.9816 | 1.0034, 1.0147, 0.9816, 0.9783, 0.9147 | 3/5 | 0.9147〜1.0147 |
+| train reuse | **1.0056** | 0.8691, 0.9581, 1.1111, 1.0056, 1.0139 | 2/5 | 0.8691〜1.1111 |
+| infer fresh | 0.8977 | 0.8107, 0.9529, 0.7931, 0.8977, 0.9011 | 5/5 | 0.7931〜0.9529 |
+| infer reuse | 0.8636 | 0.9645, 0.9050, 0.8636, 0.8596, 0.8337 | 5/5 | 0.8337〜0.9645 |
+
+- **判定: REJECT**（RULE 項 8）。train reuse の中央値比 1.0056 が上限 1.00 を超えたため。推論 2 セルは ADOPT の条件（< 1.00）を満たしている。
+- 事実の補足（判定は変えない）:
+  - train の 2 パスは前提の probe で inf-jpw1 でも applied=0 で、機構は発火していない。
+  - train reuse のラウンド別の比は 0.8691〜1.1111 にばらつき、NB-RANGE5 の幅は 0.2407 ある。
+- NB-SEP（記録のみ。比 = PyTorch / fandhe、> 1.0 で fandhe が速い）: infer fresh・infer reuse とも不成立。
+  - 変更後の比は infer fresh 0.8503〜0.9181、infer reuse 0.7970〜0.9620 で、PyTorch より遅いまま。
+- 既定の反転（#4165）は ADOPT のときだけ行う。REJECT なので反転の根拠にはならない。
+- 試走（RULE 項 11 (f)）の判定語も REJECT だった。
