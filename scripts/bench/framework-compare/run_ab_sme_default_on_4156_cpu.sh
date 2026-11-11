@@ -7,13 +7,16 @@
 #       向きは `compare_gemm_ab.py` の「after/before > 1.00 = 後退」のままで、比 = ON / OFF。
 #   (2) 出力ファイル名の識別子を 4156 にした。既存系列があれば fail-closed で止まる（上書き禁止）
 #   (3) gemm N=256/512/1024/2048 x fresh/reuse、train／infer size=64（#3232 と同じ 12 セル）、AB_HOST=macmini|gb10 必須（#3232 継承）
+#   (4) AB_HOST=macmini では各 round を他ジョブの前提ゲート（FOREIGN_GATE=foreign_job_gate.py の絶対パス。必須）で前後から挟む
+#       （2026-11-11 追加。RULE.txt の固定後の追加のため、この版で測る系列は #4156 の RULE.v2 で登録する。GB10 は従来のまま）
 # macOS 標準の bash 3.2 でも動くこと（変数は ${VAR} 形式・mapfile／連想配列を使わない・jq に依存しない）。
 # 判定規則（実測前に固定）: `docs/perf/logs/sme-default-on-ab-4156/RULE.txt`。
 # 実行手順: `docs/perf/logs/sme-default-on-ab-4156/README.md`。
 #
 # 呼び出し例:
 #   AB_HOST=macmini AB_BEFORE_FACADE_PATH=/path/to/off/crates/facade AB_AFTER_FACADE_PATH=/path/to/on/crates/facade \
-#   AB_TORCH_PYTHON=/path/to/venv-torch/bin/python bash run_ab_sme_default_on_4156_cpu.sh 4156-r1
+#   AB_TORCH_PYTHON=/path/to/venv-torch/bin/python FOREIGN_GATE=/abs/foreign_job_gate.py bash run_ab_sme_default_on_4156_cpu.sh 4156-r1
+#   （FOREIGN_GATE は AB_HOST=macmini のときだけ必須・使用。GB10 では読まない）
 set -u
 
 # AB_HOST は列挙値だけを受け付ける（A03: 値をそのままパス・コマンドへ展開しない）。
@@ -28,6 +31,21 @@ esac
 cd "$(dirname "$0")" || exit 1
 # shellcheck source=./bench_fandhe_lock_restore.sh
 source ./bench_fandhe_lock_restore.sh
+# 他ジョブの前提ゲート（Mac mini だけ。#4160 と同じ部品 ab_foreign_gate.sh → foreign_job_gate.py〈#4227〉）。
+# 2026-11-10 に hw-lock を取らない他ジョブが Mac mini の計測と重なり、load1 では検出できなかった（#4151・#4153・#4154）。
+# 各 round の前は「他ジョブ CLEAN かつ load1 < 閾値」を load1 ゲートと同じループで待ち（30 秒間隔・最大 60 回）、
+# round の後（PyTorch の同席計測まで終えた直後）に 1 回確かめる。ゲートを厳しくする方向だけの追加で、
+# 閾値・待ちの上限・round 数・判定は変えない。GB10（AB_HOST=gb10）の経路は従来のまま（ゲートを呼ばない・ログも同じ）。
+FG_ENABLED=0
+if [[ "$AB_HOST" == macmini ]]; then
+  FG_ENABLED=1
+  if [[ -z "${FOREIGN_GATE:-}" ]]; then
+    echo "error: AB_HOST=macmini では FOREIGN_GATE（foreign_job_gate.py の絶対パス）が必須です（他ジョブの前提ゲート。#4156）" >&2
+    exit 1
+  fi
+  # shellcheck source=./ab_foreign_gate.sh
+  source ./ab_foreign_gate.sh
+fi
 
 LABEL=${1:-}
 # RULE.txt は「5 round 中央値・5/5 round 一貫性」を事前登録しており、
@@ -220,6 +238,15 @@ if [[ -e "$SKIP" ]]; then
   echo "error: 既存の失敗記録 $SKIP があります。差し替え禁止のため別の LABEL で実行してください" >&2
   exit 1
 fi
+# 他ジョブの前提ゲートの出力先（Mac mini だけ。LABEL 入り。既存は差し替え禁止で拒否）。パスの検査もここで行い、
+# 系列の記録（SKIP・JSONL）を作る前に止める（ゲートのパスの誤りで LABEL を使い切らない。PR #4238 の Bugbot 指摘と同じ）。
+# 置き場は results/raw/foreign-gate/ の下で、名前に 4156 を含む results/raw/*4156* の収録の対象から外れる
+# （orchestrate_macmini.sh がこのディレクトリを別に収録する）。絶対パスはログへ書かず sha256 だけを残す。
+if [[ "$FG_ENABLED" == 1 ]]; then
+  FG_OUT="${OUT}/foreign-gate/4156-${GATE}-${DEVICE}-${LABEL}"
+  fg_require "${FOREIGN_GATE}" "${FG_OUT}" || exit 1
+  fg_sha256 "${FOREIGN_GATE}" >"${FG_OUT}/foreign_job_gate.sha256"
+fi
 : >"$SKIP"
 for _reset_arm in before after; do
   for _reset_suffix in gemm train infer; do
@@ -395,6 +422,10 @@ GATE_LOG="$OUT/load_gate-4156-${GATE}-${DEVICE}-${LABEL}.log"
 : >"$GATE_LOG"
 echo "threshold=${LOAD_GATE} rule_threshold=${RULE_LOAD_GATE} series=${GATE_SERIES}" >>"$GATE_LOG"
 wait_load_gate() { # wait_load_gate <round>
+  if [[ "$FG_ENABLED" == 1 ]]; then
+    wait_load_gate_fg "$1"
+    return 0
+  fi
   local waited=0 status=timeout l1 ok
   while ((waited < 1800)); do
     l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
@@ -424,6 +455,35 @@ wait_load_gate() { # wait_load_gate <round>
   # 1 件でも不成立なら比較結果が非後退でも判定不能として非ゼロ終了する（末尾参照）。
   if [[ "$gate_ok" != 1 ]]; then GATE_NOT_OK=$((GATE_NOT_OK + 1)); fi
   echo "round${1} gate=${status} gate_ok=${gate_ok} threshold=${LOAD_GATE} load1=${l1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GATE_LOG"
+}
+# Mac mini の round 前のゲート（他ジョブ CLEAN かつ load1 < 閾値を同じループで待つ。30 秒間隔・最大 60 回＝上の待ちと同じ上限）。
+# 行の書式は上と同じで、通過は従来どおり `round<N> gate=pass gate_ok=1 ...` の 1 行（aggregate.py の P-GATE が読む）。
+# 通過以外だけ行末に reason=foreign-job|load1|foreign-gate-error|load1-unavailable を足す（ゲート失敗は phase=before も）。
+# load1 が読めないときは従来どおり gate=unavailable。緩和閾値の系列の通過は従来どおり pass-reference（gate_ok=0）。
+wait_load_gate_fg() { # wait_load_gate_fg <round>
+  fg_wait_before "round${1}-start" "$LOAD_GATE"
+  local status=$FG_STATUS extra="" gate_ok=0
+  [[ "$FG_REASON" == load1-unavailable ]] && status=unavailable
+  if [[ "$status" == pass && "$GATE_SERIES" != official ]]; then status="pass-${GATE_SERIES}"; fi
+  [[ "$status" == pass ]] && gate_ok=1
+  if [[ "$gate_ok" != 1 ]]; then GATE_NOT_OK=$((GATE_NOT_OK + 1)); fi
+  [[ "$FG_STATUS" != pass ]] && extra=" reason=${FG_REASON}"
+  [[ "$FG_REASON" == foreign-gate-error ]] && extra="${extra} phase=before"
+  echo "round${1} gate=${status} gate_ok=${gate_ok} threshold=${LOAD_GATE} load1=${FG_L1} waited_s=${FG_WAITED} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)${extra}" >>"$GATE_LOG"
+}
+# Mac mini の round 後のゲート（round の計測と PyTorch の同席計測が終わった直後に 1 回）。FOREIGN・ゲート失敗なら
+# 同じ round の `gate=invalid gate_ok=0 ... reason=foreign-after|foreign-gate-error phase=after` を足し、GATE_NOT_OK を数える。
+# GATE_NOT_OK が 1 以上なら本スクリプトは末尾で非 0 終了し（既存の「gate: 判定不能」）、orchestrate_macmini.sh の
+# `run_ab exit=0` が欠けて aggregate.py の P-RUNAB が不成立になる（系列は正式にならない。aggregate.py は変えない）。
+# 系列は既存の GATE-TIMEOUT と同じく最後まで進める（部分系列で判定する経路は作らない）。GB10 では何もしない。
+round_gate_after() { # round_gate_after <round>
+  [[ "$FG_ENABLED" == 1 ]] || return 0
+  fg_after "round${1}"
+  if [[ "$FG_RC" -ne 0 ]]; then
+    GATE_NOT_OK=$((GATE_NOT_OK + 1))
+    echo "round${1} gate=invalid gate_ok=0 threshold=${LOAD_GATE} load1=NA waited_s=0 at=$(date -u +%Y-%m-%dT%H:%M:%SZ) reason=$(fg_after_reason) phase=after" >>"$GATE_LOG"
+  fi
+  return 0
 }
 
 : >"$OUT/uptime-4156-${GATE}-${DEVICE}-${LABEL}.log"
@@ -477,6 +537,7 @@ for run_i in $(seq 1 "$ROUNDS"); do
     done
   done
   [[ "$TORCH_ENABLED" == 1 ]] && run_torch_round "$run_i"
+  round_gate_after "$run_i"
   echo "round $run_i: $(uptime | sed 's/.*load/load/')" | tee -a "$OUT/uptime-4156-${GATE}-${DEVICE}-${LABEL}.log"
 done
 

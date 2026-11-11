@@ -25,7 +25,8 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 |---|---|
 | `RULE.txt` | 事前登録規則（計測前に単独コミットして固定。訂正は末尾への追記のみ。§9 は所有者決定の転記欄） |
 | `on-arm.patch` | `SME_PRODUCTION_ENABLED` を `false` から `true` にする 1 行（#3613 の同名パッチと同一内容。sha256 は `RULE.txt` に固定） |
-| `orchestrate_macmini.sh`・`orchestrate_gb10.sh` | P-OWNER → ロック →（GB10 は外側ゲート）→ P-TREE → P-R0 → P-RT → A/B → P-BIT → マスク収録（`--dry-run` あり） |
+| `orchestrate_macmini.sh`・`orchestrate_gb10.sh` | P-OWNER → ロック →（GB10 は外側ゲート）→ P-TREE → P-R0 → P-RT →（Mac mini は mediaanalysisd の確認）→ A/B → P-BIT → マスク収録（`--dry-run` あり） |
+| `test_foreign_gate_4156.sh` | Mac mini 腕の他ジョブの前提ゲートと mediaanalysisd の確認の self-test（実機に接続しない。`bash test_foreign_gate_4156.sh`） |
 | `aggregate.py` | 厳密集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`） |
 | `prereg_append.txt`・`macmini/`・`gb10/`・`aggregate-*.md` | 実測後に収録（現時点では無い）。`aggregate-*.md` は機械出力で手で直さない |
 | `../../../../scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` | 2 機共通の A/B 本体。#3232 の `run_ab_sme_default_on_cpu.sh` の派生（元は凍結して変更しない） |
@@ -39,8 +40,26 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 2. 開発機で `git bundle` を作って実機へ転送し、クリーンな clone を BASE とする。登録基準 SHA と BASE の間で `crates/`・`scripts/bench/`・`Cargo.*`・`rust-toolchain.toml` に差分がないことを確認する（#3613 §8 の教訓）。
 3. `RAYON_NUM_THREADS` を unset し、他の cargo・bench・python が動いていないことを確かめる。計測中はビルドを並走させない。
 4. GB10 を先に: `BASE=<clone> WORK=<作業> [TORCH_PY=<python>] bash docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh`（`PATH` に `${HOME}/.cargo/bin`。専有できる機体を選ぶ。compute プロセスが常駐する機体では外側ゲートを通らない）。
-5. Mac mini: `BASE=<clone> WORK=<作業> TORCH_PY=<venv python> bash .../orchestrate_macmini.sh`。
+5. Mac mini: `BASE=<clone> WORK=<作業> TORCH_PY=<venv python> FOREIGN_GATE=<foreign_job_gate.py の絶対パス> bash .../orchestrate_macmini.sh`。`WORK` は名前が `.noindex` で終わるディレクトリにする（Spotlight の索引を避ける。#4151 の RULE.v2.txt 項 10 (e)）。hw-lock は先に取らない（スクリプトが取る）。
 6. 回収後 `python3 -I aggregate.py gb10 gb10 > aggregate-gb10.md`、続けて `macmini macmini > aggregate-macmini.md`。perf doc §5.17 に結果を転記する。
+
+## 他ジョブの前提ゲートと mediaanalysisd の確認（Mac mini。2026-11-11 追加）
+
+`RULE.txt` の固定後に足した。ゲートを厳しくする方向だけの追加で、判定式・閾値・round 数・ほかの段の手順は変えていない。
+この版で測る系列は #4156 の RULE.v2 で登録する（GB10 セッションが書く）。GB10（`AB_HOST=gb10`）の経路は変えていない。
+
+- **他ジョブの前提ゲート**: 部品は #4160 と同じ `scripts/bench/framework-compare/ab_foreign_gate.sh` で、判定は `docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py`（#4227。G1〜G4）。どちらも変えていない。
+  - A/B 本体の各 round の前に、他ジョブが CLEAN かつ load1 < 3.0 になるまで、同じループで待つ（30 秒間隔・最大 60 回。load1 の待ちと同じ上限）。
+  - round の後（PyTorch の同席計測まで終えた直後）に 1 回確かめる。
+  - 通過の行は従来どおり `round<N> gate=pass gate_ok=1 ...` の 1 行。通過以外は行末に `reason=foreign-job|load1|foreign-gate-error|load1-unavailable` を足す。
+  - 終了後の FOREIGN・ゲート失敗は、同じ round の `gate=invalid gate_ok=0 ... reason=foreign-after|foreign-gate-error phase=after` を足す。
+  - 開始前の不通過は `aggregate.py` の P-GATE で正式系列から外れる。
+  - 終了後の FOREIGN は P-GATE では数えない（P-GATE は pass の行だけを読む）。代わりに A/B 本体が非 0 で終わり、`run_ab exit=0` が欠けて P-RUNAB で正式系列から外れる。`aggregate.py` は変えていない。
+  - ゲートの出力は A/B 本体が `results/raw/foreign-gate/4156-sme-cpu-<LABEL>/` に残し、`orchestrate_macmini.sh` が `macmini/foreign-gate/` へ収録する。ゲートの sha256 は `macmini/foreign_gate.txt`。
+- **mediaanalysisd の確認**: #4146 の `RULE.v2.txt` 項 8 (c) と同じ基準。A/B の直前に 2 分間隔で 3 回、%CPU が 5 未満であることを確かめる。
+  - 名前は basename の完全一致で見る。複数あれば最大値で判定し、プロセスがなければ通過。`ps` の失敗・出力が空・非数値は不成立。
+  - 不成立なら A/B を始めずに止める。記録は `${WORK}/macmini/mediaanalysisd.txt` に残る。
+- **起動前に止まる場合**: `FOREIGN_GATE` が未指定・相対パス・存在しない・禁止文字を含むときは、ロックを取る前に止まる。
 
 ## マスク規則・実機ロック
 
@@ -57,6 +76,18 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 - 変異の確認: 次の 2 つの変異のどちらでも self-test が落ちることを確かめた。
   - ユーザー名の項を外す
   - 境界を外す、または境界からハイフンを外す
+- 他ジョブの前提ゲートと mediaanalysisd の確認（2026-11-11）は、開発機で `bash test_foreign_gate_4156.sh` を通した。実機には接続していない。
+  - 確かめた場合: 全 CLEAN・終了後 FOREIGN・開始前 60 回 FOREIGN・load1 超過・ゲート失敗（前・後）・出力不一致・load1 が読めない・緩和閾値の系列・GB10 の行が従来どおり。
+  - 変更なしの `aggregate.py` の判定: 全 CLEAN は ADOPT、開始前の不通過は undetermined、終了後の FOREIGN は `run_ab exit=1` で undetermined。
+  - mediaanalysisd の確認: 境界 5.0・部分一致の名前・複数・非数値・`ps` の失敗。
+  - orchestrate: `FOREIGN_GATE` の不正でロック前に止まること・呼び出し順・dry-run。
+  - 変異の確認: 次の 5 つの変異のどれでも self-test が落ちることを確かめた。
+    - round 後の呼び出しを外す
+    - 開始前の GATE_NOT_OK を数えない
+    - 終了後の GATE_NOT_OK を数えない
+    - mediaanalysisd を 5 以下で通す
+    - mediaanalysisd を部分一致で拾う
+  - <metal-node> で `foreign_job_gate.py` を 1 回だけ動かした。出力 10 行は漏れ検査（`leak_re`）に 0 件で当たった（計測ではない）。
 - **未検証**: 実機での A/B・P-RT・P-BIT・マスク収録（Mac mini と GB10 が必要）。
 
 ## スコープ外
