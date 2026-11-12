@@ -8,6 +8,7 @@
   - 登録基準を `d551b31` から `18938d84c`（#4258 のマージコミット）へ移した。v1 の固定後に道具の PR（#4256・#4258）が入ったため。
   - §9 に所有者決定を転記した（GB10-GATE-ONLY-STRUCTURAL・NOISE-BAND = adopted・UNDETERMINED-HANDLING = return-to-owner）。根拠は #4143 の https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 と #4142 の https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 。記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16、`docs/cpu-gemm-sme-unsafe-audit.md` §12.14、`docs/perf/noise-band-decision.md`。
   - §11 に道具の sha256、§12 に Mac mini 腕の準備、§13 に露出の申告を足した。
+  - 計測対象（target）を `319a276b0`（#4263 のマージコミット）と明記した。`18938d84c` との差分は `crates/backend-cuda` のテストだけで、CPU の腕には関係しない。§1 の差分検査はこの版で行う。
 - `prereg_append.txt`（`RULE.v2.txt` の sha256 と準備時刻）も v2 の PR でコミットした。
 - **計測はまだ始めない（GB10 腕・Mac mini 腕とも）**。`RULE.v2.txt` §12 (c)（Mac mini 腕で他ジョブのゲートに当たったときの系列数の上限）が空欄で、所有者が決める。記入すると `RULE.v2.txt` の sha256 が変わるため、`prereg_append.txt` を取り直してから両機体を測る（`aggregate.py` は両機体の `prereg_append.txt` を現在の `RULE.v2.txt` と照合する）。
 
@@ -38,7 +39,7 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 ## 手順（実機セッション。Linux の自動運転では実行しない）
 
 1. `RULE.v2.txt` §9 の転記と `prereg_append.txt` は v2 の PR でコミット済み。実測者は転記しない。`RULE.v2.txt` §12 (c) を記入したときだけ、記入後の `RULE.v2.txt` の sha256 と UTC 時刻で `prereg_append.txt` を取り直してコミット・push する（未追跡のまま残すと A/B 本体の `verify_no_untracked_build_inputs` が BASE 内の未追跡ファイルを検出して停止する）。`prepared_at` は `YYYY-MM-DDTHH:MM:SSZ` 形式で、hwlock の取得時刻より前。形式不正・未来時刻ならロック取得前に停止し、取得直後にも `prepared_at < acquired` を再確認する。
-2. 開発機で `git bundle` を作って実機へ転送し、クリーンな clone を BASE とする。BASE は `RULE.v2.txt` と `prereg_append.txt` を含む main のコミット。登録基準 `18938d84c` と BASE の間で `crates/`・`scripts/bench/`・`Cargo.*`・`rust-toolchain.toml` に差分がないこと（#3613 §8 の教訓）と、`RULE.v2.txt` §11 のピンが BASE で一致することを、送る前に確かめて記録する。実機ではツリー指紋（送信側と実機側）を突き合わせる。
+2. 開発機で `git bundle` を作って実機へ転送し、クリーンな clone を BASE とする。BASE は `RULE.v2.txt` と `prereg_append.txt` を含む main のコミット。計測対象 `319a276b0`（#4263 のマージコミット。`RULE.v2.txt` 冒頭の「計測対象 (target)」）と BASE の間で `crates/`・`scripts/bench/`・`Cargo.*`・`rust-toolchain.toml` に差分がないこと（#3613 §8 の教訓）と、`RULE.v2.txt` §11 のピンが BASE で一致することを、送る前に確かめて記録する。実機ではツリー指紋（送信側と実機側）を突き合わせる。
 3. `RAYON_NUM_THREADS` を unset し、他の cargo・bench・python が動いていないことを確かめる。計測中はビルドを並走させない。
 4. GB10 を先に: `BASE=<clone> WORK=<作業> [TORCH_PY=<python>] bash docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh`（`PATH` に `${HOME}/.cargo/bin`。専有できる機体を選ぶ。compute プロセスが常駐する機体では外側ゲートを通らない）。
 5. Mac mini: `BASE=<clone> WORK=<作業> TORCH_PY=<venv python> FOREIGN_GATE=<foreign_job_gate.py の絶対パス> bash .../orchestrate_macmini.sh`。`WORK` は名前が `.noindex` で終わるディレクトリにする（Spotlight の索引を避ける。#4151 の RULE.v2.txt 項 10 (e)）。hw-lock は先に取らない（スクリプトが取る）。
