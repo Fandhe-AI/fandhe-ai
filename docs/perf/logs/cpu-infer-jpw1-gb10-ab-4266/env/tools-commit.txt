@@ -1,0 +1,1 @@
+tools-commit: c214644dd77f6cd796f24fbdcd1436820f3d13cf (PR #4268 のマージコミット。RULE.v2.txt・aggregate.py・orchestrate.sh・ab_patch_inf_jpw1.diff をここから取った)

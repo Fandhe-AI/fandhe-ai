@@ -1,6 +1,6 @@
 # #4266 GB10 推論限定 jpw1 の測り直し（train の判定を変えた RULE.v2）
 
-状態: **事前登録（RULE.v2）・未実測**。`RULE.v2.txt` を本ディレクトリの PR で固定し、マージの後に `<cuda-node>`（GB10）で測る。
+状態: **実測済み・ADOPT**（2026-11-12 `<cuda-node>`〈GB10〉。下の「結果」）。`RULE.v2.txt` は PR #4268（マージコミット `c214644dd`）で固定し、そのマージの後に測った。
 
 - #4161（`docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/`。REJECT）の A/B を、train セルの判定だけを変えて測り直す。#4161 のディレクトリと記録は変えない。
 - 判定の変更は所有者判断（#4266 本文「所有者判断（2026-11-12・チャット）」）。
@@ -51,6 +51,8 @@
 
 ## 検証状況（固定前・開発機）
 
+本節は RULE.v2 を固定した時点の記述で、そのまま残す。実測の結果と実行の記録は下の「結果」節。
+
 - `python3 -I aggregate.py --self-test`: OK。#4161 から変えていない部分（推論セル・ゲート・checksum・欠損）に加え、train の新しい判定を確かめる。
   - 中央値比 > 1.00 でも最小 <= 1.00 なら非後退
   - 全 round > 1.00 は REJECT
@@ -76,3 +78,35 @@
   - `RULE.txt` を読む
 - `ab_patch_inf_jpw1.diff` は `85498f32b` で `git apply --check` が通る。
 - **未検証**: GB10 での実行（ビルド・前提 report・5 ラウンド）。本規則の固定前に、実機での捨て試走はしていない（`RULE.v2.txt` 項 6 (c)）。
+
+## 結果（2026-11-12・`<cuda-node>`〈GB10〉）
+
+**verdict: ADOPT**（`aggregate.md`）。正式系列（ゲート 5/5 PASS）・前提成立・checksum 一致。
+
+| セル | 中央値比（inf-jpw1 / off） | round 別比 | 最小 | inf-jpw1 の勝ち | 判定 |
+|---|---|---|---|---|---|
+| train fresh | 0.9312 | 0.9732・0.9232・0.9312・0.8644・0.9530 | 0.8644 | 5/5 | 非後退（条件 1・2 とも成立） |
+| train reuse | 1.0225 | 1.0225・1.1695・1.0066・0.9221・1.0412 | 0.9221 | 1/5 | 非後退（条件 1・2 とも成立） |
+| infer fresh | 0.9247 | 0.9831・0.8174・0.9773・0.8432・0.9247 | 0.8174 | 5/5 | 合格（< 1.00） |
+| infer reuse | 0.9102 | 0.9776・0.9102・0.8262・0.9148・0.8909 | 0.8262 | 5/5 | 合格（< 1.00） |
+
+- **train reuse は中央値比 1.0225 で、#4161 の `RULE.txt` の式（中央値比 < 1.00）なら REJECT になる値**。本規則では train の中央値比は記録のみで、条件 2（round 別比の最小 0.9221 <= 1.00）により非後退とした。この判定の変更は所有者判断（#4266）による。
+- **開示**（`RULE.v2.txt` 項 6 と同じ）: 本規則は #4161 の値を見た後に書いた。本規則の train の判定を #4161 の値に当てても、train の 2 セルは非後退になる（round 別比の最小は train fresh 0.9147・train reuse 0.8691）。
+- train の条件 1: `prereq/inf-jpw1.log` で `train_fresh`・`train_reuse` とも `applied=0`（infer は `infer_fresh` 2・`infer_reuse` 3 で発火）。off 腕は 4 パスとも `gate=false applied=0`。`gb10_affinity` は両腕とも `enabled=false`。
+- ゲート: 5 ラウンドとも PASS（load1 0.34〜0.70・compute-apps 0・GPU util 0 ×3・hw-lock held。`round<i>/gate.txt`）。
+- NB-SEP（記録のみ。採否とは独立）: infer fresh・infer reuse とも不成立（`aggregate.md`）。
+- ADOPT でも既定は反転しない（`RULE.v2.txt` 項 5 (e)）。本結果は #4165（CPU 系の結線）の材料になる。
+
+### 実行の記録
+
+- 計測: 2026-11-12T05:39:01Z〜05:50:25Z（`orchestrate.sh` rc=0。`env/status.log`）。
+- 実機ロック: 05:39:01Z に手で取得（owner `#4266 measure 2026-11-12T05:39:01Z`）。取得前に、計測系のプロセス（cargo・rustc・python 等）0 件・GPU の compute プロセス 0 件・load1 0.22 を確かめた。終了後、計測のプロセスが 0 件であることを確かめてから 05:51:00Z に解放した。#4161 の起動スクリプトにあった終了時の自動解放は使っていない。
+- 計測対象: `85498f32be4bb8ea70302bd85ec2b8b4329d862f`（`env/rev-stamp.txt`）。`git archive` の tar の sha256 は PARAMS の `tree_fingerprint` と送信側・ノード側の両方で一致し、`orchestrate.sh` の前提検査（展開内容と BASE の一致・`.rev-stamp`）も通った。ノード上で clone・fetch はしていない。
+- 道具: PR #4268 のマージコミット `c214644dd77f6cd796f24fbdcd1436820f3d13cf` から取った（`env/tools-commit.txt`）。送信側・ノード側の両方で PARAMS の 3 つの sha256 と一致した。本ディレクトリの道具 4 本は、マージ後の main のものから変えていない。
+- `bench_py.py`: BASE の外（`<home>/work/jpw1-4266-m/bp/`）に複写したものを使った。sha256 `9fd2c08f…409b`（`env/bench_py.txt`）。torch 2.14.0+cu130（`env/torch-version.txt`）。#4161 では BASE 内の同じファイルを `BP` に渡していた（#4161 の起動記録による。`bench_py.py` は隣に `cache/` を書くので BASE 内に書いたはずだが、#4161 のノード側ディレクトリは残っておらず確かめていない。BASE と tar の一致検査は計測前に行うので、#4161 の判定には影響しない）。
+- 集計: ノード上で `python3 -I aggregate.py <記録先>` を実行した（rc=0）。収録後に開発機で、収録物の複製から再集計し、`aggregate.md`・`aggregate.tsv` がバイト単位で一致することを確かめた。
+- 系列の起動は 1 回だけ（05:39:01Z）。やり直し・捨てた系列・実機での試走はない。
+- 系列の途中では値を見ていない（見たのは `status.log` の終了行・`gate.txt`・残りのプロセス数だけ）。
+- 収録: `$HOME` を `<home>` に置換した。ホスト名・ユーザー名・IP が含まれないことを grep で確かめた。
+- ノードの作業ディレクトリは `<home>/work/jpw1-4266-m`（#4156 の作業ディレクトリとは別。そちらには触れていない）。
+
