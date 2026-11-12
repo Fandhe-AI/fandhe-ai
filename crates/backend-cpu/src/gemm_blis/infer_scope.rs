@@ -140,9 +140,12 @@ mod tests {
         assert!(!in_inference_scope());
     }
 
+    /// 上書きの入れ子と復元。上書きがないときの値は既定の定数（aarch64 Linux だけ true。#4165）に
+    /// 戻ることを確かめる。プラットフォームに依存しない形にする（GB10 で既定 ON になったため）。
     #[test]
     fn override_nests_and_restores() {
-        assert!(!infer_jpw1_effective());
+        let default = std::hint::black_box(INFER_SCOPE_JPW1_ENABLED);
+        assert_eq!(infer_jpw1_effective(), default);
         let a = override_infer_scope_jpw1_for_scope(true);
         assert!(infer_jpw1_effective());
         {
@@ -151,6 +154,6 @@ mod tests {
         }
         assert!(infer_jpw1_effective());
         drop(a);
-        assert!(!infer_jpw1_effective());
+        assert_eq!(infer_jpw1_effective(), default);
     }
 }

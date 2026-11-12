@@ -148,11 +148,25 @@ mod tests {
                 assert_eq!(jobs_per_worker_for(m, n, k), d);
             }
         }
-        // スコープ内でも override なし（定数 OFF）は既定
+        // スコープ内でも override OFF は既定
         {
+            let _o = override_infer_scope_jpw1_for_scope(false);
             let _s = enter_inference_scope();
             for &(m, n, k, _) in &SHAPES {
                 assert_eq!(jobs_per_worker_for(m, n, k), d);
+            }
+        }
+        // スコープ内で override なしは、既定の定数に従う（aarch64 Linux だけ ON。#4165）。
+        // ON のときは適格形状が 1 になる。applied の計数は下の `before` を読む前に済ませる。
+        {
+            let on = std::hint::black_box(super::super::infer_scope::INFER_SCOPE_JPW1_ENABLED);
+            let _s = enter_inference_scope();
+            for &(m, n, k, _) in &SHAPES {
+                assert_eq!(
+                    jobs_per_worker_for(m, n, k),
+                    if on { 1 } else { d },
+                    "{m}x{n}x{k}"
+                );
             }
         }
         // スコープ内 + override ON で適格形状は 1、境界外・m<2・大形状は既定
