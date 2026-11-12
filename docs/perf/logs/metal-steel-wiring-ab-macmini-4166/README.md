@@ -2,11 +2,41 @@
 
 結線（PR #4255。`tile::STEEL_LARGE_N_ENABLED = true`。M4Base の正方 1024／2048／4096 だけ）の後に、Mac mini（`<metal-node>`）の gemm Metal セルで後退していないことを確かめる前後比較の事前登録規則と道具。結論の記入先は `docs/perf/metal-gemm-steel-candidates.md` §11.5・§11.7。
 
-## 状態: 事前登録・未実測
+## 状態: 実測済み・判定 PASS（2026-11-12・系列 `formal-1`）
 
-- 規則: `RULE.txt`（本 PR で固定。以後は本文を変えず、変更は `RULE.v2.txt` で行う）。
+- 規則: `RULE.txt`（PR #4260 で固定。マージコミット `b18fc055c`。本文は測った後も変えていない）。
 - 判定式・閾値・ゲート・NB-RANGE5／NB-SEP は #4160 の `RULE.txt`（`../metal-steel-large-n-ab-macmini-4160/RULE.txt`）のセル A/B の部分を参照する。本ディレクトリでは書き写さない。
-- 計測は本 PR のマージ後。系列ごとに所有者の準備の連絡を受けてから起動する（RULE 項 4）。
+- 前提の確認（RULE 項 3）は all-pass。系列は `formal-1` の 1 本で全ゲート通過し、RULE 項 6 によりそこで止めて判定した（`formal-2`・`formal-3` は回していない）。判定は **PASS**（`series-formal-1/judge.md`）。
+
+## 結果（2026-11-12・Mac mini `<metal-node>`）
+
+### 前提の確認（RULE 項 3）
+
+- `prereq/result.txt`: `all-pass 2026-11-12T07:07:24Z`。`prereq/summary.tsv` は 61 単位（pass 58・ignored テスト 0 件の `pass-no-ignored` 3）。steel の 2 件（`--exact`）と Mac mini 表の 3 件を含め、単位ごとに一覧の件数と passed が一致し、failed 0・終了コード 0。
+- hw-lock は 1 回目で取れた（ロックが取れずにやり直した試みはない）。記録 PR には項 3 のとおり `summary.tsv` と `result.txt` だけを収める。
+
+### 系列 `formal-1`
+
+- 準備（RULE 項 4）: 所有者の準備完了の返事を受けて起動した。止めてほしいプロセスの名指しはなく、計測セッションは何も止めていない。`series-formal-1/series-start.txt` のとおり、他ジョブのゲート 2 回とも rc=0（`Safari` 本体なし）・mediaanalysisd 3 回とも %CPU 0・hw-lock 取得 08:03:31Z・load1=1.24・ツリーの照合が一致・checkout の照合（after clean、before は tile.rs の 1 行だけ、HEAD 一致、道具あり）が成り立った。
+- 実行: 2026-11-12T08:03:39Z〜08:28:25Z。`drive/drive.log` の判定行は `formal-1 verdict=pass ab_rc0=1 ab_gate=5/5 skipped_bytes=0`（`ab_rc0=1` は状態ファイルに runner の `ab rc=0` の行が 1 本あるという意味）。他ジョブのゲートは 259 回とも CLEAN（`series-formal-1/ab/foreign-gate-summary.tsv`）、load ゲートは 5 round とも pass。
+- 判定（`judge_ab.py`）: 全ゲート通過・load_ab の状態 ok・**PASS**。checksum は全セルで完全一致。5/5 round で一貫して 2% を超えて後退するセルはない。
+- after/before の中央値比（round 別の比の中央値。`judge.md`）: N=2048 fresh 0.942・reuse 0.933、N=4096 fresh 0.906・reuse 0.918（いずれも 5/5 round で after が速い）。N=256／512／1024 は 0.977〜1.004 で、round ごとに向きが揃わない。
+- **開示（compare の終了コード 3）**: runner の終了コードは 0 だが、`compare-exit-4160-metal-formal-1.log` は `compare exit=3`。`compare_gemm_ab.py`（`--threshold 1.00`）は 5 run を合わせた中央値どうしの比で判定し、N=1024 fresh を「後退」（3.487 ms ÷ 3.313 ms = 1.0527）と表示した。同じセルの round 別の比は 0.962・1.140・0.977・1.103・0.970（中央値 0.977、2% 超は 2/5）。RULE 項 2 が参照する #4160 の判定条件は「5/5 round で一貫して 2% を超える後退」で、このセルは当たらない。runner はこの終了コードを、checksum 不一致・判定不能でない限り記録だけにする（`skipped-4160-metal-formal-1.log` は 0 バイト）。#4160 の `formal-v2-2` でも同じ表示が 2 セル（256/fresh・512/reuse）に出ていた。N=1024 が「速くなった」とは書かない。
+- スコアボード比（candle 相手。記録のみで PASS／FAIL には使わない）: NB-SEP は 3 点とも**不成立**。N=2048 は before 0.932〜0.940 → after 1.000〜1.004（#4160 の `formal-v2-2` では after 1.005〜1.014 で成立していた）、N=1024 は before 0.885〜1.044 → after 0.906〜1.057、G4096（記録のみ）は before 0.854〜0.924 → after 0.951〜1.006。この系列からは「1 位に変わった」とは書けない。
+
+### 記録の配置
+
+| パス | 中身 |
+|---|---|
+| `prereq/summary.tsv`・`prereq/result.txt` | 前提の確認（RULE 項 3） |
+| `drive/drive.log` | 系列の判定行 |
+| `drive/deploy.txt`・`drive/fp-deploy.txt`・`drive/fp-deploy-ab.txt` | 展開の記録（ノード側の指紋が RULE と一致） |
+| `drive/precheck-dry-1.txt` | 固定前の dry（RULE 項 9。固定前の版の `drive_series.sh` で行った） |
+| `series-formal-1/series-start.txt`・`status.txt`・`ab.out` | 系列の準備の確認・状態ファイル・runner の出力 |
+| `series-formal-1/ab/` | runner の `results/raw` のうちラベル `formal-1` の記録（実行ファイルは除く）と、他ジョブのゲートの出力の `foreign-gate.tar.gz`・要約 `foreign-gate-summary.tsv` |
+| `series-formal-1/judge.md` | `python3 -I -B judge_ab.py series-formal-1` の出力 |
+
+回収時にホスト名を `<metal-node>`、`$HOME` を `<home>`、ユーザー名を `<user>` に置き換えた（RULE 項 8）。
 
 ## ファイル
 

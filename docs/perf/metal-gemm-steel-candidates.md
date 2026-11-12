@@ -272,7 +272,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 ## 11. N≥1024 限定の T0U-LU-FB opt-in と現行表との A/B（イシュー #4160）
 
-状態: **Mac mini で実測済み・総合 ADOPT**（RULE.v2 の系列 `formal-v2-2`。2026-11-11。§11.5）。**既定経路への結線は #4166 の PR-A で実施済み**（`STEEL_LARGE_N_ENABLED` は `true`。所有者承認済み。M4 Max での確認は Linux 単体テストとコードレビューで代える。結線後の前後比較は Mac mini で未実施。§11.7）。
+状態: **Mac mini で実測済み・総合 ADOPT**（RULE.v2 の系列 `formal-v2-2`。2026-11-11。§11.5）。**既定経路への結線は #4166 の PR-A で実施済み**（`STEEL_LARGE_N_ENABLED` は `true`。所有者承認済み。M4 Max での確認は Linux 単体テストとコードレビューで代える。結線後の前後比較は Mac mini で実測済み・判定 PASS〈2026-11-12・#4166 の系列 `formal-1`〉。§11.5・§11.7）。
 
 ### 11.1 背景
 
@@ -311,9 +311,26 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 
 - 到達はスコープ内 3 点で `profile=steel_large_n`・`CANDIDATES[0]`・Classic・fallback なし。N=256／512 は no-op 成立（解決タイル同一・bit 一致）。A/A 対照 cur_aa/cur は ±0.2% 以内。
 - セル A/B（非後退ゲート）: 状態 ok（5/5 round 一貫して 2% を超えて後退するセルはない）。after/before の中央値比は N=1024 fresh 0.944・reuse 0.984、N=2048 fresh 0.942・reuse 0.933、N=4096 fresh 0.907・reuse 0.919。N=512 reuse は 1.032（2% 超の round 3/5。5/5 ではないため後退には当たらない）。checksum は全セルで完全一致。
-- スコアボード比（candle の gemm 窓 fresh ÷ fandhe-ai の reuse 窓）: **N=2048 は NB-SEP 成立**（before 0.936〜0.946 → after 1.005〜1.014）。N=1024 は不成立（before 0.885〜0.965、after 0.900〜1.080）。G4096 は記録のみ（不成立）。「1 位に変わった」と書けるのは、opt-in を ON にした状態の M-MTL-G2048 相当（Mac mini）だけ。当時は main の既定が変わっていなかったため、スコアボードと `loss-attribution-matrix.md` は変えない（結線後の付け直しは #4168）。※ 2026-11-11 以降は #4166 の PR-A で main の既定が `true` に変わったが、結線後の前後比較は未実施のため、スコアボードの付け直しは #4168 が結線後の実測を受けて行う。
+- スコアボード比（candle の gemm 窓 fresh ÷ fandhe-ai の reuse 窓）: **N=2048 は NB-SEP 成立**（before 0.936〜0.946 → after 1.005〜1.014）。N=1024 は不成立（before 0.885〜0.965、after 0.900〜1.080）。G4096 は記録のみ（不成立）。「1 位に変わった」と書けるのは、opt-in を ON にした状態の M-MTL-G2048 相当（Mac mini）だけ。当時は main の既定が変わっていなかったため、スコアボードと `loss-attribution-matrix.md` は変えない（結線後の付け直しは #4168）。※ 2026-11-11 以降は #4166 の PR-A で main の既定が `true` に変わった。結線後の前後比較（2026-11-12。下の「結線後の前後比較」）では N=2048 の NB-SEP は不成立だった。スコアボードの付け直しは #4168 が行う。
 - 根拠にするのは RULE 項 11 の総合 ADOPT だけ（上の表の N 別判定は総合ではない）。
 - 逸脱 2 件（所有者の指示で計測セッションが `formal-v2-2` の前に常駐プロセスを止めたこと、試み 1 の不開始の原因になった Python のキャッシュ 1 件を所有者判断で消して試み 2 として起動したこと）・系列の前の準備・開示は、同ディレクトリの README を正とする。
+
+#### 結線後の前後比較（#4166。2026-11-12・Mac mini `<metal-node>`。判定 PASS）
+
+規則は `logs/metal-steel-wiring-ab-macmini-4166/RULE.txt`（PR #4260）。対象は結線のマージコミット `9eba21749`（PR #4255）で、`AB_DIRECTION=post-wiring`（before = 同じ HEAD に未コミットの `true`→`false` 1 行、after = clean な HEAD）。判定式・閾値・ゲートは #4160 の `RULE.txt` のセル A/B の部分を参照する。前提の確認（steel の 2 件・Mac mini 表の診断・parity 59 本の ignored）は all-pass。系列 `formal-1` が全ゲート通過（runner rc=0・load ゲート 5/5・他ジョブのゲート 259 回とも CLEAN・skipped 0 バイト）し、RULE 項 6 によりこの系列で判定した。`judge_ab.py` の判定は **PASS**（load_ab の状態 ok。`series-formal-1/judge.md`）。
+
+| N | mode | after/before の中央値比（round 別の比の中央値） | 2% 超の round | checksum |
+|---|---|---|---|---|
+| 256 | fresh／reuse | 0.996／1.004 | 1/5／2/5 | 完全一致 |
+| 512 | fresh／reuse | 0.994／0.998 | 0/5／2/5 | 完全一致 |
+| 1024 | fresh／reuse | 0.977／0.979 | 2/5／1/5 | 完全一致 |
+| 2048 | fresh／reuse | 0.942／0.933 | 0/5／0/5 | 完全一致 |
+| 4096 | fresh／reuse | 0.906／0.918 | 0/5／0/5 | 完全一致 |
+
+- 5/5 round で一貫して 2% を超えて後退するセルはなく、checksum は全セルで完全一致。5/5 round で after が速いのは N=2048・4096 だけで、N=256〜1024 は round ごとに向きが揃わない。
+- 開示: `compare_gemm_ab.py`（`--threshold 1.00`）は 5 run を合わせた中央値どうしの比で N=1024 fresh を「後退」（1.0527）と表示し、終了コード 3 を返した。round 別の比は 0.962・1.140・0.977・1.103・0.970 で、判定条件（5/5 round で 2% 超）には当たらない。runner はこの終了コードを、checksum 不一致・判定不能でない限り記録だけにする。`formal-v2-2` でも同じ表示が 2 セルに出ていた。N=1024 が速くなったとは書かない。
+- スコアボード比（candle 相手。記録のみ）: NB-SEP は 3 点とも不成立。N=2048 は before 0.932〜0.940 → after 1.000〜1.004、N=1024 は before 0.885〜1.044 → after 0.906〜1.057、G4096（記録のみ）は before 0.854〜0.924 → after 0.951〜1.006。この系列からは「1 位に変わった」とは書けない（`formal-v2-2` の N=2048 の成立とは別の系列）。`loss-attribution-matrix.md` の付け直しは #4168 の担当。
+- 準備・ゲート・記録の配置・マスクは、同ディレクトリの README を正とする。
 
 #### 旧 `RULE.txt` の 3 系列（参考。総合 UNDETERMINED。PR #4249）
 
@@ -334,11 +351,11 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 ### 11.6 申し送り
 
 - Mac mini: 規則の固定 → 実測 → 判定記入は済んだ（旧 `RULE.txt`〈PR #4248・#4249〉で UNDETERMINED、RULE.v2〈PR #4252〉の `formal-v2-2` で ADOPT）。`loss-attribution-matrix.md` は main の既定が変わるまで変えない（§11.5）。
-- `STEEL_LARGE_N_ENABLED` の既定反転は #4166 の PR-A で行った（所有者承認済み。コメント 6797216551）。結線後の前後比較は Mac mini で行う（§11.7）。
+- `STEEL_LARGE_N_ENABLED` の既定反転は #4166 の PR-A で行った（所有者承認済み。コメント 6797216551）。結線後の前後比較は Mac mini で行い、判定は PASS（2026-11-12・#4166 の `formal-1`。§11.5）。
 
 ### 11.7 Phase 4 結線（#4166）の状態と手順
 
-**現在の状態: #4160 は ADOPT（Mac mini 単機）。結線は #4166 の PR-A で実施済み（`STEEL_LARGE_N_ENABLED` を `true`。前提 2 は所有者が #4166 コメント 6797216551 で承認、前提 3 は下記の代替）。結線後の前後比較は未実施（Mac mini で行う）。** #4160 の A/B は 2026-11-11 に Mac mini で測った。旧 `RULE.txt` の 3 系列は全ゲート通過にならず UNDETERMINED、改訂 RULE.v2 の `formal-v2-2` が全ゲート通過して総合 ADOPT になった（§11.5）。`tile::STEEL_LARGE_N_ENABLED` は #4160 時点では `false` で、PR-A で `true` にした。結線の根拠にできるのは `formal-v2-2` の総合判定だけで、旧系列の参考値や `aggregate.md` の純カーネル部分の「ADOPT_CANDIDATE」の表示は根拠にしない（RULE.v2 項 5）。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
+**現在の状態: #4160 は ADOPT（Mac mini 単機）。結線は #4166 の PR-A で実施済み（`STEEL_LARGE_N_ENABLED` を `true`。前提 2 は所有者が #4166 コメント 6797216551 で承認、前提 3 は下記の代替）。結線後の前後比較は Mac mini で実測済みで、判定は PASS（2026-11-12・RULE は `logs/metal-steel-wiring-ab-macmini-4166/RULE.txt`・系列 `formal-1`。§11.5「結線後の前後比較」）。N=2048・4096 は 5/5 round で after が速く、5/5 round で 2% を超えて後退するセルはない。NB-SEP は 3 点とも不成立。** #4160 の A/B は 2026-11-11 に Mac mini で測った。旧 `RULE.txt` の 3 系列は全ゲート通過にならず UNDETERMINED、改訂 RULE.v2 の `formal-v2-2` が全ゲート通過して総合 ADOPT になった（§11.5）。`tile::STEEL_LARGE_N_ENABLED` は #4160 時点では `false` で、PR-A で `true` にした。結線の根拠にできるのは `formal-v2-2` の総合判定だけで、旧系列の参考値や `aggregate.md` の純カーネル部分の「ADOPT_CANDIDATE」の表示は根拠にしない（RULE.v2 項 5）。イシュー本文の換算値（N=2048 で約 9.43 ms 対 candle 9.52 ms）は出典がなく、判定の根拠にしない。
 
 経緯: #4160 は、道具立ての PR #4197 のマージ（2026-11-09T15:54:30Z）の際に本文の閉じるキーワードで自動的にクローズされた。判定前だったため、2026-11-10T02:30:00Z に再オープンした（#4160 のコメント）。判定の記録は本節と §11.5 で、記録 PR のマージで #4160 を閉じる。
 
