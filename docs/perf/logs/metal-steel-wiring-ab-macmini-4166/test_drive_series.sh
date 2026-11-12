@@ -223,8 +223,12 @@ check "prereq: passed が件数に届かなければ fail" '[ "${PRC}" = 1 ] && 
 pq steel0 FAKE_STEEL_LISTED=0
 check "prereq: --exact で 0 件なら fail" '[ "${PRC}" = 1 ]'
 mkdir "${LOCK}"; pq busy FAKE_NONE=1
-check "prereq: hw-lock 使用中なら流さない" '[ "${PRC}" = 5 ] && grep -q "^lock-busy" "${PW}/prereq/result.txt" && [ ! -e "${PW}/prereq/summary.tsv" ]'
+check "prereq: hw-lock 使用中なら流さない" '[ "${PRC}" = 5 ] && grep -q "^lock-busy" "${PW}/prereq-attempts.log" && [ ! -e "${PW}/prereq" ]'
 rm -rf "${LOCK}"
+FAKE_NONE=1 bash "${HERE}/prereq_tests.sh" "${PW}" > /dev/null 2>&1; PRC=$?
+check "prereq: ロックが外れた後に同じ展開で再試行できる" '[ "${PRC}" = 0 ] && grep -q "^all-pass " "${PW}/prereq/result.txt" && [ "$(grep -c "^lock-busy" "${PW}/prereq-attempts.log")" = 1 ] && grep -q "^lock-acquired" "${PW}/prereq-attempts.log" && [ ! -e "${LOCK}" ]'
+FAKE_NONE=1 bash "${HERE}/prereq_tests.sh" "${PW}" > /dev/null 2>&1; PRC=$?
+check "prereq: 済んだ展開での再実行は拒否する" '[ "${PRC}" = 2 ] && [ ! -e "${LOCK}" ]'
 
 if [ "${FAILS}" -ne 0 ]; then echo "self-test FAILED: ${FAILS}"; exit 1; fi
 echo "self-test ok"

@@ -7,6 +7,7 @@
 #   3. tests/ の名前に parity を含む 59 本のテストターゲットの ignored 全件
 # 各単位で、先に `--ignored --list` で件数を数え、本実行の `test result: ok. <その件数> passed; 0 failed` を要求する
 # （件数 0 の単位は「ignored テスト 0 件」として記録し、失敗にしない）。終了コードが 0 でなければ失敗。
+# hw-lock が取れなければ W/prereq を作らずに終了コード 5 で終わり、W/prereq-attempts.log に lock-busy を残す（再試行できる）。
 # 出力: W/prereq/summary.tsv（単位・件数・passed・failed・rc・結果）と W/prereq/result.txt（all-pass か fail）。
 # ログは W/prereq/*.log に残すが、記録 PR には summary と result だけを収める（値は記録しない）。
 # 使い方: bash prereq_tests.sh <W>
@@ -31,15 +32,17 @@ utc() { date -u +%FT%TZ; }
 [ -e "${P}" ] && { echo "error: 既にある: ${P}" >&2; exit 2; }
 n=0; for _ in ${PARITY}; do n=$((n + 1)); done
 [ "${n}" = 59 ] || { echo "error: parity の対象が 59 本ではない: ${n}" >&2; exit 2; }
-mkdir "${P}"
+# hw-lock が取れなかった試みは W/prereq を作らず、W/prereq-attempts.log にだけ残す（ロックが外れた後に同じ展開で再試行できる）。
 if ! mkdir "${LOCK}" 2>/dev/null; then
-  echo "lock-busy owner=$(cat "${LOCK}/owner" 2>/dev/null) $(utc)" > "${P}/result.txt"
-  echo "error: hw-lock が取れない" >&2
+  echo "lock-busy owner=$(cat "${LOCK}/owner" 2>/dev/null) $(utc)" >> "${W}/prereq-attempts.log"
+  echo "error: hw-lock が取れない（W/prereq は作っていない。ロックが外れたら再実行できる）" >&2
   exit 5
 fi
 release() { rm -f "${LOCK}/owner"; rmdir "${LOCK}" 2>/dev/null; }
 trap release EXIT
 printf '#4166 prereq %s\n' "$(utc)" > "${LOCK}/owner"
+echo "lock-acquired $(utc)" >> "${W}/prereq-attempts.log"
+mkdir "${P}" || { echo "error: ${P} を作れない（既にある）" >&2; exit 2; }
 export CARGO_TARGET_DIR="${W}/target-prereq"
 unset RAYON_NUM_THREADS
 cd "${W}/after" || exit 2

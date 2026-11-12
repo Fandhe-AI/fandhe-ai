@@ -24,8 +24,10 @@ python3 -I -B judge_ab.py --self-test: #4160 の formal-v2-2 の記録で再現�
   - PASS: 上のいずれでもない（load_ab の status が ok）。
 """
 import glob
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -97,10 +99,25 @@ def series_gates(series):
 
 
 def judge(series, agg):
+    abdir = os.path.join(series, "ab")
     try:
-        ab = agg.load_ab(os.path.join(series, "ab"))
+        ab = agg.load_ab(abdir)
     except agg.AggregateError as e:
-        raise JudgeError("load_ab が入力を拒否した: %s" % e)
+        # 記録が揃わない系列（途中で止まったもの）。記録済みの行に確かな checksum 不一致があれば、速度表を要求せずに FAIL とする
+        # （RULE.txt 項 2・6。checksum 不一致の FAIL はゲートの通過に依らない）。不一致がなければ判定を出さない。
+        try:
+            mm, label = partial_checksum_scan(abdir)
+        except JudgeError:
+            mm, label = None, None
+        if not mm:
+            raise JudgeError("load_ab が入力を拒否した: %s" % e)
+        try:
+            gates_ok, reasons = series_gates(series)
+        except JudgeError as ge:
+            gates_ok, reasons = False, [str(ge)]
+        ab = {"status": "fail-partial", "cells": {}, "label": label,
+              "notes": ["記録が揃っていない（%s）。記録済みの before／after の行に checksum 不一致がある" % e]}
+        return "FAIL", ab, gates_ok, reasons, {n: None for n in agg.SCOPE}
     gates_ok, reasons = series_gates(series)
     if ab["status"] == "fail":
         verdict = "FAIL"
@@ -126,11 +143,16 @@ def _checksum_ok(vals):
 
 
 def partial_checksum_mismatch(abdir):
+    return partial_checksum_scan(abdir)[0]
+
+
+def partial_checksum_scan(abdir):
     """途中で止まった系列の部分記録から、すでに確認できる checksum 不一致を探す（RULE.txt 項 6）。
 
     load_ab は全セル 5 行と candle 5 行が揃わないと例外を出すので、その場合に限って使う。条件は load_ab の
     checksum の条件（セルごとに before／after の全記録の checksum が有限の数値で完全一致）を、記録済みの行だけに当てる。
-    戻り値: True = 不一致あり・False = 記録済みの行には不一致なし・None = ラベルを 1 つに決められない／before・after の行が無い。
+    戻り値: (結果, ラベル)。結果は True = 不一致あり・False = 記録済みの行には不一致なし・None = ラベルを 1 つに決められない／
+    before・after の行が無い。
     """
     labels = set()
     for arm in ("before", "after"):
@@ -139,7 +161,7 @@ def partial_checksum_mismatch(abdir):
             if m:
                 labels.add(m.group(1))
     if len(labels) != 1:
-        return None
+        return None, None
     label = labels.pop()
     cells, seen = {}, 0
     for arm in ("before", "after"):
@@ -158,8 +180,8 @@ def partial_checksum_mismatch(abdir):
             cells.setdefault((r.get("size"), r.get("mode") or "fresh"), []).append(r.get("checksum"))
             seen += 1
     if not seen:
-        return None
-    return any(not _checksum_ok(v) for v in cells.values())
+        return None, label
+    return any(not _checksum_ok(v) for v in cells.values()), label
 
 
 def checksum_only(series, agg):
@@ -416,6 +438,28 @@ def self_test():
         with open(p, "w", encoding="utf-8") as f:
             f.write("\n".join(rows) + "\n")
         check("--checksum-only: 途中で止まった系列の記録済みの不一致は fail", checksum_only(d2, agg) == "fail")
+        try:
+            v, ab, _, _, b = judge(d2, agg)
+        except JudgeError:
+            v, ab, b = None, {"status": None, "cells": {}, "notes": []}, {n: None for n in agg.SCOPE}
+        check("通常の判定: 途中で止まった系列の記録済みの不一致は FAIL", v == "FAIL" and ab["status"] == "fail-partial"
+              and all(x is None for x in b.values()))
+        md = render(d2, v, ab, True, [], b, agg)
+        check("通常の判定: 速度表を出さずに FAIL を書く", "判定: FAIL" in md and "| fresh |" not in md)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["judge_ab.py", d2])
+        check("通常の判定の CLI: 途中で止まった系列の不一致は rc 0 で FAIL", rc == 0 and "判定: FAIL" in buf.getvalue())
+        os.remove(glob.glob(os.path.join(d2, "ab", "load-gate-4160-metal-*.log"))[0])
+        check("通常の判定: ゲートのログが無くても checksum 不一致は FAIL", judge(d2, agg)[0] == "FAIL")
+        d4 = _copy_series(tmp, "partok")
+        for c in glob.glob(os.path.join(d4, "ab", "results-candle-*-metal-gemm.jsonl")):
+            os.remove(c)
+        try:
+            judge(d4, agg)
+            check("通常の判定: 途中で止まり不一致が無ければ判定を出さない", False)
+        except JudgeError:
+            check("通常の判定: 途中で止まり不一致が無ければ判定を出さない", True)
         d3 = _copy_series(tmp, "partck2")
         p = glob.glob(os.path.join(d3, "ab", "results-after-*-metal-gemm.jsonl"))[0]
         rows = [ln for ln in read(p).splitlines() if ln.strip()]
@@ -423,8 +467,6 @@ def self_test():
         with open(p, "w", encoding="utf-8") as f:
             f.write("\n".join(rows[:3]) + "\n{\"task\": \"gem")  # 途中で止まり、最後の行は書きかけ
         check("--checksum-only: 部分記録の checksum 欠損は fail（load_ab と同じ条件）", checksum_only(d3, agg) == "fail")
-        import io
-        import contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = main(["judge_ab.py", "--checksum-only", d])
