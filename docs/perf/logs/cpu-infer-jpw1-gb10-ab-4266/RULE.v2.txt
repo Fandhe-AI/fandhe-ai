@@ -1,0 +1,91 @@
+RULE.v2（#4266 GB10 推論限定 jpw1 の測り直し。train の判定を変えた事前登録 A/B）
+=====================================================
+状態: 固定（測る前に単独 PR でコミットして固定する。固定後は判定式を動かさない。訂正は末尾への追記に限る）。
+
+PARAMS（aggregate.py と orchestrate.sh が読む。<...> が残っていると実行を拒否する）
+  fixed-at-utc: 2026-11-12T05:14:22Z
+  tree_sha: 85498f32be4bb8ea70302bd85ec2b8b4329d862f
+  tree_fingerprint: 181f06c7a4e4839b6fb0e29d188ba8d98caeb8eb6c51e6db2da5dafd6bf24dd9
+  aggregate_script_sha256: 546c61ea8aadaaf0907598199e70fa645bb8b2be82f3144e5325c2cdd15a3ae8
+  orchestrate_script_sha256: 6588f5d4c305fcc5f63c9f2149ceda88cf6b388028505ed2f3f4b81eb4c9700d
+  patch_sha256: 4152567b710aff3e6c3317cab25c872c46a96dc79c6327a1bd23dcc67d261075
+  rounds: 5
+  arms: off,inf-jpw1
+  machine: gb10
+
+1. 位置づけ
+  #4161（GB10 の推論だけに jpw1 を効かせる A/B。REJECT）を、train セルの判定だけを変えて測り直す。
+  変更は所有者判断（#4266 本文「所有者判断（2026-11-12・チャット）」）による。判定式の変更の承認は #4266 を正とする。
+  参照する v1: docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/RULE.txt（PR #4246 で固定。sha256
+  452a27db0396d328b96693caf3f82ba18ffd4003ce6c358a0af222c39a61ec5d）。以下「v1」と書く。
+  #4161 のディレクトリ・記録・判定（REJECT）は変えない。
+
+2. v1 から引き継ぐもの（書き写さず、名前で参照する。中身は変えない）
+  - 項 1（解釈）、項 2（腕）、項 3（セル）、項 4（反復: 5 ラウンド・腕順のローテーション・腕ごとに独立プロセス）、
+    項 5（ゲート）、項 6（機構発火の前提）、項 7（checksum）、項 9（記録のみ）、項 10（運用）。
+  - 項 8 のうち、infer セルの式（中央値比 < 1.00 で合格、>= 1.00 で REJECT）・undetermined と FAIL の定義・優先順位
+    （FAIL > undetermined > REJECT > ADOPT）。
+  - 置き換えるもの: 項 8 の train セルの式（下の項 3）と、項 11（固定時の補足。下の項 4・5 で置き換える）。
+
+3. 判定（v1 項 8 を次のとおり置き換える。変えたのは train セルだけ）
+  train セルの非後退（train fresh・train reuse のそれぞれで、次の 2 つがどちらも成り立つこと）:
+    条件 1: 前提の probe（prereq/inf-jpw1.log）で、inf-jpw1 の腕の train_<mode> が applied=0（機構が発火していない）。
+    条件 2: 5 ラウンドの round 別比（同じラウンドの inf-jpw1 / off の median_s）の最小が 1.00 以下。
+            1.00 ちょうどは非後退。5 ラウンドの比がそろった正式系列でだけ評価する。
+  新しい数値の閾値は足さない。train セルの中央値比は記録のみで、判定に使わない。
+  ADOPT        : 正式系列で、前提が成立し、checksum が一致し、
+                 infer fresh と infer reuse の中央値比がともに < 1.00、
+                 かつ train fresh と train reuse がともに非後退。
+  REJECT       : train セルのどれかが非後退でない、または infer セルのどれかの中央値比が >= 1.00。
+  undetermined : ゲート不成立・前提不成立・標本不足・未到達（v1 のまま）。
+  FAIL         : checksum 不一致（v1 のまま）。
+  優先順位: FAIL > undetermined > REJECT > ADOPT（v1 のまま）。
+  解釈（固定時に明記する）:
+    - 条件 1 は v1 項 6 の前提（inf-jpw1 の train 2 パスで applied==0）と同じ内容である。条件 1 が外れると前提も外れるため、
+      優先順位により結果は REJECT ではなく undetermined になる。
+    - 条件 2 は「5 ラウンドすべてで遅くなっている」ときにだけ外れる。ラウンドが欠けた系列は正式系列でなく undetermined。
+  aggregate.py の train_nonregress がこの 2 条件を、judge がこの判定を実装する。
+
+4. 計測対象と照合（v1 項 11 (a) と同じ形）
+  (a) 計測対象 tree_sha は 85498f32be4bb8ea70302bd85ec2b8b4329d862f（#4264 のマージコミット。本規則を書いた時点の main の先頭）。
+      main がこの後進んでも計測対象は変えない。
+  (b) 送るのは送信側で `git archive --format=tar <tree_sha>` で作った tar。tree_fingerprint はその tar 本体の sha256。
+      ノード上で展開した BASE に .rev-stamp（完全 SHA）を置く。ノード上で clone・fetch はしない。
+      orchestrate.sh の前提検査が、tar の sha256・展開内容と BASE の一致・.rev-stamp を確かめる（v1 と同じ）。
+  (c) BASE は計測対象そのもの（tree_sha の tar の展開）で、main の先頭には依存しない。このため「計測対象 → BASE」の差分は
+      構造上 0 で、差分ゲートは置かない。#4267（crates/backend-metal のみ）など、本規則の後に main へ入る変更は計測ツリーに入らない。
+  (d) 道具（本ディレクトリの RULE.v2.txt・aggregate.py・orchestrate.sh・ab_patch_inf_jpw1.diff）は、本規則を固定した PR の
+      マージ後の main から LOGDIR に置く。PARAMS の 3 つの sha256 で照合する（aggregate.py は自身、orchestrate.sh は自身と patch。
+      不一致なら止まる）。どのコミットから置いたかは env/ に記録する。
+  (e) patch: ab_patch_inf_jpw1.diff は #4161 の同名ファイルとバイト単位で同じ（sha256 4152567b…1075。定数
+      INFER_SCOPE_JPW1_ENABLED を true にする 1 行）。tree_sha の上で `git apply --check` が通ることを固定前に確かめた。
+  (f) #4161 の計測 tree（136705650）と tree_sha の差（固定前に確かめた。記録のため）:
+      - crates/backend-cpu・crates/facade・Cargo.toml・Cargo.lock・rust-toolchain.toml は差分 0。
+      - crates/ 全体では 13 ファイル（crates/backend-cuda 5・crates/backend-metal 8）。CPU の計測経路には入らない。
+      - scripts/bench は 3 ファイル（framework-compare の run_ab_infer_graph_default_cuda.sh・run_ab_sme_default_on_4156_cpu.sh・
+        run_ab_steel_large_n_gemm_metal.sh）。どれも本キットは使わない。
+
+5. 運用（v1 項 11 (c)・(e) と同じ形）
+  (a) 実機ロック: ~/work/.fandhe-hw-lock を手で取り（owner は「#4266 measure」と取得時の UTC の 3 語）、HW_LOCK_HELD=1 と
+      HW_LOCK_OWNER_FILE を渡して orchestrate.sh を起動し、終了後（失敗時も）に、計測のプロセスが 0 件であることを確かめてから外す。
+      #4156 の GB10 腕の計測（2026-11-12 終了）とロックを重ねない。
+  (b) WORK と LOGDIR は新しいディレクトリにする（orchestrate.sh は既存の出力があると止まる）。
+  (c) 系列の途中は値を見ない（見るのは終了コードと gate.txt だけ）。
+  (d) 収録: README の手順のとおり集計し、`git diff v0.14.0 <tree_sha> -- crates/` の一覧と .rev-stamp を env/ に置く。
+      ホスト名は <cuda-node>、$HOME は <home>、ユーザー名は <user> に置換し、漏れがないことを確かめてから収録する。
+  (e) ADOPT でも既定の反転は #4165 で行う（本 A/B は反転しない。v1 項 10 のまま）。
+  (f) 同じラウンド内の PyTorch の計測（記録のみ。v1 項 3）は、BASE 内の docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py
+      （sha256 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b）を BP に、torch 2.14.0 の python を PY に渡す。
+      bench_py.py と torch の版は env/ に記録する。
+
+6. 開示
+  (a) 本規則は #4161 の値を見た後に書いた。本規則を書いたセッションが見たもの:
+      - #4266 本文の表（4 セルの中央値比・inf-jpw1 の勝ち数・NB-WIDTH5）。
+      - docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/README.md の「結果」節の全部（中央値比・round 別比・勝ち数・NB-RANGE5・
+        NB-SEP の範囲・判定語 REJECT・試走の判定語）。
+      - 同 prereq/off.log・prereq/inf-jpw1.log の probe 行（両腕の applied と gb10_affinity）。
+      - 同 env/orch.log の先頭 2 行（1 つの腕・1 ラウンド分の train fresh・train reuse の JSONL。median_s・q1_s・q3_s・checksum を含む）。
+  (b) 本規則の train の判定を #4161 の値に当てると、train の 2 セルはどちらも非後退になる（round 別比の最小は
+      train fresh 0.9147、train reuse 0.8691。#4161 README）。判定の変更は所有者判断（#4266）で、本規則はその判断のとおりに書いた。
+  (c) 本規則の固定前に、実機での捨て試走はしていない。道具の確認は開発機での self-test と、orchestrate.sh の前提検査を
+      偽のコマンドで通す試験（test_orchestrate_4266.sh）だけ。
