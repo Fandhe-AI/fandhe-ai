@@ -185,6 +185,7 @@ OWNER_ENUMS = (
     ("NOISE-BAND", ("adopted", "not-adopted")),
     ("UNDETERMINED-HANDLING", ("auto-reremeasure", "return-to-owner")),
 )
+CAP_BLANK = "\uff3f" * 3  # §12 (c) の空欄記号（全角の下線 3 文字）
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
@@ -198,8 +199,20 @@ def read_owner():
     """RULE.v2.txt の所有者決定欄を読み (値の dict, 不成立理由の list) を返す。
 
     各キーはちょうど 1 回だけ行頭に現れ、列挙値と回答コメント URL の形式に完全一致しなければ不成立（fail-closed）。
-    所有者の決定を推定・補完しない（`<未決>` は列挙外として不成立になる）。"""
+    所有者の決定を推定・補完しない（`<未決>` は列挙外として不成立になる）。
+    §12 (c) の Mac mini 腕の系列数の上限（MAC-SERIES-CAP）も同じ契約で読む（P-CAP。両 orchestrate の check_series_cap と同じ。
+    #4264 の Codex 指摘・統合セッション判断 2026-11-12）: ちょうど 1 行・正の整数（先頭 0・符号・小数なし）・本ファイルに
+    空欄記号（全角の下線 3 文字）が残っていないこと。外れたら不成立の理由を返し、正式判定にしない（undetermined）。"""
     text = read_text(os.path.join(HERE, RULE_NAME))
+    probs_cap = []
+    if CAP_BLANK in text:
+        probs_cap.append("P-CAP 不成立: 空欄記号（%s）が残っている（§12 (c) が未記入）" % CAP_BLANK)
+    else:
+        caps = re.findall(r"^MAC-SERIES-CAP: *(.*?) *$", text, re.M)
+        if len(caps) != 1:
+            probs_cap.append("P-CAP 不成立: MAC-SERIES-CAP が %d 件（1 件ちょうどを要求）" % len(caps))
+        elif not re.fullmatch(r"[1-9][0-9]*", caps[0]):
+            probs_cap.append("P-CAP 不成立: MAC-SERIES-CAP が正の整数でない (%s)" % (caps[0] or "空"))
     vals, probs = {}, []
     for key, allowed in OWNER_ENUMS:
         hits = re.findall(r"^%s: *(.*?) *$" % re.escape(key), text, re.M)
@@ -213,7 +226,7 @@ def read_owner():
         uh = re.findall(r"^%s-URL: *(.*?) *$" % re.escape(key), text, re.M)
         if len(uh) != 1 or not OWNER_URL_RE.match(uh[0]):
             probs.append("P-OWNER 不成立: %s-URL（所有者回答コメント）が欠落または形式不正" % key)
-    return vals, probs
+    return vals, probs + probs_cap
 
 
 def nb_sep(on, off):
@@ -546,9 +559,16 @@ def _write(path, text):
 URL = "https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-1"
 
 
-def _mk_rule(d, mode="GB10-GATE-ONLY-STRUCTURAL", nb="adopted", und="return-to-owner", ok=True):
+def _mk_rule(d, mode="GB10-GATE-ONLY-STRUCTURAL", nb="adopted", und="return-to-owner", ok=True, cap="3"):
+    """cap: MAC-SERIES-CAP の値（None は行なし、"dup" は 2 行、"blank-elsewhere" は 3 の行と別の行の空欄記号）。"""
     import hashlib
     body = "on-arm.patch sha256: %s\n" % ("ab" * 32)
+    if cap == "dup":
+        body += "MAC-SERIES-CAP: 3\nMAC-SERIES-CAP: 3\n"
+    elif cap == "blank-elsewhere":
+        body += "MAC-SERIES-CAP: 3\n  - (c) 上限: %s\n" % CAP_BLANK
+    elif cap is not None:
+        body += "MAC-SERIES-CAP: %s\n" % cap
     if ok:
         body += "GB10-MODE: %s\nGB10-MODE-URL: %s\nNOISE-BAND: %s\nNOISE-BAND-URL: %s\nUNDETERMINED-HANDLING: %s\nUNDETERMINED-HANDLING-URL: %s\n" % (
             mode, URL, nb, URL, und, URL)
@@ -626,14 +646,14 @@ def _fixture(root, host, rule_sha_hex, on_ratio=0.9, ck_bad=False, drop_row=Fals
         os.remove(os.path.join(root, "tree_verify.txt"))
 
 
-def _res(host, mode="GB10-GATE-ONLY-STRUCTURAL", nb="adopted", owner_ok=True, **kw):
+def _res(host, mode="GB10-GATE-ONLY-STRUCTURAL", nb="adopted", owner_ok=True, cap="3", **kw):
     """RULE を別ディレクトリへ合成して HERE を差し替え、1 機の評価結果を返す（実物の RULE.v2.txt は読まない）。"""
     global HERE
     saved = HERE
     with tempfile.TemporaryDirectory() as hd, tempfile.TemporaryDirectory() as td:
         HERE = hd
         try:
-            sha_hex = _mk_rule(hd, mode=mode, nb=nb, ok=owner_ok)
+            sha_hex = _mk_rule(hd, mode=mode, nb=nb, ok=owner_ok, cap=cap)
             _fixture(td, host, sha_hex, **kw)
             try:
                 return evaluate(td, host)
@@ -687,6 +707,15 @@ def self_test():
     check("P-OWNER 未決でも checksum 不一致 FAIL を保つ", _v("gb10", owner_ok=False, ck_bad=True), "FAIL")
     check("prereg の rule sha 不一致は undetermined", _v("macmini", prereg_sha_bad=True), "undetermined")
     check("prereg がロック取得より後は undetermined", _v("macmini", prereg_late=True), "undetermined")
+    # P-CAP（§12 (c) の MAC-SERIES-CAP）: 3 は成立、空欄・不正値・欠落・重複・空欄記号の残りは両機体とも undetermined
+    check("P-CAP 3 は成立（macmini）", _v("macmini", cap="3"), "ADOPT")
+    check("P-CAP 3 は成立（gb10）", _v("gb10", cap="3"), "pass")
+    for cv in (CAP_BLANK, "0", "-1", "3.5", "three", "03", "", "+3", None, "dup", "blank-elsewhere"):
+        for h in ("macmini", "gb10"):
+            check("P-CAP %r は undetermined（%s）" % (cv, h), _v(h, cap=cv), "undetermined")
+    check("P-CAP 空欄でも checksum 不一致 FAIL を保つ", _v("macmini", cap=CAP_BLANK, ck_bad=True), "FAIL")
+    r = _res("macmini", cap=CAP_BLANK)
+    check("P-CAP 不成立の理由が gate_fail に入る", str(any(x.startswith("P-CAP 不成立") for x in r["gate_fail"])), "True")
     for tm in ("partial", "garbage", "none"):
         check("torch %s でも macmini は ADOPT 候補" % tm, _v("macmini", torch_mode=tm), "ADOPT")
     # GB10 3 方式 x {偽の 5/5 後退, 分離した後退}

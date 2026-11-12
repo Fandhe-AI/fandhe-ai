@@ -1,5 +1,5 @@
 イシュー #4156 事前登録規則 v2 (SME 既定 ON の新しい事前登録 A/B を Mac mini と GB10 で実測する)
-fixed-at-utc: 2026-11-12T01:55:33Z (この規則は計測前に単独 PR でコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る。計測前の追記は §12 (c) の記入と §13 への Mac mini セッション分の露出の申告だけを認める。どちらの追記でも本ファイルの sha256 が変わるため、prereg_append.txt を取り直してから両機体を測る)
+fixed-at-utc: 2026-11-12T04:03:09Z (この規則は計測前に単独 PR でコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る。計測前の追記は §13 への Mac mini セッション分の露出の申告だけを認める (§12 (c) は記入済み)。追記すると本ファイルの sha256 が変わるため、prereg_append.txt を取り直してから両機体を測る)
 登録基準: origin/main の 18938d84cf72081716e5a3e42bcdb4f5e3f78749 (#4258 のマージコミット)。本規則・道具・on-arm.patch はこの版に対して書いた
 計測対象 (target): origin/main の 319a276b02433c9816fae86cde00f2463163c349 (#4263 のマージコミット) の crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml。
   計測コミット (BASE) は、本規則 v2 と prereg_append.txt を含む main のコミットで、上の範囲が計測対象と同じもの (§1)。
@@ -28,7 +28,12 @@ v1 (同ディレクトリ RULE.txt。fixed-at-utc 2026-11-09T14:30:00Z) から�
         中身は実機テスト 3 件の書き換え・テスト専用の構築関数 new_isolated_for_test (#[cfg(test)])・CudaDevice::new の後半を
         非公開関数 from_parts へ切り出す整理 (挙動は変えない) の 3 つ。crates/backend-cpu・scripts/bench/・Cargo.*・rust-toolchain.toml は変わっていない。
         §11 のピンは 319a276b0 を取り込んだ版で取り直し、値は変わらなかった。on-arm.patch は 319a276b0 でも git apply --check が通る。
-        orchestrate_gb10.sh の P-TREE の注記にある「RULE の登録基準 SHA」は、この (h) により計測対象 319a276b0 と読む (道具は変えていない)。
+        orchestrate_gb10.sh の P-TREE の注記にある「RULE の登録基準 SHA」は、この (h) により計測対象 319a276b0 と読む (この注記は変えていない)。
+  - (i) §12 (c) に系列数の上限 3 を記入し (所有者判断)、機械が読む行 MAC-SERIES-CAP を置いて P-CAP を §4 に足した (ゲートを厳しくする方向)。
+        理由: 空欄のままでも起動・集計できてしまうという #4264 の Codex 指摘に対し、統合セッションがゲートを足すと決めたため (2026-11-12)。
+        道具の変更は P-CAP の検査だけ: orchestrate_gb10.sh・orchestrate_macmini.sh に check_series_cap (ロック取得の前、P-OWNER の直後) と
+        --self-test-cap、aggregate.py の read_owner に同じ検査と self-test、test_foreign_gate_4156.sh に両 orchestrate がロック前に止まることの確認。
+        §11 のピンはこの版で取り直した。判定式・閾値・round 数・§1 の範囲は変えていない。
 
 0. 位置づけ
   - 2026-10-28 の所有者判断 (docs/perf/cpu-gemm-sme-fmopa-microkernel.md §5.15: SME 既定は OFF のまま、ON に戻すのは新しい事前登録 A/B に合格したときだけ) に基づく A/B。
@@ -59,6 +64,8 @@ v1 (同ディレクトリ RULE.txt。fixed-at-utc 2026-11-09T14:30:00Z) から�
   - P-OWNER  : §9 の 3 項目が列挙値で記入され、各々に所有者の回答コメント URL があること。
                prereg_append.txt の rule_sha256 が現在の RULE.v2.txt と一致し、prepared_at が hwlock の acquired より前であること。
                未決 (<未決>)・列挙外・URL 欠落・順序不成立は不成立。orchestrate はロック取得の前に止まる。
+  - P-CAP    : §12 (c) の MAC-SERIES-CAP がちょうど 1 行だけ行頭にあり、値が正の整数 (先頭 0・符号・小数なし) で、本ファイルに空欄記号
+               (全角の下線 3 文字) が残っていないこと。両機体で検査する。orchestrate はロック取得の前に止まり、aggregate.py は undetermined にする。
   - P-TREE   : 両ツリーで内容が異なるファイルが gemm_blis/mod.rs の 1 件だけ、OFF が `const SME_PRODUCTION_ENABLED: bool = false;`・ON が true、
                on-arm.patch の sha256 が上記と一致し git apply --check が通る、未追跡のビルド入力がない、
                cargo tree -p bench-fandhe で fandhe-ai が path patch の facade に解決する。
@@ -129,10 +136,10 @@ UNDETERMINED-HANDLING-URL: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#is
 11. 道具のピン (sha256。v2 の PR の内容。計測セッションは送る前に BASE でこの値と一致することを確かめて記録する。不一致なら計測しない)
   - scripts/bench/ の下の 2 本は §1 の差分検査の範囲でもある。docs/perf/logs/ の下の道具は §1 の範囲外のため、ここで固定する。
   - README.md・prereg_append.txt はピンに入れない (prereg は本ファイルの sha256 を持つため循環する)。
-  pin 163ca70a993ba81ef997dfc2a27c4b10faab9f1826540a20c152522d85fc4779 docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh
-  pin 0fd5799e7319033efe36c227b49f3187d0216495b70e99f17e511f85681cbff9 docs/perf/logs/sme-default-on-ab-4156/orchestrate_macmini.sh
-  pin 85c8791c2d6a512e287cb29c09a4ea334f4a5bb31d353d867eabf0fede0fd3d0 docs/perf/logs/sme-default-on-ab-4156/aggregate.py
-  pin 0df2b619c4f7c9116fc7142decd79eafcb5af22d88b6a7e7c59f3ea746cdf86b docs/perf/logs/sme-default-on-ab-4156/test_foreign_gate_4156.sh
+  pin 79dc74bcc8f8d4d997f1b8ee44621052df2edc4f497d0209e12540047517e19a docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh
+  pin 0e55995104814eae6615ea5cfd2f52574a3584e8df89314776f543a56264e755 docs/perf/logs/sme-default-on-ab-4156/orchestrate_macmini.sh
+  pin 09a4aab237bb95c3d2be59d32813403265419b0019f72200bccd37af6c1a6afa docs/perf/logs/sme-default-on-ab-4156/aggregate.py
+  pin 0bbfe77fd77ae1f77a3cc4aa36817560991c72153898cac349d142deb61ca1f5 docs/perf/logs/sme-default-on-ab-4156/test_foreign_gate_4156.sh
   pin 226e73d0e78936bff508b1a746966c65641aed8ce1b0ae50b0a9b2d20132b964 docs/perf/logs/sme-default-on-ab-4156/on-arm.patch
   pin d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04 docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py
   pin 2942fe7bbca67b80564157bd563007b2fa953e1d673a56f4070684b7b41ae098 scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh
@@ -146,9 +153,15 @@ UNDETERMINED-HANDLING-URL: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#is
   - (b) 系列の前にほかのプロセスを止めるのは所有者が決める。計測セッションが止めてよいのは、所有者が名指ししたものだけ。
         名指しのないプロセスは止めず、見つけたら止まって所有者へ報告する。止めたものは名前と時刻を記録し、計測記録に書く。
         GB10 腕も同じ (計測セッションは他のジョブを止めない)。
-  - (c) 他ジョブのゲートに当たったときの系列数の上限 (別ラベルで何系列まで): ＿＿＿ (空欄。所有者が決めて記入する)
-        この欄の記入で本ファイルの sha256 が変わるため、記入したら prereg_append.txt を取り直す。
-        aggregate.py は両機体の prereg_append.txt を現在の本ファイルと照合するため、記入は両機体の計測より前に行う。
+  - (c) 他ジョブのゲートに当たったときの系列数の上限: 3 系列 (所有者判断 2026-11-12。#4166 と同じ形。根拠は #4156 のコメント
+        https://github.com/Fandhe-AI/fandhe-ai/issues/4156#issuecomment-6812626727 )。
+        - ラベルを分けて formal-1・formal-2・formal-3 の順に測る。1 系列は orchestrate_macmini.sh の 1 回 (5 round の A/B)。
+        - 全ゲート (§4 の前提ゲート) を通った系列が出たら、そこで止めてその系列で判定する。
+        - 3 系列とも通らなければ UNDETERMINED として所有者へ戻す。回した系列はすべて残す (差し替え・除外・上書きはしない)。
+        - 道具は系列の数を数えない (LABEL 4156-r1 と収録先は固定)。系列ごとの WORK と収録の分け方は Mac mini セッションが
+          系列の前に決めて記録する。
+        機械が読む行 (P-CAP。§4。両 orchestrate がロック取得の前に、aggregate.py が集計の前提として検査する):
+MAC-SERIES-CAP: 3
 
 13. 露出の申告 (GB10 セッション分。Mac mini セッション分は統合セッションが追記する)
   - 2026-11-10 の GB10 試走 (ツリーは d551b31 に v1 RULE と §9 の仮転記を足したもの。crates/ は 18938d84c と差分があり、本規則の計測ツリーとは異なる) で、

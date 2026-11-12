@@ -6,7 +6,7 @@
 # ON = BASE を clone して on-arm.patch（定数 true の 1 行）を当てた計測専用ツリー。main へコミットしない。
 # 追加ゲート: P-OWNER（所有者決定が RULE §9 に転記済みか。未決なら計測を始めない）・
 # P-RT（両腕。ON は sme_production_disabled_after_gb10_reject を除外）・P-BIT（両腕 bitdump の一致）。
-# 起動順: P-OWNER → ロック → P-TREE → P-R0 → P-RT → mediaanalysisd の確認 → A/B（AB_HOST=macmini）→ P-BIT → マスク収録。
+# 起動順: P-OWNER → P-CAP → ロック → P-TREE → P-R0 → P-RT → mediaanalysisd の確認 → A/B（AB_HOST=macmini）→ P-BIT → マスク収録。
 # 他ジョブの前提ゲート（2026-11-11 追加。#4160 の orchestrate_macmini.sh と同じ部品）: FOREIGN_GATE（foreign_job_gate.py の絶対パス。必須）を
 #   A/B 本体へ渡し、A/B 本体が各 round の前（他ジョブ CLEAN かつ load1 < 3.0 を同じループで待つ）と後（1 回）に挟む。
 #   ゲートの出力は A/B の後に ${OUT}/foreign-gate へ収録し、ゲートの sha256 を ${OUT}/foreign_gate.txt に残す。
@@ -71,6 +71,20 @@ check_owner() { # check_owner <RULE.v2.txt> -> 0=成立 1=不成立（理由は 
     return ${rc}
 }
 
+# P-CAP: RULE.v2.txt §12 (c) の Mac mini 腕の系列数の上限（MAC-SERIES-CAP）を読むだけで検査する
+# （#4264 の Codex 指摘・統合セッション判断 2026-11-12。所有者の値は §12 (c) の根拠コメント）。
+# キーはちょうど 1 行だけ行頭にあり、値は正の整数（先頭 0・符号・小数なし）で、本ファイルに空欄記号（全角の下線 3 文字）が
+# 残っていないこと。どれか外れたら不成立（fail-closed）。両機体で同じ検査をロック取得より前に行う（aggregate.py の read_owner と同じ契約）。
+check_series_cap() { # check_series_cap <RULE.v2.txt> -> 0=成立 1=不成立（理由は stderr）
+    local rule=$1 n v
+    if grep -q '＿＿＿' "${rule}"; then echo "P-CAP 不成立: 空欄記号（＿＿＿）が残っている（§12 (c) が未記入）" >&2; return 1; fi
+    n="$(grep -c '^MAC-SERIES-CAP:' "${rule}")"
+    if [ "${n}" != "1" ]; then echo "P-CAP 不成立: MAC-SERIES-CAP が ${n} 件（1 件ちょうどを要求）" >&2; return 1; fi
+    v="$(sed -n 's/^MAC-SERIES-CAP: *\(.*[^ ]\) *$/\1/p' "${rule}")"
+    case "${v}" in '' | 0* | *[!0-9]*) echo "P-CAP 不成立: MAC-SERIES-CAP が正の整数でない (${v:-空})" >&2; return 1 ;; esac
+    return 0
+}
+
 # 収録前のマスク漏れ検査の正規表現（#4156 所有者判断 2026-11-11）。
 # ユーザー名の項だけを語境界つきにする。語の文字は英数字・下線・ハイフンとし、前後がそのどれでもないときだけ一致する
 # （ハイフンでつながった識別子の一部は別の語として扱う）。ほかの項（/Users/・/home/・
@@ -114,6 +128,45 @@ self_test_leak() { # 値は表示しない（件数と PASS/FAIL だけ）
 if [ "${1:-}" = "--self-test-leak" ]; then
     self_test_leak; exit $?
 fi
+# P-CAP の self-test: 合成した RULE で、正の整数 1 行だけが成立し、空欄・不正値・欠落・重複・空欄記号の残りが不成立になること。
+self_test_cap() {
+    local d n=0 bad=0 c k want rc
+    d="$(mktemp -d)" || return 1
+    for c in "v3|0" "v1|0" "v12|0" "blank|1" "v0|1" "neg|1" "dec|1" "abc|1" "lead0|1" "empty|1" "plus|1" "missing|1" "dup|1" "blank-elsewhere|1"; do
+        k="${c%%|*}"; want="${c#*|}"
+        {
+            echo "12. Mac mini 腕の準備"
+            case "${k}" in
+                v3) echo "MAC-SERIES-CAP: 3" ;;
+                v1) echo "MAC-SERIES-CAP: 1" ;;
+                v12) echo "MAC-SERIES-CAP: 12 " ;;
+                blank) echo "MAC-SERIES-CAP: ＿＿＿" ;;
+                v0) echo "MAC-SERIES-CAP: 0" ;;
+                neg) echo "MAC-SERIES-CAP: -1" ;;
+                dec) echo "MAC-SERIES-CAP: 3.5" ;;
+                abc) echo "MAC-SERIES-CAP: three" ;;
+                lead0) echo "MAC-SERIES-CAP: 03" ;;
+                empty) echo "MAC-SERIES-CAP: " ;;
+                plus) echo "MAC-SERIES-CAP: +3" ;;
+                missing) echo "  - (c) 上限: 3" ;;
+                dup) printf '%s\n' "MAC-SERIES-CAP: 3" "MAC-SERIES-CAP: 3" ;;
+                blank-elsewhere) printf '%s\n' "MAC-SERIES-CAP: 3" "  - (c) 上限: ＿＿＿" ;;
+            esac
+        } > "${d}/RULE.v2.txt"
+        check_series_cap "${d}/RULE.v2.txt" 2>/dev/null
+        rc=$?
+        n=$((n + 1))
+        if { [ "${want}" = "0" ] && [ "${rc}" != "0" ]; } || { [ "${want}" = "1" ] && [ "${rc}" = "0" ]; }; then
+            echo "self-test-cap NG: ${k}（期待 $([ "${want}" = 0 ] && echo 成立 || echo 不成立)）" >&2; bad=$((bad + 1))
+        fi
+    done
+    rm -rf "${d}"
+    if [ "${bad}" = "0" ]; then echo "self-test-cap ok (${n} 件)"; return 0; fi
+    echo "self-test-cap NG (${bad}/${n} 件)" >&2; return 1
+}
+if [ "${1:-}" = "--self-test-cap" ]; then
+    self_test_cap; exit $?
+fi
 
 # mediaanalysisd の確認（#4146 の RULE.v2.txt 項 8 (c) と同じ基準）。2 分間隔で 3 回、%CPU が 5 未満であること。
 # 名前は ps の comm の basename の完全一致で見る（部分一致にしない）。複数あれば最大値。プロセスがなければ absent で通過。
@@ -145,8 +198,10 @@ check_mediaanalysisd() { # check_mediaanalysisd <出力ファイル> -> 0=成立
 if [ "${DRY}" = "1" ]; then
     echo "# dry-run: 実行計画（副作用なし）"
     echo "0. P-OWNER: ${REPO_LOG}/RULE.v2.txt §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING と各回答コメント URL が記入済みであること（未決ならロック取得前に停止）。prereg_append.txt の rule_sha256 が RULE.v2.txt と一致すること"
+    echo "0b. P-CAP: ${REPO_LOG}/RULE.v2.txt §12 (c) の MAC-SERIES-CAP がちょうど 1 行・正の整数で、空欄記号が残っていないこと（不成立ならロック取得前に停止）"
     if [ -n "${BASE:-}" ] && [ -f "${BASE}/${REPO_LOG}/RULE.v2.txt" ]; then
         if check_owner "${BASE}/${REPO_LOG}/RULE.v2.txt"; then echo "   (現在の RULE.v2.txt: P-OWNER 成立)"; else echo "   (現在の RULE.v2.txt: P-OWNER 不成立。実行モードは計測を始めない)"; fi
+        if check_series_cap "${BASE}/${REPO_LOG}/RULE.v2.txt"; then echo "   (現在の RULE.v2.txt: P-CAP 成立)"; else echo "   (現在の RULE.v2.txt: P-CAP 不成立。実行モードは計測を始めない)"; fi
     fi
     echo "1. ロック: mkdir ${LOCK_DIR}（60 秒おきに再試行）。owner に '#4156 <UTC>' を書き hwlock.log へ取得・解放時刻を残す"
 
@@ -180,6 +235,7 @@ fi
 RULE="${BASE}/${REPO_LOG}/RULE.v2.txt"
 # P-OWNER（ロック取得より前。未決なら何も始めない）
 check_owner "${RULE}" || { echo "P-OWNER 不成立 -> 計測を始めない（undetermined）。RULE.v2.txt §9 へ所有者決定を転記してから再実行すること" >&2; exit 1; }
+check_series_cap "${RULE}" || { echo "P-CAP 不成立 -> 計測を始めない（undetermined）。RULE.v2.txt §12 (c) の MAC-SERIES-CAP を確かめること" >&2; exit 1; }
 PREREG="${BASE}/${REPO_LOG}/prereg_append.txt"
 [ -f "${PREREG}" ] || { echo "prereg_append.txt が無い -> P-OWNER 不成立" >&2; exit 1; }
 [ "$(sed -n 's/^rule_sha256=\([0-9a-f]\{64\}\)$/\1/p' "${PREREG}" | head -n1)" = "$(sha "${RULE}" | awk '{print $1}')" ] \

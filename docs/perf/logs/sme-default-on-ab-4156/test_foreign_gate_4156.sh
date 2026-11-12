@@ -10,6 +10,8 @@
 #   - AB_HOST=gb10 ではゲートを呼ばず、ログの行が従来の書式のままであること
 #   - orchestrate_macmini.sh の check_mediaanalysisd（basename の完全一致・5 未満・不在は通過・ps の失敗と非数値は不成立）と、
 #     FOREIGN_GATE の未指定・相対パス・存在しないパスでロックを取る前に止まること、呼び出し順（ロック → P-RT → mediaanalysisd → A/B）
+#   - P-CAP（RULE.v2.txt §12 (c) の MAC-SERIES-CAP。2026-11-12 追加）: 両 orchestrate が、上限が空欄ならロックを取る前に止まり、
+#     上限 3 なら P-CAP を通って次の検査へ進むこと・呼び出しが P-OWNER の後でロックより前にあること・--self-test-cap が通ること
 # 使い方: bash test_foreign_gate_4156.sh   （成功で "self-test ok"・exit 0。macOS／Linux の bash で動く）
 # shellcheck disable=SC2034,SC2086,SC1091  # 切り出した関数が読む変数・意図した単語分割
 set -uo pipefail
@@ -273,6 +275,38 @@ done
 orch okgate "${T}/fake_gate.py" && ng "orch okgate: P-OWNER 未決のまま起動した"
 grep -q 'P-OWNER 不成立' "${T}/orch-okgate.log" || ng "orch okgate: P-OWNER まで進まない"
 [ ! -e "${T}/home/work/.fandhe-hw-lock" ] || ng "orch okgate: ロックを取った"
+
+# ---- P-CAP（§12 (c) の MAC-SERIES-CAP）: 実物の RULE.v2.txt（§9 記入済み）の写しで、上限を空欄記号に戻すと両 orchestrate が
+# ロックを取る前に P-CAP で止まり、実物どおり 3 なら P-CAP を通って次の prereg の検査で止まる（写しの BASE に prereg は置かない）。
+# 不正値（0・負・小数・非数値・先頭 0・空・欠落・重複など）は各 orchestrate の --self-test-cap で確かめる
+GB10_ORCH="${HERE}/orchestrate_gb10.sh"
+CAPREL="docs/perf/logs/sme-default-on-ab-4156"
+mkdir -p "${T}/capbase/blank/${CAPREL}" "${T}/capbase/three/${CAPREL}"
+sed 's/^MAC-SERIES-CAP: .*/MAC-SERIES-CAP: ＿＿＿/' "${HERE}/RULE.v2.txt" > "${T}/capbase/blank/${CAPREL}/RULE.v2.txt"
+grep -q '^MAC-SERIES-CAP: ＿＿＿$' "${T}/capbase/blank/${CAPREL}/RULE.v2.txt" || ng "cap: 空欄の RULE.v2.txt の写しを作れない"
+cp "${HERE}/RULE.v2.txt" "${T}/capbase/three/${CAPREL}/RULE.v2.txt"
+grep -q '^MAC-SERIES-CAP: 3$' "${T}/capbase/three/${CAPREL}/RULE.v2.txt" || ng "cap: 実物の RULE.v2.txt に MAC-SERIES-CAP: 3 が無い"
+capo() { # capo <名前> <orchestrate> <BASE> -> 終了コード
+  HOME="${T}/home" BASE="$3" WORK="${T}/work-cap-$1" TORCH_PY="/usr/bin/true" FOREIGN_GATE="${T}/fake_gate.py" \
+    bash "$2" > "${T}/cap-$1.log" 2>&1
+}
+for o in "mac|${ORCH}" "gb10|${GB10_ORCH}"; do
+  on="${o%%|*}"; of="${o#*|}"
+  capo "${on}-blank" "${of}" "${T}/capbase/blank" && ng "cap ${on} blank: 起動した"
+  grep -q 'P-CAP 不成立' "${T}/cap-${on}-blank.log" || ng "cap ${on} blank: P-CAP で止まらない"
+  [ ! -e "${T}/home/work/.fandhe-hw-lock" ] || ng "cap ${on} blank: ロックを取った"
+  capo "${on}-three" "${of}" "${T}/capbase/three" && ng "cap ${on} three: 起動した"
+  grep -q 'P-CAP 不成立' "${T}/cap-${on}-three.log" && ng "cap ${on} three: 3 で P-CAP 不成立になった"
+  grep -q 'prereg_append.txt が無い' "${T}/cap-${on}-three.log" || ng "cap ${on} three: P-CAP の次（prereg の検査）まで進まない"
+  [ ! -e "${T}/home/work/.fandhe-hw-lock" ] || ng "cap ${on} three: ロックを取った"
+  bash "${of}" --self-test-cap > /dev/null 2>&1 || ng "cap ${on}: --self-test-cap が通らない"
+  l_ow=$(grep -n '^check_owner "${RULE}"' "${of}" | head -n 1 | cut -d: -f1)
+  l_cap=$(grep -n '^check_series_cap "${RULE}"' "${of}" | head -n 1 | cut -d: -f1)
+  l_lk=$(grep -n 'until mkdir "${LOCK_DIR}"' "${of}" | head -n 1 | cut -d: -f1)
+  if [ -z "${l_ow}" ] || [ -z "${l_cap}" ] || [ -z "${l_lk}" ] || ! [ "${l_ow}" -lt "${l_cap}" ] || ! [ "${l_cap}" -lt "${l_lk}" ]; then
+    ng "cap ${on}: P-CAP の呼び出しが P-OWNER の後・ロック取得の前にない"
+  fi
+done
 
 # 呼び出し順: ロック → P-RT（rt_off）→ mediaanalysisd → A/B。A/B に FOREIGN_GATE を渡す・ゲートの出力を収録する
 ln_of() { grep -n -- "$1" "${ORCH}" | head -n 1 | cut -d: -f1; }
