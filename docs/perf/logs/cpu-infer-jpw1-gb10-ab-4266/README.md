@@ -36,16 +36,17 @@
 4. 次で起動する（nohup で切り離す）。`RAYON_NUM_THREADS` は unset。
    ```sh
    BASE=<展開先> LOGDIR=<記録先> WORK=<作業> ARCHIVE=<tree.tar> \
-   PY=<torch 2.14.0 の python> BP=<展開先>/docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py \
+   PY=<torch 2.14.0 の python> BP=<ツリー外の bench_py.py> \
    HW_LOCK_OWNER_FILE=<home>/work/.fandhe-hw-lock/owner HW_LOCK_HELD=1 bash <記録先>/orchestrate.sh
    ```
+   - `BP` は sha256 `9fd2c08f…409b` の `bench_py.py`（計測対象 tree の `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py` と同じ）を、BASE の外に置いたもの。`bench_py.py` は自身の隣に `cache/` を書くため、BASE 内のものは使わない（`RULE.v2.txt` 項 5 (f)）。
 5. 系列の途中は値を見ない（見るのは終了コードと `gate.txt` だけ）。終わったら（失敗時も）、計測のプロセスが 0 件であることを確かめてからロックを外す。
 6. `python3 -I <記録先>/aggregate.py <記録先>` で集計する。
 7. マスクして収録する（ホスト名は `<cuda-node>`、`$HOME` は `<home>`、ユーザー名は `<user>`）。漏れがないことを確かめてから入れる。`env/` には次を置く。
    - `.rev-stamp`
    - `git diff v0.14.0 <tree_sha> -- crates/` の一覧
    - 道具を取ったコミット
-   - `bench_py.py` と torch の版
+   - 使った `bench_py.py` の置き場所（`<home>` に置換）と sha256、torch の版
    - ロックの取得・解放の時刻
 
 ## 検証状況（固定前・開発機）
@@ -57,6 +58,7 @@
   - round が欠けた比の列は条件 2 不成立
   - probe の `applied` の読み取り（値・重複・欠落）と、条件 1 の不成立
   - PARAMS の検査と `patch_sha256.txt` の照合
+  - `run()` を最後まで通す（集計・判定・NB-SEP・`aggregate.md`／`aggregate.tsv` の書き出しと列数）
 - `bash test_orchestrate_4266.sh`: OK。本物の `RULE.v2.txt`・patch で前提検査をすべて通り、2 腕のツリーを作って patch を当て（定数 false／true）、ビルドの最初で止まる。次の場合は、何も書かずに止まる。
   - `orchestrate.sh` を 1 行変える
   - patch を変える、または消す

@@ -3,10 +3,10 @@ RULE.v2（#4266 GB10 推論限定 jpw1 の測り直し。train の判定を変�
 状態: 固定（測る前に単独 PR でコミットして固定する。固定後は判定式を動かさない。訂正は末尾への追記に限る）。
 
 PARAMS（aggregate.py と orchestrate.sh が読む。<...> が残っていると実行を拒否する）
-  fixed-at-utc: 2026-11-12T05:14:22Z
+  fixed-at-utc: 2026-11-12T05:17:10Z
   tree_sha: 85498f32be4bb8ea70302bd85ec2b8b4329d862f
   tree_fingerprint: 181f06c7a4e4839b6fb0e29d188ba8d98caeb8eb6c51e6db2da5dafd6bf24dd9
-  aggregate_script_sha256: 546c61ea8aadaaf0907598199e70fa645bb8b2be82f3144e5325c2cdd15a3ae8
+  aggregate_script_sha256: 4e2dbf73c725b8c7025236e39ce5c78a103b263949c92a3a7a190e1b39a06229
   orchestrate_script_sha256: 6588f5d4c305fcc5f63c9f2149ceda88cf6b388028505ed2f3f4b81eb4c9700d
   patch_sha256: 4152567b710aff3e6c3317cab25c872c46a96dc79c6327a1bd23dcc67d261075
   rounds: 5
@@ -74,12 +74,15 @@ PARAMS（aggregate.py と orchestrate.sh が読む。<...> が残っていると
   (d) 収録: README の手順のとおり集計し、`git diff v0.14.0 <tree_sha> -- crates/` の一覧と .rev-stamp を env/ に置く。
       ホスト名は <cuda-node>、$HOME は <home>、ユーザー名は <user> に置換し、漏れがないことを確かめてから収録する。
   (e) ADOPT でも既定の反転は #4165 で行う（本 A/B は反転しない。v1 項 10 のまま）。
-  (f) 同じラウンド内の PyTorch の計測（記録のみ。v1 項 3）は、BASE 内の docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py
-      （sha256 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b）を BP に、torch 2.14.0 の python を PY に渡す。
-      bench_py.py と torch の版は env/ に記録する。
+  (f) 同じラウンド内の PyTorch の計測（記録のみ。v1 項 3）には、sha256 が
+      9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b の bench_py.py（計測対象 tree の
+      docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py と同じ）を BP に、torch 2.14.0 の python を PY に渡す。
+      bench_py.py は自身の隣に cache/ を書くため、BASE の外（ツリー外のディレクトリ）に置いたものを使う。
+      使った bench_py.py の置き場所（<home> に置換）と sha256、torch の版は env/ に記録する。
 
 6. 開示
-  (a) 本規則は #4161 の値を見た後に書いた。本規則を書いたセッションが見たもの:
+  (a) 本規則は #4161 の値を見た後に書いた。本規則を書いたセッションは、#4161 の計測・集計・記録 PR（#4247）を行ったセッションで、
+      #4161 の集計出力（aggregate.md・aggregate.tsv）と収録物の全体を見ている。本規則を書く作業の中で改めて表示したもの:
       - #4266 本文の表（4 セルの中央値比・inf-jpw1 の勝ち数・NB-WIDTH5）。
       - docs/perf/logs/cpu-infer-jpw1-gb10-ab-4161/README.md の「結果」節の全部（中央値比・round 別比・勝ち数・NB-RANGE5・
         NB-SEP の範囲・判定語 REJECT・試走の判定語）。

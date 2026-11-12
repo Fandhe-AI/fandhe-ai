@@ -512,6 +512,36 @@ def self_test():
     med[(3, "inf-jpw1") + cell] = 1.95  # 変更後最小(2/1.95=1.026) < 変更前最大(2/1.91=1.047)
     assert nb_sep(med, pt, 5)[cell][0] is False
     assert nb_sep(med, None, 5)[cell] is None
+
+    # ---- run() を最後まで通す（PARAMS・patch 記録・集計・判定・NB-SEP・aggregate.md／.tsv の書き出し）
+    import contextlib
+    import io
+    for on_over, want in (({}, "ADOPT"), ({("train", "reuse"): [1.01, 1.02, 1.03, 1.02, 1.05]}, "REJECT"),
+                          ({("train", "reuse"): [0.87, 0.96, 1.11, 1.006, 1.014]}, "ADOPT")):
+        with tempfile.TemporaryDirectory() as d:
+            on = dict(GOOD_ON)
+            on.update(on_over)
+            _write_fixture(d, 5, {c: 1.0 for c in CELLS}, on)
+            for i in range(1, 6):
+                with open(os.path.join(d, f"round{i}", "raw", "pytorch-infer-fresh.jsonl"), "w") as f:
+                    f.write(json.dumps({"framework": "pytorch", "task": "infer", "median_s": 0.8}) + "\n")
+            with open(os.path.join(d, RULE_NAME), "w") as f:
+                f.write(_rule_text(aggregate_script_sha256=self_sha()))
+            with open(os.path.join(d, "patch_sha256.txt"), "w") as f:
+                f.write("d" * 64 + "  ab_patch_inf_jpw1.diff\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                v = run(d)
+            assert v == want and out.getvalue().strip() == want, (v, want)
+            with open(os.path.join(d, "aggregate.md"), encoding="utf-8") as f:
+                md = f.read()
+            assert f"verdict: {want}" in md and "NB-SEP=" in md, md
+            with open(os.path.join(d, "aggregate.tsv"), encoding="utf-8") as f:
+                rows = [r.split("\t") for r in f.read().splitlines()]
+            assert len(rows) == 1 + len(CELLS) and all(len(r) == 12 for r in rows), rows
+            assert [r[9:] for r in rows[1:3]] == [["True", "True", "True"],
+                                                  ["True", str(want == "ADOPT"), str(want == "ADOPT")]], rows
+            assert [r[9:] for r in rows[3:]] == [["-", "-", "-"], ["-", "-", "-"]], rows
     print("self-test OK")
 
 
