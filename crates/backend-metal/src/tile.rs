@@ -1881,6 +1881,15 @@ mod steel_fallback_tests {
         assert_eq!((s, t), (1, 1));
     }
 
+    /// 表の経路が縮退した（`resolved != requested`）結果は、そのまま採る。表の経路は
+    /// 結線前の本番と同じ扱いで、ここでは再度の組み直しをしない。
+    #[test]
+    fn degraded_table_result_is_taken_as_is() {
+        let (r, s, t) = run(Err("steel"), Ok(SMALL));
+        assert_eq!(r, Ok(("table", SMALL, true)));
+        assert_eq!((s, t), (1, 1));
+    }
+
     #[test]
     fn table_err_is_propagated() {
         let (r, s, t) = run(Err("steel"), Err("table"));
