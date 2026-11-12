@@ -28,6 +28,8 @@ utc() { date -u +%FT%TZ; }
 case "${MODE}" in run) A="${W}/attempt-${K}-${N}.txt";; dry) A="${W}/precheck-dry-${N}.txt";; *) echo "mode?" >&2; exit 2;; esac
 [ -e "${A}" ] && { echo "exists: ${A}" >&2; exit 2; }
 [ "${MODE}" = run ] && [ -e "${W}/${SER}" ] && { echo "exists: ${W}/${SER}" >&2; exit 2; }
+# 始めなかった試みの記録（prestart）も使用済みの試み番号として拒否する（RULE.txt 項 6。記録を上書きしない）。
+[ "${MODE}" = run ] && [ -e "${W}/prestart-${K}-${N}.txt" ] && { echo "exists: ${W}/prestart-${K}-${N}.txt" >&2; exit 2; }
 : > "${A}"
 say() { echo "$*" >> "${A}"; }
 LOCKED=0; LOCK="${HOME}/work/.fandhe-hw-lock"

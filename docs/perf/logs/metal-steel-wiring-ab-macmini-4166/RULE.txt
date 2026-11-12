@@ -1,6 +1,6 @@
 イシュー #4166: steel 候補 T0U-LU-FB の結線（tile::STEEL_LARGE_N_ENABLED = true。PR #4255）の Mac mini 前後比較 — 事前登録規則（計測前に固定。以後、本文は変更しない。変更が要るなら RULE.v2.txt で改訂する）
 
-fixed-at-utc: 2026-11-12T01:10:57Z
+fixed-at-utc: 2026-11-12T01:28:37Z
 target_sha: 9eba21749767147d100399962e3d41e54c8365df
 tree_fingerprint: 908b5d934f23e05b23b0472817fc740df7a9700870c45af3a0698b2c7ccbeeac files=22279
 tree_fingerprint_ab_excluded: 08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006
@@ -37,7 +37,7 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
       deploy.sh         493a69c932c46afe27243647401a467fc11a048c95fb86b62ee1b4c949a1569c
       fp.sh             0bbdd18c20b1f7fdebac4bb40c6b031c42a51d005f2ae5b211a17f939dc73aae
       prereq_tests.sh   892b9410519fb4b5a7431edc5a01633b91ec7d5801c1e91c43b2a818061bf904
-      drive_series.sh   5ec9fb2c4870cd79cf75ac88432380b41d639f70bc8a74332aa5429032efe1eb
+      drive_series.sh   8f0a1f266ca34fbae7405c1d078230c9b2bc796e6537c20774944bbbc36f3d6f
       judge_ab.py       d8887b3265fc5621d7d3e9fef2e77c64c4c4b527a3841d18830777c2c61608f4
       展開先 W は名前が `.noindex` で終わる新しいディレクトリ（#4151 の RULE.v2.txt 項 10 (e)）。ビルド・計測・記録のファイルはすべて W の中に書く。
 
@@ -119,7 +119,8 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
      （load_ab の状態は fail-partial と表示）を出す。不一致がなければ記録の不足として判定を出さない（終了コード 2）。
      記録が揃っていて checksum 不一致（status fail）の系列は、status.txt やゲートのログが欠けても FAIL を出し、欠けたことを理由に残す。
    - 3 系列とも通らなければ、3 系列とも参考系列として記録し、判定は UNDETERMINED として所有者へ戻す。
-   - 回した系列はすべて残す。差し替え・追加・除外・上書きはしない（#4160 の RULE.txt 項 12）。
+   - 回した系列はすべて残す。差し替え・追加・除外・上書きはしない（#4160 の RULE.txt 項 12）。始めなかった試みの記録（prestart-<k>-<n>.txt）
+     も上書きしない。drive_series.sh は、使用済みの試み番号（attempt・prestart・formal-<k> のいずれかがある）での起動を拒否する。
    - 系列の途中で値を見ない。見るのは状態ファイル・ゲートの行・drive.log の判定行だけ。results-*・compare-* は判定する系列が決まるまで開かない。
 
 7. 結果の扱い
@@ -144,4 +145,5 @@ ref_aggregate_4160_sha256: e8ae78af7aa956753e333c45c9719d00484c06aa5e0b778f78a46
    - 固定前に Mac mini で、dry 用の別ディレクトリ（固定後に消した）へ deploy.sh を通し（ノード側の指紋は上の 2 値と一致）、
      drive_series.sh の dry を 1 回通した（2026-11-11T14:48:36〜14:52:48Z。他ジョブのゲート 2 回とも CLEAN・mediaanalysisd 3 回とも 0・
      hw-lock を取って外した・load1=1.09・ツリーと checkout の照合が一致・dry-ok）。計測プロセスは起動しておらず、値は取っていない。
-     記録（マスク済み）は記録 PR に precheck-dry-1.txt として収める。
+     記録（マスク済み）は記録 PR に precheck-dry-1.txt として収める。この dry は drive_series.sh の固定前の版（sha256 5ec9fb2c…）で
+     行った。その後の変更は、使用済みの試み番号（prestart）での起動を拒否する起動時の 1 行だけで、dry が通った確認の段は変えていない。

@@ -107,6 +107,11 @@ mkdir "${LOCK}"; echo other > "${LOCK}/owner"
 W=$(mkw busy); drive "${W}" 1 1 run; rc=$?
 check "busy: rc 5・lock-busy" '[ "${rc}" = 5 ] && grep -q "reason=lock-busy" "${W}/prestart-1-1.txt"'
 check "busy: 他人の hw-lock を消さない" '[ "$(cat "${LOCK}/owner")" = other ]'
+cp "${W}/prestart-1-1.txt" "${T}/prestart-busy.saved"
+drive "${W}" 1 1 run; rc=$?
+check "busy: 使った試み番号での再実行は拒否し、prestart を上書きしない" '[ "${rc}" = 2 ] && cmp -s "${W}/prestart-1-1.txt" "${T}/prestart-busy.saved" && [ ! -e "${W}/attempt-1-1.txt" ]'
+drive "${W}" 1 2 run; rc=$?
+check "busy: 次の試み番号なら確認を行う" '[ "${rc}" = 5 ] && grep -q "reason=lock-busy" "${W}/prestart-1-2.txt"'
 rm -rf "${LOCK}"
 W=$(mkw pyc); mkdir "${W}/tree/scripts/bench/framework-compare/__pycache__"
 echo z > "${W}/tree/scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-312.pyc"

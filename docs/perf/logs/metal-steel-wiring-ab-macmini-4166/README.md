@@ -31,7 +31,7 @@
 ## 検証状況（固定前）
 
 - `python3 -I -B judge_ab.py --self-test`: #4160 の `series-formal-v2-2/ab` を見本に、同系列の `aggregate.md` のセル A/B 表とスコアボード比（NB-SEP は 2048 だけ成立）を再現した。変異（5/5 round の後退・4/5 round の後退・checksum 不一致（ゲート不通過の系列を含む）・`--checksum-only` の各状態（途中で止まった系列の記録済みの不一致・checksum 欠損を含む）・ゲート不通過の系列の NB-SEP・展開の配置での `aggregate.py` の探索・セルのゲート・round 先頭の timeout・rc=1・skipped・`gate=pass-reference`・ラベル混在・sha256 不一致）で各分岐を確かめた。コードへの 12 個の変異（anomaly を PASS に・ゲート不通過を無視・`gate=pass` の部分一致・sha256 照合の無効化・NB-SEP の無効化・`--checksum-only` の fail／unknown の取りこぼし・部分記録の照合の無効化・通常の判定での部分記録の FAIL の無効化・ゲート関連の入力の欠落で checksum の FAIL を失うこと・展開の配置の探索の削除）は、どれも self-test で落ちた。
-- `bash test_drive_series.sh`: 始めない分岐（ゲート FOREIGN／失敗・Safari・mediaanalysisd の境界 5.0／最大値／非数値／部分一致の名前・hw-lock 使用中・2 回目の確認・`__pycache__` によるツリー不一致・after の未追跡・before の余分な差分／差分なし／HEAD 違い・cargo が見つからない）、全ゲート通過の判定、runner へ渡す環境変数、`prereq_tests.sh` の件数照合と、hw-lock が取れなかった後の再試行。13 個の変異を入れ、どれも self-test が落ちることを確かめた。`/bin/bash`（3.2）でも通る。
+- `bash test_drive_series.sh`: 始めない分岐（ゲート FOREIGN／失敗・Safari・mediaanalysisd の境界 5.0／最大値／非数値／部分一致の名前・hw-lock 使用中・2 回目の確認・`__pycache__` によるツリー不一致・after の未追跡・before の余分な差分／差分なし／HEAD 違い・cargo が見つからない・使用済みの試み番号での再実行）、全ゲート通過の判定、runner へ渡す環境変数、`prereq_tests.sh` の件数照合と、hw-lock が取れなかった後の再試行。14 個の変異を入れ、どれも self-test が落ちることを確かめた。`/bin/bash`（3.2）でも通る。
 - 手元（開発機。計測ではない）で `9eba21749` の archive に `deploy.sh` を通し、偽の cargo で runner をビルドの手前まで動かした。post-wiring の checkout 検査は通り、pre-wiring では止まった。
 - 手元で本物の cargo に `--ignored --list` だけをさせ（GPU では流していない）、`--exact` の 2 件・Mac mini 表の 3 件・`gemm_splitk_parity` の 1 件が数えられ、`linalg_parity_inputs_guard` が 0 件になること、一覧のビルドの後も after が clean のままであることを確かめた。
-- Mac mini で dry 用の別ディレクトリへ `deploy.sh` を通し（ノード側の指紋は RULE の値と一致）、`drive_series.sh` の dry を 1 回通した（全段 dry-ok。計測は起動していない。dry 用ディレクトリは消した）。
+- Mac mini で dry 用の別ディレクトリへ `deploy.sh` を通し（ノード側の指紋は RULE の値と一致）、`drive_series.sh` の dry を 1 回通した（固定前の版。その後の変更は使用済みの試み番号を拒否する起動時の 1 行だけ。全段 dry-ok。計測は起動していない。dry 用ディレクトリは消した）。
