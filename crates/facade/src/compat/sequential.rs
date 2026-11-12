@@ -3174,8 +3174,8 @@ impl Sequential {
         input: &Tensor<f32>,
         rec: &mut R,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        // イシュー #4161: 推論スコープに入る（CPU の小形状 GEMM の jpw1 opt-in。既定 OFF で
-        // 挙動不変。学習経路は対象外。`predict`・`predict_batches` はここを通る。rayon
+        // イシュー #4161: 推論スコープに入る（CPU の小形状 GEMM の jpw1。aarch64 Linux だけ既定 ON・
+        // ほかは OFF で挙動不変（#4165）。学習経路は対象外。`predict`・`predict_batches` はここを通る。rayon
         // ワーカー上の GEMM はスコープを継がず既定の jpw になる＝安全側）。
         let _infer_scope = fandhe_ai_backend_cpu::enter_inference_scope();
         // イシュー #1760・Cursor Bugbot 指摘是正: tape 不要経路
@@ -4437,7 +4437,7 @@ impl Sequential {
         store: &DeviceParamStore,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        // イシュー #4161: 推論スコープ（`predict_recorded` と同じ理由。既定 OFF で挙動不変）。
+        // イシュー #4161: 推論スコープ（`predict_recorded` と同じ理由。既定は aarch64 Linux だけ ON・#4165）。
         let _infer_scope = fandhe_ai_backend_cpu::enter_inference_scope();
         // イシュー #1770・#1760・#1957: `Self::forward_resident` と同じ
         // ガード。
@@ -4486,7 +4486,7 @@ impl Sequential {
         store: &DeviceParamStore,
         input: &ResidentTensor,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        // イシュー #4161: 推論スコープ（`predict_recorded` と同じ理由。既定 OFF で挙動不変）。
+        // イシュー #4161: 推論スコープ（`predict_recorded` と同じ理由。既定は aarch64 Linux だけ ON・#4165）。
         let _infer_scope = fandhe_ai_backend_cpu::enter_inference_scope();
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
