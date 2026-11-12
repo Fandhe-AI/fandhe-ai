@@ -1,8 +1,9 @@
 イシュー #4156 事前登録規則 v2 (SME 既定 ON の新しい事前登録 A/B を Mac mini と GB10 で実測する)
-fixed-at-utc: 2026-11-12T01:50:50Z (この規則は計測前に単独 PR でコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る。計測前の追記は §12 (c) の記入と §13 への Mac mini セッション分の露出の申告だけを認める。どちらの追記でも本ファイルの sha256 が変わるため、prereg_append.txt を取り直してから両機体を測る)
+fixed-at-utc: 2026-11-12T01:55:33Z (この規則は計測前に単独 PR でコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る。計測前の追記は §12 (c) の記入と §13 への Mac mini セッション分の露出の申告だけを認める。どちらの追記でも本ファイルの sha256 が変わるため、prereg_append.txt を取り直してから両機体を測る)
 登録基準: origin/main の 18938d84cf72081716e5a3e42bcdb4f5e3f78749 (#4258 のマージコミット)。本規則・道具・on-arm.patch はこの版に対して書いた
 計測対象 (target): origin/main の 319a276b02433c9816fae86cde00f2463163c349 (#4263 のマージコミット) の crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml。
-  計測コミット (BASE) は、本規則 v2 と prereg_append.txt を足した PR のマージコミット (本規則の PR は 319a276b0 を取り込んでいる)。
+  計測コミット (BASE) は、本規則 v2 と prereg_append.txt を含む main のコミットで、上の範囲が計測対象と同じもの (§1)。
+  計測前の追記 (§12 (c)・§13) を足した後のコミットでもよい。本規則の PR は 319a276b0 を取り込んでいる。
   squash 後は SHA が変わるため、P-TREE は SHA ではなく内容で検査する (下記 §1)。計測セッションは BASE のフル SHA を計測記録に書く
 on-arm.patch sha256: 226e73d0e78936bff508b1a746966c65641aed8ce1b0ae50b0a9b2d20132b964
 
@@ -23,8 +24,9 @@ v1 (同ディレクトリ RULE.txt。fixed-at-utc 2026-11-09T14:30:00Z) から�
         #4160 では事後の逸脱として記録した 2 点を、事前に決めておくため (#4160 の所有者判断記録 https://github.com/Fandhe-AI/fandhe-ai/issues/4160#issuecomment-6795455525)。
   - (g) §13 に露出の申告を足した。
   - (h) 計測対象 (target) を 319a276b02433c9816fae86cde00f2463163c349 (#4263 のマージコミット) と明記し、§1 の差分検査をこの版で行う。
-        理由: 本規則の PR を最新の main から切るよう統合セッションから指示があったため。登録基準 18938d84c との差分は #4263 の
-        crates/backend-cuda のテスト 3 件とテスト専用の構築関数 (device.rs) だけで、#4156 が測る CPU の腕 (backend-cpu・framework-compare) には関係しない。
+        理由: 本規則の PR を最新の main から切るよう統合セッションから指示があったため。登録基準 18938d84c との差分は #4263 の crates/backend-cuda だけで、
+        中身は実機テスト 3 件の書き換え・テスト専用の構築関数 new_isolated_for_test (#[cfg(test)])・CudaDevice::new の後半を
+        非公開関数 from_parts へ切り出す整理 (挙動は変えない) の 3 つ。crates/backend-cpu・scripts/bench/・Cargo.*・rust-toolchain.toml は変わっていない。
         §11 のピンは 319a276b0 を取り込んだ版で取り直し、値は変わらなかった。on-arm.patch は 319a276b0 でも git apply --check が通る。
         orchestrate_gb10.sh の P-TREE の注記にある「RULE の登録基準 SHA」は、この (h) により計測対象 319a276b0 と読む (道具は変えていない)。
 
@@ -159,7 +161,7 @@ UNDETERMINED-HANDLING-URL: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#is
         P-RUNAB/P-COLLECT の不成立理由、GB10 の総合 verdict の語 (収録失敗による前提ゲート不成立)。3 方式の判定の行は表示していない (見出しだけ)。
   - 2026-11-10 の試走の起動と終了の確認では、各段の終了コードの行に加え、外側ゲートの 1 行 (load1・GPU 使用率・compute プロセス数) と内側ゲートの通過の行を表示した (ゲートの記録で、判定に使う値ではない)。
   - 2026-11-11 のマスク漏れ検査の見直しでは、ファイル数・一致したファイル数と、一致箇所の前後の短い断片 (計測値は含まない) を件数つきで表示した。
-  - 2026-11-11 に本規則 v2 の固定前の捨て試走を GB10 で 1 回流した (ツリーは本規則の固定前の版。§9 転記済み・仮の prepared_at。crates/ は 18938d84c と同じで、計測対象 319a276b0 とは crates/backend-cuda のテストだけが異なる)。
+  - 2026-11-11 に本規則 v2 の固定前の捨て試走を GB10 で 1 回流した (ツリーは本規則の固定前の版。§9 転記済み・仮の prepared_at。crates/ は 18938d84c と同じで、計測対象 319a276b0 とは crates/backend-cuda だけが異なる。差分の中身は (h))。
     見たのは各段の終了コードの行 (P-TREE・P-R0 の通過、rt_on・rt_off・run_ab・bitdump/cmp・collect の exit) と全体の終了コードだけで、
     判定に使う値・集計・verdict の語は見ていない。aggregate.py は試走の出力に対して実行していない。ロックは orchestrate が取って解放し、終了後にプロセス 0 を確かめた。
   - 両試走 (2026-11-10・2026-11-11) の出力は、2026-11-11 に GB10 から開かずに消した。公開していない。

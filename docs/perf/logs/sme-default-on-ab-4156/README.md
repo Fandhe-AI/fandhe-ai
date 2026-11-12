@@ -8,7 +8,7 @@
   - 登録基準を `d551b31` から `18938d84c`（#4258 のマージコミット）へ移した。v1 の固定後に道具の PR（#4256・#4258）が入ったため。
   - §9 に所有者決定を転記した（GB10-GATE-ONLY-STRUCTURAL・NOISE-BAND = adopted・UNDETERMINED-HANDLING = return-to-owner）。根拠は #4143 の https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 と #4142 の https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 。記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16、`docs/cpu-gemm-sme-unsafe-audit.md` §12.14、`docs/perf/noise-band-decision.md`。
   - §11 に道具の sha256、§12 に Mac mini 腕の準備、§13 に露出の申告を足した。
-  - 計測対象（target）を `319a276b0`（#4263 のマージコミット）と明記した。`18938d84c` との差分は `crates/backend-cuda` のテストだけで、CPU の腕には関係しない。§1 の差分検査はこの版で行う。
+  - 計測対象（target）を `319a276b0`（#4263 のマージコミット）と明記した。`18938d84c` との差分は #4263 の `crates/backend-cuda` だけ（テスト 3 件・テスト専用の構築関数・`CudaDevice::new` の挙動を変えない切り出し）で、`crates/backend-cpu`・`scripts/bench/` は変わっていない。§1 の差分検査はこの版で行う。
 - `prereg_append.txt`（`RULE.v2.txt` の sha256 と準備時刻）も v2 の PR でコミットした。
 - **計測はまだ始めない（GB10 腕・Mac mini 腕とも）**。`RULE.v2.txt` §12 (c)（Mac mini 腕で他ジョブのゲートに当たったときの系列数の上限）が空欄で、所有者が決める。記入すると `RULE.v2.txt` の sha256 が変わるため、`prereg_append.txt` を取り直してから両機体を測る（`aggregate.py` は両機体の `prereg_append.txt` を現在の `RULE.v2.txt` と照合する）。
 
