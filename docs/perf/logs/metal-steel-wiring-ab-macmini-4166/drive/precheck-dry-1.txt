@@ -1,0 +1,51 @@
+formal-1 attempt=1 mode=dry begin 2026-11-11T14:48:36Z
+env macos=27.0.1 hw_model=Mac16,10 rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+proc-check1 2026-11-11T14:48:41Z safari_app=0 gate_rc=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-11T14:48:41Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 1 0 0 0 0
+    processes_scanned 820
+    max_pcpu_non_excluded 2.0
+    top pid=603 uid=88 pcpu=2.0 name=WindowServer
+    top pid=17778 uid=282 pcpu=2.0 name=trustd
+    top pid=710 uid=0 pcpu=1.6 name=backgroundtaskmanagementd
+    top pid=670 uid=0 pcpu=1.1 name=airportd
+    top pid=741 uid=270 pcpu=1.1 name=com.apple.DriverKit-AppleBCMWLAN
+mediaanalysisd check1 2026-11-11T14:48:41Z pcpu=0
+mediaanalysisd check2 2026-11-11T14:50:41Z pcpu=0
+mediaanalysisd check3 2026-11-11T14:52:41Z pcpu=0
+spotlightknowledged_submitting_last10m=0 idle_ok=1
+lock-acquired 2026-11-11T14:52:42Z owner=#4166 measure formal-1-dry 2026-11-11T14:52:42Z
+load1 sample 1 2026-11-11T14:52:42Z load1=1.09
+load1-wait done waited_s=0 load1=1.09 reached_below_1.5=yes
+proc-check2 2026-11-11T14:52:46Z safari_app=0 gate_rc=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-11T14:52:46Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 0 0 0 0 0
+    processes_scanned 813
+    max_pcpu_non_excluded 2.2
+    top pid=17778 uid=282 pcpu=2.2 name=trustd
+    top pid=88326 uid=502 pcpu=2.1 name=com.apple.Virtualization.VirtualMachine
+    top pid=1013 <user> pcpu=2.0 name=sharingd
+    top pid=596 uid=0 pcpu=1.8 name=bluetoothd
+    top pid=710 uid=0 pcpu=1.6 name=backgroundtaskmanagementd
+tree-check 2026-11-11T14:52:48Z fingerprint_ab_excluded: fingerprint=08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006 expected: fingerprint=08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006 manifest_check_rc=0
+checkout-check 2026-11-11T14:52:48Z after_status_lines=0 before_status=[ M crates/backend-metal/src/tile.rs] before_numstat=[1 1 crates/backend-metal/src/tile.rs] head_equal=yes tools=ok
+result=dry-ok (no measurement started) 2026-11-11T14:52:48Z
+lock released 2026-11-11T14:52:48Z

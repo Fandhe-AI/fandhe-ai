@@ -1,0 +1,24 @@
+deployed 2026-11-12T07:05:05Z
+target_sha=9eba21749767147d100399962e3d41e54c8365df
+fingerprint=908b5d934f23e05b23b0472817fc740df7a9700870c45af3a0698b2c7ccbeeac files=22279
+ab_excluded fingerprint=08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006
+checkout_head=a769b085ba962a6b4116b244f33a16b33c731bad
+before_diff:
+  diff --git a/crates/backend-metal/src/tile.rs b/crates/backend-metal/src/tile.rs
+  index 8e4732a..fb4c9cf 100644
+  --- a/crates/backend-metal/src/tile.rs
+  +++ b/crates/backend-metal/src/tile.rs
+  @@ -1794,7 +1794,7 @@ pub(crate) const FRAG_INTERLEAVE_ENABLED: bool = false;
+   ///
+   /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`UNROLL_ACC_ENABLED`] と同じ。
+   #[cfg(any(test, target_os = "macos"))]
+  -pub(crate) const STEEL_LARGE_N_ENABLED: bool = true;
+  +pub(crate) const STEEL_LARGE_N_ENABLED: bool = false;
+   
+   /// [`select_steel_large_n`] が返す、形状限定 steel 候補の構成（イシュー #4160）。
+   /// `cfg` は `CANDIDATES[0]`、ゲート 3 軸（acc unroll の instance 側・load unroll・細粒度
+rule_files:
+  8f0a1f266ca34fbae7405c1d078230c9b2bc796e6537c20774944bbbc36f3d6f  drive_series.sh
+  892b9410519fb4b5a7431edc5a01633b91ec7d5801c1e91c43b2a818061bf904  prereq_tests.sh
+  0bbdd18c20b1f7fdebac4bb40c6b031c42a51d005f2ae5b211a17f939dc73aae  fp.sh
+  d8887b3265fc5621d7d3e9fef2e77c64c4c4b527a3841d18830777c2c61608f4  judge_ab.py

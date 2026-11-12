@@ -1,0 +1,51 @@
+formal-1 attempt=1 mode=run begin 2026-11-12T07:59:25Z
+env macos=27.0.1 hw_model=Mac16,10 rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+proc-check1 2026-11-12T07:59:29Z safari_app=0 gate_rc=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-12T07:59:29Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 86 0 0 0 0
+    processes_scanned 819
+    max_pcpu_non_excluded 1.9
+    top pid=1013 <user> pcpu=1.9 name=sharingd
+    top pid=596 uid=0 pcpu=1.5 name=bluetoothd
+    top pid=741 uid=270 pcpu=0.9 name=com.apple.DriverKit-AppleBCMWLAN
+    top pid=958 <user> pcpu=0.9 name=rapportd
+    top pid=1035 uid=268 pcpu=0.8 name=nearbyd
+mediaanalysisd check1 2026-11-12T07:59:29Z pcpu=0
+mediaanalysisd check2 2026-11-12T08:01:30Z pcpu=0
+mediaanalysisd check3 2026-11-12T08:03:30Z pcpu=0
+spotlightknowledged_submitting_last10m=0 idle_ok=1
+lock-acquired 2026-11-12T08:03:31Z owner=#4166 measure formal-1-run 2026-11-12T08:03:31Z
+load1 sample 1 2026-11-12T08:03:31Z load1=1.24
+load1-wait done waited_s=0 load1=1.24 reached_below_1.5=yes
+proc-check2 2026-11-12T08:03:35Z safari_app=0 gate_rc=0
+  safari-named (pcpu basename):
+    0.0 SafariBookmarksSyncAgent
+    0.0 SafariConfigurationSubscriber
+    0.0 SafariLaunchAgent
+    0.0 SafariLinkExtension
+    0.0 SafariWidgetExtension
+    0.0 com.apple.Safari.SafeBrowsing.Service
+  gate output:
+    CLEAN before 2026-11-12T08:03:35Z
+    criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+    gpu_device_utilization 1 0 0 0 0
+    processes_scanned 814
+    max_pcpu_non_excluded 1.3
+    top pid=1013 <user> pcpu=1.3 name=sharingd
+    top pid=596 uid=0 pcpu=1.2 name=bluetoothd
+    top pid=1035 uid=268 pcpu=0.7 name=nearbyd
+    top pid=603 uid=88 pcpu=0.6 name=WindowServer
+    top pid=958 <user> pcpu=0.6 name=rapportd
+tree-check 2026-11-12T08:03:38Z fingerprint_ab_excluded: fingerprint=08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006 expected: fingerprint=08e53d0f26f45c86dbaf781f9c53f061a995b3812ea1cf966e4b32af843f16b5 files=22006 manifest_check_rc=0
+checkout-check 2026-11-12T08:03:39Z after_status_lines=0 before_status=[ M crates/backend-metal/src/tile.rs] before_numstat=[1 1 crates/backend-metal/src/tile.rs] head_equal=yes tools=ok
+series-start 2026-11-12T08:03:39Z
+lock released 2026-11-12T08:28:25Z
