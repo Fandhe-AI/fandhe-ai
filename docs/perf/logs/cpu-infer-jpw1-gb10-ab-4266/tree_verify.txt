@@ -1,0 +1,2 @@
+24:pub(super) const INFER_SCOPE_JPW1_ENABLED: bool = false;
+24:pub(super) const INFER_SCOPE_JPW1_ENABLED: bool = true;
