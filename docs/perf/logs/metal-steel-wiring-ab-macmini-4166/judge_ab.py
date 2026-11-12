@@ -118,7 +118,13 @@ def judge(series, agg):
         ab = {"status": "fail-partial", "cells": {}, "label": label,
               "notes": ["記録が揃っていない（%s）。記録済みの before／after の行に checksum 不一致がある" % e]}
         return "FAIL", ab, gates_ok, reasons, {n: None for n in agg.SCOPE}
-    gates_ok, reasons = series_gates(series)
+    try:
+        gates_ok, reasons = series_gates(series)
+    except JudgeError as ge:
+        # checksum 不一致の FAIL はゲートの通過に依らない（RULE.txt 項 2・6）。ゲート関連の入力が欠けても FAIL は出し、理由に残す。
+        if ab["status"] != "fail":
+            raise
+        gates_ok, reasons = False, [str(ge)]
     if ab["status"] == "fail":
         verdict = "FAIL"
     elif not gates_ok or ab["status"] in ("undetermined", "unavailable"):
@@ -369,6 +375,19 @@ def self_test():
             f.write("\n".join(rows) + "\n")
         v, ab, _, _, _ = judge(d, agg)
         check("checksum 不一致は FAIL", v == "FAIL" and ab["status"] == "fail")
+        os.remove(os.path.join(d, "status.txt"))
+        try:
+            v, _, gok, rs, _ = judge(d, agg)
+        except JudgeError:
+            v, gok, rs = None, None, []
+        check("status.txt が無くても checksum 不一致は FAIL（理由に残す）", v == "FAIL" and gok is False and any("status.txt" in r for r in rs))
+        dn = _copy_series(tmp, "nost")
+        os.remove(os.path.join(dn, "status.txt"))
+        try:
+            judge(dn, agg)
+            check("checksum が合う系列で status.txt が無ければ判定を出さない", False)
+        except JudgeError:
+            check("checksum が合う系列で status.txt が無ければ判定を出さない", True)
         # 5. ゲート: 各 round 内のセルの行（gate=invalid ... cell=）→ UNDETERMINED。
         d = _copy_series(tmp, "cellgate")
         g = glob.glob(os.path.join(d, "ab", "load-gate-4160-metal-*.log"))[0]
