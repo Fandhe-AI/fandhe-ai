@@ -2,15 +2,16 @@
 
 ## 状態
 
-**事前登録・未実測**。計測部品（A/B 本体・オーケストレーション・厳密集計）と事前登録規則 `RULE.txt` を固定した段階で、実機の値は一つもない。
+**事前登録（v2）・未実測**。判定に使う規則は `RULE.v2.txt`（v2）。v1 の `RULE.txt` は経緯として残し、道具（両オーケストレーション・`aggregate.py`）は読まない。
 
-**計測はまだ始められない**。`RULE.txt` §9（所有者決定の転記欄）が `<未決>` で、P-OWNER が不成立になるため。根拠:
-
-- #4143 は 2026-11-10 に所有者が承認済み（案 (c) GB10-GATE-ONLY-STRUCTURAL・UNDETERMINED-HANDLING = return-to-owner・#4142 依存の了承）: https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 。記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16、`docs/cpu-gemm-sme-unsafe-audit.md` §12.14。
-- #4142 も 2026-11-10 に所有者が承認済み（案 A: NB-RANGE5・NB-SEP を採用）: https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 。記録は `docs/perf/noise-band-decision.md`。
-- ただし `RULE.txt` §9 は事前登録時点で `<未決>` のまま固定している。決定を推定・代筆せず、§9 への転記は実測者が測る前に行う（下記）。
-
-#4142・#4143 は承認済み。実測者は上記の回答コメント URL とともに `RULE.txt` §9 へ列挙値を転記し（計測前に限る追記）、`prereg_append.txt` を作ってから実機で測る。
+- v2 で変えた点と理由は `RULE.v2.txt` の冒頭に書いた。判定式・閾値・5 round・5/5 一貫性・checksum 完全一致・処置は v1 のまま。
+  - 登録基準を `d551b31` から `18938d84c`（#4258 のマージコミット）へ移した。v1 の固定後に道具の PR（#4256・#4258）が入ったため。
+  - §9 に所有者決定を転記した（GB10-GATE-ONLY-STRUCTURAL・NOISE-BAND = adopted・UNDETERMINED-HANDLING = return-to-owner）。根拠は #4143 の https://github.com/Fandhe-AI/fandhe-ai/issues/4143#issuecomment-6757498148 と #4142 の https://github.com/Fandhe-AI/fandhe-ai/issues/4142#issuecomment-6757497844 。記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.16、`docs/cpu-gemm-sme-unsafe-audit.md` §12.14、`docs/perf/noise-band-decision.md`。
+  - §11 に道具の sha256、§12 に Mac mini 腕の準備、§13 に露出の申告を足した。
+  - 計測対象（target）を `319a276b0`（#4263 のマージコミット）と明記した。`18938d84c` との差分は #4263 の `crates/backend-cuda` だけ（テスト 3 件・テスト専用の構築関数・`CudaDevice::new` の挙動を変えない切り出し）で、`crates/backend-cpu`・`scripts/bench/` は変わっていない。§1 の差分検査はこの版で行う。
+- `prereg_append.txt`（`RULE.v2.txt` の sha256 と準備時刻）も v2 の PR でコミットした。
+- `RULE.v2.txt` §12 (c)（Mac mini 腕で他ジョブのゲートに当たったときの系列数の上限）は **3 系列**（所有者判断 2026-11-12。#4166 と同じ形で、`formal-1`〜`formal-3`）。機械が読む行 `MAC-SERIES-CAP: 3` を置き、両オーケストレーション（ロック取得の前）と `aggregate.py` が P-CAP として検査する（空欄・不正値・欠落・重複は不成立）。
+- 計測は v2 の PR のマージ後に始める。`RULE.v2.txt` を変えると sha256 が変わるため、`prereg_append.txt` を取り直してから両機体を測る（`aggregate.py` は両機体の `prereg_append.txt` を現在の `RULE.v2.txt` と照合する）。
 
 ## 目的
 
@@ -23,12 +24,14 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 
 | パス | 内容 |
 |---|---|
-| `RULE.txt` | 事前登録規則（計測前に単独コミットして固定。訂正は末尾への追記のみ。§9 は所有者決定の転記欄） |
-| `on-arm.patch` | `SME_PRODUCTION_ENABLED` を `false` から `true` にする 1 行（#3613 の同名パッチと同一内容。sha256 は `RULE.txt` に固定） |
-| `orchestrate_macmini.sh`・`orchestrate_gb10.sh` | P-OWNER → ロック →（GB10 は外側ゲート）→ P-TREE → P-R0 → P-RT →（Mac mini は mediaanalysisd の確認）→ A/B → P-BIT → マスク収録（`--dry-run` あり） |
+| `RULE.v2.txt` | 事前登録規則 v2（判定に使う規則。計測前に単独 PR でコミットして固定。訂正は末尾への追記のみ。v1 から変えた点は冒頭） |
+| `RULE.txt` | 事前登録規則 v1（経緯として残す。§9 は `<未決>` のまま。道具は読まない） |
+| `prereg_append.txt` | `RULE.v2.txt` の sha256（`rule_sha256=`）と準備時刻（`prepared_at=`。両機体の hwlock 取得より前）。v2 の PR でコミット |
+| `on-arm.patch` | `SME_PRODUCTION_ENABLED` を `false` から `true` にする 1 行（#3613 の同名パッチと同一内容。sha256 は `RULE.v2.txt` に固定。v1 と同じ値） |
+| `orchestrate_macmini.sh`・`orchestrate_gb10.sh` | P-OWNER → P-CAP → ロック →（GB10 は外側ゲート）→ P-TREE → P-R0 → P-RT →（Mac mini は mediaanalysisd の確認）→ A/B → P-BIT → マスク収録（`--dry-run`・`--self-test-leak`・`--self-test-cap` あり） |
 | `test_foreign_gate_4156.sh` | Mac mini 腕の他ジョブの前提ゲートと mediaanalysisd の確認の self-test（実機に接続しない。`bash test_foreign_gate_4156.sh`） |
 | `aggregate.py` | 厳密集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`） |
-| `prereg_append.txt`・`macmini/`・`gb10/`・`aggregate-*.md` | 実測後に収録（現時点では無い）。`aggregate-*.md` は機械出力で手で直さない |
+| `macmini/`・`gb10/`・`aggregate-*.md` | 実測後に収録（現時点では無い）。`aggregate-*.md` は機械出力で手で直さない |
 | `../../../../scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` | 2 機共通の A/B 本体。#3232 の `run_ab_sme_default_on_cpu.sh` の派生（元は凍結して変更しない） |
 
 腕は before = OFF（main のクリーンな clone・定数 false）、after = ON（その clone に `on-arm.patch` を当てた計測専用ツリー）。
@@ -36,8 +39,8 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 
 ## 手順（実機セッション。Linux の自動運転では実行しない）
 
-1. 所有者の回答を `RULE.txt` §9 へ転記してコミット・push し、追記後の `RULE.txt` の sha256 と UTC 時刻を `prereg_append.txt`（`rule_sha256=` と `prepared_at=`）に記録する。時刻は hwlock の取得時刻より前でなければならない。`prereg_append.txt` も同じ要領でコミット・push する（未追跡のまま残すと A/B 本体の `verify_no_untracked_build_inputs` が BASE 内の未追跡ファイルを検出して停止する）。`prepared_at` は `YYYY-MM-DDTHH:MM:SSZ` 形式で、形式不正・未来時刻ならロック取得前に停止し、取得直後にも `prepared_at < acquired` を再確認する。
-2. 開発機で `git bundle` を作って実機へ転送し、クリーンな clone を BASE とする。登録基準 SHA と BASE の間で `crates/`・`scripts/bench/`・`Cargo.*`・`rust-toolchain.toml` に差分がないことを確認する（#3613 §8 の教訓）。
+1. `RULE.v2.txt` §9 の転記・§12 (c) の記入と `prereg_append.txt` は v2 の PR でコミット済み。実測者は転記しない。§13 へ追記したときだけ、追記後の `RULE.v2.txt` の sha256 と UTC 時刻で `prereg_append.txt` を取り直してコミット・push する（未追跡のまま残すと A/B 本体の `verify_no_untracked_build_inputs` が BASE 内の未追跡ファイルを検出して停止する）。`prepared_at` は `YYYY-MM-DDTHH:MM:SSZ` 形式で、hwlock の取得時刻より前。形式不正・未来時刻ならロック取得前に停止し、取得直後にも `prepared_at < acquired` を再確認する。
+2. 開発機で `git bundle` を作って実機へ転送し、クリーンな clone を BASE とする。BASE は `RULE.v2.txt` と `prereg_append.txt` を含む main のコミット。計測対象 `319a276b0`（#4263 のマージコミット。`RULE.v2.txt` 冒頭の「計測対象 (target)」）と BASE の間で `crates/`・`scripts/bench/`・`Cargo.*`・`rust-toolchain.toml` に差分がないこと（#3613 §8 の教訓）と、`RULE.v2.txt` §11 のピンが BASE で一致することを、送る前に確かめて記録する。実機ではツリー指紋（送信側と実機側）を突き合わせる。
 3. `RAYON_NUM_THREADS` を unset し、他の cargo・bench・python が動いていないことを確かめる。計測中はビルドを並走させない。
 4. GB10 を先に: `BASE=<clone> WORK=<作業> [TORCH_PY=<python>] bash docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh`（`PATH` に `${HOME}/.cargo/bin`。専有できる機体を選ぶ。compute プロセスが常駐する機体では外側ゲートを通らない）。
 5. Mac mini: `BASE=<clone> WORK=<作業> TORCH_PY=<venv python> FOREIGN_GATE=<foreign_job_gate.py の絶対パス> bash .../orchestrate_macmini.sh`。`WORK` は名前が `.noindex` で終わるディレクトリにする（Spotlight の索引を避ける。#4151 の RULE.v2.txt 項 10 (e)）。hw-lock は先に取らない（スクリプトが取る）。
@@ -45,8 +48,9 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 
 ## 他ジョブの前提ゲートと mediaanalysisd の確認（Mac mini。2026-11-11 追加）
 
-`RULE.txt` の固定後に足した。ゲートを厳しくする方向だけの追加で、判定式・閾値・round 数・ほかの段の手順は変えていない。
-この版で測る系列は #4156 の RULE.v2 で登録する（GB10 セッションが書く）。GB10（`AB_HOST=gb10`）の経路は変えていない。
+v1 の `RULE.txt` の固定後に足した。ゲートを厳しくする方向だけの追加で、判定式・閾値・round 数・ほかの段の手順は変えていない。
+`RULE.v2.txt` §4（P-GATE）に登録した。GB10（`AB_HOST=gb10`）の経路は変えていない。
+Mac mini 腕の準備（`__pycache__` の扱い・系列の前に誰がプロセスを止めるか・系列数の上限）は `RULE.v2.txt` §12。
 
 - **他ジョブの前提ゲート**: 部品は #4160 と同じ `scripts/bench/framework-compare/ab_foreign_gate.sh` で、判定は `docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py`（#4227。G1〜G4）。どちらも変えていない。
   - A/B 本体の各 round の前に、他ジョブが CLEAN かつ load1 < 3.0 になるまで、同じループで待つ（30 秒間隔・最大 60 回。load1 の待ちと同じ上限）。
@@ -88,7 +92,19 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
     - mediaanalysisd を 5 以下で通す
     - mediaanalysisd を部分一致で拾う
   - <metal-node> で `foreign_job_gate.py` を 1 回だけ動かした。出力 10 行は漏れ検査（`leak_re`）に 0 件で当たった（計測ではない）。
-- **未検証**: 実機での A/B・P-RT・P-BIT・マスク収録（Mac mini と GB10 が必要）。
+- P-CAP（2026-11-12）は開発機（bash 3.2）で次を通した。実機には接続していない。
+  - 両オーケストレーションの `--self-test-cap`（14 件）: `3`・`1`・`12` は成立。空欄記号・`0`・`-1`・`3.5`・非数値・`03`・空・`+3`・欠落・重複・別の行に空欄記号が残る場合は不成立。
+  - `aggregate.py --self-test`: `3` は両機体とも正式、上の不正値はどれも両機体で undetermined、空欄でも checksum 不一致の FAIL は保つ。
+  - `test_foreign_gate_4156.sh`: 両オーケストレーションが、上限を空欄に戻した写しではロックを取る前に P-CAP で止まり、`3` では P-CAP を通って次の検査へ進む。呼び出しが P-OWNER の後でロック取得の前にあること。
+  - 変異の確認: 次の 6 つの変異のどれでも、いずれかの self-test が落ちることを確かめた。
+    - Mac mini 側の P-CAP の呼び出しを外す
+    - GB10 側の P-CAP の呼び出しを外す
+    - `check_series_cap` を常に成立にする
+    - `aggregate.py` で P-CAP の理由を捨てる
+    - `aggregate.py` で空欄記号を見ない
+    - `check_series_cap` で空欄記号を見ない（Mac mini 側）
+- v2 の固定前に、`<cuda-node>` で v2 の道具の捨て試走を 1 回流した（2026-11-11）。全段が exit 0 で、マスク収録まで通った。見たのは終了コードの行だけで、出力は開かずに消した（`RULE.v2.txt` §13）。
+- **未検証**: 正式系列での実機の A/B・P-RT・P-BIT・マスク収録と、マスク後の収録物に対する `aggregate.py` の実行（Mac mini と GB10 が必要）。
 
 ## スコープ外
 

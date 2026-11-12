@@ -1,12 +1,12 @@
 #!/bin/bash
 # GB10（DGX Spark・SME 非搭載）での SME 既定 ON の A/B（構造ガード）（イシュー #4156）。
 # 役割: SME `fmopa` カーネル既定 ON の「新しい事前登録 A/B」を GB10で測るオーケストレーション。
-# 判定規則は同ディレクトリ RULE.txt（計測前に単独コミット済み）。#3232 の orchestrate_gb10.sh を派生元とし、
+# 判定規則は同ディレクトリ RULE.v2.txt（計測前に単独コミット済み。v1 の RULE.txt は経緯として残し、本スクリプトは読まない）。#3232 の orchestrate_gb10.sh を派生元とし、
 # 腕の組み立てを逆にした: OFF = 本スクリプトを置いたツリー（BASE。main の clone・クリーン・定数 false）、
 # ON = BASE を clone して on-arm.patch（定数 true の 1 行）を当てた計測専用ツリー。main へコミットしない。
 # 追加ゲート: P-OWNER（所有者決定が RULE §9 に転記済みか。未決なら計測を始めない）・
 # P-RT（両腕。ON は sme_production_disabled_after_gb10_reject を除外）・P-BIT（両腕 bitdump の一致）。
-# 起動順: P-OWNER → ロック → 外側ゲート → P-TREE → P-R0 → P-RT → A/B（AB_HOST=gb10）→ P-BIT → マスク収録。
+# 起動順: P-OWNER → P-CAP → ロック → 外側ゲート → P-TREE → P-R0 → P-RT → A/B（AB_HOST=gb10）→ P-BIT → マスク収録。
 # 既定の切り替えは行わない（定数は計測専用ツリーでのみ true）。
 # macOS の bash 3.2 でも動くよう変数は ${VAR} と書く（mapfile・連想配列・jq は使わない）。
 #
@@ -37,7 +37,7 @@ else
     sha() { shasum -a 256 "$@"; }
 fi
 
-# P-OWNER: RULE.txt §9 に所有者決定が転記されているかを読むだけで検査する（ソースは実行しない）。
+# P-OWNER: RULE.v2.txt §9 に所有者決定が転記されているかを読むだけで検査する（ソースは実行しない）。
 # 値はアンカー付き正規表現で取り出し、列挙値と URL の形式に完全一致しなければ不成立（fail-closed）。
 OWNER_URL_RE='^https://github\.com/Fandhe-AI/fandhe-ai/(issues|pull)/[0-9]+#issuecomment-[0-9]+$'
 # 各キーはちょうど 1 行だけを要求する（重複・欠落は空を返して不成立にする。aggregate.py の read_owner と同じ契約）。
@@ -47,7 +47,7 @@ owner_field() {
     if [ "${n}" != "1" ]; then echo "P-OWNER 不成立: $1 が ${n} 件（1 件ちょうどを要求）" >&2; return 0; fi
     sed -n "s/^$1: *\(.*[^ ]\) *\$/\1/p" "$2"
 }
-check_owner() { # check_owner <RULE.txt> -> 0=成立 1=不成立（理由は stderr）
+check_owner() { # check_owner <RULE.v2.txt> -> 0=成立 1=不成立（理由は stderr）
     local rule=$1 mode nb und murl nurl uurl u rc=0
     mode="$(owner_field GB10-MODE "${rule}")"
     nb="$(owner_field NOISE-BAND "${rule}")"
@@ -62,6 +62,20 @@ check_owner() { # check_owner <RULE.txt> -> 0=成立 1=不成立（理由は std
         printf '%s\n' "${u}" | grep -Eq "${OWNER_URL_RE}" || { echo "P-OWNER 不成立: 所有者回答コメントの URL が欠落または形式不正 (${u:-空})" >&2; rc=1; }
     done
     return ${rc}
+}
+
+# P-CAP: RULE.v2.txt §12 (c) の Mac mini 腕の系列数の上限（MAC-SERIES-CAP）を読むだけで検査する
+# （#4264 の Codex 指摘・統合セッション判断 2026-11-12。所有者の値は §12 (c) の根拠コメント）。
+# キーはちょうど 1 行だけ行頭にあり、値は正の整数（先頭 0・符号・小数なし）で、本ファイルに空欄記号（全角の下線 3 文字）が
+# 残っていないこと。どれか外れたら不成立（fail-closed）。両機体で同じ検査をロック取得より前に行う（aggregate.py の read_owner と同じ契約）。
+check_series_cap() { # check_series_cap <RULE.v2.txt> -> 0=成立 1=不成立（理由は stderr）
+    local rule=$1 n v
+    if grep -q '＿＿＿' "${rule}"; then echo "P-CAP 不成立: 空欄記号（＿＿＿）が残っている（§12 (c) が未記入）" >&2; return 1; fi
+    n="$(grep -c '^MAC-SERIES-CAP:' "${rule}")"
+    if [ "${n}" != "1" ]; then echo "P-CAP 不成立: MAC-SERIES-CAP が ${n} 件（1 件ちょうどを要求）" >&2; return 1; fi
+    v="$(sed -n 's/^MAC-SERIES-CAP: *\(.*[^ ]\) *$/\1/p' "${rule}")"
+    case "${v}" in '' | 0* | *[!0-9]*) echo "P-CAP 不成立: MAC-SERIES-CAP が正の整数でない (${v:-空})" >&2; return 1 ;; esac
+    return 0
 }
 
 # 収録前のマスク漏れ検査の正規表現（#4156 所有者判断 2026-11-11）。
@@ -107,16 +121,57 @@ self_test_leak() { # 値は表示しない（件数と PASS/FAIL だけ）
 if [ "${1:-}" = "--self-test-leak" ]; then
     self_test_leak; exit $?
 fi
+# P-CAP の self-test: 合成した RULE で、正の整数 1 行だけが成立し、空欄・不正値・欠落・重複・空欄記号の残りが不成立になること。
+self_test_cap() {
+    local d n=0 bad=0 c k want rc
+    d="$(mktemp -d)" || return 1
+    for c in "v3|0" "v1|0" "v12|0" "blank|1" "v0|1" "neg|1" "dec|1" "abc|1" "lead0|1" "empty|1" "plus|1" "missing|1" "dup|1" "blank-elsewhere|1"; do
+        k="${c%%|*}"; want="${c#*|}"
+        {
+            echo "12. Mac mini 腕の準備"
+            case "${k}" in
+                v3) echo "MAC-SERIES-CAP: 3" ;;
+                v1) echo "MAC-SERIES-CAP: 1" ;;
+                v12) echo "MAC-SERIES-CAP: 12 " ;;
+                blank) echo "MAC-SERIES-CAP: ＿＿＿" ;;
+                v0) echo "MAC-SERIES-CAP: 0" ;;
+                neg) echo "MAC-SERIES-CAP: -1" ;;
+                dec) echo "MAC-SERIES-CAP: 3.5" ;;
+                abc) echo "MAC-SERIES-CAP: three" ;;
+                lead0) echo "MAC-SERIES-CAP: 03" ;;
+                empty) echo "MAC-SERIES-CAP: " ;;
+                plus) echo "MAC-SERIES-CAP: +3" ;;
+                missing) echo "  - (c) 上限: 3" ;;
+                dup) printf '%s\n' "MAC-SERIES-CAP: 3" "MAC-SERIES-CAP: 3" ;;
+                blank-elsewhere) printf '%s\n' "MAC-SERIES-CAP: 3" "  - (c) 上限: ＿＿＿" ;;
+            esac
+        } > "${d}/RULE.v2.txt"
+        check_series_cap "${d}/RULE.v2.txt" 2>/dev/null
+        rc=$?
+        n=$((n + 1))
+        if { [ "${want}" = "0" ] && [ "${rc}" != "0" ]; } || { [ "${want}" = "1" ] && [ "${rc}" = "0" ]; }; then
+            echo "self-test-cap NG: ${k}（期待 $([ "${want}" = 0 ] && echo 成立 || echo 不成立)）" >&2; bad=$((bad + 1))
+        fi
+    done
+    rm -rf "${d}"
+    if [ "${bad}" = "0" ]; then echo "self-test-cap ok (${n} 件)"; return 0; fi
+    echo "self-test-cap NG (${bad}/${n} 件)" >&2; return 1
+}
+if [ "${1:-}" = "--self-test-cap" ]; then
+    self_test_cap; exit $?
+fi
 
 if [ "${DRY}" = "1" ]; then
     echo "# dry-run: 実行計画（副作用なし）"
-    echo "0. P-OWNER: ${REPO_LOG}/RULE.txt §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING と各回答コメント URL が記入済みであること（未決ならロック取得前に停止）。prereg_append.txt の rule_sha256 が RULE.txt と一致すること"
-    if [ -n "${BASE:-}" ] && [ -f "${BASE}/${REPO_LOG}/RULE.txt" ]; then
-        if check_owner "${BASE}/${REPO_LOG}/RULE.txt"; then echo "   (現在の RULE.txt: P-OWNER 成立)"; else echo "   (現在の RULE.txt: P-OWNER 不成立。実行モードは計測を始めない)"; fi
+    echo "0. P-OWNER: ${REPO_LOG}/RULE.v2.txt §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING と各回答コメント URL が記入済みであること（未決ならロック取得前に停止）。prereg_append.txt の rule_sha256 が RULE.v2.txt と一致すること"
+    echo "0b. P-CAP: ${REPO_LOG}/RULE.v2.txt §12 (c) の MAC-SERIES-CAP がちょうど 1 行・正の整数で、空欄記号が残っていないこと（不成立ならロック取得前に停止）"
+    if [ -n "${BASE:-}" ] && [ -f "${BASE}/${REPO_LOG}/RULE.v2.txt" ]; then
+        if check_owner "${BASE}/${REPO_LOG}/RULE.v2.txt"; then echo "   (現在の RULE.v2.txt: P-OWNER 成立)"; else echo "   (現在の RULE.v2.txt: P-OWNER 不成立。実行モードは計測を始めない)"; fi
+        if check_series_cap "${BASE}/${REPO_LOG}/RULE.v2.txt"; then echo "   (現在の RULE.v2.txt: P-CAP 成立)"; else echo "   (現在の RULE.v2.txt: P-CAP 不成立。実行モードは計測を始めない)"; fi
     fi
     echo "1. ロック: mkdir ${LOCK_DIR}（60 秒おきに再試行）。owner に '#4156 <UTC>' を書き hwlock.log へ取得・解放時刻を残す"
     echo "1b. 外側ゲート: load1 < 1.0・GPU 使用率 0%・nvidia-smi --query-compute-apps が 0 行（最大 20 回・30 秒間隔。内側ゲートは 8.0）"
-    echo "2. P-TREE: BASE を clone して on-arm.patch を適用（sha256 は RULE.txt の値と照合・git apply --check が先）。差分が ${GATE_FILE} の 1 件だけで OFF=false・ON=true"
+    echo "2. P-TREE: BASE を clone して on-arm.patch を適用（sha256 は RULE.v2.txt の値と照合・git apply --check が先）。差分が ${GATE_FILE} の 1 件だけで OFF=false・ON=true"
     echo "3. P-R0: 両腕の sme_report() が kernel_enabled: ${EXPECT_KERNEL} であること（外れたら中止）"
     echo "4. P-RT: ON は cargo test -p fandhe-ai-backend-cpu --release -- --skip ${RT_SKIP_TEST}、OFF はスキップなしの同コマンド"
     echo "5. A/B: scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh ${LABEL}（AB_HOST=${HOST}・5 round）"
@@ -137,13 +192,14 @@ if [ -n "${RAYON_NUM_THREADS:-}" ]; then
     exit 1
 fi
 TORCH_PY="${TORCH_PY:-}"
-RULE="${BASE}/${REPO_LOG}/RULE.txt"
+RULE="${BASE}/${REPO_LOG}/RULE.v2.txt"
 # P-OWNER（ロック取得より前。未決なら何も始めない）
-check_owner "${RULE}" || { echo "P-OWNER 不成立 -> 計測を始めない（undetermined）。RULE.txt §9 へ所有者決定を転記してから再実行すること" >&2; exit 1; }
+check_owner "${RULE}" || { echo "P-OWNER 不成立 -> 計測を始めない（undetermined）。RULE.v2.txt §9 へ所有者決定を転記してから再実行すること" >&2; exit 1; }
+check_series_cap "${RULE}" || { echo "P-CAP 不成立 -> 計測を始めない（undetermined）。RULE.v2.txt §12 (c) の MAC-SERIES-CAP を確かめること" >&2; exit 1; }
 PREREG="${BASE}/${REPO_LOG}/prereg_append.txt"
 [ -f "${PREREG}" ] || { echo "prereg_append.txt が無い -> P-OWNER 不成立" >&2; exit 1; }
 [ "$(sed -n 's/^rule_sha256=\([0-9a-f]\{64\}\)$/\1/p' "${PREREG}" | head -n1)" = "$(sha "${RULE}" | awk '{print $1}')" ] \
-    || { echo "prereg_append.txt の rule_sha256 が現在の RULE.txt と不一致 -> P-OWNER 不成立" >&2; exit 1; }
+    || { echo "prereg_append.txt の rule_sha256 が現在の RULE.v2.txt と不一致 -> P-OWNER 不成立" >&2; exit 1; }
 # prepared_at の形式検証（ロック取得より前。欠落・形式不正・未来時刻は計測を始めない。RULE §4）
 PREPARED_AT="$(sed -n 's/^prepared_at=\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z\)$/\1/p' "${PREREG}" | head -n1)"
 [ -n "${PREPARED_AT}" ] || { echo "prereg_append.txt の prepared_at が欠落または形式不正 (YYYY-MM-DDTHH:MM:SSZ) -> P-OWNER 不成立" >&2; exit 1; }
@@ -206,7 +262,7 @@ PATCH="${BASE}/${REPO_LOG}/on-arm.patch"
 EXPECTED="$(sed -n 's/^on-arm\.patch sha256: \([0-9a-f]\{64\}\)$/\1/p' "${RULE}" | head -n1)"
 case "${EXPECTED}" in
     ????????????????????????????????????????????????????????????????) ;;
-    *) echo "RULE.txt から patch の sha256 を取得できない -> P-TREE 不成立" >&2; exit 1 ;;
+    *) echo "RULE.v2.txt から patch の sha256 を取得できない -> P-TREE 不成立" >&2; exit 1 ;;
 esac
 sha "${PATCH}" | awk '{print $1}' > "${OUT}/patch_sha256.txt" || exit 1
 [ "$(cat "${OUT}/patch_sha256.txt")" = "${EXPECTED}" ] || { echo "patch の sha256 が RULE 記載と不一致 -> P-TREE 不成立" >&2; exit 1; }
