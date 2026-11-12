@@ -189,24 +189,28 @@ fn cached_scalar_unary_kernel_clamp_payload_does_not_split_cache() {
 }
 
 /// 異なる `CudaDevice`（`context_cache::cached_device` を経由しない
-/// `CudaDevice::new` の直接呼び出し。`ContextKey` が異なる）から呼んだ
+/// `CudaDevice::new_isolated_for_test` の呼び出し。`ContextKey` が異なる）から呼んだ
 /// 場合はキャッシュがヒットせず別エントリになる（`cached_gemm`／
 /// `cached_elementwise` の既存挙動と同じであることの確認。
 /// `module_cache_wiring_tests.rs` 冒頭コメント「ABA 耐性」節と同じ、
 /// ctx 単位のキー分離）。
+///
+/// `CudaDevice::new(0)` を 2 回呼ぶ形にしない理由（#4262）: 推論 Graph 既定 ON
+/// では同 ordinal で `Arc<CudaContext>` を共有し「別 ctx」の前提が崩れるため、
+/// 既定に依らず ctx を分けられるテスト専用の構築関数を使う。
 #[test]
 #[ignore = "実機（DGX Spark GB10 等の CUDA 搭載環境）専用。libnvrtc 必須"]
 fn cached_scalar_unary_kernel_distinct_devices_do_not_share_cache() {
-    let device_a = match CudaDevice::new(0) {
+    let device_a = match CudaDevice::new_isolated_for_test(0) {
         Ok(dev) => dev,
         Err(e) if is_environment_unavailable_error(&e) => {
             eprintln!("CUDA/NVRTC 非搭載環境のためスキップ: {e}");
             return;
         }
-        Err(e) => panic!("unexpected CudaError from CudaDevice::new: {e}"),
+        Err(e) => panic!("unexpected CudaError from CudaDevice::new_isolated_for_test: {e}"),
     };
-    let device_b =
-        CudaDevice::new(0).expect("2nd CudaDevice::new must succeed given the 1st succeeded");
+    let device_b = CudaDevice::new_isolated_for_test(0)
+        .expect("2nd new_isolated_for_test must succeed given the 1st succeeded");
 
     let func_a = context_cache::cached_scalar_unary_kernel(&device_a, ScalarUnaryOp::Sqrt)
         .expect("Sqrt is implemented")
