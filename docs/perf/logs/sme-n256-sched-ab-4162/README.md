@@ -21,8 +21,13 @@
 - PyTorch 比（記録のみ。torch median / fandhe median）: gemm 256 fresh の中央値は base 0.873、t4-jpw1 1.287。gemm 512 fresh は両方とも 1.335。
 - 収録前の漏れ検査（P-COLLECT）は 0 件。手元でも `/Users/`・`/home/`・ホスト名・ユーザー名・IP で数え直して 0 件だった。`aggregate.py` を手元で回し直した出力は `aggregate-macmini.md` と一致した。
 - `tree_fingerprint.txt` は計測時の BASE（`RULE.txt` を含む）の値で、`RULE.txt` の PARAMS の値（`1a30988db` のもの）とは違う。この違いは `RULE.txt` に書いてあるとおりで、orchestrate は照合しない。
-- round 1 の初回起動の影響（記録のみ）: round 1 は各腕のバイナリが初めて起動されるセルが遅い（gemm 256 fresh で base 278.5µs・t4 225.4µs。round 2〜5 は base 183.8〜187.4µs）。base と同じバイナリの aa（2 回目の起動）と PyTorch は平常値だった。このため round 1 だけ A/A 0.666・base の PyTorch 比 0.595 に外れている。t4-jpw1 の round 1 の比は 0.801 で、判定は変わらない。規則は変えていない。
-- 計測中に BASE の中へ、ベンチの入力キャッシュ（`docs/perf/logs/lowlayer-diagnosis-2026-09-12/cache/` の `.npy` 10 本。round 1 の最中の 11:33:53Z〜55Z に作成）ができた。収録物には入っておらず、コミットもしていない。
+- round 1 の外れ値（記録のみ。規則は変えていない）
+  - 観測: round 1 の gemm 256 fresh は base 278.5µs・t4 225.4µs・t4-jpw1 223.0µs で、round 2〜5（base 183.8〜187.4µs・t4 121.9〜132.3µs）より遅い。base と同じバイナリの aa（185.5µs）と PyTorch（165.8µs）は round 2〜5 と同じ水準だった。このため round 1 だけ A/A 0.666・base の PyTorch 比 0.595 に外れている。
+  - 推定（原因は確かめていない）: 各腕のバイナリが初めて起動されるセルで遅くなった可能性がある（aa は base の後に走るのでその round で 2 回目の起動になる）。
+  - t4-jpw1 の round 1 の比は 0.801 で、round 1 を含めても 5/5 で 1.00 以下。判定は変わらない。
+- round の間隔（限界として記録）: 開始前のゲートの待ちはすべて 0 秒で、5 round は 11:33:48Z〜11:34:48Z の約 60 秒に収まった。規則どおりだが、round 間の独立性は時間方向にはほとんどない（同じ 1 分間の状態を 5 回測っている）。#4165 の判断材料として記録する。
+- P-RT の skip（記録のみ）: 候補 5 腕の passed は 1335 で、base／aa の 1337 より 2 少ない（failed はすべて 0）。`--skip sme_small_sched_disabled_by_default` は libtest の部分一致なので、固定した名前のテストに加えて `sme_small_sched_disabled_by_default_plan_is_inert` も外れた。どちらも既定 OFF の plan を確かめるテストで、定数を反転したツリーでは作りの上で落ちる。orchestrate の P-RT は ok で、規則は変えていない。
+- 計測中に BASE の中へ、PyTorch セルが使う `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py` の入力キャッシュ（同ディレクトリ `cache/` の `fill_*.npy` など 10 本。round 1 の PyTorch 3 セルの時刻 11:33:53Z〜55Z に作成）ができた。`bench_py.py` は入力を (seed, n) ごとに `.npy` へキャッシュする作り（同ファイル 22〜28 行目）。収録物には入っておらず、コミットもしていない。
 
 ## 目的と根拠
 

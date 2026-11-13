@@ -1068,7 +1068,9 @@ Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 
 
 - 限界: 候補 5 つの多重比較。専用プールとグローバルプールの spin の干渉はガードセルが帯の外で検出できない。macOS に pinning の手段がなく T=4 が P コアだけで動く保証はない。
 - GB10 は対象外（SME 非搭載で機構に到達しない）。
-- round 1 の初回起動の影響（記録のみ。判定は規則どおり変えない）: round 1 は、各腕のバイナリが初めて起動されるセルが遅い（gemm 256 fresh の median_s は base 278.5µs・t4 225.4µs。round 2〜5 は base 183.8〜187.4µs・t4 121.9〜132.3µs）。base と同じバイナリの aa（その round の 2 回目の起動）と PyTorch は平常値だった。このため round 1 だけ A/A が 0.666、base の PyTorch 比が 0.595 に外れている。t4-jpw1 の round 1 の比は 0.801 で、round 1 を含めても 5/5 で 1.00 以下。
+- round 1 の外れ値（記録のみ。判定は規則どおり変えない）: round 1 の gemm 256 fresh は base 278.5µs・t4 225.4µs で、round 2〜5（base 183.8〜187.4µs・t4 121.9〜132.3µs）より遅い。aa と PyTorch は平常値だった。このため round 1 だけ A/A が 0.666、base の PyTorch 比が 0.595 に外れている。各腕のバイナリの初回起動が原因の可能性があるが、確かめていない。t4-jpw1 の round 1 の比は 0.801 で、round 1 を含めても 5/5 で 1.00 以下。
+- round の間隔: ゲートの待ちはすべて 0 秒で、5 round は約 60 秒（11:33:48Z〜11:34:48Z）に収まった。規則どおりだが、時間方向の独立性はほとんどない。
+- P-RT: 候補腕の `--skip sme_small_sched_disabled_by_default` は部分一致で `sme_small_sched_disabled_by_default_plan_is_inert` も外した（passed は base 1337・候補 1335。failed 0）。どちらも既定 OFF を確かめるテストで、規則は変えていない。
 - NB-RANGE5・NB-SEP は、本節の「不変」の行では #4142 承認済みとしているが、`RULE.txt` §6 と `aggregate.py` の出力では「#4142 は所有者承認待ち・記録のみ」としている。判定には使っていない（`aggregate-macmini.md` の値は記録のみ）。
 
 - #4165: 本 A/B の ADOPT(t4-jpw1) を Phase 4（#4165）の入力として記録する。前提として、#4156 の SME 既定 ON が ADOPT であること（§5.17）と、SME の unsafe 独立監査（#4157）を併記する。本イシューでは定数（`SME_SMALL_SCHED_ENABLED`・`THREADS`・`JPW`）を変えていない。結線は #4165 で、所有者の承認を得てから行う（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
