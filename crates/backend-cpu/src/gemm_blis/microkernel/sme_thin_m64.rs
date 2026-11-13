@@ -8,7 +8,8 @@
 //! `docs/perf/cpu-gemm-sme-thin-m64-decision.md`（#3234 判定 (A)）に従い、64×16 の C を
 //! ZA0〜ZA3 に常駐させて K 全長を 1 区間で処理する**別入口**を提供する。`MAX_TILE`（256 要素）を
 //! 通らないため `super::Microkernel` は実装しない。呼び出し元は `gemm_blis/mod.rs` の
-//! `sme_thin_m64_path`（既定 OFF の `SME_THIN_M64_ENABLED` と適格判定の両方が真のときだけ到達）で、
+//! `sme_thin_m64_path`（本番 SME ゲート・`SME_THIN_M64_ENABLED`・適格判定のすべてが真のときだけ到達。
+//! 前二者の合成が `thin_m64_gate_enabled`、#4280）で、
 //! 実行スレッド上で `super::SmeKernel::run_thin_m64_block` を経由して呼ばれる。
 //!
 //! ## bit 完全一致契約（REQ-2・FMA 契約統一）
@@ -445,5 +446,93 @@ mod tests {
         // SAFETY: try_new() が Some。
         unsafe { kernel_unchecked(&ap, &bp, NR, &mut c, NR, k) }.unwrap();
         assert!(c[5 * NR..][..NR].iter().all(|v| v.is_nan()));
+    }
+
+    /// 保留中 lazy ZA save 下の thin 入口検証（#4280・監査 §13.6 P2 #2）の共通本体。
+    /// `sme.rs` のテスト専用ヘルパーで dormant ZA（`TPIDR2_EL0 != 0`）を作り、`call` 経由で thin 入口を
+    /// 呼んで (1) スカラー参照と bit 一致 (2) TPIDR2 が非ゼロのまま (3) ZA0 のパターンが無傷、を確かめる。
+    /// ZA0（16×16）だけを読み戻す。`compute_thin_m64` が走れば C のプリロードで ZA0〜ZA3 が上書きされる
+    /// ため ZA0 の無傷は「compute 未実行」の証拠になるが、ZA1〜ZA3 は検証しない（限界）。
+    /// `TPIDR2_EL0`・ZA はスレッドごとの状態なので専用スレッドで実行する。途中で panic しても
+    /// `PendingLazySaveGuard::Drop` が TPIDR2 クリアと `smstop` を行う。
+    /// `sme_thin_m64_path` を入口にしないのは、ドライバが rayon worker 上でカーネルを動かし、
+    /// 呼び出し元スレッドの保留状態が worker から見えないため。
+    fn check_pending_lazy_save_fallback(
+        seed: u32,
+        call: impl FnOnce(
+            &[f32],
+            &[f32],
+            usize,
+            &mut [f32],
+            usize,
+            usize,
+        ) -> Result<(), TileBoundsError>
+        + Send
+        + 'static,
+    ) {
+        use crate::gemm_blis::microkernel::sme::tests::{
+            enter_dormant_za_with_pending_lazy_save, read_za0_and_clear_pending_lazy_save,
+        };
+        let handle = std::thread::spawn(move || {
+            let za_pattern = xorshift32_vec(
+                seed,
+                crate::gemm_blis::microkernel::sme::MR * crate::gemm_blis::microkernel::sme::NR,
+            );
+            let mut za_readback = vec![0.0f32; za_pattern.len()];
+            // SAFETY: 外側で `SmeKernel::try_new()` が Some（SME 対応・SVL=64）を確認済み。
+            // ヘルパーの `# Safety` 契約（SME 対応 CPU）を満たす。
+            let guard = unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
+
+            let (k, b_stride, ldc) = (5usize, 24usize, 20usize);
+            let ap = xorshift32_vec(seed ^ 0x11, M * k);
+            let bp = xorshift32_vec(seed ^ 0x22, (k - 1) * b_stride + NR);
+            let c0 = xorshift32_vec(seed ^ 0x33, 63 * ldc + NR);
+            let mut c = c0.clone();
+            call(&ap, &bp, b_stride, &mut c, ldc, k).expect("長さは用意済みのため成功するはず");
+            assert_eq!(
+                c,
+                reference(&ap, &bp, b_stride, &c0, ldc, k),
+                "TPIDR2_EL0 非ゼロ時はスカラーへ切り替わり参照と bit 完全一致するはず"
+            );
+            // SAFETY: SME 対応 CPU（上記と同じ契約）。
+            assert!(unsafe { crate::gemm_blis::microkernel::sme::has_pending_lazy_za_save() });
+            // SAFETY: `za_readback.len() == MR * NR`、SME 対応 CPU。
+            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback, guard) };
+            assert_eq!(
+                za_readback, za_pattern,
+                "thin の compute が走らず呼び出し元の dormant ZA を破壊しないはず"
+            );
+        });
+        handle.join().expect("lazy-ZA 検証用スレッドが panic した");
+    }
+
+    /// イシュー #4280: `kernel_unchecked` を TPIDR2 非ゼロで直接呼んでも ZA に触れずフォールバックする。
+    #[test]
+    #[ignore = "SME 実機（M4 系）専用。#4280。cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_thin_m64 --test-threads=1"]
+    fn sme_thin_m64_kernel_unchecked_falls_back_without_corrupting_dormant_za_when_lazy_save_pending()
+     {
+        if SmeKernel::try_new().is_none() {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        }
+        check_pending_lazy_save_fallback(0xa5a5_0001, |ap, bp, bs, c, ldc, k| {
+            // SAFETY: 外側で SME 対応・SVL=64 を確認済み。TPIDR2 確認は関数自身が行う。
+            unsafe { kernel_unchecked(ap, bp, bs, c, ldc, k) }
+        });
+    }
+
+    /// イシュー #4280: `SmeKernel::run_thin_m64_block`（`current_thread_capable` が保留を見て
+    /// `scalar_fallback` へ切り替える経路）も同様に ZA を壊さない。
+    #[test]
+    #[ignore = "SME 実機（M4 系）専用。#4280。cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_thin_m64 --test-threads=1"]
+    fn sme_thin_m64_run_thin_m64_block_falls_back_without_corrupting_dormant_za_when_lazy_save_pending()
+     {
+        let Some(kernel) = SmeKernel::try_new() else {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        };
+        check_pending_lazy_save_fallback(0xa5a5_0002, move |ap, bp, bs, c, ldc, k| {
+            kernel.run_thin_m64_block(ap, bp, bs, c, ldc, k)
+        });
     }
 }

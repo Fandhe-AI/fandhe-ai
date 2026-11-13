@@ -429,7 +429,7 @@ pub(crate) fn scalar_fallback_kernel(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::gemm_blis::microkernel::{Microkernel, SmeKernel, TileBoundsError};
 
@@ -833,7 +833,7 @@ mod tests {
     /// PSTATE.SM の遷移自体を伴わない、別の独立した asm ブロック）を
     /// 呼ぶ。両者は asm を共有しないが、`cleaned_up` フラグにより
     /// 二重後始末（`msr`／`smstop` の重複発行）を防ぐ。
-    struct PendingLazySaveGuard {
+    pub(in crate::gemm_blis::microkernel) struct PendingLazySaveGuard {
         _block: Box<Tpidr2Block>,
         _save_buffer: AlignedSaveBuffer,
         /// [`Self::read_za0_and_finish_streaming`]（正常経路）または
@@ -1078,7 +1078,9 @@ mod tests {
     /// 使うため `nomem`/`pure` は付けない。スタック未使用のため
     /// `options(nostack)`。本関数はテスト専用の ZA 状態構築であり
     /// `compute` の呼び出し規約とは独立。
-    unsafe fn enter_dormant_za_with_pending_lazy_save(za_pattern: &[f32]) -> PendingLazySaveGuard {
+    pub(in crate::gemm_blis::microkernel) unsafe fn enter_dormant_za_with_pending_lazy_save(
+        za_pattern: &[f32],
+    ) -> PendingLazySaveGuard {
         // 実行時 SVL。`SmeKernel::try_new()` を確認済みのスレッド前提
         // （呼び出し元契約）のため、`crate::sme_detect::sme_report()` は
         // 常に `kernel_enabled == true` かつ `svl_bytes == Some(_)` を
@@ -1206,7 +1208,7 @@ mod tests {
     /// [`enter_dormant_za_with_pending_lazy_save`] と同一（実行 CPU が
     /// SME 対応であること。`out.len() == MR * NR` を満たさない場合の
     /// 挙動は未定義）。
-    unsafe fn read_za0_and_clear_pending_lazy_save(
+    pub(in crate::gemm_blis::microkernel) unsafe fn read_za0_and_clear_pending_lazy_save(
         out: &mut [f32],
         mut guard: PendingLazySaveGuard,
     ) {

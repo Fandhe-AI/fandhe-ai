@@ -522,3 +522,13 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - 呼び出し元は crate 内（`gemm_blis/microkernel.rs`）だけ。`backend-cpu/src` の外からの呼び出しと、`pub use` による再公開は無い（`git grep` で確認）。
 - 公開 API の破壊的変更になる（`fandhe-ai-backend-cpu`。版は 0.x）。次の minor（0.15.0）で出す。リリースは別に承認を得る。
 - §6 の R1（到達可能性）の「外部から到達できる」は、本節の時点で解消した。到達できるのは crate 内の `Microkernel` 実装経由だけで、`SmeKernel` は `pub(crate)` の `try_new`（実行時検出つき）でしか作れない。
+
+### 14.15 thin のゲート従属と lazy-ZA テスト（イシュー #4280。2026-11-13 追記）
+
+§13.6 の P2 #1・#2 への是正。**所有者の承認ではない**。既定値（`SME_PRODUCTION_ENABLED = true`・`SME_THIN_M64_ENABLED = false`）と本番の `asm!` 本体は変えていない。
+
+- **P2 #1（ゲートの従属）**: `gemm_blis/mod.rs` に純関数 `thin_m64_gate(production, thin)`（論理積）と読み出し口 `thin_m64_gate_enabled()` を足した。後者は非 aarch64 でもビルドできるよう `sme_production_enabled()` を経由する。`sme_thin_m64_path` の本番 2 呼び出し点は、この実効ゲートだけを渡す。本番 SME のロールバック（`SME_PRODUCTION_ENABLED` の 1 行）で thin も必ず OFF になる。`sme_thin_m64_path`／`thin_m64_kernel_for_shape` の `enabled` 引数の意味は変えていない（テストは `true` を渡して直接カーネルを動かせる）。
+- **ドリフト検出テスト**: `thin_m64_gate_requires_both_production_and_thin`（真理値表。非 aarch64 の CI でも走る）、`thin_m64_gate_enabled_follows_sme_production_enabled`（aarch64。値は固定せず論理積の構造を守る）、`thin_m64_call_sites_use_composed_gate`（呼び出し点が `SME_THIN_M64_ENABLED` を直接渡さず合成ゲートを 2 回渡すことのソース検査）、既存 `sme_thin_m64_disabled_by_default` の拡張。
+- **P2 #2（lazy-ZA テスト）**: `sme_thin_m64.rs` に `#[ignore]` 付きテスト 2 件を足した（`sme_thin_m64_kernel_unchecked_falls_back_…`・`sme_thin_m64_run_thin_m64_block_falls_back_…`）。`sme.rs` のテスト専用ヘルパー（`enter_dormant_za_with_pending_lazy_save`・`read_za0_and_clear_pending_lazy_save`）の可視性を `cfg(test)` 内で `microkernel` スコープへ広げて共有した。テスト専用 `asm!` は 3 か所のまま。本番の `asm!`・`unsafe fn` の数は不変で、テスト側の `unsafe {}` が `sme_thin_m64.rs` の `mod tests` に増えた。
+- **限界**: 読み戻すのは ZA0（16×16）だけ。`compute_thin_m64` が走れば C のプリロードで ZA0 も上書きされるので「compute 未実行」の証拠にはなるが、ZA1〜ZA3 は検証しない。`sme_thin_m64_path` を入口にしないのは、ドライバが rayon worker 上でカーネルを動かし、呼び出し元スレッドの `TPIDR2_EL0` が worker から見えないため。
+- **検証**: x86_64 Linux で fmt・clippy（workspace・aarch64-apple-darwin・aarch64-unknown-linux-gnu の `--lib --tests`）と非 aarch64 のテストが通る。**実機（Apple M4）での実行は未検証**。Mac mini で `cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_thin_m64 --test-threads=1` と `--lib sme_thin_m64` を実行し、結果をこの節へ追記すること（イシュー #4280 を閉じる条件）。

@@ -537,9 +537,10 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
         return Ok(());
     }
 
-    // m=64 専用 4 タイル SME 経路（#3235）。既定 OFF（[`SME_THIN_M64_ENABLED`]）かつ適格形状かつ
+    // m=64 専用 4 タイル SME 経路（#3235）。本番 SME ゲートと thin ゲートの両方が真
+    // （[`thin_m64_gate_enabled`]。#4280）かつ適格形状かつ
     // SME 搭載のときだけ `Some`。それ以外は従来経路へ進む（OFF では `try_new` も呼ばれない）。
-    if let Some(r) = sme_thin_m64_path(SME_THIN_M64_ENABLED, a, b, c, m, n, k, transpose) {
+    if let Some(r) = sme_thin_m64_path(thin_m64_gate_enabled(), a, b, c, m, n, k, transpose) {
         return r;
     }
 
@@ -797,7 +798,8 @@ pub(crate) fn gemm_blis_bias_act_parallel_prepacked(
 
     // m=64 専用 4 タイル SME 経路（#3235。既定 OFF）。Nn 固定で B 行は連続のため `prepack` は使わない。
     // epilogue は GEMM 完了後に全体へ 1 回だけ当てる（asm へは融合しない。決定記録 §4.8 初版方針）。
-    if let Some(r) = sme_thin_m64_path(SME_THIN_M64_ENABLED, a, b, c, m, n, k, GemmTranspose::Nn) {
+    if let Some(r) = sme_thin_m64_path(thin_m64_gate_enabled(), a, b, c, m, n, k, GemmTranspose::Nn)
+    {
         r?;
         return apply_epilogue(c, n, bias, act);
     }
@@ -3622,6 +3624,25 @@ pub fn sme_production_enabled() -> bool {
 /// ドリフト検出は `sme_thin_m64_disabled_by_default`。
 const SME_THIN_M64_ENABLED: bool = false;
 
+/// thin 経路の実効ゲート（純関数）。本番 SME ゲートと thin ゲートの**両方**が真のときだけ真。
+///
+/// 監査 `docs/cpu-gemm-sme-unsafe-audit.md` §13.6 P2 #1・イシュー #4280。従来は
+/// `SME_THIN_M64_ENABLED` だけで判定していたため、「本番 SME をロールバック
+/// （`SME_PRODUCTION_ENABLED = false`）したのに thin だけ ON」という構成を作れた。本関数で
+/// 従属させ、本番 SME のロールバックは従来どおり `SME_PRODUCTION_ENABLED` の 1 行で thin も
+/// 必ず OFF になる。`sme_thin_m64_path` の 2 つの本番呼び出し点へはこの結果だけを渡す
+/// （ドリフト検出は `thin_m64_call_sites_use_composed_gate`）。
+const fn thin_m64_gate(production: bool, thin: bool) -> bool {
+    production && thin
+}
+
+/// [`thin_m64_gate`] へ現在の本番 SME ゲートと [`SME_THIN_M64_ENABLED`] を渡す読み出し口。
+/// `SME_PRODUCTION_ENABLED` は aarch64 限定 const のため、非 aarch64 でもビルドできるよう
+/// [`sme_production_enabled`]（非 aarch64 では `false`）を経由する。
+fn thin_m64_gate_enabled() -> bool {
+    thin_m64_gate(sme_production_enabled(), SME_THIN_M64_ENABLED)
+}
+
 /// m=64 専用経路の適格形状判定（純関数）。`n` は 16 の倍数（端のマスク付きストアは未対応で従来経路へ
 /// 落とす）、転置は Nn／Nt のみ（Tn は対象外）。k の下限は #3236 の格子で決めるため置かず `k >= 1` だけ
 /// を要求する（`k == 0` は従来経路に任せる）。
@@ -3636,7 +3657,7 @@ fn thin_m64_shape_eligible(m: usize, n: usize, k: usize, transpose: GemmTranspos
 
 /// 本番ゲート式: `enabled` かつ [`thin_m64_shape_eligible`] のときだけ
 /// [`microkernel::SmeKernel::try_new`] を呼ぶ（短絡評価。OFF では検出も走らず従来経路と同一）。
-/// 本番は [`SME_THIN_M64_ENABLED`] を渡し、テストは `true` を渡す。
+/// 本番は [`thin_m64_gate_enabled`] を渡し、テストは `true` を渡す。
 #[cfg(target_arch = "aarch64")]
 fn thin_m64_kernel_for_shape(
     enabled: bool,
@@ -5993,6 +6014,55 @@ mod tests {
         let mut c = vec![0.0f32; m * n];
         assert!(sme_thin_m64_path(false, &a, &b, &mut c, m, n, k, GemmTranspose::Nn).is_none());
         assert!(thin_m64_kernel_for_shape(false, m, n, k, GemmTranspose::Nn).is_none());
+        // #4280: 実効ゲートも既定では OFF（本番 SME ON でも thin が OFF のため）。
+        // （変数経由にして `thin_m64_call_sites_use_composed_gate` のソース検査へ数えさせない）
+        let gate = thin_m64_gate_enabled();
+        assert!(!gate);
+        assert!(sme_thin_m64_path(gate, &a, &b, &mut c, m, n, k, GemmTranspose::Nn).is_none());
+    }
+
+    /// イシュー #4280（監査 §13.6 P2 #1）: 実効ゲートは両者の論理積。`(true, true)` だけが真。
+    #[test]
+    fn thin_m64_gate_requires_both_production_and_thin() {
+        assert!(thin_m64_gate(true, true));
+        assert!(!thin_m64_gate(true, false));
+        assert!(!thin_m64_gate(false, true));
+        assert!(!thin_m64_gate(false, false));
+    }
+
+    /// イシュー #4280: 読み出し口が本番 SME ゲートと thin ゲートの論理積に従う。値そのものは固定せず
+    /// 構造だけを守る（A/B の ON 腕〈thin=true〉でも成り立つ）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn thin_m64_gate_enabled_follows_sme_production_enabled() {
+        assert_eq!(
+            thin_m64_gate_enabled(),
+            std::hint::black_box(SME_PRODUCTION_ENABLED)
+                && std::hint::black_box(SME_THIN_M64_ENABLED)
+        );
+    }
+
+    /// イシュー #4280: 本番の 2 呼び出し点が `SME_THIN_M64_ENABLED` を直接渡さず合成ゲートを渡す
+    /// ことのソース検査。テストは `true`／`false` リテラルで呼ぶため数に入らない。検査文字列は
+    /// 実行時に組み立て、本テスト自身のソースにはマッチさせない。
+    #[test]
+    fn thin_m64_call_sites_use_composed_gate() {
+        let src: String = include_str!("mod.rs")
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        let direct = format!("sme_thin_m64_path({}", "SME_THIN_M64_ENABLED");
+        let composed = format!("sme_thin_m64_path({}(),", "thin_m64_gate_enabled");
+        assert_eq!(
+            src.matches(&direct).count(),
+            0,
+            "thin のゲートは本番 SME ゲートに従わせる（監査 §13.6 P2 #1・#4280）"
+        );
+        assert_eq!(
+            src.matches(&composed).count(),
+            2,
+            "本番 2 入口は thin_m64_gate_enabled() を渡す（監査 §13.6 P2 #1・#4280）"
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
