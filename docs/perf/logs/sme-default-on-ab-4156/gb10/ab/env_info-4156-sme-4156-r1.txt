@@ -1,0 +1,15 @@
+gate=sme
+host_kind=gb10
+sw_vers=
+nproc=20
+uname_m=aarch64
+rustc=rustc 1.97.1 (8bab26f4f 2026-07-14)
+head=85498f32be4bb8ea70302bd85ec2b8b4329d862f
+cpu_brand=NA
+hw.logicalcpu=NA
+hw.perflevel0.logicalcpu=NA
+hw.perflevel1.logicalcpu=NA
+hw.memsize=NA
+rayon_num_threads=unset
+bench_py_sha256=9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+torch=2.14.0+cu130 20

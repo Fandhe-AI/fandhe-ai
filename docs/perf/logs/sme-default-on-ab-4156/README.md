@@ -2,7 +2,7 @@
 
 ## 状態
 
-**事前登録（v2）・未実測**。判定に使う規則は `RULE.v2.txt`（v2）。v1 の `RULE.txt` は経緯として残し、道具（両オーケストレーション・`aggregate.py`）は読まない。
+**事前登録（v2）・両機体の系列は終了・集計前**。GB10 腕の収録物は `gb10/` に入れた（下の「実行の記録」）。Mac mini 腕の収録・集計・判定はまだ（下の「結果」は空欄）。判定に使う規則は `RULE.v2.txt`（v2）。v1 の `RULE.txt` は経緯として残し、道具（両オーケストレーション・`aggregate.py`）は読まない。
 
 - v2 で変えた点と理由は `RULE.v2.txt` の冒頭に書いた。判定式・閾値・5 round・5/5 一貫性・checksum 完全一致・処置は v1 のまま。
   - 登録基準を `d551b31` から `18938d84c`（#4258 のマージコミット）へ移した。v1 の固定後に道具の PR（#4256・#4258）が入ったため。
@@ -31,7 +31,7 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 | `orchestrate_macmini.sh`・`orchestrate_gb10.sh` | P-OWNER → P-CAP → ロック →（GB10 は外側ゲート）→ P-TREE → P-R0 → P-RT →（Mac mini は mediaanalysisd の確認）→ A/B → P-BIT → マスク収録（`--dry-run`・`--self-test-leak`・`--self-test-cap` あり） |
 | `test_foreign_gate_4156.sh` | Mac mini 腕の他ジョブの前提ゲートと mediaanalysisd の確認の self-test（実機に接続しない。`bash test_foreign_gate_4156.sh`） |
 | `aggregate.py` | 厳密集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`） |
-| `macmini/`・`gb10/`・`aggregate-*.md` | 実測後に収録（現時点では無い）。`aggregate-*.md` は機械出力で手で直さない |
+| `macmini/`・`gb10/`・`aggregate-*.md` | 実測後に収録（`gb10/` は収録済み。`macmini/`・`aggregate-*.md` はまだ無い）。`aggregate-*.md` は機械出力で手で直さない |
 | `../../../../scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` | 2 機共通の A/B 本体。#3232 の `run_ab_sme_default_on_cpu.sh` の派生（元は凍結して変更しない） |
 
 腕は before = OFF（main のクリーンな clone・定数 false）、after = ON（その clone に `on-arm.patch` を当てた計測専用ツリー）。
@@ -105,6 +105,35 @@ Mac mini 腕の準備（`__pycache__` の扱い・系列の前に誰がプロセ
     - `check_series_cap` で空欄記号を見ない（Mac mini 側）
 - v2 の固定前に、`<cuda-node>` で v2 の道具の捨て試走を 1 回流した（2026-11-11）。全段が exit 0 で、マスク収録まで通った。見たのは終了コードの行だけで、出力は開かずに消した（`RULE.v2.txt` §13）。
 - **未検証**: 正式系列での実機の A/B・P-RT・P-BIT・マスク収録と、マスク後の収録物に対する `aggregate.py` の実行（Mac mini と GB10 が必要）。
+
+## 結果
+
+<集計前。Mac mini 腕のセッションが `aggregate.py` の出力（`aggregate-*.md`）と判定をここに書く>
+
+## 実行の記録
+
+### GB10 腕（`<cuda-node>`）
+
+- 計測対象（BASE）: `85498f32be4bb8ea70302bd85ec2b8b4329d862f`（#4264 のマージコミット。`gb10/rev-stamp.txt`）。`git bundle` で送ってクリーンな clone を BASE とし、ツリー指紋が送信側と実機側で一致することを確かめた。ノード上で GitHub への clone・fetch はしていない。
+- 系列: 2026-11-12T04:57:01Z〜05:01:51Z（`run_ab exit=0`）。
+- 実機ロック: `orchestrate_gb10.sh` が 04:57:01Z に取得し、05:01:51Z に解放した。
+  - 収録した `gb10/hwlock.log` は、収録先へ複製した時点の写しなので、最後の行は `released-pending at=2026-11-12T05:01:51Z`。
+  - 解放の行（`released at=2026-11-12T05:01:51Z`）は、ノードの作業ディレクトリ側の `hwlock.log` にだけある。
+- 収録前の漏れ検査（`orchestrate_gb10.sh` の `leak_re`）: 0 件（`collect exit=0`）。
+- push 前の再検査（2026-11-13・開発機）:
+  - 回収した 43 ファイルに、実機の実値で組んだ `leak_re` を当てた。0 件。
+  - 開発機のユーザー名・ホスト名も 0 件。
+  - 43 ファイルの sha256 は、ノード上の収録先の複製とすべて一致した。
+- 道具（`RULE.v2.txt` §11 で固定した 8 本）は変えていない。
+- 値を見ていないこと:
+  - 系列の途中でも、Mac mini 腕の系列が終わるまでの間も、収録物の値は開いていない。
+  - 見たのは次だけ: ファイル名・空ファイルの数・`hwlock.log` の時刻・終了行（`run_ab exit=`・`collect exit=`）・漏れ検査の件数・`rev-stamp.txt` の SHA。
+  - GB10 腕のセッションは `aggregate.py` を流していない。
+- ノードの作業ディレクトリ `<home>/work/sme-4156-gb10` は、記録 PR のマージまで残す。
+
+### Mac mini 腕（`<metal-node>`）
+
+<Mac mini 腕のセッションが書く>
 
 ## スコープ外
 

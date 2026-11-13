@@ -1,0 +1,2 @@
+off: sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
+on: sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
