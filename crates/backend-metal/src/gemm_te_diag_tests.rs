@@ -1,7 +1,7 @@
 //! `thread_elements()` 方式 BlockMMA 候補（イシュー #1693。
 //! `gemm_simdgroup_tiled_te`／`tile::MmaFragLoad::ThreadElements`）の
 //! 純カーネル専有時間（GPU タイムスタンプ。`kernel_gpu`。イシュー
-//! #1276）を本番選択構成（`tile::select_for_device`）と M4 Max 実機で
+//! #1276）を本番選択構成（`tile::select_for_verified_device`）と M4 Max 実機で
 //! A/B 比較する診断テスト（イシュー #1694）。
 //!
 //! # 位置づけ・前提ゲート
@@ -81,7 +81,7 @@
 //! 追加。前者は `pub`、後者は `#[cfg(test)] pub(crate)`）・
 //! `gemm_reuse_phase_diag_tests::{measure_one_phase_trial,
 //! WARMUP_TRIALS, MEASURED_TRIALS, gen_square_ab, median_of}`・
-//! `tile::select_for_device` へ到達するため、integration test では
+//! `tile::select_for_verified_device` へ到達するため、integration test では
 //! なく `lib.rs` の兄弟モジュールとして配置する。`objc2` 系 FFI 型に
 //! 触れるため `cfg(all(test, target_os = "macos"))` を付ける。
 //!
@@ -124,7 +124,7 @@ use crate::gemm_reuse_phase_diag_tests::{
 use crate::tile::{self, MmaFragLoad};
 use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
 
-/// 本番選択構成（`tile::select_for_device`）が実測帯域全体をカバー
+/// 本番選択構成（`tile::select_for_verified_device`）が実測帯域全体をカバー
 /// するよう、`gemm_bk32_diag_tests::SIZES_B`（B 系列）と同一の対象
 /// サイズを使う。
 const SIZES_AB: [usize; 4] = [512, 1024, 2048, 4096];
@@ -174,14 +174,14 @@ fn te_kernel_gpu_ab_vs_production_select() {
     );
 
     for n in SIZES_AB {
-        let cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         // false-green 防止 (2): te ガードは非 staged 候補を拒否する
         // ため、本番選択構成が非 staged であれば head 側が別構成へ
         // フォールバックしうる（構造上該当しない想定だが、本番選択
         // テーブルの将来変更に備え明示的に検証する）。
         assert!(
             cfg.staged,
-            "N={n}: tile::select_for_device が非 staged 構成 {cfg:?} を \
+            "N={n}: tile::select_for_verified_device が非 staged 構成 {cfg:?} を \
              選んだ。te ガードは非 staged 候補を拒否するため本 A/B の \
              前提が崩れる"
         );

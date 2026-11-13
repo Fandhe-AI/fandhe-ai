@@ -18,7 +18,7 @@
 //! # 候補と `TileConfig` の組み立て方
 //!
 //! `tgp-k1`／`tgp-k2` は `staged=true` の本番選択構成（`tile::
-//! select_for_device`）をそのまま使う（`FragLoadConfig.device_hoisted` は
+//! select_for_verified_device`）をそのまま使う（`FragLoadConfig.device_hoisted` は
 //! staged 経路では no-op。`docs/perf/metal-gemm-frag-load-candidates.md`
 //! §1 候補表）。`device-legacy`／`device-hoisted-k1`／`device-hoisted-k2`
 //! は `TileConfig { staged: false, ..cfg }`（同ドキュメント §5「`{staged:
@@ -150,9 +150,9 @@ fn frag_load_kernel_gpu_ab_production_sizes() {
     let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
 
     for n in SIZES {
-        // base 選択構成（`tile::select_for_device`。`dispatch_auto` と同一
+        // base 選択構成（`tile::select_for_verified_device`。`dispatch_auto` と同一
         // 解決。`tgp-k1`／`tgp-k2` はこの構成をそのまま使う）。
-        let base_cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let base_cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         let device_twin = TileConfig {
             staged: false,
             ..base_cfg

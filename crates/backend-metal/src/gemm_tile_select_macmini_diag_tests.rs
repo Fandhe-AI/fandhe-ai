@@ -7,6 +7,14 @@
 //!
 //! # 位置づけ
 //!
+//! - **意図的に旧入口（`verified_m4_max_gpu_core_count`／`select_for_device`／
+//!   `select_route_for_device`。M4 Max 表のみ）を使う**（#4219 の棚卸し。許可リストは
+//!   `tests/diag_tile_select_source_evidence.rs`）。理由: (a) 本ファイルの実測（#3181）は
+//!   M4Base 表（#3206）を導いた入力側で、RULE.txt は計測前に固定済み、(b) TRACE の
+//!   `select_for_device=` は API の逐語トレースで本番の実際は `executed_route=` が記録する、
+//!   (c) `aggregate.py` が `select_for_device=` と CAND の `selected=` を突合するため変えるなら
+//!   両方を同時に変える必要がある、(d) 新入口へ変えると表を作った実測を表自身で再生する循環になる。
+//!   本番代表の診断は他ファイル（`verified_tile_table_device` 系）が担う。
 //! - 規則の正（計測前に固定）: `docs/perf/logs/metal-tile-macmini-3181/RULE.txt`
 //! - 結論: `docs/perf/metal-gemm-tile-select-macmini.md`
 //! - 雛形: `gemm_steel_candidate_diag_tests.rs`（候補の強制実行・hash・CPU 参照 parity）・
@@ -114,6 +122,7 @@ fn run_tiled(
 fn tile_select_trace_square_sizes() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
+    // #4219: 意図的に旧入口（M4 Max 表のみ）。理由はファイル冒頭「位置づけ」を参照。
     let verified = ctx.verified_m4_max_gpu_core_count();
     println!(
         "DEVICE gpu_cores={} soc=\"{}\" verified_m4_max={} split_k_enabled={}",
@@ -198,6 +207,7 @@ fn tile_candidates_match_cpu_reference() {
 fn tile_candidates_kernel_gpu_square_sizes() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new_with_steel_large_n(&ctx, false).expect("MetalGemm の構築に失敗した");
+    // #4219: 意図的に旧入口（M4 Max 表のみ）。理由はファイル冒頭「位置づけ」を参照。
     let verified = ctx.verified_m4_max_gpu_core_count();
     let num = tile::CANDIDATES.len();
 

@@ -9,15 +9,15 @@
 //!
 //! - **S（候補スイープ）**: hfrag × 全 staged `tile::CANDIDATES[0..=10]`
 //!   を N=1024/2048/4096 で単独計測し、N ごとの hfrag 最良タイルを
-//!   確定する（`select_for_device` の構成は f32 向けにチューニングされて
+//!   確定する（`select_for_verified_device` の構成は f32 向けにチューニングされて
 //!   おり、hfrag の SMEM 使用量は f32 版のちょうど半分〈`tile::
 //!   TileConfig::shared_mem_bytes_hfrag_for`〉のため、hfrag に最適な
 //!   タイルが f32 と同じとは限らない）。
-//! - **A（同一タイル比較）**: `tile::select_for_device` が選ぶ構成を
+//! - **A（同一タイル比較）**: `tile::select_for_verified_device` が選ぶ構成を
 //!   base（f32）/head（hfrag）両 arm に使い、N=512/1024/2048/4096 で
 //!   「タイル形状を揃えた純粋な half MMA 効果」を直接比較する。
 //! - **B（結線判断の根拠）**: head を S 系列で確定した N 別最良タイル、
-//!   base を本番選択構成（`select_for_device`）とし、N=512/1024/2048/
+//!   base を本番選択構成（`select_for_verified_device`）とし、N=512/1024/2048/
 //!   4096 で採否判断の主根拠とする（`docs/perf/metal-gemm-hfrag-
 //!   candidate.md` §2.4 のとおり、本番結線自体は opt-in 公開 API 設計＋
 //!   ユーザー承認が前提。本イシューの「採否」は「opt-in 候補として前進
@@ -48,7 +48,7 @@
 //! イシュー #1370 で `DiagKernel`／`measure_one_phase_trial_with` を
 //! 新設）・`gemm_bk32_diag_tests::run_ab_pair_kernels`（`pub(crate)`。
 //! イシュー #1370 で base/head 独立カーネル指定へ一般化）・
-//! `tile::{CANDIDATES, select_for_device}` へ到達するため、integration
+//! `tile::{CANDIDATES, select_for_verified_device}` へ到達するため、integration
 //! test ではなく `lib.rs` の兄弟モジュールとして配置する。`objc2` 系 FFI
 //! 型に触れるため `cfg(all(test, target_os = "macos"))` を付ける。
 //!
@@ -107,7 +107,7 @@ const SIZES_S: [usize; 3] = [1024, 2048, 4096];
 
 /// [`hfrag_kernel_gpu_ab_same_tile_vs_f32`]・
 /// [`hfrag_kernel_gpu_ab_best_vs_production_select`] が対象とするサイズ
-/// （`tile::select_for_device` の実測帯域全体。E7/E8 の `SIZES_B` と
+/// （`tile::select_for_verified_device` の実測帯域全体。E7/E8 の `SIZES_B` と
 /// 同一）。
 const SIZES_AB: [usize; 4] = [512, 1024, 2048, 4096];
 
@@ -126,9 +126,9 @@ const MAX_THREADS_PER_TG_ESTIMATE: u32 = 1024;
 /// - N=4096 → `[9]`（`(bm=64,bn=64,bk=32,wm=2,wn=2)`。中央値 12.2568 ms）
 ///
 /// N=512 は S 系列の対象外（`SIZES_S` 参照）のため、本番選択構成
-/// （`tile::select_for_device` が返す `[5]`）をそのまま用いる（この N
+/// （`tile::select_for_verified_device` が返す `[5]`）をそのまま用いる（この N
 /// では A 系列と B 系列が同一ペアになる。ファイル冒頭「系列構成」参照）。
-/// M4 Max 本番選択構成（`tile::select_for_device` 実測）: 512→`[5]`・
+/// M4 Max 本番選択構成（`tile::select_for_verified_device` 実測）: 512→`[5]`・
 /// 1024→`[6]`・2048→`[1]`・4096→`[2]`（`docs/perf/metal-gemm-n4096-
 /// kernel-gap.md` §16.3）。
 const HFRAG_BEST_BY_N: [(usize, usize); 4] = [(512, 5), (1024, 6), (2048, 0), (4096, 9)];
@@ -268,7 +268,7 @@ fn hfrag_kernel_gpu_sweep_all_staged_candidates() {
     }
 }
 
-/// A 系列: `tile::select_for_device` が選ぶ構成（本番選択タイル）を
+/// A 系列: `tile::select_for_verified_device` が選ぶ構成（本番選択タイル）を
 /// base（f32）/head（hfrag）両 arm に使い、N=512/1024/2048/4096 で
 /// 「タイル形状を揃えた純粋な half MMA 効果」を比較する
 /// （`docs/perf/metal-gemm-hfrag-candidate.md` §9.3）。
@@ -279,7 +279,7 @@ fn hfrag_kernel_gpu_ab_same_tile_vs_f32() {
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
     for n in SIZES_AB {
-        let cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         validate_hfrag_cfg(&ctx, cfg);
         println!("N={n} pair=same_tile production_select_resolved={cfg:?}");
 
@@ -316,7 +316,7 @@ fn hfrag_kernel_gpu_ab_best_vs_production_select() {
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
     for n in SIZES_AB {
-        let base_cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let base_cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         let head_cfg = hfrag_best_cfg_for(n);
         validate_hfrag_cfg(&ctx, head_cfg);
         println!(
@@ -357,7 +357,7 @@ fn hfrag_smoke_rounded_inputs_pass_composite_vs_f32() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
-    let cfg = tile::select_for_device(N, N, N, ctx.verified_m4_max_gpu_core_count());
+    let cfg = tile::select_for_verified_device(N, N, N, ctx.verified_tile_table_device());
     validate_hfrag_cfg(&ctx, cfg);
 
     let (mut a, mut b) = gen_square_ab(0x1370_5a0c, N);

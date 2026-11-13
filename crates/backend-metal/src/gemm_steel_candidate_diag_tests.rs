@@ -253,7 +253,7 @@ fn steel_candidate_arms_match_cpu_reference() {
     use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
 
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
-    let verified = ctx.verified_m4_max_gpu_core_count();
+    let verified = ctx.verified_tile_table_device();
     let mut shapes: Vec<(usize, usize, usize)> = SIZES.iter().map(|&s| (s, s, s)).collect();
     shapes.push((1032, 1048, 1032));
     for arm in STEEL_ARMS {
@@ -309,7 +309,7 @@ fn steel_candidate_arms_match_cpu_reference() {
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn steel_candidate_kernel_gpu_ab_production_sizes() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
-    let verified = ctx.verified_m4_max_gpu_core_count();
+    let verified = ctx.verified_tile_table_device();
 
     let gemms: Vec<MetalGemm> = STEEL_ARMS
         .iter()

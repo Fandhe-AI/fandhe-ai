@@ -199,7 +199,7 @@ N=256 は現行選択が帯内のため表に入れない。
   **f16 経路は Mini 未実測のため対象外**（旧入口・M4 Max token のまま）。
 - 新エントリは split-K に入らない（`should_split_k` は N=512 で並列度条件、N≥1024 で `tmn16` 条件により `None`。pad8 後も同じ）。
   split-K parity baseline の全行は m,n ≤ 128 で、新エントリとは交差しない。単体テストで固定している。
-- 既存の診断テスト（#3181 の `verified_m4_max_gpu_core_count` 利用）は Mini で `verified=None` と表示するが、本番は Mini 表を使う。この表示上のずれは仕様。
+- 診断テストの tile 選択は #4219 で棚卸しし、本番代表の前提があるものは `verified_tile_table_device` 系へ揃えた。#3181 のトレースだけは意図的に旧入口（§7.6）。
 - tolerance・split-K baseline・`should_split_k` パラメータ・シェーダは変更しない。
 
 ### 7.5 正式系列の結果（AC4）
@@ -207,3 +207,14 @@ N=256 は現行選択が帯内のため表に入れない。
 5 プロセス・負荷ゲート・candle 同系列の正式系列（`docs/perf/metal-gemm-tile-select-macmini.md` §9）で、追加後は追加前（`[3]` 強制）に対し
 kernel_gpu が N=512／1024／2048／4096 で 0.949／0.935／0.810／0.818 倍（全 N で「改善」、退行なし）。candle 主比（後）は N=2048／4096 で 0.735／0.761。
 bit 一致と選択確認は 5 run 全一致。f16 と系列 B（reuse 比）は対象外のまま。
+
+### 7.6 診断テストの tile 選択（#4219）
+
+旧入口（`verified_m4_max_gpu_core_count`＋`select_for_device`／`select_route_for_device`）は M4 Max の表だけを通る。
+Mac mini では診断が汎用表、本番が M4Base 表になり、`DIAG_BITEQ`（K の縮約順序が同じなら bit 一致）では構成差を検出できなかった（#4153 で発覚）。
+
+- 揃えた（`verified_tile_table_device`＋`select_for_verified_device`／`select_route_for_verified_device`）: `gemm_reuse_phase`・`gemm_bk32`・`gemm_bm128`・`gemm_coop_load`・`gemm_frag_load`・`gemm_hfrag`・`gemm_mpp`・`gemm_smem_swizzle`・`gemm_spec_source`・`gemm_te`・`gemm_steel_candidate` の各診断テストと `readout_regression_diag_tests_1695`、`tile.rs` の `SteelArm`（`#[cfg(test)]`）。M4 Max・未検証機種では選択が変わらない（`legacy_select_for_device_maps_to_m4max_variant` が固定）。
+- 変えない（意図的に旧入口）: `gemm_tile_select_macmini_diag_tests`（#3181）。(a) 表（#3206）を導いた入力側の実測で RULE.txt は計測前に固定済み、(b) TRACE の `select_for_device=` は API の逐語トレースで本番の実際は `executed_route=`、(c) `aggregate.py` が `select_for_device=` と CAND の `selected=` を突合する、(d) 新入口へ変えると表を表自身で再生する循環になる。
+- 再混入防止: `crates/backend-metal/tests/diag_tile_select_source_evidence.rs`（許可リストは上記 1 ファイルのみ）。
+- 残るずれ: M4Base の正方 1024/2048/4096 の本番は steel（`select_steel_large_n`・ゲート組 `SteelLargeN`）で、`diag_encode_tiled_nn` は `Instance` 固定のため、表経路へ揃えても診断は本番を代表しない。`gemm_window_route_precheck` が出す `ROUTE_CFG_CHECK`（route の variant・bm/bn/bk/wm/wn/staged・解決後構成・ゲート組の一致）で見える。既存 3 行（`ROUTE`／`ROUTE_ACTUAL`／`DIAG_BITEQ`）の形式は不変。
+- スコープ外: f16 の `dispatch_f16_auto_unverified`（Mini 未実測）、`examples/*.rs`・f16/strided/swizzle の統合テスト、診断測定経路の `classic_plan` 化。Metal 実機での実行は未検証。

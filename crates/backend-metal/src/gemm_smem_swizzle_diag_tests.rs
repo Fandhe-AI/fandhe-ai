@@ -134,7 +134,7 @@ fn xor_swizzle_kernel_gpu_ab_production_sizes() {
     let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
 
     for n in SIZES {
-        let base_cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let base_cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         assert!(
             base_cfg.staged,
             "N={n}: 選択構成が staged=false だった。CoopLoadConfig::pad_elems は \

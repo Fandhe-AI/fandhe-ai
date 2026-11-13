@@ -416,7 +416,7 @@ fn measure_mpp_trial(
     kernel_gpu_secs
 }
 
-/// 本番選択構成（`tile::select_for_device` が実際に選ぶ `gemm_
+/// 本番選択構成（`tile::select_for_verified_device` が実際に選ぶ `gemm_
 /// simdgroup_tiled` 構成。`gemm::MetalGemm::diag_encode_tiled_nn`
 /// 経由）の 1 回の kernel_gpu を計測する（E7/E8 `run_ab_pair` の base
 /// arm 相当を MPP 診断内で複製したもの。`gemm_bk32_diag_tests::
@@ -464,7 +464,7 @@ fn measure_production_trial(
 }
 
 /// (3) 純カーネル時間 A/B（head=MPP `matmul2d` Route C・base=本番選択
-/// 構成 `tile::select_for_device`）。E7/E8 と同じ交互測定・trial index
+/// 構成 `tile::select_for_verified_device`）。E7/E8 と同じ交互測定・trial index
 /// による開始 arm 回転で order-bias を相殺し、trial 0 の出力を REQ-2
 /// 複合判定で比較する（**bit 完全一致は要求しない** — MPP は別カーネル
 /// 実装のため加算順序が異なりうる。`coding-rust.md`「バックエンド間
@@ -485,7 +485,7 @@ fn mpp_kernel_gpu_ab_vs_production_select() {
     for n in KERNEL_GPU_AB_SIZES {
         let (a, b) = gen_square_ab(0x1326_a000 ^ (n as u64), n);
         let base_cfg =
-            crate::tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+            crate::tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         println!("N={n} pair=mpp_vs_production_select production_select_resolved={base_cfg:?}");
 
         let mut keep_alive_base: Vec<Vec<f32>> =

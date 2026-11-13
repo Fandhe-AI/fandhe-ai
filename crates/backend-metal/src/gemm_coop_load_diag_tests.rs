@@ -20,7 +20,7 @@
 //! との差分）
 //!
 //! E3（`FragLoadConfig`）と異なり、E4 の 6 候補はいずれも同一の
-//! `base_cfg = tile::select_for_device(...)`（`staged=true` の本番選択
+//! `base_cfg = tile::select_for_verified_device(...)`（`staged=true` の本番選択
 //! 構成。`dispatch_auto` と同一解決）をそのまま使う（`{staged: false}`
 //! twin は不要）。`CoopLoadConfig::pad_elems` が `!cfg.staged` の場合に
 //! 常に `0` を返す契約（`tile.rs::CoopLoadConfig::pad_elems` doc
@@ -162,11 +162,11 @@ fn coop_load_kernel_gpu_ab_production_sizes() {
     let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
 
     for n in SIZES {
-        // 全候補共通の選択構成（`tile::select_for_device`。`dispatch_auto`
+        // 全候補共通の選択構成（`tile::select_for_verified_device`。`dispatch_auto`
         // と同一解決）。E4 は `TileConfig` 自体を差し替えないため、E3の
         // ような device twin は不要（ファイル冒頭「候補と `TileConfig`
         // の組み立て方」参照）。
-        let base_cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let base_cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         assert!(
             base_cfg.staged,
             "N={n}: 選択構成が staged=false だった。CoopLoadConfig::pad_elems は \

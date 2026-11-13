@@ -171,7 +171,7 @@ fn print_quartiles_ms(label: &str, q: Quartiles) {
 pub(crate) struct PhaseSample {
     /// `diag_encode_tiled_nn` が実際にディスパッチした構成（`pipeline_
     /// for_tile` のフォールバック解決後）。要求構成 `cfg`（呼び出し元が
-    /// `tile::select_for_device` で解決した値）と一致するとは限らない
+    /// `tile::select_for_verified_device` で解決した値）と一致するとは限らない
     /// （デバイス上限超過・パイプライン構築失敗時にフォールバックしうる。
     /// `pipeline_for_tile` ドキュメンテーションコメント参照）ため、
     /// 計測時間をどの構成の性能として記録したかを区別するために保持
@@ -230,7 +230,7 @@ impl DiagKernel {
 /// プール経由になる契約 — `buffer.rs::MetalBuffer::alloc_uninit_pooled`
 /// ドキュメンテーションコメント参照）。
 ///
-/// 選択構成 `cfg` は `dispatch_auto` と同一の `tile::select_for_device`
+/// 選択構成 `cfg` は `dispatch_auto` と同一の `tile::select_for_verified_device`
 /// で呼び出し元が 1 度だけ解決し、全反復で使い回す（本番も `dispatch_
 /// auto` 呼び出しのたびに再解決するため反復間で変わらない。診断側で
 /// 反復ごとに解決し直しても結果は同じだが、解決コスト自体をフェーズへ
@@ -406,7 +406,7 @@ pub(crate) fn run_size_with(
 ) {
     // `dispatch_auto` と同一の構成解決（ファイル冒頭「1 サイズの 1 反復」
     // ドキュメンテーションコメント参照）。
-    let cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+    let cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
 
     let (a, b) = gen_square_ab(0x1189_a000 ^ (n as u64), n);
     let mut keep_alive: Vec<Vec<f32>> = Vec::with_capacity(WARMUP_TRIALS + MEASURED_TRIALS);
@@ -549,7 +549,7 @@ fn gpu_timestamps_within_commit_wait_window() {
 
     let ctx = cached_context().expect("Metal device (system default) must be available");
     let gemm = cached_gemm(&ctx).expect("MetalGemm construction must succeed");
-    let cfg = tile::select_for_device(N, N, N, ctx.verified_m4_max_gpu_core_count());
+    let cfg = tile::select_for_verified_device(N, N, N, ctx.verified_tile_table_device());
     let (a, b) = gen_square_ab(0x1276_a000, N);
     let mut keep_alive: Vec<Vec<f32>> = Vec::with_capacity(TRIALS);
 
@@ -575,20 +575,34 @@ fn gemm_window_phase_diag_small_sizes() {
     }
 }
 
+fn route_kind(route: &tile::GemmRoute) -> &'static str {
+    match route {
+        tile::GemmRoute::Classic(_) => "Classic",
+        tile::GemmRoute::SplitK(_) => "SplitK",
+    }
+}
+
 /// #3182: 診断経路（`diag_encode_tiled_nn`）が本番 `dispatch_auto` の
 /// 経路を代表するかの事前確認。N ごとに `ROUTE`（Mac mini の GPU コア数
 /// で解決した route と構成）と `DIAG_BITEQ`（両経路の出力 bit 一致）を
 /// 出力する。値は assert しない（判定は `aggregate.py`）。
+///
+/// #4219: `DIAG_BITEQ` は K の縮約順序が同じならタイルが違っても true になり構成差を
+/// 検出できないため、`ROUTE_CFG_CHECK` 行で予測構成（診断経路が使う構成）と実際の構成
+/// （`dispatch_auto_with_route` の route・`diag_classic_plan_resolved` の解決後構成とゲート組）
+/// の一致を出す。M4Base の 1024/2048/4096 は本番が steel（ゲート組 `SteelLargeN`）のため
+/// `tile_match=false`／`profile_match=false` になりうる（診断 `diag_encode_tiled_nn` は
+/// `Instance` 固定。その N では診断経路は本番を代表しない）。
 #[test]
 #[ignore]
 fn gemm_window_route_precheck() {
     let ctx = cached_context().expect("Metal device (system default) must be available");
     let gemm = cached_gemm(&ctx).expect("MetalGemm construction must succeed");
-    let core = ctx.verified_m4_max_gpu_core_count();
+    let device = ctx.verified_tile_table_device();
     for n in [256usize, 512, 1024, 2048, 4096] {
         let n8 = crate::pad::pad8(n);
-        let route = tile::select_route_for_device(n8, n8, n8, core);
-        let cfg = tile::select_for_device(n, n, n, core);
+        let route = tile::select_route_for_verified_device(n8, n8, n8, device);
+        let cfg = tile::select_for_verified_device(n, n, n, device);
         println!("ROUTE N={n} route={route:?} resolved_tile={cfg:?}");
 
         let (a, b) = gen_square_ab(0x3182_a000 ^ (n as u64), n);
@@ -596,6 +610,36 @@ fn gemm_window_route_precheck() {
             .dispatch_auto_with_route(&ctx, &a, &b, n, n, n)
             .expect("dispatch_auto must succeed");
         println!("ROUTE_ACTUAL N={n} route={actual:?}");
+        let m = tile::route_cfg_match(&route, cfg, &actual);
+        let (plan_label, plan_match, profile, profile_match, fell_back) =
+            match (&actual, gemm.diag_classic_plan_resolved(&ctx, n, n, n)) {
+                (tile::GemmRoute::Classic(_), Ok((_, profile, resolved, fell_back))) => (
+                    tile::tile_label(resolved),
+                    (resolved == cfg).to_string(),
+                    format!("{profile:?}"),
+                    (profile == crate::gemm::GateProfile::Instance).to_string(),
+                    fell_back.to_string(),
+                ),
+                _ => (
+                    "na".to_string(),
+                    "na".to_string(),
+                    "na".to_string(),
+                    "na".to_string(),
+                    "na".to_string(),
+                ),
+            };
+        println!(
+            "ROUTE_CFG_CHECK N={n} predicted_route={} actual_route={} variant_match={} \
+             predicted_tile={} actual_tile={} tile_match={} plan_resolved_tile={plan_label} \
+             plan_resolved_match={plan_match} profile={profile} profile_match={profile_match} \
+             fell_back={fell_back}",
+            route_kind(&route),
+            route_kind(&actual),
+            m.variant_match,
+            tile::tile_label(cfg),
+            tile::tile_label(tile::route_tile(&actual)),
+            m.tile_match,
+        );
 
         let a_buf = MetalBuffer::new_with_data(&ctx, &a).expect("A upload");
         let b_buf = MetalBuffer::new_with_data(&ctx, &b).expect("B upload");
