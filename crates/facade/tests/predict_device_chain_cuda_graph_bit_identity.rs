@@ -1,11 +1,12 @@
-//! イシュー #2115: 推論チェーンの CUDA Graph capture（opt-in
-//! `FANDHE_AI_CUDA_GRAPH_INFER`・既定 OFF）の bit 同一検証（R2）用の
+//! イシュー #2115: 推論チェーンの CUDA Graph capture（
+//! `FANDHE_AI_CUDA_GRAPH_INFER`。#4167 以降は既定 ON・`0` で OFF）の bit 同一検証（R2）用の
 //! 生値ダンプ。`predict_device_chain_cuda_bit_identity.rs` の
 //! `predict_resident_bit_dump_cuda`（batch 64 固定）を、判定セルの batch
 //! （64／1024／4096。`bench-fandhe --infer-batch`）へ広げたもの。
 //!
-//! **必ず `--exact` で 1 テストずつ、OFF（環境変数未設定）と ON
-//! （`FANDHE_AI_CUDA_GRAPH_INFER=1`）の 2 プロセスで実行する**。opt-in は
+//! **必ず `--exact` で 1 テストずつ、OFF（`FANDHE_AI_CUDA_GRAPH_INFER=0`。
+//! #4167 以降は未設定が ON になるため明示が必要）と ON
+//! （`FANDHE_AI_CUDA_GRAPH_INFER=1`。未設定でも ON）の 2 プロセスで実行する**。切替は
 //! 最初の CUDA デバイス初期化前に環境変数で決まり（created stream は
 //! ordinal ごとに sticky）、同一プロセス内では切り替えられないため。
 //! 標準出力から `^out\[` 行を抽出して OFF／ON を diff し、全行一致を
@@ -25,7 +26,7 @@
 //! ```sh
 //! b=1024
 //! for mode in off on; do
-//!   if [ "$mode" = on ]; then export FANDHE_AI_CUDA_GRAPH_INFER=1; else unset FANDHE_AI_CUDA_GRAPH_INFER; fi
+//!   if [ "$mode" = on ]; then export FANDHE_AI_CUDA_GRAPH_INFER=1; else export FANDHE_AI_CUDA_GRAPH_INFER=0; fi
 //!   cargo test -p fandhe-ai --release --test predict_device_chain_cuda_graph_bit_identity \
 //!     -- --ignored --exact --nocapture "predict_resident_bit_dump_cuda_graph_batch_$b" \
 //!     > "raw-$mode-$b.txt" || { echo "R2-FAIL: test failed mode=$mode"; break; }

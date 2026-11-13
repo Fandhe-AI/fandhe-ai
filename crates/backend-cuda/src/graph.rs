@@ -15,11 +15,12 @@
 //! # 推論 forward チェーンの capture（イシュー #2115。別機構）
 //!
 //! 学習 step の update 区間（上記・`STEP_GRAPH_MODE`・#1349）とは**別の
-//! opt-in**として、推論 forward チェーン（`DeviceParamStore::
+//! 機構**として（#4167 以降は**既定 ON**・opt-out 可）、推論 forward チェーン（`DeviceParamStore::
 //! predict_device_chain` の層カーネル列）を 1 本の graph へ capture し、
 //! 2 回目以降は graph launch 1 回で再生する経路を持つ
 //! （`run_captured_linear_chain`・opt-in は [`infer_graph_enabled`]・
-//! 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`・既定 OFF）。層ごとの kernel
+//! 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`・#4167 以降は既定 ON。
+//! `0` 等の `1`／`true` 以外の値や API 明示 false で OFF）。層ごとの kernel
 //! launch と出力バッファの `alloc_zeroed`・入力の `upload` 新規確保を
 //! 除去することが目的で、graph・staging・中間バッファは thread-local の
 //! `INFER_GRAPHS` が所有する。**stream 種別（created stream）の決定は
@@ -660,14 +661,16 @@ pub(crate) fn run_captured_sgd_step_segment(
 }
 
 // ============================================================
-// 推論 forward チェーンの capture（イシュー #2115。別機構・opt-in・既定 OFF）
+// 推論 forward チェーンの capture（イシュー #2115。別機構。#4167 以降は既定 ON・opt-out 可）
 // ============================================================
 
-/// 推論チェーン capture の既定値（**既定 OFF**）。A/B の after 側・将来の
-/// 既定反転（別 PR）で反転する単一ゲート。反転すると `device.rs` の
-/// created stream 選択にも波及する（全 CUDA 利用者の既定ストリームが
-/// created に変わる）ため、反転は GB10 での ADOPT 判定後に限る。
-pub(crate) const INFER_GRAPH_DEFAULT_ENABLED: bool = false;
+/// 推論チェーン capture の既定値（**既定 ON**。#4167 で反転。根拠は #4163 の
+/// GB10 測り直し RULE.v3 の ADOPT〈`judge-4163v3.md`〉と所有者承認）。単一ゲート。
+/// `device.rs` の created stream 選択にも波及し、学習を含む全 CUDA 利用者の
+/// 既定ストリームが created になる（`device.rs` の OR。ロジックは不変）。
+/// opt-out は環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` を `1`／`true` 以外
+/// （例 `0`）にするか、API 明示 false。優先順位は API > 環境変数 > 本 const。
+pub(crate) const INFER_GRAPH_DEFAULT_ENABLED: bool = true;
 
 /// 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` の値と既定値から opt-in を決める
 /// 純粋関数（`std::env` を読まないため並列テストで安全）。許容値は
@@ -688,11 +691,12 @@ static INFER_API_ENABLED: AtomicBool = AtomicBool::new(false);
 /// API で明示設定済みか（学習側 `EXPLICIT` と同型）。
 static INFER_EXPLICIT: AtomicBool = AtomicBool::new(false);
 
-/// 推論チェーン capture の opt-in を API から明示設定する（イシュー #3116。
+/// 推論チェーン capture の有効・無効を API から明示設定する（#4167 以降は既定 ON のため
+/// `false` で opt-out）（イシュー #3116。
 /// 公開形は `docs/facade-graph-tier-b-optin-exposure-decision.md` §3・§4。
 /// 呼び出し元は `facade::set_cuda_graph_infer_enabled`）。
 ///
-/// 優先順位は API 明示 > 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` > 既定 OFF。
+/// 優先順位は API 明示 > 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` > 既定 ON（#4167）。
 /// プロセスワイドで `Device` 単位ではない。**最初の CUDA デバイス初期化より
 /// 前に呼ぶこと**: stream 種別は ordinal ごとに sticky なため、遅れた場合は
 /// その ordinal の stream が capture 不可のまま残り、
@@ -2004,10 +2008,10 @@ mod tests {
         assert!(infer_graph_stream_requested());
     }
 
-    /// 既定は OFF（受け入れ基準 1。反転は ADOPT 判定後の別 PR）。
+    /// 既定は ON（#4167。#4163 v3 ADOPT〈`judge-4163v3.md`〉に基づく反転）。
     #[test]
-    fn infer_graph_default_is_off() {
-        const { assert!(!INFER_GRAPH_DEFAULT_ENABLED) };
+    fn infer_graph_default_is_on() {
+        const { assert!(INFER_GRAPH_DEFAULT_ENABLED) };
     }
 
     /// override は現スレッド限定で、ガード drop で直前の値へ戻る。

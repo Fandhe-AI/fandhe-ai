@@ -1,10 +1,10 @@
-# CUDA 推論チェーンの CUDA Graph capture（opt-in）A/B 記録（イシュー #2115）
+# CUDA 推論チェーンの CUDA Graph capture（#4167 以降は既定 ON）A/B 記録（イシュー #2115）
 
 - 対象: `DeviceParamStore::predict_device_chain`（#1688）の層カーネル列を CUDA Graph へ
   stream capture し、2 回目以降を graph launch 1 回で再生する opt-in 経路。update 区間 capture
   （#1349・`STEP_GRAPH_MODE`）とは別機構
 - スコープ: infer の fresh／reuse のみ。train の update 区間 capture（#1349）は対象外
-- **現状の verdict: `undetermined`**（GB10 未実測。本 PR は opt-in 実装・A/B 基盤・事前登録規則まで）
+- **現状の状態（2026-11-13 更新）**: 旧 A/B（#2115・§3）の verdict は `undetermined` のまま。#4163 の測り直し（v3）は ADOPT（§6.3）で、所有者承認（#4167 issuecomment-6859477937）により #4167 で**既定 ON に結線済み**（§7）。反転後の GB10 実機確認は未実施（実施後に §7 へ追記する）
 - 事前登録規則の正: [`logs/cuda-infer-chain-graphcapture-2115/RULE.txt`](./logs/cuda-infer-chain-graphcapture-2115/RULE.txt)
   （実測前に固定。事後に緩めない。#1349/#1350 の非後退ゲートとは別に定めた規則）
 - 実行手順: [`logs/cuda-infer-chain-graphcapture-2115/README.md`](./logs/cuda-infer-chain-graphcapture-2115/README.md)
@@ -13,7 +13,7 @@
 
 | 項目 | 内容 | 出典 |
 |------|------|------|
-| opt-in | 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`（`1`／`true` 完全一致のみ ON・既定 OFF）。単一ゲート `INFER_GRAPH_DEFAULT_ENABLED = false` | `crates/backend-cuda/src/graph.rs` |
+| 有効化 | 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`（`1`／`true` 完全一致のみ ON。**#4167 以降は既定 ON**で、`0` 等それ以外の値か API 明示 false で OFF）。単一ゲート `INFER_GRAPH_DEFAULT_ENABLED = true`（2026-11-13 に `false` から反転） | `crates/backend-cuda/src/graph.rs` |
 | created stream | opt-in ON で created stream を選ぶ（`step_graph_mode` との OR・ordinal ごとに sticky）。初回デバイス初期化前に設定が必要 | `crates/backend-cuda/src/device.rs` |
 | BackendOps 拡張 | `linear_chain_forward_captured`（default `Ok(None)`）。不適用は `Ok(None)`、`Err` は実 driver 失敗のみ（`Unsupported` は tape 経路への全体フォールバックを意味するため不使用） | `crates/tensor-core/src/backend_ops.rs` |
 | CUDA 実装 | key 構築（世代・base バッファのアドレス・config_key）→ thread-local キャッシュ（ordinal 分割・上限 8・世代 evict）→ ミス時 warmup（NVRTC＋実 launch 1 回）→ capture → replay。同期点は入力 `upload_into` 1・出力 `download` 1（決定 3） | `graph.rs::run_captured_linear_chain`・`ops.rs::linear_chain_forward_captured` |
@@ -115,9 +115,11 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 | 規則の固定 | `RULE.v2.txt`（R3 は N=3。PR #4259。v1 の `RULE.txt` は使っていない）。測り直しは `RULE.v3.txt`（PR #4288） |
 | GB10 実測・判定（v2） | 実測済み（2026-11-11・`8482bcb19`）。**verdict: UNDETERMINED**（undetermined 要因 `r3: 阻害 3 件`・reject 要因 `ratio > 1.00: infer-fresh-1024`）。R0〜R2 は合格。詳細は `logs/cuda-infer-graph-default-ab-4163/README.md`「結果（v2）」と `judge-4163.md` |
 | GB10 測り直し・判定（v3） | 実測済み（2026-11-13・`4c2792004`・ラベル `4163v3`）。**verdict: ADOPT**（undetermined 要因・reject 要因なし）。R0・R1(a)・R1(b) 5/5・R2 は合格、R3 は阻害 0 件（既定OFF前提 1 件・不安定 2 件は判定外）。全 11 セルで ratio <= 1.00・checksum 一致。詳細は同 README「結果（v3）」と `judge-4163v3.md`。`INFER_GRAPH_DEFAULT_ENABLED` は変えていない |
-| #4167 の判断 | 結線見送り（ADOPT 入力なし。§7） |
+| #4167 の判断 | **結線（既定 ON・2026-11-13・#4167。所有者承認 issuecomment-6859477937。§7）**。2026-11-11 時点の見送りは §7.1〜7.2 に残す |
 
-## 7. #4167 既定経路への結線の判断（見送り）
+## 7. #4167 既定経路への結線の判断（2026-11-11 は見送り・2026-11-13 に結線）
+
+（追記・2026-11-13）所有者が既定反転を承認し（#4167 issuecomment-6859477937）、v3 の ADOPT（§6.3）を根拠に、#4167 の反転 PR で `INFER_GRAPH_DEFAULT_ENABLED = true` へ結線した。以下の 7.1〜7.3 の本文は 2026-11-11 時点の判断の記録で、そのまま残す。現在の状態は 7.4 の追記を参照。
 
 ### 7.1 判断
 
@@ -139,17 +141,19 @@ Phase 3 由来の CUDA 系 ADOPT は 0 件で、結線する入力がない。
 ### 7.4 再開条件（すべて満たしたときだけ、新しい結線イシューで行う）
 
 1. #4163 の PR-2（RULE.txt を測る前に単独コミット）と PR-3（GB10〈`<cuda-node>`〉実測・`judge-4163.md`）が完了し、判定が ADOPT であること（R1(b)・R3 を含む）。
-   - （2026-11-13 追記）v3 の測り直し（`RULE.v3.txt`・`4c2792004`）の判定は ADOPT（R1(b) 5/5・R3 の阻害 0 件。§6.3・`judge-4163v3.md`）。1. は満たした。2.・3. はまだで、`INFER_GRAPH_DEFAULT_ENABLED` は変えていない。
+   - （2026-11-13 追記）v3 の測り直し（`RULE.v3.txt`・`4c2792004`）の判定は ADOPT（R1(b) 5/5・R3 の阻害 0 件。§6.3・`judge-4163v3.md`）。1. は満たした。
+   - （2026-11-13 追記・結線時）2. は満たした（所有者承認 #4167 issuecomment-6859477937）。3. は #4167 の反転 PR で実施した（const 反転・既定 OFF 前提 2 件の更新・前後比較の記録）。反転後の GB10 実機確認（`#[ignore]` 実機テスト全件・off＝`=0`／on＝未設定の bit 同一ダンプ）は未実施で、結果は実施後に追記する。
 2. 所有者が既定反転を承認し、結線イシューを起票すること。
 3. 反転 PR で次を行う。
    - const を反転する。
    - `default-off-assumption-tests.txt` の 2 件（`lib::graph::tests::infer_graph_default_is_off`・`graph_capture_real_device_optin_off::opt_in_off_keeps_legacy_stream_and_returns_none`）を既定 ON 前提へ更新する。
    - R3 相当（既定 ON での `#[ignore]` 実機テスト全件の差分）を行う。
    - 推論・学習の両方で前後比較を記録する（既定 ON は `requires_created_stream` を通じて全 CUDA 利用者の stream を created に変える）。
+   - （2026-11-13 追記）前後比較は v3 の A/B（`judge-4163v3.md`）を引く。on 腕（`=1`）は const `true` と同じ `resolve_infer_requested` を通るため既定 ON と同値（§6.2）。推論 9 セルと学習 2 セル（train-fresh・train-reuse）がそろっており、全 11 セルで ratio <= 1.00・checksum 一致。
 
 ### 7.5 所見（結線で得られる効果の上限）
 
-§6.1 のとおり、本番の G-CUDA-INF reuse セル（常駐入力 `predict_device_chain_resident`）は capture に届かない。ADOPT 後に反転しても本番セルでの効果は created stream 化だけになる。常駐入力経路の capture 対応は製品の挙動の変更で、別の A/B と所有者承認が要る。
+§6.1 のとおり、本番の G-CUDA-INF reuse セル（常駐入力 `predict_device_chain_resident`）は capture に届かない。ADOPT 後に反転しても（#4167 で反転済み）本番セルでの効果は created stream 化だけになる。常駐入力経路の capture 対応は製品の挙動の変更で、別の A/B と所有者承認が要る。
 
 ### 7.6 注意
 

@@ -1189,6 +1189,7 @@ A/B。`run_ab_resident_grad_cuda.sh`〈#1560〉と同じ「before／after 2 本�
   undetermined で終了。判定は `compare_gemm_ab.py --task infer --sizes infer-batches --per-run --require-checksum-exact`
   （`--sizes infer-batches` は infer 専用の 3 形状セル集合）
 - 判定規則・実行手順・記録: `docs/perf/infer-chain-graphcapture-cuda-ab.md`・`docs/perf/logs/cuda-infer-chain-graphcapture-2115/`
+- **注意（2026-11-13・#4167 以降）**: 推論 Graph は既定 ON になった。`run_ab_infer_graph_cuda.sh`・`run_ab_infer_graph_default_cuda.sh` と学習側の `run_ab_train_*`・`run_ab_graph_cuda.sh` は off 腕を `FANDHE_AI_CUDA_GRAPH_INFER` 未設定で起動するため、反転後の HEAD でそのまま再利用すると off 腕も ON になる。再利用するときは off 腕を `FANDHE_AI_CUDA_GRAPH_INFER=0` で明示すること。これらのスクリプトは RULE の sha256 で固定済み・完了した A/B の記録のため書き換えていない。過去の記録は、それぞれの計測 HEAD（既定 OFF の tree）で再現する
 
 ### CUDA GEMM VJP NT／TN 転置入口 train A/B（イシュー #1590）
 
@@ -2085,7 +2086,7 @@ main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の
 
 ## 学習ステップ全体の Graph capture A/B（`run_ab_train_graph_cuda.sh`・`judge_train_graph_ab.py`、イシュー #3261）
 
-GB10 専用。#3260 の opt-in（`FANDHE_AI_CUDA_GRAPH_TRAIN=1`・既定 OFF）を train CUDA で 5 round 計測する。同一バイナリ・同一コミットで腕の差は環境変数だけ（off = 3 変数すべて未設定、on = TRAIN=1 のみ）。セルは {chain, reuse, fresh} × {off, on}。判定セルは chain（capture が届く唯一の経路。計測専用パッチ `docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch` を runner ツリーにだけ適用）、reuse・fresh は stream 変更のみの対照セル。計測前に前提ゲート R0〜R2（既存回帰・結線・2 プロセス bit 一致）を同じ HEAD で実行する。規則は `docs/perf/logs/train-step-graph-ab-3261/RULE.txt`、手順は同 `README.md`。判定は `judge_train_graph_ab.py`（終了コード ADOPT=0・REJECT=3・UNDETERMINED=4・入力不正=2。`judge_train_graph_ab_test.py` は CI で実行）。ADOPT でも既定の反転は本件の範囲外（設計 §8.6。所有者判断）。
+GB10 専用。#3260 の opt-in（`FANDHE_AI_CUDA_GRAPH_TRAIN=1`・既定 OFF）を train CUDA で 5 round 計測する。同一バイナリ・同一コミットで腕の差は環境変数だけ（off = 3 変数すべて未設定、on = TRAIN=1 のみ）。セルは {chain, reuse, fresh} × {off, on}。判定セルは chain（capture が届く唯一の経路。計測専用パッチ `docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch` を runner ツリーにだけ適用）、reuse・fresh は stream 変更のみの対照セル。計測前に前提ゲート R0〜R2（既存回帰・結線・2 プロセス bit 一致）を同じ HEAD で実行する。規則は `docs/perf/logs/train-step-graph-ab-3261/RULE.txt`、手順は同 `README.md`。判定は `judge_train_graph_ab.py`（終了コード ADOPT=0・REJECT=3・UNDETERMINED=4・入力不正=2。`judge_train_graph_ab_test.py` は CI で実行）。ADOPT でも既定の反転は本件の範囲外（設計 §8.6。所有者判断）。 （2026-11-13・#4167 以降は推論 Graph が既定 ON のため、本スクリプトの off 腕〈3 変数すべて未設定〉も推論側は ON になる。推論 Graph を OFF にするには `FANDHE_AI_CUDA_GRAPH_INFER=0` を明示する。スクリプトは sha256 固定のため未変更）
 
 ## bench-fandhe 是正前後の新旧併記（`run_ab_bench_fandhe_symmetry.sh`・`judge_bench_fandhe_symmetry_ab.py`、イシュー #3266）
 

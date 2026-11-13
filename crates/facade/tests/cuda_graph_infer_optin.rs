@@ -39,12 +39,11 @@ impl Drop for InferFlagGuard {
     }
 }
 
-/// 既定無効の契約を、明示的に `false` へ戻した直後の観測で確認する
-/// （他テストが有効化したまま残す可能性があるため、起動直後の真の初期値
-/// そのものは検証しない。`cuda_graph_step_optin.rs::default_is_disabled`
-/// と同じ理由）。
+/// 明示 `false` で無効化できる契約を、`false` へ設定した直後の観測で確認する
+/// （#4167 以降の既定は ON のため、既定値そのものではなく明示 OFF を検証する。
+/// 他テストが状態を変えたまま残す可能性があるため起動直後の初期値も見ない）。
 #[test]
-fn default_is_disabled() {
+fn explicit_false_disables() {
     let _guard = InferFlagGuard::acquire();
     fandhe_ai::set_cuda_graph_infer_enabled(false);
     assert!(!fandhe_ai::cuda_graph_infer_enabled());
