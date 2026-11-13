@@ -66,5 +66,6 @@ REJECT（#4158）と「測っていない」（#4159）は別物として扱う�
 - **#4280**: thin のゲートを `SME_PRODUCTION_ENABLED` に従属させる。別 PR。`cpu-gemm-sme-unsafe-audit.md` §13.6 の P2（thin のゲート従属・thin 側の lazy-ZA の回帰テスト）の系列。thin を有効にする前に必須。
 - **M4 Max の非後退（未計測）**: §5.4.1 で境界 (256,64) の中央値が 1.161、2/5 run が 1.0 未満で 5/5 を満たさなかった。SME を報告する Linux aarch64 機も未計測。所有者判断で受け入れて記録する。計測できる機会に後続で確かめる。
 - **ロールバック**: `SME_PRODUCTION_ENABLED` を `false` に戻す 1 行と、ドリフト検出テスト `sme_production_enabled_is_true_with_neon_fallback` の反転（t4-jpw1 は SME OFF なら効かない）。t4-jpw1 だけを外す場合は、`sme_small_sched.rs` の 3 定数と対応するテスト。
+- **過去の A/B の道具の再現**: #4156・#4162 の腕の patch（`on-arm.patch`・`arm-t4-jpw1.patch` など）と、その A/B スクリプト（`scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` など）は、結線前の main を前提にしている。結線後の main には当たらない（2026-11-13 に `git apply --check` で確認）。再現は結線前のコミット（`00db8720e`）で行う。
 - eager release（#4158 REJECT・#4159 未測）の既定反転は #3227 の別判断。現時点では結線しない。
 - Metal／CUDA 系は #4166・#4167、分類の付け直しは #4168。

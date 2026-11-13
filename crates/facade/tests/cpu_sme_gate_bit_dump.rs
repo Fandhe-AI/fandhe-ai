@@ -5,8 +5,8 @@
 //! `thread_limit::BIG_CORE_LIMIT_ENABLED` と同型のロールバック機構
 //! （同ファイル doc comment 参照）で、採否記録は
 //! `docs/perf/cpu-gemm-sme-fmopa-microkernel.md`）の on/off で CPU 側
-//! 出力が bit 完全一致することを、2 ツリー（ON = main、OFF =
-//! `docs/perf/logs/sme-default-on-3231/off-arm.patch` を当てたツリー）で本ファイルを実行し
+//! 出力が bit 完全一致することを、2 ツリー（ON = main、OFF = 定数 1 行を `false` にしたツリー。
+//! `docs/perf/logs/sme-default-on-3231/off-arm.patch` は #4165 以降の main には当たらない）で本ファイルを実行し
 //! 標準出力を diff することで確認する診断用テスト。
 //!
 //! `RAYON_NUM_THREADS`（未設定・1・2・4・8）を変えた実行でも出力 bit が同一

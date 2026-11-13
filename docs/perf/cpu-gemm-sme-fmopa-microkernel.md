@@ -172,7 +172,7 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
   `try_new()` が `None` となり NEON へ fall back して出力は不変。`false` に
   戻すと実行 CPU が SME に対応していても常に NEON（#1313 以前と bit 完全一致）。
   ドリフト検出は `sme_production_enabled_is_true_with_neon_fallback`
-  （#3231 で `..._is_false_pending_measurement` から置換。#3232 の復帰で `sme_production_disabled_after_gb10_reject` へ反転、#4165 で再び `sme_production_enabled_is_true_with_neon_fallback` 型へ戻した。§5.19）。
+  （#3231 で `..._is_false_pending_measurement` から置換。#3232 の復帰で `sme_production_disabled_after_gb10_reject` へ反転、#4165 で #3231 時代（#3560・62eadbec7）と同名の `sme_production_enabled_is_true_with_neon_fallback` へ戻した。中身は、SME 機の判定を `SmeKernel::try_new()` で取る形に書き直している。§5.19）。
 - `Isa` enum への variant 追加は行わない（SME 検出は `Isa::detect()` とは
   独立の軸であり、`Isa::Sme` を追加すると crates.io 公開クレート
   `fandhe-ai-backend-cpu` の `pub enum` への semver 破壊になる一方、
