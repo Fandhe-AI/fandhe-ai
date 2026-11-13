@@ -1,0 +1,3 @@
+compare task=gemm exit=3
+compare task=train exit=3
+compare task=infer exit=3

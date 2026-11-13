@@ -1,0 +1,9 @@
+docs/perf/logs/sme-default-on-ab-4156/orchestrate_gb10.sh: OK
+docs/perf/logs/sme-default-on-ab-4156/orchestrate_macmini.sh: OK
+docs/perf/logs/sme-default-on-ab-4156/aggregate.py: OK
+docs/perf/logs/sme-default-on-ab-4156/test_foreign_gate_4156.sh: OK
+docs/perf/logs/sme-default-on-ab-4156/on-arm.patch: OK
+docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py: OK
+scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh: OK
+scripts/bench/framework-compare/ab_foreign_gate.sh: OK
+rc=0

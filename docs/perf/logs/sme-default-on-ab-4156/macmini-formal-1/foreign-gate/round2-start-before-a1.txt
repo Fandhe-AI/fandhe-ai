@@ -1,0 +1,10 @@
+CLEAN before 2026-11-12T10:51:35Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 0 0 0 0 0
+processes_scanned 816
+max_pcpu_non_excluded 1.3
+top pid=670 uid=0 pcpu=1.3 name=airportd
+top pid=88326 uid=502 pcpu=1.1 name=com.apple.Virtualization.VirtualMachine
+top pid=741 uid=270 pcpu=1.0 name=com.apple.DriverKit-AppleBCMWLAN
+top pid=603 uid=88 pcpu=0.7 name=WindowServer
+top pid=1294 <user> pcpu=0.6 name=ControlCenter

@@ -1,0 +1,18 @@
+lock-acquired 2026-11-12T09:50:30Z
+# dry-run: 実行計画（副作用なし）
+0. P-OWNER: docs/perf/logs/sme-default-on-ab-4156/RULE.v2.txt §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING と各回答コメント URL が記入済みであること（未決ならロック取得前に停止）。prereg_append.txt の rule_sha256 が RULE.v2.txt と一致すること
+0b. P-CAP: docs/perf/logs/sme-default-on-ab-4156/RULE.v2.txt §12 (c) の MAC-SERIES-CAP がちょうど 1 行・正の整数で、空欄記号が残っていないこと（不成立ならロック取得前に停止）
+   (現在の RULE.v2.txt: P-OWNER 成立)
+   (現在の RULE.v2.txt: P-CAP 成立)
+1. ロック: mkdir <home>/work/.fandhe-hw-lock（60 秒おきに再試行）。owner に '#4156 <UTC>' を書き hwlock.log へ取得・解放時刻を残す
+2. P-TREE: BASE を clone して on-arm.patch を適用（sha256 は RULE.v2.txt の値と照合・git apply --check が先）。差分が crates/backend-cpu/src/gemm_blis/mod.rs の 1 件だけで OFF=false・ON=true
+3. P-R0: 両腕の sme_report() が kernel_enabled: true であること（外れたら中止）
+4. P-RT: ON は cargo test -p fandhe-ai-backend-cpu --release -- --skip sme_production_disabled_after_gb10_reject、OFF はスキップなしの同コマンド
+4b. mediaanalysisd の確認: 2 分間隔で 3 回 %CPU 5 未満（basename の完全一致・不在は通過・ps の失敗は不成立）。不成立なら A/B を始めずに止める
+5. A/B: scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh 4156-r1（AB_HOST=macmini・5 round）
+   他ジョブの前提ゲート: FOREIGN_GATE 必須。各 round の前は他ジョブ CLEAN かつ load1<3.0 を同じループで待ち（30 秒間隔・最大 60 回）、round の後に 1 回確認（FOREIGN は gate=invalid reason=foreign-after → A/B は非 0 終了）
+6. P-BIT: cpu_sme_gate_bit_dump の ^out[ 行を ON/OFF で比較（期待 6726847 行・sha256 一致・cmp 差分 0）
+7. 収録: マスクして docs/perf/logs/sme-default-on-ab-4156/macmini へ複製。実ホスト名等の grep が 0 件でなければ停止。target-ab-* を削除しロックを解放
+dry rc=0
+WORK not created
+lock-release 2026-11-12T09:50:30Z
