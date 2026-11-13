@@ -1789,12 +1789,117 @@ pub(crate) const FRAG_INTERLEAVE_ENABLED: bool = false;
 /// （従来の表経路。`gemm.rs` の `classic_plan`）。[`crate::gemm::MetalGemm::new`] 系は本定数で
 /// 初期化する。結線前の表経路の腕は `#[cfg(test)]` の `MetalGemm::new_with_steel_large_n(ctx,
 /// false)` で作る。前後比較は `docs/perf/metal-gemm-steel-candidates.md` §11.7。
-/// steel の解決（`pipeline_for_tile` の全候補のパイプライン生成）に失敗した場合は表経路へ
-/// 落とさず `Err` を返す（Mac mini 実測で到達・fallback なしを確認済み。#4160）。
+/// steel の primary（`CANDIDATES[0]`）がそのまま使えない場合（plan が `Err`、または
+/// `SINGLE_SIMDGROUP_8X8` 等へ縮退して `resolved != requested`）は、表経路
+/// （`select_for_verified_device` + `GateProfile::Instance`）で組み直す
+/// （[`resolve_with_steel_fallback`]・`gemm.rs` の `plan_classic_with_steel_fallback`。
+/// イシュー #4265）。組み直した形状は `MetalGemm` の寿命のあいだ記録され、以後は steel を
+/// 試さない（一過性の失敗でも寿命中は steel を使わない）。表経路でも `Err` なら、その
+/// `Err` を返す（結線前と同じ）。
 ///
 /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`UNROLL_ACC_ENABLED`] と同じ。
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const STEEL_LARGE_N_ENABLED: bool = true;
+
+/// steel 候補の解決を試し、primary のままでなければ表経路で組み直す汎用ヘルパー
+/// （イシュー #4265）。`gemm.rs` の `plan_classic_with_steel_fallback` が、plan 構築を
+/// クロージャにして呼ぶ。Metal なしで流れを単体テストできるよう、パイプライン構築とは
+/// 切り離してある。
+///
+/// - `try_steel` を 1 回だけ呼ぶ。`Ok((_, resolved))` かつ `resolved == requested` なら
+///   そのまま返す（`fell_back = false`。`table` は呼ばない）。
+/// - `try_steel` が `Err`、または `Ok` でも `resolved != requested`（8x8 steel への黙った
+///   縮退。結線の根拠 #4160 が測っていない構成）なら `table` を 1 回だけ呼び、`fell_back =
+///   true` で返す。`table` の `Err` はそのまま返す。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn resolve_with_steel_fallback<T, E>(
+    requested: TileConfig,
+    try_steel: impl FnOnce() -> Result<(T, TileConfig), E>,
+    table: impl FnOnce() -> Result<(T, TileConfig), E>,
+) -> Result<(T, TileConfig, bool), E> {
+    if let Ok((value, resolved)) = try_steel()
+        && resolved == requested
+    {
+        return Ok((value, resolved, false));
+    }
+    let (value, resolved) = table()?;
+    Ok((value, resolved, true))
+}
+
+#[cfg(test)]
+mod steel_fallback_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const REQ: TileConfig = CANDIDATES[0];
+    const SMALL: TileConfig = TileConfig::SINGLE_SIMDGROUP_8X8;
+
+    /// `(結果, steel の呼び出し回数, 表の呼び出し回数)`。
+    type Outcome = (
+        Result<(&'static str, TileConfig, bool), &'static str>,
+        u32,
+        u32,
+    );
+
+    fn run(
+        steel: Result<TileConfig, &'static str>,
+        table: Result<TileConfig, &'static str>,
+    ) -> Outcome {
+        let (sc, tc) = (Cell::new(0u32), Cell::new(0u32));
+        let r = resolve_with_steel_fallback(
+            REQ,
+            || {
+                sc.set(sc.get() + 1);
+                steel.map(|c| ("steel", c))
+            },
+            || {
+                tc.set(tc.get() + 1);
+                table.map(|c| ("table", c))
+            },
+        );
+        (r, sc.get(), tc.get())
+    }
+
+    #[test]
+    fn steel_ok_as_requested_skips_table() {
+        let (r, s, t) = run(Ok(REQ), Ok(SMALL));
+        assert_eq!(r, Ok(("steel", REQ, false)));
+        assert_eq!((s, t), (1, 0));
+    }
+
+    #[test]
+    fn steel_degraded_falls_back_to_table() {
+        let (r, s, t) = run(Ok(SMALL), Ok(SMALL));
+        assert_eq!(r, Ok(("table", SMALL, true)));
+        assert_eq!((s, t), (1, 1));
+    }
+
+    #[test]
+    fn steel_err_falls_back_to_table() {
+        let (r, s, t) = run(Err("steel"), Ok(REQ));
+        assert_eq!(r, Ok(("table", REQ, true)));
+        assert_eq!((s, t), (1, 1));
+    }
+
+    /// 表の経路が縮退した（`resolved != requested`）結果は、そのまま採る。表の経路は
+    /// 結線前の本番と同じ扱いで、ここでは再度の組み直しをしない。
+    #[test]
+    fn degraded_table_result_is_taken_as_is() {
+        let (r, s, t) = run(Err("steel"), Ok(SMALL));
+        assert_eq!(r, Ok(("table", SMALL, true)));
+        assert_eq!((s, t), (1, 1));
+    }
+
+    #[test]
+    fn table_err_is_propagated() {
+        let (r, s, t) = run(Err("steel"), Err("table"));
+        assert_eq!(r, Err("table"));
+        assert_eq!((s, t), (1, 1));
+        let (r, s, t) = run(Ok(SMALL), Err("table"));
+        assert_eq!(r, Err("table"));
+        assert_eq!((s, t), (1, 1));
+    }
+}
 
 /// [`select_steel_large_n`] が返す、形状限定 steel 候補の構成（イシュー #4160）。
 /// `cfg` は `CANDIDATES[0]`、ゲート 3 軸（acc unroll の instance 側・load unroll・細粒度

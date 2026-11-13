@@ -22,7 +22,7 @@
 //! と同型の設計。#39 時点は naive のみを productize していた）。
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use objc2::rc::Retained;
@@ -627,8 +627,23 @@ pub struct MetalGemm {
     /// （結線後は `true`）で初期化し、テスト専用 `new_with_steel_large_n` と A/B 計測用の
     /// 「定数 1 行差分」だけが上書きする。`true` かつ [`tile::select_steel_large_n`]
     /// が `Some` の形状だけ、classic 経路が [`GateProfile::SteelLargeN`] で
-    /// パイプラインを解決する（他の形状・経路は不変）。
+    /// パイプラインを解決する（他の形状・経路は不変）。steel の primary がそのまま使えない
+    /// （plan が `Err`、または 8x8 等へ縮退）場合は表経路で組み直し（`plan_classic_with_
+    /// steel_fallback`。イシュー #4265）、その形状を [`Self::steel_large_n_failed`] へ記録する。
     steel_large_n_enabled: bool,
+    /// steel の組み直し（#4265）が起きた形状 `(m, n, k)` の負キャッシュ。`classic_plan` が
+    /// 参照し、記録済みの形状は steel を試さず表経路を返す（失敗する環境で dispatch のたびに
+    /// steel をコンパイルし直さないため）。寿命は `MetalGemm` と同じ（`steel_large_n_cache` と
+    /// 同じ扱い）で、一過性の失敗でも寿命中は steel を使わない（表経路で正しく動く）。初回
+    /// だけは fresh の診断 route が steel の cfg を報告する（記録が encode の中で行われるため）。
+    steel_large_n_failed: Mutex<HashSet<(usize, usize, usize)>>,
+    /// テスト専用: steel 分岐のパイプライン構築失敗の注入（#4265）。
+    #[cfg(test)]
+    force_steel_failure: SteelFailureMode,
+    /// テスト専用: `GateProfile::SteelLargeN` での `pipeline_for_tile_with_profile` 呼び出し回数
+    /// （負キャッシュにより 2 回目以降は steel を試さないことの確認用）。
+    #[cfg(test)]
+    steel_pipeline_attempts: std::sync::atomic::AtomicUsize,
     /// [`GateProfile::SteelLargeN`] 専用のパイプラインキャッシュ。ゲート（FB・unroll）が
     /// 違うのに同じ `(TileConfig, TransposePattern, TileClass)` キーの `tiled_cache` を
     /// 共有すると、`CANDIDATES[0]` を選ぶ別形状へゲート違いのパイプラインを返して
@@ -714,6 +729,17 @@ pub struct MetalGemm {
 pub(crate) enum GateProfile {
     Instance,
     SteelLargeN,
+}
+
+/// テスト専用: steel 分岐のパイプライン構築失敗の注入モード（イシュー #4265）。
+/// `Err` は steel の全候補の構築失敗、`Degrade` は primary だけ失敗して 8x8 へ縮退する
+/// ケースを再現する。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SteelFailureMode {
+    None,
+    Err,
+    Degrade,
 }
 
 /// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
@@ -1076,9 +1102,30 @@ impl MetalGemm {
         self.steel_large_n_enabled
     }
 
+    /// テスト専用: steel 分岐のパイプライン構築失敗を注入する（#4265）。
+    #[cfg(test)]
+    pub(crate) fn with_forced_steel_failure(mut self, mode: SteelFailureMode) -> Self {
+        self.force_steel_failure = mode;
+        self
+    }
+
+    /// テスト専用: steel プロファイルでの `pipeline_for_tile_with_profile` 呼び出し回数（#4265）。
+    #[cfg(test)]
+    pub(crate) fn steel_pipeline_attempts(&self) -> usize {
+        self.steel_pipeline_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// テスト専用: steel の組み直しが記録された形状か（負キャッシュ。#4265）。
+    #[cfg(test)]
+    pub(crate) fn steel_large_n_failed_contains(&self, m: usize, n: usize, k: usize) -> bool {
+        self.steel_failed(m, n, k)
+    }
+
     /// テスト専用: 到達追跡用。`dispatch_auto` classic 経路が解決する `(要求 cfg,
-    /// ゲート組, 実際に使われる解決 cfg)` を返す（#4160）。`resolved != requested` は
-    /// フォールバック発生を示す。
+    /// 実際に使われたゲート組, 実際に使われる解決 cfg, 表経路へ組み直したか)` を返す
+    /// （#4160・#4265）。steel の組み直し（[`Self::plan_classic_with_steel_fallback`]）が
+    /// 起きると、ゲート組は `Instance`・`fell_back = true`（要求 cfg は steel の primary のまま）。
     #[cfg(test)]
     pub(crate) fn diag_classic_plan_resolved(
         &self,
@@ -1086,16 +1133,19 @@ impl MetalGemm {
         m: usize,
         n: usize,
         k: usize,
-    ) -> Result<(TileConfig, GateProfile, TileConfig), MetalError> {
+    ) -> Result<(TileConfig, GateProfile, TileConfig, bool), MetalError> {
         let (cfg, profile) = self.classic_plan(ctx, m, n, k);
-        let (_, resolved) = self.pipeline_for_tile_with_profile(
-            ctx,
-            cfg,
-            TransposePattern::Nn,
-            tile::TileClass::Legacy,
-            profile,
-        )?;
-        Ok((cfg, profile, resolved))
+        let (_, resolved, actual_profile, fell_back) =
+            self.plan_classic_with_steel_fallback(ctx, (m, n, k), cfg, profile, |c, p| {
+                self.pipeline_for_tile_with_profile(
+                    ctx,
+                    c,
+                    TransposePattern::Nn,
+                    tile::TileClass::Legacy,
+                    p,
+                )
+            })?;
+        Ok((cfg, actual_profile, resolved, fell_back))
     }
 
     /// テスト専用: 構築済みインスタンスの交互配置ゲート（#3211）を上書きする。
@@ -1517,6 +1567,11 @@ impl MetalGemm {
             frag_interleave_enabled: tile::FRAG_INTERLEAVE_ENABLED,
             steel_large_n_enabled: tile::STEEL_LARGE_N_ENABLED,
             steel_large_n_cache: Mutex::new(HashMap::new()),
+            steel_large_n_failed: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            force_steel_failure: SteelFailureMode::None,
+            #[cfg(test)]
+            steel_pipeline_attempts: std::sync::atomic::AtomicUsize::new(0),
             tile_class_mode,
             tiled_splitk_cache: Mutex::new(HashMap::new()),
             pipeline_splitk_reduce,
@@ -1600,8 +1655,29 @@ impl MetalGemm {
             &self.tiled_cache
         };
         let steel = profile == GateProfile::SteelLargeN;
+        // イシュー #4265: steel 分岐の構築失敗の注入（テスト専用。本番ビルドには含まれない）。
+        #[cfg(test)]
+        let forced = if steel {
+            self.steel_pipeline_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.force_steel_failure
+        } else {
+            SteelFailureMode::None
+        };
+        #[cfg(test)]
+        if forced == SteelFailureMode::Err {
+            return Err(MetalError::PipelineCreation {
+                message: "forced steel pipeline failure (test)".to_string(),
+            });
+        }
 
         for candidate in tile::fallback_chain(cfg) {
+            #[cfg(test)]
+            if forced == SteelFailureMode::Degrade && candidate != TileConfig::SINGLE_SIMDGROUP_8X8
+            {
+                continue;
+            }
+
             // イシュー #1693: `thread_elements()` 方式候補カーネル
             // （`gemm_simdgroup_tiled_te`）は staged 経路・`TileClass::
             // Legacy` のみを実装する（`TileClass` 分割・split-K のいずれも
@@ -1881,6 +1957,8 @@ impl MetalGemm {
     /// 直前）で加算していたが、`plan_tiled_by_class` は常に直後に
     /// [`Self::encode_tiled_plan`] へ渡されて即座に消費される（呼び出し元
     /// が計画だけ作って握り潰すことはない）ため、可観測な回数は不変。
+    /// ただし steel の組み直し（#4265）で steel 側の plan を捨てて表経路で作り直す場合は、
+    /// 捨てた plan が Split のフォールバック計数を進めうる（steel 失敗時のみ。成功時は不変）。
     #[cfg(test)]
     fn plan_tiled_by_class(
         &self,
@@ -2105,7 +2183,17 @@ impl MetalGemm {
         pattern: TransposePattern,
         profile: GateProfile,
     ) -> Result<TileConfig, MetalError> {
-        let plan = self.plan_tiled_by_class_with_profile(ctx, cfg, dims, pattern, profile)?;
+        let (plan, _, _, _) = self.plan_classic_with_steel_fallback(
+            ctx,
+            (dims.m as usize, dims.n as usize, dims.k as usize),
+            cfg,
+            profile,
+            |c, p| {
+                let plan = self.plan_tiled_by_class_with_profile(ctx, c, dims, pattern, p)?;
+                let resolved = plan.resolved_cfg;
+                Ok((plan, resolved))
+            },
+        )?;
         let resolved_cfg = plan.resolved_cfg;
         let swizzle_enabled = self.swizzle_enabled;
         ctx.dispatch_sync(|encoder| {
@@ -2675,8 +2763,11 @@ impl MetalGemm {
     /// 共有する。`steel_large_n_enabled` が `false`、または `select_steel_large_n` が `None`
     /// （M4Base の正方 1024／2048／4096 以外・M4Max・非検証機）なら従来の
     /// `select_for_verified_device` + `Instance`（結線後の本番既定は `true`。#4166）。
-    /// steel の解決（`pipeline_for_tile` の全候補のパイプライン生成）に失敗した場合は表経路へ
-    /// 落とさず `Err` を返す（Mac mini 実測で到達・fallback なしを確認済み。#4160）。
+    /// steel の組み直しが記録済みの形状（[`Self::steel_large_n_failed`]）も表経路を返す
+    /// （#4265）。steel の primary が作れない・縮退した場合の組み直しは encode 側の
+    /// [`Self::plan_classic_with_steel_fallback`] が行う。そのため初回だけ、本関数（と fresh の
+    /// 診断 route）は steel の cfg を報告し、実際に使われる構成と食い違う。一過性の失敗でも
+    /// その `MetalGemm` の寿命のあいだは steel を使わない。
     /// split-K の classic フォールバック内の選択は対象外（スコープ 3 点は split-K に入らず、パス 1 では load unroll が no-op の
     /// 既存契約と揃える）。
     fn classic_plan(
@@ -2687,12 +2778,65 @@ impl MetalGemm {
         k: usize,
     ) -> (TileConfig, GateProfile) {
         let device = ctx.verified_tile_table_device();
-        match tile::select_steel_large_n(m, n, k, device, self.steel_large_n_enabled) {
+        let steel = if self.steel_failed(m, n, k) {
+            None
+        } else {
+            tile::select_steel_large_n(m, n, k, device, self.steel_large_n_enabled)
+        };
+        match steel {
             Some(p) => (p.cfg, GateProfile::SteelLargeN),
             None => (
                 tile::select_for_verified_device(m, n, k, device),
                 GateProfile::Instance,
             ),
+        }
+    }
+
+    /// steel の組み直し（#4265）が記録された形状か。Mutex の poison は記録なし扱い
+    /// （再コンパイルが増えるだけで結果は変わらない。本番経路で unwrap/expect しない）。
+    fn steel_failed(&self, m: usize, n: usize, k: usize) -> bool {
+        self.steel_large_n_failed
+            .lock()
+            .map(|set| set.contains(&(m, n, k)))
+            .unwrap_or(false)
+    }
+
+    /// steel の plan を試し、primary のままでなければ表経路で組み直す（イシュー #4265）。
+    /// `encode_tiled_by_class_with_profile`・`encode_tiled_nn_recorded_with_profile`・
+    /// `diag_classic_plan_resolved` から呼ぶ。`profile` が `Instance` なら従来どおり 1 回
+    /// `build` するだけ。`SteelLargeN` では [`tile::resolve_with_steel_fallback`] に従い、
+    /// steel が `Err`、または `Ok` でも `resolved != requested`（測っていない 8x8 steel へ
+    /// の縮退）なら `select_for_verified_device` + `Instance` で `build` し直し、その形状を
+    /// 負キャッシュへ記録する。表経路の `Err` はそのまま返す（結線前と同じ）。戻りは
+    /// `(build の値, 解決 cfg, 実際のゲート組, 組み直したか)`。
+    fn plan_classic_with_steel_fallback<T>(
+        &self,
+        ctx: &MetalContext,
+        (m, n, k): (usize, usize, usize),
+        cfg: TileConfig,
+        profile: GateProfile,
+        build: impl Fn(TileConfig, GateProfile) -> Result<(T, TileConfig), MetalError>,
+    ) -> Result<(T, TileConfig, GateProfile, bool), MetalError> {
+        if profile != GateProfile::SteelLargeN {
+            let (value, resolved) = build(cfg, profile)?;
+            return Ok((value, resolved, profile, false));
+        }
+        let (value, resolved, fell_back) = tile::resolve_with_steel_fallback(
+            cfg,
+            || build(cfg, GateProfile::SteelLargeN),
+            || {
+                let table =
+                    tile::select_for_verified_device(m, n, k, ctx.verified_tile_table_device());
+                build(table, GateProfile::Instance)
+            },
+        )?;
+        if fell_back {
+            if let Ok(mut set) = self.steel_large_n_failed.lock() {
+                set.insert((m, n, k));
+            }
+            Ok((value, resolved, GateProfile::Instance, true))
+        } else {
+            Ok((value, resolved, GateProfile::SteelLargeN, false))
         }
     }
 
@@ -3157,8 +3301,18 @@ impl MetalGemm {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
         validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
-        let plan =
-            self.plan_tiled_by_class_with_profile(ctx, cfg, dims, TransposePattern::Nn, profile)?;
+        let (plan, _, _, _) = self.plan_classic_with_steel_fallback(
+            ctx,
+            (dims.m as usize, dims.n as usize, dims.k as usize),
+            cfg,
+            profile,
+            |c, p| {
+                let plan =
+                    self.plan_tiled_by_class_with_profile(ctx, c, dims, TransposePattern::Nn, p)?;
+                let resolved = plan.resolved_cfg;
+                Ok((plan, resolved))
+            },
+        )?;
         let resolved_cfg = plan.resolved_cfg;
         let swizzle_enabled = self.swizzle_enabled;
         ctx.encode(
@@ -3220,7 +3374,9 @@ impl MetalGemm {
     /// 本番 `dispatch_auto`（reuse 経路 `dispatch_auto_resident`）と同じ classic 計画
     /// （[`Self::classic_plan`]）で正方 NN を encode だけ行う診断専用入口（イシュー #4160。
     /// ラベルは `"diag_encode_tiled_nn"` 固定）。`steel_large_n_enabled` と形状に応じて
-    /// `cur`／`sl` 腕の双方を本番と同じ解決で測れる。戻りは `(解決 cfg, ゲート組)`。
+    /// `cur`／`sl` 腕の双方を本番と同じ解決で測れる。戻りは `(解決 cfg, ゲート組)`。ゲート組は
+    /// `classic_plan` の値で、steel の組み直し（#4265）が初回に起きた場合は実際の組と食い違う
+    /// （実際の組は `diag_classic_plan_resolved` が返す）。
     #[cfg(test)]
     pub(crate) fn diag_encode_classic_auto_nn(
         &self,

@@ -286,6 +286,7 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
   - `enabled`、デバイスが `M4Base`、`(m, n, k)` が正方 1024／2048／4096 のいずれかと完全一致。
 - スコープ判断（安全側）: Issue は「N≥1024」だが、§8.3 と既存表の方針（実測範囲外へ無根拠に拡張しない）に従い、実測した 3 点との完全一致に絞った。N=512 以下・非正方・8192 以上・M4Max・未検証機種は既存の表選択のまま。
 - `MetalGemm` は classic 経路（fresh の `dispatch_auto_with_route_impl` と reuse の `dispatch_auto_resident`）で `classic_plan` を共有し、該当形状だけ `GateProfile::SteelLargeN` でパイプラインを解決する。**専用の `steel_large_n_cache`** を持ち、ゲート違いのパイプラインが `tiled_cache` 経由で別形状へ返る取り違えを構造的に防ぐ。split-K の classic フォールバック内の選択は対象外（3 点は split-K に入らない。単体テストで固定）。
+- **steel の primary が使えないときは表経路で組み直す（#4265）**: steel の plan が `Err`、または `Ok` でも `resolved != requested`（測っていない 8x8 steel への黙った縮退）の場合、`plan_classic_with_steel_fallback`（`tile::resolve_with_steel_fallback`）が `select_for_verified_device` + `GateProfile::Instance`（結線前の本番の経路）で plan し直す。表経路でも `Err` なら、その `Err` を返す（結線前と同じ）。組み直した形状は `MetalGemm` の負キャッシュ（`steel_large_n_failed`）へ記録し、`classic_plan` が記録済みの形状では steel を選ばない（失敗する環境で dispatch のたびに steel をコンパイルし直さない）。副作用: 一過性の失敗でも、その `MetalGemm` の寿命のあいだは steel を使わない（表経路で正しく動く）。初回だけ、fresh の診断 route（`GemmRoute::Classic(cfg)`）は steel の cfg を報告する（組み直しが encode の中で起きるため）。成功時の経路（構成・ゲート・選び方）は変えない。Linux の単体テストは `tile.rs` の `steel_fallback_tests`、注入点を使う実機テストは `gemm_steel_large_n_diag_tests.rs` の `steel_large_n_fallback_*`（`#[ignore]`）。
 - `shaders/gemm.metal` は変更しない（既存 function constant の組み合わせのみ）。
 
 ### 11.3 REQ-8・数値
@@ -372,6 +373,8 @@ N=2048／4096 を中心に、実測した値と推定を区別して書く。緩
 - `STEEL_LARGE_N_ENABLED` の doc コメント（「構築入口は `#[cfg(test)]` のみ」「既定挙動は不変」）と §11.2 の「既定 OFF」の記述を直す。
 - `MetalGemm::new` 系の初期化経路で本定数が本番へ届くことを確かめる。
 - 範囲は #4197 の絞り込みを引き継ぐ。M4Base かつ正方 1024／2048／4096 との完全一致だけ。「N≥1024」へ広げるには追加実測と別の判断が要る。
+
+**#4265 の影響**: steel の失敗時の組み直し（§11.2）は成功時の経路を変えないため、#4166 の前後比較（対象 `9eba21749` 固定）には影響しない。
 
 **前後比較の取り方**: `scripts/bench/framework-compare/run_ab_steel_large_n_gemm_metal.sh`・`orchestrate_macmini.sh`・`aggregate.py` を使い、5 ラウンドの中央値で §11.5 に記録する。結線後の main（定数 `true`）に対しては、スクリプトに `AB_DIRECTION=post-wiring` を指定する（before = 同じ HEAD に未コミットの `true`→`false` 1 行、after = そのまま clean な HEAD。既定の `pre-wiring` は従来の向き）。どちらの向きも「同じ HEAD・tile.rs の定数 1 行だけの差分・ほかに未コミット差分なし」を計測前に fail-closed で確かめる。診断テストの `cur`／`cur_aa` 腕は `new_with_steel_large_n(ctx, false)`（結線前の表経路）で作る。`loss-attribution-matrix.md` の M-MTL-G1024／G2048 行と両機体の 14 セルの付け直しは #4168 の担当。
 

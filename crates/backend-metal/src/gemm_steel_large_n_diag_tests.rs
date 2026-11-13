@@ -31,6 +31,9 @@
 //!
 //! - `DEVICE gpu_cores=<u32|none> soc="<s|none>" verified_tile_table=<s> split_k_enabled=<bool>`
 //! - `TRACE n=<N> arm=<cur|sl> cfg=<l> profile=<table|steel_large_n> route=<Classic|SplitK> fallback=<bool>`
+//!   （`profile` は実際に使われたゲート組。`fallback=true` は steel の primary がそのまま使えず
+//!   表経路へ組み直した〈`profile=table fallback=true`〉ことを示す。イシュー #4265。通常
+//!   〈注入なし〉の本番既定では `sl` も `fallback=false`）
 //! - `PARITY n=<N> arm=<cur|sl> ok=<true|false>`
 //! - `BITIDENT n=<N> pair=<sl_vs_ref|sl_vs_cur> ok=<true|false>`
 //! - `MEAS n=<N> arm=<a> role=<judge|record_only> kernel_gpu_ms=<v> encode_ms=<v> commit_wait_ms=<v> alloc_c_ms=<v> wall_sum_ms=<v> hash=<16hex>`
@@ -46,7 +49,7 @@ use std::time::Instant;
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::device::{probe_gpu_core_count, probe_soc_brand_string};
-use crate::gemm::{GateProfile, MetalGemm};
+use crate::gemm::{GateProfile, MetalGemm, SteelFailureMode};
 use crate::gemm_reuse_phase_diag_tests::{MEASURED_TRIALS, WARMUP_TRIALS, median_of};
 use crate::split_k_runtime::split_k_enabled;
 use crate::tile::{self, GemmRoute, TileConfig};
@@ -262,7 +265,8 @@ fn steel_large_n_default_is_on() {
 
 /// 到達追跡。N ごとの解決構成・ゲート組・経路・フォールバック有無を決定的に残す。
 /// 期待: N≥1024 の `sl` は `profile=steel_large_n cfg=C0 route=Classic fallback=false`、
-/// N≤512 は `profile=table`（`cur` と同一）。
+/// N≤512 は `profile=table fallback=false`（`cur` と同一）。`fallback=true` は注入テスト
+/// （`steel_large_n_fallback_*`）でのみ起きる（イシュー #4265）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn steel_large_n_reach_trace() {
@@ -276,19 +280,20 @@ fn steel_large_n_reach_trace() {
             GemmRoute::SplitK(_) => "SplitK",
         };
         for (name, gemm) in [("cur", &g.cur), ("sl", &g.sl)] {
-            let (requested, profile, resolved) = gemm
+            let (requested, profile, resolved, fell_back) = gemm
                 .diag_classic_plan_resolved(&ctx, n, n, n)
                 .expect("計画の解決に失敗した");
             println!(
                 "TRACE n={n} arm={name} cfg={} profile={} route={route} fallback={}",
                 label_of(resolved),
                 profile_label(profile),
-                requested != resolved
+                fell_back || requested != resolved
             );
             if name == "sl" && in_scope(n) {
                 assert_eq!(profile, GateProfile::SteelLargeN, "n={n}");
                 assert_eq!(resolved, tile::CANDIDATES[0], "n={n}");
                 assert_eq!(requested, resolved, "n={n}: フォールバックが発生した");
+                assert!(!fell_back, "n={n}: 表経路へ組み直された");
                 assert_eq!(route, "Classic", "n={n}");
             } else {
                 assert_eq!(profile, GateProfile::Instance, "n={n} arm={name}");
@@ -413,6 +418,168 @@ fn steel_large_n_kernel_gpu() {
                 median_of(&al[idx]).median * 1e3,
                 median_of(&wall[idx]).median * 1e3,
                 hashes[idx],
+            );
+        }
+    }
+}
+
+/// CPU 参照（FMA 契約）との REQ-2 統一複合判定（tolerance は既存の `compare` を使い回す）。
+fn assert_parity_vs_ref(out: &[f32], expected: &[f32], what: &str) {
+    use fandhe_ai_backend_cpu::parity::compare;
+    let report = compare(out, expected).expect("出力長が参照と一致しない");
+    assert!(
+        report.passes(),
+        "{what}: fail_count={}/{} max_abs_diff={:.3e} max_rel_err={:.3e}",
+        report.fail_count,
+        report.total,
+        report.max_abs_diff,
+        report.max_rel_err
+    );
+}
+
+/// 注入つきの `sl` 腕を作る（steel ON・構築失敗を `mode` で注入）。
+fn injected(ctx: &MetalContext, mode: SteelFailureMode) -> MetalGemm {
+    MetalGemm::new_with_steel_large_n(ctx, true)
+        .expect("構築に失敗した")
+        .with_forced_steel_failure(mode)
+}
+
+/// steel の組み直し（イシュー #4265）。`Err` 注入・8x8 縮退注入の双方で、対象 3 形状が
+/// 表経路（`profile=table fallback=true`）へ戻り、fresh・reuse の両方で CPU 参照と REQ-2
+/// 複合判定が一致し、2 回目の dispatch は steel を試さない（負キャッシュ）こと。
+/// 対象外機種（M4Base 以外）では対象形状が無いため何も検証せず return する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn steel_large_n_fallback_injected_returns_to_table() {
+    use fandhe_ai_backend_cpu::parity::matmul_reference_fma;
+
+    let ctx = MetalContext::new().expect("Metal 初期化に失敗した");
+    let device = ctx.verified_tile_table_device();
+    for &n in &[1024usize, 2048, 4096] {
+        if tile::select_steel_large_n(n, n, n, device, true).is_none() {
+            eprintln!("n={n}: steel 対象外の機種のため skip");
+            continue;
+        }
+        let table_cfg = tile::select_for_verified_device(n, n, n, device);
+        let (a, b) = square_ab(n);
+        let mut expected = vec![0.0f32; n * n];
+        matmul_reference_fma(&a, &b, &mut expected, n, n, n).expect("CPU 参照の形状検証に失敗した");
+        let a_buf = MetalBuffer::new_with_data(&ctx, &a).expect("A アップロード");
+        let b_buf = MetalBuffer::new_with_data(&ctx, &b).expect("B アップロード");
+
+        for mode in [SteelFailureMode::Err, SteelFailureMode::Degrade] {
+            let tag = format!("n={n} mode={mode:?}");
+
+            // 診断: 初回は組み直し（profile=table fallback=true）、2 回目は steel を試さない。
+            let g = injected(&ctx, mode);
+            let (requested, profile, resolved, fell_back) = g
+                .diag_classic_plan_resolved(&ctx, n, n, n)
+                .expect("計画の解決に失敗した");
+            println!(
+                "INJECT n={n} mode={mode:?} cfg={} profile={} fallback={fell_back}",
+                label_of(resolved),
+                profile_label(profile),
+            );
+            assert_eq!(requested, tile::CANDIDATES[0], "{tag}");
+            assert_eq!(profile, GateProfile::Instance, "{tag}");
+            assert!(fell_back, "{tag}");
+            assert!(g.steel_large_n_failed_contains(n, n, n), "{tag}");
+            let attempts = g.steel_pipeline_attempts();
+            assert!(attempts >= 1, "{tag}: steel が試されていない");
+            let (requested2, profile2, resolved2, fell_back2) = g
+                .diag_classic_plan_resolved(&ctx, n, n, n)
+                .expect("2 回目の計画の解決に失敗した");
+            assert_eq!(requested2, table_cfg, "{tag}");
+            assert_eq!(resolved2, resolved, "{tag}");
+            assert_eq!(profile2, GateProfile::Instance, "{tag}");
+            assert!(!fell_back2, "{tag}");
+            assert_eq!(
+                g.steel_pipeline_attempts(),
+                attempts,
+                "{tag}: 2 回目も steel を試した"
+            );
+
+            // fresh（dispatch_auto）: 組み直し後も正しい結果・2 回目は steel を試さない。
+            let g = injected(&ctx, mode);
+            let (out, _) = g
+                .dispatch_auto_with_route(&ctx, &a, &b, n, n, n)
+                .expect("fresh dispatch に失敗した");
+            assert_parity_vs_ref(&out, &expected, &format!("{tag} fresh 1 回目"));
+            assert!(g.steel_large_n_failed_contains(n, n, n), "{tag} fresh");
+            let attempts = g.steel_pipeline_attempts();
+            assert!(attempts >= 1, "{tag} fresh: steel が試されていない");
+            let (out, _) = g
+                .dispatch_auto_with_route(&ctx, &a, &b, n, n, n)
+                .expect("fresh dispatch（2 回目）に失敗した");
+            assert_parity_vs_ref(&out, &expected, &format!("{tag} fresh 2 回目"));
+            assert_eq!(
+                g.steel_pipeline_attempts(),
+                attempts,
+                "{tag} fresh: 2 回目も steel を試した"
+            );
+
+            // reuse（dispatch_auto_resident）: 同上。
+            let g = injected(&ctx, mode);
+            let c_buf = MetalBuffer::alloc_uninit_pooled(&ctx, n * n).expect("C 確保に失敗した");
+            let ran = g
+                .dispatch_auto_resident(&ctx, &a_buf, &b_buf, &c_buf, n, n, n)
+                .expect("reuse dispatch に失敗した");
+            assert!(ran, "{tag} reuse: 発火しなかった");
+            assert_parity_vs_ref(
+                &c_buf.read_to_vec(),
+                &expected,
+                &format!("{tag} reuse 1 回目"),
+            );
+            assert!(g.steel_large_n_failed_contains(n, n, n), "{tag} reuse");
+            let attempts = g.steel_pipeline_attempts();
+            assert!(attempts >= 1, "{tag} reuse: steel が試されていない");
+            let c_buf = MetalBuffer::alloc_uninit_pooled(&ctx, n * n).expect("C 確保に失敗した");
+            g.dispatch_auto_resident(&ctx, &a_buf, &b_buf, &c_buf, n, n, n)
+                .expect("reuse dispatch（2 回目）に失敗した");
+            assert_parity_vs_ref(
+                &c_buf.read_to_vec(),
+                &expected,
+                &format!("{tag} reuse 2 回目"),
+            );
+            assert_eq!(
+                g.steel_pipeline_attempts(),
+                attempts,
+                "{tag} reuse: 2 回目も steel を試した"
+            );
+        }
+    }
+}
+
+/// 対象外の形状（N≤512）は注入しても挙動が変わらない（steel を試さず・記録もせず、
+/// 注入なしの `cur` と bit 一致）こと（イシュー #4265）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn steel_large_n_fallback_out_of_scope_unchanged() {
+    let ctx = MetalContext::new().expect("Metal 初期化に失敗した");
+    let cur = MetalGemm::new_with_steel_large_n(&ctx, false).expect("cur の構築に失敗した");
+    for &n in &[256usize, 512] {
+        let (a, b) = square_ab(n);
+        let expected = cur
+            .dispatch_auto(&ctx, &a, &b, n, n, n)
+            .expect("cur に失敗した");
+        for mode in [SteelFailureMode::Err, SteelFailureMode::Degrade] {
+            let g = injected(&ctx, mode);
+            let (_, profile, _, fell_back) = g
+                .diag_classic_plan_resolved(&ctx, n, n, n)
+                .expect("計画の解決に失敗した");
+            assert_eq!(profile, GateProfile::Instance, "n={n} mode={mode:?}");
+            assert!(!fell_back, "n={n} mode={mode:?}");
+            let out = g
+                .dispatch_auto(&ctx, &a, &b, n, n, n)
+                .expect("dispatch に失敗した");
+            assert!(
+                bits_equal(&out, &expected),
+                "n={n} mode={mode:?}: bit 不一致"
+            );
+            assert_eq!(g.steel_pipeline_attempts(), 0, "n={n} mode={mode:?}");
+            assert!(
+                !g.steel_large_n_failed_contains(n, n, n),
+                "n={n} mode={mode:?}"
             );
         }
     }
