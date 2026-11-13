@@ -6,7 +6,7 @@
 //!
 //! - **A 系列**: `tile::CANDIDATES[0]`（同じ 64×64 タイル・`bk=16`。
 //!   `[9]` の直接比較対象）
-//! - **B 系列**: `tile::select_for_device` が実際に選ぶ本番選択構成
+//! - **B 系列**: `tile::select_for_verified_device` が実際に選ぶ本番選択構成
 //!   （M4 Max では N=512→`[5]`・1024→`[6]`・2048→`[1]`・4096→`[2]`）
 //!
 //! の 2 系列で N=1024/2048/4096（B 系列は 512 も含む）× 5 プロセス
@@ -15,7 +15,7 @@
 //!
 //! # A 系列単独では「組み込み可否」を判断できない（計画上の前提）
 //!
-//! 本番 `dispatch_auto`（`tile::select_for_device` の M4 Max 厳密一致
+//! 本番 `dispatch_auto`（`tile::select_for_verified_device` の M4 Max 厳密一致
 //! テーブル）は N=2048/4096 で `CANDIDATES[0]` を選ばない（`docs/perf/
 //! metal-gemm-n4096-kernel-gap.md` §12 実測: `[0]` は N=4096 で本番選択
 //! 構成 `[2]` より約 7.7 倍遅い）。したがって `[9]` が `[0]` に勝っても
@@ -40,7 +40,7 @@
 //! `gemm::MetalGemm::diag_encode_tiled_nn`（`#[cfg(test)] pub(crate)`）・
 //! `gemm_reuse_phase_diag_tests::{measure_one_phase_trial, WARMUP_TRIALS,
 //! MEASURED_TRIALS, gen_square_ab, median_of}`（いずれも `pub(crate)`）・
-//! `tile::{CANDIDATES, select_for_device}`（`pub(crate)`／`pub`）へ到達
+//! `tile::{CANDIDATES, select_for_verified_device}`（`pub(crate)`／`pub`）へ到達
 //! するため、integration test ではなく `lib.rs` の兄弟モジュールとして
 //! 配置する。
 //!
@@ -105,7 +105,7 @@ use objc2_metal::MTLDevice;
 const SIZES_A: [usize; 3] = [1024, 2048, 4096];
 
 /// [`bk32_kernel_gpu_ab_vs_production_select`] が対象とするサイズ
-/// （`tile::select_for_device` の実測帯域全体。512/1024 は非後退情報
+/// （`tile::select_for_verified_device` の実測帯域全体。512/1024 は非後退情報
 /// として追加する）。
 const SIZES_B: [usize; 4] = [512, 1024, 2048, 4096];
 
@@ -352,7 +352,7 @@ fn bk32_kernel_gpu_ab_vs_candidate0() {
 }
 
 /// B 系列（結線判断に必須）: `CANDIDATES[9]`（head）vs
-/// `tile::select_for_device` の本番選択構成（base）を N=512/1024/2048/
+/// `tile::select_for_verified_device` の本番選択構成（base）を N=512/1024/2048/
 /// 4096 で比較する（ファイル冒頭「A 系列単独では組み込み可否を判断
 /// できない」参照。`select` のテーブルを変更する唯一の根拠）。
 #[test]
@@ -377,7 +377,7 @@ fn bk32_kernel_gpu_ab_vs_production_select() {
         // `dispatch_auto` と同一の構成解決（`gemm_reuse_phase_diag_
         // tests::run_size_with` と同じ呼び出し方）。解決結果を
         // `println!` で残し、docs 側での突合を容易にする。
-        let base_cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let base_cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         println!("N={n} pair=production_select production_select_resolved={base_cfg:?}");
 
         let (a, b) = gen_square_ab(0x1330_b000 ^ (n as u64), n);

@@ -2065,14 +2065,16 @@ pub(crate) const STEEL_ARMS: [SteelArm; 5] = [
 
 #[cfg(test)]
 impl SteelArm {
-    /// arm のタイル構成（`base` は本番選択に `verified` を渡す）。
+    /// arm のタイル構成（`base` は本番選択に `verified` を渡す。#4219 で本番と同じ
+    /// `select_for_verified_device`〈M4Base 表を含む〉へ揃えた）。なお M4Base の正方
+    /// 1024/2048/4096 の本番は steel（`select_steel_large_n`）で、`base` は結線前の表経路である。
     pub(crate) fn tile_for(
         &self,
         n: usize,
-        verified: Option<VerifiedM4MaxGpuCoreCount>,
+        verified: Option<VerifiedTileTableDevice>,
     ) -> TileConfig {
         match self.select {
-            SteelTileSelect::Production => select_for_device(n, n, n, verified),
+            SteelTileSelect::Production => select_for_verified_device(n, n, n, verified),
             SteelTileSelect::CandleEquivalent => select_candle_equivalent(n, n, n),
         }
     }
@@ -2083,7 +2085,7 @@ impl SteelArm {
     pub(crate) fn same_kernel_as_base(
         &self,
         n: usize,
-        verified: Option<VerifiedM4MaxGpuCoreCount>,
+        verified: Option<VerifiedTileTableDevice>,
     ) -> bool {
         let base = &STEEL_ARMS[0];
         let (bc, ac) = (base.tile_for(n, verified), self.tile_for(n, verified));
@@ -3224,6 +3226,54 @@ pub fn select_route_for_verified_device(
         Some(plan) => GemmRoute::SplitK(plan),
         None => GemmRoute::Classic(select_for_verified_device(m, n, k, device)),
     }
+}
+
+/// 診断 precheck（`gemm_reuse_phase_diag_tests::gemm_window_route_precheck`。#4219）用の
+/// 純関数: 診断経路が使う予測構成と、本番 `dispatch_auto_with_route` が返した route の一致判定。
+/// `DIAG_BITEQ` は K の縮約順序が同じならタイルが違っても true になり構成差を検出できないため、
+/// route の variant と bm・bn・bk・wm・wn・staged を明示的に比べる。呼び出し元は診断テストのみ。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteCfgMatch {
+    pub variant_match: bool,
+    pub tile_match: bool,
+}
+
+/// [`RouteCfgMatch`] を求める。タイルは `Classic(cfg)` なら `cfg`、`SplitK(plan)` なら
+/// `plan.tile` を取り出して全項目で比べる。
+#[cfg(test)]
+pub(crate) fn route_cfg_match(
+    predicted: &GemmRoute,
+    predicted_cfg: TileConfig,
+    actual: &GemmRoute,
+) -> RouteCfgMatch {
+    let variant_match = matches!(
+        (predicted, actual),
+        (GemmRoute::Classic(_), GemmRoute::Classic(_))
+            | (GemmRoute::SplitK(_), GemmRoute::SplitK(_))
+    );
+    RouteCfgMatch {
+        variant_match,
+        tile_match: predicted_cfg == route_tile(actual),
+    }
+}
+
+/// route が実行するタイル構成（Classic は要求構成、SplitK はパス 1 の構成）。
+#[cfg(test)]
+pub(crate) fn route_tile(route: &GemmRoute) -> TileConfig {
+    match route {
+        GemmRoute::Classic(cfg) => *cfg,
+        GemmRoute::SplitK(plan) => plan.tile,
+    }
+}
+
+/// 構成ラベル（空白なし。例: `bm32xbn64xbk16_wm2xwn2_stagedtrue`）。
+#[cfg(test)]
+pub(crate) fn tile_label(cfg: TileConfig) -> String {
+    format!(
+        "bm{}xbn{}xbk{}_wm{}xwn{}_staged{}",
+        cfg.bm, cfg.bn, cfg.bk, cfg.wm, cfg.wn, cfg.staged
+    )
 }
 
 #[cfg(test)]
@@ -7563,5 +7613,26 @@ mod tests {
                 GemmRoute::Classic(CANDIDATES[want])
             );
         }
+    }
+    /// #4219: route_cfg_match は bn だけの差・variant の差を検出する。
+    #[test]
+    fn route_cfg_match_detects_tile_and_variant_diff() {
+        let a = select_for_verified_device(1024, 1024, 1024, None);
+        let mut b = a;
+        b.bn = if a.bn == 64 { 32 } else { 64 };
+        let same = route_cfg_match(&GemmRoute::Classic(a), a, &GemmRoute::Classic(a));
+        assert!(same.variant_match && same.tile_match);
+        let diff = route_cfg_match(&GemmRoute::Classic(a), a, &GemmRoute::Classic(b));
+        assert!(diff.variant_match && !diff.tile_match);
+        let plan = SplitKPlan {
+            tile: a,
+            partitions: 2,
+            k_per_partition: 64,
+        };
+        let v = route_cfg_match(&GemmRoute::Classic(a), a, &GemmRoute::SplitK(plan));
+        assert!(!v.variant_match);
+        assert!(v.tile_match, "SplitK は plan.tile で比べる");
+        assert_eq!(tile_label(a), tile_label(a));
+        assert!(!tile_label(a).contains(' '));
     }
 }

@@ -8,7 +8,7 @@
 //!   構造上の直接対応。#1331/§15.6 の引き継ぎ）、(b)
 //!   `tile::CANDIDATES[3]`（イシュー本文が「現行 N=4096 最良候補」と
 //!   呼ぶ #744 時点の候補。参考ペア）
-//! - **B 系列**: `tile::select_for_device` が実際に選ぶ本番選択構成
+//! - **B 系列**: `tile::select_for_verified_device` が実際に選ぶ本番選択構成
 //!   （M4 Max では N=512→`[5]`・1024→`[6]`・2048→`[1]`・4096→`[2]`。
 //!   `docs/perf/metal-gemm-n4096-kernel-gap.md` §14）
 //!
@@ -33,7 +33,7 @@
 //!
 //! # A 系列単独では「組み込み可否」を判断できない（E7 と同じ理由）
 //!
-//! 本番 `dispatch_auto`（`tile::select_for_device` の M4 Max 厳密一致
+//! 本番 `dispatch_auto`（`tile::select_for_verified_device` の M4 Max 厳密一致
 //! テーブル）は N=2048/4096 で `CANDIDATES[0]`／`[3]` を選ばない。
 //! したがって `[10]` が `[0]`／`[3]` に勝っても `select` を触る根拠には
 //! ならない。A 系列は #1325 の「タイル再利用率向上仮説」に対する直接
@@ -55,7 +55,7 @@
 //! MEASURED_TRIALS, gen_square_ab, median_of}`（いずれも `pub(crate)`）・
 //! `gemm_bk32_diag_tests::run_ab_pair`（`pub(crate)`。E7/E8 で共有する
 //! 交互測定・fail-closed 検証ヘルパ。本イシューで複製せず共有へ
-//! 昇格した）・`tile::{CANDIDATES, select_for_device}`（`pub(crate)`／
+//! 昇格した）・`tile::{CANDIDATES, select_for_verified_device}`（`pub(crate)`／
 //! `pub`）へ到達するため、integration test ではなく `lib.rs` の兄弟
 //! モジュールとして配置する。
 //!
@@ -114,7 +114,7 @@ use objc2_metal::MTLDevice;
 const SIZES_A: [usize; 3] = [1024, 2048, 4096];
 
 /// [`bm128_kernel_gpu_ab_vs_production_select`] が対象とするサイズ
-/// （`tile::select_for_device` の実測帯域全体。512/1024 は非後退情報
+/// （`tile::select_for_verified_device` の実測帯域全体。512/1024 は非後退情報
 /// として追加する）。
 const SIZES_B: [usize; 4] = [512, 1024, 2048, 4096];
 
@@ -176,7 +176,7 @@ fn bm128_kernel_gpu_ab_vs_candidate0() {
 }
 
 /// B 系列（結線判断に必須）: `CANDIDATES[10]`（head）vs
-/// `tile::select_for_device` の本番選択構成（base）を N=512/1024/2048/
+/// `tile::select_for_verified_device` の本番選択構成（base）を N=512/1024/2048/
 /// 4096 で比較する（ファイル冒頭「A 系列単独では組み込み可否を判断
 /// できない」参照。`select` のテーブルを変更する唯一の根拠）。
 #[test]
@@ -201,7 +201,7 @@ fn bm128_kernel_gpu_ab_vs_production_select() {
         // `dispatch_auto` と同一の構成解決（E7 と同じ呼び出し方）。
         // 解決結果を `println!` で残し、docs 側での突合を容易にする。
         let base_cfg: TileConfig =
-            tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+            tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         println!("N={n} pair=production_select production_select_resolved={base_cfg:?}");
 
         let (a, b) = gen_square_ab(0x1332_b000 ^ (n as u64), n);

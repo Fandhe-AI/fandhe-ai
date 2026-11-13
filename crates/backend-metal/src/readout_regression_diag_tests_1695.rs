@@ -244,7 +244,7 @@ fn measure_one_readout_trial(
 fn run_size_arm(n: usize, arm: ReadoutArm) {
     let ctx = cached_context().expect("Metal device (system default) must be available");
     let gemm = cached_gemm(&ctx).expect("MetalGemm construction must succeed");
-    let cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+    let cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
 
     let (a, b) = gen_square_ab(0x1695_a000 ^ (n as u64), n);
     let numel = n * n;

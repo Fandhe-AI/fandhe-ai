@@ -245,7 +245,7 @@ fn spec_source_kernel_gpu_ab_production_sizes() {
         .expect("head GEMM パイプラインの構築に失敗した");
 
     for n in SIZES {
-        let cfg = tile::select_for_device(n, n, n, ctx.verified_m4_max_gpu_core_count());
+        let cfg = tile::select_for_verified_device(n, n, n, ctx.verified_tile_table_device());
         let (a, b) = gen_square_ab(0x1289_a000 ^ (n as u64), n);
 
         let mut base_keep_alive: Vec<Vec<f32>> =
