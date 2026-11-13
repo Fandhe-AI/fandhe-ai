@@ -1,0 +1,2 @@
+rule_sha256=b8751c45b7fe02da1bd98ff0cd1ac8f19dc11ce4da6b25e69075efeab010241f
+prepared_at=2026-11-12T04:03:19Z

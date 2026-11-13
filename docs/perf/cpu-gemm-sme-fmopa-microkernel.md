@@ -1036,19 +1036,19 @@ N=5・単一機体。帰無確率は概算。`train 64 fresh` の実差の可能
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | **事前登録・未実測**。計測部品と規則（`RULE.txt`）を固定した段階。実測は実機セッションで行う |
-| 計測の前提 | #4143（§5.16）・#4142（`noise-band-decision.md`）は 2026-11-10 に所有者が承認済み。ただし RULE §9 の GB10-MODE・NOISE-BAND・UNDETERMINED-HANDLING は固定時点では `<未決>` のままで、実測者が測る前に回答コメント URL つきで転記するまで P-OWNER は不成立（計測は始まらない） |
-| 規則・部品 | `docs/perf/logs/sme-default-on-ab-4156/`（`RULE.txt`・`on-arm.patch`・`orchestrate_macmini.sh`・`orchestrate_gb10.sh`・`aggregate.py`）、A/B 本体 `scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` |
+| 状態 | **実測済み・総合判定 ADOPT**（2026-11-12 計測・2026-11-13 集計）。判定に使った規則は `RULE.v2.txt`（v2。v1 の `RULE.txt` は経緯） |
+| 計測の前提 | #4143（§5.16）・#4142（`noise-band-decision.md`）は 2026-11-10 に所有者が承認済み。`RULE.v2.txt` §9 に GB10-GATE-ONLY-STRUCTURAL・NOISE-BAND = adopted・UNDETERMINED-HANDLING = return-to-owner を回答コメント URL つきで転記してから測った（v1 の `RULE.txt` の §9 は `<未決>` のまま） |
+| 規則・部品 | `docs/perf/logs/sme-default-on-ab-4156/`（`RULE.v2.txt`・`RULE.txt`・`on-arm.patch`・`orchestrate_macmini.sh`・`orchestrate_gb10.sh`・`aggregate.py`）、A/B 本体 `scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` |
 | 腕 | before = OFF（main・定数 false）、after = ON（`on-arm.patch` を当てた計測専用ツリー。main へコミットしない）。#3232 と逆の組み立て。比 = ON / OFF |
-| 結果 | 未実測（ADOPT／REJECT／FAIL／undetermined のいずれも未確定） |
-| 不変 | 既定 OFF のまま。定数・ドリフト検出テスト・unsafe・FMA 契約・tolerance・baseline は変えない。SME の unsafe 独立監査は #4157、既定の切り替えは #4165 と所有者承認 |
+| 結果 | **ADOPT**（`aggregate-macmini-formal-1.md`）。Mac mini（系列 `formal-1`）は到達 10 セルがすべて 5/5 で ON 優位（ON/OFF 中央値比 gemm 0.463〜0.760・train 0.880〜0.913）、ガードの infer 64 に後退なし。GB10 は 12 セルすべてガードで、拘束方式 GB10-GATE-ONLY-STRUCTURAL が pass（5/5 一貫・分離した後退なし）。P-BIT は両機体とも 6726847 行で ON/OFF の sha256 一致。PyTorch 比（記録のみ）は Mac mini の ON 腕が gemm 512〜2048 の 6 セルで 1.078〜1.568・NB-SEP 成立、GB10 は「改善傾向・確定せず」。詳細は `docs/perf/logs/sme-default-on-ab-4156/README.md` の「結果」 |
+| 不変 | 既定 OFF のまま（ADOPT でも本イシューでは定数を変えない。RULE.v2 §8）。定数・ドリフト検出テスト・unsafe・FMA 契約・tolerance・baseline は変えない。SME の unsafe 独立監査は #4157、既定の切り替えは #4165 と所有者承認 |
 
 - 交絡: #3635 以降 `reuse` は常駐入力経路で、#3232 の値とは条件が違う。旧値と並べて比べない。
 - P-RT は ON 腕で `sme_production_disabled_after_gb10_reject`（定数 true では作りの上で必ず落ちる）だけを計測前に固定して除外する。OFF 腕は除外なし。
 - P-BIT は Mac mini でも取る（ON/OFF の bit 同一、すなわち SME と NEON の bit 同一の実証になる）。
 - 6 フレームワークのスコアボードでの 1 位化は Phase 6 で確定する。本 A/B の PyTorch 比は記録のみ。
 
-- #4165: 判定未取得のため結線していない（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
+- #4165: 本 A/B の ADOPT を Phase 4（#4165）の入力として記録する。既定 ON の前提として SME の unsafe 独立監査（#4157）を併記する。結線（定数の切り替え）は #4165 と所有者承認で行い、本イシューでは行っていない（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
 
 ### 5.18 N=256 の SME スレッド数と分配の事前登録 A/B（イシュー #4162）
 

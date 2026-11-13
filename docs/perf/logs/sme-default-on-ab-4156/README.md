@@ -2,7 +2,7 @@
 
 ## 状態
 
-**事前登録（v2）・両機体の系列は終了・集計前**。GB10 腕の収録物は `gb10/` に入れた（下の「実行の記録」）。Mac mini 腕の収録・集計・判定はまだ（下の「結果」は空欄）。判定に使う規則は `RULE.v2.txt`（v2）。v1 の `RULE.txt` は経緯として残し、道具（両オーケストレーション・`aggregate.py`）は読まない。
+**実測済み・総合判定 ADOPT**（2026-11-13 集計。下の「結果」）。GB10 腕は `gb10/`、Mac mini 腕は `macmini-formal-1/`（1 系列目で全ゲートを通過）。判定に使った規則は `RULE.v2.txt`（v2）。既定の切り替えは本イシューの範囲外で、定数は `false` のまま（#4165 の入力として記録する）。v1 の `RULE.txt` は経緯として残し、道具（両オーケストレーション・`aggregate.py`）は読まない。
 
 - v2 で変えた点と理由は `RULE.v2.txt` の冒頭に書いた。判定式・閾値・5 round・5/5 一貫性・checksum 完全一致・処置は v1 のまま。
   - 登録基準を `d551b31` から `18938d84c`（#4258 のマージコミット）へ移した。v1 の固定後に道具の PR（#4256・#4258）が入ったため。
@@ -31,7 +31,9 @@ ADOPT／REJECT を記録する。**既定の切り替え（定数を true にす
 | `orchestrate_macmini.sh`・`orchestrate_gb10.sh` | P-OWNER → P-CAP → ロック →（GB10 は外側ゲート）→ P-TREE → P-R0 → P-RT →（Mac mini は mediaanalysisd の確認）→ A/B → P-BIT → マスク収録（`--dry-run`・`--self-test-leak`・`--self-test-cap` あり） |
 | `test_foreign_gate_4156.sh` | Mac mini 腕の他ジョブの前提ゲートと mediaanalysisd の確認の self-test（実機に接続しない。`bash test_foreign_gate_4156.sh`） |
 | `aggregate.py` | 厳密集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`） |
-| `macmini/`・`gb10/`・`aggregate-*.md` | 実測後に収録（`gb10/` は収録済み。`macmini/`・`aggregate-*.md` はまだ無い）。`aggregate-*.md` は機械出力で手で直さない |
+| `gb10/` | GB10 腕の収録物（`orchestrate_gb10.sh` のマスク収録の写し） |
+| `macmini-formal-1/` | Mac mini 腕の系列 1（`formal-1`）の収録物（`orchestrate_macmini.sh` が BASE の下の `macmini/` へ収録したものの写し）。`kit/` は系列の外の準備の記録（道具のピンの照合・dry・torch の venv・起動の終了行）。系列の分け方は下の「Mac mini 腕」 |
+| `aggregate-gb10.md`・`aggregate-macmini-formal-1.md` | `python3 -I aggregate.py gb10 gb10`・`python3 -I aggregate.py macmini-formal-1 macmini` の機械出力（手で直さない）。Mac mini 側の総合判定は `gb10/` を合わせた両機体の総合 |
 | `../../../../scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` | 2 機共通の A/B 本体。#3232 の `run_ab_sme_default_on_cpu.sh` の派生（元は凍結して変更しない） |
 
 腕は before = OFF（main のクリーンな clone・定数 false）、after = ON（その clone に `on-arm.patch` を当てた計測専用ツリー）。
@@ -104,11 +106,20 @@ Mac mini 腕の準備（`__pycache__` の扱い・系列の前に誰がプロセ
     - `aggregate.py` で空欄記号を見ない
     - `check_series_cap` で空欄記号を見ない（Mac mini 側）
 - v2 の固定前に、`<cuda-node>` で v2 の道具の捨て試走を 1 回流した（2026-11-11）。全段が exit 0 で、マスク収録まで通った。見たのは終了コードの行だけで、出力は開かずに消した（`RULE.v2.txt` §13）。
-- **未検証**: 正式系列での実機の A/B・P-RT・P-BIT・マスク収録と、マスク後の収録物に対する `aggregate.py` の実行（Mac mini と GB10 が必要）。
+- 正式系列（2026-11-12）: 両機体で実機の A/B・P-RT・P-BIT・マスク収録が通り、マスク後の収録物に `aggregate.py` を流した（下の「結果」「実行の記録」）。
 
 ## 結果
 
-<集計前。Mac mini 腕のセッションが `aggregate.py` の出力（`aggregate-*.md`）と判定をここに書く>
+**総合判定: ADOPT**（`aggregate-macmini-formal-1.md` の総合。評価順 FAIL > undetermined（前提ゲート不成立）> REJECT > ADOPT）。
+
+- 所有者決定（§9）: GB10-MODE = GB10-GATE-ONLY-STRUCTURAL・NOISE-BAND = adopted・UNDETERMINED-HANDLING = return-to-owner。
+- 前提ゲート: 両機体とも「すべて成立」（`aggregate-*.md` の「前提ゲート」節）。checksum 不一致（FAIL）は両機体ともない。
+- Mac mini（`<metal-node>`。系列 `formal-1`）: 到達 10 セル（gemm 256〜2048 × fresh/reuse・train 64 × fresh/reuse）はすべて 5/5 で ON/OFF ≤ 1.00。ON/OFF 中央値比は gemm 0.463〜0.760・train 0.880〜0.913。ガード（非到達）の infer 64 は 0.997（fresh）・0.959（reuse）で、5/5 一貫の後退・分離した後退はない。Mac mini 側の判定は ADOPT。
+- GB10（`<cuda-node>`）: 12 セルすべてガード（非到達）。5/5 一貫の後退・分離した後退はない。拘束する方式 GB10-GATE-ONLY-STRUCTURAL は pass（参考の GB10-RECORD・GB10-NBSEP も pass）。
+- P-BIT: 両機体とも ON/OFF の `^out[` 行が 6726847 行で sha256 一致・`cmp` 差分 0。両機体の sha256 も同じ値（`b8c399e9…a694af`）。
+- 1 位化の記録（§6。判定には使わない・PyTorch だけとの比較）: Mac mini の ON 腕は gemm 512/1024/2048 × fresh/reuse の 6 セルで PyTorch 比 1.078〜1.568、NB-SEP 成立（「1 位（確定）」。OFF 腕は 0.516〜0.775）。GB10 は 6 セルとも NB-SEP 不成立で「改善傾向・確定せず」。6 フレームワークでの 1 位化は Phase 6。
+- 処置（§8）: 本イシューでは定数を変えない（`SME_PRODUCTION_ENABLED` は `false` のまま）。ADOPT を Phase 4（#4165）の入力として記録する。既定 ON の前提として SME の unsafe 独立監査（#4157）を併記する。
+- #3232 との違い: #3232 は GB10 の 2 セルの 5/5 後退で総合 REJECT だった。本 A/B では GB10 の数え方（#4143）を先に決めて測り、GB10 に 5/5 一貫の後退は出なかった。#3635 以降 `reuse` は常駐入力経路のため、#3232 の値と並べて比べない。
 
 ## 実行の記録
 
@@ -135,7 +146,23 @@ Mac mini 腕の準備（`__pycache__` の扱い・系列の前に誰がプロセ
 
 ### Mac mini 腕（`<metal-node>`）
 
-<Mac mini 腕のセッションが書く>
+- 計測対象（BASE）: `85498f32be4bb8ea70302bd85ec2b8b4329d862f`（#4264 のマージコミット。`macmini-formal-1/rev-stamp.txt`）。
+  - 開発機で `85498f32b` から `git clone --depth 1` したクリーンな clone（origin を外したもの）を rsync で送り、BASE とした。README の手順 2 の `git bundle` ではないが、BASE がクリーンな clone であることは同じ。ノード上で GitHub への clone・fetch はしていない。shallow clone から ON 腕の複製・`on-arm.patch` の適用・差分 1 件の確認が通ることは、送る前に開発機で試した。
+  - 計測対象 `319a276b0` は `85498f32b` の祖先で、間の `crates/`・`scripts/bench/`・`Cargo.*`・`rust-toolchain.toml` の差分は 0 件（開発機で確認）。
+  - 収録した `macmini-formal-1/tree_fingerprint.txt` は、開発機で `85498f32b` の追跡ファイル一覧から同じ方法（`LC_ALL=C` の sort）で計算した値と一致した（`557ae30e…643da9`。GB10 腕とも同じ値）。`tree_verify.txt` は `crates/backend-cpu/src/gemm_blis/mod.rs` の 1 件。
+  - `RULE.v2.txt` §11 の 8 本のピンは、開発機の clone とノード上の BASE の両方で一致した（`macmini-formal-1/kit/pin-check.txt`）。ツリーの外の kit に置いた `foreign_job_gate.py` も一致した（`kit/kit-pin-check.txt`）。BASE の未コミット変更は 0 件（`kit/base-status-lines.txt`）。
+- 系列の分け方（所有者判断 2026-11-12。#4156 のコメント https://github.com/Fandhe-AI/fandhe-ai/issues/4156#issuecomment-6820151024 の A）: 系列ごとに空の新しい WORK（`<home>/work/w4156-formal-k.noindex`）と、`85498f32b` から作り直した BASE（`<home>/work/b4156-formal-k.noindex`）を使い、収録は `macmini-formal-k/`。`formal-1` で全ゲートを通ったため、`formal-2`・`formal-3` は回していない（§12 (c) の上限 3 のうち 1 系列）。
+- 1 系列目の前の dry（2026-11-12T09:50:30Z）: hw-lock を手で取り（owner `#4156 dry <UTC>`）、`orchestrate_macmini.sh --dry-run` を流した。rc=0、P-OWNER・P-CAP とも成立、WORK は作られていない（`kit/dry-1.txt`）。dry は計画の表示と P-OWNER・P-CAP だけで、収録と集計の分け方はコードを読んで確かめた（収録先 `${BASE}/…/macmini` は BASE を作り直すため系列ごとに新しい、`aggregate.py` の subdir は任意）。
+- torch の venv（所有者判断 2026-11-12）: `<home>/work/k4156.noindex/venv-torch`（WORK・BASE の外）。uv の Python 3.12.15 で作り、`pip install torch==2.14.0 numpy==2.5.4` だけを入れた（2026-11-12T09:59:15Z〜09:59:25Z。hw-lock なし・系列の前）。版は torch 2.14.0・numpy 2.5.4 で RULE.v2 のとおり（`kit/venv-python.txt`・`kit/venv-versions.txt`・`kit/venv-pip-freeze.txt`・`kit/pip.log`）。リポジトリの依存は変えていない。
+- 系列 `formal-1`: 2026-11-12T10:42:13Z〜10:54:44Z（`kit/formal-1.status` は `end rc=0`）。所有者が Mac mini の準備を終えた連絡を受けてから起動した。止めるよう名指しされたプロセスはなく（§12 (b)）、計測セッションからは何も止めていない。
+- 実機ロック: `orchestrate_macmini.sh` が 10:42:13Z に取得し、10:54:44Z に解放した。収録した `macmini-formal-1/hwlock.log` は GB10 腕と同じく収録先へ複製した時点の写しなので、最後の行は `released-pending at=2026-11-12T10:54:44Z`。解放の行（`released at=2026-11-12T10:54:44Z`）はノードの WORK 側の `hwlock.log` にだけある。`aggregate.py` はこの形で止まらなかった。
+- 判定行（`macmini-formal-1/load_gate.log`）: `rt_on exit=0 skip=sme_production_disabled_after_gb10_reject`・`rt_off exit=0`・`mediaanalysisd exit=0`・`run_ab exit=0`・`bitdump exit=0 cmp_exit=0`・`collect exit=0`。オーケストレーションの標準出力は `P-TREE ok`・`P-R0 ok`・`完了`（`kit/formal-1.out`）。
+- 他ジョブの前提ゲート: 5 round とも、開始前のゲートが CLEAN かつ load1 < 3.0 で `gate=pass gate_ok=1`（待ちは round 1 から順に 90・0・30・0・30 秒）、終了後の確認も 5 round とも CLEAN（`macmini-formal-1/foreign-gate/`。ゲートの sha256 は `foreign_gate.txt` でピンと一致）。hw-lock を取らずに GPU を使う別のジョブは見ていない。
+- 集計の前の揃い方の確認（系列が 12 分半と短かったため。値は開かずに確認）: round 1〜5 の判定行が揃っている、結果の jsonl の行数（gemm 40・train 10・infer 10 を両腕、torch 30）が GB10 腕と同じ、ファイルの組み合わせが GB10 腕と同じ（Mac mini だけの `foreign-gate/`・`foreign_gate.txt`・`mediaanalysisd.txt` と GB10 だけの `load_gate_outer.log` を除く）、`torch_failed_total=0`、skip の記録が空。
+- 漏れ検査: 収録前の `leak_re` は 0 件（`collect exit=0`）。回収後に開発機で `<home>` などへの置換をかけ直し（3 ファイル。kit の照合結果・dry・pip.log の絶対パス）、ノードのホスト名（2 形）・ユーザー名・ホームのパス・`/Users/`・IPv4・開発機のユーザー名を全 75 ファイルに当てて 0 件。
+- `__pycache__` は消していない（§12 (a)）。`aggregate.py` は `-B` と `PYTHONDONTWRITEBYTECODE=1` で流し、`__pycache__` を作っていない。
+- 露出の申告（§13 の Mac mini 分）: #4156 のコメント https://github.com/Fandhe-AI/fandhe-ai/issues/4156#issuecomment-6820151024 の B（1 系列目より前に統合セッションが投稿）。系列の途中は、プロセスの生存・hw-lock の owner・終了の行だけを見た。値・集計は、全系列が終わり GB10 の記録（`test/4156-record`）を受け取った後の集計で初めて見た。GB10 の記録もその時点まで開いていない。
+- ノードの `<home>/work/b4156-formal-1.noindex`（BASE）・`w4156-formal-1.noindex`（WORK）・`k4156.noindex`（kit）は、記録 PR のマージまで残す。
 
 ## スコープ外
 

@@ -1,0 +1,3 @@
+mediaanalysisd check1 at=2026-11-12T10:44:12Z pcpu=0.0
+mediaanalysisd check2 at=2026-11-12T10:46:12Z pcpu=0.0
+mediaanalysisd check3 at=2026-11-12T10:48:12Z pcpu=0.0

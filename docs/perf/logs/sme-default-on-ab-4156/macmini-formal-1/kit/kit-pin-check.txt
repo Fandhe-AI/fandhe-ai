@@ -1,0 +1,2 @@
+<home>/work/k4156.noindex/foreign_job_gate.py: OK
+rc=0
