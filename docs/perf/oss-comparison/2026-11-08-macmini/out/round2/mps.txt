@@ -1,0 +1,5 @@
+torch=2.14.0 device=mps
+size=512 pytorch_mps_f32_tflops=0.7391
+size=1024 pytorch_mps_f32_tflops=2.1378
+size=2048 pytorch_mps_f32_tflops=3.2403
+size=4096 pytorch_mps_f32_tflops=3.2921

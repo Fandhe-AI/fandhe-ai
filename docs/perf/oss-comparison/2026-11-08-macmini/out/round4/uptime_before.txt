@@ -1,0 +1,6 @@
+19:20  up 28 days, 18:54, 1 user, load averages: 0.85 1.53 2.06
+  2.2 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  0.9 /usr/libexec/sharingd
+  0.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  0.8 /usr/sbin/bluetoothd
+  0.7 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter

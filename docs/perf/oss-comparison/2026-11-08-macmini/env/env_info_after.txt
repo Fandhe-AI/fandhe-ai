@@ -1,0 +1,38 @@
+2026-11-08T10:31:25Z
+Apple M4
+10
+4
+6
+17179869184
+Darwin 27.0.0 arm64
+27.0.1
+26A434
+{ 1.07 1.48 1.83 }
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+Now drawing from 'AC Power'
+logged-in users: nancy 
+top cpu:
+  5.0 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  1.8 /usr/sbin/cfprefsd
+  1.3 /usr/sbin/bluetoothd
+  0.9 /usr/sbin/notifyd
+  0.8 /usr/libexec/opendirectoryd
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: aarch64-apple-darwin
+release: 1.99.0
+LLVM version: 23.1.1
+cargo 1.99.0 (5f94df478 2026-08-27)
+venv-mlx 3.12.15 mlx 0.32.4 numpy 2.5.4
+venv-torch 3.12.15 torch 2.14.0 numpy 2.5.4 mps True
+rev_stamp=sha=b6ae8170168c768c1fca152dae4173975b0a53d1
+ref=v0.14.0
+dirty=0
+source=git-archive
+bin d5f40fa11f8c978a5f048360d2a44a94046f6a18d156667cfd3a290cd2aa6601 2026-11-08T19:01:23 target-oss/release/oss-gemm-compare
+bin cf09675f98d66aab5cb332d3256628ddecd00d3d3e9d03b36895a3a10b733923 2026-11-08T19:01:45 target-metal/release/examples/metal_gemm_bench
+bin 2193b305799ea167e314c6072eb5ab5b3ea17c915da96d214e7f2d7b39ee0bde 2026-11-08T19:01:45 target-metal/release/examples/gemm_f32_prepared_bench

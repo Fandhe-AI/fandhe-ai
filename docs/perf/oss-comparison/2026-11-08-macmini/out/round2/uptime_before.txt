@@ -1,0 +1,6 @@
+19:09  up 28 days, 18:43, 1 user, load averages: 1.12 2.49 2.53
+  8.9 /usr/sbin/bluetoothd
+  6.6 /usr/libexec/sharingd
+  6.1 /usr/libexec/nearbyd
+  5.1 /usr/libexec/rapportd
+  3.9 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
