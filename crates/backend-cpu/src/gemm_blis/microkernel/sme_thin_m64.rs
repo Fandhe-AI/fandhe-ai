@@ -22,7 +22,7 @@
 //! ## 安全性
 //!
 //! 新規 `unsafe asm!` は 1 ブロック（`compute_thin_m64`）。入口 `kernel_unchecked` は asm より前に
-//! 全長とストライドを `checked_*` で検査し、違反は型付きエラーで返す（REQ-8・panic しない）。
+//! 全長とストライド（バイト換算を含む）を `checked_*` で検査し、違反は型付きエラーで返す（REQ-8・panic しない）。
 //! 監査記録は `docs/cpu-gemm-sme-unsafe-audit.md` §13。
 
 use std::arch::asm;
@@ -37,6 +37,11 @@ pub const NR: usize = 16;
 const _: () = assert!(M == 4 * NR);
 
 /// 長さ・ストライドの事前検査（REQ-8）。`kernel_unchecked`／`scalar_fallback` 共通。
+///
+/// 本体は arch 非依存の `super::check_thin_m64_bounds`（x86_64 の CI でも境界値テストを走らせるため）。
+/// 戻り値は asm へ渡す `checked_mul` 済みのバイト単位ストライド（#4279）。`scalar_fallback` も同じ
+/// 検査を通るため、`k <= 1` かつ `b_stride > usize::MAX / 4` は scalar 側でも `Err` になる
+/// （現行の呼び出し元は `NR` か `n` を渡すので到達しない）。
 fn check_bounds(
     ap_len: usize,
     bp_len: usize,
@@ -44,37 +49,8 @@ fn check_bounds(
     c_len: usize,
     ldc: usize,
     k: usize,
-) -> Result<(), TileBoundsError> {
-    match M.checked_mul(k) {
-        Some(expected) if expected == ap_len => {}
-        _ => {
-            return Err(TileBoundsError::PanelLengthMismatch {
-                panel: "ap",
-                actual: ap_len,
-            });
-        }
-    }
-    if b_stride < NR {
-        return Err(TileBoundsError::LdcTooSmall {
-            ldc: b_stride,
-            nr: NR,
-        });
-    }
-    if k > 0 {
-        let need = (k - 1)
-            .checked_mul(b_stride)
-            .and_then(|v| v.checked_add(NR));
-        match need {
-            Some(need) if bp_len >= need => {}
-            _ => {
-                return Err(TileBoundsError::PanelLengthMismatch {
-                    panel: "bp",
-                    actual: bp_len,
-                });
-            }
-        }
-    }
-    super::check_c_tile_bounds(M, NR, ldc, c_len)
+) -> Result<super::ThinM64StrideBytes, TileBoundsError> {
+    super::check_thin_m64_bounds(M, NR, ap_len, bp_len, b_stride, c_len, ldc, k)
 }
 
 /// SME 命令を発行する演算本体（非公開）。
@@ -87,6 +63,7 @@ fn check_bounds(
 /// - 直前に `TPIDR2_EL0 == 0`（`super::sme::has_pending_lazy_za_save` が偽）を確認済み。
 /// - `check_bounds` を通過済み: `ap.len() == 64*k`、`k>0` のとき `bp.len() >= (k-1)*b_stride+16`、
 ///   `b_stride >= 16`、`ldc >= 16`、`c.len() >= 63*ldc+16`。
+/// - `strides` は同じ `check_bounds` が `checked_mul` で作った値（`b_stride*4`・`ldc*4`。#4279）。
 unsafe fn compute_thin_m64(
     ap: &[f32],
     bp: &[f32],
@@ -94,18 +71,23 @@ unsafe fn compute_thin_m64(
     c: &mut [f32],
     ldc: usize,
     k: usize,
+    strides: super::ThinM64StrideBytes,
 ) {
     let c_ptr = c.as_mut_ptr();
     let a_ptr = ap.as_ptr();
     let b_ptr = bp.as_ptr();
-    let ldc_bytes = ldc * size_of::<f32>();
-    let b_stride_bytes = b_stride * size_of::<f32>();
+    // バイト換算は `check_bounds` が `checked_mul` で済ませた値を使う（#4279。未検査の乗算を
+    // ここへ置かない）。`b_stride` は asm へ渡さない（バイト値のみ）ため要素数引数は C 側計算用。
+    let _ = b_stride;
+    let ldc_bytes = strides.ldc;
+    let b_stride_bytes = strides.b_stride;
     // タイル t（C 行 16t..16t+16）の先頭行ポインタ。オフセットは検査済み長の範囲内
     // （最大 63*ldc+16 要素）のため `wrapping_add` でも実質オーバーフローしない。
     let c0 = c_ptr;
     let c1 = c_ptr.wrapping_add(16 * ldc);
     let c2 = c_ptr.wrapping_add(32 * ldc);
     let c3 = c_ptr.wrapping_add(48 * ldc);
+    // c.len() >= 63*ldc+16 かつ f32 スライス長は isize::MAX/4 以下のため 16*ldc_bytes は溢れない。
     let back_bytes = 16 * ldc_bytes;
 
     // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）により SME 対応・SVL=64 バイト・
@@ -236,15 +218,15 @@ pub(crate) unsafe fn kernel_unchecked(
     ldc: usize,
     k: usize,
 ) -> Result<(), TileBoundsError> {
-    check_bounds(ap.len(), bp.len(), b_stride, c.len(), ldc, k)?;
+    let strides = check_bounds(ap.len(), bp.len(), b_stride, c.len(), ldc, k)?;
     // SAFETY: 呼び出し元契約により SME 対応（TPIDR2_EL0 を読める）。
     if unsafe { super::sme::has_pending_lazy_za_save() } {
         scalar_fallback_unchecked(ap, bp, b_stride, c, ldc, k);
         return Ok(());
     }
     // SAFETY: `compute_thin_m64` の `# Safety` 契約: SME 対応は呼び出し元契約、
-    // lazy save なしは直前に確認、長さは `check_bounds` で検査済み。
-    unsafe { compute_thin_m64(ap, bp, b_stride, c, ldc, k) };
+    // lazy save なしは直前に確認、長さとバイト換算ストライドは `check_bounds` で検査済み。
+    unsafe { compute_thin_m64(ap, bp, b_stride, c, ldc, k, strides) };
     Ok(())
 }
 
@@ -338,6 +320,20 @@ mod tests {
             assert!(kernel_unchecked(&ap, &bp, NR - 1, &mut c, NR, k).is_err());
             assert!(kernel_unchecked(&ap, &bp, NR, &mut c, NR, usize::MAX).is_err());
             assert!(kernel_unchecked(&ap, &bp, usize::MAX, &mut c, NR, k).is_err());
+        }
+    }
+
+    /// #4279: k=0・k=1 かつ `b_stride > usize::MAX/4` はバイト換算の桁あふれで `Err`（panic しない）。
+    #[test]
+    fn b_stride_byte_overflow_is_err_for_k0_and_k1() {
+        let over = usize::MAX / 4 + 1;
+        let mut c = vec![0.0f32; 63 * NR + NR];
+        for k in [0usize, 1] {
+            let ap = vec![0.0f32; M * k];
+            let bp = vec![0.0f32; NR];
+            assert!(scalar_fallback(&ap, &bp, over, &mut c, NR, k).is_err());
+            // SAFETY: 検査エラーは asm・TPIDR2 読み取りより前に返る。
+            assert!(unsafe { kernel_unchecked(&ap, &bp, over, &mut c, NR, k) }.is_err());
         }
     }
 
