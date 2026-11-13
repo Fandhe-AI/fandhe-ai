@@ -428,7 +428,34 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 
 ### 14.5 独立 security-auditor 監査の要約
 
-**未実施**（§14.1）。本節には転記する要約が無い。独立監査の依頼は、`.claude/agents/quality/security-auditor.md` を起動できる環境で、基準 sha `8aedf2be6`・§14.2 の範囲表・§14.4 の観点 ID・§12.11 の受理条件・§13.6 の P2 を渡して行う。
+2026-11-13 に、独立した security-auditor subagent が origin/main `72431417e` を基準に監査した（読み取り専用・静的な読解のみ）。§14.4 の自己点検の結論は渡さず、範囲・観点 ID・§12.8／§12.11 の受理条件・§13.6 の P2 だけを渡して、コードを読み直させた。所見は監査者のものであり、扱いの最終判断は所有者が行う。
+
+- **基準の差分**: `8aedf2be6..72431417e` では、SME の `microkernel/`・`microkernel.rs`・`sme_detect.rs`・`thread_limit.rs` に差分はない。`gemm_blis/mod.rs` と、新規の `sme_small_sched.rs`（#4162 の腕。`unsafe` なし・定数 OFF・SME 分岐の内側だけ）・`infer_scope.rs`（`unsafe` なし）などに差分がある。
+- **インベントリ（監査者が数え直した値）**: 本番の `asm!` は 4 か所（`sme.rs:127`・`sme.rs:201`・`sme_detect.rs:162`・`sme_thin_m64.rs:129`）、本番の `unsafe fn` は 7、本番の `unsafe {}` は 13。テスト専用の `asm!` は 3 か所（`sme.rs:911・1005・1107`）で、`#[cfg(test)]` の `mod tests` に閉じている。§14.3 と一致する。
+
+| ID | 判定 | 根拠（`72431417e` の `file:line`） |
+|----|------|------------------------------------|
+| M1 長さ・境界検査 | 適合 | `microkernel.rs:203` の `panel_len_matches`（`checked_mul`）、同 285-307 の `check_c_tile_bounds`（`checked_sub`／`checked_mul`／`checked_add`）、thin の `check_bounds`（`sme_thin_m64.rs:39-77`）。`ldc*4`・`16*ldc` は検査の後に計算する |
+| M2 lazy ZA save | 適合 | `current_thread_capable`（`microkernel.rs:821`）が実行スレッド自身で SVL と `TPIDR2_EL0` を判定し直し、`kernel_unchecked*` も自分で確かめる（`sme.rs:311`・thin:240） |
+| M3 SVL・OS 判定の順序 | 適合 | `sme_report` は OS フラグの判定のあとでだけ `rdsvl` を呼ぶ（`sme_detect.rs:202-211`）。`mrs TPIDR2` も `kernel_enabled` のあと（`microkernel.rs:822-828`） |
+| M4 clobber 宣言 | 適合 | `v0`〜`v31`・`p0`〜`p15`・`ffr`・`w12` を宣言し、x レジスタは `inout`。フラグを書くため `preserves_flags` なし |
+| M5 `smstart`／`smstop` | 適合 | 1 つの `asm!` の中で対にして閉じ、ループは後方分岐だけで早期脱出がない（`sme.rs:203-243`・thin:131-191） |
+| G1 既定 OFF の短絡 | 適合 | `SME_PRODUCTION_ENABLED = false`（`mod.rs:3558`）と `&&` の短絡（同 3593）。環境変数で ON にする口はない（読むのは `RAYON_NUM_THREADS` だけ。`sme_small_sched.rs:165`） |
+| R1 公開面 | 適合（P2 の所見あり。下記） | `sme_production_enabled()` は `#[doc(hidden)] pub` の読み取り専用関数。`crates/facade` から SME への参照はない |
+| OWASP | 適合 | A03: macOS の `sysctl` は絶対パス・固定引数・`env_clear()`（`thread_limit.rs:323` の `read_sysctl`）。A04・A05・A08 は問題なし。A06: 新しい依存なし。秘密情報なし |
+
+**新しい所見**（是正の issue は起票していない。§14.11）
+
+| 重大度 | 所見 | 失敗シナリオ | 是正案 |
+|--------|------|--------------|--------|
+| P2 | `gemm_blis`・`microkernel`・`sme` がすべて `pub mod`（`lib.rs:151`・`gemm_blis/mod.rs:65`・`microkernel.rs:76`）。crates.io で公開済みの `fandhe-ai-backend-cpu` から、外部の crate が `sme::kernel_unchecked{,_with_ldc}`（`pub unsafe fn`）を直接呼べる | SME の無い aarch64 機で外部コードが呼ぶと SIGILL になる。`unsafe fn` の契約に違反した呼び出しなので、扱いは呼び出し側の UB。サポート対象の公開面（facade）からは届かない | `pub(crate)` にする。公開 API の破壊的変更になるため、所有者の判断が要る。既定 ON の可否そのものには影響しない |
+| P3 | thin で `k == 1` かつ `b_stride > usize::MAX / 4` のとき、`b_stride * size_of::<f32>()`（`sme_thin_m64.rs:101`）が debug ビルドで panic する（release では wrap するが値は使われず、UB ではない） | 今の呼び出し元（`NR` か `n` を渡す）からは届かない | `checked_mul` にする |
+| P3 | `microkernel.rs:891` の `debug_assert!` は debug ビルドだけで効く | — | 現状のまま（§12.11 の P2 対応として既存） |
+| P3（推測） | 既存の L3（ストリーミング中のシグナル配送）と、呼び出し元の ZA 使用を検出しない点は未確認のまま | — | L3 は §12.11 で所有者が受け入れ済み |
+
+**§13.6 の P2 の現状**: #1（thin のゲートが `SME_PRODUCTION_ENABLED` に従属しない。`mod.rs:542・800・3647`）と #2（thin 側に lazy-ZA 保留のテストが無い）は、どちらも未対応。thin を OFF のまま `SME_PRODUCTION_ENABLED` だけを true にするなら、thin の経路は OFF の定数で短絡するので、どちらも必須ではない。thin を ON にする PR では必須。
+
+**監査の限界**: Apple M4 の実機では実行していない（静的な読解のみ）。`mrs TPIDR2_EL0` が macOS の EL0 で許されること、`smstop` 後のシグナルの扱いなど、OS の挙動の一次資料と Arm ARM の命令仕様は照合していない。実機での直近の結果は §12.5・§13.5 と、#4156 の P-BIT（sha 一致）。
 
 ### 14.6 lint の再実行（x86_64 Linux からのクロス型検査）
 
@@ -463,3 +490,10 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - 既定 ON の判断は #4165 と所有者承認による。D-C（#3018 コメント 6111643437）は条件付き承認のまま。
 
 - #4165: 本節 §14.5 が未実施のため、SME 既定 ON は結線していない（[`perf/cpu-adopt-wiring-4165.md`](perf/cpu-adopt-wiring-4165.md)）。
+
+### 14.11 独立監査の結果と閉じる条件（2026-11-13 追記）
+
+- §14.9・§14.10 の「独立監査は未達」は、§14.5 の記録で解消した。§14.1〜§14.10 は 2026-11-09 時点の記録として変更しない。
+- 条件 3（`unsafe asm!` の監査）: 独立監査で M1〜M5・G1・R1・OWASP はすべて適合。新しい P0・P1 はない。
+- 是正 issue の候補（起票は所有者の承認後）: P2 の SME カーネルの公開範囲（`pub(crate)` 化。破壊的変更）と、P3 の thin の `checked_mul`。§13.6 の P2 #1・#2 は thin を有効にする前の必須事項として引き継ぐ。
+- SME 既定 ON は、引き続き #4165 と所有者承認による。本節は既定 ON の承認ではない。
