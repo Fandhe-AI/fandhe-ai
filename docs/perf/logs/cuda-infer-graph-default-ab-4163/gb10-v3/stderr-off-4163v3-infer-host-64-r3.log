@@ -1,0 +1,1 @@
+DIAG: --diag-host-input-reuse ON (host-input predict_resident, chain capture reachable; issue #4163)

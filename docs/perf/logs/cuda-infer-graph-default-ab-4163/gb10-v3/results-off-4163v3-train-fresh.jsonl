@@ -1,0 +1,5 @@
+{"framework":"fandhe-ai","version":"0.14.0","task":"train","device":"cuda","size":64,"median_s":0.000500516,"q1_s":0.000492673,"q3_s":0.000507152,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.14.0","task":"train","device":"cuda","size":64,"median_s":0.000506479,"q1_s":0.000500876,"q3_s":0.000511055,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.14.0","task":"train","device":"cuda","size":64,"median_s":0.000531571,"q1_s":0.000509019,"q3_s":0.000553562,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.14.0","task":"train","device":"cuda","size":64,"median_s":0.000535261,"q1_s":0.000517709,"q3_s":0.000563844,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.14.0","task":"train","device":"cuda","size":64,"median_s":0.000530056,"q1_s":0.000508900,"q3_s":0.000552818,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
