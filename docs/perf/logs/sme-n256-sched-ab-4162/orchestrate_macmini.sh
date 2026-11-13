@@ -6,9 +6,20 @@
 # 腕: base（SME ON）・aa（base と同一バイナリの A/A）・t4・t6・jpw1・jpw4・t4-jpw1。判定は aggregate.py。
 # 既定の切り替えは行わない（定数は計測専用ツリーでだけ書き換える。main へコミットしない）。
 # macOS の bash 3.2 でも動くよう mapfile・連想配列・jq は使わない。
+# 起動順: RULE 照合 → P-LOCK → P-TREE → P-R0/P-FIRE/P-RT/P-BIT → ビルド → 系列の前の確認（Safari・mediaanalysisd）→ A/B 5 round → マスク収録。
+# 他ジョブの前提ゲート（2026-11-13 追加。#4156 の Mac mini 腕〈PR #4258〉・#4160 と同じ部品）: FOREIGN_GATE（foreign_job_gate.py の
+#   絶対パス。必須）を scripts/bench/framework-compare/ab_foreign_gate.sh 経由で呼ぶ。round のループは本スクリプトにあるので、
+#   #4258 が A/B 本体で挟んだのと同じ形をここで挟む: 各 round の前は「他ジョブ CLEAN（G1〜G4）かつ load1 < 3.0」を同じループで
+#   待ち（30 秒間隔・最大 60 回＝従来の load1 の待ちと同じ上限）、round の後（PyTorch まで終えた直後）に 1 回確かめる。
+#   ゲートの出力は ${OUT}/foreign-gate、ゲートの sha256 は ${OUT}/foreign_gate.txt。
+# 系列の前の確認（2026-11-13 追加）: ビルドの後・最初の round の前に、basename がちょうど Safari のプロセスが無いこと
+#   （#4160 の RULE.v2.txt 項 4 (b) 1）と、mediaanalysisd の %CPU が 2 分間隔で 3 回 5 未満であること（#4146 の RULE.v2.txt
+#   項 8 (c)。プロセスがなければ通過）を確かめる。不成立なら 1 セルも測らず、記録を ${WORK}/prestart.txt に残して止まる。
+# どちらもゲートを厳しくする方向だけの追加で、判定式・閾値・round 数・腕・セル・ほかの段の手順・aggregate.py は変えない。
 #
 # 使い方（BASE ツリーのルートで）:
 #   BASE=<クリーンな clone の絶対パス> WORK=<作業ディレクトリ絶対パス> TORCH_PY=<venv-torch/bin/python 絶対パス> \
+#   FOREIGN_GATE=<foreign_job_gate.py の絶対パス（docs/perf/logs/macmini-foreign-job-gate/。tree の外の kit に置く）> \
 #     bash docs/perf/logs/sme-n256-sched-ab-4162/orchestrate_macmini.sh --dry-run   # 計画のみ（副作用なし）
 #     bash docs/perf/logs/sme-n256-sched-ab-4162/orchestrate_macmini.sh             # 実行（Mac mini 上）
 # WORK は同期ツリーの外に置く（target もそこ）。ログは BASE の外（${WORK}/out）へ出し、終了後に
@@ -51,27 +62,99 @@ validate_abs() { # validate_abs <名前> <値>
     return 0
 }
 
+# 系列の前の Safari の確認（#4160 の RULE.v2.txt 項 4 (b) 1 と同じ基準）。ps の comm の basename がちょうど `Safari` の
+# プロセス（Safari アプリ本体）が 0 件であること。補助プロセス（com.apple.Safari.SafeBrowsing.Service 等）は条件にしない
+# （名前に Safari を含むプロセスは basename と %CPU を記録するだけ）。ps の失敗・出力が空は不成立（fail-closed）。
+check_safari() { # check_safari <出力ファイル> -> 0=成立 1=不成立
+    local out=$1 ps_out n
+    ps_out="$(ps -A -o pcpu=,comm= 2>/dev/null)" || { echo "safari check at=$(date -u +%Y-%m-%dT%H:%M:%SZ) ps-failed" >> "${out}"; return 1; }
+    [ -n "${ps_out}" ] || { echo "safari check at=$(date -u +%Y-%m-%dT%H:%M:%SZ) ps-empty" >> "${out}"; return 1; }
+    n="$(printf '%s\n' "${ps_out}" | awk '{
+        c = $0; sub(/^[ \t]*[^ \t]+[ \t]+/, "", c); k = split(c, a, "/")
+        if (a[k] == "Safari") m++
+    } END { print m + 0 }')"
+    echo "safari check at=$(date -u +%Y-%m-%dT%H:%M:%SZ) safari_app=${n}" >> "${out}"
+    printf '%s\n' "${ps_out}" | awk '{
+        c = $0; sub(/^[ \t]*[^ \t]+[ \t]+/, "", c); k = split(c, a, "/")
+        if (a[k] ~ /Safari/) print "  safari-named pcpu=" $1 " " a[k]
+    }' | sort >> "${out}"
+    [ "${n}" = "0" ]
+}
+
+# mediaanalysisd の確認（#4146 の RULE.v2.txt 項 8 (c) と同じ基準。#4156 の orchestrate_macmini.sh〈PR #4258〉と同じ関数）。
+# 2 分間隔で 3 回、%CPU が 5 未満であること。名前は ps の comm の basename の完全一致で見る（部分一致にしない）。
+# 複数あれば最大値。プロセスがなければ absent で通過。ps の失敗・出力が空・%CPU が数値でないときは不成立（fail-closed）。
+# 各回の結果を <出力ファイル> に 1 行ずつ足す。
+check_mediaanalysisd() { # check_mediaanalysisd <出力ファイル> -> 0=成立 1=不成立
+    local out=$1 i v ps_out
+    for i in 1 2 3; do
+        ps_out="$(ps -A -o pcpu=,comm= 2>/dev/null)" || { echo "mediaanalysisd check${i} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) ps-failed" >> "${out}"; return 1; }
+        [ -n "${ps_out}" ] || { echo "mediaanalysisd check${i} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) ps-empty" >> "${out}"; return 1; }
+        v="$(printf '%s\n' "${ps_out}" | awk '{
+            c = $0; sub(/^[ \t]*[^ \t]+[ \t]+/, "", c); n = split(c, a, "/")
+            if (a[n] == "mediaanalysisd") {
+                if ($1 !~ /^[0-9]+(\.[0-9]+)?$/) bad = 1
+                else if (!f || $1 + 0 > m + 0) m = $1
+                f = 1
+            }
+        } END { if (bad) print "not-numeric"; else if (f) print m; else print "absent" }')"
+        echo "mediaanalysisd check${i} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) pcpu=${v}" >> "${out}"
+        case "${v}" in
+            absent) ;;
+            '' | not-numeric) return 1 ;;
+            *) awk -v x="${v}" 'BEGIN { exit !(x < 5) }' || return 1 ;;
+        esac
+        [ "${i}" -lt 3 ] && sleep 120
+    done
+    return 0
+}
+
+# 系列の前の確認（ビルドの後・最初の round の前。hw-lock の下）。Safari → mediaanalysisd の順に確かめ、記録を <出力ファイル> に残す。
+# 1 つでも不成立なら記録を <prestart ファイル> へ移し、1 セルも測らずに非 0 で止まる（系列は始まっていない。ロックは EXIT trap が外す）。
+series_start_check() { # series_start_check <出力ファイル> <prestart ファイル> -> 0=成立（不成立は exit 1）
+    local out=$1 pre=$2 why=""
+    echo "series-start begin at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${out}"
+    if ! check_safari "${out}"; then
+        why=safari
+    elif ! check_mediaanalysisd "${out}"; then
+        why=mediaanalysisd
+    fi
+    if [ -n "${why}" ]; then
+        echo "result=not-started reason=${why} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${out}"
+        mv "${out}" "${pre}" || echo "error: prestart の記録を移せない（${out} に残る）" >&2
+        echo "error: 系列の前の確認が不成立（reason=${why}）-> 1 セルも測らずに止める。記録は ${pre}（所有者へ報告する）" >&2
+        exit 1
+    fi
+    echo "result=started at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${out}"
+    return 0
+}
+
 if [ "${DRY}" = "1" ]; then
     echo "# dry-run: 実行計画（副作用なし）"
-    echo "0. RULE.txt: プレースホルダ（<未記入>）が残っていないこと、fixed-at-utc が現在より前、各 sha256（patch 6 本・aggregate.py・実行中の本スクリプト自身）が実ファイルと一致"
-    echo "1. P-LOCK: mkdir ${LOCK_DIR}（60 秒おきに再試行）。取得・解放時刻を hwlock.log へ"
+    echo "0. 起動時の検査（ロックの前）: BASE・WORK・TORCH_PY・FOREIGN_GATE が絶対パスで禁止文字なし、FOREIGN_GATE のファイルがある"
+    echo "   RULE.txt: プレースホルダ（<未記入>）が残っていないこと、fixed-at-utc が現在より前、各 sha256（patch 6 本・aggregate.py・実行中の本スクリプト自身）が実ファイルと一致"
+    echo "1. P-LOCK: mkdir ${LOCK_DIR}（60 秒おきに再試行）。取得・解放時刻を hwlock.log へ。FOREIGN_GATE の sha256 を foreign_gate.txt へ（パスは書かない）"
     echo "2. P-TREE: BASE を ${TREES} の 6 ツリーへ clone。on-arm.patch（全ツリー）と arm-<腕>.patch（候補のみ）を git apply --check のうえ適用。差分ファイルが ${GATE_FILE} と ${SCHED_FILE} の期待どおりか。BASE と tree_sha の間で crates/・scripts/bench/・Cargo.*・rust-toolchain.toml に差分がないか。cargo tree で fandhe-ai が path patch の facade に解決するか"
     echo "3. P-R0: 全ツリーで sme_report().kernel_enabled == true（定数 SME_PRODUCTION_ENABLED == true は P-TREE が確認）"
     echo "4. P-FIRE: 各ツリーで ${FIRE_TEST} を --ignored --exact 1 件。256^3 の発火数は候補 >=1・base/aa =0、512^3 と (784,256,64) は全腕 0"
     echo "5. P-RT: base/aa は cargo test -p fandhe-ai-backend-cpu --release -- --skip ${RT_SKIP_ON}。候補は --skip ${RT_SKIP_CAND} も付ける"
     echo "6. P-BIT: 各ツリーで ${BIT_TEST} を実行（SKIP 出力なら undetermined）"
     echo "7. ビルド（逐次・計測前）: 各ツリーの bench-fandhe を path patch の facade で release ビルド"
-    echo "8. A/B: ${ROUNDS} round。round ごとに ${ARMS} の起動順をローテーション。load1 < 3.0（30 秒間隔・最大 30 分）。セルは gemm 256/512 x fresh/reuse と train 64 x fresh/reuse。各 round 後に PyTorch（記録のみ）"
-    echo "9. 収録: gates.txt を作り、マスクして ${REPO_LOG}/macmini へ複製。ホスト名等の grep が 0 件でなければ停止。ロックを解放（解放時刻は複製前に hwlock.log へ記録）"
+    echo "7b. 系列の前の確認: basename がちょうど Safari のプロセスが 0 件（補助プロセスは条件にしない）→ mediaanalysisd が 2 分間隔で 3 回 %CPU 5 未満（basename の完全一致・不在は通過・ps の失敗は不成立）。記録は series-start.txt。不成立なら 1 セルも測らず \${WORK}/prestart.txt を残して止める"
+    echo "8. A/B: ${ROUNDS} round。round ごとに ${ARMS} の起動順をローテーション。セルは gemm 256/512 x fresh/reuse と train 64 x fresh/reuse。各 round 後に PyTorch（記録のみ）"
+    echo "   他ジョブの前提ゲート: FOREIGN_GATE 必須（ab_foreign_gate.sh 経由で foreign_job_gate.py の G1〜G4）。各 round の前は他ジョブ CLEAN かつ load1<3.0 を同じループで待ち（30 秒間隔・最大 60 回）、round の後（PyTorch の後）に 1 回確認（FOREIGN は同じ round の gate=invalid reason=foreign-after phase=after を足す → aggregate.py の P-GATE で undetermined）。出力は foreign-gate/"
+    echo "9. 収録: gates.txt を作り、マスクして ${REPO_LOG}/macmini へ複製（foreign-gate/・series-start.txt を含む）。ホスト名等の grep が 0 件でなければ停止。ロックを解放（解放時刻は複製前に hwlock.log へ記録）"
     exit 0
 fi
 
-for v in BASE WORK TORCH_PY; do
+for v in BASE WORK TORCH_PY FOREIGN_GATE; do
     eval "val=\${${v}:-}"
     # shellcheck disable=SC2154
     validate_abs "${v}" "${val}" || exit 1
 done
 [ -x "${TORCH_PY}" ] || { echo "error: TORCH_PY が実行可能でない" >&2; exit 1; }
+# 他ジョブの前提ゲート（foreign_job_gate.py）はロックを取る前に存在を確かめる（パスの誤りで系列を始めない）
+[ -f "${FOREIGN_GATE}" ] || { echo "error: FOREIGN_GATE のファイルが無い" >&2; exit 1; }
 if [ -n "${RAYON_NUM_THREADS:-}" ]; then
     echo "error: RAYON_NUM_THREADS が設定されている（専用プールが env_override で無効化される）。unset して再実行" >&2
     exit 1
@@ -115,7 +198,8 @@ OUT="${WORK}/out"
 FINAL="${D}/macmini"
 AB="${OUT}/ab"
 mkdir -p "${WORK}" "${AB}" || exit 1
-if [ -e "${FINAL}" ] || [ -e "${OUT}/gates.txt" ] || [ -e "${WORK}/trees" ]; then
+if [ -e "${FINAL}" ] || [ -e "${OUT}/gates.txt" ] || [ -e "${WORK}/trees" ] || [ -e "${OUT}/foreign-gate" ] \
+    || [ -e "${OUT}/series-start.txt" ] || [ -e "${WORK}/prestart.txt" ]; then
     echo "既存の収録先・ログ・ツリーがあるため停止（上書き禁止。別の WORK で再実行）" >&2
     exit 1
 fi
@@ -136,6 +220,8 @@ release_lock() { # 冪等。収録先へ複製する前に呼び、解放時刻�
 }
 trap release_lock EXIT
 [ "${FIXED_AT}" \< "${ACQUIRED_AT}" ] || { echo "fixed-at-utc がロック取得時刻より前でない" >&2; exit 1; }
+# 他ジョブの前提ゲートの sha256 だけを残す（絶対パスは $HOME を含みうるので書かない）
+echo "foreign_job_gate_sha256=$(sha "${FOREIGN_GATE}" | awk '{print $1}')" > "${OUT}/foreign_gate.txt"
 
 GATES="${OUT}/gates.txt"
 : > "${GATES}"
@@ -166,6 +252,12 @@ for t in ${TREES}; do
 done
 echo "P-TREE ok"
 gate P-TREE all ok
+
+# 他ジョブの前提ゲートの部品（#4160・#4156 と同じ ab_foreign_gate.sh。BASE の scripts/bench/ は上の P-TREE で tree_sha と照合済み）。
+# 出力先 ${OUT}/foreign-gate は新規作成だけを許す（既存は差し替え禁止で拒否）。ゲート自身の出力はマスク済みで、収録前にも mask と漏れ検査を通す。
+# shellcheck source=../../../../scripts/bench/framework-compare/ab_foreign_gate.sh
+. "${BASE}/scripts/bench/framework-compare/ab_foreign_gate.sh" || die "ab_foreign_gate.sh を読めない"
+fg_require "${FOREIGN_GATE}" "${OUT}/foreign-gate" || die "他ジョブの前提ゲートの準備に失敗"
 
 # P-R0 / P-FIRE / P-RT / P-BIT（ツリーごと。target は WORK に置く）
 : > "${OUT}/gates_detail.log"
@@ -236,6 +328,8 @@ BENCH_PY="${BASE}/docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py"
 bin_of() { # bin_of <腕>
     if [ "$1" = "aa" ]; then echo "${WORK}/target-ab-base/release/bench-fandhe"; else echo "${WORK}/target-ab-$1/release/bench-fandhe"; fi
 }
+# 系列の前の確認（ビルドの後・最初のセルの前。不成立なら 1 セルも測らず ${WORK}/prestart.txt を残して止まる）
+series_start_check "${OUT}/series-start.txt" "${WORK}/prestart.txt"
 for a in ${ARMS}; do : > "${AB}/results-${a}-gemm.jsonl"; : > "${AB}/results-${a}-train.jsonl"; done
 : > "${AB}/results-torch-gemm.jsonl"; : > "${AB}/results-torch-train.jsonl"
 RUNAB_FAIL=0
@@ -255,18 +349,36 @@ run_arm() { # run_arm <腕>
     for m in fresh reuse; do run_cell "$1" train 64 "${m}"; done
 }
 LOAD_GATE=3.0
+GATE_NOT_OK=0
 : > "${OUT}/load_gate.log"
+# round の前のゲート（他ジョブ CLEAN かつ load1 < 閾値を同じループで待つ。30 秒間隔・最大 60 回＝従来の load1 の待ちと同じ上限）。
+# 判定は ab_foreign_gate.sh の fg_wait_before（#4156 の wait_load_gate_fg〈PR #4258〉と同じ写し方）。行の書式は従来と同じで、
+# 通過は `round<N> gate=pass gate_ok=1 ...` の 1 行（aggregate.py の read_load_gate が読む）。通過以外だけ行末に
+# reason=foreign-job|load1|foreign-gate-error|load1-unavailable を足す（ゲート失敗は phase=before も）。load1 が読めないときは従来どおり
+# gate=unavailable。不通過でも系列は最後まで進め（従来の timeout と同じ）、aggregate.py の P-GATE が undetermined にする。
 wait_load_gate() { # wait_load_gate <round>
-    local waited=0 status=timeout l1 ok gate_ok=0
-    while [ "${waited}" -lt 1800 ]; do
-        l1="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
-        if [ -z "${l1}" ] || echo "${l1}" | grep -q '[^0-9.]'; then status=unavailable; l1=NA; break; fi
-        ok="$(awk -v a="${l1}" -v t="${LOAD_GATE}" 'BEGIN{print (a<t)?1:0}')"
-        if [ "${ok}" = "1" ]; then status=pass; break; fi
-        sleep 30; waited=$((waited + 30))
-    done
+    local status extra="" gate_ok=0
+    fg_wait_before "round${1}-start" "${LOAD_GATE}"
+    status="${FG_STATUS}"
+    [ "${FG_REASON}" = "load1-unavailable" ] && status=unavailable
     [ "${status}" = "pass" ] && gate_ok=1
-    echo "round${1} gate=${status} gate_ok=${gate_ok} threshold=${LOAD_GATE} load1=${l1:-NA} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/load_gate.log"
+    [ "${gate_ok}" = "1" ] || GATE_NOT_OK=$((GATE_NOT_OK + 1))
+    [ "${FG_STATUS}" = "pass" ] || extra=" reason=${FG_REASON}"
+    [ "${FG_REASON}" = "foreign-gate-error" ] && extra="${extra} phase=before"
+    echo "round${1} gate=${status} gate_ok=${gate_ok} threshold=${LOAD_GATE} load1=${FG_L1} waited_s=${FG_WAITED} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)${extra}" >> "${OUT}/load_gate.log"
+}
+# round の後のゲート（全腕の計測と PyTorch の同席計測が終わった直後に 1 回）。FOREIGN・ゲート失敗なら同じ round の
+# `gate=invalid gate_ok=0 ... reason=foreign-after|foreign-gate-error phase=after` を足し、GATE_NOT_OK を数える。
+# aggregate.py の read_load_gate は同じ round の 2 行目を「重複」として problems に入れ、最後の行の gate_ok=0 で P-GATE も
+# 不成立にするので、aggregate.py を変えずにその系列は undetermined になる（#4156 は P-RUNAB に頼ったが、本キットには run_ab が無い）。
+# 系列は最後まで進める（部分系列で判定する経路は作らない）。
+round_gate_after() { # round_gate_after <round>
+    fg_after "round${1}"
+    if [ "${FG_RC}" -ne 0 ]; then
+        GATE_NOT_OK=$((GATE_NOT_OK + 1))
+        echo "round${1} gate=invalid gate_ok=0 threshold=${LOAD_GATE} load1=NA waited_s=0 at=$(date -u +%Y-%m-%dT%H:%M:%SZ) reason=$(fg_after_reason) phase=after" >> "${OUT}/load_gate.log"
+    fi
+    return 0
 }
 TORCH_FAILED=0
 torch_cell() { # torch_cell <task> <size>
@@ -287,6 +399,7 @@ while [ "${r}" -le "${ROUNDS}" ]; do
         i=$((i + 1))
     done
     torch_cell gemm 256; torch_cell gemm 512; torch_cell train 64
+    round_gate_after "${r}"
     r=$((r + 1))
 done
 if [ "${RUNAB_FAIL}" = "0" ]; then gate P-CELLS-RUNAB all ok; else gate P-CELLS-RUNAB all fail; fi
@@ -301,6 +414,15 @@ for f in "${OUT}/cell_err.log" "${OUT}/torch_err.log"; do
     [ -e "${f}" ] && { mask < "${f}" > "${f}.m" && mv "${f}.m" "${f}"; }
 done
 rm -rf "${AB}"; mv "${OUT}/masked" "${AB}" || collect_rc=1
+# 他ジョブの前提ゲートの出力（ゲート自身がマスク済みだが念のため mask を通す。下の漏れ検査の対象にも入る）
+if [ -d "${OUT}/foreign-gate" ]; then
+    for f in "${OUT}/foreign-gate"/*; do
+        [ -f "${f}" ] || { collect_rc=1; continue; }
+        { mask < "${f}" > "${f}.m" && mv "${f}.m" "${f}"; } || collect_rc=1
+    done
+else
+    collect_rc=1
+fi
 LEAK_RE="/Users/|/home/|$(hostname 2>/dev/null || echo __nohost__)|$(id -un 2>/dev/null || echo __nouser__)|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"
 if grep -rEq "${LEAK_RE}" "${OUT}"; then
     echo "マスク漏れの疑い（ホスト名・ユーザー名・絶対パス・IP）-> 収録を中止" >&2
@@ -316,4 +438,5 @@ if [ "${collect_rc}" = "0" ]; then
 fi
 [ "${collect_rc}" = "0" ] || die "収録に失敗（生ログは ${OUT} に残る。公開しないこと）"
 echo "torch_failed=${TORCH_FAILED}（記録専用）"
+echo "gate_not_ok=${GATE_NOT_OK}（round の前後のゲートの不通過数。1 以上なら aggregate.py の P-GATE で undetermined になる）"
 echo "完了。python3 -I ${REPO_LOG}/aggregate.py ${REPO_LOG}/macmini > ${REPO_LOG}/aggregate-macmini.md で集計する"
