@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # イシュー #4163: CUDA Graph（推論チェーン capture。#2115）を既定にした場合の影響を GB10 で A/B する。
-# GB10（aarch64・CUDA）専用ランナー。規則の正本: docs/perf/logs/cuda-infer-graph-default-ab-4163/RULE.v2.txt
-# （RULE.txt〈v1・N=5〉は固定済みの記録として残すが、本ランナーは読まない。#4163 所有者判断 2026-11-11 コメント 6798581780）
+# GB10（aarch64・CUDA）専用ランナー。規則の正本: docs/perf/logs/cuda-infer-graph-default-ab-4163/RULE.v3.txt
+# （RULE.txt〈v1・N=5〉・RULE.v2.txt〈v2・N=3〉は固定済みの記録として残すが、本ランナーは読まない。#4163 所有者判断 2026-11-11 コメント 6798581780・2026-11-13 #4167 コメント 6855769755）
 # （計測前に単独コミットで固定。本スクリプトは sha256 を env_info へ記録し、aggregate_4163.py が現 RULE と突合する）。
 #
 # 1 ツリー・1 ビルド・1 バイナリ: bench-fandhe は runner ツリーの `crates/facade` への
@@ -32,7 +32,7 @@ if [[ -z "$LABEL" || ! "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 if [[ "$ROUNDS" != "5" ]]; then
-  echo "error: AB_ROUNDS は 5 固定（RULE.v2.txt。got: ${ROUNDS}）" >&2
+  echo "error: AB_ROUNDS は 5 固定（RULE.v3.txt。got: ${ROUNDS}）" >&2
   exit 1
 fi
 
@@ -68,7 +68,7 @@ if [[ "$(cd "$FACADE/../.." && pwd)" != "$RUNNER_ROOT" ]]; then
   echo "error: AB_FACADE_PATH が runner ツリーの crates/facade でない（1 ツリー方式）" >&2; exit 1
 fi
 LOGDIR="$RUNNER_ROOT/docs/perf/logs/cuda-infer-graph-default-ab-4163"
-RULE_FILE="$LOGDIR/RULE.v2.txt"
+RULE_FILE="$LOGDIR/RULE.v3.txt"
 GATES_SH="$LOGDIR/run_gates_4163.sh"
 
 # 機体同定（fail-closed）。GB10 の aarch64 のみ。
@@ -79,9 +79,9 @@ if [[ "$GPU_NAME" != *GB10* ]]; then
 fi
 
 sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-[[ -f "$RULE_FILE" && -f "$GATES_SH" ]] || { echo "error: RULE.v2.txt / run_gates_4163.sh が無い" >&2; exit 1; }
+[[ -f "$RULE_FILE" && -f "$GATES_SH" ]] || { echo "error: RULE.v3.txt / run_gates_4163.sh が無い" >&2; exit 1; }
 RULE_SHA="$(sha256_of "$RULE_FILE")"
-# RULE.v2.txt に固定した sha256 と実ファイルの一致（行頭アンカー。コメント行では素通りさせない）。
+# RULE.v3.txt に固定した sha256 と実ファイルの一致（行頭アンカー。コメント行では素通りさせない）。
 rule_pinned() { # <key> <file>
   local want
   want="$(sed -n "s/^  $1: \\([0-9a-f]\\{64\\}\\)\$/\\1/p" "$RULE_FILE" | head -n1)"
@@ -90,7 +90,7 @@ rule_pinned() { # <key> <file>
 for pair in "runner_sha256:$SELF_PATH" "gates_sha256:$GATES_SH" "patch_sha256:$LOGDIR/default-on.patch" \
             "assumption_list_sha256:$LOGDIR/default-off-assumption-tests.txt" \
             "aggregate_sha256:$LOGDIR/aggregate_4163.py" "bench_main_sha256:bench-fandhe/src/main.rs"; do
-  rule_pinned "${pair%%:*}" "${pair#*:}" || { echo "error: RULE.v2.txt の ${pair%%:*} と実ファイルの sha256 が一致しない" >&2; exit 1; }
+  rule_pinned "${pair%%:*}" "${pair#*:}" || { echo "error: RULE.v3.txt の ${pair%%:*} と実ファイルの sha256 が一致しない" >&2; exit 1; }
 done
 
 OUT="results/raw"
@@ -112,23 +112,23 @@ REAL_HEAD="$(git -C "$RUNNER_ROOT" rev-parse HEAD 2>/dev/null || true)"
 if [[ -z "$STAMP_RUNNER" || "$STAMP_RUNNER" != "$REAL_HEAD" || "$STAMP_DIRTY" != "dirty=0" ]]; then
   echo "error: .rev-stamp が無い・HEAD と不一致・dirty=0 でない（stamp=${STAMP_RUNNER:-none} head=${REAL_HEAD:-none}）" >&2; exit 1
 fi
-# 計測対象ソースの同一性。RULE.v2.txt は計測前にコミットされ HEAD が source_commit から進むため、HEAD 完全一致は要求しない。
-# 代わりに「source_commit（フル SHA）が HEAD の祖先で、差分が RULE.v2.txt・本ランナー・run_gates_4163.sh の 3 ファイルだけ」を検証する。
-# v2 は本ランナーとゲートを同じ PR で直す（読む RULE の名前）ため、この 2 つは source_commit から変わる。除外してよいのは、
-# 2 つの中身を直前の sha256 照合（runner_sha256・gates_sha256）が RULE.v2.txt の値に固定しているから。
+# 計測対象ソースの同一性。RULE.v3.txt は計測前にコミットされ HEAD が source_commit から進むため、HEAD 完全一致は要求しない。
+# 代わりに「source_commit（フル SHA）が HEAD の祖先で、差分が RULE.v3.txt・本ランナー・run_gates_4163.sh の 3 ファイルだけ」を検証する。
+# v3 は本ランナーとゲートを同じ PR で直す（読む RULE の名前）ため、この 2 つは source_commit から変わる。除外してよいのは、
+# 2 つの中身を直前の sha256 照合（runner_sha256・gates_sha256）が RULE.v3.txt の値に固定しているから。
 # 除外は正確なパスに限る（glob・ディレクトリ単位にしない）。ソース・パッチ・事前リスト・集計器・bench が変われば停止する。
 RULE_SRC="$(sed -n 's/^  source_commit: \([0-9a-f]\{40\}\)$/\1/p' "$RULE_FILE" | head -n1)"
 if [[ -z "$RULE_SRC" ]] || ! git -C "$RUNNER_ROOT" cat-file -e "${RULE_SRC}^{commit}" 2>/dev/null; then
-  echo "error: RULE.v2.txt の source_commit が無い・リポジトリに存在しない" >&2; exit 1
+  echo "error: RULE.v3.txt の source_commit が無い・リポジトリに存在しない" >&2; exit 1
 fi
 if ! git -C "$RUNNER_ROOT" merge-base --is-ancestor "$RULE_SRC" "$REAL_HEAD"; then
   echo "error: source_commit が runner の HEAD の祖先でない" >&2; exit 1
 fi
 if ! git -C "$RUNNER_ROOT" diff --quiet "$RULE_SRC" "$REAL_HEAD" -- . \
-    ':(exclude)docs/perf/logs/cuda-infer-graph-default-ab-4163/RULE.v2.txt' \
+    ':(exclude)docs/perf/logs/cuda-infer-graph-default-ab-4163/RULE.v3.txt' \
     ':(exclude)scripts/bench/framework-compare/run_ab_infer_graph_default_cuda.sh' \
     ':(exclude)docs/perf/logs/cuda-infer-graph-default-ab-4163/run_gates_4163.sh'; then
-  echo "error: source_commit から HEAD までに RULE.v2.txt・ランナー・ゲート以外の差分がある（計測対象ソースが変わっている）" >&2; exit 1
+  echo "error: source_commit から HEAD までに RULE.v3.txt・ランナー・ゲート以外の差分がある（計測対象ソースが変わっている）" >&2; exit 1
 fi
 # 作業ツリーは無変更（パッチは当てない。診断腕はコミット済みの main.rs に入っている）。
 if [[ -n "$(git -C "$RUNNER_ROOT" status --porcelain | grep -v '^??' || true)" ]]; then
@@ -251,7 +251,7 @@ run_cell() {
   fi
 }
 
-# 起動順（RULE.v2.txt 固定）: 基準のセル列を round ごとに 3*(r-1) mod 11 だけ巡回し、
+# 起動順（RULE.v3.txt 固定）: 基準のセル列を round ごとに 3*(r-1) mod 11 だけ巡回し、
 # 各セルは off／on を連続起動する。先後は奇数 round が off→on、偶数 round が on→off。
 CELLS=(infer-fresh-64 infer-fresh-1024 infer-fresh-4096 infer-reuse-64 infer-reuse-1024 infer-reuse-4096
        infer-host-64 infer-host-1024 infer-host-4096 train-fresh train-reuse)
