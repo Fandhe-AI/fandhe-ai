@@ -132,7 +132,7 @@ bit 一致テスト 24 件 pass のもとで、**G1（merge）・G2（merge+prep
 
 §13 の REJECT は G1 を全経路へ効かせた結果である。#3177 の単体 A/B では GB10 で jpw=1 が L1 の 3 形状と L2 dX を 0.82〜0.94 に縮めたため、**推論経路の中だけ**に限る別ゲートを追加した。既存の節（§1〜§13）は変更しない。
 
-- ゲート: `crates/backend-cpu/src/gemm_blis/infer_scope.rs::INFER_SCOPE_JPW1_ENABLED`（**既定 OFF**。OFF のとき `jobs_per_worker_for` は従来どおり常に `TWO_D_JOBS_PER_WORKER` を返し、挙動は現行と同一）。既定の反転は A/B が ADOPT となった後の #4165 でのみ行う。
+- ゲート: `crates/backend-cpu/src/gemm_blis/infer_scope.rs::INFER_SCOPE_JPW1_ENABLED`（#4165 で **aarch64 Linux だけ既定 ON**、ほかは既定 OFF。OFF のとき `jobs_per_worker_for` は従来どおり常に `TWO_D_JOBS_PER_WORKER` を返し、挙動は現行と同一）。
 - スコープの入口: `facade` の `Sequential::predict_recorded`（`predict`・`predict_batches` を覆う）・`predict_resident`・`predict_resident_input` が先頭で `enter_inference_scope()` を呼ぶ（`!Send` の RAII ガード・thread-local）。学習（tape の forward／backward・`train_step_resident`）はスコープの外で、機構が効かない。
 - jpw の決定位置: thread-local のため、`gemm_blis_parallel_with_transpose`・`gemm_blis_bias_act_parallel_prepacked` は affinity／cap のプールのクロージャに入る**前**の呼び出し元スレッドで `small_m::jobs_per_worker_for` を評価し、値をクロージャへ渡す（`ThreadPool::install` はワーカー上で実行するためスコープを見失う）。
 - G1 との関係: G1（`SMALL_M_JOB_MERGE_ENABLED`）が有効ならそちらを優先する。A の pack 共有（`select_shared_a`）は含めず、`share_a` は従来どおり G1 のゲートに従う。#3201 の merge 腕（jpw1 と A 共有）とは別物。
@@ -142,3 +142,4 @@ bit 一致テスト 24 件 pass のもとで、**G1（merge）・G2（merge+prep
 - GB10 実測（2026-11-11）: **REJECT**。inf-jpw1 / off の中央値比は infer fresh 0.8977・infer reuse 0.8636（いずれも 5/5 で inf-jpw1 が速い）、train fresh 0.9816・train reuse 1.0056。train reuse が上限 1.00 を超えたため REJECT になった。train の 2 パスは機構が発火していない（probe は applied=0）。ゲートは既定 OFF のまま。記録は同ディレクトリの README「結果」。
 
 - #4165: 判定未取得のため結線していない（[`perf/cpu-adopt-wiring-4165.md`](perf/cpu-adopt-wiring-4165.md)）。
+- #4165 の結線: #4266 の再測定が ADOPT（記録 PR #4269）となり、所有者判断（2026-11-12）で **aarch64 Linux だけ既定 ON** に結線した（`cfg!(all(target_arch = "aarch64", target_os = "linux"))`。macOS・x86 は OFF のまま）。前後比較は #4266 の記録（`perf/logs/cpu-infer-jpw1-gb10-ab-4266/`。同じ定数の反転）。学習経路（スコープ外）は不変。

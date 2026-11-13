@@ -5,6 +5,7 @@ Phase 4 の CPU 系の担当。Phase 3 の A/B で **ADOPT と判定された候
 ## 1. 状態
 
 - 基準: origin/main `28435bb15`（2026-11-09）。
+- **追記（2026-11-12）: 推論限定 jpw1（#4161）は #4266 で ADOPT（記録 PR #4269）。所有者判断で aarch64 Linux だけ既定 ON に結線した。以下の「0 件」は 2026-11-09 時点の記述で、jpw1 以外の 4 候補は引き続き未結線。**
 - **ADOPT 0 件・REJECT 0 件・判定なし（未実測）5 件。結線はしていない。**
 - 依存イシュー（#4156・#4157・#4158・#4159・#4161・#4162）はすべて CLOSED だが、閉じた PR はどれも道具立て（計測部品・監査の自己点検）だけで、実機の A/B 結果も独立監査も出ていない。
 
@@ -16,7 +17,7 @@ Phase 4 の CPU 系の担当。Phase 3 の A/B で **ADOPT と判定された候
 | SME unsafe 独立監査（#4157。前提条件） | #4200 | — | 自己点検のみ。独立 security-auditor は未実施 | §14.5 が空 | `cpu-gemm-sme-unsafe-audit.md` §14.1・§14.5 |
 | eager release サイズゲート（GB10 #4158） | #4195 | `crates/autodiff/src/eager_release.rs:48` `EAGER_MATMUL_RELEASE_DEFAULT_ENABLED = false` | 未実測 | 実機セッション未実施 | `perf/cpu-gemm-reuse-fresh-inversion.md` §18 |
 | eager release の Mac mini 非後退（#4159） | #4198 | 同上 | 未実測 | 同上 | 同 §19 |
-| 推論限定 jpw1（#4161） | #4196 | `crates/backend-cpu/src/gemm_blis/infer_scope.rs:24` `INFER_SCOPE_JPW1_ENABLED = false` | 未実測 | RULE.txt 未固定（下書きのみ）。GB10 実測未実施 | `cpu-gemm-small-m-job-merge-prepack-decision.md` §14 |
+| 推論限定 jpw1（#4161） | #4196 | `crates/backend-cpu/src/gemm_blis/infer_scope.rs:24` `INFER_SCOPE_JPW1_ENABLED = cfg!(aarch64 Linux)` | ADOPT（#4266・記録 PR #4269）。aarch64 Linux だけ既定 ON に結線（#4165） | 結線済み（macOS・x86 は OFF のまま） | `cpu-gemm-small-m-job-merge-prepack-decision.md` §14 |
 | N=256 の SME スケジュール（#4162） | #4201 | `crates/backend-cpu/src/gemm_blis/sme_small_sched.rs:37` `SME_SMALL_SCHED_ENABLED = false` | 未実測 | RULE 未固定（テンプレートのみ）。#4156 が ADOPT でない限り本番に効かない | `perf/cpu-gemm-sme-fmopa-microkernel.md` §5.18 |
 
 ## 3. 0 件の意味

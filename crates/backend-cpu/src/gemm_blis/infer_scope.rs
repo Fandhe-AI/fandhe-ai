@@ -7,8 +7,9 @@
 //! 背景は #3177 の単体 A/B（GB10 で jpw1 が一部形状を 0.82〜0.94 に縮める一方、正方 512 は悪化）と、
 //! 全経路適用が train セルの後退で REJECT された #3201。
 //!
-//! ゲート `INFER_SCOPE_JPW1_ENABLED` は既定 OFF。OFF のとき挙動は現行と同一（常に既定の
-//! `TWO_D_JOBS_PER_WORKER`）。既定の反転は A/B が ADOPT となった後の #4165 でのみ行う。
+//! ゲート `INFER_SCOPE_JPW1_ENABLED` は aarch64 Linux（GB10 で実測。#4161 → #4266 ADOPT・
+//! 記録 PR #4269）でだけ既定 ON、ほかは既定 OFF（実測範囲外へ広げない。所有者判断 2026-11-12・
+//! #4165）。OFF のとき挙動は現行と同一（常に既定の `TWO_D_JOBS_PER_WORKER`）。
 //!
 //! bit 一致の根拠は `small_m.rs` と同じ。jpw は job の大きさだけを決め、各 C 要素の FMA 連鎖は
 //! 変わらない。tolerance と FMA 契約は不変。A の pack 共有（#3199 の G1）は含めない。
@@ -20,8 +21,10 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 
-/// 推論スコープ内 jpw1 の既定有効フラグ。**既定 OFF**。after 腕はこの 1 行だけを反転する。
-pub(super) const INFER_SCOPE_JPW1_ENABLED: bool = false;
+/// 推論スコープ内 jpw1 の既定有効フラグ。aarch64 Linux だけ ON、ほかは OFF（#4165）。
+/// #4266 の A/B after 腕はこの定数を true にした状態で、GB10 上の既定と同じ挙動になる。
+pub(super) const INFER_SCOPE_JPW1_ENABLED: bool =
+    cfg!(all(target_arch = "aarch64", target_os = "linux"));
 
 thread_local! {
     static SCOPE_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -119,9 +122,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gate_is_off_by_default() {
+    fn gate_default_matches_platform() {
         // 実行時 assert（#3201 の教訓: 反転ツリーでもテストをコンパイルできるようにする）。
-        assert!(!std::hint::black_box(INFER_SCOPE_JPW1_ENABLED));
+        let expected = cfg!(all(target_arch = "aarch64", target_os = "linux"));
+        assert_eq!(std::hint::black_box(INFER_SCOPE_JPW1_ENABLED), expected);
     }
 
     #[test]
@@ -136,9 +140,12 @@ mod tests {
         assert!(!in_inference_scope());
     }
 
+    /// 上書きの入れ子と復元。上書きがないときの値は既定の定数（aarch64 Linux だけ true。#4165）に
+    /// 戻ることを確かめる。プラットフォームに依存しない形にする（GB10 で既定 ON になったため）。
     #[test]
     fn override_nests_and_restores() {
-        assert!(!infer_jpw1_effective());
+        let default = std::hint::black_box(INFER_SCOPE_JPW1_ENABLED);
+        assert_eq!(infer_jpw1_effective(), default);
         let a = override_infer_scope_jpw1_for_scope(true);
         assert!(infer_jpw1_effective());
         {
@@ -147,6 +154,6 @@ mod tests {
         }
         assert!(infer_jpw1_effective());
         drop(a);
-        assert!(!infer_jpw1_effective());
+        assert_eq!(infer_jpw1_effective(), default);
     }
 }
