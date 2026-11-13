@@ -114,7 +114,9 @@ Mac mini 腕の準備（`__pycache__` の扱い・系列の前に誰がプロセ
 
 ### GB10 腕（`<cuda-node>`）
 
-- 計測対象（BASE）: `85498f32be4bb8ea70302bd85ec2b8b4329d862f`（#4264 のマージコミット。`gb10/rev-stamp.txt`）。`git bundle` で送ってクリーンな clone を BASE とし、ツリー指紋が送信側と実機側で一致することを確かめた。ノード上で GitHub への clone・fetch はしていない。
+- 計測対象（BASE）: `85498f32be4bb8ea70302bd85ec2b8b4329d862f`（#4264 のマージコミット。`gb10/rev-stamp.txt`）。`git bundle` で送ってクリーンな clone を BASE とした。ノード上で GitHub への clone・fetch はしていない。
+  - 収録した `gb10/tree_fingerprint.txt`（`orchestrate_gb10.sh` が BASE の `git ls-files` から計算）は、開発機で `85498f32b` の追跡ファイル一覧から同じ方法（`LC_ALL=C` の sort）で計算した値と一致した（2026-11-13）。
+  - `gb10/tree_verify.txt`（ON 腕の差分ファイル一覧）は `crates/backend-cpu/src/gemm_blis/mod.rs` の 1 件。
 - 系列: 2026-11-12T04:57:01Z〜05:01:51Z（`run_ab exit=0`）。
 - 実機ロック: `orchestrate_gb10.sh` が 04:57:01Z に取得し、05:01:51Z に解放した。
   - 収録した `gb10/hwlock.log` は、収録先へ複製した時点の写しなので、最後の行は `released-pending at=2026-11-12T05:01:51Z`。
@@ -127,7 +129,7 @@ Mac mini 腕の準備（`__pycache__` の扱い・系列の前に誰がプロセ
 - 道具（`RULE.v2.txt` §11 で固定した 8 本）は変えていない。
 - 値を見ていないこと:
   - 系列の途中でも、Mac mini 腕の系列が終わるまでの間も、収録物の値は開いていない。
-  - 見たのは次だけ: ファイル名・空ファイルの数・`hwlock.log` の時刻・終了行（`run_ab exit=`・`collect exit=`）・漏れ検査の件数・`rev-stamp.txt` の SHA。
+  - 見たのは次だけ: ファイル名・空ファイルの数・各ファイルの sha256・`hwlock.log` の時刻・終了行（`run_ab exit=`・`collect exit=`）・漏れ検査の件数と `<home>` を含む行の数・`rev-stamp.txt` の SHA・`tree_fingerprint.txt` のハッシュ（照合のため）・`tree_verify.txt` のファイル名。
   - GB10 腕のセッションは `aggregate.py` を流していない。
 - ノードの作業ディレクトリ `<home>/work/sme-4156-gb10` は、記録 PR のマージまで残す。
 
