@@ -507,3 +507,18 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - thin（`SME_THIN_M64_ENABLED`）は OFF のまま。§13.6 の P2 #1・#2（thin のゲート従属・lazy-ZA の回帰テスト）は thin を有効にする前の必須事項として残る。
 - §14.11 の是正候補は別 PR で扱う: #4278（6 関数の `pub(crate)` 化。所有者判断 (a)）・#4279（P3 の `checked_mul`）・#4280（thin のゲートを `SME_PRODUCTION_ENABLED` に従属させる）。
 - マージ前に Mac mini で PR ブランチの実機テストを行う（結果は PR に記録する）。M4 Max・SME を報告する Linux aarch64 機の非後退は未計測で、所有者判断で受け入れた。ロールバックは `SME_PRODUCTION_ENABLED` を `false` に戻す 1 行とドリフト検出テストの反転。
+
+### 14.13 SME カーネルの公開範囲を狭めた記録（イシュー #4278。2026-11-13 追記）
+
+- §14.11 の P2（`pub mod` 経由で、外部の crate から `sme::kernel_unchecked{,_with_ldc}` を直接呼べる）を是正した。§14.1〜§14.12 は当時の記録として変更しない。
+- 所有者判断は (a) `pub(crate)` にする（2026-11-13、https://github.com/Fandhe-AI/fandhe-ai/issues/4278#issuecomment-6852478423）。
+- 範囲は同じ形の 6 関数で、`pub unsafe fn` を `pub(crate) unsafe fn` にした。
+  - `gemm_blis/microkernel/sme.rs` の `kernel_unchecked_with_ldc`・`kernel_unchecked`
+  - `gemm_blis/microkernel/avx2.rs` の 2 関数（AVX2 は CPU 機能の無い x86 機で SIGILL になる、同じ形の露出）
+  - `gemm_blis/microkernel/avx512.rs` の 2 関数（AVX-512 も同じ形の露出）
+- シグネチャ・本体・`unsafe` 契約・SAFETY コメントの中身は変えていない。新しい `unsafe` は無い。
+- `pub mod gemm_blis`・`microkernel`・`sme` は残した。`examples/cpu_gemm_nr_tail_4152.rs` が `microkernel::Isa` を使っているため。
+- NEON には同じ形の `pub unsafe fn` が無い。`sme_thin_m64.rs` の `kernel_unchecked` は、以前から `pub(crate)`。
+- 呼び出し元は crate 内（`gemm_blis/microkernel.rs`）だけ。`backend-cpu/src` の外からの呼び出しと、`pub use` による再公開は無い（`git grep` で確認）。
+- 公開 API の破壊的変更になる（`fandhe-ai-backend-cpu`。版は 0.x）。次の minor（0.15.0）で出す。リリースは別に承認を得る。
+- §6 の R1（到達可能性）の「外部から到達できる」は、本節の時点で解消した。到達できるのは crate 内の `Microkernel` 実装経由だけで、`SmeKernel` は `pub(crate)` の `try_new`（実行時検出つき）でしか作れない。

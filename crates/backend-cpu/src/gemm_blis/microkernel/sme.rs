@@ -274,8 +274,8 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// ## 保留中 lazy ZA save の自己防御（codex-review P0 再指摘対応）
 ///
 /// 本関数は `super::SmeKernel::run_with_ldc`〈`pub(crate)` のため
-/// コードスパン表記〉経由に限らず外部から直接呼び出しうる `pub unsafe fn`
-/// のため、`# Safety` 契約が SME 対応・SVL のみを要求し
+/// コードスパン表記〉経由に限らず直接呼び出しうる関数（#4278 で
+/// `pub(crate) unsafe fn` に絞り、crate 外からは呼べない）のため、`# Safety` 契約が SME 対応・SVL のみを要求し
 /// `has_pending_lazy_za_save`〈非公開関数のためコードスパン表記〉の事前
 /// 確認を呼び出し元の努力目標にとどめる設計では、契約を字面どおり満たした
 /// 呼び出しでも保留中の lazy ZA save を破壊しうる（本モジュール「背景」
@@ -296,7 +296,7 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// 本関数が自動的にフォールバックへ切り替えるため、呼び出し元が事前に
 /// `has_pending_lazy_za_save`〈非公開関数のためコードスパン表記〉を確認
 /// する必要はない**（上記「保留中 lazy ZA save の自己防御」節）。
-pub unsafe fn kernel_unchecked_with_ldc(
+pub(crate) unsafe fn kernel_unchecked_with_ldc(
     ap: &[f32],
     bp: &[f32],
     c: &mut [f32],
@@ -337,8 +337,8 @@ pub unsafe fn kernel_unchecked_with_ldc(
 /// ## 長さ・境界検査を型付きエラー化（codex-review P1 再指摘対応）
 ///
 /// 以前は本関数自身が `assert!`／`assert_eq!` で `ap`／`bp`／`c` の長さを
-/// 検査していたため、`SmeKernel::run` を経由せずに本関数（`pub unsafe fn`）
-/// を直接呼び出す外部コードへ panic が漏れ、「本番経路の panic 禁止」
+/// 検査していたため、`SmeKernel::run` を経由せずに本関数（当時は `pub unsafe fn`。
+/// #4278 で `pub(crate)` に絞った）を直接呼び出すコードへ panic が漏れ、「本番経路の panic 禁止」
 /// （`.claude/rules/security.md`／AGENTS.md）に抵触していた。境界検査
 /// 自体は維持しつつ（REQ-8 境界検査規約）、[`kernel_unchecked_with_ldc`]
 /// （`super::check_panel_lengths`／`super::check_c_tile_bounds` を経由し
@@ -349,7 +349,7 @@ pub unsafe fn kernel_unchecked_with_ldc(
 ///
 /// [`kernel_unchecked_with_ldc`] と同一（`TPIDR2_EL0` 非ゼロ時の
 /// 自動フォールバックを含む）。
-pub unsafe fn kernel_unchecked(
+pub(crate) unsafe fn kernel_unchecked(
     ap: &[f32],
     bp: &[f32],
     c: &mut [f32],
@@ -433,8 +433,8 @@ mod tests {
     use super::*;
     use crate::gemm_blis::microkernel::{Microkernel, SmeKernel, TileBoundsError};
 
-    /// [`kernel_unchecked`]（`pub unsafe fn`。`SmeKernel::run` を経由せず
-    /// 外部から直接呼びうる）が、長さ不一致（`ap` 長不足）を `panic!` で
+    /// [`kernel_unchecked`]（`pub(crate) unsafe fn`〈#4278〉。`SmeKernel::run`
+    /// を経由せず crate 内から直接呼びうる）が、長さ不一致（`ap` 長不足）を `panic!` で
     /// はなく `Result::Err(TileBoundsError::PanelLengthMismatch)` として
     /// 返すことを確認する（codex-review P1 再指摘対応。本テストの主張は
     /// [`kernel_unchecked`] doc「長さ・境界検査を型付きエラー化」節）。
@@ -1405,7 +1405,7 @@ mod tests {
                 cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
     fn sme_kernel_unchecked_with_ldc_falls_back_without_corrupting_dormant_za_when_lazy_save_pending()
      {
-        // `pub unsafe fn kernel_unchecked_with_ldc` を直接呼ぶには実行
+        // `pub(crate) unsafe fn kernel_unchecked_with_ldc` を直接呼ぶには実行
         // CPU の SME 対応確認が必要（`SmeKernel::try_new()` を代わりに
         // 使い、`Some` の場合のみ実行することでこれを満たす）。
         if SmeKernel::try_new().is_none() {

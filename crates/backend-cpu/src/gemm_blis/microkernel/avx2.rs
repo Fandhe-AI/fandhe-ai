@@ -5,7 +5,7 @@
 //! 単位で `target_feature` cfg するとデフォルトビルド〈RUSTFLAGS なし〉で
 //! 本体が一切コンパイルされず、`is_x86_feature_detected!` によるテスト
 //! 限定の実行時検証が不可能になるため）。実際に AVX2+FMA 命令を発行する
-//! [`kernel_unchecked`] は `#[target_feature(enable = ...)]` で個別に
+//! `kernel_unchecked`（#4278 で `pub(crate)`） は `#[target_feature(enable = ...)]` で個別に
 //! ゲートし、それを安全に呼べるかどうかは呼び出し側の条件（コンパイル時
 //! cfg または実行時 `is_x86_feature_detected!`）に委ねる。
 //!
@@ -65,7 +65,7 @@ const _: () = assert!(MR * NR <= 256);
 /// [`super::scalar::kernel_with_ldc`] のドキュメント参照。本モジュールも
 /// 同じ理由で従来シグネチャを [`kernel_unchecked`] として残す。
 #[target_feature(enable = "avx2,fma")]
-pub unsafe fn kernel_unchecked_with_ldc(
+pub(crate) unsafe fn kernel_unchecked_with_ldc(
     ap: &[f32],
     bp: &[f32],
     c: &mut [f32],
@@ -149,7 +149,7 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// （`_mm256_loadu_ps` 等）であり範囲チェックを経ないため、検査なしでは
 /// 未定義動作に到達しうる）。
 #[target_feature(enable = "avx2,fma")]
-pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+pub(crate) unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
     assert!(
         super::panel_len_matches(ap.len(), MR, kc_len),
         "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
