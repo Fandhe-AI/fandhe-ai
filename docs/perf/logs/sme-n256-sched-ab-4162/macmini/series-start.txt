@@ -1,0 +1,12 @@
+series-start begin at=2026-11-13T11:29:44Z
+safari check at=2026-11-13T11:29:44Z safari_app=0
+  safari-named pcpu=0.0 SafariBookmarksSyncAgent
+  safari-named pcpu=0.0 SafariConfigurationSubscriber
+  safari-named pcpu=0.0 SafariLaunchAgent
+  safari-named pcpu=0.0 SafariLinkExtension
+  safari-named pcpu=0.0 SafariWidgetExtension
+  safari-named pcpu=0.0 com.apple.Safari.SafeBrowsing.Service
+mediaanalysisd check1 at=2026-11-13T11:29:44Z pcpu=0.0
+mediaanalysisd check2 at=2026-11-13T11:31:44Z pcpu=0.0
+mediaanalysisd check3 at=2026-11-13T11:33:44Z pcpu=0.0
+result=started at=2026-11-13T11:33:44Z

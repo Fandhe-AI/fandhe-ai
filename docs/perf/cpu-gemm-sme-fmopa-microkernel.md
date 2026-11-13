@@ -1056,17 +1056,19 @@ Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | **PR-1（道具立て）時点は実測なし**。判定は PR-3 で記録する。`Refs #4162`（部品だけの PR のためイシューは閉じない） |
+| 状態 | **実測済み・判定 ADOPT(t4-jpw1)**（Mac mini `<metal-node>`・2026-11-13 計測と集計）。判定に使った規則は `RULE.txt`（fixed-at-utc 2026-11-13T10:30:43Z・PR #4282。§9 で他ジョブの前提ゲートと系列の前の確認を足した版）。計測ツリーは `c9582d868`（`rev-stamp.txt`） |
 | 機構 | `crates/backend-cpu/src/gemm_blis/sme_small_sched.rs`。aarch64 版 `dispatch_two_d_dynamic` の SME 分岐の中だけで、対象帯（SME 適格かつ m,n,k ≤ 256 = 実質 m=n=256）の専用プールのスレッド数と jpw を差し替える。`ENABLED=false`・`THREADS=0`・`JPW=0` が main の既定（OFF）。新しい `unsafe`・`asm!` なし |
 | bit 一致 | スレッド数と jpw は job の大きさと並列度を決めるだけで、各 C 要素は 1 job の中で同じ FMA 連鎖で計算される（2D 設計 §3 条件 6）。Linux の lib テストで専用プール T=4 と jpw ∈ {1,2,4} の出力が既定と bit 完全一致であることを固定した |
 | 腕（7） | base（SME ON）・aa（base と同一バイナリ）・t4・t6・jpw1・jpw4・t4-jpw1。根拠は #3175 の実測（`cpu-sme-thread-scaling-macmini.md` §2・§3: (256,256,128) は T=4 が最大、T=10 は 0.90 倍）。#4151 の区間別内訳は未実測のため腕の選定に使っていない |
 | セル | 判定: gemm 256 fresh／reuse。ガード: gemm 512 fresh／reuse・train size=64 fresh／reuse |
 | 判定 | 候補は判定 2 セルとも 5 round 中央値 ≤ 1.00 かつ 5/5 round で ≤ 1.00、ガードに 5/5 後退なし、checksum・P-BIT 一致で ADOPT 適格。適格のうち幾何平均が最小のものを選ぶ（差 0.005 未満なら変更パラメータの少ない腕、なお並べば jpw だけの腕） |
-| 部品 | `docs/perf/logs/sme-n256-sched-ab-4162/`（`RULE.template.txt`・`on-arm.patch`・`arm-*.patch`・`orchestrate_macmini.sh`・`aggregate.py`・`README.md`） |
-| 結果 | 未実測 |
+| 部品 | `docs/perf/logs/sme-n256-sched-ab-4162/`（`RULE.txt`・`RULE.template.txt`・`on-arm.patch`・`arm-*.patch`・`orchestrate_macmini.sh`・`aggregate.py`・`README.md`） |
+| 結果 | **ADOPT(t4-jpw1)**（`aggregate-macmini.md`・収録物 `macmini/`）。t4-jpw1（専用プール 4 スレッド・jpw=1）は判定 2 セルとも 5/5 で base より速い（候補/base の中央値比 gemm 256 fresh 0.677・reuse 0.764）。ガード 4 セルの中央値比は 0.996〜1.008 で、5/5 の後退はない。幾何平均は t4-jpw1 0.7192・t4 0.7256（差 0.0064 で 0.005 以上のため、t4-jpw1 が最小として選ばれた）・t6 0.7561。t4・t6 も ADOPT 適格。jpw1 は適格外で後退もない。jpw4 は判定セルで 5/5 後退（中央値比 1.061・1.064）。前提ゲートはすべて ok（P-TREE・P-R0・P-FIRE・P-RT・P-BIT・P-CELLS・P-LOCK・P-COLLECT）。5 round とも開始前・終了後の他ジョブゲートが CLEAN で、load1 は 1.17〜1.39。系列の前の確認は Safari アプリ本体 0 件・mediaanalysisd 0.0% が 3 回。PyTorch 比（記録のみ）の gemm 256 fresh の中央値は base 0.873、t4-jpw1 1.287 |
 | 不変 | 既定 OFF のまま。本番に効くのは #4156 で SME 既定 ON が ADOPT された場合だけ。既定の切り替えは #4165 と所有者承認、SME の unsafe 独立監査は #4157。NB-RANGE5・NB-SEP は #4142 が 2026-11-10 に承認済み（判定への適用は各 RULE の定めによる） |
 
 - 限界: 候補 5 つの多重比較。専用プールとグローバルプールの spin の干渉はガードセルが帯の外で検出できない。macOS に pinning の手段がなく T=4 が P コアだけで動く保証はない。
 - GB10 は対象外（SME 非搭載で機構に到達しない）。
+- round 1 の初回起動の影響（記録のみ。判定は規則どおり変えない）: round 1 は、各腕のバイナリが初めて起動されるセルが遅い（gemm 256 fresh の median_s は base 278.5µs・t4 225.4µs。round 2〜5 は base 183.8〜187.4µs・t4 121.9〜132.3µs）。base と同じバイナリの aa（その round の 2 回目の起動）と PyTorch は平常値だった。このため round 1 だけ A/A が 0.666、base の PyTorch 比が 0.595 に外れている。t4-jpw1 の round 1 の比は 0.801 で、round 1 を含めても 5/5 で 1.00 以下。
+- NB-RANGE5・NB-SEP は、本節の「不変」の行では #4142 承認済みとしているが、`RULE.txt` §6 と `aggregate.py` の出力では「#4142 は所有者承認待ち・記録のみ」としている。判定には使っていない（`aggregate-macmini.md` の値は記録のみ）。
 
-- #4165: 判定未取得のため結線していない（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
+- #4165: 本 A/B の ADOPT(t4-jpw1) を Phase 4（#4165）の入力として記録する。前提として、#4156 の SME 既定 ON が ADOPT であること（§5.17）と、SME の unsafe 独立監査（#4157）を併記する。本イシューでは定数（`SME_SMALL_SCHED_ENABLED`・`THREADS`・`JPW`）を変えていない。結線は #4165 で、所有者の承認を得てから行う（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
