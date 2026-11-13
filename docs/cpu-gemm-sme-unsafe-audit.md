@@ -522,3 +522,13 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - 呼び出し元は crate 内（`gemm_blis/microkernel.rs`）だけ。`backend-cpu/src` の外からの呼び出しと、`pub use` による再公開は無い（`git grep` で確認）。
 - 公開 API の破壊的変更になる（`fandhe-ai-backend-cpu`。版は 0.x）。次の minor（0.15.0）で出す。リリースは別に承認を得る。
 - §6 の R1（到達可能性）の「外部から到達できる」は、本節の時点で解消した。到達できるのは crate 内の `Microkernel` 実装経由だけで、`SmeKernel` は `pub(crate)` の `try_new`（実行時検出つき）でしか作れない。
+
+### 14.14 thin の `b_stride` のバイト換算を `checked_mul` にした記録（イシュー #4279。2026-11-13 追記）
+
+- §14.5 の P3（`sme_thin_m64.rs` の `b_stride * size_of::<f32>()` が未検査）を是正した。§14.1〜§14.13 は当時の記録として変更しない。
+- 到達条件は、監査の記載（`k == 1`）より広い。`check_bounds` が `b_stride` の上限を課すのは `k > 0` の `(k-1)*b_stride+NR <= bp_len` だけなので、`k ∈ {0, 1}` かつ `b_stride > usize::MAX / 4` で届く。現行の呼び出し元（`NR` か `n` を渡す）からは届かない。UB ではなく、debug は panic・release は wrap だった。
+- 是正: 検査本体を arch 非依存の `microkernel.rs::check_thin_m64_bounds` へ移し、`b_stride`・`ldc` のバイト換算を `checked_mul` で作って `ThinM64StrideBytes` で返す。`b_stride` の桁あふれは既存と同じ `TileBoundsError::PanelLengthMismatch`（`bp`）で返す（バリアントの追加なし）。`compute_thin_m64` は検査済みのバイト値を受け取り、未検査の乗算を持たない。
+- `asm!` の本体・オペランド・options は変えていない。新しい `unsafe` は無い。`# Safety`／SAFETY の前提に「バイト換算は `check_bounds` が作った値」を足した。
+- `scalar_fallback` も同じ検査を通るため、`k <= 1` かつ `b_stride > usize::MAX / 4` は scalar 側でも `Err` になる（受け付ける範囲が揃った。現行の呼び出し元からは届かない）。
+- テスト: `microkernel.rs` の `check_thin_m64_bounds_*` 2 件（x86_64 の CI で実行。k=0・k=1 の境界値 `usize::MAX/4` は `Ok`・`+1` は `Err`、既存の拒否が不変）。aarch64 のみの `b_stride_byte_overflow_is_err_for_k0_and_k1`（SME 不要）は x86_64 では実行されず、aarch64 2 ターゲットの clippy 型検査のみ通過。
+- 未実施: SME 実機テスト（`--ignored sme_thin_m64 --test-threads=1`）と aarch64 のテスト実行は Mac mini（M4）での確認が残る。

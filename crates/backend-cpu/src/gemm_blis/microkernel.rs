@@ -308,6 +308,82 @@ pub(crate) fn check_c_tile_bounds(
     }
 }
 
+/// thin SME カーネル（`sme_thin_m64`）が asm へ渡すバイト単位のストライド（検査済み）。
+///
+/// [`check_thin_m64_bounds`] だけが生成する。`b_stride`／`ldc` を `size_of::<f32>()` 倍した値を
+/// `checked_mul` で作るため、asm のオペランドに未検査の乗算結果が渡らない（イシュー #4279）。
+#[cfg(any(target_arch = "aarch64", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThinM64StrideBytes {
+    /// `b_stride * 4`（bp の行間隔。バイト）。
+    pub(crate) b_stride: usize,
+    /// `ldc * 4`（C の行間隔。バイト）。
+    pub(crate) ldc: usize,
+}
+
+/// thin SME カーネル（m=64 専用）の長さ・ストライド検査と、バイト換算ストライドの生成（REQ-8）。
+///
+/// `sme_thin_m64::check_bounds` から呼ばれる。検査本体を arch 非依存のここへ置くのは、x86_64 の CI
+/// でも境界値テストを実行するため（`sme_thin_m64` は `cfg(target_arch = "aarch64")` 限定）。
+/// 本番では aarch64 だけが使うので `cfg(any(target_arch = "aarch64", test))` で dead_code を避ける。
+///
+/// `b_stride` のバイト換算は `k` に関係なく asm のオペランドとして渡るため、`k > 0` の長さ検査の
+/// 外で無条件に `checked_mul` する（`k` が 0 か 1 だと `(k-1)*b_stride` の検査が上限を課さない）。
+/// 桁あふれは既存の積オーバーフローと同じ [`TileBoundsError::PanelLengthMismatch`]（`bp`）で返す。
+#[cfg(any(target_arch = "aarch64", test))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_thin_m64_bounds(
+    m: usize,
+    nr: usize,
+    ap_len: usize,
+    bp_len: usize,
+    b_stride: usize,
+    c_len: usize,
+    ldc: usize,
+    k: usize,
+) -> Result<ThinM64StrideBytes, TileBoundsError> {
+    match m.checked_mul(k) {
+        Some(expected) if expected == ap_len => {}
+        _ => {
+            return Err(TileBoundsError::PanelLengthMismatch {
+                panel: "ap",
+                actual: ap_len,
+            });
+        }
+    }
+    if b_stride < nr {
+        return Err(TileBoundsError::LdcTooSmall { ldc: b_stride, nr });
+    }
+    let Some(b_stride_bytes) = b_stride.checked_mul(size_of::<f32>()) else {
+        return Err(TileBoundsError::PanelLengthMismatch {
+            panel: "bp",
+            actual: bp_len,
+        });
+    };
+    if k > 0 {
+        let need = (k - 1)
+            .checked_mul(b_stride)
+            .and_then(|v| v.checked_add(nr));
+        match need {
+            Some(need) if bp_len >= need => {}
+            _ => {
+                return Err(TileBoundsError::PanelLengthMismatch {
+                    panel: "bp",
+                    actual: bp_len,
+                });
+            }
+        }
+    }
+    check_c_tile_bounds(m, nr, ldc, c_len)?;
+    let Some(ldc_bytes) = ldc.checked_mul(size_of::<f32>()) else {
+        return Err(TileBoundsError::NonPositiveMrOrOverflow { mr: m, ldc });
+    };
+    Ok(ThinM64StrideBytes {
+        b_stride: b_stride_bytes,
+        ldc: ldc_bytes,
+    })
+}
+
 // デフォルト経路の選択（コンパイル時 cfg。公開 API 非破壊のため残すが、
 // [`gemm_blis`]／[`gemm_blis_parallel`] の駆動経路は本モジュールの
 // 実行時ディスパッチへ切り替わっている。モジュールドキュメント参照）。
@@ -1339,6 +1415,82 @@ mod tests {
                 actual: 4
             })
         );
+    }
+
+    /// #4279: thin の `b_stride` バイト換算の桁あふれは k=0・k=1 でも `Err`（x86_64 でも実行される）。
+    #[test]
+    fn check_thin_m64_bounds_rejects_b_stride_byte_overflow() {
+        let (m, nr, ldc, c_len) = (64usize, 16usize, 16usize, 63 * 16 + 16);
+        for &(k, ap_len, bp_len) in &[(0usize, 0usize, 0usize), (1, 64, 16)] {
+            let over = usize::MAX / 4 + 1;
+            assert_eq!(
+                check_thin_m64_bounds(m, nr, ap_len, bp_len, over, c_len, ldc, k),
+                Err(TileBoundsError::PanelLengthMismatch {
+                    panel: "bp",
+                    actual: bp_len
+                }),
+                "k={k}"
+            );
+            let edge = usize::MAX / 4;
+            let ok = check_thin_m64_bounds(m, nr, ap_len, bp_len, edge, c_len, ldc, k).unwrap();
+            assert_eq!(ok.b_stride, edge * 4, "k={k}");
+            assert_eq!(ok.ldc, ldc * 4, "k={k}");
+        }
+    }
+
+    #[test]
+    fn check_thin_m64_bounds_accepts_normal_and_keeps_existing_rejections() {
+        let (m, nr) = (64usize, 16usize);
+        let (k, bs, ldc) = (9usize, 40usize, 20usize);
+        let (ap, bp, c) = (m * k, (k - 1) * bs + nr, 63 * ldc + nr);
+        let ok = check_thin_m64_bounds(m, nr, ap, bp, bs, c, ldc, k).unwrap();
+        assert_eq!((ok.b_stride, ok.ldc), (40 * 4, 20 * 4));
+        let ap_err = |r: Result<ThinM64StrideBytes, TileBoundsError>| {
+            matches!(
+                r,
+                Err(TileBoundsError::PanelLengthMismatch { panel: "ap", .. })
+            )
+        };
+        assert!(ap_err(check_thin_m64_bounds(
+            m,
+            nr,
+            ap + 1,
+            bp,
+            bs,
+            c,
+            ldc,
+            k
+        )));
+        assert!(matches!(
+            check_thin_m64_bounds(m, nr, ap, bp, nr - 1, c, ldc, k),
+            Err(TileBoundsError::LdcTooSmall { .. })
+        ));
+        assert!(matches!(
+            check_thin_m64_bounds(m, nr, ap, bp - 1, bs, c, ldc, k),
+            Err(TileBoundsError::PanelLengthMismatch { panel: "bp", .. })
+        ));
+        assert!(matches!(
+            check_thin_m64_bounds(m, nr, ap, bp, bs, c, nr - 1, k),
+            Err(TileBoundsError::LdcTooSmall { .. })
+        ));
+        assert!(matches!(
+            check_thin_m64_bounds(m, nr, ap, bp, bs, c - 1, ldc, k),
+            Err(TileBoundsError::CBufferTooSmall { .. })
+        ));
+        assert!(ap_err(check_thin_m64_bounds(
+            m,
+            nr,
+            ap,
+            bp,
+            bs,
+            c,
+            ldc,
+            usize::MAX
+        )));
+        assert!(matches!(
+            check_thin_m64_bounds(m, nr, 128, 16, usize::MAX, c, ldc, 2),
+            Err(TileBoundsError::PanelLengthMismatch { panel: "bp", .. })
+        ));
     }
 
     #[test]
