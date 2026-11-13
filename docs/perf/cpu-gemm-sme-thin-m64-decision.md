@@ -210,3 +210,10 @@ train CPU に効くのは forward と dX の GEMM 経由だけである。
 - 総合判定: **undetermined**。規則は緩めない。
 
 処置: 既定 `SME_THIN_M64_ENABLED` は OFF のまま、Rust は変えない。揺らぎ・遅延傾向の原因切り分けは所有者判断（本 PR の対象外）。未実測: framework-compare の再計測、`RAYON_NUM_THREADS=1` の記録 run。
+
+## 追記: thin ゲートを本番 SME ゲートに従わせた（イシュー #4280。2026-11-13）
+
+- 191 行目付近の但し書き（P2 #1 のゲート結合は production SME が false の現状では薄型経路を死に経路にする）は、#4165 で `SME_PRODUCTION_ENABLED = true` になった時点で成り立たなくなった。
+- #4280 で結合を入れた。実効ゲートは `thin_m64_gate_enabled()`（本番 SME ゲート かつ `SME_THIN_M64_ENABLED`）。
+- 今後 thin を ON にする A/B の腕の差は、引き続き `SME_THIN_M64_ENABLED` の宣言 1 行（`on-arm.patch`）で作れる。ただし実効的に ON になるのは本番 SME も ON のときだけ。
+- 詳細は `docs/cpu-gemm-sme-unsafe-audit.md` §14.15。
