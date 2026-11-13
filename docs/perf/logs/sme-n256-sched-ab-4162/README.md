@@ -57,7 +57,7 @@ main では `ENABLED=false`・`THREADS=0`・`JPW=0` で、SME 自体も既定 OF
 
 1. PR-2: `RULE.template.txt` の PARAMS（`fixed-at-utc`・`tree_sha`・`tree_fingerprint`・`aggregate.py`／`orchestrate_macmini.sh` の sha256・P-DIAG）を埋め、`RULE.txt` として単独コミットして push する。
 2. BASE（クリーンな clone）で `RAYON_NUM_THREADS` を unset し、他の cargo・bench・python が動いていないことを確かめる。Safari を終了しておく（Safari アプリ本体が動いていると系列を始めない）。
-3. `BASE=<clone> WORK=<作業> TORCH_PY=<venv python> FOREIGN_GATE=<foreign_job_gate.py の絶対パス> bash docs/perf/logs/sme-n256-sched-ab-4162/orchestrate_macmini.sh`。`FOREIGN_GATE` は `docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py` を tree の外の kit に置いたもの。hw-lock は先に取らない（スクリプトが取る）。系列の前の確認が不成立なら `${WORK}/prestart.txt` が残る。所有者へ報告し、再試行は新しい `WORK` で行う。
+3. `BASE=<clone> WORK=<作業> TORCH_PY=<venv python> FOREIGN_GATE=<foreign_job_gate.py の絶対パス> bash docs/perf/logs/sme-n256-sched-ab-4162/orchestrate_macmini.sh`。`FOREIGN_GATE` は `docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py` を tree の外の kit に置いたもの。`WORK` は名前が `.noindex` で終わるディレクトリにする（Spotlight の索引を避ける。#4151 の RULE.v2.txt 項 10 (e)。#4258 と同じ）。hw-lock は先に取らない（スクリプトが取る）。系列の前の確認が不成立なら `${WORK}/prestart.txt` が残る。所有者へ報告し、再試行は新しい `WORK` で行う。
 4. `python3 -I aggregate.py macmini > aggregate-macmini.md`。perf doc §5.18 に結果を転記する。
 
 ## 他ジョブの前提ゲートと系列の前の確認（2026-11-13 追加）
@@ -80,7 +80,7 @@ PR-1 の後、`RULE.txt` の固定（PR-2）の前に足した。ゲートを厳
   - `ps` の失敗・出力が空・非数値は不成立。
   - 不成立なら 1 セルも測らずに止める。記録は `${WORK}/prestart.txt`（`result=not-started reason=safari|mediaanalysisd`）に移る。系列は始まっていない。
 - **起動前に止まる場合**: `FOREIGN_GATE` が未指定・相対パス・存在しない・禁止文字を含むときは、ロックを取る前に止まる。
-- **PR-2 への申し送り**: `RULE.template.txt` は変えていない（#4258 も `RULE.txt` を変えず、記述は後の RULE.v2 で足した）。`RULE.txt` を固定するときに、§4 の前提ゲートへ上の 2 つ（他ジョブの前提ゲート・系列の前の確認）を書き足すかを決める。`orchestrate_macmini.sh` の sha256 はこの版の値で埋める（`python3 -I aggregate.py --fingerprint`）。
+- **PR-2 への申し送り**: `RULE.template.txt` は変えていない（#4258 も `RULE.txt` を変えず、記述は後の RULE.v2 で足した）。`RULE.template.txt` の §4 の P-GATE は load1 < 3.0 だけの記述のまま。雛形の冒頭のとおり PR-2 で埋めてよいのは PARAMS だけなので、上の 2 つ（他ジョブの前提ゲート・系列の前の確認）を RULE に書くかどうか・書く場合は本文の訂正として末尾へ追記する形にするかを PR-2 で決める。`orchestrate_macmini.sh` の sha256 はこの版の値で埋める（`python3 -I aggregate.py --fingerprint`）。また `RULE.txt` を固定する前に、Mac mini で `foreign_job_gate.py` を 1 回だけ動かし、その出力と `ps` の basename が本キットの漏れ検査（`orchestrate_macmini.sh` の `LEAK_RE`。#4156 の `leak_re` とは別物で、ホスト名・ユーザー名をそのまま含む）に当たらないことを確かめる（当たると全系列を回した後に P-COLLECT で止まる。#4258 の実機確認は #4156 の `leak_re` でだけ行った）。
 
 ## マスク規則・実機ロック
 
