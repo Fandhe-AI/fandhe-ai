@@ -3741,13 +3741,15 @@ pub fn cuda_graph_step_stats() -> CudaGraphStepStats {
     fandhe_ai_backend_cuda::graph::step_graph_stats()
 }
 
-/// 推論 forward チェーンの CUDA Graph capture を opt-in で有効／無効にする
+/// 推論 forward チェーンの CUDA Graph capture を有効／無効にする（#4167 以降は既定 ON）
 /// （イシュー #2115 が機構・#3115 が公開形・#3116 が公開。公開形の正は
 /// `docs/facade-graph-tier-b-optin-exposure-decision.md` §3・§4）。
 ///
-/// - **既定は無効**。有効化しない限り挙動は変わない。プロセスワイドの切替で
-///   `Device` 単位ではない。優先順位は API 明示 > 環境変数
-///   `FANDHE_AI_CUDA_GRAPH_INFER` > 既定 OFF
+/// - **既定は有効**（#4167。#4163 の GB10 測り直し ADOPT に基づく反転。出力は
+///   bit 同一）。`false` で無効化できる。環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` を
+///   `1`／`true` 以外（例 `0`）にしても無効化できる。プロセスワイドの切替で
+///   `Device` 単位ではない。優先順位は API 明示 > 環境変数 > 既定 ON。既定 ON は
+///   学習を含む全 CUDA 利用者の既定ストリームを created にする
 /// - **設定タイミング**: 最初の CUDA デバイス初期化より前に呼ぶ。間に合わ
 ///   なかった場合は拒否されず、非 capture 経路へ黙ってフォールバックする
 ///   （出力は同一）。遅れた場合に `BackendError::Unsupported` で拒否する
@@ -3766,7 +3768,7 @@ pub fn set_cuda_graph_infer_enabled(enabled: bool) {
     fandhe_ai_backend_cuda::graph::set_infer_graph_enabled(enabled);
 }
 
-/// 推論チェーン capture の現在の opt-in 状態を返す
+/// 推論チェーン capture の現在の有効・無効状態を返す（既定 ON。#4167）
 /// （[`set_cuda_graph_infer_enabled`] 参照。イシュー #3116）。
 pub fn cuda_graph_infer_enabled() -> bool {
     fandhe_ai_backend_cuda::graph::infer_graph_enabled()

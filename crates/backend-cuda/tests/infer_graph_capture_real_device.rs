@@ -4,7 +4,9 @@
 //!
 //! **実行手順**: opt-in は最初の CUDA デバイス初期化より前に環境変数で
 //! 与える必要がある（created stream は ordinal ごとに sticky。
-//! `crates/backend-cuda/src/device.rs`）。
+//! `crates/backend-cuda/src/device.rs`）。**#4167 以降は推論 Graph が既定 ON の
+//! ため `=1` の指定は不要**（未設定で ON。以下の `=1` は ON の明示）。OFF に
+//! するには `FANDHE_AI_CUDA_GRAPH_INFER=0` を与える。
 //!
 //! ```sh
 //! FANDHE_AI_CUDA_GRAPH_INFER=1 cargo test -p fandhe-ai-backend-cuda --release \

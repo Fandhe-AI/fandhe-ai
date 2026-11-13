@@ -175,7 +175,7 @@ M4 Max 実機での実測自体は本エージェント実行環境に Apple Sil
 ## 11. 実装記録（#2115・CUDA Graph によるチェーン全体 capture）
 
 推論 forward チェーンの層カーネル列を CUDA Graph へ stream capture し、2 回目以降を graph launch
-1 回で再生する opt-in 経路（環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`・既定 OFF）を追加した。
+1 回で再生する opt-in 経路（環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`・追加時は既定 OFF）を追加した。（2026-11-13・#4167: 推論 Graph は既定 ON。`FANDHE_AI_CUDA_GRAPH_INFER=0` または API 明示 false で OFF。詳細は `docs/perf/infer-chain-graphcapture-cuda-ab.md` §7）
 学習 step の update 区間 capture（#1349）とは別機構。詳細・判定規則・実測記入欄は
 `docs/perf/infer-chain-graphcapture-cuda-ab.md`（verdict は GB10 未実測のため `undetermined`）。
 
