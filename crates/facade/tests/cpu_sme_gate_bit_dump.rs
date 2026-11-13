@@ -1,5 +1,5 @@
 //! イシュー #2049: `SME_PRODUCTION_ENABLED`（`crates/backend-cpu/src/
-//! gemm_blis/mod.rs`。既定 `false`〈#3231 で一度 `true` にしたが #3232 の GB10 REJECT で `false` へ戻した〉。aarch64 SME `fmopa` マイクロ
+//! gemm_blis/mod.rs`。既定 `true`〈#3231 で一度 `true`、#3232 の GB10 REJECT で `false` へ戻し、#4156 ADOPT・#4165 で再度 `true`。GB10 は SME 非搭載で NEON のまま〉。aarch64 SME `fmopa` マイクロ
 //! カーネルを `GemmDriverVariant::TwoDDynamic` へ形状条件付きで結線
 //! するかどうかの単一 const ゲート。`TWO_D_DYNAMIC_PRODUCTION_ENABLED`・
 //! `thread_limit::BIG_CORE_LIMIT_ENABLED` と同型のロールバック機構

@@ -1,6 +1,9 @@
 # SME 既定 ON（#3231）の bit 同一確認ログ
 
 - `off-arm.patch`: `SME_PRODUCTION_ENABLED` を `true` から `false` へ戻す 1 行のパッチ（OFF ツリー作成用。`patch_sha256.txt`）。
+  - 現在の main は ON（#4165 で再び `true` にした。`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.19）。OFF ツリーは `off-arm.patch` をそのまま当てるか、
+    `docs/perf/logs/sme-default-on-ab-4156/on-arm.patch` の逆適用（`git apply -R`）、あるいは定数 1 行を `false` にして作る。
+  - 本ログの取得時点（#3231）の main も ON だった。その後 #3232 の REJECT で OFF（§5.14）となり、#4165 で ON に戻った。取得時点と現在の main は同一ではないため、再取得するときはコミットを明記する。
 - `bitdump/summary.txt`: ON（`RAYON_NUM_THREADS` 未設定・1・2・4・8）と OFF（未設定）の全出力行数と sha256。6 本一致。
 - 手順（M4 Max 等の SME 搭載 aarch64。`--release`）:
 
