@@ -1,0 +1,122 @@
+イシュー #4162 事前登録規則 (N=256 で SME のスレッド数と分配を変えて A/B する) の雛形
+使い方: PR-2 で Mac mini のセッションがプレースホルダを埋め、RULE.txt として単独コミットしてから計測する。
+        埋めてよいのは「## PARAMS」の値だけ。§0 以降の本文は変えない (変えるなら本文の訂正として末尾へ追記)。
+        プレースホルダ (山括弧で囲んだ「未記入」) が 1 つでも残る RULE.txt を orchestrate_macmini.sh は拒否する。
+
+## PARAMS (計測前に埋める。ここだけ可変)
+fixed-at-utc: 2026-11-13T10:30:43Z
+tree_sha: 1a30988db5e283a7936c2fbf24214653322f3edf
+tree_fingerprint: acd45f09979c8c15afee7e0df8f7a10217d9223345e80691055c6d4e2a0735ad (tree_sha の clone で LC_ALL=C の `git ls-files | sort | shasum -a 256`。orchestrate_macmini.sh の tree_fingerprint.txt と同じ定義・files=22908。計測時の BASE は本 RULE.txt を含むので値は変わる。記録だけで、orchestrate はこの値を照合しない)
+aggregate.py sha256: d093ce1e56cc9543768da45b439dbacda53232b9fdb6eae033aaa2dcf5618b3b
+on-arm.patch sha256: 226e73d0e78936bff508b1a746966c65641aed8ce1b0ae50b0a9b2d20132b964
+arm-t4.patch sha256: eb621de7f61e1efcad9ebcafa0544a541bd576a52fa8463354d5071a5850a990
+arm-t6.patch sha256: e7a49d4d8bbc57aa7589e611816c9e660b7c0f547ba8f335815ea6f7027fcadc
+arm-jpw1.patch sha256: e8fca0c8e877b0bf3ac8c56a47ef424e04b0b4facbabb94d294e6e1daa9393b5
+arm-jpw4.patch sha256: f46cd1c13fcc32398cb991d8e7acb0c4a1632e5a110e774464b801609116fbcc
+arm-t4-jpw1.patch sha256: bd3bd9441b78cca2cc21d74a3eb0075f30082c787b3e70e682a3ef33d6b6b84c
+orchestrate_macmini.sh sha256: 12801a0dfa50487f273c92a1f0bb66ab9c5e93001fe234e913d194f1df0ca326
+P-DIAG: あり。docs/perf/logs/diag-0140-m-cpu-g256-4151/series-remeasure-1/ (PR #4235・main の 8b3b583ecfd7c870bc294c04656ce58f3bddee1f)。記録だけで、腕の組は変えない
+
+(tree_sha は計測部品を含む origin/main のコミット。orchestrate は BASE と tree_sha の間で crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml に差分がないことを確かめる。
+ aggregate.py と orchestrate_macmini.sh の sha256 は `python3 -I aggregate.py --fingerprint` で得る。
+ P-DIAG は記録だけ: 固定時点で #4151 の区間別内訳の結果が main にあるか、あればその参照先。無ければ「なし」。)
+
+0. 位置づけ
+  - 目的: N=256 (Mac mini の CPU GEMM) で SME 経路のスレッド数と 2D 分配 (jobs_per_worker) を変えると速くなるかを、事前登録した A/B で判定する。
+    根拠はすでにある実測だけを使う: docs/perf/cpu-sme-thread-scaling-macmini.md §2・§3 (#3175: (256,256,128) の SME は T=4 が最大、T=10 は 0.90 倍)、
+    docs/perf/logs/sme-default-on-ab-3232/aggregate-macmini.md (gemm 256 の SME ON は PyTorch 比 0.888 / 0.893)。#4151 の区間別内訳の結果を見てから腕を選ばない。
+    #4151 の結果が固定時点より後に main へ入った場合は、参考の文脈として末尾へ追記するだけにし、腕の組は変えない。
+  - 前例: docs/perf/logs/sme-default-on-ab-4156/RULE.txt (#4156)。語彙 (FAIL / REJECT / ADOPT / undetermined) と 5 round・5/5 一貫性・checksum 完全一致を継承する。
+  - 本番の既定は変えない。どの判定でも本イシューでは定数を変えない。SME 自体が既定 OFF (SME_PRODUCTION_ENABLED = false) なので、
+    ADOPT でも本番に効くのは #4156 で SME 既定 ON が ADOPT された場合だけ。
+  - 新しい asm!・unsafe・多タイル化は入れない。計算結果の bit は変えない (jpw とプールのスレッド数は job の大きさと並列度を決めるだけ)。
+
+1. 腕 (どれも SME ON が前提。機構は crates/backend-cpu/src/gemm_blis/sme_small_sched.rs。対象帯は SME 適格かつ m,n,k <= 256 = 実質 m=n=256・k 64..256)
+  - base    : on-arm.patch だけ (SME ON。機構は OFF)。THREADS=0 (プールは 10 のまま)・JPW=0 (jpw=2 のまま)。0.888 の基準。
+  - aa      : base と同一バイナリ。ノイズ幅の記録だけ (判定に使わない)。
+  - t4      : base + arm-t4.patch      (THREADS=4, JPW=0)   P コア数・#3175 の T=4 最大。
+  - t6      : base + arm-t6.patch      (THREADS=6, JPW=0)   中間。
+  - jpw1    : base + arm-jpw1.patch    (THREADS=0, JPW=1)   分配の粗化。
+  - jpw4    : base + arm-jpw4.patch    (THREADS=0, JPW=4)   分配の細分化。
+  - t4-jpw1 : base + arm-t4-jpw1.patch (THREADS=4, JPW=1)   組み合わせ。
+  - 比 = 腕 / base (round ごと)。1.00 以下なら腕が速い。aggregate.py の ARMS・CANDIDATES と一致させる。
+  - 腕は結果を見てから足さない。足すなら RULE-reopen を末尾へ追記して新しい WORK で測る。
+
+2. セル (数値を見る前に固定)
+  - 判定セル (到達): bench-fandhe の gemm 256 fresh と reuse (device=cpu)。
+  - ガードセル: gemm 512 fresh/reuse、train size=64 fresh/reuse。対象帯の外のため、機構が効かないこと (後退がないこと) の確認に使う。
+  - gemm 1024/2048 は測らない。対象帯の外であることは P-FIRE の構造検査 (512^3 と (784,256,64) の発火数 0) で確かめる。
+  - reuse は #3635 以降の常駐入力経路。#3232 の値とは条件が違うので旧値と並べて比べない。
+
+3. ラウンド数・実行順
+  - 5 round 固定。round ごとに 7 腕の起動順をローテーションする。
+
+4. 前提ゲート (1 つでも不成立なら undetermined。FAIL は常に先)
+  - P-TREE   : 各腕ツリーと base で内容が違うファイルが期待どおり (mod.rs の 1 行と sme_small_sched.rs の定数行) だけ。patch の sha256 一致・git apply --check・
+               未追跡のビルド入力なし。cargo tree -p bench-fandhe で fandhe-ai が path patch の facade に解決する。
+               BASE と tree_sha の間で crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml に差分なし。
+  - P-R0     : 全ツリーで sme_report().kernel_enabled == true。
+  - P-FIRE   : 各ツリーで #[ignore] の lib テスト report_sme_small_sched_probe を --exact で 1 件。256^3 の発火数が候補の腕で 1 以上・base/aa で 0。512^3 と (784,256,64) は全腕で 0。
+  - P-RT     : base/aa は cargo test -p fandhe-ai-backend-cpu --release -- --skip sme_production_disabled_after_gb10_reject が全件 pass。
+               候補の腕はさらに --skip sme_small_sched_disabled_by_default も付ける (定数を反転したツリーでは作りの上で落ちるドリフト検出。名前は計測前に固定)。
+               落ちたテストは直さず名前を記録し「後退あり相当 (要調査)」とする。
+  - P-BIT    : 各腕ツリーで #[ignore] テスト sme_small_sched_bit_exact_vs_default_when_sme_available (256^3 の出力の to_bits が単一連続 K ループの FMA 参照と全一致)。
+               不一致は FAIL。SKIP (SME 非搭載) は undetermined。
+  - checksum : 全セルで全腕の checksum が完全一致。不一致は FAIL。
+  - P-CELLS  : 6 セル x 7 腕 x 5 行ちょうど。重複・欠損・非有限値は不成立。
+  - P-LOCK   : 実機ロック (~/work/.fandhe-hw-lock) を保持し、取得・解放時刻を hwlock.log に残した。
+  - P-GATE   : 5/5 round が load1 < 3.0 (30 秒間隔・最大 30 分待ち)。
+  - P-COLLECT: 収録前のマスク漏れ検査 (ホスト名・/Users/・/home/・ユーザー名・IP) が 0 件。
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する (専用プールが env_override で無効化されるため)。計測中はビルドを並走させない。全腕のビルドは計測の前に逐次で済ませる。
+  - GB10 は対象外: SME 非搭載で sme_kernel_for_shape が常に None になり機構に到達しない。単体テストで構造的に担保する。GB10-MODE の決定は不要。
+
+5. 判定 (評価順 FAIL > undetermined (前提ゲート不成立) > ADOPT(X) > REJECT > undetermined。緩めない)
+  - 候補 X が ADOPT 適格 (すべて満たす):
+      (a) 判定 2 セルとも、5 round 中央値 <= 1.00 かつ 5/5 round で <= 1.00
+      (b) ガード 4 セルのどれにも、5/5 round すべてで > 1.00 の一貫した後退がない
+      (c) checksum 完全一致、P-BIT 一致
+  - 選択: 適格な候補のうち、判定 2 セルの中央値比の幾何平均が最小のもの。差が 0.005 未満なら変更パラメータの少ないものを選ぶ。それでも並ぶなら jpw だけの腕 (新しいスレッドを立てない) を優先する。
+  - REJECT = 全候補で「判定セルの 5/5 後退またはガードの 5/5 後退」。適格な候補がなく、全候補が後退でもない場合は undetermined。
+  - 候補が 5 つあるため多重比較になる。限界として記録する (緩和・補正はしない)。
+
+6. 記録だけ (判定には使わない)
+  - A/A の腕の比の幅。
+  - PyTorch 比 (bench_py.py。torch median_s / fandhe median_s。gemm 256・512 fresh) を base と選んだ腕の両方。
+  - NB-RANGE5・NB-SEP。#4142 (docs/perf/noise-band-decision.md) は所有者承認待ちで承認欄は未取得。承認済みとは書かない。定義が変われば RULE.v2.txt で改訂する。
+
+7. 処置
+  - ADOPT / REJECT / FAIL / undetermined のどれでも、本イシューでは定数を変えない。
+  - ADOPT なら Phase 4 (#4165) の入力として記録する。その際 #4156 が ADOPT であることと SME の unsafe 独立監査 (#4157) を前提として併記する。
+  - 再計測するときは末尾に RULE-reopen を追記してから新しい WORK で測る。既存の系列は差し替えない。
+
+8. マスク規則
+  - 収録するログのホスト名は <metal-node>、$HOME は <home>、ユーザー名・絶対パス・IP は除去する。実機のホスト名・接続情報はリポに書かない。
+  - rev-stamp と tree_fingerprint を成果物に含める。
+
+9. 本文の訂正 (2026-11-13T10:30:43Z・固定時点。計測前の追記。統合セッションの判断)
+  PR-1 の後・本規則の固定の前に orchestrate_macmini.sh へ足された 2 つの確認 (PR #4281・1a30988db。README「他ジョブの前提ゲートと系列の前の確認」節) を、
+  測る前に本規則へ固定する。どちらもゲートを厳しくする方向だけの記述で、§0〜§8 の判定式・閾値・round 数・腕・セル・ほかの段の手順・aggregate.py・patch は変えない。
+  (1) 他ジョブの前提ゲート (§4 P-GATE の訂正。load1 < 3.0 の条件に足す)
+    - 部品は #4160・#4156 と同じ scripts/bench/framework-compare/ab_foreign_gate.sh。判定は docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py (#4227) の
+      G1〜G4 (G1 caffeinate・G2 %CPU・G3 名前・G4 GPU。ps と ioreg を 1 回ずつ読む)。foreign_job_gate.py は tree の外の kit に置き、FOREIGN_GATE に絶対パスで渡す。
+      FOREIGN_GATE が未指定・相対パス・存在しない・禁止文字を含むときは、ロックを取る前に止まる。
+    - 各 round の前に、他ジョブが CLEAN かつ load1 < 3.0 になるまで、同じループで待つ (30 秒間隔・最大 60 回。§4 の「最大 30 分待ち」と同じ上限)。
+    - round の後 (7 腕と PyTorch の同席計測まで終えた直後) に 1 回確かめる。
+    - 通過の行は従来どおり load_gate.log の `round<N> gate=pass gate_ok=1 ...` の 1 行。通過以外は行末に reason=foreign-job|load1|foreign-gate-error|load1-unavailable を足す
+      (ゲート失敗は phase=before も)。終了後の FOREIGN・ゲート失敗は、同じ round の `gate=invalid gate_ok=0 ... reason=foreign-after|foreign-gate-error phase=after` を足す。
+    - 不通過でも系列は最後まで進める (部分系列で判定する経路は作らない)。開始前の不通過は aggregate.py の P-GATE で undetermined。
+      終了後の FOREIGN は、同じ round の 2 行目を aggregate.py の read_load_gate が重複として扱い、最後の行の gate_ok=0 で P-GATE も不成立になるので undetermined。
+    - よって P-GATE は「5/5 round が、開始前に他ジョブ CLEAN かつ load1 < 3.0 で通過し、終了後にも他ジョブ CLEAN」と読む。不通過は P-GATE で undetermined。
+    - ゲートの出力は macmini/foreign-gate/、ゲートの sha256 は macmini/foreign_gate.txt (絶対パスは書かない)。どちらも収録前の mask と P-COLLECT の漏れ検査の対象に入る。
+    - 固定時点の部品の sha256 (記録): foreign_job_gate.py d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04・
+      ab_foreign_gate.sh b7ae69bc4b32fa63887867822b97e1eeb9e900ed1a51a81053b231e8ff10f975 (どちらも tree_sha の値)。
+  (2) 系列の前の確認 (§4 の前提ゲートに足す)
+    - ビルドの後・最初のセルの前 (hw-lock の下) に、次の順に確かめる。記録は macmini/series-start.txt。
+    - Safari: ps の comm の basename がちょうど `Safari` のプロセス (Safari アプリ本体) が 0 件 (#4160 の RULE.v2.txt 項 4 (b) 1 と同じ)。
+      補助プロセス (com.apple.Safari.SafeBrowsing.Service など) は条件にせず、名前に Safari を含むプロセスの basename と %CPU を記録するだけ。
+    - mediaanalysisd: #4146 の RULE.v2.txt 項 8 (c) と同じ基準 (#4258 と同じ関数)。2 分間隔で 3 回、%CPU が 5 未満。名前は basename の完全一致で見る。
+      複数あれば最大値で判定し、プロセスがなければ通過。
+    - ps の失敗・出力が空・非数値は不成立。
+    - 不成立なら 1 セルも測らずに止める。記録は ${WORK}/prestart.txt (result=not-started reason=safari|mediaanalysisd) に移る。系列は始まっていない。
+      所有者へ報告し、再試行は新しい WORK で行う。
+  - WORK は名前が .noindex で終わるディレクトリにする (Spotlight の索引を避ける。#4151 の RULE.v2.txt 項 10 (e)・#4258 と同じ)。
