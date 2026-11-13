@@ -80,7 +80,7 @@ mod partition;
 // `docs/cpu-gemm-small-m-job-merge-prepack-decision.md`）。
 pub(crate) mod prepack;
 mod small_m;
-// イシュー #4162: SME 小形状（N=256 級）のスレッド数・分配の A/B 機構（既定 OFF）。
+// イシュー #4162: SME 小形状（N=256 級）のスレッド数・分配の機構（ADOPT(t4-jpw1) を #4165 で既定 ON に結線）。
 mod sme_small_sched;
 // イシュー #4161: 推論スコープ内だけ jpw1 を効かせる opt-in（既定 OFF）。
 pub mod infer_scope;
@@ -3450,7 +3450,7 @@ fn dispatch_two_d_dynamic(
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
     if let Some(kernel) = sme_kernel_for_shape(rows.end - rows.start, n, k) {
-        // #4162: 既定 OFF。ON の計測ツリーだけ、小形状でスレッド数・jpw を差し替える。
+        // #4162・#4165: 帯（m=n=256・k∈[64,256]）の SME 経路だけ、専用 4 スレッド・jpw=1 に差し替える。
         let plan = sme_small_sched::plan_for(rows.end - rows.start, n, k, jobs_per_worker);
         return sme_small_sched::run_in_plan(plan, move || {
             gemm_blis_two_d_dynamic_region(
@@ -3545,17 +3545,18 @@ const TWO_D_DYNAMIC_PRODUCTION_ENABLED: bool = true;
 /// どうかの単一 const ゲート（[`TWO_D_DYNAMIC_PRODUCTION_ENABLED`]・
 /// `thread_limit::BIG_CORE_LIMIT_ENABLED` と同型のロールバック機構）。
 ///
-/// 既定 `false`（既定 OFF）。#3231 で一度 `true`（既定 ON）にしたが、#3232 の
-/// A/B（`docs/perf/logs/sme-default-on-ab-3232/`）で GB10 が REJECT
-/// （`gemm 256 fresh`・`gemm 2048 reuse` が 5/5 round 一貫で後退）となり、
-/// 事前登録規則（RULE.txt:55）どおり本 const を `false` へ戻した
-/// （2026-10-24 所有者判断）。Mac mini〈Apple M4〉の A/B 実測は
-/// `docs/perf/cpu-gemm-sme-ab-macmini.md`、経緯は
-/// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.10。`false` では
+/// 既定 `true`（既定 ON）。#4156 の A/B（Mac mini〈Apple M4〉）が ADOPT、
+/// #4157 で SME `unsafe` の独立監査が済み、#4165 で本番へ結線した
+/// （2026-11-13 所有者承認）。GB10 は SME 非搭載のため検出が `false` になり
+/// [`microkernel::SmeKernel::try_new`] が `None`、NEON のまま不変。
+/// 経緯: #3231 で一度 `true` にしたが、#3232 の GB10 A/B が REJECT で `false`
+/// へ戻した（2026-10-24。`docs/perf/logs/sme-default-on-ab-3232/`）。記録は
+/// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md`。
+/// ロールバックは本 const を `false` に戻す 1 行と
+/// `sme_production_enabled_is_true_with_neon_fallback` の反転だけ。`false` では
 /// [`sme_kernel_for_shape`] が常に `None`（NEON）を返し出力 bit は不変。
-/// ドリフト検出は `sme_production_disabled_after_gb10_reject`。
 #[cfg(target_arch = "aarch64")]
-const SME_PRODUCTION_ENABLED: bool = false;
+const SME_PRODUCTION_ENABLED: bool = true;
 
 /// [`SME_PRODUCTION_ENABLED`] が `true` のときに SME 経路を候補とする
 /// 形状しきい値（イシュー #1587 事前登録規則 R4）。`sme_shape_eligible`
@@ -4001,8 +4002,8 @@ pub(crate) enum GemmDriverVariant {
     /// (mc, nc) 2D 動的分配を **NEON 強制・SME ゲート迂回**で実行する
     /// 参照候補（#3231）。[`SME_PRODUCTION_ENABLED`] を `true` にした場合は
     /// [`TwoDDynamic`](Self::TwoDDynamic) が SME 搭載機で SME を含むため、
-    /// A/B の NEON 腕と bit 同一テストの参照にはこちらを使う（既定 OFF に
-    /// 戻した現在は両者が同一経路）。aarch64 限定。
+    /// A/B の NEON 腕と bit 同一テストの参照にはこちらを使う（既定 ON の現在、
+    /// SME 搭載機では両者は別経路）。aarch64 限定。
     #[cfg(target_arch = "aarch64")]
     TwoDDynamicNeon,
 }
@@ -5848,22 +5849,28 @@ mod tests {
         ));
     }
 
-    /// イシュー #3232: GB10 REJECT により既定 OFF（[`SME_PRODUCTION_ENABLED`]
-    /// = `false`。RULE.txt:55・2026-10-24 所有者判断）に戻した契約のドリフト
-    /// 検出。確定しきい値 (256, 256, 64) の固定、およびゲート式
-    /// [`sme_kernel_for_shape`] が形状・ホストによらず常に `None`（NEON）で
-    /// あることを機械的に表明する。再度 ON にする場合は本テストを反転する。
+    /// イシュー #4165: SME 既定 ON（[`SME_PRODUCTION_ENABLED`] = `true`。#4156 ADOPT・
+    /// 2026-11-13 所有者承認）の契約のドリフト検出。確定しきい値 (256, 256, 64) の固定、
+    /// および適格形状では [`sme_kernel_for_shape`] が SME 搭載ホストでのみ `Some`、
+    /// 非搭載ホスト（GB10 等）では `None`（NEON fallback）であること、形状外は常に `None`
+    /// であることを表明する。ロールバック時は本テストを反転する。
     #[cfg(target_arch = "aarch64")]
     #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn sme_production_disabled_after_gb10_reject() {
+    fn sme_production_enabled_is_true_with_neon_fallback() {
         assert!(
-            !SME_PRODUCTION_ENABLED,
-            "#3232 の GB10 REJECT で既定 OFF に戻した契約"
+            std::hint::black_box(SME_PRODUCTION_ENABLED),
+            "#4165 で既定 ON に結線した契約"
         );
         assert_eq!((SME_MIN_M, SME_MIN_N, SME_MIN_K), (256, 256, 64));
-        assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K).is_none());
-        assert!(sme_kernel_for_shape(SME_MIN_M * 4, SME_MIN_N * 4, SME_MIN_K * 4).is_none());
+        let sme_present = microkernel::SmeKernel::try_new().is_some();
+        assert_eq!(
+            sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K).is_some(),
+            sme_present
+        );
+        assert_eq!(
+            sme_kernel_for_shape(SME_MIN_M * 4, SME_MIN_N * 4, SME_MIN_K * 4).is_some(),
+            sme_present
+        );
         assert!(sme_kernel_for_shape(SME_MIN_M - 1, SME_MIN_N, SME_MIN_K).is_none());
         assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N - 1, SME_MIN_K).is_none());
         assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K - 1).is_none());

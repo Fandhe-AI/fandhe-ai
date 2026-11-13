@@ -1,11 +1,14 @@
-//! SME 経路の小形状（N=256 級）専用スケジューリング A/B 機構（イシュー #4162）。
+//! SME 経路の小形状（N=256 級）専用スケジューリング機構（イシュー #4162。#4165 で本番結線）。
 //!
 //! 役割: SME 経路（[`super::sme_kernel_for_shape`] が `Some`）のうち m・n・k がすべて
 //! [`SME_SMALL_SCHED_MAX_DIM`] 以下の形状に限り、(1) 専用 rayon プールのスレッド数
 //! [`SME_SMALL_SCHED_THREADS`] と (2) 2D 動的分配の `jobs_per_worker`
-//! [`SME_SMALL_SCHED_JPW`] を差し替える。全ゲートは **main では既定 OFF**（無効値）で、
-//! OFF のとき [`select`] は渡された `jobs_per_worker` と `None` を返し、現行と同一の挙動になる。
-//! 腕ごとの定数は `docs/perf/logs/sme-n256-sched-ab-4162/arm-*.patch` が書き換える。
+//! [`SME_SMALL_SCHED_JPW`] を差し替える。#4162 の A/B が ADOPT(t4-jpw1)
+//! （T=4・jpw=1）となり、#4165 で **既定 ON**（2026-11-13 所有者承認）に結線した。
+//! 帯外、またはゲートを OFF（無効値）に戻した場合、[`select`] は渡された `jobs_per_worker` と
+//! `None` を返し、従来と同一の挙動になる。ロールバックは 3 定数を無効値（false・0・0）へ戻し、
+//! 本ファイルのテストを反転する。腕の定義は `docs/perf/logs/sme-n256-sched-ab-4162/arm-*.patch`。
+//! SME 非搭載機（GB10 等）は [`super::sme_kernel_for_shape`] が `None` で本機構へ到達しない。
 //!
 //! 背景: Mac mini（Apple M4・4P+6E）の gemm 256 は SME ON でも PyTorch 比 0.888 で、
 //! 小形状では T=4 が最大 GFLOPS で T=10 は 0.90 倍に落ちる実測がある
@@ -32,17 +35,17 @@ use super::TWO_D_JOBS_PER_WORKER;
 #[cfg(any(target_arch = "aarch64", test))]
 const BAND_MIN: (usize, usize, usize) = (256, 256, 64);
 
-/// 本機構の単一ゲート（既定 OFF。ロールバックは `false` に戻す 1 行）。
+/// 本機構の単一ゲート（既定 ON。#4162 ADOPT(t4-jpw1)・#4165 で結線。ロールバックは `false` に戻す）。
 #[cfg(any(target_arch = "aarch64", test))]
-pub(super) const SME_SMALL_SCHED_ENABLED: bool = false;
+pub(super) const SME_SMALL_SCHED_ENABLED: bool = true;
 
-/// 専用プールのスレッド数。0 は「今のプールのまま」。
+/// 専用プールのスレッド数（ADOPT(t4-jpw1) の 4）。0 は「今のプールのまま」。
 #[cfg(any(target_arch = "aarch64", test))]
-pub(super) const SME_SMALL_SCHED_THREADS: usize = 0;
+pub(super) const SME_SMALL_SCHED_THREADS: usize = 4;
 
-/// 差し替える `jobs_per_worker`。0 は「渡された値のまま」。
+/// 差し替える `jobs_per_worker`（ADOPT(t4-jpw1) の 1）。0 は「渡された値のまま」。
 #[cfg(any(target_arch = "aarch64", test))]
-pub(super) const SME_SMALL_SCHED_JPW: usize = 0;
+pub(super) const SME_SMALL_SCHED_JPW: usize = 1;
 
 /// 対象帯の上限（m・n・k のすべてがこれ以下）。SME 適格（m≥256・n≥256・k≥64）と合わせて
 /// 実質 m=n=256・k∈[64,256] になる。
@@ -180,13 +183,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sme_small_sched_disabled_by_default() {
-        // 実行時 assert（const assert だと ON の計測ツリーで lib テストがコンパイル不能になる。
-        // `small_m::gate_is_off_by_default` と同じ理由）。
-        // 腕ツリーでは落ちるため、P-RT で名前を固定して除外する。
-        assert!(!std::hint::black_box(SME_SMALL_SCHED_ENABLED));
-        assert_eq!(std::hint::black_box(SME_SMALL_SCHED_THREADS), 0);
-        assert_eq!(std::hint::black_box(SME_SMALL_SCHED_JPW), 0);
+    fn sme_small_sched_enabled_with_t4_jpw1() {
+        // 実行時 assert（const assert だと値を反転したツリーで lib テストがコンパイル不能になる。
+        // `small_m::gate_is_off_by_default` と同じ理由）。ロールバック時は本テストを反転する。
+        assert!(std::hint::black_box(SME_SMALL_SCHED_ENABLED));
+        assert_eq!(std::hint::black_box(SME_SMALL_SCHED_THREADS), 4);
+        assert_eq!(std::hint::black_box(SME_SMALL_SCHED_JPW), 1);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -276,17 +278,25 @@ mod tests {
     }
 
     #[test]
-    fn sme_small_sched_disabled_by_default_plan_is_inert() {
+    fn sme_small_sched_enabled_plan_fires_in_band_only() {
+        // 本番定数の plan は純関数で決まり、SME の有無に依らない（SME 非搭載機は呼び出し側の
+        // `sme_kernel_for_shape` が `None` で、そもそも本機構へ到達しない）。
+        let on = SchedPlan {
+            pool_threads: Some(4),
+            jpw: 1,
+        };
         let before = fires();
-        let p = plan_for(256, 256, 256, 2);
-        assert_eq!(
-            p,
-            SchedPlan {
-                pool_threads: None,
-                jpw: 2
-            }
-        );
-        assert_eq!(fires(), before);
+        assert_eq!(plan_for(256, 256, 256, 2), on);
+        assert_eq!(plan_for(256, 256, 64, 2), on);
+        assert_eq!(fires(), before + 2);
+        // 帯外は素通り（incoming_jpw を保つ・専用プールなし）で発火しない。
+        let pass = SchedPlan {
+            pool_threads: None,
+            jpw: 2,
+        };
+        assert_eq!(plan_for(512, 512, 512, 2), pass);
+        assert_eq!(plan_for(784, 256, 64, 2), pass);
+        assert_eq!(fires(), before + 2);
     }
 
     /// 専用プール（T=4）と jpw ∈ {1,2,4} の実行が、既定プール・既定 jpw と bit 完全一致する。

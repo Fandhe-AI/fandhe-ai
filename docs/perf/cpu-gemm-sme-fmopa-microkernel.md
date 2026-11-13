@@ -160,7 +160,7 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
 
 ### 3.3 ディスパッチ結線（`crates/backend-cpu/src/gemm_blis/mod.rs`）
 
-- 単一 const ゲート `SME_PRODUCTION_ENABLED`（既定 `false`〈#3231 で一度 `true` にしたが #3232 の GB10 REJECT により `false` へ戻した。§5.14〉。
+- 単一 const ゲート `SME_PRODUCTION_ENABLED`（現在 `true`〈#4165 で結線。§5.19。経緯: #3231 で一度 `true` → #3232 の GB10 REJECT で `false` へ戻した〈§5.14〉→ #4156 の ADOPT〈§5.17〉で再び `true`〉。
   `TWO_D_DYNAMIC_PRODUCTION_ENABLED` と同型のロールバック機構）。
 - 純関数 `sme_shape_eligible(m_total, n, k) -> bool`（`SME_MIN_M=256`・
   `SME_MIN_N=256`・`SME_MIN_K=64`。§5.4.1 R4 参照）。
@@ -172,7 +172,7 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
   `try_new()` が `None` となり NEON へ fall back して出力は不変。`false` に
   戻すと実行 CPU が SME に対応していても常に NEON（#1313 以前と bit 完全一致）。
   ドリフト検出は `sme_production_enabled_is_true_with_neon_fallback`
-  （#3231 で `..._is_false_pending_measurement` から置換）。
+  （#3231 で `..._is_false_pending_measurement` から置換。#3232 の復帰で `sme_production_disabled_after_gb10_reject` へ反転、#4165 で #3231 時代（#3560・62eadbec7）と同名の `sme_production_enabled_is_true_with_neon_fallback` へ戻した。中身は、SME 機の判定を `SmeKernel::try_new()` で取る形に書き直している。§5.19）。
 - `Isa` enum への variant 追加は行わない（SME 検出は `Isa::detect()` とは
   独立の軸であり、`Isa::Sme` を追加すると crates.io 公開クレート
   `fandhe-ai-backend-cpu` の `pub enum` への semver 破壊になる一方、
@@ -1041,7 +1041,7 @@ N=5・単一機体。帰無確率は概算。`train 64 fresh` の実差の可能
 | 規則・部品 | `docs/perf/logs/sme-default-on-ab-4156/`（`RULE.v2.txt`・`RULE.txt`・`on-arm.patch`・`orchestrate_macmini.sh`・`orchestrate_gb10.sh`・`aggregate.py`）、A/B 本体 `scripts/bench/framework-compare/run_ab_sme_default_on_4156_cpu.sh` |
 | 腕 | before = OFF（main・定数 false）、after = ON（`on-arm.patch` を当てた計測専用ツリー。main へコミットしない）。#3232 と逆の組み立て。比 = ON / OFF |
 | 結果 | **ADOPT**（`aggregate-macmini-formal-1.md`）。Mac mini（系列 `formal-1`）は到達 10 セルがすべて 5/5 で ON 優位（ON/OFF 中央値比 gemm 0.463〜0.760・train 0.880〜0.913）、ガードの infer 64 に後退なし。GB10 は 12 セルすべてガードで、拘束方式 GB10-GATE-ONLY-STRUCTURAL が pass（5/5 一貫・分離した後退なし）。P-BIT は両機体とも 6726847 行で ON/OFF の sha256 一致。PyTorch 比（記録のみ）は Mac mini の ON 腕が gemm 512〜2048 の 6 セルで 1.078〜1.568・NB-SEP 成立、GB10 は「改善傾向・確定せず」。詳細は `docs/perf/logs/sme-default-on-ab-4156/README.md` の「結果」 |
-| 不変 | 既定 OFF のまま（ADOPT でも本イシューでは定数を変えない。RULE.v2 §8）。定数・ドリフト検出テスト・unsafe・FMA 契約・tolerance・baseline は変えない。SME の unsafe 独立監査は #4157、既定の切り替えは #4165 と所有者承認 |
+| 不変 | 既定 OFF のまま（ADOPT でも本イシューでは定数を変えない。RULE.v2 §8）。定数・ドリフト検出テスト・unsafe・FMA 契約・tolerance・baseline は変えない。SME の unsafe 独立監査は #4157、既定の切り替えは #4165 と所有者承認（→ 2026-11-13 に #4165 で結線した。§5.19。本行は当時の記述） |
 
 - 交絡: #3635 以降 `reuse` は常駐入力経路で、#3232 の値とは条件が違う。旧値と並べて比べない。
 - P-RT は ON 腕で `sme_production_disabled_after_gb10_reject`（定数 true では作りの上で必ず落ちる）だけを計測前に固定して除外する。OFF 腕は除外なし。
@@ -1064,7 +1064,7 @@ Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 
 | 判定 | 候補は判定 2 セルとも 5 round 中央値 ≤ 1.00 かつ 5/5 round で ≤ 1.00、ガードに 5/5 後退なし、checksum・P-BIT 一致で ADOPT 適格。適格のうち幾何平均が最小のものを選ぶ（差 0.005 未満なら変更パラメータの少ない腕、なお並べば jpw だけの腕） |
 | 部品 | `docs/perf/logs/sme-n256-sched-ab-4162/`（`RULE.txt`・`RULE.template.txt`・`on-arm.patch`・`arm-*.patch`・`orchestrate_macmini.sh`・`aggregate.py`・`README.md`） |
 | 結果 | **ADOPT(t4-jpw1)**（`aggregate-macmini.md`・収録物 `macmini/`）。t4-jpw1（専用プール 4 スレッド・jpw=1）は判定 2 セルとも 5/5 で base より速い（候補/base の中央値比 gemm 256 fresh 0.677・reuse 0.764）。ガード 4 セルの中央値比は 0.996〜1.008 で、5/5 の後退はない。幾何平均は t4-jpw1 0.7192・t4 0.7256（差 0.0064 で 0.005 以上のため、t4-jpw1 が最小として選ばれた）・t6 0.7561。t4・t6 も ADOPT 適格。jpw1 は適格外で後退もない。jpw4 は判定セルで 5/5 後退（中央値比 1.061・1.064）。前提ゲートはすべて ok（P-TREE・P-R0・P-FIRE・P-RT・P-BIT・P-CELLS・P-LOCK・P-COLLECT）。5 round とも開始前・終了後の他ジョブゲートが CLEAN で、load1 は 1.17〜1.39。系列の前の確認は Safari アプリ本体 0 件・mediaanalysisd 0.0% が 3 回。PyTorch 比（記録のみ）の gemm 256 fresh の中央値は base 0.873、t4-jpw1 1.287 |
-| 不変 | 既定 OFF のまま。本番に効くのは #4156 で SME 既定 ON が ADOPT された場合だけ。既定の切り替えは #4165 と所有者承認、SME の unsafe 独立監査は #4157。NB-RANGE5・NB-SEP は #4142 が 2026-11-10 に承認済み（判定への適用は各 RULE の定めによる） |
+| 不変 | 既定 OFF のまま。本番に効くのは #4156 で SME 既定 ON が ADOPT された場合だけ。既定の切り替えは #4165 と所有者承認、SME の unsafe 独立監査は #4157。NB-RANGE5・NB-SEP は #4142 が 2026-11-10 に承認済み（判定への適用は各 RULE の定めによる）（→ 2026-11-13 に #4165 で結線した。§5.19。本行は当時の記述） |
 
 - 限界: 候補 5 つの多重比較。専用プールとグローバルプールの spin の干渉はガードセルが帯の外で検出できない。macOS に pinning の手段がなく T=4 が P コアだけで動く保証はない。
 - GB10 は対象外（SME 非搭載で機構に到達しない）。
@@ -1073,4 +1073,25 @@ Mac mini の CPU GEMM N=256 は SME ON でも PyTorch 比 0.888 で、あと約 
 - P-RT: 候補腕の `--skip sme_small_sched_disabled_by_default` は部分一致で `sme_small_sched_disabled_by_default_plan_is_inert` も外した（passed は base 1337・候補 1335。failed 0）。どちらも既定 OFF を確かめるテストで、規則は変えていない。
 - NB-RANGE5・NB-SEP は、本節の「不変」の行では #4142 承認済みとしているが、`RULE.txt` §6 と `aggregate.py` の出力では「#4142 は所有者承認待ち・記録のみ」としている。判定には使っていない（`aggregate-macmini.md` の値は記録のみ）。
 
-- #4165: 本 A/B の ADOPT(t4-jpw1) を Phase 4（#4165）の入力として記録する。前提として、#4156 の SME 既定 ON が ADOPT であること（§5.17）と、SME の unsafe 独立監査（#4157）を併記する。本イシューでは定数（`SME_SMALL_SCHED_ENABLED`・`THREADS`・`JPW`）を変えていない。結線は #4165 で、所有者の承認を得てから行う（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。
+- #4165: 本 A/B の ADOPT(t4-jpw1) を Phase 4（#4165）の入力として記録する。前提として、#4156 の SME 既定 ON が ADOPT であること（§5.17）と、SME の unsafe 独立監査（#4157）を併記する。本イシューでは定数（`SME_SMALL_SCHED_ENABLED`・`THREADS`・`JPW`）を変えていない。結線は #4165 で、所有者の承認を得てから行う（[`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)）。（→ 2026-11-13 に結線した。§5.19。本行は当時の記述）
+
+### 5.19 既定 ON と t4-jpw1 の結線（イシュー #4165）
+
+2026-11-13 に所有者が #4165 の結線を承認した（チャット。原文「承認します」）。#4156 の ADOPT（§5.17）と #4162 の ADOPT(t4-jpw1)（§5.18）を既定経路へ反映する。§5.17・§5.18 の当時の記述（「既定 OFF のまま」「不変」）は書き換えない。
+
+| 項目 | 内容 |
+|------|------|
+| 結線 (1) | `crates/backend-cpu/src/gemm_blis/mod.rs` の `SME_PRODUCTION_ENABLED` を `true` にした。`docs/perf/logs/sme-default-on-ab-4156/on-arm.patch` と同じ 1 行の変更 |
+| 結線 (2) | `crates/backend-cpu/src/gemm_blis/sme_small_sched.rs` の `SME_SMALL_SCHED_ENABLED=true`・`SME_SMALL_SCHED_THREADS=4`・`SME_SMALL_SCHED_JPW=1`。`docs/perf/logs/sme-n256-sched-ab-4162/arm-t4-jpw1.patch` と同じ値。`MAX_DIM=256` は据え置き |
+| 前提 | #4156 は ADOPT（§5.17）。#4157 の独立監査は済み（`docs/cpu-gemm-sme-unsafe-audit.md` §14.5・§14.11・§14.12。PR #4277。P0・P1 なし）。#4162 は ADOPT(t4-jpw1)（gemm 256 fresh 0.677・reuse 0.764・ガード 0.996〜1.008。§5.18。PR #4283） |
+| 挙動が変わる範囲 | aarch64 で OS が SME と f32f32 を報告し、SVL が 64B の機体だけ。m≥256・n≥256・k≥64 は NEON から SME になる。そのうち m=n=256・k∈[64,256] は専用プール 4 スレッドと jpw=1 になる。x86、および SME の無い aarch64（GB10。検出が false）は不変 |
+| 数値 | bit 一致。#4156 の bitdump（§5.17）と #4162 の P-BIT（§5.18）で確認済み。FMA 契約・unsafe・tolerance・baseline・依存は変えない |
+| OFF のまま | thin（`SME_THIN_M64_ENABLED`。undetermined）。eager release（#4158 REJECT・#4159 未測。`cpu-gemm-reuse-fresh-inversion.md` §18・§19） |
+| ドリフト検出テスト | 反転: `sme_production_disabled_after_gb10_reject` → `sme_production_enabled_is_true_with_neon_fallback` 型（定数が `true`。適格形状は SME 機で Some・非 SME 機で None。形状外は None）。書き換え: `sme_small_sched_disabled_by_default` → `sme_small_sched_enabled_with_t4_jpw1`（ON の値 true・4・1 を固定）、`..._plan_is_inert` → `sme_small_sched_enabled_plan_fires_in_band_only`（帯内 256³・(256,256,64) で plan が有効、帯外 512³・(784,256,64) は素通り） |
+| 前後比較 | 所有者判断で追加の計測はしない。#4156（OFF 対 ON）と #4162（SME ON を base にした t4-jpw1 対 base）の 2 件の合成で代替する。**現 main（OFF）と結線後（ON + t4-jpw1）を直接並べた計測は無い** |
+| 未計測の SME 機 | 所有者判断で受け入れて記録する。M4 Max は §5.4.1 で境界 (256,64) の中央値が 1.161、2/5 run が 1.0 未満で 5/5 を満たさなかった。SME を報告する Linux aarch64 機も未計測。M4 Max の非後退は、計測できる機会に後続で確かめる |
+| ロールバック | `SME_PRODUCTION_ENABLED` を `false` に戻す 1 行（t4-jpw1 は SME OFF なら効かない）と、`sme_production_enabled_is_true_with_neon_fallback` の反転。t4-jpw1 だけを外す場合は `sme_small_sched.rs` の 3 定数と対応するテスト |
+| マージ前の検証 | Mac mini で PR ブランチの実機テストを行う（`cargo test -p fandhe-ai-backend-cpu --release`、P-BIT・P-FIRE）。結果は PR に記録する |
+| 別 PR | #4278（sme・avx2・avx512 の `kernel_unchecked{,_with_ldc}` 6 関数の `pub(crate)` 化。所有者判断 (a)）・#4280（thin のゲートを `SME_PRODUCTION_ENABLED` に従属させる）・#4279（P3 の `checked_mul`） |
+
+- 記録の全体は [`cpu-adopt-wiring-4165.md`](cpu-adopt-wiring-4165.md)。

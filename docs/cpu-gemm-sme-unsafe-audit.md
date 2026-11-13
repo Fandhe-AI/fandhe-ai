@@ -497,3 +497,13 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - 条件 3（`unsafe asm!` の監査）: 独立監査で M1〜M5・G1・R1・OWASP はすべて適合。新しい P0・P1 はない。
 - 是正 issue の候補（起票は所有者の承認後）: P2 の SME カーネルの公開範囲（`pub(crate)` 化。破壊的変更）と、P3 の thin の `checked_mul`。§13.6 の P2 #1・#2 は thin を有効にする前の必須事項として引き継ぐ。
 - SME 既定 ON は、引き続き #4165 と所有者承認による。本節は既定 ON の承認ではない。
+
+### 14.12 本番ゲートを true にした記録（イシュー #4165。2026-11-13 追記）
+
+- §14.1〜§14.11 は当時の記録として変更しない。§14.10 と §14.11 末尾の「結線していない」「引き続き #4165 と所有者承認による」は、本節で次のとおり解消した。
+- 2026-11-13 に所有者が #4165 の結線を承認した（チャット。原文「承認します」）。`crates/backend-cpu/src/gemm_blis/mod.rs` の `SME_PRODUCTION_ENABLED` を `true` にした（`docs/perf/logs/sme-default-on-ab-4156/on-arm.patch` と同じ 1 行）。あわせて #4162 の t4-jpw1（`sme_small_sched.rs` の `SME_SMALL_SCHED_ENABLED=true`・`THREADS=4`・`JPW=1`）も結線した（`perf/cpu-gemm-sme-fmopa-microkernel.md` §5.19）。
+- 条件 3（`unsafe asm!` の監査）は §14.5・§14.11 の独立監査で充足（P0・P1 なし）。条件 1・2 は #4156 の ADOPT（`perf/cpu-gemm-sme-fmopa-microkernel.md` §5.17）。
+- **本節の変更は定数と対応するテストだけで、`unsafe`・`asm!` の本体は変えていない。** 新しい `unsafe` の追加なし。到達範囲が広がる（aarch64 で OS が SME と f32f32 を報告し、SVL が 64B の機体で m≥256・n≥256・k≥64 が SME になる）。実行時検出が false の機体（GB10 など）は到達しない。
+- thin（`SME_THIN_M64_ENABLED`）は OFF のまま。§13.6 の P2 #1・#2（thin のゲート従属・lazy-ZA の回帰テスト）は thin を有効にする前の必須事項として残る。
+- §14.11 の是正候補は別 PR で扱う: #4278（6 関数の `pub(crate)` 化。所有者判断 (a)）・#4279（P3 の `checked_mul`）・#4280（thin のゲートを `SME_PRODUCTION_ENABLED` に従属させる）。
+- マージ前に Mac mini で PR ブランチの実機テストを行う（結果は PR に記録する）。M4 Max・SME を報告する Linux aarch64 機の非後退は未計測で、所有者判断で受け入れた。ロールバックは `SME_PRODUCTION_ENABLED` を `false` に戻す 1 行とドリフト検出テストの反転。
