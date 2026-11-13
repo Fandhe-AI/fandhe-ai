@@ -2,13 +2,32 @@
 
 ## 状態
 
-**PR-1（道具立て）時点は実測なし**。機構（既定 OFF）・腕の patch・RULE 雛形・実行キット・集計を入れた段階で、実機の値は一つもない。判定は PR-3 で記録する。
+**実測済み・判定 ADOPT(t4-jpw1)**（Mac mini `<metal-node>`・2026-11-13 計測と集計。`aggregate-macmini.md`）。既定は切り替えていない（結線は #4165 と所有者承認）。
 
 | PR | 内容 | 状態 |
 |---|---|---|
-| PR-1 | 機構・patch・`RULE.template.txt`・`orchestrate_macmini.sh`・`aggregate.py`・doc | 本 PR（`Refs #4162`。イシューは閉じない） |
-| PR-2 | Mac mini のセッションが `RULE.template.txt` を埋めて `RULE.txt` として単独コミット | 未着手 |
-| PR-3 | Mac mini での実測と判定の記録（`Closes #4162`） | 未着手 |
+| PR-1 | 機構・patch・`RULE.template.txt`・`orchestrate_macmini.sh`・`aggregate.py`・doc | マージ済み（`Refs #4162`）。他ジョブの前提ゲートと系列の前の確認は PR #4281 で追加 |
+| PR-2 | Mac mini のセッションが `RULE.template.txt` を埋めて `RULE.txt` として単独コミット | マージ済み（PR #4282・`c9582d868`。fixed-at-utc 2026-11-13T10:30:43Z） |
+| PR-3 | Mac mini での実測と判定の記録（`macmini/`・`aggregate-macmini.md`） | 本 PR |
+
+## 結果（Mac mini・系列 1）
+
+- 計測: 2026-11-13T11:21:18Z〜11:34:48Z（hw-lock の取得から解放まで）。BASE は `c9582d868` のクリーンな clone、WORK は `.noindex` で終わる新しいディレクトリ。orchestrate の終了コードは 0。
+- **判定: ADOPT(t4-jpw1)**（`aggregate.py` の機械出力）。判定 2 セルの候補/base の中央値比は gemm 256 fresh 0.677・reuse 0.764 で、どちらも 5/5 round で 1.00 以下。ガード 4 セル（gemm 512 fresh／reuse・train 64 fresh／reuse）の中央値比は 0.996〜1.008 で、5/5 の後退はない。
+- 選択: 適格は t4・t6・t4-jpw1。幾何平均は t4-jpw1 0.7192・t4 0.7256・t6 0.7561。t4-jpw1 と t4 の差は 0.0064 で 0.005 以上のため、少パラメータ優先の規則は働かず、t4-jpw1 が選ばれた。jpw1（0.9774）は適格外で後退もない。jpw4（1.0624）は判定セルで 5/5 後退。
+- 前提ゲート: `macmini/gates.txt` はすべて ok（P-TREE・P-R0・P-FIRE／P-RT／P-BIT は 7 腕とも・P-CELLS-RUNAB・P-COLLECT・P-LOCK）。`cell_err.log`・`torch_err.log` は空。
+- 他ジョブの前提ゲート: 5 round とも開始前・終了後が CLEAN（`macmini/foreign-gate/` の 10 本）。待ち時間は 0 秒、load1 は 1.17〜1.39、`gate_not_ok=0`。ゲートの sha256 は `RULE.txt` §9 の値と一致（`macmini/foreign_gate.txt`）。
+- 系列の前の確認: Safari アプリ本体は 0 件（補助プロセス 6 件はすべて %CPU 0.0）。mediaanalysisd は 3 回とも 0.0%（`macmini/series-start.txt`）。
+- PyTorch 比（記録のみ。torch median / fandhe median）: gemm 256 fresh の中央値は base 0.873、t4-jpw1 1.287。gemm 512 fresh は両方とも 1.335。
+- 収録前の漏れ検査（P-COLLECT）は 0 件。手元でも `/Users/`・`/home/`・ホスト名・ユーザー名・IP で数え直して 0 件だった。`aggregate.py` を手元で回し直した出力は `aggregate-macmini.md` と一致した。
+- `tree_fingerprint.txt` は計測時の BASE（`RULE.txt` を含む）の値で、`RULE.txt` の PARAMS の値（`1a30988db` のもの）とは違う。この違いは `RULE.txt` に書いてあるとおりで、orchestrate は照合しない。
+- round 1 の外れ値（記録のみ。規則は変えていない）
+  - 観測: round 1 の gemm 256 fresh は base 278.5µs・t4 225.4µs・t4-jpw1 223.0µs で、round 2〜5（base 183.8〜187.4µs・t4 121.9〜132.3µs）より遅い。base と同じバイナリの aa（185.5µs）と PyTorch（165.8µs）は round 2〜5 と同じ水準だった。このため round 1 だけ A/A 0.666・base の PyTorch 比 0.595 に外れている。
+  - 推定（原因は確かめていない）: 各腕のバイナリが初めて起動されるセルで遅くなった可能性がある（aa は base の後に走るのでその round で 2 回目の起動になる）。
+  - t4-jpw1 の round 1 の比は 0.801 で、round 1 を含めても 5/5 で 1.00 以下。判定は変わらない。
+- round の間隔（限界として記録）: 開始前のゲートの待ちはすべて 0 秒で、5 round は 11:33:48Z〜11:34:48Z の約 60 秒に収まった。規則どおりだが、round 間の独立性は時間方向にはほとんどない（同じ 1 分間の状態を 5 回測っている）。#4165 の判断材料として記録する。
+- P-RT の skip（記録のみ）: 候補 5 腕の passed は 1335 で、base／aa の 1337 より 2 少ない（failed はすべて 0）。`--skip sme_small_sched_disabled_by_default` は libtest の部分一致なので、固定した名前のテストに加えて `sme_small_sched_disabled_by_default_plan_is_inert` も外れた。どちらも既定 OFF の plan を確かめるテストで、定数を反転したツリーでは作りの上で落ちる。orchestrate の P-RT は ok で、規則は変えていない。
+- 計測中に BASE の中へ、PyTorch セルが使う `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py` の入力キャッシュ（同ディレクトリ `cache/` の `fill_*.npy` など 10 本。round 1 の PyTorch 3 セルの時刻 11:33:53Z〜55Z に作成）ができた。`bench_py.py` は入力を (seed, n) ごとに `.npy` へキャッシュする作り（同ファイル 22〜28 行目）。収録物には入っておらず、コミットもしていない。
 
 ## 目的と根拠
 
@@ -97,7 +116,7 @@ PR-1 の後、`RULE.txt` の固定（PR-2）の前に足した。ゲートを厳
   - 系列の前の確認が不成立なら prestart を残して止まり、先へ進まないこと。
   - orchestrate: `FOREIGN_GATE` の不正でロック前に止まること・呼び出し順・上書き禁止の対象・dry-run。
   - 変異の確認: 次の 10 の変異のどれでも self-test が落ちることを確かめた。round 後の呼び出しを外す・開始前の GATE_NOT_OK を数えない・終了後の GATE_NOT_OK を数えない・終了後の行を書かない・mediaanalysisd を 5 以下で通す・mediaanalysisd を部分一致で拾う・Safari を部分一致で拾う・系列の前の確認で止まらない・系列の前の確認を呼ばない・`FOREIGN_GATE` のパス検査を外す。
-- **未検証**: Mac mini 上での `#[ignore]` テスト（P-FIRE・P-BIT）、A/B の実行、P-RT、`foreign_job_gate.py` と Safari・mediaanalysisd の確認を実機の `ps` で動かすこと。
+- **Mac mini で検証済み（2026-11-13・PR-3）**: `#[ignore]` テスト（P-FIRE・P-BIT）、P-RT、A/B の実行、`foreign_job_gate.py` と Safari・mediaanalysisd の確認を実機の `ps` で動かすこと（結果は上の「結果」節）。
 
 ## 限界
 
