@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# イシュー #4163: 前提ゲート R0〜R3 の実行（GB10 専用。規則の正本は同ディレクトリの RULE.v2.txt。RULE.txt〈v1〉は読まない）。
+# イシュー #4163: 前提ゲート R0〜R3 の実行（GB10 専用。規則の正本は同ディレクトリの RULE.v3.txt。RULE.txt〈v1〉・RULE.v2.txt〈v2〉は読まない）。
 # scripts/bench/framework-compare/run_ab_infer_graph_default_cuda.sh から計測の前に呼ばれる。
 # 各ログ末尾に rc= 行を残し、判定は aggregate_4163.py が生ログで行う（本スクリプトの終了コードは補助）。
 #   R0: 非後退（env なし）  R1(a): env=1 の capture 実機テスト  R1(b): env=1 の並列推論テスト 5 回
@@ -62,11 +62,11 @@ for b in 64 1024 4096; do
 done
 
 # ---- R3: 既定 ON の波及。tree を別ディレクトリへ展開し、腕 A/B にだけパッチを当てる（ROOT の作業ツリーは触らない） ----
-# 反復回数 N は RULE.v2.txt の `  r3_repeats: <正の整数>`（所有者が決める。#4163 所有者判断 2026-11-11・コメント 6798581780）。腕 C・A を N 回ずつ流し、
+# 反復回数 N は RULE.v3.txt の `  r3_repeats: <正の整数>`（所有者が決める。#4163 所有者判断 2026-11-11・コメント 6798581780）。腕 C・A を N 回ずつ流し、
 # aggregate_4163.py が「腕 A で毎回失敗・腕 C で毎回成功」だけを阻害、結果が回ごとに混ざったテストを不安定（判定外）に分ける。
-R3_REPEATS="$(sed -n 's/^  r3_repeats: \([1-9][0-9]*\)$/\1/p' "$HERE/RULE.v2.txt" 2>/dev/null | head -n1)"
+R3_REPEATS="$(sed -n 's/^  r3_repeats: \([1-9][0-9]*\)$/\1/p' "$HERE/RULE.v3.txt" 2>/dev/null | head -n1)"
 if [[ -z "$R3_REPEATS" ]]; then
-  echo "error: RULE.v2.txt に r3_repeats（正の整数）が無い -> R3 を実行しない" >&2
+  echo "error: RULE.v3.txt に r3_repeats（正の整数）が無い -> R3 を実行しない" >&2
   note_fail r3-repeats 1
 fi
 # 標準出力へ直接書くダンプテスト（facade の tests/cpu_sme_gate_bit_dump.rs。高速化のための意図した作りでテストは変えない）は
