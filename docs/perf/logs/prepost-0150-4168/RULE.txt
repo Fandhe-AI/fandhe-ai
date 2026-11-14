@@ -1,0 +1,122 @@
+RULE fixed-at-utc: 2026-11-14T02:45:43Z
+issue: #4168（親: #4140 Phase 5。Phase 4〔#4165〜#4167〕の結線後の前後比較と 14 セルの分類の付け直し）
+本規則は計測より前に固定する。事後に緩めない。
+本計測は ADOPT／REJECT の二値判定を行わない。効果の向きも大きさも仮説にとどめ、数値目標は置かない。
+判定式（同一 run 内の最速相手比・区分の閾値）は 0.14.0 スコアボード（framework-compare-0.14.0-remeasure/scoreboard/gen_0140.py の
+load・key・index・metric・better・paired_ratio・judge）から変えない（judge_prepost_0150_4168.py が逐語コピーを持ち、--check-verbatim と --regress-0140 で確認する）。
+
+[腕]
+- before = registry の fandhe-ai =0.14.0（path patch なし・--locked）。
+- after = main HEAD の crates/facade への path patch（`--config patch.crates-io.fandhe-ai.path=...`）。fandhe-ai と fandhe-ai-* のすべてが crates/ の path に解決されることを cargo tree --depth 2 --target all で事前確認する（registry に残れば停止）。
+- after SHA（BASE）:
+- after = 1b5a8dfd4678eaad25553cef19142c8fb63539cf
+- baseline コミット（0.14.0 計測腕）: 18a7f4b87fe61029a179cb1922cc82928440f2c9
+- 両腕とも同じ BASE の同じ bench-fandhe ソース（差はライブラリだけ）。相手（candle・burn・Python）は BASE からビルドして共用する。bench_py.py の sha256 は 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b（run ごとに照合）。
+- ビルド順は before → 相手 → after。after のビルドは Cargo.lock を書き換えるため退避し、終了時に復元して git diff 0 を確かめる。
+
+[事前確認（fail-closed）]
+- ゲート定数（crates/ 配下の `const *ENABLED*: bool`）: 下の [期待するゲート定数] と完全一致する（1 行でも増減・値の違いがあれば停止）。Phase 4 の結線（#4165〜#4167）は main に入っているので、baseline コミット（18a7f4b87）から値が変わった定数が在ることは想定内で、停止の理由にしない。baseline との差（値の変化・追加）は env 配下の consts-diff.txt へ記録だけする。baseline の全定数が現在側に在ること（削除・抽出対象外化がないこと）は検査する。
+  抽出は `;` までの継続行をつなぎ、値が true／false 以外の式（`cfg!(...)` など）のときは空白を詰めて式のまま記録する（INFER_SCOPE_JPW1_ENABLED はこの形）。行頭が `//` のコメント行は無視する。`const *ENABLED*: bool` と読めるのに解析できない定義が 1 つでも見つかれば停止する。
+- 環境変数: 名前が FANDHE_AI_ または RUST_AI_ で始まる変数が 1 つでもあれば停止する（腕の既定が黙って変わるため。unset で黙って直さない）。0 件だったことと RAYON_NUM_THREADS を unset したことを env_info へ記録し、判定器が検査する。
+- 道具の sha256: 下の [道具の sha256] と実ファイルの完全一致をランナー（起動時。実行中の自分自身も照合）と判定器の双方が検査し、食い違えば拒否する。
+- bench-fandhe の baseline からの差分は env 配下へ記録し、README の「事前確認」で人が読む。ランナーは --diag-* を一切渡さず、判定器は diag マーカー付きの行を拒否する。
+- BASE の .rev-stamp が after SHA と一致する。
+
+[期待するゲート定数]
+- 計測ツリー（after SHA）の crates/ から抽出した `path:NAME=value` の全行（整列済み）。ランナーの --print-expected-consts の出力と完全一致させる。
+# >>> expected-consts
+crates/autodiff/src/eager_release.rs:EAGER_MATMUL_RELEASE_DEFAULT_ENABLED=false
+crates/backend-cpu/src/gb10_affinity.rs:GB10_AFFINITY_ENABLED=false
+crates/backend-cpu/src/gemm_blis/infer_scope.rs:INFER_SCOPE_JPW1_ENABLED=cfg!(all(target_arch="aarch64",target_os="linux"))
+crates/backend-cpu/src/gemm_blis/mod.rs:SME_PRODUCTION_ENABLED=true
+crates/backend-cpu/src/gemm_blis/mod.rs:SME_THIN_M64_ENABLED=false
+crates/backend-cpu/src/gemm_blis/mod.rs:TWO_D_DYNAMIC_PRODUCTION_ENABLED=true
+crates/backend-cpu/src/gemm_blis/prepack.rs:RESIDENT_W_PREPACK_ENABLED=false
+crates/backend-cpu/src/gemm_blis/small_m.rs:SMALL_M_JOB_MERGE_ENABLED=false
+crates/backend-cpu/src/gemm_blis/sme_small_sched.rs:SME_SMALL_SCHED_ENABLED=true
+crates/backend-cpu/src/reduction.rs:REDUCTION_SEQUENTIAL_FALLBACK_ENABLED=false
+crates/backend-cpu/src/small_shape_thread_cap.rs:SMALL_SHAPE_CAP_ENABLED=false
+crates/backend-cpu/src/thread_limit.rs:BIG_CORE_LIMIT_ENABLED=false
+crates/backend-cuda/src/gemm.rs:TILED_PIPELINE_128X64_PRODUCTION_ENABLED=true
+crates/backend-cuda/src/gemm_auto.rs:MMA_PRIORITY_PRODUCTION_ENABLED=true
+crates/backend-cuda/src/graph.rs:INFER_GRAPH_DEFAULT_ENABLED=true
+crates/backend-cuda/src/graph.rs:TRAIN_GRAPH_DEFAULT_ENABLED=false
+crates/backend-cuda/src/host_staging.rs:PINNED_H2D_DEFAULT_ENABLED=false
+crates/backend-metal/src/fixed_cost_diag.rs:METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED=false
+crates/backend-metal/src/split_k_runtime.rs:SPLIT_K_DEFAULT_ENABLED=true
+crates/backend-metal/src/tile.rs:FINE_BARRIER_ENABLED=false
+crates/backend-metal/src/tile.rs:FRAG_INTERLEAVE_ENABLED=false
+crates/backend-metal/src/tile.rs:M64_THIN_TILE_ENABLED=false
+crates/backend-metal/src/tile.rs:SOURCE_SPECIALIZATION_ENABLED=false
+crates/backend-metal/src/tile.rs:STEEL_LARGE_N_ENABLED=true
+crates/backend-metal/src/tile.rs:SWIZZLE_ENABLED=false
+crates/backend-metal/src/tile.rs:UNROLL_ACC_ENABLED=false
+crates/backend-metal/src/tile.rs:UNROLL_LOAD_ENABLED=false
+crates/backend-metal/src/train_forward_encode_runtime.rs:TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED=false
+crates/tensor-core/src/alloc.rs:HOST_ARENA_DEFAULT_ENABLED=false
+# <<< expected-consts
+
+[道具の sha256]
+- 本規則を固定するときの道具の sha256（`<sha256>  <リポジトリルート相対パス>`）。対象はランナー・判定器・orchestrate.sh・foreign_job_gate.py（Mac mini の他ジョブゲート）と、ランナーが source する ab_foreign_gate.sh。ランナーの --print-tool-sha256 の出力と完全一致させる。
+# >>> tool-sha256
+a2bb17b292ab9d0203cbcd1ea3c1555d7c0ed16fc29d8c8884e82b8b1cac77ad  scripts/bench/framework-compare/run_ab_prepost_0150_4168.sh
+3c314ba96e108d0f8eb94a26b934eea01375473b33dc818d93d73419e74ed7c4  scripts/bench/framework-compare/judge_prepost_0150_4168.py
+0f3f17261ff8d30c5a982f79c6d1fa311877c102c7f3187e75ad3c0b3d5abf9b  docs/perf/logs/prepost-0150-4168/orchestrate.sh
+d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04  docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py
+b7ae69bc4b32fa63887867822b97e1eeb9e900ed1a51a81053b231e8ff10f975  scripts/bench/framework-compare/ab_foreign_gate.sh
+# <<< tool-sha256
+
+[セル]（判定行は fandhe reuse。fresh は参考。0.14.0 スコアボードと同じ 27 判定行。重点は unreached_0140.tsv の 14 セル、残り 13 は後退検知のガード）
+- Mac mini（Apple M4 のみ。M4 Max は対象外〔2026-11-14 所有者指示〕で拒否）13 行: gemm Metal N=256/512/1024/2048/4096、gemm CPU N=256/512/1024/2048、train・infer の Metal・CPU（size 64）。
+- GB10 14 行: gemm CUDA・CPU N=256/512/1024/2048/4096、train・infer の CUDA・CPU（size 64）。
+- 相手は同じラウンドで実測する: candle・burn fresh、PyTorch・TensorFlow・SciPy（Mac mini は CPU・Metal、GB10 は CPU と PyTorch CUDA）。burn Metal gemm N=512〜4096 は既知の MEASURE_ERROR（記録拒否）4 件のみ許容。
+- --phases・--tf32・--device-checksum・--diag-* は測らない。
+
+[手順]
+- 5 ラウンド固定（AB_ROUNDS が 5 以外なら拒否）。プロセスは独立起動。順序は Rust の相手 → fandhe 両腕 → Python。fandhe はセルごとに before／after を続けて走らせ、先行腕はラウンドの奇偶で反転する。
+- 全ビルドを round1 の前に済ませ、計測中はビルドを並走させない。run の差し替え・追加起動・セル除外はしない。同じラベルの既存出力があれば停止。RAYON_NUM_THREADS は unset。
+- 期待行数（ラウンドごと。外れたら系列を打ち切る。#3266 の値を起点に、RULE 固定前の行数スモークで実測して下に書く）: Mac mini 各腕 26／相手 Rust 22／Python 32、GB10 各腕 28／相手 Rust 28／Python 28。
+- 行数スモーク（ビルド込み 1 round。RULE.txt の実体化前に `orchestrate.sh --smoke` を、Mac mini は `AB_PROFILE=macmini ... AB_PY_TORCH=<abs> AB_PY_TF=<abs> AB_SMOKE_SUMMARY=<abs>`、GB10 は `AB_PROFILE=gb10 ... AB_PY=<abs> AB_SMOKE_SUMMARY=<abs>` で実行する〔README の手順 2〕。報告するのは rows／pyrows／skipped／rc だけで、値は判定に使わず残さない。判定器は --smoke の出力を拒否する）: 
+  - Mac mini（<metal-node>）: 2026-11-14T02:09:46Z〜02:17:34Z、clone の HEAD 252813b5f（#4292 マージ）。rows（各腕 before／after／相手 Rust）26／26／22、pyrows 32、skipped 4（burn Metal gemm N=512〜4096 fresh の既知の MEASURE_ERROR）、想定外の失敗 0、rc 0。#4293 の差は gb10 の分岐だけなので Mac mini の行数に影響しない。Python は 0.14.0 Mac mini 測り直しの env/pip-freeze-venv-{torch,tf}.txt どおりに作り直した venv（Python 3.12.15。uv pip freeze の出力が収録 freeze と byte 一致。2026-11-14 所有者承認）。
+  - GB10（<cuda-node>）: 2026-11-14T02:30:59Z〜02:43:22Z、clone の HEAD 1b5a8dfd4（after と同じ）。rows 28／28／28、pyrows 28、skipped 0、想定外の失敗 0、rc 0。
+  - 両機とも、照合（--print-expected-consts 29 行・--print-tool-sha256 5 行）が下の 2 ブロックと sha256 で一致した。値は見ていない。
+- clone の分け方: BASE（AB_BASE_ROOT）は after SHA の clone（.rev-stamp の 1 行目が after SHA）、ランナー側（AB_RUNNER_ROOT）は本 RULE.txt を含むコミットの clone。両者の差は docs だけであること（記録 PR で git diff --stat を確かめる）。
+- bench_py.py はランナー側のものを起動し、自身の隣に cache/（fill_*.npy・ref_*.npy。入力・参照値の決定的なキャッシュ）を書く（#4162 で既知。行数スモークでも生成を確認）。追跡外で、コミットせず、収録物にも入れない。BASE の中には書かれない。
+- 実機ロック（~/work/.fandhe-hw-lock）を取り、ロックなしで測った値は使わない。公開面には機体のホスト名を <metal-node>・<cuda-node> とだけ書く。
+
+[負荷ゲート]
+- Mac mini: 系列 B のみ（各ラウンド前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ。GATE-INVALID／GATE-TIMEOUT で打ち切り）。pmset -g therm を各ラウンドの前後で記録する。machdep.cpu.brand_string が "Apple M4" と完全一致（run ごとに検査）。
+- Mac mini の他ジョブゲート（2026-11-14 所有者承認。#4166 と同じ。docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py の G1〜G4 を ab_foreign_gate.sh 経由で呼ぶ。ゲートの中身は変えず、ここで厳しくする方向だけを足す）: 各ラウンドの前に、他ジョブが CLEAN かつ load1 < 3.0 になるまで 30 秒間隔・最大 30 分待つ（超えたら GATE-TIMEOUT で打ち切り）。各ラウンドの後に 1 回確かめ、FOREIGN（またはゲート自身の失敗）ならそのラウンドを無効にして系列を打ち切る。結果は gate.log（`roundN foreign-before=clean`・`roundN foreign-after=clean`。異常は GATE-TIMEOUT／GATE-INVALID）と env 配下の foreign-gate/ に残し、判定器が各ラウンドの前後の CLEAN を要求する。5/5 完走だけを採る。
+- GB10: uname -m が aarch64。系列の前と各ラウンドの前に nvidia-smi --query-compute-apps で compute プロセスが 0 件（取得失敗は EXCLUSIVE-INVALID、1 件でもあれば専有未達）。さらに load1 < 1.0 かつ GPU 使用率 0% を 3 サンプル連続で確認する。GB10 のゲートは従来のまま（他ジョブゲートは足さない）。
+- 打ち切った系列は採用しない。5/5 完走だけを採る。取り直しは別名の RULE。
+
+[比・区分]
+- 腕ごとに、run ごとに「同じ run の有効な相手（parity_fail_count == 0 の fresh 行）の最速 median_s ÷ その腕の fandhe reuse median_s」を求め、5 run の中央値で区分する（1 を超えれば 1 位、0.90 以上なら僅差、それ未満は負け。推論は同じ式でスループット比と一致する）。
+- 0.15.0 の見込み = after 腕の比と区分。0.15.0 の公開版には Phase 5 以降の変更が入りうる。勝敗の正は Phase 6（#4177〜#4179）の測り直し。
+- 腕比（参考）: median(after の reuse median_s) ÷ median(before の同じ値) と run ごとの値。合格ラインは置かない。27 セルで 5/5 run 一貫の後退が出たら所有者への報告事項として記録し、自律的な revert・再計測による差し替えはしない。
+- ノイズ帯 NB-RANGE5・確定条件 NB-SEP は、定義は承認済み（#4142 issuecomment-6757497844・#4209）。本 issue では記録だけで、判定と分類には使わない（帯〔after の run 別の最小〜最大〕を記録する。区分の確定は Phase 6 に委ねる）。
+
+[hard 条件]
+- 同じ腕の 5 run すべてで checksum・parity_total・parity_fail_count・parity_max_abs_err・parity_max_rel_err・parity_scaled_abs_bound・parity_scaled_abs_rescued が完全に一致する（reuse・fresh 両方。train／infer は checksum）。不一致は「正しさの失敗」として所有者へ報告する。tolerance・baseline は変えない。
+- 腕の間（before と after）の checksum の差はライブラリのコードが違うため即失敗にせず、セル単位で「差あり」と記録して所有者へ報告する。
+- 判定側（fandhe）の parity_fail_count > 0 が 1 件でもあれば停止する（終了コード 4）。相手の parity fail はその相手を除外する。
+- 終了コード: 0 = 全セル判定可能、2 = undetermined あり、3 = 同じ腕の中の hard 不一致（優先）、4 = 判定側の parity 停止。
+
+[分類の付け直し]
+- 区分は loss-attribution-matrix.md §10.5 の 3 区分（ハードの上限／計測窓の定義／自分たちの制約）と表示専用の「分類保留」だけ。「確度低」は理由列の先頭に書く。
+- 分類を変えてよいのは出典つきの実測値の新しい根拠があるときだけ。道具立てのみの記録は「部品のみ・実測なし（#番号）」と書き、分類変更の根拠にしない。
+- after 腕で 5 run 中央値が 1.0 を超えた重点セルは、理由列に「見込みで 1 位（#4168 after 腕）」と書く。行は消さず、確定は Phase 6 に委ねる。
+- 列の形式は unreached_0140.tsv と同じ（セルID・機体・比・分類・理由・出典）。
+
+[結果の扱い]
+- 結果はすべて記録する。自律的な revert・再計測による差し替えはしない。
+- 事前に表明する仮説（合格ラインではない。表明するだけで、実測で検証する）。Phase 4 の結線は main に入っており、after は結線後のライブラリである:
+  - Mac mini の CPU gemm は、SME 既定 ON（#4273 ADOPT・#4284。`SME_PRODUCTION_ENABLED = true`）で動く見込み。
+  - Mac mini の Metal gemm N=1024〜4096 は、steel 結線（#4166 PASS・#4255。`STEEL_LARGE_N_ENABLED = true`）で動く見込み。
+  - GB10 は、jpw1（#4269 ADOPT・#4270。aarch64 Linux 限定の `INFER_SCOPE_JPW1_ENABLED`）と、推論 Graph 既定 ON（#4163 v3 ADOPT・#4290。`INFER_GRAPH_DEFAULT_ENABLED = true`）で動く見込み（jpw1 は CPU の推論セル、Graph は CUDA の推論セルが対象）。
+  - G-CUDA-INF の本番セル（常駐入力）は capture に届かない。そのため、created stream 化の分しか動かない見込み（infer-chain-graphcapture-cuda-ab.md §7.5）。
+  - 上記の対象外の重点セルとガードセルは、after ≈ before の見込み。ただし既定経路のコード（gemm_blis/mod.rs・small_m.rs・backend-metal/src/gemm.rs・tensor-core/src/cumulative.rs など）にも v0.14.0 以降の差分があるため、断定しない。
+  - 見込みが外れても、規則は変えない。結果はそのまま記録する。
+
+[機体の同定]
+- Mac mini は machdep.cpu.brand_string が "Apple M4" と完全一致。GB10 は uname -m が aarch64 で、GPU 名を env_info へ記録する。
