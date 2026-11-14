@@ -1,0 +1,2 @@
+fandhe_ai_env=none
+rayon_num_threads_env=none
