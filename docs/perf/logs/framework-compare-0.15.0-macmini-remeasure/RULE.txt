@@ -1,0 +1,100 @@
+事前登録規則（Mac mini・Apple M4）0.15.0 6 フレームワーク同席計測 — 【固定】
+#4177（GB10 は #4178 が別ディレクトリ・別 PR で行う）。固定時刻: 本ファイルを含む PR のマージ時刻（以後編集しない。固定後の変更は RULE.v2.txt を新設する）。
+本ファイルは時間の実測値を含まない。0.14.0 の RULE.txt（../framework-compare-0.14.0-macmini-remeasure/RULE.txt）を雛形にした。
+0.14.0 との違いは、版（0.15.0）・計測 SHA・前版比の参照先（0.14.0）に加え、所有者承認済み（#4177 issuecomment-6878423964）の次の 4 点だけ:
+  (1) Mac mini の他ジョブゲートの追加（0.14.0 の系列 B の run 前の load1 待ちは、このゲートの待ちに統合した）
+  (2) 既定設定の文言（0.14.0 の「SME OFF・Graph capture OFF」を 0.15.0 の既定に書き換え。環境変数では既定を変えない）
+  (3) 収録のマスクをスクリプト（collect.sh）にし、漏れ検査と SHA256SUMS も同じスクリプトで行う
+  (4) 比較相手の venv の前提（0.14.0 の収録 freeze と byte 一致）と、計測後の freeze 収録・cmp
+判定式・閾値（1 超が 1 位、0.90 以上が僅差）・N=5・相手の parity fail は判定不能・判定側の parity 不合格は fail-closed・期待行数・tolerance・baseline は 0.14.0 と同一。
+
+腕（単腕）:
+  計測 SHA = 4fce735fb57d97c09ce96b7c6b77eff915c24229（main の #4306 マージ。道具 PR。framework-compare のピンは fandhe-ai =0.15.0 〔#4305〕）。
+  機体側はこの SHA で clone し、.rev-stamp（40 桁 1 行）と EXPECT_SHA をこの値にする。run ごとに照合する。
+  方針: 腕は 1 つ（registry の fandhe-ai =0.15.0）。旧版の腕は置かない。bench-fandhe の既定経路は 0.14.0 から変えない。
+  計測前の事前確認（RULE 固定前に統合セッションが確認済み）:
+    scripts/bench/framework-compare について、0.14.0 の腕 18a7f4b87fe61029a179cb1922cc82928440f2c9 と計測 SHA の差分が
+    ・bench-fandhe/src/main.rs の差は VERSION 定数（"0.14.0"→"0.15.0"）・ピンの版を述べた文字列とコメント・診断フラグ（--diag-legacy-tape-reuse・--diag-host-input-reuse。既定 OFF で既定経路は不変）・テストの追加だけ、
+    ・run_all.sh・run_all_cuda.sh の差はピンの版を述べたコメント各 1 行だけ、bench-common・bench-candle・bench-burn・ワークスペースの Cargo.toml・deny.toml は差なし、
+    ・bench-fandhe/Cargo.toml の差は fandhe-ai の版の行とコメントだけ、Cargo.lock の差は自社 8 クレート（fandhe-ai・autodiff・backend-cpu・backend-cuda・backend-metal・backend-rocm・onnx-interop・tensor-core）の版・checksum だけ（外部 crate の増減・版変更 0。#4305）、
+    ・それ以外の差は run_all*.sh から呼ばれない A/B・診断用の道具（run_ab_*.sh・judge_*.py・torch_*_diag.py など）の追加・変更だけ、であること。
+  常駐入力の判別式（計測ツリーで 1 件ヒットしなければ fail。0.14.0 と同じ式。run ごとに検査）:
+    ^[[:space:]]+let c0 = tape\.matmul_resident\(
+  bench_py.py sha256: 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b（0.14.0 と同値。run ごとに照合）
+  Python 3 FW の版: 0.14.0 の計測と同じ版を使う。venv の中身は下の「venv の前提」で byte 一致を要求する。
+
+既定設定（0.14.0 の「SME OFF・Graph capture OFF」からの書き換え。根拠は v0.15.0 タグ 22a475e2d のコード）:
+  環境変数で既定を変えずに測る。0.15.0 の既定は次のとおり。
+  ・SME_PRODUCTION_ENABLED（crates/backend-cpu/src/gemm_blis/mod.rs）と SME_SMALL_SCHED_ENABLED（同 sme_small_sched.rs）は true。aarch64 で効き、Mac mini M4 は SME 経路を使う（GB10 は SME 非搭載で NEON のまま）。
+  ・推論スコープ jpw1（INFER_SCOPE_JPW1_ENABLED。同 infer_scope.rs）は aarch64 Linux（GB10）だけ。Mac mini では効かない。
+  ・CUDA 推論 Graph は既定 ON（INFER_GRAPH_DEFAULT_ENABLED。crates/backend-cuda/src/graph.rs）。既定のストリームが created stream になり、学習にも効く。Mac mini では効かない。
+  ・Metal の STEEL_LARGE_N_ENABLED（crates/backend-metal/src/tile.rs）は true。M4Base の正方 1024／2048／4096 に効く。
+  環境変数の検査: 各 run の前に FANDHE_AI_* と RAYON_NUM_THREADS が 1 つも設定されていないことをランナーが確かめ（scripts/env_guard.sh）、設定があれば名前だけを出して rc 3 で止める。
+  結果（なし）は run ごとの env_guard.txt と、系列の前後の env/env_info_*.txt に残る。
+  N = 5。
+
+venv の前提（0.14.0 と同じ中身であること。系列の前の事前検査）:
+  scripts/venv_preflight.sh macmini <venv の親ディレクトリ> を実行し、使う venv の uv pip freeze が 0.14.0 の収録
+  （../framework-compare-0.14.0-macmini-remeasure/env/pip-freeze-venv-torch.txt・pip-freeze-venv-tf.txt）と byte 一致すること（rc=0 かつ torch identical・tf identical）。
+  不在や不一致なら測らず止まる（作り直しは別承認）。計測後にも freeze を収録し、collect.sh が 0.14.0 の収録と cmp する（env/freeze-cmp.txt。不一致は rc 5 で所有者へ報告）。
+
+判定（0.14.0 から不変）: 比 = 同一 run 内の「有効な相手のうち最速 / fandhe-ai reuse」の 5 run 中央値（推論はスループット比。同じ式）。
+  比 > 1 で 1 位、>= 0.90 で僅差、それ未満は負け。相手側の parity_fail_count > 0 の行は判定不能（その相手を順位・最速に含めない）。
+  判定側（fandhe-ai reuse）の要素検証（parity_fail_count）が 1 件でも不合格なら、判定不能にせず生成を停止する（fail-closed）。
+  欠損 run・有効な相手の不在も生成停止。負けの「N 位」と相手名は 5 run 中央値で数える。tolerance・baseline は変えない。
+  判定一覧の生成器・検査器（gen_0150.py・check_0150.py）は #4179 の範囲で、本計測の範囲外。判定規則は上の式のとおりで、変更しない。
+前版比（0.14.0 比。表示のみ・勝敗には使わない）: 同一セル・同一モードの fandhe-ai 中央値同士の比（0.15.0 の 5 run 中央値 ÷ 0.14.0 の 5 run 中央値。
+  推論はスループット比。<1 が高速化・推論は >1 が改善）。参照ファイル（#4179 の前版比較が使う。sha256 を固定）:
+    framework-compare-0.14.0-macmini-remeasure/macmini-series-b/results-macmini-0.14.0-median5.jsonl
+      ce89a7772b723714a910c7f1ae134fc30802abb82f2300995de4e169357c2416
+    framework-compare-0.14.0-macmini-remeasure/macmini-series-b/results-macmini-py-0.14.0-median5.jsonl
+      d381443dbe34c51461449ea3bc857d521eabc1bc90fa052d57948c50ad1e7245
+    （GB10 側の 3 本は #4178 の RULE に固定する）
+  前版の判定一覧は framework-compare-0.14.0-remeasure/scoreboard/gen_0140.out（tally 13 3 11 invalid 1 noise na total 27。27 セル。
+    sha256 cdec4f544ba8ddd3b8d0e0c3fe5c5573e18a2df28fcb2e228d66b34ee35a715e）を参照する。Mac mini の 13 セルとの比較は同ファイルの Mac mini 行で行う（表示のみ）。
+  0.14.0 → 0.15.0 の差には、ライブラリの既定の変更（SME・Graph・jpw1・STEEL）と、Mac mini に足した他ジョブゲートの影響が含まれる。
+  計測日が異なるため、計測日の負荷・機体の状態の揺れも含む（ライブラリの変更だけの効果ではない）。
+
+機体: machdep.cpu.brand_string == "Apple M4"（完全一致。run ごとに検査）。M4 Max の値を Mac mini の値として使わない。公開テキストでは機体のホスト名を <metal-node> と書く。
+実機ロック: ~/work/.fandhe-hw-lock（owner は "#4177 rel-0.15.0 <UTC>"〈date -u +%FT%TZ〉の形式で 1 行。mkdir が成功したときだけ取得。系列の前に取り、終わりまで保持する）。ロックなしの値は採らない。計測中のビルド・並走負荷は禁止。
+  起動は scripts/macmini-0150-series.sh（owner の形式と一致を確かめて macmini-0150b-loop.sh を 1 回実行し、環境の記録を前後に取り、失敗しても trap でロックを外す）。実行は zsh -lc で包み（0.14.0 と同じ。ログインシェルの PATH で uv を解決する）、nohup で切り離す。venv_preflight.sh も同じくログインシェルで実行する。
+期待行数: Rust 48 / Python 32。skipped は bench-burn gemm metal 512/1024/2048/4096 fresh の 4 件のみ許容
+  （MEASURE_ERROR: gemm checksum is degenerate。0.14.0 と同じ。それ以外の skipped は run を fail にする）。
+  機体の dry-run（RULE 固定前・ビルド込み 1 round・値は判定に使わず見ない・結果は消した。2026-11-14T15:45:33Z 開始〜15:49:42Z 終了（<metal-node>）:
+    rows 48・pyrows 32・skipped 4・rc 0。ロック owner "#4177 rel-0.15.0 2026-11-14T15:45:33Z"、終了後に解放）。期待行数と一致したので変えない。
+  dry-run 前の事前検査（<metal-node>）: /bin/bash 3.2.57 で bash -n 全件通過・self-test 197 件 FAIL 0・道具の sha256 一致。
+    venv は <home>/work/venv4168.noindex（#4168 で 0.14.0 の freeze どおりに作り直したもの。0.14.0 の作業ディレクトリは残っていない）で、
+    ログインシェルの PATH で torch identical・tf identical・rc 0（非ログインシェルでは uv が PATH に無く rc 1。道具と venv は変えていない）。
+系列: 系列 B のみ（5 run）。系列 A（ゲートなしの対照）は行わない。ノイズ帯は算出できない（「対照系列なし・未算出」。判定一覧の tally 行は noise na。0 件とは書かない）。
+  ビルドは系列開始前に 1 回だけ（macmini-0150b-loop.sh が macmini-run-0150.sh を BUILD_ONLY=1 で呼ぶ）。
+  CARGO_TARGET_DIR は 0.14.0 と同じ扱い（設定しない。計測ツリーの framework-compare/target を使う）。
+
+負荷ゲート（0.14.0 の系列 B と、他ジョブゲートの統合。所有者承認 #4177 issuecomment-6878423964。#4168 の docs/perf/logs/prepost-0150-4168/RULE.txt の [負荷ゲート] と同じ扱い）:
+  ・各ラウンドの前: 他ジョブが CLEAN かつ load1 < 3.0 になるまで 30 秒間隔・最大 30 分待つ。超えたら GATE-TIMEOUT で打ち切る。
+    0.14.0 の系列 B（run 前に load1 < 3.0 を 60 秒間隔・最大 30 分待つ）はこの待ちに統合した。閾値（3.0）と上限（30 分）は同じで、間隔だけが 60 秒から 30 秒になる。
+  ・各ラウンドの後: 1 回確かめ、FOREIGN（またはゲート自身の失敗）ならそのラウンドを無効にして系列を打ち切る。
+  ・数値が取れない・ゲート自身の失敗は GATE-INVALID で打ち切る。
+  ・ゲートの中身は変えない。docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py（G1〜G4）を ab_foreign_gate.sh 経由で呼ぶ（scripts/foreign_gate_wrapper.sh が sha256 を検査してから呼ぶ）。
+  ・結果は gate.log（roundN foreign-before=clean・roundN foreign-after=clean。異常は GATE-TIMEOUT／GATE-INVALID）と env 配下の foreign-gate/ に残る。
+  ・5/5 完走だけを採る（loop.log に ALL-DONE completed=5/5）。打ち切ったら報告して止める。取り直しは所有者判断で、新しいディレクトリと別名の RULE（RULE.v2.txt）で行う。
+
+収録（マスク・漏れ検査）:
+  collect.sh（語境界つきマスク。${VAR} 形式）で収録する。マスクは txt/log/md/tsv/out/err で、jsonl は書き換えない。
+  漏れの検査（実名・IP・ユーザー名・絶対パス。1 件でも残れば収録しない）と SHA256SUMS の生成も同じスクリプトで行う。公開テキストでは <metal-node>・<home>・<user> と repo 相対パスを使う。
+
+道具の sha256（<sha256>  <リポジトリルート相対パス>。計測 SHA 4fce735fb57d97c09ce96b7c6b77eff915c24229 の実ファイル。機体側で sha256sum と完全一致を確かめる）:
+# >>> tool-sha256
+4bc1ba36679a2b16803c9208d587827db9d38bc4cc1951a1baaea00a0db2a377  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/env_guard.sh
+f3c66edab585ec0436570433182fb27338870eaca55f201832f9b9085cf8d0be  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/foreign_gate_wrapper.sh
+5ba7ee1011bba2b44a75093fbe5544b5174ccbf3adf86c2da45d6e0d5a2e243e  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/macmini-0150-series.sh
+eba0a302eb053ec117d94fba23926de524a5d2da603def852d33fb477897181a  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/macmini-0150b-loop.sh
+e0162a12e664f4f2323aa00e770ac30b01f6cdb137738f75531774788b9beb91  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/macmini-run-0150.sh
+5d61e70fa00f688040f03145e94e91358e3356192709106450d50288f42f777a  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/mask_lib.sh
+33399d33787e00a0a58a8c478fed40db328d7337787ebe5071cf425b4eeb73ae  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/self-test.sh
+9f5623447c1c653e2257860a92f852997510e9ad10ffa18899e4eedbdbd7e28a  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/venv_preflight.sh
+5c3300e98d3e2d97842577de12fefd3ed442284e81023a25d455978760c59fae  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/collect.sh
+9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b  docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py
+d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04  docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py
+b7ae69bc4b32fa63887867822b97e1eeb9e900ed1a51a81053b231e8ff10f975  scripts/bench/framework-compare/ab_foreign_gate.sh
+# <<< tool-sha256
+実機テスト: #3256 の M1〜M6・#3272 の X1 は本計測の範囲外とする。スコアボード HTML の生成・対応表の更新（#4179）も範囲外とする。
