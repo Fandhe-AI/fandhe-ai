@@ -59,6 +59,7 @@ Phase 4（#4165〜#4167）の結線後の main HEAD が 0.15.0 でどこまで�
    AB_BASE_ROOT=<BASE の絶対パス> AB_RUNNER_ROOT=<BASE の絶対パス> bash <BASE>/scripts/bench/framework-compare/run_ab_prepost_0150_4168.sh --print-tool-sha256
    ```
 4. **GB10**（`<cuda-node>`・compute プロセス 0 の専有）の次に **Mac mini**（`<metal-node>`・Apple M4 のみ。他ジョブゲートつき）の順に `AB_PROFILE=... bash docs/perf/logs/prepost-0150-4168/orchestrate.sh` を実行する。計測中はビルドを並走させない。
+   - 収録の段（判定器のあとのマスク検査）で止まり、収録先に `SHA256SUMS` が無いときは、計測を取り直さず `recollect.sh` で収録だけをやり直す（2026-11-14 所有者判断）。固定済みの道具（ランナー・判定器・`orchestrate.sh`）と RULE.txt は変えない。`recollect.sh` は生データに固定済みの判定器を再実行し、旧マスクで組み直したものが止まった収録先とバイト一致することを確かめてから、ユーザー名の項だけ語境界つき（#4156 と同じ定義）のマスクで収録し直す。`AB_PROFILE=... AB_RUNNER_ROOT=<RULE コミットの clone> AB_LOCK_ACQUIRED=<UTC> AB_LOCK_RELEASED=<UTC> bash docs/perf/logs/prepost-0150-4168/recollect.sh`（自己検査は `--self-test`）。
 5. 判定器の出力・ログ・SHA256SUMS を収録し、`--fill-draft` で原稿の比を埋め、RULE の「分類の付け直し」の規則で分類・理由を確定する。ここで README の状態を更新し `Closes #4168`。
 
 ## マスク規則
