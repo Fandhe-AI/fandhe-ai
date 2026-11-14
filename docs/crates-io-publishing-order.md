@@ -1152,6 +1152,14 @@ dry-run の Verifying 段は、展開した `.crate` を ROCm 非搭載の環境
   `v0.14.0` は未実施（#3872。backend-rocm は §15.7 の条件〈#3159・#3867 の ROCm 実機 parity〉が
   未充足のまま）。ローカルの多パッケージ dry-run: `cargo publish --dry-run --locked`（§8.1 と同じ形・9 クレート同時・worktree 内 target）で 9 件すべてが Packaging → Verifying → `aborting upload due to dry run` に到達（exit 0）。workflow の `mode: dry-run-only` はマージ後に実行する（未実施）。
 
+- 2026-11-14（v0.15.0 リリースサイクル・バンプ。#4174）: 公開対象 9 クレートを lockstep で
+  0.14.0 → 0.15.0 に上げた。変えたもの: ルート `Cargo.toml` の `workspace.version`、
+  内部依存の `version = "=0.15.0"` 16 箇所、ルート `Cargo.lock`（workspace メンバー 13 件の版だけ）、
+  `scripts/bench/oss-gemm-compare/Cargo.lock`（path 依存のメンバー 5 件の版だけ）。外部依存の
+  版・checksum・source の変更はない。framework-compare のピン `=0.14.0` は変えていない
+  （更新は #4176）。移行ノート `docs/migration/0.15.0.md` を新設した。publish と注釈付きタグ
+  `v0.15.0` は未実施（#4175）。workflow の `mode: dry-run-only`（`version=0.15.0`）はマージ後に main で起動する（未実施）。
+
 - 2026-11-04（#3852）: facade が backend-rocm を通常依存に持つようにしたことを §15.8 に記録した。単体 dry-run の注意と Phase 11 への申し送りを含む。
 
 - 2026-11-01（#3775）: CLAUDE.md・README・`site/`・`Cargo.toml` コメント・`.claude/agents` の
