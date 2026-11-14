@@ -1,0 +1,15 @@
+round1 gate=pass threshold=3.0 waited_s=0 load1=1.27
+round1 foreign-before=clean
+round1 foreign-after=clean
+round2 gate=pass threshold=3.0 waited_s=0 load1=2.47
+round2 foreign-before=clean
+round2 foreign-after=clean
+round3 gate=pass threshold=3.0 waited_s=0 load1=2.29
+round3 foreign-before=clean
+round3 foreign-after=clean
+round4 gate=pass threshold=3.0 waited_s=30 load1=2.46
+round4 foreign-before=clean
+round4 foreign-after=clean
+round5 gate=pass threshold=3.0 waited_s=0 load1=2.48
+round5 foreign-before=clean
+round5 foreign-after=clean

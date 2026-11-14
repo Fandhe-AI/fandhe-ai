@@ -1,0 +1,10 @@
+CLEAN after 2026-11-14T16:38:42Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 78 0 0 0 0
+processes_scanned 650
+max_pcpu_non_excluded 2.3
+top pid=596 uid=0 pcpu=2.3 name=bluetoothd
+top pid=606 uid=0 pcpu=1.5 name=cfprefsd
+top pid=603 uid=88 pcpu=1.3 name=WindowServer
+top pid=608 uid=0 pcpu=1.2 name=runningboardd
+top pid=741 uid=270 pcpu=1.0 name=com.apple.DriverKit-AppleBCMWLAN

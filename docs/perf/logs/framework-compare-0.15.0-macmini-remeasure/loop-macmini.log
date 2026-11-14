@@ -1,0 +1,12 @@
+Using Python 3.12.15 environment at: work/venv4168.noindex/venv-torch
+venv-preflight: torch identical（0.14.0 の収録 freeze と byte 一致）
+Using Python 3.12.15 environment at: work/venv4168.noindex/venv-tf
+venv-preflight: tf identical（0.14.0 の収録 freeze と byte 一致）
+run1: done. rows=48 pyrows=32 skipped=4 2026-11-14T16:38:37Z
+run2: done. rows=48 pyrows=32 skipped=4 2026-11-14T16:40:02Z
+run3: done. rows=48 pyrows=32 skipped=4 2026-11-14T16:41:27Z
+run4: done. rows=48 pyrows=32 skipped=4 2026-11-14T16:43:25Z
+run5: done. rows=48 pyrows=32 skipped=4 2026-11-14T16:44:50Z
+ALL-DONE completed=5/5
+series rc=0 2026-11-14T16:44:57Z
+lock released 2026-11-14T16:44:57Z
