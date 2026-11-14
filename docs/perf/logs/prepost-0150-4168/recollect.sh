@@ -38,16 +38,46 @@ mask_new() { # mask_new <file> <home> <host> <host-short> <user>
   LC_ALL=C sed -E "${args[@]}" "$f" >"$t" && cat "$t" >"$f"
   rc=$?; rm -f "$t"; return "$rc"
 }
-# 漏れ検査（ディレクトリ再帰。件数だけ返す。値は表示しない）
+# 漏れ検査（ディレクトリ再帰。件数だけ標準出力へ返す。値は表示しない）。
+# grep の終了コードは 0=検出・1=不一致・それ以外=検査失敗（読めないファイルなど）。検査失敗は「漏れなし」と扱わず rc 2 を返す（fail-closed）。
 leak_count() { # leak_count <dir> <home> <host> <host-short> <user>
-  local d=$1 n=0 needle
+  local d=$1 n=0 needle g
+  [[ -d "$d" ]] || { echo "error: 検査対象が無い" >&2; return 2; }
   for needle in "$2" "$3" "$4"; do
     [[ -n "$needle" ]] || continue
-    if grep -rFq -- "$needle" "$d"; then echo "LEAK: '${needle:0:2}…' が収録物に残る" >&2; n=$((n + 1)); fi
+    grep -rFq -- "$needle" "$d"; g=$?
+    case "$g" in 0) echo "LEAK: '${needle:0:2}…' が収録物に残る" >&2; n=$((n + 1)) ;; 1) ;; *) echo "error: 漏れ検査の grep が失敗（rc=${g}）" >&2; return 2 ;; esac
   done
-  if [[ -n "$5" ]] && grep -rEq -- "$(user_ere "$5")" "$d"; then echo "LEAK: ユーザー名（語境界つき）が収録物に残る" >&2; n=$((n + 1)); fi
-  if grep -rEq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$d" --include='*.txt' --include='*.log' --include='*.md'; then echo "LEAK: IP アドレスらしき文字列が残る" >&2; n=$((n + 1)); fi
+  if [[ -n "$5" ]]; then
+    grep -rEq -- "$(user_ere "$5")" "$d"; g=$?
+    case "$g" in 0) echo "LEAK: ユーザー名（語境界つき）が収録物に残る" >&2; n=$((n + 1)) ;; 1) ;; *) echo "error: 漏れ検査の grep が失敗（rc=${g}）" >&2; return 2 ;; esac
+  fi
+  grep -rEq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$d" --include='*.txt' --include='*.log' --include='*.md'; g=$?
+  case "$g" in 0) echo "LEAK: IP アドレスらしき文字列が残る" >&2; n=$((n + 1)) ;; 1) ;; *) echo "error: 漏れ検査の grep が失敗（rc=${g}）" >&2; return 2 ;; esac
   echo "$n"
+}
+# マスクの一括適用（txt/log/md/tsv。1 件でも失敗すれば非 0。パイプの while は失敗を握りつぶすのでプロセス置換で回す）
+mask_tree() { # mask_tree <dir> <mask 関数名> [関数への追加引数...]
+  local d=$1 fn=$2 f bad=0
+  shift 2
+  while IFS= read -r f; do
+    if [[ "$f" == "__FIND_FAILED__" ]]; then bad=$((bad + 1)); continue; fi
+    "$fn" "$f" "$@" || bad=$((bad + 1))
+  done < <(find "$d" -type f \( -name '*.txt' -o -name '*.log' -o -name '*.md' -o -name '*.tsv' \) || echo "__FIND_FAILED__")
+  [[ "$bad" -eq 0 ]] || { echo "error: マスクの適用に ${bad} 件失敗" >&2; return 1; }
+}
+# SHA256SUMS の作成（各ハッシュと書き込みの成否を確かめる）
+sha_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+write_sums() { # write_sums <dir>
+  local d=$1 f tmp bad=0
+  tmp="$(mktemp)" || return 1
+  while IFS= read -r f; do
+    [[ "$f" != "__FIND_FAILED__" ]] || { bad=$((bad + 1)); continue; }
+    (cd "$d" && sha_of "$f") >>"$tmp" || bad=$((bad + 1))
+  done < <(cd "$d" && find . -type f | LC_ALL=C sort || echo "__FIND_FAILED__")
+  if [[ "$bad" -ne 0 || ! -s "$tmp" ]]; then rm -f "$tmp"; echo "error: SHA256SUMS の作成に失敗" >&2; return 1; fi
+  cat "$tmp" >"$d/SHA256SUMS" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
 }
 
 self_test() {
@@ -76,6 +106,16 @@ self_test() {
   # ホームの置換（正規表現の特殊文字を含むパスでも文字どおりに置換される）
   mkdir -p "$d/home"; printf 'p /tmp/a.b+c/x\n' >"$d/home/a.log"
   mask_new "$d/home/a.log" "/tmp/a.b+c" "" "" ""; n=$((n + 1)); [[ "$(cat "$d/home/a.log")" == "p <home>/x" ]] || { bad=$((bad + 1)); echo "self-test FAIL: ホームの置換" >&2; }
+  # 検査失敗の扱い（root では読み書きの拒否が起きないので飛ばす）
+  if [[ "$(id -u)" != "0" ]]; then
+    mkdir -p "$d/unread"; printf 'x\n' >"$d/unread/a.txt"; chmod 000 "$d/unread/a.txt"
+    n=$((n + 1)); leak_count "$d/unread" "/nonexistent-home" "__nohost__" "" "tuser9" >/dev/null 2>&1; [[ $? -eq 2 ]] || { bad=$((bad + 1)); echo "self-test FAIL: 読めないファイルで漏れ検査が失敗を返さない" >&2; }
+    chmod 600 "$d/unread/a.txt"
+    mkdir -p "$d/ro"; printf 'tuser9\n' >"$d/ro/a.txt"; chmod 444 "$d/ro/a.txt"
+    n=$((n + 1)); if mask_tree "$d/ro" mask_new "/nonexistent-home" "" "" "tuser9" 2>/dev/null; then bad=$((bad + 1)); echo "self-test FAIL: 書けないファイルでマスクの一括適用が失敗を返さない" >&2; fi
+    chmod 644 "$d/ro/a.txt"
+  fi
+  n=$((n + 1)); leak_count "$d/__absent__" "" "" "" "" >/dev/null 2>&1; [[ $? -eq 2 ]] || { bad=$((bad + 1)); echo "self-test FAIL: 検査対象が無いときに失敗を返さない" >&2; }
   rm -rf "$d"
   echo "self-test: ${n} 件中 FAIL ${bad} 件"
   [[ "$bad" -eq 0 ]]
@@ -137,12 +177,12 @@ assemble() { # assemble <out>
 OLD="$WORK/old"
 JRC_OLD="$(assemble "$OLD")" || die "組み直しに失敗"
 mask_old() {
-  local f=$1 t
-  t="$(mktemp)"
+  local f=$1 t rc
+  t="$(mktemp)" || return 1
   LC_ALL=C sed -e "s#${H}#<home>#g" ${HN:+-e "s#${HN}#<host>#g"} ${HNS:+-e "s#${HNS}#<host>#g"} ${UN:+-e "s#${UN}#<user>#g"} "$f" >"$t" && cat "$t" >"$f"
-  rm -f "$t"
+  rc=$?; rm -f "$t"; return "$rc"
 }
-find "$OLD" -type f \( -name '*.txt' -o -name '*.log' -o -name '*.md' -o -name '*.tsv' \) | while IFS= read -r f; do mask_old "$f"; done
+mask_tree "$OLD" mask_old || die "旧マスクの組み直しに失敗"
 if ! diff -rq -x hwlock.log "$OLD" "$DEST" >/dev/null 2>&1; then
   echo "error: 止まった収録先と、生データから組み直したものが一致しない（差分のあるファイル名だけ示す。中身は表示しない）" >&2
   diff -rq -x hwlock.log "$OLD" "$DEST" 2>&1 | sed -e "s#${WORK}#<work>#g" -e "s#${R}#<R>#g" >&2
@@ -154,20 +194,27 @@ echo "check-old-collection=ok（止まった収録先と、生データ＋固定
 NEW="$WORK/new"
 JRC_NEW="$(assemble "$NEW")" || die "組み直しに失敗"
 [[ "$JRC_NEW" == "$JRC_OLD" ]] || die "判定器の終了コードが再実行で変わった（${JRC_OLD} → ${JRC_NEW}）"
-find "$NEW" -type f \( -name '*.txt' -o -name '*.log' -o -name '*.md' -o -name '*.tsv' \) | while IFS= read -r f; do mask_new "$f" "$H" "$HN" "$HNS" "$UN"; done
-leaks="$(leak_count "$NEW" "$H" "$HN" "$HNS" "$UN")"
+mask_tree "$NEW" mask_new "$H" "$HN" "$HNS" "$UN" || die "マスクの適用に失敗。収録しない（止まった収録先はそのまま残す）"
+leaks="$(leak_count "$NEW" "$H" "$HN" "$HNS" "$UN")" || die "漏れ検査そのものが失敗。収録しない（止まった収録先はそのまま残す）"
 [[ "$leaks" == "0" ]] || die "マスク検査に失敗（${leaks} 項目）。収録しない（止まった収録先はそのまま残す）"
 
-printf 'acquired=%s\nreleased=%s\n' "$AB_LOCK_ACQUIRED" "$AB_LOCK_RELEASED" >"$NEW/hwlock.log"
-RC_SHA="$(if command -v sha256sum >/dev/null 2>&1; then sha256sum "${BASH_SOURCE[0]}"; else shasum -a 256 "${BASH_SOURCE[0]}"; fi | cut -d' ' -f1)"
+printf 'acquired=%s\nreleased=%s\n' "$AB_LOCK_ACQUIRED" "$AB_LOCK_RELEASED" >"$NEW/hwlock.log" || die "hwlock.log を書けない"
+RC_SHA="$(sha_of "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
+[[ "$RC_SHA" =~ ^[0-9a-f]{64}$ ]] || die "recollect.sh 自身の sha256 を取れない"
 printf 'recollected=%s\nrecollect_sh_sha256=%s\nreason=orchestrate.sh の収録の段がマスク検査で停止（計測と判定は完了済み）。2026-11-14 所有者判断で収録だけをやり直した\ncheck_old_collection=ok\njudge_exit=%s\nleaks=0\n' \
-  "$(date -u +%FT%TZ)" "$RC_SHA" "$JRC_NEW" >"$NEW/recollect.log"
-SUMS_TMP="$(mktemp)"
-( cd "$NEW" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
-    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f"; else shasum -a 256 "$f"; fi
-  done ) >"$SUMS_TMP" && cat "$SUMS_TMP" >"$NEW/SHA256SUMS"
-rm -f "$SUMS_TMP"
-# 止まった収録先を置き換える（確認 1 で生データから再現できることを確かめた後なので、失われるものは無い）
-rm -rf "$DEST" && cp -R "$NEW" "$DEST" || die "収録先の置き換えに失敗"
+  "$(date -u +%FT%TZ)" "$RC_SHA" "$JRC_NEW" >"$NEW/recollect.log" || die "recollect.log を書けない"
+write_sums "$NEW" || die "SHA256SUMS を作れない。収録しない（止まった収録先はそのまま残す）"
+# 止まった収録先を置き換える。同じ親ディレクトリに完成品を作って検査し、元を退避してから rename する。
+# 途中で失敗したら元へ戻す（退避分は置き換えが済むまで消さない）。
+STAGE="${DEST}.recollect-stage"; KEEP="${DEST}.recollect-stopped"
+[[ ! -e "$STAGE" && ! -e "$KEEP" ]] || die "作業用の名前が既に在る（前回の中断の跡）: ${STAGE##*/} / ${KEEP##*/}。中身を確かめてから消す"
+cp -R "$NEW" "$STAGE" || { rm -rf "$STAGE"; die "収録物の複写に失敗（止まった収録先はそのまま残す）"; }
+diff -rq "$NEW" "$STAGE" >/dev/null 2>&1 || { rm -rf "$STAGE"; die "複写した収録物が一致しない（止まった収録先はそのまま残す）"; }
+mv "$DEST" "$KEEP" || { rm -rf "$STAGE"; die "止まった収録先の退避に失敗"; }
+if ! mv "$STAGE" "$DEST"; then
+  mv "$KEEP" "$DEST" || die "置き換えに失敗し、退避分も戻せない: ${KEEP##*/} を確かめる"
+  die "置き換えに失敗（止まった収録先は元へ戻した）"
+fi
+rm -rf "$KEEP" || echo "note: 退避分（${KEEP##*/}）を消せなかった。収録は完了している" >&2
 echo "収録完了（recollect）: $DEST（judge=${JRC_NEW}）"
 [[ "$JRC_NEW" == "0" ]]
