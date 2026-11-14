@@ -75,3 +75,9 @@ shellcheck -s bash -S warning -x scripts/*.sh collect.sh
 - `RULE.txt`（別 PR）に、道具の sha256（上のスクリプト群と、固定済みの `foreign_job_gate.py`・`ab_foreign_gate.sh`）と計測 SHA を書き込む。0.14.0 の RULE との差は変更点 1〜3 と「SME OFF・Graph OFF」の文言だけにする。
 - `venv4168.noindex` の中身の配置（直下に `venv-torch`・`venv-tf`）はこの PR では確認していない（機体側で `venv_preflight.sh` を当てて確かめる）。
 - 0.14.0 → 0.15.0 の差には、既定の変更（SME・STEEL ほか）と、Mac mini に足した他ジョブゲートの影響が含まれる。#4179 のスコアボードの注記に書く。
+
+## 運用メモ・既知の制限
+
+- **打ち切り後の再実行**: 他ジョブゲートの出力ディレクトリ `${D}/macmini-0150b/foreign-gate/` は、`fg_require` が既存を拒否する（差し替え禁止）。そのため、打ち切った系列と同じ `D` で `macmini-0150-series.sh` を再実行すると `FOREIGN-GATE PRECHECK FAILED` で止まる。これは意図した動きで、打ち切り系列は採らず、再実行（取り直し）の判断は所有者が行い、その場合は新しい `D`（別名の RULE）を使う。self-test が確認している。
+- **env_info の環境変数検査**: `env_info_before.txt`／`env_info_after.txt` は、それぞれの時点で `env_guard_check` を呼び直した結果を書く（`env_guard_checked_at=` の行つき）。
+- **マスクの既知の制限**: ユーザー名が `home`・`user`・`node` のような語のとき、置換先（`<home>`・`<user>`・`<metal-node>`）の中身と衝突して `<<user>>` のようになりうる。漏れは残さない側（fail-closed）なので直さず許容する。

@@ -6,7 +6,8 @@
 #   (2) 環境変数の検査（env_guard.sh）: FANDHE_AI_* と RAYON_NUM_THREADS が無いこと。結果を env_info に残す。あれば測らず止まる。
 #   (3) 比較相手の venv の freeze が 0.14.0 の収録と byte 一致すること（venv_preflight.sh）。不一致・不在なら測らず止まる。
 #       venv の場所は PY_VENV_DIR（直下の venv-torch・venv-tf。既定は D）。
-#   (4) env_info に他ジョブゲートの 2 ファイルの sha256 を記録する（RULE が固定する値との照合用）。
+#   (4) env_info_before／after の環境変数検査は、それぞれの時点で env_guard_check を呼び直した結果（after は系列の後。起動時の値の使い回しではない）。
+#   (5) env_info に他ジョブゲートの 2 ファイルの sha256 を記録する（RULE が固定する値との照合用）。
 # 引数: $1=ロック owner（RULE.txt に書いた文字列）。環境変数: ROOT・D・EXPECT_SHA（ループと同じ）・任意 PY_VENV_DIR・FREEZE_REF_DIR。
 # ロックは取らない（RULE 固定前の dry-run の時点から送信側が保持している）。owner が違えば何も実行しない。
 # bash 3.2 互換（${VAR} 形式・setsid なし）。計測中はビルドも別負荷も並走させない。
@@ -23,7 +24,7 @@ trap release EXIT
 trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 # shellcheck source=/dev/null
 . "${SD}/env_guard.sh"
-ENVG="$(env_guard_check)" || { echo "ENV-GUARD FAILED（FANDHE_AI_* か RAYON_NUM_THREADS が設定されている）"; exit 3; }
+env_guard_check > /dev/null || { echo "ENV-GUARD FAILED（FANDHE_AI_* か RAYON_NUM_THREADS が設定されている）"; exit 3; }
 # 事前検査: venv の freeze（0.14.0 の収録と byte 一致）。不一致なら測らない
 bash "${SD}/venv_preflight.sh" macmini "${PY_VENV_DIR}" || { echo "VENV-PREFLIGHT FAILED"; exit 4; }
 mkdir -p "${ENVD}"
@@ -38,7 +39,8 @@ envinfo() { # $1=出力ファイル。ホスト名は書かない（uname -n を
     echo "bench_py_sha256=$(sha256_of "${D}/py/bench_py.py")"
     echo "foreign_job_gate_sha256=$(sha256_of "${ROOT}/docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py")"
     echo "ab_foreign_gate_sha256=$(sha256_of "${ROOT}/scripts/bench/framework-compare/ab_foreign_gate.sh")"
-    printf '%s\n' "${ENVG}"
+    echo "env_guard_checked_at=$(date -u +%FT%TZ)"
+    env_guard_check || echo "env_guard=VIOLATION（上の名前の変数が設定されている）"
     echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR-unset}"; } > "$1" 2>&1
 }
 fingerprint() { ( cd "${ROOT}" && find scripts/bench/framework-compare -type f ! -path '*/target/*' -print | LC_ALL=C sort | while IFS= read -r f; do shasum -a 256 "$f"; done ) > "$1"; }

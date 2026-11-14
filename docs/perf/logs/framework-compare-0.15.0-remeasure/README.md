@@ -65,3 +65,8 @@ shellcheck -s bash -S warning -x scripts/*.sh collect.sh
 - `RULE.txt`（別 PR）に、道具の sha256 と計測 SHA を書き込む。0.14.0 の RULE との差は変更点 2〜3 と「SME OFF・Graph OFF」の文言だけにする。
 - 0.14.0 → 0.15.0 の差には、既定の変更（jpw1・Graph ほか）が含まれる。#4179 のスコアボードの注記に書く。
 - 入力: `run1..5/`、median5 の jsonl（GB10 は 3 本）、各 run の `env_info.txt`。
+
+## 運用メモ・既知の制限
+
+- **打ち切り後の再実行**: `~/work/dgx-0150-logs` は系列のログ置き場で、同じ場所へ重ねて回すと run のログが混ざる。打ち切り系列は採らず、再実行（取り直し）の判断は所有者が行い、新しいログ置き場（別名の RULE）を使う。なお Mac mini 側は `fg_require` が既存の出力ディレクトリを拒否するため、同じ `D` での再実行は `FOREIGN-GATE PRECHECK FAILED` で止まる（そちらの README と self-test）。
+- **マスクの既知の制限**: ユーザー名が `home`・`user`・`node` のような語のとき、置換先（`<home>`・`<user>`・`<cuda-node>`）の中身と衝突して `<<user>>` のようになりうる。漏れは残さない側（fail-closed）なので直さず許容する。

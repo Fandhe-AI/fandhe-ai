@@ -43,7 +43,7 @@ APPS="$(nvidia-smi --query-compute-apps=pid,name --format=csv,noheader 2>&1)"; A
 cd "${FC}" || exit 1
 # pin 検査は計測前に行う（誤った pin で計測を終えてから fail しない）。fail() は FAILED を立てるので、ここでは即 exit する
 cargo tree --locked -p bench-fandhe --depth 1 | grep -E 'fandhe-ai v' > "${LOGD}/tree.txt"
-grep -q 'fandhe-ai v0\.14\.0$' "${LOGD}/tree.txt" || fail "registry pin 0.15.0 not resolved (tree)"
+grep -q 'fandhe-ai v0\.15\.0$' "${LOGD}/tree.txt" || fail "registry pin 0.15.0 not resolved (tree)"
 [ "${FAILED}" -eq 0 ] || { echo "pin 検査に失敗（計測前）"; exit 1; }
 echo "start $(date -u +%FT%TZ) rev=$(cut -c1-8 "${ROOT}/.rev-stamp")"; uptime > "${LOGD}/uptime_before_all.txt"
 nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader > "${LOGD}/gpu_util_before.txt"

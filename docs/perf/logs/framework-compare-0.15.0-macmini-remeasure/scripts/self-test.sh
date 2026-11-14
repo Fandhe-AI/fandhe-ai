@@ -268,5 +268,104 @@ CLEAN" "1.20" before
   fi
 fi
 
+# ---- 5. 結線の検査（版の文字列・env_guard の呼び出し・ループの打ち切り。計測は走らせない）
+RUNS=""; for f in macmini-run-0150.sh dgx-run-0150.sh; do [ -f "${SD}/${f}" ] && RUNS="${RUNS} ${f}"; done
+for f in ${RUNS} macmini-0150b-loop.sh macmini-0150-series.sh dgx-0150-loop.sh; do
+  [ -f "${SD}/${f}" ] || continue
+  # (a) 静的検査: コメント行を除いた本体に 0.14.0 系の版・owner・出力名が残っていない
+  body="$(grep -v '^[[:space:]]*#' "${SD}/${f}" | grep -v 'bench-fandhe が 0.14.0 から変わっている')"
+  case "${body}" in *'0\.14\.0'*|*'0.14.0'*|*rel-0.14*|*'#3874'*|*'#3875'*|*0140*|*0130*) ng "wiring: ${f} の本体に 0.14.0 系の文字列が残っている" ;; *) ok ;; esac
+done
+for f in ${RUNS}; do
+  grep -qF "grep -q 'fandhe-ai v0\\.15\\.0\$' " "${SD}/${f}" && ok || ng "wiring: ${f} のピン検査が v0\\.15\\.0\$ でない"
+  [ "$(grep -c 'fandhe-ai v0' "${SD}/${f}")" = "2" ] && ok || ng "wiring: ${f} の fandhe-ai v0 の行数（ピン検査 1 + コメント 1 の想定）"
+done
+if [ -f "${SD}/macmini-run-0150.sh" ]; then
+  grep -qF "results-macmini-0.15.0.jsonl" "${SD}/macmini-run-0150.sh" && grep -qF "results-macmini-py-0.15.0.jsonl" "${SD}/macmini-run-0150.sh" && ok || ng "wiring: macmini-run の出力名の版"
+  grep -qF '#4177 rel-0\.15\.0 ' "${SD}/macmini-0150-series.sh" && ok || ng "wiring: macmini-series の owner 正規表現"
+  grep -qF 'macmini-0150b' "${SD}/macmini-0150b-loop.sh" && grep -qF 'macmini-run-0150.sh' "${SD}/macmini-0150b-loop.sh" && ok || ng "wiring: macmini-loop の作業名・呼び先"
+fi
+if [ -f "${SD}/dgx-run-0150.sh" ]; then
+  grep -qF '#4178 rel-0\.15\.0 ' "${SD}/dgx-run-0150.sh" && grep -qF '#4178 rel-0\.15\.0 ' "${SD}/dgx-0150-loop.sh" && ok || ng "wiring: dgx の owner 正規表現"
+  grep -qF "results-dgx-0.15.0.jsonl" "${SD}/dgx-run-0150.sh" && grep -qF "results-dgx-py-0.15.0.jsonl" "${SD}/dgx-run-0150.sh" && grep -qF "dgx-0150-logs" "${SD}/dgx-0150-loop.sh" && ok || ng "wiring: dgx の出力名・ログ置き場の版"
+fi
+# (c) env_guard が実際に呼ばれる: FANDHE_AI_X=1 / RAYON_NUM_THREADS で rc 3、設定なしでは rc 3 にならない
+#     （冒頭の検査で止まるだけで計測は始まらない。偽の HOME・空の ROOT・モックの sysctl で、設定なしの対照も冒頭の別の検査で rc 1 になる）
+WH="${T}/wirehome"; mkdir -p "${WH}/work" "${T}/wireroot" "${T}/wirelog"
+if [ ! -x "${MB}/sysctl" ]; then printf '#!/bin/sh\necho "{ 1.0 1.0 1.0 }"\n' > "${MB}/sysctl"; chmod +x "${MB}/sysctl"; fi
+wire_run() { # <スクリプト> [NAME=VALUE ...]
+  local sc=$1; shift
+  env -i PATH="${MB}:${PATH}" HOME="${WH}" MOCK_DIR="${T}/wirelog" "$@" ROOT="${T}/wireroot" D="${T}/wireroot" LOGD="${T}/wirelog/l" EXPECT_SHA=x bash "${SD}/${sc}" "${T}/wirelog/l" > "${T}/wirelog/out.txt" 2>&1
+}
+for f in ${RUNS} dgx-0150-loop.sh; do
+  [ -f "${SD}/${f}" ] || continue
+  wire_run "${f}" FANDHE_AI_X=1; expect_rc "wiring: ${f} は FANDHE_AI_X=1 で rc 3" 3 "$?"
+  wire_run "${f}" RAYON_NUM_THREADS=2; expect_rc "wiring: ${f} は RAYON_NUM_THREADS=2 で rc 3" 3 "$?"
+done
+for f in ${RUNS}; do
+  wire_run "${f}"; rc=$?; if [ "${rc}" -ne 3 ]; then ok; else ng "wiring: ${f} は設定なしでも rc 3"; fi
+done
+if [ -f "${SD}/macmini-0150-series.sh" ]; then
+  OWN="#4177 rel-0.15.0 2026-01-01T00:00:00Z"
+  mkdir -p "${WH}/work/.fandhe-hw-lock"; printf '%s' "${OWN}" > "${WH}/work/.fandhe-hw-lock/owner"
+  env -i PATH="${MB}:${PATH}" HOME="${WH}" FANDHE_AI_X=1 ROOT="${T}/wireroot" D="${T}/wireroot" EXPECT_SHA=x bash "${SD}/macmini-0150-series.sh" "${OWN}" > "${T}/wirelog/out.txt" 2>&1
+  expect_rc "wiring: macmini-series は FANDHE_AI_X=1 で rc 3" 3 "$?"
+  env -i PATH="${MB}:${PATH}" HOME="${WH}" ROOT="${T}/wireroot" D="${T}/wireroot" EXPECT_SHA=x bash "${SD}/macmini-0150-series.sh" "#4177 rel-0.14.0 2026-01-01T00:00:00Z" > /dev/null 2>&1
+  expect_rc "wiring: macmini-series は 0.14.0 の owner 形式を rc 2 で拒否" 2 "$?"
+  rm -rf "${WH}/work/.fandhe-hw-lock"
+fi
+# (b) macmini-0150b-loop.sh の結線: run をモックに差し替えた scripts のコピーで 1 系列を走らせる（python3・sysctl・sleep もモック。計測しない）
+if [ -f "${SD}/macmini-0150b-loop.sh" ]; then
+  mkdir -p "${T}/lsd"; cp "${SD}"/*.sh "${T}/lsd/"
+  cat > "${T}/lsd/macmini-run-0150.sh" <<'EOF'
+#!/bin/bash
+# 偽の 1 round: 計測せず、BUILD_ONLY は即 0、通常は done 行だけ出す
+[ -z "${BUILD_ONLY:-}" ] || exit 0
+mkdir -p "$1"; echo "done. mock"
+EOF
+  chmod +x "${T}/lsd/macmini-run-0150.sh"
+  LROOT="${T}/lroot"; mkdir -p "${LROOT}/docs/perf/logs/macmini-foreign-job-gate" "${LROOT}/scripts/bench/framework-compare/target/release"
+  cp "${REPO_ROOT}/${FGW_GATE_REL}" "${LROOT}/${FGW_GATE_REL}"; cp "${REPO_ROOT}/${FGW_LIB_REL}" "${LROOT}/${FGW_LIB_REL}"
+  for bin in bench-fandhe bench-candle bench-burn; do printf '#!/bin/sh\n' > "${LROOT}/scripts/bench/framework-compare/target/release/${bin}"; chmod +x "${LROOT}/scripts/bench/framework-compare/target/release/${bin}"; done
+  LC_N=0
+  loop_exec() { LOOP_OUT="$(env -i PATH="${MB}:${PATH}" HOME="${WH}" MOCK_DIR="${LOOP_D}/mock" ROOT="${LROOT}" D="${LOOP_D}" EXPECT_SHA=x bash "${T}/lsd/macmini-0150b-loop.sh" 2>&1)"; LOOP_RC=$?; }
+  run_loop() { # <gate.seq> <load.seq>: LOOP_OUT・LOOP_RC・LOOP_D を設定
+    LC_N=$((LC_N + 1)); LOOP_D="${T}/ld${LC_N}"; mkdir -p "${LOOP_D}/mock"
+    printf '%s\n' "$1" > "${LOOP_D}/mock/gate.seq"; printf '%s\n' "$2" > "${LOOP_D}/mock/load.seq"; : > "${LOOP_D}/mock/sleep.log"
+    loop_exec
+  }
+  lhas() { case "${LOOP_OUT}" in *"$1"*) ok ;; *) ng "loop: 出力に「$1」が無い（$2）" ;; esac; }
+  # CLEAN が続けば 5 ラウンドとも進んで完走
+  run_loop "CLEAN" "1.0"
+  expect_rc "loop: 全部 CLEAN → rc 0" 0 "${LOOP_RC}"; lhas "ALL-DONE completed=5/5" "完走"
+  [ -d "${LOOP_D}/macmini-0150b/run5" ] && ok || ng "loop: run5 が作られない"
+  grep -q 'round5 foreign-after=clean' "${LOOP_D}/macmini-0150b/gate.log" && ok || ng "loop: gate.log に round5 の後 CLEAN が無い"
+  # ラウンド 2 の後が FOREIGN（ゲート呼び出し: 1 前 2 後 3 前 4 後）→ 打ち切り
+  run_loop "CLEAN
+CLEAN
+CLEAN
+FOREIGN" "1.0"
+  expect_rc "loop: round2 の後が FOREIGN → rc 1" 1 "${LOOP_RC}"; lhas "SERIES-ABORTED completed=1/5" "打ち切り"; lhas "run2 は無効" "無効の表示"
+  case "${LOOP_OUT}" in *ALL-DONE*) ng "loop: FOREIGN の後に ALL-DONE が出た" ;; *) ok ;; esac
+  [ ! -d "${LOOP_D}/macmini-0150b/run3" ] && ok || ng "loop: 打ち切り後に run3 が始まった"
+  grep -q 'round2 GATE-INVALID reason=foreign-after' "${LOOP_D}/macmini-0150b/gate.log" && ok || ng "loop: gate.log に foreign-after の無効行が無い"
+  # 後のゲート自身の失敗 → 打ち切り
+  run_loop "CLEAN
+ERROR" "1.0"
+  expect_rc "loop: round1 の後のゲート失敗 → rc 1" 1 "${LOOP_RC}"; lhas "SERIES-ABORTED completed=0/5" "失敗の打ち切り"
+  grep -q 'round1 GATE-INVALID reason=foreign-gate-error' "${LOOP_D}/macmini-0150b/gate.log" && ok || ng "loop: gate.log に foreign-gate-error が無い"
+  # 前のタイムアウト（ずっと FOREIGN）→ 打ち切り・run は始まらない
+  run_loop "FOREIGN" "1.0"
+  expect_rc "loop: 前のタイムアウト → rc 1" 1 "${LOOP_RC}"; lhas "GATE-TIMEOUT before run1" "タイムアウト"; lhas "SERIES-ABORTED completed=0/5" "打ち切り"
+  [ ! -d "${LOOP_D}/macmini-0150b/run1" ] && ok || ng "loop: タイムアウトなのに run1 が始まった"
+  # 前のゲート失敗 → 打ち切り
+  run_loop "ERROR" "1.0"
+  expect_rc "loop: 前のゲート失敗 → rc 1" 1 "${LOOP_RC}"; lhas "GATE-INVALID before run1" "ゲート失敗"
+  [ ! -d "${LOOP_D}/macmini-0150b/run1" ] && ok || ng "loop: ゲート失敗なのに run1 が始まった"
+  # 同じ D で再実行（foreign-gate が既にある）→ 系列を始めない
+  loop_exec
+  expect_rc "loop: 再実行（foreign-gate が既にある）→ rc 1" 1 "${LOOP_RC}"; lhas "FOREIGN-GATE PRECHECK FAILED" "再実行の拒否"
+fi
+
 echo "self-test: ${N} 件中 FAIL ${BAD} 件"
 [ "${BAD}" -eq 0 ]
