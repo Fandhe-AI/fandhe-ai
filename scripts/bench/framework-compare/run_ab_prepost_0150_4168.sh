@@ -159,7 +159,8 @@ if [[ -z "$PRINT" ]]; then
   if [[ "$ROUNDS" != "5" ]]; then echo "error: AB_ROUNDS は 5 固定（RULE.txt。got: ${ROUNDS}）" >&2; exit 1; fi
   case "$PROFILE" in
     macmini) RULE_LOAD_GATE=3.0 ;;
-    gb10) RULE_LOAD_GATE=1.0 ;;
+    # gb10 は対話しない ssh から起動されると PATH に cargo・nvcc が無い。cargo tree（腕の解決確認）より前に足す。
+    gb10) RULE_LOAD_GATE=1.0; export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}" ;;
     *) echo "error: AB_PROFILE は macmini か gb10（got: ${PROFILE:-unset}）" >&2; exit 1 ;;
   esac
 fi
@@ -376,7 +377,6 @@ build() { # <target-dir-name> <crate> [cargo args...]（BASE の framework-compa
   ( cd "$FC_DIR" && cargo build --release --locked -p "$crate" --target-dir "$tdir" "$@" ) 2>"$OUT/build-${arm}-${crate}.err" \
     || { tail -40 "$OUT/build-${arm}-${crate}.err"; echo "BUILD FAILED ${arm} ${crate}" >>"$SKIP"; exit 1; }
 }
-if [[ "$PROFILE" == "gb10" ]]; then export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"; fi
 build before bench-fandhe
 if [[ "$PROFILE" == "gb10" ]]; then
   build opp-cuda bench-candle --no-default-features --features cuda
