@@ -10,7 +10,7 @@ before 腕（registry の fandhe-ai =0.14.0）と after 腕（main HEAD の path
 規則の正本: `docs/perf/logs/prepost-0150-4168/RULE.txt`（RULE.template.txt から実体化し計測前に単独コミットする）。
 
 fail-closed: 欠損・重複・run 不足・追加ラウンド・diag 行・版違い・RULE 不一致・ゲート不成立は undetermined。
-NB-RANGE5・NB-SEP（#4142）は所有者未承認のため帯の記録のみで判定に使わない。
+NB-RANGE5・NB-SEP の定義は承認済み（#4142 issuecomment-6757497844・#4209）。本 issue では記録だけで、判定と分類には使わない。
 終了コード: 0 = 全セル判定可能 / 2 = undetermined あり / 3 = 同じ腕の中の hard 不一致（3 が 2 より優先）/
 4 = 判定側（fandhe）の parity_fail_count > 0 で停止。
 """
@@ -32,6 +32,16 @@ VERBATIM_FUNCS = ('load', 'key', 'index', 'metric', 'better', 'paired_ratio', 'j
 HARD_FIELDS = ('checksum', 'parity_total', 'parity_fail_count', 'parity_max_abs_err',
                'parity_max_rel_err', 'parity_scaled_abs_bound', 'parity_scaled_abs_rescued')
 PLACEHOLDER = '<要記入'
+# RULE が固定する道具（リポジトリルート相対。順序も含めランナー run_ab_prepost_0150_4168.sh の TOOL_FILES と同一）。
+TOOL_FILES = (
+    'scripts/bench/framework-compare/run_ab_prepost_0150_4168.sh',
+    'scripts/bench/framework-compare/judge_prepost_0150_4168.py',
+    'docs/perf/logs/prepost-0150-4168/orchestrate.sh',
+    'docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py',
+    'scripts/bench/framework-compare/ab_foreign_gate.sh',
+)
+JUDGE_REL = 'scripts/bench/framework-compare/judge_prepost_0150_4168.py'
+DEFAULT_ROOT = Path(__file__).resolve().parents[3]
 
 # 0.14.0 スコアボードと同じ 27 判定行（Mac mini 13 + GB10 14）。重点 = unreached_0140.tsv の 14 セル。
 UNREACHED = frozenset({'M-MTL-G1024', 'M-MTL-G2048', 'M-MTL-G4096', 'M-CPU-G256', 'M-CPU-G512', 'M-CPU-G1024', 'M-CPU-G2048',
@@ -339,15 +349,67 @@ def verdict_line(machine, label, a):
     return f"{machine:7} {label:22} {a['verdict']:4} vs {a['best']:10} {a['ratio']:.2f}x  run別 [{' '.join(f'{x:.2f}' for x in a['runs'])}]{mm}"
 
 
-def check_series_meta(rule_path, env_info, gate_log, profile, compute_log=''):
-    """RULE sha256・RULE の未記入・env_info・ゲート（GB10 は専有）の整合。成立しなければ理由リスト。"""
+def rule_block(text, name):
+    """RULE の `# >>> <name>` と `# <<< <name>` の間の行（ランナーの rule_block と同じ切り出し）。マーカーが無ければ None。"""
+    lines = text.split('\n')
+    try:
+        b = lines.index(f'# >>> {name}')
+        e = lines.index(f'# <<< {name}', b + 1)
+    except ValueError:
+        return None
+    return lines[b + 1:e]
+
+
+def sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def check_tool_sha256(block, root, judge_file=None):
+    """[道具の sha256] ブロック（`<sha256>  <相対パス>`。順序・集合とも TOOL_FILES と一致）と実ファイルの照合。理由リストを返す。"""
+    if not block:
+        return ['RULE に [道具の sha256] ブロック（# >>> tool-sha256）が無い']
     issues = []
+    if any(not l for l in block):
+        return ['RULE の [道具の sha256] ブロックに空行がある']
+    want = [l.split('  ', 1) for l in block]
+    if [w[1] if len(w) == 2 else '' for w in want] != list(TOOL_FILES):
+        return [f'RULE の [道具の sha256] の対象が TOOL_FILES と一致しない（RULE={[w[-1] for w in want]}）']
+    for sha, rel in want:
+        f = Path(root) / rel
+        if not f.is_file():
+            issues.append(f'道具ファイルが無い: {rel}')
+        elif sha256_file(f) != sha:
+            issues.append(f'道具の sha256 が RULE と不一致: {rel}')
+    if judge_file is not None and Path(judge_file).is_file():
+        pinned = dict((rel, sha) for sha, rel in want).get(JUDGE_REL)
+        if sha256_file(judge_file) != pinned:
+            issues.append('実行中の判定器が RULE の sha256 と不一致')
+    return issues
+
+
+def check_series_meta(rule_path, env_info, gate_log, profile, compute_log='', root=None, judge_file=None):
+    """RULE sha256・RULE の未記入・道具の sha256・env_info・ゲート（Mac mini は他ジョブ、GB10 は専有）の整合。成立しなければ理由リスト。
+
+    root = 道具の実ファイルを探すリポジトリルート（既定は本ファイルの 3 つ上。テストは一時ツリーを渡す）。
+    judge_file = 実行中の判定器の実体（既定は本ファイル。root を差し替えるテストでは None で省略）。
+    """
+    issues = []
+    if root is None:
+        root = DEFAULT_ROOT
+        if judge_file is None:
+            judge_file = __file__
     rule = Path(rule_path)
     if not rule.is_file():
         return [f'RULE 欠損: {rule}']
     rt = rule.read_text()
     if PLACEHOLDER in rt:
         issues.append(f'RULE に {PLACEHOLDER} が残っている')
+    issues += check_tool_sha256(rule_block(rt, 'tool-sha256'), root, judge_file)
+    consts_block = rule_block(rt, 'expected-consts')
+    if not consts_block:
+        issues.append('RULE に [期待するゲート定数] ブロック（# >>> expected-consts）が無い')
+    elif any(not l for l in consts_block):
+        issues.append('RULE の [期待するゲート定数] ブロックに空行がある')
     rule_sha = hashlib.sha256(rule.read_bytes()).hexdigest()
     env = Path(env_info)
     if not env.is_file():
@@ -357,6 +419,17 @@ def check_series_meta(rule_path, env_info, gate_log, profile, compute_log=''):
         rec = [l.split('=', 1)[1].strip() for l in lines if l.startswith('rule_sha256=')]
         if rec != [rule_sha]:
             issues.append(f'env_info の rule_sha256 が現 RULE と不一致（env={rec} rule={rule_sha}）')
+        # 環境変数の混入検査（ランナーが FANDHE_AI_*／RUST_AI_* の存在を拒否し、0 件だったことと RAYON_NUM_THREADS の unset を記録する）
+        for key, want in (('fandhe_ai_rust_ai_env_vars', '0'), ('rayon_num_threads', 'unset'), ('tool_sha256_check', 'ok'),
+                          ('smoke', '0')):
+            got = [l.split('=', 1)[1].strip() for l in lines if l.startswith(key + '=')]
+            if got != [want]:
+                issues.append(f'env_info の {key} が {want} でない（{got}）')
+        if consts_block:
+            want_sha = hashlib.sha256(('\n'.join(consts_block) + '\n').encode()).hexdigest()
+            got = [l.split('=', 1)[1].strip() for l in lines if l.startswith('expected_consts_sha256=')]
+            if got != [want_sha]:
+                issues.append(f'env_info の expected_consts_sha256 が RULE の [期待するゲート定数] と不一致（env={got} rule={want_sha}）')
     g = Path(gate_log) if gate_log else None
     if g is None or not g.is_file():
         issues.append('gate.log 欠損（ゲートは必須）')
@@ -369,6 +442,13 @@ def check_series_meta(rule_path, env_info, gate_log, profile, compute_log=''):
         for r in range(1, NRUNS + 1):
             if f'round{r}' not in passed:
                 issues.append(f'gate.log に round{r} の gate=pass が無い')
+        if profile == 'macmini':
+            # 他ジョブゲート: 各ラウンドの前後が CLEAN（行頭一致。load1 の `gate=pass` 行とは別の語で記録される）
+            have = set(text.splitlines())
+            for r in range(1, NRUNS + 1):
+                for tok in ('foreign-before=clean', 'foreign-after=clean'):
+                    if f'round{r} {tok}' not in have:
+                        issues.append(f'gate.log に round{r} の {tok} が無い（他ジョブゲート）')
     if profile == 'gb10':
         c = Path(compute_log) if compute_log else None
         if c is None or not c.is_file():
@@ -437,9 +517,13 @@ def build(args):
     out.append('before = registry の fandhe-ai =0.14.0、after = main HEAD（path patch）。判定式は 0.14.0 スコアボードと同一'
                '（同一 run 内の最速相手比の 5 run 中央値）。after の比は 0.15.0 の見込みであり、公開版には Phase 5 以降の変更が入りうる。'
                '勝敗の正は Phase 6（#4177〜#4179）の測り直し。腕比は参考で合格ラインはない。'
-               'NB-RANGE5・NB-SEP（#4142）は所有者未承認のため帯の記録のみ。\n')
-    meta = check_series_meta(args.rule, args.env_info, args.gate_log, args.profile, args.compute_log)
+               'NB-RANGE5・NB-SEP の定義は承認済み（#4142 issuecomment-6757497844・#4209）。本 issue では帯を記録するだけで、判定と分類には使わない。\n')
+    # CLI 経路では --tool-root の有無にかかわらず、実行中の判定器自身も RULE の sha256 と照合する（--tool-root で照合を外せないようにする）。
+    meta = check_series_meta(args.rule, args.env_info, args.gate_log, args.profile, args.compute_log, args.tool_root, judge_file=__file__)
     undet += [f'系列: {m}' for m in meta]
+    # --smoke（行数スモーク）の出力は計測の代わりにならない（ディレクトリ名と env_info の smoke=1 の両方で拒否）
+    if Path(args.series_dir).name.startswith('ab4168-smoke-'):
+        undet.append('系列: --smoke の出力ディレクトリは判定に使えない（行数スモークは計測の代わりにならない）')
     tsv, regress = [], []
     try:
         cells = evaluate(args.profile, args.series_dir)
@@ -590,6 +674,7 @@ def main(argv=None):
     p.add_argument('--rule')
     p.add_argument('--gate-log', default='')
     p.add_argument('--compute-log', default='')
+    p.add_argument('--tool-root', default=None, help='道具の実ファイルを探すリポジトリルート（既定は本ファイルの 3 つ上）')
     p.add_argument('--ratios-out', default='')
     args = p.parse_args(argv)
     if args.self_test:

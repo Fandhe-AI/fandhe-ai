@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import judge_prepost_0150_4168 as J  # noqa: E402
 
 PROFILE = 'macmini'
-GATE_OK = ''.join(f'round{i} gate=pass threshold=3.0 waited_s=0 load1=0.5\n' for i in range(1, 6))
+GATE_OK = ''.join(f'round{i} gate=pass threshold=3.0 waited_s=0 load1=0.5\nround{i} foreign-before=clean\nround{i} foreign-after=clean\n'
+                  for i in range(1, 6))
+CONSTS = ['crates/a/src/x.rs:FOO_ENABLED=true', 'crates/b/src/y.rs:BAR_ENABLED=cfg!(all(target_os="linux"))']
 
 
 def fandhe_row(task, dev, size, mode, sec, fail=0, ver=J.EXPECT_VERSION, checksum=1.0, extra=None):
@@ -74,12 +76,35 @@ def make_series(root, before_sec=1.0, after_sec=0.5, mutate=None, runs=5, extra_
     return d
 
 
-def make_meta(root, rule_text='RULE\n', env_sha=None, gate=GATE_OK):
+def make_tools(root):
+    """一時ツリーに TOOL_FILES と同じ相対パスの道具を置き、RULE の [道具の sha256] ブロックの行を返す。"""
+    lines = []
+    for rel in J.TOOL_FILES:
+        f = Path(root) / 'tools' / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        # 判定器だけは実体を写す（CLI 経路は --tool-root でも実行中の判定器自身を RULE の sha256 と照合するため）
+        if rel == J.JUDGE_REL:
+            f.write_bytes(Path(J.__file__).read_bytes())
+        else:
+            f.write_text(f'# dummy {rel}\n')
+        lines.append(f'{hashlib.sha256(f.read_bytes()).hexdigest()}  {rel}')
+    return lines
+
+
+def make_meta(root, rule_text='RULE\n', env_sha=None, gate=GATE_OK, tool_lines=None, consts=None, env_extra=None, env_drop=()):
+    tools = make_tools(root) if tool_lines is None else tool_lines
+    cons = CONSTS if consts is None else consts
+    body = rule_text + '# >>> expected-consts\n' + ''.join(c + '\n' for c in cons) + '# <<< expected-consts\n'
+    body += '# >>> tool-sha256\n' + ''.join(t + '\n' for t in tools) + '# <<< tool-sha256\n'
     rule = Path(root) / 'RULE.txt'
-    rule.write_text(rule_text)
+    rule.write_text(body)
     sha = hashlib.sha256(rule.read_bytes()).hexdigest() if env_sha is None else env_sha
+    csha = hashlib.sha256(('\n'.join(cons) + '\n').encode()).hexdigest()
+    kv = {'rule_sha256': sha, 'tool_sha256_check': 'ok', 'expected_consts_sha256': csha,
+          'fandhe_ai_rust_ai_env_vars': '0', 'rayon_num_threads': 'unset', 'smoke': '0'}
+    kv.update(env_extra or {})
     env = Path(root) / 'env_info.txt'
-    env.write_text(f'rule_sha256={sha}\n')
+    env.write_text(''.join(f'{k}={v}\n' for k, v in kv.items() if k not in env_drop))
     g = Path(root) / 'gate.log'
     g.write_text(gate)
     return rule, env, g
@@ -87,7 +112,8 @@ def make_meta(root, rule_text='RULE\n', env_sha=None, gate=GATE_OK):
 
 def run_main(root, series, rule, env, gate):
     argv = ['--profile', PROFILE, '--label', 't', '--series-dir', str(series), '--env-info', str(env),
-            '--rule', str(rule), '--gate-log', str(gate), '--ratios-out', str(Path(root) / 'ratios.tsv')]
+            '--rule', str(rule), '--gate-log', str(gate), '--ratios-out', str(Path(root) / 'ratios.tsv'),
+            '--tool-root', str(Path(root) / 'tools')]
     buf = io.StringIO()
     with redirect_stdout(buf):
         code = J.main(argv)
@@ -96,7 +122,7 @@ def run_main(root, series, rule, env, gate):
 
 class JudgeTest(unittest.TestCase):
     def go(self, **kw):
-        meta_kw = {k: kw.pop(k) for k in ('rule_text', 'env_sha', 'gate') if k in kw}
+        meta_kw = {k: kw.pop(k) for k in ('rule_text', 'env_sha', 'gate', 'tool_lines', 'consts', 'env_extra', 'env_drop') if k in kw}
         with tempfile.TemporaryDirectory() as t:
             s = make_series(t, **kw)
             rule, env, g = make_meta(t, **meta_kw)
@@ -207,6 +233,131 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(code, 2, out)
         code, out = self.go(gate='round1 gate=pass\n')
         self.assertEqual(code, 2, out)
+
+    def test_foreign_gate_tokens_required_on_macmini(self):
+        # load1 の gate=pass だけでは足りない（Mac mini は各ラウンドの前後の他ジョブゲートが CLEAN であること）
+        plain = ''.join(f'round{i} gate=pass threshold=3.0 waited_s=0 load1=0.5\n' for i in range(1, 6))
+        code, out = self.go(gate=plain)
+        self.assertEqual(code, 2, out)
+        self.assertIn('foreign-before=clean', out)
+        code, out = self.go(gate=GATE_OK.replace('round4 foreign-after=clean\n', ''))
+        self.assertEqual(code, 2, out)
+        self.assertIn('round4 の foreign-after=clean', out)
+        code, out = self.go(gate=GATE_OK + 'round2 GATE-INVALID reason=foreign-after\n')
+        self.assertEqual(code, 2, out)
+
+    def test_tool_sha256_mismatch_in_rule(self):
+        with tempfile.TemporaryDirectory() as t:
+            lines = make_tools(t)
+            lines[3] = '0' * 64 + '  ' + J.TOOL_FILES[3]
+            s = make_series(t)
+            rule, env, g = make_meta(t, tool_lines=lines)
+            code, out = run_main(t, s, rule, env, g)
+        self.assertEqual(code, 2, out)
+        self.assertIn('道具の sha256 が RULE と不一致', out)
+        self.assertIn('foreign_job_gate.py', out)
+
+    def test_tool_file_modified_after_rule(self):
+        with tempfile.TemporaryDirectory() as t:
+            lines = make_tools(t)
+            (Path(t) / 'tools' / J.TOOL_FILES[2]).write_text('改変\n')
+            s = make_series(t)
+            rule, env, g = make_meta(t, tool_lines=lines)
+            code, out = run_main(t, s, rule, env, g)
+        self.assertEqual(code, 2, out)
+        self.assertIn('orchestrate.sh', out)
+
+    def test_tool_block_missing_or_wrong_set(self):
+        code, out = self.go(tool_lines=[])
+        self.assertEqual(code, 2, out)
+        self.assertIn('[道具の sha256]', out)
+        with tempfile.TemporaryDirectory() as t:
+            lines = make_tools(t)[:-1]
+            s = make_series(t)
+            rule, env, g = make_meta(t, tool_lines=lines)
+            code, out = run_main(t, s, rule, env, g)
+        self.assertEqual(code, 2, out)
+        self.assertIn('TOOL_FILES と一致しない', out)
+
+    def test_judge_self_hash_checked(self):
+        with tempfile.TemporaryDirectory() as t:
+            lines = make_tools(t)
+            f = Path(t) / 'judge_copy.py'
+            f.write_text('# 別の判定器\n')
+            block = '\n'.join(lines)
+            self.assertIn('実行中の判定器', ' '.join(J.check_tool_sha256(lines, Path(t) / 'tools', f)))
+            self.assertEqual(J.check_tool_sha256(lines, Path(t) / 'tools', Path(t) / 'tools' / J.JUDGE_REL), [], block)
+
+    def test_env_info_env_var_records(self):
+        code, out = self.go(env_extra={'fandhe_ai_rust_ai_env_vars': '1'})
+        self.assertEqual(code, 2, out)
+        self.assertIn('fandhe_ai_rust_ai_env_vars', out)
+        code, out = self.go(env_extra={'rayon_num_threads': 'set'})
+        self.assertEqual(code, 2, out)
+        self.assertIn('rayon_num_threads', out)
+        code, out = self.go(env_drop=('fandhe_ai_rust_ai_env_vars',))
+        self.assertEqual(code, 2, out)
+
+    def test_smoke_output_refused(self):
+        # --smoke の出力は計測の代わりにならない: env_info の smoke=1・smoke の欠落・ディレクトリ名のどれでも拒否
+        code, out = self.go(env_extra={'smoke': '1'})
+        self.assertEqual(code, 2, out)
+        self.assertIn('smoke', out)
+        code, out = self.go(env_drop=('smoke',))
+        self.assertEqual(code, 2, out)
+        with tempfile.TemporaryDirectory() as t:
+            s = make_series(t)
+            s = s.rename(Path(t) / 'ab4168-smoke-x')
+            rule, env, g = make_meta(t)
+            code, out = run_main(t, s, rule, env, g)
+        self.assertEqual(code, 2, out)
+        self.assertIn('--smoke の出力ディレクトリ', out)
+
+    def test_expected_consts_block_and_sha(self):
+        code, out = self.go(consts=[])
+        self.assertEqual(code, 2, out)
+        self.assertIn('[期待するゲート定数]', out)
+        code, out = self.go(env_extra={'expected_consts_sha256': '0' * 64})
+        self.assertEqual(code, 2, out)
+        self.assertIn('expected_consts_sha256', out)
+
+    def test_blank_line_in_blocks_rejected(self):
+        with tempfile.TemporaryDirectory() as t:
+            lines = make_tools(t) + ['']
+            s = make_series(t)
+            rule, env, g = make_meta(t, tool_lines=lines)
+            code, out = run_main(t, s, rule, env, g)
+        self.assertEqual(code, 2, out)
+        self.assertIn('空行', out)
+        code, out = self.go(consts=CONSTS + [''])
+        self.assertEqual(code, 2, out)
+        self.assertIn('空行', out)
+
+    def test_runner_print_output_accepted_by_judge(self):
+        # ランナーの --print-tool-sha256 の実出力（リポジトリの実ファイル）を、そのまま判定器が受け入れること
+        import os
+        import subprocess
+        root = J.DEFAULT_ROOT
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('FANDHE_AI_', 'RUST_AI_'))}
+        env.update(AB_BASE_ROOT=str(root), AB_RUNNER_ROOT=str(root))
+        r = subprocess.run(['bash', str(root / 'scripts/bench/framework-compare/run_ab_prepost_0150_4168.sh'), '--print-tool-sha256'],
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.rstrip('\n').split('\n')
+        self.assertEqual(J.check_tool_sha256(lines, root, J.__file__), [])
+
+    def test_tool_files_match_runner(self):
+        # ランナーの TOOL_FILES（シェル）と判定器の TOOL_FILES が同じ集合・同じ順であること（ずれると実体化したブロックを片方が拒否する）
+        src = (Path(__file__).resolve().parent / 'run_ab_prepost_0150_4168.sh').read_text()
+        body = src.split('TOOL_FILES="', 1)[1].split('"\n', 1)[0]
+        base = 'scripts/bench/framework-compare'
+        logs = 'docs/perf/logs/prepost-0150-4168'
+        got = [l.replace('$FC_REL', base).replace('$LOGS_REL', logs) for l in body.split('\n')]
+        self.assertEqual(got, list(J.TOOL_FILES))
+
+    def test_clean_series_with_all_meta_passes(self):
+        code, out = self.go()
+        self.assertEqual(code, 0, out)
 
     def test_missing_opponent_file(self):
         with tempfile.TemporaryDirectory() as t:
