@@ -1,0 +1,1 @@
+venv-bench: identical（0.14.0 の収録 pip-freeze-venv-bench.txt と byte 一致）

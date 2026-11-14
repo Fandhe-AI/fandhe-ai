@@ -1,0 +1,1 @@
+venv-preflight: bench identical（0.14.0 の収録 freeze と byte 一致）
