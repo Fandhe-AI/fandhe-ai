@@ -1,0 +1,6 @@
+recollected=2026-11-14T04:48:09Z
+recollect_sh_sha256=9843b5aef94501b1323a6de81e538cb092e0fa9b5fa5cbfa6cf990c4751ed995
+reason=orchestrate.sh の収録の段がマスク検査で停止（計測と判定は完了済み）。2026-11-14 所有者判断で収録だけをやり直した
+check_old_collection=ok
+judge_exit=0
+leaks=0
