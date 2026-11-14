@@ -5,13 +5,17 @@
 # 前提: RULE.txt は実体化して単独コミット済み（RULE.template.txt の手順）。AB_BASE_ROOT は RULE の after SHA の clone（.rev-stamp つき）。
 # 公開面には機体名を <metal-node>・<cuda-node> とだけ書く。ホスト名・ユーザー名・ホームの絶対パスは収録前に置換し、
 # 残りが 1 件でもあれば収録しない（fail-closed）。実名は docs/real-hardware-verification-env.local.md を見るだけで転記しない。
+# 行数スモーク（RULE.txt の実体化前。行数と rc だけを報告する。値は見ない）:
+#   AB_PROFILE=macmini|gb10 AB_BASE_ROOT=<abs> AB_RUNNER_ROOT=<abs> AB_SMOKE_SUMMARY=<abs・未存在> (macmini: AB_PY_TORCH・AB_PY_TF / gb10: AB_PY) bash orchestrate.sh --smoke
 # 使い方: AB_PROFILE=macmini AB_BASE_ROOT=<abs> AB_RUNNER_ROOT=<abs> AB_PY_TORCH=<abs> AB_PY_TF=<abs> bash orchestrate.sh [--dry-run]
 #   gb10 は AB_PY=<abs>。--dry-run はロックを取らず、ランナーの --dry-run（事前確認だけ）を呼んで終わる。
 # bash 3.2 互換。
 set -uo pipefail
 
 DRY=0
+SMOKE=0
 [[ "${1:-}" == "--dry-run" ]] && DRY=1
+[[ "${1:-}" == "--smoke" ]] && SMOKE=1
 PROFILE=${AB_PROFILE:-}
 case "$PROFILE" in
   macmini) LABEL=series-b ;;
@@ -29,7 +33,12 @@ RUNNER="$RUNNER_ROOT/scripts/bench/framework-compare/run_ab_prepost_0150_4168.sh
 JUDGE="$RUNNER_ROOT/scripts/bench/framework-compare/judge_prepost_0150_4168.py"
 LOGS="$RUNNER_ROOT/docs/perf/logs/prepost-0150-4168"
 RULE="$LOGS/RULE.txt"
-[[ -f "$RUNNER" && -f "$JUDGE" && -f "$RULE" ]] || { echo "error: ランナー・判定器・RULE.txt のいずれかが無い" >&2; exit 1; }
+if [[ "$SMOKE" == "1" ]]; then
+  # 行数スモーク（RULE.txt の実体化前）: RULE.txt は要らず、読みもしない。AB_SMOKE_SUMMARY（絶対パス・未存在）に件数・rc だけを残す。
+  [[ -f "$RUNNER" ]] || { echo "error: ランナーが無い" >&2; exit 1; }
+else
+  [[ -f "$RUNNER" && -f "$JUDGE" && -f "$RULE" ]] || { echo "error: ランナー・判定器・RULE.txt のいずれかが無い" >&2; exit 1; }
+fi
 
 if [[ "$DRY" == "1" ]]; then
   exec bash "$RUNNER" --dry-run "$LABEL"
@@ -48,6 +57,12 @@ trap release EXIT
 trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
 export AB_HWLOCK_OWNER="$OWNER"
+if [[ "$SMOKE" == "1" ]]; then
+  # 実ラウンドと同じ手順・同じゲートを 1 ラウンドだけ。計測値は出さず、結果ファイルは削除される（ランナーの trap）。判定・収録はしない。
+  bash "$RUNNER" --smoke "smoke-${PROFILE}"; rc=$?
+  echo "smoke rc=${rc}"
+  exit "$rc"
+fi
 bash "$RUNNER" "$LABEL"; rc=$?
 RAW="$RUNNER_ROOT/scripts/bench/framework-compare/results/raw/ab4168-${LABEL}"
 echo "runner rc=${rc}"
@@ -66,9 +81,11 @@ echo "$jrc" >"$DEST/judge-4168-${PROFILE}.exit"
 echo "judge rc=${jrc}"
 
 # 収録: ログと JSONL だけ（target-*・バイナリ・build-*.err は収録しない）
-for f in env_info.txt gate.log skipped.log tree-before.txt tree-after.txt consts.txt consts-baseline.txt bench-fandhe-diff-stat.txt compute_apps.log; do
+for f in env_info.txt gate.log skipped.log tree-before.txt tree-after.txt consts.txt consts-baseline.txt consts-diff.txt bench-fandhe-diff-stat.txt compute_apps.log; do
   [[ -f "$RAW/$f" ]] && cp "$RAW/$f" "$DEST/$f"
 done
+# Mac mini の他ジョブゲートの出力（ゲート側がマスク済み。収録後に下のマスク検査をもう一度通す）
+if [[ -d "$RAW/foreign-gate" ]]; then mkdir -p "$DEST/foreign-gate"; cp "$RAW/foreign-gate/"* "$DEST/foreign-gate/"; fi
 i=1
 while [[ "$i" -le 5 ]]; do
   if [[ -d "$RAW/run$i" ]]; then mkdir -p "$DEST/run$i"; cp "$RAW/run$i/"* "$DEST/run$i/"; fi
