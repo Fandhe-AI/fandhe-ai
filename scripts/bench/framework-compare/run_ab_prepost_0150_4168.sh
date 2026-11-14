@@ -138,7 +138,9 @@ consts_of() { # <git-rev|WORKTREE>  -> 'path:NAME=value' を整列して出力�
         awk -v P="$f" "$CONST_AWK" <"$BASE_ROOT/$f"
       done
     else
-      git -C "$BASE_ROOT" grep -lE 'const[[:space:]]+[A-Za-z0-9_]*ENABLED' "$1" -- 'crates/*.rs' | sed -e "s/^$1://" | while IFS= read -r f; do
+      # pathspec は glob を使わずディレクトリ crates だけを渡し、.rs の絞り込みは後段の grep で行う
+      # （GIT_GLOB_PATHSPECS・GIT_LITERAL_PATHSPECS などの環境で pathspec の解釈が変わり、baseline 側が空になるのを避ける）。
+      git -C "$BASE_ROOT" grep -lE 'const[[:space:]]+[A-Za-z0-9_]*ENABLED' "$1" -- crates | sed -e "s/^$1://" | grep -E '\.rs$' | while IFS= read -r f; do
         git -C "$BASE_ROOT" show "$1:$f" | awk -v P="$f" "$CONST_AWK"
       done
     fi
