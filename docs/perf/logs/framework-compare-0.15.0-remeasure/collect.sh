@@ -46,6 +46,9 @@ STAGE="$(mktemp -d "${HERE}/.collect-stage.XXXXXX")" || die "ステージを作�
 trap 'rm -rf "${STAGE}"' EXIT
 mkdir -p "${STAGE}/env" || die "mkdir"
 cp -R "${SERIES_DIR}" "${STAGE}/${SERIES_NAME}" || die "SERIES_DIR の複写に失敗"
+# 完走判定に使った LOOP_LOG を gb10/loop.log として必ず収録する（SERIES_DIR 外を指定した場合に、
+# 判定に使わなかった古い loop.log が残るのを防ぐ。既定どおり SERIES_DIR 内なら同じ内容で上書きになる）
+cp "${LOOP_LOG}" "${STAGE}/${SERIES_NAME}/loop.log" || die "ループログの複写に失敗"
 # venv の freeze（計測後。0.14.0 と同じ形式）
 vp_freeze gb10 "${VENV_DIR}" "${STAGE}/env/pip-freeze-venv-bench.txt" || die "venv の freeze を取れない"
 mask_tree "${STAGE}" "${H}" "${HN}" "${HNS}" "${UN}" "${NODE_PH}" || die "マスクの適用に失敗。収録しない"
