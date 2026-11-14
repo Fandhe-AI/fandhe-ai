@@ -154,7 +154,13 @@ members = [
 # `fandhe-ai-backend-rocm` が加わる。backend-rocm の実公開は #3159・#3867 の
 # 実機 parity が条件で、現時点では未実測。変更点の網羅は
 # `docs/migration/0.14.0.md` を正とする。
-version = "0.14.0"
+#
+# v0.15.0（2026-11）: 0.14.0 公開（2026-11-05）以降の変更を含める lockstep バンプ（#4174）。
+# #4140 の Phase 4 の既定値の結線（CPU の SME 既定 ON・jpw1、Metal の steel、CUDA の
+# 推論 Graph 既定 ON）が中心。公開 API の追加はない。内部クレートの破壊的変更は
+# `backend-cpu` の `kernel_unchecked*` の `pub(crate)` 化の 1 件。変更点の網羅は
+# `docs/migration/0.15.0.md` を正とする。
+version = "0.15.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
