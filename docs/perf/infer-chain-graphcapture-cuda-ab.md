@@ -4,7 +4,7 @@
   stream capture し、2 回目以降を graph launch 1 回で再生する opt-in 経路。update 区間 capture
   （#1349・`STEP_GRAPH_MODE`）とは別機構
 - スコープ: infer の fresh／reuse のみ。train の update 区間 capture（#1349）は対象外
-- **現状の状態（2026-11-13 更新）**: 旧 A/B（#2115・§3）の verdict は `undetermined` のまま。#4163 の測り直し（v3）は ADOPT（§6.3）で、所有者承認（#4167 issuecomment-6859477937）により #4167 で**既定 ON に結線済み**（§7）。反転後の GB10 実機確認は未実施（実施後に §7 へ追記する）
+- **現状の状態（2026-11-13 更新）**: 旧 A/B（#2115・§3）の verdict は `undetermined` のまま。#4163 の測り直し（v3）は ADOPT（§6.3）で、所有者承認（#4167 issuecomment-6859477937）により #4167 で**既定 ON に結線済み**（§7）。反転後の GB10 実機確認は 2026-11-13 に実施し、反転で増えた失敗は 0 件、off／on の出力は bit 同一（§7.4）
 - 事前登録規則の正: [`logs/cuda-infer-chain-graphcapture-2115/RULE.txt`](./logs/cuda-infer-chain-graphcapture-2115/RULE.txt)
   （実測前に固定。事後に緩めない。#1349/#1350 の非後退ゲートとは別に定めた規則）
 - 実行手順: [`logs/cuda-infer-chain-graphcapture-2115/README.md`](./logs/cuda-infer-chain-graphcapture-2115/README.md)
@@ -143,6 +143,20 @@ Phase 3 由来の CUDA 系 ADOPT は 0 件で、結線する入力がない。
 1. #4163 の PR-2（RULE.txt を測る前に単独コミット）と PR-3（GB10〈`<cuda-node>`〉実測・`judge-4163.md`）が完了し、判定が ADOPT であること（R1(b)・R3 を含む）。
    - （2026-11-13 追記）v3 の測り直し（`RULE.v3.txt`・`4c2792004`）の判定は ADOPT（R1(b) 5/5・R3 の阻害 0 件。§6.3・`judge-4163v3.md`）。1. は満たした。
    - （2026-11-13 追記・結線時）2. は満たした（所有者承認 #4167 issuecomment-6859477937）。3. は #4167 の反転 PR で実施した（const 反転・既定 OFF 前提 2 件の更新・前後比較の記録）。反転後の GB10 実機確認（`#[ignore]` 実機テスト全件・off＝`=0`／on＝未設定の bit 同一ダンプ）は未実施で、結果は実施後に追記する。
+   - （2026-11-14 追記・反転後の実機確認）GB10（`<cuda-node>`）で `ded2292ed`（#4167 の反転 PR #4290 のマージコミット）を確認した。
+     - 条件: `FANDHE_AI_CUDA_GRAPH_INFER`／`_STEP`／`_TRAIN`・`RAYON_NUM_THREADS` をすべて未設定にした（推論 Graph は既定 ON）。2026-11-13T17:38Z〜17:53Z。事前登録の計測ではなく、pass／fail だけを見た。
+     - `#[ignore]` 実機テスト全件（`--include-ignored --test-threads=1`、各 1 回）: `fandhe-ai-backend-cuda` は passed 1855・failed 25、`fandhe-ai` は passed 4335・failed 9。`cpu_sme_gate_bit_dump` は単独実行で ok。
+     - FAILED 34 本の内訳は次のとおり。反転で増えた失敗は 0 件だった。
+       - v3 の R3 で腕 C（tree・既定 OFF・env なし）が 3/3 回失敗した 32 本。名前は腕 C の集合と完全に一致した（`logs/cuda-infer-graph-default-ab-4163/gb10-v3/r3-C-*.log.gz` と照合）。各 2 回の単独再実行でも、2 回とも失敗した。
+         - 起動時に env を要するテストが 16 本（`FANDHE_AI_CUDA_GRAPH_TRAIN=1`・`FANDHE_AI_CUDA_GRAPH_STEP=1` などを付けて別プロセスで流す作り）。
+         - ROCm が無いノードでの ROCm テストが 3 本。
+         - TF32／f16 経路の parity 複合判定が 11 本。
+         - その他 2 本（`quantile_create_graph_via_facade`・`resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d`）。
+       - R3 で「不安定（判定外）」だった wmma の性能テスト 2 本（`wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`・`wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096`）。
+     - 反転 PR の計画は、合格基準を「失敗は wmma の性能テスト 2 本だけ」としていた。これは反転前から env なしの全件実行で失敗する上の 32 本を数え落とした書き落としだった。所有者の承認（2026-11-14、チャットでの明示指示）を得て、基準を「v3 R3 の腕 C から増えた失敗が 0 件」と読み替え、合格とした。
+     - 既定 OFF 前提だった `opt_in_off_keeps_legacy_stream_and_returns_none` は、明示 OFF（`set_infer_graph_enabled(false)`）で ok だった。
+     - R2 相当の bit 同一（`predict_device_chain_cuda_graph_bit_identity`。off＝`FANDHE_AI_CUDA_GRAPH_INFER=0`、on＝未設定。腕ごとに別プロセス）: batch 64・1024・4096 で 6 回とも rc=0。出力の行数は batch×10 で、3 batch ともダンプが一致した。
+     - 以上で 3. を満たしたので、#4167 を閉じる。
 2. 所有者が既定反転を承認し、結線イシューを起票すること。
 3. 反転 PR で次を行う。
    - const を反転する。
