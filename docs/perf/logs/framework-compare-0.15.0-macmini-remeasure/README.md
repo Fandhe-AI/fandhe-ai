@@ -32,9 +32,9 @@
 1. 計測 SHA は道具 PR マージ後の main。その SHA で clone し、`.rev-stamp`（40 桁 1 行）を作る。`ROOT` はその clone。
 2. 比較相手の venv を決める。**候補は 2 つ**: 0.14.0 の作業ディレクトリに残っている `venv-torch`・`venv-tf`、無ければ `<home>/work/venv4168.noindex/`（#4168 で作り直した venv。直下に `venv-torch`・`venv-tf` がある前提）。使う方を **`PY_VENV_DIR`** に指定する（既定は `D`）。
 3. 事前検査: `bash scripts/venv_preflight.sh macmini "${PY_VENV_DIR}"`（rc=0 かつ `torch identical`・`tf identical`）。スクリプトを平置きした場合は `FREEZE_REF_DIR` に 0.14.0 の `env/` を指す。
-4. 作業ディレクトリ `D` に `py/bench_py.py` を置く（sha256 は run ごとに照合）。実機ロックを取る（owner `#4177 rel-0.15.0 <UTC>`）。
-5. dry-run: `BUILD_ONLY` ではなく 1 round を通して rc=0・行数（Rust 48・Python 32・skipped 4）を確かめる（結果の値は見ない・残さない）。この行数の確認のあとに RULE を固定する。
-6. 系列（bash 3.2・`setsid` なし。`ROOT`・`D`・`EXPECT_SHA`・任意の `PY_VENV_DIR` を export）:
+4. 作業ディレクトリ `D` に `py/bench_py.py` を置く（sha256 は run ごとに照合）。dry-run の前に実機ロックを取る（`mkdir ~/work/.fandhe-hw-lock` が成功したときだけ、`owner` に `#4177 rel-0.15.0 <UTC>`〈`date -u +%FT%TZ`〉を 1 行で書く。`mkdir` が失敗したら他のジョブが使用中なので待つ）。
+5. dry-run: `BUILD_ONLY` ではなく 1 round を通して rc=0・行数（Rust 48・Python 32・skipped 4）を確かめる（結果の値は見ない・残さない）。終わったら owner が自分のものであることを確かめてからロックを外す（`rm -rf ~/work/.fandhe-hw-lock`）。この行数の確認のあとに RULE を固定する（別 PR）。固定を待つ間はロックを持たない。
+6. RULE の固定後、もう一度ロックを取り（owner は新しい時刻で同じ形式）、その owner を引数に渡して系列を始める。系列のロックは `macmini-0150-series.sh` が終了時（打ち切り・失敗を含む）に自動で外す（owner が引数と一致するときだけ）。系列（bash 3.2・`setsid` なし。`ROOT`・`D`・`EXPECT_SHA`・任意の `PY_VENV_DIR` を export）:
 
    ```bash
    (nohup bash "<ROOT>/docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/scripts/macmini-0150-series.sh" "<ロックの owner>" > "${D}/loop-macmini.log" 2>&1 < /dev/null &)

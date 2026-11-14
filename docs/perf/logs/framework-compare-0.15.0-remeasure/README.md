@@ -31,16 +31,18 @@
 
 1. 計測 SHA は道具 PR マージ後の main。その SHA で clone し、`.rev-stamp`（40 桁 1 行）を作る。`ROOT` はその clone。
 2. 事前検査: `bash scripts/venv_preflight.sh gb10 "${HOME}/work/.venv-bench"`（rc=0 かつ `bench identical`）。スクリプトを平置きした場合は `FREEZE_REF_DIR` に 0.14.0 の `env/` を指す。
-3. `~/work/bench_py.py`（sha256 は run ごとに照合）を置き、dry-run（1 round を通して rc=0・行数 112／8／28・skipped 0。値は見ない・残さない）。この行数の確認のあとに RULE を固定する。
-4. 実機ロックを取る（owner `#4178 rel-0.15.0 <UTC>`）。系列:
+3. `~/work/bench_py.py`（sha256 は run ごとに照合）を置く。
+4. dry-run の前に実機ロックを取る（`mkdir ~/work/.fandhe-hw-lock` が成功したときだけ、`owner` に `#4178 rel-0.15.0 <UTC>`〈`date -u +%FT%TZ`〉を 1 行で書く。`mkdir` が失敗したら他のジョブが使用中なので待つ）。`dgx-run-0150.sh` は owner がこの形式でないと計測前に止まる。
+5. dry-run（ロックを持ったまま `dgx-run-0150.sh` で 1 round を通して rc=0・行数 112／8／28・skipped 0。値は見ない・残さない）。終わったら owner が自分のものであることを確かめてからロックを外す（`rm -rf ~/work/.fandhe-hw-lock`）。RULE の固定（別 PR）を待つ間はロックを持たない。
+6. RULE の固定後、もう一度ロックを取る（owner は新しい時刻で同じ形式）。系列:
 
    ```bash
    mkdir -p ~/work/dgx-0150-logs
    ROOT=<clone> EXPECT_SHA=<計測 SHA> setsid nohup bash <clone>/docs/perf/logs/framework-compare-0.15.0-remeasure/scripts/dgx-0150-loop.sh > ~/work/dgx-0150-logs/loop.log 2>&1 &
    ```
 
-   `loop.log` に `ALL-DONE completed=5/5` が出たものだけを採る。`SERIES-ABORTED` で打ち切ったら報告して止める（取り直しは別名の RULE）。ロックは終了時に自動で外れる。
-5. 収録（clone の本ディレクトリで）: `SERIES_DIR=~/work/dgx-0150-logs bash collect.sh`。rc=0 なら漏れ 0 件・`SHA256SUMS` 生成済みで、freeze は 0.14.0 と byte 一致（`env/freeze-cmp.txt`）。rc=5 は収録完了だが計測後の freeze が不一致（所有者へ報告）。
+   `loop.log` に `ALL-DONE completed=5/5` が出たものだけを採る。`SERIES-ABORTED` で打ち切ったら報告して止める（取り直しは別名の RULE）。系列のロックは `dgx-0150-loop.sh` が終了時（打ち切り・失敗を含む）に自動で外す（owner が `#4178 rel-0.15.0 ` で始まるときだけ。`lock-released` が出る）。
+7. 収録（clone の本ディレクトリで）: `SERIES_DIR=~/work/dgx-0150-logs bash collect.sh`。rc=0 なら漏れ 0 件・`SHA256SUMS` 生成済みで、freeze は 0.14.0 と byte 一致（`env/freeze-cmp.txt`）。rc=5 は収録完了だが計測後の freeze が不一致（所有者へ報告）。
 
 ## 自己テスト
 
