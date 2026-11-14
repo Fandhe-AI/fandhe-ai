@@ -1,0 +1,29 @@
+profile=gb10
+label=gb10
+host=masked
+uname=Linux 6.17.0-1031-nvidia aarch64
+gpu=NVIDIA GB10
+dry_run=0
+rule_sha256=9b00221606778512e550bf70d7fcb9dca21eba5f7df93cdd982b2fd8497428db
+tool_sha256_check=ok
+latin_square_check=ok
+fandhe_ai_rust_ai_env_vars=0
+rayon_num_threads=unset
+rayon_num_threads_prior=unset
+base_sha=1b5a8dfd4678eaad25553cef19142c8fb63539cf
+rev_stamp_base=1b5a8dfd4678eaad25553cef19142c8fb63539cf
+rev_stamp_runner=d3886035edb2f7b47fd35c69abbd91c23b51fc07
+runner_base_diff_crates_bench_fandhe=0
+cargo_lock_sha256=3683dd3f92f7d031b66d558470da1afc61dd6db031c718c93cc6f330ed976f59
+bin_sha256_A=cb3bc0949db1ff5f2655a01fb9dcf20d3dd63af3447f1e17ee4cda788b926dd6
+bin_sha256_B=5c9e7b9a38021db5c2f2d92fda8d7d405f0b0059a4695365a5b2962767c4e893
+bin_sha256_C=5c9e7b9a38021db5c2f2d92fda8d7d405f0b0059a4695365a5b2962767c4e893
+bin_sha256_D=cb3bc0949db1ff5f2655a01fb9dcf20d3dd63af3447f1e17ee4cda788b926dd6
+env_A=none
+env_B=none
+env_C=FANDHE_AI_CUDA_GRAPH_INFER=0
+env_D=FANDHE_AI_CUDA_GRAPH_INFER=1
+gate=1
+load_gate=1.0
+rounds=16
+utc=2026-11-14T11:44:57Z

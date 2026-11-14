@@ -1,0 +1,1 @@
+{"framework":"fandhe-ai","version":"0.14.0","task":"train","device":"cuda","size":64,"median_s":0.000530979,"q1_s":0.000510699,"q3_s":0.000561233,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}

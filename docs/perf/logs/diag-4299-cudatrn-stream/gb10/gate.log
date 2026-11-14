@@ -1,0 +1,16 @@
+round1 gate=pass threshold=1.0 waited_s=180 load1=0.86
+round2 gate=pass threshold=1.0 waited_s=0 load1=0.81
+round3 gate=pass threshold=1.0 waited_s=0 load1=0.76
+round4 gate=pass threshold=1.0 waited_s=0 load1=0.72
+round5 gate=pass threshold=1.0 waited_s=30 load1=0.73
+round6 gate=pass threshold=1.0 waited_s=0 load1=0.70
+round7 gate=pass threshold=1.0 waited_s=0 load1=0.67
+round8 gate=pass threshold=1.0 waited_s=0 load1=0.65
+round9 gate=pass threshold=1.0 waited_s=0 load1=0.63
+round10 gate=pass threshold=1.0 waited_s=0 load1=0.61
+round11 gate=pass threshold=1.0 waited_s=0 load1=0.60
+round12 gate=pass threshold=1.0 waited_s=0 load1=0.59
+round13 gate=pass threshold=1.0 waited_s=0 load1=0.58
+round14 gate=pass threshold=1.0 waited_s=0 load1=0.57
+round15 gate=pass threshold=1.0 waited_s=0 load1=0.72
+round16 gate=pass threshold=1.0 waited_s=30 load1=0.82
