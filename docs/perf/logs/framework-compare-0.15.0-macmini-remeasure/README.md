@@ -1,6 +1,6 @@
 # 0.15.0 の 6 フレームワーク同席計測 — Mac mini（Apple M4）
 
-**状態: 道具のみ・RULE 固定（draft）・未計測。** crates.io `fandhe-ai =0.15.0`（framework-compare のピンは #4305 で更新済み）を Mac mini の系列 B で測る #4177 の計測キット。
+**状態: RULE 固定・未計測。** crates.io `fandhe-ai =0.15.0`（framework-compare のピンは #4305 で更新済み）を Mac mini の系列 B で測る #4177 の計測キット。
 実測値・判定はまだ無い。`RULE.txt` は別 PR で道具の sha256 と計測 SHA を書き込んで固定する（#4168 の「道具 #4292 → RULE #4294」と同じ分離）。
 スコアボードの生成器・検査器（`gen_0150.py`・`check_0150.py`）は #4179 の範囲で、本ディレクトリには置かない。GB10 は #4178 が別ディレクトリ `../framework-compare-0.15.0-remeasure/` で行う。
 計測の実行と値の確認はこの PR の範囲外。

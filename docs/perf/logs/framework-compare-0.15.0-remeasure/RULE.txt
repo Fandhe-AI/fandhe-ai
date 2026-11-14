@@ -49,7 +49,13 @@ venv の前提（0.14.0 と同じ中身であること。系列の前の事前�
 Python 3 FW の版: 0.14.0 と同じ（上の byte 一致で担保する）。
 
 期待行数: stage1 112（skipped 0）/ stage2 8 / stage3 28。旧条件腕はない。
-  機体の dry-run（1 round・値は見ない・残さない）で行数と rc=0 を確かめてから固定する。違えば RULE を直す。
+  機体の dry-run（RULE 固定前・ビルド込み 1 round・値は判定に使わない・結果は消した。ビルド 2026-11-14T15:45:34Z〜15:47:42Z、計測 15:47:42Z〜15:51:49Z（<cuda-node>）:
+    stage1 112・skipped 0・stage2 8・stage3 28・rc 0。ロック owner "#4178 rel-0.15.0 2026-11-14T15:45:34Z"、終了後に解放）。期待行数と一致したので変えない。
+  dry-run 前の事前検査（<cuda-node>）: bash -n 全件通過・self-test 130 件 FAIL 0・道具の sha256 一致・venv bench identical（rc 0）・compute プロセス 0・環境変数の残留なし。
+  dry-run の値の露出（記録）: stage2 の 8 行（bench-fandhe／candle／burn の CPU GEMM extra）は stdout に出てランナーのログに入る（0.14.0 の dgx-run-0140.sh と同じ挙動で、
+    0.14.0 の収録 gb10/run*.log にも同じ 8 行がある）。統合セッションの指示の grep がこの行を除いていなかったため、GB10 の作業セッションが dry-run の stage2 の 8 行を目にした。
+    RULE を固定する統合セッションは値を見ていない。dry-run の値は判定にも RULE の内容にも使わない。値を含む dry-run のログ（dry1.log）も消すよう指示した。道具は 0.14.0 と同じ挙動のまま変えない
+    （系列の run*.log に stage2 の値が入るのは 0.14.0 と同じで、収録の対象）。
 ゲート（0.14.0 と同一。他ジョブゲートは足さない）: 各 round 前に load1 < 1.0 かつ GPU 使用率 0% が 3 サンプル連続（30 秒間隔・最大 30 分）。
   値が数値で取れなければ GATE-INVALID、30 分超過は GATE-TIMEOUT として系列を打ち切る。5/5 完走のみ採用（loop.log に ALL-DONE completed=5/5）。
   打ち切ったら報告して止める。取り直しは所有者判断で、新しいディレクトリと別名の RULE（RULE.v2.txt）で行う。

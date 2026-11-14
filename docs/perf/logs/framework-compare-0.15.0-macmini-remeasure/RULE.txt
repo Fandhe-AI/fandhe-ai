@@ -57,10 +57,14 @@ venv の前提（0.14.0 と同じ中身であること。系列の前の事前�
 
 機体: machdep.cpu.brand_string == "Apple M4"（完全一致。run ごとに検査）。M4 Max の値を Mac mini の値として使わない。公開テキストでは機体のホスト名を <metal-node> と書く。
 実機ロック: ~/work/.fandhe-hw-lock（owner は "#4177 rel-0.15.0 <UTC>"〈date -u +%FT%TZ〉の形式で 1 行。mkdir が成功したときだけ取得。系列の前に取り、終わりまで保持する）。ロックなしの値は採らない。計測中のビルド・並走負荷は禁止。
-  起動は scripts/macmini-0150-series.sh（owner の形式と一致を確かめて macmini-0150b-loop.sh を 1 回実行し、環境の記録を前後に取り、失敗しても trap でロックを外す）。実行は nohup で切り離す。
+  起動は scripts/macmini-0150-series.sh（owner の形式と一致を確かめて macmini-0150b-loop.sh を 1 回実行し、環境の記録を前後に取り、失敗しても trap でロックを外す）。実行は zsh -lc で包み（0.14.0 と同じ。ログインシェルの PATH で uv を解決する）、nohup で切り離す。venv_preflight.sh も同じくログインシェルで実行する。
 期待行数: Rust 48 / Python 32。skipped は bench-burn gemm metal 512/1024/2048/4096 fresh の 4 件のみ許容
   （MEASURE_ERROR: gemm checksum is degenerate。0.14.0 と同じ。それ以外の skipped は run を fail にする）。
-  機体の dry-run（1 round・値は見ない・残さない）で行数が一致することを確かめてから固定する。違えば RULE を直す。
+  機体の dry-run（RULE 固定前・ビルド込み 1 round・値は判定に使わず見ない・結果は消した。2026-11-14T15:45:33Z 開始〜15:49:42Z 終了（<metal-node>）:
+    rows 48・pyrows 32・skipped 4・rc 0。ロック owner "#4177 rel-0.15.0 2026-11-14T15:45:33Z"、終了後に解放）。期待行数と一致したので変えない。
+  dry-run 前の事前検査（<metal-node>）: /bin/bash 3.2.57 で bash -n 全件通過・self-test 197 件 FAIL 0・道具の sha256 一致。
+    venv は <home>/work/venv4168.noindex（#4168 で 0.14.0 の freeze どおりに作り直したもの。0.14.0 の作業ディレクトリは残っていない）で、
+    ログインシェルの PATH で torch identical・tf identical・rc 0（非ログインシェルでは uv が PATH に無く rc 1。道具と venv は変えていない）。
 系列: 系列 B のみ（5 run）。系列 A（ゲートなしの対照）は行わない。ノイズ帯は算出できない（「対照系列なし・未算出」。判定一覧の tally 行は noise na。0 件とは書かない）。
   ビルドは系列開始前に 1 回だけ（macmini-0150b-loop.sh が macmini-run-0150.sh を BUILD_ONLY=1 で呼ぶ）。
   CARGO_TARGET_DIR は 0.14.0 と同じ扱い（設定しない。計測ツリーの framework-compare/target を使う）。
