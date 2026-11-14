@@ -1,7 +1,7 @@
 # 0.15.0 の 6 フレームワーク同席計測 — GB10（DGX Spark）
 
-**状態: 道具のみ（RULE 未固定・未計測）。** crates.io `fandhe-ai =0.15.0`（framework-compare のピンは #4305 で更新済み）を GB10 で 5 ラウンド測る #4178 の計測キット。
-実測値・判定・`RULE.txt` はまだ無い。`RULE.txt` は別 PR で道具の sha256 と計測 SHA を書き込んで固定する（#4168 の「道具 → RULE」と同じ分離）。
+**状態: 道具のみ・RULE 固定（draft）・未計測。** crates.io `fandhe-ai =0.15.0`（framework-compare のピンは #4305 で更新済み）を GB10 で 5 ラウンド測る #4178 の計測キット。
+実測値・判定はまだ無い。`RULE.txt` は別 PR で道具の sha256 と計測 SHA を書き込んで固定する（#4168 の「道具 → RULE」と同じ分離）。
 スコアボードの生成器・検査器（`gen_0150.py`・`check_0150.py`。0.14.0 の `scoreboard/run_0140.sh` に当たるもの）は #4179 の範囲で、本ディレクトリには置かない。Mac mini は #4177 が `../framework-compare-0.15.0-macmini-remeasure/` で行う。
 計測の実行と値の確認はこの PR の範囲外。
 

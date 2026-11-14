@@ -1,0 +1,85 @@
+事前登録規則（DGX Spark GB10）0.15.0 6 フレームワーク同席計測 — 【固定】
+イシュー #4178。固定時刻: 本ファイルを含む PR のマージ時刻（以後編集しない。固定後の変更は RULE.v2.txt を新設する）。本ファイルは時間の実測値を含まない。
+0.14.0 の RULE.txt（../framework-compare-0.14.0-remeasure/RULE.txt）を雛形にした。0.14.0 との違いは、版（0.15.0）・計測 SHA・前版比の参照先（0.14.0）に加え、
+所有者承認済み（#4178 issuecomment-6878424293）の次の 3 点だけ:
+  (2) 既定設定の文言（0.14.0 の「SME OFF・Graph capture OFF」を 0.15.0 の既定に書き換え。環境変数では既定を変えない）
+  (3) 収録のマスクをスクリプト（collect.sh）にし、漏れ検査と SHA256SUMS も同じスクリプトで行う
+  (4) venv の前提（0.14.0 の収録 freeze と byte 一致）と、計測後の freeze 収録・cmp
+（番号は Mac mini の RULE と揃えた。(1) の他ジョブゲートは Mac mini だけで、GB10 には足さない。）
+判定式・閾値（1 超が 1 位、0.90 以上が僅差）・N=5・相手の parity fail は判定不能・判定側の parity 不合格は fail-closed・GB10 の専有ゲート・期待行数・tolerance・baseline は 0.14.0 と同一。
+0.14.0 にあった「形の違い」(a)(b)（判定の出力元）は、判定一覧の生成が #4179 の範囲のため本 RULE では扱わない。判定規則は下の式のとおりで、変更しない。
+
+腕（単腕）:
+  計測 SHA = 4fce735fb57d97c09ce96b7c6b77eff915c24229（main の #4306 マージ。道具 PR。framework-compare のピンは fandhe-ai =0.15.0 〔#4305〕）。
+  機体側はこの SHA で clone し、.rev-stamp（40 桁 1 行）と EXPECT_SHA をこの値にする。run ごとに照合する。
+  方針: 腕は 1 つ（registry の fandhe-ai =0.15.0）。旧版の腕は置かない。bench-fandhe は 0.14.0 から変えない。
+  常駐入力の判別式（計測ツリーで 1 件ヒットしなければ fail。0.14.0 と同じ式。run ごとに検査）:
+    ^[[:space:]]+let c0 = tape\.matmul_resident\(
+  bench_py.py sha256: 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b（0.14.0 と同値。run ごとに照合）
+
+既定設定（0.14.0 の「SME OFF・Graph capture OFF」からの書き換え。根拠は v0.15.0 タグ 22a475e2d のコード）:
+  環境変数で既定を変えずに測る。0.15.0 の既定は次のとおり。
+  ・SME_PRODUCTION_ENABLED（crates/backend-cpu/src/gemm_blis/mod.rs）と SME_SMALL_SCHED_ENABLED（同 sme_small_sched.rs）は true。aarch64 で効くが、GB10 は SME を持たないので CPU は NEON のまま（Mac mini M4 は SME 経路）。
+  ・推論スコープ jpw1（INFER_SCOPE_JPW1_ENABLED。同 infer_scope.rs）は aarch64 Linux だけ。GB10 で効く。
+  ・CUDA 推論 Graph は既定 ON（INFER_GRAPH_DEFAULT_ENABLED。crates/backend-cuda/src/graph.rs）。既定のストリームが created stream になり、学習にも効く。
+  ・Metal の STEEL_LARGE_N_ENABLED（crates/backend-metal/src/tile.rs）は true だが macOS 限定で、GB10 では効かない。
+  環境変数の検査: 系列の前（dgx-0150-loop.sh）と各 run の前（dgx-run-0150.sh）に、FANDHE_AI_* と RAYON_NUM_THREADS が 1 つも設定されていないこと
+  をランナーが確かめ（scripts/env_guard.sh）、設定があれば名前だけを出して rc 3 で止める。
+  ほかに GEMM_GATE_PATCH_FACADE_PATH が空であることも確かめ（0.14.0 と同じ。非空なら rc 2 で止める）。
+  結果（なし）は env_info.txt の末尾と env_guard_before_series.txt に残る（GB10 は #4299 で env=0/1 を使った直後のため、残留を疑って確かめる）。
+  N = 5。
+
+機体: <cuda-node>（GB10 / sm_121・aarch64）を専有する（#4178 で指定したノード。ホスト名は公開テキストに書かない）。専有ノードは計測前に決めて途中で変えない。
+  実機ロック（~/work/.fandhe-hw-lock）の owner は "#4178 rel-0.15.0 <UTC>"（date -u +%FT%TZ。正規表現 `#4178 rel-0\.15\.0 <UTC>`）。mkdir が成功したときだけ取得し、ロックなしの値は採らない。
+  ロックは系列の前に取り、系列の終わりまで持つ。系列が失敗しても外す（dgx-0150-loop.sh の終了時処理。owner が "#4178 rel-0.15.0 " で始まるときだけ）。
+  専有の確認（0.14.0 と同じ）: 系列の前と各 round の前に nvidia-smi --query-compute-apps で compute プロセスが 0 件であることを確かめ、env_info.txt に記録する（vLLM・ComfyUI・Kokoro の常駐の有無も）。
+  1 件でも出たら「専有未達」、nvidia-smi が失敗したら EXCLUSIVE-INVALID として系列を打ち切り、pass にしない。
+  driver は計測時の env_info.txt に記録する（0.14.0 の値と違っていれば記録のみ）。
+
+venv の前提（0.14.0 と同じ中身であること。系列の前の事前検査）:
+  scripts/venv_preflight.sh gb10 <venv> を実行し、~/work/.venv-bench の freeze（pip freeze の直後に python --version。0.14.0 と同じ形式）が
+  0.14.0 の収録（../framework-compare-0.14.0-remeasure/env/pip-freeze-venv-bench.txt）と byte 一致すること（rc=0 かつ bench identical。結果は venv_preflight.txt）。
+  不在や不一致なら測らず止まる（作り直しは別承認）。計測後にも freeze を収録し、collect.sh が 0.14.0 の収録と cmp する（env/freeze-cmp.txt。不一致は rc 5 で所有者へ報告）。
+Python 3 FW の版: 0.14.0 と同じ（上の byte 一致で担保する）。
+
+期待行数: stage1 112（skipped 0）/ stage2 8 / stage3 28。旧条件腕はない。
+  機体の dry-run（1 round・値は見ない・残さない）で行数と rc=0 を確かめてから固定する。違えば RULE を直す。
+ゲート（0.14.0 と同一。他ジョブゲートは足さない）: 各 round 前に load1 < 1.0 かつ GPU 使用率 0% が 3 サンプル連続（30 秒間隔・最大 30 分）。
+  値が数値で取れなければ GATE-INVALID、30 分超過は GATE-TIMEOUT として系列を打ち切る。5/5 完走のみ採用（loop.log に ALL-DONE completed=5/5）。
+  打ち切ったら報告して止める。取り直しは所有者判断で、新しいディレクトリと別名の RULE（RULE.v2.txt）で行う。
+判定（0.14.0 から不変）: 比 = 同一 run 内の「有効な相手のうち最速 / fandhe-ai reuse」の 5 run 中央値（推論はスループット比。同じ式）。
+  比 > 1 で 1 位、>= 0.90 で僅差、それ未満は負け。相手側の parity_fail_count > 0 の行は判定不能（その相手を順位・最速に含めない）。
+  判定側（fandhe-ai reuse）の要素検証（parity_fail_count）が 1 件でも不合格なら、判定不能にせず生成を停止する（fail-closed）。
+  欠損 run・有効な相手の不在も生成停止。負けの「N 位」と相手名は 5 run 中央値で数える。tolerance・baseline は変えない。
+  GB10 には対照系列を置かない（0.14.0 も置いていない）ので、ノイズ帯は算出しない（「対照系列なし・未算出」。判定一覧の tally 行は noise na）。
+  要素検証の欄は gemm の行にだけあり、train／infer の行には無い（0.14.0 と同じ出力仕様）。合否の集計は gemm の行で行う。
+前版比（0.14.0 比。表示のみ・勝敗には使わない）: 同一セル・同一モードの fandhe-ai 中央値同士の比（0.15.0 の 5 run 中央値 ÷ 0.14.0 の 5 run 中央値。
+  推論はスループット比。<1 が高速化・推論は >1 が改善）。参照ファイル（#4179 の前版比較が使う。sha256 を固定）:
+  framework-compare-0.14.0-remeasure/gb10/results-dgx-0.14.0-median5.jsonl
+    205129ec14fa79c201c0647928db8fbf74dc3460f5283e7c49275053613897b2
+  framework-compare-0.14.0-remeasure/gb10/results-dgx-0.14.0-extra-median5.jsonl
+    d838593eb6759f734f7e564f690336e40a176acf4884b357a043a4805df15f9a
+  framework-compare-0.14.0-remeasure/gb10/results-dgx-py-0.14.0-median5.jsonl
+    dd217b11d4dbe6beb9d9fb222efa467af42759c0d5a49fd00a895225fb5d7e84
+  前版の判定一覧は framework-compare-0.14.0-remeasure/scoreboard/gen_0140.out（tally 13 3 11 invalid 1 noise na total 27。27 セル。
+    sha256 cdec4f544ba8ddd3b8d0e0c3fe5c5573e18a2df28fcb2e228d66b34ee35a715e）を参照する。GB10 の 14 セルとの比較は同ファイルの GB10 行で行う（表示のみ）。
+  0.14.0 → 0.15.0 の差には、ライブラリの既定の変更（SME・Graph・jpw1・STEEL）が含まれる（Mac mini に足した他ジョブゲートは GB10 には無い）。
+  計測日が異なるため、計測日の負荷・機体の状態の揺れも含む（ライブラリの変更だけの効果ではない）。
+  （Mac mini 側の参照ファイルは #4177 の RULE に固定する）
+
+収録（マスク・漏れ検査）:
+  collect.sh（語境界つきマスク。${VAR} 形式）で収録する。マスクは txt/log/md/tsv/out/err で、jsonl は書き換えない。
+  漏れの検査（実名・IP・ユーザー名・絶対パス。1 件でも残れば収録しない）と SHA256SUMS の生成も同じスクリプトで行う。公開テキストでは <cuda-node>・<home>・<user> と repo 相対パスを使う。
+
+道具の sha256（<sha256>  <リポジトリルート相対パス>。計測 SHA 4fce735fb57d97c09ce96b7c6b77eff915c24229 の実ファイル。機体側で sha256sum と完全一致を確かめる）:
+# >>> tool-sha256
+a1704d9ecda0bacf875959fdcbc9c156e746076814b7155c11cee97f8b357868  docs/perf/logs/framework-compare-0.15.0-remeasure/scripts/dgx-0150-loop.sh
+cf50bc78289be72a99d994bf8ca60096bcfbdafea1881aa0e18807bd333a9f44  docs/perf/logs/framework-compare-0.15.0-remeasure/scripts/dgx-run-0150.sh
+4bc1ba36679a2b16803c9208d587827db9d38bc4cc1951a1baaea00a0db2a377  docs/perf/logs/framework-compare-0.15.0-remeasure/scripts/env_guard.sh
+5d61e70fa00f688040f03145e94e91358e3356192709106450d50288f42f777a  docs/perf/logs/framework-compare-0.15.0-remeasure/scripts/mask_lib.sh
+33399d33787e00a0a58a8c478fed40db328d7337787ebe5071cf425b4eeb73ae  docs/perf/logs/framework-compare-0.15.0-remeasure/scripts/self-test.sh
+9f5623447c1c653e2257860a92f852997510e9ad10ffa18899e4eedbdbd7e28a  docs/perf/logs/framework-compare-0.15.0-remeasure/scripts/venv_preflight.sh
+9969e84a595d7a99669a5bf5ee7d9042ae9d773389054ee131a50fd1573f8f55  docs/perf/logs/framework-compare-0.15.0-remeasure/collect.sh
+9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b  docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py
+# <<< tool-sha256
+実機テスト: #3256 の C1〜C9・#3272 の X1 は本計測の範囲外とする。ビルドは系列開始前に 1 回だけ（dgx-0150-loop.sh）。fail が出ても tolerance・assert・baseline は変えない。計測中にビルド・並走負荷を置かない。
