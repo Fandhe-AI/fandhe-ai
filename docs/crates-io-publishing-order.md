@@ -616,6 +616,22 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > 公開した（§15.7 の追補）。framework-compare のピン `fandhe-ai =0.13.0` は変えていない
 > （更新は #3873・所有者承認待ち）。
 
+> **追補（2026-11-14・v0.15.0 公開完了。#4175）**: `.github/workflows/release-all.yml`
+> （`mode: publish`・`version: 0.15.0` run 43598095320。同 run の verify ジョブが 9 クレートの
+> dry-run を success（完了 2026-11-14T13:09:54Z）、publish ジョブが environment `crates-io-release` の
+> 承認後に success（完了 2026-11-14T13:14:13Z）。事前の dry-run-only run 43591985948〈main `97182300d`〉。
+> 公開 ref は main `22a475e2df0cfcbf5854d827a79ddc1e7df4a4b9`＝#4303 のマージ。`97182300d` からの差は
+> docs と計測の記録だけで、`crates/`・`Cargo.toml`・`Cargo.lock` の差は 0）により、公開対象
+> 9 クレート（`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
+> `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`・`fandhe-ai-backend-rocm`・
+> `fandhe-ai-onnx-interop`・`fandhe-ai-hf-hub`・`fandhe-ai`）の **v0.15.0 の公開を完了した**
+> （9 クレートとも sparse index で 0.15.0・yanked=false を確認済み）。
+> リリースタグ `v0.15.0`（メッセージ "release: v0.15.0"）は注釈付きタグでコミット `22a475e2d` を指し、
+> push 済み（タグ object `d8b3536e8`）。所有者の明示指示（2026-11-14・チャットでの明示指示。原文「ok」。
+> #4299 を修正なしで閉じることと #4175 の公開をまとめて承認したもの）に基づく。
+> backend-rocm の ROCm 実機 parity は未実測のまま（§15.7 の追補）。framework-compare のピン
+> `fandhe-ai =0.14.0` は変えていない（更新は #4176。所有者承認が要る）。
+
 > **追補（2026-11-05・v0.14.0 ピン更新。#3873）**: 所有者の承認（2026-11-05・チャットでの
 > 明示指示。原文「ok」。記録コメント:
 > <https://github.com/Fandhe-AI/fandhe-ai/issues/3873#issuecomment-6659367020>）により、
@@ -1023,6 +1039,10 @@ lock-all` も green。
 > 初回公開した（`release-all.yml` `mode: publish` run 42034541697。sparse index で 0.14.0・
 > yanked=false を確認済み。詳細は §10 の追補）。
 
+> **追補（2026-11-14・v0.15.0 公開完了。#4175）**: `fandhe-ai-hf-hub` 0.15.0 を公開した
+> （通常の lockstep 公開。初回公開ではない。`release-all.yml` `mode: publish` run 43598095320。
+> sparse index で 0.15.0・yanked=false を確認済み。詳細は §10 の追補）。
+
 ## 15. 8 クレート目 `fandhe-ai-backend-rocm` の公開準備と検証記録（#3774）
 
 所有者の承認（#3771 の回答 <https://github.com/Fandhe-AI/fandhe-ai/issues/3771#issuecomment-6554565469>、
@@ -1131,7 +1151,20 @@ dry-run の Verifying 段は、展開した `.crate` を ROCm 非搭載の環境
 > `fandhe-ai-backend-rocm` 0.14.0 を公開した（初回公開。`release-all.yml` run 42034541697）。
 > 実機 parity の追跡は #3159・#3867 に残る。
 
+> **追補（2026-11-14・v0.15.0 公開完了。#4175）**: `fandhe-ai-backend-rocm` 0.15.0 を公開した
+> （通常の lockstep 公開。初回公開ではない。`release-all.yml` run 43598095320）。ROCm 実機 parity は
+> **未実測のまま**で、本節の条件（#3159・#3867 の ROCm 実機 parity pass）は満たしていない。
+> 2026-11-14 の所有者判断で MI300X を今は使わないことになり、Phase 5（#4169）はツリーから外した。
+> 公開は所有者の明示指示（2026-11-14・チャットでの明示指示。原文「ok」。#4175 の承認）に基づく。
+
 ## 変更履歴
+
+- 2026-11-14（v0.15.0 公開完了。#4175）: `release-all.yml`（`mode: publish`・`version: 0.15.0`
+  run 43598095320。事前 dry-run-only run 43591985948〈main `97182300d`〉。公開 ref は main
+  `22a475e2df0cfcbf5854d827a79ddc1e7df4a4b9`＝#4303 のマージ）で公開対象 9 クレートの v0.15.0 の
+  公開を完了した（9 クレートとも sparse index で 0.15.0・yanked=false を確認済み）。注釈付きタグ
+  `v0.15.0` は `22a475e2d`（タグ object `d8b3536e8`）。§10・§14.4・§15.7 の追補に記録した。
+  framework-compare のピン `=0.14.0` は変えていない（更新は #4176）。
 
 - 2026-11-05（v0.14.0 公開完了。#3872）: `release-all.yml`（`mode: publish`・`version: 0.14.0`
   run 42034541697。事前 dry-run-only run 42003820472〈main `c5c39c112`〉。main
