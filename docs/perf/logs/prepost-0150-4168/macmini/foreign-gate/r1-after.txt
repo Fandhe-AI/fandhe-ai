@@ -1,0 +1,10 @@
+CLEAN after 2026-11-14T05:37:10Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 79 0 0 0 0
+processes_scanned 648
+max_pcpu_non_excluded 4.5
+top pid=95470 <user> pcpu=4.5 name=spotlightknowledged.updater
+top pid=584 uid=0 pcpu=2.2 name=dasd
+top pid=1013 <user> pcpu=1.1 name=sharingd
+top pid=596 uid=0 pcpu=1.0 name=bluetoothd
+top pid=958 <user> pcpu=0.6 name=rapportd

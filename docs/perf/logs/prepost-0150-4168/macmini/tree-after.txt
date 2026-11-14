@@ -1,0 +1,21 @@
+     Locking 8 packages to highest compatible versions
+      Adding fandhe-ai v0.14.0 (<home>/work/v4168m-base.noindex/crates/facade)
+      Adding fandhe-ai-autodiff v0.14.0 (<home>/work/v4168m-base.noindex/crates/autodiff)
+      Adding fandhe-ai-backend-cpu v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-cpu)
+      Adding fandhe-ai-backend-cuda v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-cuda)
+      Adding fandhe-ai-backend-metal v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-metal)
+      Adding fandhe-ai-backend-rocm v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-rocm)
+      Adding fandhe-ai-onnx-interop v0.14.0 (<home>/work/v4168m-base.noindex/crates/onnx-interop)
+      Adding fandhe-ai-tensor-core v0.14.0 (<home>/work/v4168m-base.noindex/crates/tensor-core)
+bench-fandhe v0.1.0 (<home>/work/v4168m-base.noindex/scripts/bench/framework-compare/bench-fandhe)
+├── bench-common v0.1.0 (<home>/work/v4168m-base.noindex/scripts/bench/framework-compare/bench-common)
+└── fandhe-ai v0.14.0 (<home>/work/v4168m-base.noindex/crates/facade)
+    ├── fandhe-ai-autodiff v0.14.0 (<home>/work/v4168m-base.noindex/crates/autodiff)
+    ├── fandhe-ai-backend-cpu v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-cpu)
+    ├── fandhe-ai-backend-cuda v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-cuda)
+    ├── fandhe-ai-backend-metal v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-metal)
+    ├── fandhe-ai-backend-rocm v0.14.0 (<home>/work/v4168m-base.noindex/crates/backend-rocm)
+    ├── fandhe-ai-onnx-interop v0.14.0 (<home>/work/v4168m-base.noindex/crates/onnx-interop)
+    ├── fandhe-ai-tensor-core v0.14.0 (<home>/work/v4168m-base.noindex/crates/tensor-core)
+    ├── libc v0.2.189
+    └── ureq v3.4.2

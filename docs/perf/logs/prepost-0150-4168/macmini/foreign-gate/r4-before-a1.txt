@@ -1,0 +1,10 @@
+CLEAN before 2026-11-14T05:41:48Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 0 0 0 0 0
+processes_scanned 648
+max_pcpu_non_excluded 0.8
+top pid=741 uid=270 pcpu=0.8 name=com.apple.DriverKit-AppleBCMWLAN
+top pid=710 uid=0 pcpu=0.6 name=backgroundtaskmanagementd
+top pid=921 <user> pcpu=0.5 name=secd
+top pid=1013 <user> pcpu=0.4 name=sharingd
+top pid=17778 uid=282 pcpu=0.4 name=trustd

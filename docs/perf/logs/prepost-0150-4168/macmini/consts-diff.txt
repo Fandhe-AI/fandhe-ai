@@ -1,0 +1,5 @@
+crates/backend-cpu/src/gemm_blis/infer_scope.rs:INFER_SCOPE_JPW1_ENABLED (baseline に無い) -> cfg!(all(target_arch="aarch64",target_os="linux"))
+crates/backend-cpu/src/gemm_blis/mod.rs:SME_PRODUCTION_ENABLED false -> true
+crates/backend-cpu/src/gemm_blis/sme_small_sched.rs:SME_SMALL_SCHED_ENABLED (baseline に無い) -> true
+crates/backend-cuda/src/graph.rs:INFER_GRAPH_DEFAULT_ENABLED false -> true
+crates/backend-metal/src/tile.rs:STEEL_LARGE_N_ENABLED (baseline に無い) -> true
