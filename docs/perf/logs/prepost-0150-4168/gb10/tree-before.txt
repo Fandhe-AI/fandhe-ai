@@ -1,0 +1,12 @@
+bench-fandhe v0.1.0 (<home>/work/v4168m-base/scripts/bench/framework-compare/bench-fandhe)
+├── bench-common v0.1.0 (<home>/work/v4168m-base/scripts/bench/framework-compare/bench-common)
+└── fandhe-ai v0.14.0
+    ├── fandhe-ai-autodiff v0.14.0
+    ├── fandhe-ai-backend-cpu v0.14.0
+    ├── fandhe-ai-backend-cuda v0.14.0
+    ├── fandhe-ai-backend-metal v0.14.0
+    ├── fandhe-ai-backend-rocm v0.14.0
+    ├── fandhe-ai-onnx-interop v0.14.0
+    ├── fandhe-ai-tensor-core v0.14.0
+    ├── libc v0.2.189
+    └── ureq v3.4.2

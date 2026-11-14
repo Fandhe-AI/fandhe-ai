@@ -1,0 +1,5 @@
+round1 gate=pass threshold=1.0 waited_s=180 load1=0.96
+round2 gate=pass threshold=1.0 waited_s=150 load1=0.85
+round3 gate=pass threshold=1.0 waited_s=210 load1=0.91
+round4 gate=pass threshold=1.0 waited_s=120 load1=0.74
+round5 gate=pass threshold=1.0 waited_s=180 load1=0.71
