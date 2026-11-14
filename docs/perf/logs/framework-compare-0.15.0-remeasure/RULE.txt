@@ -12,7 +12,13 @@
 腕（単腕）:
   計測 SHA = 4fce735fb57d97c09ce96b7c6b77eff915c24229（main の #4306 マージ。道具 PR。framework-compare のピンは fandhe-ai =0.15.0 〔#4305〕）。
   機体側はこの SHA で clone し、.rev-stamp（40 桁 1 行）と EXPECT_SHA をこの値にする。run ごとに照合する。
-  方針: 腕は 1 つ（registry の fandhe-ai =0.15.0）。旧版の腕は置かない。bench-fandhe は 0.14.0 から変えない。
+  方針: 腕は 1 つ（registry の fandhe-ai =0.15.0）。旧版の腕は置かない。bench-fandhe の既定経路は 0.14.0 から変えない。
+  計測前の事前確認（RULE 固定前に統合セッションが確認済み）:
+    scripts/bench/framework-compare について、0.14.0 の腕 18a7f4b87fe61029a179cb1922cc82928440f2c9 と計測 SHA の差分が
+    ・bench-fandhe/src/main.rs の差は VERSION 定数（"0.14.0"→"0.15.0"）・ピンの版を述べた文字列とコメント・診断フラグ（--diag-legacy-tape-reuse・--diag-host-input-reuse。既定 OFF で既定経路は不変）・テストの追加だけ、
+    ・run_all.sh・run_all_cuda.sh の差はピンの版を述べたコメント各 1 行だけ、bench-common・bench-candle・bench-burn・ワークスペースの Cargo.toml・deny.toml は差なし、
+    ・bench-fandhe/Cargo.toml の差は fandhe-ai の版の行とコメントだけ、Cargo.lock の差は自社 8 クレート（fandhe-ai・autodiff・backend-cpu・backend-cuda・backend-metal・backend-rocm・onnx-interop・tensor-core）の版・checksum だけ（外部 crate の増減・版変更 0。#4305）、
+    ・それ以外の差は run_all*.sh から呼ばれない A/B・診断用の道具（run_ab_*.sh・judge_*.py・torch_*_diag.py など）の追加・変更だけ、であること。
   常駐入力の判別式（計測ツリーで 1 件ヒットしなければ fail。0.14.0 と同じ式。run ごとに検査）:
     ^[[:space:]]+let c0 = tape\.matmul_resident\(
   bench_py.py sha256: 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b（0.14.0 と同値。run ごとに照合）
