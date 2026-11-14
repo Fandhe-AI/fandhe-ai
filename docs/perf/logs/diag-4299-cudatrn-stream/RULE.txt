@@ -1,0 +1,119 @@
+RULE fixed-at-utc: 2026-11-14T11:02:54Z
+issue: #4299（親: #4173〔Phase 6〕・ルート #4140。元の計測は #4168）
+本規則は計測より前に固定する。事後に緩めない。腕・手順・判定式・ラウンド数は issue #4299 本文のとおりで、ここに逐語に近く写す。
+所有者の指示（2026-11-14）は「調査する」で、計測案（A・B・C）は承認済み。D はこの issue で足した腕。
+
+[背景]
+- #4168 の前後比較（GB10〔<cuda-node>〕）で、G-CUDA-TRN（CUDA の MLP 学習・size 64・reuse）だけ after が 5 run とも遅くなった。
+  腕比は中央値 1.007、run 別は 1.0025〜1.0081（docs/perf/logs/prepost-0150-4168/gb10/judge-4168-gb10.md:17）。
+  1 step の時間は before が平均 135.90 µs、after が平均 136.62 µs で、差は 0.71 µs（0.52%）。腕の中の振れ（0.7〜1.0%）より差が小さく、
+  5 run だけではノイズと分けられない（片側符号検定で p≈0.06）。CUDA のほかのセル（推論、gemm 5 形状）は腕比 0.99〜1.00。
+- コードを読んだ結果（2026-11-14）: v0.14.0..1b5a8dfd4 の間に、学習 step のホットパス（同期・alloc・launch の数）の変更はない。
+  学習に効く変更は 1 つだけで、#4167 で推論 Graph が既定 ON（INFER_GRAPH_DEFAULT_ENABLED = true）になり、CudaDevice::new が作る stream が
+  legacy の NULL stream から created stream（disable_event_tracking 付き）に替わった（crates/backend-cuda/src/device.rs:414-422）。
+  stream は ordinal ごとに sticky で全デバイスが共有するので、学習も created stream で動く。
+
+[BASE]
+- BASE = 1b5a8dfd4678eaad25553cef19142c8fb63539cf
+- #4168 の after と同じ SHA。1b5a8dfd4..origin/main（本規則の固定時点の origin/main = 29b758935）に crates/ と
+  scripts/bench/framework-compare/bench-fandhe の差分は 0（`git diff --stat 1b5a8dfd4 origin/main -- crates/ scripts/bench/framework-compare/bench-fandhe`
+  の出力が空であることを固定時に確かめた）。
+- BASE（AB_BASE_ROOT）は BASE SHA の clone（.rev-stamp の 1 行目と HEAD がどちらも BASE SHA。crates/・framework-compare に未コミットの変更なし）。
+  ランナー側（AB_RUNNER_ROOT）は本 RULE.txt を含むコミットの clone で、BASE との crates/・bench-fandhe の差分 0 をランナーが起動時に確かめる。
+
+[腕]（4 本。同じ BASE の同じ bench-fandhe ソースで、ビルドは 2 つ）
+| 腕 | ライブラリ | プロセスにだけ渡す環境変数 | stream（コードから読んだもの） |
+| A | registry の fandhe-ai =0.14.0 | なし | legacy |
+| B | 1b5a8dfd4 の path patch | なし | created（既定 ON） |
+| C | B と同じバイナリ | FANDHE_AI_CUDA_GRAPH_INFER=0 | legacy |
+| D | A と同じバイナリ | FANDHE_AI_CUDA_GRAPH_INFER=1 | created（0.14.0 の opt-in） |
+- 腕と stream の対応は、コードを読んだ結果にもとづく。実行時には観測していない（crates/ に手を入れずに stream の種別を実行時に観測する手段はない）。
+  根拠: graph.rs の infer_graph_stream_requested（環境変数 FANDHE_AI_CUDA_GRAPH_INFER が `1`／`true` と完全一致なら ON、それ以外の値は OFF、
+  未設定なら INFER_GRAPH_DEFAULT_ENABLED）と device.rs:414-422（その値〔ほかの opt-in との OR〕が真なら created stream、偽なら legacy）。
+  v0.14.0 も同じ分岐で、v0.14.0 の INFER_GRAPH_DEFAULT_ENABLED は false、BASE は true（ランナーが BASE の定義を確かめる）。
+- bench-fandhe の学習経路は推論 Graph の API を呼ばない（API で明示すると環境変数が読まれなくなる。bench-fandhe/src に呼び出しが無いことを固定時に確かめた）。
+  ランナーは --graph・--phases・--tf32・--diag-* を渡さない。
+- D は承認された案（A・B・C）に足した腕。古いコードでも stream の切り替えだけで遅くなるかを確かめる。
+- ビルド: A 用は registry の fandhe-ai =0.14.0（path patch なし・--locked）、B 用は `--config patch.crates-io.fandhe-ai.path="<BASE>/crates/facade"`。
+  事前に cargo tree --depth 2 --target all で、A の fandhe-ai が registry 0.14.0 に解決されること（path に解決された fandhe-ai 系が無いこと）、
+  B の fandhe-ai と fandhe-ai-*（tensor-core・autodiff・backend-cpu・backend-cuda を含む）のすべてが BASE の crates/ に解決されることを確かめる。
+  B のビルドは Cargo.lock を書き換えるため退避し、直後と終了時に復元して git diff 0 を確かめる。A と B のバイナリの sha256 が同じなら停止する。
+- 両バイナリとも version 0.14.0 を名乗る（BASE の workspace.version も 0.14.0）。腕の同定は出力パス・launch.tsv・env_info の bin_sha256（A ≠ B、C = B、D = A）で行う。
+
+[事前確認（fail-closed）]
+- 環境変数: 名前が FANDHE_AI_ または RUST_AI_ で始まる変数が 1 つでもあれば停止する（#4168 と同じ。unset で黙って直さない）。
+  0 件だったことと RAYON_NUM_THREADS を unset したことを env_info へ記録し、判定器が検査する。
+- 道具の sha256: 下の [道具の sha256] と実ファイルの完全一致をランナー（起動時。実行中の自分自身も照合）と判定器（実行中の自分自身も照合）が検査し、食い違えば停止する。
+- ラテン方格: 下の [ラテン方格] とランナー・判定器の定数の完全一致。
+- BASE の .rev-stamp・HEAD・未コミットの変更なし、ランナー側 clone と BASE の差分 0、BASE の INFER_GRAPH_DEFAULT_ENABLED = true、cargo tree の解決。
+- 実機ロック（~/work/.fandhe-hw-lock）の owner が起動役のものと一致すること（--dry-run も同じ。dry-run もビルドで機体を使うため）。
+- 同じラベルの生データ・収録先が既にあれば停止する（差し替え禁止）。
+
+[ラテン方格]（4×4。round r は ((r-1) mod 4)+1 行目の順に 4 腕を起動し、16 ラウンドで方格を 4 回繰り返す）
+- 各列に各腕が 1 回ずつ来る（位置の均等）。さらに Williams 型で、どの腕の直前にもほかの 3 腕が 1 回ずつ来る（直前の腕の均等）。
+# >>> latin-square
+A B D C
+B C A D
+C D B A
+D A C B
+# <<< latin-square
+
+[手順]（事前登録。計測より前に本 RULE.txt で固定し、事後に緩めない）
+- セルは G-CUDA-TRN だけ（--task train --device cuda --size 64 --mode reuse）。fresh（--mode fresh）は参考として記録する。相手フレームワークは測らない。
+- 16 ラウンドに固定する（AB_ROUNDS が 16 以外なら拒否）。各ラウンドで 4 腕を 1 プロセスずつ独立に起動し、腕の順番は上の方格に従う。
+- ラウンドの中は、reuse を方格の行の順に 4 腕、続けて fresh を同じ順に 4 腕（1 ラウンド 8 プロセス・1 プロセス 1 行）。
+- C と D のプロセスにだけ、上の 1 変数を env で渡す。渡した値は起動ごとに 1 行、roundN/launch.tsv に記録する
+  （列: round・ラウンド内の順位・腕・mode・渡した変数〔none／FANDHE_AI_CUDA_GRAPH_INFER=0／=1〕・バイナリ〔before／after〕・rc・開始 UTC・終了 UTC）。
+  判定器は、方格どおりの起動順・腕と変数・腕とバイナリの対応・rc 0 を照合する。
+- ビルドはすべて round1 の前に済ませる。計測中はビルドを並走させない。
+- 出力は scripts/bench/framework-compare/results/raw/diag4299-<label>/roundN/<腕>-<mode>.jsonl（1 ファイル 1 行）。
+- 起動の失敗（rc ≠ 0・行数 ≠ 1）とゲートの不成立は系列を打ち切る。差し替え・追加起動・セルの除外はしない。打ち切った系列は採らない（取り直しは別名の RULE）。
+- 起動役は docs/perf/logs/diag-4299-cudatrn-stream/collect.sh。実機ロックを取り、ロックなしで測った値は使わない。公開面には機体名を <cuda-node> とだけ書く。
+
+[負荷ゲート]（#4168 の GB10 と同じ）
+- uname -m が aarch64（Linux）。実機ロックを取る。
+- 各ラウンドの前に nvidia-smi --query-compute-apps で compute プロセスが 0 件であることを確かめる（取得失敗は EXCLUSIVE-INVALID、1 件でもあれば EXCLUSIVE-UNMET）。
+- さらに load1 < 1.0 かつ GPU 使用率 0% が 3 サンプル続くまで、30 秒間隔・最大 30 分待つ（超えたら GATE-TIMEOUT）。
+- 結果は gate.log（`roundN gate=pass ...`）と compute_apps.log に残し、判定器が 16 ラウンドすべての gate=pass と compute プロセス 0 を要求する。
+- 打ち切った系列は採らない。16/16 完走だけを採る。
+
+[判定]（ラウンドごとの対の比 = 時間比。reuse の median_s で計算する）
+- R1 再現
+  - B/A > 1 のラウンドが 12/16 以上なら「後退を再現」とする（片側符号検定で p≈0.038）。
+  - 4/16 以下なら「逆向き」とする。
+  - それ以外は「再現せず（ノイズの範囲）」とし、判定を終える。
+- R2 原因（R1 で再現したときだけ判定する）
+  - B/C > 1 が 12/16 以上、かつ D/A > 1 が 12/16 以上なら、「stream の切り替えが原因」とする。新旧どちらのコードでも再現した、という意味。
+  - B/C > 1 が 12/16 以上で、D/A > 1 が 12/16 未満なら、「stream の切り替えと新しいコードの組み合わせ」とする。
+  - B/C > 1 が 12/16 未満なら、「stream 以外」とする。そのとき C/A > 1 が 12/16 以上なら「stream 以外の差分が原因」と記録し、そうでなければ「判定できない」とする。
+- 数え方: 「比 > 1 のラウンド数」だけを数える。比がちょうど 1 のラウンドは > 1 に入れない。「逆向き」は「> 1 が 4 以下」であり、「< 1 が 12 以上」とは読み替えない。
+- R2 の「判定できない」は規則上の結論で、判定器の終了コードは 0（判定済み）。
+- B/A・C/A・B/C・D/A は、16 ラウンドの中央値と、ラウンドごとの値をすべて記録する。fresh の同じ 4 比も参考として記録する（判定には使わない）。
+
+[hard 条件]
+- 同じ腕の 16 ラウンドで checksum が完全に一致すること（reuse・fresh それぞれ）。不一致は、正しさの失敗として報告する。tolerance・baseline は変えない。
+- B と C、A と D は同じライブラリなので、checksum が違えば報告事項にする（終了コードは変えない）。
+- A と B の差は記録だけする。
+- 判定器の終了コード: 0 = 判定済み、3 = 同じ腕の中で checksum が一致しない（2 より優先）、
+  2 = 行の欠け・起動記録の不一致・RULE／道具／env_info／ゲートの不成立などで判定できない（このとき R1・R2 は判定しない）。
+
+[収録]
+- collect.sh が判定器の出力（judge-4299-gb10.md・.exit・ratios.tsv）と、ログ・JSONL・launch.tsv を docs/perf/logs/diag-4299-cudatrn-stream/gb10/ へ写す
+  （target-*・バイナリ・ビルドと各起動の *.err は写さない）。
+- マスク: ホームの絶対パス → <home>、ホスト名 → <cuda-node>、ユーザー名 → <user>（語境界つき。#4168 の recollect.sh と同じ定義で、
+  語の文字は英数字・下線・ハイフン）。マスクの後に漏れ検査（ホーム・ホスト名・ユーザー名〔語境界つき〕・IPv4 らしき文字列）を行い、
+  1 件でもあれば収録しない。その後で hwlock.log を確定し SHA256SUMS を書く。
+
+[結果の扱い]
+- 結果はすべて記録する。自律的な revert も、再計測による差し替えもしない。
+- 直すかどうか（学習を legacy stream に戻す案など）は、結果を見て所有者が決める。
+- #4174・#4175（0.15.0）は本計測を待たない。公開（#4175）の前に結果が出た場合は公開の判断材料にする。公開した後に直す場合は 0.15.1。
+
+[道具の sha256]
+- 本規則を固定するときの道具の sha256（`<sha256>  <リポジトリルート相対パス>`）。対象はランナー・判定器・collect.sh。
+  ランナーの --print-tool-sha256 の出力と完全一致させる。
+# >>> tool-sha256
+54dd7fcf6c2cdf2893e55b7eaf54a3c42d461a6147dbdd71e9234df3e189e4f1  scripts/bench/framework-compare/run_diag_4299_cudatrn_stream.sh
+a4dab0e51c55c132c4db53497e54f7428b3f0425cd5e30bc392e74d5e701cf85  scripts/bench/framework-compare/judge_diag_4299.py
+f9c99dbe158a3d00df1edc0e5f6f875b4fb76259b4d9fec7c6a489e77ddfc9f0  docs/perf/logs/diag-4299-cudatrn-stream/collect.sh
+# <<< tool-sha256
