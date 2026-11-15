@@ -1,7 +1,7 @@
 # 0.15.0 の 6 フレームワーク同席計測 — Mac mini（Apple M4）
 
-**状態: 計測済み（5/5）・5 run 中央値を集計済み。判定一覧は #4179。** crates.io `fandhe-ai =0.15.0` を Mac mini（Apple M4）の系列 B で 5 ラウンド測った #4177 の収録物と計測キット。
-RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`）と勝敗・前版比の表は #4179 の範囲で、本ディレクトリには置かない。本 README には数値の表・比・勝敗を書かない。
+**状態: 判定記録済み（計測 5/5・5 run 中央値の集計・判定一覧とスコアボードの生成〈#4179〉）。** crates.io `fandhe-ai =0.15.0` を Mac mini（Apple M4）の系列 B で 5 ラウンド測った #4177 の収録物と計測キット。
+RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`・`gen_0150.out`）と HTML は #4179 で `../framework-compare-0.15.0-remeasure/scoreboard/` に置いた（下の「スコアボード」節。Artifact は未公開）。数値は判定一覧・tally の範囲で書く。
 GB10 は #4178 が `../framework-compare-0.15.0-remeasure/` で行った。
 
 ## 計測の事実（収録物で確認済み）
@@ -33,6 +33,12 @@ python3 -I aggregate/median_rounds.py $M/results-macmini-0.15.0-median5.jsonl $M
 python3 -I aggregate/median_rounds.py $M/results-macmini-py-0.15.0-median5.jsonl $M/run{1..5}/results-macmini-py-0.15.0.jsonl
 sha256sum -c SHA256SUMS
 ```
+
+## スコアボード（判定記録・#4179）
+
+両機体を合わせた 27 セルの判定一覧とスコアボードは `../framework-compare-0.15.0-remeasure/scoreboard/` にある（生成器・検査器・再現手順・tally は同ディレクトリの README の「スコアボード」節）。
+本ディレクトリの `macmini-series-b/` の run1..5 と `*-median5.jsonl` が入力で、Mac mini の 13 行は 1 位 8・僅差 3・負け 2。Mac mini の計測条件（各ラウンドの前の他ジョブゲート。CLEAN かつ load1<3.0 を 30 秒間隔・最大 30 分待つ）は `scoreboard/gen_args.txt` に実測値から書いた。
+0.14.0→0.15.0 の差には、ライブラリの既定の変更（SME・STEEL ほか）と、Mac mini に足した他ジョブゲートの影響が含まれる（前版比は表示のみ）。
 
 以降の節は計測前に書いた計測キットの説明（0.14.0 からの変更・手順・自己テスト）である。
 

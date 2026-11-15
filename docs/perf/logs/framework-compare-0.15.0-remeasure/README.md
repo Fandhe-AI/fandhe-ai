@@ -1,7 +1,7 @@
 # 0.15.0 の 6 フレームワーク同席計測 — GB10（DGX Spark）
 
-**状態: 計測済み（5/5）・5 run 中央値を集計済み。判定一覧は #4179。** crates.io `fandhe-ai =0.15.0` を GB10（DGX Spark）で 5 ラウンド測った #4178 の収録物と計測キット。
-RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`）と勝敗・前版比の表は #4179 の範囲で、本ディレクトリには置かない。本 README には数値の表・比・勝敗を書かない。
+**状態: 判定記録済み（計測 5/5・5 run 中央値の集計・判定一覧とスコアボードの生成〈#4179〉）。** crates.io `fandhe-ai =0.15.0` を GB10（DGX Spark）で 5 ラウンド測った #4178 の収録物と計測キット。
+RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`・`gen_0150.out`）と HTML は #4179 で `scoreboard/` に置いた（下の「スコアボード」節。Artifact は未公開）。数値は判定一覧・tally の範囲で書く。
 Mac mini は #4177 が `../framework-compare-0.15.0-macmini-remeasure/` で行った。
 
 ## 計測の事実（収録物で確認済み）
@@ -35,6 +35,43 @@ python3 -I aggregate/median_rounds.py $g/results-dgx-0.15.0-extra-median5.jsonl 
 python3 -I aggregate/median_rounds.py $g/results-dgx-py-0.15.0-median5.jsonl $g/run{1..5}/results-dgx-py-0.15.0.jsonl
 sha256sum -c SHA256SUMS
 ```
+
+## スコアボード（判定記録・#4179）
+
+両機体を合わせた 27 セルの判定一覧とスコアボードは `scoreboard/` にある（#4179。Mac mini 側 `../framework-compare-0.15.0-macmini-remeasure/` の `macmini-series-b/` も入力に使う）。判定式・閾値・tolerance・tally の書式・noise `na` は 0.14.0 から変えていない（RULE）。
+判定側（fandhe-ai reuse）の要素検証の不合格は 0 件（あれば生成が止まる）。
+
+| ファイル | 内容 |
+|---|---|
+| `scoreboard/gen_0150.py` | 生成器（判定関数は `gen_0140.py` と字句で同一）。判定一覧を標準出力へ、HTML を `--out` へ |
+| `scoreboard/check_0150.py` | HTML と判定一覧・理由表の機械照合（0.14.0 の検査を引き継ぎ、ピン表記 `fandhe-ai =0.15.0` の存在と 0.15.0 以外のピン表記の禁止を足した） |
+| `scoreboard/run_0150.sh` | 一括実行（下の手順） |
+| `scoreboard/gen_args.txt`・`body_0150.html`・`style.css`・`unreached_0150.tsv` | 両機の実測依存の引数・本文・色・理由表（1 位でない 9 セル） |
+| `scoreboard/gen_0150.out`・`scoreboard/out/scoreboard_0150.html` | 判定一覧（27 行＋tally 1 行）と HTML（生成物。コミット済み） |
+| `../../framework-compare-feature-matrix-0.15.0.md`（`docs/perf/`） | 対応表の再監査（9 行を 5 区分で再判定。判定は 0.14.0 から変わらない） |
+
+再現（本ディレクトリで。Linux・macOS の bash 3.2 で動く）:
+
+```bash
+cd scoreboard
+bash run_0150.sh            # rc 0 なら下の 5 段がすべて通った
+bash run_0150.sh skeleton   # 雛形（1 位以外のセルの TSV）だけを出す
+```
+
+`run_0150.sh` の段: (0) 前版参照 6 つ（0.14.0 の median5 5 本と `gen_0140.out`。両機体の `RULE.txt` の sha256）の照合 → (1) 字句照合（判定関数 7 本が `gen_0140.py` と関数単位で diff 0）→ (2) 回帰（0.14.0 の入力と引数を `gen_0150.py` に与えた判定一覧が、コミット済みの `gen_0140.out` と byte 一致）→ 0.15.0 の生成 →
+コミット済み `gen_0150.out` との `cmp` → `check_0150.py`。0.14.0 にあった機体別 judge との byte 一致は、0.15.0 では機体別 judge を置かないため上の (1)(2) に置き換えた（所有者決定・#4179 issuecomment-6887862187）。
+
+判定一覧の tally（同一ラウンド内の対戦相手比の 5 run 中央値。`scoreboard/gen_0150.out`）:
+
+| 条件 | 1 位 | 僅差 | 負け | 判定不能 | ノイズ帯 | 計 |
+|---|---|---|---|---|---|---|
+| 0.15.0（本計測） | 18 | 3 | 6 | 1 | 未算出（対照系列なし） | 27 |
+| 0.14.0（`../framework-compare-0.14.0-remeasure/scoreboard/gen_0140.out`） | 13 | 3 | 11 | 1 | 未算出（対照系列なし） | 27 |
+
+機体別（0.15.0）: Mac mini 13 行は 1 位 8・僅差 3・負け 2、GB10 14 行は 1 位 10・僅差 0・負け 4。区分が 0.14.0 から変わったのは Mac mini の 8 セルで、GB10 は区分の変化がない。
+**0.14.0→0.15.0 の差には、ライブラリの既定の変更（SME・Graph・jpw1・STEEL）と計測日の負荷の揺れが含まれる**（前版比は表示のみで勝敗には使わない。Mac mini は他ジョブゲートも足した）。
+
+Artifact（HTML の公開）は**未公開**。マージ後にメインのセッションが `scoreboard/out/scoreboard_0150.html` から新しいページとして公開し（0.14.0 のページは上書きしない）、URL を #4179 に記録する。GitHub Pages には載せない。
 
 以降の節は計測前に書いた計測キットの説明（0.14.0 からの変更・手順・自己テスト）である。
 
