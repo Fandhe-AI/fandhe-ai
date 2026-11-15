@@ -167,8 +167,12 @@ v0.15.0 で増えた所有者の承認はない。得ていない承認は書か
 | 推論・サービング | 0 | 0 | 一致 | — |
 
 29 項目の外で数えた項目は 0 件である（0.14.0 版 §4.2 と同じ。`CosineSimilarity`・`PairwiseDistance` の `create_graph` 拒否は承認済みで保留に当たらず、件数に数えない）。
-29 項目の外の走査: `git diff --name-only v0.14.0 v0.15.0 -- docs/`（`docs/perf/logs` 以外）で増減した決定記録を確認した。`docs/autodiff-higher-order-grad-decision.md`（§77〜§83 の追記。#4101 ツリーの `create_graph` 総括判定の記録）・`docs/autodiff-cumulative-ops-decision.md`・`docs/perf/` 配下の A/B・診断の記録・`docs/migration/0.15.0.md` が主で、
-新たに「所有者の回答が無い論点」を示す記述は見つからなかった（§72.1 の F5 は 0.14.0 版と同じ扱いで、`docs/compat-unlisted-holds-inventory.md` と保留ガード 43 件も不変）。
+29 項目の外の走査: `git diff --name-only v0.14.0 v0.15.0 -- docs/`（`docs/perf/logs` 以外）で増減したファイル名を確認し、`create_graph` に関わる決定記録 2 本（`docs/autodiff-higher-order-grad-decision.md`〈§77〜§83 の追記。#4101 ツリー〉・`docs/autodiff-cumulative-ops-decision.md`）の追記行を「所有者／承認／未回答／保留／見送り／未決」で grep して読んだ。
+それ以外の `docs/perf/` 配下の A/B・診断の記録と移行ノートは、ファイル名と見出しの確認にとどめ、全文は読んでいない。
+追記には、所有者判断待ち・起票未了の後続候補が残っている: `dg32`（Triplet の `PowScalar` の VJP 係数の指数の食い違い）の是正（判定が変わるため所有者判断）、既存の `flag` 行の O(C²)／O(d²) の走査への上限の導入（受理 → 拒否になりうるため所有者判断）、
+`Lin` の仮定（CPU の `f32::powf`／`exp` が 2 ulp 以内。設計値で、GPU・aarch64 Linux・macOS は未実測。いずれも §80〜§82）。いずれも `create_graph` の内部判定の後続候補で、facade の公開面でも追跡表の 29 項目でもないため、
+0.14.0 版 §4.2 の `CosineSimilarity`・`PairwiseDistance` と同じく件数に数えず、§6.2 に確認事項として挙げた。`Lin::total` の精密化（#4132）は 2026-11-08 に契約維持で決定し閉じている（§82.15.6）。
+§72.1 の F5 は 0.14.0 版と同じ扱いで、`docs/compat-unlisted-holds-inventory.md` と保留ガード 43 件も不変。
 
 ### 4.3 0.14.0 版 §4.3 の決着 9 件
 
@@ -180,7 +184,7 @@ v0.15.0 で増えた所有者の承認はない。得ていない承認は書か
 
 - 0.14.0 版 §5（付録表 172 件。基準 sha `1cbb4759`。同書 §5.1〜§5.8）を**そのまま引き継ぎ、再作成していない**。数える母集合も判定規則（「実測済み」はテスト単位または族単位の pass で、測定コミットの内容に限る）も変えていない。
 - 引き継ぐ根拠: v0.14.0 から v0.15.0 までに `docs/perf/logs` へ新設されたディレクトリ 26 件のうち、API の実機 parity の測定は **0 件**である（`git diff --name-status v0.14.0 v0.15.0 -- docs/perf/logs` の追加ディレクトリを確認）。
-  25 件は性能の A/B・診断・同席計測・道具（`cpu-gemm-reuse-release-sizegate-*`・`cpu-infer-jpw1-gb10-ab-*`・`cuda-infer-graph-default-ab-4163`・`diag-0140-*`・`diag-4299-cudatrn-stream`・`framework-compare-0.14.0-*remeasure`・`macmini-foreign-job-gate`・`metal-steel-*`・`noise-band-4142`・`prepost-0150-4168`・`sme-*`）で、
+  25 件は、ディレクトリ名で性能の A/B・診断・同席計測・道具と分類した（各 README の中身までは読んでいない。`cpu-gemm-reuse-release-sizegate-*`・`cpu-infer-jpw1-gb10-ab-*`・`cuda-infer-graph-default-ab-4163`・`diag-0140-*`・`diag-4299-cudatrn-stream`・`framework-compare-0.14.0-*remeasure`・`macmini-foreign-job-gate`・`metal-steel-*`・`noise-band-4142`・`prepost-0150-4168`・`sme-*`）。
   残る 1 件は `rocm-facade-3867`（#3867。**未実測**。§5.2）。既存ディレクトリの変更は `sme-default-on-3231` の 1 件だけ（性能の記録）。
 - 本付録の「実機 parity」は、各行の根拠欄（§3）に 0.14.0 版から引き継いだ記述のまま載せている。実機は動かしていない。
 
@@ -235,6 +239,7 @@ v0.15.0 で増えた所有者の承認はない。得ていない承認は書か
 - `CosineSimilarity`・`PairwiseDistance` の `create_graph` 拒否（決定記録 `docs/autodiff-higher-order-grad-decision.md` §73）。承認済みで別設計待ち・恒久ではなく、起票は所有者の承認事項で未起票（0.14.0 版と同じ）。
 - §72.1 の F5（`Selu` など 5 variant と `Atan2` の `create_graph` fail-closed。#2649・#2634）。記録のみで承認は主張しない（0.14.0 版と同じ）。
 - `create_graph` の総括判定の実機 parity（v0.15.0 の `Lin` 化の後）。測定の起票は所有者の承認事項で、本書では起票していない（§5.3）。
+- `create_graph` の内部判定の後続候補（§4.2 の `dg32` の是正・`flag` 行の走査量の上限・`Lin` の仮定の GPU／aarch64 Linux／macOS での実測）。所有者判断・起票は所有者承認後で、本書では起票していない。
 
 ### 6.3 本 PR の範囲
 

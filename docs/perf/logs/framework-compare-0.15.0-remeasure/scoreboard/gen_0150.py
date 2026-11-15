@@ -474,6 +474,7 @@ def print_verdicts():
 UNREACHED_CLASSES = ('ハードの上限', '計測窓の定義', '自分たちの制約')  # loss-attribution-matrix.md §10.5 の 3 分類
 UNREACHED_HOLD_OWNER_DECIDED = frozenset({'G-CPU-INF'})  # 所有者判断（2026-10-27）を経た分類保留セル
 UNREACHED_HOLD_INHERITED = frozenset({'M-MTL-TRN'})  # 0.13.0 で新たに生じ（所有者判断は未）、0.14.0・0.15.0 に引き継いだ分類保留セル
+UNREACHED_HOLD_RECLASSIFIED_4168 = {'M-MTL-G4096': '#4153', 'M-CPU-TRN': '#4146'}  # 0.14.0 の「自分たちの制約」から、#4168 の記録 PR が診断（#4153／#4146）を根拠に付け直した分類保留セル（所有者判断の有無はこの表では主張しない）
 UNREACHED_HOLD = '分類保留'  # 所有者判断（2026-10-27・0.12.0 の #3274）: 数字で 3 分類に割り当てられなかったセルの表示専用ラベル
 
 def unreached_expected():
@@ -538,6 +539,8 @@ def unreached_table(path):
                 src = '所有者判断 2026-10-27'
             elif cell in UNREACHED_HOLD_INHERITED:
                 src = '0.13.0 で新たに生じた保留を引き継いだ・所有者判断は未'
+            elif cell in UNREACHED_HOLD_RECLASSIFIED_4168:
+                src = f'0.14.0 の分類（自分たちの制約）から #4168 の記録 PR が付け直した保留（診断 {UNREACHED_HOLD_RECLASSIFIED_4168[cell]}）'
             else:
                 src = '0.15.0 で新たに生じた保留・所有者判断は未'
             return f'<span class="pill solo" title="数字で 3 分類に割り当てられなかった（{src}）">{e(k)}</span>'
