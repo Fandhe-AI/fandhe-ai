@@ -1,7 +1,7 @@
 # 0.15.0 の 6 フレームワーク同席計測 — GB10（DGX Spark）
 
 **状態: 判定記録済み（計測 5/5・5 run 中央値の集計・判定一覧とスコアボードの生成〈#4179〉）。** crates.io `fandhe-ai =0.15.0` を GB10（DGX Spark）で 5 ラウンド測った #4178 の収録物と計測キット。
-RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`・`gen_0150.out`）と HTML は #4179 で `scoreboard/` に置いた（下の「スコアボード」節。Artifact は未公開）。数値は判定一覧・tally の範囲で書く。
+RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`・`gen_0150.out`）と HTML は #4179 で `scoreboard/` に置いた（下の「スコアボード」節。Artifact は 2026-11-15 に公開）。数値は判定一覧・tally の範囲で書く。
 Mac mini は #4177 が `../framework-compare-0.15.0-macmini-remeasure/` で行った。
 
 ## 計測の事実（収録物で確認済み）
@@ -71,7 +71,7 @@ bash run_0150.sh skeleton   # 雛形（1 位以外のセルの TSV）だけを�
 機体別（0.15.0）: Mac mini 13 行は 1 位 8・僅差 3・負け 2、GB10 14 行は 1 位 10・僅差 0・負け 4。区分が 0.14.0 から変わったのは Mac mini の 8 セルで、GB10 は区分の変化がない。
 **0.14.0→0.15.0 の差には、ライブラリの既定の変更（SME・Graph・jpw1・STEEL）と計測日の負荷の揺れが含まれる**（前版比は表示のみで勝敗には使わない。Mac mini は他ジョブゲートも足した）。
 
-Artifact（HTML の公開）は**未公開**。マージ後にメインのセッションが `scoreboard/out/scoreboard_0150.html` から新しいページとして公開し（0.14.0 のページは上書きしない）、URL を #4179 に記録する。GitHub Pages には載せない。
+スコアボードは claude.ai Artifact として公開した（非公開の個人 Artifact。<https://claude.ai/artifact/Vd2q3sSgWzsWEXU42aWuEp>。2026-11-15・main `337c383ac` の `scoreboard/out/scoreboard_0150.html` から先頭の charset と viewport の meta 2 行を除いたもの）。0.14.0 のページは上書きしていない。GitHub Pages には載せない。URL は #4179 にも記録した。
 
 以降の節は計測前に書いた計測キットの説明（0.14.0 からの変更・手順・自己テスト）である。
 
