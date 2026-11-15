@@ -1,0 +1,13 @@
+rounds total=5 gate_pass=5 status=formal
+versions {"mlx": "0.32.4", "torch": "2.14.0"}
+oss_exit exit=1,exit=1,exit=1,exit=1,exit=1
+# CPU GEMM GFLOP/s（run 間中央値）と self÷相手（同一ラウンド内の比の run 間中央値）
+cpu size=512 self=777 gemm=394 mm=112 self/gemm=1.975 self/mm=6.968 med_ratio self/gemm=1.972 match_rounds gemm=5/5 mm=5/5
+cpu size=1024 self=1191 gemm=494 mm=113 self/gemm=2.407 self/mm=10.578 med_ratio self/gemm=2.411 match_rounds gemm=5/5 mm=0/5
+cpu size=2048 self=1164 gemm=471 mm=112 self/gemm=2.465 self/mm=10.366 med_ratio self/gemm=2.470 match_rounds gemm=5/5 mm=0/5
+cpu size=4096 self=976 gemm=497 mm=112 self/gemm=1.965 self/mm=8.734 med_ratio self/gemm=1.965 match_rounds gemm=0/5 mm=0/5
+# Metal GEMM TFLOPS（run 間中央値）と比（同一ラウンド内の比の run 間中央値）
+metal size=512 self_transfer=0.48 self_prepared=0.81 mlx_device=0.68 mlx_transfer=0.67 mps=0.71 transfer/mlx_transfer=0.72 transfer/mps=0.68 prepared/mlx_device=1.12
+metal size=1024 self_transfer=1.10 self_prepared=1.84 mlx_device=2.29 mlx_transfer=1.75 mps=2.16 transfer/mlx_transfer=0.63 transfer/mps=0.51 prepared/mlx_device=0.83
+metal size=2048 self_transfer=1.79 self_prepared=2.06 mlx_device=2.98 mlx_transfer=2.16 mps=3.15 transfer/mlx_transfer=0.82 transfer/mps=0.57 prepared/mlx_device=0.69
+metal size=4096 self_transfer=2.25 self_prepared=2.03 mlx_device=3.07 mlx_transfer=2.78 mps=3.22 transfer/mlx_transfer=0.81 transfer/mps=0.70 prepared/mlx_device=0.66
