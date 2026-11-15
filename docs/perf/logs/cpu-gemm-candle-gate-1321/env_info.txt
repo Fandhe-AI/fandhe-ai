@@ -17,7 +17,7 @@
 | DGX | 0.7.0-1321 | registry | "" | registry |
 | DGX | head-ced4d14-1321 | path:/home/fandhe/work/fc-1321/rust-ai-library-run/crates/facade | "" | registry |
 | M4 Max | 0.7.0-1321 | registry | "" | registry |
-| M4 Max | head-ced4d14-1321 | path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade | "" | registry |
+| M4 Max | head-ced4d14-1321 | path:~/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade | "" | registry |
 
 4 系列とも `results/raw/results-*.jsonl` は 45 行、`skipped-*.log` は空。
 
@@ -42,10 +42,10 @@
 
 ## Apple M4 Max（このセッションが動くホスト自身）
 
-- OS: macOS 26.6.2（BuildVersion 25G83）・`Darwin nancynoMBP 25.6.0 arm64`
+- OS: macOS 26.6.2（BuildVersion 25G83）・`Darwin <host> 25.6.0 arm64`
 - CPU: `hw.perflevel0.logicalcpu=12`（性能コア）・`hw.perflevel1.logicalcpu=4`（効率コア）
 - rustc: `1.96.0 (ac68faa20 2026-05-25)`
-- 実行場所: 本 worktree（`/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43`）を直接使用（rsync 転送不要。ローカル実行）
+- 実行場所: 本 worktree（`~/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43`）を直接使用（rsync 転送不要。ローカル実行）
 - trusted-hosts: `GEMM_GATE_TRUSTED_HOSTS_FILE` でメイン worktree の `scripts/bench/framework-compare/gemm-gate-trusted-hosts.local` を直接参照（コピーせず）
 - 専有ゲート: 開始時 load average 6.48〜8.26（他セッション並走中の共有負荷）。08:18:53 UTC に load1=4.34 で 2 回連続 load1<6.0 を満たし通過（`gate-m4max.log`）
 - 実行順: 正式系列（`0.7.0-1321`。専有ゲート通過〈08:18:53 UTC〉で開始し、参考系列開始
@@ -57,7 +57,7 @@
   → 参考系列（`head-ced4d14-1321`。08:20:01〜08:20:49 UTC）
 - **注記（共有負荷）**: 専有ゲート自体は通過したが、参考系列の計測完了時点の load average は `9.27, 7.71, 7.96`（`uptime-m4max.log`）まで再上昇していた。他セッションの並走ビルド・計測が計測ウィンドウ中に増加した可能性がある。規則 4 に従い「専有ゲート通過」と「完了時点で共有負荷が再上昇した」の両方を事実として記録する（判定自体は §22.1 規則どおり確定するが、絶対値の解釈には幅を持たせる）
 - `git status` で `scripts/bench/framework-compare/Cargo.toml`／`Cargo.lock` の差分なしを確認済み
-- 秘密情報 grep: `/Users/nancy/...` パスは precedent（既存コミット済み manifest 多数。例 `manifest-m4max-cpu-gemm-gate-head-145639d-pzero-on.json`）と同型のため許容する既存慣行として扱う。DGX 側の CUDA_NODE 実 SSH ホスト名（`docs/real-hardware-verification-env.local.md` にのみ存在するフルドメイン形式）は非開示のまま維持し、本ファイル・生成物のいずれにも記載していない（`<cuda-node>`〈trusted-hosts の tag 用短縮形。実機の `hostname` コマンド出力〉自体は precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で既に許容されている短縮形のため同様に扱う）
+- 秘密情報 grep: `~/...` パスは precedent（既存コミット済み manifest 多数。例 `manifest-m4max-cpu-gemm-gate-head-145639d-pzero-on.json`）と同型のため許容する既存慣行として扱う。DGX 側の CUDA_NODE 実 SSH ホスト名（`docs/real-hardware-verification-env.local.md` にのみ存在するフルドメイン形式）は非開示のまま維持し、本ファイル・生成物のいずれにも記載していない（`<cuda-node>`〈trusted-hosts の tag 用短縮形。実機の `hostname` コマンド出力〉自体は precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で既に許容されている短縮形のため同様に扱う）
 
 ## 実測結果サマリ（詳細は gate doc §22.4 を正とする）
 

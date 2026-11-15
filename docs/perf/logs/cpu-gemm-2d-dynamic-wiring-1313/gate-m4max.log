@@ -9,25 +9,25 @@ attempt=6 load1=9.64
 attempt=7 load1=5.14
 attempt=8 load1=3.40
 gate PASSED at attempt=8
-who: nancy            console       8月 19 12:50 
-nancy            ttys000       8月 19 12:50 
-nancy            ttys001       8月 19 12:50 
-nancy            ttys002       8月 20 09:27 
-nancy            ttys003       8月 19 12:50 
-nancy            ttys004       8月 19 13:48 
-nancy            ttys005       8月 29 11:52 
-nancy            ttys006       8月 19 13:58 
-nancy            ttys007       8月 19 13:58 
-nancy            ttys008       8月 27 16:16 
-nancy            ttys009       8月 22 12:49 
-nancy            ttys010       8月 30 21:43 
-nancy            ttys011       8月 19 19:44 
-nancy            ttys013       9月  6 22:36 
-nancy            ttys015       8月 20 00:08 
-nancy            ttys017       8月 20 09:27 
-nancy            ttys018       8月 30 10:20 
-nancy            ttys020       9月  6 19:56 
-nancy            ttys021       9月  7 04:03 
+who: <user>            console       8月 19 12:50 
+<user>            ttys000       8月 19 12:50 
+<user>            ttys001       8月 19 12:50 
+<user>            ttys002       8月 20 09:27 
+<user>            ttys003       8月 19 12:50 
+<user>            ttys004       8月 19 13:48 
+<user>            ttys005       8月 29 11:52 
+<user>            ttys006       8月 19 13:58 
+<user>            ttys007       8月 19 13:58 
+<user>            ttys008       8月 27 16:16 
+<user>            ttys009       8月 22 12:49 
+<user>            ttys010       8月 30 21:43 
+<user>            ttys011       8月 19 19:44 
+<user>            ttys013       9月  6 22:36 
+<user>            ttys015       8月 20 00:08 
+<user>            ttys017       8月 20 09:27 
+<user>            ttys018       8月 30 10:20 
+<user>            ttys020       9月  6 19:56 
+<user>            ttys021       9月  7 04:03 
  %CPU   PID COMM
   9.2   603 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
   6.9  1505 /Applications/cmux.app/Contents/MacOS/cmux
@@ -37,7 +37,7 @@ nancy            ttys021       9月  7 04:03
   3.4  1529 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
   2.9   645 /usr/libexec/airportd
   2.7 88969 /Applications/Typeless.app/Contents/Frameworks/Typeless Helper (Renderer).app/Contents/MacOS/Typeless Helper (Renderer)
-  2.5 10115 /Users/nancy/.local/bin/claude
+  2.5 10115 ~/.local/bin/claude
   2.2 88931 /Applications/Typeless.app/Contents/MacOS/Typeless
   2.1 79945 /Applications/Dia.app/Contents/MacOS/Dia
   1.6  1371 /usr/libexec/milod

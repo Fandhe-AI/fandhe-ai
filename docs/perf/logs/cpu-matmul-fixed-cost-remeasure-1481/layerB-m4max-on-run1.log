@@ -26,10 +26,10 @@
    Compiling rand v0.9.5
    Compiling rand_distr v0.5.1
    Compiling half v2.7.1
-   Compiling fandhe-ai-tensor-core v0.7.0 (/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/tensor-core)
-   Compiling fandhe-ai-backend-cpu v0.7.0 (/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/backend-cpu)
-   Compiling fandhe-ai-autodiff v0.7.0 (/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/autodiff)
-   Compiling fandhe-ai-backend-cuda v0.7.0 (/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/backend-cuda)
+   Compiling fandhe-ai-tensor-core v0.7.0 (/private/tmp/claude-501/-Users-<user>-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/tensor-core)
+   Compiling fandhe-ai-backend-cpu v0.7.0 (/private/tmp/claude-501/-Users-<user>-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/backend-cpu)
+   Compiling fandhe-ai-autodiff v0.7.0 (/private/tmp/claude-501/-Users-<user>-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/autodiff)
+   Compiling fandhe-ai-backend-cuda v0.7.0 (/private/tmp/claude-501/-Users-<user>-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/backend-cuda)
 warning: unused import: `CudaSlice`
   --> crates/backend-cuda/src/gemm_mma.rs:17:19
    |
@@ -441,7 +441,7 @@ warning: methods `alloc_uninit_f16` and `upload_f16` are never used
 
 warning: `fandhe-ai-backend-cuda` (lib) generated 61 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
    Compiling objc2-metal v0.3.2
-   Compiling fandhe-ai-backend-metal v0.7.0 (/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/backend-metal)
+   Compiling fandhe-ai-backend-metal v0.7.0 (/private/tmp/claude-501/-Users-<user>-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/backend-metal)
 warning: struct `BatchGpuTimestamps` is never constructed
    --> crates/backend-metal/src/context.rs:144:19
     |
@@ -489,7 +489,7 @@ warning: methods `encode_tiled_nn_recorded` and `encode_tiled_prepared` are neve
 2174 |     pub(crate) fn encode_tiled_prepared(
      |                   ^^^^^^^^^^^^^^^^^^^^^
 
-   Compiling bench-harness v0.7.0 (/private/tmp/claude-501/-Users-nancy-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/bench-harness)
+   Compiling bench-harness v0.7.0 (/private/tmp/claude-501/-Users-<user>-fandhe-library-rust-ai-library/bac57b76-f1a4-4186-aea8-8f5e06b5dc10/scratchpad/fc-1481-on/crates/bench-harness)
 warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
     Finished `release` profile [optimized] target(s) in 14.61s
      Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cpu-08eb8cc2a1653da7)

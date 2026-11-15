@@ -168,7 +168,7 @@ warning: methods `alloc_uninit_f16` and `upload_f16` are never used
     |                   ^^^^^^^^^^
 
 warning: `fandhe-ai-backend-cuda` (lib) generated 25 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
-   Compiling fandhe-ai-backend-metal v0.6.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_66511426-3dc-16/crates/backend-metal)
+   Compiling fandhe-ai-backend-metal v0.6.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_66511426-3dc-16/crates/backend-metal)
     Finished `release` profile [optimized] target(s) in 0.26s
      Running tests/gemm_transposed_perf.rs (target/release/deps/gemm_transposed_perf-bbed059222c6aaa5)
 

@@ -78,12 +78,12 @@ DGX・M4 Max とも `results/raw/results-*-cpu-gemm-gate-0.8.0-1488.jsonl` は 4
 
 ## Apple M4 Max（このセッションが動くホスト自身）
 
-- OS: macOS 26.6.2（BuildVersion 25G83）・`Darwin nancynoMBP 25.6.0 arm64`
+- OS: macOS 26.6.2（BuildVersion 25G83）・`Darwin <host> 25.6.0 arm64`
 - CPU: `hw.perflevel0.logicalcpu=12`（性能コア）・`hw.perflevel1.logicalcpu=4`
   （効率コア）
 - rustc: `1.96.0 (ac68faa20 2026-05-25)`
 - 実行場所: 本 worktree
-  （`/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_bc0d0530-bc1-27`）
+  （`~/fandhe/library/rust-ai-library/.claude/worktrees/wf_bc0d0530-bc1-27`）
   を直接使用（rsync 転送不要。ローカル実行）
 - trusted-hosts: `GEMM_GATE_TRUSTED_HOSTS_FILE` でメイン worktree の
   `scripts/bench/framework-compare/gemm-gate-trusted-hosts.local` を直接参照
@@ -112,7 +112,7 @@ DGX・M4 Max とも `results/raw/results-*-cpu-gemm-gate-0.8.0-1488.jsonl` は 4
   正式系列の計測は 02:20:26〜02:21:31 UTC（約 1 分強）に完了。計測ウィンドウ中に
   load average は 4.13→11.42（1 分平均）まで再上昇しているが（`uptime-m4max.log`）、
   計測自体は完了しておりゲート判定の事後変更は行っていない
-- 秘密情報 grep: `/Users/nancy/...` パスは precedent（既存コミット済み manifest
+- 秘密情報 grep: `~/...` パスは precedent（既存コミット済み manifest
   多数）と同型のため許容する既存慣行として扱う。DGX 側の CUDA_NODE 実 SSH
   ホスト名（`docs/real-hardware-verification-env.local.md` にのみ存在するフル
   ドメイン形式）は非開示のまま維持

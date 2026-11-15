@@ -20,7 +20,7 @@
    Compiling num-traits v0.2.19
    Compiling libloading v0.9.0
    Compiling serde v1.0.229
-   Compiling fandhe-ai-backend-cpu v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-cpu)
+   Compiling fandhe-ai-backend-cpu v0.7.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-cpu)
    Compiling serde_json v1.0.151
    Compiling either v1.17.0
    Compiling objc2-core-foundation v0.3.2
@@ -40,8 +40,8 @@
    Compiling rand v0.9.5
    Compiling rand_distr v0.5.1
    Compiling half v2.7.1
-   Compiling fandhe-ai-tensor-core v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/tensor-core)
-   Compiling fandhe-ai-backend-cuda v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-cuda)
+   Compiling fandhe-ai-tensor-core v0.7.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.7.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-cuda)
 warning: unused import: `crate::context_cache`
   --> crates/backend-cuda/src/gemm_mma.rs:21:5
    |
@@ -329,8 +329,8 @@ warning: methods `alloc_uninit_f16` and `upload_f16` are never used
 
    Compiling objc2-metal v0.3.2
 warning: `fandhe-ai-backend-cuda` (lib) generated 43 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
-   Compiling fandhe-ai-backend-metal v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-metal)
-   Compiling bench-harness v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/bench-harness)
+   Compiling fandhe-ai-backend-metal v0.7.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-metal)
+   Compiling bench-harness v0.7.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/bench-harness)
     Finished `release` profile [optimized] target(s) in 12.85s
      Running tests/gemm_strided_parity.rs (target/release/deps/gemm_strided_parity-054c6752fdbba18a)
 
@@ -630,7 +630,7 @@ warning: methods `alloc_uninit_f16` and `upload_f16` are never used
     |                   ^^^^^^^^^^
 
 warning: `fandhe-ai-backend-cuda` (lib) generated 43 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 1 suggestion)
-   Compiling fandhe-ai-backend-metal v0.7.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-metal)
+   Compiling fandhe-ai-backend-metal v0.7.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_d693f20c-fb7-140/crates/backend-metal)
     Finished `release` profile [optimized] target(s) in 0.30s
      Running tests/gemm_dynamic_tile_parity.rs (target/release/deps/gemm_dynamic_tile_parity-cd884c1e59e6ae87)
 
