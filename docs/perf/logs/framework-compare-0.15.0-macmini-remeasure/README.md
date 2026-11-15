@@ -1,9 +1,40 @@
 # 0.15.0 の 6 フレームワーク同席計測 — Mac mini（Apple M4）
 
-**状態: RULE 固定・未計測。** crates.io `fandhe-ai =0.15.0`（framework-compare のピンは #4305 で更新済み）を Mac mini の系列 B で測る #4177 の計測キット。
-実測値・判定はまだ無い。`RULE.txt` は別 PR で道具の sha256 と計測 SHA を書き込んで固定する（#4168 の「道具 #4292 → RULE #4294」と同じ分離）。
-スコアボードの生成器・検査器（`gen_0150.py`・`check_0150.py`）は #4179 の範囲で、本ディレクトリには置かない。GB10 は #4178 が別ディレクトリ `../framework-compare-0.15.0-remeasure/` で行う。
-計測の実行と値の確認はこの PR の範囲外。
+**状態: 計測済み（5/5）・5 run 中央値を集計済み。判定一覧は #4179。** crates.io `fandhe-ai =0.15.0` を Mac mini（Apple M4）の系列 B で 5 ラウンド測った #4177 の収録物と計測キット。
+RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`）と勝敗・前版比の表は #4179 の範囲で、本ディレクトリには置かない。本 README には数値の表・比・勝敗を書かない。
+GB10 は #4178 が `../framework-compare-0.15.0-remeasure/` で行った。
+
+## 計測の事実（収録物で確認済み）
+
+- 系列: 2026-11-14T16:35:58Z〜16:44:57Z。`loop-macmini.log` が `ALL-DONE completed=5/5`。
+- 他ジョブゲート: 各 round で `gate=pass threshold=3.0`、`foreign-before`・`foreign-after` とも clean。round 4 だけ前ゲートで 30 秒待った（1 回目の foreign 判定は CLEAN だったが load1 が閾値以上だったため。`macmini-series-b/foreign-gate/r4-before-a1.txt`・`macmini-series-b/gate.log`）。
+- 環境変数検査: 5 round とも `fandhe_ai_env=none`・`rayon_num_threads_env=none`（`run*/env_guard.txt`）。計測ツリーの指紋は系列の前後で一致（`env/tree-fingerprint-*.txt`）。
+- venv: `venv-torch`・`venv-tf` の freeze は 0.14.0 の収録と byte 一致（`env/freeze-cmp.txt`）。
+- 計測 SHA: `rev-stamp.txt` は 5 round とも `4fce735fb…`（RULE と一致）。
+- 同一性検査: `aggregate/check_identity.py`（0.14.0 の同名版から版の文字列だけを 0.15.0 に変えたもの）が rc=0。行数は Rust 48・Python 32（5 run とも）。
+
+## 5 run 中央値の集計
+
+`aggregate/median_rounds.py`（0.14.0 の同名版と byte 一致）で run1..5 から、セルごとに `median_s` の中央値 round の行を選んで 1 本にした（全セルで 5 run 揃い。2 回実行して byte 一致）。判定・勝敗・集計表は含まない（#4179）。
+
+| ファイル | セル数 | sha256 |
+|---|---|---|
+| `macmini-series-b/results-macmini-0.15.0-median5.jsonl` | 48 | `bbe4960d8ab53ab277f5cc3d5f7808a53fa32f53aa8989ce588b78e8da5cbe0c` |
+| `macmini-series-b/results-macmini-py-0.15.0-median5.jsonl` | 32 | `4aaca17b39b2de5e2604041d8cc155f5ab14cb2c6db23ed1b2fe54690b9d4247` |
+
+スクリプトの sha256: `aggregate/check_identity.py` は `1956d53f8998fbb00737e6c913611ff9778fbd13dd4874a352f70effd0a6ca08`、`aggregate/median_rounds.py` は `8b74f22339ee94a280617a209214134f6c55698eb86ef01bae3f9d657724306f`。
+
+再現（本ディレクトリで）:
+
+```bash
+PIN=4fce735fb57d97c09ce96b7c6b77eff915c24229; M=macmini-series-b
+python3 -I aggregate/check_identity.py $PIN results-macmini-0.15.0.jsonl=48,results-macmini-py-0.15.0.jsonl=32 $M/run{1..5}
+python3 -I aggregate/median_rounds.py $M/results-macmini-0.15.0-median5.jsonl $M/run{1..5}/results-macmini-0.15.0.jsonl
+python3 -I aggregate/median_rounds.py $M/results-macmini-py-0.15.0-median5.jsonl $M/run{1..5}/results-macmini-py-0.15.0.jsonl
+sha256sum -c SHA256SUMS
+```
+
+以降の節は計測前に書いた計測キットの説明（0.14.0 からの変更・手順・自己テスト）である。
 
 ## 0.14.0 からの変更
 

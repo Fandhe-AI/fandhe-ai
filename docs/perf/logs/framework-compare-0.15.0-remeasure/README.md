@@ -1,9 +1,42 @@
 # 0.15.0 の 6 フレームワーク同席計測 — GB10（DGX Spark）
 
-**状態: RULE 固定・未計測。** crates.io `fandhe-ai =0.15.0`（framework-compare のピンは #4305 で更新済み）を GB10 で 5 ラウンド測る #4178 の計測キット。
-実測値・判定はまだ無い。`RULE.txt` は別 PR で道具の sha256 と計測 SHA を書き込んで固定する（#4168 の「道具 → RULE」と同じ分離）。
-スコアボードの生成器・検査器（`gen_0150.py`・`check_0150.py`。0.14.0 の `scoreboard/run_0140.sh` に当たるもの）は #4179 の範囲で、本ディレクトリには置かない。Mac mini は #4177 が `../framework-compare-0.15.0-macmini-remeasure/` で行う。
-計測の実行と値の確認はこの PR の範囲外。
+**状態: 計測済み（5/5）・5 run 中央値を集計済み。判定一覧は #4179。** crates.io `fandhe-ai =0.15.0` を GB10（DGX Spark）で 5 ラウンド測った #4178 の収録物と計測キット。
+RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`）と勝敗・前版比の表は #4179 の範囲で、本ディレクトリには置かない。本 README には数値の表・比・勝敗を書かない。
+Mac mini は #4177 が `../framework-compare-0.15.0-macmini-remeasure/` で行った。
+
+## 計測の事実（収録物で確認済み）
+
+- 系列: 2026-11-14T16:36:06Z〜17:09:51Z。`gb10/loop.log` が `ALL-DONE completed=5/5`。
+- 専有ゲート: 各 round の前に load1<1.0 かつ GPU 0% を 3 サンプル連続で確認（`gb10/gate.log`）。系列の前後の compute プロセスは 0 件（`gb10/compute_apps_before_series.txt`・`compute_apps_after_series.txt`）。
+- 環境変数検査: none（`gb10/env_guard_before_series.txt`・各 run の記録）。
+- venv: `venv-bench` の freeze は 0.14.0 の収録と byte 一致（`env/freeze-cmp.txt`）。
+- 計測 SHA: `rev-stamp.txt` は 5 round とも `4fce735fb…`（RULE と一致）。
+- 同一性検査: `aggregate/check_identity.py`（0.14.0 の同名版から版の文字列だけを 0.15.0 に変えたもの）が rc=0。行数は stage1 112・stage2（extra）8・stage3（Python）28（5 run とも）。
+
+## 5 run 中央値の集計
+
+`aggregate/median_rounds.py`（0.14.0 の同名版と byte 一致）で run1..5 から、セルごとに `median_s` の中央値 round の行を選んで 1 本にした（全セルで 5 run 揃い。2 回実行して byte 一致）。stage1 の 112 行のうち `train_phases`・`infer_phases` の行は集約の対象外（0.14.0 と同じ）のため、集約後は 58 セルになる。判定・勝敗・集計表は含まない（#4179）。
+
+| ファイル | セル数 | sha256 |
+|---|---|---|
+| `gb10/results-dgx-0.15.0-median5.jsonl` | 58 | `cca61103bf3d25d6896775657994de8f02b8fe09407c96ef31b8c425e170f143` |
+| `gb10/results-dgx-0.15.0-extra-median5.jsonl` | 8 | `14d10b49b13f095c3191bc6bfaf21cd2fb0d97696d7bf4428b02db3dea076ea3` |
+| `gb10/results-dgx-py-0.15.0-median5.jsonl` | 28 | `1d4b3dc5164429a34134d84207cca6c1cff0b996b7cf882ebc7360381374631d` |
+
+スクリプトの sha256: `aggregate/check_identity.py` は `1e8e4064d1b7609e341ca7beb3b13a4b4acbf2fdbb939098909b337ba526de32`、`aggregate/median_rounds.py` は `8b74f22339ee94a280617a209214134f6c55698eb86ef01bae3f9d657724306f`。
+
+再現（本ディレクトリで）:
+
+```bash
+PIN=4fce735fb57d97c09ce96b7c6b77eff915c24229; g=gb10
+python3 -I aggregate/check_identity.py $PIN results-dgx-0.15.0.jsonl=112,results-dgx-0.15.0-extra.jsonl=8,results-dgx-py-0.15.0.jsonl=28 $g/run{1..5}
+python3 -I aggregate/median_rounds.py $g/results-dgx-0.15.0-median5.jsonl $g/run{1..5}/results-dgx-0.15.0.jsonl
+python3 -I aggregate/median_rounds.py $g/results-dgx-0.15.0-extra-median5.jsonl $g/run{1..5}/results-dgx-0.15.0-extra.jsonl
+python3 -I aggregate/median_rounds.py $g/results-dgx-py-0.15.0-median5.jsonl $g/run{1..5}/results-dgx-py-0.15.0.jsonl
+sha256sum -c SHA256SUMS
+```
+
+以降の節は計測前に書いた計測キットの説明（0.14.0 からの変更・手順・自己テスト）である。
 
 ## 0.14.0 からの変更
 

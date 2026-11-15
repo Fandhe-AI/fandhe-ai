@@ -83,3 +83,7 @@ e0162a12e664f4f2323aa00e770ac30b01f6cdb137738f75531774788b9beb91  ./scripts/macm
 5d61e70fa00f688040f03145e94e91358e3356192709106450d50288f42f777a  ./scripts/mask_lib.sh
 33399d33787e00a0a58a8c478fed40db328d7337787ebe5071cf425b4eeb73ae  ./scripts/self-test.sh
 9f5623447c1c653e2257860a92f852997510e9ad10ffa18899e4eedbdbd7e28a  ./scripts/venv_preflight.sh
+1956d53f8998fbb00737e6c913611ff9778fbd13dd4874a352f70effd0a6ca08  ./aggregate/check_identity.py
+8b74f22339ee94a280617a209214134f6c55698eb86ef01bae3f9d657724306f  ./aggregate/median_rounds.py
+bbe4960d8ab53ab277f5cc3d5f7808a53fa32f53aa8989ce588b78e8da5cbe0c  ./macmini-series-b/results-macmini-0.15.0-median5.jsonl
+4aaca17b39b2de5e2604041d8cc155f5ab14cb2c6db23ed1b2fe54690b9d4247  ./macmini-series-b/results-macmini-py-0.15.0-median5.jsonl
