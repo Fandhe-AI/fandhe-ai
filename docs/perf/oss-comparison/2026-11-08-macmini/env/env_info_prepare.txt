@@ -12,7 +12,7 @@ Note: No thermal warning level has been recorded
 Note: No performance warning level has been recorded
 Note: No CPU power status has been recorded
 Now drawing from 'AC Power'
-logged-in users: nancy 
+logged-in users: <user>
 top cpu:
  18.8 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared
  18.8 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared

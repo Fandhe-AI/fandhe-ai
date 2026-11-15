@@ -12,9 +12,9 @@ Note: No thermal warning level has been recorded
 Note: No performance warning level has been recorded
 Note: No CPU power status has been recorded
 Now drawing from 'AC Power'
-logged-in users: nancy 
+logged-in users: <user>
 top cpu:
-  7.9 sshd-session: nancy [priv]
+  7.9 sshd-session: <user> [priv]
   3.4 /usr/libexec/opendirectoryd
   1.4 /sbin/launchd
   1.3 /usr/libexec/sharingd
