@@ -1,0 +1,43 @@
+2026-11-15T03:56:37Z
+Apple M4
+10
+4
+6
+17179869184
+Darwin 27.0.0 arm64
+27.0.1
+26A434
+{ 2.40 1.98 1.57 }
+sme sysctl (FEAT_SME SME_F32F32):
+1
+1
+gpu:
+      Chipset Model: Apple M4
+      Total Number of Cores: 10
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+Now drawing from 'AC Power'
+logged-in users: <user> 
+top cpu:
+  4.9 sshd-session: <user> [priv]
+  4.5 /usr/libexec/opendirectoryd
+  3.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  2.9 bash
+  1.7 /sbin/launchd
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: aarch64-apple-darwin
+release: 1.99.0
+LLVM version: 23.1.1
+cargo 1.99.0 (5f94df478 2026-08-27)
+venv-mlx 3.12.15 mlx 0.32.4 numpy 2.5.4
+venv-torch 3.12.15 torch 2.14.0 numpy 2.5.4 mps True
+rev_stamp=sha=22a475e2df0cfcbf5854d827a79ddc1e7df4a4b9 dirty=0
+bin ede7e5d4966987c0a63d4872265d26c4dc364263a2eb9e7c2b32db70566304b9 2026-11-15T12:55:06 target-oss/release/oss-gemm-compare
+bin 763a8842a2240189b7221cd301760c691b281ac620aafc658745fb59b7a3c443 2026-11-15T12:55:28 target-metal/release/examples/metal_gemm_bench
+bin b379ba8cec67195a747ac48293724015c8220ce8df0045f81cd26e62c5c7b9b6 2026-11-15T12:55:28 target-metal/release/examples/gemm_f32_prepared_bench
+fandhe_ai_env=none
+rayon_num_threads_env=none

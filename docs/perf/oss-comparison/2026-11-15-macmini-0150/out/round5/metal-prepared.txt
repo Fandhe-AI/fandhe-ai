@@ -1,0 +1,4 @@
+size=512 metal_f32_simdgroup_tiled_tflops=0.8048 q1_tflops=0.7974 q3_tflops=0.8103 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+size=1024 metal_f32_simdgroup_tiled_tflops=1.7910 q1_tflops=1.7880 q3_tflops=1.9193 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+size=2048 metal_f32_simdgroup_tiled_tflops=2.0475 q1_tflops=2.0447 q3_tflops=2.0535 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+size=4096 metal_f32_simdgroup_tiled_tflops=1.9602 q1_tflops=1.9432 q3_tflops=2.0144 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }

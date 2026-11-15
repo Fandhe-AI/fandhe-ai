@@ -1,0 +1,6 @@
+13:02  up 35 days, 12:36, 1 user, load averages: 2.42 2.02 1.75
+  8.0 /usr/sbin/bluetoothd
+  4.3 /System/Library/PrivateFrameworks/UsageTracking.framework/Versions/A/UsageTrackingAgent
+  3.4 /usr/sbin/cfprefsd
+  2.9 /System/Library/PrivateFrameworks/ApplePushService.framework/apsd
+  1.6 /usr/libexec/airportd

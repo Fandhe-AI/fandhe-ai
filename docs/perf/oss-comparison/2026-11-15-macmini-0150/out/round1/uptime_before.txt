@@ -1,0 +1,6 @@
+12:57  up 35 days, 12:30, 1 user, load averages: 2.13 1.95 1.57
+  7.3 /usr/sbin/bluetoothd
+  6.7 /usr/sbin/cfprefsd
+  2.6 /usr/libexec/rapportd
+  1.9 /usr/libexec/sharingd
+  1.9 /System/Library/PrivateFrameworks/SafariSafeBrowsing.framework/com.apple.Safari.SafeBrowsing.Service

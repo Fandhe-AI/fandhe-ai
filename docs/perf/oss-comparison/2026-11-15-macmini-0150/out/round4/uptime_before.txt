@@ -1,0 +1,6 @@
+13:13  up 35 days, 12:47, 1 user, load averages: 0.92 1.47 1.61
+  0.7 /usr/sbin/cfprefsd
+  0.7 /usr/sbin/bluetoothd
+  0.5 /usr/libexec/sharingd
+  0.4 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+  0.3 /usr/libexec/rapportd

@@ -1,0 +1,5 @@
+mlx=0.32.4 device=Device(gpu, 0)
+size=512 mlx_f32_device_resident_tflops=0.6800 mlx_f32_transfer_included_tflops=0.6660
+size=1024 mlx_f32_device_resident_tflops=2.1959 mlx_f32_transfer_included_tflops=1.7230
+size=2048 mlx_f32_device_resident_tflops=2.9798 mlx_f32_transfer_included_tflops=2.0738
+size=4096 mlx_f32_device_resident_tflops=3.0627 mlx_f32_transfer_included_tflops=2.7815
