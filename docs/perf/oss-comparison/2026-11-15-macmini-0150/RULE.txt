@@ -1,0 +1,86 @@
+RULE fixed-at: 本ファイルを含む PR のマージ時刻（下書き 2026-11-15T03:31Z。計測前に固定してコミットする。以後編集しない。
+  取り直しは所有者判断で、新しいディレクトリと別名の RULE（RULE.v2.txt）で行う）
+
+目的: スコアボード 0.15.0（docs/perf/logs/framework-compare-0.15.0-remeasure/scoreboard/）の「エンジン単体の対照」節の 2 カードを、
+v0.15.0 のソースで計測専用の Mac mini（<metal-node>。Apple M4・10 コア・16 GB）で測り直す（#4314。所有者判断 #4179: 0.15.0 のページは
+v0.14.0 の値を「0.15.0 未再計測」と明記して流用し、測り直しは別 issue）。
+  (A) CPU GEMM vs gemm crate／matrixmultiply（前回: v0.14.0・2026-11-08・docs/perf/oss-comparison/2026-11-08-macmini/）
+  (B) Metal GEMM vs MLX f32／PyTorch MPS f32（同上）
+  (C) candle 比ゲートのカードは測らない（正式ゲートの Mac mini 系列は新規 issue と事前登録が要るため。文言は据え置き）
+  M4 Max は測らない。Mac mini の Magnet と node の待ち受けは止めたまま。
+
+対象ツリー: タグ v0.15.0 のコミット 22a475e2df0cfcbf5854d827a79ddc1e7df4a4b9 の git archive。.rev-stamp に sha・dirty=0。
+  crates/・scripts/bench/・Cargo.toml・Cargo.lock・rust-toolchain.toml の全ファイル SHA-256 一覧（scripts/orchestrate.sh の fingerprint() と同じ定義。
+  2705 行）の SHA-256 = 014866abefa1b87c43d8c37619a857b4e26515fb6e3fe32fa28b01bf25d8d8f4（送信側で git archive から計算。
+  Linux の sha256sum と macOS の shasum -a 256 は同じ「<hash>  <path>」形式で、同じファイルに同じ行を出すことを確かめた）。
+  ノード側で展開したツリーの指紋がこの値と一致しなければ計測しない。
+  ハーネスの差分: `git diff --stat v0.14.0 22a475e2d -- scripts/bench/oss-gemm-compare crates/backend-metal/examples
+  scripts/bench/gemm_bench_mlx_f32.py scripts/bench/gemm_bench_torch_mps_f32.py` は scripts/bench/oss-gemm-compare/Cargo.lock の 1 ファイル
+  （5 行の置換。自社 5 クレートの version が 0.14.0 → 0.15.0）だけ。src・example・Python スクリプトは差分なし（形状・反復数・出力形式は前回と同じ）。
+  oss-gemm-compare は fandhe-ai-backend-cpu を path 依存で参照するため、v0.15.0 のソースを測る。
+  測るソースの差は backend-cpu・backend-metal の既定値の変更:
+    - SME 既定 ON: crates/backend-cpu/src/gemm_blis/mod.rs:3561 `const SME_PRODUCTION_ENABLED: bool = true;`
+      （ほかに crates/backend-cpu/src/gemm_blis/sme_small_sched.rs:40 `SME_SMALL_SCHED_ENABLED = true`。前回の値は SME 既定 OFF）
+    - Metal STEEL: crates/backend-metal/src/tile.rs:1802 `pub(crate) const STEEL_LARGE_N_ENABLED: bool = true;`（M4Base の正方 1024/2048/4096）
+  既定経路をそのまま測る（環境変数で既定を変えない）。SME は OS の検出（sysctl hw.optional.arm.FEAT_SME と hw.optional.arm.SME_F32F32 が
+  ともに 1 で SVL が一致）が満たされたときだけ有効になり、満たさなければ NEON に落ちるため、envinfo の記録（sysctl の 2 値）で確かめる。
+  STEEL がどのハーネスで選ばれたかはこの計測では確かめない（主張しない）。GPU の Chipset Model とコア数は envinfo に記録だけする。
+実機ロック: <home>/work/.fandhe-hw-lock。owner = "#4314 engine-0150-macmini <UTC>"（取得は送信側。ほかのジョブのロックには触らない）。
+  target は新規の 2 つ（target-oss・target-metal。prepare は既にあれば止まる）。
+
+環境変数の検査: series の開始時に scripts/env_guard.sh（#4177 の byte コピー）で FANDHE_AI_* と RAYON_NUM_THREADS が 1 つも設定されて
+  いないことを確かめる。設定があれば系列を始めない（値は記録しない）。結果の 2 行は env/env_info_before.txt に残る。
+
+Python: venv-torch は #4177 で使った venv（<home>/work/venv4168.noindex/venv-torch）をそのまま使う（作り直さない・パッケージを足さない）。
+  torch 2.14.0・numpy 2.5.4 は前回（2026-11-08）と同版。前回の freeze とは filelock の版・scipy の有無・名前の表記（Jinja2／jinja2 等）が
+  違うが、MPS GEMM の計測経路（torch・numpy）には関わらない。参照は docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/env/pip-freeze-venv-torch.txt。
+  venv-mlx は uv の CPython 3.12.15 で <D>/venv-mlx に新規に作り、mlx==0.32.4・mlx-metal==0.32.4・numpy==2.5.4 を入れる（前回と同版）。
+  参照は docs/perf/oss-comparison/2026-11-08-macmini/env/pip-freeze-venv-mlx.txt。
+  freeze は `uv pip freeze --python <venv>/bin/python` で取る。prepare・series の開始時・series の終了時に参照と byte 一致を確かめ、
+  一致しなければ計測しない（終了時の不一致は系列を無効にする）。読み替え・作り直しはしないで報告する。
+
+手順（scripts/orchestrate.sh。prepare → series）:
+  起動は #4177 と同じ形にする: `zsh -lc` で包み（ログインシェルの PATH で uv・python3・cargo を解決する）、nohup で切り離す。
+  caffeinate は使わない（他ジョブゲートの G1 に当たる）。計測中に同じノードで別のビルド・計測・python・cargo を走らせない（G3）。
+  ゲート（#4177 と同じ。ゲートの中身は変えない）: docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py（G1〜G4）を
+    scripts/bench/framework-compare/ab_foreign_gate.sh 経由で呼ぶ（scripts/foreign_gate_wrapper.sh〈#4177 の byte コピー〉が sha256 を検査してから呼ぶ。
+    v0.15.0 のツリー内の 2 ファイルは固定値と一致することを確かめた）。
+    ・各ラウンドの前: 他ジョブが CLEAN かつ load1 < 3.0 になるまで 30 秒間隔・最大 30 分待つ。超えたら GATE-TIMEOUT で系列を打ち切る。
+    ・数値が取れない・ゲート自身の失敗は GATE-INVALID で系列を打ち切る。
+    ・各ラウンドの後: 1 回確かめ、FOREIGN（またはゲート自身の失敗）ならそのラウンドを無効にして系列を打ち切る。
+    ・結果は out/gate.log（roundN gate=pass … ／ roundN foreign-before=clean ／ roundN foreign-after=clean。異常は GATE-TIMEOUT／GATE-INVALID）、
+      out/roundN/gate.txt（1 行目 PASS／TIMEOUT／INVALID）、out/foreign-gate/ に残る。
+  ラウンド内は oss-gemm-compare（引数なし: N=512/1024/2048/4096）→ metal_gemm_bench（examples/gemm_bench.rs・転送込み）
+  → gemm_f32_prepared_bench（prepared）→ gemm_bench_mlx_f32.py → gemm_bench_torch_mps_f32.py の順に、それぞれ独立プロセスで 1 回（前回と同じ）。
+  各ハーネスの中は warmup 20・計測 20・中央値（既存の定義のまま）。5 ラウンド。
+  系列の途中で値を見ない。系列の途中で本 RULE を変えない。
+
+採否（前回からの変更）: 前回（2026-11-08）は TIMEOUT のラウンドを飛ばして続け、部分通過を参考値として載せる規則だった。
+  今回は #4177 と同じく、打ち切りは系列全体の打ち切りとし、5/5 完走（loop.log に ALL-DONE completed=5/5）だけを採る。
+  SERIES-ABORTED・SERIES-INVALID・SERIES-INCOMPLETE で終わった系列は値を見ずに捨てて報告する。取り直しは所有者判断で、新しいディレクトリと RULE.v2.txt で行う。
+  oss-gemm-compare の output_match=false と、それによる非 0 終了は記録のみで計測失敗にしない（前回と同じ。matrixmultiply は K≥1024 で不一致・参照除外）。
+  他のハーネスの非 0 終了・欠損行があれば、ALL-DONE でもその系列は正式値にせず報告する（終了コードは集計の前に out/roundN/*.exit で
+  確かめる。欠損行は aggregate.py が AggError で止まる）。
+
+集計（scripts/aggregate.py。2026-11-08 版と byte 一致・sha256 は下の一覧）:
+  集計は ALL-DONE の系列だけに行う（`python3 -I scripts/aggregate.py out 5`）。値は 5 ラウンドの run 間中央値（CPU は GFLOP/s、Metal は TFLOPS）。
+  比は同一ラウンド内の比の run 間中央値。カードの「対 gemm crate」の範囲は前回と同じく中央値同士の比（med_ratio）で書き、同一ラウンド比の中央値も併記する。
+  Metal の比は docs/perf/oss-gemm-comparison-baseline.md §3 の比較可能ペア（転送込み÷MLX 転送込み・転送込み÷MPS、prepared÷MLX device は参考値）。
+  `--self-test`（過去データで baseline.md の値を再現）は計測前に送信側で通過済み（2026-11-15。`self-test ok`）。
+  v0.14.0（2026-11-08）の値とは比べてよい（同じ機体・同じハーネス・同じ venv の版）が、差にはライブラリ既定の変更（SME・STEEL）と
+  計測日の負荷の揺れが含まれる。M4 Max の旧値とは機体が違うため比べない（旧値は baseline.md に残し上書きしない）。
+  tolerance・判定規則・閾値・依存（本体 workspace）は変更しない。
+
+道具の検査: scripts/self-test.sh（Linux 上でモック。series の分岐〈完走・前 TIMEOUT・ゲート失敗・後 FOREIGN・env guard・freeze 不一致・
+  ロック owner 不一致・ロック解放〉、prepare の freeze 検査、同梱コピーの byte 一致、aggregate.py --self-test）を送信側で通過済み（97 件・FAIL 0）。
+
+本 RULE が参照するファイルの sha256（リポジトリ相対パス）:
+b90aec8ac22feaf1637ba8457cafaaeaf5d5ddc707ecd86f34dea90c1122ed8e  docs/perf/oss-comparison/2026-11-15-macmini-0150/scripts/orchestrate.sh
+f3c66edab585ec0436570433182fb27338870eaca55f201832f9b9085cf8d0be  docs/perf/oss-comparison/2026-11-15-macmini-0150/scripts/foreign_gate_wrapper.sh
+4bc1ba36679a2b16803c9208d587827db9d38bc4cc1951a1baaea00a0db2a377  docs/perf/oss-comparison/2026-11-15-macmini-0150/scripts/env_guard.sh
+1cfbe2ed66cf395e529b1d067ccc2f6933a8a67e528e56c525dd2933cafc18ed  docs/perf/oss-comparison/2026-11-15-macmini-0150/scripts/aggregate.py
+84ba5d6b9d208e486d9f8d8ce7dd695315bf3fa0c6886166750f8f13983b751c  docs/perf/oss-comparison/2026-11-15-macmini-0150/scripts/self-test.sh
+d8cf0fd60693be5ed16e2d0947e8a5a5a5c1918999eeb61dd635d9dbd7a91e04  docs/perf/logs/macmini-foreign-job-gate/foreign_job_gate.py
+b7ae69bc4b32fa63887867822b97e1eeb9e900ed1a51a81053b231e8ff10f975  scripts/bench/framework-compare/ab_foreign_gate.sh
+31d1d803fffa3aace03978d563b89641f9ed9edb2f6cb40857ded84e8b4f18fb  docs/perf/logs/framework-compare-0.15.0-macmini-remeasure/env/pip-freeze-venv-torch.txt
+0cb13fa0f659b1d4d6bc6e94d1b6af510cce39ce0aea417ffc64e184e2fcdd58  docs/perf/oss-comparison/2026-11-08-macmini/env/pip-freeze-venv-mlx.txt
