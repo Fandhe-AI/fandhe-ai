@@ -1,13 +1,13 @@
    Compiling fandhe-ai-tensor-core v0.6.0
    Compiling fandhe-ai-backend-cpu v0.6.0
-   Compiling bench-common v0.1.0 (/Users/nancy/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-common)
-   Compiling bench-burn v0.1.0 (/Users/nancy/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-burn)
-   Compiling bench-candle v0.1.0 (/Users/nancy/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-candle)
+   Compiling bench-common v0.1.0 (~/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-common)
+   Compiling bench-burn v0.1.0 (~/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-burn)
+   Compiling bench-candle v0.1.0 (~/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-candle)
    Compiling fandhe-ai-autodiff v0.6.0
    Compiling fandhe-ai-backend-metal v0.6.0
    Compiling fandhe-ai-backend-cuda v0.6.0
    Compiling fandhe-ai v0.6.0
-   Compiling bench-fandhe v0.1.0 (/Users/nancy/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-fandhe)
+   Compiling bench-fandhe v0.1.0 (~/fandhe/library/rust-ai-library/scripts/bench/framework-compare/bench-fandhe)
     Finished `release` profile [optimized] target(s) in 21.92s
 == bench-fandhe gemm cpu size=256 mode=fresh extra=none ==
 {"framework":"fandhe-ai","version":"0.6.0","task":"gemm","device":"cpu","size":256,"median_s":0.000313521,"q1_s":0.000277187,"q3_s":0.000331885,"gflops":107.025,"checksum":237.546660,"warmup":20,"iters":20,"mode":"fresh","parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0}

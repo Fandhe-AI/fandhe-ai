@@ -60,33 +60,33 @@ attempt=57 load1=12.61
 attempt=58 load1=12.47
 attempt=59 load1=8.22
 gate NOT PASSED after max wait (共有負荷下として続行)
-who: nancy            console       8月 19 12:50 
-nancy            ttys000       8月 19 12:50 
-nancy            ttys001       8月 19 12:50 
-nancy            ttys002       8月 20 09:27 
-nancy            ttys003       8月 19 12:50 
-nancy            ttys004       8月 19 13:48 
-nancy            ttys005       8月 29 11:52 
-nancy            ttys006       8月 19 13:58 
-nancy            ttys007       8月 19 13:58 
-nancy            ttys008       8月 27 16:16 
-nancy            ttys009       8月 22 12:49 
-nancy            ttys010       8月 30 21:43 
-nancy            ttys011       8月 19 19:44 
-nancy            ttys013       9月  6 22:36 
-nancy            ttys015       8月 20 00:08 
-nancy            ttys017       8月 20 09:27 
-nancy            ttys018       8月 30 10:20 
-nancy            ttys020       9月  6 19:56 
-nancy            ttys021       9月  7 04:03 
+who: <user>            console       8月 19 12:50 
+<user>            ttys000       8月 19 12:50 
+<user>            ttys001       8月 19 12:50 
+<user>            ttys002       8月 20 09:27 
+<user>            ttys003       8月 19 12:50 
+<user>            ttys004       8月 19 13:48 
+<user>            ttys005       8月 29 11:52 
+<user>            ttys006       8月 19 13:58 
+<user>            ttys007       8月 19 13:58 
+<user>            ttys008       8月 27 16:16 
+<user>            ttys009       8月 22 12:49 
+<user>            ttys010       8月 30 21:43 
+<user>            ttys011       8月 19 19:44 
+<user>            ttys013       9月  6 22:36 
+<user>            ttys015       8月 20 00:08 
+<user>            ttys017       8月 20 09:27 
+<user>            ttys018       8月 30 10:20 
+<user>            ttys020       9月  6 19:56 
+<user>            ttys021       9月  7 04:03 
  %CPU   PID COMM
-1330.6 51499 /Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_f4131cc9-5f2-21/scripts/bench/framework-compare/target/debug/deps/bench_fandhe-db88f21a308e39e0
+1330.6 51499 ~/fandhe/library/rust-ai-library/.claude/worktrees/wf_f4131cc9-5f2-21/scripts/bench/framework-compare/target/debug/deps/bench_fandhe-db88f21a308e39e0
  34.9  1407 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
  26.4   603 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
  11.5  1547 /System/Library/ExtensionKit/Extensions/WallpaperAerialsExtension.appex/Contents/MacOS/WallpaperAerialsExtension
   8.8  1529 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
   6.6 51812 gh
-  6.4 48077 /Users/nancy/.local/bin/claude
+  6.4 48077 ~/.local/bin/claude
   4.5  1579 /System/Library/Frameworks/VideoToolbox.framework/Versions/A/XPCServices/VTDecoderXPCService.xpc/Contents/MacOS/VTDecoderXPCService
   2.5  1267 /usr/libexec/textunderstandingd
   2.4 24755 /usr/libexec/syspolicyd

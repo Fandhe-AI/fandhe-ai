@@ -7,7 +7,7 @@
 # （base AGENTS.md「ハードコード回避」・codex-review 指摘 #1429 対応）。
 set -uo pipefail
 
-WORKDIR="${WORKDIR:-/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_f889d48c-a2d-87}"
+WORKDIR="${WORKDIR:-$HOME/fandhe/library/rust-ai-library/.claude/worktrees/wf_f889d48c-a2d-87}"
 BIN="${BIN:-$WORKDIR/scripts/bench/oss-gemm-compare/target/release/oss-gemm-compare}"
 LOGDIR="${LOGDIR:-$WORKDIR/docs/perf/logs/cpu-gemm-rayon-sweep-1305/out-m4max}"
 SCRIPTDIR="${SCRIPTDIR:-$WORKDIR/docs/perf/logs/cpu-gemm-rayon-sweep-1305}"

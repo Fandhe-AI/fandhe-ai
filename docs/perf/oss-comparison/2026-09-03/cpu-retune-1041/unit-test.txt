@@ -1,4 +1,4 @@
-   Compiling fandhe-ai-backend-cpu v0.6.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_05a923d0-002-197/crates/backend-cpu)
+   Compiling fandhe-ai-backend-cpu v0.6.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_05a923d0-002-197/crates/backend-cpu)
 warning: field `1` is never read
    --> crates/backend-cuda/src/gemm.rs:748:48
     |
@@ -140,7 +140,7 @@ warning: function `tiled_pipeline_f32_source_with_stages` is never used
     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `fandhe-ai-backend-cuda` (lib) generated 22 warnings
-   Compiling bench-harness v0.6.0 (/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_05a923d0-002-197/crates/bench-harness)
+   Compiling bench-harness v0.6.0 (~/fandhe/library/rust-ai-library/.claude/worktrees/wf_05a923d0-002-197/crates/bench-harness)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.87s
      Running unittests src/lib.rs (target/debug/deps/fandhe_ai_backend_cpu-1a87426b00326521)
 

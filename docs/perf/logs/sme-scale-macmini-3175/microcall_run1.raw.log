@@ -1,5 +1,5 @@
     Finished `release` profile [optimized] target(s) in 0.03s
-     Running unittests src/lib.rs (/Users/nancy/work/target-3175/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
+     Running unittests src/lib.rs (~/work/target-3175/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
 
 running 1 test
 test gemm_blis::tests::sme_microcall_fixed_cost_probe ... probe=microcall kernel=SME kc=0 reps=32768 median_ns_per_call=44.462

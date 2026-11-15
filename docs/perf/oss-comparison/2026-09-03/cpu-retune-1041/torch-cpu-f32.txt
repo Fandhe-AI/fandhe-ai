@@ -1,4 +1,4 @@
-/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_05a923d0-002-197/.venv-mps-bench/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /Users/runner/work/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+~/fandhe/library/rust-ai-library/.claude/worktrees/wf_05a923d0-002-197/.venv-mps-bench/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /Users/runner/work/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
   cpu = _conversion_method_template(device=torch.device("cpu"))
 torch=2.14.0 device=cpu
 torch.get_num_threads()=12

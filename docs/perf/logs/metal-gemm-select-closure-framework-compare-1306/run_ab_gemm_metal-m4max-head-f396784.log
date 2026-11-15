@@ -1,9 +1,9 @@
 == build bench-fandhe (before: registry pin fandhe-ai =0.7.0) ==
 bench-fandhe-ab-before sha256: c0066ca9bef521ee84d068e3f21724f74ca3a570453279d6b020efd546542339 (source: registry)
 == build bench-fandhe (after: HEAD path patch) ==
-bench-fandhe-ab-after sha256: 94af83baaac380e558771923092051621b2385a8fe8d183638de4efa30f51d96 (source: path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_0bf56c37-a72-29/crates/facade)
+bench-fandhe-ab-after sha256: 94af83baaac380e558771923092051621b2385a8fe8d183638de4efa30f51d96 (source: path:~/fandhe/library/rust-ai-library/.claude/worktrees/wf_0bf56c37-a72-29/crates/facade)
 == manifest 記録: results/raw/manifest-m4max-gemm-ab-head-f396784.json ==
-{"label":"head-f396784","device":"metal","head_sha":"f396784d8802ab192ae4a7cff1ba71fec270f556","before_sha256":"c0066ca9bef521ee84d068e3f21724f74ca3a570453279d6b020efd546542339","before_source":"registry","after_sha256":"94af83baaac380e558771923092051621b2385a8fe8d183638de4efa30f51d96","after_source":"path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_0bf56c37-a72-29/crates/facade","recorded_at":"2026-09-07T07:19:18Z"}
+{"label":"head-f396784","device":"metal","head_sha":"f396784d8802ab192ae4a7cff1ba71fec270f556","before_sha256":"c0066ca9bef521ee84d068e3f21724f74ca3a570453279d6b020efd546542339","before_source":"registry","after_sha256":"94af83baaac380e558771923092051621b2385a8fe8d183638de4efa30f51d96","after_source":"path:~/fandhe/library/rust-ai-library/.claude/worktrees/wf_0bf56c37-a72-29/crates/facade","recorded_at":"2026-09-07T07:19:18Z"}
 == metal status (before loop) ==
 Apple M4 Max
 Note: No thermal warning level has been recorded

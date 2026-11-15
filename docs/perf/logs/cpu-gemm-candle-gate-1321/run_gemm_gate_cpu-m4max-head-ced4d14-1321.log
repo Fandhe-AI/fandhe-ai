@@ -1,10 +1,10 @@
-   (GEMM_GATE_PATCH_FACADE_PATH=/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade)
+   (GEMM_GATE_PATCH_FACADE_PATH=~/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade)
 == build bench-fandhe ==
 == build bench-candle (cpu) ==
 == manifest 記録: results/raw/manifest-m4max-cpu-gemm-gate-head-ced4d14-1321.json ==
-{"label":"head-ced4d14-1321","device":"cpu","bench_fandhe_sha256":"e6bfa1f8dcef82bc724ee525356360e409f65069ec44751fb0b1825522b49c8e","fandhe_ai_source":"path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade","bench_fandhe_features":"","bench_candle_sha256":"1f0d9061870eb02ce66286f5716de8465d322a92bae0255a0513b1bf05c3c1e3","candle_core_source":"registry","recorded_at":"2026-09-08T08:20:11Z"}
+{"label":"head-ced4d14-1321","device":"cpu","bench_fandhe_sha256":"e6bfa1f8dcef82bc724ee525356360e409f65069ec44751fb0b1825522b49c8e","fandhe_ai_source":"path:~/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade","bench_fandhe_features":"","bench_candle_sha256":"1f0d9061870eb02ce66286f5716de8465d322a92bae0255a0513b1bf05c3c1e3","candle_core_source":"registry","recorded_at":"2026-09-08T08:20:11Z"}
 == バイナリ sha256 検証 OK: bench-fandhe=e6bfa1f8dcef82bc724ee525356360e409f65069ec44751fb0b1825522b49c8e（label 'head-ced4d14-1321'・device 'cpu'） ==
-== 依存元検証 OK: fandhe_ai_source=path:/Users/nancy/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade（label 'head-ced4d14-1321'） ==
+== 依存元検証 OK: fandhe_ai_source=path:~/fandhe/library/rust-ai-library/.claude/worktrees/wf_ef32da0d-34e-43/crates/facade（label 'head-ced4d14-1321'） ==
 == feature 検証 OK: bench_fandhe_features=''（label 'head-ced4d14-1321'） ==
 == バイナリ sha256 検証 OK: bench-candle=1f0d9061870eb02ce66286f5716de8465d322a92bae0255a0513b1bf05c3c1e3（label 'head-ced4d14-1321'） ==
 == 依存元検証 OK: candle_core_source=registry（label 'head-ced4d14-1321'） ==
