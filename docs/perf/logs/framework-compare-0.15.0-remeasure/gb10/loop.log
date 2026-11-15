@@ -1,0 +1,8 @@
+venv-preflight: bench identical（0.14.0 の収録 freeze と byte 一致）
+run1: done. 2026-11-14T16:41:15Z
+run2: done. 2026-11-14T16:48:23Z
+run3: done. 2026-11-14T16:55:31Z
+run4: done. 2026-11-14T17:02:42Z
+run5: done. 2026-11-14T17:09:51Z
+ALL-DONE completed=5/5
+lock-released 2026-11-14T17:09:51Z
