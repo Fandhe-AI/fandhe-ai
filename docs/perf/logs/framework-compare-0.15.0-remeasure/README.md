@@ -71,7 +71,7 @@ bash run_0150.sh skeleton   # 雛形（1 位以外のセルの TSV）だけを�
 機体別（0.15.0）: Mac mini 13 行は 1 位 8・僅差 3・負け 2、GB10 14 行は 1 位 10・僅差 0・負け 4。区分が 0.14.0 から変わったのは Mac mini の 8 セルで、GB10 は区分の変化がない。
 **0.14.0→0.15.0 の差には、ライブラリの既定の変更（SME・Graph・jpw1・STEEL）と計測日の負荷の揺れが含まれる**（前版比は表示のみで勝敗には使わない。Mac mini は他ジョブゲートも足した）。
 
-スコアボードは claude.ai Artifact として公開した（非公開の個人 Artifact。<https://claude.ai/artifact/Vd2q3sSgWzsWEXU42aWuEp>。2026-11-15・main `337c383ac` の `scoreboard/out/scoreboard_0150.html` から先頭の charset と viewport の meta 2 行を除いたもの）。0.14.0 のページは上書きしていない。GitHub Pages には載せない。URL は #4179 にも記録した。
+スコアボードは claude.ai Artifact として公開した（非公開の個人 Artifact。<https://claude.ai/artifact/Vd2q3sSgWzsWEXU42aWuEp>。2026-11-15・main `337c383ac` の `scoreboard/out/scoreboard_0150.html` から先頭の charset と viewport の meta 2 行を除いたもの）。2026-11-15 に同じ URL のまま Version 2 へ更新した（#4314。「エンジン単体の対照」の 2 カードを v0.15.0 の Mac mini 実測値に差し替えた main `532145b2e` の生成物から、同じ 2 行を除いたもの）。0.14.0 のページは上書きしていない。GitHub Pages には載せない。URL は #4179 にも記録した。
 
 以降の節は計測前に書いた計測キットの説明（0.14.0 からの変更・手順・自己テスト）である。
 
