@@ -12,7 +12,7 @@ Note: No thermal warning level has been recorded
 Note: No performance warning level has been recorded
 Note: No CPU power status has been recorded
 Now drawing from 'AC Power'
-logged-in users: nancy 
+logged-in users: <user>
 top cpu:
   5.0 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
   1.8 /usr/sbin/cfprefsd
