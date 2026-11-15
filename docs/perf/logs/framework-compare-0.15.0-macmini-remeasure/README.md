@@ -1,7 +1,7 @@
 # 0.15.0 の 6 フレームワーク同席計測 — Mac mini（Apple M4）
 
 **状態: 判定記録済み（計測 5/5・5 run 中央値の集計・判定一覧とスコアボードの生成〈#4179〉）。** crates.io `fandhe-ai =0.15.0` を Mac mini（Apple M4）の系列 B で 5 ラウンド測った #4177 の収録物と計測キット。
-RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`・`gen_0150.out`）と HTML は #4179 で `../framework-compare-0.15.0-remeasure/scoreboard/` に置いた（下の「スコアボード」節。Artifact は未公開）。数値は判定一覧・tally の範囲で書く。
+RULE は `RULE.txt` で固定済み（計測 SHA `4fce735fb57d97c09ce96b7c6b77eff915c24229`）。判定一覧（`gen_0150.py`・`check_0150.py`・`gen_0150.out`）と HTML は #4179 で `../framework-compare-0.15.0-remeasure/scoreboard/` に置いた（下の「スコアボード」節。Artifact は 2026-11-15 に公開）。数値は判定一覧・tally の範囲で書く。
 GB10 は #4178 が `../framework-compare-0.15.0-remeasure/` で行った。
 
 ## 計測の事実（収録物で確認済み）
