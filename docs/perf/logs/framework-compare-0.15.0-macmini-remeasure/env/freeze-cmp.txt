@@ -1,0 +1,2 @@
+venv-torch: identical（0.14.0 の収録 pip-freeze-venv-torch.txt と byte 一致）
+venv-tf: identical（0.14.0 の収録 pip-freeze-venv-tf.txt と byte 一致）

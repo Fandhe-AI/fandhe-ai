@@ -1,0 +1,10 @@
+CLEAN after 2026-11-14T16:40:06Z
+criteria cpu>=25.0 gpu>=10x2of5 names=wgpu,python,cargo,rustc,xctrace,torch,bench,caffeinate caffeinate excl=self+ancestors+descendants+pid0,1
+gpu_device_utilization 78 0 0 0 0
+processes_scanned 650
+max_pcpu_non_excluded 2.3
+top pid=596 uid=0 pcpu=2.3 name=bluetoothd
+top pid=1294 <user> pcpu=1.0 name=ControlCenter
+top pid=603 uid=88 pcpu=0.7 name=WindowServer
+top pid=1013 <user> pcpu=0.7 name=sharingd
+top pid=600 uid=0 pcpu=0.6 name=com.apple.cmio.registerassistantservice
