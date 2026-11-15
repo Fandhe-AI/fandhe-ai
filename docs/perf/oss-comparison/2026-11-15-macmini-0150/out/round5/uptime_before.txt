@@ -1,0 +1,6 @@
+13:19  up 35 days, 12:52, 1 user, load averages: 1.48 1.75 1.74
+  1.4 /usr/libexec/trustd
+  1.4 /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Resources/backgroundtaskmanagementd
+  1.1 /usr/libexec/smd
+  0.7 /usr/libexec/sharingd
+  0.5 /usr/sbin/bluetoothd

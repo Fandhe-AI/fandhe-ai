@@ -1,0 +1,6 @@
+13:08  up 35 days, 12:41, 1 user, load averages: 0.68 1.36 1.56
+  1.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  1.6 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+  1.1 /usr/libexec/configd
+  0.7 /usr/sbin/bluetoothd
+  0.6 /usr/libexec/sharingd
