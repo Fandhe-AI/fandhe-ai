@@ -86,6 +86,10 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
 2026-10-17 に追加した `RUSTSEC-2026-0367`〜`0369`、2026-11-02 に追加した
 `RUSTSEC-2026-0429`（いずれも `zip` の展開時の脆弱性）は脆弱性型だが、ハーネスが
 ZIP を展開する経路を持たないため同じく受容する（§4 の 2026-10-17・2026-11-02 の記録）。
+2026-11-17 に追加した `RUSTSEC-2026-0545`〜`0548`（`zip` の AES 認証コード未検査・
+展開時の symlink 経由の展開先外書き込み・Legacy デコーダの事前確保・ストリーム読み取りの
+ヘッダ食い違い）も、該当 feature（`aes-crypto`・`legacy-zip`）が無効で、展開・復号・
+ストリーム読み取りの API を呼ばないため同じく受容する（§4 の 2026-11-17 の記録）。
 
 ルート `deny.toml`・`docs/license-matrix.md` 2 節の本体 workspace 向け適合基準は
 一切変更しない。
@@ -333,6 +337,21 @@ ZIP を展開する経路を持たないため同じく受容する（§4 の 20
   `nothing to print`、`-i zip@8.6.0` は candle-core 0.11.0（bench-candle 経由）のみ。
   本勧告は `ZipArchive::extract` が対象のため B の `.extract(` 検出で足りる。承認済みピン・
   zip の版集合・`Cargo.lock`・ルート `deny.toml`・他の ignore は変更しない。
+- 2026-11-17: `deny.toml` の `[advisories] ignore` に `RUSTSEC-2026-0545`〜`0548` を追加した
+  （所有者承認はこの変更の PR で求める。承認前にマージしない）。内容: 0545 は AES エントリの
+  認証コード未検査（`aes-crypto` feature）、0546 は `ZipArchive::extract` が絶対パス・連鎖
+  symlink 経由で展開先外へ書き込む、0547 は Legacy デコーダの事前確保（`legacy-zip`
+  feature）、0548 は `ZipStreamReader`／`read_zipfile_from_stream` のヘッダ食い違い。修正版は
+  0545〜0547 が >= 9.0.0、0548 が >= 9.0.5 で、対象は `Cargo.lock` の `zip 8.6.0`
+  （candle-core 0.11.0 の要求は `^8.6.0`）。この勧告で `forbidden dependencies check` が
+  `advisories FAILED` となり全 PR が止まっていた（run 44073089912）。到達性は 0・A〜E の
+  再実行に加え、`deny.toml` に追加した F（zip の有効 feature が 0 件。`--all-features` でも
+  0 件）・G（復号 API・ストリーム読み取り API の呼び出しなし）で確認した。0 は
+  candle-core-0.11.0 の src パスが 1 件、A・B・C・G は出力なし（終了コード 1）、D・E は
+  `nothing to print`、`-i zip@8.6.0` は candle-core 0.11.0（bench-candle 経由）のみ。
+  承認済みピン・zip の版集合・`Cargo.lock`・ルート `deny.toml`・他の ignore は変更しない。
+  代替案: zip ^9.1.3 を要求する candle-core 0.11.1 へピンを更新すれば ignore は不要になるが、
+  比較対象の版を変える再計測キャンペーンになるため本変更では行わない。
 
 ## 5. tch-rs を計測対象に含めない判断
 
