@@ -10,17 +10,28 @@
 # キャッシュは約 9.8GB（圧縮後）に達し、リポジトリのキャッシュ上限を単独で使い切って他の
 # キャッシュを毎回追い出していた。依存 crate（crates.io 側）の成果物だけを残す。
 #
-# 判定方法（名前の一致ではなくハッシュで判定する）:
+# 判定方法（名前の一致ではなくハッシュで判定する）。プロファイル（target[/<triple>]/
+# {debug,release}）ごとに、cargo の build-dir 構造を次の 2 通りから判定する。
+#   旧構造（Cargo 1.99 以前）: `.fingerprint/<package>-<16 桁 hex>`・`build/<package>-<hex>`・
+#     `deps/<target 名>-<hex>[.拡張子…]` がプロファイル直下に並ぶ。
+#   新構造（Cargo 1.100 以降・cargo#17354）: `.fingerprint/` と `deps/` が無く、全ユニットの
+#     成果物が `build/<package>/<16 桁 hex>/{fingerprint,out,run…}` に置かれる。hex はユニットの
+#     メタデータハッシュで、`out/` に rlib・テストバイナリ等が入る。
+# 手順:
 #   1. `cargo metadata --no-deps` で workspace メンバーの package 名を得る
-#   2. `.fingerprint/<package>-<16 桁 hex>` のうち package 名がメンバーのものを削除し、
-#      その hex（ユニットのメタデータハッシュ）を集める。`build/<package>-<hex>` も同様
-#   3. `deps/` は `<target 名>-<hex>[.拡張子…]` のうち hex が 2. の集合に含まれるものだけを
+#   2. 旧構造: `.fingerprint/<package>-<hex>` と `build/<package>-<hex>` のうち package 名が
+#      メンバーのものを削除し、その hex を集める。新構造: `build/<package>/` のうち package 名が
+#      メンバーのものを配下の hex ディレクトリごと削除する（依存 crate の `build/<package>/` は残す）
+#   3. 旧構造の `deps/` は `<target 名>-<hex>[.拡張子…]` のうち hex が 2. の集合に含まれるものだけを
 #      削除する。target 名で判定すると、統合テスト名と crates.io 依存の crate 名が同じ
-#      場合（例: テスト `cast` と依存 `cast`）に依存側の成果物まで消してしまうため
+#      場合（例: テスト `cast` と依存 `cast`）に依存側の成果物まで消してしまうため。新構造は
+#      成果物が package ディレクトリ配下にあるため package 名だけで判定でき、この問題は無い
 #   4. プロファイル直下の通常ファイル（ルートユニット＝メンバーの uplift 成果物と .d）と
 #      `examples/`・`incremental/` を削除する。依存 crate の成果物は uplift されない
 #   5. `doc/`（`cargo doc --no-deps` の出力はメンバーのみ）と `tmp/`（統合テストの
 #      CARGO_TARGET_TMPDIR）を削除する
+# どちらの構造でもない（想定外の構造）プロファイル、またはメンバーのユニットが 1 件も見つから
+# ないプロファイルは、黙って空振りせず `::warning::` を出す（cargo のレイアウト変更の検知）。
 # メンバーと同名の crates.io 依存が Cargo.lock にある場合は 2. が依存側を巻き込むため、
 # fail-closed で中止する。削除前後のサイズとプロファイル別内訳を出力する（キャッシュ
 # サイズの計測用。`.claude/rules/github-actions.md`「キャッシュ方針」節）。
@@ -67,6 +78,12 @@ fmt_mib() {
   awk -v k="$1" 'BEGIN { printf "%.0f MiB", k / 1024 }'
 }
 
+# count_entries <dir>: 直下のエントリ数（ディレクトリが無ければ 0。`find` の失敗を pipefail へ
+# 伝播させない。新構造では deps/ が存在しない）。
+count_entries() {
+  if [ -d "$1" ]; then find "$1" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' '; else echo 0; fi
+}
+
 before_kib="$(size_of "${target_dir}")"
 
 work="$(mktemp -d)"
@@ -111,12 +128,13 @@ list_names() {
 }
 
 prune_profile() { # $1=プロファイルディレクトリ（target[/<triple>]/{debug,release}）
-  local profile="$1" d n n_units=0 n_deps=0
+  local profile="$1" d n h hs n_units=0 n_deps=0 n_new=0 old_seen=0 new_seen=0
   assert_real_dir "${profile}"
   for d in .fingerprint build deps; do
     if [ -e "${profile}/${d}" ] || [ -L "${profile}/${d}" ]; then assert_real_dir "${profile}/${d}"; fi
   done
   : >"${work}/hashes"
+  if [ -d "${profile}/.fingerprint" ] || [ -d "${profile}/deps" ]; then old_seen=1; fi
   # 2. .fingerprint/ と build/ のメンバーユニット（`<package>-<hex>` の package 名で判定し、
   #    hex を集める）。名前は空白・改行を含まない形（sed の正規表現で検証）だけを扱う。
   for d in .fingerprint build; do
@@ -129,7 +147,20 @@ prune_profile() { # $1=プロファイルディレクトリ（target[/<triple>]/
       sed -nE 's/^([A-Za-z0-9_-]+)-([0-9a-f]{16})$/\1 \2 &/p' |
       awk 'NR == FNR { m[$1]; next } ($1 in m) { print $3, $2 }' "${work}/members" -)
   done
-  # 3. deps/ はメンバーユニットの hex に一致するものだけ。
+  # 2'. 新構造: build/<package>/<hex>。`<package>-<hex>` 形（旧構造）は上で処理済みのため除外し、
+  #     配下に hex ディレクトリを持つものを新構造と認識する。メンバーなら package ごと削除する。
+  if [ -d "${profile}/build" ]; then
+    while IFS= read -r n; do
+      hs="$(list_names "${profile}/build/${n}" | grep -cE '^[0-9a-f]{16}$' || true)"
+      [ "${hs}" -gt 0 ] || continue
+      new_seen=1
+      if grep -qxF -- "${n}" "${work}/members"; then
+        queue_rm "${profile}/build/${n}" "${profile}"
+        n_new=$((n_new + hs))
+      fi
+    done < <(list_names "${profile}/build" | grep -E '^[A-Za-z0-9_-]+$' | grep -vE -- '-[0-9a-f]{16}$' || true)
+  fi
+  # 3. 旧構造の deps/ はメンバーユニットの hex に一致するものだけ。
   if [ -d "${profile}/deps" ]; then
     while IFS= read -r n; do
       queue_rm "${profile}/deps/${n}" "${profile}"
@@ -142,6 +173,11 @@ prune_profile() { # $1=プロファイルディレクトリ（target[/<triple>]/
       # 削除漏れはキャッシュが大きくなるだけで正しさには影響しないため警告に留める。
       echo "::warning::${profile#"${target_dir}"/}: メンバーの fingerprint ${n_units} 件に対応する deps/ の成果物が見つかりませんでした（cargo のファイル名規則の変更を確認してください）"
     fi
+  fi
+  if [ "${old_seen}" -eq 0 ] && [ "${new_seen}" -eq 0 ]; then
+    echo "::warning::${profile#"${target_dir}"/}: 旧構造（.fingerprint/・deps/）も新構造（build/<package>/<hash>/）も見つかりませんでした。メンバーの成果物を削除できていません（cargo の build-dir レイアウトの変更を確認してください）"
+  elif [ $((n_units + n_new)) -eq 0 ]; then
+    echo "::warning::${profile#"${target_dir}"/}: workspace メンバーのユニットが 1 件も見つかりませんでした（package 名の判定を確認してください）"
   fi
   # 4. uplift 成果物（プロファイル直下の通常ファイル。.cargo-lock 等のドットファイルは残す）と
   #    examples/・incremental/。
@@ -164,14 +200,14 @@ while IFS= read -r -d '' d; do
   profiles+=("${d}")
 done < <(find "${target_dir}" -mindepth 1 -maxdepth 2 -type d \( -name debug -o -name release \) -print0)
 
-# 計測（削除前）: プロファイルごとのサイズと deps/ のファイル数。
+# 計測（削除前）: プロファイルごとのサイズと deps/（旧構造）・build/ のエントリ数。
 summary=()
-for p in "${profiles[@]}"; do
+for p in ${profiles[@]+"${profiles[@]}"}; do
   rel="${p#"${target_dir}"/}"
-  summary+=("${rel}: $(fmt_mib "$(size_of "${p}")")（deps $(find "${p}/deps" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ') 件）")
+  summary+=("${rel}: $(fmt_mib "$(size_of "${p}")")（deps $(count_entries "${p}/deps") 件・build $(count_entries "${p}/build") 件）")
 done
 
-for p in "${profiles[@]}"; do
+for p in ${profiles[@]+"${profiles[@]}"}; do
   prune_profile "${p}"
 done
 # doc/（`cargo doc --no-deps` の出力はメンバーのみ）と tmp/（CARGO_TARGET_TMPDIR）。
