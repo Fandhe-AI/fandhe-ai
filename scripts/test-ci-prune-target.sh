@@ -148,5 +148,20 @@ ln -s "${tmp}/outside" "${t}/build/memb-a"
 run_prune "${w}" "${tmp}/symlink.log"
 check "symlink: 外部の実体が無傷" exist_all "${tmp}/outside/keep"
 
+# --- 新構造で build/<package> が symlink: fail-closed（rc 非 0・何も消さない） ---
+# 走査用の部分シェル（`$(...) || true`）の中で die しても主シェルが続行しないこと。
+w="${tmp}/symlink-new"
+make_ws "${w}"
+t="${w}/target/debug"
+mkdir -p "${t}/build/memb-b/${H1}/out" "${t}/build/dep-x/${H1}/out" "${tmp}/outside2/${H1}"
+: >"${tmp}/outside2/keep"
+: >"${t}/memb-b"
+ln -s "${tmp}/outside2" "${t}/build/memb-a"
+run_prune "${w}" "${tmp}/symlink-new.log"
+check "新構造 symlink: 中止（rc 非 0）" [ "${rc}" -ne 0 ]
+check "新構造 symlink: 中止理由を出す" contains "${tmp}/symlink-new.log" "symlink のため prune を中止します"
+check "新構造 symlink: 外部の実体が無傷" exist_all "${tmp}/outside2/keep"
+check "新構造 symlink: 何も消さない" exist_all "${t}/build/memb-b/${H1}/out" "${t}/build/dep-x/${H1}/out" "${t}/memb-b" "${t}/build/memb-a"
+
 [ "${fail}" -eq 0 ] || die "ci-prune-target.sh の回帰テストに失敗しました"
 echo "OK: ci-prune-target.sh の回帰テストすべて成功"

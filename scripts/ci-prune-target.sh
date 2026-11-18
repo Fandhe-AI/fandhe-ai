@@ -128,7 +128,7 @@ list_names() {
 }
 
 prune_profile() { # $1=プロファイルディレクトリ（target[/<triple>]/{debug,release}）
-  local profile="$1" d n h hs n_units=0 n_deps=0 n_new=0 old_seen=0 new_seen=0
+  local profile="$1" d n h hs names n_units=0 n_deps=0 n_new=0 old_seen=0 new_seen=0
   assert_real_dir "${profile}"
   for d in .fingerprint build deps; do
     if [ -e "${profile}/${d}" ] || [ -L "${profile}/${d}" ]; then assert_real_dir "${profile}/${d}"; fi
@@ -151,7 +151,11 @@ prune_profile() { # $1=プロファイルディレクトリ（target[/<triple>]/
   #     配下に hex ディレクトリを持つものを新構造と認識する。メンバーなら package ごと削除する。
   if [ -d "${profile}/build" ]; then
     while IFS= read -r n; do
-      hs="$(list_names "${profile}/build/${n}" | grep -cE '^[0-9a-f]{16}$' || true)"
+      # `$(...) || true` の中で die しても部分シェルが終わるだけで主シェルは続行する（symlink を
+      # 見逃して rc 0 になる）ため、検査と列挙は主シェルで行い、grep の「該当なし」だけを許容する。
+      assert_real_dir "${profile}/build/${n}"
+      names="$(list_names "${profile}/build/${n}")" || die "列挙に失敗したため prune を中止します: ${profile}/build/${n}"
+      hs="$(printf '%s\n' "${names}" | grep -cE '^[0-9a-f]{16}$' || true)"
       [ "${hs}" -gt 0 ] || continue
       new_seen=1
       if grep -qxF -- "${n}" "${work}/members"; then
