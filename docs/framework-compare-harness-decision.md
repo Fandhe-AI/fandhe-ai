@@ -337,8 +337,11 @@ ZIP を展開する経路を持たないため同じく受容する（§4 の 20
   `nothing to print`、`-i zip@8.6.0` は candle-core 0.11.0（bench-candle 経由）のみ。
   本勧告は `ZipArchive::extract` が対象のため B の `.extract(` 検出で足りる。承認済みピン・
   zip の版集合・`Cargo.lock`・ルート `deny.toml`・他の ignore は変更しない。
-- 2026-11-17: `deny.toml` の `[advisories] ignore` に `RUSTSEC-2026-0545`〜`0548` を追加した
-  （所有者承認はこの変更の PR で求める。承認前にマージしない）。内容: 0545 は AES エントリの
+- 2026-11-17: 所有者の明示承認（2026-11-19。Issue #4328。出典:
+  https://github.com/Fandhe-AI/fandhe-ai/issues/4328#issuecomment-6994303764）
+  に基づき、`deny.toml` の `[advisories] ignore` に `RUSTSEC-2026-0545`・`0546`・`0547`・
+  `0548` を追加した（2026-11-17 に PR #4326 で追加。承認は 4 件とも同じ 2026-11-19 の
+  出典で、勧告 ID ごとの承認日・出典は下の表のとおり）。内容: 0545 は AES エントリの
   認証コード未検査（`aes-crypto` feature）、0546 は `ZipArchive::extract` が絶対パス・連鎖
   symlink 経由で展開先外へ書き込む、0547 は Legacy デコーダの事前確保（`legacy-zip`
   feature）、0548 は `ZipStreamReader`／`read_zipfile_from_stream` のヘッダ食い違い。修正版は
@@ -352,6 +355,14 @@ ZIP を展開する経路を持たないため同じく受容する（§4 の 20
   承認済みピン・zip の版集合・`Cargo.lock`・ルート `deny.toml`・他の ignore は変更しない。
   代替案: zip ^9.1.3 を要求する candle-core 0.11.1 へピンを更新すれば ignore は不要になるが、
   比較対象の版を変える再計測キャンペーンになるため本変更では行わない。
+  承認の出典（勧告 ID ごと。いずれも所有者の明示承認）:
+
+  | 勧告 ID | 承認日 | 出典 |
+  |---------|--------|------|
+  | `RUSTSEC-2026-0545` | 2026-11-19 | https://github.com/Fandhe-AI/fandhe-ai/issues/4328#issuecomment-6994303764 |
+  | `RUSTSEC-2026-0546` | 2026-11-19 | https://github.com/Fandhe-AI/fandhe-ai/issues/4328#issuecomment-6994303764 |
+  | `RUSTSEC-2026-0547` | 2026-11-19 | https://github.com/Fandhe-AI/fandhe-ai/issues/4328#issuecomment-6994303764 |
+  | `RUSTSEC-2026-0548` | 2026-11-19 | https://github.com/Fandhe-AI/fandhe-ai/issues/4328#issuecomment-6994303764 |
 
 ## 5. tch-rs を計測対象に含めない判断
 

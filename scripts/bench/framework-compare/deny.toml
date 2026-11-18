@@ -50,17 +50,18 @@ ignore = [
     #     （`ZipFile::size()`）を検証せず `Vec::with_capacity` に渡し、細工した archive で
     #     プロセスが abort する。共通節を参照。2026-11-02 に追加（所有者承認。出典:
     #     https://github.com/Fandhe-AI/fandhe-ai/issues/3961#issuecomment-6575647964 ）。
-    #   以下の 4 件は 2026-11-17 に追加（修正版は 0545〜0547 が >= 9.0.0、0548 が >= 9.0.5。
-    #   所有者承認はこの ignore を追加する PR で求める。承認前にマージしない）。
-    #   - RUSTSEC-2026-0545: AES（AE-1／AE-2）エントリをデータが途中で尽きた場合や空の場合に
+    #   以下の 4 件は 2026-11-17 に追加（修正版は 0545〜0547 が >= 9.0.0、0548 が >= 9.0.5）。
+    #   4 件とも 2026-11-19 に所有者の明示承認（出典:
+    #   https://github.com/Fandhe-AI/fandhe-ai/issues/4328#issuecomment-6994303764 ）。
+    #   - RUSTSEC-2026-0545（2026-11-19 承認・出典は上記）: AES（AE-1／AE-2）エントリをデータが途中で尽きた場合や空の場合に
     #     認証コードを検査せず返す（`ZipArchive::by_name_decrypt` 等。`aes-crypto` feature）。
     #     共通節に加えて F・G を参照（`aes-crypto` は無効で、復号 API も呼ばない）。
-    #   - RUSTSEC-2026-0546: `ZipArchive::extract`／`extract_unwrapped_root_dir` が絶対パスや
+    #   - RUSTSEC-2026-0546（2026-11-19 承認・出典は上記）: `ZipArchive::extract`／`extract_unwrapped_root_dir` が絶対パスや
     #     連鎖した symlink のリンク先を通じて展開先の外へ書き込む。共通節を参照（B で検出対象）。
-    #   - RUSTSEC-2026-0547: Legacy の Shrink／Reduce／Implode デコーダが宣言サイズ分を事前確保
+    #   - RUSTSEC-2026-0547（2026-11-19 承認・出典は上記）: Legacy の Shrink／Reduce／Implode デコーダが宣言サイズ分を事前確保
     #     する（`legacy-zip` feature。読み取りだけで発生）。共通節に加えて F を参照
     #     （`legacy-zip` は無効でデコーダ自体がビルドされない）。
-    #   - RUSTSEC-2026-0548: `ZipStreamReader`／`read_zipfile_from_stream` がローカルヘッダの
+    #   - RUSTSEC-2026-0548（2026-11-19 承認・出典は上記）: `ZipStreamReader`／`read_zipfile_from_stream` がローカルヘッダの
     #     名前で展開し、セントラルディレクトリと食い違い得る。共通節に加えて G を参照。
     # 理由（共通）: 解決グラフに入る zip は `zip 8.6.0` だけで、比較対象
     # `candle-core =0.11.0` の推移的依存。修正版 >= 9.0.0 へは比較対象の完全固定版を
