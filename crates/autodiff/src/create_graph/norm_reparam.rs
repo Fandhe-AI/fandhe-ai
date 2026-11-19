@@ -1201,11 +1201,11 @@ fn lrn_col_scan(x: &[f32], up: &[f32], w: LrnWin, beta: f64) -> (bool, f64) {
         lrn_col_rev(&f, w, j, &mut sc);
         let (ulo, uhi) = (j.saturating_sub(w.br), (j + w.fr).min(c - 1));
         let (xlo, xhi) = (ulo.saturating_sub(w.bf), (uhi + w.ff).min(c - 1));
-        for l in xlo..=xhi {
-            note(sc.xs[l]);
+        for &x in &sc.xs[xlo..=xhi] {
+            note(x);
         }
-        for m in ulo..=uhi {
-            note(sc.up[m]);
+        for &u in &sc.up[ulo..=uhi] {
+            note(u);
         }
     }
     (fin, mx)
