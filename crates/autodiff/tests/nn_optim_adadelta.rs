@@ -123,17 +123,17 @@ fn adadelta_matches_pytorch_reference() {
             param_b = updated[1].clone();
 
             let expected = &case.steps[step];
-            for i in 0..expected.param_a.len() {
+            for (i, &exp) in expected.param_a.iter().enumerate() {
                 assert_close(
                     param_a.get(&index_of(&fixture.param_a_shape, i)).unwrap(),
-                    expected.param_a[i],
+                    exp,
                     &format!("case={case_name} step={step} param_a[{i}]"),
                 );
             }
-            for i in 0..expected.param_b.len() {
+            for (i, &exp) in expected.param_b.iter().enumerate() {
                 assert_close(
                     param_b.get(&index_of(&fixture.param_b_shape, i)).unwrap(),
-                    expected.param_b[i],
+                    exp,
                     &format!("case={case_name} step={step} param_b[{i}]"),
                 );
             }
