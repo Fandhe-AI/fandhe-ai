@@ -33,9 +33,10 @@ ignore = [
     # （アップグレード先なし・ベンチ専用ツリーで受容。2026-08-28 ユーザー承認:
     # PR #915 導入指示）。
     "RUSTSEC-2024-0436",
-    # zip 9.0.0 未満の展開（extract）API に関する 4 勧告（修正版 >= 9.0.0）。勧告 ID は
+    # zip 9.0.0 未満の展開（extract）API などに関する 8 勧告（修正版 >= 9.0.0。0548 のみ
+    # >= 9.0.5）。勧告 ID は
     # 版を問わず効く。ID ごとの内容は次のとおりで、各 ID の理由・到達性の根拠・失効条件は
-    # いずれも下記の共通節（理由／到達性の根拠 A〜E／失効条件）に従う（2026-10-17
+    # いずれも下記の共通節（理由／到達性の根拠 A〜G／失効条件）に従う（最初の 3 件は 2026-10-17
     # ユーザー承認。出典: https://github.com/Fandhe-AI/fandhe-ai/pull/3410#issuecomment-6232331383
     # 。ベンチ専用・非配布のツリーのため受容。本体のルート `deny.toml` には追加しない）。
     #   - RUSTSEC-2026-0367: ZIP 展開時に SUID/SGID/sticky ビットを安全な権限へ
@@ -49,12 +50,26 @@ ignore = [
     #     （`ZipFile::size()`）を検証せず `Vec::with_capacity` に渡し、細工した archive で
     #     プロセスが abort する。共通節を参照。2026-11-02 に追加（所有者承認。出典:
     #     https://github.com/Fandhe-AI/fandhe-ai/issues/3961#issuecomment-6575647964 ）。
+    #   以下の 4 件は 2026-11-17 に追加（修正版は 0545〜0547 が >= 9.0.0、0548 が >= 9.0.5）。
+    #   4 件とも 2026-11-19 に所有者の明示承認（出典:
+    #   https://github.com/Fandhe-AI/fandhe-ai/issues/4328#issuecomment-6994303764 ）。
+    #   - RUSTSEC-2026-0545（2026-11-19 承認・出典は上記）: AES（AE-1／AE-2）エントリをデータが途中で尽きた場合や空の場合に
+    #     認証コードを検査せず返す（`ZipArchive::by_name_decrypt` 等。`aes-crypto` feature）。
+    #     共通節に加えて F・G を参照（`aes-crypto` は無効で、復号 API も呼ばない）。
+    #   - RUSTSEC-2026-0546（2026-11-19 承認・出典は上記）: `ZipArchive::extract`／`extract_unwrapped_root_dir` が絶対パスや
+    #     連鎖した symlink のリンク先を通じて展開先の外へ書き込む。共通節を参照（B で検出対象）。
+    #   - RUSTSEC-2026-0547（2026-11-19 承認・出典は上記）: Legacy の Shrink／Reduce／Implode デコーダが宣言サイズ分を事前確保
+    #     する（`legacy-zip` feature。読み取りだけで発生）。共通節に加えて F を参照
+    #     （`legacy-zip` は無効でデコーダ自体がビルドされない）。
+    #   - RUSTSEC-2026-0548（2026-11-19 承認・出典は上記）: `ZipStreamReader`／`read_zipfile_from_stream` がローカルヘッダの
+    #     名前で展開し、セントラルディレクトリと食い違い得る。共通節に加えて G を参照。
     # 理由（共通）: 解決グラフに入る zip は `zip 8.6.0` だけで、比較対象
     # `candle-core =0.11.0` の推移的依存。修正版 >= 9.0.0 へは比較対象の完全固定版を
-    # 変えない限り更新できない。
+    # 変えない限り更新できない（candle-core 0.11.0 の要求は `zip ^8.6.0`。zip ^9.1.3 を
+    # 要求する candle-core 0.11.1 へ上げるにはピン更新＝再計測キャンペーンが要る）。
     # 到達性の根拠（共通。いずれも勧告対象の展開 API を呼ばない。リポジトリルート基準。
     # 事前に `cargo fetch --manifest-path scripts/bench/framework-compare/Cargo.toml --locked`
-    # （またはビルド）で依存ソースを取得しておくこと。2026-10-17 に A〜E を実行して確認。2026-11-02 に 0〜E を再実行し 0429 追加後も同じ結果を確認）:
+    # （またはビルド）で依存ソースを取得しておくこと。2026-10-17 に A〜E を実行して確認。2026-11-02 に 0〜E を再実行し 0429 追加後も同じ結果を確認。2026-11-17 に 0〜G を実行し 0545〜0548 追加後も同じ結果を確認）:
     #   0. C="$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/candle-core-0.11.0/src)"
     #      → 1 件のパスが出ること（出なければ B・C は偽陰性になるため先に失敗させる）。
     #   A. grep -rnE '\bzip::|use zip|ZipArchive|ZipStreamReader|\.extract[_(]|::extract[_(]|^zip\b' \
@@ -73,9 +88,18 @@ ignore = [
     #   E. cargo tree --manifest-path scripts/bench/framework-compare/Cargo.toml --offline --locked -i zip@0.6.6
     #      → `nothing to print`（同。burn-tch 由来は無効 feature 側）。
     #      なお `-i zip@8.6.0` は candle-core 0.11.0（bench-candle 経由）だけを示す。
+    #   F. cargo tree --manifest-path scripts/bench/framework-compare/Cargo.toml --offline --locked \
+    #        --target all [--all-features] -e features | grep -cE 'zip feature'
+    #      → どちらも 0（zip 8.6.0 は feature なしで解決される。candle-core は
+    #        `default-features = false` で zip を要求し feature を足さない）。`aes-crypto`
+    #        （0545）・`legacy-zip`（0547）が無効なので該当コードはビルドされない。
+    #   G. grep -rnE 'by_name_decrypt|by_index_decrypt|_decrypt\(|read_zipfile_from_stream|ZipStreamReader|aes' \
+    #        "$C" scripts/bench/framework-compare/bench-*/ --include='*.rs'
+    #      → 出力なし（終了コード 1）。復号 API（0545）とストリーム読み取り API（0548）を呼ばない。
     #   入力は自前生成のテンソルと safetensors のみで、外部の ZIP を展開しない。
-    # 失効条件: zip の修正版（>= 9.0.0）が candle-core の要求範囲に入った時点、または
-    # 比較対象（candle-core・burn）のピン更新時に、この 4 件の ignore を削除する。
+    # 失効条件: zip の修正版（0545〜0547 は >= 9.0.0、0548 は >= 9.0.5）が candle-core の
+    # 要求範囲に入った時点、または比較対象（candle-core・burn）のピン更新時に、この 8 件の
+    # ignore を削除する。
     # zip の版集合（0.6.6／7.2.0／8.6.0）は `scripts/check-forbidden-deps.sh lock-all` が
     # Cargo.lock に対し fail-closed で固定する（版の追加・変更・非 registry 化は CI で失敗。
     # 別の版が入ったら ignore を足さず承認を取り直す）。
@@ -83,6 +107,10 @@ ignore = [
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0429",
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0546",
+    "RUSTSEC-2026-0547",
+    "RUSTSEC-2026-0548",
 ]
 
 [licenses]
