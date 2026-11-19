@@ -570,7 +570,8 @@ mod tests {
 
             assert_eq!(raw_par.mean[ch], raw_single.mean[0], "ch={ch}");
             assert_eq!(raw_par.var[ch], raw_single.var[0], "ch={ch}");
-            for (i, &single) in raw_single.out.iter().enumerate().take(n * spatial) {
+            assert_eq!(raw_single.out.len(), n * spatial, "ch={ch}");
+            for (i, &single) in raw_single.out.iter().enumerate() {
                 let idx = channel_index(i, ch, c, spatial);
                 assert_eq!(raw_par.out[idx], single, "ch={ch} i={i}");
             }

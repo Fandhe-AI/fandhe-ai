@@ -194,7 +194,7 @@ fn lbfgs_matches_pytorch_reference() {
                 expected.orig_loss,
                 &format!("case={case_name} step={step_idx} orig_loss"),
             );
-            for (j, &exp) in expected.w.iter().enumerate().take(d) {
+            for (j, &exp) in expected.w[..d].iter().enumerate() {
                 assert_close(
                     w.get(&[j]).unwrap(),
                     exp,
