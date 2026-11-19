@@ -732,15 +732,15 @@ mod tests {
             vec![1.5, -0.5, 4.0, 0.25, 2.0],
         ] {
             let f = forward32(&w);
-            for i in 0..w.len() {
+            assert_eq!(f.excl.len(), w.len());
+            for (i, &excl) in f.excl.iter().enumerate() {
                 let want: f64 = (0..w.len())
                     .filter(|&l| l != i)
                     .map(|l| f64::from(w[l]))
                     .product();
                 assert!(
-                    fandhe_ai_tensor_core::tolerance::composite_close_f32(f.excl[i], want as f32),
-                    "{w:?} i={i} {} vs {want}",
-                    f.excl[i]
+                    fandhe_ai_tensor_core::tolerance::composite_close_f32(excl, want as f32),
+                    "{w:?} i={i} {excl} vs {want}"
                 );
             }
         }

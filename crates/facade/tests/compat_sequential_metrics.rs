@@ -214,14 +214,14 @@ fn val_metrics_matches_independent_predict_and_compute_per_epoch() {
     let mut twin = build_model();
     twin.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
         .unwrap();
-    for epoch in 0..EPOCHS {
+    for (epoch, hist) in history.val_metrics.iter().enumerate().take(EPOCHS) {
         twin.fit(&x, &y, FitConfig::new(1, N)).unwrap();
         twin.eval();
         let logits_val = twin.predict(&x_val).unwrap();
         let expected =
             MetricsResult::compute(&[Metrics::Accuracy, Metrics::F1], &logits_val, &y_val).unwrap();
         assert_eq!(
-            history.val_metrics[epoch], expected,
+            *hist, expected,
             "epoch {epoch}: history.val_metrics が独立計算と一致しない"
         );
     }
