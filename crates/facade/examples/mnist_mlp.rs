@@ -197,6 +197,11 @@ mod tests {
         fandhe_ai::manual_seed(SEED_GLOBAL);
         let train = synthetic_mnist(N_TRAIN, SEED_TRAIN).unwrap();
         let test = synthetic_mnist(N_TEST, SEED_TEST).unwrap();
+        // 評価入力が学習入力の先頭 N_TEST 件と一致しない（別シードで生成された）ことを、
+        // 実際に生成したデータで確認する。クラス原型とラベル順は共通のため入力でのみ区別できる。
+        let train_x = train.x.as_slice().expect("画素スライスを取得できること");
+        let test_x = test.x.as_slice().expect("画素スライスを取得できること");
+        assert_ne!(&train_x[..test_x.len()], test_x);
         let mut model = build_model().unwrap();
         let report = train_and_report(&mut model, &train, &test).unwrap();
         assert_eq!(report.epoch_loss.len(), EPOCHS);
