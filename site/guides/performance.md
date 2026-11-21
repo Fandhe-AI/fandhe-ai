@@ -29,9 +29,10 @@ CUDA（NVRTC/mma）・Metal（simdgroup）の全カーネルに適用されま�
 ウォームアップ 1 回＋ 5 回計測の中央値を計算する構成にしています。
 
 学習系の回帰テストには決定的シード設定ユーティリティ
-（`bench_harness::rng::Xorshift64Star` 等）を使い、実行のたびに結果が
-揺れないようにします。[training-loop example](/examples/training-loop/)
-も同じ理由で重み初期化・データ生成の双方を固定シードで駆動しています。
+（`bench_harness::rng::Xorshift64Star` 等。統合テスト・ベンチ側のユーティリティ）を使い、
+実行のたびに結果が揺れないようにします。[training-loop example](/examples/training-loop/)
+も同じ理由で固定シードで駆動しており、公開面の `fandhe_ai::manual_seed` ＋
+`fandhe_ai::rand`（データ）と `add_linear` の `seed` 引数（重み）を使います。
 
 ## 本格計測は `bench-harness`（criterion）の領分
 

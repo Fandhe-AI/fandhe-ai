@@ -1,15 +1,17 @@
 # 学習ループ
 
-`compat::Sequential` を使った学習ループの最小例です。`fandhe_ai_autodiff::optim::
-{Sgd, AdamW}` は `fandhe-ai` の公開面（`docs/compat-api-scope.md` §0）に
-含まれない内部 API のため、この例は `param - lr * grad` を自前で計算
-する手動 SGD にしています。optimizer 実装自体の解説は本ページの対象外
-です。
+`Tape`／`Var` と `fandhe_ai::optim::Sgd` で書く、PyTorch 風の手書き学習ループの
+最小例です。`fandhe-ai` の公開面（`fandhe_ai::*`）だけで完結するため、
+`fandhe-ai` だけに依存するプロジェクトへそのまま写して動きます。
+
+学習ループを書かずに済ませたい場合（Keras 風）は `Sequential::compile`／`fit`
+を使います（API は [compat API](/api/compat/) を参照。実行可能な example は
+イシュー #4338 で追加予定です）。
 
 ```rust
-use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
+use fandhe_ai::optim::{Sgd, SgdConfig};
 
 const BATCH: usize = 4;
 const D_IN: usize = 8;
@@ -23,19 +25,15 @@ const SEED_L2: u64 = 0x2222_2222;
 const STEPS: usize = 100;
 const LR: f32 = 0.05;
 
-/// `x`（`[BATCH, D_IN]`）・`y`（`[BATCH, D_OUT]`）を Xorshift64Star から
-/// 生成する（`crates/facade/tests/compat_sequential_train.rs::gen_regression_data`
-/// と同一生成順）。
+/// `x`（`[BATCH, D_IN]`）・`y`（`[BATCH, D_OUT]`）を `[0, 1)` の一様乱数で
+/// 生成する（`manual_seed` で系列を固定してから `rand` を呼ぶ）。
 fn gen_regression_data(
     seed: u64,
 ) -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> {
-    let mut rng = Xorshift64Star::new(seed);
-    let x = rng.fill_vec(BATCH * D_IN);
-    let y = rng.fill_vec(BATCH * D_OUT);
-    Ok((
-        Tensor::new(x, &[BATCH, D_IN])?,
-        Tensor::new(y, &[BATCH, D_OUT])?,
-    ))
+    fandhe_ai::manual_seed(seed);
+    let x = fandhe_ai::rand(&[BATCH, D_IN])?;
+    let y = fandhe_ai::rand(&[BATCH, D_OUT])?;
+    Ok((x, y))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,16 +43,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_linear(D_HIDDEN, D_OUT, SEED_L2)?;
 
     let (x_data, y_data) = gen_regression_data(SEED_DATA)?;
+    let mut optimizer = Sgd::new(SgdConfig::new(LR))?;
 
     let mut initial_loss = None;
     let mut final_loss = 0.0_f32;
 
     for step in 0..STEPS {
-        // 1 ステップ分の Tape 上で forward → backward → 手動 SGD 更新値の
-        // 計算までを行い、更新後テンソル列（所有 `Vec<Tensor<f32>>`）を
-        // ブロック外へ持ち出す。ブロックを抜けると `bound`（`&model` を
-        // 借用）と `tape` が drop され、直後の `apply_parameters`
-        // （`&mut model`）呼び出しと借用が競合しない。
+        // 1 ステップ分の Tape 上で forward → backward → optimizer.step までを
+        // 行い、更新後テンソル列（所有 `Vec<Tensor<f32>>`）をブロック外へ
+        // 持ち出す。ブロックを抜けると `bound`（`&model` を借用）と `tape` が
+        // drop され、直後の `apply_parameters`（`&mut model`）と借用が競合しない。
         let updated: Vec<Tensor<f32>> = {
             let tape = fandhe_ai::tape();
             let bound = model.bind(&tape);
@@ -72,31 +70,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             final_loss = loss_value;
 
+            // PyTorch の `loss.backward()` に相当。
             let grads = tape.backward(&loss)?;
             let grad_refs = bound.trainable_grads(&grads)?;
             let param_refs = model.trainable_parameters();
 
-            let mut next_params = Vec::with_capacity(param_refs.len());
-            for (param, grad) in param_refs.iter().zip(grad_refs.iter()) {
-                // `contiguous()` の戻り値は同一文の間だけ生存すればよい
-                // （`crates/facade/tests/compat_sequential_train.rs::dense_vec`
-                // と同じ一時変数寿命の使い方）ため 1 文で `to_vec()` まで行う。
-                let param_data = param.contiguous().as_slice().ok_or(
-                    "trainable_parameters() の要素は contiguous() 直後は必ず as_slice() が Some",
-                )?.to_vec();
-                let grad_data = grad
-                    .contiguous()
-                    .as_slice()
-                    .ok_or("trainable_grads() の要素は contiguous() 直後は必ず as_slice() が Some")?
-                    .to_vec();
-                let sgd_data: Vec<f32> = param_data
-                    .iter()
-                    .zip(grad_data.iter())
-                    .map(|(p, g)| p - LR * g)
-                    .collect();
-                next_params.push(Tensor::from_slice(&sgd_data, param.shape())?);
-            }
-            next_params
+            // PyTorch の `optimizer.step()` に相当（更新後パラメータを返す）。
+            optimizer.step(&param_refs, &grad_refs)?
         };
         model.apply_parameters(updated)?;
     }
@@ -109,7 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 学習退行（勾配計算・パラメータ更新の不具合で loss が非有限化
     // する、または減少しなくなる）を表示するだけで見逃さないよう、
-    // 満たさない場合は Err を返して `cargo run` を失敗終了させる。
+    // 満たさない場合は Err を返して `cargo run` を失敗終了させる
+    // （イシュー #875 レビュー指摘）。
     if !final_loss.is_finite() {
         return Err(format!("final loss が有限値ではない: {final_loss}").into());
     }
@@ -130,8 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 で実行確認済み。出力は次の 3 行）。
 
 ```
-initial loss: 0.5237394
-final loss: 0.055154312
+initial loss: 0.15434094
+final loss: 0.06244343
 loss decreased: true
 ```
 

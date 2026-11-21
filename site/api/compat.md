@@ -61,6 +61,15 @@ Keras `Sequential` 慣習でレイヤーを積み上げるビルダーです。`
 （facade 公開面）の位置対応契約にそのまま渡せます。`apply_parameters` は shape を変えない
 更新専用の契約であり、層幅を変えるリサイズ用途はサポート対象外です。
 
+### 学習ループの自動化（`compile`／`fit`）
+
+手書きのループを省く Keras 風の入口です。
+
+| メソッド | 役割 |
+|---|---|
+| `Sequential::compile(optimizer, loss) -> Result<(), AutodiffError>` | optimizer と loss を設定する。`fit` の前に 1 回呼ぶ |
+| `Sequential::fit(&x, &y, config: FitConfig) -> Result<History, AutodiffError>` | `compile` 済みの設定でエポック学習を実行し、学習履歴 `History` を返す（`y` の要素型は `FitTarget` を満たすもの） |
+
 ### `fandhe_ai::Tape` newtype について
 
 `Sequential::forward`／`Sequential::bind` はいずれも `fandhe_ai_autodiff::Tape` では
