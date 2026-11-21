@@ -92,6 +92,12 @@ P5 の「将来の損失・最適化は別入口の追加で扱う」と同じ�
   - 学習率の反映: 既存と同じ（epoch 開始時の学習率がその epoch の更新に使われ、変更後の値が
     終了時にホストの optimizer へ保存される）
   - エラー: 既存の処理が返すエラーは既存と同じ型・variant で返す（エラー表）
+  - **ユーザーから観測できる出力**（`History`〈`loss` の集計値を含む〉、callback・`save_model` に渡す重み、
+    終了後のホストモデル）は既存と同じ形・同じ値にする。特に重みは既存の `Sequential::state_dict()` と
+    同じキー（`0.weight` 等）・形状とし、同じモデルの `load_state_dict` で復元できる形（メモリ内保存・
+    ファイル保存の両方）にする。デバイス上の中間表現（`sync_device_param_store_to_host` が返すスロット順の
+    テンソル列・世代つきの loss ハンドル等）を出力へそのまま出さず、スロット列からの対応付けと
+    損失の集計は実装側の責務とする
 
   これと違ってよいのは次の例外**だけ**である（例外以外の検証・位置・エラーは既存どおり。既存が転送後・実行時に失敗しうる検査も、そのまま失敗しうる）:
   - E1（GPU 固有の事前検査の位置）: デバイスの解決・対応可否、モデル・損失・optimizer の静的な未対応
@@ -121,7 +127,7 @@ impl Sequential {
 }
 ```
 
-- `History` は CPU の fit と同じ型・同じ意味。`compile` は既存のまま使い、optimizer・loss は
+- `History` は §4 の等価規定（観測できる出力）のとおり CPU の fit と同じ型・同じ意味。`compile` は既存のまま使い、optimizer・loss は
   デバイスに依らない設定として `Compiled` に残す。
 - **状態の契約**:
   - store は呼び出しごとに `tape_for(device)` → `init_device_param_store` で作る。終了時の
@@ -248,7 +254,8 @@ impl Sequential {
   `Sequential` の `state_dict()` を保存するので、同期後も同じホストモデルを渡すと現在の監視値に対して学習前の重みが
   保存される。このため両 callback のスナップショット（`EarlyStopping` の最良重み、`ModelCheckpoint` の保存内容）は、
   **現在の store から取得（D2H）した重みを使い**、ホストモデルの `state_dict()` を使わない。
-  ファイル出力を指定しない `ModelCheckpoint` のメモリ内保存にも同じ契約を適用する。
+  ファイル出力を指定しない `ModelCheckpoint` のメモリ内保存にも同じ契約を適用する。保存内容の形式は
+  §4 の等価規定（観測できる出力）に従う。
 - **取得失敗の伝播契約**: `Tape::sync_device_param_store_to_host` は失敗しうるが、既存の
   `EarlyStopping::observe` が受けるスナップショット取得クロージャは失敗を返せず、取得より先に
   `best` を更新する。GPU 入口ではこの順序を踏襲せず、**改善判定 → 重み取得（D2H）→ 取得成功後に
@@ -268,8 +275,8 @@ impl Sequential {
   検証の分割・損失の集計・metrics の蓄積、metrics・callback の監視設定の引数検証は、§4 の
   「既存 CPU 入口との等価」のとおり既存と同じにする（本節で項目を重ねて定義しない）。
   CPU の fit との差は REQ-2 の判定で見る（方式は #4360）。
-- `History`: 型・意味は CPU と同じ。loss を step ごとに `ResidentLoss::read` するか epoch 単位で
-  まとめて読むかは転送回数の方針として **#4360 に申し送る未決点**。
+- `History`: §4 の等価規定に従う。loss を step ごとに `ResidentLoss::read` するか epoch 単位で
+  まとめて読むかは転送回数の方針として **#4360（§12）に申し送る未決点**（前提は §12）。
 - `evaluate`・`predict` の GPU 版は #4377 の範囲。
 
 ## §8 後続のための予約節
@@ -290,7 +297,11 @@ impl Sequential {
 
 ## §12 ホスト⇔デバイス転送回数の上限（#4360 で記入）
 
-未記入（担当 #4360）。
+未記入（担当 #4360）。申し送り 1 点: loss を epoch 単位で転送する案にする場合も、`History.loss` は
+既存の集計（各バッチの損失をサンプル数で重み付け）と同じ値でなければならない（§4 の等価規定）。
+現行の `DeviceParamStore::read_train_step_loss` は次の step の発行後に古い世代のハンドルを拒否する
+（`train_chain.rs` の世代検査）ため、`ResidentLoss::read` を epoch 末へ遅らせるだけでは成立せず、
+各 step の損失を上書き前に保持する等の仕組みが要る。方式は #4360／本節の判断に委ねる。
 
 ## §13 承認結果（#4361 で記入）
 
