@@ -72,6 +72,40 @@
 store を呼び出しの中へ閉じて重みの正を二重にしない・`compat-resident-train-step-decision.md`
 P5 の「将来の損失・最適化は別入口の追加で扱う」と同じ方向、の 4 点。
 
+- **既存 CPU 入口との等価（本記録の他の節はこの規定を参照し、独自の細部を書かない）**:
+  `fit_on`／`fit_on_with_callbacks` は、既存の `fit_with_callbacks_named` → `run_fit` →
+  `run_evaluate_with_metrics`（`crates/facade/src/compat/training.rs`）と、次を**同じにする**。
+  常駐チェーン経路・Tape 経路（§6 ③）のどちらでも同じである。
+  - 処理順（コードで確認済み）: (1) 引数・組合せの検証群（`validation_split`・重み・検証データなしの
+    callback／metrics・`ValMetric` の監視設定・分類 metrics と target 型・EMA／SWA の併用 等。この群は
+    callback の開始処理より前）→ (2) `EarlyStopping::reset_for_fit` → (3) ロガー・EMA・SWA の
+    `begin_fit` → (4) train モード切替 → (5) `run_fit` 内の `TensorDataset::new`・`DataLoader` 構築と
+    その検査（`batch_size == 0` 等）→ (6) epoch ループ（epoch 開始時の LR 同期 → バッチ更新 → 検証評価 →
+    callback）。したがって `batch_size == 0` とロガーの開始失敗が重なれば、既存はロガー（(3)）が先に返る
+  - バッチ分割と端数バッチ: 学習・検証とも `config.batch_size` で分け、端数バッチを落とさない
+  - 検証の集計: `run_evaluate_with_metrics` と同じ（検証データを `batch_size` で分け、バッチ損失を
+    サンプル数で重み付けして `f64` で加算し、最後に 1 回 `f32` へ。metrics は `ConfusionAccumulator`）。
+    全件一括評価など**異なる分割・集計は許さない**（`History.val_loss`・`EarlyStopping`・
+    `ModelCheckpoint` の判断を変えるため）。bit 一致・REQ-2 の判定の扱いは §6 ③ の (a)(b) と #4360 のまま
+  - callback のリセット規則: 呼び出し開始時にリセットされるのは `EarlyStopping` だけ。`ModelCheckpoint`・
+    `LrSchedule`・`Ema`・`Swa` は呼び出しをまたいで状態を継続し、ロガー・`Lambda` は持たない
+    （`callbacks.rs` 冒頭「epoch 番号の数え方」）
+  - 学習率の反映: epoch 開始時の学習率（`LrSchedule` による `set_lr`）がその epoch の全更新に使われ、
+    変更後の学習率が終了時にホストの optimizer へ保存される
+  - エラー型: 既存と同じ `AutodiffError::InvalidArgument`（エラー表）
+
+  これと違ってよいのは次の例外**だけ**である（例外以外の検証・位置・エラーは既存どおり）:
+  - E1（GPU 固有の事前検査の位置）: デバイスの解決・対応可否、モデル・損失・optimizer の静的な未対応
+    判定、検証指定時の eval 経路の可否（§6・§7）は GPU 固有で既存に対応物がないため、(1) の検証群の
+    直後・(2) の前に置き、`Unsupported`（`tape_for` の失敗は §4 エラー表）で返す。**既存と同じ検査
+    （`batch_size == 0`・データセット／ローダーの検査等）は前倒しせず、既存と同じ位置 (5) で同じ
+    エラーを返す**。store の初期化は (5) の後・epoch ループの前に行う
+  - E2（失敗時の重み）: 上記「状態の契約」の、呼び出し前への巻き戻しとベスト重みを `Err` 時に
+    適用しない点（既存の `run_fit` は成功済みバッチの更新とベスト重みを残す）
+  - E3（初期段階の `Unsupported`）: §6 の無条件拒否・§7 の `Ema`／`Swa`・`Lambda` の扱い（#4360）
+  - E4（重みの出所と書き戻し時点）: ホストモデルへの書き戻しは終了時のみで、callback のスナップショットは
+    store から取得した重みを使う（§7）
+
 下流 issue（#4375〜#4378）向けのたたき台（最終形は #4361 の承認時に確定する。変える場合は同じ PR で本記録を更新する）。
 
 ```rust
@@ -127,25 +161,14 @@ impl Sequential {
     スナップショットが肥大するため推奨しない）。この例外は `restore_best_weights` 有効かつ
     スナップショット存在の正常終了時に限る
   - `Device::Cpu` も受け付け、CPU の常駐チェーン（#3253 の部品）で回す。CPU の `fit` へ委譲はしない
-- **既存の CPU 入口との等価（検証・callback の扱い・エラー型）**: `fit_on`／`fit_on_with_callbacks` は、
-  既存の `fit`／`fit_with_callbacks` と**同じ引数検証・同じ callback の開始時処理・同じエラー型を、
-  同じ順序で**適用する。既存の順序は `training.rs` の `run_fit` 系で、引数・metrics・callback の
-  監視設定の検証 → `EarlyStopping` のリセット → ロガー・EMA・SWA の開始処理 → 学習、である。
-  GPU 入口はこの検証群を **store の初期化・`tape_for` の確保・callback の開始処理より前**に通す
-  （検証項目の列挙は本記録に重ねず、既存挙動を正とする）。GPU 固有の事前検査（§6・§7）はこの検証群の
-  後に足す。入口が足すのは GPU 固有の検査だけである
-- **エラー時の callback 副作用**: 失敗時に戻す状態は「モデル重み・optimizer 状態」（呼び出し前の
-  ホスト状態）に限る。`ModelCheckpoint` が書き出したチェックポイント、ログ、最良値スナップショット、
-  callback の進捗は確定済みの副作用であり巻き戻さない（外部ファイルは取り消せないため）。
-  **callback の状態のリセットは既存の `fit_with_callbacks` と同じで、入口が新たに足さない**:
-  呼び出し開始時にリセットされるのは `EarlyStopping` だけ（`reset_for_fit`）で、`ModelCheckpoint`・
-  `LrSchedule`・`Ema`・`Swa` は呼び出しをまたいで状態（最良値・通算 epoch 番号・`next_epoch`・shadow 等）を
-  継続し、ロガー・`Lambda` は呼び出しをまたぐ状態を持たない（`callbacks.rs` 冒頭「epoch 番号の数え方」）。
-  したがって失敗後に**同じ callback インスタンスを `fit_on_with_callbacks` へ再び渡すと、失敗した
-  呼び出しの最良値・epoch 番号がそのまま残る**。失敗した試行の状態を引き継がせたくない場合は、
-  **呼び出し側が新しい callback を用意する**（`fit_on` は callback を受けないので該当しない）。
-  残存したチェックポイントの扱いも呼び出し側が担う。エラーを返す時点でチェックポイントが
-  書かれていた場合の通知方法は #4360 で定める
+- **エラー時・再呼び出し時の callback の状態**（上記「既存 CPU 入口との等価」から導く）: エラー直後に
+  観測できるのは、失敗した呼び出しが残した状態のまま（`ModelCheckpoint` が書き出したチェックポイント・
+  ログ・最良値・callback の進捗は確定済みで巻き戻さない。巻き戻すのはモデル重みと optimizer 状態だけ。
+  例外 E2）。再呼び出し後は既存のリセット規則に従い、`EarlyStopping` は開始処理（`reset_for_fit`）に
+  達した時点で最良値・epoch 番号・スナップショットがリセットされ、`ModelCheckpoint`・`LrSchedule`・
+  `Ema`・`Swa` は失敗した呼び出しの状態を引き継ぐ。引き継がせたくない callback は呼び出し側が新しく
+  用意する（`fit_on` は callback を受けない）。残存したチェックポイントの扱いも呼び出し側が担う。
+  エラーを返す時点でチェックポイントが書かれていた場合の通知方法は #4360 で定める
 - **エラー表**（新しいエラー型・variant は足さない。既存の引数・状態エラーは `AutodiffError` の
   variant、バックエンド由来のエラーは `AutodiffError::Backend(BackendError::…)` を、完全な variant 名で使い分ける）:
 
@@ -184,7 +207,7 @@ impl Sequential {
 | ② 演算単位のホストフォールバック（`BackendOps` 内でホストへ落とす） | **禁止**（`train-step-resident-parts-design.md` と同じ方針） |
 | ③ `compat-resident-train-step-decision.md` §5 第 2 段のフォールバック（store 未変更時に限り同じデバイスの Tape 経路〈`forward_resident` → 損失 → `backward_device_param_store` → `step_device_param_store*`〉へ落とす） | CPU ではなく同じデバイス上で、判定を満たす場合だけ許す。`fit_on` で使うかと条件は #4360 の段階分けで決める。**判定は構成で 2 つに分ける**: (a) 常駐チェーンと Tape 経路の**両方が成立する構成**では、両経路の結果の bit 一致を確認する（同じデバイス・同じ入力）。(b) **Tape 経路だけが成立する構成**（チェーンを構築できない構成）には bit 一致の比較先となるチェーンがないため、(a) の条件はそのまま使えない。(b) の受け入れ条件（比較先〈CPU の `fit` か同じデバイスの既存 Tape 手組み経路か〉と判定方式〈REQ-2 の統一複合判定か baseline 方式か〉）は本記録で決めず、#4360（§9・§10）で確定する。確定するまで (b) の構成は ③ で許可済みとは扱わず `Unsupported` とする |
 
-拒否は store を作る前（状態を変える前）に行う fail-closed とする。選択デバイスの対応可否（`MemoryOps` 等の必要なバックエンド能力）の確認も
+拒否は store を作る前（状態を変える前）に行う fail-closed とし、位置は §4 の例外 E1 に従う（既存と同じ検査は前倒ししない）。選択デバイスの対応可否（`MemoryOps` 等の必要なバックエンド能力）の確認も
 この store 生成前の検査に含める。**事前拒否するのは「選択したデバイスで許可済みの経路が一つも成立しない場合」に限る**。
 常駐チェーンが成立しなくても、③ の条件（store 未変更・同じデバイス上・(a)(b) の判定）を #4360 が許可した構成では、
 同じデバイスの Tape 経路が成立するため事前拒否せず、その経路を選ぶ。チェーン固有の検査
@@ -216,8 +239,8 @@ impl Sequential {
 
 | Callback | ホスト重み | D2H 同期の時点 | `set_lr` の届き方 | 初期段階 |
 |---|---|---|---|---|
-| `LrSchedule` | 不要 | なし | epoch 開始時に lr を更新し、チェーンへ渡す optimizer 設定へ反映（`compat-callbacks-design.md` §4.5 と同じ時点） | 対応 |
-| `EarlyStopping` | 監視値のみ。`restore_best_weights` は要 | 改善時 | 該当なし | 対応（`restore_best_weights` は改善時に同期。正常終了時のみ、スナップショットが存在すれば最終書き戻しの後にベスト重みを適用し、不在なら最終書き戻しの重みを保持する。`Err` 時は適用せず呼び出し前の状態を残す。§4） |
+| `LrSchedule` | 不要 | なし | §4 の学習率の反映規則に従う（経路を問わない。`compat-callbacks-design.md` §4.5 と同じ時点） | 対応 |
+| `EarlyStopping` | 監視値のみ。`restore_best_weights` は要 | 改善時 | 該当なし | 対応（`restore_best_weights` は改善時に同期。終了時に残る重みは §4 の「終了時に残る重み」、`Err` 時は §4 の例外 E2） |
 | `ModelCheckpoint` | 要 | 保存の直前 | 該当なし | 対応（保存時に同期） |
 | `CsvLogger`／`JsonLogger` | 不要（`History` の数値のみ） | なし | 該当なし | 対応 |
 | `Lambda` | 不要（既存 `LambdaCallback::on_epoch_end` のクロージャが受けるのは epoch 番号と `&History` のみで、`Sequential` や重みは渡らない） | なし | 該当なし | 既存シグネチャのままなら重み同期は不要。初期段階で対応するかは別判断として #4360 で決める |
@@ -243,11 +266,10 @@ impl Sequential {
   `predict_resident_input` は `build_device_chain_steps` でチェーンを構築できないと `Unsupported`
   を返す。このため検証データを指定した呼び出し（`validation_split` は §6 のとおり初期段階では拒否）では、
   学習側の経路判定（§6）に加えて、対応する**同一デバイス上の eval 経路**（常駐チェーン、または
-  ③ で許可済みの Tape 経路）の成立も store 初期化前に判定し、成立しなければ store を作る前に
+  ③ で許可済みの Tape 経路）の成立も §4 の例外 E1 の位置で判定し、成立しなければ store を作る前に
   `Unsupported` で拒否する。学習途中の epoch 終了時に初めて検証が失敗する状態を作らない。
-  これに先立ち、metrics・callback の監視設定（検証データなしの metrics、分類 metrics と target 型の組合せ、
-  監視する指標の未要求・非スカラー等）の引数検証は、§4 の「既存の CPU 入口との等価」のとおり既存入口と
-  同じ検証を store 初期化・callback の開始処理より前に通す（本節で項目を重ねて定義しない）。
+  検証の分割・損失の集計・metrics の蓄積、metrics・callback の監視設定の引数検証は、§4 の
+  「既存 CPU 入口との等価」のとおり既存と同じにする（本節で項目を重ねて定義しない）。
   CPU の fit との差は REQ-2 の判定で見る（方式は #4360）。
 - `History`: 型・意味は CPU と同じ。loss を step ごとに `ResidentLoss::read` するか epoch 単位で
   まとめて読むかは転送回数の方針として **#4360 に申し送る未決点**。
@@ -302,8 +324,9 @@ impl Sequential {
 
 - A01／A04: 未対応構成は store を作る前に型付きエラーで止め、黙って CPU や別の計算へ切り替えない。
   別デバイス・別ストア・古い世代のハンドルの拒否は P1〜P6 の検査（`store_id`・`device`・`generation`）を流用する
-- A03: `epochs`・`batch_size`・形状の検査はデバイスへの転送より前に、既存 `fit` と同じ検査
-  （`checked_*` による算術オーバーフロー防止を含む）を通す。カーネル側の手動境界チェックは省略しない（REQ-8）
+- A03: `epochs`・`batch_size`・形状の検査は、既存 `fit` と同じ検査（`checked_*` による算術オーバーフロー防止を
+  含む）を既存と同じ位置で通す（§4 の例外 E1。位置を前倒ししない）。store の初期化とデバイスへの転送は
+  その検査より後に行うため、検査を通らない入力はデバイスへ届かない。カーネル側の手動境界チェックは省略しない（REQ-8）
 - A05／A06: 依存追加なし・新規 `unsafe` なし
 - A08: 学習結果は、常駐チェーンと Tape 経路が両方成立する構成では両経路の bit 一致、Tape 経路だけが成立する構成では
   #4360 が §10 で確定する比較先と判定方式（§6 ③）と、REQ-2 の判定で担保し、tolerance・baseline は変えない
