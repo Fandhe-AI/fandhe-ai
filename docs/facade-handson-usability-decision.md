@@ -58,7 +58,7 @@
 
 ### 4.3 推奨・SemVer・`api_surface.rs`
 
-- 推奨: **実装する（案 A）**。フィールドを非公開に保つ案（A〜D）では構造体更新構文は成立せず、ビルダーなしの `Default` では目的を果たせないため。構造体更新構文が成立するのは案 E だけで、その場合も現行の `FitConfig` には `Default` がないため、フィールドの公開に加えて `Default` の追加（手書き `impl Default`）が必要になる。案 E は不採用他フィールドの既定は `new` と同じ。rustdoc に既定値一覧と `FitConfig::default() == FitConfig::new(1, 32)` の doctest を書く
+- 推奨: **実装する（案 A）**。フィールドを非公開に保つ案（A〜D）では構造体更新構文は成立せず、ビルダーなしの `Default` では目的を果たせないため。構造体更新構文が成立するのは案 E だけで、その場合も現行の `FitConfig` には `Default` がないため、フィールドの公開に加えて `Default` の追加（手書き `impl Default`）が必要になる。案 E は採らない。案 A の `Default` は他フィールドの既定も `FitConfig::new(1, 32)` と同じ値を引き継ぐ。rustdoc に既定値一覧と `FitConfig::default() == FitConfig::new(1, 32)` の doctest を書く
 - SemVer: 追加のみ（trait impl と inherent メソッドの追加。derive 集合と既存メソッドは不変）
 - `api_surface.rs`: `fit_types_are_reachable_via_facade_only` の近くに正のプローブを足す（`Default + Copy + Eq` の境界の具体化、`FitConfig::default() == FitConfig::new(1, 32)`、`epochs`／`batch_size` の `fn(FitConfig, usize) -> FitConfig` 型）
 
@@ -133,6 +133,7 @@
 ### 7.6 互換への影響
 
 - 推奨案はすべて「追加のみ」。§3 案 A を採る場合だけ「破壊的で承認要」
+- 公開面の区分（追加のみ）とは別に、§5.3 案 A では `History` の `==` の結果が変わる（既存 4 フィールドが同じでも停止 epoch が異なれば false）。`docs/api-compat-0.14.0-decision.md` §12.2 (c) の方針に沿い、これは「該当なし」相当の挙動変更として扱い、論点 7 で承認された場合はリリース時の「挙動のみの変更」欄に記載する
 
 ### 7.7 適用記録・索引・追跡表
 
