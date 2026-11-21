@@ -1,6 +1,7 @@
 //! 合成 MNIST 形式データで `compile` → `fit` → `evaluate` → `predict` を通す example（イシュー #4339・親 #4338）。
 //!
 //! 実行: `cargo run -p fandhe-ai --example mnist_mlp --release`（debug でも動くが遅い）。
+//! 保存・読み込みを含む終了コード 0 は Linux（x86_64／aarch64）と macOS が対象で、それ以外では非 0 終了する。
 //!
 //! - 入力 784 次元・10 クラスの MNIST と同じ形の**合成データ**を使う。実 MNIST ではなく、
 //!   ネットワーク取得もしない（オフラインで exit 0 になる）。
@@ -13,8 +14,8 @@
 //! - 学習後に一時ディレクトリへ `save_model` し、`load_model` で復元したモデルの `predict` 出力が
 //!   保存前と bit 一致することを確認する（#4341）。最大差を表示し、0 でなければ非 0 終了する。
 //!   一時ディレクトリ（unix では 0o700 で排他作成）は成功・失敗を問わず終了時に片付けを試みる
-//!   （後始末はベストエフォートで、削除に失敗すると残りうる）。保存・読み込みは unix（Linux／macOS）
-//!   が対象で、非 unix では `save_model` が `Unsupported` を返し非 0 終了する。
+//!   （後始末はベストエフォートで、削除に失敗すると残りうる）。保存・読み込みは load_model の対応環境
+//!   （Linux x86_64／aarch64 と macOS）が対象で、それ以外では非 0 終了する。
 //! - 兄弟イシュー #4340 は `synthetic_mnist` と並ぶ IDX 読み込みを足す（引数なしは合成データのまま）。
 
 use fandhe_ai::compat::{
@@ -178,25 +179,29 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().create(path)
 }
 
-/// 親ディレクトリが信頼できることを確認する（unix）。sticky bit 付き、または
-/// 作成したディレクトリと同じ所有者（または root）でグループ・その他に書き込み権限がないこと。
-/// そうでない共有ディレクトリでは、他者が親のエントリを差し替えて保存先や削除対象を
-/// すり替えられるため拒否する。
+/// 親ディレクトリ階層が信頼できることを確認する（unix）。`parent` を正規化し、その各祖先
+/// （自身と `/` を含む）が、作成したディレクトリと同じ所有者（または root）の持ち物で、
+/// かつ「グループ・その他に書き込み権限がない」か「sticky bit 付き」であることを要求する。
+/// 別ユーザー所有の sticky ディレクトリや、他者が書ける祖先は、エントリの差し替えで
+/// 保存先・削除対象をすり替えられるため拒否する。
 #[cfg(unix)]
 fn check_parent_trusted(parent: &Path, child: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
-    let p = std::fs::metadata(parent)?;
-    let c = std::fs::symlink_metadata(child)?;
-    let sticky = p.mode() & 0o1000 != 0;
-    let private = (p.uid() == c.uid() || p.uid() == 0) && p.mode() & 0o022 == 0;
-    if sticky || private {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "一時ディレクトリの親が信頼できない（sticky bit なしで他者が書き込める）",
-        ))
+    let owner = std::fs::symlink_metadata(child)?.uid();
+    let canon = std::fs::canonicalize(parent)?;
+    for dir in canon.ancestors() {
+        let m = std::fs::metadata(dir)?;
+        let owner_ok = m.uid() == owner || m.uid() == 0;
+        let sticky = m.mode() & 0o1000 != 0;
+        let closed = m.mode() & 0o022 == 0;
+        if !(owner_ok && (closed || sticky)) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("一時ディレクトリの祖先 {} が信頼できない", dir.display()),
+            ));
+        }
     }
+    Ok(())
 }
 
 impl SaveDirGuard {
@@ -219,11 +224,14 @@ impl SaveDirGuard {
             let path = base.join(name);
             match create_private_dir(&path) {
                 Ok(()) => {
-                    // 以降は Drop で片付く。親が信頼できなければ即座に拒否する。
-                    let guard = Self { path };
+                    // 信頼検査を通るまで再帰削除ガードは作らない。拒否時は今作った空ディレクトリだけを
+                    // 非再帰で消す（信頼できないパスに remove_dir_all を向けない）。
                     #[cfg(unix)]
-                    check_parent_trusted(&base, &guard.path)?;
-                    return Ok(guard);
+                    if let Err(e) = check_parent_trusted(&base, &path) {
+                        let _ = std::fs::remove_dir(&path);
+                        return Err(e);
+                    }
+                    return Ok(Self { path });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
                 Err(e) => return Err(e),
@@ -424,6 +432,26 @@ mod tests {
         }
         drop(guard);
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_parent_is_rejected_without_recursive_delete() {
+        use std::os::unix::fs::PermissionsExt;
+        let outer = SaveDirGuard::create().unwrap();
+        let open = outer.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let child = open.join("child");
+        create_private_dir(&child).unwrap();
+        assert!(check_parent_trusted(&open, &child).is_err());
+        let trusted = outer.path().join("closed");
+        std::fs::create_dir(&trusted).unwrap();
+        // umask に依らず他者書き込みなしにする。
+        std::fs::set_permissions(&trusted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let child2 = trusted.join("child");
+        create_private_dir(&child2).unwrap();
+        assert!(check_parent_trusted(&trusted, &child2).is_ok());
     }
 
     #[test]

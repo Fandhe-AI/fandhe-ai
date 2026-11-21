@@ -95,7 +95,7 @@ cargo run -p fandhe-ai --example getting_started
 cargo run -p fandhe-ai --example mnist_mlp --release
 ```
 
-保存・読み込みは Unix（Linux／macOS）が対象です。非 Unix では `save_model` が `Unsupported` を返し、この example は非 0 終了します。
+保存・読み込みは `load_model` の対応環境（Linux x86_64／aarch64 と macOS）が対象です。終了コード 0 もこの環境の場合に限り、それ以外では example は非 0 終了します。
 
 ## クレート構成とサポート境界
 
