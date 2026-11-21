@@ -556,7 +556,10 @@ impl<'a> FitWeights<'a> {
 /// 各 `fit` 入口で共通）が `Some` の場合、または `config` の実効的な
 /// [`FitConfig::validation_split`] が末尾を検証データに割り当てた場合に
 /// 得られる。どちらも無い場合（[`Sequential::fit`] を含む）は空のまま
-/// （`Vec::new()`）。
+/// （`Vec::new()`）。ただし `metrics` が非空で検証データも無い場合は空で
+/// 返らず、`fit` が `AutodiffError::InvalidArgument` で失敗する（指標は検証
+/// データ上で定義されるため。`metrics` を要求するときは `validation` または
+/// 実効的な `validation_split` が必須）。
 ///
 /// `lr[i]`（イシュー #1763）は epoch `i` の**全バッチが実際に使った**
 /// optimizer の学習率（`callbacks` の有無に関わらず常に記録する。
@@ -566,13 +569,14 @@ impl<'a> FitWeights<'a> {
 /// `val_metrics[i]`（イシュー #2072）は、`val_loss` を記録する場合（実効的な
 /// 検証データがある）に加えて、各 `fit` 入口の `metrics` 引数（共通処理へ渡る）
 /// が非空のときのみ epoch `i` 末の検証 metrics（[`MetricsResult`]。`val_loss`
-/// と同じ validation バッチ列から算出）で埋まる。次のいずれかなら空のまま
-/// （`Vec::new()`）で、2 条件（metrics の要求・検証データの有無）は独立に効く:
+/// と同じ validation バッチ列から算出）で埋まる。正常終了時に次のいずれかなら
+/// 空のまま（`Vec::new()`）で、2 条件（metrics の要求・検証データの有無）は
+/// 独立に効く（`metrics` 非空かつ検証データ無しはエラーであり空では返らない）:
 /// - `metrics` が空（[`Sequential::fit`]／`fit_with_callbacks` は内部へ空の
 ///   `metrics` を渡すため、`validation_split` で `val_loss` が記録されても
 ///   `val_metrics` は空。`fit_with_metrics`・`fit_with_weights`・
 ///   `fit_with_train_step` は渡された `metrics` に従う）
-/// - 検証データが無い
+/// - 検証データが無い（`metrics` も空の場合に限る）
 ///
 /// いずれの `Vec` も `i` は `fit_with_callbacks` 呼び出し内のローカル
 /// epoch 番号（0-indexed。`super::callbacks` モジュール doc「epoch
