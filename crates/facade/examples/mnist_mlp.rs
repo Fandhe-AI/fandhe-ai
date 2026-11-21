@@ -190,12 +190,10 @@ mod tests {
         assert_eq!(a.x.shape(), [20, IMAGE_LEN]);
         assert_eq!(a.y.shape(), [20]);
         assert_eq!(a.x.as_slice(), b.x.as_slice());
-        assert!(
-            a.y.as_slice()
-                .unwrap()
-                .iter()
-                .all(|&c| (0..10).contains(&c))
-        );
+        // 値域だけでなく 10 クラスの巡回（i % NUM_CLASSES）そのものを検証する。
+        // 単一クラスへ退化したデータでも精度 1.0 になる回帰を防ぐ。
+        let expected: Vec<i32> = (0..20).map(|i| (i % NUM_CLASSES) as i32).collect();
+        assert_eq!(a.y.as_slice().unwrap(), expected.as_slice());
     }
 
     /// 固定シードの合成データで compile→fit→evaluate→predict を通し、`check_result` で検証する。
