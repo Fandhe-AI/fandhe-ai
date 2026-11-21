@@ -2520,7 +2520,12 @@ impl Sequential {
     /// - Dropout など、学習時に同じグローバル RNG を使う層があれば、その消費も同じ列に入る。
     /// - `add_linear(.., seed)` 等の個別 seed による初期化は `manual_seed` と独立している。
     /// - `validation_split` の分割はシャッフル前に行い、末尾を検証側にするため乱数に依らない。
-    ///   検証フェーズは shuffle せず eval モードで回すため、RNG を消費しない。
+    ///   検証用のサンプル順序は shuffle せず、順序の決定ではグローバル RNG を消費しない。
+    ///   ただしこれは層の forward による乱数消費とは別の話で、
+    ///   [`Sequential::add_fractional_max_pool2d`]／[`Sequential::add_fractional_max_pool3d`] の層は
+    ///   eval モードでも forward ごとにグローバル RNG から標本を引く。これらを含むモデルでは、
+    ///   検証フェーズの forward（`validation`／`validation_split`）でも RNG の状態が進み、
+    ///   後続 epoch のシャッフル順序や再現性に影響しうる。
     /// - RNG は再現性のための決定的な乱数で、暗号用途には使えない。
     ///
     /// ```
