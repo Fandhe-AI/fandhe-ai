@@ -94,6 +94,13 @@ cargo run -p fandhe-ai --example getting_started
 cargo run -p fandhe-ai --example mnist_mlp --release
 ```
 
+展開済みの MNIST の IDX ファイルを置いたディレクトリを引数に渡すと、実データで学習できます
+（取得・sha256 照合・`gunzip` での展開は利用者側の責務です。詳細は example 冒頭のコメント）。
+
+```bash
+cargo run -p fandhe-ai --example mnist_mlp --release -- <IDX ディレクトリ>
+```
+
 ## クレート構成とサポート境界
 
 内部は複数のクレートに分かれていますが、利用者が直接触れるのは `fandhe-ai`
