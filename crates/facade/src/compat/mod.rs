@@ -15,13 +15,16 @@
 //! 1. **作る**: [`Sequential::new`](crate::compat::Sequential::new) に
 //!    [`add_linear`](crate::compat::Sequential::add_linear) などの `add_*` を連ねる。
 //! 2. **compile**: [`Sequential::compile`](crate::compat::Sequential::compile) で
-//!    optimizer と [`Loss`](crate::compat::Loss) を指定する。`&mut self` を取り `()` を返すため、
-//!    メソッドチェーンの末尾ではなく別の文として呼ぶ。
+//!    optimizer と [`Loss`](crate::compat::Loss) を指定する。`&mut self` を取り
+//!    `Result<(), AutodiffError>` を返すため、モデル構築の後に別の文として呼び、`?` 等で
+//!    エラーを処理する（メソッドチェーンの途中には置けない）。
 //! 3. **fit**: [`Sequential::fit`](crate::compat::Sequential::fit) に
 //!    [`FitConfig`](crate::compat::FitConfig) を渡し、エポックごとの損失を持つ
 //!    [`History`](crate::compat::History) を得る。validation・callbacks・metrics が要る場合は
 //!    [`fit_with_callbacks`](crate::compat::Sequential::fit_with_callbacks)／
-//!    [`fit_with_metrics`](crate::compat::Sequential::fit_with_metrics) を使う。
+//!    [`fit_with_metrics`](crate::compat::Sequential::fit_with_metrics) を使う。空でない
+//!    `metrics` を渡すときは `validation` に `Some((x_val, y_val))` が必要で、`None` との
+//!    組み合わせは `InvalidArgument` になる。
 //! 4. **evaluate**: [`Sequential::evaluate`](crate::compat::Sequential::evaluate) で損失を測る。
 //! 5. **predict**: [`Sequential::predict`](crate::compat::Sequential::predict) で推論する。
 //!    Dropout などを含むモデルで決定的な推論をしたいときは、先に
@@ -62,10 +65,14 @@
 //!     let parent = std::env::temp_dir()
 //!         .join(format!("fandhe_ai_doc_4345_{}_{nanos}", std::process::id()));
 //!     std::fs::create_dir(&parent)?;
-//!     save_model(&model, parent.join("model"))?;
-//!     let restored = load_model(parent.join("model"))?;
-//!     assert_eq!(restored.predict(&x)?.as_slice(), pred.as_slice());
+//!     // 失敗しても一時ディレクトリを片付けてからエラーを返すため、結果を変数に保持する。
+//!     let outcome = (|| -> Result<_, Box<dyn std::error::Error>> {
+//!         save_model(&model, parent.join("model"))?;
+//!         let restored = load_model(parent.join("model"))?;
+//!         Ok(restored.predict(&x)?)
+//!     })();
 //!     std::fs::remove_dir_all(&parent)?;
+//!     assert_eq!(outcome?.as_slice(), pred.as_slice());
 //! }
 //! # Ok(())
 //! # }
