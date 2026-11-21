@@ -3,7 +3,7 @@
 //! 実行:
 //! - 合成データ（既定・オフライン）: `cargo run -p fandhe-ai --example mnist_mlp --release`
 //!   （debug でも動くが遅い）
-//! - 実 MNIST: `cargo run -p fandhe-ai --example mnist_mlp --release -- <IDX ディレクトリ>`
+//! - 実 MNIST: `cargo run -p fandhe-ai --example mnist_mlp --release -- '/path/to/mnist-idx'`  （パスは実際のディレクトリに置換する）
 //!
 //! 実データの用意（利用者側の責務。example 自身はネットワークに出ず、sha256 値も同梱しない）:
 //! 1. 信頼できる配布元から MNIST の 4 ファイル（`.gz`）を取得する。
@@ -17,6 +17,8 @@
 //!
 //! - 引数なしのときは入力 784 次元・10 クラスの MNIST と同じ形の**合成データ**を使う
 //!   （実 MNIST ではなく、オフラインで exit 0 になる）。
+//! - IDX 入力のディレクトリは利用者が管理する信頼できるローカルのものを前提にする。
+//!   通常ファイル以外は拒否するが、読み込み中の別プロセスによる差し替えは防がない。
 //! - IDX は magic・次元・件数・長さを先に検証し、不正な入力は型付きエラー（`IdxError`）で
 //!   非 0 終了にする。ファイル長にも上限を置き、巨大なヘッダによるメモリ枯渇を防ぐ。
 //! - 使うのは `fandhe_ai`（facade）の公開面と std だけ。`bench_harness` は非公開クレートで
@@ -309,35 +311,27 @@ fn idx_expected_len(header: &[u8], ndim: u8) -> Result<u64, IdxError> {
     }
 }
 
-/// リンクを辿らず非ブロッキングで開く。Unix は `O_NOFOLLOW | O_NONBLOCK`（`libc` は facade の
-/// `cfg(unix)` 既存依存）、非 Unix はリンク自体の種別を先に検査する（best effort）。
-fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
+/// 通常ファイルかを事前に確かめてから開く（`libc` は使わず std だけで行う）。
+/// 入力ディレクトリは利用者が管理する信頼できるローカルのもの、という前提に立つ。
+/// 検査から `open` までの間に別プロセスが差し替える攻撃は対象外とする
+/// （対策には `openat` 系のディレクトリハンドル相対オープンが要り、`libc`〈第 10 区分〉の
+/// 承認済み用途を example へ広げることになるため採らない）。FIFO などで `open` が
+/// 書き手待ちになるのを避けるため、`open` の前に `metadata()` で通常ファイルを確認する。
+fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "通常ファイルではない",
+        ));
     }
-    #[cfg(not(unix))]
-    {
-        if !std::fs::symlink_metadata(path)?.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "通常ファイルではない",
-            ));
-        }
-        std::fs::File::open(path)
-    }
+    std::fs::File::open(path)
 }
 
 /// IDX ファイルを読む。固定長ヘッダを先に読んで期待長を算出し、実ファイル長と一致を
 /// 確かめてからペイロードを確保する（不正な巨大ファイルを先読みしない）。
 ///
-/// 通常ファイルだけを受け付ける。Unix では `O_NOFOLLOW | O_NONBLOCK` で開き（検査と `open` の
-/// 間に差し替えられても、リンクは辿らず FIFO の書き手待ちでも停止しない）、取得したハンドルの
-/// `metadata()` で通常ファイルかを判定する（TOCTOU を作らない）。
+/// 通常ファイルだけを受け付ける（`open_regular` の事前検査と、開いたハンドルの `metadata()` の
+/// 二重確認）。入力は信頼できるローカルのディレクトリを前提とし、並行する差し替えは防がない。
 fn read_idx_file(path: &Path, ndim: u8) -> Result<Vec<u8>, IdxError> {
     let io = |source| IdxError::Io {
         path: path.to_path_buf(),
@@ -346,11 +340,9 @@ fn read_idx_file(path: &Path, ndim: u8) -> Result<Vec<u8>, IdxError> {
     let not_regular = || IdxError::NotRegularFile {
         path: path.to_path_buf(),
     };
-    let file = match open_regular_nofollow(path) {
+    let file = match open_regular(path) {
         Ok(f) => f,
-        // `O_NOFOLLOW` はリンクを `ELOOP` で拒否する。通常ファイルでないものと同じ扱いにする。
-        #[cfg(unix)]
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(not_regular()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return Err(not_regular()),
         Err(e) => return Err(io(e)),
     };
     let meta = file.metadata().map_err(io)?;
@@ -750,7 +742,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn read_idx_file_rejects_fifo_and_symlink() {
+    fn read_idx_file_rejects_fifo_and_directory() {
         let d = TempDirGuard::new("special");
         let p = d.path().join("fifo");
         let st = std::process::Command::new("mkfifo")
@@ -762,14 +754,9 @@ mod tests {
             read_idx_file(&p, 1),
             Err(IdxError::NotRegularFile { .. })
         ));
-        // 実在する正当なファイルへのシンボリックリンクも拒否する。
-        let real = d.path().join("real");
-        std::fs::write(&real, labels_bytes(&[0, 1])).unwrap();
-        assert!(read_idx_file(&real, 1).is_ok());
-        let link = d.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // ディレクトリも通常ファイルではない。
         assert!(matches!(
-            read_idx_file(&link, 1),
+            read_idx_file(d.path(), 1),
             Err(IdxError::NotRegularFile { .. })
         ));
     }
