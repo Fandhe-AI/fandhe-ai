@@ -309,13 +309,35 @@ fn idx_expected_len(header: &[u8], ndim: u8) -> Result<u64, IdxError> {
     }
 }
 
+/// リンクを辿らず非ブロッキングで開く。Unix は `O_NOFOLLOW | O_NONBLOCK`（`libc` は facade の
+/// `cfg(unix)` 既存依存）、非 Unix はリンク自体の種別を先に検査する（best effort）。
+fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        if !std::fs::symlink_metadata(path)?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "通常ファイルではない",
+            ));
+        }
+        std::fs::File::open(path)
+    }
+}
+
 /// IDX ファイルを読む。固定長ヘッダを先に読んで期待長を算出し、実ファイル長と一致を
 /// 確かめてからペイロードを確保する（不正な巨大ファイルを先読みしない）。
 ///
-/// 通常ファイルだけを受け付ける。`symlink_metadata` でリンク自体を見てシンボリックリンクと
-/// FIFO 等の特殊ファイルを `open` 前に拒否し、オープン後は同じ `fstat`（dev・ino）が
-/// 一致することを確かめて、検査と `open` の間の差し替えを検出する（libc を使わない std のみの対応。
-/// 残る競合窓は、指定ディレクトリを書き換えられる攻撃者が前提のため例示用途では受容する）。
+/// 通常ファイルだけを受け付ける。Unix では `O_NOFOLLOW | O_NONBLOCK` で開き（検査と `open` の
+/// 間に差し替えられても、リンクは辿らず FIFO の書き手待ちでも停止しない）、取得したハンドルの
+/// `metadata()` で通常ファイルかを判定する（TOCTOU を作らない）。
 fn read_idx_file(path: &Path, ndim: u8) -> Result<Vec<u8>, IdxError> {
     let io = |source| IdxError::Io {
         path: path.to_path_buf(),
@@ -324,21 +346,16 @@ fn read_idx_file(path: &Path, ndim: u8) -> Result<Vec<u8>, IdxError> {
     let not_regular = || IdxError::NotRegularFile {
         path: path.to_path_buf(),
     };
-    let link_meta = std::fs::symlink_metadata(path).map_err(io)?;
-    if !link_meta.is_file() {
-        return Err(not_regular());
-    }
-    let file = std::fs::File::open(path).map_err(io)?;
+    let file = match open_regular_nofollow(path) {
+        Ok(f) => f,
+        // `O_NOFOLLOW` はリンクを `ELOOP` で拒否する。通常ファイルでないものと同じ扱いにする。
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(not_regular()),
+        Err(e) => return Err(io(e)),
+    };
     let meta = file.metadata().map_err(io)?;
     if !meta.is_file() {
         return Err(not_regular());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if (link_meta.dev(), link_meta.ino()) != (meta.dev(), meta.ino()) {
-            return Err(not_regular());
-        }
     }
     let len = meta.len();
     if len > MAX_FILE_BYTES {
@@ -373,8 +390,10 @@ fn read_idx_file(path: &Path, ndim: u8) -> Result<Vec<u8>, IdxError> {
 
 /// 画像・ラベルの 1 組を読み、件数一致を検査して `Dataset` にする。
 fn load_idx_split(dir: &Path, images: &str, labels: &str) -> Result<Dataset, DynError> {
-    let (n, data) = parse_idx_images(&read_idx_file(&dir.join(images), 3)?)?;
+    // ラベルを先に検証し、画像ヘッダの件数と照合してから f32 展開（約 299 MiB）へ進む。
     let y = parse_idx_labels(&read_idx_file(&dir.join(labels), 1)?)?;
+    let image_bytes = read_idx_file(&dir.join(images), 3)?;
+    let n = check_magic(&image_bytes, 3)? as usize;
     if y.len() != n {
         return Err(IdxError::CountMismatch {
             images: n,
@@ -382,6 +401,7 @@ fn load_idx_split(dir: &Path, images: &str, labels: &str) -> Result<Dataset, Dyn
         }
         .into());
     }
+    let (_, data) = parse_idx_images(&image_bytes)?;
     Ok(Dataset {
         x: Tensor::new(data, &[n, IMAGE_LEN])?,
         y: Tensor::new(y, &[n])?,
