@@ -61,7 +61,7 @@ fn class_prototype(class: usize) -> Vec<f32> {
     let mut proto = vec![0.2f32; IMAGE_LEN];
     let mut rng = SplitMix64(0x9000 + class as u64);
     for _ in 0..(IMAGE_LEN / 6) {
-        let idx = (rng.next_u64() as usize) % IMAGE_LEN;
+        let idx = (rng.next_u64() % IMAGE_LEN as u64) as usize;
         proto[idx] = 0.6;
     }
     proto
@@ -158,8 +158,9 @@ fn check_result(r: &Report) -> Result<(), DynError> {
 }
 
 /// 本 example は引数を受け付けない（#4340 が path 引数を追加する）。
-fn parse_args(args: impl Iterator<Item = String>) -> Result<(), DynError> {
-    let extra: Vec<String> = args.collect();
+fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), DynError> {
+    // UTF-8 でない引数でもパニックしないよう OsString のまま扱う。
+    let extra: Vec<std::ffi::OsString> = args.collect();
     if extra.is_empty() {
         Ok(())
     } else {
@@ -168,7 +169,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<(), DynError> {
 }
 
 fn main() -> Result<(), DynError> {
-    parse_args(std::env::args().skip(1))?;
+    parse_args(std::env::args_os().skip(1))?;
     fandhe_ai::manual_seed(SEED_GLOBAL);
     let train = synthetic_mnist(N_TRAIN, SEED_TRAIN)?;
     let test = synthetic_mnist(N_TEST, SEED_TEST)?;
@@ -200,7 +201,7 @@ mod tests {
     #[test]
     fn parse_args_rejects_extra() {
         assert!(parse_args(std::iter::empty()).is_ok());
-        assert!(parse_args(["x".to_string()].into_iter()).is_err());
+        assert!(parse_args([std::ffi::OsString::from("x")].into_iter()).is_err());
     }
 
     #[test]
