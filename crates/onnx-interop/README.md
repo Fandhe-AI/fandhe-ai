@@ -10,14 +10,14 @@
 （composition root・compat 公開面）であり、本クレートはその内部実装として
 crates.io にも公開されています（依存解決のため）。
 
-ONNX import／export は `fandhe-ai::interop::onnx`（`OnnxModel`／
+ONNX import／export は `fandhe_ai::interop::onnx`（`OnnxModel`／
 `OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
 to_bytes, to_path, from_sequential}`・`OnnxExportOptions`）として
 `fandhe-ai` から公開済みです（import はイシュー #2017・export はイシュー
 #2018）。export には、import したモデルの書き出しと、`compat::Sequential`
 からの書き出し（`from_sequential` でモデルを作り、`to_bytes`／`to_path` で
 書き出す。対応層は 7 種）の 2 つがあります。safetensors save／load も
-`fandhe-ai::interop::safetensors`（`LoadError`／`SaveError`／
+`fandhe_ai::interop::safetensors`（`LoadError`／`SaveError`／
 `load_safetensors_f32`／`load_safetensors_f32_from_bytes`／
 `require_keys`／`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）
 として `fandhe-ai` から公開済みです（イシュー #2019）。dtype 混在ファイルの読込
