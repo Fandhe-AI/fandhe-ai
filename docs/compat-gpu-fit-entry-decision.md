@@ -68,57 +68,13 @@
 
 ## §4 推奨形（案 B）
 
+本記録の規範（「〜とする」）は次の 2 つに限る。(A) 公開形（入口の名前・署名・エラー型の区分・推奨案と比較）、
+(B) ユーザーから観測できる挙動の既存 CPU 入口との等価（本節の等価規定・(i)〜(iii)・例外 E1〜E4）。
+内部実装の契約（経路の切替・store の扱い・転送・D2H の頻度等）は規範にせず §17 へ申し送る。
+
 理由: 既存 `fit` 系 6 系統と `FitConfig` を変えない・未対応の組合せをシグネチャで受けない・
 store を呼び出しの中へ閉じて重みの正を二重にしない・`compat-resident-train-step-decision.md`
 P5 の「将来の損失・最適化は別入口の追加で扱う」と同じ方向、の 4 点。
-
-- **既存 CPU 入口との等価（本記録の他の節はこの規定を参照し、独自の細部を書かない）**:
-  `fit_on`／`fit_on_with_callbacks` は、既存の `fit_with_callbacks_named` → `run_fit` →
-  `run_evaluate_with_metrics`（`crates/facade/src/compat/training.rs`）と、次を**同じにする**。
-  常駐チェーン経路・Tape 経路（§6 ③）のどちらでも、**各項目は既存の同名関数の挙動を正とし、
-  本記録では細部を言い換えない**（細部が要るときは該当関数を読む）。
-  - 処理順: 引数・組合せの検証群（`fit_with_callbacks_named` 冒頭）→ `EarlyStopping` のリセット →
-    ロガー・EMA・SWA の `begin_fit` → `run_fit`（データセット／ローダー構築 → epoch ループ）の順。
-    この順序のまま、検査をどの位置で行うかも既存と同じにする（E1 を除く。コードで確認済みの例:
-    `batch_size == 0` の検査は `run_fit` 内にあり、ロガーの `begin_fit` より後）
-  - バッチ分割と端数バッチ: 学習は `FitConfig`（`drop_last` を含む）の扱いを含めて `run_fit` と同じ、
-    検証は `run_evaluate_with_metrics` と同じ。`drop_last` は分割をホスト側の既存ローダーが担うため
-    GPU 入口で解釈を足す必要がなく、初期段階の `Unsupported` にはしない
-  - 検証の集計・metrics: `run_evaluate_with_metrics` と同じ。全件一括評価など異なる分割・集計は
-    許さない（`History.val_loss`・`EarlyStopping`・`ModelCheckpoint` の判断を変えるため）。
-    値の合否・離散的な結果の扱いは下記 (ii)(iii) と #4360 のまま
-  - callback のリセット規則: 既存の `fit_with_callbacks` と同じ（`callbacks.rs` 冒頭「epoch 番号の数え方」。
-    どの callback が呼び出しをまたいで状態を持つかはそこを正とする）
-  - 学習率の反映: 既存と同じ（epoch 開始時の学習率がその epoch の更新に使われ、変更後の値が
-    終了時にホストの optimizer へ保存される）
-  - エラー: 既存の処理が返すエラーは既存と同じ型・variant で返す（エラー表）
-  - **ユーザーから観測できる出力**（`History`、callback・`save_model` に渡す重み、終了後のホストモデル）は、
-    次の 3 段で既存と等価にする:
-    - (i) **形式と手順**: 出力の型・キー・形状、`History` の各列の集計手順（どのバッチをどう重み付けするか）、
-      callback を呼ぶ順序と回数は既存と同じ（既存を正とする）。重みは既存の `Sequential::state_dict()` と
-      同じキー（`0.weight` 等）・形状とし、同じモデルの `load_state_dict` で復元できる形（メモリ内保存・
-      ファイル保存の両方）にする。デバイス上の中間表現（`sync_device_param_store_to_host` が返す
-      スロット順のテンソル列・世代つきの loss ハンドル等）を出力へそのまま出さず、スロット列からの
-      対応付けと損失の集計は実装側の責務とする
-    - (ii) **浮動小数点値の合否**: §6 ③ の (a)(b) に従う。(a) 両経路が成立する構成の経路間比較は bit 一致。
-      CPU 版との比較の判定方式（REQ-2 統一複合判定か baseline 方式か）と (b) は #4360（§10）で確定する。
-      REQ-2 の判定式・tolerance は変えない
-    - (iii) **離散的な結果**（`argmax` に基づく分類 metrics、監視値による `EarlyStopping`／
-      `ModelCheckpoint`／`LrSchedule` の判断）: 浮動小数点値が (ii) で合格でも CPU 版と一致するとは限らない
-      （許容誤差内の logits の差で `argmax` や監視値の大小が変わりうる）。CPU 版との一致を要求するか、
-      受け入れ条件は #4360 で決める。本記録では一致を保証しない
-
-  これと違ってよいのは次の例外**だけ**である（例外以外の検証・位置・エラーは既存どおり。既存が転送後・実行時に失敗しうる検査も、そのまま失敗しうる）:
-  - E1（GPU 固有の事前検査の位置）: デバイスの解決・対応可否、モデル・損失・optimizer の静的な未対応
-    判定、検証指定時の eval 経路の可否（§6・§7）は GPU 固有で既存に対応物がないため、引数・組合せの
-    検証群の直後・`EarlyStopping` のリセットの前に置き、エラー表のとおり返す。これだけが転送前の静的検査である。**既存と同じ検査
-    （データセット／ローダーの検査・形状の適合検査・検証データの検査等）は前倒しせず、既存と同じ位置で
-    同じエラーを返す**。store の初期化は `run_fit` のローダー構築の後・epoch ループの前に行う
-  - E2（失敗時の重み）: 上記「状態の契約」の、呼び出し前への巻き戻しとベスト重みを `Err` 時に
-    適用しない点（既存の `run_fit` は成功済みバッチの更新とベスト重みを残す）
-  - E3（初期段階の `Unsupported`）: §6 の無条件拒否・§7 の `Ema`／`Swa`・`Lambda` の扱い（#4360）
-  - E4（重みの出所と書き戻し時点）: ホストモデルへの書き戻しは終了時のみで、callback のスナップショットは
-    store から取得した重みを使う（§7）
 
 下流 issue（#4375〜#4378）向けのたたき台（最終形は #4361 の承認時に確定する。変える場合は同じ PR で本記録を更新する）。
 
@@ -136,54 +92,65 @@ impl Sequential {
 }
 ```
 
-- `History` の型と各列の意味・集計手順は §4 の (i) のとおり CPU の fit と同じ（値の合否は (ii)(iii)）。`compile` は既存のまま使い、optimizer・loss は
-  デバイスに依らない設定として `Compiled` に残す。
-- **状態の契約**:
-  - store は呼び出しごとに `tape_for(device)` → `init_device_param_store` で作る。終了時の
-    書き戻しは 2 段で、(1) `Tape::sync_device_param_store_to_host` が返す `Vec<Tensor<f32>>` を
-    取得し、(2) それを `apply_parameters` 相当で `Sequential` の層へ反映するところまでを
-    契約に含める（(1) だけではモデルへ反映されない）
-  - 失敗時の扱い（新契約）: 既存 `run_fit` はバッチごとに更新済み重みをモデルへ適用するため、
-    失敗しても成功済みバッチの更新がホストに残る。GPU 入口はデバイス側で更新し終了時にのみ
-    書き戻すため、**失敗時は呼び出し前のスナップショットへ重みと optimizer 状態を戻す**
-    （既存 `fit` とは異なる新契約として明記する）。重みと optimizer 状態は常に同じ時点
-    （呼び出し前、または正常終了時）にそろえ、片方だけが進んだ状態を残さない。
-    **`Err` を返すときは、ベストスナップショットを取得済みでも適用せず（既存 `run_fit` が
-    エラー時にも取得済みのベスト重みを適用する挙動とは異なる）、重み・optimizer 状態とも
-    呼び出し前の状態を残す**。ベスト重みを適用するのは正常終了時だけである
-  - optimizer 状態の持ち越しと書き戻し: optimizer 状態（Adam の moment・step 等）を fit 呼び出しの
-    間で持ち越すことを、独立した契約として GPU 入口でも守る。
-    「2 回の fit ＝ epoch 倍の 1 回」（`fit_twice_equals_fit_once_with_double_epochs`）の同値性は
-    **`shuffle=false` で callback がなく、バッチ順序・更新条件が同じで、分割した中間の呼び出し終了時に
-    ベスト重みの復元が入らない場合に限って**主張する（`restore_best_weights` は中間の呼び出し終了時にも
-    入りうるため、callback を伴う分割には同値性を主張しない）。書き戻し対象は既存状態に限らず、**初回実行で生成される Adam 系の
-    moment・step も含む**。状態を持つ optimizer は、新規 compile 直後の初回呼び出しでも
-    終了時の状態をホストへ保存できることを対応条件とする。ホストの optimizer 状態を
-    持ち込み・書き戻せない optimizer は、既存状態の有無に関わらず（初回でも）
-    型付きエラーで拒否する（安全側）。実現可否は #4367／#4376 で確かめる
-  - 終了時に残る重み: `restore_best_weights` が有効な場合、最終書き戻し（デバイス重み → ホスト）を
-    先に行い、**その後にベスト重みをホストへ適用する**。順序を逆にして復元済みのベスト重みを
-    最終 epoch のデバイス重みで上書きしない。復元の条件は `restore_best_weights` が有効かつ
-    **ベストスナップショットが存在すること**（`EarlyStopping::observe` は改善時にだけ取得する
-    ため、監視値が全 epoch で NaN の場合などは存在しない）。存在しなければ復元は行わず、
-    最終書き戻しの重みを保持する。正常終了時に残るのは、無効またはスナップショット不在なら
-    最終 epoch の重み、有効かつ存在すればベスト重みである
-  - **重みのみ復元（同時点保証の明示的な例外）**: 上記の「重みと optimizer 状態は常に同じ時点」は
-    呼び出し前の復元（失敗時）と最終書き戻しに対する保証であり、`restore_best_weights` による復元は
-    既存 callback と同じく**重みのみ**を過去の epoch へ戻す。optimizer 状態（moment・step）は最終
-    epoch のままホストへ残す（ベスト epoch の optimizer 状態は保存しない。保存・復元の追加は
-    スナップショットが肥大するため推奨しない）。この例外は `restore_best_weights` 有効かつ
-    スナップショット存在の正常終了時に限る
-  - `Device::Cpu` も受け付け、CPU の常駐チェーン（#3253 の部品）で回す。CPU の `fit` へ委譲はしない
-- **エラー時・再呼び出し時の callback の状態**（上記「既存 CPU 入口との等価」から導く）: エラー直後に
-  観測できるのは、失敗した呼び出しが残した状態のまま（`ModelCheckpoint` が書き出したチェックポイント・
-  ログ・最良値・callback の進捗は確定済みで巻き戻さない。巻き戻すのはモデル重みと optimizer 状態だけ。
-  例外 E2）。再呼び出し後は既存のリセット規則に従い、`EarlyStopping` は開始処理（`reset_for_fit`）に
-  達した時点で最良値・epoch 番号・スナップショットがリセットされ、`ModelCheckpoint`・`LrSchedule`・
-  `Ema`・`Swa` は失敗した呼び出しの状態を引き継ぐ。引き継がせたくない callback は呼び出し側が新しく
-  用意する（`fit_on` は callback を受けない）。残存したチェックポイントの扱いも呼び出し側が担う。
-  エラーを返す時点でチェックポイントが書かれていた場合の通知方法は #4360 で定める
-- **エラー表**（新しいエラー型・variant は足さない。3 区分で、variant は完全名で書く）:
+`compile` は既存のまま使い、optimizer・loss はデバイスに依らない設定として `Compiled` に残す。
+`Device::Cpu` も受け付ける（CPU の `fit` へは委譲しない）。
+
+### 既存 CPU 入口との等価（(B)。本記録の他の節はこの規定を参照し、独自の細部を書かない）
+
+`fit_on`／`fit_on_with_callbacks` は、既存の `fit_with_callbacks_named` → `run_fit` →
+`run_evaluate_with_metrics`（`crates/facade/src/compat/training.rs`）と、次を**同じにする**。
+各項目は既存の同名関数の挙動を正とし、本記録では細部を言い換えない（細部が要るときは該当関数を読む）。
+
+- 処理順と検査の位置: 引数・組合せの検証群 → `EarlyStopping` のリセット → ロガー・EMA・SWA の `begin_fit` →
+  `run_fit`（データセット／ローダー構築 → epoch ループ）。検査をどの位置で行うかも既存と同じ（E1 を除く）
+- バッチ分割と端数バッチ: 学習は `FitConfig`（`drop_last` を含む）の扱いを含めて `run_fit` と同じ、
+  検証は `run_evaluate_with_metrics` と同じ。異なる分割・集計は許さない
+  （`History.val_loss`・`EarlyStopping`・`ModelCheckpoint` の判断を変えるため）。
+  分割はホスト側の既存ローダーが担うため、`drop_last` は初期段階の `Unsupported` にしない
+- callback のリセット規則: 既存の `fit_with_callbacks` と同じ（`callbacks.rs` 冒頭「epoch 番号の数え方」）。
+  エラー直後に観測できるのは失敗した呼び出しが残した状態のままで、再呼び出し後は既存の規則に従う
+  （`EarlyStopping` は `reset_for_fit` 到達でリセット、`ModelCheckpoint`・`LrSchedule`・`Ema`・`Swa` は継続）。
+  引き継がせたくない callback は呼び出し側が新しく用意する（`fit_on` は callback を受けない）
+- 学習率: optimizer に残るのは各 epoch 開始時に反映した値（最終 epoch で実際に使った値）である。
+  epoch 末に callback が更新した次回用の値は callback が保持し、optimizer へは反映しない（既存を正とする。
+  `compat-callbacks-design.md` §4.5）
+- optimizer 状態: fit 呼び出しの間の持ち越しと終了時のホストへの保存（初回呼び出しで生成される状態を含む）は
+  既存と同じ。ホストへ戻せない optimizer は初期段階で `Unsupported`（E3）
+- 終了時の重み: `restore_best_weights` を含め既存と同じ（正常終了時のみベスト重みを適用し、重みだけを戻す）
+- エラー: 既存の処理が返すエラーは既存と同じ型・variant で返す（エラー表）
+- **ユーザーから観測できる出力**（`History`、callback・`save_model` に渡す重み、終了後のホストモデル）は、
+  次の 3 段で既存と等価にする:
+  - (i) **形式と手順**: 出力の型・キー・形状、`History` の各列の集計手順（どのバッチをどう重み付けするか）、
+    callback を呼ぶ順序と回数は既存と同じ。重みは既存の `Sequential::state_dict()` と同じキー（`0.weight` 等）・
+    形状とし、同じモデルの `load_state_dict` で復元できる形（メモリ内保存・ファイル保存の両方）にする。
+    callback が保存する重みは学習中の現在の重みである（ホストモデルの学習前の重みではない）。デバイス上の
+    中間表現（スロット順のテンソル列・世代つきの loss ハンドル等）は出力へそのまま出さない
+  - (ii) **浮動小数点値の合否**: (a) 常駐チェーンと同一デバイスの Tape 経路が両方成立する構成の経路間比較は
+    bit 一致。CPU 版との比較は REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を適用する。
+    **baseline 方式を使えるのは、`.claude/rules/coding-rust.md`／AGENTS.md の条件（単一の連続縮約ループとは
+    異なる結合順序で部分和を求める構造を持つカーネル・実機実測値のみ・人間承認）を満たす場合に限り、
+    それ以外は統一複合判定を適用する**。(b) Tape 経路だけが成立する構成の比較先と判定方式は #4360（§10）で
+    確定する（上記の条件を引く）。REQ-2 の判定式・tolerance は変えない
+  - (iii) **離散的な結果**（`argmax` に基づく分類 metrics、監視値による `EarlyStopping`／`ModelCheckpoint`／
+    `LrSchedule` の判断）: 浮動小数点値が (ii) で合格でも CPU 版と一致するとは限らない（許容誤差内の
+    logits の差で `argmax` や監視値の大小が変わりうる）。CPU 版との一致を要求するか、受け入れ条件は #4360 で
+    決める。本記録では一致を保証しない
+
+これと違ってよいのは次の例外**だけ**である（例外以外の検証・位置・エラーは既存どおり。既存が転送後・実行時に
+失敗しうる検査も、そのまま失敗しうる）:
+
+- E1（GPU 固有の事前検査の位置）: デバイスの解決・対応可否、モデル・損失・optimizer の静的な未対応判定、
+  検証指定時の eval 経路の可否は GPU 固有で既存に対応物がないため、引数・組合せの検証群の直後・
+  `EarlyStopping` のリセットの前に置く。これだけが転送前の静的検査である。**既存と同じ検査（データセット／
+  ローダーの検査・形状の適合検査・検証データの検査等）は前倒しせず、既存と同じ位置で同じエラーを返す**
+- E2（失敗時の重み）: `Err` を返すときは、モデル重み・optimizer 状態とも呼び出し前の状態を残し、ベスト重みも
+  適用しない（既存の `run_fit` は成功済みバッチの更新と取得済みのベスト重みを残す）。callback の副作用
+  （チェックポイント・ログ・最良値・進捗）は巻き戻さない。残存したチェックポイントの扱いは呼び出し側が担い、
+  `Err` 時にチェックポイントが書かれていた場合の通知方法は #4360 で定める
+- E3（初期段階の `Unsupported`）: §6 の拒否一覧・`Ema`／`Swa`・`Lambda` の扱い（#4360）
+- E4（書き戻し時点）: ホストモデルへの書き戻しは終了時のみ
+
+### エラー表（(A)。新しいエラー型・variant は足さない。3 区分で variant は完全名で書く）
 
 | 区分 | 事象 | エラー |
 |---|---|---|
@@ -192,102 +159,34 @@ impl Sequential {
 | デバイス・バックエンド由来 | デバイス不在・範囲外 ordinal | `tape_for` の戻り値は `Result<Tape, BackendError>`。`Err(e)` を `AutodiffError::Backend(e)`（既存の `From<BackendError> for AutodiffError`）で包んで返す。`e` の variant と内容は変えない |
 | 〃 | 状態の poison 等 | `AutodiffError::Backend(BackendError::StorePoisoned)`（P6 と同じ） |
 
-## §5 既存 `train_step_resident`（P5）との関係
+## §5 公開面と既存 `train_step_resident`（P5）との関係
 
-- P5 のシグネチャ（SGD・MSE mean 固定）は変えない。`fit_on` は P5 より上の入口で、内部の
-  常駐チェーン（`DeviceParamStore::train_step_device_chain` 系）を共有する。
-  `train_step_device_chain` は `autodiff` クレートの現行 `pub` メソッドで、`facade` は別クレートから
-  呼ぶため、`pub(crate)` の拡張だけでは `fit_on` から使えない。既存の公開シグネチャを維持したまま
-  既存口から拡張へ委譲できるか、`autodiff` 内部クレートとして `facade` が呼ぶための口
-  が必要かは #4361／#4362 の実装で確かめる。その口は `DeviceParamStore` の `#[doc(hidden)] pub fn`
-  にしない。`DeviceParamStore` は facade から型ごと再エクスポートされるため、`pub fn` を足すと
-  facade の公開面が増え「公開面は `fit_on` 系だけ」に反する。別の呼び出し口が要る場合は、既存の
-  `optim::resident_param_groups` と同様に facade が再エクスポートしないモジュールの自由関数として足す。
-  いずれも「facade のサポート対象公開面を増やさない」方針に従う。
-- CrossEntropy（#4362）・Adam／AdamW（#4367）・活性化（#4370）のチェーン拡張は、内部
-  （内部クレート間の口として足し、facade から再エクスポートしない。上記の `pub` と `pub(crate)` の違いに注意）として足し、**公開面は `fit_on` 系だけ**を
-  推奨する。P5 の別損失版など低レベルの公開入口を足すかは本記録では推奨せず、必要になったら
-  別の承認事項にする。#4361 の承認対象は「`fit_on` 系 2 本」に絞られる。
+- P5 のシグネチャ（SGD・MSE mean 固定）は変えない。`fit_on` は P5 より上の入口である
+- CrossEntropy（#4362）・Adam／AdamW（#4367）・活性化（#4370）のチェーン拡張は内部として足し、
+  **公開面は `fit_on` 系だけ**を推奨する。facade から再エクスポートしない（`DeviceParamStore` は型ごと
+  再エクスポートされるため、その `pub fn` を足すと公開面が増える。呼び出し口の形は §17）。P5 の別損失版など
+  低レベルの公開入口を足すかは本記録では推奨せず、必要になったら別の承認事項にする。
+  #4361 の承認対象は「`fit_on` 系 2 本」に絞られる
 
-## §6 未対応の扱いと「暗黙の CPU フォールバック」の定義
+## §6 未対応の扱い
 
-3 種類を区別する。
+- 暗黙の CPU フォールバック（`tape_for(device)` の代わりに `crate::tape()` で回す）と、演算単位のホスト
+  フォールバック（`BackendOps` 内でホストへ落とす。`train-step-resident-parts-design.md` と同じ方針）は**禁止**する
+- 未対応構成は store を作る前に `Unsupported`（エラー表）で拒否する（位置は E1）。同一デバイス内で別の計算経路
+  （Tape 経路）へ切り替えるかとその条件は、本記録では規範にせず §17 と #4360 に委ねる
+- 初期段階で拒否する組合せ（E3）: 常駐非対応の層（#4379／#4383／#4386 で段階的に解除）・追跡対象外の
+  独自層・未対応の損失と optimizer（L-BFGS を含む）・AMP・param groups・`accumulate_steps > 1`・
+  `validation_split`（解除は #4360）・未対応の callback（§7）。チェーン非対応の構成（空モデル・未対応の
+  活性化）の扱いも #4360 の段階分けに従う
+- `FitWeights`・学習 step フック・prefetch は入口に引数がなく、構造的に受けない
 
-| 種類 | 扱い |
-|---|---|
-| ① デバイス単位のフォールバック（`tape_for(device)` の代わりに `crate::tape()` で回す） | **禁止** |
-| ② 演算単位のホストフォールバック（`BackendOps` 内でホストへ落とす） | **禁止**（`train-step-resident-parts-design.md` と同じ方針） |
-| ③ `compat-resident-train-step-decision.md` §5 第 2 段のフォールバック（store 未変更時に限り同じデバイスの Tape 経路〈`forward_resident` → 損失 → `backward_device_param_store` → `step_device_param_store*`〉へ落とす） | CPU ではなく同じデバイス上で、判定を満たす場合だけ許す。`fit_on` で使うかと条件は #4360 の段階分けで決める。**判定は構成で 2 つに分ける**: (a) 常駐チェーンと Tape 経路の**両方が成立する構成**では、両経路の結果の bit 一致を確認する（同じデバイス・同じ入力）。(b) **Tape 経路だけが成立する構成**（チェーンを構築できない構成）には bit 一致の比較先となるチェーンがないため、(a) の条件はそのまま使えない。(b) の受け入れ条件（比較先〈CPU の `fit` か同じデバイスの既存 Tape 手組み経路か〉と判定方式〈REQ-2 の統一複合判定か baseline 方式か〉）は本記録で決めず、#4360（§9・§10）で確定する。確定するまで (b) の構成は ③ で許可済みとは扱わず `Unsupported` とする |
+## §7 callbacks・metrics・validation
 
-拒否は store を作る前（状態を変える前）に行う fail-closed とし、位置は §4 の例外 E1 に従う（既存と同じ検査は前倒ししない）。選択デバイスの対応可否（`MemoryOps` 等の必要なバックエンド能力）の確認も
-この store 生成前の検査に含める。**事前拒否するのは「選択したデバイスで許可済みの経路が一つも成立しない場合」に限る**。
-常駐チェーンが成立しなくても、③ の条件（store 未変更・同じデバイス上・(a)(b) の判定）を #4360 が許可した構成では、
-同じデバイスの Tape 経路が成立するため事前拒否せず、その経路を選ぶ。チェーン固有の検査
-（下記の空モデル・未対応活性化等）は「常駐チェーン経路の可否」を決めるだけで、それ単独では拒否理由にならず、
-代替経路の可否は ③ の許可条件で別に判定する。未対応デバイスでは store の初期化に進まない。検査は store に依存しない
-モデル構成の静的検査として行い、段階ごとのチェーン対応構成（`train_step_resident` が
-`build_device_chain_steps` で拒否する空モデル・Sigmoid 等を含む）を store 生成前に別途検査する。
-`contains_resident_unsupported_layer` は汎用の常駐経路向けの除外リストであり、これだけでは不足する。
-無条件に拒否する組合せ（経路選択に依らない）:
-
-- 常駐非対応の層（`contains_resident_unsupported_layer` の対象。#4379／#4383／#4386 で段階的に解除）
-- 追跡対象外の独自層（`add_module`）
-- 未対応の損失・未対応の optimizer（L-BFGS を含む）
-- `compile_with_amp`（AMP）・`compile_with_param_groups`（param groups）
-- `FitConfig::accumulate_steps > 1`・`validation_split`（初期段階は拒否。解除するかは #4360 で決める）
-- 未対応の callback（§7）
-
-経路選択の条件として扱う構成（無条件の拒否ではない）:
-
-- チェーン非対応の構成（空モデル・未対応の活性化〈Sigmoid 等〉。`build_device_chain_steps` と
-  同じ条件を store 生成前に検査する。段階ごとの対応範囲は #4360）。常駐チェーンが成立しない
-  というだけでは拒否せず、③ で許可済みの同一デバイス上の Tape 経路が成立すればそちらを選ぶ。
-  **許可済みのどの経路も成立しない場合に限り** `Unsupported` で拒否する
-
-`FitWeights`（class／sample weight）・学習 step フック・prefetch は案 B では入口に引数がなく、構造的に受けない。
-段階ごとの対応範囲は #4360 に任せ、本節は方針のみを定める。
-
-## §7 callbacks・metrics・validation との関係
-
-| Callback | ホスト重み | D2H 同期の時点 | `set_lr` の届き方 | 初期段階 |
-|---|---|---|---|---|
-| `LrSchedule` | 不要 | なし | §4 の学習率の反映規則に従う（経路を問わない。`compat-callbacks-design.md` §4.5 と同じ時点） | 対応 |
-| `EarlyStopping` | 監視値のみ。`restore_best_weights` は要 | 改善時 | 該当なし | 対応（`restore_best_weights` は改善時に同期。終了時に残る重みは §4 の「終了時に残る重み」、`Err` 時は §4 の例外 E2） |
-| `ModelCheckpoint` | 要 | 保存の直前 | 該当なし | 対応（保存時に同期） |
-| `CsvLogger`／`JsonLogger` | 不要（`History` の数値のみ） | なし | 該当なし | 対応 |
-| `Lambda` | 不要（既存 `LambdaCallback::on_epoch_end` のクロージャが受けるのは epoch 番号と `&History` のみで、`Sequential` や重みは渡らない） | なし | 該当なし | 既存シグネチャのままなら重み同期は不要。初期段階で対応するかは別判断として #4360 で決める |
-| `Ema` | step ごとに要（`ema_update_after_step` は step 後に呼ばれる） | step ごと | 該当なし | 初期は `Unsupported` |
-| `Swa` | 平均の更新用に要（`swa_update_after_epoch` は epoch 末に呼ばれる） | 対象 epoch の終了時 | 該当なし | 初期は `Unsupported` |
-
-- **スナップショットの重みの出所（`EarlyStopping`・`ModelCheckpoint` 共通の契約）**: §4 の書き戻しは終了時に行うため、
-  学習中のホスト `Sequential` は学習前の重みのままである。既存の `ModelCheckpoint::observe` は渡された
-  `Sequential` の `state_dict()` を保存するので、同期後も同じホストモデルを渡すと現在の監視値に対して学習前の重みが
-  保存される。このため両 callback のスナップショット（`EarlyStopping` の最良重み、`ModelCheckpoint` の保存内容）は、
-  **現在の store から取得（D2H）した重みを使い**、ホストモデルの `state_dict()` を使わない。
-  ファイル出力を指定しない `ModelCheckpoint` のメモリ内保存にも同じ契約を適用する。保存内容の形式は
-  §4 の等価規定（観測できる出力）に従う。
-- **取得失敗の伝播契約**: `Tape::sync_device_param_store_to_host` は失敗しうるが、既存の
-  `EarlyStopping::observe` が受けるスナップショット取得クロージャは失敗を返せず、取得より先に
-  `best` を更新する。GPU 入口ではこの順序を踏襲せず、**改善判定 → 重み取得（D2H）→ 取得成功後に
-  最良値とスナップショットを確定**の順にする。取得が失敗した場合は `best`・スナップショットを
-  更新せず（直前の確定状態を保つ）、その失敗を `fit_on` の `Err` として呼び出し元へ伝播し、§4 の
-  失敗時契約（呼び出し前の状態へ戻す）に従う。失敗を返せる取得経路の具体形（既存 `observe` の
-  拡張か GPU 入口側の薄い写しか）は #4377 の実装で確かめる。`ModelCheckpoint` の保存前同期の
-  失敗も同様に `Err` として伝播する。
-
-- validation・metrics: 検証のフォワードはデバイスで行い（`predict_resident_input` 相当）、
-  出力をホストへ戻して既存の損失・metrics 計算（`evaluate` と同じ eval モード）に渡す方針。
-  `predict_resident_input` は `build_device_chain_steps` でチェーンを構築できないと `Unsupported`
-  を返す。このため検証データを指定した呼び出し（`validation_split` は §6 のとおり初期段階では拒否）では、
-  学習側の経路判定（§6）に加えて、対応する**同一デバイス上の eval 経路**（常駐チェーン、または
-  ③ で許可済みの Tape 経路）の成立も §4 の例外 E1 の位置で判定し、成立しなければ store を作る前に
-  `Unsupported` で拒否する。これは eval 経路の成立（デバイス能力・チェーン構成）に限る静的検査で、検証データの形状など既存が epoch 末に初めて検査する項目は、既存と同じく実行時に失敗しうる（前倒ししない）。
-  検証の分割・損失の集計・metrics の蓄積、metrics・callback の監視設定の引数検証は、§4 の
-  「既存 CPU 入口との等価」のとおり既存と同じにする（本節で項目を重ねて定義しない）。
-  CPU の fit との比較の合否は §4 の (ii)(iii) に従う（方式は #4360）。
-- `History`: §4 の等価規定に従う。loss を step ごとに `ResidentLoss::read` するか epoch 単位で
-  まとめて読むかは転送回数の方針として **#4360（§12）に申し送る未決点**（前提は §12）。
-- `evaluate`・`predict` の GPU 版は #4377 の範囲。
+- 初期段階の callback の対応（E3）: `LrSchedule`・`EarlyStopping`・`ModelCheckpoint`・`CsvLogger`／`JsonLogger`
+  は対応する。`Ema`／`Swa` は `Unsupported`。`Lambda` は既存シグネチャでは重みを受けないため重み同期が
+  不要で、対応するかは #4360 で決める
+- validation・metrics の分割・集計・引数検証は §4 の等価規定に従う。CPU 版との比較の合否は §4 の (ii)(iii)
+- `evaluate`・`predict` の GPU 版は #4377 の範囲
 
 ## §8 後続のための予約節
 
@@ -307,11 +206,7 @@ impl Sequential {
 
 ## §12 ホスト⇔デバイス転送回数の上限（#4360 で記入）
 
-未記入（担当 #4360）。申し送り 1 点: loss を epoch 単位で転送する案にする場合も、`History.loss` は
-既存の集計手順（各バッチの損失をサンプル数で重み付け）と同じでなければならない（§4 の (i)。値の合否は (ii)）。
-現行の `DeviceParamStore::read_train_step_loss` は次の step の発行後に古い世代のハンドルを拒否する
-（`train_chain.rs` の世代検査）ため、`ResidentLoss::read` を epoch 末へ遅らせるだけでは成立せず、
-各 step の損失を上書き前に保持する等の仕組みが要る。方式は #4360／本節の判断に委ねる。
+未記入（担当 #4360）。loss の読み出し方式の前提は §17 の項目 9。
 
 ## §13 承認結果（#4361 で記入）
 
@@ -346,6 +241,51 @@ impl Sequential {
   （`checked_*` による算術オーバーフロー防止を含む）は既存の `fit` と同じ位置で行い、既存と同じく
   転送後・実行時に失敗しうる（前倒しはしない）。カーネル側の手動境界チェックは省略しない（REQ-8）
 - A05／A06: 依存追加なし・新規 `unsafe` なし
-- A08: 学習結果は、常駐チェーンと Tape 経路が両方成立する構成では両経路の bit 一致、Tape 経路だけが成立する構成では
-  #4360 が §10 で確定する比較先と判定方式（§6 ③）と、REQ-2 の判定で担保し、tolerance・baseline は変えない
+- A08: 学習結果の合否は §4 の (ii)(iii) に従い、tolerance・baseline は変えない
 - A09: 同期・転送回数は診断カウンタで実機確認する受け入れ条件を #4360・#4392 に残す
+
+## §17 実装 issue への申し送り（規範ではない）
+
+内部実装の契約。各項目は「事実（既存の関数と契約）＋ 実装で守る条件 ＋ 担当」。本記録の規範（§4 の (A)(B)）と
+食い違う場合は §4 を正とする。
+
+1. **公開面を増やさない呼び出し口**: 事実: `DeviceParamStore::train_step_device_chain` は `autodiff` の `pub`
+   メソッドで、別クレートの `facade` から呼ぶには `pub(crate)` では足りない。条件: 既存シグネチャを維持して
+   既存口から拡張へ委譲できるか、内部口が要るかを確かめる。口は `DeviceParamStore` の `pub fn`
+   （`#[doc(hidden)]` を含む）にせず、`optim::resident_param_groups` と同様に facade が再エクスポートしない
+   モジュールの自由関数にする。担当: #4362・#4361
+2. **事前の経路選択と実行時の再試行（Tape 経路）**: 事実: P5 の契約（`compat-resident-train-step-decision.md`
+   §5 第 2 段・「失敗の境界」）は、store に何も書いていない段階で部品が `Unsupported` を返したときに限り
+   同じ step を Tape 経路へ落とせる。それ以外の `Err` は poison もありうる。条件: 事前の静的な経路選択と、
+   実行時の再試行を区別する。再試行は事前検証を通過し、チェーンが書き込み前に store を変えず `Unsupported` を
+   返した場合に限る。入力エラー・実行時エラーは store が未変更でもそのまま返す。Tape 経路の許可と範囲は
+   #4360 が決める。担当: #4360・#4376
+3. **検証用 Tape 経路は読み取り専用**: 事実: `forward_resident` は `register_resident_params` で pending
+   forward を登録する（学習用）。`predict_resident` は `snapshot_resident_params`（`pending` を変えない読み取り専用）を使う。
+   条件: 検証用の Tape 経路は後者相当で現在のパラメータを読み、pending や世代を進めない。担当: #4377
+4. **eval 経路の事前判定**: 事実: `predict_resident_input` は `build_device_chain_steps` でチェーンを構築できないと
+   `Unsupported` を返す。条件: E1 の位置で、デバイス能力（`MemoryOps` 等）・モデル構成（空モデル・Sigmoid 等の
+   `build_device_chain_steps` と同じ条件。`contains_resident_unsupported_layer` だけでは不足）を静的に判定する。
+   担当: #4375
+5. **store の生成と書き戻し**: 事実: `tape_for(device)` → `init_device_param_store`、終了時は
+   `Tape::sync_device_param_store_to_host`（`Vec<Tensor<f32>>`）。条件: 取得後に `apply_parameters` 相当で層へ
+   反映する。スロット列から `state_dict()` のキー（`0.weight` 等）への対応付けは実装側の責務。担当: #4376
+6. **失敗時の巻き戻し（E2）**: 条件: 呼び出し前の重みと optimizer 状態を保持し、`Err` 時に戻す。ベスト重みは
+   正常終了時のみ、最終書き戻しの後に適用する（逆順にしない）。担当: #4376・#4377
+7. **optimizer 状態の持ち越し**: 事実: `fit_twice_equals_fit_once_with_double_epochs` は `shuffle=false`・
+   callback なしの条件で成立する。条件: 同値性の主張はその範囲に限る。Adam 系の初回生成分も書き戻せることを
+   確かめ、戻せなければ `Unsupported`。担当: #4367・#4376
+8. **callback の D2H**: 事実（`training.rs` の呼び出し位置）: `ema_update_after_step` は step 後、
+   `swa_update_after_epoch` は epoch 末、`ModelCheckpoint::observe`・`EarlyStopping::observe` は epoch 末の
+   callback ループ。条件: `EarlyStopping`（`restore_best_weights` 時は改善時）・`ModelCheckpoint`（保存の直前）の
+   スナップショットは現在の store から取得した重みを使い、ホストモデルの `state_dict()` を使わない。
+   取得（`sync_device_param_store_to_host`）は失敗しうるため、改善判定 → 取得 → 成功後に最良値とスナップショットを
+   確定の順にし、失敗は `Err` として伝播する（既存 `observe` のクロージャは失敗を返せない。拡張か薄い写しかは
+   実装で確かめる）。担当: #4377
+9. **loss の読み出し**: 事実: `read_train_step_loss` は古い世代のハンドルを `InvalidArgument` で拒否する
+   （`train_chain.rs` の世代検査）。条件: `History.loss` は既存の集計手順（各バッチの損失をサンプル数で重み付け）と
+   同じ（§4 の (i)）。epoch 単位で転送するなら、各 step の損失を上書き前に保持する等の仕組みが要る
+   （`ResidentLoss::read` を遅らせるだけでは成立しない）。方式は #4360（§12）。担当: #4360・#4376
+10. **Tape 経路だけが成立する構成の比較先**: 条件: §4 の (ii)(b)。確定するまで当該構成は `Unsupported`。担当: #4360（§9・§10）
+11. **学習率の反映**: 条件: 常駐チェーン・Tape 経路のどちらでも、epoch 開始時の学習率をその epoch の更新
+    （`step_device_param_store*` を含む）へ渡し、終了時に optimizer へ残るのは §4 の規定どおり。担当: #4367・#4376
