@@ -15,7 +15,8 @@ ONNX import／export は `fandhe-ai::interop::onnx`（`OnnxModel`／
 to_bytes, to_path, from_sequential}`・`OnnxExportOptions`）として
 `fandhe-ai` から公開済みです（import はイシュー #2017・export はイシュー
 #2018）。export には、import したモデルの書き出しと、`compat::Sequential`
-からの書き出し（`from_sequential`。対応層は 7 種）の 2 つがあります。safetensors save／load も
+からの書き出し（`from_sequential` でモデルを作り、`to_bytes`／`to_path` で
+書き出す。対応層は 7 種）の 2 つがあります。safetensors save／load も
 `fandhe-ai::interop::safetensors`（`LoadError`／`SaveError`／
 `load_safetensors_f32`／`load_safetensors_f32_from_bytes`／
 `require_keys`／`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）

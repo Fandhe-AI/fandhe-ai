@@ -95,7 +95,7 @@ import は `OnnxModel::from_bytes`／`from_path` で行い、推論は `run` で
 行います。export は `OnnxModel::to_bytes`／`to_path`（`OnnxExportOptions`。
 既定 `ir_version=8`・`opset_version=17`）で行い、import したモデルを
 書き出せます。また、`compat::Sequential` から `OnnxModel::from_sequential`
-で書き出せます（対応層は `Linear`／`ReLU`／`Sigmoid`／`Softmax`／
+でモデルを作り、その `to_bytes`／`to_path` で書き出せます（対応層は `Linear`／`ReLU`／`Sigmoid`／`Softmax`／
 `LayerNorm`／`GELU`〈erf 版〉／`Conv2d` の 7 種で、それ以外の層を含むと
 `OnnxError::UnsupportedLayer` で拒否します）。export 非対応の op
 （`MaxPool`／`AveragePool` など）を含むグラフは `OnnxError::UnsupportedOp`
