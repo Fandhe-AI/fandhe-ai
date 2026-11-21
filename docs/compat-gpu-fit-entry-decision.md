@@ -86,18 +86,27 @@ P5 の「将来の損失・最適化は別入口の追加で扱う」と同じ�
     GPU 入口で解釈を足す必要がなく、初期段階の `Unsupported` にはしない
   - 検証の集計・metrics: `run_evaluate_with_metrics` と同じ。全件一括評価など異なる分割・集計は
     許さない（`History.val_loss`・`EarlyStopping`・`ModelCheckpoint` の判断を変えるため）。
-    bit 一致・REQ-2 の判定の扱いは §6 ③ の (a)(b) と #4360 のまま
+    値の合否・離散的な結果の扱いは下記 (ii)(iii) と #4360 のまま
   - callback のリセット規則: 既存の `fit_with_callbacks` と同じ（`callbacks.rs` 冒頭「epoch 番号の数え方」。
     どの callback が呼び出しをまたいで状態を持つかはそこを正とする）
   - 学習率の反映: 既存と同じ（epoch 開始時の学習率がその epoch の更新に使われ、変更後の値が
     終了時にホストの optimizer へ保存される）
   - エラー: 既存の処理が返すエラーは既存と同じ型・variant で返す（エラー表）
-  - **ユーザーから観測できる出力**（`History`〈`loss` の集計値を含む〉、callback・`save_model` に渡す重み、
-    終了後のホストモデル）は既存と同じ形・同じ値にする。特に重みは既存の `Sequential::state_dict()` と
-    同じキー（`0.weight` 等）・形状とし、同じモデルの `load_state_dict` で復元できる形（メモリ内保存・
-    ファイル保存の両方）にする。デバイス上の中間表現（`sync_device_param_store_to_host` が返すスロット順の
-    テンソル列・世代つきの loss ハンドル等）を出力へそのまま出さず、スロット列からの対応付けと
-    損失の集計は実装側の責務とする
+  - **ユーザーから観測できる出力**（`History`、callback・`save_model` に渡す重み、終了後のホストモデル）は、
+    次の 3 段で既存と等価にする:
+    - (i) **形式と手順**: 出力の型・キー・形状、`History` の各列の集計手順（どのバッチをどう重み付けするか）、
+      callback を呼ぶ順序と回数は既存と同じ（既存を正とする）。重みは既存の `Sequential::state_dict()` と
+      同じキー（`0.weight` 等）・形状とし、同じモデルの `load_state_dict` で復元できる形（メモリ内保存・
+      ファイル保存の両方）にする。デバイス上の中間表現（`sync_device_param_store_to_host` が返す
+      スロット順のテンソル列・世代つきの loss ハンドル等）を出力へそのまま出さず、スロット列からの
+      対応付けと損失の集計は実装側の責務とする
+    - (ii) **浮動小数点値の合否**: §6 ③ の (a)(b) に従う。(a) 両経路が成立する構成の経路間比較は bit 一致。
+      CPU 版との比較の判定方式（REQ-2 統一複合判定か baseline 方式か）と (b) は #4360（§10）で確定する。
+      REQ-2 の判定式・tolerance は変えない
+    - (iii) **離散的な結果**（`argmax` に基づく分類 metrics、監視値による `EarlyStopping`／
+      `ModelCheckpoint`／`LrSchedule` の判断）: 浮動小数点値が (ii) で合格でも CPU 版と一致するとは限らない
+      （許容誤差内の logits の差で `argmax` や監視値の大小が変わりうる）。CPU 版との一致を要求するか、
+      受け入れ条件は #4360 で決める。本記録では一致を保証しない
 
   これと違ってよいのは次の例外**だけ**である（例外以外の検証・位置・エラーは既存どおり。既存が転送後・実行時に失敗しうる検査も、そのまま失敗しうる）:
   - E1（GPU 固有の事前検査の位置）: デバイスの解決・対応可否、モデル・損失・optimizer の静的な未対応
@@ -127,7 +136,7 @@ impl Sequential {
 }
 ```
 
-- `History` は §4 の等価規定（観測できる出力）のとおり CPU の fit と同じ型・同じ意味。`compile` は既存のまま使い、optimizer・loss は
+- `History` の型と各列の意味・集計手順は §4 の (i) のとおり CPU の fit と同じ（値の合否は (ii)(iii)）。`compile` は既存のまま使い、optimizer・loss は
   デバイスに依らない設定として `Compiled` に残す。
 - **状態の契約**:
   - store は呼び出しごとに `tape_for(device)` → `init_device_param_store` で作る。終了時の
@@ -247,7 +256,8 @@ impl Sequential {
 | `ModelCheckpoint` | 要 | 保存の直前 | 該当なし | 対応（保存時に同期） |
 | `CsvLogger`／`JsonLogger` | 不要（`History` の数値のみ） | なし | 該当なし | 対応 |
 | `Lambda` | 不要（既存 `LambdaCallback::on_epoch_end` のクロージャが受けるのは epoch 番号と `&History` のみで、`Sequential` や重みは渡らない） | なし | 該当なし | 既存シグネチャのままなら重み同期は不要。初期段階で対応するかは別判断として #4360 で決める |
-| `Ema`／`Swa` | step ごとに要 | step ごと | 該当なし | 初期は `Unsupported` |
+| `Ema` | step ごとに要（`ema_update_after_step` は step 後に呼ばれる） | step ごと | 該当なし | 初期は `Unsupported` |
+| `Swa` | 平均の更新用に要（`swa_update_after_epoch` は epoch 末に呼ばれる） | 対象 epoch の終了時 | 該当なし | 初期は `Unsupported` |
 
 - **スナップショットの重みの出所（`EarlyStopping`・`ModelCheckpoint` 共通の契約）**: §4 の書き戻しは終了時に行うため、
   学習中のホスト `Sequential` は学習前の重みのままである。既存の `ModelCheckpoint::observe` は渡された
@@ -274,7 +284,7 @@ impl Sequential {
   `Unsupported` で拒否する。これは eval 経路の成立（デバイス能力・チェーン構成）に限る静的検査で、検証データの形状など既存が epoch 末に初めて検査する項目は、既存と同じく実行時に失敗しうる（前倒ししない）。
   検証の分割・損失の集計・metrics の蓄積、metrics・callback の監視設定の引数検証は、§4 の
   「既存 CPU 入口との等価」のとおり既存と同じにする（本節で項目を重ねて定義しない）。
-  CPU の fit との差は REQ-2 の判定で見る（方式は #4360）。
+  CPU の fit との比較の合否は §4 の (ii)(iii) に従う（方式は #4360）。
 - `History`: §4 の等価規定に従う。loss を step ごとに `ResidentLoss::read` するか epoch 単位で
   まとめて読むかは転送回数の方針として **#4360（§12）に申し送る未決点**（前提は §12）。
 - `evaluate`・`predict` の GPU 版は #4377 の範囲。
@@ -298,7 +308,7 @@ impl Sequential {
 ## §12 ホスト⇔デバイス転送回数の上限（#4360 で記入）
 
 未記入（担当 #4360）。申し送り 1 点: loss を epoch 単位で転送する案にする場合も、`History.loss` は
-既存の集計（各バッチの損失をサンプル数で重み付け）と同じ値でなければならない（§4 の等価規定）。
+既存の集計手順（各バッチの損失をサンプル数で重み付け）と同じでなければならない（§4 の (i)。値の合否は (ii)）。
 現行の `DeviceParamStore::read_train_step_loss` は次の step の発行後に古い世代のハンドルを拒否する
 （`train_chain.rs` の世代検査）ため、`ResidentLoss::read` を epoch 末へ遅らせるだけでは成立せず、
 各 step の損失を上書き前に保持する等の仕組みが要る。方式は #4360／本節の判断に委ねる。
