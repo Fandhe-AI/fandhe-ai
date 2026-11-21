@@ -120,6 +120,9 @@ enum IdxError {
         path: PathBuf,
         source: std::io::Error,
     },
+    NotRegularFile {
+        path: PathBuf,
+    },
     Gzipped,
     TooLarge {
         len: u64,
@@ -152,6 +155,11 @@ enum IdxError {
 impl fmt::Display for IdxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NotRegularFile { path } => write!(
+                f,
+                "IDX ファイル {} が通常ファイルでない（FIFO・デバイス等は受け付けない）",
+                path.display()
+            ),
             Self::Io { path, source } if source.kind() == std::io::ErrorKind::NotFound => write!(
                 f,
                 "IDX ファイル {} が見つからない（展開済みの 4 ファイルを置く）",
@@ -287,8 +295,28 @@ fn read_idx_file(path: &Path) -> Result<Vec<u8>, IdxError> {
         path: path.to_path_buf(),
         source,
     };
-    let file = std::fs::File::open(path).map_err(io)?;
-    let len = file.metadata().map_err(io)?.len();
+    // 通常ファイルだけを受け付ける。FIFO 等の特殊ファイルは `open` が無期限に待ち得るため、
+    // オープン前に種別を拒否し、パス差し替えに備え非ブロッキングで開いて種別を再検証する。
+    if !std::fs::metadata(path).map_err(io)?.is_file() {
+        return Err(IdxError::NotRegularFile {
+            path: path.to_path_buf(),
+        });
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = opts.open(path).map_err(io)?;
+    let meta = file.metadata().map_err(io)?;
+    if !meta.is_file() {
+        return Err(IdxError::NotRegularFile {
+            path: path.to_path_buf(),
+        });
+    }
+    let len = meta.len();
     if len > MAX_FILE_BYTES {
         return Err(IdxError::TooLarge { len });
     }
@@ -441,7 +469,12 @@ fn main() -> Result<(), DynError> {
 }
 
 #[cfg(test)]
+#[path = "../tests/common/temp_dir.rs"]
+mod temp_dir;
+
+#[cfg(test)]
 mod tests {
+    use super::temp_dir::TempDirGuard;
     use super::*;
 
     #[test]
@@ -621,29 +654,9 @@ mod tests {
         ));
     }
 
-    /// 一意な一時ディレクトリ。Drop で片付ける。
-    struct TempDir(PathBuf);
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let t = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let p =
-                std::env::temp_dir().join(format!("mnist_idx_{tag}_{}_{t}", std::process::id()));
-            std::fs::create_dir_all(&p).unwrap();
-            Self(p)
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn load_idx_dir_roundtrip_and_missing() {
-        let d = TempDir::new("ok");
+        let d = TempDirGuard::new("ok");
         let img = images_bytes(3, 28, 28, 3 * IMAGE_LEN);
         let lab = labels_bytes(&[0, 1, 2]);
         for (name, bytes) in [
@@ -652,14 +665,14 @@ mod tests {
             (TEST_IMAGES, &img),
             (TEST_LABELS, &lab),
         ] {
-            std::fs::write(d.0.join(name), bytes).unwrap();
+            std::fs::write(d.path().join(name), bytes).unwrap();
         }
-        let (train, test) = load_idx_mnist(&d.0).unwrap();
+        let (train, test) = load_idx_mnist(d.path()).unwrap();
         assert_eq!(train.x.shape(), [3, IMAGE_LEN]);
         assert_eq!(test.y.shape(), [3]);
         // 件数不一致
-        std::fs::write(d.0.join(TEST_LABELS), labels_bytes(&[0, 1])).unwrap();
-        let e = load_idx_mnist(&d.0).err().unwrap();
+        std::fs::write(d.path().join(TEST_LABELS), labels_bytes(&[0, 1])).unwrap();
+        let e = load_idx_mnist(d.path()).err().unwrap();
         assert!(matches!(
             e.downcast_ref::<IdxError>(),
             Some(IdxError::CountMismatch {
@@ -668,11 +681,25 @@ mod tests {
             })
         ));
         // 欠落
-        std::fs::remove_file(d.0.join(TRAIN_IMAGES)).unwrap();
-        let e = load_idx_mnist(&d.0).err().unwrap();
+        std::fs::remove_file(d.path().join(TRAIN_IMAGES)).unwrap();
+        let e = load_idx_mnist(d.path()).err().unwrap();
         assert!(matches!(
             e.downcast_ref::<IdxError>(),
             Some(IdxError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_idx_file_rejects_fifo_without_blocking() {
+        let d = TempDirGuard::new("fifo");
+        let p = d.path().join("fifo");
+        let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        // SAFETY: c は NUL 終端の有効な C 文字列。
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            read_idx_file(&p),
+            Err(IdxError::NotRegularFile { .. })
         ));
     }
 

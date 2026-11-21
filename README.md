@@ -96,6 +96,8 @@ cargo run -p fandhe-ai --example mnist_mlp --release
 
 展開済みの MNIST の IDX ファイルを置いたディレクトリを引数に渡すと、実データで学習できます
 （取得・sha256 照合・`gunzip` での展開は利用者側の責務です。詳細は example 冒頭のコメント）。
+通常ファイル以外（FIFO 等）や不正な IDX は入力エラーで非 0 終了します。入力が正しくても、
+テスト精度が 0.5 以下、または最終 epoch の loss が初回より低くない場合は、学習結果の健全性検査で非 0 終了します。
 
 ```bash
 cargo run -p fandhe-ai --example mnist_mlp --release -- <IDX ディレクトリ>
