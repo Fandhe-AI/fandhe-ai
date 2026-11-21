@@ -179,19 +179,21 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().create(path)
 }
 
-/// 親ディレクトリ階層が信頼できることを確認する（unix）。`parent` を正規化し、その各祖先
-/// （自身と `/` を含む）が、作成したディレクトリと同じ所有者（または root）の持ち物で、
-/// かつ「グループ・その他に書き込み権限がない」か「sticky bit 付き」であることを要求する。
-/// 別ユーザー所有の sticky ディレクトリや、他者が書ける祖先は、エントリの差し替えで
-/// 保存先・削除対象をすり替えられるため拒否する。
+/// 親ディレクトリを正規化して返し、その各祖先（自身と `/` を含む）が信頼できることを確認する（unix）。
+/// 信頼判定の基準はパスから引き直さない値（プロセスの実効 UID）で、各祖先は「実効 UID または root の
+/// 持ち物」かつ「グループ・その他に書き込み権限がない」か「sticky bit 付き」であることを要求する。
+/// 他者が書ける祖先は、エントリの差し替えで保存先・削除対象をすり替えられるため拒否する。
+/// 作成前に呼び、返った正規化済みパスだけを以後の作成・保存・読込・削除に使う
+/// （検証済みの経路と実際に操作する経路を一致させ、検査後の中間成分差し替えを無効にする）。
 #[cfg(unix)]
-fn check_parent_trusted(parent: &Path, child: &Path) -> std::io::Result<()> {
+fn trusted_canonical_parent(parent: &Path) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
-    let owner = std::fs::symlink_metadata(child)?.uid();
+    // SAFETY: `geteuid` は引数なし・副作用なしで常に成功する POSIX 関数。
+    let euid = unsafe { libc::geteuid() };
     let canon = std::fs::canonicalize(parent)?;
     for dir in canon.ancestors() {
         let m = std::fs::metadata(dir)?;
-        let owner_ok = m.uid() == owner || m.uid() == 0;
+        let owner_ok = m.uid() == euid || m.uid() == 0;
         let sticky = m.mode() & 0o1000 != 0;
         let closed = m.mode() & 0o022 == 0;
         if !(owner_ok && (closed || sticky)) {
@@ -201,13 +203,20 @@ fn check_parent_trusted(parent: &Path, child: &Path) -> std::io::Result<()> {
             ));
         }
     }
-    Ok(())
+    Ok(canon)
+}
+
+/// 非 unix では所有者・権限の検査を行わず、正規化のみ行う（本 example の対応環境は unix）。
+#[cfg(not(unix))]
+fn trusted_canonical_parent(parent: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(parent)
 }
 
 impl SaveDirGuard {
     fn create() -> std::io::Result<Self> {
         use std::hash::{BuildHasher, Hasher};
-        let base = std::env::temp_dir();
+        // 作成前に親を確定・検証し、以後は正規化済みの経路だけを使う。
+        let base = trusted_canonical_parent(&std::env::temp_dir())?;
         let mut last = None;
         for _ in 0..8 {
             let rand = |_: ()| {
@@ -223,16 +232,7 @@ impl SaveDirGuard {
             );
             let path = base.join(name);
             match create_private_dir(&path) {
-                Ok(()) => {
-                    // 信頼検査を通るまで再帰削除ガードは作らない。拒否時は今作った空ディレクトリだけを
-                    // 非再帰で消す（信頼できないパスに remove_dir_all を向けない）。
-                    #[cfg(unix)]
-                    if let Err(e) = check_parent_trusted(&base, &path) {
-                        let _ = std::fs::remove_dir(&path);
-                        return Err(e);
-                    }
-                    return Ok(Self { path });
-                }
+                Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
                 Err(e) => return Err(e),
             }
@@ -436,22 +436,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn untrusted_parent_is_rejected_without_recursive_delete() {
+    fn untrusted_parent_is_rejected_before_creation() {
         use std::os::unix::fs::PermissionsExt;
         let outer = SaveDirGuard::create().unwrap();
         let open = outer.path().join("open");
         std::fs::create_dir(&open).unwrap();
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let child = open.join("child");
-        create_private_dir(&child).unwrap();
-        assert!(check_parent_trusted(&open, &child).is_err());
+        assert!(trusted_canonical_parent(&open).is_err());
         let trusted = outer.path().join("closed");
         std::fs::create_dir(&trusted).unwrap();
         // umask に依らず他者書き込みなしにする。
         std::fs::set_permissions(&trusted, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let child2 = trusted.join("child");
-        create_private_dir(&child2).unwrap();
-        assert!(check_parent_trusted(&trusted, &child2).is_ok());
+        assert!(trusted_canonical_parent(&trusted).is_ok());
     }
 
     #[test]
