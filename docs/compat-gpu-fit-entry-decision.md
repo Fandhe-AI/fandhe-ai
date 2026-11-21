@@ -75,31 +75,30 @@ P5 の「将来の損失・最適化は別入口の追加で扱う」と同じ�
 - **既存 CPU 入口との等価（本記録の他の節はこの規定を参照し、独自の細部を書かない）**:
   `fit_on`／`fit_on_with_callbacks` は、既存の `fit_with_callbacks_named` → `run_fit` →
   `run_evaluate_with_metrics`（`crates/facade/src/compat/training.rs`）と、次を**同じにする**。
-  常駐チェーン経路・Tape 経路（§6 ③）のどちらでも同じである。
-  - 処理順（コードで確認済み）: (1) 引数・組合せの検証群（`validation_split`・重み・検証データなしの
-    callback／metrics・`ValMetric` の監視設定・分類 metrics と target 型・EMA／SWA の併用 等。この群は
-    callback の開始処理より前）→ (2) `EarlyStopping::reset_for_fit` → (3) ロガー・EMA・SWA の
-    `begin_fit` → (4) train モード切替 → (5) `run_fit` 内の `TensorDataset::new`・`DataLoader` 構築と
-    その検査（`batch_size == 0` 等）→ (6) epoch ループ（epoch 開始時の LR 同期 → バッチ更新 → 検証評価 →
-    callback）。したがって `batch_size == 0` とロガーの開始失敗が重なれば、既存はロガー（(3)）が先に返る
-  - バッチ分割と端数バッチ: 学習・検証とも `config.batch_size` で分け、端数バッチを落とさない
-  - 検証の集計: `run_evaluate_with_metrics` と同じ（検証データを `batch_size` で分け、バッチ損失を
-    サンプル数で重み付けして `f64` で加算し、最後に 1 回 `f32` へ。metrics は `ConfusionAccumulator`）。
-    全件一括評価など**異なる分割・集計は許さない**（`History.val_loss`・`EarlyStopping`・
-    `ModelCheckpoint` の判断を変えるため）。bit 一致・REQ-2 の判定の扱いは §6 ③ の (a)(b) と #4360 のまま
-  - callback のリセット規則: 呼び出し開始時にリセットされるのは `EarlyStopping` だけ。`ModelCheckpoint`・
-    `LrSchedule`・`Ema`・`Swa` は呼び出しをまたいで状態を継続し、ロガー・`Lambda` は持たない
-    （`callbacks.rs` 冒頭「epoch 番号の数え方」）
-  - 学習率の反映: epoch 開始時の学習率（`LrSchedule` による `set_lr`）がその epoch の全更新に使われ、
-    変更後の学習率が終了時にホストの optimizer へ保存される
-  - エラー型: 既存と同じ `AutodiffError::InvalidArgument`（エラー表）
+  常駐チェーン経路・Tape 経路（§6 ③）のどちらでも、**各項目は既存の同名関数の挙動を正とし、
+  本記録では細部を言い換えない**（細部が要るときは該当関数を読む）。
+  - 処理順: 引数・組合せの検証群（`fit_with_callbacks_named` 冒頭）→ `EarlyStopping` のリセット →
+    ロガー・EMA・SWA の `begin_fit` → `run_fit`（データセット／ローダー構築 → epoch ループ）の順。
+    この順序のまま、検査をどの位置で行うかも既存と同じにする（E1 を除く。コードで確認済みの例:
+    `batch_size == 0` の検査は `run_fit` 内にあり、ロガーの `begin_fit` より後）
+  - バッチ分割と端数バッチ: 学習は `FitConfig`（`drop_last` を含む）の扱いを含めて `run_fit` と同じ、
+    検証は `run_evaluate_with_metrics` と同じ。`drop_last` は分割をホスト側の既存ローダーが担うため
+    GPU 入口で解釈を足す必要がなく、初期段階の `Unsupported` にはしない
+  - 検証の集計・metrics: `run_evaluate_with_metrics` と同じ。全件一括評価など異なる分割・集計は
+    許さない（`History.val_loss`・`EarlyStopping`・`ModelCheckpoint` の判断を変えるため）。
+    bit 一致・REQ-2 の判定の扱いは §6 ③ の (a)(b) と #4360 のまま
+  - callback のリセット規則: 既存の `fit_with_callbacks` と同じ（`callbacks.rs` 冒頭「epoch 番号の数え方」。
+    どの callback が呼び出しをまたいで状態を持つかはそこを正とする）
+  - 学習率の反映: 既存と同じ（epoch 開始時の学習率がその epoch の更新に使われ、変更後の値が
+    終了時にホストの optimizer へ保存される）
+  - エラー: 既存の処理が返すエラーは既存と同じ型・variant で返す（エラー表）
 
-  これと違ってよいのは次の例外**だけ**である（例外以外の検証・位置・エラーは既存どおり）:
+  これと違ってよいのは次の例外**だけ**である（例外以外の検証・位置・エラーは既存どおり。既存が転送後・実行時に失敗しうる検査も、そのまま失敗しうる）:
   - E1（GPU 固有の事前検査の位置）: デバイスの解決・対応可否、モデル・損失・optimizer の静的な未対応
-    判定、検証指定時の eval 経路の可否（§6・§7）は GPU 固有で既存に対応物がないため、(1) の検証群の
-    直後・(2) の前に置き、`Unsupported`（`tape_for` の失敗は §4 エラー表）で返す。**既存と同じ検査
-    （`batch_size == 0`・データセット／ローダーの検査等）は前倒しせず、既存と同じ位置 (5) で同じ
-    エラーを返す**。store の初期化は (5) の後・epoch ループの前に行う
+    判定、検証指定時の eval 経路の可否（§6・§7）は GPU 固有で既存に対応物がないため、引数・組合せの
+    検証群の直後・`EarlyStopping` のリセットの前に置き、エラー表のとおり返す。これだけが転送前の静的検査である。**既存と同じ検査
+    （データセット／ローダーの検査・形状の適合検査・検証データの検査等）は前倒しせず、既存と同じ位置で
+    同じエラーを返す**。store の初期化は `run_fit` のローダー構築の後・epoch ループの前に行う
   - E2（失敗時の重み）: 上記「状態の契約」の、呼び出し前への巻き戻しとベスト重みを `Err` 時に
     適用しない点（既存の `run_fit` は成功済みバッチの更新とベスト重みを残す）
   - E3（初期段階の `Unsupported`）: §6 の無条件拒否・§7 の `Ema`／`Swa`・`Lambda` の扱い（#4360）
@@ -169,16 +168,14 @@ impl Sequential {
   `Ema`・`Swa` は失敗した呼び出しの状態を引き継ぐ。引き継がせたくない callback は呼び出し側が新しく
   用意する（`fit_on` は callback を受けない）。残存したチェックポイントの扱いも呼び出し側が担う。
   エラーを返す時点でチェックポイントが書かれていた場合の通知方法は #4360 で定める
-- **エラー表**（新しいエラー型・variant は足さない。既存の引数・状態エラーは `AutodiffError` の
-  variant、バックエンド由来のエラーは `AutodiffError::Backend(BackendError::…)` を、完全な variant 名で使い分ける）:
+- **エラー表**（新しいエラー型・variant は足さない。3 区分で、variant は完全名で書く）:
 
-| 事象 | エラー |
-|---|---|
-| デバイス不在・範囲外 ordinal | `tape_for` の戻り値は `Result<Tape, BackendError>`。`Err(e)` を `AutodiffError::Backend(e)`（既存の `From<BackendError> for AutodiffError`）で包んで返す。`e` の variant と内容は変えない |
-| 未対応の層・損失・optimizer・組合せ | `AutodiffError::Backend(BackendError::Unsupported)` |
-| 不正な引数（`epochs == 0`・metrics・callback の監視設定等） | 既存の CPU 入口と同じ検証・同じ `AutodiffError::InvalidArgument`（`BackendError::InvalidArgument` ではない。上記「既存の CPU 入口との等価」） |
-| 未 compile | 既存 `fit` と同じエラー |
-| 状態の poison 等 | `AutodiffError::Backend(BackendError::StorePoisoned)`（P6 と同じ） |
+| 区分 | 事象 | エラー |
+|---|---|---|
+| 既存の処理が返すもの | 入力検証・未 compile・容量確保の失敗など、既存の `fit`／`fit_with_callbacks` が返すもの | **既存と同じ型・variant**（`AutodiffError::InvalidArgument`、`AutodiffError::Shape(..)` 等。既存を正とし、本記録は列挙しない。`BackendError::InvalidArgument` ではない） |
+| GPU 固有の未対応 | 未対応の層・損失・optimizer・組合せ（§6・E1・E3） | `AutodiffError::Backend(BackendError::Unsupported(String))`（`String` に理由を入れる） |
+| デバイス・バックエンド由来 | デバイス不在・範囲外 ordinal | `tape_for` の戻り値は `Result<Tape, BackendError>`。`Err(e)` を `AutodiffError::Backend(e)`（既存の `From<BackendError> for AutodiffError`）で包んで返す。`e` の variant と内容は変えない |
+| 〃 | 状態の poison 等 | `AutodiffError::Backend(BackendError::StorePoisoned)`（P6 と同じ） |
 
 ## §5 既存 `train_step_resident`（P5）との関係
 
@@ -267,7 +264,7 @@ impl Sequential {
   を返す。このため検証データを指定した呼び出し（`validation_split` は §6 のとおり初期段階では拒否）では、
   学習側の経路判定（§6）に加えて、対応する**同一デバイス上の eval 経路**（常駐チェーン、または
   ③ で許可済みの Tape 経路）の成立も §4 の例外 E1 の位置で判定し、成立しなければ store を作る前に
-  `Unsupported` で拒否する。学習途中の epoch 終了時に初めて検証が失敗する状態を作らない。
+  `Unsupported` で拒否する。これは eval 経路の成立（デバイス能力・チェーン構成）に限る静的検査で、検証データの形状など既存が epoch 末に初めて検査する項目は、既存と同じく実行時に失敗しうる（前倒ししない）。
   検証の分割・損失の集計・metrics の蓄積、metrics・callback の監視設定の引数検証は、§4 の
   「既存 CPU 入口との等価」のとおり既存と同じにする（本節で項目を重ねて定義しない）。
   CPU の fit との差は REQ-2 の判定で見る（方式は #4360）。
@@ -324,9 +321,9 @@ impl Sequential {
 
 - A01／A04: 未対応構成は store を作る前に型付きエラーで止め、黙って CPU や別の計算へ切り替えない。
   別デバイス・別ストア・古い世代のハンドルの拒否は P1〜P6 の検査（`store_id`・`device`・`generation`）を流用する
-- A03: `epochs`・`batch_size`・形状の検査は、既存 `fit` と同じ検査（`checked_*` による算術オーバーフロー防止を
-  含む）を既存と同じ位置で通す（§4 の例外 E1。位置を前倒ししない）。store の初期化とデバイスへの転送は
-  その検査より後に行うため、検査を通らない入力はデバイスへ届かない。カーネル側の手動境界チェックは省略しない（REQ-8）
+- A03: 転送前に行う検査は GPU 固有の静的な事前検査（§4 の E1）だけである。それ以外の検査
+  （`checked_*` による算術オーバーフロー防止を含む）は既存の `fit` と同じ位置で行い、既存と同じく
+  転送後・実行時に失敗しうる（前倒しはしない）。カーネル側の手動境界チェックは省略しない（REQ-8）
 - A05／A06: 依存追加なし・新規 `unsafe` なし
 - A08: 学習結果は、常駐チェーンと Tape 経路が両方成立する構成では両経路の bit 一致、Tape 経路だけが成立する構成では
   #4360 が §10 で確定する比較先と判定方式（§6 ③）と、REQ-2 の判定で担保し、tolerance・baseline は変えない
