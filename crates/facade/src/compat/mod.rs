@@ -8,6 +8,69 @@
 //! 「互換 API 層は自作コアの上の薄いラッパーに徹する」・`.claude/rules/
 //! coding-rust.md`）。
 //!
+//! # 学習の流れ（作る → compile → fit → evaluate → predict → 保存）
+//!
+//! Keras 慣習の一連の流れは次の API で通る。各段階の詳細は各リンク先の doc を参照する。
+//!
+//! 1. **作る**: [`Sequential::new`](crate::compat::Sequential::new) に
+//!    [`add_linear`](crate::compat::Sequential::add_linear) などの `add_*` を連ねる。
+//! 2. **compile**: [`Sequential::compile`](crate::compat::Sequential::compile) で
+//!    optimizer と [`Loss`](crate::compat::Loss) を指定する。`&mut self` を取り `()` を返すため、
+//!    メソッドチェーンの末尾ではなく別の文として呼ぶ。
+//! 3. **fit**: [`Sequential::fit`](crate::compat::Sequential::fit) に
+//!    [`FitConfig`](crate::compat::FitConfig) を渡し、エポックごとの損失を持つ
+//!    [`History`](crate::compat::History) を得る。validation・callbacks・metrics が要る場合は
+//!    [`fit_with_callbacks`](crate::compat::Sequential::fit_with_callbacks)／
+//!    [`fit_with_metrics`](crate::compat::Sequential::fit_with_metrics) を使う。
+//! 4. **evaluate**: [`Sequential::evaluate`](crate::compat::Sequential::evaluate) で損失を測る。
+//! 5. **predict**: [`Sequential::predict`](crate::compat::Sequential::predict) で推論する。
+//!    Dropout などを含むモデルで決定的な推論をしたいときは、先に
+//!    [`Sequential::eval`](crate::compat::Sequential::eval) を呼ぶ。
+//! 6. **保存**: [`save_model`](crate::compat::save_model)・[`load_model`](crate::compat::load_model) は
+//!    `Sequential` のメソッドではなく `compat` の自由関数である。非 unix では
+//!    `ErrorKind::Unsupported` を返す。契約の詳細は `save_model` の doc を参照する。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential};
+//! use fandhe_ai::optim::SgdConfig;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut model = Sequential::new()
+//!     .add_linear(2, 4, 1)?
+//!     .add_relu()
+//!     .add_linear(4, 1, 2)?;
+//! let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], &[4, 2])?;
+//! let y = Tensor::new(vec![0.0f32, 1.0, 0.5, 0.2], &[4, 1])?;
+//!
+//! model.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)?;
+//! let history = model.fit(&x, &y, FitConfig::new(3, 2))?;
+//! assert_eq!(history.loss.len(), 3);
+//! assert!(model.evaluate(&x, &y, 4)?.is_finite());
+//!
+//! model.eval();
+//! let pred = model.predict(&x)?;
+//! assert_eq!(pred.shape(), &[4, 1]);
+//!
+//! // 保存・復元は unix 限定（非 unix では save_model が Unsupported を返す）。
+//! #[cfg(unix)]
+//! {
+//!     use fandhe_ai::compat::{load_model, save_model};
+//!     let nanos = std::time::SystemTime::now()
+//!         .duration_since(std::time::UNIX_EPOCH)?
+//!         .as_nanos();
+//!     let parent = std::env::temp_dir()
+//!         .join(format!("fandhe_ai_doc_4345_{}_{nanos}", std::process::id()));
+//!     std::fs::create_dir(&parent)?;
+//!     save_model(&model, parent.join("model"))?;
+//!     let restored = load_model(parent.join("model"))?;
+//!     assert_eq!(restored.predict(&x)?.as_slice(), pred.as_slice());
+//!     std::fs::remove_dir_all(&parent)?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! **配置の確定履歴**: TASK-9.2a（#95）は本モジュールを `fandhe_ai_autodiff::compat`
 //! として確定していた（当時は 9 クレート構成で compat 専用クレートが
 //! 存在せず、`autodiff` 配下以外に置く選択肢がなかったため）。10 クレート
