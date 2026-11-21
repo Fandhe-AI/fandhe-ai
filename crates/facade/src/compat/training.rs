@@ -174,6 +174,10 @@ impl std::fmt::Debug for AmpState {
 /// パラメータ付き損失は固定値（`Huber` の delta・`SmoothL1` の beta は 1.0、
 /// `KlDiv` は `log_target = false`）で、可変化は本 enum の範囲外。
 ///
+/// 縮約は [`Reduction::Mean`](crate::nn::loss::Reduction::Mean) 固定で、選べない。`Var` の損失
+/// メソッドや `nn::loss` の構造体で縮約を選ぶときは [`crate::nn::loss::Reduction`]
+/// （`use fandhe_ai::nn::loss::Reduction;`）を import する。
+///
 /// 決定記録は `docs/facade-compile-loss-variants-decision.md`（イシュー #2509）。
 ///
 /// # 例
@@ -322,8 +326,9 @@ pub enum Optimizer {
 ///
 /// **`shuffle` の既定値（`false`）について**: Keras `fit` の既定
 /// `shuffle=True` とは異なり、[`fandhe_ai_tensor_core::data::
-/// DataLoaderConfig::new`] と同じ「既定でグローバル RNG を消費しない」
-/// 側へ揃えた（`docs/compat-fit-evaluate-design.md` 参照）。Keras
+/// DataLoaderConfig::new`] と同じ「既定でサンプル順序のシャッフルにグローバル RNG
+/// を消費しない」側へ揃えた（Dropout など学習時に乱数を使う層は別で、`shuffle = false`
+/// でも消費する）（`docs/compat-fit-evaluate-design.md` 参照）。Keras
 /// 相当にしたい呼び出し元は [`Self::shuffle`]`(true)` を明示する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FitConfig {
@@ -437,8 +442,10 @@ impl FitConfig {
     /// 範囲検査は [`Self::new`] の `epochs == 0` や [`Self::accumulate_steps`]
     /// の `n == 0` と同じ方針で fit 呼び出し時に行い、非有限・負値・`1` 以上・
     /// 分割後の学習側／検証側が 0 件になる値・明示 `validation` との併用は
-    /// `AutodiffError::InvalidArgument` で拒否する。`0.0`（`-0.0` を含む）は
-    /// 分割なしとして扱う。
+    /// `AutodiffError::InvalidArgument` で拒否する（学習側・検証側の両方に少なくとも 1 件
+    /// 必要で、例えば N = 1・`fraction = 0.25` は学習側が 0 件になり拒否）。`0.0`（`-0.0` を
+    /// 含む）は明示 `validation` との併用検査より先に処理され、自動分割を無効にするだけで、
+    /// 明示 `validation` と併用しても拒否されない（拒否は非ゼロの有効な分割率との併用のみ）。
     ///
     /// 内部表現は `f32::to_bits` のため、`Eq` はビット比較になる:
     /// `validation_split(0.0)` は未指定の [`Self::new`] と等しくなく、
@@ -541,23 +548,37 @@ impl<'a> FitWeights<'a> {
 /// サンプル数で重み付けした平均（`Σ(batch_loss * batch_n) / Σ batch_n`。
 /// `f64` で集計し最後に 1 回 `f32` へ downcast）として記録する。
 ///
-/// `val_loss[i]`（イシュー #1763）は `fit_with_callbacks` の
-/// `validation` 引数が `Some` の場合のみ epoch `i` 末の検証損失
+/// `val_loss[i]`（イシュー #1763）は実効的な検証データがある場合のみ
+/// epoch `i` 末の検証損失
 /// （[`Sequential::evaluate`] と同じサンプル数重み付き平均集計方式）で
-/// 埋まる。`validation = None`（[`Sequential::fit`] を含む）の場合は
-/// 空のまま（`Vec::new()`）。
+/// 埋まる。検証データは、明示の `validation` 引数（`fit_with_callbacks`・
+/// `fit_with_metrics`・`fit_with_weights`・`fit_with_train_step` 等の
+/// 各 `fit` 入口で共通）が `Some` の場合、または `config` の実効的な
+/// [`FitConfig::validation_split`] が末尾を検証データに割り当てた場合に
+/// 得られる。どちらも無い場合（[`Sequential::fit`] を含む）は空のまま
+/// （`Vec::new()`）。なお `metrics` を引数に取る入口（[`Sequential::fit_with_metrics`]・
+/// `fit_with_weights`・`fit_with_train_step`・`fit_with_prefetch`）では、`metrics` が
+/// 非空で検証データも無い場合は空で返らず `AutodiffError::InvalidArgument` で失敗する
+/// （指標は検証データ上で定義されるため）。[`Sequential::fit`]・`fit_with_callbacks` は
+/// 内部へ常に空の `metrics` を渡すので、この条件では失敗しない。
 ///
 /// `lr[i]`（イシュー #1763）は epoch `i` の**全バッチが実際に使った**
 /// optimizer の学習率（`callbacks` の有無に関わらず常に記録する。
 /// [`super::callbacks::LrSchedule`] が存在しない場合は `compile()` 時に
 /// 設定した学習率が epoch を通じて一定のまま記録される）。
 ///
-/// `val_metrics[i]`（イシュー #2072）は [`Sequential::fit_with_metrics`]
-/// の `metrics` 引数が非空かつ `validation` が `Some` の場合のみ epoch
-/// `i` 末の検証 metrics（[`MetricsResult`]。`val_loss` と同じ
-/// validation バッチ列から算出）で埋まる。`metrics` が空、または
-/// `validation = None`（[`Sequential::fit`]／`fit_with_callbacks` を
-/// 含む）の場合は空のまま（`Vec::new()`）。
+/// `val_metrics[i]`（イシュー #2072）は、`val_loss` を記録する場合（実効的な
+/// 検証データがある）に加えて、各 `fit` 入口の `metrics` 引数（共通処理へ渡る）
+/// が非空のときのみ epoch `i` 末の検証 metrics（[`MetricsResult`]。`val_loss`
+/// と同じ validation バッチ列から算出）で埋まる。正常終了時に次のいずれかなら
+/// 空のまま（`Vec::new()`）で、2 条件（metrics の要求・検証データの有無）は
+/// 独立に効く（`metrics` を指定できる入口では、`metrics` 非空かつ検証データ無しは
+/// エラーであり空では返らない）:
+/// - `metrics` が空（[`Sequential::fit`]／`fit_with_callbacks` は内部へ空の
+///   `metrics` を渡すため、`validation_split` で `val_loss` が記録されても
+///   `val_metrics` は空。`fit_with_metrics`・`fit_with_weights`・
+///   `fit_with_train_step` は渡された `metrics` に従う）
+/// - 検証データが無い（`metrics` も空の場合に限る）
 ///
 /// いずれの `Vec` も `i` は `fit_with_callbacks` 呼び出し内のローカル
 /// epoch 番号（0-indexed。`super::callbacks` モジュール doc「epoch
@@ -2495,7 +2516,61 @@ impl Sequential {
     ///
     /// 1 バッチあたりの演算列・train／eval モードの扱い・エラー契約は
     /// [`Self::fit_with_callbacks`] doc を参照（本メソッドはそのうち
-    /// `validation`／`callbacks` を使わないサブセット）。
+    /// `validation`／`callbacks` を使わないサブセット）。ただし `config` に
+    /// [`FitConfig::validation_split`] があり、有効な分割が成立する場合（学習側・検証側の両方に
+    /// 1 件以上）は、`fit` でも末尾の分割で検証し `History::val_loss` を積む。
+    /// ただし `fit` は空の `metrics` を内部へ渡すため、分割が有効でも
+    /// `History::val_metrics` は空のまま（値を得るには [`Self::fit_with_metrics`]）。
+    ///
+    /// # 乱数（shuffle と `manual_seed`）
+    ///
+    /// - 既定（[`FitConfig::new`]）は `shuffle = false` で、サンプル順序のシャッフルでは
+    ///   グローバル RNG を消費しない（Dropout などの層は学習モードで別途消費する。下記参照）。
+    /// - [`FitConfig::shuffle`]`(true)` のとき、各 epoch の開始時に、[`crate::manual_seed`] で
+    ///   初期化されるグローバル RNG から、サンプル添字の順列を 1 回引き、バッチに分割する。
+    ///   `fit` の前に `fandhe_ai::manual_seed(seed)` を呼べば、同じ消費順であるかぎり
+    ///   **再現されるのはシャッフル順とグローバル RNG の乱数列**である。
+    ///   `History` と最終パラメータの一致までは保証しない。それには、同じデータ・同じモデル構築・
+    ///   同じ呼び出し列に加えて、層などの計算が決定的であること（`Sequential::add_module` の
+    ///   利用者定義層が独自の乱数源・非決定的な計算を使う場合は変わりうる）が必要になる。
+    /// - グローバル RNG はプロセス全体で共有されるため、「`manual_seed` から `fit` の終了までの間に、
+    ///   他スレッドが RNG を消費・再シードしない」ことも前提になる（介入があるとシャッフル順が
+    ///   変わる。契約は `docs/rng-global-contract-design.md`）。並列実行するテストでは
+    ///   RNG を使う処理を直列化すること。
+    /// - Dropout など、学習時に同じグローバル RNG を使う層があれば、その消費も同じ列に入る。
+    /// - `add_linear(.., seed)` 等の個別 seed による初期化は `manual_seed` と独立している。
+    /// - `validation_split` の分割はシャッフル前に行い、末尾を検証側にするため乱数に依らない。
+    ///   検証用のサンプル順序は shuffle せず、順序の決定ではグローバル RNG を消費しない。
+    ///   ただしこれは層の forward による乱数消費とは別の話で、
+    ///   [`Sequential::add_fractional_max_pool2d`]／[`Sequential::add_fractional_max_pool3d`] の層は
+    ///   eval モードでも forward ごとにグローバル RNG から標本を引く。これらを含むモデルでは、
+    ///   検証フェーズの forward（`validation`／`validation_split`）でも RNG の状態が進み、
+    ///   後続 epoch のシャッフル順序や再現性に影響しうる。
+    /// - RNG は再現性のための決定的な乱数で、暗号用途には使えない。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential};
+    /// use fandhe_ai::optim::SgdConfig;
+    /// use fandhe_ai::{manual_seed, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let xs: Vec<f32> = (0..16).map(|i| i as f32 / 16.0).collect();
+    /// let ys: Vec<f32> = (0..8).map(|i| i as f32 / 8.0).collect();
+    /// let x = Tensor::new(xs, &[8, 2])?;
+    /// let y = Tensor::new(ys, &[8, 1])?;
+    ///
+    /// let mut run = || -> Result<_, Box<dyn std::error::Error>> {
+    ///     manual_seed(42);
+    ///     let mut model = Sequential::new().add_linear(2, 1, 7)?;
+    ///     model.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)?;
+    ///     Ok(model.fit(&x, &y, FitConfig::new(3, 2).shuffle(true))?)
+    /// };
+    /// // 同じ seed なら shuffle の順列も同じになる。この例のモデルは `add_linear` のみで
+    /// // 計算が決定的なため History も一致する（他スレッドが RNG を操作しない前提。上記参照）。
+    /// assert_eq!(run()?, run()?);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn fit<T: FitTarget>(
         &mut self,
         x: &Tensor<f32>,
@@ -2536,7 +2611,9 @@ impl Sequential {
     /// 2. [`Self::fit`] と同一のバッチループ（`bind → forward →
     ///    T::loss_for → backward → trainable_grads → optimizer.step →
     ///    apply_parameters`）を回し `history.loss` へ記録する。
-    /// 3. `validation` が `Some` なら eval モードへ一時的に切り替えて
+    /// 3. 検証データ（`validation` が `Some`、または `config` の実効的な
+    ///    [`FitConfig::validation_split`] による末尾の分割）があれば
+    ///    eval モードへ一時的に切り替えて
     ///    [`Self::evaluate`] と同じ演算列（`run_evaluate`。
     ///    `config.batch_size` を使う）で評価し `history.val_loss` へ
     ///    記録する。
@@ -2657,7 +2734,8 @@ impl Sequential {
     ///   （[`super::callbacks::EarlyStopping`]／
     ///   [`super::callbacks::ModelCheckpoint`] の既定・
     ///   [`super::callbacks::LrSchedule::plateau`] の既定）で
-    ///   `validation.is_none()` の場合 → `InvalidArgument`
+    ///   検証データ（明示の `validation` も実効的な `validation_split` も）が無い
+    ///   場合 → `InvalidArgument`
     ///   （train／eval モード変更前に検査するため復元は不要）
     /// - compile 済み optimizer が `RmsProp`／`Adagrad`／`Lamb`
     ///   （イシュー #2170。いずれも `set_lr` 非対応）で `callbacks` に
@@ -2707,7 +2785,8 @@ impl Sequential {
 
     /// [`Self::fit_with_callbacks`] の拡張版（イシュー #2072・親
     /// #2059）: `metrics`（[`super::metrics::Metrics`] の集合）を追加で
-    /// 受け取り、`validation` が `Some` の場合のみ epoch 末に
+    /// 受け取り、検証データ（`validation` が `Some`、または `config` の実効的な
+    /// [`FitConfig::validation_split`] による分割）がある場合のみ epoch 末に
     /// [`super::metrics::MetricsResult`] を計算して
     /// [`History::val_metrics`] へ積む。`metrics = &[]` のとき
     /// [`Self::fit_with_callbacks`] と完全に同一の演算列・戻り値になる
@@ -2728,11 +2807,61 @@ impl Sequential {
     /// 監視する場合は呼び出し側が `.mode(MonitorMode::Max)` を明示する
     /// 必要がある。自動推定はしない）。
     ///
+    /// # `validation_split` との併用
+    ///
+    /// `validation: None` と [`FitConfig::validation_split`]`(f)`（`f` は 0 より大きく 1 未満）
+    /// を組み合わせると、末尾の分割が検証データになる。`metrics`・`Monitor::ValMetric`／
+    /// `ValLoss` 監視・`History::val_loss` はその分割に対して有効になる。`Some(..)` の
+    /// `validation` と非ゼロの有効な `validation_split` の併用は `InvalidArgument`。
+    /// `validation_split(0.0)`（`-0.0` を含む）は併用検査より先に処理され、自動分割を無効に
+    /// するだけなので、`validation: Some(..)` と併用しても明示の検証データで評価される。
+    /// 分割は学習側・検証側に少なくとも 1 件ずつ必要で、満たさない値は `InvalidArgument`。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{FitConfig, Loss, Metrics, Optimizer, Sequential};
+    /// use fandhe_ai::optim::SgdConfig;
+    /// use fandhe_ai::{AutodiffError, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let xs: Vec<f32> = (0..24).map(|i| i as f32 / 24.0).collect();
+    /// let ys: Vec<i32> = (0..12).map(|i| i % 2).collect();
+    /// let x = Tensor::new(xs, &[12, 2])?;
+    /// let y = Tensor::new(ys, &[12])?;
+    /// let mut model = Sequential::new().add_linear(2, 2, 3)?;
+    /// model.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)?;
+    ///
+    /// // validation: None + validation_split: 末尾 25% が検証データになる。
+    /// let h = model.fit_with_metrics(
+    ///     &x,
+    ///     &y,
+    ///     FitConfig::new(2, 4).validation_split(0.25),
+    ///     None,
+    ///     &mut [],
+    ///     &[Metrics::Accuracy],
+    /// )?;
+    /// assert_eq!(h.val_loss.len(), 2);
+    /// assert_eq!(h.val_metrics.len(), 2);
+    /// assert!(h.val_metrics[0].accuracy.is_some());
+    ///
+    /// // 明示の validation との併用は拒否される。
+    /// let err = model.fit_with_metrics(
+    ///     &x,
+    ///     &y,
+    ///     FitConfig::new(2, 4).validation_split(0.25),
+    ///     Some((&x, &y)),
+    ///     &mut [],
+    ///     &[Metrics::Accuracy],
+    /// );
+    /// assert!(matches!(err, Err(AutodiffError::InvalidArgument(_))));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # エラー
     ///
     /// [`Self::fit_with_callbacks`] の既存エラー契約に加え:
-    /// - `!metrics.is_empty() && validation.is_none()` →
-    ///   `InvalidArgument`（metrics は validation set 上で定義される
+    /// - `metrics` が非空で、明示の `validation` も実効的な `validation_split`
+    ///   も無い場合 → `InvalidArgument`（metrics は検証データ上で定義される
     ///   指標のため）
     /// - `callbacks` のいずれかが `Monitor::ValMetric(m)` を監視し、
     ///   `m` が `metrics` に含まれない、または `m ==
