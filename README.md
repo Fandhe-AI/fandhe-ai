@@ -108,7 +108,7 @@ to_bytes, to_path, from_sequential}`・`OnnxExportOptions`）として
 `fandhe-ai` から公開済みです。export には、import したモデルの書き出しと、
 `compat::Sequential` からの書き出し（`from_sequential` でモデルを作り、`to_bytes`／`to_path` で
 書き出す。対応層は 7 種）の
-2 つがあります。safetensors の save／load も
+2 つがあります。export した ONNX は `value_info` を空で出力するため、`onnx.checker` 等の外部ツールによる厳密な妥当性検証は保証しません。import したモデルの再エクスポートは、元の `opset_import`／`ir_version` を保持せず `OnnxExportOptions`（既定 `opset_version=17`）の値で出力するため、元の opset に合わせたい場合は明示指定してください。safetensors の save／load も
 `fandhe_ai::interop::safetensors`（`save_safetensors_f32`／
 `load_safetensors_f32` とその `_to_bytes`／`_from_bytes` 版、多 dtype 版の
 `*_typed`、`LoadError`／`SaveError` など）から使えます。
