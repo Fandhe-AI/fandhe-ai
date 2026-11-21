@@ -127,20 +127,33 @@ impl Sequential {
     スナップショットが肥大するため推奨しない）。この例外は `restore_best_weights` 有効かつ
     スナップショット存在の正常終了時に限る
   - `Device::Cpu` も受け付け、CPU の常駐チェーン（#3253 の部品）で回す。CPU の `fit` へ委譲はしない
+- **既存の CPU 入口との等価（検証・callback の扱い・エラー型）**: `fit_on`／`fit_on_with_callbacks` は、
+  既存の `fit`／`fit_with_callbacks` と**同じ引数検証・同じ callback の開始時処理・同じエラー型を、
+  同じ順序で**適用する。既存の順序は `training.rs` の `run_fit` 系で、引数・metrics・callback の
+  監視設定の検証 → `EarlyStopping` のリセット → ロガー・EMA・SWA の開始処理 → 学習、である。
+  GPU 入口はこの検証群を **store の初期化・`tape_for` の確保・callback の開始処理より前**に通す
+  （検証項目の列挙は本記録に重ねず、既存挙動を正とする）。GPU 固有の事前検査（§6・§7）はこの検証群の
+  後に足す。入口が足すのは GPU 固有の検査だけである
 - **エラー時の callback 副作用**: 失敗時に戻す状態は「モデル重み・optimizer 状態」（呼び出し前の
   ホスト状態）に限る。`ModelCheckpoint` が書き出したチェックポイント、ログ、最良値スナップショット、
-  callback の進捗は確定済みの副作用であり巻き戻さない（外部ファイルは取り消せないため）。再試行時は
-  これらを引き継がず、callback は新しい `fit_on` 呼び出しで初期化し直す前提とし、呼び出し側が
-  残存したチェックポイントを扱う。エラーを返す時点でチェックポイントが書かれていた場合の通知方法は
-  #4360 で定める
+  callback の進捗は確定済みの副作用であり巻き戻さない（外部ファイルは取り消せないため）。
+  **callback の状態のリセットは既存の `fit_with_callbacks` と同じで、入口が新たに足さない**:
+  呼び出し開始時にリセットされるのは `EarlyStopping` だけ（`reset_for_fit`）で、`ModelCheckpoint`・
+  `LrSchedule`・`Ema`・`Swa` は呼び出しをまたいで状態（最良値・通算 epoch 番号・`next_epoch`・shadow 等）を
+  継続し、ロガー・`Lambda` は呼び出しをまたぐ状態を持たない（`callbacks.rs` 冒頭「epoch 番号の数え方」）。
+  したがって失敗後に**同じ callback インスタンスを `fit_on_with_callbacks` へ再び渡すと、失敗した
+  呼び出しの最良値・epoch 番号がそのまま残る**。失敗した試行の状態を引き継がせたくない場合は、
+  **呼び出し側が新しい callback を用意する**（`fit_on` は callback を受けないので該当しない）。
+  残存したチェックポイントの扱いも呼び出し側が担う。エラーを返す時点でチェックポイントが
+  書かれていた場合の通知方法は #4360 で定める
 - **エラー表**（新しいエラー型・variant は足さない。既存の引数・状態エラーは `AutodiffError` の
   variant、バックエンド由来のエラーは `AutodiffError::Backend(BackendError::…)` を、完全な variant 名で使い分ける）:
 
 | 事象 | エラー |
 |---|---|
-| デバイス不在・範囲外 ordinal | `tape_for` が返す `AutodiffError::Backend(BackendError::…)` をそのまま返す |
+| デバイス不在・範囲外 ordinal | `tape_for` の戻り値は `Result<Tape, BackendError>`。`Err(e)` を `AutodiffError::Backend(e)`（既存の `From<BackendError> for AutodiffError`）で包んで返す。`e` の variant と内容は変えない |
 | 未対応の層・損失・optimizer・組合せ | `AutodiffError::Backend(BackendError::Unsupported)` |
-| 不正な引数（`epochs == 0` 等） | 既存 `run_fit` と同じ `AutodiffError::InvalidArgument`（`BackendError::InvalidArgument` ではない） |
+| 不正な引数（`epochs == 0`・metrics・callback の監視設定等） | 既存の CPU 入口と同じ検証・同じ `AutodiffError::InvalidArgument`（`BackendError::InvalidArgument` ではない。上記「既存の CPU 入口との等価」） |
 | 未 compile | 既存 `fit` と同じエラー |
 | 状態の poison 等 | `AutodiffError::Backend(BackendError::StorePoisoned)`（P6 と同じ） |
 
@@ -169,11 +182,11 @@ impl Sequential {
 |---|---|
 | ① デバイス単位のフォールバック（`tape_for(device)` の代わりに `crate::tape()` で回す） | **禁止** |
 | ② 演算単位のホストフォールバック（`BackendOps` 内でホストへ落とす） | **禁止**（`train-step-resident-parts-design.md` と同じ方針） |
-| ③ `compat-resident-train-step-decision.md` §5 第 2 段のフォールバック（store 未変更時に限り同じデバイスの Tape 経路〈`forward_resident` → 損失 → `backward_device_param_store` → `step_device_param_store*`〉へ落とす） | CPU ではなく同じデバイス上で bit 一致が条件の場合だけ許す。`fit_on` で使うかと条件は #4360 の段階分けで決める |
+| ③ `compat-resident-train-step-decision.md` §5 第 2 段のフォールバック（store 未変更時に限り同じデバイスの Tape 経路〈`forward_resident` → 損失 → `backward_device_param_store` → `step_device_param_store*`〉へ落とす） | CPU ではなく同じデバイス上で、判定を満たす場合だけ許す。`fit_on` で使うかと条件は #4360 の段階分けで決める。**判定は構成で 2 つに分ける**: (a) 常駐チェーンと Tape 経路の**両方が成立する構成**では、両経路の結果の bit 一致を確認する（同じデバイス・同じ入力）。(b) **Tape 経路だけが成立する構成**（チェーンを構築できない構成）には bit 一致の比較先となるチェーンがないため、(a) の条件はそのまま使えない。(b) の受け入れ条件（比較先〈CPU の `fit` か同じデバイスの既存 Tape 手組み経路か〉と判定方式〈REQ-2 の統一複合判定か baseline 方式か〉）は本記録で決めず、#4360（§9・§10）で確定する。確定するまで (b) の構成は ③ で許可済みとは扱わず `Unsupported` とする |
 
 拒否は store を作る前（状態を変える前）に行う fail-closed とする。選択デバイスの対応可否（`MemoryOps` 等の必要なバックエンド能力）の確認も
 この store 生成前の検査に含める。**事前拒否するのは「選択したデバイスで許可済みの経路が一つも成立しない場合」に限る**。
-常駐チェーンが成立しなくても、③ の条件（store 未変更・同じデバイス上で bit 一致）を #4360 が許可した構成では、
+常駐チェーンが成立しなくても、③ の条件（store 未変更・同じデバイス上・(a)(b) の判定）を #4360 が許可した構成では、
 同じデバイスの Tape 経路が成立するため事前拒否せず、その経路を選ぶ。チェーン固有の検査
 （下記の空モデル・未対応活性化等）は「常駐チェーン経路の可否」を決めるだけで、それ単独では拒否理由にならず、
 代替経路の可否は ③ の許可条件で別に判定する。未対応デバイスでは store の初期化に進まない。検査は store に依存しない
@@ -186,7 +199,7 @@ impl Sequential {
 - 追跡対象外の独自層（`add_module`）
 - 未対応の損失・未対応の optimizer（L-BFGS を含む）
 - `compile_with_amp`（AMP）・`compile_with_param_groups`（param groups）
-- `FitConfig::accumulate_steps > 1`・`validation_split`（扱いは #4360 で決める）
+- `FitConfig::accumulate_steps > 1`・`validation_split`（初期段階は拒否。解除するかは #4360 で決める）
 - 未対応の callback（§7）
 
 経路選択の条件として扱う構成（無条件の拒否ではない）:
@@ -228,10 +241,13 @@ impl Sequential {
 - validation・metrics: 検証のフォワードはデバイスで行い（`predict_resident_input` 相当）、
   出力をホストへ戻して既存の損失・metrics 計算（`evaluate` と同じ eval モード）に渡す方針。
   `predict_resident_input` は `build_device_chain_steps` でチェーンを構築できないと `Unsupported`
-  を返す。このため検証を指定した呼び出し（`validation_split` や検証データの指定）では、
+  を返す。このため検証データを指定した呼び出し（`validation_split` は §6 のとおり初期段階では拒否）では、
   学習側の経路判定（§6）に加えて、対応する**同一デバイス上の eval 経路**（常駐チェーン、または
   ③ で許可済みの Tape 経路）の成立も store 初期化前に判定し、成立しなければ store を作る前に
   `Unsupported` で拒否する。学習途中の epoch 終了時に初めて検証が失敗する状態を作らない。
+  これに先立ち、metrics・callback の監視設定（検証データなしの metrics、分類 metrics と target 型の組合せ、
+  監視する指標の未要求・非スカラー等）の引数検証は、§4 の「既存の CPU 入口との等価」のとおり既存入口と
+  同じ検証を store 初期化・callback の開始処理より前に通す（本節で項目を重ねて定義しない）。
   CPU の fit との差は REQ-2 の判定で見る（方式は #4360）。
 - `History`: 型・意味は CPU と同じ。loss を step ごとに `ResidentLoss::read` するか epoch 単位で
   まとめて読むかは転送回数の方針として **#4360 に申し送る未決点**。
@@ -289,5 +305,6 @@ impl Sequential {
 - A03: `epochs`・`batch_size`・形状の検査はデバイスへの転送より前に、既存 `fit` と同じ検査
   （`checked_*` による算術オーバーフロー防止を含む）を通す。カーネル側の手動境界チェックは省略しない（REQ-8）
 - A05／A06: 依存追加なし・新規 `unsafe` なし
-- A08: 学習結果は同一バックエンドの Tape 経路との bit 一致と REQ-2 の判定で担保し、tolerance・baseline は変えない
+- A08: 学習結果は、常駐チェーンと Tape 経路が両方成立する構成では両経路の bit 一致、Tape 経路だけが成立する構成では
+  #4360 が §10 で確定する比較先と判定方式（§6 ③）と、REQ-2 の判定で担保し、tolerance・baseline は変えない
 - A09: 同期・転送回数は診断カウンタで実機確認する受け入れ条件を #4360・#4392 に残す
