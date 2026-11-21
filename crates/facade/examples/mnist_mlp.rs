@@ -439,6 +439,7 @@ fn main() -> Result<(), DynError> {
     let report = train_and_report(&mut model, &train, &test)?;
     check_result(&report)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +675,7 @@ mod tests {
             Some(IdxError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound
         ));
     }
+
     #[test]
     fn check_result_rejects_bad() {
         let r = |l: Vec<f32>, tl, ta| Report {
