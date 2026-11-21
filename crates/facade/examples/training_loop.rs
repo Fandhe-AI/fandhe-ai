@@ -12,14 +12,18 @@
 //! **optimizer**: `fandhe_ai::optim::{Sgd, SgdConfig}` を使う。PyTorch の
 //! `loss.backward(); optimizer.step()` に対応するのが `tape.backward` と
 //! `Sgd::step` で、`step` は更新後パラメータを返すので
-//! `Sequential::apply_parameters` で書き戻す。`AdamW` に替える場合は
-//! `AdamW::step` が `&[(&Tensor, &Tensor)]`（param と grad の組）を取る点だけ
-//! が異なる。ループ自体を書かずに済ませたい場合は `Sequential::compile`／
+//! `Sequential::apply_parameters` で書き戻す。`AdamW` に替える場合は、
+//! 設定型も `SgdConfig::new(LR)` から `AdamWConfig`（例: `AdamWConfig::default()`）
+//! へ差し替えて `AdamW::new(AdamWConfig)` を呼ぶ（`SgdConfig` のままでは型が合わない）。
+//! `step` の引数は `&[(&Tensor, &Tensor)]`（param と grad の組）で、
+//! `trainable_parameters` と `trainable_grads` を同じ順序で zip して渡す。ループ自体を書かずに済ませたい場合は `Sequential::compile`／
 //! `fit` を使う（その example はイシュー #4338 で追加予定）。
 //!
 //! **決定的シード**: データ生成は `fandhe_ai::manual_seed` ＋
-//! `fandhe_ai::rand`（整数演算のみで生成されるためプラットフォーム間で
-//! bit 同一）、重み初期化は `Sequential::add_linear` の `seed` 引数で固定する
+//! `fandhe_ai::rand`（整数演算の xorshift64* で生成し、`next_unit_f32` は上位 24 ビットを
+//! `f32` へ変換して 2^24 で除算する。24 ビット整数と 2 のべき乗による
+//! スケーリングは `f32` で厳密に表現できるためプラットフォーム間で bit 同一）、
+//! 重み初期化は `Sequential::add_linear` の `seed` 引数で固定する
 //! （`.claude/rules/coding-rust.md`「学習系回帰テストには決定的シード設定
 //! ユーティリティを使う」）。`rand` は暗号用途の乱数ではなく、再現可能な
 //! デモ用途に限る。
