@@ -127,6 +127,12 @@ impl Sequential {
     スナップショットが肥大するため推奨しない）。この例外は `restore_best_weights` 有効かつ
     スナップショット存在の正常終了時に限る
   - `Device::Cpu` も受け付け、CPU の常駐チェーン（#3253 の部品）で回す。CPU の `fit` へ委譲はしない
+- **エラー時の callback 副作用**: 失敗時に戻す状態は「モデル重み・optimizer 状態」（呼び出し前の
+  ホスト状態）に限る。`ModelCheckpoint` が書き出したチェックポイント、ログ、最良値スナップショット、
+  callback の進捗は確定済みの副作用であり巻き戻さない（外部ファイルは取り消せないため）。再試行時は
+  これらを引き継がず、callback は新しい `fit_on` 呼び出しで初期化し直す前提とし、呼び出し側が
+  残存したチェックポイントを扱う。エラーを返す時点でチェックポイントが書かれていた場合の通知方法は
+  #4360 で定める
 - **エラー表**（新しいエラー型・variant は足さず `AutodiffError::Backend(BackendError::…)` を再利用）:
 
 | 事象 | エラー |
@@ -144,8 +150,11 @@ impl Sequential {
   `train_step_device_chain` は `autodiff` クレートの現行 `pub` メソッドで、`facade` は別クレートから
   呼ぶため、`pub(crate)` の拡張だけでは `fit_on` から使えない。既存の公開シグネチャを維持したまま
   既存口から拡張へ委譲できるか、`autodiff` 内部クレートとして `facade` が呼ぶための口
-  （`#[doc(hidden)]` 等。内部クレートであり facade のサポート対象 API ではない）が必要かは
-  #4361／#4362 の実装で確かめる。いずれも「facade のサポート対象公開面を増やさない」方針とは別事項である。
+  が必要かは #4361／#4362 の実装で確かめる。その口は `DeviceParamStore` の `#[doc(hidden)] pub fn`
+  にしない。`DeviceParamStore` は facade から型ごと再エクスポートされるため、`pub fn` を足すと
+  facade の公開面が増え「公開面は `fit_on` 系だけ」に反する。別の呼び出し口が要る場合は、既存の
+  `optim::resident_param_groups` と同様に facade が再エクスポートしないモジュールの自由関数として足す。
+  いずれも「facade のサポート対象公開面を増やさない」方針に従う。
 - CrossEntropy（#4362）・Adam／AdamW（#4367）・活性化（#4370）のチェーン拡張は、内部
   （内部クレート間の口として足し、facade から再エクスポートしない。上記の `pub` と `pub(crate)` の違いに注意）として足し、**公開面は `fit_on` 系だけ**を
   推奨する。P5 の別損失版など低レベルの公開入口を足すかは本記録では推奨せず、必要になったら
@@ -161,7 +170,8 @@ impl Sequential {
 | ② 演算単位のホストフォールバック（`BackendOps` 内でホストへ落とす） | **禁止**（`train-step-resident-parts-design.md` と同じ方針） |
 | ③ `compat-resident-train-step-decision.md` §5 第 2 段のフォールバック（store 未変更時に限り同じデバイスの Tape 経路〈`forward_resident` → 損失 → `backward_device_param_store` → `step_device_param_store*`〉へ落とす） | CPU ではなく同じデバイス上で bit 一致が条件の場合だけ許す。`fit_on` で使うかと条件は #4360 の段階分けで決める |
 
-拒否は store を作る前（状態を変える前）に行う fail-closed とする。検査は store に依存しない
+拒否は store を作る前（状態を変える前）に行う fail-closed とする。選択デバイスの対応可否（常駐チェーンの利用可否、`MemoryOps` 等の必要なバックエンド能力）の確認も
+この store 生成前の検査に含め、未対応デバイスでは store の初期化に進まない。検査は store に依存しない
 モデル構成の静的検査として行い、段階ごとのチェーン対応構成（`train_step_resident` が
 `build_device_chain_steps` で拒否する空モデル・Sigmoid 等を含む）を store 生成前に別途検査する。
 `contains_resident_unsupported_layer` は汎用の常駐経路向けの除外リストであり、これだけでは不足する。
