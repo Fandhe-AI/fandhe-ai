@@ -32,7 +32,7 @@ import 済みモデルの roundtrip 限定）。safetensors save／load も
 
 ```toml
 [dependencies]
-fandhe-ai = "0.9.0"
+fandhe-ai = "0.15.0"
 ```
 
 開発版を試す場合は Git 依存でも参照できます。

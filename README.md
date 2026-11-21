@@ -93,7 +93,7 @@ cargo run -p fandhe-ai --example getting_started
 
 | クレート | 役割 |
 |---|---|
-| `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`tape()`／`tape_for(Device)`）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`（`Sgd`／`AdamW` 等）・デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）の 4 つを確定入口として提供します（[`docs/compat-api-scope.md`](docs/compat-api-scope.md) §0） |
+| `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`tape()`／`tape_for(Device)`）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`（`Sgd`／`AdamW` 等）・デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）・デバイスメモリプールの明示解放・統計（`release_cached_memory(Device)`／`memory_pool_stats(Device)`）の 5 つを確定入口として提供します（[`docs/compat-api-scope.md`](docs/compat-api-scope.md) §0） |
 | `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
 
 上記 6 クレートと、下記の `fandhe-ai-onnx-interop`・`fandhe-ai-hf-hub`・`fandhe-ai-backend-rocm` の計 9 クレートを crates.io に公開しています（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
@@ -104,10 +104,15 @@ cargo run -p fandhe-ai --example getting_started
 v0.10.0（2026-10-03）から 7 クレート目として crates.io に公開しています。
 ONNX import／export は `fandhe_ai::interop::onnx`（`OnnxModel`／
 `OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
-to_bytes, to_path}`・`OnnxExportOptions`）として `fandhe-ai` から公開済み
-です（export は import 済みモデルの roundtrip 限定）。safetensors
-save／load は引き続き `fandhe-ai` からの再エクスポートが未提供のため
-利用できません。
+to_bytes, to_path, from_sequential}`・`OnnxExportOptions`）として
+`fandhe-ai` から公開済みです。export には、import したモデルの書き出しと、
+`compat::Sequential` からの書き出し（`from_sequential`。対応層は 7 種）の
+2 つがあります。safetensors の save／load も
+`fandhe_ai::interop::safetensors`（`save_safetensors_f32`／
+`load_safetensors_f32` とその `_to_bytes`／`_from_bytes` 版、多 dtype 版の
+`*_typed`、`LoadError`／`SaveError` など）から使えます。
+`compat::Sequential::state_dict`／`load_state_dict` と組み合わせると、
+bit 完全一致で往復できます（`docs/facade-safetensors-exposure-decision.md` §11）。
 
 このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
 ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。v0.14.0 で crates.io へ初回公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする。v0.14.0 で crates.io へ初回公開。ROCm 実機 parity は未実測のまま所有者判断で公開）を担う内部クレートがあります。
