@@ -45,6 +45,10 @@ use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallib
 /// #189「損失関数（MSE・CrossEntropy）の実装」）。PyTorch
 /// `nn.MSELoss(reduction=...)` の `mean`/`sum` に対応する。
 ///
+/// facade（`fandhe-ai`）からは `use fandhe_ai::nn::loss::Reduction;` で import する
+/// （crate ルート・`nn` 直下には再エクスポートしない）。`Var` の損失メソッドの `reduction`
+/// 引数と `nn::loss` の構造体がこの型を取る。`compat::Loss` は別レイヤで `Mean` 固定。
+///
 /// `#[non_exhaustive]` とする理由: 将来 `none`（要素ごと損失。PyTorch
 /// `reduction='none'` 相当）を追加しうるが、本イシューでは #190 実装
 /// 計画のスコープ外（out-of-scope-tracking.md 準拠でユーザー承認後に
@@ -1397,6 +1401,7 @@ impl<'t> Var<'t> {
     /// `mse_loss_with(target, Reduction::Mean)` への委譲（#190）。
     /// 既存呼び出し元（`nn::activation` 系テスト・`tests/backward.rs`
     /// 等）のシグネチャ・意味を変えないため本メソッドは維持する。
+    /// `Reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元）。
     pub fn mse_loss(&self, target: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.mse_loss_with(target, Reduction::Mean)
     }
@@ -1419,6 +1424,7 @@ impl<'t> Var<'t> {
     /// バックエンド実装が返す `ShapeMismatch` は「バックエンド実装の
     /// 契約違反」を意味し、こちらも `Unsupported` 同様フォールバック
     /// せず伝播する（想定内の分岐で握り潰さない）。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn mse_loss_with(
         &self,
         target: &Var<'t>,
@@ -1475,6 +1481,7 @@ impl<'t> Var<'t> {
     /// 要求する（PyTorch の `delta` 引数と同じ制約）。
     /// `huber_loss_impl(target, HuberKind::Huber, delta, reduction)`
     /// への委譲。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn huber_loss(
         &self,
         target: &Var<'t>,
@@ -1493,6 +1500,7 @@ impl<'t> Var<'t> {
     /// `> 0`」検査により `AutodiffError::InvalidArgument` で拒否する。
     /// `huber_loss_impl(target, HuberKind::SmoothL1, beta, reduction)`
     /// への委譲。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn smooth_l1_loss(
         &self,
         target: &Var<'t>,
@@ -1578,6 +1586,7 @@ impl<'t> Var<'t> {
     /// 委譲（#1737。親イシュー #1609「損失関数の拡張」）。`nn::loss::
     /// BceLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの薄いラッパー
     /// （REQ-9）。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn bce_loss(
         &self,
         target: &Var<'t>,
@@ -1595,6 +1604,7 @@ impl<'t> Var<'t> {
     /// （[`Self::bce_loss`] と異なり範囲検査を行わない）。`nn::loss::
     /// BceWithLogitsLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの
     /// 薄いラッパー（REQ-9）。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn bce_with_logits_loss(
         &self,
         target: &Var<'t>,
@@ -2208,6 +2218,7 @@ impl<'t> Var<'t> {
     /// label_smoothing・ignore_index・class_weight の各オプションは
     /// `Self::cross_entropy_loss_with`（`crate::loss_ops` への委譲。
     /// #2538 で facade 公開）で追加提供する。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn cross_entropy_loss(
         &self,
         targets: &Tensor<i32>,
@@ -2266,6 +2277,7 @@ impl<'t> Var<'t> {
     /// A08）→ ⑤戻り値 shape `[]` の契約検証 → ⑥ノード記録。`nn::loss::
     /// NllLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの薄いラッパー
     /// （REQ-9）。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn nll_loss(
         &self,
         targets: &Tensor<i32>,
@@ -2340,6 +2352,7 @@ impl<'t> Var<'t> {
     /// KlDivTarget::Probabilities, reduction)` への委譲。`nn::loss::
     /// KlDivLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの薄いラッパー
     /// （REQ-9）。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn kl_div_loss(
         &self,
         target: &Var<'t>,
@@ -2354,6 +2367,7 @@ impl<'t> Var<'t> {
     /// KlDivTarget::LogProbabilities, reduction)` への委譲（#1738）。
     /// `nn::loss::KlDivLoss::new_with_log_target`（`nn/loss.rs`）はこの
     /// メソッドを呼ぶだけの薄いラッパー（REQ-9）。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn kl_div_loss_with_log_target(
         &self,
         target: &Var<'t>,
@@ -4850,6 +4864,7 @@ impl<'t> Var<'t> {
     /// L1 損失（`torch.nn.L1Loss` 相当。イシュー #2166・#2538）。
     /// `crate::loss_ops::l1_loss` へ委譲する。テープ不一致・shape 不一致は型付き
     /// エラーで拒否する。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn l1_loss(
         &self,
         target: &Var<'t>,
@@ -4862,6 +4877,8 @@ impl<'t> Var<'t> {
     /// （`torch.nn.CrossEntropyLoss(label_smoothing=, ignore_index=, weight=)` 相当。
     /// イシュー #2166・#2538）。`crate::loss_ops::cross_entropy_loss_with` へ委譲する。
     /// `options` が既定値なら `Self::cross_entropy_loss` へ丸ごと委譲される（R3）。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
+    /// オプション型 `CrossEntropyOptions` も `fandhe_ai::nn::loss` から import する。
     pub fn cross_entropy_loss_with(
         &self,
         targets: &Tensor<i32>,
@@ -4876,6 +4893,7 @@ impl<'t> Var<'t> {
     /// イシュー #2167・#2539）。`crate::loss_ops::cosine_embedding_loss` へ委譲する。
     /// テープ不一致・shape 不一致・`y` が ±1 以外・`margin` 非有限は型付きエラーで
     /// 拒否する。PyTorch との差分は決定記録 `docs/autodiff-distance-poisson-loss-ops-decision.md` §3 参照。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn cosine_embedding_loss(
         &self,
         x2: &Var<'t>,
@@ -4889,6 +4907,7 @@ impl<'t> Var<'t> {
     /// マージンランキング損失（`torch.nn.MarginRankingLoss` 相当。`self` が x1。
     /// イシュー #2167・#2539）。`crate::loss_ops::margin_ranking_loss` へ委譲する。
     /// テープ不一致・shape 不一致・`y` が ±1 以外・`margin` 非有限は型付きエラーで拒否する。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
     pub fn margin_ranking_loss(
         &self,
         x2: &Var<'t>,
@@ -5013,6 +5032,8 @@ impl<'t> Var<'t> {
     /// トリプレットマージン損失（`torch.nn.TripletMarginLoss` 相当。`self` が anchor。
     /// イシュー #2167・#2539）。`crate::loss_ops::triplet_margin_loss` へ委譲する。
     /// テープ不一致・shape 不一致・`p < 1`・`eps` 負などは型付きエラーで拒否する。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
+    /// オプション型 `TripletMarginOptions` も `fandhe_ai::nn::loss` から import する。
     pub fn triplet_margin_loss(
         &self,
         positive: &Var<'t>,
@@ -5026,6 +5047,8 @@ impl<'t> Var<'t> {
     /// Poisson 負の対数尤度損失（`torch.nn.PoissonNLLLoss` 相当。`self` が input。
     /// イシュー #2167・#2539）。`crate::loss_ops::poisson_nll_loss` へ委譲する。
     /// テープ不一致・shape 不一致・`eps` 不正は型付きエラーで拒否する。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
+    /// オプション型 `PoissonNllOptions` も `fandhe_ai::nn::loss` から import する。
     pub fn poisson_nll_loss(
         &self,
         target: &Var<'t>,
@@ -5039,6 +5062,8 @@ impl<'t> Var<'t> {
     /// イシュー #2168・#2540）。`crate::loss_ops::ctc_loss` へ委譲する。
     /// rank／長さ不一致・`blank >= C`・target 値域外・確保前上限超過は型付きエラーで拒否する。
     /// 数式・VJP 規約・PyTorch との差分は `docs/autodiff-ctc-design.md` 参照。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`（facade での import 元。crate ルート・`nn` 直下には無い）。
+    /// オプション型 `CtcLossOptions` も `fandhe_ai::nn::loss` から import する。
     pub fn ctc_loss(
         &self,
         targets: &Tensor<i32>,
