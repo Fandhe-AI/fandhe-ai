@@ -87,12 +87,15 @@ cargo run -p fandhe-ai --example getting_started
 ```
 
 学習ループ（`compile` → `fit` → `evaluate` → `predict`）を通す MNIST 形式の example もあります。
-784 次元・10 クラスの**合成データ**を使うため、ネットワーク取得なしでオフラインで動作します
+784 次元・10 クラスの**合成データ**を使うため、ネットワーク取得なしでオフラインで動作します。
+学習後に一時ディレクトリへ `save_model` → `load_model` し、保存前後の `predict` 出力が bit 一致することまで確認します
 （[`crates/facade/examples/mnist_mlp.rs`](crates/facade/examples/mnist_mlp.rs)）。
 
 ```bash
 cargo run -p fandhe-ai --example mnist_mlp --release
 ```
+
+保存・読み込みは `load_model` の対応環境（Linux x86_64／aarch64 と macOS）が対象です。終了コード 0 もこの環境の場合に限り、それ以外では example は非 0 終了します。
 
 ## クレート構成とサポート境界
 

@@ -1,6 +1,7 @@
 //! 合成 MNIST 形式データで `compile` → `fit` → `evaluate` → `predict` を通す example（イシュー #4339・親 #4338）。
 //!
 //! 実行: `cargo run -p fandhe-ai --example mnist_mlp --release`（debug でも動くが遅い）。
+//! 保存・読み込みを含む終了コード 0 は Linux（x86_64／aarch64）と macOS が対象で、それ以外では非 0 終了する。
 //!
 //! - 入力 784 次元・10 クラスの MNIST と同じ形の**合成データ**を使う。実 MNIST ではなく、
 //!   ネットワーク取得もしない（オフラインで exit 0 になる）。
@@ -10,13 +11,19 @@
 //!   （グローバル RNG を消費せず、学習用・評価用・クラスごとにシードを固定して決定的）。
 //! - `FitConfig::shuffle(true)` はグローバル RNG（`fandhe_ai::manual_seed`）を消費するため、
 //!   `main` の先頭で固定シードを設定し、再現性を保つ。
-//! - 兄弟イシューが土台にする分割: #4340 は `synthetic_mnist` と並ぶ IDX 読み込みを足し
-//!   （引数なしは合成データのまま）、#4341 は `train_and_report` が返す学習済みモデルへ
-//!   save_model／load_model の bit 一致確認を足す。
+//! - 学習後に一時ディレクトリへ `save_model` し、`load_model` で復元したモデルの `predict` 出力が
+//!   保存前と bit 一致することを確認する（#4341）。最大差を表示し、0 でなければ非 0 終了する。
+//!   一時ディレクトリ（unix では 0o700 で排他作成）は成功・失敗を問わず終了時に片付けを試みる
+//!   （後始末はベストエフォートで、削除に失敗すると残りうる）。保存・読み込みは load_model の対応環境
+//!   （Linux x86_64／aarch64 と macOS）が対象で、それ以外では非 0 終了する。
+//! - 兄弟イシュー #4340 は `synthetic_mnist` と並ぶ IDX 読み込みを足す（引数なしは合成データのまま）。
 
-use fandhe_ai::compat::{FitConfig, Loss, Metrics, MetricsResult, Optimizer, Sequential};
+use fandhe_ai::compat::{
+    FitConfig, Loss, Metrics, MetricsResult, Optimizer, Sequential, load_model, save_model,
+};
 use fandhe_ai::optim::AdamConfig;
 use fandhe_ai::{AutodiffError, Generator, Tensor};
+use std::path::{Path, PathBuf};
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -150,6 +157,170 @@ fn check_result(r: &Report) -> Result<(), DynError> {
     Ok(())
 }
 
+/// 保存先の一時ディレクトリを排他的に作り、drop で再帰削除する RAII ガード。
+///
+/// `save_and_verify` から使われ、早期 return（`?`）でも後始末を試みる（ベストエフォート。`process::exit` は使わない）。
+/// 新規依存を避けるため std のみで実装する。名前に pid と `RandomState` 由来の 128 bit を含め、
+/// `create_dir` の排他作成で既存パス・事前配置 symlink を再利用しない（`AlreadyExists` のみ再試行）。
+struct SaveDirGuard {
+    path: PathBuf,
+}
+
+/// 排他的にディレクトリを作る。unix では作成モードを 0o700 にする（umask でさらに絞られうる）。
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// 排他的にディレクトリを作る（非 unix。モード指定なし）。
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().create(path)
+}
+
+/// 親ディレクトリを正規化して返し、その各祖先（自身と `/` を含む）が信頼できることを確認する（unix）。
+/// 信頼判定の基準はパスから引き直さない値（プロセスの実効 UID）で、各祖先は「実効 UID または root の
+/// 持ち物」かつ「グループ・その他に書き込み権限がない」か「sticky bit 付き」であることを要求する。
+/// 他者が書ける祖先は、エントリの差し替えで保存先・削除対象をすり替えられるため拒否する。
+/// 作成前に呼び、返った正規化済みパスだけを以後の作成・保存・読込・削除に使う
+/// （検証済みの経路と実際に操作する経路を一致させ、検査後の中間成分差し替えを無効にする）。
+#[cfg(unix)]
+fn trusted_canonical_parent(parent: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: `geteuid` は引数なし・副作用なしで常に成功する POSIX 関数。
+    let euid = unsafe { libc::geteuid() };
+    let canon = std::fs::canonicalize(parent)?;
+    for dir in canon.ancestors() {
+        let m = std::fs::metadata(dir)?;
+        let owner_ok = m.uid() == euid || m.uid() == 0;
+        let sticky = m.mode() & 0o1000 != 0;
+        let closed = m.mode() & 0o022 == 0;
+        if !(owner_ok && (closed || sticky)) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("一時ディレクトリの祖先 {} が信頼できない", dir.display()),
+            ));
+        }
+    }
+    Ok(canon)
+}
+
+/// 非 unix では所有者・権限の検査を行わず、正規化のみ行う（本 example の対応環境は unix）。
+#[cfg(not(unix))]
+fn trusted_canonical_parent(parent: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(parent)
+}
+
+impl SaveDirGuard {
+    fn create() -> std::io::Result<Self> {
+        use std::hash::{BuildHasher, Hasher};
+        // 作成前に親を確定・検証し、以後は正規化済みの経路だけを使う。
+        let base = trusted_canonical_parent(&std::env::temp_dir())?;
+        let mut last = None;
+        for _ in 0..8 {
+            let rand = |_: ()| {
+                std::collections::hash_map::RandomState::new()
+                    .build_hasher()
+                    .finish()
+            };
+            let name = format!(
+                "fandhe-ai-mnist-mlp-{}-{:016x}{:016x}",
+                std::process::id(),
+                rand(()),
+                rand(())
+            );
+            let path = base.join(name);
+            match create_private_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| std::io::Error::other("一時ディレクトリを作成できなかった")))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SaveDirGuard {
+    fn drop(&mut self) {
+        // 後始末はベストエフォート（std の remove_dir_all は symlink を辿らない）。
+        // 失敗しても本処理の結果は変えず、一時ディレクトリが残りうる。
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// 保存前後の `predict` 出力の比較結果。
+struct RoundTripDiff {
+    max_abs_diff: f32,
+    bit_mismatches: usize,
+    len: usize,
+}
+
+/// 2 つの出力を比較する。shape・要素数が違えば Err。最大差は NaN を飲み込まず NaN として残す。
+fn compare_outputs(before: &Tensor<f32>, after: &Tensor<f32>) -> Result<RoundTripDiff, DynError> {
+    if before.shape() != after.shape() {
+        return Err(format!(
+            "出力の shape が一致しない（保存前 {:?}, 復元後 {:?}）",
+            before.shape(),
+            after.shape()
+        )
+        .into());
+    }
+    let (b, a) = (before.host_slice(), after.host_slice());
+    if b.len() != a.len() {
+        return Err(format!("出力の要素数が一致しない（{} vs {}）", b.len(), a.len()).into());
+    }
+    let mut max_abs_diff = 0.0f32;
+    let mut bit_mismatches = 0usize;
+    for (&x, &y) in b.iter().zip(a.iter()) {
+        if x.to_bits() != y.to_bits() {
+            bit_mismatches += 1;
+        }
+        let d = (x - y).abs();
+        if d.is_nan() || max_abs_diff.is_nan() {
+            max_abs_diff = f32::NAN;
+        } else if d > max_abs_diff {
+            max_abs_diff = d;
+        }
+    }
+    Ok(RoundTripDiff {
+        max_abs_diff,
+        bit_mismatches,
+        len: b.len(),
+    })
+}
+
+/// 往復の合否判定（fail-closed）。bit 不一致 0 かつ最大差が有限の 0 のときだけ合格。
+/// `+0.0` と `-0.0` のように差が 0 でも bit が違えば不合格、NaN も不合格にする。
+fn check_round_trip(d: &RoundTripDiff) -> Result<(), DynError> {
+    if d.bit_mismatches == 0 && d.max_abs_diff.is_finite() && d.max_abs_diff == 0.0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "save_model → load_model で predict 出力が一致しない（最大差 {:e}, bit 不一致 {}/{} 要素）",
+            d.max_abs_diff, d.bit_mismatches, d.len
+        )
+        .into())
+    }
+}
+
+/// 一時ディレクトリへ `save_model` → `load_model` し、同じ入力 `x` の `predict` 出力を比較する。
+/// ガードは本関数内で drop され、成功・失敗どちらでも削除を試みる（削除失敗は無視するため残りうる）。
+fn save_and_verify(model: &Sequential, x: &Tensor<f32>) -> Result<RoundTripDiff, DynError> {
+    // 保存前の出力を比較基準にするため、save_model より前に計算する。
+    let before = model.predict(x)?;
+    let guard = SaveDirGuard::create()?;
+    let dir = guard.path().join("model");
+    save_model(model, &dir)?;
+    let loaded = load_model(&dir)?;
+    let after = loaded.predict(x)?;
+    compare_outputs(&before, &after)
+}
+
 /// 本 example は引数を受け付けない（#4340 が path 引数を追加する）。
 fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), DynError> {
     // UTF-8 でない引数でもパニックしないよう OsString のまま扱う。
@@ -169,7 +340,13 @@ fn main() -> Result<(), DynError> {
     println!("== MLP 784→{HIDDEN}→10 / 合成 MNIST 形式データ（train={N_TRAIN}, test={N_TEST}） ==");
     let mut model = build_model()?;
     let report = train_and_report(&mut model, &train, &test)?;
-    check_result(&report)
+    check_result(&report)?;
+    let diff = save_and_verify(&model, &test.x)?;
+    println!(
+        "save_model → load_model: predict 出力の最大差 = {:e}（bit 不一致 {}/{} 要素）",
+        diff.max_abs_diff, diff.bit_mismatches, diff.len
+    );
+    check_round_trip(&diff)
 }
 
 #[cfg(test)]
@@ -206,6 +383,20 @@ mod tests {
         let report = train_and_report(&mut model, &train, &test).unwrap();
         assert_eq!(report.epoch_loss.len(), EPOCHS);
         check_result(&report).unwrap();
+        // fit 後のモデルで保存・復元の往復を検証する（学習の重複を避ける）。
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            target_os = "macos"
+        ))]
+        {
+            let diff = save_and_verify(&model, &test.x).unwrap();
+            assert_eq!(diff.bit_mismatches, 0);
+            assert_eq!(diff.max_abs_diff, 0.0);
+            check_round_trip(&diff).unwrap();
+        }
     }
 
     #[test]
@@ -226,5 +417,58 @@ mod tests {
         assert!(check_result(&r(vec![f32::NAN, 1.0], 1.0, 0.9)).is_err());
         assert!(check_result(&r(vec![1.0, 2.0], 1.0, 0.9)).is_err());
         assert!(check_result(&r(vec![2.0, 1.0], 1.0, 0.1)).is_err());
+    }
+
+    #[test]
+    fn save_dir_guard_cleans_up() {
+        let guard = SaveDirGuard::create().unwrap();
+        let path = guard.path().to_path_buf();
+        assert!(path.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "グループ・その他の権限がないこと");
+        }
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_parent_is_rejected_before_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let outer = SaveDirGuard::create().unwrap();
+        let open = outer.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(trusted_canonical_parent(&open).is_err());
+        let trusted = outer.path().join("closed");
+        std::fs::create_dir(&trusted).unwrap();
+        // umask に依らず他者書き込みなしにする。
+        std::fs::set_permissions(&trusted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted_canonical_parent(&trusted).is_ok());
+    }
+
+    #[test]
+    fn compare_outputs_detects_mismatch() {
+        let t = |v: Vec<f32>, s: &[usize]| Tensor::new(v, s).unwrap();
+        let base = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let same = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        check_round_trip(&compare_outputs(&base, &same).unwrap()).unwrap();
+        let one = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.5], &[2, 3]);
+        let d = compare_outputs(&base, &one).unwrap();
+        assert!(d.max_abs_diff > 0.0);
+        assert!(check_round_trip(&d).is_err());
+        let nan = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, f32::NAN], &[2, 3]);
+        assert!(check_round_trip(&compare_outputs(&base, &nan).unwrap()).is_err());
+        let pz = t(vec![0.0], &[1]);
+        let nz = t(vec![-0.0], &[1]);
+        let d = compare_outputs(&pz, &nz).unwrap();
+        assert_eq!(d.max_abs_diff, 0.0);
+        assert_eq!(d.bit_mismatches, 1);
+        assert!(check_round_trip(&d).is_err());
+        let other = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
+        assert!(compare_outputs(&base, &other).is_err());
     }
 }
