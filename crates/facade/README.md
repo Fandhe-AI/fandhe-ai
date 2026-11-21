@@ -14,7 +14,7 @@ compat 公開面（`compat::array`／`compat::Sequential`）・optimizer 公開�
 
 ```toml
 [dependencies]
-fandhe-ai = "0.4.0"
+fandhe-ai = "0.15.0"
 ```
 
 開発版を試す場合は Git 依存でも参照できます。
@@ -90,16 +90,24 @@ let bytes = save_safetensors_f32_to_bytes(&model.state_dict(), None).unwrap();
 let loaded = load_safetensors_f32_from_bytes(&bytes).unwrap();
 ```
 
-ONNX import（`fandhe_ai::interop::onnx::OnnxModel`）も利用できます
-（詳細は `docs/facade-onnx-import-exposure-decision.md` 参照）。ONNX
-export への再エクスポートは引き続き未提供です。
+ONNX の import と export は `fandhe_ai::interop::onnx` から使えます。
+import は `OnnxModel::from_bytes`／`from_path` で行い、推論は `run` で
+行います。export は `OnnxModel::to_bytes`／`to_path`（`OnnxExportOptions`。
+既定 `ir_version=8`・`opset_version=17`）で行い、import したモデルを
+書き出せます（元の `opset_import`／`ir_version` は保持せず `OnnxExportOptions` の値で出力するため、元の opset に合わせたい場合は明示指定してください）。export した ONNX は、中間値の `value_info` が空で、グラフの入出力の `ValueInfoProto` にも名前だけで `TypeProto`（型・形状）を持たないため、`onnx.checker` 等の外部ツールによる厳密な妥当性検証は保証しません。また `OnnxExportOptions` の opset 指定は宣言値の設定だけでバージョン変換は行わず、ノードの入力・属性はそのまま複製します（例: `axes` 属性を持つ opset 12 の `Unsqueeze` を既定設定で書き出すと、opset 17 宣言と旧形式ノードが混在します）。指定先の opset の仕様に既存ノードが適合している必要があります。また、`compat::Sequential` から `OnnxModel::from_sequential`
+でモデルを作り、その `to_bytes`／`to_path` で書き出せます（対応層は `Linear`／`ReLU`／`Sigmoid`／`Softmax`／
+`LayerNorm`／`GELU`〈erf 版〉／`Conv2d` の 7 種で、それ以外の層を含むと
+`OnnxError::UnsupportedLayer` で拒否します）。export 非対応の op
+（`MaxPool`／`AveragePool` など）を含むグラフは `OnnxError::UnsupportedOp`
+で拒否します。詳細は `docs/facade-onnx-import-exposure-decision.md`・
+`docs/facade-onnx-export-exposure-decision.md` を参照してください。
 
 ### ローカルモデルレジストリ
 
 `fandhe_ai::model::ModelRegistry` は `$HOME/.fandhe-ai/models/<name>/<version>/model.safetensors`
 （Windows は `$USERPROFILE`）というレイアウトを規定し、名前・バージョン
 指定での同期ロードを提供します（読み取り系は作成・削除をしません。
-`save`（Linux x86_64／aarch64 限定）だけが書き込みます）。**`load`／`available_models` の対応プラットフォームは
+書き込むのは `save`（Linux x86_64／aarch64 限定）と、HTTPS 取得の `download`／`download_with`（unix 限定。それ以外では `Unsupported` で失敗）だけです）。**`load`／`available_models` の対応プラットフォームは
 Linux（x86_64／aarch64）・macOS 限定です**。キャッシュルート解決
 （`$USERPROFILE` 優先）自体は Windows でも動作しますが、シンボリック
 リンク経由の脱出対策（no-follow オープン）が Linux／macOS 限定実装の
