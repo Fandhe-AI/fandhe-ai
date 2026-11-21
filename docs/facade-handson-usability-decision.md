@@ -68,7 +68,7 @@
 
 - `Sequential::fit_with_callbacks` は `callbacks: &mut [Callback]` を受けるため、所有権は呼び出し側に残る。fit の後に `let Callback::EarlyStopping(es) = &cbs[i] else { … }; es.stopped_epoch()` で今でも読める（`crates/facade/tests/compat_sequential_fit_swa_wiring.rs`・`compat_sequential_fit_ema.rs` が同形で読む。`docs/compat-callbacks-design.md` §4.2 も意図した設計として記録）。課題は「取得できない」ではなく「見つけにくい」である
 - `History` は `#[non_exhaustive]` で pub フィールドは `loss`・`val_loss`・`lr`・`val_metrics` の 4 つ。下流は構築できないためフィールド追加は追加のみ。構築箇所は `compat/training.rs` の fit 本体、`compat/functional/train.rs`、`compat/callbacks.rs` の単体テストの 3 つ
-- 学習を打ち切るのは `Callback::EarlyStopping` だけで、epoch 末に他の callback を処理してから `break` する。`EarlyStopping::stopped_epoch()` は fit ローカルの 0 始まりで、完走時は `None`。最終 epoch で停止しても `Some` なので `history.loss.len() < epochs` では判定できない
+- 学習を打ち切るのは `Callback::EarlyStopping` だけで、epoch 末に他の callback を処理してから `break` する。既存の `fit_with_callbacks` は、停止要求後でも後続の callback（`LambdaCallback`・`ModelCheckpoint` 等）が失敗すれば callback 処理を打ち切って `Err` を返す。この契約は変えない。`EarlyStopping::stopped_epoch()` は fit ローカルの 0 始まりで、完走時は `None`。最終 epoch で停止しても `Some` なので `history.loss.len() < epochs` では判定できない
 
 ### 5.2 案
 
@@ -82,7 +82,7 @@
 
 - 推奨: **実装する（案 A。案 B の rustdoc も併せて書く）**
 - 等値比較への影響: `History` は `PartialEq` を derive しているため、案 A では停止 epoch が異なれば既存 4 フィールドが等しくても `==` の結果が変わる。推奨は停止 epoch を等値比較に含める（derive のまま。停止の有無も学習結果の差として扱う）。既存の `History` 同士の比較テストは構築箇所で `stopped_epoch: None` を与えれば結果が変わらない。この点は所有者への論点 7 とする
-- 確定タイミングと観測契約: 停止 epoch は、その epoch 末の全 callback（`LambdaCallback` を含む）の処理が終わった後に確定し、fit の戻り値の `History` で公開する。callback 処理中に渡される `&History` には当該 epoch の停止要求が反映されない（`stopped_epoch` は `None` のまま。EarlyStopping の登録順に依存した値を callback に見せない）。callback が停止を知る方法は fit の戻り値と `EarlyStopping::stopped_epoch()` のみとする
+- 確定タイミングと観測契約: 停止 epoch は、その epoch 末の全 callback（`LambdaCallback` を含む）の処理が終わった後に確定し、fit の戻り値の `History` で公開する。callback 処理中に渡される `&History` には当該 epoch の停止要求が反映されない（`stopped_epoch` は `None` のまま。EarlyStopping の登録順に依存した値を callback に見せない）。callback が停止を知る方法は fit の戻り値と `EarlyStopping::stopped_epoch()` のみとする。停止 epoch を記録するのは、全 callback が正常に完了し fit が `Ok(History)` を返す場合に限る。停止要求後に callback が失敗して `Err` を返す場合は既存どおり `Err` のままで、停止 epoch は `History` に残さない
 - 意味: `EarlyStopping` が複数あっても 1 epoch で全 callback を処理してから抜けるため値は 1 つ。`fit_with_callbacks` を複数回呼ぶ場合はその呼び出しのローカル番号。callbacks を受けない入口（`fit`・`FunctionalModel` の学習）は常に `None`
 - SemVer: 追加のみ（`History` は `#[non_exhaustive]`）。ただし `==` の判定対象が増える挙動変化があり、論点 7 で承認を得る
 - `api_surface.rs`: `assert_is_history_type` 付近に `let _: &Option<usize> = &h.stopped_epoch;` 型のフィールドプローブを足す。停止／完走のテストは #4353 の範囲
@@ -125,7 +125,7 @@
 |--------------|--------|------|
 | #4351 別名の入口の追加 | `api_surface.rs` の期待集合 18 件・パス型 4 種のプローブ・往復テスト | CI |
 | #4352 `Default` とビルダー | 正のプローブ・doctest（`default() == new(1, 32)`） | CI |
-| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト・最終 epoch で停止し履歴長が予定 epoch 数に等しくても `Some(epochs - 1)` となるケース（`history.loss.len() < epochs` からの推定実装を見逃さないため）・停止 epoch だけが異なる 2 つの `History` の `==` テスト（論点 7 の結論で期待値を切り替える。「含める」なら不一致、「含めない」〈`PartialEq` を手書きして除外〉なら一致）・`LambdaCallback` 内で観測する `History` の `stopped_epoch` が `None` であること | CI |
+| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト・最終 epoch で停止し履歴長が予定 epoch 数に等しくても `Some(epochs - 1)` となるケース（`history.loss.len() < epochs` からの推定実装を見逃さないため）・停止 epoch だけが異なる 2 つの `History` の `==` テスト（論点 7 の結論で期待値を切り替える。「含める」なら不一致、「含めない」〈`PartialEq` を手書きして除外〉なら一致）・実際に停止を要求する `EarlyStopping` の後ろ（スライス順で後）に `LambdaCallback` を置き、停止 epoch 中に `LambdaCallback` が観測する `History` の `stopped_epoch` が `None` で、同じ fit の戻り値には `Some(停止 epoch)` が入ること（`LambdaCallback` が先に呼ばれる配置では、停止要求直後に書き込む実装を見逃すため）・停止要求後に後続 callback が失敗した場合は `Err` で、停止 epoch が残らないこと | CI |
 
 ### 7.5 数値契約
 
