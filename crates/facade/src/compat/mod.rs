@@ -23,15 +23,17 @@
 //!    [`History`](crate::compat::History) を得る。validation・callbacks・metrics が要る場合は
 //!    [`fit_with_callbacks`](crate::compat::Sequential::fit_with_callbacks)／
 //!    [`fit_with_metrics`](crate::compat::Sequential::fit_with_metrics) を使う。空でない
-//!    `metrics` を渡すときは `validation` に `Some((x_val, y_val))` が必要で、`None` との
-//!    組み合わせは `InvalidArgument` になる。
+//!    `metrics` を渡すときは、`validation` に `Some((x_val, y_val))` に加えて分類ターゲット
+//!    （`Tensor<i32>`）が必要になる。`None` との組み合わせや `Loss::Mse` と `Tensor<f32>` の
+//!    ターゲットとの組み合わせは `InvalidArgument` になる。
 //! 4. **evaluate**: [`Sequential::evaluate`](crate::compat::Sequential::evaluate) で損失を測る。
 //! 5. **predict**: [`Sequential::predict`](crate::compat::Sequential::predict) で推論する。
 //!    Dropout などを含むモデルで決定的な推論をしたいときは、先に
 //!    [`Sequential::eval`](crate::compat::Sequential::eval) を呼ぶ。
 //! 6. **保存**: [`save_model`](crate::compat::save_model)・[`load_model`](crate::compat::load_model) は
-//!    `Sequential` のメソッドではなく `compat` の自由関数である。非 unix では
-//!    `ErrorKind::Unsupported` を返す。契約の詳細は `save_model` の doc を参照する。
+//!    `Sequential` のメソッドではなく `compat` の自由関数である。保存は unix で、復元は
+//!    Linux（x86_64／aarch64）と macOS でのみ動く。それ以外の環境では
+//!    `ErrorKind::Unsupported` を返す（非対応の unix では保存に成功しても復元が失敗する）。契約の詳細は `save_model` の doc を参照する。
 //!
 //! ```
 //! use fandhe_ai::Tensor;
@@ -55,8 +57,11 @@
 //! let pred = model.predict(&x)?;
 //! assert_eq!(pred.shape(), &[4, 1]);
 //!
-//! // 保存・復元は unix 限定（非 unix では save_model が Unsupported を返す）。
-//! #[cfg(unix)]
+//! // 保存・復元は Linux（x86_64／aarch64）と macOS 限定（load_model の対応範囲）。
+//! #[cfg(any(
+//!     all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+//!     target_os = "macos"
+//! ))]
 //! {
 //!     use fandhe_ai::compat::{load_model, save_model};
 //!     let nanos = std::time::SystemTime::now()
