@@ -124,3 +124,10 @@ harness = false
 [[example]]
 name = "facade_gemm_bench"
 path = "examples/gemm_bench.rs"
+
+# イシュー #4339: `examples/mnist_mlp.rs` 内の `#[test]`（loss 低下・精度下限の
+# 回帰検査）を `cargo test --workspace` で実行させる。example は既定で
+# コンパイルのみでテストは走らないため `test = true` を明示する。
+[[example]]
+name = "mnist_mlp"
+test = true
