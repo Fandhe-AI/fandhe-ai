@@ -165,15 +165,38 @@ struct SaveDirGuard {
     path: PathBuf,
 }
 
-/// 排他的にディレクトリを作る。unix では umask に依存せず所有者のみ（0o700）にする。
+/// 排他的にディレクトリを作る。unix では作成モードを 0o700 にする（umask でさらに絞られうる）。
+#[cfg(unix)]
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// 排他的にディレクトリを作る（非 unix。モード指定なし）。
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().create(path)
+}
+
+/// 親ディレクトリが信頼できることを確認する（unix）。sticky bit 付き、または
+/// 作成したディレクトリと同じ所有者（または root）でグループ・その他に書き込み権限がないこと。
+/// そうでない共有ディレクトリでは、他者が親のエントリを差し替えて保存先や削除対象を
+/// すり替えられるため拒否する。
+#[cfg(unix)]
+fn check_parent_trusted(parent: &Path, child: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let p = std::fs::metadata(parent)?;
+    let c = std::fs::symlink_metadata(child)?;
+    let sticky = p.mode() & 0o1000 != 0;
+    let private = (p.uid() == c.uid() || p.uid() == 0) && p.mode() & 0o022 == 0;
+    if sticky || private {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "一時ディレクトリの親が信頼できない（sticky bit なしで他者が書き込める）",
+        ))
     }
-    builder.create(path)
 }
 
 impl SaveDirGuard {
@@ -195,7 +218,13 @@ impl SaveDirGuard {
             );
             let path = base.join(name);
             match create_private_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
+                Ok(()) => {
+                    // 以降は Drop で片付く。親が信頼できなければ即座に拒否する。
+                    let guard = Self { path };
+                    #[cfg(unix)]
+                    check_parent_trusted(&base, &guard.path)?;
+                    return Ok(guard);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
                 Err(e) => return Err(e),
             }
@@ -272,13 +301,14 @@ fn check_round_trip(d: &RoundTripDiff) -> Result<(), DynError> {
 }
 
 /// 一時ディレクトリへ `save_model` → `load_model` し、同じ入力 `x` の `predict` 出力を比較する。
-/// ガードは本関数内で drop されるため、成功・失敗どちらでもディレクトリは残らない。
+/// ガードは本関数内で drop され、成功・失敗どちらでも削除を試みる（削除失敗は無視するため残りうる）。
 fn save_and_verify(model: &Sequential, x: &Tensor<f32>) -> Result<RoundTripDiff, DynError> {
+    // 保存前の出力を比較基準にするため、save_model より前に計算する。
+    let before = model.predict(x)?;
     let guard = SaveDirGuard::create()?;
     let dir = guard.path().join("model");
     save_model(model, &dir)?;
     let loaded = load_model(&dir)?;
-    let before = model.predict(x)?;
     let after = loaded.predict(x)?;
     compare_outputs(&before, &after)
 }
@@ -346,7 +376,13 @@ mod tests {
         assert_eq!(report.epoch_loss.len(), EPOCHS);
         check_result(&report).unwrap();
         // fit 後のモデルで保存・復元の往復を検証する（学習の重複を避ける）。
-        #[cfg(unix)]
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            target_os = "macos"
+        ))]
         {
             let diff = save_and_verify(&model, &test.x).unwrap();
             assert_eq!(diff.bit_mismatches, 0);
@@ -384,7 +420,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o700);
+            assert_eq!(mode & 0o077, 0, "グループ・その他の権限がないこと");
         }
         drop(guard);
         assert!(!path.exists());
