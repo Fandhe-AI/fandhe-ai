@@ -198,6 +198,18 @@ mod tests {
         );
     }
 
+    /// 固定シードの合成データで compile→fit→evaluate→predict を通し、`check_result` で検証する。
+    #[test]
+    fn train_and_report_passes_check_result() {
+        fandhe_ai::manual_seed(SEED_GLOBAL);
+        let train = synthetic_mnist(N_TRAIN, SEED_TRAIN).unwrap();
+        let test = synthetic_mnist(N_TEST, SEED_TEST).unwrap();
+        let mut model = build_model().unwrap();
+        let report = train_and_report(&mut model, &train, &test).unwrap();
+        assert_eq!(report.epoch_loss.len(), EPOCHS);
+        check_result(&report).unwrap();
+    }
+
     #[test]
     fn parse_args_rejects_extra() {
         assert!(parse_args(std::iter::empty()).is_ok());
