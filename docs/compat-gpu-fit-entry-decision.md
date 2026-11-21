@@ -21,8 +21,12 @@
 
 - 課題: `compat::Sequential` の `fit` 系は内部で `crate::tape()`（CPU 固定）を使い、デバイスを
   指定できない（`crates/facade/src/compat/training.rs`）。GPU 学習の既存入口は低レベルの
-  `init_device_param_store` → `train_step_resident`（MSE mean・SGD 固定、Linear＋ReLU のみ。
-  `crates/facade/src/compat/sequential.rs`）だけで、Keras 風の書き方では GPU を使えない。
+  `init_device_param_store` → 専用の学習ステップ `train_step_resident`（MSE mean・SGD 固定、
+  Linear＋ReLU のみ。`crates/facade/src/compat/sequential.rs`）と、Tape の組み合わせ経路
+  （`forward_resident` → 損失 → `Tape::backward_device_param_store` →
+  `Tape::step_device_param_store_adam` 等）である。MSE mean・SGD・Linear＋ReLU の制限は
+  専用の学習ステップ入口 `train_step_resident` に限る。どちらも Keras 風の書き方ではなく、
+  `fit` 系からは GPU を使えない。
 - ハンズオン（2026-11-21）で、低レベル経路なら CrossEntropy＋Adam が Metal 上で動いたと
   イシュー本文に記載されている。**これはイシュー本文の記述の引用であり、本記録では検証していない**。
 - 関連 issue: 兄弟 #4360（対応範囲の段階分け・REQ-2・REQ-12・転送回数）、承認 #4361、
@@ -87,12 +91,26 @@ impl Sequential {
 - `History` は CPU の fit と同じ型・同じ意味。`compile` は既存のまま使い、optimizer・loss は
   デバイスに依らない設定として `Compiled` に残す。
 - **状態の契約**:
-  - store は呼び出しごとに `tape_for(device)` → `init_device_param_store` で作り、終了時に
-    `Tape::sync_device_param_store_to_host` でホストへ書き戻す。失敗時はホスト重みを
-    既存 `fit` の「失敗時は復元」と同じ扱い（スナップショットへ戻す）にする
-  - optimizer 状態の持ち越し: 2 回の fit ＝ epoch 倍の 1 回、の不変条件を GPU 入口でも守る
-    ことを目標とする。ホストの optimizer 状態を持ち込み・書き戻せない optimizer で既存状態が
-    ある場合は型付きエラーで拒否する（安全側）。実現可否は #4367／#4376 で確かめる
+  - store は呼び出しごとに `tape_for(device)` → `init_device_param_store` で作る。終了時の
+    書き戻しは 2 段で、(1) `Tape::sync_device_param_store_to_host` が返す `Vec<Tensor<f32>>` を
+    取得し、(2) それを `apply_parameters` 相当で `Sequential` の層へ反映するところまでを
+    契約に含める（(1) だけではモデルへ反映されない）
+  - 失敗時の扱い（新契約）: 既存 `run_fit` はバッチごとに更新済み重みをモデルへ適用するため、
+    失敗しても成功済みバッチの更新がホストに残る。GPU 入口はデバイス側で更新し終了時にのみ
+    書き戻すため、**失敗時は呼び出し前のスナップショットへ重みと optimizer 状態を戻す**
+    （既存 `fit` とは異なる新契約として明記する）。重みと optimizer 状態は常に同じ時点
+    （呼び出し前、または正常終了時）にそろえ、片方だけが進んだ状態を残さない。
+    `EarlyStopping` のベスト重み復元は既存の個別規則に従う（§7）
+  - optimizer 状態の持ち越しと書き戻し: 2 回の fit ＝ epoch 倍の 1 回、の不変条件を GPU 入口でも
+    守ることを目標とする。書き戻し対象は既存状態に限らず、**初回実行で生成される Adam 系の
+    moment・step も含む**。状態を持つ optimizer は、新規 compile 直後の初回呼び出しでも
+    終了時の状態をホストへ保存できることを対応条件とする。ホストの optimizer 状態を
+    持ち込み・書き戻せない optimizer は、既存状態の有無に関わらず（初回でも）
+    型付きエラーで拒否する（安全側）。実現可否は #4367／#4376 で確かめる
+  - 終了時に残る重み: `restore_best_weights` が有効な場合、最終書き戻し（デバイス重み → ホスト）を
+    先に行い、**その後にベスト重みをホストへ適用する**。順序を逆にして復元済みのベスト重みを
+    最終 epoch のデバイス重みで上書きしない。終了時に残るのは、無効なら最終 epoch の重み、
+    有効ならベスト重みである
   - `Device::Cpu` も受け付け、CPU の常駐チェーン（#3253 の部品）で回す。CPU の `fit` へ委譲はしない
 - **エラー表**（新しいエラー型・variant は足さず `AutodiffError::Backend(BackendError::…)` を再利用）:
 
@@ -123,9 +141,15 @@ impl Sequential {
 | ② 演算単位のホストフォールバック（`BackendOps` 内でホストへ落とす） | **禁止**（`train-step-resident-parts-design.md` と同じ方針） |
 | ③ `compat-resident-train-step-decision.md` §5 第 2 段のフォールバック（store 未変更時に限り同じデバイスの Tape 経路〈`forward_resident` → 損失 → `backward_device_param_store` → `step_device_param_store*`〉へ落とす） | CPU ではなく同じデバイス上で bit 一致が条件の場合だけ許す。`fit_on` で使うかと条件は #4360 の段階分けで決める |
 
-拒否は store を作る前（状態を変える前）に行う fail-closed とする。拒否する組合せ:
+拒否は store を作る前（状態を変える前）に行う fail-closed とする。検査は store に依存しない
+モデル構成の静的検査として行い、段階ごとのチェーン対応構成（`train_step_resident` が
+`build_device_chain_steps` で拒否する空モデル・Sigmoid 等を含む）を store 生成前に別途検査する。
+`contains_resident_unsupported_layer` は汎用の常駐経路向けの除外リストであり、これだけでは不足する。
+拒否する組合せ:
 
 - 常駐非対応の層（`contains_resident_unsupported_layer` の対象。#4379／#4383／#4386 で段階的に解除）
+- チェーン非対応の構成（空モデル・未対応の活性化〈Sigmoid 等〉。`build_device_chain_steps` と
+  同じ条件を store 生成前に検査する。段階ごとの対応範囲は #4360）
 - 追跡対象外の独自層（`add_module`）
 - 未対応の損失・未対応の optimizer（L-BFGS を含む）
 - `compile_with_amp`（AMP）・`compile_with_param_groups`（param groups）
@@ -140,7 +164,7 @@ impl Sequential {
 | Callback | ホスト重み | D2H 同期の時点 | `set_lr` の届き方 | 初期段階 |
 |---|---|---|---|---|
 | `LrSchedule` | 不要 | なし | epoch 開始時に lr を更新し、チェーンへ渡す optimizer 設定へ反映（`compat-callbacks-design.md` §4.5 と同じ時点） | 対応 |
-| `EarlyStopping` | 監視値のみ。`restore_best_weights` は要 | 改善時 | 該当なし | 対応（`restore_best_weights` は改善時に同期） |
+| `EarlyStopping` | 監視値のみ。`restore_best_weights` は要 | 改善時 | 該当なし | 対応（`restore_best_weights` は改善時に同期。終了時は最終書き戻しの後にベスト重みを適用する。§4） |
 | `ModelCheckpoint` | 要 | 保存の直前 | 該当なし | 対応（保存時に同期） |
 | `CsvLogger`／`JsonLogger` | 不要（`History` の数値のみ） | なし | 該当なし | 対応 |
 | `Lambda` | モデルを参照しうる | 呼ぶ前に同期 | 該当なし | 同期して対応するか初期は `Unsupported` かを #4360 で決める |
