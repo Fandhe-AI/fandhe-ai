@@ -2510,7 +2510,7 @@ impl Sequential {
     ///
     /// - 既定（[`FitConfig::new`]）は `shuffle = false` で、グローバル RNG を消費しない。
     /// - [`FitConfig::shuffle`]`(true)` のとき、各 epoch の開始時に、[`crate::manual_seed`] で
-    ///   初期化されるグローバル RNG から、バッチ順の順列を 1 回引く。`fit` の前に
+    ///   初期化されるグローバル RNG から、サンプル添字の順列を 1 回引き、バッチに分割する。`fit` の前に
     ///   `fandhe_ai::manual_seed(seed)` を呼べば、同じデータ・同じモデル構築・同じ呼び出し列で
     ///   `History` と最終パラメータが再現する。
     /// - Dropout など、学習時に同じグローバル RNG を使う層があれば、その消費も同じ列に入る。
