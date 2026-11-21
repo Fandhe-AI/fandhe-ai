@@ -170,8 +170,12 @@ impl Sequential {
 | ② 演算単位のホストフォールバック（`BackendOps` 内でホストへ落とす） | **禁止**（`train-step-resident-parts-design.md` と同じ方針） |
 | ③ `compat-resident-train-step-decision.md` §5 第 2 段のフォールバック（store 未変更時に限り同じデバイスの Tape 経路〈`forward_resident` → 損失 → `backward_device_param_store` → `step_device_param_store*`〉へ落とす） | CPU ではなく同じデバイス上で bit 一致が条件の場合だけ許す。`fit_on` で使うかと条件は #4360 の段階分けで決める |
 
-拒否は store を作る前（状態を変える前）に行う fail-closed とする。選択デバイスの対応可否（常駐チェーンの利用可否、`MemoryOps` 等の必要なバックエンド能力）の確認も
-この store 生成前の検査に含め、未対応デバイスでは store の初期化に進まない。検査は store に依存しない
+拒否は store を作る前（状態を変える前）に行う fail-closed とする。選択デバイスの対応可否（`MemoryOps` 等の必要なバックエンド能力）の確認も
+この store 生成前の検査に含める。**事前拒否するのは「選択したデバイスで許可済みの経路が一つも成立しない場合」に限る**。
+常駐チェーンが成立しなくても、③ の条件（store 未変更・同じデバイス上で bit 一致）を #4360 が許可した構成では、
+同じデバイスの Tape 経路が成立するため事前拒否せず、その経路を選ぶ。チェーン固有の検査
+（下記の空モデル・未対応活性化等）は「常駐チェーン経路の可否」を決めるだけで、それ単独では拒否理由にならず、
+代替経路の可否は ③ の許可条件で別に判定する。未対応デバイスでは store の初期化に進まない。検査は store に依存しない
 モデル構成の静的検査として行い、段階ごとのチェーン対応構成（`train_step_resident` が
 `build_device_chain_steps` で拒否する空モデル・Sigmoid 等を含む）を store 生成前に別途検査する。
 `contains_resident_unsupported_layer` は汎用の常駐経路向けの除外リストであり、これだけでは不足する。
@@ -199,6 +203,13 @@ impl Sequential {
 | `CsvLogger`／`JsonLogger` | 不要（`History` の数値のみ） | なし | 該当なし | 対応 |
 | `Lambda` | 不要（既存 `LambdaCallback::on_epoch_end` のクロージャが受けるのは epoch 番号と `&History` のみで、`Sequential` や重みは渡らない） | なし | 該当なし | 既存シグネチャのままなら重み同期は不要。初期段階で対応するかは別判断として #4360 で決める |
 | `Ema`／`Swa` | step ごとに要 | step ごと | 該当なし | 初期は `Unsupported` |
+
+- **スナップショットの重みの出所（`EarlyStopping`・`ModelCheckpoint` 共通の契約）**: §4 の書き戻しは終了時に行うため、
+  学習中のホスト `Sequential` は学習前の重みのままである。既存の `ModelCheckpoint::observe` は渡された
+  `Sequential` の `state_dict()` を保存するので、同期後も同じホストモデルを渡すと現在の監視値に対して学習前の重みが
+  保存される。このため両 callback のスナップショット（`EarlyStopping` の最良重み、`ModelCheckpoint` の保存内容）は、
+  **現在の store から取得（D2H）した重みを使い**、ホストモデルの `state_dict()` を使わない。
+  ファイル出力を指定しない `ModelCheckpoint` のメモリ内保存にも同じ契約を適用する。
 
 - validation・metrics: 検証のフォワードはデバイスで行い（`predict_resident_input` 相当）、
   出力をホストへ戻して既存の損失・metrics 計算（`evaluate` と同じ eval モード）に渡す方針。
