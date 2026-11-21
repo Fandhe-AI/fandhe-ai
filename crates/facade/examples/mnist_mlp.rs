@@ -1,22 +1,41 @@
-//! 合成 MNIST 形式データで `compile` → `fit` → `evaluate` → `predict` を通す example（イシュー #4339・親 #4338）。
+//! MNIST 形式データで `compile` → `fit` → `evaluate` → `predict` を通す example（イシュー #4339・#4340・親 #4338）。
 //!
-//! 実行: `cargo run -p fandhe-ai --example mnist_mlp --release`（debug でも動くが遅い）。
+//! 実行:
+//! - 合成データ（既定・オフライン）: `cargo run -p fandhe-ai --example mnist_mlp --release`
+//!   （debug でも動くが遅い）
+//! - 実 MNIST: `cargo run -p fandhe-ai --example mnist_mlp --release -- '/path/to/mnist-idx'`  （パスは実際のディレクトリに置換する）
 //!
-//! - 入力 784 次元・10 クラスの MNIST と同じ形の**合成データ**を使う。実 MNIST ではなく、
-//!   ネットワーク取得もしない（オフラインで exit 0 になる）。
+//! 実データの用意（利用者側の責務。example 自身はネットワークに出ず、sha256 値も同梱しない）:
+//! 1. 信頼できる配布元から MNIST の 4 ファイル（`.gz`）を取得する。
+//! 2. `sha256sum` 等で、配布元が示す値と照合してデータの真正性を確かめる。
+//! 3. `gunzip` で展開し、次の固定ファイル名で 1 つのディレクトリに置く
+//!    （std だけでは gzip を展開できないため、展開済みであることを前提にする）。
+//!    - `train-images-idx3-ubyte`（`16 + N*784` バイト。標準の N は 60000）
+//!    - `train-labels-idx1-ubyte`（`8 + N` バイト）
+//!    - `t10k-images-idx3-ubyte`（`16 + N*784` バイト。標準の N は 10000）
+//!    - `t10k-labels-idx1-ubyte`（`8 + N` バイト）
+//!
+//! - 引数なしのときは入力 784 次元・10 クラスの MNIST と同じ形の**合成データ**を使う
+//!   （実 MNIST ではなく、オフラインで exit 0 になる）。
+//! - IDX 入力のディレクトリは利用者が管理する信頼できるローカルのものを前提にする。
+//!   通常ファイル以外は拒否するが、読み込み中の別プロセスによる差し替えは防がない。
+//! - IDX は magic・次元・件数・長さを先に検証し、不正な入力は型付きエラー（`IdxError`）で
+//!   非 0 終了にする。ファイル長にも上限を置き、巨大なヘッダによるメモリ枯渇を防ぐ。
 //! - 使うのは `fandhe_ai`（facade）の公開面と std だけ。`bench_harness` は非公開クレートで
 //!   facade の dev-dependency のため、公開パッケージに同梱される example からは使えない。
 //!   乱数は facade 公開の `Generator::new(固定シード)` の `multinomial`／`normal` で作る
 //!   （グローバル RNG を消費せず、学習用・評価用・クラスごとにシードを固定して決定的）。
 //! - `FitConfig::shuffle(true)` はグローバル RNG（`fandhe_ai::manual_seed`）を消費するため、
 //!   `main` の先頭で固定シードを設定し、再現性を保つ。
-//! - 兄弟イシューが土台にする分割: #4340 は `synthetic_mnist` と並ぶ IDX 読み込みを足し
-//!   （引数なしは合成データのまま）、#4341 は `train_and_report` が返す学習済みモデルへ
+//! - 兄弟イシューの分割: #4341 は `train_and_report` が返す学習済みモデルへ
 //!   save_model／load_model の bit 一致確認を足す。
 
 use fandhe_ai::compat::{FitConfig, Loss, Metrics, MetricsResult, Optimizer, Sequential};
 use fandhe_ai::optim::AdamConfig;
 use fandhe_ai::{AutodiffError, Generator, Tensor};
+use std::fmt;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -79,6 +98,332 @@ fn synthetic_mnist(n: usize, seed: u64) -> Result<Dataset, DynError> {
         x: Tensor::new(data, &[n, IMAGE_LEN])?,
         y: Tensor::new(labels, &[n])?,
     })
+}
+
+// ---- IDX（MNIST 配布形式）読み込み（イシュー #4340） ----
+// 外部ファイルを読むため、ヘッダ検証（magic → ndim → 次元 → 長さの厳密一致）を終えてから
+// 確保・変換する。長さ計算は checked 演算で、不正入力でパニックしない。
+
+const TRAIN_IMAGES: &str = "train-images-idx3-ubyte";
+const TRAIN_LABELS: &str = "train-labels-idx1-ubyte";
+const TEST_IMAGES: &str = "t10k-images-idx3-ubyte";
+const TEST_LABELS: &str = "t10k-labels-idx1-ubyte";
+/// 画像件数の上限（標準 MNIST は最大 60000）。
+const MAX_ITEMS: u64 = 100_000;
+/// ファイル長の上限。最大件数の画像ファイル長（16 バイトのヘッダ + 件数 × 画素数）から導出する。
+const MAX_FILE_BYTES: u64 = MAX_ITEMS * (IMAGE_LEN as u64) + 16;
+const IDX_UBYTE: u8 = 0x08;
+const IMAGE_SIDE: u32 = 28;
+
+/// IDX 読み込みの型付きエラー。`main` で `DynError` へ載せて非 0 終了にする。
+#[derive(Debug)]
+enum IdxError {
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    NotRegularFile {
+        path: PathBuf,
+    },
+    Gzipped,
+    TooLarge {
+        len: u64,
+    },
+    BadMagic {
+        expected_ndim: u8,
+        found: [u8; 4],
+    },
+    BadDims {
+        rows: u32,
+        cols: u32,
+    },
+    BadCount {
+        count: u64,
+    },
+    LengthMismatch {
+        expected: Option<u64>,
+        actual: u64,
+    },
+    CountMismatch {
+        images: usize,
+        labels: usize,
+    },
+    LabelOutOfRange {
+        index: usize,
+        value: u8,
+    },
+}
+
+impl fmt::Display for IdxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRegularFile { path } => write!(
+                f,
+                "IDX ファイル {} が通常ファイルでない（FIFO・デバイス等は受け付けない）",
+                path.display()
+            ),
+            Self::Io { path, source } if source.kind() == std::io::ErrorKind::NotFound => write!(
+                f,
+                "IDX ファイル {} が見つからない（展開済みの 4 ファイルを置く）",
+                path.display()
+            ),
+            Self::Io { path, source } => {
+                write!(f, "IDX ファイル {} を読めない: {source}", path.display())
+            }
+            Self::Gzipped => write!(f, "gzip 圧縮のままである（gunzip で展開してから渡す）"),
+            Self::TooLarge { len } => {
+                write!(f, "ファイルが上限 {MAX_FILE_BYTES} バイトを超える（{len}）")
+            }
+            Self::BadMagic {
+                expected_ndim,
+                found,
+            } => write!(
+                f,
+                "IDX の magic が不正（期待: 0 0 8 {expected_ndim}、実際: {found:?}）"
+            ),
+            Self::BadDims { rows, cols } => {
+                write!(
+                    f,
+                    "画像サイズが {IMAGE_SIDE}x{IMAGE_SIDE} でない（{rows}x{cols}）"
+                )
+            }
+            Self::BadCount { count } => {
+                write!(f, "件数が不正（1..={MAX_ITEMS} の範囲外: {count}）")
+            }
+            Self::LengthMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "ファイル長がヘッダと一致しない（期待: {expected:?}、実際: {actual}）"
+                )
+            }
+            Self::CountMismatch { images, labels } => {
+                write!(f, "画像件数 {images} とラベル件数 {labels} が一致しない")
+            }
+            Self::LabelOutOfRange { index, value } => {
+                write!(
+                    f,
+                    "ラベル {index} 件目の値 {value} が 0..={} の範囲外",
+                    NUM_CLASSES - 1
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for IdxError {}
+
+fn be_u32(b: &[u8], at: usize) -> Option<u32> {
+    let s = b.get(at..at.checked_add(4)?)?;
+    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+/// magic（先頭 4 バイト）を検証して件数を返す。gzip 先頭は専用エラーにする。
+fn check_magic(bytes: &[u8], ndim: u8) -> Result<u64, IdxError> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return Err(IdxError::Gzipped);
+    }
+    let mut found = [0u8; 4];
+    for (d, s) in found.iter_mut().zip(bytes) {
+        *d = *s;
+    }
+    if bytes.len() < 4
+        || found[0] != 0
+        || found[1] != 0
+        || found[2] != IDX_UBYTE
+        || found[3] != ndim
+    {
+        return Err(IdxError::BadMagic {
+            expected_ndim: ndim,
+            found,
+        });
+    }
+    let count = u64::from(be_u32(bytes, 4).ok_or(IdxError::LengthMismatch {
+        expected: None,
+        actual: bytes.len() as u64,
+    })?);
+    if count == 0 || count > MAX_ITEMS {
+        return Err(IdxError::BadCount { count });
+    }
+    Ok(count)
+}
+
+/// 画像ファイル（3 次元）を `(件数, [0,1] 正規化した画素)` へ解析する。
+fn parse_idx_images(bytes: &[u8]) -> Result<(usize, Vec<f32>), IdxError> {
+    let count = check_magic(bytes, 3)?;
+    let short = || IdxError::LengthMismatch {
+        expected: None,
+        actual: bytes.len() as u64,
+    };
+    let rows = be_u32(bytes, 8).ok_or_else(short)?;
+    let cols = be_u32(bytes, 12).ok_or_else(short)?;
+    if rows != IMAGE_SIDE || cols != IMAGE_SIDE {
+        return Err(IdxError::BadDims { rows, cols });
+    }
+    let expected = count
+        .checked_mul(IMAGE_LEN as u64)
+        .and_then(|n| n.checked_add(16));
+    let actual = bytes.len() as u64;
+    if expected != Some(actual) {
+        return Err(IdxError::LengthMismatch { expected, actual });
+    }
+    let data = bytes[16..].iter().map(|&p| f32::from(p) / 255.0).collect();
+    Ok((count as usize, data))
+}
+
+/// ラベルファイル（1 次元）を解析する。値は 0..=9 に限る。
+fn parse_idx_labels(bytes: &[u8]) -> Result<Vec<i32>, IdxError> {
+    let count = check_magic(bytes, 1)?;
+    let expected = count.checked_add(8);
+    let actual = bytes.len() as u64;
+    if expected != Some(actual) {
+        return Err(IdxError::LengthMismatch { expected, actual });
+    }
+    bytes[8..]
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            if usize::from(value) < NUM_CLASSES {
+                Ok(i32::from(value))
+            } else {
+                Err(IdxError::LabelOutOfRange { index, value })
+            }
+        })
+        .collect()
+}
+
+/// ヘッダ（画像 16 バイト・ラベル 8 バイト）から期待ファイル長を求める。
+/// 件数と次元の検証もここで行い、ペイロード確保前の長さ照合に使う。
+fn idx_expected_len(header: &[u8], ndim: u8) -> Result<u64, IdxError> {
+    let count = check_magic(header, ndim)?;
+    let short = || IdxError::LengthMismatch {
+        expected: None,
+        actual: header.len() as u64,
+    };
+    if ndim == 3 {
+        let rows = be_u32(header, 8).ok_or_else(short)?;
+        let cols = be_u32(header, 12).ok_or_else(short)?;
+        if rows != IMAGE_SIDE || cols != IMAGE_SIDE {
+            return Err(IdxError::BadDims { rows, cols });
+        }
+        Ok(count * IMAGE_LEN as u64 + 16)
+    } else {
+        Ok(count + 8)
+    }
+}
+
+/// 通常ファイルかを事前に確かめてから開く（`libc` は使わず std だけで行う）。
+/// 入力ディレクトリは利用者が管理する信頼できるローカルのもの、という前提に立つ。
+/// 検査から `open` までの間に別プロセスが差し替える攻撃は対象外とする
+/// （対策には `openat` 系のディレクトリハンドル相対オープンが要り、`libc`〈第 10 区分〉の
+/// 承認済み用途を example へ広げることになるため採らない）。FIFO などで `open` が
+/// 書き手待ちになるのを避けるため、`open` の前に `metadata()` で通常ファイルを確認する。
+fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "通常ファイルではない",
+        ));
+    }
+    std::fs::File::open(path)
+}
+
+/// IDX ファイルを読む。固定長ヘッダを先に読んで期待長を算出し、実ファイル長と一致を
+/// 確かめてからペイロードを確保する（不正な巨大ファイルを先読みしない）。
+///
+/// 通常ファイルだけを受け付ける（`open_regular` の事前検査と、開いたハンドルの `metadata()` の
+/// 二重確認）。入力は信頼できるローカルのディレクトリを前提とし、並行する差し替えは防がない。
+fn read_idx_file(path: &Path, ndim: u8) -> Result<Vec<u8>, IdxError> {
+    let io = |source| IdxError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let not_regular = || IdxError::NotRegularFile {
+        path: path.to_path_buf(),
+    };
+    let file = match open_regular(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return Err(not_regular()),
+        Err(e) => return Err(io(e)),
+    };
+    let meta = file.metadata().map_err(io)?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    let len = meta.len();
+    if len > MAX_FILE_BYTES {
+        return Err(IdxError::TooLarge { len });
+    }
+    let header_len: u64 = if ndim == 3 { 16 } else { 8 };
+    let mut buf = Vec::new();
+    let mut file = file;
+    (&mut file)
+        .take(header_len)
+        .read_to_end(&mut buf)
+        .map_err(io)?;
+    let expected = idx_expected_len(&buf, ndim)?;
+    if expected != len {
+        return Err(IdxError::LengthMismatch {
+            expected: Some(expected),
+            actual: len,
+        });
+    }
+    // 読み取り中に伸びても期待長 + 1 で止め、超過を余分な末尾データとして拒否する。
+    file.take(expected - header_len + 1)
+        .read_to_end(&mut buf)
+        .map_err(io)?;
+    if buf.len() as u64 != expected {
+        return Err(IdxError::LengthMismatch {
+            expected: Some(expected),
+            actual: buf.len() as u64,
+        });
+    }
+    Ok(buf)
+}
+
+/// 画像・ラベルの 1 組を読み、件数一致を検査して `Dataset` にする。
+fn load_idx_split(dir: &Path, images: &str, labels: &str) -> Result<Dataset, DynError> {
+    // ラベルを先に検証し、画像ヘッダの件数と照合してから f32 展開（約 299 MiB）へ進む。
+    let y = parse_idx_labels(&read_idx_file(&dir.join(labels), 1)?)?;
+    let image_bytes = read_idx_file(&dir.join(images), 3)?;
+    let n = check_magic(&image_bytes, 3)? as usize;
+    if y.len() != n {
+        return Err(IdxError::CountMismatch {
+            images: n,
+            labels: y.len(),
+        }
+        .into());
+    }
+    let (_, data) = parse_idx_images(&image_bytes)?;
+    Ok(Dataset {
+        x: Tensor::new(data, &[n, IMAGE_LEN])?,
+        y: Tensor::new(y, &[n])?,
+    })
+}
+
+/// `dir` 直下の固定名 4 ファイルから `(train, test)` を読む。
+fn load_idx_mnist(dir: &Path) -> Result<(Dataset, Dataset), DynError> {
+    Ok((
+        load_idx_split(dir, TRAIN_IMAGES, TRAIN_LABELS)?,
+        load_idx_split(dir, TEST_IMAGES, TEST_LABELS)?,
+    ))
+}
+
+/// データの取得元。
+#[derive(Debug, PartialEq)]
+enum DataSource {
+    Synthetic,
+    Idx(PathBuf),
+}
+
+/// 引数 0 個は合成データ、1 個は IDX ディレクトリ、2 個以上はエラー。
+fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<DataSource, DynError> {
+    // UTF-8 でない引数でもパニックしないよう OsString のまま扱う。
+    let mut args: Vec<std::ffi::OsString> = args.collect();
+    match args.len() {
+        0 => Ok(DataSource::Synthetic),
+        1 => Ok(DataSource::Idx(PathBuf::from(args.remove(0)))),
+        _ => Err(format!("引数は IDX ディレクトリ 1 個まで（指定: {args:?}）").into()),
+    }
 }
 
 /// 784→128→10 の MLP を組んで Adam + CrossEntropy で compile する。
@@ -150,30 +495,37 @@ fn check_result(r: &Report) -> Result<(), DynError> {
     Ok(())
 }
 
-/// 本 example は引数を受け付けない（#4340 が path 引数を追加する）。
-fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), DynError> {
-    // UTF-8 でない引数でもパニックしないよう OsString のまま扱う。
-    let extra: Vec<std::ffi::OsString> = args.collect();
-    if extra.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("引数は受け付けない（指定: {extra:?}）").into())
-    }
-}
-
 fn main() -> Result<(), DynError> {
-    parse_args(std::env::args_os().skip(1))?;
+    let source = parse_args(std::env::args_os().skip(1))?;
     fandhe_ai::manual_seed(SEED_GLOBAL);
-    let train = synthetic_mnist(N_TRAIN, SEED_TRAIN)?;
-    let test = synthetic_mnist(N_TEST, SEED_TEST)?;
-    println!("== MLP 784→{HIDDEN}→10 / 合成 MNIST 形式データ（train={N_TRAIN}, test={N_TEST}） ==");
+    let (train, test, kind) = match source {
+        DataSource::Synthetic => (
+            synthetic_mnist(N_TRAIN, SEED_TRAIN)?,
+            synthetic_mnist(N_TEST, SEED_TEST)?,
+            "合成 MNIST 形式データ",
+        ),
+        DataSource::Idx(dir) => {
+            let (train, test) = load_idx_mnist(&dir)?;
+            (train, test, "MNIST（IDX）")
+        }
+    };
+    println!(
+        "== MLP 784→{HIDDEN}→10 / {kind}（train={}, test={}） ==",
+        train.x.shape()[0],
+        test.x.shape()[0]
+    );
     let mut model = build_model()?;
     let report = train_and_report(&mut model, &train, &test)?;
     check_result(&report)
 }
 
 #[cfg(test)]
+#[path = "../tests/common/temp_dir.rs"]
+mod temp_dir;
+
+#[cfg(test)]
 mod tests {
+    use super::temp_dir::TempDirGuard;
     use super::*;
 
     #[test]
@@ -209,9 +561,233 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_rejects_extra() {
-        assert!(parse_args(std::iter::empty()).is_ok());
-        assert!(parse_args([std::ffi::OsString::from("x")].into_iter()).is_err());
+    fn parse_args_variants() {
+        use std::ffi::OsString;
+        assert_eq!(
+            parse_args(std::iter::empty()).unwrap(),
+            DataSource::Synthetic
+        );
+        assert_eq!(
+            parse_args([OsString::from("d")].into_iter()).unwrap(),
+            DataSource::Idx(PathBuf::from("d"))
+        );
+        assert!(parse_args([OsString::from("a"), OsString::from("b")].into_iter()).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let bad = OsString::from_vec(vec![0xff, 0xfe]);
+            assert!(matches!(
+                parse_args([bad].into_iter()).unwrap(),
+                DataSource::Idx(_)
+            ));
+        }
+    }
+
+    fn images_bytes(count: u32, rows: u32, cols: u32, body: usize) -> Vec<u8> {
+        let mut v = vec![0, 0, 8, 3];
+        for n in [count, rows, cols] {
+            v.extend(n.to_be_bytes());
+        }
+        v.extend(std::iter::repeat_n(255u8, body));
+        v
+    }
+
+    fn labels_bytes(vals: &[u8]) -> Vec<u8> {
+        let mut v = vec![0, 0, 8, 1];
+        v.extend((vals.len() as u32).to_be_bytes());
+        v.extend(vals);
+        v
+    }
+
+    #[test]
+    fn idx_parses_valid() {
+        let mut img = images_bytes(3, 28, 28, 3 * IMAGE_LEN);
+        img[16] = 0;
+        let (n, data) = parse_idx_images(&img).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(data.len(), 3 * IMAGE_LEN);
+        assert_eq!(data[0], 0.0);
+        assert_eq!(data[1], 1.0);
+        assert_eq!(
+            parse_idx_labels(&labels_bytes(&[0, 5, 9])).unwrap(),
+            vec![0, 5, 9]
+        );
+    }
+
+    #[test]
+    fn idx_rejects_bad_images() {
+        let ok = images_bytes(2, 28, 28, 2 * IMAGE_LEN);
+        let mut m = ok.clone();
+        m[0] = 1;
+        assert!(matches!(
+            parse_idx_images(&m),
+            Err(IdxError::BadMagic { .. })
+        ));
+        let mut m = ok.clone();
+        m[2] = 9;
+        assert!(matches!(
+            parse_idx_images(&m),
+            Err(IdxError::BadMagic { .. })
+        ));
+        // ラベルファイル（ndim=1）を画像として渡す。
+        assert!(matches!(
+            parse_idx_images(&labels_bytes(&[1, 2])),
+            Err(IdxError::BadMagic { .. })
+        ));
+        assert!(matches!(
+            parse_idx_images(&images_bytes(2, 27, 28, 2 * IMAGE_LEN)),
+            Err(IdxError::BadDims { .. })
+        ));
+        assert!(matches!(
+            parse_idx_images(&images_bytes(0, 28, 28, 0)),
+            Err(IdxError::BadCount { .. })
+        ));
+        assert!(matches!(
+            parse_idx_images(&images_bytes(100_001, 28, 28, 0)),
+            Err(IdxError::BadCount { .. })
+        ));
+        assert!(matches!(
+            parse_idx_images(&ok[..ok.len() - 1]),
+            Err(IdxError::LengthMismatch { .. })
+        ));
+        let mut long = ok.clone();
+        long.push(0);
+        assert!(matches!(
+            parse_idx_images(&long),
+            Err(IdxError::LengthMismatch { .. })
+        ));
+        assert!(matches!(
+            parse_idx_images(&ok[..10]),
+            Err(IdxError::LengthMismatch { .. })
+        ));
+        assert!(matches!(
+            parse_idx_images(&[0, 0, 8]),
+            Err(IdxError::BadMagic { .. })
+        ));
+        assert!(matches!(
+            parse_idx_images(&[0x1f, 0x8b, 8, 0, 0, 0]),
+            Err(IdxError::Gzipped)
+        ));
+        // 件数が大きくても長さ不一致で拒否され、確保しない。
+        assert!(matches!(
+            parse_idx_images(&images_bytes(100_000, 28, 28, 10)),
+            Err(IdxError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn idx_rejects_bad_labels() {
+        assert!(matches!(
+            parse_idx_labels(&labels_bytes(&[0, 10])),
+            Err(IdxError::LabelOutOfRange {
+                index: 1,
+                value: 10
+            })
+        ));
+        let ok = labels_bytes(&[1, 2, 3]);
+        assert!(matches!(
+            parse_idx_labels(&ok[..ok.len() - 1]),
+            Err(IdxError::LengthMismatch { .. })
+        ));
+        let mut long = ok.clone();
+        long.push(0);
+        assert!(matches!(
+            parse_idx_labels(&long),
+            Err(IdxError::LengthMismatch { .. })
+        ));
+        assert!(matches!(
+            parse_idx_labels(&images_bytes(1, 28, 28, IMAGE_LEN)),
+            Err(IdxError::BadMagic { .. })
+        ));
+        assert!(matches!(
+            parse_idx_labels(&[0x1f, 0x8b]),
+            Err(IdxError::Gzipped)
+        ));
+    }
+
+    #[test]
+    fn load_idx_dir_roundtrip_and_missing() {
+        let d = TempDirGuard::new("ok");
+        let img = images_bytes(3, 28, 28, 3 * IMAGE_LEN);
+        let lab = labels_bytes(&[0, 1, 2]);
+        for (name, bytes) in [
+            (TRAIN_IMAGES, &img),
+            (TRAIN_LABELS, &lab),
+            (TEST_IMAGES, &img),
+            (TEST_LABELS, &lab),
+        ] {
+            std::fs::write(d.path().join(name), bytes).unwrap();
+        }
+        let (train, test) = load_idx_mnist(d.path()).unwrap();
+        assert_eq!(train.x.shape(), [3, IMAGE_LEN]);
+        assert_eq!(test.y.shape(), [3]);
+        // 件数不一致
+        std::fs::write(d.path().join(TEST_LABELS), labels_bytes(&[0, 1])).unwrap();
+        let e = load_idx_mnist(d.path()).err().unwrap();
+        assert!(matches!(
+            e.downcast_ref::<IdxError>(),
+            Some(IdxError::CountMismatch {
+                images: 3,
+                labels: 2
+            })
+        ));
+        // 欠落
+        std::fs::remove_file(d.path().join(TRAIN_IMAGES)).unwrap();
+        let e = load_idx_mnist(d.path()).err().unwrap();
+        assert!(matches!(
+            e.downcast_ref::<IdxError>(),
+            Some(IdxError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_idx_file_rejects_fifo_and_directory() {
+        let d = TempDirGuard::new("special");
+        let p = d.path().join("fifo");
+        let st = std::process::Command::new("mkfifo")
+            .arg(&p)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert!(matches!(
+            read_idx_file(&p, 1),
+            Err(IdxError::NotRegularFile { .. })
+        ));
+        // ディレクトリも通常ファイルではない。
+        assert!(matches!(
+            read_idx_file(d.path(), 1),
+            Err(IdxError::NotRegularFile { .. })
+        ));
+    }
+
+    #[test]
+    fn read_idx_file_checks_header_before_payload() {
+        let d = TempDirGuard::new("hdr");
+        // 最大件数ちょうど: 上限内で実読み込み経路を通る（疎ファイルで作る）。
+        let p = d.path().join("max");
+        let mut h = images_bytes(MAX_ITEMS as u32, 28, 28, 0);
+        h.truncate(16);
+        std::fs::write(&p, &h).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_len(MAX_FILE_BYTES).unwrap();
+        assert_eq!(read_idx_file(&p, 3).unwrap().len() as u64, MAX_FILE_BYTES);
+        // 件数が上限超過: ペイロードを読む前に BadCount。
+        let q = d.path().join("over");
+        let mut h = images_bytes(MAX_ITEMS as u32 + 1, 28, 28, 0);
+        h.truncate(16);
+        std::fs::write(&q, &h).unwrap();
+        assert!(matches!(
+            read_idx_file(&q, 3),
+            Err(IdxError::BadCount { .. })
+        ));
+        // 実長がヘッダの期待長と異なる: 末尾余り・切り詰めとも拒否。
+        let r = d.path().join("extra");
+        std::fs::write(&r, images_bytes(2, 28, 28, 2 * IMAGE_LEN + 1)).unwrap();
+        assert!(matches!(
+            read_idx_file(&r, 3),
+            Err(IdxError::LengthMismatch { .. })
+        ));
     }
 
     #[test]
