@@ -82,6 +82,7 @@
 
 - 推奨: **実装する（案 A。案 B の rustdoc も併せて書く）**
 - 等値比較への影響: `History` は `PartialEq` を derive しているため、案 A では停止 epoch が異なれば既存 4 フィールドが等しくても `==` の結果が変わる。推奨は停止 epoch を等値比較に含める（derive のまま。停止の有無も学習結果の差として扱う）。既存の `History` 同士の比較テストは構築箇所で `stopped_epoch: None` を与えれば結果が変わらない。この点は所有者への論点 7 とする
+- 確定タイミングと観測契約: 停止 epoch は、その epoch 末の全 callback（`LambdaCallback` を含む）の処理が終わった後に確定し、fit の戻り値の `History` で公開する。callback 処理中に渡される `&History` には当該 epoch の停止要求が反映されない（`stopped_epoch` は `None` のまま。EarlyStopping の登録順に依存した値を callback に見せない）。callback が停止を知る方法は fit の戻り値と `EarlyStopping::stopped_epoch()` のみとする
 - 意味: `EarlyStopping` が複数あっても 1 epoch で全 callback を処理してから抜けるため値は 1 つ。`fit_with_callbacks` を複数回呼ぶ場合はその呼び出しのローカル番号。callbacks を受けない入口（`fit`・`FunctionalModel` の学習）は常に `None`
 - SemVer: 追加のみ（`History` は `#[non_exhaustive]`）。ただし `==` の判定対象が増える挙動変化があり、論点 7 で承認を得る
 - `api_surface.rs`: `assert_is_history_type` 付近に `let _: &Option<usize> = &h.stopped_epoch;` 型のフィールドプローブを足す。停止／完走のテストは #4353 の範囲
@@ -124,7 +125,7 @@
 |--------------|--------|------|
 | #4351 別名の入口の追加 | `api_surface.rs` の期待集合 18 件・パス型 4 種のプローブ・往復テスト | CI |
 | #4352 `Default` とビルダー | 正のプローブ・doctest（`default() == new(1, 32)`） | CI |
-| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト・最終 epoch で停止し履歴長が予定 epoch 数に等しくても `Some(epochs - 1)` となるケース（`history.loss.len() < epochs` からの推定実装を見逃さないため）・停止 epoch だけが異なる 2 つの `History` が `==` で不一致になるテスト | CI |
+| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト・最終 epoch で停止し履歴長が予定 epoch 数に等しくても `Some(epochs - 1)` となるケース（`history.loss.len() < epochs` からの推定実装を見逃さないため）・停止 epoch だけが異なる 2 つの `History` の `==` テスト（論点 7 の結論で期待値を切り替える。「含める」なら不一致、「含めない」〈`PartialEq` を手書きして除外〉なら一致）・`LambdaCallback` 内で観測する `History` の `stopped_epoch` が `None` であること | CI |
 
 ### 7.5 数値契約
 
