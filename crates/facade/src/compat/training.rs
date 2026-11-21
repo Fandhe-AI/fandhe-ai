@@ -2525,12 +2525,15 @@ impl Sequential {
     /// - 既定（[`FitConfig::new`]）は `shuffle = false` で、サンプル順序のシャッフルでは
     ///   グローバル RNG を消費しない（Dropout などの層は学習モードで別途消費する。下記参照）。
     /// - [`FitConfig::shuffle`]`(true)` のとき、各 epoch の開始時に、[`crate::manual_seed`] で
-    ///   初期化されるグローバル RNG から、サンプル添字の順列を 1 回引き、バッチに分割する。`fit` の前に
-    ///   `fandhe_ai::manual_seed(seed)` を呼べば、同じデータ・同じモデル構築・同じ呼び出し列で
-    ///   `History` と最終パラメータが再現する。ただしグローバル RNG はプロセス全体で共有されるため、
-    ///   再現は「`manual_seed` から `fit` の終了までの間に、他スレッドが RNG を消費・再シードしない」
-    ///   前提でのみ成り立つ（介入があるとシャッフル順が変わり、`History` と最終パラメータの
-    ///   一致は保証されない。契約は `docs/rng-global-contract-design.md`）。並列実行するテストでは
+    ///   初期化されるグローバル RNG から、サンプル添字の順列を 1 回引き、バッチに分割する。
+    ///   `fit` の前に `fandhe_ai::manual_seed(seed)` を呼べば、同じ消費順であるかぎり
+    ///   **再現されるのはシャッフル順とグローバル RNG の乱数列**である。
+    ///   `History` と最終パラメータの一致までは保証しない。それには、同じデータ・同じモデル構築・
+    ///   同じ呼び出し列に加えて、層などの計算が決定的であること（`Sequential::add_module` の
+    ///   利用者定義層が独自の乱数源・非決定的な計算を使う場合は変わりうる）が必要になる。
+    /// - グローバル RNG はプロセス全体で共有されるため、「`manual_seed` から `fit` の終了までの間に、
+    ///   他スレッドが RNG を消費・再シードしない」ことも前提になる（介入があるとシャッフル順が
+    ///   変わる。契約は `docs/rng-global-contract-design.md`）。並列実行するテストでは
     ///   RNG を使う処理を直列化すること。
     /// - Dropout など、学習時に同じグローバル RNG を使う層があれば、その消費も同じ列に入る。
     /// - `add_linear(.., seed)` 等の個別 seed による初期化は `manual_seed` と独立している。
@@ -2560,8 +2563,8 @@ impl Sequential {
     ///     model.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)?;
     ///     Ok(model.fit(&x, &y, FitConfig::new(3, 2).shuffle(true))?)
     /// };
-    /// // 同じ seed なら shuffle の順列も同じで、History が一致する
-    /// // （他スレッドが RNG を操作しない前提。上記参照）。
+    /// // 同じ seed なら shuffle の順列も同じになる。この例のモデルは `add_linear` のみで
+    /// // 計算が決定的なため History も一致する（他スレッドが RNG を操作しない前提。上記参照）。
     /// assert_eq!(run()?, run()?);
     /// # Ok(())
     /// # }
