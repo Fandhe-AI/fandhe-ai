@@ -103,8 +103,12 @@ impl Sequential {
     **`Err` を返すときは、ベストスナップショットを取得済みでも適用せず（既存 `run_fit` が
     エラー時にも取得済みのベスト重みを適用する挙動とは異なる）、重み・optimizer 状態とも
     呼び出し前の状態を残す**。ベスト重みを適用するのは正常終了時だけである
-  - optimizer 状態の持ち越しと書き戻し: 2 回の fit ＝ epoch 倍の 1 回、の不変条件を GPU 入口でも
-    守ることを目標とする。書き戻し対象は既存状態に限らず、**初回実行で生成される Adam 系の
+  - optimizer 状態の持ち越しと書き戻し: optimizer 状態（Adam の moment・step 等）を fit 呼び出しの
+    間で持ち越すことを、独立した契約として GPU 入口でも守る。
+    「2 回の fit ＝ epoch 倍の 1 回」（`fit_twice_equals_fit_once_with_double_epochs`）の同値性は
+    **`shuffle=false` で callback がなく、バッチ順序・更新条件が同じで、分割した中間の呼び出し終了時に
+    ベスト重みの復元が入らない場合に限って**主張する（`restore_best_weights` は中間の呼び出し終了時にも
+    入りうるため、callback を伴う分割には同値性を主張しない）。書き戻し対象は既存状態に限らず、**初回実行で生成される Adam 系の
     moment・step も含む**。状態を持つ optimizer は、新規 compile 直後の初回呼び出しでも
     終了時の状態をホストへ保存できることを対応条件とする。ホストの optimizer 状態を
     持ち込み・書き戻せない optimizer は、既存状態の有無に関わらず（初回でも）
@@ -116,6 +120,12 @@ impl Sequential {
     ため、監視値が全 epoch で NaN の場合などは存在しない）。存在しなければ復元は行わず、
     最終書き戻しの重みを保持する。正常終了時に残るのは、無効またはスナップショット不在なら
     最終 epoch の重み、有効かつ存在すればベスト重みである
+  - **重みのみ復元（同時点保証の明示的な例外）**: 上記の「重みと optimizer 状態は常に同じ時点」は
+    呼び出し前の復元（失敗時）と最終書き戻しに対する保証であり、`restore_best_weights` による復元は
+    既存 callback と同じく**重みのみ**を過去の epoch へ戻す。optimizer 状態（moment・step）は最終
+    epoch のままホストへ残す（ベスト epoch の optimizer 状態は保存しない。保存・復元の追加は
+    スナップショットが肥大するため推奨しない）。この例外は `restore_best_weights` 有効かつ
+    スナップショット存在の正常終了時に限る
   - `Device::Cpu` も受け付け、CPU の常駐チェーン（#3253 の部品）で回す。CPU の `fit` へ委譲はしない
 - **エラー表**（新しいエラー型・variant は足さず `AutodiffError::Backend(BackendError::…)` を再利用）:
 
@@ -131,8 +141,13 @@ impl Sequential {
 
 - P5 のシグネチャ（SGD・MSE mean 固定）は変えない。`fit_on` は P5 より上の入口で、内部の
   常駐チェーン（`DeviceParamStore::train_step_device_chain` 系）を共有する。
+  `train_step_device_chain` は `autodiff` クレートの現行 `pub` メソッドで、`facade` は別クレートから
+  呼ぶため、`pub(crate)` の拡張だけでは `fit_on` から使えない。既存の公開シグネチャを維持したまま
+  既存口から拡張へ委譲できるか、`autodiff` 内部クレートとして `facade` が呼ぶための口
+  （`#[doc(hidden)]` 等。内部クレートであり facade のサポート対象 API ではない）が必要かは
+  #4361／#4362 の実装で確かめる。いずれも「facade のサポート対象公開面を増やさない」方針とは別事項である。
 - CrossEntropy（#4362）・Adam／AdamW（#4367）・活性化（#4370）のチェーン拡張は、内部
-  （`pub(crate)` 相当・facade から再エクスポートしない）として足し、**公開面は `fit_on` 系だけ**を
+  （内部クレート間の口として足し、facade から再エクスポートしない。上記の `pub` と `pub(crate)` の違いに注意）として足し、**公開面は `fit_on` 系だけ**を
   推奨する。P5 の別損失版など低レベルの公開入口を足すかは本記録では推奨せず、必要になったら
   別の承認事項にする。#4361 の承認対象は「`fit_on` 系 2 本」に絞られる。
 
@@ -172,7 +187,7 @@ impl Sequential {
 | `EarlyStopping` | 監視値のみ。`restore_best_weights` は要 | 改善時 | 該当なし | 対応（`restore_best_weights` は改善時に同期。正常終了時のみ、スナップショットが存在すれば最終書き戻しの後にベスト重みを適用し、不在なら最終書き戻しの重みを保持する。`Err` 時は適用せず呼び出し前の状態を残す。§4） |
 | `ModelCheckpoint` | 要 | 保存の直前 | 該当なし | 対応（保存時に同期） |
 | `CsvLogger`／`JsonLogger` | 不要（`History` の数値のみ） | なし | 該当なし | 対応 |
-| `Lambda` | モデルを参照しうる | 呼ぶ前に同期 | 該当なし | 同期して対応するか初期は `Unsupported` かを #4360 で決める |
+| `Lambda` | 不要（既存 `LambdaCallback::on_epoch_end` のクロージャが受けるのは epoch 番号と `&History` のみで、`Sequential` や重みは渡らない） | なし | 該当なし | 既存シグネチャのままなら重み同期は不要。初期段階で対応するかは別判断として #4360 で決める |
 | `Ema`／`Swa` | step ごとに要 | step ごと | 該当なし | 初期は `Unsupported` |
 
 - validation・metrics: 検証のフォワードはデバイスで行い（`predict_resident_input` 相当）、
