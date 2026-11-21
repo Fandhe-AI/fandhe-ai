@@ -26,13 +26,13 @@
 
 | 案 | 内容 | 利点 | 欠点・影響 |
 |----|------|------|-----------|
-| A | 既存 4 関数をその場で `path: impl AsRef<Path>` へ変える | 既存の名前で `&str`・`String`・`PathBuf` を受けられる | 既存シグネチャの変更で破壊的（§8）。関数ポインタ `fn(&Path) -> …` への型強制、`x.as_ref()` を渡す呼び出しの型推論、独自 `Deref<Target = Path>` 型の deref 強制が壊れうる（未実測。#4351 で確認）。§4 の「ジェネリック化は不可」と衝突し、移行ノートが要る |
+| A | 既存 4 関数をその場で `path: impl AsRef<Path>` へ変える | 既存の名前で `&str`・`String`・`PathBuf` を受けられる | 既存シグネチャの変更で破壊的（api-compat §8）。関数ポインタ `fn(&Path) -> …` への型強制、`x.as_ref()` を渡す呼び出しの型推論、独自 `Deref<Target = Path>` 型の deref 強制が壊れうる（未実測。#4351 で確認）。§4 の「ジェネリック化は不可」と衝突し、移行ノートが要る |
 | B（推奨） | 既存 4 関数は変えず、別名の入口 4 本を onnx-interop に足し facade で再エクスポート: `load_safetensors_f32_from_path`・`load_safetensors_typed_from_path`・`save_safetensors_f32_to_path`・`save_safetensors_typed_to_path`。`path: impl AsRef<Path>` を受け、既存関数へ `path.as_ref()` で委譲する | 追加のみ。既存の `*_from_bytes`／`*_to_bytes`・`OnnxModel::from_path`／`to_path` と命名が揃う。挙動は既存と同一 | 同機能の名前が 2 つになる。既存名に `&str` を渡したときのエラーは残るため、既存関数の rustdoc から新名を案内する |
 | C | 対象外（rustdoc に `Path::new` と `&PathBuf` の渡し方を書く） | 公開面が増えない | 他の保存 API との作法の不一致が残る |
 
 ### 3.3 推奨・SemVer・`api_surface.rs`
 
-- 推奨: **実装する（案 B）**。先例の方針と §8 の判定に合い、追加のみで済み、命名が既存と対称になるため。既存関数に `#[deprecated]` は付けない（既存利用者への警告という挙動変化になるため）
+- 推奨: **実装する（案 B）**。先例の方針と api-compat §8 の判定に合い、追加のみで済み、命名が既存と対称になるため。既存関数に `#[deprecated]` は付けない（既存利用者への警告という挙動変化になるため）
 - SemVer: 案 B は追加のみ。案 A は破壊的で承認要（`BREAKING CHANGE:`・0.16.0 移行ノート）。案 C は該当なし
 - `api_surface.rs`（案 B）: 識別子の期待集合を 14 件から 18 件にする。既存の関数ポインタプローブは変えず、既存の凍結の証拠として残す。新 4 本には `&str`・`String`・`PathBuf`・`&Path` を渡す呼び出しのコンパイル可否プローブを足す（ジェネリック関数は高階関数ポインタへ強制できないため、関数本体内の呼び出しで確かめる）。純再エクスポート検査・接頭辞 allowlist・`pub use` 1 文 1 行の規約は維持する。スキャナの自己テスト（alias／swap 系）へ新名を足すかは #4351 で判断する
 
