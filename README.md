@@ -112,8 +112,10 @@ to_bytes, to_path, from_sequential}`・`OnnxExportOptions`）として
 `fandhe_ai::interop::safetensors`（`save_safetensors_f32`／
 `load_safetensors_f32` とその `_to_bytes`／`_from_bytes` 版、多 dtype 版の
 `*_typed`、`LoadError`／`SaveError` など）から使えます。
-`compat::Sequential::state_dict`／`load_state_dict` と組み合わせると、
-bit 完全一致で往復できます（`docs/facade-safetensors-exposure-decision.md` §11）。
+`compat::Sequential::state_dict`／`load_state_dict` と組み合わせると、f32 の
+save／load 往復に限り bit 完全一致で往復できます（`docs/facade-safetensors-exposure-decision.md` §11）。
+BF16 等の型変換を伴う保存・読み込み経路は丸めで元の f32 ビット列が変わり得るため、
+この保証の対象外です。
 
 このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
 ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。v0.14.0 で crates.io へ初回公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする。v0.14.0 で crates.io へ初回公開。ROCm 実機 parity は未実測のまま所有者判断で公開）を担う内部クレートがあります。
