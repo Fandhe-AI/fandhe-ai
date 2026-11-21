@@ -6,7 +6,8 @@
 //!   ネットワーク取得もしない（オフラインで exit 0 になる）。
 //! - 使うのは `fandhe_ai`（facade）の公開面と std だけ。`bench_harness` は非公開クレートで
 //!   facade の dev-dependency のため、公開パッケージに同梱される example からは使えない。
-//!   そのため局所 PRNG（SplitMix64。`main.rs` と同じ式）を inline で持つ。
+//!   乱数は facade 公開の `Generator::new(固定シード)` の `multinomial`／`normal` で作る
+//!   （グローバル RNG を消費せず、学習用・評価用・クラスごとにシードを固定して決定的）。
 //! - `FitConfig::shuffle(true)` はグローバル RNG（`fandhe_ai::manual_seed`）を消費するため、
 //!   `main` の先頭で固定シードを設定し、再現性を保つ。
 //! - 兄弟イシューが土台にする分割: #4340 は `synthetic_mnist` と並ぶ IDX 読み込みを足し
@@ -15,7 +16,7 @@
 
 use fandhe_ai::compat::{FitConfig, Loss, Metrics, MetricsResult, Optimizer, Sequential};
 use fandhe_ai::optim::AdamConfig;
-use fandhe_ai::{AutodiffError, Tensor};
+use fandhe_ai::{AutodiffError, Generator, Tensor};
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -27,28 +28,11 @@ const BATCH_SIZE: usize = 64;
 const N_TRAIN: usize = 4096;
 const N_TEST: usize = 1024;
 const LR: f32 = 1e-3;
+const NOISE_STD: f32 = 0.15;
 const MIN_ACCURACY: f32 = 0.5;
 const SEED_GLOBAL: u64 = 42;
 const SEED_TRAIN: u64 = 0x4339_0001;
 const SEED_TEST: u64 = 0x4339_0002;
-
-/// 依存追加なしの局所 PRNG（SplitMix64）。
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// `[0, 1)` の一様乱数（上位 24bit）。
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-}
 
 /// 画像 `[N, 784]` とクラスラベル `[N]` の組。
 struct Dataset {
@@ -57,28 +41,37 @@ struct Dataset {
 }
 
 /// クラスごとに決定的な点灯画素パターン（プロトタイプ）を作る。
-fn class_prototype(class: usize) -> Vec<f32> {
+/// 点灯画素は `Generator::multinomial`（一様重み・復元抽出）で選ぶ。
+fn class_prototype(class: usize) -> Result<Vec<f32>, DynError> {
     let mut proto = vec![0.2f32; IMAGE_LEN];
-    let mut rng = SplitMix64(0x9000 + class as u64);
-    for _ in 0..(IMAGE_LEN / 6) {
-        let idx = (rng.next_u64() % IMAGE_LEN as u64) as usize;
-        proto[idx] = 0.6;
+    let mut rng = Generator::new(0x9000 + class as u64);
+    let weights = Tensor::new(vec![1.0f32; IMAGE_LEN], &[IMAGE_LEN])?;
+    let lit = rng.multinomial(&weights, IMAGE_LEN / 6, true)?;
+    for &idx in lit.host_slice().iter() {
+        proto[idx as usize] = 0.6;
     }
-    proto
+    Ok(proto)
 }
 
 /// 合成 MNIST 形式データ `n` 件を生成する。ラベルは `i % 10` の巡回。
+/// ノイズは `seed` 固定の `Generator::normal`（グローバル RNG は消費しない）。
 fn synthetic_mnist(n: usize, seed: u64) -> Result<Dataset, DynError> {
-    let protos: Vec<Vec<f32>> = (0..NUM_CLASSES).map(class_prototype).collect();
-    let mut rng = SplitMix64(seed);
+    let protos = (0..NUM_CLASSES)
+        .map(class_prototype)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut rng = Generator::new(seed);
+    let noise = rng.normal(0.0, NOISE_STD, &[n * IMAGE_LEN])?;
+    let noise = noise.host_slice();
     let mut data = Vec::with_capacity(n * IMAGE_LEN);
     let mut labels = Vec::with_capacity(n);
     for i in 0..n {
         let class = i % NUM_CLASSES;
+        let row = &noise[i * IMAGE_LEN..(i + 1) * IMAGE_LEN];
         data.extend(
             protos[class]
                 .iter()
-                .map(|&p| (p + (rng.next_f32() * 2.0 - 1.0) * 0.25).clamp(0.0, 1.0)),
+                .zip(row)
+                .map(|(&p, &e)| (p + e).clamp(0.0, 1.0)),
         );
         labels.push(class as i32);
     }
