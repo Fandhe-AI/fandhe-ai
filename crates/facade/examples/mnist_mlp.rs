@@ -108,8 +108,8 @@ const TEST_IMAGES: &str = "t10k-images-idx3-ubyte";
 const TEST_LABELS: &str = "t10k-labels-idx1-ubyte";
 /// 画像件数の上限（標準 MNIST は最大 60000）。
 const MAX_ITEMS: u64 = 100_000;
-/// ファイル長の上限（train images は 47,040,016 バイト）。
-const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// ファイル長の上限。最大件数の画像ファイル長（16 バイトのヘッダ + 件数 × 画素数）から導出する。
+const MAX_FILE_BYTES: u64 = MAX_ITEMS * (IMAGE_LEN as u64) + 16;
 const IDX_UBYTE: u8 = 0x08;
 const IMAGE_SIDE: u32 = 28;
 
@@ -289,44 +289,83 @@ fn parse_idx_labels(bytes: &[u8]) -> Result<Vec<i32>, IdxError> {
         .collect()
 }
 
-/// ファイルを上限付きで読む。メタデータと実体の食い違いに備え `take` でも上限を掛ける。
-fn read_idx_file(path: &Path) -> Result<Vec<u8>, IdxError> {
+/// ヘッダ（画像 16 バイト・ラベル 8 バイト）から期待ファイル長を求める。
+/// 件数と次元の検証もここで行い、ペイロード確保前の長さ照合に使う。
+fn idx_expected_len(header: &[u8], ndim: u8) -> Result<u64, IdxError> {
+    let count = check_magic(header, ndim)?;
+    let short = || IdxError::LengthMismatch {
+        expected: None,
+        actual: header.len() as u64,
+    };
+    if ndim == 3 {
+        let rows = be_u32(header, 8).ok_or_else(short)?;
+        let cols = be_u32(header, 12).ok_or_else(short)?;
+        if rows != IMAGE_SIDE || cols != IMAGE_SIDE {
+            return Err(IdxError::BadDims { rows, cols });
+        }
+        Ok(count * IMAGE_LEN as u64 + 16)
+    } else {
+        Ok(count + 8)
+    }
+}
+
+/// IDX ファイルを読む。固定長ヘッダを先に読んで期待長を算出し、実ファイル長と一致を
+/// 確かめてからペイロードを確保する（不正な巨大ファイルを先読みしない）。
+///
+/// 通常ファイルだけを受け付ける。`symlink_metadata` でリンク自体を見てシンボリックリンクと
+/// FIFO 等の特殊ファイルを `open` 前に拒否し、オープン後は同じ `fstat`（dev・ino）が
+/// 一致することを確かめて、検査と `open` の間の差し替えを検出する（libc を使わない std のみの対応。
+/// 残る競合窓は、指定ディレクトリを書き換えられる攻撃者が前提のため例示用途では受容する）。
+fn read_idx_file(path: &Path, ndim: u8) -> Result<Vec<u8>, IdxError> {
     let io = |source| IdxError::Io {
         path: path.to_path_buf(),
         source,
     };
-    // 通常ファイルだけを受け付ける。FIFO 等の特殊ファイルは `open` が無期限に待ち得るため、
-    // オープン前に種別を拒否し、パス差し替えに備え非ブロッキングで開いて種別を再検証する。
-    if !std::fs::metadata(path).map_err(io)?.is_file() {
-        return Err(IdxError::NotRegularFile {
-            path: path.to_path_buf(),
-        });
+    let not_regular = || IdxError::NotRegularFile {
+        path: path.to_path_buf(),
+    };
+    let link_meta = std::fs::symlink_metadata(path).map_err(io)?;
+    if !link_meta.is_file() {
+        return Err(not_regular());
     }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = opts.open(path).map_err(io)?;
+    let file = std::fs::File::open(path).map_err(io)?;
     let meta = file.metadata().map_err(io)?;
     if !meta.is_file() {
-        return Err(IdxError::NotRegularFile {
-            path: path.to_path_buf(),
-        });
+        return Err(not_regular());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (link_meta.dev(), link_meta.ino()) != (meta.dev(), meta.ino()) {
+            return Err(not_regular());
+        }
     }
     let len = meta.len();
     if len > MAX_FILE_BYTES {
         return Err(IdxError::TooLarge { len });
     }
+    let header_len: u64 = if ndim == 3 { 16 } else { 8 };
     let mut buf = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
+    let mut file = file;
+    (&mut file)
+        .take(header_len)
         .read_to_end(&mut buf)
         .map_err(io)?;
-    if buf.len() as u64 > MAX_FILE_BYTES {
-        return Err(IdxError::TooLarge {
-            len: buf.len() as u64,
+    let expected = idx_expected_len(&buf, ndim)?;
+    if expected != len {
+        return Err(IdxError::LengthMismatch {
+            expected: Some(expected),
+            actual: len,
+        });
+    }
+    // 読み取り中に伸びても期待長 + 1 で止め、超過を余分な末尾データとして拒否する。
+    file.take(expected - header_len + 1)
+        .read_to_end(&mut buf)
+        .map_err(io)?;
+    if buf.len() as u64 != expected {
+        return Err(IdxError::LengthMismatch {
+            expected: Some(expected),
+            actual: buf.len() as u64,
         });
     }
     Ok(buf)
@@ -334,8 +373,8 @@ fn read_idx_file(path: &Path) -> Result<Vec<u8>, IdxError> {
 
 /// 画像・ラベルの 1 組を読み、件数一致を検査して `Dataset` にする。
 fn load_idx_split(dir: &Path, images: &str, labels: &str) -> Result<Dataset, DynError> {
-    let (n, data) = parse_idx_images(&read_idx_file(&dir.join(images))?)?;
-    let y = parse_idx_labels(&read_idx_file(&dir.join(labels))?)?;
+    let (n, data) = parse_idx_images(&read_idx_file(&dir.join(images), 3)?)?;
+    let y = parse_idx_labels(&read_idx_file(&dir.join(labels), 1)?)?;
     if y.len() != n {
         return Err(IdxError::CountMismatch {
             images: n,
@@ -691,15 +730,56 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn read_idx_file_rejects_fifo_without_blocking() {
-        let d = TempDirGuard::new("fifo");
+    fn read_idx_file_rejects_fifo_and_symlink() {
+        let d = TempDirGuard::new("special");
         let p = d.path().join("fifo");
-        let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
-        // SAFETY: c は NUL 終端の有効な C 文字列。
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let st = std::process::Command::new("mkfifo")
+            .arg(&p)
+            .status()
+            .unwrap();
+        assert!(st.success());
         assert!(matches!(
-            read_idx_file(&p),
+            read_idx_file(&p, 1),
             Err(IdxError::NotRegularFile { .. })
+        ));
+        // 実在する正当なファイルへのシンボリックリンクも拒否する。
+        let real = d.path().join("real");
+        std::fs::write(&real, labels_bytes(&[0, 1])).unwrap();
+        assert!(read_idx_file(&real, 1).is_ok());
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(matches!(
+            read_idx_file(&link, 1),
+            Err(IdxError::NotRegularFile { .. })
+        ));
+    }
+
+    #[test]
+    fn read_idx_file_checks_header_before_payload() {
+        let d = TempDirGuard::new("hdr");
+        // 最大件数ちょうど: 上限内で実読み込み経路を通る（疎ファイルで作る）。
+        let p = d.path().join("max");
+        let mut h = images_bytes(MAX_ITEMS as u32, 28, 28, 0);
+        h.truncate(16);
+        std::fs::write(&p, &h).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_len(MAX_FILE_BYTES).unwrap();
+        assert_eq!(read_idx_file(&p, 3).unwrap().len() as u64, MAX_FILE_BYTES);
+        // 件数が上限超過: ペイロードを読む前に BadCount。
+        let q = d.path().join("over");
+        let mut h = images_bytes(MAX_ITEMS as u32 + 1, 28, 28, 0);
+        h.truncate(16);
+        std::fs::write(&q, &h).unwrap();
+        assert!(matches!(
+            read_idx_file(&q, 3),
+            Err(IdxError::BadCount { .. })
+        ));
+        // 実長がヘッダの期待長と異なる: 末尾余り・切り詰めとも拒否。
+        let r = d.path().join("extra");
+        std::fs::write(&r, images_bytes(2, 28, 28, 2 * IMAGE_LEN + 1)).unwrap();
+        assert!(matches!(
+            read_idx_file(&r, 3),
+            Err(IdxError::LengthMismatch { .. })
         ));
     }
 
