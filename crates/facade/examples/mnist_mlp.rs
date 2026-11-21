@@ -12,7 +12,8 @@
 //!   `main` の先頭で固定シードを設定し、再現性を保つ。
 //! - 学習後に一時ディレクトリへ `save_model` し、`load_model` で復元したモデルの `predict` 出力が
 //!   保存前と bit 一致することを確認する（#4341）。最大差を表示し、0 でなければ非 0 終了する。
-//!   一時ディレクトリは成功・失敗を問わず終了時に片付ける。保存・読み込みは unix（Linux／macOS）
+//!   一時ディレクトリ（unix では 0o700 で排他作成）は成功・失敗を問わず終了時に片付けを試みる
+//!   （後始末はベストエフォートで、削除に失敗すると残りうる）。保存・読み込みは unix（Linux／macOS）
 //!   が対象で、非 unix では `save_model` が `Unsupported` を返し非 0 終了する。
 //! - 兄弟イシュー #4340 は `synthetic_mnist` と並ぶ IDX 読み込みを足す（引数なしは合成データのまま）。
 
@@ -157,11 +158,22 @@ fn check_result(r: &Report) -> Result<(), DynError> {
 
 /// 保存先の一時ディレクトリを排他的に作り、drop で再帰削除する RAII ガード。
 ///
-/// `save_and_verify` から使われ、早期 return（`?`）でも後始末を保証する（`process::exit` は使わない）。
+/// `save_and_verify` から使われ、早期 return（`?`）でも後始末を試みる（ベストエフォート。`process::exit` は使わない）。
 /// 新規依存を避けるため std のみで実装する。名前に pid と `RandomState` 由来の 128 bit を含め、
 /// `create_dir` の排他作成で既存パス・事前配置 symlink を再利用しない（`AlreadyExists` のみ再試行）。
 struct SaveDirGuard {
     path: PathBuf,
+}
+
+/// 排他的にディレクトリを作る。unix では umask に依存せず所有者のみ（0o700）にする。
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 impl SaveDirGuard {
@@ -182,7 +194,7 @@ impl SaveDirGuard {
                 rand(())
             );
             let path = base.join(name);
-            match std::fs::create_dir(&path) {
+            match create_private_dir(&path) {
                 Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
                 Err(e) => return Err(e),
@@ -198,7 +210,8 @@ impl SaveDirGuard {
 
 impl Drop for SaveDirGuard {
     fn drop(&mut self) {
-        // std の remove_dir_all は symlink を辿らない。後始末の失敗で本処理の結果は変えない。
+        // 後始末はベストエフォート（std の remove_dir_all は symlink を辿らない）。
+        // 失敗しても本処理の結果は変えず、一時ディレクトリが残りうる。
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
@@ -332,6 +345,14 @@ mod tests {
         let report = train_and_report(&mut model, &train, &test).unwrap();
         assert_eq!(report.epoch_loss.len(), EPOCHS);
         check_result(&report).unwrap();
+        // fit 後のモデルで保存・復元の往復を検証する（学習の重複を避ける）。
+        #[cfg(unix)]
+        {
+            let diff = save_and_verify(&model, &test.x).unwrap();
+            assert_eq!(diff.bit_mismatches, 0);
+            assert_eq!(diff.max_abs_diff, 0.0);
+            check_round_trip(&diff).unwrap();
+        }
     }
 
     #[test]
@@ -355,17 +376,16 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_is_bit_identical_and_cleans_up() {
-        fandhe_ai::manual_seed(SEED_GLOBAL);
-        let x = synthetic_mnist(32, 1).unwrap().x;
-        let model = build_model().unwrap();
-        let diff = save_and_verify(&model, &x).unwrap();
-        assert_eq!(diff.bit_mismatches, 0);
-        assert_eq!(diff.max_abs_diff, 0.0);
-        check_round_trip(&diff).unwrap();
+    fn save_dir_guard_cleans_up() {
         let guard = SaveDirGuard::create().unwrap();
         let path = guard.path().to_path_buf();
         assert!(path.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
         drop(guard);
         assert!(!path.exists());
     }
