@@ -34,7 +34,7 @@
 
 - 推奨: **実装する（案 B）**。先例の方針と api-compat §8 の判定に合い、追加のみで済み、命名が既存と対称になるため。既存関数に `#[deprecated]` は付けない（既存利用者への警告という挙動変化になるため）
 - SemVer: 案 B は追加のみ。案 A は破壊的で承認要（`BREAKING CHANGE:`・0.16.0 移行ノート）。案 C は該当なし
-- `api_surface.rs`（案 B）: 識別子の期待集合を 14 件から 18 件にする。既存の関数ポインタプローブは変えず、既存の凍結の証拠として残す。新 4 本には `&str`・`String`・`PathBuf`・`&Path` を渡す呼び出しのコンパイル可否プローブを足す（ジェネリック関数は高階関数ポインタへ強制できないため、関数本体内の呼び出しで確かめる）。純再エクスポート検査・接頭辞 allowlist・`pub use` 1 文 1 行の規約は維持する。スキャナの自己テスト（alias／swap 系）へ新名を足すかは #4351 で判断する
+- `api_surface.rs`（案 B）: 識別子の期待集合を 14 件から 18 件にする。既存の関数ポインタプローブ（`interop_safetensors_types_are_reachable_via_facade`）が `&Path` で固定するのは `load_safetensors_typed`・`save_safetensors_typed` の 2 本だけで、f32 版 2 本（`load_safetensors_f32`・`save_safetensors_f32`）は固定されていない。既存プローブは変えず、この 2 本の範囲の凍結の証拠として残す。4 本すべてのシグネチャを固定するため、f32 版 2 本の `&Path` 関数ポインタプローブも #4351 の実装計画に含める。新 4 本には `&str`・`String`・`PathBuf`・`&Path` を渡す呼び出しのコンパイル可否プローブを足す（ジェネリック関数は高階関数ポインタへ強制できないため、関数本体内の呼び出しで確かめる）。純再エクスポート検査・接頭辞 allowlist・`pub use` 1 文 1 行の規約は維持する。スキャナの自己テスト（alias／swap 系）へ新名を足すかは #4351 で判断する
 
 ## 4. #4352 `FitConfig` の `Default`
 
@@ -58,7 +58,7 @@
 
 ### 4.3 推奨・SemVer・`api_surface.rs`
 
-- 推奨: **実装する（案 A）**。構造体更新構文はどの案でも成立せず、ビルダーなしの `Default` では目的を果たせないため。他フィールドの既定は `new` と同じ。rustdoc に既定値一覧と `FitConfig::default() == FitConfig::new(1, 32)` の doctest を書く
+- 推奨: **実装する（案 A）**。フィールドを非公開に保つ案（A〜D）では構造体更新構文は成立せず、ビルダーなしの `Default` では目的を果たせないため。構造体更新構文が成立するのは案 E だけで、その場合も現行の `FitConfig` には `Default` がないため、フィールドの公開に加えて `Default` の追加（手書き `impl Default`）が必要になる。案 E は不採用他フィールドの既定は `new` と同じ。rustdoc に既定値一覧と `FitConfig::default() == FitConfig::new(1, 32)` の doctest を書く
 - SemVer: 追加のみ（trait impl と inherent メソッドの追加。derive 集合と既存メソッドは不変）
 - `api_surface.rs`: `fit_types_are_reachable_via_facade_only` の近くに正のプローブを足す（`Default + Copy + Eq` の境界の具体化、`FitConfig::default() == FitConfig::new(1, 32)`、`epochs`／`batch_size` の `fn(FitConfig, usize) -> FitConfig` 型）
 
@@ -81,8 +81,9 @@
 ### 5.3 推奨・意味・SemVer・`api_surface.rs`
 
 - 推奨: **実装する（案 A。案 B の rustdoc も併せて書く）**
+- 等値比較への影響: `History` は `PartialEq` を derive しているため、案 A では停止 epoch が異なれば既存 4 フィールドが等しくても `==` の結果が変わる。推奨は停止 epoch を等値比較に含める（derive のまま。停止の有無も学習結果の差として扱う）。既存の `History` 同士の比較テストは構築箇所で `stopped_epoch: None` を与えれば結果が変わらない。この点は所有者への論点 7 とする
 - 意味: `EarlyStopping` が複数あっても 1 epoch で全 callback を処理してから抜けるため値は 1 つ。`fit_with_callbacks` を複数回呼ぶ場合はその呼び出しのローカル番号。callbacks を受けない入口（`fit`・`FunctionalModel` の学習）は常に `None`
-- SemVer: 追加のみ（`History` は `#[non_exhaustive]`）
+- SemVer: 追加のみ（`History` は `#[non_exhaustive]`）。ただし `==` の判定対象が増える挙動変化があり、論点 7 で承認を得る
 - `api_surface.rs`: `assert_is_history_type` 付近に `let _: &Option<usize> = &h.stopped_epoch;` 型のフィールドプローブを足す。停止／完走のテストは #4353 の範囲
 
 ## 6. 所有者へ戻す論点（#4349 が行を足す）
@@ -95,6 +96,7 @@
 | 4 | `FitConfig::default()` の既定値（`epochs=1`・`batch_size=32`） | 左記 | 同上 |
 | 5 | ビルダー `epochs`／`batch_size` を足すか（案 A／B） | 足す（A） | 同上 |
 | 6 | `History::stopped_epoch` を足すか、rustdoc のみか（案 A／B） | A（B の doc も併記） | 同上 |
+| 7 | `History` の等値比較（`PartialEq`）に停止 epoch を含めるか | 含める（derive のまま） | 同上 |
 
 承認: 未取得（#4350 が `承認: <URL>・<日付>` の形で記入する）
 
@@ -122,7 +124,7 @@
 |--------------|--------|------|
 | #4351 別名の入口の追加 | `api_surface.rs` の期待集合 18 件・パス型 4 種のプローブ・往復テスト | CI |
 | #4352 `Default` とビルダー | 正のプローブ・doctest（`default() == new(1, 32)`） | CI |
-| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト | CI |
+| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト・最終 epoch で停止し履歴長が予定 epoch 数に等しくても `Some(epochs - 1)` となるケース（`history.loss.len() < epochs` からの推定実装を見逃さないため）・停止 epoch だけが異なる 2 つの `History` が `==` で不一致になるテスト | CI |
 
 ### 7.5 数値契約
 
