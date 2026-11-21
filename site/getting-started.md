@@ -3,12 +3,12 @@
 ## インストール
 
 本ライブラリは Rust の `stable` チャンネルを前提としています
-（リポジトリ直下の `rust-toolchain.toml` が単一真実源です）。crates.io（v0.4.0・
-2026-08-29 公開済み）から利用できます。
+（リポジトリ直下の `rust-toolchain.toml` が単一真実源です）。crates.io（v0.15.0・
+2026-11-14 公開済み）から利用できます。
 
 ```toml
 [dependencies]
-fandhe-ai = "0.4.0"
+fandhe-ai = "0.15.0"
 ```
 
 公開ドキュメントは以下のとおりです。
@@ -32,7 +32,7 @@ fandhe-ai = { path = "../fandhe-ai/crates/facade" }
 
 利用者が直接依存すべきクレートは `fandhe-ai` だけです。`fandhe-ai-tensor-core`・
 `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
-`fandhe-ai-backend-metal` は内部クレートであり、直接の依存・利用はサポート
+`fandhe-ai-backend-metal`・`fandhe-ai-backend-rocm` は内部クレートであり、直接の依存・利用はサポート
 対象外です（詳細は [API Reference](/api/) を参照）。
 
 ## 最小コード例
@@ -40,7 +40,7 @@ fandhe-ai = { path = "../fandhe-ai/crates/facade" }
 `compat::array`（numpy `np.array` 慣習のテンソル生成）と
 `compat::Sequential`（Keras `Sequential` 慣習のレイヤー積み上げ）を使うと、
 数行でモデルを組み立てて推論できます。以下は
-`crates/facade/examples/getting_started.rs`（`cargo run --example
+`crates/facade/examples/getting_started.rs`（`cargo run -p fandhe-ai --example
 getting_started` で実行確認済み）と同一のコードです。
 
 ```rust
@@ -55,8 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![0.5_f32, 0.6, 0.7, 0.8],
     ])?;
 
-    // Keras `Sequential` 慣習でレイヤーを積み上げる（対象は Linear・
-    // ReLU/Sigmoid/Tanh の 4 種限定。`docs/compat-api-scope.md` §1）。
+    // Keras `Sequential` 慣習でレイヤーを積み上げる（`add_linear`／`add_relu`
+    // などの `add_*` 群。活性化・Conv・Norm・Pool・Attention・Transformer 等を
+    // 含む。対象範囲の正は `docs/compat-api-scope.md` §1、一覧は docs.rs の
+    // `compat::Sequential`）。
     // `add_linear` は `in_features == 0` を拒否するため `Result` を返し
     // `?` で連鎖できる（`Linear::new` への委譲。`fandhe_ai_autodiff::nn::linear`）。
     let model = Sequential::new()
@@ -91,7 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 バックエンド切替は feature フラグを使わない **cfg ベース**です。既定の
 `fandhe_ai::tape()` は常に利用可能な CPU バックエンドを結線します。明示的に
-デバイスを指定したい場合は `fandhe_ai::tape_for(Device)` を使います。
+デバイスを指定したい場合は `fandhe_ai::tape_for(Device)` を使います。指定できる値は
+`Device::Cpu`・`Device::Cuda(ordinal)`・`Device::Metal`（macOS 限定）・
+`Device::Rocm(0)`（AMD GPU。条件付き・実験的）です。
 
 ```rust
 use fandhe_ai::{Device, tape_for};
@@ -134,12 +138,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Device::Cpu`〈GitHub ホステッド CI・CUDA 非搭載環境の場合〉、2 行目が
 `input grad shape: [1, 4]`）。
 
-`Device::Cuda(ordinal)`／`Device::Metal`（macOS 限定）はいずれも構築時に
+`Device::Cuda(ordinal)`／`Device::Metal`（macOS 限定）／`Device::Rocm(0)` はいずれも構築時に
 デバイスの存在検証を行い、ドライバ不在・範囲外 ordinal の場合はエラーを
 返す fail-fast 設計です。`fandhe-ai` はデバイスが利用できないときに自動的に
 別のバックエンドへフォールバックすることはしません。フォールバックが
 必要な場合は、上記の例のように呼び出し側で `Result` を見て分岐して
 ください。
 
-`Device::available()` 相当の自動デバイス検出・列挙 API は現時点では
-提供していません。
+`Device::Rocm(0)`（AMD GPU）は**条件付き・実験的**です。HIP・HIPRTC・gfx942 の
+code object のロードがそろうホストだけで使え、それ以外のホストと
+`Device::Rocm(n >= 1)` は `DeviceUnavailable` になります（自動フォールバックは
+しません）。実機での確認は未実施です。
+
+利用できるデバイスの列挙には `fandhe_ai::available_devices()` が使えます。
+`Vec<Device>` を返し、`Device::Cpu` は常に含まれます。順序は Cpu → Cuda
+（ordinal 昇順）→ Metal（macOS）→ Rocm(0) です。列挙に失敗したバックエンドは
+panic せず結果から除かれます。返った各 `Device` は `tape_for` が `Ok` を
+返すことを意図していますが、列挙後に状態が変わる場合は契約の対象外です。
+`Device` は `#[non_exhaustive]` のため、下流で網羅的な `match` を書くときは
+`_` 腕が必要です。
