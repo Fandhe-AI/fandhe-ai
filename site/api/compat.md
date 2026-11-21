@@ -70,7 +70,7 @@ Keras `Sequential` 慣習でレイヤーを積み上げるビルダーです。`
 | `Sequential::compile(optimizer, loss) -> Result<(), AutodiffError>` | optimizer と loss を設定する。`fit` の前に 1 回呼ぶ |
 | `Sequential::fit(&x, &y, config: FitConfig) -> Result<History, AutodiffError>` | `compile` 済みの設定でエポック学習を実行し、学習履歴 `History` を返す（`y` の要素型は `FitTarget` を満たすもの） |
 
-
+### `fandhe_ai::Tape` newtype について
 
 `Sequential::forward`／`Sequential::bind` はいずれも `fandhe_ai_autodiff::Tape` では
 なく `fandhe_ai::Tape`（`fandhe-ai` 側の newtype）を引数に取ります。これは

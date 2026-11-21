@@ -15,8 +15,10 @@
 //! `Sequential::apply_parameters` で書き戻す。`AdamW` に替える場合は、
 //! 設定型も `SgdConfig::new(LR)` から `AdamWConfig`（例: `AdamWConfig::default()`）
 //! へ差し替えて `AdamW::new(AdamWConfig)` を呼ぶ（`SgdConfig` のままでは型が合わない）。
-//! `step` の引数は `&[(&Tensor, &Tensor)]`（param と grad の組）で、
-//! `trainable_parameters` と `trainable_grads` を同じ順序で zip して渡す。ループ自体を書かずに済ませたい場合は `Sequential::compile`／
+//! `step` の呼び出し方も異なる。`Sgd::step` は `&param_refs, &grad_refs` の 2 引数だが、
+//! `AdamW::step` は `&[(&Tensor<f32>, &Tensor<f32>)]`（param と grad の組）の 1 引数なので、
+//! `trainable_parameters` と `trainable_grads` を同じ順序で zip して組を作って渡す。
+//! ループ自体を書かずに済ませたい場合は `Sequential::compile`／
 //! `fit` を使う（その example はイシュー #4338 で追加予定）。
 //!
 //! **決定的シード**: データ生成は `fandhe_ai::manual_seed` ＋
