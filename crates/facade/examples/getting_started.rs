@@ -24,8 +24,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![0.5_f32, 0.6, 0.7, 0.8],
     ])?;
 
-    // Keras `Sequential` 慣習でレイヤーを積み上げる（対象は Linear・
-    // ReLU/Sigmoid/Tanh の 4 種限定。`docs/compat-api-scope.md` §1）。
+    // Keras `Sequential` 慣習でレイヤーを積み上げる（`add_linear`／`add_relu`
+    // などの `add_*` 群。活性化・Conv・Norm・Pool・Attention・Transformer 等を
+    // 含む。対象範囲の正は `docs/compat-api-scope.md` §1、一覧は docs.rs の
+    // `compat::Sequential`）。
     // `add_linear` は `in_features == 0` を拒否するため `Result` を返し
     // `?` で連鎖できる（`Linear::new` への委譲。`fandhe_ai_autodiff::nn::linear`）。
     let model = Sequential::new()
