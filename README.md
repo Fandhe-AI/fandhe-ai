@@ -86,6 +86,14 @@ cargo run -p fandhe-ai --example getting_started
 # => output shape: [2, 2]
 ```
 
+学習ループ（`compile` → `fit` → `evaluate` → `predict`）を通す MNIST 形式の example もあります。
+784 次元・10 クラスの**合成データ**を使うため、ネットワーク取得なしでオフラインで動作します
+（[`crates/facade/examples/mnist_mlp.rs`](crates/facade/examples/mnist_mlp.rs)）。
+
+```bash
+cargo run -p fandhe-ai --example mnist_mlp --release
+```
+
 ## クレート構成とサポート境界
 
 内部は複数のクレートに分かれていますが、利用者が直接触れるのは `fandhe-ai`
