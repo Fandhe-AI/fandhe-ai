@@ -10,7 +10,7 @@
 ## 2. 横断の前提
 
 - 互換判定は `docs/api-compat-0.14.0-decision.md` §8 の手順に従い、「追加のみ／破壊的で承認要／該当なし」の 3 区分で書く
-- 次の版は workspace の lockstep で 0.16.0 の見込み。破壊的変更を採る場合に限り `docs/migration/0.16.0.md` が要る（未作成。作成は実装 issue）
+- 次の版は workspace の lockstep で 0.16.0 の見込み。破壊的変更を採る場合、または §5.3 案 A の `History` の `==` の挙動変更（論点 7）が承認された場合は、`docs/migration/0.16.0.md` が要る（未作成。作成は実装 issue。後者は同ノートの「挙動のみの変更」欄に記載する）
 - facade が唯一のサポートされる公開面（`compat-api-scope.md` §0）。`onnx-interop` は内部クレートだが crates.io 公開済みのため、既存シグネチャは同じ扱いで凍結する
 
 ## 3. #4351 safetensors の `impl AsRef<Path>`
@@ -19,7 +19,7 @@
 
 - 4 関数が `&Path` を固定で受ける: `load_safetensors_f32`・`load_safetensors_typed`（`crates/onnx-interop/src/st_load.rs`）、`save_safetensors_f32`・`save_safetensors_typed`（`st_save.rs`）
 - facade の `crates/facade/src/interop/safetensors.rs` は `pub use` だけのモジュール。`api_surface.rs` の `interop_safetensors_module_is_pure_reexport` が facade 独自の定義を禁じ、`interop_safetensors_reexports_exactly_expected_surface` が識別子 14 件の完全一致を固定している。よって新しい入口は onnx-interop に置き、facade は再エクスポートする
-- `interop_safetensors_types_are_reachable_via_facade` は `fn(&std::path::Path) -> …` への関数ポインタ型強制で既存シグネチャを固定している。その場でジェネリック化すると、このプローブ自体が壊れる
+- `interop_safetensors_types_are_reachable_via_facade` は `fn(&std::path::Path) -> …` への関数ポインタ型強制でシグネチャを固定しているが、対象は `load_safetensors_typed`・`save_safetensors_typed`（保存側はマップ参照も受ける）の 2 本だけで、f32 版 2 本は固定されていない（#4351 で f32 版の `&Path` プローブを足す。§3.3）。typed 版をその場でジェネリック化すると、このプローブ自体が壊れる
 - 先例: `api-compat-0.14.0-decision.md` §4 は safetensors の入口を「ジェネリック化は不可。別名の入口を足す」とし、`facade-safetensors-exposure-decision.md` §13 も dtype 拡張で別名の入口（`*_typed`）を採って既存を凍結した。`impl AsRef<Path>` の先例は `compat::save_model`／`load_model`・`OnnxModel::from_path`／`to_path`
 
 ### 3.2 案
@@ -134,7 +134,7 @@
 ### 7.6 互換への影響
 
 - 推奨案はすべて「追加のみ」。§3 案 A を採る場合だけ「破壊的で承認要」
-- 公開面の区分（追加のみ）とは別に、§5.3 案 A では `History` の `==` の結果が変わる（既存 4 フィールドが同じでも停止 epoch が異なれば false）。`docs/api-compat-0.14.0-decision.md` §12.2 (c) の方針に沿い、これは「該当なし」相当の挙動変更として扱い、論点 7 で承認された場合はリリース時の「挙動のみの変更」欄に記載する
+- 公開面の区分（追加のみ）とは別に、§5.3 案 A では `History` の `==` の結果が変わる（既存 4 フィールドが同じでも停止 epoch が異なれば false）。`docs/api-compat-0.14.0-decision.md` §12.2 (c) の方針に沿い、これは「該当なし」相当の挙動変更として扱い、論点 7 で承認された場合は `docs/migration/0.16.0.md` の「挙動のみの変更」欄に記載する（公開面が追加のみでも、この挙動変更が承認されればノートを作る。§2）
 
 ### 7.7 適用記録・索引・追跡表
 
