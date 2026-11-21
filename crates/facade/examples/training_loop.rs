@@ -1,23 +1,28 @@
-//! `compat::Sequential` を使った学習ループの最小例（イシュー #875）。
+//! `Tape`／`Var` と `fandhe_ai::optim::Sgd` で書く、PyTorch 風の手書き
+//! 学習ループの最小例（イシュー #875・#4337）。
 //!
 //! サイト原稿（`site/examples/training-loop.md`）に転記するコード例の
 //! 一次ソース（`getting_started.rs`〈#874〉と同じ理由で二重実装を避ける。
 //! `.claude/rules/code-comment-style.md`）。本 example の実行成功
 //! （`cargo run -p fandhe-ai --example training_loop`）が原稿の受け入れ
 //! 条件（コード例がコンパイル・動作確認済みであること）を担保する。
+//! `fandhe-ai` の公開面（`fandhe_ai::*`）だけで完結するため、`fandhe-ai`
+//! だけに依存する利用者のプロジェクトへそのまま写して動く。
 //!
-//! **手動 SGD にする理由**: `fandhe_ai_autodiff::optim::{Sgd, AdamW}` は
-//! `facade` の公開面（`docs/compat-api-scope.md` §0）に含まれない
-//! 内部 API のため、本 example は `fandhe_ai::compat::Sequential` と
-//! `fandhe_ai::{Tape, Var, Tensor}` の公開面だけで完結する最小学習ループ
-//! として `param - lr * grad` を自前で計算する。optimizer 実装自体の
-//! 例は本 example のスコープ外（イシュー #875 実装計画 §7）。
+//! **optimizer**: `fandhe_ai::optim::{Sgd, SgdConfig}` を使う。PyTorch の
+//! `loss.backward(); optimizer.step()` に対応するのが `tape.backward` と
+//! `Sgd::step` で、`step` は更新後パラメータを返すので
+//! `Sequential::apply_parameters` で書き戻す。`AdamW` に替える場合は
+//! `AdamW::step` が `&[(&Tensor, &Tensor)]`（param と grad の組）を取る点だけ
+//! が異なる。ループ自体を書かずに済ませたい場合は `Sequential::compile`／
+//! `fit` を使う（その example はイシュー #4338 で追加予定）。
 //!
-//! **決定的シード**: 重み初期化（`Sequential::add_linear` の `seed`
-//! 引数）・データ生成（`bench_harness::rng::Xorshift64Star`）の双方を
-//! 固定シードで駆動する（`.claude/rules/coding-rust.md`「学習系回帰
-//! テストには決定的シード設定ユーティリティを使う」。ベンチ用途に
-//! 限らず本 example のような再現可能なデモにも同じ方針を適用する）。
+//! **決定的シード**: データ生成は `fandhe_ai::manual_seed` ＋
+//! `fandhe_ai::rand`（整数演算のみで生成されるためプラットフォーム間で
+//! bit 同一）、重み初期化は `Sequential::add_linear` の `seed` 引数で固定する
+//! （`.claude/rules/coding-rust.md`「学習系回帰テストには決定的シード設定
+//! ユーティリティを使う」）。`rand` は暗号用途の乱数ではなく、再現可能な
+//! デモ用途に限る。
 //!
 //! **借用スコープ**: `Sequential::bind` が返す `SequentialVars` は
 //! `&model`/`&tape` を借用するため、`Sequential::apply_parameters`
@@ -27,9 +32,9 @@
 //! 本番経路で `unwrap()`/`expect()` を使わない方針（`.claude/rules/
 //! coding-rust.md`）に合わせ、`main` は `Result` を返し `?` で伝播する。
 
-use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
+use fandhe_ai::optim::{Sgd, SgdConfig};
 
 const BATCH: usize = 4;
 const D_IN: usize = 8;
@@ -43,19 +48,15 @@ const SEED_L2: u64 = 0x2222_2222;
 const STEPS: usize = 100;
 const LR: f32 = 0.05;
 
-/// `x`（`[BATCH, D_IN]`）・`y`（`[BATCH, D_OUT]`）を Xorshift64Star から
-/// 生成する（`crates/facade/tests/compat_sequential_train.rs::gen_regression_data`
-/// と同一生成順）。
+/// `x`（`[BATCH, D_IN]`）・`y`（`[BATCH, D_OUT]`）を `[0, 1)` の一様乱数で
+/// 生成する（`manual_seed` で系列を固定してから `rand` を呼ぶ）。
 fn gen_regression_data(
     seed: u64,
 ) -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> {
-    let mut rng = Xorshift64Star::new(seed);
-    let x = rng.fill_vec(BATCH * D_IN);
-    let y = rng.fill_vec(BATCH * D_OUT);
-    Ok((
-        Tensor::new(x, &[BATCH, D_IN])?,
-        Tensor::new(y, &[BATCH, D_OUT])?,
-    ))
+    fandhe_ai::manual_seed(seed);
+    let x = fandhe_ai::rand(&[BATCH, D_IN])?;
+    let y = fandhe_ai::rand(&[BATCH, D_OUT])?;
+    Ok((x, y))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,16 +66,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_linear(D_HIDDEN, D_OUT, SEED_L2)?;
 
     let (x_data, y_data) = gen_regression_data(SEED_DATA)?;
+    let mut optimizer = Sgd::new(SgdConfig::new(LR))?;
 
     let mut initial_loss = None;
     let mut final_loss = 0.0_f32;
 
     for step in 0..STEPS {
-        // 1 ステップ分の Tape 上で forward → backward → 手動 SGD 更新値の
-        // 計算までを行い、更新後テンソル列（所有 `Vec<Tensor<f32>>`）を
-        // ブロック外へ持ち出す。ブロックを抜けると `bound`（`&model` を
-        // 借用）と `tape` が drop され、直後の `apply_parameters`
-        // （`&mut model`）呼び出しと借用が競合しない。
+        // 1 ステップ分の Tape 上で forward → backward → optimizer.step までを
+        // 行い、更新後テンソル列（所有 `Vec<Tensor<f32>>`）をブロック外へ
+        // 持ち出す。ブロックを抜けると `bound`（`&model` を借用）と `tape` が
+        // drop され、直後の `apply_parameters`（`&mut model`）と借用が競合しない。
         let updated: Vec<Tensor<f32>> = {
             let tape = fandhe_ai::tape();
             let bound = model.bind(&tape);
@@ -92,31 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             final_loss = loss_value;
 
+            // PyTorch の `loss.backward()` に相当。
             let grads = tape.backward(&loss)?;
             let grad_refs = bound.trainable_grads(&grads)?;
             let param_refs = model.trainable_parameters();
 
-            let mut next_params = Vec::with_capacity(param_refs.len());
-            for (param, grad) in param_refs.iter().zip(grad_refs.iter()) {
-                // `contiguous()` の戻り値は同一文の間だけ生存すればよい
-                // （`crates/facade/tests/compat_sequential_train.rs::dense_vec`
-                // と同じ一時変数寿命の使い方）ため 1 文で `to_vec()` まで行う。
-                let param_data = param.contiguous().as_slice().ok_or(
-                    "trainable_parameters() の要素は contiguous() 直後は必ず as_slice() が Some",
-                )?.to_vec();
-                let grad_data = grad
-                    .contiguous()
-                    .as_slice()
-                    .ok_or("trainable_grads() の要素は contiguous() 直後は必ず as_slice() が Some")?
-                    .to_vec();
-                let sgd_data: Vec<f32> = param_data
-                    .iter()
-                    .zip(grad_data.iter())
-                    .map(|(p, g)| p - LR * g)
-                    .collect();
-                next_params.push(Tensor::from_slice(&sgd_data, param.shape())?);
-            }
-            next_params
+            // PyTorch の `optimizer.step()` に相当（更新後パラメータを返す）。
+            optimizer.step(&param_refs, &grad_refs)?
         };
         model.apply_parameters(updated)?;
     }
