@@ -326,8 +326,9 @@ pub enum Optimizer {
 ///
 /// **`shuffle` の既定値（`false`）について**: Keras `fit` の既定
 /// `shuffle=True` とは異なり、[`fandhe_ai_tensor_core::data::
-/// DataLoaderConfig::new`] と同じ「既定でグローバル RNG を消費しない」
-/// 側へ揃えた（`docs/compat-fit-evaluate-design.md` 参照）。Keras
+/// DataLoaderConfig::new`] と同じ「既定でサンプル順序のシャッフルにグローバル RNG
+/// を消費しない」側へ揃えた（Dropout など学習時に乱数を使う層は別で、`shuffle = false`
+/// でも消費する）（`docs/compat-fit-evaluate-design.md` 参照）。Keras
 /// 相当にしたい呼び出し元は [`Self::shuffle`]`(true)` を明示する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FitConfig {
@@ -441,8 +442,10 @@ impl FitConfig {
     /// 範囲検査は [`Self::new`] の `epochs == 0` や [`Self::accumulate_steps`]
     /// の `n == 0` と同じ方針で fit 呼び出し時に行い、非有限・負値・`1` 以上・
     /// 分割後の学習側／検証側が 0 件になる値・明示 `validation` との併用は
-    /// `AutodiffError::InvalidArgument` で拒否する。`0.0`（`-0.0` を含む）は
-    /// 分割なしとして扱う。
+    /// `AutodiffError::InvalidArgument` で拒否する（学習側・検証側の両方に少なくとも 1 件
+    /// 必要で、例えば N = 1・`fraction = 0.25` は学習側が 0 件になり拒否）。`0.0`（`-0.0` を
+    /// 含む）は明示 `validation` との併用検査より先に処理され、自動分割を無効にするだけで、
+    /// 明示 `validation` と併用しても拒否されない（拒否は非ゼロの有効な分割率との併用のみ）。
     ///
     /// 内部表現は `f32::to_bits` のため、`Eq` はビット比較になる:
     /// `validation_split(0.0)` は未指定の [`Self::new`] と等しくなく、
@@ -2503,12 +2506,13 @@ impl Sequential {
     /// 1 バッチあたりの演算列・train／eval モードの扱い・エラー契約は
     /// [`Self::fit_with_callbacks`] doc を参照（本メソッドはそのうち
     /// `validation`／`callbacks` を使わないサブセット）。ただし `config` に
-    /// [`FitConfig::validation_split`] があれば、`fit` でも末尾の分割で検証し
-    /// `History::val_loss` を積む。
+    /// [`FitConfig::validation_split`] があり、有効な分割が成立する場合（学習側・検証側の両方に
+    /// 1 件以上）は、`fit` でも末尾の分割で検証し `History::val_loss` を積む。
     ///
     /// # 乱数（shuffle と `manual_seed`）
     ///
-    /// - 既定（[`FitConfig::new`]）は `shuffle = false` で、グローバル RNG を消費しない。
+    /// - 既定（[`FitConfig::new`]）は `shuffle = false` で、サンプル順序のシャッフルでは
+    ///   グローバル RNG を消費しない（Dropout などの層は学習モードで別途消費する。下記参照）。
     /// - [`FitConfig::shuffle`]`(true)` のとき、各 epoch の開始時に、[`crate::manual_seed`] で
     ///   初期化されるグローバル RNG から、サンプル添字の順列を 1 回引き、バッチに分割する。`fit` の前に
     ///   `fandhe_ai::manual_seed(seed)` を呼べば、同じデータ・同じモデル構築・同じ呼び出し列で
@@ -2782,8 +2786,10 @@ impl Sequential {
     /// `validation: None` と [`FitConfig::validation_split`]`(f)`（`f` は 0 より大きく 1 未満）
     /// を組み合わせると、末尾の分割が検証データになる。`metrics`・`Monitor::ValMetric`／
     /// `ValLoss` 監視・`History::val_loss` はその分割に対して有効になる。`Some(..)` の
-    /// `validation` と `validation_split` の併用は `InvalidArgument`。`validation_split(0.0)`
-    /// （`-0.0` を含む）は分割なしで、検証データは無いものとして扱う。
+    /// `validation` と非ゼロの有効な `validation_split` の併用は `InvalidArgument`。
+    /// `validation_split(0.0)`（`-0.0` を含む）は併用検査より先に処理され、自動分割を無効に
+    /// するだけなので、`validation: Some(..)` と併用しても明示の検証データで評価される。
+    /// 分割は学習側・検証側に少なくとも 1 件ずつ必要で、満たさない値は `InvalidArgument`。
     ///
     /// ```
     /// use fandhe_ai::compat::{FitConfig, Loss, Metrics, Optimizer, Sequential};
