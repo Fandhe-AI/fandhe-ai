@@ -565,9 +565,12 @@ impl<'a> FitWeights<'a> {
 /// の `metrics` 引数が非空かつ検証データ（明示の `validation`、または
 /// 実効的な `validation_split` による分割）がある場合のみ epoch
 /// `i` 末の検証 metrics（[`MetricsResult`]。`val_loss` と同じ
-/// validation バッチ列から算出）で埋まる。`metrics` が空、または
-/// 検証データが無い場合（[`Sequential::fit`]／`fit_with_callbacks` で
-/// `validation_split` も無いとき）は空のまま（`Vec::new()`）。
+/// validation バッチ列から算出）で埋まる。次のいずれかなら空のまま
+/// （`Vec::new()`）で、2 条件（metrics の要求・検証データの有無）は独立に効く:
+/// - `metrics` が空（[`Sequential::fit`]／`fit_with_callbacks` は内部へ空の
+///   `metrics` を渡すため、`validation_split` で `val_loss` が記録されても
+///   `val_metrics` は空）
+/// - 検証データが無い
 ///
 /// いずれの `Vec` も `i` は `fit_with_callbacks` 呼び出し内のローカル
 /// epoch 番号（0-indexed。`super::callbacks` モジュール doc「epoch
@@ -2508,6 +2511,8 @@ impl Sequential {
     /// `validation`／`callbacks` を使わないサブセット）。ただし `config` に
     /// [`FitConfig::validation_split`] があり、有効な分割が成立する場合（学習側・検証側の両方に
     /// 1 件以上）は、`fit` でも末尾の分割で検証し `History::val_loss` を積む。
+    /// ただし `fit` は空の `metrics` を内部へ渡すため、分割が有効でも
+    /// `History::val_metrics` は空のまま（値を得るには [`Self::fit_with_metrics`]）。
     ///
     /// # 乱数（shuffle と `manual_seed`）
     ///
@@ -2516,7 +2521,11 @@ impl Sequential {
     /// - [`FitConfig::shuffle`]`(true)` のとき、各 epoch の開始時に、[`crate::manual_seed`] で
     ///   初期化されるグローバル RNG から、サンプル添字の順列を 1 回引き、バッチに分割する。`fit` の前に
     ///   `fandhe_ai::manual_seed(seed)` を呼べば、同じデータ・同じモデル構築・同じ呼び出し列で
-    ///   `History` と最終パラメータが再現する。
+    ///   `History` と最終パラメータが再現する。ただしグローバル RNG はプロセス全体で共有されるため、
+    ///   再現は「`manual_seed` から `fit` の終了までの間に、他スレッドが RNG を消費・再シードしない」
+    ///   前提でのみ成り立つ（介入があるとシャッフル順が変わり、`History` と最終パラメータの
+    ///   一致は保証されない。契約は `docs/rng-global-contract-design.md`）。並列実行するテストでは
+    ///   RNG を使う処理を直列化すること。
     /// - Dropout など、学習時に同じグローバル RNG を使う層があれば、その消費も同じ列に入る。
     /// - `add_linear(.., seed)` 等の個別 seed による初期化は `manual_seed` と独立している。
     /// - `validation_split` の分割はシャッフル前に行い、末尾を検証側にするため乱数に依らない。
@@ -2545,7 +2554,8 @@ impl Sequential {
     ///     model.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)?;
     ///     Ok(model.fit(&x, &y, FitConfig::new(3, 2).shuffle(true))?)
     /// };
-    /// // 同じ seed なら shuffle の順列も同じで、History が一致する。
+    /// // 同じ seed なら shuffle の順列も同じで、History が一致する
+    /// // （他スレッドが RNG を操作しない前提。上記参照）。
     /// assert_eq!(run()?, run()?);
     /// # Ok(())
     /// # }
