@@ -10,7 +10,7 @@
 ## 2. 横断の前提
 
 - 互換判定は `docs/api-compat-0.14.0-decision.md` §8 の手順に従い、「追加のみ／破壊的で承認要／該当なし」の 3 区分で書く
-- 次の版は workspace の lockstep で 0.16.0 の見込み。破壊的変更を採る場合、または §5.3 案 A の `History` の `==` の挙動変更（論点 7）が承認された場合は、`docs/migration/0.16.0.md` が要る（未作成。作成は実装 issue。後者は同ノートの「挙動のみの変更」欄に記載する）
+- 次の版は workspace の lockstep で 0.16.0 の見込み。`docs/migration/0.16.0.md` は、破壊的変更を採る場合、または §7.6 の「挙動の変化の一覧」のいずれかを採る場合に要る（未作成。作成は実装 issue。何をどの条件で載せるかは §7.6 の一覧を正とし、ここでは書かない）
 - facade が唯一のサポートされる公開面（`compat-api-scope.md` §0）。`onnx-interop` は内部クレートだが crates.io 公開済みのため、既存シグネチャは同じ扱いで凍結する
 
 ## 3. #4351 safetensors の `impl AsRef<Path>`
@@ -54,11 +54,11 @@
 | B | `Default` だけ足す | 変更が最小 | `epochs=1`・`batch_size=32` 固定のため、作法を揃える目的をほぼ果たさない |
 | C | `#[derive(Default)]` | 実装が最小 | 0／0 は拒否される値のため不採用 |
 | D | 対象外（rustdoc に、構造体更新構文は使えず `new` が正の入口と書く） | 公開面が増えない | ハンズオンの不一致が残る |
-| E | フィールドを `pub` にする | `..Default::default()` が成立 | 以後のフィールド追加がすべて破壊的になり、`validation_split_bits` の内部表現も露出する。不採用 |
+| E | フィールドを `pub` にする | `..Default::default()` が成立（フィールドの公開に加えて手書き `impl Default` の追加も要る） | 以後のフィールド追加がすべて破壊的になり、`validation_split_bits` の内部表現も露出する。不採用 |
 
 ### 4.3 推奨・SemVer・`api_surface.rs`
 
-- 推奨: **実装する（案 A）**。フィールドを非公開に保つ案（A〜D）では構造体更新構文は成立せず、ビルダーなしの `Default` では目的を果たせないため。構造体更新構文が成立するのは案 E だけで、その場合も現行の `FitConfig` には `Default` がないため、フィールドの公開に加えて `Default` の追加（手書き `impl Default`）が必要になる。案 E は採らない。案 A の `Default` は他フィールドの既定も `FitConfig::new(1, 32)` と同じ値を引き継ぐ。rustdoc に既定値一覧と `FitConfig::default() == FitConfig::new(1, 32)` の doctest を書く
+- 推奨: **実装する（案 A）**。フィールドを非公開に保つ案（A〜D）では構造体更新構文は成立せず、ビルダーなしの `Default` では目的を果たせないため。構造体更新構文が成立する条件は §4.2 案 E のとおりで、案 E は採らない。案 A の `Default` は他フィールドの既定も `FitConfig::new(1, 32)` と同じ値を引き継ぐ。rustdoc に既定値一覧と `FitConfig::default() == FitConfig::new(1, 32)` の doctest を書く
 - SemVer: 追加のみ（trait impl と inherent メソッドの追加。derive 集合と既存メソッドは不変）
 - `api_surface.rs`: `fit_types_are_reachable_via_facade_only` の近くに正のプローブを足す（`Default + Copy + Eq` の境界の具体化、`FitConfig::default() == FitConfig::new(1, 32)`、`epochs`／`batch_size` の `fn(FitConfig, usize) -> FitConfig` 型）
 
@@ -82,9 +82,13 @@
 
 - 推奨: **実装する（案 A。案 B の rustdoc も併せて書く）**
 - 等値比較への影響: `History` は `PartialEq` を derive しているため、案 A では停止 epoch が異なれば既存 4 フィールドが等しくても `==` の結果が変わる。推奨は停止 epoch を等値比較に含める（derive のまま。停止の有無も学習結果の差として扱う）。既存の `History` 同士の比較テストは構築箇所で `stopped_epoch: None` を与えれば結果が変わらない。この点は所有者への論点 7 とする
-- 確定タイミングと観測契約: 停止 epoch は、その epoch 末の全 callback（`LambdaCallback` を含む）の処理が終わった後に確定し、fit の戻り値の `History` で公開する。callback 処理中に渡される `&History` には当該 epoch の停止要求が反映されない（`stopped_epoch` は `None` のまま。EarlyStopping の登録順に依存した値を callback に見せない）。callback が停止を知る方法は fit の戻り値と `EarlyStopping::stopped_epoch()` のみとする。停止 epoch を記録するのは、全 callback が正常に完了し fit が `Ok(History)` を返す場合に限る。停止要求後に callback が失敗して `Err` を返す場合は既存どおり `Err` のままで、戻り値の `History` は存在しない。呼び出し側の `EarlyStopping::stopped_epoch()` は停止要求時に保存された `Some(epoch_local)` のまま残る（既存挙動。クリアの境界は 1 つで、次の呼び出しが `reset_for_fit()` に到達した時点で `None` になる。`reset_for_fit()` に到達する前に `Err` で拒否された呼び出しでは前回の値が残り、到達した後の `Err`〈ローダー構築での `batch_size == 0` の拒否等〉ではクリア済み〈`None`〉になる。どの検証がどちらの側かは実装に従い、本記録では列挙しない）
+- 確定タイミングと観測契約: 停止 epoch は、その epoch 末の全 callback（`LambdaCallback` を含む）の処理が終わった後に確定し、fit の戻り値の `History` で公開する。callback 処理中に渡される `&History` には当該 epoch の停止要求が反映されない（`stopped_epoch` は `None` のまま。EarlyStopping の登録順に依存した値を callback に見せない）。callback が停止を知る方法は fit の戻り値と `EarlyStopping::stopped_epoch()` のみとする。停止 epoch を記録するのは、全 callback が正常に完了し fit が `Ok(History)` を返す場合に限る。停止要求後に callback が失敗して `Err` を返す場合は既存どおり `Err` のままで、戻り値の `History` は存在しない。呼び出し側の `EarlyStopping::stopped_epoch()` の値は下の定義に従う（既存挙動。検証がどちら側かは実装に従い、本記録では列挙しない）
+- `EarlyStopping::stopped_epoch()` の呼び出し後の値の定義（既存挙動。1 回の fit 呼び出しが「`reset_for_fit()` に到達したか」×「その呼び出しで停止要求が出たか」で決まる。他の節はここを参照し、言い換えない）
+  - `reset_for_fit()` に到達する前に `Err` で拒否された → 前回の値のまま
+  - 到達した後、停止要求が出る前に `Err`（ローダー構築での `batch_size == 0` の拒否、停止要求前の epoch での失敗等）→ `None`
+  - 停止要求が出た後（後続 callback の失敗による `Err` を含む）→ その呼び出しの `Some(epoch_local)`
 - 意味: `EarlyStopping` が複数あっても 1 epoch で全 callback を処理してから抜けるため値は 1 つ。callback を受ける全入口（`fit_with_callbacks`・`fit_with_metrics`・`fit_with_prefetch`・`fit_with_train_step`・`fit_with_weights`）が共通の内部学習経路（`fit_with_callbacks_named`。`reset_for_fit()` もここで 1 回呼ぶ）を通って同じ `History` を返すため、どの入口で停止しても同じ契約で `Some(epoch_local)` を返す（上記の確定タイミング・`Err` 時・リセットの契約も全入口に同じく適用される。既存の公開形の適用範囲の明記であり、新しい保証ではない）。fit を複数回呼ぶ場合はその呼び出しのローカル番号。callback を受けない入口（`fit`〈空の callback で同じ経路を通る〉・`FunctionalModel` の学習）は常に `None`
-- SemVer（公開面の区分）: 追加のみ（`History` は `#[non_exhaustive]`。公開名の増減で決める）。`==` の判定対象が増える挙動変化は区分には重ねず、別途、承認対象（論点 7）および移行ノートの記載事項として記録する（§7.6）
+- SemVer（公開面の区分）: 追加のみ（`History` は `#[non_exhaustive]`。公開名の増減で決める）。挙動の変化（`==`・`{:?}`）は区分に重ねず §7.6 の一覧に記録する
 - `api_surface.rs`: `assert_is_history_type` 付近に `let _: &Option<usize> = &h.stopped_epoch;` 型のフィールドプローブを足す。停止／完走のテストは #4353 の範囲
 
 ## 6. 所有者へ戻す論点（#4349 が行を足す）
@@ -125,7 +129,7 @@
 |--------------|--------|------|
 | #4351 別名の入口の追加 | `api_surface.rs` の期待集合 18 件・パス型 4 種のコンパイル可否プローブ・新しい入口（`AsRef<Path>` 版）が既存関数への委譲と等価であることの検査。同じ入力に対して既存関数と同じ結果になること（成功時は保存したファイルを読み戻した値、失敗時は `Err` の種別）を、保存・読み込みのそれぞれで成功ケースと失敗ケースについて比べる。比較の両辺は状態と出力先を共有させず独立にする（保存では新旧 API にそれぞれ別の未作成パスを渡し、各呼び出しが指定したパスから読み戻した値どうしを比べる。呼び出し前に保存先が存在しないことと、読み戻した値が保存した入力と一致することを基準側で先に確かめる。同じ保存先だと、新 API が何も書かず `Ok(())` を返しても、既存 API が書いたファイルを読み戻して通ってしまうため）。パス型 4 種（`&str`・`String`・`PathBuf`・`&Path`）は成功ケースで確かめる。失敗ケースは、読み込みでは存在しないファイル、保存では親ディレクトリが存在しないパスを使う（親ディレクトリが存在すれば未作成の保存先に新規ファイルを作れるのは既存関数の挙動で、新しい入口も同じ。期待値は独自に決めず「既存関数と同じ」を基準にする）。パスを無視する実装では通らない | CI |
 | #4352 `Default` とビルダー | 正のプローブ（型・境界）・doctest（`default() == new(1, 32)`）に加え、各ビルダーメソッド（新設の `epochs`・`batch_size` と既存ビルダー）は、変更対象以外の全フィールドを `default()` と異なる値（各フィールドの有効な範囲内）にし、変更対象フィールドには現在値と異なる値を渡して呼ぶ（bool のフィールドは false から true、true から false の両方向を、それぞれその値から始めて確かめる）。結果は、変更対象だけがその値になり他の全フィールドが保持されることを、独立に構築した期待値との `==` で確かめる（`default()` の値の確認とは別の検査）。型プローブだけでは入力を無視する実装を見逃すため | CI |
-| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト（値で確かめ、型プローブだけに頼らない）・callback を受ける 5 入口（`fit_with_callbacks`・`fit_with_metrics`・`fit_with_prefetch`・`fit_with_train_step`・`fit_with_weights`）のそれぞれで、`fit_with_callbacks` と同じ停止条件・同じ入力のとき停止 epoch が `fit_with_callbacks` と一致すること。各比較で基準側（`fit_with_callbacks`）の戻り値が `Some` であることを先に確かめ、`None == None` で通らないようにする（共通経路との等価性で比べ、入口ごとに独自の期待値を置かない。両辺は入力・モデル・callback をそれぞれ別に新しく用意して独立にする。fit は学習で状態を更新するため、同じモデルや callback を使い回すと、片側が何もしなくても一致しうる）・`fit`（callback なし）と `FunctionalModel` の学習では `None` のままであること・最終 epoch で停止し履歴長が予定 epoch 数に等しくても `Some(epochs - 1)` となるケース（`history.loss.len() < epochs` からの推定実装を見逃さないため）・停止 epoch だけが異なる 2 つの `History` の `==` テスト（論点 7 の結論で期待値を切り替える。「含める」なら不一致、「含めない」〈`PartialEq` を手書きして除外〉なら一致）・実際に停止を要求する `EarlyStopping` の後ろ（スライス順で後）に `LambdaCallback` を置き、停止 epoch 中に `LambdaCallback` が観測する `History` の `stopped_epoch` が `None` で、同じ fit の戻り値には `Some(停止 epoch)` が入ること（`LambdaCallback` が先に呼ばれる配置では、停止要求直後に書き込む実装を見逃すため）・停止要求後に後続 callback（`LambdaCallback` 等）が失敗した場合は、`fit_with_callbacks` が `Err` を返す（`History` は返らないので戻り値に停止 epoch は存在しない）一方、呼び出し後の呼び出し側の `EarlyStopping::stopped_epoch()` は既存どおり `Some(epoch_local)` のまま残ること（クリアされるのは次の呼び出しが `reset_for_fit()` に到達した時点で、前回値を保持するのはその前に `Err` で拒否された場合に限る。手順の例: `fit_with_metrics` で `Monitor::ValMetric` を監視する `EarlyStopping` を停止させ、同じ callback で `metrics` から監視対象を外して再呼び出しし、`Err` かつ `stopped_epoch()` が前回の `Some(epoch_local)` のままであること。`reset_for_fit()` 到達後の `Err`〈`batch_size == 0` 等〉では `None` になること。この挙動は変えない） | CI |
+| #4353 停止 epoch | フィールド型プローブ・停止時 `Some`／完走時 `None` の統合テスト（値で確かめ、型プローブだけに頼らない）・callback を受ける 5 入口（`fit_with_callbacks`・`fit_with_metrics`・`fit_with_prefetch`・`fit_with_train_step`・`fit_with_weights`）のそれぞれで、`fit_with_callbacks` と同じ停止条件・同じ入力のとき停止 epoch が `fit_with_callbacks` と一致すること。各比較で基準側（`fit_with_callbacks`）の戻り値が `Some` であることを先に確かめ、`None == None` で通らないようにする（共通経路との等価性で比べ、入口ごとに独自の期待値を置かない。両辺は入力・モデル・callback をそれぞれ別に新しく用意して独立にする。fit は学習で状態を更新するため、同じモデルや callback を使い回すと、片側が何もしなくても一致しうる）・`fit`（callback なし）と `FunctionalModel` の学習では `None` のままであること・最終 epoch で停止し履歴長が予定 epoch 数に等しくても `Some(epochs - 1)` となるケース（`history.loss.len() < epochs` からの推定実装を見逃さないため）・停止 epoch だけが異なる 2 つの `History` の `==` テスト（論点 7 の結論で期待値を切り替える。期待値は §7.6 の `==` の行に従う）・実際に停止を要求する `EarlyStopping` の後ろ（スライス順で後）に `LambdaCallback` を置き、停止 epoch 中に `LambdaCallback` が観測する `History` の `stopped_epoch` が `None` で、同じ fit の戻り値には `Some(停止 epoch)` が入ること（`LambdaCallback` が先に呼ばれる配置では、停止要求直後に書き込む実装を見逃すため）・停止要求後に後続 callback（`LambdaCallback` 等）が失敗した場合は、`fit_with_callbacks` が `Err` を返し（`History` は返らない）、呼び出し後の `EarlyStopping::stopped_epoch()` は §5.3 の定義どおりになること（3 つの場合をそれぞれ確かめる。手順の例: 到達前の拒否は、`fit_with_metrics` で `Monitor::ValMetric` を監視する `EarlyStopping` を停止させた後、同じ callback で `metrics` から監視対象を外して再呼び出しする） | CI |
 
 ### 7.5 数値契約
 
@@ -133,12 +137,12 @@
 
 ### 7.6 互換への影響
 
-- 推奨案はすべて「追加のみ」。§3 案 A を採る場合だけ「破壊的で承認要」
-- 公開面の区分は「追加のみ」で確定（`docs/api-compat-0.14.0-decision.md` §12.2 (c): 区分は公開名の増減で決め、挙動の変化は別に記録する）。これとは別に、§5.3 案 A では `History` の `==` の結果が変わる（既存 4 フィールドが同じでも停止 epoch が異なれば false）。この挙動変更は区分を付けず、承認対象（論点 7）および移行ノートの記載事項として記録し、論点 7 で承認された場合は `docs/migration/0.16.0.md` の「挙動のみの変更」欄に記載する（公開面が追加のみでも、この挙動変更が承認されればノートを作る。§2）
-- 挙動の変化の一覧（区分は付けず、承認対象・移行ノートの記載事項。型の derive／impl は `crates/facade/src/compat/training.rs` の現行定義で確かめた。変わらないものは書かない）
+- 公開面の区分は各案の節（§3.3・§4.3・§5.3）を正とする（推奨案はすべて「追加のみ」）
+- 区分の考え方: `docs/api-compat-0.14.0-decision.md` §12.2 (c) に従い、区分は公開名の増減で決め、挙動の変化は区分を付けず別に記録する。下の一覧が、承認対象（論点 7 を含む）であり、移行ノート `docs/migration/0.16.0.md`（「挙動のみの変更」欄）に載せる事項を定義する唯一の場所である
+- 挙動の変化の一覧（区分は付けず、承認対象・移行ノートの記載事項。案 A 採用時、`{:?}` の変化は常に載せ、`==` の変化は論点 7 の結論が「含める」のときだけ載せる。型の derive／impl は `crates/facade/src/compat/training.rs` の現行定義で確かめた。変わらないものは書かない）
   - `History`（§5.3 案 A。現行の derive は `Debug`・`Clone`・`PartialEq` で、`Default`・serde 系・手書きの trait impl はない）
-    - `==` の判定: 停止 epoch が異なれば、既存 4 フィールドが等しくても不一致になる（論点 7 で「含めない」とした場合は変化しない）
-    - `{:?}` の出力: derive を維持すると、`stopped_epoch` が `None` でも出力にフィールドが加わり、既存のログ・デバッグ出力のスナップショットが変わる。論点 7 の結論に依らず発生する（`Debug` を手書きして除外する案は採らない。新しい公開形を足さないため）
+    - `==` の判定: 論点 7 が「含める」（推奨。derive のまま）なら、停止 epoch が異なれば既存 4 フィールドが等しくても不一致になる。「含めない」（`PartialEq` を手書きして除外）なら変化しない
+    - `{:?}` の出力: derive を維持すると、`stopped_epoch` が `None` でも出力にフィールドが加わり、既存のログ・デバッグ出力のスナップショットが変わる。論点 7 の結論に依らず発生し、案 A を採用すれば移行ノートに載る（`Debug` を手書きして除外する案は採らない。新しい公開形を足さないため）
   - `FitConfig`（§4.3 案 A）: 観測できる挙動の変化なし（`Default` の追加と inherent メソッド 2 本のみ。derive 集合・フィールド・既存メソッドの出力は不変）
   - safetensors（§3.3 案 B）: 観測できる挙動の変化なし（関数の追加のみ）。案 A を採る場合の呼び出し側のコンパイル可否の変化は §3.2 に記載済みで、破壊的として扱う
   - #4354・#4355 は本記録に案がまだ無い。#4349 が追記する際に同じ観点（`Debug`・`Clone`・`PartialEq`・`Default`・serde 系・`Send`／`Sync`・型推論と trait 境界）で本一覧へ足す
