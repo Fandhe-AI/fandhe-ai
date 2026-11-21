@@ -133,15 +133,16 @@ impl Sequential {
   これらを引き継がず、callback は新しい `fit_on` 呼び出しで初期化し直す前提とし、呼び出し側が
   残存したチェックポイントを扱う。エラーを返す時点でチェックポイントが書かれていた場合の通知方法は
   #4360 で定める
-- **エラー表**（新しいエラー型・variant は足さず `AutodiffError::Backend(BackendError::…)` を再利用）:
+- **エラー表**（新しいエラー型・variant は足さない。既存の引数・状態エラーは `AutodiffError` の
+  variant、バックエンド由来のエラーは `AutodiffError::Backend(BackendError::…)` を、完全な variant 名で使い分ける）:
 
 | 事象 | エラー |
 |---|---|
-| デバイス不在・範囲外 ordinal | `tape_for` の `BackendError` をそのまま返す |
-| 未対応の層・損失・optimizer・組合せ | `Unsupported` |
-| 不正な引数（`epochs == 0` 等） | 既存 `fit` と同じ `InvalidArgument` |
+| デバイス不在・範囲外 ordinal | `tape_for` が返す `AutodiffError::Backend(BackendError::…)` をそのまま返す |
+| 未対応の層・損失・optimizer・組合せ | `AutodiffError::Backend(BackendError::Unsupported)` |
+| 不正な引数（`epochs == 0` 等） | 既存 `run_fit` と同じ `AutodiffError::InvalidArgument`（`BackendError::InvalidArgument` ではない） |
 | 未 compile | 既存 `fit` と同じエラー |
-| 状態の poison 等 | `StorePoisoned`（P6 と同じ） |
+| 状態の poison 等 | `AutodiffError::Backend(BackendError::StorePoisoned)`（P6 と同じ） |
 
 ## §5 既存 `train_step_resident`（P5）との関係
 
@@ -179,16 +180,21 @@ impl Sequential {
 モデル構成の静的検査として行い、段階ごとのチェーン対応構成（`train_step_resident` が
 `build_device_chain_steps` で拒否する空モデル・Sigmoid 等を含む）を store 生成前に別途検査する。
 `contains_resident_unsupported_layer` は汎用の常駐経路向けの除外リストであり、これだけでは不足する。
-拒否する組合せ:
+無条件に拒否する組合せ（経路選択に依らない）:
 
 - 常駐非対応の層（`contains_resident_unsupported_layer` の対象。#4379／#4383／#4386 で段階的に解除）
-- チェーン非対応の構成（空モデル・未対応の活性化〈Sigmoid 等〉。`build_device_chain_steps` と
-  同じ条件を store 生成前に検査する。段階ごとの対応範囲は #4360）
 - 追跡対象外の独自層（`add_module`）
 - 未対応の損失・未対応の optimizer（L-BFGS を含む）
 - `compile_with_amp`（AMP）・`compile_with_param_groups`（param groups）
 - `FitConfig::accumulate_steps > 1`・`validation_split`（扱いは #4360 で決める）
 - 未対応の callback（§7）
+
+経路選択の条件として扱う構成（無条件の拒否ではない）:
+
+- チェーン非対応の構成（空モデル・未対応の活性化〈Sigmoid 等〉。`build_device_chain_steps` と
+  同じ条件を store 生成前に検査する。段階ごとの対応範囲は #4360）。常駐チェーンが成立しない
+  というだけでは拒否せず、③ で許可済みの同一デバイス上の Tape 経路が成立すればそちらを選ぶ。
+  **許可済みのどの経路も成立しない場合に限り** `Unsupported` で拒否する
 
 `FitWeights`（class／sample weight）・学習 step フック・prefetch は案 B では入口に引数がなく、構造的に受けない。
 段階ごとの対応範囲は #4360 に任せ、本節は方針のみを定める。
@@ -210,9 +216,22 @@ impl Sequential {
   保存される。このため両 callback のスナップショット（`EarlyStopping` の最良重み、`ModelCheckpoint` の保存内容）は、
   **現在の store から取得（D2H）した重みを使い**、ホストモデルの `state_dict()` を使わない。
   ファイル出力を指定しない `ModelCheckpoint` のメモリ内保存にも同じ契約を適用する。
+- **取得失敗の伝播契約**: `Tape::sync_device_param_store_to_host` は失敗しうるが、既存の
+  `EarlyStopping::observe` が受けるスナップショット取得クロージャは失敗を返せず、取得より先に
+  `best` を更新する。GPU 入口ではこの順序を踏襲せず、**改善判定 → 重み取得（D2H）→ 取得成功後に
+  最良値とスナップショットを確定**の順にする。取得が失敗した場合は `best`・スナップショットを
+  更新せず（直前の確定状態を保つ）、その失敗を `fit_on` の `Err` として呼び出し元へ伝播し、§4 の
+  失敗時契約（呼び出し前の状態へ戻す）に従う。失敗を返せる取得経路の具体形（既存 `observe` の
+  拡張か GPU 入口側の薄い写しか）は #4377 の実装で確かめる。`ModelCheckpoint` の保存前同期の
+  失敗も同様に `Err` として伝播する。
 
 - validation・metrics: 検証のフォワードはデバイスで行い（`predict_resident_input` 相当）、
   出力をホストへ戻して既存の損失・metrics 計算（`evaluate` と同じ eval モード）に渡す方針。
+  `predict_resident_input` は `build_device_chain_steps` でチェーンを構築できないと `Unsupported`
+  を返す。このため検証を指定した呼び出し（`validation_split` や検証データの指定）では、
+  学習側の経路判定（§6）に加えて、対応する**同一デバイス上の eval 経路**（常駐チェーン、または
+  ③ で許可済みの Tape 経路）の成立も store 初期化前に判定し、成立しなければ store を作る前に
+  `Unsupported` で拒否する。学習途中の epoch 終了時に初めて検証が失敗する状態を作らない。
   CPU の fit との差は REQ-2 の判定で見る（方式は #4360）。
 - `History`: 型・意味は CPU と同じ。loss を step ごとに `ResidentLoss::read` するか epoch 単位で
   まとめて読むかは転送回数の方針として **#4360 に申し送る未決点**。
